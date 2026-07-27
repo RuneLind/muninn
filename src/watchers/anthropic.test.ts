@@ -173,15 +173,27 @@ function textResponse(url: string, text: string): Response {
  * unchanged.
  */
 const BLOG_PAD = `<!-- ${"listing markup padding. ".repeat(30)} -->`;
+/**
+ * PIN for the truncation-scoping rule: the markdown truncation heuristic must NOT run on
+ * the blog path. Real anthropic.com listings are Next.js RSC payloads whose trailing
+ * script chunk is dense with brackets inside JSON strings — measured, the last `[` sits
+ * ~30 bytes before the last `]`. This tail reproduces the hazardous shape (an unbalanced
+ * `[` after the last `]`), so `isTruncatedMarkup` returns TRUE on it. Every blog fixture
+ * carries it: if `checkTruncation` were ever passed on the blog path, all three sections
+ * would throw and the blog assertions throughout this file would fail loudly rather than
+ * the section silently wedging in production.
+ */
+const BLOG_RSC_TAIL = `<script>var a=["x"];var b="[unclosed";</script>`;
 const NEWS_HTML =
   `<a href="/news/claude-opus-4-8">x</a>` +
   `<a href="/news/some-post">y</a>` +
   `<a href="/news/claude-opus-4-8#hero">dup</a>` +
   `<a href="/news">section root</a>` +
   `<a href="/about">unrelated</a>` +
-  BLOG_PAD;
-const ENG_HTML = `<a href="/engineering/eng-post">e</a>${BLOG_PAD}`;
-const RES_HTML = `<a href="/research/res-paper">r</a>${BLOG_PAD}`;
+  BLOG_PAD +
+  BLOG_RSC_TAIL;
+const ENG_HTML = `<a href="/engineering/eng-post">e</a>${BLOG_PAD}${BLOG_RSC_TAIL}`;
+const RES_HTML = `<a href="/research/res-paper">r</a>${BLOG_PAD}${BLOG_RSC_TAIL}`;
 
 describe("parseAtomEntries", () => {
   test("parses commits-feed entries (type-first link order, entity in title)", () => {
@@ -1139,7 +1151,12 @@ describe("checkAnthropic", () => {
       ]);
       snapStore.set("tier2:blog:engineering", ["https://www.anthropic.com/engineering/eng-post"]);
       snapStore.set("tier2:blog:research", ["https://www.anthropic.com/research/res-paper"]);
-      // Pre-seed a streak that is one skip away from healing.
+      // Pre-seed an existing streak. (NB it is not "one skip from healing" — at
+      // prior=5/fresh=2 the predicate rejects on `set too small` long before the wait
+      // bound is consulted. What this pins is narrower and still worth having: the guard
+      // row is written eagerly during the run and is NOT deleted when the gate throws,
+      // because a skipped source produces no `fresh` entry and so can never reach the
+      // `clearGuard` path in persistTier2.)
       snapStore.set("tier2:llms:guard", {
         consecutiveSkips: 2,
         firstSkipAt: Date.now() - 30 * 3_600_000,
@@ -1208,6 +1225,60 @@ describe("checkAnthropic", () => {
 
       // The streak is over, atomically with the advance.
       expect(snapStore.has("tier2:llms:guard")).toBe(false);
+    });
+
+    /**
+     * Accept AND carry in the SAME run — newly reachable, and only because the additions
+     * cap was removed from the accept predicate. While that cap existed, a shrink with
+     * >40 additions was refused outright, so the two paths were mutually exclusive by
+     * construction. Now a big prune that also added a lot must self-heal AND stay within
+     * one gate prompt.
+     */
+    test("an accepted shrink still respects the burst cap, carrying the remainder", async () => {
+      const kept = Array.from({ length: 200 }, (_, i) => `https://platform.claude.com/docs/en/k${i}.md`);
+      const added = Array.from({ length: 60 }, (_, i) => `https://platform.claude.com/docs/en/new${i}.md`);
+      const freshDocs = [...kept, ...added];
+      const prior = [...kept, ...Array.from({ length: 900 }, (_, i) => `https://platform.claude.com/docs/en/gone${i}.md`)];
+
+      stub((url) => {
+        if (url.includes("feed.test")) return COMMITS_ATOM;
+        if (url.includes("llms.txt")) {
+          return `# Docs\n${freshDocs.map((u, i) => `- [Doc ${i}](${u})`).join("\n")}\n\nTrailing prose.\n`;
+        }
+        if (url.includes("/news")) return NEWS_HTML;
+        if (url.includes("/engineering")) return ENG_HTML;
+        if (url.includes("/research")) return RES_HTML;
+        return "";
+      });
+      snapStore.set("tier2:llms", prior);
+      snapStore.set("tier2:blog:news", [
+        "https://www.anthropic.com/news/claude-opus-4-8",
+        "https://www.anthropic.com/news/some-post",
+      ]);
+      snapStore.set("tier2:blog:engineering", ["https://www.anthropic.com/engineering/eng-post"]);
+      snapStore.set("tier2:blog:research", ["https://www.anthropic.com/research/res-paper"]);
+      snapStore.set("tier2:llms:guard", {
+        consecutiveSkips: 2,
+        firstSkipAt: Date.now() - 30 * H,
+        lastSample: freshDocs,
+      });
+      gateResult = "[]";
+
+      await checkAnthropic(tier2Watcher());
+
+      // 900 removed vs 60 added clears the 10x dominance test → accepted…
+      const numbered = [...lastGatePrompt.matchAll(/^\d+\. \[Docs \(llms\.txt\)\]/gm)];
+      expect(numbered).toHaveLength(40); // …but only 40 reach the single gate prompt.
+
+      // Persist rule `fresh \ carried`: 260 fresh − 20 carried.
+      const snap = snapStore.get("tier2:llms") as string[];
+      expect(snap).toHaveLength(240);
+      expect(snapStore.has("tier2:llms:guard")).toBe(false);
+
+      // The carried 20 are still pending, so the next run drains them and converges.
+      gateResult = "[]";
+      await checkAnthropic(tier2Watcher());
+      expect((snapStore.get("tier2:llms") as string[])).toHaveLength(260);
     });
   });
 

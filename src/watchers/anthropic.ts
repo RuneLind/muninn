@@ -757,8 +757,15 @@ async function fetchTier2(
 
       // The guard record is read on EVERY run, not just shrunken ones: a stale
       // `consecutiveSkips: 2` surviving an arbitrary number of healthy runs would let
-      // the next shrink self-heal after a single skip, defeating both bounds. Any run
-      // that reaches persistTier2 clears it.
+      // the next shrink self-heal after a single skip, defeating both bounds.
+      //
+      // KNOWN RESIDUAL (accepted): only a run that reaches `persistTier2` clears it, and
+      // gate/digest failures return before that. So under a PERSISTENTLY failing gate a
+      // stale streak can survive healthy runs and let a later shrink heal in ~2 skips
+      // instead of a fresh 24h/3-skip window. The alternative — clearing inline here — is
+      // worse: it lets a gate timeout on the accepting run reset the accrued wait, so a
+      // source could never heal at all while the gate is broken. Bounded either way by
+      // the stability test, which still has to hold across those runs.
       const guardSnap = await getWatcherSnapshot(watcherId, snapGuardKey(src.key));
       const guard = isGuardRecord(guardSnap) ? guardSnap : null;
 

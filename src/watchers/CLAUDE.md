@@ -536,6 +536,12 @@ table already holding 1953-element arrays). It is **diagnostic state, not baseli
   assertion still holds unchanged).
 - The accept predicate is **re-evaluated each run rather than consumed**, so a run that
   accepts and then fails its gate simply retries.
+- **Known residual (accepted):** because only `persistTier2` clears the record and
+  gate/digest failures return before it, a stale streak can survive *healthy* runs while
+  the gate is persistently failing, letting a later shrink heal in ~2 skips rather than a
+  fresh window. Clearing inline instead is strictly worse — a gate timeout on the
+  accepting run would reset the accrued wait and the source could never heal at all while
+  the gate is broken. The stability test still has to hold across those runs.
 
 **On accept the fetch is treated as healthy** — normal diff, candidates, `persistTier2`.
 Exactly ONE persist rule applies, and it must be stated because two plausible ones collide:
