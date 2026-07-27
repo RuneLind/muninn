@@ -3,6 +3,7 @@ import {
   backlogStripModel,
   backlogSentenceHtml,
   backlogTailHtml,
+  backlogGlossaryHtml,
   backlogControlHtml,
   backlogConfirmHtml,
   backlogProgressText,
@@ -1466,6 +1467,94 @@ describe("prune verbs — dismissed bucket + inspector actions (PR 2)", () => {
     expect(m.showDismissReset).toBe(false);
     expect(backlogInspectorHtml(openPanel(), sources, { pruneEnabled: m.pruneEnabled })).not.toContain(
       "data-doc-action",
+    );
+  });
+});
+
+/**
+ * PR 3 — self-explanation. Tooltips on every strip control (the "Backfill oldest"
+ * `title=` precedent) plus a collapsed glossary at the foot, which is the canonical
+ * long-form home (tooltips are invisible on touch). Representative assertions only —
+ * the point is that the copy renders and stays honest about what each verb does.
+ */
+describe("tooltips + glossary (PR 3)", () => {
+  test("the segment toggles carry per-bucket hover copy, not one generic string", () => {
+    const m = backlogStripModel(base({ fresh: 5, freshBySource: [{ label: "YouTube", count: 5, collection: "youtube-summaries" }] }), 0);
+    const sentence = backlogSentenceHtml(m);
+    expect(sentence).toContain("the weekly run&#39;s turf");
+    expect(sentence).toContain("Drain a batch");
+    const tail = backlogTailHtml(backlogStripModel(base({ dismissed: 2 }), 0));
+    expect(tail).toContain("skipped by later drains until you reset");
+    expect(tail).toContain("still ingested and searchable");
+  });
+
+  test("the run/reset controls explain themselves", () => {
+    const html = backlogControlHtml(backlogStripModel(base(), 0));
+    // Drain: what a click actually does + the review gate.
+    expect(html).toContain("title=\"Run the gardener over the newest 40 drainable doc(s)");
+    expect(html).toContain("Nothing is written to the wiki until you approve.");
+    // Reset offered: the plan's exact promise — re-offer, nothing deleted.
+    expect(html).toContain("Forget which docs past drains already offered");
+    expect(html).toContain("the next drain may re-offer all 69 of them; nothing is deleted.");
+  });
+
+  test("Run gardener now names the scheduler tick + the fresh-window scope", () => {
+    const watcher: BacklogWatcherInfo = {
+      id: "w1",
+      enabled: true,
+      lastRunAt: 1_000,
+      nextRunAt: 99_999_999_999,
+      forceQueued: false,
+    };
+    const m = backlogStripModel(base({ fresh: 4, watcher }), 0, 2_000);
+    expect(backlogSentenceHtml(m)).toContain(
+      'title="Queue the weekly gardener to run on the next scheduler tick — clusters the fresh window only."',
+    );
+  });
+
+  test("the worth-a-run meter explains its threshold", () => {
+    const m = backlogStripModel(base({ fresh: 4, minClusterSize: 3 }), 0);
+    const html = backlogSentenceHtml(m);
+    expect(html).toContain('class="bk-run-meter" title="New captures vs 6');
+    expect(html).toContain("minimum cluster size of 3");
+  });
+
+  test("prune verbs' tooltips match their real semantics", () => {
+    const docs: BacklogDoc[] = [
+      { collection: "youtube-summaries", id: "a.md", label: "a", bucket: "drainable" },
+      { collection: "youtube-summaries", id: "b.md", label: "b", bucket: "dismissed" },
+    ];
+    const state: BacklogInspectorState = { ...initialInspectorState(), open: true, docs };
+    const html = backlogInspectorHtml(state, [{ collection: "youtube-summaries", label: "YouTube" }], {
+      pruneEnabled: true,
+    });
+    // dismiss = reversible, never selected, stays in search.
+    expect(html).toContain("Never select this doc for a run — reversible, and it stays ingested and searchable.");
+    expect(html).toContain("Return this doc to the queue — runs can select it again.");
+    // delete = huginn source file to trash + reindex, leaves search.
+    expect(html).toContain("Move this doc's source file to huginn's trash and reindex — it leaves search.");
+    // Bulk is filter-scoped, not page-scoped.
+    expect(html).toContain("Dismiss every doc in the current filter (1), not just the rendered page");
+    // Reset dismissed is reversible too.
+    expect(backlogTailHtml(backlogStripModel(base({ dismissed: 4 }), 0))).toContain(
+      "Un-dismiss all 4 — they return to the queue",
+    );
+  });
+
+  test("the glossary is a collapsed <details> defining all five terms", () => {
+    const html = backlogGlossaryHtml(backlogStripModel(base(), 0));
+    expect(html).toStartWith('<details class="bk-glossary">');
+    // Collapsed by default — no `open` attribute (renderBacklog re-applies the user's
+    // open state across the 3s poll re-render, keyed on the `.bk-glossary` class).
+    expect(html).not.toContain("<details class=\"bk-glossary\" open");
+    expect(html).toContain("<summary>how this works</summary>");
+    for (const term of ["new", "drainable", "previously offered", "dismissed", "consumed"]) {
+      expect(html).toContain(`<b>${term}</b>`);
+    }
+    // The window is sourced from the response, never hardcoded.
+    expect(html).toContain("the last 14 days");
+    expect(backlogGlossaryHtml(backlogStripModel(base({ freshWindowDays: 0 }), 0))).toContain(
+      "the fresh window",
     );
   });
 });

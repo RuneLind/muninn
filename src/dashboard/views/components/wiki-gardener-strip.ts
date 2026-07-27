@@ -556,6 +556,24 @@ function strong(n: number): string {
 }
 
 /**
+ * Per-bucket hover copy for the segment toggles — the short form of the glossary
+ * ({@link backlogGlossaryHtml}), which is the canonical long-form home (tooltips
+ * are invisible on touch). Every line must stay true to the code: `fresh` is the
+ * weekly watcher's turf that a drain deliberately skips, `offered` is skipped
+ * until a reset, `dismissed` is reversible + still in search.
+ */
+const BUCKET_TITLE: Record<BacklogBucket | "all", string> = {
+  all: "Show these docs",
+  fresh: "New captures still inside the gardener's fresh window — the weekly run's turf; a manual drain deliberately skips them. Click to list them.",
+  drainable:
+    "Past the fresh window and not yet offered — exactly what a “Drain a batch” click acts on. Click to list them.",
+  offered:
+    "Handed to the gardener by an earlier drain but never turned into a wiki page — skipped by later drains until you reset. Click to list them.",
+  dismissed:
+    "Pruned by hand — never selected by any run and left out of the actionable counts, but still ingested and searchable. Click to list them.",
+};
+
+/**
  * Wrap a count in an inspector toggle button. Every count in the strip that names
  * a set of docs becomes one of these — clicking opens the ONE shared inspector
  * panel filtered to `bucket` (+ `collection` when the count is per-source).
@@ -574,7 +592,7 @@ function inspectToggle(
   return (
     `<button type="button" class="bk-toggle${active ? " bk-toggle-on" : ""}" ` +
     `data-backlog-inspect="${bucket}" data-inspect-collection="${esc(collection)}" ` +
-    `aria-expanded="${active ? "true" : "false"}" title="Show these docs">${inner}</button>`
+    `aria-expanded="${active ? "true" : "false"}" title="${esc(BUCKET_TITLE[bucket])}">${inner}</button>`
   );
 }
 
@@ -627,7 +645,13 @@ function freshMeterHtml(model: BacklogStripModel): string {
   const label = crossed
     ? `<span class="bk-note bk-meter-hit">worth a gardener run</span>`
     : `<span class="bk-note">${threshold - model.freshTotal} more to suggest a run</span>`;
-  return `<span class="bk-sep"> · </span><span class="bk-run-meter">${bar}${label}</span>`;
+  const tip =
+    `New captures vs ${threshold} — twice this bot's minimum cluster size of ${model.minClusterSize}. ` +
+    "Clustering needs that many docs on ONE topic, so this is a rough “a run would probably draft something” " +
+    "mark, not a promise of pages.";
+  return (
+    `<span class="bk-sep"> · </span><span class="bk-run-meter" title="${esc(tip)}">${bar}${label}</span>`
+  );
 }
 
 /**
@@ -662,7 +686,9 @@ function freshWatcherSuffixHtml(model: BacklogStripModel): string {
     } else if (model.watcherRunNow) {
       parts.push(
         `<button class="gard-btn bk-run-watcher" data-backlog-action="run-watcher" ` +
-          `data-watcher-id="${esc(model.watcherRunNow.id)}">Run gardener now</button>`,
+          `data-watcher-id="${esc(model.watcherRunNow.id)}" ` +
+          `title="Queue the weekly gardener to run on the next scheduler tick — clusters the fresh window only.">` +
+          `Run gardener now</button>`,
       );
     }
   }
@@ -776,7 +802,9 @@ export function backlogTailHtml(model: BacklogStripModel, inspect?: BacklogInspe
           inspect,
         ) +
         (model.showDismissReset
-          ? ` <button class="gard-btn bk-reset-dismissed" data-backlog-action="reset-dismissed">` +
+          ? ` <button class="gard-btn bk-reset-dismissed" data-backlog-action="reset-dismissed" ` +
+            `title="Un-dismiss all ${model.dismissedCount} — they return to the queue and become selectable again; ` +
+            `nothing is deleted.">` +
             `Reset dismissed (${model.dismissedCount})</button>`
           : "")
       : "";
@@ -785,6 +813,55 @@ export function backlogTailHtml(model: BacklogStripModel, inspect?: BacklogInspe
     `<summary>${summary}</summary>` +
     `<span class="bk-tail-body">${breakdown}${offeredChip}${dismissedChip}</span>` +
     "</details>"
+  );
+}
+
+/**
+ * The collapsed "how this works" glossary (pure HTML) — the canonical long-form
+ * home for the strip's vocabulary. Tooltips ({@link BUCKET_TITLE} + the control
+ * `title=`s) are the short form and are invisible on touch, so this `<details>` is
+ * the fallback that always works. Styled/behaved like the coverage tail: collapsed
+ * by default, de-emphasized, and its open state is captured + re-applied across the
+ * 3s drain-poll re-render (`renderBacklog`, same guard as `.bk-tail`).
+ *
+ * Every sentence must stay true to the code — the five buckets in the order a doc
+ * moves through them.
+ */
+export function backlogGlossaryHtml(model: BacklogStripModel): string {
+  const window = model.freshWindowDays > 0 ? `the last ${model.freshWindowDays} days` : "the fresh window";
+  const items: [string, string][] = [
+    [
+      "new",
+      `Captured within ${window}. The weekly gardener clusters these; a manual drain deliberately skips them, so a zero-draft run can't burn fresh arrivals.`,
+    ],
+    [
+      "drainable",
+      "Past that window and not yet offered — exactly the set a “Drain a batch” click acts on, newest first.",
+    ],
+    [
+      "previously offered",
+      "Handed to the gardener by an earlier drain but never turned into a wiki page. Later drains skip them until you hit “Reset offered”.",
+    ],
+    [
+      "dismissed",
+      "Pruned by hand. Never selected by a drain, a backfill, or the weekly gardener, and left out of every actionable count — but still ingested and searchable. Un-dismiss or “Reset dismissed” puts them back.",
+    ],
+    [
+      "consumed",
+      "Reached the wiki — a page cites the doc's URL, or a proposal drafted from it was applied. It leaves the backlog entirely and stops being counted here.",
+    ],
+  ];
+  const body = items
+    .map(([term, text]) => `<div class="bk-gloss-item"><b>${esc(term)}</b> — ${esc(text)}</div>`)
+    .join("");
+  return (
+    '<details class="bk-glossary">' +
+    "<summary>how this works</summary>" +
+    `<div class="bk-glossary-body">${body}` +
+    '<div class="bk-gloss-item"><b>dismissed vs deleted</b> — dismiss is a local, reversible ' +
+    "“don't offer this to the gardener” mark; delete moves the doc's source file to huginn's trash " +
+    "and reindexes, so it leaves search too.</div>" +
+    "</div></details>"
   );
 }
 
@@ -842,7 +919,11 @@ export function backlogControlHtml(model: BacklogStripModel): string {
   }
   let inner = "";
   if (model.showRun) {
-    inner += `<button class="gard-btn bk-run" data-backlog-action="confirm">Drain a batch (${model.drainNow})</button>`;
+    inner +=
+      `<button class="gard-btn bk-run" data-backlog-action="confirm" ` +
+      `title="Run the gardener over the newest ${model.drainNow} drainable doc(s) — clusters them into draft ` +
+      `wiki pages for review below. Nothing is written to the wiki until you approve.">` +
+      `Drain a batch (${model.drainNow})</button>`;
   } else if (model.nothingDrainable) {
     // Not "all offered": fresh in-window docs are un-offered too, so that wording
     // lies whenever new arrivals exist. This states what the button's absence means.
@@ -850,7 +931,10 @@ export function backlogControlHtml(model: BacklogStripModel): string {
   }
   if (model.showReset) {
     const label = model.nothingDrainable ? "Reset to re-run" : `Reset offered (${model.offeredStillQueued})`;
-    inner += `<button class="gard-btn bk-reset" data-backlog-action="reset">${label}</button>`;
+    const tip =
+      `Forget which docs past drains already offered — the next drain may re-offer all ` +
+      `${model.offeredStillQueued} of them; nothing is deleted.`;
+    inner += `<button class="gard-btn bk-reset" data-backlog-action="reset" title="${esc(tip)}">${label}</button>`;
   }
   if (!inner) return ""; // nothing queued at all
   let html = `<span class="bk-control">${inner}</span>`;
@@ -1215,11 +1299,13 @@ function inspectorRowHtml(
     actions =
       d.bucket === "dismissed"
         ? `<button type="button" class="bk-doc-btn" data-doc-action="undismiss" ${attrs} ` +
-          `title="Return this doc to the queue">un-dismiss</button>`
+          `title="Return this doc to the queue — runs can select it again.">un-dismiss</button>`
         : `<button type="button" class="bk-doc-btn" data-doc-action="dismiss" ${attrs} ` +
-          `title="Never select this doc (reversible)">dismiss</button>` +
+          `title="Never select this doc for a run — reversible, and it stays ingested and searchable.">` +
+          `dismiss</button>` +
           `<button type="button" class="bk-doc-btn bk-doc-danger" data-doc-action="delete" ${attrs} ` +
-          `title="Delete this doc from huginn (irreversible)">delete</button>`;
+          `title="Move this doc's source file to huginn's trash and reindex — it leaves search. Irreversible from here.">` +
+          `delete</button>`;
   }
   return (
     '<div class="bk-doc-row">' +
@@ -1328,7 +1414,9 @@ export function backlogInspectorHtml(
         '<div class="bk-inspector-foot">' +
         `<span class="bk-note">showing ${shown.length} of ${filtered.length}</span>` +
         (pruneEnabled && bulkTargets.length
-          ? `<button type="button" class="gard-btn bk-inspector-bulk" data-inspect-action="bulk-dismiss">` +
+          ? `<button type="button" class="gard-btn bk-inspector-bulk" data-inspect-action="bulk-dismiss" ` +
+            `title="Dismiss every doc in the current filter (${bulkTargets.length}), not just the rendered page — ` +
+            `reversible, nothing is deleted.">` +
             `Dismiss all ${bulkTargets.length}</button>`
           : "") +
         (more > 0

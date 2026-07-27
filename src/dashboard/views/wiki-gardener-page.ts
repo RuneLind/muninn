@@ -91,6 +91,13 @@ export async function renderWikiGardenerPage(opts?: {
     .gard-backlog .bk-tail .bk-strong { font-weight: 600; color: var(--text-muted); }
     .gard-backlog .bk-tail .bk-n { color: var(--text-muted); }
     .gard-backlog .bk-tail-body { display: inline-block; margin-left: 18px; margin-top: 3px; }
+    /* "how this works" glossary — the strip's foot; long-form home for the tooltips. */
+    .gard-backlog .bk-glossary { flex-basis: 100%; font-size: 12px; color: var(--text-muted); }
+    .gard-backlog .bk-glossary summary { cursor: pointer; }
+    .gard-backlog .bk-glossary summary::marker { color: var(--text-dim); }
+    .gard-backlog .bk-glossary-body { margin-left: 18px; margin-top: 4px; max-width: 78ch; }
+    .gard-backlog .bk-gloss-item { margin-bottom: 4px; line-height: 1.5; }
+    .gard-backlog .bk-gloss-item b { color: var(--text-secondary); font-weight: 600; }
     .gard-backlog .bk-warn { color: var(--status-warning, #d0a000); font-size: 12px; font-weight: 600; }
     .gard-backlog .bk-control { display: inline-flex; align-items: center; gap: 8px; }
     /* Primary run button — deliberately reads as a button, not inline stat text. */
