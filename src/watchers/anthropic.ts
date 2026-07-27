@@ -4,6 +4,14 @@ import { isSkipResult } from "./x.ts";
 import { spawnHaiku, DEFAULT_MODEL, type HaikuTelemetry } from "../scheduler/executor.ts";
 import { parseGateScores, indexScoresByN, type GateScore } from "./gate-scores.ts";
 import { getWatcherSnapshot, setWatcherSnapshot } from "../db/watchers.ts";
+import {
+  SOURCE_HEALTH_KEY,
+  buildHealthAlerts,
+  isSourceHealthMap,
+  recordOutcome,
+  type SourceHealthMap,
+  type SourceOutcome,
+} from "./source-health.ts";
 import { upsertCandidate, getCandidateBySourceUrl } from "../db/summary-candidates.ts";
 import { autoPromoteCandidate } from "../anthropic/summarizer.ts";
 import { loadInterestProfile } from "../profile/generator.ts";
@@ -460,7 +468,26 @@ export async function checkAnthropic(watcher: Watcher, telemetry?: HaikuTelemetr
   // alert per candidate and has no single oversized prompt to protect.
   const tier2 = config.tier2
     ? await fetchTier2(config, watcher.id, config.gate && !config.digest ? TIER2_CANDIDATE_BURST_CAP : null)
-    : { candidates: [] as Candidate[], fresh: [] as Tier2Fresh[] };
+    : { candidates: [] as Candidate[], fresh: [] as Tier2Fresh[], health: {} as SourceHealthMap };
+
+  // Per-source health surface + escalation. Persisted UNCONDITIONALLY and before any
+  // early return below — a source that is skipped every run must still leave a durable,
+  // visible trace, which is exactly what was missing for the six days of the llms.txt
+  // wedge. `buildHealthAlerts` mutates the map's escalation bookkeeping, so it runs
+  // BEFORE the write. Best-effort throughout: health is observability, and it must never
+  // be able to break the alert path it observes.
+  const healthAlerts: WatcherAlert[] = [];
+  if (config.tier2) {
+    try {
+      healthAlerts.push(...buildHealthAlerts(watcher.name, tier2.health, Date.now()));
+      await setWatcherSnapshot(watcher.id, SOURCE_HEALTH_KEY, tier2.health);
+    } catch (err) {
+      log.error("Watcher \"{name}\": failed to persist source health: {error}", {
+        name: watcher.name,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
 
   // Persist the freshly-fetched Tier-2 sets that survived their fetch. Only called
   // once we're sure we won't retry (cold-start, no-candidates, or after a clean
@@ -491,7 +518,10 @@ export async function checkAnthropic(watcher: Watcher, telemetry?: HaikuTelemetr
   const coldTier1 = watcher.lastNotifiedIds.length === 0;
   const known = new Set(watcher.lastNotifiedIds);
 
-  const baselineAlerts: WatcherAlert[] = [];
+  // Seeded with the health escalations so they ride EVERY return path below — including
+  // the early "no new candidates" return and both failure returns, which is precisely
+  // when a dead source most needs to be heard.
+  const baselineAlerts: WatcherAlert[] = [...healthAlerts];
   if (coldTier1 && tier1Entries.length > 0) {
     log.info("Watcher \"{name}\": cold-start baseline of {n} Tier-1 entries (silent)", {
       name: watcher.name,
@@ -741,9 +771,20 @@ async function fetchTier2(
   watcherId: string,
   /** Per-source addition cap, or null on the digest/plain paths (never capped there). */
   burstCap: number | null,
-): Promise<{ candidates: Candidate[]; fresh: Tier2Fresh[] }> {
+): Promise<{ candidates: Candidate[]; fresh: Tier2Fresh[]; health: SourceHealthMap }> {
   const candidates: Candidate[] = [];
   const fresh: Tier2Fresh[] = [];
+
+  // Per-source outcome for THIS run. Recorded for every source including the skipped
+  // ones — which is the whole point: a skipped source never reaches persistTier2, so
+  // before this it left no durable trace anywhere a human or an alert could see.
+  const priorHealthSnap = await getWatcherSnapshot(watcherId, SOURCE_HEALTH_KEY);
+  const priorHealth: SourceHealthMap = isSourceHealthMap(priorHealthSnap) ? priorHealthSnap : {};
+  const health: SourceHealthMap = { ...priorHealth };
+  const runAt = Date.now();
+  const mark = (key: string, outcome: SourceOutcome, detail?: string) => {
+    health[key] = recordOutcome(priorHealth[key], outcome, runAt, detail);
+  };
 
   for (const src of buildTier2Sources(config)) {
     try {
@@ -787,6 +828,7 @@ async function fetchTier2(
             n: freshUrls.length,
             b: prior?.length ?? 0,
           });
+          mark(src.key, "skipped", `empty or unusable fetch (${freshUrls.length} urls vs baseline ${prior?.length ?? 0})`);
           continue;
         }
 
@@ -826,6 +868,7 @@ async function fetchTier2(
               error: err instanceof Error ? err.message : String(err),
             });
           }
+          mark(src.key, "skipped", `shrink guard: ${verdict.reason}`);
           continue;
         }
 
@@ -881,15 +924,18 @@ async function fetchTier2(
         // run would write a delete for a key that never existed.
         ...(guard != null ? { clearGuard: true } : {}),
       });
+      mark(src.key, "ok");
     } catch (err) {
       log.error("Tier-2 fetch/parse failed for {key}: {error}", {
         key: src.key,
         error: err instanceof Error ? err.message : String(err),
       });
-      // No `fresh` entry → snapshot not advanced → this source retries next run.
+      // No `fresh` entry → snapshot not advanced → this source retries next run. A Layer-A
+      // rejection lands here too, which is why it never advances the shrink counter.
+      mark(src.key, "error", err instanceof Error ? err.message : String(err));
     }
   }
-  return { candidates, fresh };
+  return { candidates, fresh, health };
 }
 
 /**

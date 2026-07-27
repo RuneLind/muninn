@@ -565,6 +565,36 @@ path's "**Tier-2 additions are NEVER capped**" invariant (its dedup IS the snaps
 un-surfaced addition is lost forever) is untouched and still pinned by its test. In practice
 only `e9bb5502` (Highlights) is affected.
 
+### Per-source health + escalation (`src/watchers/source-health.ts`)
+
+The guard above supplies the **counter** and the **bound**; this is the **surface**, and the
+part that would have caught the wedge on day one regardless of cause. Generic by design
+(the Phase-4 audit expects more watchers with this shape), stored in `watcher_snapshots`
+under **`source:health`**, so there is no migration.
+
+- **Per-source outcome, recorded every run** — `ok` / `skipped` / `error` with a timestamp,
+  a short reason, a `consecutive` failure count, and `lastOkAt`. Written for the SKIPPED
+  sources too, which is the whole point: a skipped source never reaches `persistTier2`, so
+  before this it left no durable trace anywhere. Persisted unconditionally and ahead of
+  every early return in `checkAnthropic`, and best-effort throughout — health is
+  observability and must never break the path it observes.
+- **Escalation** after `HEALTH_ESCALATE_AFTER` (3) consecutive non-`ok` runs: one generic
+  `watcher-health` `WatcherAlert`, seeded into `baselineAlerts` so it rides EVERY return
+  path — including the "no new candidates" early return and both failure returns, which is
+  exactly when a dead source most needs to be heard. Re-fires only every
+  `HEALTH_RE_ESCALATE_EVERY` (24) further failures, so a wedge keeps nagging without
+  becoming per-run spam; the alert id carries the streak length so a repeat isn't
+  id-deduped away while a re-run of the same state still is.
+- **Staleness for the dashboard chip** — `max(3 × interval, 24h)` **with a 4-day ceiling**.
+  A raw 3× multiplier is meaningless at both ends of our cadence range: 6h on the 2h
+  Highlights row (twitchy) and 21 days on the 7d weekly row (uselessly permissive — the
+  wedge it came from lasted six). Levels: `ok` (advanced this run), `warn` (failing but
+  inside the window), `stale` (no success inside the window, or never succeeded).
+- **Surface**: `GET /api/watchers` attaches a per-watcher `sourceHealth[]` (best-effort per
+  row), and the watcher detail pane renders a chip per source with the outcome, reason,
+  last-ok age and streak in its tooltip. **`last_run_at` being fresh no longer implies the
+  watcher is actually doing anything.**
+
 **One-off unwedge:** `scripts/rebaseline-anthropic-llms.ts` (dry-run by default) rewrote each
 row's `tier2:llms` snapshot to its own `prior ∩ fresh` — `inter ≤ fresh` always holds, so an
 intersection baseline can never re-trip the guard. Per-row and never a global figure: the

@@ -13,7 +13,14 @@ import { getScheduledTasksForUser } from "../../db/scheduled-tasks.ts";
 import { getAllScheduledTasks } from "../../db/scheduled-tasks.ts";
 import { getRecentMemories, getMemoriesByUser, getMemoriesForUser } from "../../db/memories.ts";
 import { getDashboardStats, getSlackAnalytics, getUsersSummary, getUserOverview } from "../../db/stats.ts";
-import { getAllWatchers, updateWatcher, getWatcherById, forceRunWatcher } from "../../db/watchers.ts";
+import {
+  getAllWatchers,
+  updateWatcher,
+  getWatcherById,
+  forceRunWatcher,
+  getWatcherSnapshot,
+} from "../../db/watchers.ts";
+import { SOURCE_HEALTH_KEY, healthLevel, isSourceHealthMap } from "../../watchers/source-health.ts";
 import { getScheduledTaskById } from "../../db/scheduled-tasks.ts";
 import { updateScheduledTask } from "../../db/scheduled-tasks.ts";
 import { getActivityForJob } from "../../db/activity.ts";
@@ -272,7 +279,28 @@ export function registerDataRoutes(app: Hono): void {
     try {
       const botName = c.req.query("bot") || undefined;
       const watchers = await getAllWatchers(botName);
-      return c.json({ watchers });
+      // Per-source health (see src/watchers/source-health.ts). Attached here rather than
+      // stored on the watcher row because it is per-SUB-SOURCE state: `last_run_at` being
+      // fresh says the watcher ran, not that any given source produced anything — the
+      // exact gap that let the anthropic llms.txt leg sit dead for six days while every
+      // indicator on this page read healthy. Best-effort per watcher: a health read must
+      // never take down the watchers list.
+      const withHealth = await Promise.all(
+        watchers.map(async (w) => {
+          try {
+            const snap = await getWatcherSnapshot(w.id, SOURCE_HEALTH_KEY);
+            if (!isSourceHealthMap(snap)) return w;
+            const now = Date.now();
+            const sourceHealth = Object.entries(snap)
+              .map(([key, h]) => ({ key, ...h, level: healthLevel(h, w.intervalMs, now) }))
+              .sort((a, b) => a.key.localeCompare(b.key));
+            return { ...w, sourceHealth };
+          } catch {
+            return w;
+          }
+        }),
+      );
+      return c.json({ watchers: withHealth });
     } catch (err) {
       log.error("Failed to fetch watchers: {error}", { error: err instanceof Error ? err.message : String(err) });
       return c.json({ error: "Failed to fetch watchers" }, 500);

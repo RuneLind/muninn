@@ -638,10 +638,18 @@ describe("checkAnthropic", () => {
     tier2Stub();
     const alerts = await checkAnthropic(tier2Watcher());
     expect(alerts).toEqual([]);
-    // llms + 3 blog sections all baselined
+    // llms + 3 blog sections all baselined, plus the per-source health map — which is
+    // written UNCONDITIONALLY on every tier-2 run (a source that is skipped every run must
+    // still leave a durable trace; that absence is what hid the llms.txt wedge for six days).
     expect(setCalls.map((c) => c.key).sort()).toEqual(
+      ["source:health", "tier2:blog:engineering", "tier2:blog:news", "tier2:blog:research", "tier2:llms"].sort(),
+    );
+    // All four sources reported healthy on their cold-start run.
+    const health = snapStore.get("source:health") as Record<string, { outcome: string }>;
+    expect(Object.keys(health).sort()).toEqual(
       ["tier2:blog:engineering", "tier2:blog:news", "tier2:blog:research", "tier2:llms"].sort(),
     );
+    expect(Object.values(health).every((h) => h.outcome === "ok")).toBe(true);
     expect((snapStore.get("tier2:llms") as string[]).sort()).toEqual([D1, D2].sort());
   });
 
@@ -1171,6 +1179,42 @@ describe("checkAnthropic", () => {
       const guard = snapStore.get("tier2:llms:guard") as any;
       expect(guard).toBeTruthy();
       expect(guard.consecutiveSkips).toBeGreaterThanOrEqual(2);
+    });
+
+    test("a repeatedly-skipped source escalates ONE health alert, and a healthy source stays quiet", async () => {
+      // llms.txt keeps returning a drastically shrunken set; the blog legs are fine —
+      // exactly the live shape, where partial health is what made the wedge invisible.
+      tier2Stub();
+      snapStore.set("tier2:llms", [D1, D2, "x3", "x4", "x5"]);
+      snapStore.set("tier2:blog:news", [
+        "https://www.anthropic.com/news/claude-opus-4-8",
+        "https://www.anthropic.com/news/some-post",
+      ]);
+      snapStore.set("tier2:blog:engineering", ["https://www.anthropic.com/engineering/eng-post"]);
+      snapStore.set("tier2:blog:research", ["https://www.anthropic.com/research/res-paper"]);
+
+      // Runs 1 and 2: skipped, but below the escalation threshold → silence.
+      await checkAnthropic(tier2Watcher());
+      const r2 = await checkAnthropic(tier2Watcher());
+      expect(r2.filter((a) => a.source === "watcher-health")).toHaveLength(0);
+
+      // Run 3 crosses it.
+      const r3 = await checkAnthropic(tier2Watcher());
+      const escalations = r3.filter((a) => a.source === "watcher-health");
+      expect(escalations).toHaveLength(1);
+      expect(escalations[0]!.summary).toContain("tier2:llms");
+      // The healthy blog sources must never appear.
+      expect(escalations[0]!.summary).not.toContain("blog");
+
+      // Run 4 does not re-alert (else a wedged source becomes per-run spam).
+      const r4 = await checkAnthropic(tier2Watcher());
+      expect(r4.filter((a) => a.source === "watcher-health")).toHaveLength(0);
+
+      // The durable surface: llms skipped with a streak, blogs ok.
+      const health = snapStore.get("source:health") as Record<string, any>;
+      expect(health["tier2:llms"].outcome).toBe("skipped");
+      expect(health["tier2:llms"].consecutive).toBeGreaterThanOrEqual(3);
+      expect(health["tier2:blog:news"].outcome).toBe("ok");
     });
 
     /**
