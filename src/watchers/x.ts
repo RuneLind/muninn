@@ -1458,6 +1458,8 @@ async function captureXCandidates(
   if (preCandidates.length === 0) {
     log.info("Capture: no long-form or link tweets in the batch of {n}", { botName, n: docs.length });
     health?.mark(SRC_CAPTURE, "ok");
+    // Author scores are resolved BELOW this return, so carry rather than drop.
+    health?.carry(SRC_AUTHOR_SCORES);
     return;
   }
 
@@ -1524,9 +1526,17 @@ async function captureXCandidates(
     return;
   }
 
-  health?.mark(SRC_CAPTURE, "ok");
-
   const byN = indexScoresByN(scored, eligible.length);
+  // A gate that returns but yields NO usable score for any of n eligible items is a
+  // prompt/model regression, not a healthy run: it captures nothing, forever, while
+  // reporting green. `scored` is already validated JSON, so an empty result over a
+  // non-empty batch is the signal.
+  if (byN.size === 0) {
+    log.warn("Capture: gate returned no usable scores for {n} eligible tweet(s)", { botName, n: eligible.length });
+    health?.mark(SRC_CAPTURE, "skipped", `gate returned no usable scores for ${eligible.length} eligible tweet(s)`);
+  } else {
+    health?.mark(SRC_CAPTURE, "ok");
+  }
 
   // DISTINCT candidate urls written, not admissions attempted: since destination keying
   // (step 2a) several eligible pointer tweets in ONE batch can collapse onto the same
@@ -1729,15 +1739,25 @@ export async function checkX(watcher: Watcher, _cwd?: string, botName?: string, 
   // never rejects and the alert path is never broken.
   const health = await openSourceHealth(watcher.id, watcher.name);
 
-  const capturePromise: Promise<void> =
-    config.captureCandidates && data.docs && data.docs.length > 0
-      ? captureXCandidates(data.docs, config, watcher, captureDeadline, botName, interestProfile, telemetry, health).catch((err) => {
-          log.error("Candidate capture failed (alert path unaffected): {error}", {
-            botName,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        })
-      : Promise.resolve();
+  const captureRuns = !!(config.captureCandidates && data.docs && data.docs.length > 0);
+  if (!captureRuns) {
+    // CARRY, never drop. `finish()` deletes any source it wasn't told about, so a run
+    // where the capture leg simply doesn't execute (no new docs this window, or every
+    // per-doc huginn fetch failed) would silently WIPE these two records — resetting a
+    // streak that was one run from escalating, and losing `lastOkAt` so the dashboard
+    // chip flips to `stale` and the alert copy reads "never succeeded" for a source that
+    // last succeeded 2h ago.
+    health.carry(SRC_CAPTURE);
+    health.carry(SRC_AUTHOR_SCORES);
+  }
+  const capturePromise: Promise<void> = captureRuns
+    ? captureXCandidates(data.docs!, config, watcher, captureDeadline, botName, interestProfile, telemetry, health).catch((err) => {
+        log.error("Candidate capture failed (alert path unaffected): {error}", {
+          botName,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      })
+    : Promise.resolve();
 
   // Per-source health (2026-07 audit). ONE recorder per run, shared by the alert and
   // capture legs — two recorders would each persist only their own keys and clobber the

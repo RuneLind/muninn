@@ -123,6 +123,21 @@ export function gardenerRunInFlight(botName: string): boolean {
 }
 
 /**
+ * Monotonic per-bot holder generation, bumped on every acquire (including a reclaim).
+ * A run captures it at start and re-checks before mutating any PER-BOT SHARED state, so a
+ * force-reclaimed orphan that settles later cannot stomp the run that replaced it: the
+ * reclaim protects the map slot, but progress, the run journal and the last-run record all
+ * live outside it, and an orphan clearing the NEW run's journal would strand its batch
+ * with no Recover banner — the exact failure the journal exists to prevent.
+ */
+const gardenerGeneration = new Map<string, number>();
+let gardenerGenSeq = 0;
+
+export function currentGardenerGeneration(botName: string): number {
+  return gardenerGeneration.get(botName) ?? 0;
+}
+
+/**
  * Run `work` under the per-bot gardener mutex. Returns `null` WITHOUT starting
  * anything when a run is already in flight for the bot; otherwise registers the
  * promise, starts the work, and releases in `finally` (always). The entry is set
@@ -144,6 +159,7 @@ export function runExclusive<T>(
     );
   }
   const entry = { promise: null as unknown as Promise<T>, startedAt: now };
+  gardenerGeneration.set(botName, ++gardenerGenSeq);
   const p = (async () => work())().finally(() => {
     // Only the CURRENT holder may release: a reclaimed orphan settling later must not
     // free the slot the new run is holding (same rule as the runner's token check).
@@ -157,6 +173,7 @@ export function runExclusive<T>(
 /** Test-only: clear the gardener mutex between cases. */
 export function __resetGardenerMutexForTest(): void {
   gardenerRuns.clear();
+  gardenerGeneration.clear();
   backlogProgress.clear();
 }
 
@@ -987,8 +1004,18 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
   // Two-arg `then` (not `.then().catch()`): the rejection handler must catch only
   // the RUN's failure, never a clearRunJournal failure inside the success handler —
   // otherwise a journal-clear hiccup would wrongly record an error outcome.
+  // Captured AFTER the acquire above, so it names THIS run's tenure.
+  const myGeneration = currentGardenerGeneration(deps.botName);
+  const stillHolder = () => currentGardenerGeneration(deps.botName) === myGeneration;
+
   void run.then(
     async (r) => {
+      if (!stillHolder()) {
+        log.warn("Backlog run for {bot} settled after being force-reclaimed — discarding its outcome", {
+          botName: deps.botName,
+        });
+        return;
+      }
       backlogProgress.delete(deps.botName);
       // Success OR cancel (a cancel returns normally) — clear the journal. A clear
       // failure must not swallow recordLastRun, so it's guarded independently.
@@ -1017,6 +1044,13 @@ export function startBacklogRun(deps: StartBacklogRunDeps): StartBacklogRunResul
       });
     },
     (err) => {
+      if (!stillHolder()) {
+        log.warn("Backlog run for {bot} failed after being force-reclaimed — discarding its outcome: {error}", {
+          botName: deps.botName,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return;
+      }
       backlogProgress.delete(deps.botName);
       // KEEP the journal on the error settle — a `runGardener` throw strands its
       // batch exactly like a crash, so leaving `backlog:run` in place routes the

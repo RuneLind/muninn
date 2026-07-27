@@ -25,6 +25,7 @@
  * matching how the wiki-linter reports.
  */
 
+import { existsSync } from "node:fs";
 import type { Watcher, WatcherAlert } from "../types.ts";
 import type { BotConfig } from "../bots/config.ts";
 import {
@@ -66,12 +67,29 @@ export async function checkWikiCommitter(
 
   const top = await gitToplevel(wikiDir);
   if (!top) {
+    // `gitToplevel` returns null on ANY nonzero exit, so this branch conflates a
+    // legitimately non-repo wiki with a broken one — a moved/typo'd wikiDir (git exits
+    // 128), git missing from PATH, a dubious-ownership refusal. Marking all of those `ok`
+    // would report healthy forever while the sweeper is 100% dead and gardener applies
+    // keep writing uncommitted files: the 87-page-loss shape again. A missing directory
+    // is the realistic case and is definitely an error; a present-but-non-repo directory
+    // is a legitimate configuration and stays `ok`.
+    //
+    // Residual (accepted): git-absent or an ownership refusal on an EXISTING repo dir
+    // still reads `ok` here. Distinguishing them needs `gitToplevel` to surface the exit
+    // code, which is a wider change to `src/wiki/commit.ts` than this seam warrants.
+    if (!existsSync(wikiDir)) {
+      log.error("Wiki-committer: wikiDir {dir} does not exist — nothing can ever be swept", {
+        botName: name,
+        dir: wikiDir,
+      });
+      health.mark(SRC, "error", `wikiDir does not exist: ${wikiDir}`);
+      return health.finish();
+    }
     log.info("Wiki-committer: {dir} is not inside a git repo — nothing to sweep", {
       botName: name,
       dir: wikiDir,
     });
-    // Not an error: a non-repo wiki is a legitimate configuration, and escalating it
-    // daily would be noise. Recorded as `ok` so it never accrues a false streak.
     health.mark(SRC, "ok");
     return health.finish();
   }

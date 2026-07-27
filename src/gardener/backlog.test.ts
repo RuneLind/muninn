@@ -14,6 +14,7 @@ import {
   requestBacklogCancel,
   __resetGardenerMutexForTest,
   GARDENER_MUTEX_MAX_HOLD_MS,
+  currentGardenerGeneration,
   runSourceFallback,
   BACKLOG_BATCH_SIZE,
   BACKLOG_MAX_PROPOSALS,
@@ -293,6 +294,18 @@ describe("runExclusive (per-bot gardener mutex)", () => {
     // Past it: the abandoned holder is reclaimed and work runs again.
     const reclaimed = runExclusive("jarvis", async () => "ran", T0 + GARDENER_MUTEX_MAX_HOLD_MS + 1);
     expect(reclaimed).not.toBeNull();
+  });
+
+  test("the holder generation advances on every acquire, so an orphan can detect it lost the lock", () => {
+    const T0 = 1_800_000_000_000;
+    runExclusive("jarvis", () => new Promise<void>(() => {}), T0);
+    const gen1 = currentGardenerGeneration("jarvis");
+    runExclusive("jarvis", () => new Promise<void>(() => {}), T0 + GARDENER_MUTEX_MAX_HOLD_MS + 1);
+    // Load-bearing: the mutex reclaim protects the map SLOT, but progress, the run journal
+    // and the last-run record all live outside it. Without a generation check, a
+    // force-reclaimed orphan settling later clears the NEW run's journal — stranding its
+    // batch with no Recover banner, the exact failure the journal exists to prevent.
+    expect(currentGardenerGeneration("jarvis")).not.toBe(gen1);
   });
 
   test("a reclaimed orphan settling later does NOT free the new holder's slot", async () => {
