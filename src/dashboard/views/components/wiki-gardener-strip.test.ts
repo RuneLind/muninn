@@ -1485,7 +1485,7 @@ describe("tooltips + glossary (PR 3)", () => {
     expect(sentence).toContain("Drain a batch");
     const tail = backlogTailHtml(backlogStripModel(base({ dismissed: 2 }), 0));
     expect(tail).toContain("skipped by later drains until you reset");
-    expect(tail).toContain("still ingested and searchable");
+    expect(tail).toContain("still in huginn and searchable");
   });
 
   test("the run/reset controls explain themselves", () => {

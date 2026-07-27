@@ -566,11 +566,11 @@ const BUCKET_TITLE: Record<BacklogBucket | "all", string> = {
   all: "Show these docs",
   fresh: "New captures still inside the gardener's fresh window — the weekly run's turf; a manual drain deliberately skips them. Click to list them.",
   drainable:
-    "Past the fresh window and not yet offered — exactly what a “Drain a batch” click acts on. Click to list them.",
+    "Past the fresh window and not yet offered — the pool a “Drain a batch” click draws from, newest first. Click to list them.",
   offered:
-    "Handed to the gardener by an earlier drain but never turned into a wiki page — skipped by later drains until you reset. Click to list them.",
+    "Handed to the gardener by an earlier drain (or retired from the historical tail) but never turned into a wiki page — skipped by later drains until you reset. Click to list them.",
   dismissed:
-    "Pruned by hand — never selected by any run and left out of the actionable counts, but still ingested and searchable. Click to list them.",
+    "Pruned by hand — never selected by any run and left out of the actionable counts, but still in huginn and searchable. Click to list them.",
 };
 
 /**
@@ -836,19 +836,19 @@ export function backlogGlossaryHtml(model: BacklogStripModel): string {
     ],
     [
       "drainable",
-      "Past that window and not yet offered — exactly the set a “Drain a batch” click acts on, newest first.",
+      "Past that window and not yet offered — the pool a “Drain a batch” click draws from (a click takes the newest batch, not the whole pool).",
     ],
     [
       "previously offered",
-      "Handed to the gardener by an earlier drain but never turned into a wiki page. Later drains skip them until you hit “Reset offered”.",
+      "Handed to the gardener by an earlier drain — or retired from the historical tail by the retire script — but never turned into a wiki page. Later drains skip them until you hit “Reset offered” (which also un-retires the retired tail).",
     ],
     [
       "dismissed",
-      "Pruned by hand. Never selected by a drain, a backfill, or the weekly gardener, and left out of every actionable count — but still ingested and searchable. Un-dismiss or “Reset dismissed” puts them back.",
+      "Pruned by hand. Never selected by a drain, a backfill, or the weekly gardener, and left out of every actionable count — but still in huginn and searchable. Un-dismiss or “Reset dismissed” puts them back.",
     ],
     [
       "consumed",
-      "Reached the wiki — a page cites the doc's URL, or a proposal drafted from it was applied. It leaves the backlog entirely and stops being counted here.",
+      "Reached the wiki — a page cites the doc's URL, or a proposal drafted from it is pending review or applied. It leaves the backlog entirely and stops being counted here (a draft awaiting review already counts).",
     ],
   ];
   const body = items
