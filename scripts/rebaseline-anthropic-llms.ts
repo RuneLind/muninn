@@ -56,7 +56,13 @@ const SNAP_LLMS = "tier2:llms";
  * may shrink again.
  */
 const MIN_FRESH_URLS = 400;
-/** Each row's intersection must retain at least this share of the fresh set. */
+/**
+ * Each row's intersection must retain at least this share of the fresh set. NOTE what
+ * this does and does not catch: because `inter = prior ∩ fresh`, a TRUNCATED response is
+ * a subset of the real set and scores share = 1.0. This check only fires when fresh
+ * barely overlaps prior (a genuinely DIFFERENT doc set) — truncation is caught by the
+ * double-fetch agreement below, not here.
+ */
 const MIN_INTERSECTION_SHARE = 0.5;
 
 const USAGE = `Usage: bun scripts/rebaseline-anthropic-llms.ts [--url <llms.txt>] [--execute] [--force-next-run]
@@ -119,6 +125,15 @@ function parseArgs(argv: string[]): { execute: boolean; forceNextRun: boolean; u
 
 const { execute, forceNextRun, url } = parseArgs(process.argv.slice(2));
 
+/** Fetch + parse the doc-URL set with the watcher's own parser. Throws on a non-2xx. */
+async function fetchDocSet(src: string): Promise<Set<string>> {
+  const res = await fetch(src, {
+    headers: { "User-Agent": "muninn-rebaseline-script", Accept: "text/plain, text/markdown, */*" },
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status} for ${src} — aborting (no writes)`);
+  return new Set(parseLlmsTxtDocs(await res.text()).keys());
+}
+
 async function main() {
   if (forceNextRun && !execute) {
     usageError("--force-next-run only applies with --execute (a dry-run writes nothing)");
@@ -131,13 +146,8 @@ async function main() {
   console.log(`Mode: ${execute ? "EXECUTE (writes)" : "DRY-RUN (no writes) — pass --execute to apply"}`);
   console.log(`Source: ${url}\n`);
 
-  // --- Fetch the current set once; every row diffs against the same fresh set. ---
-  const res = await fetch(url, {
-    headers: { "User-Agent": "muninn-rebaseline-script", Accept: "text/plain, text/markdown, */*" },
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url} — aborting (no writes)`);
-  const freshMap = parseLlmsTxtDocs(await res.text());
-  const fresh = new Set(freshMap.keys());
+  // --- Fetch the current set; every row diffs against the same fresh set. ---
+  const fresh = await fetchDocSet(url);
   console.log(`Fetched ${fresh.size} doc URL(s) from llms.txt.`);
 
   if (fresh.size < MIN_FRESH_URLS) {
@@ -147,13 +157,40 @@ async function main() {
     );
   }
 
+  // Truncation discriminator. A partial transfer is a SUBSET of the real set, so it clears
+  // both floors above (share = 1.0) — a 450-URL truncation of a 549-URL file would be
+  // written as a baseline, and the next healthy fetch would emit ~99 already-seen docs as
+  // "new". A truncation is transient, so a second fetch disagreeing is the cheap signal;
+  // a legitimate restructure is stable across seconds.
+  const confirm = await fetchDocSet(url);
+  if (confirm.size !== fresh.size || [...fresh].some((u) => !confirm.has(u))) {
+    throw new Error(
+      `Two consecutive fetches disagree (${fresh.size} vs ${confirm.size} URLs). One of them is ` +
+        `truncated or the file is mid-deploy — aborting without writing. Re-run in a minute.`,
+    );
+  }
+
   const rows = await sql`
-    SELECT w.id, w.name, w.interval_ms, s.value, s.updated_at
+    SELECT w.id, w.name, w.interval_ms, w.config ->> 'llmsTxtUrl' AS llms_txt_url,
+           s.value, s.updated_at
     FROM watcher_snapshots s
     JOIN watchers w ON w.id = s.watcher_id
     WHERE s.key = ${SNAP_LLMS}
     ORDER BY w.name
   `;
+
+  // `buildTier2Sources` reads `config.llmsTxtUrl ?? DEFAULT_LLMS_TXT_URL` PER WATCHER, so a
+  // row pointed at a different index must not be rebaselined against this one — its next
+  // run would diff its own source against a foreign baseline and burst. Null (the live
+  // state for all three rows) means the row uses the default, which is what `url` is.
+  const mismatched = rows.filter((r: any) => r.llms_txt_url != null && r.llms_txt_url !== url);
+  if (mismatched.length > 0) {
+    throw new Error(
+      `These watcher(s) have their own config.llmsTxtUrl differing from ${url}: ` +
+        `${mismatched.map((r: any) => `${r.name} (${r.llms_txt_url})`).join(", ")}. ` +
+        `Re-run per source with --url — aborting without writing anything.`,
+    );
+  }
 
   if (rows.length === 0) {
     console.warn(`\nWARNING: no '${SNAP_LLMS}' snapshot rows found — nothing to rebaseline.`);
@@ -163,9 +200,20 @@ async function main() {
   // --- Compute per row. Never a global figure: the three rows differ. ---
   const plans: { id: string; name: string; prior: number; inter: string[]; added: string[] }[] = [];
   for (const row of rows) {
-    const prior: string[] = Array.isArray(row.value) ? row.value : [];
+    // A corrupt (non-array) snapshot is the state `fetchTier2` treats as a benign cold
+    // start. Skip the row with a warning rather than aborting — one bad row must not keep
+    // the healthy rows this script exists to fix wedged.
+    if (!Array.isArray(row.value)) {
+      console.warn(
+        `\n${row.name} (${String(row.id).slice(0, 8)}): snapshot is not an array ` +
+          `(${typeof row.value}) — skipping. Its next run cold-starts and baselines silently.`,
+      );
+      continue;
+    }
+    const prior: string[] = row.value;
+    const priorSet = new Set(prior);
     const inter = prior.filter((u) => fresh.has(u));
-    const added = [...fresh].filter((u) => !prior.includes(u));
+    const added = [...fresh].filter((u) => !priorSet.has(u));
     const removed = prior.length - inter.length;
     const share = inter.length / fresh.size;
 
@@ -184,6 +232,11 @@ async function main() {
 
     for (const u of added) console.log(`    + ${u}`);
     plans.push({ id: row.id, name: row.name, prior: prior.length, inter, added });
+  }
+
+  if (plans.length === 0) {
+    console.warn(`\nWARNING: every '${SNAP_LLMS}' row was skipped — nothing to rebaseline.`);
+    return;
   }
 
   if (!execute) {
