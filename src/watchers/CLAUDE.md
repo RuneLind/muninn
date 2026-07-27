@@ -581,15 +581,38 @@ under **`source:health`**, so there is no migration.
 - **Escalation** after `HEALTH_ESCALATE_AFTER` (3) consecutive non-`ok` runs: one generic
   `watcher-health` `WatcherAlert`, seeded into `baselineAlerts` so it rides EVERY return
   path — including the "no new candidates" early return and both failure returns, which is
-  exactly when a dead source most needs to be heard. Re-fires only every
-  `HEALTH_RE_ESCALATE_EVERY` (24) further failures, so a wedge keeps nagging without
-  becoming per-run spam; the alert id carries the streak length so a repeat isn't
-  id-deduped away while a re-run of the same state still is.
-- **Staleness for the dashboard chip** — `max(3 × interval, 24h)` **with a 4-day ceiling**.
-  A raw 3× multiplier is meaningless at both ends of our cadence range: 6h on the 2h
-  Highlights row (twitchy) and 21 days on the 7d weekly row (uselessly permissive — the
-  wedge it came from lasted six). Levels: `ok` (advanced this run), `warn` (failing but
-  inside the window), `stale` (no success inside the window, or never succeeded).
+  exactly when a dead source most needs to be heard.
+  - **`buildHealthAlerts` is PURE and emits on EVERY run past the threshold**; suppressing
+    the repeats is the **runner's id-dedup** job. This split is load-bearing. The obvious
+    design — alert once, record that we did, stay quiet for N more failures — must commit
+    its bookkeeping when the alert is *built*, long before the runner delivers it. A
+    `withWatcherTimeout` rejection or a transient Telegram error after that write swallows
+    the alert **and** the record of it, silencing the source for another full window. The
+    runner writes `last_notified_ids` only *after* a successful send, so an undelivered
+    alert is simply re-emitted next run.
+  - **The id (`healthAlertId`) must be stable within an episode and distinct across
+    episodes**: `watcher-health:<watcher>:<key>:<lastOkAt|never>:<nagBucket>`. Keying on
+    `consecutive` alone (the first cut) produced a **byte-identical id for a second wedge**
+    — `recordOutcome` resets the streak on recovery — and the 600-id `lastNotifiedIds`
+    window (already full on the live rows) dropped it, so the next chance to be heard was
+    24 further failures: 48h on the 2h row, **~24 weeks** on the weekly one. The nag bucket
+    (`HEALTH_RE_ESCALATE_EVERY`, 24) is what lets a long wedge speak up again.
+- **Staleness for the dashboard chip** — `max(3 × interval, 24h)`, ceilinged at
+  `max(4 days, 2 × interval)`. A raw 3× multiplier is meaningless at both ends of our
+  cadence range: 6h on the 2h Highlights row (twitchy) and 21 days on the 7d weekly row
+  (uselessly permissive — the wedge it came from lasted six). The ceiling is itself floored
+  at 2 intervals because a window *shorter than the poll interval* is nonsense: a 7d
+  source's `lastOkAt` is ~7d old on its very next run, so a flat 4-day ceiling made one
+  transient 503 render red `stale` and left `warn` unreachable on that row. Levels: `ok`
+  (advanced this run), `warn` (failing but inside the window), `stale` (no success inside
+  the window, or never succeeded).
+- **Only a FETCH failure judges the source.** The per-source `try` also covers snapshot
+  reads, so a Postgres blip would otherwise be recorded as "this source is broken" on all
+  four sources at once, escalating four alerts each claiming "the watcher itself is running
+  fine". A failure after the fetch succeeded carries the prior record forward unjudged.
+- **The map is rebuilt from the sources configured THIS run**, not spread from the prior
+  one, so a section dropped from `blogSections` doesn't linger forever, keep being
+  evaluated for escalation, and keep a frozen chip on the dashboard.
 - **Surface**: `GET /api/watchers` attaches a per-watcher `sourceHealth[]` (best-effort per
   row), and the watcher detail pane renders a chip per source with the outcome, reason,
   last-ok age and streak in its tooltip. **`last_run_at` being fresh no longer implies the

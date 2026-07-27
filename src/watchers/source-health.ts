@@ -53,8 +53,6 @@ export interface SourceHealth {
   consecutive: number;
   /** Epoch ms of the last run whose outcome was `ok` — the real freshness signal. */
   lastOkAt?: number;
-  /** `consecutive` at the last escalation, so repeats are spaced rather than per-run. */
-  escalatedAtCount?: number;
 }
 
 /** The whole map for one watcher, keyed by source key (e.g. `tier2:llms`). */
@@ -86,18 +84,46 @@ export function recordOutcome(
     ...(detail ? { detail } : {}),
     consecutive: (prior?.consecutive ?? 0) + 1,
     ...(prior?.lastOkAt != null ? { lastOkAt: prior.lastOkAt } : {}),
-    ...(prior?.escalatedAtCount != null ? { escalatedAtCount: prior.escalatedAtCount } : {}),
   };
 }
 
 /**
- * Should this source alert on this run? True on the run that crosses the threshold, then
- * only every `HEALTH_RE_ESCALATE_EVERY` further consecutive failures.
+ * Should this source alert on this run? True on EVERY run at or past the threshold —
+ * suppression of the repeats is the RUNNER's id-dedup job, not ours (see
+ * {@link healthAlertId}).
+ *
+ * That split is deliberate and load-bearing. The obvious design — "alert once, record
+ * that we did, stay quiet for N more failures" — has to commit its bookkeeping when the
+ * alert is BUILT, which is long before the runner has actually delivered it. A watcher
+ * timeout or a transient Telegram error after that write silently swallows the alert AND
+ * the record of it, so the source goes quiet for another full re-escalation window — the
+ * exact "silently dead source" failure this module exists to prevent. Emitting every run
+ * and letting id-dedup collapse them means an undelivered alert is simply re-emitted next
+ * run, because the runner only records an id it managed to send.
  */
 export function shouldEscalate(h: SourceHealth): boolean {
-  if (h.outcome === "ok" || h.consecutive < HEALTH_ESCALATE_AFTER) return false;
-  if (h.escalatedAtCount == null) return true;
-  return h.consecutive - h.escalatedAtCount >= HEALTH_RE_ESCALATE_EVERY;
+  return h.outcome !== "ok" && h.consecutive >= HEALTH_ESCALATE_AFTER;
+}
+
+/**
+ * Stable alert id for one source's current unhealthy EPISODE and nag bucket.
+ *
+ * Two properties matter, and an earlier cut got both wrong by keying on `consecutive`:
+ * - **Stable within an episode**, so re-emitting every run collapses to ONE delivery.
+ * - **Distinct across episodes**, so a source that recovers and later wedges again is
+ *   heard. Keying on `consecutive` alone produced a byte-identical id for the second
+ *   wedge (`recordOutcome` resets the streak on recovery), and the runner's 600-id
+ *   `lastNotifiedIds` window — already full on the live rows — dropped it. The next
+ *   chance to be heard would have been 24 further failures: 48h on the 2h row, ~24 WEEKS
+ *   on the weekly one.
+ *
+ * `lastOkAt` is the episode discriminator (the moment the source was last healthy);
+ * `never` covers a source that has never succeeded.
+ */
+export function healthAlertId(watcherName: string, key: string, h: SourceHealth): string {
+  const episode = h.lastOkAt ?? "never";
+  const bucket = Math.floor((h.consecutive - HEALTH_ESCALATE_AFTER) / HEALTH_RE_ESCALATE_EVERY);
+  return `watcher-health:${watcherName}:${key}:${episode}:${bucket}`;
 }
 
 /**
@@ -110,7 +136,12 @@ export function shouldEscalate(h: SourceHealth): boolean {
 export const HEALTH_STALE_CEILING_MS = 4 * 86_400_000;
 
 export function stalenessMs(intervalMs: number): number {
-  return Math.min(Math.max(3 * intervalMs, 86_400_000), HEALTH_STALE_CEILING_MS);
+  // The ceiling itself is floored at 2 intervals, because a window SHORTER than the poll
+  // interval is nonsense: a 7d source's `lastOkAt` is ~7d old on its very next run, so a
+  // flat 4-day ceiling made one transient 503 render a red `stale` chip indistinguishable
+  // from a source wedged for months, and made `warn` unreachable on that row entirely.
+  const ceiling = Math.max(HEALTH_STALE_CEILING_MS, 2 * intervalMs);
+  return Math.min(Math.max(3 * intervalMs, 86_400_000), ceiling);
 }
 
 export type HealthLevel = "ok" | "warn" | "stale";
@@ -127,10 +158,10 @@ export function healthLevel(h: SourceHealth, intervalMs: number, now: number): H
 }
 
 /**
- * One alert for every source that crossed its escalation threshold this run. Returns an
- * empty array when nothing needs saying — the common case, so this never adds noise.
- * MUTATES `escalatedAtCount` on the escalating entries so the caller persists the
- * bookkeeping along with the outcomes.
+ * One alert for every source at or past its escalation threshold. Returns an empty array
+ * when nothing needs saying — the common case, so this never adds noise. PURE: it mutates
+ * nothing, so there is no bookkeeping that can be committed before delivery (see
+ * {@link shouldEscalate}); the runner's id-dedup does the suppression.
  */
 export function buildHealthAlerts(
   watcherName: string,
@@ -140,7 +171,6 @@ export function buildHealthAlerts(
   const alerts: WatcherAlert[] = [];
   for (const [key, h] of Object.entries(map)) {
     if (!shouldEscalate(h)) continue;
-    h.escalatedAtCount = h.consecutive;
     const hours = h.lastOkAt == null ? null : Math.round((now - h.lastOkAt) / 3_600_000);
     const since = hours == null ? "never succeeded" : `no successful run in ${hours}h`;
     log.error("Watcher \"{name}\": source {key} unhealthy — {n} consecutive {outcome} ({detail})", {
@@ -151,9 +181,7 @@ export function buildHealthAlerts(
       detail: h.detail ?? "no detail",
     });
     alerts.push({
-      // Keyed by the streak length so each escalation is its own alert and the runner's
-      // id-dedup can't swallow a repeat, while a re-run of the SAME state stays deduped.
-      id: `watcher-health:${watcherName}:${key}:${h.consecutive}`,
+      id: healthAlertId(watcherName, key, h),
       source: "watcher-health",
       sender: "Watcher health",
       subject: `${watcherName}: ${key} ${h.outcome}`,

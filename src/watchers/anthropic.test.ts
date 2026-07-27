@@ -1206,9 +1206,15 @@ describe("checkAnthropic", () => {
       // The healthy blog sources must never appear.
       expect(escalations[0]!.summary).not.toContain("blog");
 
-      // Run 4 does not re-alert (else a wedged source becomes per-run spam).
+      // Run 4 re-emits the SAME id. That is by design: suppression is the runner's
+      // id-dedup job, not the checker's. Committing an "already alerted" flag here would
+      // have to happen before the runner has actually delivered anything, so a watcher
+      // timeout or a transient Telegram error would silently swallow the alert AND the
+      // record of it — the exact silently-dead-source failure this exists to prevent.
       const r4 = await checkAnthropic(tier2Watcher());
-      expect(r4.filter((a) => a.source === "watcher-health")).toHaveLength(0);
+      const again = r4.filter((a) => a.source === "watcher-health");
+      expect(again).toHaveLength(1);
+      expect(again[0]!.id).toBe(escalations[0]!.id);
 
       // The durable surface: llms skipped with a streak, blogs ok.
       const health = snapStore.get("source:health") as Record<string, any>;

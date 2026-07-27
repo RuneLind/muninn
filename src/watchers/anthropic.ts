@@ -780,14 +780,30 @@ async function fetchTier2(
   // before this it left no durable trace anywhere a human or an alert could see.
   const priorHealthSnap = await getWatcherSnapshot(watcherId, SOURCE_HEALTH_KEY);
   const priorHealth: SourceHealthMap = isSourceHealthMap(priorHealthSnap) ? priorHealthSnap : {};
-  const health: SourceHealthMap = { ...priorHealth };
+  // Built from the sources CONFIGURED THIS RUN, not spread from the prior map: a section
+  // dropped from `config.blogSections` would otherwise linger forever, keep being
+  // evaluated for escalation (one spurious alert for a source that no longer exists), and
+  // keep its chip on the dashboard with a frozen timestamp.
+  const health: SourceHealthMap = {};
   const runAt = Date.now();
   const mark = (key: string, outcome: SourceOutcome, detail?: string) => {
     health[key] = recordOutcome(priorHealth[key], outcome, runAt, detail);
   };
+  /** Carry a source's prior record forward unjudged (this run couldn't assess it). */
+  const carryHealth = (key: string) => {
+    const p = priorHealth[key];
+    if (p) health[key] = p;
+  };
 
   for (const src of buildTier2Sources(config)) {
+    // Distinguishes "the source failed" from "our DB failed while handling the source".
+    let fetched = false;
     try {
+      // The fetch is the only part of this block whose failure says anything about the
+      // SOURCE. Everything after it is DB work, and a Postgres blip there would otherwise
+      // be caught below and recorded as "this source is broken" — on all four sources at
+      // once, escalating four alerts that each claim "the watcher itself is running fine",
+      // which would be the exact opposite of the truth.
       const freshMap = await src.fetch();
       const freshUrls = [...freshMap.keys()];
 
@@ -809,6 +825,8 @@ async function fetchTier2(
       // the stability test, which still has to hold across those runs.
       const guardSnap = await getWatcherSnapshot(watcherId, snapGuardKey(src.key));
       const guard = isGuardRecord(guardSnap) ? guardSnap : null;
+      // Past this point the fetch has succeeded, so a later throw is infra, not the source.
+      fetched = true;
 
       // Layer B — the ratio guard, now bounded. A 200 with an empty/garbage body parses
       // to 0 (or far fewer) URLs; baselining to that would flood the gate with the whole
@@ -932,7 +950,9 @@ async function fetchTier2(
       });
       // No `fresh` entry → snapshot not advanced → this source retries next run. A Layer-A
       // rejection lands here too, which is why it never advances the shrink counter.
-      mark(src.key, "error", err instanceof Error ? err.message : String(err));
+      const detail = err instanceof Error ? err.message : String(err);
+      if (fetched) carryHealth(src.key); // infra (DB) failure — judges nothing about the source
+      else mark(src.key, "error", detail);
     }
   }
   return { candidates, fresh, health };
