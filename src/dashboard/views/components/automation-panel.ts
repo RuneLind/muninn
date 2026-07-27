@@ -720,6 +720,7 @@ export function automationPanelScript(): string {
         '<div class="detail-field"><div class="detail-label">Schedule</div><div class="detail-value">' + intervalLabel + '</div></div>' +
         '<div class="detail-field"><div class="detail-label">Next Run</div><div class="detail-value">' + nextRun + '</div></div>' +
         '<div class="detail-field"><div class="detail-label">Last Run</div><div class="detail-value">' + lastLabel + '</div></div>' +
+        renderSourceHealth(w) +
         promptHtml +
         (w.config && w.config.slackChannels && w.config.slackChannels.length ? '<div class="detail-field"><div class="detail-label">Slack Channels</div><div class="detail-value">' + escapeHtml(w.config.slackChannels.join(', ')) + (w.config.slackBot ? ' <span style="color:var(--text-faint)">via ' + escapeHtml(w.config.slackBot) + '</span>' : '') + '</div></div>' : '') +
         '<div class="detail-field"><div class="detail-label">Tracked IDs</div><div class="detail-value">' + (w.lastNotifiedIds ? w.lastNotifiedIds.length : 0) + '</div></div>' +
@@ -727,6 +728,40 @@ export function automationPanelScript(): string {
         conflictWarning +
         (configHtml.length ? '<hr class="detail-divider"><div class="detail-field"><div class="detail-label">Configuration</div><div class="detail-value">' + configHtml + '</div></div>' : '') +
       '</div>';
+    }
+
+    /**
+     * Per-source health chips (see src/watchers/source-health.ts). A watcher that polls
+     * several sub-sources can have one of them 100% dead while "Last Run" reads fresh —
+     * that is exactly how the anthropic llms.txt leg stayed silently wedged for six days.
+     * Absent for watchers with no sub-sources, so nothing else on this page moves.
+     */
+    function renderSourceHealth(w) {
+      var sh = w.sourceHealth;
+      if (!sh || !sh.length) return '';
+      var chips = sh.map(function(s) {
+        var color = s.level === 'ok' ? 'var(--status-success)'
+          : s.level === 'stale' ? 'var(--status-error)' : 'var(--status-warning)';
+        var tint = s.level === 'ok' ? 'var(--tint-success)'
+          : s.level === 'stale' ? 'var(--tint-error)' : 'var(--tint-warning)';
+        var age = s.lastOkAt ? relTime(s.lastOkAt) : 'never';
+        var title = s.outcome + (s.detail ? ' — ' + s.detail : '') +
+          ' · last ok ' + age +
+          (s.consecutive ? ' · ' + s.consecutive + ' consecutive failure(s)' : '');
+        return '<span class="watcher-badge" style="background:' + tint + ';color:' + color +
+          ';text-transform:none;margin-right:6px" title="' + escapeAttr(title) + '">' +
+          escapeHtml(s.key) + ' · ' + escapeHtml(s.level === 'ok' ? 'ok' : s.outcome) +
+          (s.level === 'stale' ? ' · stale' : '') + '</span>';
+      }).join('');
+      return '<div class="detail-field"><div class="detail-label">Source health</div>' +
+        '<div class="detail-value">' + chips + '</div></div>';
+    }
+
+    function relTime(ts) {
+      var mins = Math.round((Date.now() - ts) / 60000);
+      if (mins < 60) return mins + 'm ago';
+      if (mins < 1440) return Math.round(mins / 60) + 'h ago';
+      return Math.round(mins / 1440) + 'd ago';
     }
 
     function renderWatcherEditTab(w) {
