@@ -1262,3 +1262,112 @@ describe("backlogDocHref — the reader deep link always encodes the id", () => 
     );
   });
 });
+
+/**
+ * PR 2 prune verbs — the render side. The dismissed bucket is a fourth, human-driven
+ * bucket that the actionable counts never include; the panel gains per-row
+ * dismiss/un-dismiss/delete affordances, a bulk dismiss over the FILTERED set, and a
+ * "removing…" row state for an in-flight delete.
+ */
+describe("prune verbs — dismissed bucket + inspector actions (PR 2)", () => {
+  const pruneDocs: BacklogDoc[] = [
+    { collection: "youtube-summaries", id: "a.md", label: "a", bucket: "drainable" },
+    { collection: "youtube-summaries", id: "b.md", label: "b", bucket: "dismissed" },
+    { collection: "x-articles", id: "c.md", label: "c", bucket: "fresh" },
+  ];
+  const sources = [
+    { collection: "youtube-summaries", label: "YouTube" },
+    { collection: "x-articles", label: "X" },
+  ];
+  const openPanel = (over: Partial<BacklogInspectorState> = {}): BacklogInspectorState => ({
+    ...initialInspectorState(),
+    open: true,
+    docs: pruneDocs,
+    ...over,
+  });
+
+  test("model reads the dismissed count and gates its reset + the prune affordance", () => {
+    const m = backlogStripModel(base({ dismissed: 4 }), 0);
+    expect(m.dismissedCount).toBe(4);
+    expect(m.showDismissReset).toBe(true);
+    expect(m.pruneEnabled).toBe(true);
+    // No seeded watcher ⇒ nowhere to store the set ⇒ every affordance hides (the
+    // route would 404), mirroring the Reset-offered control.
+    const unseeded = backlogStripModel(base({ dismissed: 4, watcherSeeded: false }), 0);
+    expect(unseeded.showDismissReset).toBe(false);
+    expect(unseeded.pruneEnabled).toBe(false);
+    // A degraded/older server omits the field entirely ⇒ 0 ⇒ nothing renders.
+    const degraded = backlogStripModel(base({ dismissed: undefined }), 0);
+    expect(degraded.dismissedCount).toBe(0);
+    expect(degraded.showDismissReset).toBe(false);
+  });
+
+  test("tail carries a dismissed chip + Reset dismissed, and names the share in the coverage note", () => {
+    const html = backlogTailHtml(backlogStripModel(base({ dismissed: 4 }), 0));
+    expect(html).toContain('data-backlog-inspect="dismissed"');
+    expect(html).toContain("4 dismissed");
+    expect(html).toContain('data-backlog-action="reset-dismissed"');
+    expect(html).toContain("Reset dismissed (4)");
+    // The COVERAGE sentence keeps counting them (dismissing doesn't ingest a doc) —
+    // the note names the share so the tail and the actionable lead reconcile.
+    expect(html).toContain("have no wiki footprint");
+    expect(html).toContain("; 4 dismissed)");
+    // With none dismissed the pre-PR-2 copy is byte-identical.
+    expect(backlogTailHtml(backlogStripModel(base(), 0))).not.toContain("dismissed");
+  });
+
+  test("rows carry dismiss + delete, a dismissed row carries un-dismiss instead", () => {
+    const html = backlogInspectorHtml(openPanel(), sources, { pruneEnabled: true });
+    expect(html).toContain('data-doc-action="dismiss"');
+    expect(html).toContain('data-doc-action="delete"');
+    expect(html).toContain('data-doc-action="undismiss"');
+    expect(html).toContain('data-doc-key="youtube-summaries/a.md"');
+    expect(html).toContain("bk-doc-dismissed");
+    // A dismissed row must NOT offer delete (it already left every actionable count;
+    // deleting is a separate, destructive decision made from its natural bucket).
+    const dismissedRow = html.slice(html.indexOf("youtube-summaries/b.md"));
+    expect(dismissedRow.slice(0, dismissedRow.indexOf("</div>"))).not.toContain('data-doc-action="delete"');
+  });
+
+  test("prune buttons are absent without the watcher (no snapshot to write)", () => {
+    const html = backlogInspectorHtml(openPanel(), sources, { pruneEnabled: false });
+    expect(html).not.toContain("data-doc-action");
+    expect(html).not.toContain("bulk-dismiss");
+  });
+
+  test("bulk dismiss targets the FILTERED set and skips already-dismissed rows", () => {
+    const all = backlogInspectorHtml(openPanel(), sources, { pruneEnabled: true });
+    // 3 rows, one already dismissed ⇒ 2 targets.
+    expect(all).toContain('data-inspect-action="bulk-dismiss"');
+    expect(all).toContain("Dismiss all 2");
+    // Scoped to a collection the filter narrows the target count with it.
+    const scoped = backlogInspectorHtml(openPanel({ collection: "x-articles" }), sources, {
+      pruneEnabled: true,
+    });
+    expect(scoped).toContain("Dismiss all 1");
+    // A filter showing only dismissed rows offers no bulk button at all.
+    const onlyDismissed = backlogInspectorHtml(openPanel({ bucket: "dismissed" }), sources, {
+      pruneEnabled: true,
+    });
+    expect(onlyDismissed).not.toContain("bulk-dismiss");
+  });
+
+  test("a row whose delete is in flight renders 'removing…' instead of its buttons", () => {
+    const html = backlogInspectorHtml(
+      openPanel({ removing: ["youtube-summaries/a.md"] }),
+      sources,
+      { pruneEnabled: true },
+    );
+    expect(html).toContain("removing…");
+    expect(html).not.toContain('data-doc-key="youtube-summaries/a.md"');
+    // Other rows keep their affordances.
+    expect(html).toContain('data-doc-key="x-articles/c.md"');
+  });
+
+  test("the panel's bucket filter offers the dismissed bucket", () => {
+    const html = backlogInspectorHtml(openPanel({ bucket: "dismissed" }), sources, {});
+    expect(html).toContain('data-inspect-bucket="dismissed"');
+    expect(html).toContain("showing 1 of 1");
+    expect(filterBacklogDocs(pruneDocs, "dismissed", "").map((d) => d.id)).toEqual(["b.md"]);
+  });
+});

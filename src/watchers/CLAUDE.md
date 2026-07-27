@@ -852,6 +852,19 @@ NOT the raw all-time `offered` · **drafts awaiting review** = client-side count
   docs get credited as pending via their own proposals. The strip renders "drafted N
   source pages (fallback — nothing clustered)" (or the insufficient-path variant) when
   `fallbackDrafted > 0`.
+- **Dismissed memory** (`backlog:dismissed`, PR 2 prune): a sibling snapshot set of
+  `backlog:offered` with different semantics — offered means "a drain already spent a
+  batch slot on this", dismissed means "a human said never select this". It is unioned
+  into ALL THREE selection seams (the drain's `assembleBacklog` exclusion, the source
+  drafter's `selectSourceBacklogDocs`, and the weekly harvest's `consumedDocIds` via the
+  exported `weeklyConsumedWithDismissed` — the weekly path's ONLY exclusion seam, so
+  without it a doc dismissed today is clustered by the very next weekly run), and it
+  WINS over `offered` in the review gate's bucket partition (otherwise `Reset offered`
+  would silently un-dismiss it). It is deliberately kept OUT of `assembleBacklog`'s
+  returned `offeredBefore`, because the caller persists `offeredBefore ∪ batch` back to
+  `backlog:offered`. Edited from the `/wiki/gardener` backlog inspector — see the
+  `wiki-gardener-routes.ts` row in `src/dashboard/CLAUDE.md` for the routes, guards,
+  counter layering, and the huginn DELETE proxy that pairs with it.
 - **Per-bot gardener mutex** (`runExclusive`): acquired by BOTH the backlog run and
   `checkWikiGardener`. A second backlog click while running returns `{state:"running"}`;
   a weekly fire during a backlog run returns `[]` (logged) — the runner still advances

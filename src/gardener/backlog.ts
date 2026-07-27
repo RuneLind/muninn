@@ -53,6 +53,22 @@ export const WIKI_GARDENER_OFFERED_KEY = "backlog:offered";
  */
 export const WIKI_GARDENER_RUN_KEY = "backlog:run";
 /**
+ * The `watcher_snapshots` key holding a bot's DISMISSED backlog keys (PR 2 prune).
+ * A sibling of {@link WIKI_GARDENER_OFFERED_KEY} with different semantics: offered
+ * means "a drain already spent a batch slot on this", dismissed means "never select
+ * this doc again, and drop it from every actionable counter". It is therefore
+ * unioned into EVERY selection seam (drain batch, source-drafter queue, the weekly
+ * harvest's consumed set) and wins over `offered` at the counter layer — a doc that
+ * is both must read as `dismissed`, otherwise Reset offered would silently make it
+ * eligible again.
+ *
+ * Deliberately NOT applied inside `computeIngestBacklog` (`src/wiki/ingest-backlog.ts`):
+ * that partition is TTL-cached 5 minutes, feeds three other callers, and its
+ * `total === ingested + queued` invariant is tested. Dismissal is a live, per-request
+ * overlay — exactly like the offered set.
+ */
+export const WIKI_GARDENER_DISMISSED_KEY = "backlog:dismissed";
+/**
  * The `watcher_snapshots` key holding the most recent run's {@link LastBacklogRun}
  * (PR 3) — the durable fallback the extended GET reads after a restart drops the
  * in-memory `lastBacklogRuns` map.
@@ -315,6 +331,14 @@ export interface AssembleBacklogDeps {
   getPending: (botName: string) => Promise<Set<string>>;
   getOffered: () => Promise<Set<string>>;
   /**
+   * The bot's DISMISSED keys (`backlog:dismissed`). Unioned with the offered set to
+   * form the batch EXCLUSION, but deliberately kept OUT of the returned
+   * `offeredBefore` — the caller persists `offeredBefore ∪ batch` back to
+   * `backlog:offered`, and folding dismissals in there would make "Reset offered"
+   * silently un-dismiss them. Absent ⇒ ∅ (byte-identical to pre-PR-2 selection).
+   */
+  getDismissed?: () => Promise<Set<string>>;
+  /**
    * Age floor (days) for {@link selectBacklogBatch} — the bot's RESOLVED gardener
    * `lookbackDays` (must equal the weekly window, so no doc is invisible to both
    * paths). Defaults to the gardener default when the route omits it.
@@ -372,18 +396,24 @@ export async function assembleBacklog(deps: AssembleBacklogDeps): Promise<Assemb
     }));
   }
 
-  const [wikiRefs, consumed, pending, offeredBefore] = await Promise.all([
+  const [wikiRefs, consumed, pending, offeredBefore, dismissed] = await Promise.all([
     deps.sweepWikiRefs(deps.wikiDir),
     deps.getConsumed(deps.botName),
     deps.getPending(deps.botName),
     deps.getOffered(),
+    deps.getDismissed ? deps.getDismissed() : Promise.resolve(new Set<string>()),
   ]);
 
   const backlog = computeIngestBacklog(listedBySource, wikiRefs, consumed, pending);
   const queuedDocs = backlog.byCollection.flatMap((c) => c.queuedDocs);
+  // Exclusion = offered ∪ dismissed. `offeredBefore` itself stays pure (the caller
+  // persists it unioned with the batch — see `getDismissed`'s doc comment).
+  const excluded = dismissed.size
+    ? new Set<string>([...offeredBefore, ...dismissed])
+    : offeredBefore;
   const batch = selectBacklogBatch(
     queuedDocs,
-    offeredBefore,
+    excluded,
     BACKLOG_BATCH_SIZE,
     deps.minAgeDays ?? GARDENER_DEFAULTS.lookbackDays,
     deps.now ?? Date.now(),

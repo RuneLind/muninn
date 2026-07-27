@@ -13,9 +13,11 @@ import {
   mergeBacklogLiveFields,
   __resetIngestBacklogCacheForTest,
   __setBotsForTest,
+  type GardenerWatcherRef,
   type IngestBacklogDeps,
   type IngestBacklogResponse,
 } from "./wiki-gardener-routes.ts";
+import { runExclusive, __resetGardenerMutexForTest } from "../../gardener/backlog.ts";
 import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki/registry-memo.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
 import { computeWatcherNextRun } from "../agents-overview.ts";
@@ -249,6 +251,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       offered: 0,
       remaining: 2,
       offeredStillQueued: 0,
+      dismissed: 0,
       fresh: 0,
       freshBySource: [],
       freshWindowDays: 14,
@@ -270,6 +273,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       offered: 2,
       remaining: 0,
       offeredStillQueued: 2,
+      dismissed: 0,
       fresh: 0,
       freshBySource: [],
       freshWindowDays: 14,
@@ -310,6 +314,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       offered: 0,
       remaining: 2,
       offeredStillQueued: 0,
+      dismissed: 0,
       fresh: 0,
       freshBySource: [],
       freshWindowDays: 14,
@@ -334,6 +339,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       offered: 0,
       remaining: 2,
       offeredStillQueued: 0,
+      dismissed: 0,
       fresh: 0,
       freshBySource: [],
       freshWindowDays: 14,
@@ -353,6 +359,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       offered: 0,
       remaining: 2,
       offeredStillQueued: 0,
+      dismissed: 0,
       fresh: 3,
       freshBySource: [{ label: "YouTube", count: 3, collection: "youtube-summaries" }],
       freshWindowDays: 14,
@@ -378,6 +385,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       offered: 0,
       remaining: 2,
       offeredStillQueued: 0,
+      dismissed: 0,
       fresh: 0,
       freshBySource: [],
       freshWindowDays: 14,
@@ -398,6 +406,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       offered: 2,
       remaining: 0,
       offeredStillQueued: 2,
+      dismissed: 0,
       fresh: 0,
       freshBySource: [],
       freshWindowDays: 14,
@@ -417,6 +426,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       offered: 0,
       remaining: 2,
       offeredStillQueued: 0,
+      dismissed: 0,
       fresh: 0,
       freshBySource: [],
       freshWindowDays: 14,
@@ -571,6 +581,7 @@ describe("docs=1 opt-in — the count-only default payload is unchanged", () => 
     offered: 0,
     remaining: 1,
     offeredStillQueued: 0,
+    dismissed: 0,
     fresh: 0,
     freshBySource: [],
     freshWindowDays: 14,
@@ -858,5 +869,420 @@ describe("ingest-backlog pipeline + cache", () => {
     // The clean result IS cached now.
     await getIngestBacklogCached(root, "jarvis", d, false);
     expect(fetchCalls.length).toBe(10);
+  });
+});
+
+/**
+ * PR 2 prune verbs — the FOUR-bucket partition, the dismiss/un-dismiss/reset routes
+ * and their guards, and the huginn DELETE proxy.
+ *
+ * Layering note the tests pin: dismissal is a LIVE overlay (read per request beside
+ * the offered set, outside the 5-min cache), never a filter inside
+ * `computeIngestBacklog` — so a dismiss moves the counters on a PLAIN refetch.
+ */
+describe("computeBacklogFloorCounts — the dismissed bucket (PR 2)", () => {
+  const NOW = Date.UTC(2026, 6, 20);
+  const day = (n: number): string => new Date(NOW - n * 86_400_000).toISOString().slice(0, 10);
+  const keys = [
+    { key: "c/fresh", id: "fresh", collection: "c", date: day(1) },
+    { key: "c/old", id: "old", collection: "c", date: day(90) },
+    { key: "c/offered", id: "offered", collection: "c", date: day(90) },
+    { key: "c/dismissed", id: "dismissed", collection: "c", date: day(90) },
+  ];
+
+  test("the four buckets partition the queued set exactly", () => {
+    const { remaining, offeredStillQueued, dismissed, freshByCollection } =
+      computeBacklogFloorCounts(
+        keys,
+        new Set(["c/offered"]),
+        7,
+        NOW,
+        true,
+        new Set(["c/dismissed"]),
+      );
+    const fresh = Object.values(freshByCollection).reduce((s, n) => s + n, 0);
+    expect(remaining).toBe(1);
+    expect(offeredStillQueued).toBe(1);
+    expect(dismissed).toBe(1);
+    expect(fresh).toBe(1);
+    expect(remaining + offeredStillQueued + dismissed + fresh).toBe(keys.length);
+  });
+
+  test("dismissed WINS over offered — the doc leaves offeredStillQueued entirely", () => {
+    // Same doc in BOTH sets. If it counted as `offered`, "Reset offered" would
+    // silently make a dismissed doc eligible again.
+    const both = computeBacklogFloorCounts(
+      keys,
+      new Set(["c/offered", "c/dismissed"]),
+      7,
+      NOW,
+      true,
+      new Set(["c/dismissed"]),
+    );
+    expect(both.dismissed).toBe(1);
+    expect(both.offeredStillQueued).toBe(1); // only c/offered
+    expect(both.docs.find((d) => d.id === "dismissed")!.bucket).toBe("dismissed");
+    // And a FRESH doc that is dismissed leaves the fresh bucket too (dismissal
+    // outranks every other classification).
+    const freshDismissed = computeBacklogFloorCounts(
+      keys,
+      new Set<string>(),
+      7,
+      NOW,
+      true,
+      new Set(["c/fresh"]),
+    );
+    expect(freshDismissed.freshByCollection["c"] ?? 0).toBe(0);
+    expect(freshDismissed.dismissed).toBe(1);
+  });
+
+  test("an empty dismissed set is byte-identical to the pre-PR-2 three-bucket split", () => {
+    const withArg = computeBacklogFloorCounts(keys, new Set(["c/offered"]), 7, NOW, true, new Set());
+    const without = computeBacklogFloorCounts(keys, new Set(["c/offered"]), 7, NOW, true);
+    expect(withArg.dismissed).toBe(0);
+    expect({ ...withArg, dismissed: undefined }).toEqual({ ...without, dismissed: undefined });
+  });
+});
+
+describe("prune routes — dismiss / un-dismiss / reset guards (PR 2)", () => {
+  let root: string;
+  let app: Hono;
+  let snapshots: Map<string, unknown>;
+  let watcher: GardenerWatcherRef | null;
+  let origFetch: typeof fetch;
+
+  const seededWatcher = (): GardenerWatcherRef => ({
+    id: "w1",
+    enabled: true,
+    lastRunAt: null,
+    intervalMs: 604_800_000,
+    forceNextRun: false,
+    config: {},
+  });
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-prune-route-"));
+    await Bun.write(path.join(root, "notes.md"), "# Notes\n");
+    origFetch = globalThis.fetch;
+    globalThis.fetch = (async (_input: RequestInfo | URL) =>
+      new Response(JSON.stringify({ documents: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as unknown as typeof fetch;
+
+    snapshots = new Map();
+    watcher = seededWatcher();
+    __setBotsForTest([
+      { name: "prunebot", dir: root, persona: "", telegramAllowedUserIds: [], slackAllowedUserIds: [], wikiDir: root },
+    ] as unknown as Parameters<typeof __setBotsForTest>[0]);
+    __setWikiRegistryForTest([{ name: "prunebot", root, source: "bot" }]);
+    __resetWikiCacheForTest();
+    __resetIngestBacklogCacheForTest();
+    __resetGardenerMutexForTest();
+
+    app = new Hono();
+    registerWikiGardenerRoutes(app, {
+      getConsumed: async () => new Set<string>(),
+      getPending: async () => new Set<string>(),
+      getWikiGardenerWatcher: async () => watcher,
+      getSnapshot: async (_id, key) => snapshots.get(key) ?? null,
+      setSnapshot: async (_id, key, value) => {
+        snapshots.set(key, value);
+      },
+      listProposals: async () => [],
+    });
+  });
+
+  afterEach(async () => {
+    globalThis.fetch = origFetch;
+    __setBotsForTest(null);
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    __resetIngestBacklogCacheForTest();
+    __resetGardenerMutexForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const post = async (path_: string, body?: unknown): Promise<Response> =>
+    await app.request(`${path_}${path_.includes("?") ? "&" : "?"}wiki=prunebot`, {
+      method: "POST",
+      ...(body === undefined
+        ? {}
+        : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
+    });
+
+  test("dismiss persists the keys, un-dismiss removes them, reset clears the set", async () => {
+    const r1 = await post("/api/wiki/gardener/backlog-docs-dismiss", { keys: ["c/a", "c/b"] });
+    expect(r1.status).toBe(200);
+    expect(await r1.json()).toEqual({ ok: true, dismissed: 2 });
+    expect(new Set(snapshots.get("backlog:dismissed") as string[])).toEqual(new Set(["c/a", "c/b"]));
+
+    // Idempotent — re-dismissing an already-dismissed key doesn't grow the set.
+    await post("/api/wiki/gardener/backlog-docs-dismiss", { keys: ["c/a"] });
+    expect((snapshots.get("backlog:dismissed") as string[]).length).toBe(2);
+
+    const r2 = await post("/api/wiki/gardener/backlog-docs-undismiss", { keys: ["c/a"] });
+    expect(r2.status).toBe(200);
+    expect(snapshots.get("backlog:dismissed")).toEqual(["c/b"]);
+
+    const r3 = await post("/api/wiki/gardener/backlog-docs-dismiss-reset");
+    expect(r3.status).toBe(200);
+    expect(snapshots.get("backlog:dismissed")).toEqual([]);
+  });
+
+  test("the GET emits `dismissed` as its own live field", async () => {
+    const res = await app.request("/api/wiki/ingest-backlog?wiki=prunebot");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { dismissed?: number };
+    // No queued docs in this fixture — the point is the field is present + numeric,
+    // merged OUTSIDE the 5-min cache like `offered` (so a dismiss lands on a PLAIN
+    // refetch, no expensive `refresh=1` recompute).
+    expect(body.dismissed).toBe(0);
+  });
+
+  test("no seeded watcher → 404 (the snapshot's FK is the watcher id), exactly like Reset", async () => {
+    watcher = null;
+    for (const p of [
+      "/api/wiki/gardener/backlog-docs-dismiss",
+      "/api/wiki/gardener/backlog-docs-undismiss",
+      "/api/wiki/gardener/backlog-docs-dismiss-reset",
+      "/api/wiki/gardener/backlog-doc-delete",
+    ]) {
+      const res = await post(p, { keys: ["c/a"], collection: "youtube-summaries", id: "a" });
+      expect(res.status).toBe(404);
+      expect(((await res.json()) as { error?: string }).error).toContain("no wiki-gardener watcher");
+    }
+  });
+
+  test("a gardener run in flight → 409 on every prune verb (the backlog-recover precedent)", async () => {
+    let release!: () => void;
+    const held = runExclusive("prunebot", () => new Promise<void>((r) => (release = r)));
+    expect(held).not.toBeNull();
+    try {
+      for (const [p, body] of [
+        ["/api/wiki/gardener/backlog-docs-dismiss", { keys: ["c/a"] }],
+        ["/api/wiki/gardener/backlog-docs-undismiss", { keys: ["c/a"] }],
+        ["/api/wiki/gardener/backlog-docs-dismiss-reset", undefined],
+        ["/api/wiki/gardener/backlog-doc-delete", { collection: "youtube-summaries", id: "a" }],
+      ] as const) {
+        const res = await post(p, body);
+        expect(res.status).toBe(409);
+      }
+      // Nothing was written while the mutex was held.
+      expect(snapshots.has("backlog:dismissed")).toBe(false);
+    } finally {
+      release();
+      await held;
+    }
+  });
+
+  test("a malformed body is a 400, never a silent no-op write", async () => {
+    for (const body of [{}, { keys: [] }, { keys: "c/a" }]) {
+      const res = await post("/api/wiki/gardener/backlog-docs-dismiss", body);
+      expect(res.status).toBe(400);
+    }
+    expect(snapshots.has("backlog:dismissed")).toBe(false);
+  });
+
+  test("the prune routes share the standard wiki-resolution guards", async () => {
+    const res = await app.request("/api/wiki/gardener/backlog-docs-dismiss?wiki=nope", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ keys: ["c/a"] }),
+    });
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as { error?: string }).error).toContain("no wiki configured");
+  });
+});
+
+describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
+  let root: string;
+  let app: Hono;
+  let snapshots: Map<string, unknown>;
+  let origFetch: typeof fetch;
+  let deleteCalls: string[];
+  /** How many huginn collection LISTINGS were made — the backlog cache's observable. */
+  let listCalls: number;
+  /** Stubbed huginn behaviour for the DELETE + the update-status poll. */
+  let deleteResponse: () => Response;
+  let statusResponse: () => Response;
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-delete-route-"));
+    await Bun.write(path.join(root, "notes.md"), "# Notes\n");
+    deleteCalls = [];
+    listCalls = 0;
+    deleteResponse = () =>
+      new Response(
+        JSON.stringify({
+          status: "deleted",
+          collection: "youtube-summaries",
+          doc_id: "junk.md",
+          movedTo: "/tmp/deleted/junk.md",
+          reindex: { "youtube-summaries": "started", wiki: "skipped_already_running" },
+          pollUrls: { "youtube-summaries": "/api/collections/youtube-summaries/update-status" },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    statusResponse = () =>
+      new Response(JSON.stringify({ status: "succeeded" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+
+    origFetch = globalThis.fetch;
+    // NEVER the real huginn: the running server predates the endpoint anyway.
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (init?.method === "DELETE") {
+        deleteCalls.push(url);
+        return deleteResponse();
+      }
+      if (url.includes("/update-status")) return statusResponse();
+      if (url.includes("/api/collection/")) listCalls++;
+      return new Response(JSON.stringify({ documents: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    snapshots = new Map<string, unknown>([
+      ["backlog:offered", ["youtube-summaries/junk.md", "youtube-summaries/keep.md"]],
+      ["backlog:dismissed", ["youtube-summaries/junk.md"]],
+    ]);
+    __setBotsForTest([
+      { name: "delbot", dir: root, persona: "", telegramAllowedUserIds: [], slackAllowedUserIds: [], wikiDir: root },
+    ] as unknown as Parameters<typeof __setBotsForTest>[0]);
+    __setWikiRegistryForTest([{ name: "delbot", root, source: "bot" }]);
+    __resetWikiCacheForTest();
+    __resetIngestBacklogCacheForTest();
+    __resetGardenerMutexForTest();
+
+    app = new Hono();
+    registerWikiGardenerRoutes(app, {
+      getConsumed: async () => new Set<string>(),
+      getPending: async () => new Set<string>(),
+      getWikiGardenerWatcher: async () => ({
+        id: "w1",
+        enabled: true,
+        lastRunAt: null,
+        intervalMs: 604_800_000,
+        forceNextRun: false,
+        config: {},
+      }),
+      getSnapshot: async (_id, key) => snapshots.get(key) ?? null,
+      setSnapshot: async (_id, key, value) => {
+        snapshots.set(key, value);
+      },
+      listProposals: async () => [],
+    });
+  });
+
+  afterEach(async () => {
+    globalThis.fetch = origFetch;
+    __setBotsForTest(null);
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    __resetIngestBacklogCacheForTest();
+    __resetGardenerMutexForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const del = async (body: unknown): Promise<Response> =>
+    await app.request("/api/wiki/gardener/backlog-doc-delete?wiki=delbot", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  test("happy path: calls huginn's DELETE, splits reindex into pollable vs skipped, prunes both sets", async () => {
+    const res = await del({ collection: "youtube-summaries", id: "junk.md" });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      ok: boolean;
+      polling: string[];
+      skipped: string[];
+      movedTo: string | null;
+    };
+    expect(body.ok).toBe(true);
+    // `started` is pollable; `skipped_already_running` is surfaced honestly instead
+    // (that run began BEFORE the move, so its success says nothing about this delete).
+    expect(body.polling).toEqual(["youtube-summaries"]);
+    expect(body.skipped).toEqual(["wiki"]);
+    expect(body.movedTo).toBe("/tmp/deleted/junk.md");
+    expect(deleteCalls.length).toBe(1);
+    expect(deleteCalls[0]).toContain("/api/document/youtube-summaries/junk.md");
+    // The deleted key leaves BOTH snapshot sets; the untouched key survives.
+    expect(snapshots.get("backlog:offered")).toEqual(["youtube-summaries/keep.md"]);
+    expect(snapshots.get("backlog:dismissed")).toEqual([]);
+  });
+
+  test("huginn 404 (id not in that collection) → 404, and neither snapshot set is touched", async () => {
+    deleteResponse = () => new Response("not found", { status: 404 });
+    const res = await del({ collection: "youtube-summaries", id: "junk.md" });
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as { error?: string }).error).toContain("not in that collection");
+    expect((snapshots.get("backlog:offered") as string[]).length).toBe(2);
+  });
+
+  test("huginn error / unreachable → 502 with the message, never a muninn 5xx crash", async () => {
+    deleteResponse = () => new Response("boom", { status: 500 });
+    const res = await del({ collection: "youtube-summaries", id: "junk.md" });
+    expect(res.status).toBe(502);
+    expect(((await res.json()) as { error?: string }).error).toContain("huginn refused the delete");
+  });
+
+  test("a bad body / unknown collection is a 400 before any huginn call", async () => {
+    expect((await del({})).status).toBe(400);
+    expect((await del({ collection: "not-a-collection", id: "x" })).status).toBe(400);
+    expect(deleteCalls.length).toBe(0);
+  });
+
+  test("the status poll invalidates the bot's cached backlog only once TERMINAL", async () => {
+    const statusUrl =
+      "/api/wiki/gardener/backlog-doc-delete-status?wiki=delbot&collection=youtube-summaries";
+    // Listing calls are the observable: a served-from-cache GET makes none, a
+    // recompute re-lists every summary collection.
+    const get = async (): Promise<void> => {
+      await app.request("/api/wiki/ingest-backlog?wiki=delbot");
+    };
+    await get();
+    const warm = listCalls;
+    expect(warm).toBeGreaterThan(0);
+    await get();
+    expect(listCalls).toBe(warm); // cached (5-min TTL)
+
+    // A RUNNING reindex must NOT invalidate — the doc is still in huginn's listing,
+    // so recomputing now would just re-cache the wrong payload for the whole TTL.
+    statusResponse = () =>
+      new Response(JSON.stringify({ status: "running" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    expect(((await (await app.request(statusUrl)).json()) as { status: string }).status).toBe("running");
+    await get();
+    expect(listCalls).toBe(warm);
+
+    // Terminal ⇒ the entry (and any in-flight compute) is dropped, so the client's
+    // follow-up `refresh=1` recomputes against the post-prune listing.
+    statusResponse = () =>
+      new Response(JSON.stringify({ status: "succeeded" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    expect(((await (await app.request(statusUrl)).json()) as { status: string }).status).toBe("succeeded");
+    await get();
+    expect(listCalls).toBeGreaterThan(warm);
+  });
+
+  test("an unreachable huginn on the poll reports `unknown` (never a hung 'removing…')", async () => {
+    statusResponse = () => new Response("down", { status: 503 });
+    const res = await app.request(
+      "/api/wiki/gardener/backlog-doc-delete-status?wiki=delbot&collection=youtube-summaries",
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { status: string; error?: string };
+    expect(body.status).toBe("unknown");
+    expect(body.error).toBeDefined();
   });
 });

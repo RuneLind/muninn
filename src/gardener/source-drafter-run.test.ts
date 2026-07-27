@@ -90,6 +90,27 @@ describe("selectSourceBacklogDocs", () => {
     expect(queued.map((d) => d.id)).toEqual(["old11111111", "new11111111", "undated1111"]);
   });
 
+  test("DISMISSED docs are excluded from the queue AND from totalQueued", () => {
+    // The prune verb must stop model spend on THIS seam too — not just the drain.
+    // Subtracted after the partition (never inside `computeIngestBacklog`, which is
+    // TTL-cached and shared with three other callers).
+    const docs = [ytDoc(1), ytDoc(2), ytDoc(3)];
+    const dismissed = new Set([`youtube-summaries/${docs[1]!.id}`]);
+    const { queued, totalQueued } = selectSourceBacklogDocs(
+      { "youtube-summaries": docs },
+      emptyRefs,
+      new Set(),
+      new Set(),
+      dismissed,
+    );
+    expect(totalQueued).toBe(2);
+    expect(queued.map((d) => d.id)).toEqual([docs[0]!.id, docs[2]!.id]);
+    // Omitting the arg is byte-identical to the pre-PR-2 behaviour.
+    expect(
+      selectSourceBacklogDocs({ "youtube-summaries": docs }, emptyRefs, new Set(), new Set()).totalQueued,
+    ).toBe(3);
+  });
+
   test("consumed / pending / url-referenced docs are excluded from the queue", () => {
     const docs = [ytDoc(1), ytDoc(2), ytDoc(3)];
     const consumed = new Set([`youtube-summaries/${docs[0]!.id}`]);
@@ -122,6 +143,7 @@ function stubDeps(
     sweepWikiRefs: over.sweepWikiRefs ?? (async () => emptyRefs),
     getConsumed: over.getConsumed ?? (async () => new Set<string>()),
     getPending: over.getPending ?? (async () => new Set<string>()),
+    ...(over.getDismissed ? { getDismissed: over.getDismissed } : {}),
     fetchDoc:
       over.fetch ??
       (async (_c, id) => ({ text: `body of ${id}`, metadata: { url: `https://youtu.be/${id}` } })),
@@ -170,6 +192,17 @@ describe("runSourceDraftBacklog", () => {
     // `selected` is the VISITED count (2 skips + 1 draft) — it exceeds the limit of 1.
     expect(res.totals.selected).toBe(3);
     expect(res.limit).toBe(1);
+  });
+
+  test("the batch honors the getDismissed seam — a dismissed doc is never drafted", async () => {
+    const docs = [ytDoc(1), ytDoc(2), ytDoc(3)];
+    const { deps, draftCalls } = stubDeps({
+      docs,
+      getDismissed: async () => new Set([`youtube-summaries/${docs[0]!.id}`]),
+    });
+    const res = await runSourceDraftBacklog(fakeBot, "/wiki", "youtube-summaries", 3, "http://x", deps);
+    expect(draftCalls).toEqual([docs[1]!.id, docs[2]!.id]);
+    expect(res.totalQueued).toBe(2);
   });
 
   test("limit above max clamps to the hard cap", async () => {

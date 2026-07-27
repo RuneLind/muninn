@@ -204,6 +204,31 @@ describe("assembleBacklog", () => {
     expect(a.consumedComplement.has("youtube-summaries/y3")).toBe(true);
   });
 
+  test("DISMISSED queued docs are excluded from the batch — and never leak into offeredBefore", async () => {
+    const a = await assembleBacklog(
+      baseDeps({ getDismissed: async () => new Set(["youtube-summaries/y1"]) }),
+    );
+    // The drain must not spend a batch slot on a doc a human pruned.
+    expect(a.batchKeys).toEqual(["youtube-summaries/y3"]);
+    expect(a.consumedComplement.has("youtube-summaries/y1")).toBe(true);
+    // LOAD-BEARING: the caller persists `offeredBefore ∪ batch` back to
+    // `backlog:offered`. Folding the dismissed key in here would make "Reset
+    // offered" silently un-dismiss it.
+    expect(a.offeredBefore.has("youtube-summaries/y1")).toBe(false);
+    expect(a.offeredBefore.size).toBe(0);
+  });
+
+  test("offered ∩ dismissed: the doc is excluded once, and offeredBefore keeps only the offered key", async () => {
+    const a = await assembleBacklog(
+      baseDeps({
+        getOffered: async () => new Set(["youtube-summaries/y1"]),
+        getDismissed: async () => new Set(["youtube-summaries/y1", "youtube-summaries/y3"]),
+      }),
+    );
+    expect(a.batchKeys).toEqual([]);
+    expect([...a.offeredBefore]).toEqual(["youtube-summaries/y1"]);
+  });
+
   test("already-offered queued docs are dropped from the batch but stay listed", async () => {
     const a = await assembleBacklog(
       baseDeps({ getOffered: async () => new Set(["youtube-summaries/y1"]) }),

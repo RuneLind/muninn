@@ -324,12 +324,22 @@ export function sumStatsScript(): string {
     // Fill the coverage strip's all-time backlog number from /api/wiki/ingest-backlog.
     // Uses the same bot default (jarvis) as the stats route. Best-effort — a failed
     // load just shows a dash, never breaks the strip.
+    //
+    // This line reads as ACTIONABLE ("how much is still waiting"), so human-DISMISSED
+    // docs are SUBTRACTED and named in a suffix — unlike the /wiki/gardener coverage
+    // sentence, which is a statement about wiki FOOTPRINT and keeps counting them.
+    // An older server omits the dismissed field, so it reads 0 and the number is
+    // exactly what it was. (No backticks in this comment — it lives inside a
+    // template literal.)
     async function loadBacklogNum() {
       var el = document.getElementById('statsBacklogNum');
       if (!el) return;
       try {
         var bk = await getJson('/api/wiki/ingest-backlog?bot=jarvis');
-        el.textContent = (bk && typeof bk.queued === 'number' && !bk.error) ? String(bk.queued) : '—';
+        if (!bk || typeof bk.queued !== 'number' || bk.error) { el.textContent = '—'; return; }
+        var dismissed = (typeof bk.dismissed === 'number' && bk.dismissed > 0) ? bk.dismissed : 0;
+        el.textContent = String(Math.max(0, bk.queued - dismissed)) +
+          (dismissed ? ' (+' + dismissed + ' dismissed)' : '');
       } catch (err) {
         el.textContent = '—';
       }
