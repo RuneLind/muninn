@@ -21,7 +21,7 @@ test("dispatches each block type to the matching method with the right args", ()
     { type: "heading", level: 1, content: "Title" },
     { type: "text", lines: ["para line"] },
     { type: "ul", items: ["a", "b"] },
-    { type: "ol", items: ["one", "two"] },
+    { type: "ol", items: ["one", "two"], start: 1 },
     { type: "blockquote", lines: ["quoted"] },
     { type: "code_block", lang: "ts", code: "const x = 1;" },
     { type: "hr" },

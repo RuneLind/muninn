@@ -41,7 +41,8 @@ const webRenderer: BlockRenderer = {
   },
   blockquote: (lines) => `<blockquote>${lines.map(renderInline).join("<br>")}</blockquote>`,
   ul: (items) => `<ul>${items.map((i) => `<li>${renderInline(i)}</li>`).join("")}</ul>`,
-  ol: (items) => `<ol>${items.map((i) => `<li>${renderInline(i)}</li>`).join("")}</ol>`,
+  ol: (items, start) =>
+    `<ol${start !== 1 ? ` start="${start}"` : ""}>${items.map((i) => `<li>${renderInline(i)}</li>`).join("")}</ol>`,
   table(headers, rows) {
     const thead = "<thead><tr>" + headers.map((h) => `<th>${renderInline(h)}</th>`).join("") + "</tr></thead>";
     const tbody = "<tbody>" + rows.map((row) =>
