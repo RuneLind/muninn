@@ -24,7 +24,11 @@ mock.module("../db/watchers.ts", () => ({
   getWatcherSnapshot: async (_id: string, key: string) =>
     snapStore.has(key) ? snapStore.get(key) : null,
   setWatcherSnapshot: async (_id: string, key: string, value: unknown) => {
-    snapStore.set(key, value);
+    // Mirror production: a null/undefined value DELETES the row rather than storing a
+    // null (the real implementation does, because the column is NOT NULL). The guard
+    // record is cleared this way, so a mock that stored null would hide the clear.
+    if (value === null || value === undefined) snapStore.delete(key);
+    else snapStore.set(key, value);
     setCalls.push({ key, value });
   },
 }));
@@ -73,6 +77,9 @@ const {
   candidateKind,
   isShelfWorthy,
   captureFloor,
+  shouldAcceptShrink,
+  isTruncatedMarkup,
+  jaccard,
 } = await import("./anthropic.ts");
 
 const C1 = "https://github.com/anthropics/claude-code/commit/01f1617";
@@ -126,17 +133,67 @@ const RELEASES_ATOM = `<?xml version="1.0" encoding="UTF-8"?>
 // Tier-2 fixtures. llms.txt is markdown links; the `.txt` link must be excluded.
 const D1 = "https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview.md";
 const D2 = "https://platform.claude.com/docs/en/agents-and-tools/agent-skills/quickstart.md";
+/**
+ * The trailing prose block is padding, not decoration: Layer A rejects a body under
+ * LLMS_MIN_BODY_BYTES (1 KB) as a truncated/challenge response, and the real file is
+ * ~57 KB. It carries no links, so `parseLlmsTxtDocs(LLMS_SAMPLE)` is still exactly
+ * {D1, D2}. It also ends in PROSE like the real file, which is the shape a naive
+ * "last line must be a list item" truncation check would wrongly reject.
+ */
 const LLMS_SAMPLE = `# Anthropic Developer Documentation
 - [Overview](${D1}) - Agent Skills
 - [Quickstart](${D2})
 - [Full text](https://platform.claude.com/llms-full.txt)
+
+${"Padding to clear the Layer-A byte floor; this line carries no markdown links. ".repeat(20)}
 `;
+
+/**
+ * Every Tier-2 fetch stub goes through this so Layer A sees a realistic content-type —
+ * `text/plain` for llms.txt, `text/html` for the anthropic.com blog listings (which Layer
+ * A must NOT reject as HTML), and `text/markdown` for the doc-excerpt enrichment fetches.
+ */
+function textResponse(url: string, text: string): Response {
+  const ctype = url.includes("llms.txt")
+    ? "text/plain; charset=UTF-8"
+    : url.includes("anthropic.com/")
+      ? "text/html; charset=utf-8"
+      : "text/markdown; charset=utf-8";
+  return {
+    ok: true,
+    status: 200,
+    headers: new Headers({ "content-type": ctype }),
+    text: async () => text,
+  } as unknown as Response;
+}
+/**
+ * Layer-A padding for the blog listings, same reasoning as LLMS_SAMPLE's: a real
+ * anthropic.com listing is a full SSR page, so a body under BLOG_MIN_BODY_BYTES (512) is
+ * a challenge/error page. An HTML comment carries no `href=`, so the parsed slug sets are
+ * unchanged.
+ */
+const BLOG_PAD = `<!-- ${"listing markup padding. ".repeat(30)} -->`;
+/**
+ * PIN for the truncation-scoping rule: the markdown truncation heuristic must NOT run on
+ * the blog path. Real anthropic.com listings are Next.js RSC payloads whose trailing
+ * script chunk is dense with brackets inside JSON strings — measured, the last `[` sits
+ * ~30 bytes before the last `]`. This tail reproduces the hazardous shape (an unbalanced
+ * `[` after the last `]`), so `isTruncatedMarkup` returns TRUE on it. Every blog fixture
+ * carries it: if `checkTruncation` were ever passed on the blog path, all three sections
+ * would throw and the blog assertions throughout this file would fail loudly rather than
+ * the section silently wedging in production.
+ */
+const BLOG_RSC_TAIL = `<script>var a=["x"];var b="[unclosed";</script>`;
 const NEWS_HTML =
   `<a href="/news/claude-opus-4-8">x</a>` +
   `<a href="/news/some-post">y</a>` +
   `<a href="/news/claude-opus-4-8#hero">dup</a>` +
   `<a href="/news">section root</a>` +
-  `<a href="/about">unrelated</a>`;
+  `<a href="/about">unrelated</a>` +
+  BLOG_PAD +
+  BLOG_RSC_TAIL;
+const ENG_HTML = `<a href="/engineering/eng-post">e</a>${BLOG_PAD}${BLOG_RSC_TAIL}`;
+const RES_HTML = `<a href="/research/res-paper">r</a>${BLOG_PAD}${BLOG_RSC_TAIL}`;
 
 describe("parseAtomEntries", () => {
   test("parses commits-feed entries (type-first link order, entity in title)", () => {
@@ -336,7 +393,7 @@ describe("checkAnthropic", () => {
     globalThis.fetch = (async (input: unknown) => {
       const url = String(input);
       const text = typeof body === "function" ? body(url) : body;
-      return { ok: true, status: 200, text: async () => text } as unknown as Response;
+      return textResponse(url, text);
     }) as typeof fetch;
   }
 
@@ -520,8 +577,8 @@ describe("checkAnthropic", () => {
       if (url.endsWith("llms.txt")) return LLMS_SAMPLE;
       if (url === D2) return docBody; // the enrichment fetch for the new doc
       if (url.includes("/news")) return NEWS_HTML;
-      if (url.includes("/engineering")) return `<a href="/engineering/eng-post">e</a>`;
-      if (url.includes("/research")) return `<a href="/research/res-paper">r</a>`;
+      if (url.includes("/engineering")) return ENG_HTML;
+      if (url.includes("/research")) return RES_HTML;
       return "";
     });
     await checkAnthropic(tier2Watcher()); // baseline every Tier-2 source
@@ -541,9 +598,9 @@ describe("checkAnthropic", () => {
       if (url.includes("feed.test")) text = COMMITS_ATOM;
       else if (url.endsWith("llms.txt")) text = LLMS_SAMPLE;
       else if (url.includes("/news")) text = NEWS_HTML;
-      else if (url.includes("/engineering")) text = `<a href="/engineering/eng-post">e</a>`;
-      else if (url.includes("/research")) text = `<a href="/research/res-paper">r</a>`;
-      return { ok: true, status: 200, text: async () => text } as unknown as Response;
+      else if (url.includes("/engineering")) text = ENG_HTML;
+      else if (url.includes("/research")) text = RES_HTML;
+      return textResponse(url, text);
     }) as typeof fetch;
     await checkAnthropic(tier2Watcher()); // baseline
     snapStore.set("tier2:llms", [D1]); // D2 new
@@ -564,8 +621,8 @@ describe("checkAnthropic", () => {
       if (url.includes("feed.test")) return COMMITS_ATOM;
       if (url.includes("llms.txt")) return LLMS_SAMPLE;
       if (url.includes("/news")) return NEWS_HTML;
-      if (url.includes("/engineering")) return `<a href="/engineering/eng-post">e</a>`;
-      if (url.includes("/research")) return `<a href="/research/res-paper">r</a>`;
+      if (url.includes("/engineering")) return ENG_HTML;
+      if (url.includes("/research")) return RES_HTML;
       return "";
     });
   }
@@ -800,9 +857,9 @@ describe("checkAnthropic", () => {
       if (m) text = atomFor(Number(m[1]));
       else if (url.includes("llms.txt")) text = LLMS_SAMPLE; // D1, D2
       else if (url.includes("/news")) text = NEWS_HTML;
-      else if (url.includes("/engineering")) text = `<a href="/engineering/eng-post">e</a>`;
-      else if (url.includes("/research")) text = `<a href="/research/res-paper">r</a>`;
-      return { ok: true, status: 200, text: async () => text } as unknown as Response;
+      else if (url.includes("/engineering")) text = ENG_HTML;
+      else if (url.includes("/research")) text = RES_HTML;
+      return textResponse(url, text);
     }) as typeof fetch;
 
     snapStore.set("tier2:llms", [D1]); // D2 is a Tier-2 addition
@@ -1002,5 +1059,449 @@ describe("checkAnthropic", () => {
     expect(autoPromoted).toHaveLength(0);
     // …but it was still captured into the inbox.
     expect(upsertCalls.map((u) => u.url)).toContain(C1);
+  });
+
+  describe("Layer A — invalid responses are fetch errors", () => {
+    test("a truncated llms.txt is a FETCH ERROR: source skipped and the guard counter is NOT advanced", async () => {
+      stub((url) => {
+        if (url.includes("feed.test")) return COMMITS_ATOM;
+        if (url.includes("llms.txt")) return `${LLMS_SAMPLE}\n- [Cut](https://platform.claude.com/docs/en/x`;
+        if (url.includes("/news")) return NEWS_HTML;
+        if (url.includes("/engineering")) return ENG_HTML;
+        if (url.includes("/research")) return RES_HTML;
+        return "";
+      });
+      snapStore.set("tier2:llms", [D1, D2, "x3", "x4", "x5"]);
+      snapStore.set("tier2:blog:news", [
+        "https://www.anthropic.com/news/claude-opus-4-8",
+        "https://www.anthropic.com/news/some-post",
+      ]);
+      snapStore.set("tier2:blog:engineering", ["https://www.anthropic.com/engineering/eng-post"]);
+      snapStore.set("tier2:blog:research", ["https://www.anthropic.com/research/res-paper"]);
+      setCalls.length = 0;
+
+      await checkAnthropic(tier2Watcher());
+
+      // Skipped as a fetch error: no baseline advance AND — load-bearing — no guard record,
+      // because a broken response is not evidence of a sustained upstream change.
+      expect(setCalls.find((c) => c.key === "tier2:llms")).toBeUndefined();
+      expect(snapStore.has("tier2:llms:guard")).toBe(false);
+    });
+
+    test("an HTML body served for llms.txt is rejected (challenge page), counter untouched", async () => {
+      globalThis.fetch = (async (input: unknown) => {
+        const url = String(input);
+        if (url.includes("llms.txt")) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "text/html; charset=utf-8" }),
+            text: async () => `<html><body>${"checking your browser ".repeat(80)}</body></html>`,
+          } as unknown as Response;
+        }
+        let text = "";
+        if (url.includes("feed.test")) text = COMMITS_ATOM;
+        else if (url.includes("/news")) text = NEWS_HTML;
+        else if (url.includes("/engineering")) text = ENG_HTML;
+        else if (url.includes("/research")) text = RES_HTML;
+        return textResponse(url, text);
+      }) as typeof fetch;
+      snapStore.set("tier2:llms", [D1, D2, "x3", "x4", "x5"]);
+      setCalls.length = 0;
+
+      await checkAnthropic(tier2Watcher());
+
+      expect(setCalls.find((c) => c.key === "tier2:llms")).toBeUndefined();
+      expect(snapStore.has("tier2:llms:guard")).toBe(false);
+    });
+  });
+
+  describe("Layer B — guard-record lifecycle", () => {
+    const H = 3_600_000;
+    test("a shrink skip records the counter eagerly, and a healthy run clears it", async () => {
+      tier2Stub(); // llms yields D1, D2
+      snapStore.set("tier2:llms", [D1, D2, "x3", "x4", "x5"]); // 2 fresh < 5/2 → shrink
+      snapStore.set("tier2:blog:news", [
+        "https://www.anthropic.com/news/claude-opus-4-8",
+        "https://www.anthropic.com/news/some-post",
+      ]);
+      snapStore.set("tier2:blog:engineering", ["https://www.anthropic.com/engineering/eng-post"]);
+      snapStore.set("tier2:blog:research", ["https://www.anthropic.com/research/res-paper"]);
+      setCalls.length = 0;
+
+      await checkAnthropic(tier2Watcher());
+      const guard = snapStore.get("tier2:llms:guard") as any;
+      expect(guard.consecutiveSkips).toBe(1);
+      expect(guard.lastSample.sort()).toEqual([D1, D2].sort());
+      expect(snapStore.get("tier2:llms") as string[]).toHaveLength(5); // baseline untouched
+
+      // Now a healthy baseline: the source advances, so the streak is over.
+      snapStore.set("tier2:llms", [D1]);
+      gateResult = JSON.stringify([{ n: 1, score: 0.8, why: "new doc" }]);
+      await checkAnthropic(tier2Watcher());
+      expect(snapStore.has("tier2:llms:guard")).toBe(false);
+    });
+
+    test("the counter survives a gate failure (a failing gate must not reset the wait)", async () => {
+      tier2Stub();
+      snapStore.set("tier2:llms", [D1, D2, "x3", "x4", "x5"]);
+      snapStore.set("tier2:blog:news", [
+        "https://www.anthropic.com/news/claude-opus-4-8",
+        "https://www.anthropic.com/news/some-post",
+      ]);
+      snapStore.set("tier2:blog:engineering", ["https://www.anthropic.com/engineering/eng-post"]);
+      snapStore.set("tier2:blog:research", ["https://www.anthropic.com/research/res-paper"]);
+      // Pre-seed an existing streak. (NB it is not "one skip from healing" — at
+      // prior=5/fresh=2 the predicate rejects on `set too small` long before the wait
+      // bound is consulted. What this pins is narrower and still worth having: the guard
+      // row is written eagerly during the run and is NOT deleted when the gate throws,
+      // because a skipped source produces no `fresh` entry and so can never reach the
+      // `clearGuard` path in persistTier2.)
+      snapStore.set("tier2:llms:guard", {
+        consecutiveSkips: 2,
+        firstSkipAt: Date.now() - 30 * 3_600_000,
+        lastSample: [D1, D2],
+      });
+      gateThrow = true;
+
+      await checkAnthropic(tier2Watcher());
+
+      // The gate blew up, but the guard record must still carry the accrued wait — else a
+      // persistently failing gate would keep the source from ever healing.
+      const guard = snapStore.get("tier2:llms:guard") as any;
+      expect(guard).toBeTruthy();
+      expect(guard.consecutiveSkips).toBeGreaterThanOrEqual(2);
+    });
+
+    /**
+     * The accept branch end-to-end — the whole point of the change, and the one path where
+     * the persist rule is load-bearing. Uses a REALISTICALLY sized source (the size gate
+     * needs max ≥ 100), a content-stable predecessor, and a streak already past both
+     * bounds, so this run is the one that heals.
+     */
+    test("an aged, stable, removal-dominated shrink is ACCEPTED: it diffs, shrinks the baseline, and clears the guard", async () => {
+      const kept = Array.from({ length: 200 }, (_, i) => `https://platform.claude.com/docs/en/k${i}.md`);
+      const added = Array.from({ length: 5 }, (_, i) => `https://platform.claude.com/docs/en/new${i}.md`);
+      const freshDocs = [...kept, ...added];
+      const prior = [...kept, ...Array.from({ length: 800 }, (_, i) => `https://platform.claude.com/docs/en/gone${i}.md`)];
+
+      stub((url) => {
+        if (url.includes("feed.test")) return COMMITS_ATOM;
+        if (url.includes("llms.txt")) {
+          return `# Docs\n${freshDocs.map((u, i) => `- [Doc ${i}](${u})`).join("\n")}\n\nTrailing prose.\n`;
+        }
+        if (url.includes("/news")) return NEWS_HTML;
+        if (url.includes("/engineering")) return ENG_HTML;
+        if (url.includes("/research")) return RES_HTML;
+        return "";
+      });
+      snapStore.set("tier2:llms", prior); // 205 fresh < 1000/2 → the ratio guard fires
+      snapStore.set("tier2:blog:news", [
+        "https://www.anthropic.com/news/claude-opus-4-8",
+        "https://www.anthropic.com/news/some-post",
+      ]);
+      snapStore.set("tier2:blog:engineering", ["https://www.anthropic.com/engineering/eng-post"]);
+      snapStore.set("tier2:blog:research", ["https://www.anthropic.com/research/res-paper"]);
+      // Two skips, 30h ago, whose sample is content-identical to what we fetch now → this
+      // run advances to 3 skips and satisfies (skips ≥ 3 && ≥ 24h).
+      snapStore.set("tier2:llms:guard", {
+        consecutiveSkips: 2,
+        firstSkipAt: Date.now() - 30 * H,
+        lastSample: freshDocs,
+      });
+      gateResult = "[]";
+
+      await checkAnthropic(tier2Watcher());
+
+      // Diffed: the 5 genuinely-new docs reached the gate, the 800 removed ones did not.
+      const numbered = [...lastGatePrompt.matchAll(/^\d+\. \[Docs \(llms\.txt\)\]/gm)];
+      expect(numbered).toHaveLength(5);
+
+      // THE persist rule: the baseline becomes the fresh set (205) — NOT `prior ∪ emitted`
+      // (1005), which would grow the baseline and re-trip the ratio guard forever.
+      const snap = snapStore.get("tier2:llms") as string[];
+      expect(snap).toHaveLength(205);
+      expect(snap).not.toContain("https://platform.claude.com/docs/en/gone0.md");
+
+      // The streak is over, atomically with the advance.
+      expect(snapStore.has("tier2:llms:guard")).toBe(false);
+    });
+
+    /**
+     * Accept AND carry in the SAME run — newly reachable, and only because the additions
+     * cap was removed from the accept predicate. While that cap existed, a shrink with
+     * >40 additions was refused outright, so the two paths were mutually exclusive by
+     * construction. Now a big prune that also added a lot must self-heal AND stay within
+     * one gate prompt.
+     */
+    test("an accepted shrink still respects the burst cap, carrying the remainder", async () => {
+      const kept = Array.from({ length: 200 }, (_, i) => `https://platform.claude.com/docs/en/k${i}.md`);
+      const added = Array.from({ length: 60 }, (_, i) => `https://platform.claude.com/docs/en/new${i}.md`);
+      const freshDocs = [...kept, ...added];
+      const prior = [...kept, ...Array.from({ length: 900 }, (_, i) => `https://platform.claude.com/docs/en/gone${i}.md`)];
+
+      stub((url) => {
+        if (url.includes("feed.test")) return COMMITS_ATOM;
+        if (url.includes("llms.txt")) {
+          return `# Docs\n${freshDocs.map((u, i) => `- [Doc ${i}](${u})`).join("\n")}\n\nTrailing prose.\n`;
+        }
+        if (url.includes("/news")) return NEWS_HTML;
+        if (url.includes("/engineering")) return ENG_HTML;
+        if (url.includes("/research")) return RES_HTML;
+        return "";
+      });
+      snapStore.set("tier2:llms", prior);
+      snapStore.set("tier2:blog:news", [
+        "https://www.anthropic.com/news/claude-opus-4-8",
+        "https://www.anthropic.com/news/some-post",
+      ]);
+      snapStore.set("tier2:blog:engineering", ["https://www.anthropic.com/engineering/eng-post"]);
+      snapStore.set("tier2:blog:research", ["https://www.anthropic.com/research/res-paper"]);
+      snapStore.set("tier2:llms:guard", {
+        consecutiveSkips: 2,
+        firstSkipAt: Date.now() - 30 * H,
+        lastSample: freshDocs,
+      });
+      gateResult = "[]";
+
+      await checkAnthropic(tier2Watcher());
+
+      // 900 removed vs 60 added clears the 10x dominance test → accepted…
+      const numbered = [...lastGatePrompt.matchAll(/^\d+\. \[Docs \(llms\.txt\)\]/gm)];
+      expect(numbered).toHaveLength(40); // …but only 40 reach the single gate prompt.
+
+      // Persist rule `fresh \ carried`: 260 fresh − 20 carried.
+      const snap = snapStore.get("tier2:llms") as string[];
+      expect(snap).toHaveLength(240);
+      expect(snapStore.has("tier2:llms:guard")).toBe(false);
+
+      // The carried 20 are still pending, so the next run drains them and converges.
+      gateResult = "[]";
+      await checkAnthropic(tier2Watcher());
+      expect((snapStore.get("tier2:llms") as string[])).toHaveLength(260);
+    });
+  });
+
+  describe("Tier-2 candidate burst cap (gate path only)", () => {
+    /** A wide llms.txt: 1 baselined doc + `n` additions. */
+    function wideLlms(n: number): string {
+      const lines = [`- [Overview](${D1})`];
+      for (let i = 0; i < n; i++) {
+        lines.push(`- [Doc ${i}](https://platform.claude.com/docs/en/burst/doc-${i}.md)`);
+      }
+      return `# Docs\n${lines.join("\n")}\n\nTrailing prose so the tail is not a list item.\n`;
+    }
+
+    function burstStub(n: number) {
+      stub((url) => {
+        if (url.includes("feed.test")) return COMMITS_ATOM;
+        if (url.includes("llms.txt")) return wideLlms(n);
+        if (url.includes("/news")) return NEWS_HTML;
+        if (url.includes("/engineering")) return ENG_HTML;
+        if (url.includes("/research")) return RES_HTML;
+        return "";
+      });
+    }
+
+    function seedBlogs() {
+      snapStore.set("tier2:blog:news", [
+        "https://www.anthropic.com/news/claude-opus-4-8",
+        "https://www.anthropic.com/news/some-post",
+      ]);
+      snapStore.set("tier2:blog:engineering", ["https://www.anthropic.com/engineering/eng-post"]);
+      snapStore.set("tier2:blog:research", ["https://www.anthropic.com/research/res-paper"]);
+    }
+
+    test("the gate sees at most the cap, and the remainder is CARRIED by being withheld from the snapshot", async () => {
+      burstStub(100);
+      snapStore.set("tier2:llms", [D1]);
+      seedBlogs();
+      gateResult = "[]";
+
+      await checkAnthropic(tier2Watcher());
+
+      // 100 additions, cap 40 → the prompt carries exactly 40 numbered candidates.
+      const numbered = [...lastGatePrompt.matchAll(/^\d+\. \[Docs \(llms\.txt\)\]/gm)];
+      expect(numbered).toHaveLength(40);
+
+      // Persist rule is `fresh \ carried`: the 60 withheld URLs are NOT in the snapshot, so
+      // they re-diff next run instead of being lost.
+      const snap = snapStore.get("tier2:llms") as string[];
+      expect(snap).toHaveLength(41); // D1 + the 40 emitted
+      expect(snap).toContain(D1);
+    });
+
+    test("carrying converges — the next run drains the remainder", async () => {
+      burstStub(100);
+      snapStore.set("tier2:llms", [D1]);
+      seedBlogs();
+      gateResult = "[]";
+      await checkAnthropic(tier2Watcher());
+      expect((snapStore.get("tier2:llms") as string[])).toHaveLength(41);
+
+      // Same fetch, smaller remainder — and never a re-diff of what already landed.
+      await checkAnthropic(tier2Watcher());
+      expect((snapStore.get("tier2:llms") as string[])).toHaveLength(81);
+      await checkAnthropic(tier2Watcher());
+      expect((snapStore.get("tier2:llms") as string[])).toHaveLength(101); // fully drained
+    });
+
+    test("the DIGEST path is never capped (its dedup is the snapshot — an un-surfaced addition is lost forever)", async () => {
+      burstStub(100);
+      snapStore.set("tier2:llms", [D1]);
+      seedBlogs();
+      gateResult = "digest md";
+
+      await checkAnthropic(
+        baseWatcher({
+          lastNotifiedIds: ["seen", C1, C2],
+          config: { feeds: ["https://feed.test/commits.atom"], lookbackDays: 100000, tier2: true, digest: true },
+        }),
+      );
+
+      // All 100 additions reach the digest prompt, and the snapshot advances to the FULL set.
+      const numbered = [...lastGatePrompt.matchAll(/^\d+\. \[Docs \(llms\.txt\)\]/gm)];
+      expect(numbered).toHaveLength(100);
+      expect((snapStore.get("tier2:llms") as string[])).toHaveLength(101);
+    });
+  });
+
+});
+
+// --- Pure guard predicates ---
+
+describe("Layer A — stateless response validity", () => {
+  test("the REAL llms.txt body is not flagged as truncated (prose tail, not a list item)", async () => {
+    // Regression pin for the trap the plan names: the file's last line is
+    // `For more comprehensive documentation, see [llms-full.txt](…)`, so a naive
+    // "last line must parse as a markdown list item" check would reject every healthy
+    // fetch forever — a stateless wedge with no counter and no self-heal.
+    const real = await Bun.file(
+      new URL("./__fixtures__/llms-txt-2026-07-27.txt", import.meta.url),
+    ).text();
+    expect(isTruncatedMarkup(real)).toBe(false);
+    expect(parseLlmsTxtDocs(real).size).toBe(549);
+  });
+
+  test("isTruncatedMarkup catches a body cut mid-link but not healthy prose", () => {
+    expect(isTruncatedMarkup("- [Overview](https://x/a.md)\n- [Quick](https://x/b")).toBe(true);
+    expect(isTruncatedMarkup("- [Overview](https://x/a.md)\n- [Quick")).toBe(true);
+    expect(isTruncatedMarkup("- [Overview](https://x/a.md)\nSee [full](https://x/f.txt)")).toBe(false);
+    expect(isTruncatedMarkup("no links here at all (but parens)")).toBe(false);
+  });
+});
+
+describe("Layer B — bounded shrink guard", () => {
+  const H = 3_600_000;
+  const NOW = 1_800_000_000_000;
+  // A realistic shrink: 1953 → 549, removal-dominated, 13 additions.
+  const priorSet = Array.from({ length: 1953 }, (_, i) => `u${i}`);
+  const freshSet = [
+    ...Array.from({ length: 536 }, (_, i) => `u${i}`),
+    ...Array.from({ length: 13 }, (_, i) => `new${i}`),
+  ];
+
+  /**
+   * `record` carries only the counter + streak start; the previous sample is a SEPARATE
+   * argument, because the caller has already overwritten `lastSample` with the current
+   * one for persistence. Default `previousSample` is a ~99%-identical predecessor, which
+   * is what a content-stable streak actually looks like.
+   */
+  const call = (over: {
+    prior?: string[];
+    fresh?: string[];
+    previousSample?: string[];
+    consecutiveSkips?: number;
+    firstSkipAt?: number;
+  } = {}) =>
+    shouldAcceptShrink({
+      prior: over.prior ?? priorSet,
+      fresh: over.fresh ?? freshSet,
+      record: {
+        consecutiveSkips: over.consecutiveSkips ?? 3,
+        firstSkipAt: over.firstSkipAt ?? NOW - 25 * H,
+      },
+      previousSample: over.previousSample ?? (over.fresh ?? freshSet).slice(0, -2),
+      now: NOW,
+    });
+
+  test("a sustained, stable, removal-dominated shrink is accepted once both bounds are met", () => {
+    expect(call().accept).toBe(true);
+  });
+
+  test("run count alone does not heal — the 24h wall clock must also pass", () => {
+    const v = call({ consecutiveSkips: 9, firstSkipAt: NOW - 6 * H });
+    expect(v.accept).toBe(false);
+    expect(v.reason).toContain("wait not satisfied");
+  });
+
+  test("72h heals a SLOW row that cannot reach 3 skips in time (the 7d weekly cadence)", () => {
+    // A 7d row takes three WEEKS to reach 3 skips, so the wall-clock ceiling is what
+    // unwedges it. Two skips a week apart is the state that row actually reaches — the
+    // predicate is only ever evaluated AT a skip, and skip 1 always has elapsed === 0.
+    const v = call({ consecutiveSkips: 2, firstSkipAt: NOW - 168 * H });
+    expect(v.accept).toBe(true);
+    // ...and the same row one skip in could not have healed, whatever the clock says.
+    expect(call({ consecutiveSkips: 1, firstSkipAt: NOW }).accept).toBe(false);
+  });
+
+  test("flapping content never heals, however long it flaps", () => {
+    // The predecessor sample shares nothing with this one — the shape a challenge page
+    // or a partial build produces run over run.
+    const v = call({
+      firstSkipAt: NOW - 900 * H,
+      previousSample: Array.from({ length: 549 }, (_, i) => `other${i}`),
+    });
+    expect(v.accept).toBe(false);
+    expect(v.reason).toContain("content unstable");
+  });
+
+  test("an additions-dominated shrink never heals (a garbage page inventing a URL space)", () => {
+    const garbage = Array.from({ length: 549 }, (_, i) => (i < 40 ? `u${i}` : `junk${i}`));
+    const v = call({ fresh: garbage, previousSample: garbage });
+    expect(v.accept).toBe(false);
+    expect(v.reason).toContain("not removal-dominated");
+  });
+
+  test("a LARGE but still removal-dominated addition count is accepted, not refused", () => {
+    // Regression pin: an absolute cap on additions here would re-wedge permanently —
+    // while a source is skipped its `prior` is frozen while upstream keeps publishing, so
+    // `added` only grows and could never come back under the cap. The burst cap belongs
+    // at the call site (which carries the remainder), not in the accept predicate.
+    const many = [
+      ...Array.from({ length: 536 }, (_, i) => `u${i}`),
+      ...Array.from({ length: 120 }, (_, i) => `new${i}`),
+    ];
+    const v = call({ fresh: many, previousSample: many });
+    expect(v.accept).toBe(true);
+  });
+
+  test("blog-sized sources never self-heal (ratio reasoning at n=11 is noise)", () => {
+    const small = Array.from({ length: 25 }, (_, i) => `s${i}`);
+    const v = call({
+      prior: small,
+      fresh: small.slice(0, 5),
+      previousSample: small.slice(0, 5),
+      consecutiveSkips: 50,
+      firstSkipAt: NOW - 900 * H,
+    });
+    expect(v.accept).toBe(false);
+    expect(v.reason).toContain("set too small");
+  });
+
+  test("the size gate reads the MAX of the two sets, so a legitimately-shrunk baseline still heals", () => {
+    const bigPrior = Array.from({ length: 400 }, (_, i) => `u${i}`);
+    const smallFresh = Array.from({ length: 30 }, (_, i) => `u${i}`);
+    const v = call({ prior: bigPrior, fresh: smallFresh, previousSample: smallFresh });
+    expect(v.accept).toBe(true);
+  });
+
+  test("jaccard is a content measure, not a size measure", () => {
+    // The live wedge drifted 541 → 545 → 548 → 549: set-EQUALITY (all a hash can do)
+    // never fires, but these samples are ~99% identical by content.
+    const a = new Set(Array.from({ length: 541 }, (_, i) => `u${i}`));
+    const b = new Set(Array.from({ length: 549 }, (_, i) => `u${i}`));
+    expect(jaccard(a, b)).toBeGreaterThan(0.95);
+    expect(a.size === b.size).toBe(false);
   });
 });

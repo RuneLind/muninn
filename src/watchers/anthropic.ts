@@ -270,6 +270,176 @@ interface Candidate {
 /** Snapshot key namespace, one row per Tier-2 source. */
 const SNAP_LLMS = "tier2:llms";
 const snapBlogKey = (section: string) => `tier2:blog:${section}`;
+/**
+ * Diagnostic sibling row for a Tier-2 source's shrink guard (Layer B below). NOT baseline
+ * state — `src.key` already carries the `tier2:` prefix, so this is `tier2:llms:guard`,
+ * never `tier2:tier2:llms:guard`.
+ */
+const snapGuardKey = (srcKey: string) => `${srcKey}:guard`;
+
+// --- Tier-2 response validity + shrink guard (two layers) ---
+
+/**
+ * Layer-A byte floors. A 200 carrying a JS challenge or a truncated transfer is short;
+ * a real index is not. Deliberately GENEROUS — `llms.txt` legitimately shrank 72% once
+ * (1953 → 549 URLs, still ~57 KB) and will shrink again, and a wrong stateless predicate
+ * wedges permanently and deterministically, which is the very anti-pattern this guard
+ * exists to remove.
+ */
+const LLMS_MIN_BODY_BYTES = 1_024;
+const BLOG_MIN_BODY_BYTES = 512;
+
+/**
+ * Layer-B bounds. A sustained, content-stable, removal-dominated shrink self-heals; a
+ * flapping or additions-dominated one never does.
+ *
+ * Run counts alone are cadence-blind — 3 runs is ~6h on the 2h Highlights row but three
+ * WEEKS on the 7d weekly row — so the wall-clock ceiling is what unwedges the slow rows,
+ * and the conjunction is what keeps the fast row from healing inside a plausible upstream
+ * incident.
+ */
+const GUARD_MIN_SKIPS = 3;
+const GUARD_MIN_WAIT_MS = 24 * 3_600_000;
+const GUARD_MAX_WAIT_MS = 72 * 3_600_000;
+/**
+ * Consecutive shrunken samples must be near-identical by CONTENT, not by size. Equality
+ * alone never fires (the live wedge observed 541 → 545 → 548 → 549), and a ±10% size band
+ * is not a stability test at all: a cached truncated body and a JS-challenge page are both
+ * deterministic while they last, so they return the same size by construction. That is why
+ * the guard record stores the previous URL SET, not a hash — a hash supports only equality.
+ */
+const GUARD_STABILITY_JACCARD = 0.95;
+/**
+ * Removal-dominance. A strict `fresh ⊆ prior` rule is falsified by live data — any live
+ * source accumulates additions during the 24h wait (13 URLs on the 07-21 wedge, 69 on the
+ * weekly row), so a subset rule would never fire and the wedge would recur unchanged. A
+ * garbage page inventing a different URL space is additions-dominated and still rejected.
+ */
+const GUARD_REMOVAL_DOMINANCE = 10;
+/**
+ * The same guard governs `tier2:blog:{news,engineering,research}`, whose sets are 11–25
+ * URLs; ratio reasoning at n=11 is noise, so blog sources keep today's behavior exactly.
+ * Gated on the MAX of the two sizes, not on `prior` alone — a baseline that legitimately
+ * falls under 100 must not have its self-heal disabled forever.
+ */
+const GUARD_MIN_SET_SIZE = 100;
+
+/**
+ * Bound on the Tier-2 additions one source's diff may push into a single gate call.
+ * `runGate` puts every candidate into ONE uncapped Haiku prompt, and a gate failure
+ * returns without persisting — so an oversized batch re-forms every run, a second silent
+ * wedge. The remainder is carried by being withheld from the persisted snapshot, so it
+ * re-diffs next run. GATE PATH ONLY: the digest's "Tier-2 additions are NEVER capped"
+ * invariant is load-bearing (its dedup is the snapshot, so an un-surfaced addition would
+ * be lost forever) and is untouched.
+ */
+const TIER2_CANDIDATE_BURST_CAP = 40;
+
+/** Diagnostic state for one Tier-2 source's shrink guard. Never a baseline. */
+interface Tier2GuardRecord {
+  /** Consecutive shrink skips whose samples stayed content-stable. */
+  consecutiveSkips: number;
+  /** Epoch ms of the first skip in the current stable streak. */
+  firstSkipAt: number;
+  /** The previous shrunken sample, in full — needed for the Jaccard comparison. */
+  lastSample: string[];
+}
+
+function isGuardRecord(v: unknown): v is Tier2GuardRecord {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return false;
+  const r = v as Record<string, unknown>;
+  return (
+    typeof r.consecutiveSkips === "number" &&
+    typeof r.firstSkipAt === "number" &&
+    Array.isArray(r.lastSample)
+  );
+}
+
+/** |a ∩ b| / |a ∪ b|. Two empty sets are treated as identical. */
+export function jaccard(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 && b.size === 0) return 1;
+  let inter = 0;
+  for (const v of a) if (b.has(v)) inter++;
+  return inter / (a.size + b.size - inter);
+}
+
+/**
+ * Decide whether a shrunken-but-suspicious fetch should be accepted as a legitimate
+ * upstream change. Pure + exported so the bounds are unit-testable without a DB.
+ *
+ * ALL of these must hold: the wait bound is satisfied, the sample is content-stable
+ * against the previous shrunken sample, the change is removal-dominated, and the source
+ * is big enough for ratio reasoning to mean anything.
+ *
+ * `record` is the UPDATED record for THIS skip (counter already advanced, `lastSample`
+ * still the PREVIOUS sample), so the predicate is re-evaluated from scratch each run
+ * rather than consumed — a run that accepts but then fails its gate simply retries.
+ */
+export function shouldAcceptShrink(args: {
+  prior: string[];
+  fresh: string[];
+  /** Skip counter + streak start for THIS skip (already advanced). */
+  record: Pick<Tier2GuardRecord, "consecutiveSkips" | "firstSkipAt">;
+  /**
+   * The PREVIOUS shrunken sample — deliberately a separate argument, not `record.lastSample`.
+   * The caller has already overwritten `lastSample` with the current sample for persistence,
+   * so reading it off the record would compare `fresh` against itself and make the stability
+   * clause always-true dead code. Empty on the very first skip (which cannot satisfy the wait
+   * bound anyway).
+   */
+  previousSample: string[];
+  now: number;
+}): { accept: boolean; reason: string } {
+  const { prior, fresh, record, previousSample, now } = args;
+
+  if (Math.max(prior.length, fresh.length) < GUARD_MIN_SET_SIZE) {
+    return { accept: false, reason: `set too small (max ${Math.max(prior.length, fresh.length)} < ${GUARD_MIN_SET_SIZE})` };
+  }
+
+  const elapsed = now - record.firstSkipAt;
+  const waitSatisfied =
+    (record.consecutiveSkips >= GUARD_MIN_SKIPS && elapsed >= GUARD_MIN_WAIT_MS) || elapsed >= GUARD_MAX_WAIT_MS;
+  if (!waitSatisfied) {
+    return {
+      accept: false,
+      reason: `wait not satisfied (${record.consecutiveSkips} skip(s), ${Math.round(elapsed / 3_600_000)}h)`,
+    };
+  }
+
+  // Content stability against the PREVIOUS shrunken sample. A first skip has nothing to
+  // compare against, but it also can't satisfy the wait bound above, so this is reached
+  // only with a real predecessor.
+  const stability = jaccard(new Set(previousSample), new Set(fresh));
+  if (stability < GUARD_STABILITY_JACCARD) {
+    return { accept: false, reason: `content unstable (jaccard ${stability.toFixed(3)})` };
+  }
+
+  const priorSet = new Set(prior);
+  const freshSet = new Set(fresh);
+  const added = fresh.filter((u) => !priorSet.has(u)).length;
+  const removed = prior.filter((u) => !freshSet.has(u)).length;
+  // NB — there is deliberately NO absolute cap on `added` here. The plan drafted one
+  // (`|fresh \ prior| ≤ burstCap`), but it re-creates the very wedge this guard removes:
+  // while a source is skipped its `prior` is frozen while upstream keeps publishing, so
+  // `added` only ever GROWS. Once it crossed the cap the predicate could never accept
+  // again — no time bound, no skip count, no recovery but hand-editing the snapshot. The
+  // live rows accrue ~2 new URLs/day and the weekly row already showed 69 in one window,
+  // so a two-week outage would have re-wedged the source permanently. Additions-dominated
+  // garbage is already rejected by the 10x dominance test below, and an accepted shrink
+  // with many additions is bounded by the burst cap at the CALL SITE, which carries the
+  // remainder into the next run instead of refusing the whole fetch.
+  if (removed < GUARD_REMOVAL_DOMINANCE * added) {
+    return {
+      accept: false,
+      reason: `not removal-dominated (${removed} removed vs ${added} added, need ${GUARD_REMOVAL_DOMINANCE}x)`,
+    };
+  }
+
+  return {
+    accept: true,
+    reason: `sustained removal-only shrink (${removed} removed, ${added} added, ${record.consecutiveSkips} skips)`,
+  };
+}
 
 /**
  * Tier-1 + Tier-2 alert watcher. Tier-1 polls the verified Anthropic GitHub Atom
@@ -284,9 +454,13 @@ export async function checkAnthropic(watcher: Watcher, telemetry?: HaikuTelemetr
   const config = (watcher.config ?? {}) as AnthropicConfig;
 
   const tier1Entries = await fetchTier1Entries(config);
+  // The burst cap is GATE-PATH ONLY. The digest path's "Tier-2 additions are NEVER
+  // capped" invariant is load-bearing (its dedup is the snapshot, so an un-surfaced
+  // addition is lost forever) and is pinned by a test; the plain no-gate path emits one
+  // alert per candidate and has no single oversized prompt to protect.
   const tier2 = config.tier2
-    ? await fetchTier2(config, watcher.id)
-    : { candidates: [] as Candidate[], fresh: [] as { key: string; urls: string[] }[] };
+    ? await fetchTier2(config, watcher.id, config.gate && !config.digest ? TIER2_CANDIDATE_BURST_CAP : null)
+    : { candidates: [] as Candidate[], fresh: [] as Tier2Fresh[] };
 
   // Persist the freshly-fetched Tier-2 sets that survived their fetch. Only called
   // once we're sure we won't retry (cold-start, no-candidates, or after a clean
@@ -297,6 +471,9 @@ export async function checkAnthropic(watcher: Watcher, telemetry?: HaikuTelemetr
     for (const f of tier2.fresh) {
       try {
         await setWatcherSnapshot(watcher.id, f.key, f.urls);
+        // Atomic with the advance: any source whose baseline moved forward is healthy, so
+        // its skip streak is over. A null value deletes the row (see setWatcherSnapshot).
+        if (f.clearGuard) await setWatcherSnapshot(watcher.id, snapGuardKey(f.key), null);
       } catch (err) {
         log.error("Failed to persist Tier-2 snapshot {key}: {error}", {
           key: f.key,
@@ -514,6 +691,19 @@ function toFeedCandidate(e: AtomEntry): Candidate {
 
 // --- Tier-2: snapshot-and-diff of the feed-less surfaces ---
 
+/** One source's advanced baseline, plus whether its guard record should be cleared. */
+interface Tier2Fresh {
+  key: string;
+  urls: string[];
+  /**
+   * Set when a guard record exists for this source. Pushed through `fresh` — rather than
+   * cleared inline in `fetchTier2` — so the reset and the baseline advance land ATOMICALLY
+   * in `persistTier2`. Clearing inline would let a gate timeout on the accepting run reset
+   * the wait, and the source could then never heal under a persistently failing gate.
+   */
+  clearGuard?: boolean;
+}
+
 interface Tier2Source {
   key: string;
   sourceLabel: string;
@@ -549,9 +739,11 @@ function buildTier2Sources(config: AnthropicConfig): Tier2Source[] {
 async function fetchTier2(
   config: AnthropicConfig,
   watcherId: string,
-): Promise<{ candidates: Candidate[]; fresh: { key: string; urls: string[] }[] }> {
+  /** Per-source addition cap, or null on the digest/plain paths (never capped there). */
+  burstCap: number | null,
+): Promise<{ candidates: Candidate[]; fresh: Tier2Fresh[] }> {
   const candidates: Candidate[] = [];
-  const fresh: { key: string; urls: string[] }[] = [];
+  const fresh: Tier2Fresh[] = [];
 
   for (const src of buildTier2Sources(config)) {
     try {
@@ -563,35 +755,132 @@ async function fetchTier2(
       const snap = await getWatcherSnapshot(watcherId, src.key);
       const prior = Array.isArray(snap) ? (snap as string[]) : null;
 
-      // Guard against a poisoned baseline. A 200 with an empty/garbage body (JS
-      // challenge, truncated transfer) parses to 0 — or far fewer — URLs. If we
-      // baselined/advanced to that, the next healthy fetch would diff against it
-      // and flood the gate with the entire set as "new" (a ~1753-item burst for
-      // llms.txt). Skip the source instead — don't diff, don't persist — so it
-      // retries next run against the real set. A legitimate large removal also
-      // gets skipped, which only delays recording it (removals never alert).
-      if (freshUrls.length === 0 || (prior && prior.length > 0 && freshUrls.length < prior.length / 2)) {
-        log.warn("Tier-2 {key}: suspicious fetch ({n} urls vs baseline {b}) — skipping, snapshot left as-is", {
+      // The guard record is read on EVERY run, not just shrunken ones: a stale
+      // `consecutiveSkips: 2` surviving an arbitrary number of healthy runs would let
+      // the next shrink self-heal after a single skip, defeating both bounds.
+      //
+      // KNOWN RESIDUAL (accepted): only a run that reaches `persistTier2` clears it, and
+      // gate/digest failures return before that. So under a PERSISTENTLY failing gate a
+      // stale streak can survive healthy runs and let a later shrink heal in ~2 skips
+      // instead of a fresh 24h/3-skip window. The alternative — clearing inline here — is
+      // worse: it lets a gate timeout on the accepting run reset the accrued wait, so a
+      // source could never heal at all while the gate is broken. Bounded either way by
+      // the stability test, which still has to hold across those runs.
+      const guardSnap = await getWatcherSnapshot(watcherId, snapGuardKey(src.key));
+      const guard = isGuardRecord(guardSnap) ? guardSnap : null;
+
+      // Layer B — the ratio guard, now bounded. A 200 with an empty/garbage body parses
+      // to 0 (or far fewer) URLs; baselining to that would flood the gate with the whole
+      // set as "new" on the next healthy fetch. But a SUSTAINED, content-stable,
+      // removal-dominated shrink is a legitimate upstream change and must self-heal —
+      // before this, 53 consecutive skips carried exactly as much information as one and
+      // the source stayed silently dead for six days.
+      const suspicious =
+        freshUrls.length === 0 || (prior != null && prior.length > 0 && freshUrls.length < prior.length / 2);
+      if (suspicious) {
+        // An empty parse is never a legitimate shrink — it can't be content-stable
+        // against anything meaningful, and Layer A already rejects the responses that
+        // produce it. Keep today's unconditional skip, and don't let it accrue state.
+        if (freshUrls.length === 0 || prior == null) {
+          log.warn("Tier-2 {key}: suspicious fetch ({n} urls vs baseline {b}) — skipping, snapshot left as-is", {
+            key: src.key,
+            n: freshUrls.length,
+            b: prior?.length ?? 0,
+          });
+          continue;
+        }
+
+        // Advance the counter FIRST, then re-evaluate the accept predicate from scratch.
+        // Content stability is measured against the PREVIOUS shrunken sample; a flapping
+        // source resets the streak and can therefore never age into acceptance.
+        const now = Date.now();
+        const stable =
+          guard != null && jaccard(new Set(guard.lastSample), new Set(freshUrls)) >= GUARD_STABILITY_JACCARD;
+        const updated: Tier2GuardRecord = {
+          consecutiveSkips: stable ? guard!.consecutiveSkips + 1 : 1,
+          firstSkipAt: stable ? guard!.firstSkipAt : now,
+          lastSample: freshUrls,
+        };
+
+        const verdict = shouldAcceptShrink({
+          prior,
+          fresh: freshUrls,
+          record: updated,
+          previousSample: guard?.lastSample ?? [],
+          now,
+        });
+
+        if (!verdict.accept) {
+          log.warn(
+            "Tier-2 {key}: suspicious fetch ({n} urls vs baseline {b}) — skipping (skip {skips}, {reason})",
+            { key: src.key, n: freshUrls.length, b: prior.length, skips: updated.consecutiveSkips, reason: verdict.reason },
+          );
+          // Written eagerly here, NOT via persistTier2 — that runs only after a clean
+          // gate/digest pass, which a skipped source never reaches. Best-effort: failing
+          // to record the counter must not take the whole run down.
+          try {
+            await setWatcherSnapshot(watcherId, snapGuardKey(src.key), updated);
+          } catch (err) {
+            log.error("Tier-2 {key}: failed to persist guard record: {error}", {
+              key: src.key,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+          continue;
+        }
+
+        log.warn("Tier-2 {key}: accepting shrunken fetch ({n} urls vs baseline {b}) — {reason}", {
           key: src.key,
           n: freshUrls.length,
-          b: prior?.length ?? 0,
+          b: prior.length,
+          reason: verdict.reason,
         });
-        continue;
+        // Fall through to the normal diff/persist path. The persist rule below
+        // (`fresh \ carried`) is what keeps this from re-wedging: persisting
+        // `prior ∪ emitted` on a shrink would keep every removed URL, make the baseline
+        // LARGER, and re-trip the ratio guard next run against a baseline that can only
+        // grow — a permanent wedge reached through the fix.
       }
 
+      let carried: string[] = [];
       if (prior == null) {
         // Cold start for this source: baseline silently, no candidates.
         log.info("Tier-2 {key}: cold-start baseline of {n} url(s) (silent)", { key: src.key, n: freshUrls.length });
       } else {
         const seen = new Set(prior);
+        const additions: Candidate[] = [];
         for (const [url, label] of freshMap) {
           if (!seen.has(url)) {
-            candidates.push({ id: `an:${url}`, sourceLabel: src.sourceLabel, label, url });
+            additions.push({ id: `an:${url}`, sourceLabel: src.sourceLabel, label, url });
           }
         }
+        // Burst cap (gate path only). The remainder is carried by being WITHHELD from the
+        // persisted snapshot, so it re-diffs next run instead of re-forming an oversized
+        // single Haiku prompt every run.
+        if (burstCap != null && additions.length > burstCap) {
+          carried = additions.slice(burstCap).map((c) => c.url);
+          log.warn("Tier-2 {key}: {n} additions exceed the gate cap ({cap}) — carrying {carried} to the next run", {
+            key: src.key,
+            n: additions.length,
+            cap: burstCap,
+            carried: carried.length,
+          });
+          additions.length = burstCap;
+        }
+        candidates.push(...additions);
       }
-      // Advance the snapshot: baseline on cold start, otherwise the new full set.
-      fresh.push({ key: src.key, urls: freshUrls });
+
+      // THE persist rule: `fresh \ carried`. Never `prior ∪ emitted` (see the shrink
+      // note above), and never the intersection (a Phase-1-only device — it would leave
+      // the just-emitted URLs outside the baseline so they re-diff next run).
+      const carriedSet = new Set(carried);
+      fresh.push({
+        key: src.key,
+        urls: carried.length > 0 ? freshUrls.filter((u) => !carriedSet.has(u)) : freshUrls,
+        // Only ask for a clear when there is something to clear — otherwise every healthy
+        // run would write a delete for a key that never existed.
+        ...(guard != null ? { clearGuard: true } : {}),
+      });
     } catch (err) {
       log.error("Tier-2 fetch/parse failed for {key}: {error}", {
         key: src.key,
@@ -603,12 +892,76 @@ async function fetchTier2(
   return { candidates, fresh };
 }
 
+/**
+ * Layer A — stateless response validity, the PRIMARY defence. The two threat models the
+ * shrink guard names (a JS challenge, a truncated transfer) are directly detectable on
+ * the response itself, without any comparison against history; inferring "is this broken?"
+ * from a size ratio is what let a legitimate 72% shrink disable the source for six days.
+ *
+ * A rejection here throws, so `fetchTier2`'s existing per-source catch treats it as a
+ * FETCH ERROR: the source is skipped, its snapshot is untouched, and — load-bearing — the
+ * Layer-B skip counter is NOT advanced, because a broken response is not evidence of a
+ * sustained upstream change.
+ */
+function assertValidTextResponse(
+  res: Response,
+  body: string,
+  url: string,
+  opts: { minBytes: number; rejectHtml?: boolean; checkTruncation?: boolean },
+): void {
+  const ctype = (res.headers.get("content-type") ?? "").toLowerCase();
+  if (!ctype.startsWith("text/")) {
+    throw new Error(`non-text content-type "${ctype || "(none)"}" for ${url}`);
+  }
+  if (opts.rejectHtml && ctype.startsWith("text/html")) {
+    throw new Error(`unexpected HTML content-type for ${url} (challenge or error page?)`);
+  }
+  const bytes = Buffer.byteLength(body, "utf8");
+  if (bytes < opts.minBytes) {
+    throw new Error(`body too small (${bytes} < ${opts.minBytes} bytes) for ${url}`);
+  }
+  // MARKDOWN SOURCES ONLY. The predicate is a markdown heuristic and must never run over
+  // the blog listings: those are ~150–420 KB Next.js RSC payloads whose trailing script
+  // chunk is full of `[`/`]` inside JSON strings (measured today: the last `[` sits ~30
+  // bytes before the last `]` on all three sections). One unbalanced bracket in that tail
+  // would flip the section into a permanent stateless wedge with no counter and no
+  // self-heal — precisely the failure class Layer A exists to prevent. It also buys
+  // nothing there: `parseBlogSlugs` reads `href="…"` and never consumes markdown links.
+  if (opts.checkTruncation && isTruncatedMarkup(body)) {
+    throw new Error(`body ends mid-link (truncated transfer?) for ${url}`);
+  }
+}
+
+/**
+ * Truncation predicate: an UNTERMINATED `[…](…` fragment at the end of the body.
+ *
+ * ⚠️ Deliberately NOT "the last line must parse as a markdown list item". The real
+ * `llms.txt` ends in PROSE — `For more comprehensive documentation, see
+ * [llms-full.txt](https://platform.claude.com/llms-full.txt)` — so a tail-shape check
+ * would reject every healthy fetch forever, wedging the source permanently and
+ * deterministically. Only an unclosed link is evidence the stream was cut.
+ */
+export function isTruncatedMarkup(body: string): boolean {
+  const lastLinkOpen = body.lastIndexOf("](");
+  if (lastLinkOpen !== -1 && body.lastIndexOf(")") < lastLinkOpen) return true;
+  const lastBracketOpen = body.lastIndexOf("[");
+  return lastBracketOpen !== -1 && body.lastIndexOf("]") < lastBracketOpen;
+}
+
 async function fetchLlmsTxtDocs(url: string): Promise<Map<string, string>> {
   const res = await fetch(url, {
     headers: { "User-Agent": "muninn-anthropic-watcher", Accept: "text/plain, text/markdown, */*" },
   });
   if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
-  return parseLlmsTxtDocs(await res.text());
+  const body = await res.text();
+  assertValidTextResponse(res, body, url, {
+    minBytes: LLMS_MIN_BODY_BYTES,
+    rejectHtml: true,
+    checkTruncation: true,
+  });
+  const docs = parseLlmsTxtDocs(body);
+  if (docs.size === 0) throw new Error(`body parsed to zero doc links for ${url}`);
+  return docs;
 }
 
 async function fetchBlogSlugs(section: string): Promise<Map<string, string>> {
@@ -617,7 +970,12 @@ async function fetchBlogSlugs(section: string): Promise<Map<string, string>> {
     headers: { "User-Agent": "muninn-anthropic-watcher", Accept: "text/html, */*" },
   });
   if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
-  return parseBlogSlugs(await res.text(), section);
+  const body = await res.text();
+  // No zero-link throw here: `fetchTier2`'s pre-existing `freshUrls.length === 0` branch
+  // already skips an empty blog listing, and `anthropic.test.ts` pins that it is skipped
+  // rather than baselined. The byte floor + content-type are the new part.
+  assertValidTextResponse(res, body, url, { minBytes: BLOG_MIN_BODY_BYTES });
+  return parseBlogSlugs(body, section);
 }
 
 /**
