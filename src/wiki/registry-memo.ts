@@ -24,3 +24,10 @@ export function getWikiRegistry(): WikiRegistryEntry[] {
 export function __resetWikiRegistryForTest(): void {
   cachedRegistry = null;
 }
+
+/** Test-only: pin a fabricated registry so a route test can exercise a BOT wiki
+ *  without real bot discovery (`WIKI_EXTRA` can only register standalone wikis).
+ *  Cleared by {@link __resetWikiRegistryForTest}. */
+export function __setWikiRegistryForTest(entries: WikiRegistryEntry[]): void {
+  cachedRegistry = entries;
+}

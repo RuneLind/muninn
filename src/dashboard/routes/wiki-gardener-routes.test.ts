@@ -7,13 +7,16 @@ import {
   registerWikiGardenerRoutes,
   computeIngestBacklogResponse,
   computeBacklogFloorCounts,
+  backlogDocLabel,
+  sortBacklogDocsNewestFirst,
   getIngestBacklogCached,
   mergeBacklogLiveFields,
   __resetIngestBacklogCacheForTest,
+  __setBotsForTest,
   type IngestBacklogDeps,
   type IngestBacklogResponse,
 } from "./wiki-gardener-routes.ts";
-import { __resetWikiRegistryForTest } from "../../wiki/registry-memo.ts";
+import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki/registry-memo.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
 import { computeWatcherNextRun } from "../agents-overview.ts";
 import type { Watcher } from "../../types.ts";
@@ -351,7 +354,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       remaining: 2,
       offeredStillQueued: 0,
       fresh: 3,
-      freshBySource: [{ label: "YouTube", count: 3 }],
+      freshBySource: [{ label: "YouTube", count: 3, collection: "youtube-summaries" }],
       freshWindowDays: 14,
       minClusterSize: 3,
       lastBacklogRun: null,
@@ -497,6 +500,214 @@ describe("computeBacklogFloorCounts — route age-floor branch", () => {
     ];
     const { remaining } = computeBacklogFloorCounts(queuedKeys, new Set<string>(), MIN_AGE_DAYS, NOW);
     expect(remaining).toBe(1); // only the old-prefixed doc
+  });
+
+  /**
+   * The backlog inspector's per-doc list rides on the SAME single pass as the
+   * counts, so a count and its bucket membership can never disagree.
+   */
+  test("emits the classified doc list alongside the counts (buckets match the counts exactly)", () => {
+    const queuedKeys = [
+      { key: "youtube-summaries/2026-07-16-a", id: "2026-07-16-a", collection: "youtube-summaries", date: "2026-07-16", url: "https://youtu.be/a" }, // fresh
+      { key: "youtube-summaries/2026-06-01-b", id: "2026-06-01-b", collection: "youtube-summaries", date: "2026-06-01" }, // drainable
+      { key: "x-articles/2026-05-01-c", id: "2026-05-01-c", collection: "x-articles", date: "2026-05-01" }, // offered
+    ];
+    const offered = new Set(["x-articles/2026-05-01-c"]);
+    const { remaining, offeredStillQueued, freshByCollection, docs } = computeBacklogFloorCounts(
+      queuedKeys,
+      offered,
+      MIN_AGE_DAYS,
+      NOW,
+    );
+    expect(remaining).toBe(1);
+    expect(offeredStillQueued).toBe(1);
+    expect(freshByCollection).toEqual({ "youtube-summaries": 1 });
+    expect(docs.map((d) => d.bucket)).toEqual(["fresh", "drainable", "offered"]);
+    // Bucket membership adds up to the counts it was derived from.
+    expect(docs.filter((d) => d.bucket === "drainable").length).toBe(remaining);
+    expect(docs.filter((d) => d.bucket === "offered").length).toBe(offeredStillQueued);
+    // The url rides through from the listing for the row's "open ↗" link; a
+    // url-less doc simply omits it (never a bogus empty string).
+    expect(docs[0]!.url).toBe("https://youtu.be/a");
+    expect(docs[1]!.url).toBeUndefined();
+    expect(docs[0]!.label).toBe("2026-07-16-a");
+  });
+});
+
+describe("backlogDocLabel + sortBacklogDocsNewestFirst — inspector row shaping", () => {
+  test("label is the id basename with the extension stripped (huginn carries no title)", () => {
+    expect(backlogDocLabel("career/Why 2026 Is the Year.md")).toBe("Why 2026 Is the Year");
+    expect(backlogDocLabel("plain-id")).toBe("plain-id");
+    expect(backlogDocLabel("a/b/c.mdx")).toBe("c");
+    // A dotfile-ish basename keeps its name rather than collapsing to empty.
+    expect(backlogDocLabel(".hidden")).toBe(".hidden");
+    expect(backlogDocLabel("")).toBe("");
+  });
+
+  test("newest-first, undated last, input array untouched", () => {
+    const docs = [
+      { collection: "c", id: "b", label: "b", bucket: "fresh" as const, date: "2026-01-01" },
+      { collection: "c", id: "u", label: "u", bucket: "fresh" as const },
+      { collection: "c", id: "a", label: "a", bucket: "fresh" as const, date: "2026-06-01" },
+    ];
+    const sorted = sortBacklogDocsNewestFirst(docs);
+    expect(sorted.map((d) => d.id)).toEqual(["a", "b", "u"]);
+    expect(docs.map((d) => d.id)).toEqual(["b", "u", "a"]); // copy, not in place
+  });
+});
+
+describe("docs=1 opt-in — the count-only default payload is unchanged", () => {
+  const cachedDocs: IngestBacklogResponse = {
+    byCollection: [],
+    total: 2,
+    ingested: 0,
+    queued: 2,
+    wikiUrlCount: 0,
+    generatedAt: 5,
+    queuedKeys: [{ key: "c/a", id: "a", collection: "c", url: "https://example.com/a" }],
+  };
+  const live = {
+    running: false,
+    offered: 0,
+    remaining: 1,
+    offeredStillQueued: 0,
+    fresh: 0,
+    freshBySource: [],
+    freshWindowDays: 14,
+    minClusterSize: 3,
+    lastBacklogRun: null,
+    weeklyRun: null,
+    watcherSeeded: true,
+    gardenerEnabled: true,
+    progress: null,
+  };
+
+  test("no docs field without the opt-in; present (and never the raw queuedKeys) with it", () => {
+    const plain = mergeBacklogLiveFields(cachedDocs, live);
+    expect("docs" in plain).toBe(false);
+    expect("queuedKeys" in plain).toBe(false);
+
+    const withDocs = mergeBacklogLiveFields(cachedDocs, {
+      ...live,
+      docs: [{ collection: "c", id: "a", label: "a", bucket: "drainable", url: "https://example.com/a" }],
+    });
+    expect("queuedKeys" in withDocs).toBe(false);
+    expect(withDocs.docs).toEqual([
+      { collection: "c", id: "a", label: "a", bucket: "drainable", url: "https://example.com/a" },
+    ]);
+    // Every other field is byte-identical to the count-only payload.
+    const { docs: _drop, ...rest } = withDocs as Record<string, unknown>;
+    expect(rest).toEqual(plain);
+  });
+
+  test("withDocs=false skips building the doc list; the counts are identical", () => {
+    const queuedKeys = [
+      { key: "c/2026-01-01-a", id: "2026-01-01-a", collection: "c" },
+      { key: "c/2026-06-01-b", id: "2026-06-01-b", collection: "c" },
+    ];
+    const now = Date.parse("2026-07-17T00:00:00Z");
+    const withDocs = computeBacklogFloorCounts(queuedKeys, new Set<string>(), 7, now, true);
+    const countsOnly = computeBacklogFloorCounts(queuedKeys, new Set<string>(), 7, now, false);
+    expect(countsOnly.docs).toEqual([]);
+    expect(countsOnly.remaining).toBe(withDocs.remaining);
+    expect(countsOnly.offeredStillQueued).toBe(withDocs.offeredStillQueued);
+    expect(countsOnly.freshByCollection).toEqual(withDocs.freshByCollection);
+  });
+});
+
+/**
+ * Route-level integration through `registerWikiGardenerRoutes` — the whole GET
+ * handler (resolution → cached compute → live merge → wire), not just the pure
+ * helpers. A fabricated bot + registry (test-only pins) stands in for real bot
+ * discovery, huginn listings come from a stubbed `fetch`, and the backlog deps are
+ * injected, so nothing here touches the DB, huginn, or the real `bots/` folder.
+ */
+describe("GET /api/wiki/ingest-backlog — docs=1 through the route", () => {
+  let root: string;
+  let app: Hono;
+  let origFetch: typeof fetch;
+
+  /** Two YouTube docs: one with an explicit date, one dated only by its id prefix. */
+  const listings: Record<string, Array<{ id: string; url?: string; date?: string }>> = {
+    "youtube-summaries": [
+      // Explicit date, OLDER than the prefix-dated doc below.
+      { id: "old-doc.md", url: "https://youtu.be/old", date: "2020-01-01" },
+      // No `date` field — its date lives in the id prefix (the docDateMs fallback).
+      { id: "2026-01-05-prefixed.md", url: "https://youtu.be/pre" },
+    ],
+    "x-articles": [],
+    "anthropic-summaries": [],
+    "tiktok-summaries": [],
+    "article-summaries": [],
+  };
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-inspector-route-"));
+    await Bun.write(path.join(root, "notes.md"), "# Notes\nNothing cited here.\n");
+    origFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const m = String(input).match(/\/api\/collection\/([^/]+)\/documents/);
+      const collection = m ? m[1]! : "";
+      return new Response(JSON.stringify({ documents: listings[collection] ?? [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    __setBotsForTest([
+      { name: "inspectorbot", dir: root, persona: "", telegramAllowedUserIds: [], slackAllowedUserIds: [], wikiDir: root },
+    ] as unknown as Parameters<typeof __setBotsForTest>[0]);
+    __setWikiRegistryForTest([{ name: "inspectorbot", root, source: "bot" }]);
+    __resetWikiCacheForTest();
+    __resetIngestBacklogCacheForTest();
+
+    app = new Hono();
+    // No watcher seeded ⇒ empty offered set; no snapshots, no proposals.
+    registerWikiGardenerRoutes(app, {
+      getConsumed: async () => new Set<string>(),
+      getPending: async () => new Set<string>(),
+      getWikiGardenerWatcher: async () => null,
+      getSnapshot: async () => null,
+      setSnapshot: async () => {},
+      listProposals: async () => [],
+    });
+  });
+
+  afterEach(async () => {
+    globalThis.fetch = origFetch;
+    __setBotsForTest(null);
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    __resetIngestBacklogCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("no docs field without the opt-in", async () => {
+    const res = await app.request("/api/wiki/ingest-backlog?wiki=inspectorbot");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBeUndefined();
+    expect(body.queued).toBe(2);
+    expect("docs" in body).toBe(false);
+    expect("queuedKeys" in body).toBe(false);
+  });
+
+  test("docs=1 returns the classified list, ordered by the SAME date the drain selects by", async () => {
+    const res = await app.request("/api/wiki/ingest-backlog?wiki=inspectorbot&docs=1");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      docs?: { id: string; label: string; bucket: string; date?: string }[];
+    };
+    expect(body.docs).toBeDefined();
+    expect(body.docs!.length).toBe(2);
+    // Both are years old ⇒ past the age floor ⇒ drainable; labels are the stripped basenames.
+    expect(body.docs!.map((d) => d.bucket)).toEqual(["drainable", "drainable"]);
+    // The id-prefix-dated doc is NEWER than the explicitly-dated one, so it sorts
+    // FIRST and renders its prefix date — the pre-fix behaviour sank it to the
+    // bottom with a "—" date although the drain would take it first.
+    expect(body.docs!.map((d) => d.label)).toEqual(["2026-01-05-prefixed", "old-doc"]);
+    expect(body.docs![0]!.date).toBe("2026-01-05");
+    expect(body.docs![1]!.date).toBe("2020-01-01");
   });
 });
 
