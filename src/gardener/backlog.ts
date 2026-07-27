@@ -66,6 +66,12 @@ export const WIKI_GARDENER_RUN_KEY = "backlog:run";
  * that partition is TTL-cached 5 minutes, feeds three other callers, and its
  * `total === ingested + queued` invariant is tested. Dismissal is a live, per-request
  * overlay — exactly like the offered set.
+ *
+ * **`scripts/retire-backlog-tail.ts` deliberately does NOT read this set.** Retire
+ * writes the OFFERED set (census semantics: "a run has accounted for this", and
+ * `Reset offered` un-retires it); dismissed is the never-select store, which nothing
+ * resets implicitly. Folding retire onto the dismissed set is deferred past v1 —
+ * don't "fix" the asymmetry without deciding what Reset offered should then mean.
  */
 export const WIKI_GARDENER_DISMISSED_KEY = "backlog:dismissed";
 /**

@@ -237,6 +237,19 @@ export async function renderWikiGardenerPage(opts?: {
     .gard-backlog .bk-doc-open { color: var(--status-info); text-decoration: none; font-size: 11.5px; white-space: nowrap; }
     .gard-backlog .bk-doc-open:hover { text-decoration: underline; }
     .gard-backlog .bk-inspector-note { color: var(--text-muted); font-size: 12px; padding: 6px 0; }
+    /* Sticky prune notice — survives the refetch every prune verb triggers. */
+    .gard-backlog .bk-inspector-notice {
+      font-size: 12px; padding: 6px 9px; margin: 6px 0; border-radius: 6px;
+      border-left: 3px solid var(--border-secondary);
+    }
+    .gard-backlog .bk-inspector-notice.bk-err {
+      color: var(--status-error); border-left-color: var(--status-error);
+      background: color-mix(in srgb, var(--status-error) 10%, transparent);
+    }
+    .gard-backlog .bk-inspector-notice.bk-info {
+      color: var(--text-secondary); border-left-color: var(--status-info);
+      background: color-mix(in srgb, var(--status-info) 10%, transparent);
+    }
     .gard-backlog .bk-inspector-foot { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
     .gard-backlog .gard-btn.bk-inspector-more {
       background: transparent; border: 1px solid var(--border-secondary); color: var(--text-secondary);

@@ -865,6 +865,10 @@ NOT the raw all-time `offered` · **drafts awaiting review** = client-side count
   `backlog:offered`. Edited from the `/wiki/gardener` backlog inspector — see the
   `wiki-gardener-routes.ts` row in `src/dashboard/CLAUDE.md` for the routes, guards,
   counter layering, and the huginn DELETE proxy that pairs with it.
+  **`scripts/retire-backlog-tail.ts` stays on the OFFERED set by design** (census
+  semantics — "a run has accounted for this", and `Reset offered` un-retires it);
+  dismissed is the never-select store that nothing resets implicitly. Folding retire
+  onto the dismissed set is deferred past v1.
 - **Per-bot gardener mutex** (`runExclusive`): acquired by BOTH the backlog run and
   `checkWikiGardener`. A second backlog click while running returns `{state:"running"}`;
   a weekly fire during a backlog run returns `[]` (logged) — the runner still advances

@@ -142,6 +142,15 @@ export interface IngestBacklogResponse {
   offeredStillQueued?: number;
   /** Queued docs a human DISMISSED — the fourth bucket (absent/older server ⇒ 0). */
   dismissed?: number;
+  /**
+   * Per-collection breakdown of {@link dismissed} (always present alongside it on a
+   * live response; absent ⇒ {} ⇒ every actionable affordance reads exactly as it did
+   * before). The ACTIONABLE affordances ("Backfill oldest" + its `<select>` counts,
+   * `nothingDrainable`) subtract it from the cached per-collection `queued`, which is
+   * a FOOTPRINT number and therefore still counts dismissed docs — see the coverage
+   * note on {@link backlogTailHtml} for why the two readings differ on purpose.
+   */
+  dismissedByCollection?: Record<string, number>;
   /** Queued docs still inside the weekly watcher's window — the "new arrivals" lead. */
   fresh?: number;
   /**
@@ -209,6 +218,22 @@ export interface BacklogDoc {
 }
 
 /**
+ * A STICKY prune notice — the outcome of the last dismiss/delete action.
+ *
+ * Deliberately separate from {@link BacklogInspectorState.error} (the doc-FETCH
+ * error), because every prune verb ends in a refetch and `loadInspectorDocs`
+ * nulls `error` on success: a 409 "gardener run in flight", a 404, or the honest
+ * "deleted — but a reindex was already running" note would be wiped within a frame
+ * if it rode that field. The notice is cleared only by the NEXT user action
+ * (a prune click, a bucket/collection filter change, a panel toggle).
+ */
+export interface BacklogInspectorNotice {
+  text: string;
+  /** `err` renders in the error palette; `info` is an honest-but-not-failed note. */
+  kind: "err" | "info";
+}
+
+/**
  * The inspector panel's module-level state. Lives OUTSIDE the strip's DOM (the
  * drain poller replaces the strip's innerHTML every 3s, which would otherwise
  * slam the panel shut — the same footgun the tail `<details>` open-state guards
@@ -222,6 +247,8 @@ export interface BacklogInspectorState {
   collection: string;
   loading: boolean;
   error: string | null;
+  /** Sticky prune outcome — survives a successful refetch. See {@link BacklogInspectorNotice}. */
+  notice: BacklogInspectorNotice | null;
   /** Null until the first lazy fetch resolves. */
   docs: BacklogDoc[] | null;
   /** How many filtered rows to render (paging guard for tail-heavy bots). */
@@ -246,6 +273,7 @@ export function initialInspectorState(): BacklogInspectorState {
     collection: "",
     loading: false,
     error: null,
+    notice: null,
     docs: null,
     limit: INSPECTOR_PAGE_SIZE,
     removing: [],
@@ -418,8 +446,21 @@ export function backlogStripModel(
       count: s.count,
       ...(typeof s.collection === "string" && s.collection ? { collection: s.collection } : {}),
     }));
+  // Per-collection dismissed counts — the ACTIONABLE affordances subtract them from
+  // the cached (footprint) `queued`. A malformed/absent map degrades to {} ⇒ no
+  // subtraction ⇒ exactly the pre-fix behaviour.
+  const dismissedByCollection: Record<string, number> =
+    data.dismissedByCollection && typeof data.dismissedByCollection === "object"
+      ? data.dismissedByCollection
+      : {};
+  const dismissedIn = (collection: string): number =>
+    Math.max(0, numOr(dismissedByCollection[collection], 0));
   const running = data.running === true;
   const controlHidden = data.watcherSeeded === false;
+  // Prune affordances need a POSITIVELY seeded watcher: the dismissed snapshot is
+  // keyed by the watcher id, so a degraded/older server that omits `watcherSeeded`
+  // must NOT render buttons that would 404 (`!controlHidden` treated absent as true).
+  const watcherSeeded = data.watcherSeeded === true;
   const batchSize = numOr(data.batchSize, 0);
   const maxProposals = numOr(data.maxProposals, 0);
   // Watcher affordance (fresh segment). Only an ENABLED watcher offers a next-run
@@ -443,14 +484,17 @@ export function backlogStripModel(
     total: Math.max(0, numOr(c.total, 0)),
     collection: typeof c.collection === "string" ? c.collection : "",
   }));
-  // Source-draft select options: one per reported collection, its queued count as
-  // the label. The button is offered when ANY collection has uncovered docs; the
-  // pre-selected collection is the one with the largest queue (the client can pick
-  // another and the button re-gates on that collection's count).
+  // Source-draft select options: one per reported collection, its ACTIONABLE queued
+  // count as the label — the cached per-collection `queued` MINUS that collection's
+  // dismissed docs (floored at 0). Without the subtraction, dismissing every doc in a
+  // collection left "Backfill oldest" enabled and mislabeled against a queue the
+  // drafter would refuse. The button is offered when ANY collection has actionable
+  // uncovered docs; the pre-selected collection is the one with the largest such
+  // queue (the client can pick another and the button re-gates on that count).
   const sourceDraftOptions = perSource.map((s) => ({
     collection: s.collection,
     label: s.label,
-    queued: s.queued,
+    queued: Math.max(0, s.queued - dismissedIn(s.collection)),
   }));
   const sourceDraftDefaultCollection = sourceDraftOptions.length
     ? sourceDraftOptions.reduce((best, o) => (o.queued > best.queued ? o : best)).collection
@@ -479,12 +523,18 @@ export function backlogStripModel(
     // gating on `offered > 0` could render "Reset offered (0)" once every offered
     // key is consumed, where a reset would be a no-op anyway.
     showReset: !controlHidden && !running && offeredStillQueued > 0,
-    showDismissReset: !controlHidden && !running && dismissedCount > 0,
-    // The prune verbs need the watcher (dismissed snapshot FK) — same gate as Reset.
+    showDismissReset: watcherSeeded && !running && dismissedCount > 0,
+    // The prune verbs need the watcher (dismissed snapshot FK) — same gate as Reset,
+    // but requiring `watcherSeeded === true` explicitly (finding 8: an ABSENT field on
+    // a degraded server must not enable buttons whose routes 404).
     // Deliberately NOT gated on `running`: the routes 409 cleanly under the mutex and
     // the panel is a reading surface, so the buttons stay visible mid-drain.
-    pruneEnabled: !controlHidden,
-    nothingDrainable: !controlHidden && !running && remaining <= 0 && queued > 0,
+    pruneEnabled: watcherSeeded,
+    // "nothing drainable" is an ACTIONABLE statement, so the queued side subtracts the
+    // dismissed docs: with every queued doc dismissed there is no queue to speak of and
+    // the note would be a non-sequitur.
+    nothingDrainable:
+      !controlHidden && !running && remaining <= 0 && queued - dismissedCount > 0,
     batchSize,
     maxProposals,
     drainNow: Math.max(0, Math.min(batchSize, remaining)),
@@ -1237,6 +1287,15 @@ export function backlogInspectorHtml(
     'aria-label="Close the backlog inspector">✕</button>' +
     "</div>";
 
+  // The STICKY prune notice (finding 1) — rendered above the rows and NOT cleared by
+  // a successful refetch, so a 409/404/400 or the honest skipped-reindex note survives
+  // the `loadInspectorDocs` that every prune verb triggers. Distinct from `error`
+  // (the doc-fetch failure) in both field and styling.
+  const noticeHtml = state.notice
+    ? `<div class="bk-inspector-notice ${state.notice.kind === "err" ? "bk-err" : "bk-info"}" ` +
+      `role="status">${esc(state.notice.text)}</div>`
+    : "";
+
   let body: string;
   let footer = "";
   // A failed refresh must NOT wipe rows the user is reading: with docs already
@@ -1279,5 +1338,5 @@ export function backlogInspectorHtml(
         "</div>";
     }
   }
-  return `<div class="bk-inspector">${head}${body}${footer}</div>`;
+  return `<div class="bk-inspector">${head}${noticeHtml}${body}${footer}</div>`;
 }

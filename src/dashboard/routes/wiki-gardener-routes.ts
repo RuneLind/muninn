@@ -340,6 +340,15 @@ export interface BacklogLiveFields {
    */
   dismissed: number;
   /**
+   * Per-collection breakdown of `dismissed` — always present (empty object when
+   * nothing is dismissed). The strip's ACTIONABLE affordances ("Backfill oldest" +
+   * its `<select>` counts) subtract it from the cached per-collection `queued`, which
+   * is a FOOTPRINT number and keeps counting dismissed docs. Without it, dismissing a
+   * whole collection left the button enabled and mislabeled against a queue every
+   * selection seam already refuses.
+   */
+  dismissedByCollection: Record<string, number>;
+  /**
    * Queued docs still inside the weekly gardener's window (not offered, fails the
    * drain's age floor) — the "new arrivals" the strip leads with. These are the
    * weekly watcher's turf: the drain refuses them, so without this count they are
@@ -501,12 +510,15 @@ export function computeBacklogFloorCounts(
   remaining: number;
   offeredStillQueued: number;
   dismissed: number;
+  /** Per-collection share of `dismissed` — the actionable affordances' subtrahend. */
+  dismissedByCollection: Record<string, number>;
   freshByCollection: Record<string, number>;
   docs: BacklogDocRow[];
 } {
   let remaining = 0;
   let offeredStillQueued = 0;
   let dismissed = 0;
+  const dismissedByCollection: Record<string, number> = {};
   const freshByCollection: Record<string, number> = {};
   const docs: BacklogDocRow[] = [];
   for (const q of queuedKeys) {
@@ -514,6 +526,7 @@ export function computeBacklogFloorCounts(
     // Dismissed wins over offered — see the precedence note above.
     if (dismissedSet.has(q.key)) {
       dismissed++;
+      dismissedByCollection[q.collection] = (dismissedByCollection[q.collection] ?? 0) + 1;
       bucket = "dismissed";
     } else if (offeredSet.has(q.key)) {
       offeredStillQueued++;
@@ -539,7 +552,7 @@ export function computeBacklogFloorCounts(
       ...(q.url ? { url: q.url } : {}),
     });
   }
-  return { remaining, offeredStillQueued, dismissed, freshByCollection, docs };
+  return { remaining, offeredStillQueued, dismissed, dismissedByCollection, freshByCollection, docs };
 }
 
 /**
@@ -651,6 +664,19 @@ const DELETE_TIMEOUT_MS = 20_000;
  */
 const backlogCache = new Map<string, { data: IngestBacklogResponse; at: number }>();
 const backlogInFlight = new Map<string, Promise<IngestBacklogResponse>>();
+/**
+ * Per-bot invalidation generation. Bumped by {@link invalidateIngestBacklogCache};
+ * captured by a compute at START and re-read on settle. Without it a compute that had
+ * ALREADY read huginn's pre-delete listing would still `backlogCache.set` after the
+ * invalidation — re-poisoning the cache with the stale listing for the whole TTL — and
+ * its `.finally` would delete the NEWER in-flight promise out of the map. Both are
+ * empirically reproducible: the refresh a delete triggers races the poll's compute.
+ */
+const backlogGeneration = new Map<string, number>();
+
+function backlogGenerationOf(botName: string): number {
+  return backlogGeneration.get(botName) ?? 0;
+}
 
 /**
  * Drop one bot's cached backlog (and any in-flight computation started BEFORE the
@@ -665,12 +691,16 @@ const backlogInFlight = new Map<string, Promise<IngestBacklogResponse>>();
 export function invalidateIngestBacklogCache(botName: string): void {
   backlogCache.delete(botName);
   backlogInFlight.delete(botName);
+  // Fence every compute that started before this call: on settle it must neither
+  // re-cache its (now stale) payload nor evict a newer in-flight entry.
+  backlogGeneration.set(botName, backlogGenerationOf(botName) + 1);
 }
 
 /** Test-only: clear the backlog cache (and in-flight guard) between cases. */
 export function __resetIngestBacklogCacheForTest(): void {
   backlogCache.clear();
   backlogInFlight.clear();
+  backlogGeneration.clear();
 }
 
 /**
@@ -763,19 +793,29 @@ export async function getIngestBacklogCached(
 
   let inflight = backlogInFlight.get(botName);
   if (!inflight) {
-    inflight = computeIngestBacklogResponse(root, botName, deps).finally(() => {
-      backlogInFlight.delete(botName);
-    });
+    // Capture the invalidation generation at START. Both the cache write and the
+    // in-flight eviction below are conditional on it still being current, so a compute
+    // that read huginn BEFORE an invalidation can neither re-poison the cache nor
+    // evict the newer compute that replaced it.
+    const startedGen = backlogGenerationOf(botName);
+    inflight = (async () => {
+      try {
+        const data = await computeIngestBacklogResponse(root, botName, deps);
+        // Only cache fully-successful results — a degraded payload (a collection down)
+        // must not be served for the whole TTL once huginn recovers.
+        const stale = backlogGenerationOf(botName) !== startedGen;
+        if (!stale && (!data.errors || data.errors.length === 0)) {
+          backlogCache.set(botName, { data, at: Date.now() });
+        }
+        return data;
+      } finally {
+        if (backlogGenerationOf(botName) === startedGen) backlogInFlight.delete(botName);
+      }
+    })();
     backlogInFlight.set(botName, inflight);
   }
 
-  const data = await inflight;
-  // Only cache fully-successful results — a degraded payload (a collection down)
-  // must not be served for the whole TTL once huginn recovers.
-  if (!data.errors || data.errors.length === 0) {
-    backlogCache.set(botName, { data, at: Date.now() });
-  }
-  return data;
+  return await inflight;
 }
 
 /**
@@ -1113,7 +1153,7 @@ export function registerWikiGardenerRoutes(
       // nothing about offered/floor). Gated so the 3s drain poll never allocates
       // (or labels) a row per queued doc; the counts are identical either way.
       const wantDocs = c.req.query("docs") === "1";
-      const { remaining, offeredStillQueued, dismissed, freshByCollection, docs } =
+      const { remaining, offeredStillQueued, dismissed, dismissedByCollection, freshByCollection, docs } =
         computeBacklogFloorCounts(queuedKeys, offeredSet, minAgeDays, now, wantDocs, dismissedSet);
       // Per-source fresh breakdown in listing order, labels from the cached
       // byCollection rows (non-zero only — the wire stays compact).
@@ -1182,6 +1222,7 @@ export function registerWikiGardenerRoutes(
           remaining,
           offeredStillQueued,
           dismissed,
+          dismissedByCollection,
           fresh,
           freshBySource,
           freshWindowDays: minAgeDays,
@@ -1416,12 +1457,20 @@ export function registerWikiGardenerRoutes(
    * inspector's `<collection>/<id>`. Rejects a non-array / empty list and caps the
    * batch (the bulk affordance can select every filtered row).
    */
-  const parseDismissKeys = (body: unknown): string[] | null => {
+  const parseDismissKeys = (body: unknown): { keys: string[] } | { error: string } => {
     const raw = (body as { keys?: unknown })?.keys;
-    if (!Array.isArray(raw)) return null;
+    if (!Array.isArray(raw)) return { error: "expected a non-empty `keys` array of doc keys" };
     const keys = raw.filter((k): k is string => typeof k === "string" && k.length > 0);
-    if (!keys.length || keys.length > MAX_DISMISS_KEYS) return null;
-    return keys;
+    if (!keys.length) return { error: "expected a non-empty `keys` array of doc keys" };
+    // Distinct message: an over-cap batch is a DIFFERENT failure from a malformed
+    // body, and "expected a non-empty array" would send the caller hunting the wrong
+    // bug. The client chunks under the cap, so this is a fence, not a UX limit.
+    if (keys.length > MAX_DISMISS_KEYS) {
+      return {
+        error: `too many keys: ${keys.length} (max ${MAX_DISMISS_KEYS} per request — send them in chunks)`,
+      };
+    }
+    return { keys };
   };
 
   /**
@@ -1429,14 +1478,12 @@ export function registerWikiGardenerRoutes(
    * `wiki-gardener` watcher (the snapshot's FK — exactly the RESET route's 404), and
    * hold the per-bot gardener mutex (exactly the `backlog-recover` route's 409) so a
    * prune can't interleave with a drain's offered read/persist. Returns a Response on
-   * refusal, else the resolved `{ bot, root, watcher }`.
+   * refusal, else the resolved `{ bot, watcher }` (the wiki `root` is deliberately not
+   * returned — no prune verb touches the wiki on disk).
    */
   const resolvePruneTarget = async (
     c: Context,
-  ): Promise<
-    | { bot: BotConfig; root: string; watcher: GardenerWatcherRef }
-    | { refusal: Response }
-  > => {
+  ): Promise<{ bot: BotConfig; watcher: GardenerWatcherRef } | { refusal: Response }> => {
     const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
     if ("error" in resolved) {
       return { refusal: c.json({ error: resolved.error }, resolved.status) };
@@ -1445,7 +1492,7 @@ export function registerWikiGardenerRoutes(
     if (!watcher) {
       return { refusal: c.json({ error: "no wiki-gardener watcher seeded for this bot" }, 404) };
     }
-    return { bot: resolved.bot, root: resolved.root, watcher };
+    return { bot: resolved.bot, watcher };
   };
 
   /** Read-modify-write the dismissed snapshot under the mutex. `null` ⇒ 409. */
@@ -1469,8 +1516,9 @@ export function registerWikiGardenerRoutes(
     const target = await resolvePruneTarget(c);
     if ("refusal" in target) return target.refusal;
 
-    const keys = parseDismissKeys(await c.req.json().catch(() => null));
-    if (!keys) return c.json({ error: "expected a non-empty `keys` array of doc keys" }, 400);
+    const parsed = parseDismissKeys(await c.req.json().catch(() => null));
+    if ("error" in parsed) return c.json({ error: parsed.error }, 400);
+    const keys = parsed.keys;
 
     const run = mutateDismissed(target.bot.name, target.watcher.id, (current) => {
       for (const k of keys) current.add(k);
@@ -1492,11 +1540,11 @@ export function registerWikiGardenerRoutes(
     const target = await resolvePruneTarget(c);
     if ("refusal" in target) return target.refusal;
 
-    const keys = parseDismissKeys(await c.req.json().catch(() => null));
-    if (!keys) return c.json({ error: "expected a non-empty `keys` array of doc keys" }, 400);
+    const parsed = parseDismissKeys(await c.req.json().catch(() => null));
+    if ("error" in parsed) return c.json({ error: parsed.error }, 400);
 
     const run = mutateDismissed(target.bot.name, target.watcher.id, (current) => {
-      for (const k of keys) current.delete(k);
+      for (const k of parsed.keys) current.delete(k);
       return current;
     });
     if (run === null) return c.json({ error: "a gardener run is in flight" }, 409);
@@ -1553,15 +1601,17 @@ export function registerWikiGardenerRoutes(
       );
       // Prune the key from both live sets — the doc is gone, so an entry naming it
       // would linger forever (the sets are never garbage-collected against a listing).
-      for (const snapKey of [WIKI_GARDENER_OFFERED_KEY, WIKI_GARDENER_DISMISSED_KEY]) {
-        const current =
-          snapKey === WIKI_GARDENER_OFFERED_KEY
-            ? await readOffered(backlogDeps, target.watcher.id)
-            : await readDismissed(backlogDeps, target.watcher.id);
+      const pruneKeyFrom = async (
+        snapKey: string,
+        read: (deps: BacklogRouteDeps, watcherId: string) => Promise<Set<string>>,
+      ): Promise<void> => {
+        const current = await read(backlogDeps, target.watcher.id);
         if (current.delete(key)) {
           await backlogDeps.setSnapshot(target.watcher.id, snapKey, [...current]);
         }
-      }
+      };
+      await pruneKeyFrom(WIKI_GARDENER_OFFERED_KEY, readOffered);
+      await pruneKeyFrom(WIKI_GARDENER_DISMISSED_KEY, readDismissed);
       return res;
     });
     if (run === null) return c.json({ error: "a gardener run is in flight" }, 409);
@@ -1668,7 +1718,12 @@ export function registerWikiGardenerRoutes(
       return c.json({ error: `unknown summary collection "${collection}"` }, 400);
     }
 
-    const outcome = await runSourceDraftForNewest(bot, root, collection, KNOWLEDGE_API_URL);
+    // Prune seam — the fourth selection site (drain / source-drafter backlog / weekly
+    // harvest are the other three). No seeded watcher ⇒ no snapshot ⇒ ∅.
+    const rnWatcher = await backlogDeps.getWikiGardenerWatcher(bot.name);
+    const outcome = await runSourceDraftForNewest(bot, root, collection, KNOWLEDGE_API_URL, () =>
+      rnWatcher ? readDismissed(backlogDeps, rnWatcher.id) : Promise.resolve(new Set<string>()),
+    );
     log.info("Source-draft run-now for {bot} ({collection}): {outcome}", {
       bot: bot.name,
       collection,

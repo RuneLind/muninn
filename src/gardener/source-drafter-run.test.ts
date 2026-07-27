@@ -4,6 +4,7 @@ import {
   categoryFromDocId,
   selectSourceBacklogDocs,
   runSourceDraftBacklog,
+  runSourceDraftForNewest,
   SOURCE_BACKLOG_DEFAULT_LIMIT,
   SOURCE_BACKLOG_MAX_LIMIT,
   type SourceBacklogDeps,
@@ -273,5 +274,94 @@ describe("runSourceDraftBacklog", () => {
     expect(res.totalQueued).toBe(0);
     expect(res.totals.selected).toBe(0);
     expect(draftCalls).toEqual([]);
+  });
+});
+
+/**
+ * The FOURTH selection seam. "Draft newest" picks the newest doc in a collection, and
+ * without the prune seam it spends a real model one-shot on a doc a human explicitly
+ * dismissed — the drain, the source-drafter backlog and the weekly harvest all exclude
+ * the same set. Both cases below stop BEFORE any model call.
+ */
+describe("runSourceDraftForNewest — the dismissed seam", () => {
+  const listing = [
+    { id: "newest", url: "https://youtu.be/newest", date: "2026-02-02" },
+    { id: "older", url: "https://youtu.be/older", date: "2026-01-01" },
+  ];
+
+  /** Stub huginn: the collection listing, then a body-less document fetch. */
+  function stubFetch(calls: string[]): typeof fetch {
+    return (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      calls.push(url);
+      const body = url.includes("/documents")
+        ? { documents: listing }
+        : { text: "", metadata: {} }; // body-less ⇒ a "skipped" outcome, no model call
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+  }
+
+  test("skips a dismissed newest doc and falls through to the next one", async () => {
+    const calls: string[] = [];
+    const orig = globalThis.fetch;
+    globalThis.fetch = stubFetch(calls);
+    try {
+      const outcome = await runSourceDraftForNewest(
+        fakeBot,
+        "/tmp/does-not-matter",
+        "youtube-summaries",
+        "http://huginn.test",
+        async () => new Set(["youtube-summaries/newest"]),
+      );
+      // It reached the SECOND doc — the dismissed newest was never fetched or drafted.
+      expect(outcome.outcome).toBe("skipped");
+      expect("reason" in outcome ? outcome.reason : "").toContain("older");
+      expect(calls.some((u) => u.includes("newest"))).toBe(false);
+    } finally {
+      globalThis.fetch = orig;
+    }
+  });
+
+  test("an entirely dismissed collection short-circuits before any doc fetch", async () => {
+    const calls: string[] = [];
+    const orig = globalThis.fetch;
+    globalThis.fetch = stubFetch(calls);
+    try {
+      const outcome = await runSourceDraftForNewest(
+        fakeBot,
+        "/tmp/does-not-matter",
+        "youtube-summaries",
+        "http://huginn.test",
+        async () => new Set(["youtube-summaries/newest", "youtube-summaries/older"]),
+      );
+      expect(outcome.outcome).toBe("skipped");
+      expect("reason" in outcome ? outcome.reason : "").toContain("dismissed");
+      // Only the listing was fetched — no per-doc fetch, no model call.
+      expect(calls.length).toBe(1);
+      expect(calls[0]).toContain("/documents");
+    } finally {
+      globalThis.fetch = orig;
+    }
+  });
+
+  test("no seam (absent getDismissed) is byte-identical to the pre-prune behaviour", async () => {
+    const calls: string[] = [];
+    const orig = globalThis.fetch;
+    globalThis.fetch = stubFetch(calls);
+    try {
+      const outcome = await runSourceDraftForNewest(
+        fakeBot,
+        "/tmp/does-not-matter",
+        "youtube-summaries",
+        "http://huginn.test",
+      );
+      expect(outcome.outcome).toBe("skipped");
+      expect("reason" in outcome ? outcome.reason : "").toContain("newest");
+    } finally {
+      globalThis.fetch = orig;
+    }
   });
 });

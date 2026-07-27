@@ -109,12 +109,18 @@ export async function runSourceDraftForInput(
  * title), picks the newest by date, fetches its body + url via
  * `GET /api/document/<collection>/<id>`, then drafts it. Returns a "skipped" outcome
  * (never throws) when the collection is empty or the fetch yields no body/url.
+ *
+ * `getDismissed` is the FOURTH selection seam for the prune set (`backlog:dismissed`),
+ * matching the drain / source-drafter backlog / weekly harvest: without it "Draft
+ * newest" spends a real model call on a doc a human explicitly dismissed. Absent ⇒ ∅
+ * (byte-identical to the pre-prune behaviour).
  */
 export async function runSourceDraftForNewest(
   botConfig: BotConfig,
   wikiDir: string,
   collection: string,
   apiUrl: string = DEFAULT_API_URL,
+  getDismissed?: () => Promise<Set<string>>,
 ): Promise<SourceDraftOutcome> {
   let listed: ListedDoc[];
   try {
@@ -128,6 +134,15 @@ export async function runSourceDraftForNewest(
   }
   if (listed.length === 0) {
     return { outcome: "skipped", reason: `collection ${collection} is empty` };
+  }
+
+  // Prune seam: a dismissed doc must never be selected here either.
+  const dismissed = getDismissed ? await getDismissed() : new Set<string>();
+  if (dismissed.size) {
+    listed = listed.filter((d) => !dismissed.has(`${collection}/${d.id}`));
+    if (listed.length === 0) {
+      return { outcome: "skipped", reason: `every doc in ${collection} is dismissed` };
+    }
   }
 
   // Newest-first by listing date (undated sorts last).

@@ -10,6 +10,7 @@ import {
   backlogDocLabel,
   sortBacklogDocsNewestFirst,
   getIngestBacklogCached,
+  invalidateIngestBacklogCache,
   mergeBacklogLiveFields,
   __resetIngestBacklogCacheForTest,
   __setBotsForTest,
@@ -252,6 +253,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       remaining: 2,
       offeredStillQueued: 0,
       dismissed: 0,
+      dismissedByCollection: {},
       fresh: 0,
       freshBySource: [],
       freshWindowDays: 14,
@@ -274,6 +276,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       remaining: 0,
       offeredStillQueued: 2,
       dismissed: 0,
+      dismissedByCollection: {},
       fresh: 0,
       freshBySource: [],
       freshWindowDays: 14,
@@ -315,6 +318,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       remaining: 2,
       offeredStillQueued: 0,
       dismissed: 0,
+      dismissedByCollection: {},
       fresh: 0,
       freshBySource: [],
       freshWindowDays: 14,
@@ -340,6 +344,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       remaining: 2,
       offeredStillQueued: 0,
       dismissed: 0,
+      dismissedByCollection: {},
       fresh: 0,
       freshBySource: [],
       freshWindowDays: 14,
@@ -360,6 +365,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       remaining: 2,
       offeredStillQueued: 0,
       dismissed: 0,
+      dismissedByCollection: {},
       fresh: 3,
       freshBySource: [{ label: "YouTube", count: 3, collection: "youtube-summaries" }],
       freshWindowDays: 14,
@@ -386,6 +392,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       remaining: 2,
       offeredStillQueued: 0,
       dismissed: 0,
+      dismissedByCollection: {},
       fresh: 0,
       freshBySource: [],
       freshWindowDays: 14,
@@ -407,6 +414,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       remaining: 0,
       offeredStillQueued: 2,
       dismissed: 0,
+      dismissedByCollection: {},
       fresh: 0,
       freshBySource: [],
       freshWindowDays: 14,
@@ -427,6 +435,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       remaining: 2,
       offeredStillQueued: 0,
       dismissed: 0,
+      dismissedByCollection: {},
       fresh: 0,
       freshBySource: [],
       freshWindowDays: 14,
@@ -582,6 +591,7 @@ describe("docs=1 opt-in — the count-only default payload is unchanged", () => 
     remaining: 1,
     offeredStillQueued: 0,
     dismissed: 0,
+    dismissedByCollection: {},
     fresh: 0,
     freshBySource: [],
     freshWindowDays: 14,
@@ -873,6 +883,102 @@ describe("ingest-backlog pipeline + cache", () => {
 });
 
 /**
+ * The invalidation GENERATION counter. `invalidateIngestBacklogCache` (fired when a
+ * delete's reindex poll goes terminal) must fence every compute that started BEFORE
+ * it: such a compute already read huginn's pre-delete listing, so on settle it must
+ * neither `backlogCache.set` that stale payload (re-poisoning the cache for the full
+ * 5-min TTL) nor let its `.finally` evict the NEWER in-flight compute out of the map.
+ */
+describe("ingest-backlog cache — invalidation generation fencing", () => {
+  let root: string;
+  let origFetch: typeof fetch;
+  let fetchCalls: string[];
+  /** Resolvers parked at the LAST collection listing — one per in-flight compute. */
+  let gates: Array<() => void>;
+  /** The youtube listing the NEXT compute will see (mutated between computes). */
+  let youtubeDocs: Array<{ id: string; url: string; date?: string }>;
+
+  const deps: IngestBacklogDeps = {
+    getConsumed: async () => new Set<string>(),
+    getPending: async () => new Set<string>(),
+  };
+
+  /** Spin until `n` computes have parked at the gate. */
+  async function waitForGates(n: number): Promise<void> {
+    for (let i = 0; i < 200 && gates.length < n; i++) await new Promise((r) => setTimeout(r, 1));
+    expect(gates.length).toBe(n);
+  }
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-backlog-gen-"));
+    await Bun.write(path.join(root, "notes.md"), "# Notes\nnothing cited here.\n");
+    fetchCalls = [];
+    gates = [];
+    youtubeDocs = [
+      { id: "d1", url: "https://youtu.be/d1", date: "2026-01-01" },
+      { id: "d2", url: "https://youtu.be/d2", date: "2026-01-02" },
+    ];
+    origFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      fetchCalls.push(url);
+      const m = url.match(/\/api\/collection\/([^/]+)\/documents/);
+      const collection = m ? m[1]! : "";
+      const documents = collection === "youtube-summaries" ? youtubeDocs : [];
+      // Park each compute on its LAST collection so the test controls settle order.
+      if (collection === "article-summaries") {
+        await new Promise<void>((resolve) => gates.push(resolve));
+      }
+      return new Response(JSON.stringify({ documents }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+    __resetIngestBacklogCacheForTest();
+  });
+
+  afterEach(async () => {
+    globalThis.fetch = origFetch;
+    for (const release of gates) release();
+    __resetIngestBacklogCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("a pre-invalidation compute neither re-caches its stale payload nor evicts the newer one", async () => {
+    // Compute A starts and reads the PRE-delete listing (2 queued docs).
+    const a = getIngestBacklogCached(root, "genbot", deps, false);
+    await waitForGates(1);
+
+    // The delete's reindex went terminal: the cache is invalidated, and huginn's
+    // listing no longer carries d2. Compute B (the client's `refresh=1`) starts.
+    invalidateIngestBacklogCache("genbot");
+    youtubeDocs = [{ id: "d1", url: "https://youtu.be/d1", date: "2026-01-01" }];
+    const b = getIngestBacklogCached(root, "genbot", deps, true);
+    await waitForGates(2);
+
+    // A settles FIRST, while B is still in flight.
+    gates[0]!();
+    expect((await a).queued).toBe(2);
+
+    // A's `.finally` must NOT have removed B's in-flight entry — a third caller
+    // joins B rather than kicking off a fourth compute.
+    const callsBefore = fetchCalls.length;
+    const joined = getIngestBacklogCached(root, "genbot", deps, false);
+    expect(fetchCalls.length).toBe(callsBefore);
+
+    gates[1]!();
+    expect((await b).queued).toBe(1);
+    expect((await joined).queued).toBe(1);
+
+    // The cache holds B's post-delete payload — A must not have re-poisoned it.
+    const callsBeforeServe = fetchCalls.length;
+    const served = await getIngestBacklogCached(root, "genbot", deps, false);
+    expect(served.queued).toBe(1);
+    expect(fetchCalls.length).toBe(callsBeforeServe); // served from cache, not recomputed
+  });
+});
+
+/**
  * PR 2 prune verbs — the FOUR-bucket partition, the dismiss/un-dismiss/reset routes
  * and their guards, and the huginn DELETE proxy.
  *
@@ -1082,6 +1188,23 @@ describe("prune routes — dismiss / un-dismiss / reset guards (PR 2)", () => {
       expect(res.status).toBe(400);
     }
     expect(snapshots.has("backlog:dismissed")).toBe(false);
+  });
+
+  // An over-cap batch is a DIFFERENT failure from a malformed body: the old shared
+  // "expected a non-empty keys array" message sent the caller hunting the wrong bug.
+  // (The client chunks under the cap, so this is a fence, not a UX limit.)
+  test("an over-cap key list 400s with a message that names the cap", async () => {
+    const keys = Array.from({ length: 2001 }, (_, i) => `c/${i}`);
+    const res = await post("/api/wiki/gardener/backlog-docs-dismiss", { keys });
+    expect(res.status).toBe(400);
+    const { error } = (await res.json()) as { error?: string };
+    expect(error).toContain("too many keys");
+    expect(error).toContain("2000");
+    expect(error).not.toContain("non-empty");
+    expect(snapshots.has("backlog:dismissed")).toBe(false);
+    // Exactly at the cap still succeeds.
+    const ok = await post("/api/wiki/gardener/backlog-docs-dismiss", { keys: keys.slice(0, 2000) });
+    expect(ok.status).toBe(200);
   });
 
   test("the prune routes share the standard wiki-resolution guards", async () => {
