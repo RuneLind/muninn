@@ -12,10 +12,11 @@ import {
   getIngestBacklogCached,
   mergeBacklogLiveFields,
   __resetIngestBacklogCacheForTest,
+  __setBotsForTest,
   type IngestBacklogDeps,
   type IngestBacklogResponse,
 } from "./wiki-gardener-routes.ts";
-import { __resetWikiRegistryForTest } from "../../wiki/registry-memo.ts";
+import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki/registry-memo.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
 import { computeWatcherNextRun } from "../agents-overview.ts";
 import type { Watcher } from "../../types.ts";
@@ -597,6 +598,116 @@ describe("docs=1 opt-in — the count-only default payload is unchanged", () => 
     // Every other field is byte-identical to the count-only payload.
     const { docs: _drop, ...rest } = withDocs as Record<string, unknown>;
     expect(rest).toEqual(plain);
+  });
+
+  test("withDocs=false skips building the doc list; the counts are identical", () => {
+    const queuedKeys = [
+      { key: "c/2026-01-01-a", id: "2026-01-01-a", collection: "c" },
+      { key: "c/2026-06-01-b", id: "2026-06-01-b", collection: "c" },
+    ];
+    const now = Date.parse("2026-07-17T00:00:00Z");
+    const withDocs = computeBacklogFloorCounts(queuedKeys, new Set<string>(), 7, now, true);
+    const countsOnly = computeBacklogFloorCounts(queuedKeys, new Set<string>(), 7, now, false);
+    expect(countsOnly.docs).toEqual([]);
+    expect(countsOnly.remaining).toBe(withDocs.remaining);
+    expect(countsOnly.offeredStillQueued).toBe(withDocs.offeredStillQueued);
+    expect(countsOnly.freshByCollection).toEqual(withDocs.freshByCollection);
+  });
+});
+
+/**
+ * Route-level integration through `registerWikiGardenerRoutes` — the whole GET
+ * handler (resolution → cached compute → live merge → wire), not just the pure
+ * helpers. A fabricated bot + registry (test-only pins) stands in for real bot
+ * discovery, huginn listings come from a stubbed `fetch`, and the backlog deps are
+ * injected, so nothing here touches the DB, huginn, or the real `bots/` folder.
+ */
+describe("GET /api/wiki/ingest-backlog — docs=1 through the route", () => {
+  let root: string;
+  let app: Hono;
+  let origFetch: typeof fetch;
+
+  /** Two YouTube docs: one with an explicit date, one dated only by its id prefix. */
+  const listings: Record<string, Array<{ id: string; url?: string; date?: string }>> = {
+    "youtube-summaries": [
+      // Explicit date, OLDER than the prefix-dated doc below.
+      { id: "old-doc.md", url: "https://youtu.be/old", date: "2020-01-01" },
+      // No `date` field — its date lives in the id prefix (the docDateMs fallback).
+      { id: "2026-01-05-prefixed.md", url: "https://youtu.be/pre" },
+    ],
+    "x-articles": [],
+    "anthropic-summaries": [],
+    "tiktok-summaries": [],
+    "article-summaries": [],
+  };
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-inspector-route-"));
+    await Bun.write(path.join(root, "notes.md"), "# Notes\nNothing cited here.\n");
+    origFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const m = String(input).match(/\/api\/collection\/([^/]+)\/documents/);
+      const collection = m ? m[1]! : "";
+      return new Response(JSON.stringify({ documents: listings[collection] ?? [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    __setBotsForTest([
+      { name: "inspectorbot", dir: root, persona: "", telegramAllowedUserIds: [], slackAllowedUserIds: [], wikiDir: root },
+    ] as unknown as Parameters<typeof __setBotsForTest>[0]);
+    __setWikiRegistryForTest([{ name: "inspectorbot", root, source: "bot" }]);
+    __resetWikiCacheForTest();
+    __resetIngestBacklogCacheForTest();
+
+    app = new Hono();
+    // No watcher seeded ⇒ empty offered set; no snapshots, no proposals.
+    registerWikiGardenerRoutes(app, {
+      getConsumed: async () => new Set<string>(),
+      getPending: async () => new Set<string>(),
+      getWikiGardenerWatcher: async () => null,
+      getSnapshot: async () => null,
+      setSnapshot: async () => {},
+      listProposals: async () => [],
+    });
+  });
+
+  afterEach(async () => {
+    globalThis.fetch = origFetch;
+    __setBotsForTest(null);
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    __resetIngestBacklogCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("no docs field without the opt-in", async () => {
+    const res = await app.request("/api/wiki/ingest-backlog?wiki=inspectorbot");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBeUndefined();
+    expect(body.queued).toBe(2);
+    expect("docs" in body).toBe(false);
+    expect("queuedKeys" in body).toBe(false);
+  });
+
+  test("docs=1 returns the classified list, ordered by the SAME date the drain selects by", async () => {
+    const res = await app.request("/api/wiki/ingest-backlog?wiki=inspectorbot&docs=1");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      docs?: { id: string; label: string; bucket: string; date?: string }[];
+    };
+    expect(body.docs).toBeDefined();
+    expect(body.docs!.length).toBe(2);
+    // Both are years old ⇒ past the age floor ⇒ drainable; labels are the stripped basenames.
+    expect(body.docs!.map((d) => d.bucket)).toEqual(["drainable", "drainable"]);
+    // The id-prefix-dated doc is NEWER than the explicitly-dated one, so it sorts
+    // FIRST and renders its prefix date — the pre-fix behaviour sank it to the
+    // bottom with a "—" date although the drain would take it first.
+    expect(body.docs!.map((d) => d.label)).toEqual(["2026-01-05-prefixed", "old-doc"]);
+    expect(body.docs![0]!.date).toBe("2026-01-05");
+    expect(body.docs![1]!.date).toBe("2020-01-01");
   });
 });
 

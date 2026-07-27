@@ -190,6 +190,8 @@ export async function renderWikiGardenerPage(opts?: {
     }
     .gard-backlog .bk-toggle:hover { border-bottom-color: var(--accent); }
     .gard-backlog .bk-toggle-on { border-bottom: 1px solid var(--accent); }
+    /* A fully-covered (0 queued) tail row — the same count, but not a toggle. */
+    .gard-backlog .bk-tail-item { color: var(--text-muted); }
     .gard-backlog .bk-inspector {
       flex-basis: 100%; margin-top: 4px; padding: 10px 12px;
       background: var(--bg-inset); border: 1px solid var(--border-secondary); border-radius: 8px;

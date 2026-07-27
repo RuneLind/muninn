@@ -227,7 +227,7 @@ async function act(id: string, action: "approve" | "reject", card: HTMLElement):
     }
     render();
     // A draft that just got applied/rejected changes "drafts awaiting review".
-    if (lastBacklogData) renderBacklog(lastBacklogData);
+    rerenderStrip();
   } catch (err) {
     setOutcome(card, "Network error: " + (err as Error).message, "err");
     buttons.forEach((b) => ((b as HTMLButtonElement).disabled = false));
@@ -404,6 +404,9 @@ function renderBacklog(data: IngestBacklogResponse): void {
   // Re-renders (drain polls every 3s) must not slam an open tail shut: capture
   // its open state before replacing the HTML and re-apply after.
   const tailWasOpen = el.querySelector<HTMLDetailsElement>(".bk-tail")?.open === true;
+  // Same footgun for the inspector's scrolling row list: replacing the innerHTML
+  // resets it to the top mid-read on every 3s poll tick, so capture + re-apply.
+  const inspectorScrollTop = el.querySelector<HTMLElement>(".bk-inspector-rows")?.scrollTop ?? 0;
   el.innerHTML =
     backlogStripHtml(model, data.errors, inspector) +
     backlogOutcomeHtml(data.lastBacklogRun) +
@@ -416,6 +419,10 @@ function renderBacklog(data: IngestBacklogResponse): void {
   if (tailWasOpen) {
     const tail = el.querySelector<HTMLDetailsElement>(".bk-tail");
     if (tail) tail.open = true;
+  }
+  if (inspectorScrollTop > 0) {
+    const rows = el.querySelector<HTMLElement>(".bk-inspector-rows");
+    if (rows) rows.scrollTop = inspectorScrollTop;
   }
   // Restore the user's chosen collection + gate the source-draft button on its
   // queued count (the strip's innerHTML is replaced wholesale on every render).
@@ -475,7 +482,11 @@ function pollBacklogUntilDone(): void {
         // Final refresh so the strip reflects the newly-drafted (now pending) docs.
         fetch(withBot("/api/wiki/ingest-backlog?refresh=1"))
           .then((r) => r.json())
-          .then((fresh: IngestBacklogResponse) => renderBacklog(fresh))
+          .then((fresh: IngestBacklogResponse) => {
+            renderBacklog(fresh);
+            // The drain just consumed docs — an open panel's rows are stale.
+            refreshInspectorAfterMutation();
+          })
           .catch(() => {});
         loadProposals();
       })
@@ -543,7 +554,10 @@ function pollBacklogUntilRunStarts(): void {
         runStartPolling = false;
         fetch(withBot("/api/wiki/ingest-backlog?refresh=1"))
           .then((r) => r.json())
-          .then((fresh: IngestBacklogResponse) => renderBacklog(fresh))
+          .then((fresh: IngestBacklogResponse) => {
+            renderBacklog(fresh);
+            refreshInspectorAfterMutation();
+          })
           .catch(() => {});
         loadProposals();
       })
@@ -575,7 +589,7 @@ async function triggerWatcherRun(id: string, btn: HTMLButtonElement): Promise<vo
     pollBacklogUntilRunStarts();
   } catch {
     // Restore the button + surface the error the same way startBacklogRun does.
-    if (lastBacklogData) renderBacklog(lastBacklogData);
+    rerenderStrip();
     const el = document.getElementById("gardBacklog");
     if (el) {
       const note = document.createElement("span");
@@ -620,9 +634,13 @@ async function startSourceDraftBacklog(btn: HTMLButtonElement): Promise<void> {
   // the drafts show up in the gate. renderBacklog picks up lastSourceDraftResult.
   fetch(withBot("/api/wiki/ingest-backlog?refresh=1"))
     .then((r) => r.json())
-    .then((fresh: IngestBacklogResponse) => renderBacklog(fresh))
+    .then((fresh: IngestBacklogResponse) => {
+      renderBacklog(fresh);
+      // Freshly-covered docs left the queue — refetch an open panel's rows.
+      refreshInspectorAfterMutation();
+    })
     .catch(() => {
-      if (lastBacklogData) renderBacklog(lastBacklogData);
+      rerenderStrip();
     });
   loadProposals();
 }
@@ -635,7 +653,11 @@ async function resetBacklog(): Promise<void> {
   }
   fetch(withBot("/api/wiki/ingest-backlog?refresh=1"))
     .then((r) => r.json())
-    .then((data: IngestBacklogResponse) => renderBacklog(data))
+    .then((data: IngestBacklogResponse) => {
+      renderBacklog(data);
+      // The offered bucket just emptied — its rows would still chip "offered".
+      refreshInspectorAfterMutation();
+    })
     .catch(() => {});
 }
 
@@ -664,7 +686,11 @@ async function recoverBacklog(): Promise<void> {
   }
   fetch(withBot("/api/wiki/ingest-backlog"))
     .then((r) => r.json())
-    .then((data: IngestBacklogResponse) => renderBacklog(data))
+    .then((data: IngestBacklogResponse) => {
+      renderBacklog(data);
+      // The recovered batch moved back out of the offered bucket.
+      refreshInspectorAfterMutation();
+    })
     .catch(() => {});
 }
 
@@ -685,7 +711,7 @@ async function dismissBacklog(): Promise<void> {
 // Re-render the strip from the last payload — the inspector's state changes are
 // client-only (open/filter/paging), so they never need a server round-trip.
 function rerenderStrip(): void {
-  if (lastBacklogData) renderBacklog(lastBacklogData);
+  rerenderStrip();
 }
 
 // Lazy per-doc fetch (`?docs=1`) behind the inspector. Runs on OPEN only — the
@@ -718,6 +744,15 @@ async function loadInspectorDocs(): Promise<void> {
   rerenderStrip();
 }
 
+// Re-run the lazy doc fetch when a MUTATING action changed the backlog under an
+// open panel (a drain settling, Reset offered, Backfill oldest, recover/dismiss):
+// the rows and their bucket chips are a snapshot, so without this an open panel
+// keeps showing drained rows chipped "drainable". Once per event — never per poll
+// tick (the 3s drain poll stays count-only) — and a no-op while closed.
+function refreshInspectorAfterMutation(): void {
+  if (inspector.open) void loadInspectorDocs();
+}
+
 // Open the inspector on a count's (bucket, collection) pair — or close it when the
 // same count is clicked again (the toggle contract).
 function toggleInspector(bucket: BacklogBucket | "all", collection: string): void {
@@ -727,6 +762,9 @@ function toggleInspector(bucket: BacklogBucket | "all", collection: string): voi
     return;
   }
   inspector.open = true;
+  // A stale error from a previous failed open must not render in place of the
+  // "Loading docs…" state on the next one.
+  inspector.error = null;
   inspector.bucket = bucket;
   inspector.collection = collection;
   inspector.limit = INSPECTOR_PAGE_SIZE;
@@ -838,7 +876,7 @@ function loadProposals(): void {
       render();
       // The strip's "drafts awaiting review" count + re-render depend on the
       // proposal list — refresh it now that the count is known.
-      if (lastBacklogData) renderBacklog(lastBacklogData);
+      rerenderStrip();
     })
     .catch((err: Error) => {
       document.getElementById("gardList")!.innerHTML =

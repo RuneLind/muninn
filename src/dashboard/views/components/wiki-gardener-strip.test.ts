@@ -1113,6 +1113,20 @@ describe("backlog inspector — count toggles", () => {
     expect(html).not.toContain("previously offered");
   });
 
+  test("a fully-covered (0 queued) tail source keeps its count but is NOT a toggle", () => {
+    const data = base();
+    data.byCollection = data.byCollection.map((c) =>
+      c.collection === "anthropic-summaries" ? { ...c, queued: 0, ingested: c.total } : c,
+    );
+    const html = backlogTailHtml(backlogStripModel(data, 0));
+    // The count is still reported…
+    expect(html).toContain("Anthropic");
+    expect(html).toContain("bk-tail-item");
+    // …but there is no toggle into an empty panel for it.
+    expect(html).not.toContain('data-inspect-collection="anthropic-summaries"');
+    expect(html).toContain('data-inspect-collection="youtube-summaries"');
+  });
+
   test("'Reset offered (N)' stays a pure action button — never an inspector toggle", () => {
     const html = backlogControlHtml(backlogStripModel(base(), 0));
     expect(html).toContain('data-backlog-action="reset"');
@@ -1187,6 +1201,34 @@ describe("backlog inspector — panel render + filters", () => {
     expect(backlogInspectorHtml(open({ docs: many, limit: 50 }), sources)).not.toContain(
       'data-inspect-action="more"',
     );
+  });
+
+  test("a failed refresh keeps already-loaded rows and renders the error as a note above them", () => {
+    const html = backlogInspectorHtml(open({ error: "boom" }), sources);
+    expect(html).toContain("boom");
+    // The rows the user was reading survive the failure (the refetch contract).
+    expect(html).toContain("2026-07-16-a");
+    expect(html).toContain("showing 3 of 3");
+    // With nothing loaded the error IS the whole body.
+    const empty = backlogInspectorHtml(open({ docs: null, error: "boom" }), sources);
+    expect(empty).toContain("boom");
+    expect(empty).not.toContain("bk-inspector-rows");
+  });
+
+  test("a 0-queued source is dropped from the collection select (it could only render an empty filter)", () => {
+    const counted = [
+      { collection: "youtube-summaries", label: "YouTube", queued: 2 },
+      { collection: "anthropic-summaries", label: "Anthropic", queued: 0 },
+    ];
+    const html = backlogInspectorHtml(open(), counted);
+    expect(html).toContain('<option value="youtube-summaries"');
+    expect(html).not.toContain('<option value="anthropic-summaries"');
+    // …unless it is the current selection — the control must never show a value
+    // it doesn't offer.
+    const selected = backlogInspectorHtml(open({ collection: "anthropic-summaries" }), counted);
+    expect(selected).toContain('<option value="anthropic-summaries"');
+    // A source with no queued count at all (count-less caller) stays selectable.
+    expect(backlogInspectorHtml(open(), sources)).toContain('<option value="x-articles"');
   });
 
   test("hostile doc fields are escaped, never injected", () => {

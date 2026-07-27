@@ -34,6 +34,7 @@ import { listSummaryCollections } from "../../summaries/list-collections.ts";
 import type { StatsError } from "../../summaries/stats.ts";
 import { collectWikiRefs, computeIngestBacklog, type ListedDoc } from "../../wiki/ingest-backlog.ts";
 import { resolveGardenerConfig } from "../../gardener/types.ts";
+import { docDateMs } from "../../gardener/harvest.ts";
 import { runGardener, type GardenerDeps } from "../../gardener/runner.ts";
 import {
   assembleBacklog,
@@ -88,6 +89,15 @@ const KNOWLEDGE_API_URL = process.env.KNOWLEDGE_API_URL ?? "http://localhost:832
 let cachedBots: BotConfig[] | null = null;
 function getBots(): BotConfig[] {
   return (cachedBots ??= discoverAllBots());
+}
+
+/**
+ * Test-only: pin (or with `null` release) the discovered bots, so a route test can
+ * drive a fabricated bot wiki without touching the real `bots/` folder. Pairs with
+ * `__setWikiRegistryForTest` (the registry is the other half of the resolution).
+ */
+export function __setBotsForTest(bots: BotConfig[] | null): void {
+  cachedBots = bots;
 }
 
 /**
@@ -441,7 +451,8 @@ export interface BacklogDocRow {
  * It also returns `docs` — the SAME partition expressed per doc (`bucket`), in
  * input order. The counts are derived from the same single pass, so a count and
  * its bucket membership can never disagree; the route emits `docs` only on the
- * `?docs=1` opt-in (the strip's 3s poll stays count-only).
+ * `?docs=1` opt-in (the strip's 3s poll stays count-only). `withDocs: false` skips
+ * building that list entirely (the poll path) — the counts are unaffected.
  *
  * Pure + injectable so the route's floor branch is unit-testable. `q.id` is the
  * bare doc id (the floor's filename-prefix fallback needs it, not the key);
@@ -453,6 +464,7 @@ export function computeBacklogFloorCounts(
   offeredSet: Set<string>,
   minAgeDays: number,
   now: number,
+  withDocs = true,
 ): {
   remaining: number;
   offeredStillQueued: number;
@@ -475,12 +487,17 @@ export function computeBacklogFloorCounts(
       freshByCollection[q.collection] = (freshByCollection[q.collection] ?? 0) + 1;
       bucket = "fresh";
     }
+    if (!withDocs) continue;
+    // The rendered date is the SAME value the floor (and the drain) judged the doc
+    // by — `docDateMs` falls back to the id's `YYYY-MM-DD` prefix, so an undated
+    // listing row shows its real date instead of a bare "—".
+    const date = backlogDocDate(q);
     docs.push({
       collection: q.collection,
       id: q.id,
       label: backlogDocLabel(q.id),
       bucket,
-      ...(q.date ? { date: q.date } : {}),
+      ...(date ? { date } : {}),
       ...(q.url ? { url: q.url } : {}),
     });
   }
@@ -488,19 +505,34 @@ export function computeBacklogFloorCounts(
 }
 
 /**
+ * A queued doc's EFFECTIVE date (`YYYY-MM-DD`), resolved exactly the way the drain
+ * resolves it ({@link docDateMs}): the listing's explicit `date`, else the id's
+ * `YYYY-MM-DD` prefix. Undefined only when neither yields a date. Without the
+ * fallback an undated-but-prefixed doc rendered "—" and sorted to the bottom while
+ * the drain would take it FIRST — the panel's top rows must be the drain's queue.
+ */
+export function backlogDocDate(q: { id: string; date?: string }): string | undefined {
+  if (q.date) return q.date;
+  const ms = docDateMs(q);
+  return ms === undefined ? undefined : new Date(ms).toISOString().slice(0, 10);
+}
+
+/**
  * Newest-first ordering for the inspector's doc list (undated docs last, then a
- * stable id tiebreak). Pure so the ordering contract is unit-testable. Sorts a
- * COPY — the caller's array (and the cached `queuedKeys` order the counts rely
- * on) is never reordered.
+ * stable id tiebreak). Ordering is keyed on {@link docDateMs} — the SAME date the
+ * drain selects by — so an undated row whose id carries a date prefix sorts by that
+ * prefix instead of sinking to the bottom. Pure so the ordering contract is
+ * unit-testable. Sorts a COPY — the caller's array (and the cached `queuedKeys`
+ * order the counts rely on) is never reordered.
  */
 export function sortBacklogDocsNewestFirst(docs: BacklogDocRow[]): BacklogDocRow[] {
   return [...docs].sort((a, b) => {
-    const ad = a.date ?? "";
-    const bd = b.date ?? "";
+    const ad = docDateMs(a);
+    const bd = docDateMs(b);
     if (ad !== bd) {
-      if (!ad) return 1;
-      if (!bd) return -1;
-      return ad < bd ? 1 : -1;
+      if (ad === undefined) return 1;
+      if (bd === undefined) return -1;
+      return bd - ad;
     }
     return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
   });
@@ -1008,22 +1040,25 @@ export function registerWikiGardenerRoutes(
       const gardenerCfg = resolveGardenerConfig(bot.gardener);
       const minAgeDays = gardenerCfg.lookbackDays;
       const now = Date.now();
+      // Opt-in per-doc list (the backlog inspector). Classified in the SAME pass as
+      // the counts, at the live merge layer, so bucket membership reflects the
+      // per-request offered set — never the 5-min-cached compute (which knows
+      // nothing about offered/floor). Gated so the 3s drain poll never allocates
+      // (or labels) a row per queued doc; the counts are identical either way.
+      const wantDocs = c.req.query("docs") === "1";
       const { remaining, offeredStillQueued, freshByCollection, docs } = computeBacklogFloorCounts(
         queuedKeys,
         offeredSet,
         minAgeDays,
         now,
+        wantDocs,
       );
       // Per-source fresh breakdown in listing order, labels from the cached
       // byCollection rows (non-zero only — the wire stays compact).
       const freshBySource = data.byCollection
         .filter((c) => (freshByCollection[c.collection] ?? 0) > 0)
         .map((c) => ({ label: c.label, count: freshByCollection[c.collection]!, collection: c.collection }));
-      // Opt-in per-doc list (the backlog inspector). Classified HERE, at the live
-      // merge layer, so bucket membership reflects the per-request offered set —
-      // never the 5-min-cached compute (which knows nothing about offered/floor).
-      const wantDocs = c.req.query("docs") === "1";
-      const fresh = Object.values(freshByCollection).reduce((s, n) => s + n, 0);
+      const fresh =Object.values(freshByCollection).reduce((s, n) => s + n, 0);
       const running = gardenerRunInFlight(bot.name);
 
       // Last-run: the in-memory record wins; after a restart it's gone, so fall back

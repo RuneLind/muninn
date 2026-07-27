@@ -400,14 +400,23 @@ export function backlogStripModel(
       ? { id: watcher!.id }
       : null;
   const nextRunText = watcherUsable ? computeNextRunText(watcher!, now) : null;
+  // One pass over the reported collections feeds BOTH the tail breakdown and the
+  // source-draft select (the latter is a strict subset of the former — same
+  // collection/label/queued, clamped identically, so they can never disagree).
+  const perSource = (data.byCollection || []).map((c) => ({
+    label: c.label,
+    queued: Math.max(0, numOr(c.queued, 0)),
+    total: Math.max(0, numOr(c.total, 0)),
+    collection: typeof c.collection === "string" ? c.collection : "",
+  }));
   // Source-draft select options: one per reported collection, its queued count as
   // the label. The button is offered when ANY collection has uncovered docs; the
   // pre-selected collection is the one with the largest queue (the client can pick
   // another and the button re-gates on that collection's count).
-  const sourceDraftOptions = (data.byCollection || []).map((c) => ({
-    collection: c.collection,
-    label: c.label,
-    queued: Math.max(0, numOr(c.queued, 0)),
+  const sourceDraftOptions = perSource.map((s) => ({
+    collection: s.collection,
+    label: s.label,
+    queued: s.queued,
   }));
   const sourceDraftDefaultCollection = sourceDraftOptions.length
     ? sourceDraftOptions.reduce((best, o) => (o.queued > best.queued ? o : best)).collection
@@ -415,12 +424,7 @@ export function backlogStripModel(
   return {
     totalNeverIngested: queued,
     allTimeTotal: Math.max(0, numOr(data.total, 0)),
-    perSource: (data.byCollection || []).map((c) => ({
-      label: c.label,
-      queued: c.queued,
-      total: Math.max(0, numOr(c.total, 0)),
-      collection: typeof c.collection === "string" ? c.collection : "",
-    })),
+    perSource,
     eligibleNow: remaining,
     offeredStillQueued,
     freshTotal,
@@ -640,6 +644,9 @@ export function backlogTailHtml(model: BacklogStripModel, inspect?: BacklogInspe
       const label = `${esc(s.label)} <span class="bk-n">${s.queued}</span>`;
       const inner =
         s.total >= s.queued && s.total > 0 ? `${label} of <span class="bk-n">${s.total}</span>` : label;
+      // A fully-covered collection (0 queued) has no docs behind it — a toggle there
+      // could only ever open an empty panel, so the count stays visible as plain text.
+      if (s.queued <= 0) return `<span class="bk-tail-item">${inner}</span>`;
       // Every bucket for this collection — the tail is the all-time accounting.
       return inspectToggle(inner, "all", s.collection ?? "", inspect);
     })
@@ -1088,10 +1095,15 @@ function inspectorRowHtml(d: BacklogDoc, sourceLabel: string): string {
  * `<select>` (the strip model's per-source rows). Rendering is capped at
  * `state.limit` rows with a "Show more" affordance — 253 rows is fine, but a
  * tail-heavy bot must not lay out thousands.
+ *
+ * A source with `queued: 0` still labels its rows (an already-drained collection can
+ * own rows in a stale snapshot) but is dropped from the `<select>`: picking it could
+ * only ever render "No docs in this filter". The currently-selected collection is
+ * always kept as an option so the control can never show a value it doesn't offer.
  */
 export function backlogInspectorHtml(
   state: BacklogInspectorState,
-  sources: { collection: string; label: string }[],
+  sources: { collection: string; label: string; queued?: number }[],
 ): string {
   if (!state.open) return "";
   const labelOf = (collection: string): string =>
@@ -1107,7 +1119,10 @@ export function backlogInspectorHtml(
       );
     })
     .join("");
-  const options = [{ collection: "", label: "all sources" }, ...sources]
+  const selectable = sources.filter(
+    (s) => s.queued === undefined || s.queued > 0 || s.collection === state.collection,
+  );
+  const options = [{ collection: "", label: "all sources" }, ...selectable]
     .map(
       (s) =>
         `<option value="${esc(s.collection)}"${s.collection === state.collection ? " selected" : ""}>` +
@@ -1125,17 +1140,23 @@ export function backlogInspectorHtml(
 
   let body: string;
   let footer = "";
-  if (state.error) {
-    body = `<div class="bk-inspector-note bk-err">${esc(state.error)}</div>`;
+  // A failed refresh must NOT wipe rows the user is reading: with docs already
+  // loaded the error renders as a note ABOVE them (matching `loadInspectorDocs`'s
+  // "any previously-loaded rows stay on screen" contract); an error with nothing
+  // loaded is the only error-only body.
+  const errNote = state.error ? `<div class="bk-inspector-note bk-err">${esc(state.error)}</div>` : "";
+  if (state.error && !state.docs?.length) {
+    body = errNote;
   } else if (!state.docs) {
     body = `<div class="bk-inspector-note">${state.loading ? "Loading docs…" : "No docs loaded."}</div>`;
   } else {
     const filtered = filterBacklogDocs(state.docs, state.bucket, state.collection);
     if (!filtered.length) {
-      body = '<div class="bk-inspector-note">No docs in this filter.</div>';
+      body = errNote + '<div class="bk-inspector-note">No docs in this filter.</div>';
     } else {
       const shown = filtered.slice(0, Math.max(1, state.limit));
       body =
+        errNote +
         '<div class="bk-inspector-rows">' +
         shown.map((d) => inspectorRowHtml(d, labelOf(d.collection))).join("") +
         "</div>";
