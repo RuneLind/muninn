@@ -20,7 +20,9 @@ export interface BlockRenderer {
   heading(block: { level: number; content: string }): string;
   blockquote(lines: string[]): string;
   ul(items: string[]): string;
-  ol(items: string[]): string;
+  /** `start` is the list's first ordinal (from the source markdown) — a list
+   *  split across paragraphs must not restart at 1 on every fragment. */
+  ol(items: string[], start: number): string;
   table(headers: string[], rows: string[][]): string;
   /** Render a component block. `renderedChildren` is the component body already
    *  walked through this same renderer, so most components only wrap/decorate it.
@@ -65,7 +67,7 @@ function renderBlock(block: Block, r: BlockRenderer): string {
     case "ul":
       return r.ul(block.items);
     case "ol":
-      return r.ol(block.items);
+      return r.ol(block.items, block.start);
     case "table":
       return r.table(block.headers, block.rows);
     case "component":

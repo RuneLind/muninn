@@ -19,7 +19,7 @@ export type Block =
   | { type: "heading"; level: number; content: string }
   | { type: "blockquote"; lines: string[] }
   | { type: "ul"; items: string[] }
-  | { type: "ol"; items: string[] }
+  | { type: "ol"; items: string[]; start: number }
   | { type: "table"; headers: string[]; rows: string[][] }
   | { type: "component"; name: ComponentName; attrs: Record<string, string>; children: Block[] }
   | { type: "text"; lines: string[] };
@@ -171,7 +171,7 @@ const HR_RE = /^---+$/;
 const HEADING_RE = /^(#{1,6})\s+(.+)$/;
 const BLOCKQUOTE_RE = /^>\s?(.*)$/;
 const UL_RE = /^[-*]\s+(.*)$/;
-const OL_RE = /^\d+\.\s+(.*)$/;
+const OL_RE = /^(\d+)\.\s+(.*)$/;
 
 export function parseBlocks(text: string): Block[] {
   const normalized = text.replace(/\r\n/g, "\n");
@@ -284,13 +284,15 @@ function parseBlocksInner(
     if (OL_RE.test(line)) {
       flushText();
       const items: string[] = [];
+      let start = 1;
       while (i < lines.length) {
         const m = lines[i]!.match(OL_RE);
         if (!m) break;
-        items.push(m[1]!);
+        if (items.length === 0) start = parseInt(m[1]!, 10) || 1;
+        items.push(m[2]!);
         i++;
       }
-      blocks.push({ type: "ol", items });
+      blocks.push({ type: "ol", items, start });
       continue;
     }
 

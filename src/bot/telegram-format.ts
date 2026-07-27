@@ -29,7 +29,7 @@ const telegramRenderer: BlockRenderer = {
   heading: (block) => `<b>${renderInline(block.content)}</b>`,
   blockquote: (lines) => lines.map((l) => `> ${renderInline(l)}`).join("\n"),
   ul: (items) => items.map((i) => `- ${renderInline(i)}`).join("\n"),
-  ol: (items) => items.map((i, idx) => `${idx + 1}. ${renderInline(i)}`).join("\n"),
+  ol: (items, start) => items.map((i, idx) => `${start + idx}. ${renderInline(i)}`).join("\n"),
   table(headers, rows) {
     const headerRow = `| ${headers.map(renderInline).join(" | ")} |`;
     const sepRow = "|" + headers.map(() => "---").join("|") + "|";

@@ -68,7 +68,7 @@ describe("parseBlocks", () => {
 
   test("groups ordered list items", () => {
     expect(parseBlocks("1. a\n2. b\n3. c")).toEqual([
-      { type: "ol", items: ["a", "b", "c"] },
+      { type: "ol", items: ["a", "b", "c"], start: 1 },
     ]);
   });
 

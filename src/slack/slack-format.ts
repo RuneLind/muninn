@@ -28,7 +28,7 @@ const slackRenderer: BlockRenderer = {
   heading: (block) => `*${renderInline(block.content)}*`,
   blockquote: (lines) => lines.map((l) => `> ${renderInline(l)}`).join("\n"),
   ul: (items) => items.map((i) => `- ${renderInline(i)}`).join("\n"),
-  ol: (items) => items.map((i, idx) => `${idx + 1}. ${renderInline(i)}`).join("\n"),
+  ol: (items, start) => items.map((i, idx) => `${start + idx}. ${renderInline(i)}`).join("\n"),
   table: (headers, rows) => renderTable(headers, rows),
   component(name, attrs, children, rawChildren) {
     switch (name) {
