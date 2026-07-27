@@ -109,12 +109,18 @@ export async function runSourceDraftForInput(
  * title), picks the newest by date, fetches its body + url via
  * `GET /api/document/<collection>/<id>`, then drafts it. Returns a "skipped" outcome
  * (never throws) when the collection is empty or the fetch yields no body/url.
+ *
+ * `getDismissed` is the FOURTH selection seam for the prune set (`backlog:dismissed`),
+ * matching the drain / source-drafter backlog / weekly harvest: without it "Draft
+ * newest" spends a real model call on a doc a human explicitly dismissed. Absent ⇒ ∅
+ * (byte-identical to the pre-prune behaviour).
  */
 export async function runSourceDraftForNewest(
   botConfig: BotConfig,
   wikiDir: string,
   collection: string,
   apiUrl: string = DEFAULT_API_URL,
+  getDismissed?: () => Promise<Set<string>>,
 ): Promise<SourceDraftOutcome> {
   let listed: ListedDoc[];
   try {
@@ -128,6 +134,15 @@ export async function runSourceDraftForNewest(
   }
   if (listed.length === 0) {
     return { outcome: "skipped", reason: `collection ${collection} is empty` };
+  }
+
+  // Prune seam: a dismissed doc must never be selected here either.
+  const dismissed = getDismissed ? await getDismissed() : new Set<string>();
+  if (dismissed.size) {
+    listed = listed.filter((d) => !dismissed.has(`${collection}/${d.id}`));
+    if (listed.length === 0) {
+      return { outcome: "skipped", reason: `every doc in ${collection} is dismissed` };
+    }
   }
 
   // Newest-first by listing date (undated sorts last).
@@ -228,6 +243,13 @@ export interface SourceBacklogDeps {
   getConsumed: CoverageDeps["getConsumed"];
   /** Pending keys (draft/approved proposals) — credit rule. */
   getPending: CoverageDeps["getPending"];
+  /**
+   * DISMISSED keys (`backlog:dismissed`, `<collection>/<id>`) — docs a human pruned
+   * out of the backlog. Excluded from the queue so a dismissal actually stops model
+   * spend on this seam too, not just on the drain. Absent ⇒ ∅ (byte-identical to
+   * pre-PR-2 selection); the route binds it from the bot's watcher snapshot.
+   */
+  getDismissed?: () => Promise<Set<string>>;
   /** Fetch a doc's body + url (`GET /api/document/<collection>/<id>`) for one draft. */
   fetchDoc: (collection: string, id: string) => Promise<RawFetchedDoc | null>;
   /** Draft ONE source page from a fully-formed input (the real model one-shot). */
@@ -284,15 +306,23 @@ export function defaultSourceBacklogDeps(
  * chronological tail. Undated docs sort LAST (treated as +∞): clearly-dated old docs
  * drain first, so a naive inversion of the drain's undated-as-−∞ convention can't
  * float them to the head. Undated docs are R5's archive-tail territory, deferred here.
+ *
+ * `dismissed` (`<collection>/<id>` keys, default ∅) is subtracted AFTER the partition,
+ * never inside `computeIngestBacklog` — same layering rule as the drain's exclusion.
+ * `totalQueued` therefore reports the ACTIONABLE queue: a dismissed doc is neither
+ * drafted nor counted as waiting.
  */
 export function selectSourceBacklogDocs(
   listedBySource: Record<string, BacklogListedDoc[]>,
   wikiRefs: WikiRefs,
   consumed: Set<string>,
   pending: Set<string>,
+  dismissed: Set<string> = new Set(),
 ): { queued: QueuedDoc[]; totalQueued: number } {
   const backlog = computeIngestBacklog(listedBySource, wikiRefs, consumed, pending);
-  const queued = backlog.byCollection.flatMap((c) => c.queuedDocs);
+  const queued = backlog.byCollection
+    .flatMap((c) => c.queuedDocs)
+    .filter((d) => !dismissed.has(`${d.collection}/${d.id}`));
   const sorted = [...queued].sort(
     (a, b) =>
       (docDateMs(a) ?? Number.POSITIVE_INFINITY) - (docDateMs(b) ?? Number.POSITIVE_INFINITY),
@@ -331,11 +361,12 @@ export async function runSourceDraftBacklog(
 ): Promise<SourceBacklogResult> {
   const cap = clampSourceBacklogLimit(limit);
 
-  const [listed, wikiRefs, consumed, pending] = await Promise.all([
+  const [listed, wikiRefs, consumed, pending, dismissed] = await Promise.all([
     deps.listDocs(collection),
     deps.sweepWikiRefs(wikiDir),
     deps.getConsumed(botConfig.name),
     deps.getPending(botConfig.name),
+    deps.getDismissed ? deps.getDismissed() : Promise.resolve(new Set<string>()),
   ]);
 
   const { queued, totalQueued } = selectSourceBacklogDocs(
@@ -343,6 +374,7 @@ export async function runSourceDraftBacklog(
     wikiRefs,
     consumed,
     pending,
+    dismissed,
   );
 
   // Scan the whole queue in order; only real model attempts (drafted/error) count

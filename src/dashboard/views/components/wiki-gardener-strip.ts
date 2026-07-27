@@ -140,6 +140,17 @@ export interface IngestBacklogResponse {
   remaining?: number;
   /** Queued docs also in the offered set — the honest "offered in past runs" count. */
   offeredStillQueued?: number;
+  /** Queued docs a human DISMISSED — the fourth bucket (absent/older server ⇒ 0). */
+  dismissed?: number;
+  /**
+   * Per-collection breakdown of {@link dismissed} (always present alongside it on a
+   * live response; absent ⇒ {} ⇒ every actionable affordance reads exactly as it did
+   * before). The ACTIONABLE affordances ("Backfill oldest" + its `<select>` counts,
+   * `nothingDrainable`) subtract it from the cached per-collection `queued`, which is
+   * a FOOTPRINT number and therefore still counts dismissed docs — see the coverage
+   * note on {@link backlogTailHtml} for why the two readings differ on purpose.
+   */
+  dismissedByCollection?: Record<string, number>;
   /** Queued docs still inside the weekly watcher's window — the "new arrivals" lead. */
   fresh?: number;
   /**
@@ -183,8 +194,12 @@ export interface IngestBacklogResponse {
   docs?: BacklogDoc[];
 }
 
-/** Which live bucket a queued doc falls in (mirrors the route's `BacklogBucket`). */
-export type BacklogBucket = "fresh" | "drainable" | "offered";
+/**
+ * Which live bucket a queued doc falls in (mirrors the route's `BacklogBucket`).
+ * `dismissed` is the human-pruned bucket — excluded from every actionable count and
+ * from every selection seam, and it WINS over `offered` when a doc is in both.
+ */
+export type BacklogBucket = "fresh" | "drainable" | "offered" | "dismissed";
 
 /**
  * One inspector row (mirrors the route's `BacklogDocRow` — hand-declared here for
@@ -203,6 +218,22 @@ export interface BacklogDoc {
 }
 
 /**
+ * A STICKY prune notice — the outcome of the last dismiss/delete action.
+ *
+ * Deliberately separate from {@link BacklogInspectorState.error} (the doc-FETCH
+ * error), because every prune verb ends in a refetch and `loadInspectorDocs`
+ * nulls `error` on success: a 409 "gardener run in flight", a 404, or the honest
+ * "deleted — but a reindex was already running" note would be wiped within a frame
+ * if it rode that field. The notice is cleared only by the NEXT user action
+ * (a prune click, a bucket/collection filter change, a panel toggle).
+ */
+export interface BacklogInspectorNotice {
+  text: string;
+  /** `err` renders in the error palette; `info` is an honest-but-not-failed note. */
+  kind: "err" | "info";
+}
+
+/**
  * The inspector panel's module-level state. Lives OUTSIDE the strip's DOM (the
  * drain poller replaces the strip's innerHTML every 3s, which would otherwise
  * slam the panel shut — the same footgun the tail `<details>` open-state guards
@@ -216,10 +247,19 @@ export interface BacklogInspectorState {
   collection: string;
   loading: boolean;
   error: string | null;
+  /** Sticky prune outcome — survives a successful refetch. See {@link BacklogInspectorNotice}. */
+  notice: BacklogInspectorNotice | null;
   /** Null until the first lazy fetch resolves. */
   docs: BacklogDoc[] | null;
   /** How many filtered rows to render (paging guard for tail-heavy bots). */
   limit: number;
+  /**
+   * Doc keys (`<collection>/<id>`) whose DELETE is in flight — huginn's 200 only
+   * means "source moved + reindex started", so the row stays "removing…" until the
+   * reindex poll goes terminal (see the delete route). Also used as a per-row
+   * re-entrancy guard for the dismiss verbs.
+   */
+  removing: string[];
 }
 
 /** How many rows the inspector renders per page (Show more adds another page). */
@@ -233,8 +273,10 @@ export function initialInspectorState(): BacklogInspectorState {
     collection: "",
     loading: false,
     error: null,
+    notice: null,
     docs: null,
     limit: INSPECTOR_PAGE_SIZE,
+    removing: [],
   };
 }
 
@@ -246,6 +288,12 @@ export interface BacklogStripModel {
   perSource: { label: string; queued: number; total: number; collection: string }[];
   eligibleNow: number;
   offeredStillQueued: number;
+  /**
+   * Queued docs a human dismissed (the fourth bucket). Presented as a tail chip +
+   * a "Reset dismissed" affordance — see {@link backlogTailHtml} for why the
+   * COVERAGE sentence keeps counting them while the actionable counts do not.
+   */
+  dismissedCount: number;
   /** New arrivals inside the watcher window (the sentence's lead segment). */
   freshTotal: number;
   freshPerSource: { label: string; count: number; collection?: string }[];
@@ -286,6 +334,17 @@ export interface BacklogStripModel {
   controlHidden: boolean;
   showRun: boolean;
   showReset: boolean;
+  /**
+   * Offer "Reset dismissed (N)" — mirrors {@link showReset} exactly (hidden without a
+   * seeded watcher, hidden while a run holds the mutex since the route 409s then).
+   */
+  showDismissReset: boolean;
+  /**
+   * The inspector may render its prune buttons. Same gate as the Reset controls: the
+   * dismissed set is keyed by the gardener watcher's id, so a bot with no seeded
+   * watcher has nowhere to store it and the route 404s — hide rather than 404.
+   */
+  pruneEnabled: boolean;
   /** Queued but nothing drainable now (every past-floor doc already offered). */
   nothingDrainable: boolean;
   batchSize: number;
@@ -364,6 +423,9 @@ export function backlogStripModel(
   // floor would inflate by counting merely-too-fresh docs as offered. Falls back
   // to 0 on a degraded response (no live fields ⇒ "none offered yet").
   const offeredStillQueued = Math.max(0, numOr(data.offeredStillQueued, 0));
+  // Fourth bucket. Absent on a degraded/older server ⇒ 0 ⇒ every dismissed
+  // affordance hides, and the sentence reads exactly as it did before PR 2.
+  const dismissedCount = Math.max(0, numOr(data.dismissed, 0));
   // Fresh bucket (new arrivals inside the watcher window). freshWindowDays doubles
   // as the presence marker: 0/absent ⇒ degraded response ⇒ the sentence hides the
   // fresh segment rather than showing a false "0 new".
@@ -384,8 +446,21 @@ export function backlogStripModel(
       count: s.count,
       ...(typeof s.collection === "string" && s.collection ? { collection: s.collection } : {}),
     }));
+  // Per-collection dismissed counts — the ACTIONABLE affordances subtract them from
+  // the cached (footprint) `queued`. A malformed/absent map degrades to {} ⇒ no
+  // subtraction ⇒ exactly the pre-fix behaviour.
+  const dismissedByCollection: Record<string, number> =
+    data.dismissedByCollection && typeof data.dismissedByCollection === "object"
+      ? data.dismissedByCollection
+      : {};
+  const dismissedIn = (collection: string): number =>
+    Math.max(0, numOr(dismissedByCollection[collection], 0));
   const running = data.running === true;
   const controlHidden = data.watcherSeeded === false;
+  // Prune affordances need a POSITIVELY seeded watcher: the dismissed snapshot is
+  // keyed by the watcher id, so a degraded/older server that omits `watcherSeeded`
+  // must NOT render buttons that would 404 (`!controlHidden` treated absent as true).
+  const watcherSeeded = data.watcherSeeded === true;
   const batchSize = numOr(data.batchSize, 0);
   const maxProposals = numOr(data.maxProposals, 0);
   // Watcher affordance (fresh segment). Only an ENABLED watcher offers a next-run
@@ -409,14 +484,17 @@ export function backlogStripModel(
     total: Math.max(0, numOr(c.total, 0)),
     collection: typeof c.collection === "string" ? c.collection : "",
   }));
-  // Source-draft select options: one per reported collection, its queued count as
-  // the label. The button is offered when ANY collection has uncovered docs; the
-  // pre-selected collection is the one with the largest queue (the client can pick
-  // another and the button re-gates on that collection's count).
+  // Source-draft select options: one per reported collection, its ACTIONABLE queued
+  // count as the label — the cached per-collection `queued` MINUS that collection's
+  // dismissed docs (floored at 0). Without the subtraction, dismissing every doc in a
+  // collection left "Backfill oldest" enabled and mislabeled against a queue the
+  // drafter would refuse. The button is offered when ANY collection has actionable
+  // uncovered docs; the pre-selected collection is the one with the largest such
+  // queue (the client can pick another and the button re-gates on that count).
   const sourceDraftOptions = perSource.map((s) => ({
     collection: s.collection,
     label: s.label,
-    queued: s.queued,
+    queued: Math.max(0, s.queued - dismissedIn(s.collection)),
   }));
   const sourceDraftDefaultCollection = sourceDraftOptions.length
     ? sourceDraftOptions.reduce((best, o) => (o.queued > best.queued ? o : best)).collection
@@ -427,6 +505,7 @@ export function backlogStripModel(
     perSource,
     eligibleNow: remaining,
     offeredStillQueued,
+    dismissedCount,
     freshTotal,
     freshPerSource,
     freshWindowDays,
@@ -444,7 +523,18 @@ export function backlogStripModel(
     // gating on `offered > 0` could render "Reset offered (0)" once every offered
     // key is consumed, where a reset would be a no-op anyway.
     showReset: !controlHidden && !running && offeredStillQueued > 0,
-    nothingDrainable: !controlHidden && !running && remaining <= 0 && queued > 0,
+    showDismissReset: watcherSeeded && !running && dismissedCount > 0,
+    // The prune verbs need the watcher (dismissed snapshot FK) — same gate as Reset,
+    // but requiring `watcherSeeded === true` explicitly (finding 8: an ABSENT field on
+    // a degraded server must not enable buttons whose routes 404).
+    // Deliberately NOT gated on `running`: the routes 409 cleanly under the mutex and
+    // the panel is a reading surface, so the buttons stay visible mid-drain.
+    pruneEnabled: watcherSeeded,
+    // "nothing drainable" is an ACTIONABLE statement, so the queued side subtracts the
+    // dismissed docs: with every queued doc dismissed there is no queue to speak of and
+    // the note would be a non-sequitur.
+    nothingDrainable:
+      !controlHidden && !running && remaining <= 0 && queued - dismissedCount > 0,
     batchSize,
     maxProposals,
     drainNow: Math.max(0, Math.min(batchSize, remaining)),
@@ -633,9 +723,16 @@ export function backlogTailHtml(model: BacklogStripModel, inspect?: BacklogInspe
   // Denominator falls back to the queued count on a degraded response with no all-
   // time total (never < numerator, so "N of N" reads as full-tail rather than lying).
   const total = Math.max(model.allTimeTotal, model.totalNeverIngested);
+  // The coverage sentence deliberately KEEPS counting dismissed docs: it is a
+  // statement about wiki FOOTPRINT, and dismissing a doc doesn't ingest it. The
+  // ACTIONABLE counts (fresh / drainable / offered) exclude them by construction —
+  // so the note names the dismissed share, keeping the two readings reconcilable
+  // instead of leaving an unexplained gap between the tail and the lead.
+  const dismissedNote = model.dismissedCount > 0 ? `; ${model.dismissedCount} dismissed` : "";
   const summary =
     `${strong(model.totalNeverIngested)} of ${strong(total)} all-time docs have no wiki footprint` +
-    ` <span class="bk-note">(pre-auto-drafter tail; new captures auto-draft their own source page)</span>`;
+    ` <span class="bk-note">(pre-auto-drafter tail; new captures auto-draft their own source page` +
+    `${dismissedNote})</span>`;
   const breakdown = model.perSource
     .map((s) => {
       // Guard the denominator like the aggregate line: a degraded/older response can
@@ -666,10 +763,27 @@ export function backlogTailHtml(model: BacklogStripModel, inspect?: BacklogInspe
           inspect,
         )
       : "";
+  // The dismissed bucket's chip + its reset affordance. `Reset dismissed (N)` is a
+  // pure action button like `Reset offered (N)`; the chip beside it is the way to SEE
+  // the rows without acting on them.
+  const dismissedChip =
+    model.dismissedCount > 0
+      ? '<span class="bk-sep"> · </span>' +
+        inspectToggle(
+          `<span class="bk-n">${model.dismissedCount}</span> dismissed`,
+          "dismissed",
+          "",
+          inspect,
+        ) +
+        (model.showDismissReset
+          ? ` <button class="gard-btn bk-reset-dismissed" data-backlog-action="reset-dismissed">` +
+            `Reset dismissed (${model.dismissedCount})</button>`
+          : "")
+      : "";
   return (
     '<details class="bk-tail">' +
     `<summary>${summary}</summary>` +
-    `<span class="bk-tail-body">${breakdown}${offeredChip}</span>` +
+    `<span class="bk-tail-body">${breakdown}${offeredChip}${dismissedChip}</span>` +
     "</details>"
   );
 }
@@ -1041,7 +1155,13 @@ const BUCKET_LABEL: Record<BacklogBucket, string> = {
   fresh: "new",
   drainable: "drainable",
   offered: "offered",
+  dismissed: "dismissed",
 };
+
+/** The snapshot key a queued doc is tracked by — identical to the server's. */
+export function backlogDocKey(d: { collection: string; id: string }): string {
+  return `${d.collection}/${d.id}`;
+}
 
 /**
  * The dashboard doc-reader deep link for a queued doc. **Always** percent-encodes
@@ -1072,10 +1192,35 @@ export function filterBacklogDocs(
  * reader; the external "open ↗" only renders for an http(s) url (`esc()` does not
  * neutralize a `javascript:` scheme).
  */
-function inspectorRowHtml(d: BacklogDoc, sourceLabel: string): string {
+function inspectorRowHtml(
+  d: BacklogDoc,
+  sourceLabel: string,
+  pruneEnabled: boolean,
+  removing: Set<string>,
+): string {
   const open = d.url && /^https?:\/\//i.test(d.url)
     ? `<a class="bk-doc-open" href="${esc(d.url)}" target="_blank" rel="noopener">open ↗</a>`
     : "";
+  const key = backlogDocKey(d);
+  const attrs =
+    `data-doc-key="${esc(key)}" data-doc-collection="${esc(d.collection)}" ` +
+    `data-doc-id="${esc(d.id)}" data-doc-label="${esc(d.label || d.id)}"`;
+  let actions = "";
+  if (removing.has(key)) {
+    // A delete's huginn 200 only means "moved + reindex started" — the row stays in
+    // this state until the reindex poll goes terminal, so the user never sees a doc
+    // that looks deleted but is still listed.
+    actions = '<span class="bk-doc-removing">removing…</span>';
+  } else if (pruneEnabled) {
+    actions =
+      d.bucket === "dismissed"
+        ? `<button type="button" class="bk-doc-btn" data-doc-action="undismiss" ${attrs} ` +
+          `title="Return this doc to the queue">un-dismiss</button>`
+        : `<button type="button" class="bk-doc-btn" data-doc-action="dismiss" ${attrs} ` +
+          `title="Never select this doc (reversible)">dismiss</button>` +
+          `<button type="button" class="bk-doc-btn bk-doc-danger" data-doc-action="delete" ${attrs} ` +
+          `title="Delete this doc from huginn (irreversible)">delete</button>`;
+  }
   return (
     '<div class="bk-doc-row">' +
     `<span class="bk-doc-date">${esc(d.date ?? "—")}</span>` +
@@ -1083,6 +1228,7 @@ function inspectorRowHtml(d: BacklogDoc, sourceLabel: string): string {
     `<a class="bk-doc-title" href="${backlogDocHref(d.collection, d.id)}" title="${esc(d.id)}">${esc(d.label || d.id)}</a>` +
     `<span class="bk-doc-chip bk-doc-${d.bucket}">${esc(BUCKET_LABEL[d.bucket])}</span>` +
     open +
+    (actions ? `<span class="bk-doc-actions">${actions}</span>` : "") +
     "</div>"
   );
 }
@@ -1104,11 +1250,14 @@ function inspectorRowHtml(d: BacklogDoc, sourceLabel: string): string {
 export function backlogInspectorHtml(
   state: BacklogInspectorState,
   sources: { collection: string; label: string; queued?: number }[],
+  opts: { pruneEnabled?: boolean } = {},
 ): string {
   if (!state.open) return "";
+  const pruneEnabled = opts.pruneEnabled === true;
+  const removing = new Set(state.removing);
   const labelOf = (collection: string): string =>
     sources.find((s) => s.collection === collection)?.label || collection;
-  const buckets: (BacklogBucket | "all")[] = ["all", "fresh", "drainable", "offered"];
+  const buckets: (BacklogBucket | "all")[] = ["all", "fresh", "drainable", "offered", "dismissed"];
   const bucketBtns = buckets
     .map((b) => {
       const on = state.bucket === b ? " bk-filter-on" : "";
@@ -1138,6 +1287,15 @@ export function backlogInspectorHtml(
     'aria-label="Close the backlog inspector">✕</button>' +
     "</div>";
 
+  // The STICKY prune notice (finding 1) — rendered above the rows and NOT cleared by
+  // a successful refetch, so a 409/404/400 or the honest skipped-reindex note survives
+  // the `loadInspectorDocs` that every prune verb triggers. Distinct from `error`
+  // (the doc-fetch failure) in both field and styling.
+  const noticeHtml = state.notice
+    ? `<div class="bk-inspector-notice ${state.notice.kind === "err" ? "bk-err" : "bk-info"}" ` +
+      `role="status">${esc(state.notice.text)}</div>`
+    : "";
+
   let body: string;
   let footer = "";
   // A failed refresh must NOT wipe rows the user is reading: with docs already
@@ -1158,12 +1316,21 @@ export function backlogInspectorHtml(
       body =
         errNote +
         '<div class="bk-inspector-rows">' +
-        shown.map((d) => inspectorRowHtml(d, labelOf(d.collection))).join("") +
+        shown.map((d) => inspectorRowHtml(d, labelOf(d.collection), pruneEnabled, removing)).join("") +
         "</div>";
       const more = filtered.length - shown.length;
+      // Bulk is dismiss-ONLY (delete stays single-row + per-doc confirm) and acts on
+      // the whole FILTERED set — not just the rendered page — so a "Show more" click
+      // isn't a prerequisite for pruning a long tail. Already-dismissed rows are
+      // excluded (dismissing them again is a no-op that would only inflate the count).
+      const bulkTargets = filtered.filter((d) => d.bucket !== "dismissed");
       footer =
         '<div class="bk-inspector-foot">' +
         `<span class="bk-note">showing ${shown.length} of ${filtered.length}</span>` +
+        (pruneEnabled && bulkTargets.length
+          ? `<button type="button" class="gard-btn bk-inspector-bulk" data-inspect-action="bulk-dismiss">` +
+            `Dismiss all ${bulkTargets.length}</button>`
+          : "") +
         (more > 0
           ? `<button type="button" class="gard-btn bk-inspector-more" data-inspect-action="more">Show ${Math.min(more, INSPECTOR_PAGE_SIZE)} more</button>`
           : "") +
@@ -1171,5 +1338,5 @@ export function backlogInspectorHtml(
         "</div>";
     }
   }
-  return `<div class="bk-inspector">${head}${body}${footer}</div>`;
+  return `<div class="bk-inspector">${head}${noticeHtml}${body}${footer}</div>`;
 }

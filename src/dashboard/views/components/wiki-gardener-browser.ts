@@ -16,6 +16,8 @@ import {
   backlogTailHtml,
   sourceDraftResultHtml,
   backlogInspectorHtml,
+  backlogDocKey,
+  filterBacklogDocs,
   initialInspectorState,
   INSPECTOR_PAGE_SIZE,
   type BacklogBucket,
@@ -355,6 +357,23 @@ let inspector: BacklogInspectorState = initialInspectorState();
 // True while the lazy `?docs=1` fetch is in flight — one at a time.
 let inspectorFetching = false;
 
+// Reindex poll cadence after a delete (huginn's 200 only starts the reindex).
+const REINDEX_POLL_INTERVAL_MS = 2000;
+// Hard stop so an abandoned/stuck reindex can't leave a row wedged on "removing…";
+// the server cache heals at TTL expiry either way.
+const REINDEX_POLL_MAX_MS = 120_000;
+// How many consecutive NON-terminal, non-`running` status reads (an `idle`, a 400, an
+// unreachable huginn) before the poll gives up on that collection. Small: the status
+// is only ever `idle` here when something is wrong, since huginn flips the collection
+// to `running` synchronously BEFORE its DELETE responds (verified in huginn
+// main/runtime/knowledge_store.py) — so the first poll can never see a stale terminal
+// state from a previous run.
+const REINDEX_STATUS_RETRY_MAX = 3;
+// Server-side cap on one dismiss request's key list (`MAX_DISMISS_KEYS` in
+// wiki-gardener-routes.ts). The client chunks to stay under it so the bulk affordance
+// can never trip the 400 on a tail-heavy bot.
+const DISMISS_KEY_CHUNK = 2000;
+
 function pendingDraftCount(): number {
   return allProposals.filter((p) => p.status === "draft").length;
 }
@@ -415,7 +434,7 @@ function renderBacklog(data: IngestBacklogResponse): void {
     backlogTailHtml(model, inspector) +
     // The inspector renders last (its own full-width row below the tail) and only
     // when open — its state lives at module level, so a poll re-render can't shut it.
-    backlogInspectorHtml(inspector, model.perSource);
+    backlogInspectorHtml(inspector, model.perSource, { pruneEnabled: model.pruneEnabled });
   if (tailWasOpen) {
     const tail = el.querySelector<HTMLDetailsElement>(".bk-tail");
     if (tail) tail.open = true;
@@ -709,9 +728,11 @@ async function dismissBacklog(): Promise<void> {
 }
 
 // Re-render the strip from the last payload — the inspector's state changes are
-// client-only (open/filter/paging), so they never need a server round-trip.
+// client-only (open/filter/paging/removing), so they never need a server round-trip.
+// NB: this must re-enter `renderBacklog`, NOT itself (a self-call shipped in PR 1 and
+// blew the stack on the first inspector toggle).
 function rerenderStrip(): void {
-  rerenderStrip();
+  if (lastBacklogData) renderBacklog(lastBacklogData);
 }
 
 // Lazy per-doc fetch (`?docs=1`) behind the inspector. Runs on OPEN only — the
@@ -753,9 +774,249 @@ function refreshInspectorAfterMutation(): void {
   if (inspector.open) void loadInspectorDocs();
 }
 
+// ── Prune verbs (dismiss / un-dismiss / delete) ────────────────────────────
+//
+// Dismiss lands at the LIVE-merge layer (the dismissed set is read per request,
+// outside the 5-min cache), so a PLAIN refetch already reflects it — never
+// `refresh=1`, which would force the expensive recompute (wiki sweep + 5 sequential
+// huginn listings) on every click.
+
+// Set/clear the STICKY prune notice. It lives on its own state field (not
+// `inspector.error`) precisely because every prune verb ends in a refetch and
+// `loadInspectorDocs` nulls `error` on success — a 409/404/400 or the honest
+// skipped-reindex note would otherwise vanish within a frame. Cleared by the next
+// user action (a prune click, a filter change, a panel toggle), never by a refetch.
+function setInspectorNotice(text: string, kind: "err" | "info"): void {
+  inspector.notice = { text, kind };
+}
+function clearInspectorNotice(): void {
+  inspector.notice = null;
+}
+
+// Plain (non-refresh) strip refetch + inspector refresh — the dismiss verbs' tail.
+function reloadAfterDismiss(): void {
+  fetch(withBot("/api/wiki/ingest-backlog"))
+    .then((r) => r.json())
+    .then((data: IngestBacklogResponse) => {
+      renderBacklog(data);
+      refreshInspectorAfterMutation();
+    })
+    .catch(() => {});
+}
+
+// POST a key list to a dismiss verb, CHUNKED under the route's `MAX_DISMISS_KEYS`
+// cap (sequential awaits — the routes serialize on the per-bot gardener mutex, so
+// parallel chunks would just 409 each other). Stops on the first failed chunk and
+// leaves a sticky notice; the already-applied chunks stand (dismiss is idempotent
+// and reversible, so a partial apply is safe — the counts show what landed).
+async function postDismissKeys(path: string, keys: string[]): Promise<void> {
+  if (!keys.length) return;
+  clearInspectorNotice();
+  for (let i = 0; i < keys.length; i += DISMISS_KEY_CHUNK) {
+    const chunk = keys.slice(i, i + DISMISS_KEY_CHUNK);
+    let failed = false;
+    try {
+      const res = await fetch(withBot(path), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ keys: chunk }),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        setInspectorNotice(body.error || `dismiss failed (${res.status})`, "err");
+        failed = true;
+      }
+    } catch {
+      setInspectorNotice("couldn't reach the server", "err");
+      failed = true;
+    }
+    if (failed) break;
+  }
+  reloadAfterDismiss();
+}
+
+// "Reset dismissed (N)" — the offered-reset analogue for the prune bucket.
+async function resetDismissed(): Promise<void> {
+  clearInspectorNotice();
+  try {
+    const res = await fetch(withBot("/api/wiki/gardener/backlog-docs-dismiss-reset"), {
+      method: "POST",
+    });
+    if (!res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { error?: string };
+      setInspectorNotice(body.error || `reset failed (${res.status})`, "err");
+    }
+  } catch {
+    setInspectorNotice("couldn't reach the server", "err");
+  }
+  reloadAfterDismiss();
+}
+
+// The keys the bulk button acts on: the whole FILTERED set minus already-dismissed
+// rows (mirrors `backlogInspectorHtml`'s own bulk-target derivation).
+function bulkDismissTargets(): string[] {
+  if (!inspector.docs) return [];
+  return filterBacklogDocs(inspector.docs, inspector.bucket, inspector.collection)
+    .filter((d) => d.bucket !== "dismissed")
+    .map((d) => backlogDocKey(d));
+}
+
+/**
+ * Delete one doc from huginn, then wait for the truth to catch up.
+ *
+ * huginn's 200 means "source moved + background reindex started" — the doc is still
+ * in its LISTING until that reindex finishes. So: mark the row "removing…", poll
+ * each started collection's update-status until terminal (which is also where the
+ * server drops the bot's cached backlog), and only THEN re-fetch with `refresh=1`.
+ * An immediate `refresh=1` would re-list the still-present doc and cache that wrong
+ * payload for the full 5-min TTL.
+ *
+ * A `skipped_already_running` collection is reported honestly instead of polled: its
+ * in-flight run started BEFORE the move, so its success says nothing about this delete.
+ * If the poll is abandoned (page reload) the cache entry heals at TTL expiry.
+ *
+ * **`refresh=1` is conditional on a TERMINAL poll.** The server drops its cached
+ * backlog only when a status poll reads `succeeded`/`failed`; so when NOTHING reached
+ * terminal (every collection `skipped_already_running`, or the status never resolved)
+ * a `refresh=1` would recompute against the still-listing huginn and re-cache that
+ * wrong payload for the full 5-min TTL — the exact move the route comment warns
+ * against. Those cases do a PLAIN refetch and say so in the sticky notice.
+ */
+async function deleteBacklogDoc(collection: string, id: string, label: string): Promise<void> {
+  const key = `${collection}/${id}`;
+  if (inspector.removing.includes(key)) return;
+  if (!window.confirm(`Delete "${label}" from ${collection}?\n\nThis removes the document from huginn and cannot be undone from this page.`)) {
+    return;
+  }
+  inspector.removing = [...inspector.removing, key];
+  inspector.error = null;
+  clearInspectorNotice();
+  rerenderStrip();
+
+  let polling: string[] = [];
+  let skipped: string[] = [];
+  try {
+    const res = await fetch(withBot("/api/wiki/gardener/backlog-doc-delete"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ collection, id }),
+    });
+    const body = (await res.json().catch(() => ({}))) as {
+      error?: string;
+      polling?: string[];
+      skipped?: string[];
+    };
+    if (!res.ok) {
+      setInspectorNotice(body.error || `delete failed (${res.status})`, "err");
+      inspector.removing = inspector.removing.filter((k) => k !== key);
+      rerenderStrip();
+      return;
+    }
+    polling = Array.isArray(body.polling) ? body.polling : [];
+    skipped = Array.isArray(body.skipped) ? body.skipped : [];
+  } catch {
+    setInspectorNotice("couldn't reach the server", "err");
+    inspector.removing = inspector.removing.filter((k) => k !== key);
+    rerenderStrip();
+    return;
+  }
+
+  const { unresolved } = await waitForReindex(polling);
+  inspector.removing = inspector.removing.filter((k) => k !== key);
+
+  // Honest, not silent: the doc IS gone from disk, but the listing this panel reads
+  // won't reflect it until those collections reindex again.
+  const caveats: string[] = [];
+  if (skipped.length) caveats.push(`a reindex was already running for ${skipped.join(", ")}`);
+  if (unresolved.length) {
+    caveats.push(`the reindex for ${unresolved.join(", ")} never reported a terminal status`);
+  }
+  if (caveats.length) {
+    setInspectorNotice(
+      `deleted — but ${caveats.join(" and ")}, so the doc may still be listed until the next index run`,
+      "info",
+    );
+  }
+
+  // Only a TERMINAL poll invalidated the server cache; without one, `refresh=1` would
+  // re-cache the still-listed doc for the whole TTL. Plain refetch instead — the row
+  // disappears on a later manual refresh once the blocking run (and a retried update)
+  // has finished.
+  const invalidated = polling.length - unresolved.length > 0;
+  if (!invalidated) {
+    reloadAfterDismiss();
+    return;
+  }
+  fetch(withBot("/api/wiki/ingest-backlog?refresh=1"))
+    .then((r) => r.json())
+    .then((data: IngestBacklogResponse) => {
+      renderBacklog(data);
+      refreshInspectorAfterMutation();
+    })
+    .catch(() => {
+      rerenderStrip();
+    });
+}
+
+/**
+ * Poll each collection's reindex until TERMINAL (bounded — never a wedged spinner).
+ *
+ * Terminal is `succeeded`/`failed` EXPLICITLY — huginn's status vocabulary is
+ * `idle|running|succeeded|failed`, and the server invalidates its backlog cache on
+ * exactly those two, so a looser `status !== "running"` predicate would report "done"
+ * for an `idle`/`unknown`/400 read that dropped no cache. There is no
+ * "first poll sees the previous run's terminal status" race to guard against: huginn
+ * marks the collection `running` synchronously before the DELETE responds.
+ *
+ * Returns the collections whose status never resolved (retry budget exhausted, huginn
+ * unreachable, or the overall deadline hit) so the caller can skip `refresh=1`.
+ */
+async function waitForReindex(collections: string[]): Promise<{ unresolved: string[] }> {
+  const deadline = Date.now() + REINDEX_POLL_MAX_MS;
+  const pending = new Set(collections);
+  const unresolved = new Set<string>();
+  const strikes = new Map<string, number>();
+  const strike = (collection: string): void => {
+    const n = (strikes.get(collection) ?? 0) + 1;
+    strikes.set(collection, n);
+    if (n >= REINDEX_STATUS_RETRY_MAX) {
+      pending.delete(collection);
+      unresolved.add(collection);
+    }
+  };
+  while (pending.size && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, REINDEX_POLL_INTERVAL_MS));
+    for (const collection of [...pending]) {
+      try {
+        const res = await fetch(
+          withBot(
+            `/api/wiki/gardener/backlog-doc-delete-status?collection=${encodeURIComponent(collection)}`,
+          ),
+        );
+        const body = (await res.json()) as { status?: string };
+        if (body.status === "succeeded" || body.status === "failed") {
+          pending.delete(collection);
+        } else if (body.status === "running") {
+          strikes.delete(collection);
+        } else {
+          // `idle` / `unknown` / a 400 body — retry a couple of ticks (a transient
+          // blip), then stop waiting on it rather than spinning to the deadline.
+          strike(collection);
+        }
+      } catch {
+        strike(collection);
+      }
+    }
+  }
+  // Anything still pending when the deadline hit never went terminal either.
+  for (const collection of pending) unresolved.add(collection);
+  return { unresolved: [...unresolved] };
+}
+
 // Open the inspector on a count's (bucket, collection) pair — or close it when the
 // same count is clicked again (the toggle contract).
 function toggleInspector(bucket: BacklogBucket | "all", collection: string): void {
+  clearInspectorNotice();
   if (inspector.open && inspector.bucket === bucket && inspector.collection === collection) {
     inspector.open = false;
     rerenderStrip();
@@ -783,18 +1044,43 @@ document.getElementById("gardBacklog")?.addEventListener("click", (e) => {
     toggleInspector(bucket, toggle.getAttribute("data-inspect-collection") || "");
     return;
   }
-  // Inspector panel controls (close / show more).
+  // Per-row prune verbs (dismiss / un-dismiss / delete).
+  const docAction = target.closest("[data-doc-action]");
+  if (docAction) {
+    const what = docAction.getAttribute("data-doc-action");
+    const key = docAction.getAttribute("data-doc-key") || "";
+    if (what === "dismiss") void postDismissKeys("/api/wiki/gardener/backlog-docs-dismiss", [key]);
+    else if (what === "undismiss") {
+      void postDismissKeys("/api/wiki/gardener/backlog-docs-undismiss", [key]);
+    } else if (what === "delete") {
+      void deleteBacklogDoc(
+        docAction.getAttribute("data-doc-collection") || "",
+        docAction.getAttribute("data-doc-id") || "",
+        docAction.getAttribute("data-doc-label") || key,
+      );
+    }
+    return;
+  }
+  // Inspector panel controls (close / show more / bulk dismiss).
   const inspectAction = target.closest("[data-inspect-action]");
   if (inspectAction) {
     const what = inspectAction.getAttribute("data-inspect-action");
     if (what === "close") inspector.open = false;
     else if (what === "more") inspector.limit += INSPECTOR_PAGE_SIZE;
+    else if (what === "bulk-dismiss") {
+      const keys = bulkDismissTargets();
+      if (keys.length && window.confirm(`Dismiss ${keys.length} doc(s)? They stop being selected by the gardener, and can be un-dismissed later.`)) {
+        void postDismissKeys("/api/wiki/gardener/backlog-docs-dismiss", keys);
+      }
+      return;
+    }
     rerenderStrip();
     return;
   }
   // Inspector bucket filter.
   const bucketBtn = target.closest("[data-inspect-bucket]");
   if (bucketBtn) {
+    clearInspectorNotice();
     inspector.bucket = (bucketBtn.getAttribute("data-inspect-bucket") || "all") as BacklogBucket | "all";
     inspector.limit = INSPECTOR_PAGE_SIZE;
     rerenderStrip();
@@ -819,6 +1105,8 @@ document.getElementById("gardBacklog")?.addEventListener("click", (e) => {
     void startBacklogRun();
   } else if (action === "reset") {
     void resetBacklog();
+  } else if (action === "reset-dismissed") {
+    void resetDismissed();
   } else if (action === "run-watcher") {
     // "Run gardener now" on the fresh segment — queue the weekly watcher.
     const id = btn.getAttribute("data-watcher-id");
@@ -843,6 +1131,7 @@ document.getElementById("gardBacklog")?.addEventListener("change", (e) => {
   // The inspector's collection filter (client-only — the docs are already loaded).
   const inspectSel = (e.target as HTMLElement).closest(".bk-inspector-select") as HTMLSelectElement | null;
   if (inspectSel) {
+    clearInspectorNotice();
     inspector.collection = inspectSel.value;
     inspector.limit = INSPECTOR_PAGE_SIZE;
     rerenderStrip();

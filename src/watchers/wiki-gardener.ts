@@ -35,10 +35,11 @@ import {
   DRAFT_TIMEOUT_MS,
   runExclusive,
   WIKI_GARDENER_WEEKLY_RUN_KEY,
+  WIKI_GARDENER_DISMISSED_KEY,
   type WeeklyGardenerRun,
 } from "../gardener/backlog.ts";
 import type { ClusterDropEntry, ClusterDropTally } from "../gardener/cluster.ts";
-import { setWatcherSnapshot } from "../db/watchers.ts";
+import { getWatcherSnapshot, setWatcherSnapshot } from "../db/watchers.ts";
 import type { Config } from "../config.ts";
 import { getLog } from "../logging.ts";
 
@@ -289,6 +290,40 @@ export function buildGardenerSeams(ctx: GardenerSeamContext): SharedGardenerSeam
 }
 
 /**
+ * The weekly run's harvest EXCLUSION set: the applied-proposal `consumed` keys UNION
+ * the bot's DISMISSED keys (`backlog:dismissed`, the inspector's prune verb).
+ *
+ * `consumedDocIds` is the weekly path's ONLY exclusion seam, so without this union a
+ * doc dismissed today would be clustered by the very next weekly run — dismissal has
+ * to stop model spend on all three selection seams (drain / source drafter / weekly
+ * harvest), not just the two the dashboard drives.
+ *
+ * Injectable + exported so the union is unit-testable without a DB. Best-effort on the
+ * snapshot side: a read failure warns and degrades to the plain consumed set (today's
+ * behaviour) rather than failing the whole weekly run.
+ */
+export async function weeklyConsumedWithDismissed(
+  botName: string,
+  loadConsumed: () => Promise<Set<string>>,
+  loadDismissed: () => Promise<unknown>,
+): Promise<Set<string>> {
+  const consumed = await loadConsumed();
+  try {
+    const snap = await loadDismissed();
+    if (Array.isArray(snap)) {
+      for (const k of snap) if (typeof k === "string" && k) consumed.add(k);
+    }
+  } catch (err) {
+    log.warn("Wiki-gardener: reading the dismissed set failed for \"{name}\": {error}", {
+      botName,
+      name: botName,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  return consumed;
+}
+
+/**
  * Build the durable weekly-run snapshot from the aggregate drop tally the runner's
  * `onTally` hook emits. Pure + exported so the shape (and the `clustersFound === kept
  * + dropped` invariant) is unit-testable without a DB. The evicted-topic list is the
@@ -379,7 +414,18 @@ export async function checkWikiGardener(
       // stays eligible for concept/entity synthesis (source + concept pages about
       // the same video are complementary). The backlog-crediting path keeps the
       // unfiltered set, so a source-paged doc still counts as ingested there.
-      consumedDocIds: () => getConsumedDocIds(name, ["concept", "entity"]),
+      //
+      // DISMISSED docs (`backlog:dismissed`, the inspector's prune verb) are unioned
+      // in here — harvest's consumed-filter is the weekly path's only exclusion seam,
+      // so without this a doc dismissed today would be clustered by the very next
+      // weekly run (dismissal must stop model spend on ALL three selection seams).
+      // Best-effort: a snapshot read failure degrades to today's behaviour.
+      consumedDocIds: () =>
+        weeklyConsumedWithDismissed(
+          name,
+          () => getConsumedDocIds(name, ["concept", "entity"]),
+          () => getWatcherSnapshot(watcher.id, WIKI_GARDENER_DISMISSED_KEY),
+        ),
       ...buildGardenerSeams({ botConfig, config, apiUrl, wikiDir, profileUserId: watcher.userId, tracer }),
     }),
   );

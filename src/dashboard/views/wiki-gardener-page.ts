@@ -237,11 +237,40 @@ export async function renderWikiGardenerPage(opts?: {
     .gard-backlog .bk-doc-open { color: var(--status-info); text-decoration: none; font-size: 11.5px; white-space: nowrap; }
     .gard-backlog .bk-doc-open:hover { text-decoration: underline; }
     .gard-backlog .bk-inspector-note { color: var(--text-muted); font-size: 12px; padding: 6px 0; }
+    /* Sticky prune notice — survives the refetch every prune verb triggers. */
+    .gard-backlog .bk-inspector-notice {
+      font-size: 12px; padding: 6px 9px; margin: 6px 0; border-radius: 6px;
+      border-left: 3px solid var(--border-secondary);
+    }
+    .gard-backlog .bk-inspector-notice.bk-err {
+      color: var(--status-error); border-left-color: var(--status-error);
+      background: color-mix(in srgb, var(--status-error) 10%, transparent);
+    }
+    .gard-backlog .bk-inspector-notice.bk-info {
+      color: var(--text-secondary); border-left-color: var(--status-info);
+      background: color-mix(in srgb, var(--status-info) 10%, transparent);
+    }
     .gard-backlog .bk-inspector-foot { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
     .gard-backlog .gard-btn.bk-inspector-more {
       background: transparent; border: 1px solid var(--border-secondary); color: var(--text-secondary);
     }
     .gard-backlog .gard-btn.bk-inspector-more:hover { border-color: var(--accent); color: var(--text-primary); }
+    /* Prune verbs (PR 2): the dismissed bucket chip + the per-row action buttons. */
+    .gard-backlog .bk-doc-dismissed { background: color-mix(in srgb, var(--text-dim) 26%, transparent); color: var(--text-muted); text-decoration: line-through; }
+    .gard-backlog .bk-doc-actions { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+    .gard-backlog .bk-doc-btn {
+      padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border-secondary);
+      background: transparent; color: var(--text-muted); font-size: 11px; font-family: inherit; cursor: pointer;
+    }
+    .gard-backlog .bk-doc-btn:hover { color: var(--text-primary); border-color: var(--accent); }
+    .gard-backlog .bk-doc-btn.bk-doc-danger:hover { color: var(--status-error); border-color: var(--status-error); }
+    .gard-backlog .bk-doc-removing { color: var(--text-dim); font-size: 11px; font-style: italic; white-space: nowrap; }
+    .gard-backlog .gard-btn.bk-inspector-bulk, .gard-backlog .gard-btn.bk-reset-dismissed {
+      background: transparent; border: 1px solid var(--border-secondary); color: var(--text-secondary);
+    }
+    .gard-backlog .gard-btn.bk-inspector-bulk:hover, .gard-backlog .gard-btn.bk-reset-dismissed:hover {
+      border-color: var(--accent); color: var(--text-primary);
+    }
 
     .gard-filter-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 16px; }
     .gard-filter {

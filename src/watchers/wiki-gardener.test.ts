@@ -1,5 +1,10 @@
 import { test, expect, describe } from "bun:test";
-import { buildGardenerSeams, stampDraftClaudeSpan, buildWeeklyGardenerRun } from "./wiki-gardener.ts";
+import {
+  buildGardenerSeams,
+  stampDraftClaudeSpan,
+  buildWeeklyGardenerRun,
+  weeklyConsumedWithDismissed,
+} from "./wiki-gardener.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { Config } from "../config.ts";
 import type { Tracer } from "../tracing/index.ts";
@@ -135,5 +140,43 @@ describe("buildWeeklyGardenerRun — weekly-run snapshot shape (PR 2)", () => {
     expect(snap.clustersFound).toBe(5);
     expect(snap.dropped).toBe(0);
     expect(snap.evictedTopics).toEqual([]);
+  });
+});
+
+/**
+ * The weekly path's prune seam (PR 2). `consumedDocIds` is the ONLY exclusion the
+ * weekly run has, so the dismissed set has to ride in there — otherwise a doc
+ * dismissed today gets clustered by the very next weekly run.
+ */
+describe("weeklyConsumedWithDismissed — the weekly harvest exclusion (PR 2)", () => {
+  const consumed = (): Promise<Set<string>> =>
+    Promise.resolve(new Set(["youtube-summaries/applied.md"]));
+
+  test("unions the dismissed keys into the consumed set", async () => {
+    const set = await weeklyConsumedWithDismissed("jarvis", consumed, async () => [
+      "youtube-summaries/junk.md",
+      "x-articles/hype.md",
+    ]);
+    expect([...set].sort()).toEqual([
+      "x-articles/hype.md",
+      "youtube-summaries/applied.md",
+      "youtube-summaries/junk.md",
+    ]);
+  });
+
+  test("an absent / malformed / erroring snapshot degrades to the plain consumed set", async () => {
+    for (const load of [
+      async () => null,
+      async () => ({ nope: true }),
+      async () => ["ok/key.md", 42, ""],
+      async () => {
+        throw new Error("db down");
+      },
+    ]) {
+      const set = await weeklyConsumedWithDismissed("jarvis", consumed, load as () => Promise<unknown>);
+      expect(set.has("youtube-summaries/applied.md")).toBe(true);
+      // Only well-formed string keys are ever added.
+      expect([...set].every((k) => typeof k === "string" && k.length > 0)).toBe(true);
+    }
   });
 });
