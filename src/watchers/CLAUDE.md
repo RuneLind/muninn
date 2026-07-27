@@ -451,11 +451,102 @@ Spawns Haiku with the bot's Gmail MCP tools. The prompt has structural parts (Gm
 Two tiers over the Anthropic firehose, alert-only. The companion *indexing* half (Huginn `anthropic-knowledge`) already content-hash-diffs the same surfaces, so this watcher is Muninn-only.
 
 - **Tier-1** polls the verified GitHub Atom feeds (`DEFAULT_ANTHROPIC_FEEDS`) via a small Atom parser (`parseRssItems` is RSS-2.0-only and returns 0 on Atom). Dedup by entry id (the GitHub URL) against `lastNotifiedIds`; the runner **skips content-hash dedup for `type='anthropic'`** (ids are stable canonical URLs).
-- **Tier-2** (opt-in `config.tier2`) snapshot-and-diffs the feed-less surfaces — the `llms.txt` doc-URL set (~1753) + `anthropic.com/{news,engineering,research}` slug sets — against the `watcher_snapshots` table (one row per source). NOT `lastNotifiedIds` (600-capped, shared with Tier-1) and NOT `config` (the dashboard's `updateWatcher` overwrites the whole blob). URLs absent from the snapshot are candidates; each source's first run records the baseline silently.
+- **Tier-2** (opt-in `config.tier2`) snapshot-and-diffs the feed-less surfaces — the `llms.txt` doc-URL set (**549** since Anthropic's 2026-07-21 restructure; it held ~1953 before) + `anthropic.com/{news,engineering,research}` slug sets — against the `watcher_snapshots` table (one row per source). NOT `lastNotifiedIds` (600-capped, shared with Tier-1) and NOT `config` (the dashboard's `updateWatcher` overwrites the whole blob). URLs absent from the snapshot are candidates; each source's first run records the baseline silently.
 - **Haiku gate** (opt-in `config.gate`): the new candidates (Tier-1 entries + Tier-2 additions) are scored 0–1 in **one** Haiku call (`DEFAULT_ANTHROPIC_GATE_PROMPT` — weights Claude Code, agents/tools/MCP, retrieval/evals, and new models highest). Only candidates ≥ `minScore` alert, each carrying a one-line "why it matters"; the rest are tracked silently (one `silent: true` alert), so they aren't re-scored next run. The gate is what makes the high-churn commit feeds safe to enable. `config.quietMode` lets the model reply with literal `SKIP` to suppress the whole batch. On a gate error the run returns `[]` and Tier-2 snapshots are **not** advanced, so the additions re-surface and retry.
 - **Body excerpt fed to the gate ("alert depth", Learning Center §10).** The gate scores off **content, not just titles**: each candidate carries an optional truncated body slice (`excerpt`, hard-capped at `MAX_EXCERPT_CHARS` = 300) fed in on its own line by `formatCandidateList(cands, { withExcerpt: true })`. Per-source at the cheapest layer: **Tier-1** captures it *for free* from the Atom `<content>`/`<summary>` during `parseAtomEntries` (commit messages / release notes); **Tier-2 docs** are enriched by a small direct `.md` fetch in `enrichDocExcerpts` (the llms.txt URLs are clean-markdown `.md` per L7 — no Huginn id-resolution and no indexing-lag miss for a brand-new doc), bounded to `MAX_DOC_EXCERPT_FETCHES` (10) with a short per-fetch timeout; **Tier-2 blogs** stay title-only (HTML listings, no cheap clean body). Degrades gracefully — no body → title-only (today's behavior), and a doc-fetch error/over-cap is best-effort (logged, never breaks the run). **Gate path only** — the digest (`formatCandidateList` default, no `withExcerpt`) stays title-only so its up-to-DIGEST_MAX_TIER1-item prompt can’t balloon.
 
-**Cold start** (empty `lastNotifiedIds`): the Tier-1 baseline is recorded as a single silent alert and every Tier-2 snapshot is baselined — run 1 fires nothing despite ~1753 docs. Steady-state runs filter candidates against `lastNotifiedIds` **before** the gate, so the gate only ever sees the delta since the last run.
+**Cold start** (empty `lastNotifiedIds`): the Tier-1 baseline is recorded as a single silent alert and every Tier-2 snapshot is baselined — run 1 fires nothing despite the full doc set. Steady-state runs filter candidates against `lastNotifiedIds` **before** the gate, so the gate only ever sees the delta since the last run.
+
+### Two-layer Tier-2 response guard (2026-07-27, the llms.txt wedge)
+
+**What went wrong.** Anthropic restructured `llms.txt` on 2026-07-21, dropping ~1417 per-SDK
+duplicate API-reference URLs (1953 → 549). The single anti-poison guard —
+`freshUrls.length < prior.length / 2` — fired, `continue`d, and left the snapshot untouched.
+It then fired on **every run since**: 53 consecutive skips across all three anthropic rows,
+six days with no diff, no candidate, no digest mention, and **no surface anywhere** —
+`last_run_at` kept advancing, because the *watcher* was fine. The blog leg kept working the
+whole time, which is exactly what made it invisible.
+
+> **The rule this encodes.** Any defensive skip that can persist across runs needs three
+> things: a **counter** (how many consecutive times), a **bound** (after N, do something
+> different), and a **surface** (somewhere a human or an alert can see it). A guard with
+> none of them converts a temporary anomaly into permanent silent data loss.
+
+**Layer A — stateless response validity (`assertValidTextResponse`, the PRIMARY defence).**
+The two threat models the old guard named — a JS challenge, a truncated transfer — are
+directly detectable on the response itself, with no reference to history. Before parsing,
+`fetchLlmsTxtDocs`/`fetchBlogSlugs` reject a non-2xx, a non-`text/*` content type (and
+`text/html` specifically for `llms.txt`), a body under a byte floor
+(`LLMS_MIN_BODY_BYTES` 1 KB / `BLOG_MIN_BODY_BYTES` 512 — deliberately generous, since the
+file legitimately shrank 72% once and will again), a body that parses to zero doc links,
+and a truncated body. A rejection **throws**, so the existing per-source catch treats it as
+a FETCH ERROR: skipped, snapshot untouched, and — load-bearing — **the Layer-B counter is
+not advanced**, because a broken response is not evidence of a sustained upstream change.
+Layer A alone would have let the 07-21 restructure through on day one.
+
+⚠️ **Do NOT implement truncation as "the last line must be a markdown list item."** The real
+file ends in PROSE: `For more comprehensive documentation, see [llms-full.txt](…)`. A tail-shape
+check rejects every healthy fetch forever — a stateless wedge with no counter and no self-heal,
+i.e. the same anti-pattern in a new place. `isTruncatedMarkup` instead looks for an
+**unterminated `[…](…` fragment**, pinned by a fixture test against the real 57 KB body
+(`__fixtures__/llms-txt-2026-07-27.txt`, `text/plain; charset=UTF-8`, 549 parsed URLs).
+
+**Layer B — the ratio guard, now bounded (`shouldAcceptShrink`, pure + exported).** The
+`< prior/2` test is kept as a backstop, but a *sustained, content-stable, removal-dominated*
+shrink now self-heals. **All** must hold:
+
+| Condition | Constant | Why |
+|---|---|---|
+| `(skips ≥ 3 && elapsed ≥ 24h) \|\| elapsed ≥ 72h` | `GUARD_MIN_SKIPS`, `GUARD_MIN_WAIT_MS`, `GUARD_MAX_WAIT_MS` | Run counts alone are cadence-blind: 3 runs is ~6h on the 2h Highlights row but **three weeks** on the 7d weekly row. The conjunction slows the fast row past a plausible upstream incident; the wall-clock ceiling is what unwedges the slow ones. |
+| Consecutive samples ≥ 95% Jaccard | `GUARD_STABILITY_JACCARD` | **Content** stability, not size. Equality never fires (the live wedge drifted 541→545→548→549), and a ±10% *size* band is not a stability test at all — a cached truncated body and a challenge page are both deterministic while they last. This is why the guard record stores the previous URL **SET, not a hash**: a hash supports only equality. |
+| `\|fresh \ prior\| ≤ burstCap` **and** `\|prior \ fresh\| ≥ 10 × \|fresh \ prior\|` | `GUARD_REMOVAL_DOMINANCE` | Removal-dominance, **not** strict subset. A `fresh ⊆ prior` rule is falsified by the live data — 13 additions (69 on the weekly row) existed on day one, so a subset rule would never fire and the wedge would recur unchanged. A garbage page inventing a URL space is additions-dominated and still rejected. |
+| `max(prior.length, fresh.length) ≥ 100` | `GUARD_MIN_SET_SIZE` | The same guard governs `tier2:blog:*`, whose sets are 11–25 URLs; ratio reasoning at n=11 is noise, so **blog sources keep today's behavior exactly**. Gated on the MAX, so a baseline that legitimately falls under 100 doesn't lose its self-heal forever. |
+
+**Guard record** — key `` `${src.key}:guard` `` → **`tier2:llms:guard`** (`src.key` already
+carries the `tier2:` prefix; `tier2:<key>:guard` would yield `tier2:tier2:llms:guard`).
+Shape `{consecutiveSkips, firstSkipAt, lastSample: string[]}` (~40 KB for llms.txt, in a
+table already holding 1953-element arrays). It is **diagnostic state, not baseline state**:
+
+- Written **eagerly in `fetchTier2`** on a skip — `persistTier2` runs only after a clean
+  gate/digest pass, which a skipped source never reaches.
+- **Read on every run**, not just shrunken ones: a stale `consecutiveSkips: 2` surviving
+  healthy runs would let the next shrink heal after one skip, defeating both bounds.
+- **Cleared only where the baseline actually advances**, via a `clearGuard` flag pushed
+  through `fresh` so the reset and the advance land **atomically in `persistTier2`**.
+  Otherwise a gate timeout on the accepting run resets the wait and the source could never
+  heal under a persistently failing gate. The flag is set only when a record exists, so a
+  healthy run writes no spurious delete (this is why `anthropic.test.ts`'s exact-`setCalls`
+  assertion still holds unchanged).
+- The accept predicate is **re-evaluated each run rather than consumed**, so a run that
+  accepts and then fails its gate simply retries.
+
+**On accept the fetch is treated as healthy** — normal diff, candidates, `persistTier2`.
+Exactly ONE persist rule applies, and it must be stated because two plausible ones collide:
+
+> **Persist `fresh \ carried`** — the full fresh set minus any additions withheld by the
+> burst cap.
+
+Never `prior ∪ emitted` on a shrink: that keeps all 1417 removed URLs, makes the baseline
+*larger*, re-trips the ratio guard next run against a baseline that can only grow, and
+clears the guard record each time — **a permanent wedge reached through the fix**. Never the
+intersection either (a Phase-1 re-baseline device only; it would leave the just-emitted URLs
+outside the baseline so they re-diff next run).
+
+**Candidate burst cap — `TIER2_CANDIDATE_BURST_CAP` (40), per source, GATE PATH ONLY.**
+`runGate` puts every candidate into ONE uncapped Haiku prompt and a gate failure returns
+*without* persisting, so an oversized batch re-forms every run — a second silent wedge. The
+cap bounds one source's additions per diff; the remainder is **carried by being withheld
+from the persisted snapshot**, so it re-diffs next run and drains over successive runs.
+Passed into `fetchTier2` as `config.gate && !config.digest ? CAP : null`, so the digest
+path's "**Tier-2 additions are NEVER capped**" invariant (its dedup IS the snapshot, so an
+un-surfaced addition is lost forever) is untouched and still pinned by its test. In practice
+only `e9bb5502` (Highlights) is affected.
+
+**One-off unwedge:** `scripts/rebaseline-anthropic-llms.ts` (dry-run by default) rewrote each
+row's `tier2:llms` snapshot to its own `prior ∩ fresh` — `inter ≤ fresh` always holds, so an
+intersection baseline can never re-trip the guard. Per-row and never a global figure: the
+rows were **not** in the same state (Highlights/Daily 1953→536 with 13 new; Weekly, already a
+run behind at 1894/07-19, 1894→480 with **69** new).
 
 ### 3-row digest cadence (Phase 4)
 
