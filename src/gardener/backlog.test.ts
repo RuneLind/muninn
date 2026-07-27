@@ -13,6 +13,7 @@ import {
   getBacklogProgress,
   requestBacklogCancel,
   __resetGardenerMutexForTest,
+  GARDENER_MUTEX_MAX_HOLD_MS,
   runSourceFallback,
   BACKLOG_BATCH_SIZE,
   BACKLOG_MAX_PROPOSALS,
@@ -275,6 +276,37 @@ describe("runExclusive (per-bot gardener mutex)", () => {
     const b = runExclusive("melosys", () => new Promise<void>(() => {}));
     expect(a).not.toBeNull();
     expect(b).not.toBeNull();
+  });
+
+  // The lock is released only in the work promise's `.finally`, and the manual drain
+  // route has no timeout net — so a never-settling one-shot held it forever, skipping
+  // every WEEKLY run at INFO level (one line per week) and swallowing manual triggers
+  // too, recoverable only by restarting the process.
+  test("a never-settling holder is force-reclaimed after the max hold, not held forever", () => {
+    const T0 = 1_800_000_000_000;
+    const stuck = runExclusive("jarvis", () => new Promise<void>(() => {}), T0);
+    expect(stuck).not.toBeNull();
+
+    // Just inside the bound: still blocked, as before.
+    expect(runExclusive("jarvis", async () => "x", T0 + GARDENER_MUTEX_MAX_HOLD_MS - 1)).toBeNull();
+
+    // Past it: the abandoned holder is reclaimed and work runs again.
+    const reclaimed = runExclusive("jarvis", async () => "ran", T0 + GARDENER_MUTEX_MAX_HOLD_MS + 1);
+    expect(reclaimed).not.toBeNull();
+  });
+
+  test("a reclaimed orphan settling later does NOT free the new holder's slot", async () => {
+    const T0 = 1_800_000_000_000;
+    let releaseOrphan: (() => void) | undefined;
+    runExclusive("jarvis", () => new Promise<void>((res) => { releaseOrphan = res; }), T0);
+    runExclusive("jarvis", () => new Promise<void>(() => {}), T0 + GARDENER_MUTEX_MAX_HOLD_MS + 1);
+
+    releaseOrphan!();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Same rule as the runner's token check: the late `.finally` must be a no-op.
+    expect(gardenerRunInFlight("jarvis")).toBe(true);
   });
 });
 

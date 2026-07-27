@@ -99,7 +99,23 @@ export const WIKI_GARDENER_WEEKLY_RUN_KEY = "gardener:lastRun";
 // value is the in-flight run promise (callers only ever check `.has()` — nobody
 // awaits it), so a settled/rejected run always clears its own entry.
 
-const gardenerRuns = new Map<string, Promise<unknown>>();
+const gardenerRuns = new Map<string, { promise: Promise<unknown>; startedAt: number }>();
+
+/**
+ * Age after which a held gardener mutex is treated as ABANDONED and force-reclaimed.
+ *
+ * The lock is released only in the work promise's `.finally`, and the manual drain route
+ * has no timeout net of its own — so an `executeOneShot` subprocess that never settles
+ * holds the mutex forever. Every subsequent WEEKLY run is then skipped at INFO level (one
+ * line per week), manual force-triggers are swallowed too, and recovery needs a process
+ * restart. That is the same skip-forever-with-no-bound shape the 2026-07 audit was hunting,
+ * so it gets the same remedy the runner already applies to a wedged checker
+ * (`claimChecker`'s 2x-timeout reclaim): a bound, and a LOUD log when it fires.
+ *
+ * 90 min is comfortably above the seeded weekly gardener's 45-min `timeoutMs` and the
+ * ~10–20 min a drain batch takes.
+ */
+export const GARDENER_MUTEX_MAX_HOLD_MS = 90 * 60_000;
 
 /** True when a gardener run (backlog or weekly) is in flight for the bot. */
 export function gardenerRunInFlight(botName: string): boolean {
@@ -113,10 +129,28 @@ export function gardenerRunInFlight(botName: string): boolean {
  * synchronously before returning, so two calls in the same tick can never both
  * acquire.
  */
-export function runExclusive<T>(botName: string, work: () => Promise<T>): Promise<T> | null {
-  if (gardenerRuns.has(botName)) return null;
-  const p = (async () => work())().finally(() => gardenerRuns.delete(botName));
-  gardenerRuns.set(botName, p);
+export function runExclusive<T>(
+  botName: string,
+  work: () => Promise<T>,
+  now: number = Date.now(),
+): Promise<T> | null {
+  const held = gardenerRuns.get(botName);
+  if (held) {
+    if (now - held.startedAt < GARDENER_MUTEX_MAX_HOLD_MS) return null;
+    // Never-settling holder: reclaim rather than park the gardener until restart.
+    log.error(
+      "Gardener mutex for \"{bot}\" held {mins} min — force-reclaiming (a previous run never settled)",
+      { botName, bot: botName, mins: Math.round((now - held.startedAt) / 60_000) },
+    );
+  }
+  const entry = { promise: null as unknown as Promise<T>, startedAt: now };
+  const p = (async () => work())().finally(() => {
+    // Only the CURRENT holder may release: a reclaimed orphan settling later must not
+    // free the slot the new run is holding (same rule as the runner's token check).
+    if (gardenerRuns.get(botName) === entry) gardenerRuns.delete(botName);
+  });
+  entry.promise = p;
+  gardenerRuns.set(botName, entry);
   return p;
 }
 

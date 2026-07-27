@@ -618,6 +618,44 @@ under **`source:health`**, so there is no migration.
   last-ok age and streak in its tooltip. **`last_run_at` being fresh no longer implies the
   watcher is actually doing anything.**
 
+### Skip-forever audit (2026-07-27) — dispositions
+
+The llms.txt wedge was a defect *class*, not a one-off, so every other watcher was audited
+for guards that can repeat indefinitely with no counter, bound or surface. **Adopting
+health at a seam is three lines** — `openSourceHealth(watcher.id, watcher.name)`, `mark(key,
+outcome, detail?)`, and `return health.finish()` — and the recorder exists in that shape
+precisely because the part that's easy to get wrong is the last one: these checkers'
+defining problem is that they early-return, so an escalation built at the bottom of the
+function never ships. `carry(key)` preserves a prior record when the run couldn't judge the
+source. Sources neither marked nor carried are **dropped**, so a de-configured source can't
+linger with a frozen chip.
+
+| Seam | Disposition |
+|---|---|
+| `wiki-committer` off-default-branch / not-a-repo / dirty-but-uncommitted | **Fixed** — health at `committer:<bot>`, and the off-branch skip raised INFO→WARN. This was the worst one: `src/wiki/commit.ts` applies the SAME rule to per-write commits and *defers to this sweeper*, so a wiki repo left on a feature branch means both layers defer to each other and **nothing is ever committed** — the 2026-07-23 87-page-loss shape, reporting `alertsFound: 0` (identical to a clean tree) the whole time. |
+| `x` capture-gate failure ("log and proceed") | **Fixed** — health at `x:capture-gate`. Already firing at ~22% (14 ok / 3 failed / 1 budget-exhausted over three days), and this leg once ran ~18h with **zero** successful runs, visible only as a trace attribute on runs that finished `ok`. The gate's cost scales with `n`, so nothing self-heals once it wedges. |
+| `x` `minScore` pre-LLM gate + `quietMode` SKIP | **Fixed** — health at `x:digest`. Both mark tweet ids seen. `rankScore` falls back to **0** whenever huginn stops whitelisting `combined_score` into metadata, so `0 < minScore` would silence Highlights on every run forever while the Daily/Weekly rows (no `minScore`) kept working — the same "siblings kept working" signature as the llms.txt wedge. Silence is this row's advertised normal output, which is what makes it invisible. |
+| `x` author-scores file unavailable | **Fixed** — health at `x:author-scores`. Documented as "transparency-only, never load-bearing", but `isLinkTweet` requires a non-null tier, so a missing/short file silently kills the **entire `x-link` pointer-capture class** and quietly raises every `x-post` floor. The module warns **once per process**, which is an anti-surface. |
+| `consolidation-gardener` unknown wiki / no collections / index unreadable / overlay unavailable | **Fixed** — health at `consolidation:<wiki>`. A renamed `WIKI_EXTRA` entry kills the watcher for months at one warn per week. No data is lost (clusters persist; the Atlas button is an independent path), but the feature is 100% dead. |
+| `wiki-gardener` `runExclusive` mutex | **Fixed differently** — the right remedy is a bound, not a surface. `GARDENER_MUTEX_MAX_HOLD_MS` (90 min) force-reclaims an abandoned lock with a loud `log.error`, mirroring the runner's `claimChecker` 2×-timeout reclaim; a reclaimed orphan settling later can't free the new holder's slot. Previously a never-settling drain one-shot held the lock forever, skipping every weekly run at INFO (one line per week) and swallowing manual triggers, recoverable only by restart. |
+| `email` returning `[]` | **Noted, not fixed.** The dangerous case isn't the parse catch — it's a broken Gmail MCP where Haiku sees no tools, legitimately answers `[]`, and the checker returns with **zero log output** while `buildGmailQuery`'s `after:` cursor rolls forward daily, so a broken day is never re-queried. "No important email today" is the modal *correct* output, so `recordOutcome` can't be applied naively (3 quiet hours would escalate). It needs a **liveness predicate** first — "zero Gmail MCP tool spans this run", which `telemetry.tracer` already receives for free. Highest-impact open item. |
+| `news` (`!res.ok`, fetch throw, zero parsed items) | **Noted, latent** — no `news` watcher row exists. Worst shape of all if one is created: zero parsed items logs *nothing*, and `recent` filters on a `lastRunAt` the runner advances even on failure, so articles published during an outage are permanently skipped when the feed recovers. Needs health **plus** a floor on the `since` cursor. |
+| Quiet-hours whole-run skip for a ≥24h watcher | **Noted, latent.** `updateWatcherLastRun` is called on the skip with no log line, so the next due moment is the same clock time — a weekly row whose slot once lands in 23:00–07:00 stays there permanently. Not exposed today (every hour-gated row sits 09–18). |
+
+Judged **safe by construction** and deliberately left alone: `fetchFromCollection` returning
+null and per-doc fetch failures in `x` (nothing is marked seen, so the batch re-surfaces);
+`wiki-linter` on an unreadable index (findings are transient and recomputed on demand by
+`/wiki/gardener`); per-cluster draft failures in both gardeners (nothing is consumed, so the
+next run re-drafts); `weeklyConsumedWithDismissed`'s catch (degrades to *more* docs eligible
+— the safe direction). One asymmetry worth knowing: `x`'s digest-failure catch is safe on
+the 2h Highlights row (re-ranked 2h later) but **loses that day's digest permanently** on
+the hour-gated Daily/Weekly rows, because `isScheduledTimeDue` then sees `lastRunAt` inside
+today.
+
+> **Carry this forward:** `runner.ts` advances `last_run_at` on *every* failure to prevent
+> retry storms. That one line is the enabling condition for this entire defect class — it is
+> why `last_run_at` is uninformative. **It must never again be treated as a health signal.**
+
 **One-off unwedge:** `scripts/rebaseline-anthropic-llms.ts` (dry-run by default) rewrote each
 row's `tier2:llms` snapshot to its own `prior ∩ fresh` — `inter ≤ fresh` always holds, so an
 intersection baseline can never re-trip the guard. Per-row and never a global figure: the

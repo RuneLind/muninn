@@ -4,6 +4,7 @@ import { parseGateScores, indexScoresByN, type GateScore } from "./gate-scores.t
 import { upsertCandidate, upsertDestinationCandidate } from "../db/summary-candidates.ts";
 import { recordAmplifierVote, getAmplifierGroup } from "../db/x-link-amplifiers.ts";
 import { normalizeHandle, getAuthorScore, getAuthorTierThresholds, type AuthorTierThresholds } from "../summaries/author-scores.ts";
+import { openSourceHealth, type SourceHealthRecorder } from "./source-health.ts";
 import { extractDocLinks } from "../summaries/doc-links.ts";
 import { destinationGroupKey } from "../summaries/destination-url.ts";
 import { applyAmplification, resolveAmplificationConfig, type AmplificationConfig } from "./x-amplification.ts";
@@ -1447,6 +1448,7 @@ async function captureXCandidates(
   botName?: string,
   interestProfile: string | null = null,
   telemetry?: HaikuTelemetry,
+  health?: SourceHealthRecorder,
 ): Promise<void> {
   // Pre-candidates: long-form OR link-carrying. A link-carrying tweet still needs its
   // author tier resolved (top-5%-only eligibility), so it can't be filtered before the
@@ -1455,6 +1457,7 @@ async function captureXCandidates(
   const preCandidates = docs.filter((d) => isLongFormTweet(d) || d.links.length >= 1);
   if (preCandidates.length === 0) {
     log.info("Capture: no long-form or link tweets in the batch of {n}", { botName, n: docs.length });
+    health?.mark(SRC_CAPTURE, "ok");
     return;
   }
 
@@ -1464,6 +1467,16 @@ async function captureXCandidates(
   // and the thresholds degrade to null (unknown handle / scores file unavailable) ⇒ tier
   // null ⇒ x-post treated as non-top (stricter floor) and x-link excluded — never wider.
   const thresholds = await getAuthorTierThresholds();
+  // The author-scores file is documented as "transparency-only, never load-bearing", but
+  // `isLinkTweet` requires a non-null tier — so a missing/short file silently kills the
+  // ENTIRE x-link pointer-capture class and quietly moves every x-post to the stricter
+  // non-top floor. The module warns once per PROCESS, which is an anti-surface: after a
+  // restart it is one line, then permanent silence.
+  if (thresholds == null) {
+    health?.mark(SRC_AUTHOR_SCORES, "error", "author-scores unavailable — x-link capture disabled, x-post floors raised");
+  } else {
+    health?.mark(SRC_AUTHOR_SCORES, "ok");
+  }
   const resolved = await Promise.all(
     preCandidates.map(async (doc) => {
       const author = normalizeHandle(doc.handle);
@@ -1489,6 +1502,8 @@ async function captureXCandidates(
   }
   if (eligible.length === 0) {
     log.info("Capture: no eligible tweets after author-tier gating in the batch of {n}", { botName, n: docs.length });
+    // A batch with nothing capture-eligible is ordinary, not a failure.
+    health?.mark(SRC_CAPTURE, "ok");
     return;
   }
 
@@ -1501,8 +1516,15 @@ async function captureXCandidates(
       n: eligible.length,
       error: err instanceof Error ? err.message : String(err),
     });
+    // "Log and proceed" is the right stance for ONE failure and a silent outage across
+    // many: this leg ran ~18h with zero successful runs on 2026-07-25, visible only as a
+    // trace attribute on runs that finished `ok`. The gate's cost scales with n, so
+    // nothing self-heals once it wedges.
+    health?.mark(SRC_CAPTURE, "error", err instanceof Error ? err.message : String(err));
     return;
   }
+
+  health?.mark(SRC_CAPTURE, "ok");
 
   const byN = indexScoresByN(scored, eligible.length);
 
@@ -1705,9 +1727,11 @@ export async function checkX(watcher: Watcher, _cwd?: string, botName?: string, 
   // and get the digest killed. Collection path only; best-effort — captureXCandidates
   // swallows its own errors and this catch is the last-resort boundary, so the promise
   // never rejects and the alert path is never broken.
+  const health = await openSourceHealth(watcher.id, watcher.name);
+
   const capturePromise: Promise<void> =
     config.captureCandidates && data.docs && data.docs.length > 0
-      ? captureXCandidates(data.docs, config, watcher, captureDeadline, botName, interestProfile, telemetry).catch((err) => {
+      ? captureXCandidates(data.docs, config, watcher, captureDeadline, botName, interestProfile, telemetry, health).catch((err) => {
           log.error("Candidate capture failed (alert path unaffected): {error}", {
             botName,
             error: err instanceof Error ? err.message : String(err),
@@ -1715,14 +1739,28 @@ export async function checkX(watcher: Watcher, _cwd?: string, botName?: string, 
         })
       : Promise.resolve();
 
+  // Per-source health (2026-07 audit). ONE recorder per run, shared by the alert and
+  // capture legs — two recorders would each persist only their own keys and clobber the
+  // other's. Finished after capture settles so both legs' outcomes land together, and its
+  // alerts are prepended to whatever the alert path returned.
+  let alerts: WatcherAlert[];
   try {
-    return await runAlertPath(data, config, watcher, botName, interestProfile, telemetry);
+    alerts = await runAlertPath(data, config, watcher, botName, interestProfile, telemetry, health);
   } finally {
     // Every checkX exit waits for capture to settle so the runner's timeout net and the
     // scheduler tick never leave an orphaned in-flight Haiku call behind.
     await capturePromise;
   }
+  return [...(await health.finish()), ...alerts];
 }
+
+/**
+ * Per-source health keys (2026-07 audit). Three legs of this watcher can each go silently
+ * dead for days while the watcher itself reports healthy, so each gets its own record.
+ */
+const SRC_DIGEST = "x:digest";
+const SRC_CAPTURE = "x:capture-gate";
+const SRC_AUTHOR_SCORES = "x:author-scores";
 
 /** The original checkX alert flow (minScore gate → digest LLM → SKIP/alert). */
 async function runAlertPath(
@@ -1732,6 +1770,7 @@ async function runAlertPath(
   botName?: string,
   interestProfile: string | null = null,
   telemetry?: HaikuTelemetry,
+  health?: SourceHealthRecorder,
 ): Promise<WatcherAlert[]> {
   // Score-based quality gate: if the top tweet doesn't clear the bar, track IDs silently
   // so the same tweets aren't re-evaluated, and skip the LLM call entirely.
@@ -1739,11 +1778,19 @@ async function runAlertPath(
     log.info("Below minScore ({top} < {min}), silencing {count} tweets", {
       botName, top: data.topScore.toFixed(3), min: config.minScore, count: data.trackingIds.length,
     });
+    // Silence is this row's advertised normal output (quietMode), which is exactly what
+    // makes a STUCK gate invisible: `rankScore` falls back to 0 whenever huginn stops
+    // whitelisting `combined_score` into metadata, so `0 < minScore` would fire on every
+    // run forever while the Daily/Weekly rows (no minScore) kept working — the same
+    // "siblings kept working" signature as the llms.txt wedge. Counting consecutive
+    // silences is what makes "silenced N runs in a row" sayable.
+    health?.mark(SRC_DIGEST, "skipped", `top score ${data.topScore.toFixed(3)} < minScore ${config.minScore}`);
     return [silentAlert(data.trackingIds)];
   }
 
   if (data.texts.length === 0) {
     log.info("No new tweets to digest", { botName });
+    health?.mark(SRC_DIGEST, "ok");
     return [];
   }
 
@@ -1778,9 +1825,14 @@ ${userPrompt}`;
 
     if (config.quietMode && isSkipResult(result)) {
       log.info("Quiet mode: LLM returned SKIP, silencing {count} tweets", { botName, count: trackingIds.length });
+      // Same shape as the minScore gate one layer up: a prompt or model regression that
+      // makes SKIP the fixed point is 100% dead and 100% indistinguishable from a
+      // legitimately quiet week.
+      health?.mark(SRC_DIGEST, "skipped", "model returned SKIP");
       return [silentAlert(trackingIds)];
     }
 
+    health?.mark(SRC_DIGEST, "ok");
     return [{
       id: `x-digest-${Date.now()}`,
       source: "x",
@@ -1792,6 +1844,7 @@ ${userPrompt}`;
     log.error("Summarization failed, skipping digest ({count} tweets lost): {error}", {
       botName, count: texts.length, model, error: err instanceof Error ? err.message : String(err),
     });
+    health?.mark(SRC_DIGEST, "error", err instanceof Error ? err.message : String(err));
     return [];
   }
 }

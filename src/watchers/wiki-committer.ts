@@ -34,6 +34,7 @@ import {
   commitWikiChange,
 } from "../wiki/commit.ts";
 import { todayOslo } from "../gardener/util.ts";
+import { openSourceHealth } from "./source-health.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("watchers", "wiki-committer");
@@ -49,8 +50,19 @@ export async function checkWikiCommitter(
       botName: name,
       name,
     });
+    // Nothing to track: with no wikiDir there is no source to be healthy or unhealthy about.
     return [];
   }
+
+  // Per-source health (2026-07 audit). The off-default-branch no-op below is the single
+  // most dangerous skip in this checker: `src/wiki/commit.ts` applies the SAME rule to
+  // per-write commits and defers to this sweeper, so if a human leaves the wiki repo on a
+  // feature branch, BOTH layers defer to each other and nothing is ever committed —
+  // silently, at INFO, once a day, while gardener applies and fact-check appends keep
+  // landing uncommitted. That is the 2026-07-23 87-page-loss shape, and it reported
+  // "healthy" (`alertsFound: 0`) throughout, indistinguishable from a clean tree.
+  const health = await openSourceHealth(watcher.id, watcher.name);
+  const SRC = `committer:${name}`;
 
   const top = await gitToplevel(wikiDir);
   if (!top) {
@@ -58,15 +70,19 @@ export async function checkWikiCommitter(
       botName: name,
       dir: wikiDir,
     });
-    return [];
+    // Not an error: a non-repo wiki is a legitimate configuration, and escalating it
+    // daily would be noise. Recorded as `ok` so it never accrues a false streak.
+    health.mark(SRC, "ok");
+    return health.finish();
   }
 
   if (!(await onDefaultBranch(top))) {
-    log.info(
+    log.warn(
       "Wiki-committer: {top} is off its default branch — skipping sweep (left for a later run)",
       { botName: name, top },
     );
-    return [];
+    health.mark(SRC, "skipped", "wiki repo is off its default branch — nothing can be committed");
+    return health.finish();
   }
 
   const { dirty, deletions } = await listWikiSubtreeDirty(top, wikiDir);
@@ -75,7 +91,9 @@ export async function checkWikiCommitter(
       botName: name,
       name,
     });
-    return [];
+    // A clean tree is the sweeper working as intended, so this is the healthy outcome.
+    health.mark(SRC, "ok");
+    return health.finish();
   }
 
   const n = dirty.length;
@@ -96,7 +114,9 @@ export async function checkWikiCommitter(
       name,
       n,
     });
+    health.mark(SRC, "ok");
     return [
+      ...(await health.finish()),
       {
         id: `wiki-sweep-${todayOslo(Date.now())}`,
         source: "wiki-committer",
@@ -114,7 +134,9 @@ export async function checkWikiCommitter(
       name,
       n,
     });
+    health.mark(SRC, "error", `commit of ${n} dirty file(s) failed`);
     return [
+      ...(await health.finish()),
       {
         id: `wiki-sweep-fail-${todayOslo(Date.now())}`,
         source: "wiki-committer",
@@ -129,5 +151,9 @@ export async function checkWikiCommitter(
     name,
     reason: result.reason ?? "unknown",
   });
-  return [];
+  // Dirty files exist but nothing was committed (an off-branch race, or a
+  // nothing-to-commit disagreement). Repeating forever means the wiki stays uncommitted,
+  // so this accrues a streak rather than staying a quiet no-op.
+  health.mark(SRC, "skipped", `${n} dirty file(s) not committed (${result.reason ?? "unknown"})`);
+  return health.finish();
 }
