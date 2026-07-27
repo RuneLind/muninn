@@ -20,6 +20,7 @@
  * migration.
  */
 import type { WatcherAlert } from "../types.ts";
+import { getWatcherSnapshot, setWatcherSnapshot } from "../db/watchers.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("watchers", "source-health");
@@ -194,4 +195,67 @@ export function buildHealthAlerts(
     });
   }
   return alerts;
+}
+
+/**
+ * Load → mark → persist, bundled, so adopting health at a new seam is three lines instead
+ * of twenty. The 2026-07 audit found ten more skip-forever guards across the other
+ * watchers, and the part that is easy to get wrong when adopting is the LAST step: these
+ * checkers' defining problem is that they early-return, so an escalation built at the
+ * bottom of the function never ships. `open()` therefore hands back `alerts`, which the
+ * caller seeds into its result array at the TOP, before any of those returns.
+ *
+ * Best-effort by construction: every DB touch is caught. Health is observability and must
+ * never break the path it observes.
+ */
+export interface SourceHealthRecorder {
+  /** Record this run's outcome for one source. */
+  mark(key: string, outcome: SourceOutcome, detail?: string): void;
+  /** Carry a source's prior record forward unjudged (this run couldn't assess it). */
+  carry(key: string): void;
+  /**
+   * Persist the run's outcomes and return the alerts to emit. Sources never marked or
+   * carried are DROPPED (a de-configured source must not linger with a frozen chip).
+   */
+  finish(): Promise<WatcherAlert[]>;
+}
+
+export async function openSourceHealth(
+  watcherId: string,
+  watcherName: string,
+  now: number = Date.now(),
+): Promise<SourceHealthRecorder> {
+  let prior: SourceHealthMap = {};
+  try {
+    const snap = await getWatcherSnapshot(watcherId, SOURCE_HEALTH_KEY);
+    if (isSourceHealthMap(snap)) prior = snap;
+  } catch (err) {
+    log.warn("Watcher \"{name}\": could not read source health: {error}", {
+      name: watcherName,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  const next: SourceHealthMap = {};
+  return {
+    mark(key, outcome, detail) {
+      next[key] = recordOutcome(prior[key], outcome, now, detail);
+    },
+    carry(key) {
+      const p = prior[key];
+      if (p) next[key] = p;
+    },
+    async finish() {
+      const alerts = buildHealthAlerts(watcherName, next, now);
+      try {
+        await setWatcherSnapshot(watcherId, SOURCE_HEALTH_KEY, next);
+      } catch (err) {
+        log.error("Watcher \"{name}\": failed to persist source health: {error}", {
+          name: watcherName,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      return alerts;
+    },
+  };
 }

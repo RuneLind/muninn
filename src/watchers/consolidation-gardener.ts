@@ -54,6 +54,7 @@ import {
   type SemanticOverlay,
 } from "../dashboard/views/components/wiki-atlas-semantic.ts";
 import { draftAndPersistSynthesis } from "../gardener/synthesis-drafter.ts";
+import { openSourceHealth } from "./source-health.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("watchers", "consolidation-gardener");
@@ -167,6 +168,14 @@ export async function checkConsolidationGardener(
       ? Math.floor(cfg.capPerRun)
       : DEFAULT_CAP_PER_RUN;
 
+  // Per-source health (2026-07 audit). Every degrade below is a permanent kill for a
+  // WEEKLY watcher: a renamed/removed WIKI_EXTRA entry or dropped collections silences it
+  // for months at one warn line per week, with `last_run_at` advancing the whole time. No
+  // data is lost (clusters persist; the Atlas "Draft synthesis" button is an independent
+  // human path), but the feature is 100% dead and nothing says so.
+  const health = await openSourceHealth(watcher.id, watcher.name);
+  const SRC = `consolidation:${wikiName}`;
+
   // 1. Registry entry + collections.
   const entry = deps.findWikiEntry(wikiName);
   if (!entry) {
@@ -174,7 +183,8 @@ export async function checkConsolidationGardener(
       botName: botConfig.name,
       wiki: wikiName,
     });
-    return [];
+    health.mark(SRC, "error", `no wiki registry entry for "${wikiName}" (renamed or removed?)`);
+    return health.finish();
   }
   const collections = entry.collections ?? [];
   if (collections.length === 0) {
@@ -182,7 +192,8 @@ export async function checkConsolidationGardener(
       botName: botConfig.name,
       wiki: wikiName,
     });
-    return [];
+    health.mark(SRC, "error", `wiki "${wikiName}" has no backing collections`);
+    return health.finish();
   }
 
   // 2. Wiki index.
@@ -193,7 +204,8 @@ export async function checkConsolidationGardener(
       wiki: wikiName,
       root: entry.root,
     });
-    return [];
+    health.mark(SRC, "error", `wiki index unreadable at ${entry.root}`);
+    return health.finish();
   }
 
   // 3. Semantic overlay (huginn down ⇒ null ⇒ non-sticky skip, no alert spam).
@@ -209,7 +221,10 @@ export async function checkConsolidationGardener(
       botName: botConfig.name,
       wiki: wikiName,
     });
-    return [];
+    // Documented as a non-sticky skip (huginn down), and one run is genuinely fine — but
+    // "non-sticky" is an assumption about huginn, not a guarantee, so it accrues a streak.
+    health.mark(SRC, "skipped", "semantic overlay unavailable (huginn down?)");
+    return health.finish();
   }
 
   // 4. Clusters at threshold → badged candidates only (blob guard is inside).
@@ -220,7 +235,9 @@ export async function checkConsolidationGardener(
       wiki: wikiName,
       t: threshold,
     });
-    return [];
+    // Reaching the clustering step at all means every external source answered.
+    health.mark(SRC, "ok");
+    return health.finish();
   }
 
   // 5. PRIMARY dedup — skip clusters already drafted/approved/applied for this
@@ -239,7 +256,8 @@ export async function checkConsolidationGardener(
       "consolidation-gardener: all {n} candidate(s) for {wiki} already drafted/applied — nothing to do",
       { botName: botConfig.name, wiki: wikiName, n: candidates.length },
     );
-    return [];
+    health.mark(SRC, "ok");
+    return health.finish();
   }
 
   // 6. Resolve the synthesis bot for the DRAFT (attribution) — like Ask/digest.
@@ -249,7 +267,8 @@ export async function checkConsolidationGardener(
       botName: botConfig.name,
       wiki: wikiName,
     });
-    return [];
+    health.mark(SRC, "error", `no synthesis bot resolves for wiki "${wikiName}"`);
+    return health.finish();
   }
 
   // 7. Rank + draft the top capPerRun SEQUENTIALLY (avoids the per-wiki single-flight).
@@ -313,10 +332,16 @@ export async function checkConsolidationGardener(
     }
   }
 
+  // The run reached the drafting stage, so every external source answered. Whether any
+  // individual draft persisted is a quality question, not a source-health one.
+  health.mark(SRC, "ok");
+  const healthAlerts = await health.finish();
+
   // 8. Alert only when ≥1 proposal actually persisted (per-run-unique id).
-  if (persistedIds.length === 0) return [];
+  if (persistedIds.length === 0) return healthAlerts;
   const wikiParam = encodeURIComponent(entry.name);
   return [
+    ...healthAlerts,
     {
       id: `consolidation-gardener:${persistedIds.join(",")}`,
       source: "consolidation-gardener",
