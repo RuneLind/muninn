@@ -317,8 +317,12 @@ export interface BacklogLiveFields {
    * invisible (in `queued` but in neither `remaining` nor `offeredStillQueued`).
    */
   fresh: number;
-  /** Per-source breakdown of `fresh` (non-zero sources only, listing order). */
-  freshBySource: { label: string; count: number }[];
+  /**
+   * Per-source breakdown of `fresh` (non-zero sources only, listing order). The
+   * `collection` rides along so the strip's per-source toggle can scope the
+   * inspector to that collection (the label alone isn't a stable key).
+   */
+  freshBySource: { label: string; count: number; collection: string }[];
   /** The resolved age-floor window in days — lets the client label "new (last Nd)". */
   freshWindowDays: number;
   /**
@@ -359,6 +363,12 @@ export interface BacklogLiveFields {
    * proposals since `at`. Absent/null when there is no stranded run.
    */
   interrupted?: { at: number; batchSize: number; drafted: number } | null;
+  /**
+   * The per-doc partition behind the counts — emitted ONLY when the request opts
+   * in with `?docs=1` (the backlog inspector's lazy fetch). Absent otherwise so
+   * the strip's 3s drain poll stays a small, count-only payload.
+   */
+  docs?: BacklogDocRow[];
 }
 
 /**
@@ -384,6 +394,36 @@ export function mergeBacklogLiveFields(
 }
 
 /**
+ * A cached queued-doc row (server-only until the `docs=1` opt-in). `key` is the
+ * synthetic `<collection>/<id>`; `url` is the doc's original source URL, carried
+ * through so the inspector can offer an "open ↗" link without a second listing.
+ */
+export interface BacklogQueuedKey {
+  key: string;
+  id: string;
+  collection: string;
+  date?: string;
+  url?: string;
+}
+
+/** Which live bucket a queued doc falls in — the inspector's row chip + filter. */
+export type BacklogBucket = "fresh" | "drainable" | "offered";
+
+/**
+ * One inspector row: the queued doc decorated with its live {@link BacklogBucket}
+ * membership. Emitted ONLY on `?docs=1` (the strip's 3s poll stays count-only).
+ */
+export interface BacklogDocRow {
+  collection: string;
+  id: string;
+  /** Human row label — the id's basename, extension stripped ({@link backlogDocLabel}). */
+  label: string;
+  bucket: BacklogBucket;
+  date?: string;
+  url?: string;
+}
+
+/**
  * Split the cached `queuedKeys` into the two honest live counts the strip needs,
  * applying the SAME age floor the drain uses ({@link passesAgeFloor}):
  *  - `remaining` = queued, NOT offered, AND past the age floor (the eligible-now
@@ -398,32 +438,86 @@ export function mergeBacklogLiveFields(
  * The three buckets partition the queued set exactly:
  * `remaining + offeredStillQueued + Σ freshByCollection === queuedKeys.length`.
  *
+ * It also returns `docs` — the SAME partition expressed per doc (`bucket`), in
+ * input order. The counts are derived from the same single pass, so a count and
+ * its bucket membership can never disagree; the route emits `docs` only on the
+ * `?docs=1` opt-in (the strip's 3s poll stays count-only).
+ *
  * Pure + injectable so the route's floor branch is unit-testable. `q.id` is the
  * bare doc id (the floor's filename-prefix fallback needs it, not the key);
  * `q.collection` is carried through from the listing so the fresh bucket never
  * has to re-parse it out of the synthetic key.
  */
 export function computeBacklogFloorCounts(
-  queuedKeys: { key: string; id: string; collection: string; date?: string }[],
+  queuedKeys: BacklogQueuedKey[],
   offeredSet: Set<string>,
   minAgeDays: number,
   now: number,
-): { remaining: number; offeredStillQueued: number; freshByCollection: Record<string, number> } {
+): {
+  remaining: number;
+  offeredStillQueued: number;
+  freshByCollection: Record<string, number>;
+  docs: BacklogDocRow[];
+} {
   let remaining = 0;
   let offeredStillQueued = 0;
   const freshByCollection: Record<string, number> = {};
+  const docs: BacklogDocRow[] = [];
   for (const q of queuedKeys) {
+    let bucket: BacklogBucket;
     if (offeredSet.has(q.key)) {
       offeredStillQueued++;
-      continue;
-    }
-    if (passesAgeFloor({ id: q.id, date: q.date }, minAgeDays, now)) {
+      bucket = "offered";
+    } else if (passesAgeFloor({ id: q.id, date: q.date }, minAgeDays, now)) {
       remaining++;
+      bucket = "drainable";
     } else {
       freshByCollection[q.collection] = (freshByCollection[q.collection] ?? 0) + 1;
+      bucket = "fresh";
     }
+    docs.push({
+      collection: q.collection,
+      id: q.id,
+      label: backlogDocLabel(q.id),
+      bucket,
+      ...(q.date ? { date: q.date } : {}),
+      ...(q.url ? { url: q.url } : {}),
+    });
   }
-  return { remaining, offeredStillQueued, freshByCollection };
+  return { remaining, offeredStillQueued, freshByCollection, docs };
+}
+
+/**
+ * Newest-first ordering for the inspector's doc list (undated docs last, then a
+ * stable id tiebreak). Pure so the ordering contract is unit-testable. Sorts a
+ * COPY — the caller's array (and the cached `queuedKeys` order the counts rely
+ * on) is never reordered.
+ */
+export function sortBacklogDocsNewestFirst(docs: BacklogDocRow[]): BacklogDocRow[] {
+  return [...docs].sort((a, b) => {
+    const ad = a.date ?? "";
+    const bd = b.date ?? "";
+    if (ad !== bd) {
+      if (!ad) return 1;
+      if (!bd) return -1;
+      return ad < bd ? 1 : -1;
+    }
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  });
+}
+
+/**
+ * Row label for the inspector: the doc id's basename with its extension stripped.
+ * Huginn's listing endpoint carries NO usable `title` (its `title?` field is never
+ * populated), and ids ARE human-readable source paths (`career/Why 2026 Is the
+ * Year….md`) — so the basename is the honest v1 label, with the full id kept on
+ * the row for the tooltip + deep link. Deliberately NOT N per-doc fetches.
+ */
+export function backlogDocLabel(id: string): string {
+  const base = id.split("/").pop() || id;
+  const dot = base.lastIndexOf(".");
+  const stripped = dot > 0 ? base.slice(0, dot) : base;
+  return stripped || id;
 }
 
 /**
@@ -460,10 +554,11 @@ export interface IngestBacklogResponse {
    * The `id` is the BARE doc id, kept alongside `key` because the age floor's
    * `docDateMs` filename-prefix fallback inspects the id, not the collection-prefixed
    * key. The date is needed for that floor; youtube ids carry no date prefix, so an
-   * undated doc reads its date from the id prefix. STRIPPED before the wire by
-   * {@link mergeBacklogLiveFields}.
+   * undated doc reads its date from the id prefix. The doc's original `url` rides
+   * along for the inspector's "open ↗" link (`?docs=1`). STRIPPED before the wire
+   * by {@link mergeBacklogLiveFields}.
    */
-  queuedKeys?: { key: string; id: string; collection: string; date?: string }[];
+  queuedKeys?: BacklogQueuedKey[];
 }
 
 const BACKLOG_TTL_MS = 5 * 60_000;
@@ -534,6 +629,9 @@ export async function computeIngestBacklogResponse(
       id: d.id,
       collection: d.collection,
       ...(d.date ? { date: d.date } : {}),
+      // Carried for the inspector's "open ↗" link (`?docs=1`) — the listing already
+      // has it, so decorating a row costs no extra fetch.
+      ...(d.url ? { url: d.url } : {}),
     })),
   );
 
@@ -910,7 +1008,7 @@ export function registerWikiGardenerRoutes(
       const gardenerCfg = resolveGardenerConfig(bot.gardener);
       const minAgeDays = gardenerCfg.lookbackDays;
       const now = Date.now();
-      const { remaining, offeredStillQueued, freshByCollection } = computeBacklogFloorCounts(
+      const { remaining, offeredStillQueued, freshByCollection, docs } = computeBacklogFloorCounts(
         queuedKeys,
         offeredSet,
         minAgeDays,
@@ -920,7 +1018,11 @@ export function registerWikiGardenerRoutes(
       // byCollection rows (non-zero only — the wire stays compact).
       const freshBySource = data.byCollection
         .filter((c) => (freshByCollection[c.collection] ?? 0) > 0)
-        .map((c) => ({ label: c.label, count: freshByCollection[c.collection]! }));
+        .map((c) => ({ label: c.label, count: freshByCollection[c.collection]!, collection: c.collection }));
+      // Opt-in per-doc list (the backlog inspector). Classified HERE, at the live
+      // merge layer, so bucket membership reflects the per-request offered set —
+      // never the 5-min-cached compute (which knows nothing about offered/floor).
+      const wantDocs = c.req.query("docs") === "1";
       const fresh = Object.values(freshByCollection).reduce((s, n) => s + n, 0);
       const running = gardenerRunInFlight(bot.name);
 
@@ -993,6 +1095,7 @@ export function registerWikiGardenerRoutes(
           watcher: watcherInfo,
           progress: getBacklogProgress(bot.name),
           interrupted,
+          ...(wantDocs ? { docs: sortBacklogDocsNewestFirst(docs) } : {}),
         }),
       );
     } catch (err) {

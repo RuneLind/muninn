@@ -183,6 +183,64 @@ export async function renderWikiGardenerPage(opts?: {
     }
     .gard-backlog .bk-source-draft-select:hover { border-color: var(--accent); }
 
+    /* Backlog inspector — every count in the strip is a toggle into one shared panel. */
+    .gard-backlog .bk-toggle {
+      background: none; border: none; padding: 0; margin: 0; font: inherit; color: inherit;
+      cursor: pointer; border-bottom: 1px dashed var(--border-secondary);
+    }
+    .gard-backlog .bk-toggle:hover { border-bottom-color: var(--accent); }
+    .gard-backlog .bk-toggle-on { border-bottom: 1px solid var(--accent); }
+    .gard-backlog .bk-inspector {
+      flex-basis: 100%; margin-top: 4px; padding: 10px 12px;
+      background: var(--bg-inset); border: 1px solid var(--border-secondary); border-radius: 8px;
+    }
+    .gard-backlog .bk-inspector-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+    .gard-backlog .bk-inspector-filters { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .gard-backlog .bk-filter {
+      padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border-secondary);
+      background: transparent; color: var(--text-muted); font-size: 11.5px; font-family: inherit; cursor: pointer;
+    }
+    .gard-backlog .bk-filter:hover { color: var(--text-primary); border-color: var(--accent); }
+    .gard-backlog .bk-filter-on { background: color-mix(in srgb, var(--accent) 18%, transparent); border-color: var(--accent); color: var(--accent-light); }
+    .gard-backlog .bk-inspector-select {
+      background: var(--bg-panel); border: 1px solid var(--border-secondary); color: var(--text-secondary);
+      font-size: 11.5px; padding: 3px 7px; border-radius: 7px; font-family: inherit; cursor: pointer;
+    }
+    .gard-backlog .bk-inspector-close {
+      background: none; border: none; color: var(--text-dim); font-size: 13px; cursor: pointer; padding: 2px 4px;
+    }
+    .gard-backlog .bk-inspector-close:hover { color: var(--text-primary); }
+    .gard-backlog .bk-inspector-rows { max-height: 420px; overflow-y: auto; }
+    .gard-backlog .bk-doc-row {
+      display: flex; align-items: center; gap: 8px; padding: 4px 0;
+      border-bottom: 1px solid var(--border-primary); font-size: 12px;
+    }
+    .gard-backlog .bk-doc-row:last-child { border-bottom: none; }
+    .gard-backlog .bk-doc-date { color: var(--text-dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .gard-backlog .bk-doc-badge {
+      padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border-secondary);
+      color: var(--text-muted); font-size: 11px; white-space: nowrap;
+    }
+    .gard-backlog .bk-doc-title {
+      color: var(--text-secondary); text-decoration: none; overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; min-width: 0;
+    }
+    .gard-backlog .bk-doc-title:hover { color: var(--text-primary); text-decoration: underline; }
+    .gard-backlog .bk-doc-chip {
+      padding: 1px 7px; border-radius: 999px; font-size: 10.5px; white-space: nowrap;
+      background: color-mix(in srgb, var(--text-dim) 18%, transparent); color: var(--text-muted);
+    }
+    .gard-backlog .bk-doc-fresh { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent-light); }
+    .gard-backlog .bk-doc-drainable { background: color-mix(in srgb, var(--status-info) 20%, transparent); color: var(--status-info); }
+    .gard-backlog .bk-doc-open { color: var(--status-info); text-decoration: none; font-size: 11.5px; white-space: nowrap; }
+    .gard-backlog .bk-doc-open:hover { text-decoration: underline; }
+    .gard-backlog .bk-inspector-note { color: var(--text-muted); font-size: 12px; padding: 6px 0; }
+    .gard-backlog .bk-inspector-foot { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+    .gard-backlog .gard-btn.bk-inspector-more {
+      background: transparent; border: 1px solid var(--border-secondary); color: var(--text-secondary);
+    }
+    .gard-backlog .gard-btn.bk-inspector-more:hover { border-color: var(--accent); color: var(--text-primary); }
+
     .gard-filter-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 16px; }
     .gard-filter {
       padding: 4px 11px; border-radius: 999px; border: 1px solid var(--border-secondary);

@@ -142,8 +142,12 @@ export interface IngestBacklogResponse {
   offeredStillQueued?: number;
   /** Queued docs still inside the weekly watcher's window — the "new arrivals" lead. */
   fresh?: number;
-  /** Per-source breakdown of `fresh` (non-zero sources only). */
-  freshBySource?: { label: string; count: number }[];
+  /**
+   * Per-source breakdown of `fresh` (non-zero sources only). `collection` is the
+   * stable key the per-source inspector toggle scopes on (optional — an older
+   * server omits it, in which case the toggle falls back to the whole bucket).
+   */
+  freshBySource?: { label: string; count: number; collection?: string }[];
   /** The resolved age-floor window in days — labels "new (last Nd)"; 0/absent ⇒ degraded. */
   freshWindowDays?: number;
   /**
@@ -172,6 +176,66 @@ export interface IngestBacklogResponse {
   // panel renders "drain a batch of N … up to M drafts" without hardcoding.
   batchSize?: number;
   maxProposals?: number;
+  /**
+   * The per-doc partition behind the counts — present ONLY on the inspector's
+   * opt-in `?docs=1` fetch (the 3s drain poll stays count-only).
+   */
+  docs?: BacklogDoc[];
+}
+
+/** Which live bucket a queued doc falls in (mirrors the route's `BacklogBucket`). */
+export type BacklogBucket = "fresh" | "drainable" | "offered";
+
+/**
+ * One inspector row (mirrors the route's `BacklogDocRow` — hand-declared here for
+ * the same client-bundle-hygiene reason as {@link LastBacklogRun}: the client must
+ * never import route/gardener modules).
+ */
+export interface BacklogDoc {
+  collection: string;
+  id: string;
+  /** The id's basename, extension stripped — the row's visible label. */
+  label: string;
+  bucket: BacklogBucket;
+  date?: string;
+  /** The doc's original source URL (http(s) only is linkified). */
+  url?: string;
+}
+
+/**
+ * The inspector panel's module-level state. Lives OUTSIDE the strip's DOM (the
+ * drain poller replaces the strip's innerHTML every 3s, which would otherwise
+ * slam the panel shut — the same footgun the tail `<details>` open-state guards
+ * against), so open/filter/paging survive every re-render.
+ */
+export interface BacklogInspectorState {
+  open: boolean;
+  /** Bucket filter — `"all"` shows every queued doc. */
+  bucket: BacklogBucket | "all";
+  /** Collection filter — `""` shows every collection. */
+  collection: string;
+  loading: boolean;
+  error: string | null;
+  /** Null until the first lazy fetch resolves. */
+  docs: BacklogDoc[] | null;
+  /** How many filtered rows to render (paging guard for tail-heavy bots). */
+  limit: number;
+}
+
+/** How many rows the inspector renders per page (Show more adds another page). */
+export const INSPECTOR_PAGE_SIZE = 200;
+
+/** A fresh, closed inspector state — the client's module-level seed. */
+export function initialInspectorState(): BacklogInspectorState {
+  return {
+    open: false,
+    bucket: "all",
+    collection: "",
+    loading: false,
+    error: null,
+    docs: null,
+    limit: INSPECTOR_PAGE_SIZE,
+  };
 }
 
 /** The pure, testable model behind the strip — numbers + control gating. */
@@ -179,12 +243,12 @@ export interface BacklogStripModel {
   totalNeverIngested: number;
   /** All-time doc total across every collection — the coverage sentence's denominator. */
   allTimeTotal: number;
-  perSource: { label: string; queued: number; total: number }[];
+  perSource: { label: string; queued: number; total: number; collection: string }[];
   eligibleNow: number;
   offeredStillQueued: number;
   /** New arrivals inside the watcher window (the sentence's lead segment). */
   freshTotal: number;
-  freshPerSource: { label: string; count: number }[];
+  freshPerSource: { label: string; count: number; collection?: string }[];
   /** Age-floor window in days; 0 ⇒ degraded response, hide the fresh segment. */
   freshWindowDays: number;
   /**
@@ -308,10 +372,18 @@ export function backlogStripModel(
   // Run-suggestion meter threshold basis (per-bot). 0 on a degraded/older server
   // (no field) ⇒ the meter renderer hides rather than dividing by a bogus threshold.
   const minClusterSize = Math.max(0, numOr(data.minClusterSize, 0));
-  const freshPerSource = (Array.isArray(data.freshBySource) ? data.freshBySource : []).filter(
-    (s): s is { label: string; count: number } =>
-      !!s && typeof s.label === "string" && typeof s.count === "number" && s.count > 0,
-  );
+  const freshPerSource = (Array.isArray(data.freshBySource) ? data.freshBySource : [])
+    .filter(
+      (s): s is { label: string; count: number; collection?: string } =>
+        !!s && typeof s.label === "string" && typeof s.count === "number" && s.count > 0,
+    )
+    // A malformed/absent `collection` degrades the per-source toggle to the whole
+    // fresh bucket rather than scoping on a bogus key.
+    .map((s) => ({
+      label: s.label,
+      count: s.count,
+      ...(typeof s.collection === "string" && s.collection ? { collection: s.collection } : {}),
+    }));
   const running = data.running === true;
   const controlHidden = data.watcherSeeded === false;
   const batchSize = numOr(data.batchSize, 0);
@@ -347,6 +419,7 @@ export function backlogStripModel(
       label: c.label,
       queued: c.queued,
       total: Math.max(0, numOr(c.total, 0)),
+      collection: typeof c.collection === "string" ? c.collection : "",
     })),
     eligibleNow: remaining,
     offeredStillQueued,
@@ -388,10 +461,44 @@ function strong(n: number): string {
   return `<span class="bk-strong">${n}</span>`;
 }
 
+/**
+ * Wrap a count in an inspector toggle button. Every count in the strip that names
+ * a set of docs becomes one of these — clicking opens the ONE shared inspector
+ * panel filtered to `bucket` (+ `collection` when the count is per-source).
+ *
+ * `inspect` is the live panel state (absent on a plain render): a toggle whose
+ * filter pair matches the OPEN panel renders pressed, so the strip always shows
+ * which count the panel is currently showing.
+ */
+function inspectToggle(
+  inner: string,
+  bucket: BacklogBucket | "all",
+  collection: string,
+  inspect?: BacklogInspectorState,
+): string {
+  const active = !!inspect && inspect.open && inspect.bucket === bucket && inspect.collection === collection;
+  return (
+    `<button type="button" class="bk-toggle${active ? " bk-toggle-on" : ""}" ` +
+    `data-backlog-inspect="${bucket}" data-inspect-collection="${esc(collection)}" ` +
+    `aria-expanded="${active ? "true" : "false"}" title="Show these docs">${inner}</button>`
+  );
+}
+
 /** "Label 4 · Label 2" — the per-source breakdown markup (sentence + tail share it). */
-function perSourceBreakdownHtml(items: { label: string; n: number }[]): string {
+function perSourceBreakdownHtml(
+  items: { label: string; n: number; collection?: string }[],
+  bucket: BacklogBucket | "all",
+  inspect?: BacklogInspectorState,
+): string {
   return items
-    .map((s) => `${esc(s.label)} <span class="bk-n">${s.n}</span>`)
+    .map((s) =>
+      inspectToggle(
+        `${esc(s.label)} <span class="bk-n">${s.n}</span>`,
+        bucket,
+        s.collection ?? "",
+        inspect,
+      ),
+    )
     .join('<span class="bk-sep"> · </span>');
 }
 
@@ -476,13 +583,23 @@ function freshWatcherSuffixHtml(model: BacklogStripModel): string {
  * (no live fields ⇒ `freshWindowDays` 0) the fresh segment is hidden rather than
  * showing a false "0 new".
  */
-export function backlogSentenceHtml(model: BacklogStripModel): string {
+export function backlogSentenceHtml(model: BacklogStripModel, inspect?: BacklogInspectorState): string {
   const segs: string[] = [];
   if (model.freshWindowDays > 0) {
-    let freshSeg = `${strong(model.freshTotal)} new (last ${model.freshWindowDays}d)`;
+    let freshSeg = inspectToggle(
+      `${strong(model.freshTotal)} new (last ${model.freshWindowDays}d)`,
+      "fresh",
+      "",
+      inspect,
+    );
     if (model.freshPerSource.length) {
       freshSeg +=
-        ": " + perSourceBreakdownHtml(model.freshPerSource.map((s) => ({ label: s.label, n: s.count })));
+        ": " +
+        perSourceBreakdownHtml(
+          model.freshPerSource.map((s) => ({ label: s.label, n: s.count, collection: s.collection })),
+          "fresh",
+          inspect,
+        );
     }
     // The informational run-suggestion meter sits BEFORE the watcher affordance
     // (next-run text + "Run gardener now" button), never competing with it.
@@ -490,7 +607,7 @@ export function backlogSentenceHtml(model: BacklogStripModel): string {
     freshSeg += freshWatcherSuffixHtml(model);
     segs.push(freshSeg);
   }
-  segs.push(`${strong(model.eligibleNow)} drainable now`);
+  segs.push(inspectToggle(`${strong(model.eligibleNow)} drainable now`, "drainable", "", inspect));
   if (model.draftsAwaitingReview > 0) {
     segs.push(`${strong(model.draftsAwaitingReview)} drafts awaiting review`);
   }
@@ -507,7 +624,7 @@ export function backlogSentenceHtml(model: BacklogStripModel): string {
  * is queued. This is where "280 never ingested · YouTube 269" went — true numbers,
  * but dead weight as a headline.
  */
-export function backlogTailHtml(model: BacklogStripModel): string {
+export function backlogTailHtml(model: BacklogStripModel, inspect?: BacklogInspectorState): string {
   if (model.totalNeverIngested <= 0) return "";
   // Denominator falls back to the queued count on a degraded response with no all-
   // time total (never < numerator, so "N of N" reads as full-tail rather than lying).
@@ -521,13 +638,31 @@ export function backlogTailHtml(model: BacklogStripModel): string {
       // carry total 0 (or below queued), which "269 of 0" would render as a lie — fall
       // back to a queued-only label when total isn't a usable denominator.
       const label = `${esc(s.label)} <span class="bk-n">${s.queued}</span>`;
-      return s.total >= s.queued && s.total > 0 ? `${label} of <span class="bk-n">${s.total}</span>` : label;
+      const inner =
+        s.total >= s.queued && s.total > 0 ? `${label} of <span class="bk-n">${s.total}</span>` : label;
+      // Every bucket for this collection — the tail is the all-time accounting.
+      return inspectToggle(inner, "all", s.collection ?? "", inspect);
     })
     .join('<span class="bk-sep"> · </span>');
+  // The offered bucket's own affordance. Deliberately NOT the "Reset offered (N)"
+  // button — that stays a pure action (and hides at 0 / while running), so
+  // overloading it would make the only way to SEE the offered docs an action the
+  // user may not want to take. This chip is always present whenever the bucket is
+  // non-empty; the panel's bucket filter is the second way in.
+  const offeredChip =
+    model.offeredStillQueued > 0
+      ? '<span class="bk-sep"> · </span>' +
+        inspectToggle(
+          `<span class="bk-n">${model.offeredStillQueued}</span> previously offered`,
+          "offered",
+          "",
+          inspect,
+        )
+      : "";
   return (
     '<details class="bk-tail">' +
     `<summary>${summary}</summary>` +
-    `<span class="bk-tail-body">${breakdown}</span>` +
+    `<span class="bk-tail-body">${breakdown}${offeredChip}</span>` +
     "</details>"
   );
 }
@@ -875,17 +1010,145 @@ export function backlogBannerHtml(model: BacklogStripModel): string {
 }
 
 /** Full strip innerHTML (pure). renderBacklog just assigns this to the element. */
-export function backlogStripHtml(model: BacklogStripModel, errors?: unknown[]): string {
+export function backlogStripHtml(
+  model: BacklogStripModel,
+  errors?: unknown[],
+  inspect?: BacklogInspectorState,
+): string {
   const errNote = errors && errors.length
     ? ` <span class="bk-err">(some sources unavailable)</span>`
     : "";
   return (
     backlogBannerHtml(model) +
     `<span class="bk-label">Ingest backlog:</span> ` +
-    backlogSentenceHtml(model) +
+    backlogSentenceHtml(model, inspect) +
     errNote +
     " " +
     backlogControlHtml(model) +
     backlogSourceDraftHtml(model)
   );
+}
+
+/** Human bucket labels (chips + the panel's filter buttons). */
+const BUCKET_LABEL: Record<BacklogBucket, string> = {
+  fresh: "new",
+  drainable: "drainable",
+  offered: "offered",
+};
+
+/**
+ * The dashboard doc-reader deep link for a queued doc. **Always** percent-encodes
+ * the id segment: real ids carry `/`, spaces, `#` and non-ASCII, and a naive
+ * interpolation would truncate the URL at the first `#`. The reader route is a
+ * wildcard (`/search/document/:collection/*`), so a slash-bearing id still
+ * resolves once encoded.
+ */
+export function backlogDocHref(collection: string, id: string): string {
+  return `/search/document/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`;
+}
+
+/** Apply the panel's bucket + collection filters (pure). */
+export function filterBacklogDocs(
+  docs: BacklogDoc[],
+  bucket: BacklogBucket | "all",
+  collection: string,
+): BacklogDoc[] {
+  return docs.filter(
+    (d) => (bucket === "all" || d.bucket === bucket) && (!collection || d.collection === collection),
+  );
+}
+
+/**
+ * One inspector row — the Stats tab's never-clustered row shape (badge + title +
+ * open link, `src/dashboard/views/components/sum-stats.ts`) with the backlog's two
+ * extras: the doc date and its bucket chip. The label links to the dashboard doc
+ * reader; the external "open ↗" only renders for an http(s) url (`esc()` does not
+ * neutralize a `javascript:` scheme).
+ */
+function inspectorRowHtml(d: BacklogDoc, sourceLabel: string): string {
+  const open = d.url && /^https?:\/\//i.test(d.url)
+    ? `<a class="bk-doc-open" href="${esc(d.url)}" target="_blank" rel="noopener">open ↗</a>`
+    : "";
+  return (
+    '<div class="bk-doc-row">' +
+    `<span class="bk-doc-date">${esc(d.date ?? "—")}</span>` +
+    `<span class="bk-doc-badge">${esc(sourceLabel)}</span>` +
+    `<a class="bk-doc-title" href="${backlogDocHref(d.collection, d.id)}" title="${esc(d.id)}">${esc(d.label || d.id)}</a>` +
+    `<span class="bk-doc-chip bk-doc-${d.bucket}">${esc(BUCKET_LABEL[d.bucket])}</span>` +
+    open +
+    "</div>"
+  );
+}
+
+/**
+ * The shared inspector panel (pure HTML) — a filterable table of the queued docs
+ * behind whichever count was clicked. Renders nothing when closed.
+ *
+ * `sources` supplies the collection→label map for the row badges + the collection
+ * `<select>` (the strip model's per-source rows). Rendering is capped at
+ * `state.limit` rows with a "Show more" affordance — 253 rows is fine, but a
+ * tail-heavy bot must not lay out thousands.
+ */
+export function backlogInspectorHtml(
+  state: BacklogInspectorState,
+  sources: { collection: string; label: string }[],
+): string {
+  if (!state.open) return "";
+  const labelOf = (collection: string): string =>
+    sources.find((s) => s.collection === collection)?.label || collection;
+  const buckets: (BacklogBucket | "all")[] = ["all", "fresh", "drainable", "offered"];
+  const bucketBtns = buckets
+    .map((b) => {
+      const on = state.bucket === b ? " bk-filter-on" : "";
+      const label = b === "all" ? "all" : BUCKET_LABEL[b];
+      return (
+        `<button type="button" class="bk-filter${on}" data-inspect-bucket="${b}" ` +
+        `aria-pressed="${state.bucket === b ? "true" : "false"}">${esc(label)}</button>`
+      );
+    })
+    .join("");
+  const options = [{ collection: "", label: "all sources" }, ...sources]
+    .map(
+      (s) =>
+        `<option value="${esc(s.collection)}"${s.collection === state.collection ? " selected" : ""}>` +
+        `${esc(s.label)}</option>`,
+    )
+    .join("");
+  const head =
+    '<div class="bk-inspector-head">' +
+    `<span class="bk-inspector-filters">${bucketBtns}` +
+    `<select class="bk-inspector-select" data-backlog-select="inspector" ` +
+    `aria-label="Filter by collection">${options}</select></span>` +
+    '<button type="button" class="bk-inspector-close" data-inspect-action="close" ' +
+    'aria-label="Close the backlog inspector">✕</button>' +
+    "</div>";
+
+  let body: string;
+  let footer = "";
+  if (state.error) {
+    body = `<div class="bk-inspector-note bk-err">${esc(state.error)}</div>`;
+  } else if (!state.docs) {
+    body = `<div class="bk-inspector-note">${state.loading ? "Loading docs…" : "No docs loaded."}</div>`;
+  } else {
+    const filtered = filterBacklogDocs(state.docs, state.bucket, state.collection);
+    if (!filtered.length) {
+      body = '<div class="bk-inspector-note">No docs in this filter.</div>';
+    } else {
+      const shown = filtered.slice(0, Math.max(1, state.limit));
+      body =
+        '<div class="bk-inspector-rows">' +
+        shown.map((d) => inspectorRowHtml(d, labelOf(d.collection))).join("") +
+        "</div>";
+      const more = filtered.length - shown.length;
+      footer =
+        '<div class="bk-inspector-foot">' +
+        `<span class="bk-note">showing ${shown.length} of ${filtered.length}</span>` +
+        (more > 0
+          ? `<button type="button" class="gard-btn bk-inspector-more" data-inspect-action="more">Show ${Math.min(more, INSPECTOR_PAGE_SIZE)} more</button>`
+          : "") +
+        (state.loading ? '<span class="bk-note">refreshing…</span>' : "") +
+        "</div>";
+    }
+  }
+  return `<div class="bk-inspector">${head}${body}${footer}</div>`;
 }

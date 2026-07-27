@@ -7,6 +7,8 @@ import {
   registerWikiGardenerRoutes,
   computeIngestBacklogResponse,
   computeBacklogFloorCounts,
+  backlogDocLabel,
+  sortBacklogDocsNewestFirst,
   getIngestBacklogCached,
   mergeBacklogLiveFields,
   __resetIngestBacklogCacheForTest,
@@ -351,7 +353,7 @@ describe("mergeBacklogLiveFields — live fields outside the cache", () => {
       remaining: 2,
       offeredStillQueued: 0,
       fresh: 3,
-      freshBySource: [{ label: "YouTube", count: 3 }],
+      freshBySource: [{ label: "YouTube", count: 3, collection: "youtube-summaries" }],
       freshWindowDays: 14,
       minClusterSize: 3,
       lastBacklogRun: null,
@@ -497,6 +499,104 @@ describe("computeBacklogFloorCounts — route age-floor branch", () => {
     ];
     const { remaining } = computeBacklogFloorCounts(queuedKeys, new Set<string>(), MIN_AGE_DAYS, NOW);
     expect(remaining).toBe(1); // only the old-prefixed doc
+  });
+
+  /**
+   * The backlog inspector's per-doc list rides on the SAME single pass as the
+   * counts, so a count and its bucket membership can never disagree.
+   */
+  test("emits the classified doc list alongside the counts (buckets match the counts exactly)", () => {
+    const queuedKeys = [
+      { key: "youtube-summaries/2026-07-16-a", id: "2026-07-16-a", collection: "youtube-summaries", date: "2026-07-16", url: "https://youtu.be/a" }, // fresh
+      { key: "youtube-summaries/2026-06-01-b", id: "2026-06-01-b", collection: "youtube-summaries", date: "2026-06-01" }, // drainable
+      { key: "x-articles/2026-05-01-c", id: "2026-05-01-c", collection: "x-articles", date: "2026-05-01" }, // offered
+    ];
+    const offered = new Set(["x-articles/2026-05-01-c"]);
+    const { remaining, offeredStillQueued, freshByCollection, docs } = computeBacklogFloorCounts(
+      queuedKeys,
+      offered,
+      MIN_AGE_DAYS,
+      NOW,
+    );
+    expect(remaining).toBe(1);
+    expect(offeredStillQueued).toBe(1);
+    expect(freshByCollection).toEqual({ "youtube-summaries": 1 });
+    expect(docs.map((d) => d.bucket)).toEqual(["fresh", "drainable", "offered"]);
+    // Bucket membership adds up to the counts it was derived from.
+    expect(docs.filter((d) => d.bucket === "drainable").length).toBe(remaining);
+    expect(docs.filter((d) => d.bucket === "offered").length).toBe(offeredStillQueued);
+    // The url rides through from the listing for the row's "open ↗" link; a
+    // url-less doc simply omits it (never a bogus empty string).
+    expect(docs[0]!.url).toBe("https://youtu.be/a");
+    expect(docs[1]!.url).toBeUndefined();
+    expect(docs[0]!.label).toBe("2026-07-16-a");
+  });
+});
+
+describe("backlogDocLabel + sortBacklogDocsNewestFirst — inspector row shaping", () => {
+  test("label is the id basename with the extension stripped (huginn carries no title)", () => {
+    expect(backlogDocLabel("career/Why 2026 Is the Year.md")).toBe("Why 2026 Is the Year");
+    expect(backlogDocLabel("plain-id")).toBe("plain-id");
+    expect(backlogDocLabel("a/b/c.mdx")).toBe("c");
+    // A dotfile-ish basename keeps its name rather than collapsing to empty.
+    expect(backlogDocLabel(".hidden")).toBe(".hidden");
+    expect(backlogDocLabel("")).toBe("");
+  });
+
+  test("newest-first, undated last, input array untouched", () => {
+    const docs = [
+      { collection: "c", id: "b", label: "b", bucket: "fresh" as const, date: "2026-01-01" },
+      { collection: "c", id: "u", label: "u", bucket: "fresh" as const },
+      { collection: "c", id: "a", label: "a", bucket: "fresh" as const, date: "2026-06-01" },
+    ];
+    const sorted = sortBacklogDocsNewestFirst(docs);
+    expect(sorted.map((d) => d.id)).toEqual(["a", "b", "u"]);
+    expect(docs.map((d) => d.id)).toEqual(["b", "u", "a"]); // copy, not in place
+  });
+});
+
+describe("docs=1 opt-in — the count-only default payload is unchanged", () => {
+  const cachedDocs: IngestBacklogResponse = {
+    byCollection: [],
+    total: 2,
+    ingested: 0,
+    queued: 2,
+    wikiUrlCount: 0,
+    generatedAt: 5,
+    queuedKeys: [{ key: "c/a", id: "a", collection: "c", url: "https://example.com/a" }],
+  };
+  const live = {
+    running: false,
+    offered: 0,
+    remaining: 1,
+    offeredStillQueued: 0,
+    fresh: 0,
+    freshBySource: [],
+    freshWindowDays: 14,
+    minClusterSize: 3,
+    lastBacklogRun: null,
+    weeklyRun: null,
+    watcherSeeded: true,
+    gardenerEnabled: true,
+    progress: null,
+  };
+
+  test("no docs field without the opt-in; present (and never the raw queuedKeys) with it", () => {
+    const plain = mergeBacklogLiveFields(cachedDocs, live);
+    expect("docs" in plain).toBe(false);
+    expect("queuedKeys" in plain).toBe(false);
+
+    const withDocs = mergeBacklogLiveFields(cachedDocs, {
+      ...live,
+      docs: [{ collection: "c", id: "a", label: "a", bucket: "drainable", url: "https://example.com/a" }],
+    });
+    expect("queuedKeys" in withDocs).toBe(false);
+    expect(withDocs.docs).toEqual([
+      { collection: "c", id: "a", label: "a", bucket: "drainable", url: "https://example.com/a" },
+    ]);
+    // Every other field is byte-identical to the count-only payload.
+    const { docs: _drop, ...rest } = withDocs as Record<string, unknown>;
+    expect(rest).toEqual(plain);
   });
 });
 

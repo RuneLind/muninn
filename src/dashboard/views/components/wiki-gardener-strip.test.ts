@@ -13,6 +13,12 @@ import {
   backlogStripHtml,
   backlogSourceDraftHtml,
   sourceDraftResultHtml,
+  backlogInspectorHtml,
+  backlogDocHref,
+  filterBacklogDocs,
+  initialInspectorState,
+  type BacklogDoc,
+  type BacklogInspectorState,
   type BacklogProgress,
   type BacklogWatcherInfo,
   type IngestBacklogResponse,
@@ -1044,5 +1050,173 @@ describe("weeklyRunHtml — weekly-run render branch (PR 2, watcher-path parity)
   test("no dominant bucket (dropped>0 but tally all zero) → no qualifier, no crash", () => {
     const html = weeklyRunHtml(run({ clustersFound: 5, kept: 3, dropped: 2, dropTally: tally() }));
     expect(html).toContain("3 kept — 2 dropped");
+  });
+});
+
+/**
+ * Backlog inspector (PR 1) — every count in the strip is a toggle into ONE shared
+ * panel listing the docs behind it. Pure render + filter contract; the panel's
+ * open/filter/paging state lives at module level in the browser entrypoint so the
+ * drain poller's 3s wholesale re-render can't shut it.
+ */
+describe("backlog inspector — count toggles", () => {
+  test("fresh total, per-source fresh rows and 'drainable now' render as toggles", () => {
+    const m = backlogStripModel(
+      base({
+        fresh: 5,
+        freshBySource: [{ label: "YouTube", count: 5, collection: "youtube-summaries" }],
+      }),
+      0,
+    );
+    const html = backlogSentenceHtml(m);
+    expect(html).toContain('data-backlog-inspect="fresh"');
+    expect(html).toContain('data-backlog-inspect="drainable"');
+    expect(html).toContain('data-inspect-collection="youtube-summaries"');
+    // The existing copy is untouched inside the toggles.
+    expect(html).toContain("5</span> new (last 14d)");
+    expect(html).toContain("260</span> drainable now");
+  });
+
+  test("an older server's collection-less freshBySource degrades to the whole bucket", () => {
+    const m = backlogStripModel(base({ fresh: 2, freshBySource: [{ label: "YouTube", count: 2 }] }), 0);
+    expect(m.freshPerSource[0]!.collection).toBeUndefined();
+    const html = backlogSentenceHtml(m);
+    expect(html).toContain('data-backlog-inspect="fresh" data-inspect-collection=""');
+  });
+
+  test("the open panel's toggle renders pressed; the others don't", () => {
+    const m = backlogStripModel(base(), 0);
+    const state: BacklogInspectorState = {
+      ...initialInspectorState(),
+      open: true,
+      bucket: "drainable",
+    };
+    const html = backlogSentenceHtml(m, state);
+    expect(html).toContain('data-backlog-inspect="drainable" data-inspect-collection="" aria-expanded="true"');
+    expect(html).toContain('data-backlog-inspect="fresh" data-inspect-collection="" aria-expanded="false"');
+    expect(html).toContain("bk-toggle-on");
+  });
+
+  test("tail per-source rows toggle every bucket for that collection; the offered chip is its own affordance", () => {
+    const html = backlogTailHtml(backlogStripModel(base({ remaining: 0, offeredStillQueued: 69 }), 0));
+    expect(html).toContain('data-backlog-inspect="all" data-inspect-collection="youtube-summaries"');
+    expect(html).toContain('data-backlog-inspect="offered"');
+    expect(html).toContain("previously offered");
+    // The tail's copy contract is unchanged (the toggles wrap it, never rewrite it).
+    expect(html).toContain("310</span> of <span class=\"bk-n\">380");
+    expect(html).not.toContain("offered in past runs");
+  });
+
+  test("no offered chip when nothing is offered-and-still-queued", () => {
+    const html = backlogTailHtml(backlogStripModel(base({ offeredStillQueued: 0 }), 0));
+    expect(html).not.toContain('data-backlog-inspect="offered"');
+    expect(html).not.toContain("previously offered");
+  });
+
+  test("'Reset offered (N)' stays a pure action button — never an inspector toggle", () => {
+    const html = backlogControlHtml(backlogStripModel(base(), 0));
+    expect(html).toContain('data-backlog-action="reset"');
+    expect(html).toContain("Reset offered (69)");
+    expect(html).not.toContain("data-backlog-inspect");
+  });
+});
+
+describe("backlog inspector — panel render + filters", () => {
+  const docs: BacklogDoc[] = [
+    { collection: "youtube-summaries", id: "2026-07-16-a.md", label: "2026-07-16-a", bucket: "fresh", date: "2026-07-16", url: "https://youtu.be/a" },
+    { collection: "youtube-summaries", id: "2026-06-01-b.md", label: "2026-06-01-b", bucket: "drainable", date: "2026-06-01" },
+    { collection: "x-articles", id: "2026-05-01-c.md", label: "2026-05-01-c", bucket: "offered", date: "2026-05-01" },
+  ];
+  const sources = [
+    { collection: "youtube-summaries", label: "YouTube" },
+    { collection: "x-articles", label: "X" },
+  ];
+  const open = (over: Partial<BacklogInspectorState> = {}): BacklogInspectorState => ({
+    ...initialInspectorState(),
+    open: true,
+    docs,
+    ...over,
+  });
+
+  test("closed → renders nothing", () => {
+    expect(backlogInspectorHtml(initialInspectorState(), sources)).toBe("");
+  });
+
+  test("open → one row per doc with date, source badge, deep link and bucket chip", () => {
+    const html = backlogInspectorHtml(open(), sources);
+    expect(html).toContain("bk-inspector");
+    expect(html).toContain("2026-07-16");
+    expect(html).toContain("YouTube");
+    expect(html).toContain('href="/search/document/youtube-summaries/2026-07-16-a.md"');
+    expect(html).toContain("bk-doc-fresh");
+    expect(html).toContain("bk-doc-drainable");
+    // Only an http(s) url gets the external open link.
+    expect(html).toContain('href="https://youtu.be/a"');
+    expect(html).toContain("showing 3 of 3");
+  });
+
+  test("bucket + collection filters narrow the rows", () => {
+    expect(filterBacklogDocs(docs, "offered", "").map((d) => d.id)).toEqual(["2026-05-01-c.md"]);
+    expect(filterBacklogDocs(docs, "all", "youtube-summaries").length).toBe(2);
+    expect(filterBacklogDocs(docs, "fresh", "x-articles").length).toBe(0);
+    const html = backlogInspectorHtml(open({ bucket: "offered" }), sources);
+    expect(html).toContain('data-inspect-bucket="offered"');
+    expect(html).toContain('aria-pressed="true"');
+    expect(html).toContain("showing 1 of 1");
+    expect(html).not.toContain("2026-07-16-a");
+  });
+
+  test("empty filter, loading and error states each render a note instead of a table", () => {
+    expect(backlogInspectorHtml(open({ collection: "nope" }), sources)).toContain("No docs in this filter");
+    expect(backlogInspectorHtml(open({ docs: null, loading: true }), sources)).toContain("Loading docs…");
+    expect(backlogInspectorHtml(open({ error: "boom" }), sources)).toContain("boom");
+  });
+
+  test("paging caps the rendered rows and offers Show more", () => {
+    const many: BacklogDoc[] = Array.from({ length: 5 }, (_, i) => ({
+      collection: "youtube-summaries",
+      id: "d" + i,
+      label: "d" + i,
+      bucket: "drainable" as const,
+    }));
+    const html = backlogInspectorHtml(open({ docs: many, limit: 2 }), sources);
+    expect(html).toContain("showing 2 of 5");
+    expect(html).toContain('data-inspect-action="more"');
+    expect(html).not.toContain(">d4<");
+    // Once the limit covers everything the Show-more affordance disappears.
+    expect(backlogInspectorHtml(open({ docs: many, limit: 50 }), sources)).not.toContain(
+      'data-inspect-action="more"',
+    );
+  });
+
+  test("hostile doc fields are escaped, never injected", () => {
+    const nasty: BacklogDoc[] = [
+      {
+        collection: "c",
+        id: '<script>alert(1)</script>',
+        label: '"><img src=x onerror=alert(1)>',
+        bucket: "fresh",
+        url: "javascript:alert(1)",
+      },
+    ];
+    const html = backlogInspectorHtml(open({ docs: nasty }), sources);
+    expect(html).not.toContain("<script>");
+    expect(html).not.toContain("<img src=x");
+    // A non-http(s) url is never linkified (esc() alone wouldn't neutralize it).
+    expect(html).not.toContain("javascript:alert(1)");
+  });
+});
+
+describe("backlogDocHref — the reader deep link always encodes the id", () => {
+  test("a '#'-bearing id survives (naive interpolation would truncate the URL)", () => {
+    const href = backlogDocHref("youtube-summaries", "notes/C# vs Kotlin.md");
+    expect(href).toBe("/search/document/youtube-summaries/notes%2FC%23%20vs%20Kotlin.md");
+    expect(href).not.toContain("#");
+  });
+
+  test("slashes, spaces and non-ASCII are encoded", () => {
+    expect(backlogDocHref("x-articles", "a/b c/æøå.md")).toBe(
+      "/search/document/x-articles/a%2Fb%20c%2F%C3%A6%C3%B8%C3%A5.md",
+    );
   });
 });

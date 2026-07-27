@@ -15,6 +15,12 @@ import {
   weeklyRunHtml,
   backlogTailHtml,
   sourceDraftResultHtml,
+  backlogInspectorHtml,
+  initialInspectorState,
+  INSPECTOR_PAGE_SIZE,
+  type BacklogBucket,
+  type BacklogDoc,
+  type BacklogInspectorState,
   type IngestBacklogResponse,
   type SourceBacklogResult,
 } from "./wiki-gardener-strip.ts";
@@ -341,6 +347,14 @@ let sourceDraftCollection: string | null = null;
 // (the batch awaits minutes of model calls) across any interleaved re-render.
 let sourceDraftInFlight = false;
 
+// Backlog inspector (the panel behind every count in the strip). Module-level for
+// the same reason as `backlogConfirmOpen` / the source-draft pick: renderBacklog
+// replaces the strip's innerHTML wholesale and the drain poller re-renders every
+// 3s, so any state parked in the DOM would be wiped on the next tick.
+let inspector: BacklogInspectorState = initialInspectorState();
+// True while the lazy `?docs=1` fetch is in flight — one at a time.
+let inspectorFetching = false;
+
 function pendingDraftCount(): number {
   return allProposals.filter((p) => p.status === "draft").length;
 }
@@ -391,11 +405,14 @@ function renderBacklog(data: IngestBacklogResponse): void {
   // its open state before replacing the HTML and re-apply after.
   const tailWasOpen = el.querySelector<HTMLDetailsElement>(".bk-tail")?.open === true;
   el.innerHTML =
-    backlogStripHtml(model, data.errors) +
+    backlogStripHtml(model, data.errors, inspector) +
     backlogOutcomeHtml(data.lastBacklogRun) +
     weeklyRunHtml(data.weeklyRun) +
     sourceDraftResultHtml(lastSourceDraftResult, lastSourceDraftCollectionLabel ?? undefined) +
-    backlogTailHtml(model);
+    backlogTailHtml(model, inspector) +
+    // The inspector renders last (its own full-width row below the tail) and only
+    // when open — its state lives at module level, so a poll re-render can't shut it.
+    backlogInspectorHtml(inspector, model.perSource);
   if (tailWasOpen) {
     const tail = el.querySelector<HTMLDetailsElement>(".bk-tail");
     if (tail) tail.open = true;
@@ -665,10 +682,87 @@ async function dismissBacklog(): Promise<void> {
     .catch(() => {});
 }
 
+// Re-render the strip from the last payload — the inspector's state changes are
+// client-only (open/filter/paging), so they never need a server round-trip.
+function rerenderStrip(): void {
+  if (lastBacklogData) renderBacklog(lastBacklogData);
+}
+
+// Lazy per-doc fetch (`?docs=1`) behind the inspector. Runs on OPEN only — the
+// strip's 3s drain poll never asks for docs, so the hot path stays count-only.
+// Any previously-loaded rows stay on screen while this refreshes.
+async function loadInspectorDocs(): Promise<void> {
+  if (inspectorFetching) return;
+  inspectorFetching = true;
+  inspector.loading = true;
+  rerenderStrip();
+  try {
+    const res = await fetch(withBot("/api/wiki/ingest-backlog?docs=1"));
+    const data = (await res.json()) as IngestBacklogResponse;
+    if (Array.isArray(data.docs)) {
+      inspector.docs = data.docs as BacklogDoc[];
+      inspector.error = null;
+      inspector.loading = false;
+      inspectorFetching = false;
+      // The docs response carries the fresh live fields too — render from it so the
+      // counts and the rows behind them come from the same snapshot.
+      renderBacklog(data);
+      return;
+    }
+    inspector.error = data.error || "no doc list in the response";
+  } catch {
+    inspector.error = "couldn't load the doc list";
+  }
+  inspectorFetching = false;
+  inspector.loading = false;
+  rerenderStrip();
+}
+
+// Open the inspector on a count's (bucket, collection) pair — or close it when the
+// same count is clicked again (the toggle contract).
+function toggleInspector(bucket: BacklogBucket | "all", collection: string): void {
+  if (inspector.open && inspector.bucket === bucket && inspector.collection === collection) {
+    inspector.open = false;
+    rerenderStrip();
+    return;
+  }
+  inspector.open = true;
+  inspector.bucket = bucket;
+  inspector.collection = collection;
+  inspector.limit = INSPECTOR_PAGE_SIZE;
+  rerenderStrip();
+  void loadInspectorDocs();
+}
+
 // Delegated backlog controls (run / reset / recover / dismiss) — the strip's
 // innerHTML is replaced on every render, so listen on the stable container.
 document.getElementById("gardBacklog")?.addEventListener("click", (e) => {
-  const btn = (e.target as HTMLElement).closest("[data-backlog-action]");
+  const target = e.target as HTMLElement;
+  // Inspector toggles (the counts in the sentence / tail / offered chip).
+  const toggle = target.closest("[data-backlog-inspect]");
+  if (toggle) {
+    const bucket = (toggle.getAttribute("data-backlog-inspect") || "all") as BacklogBucket | "all";
+    toggleInspector(bucket, toggle.getAttribute("data-inspect-collection") || "");
+    return;
+  }
+  // Inspector panel controls (close / show more).
+  const inspectAction = target.closest("[data-inspect-action]");
+  if (inspectAction) {
+    const what = inspectAction.getAttribute("data-inspect-action");
+    if (what === "close") inspector.open = false;
+    else if (what === "more") inspector.limit += INSPECTOR_PAGE_SIZE;
+    rerenderStrip();
+    return;
+  }
+  // Inspector bucket filter.
+  const bucketBtn = target.closest("[data-inspect-bucket]");
+  if (bucketBtn) {
+    inspector.bucket = (bucketBtn.getAttribute("data-inspect-bucket") || "all") as BacklogBucket | "all";
+    inspector.limit = INSPECTOR_PAGE_SIZE;
+    rerenderStrip();
+    return;
+  }
+  const btn = target.closest("[data-backlog-action]");
   if (!btn) return;
   const action = btn.getAttribute("data-backlog-action");
   const strip = document.getElementById("gardBacklog");
@@ -708,6 +802,14 @@ document.getElementById("gardBacklog")?.addEventListener("click", (e) => {
 // (it must survive the strip's wholesale re-renders) and re-gate the button on the
 // selected collection's queued count.
 document.getElementById("gardBacklog")?.addEventListener("change", (e) => {
+  // The inspector's collection filter (client-only — the docs are already loaded).
+  const inspectSel = (e.target as HTMLElement).closest(".bk-inspector-select") as HTMLSelectElement | null;
+  if (inspectSel) {
+    inspector.collection = inspectSel.value;
+    inspector.limit = INSPECTOR_PAGE_SIZE;
+    rerenderStrip();
+    return;
+  }
   const sel = (e.target as HTMLElement).closest(".bk-source-draft-select") as HTMLSelectElement | null;
   if (!sel) return;
   sourceDraftCollection = sel.value;
