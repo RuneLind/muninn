@@ -499,8 +499,25 @@ shrink now self-heals. **All** must hold:
 |---|---|---|
 | `(skips ≥ 3 && elapsed ≥ 24h) \|\| elapsed ≥ 72h` | `GUARD_MIN_SKIPS`, `GUARD_MIN_WAIT_MS`, `GUARD_MAX_WAIT_MS` | Run counts alone are cadence-blind: 3 runs is ~6h on the 2h Highlights row but **three weeks** on the 7d weekly row. The conjunction slows the fast row past a plausible upstream incident; the wall-clock ceiling is what unwedges the slow ones. |
 | Consecutive samples ≥ 95% Jaccard | `GUARD_STABILITY_JACCARD` | **Content** stability, not size. Equality never fires (the live wedge drifted 541→545→548→549), and a ±10% *size* band is not a stability test at all — a cached truncated body and a challenge page are both deterministic while they last. This is why the guard record stores the previous URL **SET, not a hash**: a hash supports only equality. |
-| `\|fresh \ prior\| ≤ burstCap` **and** `\|prior \ fresh\| ≥ 10 × \|fresh \ prior\|` | `GUARD_REMOVAL_DOMINANCE` | Removal-dominance, **not** strict subset. A `fresh ⊆ prior` rule is falsified by the live data — 13 additions (69 on the weekly row) existed on day one, so a subset rule would never fire and the wedge would recur unchanged. A garbage page inventing a URL space is additions-dominated and still rejected. |
+| `\|prior \ fresh\| ≥ 10 × \|fresh \ prior\|` | `GUARD_REMOVAL_DOMINANCE` | Removal-dominance, **not** strict subset. A `fresh ⊆ prior` rule is falsified by the live data — 13 additions (69 on the weekly row) existed on day one, so a subset rule would never fire and the wedge would recur unchanged. A garbage page inventing a URL space is additions-dominated and still rejected. |
 | `max(prior.length, fresh.length) ≥ 100` | `GUARD_MIN_SET_SIZE` | The same guard governs `tier2:blog:*`, whose sets are 11–25 URLs; ratio reasoning at n=11 is noise, so **blog sources keep today's behavior exactly**. Gated on the MAX, so a baseline that legitimately falls under 100 doesn't lose its self-heal forever. |
+
+⚠️ **There is deliberately NO absolute cap on additions in the accept predicate**, though the
+plan drafted one (`|fresh \ prior| ≤ burstCap`). It re-creates the very wedge this guard
+removes: while a source is skipped its `prior` is frozen while upstream keeps publishing, so
+`added` only ever GROWS — once past the cap the predicate could never accept again, at any
+skip count or elapsed time, recoverable only by hand-editing the snapshot. The live rows
+accrue ~2 new URLs/day and the weekly row showed 69 in one window, so a ~2-week outage would
+re-wedge the source permanently. Additions-dominated garbage is already rejected by the 10×
+dominance test, and a legitimate shrink carrying many additions is bounded by the burst cap
+**at the call site**, which carries the remainder instead of refusing the whole fetch.
+
+⚠️ **`isTruncatedMarkup` runs on the llms.txt path ONLY** (`checkTruncation: true`). It is a
+markdown heuristic, and the blog listings are 150–420 KB Next.js RSC payloads whose trailing
+script chunk is dense with `[`/`]` inside JSON strings — measured, the last `[` sits ~30 bytes
+before the last `]` on all three sections. One unbalanced bracket there would wedge the
+section permanently and statelessly. It also buys nothing: `parseBlogSlugs` reads `href="…"`
+and never consumes markdown links.
 
 **Guard record** — key `` `${src.key}:guard` `` → **`tier2:llms:guard`** (`src.key` already
 carries the `tier2:` prefix; `tier2:<key>:guard` would yield `tier2:tier2:llms:guard`).

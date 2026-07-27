@@ -378,11 +378,19 @@ export function jaccard(a: Set<string>, b: Set<string>): number {
 export function shouldAcceptShrink(args: {
   prior: string[];
   fresh: string[];
-  record: Tier2GuardRecord;
+  /** Skip counter + streak start for THIS skip (already advanced). */
+  record: Pick<Tier2GuardRecord, "consecutiveSkips" | "firstSkipAt">;
+  /**
+   * The PREVIOUS shrunken sample — deliberately a separate argument, not `record.lastSample`.
+   * The caller has already overwritten `lastSample` with the current sample for persistence,
+   * so reading it off the record would compare `fresh` against itself and make the stability
+   * clause always-true dead code. Empty on the very first skip (which cannot satisfy the wait
+   * bound anyway).
+   */
+  previousSample: string[];
   now: number;
-  burstCap: number;
 }): { accept: boolean; reason: string } {
-  const { prior, fresh, record, now, burstCap } = args;
+  const { prior, fresh, record, previousSample, now } = args;
 
   if (Math.max(prior.length, fresh.length) < GUARD_MIN_SET_SIZE) {
     return { accept: false, reason: `set too small (max ${Math.max(prior.length, fresh.length)} < ${GUARD_MIN_SET_SIZE})` };
@@ -401,7 +409,7 @@ export function shouldAcceptShrink(args: {
   // Content stability against the PREVIOUS shrunken sample. A first skip has nothing to
   // compare against, but it also can't satisfy the wait bound above, so this is reached
   // only with a real predecessor.
-  const stability = jaccard(new Set(record.lastSample), new Set(fresh));
+  const stability = jaccard(new Set(previousSample), new Set(fresh));
   if (stability < GUARD_STABILITY_JACCARD) {
     return { accept: false, reason: `content unstable (jaccard ${stability.toFixed(3)})` };
   }
@@ -410,9 +418,16 @@ export function shouldAcceptShrink(args: {
   const freshSet = new Set(fresh);
   const added = fresh.filter((u) => !priorSet.has(u)).length;
   const removed = prior.filter((u) => !freshSet.has(u)).length;
-  if (added > burstCap) {
-    return { accept: false, reason: `too many additions (${added} > cap ${burstCap})` };
-  }
+  // NB — there is deliberately NO absolute cap on `added` here. The plan drafted one
+  // (`|fresh \ prior| ≤ burstCap`), but it re-creates the very wedge this guard removes:
+  // while a source is skipped its `prior` is frozen while upstream keeps publishing, so
+  // `added` only ever GROWS. Once it crossed the cap the predicate could never accept
+  // again — no time bound, no skip count, no recovery but hand-editing the snapshot. The
+  // live rows accrue ~2 new URLs/day and the weekly row already showed 69 in one window,
+  // so a two-week outage would have re-wedged the source permanently. Additions-dominated
+  // garbage is already rejected by the 10x dominance test below, and an accepted shrink
+  // with many additions is bounded by the burst cap at the CALL SITE, which carries the
+  // remainder into the next run instead of refusing the whole fetch.
   if (removed < GUARD_REMOVAL_DOMINANCE * added) {
     return {
       accept: false,
@@ -784,8 +799,8 @@ async function fetchTier2(
           prior,
           fresh: freshUrls,
           record: updated,
+          previousSample: guard?.lastSample ?? [],
           now,
-          burstCap: burstCap ?? Number.POSITIVE_INFINITY,
         });
 
         if (!verdict.accept) {
@@ -885,7 +900,7 @@ function assertValidTextResponse(
   res: Response,
   body: string,
   url: string,
-  opts: { minBytes: number; rejectHtml?: boolean },
+  opts: { minBytes: number; rejectHtml?: boolean; checkTruncation?: boolean },
 ): void {
   const ctype = (res.headers.get("content-type") ?? "").toLowerCase();
   if (!ctype.startsWith("text/")) {
@@ -898,7 +913,14 @@ function assertValidTextResponse(
   if (bytes < opts.minBytes) {
     throw new Error(`body too small (${bytes} < ${opts.minBytes} bytes) for ${url}`);
   }
-  if (isTruncatedMarkup(body)) {
+  // MARKDOWN SOURCES ONLY. The predicate is a markdown heuristic and must never run over
+  // the blog listings: those are ~150–420 KB Next.js RSC payloads whose trailing script
+  // chunk is full of `[`/`]` inside JSON strings (measured today: the last `[` sits ~30
+  // bytes before the last `]` on all three sections). One unbalanced bracket in that tail
+  // would flip the section into a permanent stateless wedge with no counter and no
+  // self-heal — precisely the failure class Layer A exists to prevent. It also buys
+  // nothing there: `parseBlogSlugs` reads `href="…"` and never consumes markdown links.
+  if (opts.checkTruncation && isTruncatedMarkup(body)) {
     throw new Error(`body ends mid-link (truncated transfer?) for ${url}`);
   }
 }
@@ -925,7 +947,11 @@ async function fetchLlmsTxtDocs(url: string): Promise<Map<string, string>> {
   });
   if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
   const body = await res.text();
-  assertValidTextResponse(res, body, url, { minBytes: LLMS_MIN_BODY_BYTES, rejectHtml: true });
+  assertValidTextResponse(res, body, url, {
+    minBytes: LLMS_MIN_BODY_BYTES,
+    rejectHtml: true,
+    checkTruncation: true,
+  });
   const docs = parseLlmsTxtDocs(body);
   if (docs.size === 0) throw new Error(`body parsed to zero doc links for ${url}`);
   return docs;

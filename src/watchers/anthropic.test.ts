@@ -1155,6 +1155,60 @@ describe("checkAnthropic", () => {
       expect(guard).toBeTruthy();
       expect(guard.consecutiveSkips).toBeGreaterThanOrEqual(2);
     });
+
+    /**
+     * The accept branch end-to-end — the whole point of the change, and the one path where
+     * the persist rule is load-bearing. Uses a REALISTICALLY sized source (the size gate
+     * needs max ≥ 100), a content-stable predecessor, and a streak already past both
+     * bounds, so this run is the one that heals.
+     */
+    test("an aged, stable, removal-dominated shrink is ACCEPTED: it diffs, shrinks the baseline, and clears the guard", async () => {
+      const kept = Array.from({ length: 200 }, (_, i) => `https://platform.claude.com/docs/en/k${i}.md`);
+      const added = Array.from({ length: 5 }, (_, i) => `https://platform.claude.com/docs/en/new${i}.md`);
+      const freshDocs = [...kept, ...added];
+      const prior = [...kept, ...Array.from({ length: 800 }, (_, i) => `https://platform.claude.com/docs/en/gone${i}.md`)];
+
+      stub((url) => {
+        if (url.includes("feed.test")) return COMMITS_ATOM;
+        if (url.includes("llms.txt")) {
+          return `# Docs\n${freshDocs.map((u, i) => `- [Doc ${i}](${u})`).join("\n")}\n\nTrailing prose.\n`;
+        }
+        if (url.includes("/news")) return NEWS_HTML;
+        if (url.includes("/engineering")) return ENG_HTML;
+        if (url.includes("/research")) return RES_HTML;
+        return "";
+      });
+      snapStore.set("tier2:llms", prior); // 205 fresh < 1000/2 → the ratio guard fires
+      snapStore.set("tier2:blog:news", [
+        "https://www.anthropic.com/news/claude-opus-4-8",
+        "https://www.anthropic.com/news/some-post",
+      ]);
+      snapStore.set("tier2:blog:engineering", ["https://www.anthropic.com/engineering/eng-post"]);
+      snapStore.set("tier2:blog:research", ["https://www.anthropic.com/research/res-paper"]);
+      // Two skips, 30h ago, whose sample is content-identical to what we fetch now → this
+      // run advances to 3 skips and satisfies (skips ≥ 3 && ≥ 24h).
+      snapStore.set("tier2:llms:guard", {
+        consecutiveSkips: 2,
+        firstSkipAt: Date.now() - 30 * H,
+        lastSample: freshDocs,
+      });
+      gateResult = "[]";
+
+      await checkAnthropic(tier2Watcher());
+
+      // Diffed: the 5 genuinely-new docs reached the gate, the 800 removed ones did not.
+      const numbered = [...lastGatePrompt.matchAll(/^\d+\. \[Docs \(llms\.txt\)\]/gm)];
+      expect(numbered).toHaveLength(5);
+
+      // THE persist rule: the baseline becomes the fresh set (205) — NOT `prior ∪ emitted`
+      // (1005), which would grow the baseline and re-trip the ratio guard forever.
+      const snap = snapStore.get("tier2:llms") as string[];
+      expect(snap).toHaveLength(205);
+      expect(snap).not.toContain("https://platform.claude.com/docs/en/gone0.md");
+
+      // The streak is over, atomically with the advance.
+      expect(snapStore.has("tier2:llms:guard")).toBe(false);
+    });
   });
 
   describe("Tier-2 candidate burst cap (gate path only)", () => {
@@ -1276,49 +1330,56 @@ describe("Layer B — bounded shrink guard", () => {
     ...Array.from({ length: 13 }, (_, i) => `new${i}`),
   ];
 
-  const rec = (over: Partial<Parameters<typeof shouldAcceptShrink>[0]["record"]> = {}) => ({
-    consecutiveSkips: 3,
-    firstSkipAt: NOW - 25 * H,
-    lastSample: freshSet,
-    ...over,
-  });
+  /**
+   * `record` carries only the counter + streak start; the previous sample is a SEPARATE
+   * argument, because the caller has already overwritten `lastSample` with the current
+   * one for persistence. Default `previousSample` is a ~99%-identical predecessor, which
+   * is what a content-stable streak actually looks like.
+   */
+  const call = (over: {
+    prior?: string[];
+    fresh?: string[];
+    previousSample?: string[];
+    consecutiveSkips?: number;
+    firstSkipAt?: number;
+  } = {}) =>
+    shouldAcceptShrink({
+      prior: over.prior ?? priorSet,
+      fresh: over.fresh ?? freshSet,
+      record: {
+        consecutiveSkips: over.consecutiveSkips ?? 3,
+        firstSkipAt: over.firstSkipAt ?? NOW - 25 * H,
+      },
+      previousSample: over.previousSample ?? (over.fresh ?? freshSet).slice(0, -2),
+      now: NOW,
+    });
 
   test("a sustained, stable, removal-dominated shrink is accepted once both bounds are met", () => {
-    const v = shouldAcceptShrink({ prior: priorSet, fresh: freshSet, record: rec(), now: NOW, burstCap: 40 });
-    expect(v.accept).toBe(true);
+    expect(call().accept).toBe(true);
   });
 
   test("run count alone does not heal — the 24h wall clock must also pass", () => {
-    const v = shouldAcceptShrink({
-      prior: priorSet,
-      fresh: freshSet,
-      record: rec({ consecutiveSkips: 9, firstSkipAt: NOW - 6 * H }),
-      now: NOW,
-      burstCap: 40,
-    });
+    const v = call({ consecutiveSkips: 9, firstSkipAt: NOW - 6 * H });
     expect(v.accept).toBe(false);
     expect(v.reason).toContain("wait not satisfied");
   });
 
-  test("72h heals a SLOW row that can never reach 3 skips in time (the weekly cadence case)", () => {
-    // 7d interval → 3 skips is three WEEKS. The wall-clock ceiling is what unwedges it.
-    const v = shouldAcceptShrink({
-      prior: priorSet,
-      fresh: freshSet,
-      record: rec({ consecutiveSkips: 1, firstSkipAt: NOW - 80 * H }),
-      now: NOW,
-      burstCap: 40,
-    });
+  test("72h heals a SLOW row that cannot reach 3 skips in time (the 7d weekly cadence)", () => {
+    // A 7d row takes three WEEKS to reach 3 skips, so the wall-clock ceiling is what
+    // unwedges it. Two skips a week apart is the state that row actually reaches — the
+    // predicate is only ever evaluated AT a skip, and skip 1 always has elapsed === 0.
+    const v = call({ consecutiveSkips: 2, firstSkipAt: NOW - 168 * H });
     expect(v.accept).toBe(true);
+    // ...and the same row one skip in could not have healed, whatever the clock says.
+    expect(call({ consecutiveSkips: 1, firstSkipAt: NOW }).accept).toBe(false);
   });
 
   test("flapping content never heals, however long it flaps", () => {
-    const v = shouldAcceptShrink({
-      prior: priorSet,
-      fresh: freshSet,
-      record: rec({ firstSkipAt: NOW - 900 * H, lastSample: Array.from({ length: 549 }, (_, i) => `other${i}`) }),
-      now: NOW,
-      burstCap: 40,
+    // The predecessor sample shares nothing with this one — the shape a challenge page
+    // or a partial build produces run over run.
+    const v = call({
+      firstSkipAt: NOW - 900 * H,
+      previousSample: Array.from({ length: 549 }, (_, i) => `other${i}`),
     });
     expect(v.accept).toBe(false);
     expect(v.reason).toContain("content unstable");
@@ -1326,26 +1387,32 @@ describe("Layer B — bounded shrink guard", () => {
 
   test("an additions-dominated shrink never heals (a garbage page inventing a URL space)", () => {
     const garbage = Array.from({ length: 549 }, (_, i) => (i < 40 ? `u${i}` : `junk${i}`));
-    const v = shouldAcceptShrink({
-      prior: priorSet,
-      fresh: garbage,
-      record: rec({ lastSample: garbage }),
-      now: NOW,
-      burstCap: 40,
-    });
+    const v = call({ fresh: garbage, previousSample: garbage });
     expect(v.accept).toBe(false);
-    // Rejected on whichever dominance clause bites first — never accepted.
-    expect(v.reason).toMatch(/too many additions|not removal-dominated/);
+    expect(v.reason).toContain("not removal-dominated");
+  });
+
+  test("a LARGE but still removal-dominated addition count is accepted, not refused", () => {
+    // Regression pin: an absolute cap on additions here would re-wedge permanently —
+    // while a source is skipped its `prior` is frozen while upstream keeps publishing, so
+    // `added` only grows and could never come back under the cap. The burst cap belongs
+    // at the call site (which carries the remainder), not in the accept predicate.
+    const many = [
+      ...Array.from({ length: 536 }, (_, i) => `u${i}`),
+      ...Array.from({ length: 120 }, (_, i) => `new${i}`),
+    ];
+    const v = call({ fresh: many, previousSample: many });
+    expect(v.accept).toBe(true);
   });
 
   test("blog-sized sources never self-heal (ratio reasoning at n=11 is noise)", () => {
     const small = Array.from({ length: 25 }, (_, i) => `s${i}`);
-    const v = shouldAcceptShrink({
+    const v = call({
       prior: small,
       fresh: small.slice(0, 5),
-      record: { consecutiveSkips: 50, firstSkipAt: NOW - 900 * H, lastSample: small.slice(0, 5) },
-      now: NOW,
-      burstCap: 40,
+      previousSample: small.slice(0, 5),
+      consecutiveSkips: 50,
+      firstSkipAt: NOW - 900 * H,
     });
     expect(v.accept).toBe(false);
     expect(v.reason).toContain("set too small");
@@ -1354,13 +1421,7 @@ describe("Layer B — bounded shrink guard", () => {
   test("the size gate reads the MAX of the two sets, so a legitimately-shrunk baseline still heals", () => {
     const bigPrior = Array.from({ length: 400 }, (_, i) => `u${i}`);
     const smallFresh = Array.from({ length: 30 }, (_, i) => `u${i}`);
-    const v = shouldAcceptShrink({
-      prior: bigPrior,
-      fresh: smallFresh,
-      record: { consecutiveSkips: 3, firstSkipAt: NOW - 25 * H, lastSample: smallFresh },
-      now: NOW,
-      burstCap: 40,
-    });
+    const v = call({ prior: bigPrior, fresh: smallFresh, previousSample: smallFresh });
     expect(v.accept).toBe(true);
   });
 
