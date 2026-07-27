@@ -14,6 +14,7 @@ import {
   backlogOutcomeHtml,
   weeklyRunHtml,
   backlogTailHtml,
+  backlogGlossaryHtml,
   sourceDraftResultHtml,
   backlogInspectorHtml,
   backlogDocKey,
@@ -423,6 +424,9 @@ function renderBacklog(data: IngestBacklogResponse): void {
   // Re-renders (drain polls every 3s) must not slam an open tail shut: capture
   // its open state before replacing the HTML and re-apply after.
   const tailWasOpen = el.querySelector<HTMLDetailsElement>(".bk-tail")?.open === true;
+  // Same guard for the glossary `<details>` at the strip's foot — a poll tick must
+  // not slam it shut while the user is reading the bucket definitions.
+  const glossaryWasOpen = el.querySelector<HTMLDetailsElement>(".bk-glossary")?.open === true;
   // Same footgun for the inspector's scrolling row list: replacing the innerHTML
   // resets it to the top mid-read on every 3s poll tick, so capture + re-apply.
   const inspectorScrollTop = el.querySelector<HTMLElement>(".bk-inspector-rows")?.scrollTop ?? 0;
@@ -434,10 +438,15 @@ function renderBacklog(data: IngestBacklogResponse): void {
     backlogTailHtml(model, inspector) +
     // The inspector renders last (its own full-width row below the tail) and only
     // when open — its state lives at module level, so a poll re-render can't shut it.
-    backlogInspectorHtml(inspector, model.perSource, { pruneEnabled: model.pruneEnabled });
+    backlogInspectorHtml(inspector, model.perSource, { pruneEnabled: model.pruneEnabled }) +
+    backlogGlossaryHtml(model);
   if (tailWasOpen) {
     const tail = el.querySelector<HTMLDetailsElement>(".bk-tail");
     if (tail) tail.open = true;
+  }
+  if (glossaryWasOpen) {
+    const gloss = el.querySelector<HTMLDetailsElement>(".bk-glossary");
+    if (gloss) gloss.open = true;
   }
   if (inspectorScrollTop > 0) {
     const rows = el.querySelector<HTMLElement>(".bk-inspector-rows");
