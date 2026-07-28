@@ -72,7 +72,15 @@ export interface SourceDraftInput {
 export type SourceDraftOutcome =
   | { outcome: "drafted"; proposalId: string; targetPath: string; title: string }
   | { outcome: "covered"; reason: string }
-  | { outcome: "skipped"; reason: string }
+  /**
+   * `degraded` separates the two very different things a skip can mean. Without it,
+   * "this summary is too thin to be worth a page" and "the drafter burned two model
+   * calls and produced nothing usable" are the same `log.info` line — which is how
+   * three lost drafts went unnoticed for six days. Deliberate guards leave it unset;
+   * a skip that represents work thrown away sets it, and the auto-trigger logs those
+   * at WARN.
+   */
+  | { outcome: "skipped"; reason: string; degraded?: boolean }
   | { outcome: "error"; reason: string };
 
 /** The stable `topic_key` for a source proposal — a distinct namespace so it can
@@ -190,6 +198,20 @@ function stemCollision(index: WikiIndex | null, stem: string, targetPath: string
 export const COLLISION_SKIP_SENTINEL = "SKIP";
 
 /**
+ * The one-retry nudge after a reply that isn't a file at all — overwhelmingly the
+ * tool-escape shape: the model wrote the `.mdx` with `Write` and replied "File
+ * created successfully at: …", which carries no frontmatter and so no title. The
+ * drafter one-shot fences those tools off (`DRAFTER_EXCLUDED_TOOLS`), making this a
+ * belt to that braces: it also covers a connector where the fence doesn't bind, a
+ * chatty preamble that survived `normalizeDraftOutput`, or a truncated reply.
+ */
+export function buildTextOnlyRetryPrompt(basePrompt: string): string {
+  return `${basePrompt}
+
+IMPORTANT — REPLY WITH THE FILE ITSELF: your previous reply was not a .mdx file (no frontmatter title). The page is read from your REPLY TEXT and nothing else — do not write, edit, or save a file with any tool, because anything written to disk is discarded. Reply with the complete .mdx file body only: the FIRST characters of your reply must be the opening \`---\` of the frontmatter, with no commentary before or after it.`;
+}
+
+/**
  * The one-retry nudge after a stem collision: the drafter's chosen title is
  * already taken (typically by an earlier capture from the same topic wave), so
  * either differentiate — a meaningfully distinct title for what THIS item adds —
@@ -280,17 +302,33 @@ export async function draftSourcePage(deps: DraftSourcePageDeps): Promise<Source
     // `life/sources/` page as a silent skip.
     const domain = categoryToDomain(input.category ?? "");
 
-    // Up to two attempts: a stem collision on the first draft triggers ONE retry
-    // with the distinct-title-or-SKIP nudge; any other skip reason is final.
-    let prompt = basePrompt;
+    // Two independent one-shot retries, each usable at most once (so at most three
+    // model calls): a reply that isn't a file at all gets the text-only nudge, and a
+    // stem collision gets the distinct-title-or-SKIP nudge. Any other skip is final.
+    // They are tracked separately, not as one attempt counter, for two reasons: the
+    // SKIP sentinel is only meaningful as an answer to the COLLISION nudge (read
+    // after a text-only retry it would name a title nothing ever took), and both
+    // nudges must COMPOSE — each is rebuilt onto the base prompt every attempt, so
+    // a collision followed by a fileless reply doesn't drop the "that title is
+    // taken" instruction and walk straight back into the same collision.
     let draftText = "";
     let title = "";
     let targetPath = "";
-    for (let attempt = 0; ; attempt++) {
-      const raw = await deps.callDrafter(prompt, input.sourceTitle ?? input.url);
+    let retriedForTitle = false;
+    let collisionTitle: string | null = null;
+    const buildPrompt = (): string => {
+      let p = basePrompt;
+      if (retriedForTitle) p = buildTextOnlyRetryPrompt(p);
+      // Collision nudge last: it ends with the SKIP option, which must be the final
+      // instruction the model reads.
+      if (collisionTitle) p = buildCollisionRetryPrompt(p, collisionTitle);
+      return p;
+    };
+    for (;;) {
+      const raw = await deps.callDrafter(buildPrompt(), input.sourceTitle ?? input.url);
       draftText = normalizeDraftOutput(raw);
 
-      if (attempt > 0 && draftText.trim().toUpperCase() === COLLISION_SKIP_SENTINEL) {
+      if (collisionTitle !== null && draftText.trim().toUpperCase() === COLLISION_SKIP_SENTINEL) {
         return {
           outcome: "skipped",
           reason: `drafter judged the existing page "${title}" already covers this doc`,
@@ -300,11 +338,20 @@ export async function draftSourcePage(deps: DraftSourcePageDeps): Promise<Source
       const fm = parseFrontmatter(draftText);
       const rawTitle = Array.isArray(fm.title) ? fm.title[0] : fm.title;
       if (!rawTitle || !rawTitle.trim()) {
-        return { outcome: "skipped", reason: "draft has no frontmatter title" };
+        if (!retriedForTitle) {
+          retriedForTitle = true;
+          log.warn(
+            "Source drafter reply for {topic} carries no frontmatter title (head: {head}) — retrying with the text-only nudge",
+            { botName, topic: topicKey, head: draftText.trim().slice(0, 120) },
+          );
+          continue;
+        }
+        return { outcome: "skipped", reason: "draft has no frontmatter title", degraded: true };
       }
       title = rawTitle.trim();
       const stem = sanitizeFilename(title);
-      if (!stem) return { outcome: "skipped", reason: "title sanitized to an empty stem" };
+      if (!stem)
+        return { outcome: "skipped", reason: "title sanitized to an empty stem", degraded: true };
 
       targetPath = path.posix.join(expectedDir(domain, "source"), `${stem}.mdx`);
 
@@ -314,19 +361,24 @@ export async function draftSourcePage(deps: DraftSourcePageDeps): Promise<Source
         wikiDir,
         domain,
       });
-      if (!gate.ok) return { outcome: "skipped", reason: `shape gate: ${gate.reason}` };
+      if (!gate.ok)
+        return { outcome: "skipped", reason: `shape gate: ${gate.reason}`, degraded: true };
 
       if (stemCollision(index, stem, targetPath)) {
-        if (attempt === 0) {
+        if (collisionTitle === null) {
+          collisionTitle = title;
           log.info("Source drafter title collision on {stem} for {topic} — retrying with distinct-title nudge", {
             botName,
             stem,
             topic: topicKey,
           });
-          prompt = buildCollisionRetryPrompt(basePrompt, title);
           continue;
         }
-        return { outcome: "skipped", reason: `stem "${stem}" collides with an existing page` };
+        return {
+          outcome: "skipped",
+          reason: `stem "${stem}" collides with an existing page`,
+          degraded: true,
+        };
       }
       break;
     }

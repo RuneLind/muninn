@@ -159,6 +159,39 @@ function stubDeps(
 }
 
 describe("runSourceDraftBacklog", () => {
+  // A degraded skip means the drafter ANSWERED and the answer was unusable — the
+  // model calls were spent. Treating it as a free deterministic skip let a batch of
+  // failing drafts walk the whole queue firing one-shots with `modelAttempts` at 0.
+  test("a degraded skip consumes the model-attempt budget", async () => {
+    const attempts: string[] = [];
+    const { deps } = stubDeps({
+      draft: async (input) => {
+        attempts.push(input.docId);
+        return { outcome: "skipped", reason: "draft has no frontmatter title", degraded: true };
+      },
+    });
+    const res = await runSourceDraftBacklog(fakeBot, "/wiki", "youtube-summaries", 2, "http://x", deps);
+    expect(attempts.length).toBe(2);
+    expect(res.totals.skipped).toBe(2);
+    expect(res.results.every((r) => r.degraded === true)).toBe(true);
+  });
+
+  test("a non-degraded skip stays free and lets the batch reach deeper docs", async () => {
+    const attempts: string[] = [];
+    const { deps } = stubDeps({
+      draft: async (input) => {
+        attempts.push(input.docId);
+        return attempts.length <= 3
+          ? { outcome: "skipped", reason: "summary too thin" }
+          : { outcome: "drafted", proposalId: "p", targetPath: "sources/x.mdx", title: "X" };
+      },
+    });
+    const res = await runSourceDraftBacklog(fakeBot, "/wiki", "youtube-summaries", 1, "http://x", deps);
+    expect(attempts.length).toBe(4);
+    expect(res.totals.drafted).toBe(1);
+    expect(res.results.some((r) => r.degraded)).toBe(false);
+  });
+
   test("drafts up to the limit sequentially and rolls up totals", async () => {
     const { deps, draftCalls } = stubDeps();
     const res = await runSourceDraftBacklog(fakeBot, "/wiki", "youtube-summaries", 3, "http://x", deps);

@@ -203,6 +203,14 @@ export interface SourceBacklogDocResult {
   docId: string;
   outcome: SourceDraftOutcome["outcome"];
   reason?: string;
+  /**
+   * Mirrors {@link SourceDraftOutcome}'s `degraded`: a `skipped` that BURNED model
+   * calls rather than being a cheap deterministic pass. Load-bearing in
+   * {@link runSourceDraftBacklog} — without it a batch of failing drafts walks the
+   * whole queue firing two-to-three one-shots per doc while `modelAttempts` stays
+   * at zero, because plain `skipped` is treated as free.
+   */
+  degraded?: boolean;
   proposalId?: string;
   title?: string;
 }
@@ -385,7 +393,11 @@ export async function runSourceDraftBacklog(
     if (modelAttempts >= cap) break;
     const result = await draftOneBacklogDoc(doc, deps);
     results.push(result);
-    if (result.outcome === "drafted" || result.outcome === "error") modelAttempts++;
+    // A degraded skip spent the model calls too (the drafter answered, the answer was
+    // unusable) — counting it keeps the batch's spend bounded by `cap`, which the
+    // no-title / shape-gate / post-collision paths would otherwise slip past.
+    if (result.outcome === "drafted" || result.outcome === "error" || result.degraded)
+      modelAttempts++;
   }
 
   const totals = {
@@ -445,6 +457,7 @@ export async function draftOneBacklogDoc(
     ...base,
     outcome: outcome.outcome,
     ...("reason" in outcome ? { reason: outcome.reason } : {}),
+    ...(outcome.outcome === "skipped" && outcome.degraded ? { degraded: true } : {}),
     ...(outcome.outcome === "drafted"
       ? { proposalId: outcome.proposalId, title: outcome.title }
       : {}),
@@ -465,12 +478,22 @@ export function triggerSourceDraftFromCapture(
   const wikiDir = botConfig.wikiDir;
   void runSourceDraftForInput(botConfig, wikiDir, input)
     .then((outcome) => {
-      log.info("Source drafter auto-trigger for {collection}/{id}: {outcome}", {
+      // A capture that produced nothing usable must not read like a capture that was
+      // deliberately passed over: `error` and `degraded` skips are work thrown away —
+      // the doc silently stays in the gardener's "new" bucket with no proposal row and
+      // no gate entry, indistinguishable from the drafter never having run. INFO is
+      // for the honest outcomes (drafted / covered / thin / already-covered).
+      const failed =
+        outcome.outcome === "error" || (outcome.outcome === "skipped" && outcome.degraded === true);
+      const message = "Source drafter auto-trigger for {collection}/{id}: {outcome}";
+      const props = {
         collection: input.collection,
         id: input.docId,
         outcome: outcome.outcome,
         ...("reason" in outcome ? { reason: outcome.reason } : {}),
-      });
+      };
+      if (failed) log.warn(message, props);
+      else log.info(message, props);
     })
     .catch((err) => {
       log.warn("Source drafter auto-trigger threw for {collection}/{id}: {error}", {
