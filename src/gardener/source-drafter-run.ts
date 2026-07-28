@@ -203,6 +203,14 @@ export interface SourceBacklogDocResult {
   docId: string;
   outcome: SourceDraftOutcome["outcome"];
   reason?: string;
+  /**
+   * Mirrors {@link SourceDraftOutcome}'s `degraded`: a `skipped` that BURNED model
+   * calls rather than being a cheap deterministic pass. Load-bearing in
+   * {@link runSourceDraftBacklog} — without it a batch of failing drafts walks the
+   * whole queue firing two-to-three one-shots per doc while `modelAttempts` stays
+   * at zero, because plain `skipped` is treated as free.
+   */
+  degraded?: boolean;
   proposalId?: string;
   title?: string;
 }
@@ -385,7 +393,11 @@ export async function runSourceDraftBacklog(
     if (modelAttempts >= cap) break;
     const result = await draftOneBacklogDoc(doc, deps);
     results.push(result);
-    if (result.outcome === "drafted" || result.outcome === "error") modelAttempts++;
+    // A degraded skip spent the model calls too (the drafter answered, the answer was
+    // unusable) — counting it keeps the batch's spend bounded by `cap`, which the
+    // no-title / shape-gate / post-collision paths would otherwise slip past.
+    if (result.outcome === "drafted" || result.outcome === "error" || result.degraded)
+      modelAttempts++;
   }
 
   const totals = {
@@ -445,6 +457,7 @@ export async function draftOneBacklogDoc(
     ...base,
     outcome: outcome.outcome,
     ...("reason" in outcome ? { reason: outcome.reason } : {}),
+    ...(outcome.outcome === "skipped" && outcome.degraded ? { degraded: true } : {}),
     ...(outcome.outcome === "drafted"
       ? { proposalId: outcome.proposalId, title: outcome.title }
       : {}),

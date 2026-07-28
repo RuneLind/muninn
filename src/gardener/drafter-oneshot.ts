@@ -50,9 +50,24 @@ export const DRAFTER_THINKING_MAX_TOKENS = 8000;
  * `claude-sdk.ts`), so an allow-list of `[]` fences nothing. `excludedTools` is the
  * only knob that binds, and it maps on every connector that has these tools —
  * claude-sdk → `disallowedTools`, claude-cli → `--disallowedTools`, copilot-sdk →
- * `excludedTools`. openai-compat has no filesystem tools to fence.
+ * `excludedTools`. openai-compat ignores the field entirely, but it also offers no
+ * filesystem tools — there the text-only retry in `draftSourcePage` is the only belt.
+ *
+ * The agent-loop tools are on the list for the same reason `DISALLOWED_BASE` in
+ * `src/benchmarks/audit.ts` carries them: a run that is denied `Write` can still
+ * delegate the write to a sub-agent with an unrestricted toolset and come back with
+ * a confirmation — the exact shape being fenced against.
  */
-export const DRAFTER_EXCLUDED_TOOLS = ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"];
+export const DRAFTER_EXCLUDED_TOOLS = [
+  "Write",
+  "Edit",
+  "MultiEdit",
+  "NotebookEdit",
+  "Bash",
+  "Agent",
+  "Task",
+  "Skill",
+];
 
 export interface DrafterOneShotOptions {
   /** Subject for the trace + `/agents` card — the encyclopedic title if known, else the url/docId. */

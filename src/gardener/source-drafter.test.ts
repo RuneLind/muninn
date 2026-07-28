@@ -308,6 +308,33 @@ describe("draftSourcePage", () => {
     expect(prompts[0]).not.toContain("REPLY WITH THE FILE ITSELF");
   });
 
+  // Each nudge is rebuilt onto the base prompt every attempt. Replacing instead of
+  // composing dropped "that title is taken" on the third call, which walked straight
+  // back into the same collision and lost the draft after three paid model calls.
+  test("a collision then a fileless reply carries BOTH nudges into the third attempt", async () => {
+    const prompts: string[] = [];
+    await draftSourcePage(
+      baseDeps({
+        index: fakeIndex([
+          page({
+            title: "Retrieval-Augmented Generation",
+            name: "Retrieval-Augmented Generation",
+            relPath: "sources/Retrieval-Augmented Generation.md",
+          }),
+        ]),
+        callDrafter: async (prompt) => {
+          prompts.push(prompt);
+          if (prompts.length === 1) return mdxDraft(); // collides
+          if (prompts.length === 2) return "File created successfully at: /tmp/x.mdx";
+          return mdxDraft({ title: "Corrective Retrieval for RAG Pipelines" });
+        },
+      }),
+    );
+    expect(prompts.length).toBe(3);
+    expect(prompts[2]).toContain("TITLE COLLISION");
+    expect(prompts[2]).toContain("REPLY WITH THE FILE ITSELF");
+  });
+
   // The SKIP sentinel only means "the existing page covers this" as an answer to the
   // COLLISION nudge. Read after a title retry it would name a title nothing took.
   test("SKIP after the text-only retry is not read as an already-covered answer", async () => {

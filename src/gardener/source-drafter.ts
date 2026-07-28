@@ -198,14 +198,6 @@ function stemCollision(index: WikiIndex | null, stem: string, targetPath: string
 export const COLLISION_SKIP_SENTINEL = "SKIP";
 
 /**
- * The one-retry nudge after a stem collision: the drafter's chosen title is
- * already taken (typically by an earlier capture from the same topic wave), so
- * either differentiate — a meaningfully distinct title for what THIS item adds —
- * or admit the existing page already covers it by answering the SKIP sentinel.
- * Without this retry, two same-topic captures silently converge on one title and
- * the second draft is discarded with only a log line to show for the model spend.
- */
-/**
  * The one-retry nudge after a reply that isn't a file at all — overwhelmingly the
  * tool-escape shape: the model wrote the `.mdx` with `Write` and replied "File
  * created successfully at: …", which carries no frontmatter and so no title. The
@@ -219,6 +211,14 @@ export function buildTextOnlyRetryPrompt(basePrompt: string): string {
 IMPORTANT — REPLY WITH THE FILE ITSELF: your previous reply was not a .mdx file (no frontmatter title). The page is read from your REPLY TEXT and nothing else — do not write, edit, or save a file with any tool, because anything written to disk is discarded. Reply with the complete .mdx file body only: the FIRST characters of your reply must be the opening \`---\` of the frontmatter, with no commentary before or after it.`;
 }
 
+/**
+ * The one-retry nudge after a stem collision: the drafter's chosen title is
+ * already taken (typically by an earlier capture from the same topic wave), so
+ * either differentiate — a meaningfully distinct title for what THIS item adds —
+ * or admit the existing page already covers it by answering the SKIP sentinel.
+ * Without this retry, two same-topic captures silently converge on one title and
+ * the second draft is discarded with only a log line to show for the model spend.
+ */
 export function buildCollisionRetryPrompt(basePrompt: string, takenTitle: string): string {
   return `${basePrompt}
 
@@ -305,20 +305,30 @@ export async function draftSourcePage(deps: DraftSourcePageDeps): Promise<Source
     // Two independent one-shot retries, each usable at most once (so at most three
     // model calls): a reply that isn't a file at all gets the text-only nudge, and a
     // stem collision gets the distinct-title-or-SKIP nudge. Any other skip is final.
-    // The flags are separate rather than one attempt counter because the SKIP
-    // sentinel is only meaningful as an answer to the COLLISION nudge — reading it
-    // after a text-only retry would report a title that was never taken.
-    let prompt = basePrompt;
+    // They are tracked separately, not as one attempt counter, for two reasons: the
+    // SKIP sentinel is only meaningful as an answer to the COLLISION nudge (read
+    // after a text-only retry it would name a title nothing ever took), and both
+    // nudges must COMPOSE — each is rebuilt onto the base prompt every attempt, so
+    // a collision followed by a fileless reply doesn't drop the "that title is
+    // taken" instruction and walk straight back into the same collision.
     let draftText = "";
     let title = "";
     let targetPath = "";
     let retriedForTitle = false;
-    let retriedForCollision = false;
+    let collisionTitle: string | null = null;
+    const buildPrompt = (): string => {
+      let p = basePrompt;
+      if (retriedForTitle) p = buildTextOnlyRetryPrompt(p);
+      // Collision nudge last: it ends with the SKIP option, which must be the final
+      // instruction the model reads.
+      if (collisionTitle) p = buildCollisionRetryPrompt(p, collisionTitle);
+      return p;
+    };
     for (;;) {
-      const raw = await deps.callDrafter(prompt, input.sourceTitle ?? input.url);
+      const raw = await deps.callDrafter(buildPrompt(), input.sourceTitle ?? input.url);
       draftText = normalizeDraftOutput(raw);
 
-      if (retriedForCollision && draftText.trim().toUpperCase() === COLLISION_SKIP_SENTINEL) {
+      if (collisionTitle !== null && draftText.trim().toUpperCase() === COLLISION_SKIP_SENTINEL) {
         return {
           outcome: "skipped",
           reason: `drafter judged the existing page "${title}" already covers this doc`,
@@ -334,7 +344,6 @@ export async function draftSourcePage(deps: DraftSourcePageDeps): Promise<Source
             "Source drafter reply for {topic} carries no frontmatter title (head: {head}) — retrying with the text-only nudge",
             { botName, topic: topicKey, head: draftText.trim().slice(0, 120) },
           );
-          prompt = buildTextOnlyRetryPrompt(basePrompt);
           continue;
         }
         return { outcome: "skipped", reason: "draft has no frontmatter title", degraded: true };
@@ -356,14 +365,13 @@ export async function draftSourcePage(deps: DraftSourcePageDeps): Promise<Source
         return { outcome: "skipped", reason: `shape gate: ${gate.reason}`, degraded: true };
 
       if (stemCollision(index, stem, targetPath)) {
-        if (!retriedForCollision) {
-          retriedForCollision = true;
+        if (collisionTitle === null) {
+          collisionTitle = title;
           log.info("Source drafter title collision on {stem} for {topic} — retrying with distinct-title nudge", {
             botName,
             stem,
             topic: topicKey,
           });
-          prompt = buildCollisionRetryPrompt(basePrompt, title);
           continue;
         }
         return {
