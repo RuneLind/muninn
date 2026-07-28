@@ -269,9 +269,62 @@ describe("draftSourcePage", () => {
     expect(out.outcome).toBe("skipped");
   });
 
-  test("draft with no frontmatter title → skipped", async () => {
-    const out = await draftSourcePage(baseDeps({ callDrafter: async () => "not a draft at all" }));
+  test("draft with no frontmatter title → skipped as degraded after exactly 2 calls", async () => {
+    let calls = 0;
+    const out = await draftSourcePage(
+      baseDeps({
+        callDrafter: async () => {
+          calls++;
+          return "not a draft at all";
+        },
+      }),
+    );
     expect(out.outcome).toBe("skipped");
+    if (out.outcome !== "skipped") throw new Error("expected skipped");
+    expect(out.reason).toContain("no frontmatter title");
+    // Degraded: this is work thrown away, not a deliberate pass — the auto-trigger
+    // logs it at WARN instead of burying it in the INFO stream.
+    expect(out.degraded).toBe(true);
+    expect(calls).toBe(2);
+  });
+
+  // The 2026-07-28 tool escape: the drafter wrote the .mdx with the Write tool and
+  // replied with the tool's confirmation, so the draft was lost with no proposal row.
+  test("a tool-confirmation reply is retried with the text-only nudge → drafted", async () => {
+    const prompts: string[] = [];
+    const out = await draftSourcePage(
+      baseDeps({
+        callDrafter: async (prompt) => {
+          prompts.push(prompt);
+          return prompts.length === 1
+            ? "File created successfully at: /tmp/source_page.mdx"
+            : mdxDraft();
+        },
+      }),
+    );
+    expect(out.outcome).toBe("drafted");
+    expect(prompts.length).toBe(2);
+    expect(prompts[1]).toContain("REPLY WITH THE FILE ITSELF");
+    expect(prompts[0]).not.toContain("REPLY WITH THE FILE ITSELF");
+  });
+
+  // The SKIP sentinel only means "the existing page covers this" as an answer to the
+  // COLLISION nudge. Read after a title retry it would name a title nothing took.
+  test("SKIP after the text-only retry is not read as an already-covered answer", async () => {
+    let calls = 0;
+    const out = await draftSourcePage(
+      baseDeps({
+        callDrafter: async () => {
+          calls++;
+          return calls === 1 ? "File created successfully at: /tmp/x.mdx" : "SKIP";
+        },
+      }),
+    );
+    expect(out.outcome).toBe("skipped");
+    if (out.outcome !== "skipped") throw new Error("expected skipped");
+    expect(out.reason).toContain("no frontmatter title");
+    expect(out.reason).not.toContain("already covers");
+    expect(calls).toBe(2);
   });
 
   test("an unresolvable body wikilink is de-linked to bold at persist time", async () => {

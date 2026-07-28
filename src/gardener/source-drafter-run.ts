@@ -465,12 +465,22 @@ export function triggerSourceDraftFromCapture(
   const wikiDir = botConfig.wikiDir;
   void runSourceDraftForInput(botConfig, wikiDir, input)
     .then((outcome) => {
-      log.info("Source drafter auto-trigger for {collection}/{id}: {outcome}", {
+      // A capture that produced nothing usable must not read like a capture that was
+      // deliberately passed over: `error` and `degraded` skips are work thrown away —
+      // the doc silently stays in the gardener's "new" bucket with no proposal row and
+      // no gate entry, indistinguishable from the drafter never having run. INFO is
+      // for the honest outcomes (drafted / covered / thin / already-covered).
+      const failed =
+        outcome.outcome === "error" || (outcome.outcome === "skipped" && outcome.degraded === true);
+      const message = "Source drafter auto-trigger for {collection}/{id}: {outcome}";
+      const props = {
         collection: input.collection,
         id: input.docId,
         outcome: outcome.outcome,
         ...("reason" in outcome ? { reason: outcome.reason } : {}),
-      });
+      };
+      if (failed) log.warn(message, props);
+      else log.info(message, props);
     })
     .catch((err) => {
       log.warn("Source drafter auto-trigger threw for {collection}/{id}: {error}", {

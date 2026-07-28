@@ -35,6 +35,25 @@ const log = getLog("gardener", "source-drafter");
  */
 export const DRAFTER_THINKING_MAX_TOKENS = 8000;
 
+/**
+ * Tools the drafter must not have. The draft is delivered as the one-shot's RETURN
+ * TEXT — `draftSourcePage` parses frontmatter out of it — so any tool that can
+ * produce the file some other way is a way to LOSE the draft: the model writes the
+ * `.mdx` to disk, returns "File created successfully at: …", `parseFrontmatter`
+ * finds no title, and the doc is terminally skipped with no proposal row and no gate
+ * entry. Measured over one 7-day trace window: 28 of 101 `draft:source` runs reached
+ * for `Write`/`Edit` (usually as a harmless temp-file scratchpad), and 3 lost the
+ * draft outright — one of them into the muninn repo itself.
+ *
+ * Fencing is expressed as an EXCLUDE list on purpose: under the claude-sdk's
+ * `bypassPermissions`, an empty `allowedTools` means the FULL surface (see
+ * `claude-sdk.ts`), so an allow-list of `[]` fences nothing. `excludedTools` is the
+ * only knob that binds, and it maps on every connector that has these tools —
+ * claude-sdk → `disallowedTools`, claude-cli → `--disallowedTools`, copilot-sdk →
+ * `excludedTools`. openai-compat has no filesystem tools to fence.
+ */
+export const DRAFTER_EXCLUDED_TOOLS = ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"];
+
 export interface DrafterOneShotOptions {
   /** Subject for the trace + `/agents` card — the encyclopedic title if known, else the url/docId. */
   title: string;
@@ -86,7 +105,18 @@ export async function runDrafterOneShot(opts: DrafterOneShotOptions): Promise<Cl
         ? DRAFTER_THINKING_MAX_TOKENS
         : opts.thinkingMaxTokens;
 
-    const result = await tracedOneShot(tracer, "claude", opts.prompt, config, botConfig, {
+    // Fence the tool surface for the model call only. A fresh object, never a mutation:
+    // the caller's botConfig is the shared discovered config, and every other field
+    // (name / connector / model) is carried over verbatim so the trace and the /agents
+    // run still report the bot's own identity.
+    const fencedBotConfig: BotConfig = {
+      ...botConfig,
+      excludedTools: [
+        ...new Set([...(botConfig.excludedTools ?? []), ...DRAFTER_EXCLUDED_TOOLS]),
+      ],
+    };
+
+    const result = await tracedOneShot(tracer, "claude", opts.prompt, config, fencedBotConfig, {
       ...(opts.systemPrompt ? { systemPrompt: opts.systemPrompt } : {}),
       ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
       ...(thinking !== null ? { thinkingMaxTokens: thinking } : {}),
