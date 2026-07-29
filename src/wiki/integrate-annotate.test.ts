@@ -79,6 +79,75 @@ describe("stripFactWrappers", () => {
     expect(stripFactWrappers("Prose.</Fact>")).toBe("Prose.");
   });
 
+  test("leaves a tag inside a FENCED CODE BLOCK alone — it is documentation", () => {
+    const body = [
+      "How a mark is spelled:",
+      "",
+      "```mdx",
+      '<Fact n="4" v="bad">the corrected passage</Fact>',
+      "```",
+      "",
+      'And <Fact n="1" v="ok">this real mark</Fact> is prose.',
+    ].join("\n");
+    const out = stripFactWrappers(body);
+    // The fenced example survives byte-for-byte; only the real mark comes off.
+    expect(out).toContain('<Fact n="4" v="bad">the corrected passage</Fact>');
+    expect(out).toContain("And this real mark is prose.");
+    // …and the counter agrees with the strip, so no phantom supersede is reported.
+    expect(countFactWrappers(body)).toBe(1);
+    // A ~~~ fence and an info-string fence are the same case.
+    const tilde = ["~~~", '<Fact n="2" v="ok">x</Fact>', "~~~"].join("\n");
+    expect(stripFactWrappers(tilde)).toBe(tilde);
+    expect(countFactWrappers(tilde)).toBe(0);
+  });
+
+  test("leaves a tag inside an INLINE code span alone", () => {
+    const body = 'The `<Fact n="4" v="bad">` tag opens a mark; <Fact n="4" v="bad">this</Fact> is one.';
+    expect(stripFactWrappers(body)).toBe(
+      'The `<Fact n="4" v="bad">` tag opens a mark; this is one.',
+    );
+    expect(countFactWrappers(body)).toBe(1);
+    // An UNCLOSED backtick is not a code span — the tag after it really strips.
+    expect(stripFactWrappers('a ` b <Fact n="1" v="ok">c</Fact>')).toBe("a ` b c");
+  });
+
+  test("leaves a tag inside FRONTMATTER alone", () => {
+    const body = [
+      "---",
+      "title: How the annotation write path works",
+      'summary: emits <Fact n="1" v="ok">…</Fact> pairs',
+      "---",
+      "",
+      'Body <Fact n="1" v="ok">mark</Fact>.',
+    ].join("\n");
+    const out = stripFactWrappers(body);
+    expect(out).toContain('summary: emits <Fact n="1" v="ok">…</Fact> pairs');
+    expect(out).toContain("Body mark.");
+    expect(countFactWrappers(body)).toBe(1);
+  });
+
+  test("a page that is ALL documentation survives a strip untouched", () => {
+    // The regression this guards: one integrate on the plan page documenting this
+    // feature used to silently delete every tag out of its own code samples.
+    const body = [
+      "---",
+      "title: Plan",
+      "---",
+      "",
+      "The pair:",
+      "",
+      "```md",
+      '<Fact n="4" v="bad">passage</Fact>',
+      "</Fact>",
+      "```",
+      "",
+      'Inline: `<Fact n="4" v="bad">`.',
+      "",
+    ].join("\n");
+    expect(stripFactWrappers(body)).toBe(body);
+    expect(countFactWrappers(body)).toBe(0);
+  });
+
   test("is idempotent, and counts what it is about to supersede", () => {
     const body = 'a <Fact n="1" v="ok">b</Fact> c <Fact n="2" v="bad">d</Fact>';
     expect(countFactWrappers(body)).toBe(2);
@@ -311,8 +380,8 @@ test("originals carry the PRE-edit text per corrected claim", () => {
     corrections: [correction({ claimIndex: 3, old: "ships 4M units", new: "ships 2.1M units" })],
     claims: [anchor(3, "❌")],
   });
-  expect(r.originals.get(3)).toBe("ships 4M units");
-  // …and re-derived at apply from the freshly-resolved outcomes.
+  // Derived at apply from the freshly-resolved outcomes — the ONE source (the body
+  // may have drifted between propose and apply).
   expect(originalsOfOutcomes(applyEdits(body, r.edits, true).outcomes).get(3)).toBe("ships 4M units");
 });
 
@@ -385,4 +454,195 @@ test("the budget still binds on real corrections when marks are free", () => {
   const max = maxChangedChars(body.length);
   expect(changedCharsOfOutcomes(r.outcomes)).toBeGreaterThan(max);
   expect(enforceChangeBudget(r.outcomes, body.length).dropped).toHaveLength(1);
+});
+
+// ── block-marker guard (tier 1) ──────────────────────────────────────────────
+
+describe("block-marker guard", () => {
+  const TABLE = [
+    "Intro.",
+    "",
+    "| Dose | Effect |",
+    "| --- | --- |",
+    "| 3g | maintenance |",
+    "",
+    "Tail.",
+    "",
+  ].join("\n");
+
+  test("a TABLE-ROW quote is dropped, and the table survives", () => {
+    const r = annotate({
+      body: TABLE,
+      claims: [anchor(1, "✅")],
+      quotes: [{ index: 1, quote: "| 3g | maintenance |" }],
+    });
+    expect(r.edits).toHaveLength(0);
+    expect(r.dropped.map((d) => d.reason).join(" ")).toContain("break the table");
+    // Nothing was written, so every row is still a row.
+    expect(applyEdits(TABLE, r.edits, true).body).toBe(TABLE);
+  });
+
+  test("a whole BULLET line keeps its marker outside the mark", () => {
+    const body = ["Intro.", "", "- The bullet claim sentence.", "- Another bullet.", "", "Tail.", ""].join("\n");
+    const r = annotate({
+      body,
+      claims: [anchor(1, "✅")],
+      quotes: [{ index: 1, quote: "- The bullet claim sentence." }],
+    });
+    expect(r.edits).toHaveLength(1);
+    const spliced = applyEdits(body, r.edits, true).body;
+    // The list item is still a list item — the tag starts AFTER the `- `.
+    expect(spliced).toContain('- <Fact n="1" v="ok">The bullet claim sentence.</Fact>');
+    expect(r.edits[0]!.reason).toContain("marker left outside");
+    // A blockquote / heading line is the same case.
+    const quoted = "Intro.\n\n> The quoted claim.\n\nTail.\n";
+    const q = annotate({
+      body: quoted,
+      claims: [anchor(1, "✅")],
+      quotes: [{ index: 1, quote: "> The quoted claim." }],
+    });
+    expect(applyEdits(quoted, q.edits, true).body).toContain('> <Fact n="1" v="ok">The quoted claim.</Fact>');
+  });
+
+  test("a mid-line span is untouched by the guard", () => {
+    const body = "- A bullet whose middle phrase was checked.\n";
+    const r = annotate({
+      body,
+      claims: [anchor(1, "✅")],
+      quotes: [{ index: 1, quote: "middle phrase" }],
+    });
+    expect(r.edits[0]!.new).toBe('<Fact n="1" v="ok">middle phrase</Fact>');
+    expect(r.edits[0]!.reason).toBe("marks the checked passage");
+  });
+
+  test("a CORRECTION on a table row applies UNWRAPPED rather than breaking the table", () => {
+    const r = annotate({
+      body: TABLE,
+      corrections: [
+        correction({
+          claimIndex: 1,
+          old: "| 3g | maintenance |",
+          new: "| 5g | maintenance |",
+        }),
+      ],
+      claims: [anchor(1, "❌")],
+    });
+    expect(r.edits).toHaveLength(1);
+    expect(r.edits[0]!.new).toBe("| 5g | maintenance |");
+    expect(r.dropped.map((d) => d.reason).join(" ")).toContain("the correction itself still applies");
+    // The rewritten row is still a row.
+    expect(applyEdits(TABLE, r.edits, true).body).toContain("\n| 5g | maintenance |\n");
+  });
+
+  test("a CORRECTION on a bullet line applies UNWRAPPED, keeping the list", () => {
+    const body = "- The bullet claim.\n- Another.\n";
+    const r = annotate({
+      body,
+      corrections: [correction({ claimIndex: 1, old: "- The bullet claim.", new: "- The fixed claim." })],
+      claims: [anchor(1, "❌")],
+    });
+    expect(r.edits[0]!.new).toBe("- The fixed claim.");
+    expect(applyEdits(body, r.edits, true).body).toContain("- The fixed claim.");
+  });
+});
+
+// ── unknown claim index ──────────────────────────────────────────────────────
+
+test("a correction naming a claim the answer does not have applies UNMARKED", () => {
+  const body = "The device ships 4M units per year.\n";
+  const r = annotate({
+    body,
+    corrections: [correction({ claimIndex: 9, verdict: "❌", old: "ships 4M units", new: "ships 2.1M units" })],
+    claims: [anchor(1, "❌")],
+  });
+  // The correction survives, but carries NO wrapper: a chip for claim 9 would link
+  // to a `#fc-claim-9` section the appendix cannot contain.
+  expect(r.edits).toHaveLength(1);
+  expect(r.edits[0]!.new).toBe("ships 2.1M units");
+  expect(r.dropped.map((d) => d.reason).join(" ")).toContain("claim 9 is not in the answer");
+  const applied = applyEdits(body, r.edits, true);
+  expect(applied.body).not.toContain("<Fact");
+  // …and no `Was:` line is fabricated for it either.
+  expect(originalsOfOutcomes(applied.outcomes).size).toBe(0);
+});
+
+// ── one chip per claim / ⚠️ fallback marks ───────────────────────────────────
+
+test("a claim wrapped by a correction is NOT wrapped again by its quote", () => {
+  const body = "Alpha claim sentence sits here. Tail.\n";
+  const r = annotate({
+    body,
+    corrections: [correction({ claimIndex: 1, verdict: "❌", old: "Alpha claim sentence", new: "Alpha fixed sentence" })],
+    claims: [anchor(1, "❌")],
+    // The extractor's quote for the SAME claim points at text the correction did
+    // not consume — so it resolves, and without the filter it would ship a second
+    // chip with the same `n`.
+    quotes: [{ index: 1, quote: "Tail." }],
+  });
+  const page = applyEdits(body, r.edits, true).body;
+  expect([...page.matchAll(/<Fact n="1"/g)]).toHaveLength(1);
+  expect(page).toContain('<Fact n="1" v="bad">Alpha fixed sentence</Fact>');
+  // The redundant quote is never a candidate, so it is not reported as a rejection
+  // either — the claim IS marked, nothing was lost.
+  expect(r.dropped).toHaveLength(0);
+});
+
+test("a ⚠️ claim whose correction could not be placed still gets a mark", () => {
+  const body = "The dosing guidance sentence sits here.\n";
+  const r = annotate({
+    body,
+    // The model quoted text that is not in the page — the correction drops.
+    corrections: [correction({ claimIndex: 1, verdict: "⚠️", old: "text that is absent", new: "hedged" })],
+    claims: [anchor(1, "⚠️")],
+    quotes: [{ index: 1, quote: "The dosing guidance sentence" }],
+  });
+  // Without the warn fallback the flagged passage would carry NO visible mark.
+  expect(r.edits).toHaveLength(1);
+  expect(r.edits[0]!.new).toBe('<Fact n="1" v="warn">The dosing guidance sentence</Fact>');
+  // It is a pure mark, so it costs nothing against the change budget.
+  const out = applyEdits(body, r.edits, true).outcomes[0]!;
+  expect(isWrapperOnlyEdit(out.edit, out.resolvedText)).toBe(true);
+  expect(outcomeChangedChars(out)).toBe(0);
+});
+
+test("a ⚠️ claim whose correction landed is not double-marked", () => {
+  const body = "The dosing guidance sentence sits here.\n";
+  const r = annotate({
+    body,
+    corrections: [
+      correction({ claimIndex: 1, verdict: "⚠️", old: "The dosing guidance sentence", new: "The hedged guidance" }),
+    ],
+    claims: [anchor(1, "⚠️")],
+    quotes: [{ index: 1, quote: "The dosing guidance sentence" }],
+  });
+  const page = applyEdits(body, r.edits, true).body;
+  expect([...page.matchAll(/<Fact n="1"/g)]).toHaveLength(1);
+  expect(page).toContain('<Fact n="1" v="warn">The hedged guidance</Fact>');
+});
+
+// ── CRLF bodies ──────────────────────────────────────────────────────────────
+
+test("a CRLF body gets CRLF-joined block wrappers, and strip → re-annotate is stable", () => {
+  const para = "First line of the paragraph\r\nwraps onto a second line.";
+  const body = "Intro.\r\n\r\n" + para + "\r\n\r\nTail.\r\n";
+  const r = annotate({
+    body,
+    claims: [anchor(1, "✅")],
+    quotes: [{ index: 1, quote: para }],
+  });
+  expect(r.edits).toHaveLength(1);
+  expect(r.edits[0]!.new).toBe('<Fact n="1" v="ok">\r\n' + para + "\r\n</Fact>");
+  const page = applyEdits(body, r.edits, true);
+  // No lone LF was introduced into a CRLF file.
+  expect(page.body.replace(/\r\n/g, "")).not.toContain("\n");
+  // The mark still costs 0 (the predicate accepts either newline spelling)…
+  expect(changedCharsOfOutcomes(page.outcomes)).toBe(0);
+  // …and the write is a byte-stable overlay.
+  expect(stripFactWrappers(page.body)).toBe(body);
+  const again = annotate({
+    body: stripFactWrappers(page.body),
+    claims: [anchor(1, "✅")],
+    quotes: [{ index: 1, quote: para }],
+  });
+  expect(applyEdits(body, again.edits, true).body).toBe(page.body);
 });

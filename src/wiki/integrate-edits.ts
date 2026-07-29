@@ -68,14 +68,19 @@
 import {
   COMPONENT_TAG_SOURCE_SINGLE_LINE,
   countFactWrappers,
+  isFactWrapperText,
+  normalizeFactVerdict,
   stripFactWrappers,
 } from "../format/markdown-ast.ts";
 import type { FactVerdict } from "../format/markdown-ast.ts";
 import { collapseWithMap } from "./explain-context.ts";
-import { FACTCHECK_SENTINEL_START, FACTCHECK_SENTINEL_END } from "./factcheck-context.ts";
+import {
+  FACTCHECK_MAX_CLAIMS,
+  FACTCHECK_SENTINEL_START,
+  FACTCHECK_SENTINEL_END,
+} from "./factcheck-context.ts";
 import { extractJson } from "../ai/json-extract.ts";
 import {
-  factVerdictForClaim,
   factWrapperForms,
   isWrapperOnlyEdit,
   type ClaimQuote,
@@ -104,6 +109,20 @@ export { INTEGRATE_BODY_MAX } from "../dashboard/views/components/wiki-integrate
 export const INTEGRATE_MAX_EDITS = 12;
 /** Max chars for one edit's `old` or `new`. */
 export const INTEGRATE_MAX_EDIT_CHARS = 2000;
+
+/**
+ * The edit cap for ONE integration, given whether the page is annotatable.
+ *
+ * An annotated write legitimately carries the corrections PLUS up to one mark per
+ * checked claim, so the cap rises by `FACTCHECK_MAX_CLAIMS` there. The ONE authority
+ * on that number: propose's zero-claims early return, propose's full path, the apply
+ * route's count check and the acceptance test all call this, after three
+ * hand-written copies drifted (the early return echoed 12 while the full path
+ * enforced 20).
+ */
+export function annotatedMaxEdits(annotatable: boolean): number {
+  return annotatable ? FACTCHECK_MAX_CLAIMS + INTEGRATE_MAX_EDITS : INTEGRATE_MAX_EDITS;
+}
 
 /** Same-length match-mask sentinel: U+E000, private use, ONE UTF-16 code unit.
  *  Never NUL (see the module doc — `Bun.spawn` rejects NUL in argv). */
@@ -763,8 +782,11 @@ export function applyEdits(body: string, edits: IntegrateEdit[], isMdx = false):
 
 // ── Inline `<Fact>` annotation pass ──────────────────────────────────────────
 
-/** True when `[start, end)` is EXACTLY one complete blank-line-delimited
- *  paragraph of `body` — the only shape the legal BLOCK wrapper form may take. */
+/** True when `[start, end)` is EXACTLY one complete blank-line-delimited BLOCK
+ *  GROUP of `body` — the only shape the legal BLOCK wrapper form may take. Usually
+ *  a prose paragraph, but a list or a table with no blank line inside it qualifies
+ *  too: what is tested is "no blank line within, blank line (or edge) on both
+ *  sides", not that the content is one paragraph of prose. */
 function isWholeParagraph(body: string, start: number, end: number): boolean {
   const slice = body.slice(start, end);
   if (slice !== slice.trim()) return false;
@@ -806,48 +828,125 @@ function longestLineRange(
   return best;
 }
 
+/** A leading BLOCK MARKER: list bullet, ordered number, blockquote, heading. */
+const LEADING_BLOCK_MARKER_RE = /^(?:[-*+]|\d+[.)]|>+|#{1,6})[ \t]+/;
+
+/** True when only whitespace precedes `pos` on its line — i.e. a wrapper spliced
+ *  at `pos` would put its opening tag at the START of the line. `COMPONENT_OPEN_RE`
+ *  matches the TRIMMED line, so such a tag makes the block parser claim the whole
+ *  line as a component. */
+function ownsLineStart(body: string, pos: number): boolean {
+  let i = pos - 1;
+  while (i >= 0 && (body[i] === " " || body[i] === "\t")) i--;
+  return i < 0 || body[i] === "\n";
+}
+
+/**
+ * Guard for a newline-free candidate mark: a wrapper whose opening tag would own
+ * the start of a line is parsed as a BLOCK component, which destroys any block
+ * structure that line's leading marker carried.
+ *
+ * Two outcomes, matching what the tier-3 trim already does for the same reason:
+ *  - a LIST / QUOTE / HEADING marker is left OUTSIDE the mark (the span shrinks);
+ *  - a TABLE row (or delimiter row) is REFUSED — there is no sub-range to shrink to
+ *    that keeps the row a row, and wrapping one empirically destroys the whole
+ *    table, not just that line.
+ * A span that does not start its own line is inline by construction and untouched.
+ */
+function markableRange(
+  body: string,
+  start: number,
+  end: number,
+): { start: number; end: number; trimmedMarker?: boolean } | { error: string } {
+  if (!ownsLineStart(body, start)) return { start, end };
+  let s = start;
+  while (s < end && (body[s] === " " || body[s] === "\t")) s++;
+  if (body[s] === "|") {
+    return { error: "the checked passage is a table row — marking it would break the table" };
+  }
+  const marker = LEADING_BLOCK_MARKER_RE.exec(body.slice(s, end));
+  if (!marker) return { start: s, end };
+  const after = s + marker[0].length;
+  if (after >= end) {
+    return { error: "the checked passage is only a list or quote marker — nothing to mark" };
+  }
+  return { start: after, end, trimmedMarker: true };
+}
+
 /**
  * Which wrapper FORM (and over which sub-range) a resolved span may legally take.
  *
  * The inline component matcher is LINE-SCOPED, so an inline `<Fact>` wrapper
  * spliced around a span containing a newline renders as literal escaped tags in
- * the reader — a visible corruption, not a missing feature. Three tiers:
+ * the reader — a visible corruption, not a missing feature. Four tiers:
  *
- *  1. newline-free span ⇒ the INLINE form over the span as-is.
- *  2. the span is exactly ONE whole paragraph ⇒ the BLOCK form (open tag and close
- *     tag each on their own line). One paragraph maximum: the block parser closes a
- *     component at its matching tag, but a wrapper spanning a blank line would
+ *  1. newline-free span ⇒ the INLINE form over the span as-is (past the
+ *     {@link markableRange} block-marker guard).
+ *  2. the span is exactly ONE whole block group ⇒ the BLOCK form (open tag and
+ *     close tag each on their own line). One group maximum: the block parser closes
+ *     a component at its matching tag, but a wrapper spanning a blank line would
  *     swallow whatever block structure sits between the two paragraphs.
  *  3. a partial-paragraph multi-line span ⇒ TRIM to the largest newline-free
- *     sub-range (an honestly truncated mark beats no mark and beats a broken one).
- *  4. nothing left after trimming ⇒ refuse, with a reason the reviewer sees.
+ *     sub-range (an honestly truncated mark beats no mark and beats a broken one),
+ *     then through the same guard.
+ *  4. nothing left after trimming, or a span that cannot be marked without breaking
+ *     a table ⇒ refuse, with a reason the reviewer sees.
  */
 function factSpanForm(
   body: string,
   start: number,
   end: number,
-): { form: "inline" | "block"; start: number; end: number; truncated?: boolean } | { error: string } {
-  if (!body.slice(start, end).includes("\n")) return { form: "inline", start, end };
+):
+  | { form: "inline" | "block"; start: number; end: number; truncated?: boolean; trimmedMarker?: boolean }
+  | { error: string } {
+  if (!body.slice(start, end).includes("\n")) {
+    const guarded = markableRange(body, start, end);
+    if ("error" in guarded) return guarded;
+    return { form: "inline", ...guarded };
+  }
   if (isWholeParagraph(body, start, end)) return { form: "block", start, end };
   const trimmed = longestLineRange(body, start, end);
   if (!trimmed) {
     return { error: "the checked passage spans several lines with no markable text on any of them" };
   }
-  return { form: "inline", start: trimmed.start, end: trimmed.end, truncated: true };
+  // `longestLineRange` already skips a leading list/quote marker; the guard adds
+  // the table refusal (its longest line can be a table row).
+  const guarded = markableRange(body, trimmed.start, trimmed.end);
+  if ("error" in guarded) return guarded;
+  return { form: "inline", start: guarded.start, end: guarded.end, truncated: true };
 }
 
 /** The wrapper text for a CORRECTION: the mark goes around the replacement prose,
  *  which is not in the page yet, so the tier test runs on `edit.new` plus the shape
- *  of the span it replaces. */
+ *  of the span it replaces.
+ *
+ *  The block-marker guard applies here as a straight REFUSAL rather than a trim:
+ *  the wrapper must cover the whole replacement (a marker left outside it would put
+ *  prose before the `<Fact` tag, and `carriesFactWrapper` — the payload-shape gate
+ *  that makes the appendix mandatory — would then not recognize the edit at all,
+ *  shipping a chip with no `#fc-claim-N` target). A refused mark is never fatal:
+ *  the correction applies unwrapped. */
 function wrapCorrectionText(
   body: string,
   outcome: EditOutcome,
   claimIndex: number,
   verdict: FactVerdict,
+  nl: string,
 ): { text: string } | { error: string } {
   const inner = outcome.edit.new;
-  const forms = factWrapperForms(claimIndex, verdict, inner);
-  if (!inner.includes("\n")) return { text: forms[0] };
+  const forms = factWrapperForms(claimIndex, verdict, inner, nl);
+  if (!inner.includes("\n")) {
+    if (ownsLineStart(body, outcome.start!)) {
+      const head = inner.replace(/^[ \t]*/, "");
+      if (head.startsWith("|")) {
+        return { error: "the corrected line is a table row — a mark there would break the table" };
+      }
+      if (LEADING_BLOCK_MARKER_RE.test(head)) {
+        return { error: "the corrected line opens with a list or quote marker" };
+      }
+    }
+    return { text: forms[0] };
+  }
   if (
     !/\n[ \t\r]*\n/.test(inner) &&
     isWholeParagraph(body, outcome.start!, outcome.end!)
@@ -855,6 +954,12 @@ function wrapCorrectionText(
     return { text: forms[1] };
   }
   return { error: "the replacement text spans more than one block" };
+}
+
+/** The newline the BODY uses — a CRLF page must get CRLF-joined block wrappers, or
+ *  strip → re-annotate is not byte-stable and one LF line lands in a CRLF file. */
+function bodyNewline(body: string): string {
+  return body.includes("\r\n") ? "\r\n" : "\n";
 }
 
 /** Input to {@link annotateEdits}. */
@@ -882,8 +987,6 @@ export interface AnnotateEditsResult {
    *  the wrapper-only annotations. Resolve + splice this like any edit list. */
   edits: IntegrateEdit[];
   dropped: DroppedEdit[];
-  /** claimIndex → the text a correction replaced, for the appendix's `Was:` lines. */
-  originals: Map<number, string>;
 }
 
 /**
@@ -910,10 +1013,10 @@ export interface AnnotateEditsResult {
  */
 export function annotateEdits(input: AnnotateEditsInput): AnnotateEditsResult {
   const { body, isMdx } = input;
+  const nl = bodyNewline(body);
   const dropped: DroppedEdit[] = [];
-  const originals = new Map<number, string>();
   const verdictByClaim = new Map<number, FactVerdict>();
-  for (const c of input.claims) verdictByClaim.set(c.index, factVerdictForClaim(c.verdict));
+  for (const c of input.claims) verdictByClaim.set(c.index, normalizeFactVerdict(c.verdict));
 
   // ── Pass 1: corrections resolve and CLAIM their spans ────────────────────
   const pass1 = applyEdits(body, input.corrections, isMdx);
@@ -927,10 +1030,20 @@ export function annotateEdits(input: AnnotateEditsInput): AnnotateEditsResult {
     }
     claimed.push({ start: o.start, end: o.end });
     const n = o.edit.claimIndex;
-    const verdict = verdictByClaim.get(n) ?? factVerdictForClaim(o.edit.verdict);
+    // The ANSWER is the only authority on a claim's verdict. A `claimIndex` that
+    // names no parsed claim (a model-invented number) must NOT be wrapped: the chip
+    // would link to a `#fc-claim-N` section the appendix cannot contain, and the
+    // `Was:` line keyed to it would be silently dropped too. The correction itself
+    // is still applied — unwrapped, and said out loud.
+    const verdict = verdictByClaim.get(n);
     let edit = o.edit;
-    if (n > 0 && verdict !== "unknown" && !wrappedClaims.has(n)) {
-      const wrapped = wrapCorrectionText(body, o, n, verdict);
+    if (n > 0 && verdict === undefined) {
+      dropped.push({
+        edit: o.edit,
+        reason: `claim ${n} is not in the answer — the correction was applied without a mark`,
+      });
+    } else if (n > 0 && verdict !== undefined && verdict !== "unknown" && !wrappedClaims.has(n)) {
+      const wrapped = wrapCorrectionText(body, o, n, verdict, nl);
       if ("error" in wrapped) {
         dropped.push({
           edit: o.edit,
@@ -949,14 +1062,30 @@ export function annotateEdits(input: AnnotateEditsInput): AnnotateEditsResult {
         edit = { ...o.edit, new: wrapped.text };
       }
     }
-    if (n > 0 && !originals.has(n)) originals.set(n, o.resolvedText ?? "");
     corrections.push(edit);
   }
 
-  // ── Pass 2: wrapper-only marks on the ✅ claims' own quotes ───────────────
+  // ── Pass 2: wrapper-only marks on the claims' own quotes ─────────────────
+  // ✅ claims (whose prose is never rewritten) AND any ⚠️ claim pass 1 left
+  // UNMARKED — a ⚠️ whose correction dropped would otherwise leave the reader no
+  // visible trace at all on the passage the check flagged, which is the whole point
+  // of the feature. Claims already wrapped by pass 1 are excluded: two chips with
+  // the same `n` would both point at the one appendix section.
   const candidates: IntegrateEdit[] = input.quotes
-    .filter((q) => verdictByClaim.get(q.index) === "ok")
-    .map((q) => ({ claimIndex: q.index, verdict: "✅", old: q.quote, new: "", reason: "" }));
+    .filter((q) => {
+      if (wrappedClaims.has(q.index)) return false;
+      const v = verdictByClaim.get(q.index);
+      return v === "ok" || v === "warn";
+    })
+    .map((q) => ({
+      claimIndex: q.index,
+      // The emoji must AGREE with the `v` the wrapper carries, or the structural
+      // wrapper-only predicate stops recognizing the mark and it costs budget.
+      verdict: verdictByClaim.get(q.index) === "warn" ? "⚠️" : "✅",
+      old: q.quote,
+      new: "",
+      reason: "",
+    }));
   const wrappers: IntegrateEdit[] = [];
   for (const o of applyEdits(body, candidates, isMdx).outcomes) {
     if (!o.applied || o.start === undefined || o.end === undefined) {
@@ -974,7 +1103,7 @@ export function annotateEdits(input: AnnotateEditsInput): AnnotateEditsResult {
     }
     const inner = body.slice(span.start, span.end);
     const verdict = verdictByClaim.get(o.edit.claimIndex) ?? "ok";
-    const forms = factWrapperForms(o.edit.claimIndex, verdict, inner);
+    const forms = factWrapperForms(o.edit.claimIndex, verdict, inner, nl);
     const text = span.form === "block" ? forms[1] : forms[0];
     if (text.length > input.maxEditChars) {
       dropped.push({ edit: o.edit, reason: `the inline mark exceeds ${input.maxEditChars} chars` });
@@ -984,7 +1113,11 @@ export function annotateEdits(input: AnnotateEditsInput): AnnotateEditsResult {
       ...o.edit,
       old: inner,
       new: text,
-      reason: span.truncated ? "marks the checked passage (trimmed to one line)" : "marks the checked passage",
+      reason: span.truncated
+        ? "marks the checked passage (trimmed to one line)"
+        : span.trimmedMarker
+          ? "marks the checked passage (list or quote marker left outside the mark)"
+          : "marks the checked passage",
     });
   }
 
@@ -997,7 +1130,7 @@ export function annotateEdits(input: AnnotateEditsInput): AnnotateEditsResult {
     }
     edits.push(e);
   }
-  return { edits, dropped, originals };
+  return { edits, dropped };
 }
 
 /**
@@ -1013,7 +1146,8 @@ export function originalsOfOutcomes(outcomes: EditOutcome[]): Map<number, string
   const out = new Map<number, string>();
   for (const o of outcomes) {
     if (!o.applied || o.edit.claimIndex <= 0) continue;
-    if (!/^<Fact\b/.test(o.edit.new)) continue;
+    // The SHARED wrapper-shape authority, not a local `^<Fact\b` prefix test.
+    if (!isFactWrapperText(o.edit.new)) continue;
     if (isWrapperOnlyEdit(o.edit, o.resolvedText)) continue;
     if (!out.has(o.edit.claimIndex)) out.set(o.edit.claimIndex, o.resolvedText ?? "");
   }

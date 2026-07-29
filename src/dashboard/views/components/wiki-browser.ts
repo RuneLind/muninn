@@ -40,10 +40,12 @@ import {
   annotationIndexes,
   appendBlockedByIntegrate,
   buildIntegrateApplyBody,
+  carriesFactWrapper,
   claimQuotesFromClaimsEvent,
   integrateBarState,
   integratePreviewHtml,
   integrateSuccessCopy,
+  INTEGRATE_NO_ANCHORS_COPY,
   INTEGRATE_STALE_COPY,
   INTEGRATE_STALE_COPY_EDIT,
   type DroppedEditRow,
@@ -1820,6 +1822,14 @@ function factcheckIntegrateInnerHtml(turn: AskTurn): string {
       "— edit it by hand, or add the callout instead.</span>"
     );
   }
+  // Nothing to correct AND no verbatim passage to mark: the only reachable outcome
+  // is an empty panel, so say why instead of offering the click.
+  if (state === "no-anchors") {
+    return (
+      '<button class="wiki-fc-int-open" disabled>✎ Integrate into article</button>' +
+      '<span class="wiki-fc-int-bar-msg">' + esc(INTEGRATE_NO_ANCHORS_COPY) + "</span>"
+    );
+  }
   // In-flight propose is TURN state, not DOM state: a re-render (a `done`
   // refresh, an SSE drop, re-opening the turn from history) must reproduce the
   // disabled "Proposing…" button, or a second click races the first and the
@@ -2721,6 +2731,9 @@ async function acceptFactcheckIntegrate(): Promise<void> {
       calloutAdded: data.calloutAdded,
       calloutRequested,
       calloutReplaced,
+      // An annotated write persists the `<FactCheck>` APPENDIX, not the `.md`
+      // summary callout — name the thing that actually landed on the page.
+      annotated: carriesFactWrapper(body.edits),
     });
     if (applied === 0) {
       // Nothing was written. Re-offering the SAME selection would reproduce this

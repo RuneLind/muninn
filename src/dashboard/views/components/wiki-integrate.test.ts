@@ -3,10 +3,10 @@ import {
   annotationIndexes,
   carriesFactWrapper,
   editChangedChars,
-  factCheckCounts,
-  factVerdictForClaim,
   factWrapperForms,
   hasIntegrableClaims,
+  annotateOnlyWithoutAnchors,
+  INTEGRATE_NO_ANCHORS_COPY,
   INTEGRATE_STALE_COPY,
   INTEGRATE_STALE_COPY_EDIT,
   parseFactcheckClaims,
@@ -737,38 +737,6 @@ test("nothingIntegrableHtml also surfaces the quotesNote, and an absent one adds
 
 // ── Inline `<Fact>` annotation helpers ───────────────────────────────────────
 
-test("factVerdictForClaim maps every verdict emoji, VS16 or not", () => {
-  expect(factVerdictForClaim("✅")).toBe("ok");
-  expect(factVerdictForClaim("⚠️")).toBe("warn");
-  expect(factVerdictForClaim("⚠")).toBe("warn");
-  expect(factVerdictForClaim("❌")).toBe("bad");
-  expect(factVerdictForClaim("❓")).toBe("unknown");
-  expect(factVerdictForClaim("")).toBe("unknown");
-});
-
-test("factCheckCounts tallies CLAIMS off the headings, not wrappers written", () => {
-  const answer = [
-    "A lede mentioning ❌ and ⚠️ that must not be counted.",
-    "",
-    "### ✅ Claim 1/4 — a",
-    "",
-    "Fine.",
-    "",
-    "### ✅ Claim 2/4 — b",
-    "",
-    "Fine.",
-    "",
-    "### ⚠️ Claim 3/4 — c",
-    "",
-    "Partly.",
-    "",
-    "### ❓ Claim 4/4 — d",
-    "",
-    "Skipped.",
-  ].join("\n");
-  expect(factCheckCounts(answer)).toEqual({ ok: 2, warn: 1, bad: 0, unknown: 1 });
-});
-
 test("carriesFactWrapper is the fail-closed PAYLOAD-shape test", () => {
   // Fires for a wrapper-only mark AND for a Fact-wrapped correction — both emit a
   // chip that needs its `#fc-claim-N` target, so both make the appendix mandatory.
@@ -778,15 +746,29 @@ test("carriesFactWrapper is the fail-closed PAYLOAD-shape test", () => {
   // Only an OPENING tag counts — mid-string prose mentioning the tag does not.
   expect(carriesFactWrapper([{ new: 'talks about <Fact n="1" v="ok">' }])).toBe(false);
   expect(carriesFactWrapper([{ new: 42 }])).toBe(false);
+  // The FULL wrapper shape is required: prose that merely BEGINS with the literal
+  // tag is an ordinary edit, and classing it as annotated would force the apply
+  // route's mandatory-appendix path (answer-or-400) onto it.
+  expect(
+    carriesFactWrapper([{ new: '<Fact n="4" v="bad">…</Fact> is how a mark is spelled.' }]),
+  ).toBe(false);
+  expect(carriesFactWrapper([{ new: '<Fact n="4" v="bad">marked</Fact>\n' }])).toBe(true);
+  expect(carriesFactWrapper([{ new: '<Fact n="4" v="bad">\nblock form\n</Fact>' }])).toBe(true);
 });
 
 test("hasIntegrableClaims: the all-✅ relaxation is .mdx-ONLY", () => {
   // A `.md` page's only output is corrected prose, so it still needs ❌/⚠️…
   expect(hasIntegrableClaims(fcTurn({ answer: ALL_CLEAN }))).toBe(false);
   expect(integrateBarState(fcTurn({ answer: ALL_CLEAN }))).toBe("hidden");
-  // …while an annotatable page's marks + appendix are real output.
-  expect(hasIntegrableClaims(fcTurn({ answer: ALL_CLEAN, annotatable: true }))).toBe(true);
-  expect(integrateBarState(fcTurn({ answer: ALL_CLEAN, annotatable: true }))).toBe("ready");
+  // …while an annotatable page's marks + appendix are real output — as long as the
+  // check kept a verbatim passage for each mark to resolve against.
+  const quotes = [{ index: 1, quote: "Founded in 1998" }];
+  expect(hasIntegrableClaims(fcTurn({ answer: ALL_CLEAN, annotatable: true, claimQuotes: quotes }))).toBe(
+    true,
+  );
+  expect(
+    integrateBarState(fcTurn({ answer: ALL_CLEAN, annotatable: true, claimQuotes: quotes })),
+  ).toBe("ready");
   // But an annotatable page with NO parsed claim at all is still nothing to write.
   expect(hasIntegrableClaims(fcTurn({ answer: "just prose", annotatable: true }))).toBe(false);
   expect(integrateBarState(fcTurn({ answer: "just prose", annotatable: true }))).toBe("hidden");
@@ -899,4 +881,82 @@ test("buildIntegrateApplyBody posts the answer UNCONDITIONALLY on an annotated a
     answer: "### ❌ Claim 1/1 — x\n",
   });
   expect(deselected?.appendCallout).toBeUndefined();
+});
+
+test("an annotate-only turn with NO claim quotes says so instead of offering the button", () => {
+  // Nothing to correct and no anchor to mark: the click could only ever reach the
+  // empty "the editor proposed no edits" panel.
+  const turn = fcTurn({ answer: ALL_CLEAN, annotatable: true });
+  expect(hasIntegrableClaims(turn)).toBe(false);
+  expect(annotateOnlyWithoutAnchors(turn)).toBe(true);
+  expect(integrateBarState(turn)).toBe("no-anchors");
+  expect(INTEGRATE_NO_ANCHORS_COPY).toContain("nothing to mark");
+  // An empty list is the same case as an absent one.
+  expect(integrateBarState(fcTurn({ answer: ALL_CLEAN, annotatable: true, claimQuotes: [] }))).toBe(
+    "no-anchors",
+  );
+  // A CORRECTABLE turn never needs quotes — the corrections are the write.
+  expect(annotateOnlyWithoutAnchors(fcTurn({ annotatable: true }))).toBe(false);
+  expect(integrateBarState(fcTurn({ annotatable: true }))).toBe("ready");
+  // A `.md` page with no quotes stays hidden, not "no-anchors" — nothing relaxed there.
+  expect(integrateBarState(fcTurn({ answer: ALL_CLEAN }))).toBe("hidden");
+});
+
+test("integrateSuccessCopy names the APPENDIX on an annotated write, the callout otherwise", () => {
+  expect(
+    integrateSuccessCopy({ applied: 2, committed: true, calloutAdded: true, annotated: true }),
+  ).toContain("fact-check appendix added");
+  expect(
+    integrateSuccessCopy({
+      applied: 2,
+      committed: true,
+      calloutAdded: true,
+      calloutReplaced: true,
+      annotated: true,
+    }),
+  ).toContain("fact-check appendix refreshed");
+  expect(
+    integrateSuccessCopy({ applied: 2, committed: true, calloutAdded: true }),
+  ).toContain("summary callout added");
+});
+
+test("the supersede statement rides its own field, not a blank dropped row", () => {
+  const span = "Confirmed span.";
+  const edits: ProposedEdit[] = [
+    { claimIndex: 1, verdict: "❌", old: "a", new: "b", reason: "", resolvedText: "a" },
+  ];
+  const html = integratePreviewHtml(
+    { edits, dropped: [], supersededNote: "3 inline marks from a previous check superseded" },
+    [true],
+    false,
+  );
+  expect(html).toContain("Previous marks: 3 inline marks from a previous check superseded");
+  // …and it does not inflate the "not applied" list.
+  expect(html).not.toContain("not applied");
+  const without = integratePreviewHtml({ edits, dropped: [] }, [true], false);
+  expect(without).not.toContain("Previous marks:");
+});
+
+test("the Apply label counts marks as MARKS, agreeing with the head count", () => {
+  const span = "A confirmed sentence.";
+  const edits: ProposedEdit[] = [
+    { claimIndex: 1, verdict: "❌", old: "old prose", new: "new prose", reason: "", resolvedText: "old prose" },
+    {
+      claimIndex: 2,
+      verdict: "✅",
+      old: span,
+      new: factWrapperForms(2, "ok", span)[0],
+      reason: "",
+      resolvedText: span,
+    },
+  ];
+  const html = integratePreviewHtml({ edits, dropped: [] }, [true, true], false);
+  expect(html).toContain("1 proposed edit · 1 passage marked");
+  expect(html).toContain("Apply 1 edit + 1 mark");
+  // A mark-only proposal must not read as "Apply 0 edits".
+  const markOnly = integratePreviewHtml({ edits: [edits[1]!], dropped: [] }, [true], false);
+  expect(markOnly).toContain("Apply 0 edits + 1 mark");
+  // Deselecting the mark drops it from the label.
+  const half = integratePreviewHtml({ edits, dropped: [] }, [true, false], false);
+  expect(half).toContain(">Apply 1 edit<");
 });

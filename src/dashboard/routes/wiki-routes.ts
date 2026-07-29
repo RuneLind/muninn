@@ -42,7 +42,6 @@ import {
   buildFactcheckBlock,
   hasFactcheckBlock,
   FACTCHECK_ANSWER_MAX,
-  FACTCHECK_MAX_CLAIMS,
   FACTCHECK_SELECTION_MAX,
   FACTCHECK_HEADING_MAX,
 } from "../../wiki/factcheck-context.ts";
@@ -50,6 +49,7 @@ import { appendBlockToPage, spliceSentinelBlock, withTrailingNewline } from "../
 import { writeWikiPage } from "../../wiki/page-write.ts";
 import {
   annotateEdits,
+  annotatedMaxEdits,
   applyEdits,
   buildIntegratePrompt,
   changedCharsOfOutcomes,
@@ -65,7 +65,6 @@ import {
   countFactWrappers,
   stripFactWrappers,
   INTEGRATE_BODY_MAX,
-  INTEGRATE_MAX_EDITS,
   INTEGRATE_MAX_EDIT_CHARS,
   type DroppedEdit,
   type IntegrateEdit,
@@ -1740,7 +1739,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // Only native `.mdx` pages carry inline annotations (policy — a `.md` page is
       // read raw outside the reader, where JSX-ish tags are literal text).
       const annotatable = isAnnotatablePage(meta.relPath, meta.type);
-      const maxEdits = annotatable ? FACTCHECK_MAX_CLAIMS + INTEGRATE_MAX_EDITS : INTEGRATE_MAX_EDITS;
+      const maxEdits = annotatedMaxEdits(annotatable);
 
       // Claim anchors are parsed SERVER-SIDE out of the answer markdown (its
       // `### <emoji> Claim n/m — <title>` headings are a fixed prompt contract),
@@ -1792,7 +1791,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
           edits: [],
           dropped: [],
           note: "No ❌ or ⚠️ claims to integrate.",
-          budget: integrateBudget(bodyLen),
+          budget: integrateBudget(bodyLen, annotatable),
           hasSentinelBlock,
           annotatable,
           ...quoteFields,
@@ -1872,7 +1871,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
             maxEdits,
             maxEditChars: INTEGRATE_MAX_EDIT_CHARS,
           })
-        : { edits: bounded.kept, dropped: [] as DroppedEdit[], originals: new Map<number, string>() };
+        : { edits: bounded.kept, dropped: [] as DroppedEdit[] };
       const resolvedEdits = applyEdits(editable, annotation.edits, isMdx);
       const budgetDrops = enforceChangeBudget(resolvedEdits.outcomes, bodyLen);
       const edits = resolvedEdits.outcomes
@@ -1895,20 +1894,17 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         ...resolvedEdits.outcomes
           .filter((o) => !o.applied)
           .map((o) => ({ edit: o.edit, reason: o.reason ?? "could not be placed" })),
-        // The SUPERSEDE rule made visible: the strip removed every prior mark, and
-        // only this run's claims are re-marked. Reported so a shrinking claim set
-        // never reads as marks silently disappearing off the page.
-        ...(supersededWrappers > 0
-          ? [
-              {
-                edit: { claimIndex: 0, verdict: "", old: "", new: "", reason: "" },
-                reason:
-                  `${supersededWrappers} inline mark${supersededWrappers === 1 ? "" : "s"} ` +
-                  "from a previous check superseded — this run re-marks the page from its own claims",
-              },
-            ]
-          : []),
       ];
+      // The SUPERSEDE rule made visible: the strip removed every prior mark, and
+      // only this run's claims are re-marked. Reported so a shrinking claim set never
+      // reads as marks silently disappearing off the page — as a RUN-level note, not
+      // a blank row in `dropped` (which inflated the "N not applied" count with an
+      // entry that corresponds to no proposed edit).
+      const supersededNote =
+        supersededWrappers > 0
+          ? `${supersededWrappers} inline mark${supersededWrappers === 1 ? "" : "s"} ` +
+            "from a previous check superseded — this run re-marks the page from its own claims"
+          : undefined;
 
       log.info(
         "Wiki fact-check integrate: wiki={wiki} page={page} proposed={n} dropped={d} quotes={q}",
@@ -1927,9 +1923,9 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         ...(modelNote ? { note: modelNote } : {}),
         // Measured on RESOLVED spans, so accept-all is guaranteed within budget.
         // Wrapper-only annotations score 0 (see `outcomeChangedChars`).
+        ...(supersededNote ? { supersededNote } : {}),
         budget: {
-          ...integrateBudget(bodyLen),
-          maxEdits,
+          ...integrateBudget(bodyLen, annotatable),
           proposedChangedChars: budgetDrops.changedChars,
         },
         hasSentinelBlock,
@@ -2000,7 +1996,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       if ("response" in resolved) return resolved.response;
       const { entry, meta } = resolved;
       const annotatable = isAnnotatablePage(meta.relPath, meta.type);
-      const maxEdits = annotatable ? FACTCHECK_MAX_CLAIMS + INTEGRATE_MAX_EDITS : INTEGRATE_MAX_EDITS;
+      const maxEdits = annotatedMaxEdits(annotatable);
       if (edits.length > maxEdits) {
         return c.json({ error: `too many edits — the cap is ${maxEdits} per apply` }, 400);
       }
@@ -2087,8 +2083,10 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
           if (applyResult.appliedCount === 0) return null;
           // Did any mark actually land? If so the appendix is MANDATORY regardless of
           // the checkbox — the chips have nowhere to point without it.
-          const wroteWrapper = applyResult.outcomes.some(
-            (o) => o.applied && /^<Fact\b/.test(o.edit.new),
+          // Same authority as the payload-shape pre-check above — one wrapper-shape
+          // test, applied to the outcomes that actually landed.
+          const wroteWrapper = carriesFactWrapper(
+            applyResult.outcomes.filter((o) => o.applied).map((o) => o.edit),
           );
           // BOTH branches end in the same normalization (exactly one trailing
           // newline) so ticking the callout checkbox can't be the reason an
@@ -2246,8 +2244,13 @@ async function resolveIntegrateTarget(
   return { entry, index, meta };
 }
 
-/** The edit budget echoed to the client so it can disable accept-all honestly. */
-function integrateBudget(bodyLen: number): {
+/** The edit budget echoed to the client so it can disable accept-all honestly.
+ *  `annotatable` drives `maxEdits` through the shared {@link annotatedMaxEdits}, so
+ *  BOTH propose exits echo the cap the apply route actually enforces. */
+function integrateBudget(
+  bodyLen: number,
+  annotatable: boolean,
+): {
   bodyLen: number;
   maxEdits: number;
   maxEditChars: number;
@@ -2255,7 +2258,7 @@ function integrateBudget(bodyLen: number): {
 } {
   return {
     bodyLen,
-    maxEdits: INTEGRATE_MAX_EDITS,
+    maxEdits: annotatedMaxEdits(annotatable),
     maxEditChars: INTEGRATE_MAX_EDIT_CHARS,
     maxChangedChars: maxChangedChars(bodyLen),
   };

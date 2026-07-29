@@ -15,11 +15,12 @@
  */
 
 import { extractJson } from "../ai/json-extract.ts";
-import { COMPONENT_TAG_SOURCE, type FactVerdict } from "../format/markdown-ast.ts";
 import {
-  factVerdictForClaim,
-  parseFactcheckClaims,
-} from "../dashboard/views/components/wiki-integrate.ts";
+  COMPONENT_TAG_SOURCE_SINGLE_LINE,
+  normalizeFactVerdict,
+  type FactVerdict,
+} from "../format/markdown-ast.ts";
+import { parseFactcheckClaims } from "../dashboard/views/components/wiki-integrate.ts";
 
 /** Server-side cap on the selected passage (chars) — mirrors `EXPLAIN_SELECTION_MAX`. */
 export const FACTCHECK_SELECTION_MAX = 1500;
@@ -138,12 +139,18 @@ export function buildFactcheckBlock(answer: string, dateOslo: string): string {
  *    appendix early and strands every claim after it outside the block; a
  *    line-owning `<Callout>` becomes a real nested component. The answer reaches
  *    the write routes straight off the client, so neither may be trusted.
+ *
+ * The SINGLE-LINE tag source is load-bearing here for the same reason the integrate
+ * masker uses it: with a newline-crossing attribute tail, one malformed
+ * `<Callout tone=` in the answer eats every following line up to the next `>`
+ * anywhere in the answer — including blockquote markers and autolinks — deleting
+ * real evidence instead of defanging one tag.
  */
 function neutralizeAnswerMarkup(answer: string): string {
   return answer
     .replaceAll(FACTCHECK_SENTINEL_START, "factcheck:start")
     .replaceAll(FACTCHECK_SENTINEL_END, "factcheck:end")
-    .replace(new RegExp(COMPONENT_TAG_SOURCE, "g"), (tag) => tag.replace(/[<>]/g, ""));
+    .replace(new RegExp(COMPONENT_TAG_SOURCE_SINGLE_LINE, "g"), (tag) => tag.replace(/[<>]/g, ""));
 }
 
 /** Severity order for the appendix: what needs the reader's attention first.
@@ -200,11 +207,16 @@ export function buildFactcheckAppendix(
 ): string {
   const safe = neutralizeAnswerMarkup(answer);
   const anchors = parseFactcheckClaims(safe);
+  // No parsed claim ⇒ no appendix to build. Emitting an empty `<FactCheck>` block
+  // would have the ➕ append route persist a block carrying NOTHING, discarding the
+  // whole answer; the blockquote form keeps the text verbatim, which is the honest
+  // degrade for an answer whose headings didn't match the contract.
+  if (anchors.length === 0) return buildFactcheckBlock(answer, dateOslo);
   const counts: Record<FactVerdict, number> = { ok: 0, warn: 0, bad: 0, unknown: 0 };
-  for (const a of anchors) counts[factVerdictForClaim(a.verdict)]++;
+  for (const a of anchors) counts[normalizeFactVerdict(a.verdict)]++;
 
   const ordered = anchors
-    .map((a) => ({ a, v: factVerdictForClaim(a.verdict) }))
+    .map((a) => ({ a, v: normalizeFactVerdict(a.verdict) }))
     .filter((x) => x.v !== "unknown")
     .sort(
       (x, y) =>
@@ -219,7 +231,12 @@ export function buildFactcheckAppendix(
   }
 
   const blocks = ordered.map(({ a }) => {
-    const original = opts.originals?.get(a.index);
+    // The originals are PAGE PROSE, embedded verbatim by `withWasLine` — so they go
+    // through the SAME neutralizer as the answer. Without it a page that documents
+    // this feature (or any `.mdx` page carrying a component tag in a corrected
+    // sentence) could close the appendix early from inside a `Was:` line.
+    const raw = opts.originals?.get(a.index);
+    const original = raw ? neutralizeAnswerMarkup(raw) : raw;
     return original && original.trim() ? withWasLine(a.block, original) : a.block;
   });
 

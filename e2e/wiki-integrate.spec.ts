@@ -429,7 +429,7 @@ test.describe("Fact-check: integrate into article", () => {
   test("an all-✅ fact check on an ANNOTATABLE .mdx page DOES render the button", async ({ page }) => {
     // The relaxation, from the other side: on `.mdx` an all-✅ check still has real
     // output — every confirmed passage gets its inline mark plus the appendix — so
-    // the ≥1-❌/⚠️ gate drops to ≥1 parsed claim.
+    // the ≥1-❌/⚠️ gate drops to ≥1 parsed claim WITH a verbatim quote to mark.
     await seedSession(page, [
       seedTurn({
         question: "Clean mdx check",
@@ -438,11 +438,33 @@ test.describe("Fact-check: integrate into article", () => {
         baseHash: mdxBaseHash,
         bodyLen: MDX_PAGE_BODY.length,
         annotatable: true,
+        claimQuotes: [{ index: 1, quote: MDX_WARRANTY }],
         askedAt: 1_700_000_000_006,
       }),
     ]);
     await openSeededTurn(page);
     await expect(page.locator("#wikiFactcheckIntegrateBtn")).toBeVisible();
+  });
+
+  test("an all-✅ .mdx check with NO claim quotes says why instead of offering the button", async ({
+    page,
+  }) => {
+    // The annotate-only path's anchors ARE the quotes, so a quote-less turn could
+    // only ever reach an empty preview — the bar states that instead.
+    await seedSession(page, [
+      seedTurn({
+        question: "Clean mdx check, no quotes",
+        answer: MDX_CLEAN_ANSWER,
+        page: "mdx-note",
+        baseHash: mdxBaseHash,
+        bodyLen: MDX_PAGE_BODY.length,
+        annotatable: true,
+        askedAt: 1_700_000_000_008,
+      }),
+    ]);
+    await openSeededTurn(page);
+    await expect(page.locator("#wikiFactcheckIntegrateBtn")).toHaveCount(0);
+    await expect(page.locator(".wiki-fc-integrate")).toContainText("nothing to mark");
   });
 
   test("the ANNOTATED apply writes marks + appendix, and re-running never nests", async ({ page }) => {

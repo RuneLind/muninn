@@ -28,12 +28,14 @@ import {
   annotateEdits,
   applyEdits,
   countFactWrappers,
+  originalsOfOutcomes,
   stripFactWrappers,
-  INTEGRATE_MAX_EDITS,
   INTEGRATE_MAX_EDIT_CHARS,
   type IntegrateEdit,
 } from "./integrate-edits.ts";
-import { buildFactcheckAppendix, FACTCHECK_MAX_CLAIMS } from "./factcheck-context.ts";
+import { annotatedMaxEdits } from "./integrate-edits.ts";
+import { buildFactcheckAppendix } from "./factcheck-context.ts";
+import { CREATINE_ORIGINALS } from "./__fixtures__/factcheck-creatine-originals.ts";
 import {
   isWrapperOnlyEdit,
   parseFactcheckClaims,
@@ -50,26 +52,27 @@ const PINNED = (await Bun.file(
   new URL("./__fixtures__/factcheck-creatine-quotes.json", import.meta.url),
 ).json()) as { quotes: ClaimQuote[] };
 
-/** The two corrections the approved fixture's `Was:` → prose pairs imply. */
+/** The two corrections the approved fixture's `Was:` → prose pairs imply. The `old`
+ *  side IS the shared `Was:` fixture — one transcription of each. */
 const CORRECTIONS: IntegrateEdit[] = [
   {
     claimIndex: 4,
     verdict: "❌",
-    old: "Roughly 1kg of additional lean muscle mass gained versus resistance training alone.",
+    old: CREATINE_ORIGINALS.get(4)!,
     new: "A mean **1.32 kg** of additional lean muscle mass gained versus resistance training alone (95% CI 0.93–1.72).",
     reason: "The pooled meta-analytic estimate is 1.32 kg.",
   },
   {
     claimIndex: 7,
     verdict: "⚠️",
-    old: "Notably, the cognitive benefit appears strongest at standard **maintenance** doses rather than during the higher-dose loading phase, suggesting the muscle and brain effects may not scale with dose in the same way.",
+    old: CREATINE_ORIGINALS.get(7)!,
     new: "Notably, maintenance dosing (3–5g/day) is widely endorsed for cognitive benefit in older adults, but the evidence does not establish that it outperforms loading — observed cognitive effects did not depend on dose.",
     reason: "No dosing strategy is established as superior for cognition.",
   },
 ];
 
 const CLAIMS = parseFactcheckClaims(ANSWER);
-const MAX_EDITS = FACTCHECK_MAX_CLAIMS + INTEGRATE_MAX_EDITS;
+const MAX_EDITS = annotatedMaxEdits(true);
 
 function run() {
   const body = stripFactWrappers(ORIGINAL);
@@ -157,15 +160,17 @@ test("the write is a pure overlay — stripping it returns the corrected prose",
 });
 
 test("the marks and the appendix agree on which claims exist", () => {
-  const { annotation, applied } = run();
-  const appendix = buildFactcheckAppendix(ANSWER, "2026-07-29", { originals: annotation.originals });
+  const { applied } = run();
+  // PROD's own source for the `Was:` lines: the freshly-resolved apply outcomes.
+  const originals = originalsOfOutcomes(applied.outcomes);
+  const appendix = buildFactcheckAppendix(ANSWER, "2026-07-29", { originals });
   // Every chip has a claim section to link to.
   for (const m of applied.body.matchAll(/<Fact n="(\d+)"/g)) {
     expect(appendix).toContain(`Claim ${m[1]}/8`);
   }
   // The corrected claims' `Was:` lines carry this run's own pre-edit text.
-  expect(annotation.originals.get(4)).toBe(CORRECTIONS[0]!.old);
-  expect(annotation.originals.get(7)).toBe(CORRECTIONS[1]!.old);
+  expect(originals.get(4)).toBe(CORRECTIONS[0]!.old);
+  expect(originals.get(7)).toBe(CORRECTIONS[1]!.old);
   expect(appendix).toContain("Was: " + CORRECTIONS[0]!.old);
 });
 

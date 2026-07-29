@@ -197,12 +197,143 @@ export const FACT_COUNT_WORD: Record<FactVerdict, string> = {
  * {@link COMPONENT_TAG_SOURCE_SINGLE_LINE} exists.
  */
 const FACT_TAG_SOURCE = `</?Fact\\b[^>\\n]*>`;
+/** The OPENING tag alone — what {@link countFactWrappers} tallies. */
+const FACT_OPEN_TAG_SOURCE = `<Fact\\b[^>\\n]*>`;
+
+/**
+ * ONE authority on "is this text a whole `<Fact>` wrapper?" — an opening tag at
+ * the very start and a closing tag at the very end (an optional trailing newline
+ * tolerated), covering both legal spellings from `factWrapperForms`.
+ *
+ * A bare `/^<Fact\b/` prefix test is NOT enough: prose that merely BEGINS with the
+ * literal tag (a page documenting this feature, a model quoting the markup) would
+ * then be classed as an annotation, forcing the apply route's mandatory-appendix
+ * path — and its answer-or-400 — onto an ordinary edit.
+ */
+const FACT_WRAPPER_SHAPE_RE = new RegExp(
+  `^${FACT_OPEN_TAG_SOURCE}[\\s\\S]*</Fact>\\r?\\n?$`,
+);
+
+/** Does `text` have the full shape of a `<Fact>` wrapper (open tag first, close tag
+ *  last)? The shared predicate behind the payload-shape gates on the write path. */
+export function isFactWrapperText(text: unknown): boolean {
+  return typeof text === "string" && FACT_WRAPPER_SHAPE_RE.test(text);
+}
 
 /** A line whose ENTIRE content is one `Fact` tag — the legal BLOCK form emitted
  *  when a wrapped span covers a whole paragraph. Matched (and removed) with its
- *  newline: leaving the blank line behind would split the paragraph it wrapped. */
-const FACT_TAG_LINE_RE = new RegExp(`^[ \\t]*(?:${FACT_TAG_SOURCE})[ \\t]*\\r?\\n?`, "gm");
-const FACT_TAG_RE = new RegExp(FACT_TAG_SOURCE, "g");
+ *  newline: leaving the blank line behind would split the paragraph it wrapped.
+ *
+ *  Alternation, ONE pass: the line form is tried first at every line start (it
+ *  swallows the newline), a bare tag anywhere else second. Two sequential
+ *  `replace` passes would invalidate the protected-region offsets for the second.
+ */
+const FACT_TAG_SCAN_RE = new RegExp(
+  `^[ \\t]*(?:${FACT_TAG_SOURCE})[ \\t]*\\r?\\n?|${FACT_TAG_SOURCE}`,
+  "gm",
+);
+const FACT_OPEN_TAG_SCAN_RE = new RegExp(FACT_OPEN_TAG_SOURCE, "g");
+
+interface ProtectedRegion {
+  start: number;
+  end: number;
+}
+
+const FRONTMATTER_BLOCK_RE = /^---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/;
+
+/** Push every inline code span (`` `x` ``, matched backtick runs) on one line. */
+function pushInlineCodeSpans(line: string, base: number, out: ProtectedRegion[]): void {
+  let i = 0;
+  while (i < line.length) {
+    if (line[i] !== "`") {
+      i++;
+      continue;
+    }
+    let j = i;
+    while (j < line.length && line[j] === "`") j++;
+    const runLen = j - i;
+    let k = j;
+    let closeEnd = -1;
+    while (k < line.length) {
+      if (line[k] !== "`") {
+        k++;
+        continue;
+      }
+      let e = k;
+      while (e < line.length && line[e] === "`") e++;
+      if (e - k === runLen) {
+        closeEnd = e;
+        break;
+      }
+      k = e;
+    }
+    // An UNCLOSED run is not a code span — resume scanning after it.
+    if (closeEnd === -1) {
+      i = j;
+      continue;
+    }
+    out.push({ start: base + i, end: base + closeEnd });
+    i = closeEnd;
+  }
+}
+
+/**
+ * The regions of a page body where a `<Fact …>` tag is CONTENT, not markup:
+ * frontmatter, fenced code blocks, and inline backtick spans.
+ *
+ * Load-bearing, not cosmetic. The integrate apply transform WRITES the stripped
+ * body back to disk, so a flat scan silently deletes the tags out of any page that
+ * documents this very feature (mimir's plan page carries 26 of them) — the exact
+ * corruption the strip exists to prevent on the prose side.
+ *
+ * Fence scanning mirrors `findExclusionZones` in `src/wiki/integrate-edits.ts`
+ * (marker-matched, CommonMark closer-length rule, unterminated fence runs to EOF)
+ * but stays here: `markdown-ast.ts` is the import-safe module every platform
+ * formatter and the bundled reader client already depend on.
+ */
+function factProtectedRegions(body: string): ProtectedRegion[] {
+  const regions: ProtectedRegion[] = [];
+  const fm = FRONTMATTER_BLOCK_RE.exec(body);
+  const fmEnd = fm && fm.index === 0 ? fm[0].length : 0;
+  if (fmEnd > 0) regions.push({ start: 0, end: fmEnd });
+
+  let offset = 0;
+  let fenceStart = -1;
+  let fenceMarker = "";
+  let fenceRun = 0;
+  for (const line of body.split("\n")) {
+    const lineStart = offset;
+    offset += line.length + 1;
+    if (lineStart < fmEnd) continue;
+    const m = /^\s*(`{3,}|~{3,})/.exec(line);
+    if (m) {
+      const run = m[1]!;
+      const marker = run[0]!;
+      if (fenceStart < 0) {
+        fenceStart = lineStart;
+        fenceMarker = marker;
+        fenceRun = run.length;
+        continue;
+      }
+      if (marker === fenceMarker && run.length >= fenceRun) {
+        regions.push({ start: fenceStart, end: lineStart + line.length });
+        fenceStart = -1;
+        fenceMarker = "";
+        fenceRun = 0;
+      }
+      continue;
+    }
+    // Inline code spans matter only OUTSIDE a fence (inside, the whole block is
+    // already protected) — and a fence line itself can carry no code span.
+    if (fenceStart < 0) pushInlineCodeSpans(line, lineStart, regions);
+  }
+  if (fenceStart >= 0) regions.push({ start: fenceStart, end: body.length });
+  return regions;
+}
+
+function inProtectedRegion(pos: number, regions: ProtectedRegion[]): boolean {
+  return regions.some((r) => pos >= r.start && pos < r.end);
+}
 
 /**
  * Drop every `<Fact …>` / `</Fact>` wrapper from a page body, keeping the wrapped
@@ -218,20 +349,32 @@ const FACT_TAG_RE = new RegExp(FACT_TAG_SOURCE, "g");
  * BOTH forms are handled, and the block form's tag LINES are removed whole (tag
  * plus its newline). Removing only the tag would leave an empty line where the
  * opening tag stood, splitting the wrapped paragraph in two.
+ *
+ * ZONE-AWARE: a tag inside frontmatter, a fenced code block or an inline backtick
+ * span is DOCUMENTATION and survives untouched (see {@link factProtectedRegions}).
  */
 export function stripFactWrappers(body: string): string {
   // Bare-name scan, not `"<Fact"`: an orphan `</Fact>` (a hand-edit, a truncated
   // write) must still strip, and `</Fact>` does not contain `<Fact`.
   if (!body || body.indexOf("Fact") === -1) return body;
-  return body.replace(FACT_TAG_LINE_RE, "").replace(FACT_TAG_RE, "");
+  const regions = factProtectedRegions(body);
+  return body.replace(FACT_TAG_SCAN_RE, (match, offset: number) =>
+    inProtectedRegion(offset, regions) ? match : "",
+  );
 }
 
 /** How many `<Fact …>` OPENING tags a body carries — i.e. how many inline marks a
  *  re-annotation is about to supersede. Reported to the reviewer rather than left
- *  as a silent deletion. */
+ *  as a silent deletion. Counts only what {@link stripFactWrappers} would remove,
+ *  so a page documenting the tag doesn't report phantom marks. */
 export function countFactWrappers(body: string): number {
   if (!body || body.indexOf("<Fact") === -1) return 0;
-  return (body.match(new RegExp(`<Fact\\b[^>\\n]*>`, "g")) ?? []).length;
+  const regions = factProtectedRegions(body);
+  let n = 0;
+  for (const m of body.matchAll(FACT_OPEN_TAG_SCAN_RE)) {
+    if (m.index !== undefined && !inProtectedRegion(m.index, regions)) n++;
+  }
+  return n;
 }
 
 /**

@@ -17,6 +17,7 @@ import {
   FACTCHECK_SENTINEL_START,
   FACTCHECK_SENTINEL_END,
 } from "./factcheck-context.ts";
+import { CREATINE_ORIGINALS } from "./__fixtures__/factcheck-creatine-originals.ts";
 
 const ANNOTATED_PAGE = await Bun.file(
   new URL("./__fixtures__/factcheck-annotated-page.mdx", import.meta.url),
@@ -32,18 +33,6 @@ function approvedBlock(): string {
   expect(s).toBeGreaterThan(-1);
   return ANNOTATED_PAGE.slice(s, e);
 }
-
-/** The two `Was:` originals the approved fixture records, which only the INTEGRATE
- *  path can supply (the ➕ append route changes no prose). */
-const CREATINE_ORIGINALS = new Map<number, string>([
-  [4, "Roughly 1kg of additional lean muscle mass gained versus resistance training alone."],
-  [
-    7,
-    "Notably, the cognitive benefit appears strongest at standard **maintenance** doses rather " +
-      "than during the higher-dose loading phase, suggesting the muscle and brain effects may not " +
-      "scale with dose in the same way.",
-  ],
-]);
 
 test("ACCEPTANCE 1 — the appendix reproduces the approved fixture byte for byte", () => {
   const got = buildFactcheckAppendix(CREATINE_ANSWER, "2026-07-29", {
@@ -217,4 +206,52 @@ test("the .md blockquote form is untouched by any of this", () => {
   const md = buildFactcheckBlock(answer, "2026-07-29");
   expect(md).toContain("> [!factcheck] Fact check (2026-07-29)");
   expect(md).not.toContain("<FactCheck");
+});
+
+describe("malformed markup can't eat the evidence", () => {
+  test("a MALFORMED component tag defangs only its own line", () => {
+    // The single-line tag source is what stops `<Callout tone=` from swallowing
+    // every following line up to the next `>` — including blockquote markers, the
+    // `Confidence:` line and any autolink.
+    const answer = [
+      "### ❌ Claim 1/1 — contradicted",
+      "",
+      "<Callout tone=",
+      "> quoted evidence line",
+      "",
+      "Confidence: 80/100",
+      "",
+      "Sources: [a.com](https://a.com/x)",
+    ].join("\n");
+    const out = buildFactcheckAppendix(answer, "2026-07-29");
+    expect(out).toContain("> quoted evidence line");
+    expect(out).toContain("Confidence: 80/100");
+    expect(out).toContain("[a.com](https://a.com/x)");
+  });
+
+  test("a `Was:` original is neutralized like the answer", () => {
+    const answer = "### ❌ Claim 1/1 — contradicted\n\nReasoning.\n\nConfidence: 80/100\n";
+    const out = buildFactcheckAppendix(answer, "2026-07-29", {
+      originals: new Map([[1, "</FactCheck> was the old line"]]),
+    });
+    // Exactly ONE real closing tag, still the component's own.
+    expect(out.split("</FactCheck>").length - 1).toBe(1);
+    expect(out).toContain("Was: /FactCheck was the old line");
+    // An embedded end sentinel in an original can't strand the block either.
+    const sentinel = buildFactcheckAppendix(answer, "2026-07-29", {
+      originals: new Map([[1, `${FACTCHECK_SENTINEL_END} old`]]),
+    });
+    expect(sentinel.split(FACTCHECK_SENTINEL_END).length - 1).toBe(1);
+  });
+});
+
+test("an answer with NO parsed claim falls back to the blockquote form, never an empty block", () => {
+  // An empty `<FactCheck>` block persisted by the ➕ route would discard the whole
+  // answer — the one outcome worse than the wrong container.
+  const answer = "The check ran but wrote no claim headings.\n\nJust prose.";
+  const out = buildFactcheckAppendix(answer, "2026-07-29");
+  expect(out).not.toContain("<FactCheck");
+  expect(out).toContain("> [!factcheck] Fact check (2026-07-29)");
+  expect(out).toContain("The check ran but wrote no claim headings.");
+  expect(out).toContain("Just prose.");
 });
