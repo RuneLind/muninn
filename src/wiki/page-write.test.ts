@@ -211,7 +211,15 @@ test("the queue key is realpath-derived — a symlinked root shares ONE chain", 
     // Two registry paths for ONE wiki must not get independent chains — they
     // share a single real log.md, which is the whole point of the queue.
     expect(wikiWriteQueueKey(link)).toBe(wikiWriteQueueKey(real));
-    // An unresolvable path falls back to the raw string rather than throwing.
+    // An unresolvable path falls back to the raw string rather than throwing —
+    // and that fallback is NOT cached, so a dir created later converges on its
+    // realpath instead of keeping a second chain for the process's lifetime.
+    const later = path.join(base, "later");
+    expect(wikiWriteQueueKey(later)).toBe(later);
+    await mkdir(later, { recursive: true });
+    const laterLink = path.join(base, "later-link");
+    await symlink(later, laterLink, "dir");
+    expect(wikiWriteQueueKey(later)).toBe(wikiWriteQueueKey(laterLink));
     expect(wikiWriteQueueKey("/no/such/wiki-root")).toBe("/no/such/wiki-root");
   } finally {
     __resetWikiWriteQueueForTest();

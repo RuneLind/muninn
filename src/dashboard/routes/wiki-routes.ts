@@ -47,7 +47,6 @@ import { writeWikiPage } from "../../wiki/page-write.ts";
 import {
   applyEdits,
   buildIntegratePrompt,
-  changedChars,
   changedCharsOfOutcomes,
   enforceChangeBudget,
   enforceEditBounds,
@@ -1815,20 +1814,15 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       if (bodyLen > INTEGRATE_BODY_MAX) {
         return c.json({ error: "page too long to integrate", bodyLen, max: INTEGRATE_BODY_MAX }, 400);
       }
-      const maxChanged = maxChangedChars(bodyLen);
-      // Cheap PRE-resolution pre-check (a lower bound — see `changedChars`), so an
-      // obviously over-budget payload 400s before entering the write queue. The
-      // authoritative check runs on resolved spans inside the transform below.
-      const changed = changedChars(edits);
-      if (changed > maxChanged) {
-        return c.json(
-          {
-            error: `the accepted edits change ${changed} chars, over the ${maxChanged}-char limit for this page`,
-          },
-          400,
-        );
-      }
-
+      // NB there is deliberately NO cheap pre-resolution RATIO check here. The
+      // pre-resolution `changedChars` sum (Σ max(old,new)) is not a lower bound on
+      // the authoritative span-based measure — a model `old` carrying reflowed
+      // whitespace can OVER-count it — so a set that propose approved (and whose
+      // resolved spans fit) could 400 before ever being re-resolved. The count cap
+      // and per-edit char caps above stay (they are exact on the payload); the
+      // ratio budget is owned by the authoritative in-transform check below, which
+      // measures the freshly-resolved spans and reports its own 400 via
+      // `budgetError`.
       const owningBot =
         entry.source === "bot"
           ? discoverAllBots().find((b) => b.name.toLowerCase() === entry.name.toLowerCase())

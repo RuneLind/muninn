@@ -65,7 +65,7 @@
  * failure here.
  */
 
-import { COMPONENT_TAG_SOURCE } from "../format/markdown-ast.ts";
+import { COMPONENT_TAG_SOURCE_SINGLE_LINE } from "../format/markdown-ast.ts";
 import { collapseWithMap } from "./explain-context.ts";
 import { FACTCHECK_SENTINEL_START, FACTCHECK_SENTINEL_END } from "./factcheck-context.ts";
 import { extractJson } from "../ai/json-extract.ts";
@@ -128,7 +128,14 @@ const SENTINEL_BLOCK_RE = new RegExp(
  * A KNOWN component's opening / closing / self-closing tag **at the start of a
  * line** (leading indent captured separately so it is not swallowed into the
  * zone) — i.e. exactly the BLOCK form `markdown-ast`'s `COMPONENT_OPEN_RE`
- * recognizes, derived from the same shared {@link COMPONENT_TAG_SOURCE}.
+ * recognizes, derived from the same shared tag source. The indent allowance is
+ * deliberate: `tryParseComponent` matches `lines[i].trim()`, so an INDENTED block
+ * tag really does render as a component and must therefore be masked.
+ *
+ * The SINGLE-LINE tag source is load-bearing: with a newline-crossing attribute
+ * tail, an opening tag that is missing its `>` swallows every following line up
+ * to the next `>` anywhere in the page (a blockquote's `>` marker, a later tag),
+ * zoning editable prose that then reports a misleading "no longer found".
  *
  * INLINE component tags (`<Verdict>ok</Verdict>` mid-sentence, or a prose mention
  * of the `` `<Callout>` `` component) are deliberately NOT masked. Masking them
@@ -139,7 +146,7 @@ const SENTINEL_BLOCK_RE = new RegExp(
  * edit COULD rewrite an inline tag; that is bounded (the human previews the exact
  * replaced text) and strictly better than guaranteed silent failure.
  */
-const BLOCK_COMPONENT_TAG_RE = new RegExp(`^([ \\t]*)(${COMPONENT_TAG_SOURCE})`, "gm");
+const BLOCK_COMPONENT_TAG_RE = new RegExp(`^([ \\t]*)(${COMPONENT_TAG_SOURCE_SINGLE_LINE})`, "gm");
 
 /** True when `pos` falls inside any of `ranges`. */
 function inRanges(pos: number, ranges: Zone[]): boolean {
@@ -171,21 +178,30 @@ export function findExclusionZones(body: string, isMdx: boolean): Zone[] {
   // a persisted fact-check block routinely quotes a page's markdown, and a single
   // stray ``` in there used to invert fence parity for the whole rest of the page
   // (everything after it silently became "code" and thus unintegrable).
+  //
+  // CommonMark also requires the CLOSING fence's marker run to be at least as
+  // long as the opener's, so a ```-line inside a ````-opened block is content,
+  // not a closer (otherwise the rest of the page flips to "code" and the real
+  // closing ```` opens a phantom fence).
   const preZones = [...zones];
   let offset = 0;
   let fenceStart = -1;
   let fenceMarker = "";
+  let fenceRun = 0;
   for (const line of body.split("\n")) {
     const m = /^\s*(`{3,}|~{3,})/.exec(line);
     if (m && !inRanges(offset, preZones)) {
-      const marker = m[1]![0]!;
+      const run = m[1]!;
+      const marker = run[0]!;
       if (fenceStart < 0) {
         fenceStart = offset;
         fenceMarker = marker;
-      } else if (marker === fenceMarker) {
+        fenceRun = run.length;
+      } else if (marker === fenceMarker && run.length >= fenceRun) {
         zones.push({ start: fenceStart, end: offset + line.length, kind: "fence" });
         fenceStart = -1;
         fenceMarker = "";
+        fenceRun = 0;
       }
     }
     offset += line.length + 1;
@@ -408,11 +424,14 @@ export function enforceEditBounds(edits: IntegrateEdit[]): {
 }
 
 /**
- * PRE-resolution "changed chars" — the cheap route-level pre-check, per edit the
- * LARGER of the text removed and the text inserted. It is a LOWER BOUND only: a
- * tier-2 collapsed rescue can resolve to a raw span LONGER than `old` (line-wrap
- * whitespace, and — before {@link collapsedRescueRisk} — stripped markup), so the
- * authoritative measure is {@link changedCharsOfOutcomes} over resolved spans.
+ * PRE-resolution "changed chars" — per edit the LARGER of the model's quoted
+ * `old` and the text inserted. It is NOT comparable to the authoritative
+ * span-based measure in EITHER direction: a tier-2 rescue can resolve to a raw
+ * span LONGER than `old` (line-wrap whitespace), while an `old` carrying reflowed
+ * whitespace OVER-counts the span it actually resolves to. So the apply route
+ * deliberately does not ratio-gate on this — {@link changedCharsOfOutcomes} over
+ * resolved spans is the only budget referent. Kept as the descriptive payload
+ * measure (and its unit-test seam).
  */
 export function changedChars(edits: IntegrateEdit[]): number {
   return edits.reduce((sum, e) => sum + Math.max(e.old.length, e.new.length), 0);
@@ -554,10 +573,22 @@ function resolveRange(
 /** Markup delimiters whose balance a whitespace-rescued range must preserve. */
 const RESCUE_DELIMS = ["*", "`", "_", "[", "]", "(", ")"] as const;
 
+const RESCUE_DELIM_SET = new Set<string>(RESCUE_DELIMS);
+
 function countChar(s: string, ch: string): number {
   let n = 0;
   for (let i = 0; i < s.length; i++) if (s[i] === ch) n++;
   return n;
+}
+
+/**
+ * True when a resolved range's EDGE sits offset inside markup: the body char just
+ * outside the range is a rescue-stripped delimiter that `old`'s corresponding edge
+ * char is not. Splicing there would leave the neighbour delimiter orphaned (or,
+ * worse, re-pair it with a DIFFERENT construct's delimiter).
+ */
+function offsetInsideMarkup(neighbour: string, edge: string | undefined): boolean {
+  return neighbour !== "" && RESCUE_DELIM_SET.has(neighbour) && neighbour !== edge;
 }
 
 /**
@@ -574,17 +605,39 @@ function countChar(s: string, ch: string): number {
  * away: delimiter counts, plus a hard ban on a range that spans a paragraph break
  * (the mapped range can be arbitrarily larger than `old`).
  *
+ * The count comparison alone is NOT sufficient: it is invariant under a
+ * ONE-DELIMITER SHIFT. On `Anthropic shipped [Claude 3](https://a.co/n) before
+ * [GPT-4o](https://o.ai/g) launched.` an `old` of `[Claude 3](https://a.co/n)
+ * before GPT-4o` maps back to the raw slice `Claude 3](https://a.co/n) before
+ * [GPT-4o` — same `[`/`]`/`(`/`)` counts as `old`, yet splicing it re-pairs the
+ * replacement with the OTHER link's URL (a wrong-URL citation). Same class for
+ * `` `foo` and bar ``, `*fast* and slow`, `_alpha_ and beta`. So each EDGE of the
+ * range is additionally boundary-tested against the body char just outside it
+ * ({@link offsetInsideMarkup}); callers that can supply those chars must.
+ *
  * Deliberately conservative — a false drop is honest and shows the user a reason;
  * a false apply corrupts the page.
+ *
+ * @param before body char immediately BEFORE the resolved range ("" at offset 0)
+ * @param after  body char immediately AFTER the resolved range ("" at end of body)
  */
-export function collapsedRescueRisk(rawSlice: string, old: string): string | null {
-  if (rawSlice.includes("\n\n")) {
+export function collapsedRescueRisk(
+  rawSlice: string,
+  old: string,
+  before = "",
+  after = "",
+): string | null {
+  // `\r\n\r\n` is a paragraph break too — a bare `\n\n` test misses CRLF pages.
+  if (/\n[ \t\r]*\n/.test(rawSlice)) {
     return "whitespace-rescued match would span a paragraph break in the page";
   }
   for (const d of RESCUE_DELIMS) {
     if (countChar(rawSlice, d) !== countChar(old, d)) {
       return "whitespace-rescued match would cut through markdown formatting";
     }
+  }
+  if (offsetInsideMarkup(before, old[0]) || offsetInsideMarkup(after, old[old.length - 1])) {
+    return "whitespace-rescued match would start or end inside markdown formatting";
   }
   return null;
 }
@@ -609,7 +662,12 @@ export function applyEdits(body: string, edits: IntegrateEdit[], isMdx = false):
     // A tier-2 rescue's raw span can cut through markup the collapse stripped —
     // reject rather than corrupt (see `collapsedRescueRisk`).
     if (r.tier === "collapsed") {
-      const risk = collapsedRescueRisk(resolvedText, edit.old);
+      const risk = collapsedRescueRisk(
+        resolvedText,
+        edit.old,
+        r.start > 0 ? body[r.start - 1]! : "",
+        r.end < body.length ? body[r.end]! : "",
+      );
       if (risk) return { edit, applied: false, reason: risk };
     }
     return {

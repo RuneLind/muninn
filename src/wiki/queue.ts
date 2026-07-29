@@ -79,6 +79,13 @@ const queueKeyCache = new Map<string, string>();
  * The chain key for a wiki root: its REALPATH, falling back to the raw path when
  * that throws (a not-yet-created dir, a test fixture path, a permission error).
  *
+ * ONLY successful resolutions are cached: a fallback answer is a statement about
+ * a path that does not exist YET (a wiki dir created after boot, a fixture dir
+ * made between calls), and caching it would pin that wiki to its raw path for the
+ * process's lifetime while a later caller resolving the same wiki through a
+ * symlink got the realpath — two chains on one log.md, exactly what the key
+ * exists to prevent.
+ *
  * Realpathing matters because `commit.ts` already canonicalizes its own keys, and
  * because two registry entries can name the same wiki through different paths (a
  * symlinked vault, macOS `/tmp` → `/private/tmp`, a trailing-slash variant). Keyed
@@ -93,7 +100,7 @@ export function wikiWriteQueueKey(wikiRoot: string): string {
   try {
     key = realpathSync(wikiRoot);
   } catch {
-    key = wikiRoot;
+    return wikiRoot; // NOT cached — a later-created dir must converge on its realpath
   }
   queueKeyCache.set(wikiRoot, key);
   return key;

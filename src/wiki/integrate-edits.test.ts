@@ -143,6 +143,20 @@ test("findExclusionZones masks a ~~~ fence and a ``` inside it can't close it", 
   expect(applyEdits(page, [edit({ old: "Prose here.", new: "Prose fixed." })]).appliedCount).toBe(1);
 });
 
+test("a ``` line inside a ````-opened fence is content, not a closer", () => {
+  // CommonMark: the closing run must be at least as long as the opener's. A
+  // shorter run closing the block used to flip the rest of the page to "code".
+  const page = ["Prose here.", "", "````md", "```ts", "const x = 1;", "```", "````", "", "Tail prose.", ""].join(
+    "\n",
+  );
+  const zones = findExclusionZones(page, false);
+  expect(zones).toHaveLength(1);
+  expect(page.slice(zones[0]!.start, zones[0]!.end)).toBe("````md\n```ts\nconst x = 1;\n```\n````");
+  // Prose on BOTH sides stays editable — the inner ``` did not close the block.
+  expect(applyEdits(page, [edit({ old: "Tail prose.", new: "Tail fixed." })]).appliedCount).toBe(1);
+  expect(applyEdits(page, [edit({ old: "Prose here.", new: "Prose fixed." })]).appliedCount).toBe(1);
+});
+
 test("a stray ``` inside a persisted fact-check block cannot invert fence parity", () => {
   const page = [
     FACTCHECK_SENTINEL_START,
@@ -215,6 +229,33 @@ test("a BLOCK component tag is masked whole — including non-quoted attrs", () 
   expect(applyEdits(COMPONENT_PAGE, [edit({ old: "Inner prose.", new: "Fixed prose." })], true).appliedCount).toBe(1);
   // Block zones get a readable, non-empty prompt placeholder like every other kind.
   expect(promptMaskBody(COMPONENT_PAGE, true)).toContain("[component tag omitted]");
+});
+
+test("a MALFORMED opening tag cannot swallow the prose below it", () => {
+  // The `>` is missing on the tag's own line. With a newline-crossing attribute
+  // tail the zone ran on to the next `>` ANYWHERE — here a blockquote marker —
+  // zoning three lines of editable prose (and reporting "no longer found").
+  const page = [
+    "Lead.",
+    "",
+    '<Callout tone="warn"',
+    "",
+    "The device ships 4M units per year.",
+    "",
+    "> quoted line with a closing bracket",
+    "",
+  ].join("\n");
+  expect(findExclusionZones(page, true).filter((z) => z.kind === "component")).toEqual([]);
+  const r = applyEdits(page, [edit({ old: "The device ships 4M units per year.", new: "Fixed." })], true);
+  expect(r.appliedCount).toBe(1);
+});
+
+test("an INDENTED block tag is still zoned — markdown-ast trims the line before matching", () => {
+  const page = ["Lead.", "", '  <Callout tone="warn">', "  Inner prose.", "  </Callout>", ""].join("\n");
+  const zoned = findExclusionZones(page, true).filter((z) => z.kind === "component");
+  expect(zoned.map((z) => page.slice(z.start, z.end))).toEqual(['<Callout tone="warn">', "</Callout>"]);
+  // The captured indent stays OUTSIDE the zone (it is prose whitespace).
+  expect(page[zoned[0]!.start - 1]).toBe(" ");
 });
 
 // ── parseEditList ────────────────────────────────────────────────────────────
@@ -449,6 +490,51 @@ describe("applyEdits tier-2 rescue rejects a range that cuts through markdown", 
     expect(collapsedRescueRisk("bold** word", "bold word")).toContain("markdown formatting");
     expect(collapsedRescueRisk("a\n\nb", "a b")).toContain("paragraph break");
     expect(collapsedRescueRisk("The device ships\n4M units", "The device ships 4M units")).toBeNull();
+  });
+
+  // The delimiter COUNT comparison is invariant under a ONE-DELIMITER SHIFT: the
+  // mapped-back slice can carry the SAME counts as `old` while sitting offset by
+  // one delimiter, so the splice re-pairs with the neighbouring construct. The
+  // link case is the worst — it silently swaps in the WRONG source URL.
+  const OFFSET_CASES: [string, string, string][] = [
+    [
+      "a link whose splice would carry the OTHER link's URL",
+      "Anthropic shipped [Claude 3](https://a.co/n) before [GPT-4o](https://o.ai/g) launched.\n",
+      "[Claude 3](https://a.co/n) before GPT-4o",
+    ],
+    ["a code span shifted by one backtick", "Use `foo` and `bar` today.\n", "`foo` and bar"],
+    ["emphasis shifted by one asterisk", "It runs *fast* and *slow* today.\n", "*fast* and slow"],
+    ["emphasis shifted by one underscore", "It has _alpha_ and _beta_ today.\n", "_alpha_ and beta"],
+  ];
+  for (const [name, body, old] of OFFSET_CASES) {
+    test(name, () => {
+      const r = applyEdits(body, [edit({ old, new: "NEW" })]);
+      expect(r.appliedCount).toBe(0);
+      expect(r.body).toBe(body); // byte-identical — no corruption
+      expect(r.outcomes[0]!.reason).toContain("inside markdown formatting");
+    });
+  }
+
+  test("a CRLF page's paragraph break is banned too", () => {
+    const body = "Alpha beta.\r\n\r\nGamma delta.\r\n";
+    const r = applyEdits(body, [edit({ old: "beta. Gamma", new: "NEW" })]);
+    expect(r.appliedCount).toBe(0);
+    expect(r.body).toBe(body);
+    expect(r.outcomes[0]!.reason).toContain("paragraph break");
+    // …and the pure predicate says so directly.
+    expect(collapsedRescueRisk("a\r\n\r\nb", "a b")).toContain("paragraph break");
+  });
+
+  test("the boundary test is edge-aware, not a blanket delimiter ban", () => {
+    // Neighbour delimiter matches `old`'s own edge char (the `**bold**` nesting
+    // case) ⇒ the range is aligned, not offset.
+    expect(collapsedRescueRisk("*fast* and slow", "*fast* and slow", "*", "y")).toBeNull();
+    // Neighbour delimiter differs from `old`'s edge char ⇒ offset inside markup.
+    expect(collapsedRescueRisk("fast* and *slow", "*fast* and slow", "*", "*")).toContain(
+      "inside markdown formatting",
+    );
+    // No neighbours at all (range spans the whole body) ⇒ nothing to test.
+    expect(collapsedRescueRisk("plain words", "plain words")).toBeNull();
   });
 });
 
