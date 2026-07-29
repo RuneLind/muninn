@@ -1,0 +1,46 @@
+{
+  "note": "PINNED from ONE real Phase-1 claim extraction (claude-haiku-4-5-20251001 via the anthropic backend, 2026-07-30) over src/wiki/__fixtures__/factcheck-creatine-original.mdx. Regenerate only deliberately: the wrapper-placement acceptance test asserts against these exact strings, including the three the extractor returned in a shape that CANNOT resolve (an elided quote, two table-cell fragments) — those honest drops are part of the contract under test.",
+  "model": "claude-haiku-4-5-20251001",
+  "quotes": [
+    {
+      "index": 1,
+      "title": "Creatine loading protocol dosage",
+      "quote": "20g/day split into four 5g doses for 5–7 days, followed by a 3–5g/day maintenance dose"
+    },
+    {
+      "index": 2,
+      "title": "Creatine synthesis amino acids",
+      "quote": "Creatine is synthesized from three amino acids — arginine, glycine, and methionine"
+    },
+    {
+      "index": 3,
+      "title": "Creatine storage location in body",
+      "quote": "stored primarily in skeletal muscle, where it buffers the rapid regeneration of ATP during short, intense bursts of effort"
+    },
+    {
+      "index": 4,
+      "title": "Additional lean muscle mass from creatine in adults 50-70",
+      "quote": "Roughly 1kg of additional lean muscle mass gained versus resistance training alone"
+    },
+    {
+      "index": 5,
+      "title": "Creatinine rises with creatine supplementation",
+      "quote": "A common source of alarm is a rise in serum creatinine after starting creatine supplementation... Creatinine is simply the waste byproduct of creatine breakdown and is expected to rise with supplementation"
+    },
+    {
+      "index": 6,
+      "title": "Cystatin C not affected by creatine supplementation",
+      "quote": "Cystatin C test... Rises with creatine supplementation? No"
+    },
+    {
+      "index": 7,
+      "title": "Cystatin C independence from muscle mass",
+      "quote": "Cystatin C... Affected by muscle mass/diet? No"
+    },
+    {
+      "index": 8,
+      "title": "Creatine monohydrate is cheapest and most-studied form",
+      "quote": "Creatine monohydrate — the cheapest and most-studied form, distinct from HCl or buffered variants"
+    }
+  ]
+}

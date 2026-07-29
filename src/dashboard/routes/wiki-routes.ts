@@ -38,6 +38,7 @@ import {
   EXPLAIN_SELECTION_MAX,
 } from "../../wiki/explain-context.ts";
 import {
+  buildFactcheckAppendix,
   buildFactcheckBlock,
   hasFactcheckBlock,
   FACTCHECK_ANSWER_MAX,
@@ -47,6 +48,8 @@ import {
 import { appendBlockToPage, spliceSentinelBlock, withTrailingNewline } from "../../wiki/append-block.ts";
 import { writeWikiPage } from "../../wiki/page-write.ts";
 import {
+  annotateEdits,
+  annotatedMaxEdits,
   applyEdits,
   buildIntegratePrompt,
   changedCharsOfOutcomes,
@@ -56,16 +59,24 @@ import {
   integrateBodyLen,
   maxChangedChars,
   neutralizeFactcheckSentinels,
+  originalsOfOutcomes,
   parseEditList,
   promptMaskBody,
+  countFactWrappers,
+  stripFactWrappers,
   INTEGRATE_BODY_MAX,
-  INTEGRATE_MAX_EDITS,
   INTEGRATE_MAX_EDIT_CHARS,
+  type DroppedEdit,
   type IntegrateEdit,
 } from "../../wiki/integrate-edits.ts";
 import { hasForbiddenBasename } from "../../gardener/draft.ts";
 import { runIntegrateOneShot } from "../../wiki/integrate-oneshot.ts";
-import { correctableClaims, validateClaimQuotes } from "../views/components/wiki-integrate.ts";
+import {
+  carriesFactWrapper,
+  correctableClaims,
+  parseFactcheckClaims,
+  validateClaimQuotes,
+} from "../views/components/wiki-integrate.ts";
 import { commitWikiChange } from "../../wiki/commit.ts";
 import { todayOslo } from "../../gardener/util.ts";
 import { connectorCapabilities } from "../../ai/one-shot.ts";
@@ -1407,7 +1418,12 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // the client budgets against is the number the server enforces. Explainers
       // are never integrable (HTML on disk), so they get NO bodyLen at all rather
       // than an HTML length nothing enforces.
-      if (meta.type !== "explainer") bodyLen = integrateBodyLen(raw, meta.relPath.endsWith(".mdx"));
+      // Measured on the WRAPPER-STRIPPED body, because that is what the integrate
+      // route resolves against — the two must be the same number or the client
+      // budgets a "too long" verdict the server would never reach.
+      if (meta.type !== "explainer") {
+        bodyLen = integrateBodyLen(stripFactWrappers(raw), meta.relPath.endsWith(".mdx"));
+      }
       annotatable = isAnnotatablePage(meta.relPath, meta.type);
       body = meta.type === "explainer" ? htmlToText(raw) : raw;
       log.info("Wiki factcheck: wiki={wiki} bot={bot} page={page} mode={mode}", {
@@ -1607,7 +1623,14 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
           : undefined;
       const push = owningBot?.wikiAutoCommit?.push ?? true;
 
-      const block = buildFactcheckBlock(answer, todayOslo(Date.now()));
+      // A native `.mdx` page gets the `<FactCheck>` component appendix (collapsed,
+       // severity-ordered, per-claim `<section id="fc-claim-N">`); a `.md` page keeps
+      // the `> [!factcheck]` blockquote, because it is read raw outside the reader
+      // where JSX-ish tags would show as literal text. No `Was:` lines here — the ➕
+      // action changes no prose, so there is no "was" to state.
+      const block = isAnnotatablePage(meta.relPath, meta.type)
+        ? buildFactcheckAppendix(answer, todayOslo(Date.now()))
+        : buildFactcheckBlock(answer, todayOslo(Date.now()));
       const result = await appendBlockToPage({
         wikiDir: entry.root,
         relPath: meta.relPath,
@@ -1702,10 +1725,21 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       }
 
       const isMdx = meta.relPath.endsWith(".mdx");
-      const bodyLen = integrateBodyLen(current, isMdx);
+      // STRIP → resolve → splice. Every prior `<Fact>` wrapper comes off before the
+      // model sees the page and before any offset is resolved, so (a) the anchors
+      // the model quotes exist in the body we resolve against, and (b) a re-run
+      // cannot nest a wrapper inside a wrapper. Prior wrappers not re-emitted by
+      // THIS run are reported as superseded, never silently vanished.
+      const supersededWrappers = countFactWrappers(current);
+      const editable = stripFactWrappers(current);
+      const bodyLen = integrateBodyLen(editable, isMdx);
       if (bodyLen > INTEGRATE_BODY_MAX) {
         return c.json({ error: "page too long to integrate", bodyLen, max: INTEGRATE_BODY_MAX }, 400);
       }
+      // Only native `.mdx` pages carry inline annotations (policy — a `.md` page is
+      // read raw outside the reader, where JSX-ish tags are literal text).
+      const annotatable = isAnnotatablePage(meta.relPath, meta.type);
+      const maxEdits = annotatedMaxEdits(annotatable);
 
       // Claim anchors are parsed SERVER-SIDE out of the answer markdown (its
       // `### <emoji> Claim n/m — <title>` headings are a fixed prompt contract),
@@ -1745,57 +1779,75 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         ...(quoteCheck.note ? { quotesNote: quoteCheck.note } : {}),
       };
 
+      const allClaims = parseFactcheckClaims(answer);
       const claims = correctableClaims(answer);
-      if (claims.length === 0) {
+      // The ALL-✅ gate relaxation, `.mdx` ONLY. On an annotatable page a check with
+      // nothing to correct still has real output — every confirmed passage gets its
+      // inline mark plus the appendix — so ≥1 parsed claim is enough. On a `.md` page
+      // (no wrappers by policy) the only output is corrected prose, so ❌/⚠️ is still
+      // required. The button gate and the e2e assertion relax on the same predicate.
+      if (claims.length === 0 && !(annotatable && allClaims.length > 0)) {
         return c.json({
           edits: [],
           dropped: [],
           note: "No ❌ or ⚠️ claims to integrate.",
-          budget: integrateBudget(bodyLen),
+          budget: integrateBudget(bodyLen, annotatable),
           hasSentinelBlock,
+          annotatable,
           ...quoteFields,
         });
       }
 
-      const { bot } = resolveWikiSynthesisBot(entry, discoverAllBots());
-      if (!bot) return c.json({ error: "No synthesis bot for this wiki" }, 409);
+      // Nothing to CORRECT ⇒ no editor model call at all: the wrapper pass needs
+      // only the claim quotes and the body. A 90s one-shot asked to correct an
+      // all-✅ page has nothing to say.
+      let modelEdits: IntegrateEdit[] = [];
+      let modelDropped: DroppedEdit[] = [];
+      let modelNote: string | undefined;
+      if (claims.length > 0) {
+        const { bot } = resolveWikiSynthesisBot(entry, discoverAllBots());
+        if (!bot) return c.json({ error: "No synthesis bot for this wiki" }, 409);
 
-      const prompts = buildIntegratePrompt({
-        pageTitle: meta.title,
-        wikiName: entry.name,
-        claims,
-        maskedBody: promptMaskBody(current, isMdx),
-        hasSourcesSection: hasSourcesSection(current),
-      });
-
-      let raw: string;
-      try {
-        const result = await runIntegrateOneShot({
+        const prompts = buildIntegratePrompt({
           pageTitle: meta.title,
           wikiName: entry.name,
-          prompt: prompts.userPrompt,
-          systemPrompt: prompts.systemPrompt,
-          config,
-          botConfig: bot,
+          claims,
+          maskedBody: promptMaskBody(editable, isMdx),
+          hasSourcesSection: hasSourcesSection(editable),
         });
-        raw = result.result ?? "";
-      } catch (err) {
-        log.warn("Wiki fact-check integrate: one-shot failed for wiki={wiki} page={page}: {error}", {
-          wiki: entry.name,
-          page: meta.relPath,
-          error: err instanceof Error ? err.message : String(err),
-        });
-        return c.json({ error: "the editor model call failed" }, 502);
-      }
 
-      // Validate-to-null: a malformed response is a clean error, never a write.
-      const parsed = parseEditList(raw);
-      if (!parsed) {
-        log.warn("Wiki fact-check integrate: unparseable edit list wiki={wiki} raw={raw}", {
-          wiki: entry.name,
-          raw: raw.slice(0, 200),
-        });
-        return c.json({ error: "the editor model returned no usable edit list" }, 502);
+        let raw: string;
+        try {
+          const result = await runIntegrateOneShot({
+            pageTitle: meta.title,
+            wikiName: entry.name,
+            prompt: prompts.userPrompt,
+            systemPrompt: prompts.systemPrompt,
+            config,
+            botConfig: bot,
+          });
+          raw = result.result ?? "";
+        } catch (err) {
+          log.warn("Wiki fact-check integrate: one-shot failed for wiki={wiki} page={page}: {error}", {
+            wiki: entry.name,
+            page: meta.relPath,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          return c.json({ error: "the editor model call failed" }, 502);
+        }
+
+        // Validate-to-null: a malformed response is a clean error, never a write.
+        const parsed = parseEditList(raw);
+        if (!parsed) {
+          log.warn("Wiki fact-check integrate: unparseable edit list wiki={wiki} raw={raw}", {
+            wiki: entry.name,
+            raw: raw.slice(0, 200),
+          });
+          return c.json({ error: "the editor model returned no usable edit list" }, 502);
+        }
+        modelEdits = parsed.edits;
+        modelDropped = parsed.dropped;
+        modelNote = parsed.note;
       }
 
       // Payload bounds are enforced HERE too, so the preview only ever shows
@@ -1804,8 +1856,23 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // exceed `old.length`, so measuring pre-resolution under-counts). Without
       // the ratio pass a preview could offer an accept-all that was a guaranteed
       // 400 at apply.
-      const bounded = enforceEditBounds(parsed.edits);
-      const resolvedEdits = applyEdits(current, bounded.kept, isMdx);
+      //
+      // `enforceEditBounds` runs on the model's edits PRE-wrapper (unchanged); the
+      // POST-wrapper `new` length is re-checked inside `annotateEdits`, which also
+      // owns the two-pass correction-first resolution and the newline tiers.
+      const bounded = enforceEditBounds(modelEdits);
+      const annotation = annotatable
+        ? annotateEdits({
+            body: editable,
+            isMdx,
+            corrections: bounded.kept,
+            claims: allClaims,
+            quotes: quoteCheck.quotes,
+            maxEdits,
+            maxEditChars: INTEGRATE_MAX_EDIT_CHARS,
+          })
+        : { edits: bounded.kept, dropped: [] as DroppedEdit[] };
+      const resolvedEdits = applyEdits(editable, annotation.edits, isMdx);
       const budgetDrops = enforceChangeBudget(resolvedEdits.outcomes, bodyLen);
       const edits = resolvedEdits.outcomes
         .filter((o) => o.applied)
@@ -1821,12 +1888,23 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // Every drop is reported — including the model's own malformed items, which
       // used to be `continue`d into the void at parse time (#397's class).
       const dropped = [
-        ...parsed.dropped,
+        ...modelDropped,
         ...bounded.dropped,
+        ...annotation.dropped,
         ...resolvedEdits.outcomes
           .filter((o) => !o.applied)
           .map((o) => ({ edit: o.edit, reason: o.reason ?? "could not be placed" })),
       ];
+      // The SUPERSEDE rule made visible: the strip removed every prior mark, and
+      // only this run's claims are re-marked. Reported so a shrinking claim set never
+      // reads as marks silently disappearing off the page — as a RUN-level note, not
+      // a blank row in `dropped` (which inflated the "N not applied" count with an
+      // entry that corresponds to no proposed edit).
+      const supersededNote =
+        supersededWrappers > 0
+          ? `${supersededWrappers} inline mark${supersededWrappers === 1 ? "" : "s"} ` +
+            "from a previous check superseded — this run re-marks the page from its own claims"
+          : undefined;
 
       log.info(
         "Wiki fact-check integrate: wiki={wiki} page={page} proposed={n} dropped={d} quotes={q}",
@@ -1842,10 +1920,16 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       return c.json({
         edits,
         dropped,
-        ...(parsed.note ? { note: parsed.note } : {}),
+        ...(modelNote ? { note: modelNote } : {}),
         // Measured on RESOLVED spans, so accept-all is guaranteed within budget.
-        budget: { ...integrateBudget(bodyLen), proposedChangedChars: budgetDrops.changedChars },
+        // Wrapper-only annotations score 0 (see `outcomeChangedChars`).
+        ...(supersededNote ? { supersededNote } : {}),
+        budget: {
+          ...integrateBudget(bodyLen, annotatable),
+          proposedChangedChars: budgetDrops.changedChars,
+        },
         hasSentinelBlock,
+        annotatable,
         ...quoteFields,
       });
     } catch (err) {
@@ -1902,8 +1986,19 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
 
       const edits = coerceClientEdits(reqBody.edits);
       if (!edits) return c.json({ error: "edits must be a non-empty array of {old, new} with both non-empty" }, 400);
-      if (edits.length > INTEGRATE_MAX_EDITS) {
-        return c.json({ error: `too many edits — the cap is ${INTEGRATE_MAX_EDITS} per apply` }, 400);
+
+      // Page resolution moved AHEAD of the count cap (it reads the index, not the
+      // body): an ANNOTATED apply legitimately carries the corrections PLUS one mark
+      // per claim, so the cap depends on whether this page is annotatable. There is
+      // no wrapper/non-wrapper split in the cap — a correction's `new` is Fact-shaped
+      // too — so the whole cap is raised rather than the marks counted separately.
+      const resolved = await resolveIntegrateTarget(c, reqBody);
+      if ("response" in resolved) return resolved.response;
+      const { entry, meta } = resolved;
+      const annotatable = isAnnotatablePage(meta.relPath, meta.type);
+      const maxEdits = annotatedMaxEdits(annotatable);
+      if (edits.length > maxEdits) {
+        return c.json({ error: `too many edits — the cap is ${maxEdits} per apply` }, 400);
       }
       if (edits.some((e) => e.old.length > INTEGRATE_MAX_EDIT_CHARS || e.new.length > INTEGRATE_MAX_EDIT_CHARS)) {
         return c.json(
@@ -1911,14 +2006,21 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
           400,
         );
       }
-
-      const resolved = await resolveIntegrateTarget(c, reqBody);
-      if ("response" in resolved) return resolved.response;
-      const { entry, meta } = resolved;
+      // FAIL-CLOSED payload-shape pre-check, deliberately NOT the structural
+      // wrapper-only predicate (which needs a resolved span this route has not read
+      // yet): any edit whose replacement OPENS with a `<Fact` tag emits a chip, and
+      // every chip links to a `#fc-claim-N` section that only the appendix carries.
+      // So an annotated write cannot proceed without the answer to build it from —
+      // the `appendCallout` checkbox is not the authority here, because it defaults
+      // OFF on a clean page and would ship chips pointing at nothing.
+      const annotatedWrite = carriesFactWrapper(edits);
+      if (annotatedWrite && !calloutAnswer) {
+        return c.json({ error: "answer is required for an annotated apply" }, 400);
+      }
 
       const current = (await readWikiPage(resolved.index, meta)) ?? "";
       const isMdx = meta.relPath.endsWith(".mdx");
-      const bodyLen = integrateBodyLen(current, isMdx);
+      const bodyLen = integrateBodyLen(stripFactWrappers(current), isMdx);
       // Same cap + same copy as propose — apply must not be a way around it.
       if (bodyLen > INTEGRATE_BODY_MAX) {
         return c.json({ error: "page too long to integrate", bodyLen, max: INTEGRATE_BODY_MAX }, 400);
@@ -1954,15 +2056,20 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         collections: entry.collections ?? [],
         logKind: "factcheck-integrate",
         logTitle: meta.title,
-        logLine: appendCallout
+        logLine: appendCallout || annotatedWrite
           ? "fact-check corrections integrated via the wiki reader (with summary callout)"
           : "fact-check corrections integrated via the wiki reader",
         commitMessage: `[fact-check] integrate: ${meta.relPath}`,
         now: () => Date.now(),
-        transform: (body) => {
+        transform: (raw) => {
+          // STRIP first, on the freshly-read body: the offsets the client echoed were
+          // resolved against a stripped body, and a re-annotation must not nest.
+          const body = stripFactWrappers(raw);
           applyResult = applyEdits(body, edits, isMdx);
           // Authoritative budget check: on the FRESHLY-read body, over the spans
           // actually resolved (a tier-2 rescue's span can exceed `old.length`).
+          // Wrapper-only annotations score 0 here exactly as they did at propose —
+          // the SAME structural predicate, re-derived from this body's own slices.
           const liveMax = maxChangedChars(integrateBodyLen(body, isMdx));
           const liveChanged = changedCharsOfOutcomes(applyResult.outcomes);
           if (liveChanged > liveMax) {
@@ -1974,20 +2081,34 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
           // this into a write — "applied: 0" stays a clean no-op, and the ➕ button
           // remains the way to add a callout on its own.
           if (applyResult.appliedCount === 0) return null;
+          // Did any mark actually land? If so the appendix is MANDATORY regardless of
+          // the checkbox — the chips have nowhere to point without it.
+          // Same authority as the payload-shape pre-check above — one wrapper-shape
+          // test, applied to the outcomes that actually landed.
+          const wroteWrapper = carriesFactWrapper(
+            applyResult.outcomes.filter((o) => o.applied).map((o) => o.edit),
+          );
           // BOTH branches end in the same normalization (exactly one trailing
           // newline) so ticking the callout checkbox can't be the reason an
           // unrelated trailing byte changed.
-          if (!appendCallout) return withTrailingNewline(applyResult.body);
+          if (!appendCallout && !wroteWrapper) return withTrailingNewline(applyResult.body);
           // Same splice the ➕ route uses: REPLACE an existing sentinel block in
           // place (a stale callout is refreshed, never duplicated), else insert
           // before a trailing `## Sources`, else append. Runs on the already-edited
           // body inside the critical section, so page + callout are one write.
           // Edit offsets were resolved BEFORE this, and the sentinel block is a
           // masked exclusion zone, so the two can't collide.
-          const spliced = spliceSentinelBlock(
-            applyResult.body,
-            buildFactcheckBlock(calloutAnswer, todayOslo(Date.now())),
-          );
+          //
+          // `.mdx` gets the `<FactCheck>` component appendix (whose `#fc-claim-N`
+          // sections are the chips' targets, and whose `Was:` lines come from THIS
+          // write's freshly-resolved spans); `.md` keeps the blockquote callout, since
+          // a `.md` page is read raw outside the reader.
+          const block = annotatable
+            ? buildFactcheckAppendix(calloutAnswer, todayOslo(Date.now()), {
+                originals: originalsOfOutcomes(applyResult.outcomes),
+              })
+            : buildFactcheckBlock(calloutAnswer, todayOslo(Date.now()));
+          const spliced = spliceSentinelBlock(applyResult.body, block);
           calloutAdded = true;
           return withTrailingNewline(spliced);
         },
@@ -2123,8 +2244,13 @@ async function resolveIntegrateTarget(
   return { entry, index, meta };
 }
 
-/** The edit budget echoed to the client so it can disable accept-all honestly. */
-function integrateBudget(bodyLen: number): {
+/** The edit budget echoed to the client so it can disable accept-all honestly.
+ *  `annotatable` drives `maxEdits` through the shared {@link annotatedMaxEdits}, so
+ *  BOTH propose exits echo the cap the apply route actually enforces. */
+function integrateBudget(
+  bodyLen: number,
+  annotatable: boolean,
+): {
   bodyLen: number;
   maxEdits: number;
   maxEditChars: number;
@@ -2132,7 +2258,7 @@ function integrateBudget(bodyLen: number): {
 } {
   return {
     bodyLen,
-    maxEdits: INTEGRATE_MAX_EDITS,
+    maxEdits: annotatedMaxEdits(annotatable),
     maxEditChars: INTEGRATE_MAX_EDIT_CHARS,
     maxChangedChars: maxChangedChars(bodyLen),
   };

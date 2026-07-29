@@ -11,6 +11,7 @@
  */
 
 import { buildSynthesisSystemPrompt } from "../research/answer.ts";
+import { stripFactWrappers } from "../format/markdown-ast.ts";
 
 /** Server-side cap on the selected passage (chars) — a runaway selection can't blow the prompt. */
 export const EXPLAIN_SELECTION_MAX = 1500;
@@ -206,7 +207,17 @@ function locateHeadingSection(body: string, heading: string): string | null {
  *  4. Fall back to the head of the body (`2 × EXPLAIN_WINDOW` chars).
  * Bodies ≤ {@link EXPLAIN_FULL_BODY_MAX} skip all of this and return whole.
  */
-export function locateExcerpt(body: string, selection: string, heading?: string): string {
+export function locateExcerpt(rawBody: string, selection: string, heading?: string): string {
+  // Strip inline `<Fact>` annotations FIRST. The selection comes from rendered
+  // HTML, where the wrapper is a chip and a coloured underline — not text — so on an
+  // annotated page a selection that starts inside a marked passage could never match
+  // the source, and the locator silently degraded to the head of the body.
+  //
+  // Deliberately HERE and not inside `collapseWithMap`: that function is also the
+  // integrate resolver's tier-2 machinery, whose `collapsedRescueRisk` gate counts
+  // exactly the delimiters `collapseWithMap` discards. Teaching it to drop tags too
+  // would widen those counts and start false-dropping edits that resolve today.
+  const body = stripFactWrappers(rawBody);
   if (body.length <= EXPLAIN_FULL_BODY_MAX) return body.trim();
 
   const { collapsed: cBody, map } = collapseWithMap(body);

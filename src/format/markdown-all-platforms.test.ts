@@ -251,6 +251,27 @@ describe("FactCheck appendix renders collapsed, with per-claim sections", () => 
   });
 });
 
+describe("the unknown= count is the only trace a deadline-truncated run leaves", () => {
+  // ❓ claims get NO `<Fact>` mark and NO appendix section, so without this count a
+  // half-finished check renders as a clean ✓/⚠/✗ page. It reads "not checked", not
+  // "unverified" — the latter sounds like a judgement the checker made.
+  const md = '<FactCheck date="2026-07-29" ok="5" unknown="3">\n### ✅ Claim 1/8 — x\n\nEvidence.\n</FactCheck>';
+  test("web → a count span, LAST, after the real verdicts", () => {
+    const out = formatWebHtml(md);
+    expect(out).toContain('<span class="fc-count fc-count-unknown">? 3 not checked</span>');
+    expect(out.indexOf("5 confirmed")).toBeLessThan(out.indexOf("3 not checked"));
+  });
+  test("telegram + slack → the same wording in the plain-text summary", () => {
+    for (const out of [formatTelegramHtml(md), formatSlackMrkdwn(md)]) {
+      expect(out.split("\n")[0]).toBe("Fact-checked 2026-07-29: 5 confirmed, 3 not checked");
+    }
+  });
+  test("an absent unknown= is still silence, not `0 not checked`", () => {
+    const out = formatWebHtml('<FactCheck date="2026-07-29" ok="5">\nbody\n</FactCheck>');
+    expect(out).not.toContain("not checked");
+  });
+});
+
 describe("FactCheck counts that are absent or garbage are OMITTED, never rendered as 0", () => {
   // The appendix must not claim "0 corrected" on a page whose writer simply
   // didn't say — an omitted count is silence, a rendered 0 is a claim.

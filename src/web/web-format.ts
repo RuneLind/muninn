@@ -9,6 +9,7 @@ import {
   factClaimNumberFromHeading,
   FACT_VERDICT_MARK,
   FACT_VERDICT_WORD,
+  FACT_COUNT_WORD,
   parseMeterAttrs,
   firstCodeBlock,
   diffLineClass,
@@ -65,18 +66,21 @@ function factMarkParts(attrs: Record<string, string>): {
 function factCheckSummary(attrs: Record<string, string>): string {
   const date = attrs.date?.trim();
   const parts: string[] = [];
-  const count = (key: "ok" | "warn" | "bad", v: FactVerdict) => {
+  const count = (key: "ok" | "warn" | "bad" | "unknown", v: FactVerdict) => {
     const raw = attrs[key]?.trim();
     if (!raw || !/^\d+$/.test(raw)) return;
     const n = Number(raw);
     if (!Number.isSafeInteger(n)) return;
     parts.push(
-      `<span class="fc-count fc-count-${v}">${FACT_VERDICT_MARK[v]} ${n} ${FACT_VERDICT_WORD[v]}</span>`,
+      `<span class="fc-count fc-count-${v}">${FACT_VERDICT_MARK[v]} ${n} ${FACT_COUNT_WORD[v]}</span>`,
     );
   };
   count("ok", "ok");
   count("warn", "warn");
   count("bad", "bad");
+  // The ❓ claims — no `<Fact>` mark and no appendix section, so this count is the
+  // ONLY trace a deadline-truncated run leaves. Last, after the real verdicts.
+  count("unknown", "unknown");
   const lead = date ? `Fact-checked <b>${escapeHtml(date)}</b>` : "Fact-checked";
   return `<span class="fc-strip-lead">${lead}</span>${parts.join("")}`;
 }

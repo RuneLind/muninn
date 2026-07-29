@@ -34,6 +34,7 @@ import { agentStatus, setConnectorInfo } from "../../observability/agent-status.
 import { Tracer } from "../../tracing/tracer.ts";
 import { tracedOneShot } from "../../core/traced-one-shot.ts";
 import { locateExcerpt } from "../../wiki/explain-context.ts";
+import { stripFactWrappers } from "../../format/markdown-ast.ts";
 import {
   stripFactcheckBlock,
   buildClaimExtractionPrompt,
@@ -485,7 +486,11 @@ async function runFactcheck(
     // Strip any prior fact-check block ONCE. The article cap applies to the
     // EXTRACTION body only; sel-mode locateExcerpt runs over the FULL stripped
     // body (capping would break excerpt location for tail selections on >12k pages).
-    const strippedBody = stripFactcheckBlock(opts.body);
+    // Strip the prior fact-check block AND any prior inline `<Fact>` wrappers ONCE.
+    // Without the wrapper strip a re-check extracts claims from prose interleaved
+    // with `<Fact n="4" v="bad">` markup, and the quotes it returns carry that
+    // markup — which then resolves against nothing in the (stripped) integrate body.
+    const strippedBody = stripFactWrappers(stripFactcheckBlock(opts.body));
     const sel = (opts.sel ?? "").trim();
     const extractionText = opts.mode === "sel"
       ? sel

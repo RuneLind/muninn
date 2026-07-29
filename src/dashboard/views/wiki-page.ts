@@ -886,6 +886,16 @@ export async function renderWikiPage(opts?: {
       margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border-secondary);
     }
     .wiki-fc-int-callout { font-size: 12px; color: var(--text-secondary); display: flex; align-items: center; gap: 5px; cursor: pointer; }
+    /* Annotated write: the appendix is not a choice, so the control is a statement. */
+    .wiki-fc-int-callout.fixed { cursor: default; font-style: italic; }
+    /* The annotation group — one checkbox over N wrapper-only marks, each shown as
+       an anchor row rather than a no-op diff card. */
+    .wiki-fc-int-anno-row {
+      display: flex; align-items: baseline; gap: 8px; padding: 2px 0 2px 24px; font-size: 12px;
+      color: var(--text-secondary);
+    }
+    .wiki-fc-int-anno-badge { flex-shrink: 0; }
+    .wiki-fc-int-anno-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .wiki-fc-int-btn {
       padding: 6px 12px; border-radius: 8px;
       border: 1px solid var(--border-secondary); background: var(--bg-inset);
