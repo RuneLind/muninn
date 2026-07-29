@@ -231,5 +231,121 @@ export function componentBlockCss(scope: string): string {
       border-bottom: 1px solid var(--border-secondary);
     }
     ${scope} .code-tab-standalone pre { margin: 0.6rem; }
+
+    /* ── Fact-check annotation ──────────────────────────────────────────────
+       A marked passage carries a verdict-tinted underline and a chip at its end.
+       The underline is a border-bottom rather than text-decoration so it survives
+       a wrapped passage cleanly, and the tint is deliberately faint on ok — the
+       article must still read as prose, not as a highlighted textbook. */
+    ${scope} .fc-mark { border-bottom: 1px dotted var(--border-secondary); }
+    ${scope} .fc-mark-ok { border-bottom-color: color-mix(in srgb, var(--status-success) 55%, transparent); }
+    ${scope} .fc-mark-warn { border-bottom-color: var(--status-warning); }
+    ${scope} .fc-mark-bad {
+      border-bottom-color: var(--status-error);
+      background: color-mix(in srgb, var(--status-error) 10%, transparent);
+    }
+    ${scope} .fc-mark-unknown { border-bottom-style: dashed; }
+    /* A Fact tag owning its whole line is claimed by the BLOCK parser, so it can't
+       carry the inline underline (a border under a block spans the full column and
+       reads as a rule). It gets a left rail in the same verdict colour instead —
+       the mark must stay visible in both forms, or a fully-wrapped paragraph would
+       silently look unchecked. */
+    ${scope} .fc-mark-block {
+      display: block;
+      border-bottom: 0;
+      border-left: 2px solid var(--border-secondary);
+      padding-left: 0.7rem;
+      margin: 0.5rem 0;
+    }
+    ${scope} .fc-mark-block.fc-mark-ok { border-left-color: color-mix(in srgb, var(--status-success) 55%, transparent); }
+    ${scope} .fc-mark-block.fc-mark-warn { border-left-color: var(--status-warning); }
+    ${scope} .fc-mark-block.fc-mark-bad { border-left-color: var(--status-error); }
+
+    ${scope} .fc-chip {
+      appearance: none;
+      display: inline-flex;
+      align-items: center;
+      vertical-align: baseline;
+      margin-left: 0.25em;
+      padding: 0 0.45em;
+      height: 1.15em;
+      border-radius: 999px;
+      border: 1px solid transparent;
+      background: transparent;
+      font: inherit;
+      font-size: 0.75em;
+      font-weight: 700;
+      line-height: 1;
+      cursor: pointer;
+      font-variant-numeric: tabular-nums;
+    }
+    /* The label is for assistive tech only — the glyph carries it visually. Not
+       display:none, which would remove it from the accessibility tree too. */
+    ${scope} .fc-chip-label {
+      position: absolute;
+      width: 1px; height: 1px;
+      margin: -1px; padding: 0; border: 0;
+      overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+    }
+    ${scope} .fc-chip-ok {
+      color: var(--status-success);
+      background: color-mix(in srgb, var(--status-success) 16%, transparent);
+      border-color: color-mix(in srgb, var(--status-success) 40%, transparent);
+    }
+    ${scope} .fc-chip-warn {
+      color: var(--status-warning);
+      background: color-mix(in srgb, var(--status-warning) 18%, transparent);
+      border-color: var(--status-warning);
+    }
+    ${scope} .fc-chip-bad {
+      color: var(--status-error);
+      background: color-mix(in srgb, var(--status-error) 18%, transparent);
+      border-color: var(--status-error);
+    }
+    ${scope} .fc-chip-unknown { color: var(--text-muted); border-color: var(--border-secondary); }
+    ${scope} .fc-chip:hover { filter: brightness(1.25); }
+    ${scope} .fc-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    ${scope} .fc-chip[aria-expanded="true"] { outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent); }
+
+    /* The appendix: one collapsed summary line by default. */
+    ${scope} .fc-block {
+      margin: 1.5rem 0 0;
+      border: 1px solid var(--border-secondary);
+      border-radius: 10px;
+      background: var(--bg-surface);
+    }
+    ${scope} .fc-strip {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      flex-wrap: wrap;
+      padding: 0.55rem 0.9rem;
+      cursor: pointer;
+      font-size: 0.9em;
+      color: var(--text-muted);
+      border-radius: 10px;
+    }
+    ${scope} .fc-strip-lead b { color: var(--text-primary); }
+    ${scope} .fc-count {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3em;
+      padding: 0.1em 0.6em;
+      border-radius: 999px;
+      border: 1px solid var(--border-secondary);
+      font-size: 0.85em;
+      font-weight: 600;
+    }
+    ${scope} .fc-count-ok { border-color: var(--status-success); color: var(--status-success); }
+    ${scope} .fc-count-warn { border-color: var(--status-warning); color: var(--status-warning); }
+    ${scope} .fc-count-bad { border-color: var(--status-error); color: var(--status-error); }
+    ${scope} .fc-block-body {
+      padding: 0.2rem 1rem 0.9rem;
+      border-top: 1px solid var(--border-secondary);
+      font-size: 0.95em;
+    }
+    ${scope} .fc-claim { padding: 0.5rem 0 0.6rem; }
+    ${scope} .fc-claim + .fc-claim { border-top: 1px solid var(--border-primary); }
+    ${scope} .fc-claim > :first-child { margin-top: 0.4rem; }
   `;
 }

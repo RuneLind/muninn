@@ -20,12 +20,27 @@ export { stripFrontmatter } from "./store.ts";
 
 const WIKILINK_WITH_LABEL_RE = /\[\[([^\]|]+?)(?:\|([^\]]*?))?\]\]/g;
 
+/**
+ * A fact-check sentinel comment occupying its whole line, plus that line's
+ * newline. Deliberately NOT the paired `start…end` regex the write-side
+ * authorities use — this is a display strip of the two MARKERS, and the block
+ * between them is real content that must still render.
+ */
+const FACTCHECK_SENTINEL_LINE_RE = /^[ \t]*<!--[ \t]*factcheck:(?:start|end)[ \t]*-->[ \t]*\r?\n?/gm;
+
 export function renderWikiHtml(
   markdown: string,
   resolve: (target: string) => WikiPageMeta | undefined,
   opts?: { stripTitle?: string },
 ): string {
   let body = stripFrontmatter(markdown);
+  // The fact-check sentinels are internal write markers, never content — but
+  // `formatWebHtml` HTML-escapes everything it doesn't recognize, so on every page
+  // carrying a persisted fact-check block they rendered as a visible literal
+  // `<!-- factcheck:start -->` line in the reader (live on all three annotated
+  // pages before this). Dropped on their OWN lines only, so a page that quotes the
+  // marker mid-sentence while documenting this feature still shows it.
+  body = body.replace(FACTCHECK_SENTINEL_LINE_RE, "");
   // The reader renders its own title header — drop the page's leading H1 when
   // it just repeats that title, but keep distinct ones (e.g. index.md's
   // "# Wiki Index" under the fallback title "index").
