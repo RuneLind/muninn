@@ -59,15 +59,17 @@ function factMarkParts(attrs: Record<string, string>): {
 
 /** Counts strip for the collapsed `FactCheck` appendix. A count attr that is
  *  absent or not a number is omitted rather than rendered as `0` — the appendix
- *  must not claim "0 corrected" on a page whose writer simply didn't say. */
+ *  must not claim "0 corrected" on a page whose writer simply didn't say.
+ *  Counts are DIGITS-ONLY: a bare `Number()` rendered `ok="1e5"` as "100000
+ *  confirmed" and `ok="0x10"` as 16. */
 function factCheckSummary(attrs: Record<string, string>): string {
   const date = attrs.date?.trim();
   const parts: string[] = [];
   const count = (key: "ok" | "warn" | "bad", v: FactVerdict) => {
     const raw = attrs[key]?.trim();
-    if (!raw) return;
+    if (!raw || !/^\d+$/.test(raw)) return;
     const n = Number(raw);
-    if (!Number.isInteger(n) || n < 0) return;
+    if (!Number.isSafeInteger(n)) return;
     parts.push(
       `<span class="fc-count fc-count-${v}">${FACT_VERDICT_MARK[v]} ${n} ${FACT_VERDICT_WORD[v]}</span>`,
     );
@@ -94,12 +96,18 @@ function factCheckSections(children: Block[]): string {
     if (n !== null || groups.length === 0) groups.push({ n, blocks: [] });
     groups[groups.length - 1]!.blocks.push(b);
   }
+  // Two headings carrying the SAME claim number would emit two
+  // `id="fc-claim-1"` — invalid HTML, and `getElementById` would hand the chip
+  // whichever the browser picked first. Only the first occurrence keeps the id;
+  // later duplicates still render their evidence, just unaddressed.
+  const seen = new Set<number>();
   return groups
     .map((g) => {
       const body = renderBlocks(g.blocks, webRenderer);
-      return g.n === null
-        ? body
-        : `<section class="fc-claim" id="fc-claim-${g.n}" data-claim="${g.n}">${body}</section>`;
+      if (g.n === null) return body;
+      if (seen.has(g.n)) return `<section class="fc-claim" data-claim="${g.n}">${body}</section>`;
+      seen.add(g.n);
+      return `<section class="fc-claim" id="fc-claim-${g.n}" data-claim="${g.n}">${body}</section>`;
     })
     .join("");
 }

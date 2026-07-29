@@ -175,6 +175,34 @@ describe("renderWikiHtml", () => {
     expect(html).toContain("After.");
   });
 
+  test("a marker line owning only PART of its line keeps the marker", () => {
+    // Not end-anchored before this: the marker was stripped out of a line whose
+    // remainder is real prose, silently editing the sentence.
+    const html = renderWikiHtml("<!-- factcheck:start --> real prose follows.", resolve);
+    expect(html).toContain("factcheck:start");
+    expect(html).toContain("real prose follows.");
+  });
+
+  test("markers on their own line INSIDE a code fence survive (documenting the format)", () => {
+    const md = [
+      "Intro.",
+      "",
+      "```mdx",
+      "<!-- factcheck:start -->",
+      "> [!factcheck] Fact check (2026-07-29)",
+      "<!-- factcheck:end -->",
+      "```",
+      "",
+      "Outro.",
+    ].join("\n");
+    const html = renderWikiHtml(md, resolve);
+    expect(html).toContain("factcheck:start");
+    expect(html).toContain("factcheck:end");
+    expect(html).toContain("[!factcheck] Fact check (2026-07-29)");
+    expect(html).toContain("Intro.");
+    expect(html).toContain("Outro.");
+  });
+
   test("a ```mermaid fence renders as a plain code block (muninn has no mermaid renderer)", () => {
     const html = renderWikiHtml("```mermaid\ngraph TD; A-->B;\n```", resolve);
     // v1: no diagram rendering — the fence degrades to a labeled code block.

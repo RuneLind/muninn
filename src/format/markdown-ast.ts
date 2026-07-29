@@ -178,10 +178,16 @@ export const FACT_VERDICT_WORD: Record<FactVerdict, string> = {
  * A `Fact`/claim index from an untrusted attr — a positive integer, or null.
  * Null is a legitimate outcome (an anchor whose claim number was lost), and
  * renders a verdict chip with no claim link rather than `data-fact="NaN"`.
+ *
+ * DIGITS-ONLY on purpose: `Number` accepts JS numeric literals, so a bare
+ * `Number()` read `n="0x10"` as 16 and `n="1e2"` as 100 — a chip silently linked
+ * to someone else's claim section. Only a plain decimal string is a claim index.
  */
 export function factClaimIndex(value: string | undefined): number | null {
   if (!value) return null;
-  const n = Number(value.trim());
+  const raw = value.trim();
+  if (!/^\d+$/.test(raw)) return null;
+  const n = Number(raw);
   return Number.isInteger(n) && n > 0 && n < 1000 ? n : null;
 }
 

@@ -1006,6 +1006,27 @@ describe("extractDesc", () => {
     expect(extractDesc(md)).toBe("This is the first genuine prose line.");
   });
 
+  test("strips a mid-prose component tag instead of leaking JSX into the blurb", () => {
+    const md =
+      '---\ntype: source\n---\n\nThe rover weighed <Fact n="1" v="ok">1.32 kg</Fact> at launch.';
+    expect(extractDesc(md)).toBe("The rover weighed 1.32 kg at launch.");
+  });
+
+  test("a paragraph STARTING with a component tag is prose, not a skipped markup line", () => {
+    // Without the strip, `startsWith("<")` dropped the whole (real) lead
+    // paragraph and blurbed the next one instead.
+    const md = [
+      "---",
+      "type: source",
+      "---",
+      "",
+      '<Fact n="1" v="ok">The rover weighed 1.32 kg.</Fact> It launched in 2026.',
+      "",
+      "A later paragraph.",
+    ].join("\n");
+    expect(extractDesc(md)).toBe("The rover weighed 1.32 kg. It launched in 2026.");
+  });
+
   test("strips inline emphasis/code markers so the blurb is plain text", () => {
     const md = "---\ntype: concept\n---\n\nThe **bold** and _italic_ and `code` and *starred* words.";
     expect(extractDesc(md)).toBe("The bold and italic and code and starred words.");

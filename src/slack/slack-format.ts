@@ -9,7 +9,7 @@ import {
   parseChecklist,
 } from "../format/markdown-ast.ts";
 import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
-import { Placeholders } from "../format/markdown-core.ts";
+import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 
 /**
  * Converts Claude's markdown output to Slack mrkdwn.
@@ -180,16 +180,20 @@ function renderInline(text: string): string {
 
 /** Plain-text counts line for the `FactCheck` appendix — the platforms with no
  *  disclosure widget render this instead of a collapsed summary strip. Absent or
- *  non-numeric counts are omitted, never rendered as a misleading `0`. */
+ *  non-numeric counts are omitted, never rendered as a misleading `0`.
+ *
+ *  Kept byte-identical to the Telegram twin: counts are DIGITS-ONLY (`Number`
+ *  alone reads `1e5` as 100000) and the date is escaped (cosmetic here, but the
+ *  two formatters must not drift). */
 function factCheckSummaryText(attrs: Record<string, string>): string {
   const parts: string[] = [];
   for (const key of ["ok", "warn", "bad"] as const) {
     const raw = attrs[key]?.trim();
-    if (!raw) continue;
+    if (!raw || !/^\d+$/.test(raw)) continue;
     const n = Number(raw);
-    if (Number.isInteger(n) && n >= 0) parts.push(`${n} ${FACT_VERDICT_WORD[key]}`);
+    if (Number.isSafeInteger(n)) parts.push(`${n} ${FACT_VERDICT_WORD[key]}`);
   }
   const date = attrs.date?.trim();
-  const lead = date ? `Fact-checked ${date}` : "Fact-checked";
+  const lead = date ? `Fact-checked ${escapeHtml(date)}` : "Fact-checked";
   return parts.length ? `${lead}: ${parts.join(", ")}` : lead;
 }

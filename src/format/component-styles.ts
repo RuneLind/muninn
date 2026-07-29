@@ -278,6 +278,11 @@ export function componentBlockCss(scope: string): string {
       line-height: 1;
       cursor: pointer;
       font-variant-numeric: tabular-nums;
+      /* The chip is chrome, not prose: its glyph and its visually-hidden label
+         must stay out of a copied paragraph and out of the reader's
+         Explain-selection payload (which reads the selection's text). */
+      -webkit-user-select: none;
+      user-select: none;
     }
     /* The label is for assistive tech only — the glyph carries it visually. Not
        display:none, which would remove it from the accessibility tree too. */

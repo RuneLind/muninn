@@ -284,4 +284,75 @@ describe("FactCheck counts that are absent or garbage are OMITTED, never rendere
     expect(out).toContain('<span class="fc-strip-lead">Fact-checked</span>');
     expect(formatTelegramHtml("<FactCheck>\nbody\n</FactCheck>").split("\n")[0]).toBe("Fact-checked");
   });
+
+  // `Number()` accepts JS numeric literals, so these read as 16 and 100000 — a
+  // count nobody wrote, rendered as if the writer had.
+  for (const [attrs, label] of [
+    ['ok="0x10"', "hex"],
+    ['ok="1e5"', "exponent"],
+    ['ok=" 3 "', "padded (still a real count)"],
+  ] as const) {
+    const md = `<FactCheck date="2026-07-29" ${attrs}>\nbody\n</FactCheck>`;
+    const real = label.startsWith("padded");
+    test(`counts are digits-only — ${label}`, () => {
+      const web = formatWebHtml(md);
+      const tg = formatTelegramHtml(md);
+      if (real) {
+        expect(web).toContain("3 confirmed");
+        expect(tg).toContain("3 confirmed");
+      } else {
+        expect(web).not.toContain("fc-count");
+        expect(web).not.toContain("16");
+        expect(web).not.toContain("100000");
+        expect(tg.split("\n")[0]).toBe("Fact-checked 2026-07-29");
+        expect(formatSlackMrkdwn(md).split("\n")[0]).toBe("Fact-checked 2026-07-29");
+      }
+    });
+  }
+});
+
+describe("FactCheck date is escaped on every platform", () => {
+  // An unescaped date emits an unbalanced tag, and Telegram 400s the whole
+  // message rather than dropping the tag.
+  const md = '<FactCheck date="2026 <b>x" ok="1">\nbody\n</FactCheck>';
+  test("telegram → no raw tag in the summary line", () => {
+    const first = formatTelegramHtml(md).split("\n")[0]!;
+    expect(first).toContain("&lt;b&gt;");
+    expect(first).not.toContain("<b>x");
+  });
+  test("slack → same escaping (the twins must not drift)", () => {
+    const first = formatSlackMrkdwn(md).split("\n")[0]!;
+    expect(first).toContain("&lt;b&gt;");
+    expect(first).not.toContain("<b>x");
+  });
+  test("web → escaped inside the lead's own <b>", () => {
+    const out = formatWebHtml(md);
+    expect(out).toContain("Fact-checked <b>2026 &lt;b&gt;x</b>");
+  });
+});
+
+describe("Fact claim numbers are digits-only, and claim ids are unique", () => {
+  for (const [n, label] of [
+    ["0x10", "hex"],
+    ["1e2", "exponent"],
+    ["  ", "blank"],
+  ] as const) {
+    test(`n="${n}" (${label}) → no data-fact, a chip with no claim link`, () => {
+      const out = formatWebHtml(`It weighed <Fact n="${n}" v="ok">1.32 kg</Fact> at launch.`);
+      expect(out).not.toContain("data-fact");
+      expect(out).toContain('class="fc-chip fc-chip-ok"');
+      expect(out).toContain("Fact check: confirmed");
+    });
+  }
+
+  test("two headings with the SAME claim number emit the id only once", () => {
+    const md =
+      '<FactCheck date="2026-07-29">\n### ✅ Claim 1/2 — first\n\nA.\n\n### ⚠️ Claim 1/2 — dupe\n\nB.\n</FactCheck>';
+    const out = formatWebHtml(md);
+    expect(out.match(/id="fc-claim-1"/g)?.length).toBe(1);
+    // The duplicate still renders its evidence, just unaddressed.
+    expect(out).toContain('<section class="fc-claim" data-claim="1">');
+    expect(out).toContain("A.");
+    expect(out).toContain("B.");
+  });
 });

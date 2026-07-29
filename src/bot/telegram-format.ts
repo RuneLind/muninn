@@ -177,16 +177,21 @@ export function stripHtml(text: string): string {
 
 /** Plain-text counts line for the `FactCheck` appendix — the platforms with no
  *  disclosure widget render this instead of a collapsed summary strip. Absent or
- *  non-numeric counts are omitted, never rendered as a misleading `0`. */
+ *  non-numeric counts are omitted, never rendered as a misleading `0`.
+ *
+ *  Counts are DIGITS-ONLY (`Number` alone would read `1e5` as 100000 and `0x10`
+ *  as 16), and the date rides `escapeHtml` like every other attr — an unescaped
+ *  `date="2026 <b>x"` would emit an unbalanced tag and Telegram 400s the whole
+ *  message. */
 function factCheckSummaryText(attrs: Record<string, string>): string {
   const parts: string[] = [];
   for (const key of ["ok", "warn", "bad"] as const) {
     const raw = attrs[key]?.trim();
-    if (!raw) continue;
+    if (!raw || !/^\d+$/.test(raw)) continue;
     const n = Number(raw);
-    if (Number.isInteger(n) && n >= 0) parts.push(`${n} ${FACT_VERDICT_WORD[key]}`);
+    if (Number.isSafeInteger(n)) parts.push(`${n} ${FACT_VERDICT_WORD[key]}`);
   }
   const date = attrs.date?.trim();
-  const lead = date ? `Fact-checked ${date}` : "Fact-checked";
+  const lead = date ? `Fact-checked ${escapeHtml(date)}` : "Fact-checked";
   return parts.length ? `${lead}: ${parts.join(", ")}` : lead;
 }
