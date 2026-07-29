@@ -37,6 +37,7 @@ import {
   type StoredAskTurn,
 } from "./wiki-ask-session.ts";
 import {
+  annotationIndexes,
   appendBlockedByIntegrate,
   buildIntegrateApplyBody,
   claimQuotesFromClaimsEvent,
@@ -2861,6 +2862,18 @@ document.addEventListener("change", (e) => {
     return;
   }
   if (t.classList && t.classList.contains("wiki-fc-int-cb")) {
+    // The annotation GROUP checkbox owns every wrapper-only index at once — the
+    // marks are one editorial act, and a half-marked page would leave chips and
+    // appendix disagreeing about what was checked.
+    if (t.getAttribute("data-edit-group") === "annotations") {
+      const on = (t as HTMLInputElement).checked;
+      for (const i of annotationIndexes(state.proposal.edits || [])) state.selected[i] = on;
+      state.applyBlocked = false;
+      state.applyDropped = undefined;
+      state.applyDroppedOpen = undefined;
+      renderIntegratePreview();
+      return;
+    }
     const idx = parseInt(t.getAttribute("data-edit-idx") || "-1", 10);
     if (idx >= 0) {
       state.selected[idx] = (t as HTMLInputElement).checked;

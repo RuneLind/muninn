@@ -1,6 +1,12 @@
 import { test, expect } from "bun:test";
 import {
+  annotationIndexes,
+  carriesFactWrapper,
   editChangedChars,
+  factCheckCounts,
+  factVerdictForClaim,
+  factWrapperForms,
+  hasIntegrableClaims,
   INTEGRATE_STALE_COPY,
   INTEGRATE_STALE_COPY_EDIT,
   parseFactcheckClaims,
@@ -727,4 +733,170 @@ test("nothingIntegrableHtml also surfaces the quotesNote, and an absent one adds
   expect(withNote).toContain("not a list");
   const without = integratePreviewHtml({ edits: [], dropped: [] }, [], false);
   expect(without).not.toContain("Claim anchors:");
+});
+
+// ── Inline `<Fact>` annotation helpers ───────────────────────────────────────
+
+test("factVerdictForClaim maps every verdict emoji, VS16 or not", () => {
+  expect(factVerdictForClaim("✅")).toBe("ok");
+  expect(factVerdictForClaim("⚠️")).toBe("warn");
+  expect(factVerdictForClaim("⚠")).toBe("warn");
+  expect(factVerdictForClaim("❌")).toBe("bad");
+  expect(factVerdictForClaim("❓")).toBe("unknown");
+  expect(factVerdictForClaim("")).toBe("unknown");
+});
+
+test("factCheckCounts tallies CLAIMS off the headings, not wrappers written", () => {
+  const answer = [
+    "A lede mentioning ❌ and ⚠️ that must not be counted.",
+    "",
+    "### ✅ Claim 1/4 — a",
+    "",
+    "Fine.",
+    "",
+    "### ✅ Claim 2/4 — b",
+    "",
+    "Fine.",
+    "",
+    "### ⚠️ Claim 3/4 — c",
+    "",
+    "Partly.",
+    "",
+    "### ❓ Claim 4/4 — d",
+    "",
+    "Skipped.",
+  ].join("\n");
+  expect(factCheckCounts(answer)).toEqual({ ok: 2, warn: 1, bad: 0, unknown: 1 });
+});
+
+test("carriesFactWrapper is the fail-closed PAYLOAD-shape test", () => {
+  // Fires for a wrapper-only mark AND for a Fact-wrapped correction — both emit a
+  // chip that needs its `#fc-claim-N` target, so both make the appendix mandatory.
+  expect(carriesFactWrapper([{ new: '<Fact n="1" v="ok">x</Fact>' }])).toBe(true);
+  expect(carriesFactWrapper([{ new: '<Fact n="1" v="bad">rewritten</Fact>' }])).toBe(true);
+  expect(carriesFactWrapper([{ new: "plain correction" }])).toBe(false);
+  // Only an OPENING tag counts — mid-string prose mentioning the tag does not.
+  expect(carriesFactWrapper([{ new: 'talks about <Fact n="1" v="ok">' }])).toBe(false);
+  expect(carriesFactWrapper([{ new: 42 }])).toBe(false);
+});
+
+test("hasIntegrableClaims: the all-✅ relaxation is .mdx-ONLY", () => {
+  // A `.md` page's only output is corrected prose, so it still needs ❌/⚠️…
+  expect(hasIntegrableClaims(fcTurn({ answer: ALL_CLEAN }))).toBe(false);
+  expect(integrateBarState(fcTurn({ answer: ALL_CLEAN }))).toBe("hidden");
+  // …while an annotatable page's marks + appendix are real output.
+  expect(hasIntegrableClaims(fcTurn({ answer: ALL_CLEAN, annotatable: true }))).toBe(true);
+  expect(integrateBarState(fcTurn({ answer: ALL_CLEAN, annotatable: true }))).toBe("ready");
+  // But an annotatable page with NO parsed claim at all is still nothing to write.
+  expect(hasIntegrableClaims(fcTurn({ answer: "just prose", annotatable: true }))).toBe(false);
+  expect(integrateBarState(fcTurn({ answer: "just prose", annotatable: true }))).toBe("hidden");
+});
+
+test("editChangedChars: a wrapper-only mark costs 0, a Fact-wrapped rewrite does not", () => {
+  const span = "A confirmed sentence of some length.";
+  const mark: ProposedEdit = {
+    claimIndex: 2,
+    verdict: "✅",
+    old: span,
+    new: factWrapperForms(2, "ok", span)[0],
+    reason: "",
+    resolvedText: span,
+  };
+  expect(editChangedChars(mark)).toBe(0);
+  expect(selectedChangedChars([mark], [true])).toBe(0);
+  // The block form too.
+  expect(editChangedChars({ ...mark, new: factWrapperForms(2, "ok", span)[1] })).toBe(0);
+  // A CORRECTION carrying a wrapper is not free — its prose really changed.
+  const fix: ProposedEdit = {
+    claimIndex: 1,
+    verdict: "❌",
+    old: span,
+    new: factWrapperForms(1, "bad", "A corrected sentence.")[0],
+    reason: "",
+    resolvedText: span,
+  };
+  expect(editChangedChars(fix)).toBeGreaterThan(0);
+});
+
+test("annotationIndexes splits the wrapper-only marks out of the proposal", () => {
+  const span = "Confirmed span.";
+  const edits: ProposedEdit[] = [
+    { claimIndex: 1, verdict: "❌", old: "a", new: "b", reason: "", resolvedText: "a" },
+    { claimIndex: 2, verdict: "✅", old: span, new: factWrapperForms(2, "ok", span)[0], reason: "", resolvedText: span },
+  ];
+  expect(annotationIndexes(edits)).toEqual([1]);
+});
+
+test("the preview groups annotations and states the appendix instead of offering it", () => {
+  const span = "Confirmed span.";
+  const proposal = {
+    edits: [
+      { claimIndex: 1, verdict: "❌", old: "a", new: 'x', reason: "fix", resolvedText: "a" },
+      { claimIndex: 2, verdict: "✅", old: span, new: factWrapperForms(2, "ok", span)[0], reason: "mark", resolvedText: span },
+      { claimIndex: 3, verdict: "✅", old: span, new: factWrapperForms(3, "ok", span)[0], reason: "mark", resolvedText: span },
+    ] as ProposedEdit[],
+    dropped: [],
+  };
+  const html = integratePreviewHtml(proposal, [true, true, true], false);
+  // Head counts prose edits and marks separately — not "3 proposed edits".
+  expect(html).toContain("1 proposed edit · 2 passages marked");
+  // ONE group checkbox for both marks, and no per-mark diff card.
+  expect(html.split('data-edit-group="annotations"').length - 1).toBe(1);
+  expect(html).toContain("Mark 2 checked passages inline");
+  expect(html.split("wiki-fc-int-diff").length - 1).toBe(1); // only the correction diffs
+  // The appendix is not a checkbox on an annotated write.
+  expect(html).not.toContain('id="wikiFcIntCallout"');
+  expect(html).toContain("fact-check appendix will be added");
+});
+
+test("an UNannotated proposal keeps the callout checkbox exactly as before", () => {
+  const proposal = {
+    edits: [{ claimIndex: 1, verdict: "❌", old: "a", new: "b", reason: "fix", resolvedText: "a" }] as ProposedEdit[],
+    dropped: [],
+    hasSentinelBlock: true,
+  };
+  const html = integratePreviewHtml(proposal, [true], true);
+  expect(html).toContain('id="wikiFcIntCallout"');
+  expect(html).toContain("refresh the existing summary callout");
+  expect(html).toContain("1 proposed edit</div>");
+});
+
+test("buildIntegrateApplyBody posts the answer UNCONDITIONALLY on an annotated apply", () => {
+  const span = "Confirmed span.";
+  const marks: ProposedEdit[] = [
+    { claimIndex: 2, verdict: "✅", old: span, new: factWrapperForms(2, "ok", span)[0], reason: "", resolvedText: span },
+  ];
+  // appendCallout FALSE (the clean-page default) must still carry the answer —
+  // otherwise the chips ship with no `#fc-claim-N` to point at.
+  const body = buildIntegrateApplyBody({
+    page: "p",
+    baseHash: "h",
+    edits: marks,
+    selected: [true],
+    appendCallout: false,
+    answer: "### ✅ Claim 2/2 — x\n",
+  });
+  expect(body?.appendCallout).toBe(true);
+  expect(body?.answer).toContain("Claim 2/2");
+  // A plain correction with the checkbox off still posts no answer.
+  const plain = buildIntegrateApplyBody({
+    page: "p",
+    baseHash: "h",
+    edits: [{ claimIndex: 1, verdict: "❌", old: "a", new: "b", reason: "" }],
+    selected: [true],
+    appendCallout: false,
+    answer: "### ❌ Claim 1/1 — x\n",
+  });
+  expect(plain?.appendCallout).toBeUndefined();
+  expect(plain?.answer).toBeUndefined();
+  // A DESELECTED mark takes the requirement with it.
+  const deselected = buildIntegrateApplyBody({
+    page: "p",
+    baseHash: "h",
+    edits: [{ claimIndex: 1, verdict: "❌", old: "a", new: "b", reason: "" }, ...marks],
+    selected: [true, false],
+    appendCallout: false,
+    answer: "### ❌ Claim 1/1 — x\n",
+  });
+  expect(deselected?.appendCallout).toBeUndefined();
 });

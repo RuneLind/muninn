@@ -91,6 +91,55 @@ const PAGE_BODY = [
   "",
 ].join("\n");
 
+// The ANNOTATED path's scratch page — a native `.mdx`, the only extension that
+// carries inline `<Fact>` marks (a `.md` page is read raw outside the reader, where
+// JSX-ish tags would be literal text). Every new behaviour in this slice is
+// .mdx-only, and every OTHER fixture page here is `.md`.
+const MDX_WARRANTY = "Every unit ships with a two-year warranty.";
+const MDX_PAGE_BODY = [
+  "---",
+  "title: Mdx Note",
+  "---",
+  "",
+  "# Mdx Note",
+  "",
+  ORIGINAL_SENTENCE,
+  "",
+  MDX_WARRANTY,
+  "",
+  "Unrelated prose that must survive untouched.",
+  "",
+].join("\n");
+
+/** Two claims: one ❌ (corrected + marked) and one ✅ (marked only). */
+const MDX_ANSWER = [
+  "One claim is contradicted by the filing; the other holds up.",
+  "",
+  "### ❌ Claim 1/2 — Ships 4M units",
+  "",
+  "The filing reports 2.1M units.",
+  "",
+  "Confidence: 90/100",
+  "",
+  "Sources: [sec.gov](https://sec.gov/x)",
+  "",
+  "### ✅ Claim 2/2 — Two-year warranty",
+  "",
+  "Confirmed by the published warranty terms.",
+  "",
+  "Confidence: 85/100",
+].join("\n");
+
+/** An all-✅ answer on an ANNOTATABLE page — the gate relaxes there (the marks and
+ *  the appendix are real output), so the button MUST render. */
+const MDX_CLEAN_ANSWER = [
+  "Everything checks out.",
+  "",
+  "### ✅ Claim 1/1 — Two-year warranty",
+  "",
+  "Confirmed by the published warranty terms.",
+].join("\n");
+
 /** A committed fact-check answer carrying ONE ❌ claim (the integrate gate needs
  *  a `### <emoji> Claim n/m` heading block, not a stray emoji). */
 const FACTCHECK_ANSWER = [
@@ -130,12 +179,15 @@ interface SeedTurn {
    *  turn because the `claims` SSE event they arrive on is dropped at `done`; the
    *  propose POST re-sends them, which is what the seed→rehydrate→POST test covers. */
   claimQuotes?: { index: number; quote: string }[];
+  /** Server-derived `.mdx`-ness of the checked page — what relaxes the all-✅ gate. */
+  annotatable?: boolean;
 }
 
 let root: string;
 let server: ChildProcess | undefined;
 let baseHash: string;
 let calloutBaseHash: string;
+let mdxBaseHash: string;
 
 function seedTurn(over: Partial<SeedTurn> = {}): SeedTurn {
   return {
@@ -253,10 +305,14 @@ test.beforeAll(async () => {
   root = await mkdtemp(path.join(tmpdir(), "muninn-e2e-wiki-"));
   await writeFile(path.join(root, "note.md"), PAGE_BODY, "utf8");
   await writeFile(path.join(root, "callout-note.md"), CALLOUT_PAGE_BODY, "utf8");
+  await writeFile(path.join(root, "mdx-note.mdx"), MDX_PAGE_BODY, "utf8");
   await writeFile(path.join(root, "log.md"), "# Log\n", "utf8");
   baseHash = createHash("sha256").update(readFileSync(path.join(root, "note.md"), "utf8")).digest("hex");
   calloutBaseHash = createHash("sha256")
     .update(readFileSync(path.join(root, "callout-note.md"), "utf8"))
+    .digest("hex");
+  mdxBaseHash = createHash("sha256")
+    .update(readFileSync(path.join(root, "mdx-note.mdx"), "utf8"))
     .digest("hex");
 
   server = spawn("bun", ["run", "src/index.ts"], {
@@ -359,7 +415,7 @@ test.describe("Fact-check: integrate into article", () => {
       .toEqual(quotes);
   });
 
-  test("an all-✅ fact check renders no integrate button", async ({ page }) => {
+  test("an all-✅ fact check on a .md page renders no integrate button", async ({ page }) => {
     await seedSession(page, [
       seedTurn({ question: "Clean check", answer: CLEAN_ANSWER, askedAt: 1_700_000_000_001 }),
     ]);
@@ -368,6 +424,195 @@ test.describe("Fact-check: integrate into article", () => {
     // only the prose-editing action is gated on a correctable claim.
     await expect(page.locator("#wikiFactcheckAppendBtn")).toBeVisible();
     await expect(page.locator("#wikiFactcheckIntegrateBtn")).toHaveCount(0);
+  });
+
+  test("an all-✅ fact check on an ANNOTATABLE .mdx page DOES render the button", async ({ page }) => {
+    // The relaxation, from the other side: on `.mdx` an all-✅ check still has real
+    // output — every confirmed passage gets its inline mark plus the appendix — so
+    // the ≥1-❌/⚠️ gate drops to ≥1 parsed claim.
+    await seedSession(page, [
+      seedTurn({
+        question: "Clean mdx check",
+        answer: MDX_CLEAN_ANSWER,
+        page: "mdx-note",
+        baseHash: mdxBaseHash,
+        bodyLen: MDX_PAGE_BODY.length,
+        annotatable: true,
+        askedAt: 1_700_000_000_006,
+      }),
+    ]);
+    await openSeededTurn(page);
+    await expect(page.locator("#wikiFactcheckIntegrateBtn")).toBeVisible();
+  });
+
+  test("the ANNOTATED apply writes marks + appendix, and re-running never nests", async ({ page }) => {
+    // ACCEPTANCE 3. Everything new in this slice is `.mdx`-only, and the assertion
+    // that matters is the ON-DISK BYTES plus the rendered chip↔section pairing —
+    // a chip whose `#fc-claim-N` target is missing is a dead affordance.
+    const proposal = {
+      edits: [
+        {
+          claimIndex: 1,
+          verdict: "❌",
+          old: "ships 4M units per year",
+          // A CORRECTION carries its mark inside `new` — one write emits both sides.
+          new: '<Fact n="1" v="bad">ships 2.1M units per year</Fact>',
+          reason: "The filing reports 2.1M units.",
+          tier: "exact",
+          resolvedText: "ships 4M units per year",
+          beforeCtx: "The device ",
+          afterCtx: ".",
+        },
+        {
+          claimIndex: 2,
+          verdict: "✅",
+          old: MDX_WARRANTY,
+          // A WRAPPER-ONLY annotation: `new` is exactly the wrapper around
+          // `resolvedText`, which is what makes it cost 0 against the budget.
+          new: `<Fact n="2" v="ok">${MDX_WARRANTY}</Fact>`,
+          reason: "marks the checked passage",
+          tier: "exact",
+          resolvedText: MDX_WARRANTY,
+          beforeCtx: "",
+          afterCtx: "",
+        },
+      ],
+      dropped: [],
+      budget: {
+        bodyLen: MDX_PAGE_BODY.length,
+        maxEdits: 20,
+        maxEditChars: 2000,
+        maxChangedChars: 2000,
+        proposedChangedChars: 23,
+      },
+      hasSentinelBlock: false,
+      annotatable: true,
+    };
+    await page.route(
+      (url) => url.pathname === "/api/wiki/factcheck/integrate",
+      (route) =>
+        route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(proposal) }),
+    );
+    // Observe (never stub) the apply — the real write is what's under test.
+    let applyBody: { appendCallout?: boolean; answer?: string } | null = null;
+    page.on("request", (req) => {
+      if (req.url().includes("/api/wiki/factcheck/integrate/apply") && req.method() === "POST") {
+        applyBody = JSON.parse(req.postData() || "{}");
+      }
+    });
+
+    await seedSession(page, [
+      seedTurn({
+        question: "Fact check: Mdx Note",
+        answer: MDX_ANSWER,
+        page: "mdx-note",
+        baseHash: mdxBaseHash,
+        bodyLen: MDX_PAGE_BODY.length,
+        claimCount: 2,
+        annotatable: true,
+        askedAt: 1_700_000_000_007,
+      }),
+    ]);
+    await openSeededTurn(page);
+    await page.locator("#wikiFactcheckIntegrateBtn").click();
+
+    // The panel groups the wrapper-only mark instead of showing a no-op diff card,
+    // and the appendix is stated as unavoidable rather than offered as a checkbox.
+    const panel = page.locator("#wikiFcIntPanel");
+    await expect(panel).toBeVisible();
+    await expect(panel).toContainText("1 passage marked");
+    await expect(panel.locator(".wiki-fc-int-anno")).toContainText("Mark 1 checked passage inline");
+    await expect(panel.locator(".wiki-fc-int-callout.fixed")).toContainText(
+      "fact-check appendix will be added",
+    );
+    await expect(page.locator("#wikiFcIntCallout")).toHaveCount(0);
+
+    await page.locator("#wikiFcIntAccept").click();
+
+    // The answer rides the apply UNCONDITIONALLY on an annotated write — the
+    // checkbox defaults OFF on a clean page and would have shipped dead chips.
+    await expect.poll(() => (applyBody as { answer?: string } | null)?.answer).toContain("Claim 1/2");
+    expect((applyBody as unknown as { appendCallout?: boolean })!.appendCallout).toBe(true);
+
+    // ── ON-DISK BYTES ──
+    await expect
+      .poll(() => readFileSync(path.join(root, "mdx-note.mdx"), "utf8"))
+      .toContain('<Fact n="1" v="bad">');
+    const onDisk = readFileSync(path.join(root, "mdx-note.mdx"), "utf8");
+    expect(onDisk).toContain('<Fact n="1" v="bad">ships 2.1M units per year</Fact>');
+    expect(onDisk).toContain(`<Fact n="2" v="ok">${MDX_WARRANTY}</Fact>`);
+    expect(onDisk).not.toContain(ORIGINAL_SENTENCE);
+    expect(onDisk).toContain("Unrelated prose that must survive untouched.");
+    // The appendix: component form (NOT the `.md` blockquote), with both claims and
+    // this write's own `Was:` line.
+    expect(onDisk).toContain('<FactCheck date=');
+    expect(onDisk).toContain('ok="1"');
+    expect(onDisk).toContain('bad="1"');
+    expect(onDisk).not.toContain("> [!factcheck]");
+    expect(onDisk).toContain("Was: ships 4M units per year");
+    // Severity order — the ❌ claim leads.
+    expect(onDisk.indexOf("Claim 1/2")).toBeLessThan(onDisk.indexOf("Claim 2/2"));
+    // Nothing nested, one block.
+    expect(onDisk).not.toMatch(/<Fact\b[^>]*>(?:(?!<\/Fact>)[\s\S])*?<Fact\b/);
+    expect(onDisk.split(SENTINEL_START).length - 1).toBe(1);
+
+    // ── RENDERED HTML: every chip has its section ──
+    const article = page.locator("#articleWrap");
+    // NB not the whole sentence: the chip is rendered right after the marked span,
+    // so the trailing period is no longer contiguous with the corrected text.
+    // (The pre-edit text is deliberately still on the page — in the appendix's
+    // `Was:` line, which is the whole point of that line.)
+    await expect(article).toContainText("ships 2.1M units per year");
+    const pairing = await page.evaluate(() => {
+      const attrs = (sel: string, attr: string): string[] => {
+        const out: string[] = [];
+        document.querySelectorAll(sel).forEach((el) => {
+          const v = el.getAttribute(attr);
+          if (v) out.push(v);
+        });
+        return out;
+      };
+      const chips = attrs("#articleWrap [data-fact]", "data-fact");
+      const sections = attrs("#articleWrap section[data-claim]", "data-claim");
+      return { chips, sections };
+    });
+    expect(pairing.chips.length).toBeGreaterThan(0);
+    for (const n of new Set(pairing.chips)) {
+      expect(pairing.sections).toContain(n);
+      // The id the client clones into the evidence card must exist, exactly once.
+      await expect(page.locator(`#fc-claim-${n}`)).toHaveCount(1);
+    }
+
+    // ── RE-RUN: the write is an overlay, so a second apply cannot nest ──
+    const rehash = createHash("sha256")
+      .update(readFileSync(path.join(root, "mdx-note.mdx"), "utf8"))
+      .digest("hex");
+    const res = await page.request.post(`${BASE}/api/wiki/factcheck/integrate/apply`, {
+      data: {
+        wiki: WIKI_NAME,
+        page: "mdx-note",
+        baseHash: rehash,
+        answer: MDX_ANSWER,
+        edits: [
+          {
+            claimIndex: 2,
+            verdict: "✅",
+            old: MDX_WARRANTY,
+            new: `<Fact n="2" v="ok">${MDX_WARRANTY}</Fact>`,
+            reason: "marks the checked passage",
+          },
+        ],
+      },
+    });
+    expect(res.status()).toBe(200);
+    const after = readFileSync(path.join(root, "mdx-note.mdx"), "utf8");
+    expect(after).not.toMatch(/<Fact\b[^>]*>(?:(?!<\/Fact>)[\s\S])*?<Fact\b/);
+    // Claim 1's mark is gone (not in this run's edit set) and claim 2's is intact —
+    // exactly ONE of each tag, never a doubled wrapper.
+    expect((after.match(/<Fact\b[^>]*>/g) ?? []).length).toBe(1);
+    expect(after).toContain(`<Fact n="2" v="ok">${MDX_WARRANTY}</Fact>`);
+    // The correction itself survives — the strip removes marks, never prose.
+    expect(after).toContain(CORRECTED_SENTENCE);
   });
 
   test("the callout path: refresh-labelled checkbox, paired apply body, ONE block on disk", async ({

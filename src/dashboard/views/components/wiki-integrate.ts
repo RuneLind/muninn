@@ -20,6 +20,7 @@
  */
 
 import { lineDiff, type DiffLine } from "../../../gardener/diff.ts";
+import { normalizeFactVerdict, type FactVerdict } from "../../../format/markdown-ast.ts";
 import { escHtml as esc } from "./escape.ts";
 
 /**
@@ -275,6 +276,91 @@ export function correctableClaims(answer: string): FactcheckClaimAnchor[] {
   return parseFactcheckClaims(answer).filter((c) => wanted.has(c.verdict));
 }
 
+// ── Inline `<Fact>` wrappers ─────────────────────────────────────────────────
+// The wrapper is BUILT AT PROPOSE, server-side, and rides the ordinary edit
+// payload (`edit.new`) through the client's verbatim echo — there is no separate
+// "annotation" wire shape and no client-supplied flag saying "this one is a
+// wrapper". Everything downstream re-DERIVES that structurally from the edit plus
+// the span it resolved to, which is why the builders and the predicate live here:
+// the server engine, the apply re-measure and the client's budget mirror must all
+// agree, and a fourth hand-rolled copy is how they would stop agreeing.
+
+/** The `v` attr for a claim's verdict emoji. ❓ maps to `unknown`, which never
+ *  gets a wrapper — a `?` chip on a passage nothing checked is worse than none. */
+export function factVerdictForClaim(verdict: string): FactVerdict {
+  return normalizeFactVerdict(verdict);
+}
+
+/**
+ * The TWO legal spellings of one wrapper around `inner`:
+ *  - `[0]` INLINE — the normal form, for a span with no newline in it.
+ *  - `[1]` BLOCK — open tag and close tag each on their own line, the only legal
+ *    form when the wrapped span is a whole paragraph. The inline component matcher
+ *    is line-scoped, so an inline wrapper spanning a newline renders as literal
+ *    escaped tags.
+ *
+ * Returned as a pair (rather than one chosen form) because the wrapper-only
+ * PREDICATE has to recognize either without knowing which the writer picked.
+ */
+export function factWrapperForms(
+  claimIndex: number,
+  verdict: FactVerdict,
+  inner: string,
+): [inline: string, block: string] {
+  const open = '<Fact n="' + claimIndex + '" v="' + verdict + '">';
+  return [open + inner + "</Fact>", open + "\n" + inner + "\n</Fact>"];
+}
+
+/**
+ * Is this edit a WRAPPER-ONLY annotation — i.e. does it change nothing but add the
+ * mark around the text already there?
+ *
+ * STRUCTURAL, never a payload flag: `edit.new` must be EXACTLY one of the two
+ * legal wrapper spellings around the span the edit resolved to. A client cannot
+ * claim wrapper-only status for an edit that rewrites prose, because the check is
+ * against `resolvedText` — the server's own slice of its own freshly-read body.
+ *
+ * This is the whole reason wrapper-only edits can cost 0 against the change
+ * budget: a ✅ annotation on a long sentence would otherwise book the whole
+ * sentence as "changed" (≈1.2k chars on the creatine page) and eat the budget the
+ * real corrections need.
+ */
+export function isWrapperOnlyEdit(
+  edit: { claimIndex?: number; verdict?: string; new?: string },
+  resolvedText: string | undefined,
+): boolean {
+  if (typeof resolvedText !== "string" || typeof edit.new !== "string") return false;
+  const n = typeof edit.claimIndex === "number" ? edit.claimIndex : 0;
+  if (!(n > 0)) return false;
+  const v = factVerdictForClaim(typeof edit.verdict === "string" ? edit.verdict : "");
+  if (v === "unknown") return false;
+  const forms = factWrapperForms(n, v, resolvedText);
+  return edit.new === forms[0] || edit.new === forms[1];
+}
+
+/**
+ * Fail-closed PAYLOAD-SHAPE test: does any edit's replacement text OPEN with a
+ * `<Fact` tag? Used by the apply route to decide whether the fact-check appendix
+ * (and therefore the posted `answer`) is mandatory for this write.
+ *
+ * Deliberately distinct from {@link isWrapperOnlyEdit}: this one runs BEFORE the
+ * body is read (no `resolvedText` exists yet) and it must also catch a CORRECTION
+ * whose `new` is Fact-wrapped — those are not wrapper-only, but they still emit a
+ * chip that needs its `#fc-claim-N` target in the appendix.
+ */
+export function carriesFactWrapper(edits: { new?: unknown }[]): boolean {
+  return edits.some((e) => typeof e.new === "string" && /^<Fact\b/.test(e.new));
+}
+
+/** Per-verdict claim counts for the `<FactCheck>` appendix attrs, straight off the
+ *  persisted answer's headings — a tally of CLAIMS, not of wrappers written (a
+ *  claim whose anchor couldn't be located is still a claim that was checked). */
+export function factCheckCounts(answer: string): Record<FactVerdict, number> {
+  const counts: Record<FactVerdict, number> = { ok: 0, warn: 0, bad: 0, unknown: 0 };
+  for (const c of parseFactcheckClaims(answer)) counts[factVerdictForClaim(c.verdict)]++;
+  return counts;
+}
+
 /**
  * Body-length ceiling for the whole integrate flow. Declared HERE (not in
  * `src/wiki/integrate-edits.ts`, which re-exports it) because the bundled client
@@ -371,6 +457,11 @@ export interface IntegrateGateTurn {
   answer?: string;
   bodyLen?: number;
   wrote?: string;
+  /** The checked page is a native `.mdx` and therefore carries INLINE `<Fact>`
+   *  annotations (`isAnnotatablePage`, server-derived and ridden in on the `done`
+   *  payload). On such a page an ALL-✅ check is still integrable — the write marks
+   *  the confirmed passages — so the ≥1-❌/⚠️ gate relaxes to ≥1 parsed claim. */
+  annotatable?: boolean;
 }
 
 /** True when the persisted answer carries at least one ❌/⚠️ claim block. Uses the
@@ -378,6 +469,24 @@ export interface IntegrateGateTurn {
  *  claim's reasoning must not make an all-✅ check look correctable. */
 export function hasCorrectableClaims(answer: string | undefined): boolean {
   return correctableClaims(answer ?? "").length > 0;
+}
+
+/**
+ * Is there anything for an integrate run to WRITE on this turn?
+ *
+ * On a plain `.md` page the only output is corrected prose, so it takes a ❌/⚠️
+ * claim. On an ANNOTATABLE (`.mdx`) page the run also writes the inline `<Fact>`
+ * marks and the `<FactCheck>` appendix, so ANY parsed claim is enough — an all-✅
+ * check has a real, useful result there (every confirmed passage gets marked), and
+ * propose skips the model one-shot entirely since there is nothing to correct.
+ *
+ * The three former ❌/⚠️-only gates (this one behind the button, the propose
+ * early-return, and the e2e all-✅ assertion) relax together or not at all.
+ */
+export function hasIntegrableClaims(turn: IntegrateGateTurn): boolean {
+  const answer = turn.answer ?? "";
+  if (hasCorrectableClaims(answer)) return true;
+  return turn.annotatable === true && parseFactcheckClaims(answer).length > 0;
 }
 
 /**
@@ -393,7 +502,7 @@ export function integrateBarState(turn: IntegrateGateTurn): IntegrateBarState {
   if (!turn.answer) return "pending";
   if (turn.wrote === "integrate") return "done";
   if (turn.wrote === "append") return "blocked-append";
-  if (!hasCorrectableClaims(turn.answer)) return "hidden";
+  if (!hasIntegrableClaims(turn)) return "hidden";
   if (typeof turn.bodyLen === "number" && turn.bodyLen > INTEGRATE_BODY_MAX) return "too-long";
   return "ready";
 }
@@ -421,6 +530,11 @@ export const INTEGRATE_STALE_COPY_EDIT =
  *  outcome (`outcomeChangedChars`): the larger of the raw span replaced and the
  *  text inserted. Client-side this is UX only — the server re-measures. */
 export function editChangedChars(edit: ProposedEdit): number {
+  // A wrapper-only annotation changes no prose — it only marks what is already
+  // there — so it costs 0, exactly as the server's `outcomeChangedChars` scores it.
+  // Without the carve-out a handful of ✅ marks would book the whole marked
+  // sentences and disable Apply on a page nothing was actually being rewritten in.
+  if (isWrapperOnlyEdit(edit, edit.resolvedText)) return 0;
   // Defensive on BOTH sides: this runs from the checkbox change handler, so a
   // malformed proposal (a field the server never sent, a non-string) must degrade
   // to a number rather than throw and wedge the panel.
@@ -501,6 +615,69 @@ export function editPreviewHtml(
     ctxBefore +
     diffHtml(lineDiff(oldText, newText)) +
     ctxAfter +
+    "</div>"
+  );
+}
+
+/**
+ * Indexes of the WRAPPER-ONLY edits in a proposal — the annotations. Split out so
+ * the preview can present them as ONE group instead of N no-op diffs: a diff card
+ * per ✅ mark shows the same line on both sides and buries the two or three edits
+ * that actually rewrite prose.
+ */
+export function annotationIndexes(edits: ProposedEdit[]): number[] {
+  const out: number[] = [];
+  edits.forEach((e, i) => {
+    if (isWrapperOnlyEdit(e, e.resolvedText)) out.push(i);
+  });
+  return out;
+}
+
+/**
+ * The annotation group card: one checkbox for ALL wrapper-only edits, plus a
+ * per-claim anchor excerpt so the reviewer can see WHICH passages get marked.
+ *
+ * One checkbox, not N: the marks are a single editorial act ("annotate this page
+ * with the check results"), and per-wrapper checkboxes invite a half-marked page
+ * whose chips and appendix disagree about what was checked.
+ */
+function annotationGroupHtml(
+  edits: ProposedEdit[],
+  idxs: number[],
+  checked: boolean,
+  disabled: boolean,
+): string {
+  if (!idxs.length) return "";
+  const rows = idxs
+    .map((i) => {
+      const e = edits[i]!;
+      const v = factVerdictForClaim(e.verdict || "");
+      const anchor = (typeof e.resolvedText === "string" ? e.resolvedText : e.old || "")
+        .replace(/\s+/g, " ")
+        .slice(0, 140);
+      const claim =
+        typeof e.claimIndex === "number" && e.claimIndex > 0
+          ? '<span class="wiki-fc-int-claim">Claim ' + esc(String(e.claimIndex)) + "</span>"
+          : "";
+      return (
+        '<div class="wiki-fc-int-anno-row">' +
+        '<span class="wiki-fc-int-anno-badge v-' + esc(v) + '">' + esc(e.verdict || "") + "</span>" +
+        claim +
+        '<span class="wiki-fc-int-anno-text">' + esc(anchor) + "</span>" +
+        "</div>"
+      );
+    })
+    .join("");
+  return (
+    '<div class="wiki-fc-int-edit wiki-fc-int-anno">' +
+    '<label class="wiki-fc-int-row">' +
+    '<input type="checkbox" class="wiki-fc-int-cb" data-edit-group="annotations"' +
+    (checked ? " checked" : "") + (disabled ? " disabled" : "") + " />" +
+    '<span class="wiki-fc-int-reason">Mark ' + idxs.length +
+    " checked passage" + (idxs.length === 1 ? "" : "s") +
+    " inline (no prose changes)</span>" +
+    "</label>" +
+    rows +
     "</div>"
   );
 }
@@ -615,6 +792,10 @@ export function integratePreviewHtml(
   const edits = proposal.edits || [];
   if (!edits.length) return nothingIntegrableHtml(proposal);
   const applying = view.applying === true;
+  // Annotations are grouped; the remaining edits are the ones that rewrite prose.
+  const annoIdxs = annotationIndexes(edits);
+  const annoSet = new Set(annoIdxs);
+  const annoChecked = annoIdxs.every((i) => selected[i] !== false);
   const n = edits.filter((_, i) => selected[i] !== false).length;
   const changed = selectedChangedChars(edits, selected);
   const max = proposal.budget?.maxChangedChars;
@@ -637,17 +818,40 @@ export function integratePreviewHtml(
   const calloutTitle = view.calloutDisabled
     ? ' title="This turn carries no stored answer, so no callout can be built from it"'
     : "";
+  // An ANNOTATED write has no callout CHOICE: every `<Fact>` chip links to a
+  // `#fc-claim-N` section that only the appendix provides, so shipping the marks
+  // without it would ship dead chips. The checkbox is replaced by a statement.
+  const annotated = carriesFactWrapper(edits);
+  const calloutControl = annotated
+    ? '<span class="wiki-fc-int-callout fixed" title="Every inline mark links into this block, so it is written with them">' +
+      (proposal.hasSentinelBlock
+        ? "the fact-check appendix will be refreshed"
+        : "the fact-check appendix will be added") +
+      "</span>"
+    : '<label class="wiki-fc-int-callout"' + calloutTitle + '><input type="checkbox" id="wikiFcIntCallout"' +
+      (calloutChecked ? " checked" : "") + (calloutDisabled ? " disabled" : "") + " /> " +
+      calloutLabel + "</label>";
+  const headCount =
+    edits.length - annoIdxs.length + " proposed edit" +
+    (edits.length - annoIdxs.length === 1 ? "" : "s") +
+    (annoIdxs.length
+      ? " · " + annoIdxs.length + " passage" + (annoIdxs.length === 1 ? "" : "s") + " marked"
+      : "");
   const msg = view.message
     ? '<div class="wiki-fc-int-msg' + (view.messageError ? " error" : "") +
       '" id="wikiFcIntMsg">' + esc(view.message) + "</div>"
     : '<div class="wiki-fc-int-msg" id="wikiFcIntMsg"></div>';
   return (
     '<div class="wiki-fc-int-panel" id="wikiFcIntPanel">' +
-    '<div class="wiki-fc-int-head">' + edits.length +
-    " proposed edit" + (edits.length === 1 ? "" : "s") + "</div>" +
+    '<div class="wiki-fc-int-head">' + headCount + "</div>" +
     (proposal.note ? '<div class="wiki-fc-int-note">' + esc(proposal.note) + "</div>" : "") +
     quotesNoteHtml(proposal) +
-    edits.map((e, i) => editPreviewHtml(e, i, selected[i] !== false, applying)).join("") +
+    edits
+      .map((e, i) =>
+        annoSet.has(i) ? "" : editPreviewHtml(e, i, selected[i] !== false, applying),
+      )
+      .join("") +
+    annotationGroupHtml(edits, annoIdxs, annoChecked, applying) +
     droppedListHtml(proposal.dropped || [], view.droppedOpen === true) +
     // The apply route's OWN per-edit rejections — the honest reasons behind an
     // `applied: 0`, which a generic "nothing could be applied" line discarded.
@@ -658,9 +862,7 @@ export function integratePreviewHtml(
       "apply-drops",
     ) +
     '<div class="wiki-fc-int-actions">' +
-    '<label class="wiki-fc-int-callout"' + calloutTitle + '><input type="checkbox" id="wikiFcIntCallout"' +
-    (calloutChecked ? " checked" : "") + (calloutDisabled ? " disabled" : "") + " /> " +
-    calloutLabel + "</label>" +
+    calloutControl +
     '<button id="wikiFcIntAccept" class="wiki-fc-int-btn primary"' + acceptDisabled + ">" +
     (applying ? "Applying…" : "Apply " + n + " edit" + (n === 1 ? "" : "s")) + "</button>" +
     '<button id="wikiFcIntCancel" class="wiki-fc-int-btn"' + (applying ? " disabled" : "") +
@@ -694,6 +896,13 @@ export interface IntegrateApplyBody {
  * write, so the server needs the answer to rebuild the block. Requesting the
  * callout without an answer silently drops the request back to edits-only rather
  * than sending a payload the route would 400.
+ *
+ * On an ANNOTATED apply (any selected edit's `new` opens with a `<Fact` tag) the
+ * pair is NOT optional: the chips those wrappers emit link to `#fc-claim-N`
+ * sections that live only in the appendix, so the server rejects a wrapper-carrying
+ * apply that arrives without an `answer`. The checkbox is not the authority there —
+ * this is — because the checkbox defaults OFF on a clean page and would ship chips
+ * with no targets.
  */
 export function buildIntegrateApplyBody(input: {
   wiki?: string;
@@ -706,7 +915,7 @@ export function buildIntegrateApplyBody(input: {
 }): IntegrateApplyBody | null {
   const edits = input.edits.filter((_, i) => input.selected[i] !== false);
   if (!edits.length) return null;
-  const withCallout = input.appendCallout && !!input.answer;
+  const withCallout = (input.appendCallout || carriesFactWrapper(edits)) && !!input.answer;
   return {
     ...(input.wiki ? { wiki: input.wiki } : {}),
     page: input.page,

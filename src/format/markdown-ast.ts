@@ -82,7 +82,11 @@ const COMPONENT_ATTRS: Record<ComponentName, readonly string[]> = {
   // cannot look ahead to the `FactCheck` appendix to colour a chip, and one write
   // emits both sides so they cannot drift.
   Fact: ["n", "v"],
-  FactCheck: ["date", "ok", "warn", "bad"],
+  // `unknown` counts the ❓ claims — the ones nothing verified. It exists so a
+  // deadline-truncated fact check cannot render as a clean ✓/⚠/✗ page: those
+  // claims get NO `<Fact>` wrapper and NO appendix section, so without a count
+  // they would vanish from the page entirely.
+  FactCheck: ["date", "ok", "warn", "bad", "unknown"],
 };
 
 /** Max nesting of component blocks. Bodies are parsed as blocks only while the
@@ -173,6 +177,62 @@ export const FACT_VERDICT_WORD: Record<FactVerdict, string> = {
   bad: "corrected",
   unknown: "unverified",
 };
+
+/**
+ * Wording for the `FactCheck` appendix's COUNT strip, which reads as a tally of
+ * claims rather than a label on one passage. Only `unknown` differs from
+ * {@link FACT_VERDICT_WORD}: "3 unverified" reads as a judgement the checker made,
+ * while "3 not checked" is what actually happened (the run hit its deadline).
+ */
+export const FACT_COUNT_WORD: Record<FactVerdict, string> = {
+  ok: "confirmed",
+  warn: "needs care",
+  bad: "corrected",
+  unknown: "not checked",
+};
+
+/**
+ * Regex SOURCE for a `Fact` tag alone (opening / closing / self-closing), the
+ * newline-free attribute-tail variant for the same reason
+ * {@link COMPONENT_TAG_SOURCE_SINGLE_LINE} exists.
+ */
+const FACT_TAG_SOURCE = `</?Fact\\b[^>\\n]*>`;
+
+/** A line whose ENTIRE content is one `Fact` tag — the legal BLOCK form emitted
+ *  when a wrapped span covers a whole paragraph. Matched (and removed) with its
+ *  newline: leaving the blank line behind would split the paragraph it wrapped. */
+const FACT_TAG_LINE_RE = new RegExp(`^[ \\t]*(?:${FACT_TAG_SOURCE})[ \\t]*\\r?\\n?`, "gm");
+const FACT_TAG_RE = new RegExp(FACT_TAG_SOURCE, "g");
+
+/**
+ * Drop every `<Fact …>` / `</Fact>` wrapper from a page body, keeping the wrapped
+ * prose byte-for-byte.
+ *
+ * This is the **strip** of the fact-check annotation write path's
+ * strip → resolve → splice shape, and it is what makes the write IDEMPOTENT: a
+ * re-annotation resolves its anchors against a body with no wrappers in it, so
+ * offsets agree with the prompt the model saw and a second run cannot nest
+ * `<Fact>` inside `<Fact>`. Every consumer that reads a page body as PROSE —
+ * claim extraction, the selection locator, the integrate resolver — strips first.
+ *
+ * BOTH forms are handled, and the block form's tag LINES are removed whole (tag
+ * plus its newline). Removing only the tag would leave an empty line where the
+ * opening tag stood, splitting the wrapped paragraph in two.
+ */
+export function stripFactWrappers(body: string): string {
+  // Bare-name scan, not `"<Fact"`: an orphan `</Fact>` (a hand-edit, a truncated
+  // write) must still strip, and `</Fact>` does not contain `<Fact`.
+  if (!body || body.indexOf("Fact") === -1) return body;
+  return body.replace(FACT_TAG_LINE_RE, "").replace(FACT_TAG_RE, "");
+}
+
+/** How many `<Fact …>` OPENING tags a body carries — i.e. how many inline marks a
+ *  re-annotation is about to supersede. Reported to the reviewer rather than left
+ *  as a silent deletion. */
+export function countFactWrappers(body: string): number {
+  if (!body || body.indexOf("<Fact") === -1) return 0;
+  return (body.match(new RegExp(`<Fact\\b[^>\\n]*>`, "g")) ?? []).length;
+}
 
 /**
  * A `Fact`/claim index from an untrusted attr — a positive integer, or null.

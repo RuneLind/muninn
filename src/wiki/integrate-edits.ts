@@ -65,11 +65,28 @@
  * failure here.
  */
 
-import { COMPONENT_TAG_SOURCE_SINGLE_LINE } from "../format/markdown-ast.ts";
+import {
+  COMPONENT_TAG_SOURCE_SINGLE_LINE,
+  countFactWrappers,
+  stripFactWrappers,
+} from "../format/markdown-ast.ts";
+import type { FactVerdict } from "../format/markdown-ast.ts";
 import { collapseWithMap } from "./explain-context.ts";
 import { FACTCHECK_SENTINEL_START, FACTCHECK_SENTINEL_END } from "./factcheck-context.ts";
 import { extractJson } from "../ai/json-extract.ts";
-import type { FactcheckClaimAnchor } from "../dashboard/views/components/wiki-integrate.ts";
+import {
+  factVerdictForClaim,
+  factWrapperForms,
+  isWrapperOnlyEdit,
+  type ClaimQuote,
+  type FactcheckClaimAnchor,
+} from "../dashboard/views/components/wiki-integrate.ts";
+
+/** Re-exported so the write path has ONE import for the whole strip → resolve →
+ *  splice shape. The strip itself lives in `markdown-ast.ts` beside the tag-shape
+ *  authority, because the selection locator and claim extraction need it too and
+ *  neither may import this (server-graph) module. */
+export { stripFactWrappers, countFactWrappers };
 
 /**
  * Cap on the page body handed to the integrate one-shot (chars, measured through
@@ -463,9 +480,16 @@ export function changedChars(edits: IntegrateEdit[]): number {
 }
 
 /** Chars one RESOLVED edit changes: the larger of the raw span it replaces and
- *  the text it inserts. `old.length` under-measures a tier-2 rescue. */
+ *  the text it inserts. `old.length` under-measures a tier-2 rescue.
+ *
+ *  A WRAPPER-ONLY annotation scores 0 — structurally, via
+ *  {@link isWrapperOnlyEdit} over the span it actually resolved to, never a payload
+ *  flag. Without the carve-out a set of ✅ marks books every marked sentence as
+ *  "changed" (≈1.2k chars on the creatine page) and either eats the whole budget or
+ *  hard-400s the apply, for a write that alters no prose at all. */
 export function outcomeChangedChars(o: EditOutcome): number {
   if (!o.applied || o.start === undefined || o.end === undefined) return 0;
+  if (isWrapperOnlyEdit(o.edit, o.resolvedText)) return 0;
   return Math.max(o.end - o.start, o.edit.new.length);
 }
 
@@ -735,6 +759,265 @@ export function applyEdits(body: string, edits: IntegrateEdit[], isMdx = false):
     out = out.slice(0, o.start!) + o.edit.new + out.slice(o.end!);
   }
   return { body: out, outcomes, appliedCount: survivors.length };
+}
+
+// ── Inline `<Fact>` annotation pass ──────────────────────────────────────────
+
+/** True when `[start, end)` is EXACTLY one complete blank-line-delimited
+ *  paragraph of `body` — the only shape the legal BLOCK wrapper form may take. */
+function isWholeParagraph(body: string, start: number, end: number): boolean {
+  const slice = body.slice(start, end);
+  if (slice !== slice.trim()) return false;
+  if (/\n[ \t\r]*\n/.test(slice)) return false; // more than one paragraph
+  const prefix = body.slice(0, start);
+  const suffix = body.slice(end);
+  const beforeOk = /^\s*$/.test(prefix) || /(?:\r?\n)[ \t]*(?:\r?\n)[ \t]*$/.test(prefix);
+  const afterOk = /^\s*$/.test(suffix) || /^[ \t]*(?:\r?\n)[ \t]*(?:\r?\n)/.test(suffix);
+  return beforeOk && afterOk;
+}
+
+/** The longest newline-free sub-range of `[start, end)`, or null when every run in
+ *  it is blank. The pragmatic reading of "the sub-range containing the quote's
+ *  core": a partial-paragraph span's core is its bulk, which is its longest line. */
+function longestLineRange(
+  body: string,
+  start: number,
+  end: number,
+): { start: number; end: number } | null {
+  let best: { start: number; end: number } | null = null;
+  let runStart = start;
+  for (let i = start; i <= end; i++) {
+    if (i === end || body[i] === "\n") {
+      // Trim the run's own edge whitespace — a mark must not start or end on a
+      // space — and skip a leading BLOCK MARKER (list bullet, ordered number,
+      // blockquote, heading hashes). A mark that swallows the `- ` turns the line
+      // into one owned by a component tag, which the block parser then renders as a
+      // verdict rail instead of an underline and demotes the list item to prose.
+      let s = runStart;
+      let e = i;
+      while (s < e && /\s/.test(body[s]!)) s++;
+      const marker = /^(?:[-*+]|\d+[.)]|>+|#{1,6})[ \t]+/.exec(body.slice(s, e));
+      if (marker) s += marker[0].length;
+      while (e > s && /\s/.test(body[e - 1]!)) e--;
+      if (e > s && (!best || e - s > best.end - best.start)) best = { start: s, end: e };
+      runStart = i + 1;
+    }
+  }
+  return best;
+}
+
+/**
+ * Which wrapper FORM (and over which sub-range) a resolved span may legally take.
+ *
+ * The inline component matcher is LINE-SCOPED, so an inline `<Fact>` wrapper
+ * spliced around a span containing a newline renders as literal escaped tags in
+ * the reader — a visible corruption, not a missing feature. Three tiers:
+ *
+ *  1. newline-free span ⇒ the INLINE form over the span as-is.
+ *  2. the span is exactly ONE whole paragraph ⇒ the BLOCK form (open tag and close
+ *     tag each on their own line). One paragraph maximum: the block parser closes a
+ *     component at its matching tag, but a wrapper spanning a blank line would
+ *     swallow whatever block structure sits between the two paragraphs.
+ *  3. a partial-paragraph multi-line span ⇒ TRIM to the largest newline-free
+ *     sub-range (an honestly truncated mark beats no mark and beats a broken one).
+ *  4. nothing left after trimming ⇒ refuse, with a reason the reviewer sees.
+ */
+function factSpanForm(
+  body: string,
+  start: number,
+  end: number,
+): { form: "inline" | "block"; start: number; end: number; truncated?: boolean } | { error: string } {
+  if (!body.slice(start, end).includes("\n")) return { form: "inline", start, end };
+  if (isWholeParagraph(body, start, end)) return { form: "block", start, end };
+  const trimmed = longestLineRange(body, start, end);
+  if (!trimmed) {
+    return { error: "the checked passage spans several lines with no markable text on any of them" };
+  }
+  return { form: "inline", start: trimmed.start, end: trimmed.end, truncated: true };
+}
+
+/** The wrapper text for a CORRECTION: the mark goes around the replacement prose,
+ *  which is not in the page yet, so the tier test runs on `edit.new` plus the shape
+ *  of the span it replaces. */
+function wrapCorrectionText(
+  body: string,
+  outcome: EditOutcome,
+  claimIndex: number,
+  verdict: FactVerdict,
+): { text: string } | { error: string } {
+  const inner = outcome.edit.new;
+  const forms = factWrapperForms(claimIndex, verdict, inner);
+  if (!inner.includes("\n")) return { text: forms[0] };
+  if (
+    !/\n[ \t\r]*\n/.test(inner) &&
+    isWholeParagraph(body, outcome.start!, outcome.end!)
+  ) {
+    return { text: forms[1] };
+  }
+  return { error: "the replacement text spans more than one block" };
+}
+
+/** Input to {@link annotateEdits}. */
+export interface AnnotateEditsInput {
+  /** The page body with every PRIOR wrapper already stripped
+   *  ({@link stripFactWrappers}) — offsets here must match what the model saw. */
+  body: string;
+  isMdx: boolean;
+  /** The model's correction edits, already through {@link enforceEditBounds}. */
+  corrections: IntegrateEdit[];
+  /** EVERY claim parsed from the persisted answer (all four verdicts). */
+  claims: FactcheckClaimAnchor[];
+  /** Phase-1 verbatim quotes keyed by claim index, already validated. */
+  quotes: ClaimQuote[];
+  /** Hard cap on the FINAL edit list (the annotated apply cap). */
+  maxEdits: number;
+  /** Per-edit char cap, re-checked on the POST-wrapper `new`. */
+  maxEditChars: number;
+}
+
+/** {@link annotateEdits}' result — an ordinary edit list plus the bookkeeping the
+ *  appendix needs. */
+export interface AnnotateEditsResult {
+  /** The final edit list: corrections (their `new` Fact-wrapped where legal) then
+   *  the wrapper-only annotations. Resolve + splice this like any edit list. */
+  edits: IntegrateEdit[];
+  dropped: DroppedEdit[];
+  /** claimIndex → the text a correction replaced, for the appendix's `Was:` lines. */
+  originals: Map<number, string>;
+}
+
+/**
+ * Turn a fact-check result into ONE edit list that both corrects the prose and
+ * marks the checked passages.
+ *
+ * **Two passes, corrections first.** This ordering is load-bearing. `applyEdits`
+ * rejects overlaps by BODY POSITION (earlier start wins), not by list order — so a
+ * ✅ wrapper that happens to start earlier in the page would silently kill an
+ * overlapping ❌ correction, losing the whole point of the run. Corrections
+ * therefore resolve first and CLAIM their spans; any wrapper intersecting a claimed
+ * span is dropped with that reason, so by the time the combined list is re-resolved
+ * there are no correction/wrapper overlaps left for position order to arbitrate.
+ *
+ * Per claim there is at most ONE chip: a model may return several edits for one
+ * claim, and only the first accepted one carries the wrapper (the rest apply
+ * unwrapped). ❓ claims get no wrapper at all — they are counted in the appendix's
+ * `unknown=` attr instead of being marked as if something had been checked.
+ *
+ * A wrapper that cannot be built is never fatal to the CORRECTION: the correction
+ * applies unwrapped and the skipped mark is reported. The one exception is a
+ * post-wrapper `new` over `maxEditChars`, which would hard-400 the apply route —
+ * that edit is dropped outright.
+ */
+export function annotateEdits(input: AnnotateEditsInput): AnnotateEditsResult {
+  const { body, isMdx } = input;
+  const dropped: DroppedEdit[] = [];
+  const originals = new Map<number, string>();
+  const verdictByClaim = new Map<number, FactVerdict>();
+  for (const c of input.claims) verdictByClaim.set(c.index, factVerdictForClaim(c.verdict));
+
+  // ── Pass 1: corrections resolve and CLAIM their spans ────────────────────
+  const pass1 = applyEdits(body, input.corrections, isMdx);
+  const claimed: { start: number; end: number }[] = [];
+  const wrappedClaims = new Set<number>();
+  const corrections: IntegrateEdit[] = [];
+  for (const o of pass1.outcomes) {
+    if (!o.applied || o.start === undefined || o.end === undefined) {
+      dropped.push({ edit: o.edit, reason: o.reason ?? "could not be placed" });
+      continue;
+    }
+    claimed.push({ start: o.start, end: o.end });
+    const n = o.edit.claimIndex;
+    const verdict = verdictByClaim.get(n) ?? factVerdictForClaim(o.edit.verdict);
+    let edit = o.edit;
+    if (n > 0 && verdict !== "unknown" && !wrappedClaims.has(n)) {
+      const wrapped = wrapCorrectionText(body, o, n, verdict);
+      if ("error" in wrapped) {
+        dropped.push({
+          edit: o.edit,
+          reason: `inline mark skipped (${wrapped.error}) — the correction itself still applies`,
+        });
+      } else if (wrapped.text.length > input.maxEditChars) {
+        // An over-length `new` is a guaranteed 400 at apply, so drop the edit here
+        // rather than shipping a preview whose accept-all cannot succeed.
+        dropped.push({
+          edit: o.edit,
+          reason: `the correction plus its inline mark exceeds ${input.maxEditChars} chars`,
+        });
+        continue;
+      } else {
+        wrappedClaims.add(n);
+        edit = { ...o.edit, new: wrapped.text };
+      }
+    }
+    if (n > 0 && !originals.has(n)) originals.set(n, o.resolvedText ?? "");
+    corrections.push(edit);
+  }
+
+  // ── Pass 2: wrapper-only marks on the ✅ claims' own quotes ───────────────
+  const candidates: IntegrateEdit[] = input.quotes
+    .filter((q) => verdictByClaim.get(q.index) === "ok")
+    .map((q) => ({ claimIndex: q.index, verdict: "✅", old: q.quote, new: "", reason: "" }));
+  const wrappers: IntegrateEdit[] = [];
+  for (const o of applyEdits(body, candidates, isMdx).outcomes) {
+    if (!o.applied || o.start === undefined || o.end === undefined) {
+      dropped.push({ edit: o.edit, reason: o.reason ?? "could not be placed" });
+      continue;
+    }
+    if (claimed.some((c) => o.start! < c.end && c.start < o.end!)) {
+      dropped.push({ edit: o.edit, reason: "overlaps a correction — the correction wins" });
+      continue;
+    }
+    const span = factSpanForm(body, o.start, o.end);
+    if ("error" in span) {
+      dropped.push({ edit: o.edit, reason: span.error });
+      continue;
+    }
+    const inner = body.slice(span.start, span.end);
+    const verdict = verdictByClaim.get(o.edit.claimIndex) ?? "ok";
+    const forms = factWrapperForms(o.edit.claimIndex, verdict, inner);
+    const text = span.form === "block" ? forms[1] : forms[0];
+    if (text.length > input.maxEditChars) {
+      dropped.push({ edit: o.edit, reason: `the inline mark exceeds ${input.maxEditChars} chars` });
+      continue;
+    }
+    wrappers.push({
+      ...o.edit,
+      old: inner,
+      new: text,
+      reason: span.truncated ? "marks the checked passage (trimmed to one line)" : "marks the checked passage",
+    });
+  }
+
+  // Corrections first, so the cap can only ever trim MARKS — never a correction.
+  const edits: IntegrateEdit[] = [];
+  for (const e of [...corrections, ...wrappers]) {
+    if (edits.length >= input.maxEdits) {
+      dropped.push({ edit: e, reason: `over the ${input.maxEdits}-edit cap for one integration` });
+      continue;
+    }
+    edits.push(e);
+  }
+  return { edits, dropped, originals };
+}
+
+/**
+ * `Was:` originals re-derived from FRESHLY-resolved apply outcomes — the pre-edit
+ * text each Fact-wrapped CORRECTION is about to replace, keyed by claim index.
+ *
+ * Wrapper-only outcomes are excluded: they replace a passage with itself, so a
+ * `Was:` line for one would state that the text used to be the text it still is.
+ * The apply route cannot reuse propose's map — the body may have drifted, and the
+ * appendix must describe the write that actually happened.
+ */
+export function originalsOfOutcomes(outcomes: EditOutcome[]): Map<number, string> {
+  const out = new Map<number, string>();
+  for (const o of outcomes) {
+    if (!o.applied || o.edit.claimIndex <= 0) continue;
+    if (!/^<Fact\b/.test(o.edit.new)) continue;
+    if (isWrapperOnlyEdit(o.edit, o.resolvedText)) continue;
+    if (!out.has(o.edit.claimIndex)) out.set(o.edit.claimIndex, o.resolvedText ?? "");
+  }
+  return out;
 }
 
 // ── Prompt ───────────────────────────────────────────────────────────────────

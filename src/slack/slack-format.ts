@@ -4,7 +4,7 @@ import {
   normalizeVerdictValue,
   normalizeFactVerdict,
   FACT_VERDICT_MARK,
-  FACT_VERDICT_WORD,
+  FACT_COUNT_WORD,
   parseMeterAttrs,
   parseChecklist,
 } from "../format/markdown-ast.ts";
@@ -187,11 +187,11 @@ function renderInline(text: string): string {
  *  two formatters must not drift). */
 function factCheckSummaryText(attrs: Record<string, string>): string {
   const parts: string[] = [];
-  for (const key of ["ok", "warn", "bad"] as const) {
+  for (const key of ["ok", "warn", "bad", "unknown"] as const) {
     const raw = attrs[key]?.trim();
     if (!raw || !/^\d+$/.test(raw)) continue;
     const n = Number(raw);
-    if (Number.isSafeInteger(n)) parts.push(`${n} ${FACT_VERDICT_WORD[key]}`);
+    if (Number.isSafeInteger(n)) parts.push(`${n} ${FACT_COUNT_WORD[key]}`);
   }
   const date = attrs.date?.trim();
   const lead = date ? `Fact-checked ${escapeHtml(date)}` : "Fact-checked";

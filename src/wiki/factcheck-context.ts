@@ -15,6 +15,11 @@
  */
 
 import { extractJson } from "../ai/json-extract.ts";
+import { COMPONENT_TAG_SOURCE, type FactVerdict } from "../format/markdown-ast.ts";
+import {
+  factVerdictForClaim,
+  parseFactcheckClaims,
+} from "../dashboard/views/components/wiki-integrate.ts";
 
 /** Server-side cap on the selected passage (chars) — mirrors `EXPLAIN_SELECTION_MAX`. */
 export const FACTCHECK_SELECTION_MAX = 1500;
@@ -121,6 +126,111 @@ export function buildFactcheckBlock(answer: string, dateOslo: string): string {
     quoted.push(demoted.trim() === "" ? ">" : `> ${demoted}`);
   }
   return [FACTCHECK_SENTINEL_START, quoted.join("\n"), FACTCHECK_SENTINEL_END].join("\n");
+}
+
+/**
+ * Neutralize the strings that would let a CLIENT-POSTED answer break out of the
+ * block it is spliced into. Two families, same treatment (strip the delimiters so
+ * the text survives but the construct doesn't):
+ *
+ *  - the fact-check SENTINELS, for the reason the `.md` path already documents.
+ *  - whitelisted COMPONENT TAGS. A line that trims to `</FactCheck>` closes the
+ *    appendix early and strands every claim after it outside the block; a
+ *    line-owning `<Callout>` becomes a real nested component. The answer reaches
+ *    the write routes straight off the client, so neither may be trusted.
+ */
+function neutralizeAnswerMarkup(answer: string): string {
+  return answer
+    .replaceAll(FACTCHECK_SENTINEL_START, "factcheck:start")
+    .replaceAll(FACTCHECK_SENTINEL_END, "factcheck:end")
+    .replace(new RegExp(COMPONENT_TAG_SOURCE, "g"), (tag) => tag.replace(/[<>]/g, ""));
+}
+
+/** Severity order for the appendix: what needs the reader's attention first.
+ *  ❓ claims are absent from this list — they are dropped from the body and
+ *  reported as the `unknown=` count instead. */
+const APPENDIX_ORDER: readonly FactVerdict[] = ["bad", "warn", "ok"];
+
+/** Options for {@link buildFactcheckAppendix}. */
+export interface FactcheckAppendixOptions {
+  /** claimIndex → the text a correction replaced, rendered as a `Was:` line.
+   *  Integrate-only: the answer-only ➕ append route changes no prose, so it can
+   *  never produce one. */
+  originals?: Map<number, string>;
+}
+
+/** Insert the `Was:` line as its OWN paragraph immediately before the mandatory
+ *  `Confidence:` line (appended at block end when the model omitted one), so the
+ *  correction's before-text sits with the evidence rather than after the sources. */
+function withWasLine(block: string, original: string): string {
+  const lines = block.split("\n");
+  const at = lines.findIndex((l) => /^Confidence:/i.test(l.trim()));
+  const insert = ["Was: " + original.replace(/\s+/g, " ").trim(), ""];
+  if (at === -1) return [...lines, "", insert[0]!].join("\n");
+  // Drop the blank line the `Confidence:` paragraph already owns and re-emit it
+  // after the inserted paragraph, so the spacing stays one blank line either side.
+  const head = at > 0 && lines[at - 1]!.trim() === "" ? lines.slice(0, at - 1) : lines.slice(0, at);
+  return [...head, "", ...insert, ...lines.slice(at)].join("\n");
+}
+
+/**
+ * Build the persisted fact-check block in its ANNOTATED (`.mdx`) form: a
+ * `<FactCheck …>` component wrapping the per-claim evidence, fenced by the same
+ * `<!-- factcheck:start/end -->` sentinels as the `.md` blockquote form so the
+ * strip/splice authorities are unchanged.
+ *
+ * The transform of the persisted answer is DETERMINISTIC, not a re-summarization:
+ *  (a) the compose lede and any prose outside a claim block are dropped — the
+ *      appendix is evidence, and the lede is already the reader's turn text;
+ *  (b) claims are ordered by SEVERITY (❌ then ⚠️ then ✅), claim-index order within
+ *      a tier, so a corrected claim is never buried under eight confirmations;
+ *  (c) ❓ claims are dropped from the body and counted in `unknown=` — a `?` section
+ *      no chip links to is noise, but a silently missing claim is a lie;
+ *  (d) the answer body is tag-neutralized before embedding (see
+ *      {@link neutralizeAnswerMarkup});
+ *  (e) each corrected claim gains one `Was: <original>` line.
+ *
+ * Zero counts are OMITTED rather than emitted as `0`, matching the renderers'
+ * absent-vs-zero contract (`bad="0"` would render "✗ 0 corrected").
+ */
+export function buildFactcheckAppendix(
+  answer: string,
+  dateOslo: string,
+  opts: FactcheckAppendixOptions = {},
+): string {
+  const safe = neutralizeAnswerMarkup(answer);
+  const anchors = parseFactcheckClaims(safe);
+  const counts: Record<FactVerdict, number> = { ok: 0, warn: 0, bad: 0, unknown: 0 };
+  for (const a of anchors) counts[factVerdictForClaim(a.verdict)]++;
+
+  const ordered = anchors
+    .map((a) => ({ a, v: factVerdictForClaim(a.verdict) }))
+    .filter((x) => x.v !== "unknown")
+    .sort(
+      (x, y) =>
+        APPENDIX_ORDER.indexOf(x.v) - APPENDIX_ORDER.indexOf(y.v) || x.a.index - y.a.index,
+    );
+
+  // Attr order is the SUMMARY-STRIP order (ok · warn · bad · unknown), not the
+  // body's severity order — the strip reads as a tally, best-first.
+  const attrs = [`date="${dateOslo}"`];
+  for (const key of ["ok", "warn", "bad", "unknown"] as const) {
+    if (counts[key] > 0) attrs.push(`${key}="${counts[key]}"`);
+  }
+
+  const blocks = ordered.map(({ a }) => {
+    const original = opts.originals?.get(a.index);
+    return original && original.trim() ? withWasLine(a.block, original) : a.block;
+  });
+
+  return [
+    FACTCHECK_SENTINEL_START,
+    `<FactCheck ${attrs.join(" ")}>`,
+    "",
+    blocks.join("\n\n"),
+    "</FactCheck>",
+    FACTCHECK_SENTINEL_END,
+  ].join("\n");
 }
 
 /**
