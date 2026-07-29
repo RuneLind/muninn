@@ -10,6 +10,7 @@ import {
   __seedWikiDigestForTest,
   __setSimilarSearchForTest,
   __setSynthesisDraftDepsForTest,
+  coerceClientEdits,
   confirmSynthesisCandidate,
   digestCacheDecision,
   resolveExplainPreflight,
@@ -28,6 +29,10 @@ import type { WikiIndex, WikiPageMeta } from "../../wiki/store.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
 import { readLogMtimeMs, type WikiDigest } from "../../wiki/digest.ts";
 import { EXPLAINER_BRIDGE_MARKER } from "../../wiki/explainer-bridge.ts";
+import {
+  FACTCHECK_SENTINEL_START,
+  FACTCHECK_SENTINEL_END,
+} from "../../wiki/factcheck-context.ts";
 
 /**
  * Route-level tests for the explainer-serving seam `/api/wiki/html`. Uses the
@@ -380,6 +385,142 @@ describe("POST /api/wiki/remember — resolution branches", () => {
     const res = await post("?wiki=does-not-exist", { question: "q", answer: "a" });
     expect(res.status).toBe(404);
     expect(((await res.json()) as { error: string }).error).toContain("no wiki configured");
+  });
+});
+
+/**
+ * `coerceClientEdits` — the apply route's client-payload validator. It must stay
+ * at PARITY with `parseEditList` (the model-side entry into the SAME write path):
+ * both reject a blank anchor and an EMPTY `new` (a silent deletion), both
+ * normalize a bare ⚠, both trim `reason`, both neutralize injected sentinels.
+ */
+describe("coerceClientEdits — client-payload parity with parseEditList", () => {
+  const ok = { claimIndex: 2, verdict: "⚠", old: "ships 4M units", new: "ships 2.1M", reason: " f " };
+
+  test("accepts a well-formed list, normalizing ⚠ → ⚠️ and trimming the reason", () => {
+    const edits = coerceClientEdits([ok])!;
+    expect(edits).toHaveLength(1);
+    expect(edits[0]!.verdict).toBe("⚠️");
+    expect(edits[0]!.reason).toBe("f");
+    expect(edits[0]!.claimIndex).toBe(2);
+  });
+
+  test("rejects the malformed shapes wholesale (null ⇒ the route's 400)", () => {
+    expect(coerceClientEdits(null)).toBeNull();
+    expect(coerceClientEdits([])).toBeNull();
+    expect(coerceClientEdits(["not an object"])).toBeNull();
+    expect(coerceClientEdits([[]])).toBeNull(); // an array is not an edit object
+    expect(coerceClientEdits([{ ...ok, old: "   " }])).toBeNull(); // whitespace-only anchor
+    expect(coerceClientEdits([{ ...ok, old: undefined }])).toBeNull();
+    expect(coerceClientEdits([{ ...ok, new: "" }])).toBeNull(); // empty ⇒ silent deletion
+    expect(coerceClientEdits([{ ...ok, new: undefined }])).toBeNull();
+  });
+
+  test("neutralizes injected fact-check sentinels in `new`", () => {
+    const edits = coerceClientEdits([
+      { ...ok, new: `fixed ${FACTCHECK_SENTINEL_START} text ${FACTCHECK_SENTINEL_END}` },
+    ])!;
+    expect(edits[0]!.new).not.toContain(FACTCHECK_SENTINEL_START);
+    expect(edits[0]!.new).not.toContain(FACTCHECK_SENTINEL_END);
+    expect(edits[0]!.new).toContain("factcheck:start");
+  });
+});
+
+/**
+ * The integrate routes' cheap rejection branches — every one of these fires
+ * BEFORE the 90s one-shot / before the write queue, so none of them needs a model
+ * or a DB. The happy paths are covered by `integrate-edits.test.ts` (the pure
+ * engine) + `page-write.test.ts` (the write sequence) + the live smoke.
+ */
+describe("integrate routes — pre-model / pre-write rejections", () => {
+  let root: string;
+  let app: Hono;
+  let prevExtra: string | undefined;
+
+  const post = (path_: string, body: unknown) =>
+    app.request(path_, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  const editsFor = (old: string, nw: string) => [
+    { claimIndex: 1, verdict: "❌", old, new: nw, reason: "filing" },
+  ];
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-integrate-route-"));
+    await Bun.write(path.join(root, "Widgets.md"), "# Widgets\n\nThe device ships 4M units.\n");
+    await Bun.write(path.join(root, "index.md"), "# Index\n\n- [[Widgets]]\n");
+    prevExtra = process.env.WIKI_EXTRA;
+    process.env.WIKI_EXTRA = `intwiki=${root}`;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    app = new Hono();
+    registerWikiRoutes(app, {} as Parameters<typeof registerWikiRoutes>[1]);
+  });
+
+  afterEach(async () => {
+    if (prevExtra === undefined) delete process.env.WIKI_EXTRA;
+    else process.env.WIKI_EXTRA = prevExtra;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("propose on index.md is a clean 400 — never a spent one-shot", async () => {
+    const res = await post("/api/wiki/factcheck/integrate?wiki=intwiki", {
+      page: "index",
+      answer: "### ❌ Claim 1/1 — Wrong\n\nIt is wrong.",
+      baseHash: "whatever",
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("reserved wiki infrastructure");
+  });
+
+  test("apply on index.md is the SAME 400, not the confinement 500", async () => {
+    const res = await post("/api/wiki/factcheck/integrate/apply?wiki=intwiki", {
+      page: "index",
+      baseHash: "whatever",
+      edits: editsFor("Index", "Catalog"),
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("reserved wiki infrastructure");
+  });
+
+  test("apply rejects an empty `new` before touching the page", async () => {
+    const res = await post("/api/wiki/factcheck/integrate/apply?wiki=intwiki", {
+      page: "Widgets",
+      baseHash: "whatever",
+      edits: editsFor("ships 4M units", ""),
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("non-empty");
+    // The page is untouched — an empty replacement never became a deletion.
+    expect(await Bun.file(path.join(root, "Widgets.md")).text()).toContain("ships 4M units");
+  });
+
+  test("apply enforces INTEGRATE_BODY_MAX with the same copy as propose", async () => {
+    await Bun.write(path.join(root, "Widgets.md"), `# Widgets\n\n${"prose ".repeat(6000)}\n`);
+    __resetWikiCacheForTest();
+    const res = await post("/api/wiki/factcheck/integrate/apply?wiki=intwiki", {
+      page: "Widgets",
+      baseHash: "whatever",
+      edits: editsFor("prose prose", "text text"),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; max: number };
+    expect(body.error).toBe("page too long to integrate");
+    expect(body.max).toBe(24_000);
+  });
+
+  test("apply 409s a stale baseHash without writing", async () => {
+    const res = await post("/api/wiki/factcheck/integrate/apply?wiki=intwiki", {
+      page: "Widgets",
+      baseHash: "deadbeef",
+      edits: editsFor("ships 4M units", "ships 2.1M units"),
+    });
+    expect(res.status).toBe(409);
+    expect(await Bun.file(path.join(root, "Widgets.md")).text()).toContain("ships 4M units");
   });
 });
 

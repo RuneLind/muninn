@@ -94,8 +94,12 @@ export function htmlToText(html: string): string {
  * It is intentionally shallow — it does not touch headings `#`, list bullets, or
  * HTML entities — because the selection comes from rendered text and only needs
  * to survive the most common inline-markup mismatches.
+ *
+ * Exported (beyond {@link locateExcerpt}) for the fact-check integrate path's
+ * tier-2 edit resolution: an `old` that fails an exact unique match is retried
+ * against the collapsed body and mapped back to raw offsets through this map.
  */
-function collapseWithMap(text: string): { collapsed: string; map: number[] } {
+export function collapseWithMap(text: string): { collapsed: string; map: number[] } {
   const chars: string[] = [];
   const map: number[] = [];
   let lastWasSpace = true; // true so any leading whitespace is dropped

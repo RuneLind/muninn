@@ -85,6 +85,35 @@ const MAX_COMPONENT_DEPTH = 2;
 const COMPONENT_OPEN_RE = /^<([A-Za-z][A-Za-z0-9]*)((?:\s+[A-Za-z][\w-]*="[^"]*")*)\s*(\/?)>(.*)$/;
 const ATTR_RE = /([A-Za-z][\w-]*)="([^"]*)"/g;
 
+/**
+ * Regex SOURCE (not a compiled regex — callers pick their own flags/anchors) for
+ * ANY whitelisted component tag: opening, closing, or self-closing, with its
+ * attributes. This is the ONE place the tag shape lives; `src/wiki/similar.ts`
+ * (query stripping) and `src/wiki/integrate-edits.ts` (exclusion-zone masking)
+ * both derive from it rather than hand-rolling a third variant that drifts.
+ *
+ * Attributes are matched loosely (`[^>]*`) on purpose. {@link COMPONENT_OPEN_RE}
+ * requires DOUBLE-QUOTED attrs because it also has to parse them; a masker only
+ * has to find the tag's extent, and a stricter pattern would half-match
+ * `<Callout tone={x}>` — masking the name but leaving `tone={x}>` editable prose,
+ * which is exactly the corruption the mask exists to prevent.
+ */
+export const COMPONENT_TAG_SOURCE = componentTagSource("[^>]*");
+
+/**
+ * Single-line variant of {@link COMPONENT_TAG_SOURCE}: the attribute tail may not
+ * cross a newline. Required by any masker that must not let a MALFORMED tag (an
+ * opening tag whose `>` is missing on its own line) swallow the prose below it up
+ * to the next `>` anywhere in the document — `src/wiki/integrate-edits.ts` zones
+ * whatever this matches, so a runaway match would silently mark editable prose
+ * (and even a blockquote marker) uneditable.
+ */
+export const COMPONENT_TAG_SOURCE_SINGLE_LINE = componentTagSource("[^>\\n]*");
+
+function componentTagSource(attrTail: string): string {
+  return `</?(?:${COMPONENT_NAMES.join("|")})\\b${attrTail}>`;
+}
+
 /** Normalize an untrusted `tone` attr for Callout to the four known tones. */
 export function normalizeCalloutTone(tone: string | undefined): "info" | "warn" | "good" | "bad" {
   return tone === "warn" || tone === "good" || tone === "bad" ? tone : "info";
