@@ -65,7 +65,7 @@ import {
 } from "../../wiki/integrate-edits.ts";
 import { hasForbiddenBasename } from "../../gardener/draft.ts";
 import { runIntegrateOneShot } from "../../wiki/integrate-oneshot.ts";
-import { correctableClaims } from "../views/components/wiki-integrate.ts";
+import { correctableClaims, validateClaimQuotes } from "../views/components/wiki-integrate.ts";
 import { commitWikiChange } from "../../wiki/commit.ts";
 import { todayOslo } from "../../gardener/util.ts";
 import { connectorCapabilities } from "../../ai/one-shot.ts";
@@ -1370,6 +1370,11 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     let body = "";
     let baseHash = "";
     let bodyLen: number | undefined;
+    // Can this page carry inline `<Fact>` annotations? ONLY a native `.mdx` page
+    // renders the component pair (a `.md` page would show the raw tags, an
+    // explainer is HTML on disk). Derived here, from the RESOLVED path — the
+    // client only ever holds a display name and must never guess the extension.
+    let annotatable = false;
     if (!preflightError && entry && index && meta) {
       // Explainers are HTML on disk; reduce to prose so claim extraction / the
       // locator see plain text. Markdown pages pass through verbatim. A missing/
@@ -1382,6 +1387,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // are never integrable (HTML on disk), so they get NO bodyLen at all rather
       // than an HTML length nothing enforces.
       if (meta.type !== "explainer") bodyLen = integrateBodyLen(raw, meta.relPath.endsWith(".mdx"));
+      annotatable = meta.type !== "explainer" && meta.relPath.endsWith(".mdx");
       body = meta.type === "explainer" ? htmlToText(raw) : raw;
       log.info("Wiki factcheck: wiki={wiki} bot={bot} page={page} mode={mode}", {
         wiki: entry.name,
@@ -1406,6 +1412,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       botDir: botConfig?.dir,
       baseHash,
       ...(bodyLen !== undefined ? { bodyLen } : {}),
+      annotatable,
       // Same reader HTML pipeline as Ask/Explain (no citations — fact-check cites
       // raw URLs inline in the answer markdown, not numbered sources).
       renderAnswerHtml: (answer) => renderAskAnswerHtml(answer, []),
@@ -1643,7 +1650,17 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
   // append route so an unexpected failure is a 500 JSON, never an unhandled throw.
   app.post("/api/wiki/factcheck/integrate", async (c) => {
     try {
-      type IntegrateBody = { wiki?: string; bot?: string; page?: string; answer?: string; baseHash?: string };
+      type IntegrateBody = {
+        wiki?: string;
+        bot?: string;
+        page?: string;
+        answer?: string;
+        baseHash?: string;
+        /** Per-claim verbatim supporting passages `{index, quote}` from Phase-1
+         *  extraction (PR 2: carried + validated + echoed for instrumentation
+         *  only — the inline-wrapper write path lands in a later PR). */
+        quotes?: unknown;
+      };
       const reqBody = await c.req.json<IntegrateBody>().catch(() => ({}) as IntegrateBody);
       const page = typeof reqBody.page === "string" ? reqBody.page.trim() : "";
       const answer = typeof reqBody.answer === "string" ? reqBody.answer.trim() : "";
@@ -1689,6 +1706,24 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // the shared authority the strip + splice + exclusion zones already use.
       const hasSentinelBlock = hasFactcheckBlock(current);
 
+      // Claim quotes are validated against the anchors we parse out of the SAME
+      // posted answer — count + index range must agree, or the whole list is
+      // dropped. Guessing an alignment is the one thing we must never do: a quote
+      // paired with claim k+1 would later wrap that passage in the wrong verdict.
+      // A dropped list is never a hard error — propose works exactly as before.
+      const quoteCheck = validateClaimQuotes(reqBody.quotes, answer);
+      if (quoteCheck.note) {
+        log.info("Wiki fact-check integrate: claim quotes wiki={wiki} page={page} note={note}", {
+          wiki: entry.name,
+          page: meta.relPath,
+          note: quoteCheck.note,
+        });
+      }
+      const quoteFields = {
+        quotes: quoteCheck.quotes,
+        ...(quoteCheck.note ? { quotesNote: quoteCheck.note } : {}),
+      };
+
       const claims = correctableClaims(answer);
       if (claims.length === 0) {
         return c.json({
@@ -1697,6 +1732,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
           note: "No ❌ or ⚠️ claims to integrate.",
           budget: integrateBudget(bodyLen),
           hasSentinelBlock,
+          ...quoteFields,
         });
       }
 
@@ -1771,12 +1807,16 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
           .map((o) => ({ edit: o.edit, reason: o.reason ?? "could not be placed" })),
       ];
 
-      log.info("Wiki fact-check integrate: wiki={wiki} page={page} proposed={n} dropped={d}", {
-        wiki: entry.name,
-        page: meta.relPath,
-        n: edits.length,
-        d: dropped.length,
-      });
+      log.info(
+        "Wiki fact-check integrate: wiki={wiki} page={page} proposed={n} dropped={d} quotes={q}",
+        {
+          wiki: entry.name,
+          page: meta.relPath,
+          n: edits.length,
+          d: dropped.length,
+          q: quoteCheck.quotes.length,
+        },
+      );
 
       return c.json({
         edits,
@@ -1785,6 +1825,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         // Measured on RESOLVED spans, so accept-all is guaranteed within budget.
         budget: { ...integrateBudget(bodyLen), proposedChangedChars: budgetDrops.changedChars },
         hasSentinelBlock,
+        ...quoteFields,
       });
     } catch (err) {
       log.error("Wiki fact-check integrate: unexpected failure: {error}", {

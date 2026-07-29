@@ -106,6 +106,15 @@ export interface FactcheckSseOptions {
    * never enforces. Absent ⇒ the client shows no budget rather than a fiction.
    */
   bodyLen?: number;
+  /**
+   * Whether the checked page can carry INLINE fact-check annotations — i.e. its
+   * resolved file extension is `.mdx`, the only form `renderWikiHtml` renders the
+   * `<Fact>`/`<FactCheck>` component pair from. Derived SERVER-SIDE from the
+   * resolved page path (the client never sees the path and must not guess from a
+   * display name) and round-tripped on `done` so later PRs can relax the integrate
+   * gate on it. Absent ⇒ treated as not annotatable.
+   */
+  annotatable?: boolean;
   /** Final-render hook: markdown answer → reader HTML, emitted as a trailing
    *  `answer_html` (same shape as Ask/Explain). A throw is swallowed — the
    *  streamed plain text stands. */
@@ -504,9 +513,18 @@ async function runFactcheck(
     const claims: Claim[] = parsed.slice(0, maxClaims);
     const total = claims.length;
 
+    // The extractor's verbatim supporting passage rides ALONG with the title:
+    // it is what a later PR anchors an inline `<Fact>` wrapper on, and it is
+    // thrown away entirely if not forwarded here (nothing else re-derives it).
+    // Omitted per claim when the extractor gave none ("Omit it if the claim is
+    // implicit") — an absent quote is meaningful, so it must not become "".
     safeWrite("claims", {
       type: "claims",
-      claims: claims.map((c, i) => ({ index: i + 1, title: c.title })),
+      claims: claims.map((c, i) => ({
+        index: i + 1,
+        title: c.title,
+        ...(c.quote ? { quote: c.quote } : {}),
+      })),
     });
     agentStatus.updatePhase(reqId, "verifying_claims");
 
@@ -689,6 +707,10 @@ async function runFactcheck(
         claimCount,
         baseHash: opts.baseHash,
         bodyLen: opts.bodyLen,
+        // Always a boolean (unlike `bodyLen`, whose absence is meaningful): a
+        // non-.mdx page is definitively NOT annotatable, and the client should
+        // never have to distinguish "false" from "an older server".
+        annotatable: opts.annotatable === true,
         mode: opts.mode,
       }),
     });

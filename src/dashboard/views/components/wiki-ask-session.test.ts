@@ -189,3 +189,51 @@ test("per-turn shape validation drops only the malformed entries", () => {
   expect(restored.length).toBe(2);
   expect(restored.map((t) => t.question)).toEqual(["good", "also good"]);
 });
+
+test("round-trips claim quotes + annotatable (PR 2 — inline annotation)", () => {
+  const fc = turn({
+    question: "fact check",
+    kind: "factcheck",
+    page: "sources/Creatine.mdx",
+    pageType: "source",
+    baseHash: "abc",
+    annotatable: true,
+    claimQuotes: [
+      { index: 1, quote: "Creatine loading uses 20 g/day for 5–7 days." },
+      { index: 3, quote: "Older adults show smaller gains." },
+    ],
+  });
+  const restored = deserializeAskSession(serializeAskSession([fc], 10));
+  expect(restored).toEqual([fc]);
+  // Index-keyed, NOT positional: claim 2 carried no quote and is simply absent.
+  expect(restored[0]!.claimQuotes!.map((q) => q.index)).toEqual([1, 3]);
+  expect(restored[0]!.annotatable).toBe(true);
+});
+
+test("a malformed claimQuotes list is dropped but the turn survives", () => {
+  const raw = JSON.stringify([
+    { ...turn({ question: "not-an-array" }), claimQuotes: { 1: "x" } },
+    { ...turn({ question: "bad-entry" }), claimQuotes: [{ index: "1", quote: "x" }] },
+    { ...turn({ question: "missing-quote" }), claimQuotes: [{ index: 1 }] },
+    turn({ question: "clean", claimQuotes: [{ index: 2, quote: "ok" }] }),
+  ]);
+  const restored = deserializeAskSession(raw);
+  expect(restored.map((t) => t.question)).toEqual([
+    "not-an-array",
+    "bad-entry",
+    "missing-quote",
+    "clean",
+  ]);
+  expect(restored[0]!.claimQuotes).toBeUndefined();
+  expect(restored[1]!.claimQuotes).toBeUndefined();
+  expect(restored[2]!.claimQuotes).toBeUndefined();
+  expect(restored[3]!.claimQuotes).toEqual([{ index: 2, quote: "ok" }]);
+});
+
+test("a present-but-wrong-typed annotatable drops the turn", () => {
+  const raw = JSON.stringify([
+    { ...turn({ question: "bogus" }), annotatable: "yes" },
+    turn({ question: "clean", annotatable: false }),
+  ]);
+  expect(deserializeAskSession(raw).map((t) => t.question)).toEqual(["clean"]);
+});

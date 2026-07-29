@@ -15,6 +15,8 @@ import {
   selectedChangedChars,
   integrateSuccessCopy,
   INTEGRATE_BODY_MAX,
+  validateClaimQuotes,
+  CLAIM_QUOTE_MAX,
   type ProposedEdit,
 } from "./wiki-integrate.ts";
 
@@ -488,4 +490,91 @@ test("the two stale-copy strings name their OWN next action", () => {
   expect(INTEGRATE_STALE_COPY).toContain("then add it");
   expect(INTEGRATE_STALE_COPY_EDIT).toContain("then integrate again");
   expect(INTEGRATE_STALE_COPY_EDIT).not.toContain("add it");
+});
+
+// ── validateClaimQuotes (PR 2) ───────────────────────────────────────────────
+// ANSWER above carries three claim blocks (indexes 1..3).
+
+test("keeps a well-formed, index-aligned quote list", () => {
+  const r = validateClaimQuotes(
+    [{ index: 2, quote: "Ships 4M units a year." }, { index: 1, quote: "Founded in 1998." }],
+    ANSWER,
+  );
+  expect(r.quotes).toEqual([
+    { index: 2, quote: "Ships 4M units a year." },
+    { index: 1, quote: "Founded in 1998." },
+  ]);
+  expect(r.note).toBeUndefined();
+});
+
+test("an absent list is not an error and reports nothing", () => {
+  expect(validateClaimQuotes(undefined, ANSWER)).toEqual({ quotes: [] });
+  expect(validateClaimQuotes(null, ANSWER)).toEqual({ quotes: [] });
+});
+
+test("fewer quotes than claims is legitimate (quote is optional at extraction)", () => {
+  const r = validateClaimQuotes([{ index: 3, quote: "Will double next year." }], ANSWER);
+  expect(r.quotes.length).toBe(1);
+  expect(r.note).toBeUndefined();
+});
+
+test("drops the WHOLE list on any structural disagreement — never guesses alignment", () => {
+  const cases: unknown[] = [
+    "not-a-list",
+    [{ index: 4, quote: "no such claim" }], // out of range
+    [{ index: 0, quote: "1-based, so 0 names nothing" }],
+    [{ index: 1.5, quote: "non-integer" }],
+    [{ index: 1, quote: "a" }, { index: 1, quote: "b" }], // duplicate index
+    [{ index: 1, quote: "a" }, { index: 2, quote: "b" }, { index: 3, quote: "c" }, { index: 3, quote: "d" }],
+    [null],
+    ["just a string"],
+    [{ quote: "no index" }],
+  ];
+  for (const c of cases) {
+    const r = validateClaimQuotes(c, ANSWER);
+    expect(r.quotes).toEqual([]);
+    expect(typeof r.note).toBe("string");
+  }
+});
+
+test("an answer with no claim headings admits no quotes at all", () => {
+  const r = validateClaimQuotes([{ index: 1, quote: "x" }], "just prose, no headings");
+  expect(r.quotes).toEqual([]);
+  expect(r.note).toContain("more quotes than claims");
+});
+
+test("a blank or over-cap quote is dropped ALONE, keeping the rest aligned", () => {
+  const r = validateClaimQuotes(
+    [
+      { index: 1, quote: "x".repeat(CLAIM_QUOTE_MAX + 1) },
+      { index: 2, quote: "   " },
+      { index: 3, quote: "kept" },
+    ],
+    ANSWER,
+  );
+  expect(r.quotes).toEqual([{ index: 3, quote: "kept" }]);
+  expect(r.note).toContain("2 claim quotes dropped");
+});
+
+test("a quote exactly at the cap is kept", () => {
+  const r = validateClaimQuotes([{ index: 1, quote: "x".repeat(CLAIM_QUOTE_MAX) }], ANSWER);
+  expect(r.quotes.length).toBe(1);
+  expect(r.note).toBeUndefined();
+});
+
+test("an over-total list is dropped whole", () => {
+  // 8 claims x ~400 chars would be 3200; build a 3-claim answer that overshoots
+  // the total cap only via a long-but-legal per-quote size is impossible here, so
+  // assert the guard directly on a wider answer.
+  const wide = Array.from(
+    { length: 12 },
+    (_, i) => "### \u274c Claim " + (i + 1) + "/12 \u2014 t\n\nbody",
+  ).join("\n\n");
+  const quotes = Array.from({ length: 12 }, (_, i) => ({
+    index: i + 1,
+    quote: "x".repeat(CLAIM_QUOTE_MAX),
+  }));
+  const r = validateClaimQuotes(quotes, wide);
+  expect(r.quotes).toEqual([]);
+  expect(r.note).toContain("total size");
 });

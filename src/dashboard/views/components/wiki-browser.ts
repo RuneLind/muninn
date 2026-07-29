@@ -1564,6 +1564,14 @@ interface AskTurn {
   // omitted for explainers). Drives the client-side page-too-long gate so ~10% of
   // pages don't have to learn it from a server 400.
   bodyLen?: number;
+  // Per-claim verbatim supporting passages from Phase-1 extraction, keyed by the
+  // claim's 1-based index (a claim the extractor gave no quote for is absent).
+  // PERSISTED: they arrive on the transient `claims` event, which is dropped at
+  // `done`, and the integrate propose POST re-sends them from the turn.
+  claimQuotes?: { index: number; quote: string }[];
+  // Whether the checked page can carry inline <Fact> annotations (server-derived
+  // .mdx-ness of the resolved path). Absent on an older server ⇒ not annotatable.
+  annotatable?: boolean;
 }
 // One row of the fact-check claim checklist — pending until its verdict block lands.
 // `outcome` lands with the verdict (server `claim_result`) and drives the distinct
@@ -2115,6 +2123,13 @@ function runAskStream(url: string, turn: AskTurn): void {
       turn.claims = list.map((c: { index: number; title: string }) => ({
         index: c.index, title: c.title, status: "pending", block: "",
       }));
+      // The checklist itself is transient (cleared at `done`), so the quotes are
+      // lifted onto the turn HERE — this event is the only place they exist.
+      // Claims the extractor gave no quote for are simply absent from the list.
+      const quotes = list
+        .filter((c: { index: number; quote?: string }) => typeof c.quote === "string" && !!c.quote)
+        .map((c: { index: number; quote?: string }) => ({ index: c.index, quote: c.quote as string }));
+      turn.claimQuotes = quotes.length ? quotes : undefined;
       composeText = "";
       rebuildFactcheckBuffer(turn);
       if (!turn.html) scheduleAskStreamRender(turn, conn);
@@ -2211,6 +2226,10 @@ function runAskStream(url: string, turn: AskTurn): void {
         // for explainers (they can never be integrated), so an absent value is
         // meaningful and must stay undefined rather than defaulting to 0.
         turn.bodyLen = typeof d.bodyLen === "number" ? d.bodyLen : undefined;
+        // .mdx-ness of the checked page, decided server-side from the resolved
+        // path. Absent (older server) stays undefined — never defaulted to false,
+        // so "unknown" and "definitely not annotatable" remain distinguishable.
+        turn.annotatable = typeof d.annotatable === "boolean" ? d.annotatable : undefined;
         // Tally the per-outcome breakdown from the checklist BEFORE it's cleared
         // below — it's persisted (drives the honest meta line on rehydrated turns).
         turn.claimOutcomes = tallyClaimOutcomes(turn.claims);
@@ -2583,6 +2602,10 @@ async function submitFactcheckIntegrate(): Promise<void> {
         page: turn.page,
         answer: turn.answer,
         baseHash: turn.baseHash,
+        // Claim quotes ride along for instrumentation (PR 2) — the server
+        // re-validates them against the answer it parses itself and silently
+        // degrades to "no quotes" on any disagreement.
+        ...(turn.claimQuotes && turn.claimQuotes.length ? { quotes: turn.claimQuotes } : {}),
       }),
     });
     const data = (await res.json().catch(() => ({}))) as IntegrateProposal & {

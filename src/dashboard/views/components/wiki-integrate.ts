@@ -102,6 +102,101 @@ export function parseFactcheckClaims(answer: string): FactcheckClaimAnchor[] {
   return anchors;
 }
 
+/**
+ * Per-quote character cap. Phase-1 extraction already asks for ≤300 chars; 400
+ * leaves slack for a model that overshoots slightly without letting a client turn
+ * the quote list into an unbounded input on a bounded route.
+ */
+export const CLAIM_QUOTE_MAX = 400;
+
+/** Total character cap across the whole posted quote list. `FACTCHECK_MAX_CLAIMS`
+ *  (8) × {@link CLAIM_QUOTE_MAX} plus slack — a bound, not a budget. */
+export const CLAIM_QUOTES_TOTAL_MAX = 4_000;
+
+/** One claim's verbatim supporting passage, keyed by the claim's 1-based index
+ *  (the SAME `n` the `### … Claim n/m` heading carries). Alignment is ALWAYS by
+ *  this explicit index, never by list position. */
+export interface ClaimQuote {
+  index: number;
+  quote: string;
+}
+
+/** Outcome of {@link validateClaimQuotes}: the surviving quotes plus an honest
+ *  `note` whenever anything was dropped (reported on the propose response — a
+ *  silent drop is the #397 class of bug). */
+export interface ClaimQuoteValidation {
+  quotes: ClaimQuote[];
+  note?: string;
+}
+
+/**
+ * Validate a CLIENT-POSTED claim-quote list against the claim anchors the server
+ * itself parses out of the posted `answer` ({@link parseFactcheckClaims}) — the
+ * same "parse it ourselves, don't trust a client split" discipline the propose
+ * route already applies to the claim list.
+ *
+ * The failure mode this guards is specific and bad: a quote wrongly paired with
+ * claim k+1's verdict would wrap the passage in the WRONG verdict colour. So a
+ * structural disagreement drops the WHOLE list rather than guessing an alignment:
+ * a non-array payload, any malformed item, an index that names no claim block in
+ * the answer, a duplicate index, more quotes than the answer has claims, or a
+ * total size over {@link CLAIM_QUOTES_TOTAL_MAX}.
+ *
+ * NB the count rule is `≤`, not `===`: `Claim.quote` is OPTIONAL at extraction
+ * ("Omit it if the claim is implicit" — `buildClaimExtractionPrompt`), so a
+ * legitimate run routinely carries fewer quotes than claims. The safety property
+ * is preserved by the index-membership + no-duplicates rules, which is where
+ * alignment actually lives.
+ *
+ * A single over-cap or blank quote is dropped ON ITS OWN (index-keyed, so
+ * dropping one cannot shift another). Never throws; degrading to "no quotes"
+ * always leaves the caller with a working propose.
+ */
+export function validateClaimQuotes(raw: unknown, answer: string): ClaimQuoteValidation {
+  if (typeof raw === "undefined" || raw === null) return { quotes: [] };
+  if (!Array.isArray(raw)) return { quotes: [], note: "claim quotes ignored — not a list" };
+
+  const anchors = parseFactcheckClaims(answer);
+  const known = new Set(anchors.map((a) => a.index));
+  if (raw.length > anchors.length) {
+    return { quotes: [], note: "claim quotes ignored — more quotes than claims in the answer" };
+  }
+
+  const seen = new Set<number>();
+  const kept: ClaimQuote[] = [];
+  let overCap = 0;
+  let total = 0;
+  for (const item of raw) {
+    if (!item || typeof item !== "object") {
+      return { quotes: [], note: "claim quotes ignored — malformed entry" };
+    }
+    const o = item as Record<string, unknown>;
+    const index = typeof o.index === "number" && Number.isInteger(o.index) ? o.index : null;
+    if (index === null || !known.has(index)) {
+      return { quotes: [], note: "claim quotes ignored — an index matches no claim in the answer" };
+    }
+    if (seen.has(index)) {
+      return { quotes: [], note: "claim quotes ignored — duplicate claim index" };
+    }
+    seen.add(index);
+    const quote = typeof o.quote === "string" ? o.quote.trim() : "";
+    // A blank or over-long quote is dropped alone — the remaining quotes stay
+    // correctly aligned because alignment is by `index`, not position.
+    if (!quote || quote.length > CLAIM_QUOTE_MAX) {
+      overCap++;
+      continue;
+    }
+    total += quote.length;
+    kept.push({ index, quote });
+  }
+  if (total > CLAIM_QUOTES_TOTAL_MAX) {
+    return { quotes: [], note: "claim quotes ignored — total size over the limit" };
+  }
+  return overCap > 0
+    ? { quotes: kept, note: `${overCap} claim quote${overCap === 1 ? "" : "s"} dropped (blank or over ${CLAIM_QUOTE_MAX} chars)` }
+    : { quotes: kept };
+}
+
 /** Verdicts the integrate flow acts on (v1): contradicted + partly supported.
  *  ✅ and ❓ blocks are never turned into edits. */
 export const INTEGRATE_VERDICTS = ["❌", "⚠️"] as const;

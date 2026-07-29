@@ -65,6 +65,16 @@ export interface StoredAskTurn {
    *  `bodyLen`, omitted for explainers). Drives the client's page-too-long gate.
    *  Absent ⇒ render the button and let a server 400 decide. */
   bodyLen?: number;
+  /** Per-claim verbatim supporting passages from Phase-1 extraction, keyed by the
+   *  claim's 1-based index (NOT list position — a claim whose extraction carried
+   *  no quote is simply absent). Persisted because they arrive on the transient
+   *  `claims` SSE event, which is dropped at `done`; the integrate propose POST
+   *  re-sends them, so a rehydrated turn must still carry them. */
+  claimQuotes?: { index: number; quote: string }[];
+  /** Whether the checked page can carry inline `<Fact>` annotations (server-derived
+   *  `.mdx`-ness of the resolved path). Absent on a pre-field turn / an older
+   *  server ⇒ treat as not annotatable. */
+  annotatable?: boolean;
 }
 
 /** True when `v` is a well-formed persisted turn. Malformed entries (partial
@@ -101,6 +111,14 @@ function isValidTurn(v: unknown): v is StoredAskTurn {
   // just the type.
   if (typeof t.wrote !== "undefined" && t.wrote !== "append" && t.wrote !== "integrate") return false;
   if (typeof t.bodyLen !== "undefined" && typeof t.bodyLen !== "number") return false;
+  if (typeof t.annotatable !== "undefined" && typeof t.annotatable !== "boolean") return false;
+  // A malformed quote list is DROPPED (the turn survives), the `toolSourceUrls`
+  // precedent: absent quotes degrade to exactly the pre-PR behaviour, whereas
+  // rejecting the turn would throw away a whole fact-check answer. All-or-nothing
+  // per field — a half-trusted list is never kept.
+  if (typeof t.claimQuotes !== "undefined" && !isValidClaimQuotes(t.claimQuotes)) {
+    delete t.claimQuotes;
+  }
   if (typeof t.claimCount !== "undefined" && typeof t.claimCount !== "number") return false;
   if (typeof t.claimOutcomes !== "undefined" && !isValidOutcomeCounts(t.claimOutcomes)) return false;
   return true;
@@ -115,6 +133,20 @@ function isValidOutcomeCounts(v: unknown): boolean {
     if (typeof o[k] !== "undefined" && typeof o[k] !== "number") return false;
   }
   return true;
+}
+
+/** A well-formed claim-quote list: an array whose every entry is `{index:number,
+ *  quote:string}`. The server re-validates against the answer's own claim anchors
+ *  before anything is done with them — this is only shape hygiene on rehydrate. */
+function isValidClaimQuotes(v: unknown): v is { index: number; quote: string }[] {
+  if (!Array.isArray(v)) return false;
+  return v.every(
+    (q) =>
+      !!q &&
+      typeof q === "object" &&
+      typeof (q as Record<string, unknown>).index === "number" &&
+      typeof (q as Record<string, unknown>).quote === "string",
+  );
 }
 
 /** A well-formed host→url map: a plain object whose every value is a string.
