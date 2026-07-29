@@ -48,10 +48,13 @@ import {
   applyEdits,
   buildIntegratePrompt,
   changedChars,
+  changedCharsOfOutcomes,
+  enforceChangeBudget,
   enforceEditBounds,
   hasSourcesSection,
   integrateBodyLen,
   maxChangedChars,
+  neutralizeFactcheckSentinels,
   parseEditList,
   promptMaskBody,
   INTEGRATE_BODY_MAX,
@@ -59,6 +62,7 @@ import {
   INTEGRATE_MAX_EDIT_CHARS,
   type IntegrateEdit,
 } from "../../wiki/integrate-edits.ts";
+import { hasForbiddenBasename } from "../../gardener/draft.ts";
 import { runIntegrateOneShot } from "../../wiki/integrate-oneshot.ts";
 import { correctableClaims } from "../views/components/wiki-integrate.ts";
 import { commitWikiChange } from "../../wiki/commit.ts";
@@ -1364,7 +1368,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     // only reduces the body + computes the base hash.
     let body = "";
     let baseHash = "";
-    let bodyLen = 0;
+    let bodyLen: number | undefined;
     if (!preflightError && entry && index && meta) {
       // Explainers are HTML on disk; reduce to prose so claim extraction / the
       // locator see plain text. Markdown pages pass through verbatim. A missing/
@@ -1373,8 +1377,10 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       baseHash = createHash("sha256").update(raw).digest("hex");
       // The ONE body-length referent shared with the integrate route's
       // INTEGRATE_BODY_MAX check — same function, same arguments, so the number
-      // the client budgets against is the number the server enforces.
-      bodyLen = integrateBodyLen(raw, meta.relPath.endsWith(".mdx"));
+      // the client budgets against is the number the server enforces. Explainers
+      // are never integrable (HTML on disk), so they get NO bodyLen at all rather
+      // than an HTML length nothing enforces.
+      if (meta.type !== "explainer") bodyLen = integrateBodyLen(raw, meta.relPath.endsWith(".mdx"));
       body = meta.type === "explainer" ? htmlToText(raw) : raw;
       log.info("Wiki factcheck: wiki={wiki} bot={bot} page={page} mode={mode}", {
         wiki: entry.name,
@@ -1398,7 +1404,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       ctx: mode === "sel" ? ctx : undefined,
       botDir: botConfig?.dir,
       baseHash,
-      bodyLen,
+      ...(bodyLen !== undefined ? { bodyLen } : {}),
       // Same reader HTML pipeline as Ask/Explain (no citations — fact-check cites
       // raw URLs inline in the answer markdown, not numbered sources).
       renderAnswerHtml: (answer) => renderAskAnswerHtml(answer, []),
@@ -1654,10 +1660,14 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         return c.json({ error: "page too long to integrate", bodyLen, max: INTEGRATE_BODY_MAX }, 400);
       }
 
-      // Claim anchors are derived SERVER-SIDE from the persisted answer markdown
-      // (its `### <emoji> Claim n/m — <title>` headings are a fixed prompt
-      // contract) — the extraction quotes never leave the server, and the turn's
-      // claim list is transient client state we must not trust.
+      // Claim anchors are parsed SERVER-SIDE out of the answer markdown (its
+      // `### <emoji> Claim n/m — <title>` headings are a fixed prompt contract),
+      // rather than accepting the client's already-split claim list. NB the
+      // `answer` itself is CLIENT-POSTED — this buys parsing robustness and one
+      // implementation of the heading contract, NOT trust: a caller that can post
+      // an answer can post any verdict blocks it likes, which is acceptable on the
+      // auth-less loopback dashboard and is why every edit is previewed, bounded
+      // and CAS-guarded before it can touch the page.
       const claims = correctableClaims(answer);
       if (claims.length === 0) {
         return c.json({
@@ -1710,9 +1720,14 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       }
 
       // Payload bounds are enforced HERE too, so the preview only ever shows
-      // edits the apply route will accept.
+      // edits the apply route will accept — count + per-edit size first, then the
+      // RATIO budget over the RESOLVED spans (a tier-2 rescue's raw span can
+      // exceed `old.length`, so measuring pre-resolution under-counts). Without
+      // the ratio pass a preview could offer an accept-all that was a guaranteed
+      // 400 at apply.
       const bounded = enforceEditBounds(parsed.edits);
       const resolvedEdits = applyEdits(current, bounded.kept, isMdx);
+      const budgetDrops = enforceChangeBudget(resolvedEdits.outcomes, bodyLen);
       const edits = resolvedEdits.outcomes
         .filter((o) => o.applied)
         .map((o) => ({
@@ -1720,10 +1735,14 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
           start: o.start,
           end: o.end,
           tier: o.tier,
+          resolvedText: o.resolvedText,
           beforeCtx: o.beforeCtx,
           afterCtx: o.afterCtx,
         }));
+      // Every drop is reported — including the model's own malformed items, which
+      // used to be `continue`d into the void at parse time (#397's class).
       const dropped = [
+        ...parsed.dropped,
         ...bounded.dropped,
         ...resolvedEdits.outcomes
           .filter((o) => !o.applied)
@@ -1741,7 +1760,8 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         edits,
         dropped,
         ...(parsed.note ? { note: parsed.note } : {}),
-        budget: { ...integrateBudget(bodyLen), proposedChangedChars: changedChars(edits) },
+        // Measured on RESOLVED spans, so accept-all is guaranteed within budget.
+        budget: { ...integrateBudget(bodyLen), proposedChangedChars: budgetDrops.changedChars },
       });
     } catch (err) {
       log.error("Wiki fact-check integrate: unexpected failure: {error}", {
@@ -1773,7 +1793,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       if (!baseHash) return c.json({ error: "baseHash is required" }, 400);
 
       const edits = coerceClientEdits(reqBody.edits);
-      if (!edits) return c.json({ error: "edits must be a non-empty array of {old,new}" }, 400);
+      if (!edits) return c.json({ error: "edits must be a non-empty array of {old, new} with both non-empty" }, 400);
       if (edits.length > INTEGRATE_MAX_EDITS) {
         return c.json({ error: `too many edits — the cap is ${INTEGRATE_MAX_EDITS} per apply` }, 400);
       }
@@ -1791,8 +1811,15 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       const current = (await readWikiPage(resolved.index, meta)) ?? "";
       const isMdx = meta.relPath.endsWith(".mdx");
       const bodyLen = integrateBodyLen(current, isMdx);
-      const changed = changedChars(edits);
+      // Same cap + same copy as propose — apply must not be a way around it.
+      if (bodyLen > INTEGRATE_BODY_MAX) {
+        return c.json({ error: "page too long to integrate", bodyLen, max: INTEGRATE_BODY_MAX }, 400);
+      }
       const maxChanged = maxChangedChars(bodyLen);
+      // Cheap PRE-resolution pre-check (a lower bound — see `changedChars`), so an
+      // obviously over-budget payload 400s before entering the write queue. The
+      // authoritative check runs on resolved spans inside the transform below.
+      const changed = changedChars(edits);
       if (changed > maxChanged) {
         return c.json(
           {
@@ -1810,6 +1837,10 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
 
       // Re-resolved INSIDE the critical section against the freshly-read body.
       let applyResult: ReturnType<typeof applyEdits> | null = null;
+      // Set when the re-resolved spans breach the ratio budget. The transform then
+      // declines the write, and the route reports it as a 400 naming the bound
+      // (client-caused), not the 500 a thrown transform would produce.
+      let budgetError: string | null = null;
       const result = await writeWikiPage({
         wikiDir: entry.root,
         relPath: meta.relPath,
@@ -1822,6 +1853,14 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         now: () => Date.now(),
         transform: (body) => {
           applyResult = applyEdits(body, edits, isMdx);
+          // Authoritative budget check: on the FRESHLY-read body, over the spans
+          // actually resolved (a tier-2 rescue's span can exceed `old.length`).
+          const liveMax = maxChangedChars(integrateBodyLen(body, isMdx));
+          const liveChanged = changedCharsOfOutcomes(applyResult.outcomes);
+          if (liveChanged > liveMax) {
+            budgetError = `the accepted edits change ${liveChanged} chars, over the ${liveMax}-char limit for this page`;
+            return null;
+          }
           // Zero survivors ⇒ short-circuit BEFORE the write: no write, no log
           // entry, no reindex, no commit.
           return applyResult.appliedCount === 0 ? null : applyResult.body;
@@ -1853,6 +1892,9 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       if (result.outcome === "stale") {
         return c.json({ error: result.reason, stale: true }, 409);
       }
+      // A budget breach declines the transform, so it surfaces as `noop` — but it
+      // is a client-caused 400 naming the bound, not a silent "nothing applied".
+      if (budgetError) return c.json({ error: budgetError }, 400);
       if (result.outcome === "noop") {
         log.info("Wiki fact-check integrate apply: nothing resolved wiki={wiki} page={page}", {
           wiki: entry.name,
@@ -1866,7 +1908,10 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
           page,
           reason: result.reason,
         });
-        return c.json({ error: result.reason }, 500);
+        // A confinement rejection is caused by the requested PAGE, not by the
+        // server — report it as a 400 like the sibling rejections, not a 500.
+        const clientFault = result.reason.startsWith("path confinement failed");
+        return c.json({ error: result.reason }, clientFault ? 400 : 500);
       }
 
       const applied = (applyResult as ReturnType<typeof applyEdits> | null)?.appliedCount ?? 0;
@@ -1927,6 +1972,19 @@ async function resolveIntegrateTarget(
       response: c.json({ error: "fact-check edits can only be applied to markdown pages" }, 400),
     };
   }
+  // Reserved wiki infrastructure (log.md / index.md / CLAUDE.md, either
+  // extension) — the same set `isPathConfined` rejects at write time, checked
+  // HERE so the rejection is a clean 400 at BOTH routes. Without it, proposing on
+  // `index` spent a 90s one-shot and then the apply hit the confinement backstop
+  // as a 500 (verified live).
+  if (hasForbiddenBasename(meta.relPath)) {
+    return {
+      response: c.json(
+        { error: `"${meta.relPath}" is reserved wiki infrastructure and can't be edited here` },
+        400,
+      ),
+    };
+  }
   return { entry, index, meta };
 }
 
@@ -1947,23 +2005,32 @@ function integrateBudget(bodyLen: number): {
 
 /**
  * Shape-validate the client-echoed edit list. Returns null when it isn't a
- * non-empty array of objects carrying a non-empty string `old` and a string
- * `new` — apply must never guess at a malformed payload.
+ * non-empty array of objects carrying a non-blank string `old` and a NON-EMPTY
+ * string `new` — apply must never guess at a malformed payload.
+ *
+ * Kept at PARITY with `parseEditList` (the model-side entry point): both reject a
+ * blank anchor and an empty replacement (an empty `new` is a silent deletion, not
+ * an integrate edit), both normalize a bare ⚠ to ⚠️, both trim `reason`, and both
+ * neutralize embedded fact-check sentinels in `new`. Two entry points into one
+ * write path must not have two validation standards.
+ *
+ * Exported for unit tests only (the `resolveExplainPreflight` precedent).
  */
-function coerceClientEdits(raw: unknown): IntegrateEdit[] | null {
+export function coerceClientEdits(raw: unknown): IntegrateEdit[] | null {
   if (!Array.isArray(raw) || raw.length === 0) return null;
   const edits: IntegrateEdit[] = [];
   for (const item of raw) {
-    if (!item || typeof item !== "object") return null;
+    if (!item || typeof item !== "object" || Array.isArray(item)) return null;
     const o = item as Record<string, unknown>;
-    if (typeof o.old !== "string" || !o.old || typeof o.new !== "string") return null;
+    if (typeof o.old !== "string" || !o.old.trim()) return null;
+    if (typeof o.new !== "string" || !o.new) return null;
     const idx = Number(o.claimIndex);
     edits.push({
       claimIndex: Number.isFinite(idx) && idx > 0 ? Math.trunc(idx) : 0,
-      verdict: typeof o.verdict === "string" ? o.verdict : "",
+      verdict: o.verdict === "⚠" ? "⚠️" : typeof o.verdict === "string" ? o.verdict : "",
       old: o.old,
-      new: o.new,
-      reason: typeof o.reason === "string" ? o.reason : "",
+      new: neutralizeFactcheckSentinels(o.new),
+      reason: typeof o.reason === "string" ? o.reason.trim() : "",
     });
   }
   return edits;

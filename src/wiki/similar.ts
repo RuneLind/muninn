@@ -13,17 +13,17 @@
 
 import { matchCitationToPage } from "./citation-links.ts";
 import { readWikiPage, type WikiIndex, type WikiPageMeta } from "./store.ts";
-import { COMPONENT_NAMES } from "../format/markdown-ast.ts";
+import { COMPONENT_TAG_SOURCE } from "../format/markdown-ast.ts";
 import type { WikiRegistryEntry } from "./registry.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("wiki", "similar");
 
-/** Whitelisted component tags (open/close/self-closing) from the shared markdown
- *  AST. Native `.mdx` bodies carry these — stripping them keeps JSX-ish tokens
- *  (`<Callout tone="info">`, `</ComparisonTable>`) out of the semantic-search
- *  query, which should embed the prose, not the markup. */
-const COMPONENT_TAG_RE = new RegExp(`</?(?:${COMPONENT_NAMES.join("|")})\\b[^>]*>`, "g");
+/** Whitelisted component tags (open/close/self-closing), derived from the shared
+ *  markdown-AST source of truth. Native `.mdx` bodies carry these — stripping them
+ *  keeps JSX-ish tokens (`<Callout tone="info">`, `</ComparisonTable>`) out of the
+ *  semantic-search query, which should embed the prose, not the markup. */
+const COMPONENT_TAG_RE = new RegExp(COMPONENT_TAG_SOURCE, "g");
 
 /** Remove whitelisted component tags, leaving their inner prose in place. */
 export function stripComponentTags(text: string): string {

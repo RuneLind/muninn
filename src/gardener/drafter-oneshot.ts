@@ -14,60 +14,32 @@
  * job — reusing the kind keeps it in Recent + off the single-pane waterfall with no
  * AgentKind cascade). Bare `executeOneShot` is never called from the drafter — a
  * bare call would leave the draft invisible on both `/traces` and `/agents`.
+ *
+ * The sequence itself (trace root + run + tool fence + thinking cap + finish/complete
+ * in try/catch) is the shared `runFencedOneShot` (`src/core/fenced-one-shot.ts`),
+ * which the fact-check integrate proposer also uses; this module is now just the
+ * drafter's identity strings around it.
  */
 
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { ClaudeExecResult } from "../ai/executor.ts";
-import { executeOneShot, connectorCapabilities } from "../ai/one-shot.ts";
-import { tracedOneShot } from "../core/traced-one-shot.ts";
+import type { executeOneShot } from "../ai/one-shot.ts";
+import {
+  runFencedOneShot,
+  FENCED_EXCLUDED_TOOLS,
+  FENCED_THINKING_MAX_TOKENS,
+} from "../core/fenced-one-shot.ts";
 import { Tracer } from "../tracing/tracer.ts";
-import { agentStatus, getConnectorLabel } from "../observability/agent-status.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("gardener", "source-drafter");
 
-/**
- * Thinking budget for a source-page draft. Same rationale as the capture summarizers
- * (`CAPTURE_THINKING_MAX_TOKENS`): drafting is mechanical synthesis, so a bot's
- * chat-tuned budget (jarvis: 40k) is spent as silent first-token dead-air. 8k is the
- * knee — matches the gardener's own draft cap.
- */
-export const DRAFTER_THINKING_MAX_TOKENS = 8000;
+/** @deprecated name kept for compatibility — see `FENCED_THINKING_MAX_TOKENS`. */
+export const DRAFTER_THINKING_MAX_TOKENS = FENCED_THINKING_MAX_TOKENS;
 
-/**
- * Tools the drafter must not have. The draft is delivered as the one-shot's RETURN
- * TEXT — `draftSourcePage` parses frontmatter out of it — so any tool that can
- * produce the file some other way is a way to LOSE the draft: the model writes the
- * `.mdx` to disk, returns "File created successfully at: …", `parseFrontmatter`
- * finds no title, and the doc is terminally skipped with no proposal row and no gate
- * entry. Measured over one 7-day trace window: 28 of 101 `draft:source` runs reached
- * for `Write`/`Edit` (usually as a harmless temp-file scratchpad), and 3 lost the
- * draft outright — one of them into the muninn repo itself.
- *
- * Fencing is expressed as an EXCLUDE list on purpose: under the claude-sdk's
- * `bypassPermissions`, an empty `allowedTools` means the FULL surface (see
- * `claude-sdk.ts`), so an allow-list of `[]` fences nothing. `excludedTools` is the
- * only knob that binds, and it maps on every connector that has these tools —
- * claude-sdk → `disallowedTools`, claude-cli → `--disallowedTools`, copilot-sdk →
- * `excludedTools`. openai-compat ignores the field entirely, but it also offers no
- * filesystem tools — there the text-only retry in `draftSourcePage` is the only belt.
- *
- * The agent-loop tools are on the list for the same reason `DISALLOWED_BASE` in
- * `src/benchmarks/audit.ts` carries them: a run that is denied `Write` can still
- * delegate the write to a sub-agent with an unrestricted toolset and come back with
- * a confirmation — the exact shape being fenced against.
- */
-export const DRAFTER_EXCLUDED_TOOLS = [
-  "Write",
-  "Edit",
-  "MultiEdit",
-  "NotebookEdit",
-  "Bash",
-  "Agent",
-  "Task",
-  "Skill",
-];
+/** @deprecated name kept for compatibility — see `FENCED_EXCLUDED_TOOLS`. */
+export const DRAFTER_EXCLUDED_TOOLS = FENCED_EXCLUDED_TOOLS;
 
 export interface DrafterOneShotOptions {
   /** Subject for the trace + `/agents` card — the encyclopedic title if known, else the url/docId. */
@@ -91,83 +63,25 @@ export interface DrafterOneShotOptions {
  * the error re-thrown so the caller's own failure handling is unchanged.
  */
 export async function runDrafterOneShot(opts: DrafterOneShotOptions): Promise<ClaudeExecResult> {
-  const { title, url, config, botConfig } = opts;
-
-  const tracer =
-    opts.tracer ??
-    new Tracer("draft:source", { botName: botConfig.name, platform: "capture" });
-
-  // Setup runs INSIDE the try so a throw in `startRequest` / `connectorCapabilities` /
-  // the seam still finishes the root span and completes the /agents run, instead of
-  // leaking an unfinished trace + a run stuck in "drafting". The shared seam owns the
-  // `claude` span's whole lifecycle (start + ok-end + error-end), so the catch only
-  // needs the trace-root finish (gated on nothing) + `completeRequest` (gated on reqId).
-  let reqId: string | undefined;
-  try {
-    reqId = agentStatus.startRequest(botConfig.name, "drafting", undefined, {
-      kind: "capture",
-      name: `Source page: ${title}`,
-    });
-    agentStatus.setSourcePage(reqId, "/wiki/gardener");
-    agentStatus.setConnectorLabel(reqId, getConnectorLabel(botConfig.connector ?? "claude-cli"));
-    if (botConfig.model) agentStatus.setModel(reqId, botConfig.model);
-
-    // Only cap thinking where the field IS a thinking budget (claude-cli / claude-sdk);
-    // on openai-compat it is max_tokens, so overriding it would clamp the draft length.
-    const thinking = !connectorCapabilities(botConfig).supportsThinkingBudget
-      ? null
-      : opts.thinkingMaxTokens === undefined
-        ? DRAFTER_THINKING_MAX_TOKENS
-        : opts.thinkingMaxTokens;
-
-    // Fence the tool surface for the model call only. A fresh object, never a mutation:
-    // the caller's botConfig is the shared discovered config, and every other field
-    // (name / connector / model) is carried over verbatim so the trace and the /agents
-    // run still report the bot's own identity.
-    const fencedBotConfig: BotConfig = {
-      ...botConfig,
-      excludedTools: [
-        ...new Set([...(botConfig.excludedTools ?? []), ...DRAFTER_EXCLUDED_TOOLS]),
-      ],
-    };
-
-    const result = await tracedOneShot(tracer, "claude", opts.prompt, config, fencedBotConfig, {
-      ...(opts.systemPrompt ? { systemPrompt: opts.systemPrompt } : {}),
-      ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
-      ...(thinking !== null ? { thinkingMaxTokens: thinking } : {}),
-      ...(opts.oneShot ? { oneShot: opts.oneShot } : {}),
-      startAttrs: {
-        source: "source-draft",
-        title,
-        url,
-        ...(thinking !== null ? { thinkingMaxTokens: thinking } : {}),
-      },
-    });
-
-    const usage = {
-      model: result.model,
-      inputTokens: result.inputTokens,
-      outputTokens: result.outputTokens,
-      numTurns: result.numTurns,
-      toolCount: result.toolCalls?.length ?? 0,
-      costUsd: result.costUsd,
-    };
-
-    tracer.finish("ok", { source: "source-draft", ...usage });
-    agentStatus.completeRequest(reqId, {
-      ...(config.tracingEnabled ? { traceId: tracer.traceId } : {}),
-      inputTokens: result.inputTokens,
-      outputTokens: result.outputTokens,
-      numTurns: result.numTurns,
-      toolCount: usage.toolCount,
-      costUsd: result.costUsd,
-    });
-    return result;
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    tracer.finish("error", { source: "source-draft", error: message });
-    if (reqId) agentStatus.completeRequest(reqId, {});
-    log.warn("Source-page draft one-shot failed for {title}: {error}", { title, error: message });
-    throw err;
-  }
+  const { title, url } = opts;
+  return runFencedOneShot({
+    traceName: "draft:source",
+    platform: "capture",
+    kind: "capture",
+    phase: "drafting",
+    runName: `Source page: ${title}`,
+    sourcePage: "/wiki/gardener",
+    source: "source-draft",
+    prompt: opts.prompt,
+    ...(opts.systemPrompt ? { systemPrompt: opts.systemPrompt } : {}),
+    config: opts.config,
+    botConfig: opts.botConfig,
+    ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+    ...(opts.thinkingMaxTokens !== undefined ? { thinkingMaxTokens: opts.thinkingMaxTokens } : {}),
+    startAttrs: { title, url },
+    onError: (message) =>
+      log.warn("Source-page draft one-shot failed for {title}: {error}", { title, error: message }),
+    ...(opts.oneShot ? { oneShot: opts.oneShot } : {}),
+    ...(opts.tracer ? { tracer: opts.tracer } : {}),
+  });
 }

@@ -22,7 +22,15 @@
  * Semantics (unchanged from the original): unlike the gardener mutex (which SKIPS
  * when busy), a queued call is never dropped — it waits for the previous one, and
  * a rejection in the predecessor does not poison the chain.
+ *
+ * SCOPE NOTE: this queue serializes the programmatic APPEND + INTEGRATE writers
+ * against each other. It is not a global log.md lock — the gardener apply path
+ * (`src/gardener/apply.ts`) writes `log.md` under its OWN per-bot mutex, and the
+ * cache refresh / reindex / commit tail deliberately runs outside the section.
+ * Both are pre-existing and unchanged here.
  */
+
+import { realpathSync } from "node:fs";
 
 export interface KeyedQueue {
   /** Run `work` after every previously-enqueued call for `key` has settled. */
@@ -63,12 +71,41 @@ export function createQueue(): KeyedQueue {
  */
 const wikiWriteQueue = createQueue();
 
-/** Serialize a wiki-write critical section on its wiki ROOT. */
+/** Memoized {@link wikiWriteQueueKey} results — the derivation is a syscall and
+ *  the same handful of wiki roots recur for the process's lifetime. */
+const queueKeyCache = new Map<string, string>();
+
+/**
+ * The chain key for a wiki root: its REALPATH, falling back to the raw path when
+ * that throws (a not-yet-created dir, a test fixture path, a permission error).
+ *
+ * Realpathing matters because `commit.ts` already canonicalizes its own keys, and
+ * because two registry entries can name the same wiki through different paths (a
+ * symlinked vault, macOS `/tmp` → `/private/tmp`, a trailing-slash variant). Keyed
+ * verbatim, those would get INDEPENDENT chains and interleave on one real log.md —
+ * exactly the race the queue exists to close. Synchronous on purpose: an `await`
+ * before `run()` would let two callers reorder their own enqueue.
+ */
+export function wikiWriteQueueKey(wikiRoot: string): string {
+  const cached = queueKeyCache.get(wikiRoot);
+  if (cached !== undefined) return cached;
+  let key: string;
+  try {
+    key = realpathSync(wikiRoot);
+  } catch {
+    key = wikiRoot;
+  }
+  queueKeyCache.set(wikiRoot, key);
+  return key;
+}
+
+/** Serialize a wiki-write critical section on its wiki ROOT (realpath-keyed). */
 export function runWikiWriteExclusive<T>(wikiRoot: string, work: () => Promise<T>): Promise<T> {
-  return wikiWriteQueue.run(wikiRoot, work);
+  return wikiWriteQueue.run(wikiWriteQueueKey(wikiRoot), work);
 }
 
 /** Test-only: clear the wiki-write queue between cases. */
 export function __resetWikiWriteQueueForTest(): void {
   wikiWriteQueue.reset();
+  queueKeyCache.clear();
 }

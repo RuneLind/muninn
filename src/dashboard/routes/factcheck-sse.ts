@@ -100,8 +100,12 @@ export interface FactcheckSseOptions {
    * number the integrate route enforces. Computed via the one pinned referent
    * `integrateBodyLen` (`src/wiki/integrate-edits.ts`) — never a bespoke
    * sentinel-only measure, which diverges by kilobytes on a code-heavy page.
+   *
+   * OMITTED for explainer pages: they are HTML on disk and cannot be integrated
+   * at all, so any number here would be an HTML byte count the integrate route
+   * never enforces. Absent ⇒ the client shows no budget rather than a fiction.
    */
-  bodyLen: number;
+  bodyLen?: number;
   /** Final-render hook: markdown answer → reader HTML, emitted as a trailing
    *  `answer_html` (same shape as Ask/Explain). A throw is swallowed — the
    *  streamed plain text stands. */

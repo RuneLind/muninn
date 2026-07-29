@@ -18,12 +18,18 @@
  *      report `committed` truthfully).
  *
  * ── Why steps 2–5 run inside a per-WIKI queue ────────────────────────────────
- * The queue key is the resolved WIKI ROOT, never the page path: `log.md` is
- * wiki-GLOBAL, so a page-keyed queue would let two writers on different pages
- * interleave read→write on log.md and lose an entry. The critical section must
- * span read → CAS → transform → write → log.md, not just the post-write steps —
- * a queue entered AFTER the CAS compare cannot close the race it exists for, and
- * a "➕ Add to article" click in a second tab is the realistic concurrent writer.
+ * The queue key is the resolved WIKI ROOT (realpathed — see `queue.ts`), never the
+ * page path: `log.md` is wiki-GLOBAL, so a page-keyed queue would let two writers
+ * on different pages interleave read→write on log.md and lose an entry. The
+ * critical section must span read → CAS → transform → write → log.md, not just the
+ * post-write steps — a queue entered AFTER the CAS compare cannot close the race it
+ * exists for, and a "➕ Add to article" click in a second tab is the realistic
+ * concurrent writer.
+ *
+ * The queue serializes THESE writers (append + integrate) against each other. It
+ * is not a global log.md lock: the gardener apply path (`src/gardener/apply.ts`)
+ * writes log.md under its own per-bot mutex, and steps 6–7 run after the section
+ * releases. Both pre-existing, both unchanged.
  *
  * ── Why the commit is OUTSIDE that section ───────────────────────────────────
  * `commitWikiChange` enqueues its work on the per-git-toplevel COMMIT queue. On a
@@ -150,6 +156,7 @@ export async function writeWikiPage(opts: PageWriteOptions): Promise<PageWriteOu
         await opts.writeFile(logPath, insertLogEntry(existingLog, entry));
       } catch (err) {
         log.warn("Wiki page write: log.md update failed for {path}: {error}", {
+          kind: opts.logKind,
           path: relPath,
           error: errMsg(err),
         });
@@ -165,13 +172,17 @@ export async function writeWikiPage(opts: PageWriteOptions): Promise<PageWriteOu
   try {
     await opts.refreshIndex();
   } catch (err) {
-    log.warn("Wiki page write: cache refresh failed: {error}", { error: errMsg(err) });
+    log.warn("Wiki page write: cache refresh failed: {error}", {
+      kind: opts.logKind,
+      error: errMsg(err),
+    });
   }
 
   // Fire-and-forget huginn reindex over the wiki's registry collections.
   for (const collection of new Set(opts.collections)) {
     opts.reindex(collection).catch((err) => {
       log.warn("Wiki page write: reindex failed for {collection}: {error}", {
+        kind: opts.logKind,
         collection,
         error: errMsg(err),
       });
@@ -187,6 +198,7 @@ export async function writeWikiPage(opts: PageWriteOptions): Promise<PageWriteOu
       if (res && typeof res === "object" && "committed" in res) commit = res;
     } catch (err) {
       log.warn("Wiki page write: commit failed for {path}: {error}", {
+        kind: opts.logKind,
         path: relPath,
         error: errMsg(err),
       });

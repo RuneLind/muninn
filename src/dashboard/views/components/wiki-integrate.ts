@@ -13,13 +13,20 @@
  */
 
 /**
- * The four verdict markers, matching `VERDICT_RE` in `factcheck-sse.ts`: the VS16
- * (U+FE0F) on ⚠️ is OPTIONAL because models routinely emit the bare ⚠ (U+26A0),
- * and the persisted answer is the raw model blocks with no normalization pass.
- * The dash in `Claim n/m — title` is likewise tolerant (em / en / hyphen), and the
- * title is optional so a dash-less heading still parses.
+ * The four verdict markers, matching `VERDICT_RE` in `factcheck-sse.ts`. The VS16
+ * (U+FE0F) is OPTIONAL on ALL FOUR — the persisted answer is the raw model blocks
+ * with no normalization pass, and models emit both the bare ⚠ (U+26A0) and the
+ * VS16-suffixed ❌️/✅️/❓️ that most emoji keyboards produce. A single missed
+ * variant makes the whole claim invisible to the integrate flow, which is why the
+ * separator is likewise tolerant (em dash / en dash / hyphen / colon), `Claim` is
+ * matched case-insensitively, and the title is optional.
+ *
+ * The `###` anchor is deliberately NOT loosened: the heading level is a fixed
+ * prompt contract (`factcheckVerifySystemPrompt`), and accepting `##`/`####` would
+ * start matching prose that merely mentions a claim.
  */
-const CLAIM_HEADING_RE = /^###\s*(✅|⚠️?|❌|❓)\s*Claim\s+(\d+)\s*\/\s*(\d+)\s*(?:[—–-]\s*(.*))?$/u;
+const CLAIM_HEADING_RE =
+  /^###\s*(✅️?|⚠️?|❌️?|❓️?)\s*Claim\s+(\d+)\s*\/\s*(\d+)\s*(?:[—–:-]\s*(.*))?$/iu;
 
 /** One claim anchor derived SERVER-SIDE from the persisted fact-check answer. */
 export interface FactcheckClaimAnchor {
@@ -33,9 +40,12 @@ export interface FactcheckClaimAnchor {
   block: string;
 }
 
-/** Normalize a bare ⚠ (no VS16) to ⚠️ so downstream comparisons see one form. */
+/** Normalize verdict spelling to ONE form downstream can compare against: strip
+ *  every optional VS16, then re-add it on ⚠ (whose canonical form here IS ⚠️,
+ *  matching `INTEGRATE_VERDICTS`). */
 function normalizeVerdict(v: string): string {
-  return v === "⚠" ? "⚠️" : v;
+  const bare = v.replace(/\uFE0F/g, "");
+  return bare === "⚠" ? "⚠️" : bare;
 }
 
 /**

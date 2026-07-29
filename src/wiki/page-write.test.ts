@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { mkdtemp, rm, mkdir, writeFile, realpath } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, writeFile, realpath, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { writeWikiPage, type PageWriteOptions } from "./page-write.ts";
@@ -7,7 +7,7 @@ import { appendBlockToPage } from "./append-block.ts";
 import { applyEdits, type IntegrateEdit } from "./integrate-edits.ts";
 import { buildFactcheckBlock } from "./factcheck-context.ts";
 import { commitWikiChange, __resetForTest } from "./commit.ts";
-import { __resetWikiWriteQueueForTest } from "./queue.ts";
+import { __resetWikiWriteQueueForTest, wikiWriteQueueKey } from "./queue.ts";
 import { sha256 } from "../gardener/util.ts";
 
 /** In-memory filesystem whose reads/writes yield to the event loop, so an
@@ -198,6 +198,25 @@ test("the queue is keyed per WIKI ROOT — two pages in one wiki serialize, two 
   expect((fs.files["/wiki/log.md"] ?? "").match(/^## \[/gm)?.length).toBe(2);
   // A different wiki root has its own chain (and its own log.md).
   expect((fs.files["/other/log.md"] ?? "").match(/^## \[/gm)?.length).toBe(1);
+});
+
+test("the queue key is realpath-derived — a symlinked root shares ONE chain", async () => {
+  __resetWikiWriteQueueForTest();
+  const base = await mkdtemp(path.join(tmpdir(), "queue-key-"));
+  try {
+    const real = path.join(base, "wiki");
+    await mkdir(real, { recursive: true });
+    const link = path.join(base, "link");
+    await symlink(real, link, "dir");
+    // Two registry paths for ONE wiki must not get independent chains — they
+    // share a single real log.md, which is the whole point of the queue.
+    expect(wikiWriteQueueKey(link)).toBe(wikiWriteQueueKey(real));
+    // An unresolvable path falls back to the raw string rather than throwing.
+    expect(wikiWriteQueueKey("/no/such/wiki-root")).toBe("/no/such/wiki-root");
+  } finally {
+    __resetWikiWriteQueueForTest();
+    await rm(base, { recursive: true, force: true });
+  }
 });
 
 test("no deadlock when the wiki root IS the git toplevel and the commit is awaited", async () => {

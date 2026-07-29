@@ -1,14 +1,19 @@
-import { test, expect } from "bun:test";
+import { test, expect, describe } from "bun:test";
 import {
   applyEdits,
   buildIntegratePrompt,
   changedChars,
+  changedCharsOfOutcomes,
+  collapsedRescueRisk,
+  enforceChangeBudget,
   enforceEditBounds,
   findExclusionZones,
   hasSourcesSection,
   integrateBodyLen,
   matchMaskBody,
   maxChangedChars,
+  neutralizeFactcheckSentinels,
+  outcomeChangedChars,
   parseEditList,
   promptMaskBody,
   ZONE_SENTINEL,
@@ -100,16 +105,15 @@ test("promptMaskBody masks .mdx component TAG MARKUP only — inner prose stays"
   expect(promptMaskBody(page, false)).toContain("<Callout");
 });
 
-test("integrateBodyLen is the one referent — both call sites measure equal on a code-heavy page", () => {
+test("integrateBodyLen measures the PROMPT mask — kilobytes below a sentinel-only measure", () => {
   const codeHeavy = ["Prose.", "", "```ts", "x".repeat(4000), "```", "", "Tail."].join("\n");
-  // The fact-check route's `done.bodyLen` and the integrate route's cap check.
-  const factcheckRouteBodyLen = integrateBodyLen(codeHeavy);
-  const integrateRouteBodyLen = integrateBodyLen(codeHeavy);
-  expect(factcheckRouteBodyLen).toBe(integrateRouteBodyLen);
-  // ...and it is NOT what a sentinel-only masker would have reported — the whole
-  // reason the referent is pinned to one function.
-  const sentinelOnlyLen = codeHeavy.length;
-  expect(factcheckRouteBodyLen).toBeLessThan(sentinelOnlyLen - 3000);
+  // A sentinel-only (same-length) masker reports the raw length by construction.
+  expect(matchMaskBody(codeHeavy).length).toBe(codeHeavy.length);
+  // The pinned referent measures the NOT-length-preserving prompt mask instead —
+  // the whole reason the factcheck `done.bodyLen` and the integrate route's cap
+  // check both call this ONE function rather than measuring locally.
+  expect(integrateBodyLen(codeHeavy)).toBe(promptMaskBody(codeHeavy).length);
+  expect(integrateBodyLen(codeHeavy)).toBeLessThan(codeHeavy.length - 3900);
 });
 
 test("findExclusionZones merges and covers all four kinds on an .mdx page", () => {
@@ -119,9 +123,98 @@ test("findExclusionZones merges and covers all four kinds on an .mdx page", () =
   expect(kinds).toContain("component");
   expect(kinds).toContain("fence");
   expect(kinds).toContain("sentinel");
-  // Sorted, non-overlapping.
+  // Sorted, non-overlapping: each zone starts at or after the previous one's end.
   const zones = findExclusionZones(page, true);
-  for (let i = 1; i < zones.length; i++) expect(zones[i]!.start).toBeGreaterThan(zones[i - 1]!.end - 1);
+  for (let i = 1; i < zones.length; i++) {
+    expect(zones[i]!.start).toBeGreaterThanOrEqual(zones[i - 1]!.end);
+  }
+});
+
+// ── Fence scanning ───────────────────────────────────────────────────────────
+
+test("findExclusionZones masks a ~~~ fence and a ``` inside it can't close it", () => {
+  const page = "Prose here.\n\n~~~\ncode with ``` inside\n~~~\n\nTail prose.\n";
+  const zones = findExclusionZones(page, false);
+  expect(zones).toHaveLength(1);
+  expect(zones[0]!.kind).toBe("fence");
+  expect(page.slice(zones[0]!.start, zones[0]!.end)).toBe("~~~\ncode with ``` inside\n~~~");
+  // Prose on BOTH sides stays editable — the inner ``` did not flip parity.
+  expect(applyEdits(page, [edit({ old: "Tail prose.", new: "Tail corrected." })]).appliedCount).toBe(1);
+  expect(applyEdits(page, [edit({ old: "Prose here.", new: "Prose fixed." })]).appliedCount).toBe(1);
+});
+
+test("a stray ``` inside a persisted fact-check block cannot invert fence parity", () => {
+  const page = [
+    FACTCHECK_SENTINEL_START,
+    "> [!factcheck] Fact check (2026-07-29)",
+    "> The page quotes ``` in its example.",
+    FACTCHECK_SENTINEL_END,
+    "",
+    "Editable prose about widgets.",
+    "",
+    "```ts",
+    "const shipped = 4;",
+    "```",
+    "",
+    "Trailing prose after the fence.",
+    "",
+  ].join("\n");
+  const kinds = findExclusionZones(page, false).map((z) => z.kind);
+  expect(kinds).toEqual(["sentinel", "fence"]);
+  // Both prose spans stay editable; the real fence is still masked.
+  expect(applyEdits(page, [edit({ old: "Editable prose about widgets.", new: "Fixed." })]).appliedCount).toBe(1);
+  expect(applyEdits(page, [edit({ old: "Trailing prose after the fence.", new: "Fixed." })]).appliedCount).toBe(1);
+  expect(applyEdits(page, [edit({ old: "const shipped = 4;", new: "const shipped = 2;" })]).appliedCount).toBe(0);
+});
+
+// ── Component masking (block-level only) ─────────────────────────────────────
+
+const COMPONENT_PAGE = [
+  "Lead.",
+  "",
+  'The verdict <Verdict value="yes"/> says it ships 4M units.',
+  "",
+  "The `<Callout>` component wraps prose in a box.",
+  "",
+  '<Callout tone={warn} title="x">',
+  "Inner prose.",
+  "</Callout>",
+  "",
+].join("\n");
+
+test("an INLINE component tag leaves its sentence editable", () => {
+  const r = applyEdits(
+    COMPONENT_PAGE,
+    [edit({ old: "says it ships 4M units", new: "says it ships 2.1M units" })],
+    true,
+  );
+  expect(r.appliedCount).toBe(1);
+  expect(r.body).toContain('<Verdict value="yes"/> says it ships 2.1M units');
+});
+
+test("a prose MENTION of a component in backticks is untouched and stays editable", () => {
+  expect(promptMaskBody(COMPONENT_PAGE, true)).toContain("`<Callout>`");
+  const r = applyEdits(
+    COMPONENT_PAGE,
+    [edit({ old: "component wraps prose in a box", new: "component wraps prose in a callout box" })],
+    true,
+  );
+  expect(r.appliedCount).toBe(1);
+  expect(r.body).toContain("The `<Callout>` component wraps prose in a callout box.");
+});
+
+test("a BLOCK component tag is masked whole — including non-quoted attrs", () => {
+  const zoned = findExclusionZones(COMPONENT_PAGE, true).filter((z) => z.kind === "component");
+  expect(zoned.map((z) => COMPONENT_PAGE.slice(z.start, z.end))).toEqual([
+    '<Callout tone={warn} title="x">',
+    "</Callout>",
+  ]);
+  // `tone={warn}` is inside the zone, so an edit reaching into it is dropped...
+  expect(applyEdits(COMPONENT_PAGE, [edit({ old: "tone={warn}", new: "tone={bad}" })], true).appliedCount).toBe(0);
+  // ...while the component's inner prose stays editable.
+  expect(applyEdits(COMPONENT_PAGE, [edit({ old: "Inner prose.", new: "Fixed prose." })], true).appliedCount).toBe(1);
+  // Block zones get a readable, non-empty prompt placeholder like every other kind.
+  expect(promptMaskBody(COMPONENT_PAGE, true)).toContain("[component tag omitted]");
 });
 
 // ── parseEditList ────────────────────────────────────────────────────────────
@@ -156,6 +249,55 @@ test("parseEditList drops anchor-less entries but keeps a legitimately empty lis
   expect(parseEditList('{"edits": [{"old": "   ", "new": "x"}]}')!.edits).toEqual([]);
 });
 
+test("parseEditList REPORTS every malformed item instead of vaporizing it", () => {
+  const parsed = parseEditList(
+    JSON.stringify({
+      edits: [
+        { claimIndex: 1, verdict: "❌", old: "4M units", new: "2.1M units", reason: " filing " },
+        "not an object",
+        { claimIndex: 2, old: "   ", new: "x" },
+        { claimIndex: 3, old: "ships 4M" },
+      ],
+    }),
+  )!;
+  expect(parsed.edits).toHaveLength(1);
+  expect(parsed.edits[0]!.reason).toBe("filing"); // trimmed
+  expect(parsed.dropped).toHaveLength(3);
+  // Three DISTINCT reasons — the user can tell which failure they hit.
+  expect(new Set(parsed.dropped.map((d) => d.reason)).size).toBe(3);
+  expect(parsed.dropped[0]!.reason).toContain("not an edit object");
+  expect(parsed.dropped[1]!.reason).toContain("`old` is empty");
+  expect(parsed.dropped[2]!.reason).toContain("`new` is missing");
+  // The drop still names what it dropped.
+  expect(parsed.dropped[2]!.edit.old).toBe("ships 4M");
+});
+
+test("parseEditList rejects an EMPTY `new` — a silent deletion is not an edit", () => {
+  const parsed = parseEditList('{"edits": [{"old": "ships 4M units", "new": ""}]}')!;
+  expect(parsed.edits).toEqual([]);
+  expect(parsed.dropped[0]!.reason).toContain("`new` is empty");
+});
+
+test("parseEditList neutralizes injected fact-check sentinels in `new`", () => {
+  const raw = JSON.stringify({
+    edits: [
+      {
+        old: "ships 4M units",
+        new: `ships 2.1M units ${FACTCHECK_SENTINEL_START} and ${FACTCHECK_SENTINEL_END}`,
+      },
+    ],
+  });
+  const parsed = parseEditList(raw)!;
+  expect(parsed.edits[0]!.new).not.toContain(FACTCHECK_SENTINEL_START);
+  expect(parsed.edits[0]!.new).not.toContain(FACTCHECK_SENTINEL_END);
+  // ...and the neutralized form is what reaches the page.
+  const spliced = applyEdits("The device ships 4M units.\n", parsed.edits);
+  expect(spliced.appliedCount).toBe(1);
+  expect(spliced.body).not.toContain(FACTCHECK_SENTINEL_START);
+  expect(spliced.body).toContain("factcheck:start");
+  expect(neutralizeFactcheckSentinels(FACTCHECK_SENTINEL_END)).toBe("factcheck:end");
+});
+
 // ── Bounds ───────────────────────────────────────────────────────────────────
 
 test("enforceEditBounds drops over-cap counts and oversized edit text with reasons", () => {
@@ -176,6 +318,44 @@ test("changedChars counts the larger side; maxChangedChars floors at the per-edi
   expect(changedChars([edit({ old: "12345", new: "123" }), edit({ old: "1", new: "1234" })])).toBe(9);
   expect(maxChangedChars(200)).toBe(INTEGRATE_MAX_EDIT_CHARS); // short stub → floor
   expect(maxChangedChars(40_000)).toBe(10_000);
+});
+
+test("changed chars are measured on the RESOLVED span, not on `old.length`", () => {
+  // A tier-2 rescue whose raw span is LONGER than `old` (collapsed whitespace runs).
+  const body = "Intro.\n\nThe device   ships\n   4M units per\n  year worldwide.\n\nOutro.\n";
+  const anchor = "The device ships 4M units per year worldwide.";
+  const r = applyEdits(body, [edit({ old: anchor, new: "Short." })]);
+  expect(r.appliedCount).toBe(1);
+  expect(r.outcomes[0]!.tier).toBe("collapsed");
+  const span = r.outcomes[0]!.end! - r.outcomes[0]!.start!;
+  expect(span).toBeGreaterThan(anchor.length);
+  expect(r.outcomes[0]!.resolvedText!.length).toBe(span);
+  // The pre-resolution measure UNDER-counts; the resolved one is the truth.
+  expect(changedChars([edit({ old: anchor, new: "Short." })])).toBe(anchor.length);
+  expect(outcomeChangedChars(r.outcomes[0]!)).toBe(span);
+  expect(changedCharsOfOutcomes(r.outcomes)).toBe(span);
+});
+
+test("enforceChangeBudget drops over-budget edits greedily so accept-all always fits", () => {
+  // Body short enough that the floor (2000) is the budget.
+  const body = `A: ${"a".repeat(900)}\n\nB: ${"b".repeat(900)}\n\nC: ${"c".repeat(900)}\n`;
+  const r = applyEdits(body, [
+    edit({ old: "a".repeat(900), new: "x".repeat(900) }),
+    edit({ old: "b".repeat(900), new: "y".repeat(900) }),
+    edit({ old: "c".repeat(900), new: "z".repeat(900) }),
+  ]);
+  expect(r.appliedCount).toBe(3);
+  const bodyLen = integrateBodyLen(body);
+  const { dropped, changedChars: total } = enforceChangeBudget(r.outcomes, bodyLen);
+  expect(total).toBeLessThanOrEqual(maxChangedChars(bodyLen));
+  expect(dropped).toHaveLength(1); // the third no longer fits
+  expect(dropped[0]!.reason).toContain("change budget");
+  // The dropped outcome is flipped in place — the preview shows it as dropped.
+  expect(r.outcomes[2]!.applied).toBe(false);
+  expect(r.outcomes[2]!.start).toBeUndefined();
+  expect(r.outcomes[2]!.resolvedText).toBeUndefined();
+  // The survivors are still the first two, in order.
+  expect(r.outcomes.filter((o) => o.applied)).toHaveLength(2);
 });
 
 // ── applyEdits ───────────────────────────────────────────────────────────────
@@ -216,6 +396,60 @@ test("applyEdits tier-2 rescues a line-wrap-drifted anchor at the RIGHT raw offs
   // The rescued range is the real one — surrounding prose is untouched.
   expect(r.body.startsWith("Intro.\n\n")).toBe(true);
   expect(r.body.endsWith("\n\nOutro.\n")).toBe(true);
+});
+
+test("applyEdits tier-2 records the RAW resolved text, not the model's quote", () => {
+  const body = "Intro.\n\nThe device ships\n4M units per\nyear worldwide.\n\nOutro.\n";
+  const anchor = "The device ships 4M units per year worldwide.";
+  const r = applyEdits(body, [edit({ old: anchor, new: "Fixed." })]);
+  expect(r.outcomes[0]!.resolvedText).toBe("The device ships\n4M units per\nyear worldwide.");
+  expect(r.outcomes[0]!.resolvedText).not.toBe(anchor);
+  expect(body.slice(r.outcomes[0]!.start!, r.outcomes[0]!.end!)).toBe(r.outcomes[0]!.resolvedText!);
+});
+
+// The whitespace-collapse rescue also STRIPS `*`/`_`/backtick and rewrites
+// `[label](url)` → `label`, so a naively mapped-back range cuts through markup.
+// Every one of these was a reproduced corruption before the guard.
+describe("applyEdits tier-2 rescue rejects a range that cuts through markdown", () => {
+  const cases: [string, string, string][] = [
+    ["orphaned bold", "Intro.\n\nThe **device ships 4M units** per year.\n", "device ships 4M units per year."],
+    ["eaten link URL", "See [the filing](https://sec.gov/x) for details.\n", "the filing for details."],
+    ["orphaned code span", "Use `foo()` here now.\n", "foo() here now."],
+  ];
+  for (const [name, body, old] of cases) {
+    test(name, () => {
+      const r = applyEdits(body, [edit({ old, new: "NEW" })]);
+      expect(r.appliedCount).toBe(0);
+      expect(r.body).toBe(body); // byte-identical — no corruption
+      expect(r.outcomes[0]!.reason).toContain("cut through markdown formatting");
+    });
+  }
+
+  test("a range that swallows a paragraph break", () => {
+    const body = "Alpha beta.\n\nGamma delta.\n";
+    const r = applyEdits(body, [edit({ old: "beta. Gamma", new: "NEW" })]);
+    expect(r.appliedCount).toBe(0);
+    expect(r.body).toBe(body);
+    expect(r.outcomes[0]!.reason).toContain("paragraph break");
+  });
+
+  test("a legitimate line-wrap-only rescue still applies", () => {
+    const body = "Intro.\n\nThe device ships\n4M units per\nyear worldwide.\n\nOutro.\n";
+    const r = applyEdits(body, [
+      edit({
+        old: "The device ships 4M units per year worldwide.",
+        new: "The device ships 2.1M units per year worldwide.",
+      }),
+    ]);
+    expect(r.appliedCount).toBe(1);
+    expect(r.body).toBe("Intro.\n\nThe device ships 2.1M units per year worldwide.\n\nOutro.\n");
+  });
+
+  test("collapsedRescueRisk is the pure predicate behind all of the above", () => {
+    expect(collapsedRescueRisk("bold** word", "bold word")).toContain("markdown formatting");
+    expect(collapsedRescueRisk("a\n\nb", "a b")).toContain("paragraph break");
+    expect(collapsedRescueRisk("The device ships\n4M units", "The device ships 4M units")).toBeNull();
+  });
 });
 
 test("applyEdits rejects overlapping ranges — the EARLIER edit wins", () => {

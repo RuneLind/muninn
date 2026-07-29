@@ -85,6 +85,21 @@ const MAX_COMPONENT_DEPTH = 2;
 const COMPONENT_OPEN_RE = /^<([A-Za-z][A-Za-z0-9]*)((?:\s+[A-Za-z][\w-]*="[^"]*")*)\s*(\/?)>(.*)$/;
 const ATTR_RE = /([A-Za-z][\w-]*)="([^"]*)"/g;
 
+/**
+ * Regex SOURCE (not a compiled regex — callers pick their own flags/anchors) for
+ * ANY whitelisted component tag: opening, closing, or self-closing, with its
+ * attributes. This is the ONE place the tag shape lives; `src/wiki/similar.ts`
+ * (query stripping) and `src/wiki/integrate-edits.ts` (exclusion-zone masking)
+ * both derive from it rather than hand-rolling a third variant that drifts.
+ *
+ * Attributes are matched loosely (`[^>]*`) on purpose. {@link COMPONENT_OPEN_RE}
+ * requires DOUBLE-QUOTED attrs because it also has to parse them; a masker only
+ * has to find the tag's extent, and a stricter pattern would half-match
+ * `<Callout tone={x}>` — masking the name but leaving `tone={x}>` editable prose,
+ * which is exactly the corruption the mask exists to prevent.
+ */
+export const COMPONENT_TAG_SOURCE = `</?(?:${COMPONENT_NAMES.join("|")})\\b[^>]*>`;
+
 /** Normalize an untrusted `tone` attr for Callout to the four known tones. */
 export function normalizeCalloutTone(tone: string | undefined): "info" | "warn" | "good" | "bad" {
   return tone === "warn" || tone === "good" || tone === "bad" ? tone : "info";

@@ -47,6 +47,39 @@ test("parseFactcheckClaims tolerates en-dash, hyphen, and a title-less heading",
   expect(claims.map((c) => c.verdict)).toEqual(["❌", "⚠️", "✅"]);
 });
 
+test("parseFactcheckClaims tolerates VS16 on ALL four emoji, a colon separator, and lowercase 'claim'", () => {
+  const claims = parseFactcheckClaims(
+    [
+      "### ❌️ Claim 3/8", // VS16 on ❌, no title
+      "a",
+      "### ❌ Claim 4/8: Colon separator", // colon instead of a dash
+      "b",
+      "### ⚠️ claim 5/8 — Lowercase keyword", // lowercase `claim`
+      "c",
+      "### ✅️ Claim 6/8 — Also VS16", // VS16 on ✅
+      "d",
+      "### ❓️ Claim 7/8 — Unknown", // VS16 on ❓
+      "e",
+    ].join("\n"),
+  );
+  expect(claims.map((c) => c.index)).toEqual([3, 4, 5, 6, 7]);
+  expect(claims.map((c) => c.verdict)).toEqual(["❌", "❌", "⚠️", "✅", "❓"]);
+  expect(claims.map((c) => c.title)).toEqual([
+    "",
+    "Colon separator",
+    "Lowercase keyword",
+    "Also VS16",
+    "Unknown",
+  ]);
+  // …and the VS16 + colon variants still reach the integrate flow.
+  expect(correctableClaims("### ❌️ Claim 3/8: Title\n\nbody").map((c) => c.index)).toEqual([3]);
+});
+
+test("parseFactcheckClaims does NOT loosen the ### anchor", () => {
+  expect(parseFactcheckClaims("## ❌ Claim 1/1 — Wrong level")).toEqual([]);
+  expect(parseFactcheckClaims("#### ❌ Claim 1/1 — Wrong level")).toEqual([]);
+});
+
 test("parseFactcheckClaims returns [] for a malformed answer", () => {
   expect(parseFactcheckClaims("")).toEqual([]);
   expect(parseFactcheckClaims("Just prose, no headings at all.")).toEqual([]);

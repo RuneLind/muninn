@@ -10,9 +10,10 @@
  *
  * ── 1. Two masks over the page body, NEVER fused ─────────────────────────────
  * Both hide the same EXCLUSION ZONES — frontmatter, persisted `factcheck:start/end`
- * blocks, fenced code blocks, and (on `.mdx`) block-component TAG MARKUP ONLY
- * (opening/closing tags + attributes; the prose inside a `<Callout>` stays
- * editable) — but for different consumers and with different length semantics:
+ * blocks, fenced code blocks, and (on `.mdx`) BLOCK-component TAG MARKUP ONLY
+ * (line-anchored opening/closing tags + attributes; the prose inside a `<Callout>`
+ * stays editable) — but for different consumers and with different length
+ * semantics:
  *
  *  - {@link matchMaskBody} (internal, drives unique-match + offset math) is
  *    SAME-LENGTH: every excluded UTF-16 code unit becomes ONE {@link ZONE_SENTINEL}
@@ -46,9 +47,25 @@
  * WHITESPACE-COLLAPSED body and mapped back to raw offsets through the existing
  * `collapseWithMap` machinery (line-wrap drift is the common miss). The tier is
  * recorded per edit so the acceptance gate can report exact-vs-collapsed rates.
+ *
+ * That second tier is GATED by {@link collapsedRescueRisk}: `collapseWithMap`
+ * also strips `*`/`_`/backtick and rewrites `[label](url)` → `label`, so a
+ * mapped-back range can start AFTER an opening delimiter while still consuming
+ * the closing one (`**bold` → splice → `**NEW`), swallow a link's URL
+ * (`See [NEW here.`), or arbitrarily exceed `old` across a paragraph break. A
+ * rescued range whose RAW slice contains `\n\n`, or whose markup-delimiter counts
+ * differ from `old`'s, is therefore rejected rather than applied — a false drop
+ * is honest, a false apply corrupts the page. Every applied outcome also carries
+ * `resolvedText` (the raw slice that will actually be replaced), so the preview
+ * shows the truth rather than the model's `old`.
+ *
+ * NOTE on code blocks: only FENCED blocks (``` and ~~~) are zoned. A 4-space
+ * INDENTED code block is left editable — it is indistinguishable from a deep list
+ * continuation without a full block parse, and false-masking prose is the worse
+ * failure here.
  */
 
-import { COMPONENT_NAMES } from "../format/markdown-ast.ts";
+import { COMPONENT_TAG_SOURCE } from "../format/markdown-ast.ts";
 import { collapseWithMap } from "./explain-context.ts";
 import { FACTCHECK_SENTINEL_START, FACTCHECK_SENTINEL_END } from "./factcheck-context.ts";
 import { extractJson } from "../ai/json-extract.ts";
@@ -83,13 +100,17 @@ export interface Zone {
   kind: ZoneKind;
 }
 
-/** Readable, argv-safe stand-ins for the model-facing prompt mask. A component
- *  tag collapses to nothing (its prose is NOT a zone and stays in place). */
+/** Readable, argv-safe stand-ins for the model-facing prompt mask. Every kind
+ *  gets a NON-EMPTY placeholder: an empty one is indistinguishable from editable
+ *  prose in the model's copy of the page, so the model would quote across it and
+ *  the resulting `old` could never resolve (the match mask fills the same span
+ *  with sentinels). Only the TAG is replaced — a component's inner prose is not a
+ *  zone and stays in place. */
 const ZONE_PLACEHOLDER: Record<ZoneKind, string> = {
   frontmatter: "[frontmatter omitted]",
   sentinel: "[prior fact-check block omitted]",
   fence: "[code block omitted]",
-  component: "",
+  component: "[component tag omitted]",
 };
 
 const FRONTMATTER_RE = /^---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/;
@@ -103,12 +124,27 @@ const SENTINEL_BLOCK_RE = new RegExp(
   "g",
 );
 
-/** Opening / closing / self-closing tag of a KNOWN block component, with its
- *  attributes. Matches tag markup only — never the body between a pair. */
-const COMPONENT_TAG_RE = new RegExp(
-  `</?(?:${COMPONENT_NAMES.join("|")})(?:\\s+[A-Za-z][\\w-]*="[^"]*")*\\s*/?>`,
-  "g",
-);
+/**
+ * A KNOWN component's opening / closing / self-closing tag **at the start of a
+ * line** (leading indent captured separately so it is not swallowed into the
+ * zone) — i.e. exactly the BLOCK form `markdown-ast`'s `COMPONENT_OPEN_RE`
+ * recognizes, derived from the same shared {@link COMPONENT_TAG_SOURCE}.
+ *
+ * INLINE component tags (`<Verdict>ok</Verdict>` mid-sentence, or a prose mention
+ * of the `` `<Callout>` `` component) are deliberately NOT masked. Masking them
+ * made every sentence that mentions one permanently unintegrable — the match mask
+ * filled the tag's span with sentinels while the prompt mask deleted it, so the
+ * model's honestly-copied `old` could never resolve, and the "reason" the user saw
+ * was a misleading "no longer found in the page". Leaving them visible means an
+ * edit COULD rewrite an inline tag; that is bounded (the human previews the exact
+ * replaced text) and strictly better than guaranteed silent failure.
+ */
+const BLOCK_COMPONENT_TAG_RE = new RegExp(`^([ \\t]*)(${COMPONENT_TAG_SOURCE})`, "gm");
+
+/** True when `pos` falls inside any of `ranges`. */
+function inRanges(pos: number, ranges: Zone[]): boolean {
+  return ranges.some((z) => pos >= z.start && pos < z.end);
+}
 
 /**
  * Every exclusion zone in `body`, merged and sorted by start offset. Component
@@ -128,15 +164,28 @@ export function findExclusionZones(body: string, isMdx: boolean): Zone[] {
 
   // Fenced code blocks — a line-state scan, so an indented or info-string fence
   // (```ts) is handled and an UNTERMINATED fence masks to end of file (safer than
-  // leaving half a code block editable).
+  // leaving half a code block editable). Both CommonMark markers are supported and
+  // the OPENING marker is remembered, so a ``` inside a ~~~ block can't close it.
+  //
+  // The scan SKIPS lines already inside a frontmatter or fact-check-sentinel zone:
+  // a persisted fact-check block routinely quotes a page's markdown, and a single
+  // stray ``` in there used to invert fence parity for the whole rest of the page
+  // (everything after it silently became "code" and thus unintegrable).
+  const preZones = [...zones];
   let offset = 0;
   let fenceStart = -1;
+  let fenceMarker = "";
   for (const line of body.split("\n")) {
-    if (/^\s*```/.test(line)) {
-      if (fenceStart < 0) fenceStart = offset;
-      else {
+    const m = /^\s*(`{3,}|~{3,})/.exec(line);
+    if (m && !inRanges(offset, preZones)) {
+      const marker = m[1]![0]!;
+      if (fenceStart < 0) {
+        fenceStart = offset;
+        fenceMarker = marker;
+      } else if (marker === fenceMarker) {
         zones.push({ start: fenceStart, end: offset + line.length, kind: "fence" });
         fenceStart = -1;
+        fenceMarker = "";
       }
     }
     offset += line.length + 1;
@@ -144,9 +193,10 @@ export function findExclusionZones(body: string, isMdx: boolean): Zone[] {
   if (fenceStart >= 0) zones.push({ start: fenceStart, end: body.length, kind: "fence" });
 
   if (isMdx) {
-    for (const m of body.matchAll(COMPONENT_TAG_RE)) {
+    for (const m of body.matchAll(BLOCK_COMPONENT_TAG_RE)) {
       if (m.index === undefined) continue;
-      zones.push({ start: m.index, end: m.index + m[0].length, kind: "component" });
+      const start = m.index + m[1]!.length;
+      zones.push({ start, end: start + m[2]!.length, kind: "component" });
     }
   }
 
@@ -225,10 +275,41 @@ export interface IntegrateEdit {
   reason: string;
 }
 
-/** A parsed edit list plus the model's optional one-line summary. */
+/** A parsed edit list plus the model's optional one-line summary. `dropped`
+ *  carries the per-item rejections so a malformed entry is VISIBLE in the preview
+ *  instead of vanishing (the #397 silent-drop class). */
 export interface EditListResult {
   edits: IntegrateEdit[];
+  dropped: DroppedEdit[];
   note?: string;
+}
+
+/**
+ * Neutralize embedded fact-check sentinels in model- or client-supplied text —
+ * the same treatment `buildFactcheckBlock` gives an answer body, for the same
+ * reason: a lone injected `<!-- factcheck:start -->` spliced into the page makes
+ * the NEXT "➕ Add to article" append's non-greedy `spliceSentinelBlock` match
+ * from that stray marker and swallow the real prose between it and the true end
+ * sentinel. Applied to every `new` at BOTH entry points (model parse + client
+ * echo), so no path can inject one.
+ */
+export function neutralizeFactcheckSentinels(text: string): string {
+  return text
+    .replaceAll(FACTCHECK_SENTINEL_START, "factcheck:start")
+    .replaceAll(FACTCHECK_SENTINEL_END, "factcheck:end");
+}
+
+/** A best-effort {@link IntegrateEdit} for a malformed item, so a drop can still
+ *  name what it dropped. */
+function coerceEditShape(o: Record<string, unknown>): IntegrateEdit {
+  const idx = Number(o.claimIndex);
+  return {
+    claimIndex: Number.isFinite(idx) && idx > 0 ? Math.trunc(idx) : 0,
+    verdict: o.verdict === "⚠" ? "⚠️" : typeof o.verdict === "string" ? o.verdict : "",
+    old: typeof o.old === "string" ? o.old : "",
+    new: typeof o.new === "string" ? neutralizeFactcheckSentinels(o.new) : "",
+    reason: typeof o.reason === "string" ? o.reason.trim() : "",
+  };
 }
 
 /**
@@ -237,6 +318,11 @@ export interface EditListResult {
  * failure — the route turns that into a clean error and NEVER a write. An empty
  * but well-formed list is a legitimate "nothing to correct" answer, so it returns
  * `{edits: []}` rather than null.
+ *
+ * Per-ITEM failures are never `continue`d into the void: each lands in `dropped`
+ * with its own reason. A missing or empty `new` is one of them — defaulting it to
+ * `""` (the pre-review behaviour) turned "the model forgot a field" into a silent
+ * DELETION of the anchored sentence.
  */
 export function parseEditList(raw: string): EditListResult | null {
   if (!raw || typeof raw !== "string") return null;
@@ -258,22 +344,34 @@ export function parseEditList(raw: string): EditListResult | null {
   if (!Array.isArray(rawEdits)) return null;
 
   const edits: IntegrateEdit[] = [];
+  const dropped: DroppedEdit[] = [];
+  const blank: IntegrateEdit = { claimIndex: 0, verdict: "", old: "", new: "", reason: "" };
   for (const item of rawEdits) {
-    if (!item || typeof item !== "object") continue;
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      dropped.push({ edit: { ...blank }, reason: "not an edit object" });
+      continue;
+    }
     const o = item as Record<string, unknown>;
-    const oldText = typeof o.old === "string" ? o.old : "";
-    if (!oldText.trim()) continue; // an empty anchor can never resolve
-    const newText = typeof o.new === "string" ? o.new : "";
-    const idx = Number(o.claimIndex);
-    edits.push({
-      claimIndex: Number.isFinite(idx) && idx > 0 ? Math.trunc(idx) : 0,
-      verdict: o.verdict === "⚠" ? "⚠️" : typeof o.verdict === "string" ? o.verdict : "",
-      old: oldText,
-      new: newText,
-      reason: typeof o.reason === "string" ? o.reason.trim() : "",
-    });
+    const edit = coerceEditShape(o);
+    if (typeof o.old !== "string") {
+      dropped.push({ edit, reason: "`old` is missing or not a string" });
+      continue;
+    }
+    if (!edit.old.trim()) {
+      dropped.push({ edit, reason: "`old` is empty — an empty anchor can never resolve" });
+      continue;
+    }
+    if (typeof o.new !== "string") {
+      dropped.push({ edit, reason: "`new` is missing — an absent replacement would DELETE the anchor" });
+      continue;
+    }
+    if (!edit.new) {
+      dropped.push({ edit, reason: "`new` is empty — deleting the anchor is not an integrate edit" });
+      continue;
+    }
+    edits.push(edit);
   }
-  return { edits, ...(note ? { note } : {}) };
+  return { edits, dropped, ...(note ? { note } : {}) };
 }
 
 /** An edit dropped before/at resolution, with the reason shown in the preview. */
@@ -310,12 +408,65 @@ export function enforceEditBounds(edits: IntegrateEdit[]): {
 }
 
 /**
- * "Changed chars" for the apply-time ratio bound: per edit, the LARGER of the
- * text removed and the text inserted (a hedge that grows a sentence is measured
- * by the grown length, not the sum).
+ * PRE-resolution "changed chars" — the cheap route-level pre-check, per edit the
+ * LARGER of the text removed and the text inserted. It is a LOWER BOUND only: a
+ * tier-2 collapsed rescue can resolve to a raw span LONGER than `old` (line-wrap
+ * whitespace, and — before {@link collapsedRescueRisk} — stripped markup), so the
+ * authoritative measure is {@link changedCharsOfOutcomes} over resolved spans.
  */
 export function changedChars(edits: IntegrateEdit[]): number {
   return edits.reduce((sum, e) => sum + Math.max(e.old.length, e.new.length), 0);
+}
+
+/** Chars one RESOLVED edit changes: the larger of the raw span it replaces and
+ *  the text it inserts. `old.length` under-measures a tier-2 rescue. */
+export function outcomeChangedChars(o: EditOutcome): number {
+  if (!o.applied || o.start === undefined || o.end === undefined) return 0;
+  return Math.max(o.end - o.start, o.edit.new.length);
+}
+
+/** Total changed chars over the APPLIED outcomes, measured on resolved spans. */
+export function changedCharsOfOutcomes(outcomes: EditOutcome[]): number {
+  return outcomes.reduce((sum, o) => sum + outcomeChangedChars(o), 0);
+}
+
+/**
+ * Enforce the total-changed-chars ratio budget over ALREADY-RESOLVED outcomes,
+ * greedily in edit order. Exists because `enforceEditBounds` only caps COUNT and
+ * per-edit size: without this, propose could hand back a preview whose accept-all
+ * was a guaranteed 400 at apply. Edits that would push the running total over
+ * `maxChangedChars(bodyLen)` are flipped to dropped with an honest reason, so the
+ * surviving set always applies within budget.
+ *
+ * Mutates the passed outcomes in place (they are the caller's fresh
+ * {@link applyEdits} result) and returns the dropped entries plus the surviving
+ * total.
+ */
+export function enforceChangeBudget(
+  outcomes: EditOutcome[],
+  bodyLen: number,
+): { dropped: DroppedEdit[]; changedChars: number } {
+  const max = maxChangedChars(bodyLen);
+  const dropped: DroppedEdit[] = [];
+  let running = 0;
+  for (const o of outcomes) {
+    if (!o.applied) continue;
+    const cost = outcomeChangedChars(o);
+    if (running + cost > max) {
+      o.applied = false;
+      o.reason = `over the page's ${max}-char change budget`;
+      delete o.start;
+      delete o.end;
+      delete o.tier;
+      delete o.resolvedText;
+      delete o.beforeCtx;
+      delete o.afterCtx;
+      dropped.push({ edit: o.edit, reason: o.reason });
+      continue;
+    }
+    running += cost;
+  }
+  return { dropped, changedChars: running };
 }
 
 /** The ceiling on {@link changedChars} for one apply: a quarter of the body, with
@@ -340,6 +491,10 @@ export interface EditOutcome {
   start?: number;
   end?: number;
   tier?: ResolveTier;
+  /** The RAW body slice `[start, end)` that will actually be replaced. On a
+   *  tier-2 rescue this can differ from `edit.old` (whitespace), so the preview
+   *  must show THIS, not the model's quote. */
+  resolvedText?: string;
   beforeCtx?: string;
   afterCtx?: string;
 }
@@ -396,6 +551,44 @@ function resolveRange(
   return { start, end, tier: "collapsed" };
 }
 
+/** Markup delimiters whose balance a whitespace-rescued range must preserve. */
+const RESCUE_DELIMS = ["*", "`", "_", "[", "]", "(", ")"] as const;
+
+function countChar(s: string, ch: string): number {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) if (s[i] === ch) n++;
+  return n;
+}
+
+/**
+ * Safety gate on a TIER-2 (whitespace-collapsed) rescue: the reason to reject the
+ * mapped-back range, or null when it is safe to splice.
+ *
+ * `collapseWithMap` does more than collapse whitespace — it STRIPS `*`, `_` and
+ * backtick and rewrites `[label](url)` to `label`. So `map[hit]` can land after an
+ * opening `**` while the range still consumes the closing one, and a link's
+ * `](url)` can sit inside the range while `old` has no trace of it. Splicing then
+ * produces orphaned bold (`**NEW`), a half-eaten link (`See [NEW here.`) or an
+ * unbalanced code span. The collapse of the raw slice equals the needle BY
+ * CONSTRUCTION, so the only thing worth comparing is what the collapse threw
+ * away: delimiter counts, plus a hard ban on a range that spans a paragraph break
+ * (the mapped range can be arbitrarily larger than `old`).
+ *
+ * Deliberately conservative — a false drop is honest and shows the user a reason;
+ * a false apply corrupts the page.
+ */
+export function collapsedRescueRisk(rawSlice: string, old: string): string | null {
+  if (rawSlice.includes("\n\n")) {
+    return "whitespace-rescued match would span a paragraph break in the page";
+  }
+  for (const d of RESCUE_DELIMS) {
+    if (countChar(rawSlice, d) !== countChar(old, d)) {
+      return "whitespace-rescued match would cut through markdown formatting";
+    }
+  }
+  return null;
+}
+
 /**
  * Resolve every edit against the ORIGINAL match-masked body, reject overlaps
  * (earlier wins), and splice the survivors into the original body descending by
@@ -412,12 +605,20 @@ export function applyEdits(body: string, edits: IntegrateEdit[], isMdx = false):
     if (masked.slice(r.start, r.end).includes(ZONE_SENTINEL)) {
       return { edit, applied: false, reason: "resolves into an excluded region of the page" };
     }
+    const resolvedText = body.slice(r.start, r.end);
+    // A tier-2 rescue's raw span can cut through markup the collapse stripped —
+    // reject rather than corrupt (see `collapsedRescueRisk`).
+    if (r.tier === "collapsed") {
+      const risk = collapsedRescueRisk(resolvedText, edit.old);
+      if (risk) return { edit, applied: false, reason: risk };
+    }
     return {
       edit,
       applied: true,
       start: r.start,
       end: r.end,
       tier: r.tier,
+      resolvedText,
       beforeCtx: body.slice(Math.max(0, r.start - PREVIEW_CONTEXT), r.start),
       afterCtx: body.slice(r.end, r.end + PREVIEW_CONTEXT),
     };
@@ -436,6 +637,7 @@ export function applyEdits(body: string, edits: IntegrateEdit[], isMdx = false):
       delete o.start;
       delete o.end;
       delete o.tier;
+      delete o.resolvedText;
       delete o.beforeCtx;
       delete o.afterCtx;
       continue;
