@@ -184,7 +184,9 @@ function renderInline(text: string): string {
 function factCheckSummaryText(attrs: Record<string, string>): string {
   const parts: string[] = [];
   for (const key of ["ok", "warn", "bad"] as const) {
-    const n = Number(attrs[key]);
+    const raw = attrs[key]?.trim();
+    if (!raw) continue;
+    const n = Number(raw);
     if (Number.isInteger(n) && n >= 0) parts.push(`${n} ${FACT_VERDICT_WORD[key]}`);
   }
   const date = attrs.date?.trim();

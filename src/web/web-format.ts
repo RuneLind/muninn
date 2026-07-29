@@ -64,7 +64,9 @@ function factCheckSummary(attrs: Record<string, string>): string {
   const date = attrs.date?.trim();
   const parts: string[] = [];
   const count = (key: "ok" | "warn" | "bad", v: FactVerdict) => {
-    const n = Number(attrs[key]);
+    const raw = attrs[key]?.trim();
+    if (!raw) return;
+    const n = Number(raw);
     if (!Number.isInteger(n) || n < 0) return;
     parts.push(
       `<span class="fc-count fc-count-${v}">${FACT_VERDICT_MARK[v]} ${n} ${FACT_VERDICT_WORD[v]}</span>`,

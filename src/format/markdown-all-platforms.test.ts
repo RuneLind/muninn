@@ -257,6 +257,7 @@ describe("FactCheck counts that are absent or garbage are OMITTED, never rendere
   const cases = [
     ['<FactCheck date="2026-07-29">\nbody\n</FactCheck>', "all absent"],
     ['<FactCheck date="2026-07-29" ok="abc" warn="x" bad="-1">\nbody\n</FactCheck>', "garbage/negative"],
+    ['<FactCheck date="2026-07-29" ok="" warn=" " bad="">\nbody\n</FactCheck>', "empty-string"],
   ] as const;
   for (const [md, label] of cases) {
     test(`web (${label}) → lead only, no count spans`, () => {
