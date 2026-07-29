@@ -834,6 +834,9 @@ export async function renderWikiPage(opts?: {
     /* "✎ Integrate into article" — the second fact-check write action (v4).
        Bar first, then the transient diff-preview panel it opens. */
     .wiki-fc-integrate { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+    /* A still-streaming fact check keeps the (empty) bar node so \`done\` can fill
+       it in place — but it must not contribute margin while empty. */
+    .wiki-fc-integrate:empty { display: none; }
     .wiki-fc-int-open {
       padding: 6px 12px; border-radius: 8px;
       border: 1px solid var(--border-secondary); background: var(--bg-inset);

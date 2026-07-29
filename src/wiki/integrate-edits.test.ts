@@ -642,3 +642,39 @@ test("hasSourcesSection detects a trailing Sources heading", () => {
   expect(hasSourcesSection(ZONED_PAGE)).toBe(true);
   expect(hasSourcesSection("# Page\n\nBody.\n")).toBe(false);
 });
+
+test("preview context slices stop at exclusion-zone boundaries", () => {
+  // Frontmatter before, a fenced code block after: neither is editable, so
+  // neither may be shown to the reviewer as if it were adjacent prose.
+  const body = [
+    "---",
+    "title: Widgets",
+    "secret: do-not-show",
+    "---",
+    "",
+    "The device ships 4M units.",
+    "",
+    "```js",
+    "const shipped = 4_000_000;",
+    "```",
+    "",
+  ].join("\n");
+  const r = applyEdits(body, [edit({ old: "ships 4M units", new: "ships 2.1M units" })]);
+  expect(r.appliedCount).toBe(1);
+  const o = r.outcomes[0]!;
+  // Before: clamped to the text AFTER the frontmatter zone ends.
+  expect(o.beforeCtx).toBe("\nThe device ");
+  expect(o.beforeCtx).not.toContain("do-not-show");
+  expect(o.beforeCtx).not.toContain("title: Widgets");
+  // After: clamped to the text BEFORE the fence zone starts.
+  expect(o.afterCtx).toBe(".\n\n");
+  expect(o.afterCtx).not.toContain("const shipped");
+  expect(o.afterCtx).not.toContain("```");
+});
+
+test("preview context is unclamped when no zone is within reach", () => {
+  const body = "Plain intro prose. The device ships 4M units. Plain trailing prose.\n";
+  const o = applyEdits(body, [edit({ old: "ships 4M units", new: "ships 2.1M units" })]).outcomes[0]!;
+  expect(o.beforeCtx).toBe("Plain intro prose. The device ");
+  expect(o.afterCtx).toBe(". Plain trailing prose.\n");
+});

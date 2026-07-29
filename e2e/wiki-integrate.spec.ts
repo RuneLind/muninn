@@ -26,6 +26,19 @@
  * ENV PREREQUISITE: the same one every other e2e spec has — a working `.env`
  * (`DATABASE_URL` + a bot token) at the repo root, since `src/index.ts` boots the
  * full process. Bun auto-loads it in the spawned child (cwd = repo root).
+ *
+ * TELEGRAM: this spec's muninn must NOT start any Telegram bot. A bot is active
+ * iff its folder has a CLAUDE.md AND a matching `TELEGRAM_BOT_TOKEN_<NAME>` — so a
+ * second process picking those up from `.env`/the inherited env starts a SECOND
+ * long-poller on the same token and 409-fights the running production jarvis
+ * (reproduced). `blankTelegramTokens()` therefore blanks every `TELEGRAM_BOT_TOKEN_*`
+ * it can see, in BOTH the inherited env and the child's. Bun still auto-loads
+ * `.env` in the child, but an explicitly-passed empty value wins over the file, and
+ * an empty token fails the "is active" gate.
+ *
+ * NB the SHARED `webServer` in `playwright.config.ts` (port 3011, used by the other
+ * specs) is deliberately left untouched by this PR — its Telegram exposure is
+ * pre-existing and out of scope here.
  */
 
 import { test, expect, type Page } from "@playwright/test";
@@ -43,6 +56,27 @@ const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
 
 const ORIGINAL_SENTENCE = "The device ships 4M units per year.";
 const CORRECTED_SENTENCE = "The device ships 2.1M units per year.";
+
+// The callout-path scratch page: same prose, plus a STALE persisted fact-check
+// block. The apply must REPLACE it in place — one block on disk afterwards, never
+// two — while the prose edit lands in the same write.
+const SENTINEL_START = "<!-- factcheck:start -->";
+const SENTINEL_END = "<!-- factcheck:end -->";
+const CALLOUT_PAGE_BODY = [
+  "---",
+  "title: Callout Note",
+  "---",
+  "",
+  "# Callout Note",
+  "",
+  ORIGINAL_SENTENCE,
+  "",
+  SENTINEL_START,
+  "> [!factcheck] Fact check (2026-01-01)",
+  "> **Stale verdict from an older run.**",
+  SENTINEL_END,
+  "",
+].join("\n");
 
 const PAGE_BODY = [
   "---",
@@ -97,6 +131,7 @@ interface SeedTurn {
 let root: string;
 let server: ChildProcess | undefined;
 let baseHash: string;
+let calloutBaseHash: string;
 
 function seedTurn(over: Partial<SeedTurn> = {}): SeedTurn {
   return {
@@ -162,23 +197,59 @@ async function stubPropose(page: Page): Promise<void> {
             },
           ],
           dropped: [{ edit: { old: "an unrelated quote" }, reason: "no longer found in the page" }],
-          budget: { bodyLen: PAGE_BODY.length, maxEdits: 12, maxEditChars: 2000, maxChangedChars: 2000 },
+          budget: {
+            bodyLen: PAGE_BODY.length,
+            maxEdits: 12,
+            maxEditChars: 2000,
+            maxChangedChars: 2000,
+            // The real propose route always echoes this on the full path — keep the
+            // stub's shape honest so the spec can't pass against a payload the
+            // server never produces.
+            proposedChangedChars: 23,
+          },
           hasSentinelBlock: false,
         }),
       }),
   );
 }
 
+/** Every `TELEGRAM_BOT_TOKEN_*` name we can see, mapped to "". Also blanks them on
+ *  the parent's own env so nothing this process spawns inherits a live token.
+ *  Names are read from `.env` too, since the child auto-loads it and the parent may
+ *  not carry them. */
+function blankTelegramTokens(): Record<string, string> {
+  const names = new Set(Object.keys(process.env).filter((k) => k.startsWith("TELEGRAM_BOT_TOKEN_")));
+  try {
+    for (const line of readFileSync(path.join(REPO_ROOT, ".env"), "utf8").split("\n")) {
+      const m = /^\s*(TELEGRAM_BOT_TOKEN_[A-Z0-9_]+)\s*=/i.exec(line);
+      if (m) names.add(m[1]!);
+    }
+  } catch {
+    /* no .env visible — the inherited names are all there is */
+  }
+  const blanked: Record<string, string> = {};
+  for (const n of names) {
+    blanked[n] = "";
+    process.env[n] = "";
+  }
+  return blanked;
+}
+
 test.beforeAll(async () => {
   root = await mkdtemp(path.join(tmpdir(), "muninn-e2e-wiki-"));
   await writeFile(path.join(root, "note.md"), PAGE_BODY, "utf8");
+  await writeFile(path.join(root, "callout-note.md"), CALLOUT_PAGE_BODY, "utf8");
   await writeFile(path.join(root, "log.md"), "# Log\n", "utf8");
   baseHash = createHash("sha256").update(readFileSync(path.join(root, "note.md"), "utf8")).digest("hex");
+  calloutBaseHash = createHash("sha256")
+    .update(readFileSync(path.join(root, "callout-note.md"), "utf8"))
+    .digest("hex");
 
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
     env: {
       ...process.env,
+      ...blankTelegramTokens(),
       DASHBOARD_PORT: String(PORT),
       DASHBOARD_HOST: "127.0.0.1",
       SCHEDULER_ENABLED: "false",
@@ -262,6 +333,96 @@ test.describe("Fact-check: integrate into article", () => {
     // only the prose-editing action is gated on a correctable claim.
     await expect(page.locator("#wikiFactcheckAppendBtn")).toBeVisible();
     await expect(page.locator("#wikiFactcheckIntegrateBtn")).toHaveCount(0);
+  });
+
+  test("the callout path: refresh-labelled checkbox, paired apply body, ONE block on disk", async ({
+    page,
+  }) => {
+    // Stub propose for the callout scratch page, reporting a page that ALREADY
+    // carries a fact-check block.
+    await page.route(
+      (url) => url.pathname === "/api/wiki/factcheck/integrate",
+      (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            edits: [
+              {
+                claimIndex: 1,
+                verdict: "❌",
+                old: "ships 4M units per year",
+                new: "ships 2.1M units per year",
+                reason: "The filing reports 2.1M units.",
+                start: 0,
+                end: 0,
+                tier: "exact",
+                resolvedText: "ships 4M units per year",
+                beforeCtx: "The device ",
+                afterCtx: ".",
+              },
+            ],
+            dropped: [],
+            budget: {
+              bodyLen: CALLOUT_PAGE_BODY.length,
+              maxEdits: 12,
+              maxEditChars: 2000,
+              maxChangedChars: 2000,
+              proposedChangedChars: 23,
+            },
+            hasSentinelBlock: true,
+          }),
+        }),
+    );
+    // Observe (never stub) the apply request — the real write must still happen.
+    let applyBody: { appendCallout?: boolean; answer?: string } | null = null;
+    page.on("request", (req) => {
+      if (req.url().includes("/api/wiki/factcheck/integrate/apply") && req.method() === "POST") {
+        applyBody = JSON.parse(req.postData() || "{}");
+      }
+    });
+
+    await seedSession(page, [
+      seedTurn({
+        question: "Fact check: Callout Note",
+        page: "callout-note",
+        baseHash: calloutBaseHash,
+        bodyLen: CALLOUT_PAGE_BODY.length,
+        askedAt: 1_700_000_000_003,
+      }),
+    ]);
+    await openSeededTurn(page);
+    await page.locator("#wikiFactcheckIntegrateBtn").click();
+
+    // A page that already carries a block ⇒ the checkbox defaults CHECKED and says
+    // "refresh", not "add" (which would read as stacking a second block).
+    const callout = page.locator("#wikiFcIntCallout");
+    await expect(callout).toBeChecked();
+    await expect(page.locator(".wiki-fc-int-callout")).toContainText(
+      "refresh the existing summary callout",
+    );
+
+    await page.locator("#wikiFcIntAccept").click();
+
+    // The apply carried the PAIRED fields — the callout must ride this write, since
+    // applying the edits stales the very baseHash a follow-up append would need.
+    await expect
+      .poll(() => (applyBody as { appendCallout?: boolean } | null)?.appendCallout)
+      .toBe(true);
+    expect((applyBody as unknown as { answer?: string })!.answer).toContain("Claim 1/1");
+
+    const article = page.locator("#articleWrap");
+    await expect(article).toContainText(CORRECTED_SENTENCE);
+
+    // On disk: the corrected prose, EXACTLY ONE sentinel block, and the stale
+    // verdict replaced rather than stacked.
+    const onDisk = readFileSync(path.join(root, "callout-note.md"), "utf8");
+    expect(onDisk).toContain(CORRECTED_SENTENCE);
+    expect(onDisk).not.toContain(ORIGINAL_SENTENCE);
+    expect(onDisk.split(SENTINEL_START).length - 1).toBe(1);
+    expect(onDisk.split(SENTINEL_END).length - 1).toBe(1);
+    expect(onDisk).not.toContain("Stale verdict from an older run.");
+    expect(onDisk).toContain("The filing reports 2.1M units.");
   });
 
   test("a turn that already appended a callout renders integrate disabled", async ({ page }) => {

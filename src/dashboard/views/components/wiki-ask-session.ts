@@ -58,8 +58,9 @@ export interface StoredAskTurn {
    *  ➕ callout) or `"integrate"` (in-place prose edits). Persisted because BOTH
    *  buttons' disabled state is derived from it at render time: either write
    *  stales the turn's `baseHash`, so a DOM-only disable would come back live
-   *  after a reload and could only ever 409. Absent ⇒ nothing written yet. */
-  wrote?: string;
+   *  after a reload and could only ever 409. Absent ⇒ nothing written yet.
+   *  Validated as the two-value union — an unknown value is a dropped turn. */
+  wrote?: "append" | "integrate";
   /** Integrate-relevant body length of the checked page (the `done` payload's
    *  `bodyLen`, omitted for explainers). Drives the client's page-too-long gate.
    *  Absent ⇒ render the button and let a server 400 decide. */
@@ -94,7 +95,11 @@ function isValidTurn(v: unknown): v is StoredAskTurn {
   if (typeof t.toolSourceUrls !== "undefined") {
     if (!isValidUrlMap(t.toolSourceUrls)) delete t.toolSourceUrls;
   }
-  if (typeof t.wrote !== "undefined" && typeof t.wrote !== "string") return false;
+  // `wrote` is a two-value union, and BOTH values gate a write button. An unknown
+  // string would fall through every branch and silently re-enable both actions
+  // against a baseHash the real write already staled — so validate the union, not
+  // just the type.
+  if (typeof t.wrote !== "undefined" && t.wrote !== "append" && t.wrote !== "integrate") return false;
   if (typeof t.bodyLen !== "undefined" && typeof t.bodyLen !== "number") return false;
   if (typeof t.claimCount !== "undefined" && typeof t.claimCount !== "number") return false;
   if (typeof t.claimOutcomes !== "undefined" && !isValidOutcomeCounts(t.claimOutcomes)) return false;

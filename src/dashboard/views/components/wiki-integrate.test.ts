@@ -1,5 +1,8 @@
 import { test, expect } from "bun:test";
 import {
+  editChangedChars,
+  INTEGRATE_STALE_COPY,
+  INTEGRATE_STALE_COPY_EDIT,
   parseFactcheckClaims,
   correctableClaims,
   hasCorrectableClaims,
@@ -345,4 +348,114 @@ test("integrateSuccessCopy branches on the commit outcome", () => {
     "not committed (error)",
   );
   expect(integrateSuccessCopy({ applied: 0 })).toContain("nothing was written");
+});
+
+// ── Review round: state-driven panel, honest copy, defensive shaping ─────────
+
+test("integratePreviewHtml: an in-flight apply disables Apply, Cancel and every checkbox", () => {
+  const proposal = { edits: [edit(), edit()], dropped: [] };
+  const html = integratePreviewHtml(proposal, [true, true], false, { applying: true });
+  expect(html).toContain(">Applying…</button>");
+  expect(html).toContain('id="wikiFcIntAccept" class="wiki-fc-int-btn primary" disabled');
+  expect(html).toContain('id="wikiFcIntCancel" class="wiki-fc-int-btn" disabled');
+  // Both edit checkboxes are disabled, so a toggle can't re-render an enabled Apply.
+  expect(html.split('class="wiki-fc-int-cb"').length - 1).toBe(2);
+  expect(html.match(/wiki-fc-int-cb[^>]*disabled/g)).toHaveLength(2);
+  expect(html).toContain('id="wikiFcIntCallout" disabled');
+});
+
+test("integratePreviewHtml: the panel message renders from state, with its severity", () => {
+  const proposal = { edits: [edit()], dropped: [] };
+  const err = integratePreviewHtml(proposal, [true], false, {
+    message: "Couldn't apply — boom",
+    messageError: true,
+  });
+  expect(err).toContain('class="wiki-fc-int-msg error"');
+  expect(err).toContain("Couldn&#39;t apply — boom");
+  const quiet = integratePreviewHtml(proposal, [true], false, {});
+  expect(quiet).toContain('<div class="wiki-fc-int-msg" id="wikiFcIntMsg"></div>');
+});
+
+test("integratePreviewHtml: an applied:0 outcome blocks re-Apply and shows the server's reasons", () => {
+  const proposal = { edits: [edit()], dropped: [] };
+  const html = integratePreviewHtml(proposal, [true], false, {
+    applyBlocked: true,
+    applyDropped: [{ edit: { old: "Ships 4M units." }, reason: "no longer found in the page" }],
+    message: "No edits could be applied (the page may have shifted) — nothing was written.",
+    messageError: true,
+  });
+  expect(html).toContain('id="wikiFcIntAccept" class="wiki-fc-int-btn primary" disabled');
+  // Cancel stays live — the panel must remain dismissible.
+  expect(html).toContain('id="wikiFcIntCancel" class="wiki-fc-int-btn">Cancel');
+  expect(html).toContain("1 could not be applied to the current page");
+  expect(html).toContain("no longer found in the page");
+});
+
+test("integratePreviewHtml: the callout label names refresh-vs-add, and disables with no answer", () => {
+  const clean = integratePreviewHtml({ edits: [edit()], dropped: [] }, [true], false);
+  expect(clean).toContain("also add summary callout");
+  const stale = integratePreviewHtml(
+    { edits: [edit()], dropped: [], hasSentinelBlock: true },
+    [true],
+    true,
+  );
+  expect(stale).toContain("refresh the existing summary callout (replaces the previous one)");
+  expect(stale).not.toContain("also add summary callout");
+  const noAnswer = integratePreviewHtml({ edits: [edit()], dropped: [] }, [true], false, {
+    calloutDisabled: true,
+  });
+  expect(noAnswer).toContain('id="wikiFcIntCallout" disabled');
+  expect(noAnswer).toContain("no stored answer");
+});
+
+test("droppedListHtml honors the open state so a re-render can't snap the disclosure shut", () => {
+  const rows = [{ edit: { old: "x" }, reason: "nope" }];
+  expect(droppedListHtml(rows, false)).toContain('<details class="wiki-fc-int-dropped">');
+  expect(droppedListHtml(rows, true)).toContain('<details class="wiki-fc-int-dropped" open>');
+});
+
+test("editPreviewHtml guards a non-numeric claimIndex and escapes it", () => {
+  const weird = editPreviewHtml(
+    { ...edit(), claimIndex: "2<script>" as unknown as number },
+    0,
+    true,
+  );
+  expect(weird).not.toContain("<script>");
+  expect(weird).not.toContain("wiki-fc-int-claim"); // non-number ⇒ no claim chip at all
+  expect(editPreviewHtml(edit({ claimIndex: 2 }), 0, true)).toContain(">Claim 2<");
+});
+
+test("editChangedChars never throws on a malformed proposal", () => {
+  const broken = { claimIndex: 1, verdict: "❌", reason: "r" } as unknown as ProposedEdit;
+  expect(editChangedChars(broken)).toBe(0);
+  expect(
+    editChangedChars({ ...edit(), resolvedText: undefined, old: undefined as unknown as string }),
+  ).toBe("Ships 2.1M units.".length);
+  expect(selectedChangedChars([broken], [true])).toBe(0);
+});
+
+test("integrateSuccessCopy states the callout outcome, including a requested-but-missing one", () => {
+  expect(
+    integrateSuccessCopy({ applied: 2, committed: true, calloutAdded: true, calloutRequested: true }),
+  ).toBe("✓ Integrated 2 edits + summary callout added");
+  expect(
+    integrateSuccessCopy({
+      applied: 1,
+      committed: true,
+      calloutAdded: true,
+      calloutRequested: true,
+      calloutReplaced: true,
+    }),
+  ).toBe("✓ Integrated 1 edit + summary callout refreshed");
+  expect(
+    integrateSuccessCopy({ applied: 1, committed: true, calloutAdded: false, calloutRequested: true }),
+  ).toBe("✓ Integrated 1 edit (summary callout was NOT added)");
+  // Never mentioned when it was never asked for.
+  expect(integrateSuccessCopy({ applied: 1, committed: true })).toBe("✓ Integrated 1 edit");
+});
+
+test("the two stale-copy strings name their OWN next action", () => {
+  expect(INTEGRATE_STALE_COPY).toContain("then add it");
+  expect(INTEGRATE_STALE_COPY_EDIT).toContain("then integrate again");
+  expect(INTEGRATE_STALE_COPY_EDIT).not.toContain("add it");
 });

@@ -43,6 +43,8 @@ import {
   integratePreviewHtml,
   integrateSuccessCopy,
   INTEGRATE_STALE_COPY,
+  INTEGRATE_STALE_COPY_EDIT,
+  type DroppedEditRow,
   type IntegrateProposal,
 } from "./wiki-integrate.ts";
 import {
@@ -1773,6 +1775,12 @@ function factcheckAppendInnerHtml(turn: AskTurn): string {
  *  integrate body cap. The whole bar is derived from `integrateBarState`. */
 function askFactcheckIntegrateHtml(turn: AskTurn): string {
   if (turn.kind !== "factcheck" || turn.pageType === "explainer" || !turn.page) return "";
+  // An all-✅ / non-correctable check never becomes integrable, so drop the
+  // wrapper entirely — it carries margin, and an always-empty div left a phantom
+  // gap under the ➕ row. A `pending` turn KEEPS the (empty) wrapper: `done`
+  // fills it in place via `refreshWriteActionBars`, which needs the node to exist.
+  // `.wiki-fc-integrate:empty` hides it meanwhile.
+  if (integrateBarState(turn) === "hidden") return "";
   return (
     '<div class="wiki-fc-integrate" id="wikiFactcheckIntegrateBar">' +
     factcheckIntegrateInnerHtml(turn) +
@@ -1792,7 +1800,7 @@ function factcheckIntegrateInnerHtml(turn: AskTurn): string {
   if (state === "blocked-append") {
     return (
       '<button class="wiki-fc-int-open" disabled>✎ Integrate into article</button>' +
-      '<span class="wiki-fc-int-bar-msg error">' + esc(INTEGRATE_STALE_COPY) + "</span>"
+      '<span class="wiki-fc-int-bar-msg error">' + esc(INTEGRATE_STALE_COPY_EDIT) + "</span>"
     );
   }
   if (state === "too-long") {
@@ -1802,9 +1810,18 @@ function factcheckIntegrateInnerHtml(turn: AskTurn): string {
       "— edit it by hand, or add the callout instead.</span>"
     );
   }
+  // In-flight propose is TURN state, not DOM state: a re-render (a `done`
+  // refresh, an SSE drop, re-opening the turn from history) must reproduce the
+  // disabled "Proposing…" button, or a second click races the first and the
+  // loser's `finally` pins a stale label.
+  const proposing = integrateProposing === turn;
+  const msg = integrateBarMsgs[turn.askedAt];
   return (
-    '<button id="wikiFactcheckIntegrateBtn" class="wiki-fc-int-open">✎ Integrate into article</button>' +
-    '<span class="wiki-fc-int-bar-msg" id="wikiFactcheckIntegrateMsg"></span>'
+    '<button id="wikiFactcheckIntegrateBtn" class="wiki-fc-int-open"' +
+    (proposing ? " disabled" : "") + ">" +
+    (proposing ? "Proposing edits… up to ~90s" : "✎ Integrate into article") + "</button>" +
+    '<span class="wiki-fc-int-bar-msg' + (msg?.error ? " error" : "") +
+    '" id="wikiFactcheckIntegrateMsg">' + esc(msg?.text || "") + "</span>"
   );
 }
 
@@ -1813,6 +1830,16 @@ function factcheckIntegrateInnerHtml(turn: AskTurn): string {
  *  this only enriches the label within the session, and a rehydrated turn falls
  *  back to a bare "✓ Integrated". */
 const integratedNotes: Record<number, string> = {};
+
+/** Per-turn ✎ bar message (a 409, a propose failure, the too-long copy), keyed by
+ *  `askedAt` like {@link integratedNotes}. Held off the DOM so a re-render — which
+ *  replaces the bar's innerHTML wholesale — reproduces it instead of wiping it. */
+const integrateBarMsgs: Record<number, { text: string; error: boolean }> = {};
+
+/** The turn whose propose call is currently in flight (at most one — the bar
+ *  disables while it runs). Module-level so the bar's rendered state is derived,
+ *  never mutated in place. */
+let integrateProposing: AskTurn | null = null;
 
 /** Re-render BOTH write-action bars from the turn. Called at `done` (the pane was
  *  painted before the answer existed, so the gates couldn't run yet) and after any
@@ -1943,7 +1970,14 @@ function askArticleHtml(turn: AskTurn, buffer: string): string {
 
 /** Enable/disable the follow-up + Remember controls by id (they may not exist yet
  *  at module load, and the article pane is re-rendered per turn — always look up
- *  fresh). The Remember button rides the same commit gate as the follow-up bar. */
+ *  fresh). The Remember button rides the same commit gate as the follow-up bar.
+ *
+ *  The two WRITE buttons are deliberately NOT here. Their state is derived from
+ *  `turn.wrote` + the in-flight propose flag (`refreshWriteActionBars`), and a
+ *  blanket `setFollowupDisabled(false)` from an SSE drop or the `end` fallback
+ *  would force-enable a button the derivation had correctly retired — reviving a
+ *  ✎ button mid-propose so a second click races the first. Every site that used
+ *  to rely on this re-derives instead. */
 function setFollowupDisabled(disabled: boolean): void {
   const input = document.getElementById("wikiFollowupInput") as HTMLInputElement | null;
   const btn = document.getElementById("wikiFollowupBtn") as HTMLButtonElement | null;
@@ -1951,10 +1985,6 @@ function setFollowupDisabled(disabled: boolean): void {
   if (btn) btn.disabled = disabled;
   const remember = document.getElementById("wikiRememberBtn") as HTMLButtonElement | null;
   if (remember) remember.disabled = disabled;
-  const fcAppend = document.getElementById("wikiFactcheckAppendBtn") as HTMLButtonElement | null;
-  if (fcAppend) fcAppend.disabled = disabled;
-  const fcIntegrate = document.getElementById("wikiFactcheckIntegrateBtn") as HTMLButtonElement | null;
-  if (fcIntegrate) fcIntegrate.disabled = disabled;
 }
 
 /** Paint an Ask turn into the main article pane (replaces the page/start view). */
@@ -1962,8 +1992,14 @@ function showAskAnswer(turn: AskTurn, buffer: string): void {
   currentName = null;
   hideBreadcrumb(); // an Ask answer replaces the page — no breadcrumb
   askShownTurn = turn; // the turn the in-pane Remember button acts on
-  integratePreview = null; // a different turn's proposal must never survive the swap
   document.getElementById("articleWrap")!.innerHTML = askArticleHtml(turn, buffer);
+  // The preview is TURN-KEYED, not "whatever was last proposed": nulling it here
+  // stranded a ~90s propose whose user had switched turns (and, worse, an earlier
+  // build painted the panel under an unrelated turn, whose Apply then wrote turn
+  // A's page). It survives the swap; `renderIntegratePreview` paints it only when
+  // its own turn is the one on screen, so re-opening that turn from history brings
+  // the pending/ready preview back.
+  renderIntegratePreview();
   // Rehydrated turns (history re-show) inject stored answer HTML that may carry
   // mermaid fences; the streaming paths hook separately. No-op when absent.
   const askBody = document.getElementById("askAnswerBody");
@@ -2217,6 +2253,7 @@ function runAskStream(url: string, turn: AskTurn): void {
       refreshAskSources(turn);
       persistAskSession(); // re-store so the rehydrated turn carries the final HTML
       setFollowupDisabled(false); // belt: `done` enabled it, but never re-render since
+      refreshWriteActionBars(turn); // re-derive (never force-enable) the write buttons
       askActive = null;
       conn.close();
       askConn = null;
@@ -2229,6 +2266,7 @@ function runAskStream(url: string, turn: AskTurn): void {
       askActive = null;
       btn.disabled = false;
       setFollowupDisabled(false);
+      refreshWriteActionBars(turn); // re-derive (never force-enable) the write buttons
       // Terminal for this turn — close so a drop before `end` can't reconnect + re-run.
       conn.close();
       askConn = null;
@@ -2242,6 +2280,7 @@ function runAskStream(url: string, turn: AskTurn): void {
       askActive = null;
       btn.disabled = false;
       setFollowupDisabled(false);
+      refreshWriteActionBars(turn); // re-derive (never force-enable) the write buttons
     },
     onerror: () => {
       if (askConn !== conn) return;
@@ -2250,6 +2289,7 @@ function runAskStream(url: string, turn: AskTurn): void {
       askActive = null;
       btn.disabled = false;
       setFollowupDisabled(false);
+      refreshWriteActionBars(turn); // re-derive (never force-enable) the write buttons
       const wrap = document.getElementById("wikiAskStatus");
       if (wrap && !wrap.classList.contains("done") && !wrap.classList.contains("error")) {
         setAskStatus("Connection lost", "error");
@@ -2394,11 +2434,12 @@ async function submitFactcheckAppend(): Promise<void> {
     // path (`factcheckAppendInnerHtml`) is what's authoritative on a re-render.
     turn.wrote = "append";
     persistAskSession();
-    const bar = document.getElementById("wikiFactcheckAppendBar");
-    if (bar) bar.innerHTML = '<span class="wiki-fc-append-done">✓ Added to article</span>';
-    // An append stales this turn's baseHash — reflect that on the ✎ bar too.
-    const intBar = document.getElementById("wikiFactcheckIntegrateBar");
-    if (intBar) intBar.innerHTML = factcheckIntegrateInnerHtml(turn);
+    // Both bars are re-DERIVED from the turn (an append also stales this turn's
+    // baseHash, retiring the ✎ action), never poked one node at a time.
+    refreshWriteActionBars(turn);
+    // …and the outcome goes on the rail's Ask status line, the only surface that
+    // survives the `loadPage` below (which replaces #articleWrap, bars included).
+    setAskStatus("✓ Added to article", "done");
     // Reload the page content so the freshly-written callout is visible.
     loadPage(turn.page, false);
   } catch (err) {
@@ -2417,33 +2458,81 @@ async function submitFactcheckAppend(): Promise<void> {
 // re-proposes on click, since the inputs (the persisted answer + baseHash) are all
 // the propose route takes.
 interface IntegratePreviewState {
+  /** The turn this proposal belongs to. `renderIntegratePreview` paints ONLY when
+   *  this is the turn currently on screen — a ~90s propose that resolves after the
+   *  user switched turns must not paint a live Apply under an unrelated turn (its
+   *  Apply would write THIS turn's page while another is displayed). */
   turn: AskTurn;
   proposal: IntegrateProposal;
   /** Parallel to `proposal.edits` — all ON by default. */
   selected: boolean[];
   callout: boolean;
+  /** An apply is in flight. Lives HERE, not on the DOM: the panel re-renders
+   *  wholesale on every checkbox toggle, so a DOM-held disable produced a fresh
+   *  enabled Apply mid-flight and detached the nodes the error path wrote into. */
+  applying: boolean;
+  /** Panel message (an error, or an `applied: 0` outcome) + its severity. */
+  message?: string;
+  messageError?: boolean;
+  /** Apply is disabled for THIS selection (an `applied: 0` would reproduce
+   *  forever). Any checkbox toggle clears it. */
+  applyBlocked?: boolean;
+  /** The apply route's own per-edit rejections, rendered with their honest reasons. */
+  applyDropped?: DroppedEditRow[];
+  /** `<details>` open state of the propose-time dropped list, so a re-render
+   *  doesn't snap it shut under the reader. */
+  droppedOpen: boolean;
+  /** Index of the checkbox to refocus after a re-render (-1 = none). */
+  focusEditIdx: number;
 }
 let integratePreview: IntegratePreviewState | null = null;
 
-/** Show a message on the ✎ bar (not the preview panel). */
-function setIntegrateBarMsg(text: string, isError: boolean): void {
-  const el = document.getElementById("wikiFactcheckIntegrateMsg");
-  if (!el) return;
-  el.textContent = text;
-  el.className = "wiki-fc-int-bar-msg" + (isError ? " error" : "");
+/** Show a message on the ✎ bar (not the preview panel). Stored per turn and
+ *  RE-RENDERED, never poked into a node the next refresh would replace. */
+function setIntegrateBarMsg(turn: AskTurn, text: string, isError: boolean): void {
+  if (text) integrateBarMsgs[turn.askedAt] = { text, error: isError };
+  else delete integrateBarMsgs[turn.askedAt];
+  refreshWriteActionBars(turn);
 }
 
-/** Repaint the preview panel from `integratePreview` (checkbox toggles, and the
- *  accept button's count/budget state, all derive from it). */
+/** Repaint the preview panel from `integratePreview` — every visual bit (checkbox
+ *  states, the Apply count/budget/in-flight state, the messages, the dropped
+ *  disclosure) derives from it. Renders NOTHING when the stored preview belongs to
+ *  a turn other than the one on screen. */
 function renderIntegratePreview(): void {
   const host = document.getElementById("wikiFcIntHost");
   if (!host) return;
-  if (!integratePreview) { host.innerHTML = ""; return; }
-  host.innerHTML = integratePreviewHtml(
-    integratePreview.proposal,
-    integratePreview.selected,
-    integratePreview.callout,
-  );
+  const state = integratePreview;
+  if (!state || state.turn !== askShownTurn) { host.innerHTML = ""; return; }
+  host.innerHTML = integratePreviewHtml(state.proposal, state.selected, state.callout, {
+    applying: state.applying,
+    message: state.message,
+    messageError: state.messageError,
+    applyBlocked: state.applyBlocked,
+    applyDropped: state.applyDropped,
+    droppedOpen: state.droppedOpen,
+    calloutDisabled: !state.turn.answer,
+  });
+  // A full re-render on every toggle is the simple, state-honest choice — but it
+  // must not cost the reader their caret. Restore focus to the checkbox they just
+  // flipped (the details open state is carried on the state above).
+  if (state.focusEditIdx >= 0) {
+    const cb = host.querySelector(
+      '.wiki-fc-int-cb[data-edit-idx="' + state.focusEditIdx + '"]',
+    ) as HTMLElement | null;
+    cb?.focus();
+    state.focusEditIdx = -1;
+  }
+}
+
+/** Fresh preview state for a landed proposal. */
+function newPreviewState(
+  turn: AskTurn,
+  proposal: IntegrateProposal,
+  selected: boolean[],
+  callout: boolean,
+): IntegratePreviewState {
+  return { turn, proposal, selected, callout, applying: false, droppedOpen: false, focusEditIdx: -1 };
 }
 
 /**
@@ -2455,14 +2544,17 @@ async function submitFactcheckIntegrate(): Promise<void> {
   const btn = document.getElementById("wikiFactcheckIntegrateBtn") as HTMLButtonElement | null;
   const turn = askShownTurn;
   if (!btn || btn.disabled || !turn || !turn.answer || !turn.page) return;
+  if (integrateProposing) return; // one propose at a time (the bar renders disabled)
   if (!turn.baseHash) {
-    setIntegrateBarMsg("No page snapshot from this check — re-run the fact check, then integrate.", true);
+    setIntegrateBarMsg(turn, "No page snapshot from this check — re-run the fact check, then integrate.", true);
     return;
   }
-  btn.disabled = true;
-  const prevLabel = btn.textContent || "✎ Integrate into article";
-  btn.textContent = "Proposing edits… up to ~90s";
-  setIntegrateBarMsg("", false);
+  // In-flight state is derived, not poked: `integrateProposing` drives the bar's
+  // disabled "Proposing…" label through `factcheckIntegrateInnerHtml`, so any
+  // re-render (an SSE `end`, re-opening the turn) reproduces it.
+  integrateProposing = turn;
+  delete integrateBarMsgs[turn.askedAt];
+  refreshWriteActionBars(turn);
   integratePreview = null;
   renderIntegratePreview();
   try {
@@ -2481,7 +2573,7 @@ async function submitFactcheckIntegrate(): Promise<void> {
       stale?: boolean;
     };
     if (res.status === 409 || data.stale) {
-      setIntegrateBarMsg(INTEGRATE_STALE_COPY, true);
+      setIntegrateBarMsg(turn, INTEGRATE_STALE_COPY_EDIT, true);
       return;
     }
     // A page over the cap is a legitimate outcome, not a failure — the client
@@ -2489,6 +2581,7 @@ async function submitFactcheckIntegrate(): Promise<void> {
     // here. Say the same thing either way.
     if (res.status === 400 && (data.error || "").indexOf("too long") !== -1) {
       setIntegrateBarMsg(
+        turn,
         "This page is too long to integrate automatically — edit it by hand, or add the callout instead.",
         true,
       );
@@ -2496,24 +2589,30 @@ async function submitFactcheckIntegrate(): Promise<void> {
     }
     if (!res.ok) throw new Error(data.error || "HTTP " + res.status);
     const edits = Array.isArray(data.edits) ? data.edits : [];
-    integratePreview = {
+    // ALWAYS store, THEN attempt the render. A propose that resolved while the
+    // reader was on another turn (or another page) is not lost — the state is
+    // turn-keyed, and re-opening the turn from history paints it.
+    integratePreview = newPreviewState(
       turn,
-      proposal: { ...data, edits, dropped: Array.isArray(data.dropped) ? data.dropped : [] },
-      selected: edits.map(() => true),
-      // Default ON only when the page already carries a fact-check block: a stale
-      // callout beside freshly corrected prose is the case worth refreshing.
-      callout: data.hasSentinelBlock === true,
-    };
+      { ...data, edits, dropped: Array.isArray(data.dropped) ? data.dropped : [] },
+      edits.map(() => true),
+      // Default ON only when the page already carries a fact-check block AND the
+      // turn actually has an answer to build one from (no answer ⇒ the checkbox
+      // renders disabled).
+      data.hasSentinelBlock === true && !!turn.answer,
+    );
     renderIntegratePreview();
   } catch (err) {
     setIntegrateBarMsg(
+      turn,
       "Couldn't propose edits — " + (err instanceof Error ? err.message : String(err)),
       true,
     );
   } finally {
-    // Restore the bar button unless the write already retired it.
-    const b = document.getElementById("wikiFactcheckIntegrateBtn") as HTMLButtonElement | null;
-    if (b) { b.disabled = false; b.textContent = prevLabel; }
+    // Re-DERIVE the bar rather than force-enabling it: the write may have retired
+    // the button in the meantime, and a restored label would out-live the state.
+    integrateProposing = null;
+    refreshWriteActionBars(turn);
   }
 }
 
@@ -2521,11 +2620,14 @@ async function submitFactcheckIntegrate(): Promise<void> {
  *  `baseHash`, so the server's CAS still guards the write. */
 async function acceptFactcheckIntegrate(): Promise<void> {
   const state = integratePreview;
-  const accept = document.getElementById("wikiFcIntAccept") as HTMLButtonElement | null;
-  const msg = document.getElementById("wikiFcIntMsg");
-  if (!state || !accept || accept.disabled) return;
+  // Every gate is state-side: an in-flight apply, a turn that is no longer the
+  // one on screen, or a selection already known to resolve to nothing.
+  if (!state || state.applying || state.applyBlocked) return;
+  if (state.turn !== askShownTurn) return;
   const { turn } = state;
   if (!turn.page || !turn.baseHash) return;
+  const calloutRequested = state.callout && !!turn.answer;
+  const calloutReplaced = state.proposal.hasSentinelBlock === true;
   const body = buildIntegrateApplyBody({
     wiki: WIKI || undefined,
     page: turn.page,
@@ -2536,12 +2638,18 @@ async function acceptFactcheckIntegrate(): Promise<void> {
     answer: turn.answer,
   });
   if (!body) return;
+  // Show a message by mutating STATE and re-rendering — never by writing into a
+  // node captured before the render, which a mid-flight toggle would have detached.
   const showErr = (text: string): void => {
-    if (msg) { msg.textContent = text; msg.className = "wiki-fc-int-msg error"; }
+    state.message = text;
+    state.messageError = true;
+    renderIntegratePreview();
   };
-  accept.disabled = true;
-  accept.textContent = "Applying…";
-  if (msg) { msg.textContent = ""; msg.className = "wiki-fc-int-msg"; }
+  state.applying = true;
+  state.message = undefined;
+  state.messageError = false;
+  state.applyDropped = undefined;
+  renderIntegratePreview();
   try {
     const res = await fetch("/api/wiki/factcheck/integrate/apply", {
       method: "POST",
@@ -2550,15 +2658,16 @@ async function acceptFactcheckIntegrate(): Promise<void> {
     });
     const data = (await res.json().catch(() => ({}))) as {
       applied?: number;
+      calloutAdded?: boolean;
+      dropped?: DroppedEditRow[];
       committed?: boolean;
       reason?: string;
       error?: string;
       stale?: boolean;
     };
     if (res.status === 409 || data.stale) {
-      showErr(INTEGRATE_STALE_COPY);
-      accept.disabled = false;
-      accept.textContent = "Apply";
+      state.applying = false;
+      showErr(INTEGRATE_STALE_COPY_EDIT);
       return;
     }
     if (!res.ok) throw new Error(data.error || "HTTP " + res.status);
@@ -2567,12 +2676,18 @@ async function acceptFactcheckIntegrate(): Promise<void> {
       applied,
       committed: data.committed,
       reason: data.reason,
+      calloutAdded: data.calloutAdded,
+      calloutRequested,
+      calloutReplaced,
     });
     if (applied === 0) {
-      // Nothing was written — keep the ✎ button live so a re-propose is possible.
+      // Nothing was written. Re-offering the SAME selection would reproduce this
+      // forever, so Apply stays disabled until a checkbox changes — and the
+      // server's honest per-edit reasons are shown instead of being discarded.
+      state.applying = false;
+      state.applyBlocked = true;
+      state.applyDropped = Array.isArray(data.dropped) ? data.dropped : [];
       showErr(copy);
-      accept.disabled = false;
-      accept.textContent = "Apply";
       return;
     }
     // Record the write on the TURN and persist IMMEDIATELY — the session only
@@ -2580,21 +2695,31 @@ async function acceptFactcheckIntegrate(): Promise<void> {
     // come back correctly disabled after a reload.
     turn.wrote = "integrate";
     integratedNotes[turn.askedAt] = copy;
+    delete integrateBarMsgs[turn.askedAt];
     persistAskSession();
     integratePreview = null;
     renderIntegratePreview();
     refreshWriteActionBars(turn);
+    // The outcome copy ALSO goes on the rail's Ask status line, which is the only
+    // place it can actually be read: `loadPage` below replaces #articleWrap
+    // wholesale — bars and all — so a message left only on the bar is destroyed
+    // within a frame, whichever order the two calls are made in (loadPage is
+    // fire-and-forget; there is no post-render hook to re-attach to). The bar copy
+    // stays for the re-opened turn; the status line is what the user sees NOW.
+    setAskStatus(copy, "done");
     // Reload the page in the reader so the corrected prose is visible.
     loadPage(turn.page, false);
   } catch (err) {
-    accept.disabled = false;
-    accept.textContent = "Apply";
+    state.applying = false;
     showErr("Couldn't apply — " + (err instanceof Error ? err.message : String(err)));
   }
 }
 
-/** Dismiss the preview panel without writing anything. */
+/** Dismiss the preview panel without writing anything. Refuses while an apply is
+ *  in flight (the button renders disabled then too) — dropping the state mid-write
+ *  would strand the response with nowhere honest to report itself. */
 function cancelFactcheckIntegrate(): void {
+  if (integratePreview?.applying) return;
   integratePreview = null;
   renderIntegratePreview();
 }
@@ -2683,21 +2808,44 @@ document.addEventListener("click", (e) => {
 // re-rendered wholesale on every toggle, so direct listeners wouldn't survive).
 // State lives on `integratePreview`, never on the DOM.
 document.addEventListener("change", (e) => {
-  if (!integratePreview) return;
+  const state = integratePreview;
+  if (!state) return;
+  // An apply is in flight: the inputs render disabled, but a programmatic or
+  // racing change must not re-render the panel out from under it either.
+  if (state.applying) return;
   const t = e.target as HTMLElement;
   if (t.id === "wikiFcIntCallout") {
-    integratePreview.callout = (t as HTMLInputElement).checked;
+    state.callout = (t as HTMLInputElement).checked;
     renderIntegratePreview();
     return;
   }
   if (t.classList && t.classList.contains("wiki-fc-int-cb")) {
     const idx = parseInt(t.getAttribute("data-edit-idx") || "-1", 10);
     if (idx >= 0) {
-      integratePreview.selected[idx] = (t as HTMLInputElement).checked;
+      state.selected[idx] = (t as HTMLInputElement).checked;
+      // The selection changed, so the "this exact selection resolved to nothing"
+      // block no longer applies — Apply becomes live again.
+      state.applyBlocked = false;
+      state.applyDropped = undefined;
+      state.focusEditIdx = idx; // restored after the full re-render
       renderIntegratePreview();
     }
   }
 });
+// The dropped-list disclosure is state, not DOM: without this a checkbox toggle's
+// re-render snapped an opened "N not applied" list shut again.
+document.addEventListener(
+  "toggle",
+  (e) => {
+    const state = integratePreview;
+    if (!state) return;
+    const t = e.target as HTMLElement;
+    if (t instanceof HTMLDetailsElement && t.classList.contains("wiki-fc-int-dropped")) {
+      state.droppedOpen = t.open;
+    }
+  },
+  true, // `toggle` does not bubble — capture it
+);
 document.addEventListener("keydown", (e) => {
   const ke = e as KeyboardEvent;
   if (ke.key !== "Enter" || ke.shiftKey) return;

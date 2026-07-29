@@ -234,10 +234,16 @@ export function appendBlockedByIntegrate(turn: IntegrateGateTurn): boolean {
   return turn.wrote === "integrate";
 }
 
-/** The 409-shaped copy both write actions show once the other one has written.
- *  Deliberately identical to `submitFactcheckAppend`'s live-409 message. */
+/** The 409-shaped copy the ➕ **append** action shows once the other write has
+ *  landed. Deliberately identical to `submitFactcheckAppend`'s live-409 message. */
 export const INTEGRATE_STALE_COPY =
   "The page changed since the check — re-run the fact check, then add it.";
+
+/** The same 409 shape on the ✎ **integrate** bar. Separate string because "then
+ *  add it" names the ➕ action — on the editing bar the only sensible next step is
+ *  to integrate again. */
+export const INTEGRATE_STALE_COPY_EDIT =
+  "The page changed since the check — re-run the fact check, then integrate again.";
 
 // ── Diff preview ─────────────────────────────────────────────────────────────
 
@@ -245,8 +251,17 @@ export const INTEGRATE_STALE_COPY =
  *  outcome (`outcomeChangedChars`): the larger of the raw span replaced and the
  *  text inserted. Client-side this is UX only — the server re-measures. */
 export function editChangedChars(edit: ProposedEdit): number {
-  const oldText = typeof edit.resolvedText === "string" ? edit.resolvedText : edit.old;
-  return Math.max(oldText.length, edit.new.length);
+  // Defensive on BOTH sides: this runs from the checkbox change handler, so a
+  // malformed proposal (a field the server never sent, a non-string) must degrade
+  // to a number rather than throw and wedge the panel.
+  const oldText =
+    typeof edit.resolvedText === "string"
+      ? edit.resolvedText
+      : typeof edit.old === "string"
+        ? edit.old
+        : "";
+  const newText = typeof edit.new === "string" ? edit.new : "";
+  return Math.max(oldText.length, newText.length);
 }
 
 /** Total changed chars over the SELECTED edits (`selected[i]` parallel to `edits`;
@@ -276,13 +291,29 @@ function diffHtml(diff: DiffLine[]): string {
  * server didn't send one. Diffing `old` would show the reviewer a span that is not
  * what gets spliced whenever a tier-2 rescue widened it.
  */
-export function editPreviewHtml(edit: ProposedEdit, index: number, checked: boolean): string {
-  const oldText = typeof edit.resolvedText === "string" ? edit.resolvedText : edit.old;
+export function editPreviewHtml(
+  edit: ProposedEdit,
+  index: number,
+  checked: boolean,
+  disabled = false,
+): string {
+  const oldText =
+    typeof edit.resolvedText === "string"
+      ? edit.resolvedText
+      : typeof edit.old === "string"
+        ? edit.old
+        : "";
+  const newText = typeof edit.new === "string" ? edit.new : "";
   const tierChip =
     edit.tier === "collapsed"
       ? '<span class="wiki-fc-int-tier" title="Matched after collapsing whitespace — the replaced span is shown below, not the model\'s quote">collapsed match</span>'
       : "";
-  const claim = edit.claimIndex > 0 ? '<span class="wiki-fc-int-claim">Claim ' + edit.claimIndex + "</span>" : "";
+  // `claimIndex` is model-derived and only re-shaped (not re-typed) on the way
+  // here — escape it like every other untrusted field rather than interpolating.
+  const claim =
+    typeof edit.claimIndex === "number" && edit.claimIndex > 0
+      ? '<span class="wiki-fc-int-claim">Claim ' + esc(String(edit.claimIndex)) + "</span>"
+      : "";
   const ctxBefore = edit.beforeCtx
     ? '<div class="wiki-fc-int-ctx">…' + esc(edit.beforeCtx) + "</div>"
     : "";
@@ -291,14 +322,14 @@ export function editPreviewHtml(edit: ProposedEdit, index: number, checked: bool
     '<div class="wiki-fc-int-edit">' +
     '<label class="wiki-fc-int-row">' +
     '<input type="checkbox" class="wiki-fc-int-cb" data-edit-idx="' + index + '"' +
-    (checked ? " checked" : "") + " />" +
+    (checked ? " checked" : "") + (disabled ? " disabled" : "") + " />" +
     '<span class="wiki-fc-int-verdict">' + esc(edit.verdict || "") + "</span>" +
     claim +
     '<span class="wiki-fc-int-reason">' + esc(edit.reason || "") + "</span>" +
     tierChip +
     "</label>" +
     ctxBefore +
-    diffHtml(lineDiff(oldText, edit.new)) +
+    diffHtml(lineDiff(oldText, newText)) +
     ctxAfter +
     "</div>"
   );
@@ -306,7 +337,12 @@ export function editPreviewHtml(edit: ProposedEdit, index: number, checked: bool
 
 /** The collapsed "not applied" list — every propose-time rejection with its
  *  honest reason, so a thin preview never reads as a silent drop. */
-export function droppedListHtml(dropped: DroppedEditRow[]): string {
+export function droppedListHtml(
+  dropped: DroppedEditRow[],
+  open = false,
+  label?: string,
+  extraClass = "",
+): string {
   if (!dropped.length) return "";
   const rows = dropped
     .map((d) => {
@@ -320,9 +356,43 @@ export function droppedListHtml(dropped: DroppedEditRow[]): string {
     })
     .join("");
   return (
-    '<details class="wiki-fc-int-dropped"><summary>' +
-    dropped.length + " not applied</summary>" + rows + "</details>"
+    '<details class="wiki-fc-int-dropped' + (extraClass ? " " + extraClass : "") + '"' +
+    (open ? " open" : "") + "><summary>" +
+    esc(label ?? dropped.length + " not applied") + "</summary>" + rows + "</details>"
   );
+}
+
+/**
+ * Everything the preview panel renders that is NOT the proposal itself — the
+ * in-flight/outcome state of an apply, plus the two disclosure/enablement bits
+ * the panel must reproduce across a re-render.
+ *
+ * This exists because the panel is re-rendered wholesale from state on every
+ * checkbox toggle. Holding "an apply is running" on the DOM (a disabled button, a
+ * captured `msg` node) meant one toggle mid-apply produced a fresh ENABLED Apply
+ * button and detached the very nodes the error handler wrote into — an invisible
+ * failure plus a second apply. Anything the panel must survive a re-render lives
+ * here.
+ */
+export interface IntegratePreviewView {
+  /** An apply is in flight: Apply reads "Applying…" and disables, as do Cancel
+   *  and every checkbox. */
+  applying?: boolean;
+  /** Message rendered in the panel's msg row (error or outcome). */
+  message?: string;
+  /** Whether {@link message} renders as an error. */
+  messageError?: boolean;
+  /** Apply is disabled for the CURRENT selection (an `applied: 0` outcome — the
+   *  same selection would reproduce it forever). Cleared by any toggle. */
+  applyBlocked?: boolean;
+  /** Per-edit rejection reasons the APPLY route reported, rendered under the
+   *  propose-time drops so an `applied: 0` names why. */
+  applyDropped?: DroppedEditRow[];
+  /** `<details>` open state of the propose-time dropped list. */
+  droppedOpen?: boolean;
+  /** The turn carries no answer, so no callout can be built from it — render the
+   *  checkbox disabled instead of silently dropping the request at build time. */
+  calloutDisabled?: boolean;
 }
 
 /** Copy for the "nothing integrable" outcome — an honest empty state, not an
@@ -351,36 +421,63 @@ export function integratePreviewHtml(
   proposal: IntegrateProposal,
   selected: boolean[],
   calloutChecked: boolean,
+  view: IntegratePreviewView = {},
 ): string {
   const edits = proposal.edits || [];
   if (!edits.length) return nothingIntegrableHtml(proposal);
+  const applying = view.applying === true;
   const n = edits.filter((_, i) => selected[i] !== false).length;
   const changed = selectedChangedChars(edits, selected);
   const max = proposal.budget?.maxChangedChars;
   const overBudget = typeof max === "number" && changed > max;
-  const disabled = n === 0 || overBudget ? " disabled" : "";
+  const acceptDisabled =
+    n === 0 || overBudget || applying || view.applyBlocked === true ? " disabled" : "";
   const budgetNote =
     typeof max === "number"
       ? '<span class="wiki-fc-int-budget' + (overBudget ? " over" : "") + '">' +
         changed + " / " + max + " chars" + (overBudget ? " — over this page's change budget" : "") +
         "</span>"
       : "";
+  // The page already carries a fact-check block ⇒ the checkbox REPLACES it in
+  // place; a clean page ⇒ it adds one. Say which, since "add" on a page that has
+  // one reads as stacking a second.
+  const calloutLabel = proposal.hasSentinelBlock
+    ? "refresh the existing summary callout (replaces the previous one)"
+    : "also add summary callout";
+  const calloutDisabled = view.calloutDisabled === true || applying;
+  const calloutTitle = view.calloutDisabled
+    ? ' title="This turn carries no stored answer, so no callout can be built from it"'
+    : "";
+  const msg = view.message
+    ? '<div class="wiki-fc-int-msg' + (view.messageError ? " error" : "") +
+      '" id="wikiFcIntMsg">' + esc(view.message) + "</div>"
+    : '<div class="wiki-fc-int-msg" id="wikiFcIntMsg"></div>';
   return (
     '<div class="wiki-fc-int-panel" id="wikiFcIntPanel">' +
     '<div class="wiki-fc-int-head">' + edits.length +
     " proposed edit" + (edits.length === 1 ? "" : "s") + "</div>" +
     (proposal.note ? '<div class="wiki-fc-int-note">' + esc(proposal.note) + "</div>" : "") +
-    edits.map((e, i) => editPreviewHtml(e, i, selected[i] !== false)).join("") +
-    droppedListHtml(proposal.dropped || []) +
+    edits.map((e, i) => editPreviewHtml(e, i, selected[i] !== false, applying)).join("") +
+    droppedListHtml(proposal.dropped || [], view.droppedOpen === true) +
+    // The apply route's OWN per-edit rejections — the honest reasons behind an
+    // `applied: 0`, which a generic "nothing could be applied" line discarded.
+    droppedListHtml(
+      view.applyDropped || [],
+      true,
+      (view.applyDropped || []).length + " could not be applied to the current page",
+      "apply-drops",
+    ) +
     '<div class="wiki-fc-int-actions">' +
-    '<label class="wiki-fc-int-callout"><input type="checkbox" id="wikiFcIntCallout"' +
-    (calloutChecked ? " checked" : "") + " /> also add summary callout</label>" +
-    '<button id="wikiFcIntAccept" class="wiki-fc-int-btn primary"' + disabled + ">Apply " +
-    n + " edit" + (n === 1 ? "" : "s") + "</button>" +
-    '<button id="wikiFcIntCancel" class="wiki-fc-int-btn">Cancel</button>' +
+    '<label class="wiki-fc-int-callout"' + calloutTitle + '><input type="checkbox" id="wikiFcIntCallout"' +
+    (calloutChecked ? " checked" : "") + (calloutDisabled ? " disabled" : "") + " /> " +
+    calloutLabel + "</label>" +
+    '<button id="wikiFcIntAccept" class="wiki-fc-int-btn primary"' + acceptDisabled + ">" +
+    (applying ? "Applying…" : "Apply " + n + " edit" + (n === 1 ? "" : "s")) + "</button>" +
+    '<button id="wikiFcIntCancel" class="wiki-fc-int-btn"' + (applying ? " disabled" : "") +
+    ">Cancel</button>" +
     budgetNote +
     "</div>" +
-    '<div class="wiki-fc-int-msg" id="wikiFcIntMsg"></div>' +
+    msg +
     "</div>"
   );
 }
@@ -432,20 +529,36 @@ export function buildIntegrateApplyBody(input: {
 /**
  * Success copy for an apply, branching on the commit outcome. A write that
  * couldn't be committed has no git undo — say so rather than implying safety.
+ *
+ * The callout clause consumes the route's `calloutAdded`: when the user ASKED for
+ * a callout and the route reports it wasn't added, say so explicitly rather than
+ * letting an unmentioned outcome read as success.
  */
 export function integrateSuccessCopy(result: {
   applied: number;
   committed?: boolean;
   reason?: string;
+  calloutAdded?: boolean;
+  /** Whether the client requested the callout on this apply. */
+  calloutRequested?: boolean;
+  /** True when the page already carried a block (⇒ "refreshed", not "added"). */
+  calloutReplaced?: boolean;
 }): string {
   if (result.applied === 0) {
     return "No edits could be applied (the page may have shifted) — nothing was written.";
   }
   const n = result.applied + " edit" + (result.applied === 1 ? "" : "s");
-  if (result.committed) return "✓ Integrated " + n;
-  if (result.reason === "not-a-repo" || result.reason === "not-default-branch") {
-    return "✓ Integrated " + n + " — applied, but not committed (no git undo)";
+  let callout = "";
+  if (result.calloutAdded) {
+    callout = result.calloutReplaced ? " + summary callout refreshed" : " + summary callout added";
+  } else if (result.calloutRequested) {
+    callout = " (summary callout was NOT added)";
   }
-  if (result.reason) return "✓ Integrated " + n + " — not committed (" + result.reason + ")";
-  return "✓ Integrated " + n + " — not committed";
+  const head = "✓ Integrated " + n + callout;
+  if (result.committed) return head;
+  if (result.reason === "not-a-repo" || result.reason === "not-default-branch") {
+    return head + " — applied, but not committed (no git undo)";
+  }
+  if (result.reason) return head + " — not committed (" + result.reason + ")";
+  return head + " — not committed";
 }

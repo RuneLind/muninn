@@ -33,6 +33,7 @@ import { EXPLAINER_BRIDGE_MARKER } from "../../wiki/explainer-bridge.ts";
 import {
   FACTCHECK_SENTINEL_START,
   FACTCHECK_SENTINEL_END,
+  FACTCHECK_ANSWER_MAX,
 } from "../../wiki/factcheck-context.ts";
 
 /**
@@ -624,6 +625,130 @@ describe("integrate routes — pre-model / pre-write rejections", () => {
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toContain("answer is required");
     expect(await Bun.file(path.join(root, "Widgets.md")).text()).toContain("ships 4M units");
+  });
+
+  test("one combined callout+edits write produces exactly ONE log.md entry", async () => {
+    await Bun.write(path.join(root, "log.md"), "# Log\n");
+    __resetWikiCacheForTest();
+    const res = await post("/api/wiki/factcheck/integrate/apply?wiki=intwiki", {
+      page: "Widgets",
+      baseHash: await hashOf("Widgets.md"),
+      edits: editsFor("ships 4M units", "ships 2.1M units"),
+      appendCallout: true,
+      answer: "### ❌ Claim 1/1 — Ships 4M units\n\nThe filing reports 2.1M.",
+    });
+    expect(res.status).toBe(200);
+    // ONE commit attempt too — a single `CommitWikiResult` rides the outcome
+    // (`not-a-repo` on a bare temp dir), never one per spliced artefact.
+    expect((await res.json()) as { committed: boolean; reason: string }).toMatchObject({
+      committed: false,
+      reason: "not-a-repo",
+    });
+    const logText = await Bun.file(path.join(root, "log.md")).text();
+    // ONE write ⇒ ONE entry: the callout must ride the edits' write, never a
+    // second POST (which would 409 anyway, the edits having staled the baseHash).
+    expect(logText.split("factcheck-integrate").length - 1).toBe(1);
+    // …and the entry names the callout variant.
+    expect(logText).toContain("(with summary callout)");
+  });
+
+  test("an edits-only write logs the plain variant, once", async () => {
+    await Bun.write(path.join(root, "log.md"), "# Log\n");
+    __resetWikiCacheForTest();
+    const res = await post("/api/wiki/factcheck/integrate/apply?wiki=intwiki", {
+      page: "Widgets",
+      baseHash: await hashOf("Widgets.md"),
+      edits: editsFor("ships 4M units", "ships 2.1M units"),
+    });
+    expect(res.status).toBe(200);
+    const logText = await Bun.file(path.join(root, "log.md")).text();
+    expect(logText.split("factcheck-integrate").length - 1).toBe(1);
+    expect(logText).toContain("fact-check corrections integrated via the wiki reader");
+    expect(logText).not.toContain("(with summary callout)");
+  });
+
+  test("both branches end the file with exactly one trailing newline", async () => {
+    // Byte parity: ticking the callout checkbox must not be the reason an
+    // unrelated trailing byte changed.
+    const noNewline = "# Widgets\n\nThe device ships 4M units.";
+    await Bun.write(path.join(root, "Widgets.md"), noNewline);
+    __resetWikiCacheForTest();
+    let res = await post("/api/wiki/factcheck/integrate/apply?wiki=intwiki", {
+      page: "Widgets",
+      baseHash: await hashOf("Widgets.md"),
+      edits: editsFor("ships 4M units", "ships 2.1M units"),
+    });
+    expect(res.status).toBe(200);
+    let written = await Bun.file(path.join(root, "Widgets.md")).text();
+    expect(written.endsWith("\n")).toBe(true);
+    expect(written.endsWith("\n\n")).toBe(false);
+
+    await Bun.write(path.join(root, "Widgets.md"), noNewline);
+    __resetWikiCacheForTest();
+    res = await post("/api/wiki/factcheck/integrate/apply?wiki=intwiki", {
+      page: "Widgets",
+      baseHash: await hashOf("Widgets.md"),
+      edits: editsFor("ships 4M units", "ships 2.1M units"),
+      appendCallout: true,
+      answer: "### ❌ Claim 1/1 — Ships 4M units\n\nThe filing reports 2.1M.",
+    });
+    expect(res.status).toBe(200);
+    written = await Bun.file(path.join(root, "Widgets.md")).text();
+    expect(written.endsWith("\n")).toBe(true);
+    expect(written.endsWith("\n\n")).toBe(false);
+  });
+
+  test("an over-cap answer is a 400 naming the bound — at BOTH write routes", async () => {
+    const huge = "x".repeat(FACTCHECK_ANSWER_MAX + 1);
+    const hash = await hashOf("Widgets.md");
+    const apply = await post("/api/wiki/factcheck/integrate/apply?wiki=intwiki", {
+      page: "Widgets",
+      baseHash: hash,
+      edits: editsFor("ships 4M units", "ships 2.1M units"),
+      appendCallout: true,
+      answer: huge,
+    });
+    expect(apply.status).toBe(400);
+    expect(((await apply.json()) as { error: string }).error).toContain(String(FACTCHECK_ANSWER_MAX));
+    const append = await post("/api/wiki/factcheck/append?wiki=intwiki", {
+      page: "Widgets",
+      baseHash: hash,
+      answer: huge,
+    });
+    expect(append.status).toBe(400);
+    expect(((await append.json()) as { error: string }).error).toContain(String(FACTCHECK_ANSWER_MAX));
+    // Neither route wrote anything.
+    expect(await Bun.file(path.join(root, "Widgets.md")).text()).toContain("ships 4M units");
+  });
+
+  test("an answer AT the cap still writes (the bound is inclusive)", async () => {
+    const atCap = "### ❌ Claim 1/1 — Ships 4M units\n\n" + "x".repeat(FACTCHECK_ANSWER_MAX - 45);
+    expect(atCap.length).toBeLessThanOrEqual(FACTCHECK_ANSWER_MAX);
+    const res = await post("/api/wiki/factcheck/integrate/apply?wiki=intwiki", {
+      page: "Widgets",
+      baseHash: await hashOf("Widgets.md"),
+      edits: editsFor("ships 4M units", "ships 2.1M units"),
+      appendCallout: true,
+      answer: atCap,
+    });
+    expect(res.status).toBe(200);
+  });
+
+  test("propose reports hasSentinelBlock:false for an ORPHAN start sentinel", async () => {
+    // A bare `includes(START)` said true here, defaulting the reader's refresh
+    // checkbox ON for a page with no block to replace.
+    await Bun.write(
+      path.join(root, "Widgets.md"),
+      `# Widgets\n\n${FACTCHECK_SENTINEL_START}\n> half-written\n\nThe device ships 4M units.\n`,
+    );
+    __resetWikiCacheForTest();
+    const res = await post("/api/wiki/factcheck/integrate?wiki=intwiki", {
+      page: "Widgets",
+      answer: "### ✅ Claim 1/1 — Right\n\nAll good.",
+      baseHash: await hashOf("Widgets.md"),
+    });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { hasSentinelBlock: boolean }).hasSentinelBlock).toBe(false);
   });
 
   test("a zero-resolving apply stays a clean no-op even with appendCallout set", async () => {

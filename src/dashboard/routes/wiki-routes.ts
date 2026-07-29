@@ -39,11 +39,12 @@ import {
 } from "../../wiki/explain-context.ts";
 import {
   buildFactcheckBlock,
+  hasFactcheckBlock,
+  FACTCHECK_ANSWER_MAX,
   FACTCHECK_SELECTION_MAX,
   FACTCHECK_HEADING_MAX,
-  FACTCHECK_SENTINEL_START,
 } from "../../wiki/factcheck-context.ts";
-import { appendBlockToPage, spliceSentinelBlock } from "../../wiki/append-block.ts";
+import { appendBlockToPage, spliceSentinelBlock, withTrailingNewline } from "../../wiki/append-block.ts";
 import { writeWikiPage } from "../../wiki/page-write.ts";
 import {
   applyEdits,
@@ -1539,6 +1540,14 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       const baseHash = typeof body.baseHash === "string" ? body.baseHash.trim() : "";
       if (!page) return c.json({ error: "page is required" }, 400);
       if (!answer) return c.json({ error: "answer is required" }, 400);
+      // The answer is client-posted and gets spliced into the page — bound it like
+      // every other input on this write path.
+      if (answer.length > FACTCHECK_ANSWER_MAX) {
+        return c.json(
+          { error: `answer exceeds the ${FACTCHECK_ANSWER_MAX}-char limit`, max: FACTCHECK_ANSWER_MAX },
+          400,
+        );
+      }
       if (!baseHash) return c.json({ error: "baseHash is required" }, 400);
 
       const { entry, unknownWiki } = resolveWikiRequest(
@@ -1673,7 +1682,12 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // when it does (refreshing a stale block is almost always wanted) and OFF on
       // a clean page. The client cannot derive this — the page body is not in the
       // turn — so it rides the propose response.
-      const hasSentinelBlock = current.includes(FACTCHECK_SENTINEL_START);
+      // PAIRED matcher, not a bare START scan: an orphan start sentinel means
+      // there is no block to replace, so claiming one would default the reader's
+      // refresh checkbox ON and make the apply append a SECOND block (whose next
+      // strip would then swallow the prose between them). `hasFactcheckBlock` is
+      // the shared authority the strip + splice + exclusion zones already use.
+      const hasSentinelBlock = hasFactcheckBlock(current);
 
       const claims = correctableClaims(answer);
       if (claims.length === 0) {
@@ -1815,6 +1829,14 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       if (appendCallout && !calloutAnswer) {
         return c.json({ error: "answer is required when appendCallout is set" }, 400);
       }
+      // Same bound as the ➕ append route — the callout answer is spliced into the
+      // page, so it can't be the one unbounded input on a hard-bounded write.
+      if (calloutAnswer.length > FACTCHECK_ANSWER_MAX) {
+        return c.json(
+          { error: `answer exceeds the ${FACTCHECK_ANSWER_MAX}-char limit`, max: FACTCHECK_ANSWER_MAX },
+          400,
+        );
+      }
 
       const edits = coerceClientEdits(reqBody.edits);
       if (!edits) return c.json({ error: "edits must be a non-empty array of {old, new} with both non-empty" }, 400);
@@ -1890,7 +1912,10 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
           // this into a write — "applied: 0" stays a clean no-op, and the ➕ button
           // remains the way to add a callout on its own.
           if (applyResult.appliedCount === 0) return null;
-          if (!appendCallout) return applyResult.body;
+          // BOTH branches end in the same normalization (exactly one trailing
+          // newline) so ticking the callout checkbox can't be the reason an
+          // unrelated trailing byte changed.
+          if (!appendCallout) return withTrailingNewline(applyResult.body);
           // Same splice the ➕ route uses: REPLACE an existing sentinel block in
           // place (a stale callout is refreshed, never duplicated), else insert
           // before a trailing `## Sources`, else append. Runs on the already-edited
@@ -1902,7 +1927,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
             buildFactcheckBlock(calloutAnswer, todayOslo(Date.now())),
           );
           calloutAdded = true;
-          return `${spliced.replace(/\n+$/, "")}\n`;
+          return withTrailingNewline(spliced);
         },
         readFile: async (absPath) => {
           try {

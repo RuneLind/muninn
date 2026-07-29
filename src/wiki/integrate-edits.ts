@@ -95,6 +95,26 @@ export const ZONE_SENTINEL = "\uE000";
 /** Chars of surrounding body returned with each resolved edit for the client preview. */
 const PREVIEW_CONTEXT = 120;
 
+/**
+ * The preview context slices must stop at an exclusion-zone boundary. A naive
+ * `body.slice(start - 120, start)` reaches into frontmatter, a fenced code block
+ * or a persisted fact-check callout and renders those bytes to the reviewer as
+ * ordinary adjacent prose — text the edit provably cannot touch, shown as if it
+ * were its neighbourhood. The masked body already marks every zone code unit with
+ * {@link ZONE_SENTINEL}, so the clamp is a scan of the same window.
+ */
+function contextBefore(body: string, masked: string, start: number): string {
+  const from = Math.max(0, start - PREVIEW_CONTEXT);
+  const lastZone = masked.slice(from, start).lastIndexOf(ZONE_SENTINEL);
+  return body.slice(lastZone === -1 ? from : from + lastZone + 1, start);
+}
+
+function contextAfter(body: string, masked: string, end: number): string {
+  const to = Math.min(body.length, end + PREVIEW_CONTEXT);
+  const firstZone = masked.slice(end, to).indexOf(ZONE_SENTINEL);
+  return body.slice(end, firstZone === -1 ? to : end + firstZone);
+}
+
 // ── Exclusion zones ──────────────────────────────────────────────────────────
 
 export type ZoneKind = "frontmatter" | "sentinel" | "fence" | "component";
@@ -682,8 +702,8 @@ export function applyEdits(body: string, edits: IntegrateEdit[], isMdx = false):
       end: r.end,
       tier: r.tier,
       resolvedText,
-      beforeCtx: body.slice(Math.max(0, r.start - PREVIEW_CONTEXT), r.start),
-      afterCtx: body.slice(r.end, r.end + PREVIEW_CONTEXT),
+      beforeCtx: contextBefore(body, masked, r.start),
+      afterCtx: contextAfter(body, masked, r.end),
     };
   });
 

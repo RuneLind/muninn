@@ -162,6 +162,18 @@ test("a present-but-wrong-typed wrote/bodyLen drops the turn", () => {
   expect(restored.map((t) => t.question)).toEqual(["clean", "absent"]);
 });
 
+test("`wrote` is validated as the two-value union, not merely as a string", () => {
+  // An unknown value falls through every render branch and would silently
+  // re-enable BOTH write buttons against an already-staled baseHash.
+  const raw = JSON.stringify([
+    { ...turn({ question: "bogus" }), wrote: "appendd" },
+    { ...turn({ question: "empty" }), wrote: "" },
+    turn({ question: "append-ok", wrote: "append" }),
+    turn({ question: "integrate-ok", wrote: "integrate" }),
+  ]);
+  expect(deserializeAskSession(raw).map((t) => t.question)).toEqual(["append-ok", "integrate-ok"]);
+});
+
 test("per-turn shape validation drops only the malformed entries", () => {
   const good = turn({ question: "good" });
   const raw = JSON.stringify([
