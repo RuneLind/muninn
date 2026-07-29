@@ -83,6 +83,7 @@
  */
 
 import type { XDocType } from "./x.ts";
+import { readIntKnob } from "./config-knobs.ts";
 import { normalizeHandle } from "../summaries/author-scores.ts";
 import { getLog } from "../logging.ts";
 
@@ -128,21 +129,15 @@ export function resolveAmplificationConfig(
   botName?: string,
 ): ResolvedAmplificationConfig {
   return {
-    minAuthors: readInt(config.amplificationMinAuthors, "amplificationMinAuthors", DEFAULT_AMPLIFICATION_MIN_AUTHORS, 1, Number.MAX_SAFE_INTEGER, botName),
-    maxPromotions: readInt(config.amplificationMaxPromotions, "amplificationMaxPromotions", DEFAULT_AMPLIFICATION_MAX_PROMOTIONS, 0, MAX_AMPLIFICATION_MAX_PROMOTIONS, botName),
+    minAuthors: readIntKnob(config.amplificationMinAuthors, {
+      field: "amplificationMinAuthors", fallback: DEFAULT_AMPLIFICATION_MIN_AUTHORS, min: 1, max: Number.MAX_SAFE_INTEGER, botName,
+    }),
+    maxPromotions: readIntKnob(config.amplificationMaxPromotions, {
+      field: "amplificationMaxPromotions", fallback: DEFAULT_AMPLIFICATION_MAX_PROMOTIONS, min: 0, max: MAX_AMPLIFICATION_MAX_PROMOTIONS, botName,
+    }),
   };
 }
 
-function readInt(raw: unknown, field: string, fallback: number, min: number, max: number, botName?: string): number {
-  if (raw === undefined || raw === null) return fallback;
-  if (typeof raw !== "number" || !Number.isInteger(raw) || raw < min || raw > max) {
-    log.warn("Ignoring invalid {field}={value} (want an integer in [{min}, {max}]); using {fallback}", {
-      botName, field, value: String(raw), min, max, fallback,
-    });
-    return fallback;
-  }
-  return raw;
-}
 
 /** The minimum shape amplification needs off a fetched, score-ranked x-feed doc. */
 export interface RankedDoc {

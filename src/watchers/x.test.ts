@@ -1,5 +1,6 @@
 import { test, expect, describe, beforeEach, afterEach, mock } from "bun:test";
 import type { Watcher } from "../types.ts";
+import { withInterestProfile } from "../profile/inject.ts";
 // Captured from huginn's `GET /api/collection/x-feed/documents?include_scores=1` over the
 // real corpus (the 2026-07-24 1-day window); every in-window doc carries a combined_score.
 import xFeedListing from "./__fixtures__/x-feed-2026-07-24-listing.json";
@@ -253,7 +254,11 @@ const {
   DEFAULT_X_PROMPT,
   DEFAULT_X_HIGHLIGHTS_PROMPT,
   DEFAULT_X_CAPTURE_PROMPT,
+  resolveCaptureMaxItems,
+  decideAdmissions,
 } = await import("./x.ts");
+const { applyCaptureLimit, withCaptureLimit, DEFAULT_CAPTURE_MAX_ITEMS, MAX_CAPTURE_MAX_ITEMS } =
+  await import("./gate-scores.ts");
 
 // The REAL trq212 X Article doc, copied verbatim from huginn's x-feed corpus
 // (`2026-07-24_trq212_2080710971228918066.md`, combined_score 0.7493). Its body is only
@@ -847,6 +852,39 @@ describe("fetchFromCollection + checkX capture", () => {
     expect(lastGatePrompt).toContain("@alice");
     expect(lastGatePrompt).toContain("@bob");
     expect(lastGatePrompt).not.toContain("quick short take");
+  });
+
+  test("captureMaxItems caps a run to the K highest-scoring floor-passers", async () => {
+    // Both long-form posts clear the floor; the budget admits only the better one.
+    gateResult = JSON.stringify([
+      { n: 1, score: 0.78, why: "good" },
+      { n: 2, score: 0.91, why: "better" },
+    ]);
+    await checkX(
+      baseWatcher({
+        config: {
+          collection: "x-feed",
+          windowDays: 1,
+          captureCandidates: true,
+          candidateMinScore: 0.6,
+          captureMaxItems: 1,
+        },
+      }),
+    );
+    expect(upsertCalls).toHaveLength(1);
+    expect(upsertCalls[0]!.url).toBe("https://x.com/bob/status/2");
+    expect(upsertCalls[0]!.score).toBe(0.91);
+  });
+
+  test("the limit clause reaches the gate prompt with the resolved K", async () => {
+    gateResult = "[]";
+    await checkX(
+      baseWatcher({
+        config: { collection: "x-feed", windowDays: 1, captureCandidates: true, captureMaxItems: 2 },
+      }),
+    );
+    expect(lastGatePrompt).toContain("AT MOST 2");
+    expect(lastGatePrompt).toContain("never pad");
   });
 
   test("candidateMinScore drops a below-floor long-form post", async () => {
@@ -1533,6 +1571,140 @@ describe("resolveCaptureAmplifyMin", () => {
     expect(resolveCaptureAmplifyMin({ captureAmplifyMin: 2.5 })).toBeNull();
     expect(resolveCaptureAmplifyMin({ captureAmplifyMin: -1 })).toBeNull();
     expect(resolveCaptureAmplifyMin({ captureAmplifyMin: "3" as unknown as number })).toBeNull();
+  });
+});
+
+describe("resolveCaptureMaxItems", () => {
+  test("absent ⇒ ON at the default (inverse of every other capture knob)", () => {
+    expect(resolveCaptureMaxItems({})).toBe(DEFAULT_CAPTURE_MAX_ITEMS);
+    expect(DEFAULT_CAPTURE_MAX_ITEMS).toBe(3);
+  });
+
+  test("a valid integer in range is used verbatim", () => {
+    expect(resolveCaptureMaxItems({ captureMaxItems: 1 })).toBe(1);
+    expect(resolveCaptureMaxItems({ captureMaxItems: MAX_CAPTURE_MAX_ITEMS })).toBe(MAX_CAPTURE_MAX_ITEMS);
+  });
+
+  test("invalid values fall back to the DEFAULT, never to unlimited", () => {
+    // An unbudgeted gate is the defect this knob exists to fix, so a mistyped value must
+    // not silently restore it — deliberately the inverse of resolveCaptureAmplifyMin.
+    for (const bad of [0, -1, 2.5, NaN, Infinity, "3" as unknown as number]) {
+      expect(resolveCaptureMaxItems({ captureMaxItems: bad })).toBe(DEFAULT_CAPTURE_MAX_ITEMS);
+    }
+  });
+
+  test("an out-of-range value cannot silently uncap the gate", () => {
+    // The knob's whole job is to CAP volume — `1e9` is a valid integer ≥ 1 and would
+    // otherwise be honoured verbatim, restoring exactly the unbudgeted behaviour.
+    expect(resolveCaptureMaxItems({ captureMaxItems: 1e9 })).toBe(DEFAULT_CAPTURE_MAX_ITEMS);
+    expect(resolveCaptureMaxItems({ captureMaxItems: MAX_CAPTURE_MAX_ITEMS + 1 })).toBe(
+      DEFAULT_CAPTURE_MAX_ITEMS,
+    );
+  });
+});
+
+describe("applyCaptureLimit", () => {
+  test("under or at the limit ⇒ everything passes through", () => {
+    const passing = [{ n: 1, score: 0.7 }, { n: 2, score: 0.9 }];
+    expect(applyCaptureLimit(passing, 3)).toEqual(new Set([1, 2]));
+    expect(applyCaptureLimit(passing, 2)).toEqual(new Set([1, 2]));
+    expect(applyCaptureLimit([], 3)).toEqual(new Set());
+  });
+
+  test("over the limit ⇒ keeps the highest scores, NOT the first parsed", () => {
+    // parseGateScores gives no ordering guarantee, so "first K" would be arbitrary.
+    const passing = [{ n: 1, score: 0.76 }, { n: 2, score: 0.8 }, { n: 3, score: 0.95 }];
+    expect(applyCaptureLimit(passing, 1)).toEqual(new Set([3]));
+    expect(applyCaptureLimit(passing, 2)).toEqual(new Set([2, 3]));
+  });
+
+  test("exact score ties break toward the lower n (the better-ranked doc)", () => {
+    expect(applyCaptureLimit([{ n: 2, score: 0.85 }, { n: 5, score: 0.85 }], 1)).toEqual(new Set([2]));
+  });
+});
+
+describe("withCaptureLimit", () => {
+  test("appends the cap to the prompt and forbids padding", () => {
+    const out = withCaptureLimit("BASE RULES", 3);
+    expect(out.startsWith("BASE RULES")).toBe(true);
+    expect(out).toContain("AT MOST 3");
+    // Told only "at most K" a model reliably returns exactly K, turning a quiet batch
+    // into K forced captures — the anti-padding sentence is load-bearing.
+    expect(out.toLowerCase()).toContain("never pad");
+    expect(out).toContain("FEWER");
+  });
+
+  test("the interest profile still wraps LAST when both are composed", () => {
+    // The profile block's "output-format instructions above still apply" trailer is only
+    // truthful if the limit clause sits ABOVE it — this is the ordering invariant itself,
+    // not merely a fact about the base constant.
+    const composed = withInterestProfile(withCaptureLimit(DEFAULT_X_CAPTURE_PROMPT, 3), "likes agents");
+    expect(composed.indexOf("AT MOST 3")).toBeGreaterThan(-1);
+    expect(composed.indexOf("likes agents")).toBeGreaterThan(composed.indexOf("AT MOST 3"));
+  });
+});
+
+describe("decideAdmissions — floor FIRST, then the limit", () => {
+  // Minimal EligibleTweet stubs: only the fields passesCaptureFloor reads.
+  const item = (kind: "x-post" | "x-link", tier: "top1" | "top5" | null) =>
+    ({ doc: { docType: null }, author: "a", authorScore: null, tier, kind }) as never;
+
+  test("a floor-BLOCKED higher scorer does not consume the only slot", () => {
+    // The two kinds carry DIFFERENT floors, which is what makes the order observable:
+    // x-post (non-top author) floors at 0.75, x-link at 0.7. Budget-then-floor would
+    // spend the slot on n=1 (0.74, top score) and then drop it, capturing NOTHING.
+    const eligible = [item("x-post", null), item("x-link", "top5")];
+    const byN = new Map([
+      [1, { n: 1, score: 0.74, why: "under its floor" }],
+      [2, { n: 2, score: 0.72, why: "over its floor" }],
+    ]);
+    const d = decideAdmissions(eligible, byN, { candidateMinScore: 0.6 }, 1);
+    expect(d.passedFloor).toEqual(new Set([2]));
+    expect(d.admitted).toEqual(new Set([2]));
+  });
+
+  test("a strong batch admits exactly the limit; a weak one admits fewer", () => {
+    const eligible = [item("x-post", "top5"), item("x-post", "top5"), item("x-post", "top5")];
+    const strong = new Map([
+      [1, { n: 1, score: 0.9, why: "" }],
+      [2, { n: 2, score: 0.8, why: "" }],
+      [3, { n: 3, score: 0.7, why: "" }],
+    ]);
+    expect(decideAdmissions(eligible, strong, { candidateMinScore: 0.6 }, 2).admitted).toEqual(
+      new Set([1, 2]),
+    );
+    // Only one clears the 0.6 floor ⇒ one admitted, not padded up to the limit.
+    const weak = new Map([
+      [1, { n: 1, score: 0.9, why: "" }],
+      [2, { n: 2, score: 0.3, why: "" }],
+      [3, { n: 3, score: 0.2, why: "" }],
+    ]);
+    expect(decideAdmissions(eligible, weak, { candidateMinScore: 0.6 }, 2).admitted).toEqual(
+      new Set([1]),
+    );
+  });
+
+  test("passedFloor is reported PRE-limit, so a limit rejection is distinguishable", () => {
+    // The step-2b wave path depends on telling a floor rejection from a limit one.
+    const eligible = [item("x-post", "top5"), item("x-post", "top5")];
+    const byN = new Map([
+      [1, { n: 1, score: 0.9, why: "" }],
+      [2, { n: 2, score: 0.8, why: "" }],
+    ]);
+    const d = decideAdmissions(eligible, byN, { candidateMinScore: 0.6 }, 1);
+    expect(d.passedFloor).toEqual(new Set([1, 2]));
+    expect(d.admitted).toEqual(new Set([1]));
+  });
+
+  test("a sub-tier pointer is floor-blocked whatever it scores, and never eats a slot", () => {
+    const eligible = [item("x-link", null), item("x-post", "top5")];
+    const byN = new Map([
+      [1, { n: 1, score: 0.99, why: "sub-tier pointer" }],
+      [2, { n: 2, score: 0.7, why: "ordinary long-form" }],
+    ]);
+    const d = decideAdmissions(eligible, byN, { candidateMinScore: 0.6 }, 1);
+    expect(d.passedFloor).toEqual(new Set([2]));
+    expect(d.admitted).toEqual(new Set([2]));
   });
 });
 

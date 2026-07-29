@@ -1,6 +1,15 @@
 import type { Watcher, WatcherAlert } from "../types.ts";
 import { spawnHaiku, DEFAULT_MODEL, type HaikuTelemetry } from "../scheduler/executor.ts";
-import { parseGateScores, indexScoresByN, type GateScore } from "./gate-scores.ts";
+import {
+  parseGateScores,
+  indexScoresByN,
+  applyCaptureLimit,
+  withCaptureLimit,
+  DEFAULT_CAPTURE_MAX_ITEMS,
+  MAX_CAPTURE_MAX_ITEMS,
+  type GateScore,
+} from "./gate-scores.ts";
+import { readIntKnob } from "./config-knobs.ts";
 import { upsertCandidate, upsertDestinationCandidate } from "../db/summary-candidates.ts";
 import { recordAmplifierVote, getAmplifierGroup } from "../db/x-link-amplifiers.ts";
 import { normalizeHandle, getAuthorScore, getAuthorTierThresholds, type AuthorTierThresholds } from "../summaries/author-scores.ts";
@@ -127,6 +136,19 @@ interface XWatcherConfig extends AmplificationConfig {
    * headroom at current n, or once chunking has shipped.
    */
   captureAmplifyMin?: number;
+  /**
+   * **Per-run capture limit K** — the maximum items ONE gate run may admit to the inbox,
+   * applied AFTER the per-kind floors. Default {@link DEFAULT_CAPTURE_MAX_ITEMS}, bounded
+   * by {@link MAX_CAPTURE_MAX_ITEMS}.
+   *
+   * Named `…MaxItems`, not `…Budget`: this module already has a *time* budget
+   * (`captureBudgetMs` / `captureBudgetDeadline` / the `budget-exhausted` outcome), and one
+   * word for milliseconds and item-counts makes both ungreppable.
+   *
+   * Absent or invalid ⇒ **on at the default**, never unlimited. Rationale + the measurement
+   * behind K: `src/watchers/CLAUDE.md`, "Capture limit".
+   */
+  captureMaxItems?: number;
   // --- X-Article amplification (digest leg) ---
   // `amplificationMinAuthors` / `amplificationMaxPromotions` are inherited from
   // {@link AmplificationConfig}; see `x-amplification.ts` for the mechanism + its bound.
@@ -1008,6 +1030,7 @@ OMIT items that aren't worth a summary — do not output them at all.
 
 Return ONLY a JSON array of these objects, no prose and no markdown fences. If nothing is worth saving, return [].`;
 
+
 /**
  * Long-form pre-filter (mirror of the anthropic watcher's `isShelfWorthy`): capture
  * eligibility for the inbox. A long-form note/article — either a long-form `**Type:**`
@@ -1148,17 +1171,19 @@ function linkDomain(url: string): string {
 }
 
 /**
- * Does this eligible item's gate score clear its per-kind capture floor? Single source of
- * truth shared by the persist loop and the gate's outcome log, so the logged
- * `aboveFloor` can never drift from what actually gets captured.
+ * Does this eligible item's gate score clear its per-kind capture floor?
+ *
+ * Called only from {@link decideAdmissions}, which owns the floor-then-limit composition;
+ * the "log and persist can never disagree" invariant now lives there (the persist loop
+ * reads its `admitted` set rather than re-running this). `aboveFloor` in the outcome log
+ * is this predicate's count — a PRE-limit number; `admitted` is what actually captures.
  */
 function passesCaptureFloor(item: EligibleTweet, score: GateScore, config: XWatcherConfig): boolean {
   // Step 2b: a SUB-TIER pointer (in the batch only because `captureAmplifyMin` is set) is
   // NEVER admitted by the floor path, whatever it scores — its only route to the inbox is
-  // the cross-run amplifier threshold. Returning false here keeps the gate's `aboveFloor`
-  // field meaning exactly "would be captured by this loop", which is what the chunking /
-  // volume mining reads; a sub-tier pointer's contribution shows up as a wave admission
-  // instead.
+  // the cross-run amplifier threshold. Returning false here also keeps it from consuming
+  // one of the run's limited slots (see decideAdmissions); a sub-tier pointer's
+  // contribution shows up as a wave admission instead.
   if (item.kind === "x-link" && item.tier == null) return false;
   // x-post → per-tier floor (non-top raise applies, EXCEPT for `**Type:** article` —
   // long-form by construction, see the precedence table on captureFloorForTier);
@@ -1168,6 +1193,71 @@ function passesCaptureFloor(item: EligibleTweet, score: GateScore, config: XWatc
       ? captureFloorForXLink(config)
       : captureFloorForTier(item.tier, config, item.doc.docType);
   return score.score >= floor;
+}
+
+/**
+ * Resolve the per-run capture limit K — the maximum items ONE gate run may admit.
+ *
+ * ⚠️ **Degrade direction is the INVERSE of every other capture knob**: absent or invalid ⇒
+ * ON at {@link DEFAULT_CAPTURE_MAX_ITEMS}, never unlimited. An unbudgeted gate is the
+ * defect this exists to fix, so a mistyped value must not silently restore it (contrast
+ * `resolveCaptureAmplifyMin`, where invalid ⇒ off, because there "off" is the safe side).
+ * The `max` bound is what makes that true for large values too, not just wrong types.
+ *
+ * Why a limit exists at all — and why it is a PROMPT clause plus a deterministic cap, not
+ * just a cap: see the "Capture limit" section of `src/watchers/CLAUDE.md`.
+ */
+export function resolveCaptureMaxItems(
+  config: XWatcherConfig,
+  botName?: string,
+  watcherId?: string,
+): number {
+  return readIntKnob(config.captureMaxItems, {
+    field: "captureMaxItems",
+    fallback: DEFAULT_CAPTURE_MAX_ITEMS,
+    min: 1,
+    max: MAX_CAPTURE_MAX_ITEMS,
+    botName,
+    dedupeKey: `${watcherId ?? botName ?? "-"}:${String(config.captureMaxItems)}`,
+  });
+}
+
+/** What the floor+limit decision produced for one gate run. */
+export interface AdmissionDecision {
+  /** `n`s clearing their per-kind floor, BEFORE the limit. */
+  passedFloor: Set<number>;
+  /** `n`s actually admitted to the inbox — `passedFloor` narrowed by the limit. */
+  admitted: Set<number>;
+}
+
+/**
+ * Decide which eligible items reach the inbox: per-kind floor first, then the limit.
+ *
+ * Pure and exported so the composition-order invariant is unit-testable directly, without
+ * standing up a fetch stub and a markdown fixture just to reach it. `runCaptureGate` calls
+ * it once and hands both sets to the persist loop, so the outcome log and what actually
+ * gets captured cannot drift apart.
+ *
+ * Both sets are returned because they answer different questions downstream: `admitted`
+ * gates capture, while `passedFloor` is what distinguishes a **floor** rejection from a
+ * **limit** rejection — a distinction the step-2b wave path depends on (see its use in
+ * `captureXCandidates`).
+ */
+export function decideAdmissions(
+  eligible: EligibleTweet[],
+  byN: Map<number, GateScore>,
+  config: XWatcherConfig,
+  maxItems: number,
+): AdmissionDecision {
+  const passing: { n: number; score: number }[] = [];
+  for (let i = 0; i < eligible.length; i++) {
+    const s = byN.get(i + 1);
+    if (s && passesCaptureFloor(eligible[i]!, s, config)) passing.push({ n: i + 1, score: s.score });
+  }
+  return {
+    passedFloor: new Set(passing.map((p) => p.n)),
+    admitted: applyCaptureLimit(passing, maxItems),
+  };
 }
 
 /** One gate attempt's outcome — the measurement surface, logged unconditionally. */
@@ -1182,8 +1272,23 @@ interface GateOutcome {
    *  there is nothing scored, and emitting `0` there is indistinguishable from "ran and
    *  scored nothing", which would poison any mining of the acceptance rate. */
   scored?: number;
-  /** Items that would actually be captured (`passesCaptureFloor`). `ok` only, same reason. */
+  /** Items clearing `passesCaptureFloor`. `ok` only, same reason.
+   *
+   *  ⚠️ **NOT comparable across the capture-limit ship date.** The limit is also a PROMPT
+   *  clause, so post-limit the model returns at most K items at all — which caps `scored`,
+   *  and therefore caps this. Pre-limit runs measured a mean of 17.9 here; post-limit it is
+   *  structurally ≤ K. Only `n` (items FED to the gate) spans both eras. The pre-limit
+   *  distribution is the baseline and is already recorded in CLAUDE.md; do not try to
+   *  re-derive it from post-limit lines. */
   aboveFloor?: number;
+  /** The limit K in force for this run (`resolveCaptureMaxItems`). `ok` only. */
+  maxItems?: number;
+  /** Items admitted after the limit. `ok` only.
+   *
+   *  Items *attempted*, not rows landed: an upsert can throw, and several in-batch pointers
+   *  sharing a destination key collapse onto ONE row. `Capture: queued N` is the honest
+   *  inbox-volume line; this one measures the decision, not the write. */
+  admitted?: number;
   durationMs: number;
   /** Attempts actually MADE (so a `budget-exhausted` line before attempt k reports k−1,
    *  never a phantom attempt that never ran). */
@@ -1206,12 +1311,27 @@ interface GateOutcome {
  */
 function logGateOutcome(o: GateOutcome, botName: string | undefined): void {
   // `scored`/`aboveFloor` are omitted entirely on non-ok outcomes (see GateOutcome).
-  const counts = o.outcome === "ok" ? " scored={scored} aboveFloor={aboveFloor}" : "";
+  const counts =
+    o.outcome === "ok"
+      ? " scored={scored} aboveFloor={aboveFloor} maxItems={maxItems} admitted={admitted}"
+      : "";
   const msg =
     `x-capture-gate {outcome}: n={n}${counts} durationMs={durationMs} attempt={attempt}/{maxAttempts} attemptTimeoutMs={attemptTimeoutMs} promptChars={promptChars}`;
   const props = { botName, maxAttempts: CAPTURE_GATE_MAX_ATTEMPTS, ...o };
   if (o.outcome === "ok") log.info(msg, props);
   else log.warn(`${msg} error={error}`, props);
+}
+
+/**
+ * The gate's result: every parsed score, plus the admission decision.
+ *
+ * `scores` stays COMPLETE on purpose — the step-2b amplifier path records a vote for every
+ * pointer the gate *returned*, including ones the floor or the limit rejected. Filtering
+ * here would silently hollow out that table. Admission is expressed as separate n-sets
+ * instead, which the persist loop consults.
+ */
+interface CaptureGateResult extends AdmissionDecision {
+  scores: GateScore[];
 }
 
 /**
@@ -1226,14 +1346,16 @@ function logGateOutcome(o: GateOutcome, botName: string | undefined): void {
  * capture — it re-saves the OLD `lastNotifiedIds` and re-fetches the whole batch next
  * run, so the invariant is hard.
  */
+
 async function runCaptureGate(
   eligible: EligibleTweet[],
   config: XWatcherConfig,
   botName: string | undefined,
   interestProfile: string | null,
   deadline: number,
+  maxItems: number,
   telemetry?: HaikuTelemetry,
-): Promise<GateScore[]> {
+): Promise<CaptureGateResult> {
   // Feed the gate the longer gateExcerpt, not the 500-char compact digest line — it is
   // judging whether the FULL post is worth summarizing. The author-rank prior (tier only,
   // when known) lets the gate judge content WITH the strongest prior; the deterministic
@@ -1251,7 +1373,12 @@ async function runCaptureGate(
       return `${i + 1}. ${doc.docType ? "[ARTICLE/NOTE] " : ""}${doc.handle}: ${doc.gateExcerpt}${linkPart}${priorPart}\n   URL: ${doc.url}`;
     })
     .join("\n\n");
-  const criteria = withInterestProfile(DEFAULT_X_CAPTURE_PROMPT, interestProfile);
+  // withInterestProfile MUST wrap last (its trailer claims the format rules above still
+  // apply), so the limit clause is composed onto the base prompt first.
+  const criteria = withInterestProfile(
+    withCaptureLimit(DEFAULT_X_CAPTURE_PROMPT, maxItems),
+    interestProfile,
+  );
   const prompt = `${criteria}\n\nPosts:\n\n${list}`;
 
   const base = {
@@ -1299,18 +1426,26 @@ async function runCaptureGate(
       const durationMs = Date.now() - startedAt;
       const scores = parseGateScores(result);
       const byN = indexScoresByN(scores, eligible.length);
-      let aboveFloor = 0;
-      for (let i = 0; i < eligible.length; i++) {
-        const s = byN.get(i + 1);
-        if (s && passesCaptureFloor(eligible[i]!, s, config)) aboveFloor++;
-      }
+      const decision = decideAdmissions(eligible, byN, config, maxItems);
       logGateOutcome(
         // `scored` is the USABLE count (byN.size), not scores.length — `indexScoresByN`
         // drops out-of-range/duplicate `n`s, and those never reach the persist loop.
-        { ...base, outcome: "ok", scored: byN.size, aboveFloor, durationMs, attempt, attemptTimeoutMs },
+        // `aboveFloor` stays PRE-budget so the series spans the budget's ship date;
+        // `admitted` is the post-budget number the shelf volume is mined from.
+        {
+          ...base,
+          outcome: "ok",
+          scored: byN.size,
+          aboveFloor: decision.passedFloor.size,
+          maxItems,
+          admitted: decision.admitted.size,
+          durationMs,
+          attempt,
+          attemptTimeoutMs,
+        },
         botName,
       );
-      return scores;
+      return { scores, ...decision };
     } catch (err) {
       lastError = err;
       logGateOutcome(
@@ -1509,9 +1644,22 @@ async function captureXCandidates(
     return;
   }
 
+  // Both knobs resolve HERE, at one level, next to each other — the gate is a model-call
+  // wrapper and should not be re-reading config from inside its retry loop.
+  const maxItems = resolveCaptureMaxItems(config, botName, watcher.id);
   let scored: GateScore[];
+  let admitted: Set<number>;
+  let passedFloor: Set<number>;
   try {
-    scored = await runCaptureGate(eligible, config, botName, interestProfile, deadline, telemetry);
+    ({ scores: scored, admitted, passedFloor } = await runCaptureGate(
+      eligible,
+      config,
+      botName,
+      interestProfile,
+      deadline,
+      maxItems,
+      telemetry,
+    ));
   } catch (err) {
     log.error("Capture gate failed, proceeding with alert path ({n} eligible tweet(s) lost to inbox): {error}", {
       botName,
@@ -1596,17 +1744,29 @@ async function captureXCandidates(
       }
     }
 
-    // --- Direct admission (step 2a semantics, unchanged) ---
-    // Per-kind floor — shared with the gate's outcome log so `aboveFloor` there always
-    // means exactly "would be captured here". Sub-tier pointers are rejected by it
-    // unconditionally; their only route is the wave admission below.
-    const directlyAdmitted = score != null && passesCaptureFloor(item, score, config);
+    // --- Direct admission (step 2a semantics + the per-run limit) ---
+    // `admitted` is the gate's own floor-then-limit decision, so the persist loop and the
+    // outcome log's `admitted` count can never disagree — the same invariant the per-kind
+    // floor had before, just moved up one level. (No `score != null` guard: every `n` in
+    // `admitted` came from `byN` by construction, so a member always has a score.)
+    const directlyAdmitted = admitted.has(i + 1);
     if (!directlyAdmitted) {
       // A pointer that did NOT directly admit may still be the vote that pushes its
       // destination over the cross-run threshold — including a top-tier pointer that
       // fell below the floor, whose vote is just as real as a sub-tier one. Queued, not
       // checked here: every vote in THIS batch must be recorded first (see `waveKeys`).
-      if (amplifyMin !== null && isPointer && groupKey) waveKeys.add(groupKey);
+      //
+      // **Floor rejection only — never a LIMIT rejection.** A pointer that cleared its
+      // floor and merely lost this run's limit race must NOT queue a wave check: before
+      // the limit existed it would have been directly admitted and never queued, so
+      // letting it through here would hand it an uncapped same-run admission via the
+      // wave path — i.e. a way around the very cap that just rejected it. The wave path
+      // stays uncapped on purpose (it is cross-run bookkeeping paying out, not this
+      // run's discretionary pick), which is exactly why nothing the limit rejected may
+      // enter it. Its vote is still recorded above either way.
+      if (amplifyMin !== null && isPointer && groupKey && !passedFloor.has(i + 1)) {
+        waveKeys.add(groupKey);
+      }
       continue;
     }
     // `directlyAdmitted` implies a non-null score; TS can't see that through the boolean.
