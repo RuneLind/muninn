@@ -352,5 +352,77 @@ export function componentBlockCss(scope: string): string {
     ${scope} .fc-claim { padding: 0.5rem 0 0.6rem; }
     ${scope} .fc-claim + .fc-claim { border-top: 1px solid var(--border-primary); }
     ${scope} .fc-claim > :first-child { margin-top: 0.4rem; }
+
+    /* ── Reader interaction layer ───────────────────────────────────────────
+       Client-inserted by wiki-factcheck-reader.ts: a summary toolbar above the
+       article (the appendix's own date + counts, cloned) carrying the layer
+       toggle, and the evidence card a chip expands under its block. Both are
+       styled here so the annotation reads as one system in every scope. */
+    ${scope} .fc-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      flex-wrap: wrap;
+      margin: 0 0 1.1rem;
+      padding: 0.45rem 0.85rem;
+      border: 1px solid var(--border-secondary);
+      border-radius: 10px;
+      background: var(--bg-surface);
+      font-size: 0.9em;
+      color: var(--text-muted);
+    }
+    ${scope} .fc-toolbar-summary { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+    ${scope} .fc-toolbar-toggle {
+      margin-left: auto;
+      appearance: none;
+      font: inherit;
+      font-size: 0.9em;
+      cursor: pointer;
+      padding: 0.15em 0.7em;
+      border-radius: 999px;
+      border: 1px solid var(--border-secondary);
+      background: transparent;
+      color: var(--text-muted);
+    }
+    ${scope} .fc-toolbar-toggle:hover { color: var(--text-primary); border-color: var(--accent); }
+    ${scope} .fc-toolbar-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+    /* Layer OFF — the whole point of the toggle is that the article reads clean
+       underneath, so the tints go transparent (never a layout-shifting border
+       removal) and the chrome hides outright. */
+    ${scope}.fc-off .fc-mark { border-bottom-color: transparent; background: transparent; }
+    ${scope}.fc-off .fc-mark-block { border-left-color: transparent; }
+    ${scope}.fc-off .fc-chip,
+    ${scope}.fc-off .fc-block,
+    ${scope}.fc-off .fc-card { display: none; }
+
+    ${scope} .fc-card {
+      position: relative;
+      margin: 0.6rem 0 1.1rem;
+      padding: 0.15rem 2.3rem 0.4rem 0.9rem;
+      border: 1px solid var(--border-secondary);
+      border-left: 3px solid var(--accent);
+      border-radius: 8px;
+      background: var(--bg-surface);
+      font-size: 0.95em;
+    }
+    ${scope} .fc-card .fc-claim { padding-top: 0; }
+    ${scope} .fc-card-close {
+      position: absolute;
+      top: 0.4rem;
+      right: 0.5rem;
+      appearance: none;
+      border: 0;
+      background: transparent;
+      color: var(--text-muted);
+      font: inherit;
+      font-size: 0.95em;
+      line-height: 1;
+      cursor: pointer;
+      padding: 0.2rem 0.35rem;
+      border-radius: 6px;
+    }
+    ${scope} .fc-card-close:hover { color: var(--text-primary); }
+    ${scope} .fc-card-close:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   `;
 }

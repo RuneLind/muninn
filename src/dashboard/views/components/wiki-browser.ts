@@ -31,6 +31,7 @@ import {
 import { enhanceMermaid } from "./wiki-mermaid.ts";
 import { atlasBodyHtml, initAtlas } from "./wiki-atlas.ts";
 import { enhanceCodeTabs } from "./code-tabs.ts";
+import { enhanceFactCheck } from "./wiki-factcheck-reader.ts";
 import {
   serializeAskSession,
   deserializeAskSession,
@@ -1384,6 +1385,9 @@ function fetchAndRenderPage(url: string, push: boolean, relPath?: string): void 
       // with its own markup, so rendered diagrams disappear with it — not hooked.)
       enhanceMermaid(document.getElementById("articleWrap")!);
       enhanceCodeTabs(document.getElementById("articleWrap")!);
+      // Fact-check layer: chip → evidence card, the summary strip, and the
+      // layer toggle. No-op on a page carrying no annotation.
+      enhanceFactCheck(document.getElementById("articleWrap")!);
       renderConnections(data);
       // Lazy: fetch semantic cousins after the page + connections are on screen,
       // so it never blocks the article render.
