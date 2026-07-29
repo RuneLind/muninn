@@ -44,6 +44,7 @@ import {
   FACTCHECK_MAX_CLAIMS,
   type Claim,
 } from "../../wiki/factcheck-context.ts";
+import { CLAIM_QUOTE_MAX } from "../views/components/wiki-integrate.ts";
 import { getLog } from "../../logging.ts";
 
 const log = getLog("dashboard", "factcheck-sse");
@@ -106,6 +107,20 @@ export interface FactcheckSseOptions {
    * never enforces. Absent ⇒ the client shows no budget rather than a fiction.
    */
   bodyLen?: number;
+  /**
+   * Whether the checked page SHOULD carry INLINE fact-check annotations — i.e. its
+   * resolved file extension is `.mdx` (`isAnnotatablePage` in `wiki-routes.ts`).
+   * This is a POLICY restriction, not a capability one: `renderWikiHtml` is
+   * extension-agnostic and would render the `<Fact>`/`<FactCheck>` pair from a
+   * `.md` page too, but `.md` pages are read raw outside the reader (GitHub),
+   * where the tags would show as literal text — so they keep the blockquote
+   * callout form and get no wrappers.
+   *
+   * Derived SERVER-SIDE from the resolved page path (the client never sees the
+   * path and must not guess from a display name) and round-tripped on `done` so
+   * later PRs can relax the integrate gate on it. Absent ⇒ not annotatable.
+   */
+  annotatable?: boolean;
   /** Final-render hook: markdown answer → reader HTML, emitted as a trailing
    *  `answer_html` (same shape as Ask/Explain). A throw is swallowed — the
    *  streamed plain text stands. */
@@ -129,6 +144,35 @@ export function verdictOf(block: string): string {
   const m = block.match(VERDICT_RE);
   if (!m) return "❓";
   return m[1] === "⚠" ? "⚠️" : m[1]!;
+}
+
+/**
+ * Build the `claims` SSE event's per-claim payload. The extractor's verbatim
+ * supporting passage rides ALONG with the title — it is what a later PR anchors an
+ * inline `<Fact>` wrapper on, and this event is the only place it ever exists
+ * (nothing re-derives it). Two rules:
+ *
+ * - An ABSENT quote stays absent ("Omit it if the claim is implicit" —
+ *   `buildClaimExtractionPrompt`), so a missing quote never becomes `""`.
+ * - An over-cap quote is **dropped, never truncated**: the propose route rejects
+ *   anything over {@link CLAIM_QUOTE_MAX}, and a truncated quote may resolve to a
+ *   DIFFERENT span than the model meant. Dropping here keeps the value that
+ *   survives extraction identical to the value that survives propose.
+ *
+ * The length test is on the TRIMMED quote, matching `validateClaimQuotes` (which
+ * trims before capping); the emitted value stays the extractor's own string.
+ */
+export function claimsEventPayload(
+  claims: { title: string; quote?: string }[],
+): { index: number; title: string; quote?: string }[] {
+  return claims.map((c, i) => {
+    const trimmed = (c.quote ?? "").trim();
+    return {
+      index: i + 1,
+      title: c.title,
+      ...(trimmed && trimmed.length <= CLAIM_QUOTE_MAX ? { quote: c.quote as string } : {}),
+    };
+  });
 }
 
 /** A synthetic ❓ block for a claim we could not verify (skipped / timed out).
@@ -504,10 +548,9 @@ async function runFactcheck(
     const claims: Claim[] = parsed.slice(0, maxClaims);
     const total = claims.length;
 
-    safeWrite("claims", {
-      type: "claims",
-      claims: claims.map((c, i) => ({ index: i + 1, title: c.title })),
-    });
+    // The extractor's verbatim supporting passages ride ALONG with the titles —
+    // see `claimsEventPayload` for the absent-stays-absent + drop-over-cap rules.
+    safeWrite("claims", { type: "claims", claims: claimsEventPayload(claims) });
     agentStatus.updatePhase(reqId, "verifying_claims");
 
     // sel-mode surrounding excerpt (located over the FULL stripped body).
@@ -689,6 +732,10 @@ async function runFactcheck(
         claimCount,
         baseHash: opts.baseHash,
         bodyLen: opts.bodyLen,
+        // Always a boolean (unlike `bodyLen`, whose absence is meaningful): a
+        // non-.mdx page is definitively NOT annotatable, and the client should
+        // never have to distinguish "false" from "an older server".
+        annotatable: opts.annotatable === true,
         mode: opts.mode,
       }),
     });

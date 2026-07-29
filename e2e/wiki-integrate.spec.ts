@@ -126,6 +126,10 @@ interface SeedTurn {
   bodyLen: number;
   claimCount: number;
   wrote?: string;
+  /** Phase-1 extraction quotes, keyed by the 1-based claim index. Persisted on the
+   *  turn because the `claims` SSE event they arrive on is dropped at `done`; the
+   *  propose POST re-sends them, which is what the seed→rehydrate→POST test covers. */
+  claimQuotes?: { index: number; quote: string }[];
 }
 
 let root: string;
@@ -172,12 +176,21 @@ async function openSeededTurn(page: Page): Promise<void> {
   await page.locator(".wiki-ask-hist-item").first().click();
 }
 
-/** Stub ONLY the propose call (a real model one-shot). Apply hits the real server. */
-async function stubPropose(page: Page): Promise<void> {
+/** Stub ONLY the propose call (a real model one-shot). Apply hits the real server.
+ *  `onBody` observes the intercepted REQUEST — the only place the client's posted
+ *  payload (claim quotes included) is visible without a live model call. */
+async function stubPropose(page: Page, onBody?: (body: Record<string, unknown>) => void): Promise<void> {
   await page.route(
     (url) => url.pathname === "/api/wiki/factcheck/integrate",
-    (route) =>
-      route.fulfill({
+    (route) => {
+      if (onBody) {
+        try {
+          onBody(JSON.parse(route.request().postData() || "{}") as Record<string, unknown>);
+        } catch {
+          onBody({});
+        }
+      }
+      return route.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
@@ -209,7 +222,8 @@ async function stubPropose(page: Page): Promise<void> {
           },
           hasSentinelBlock: false,
         }),
-      }),
+      });
+    },
   );
 }
 
@@ -322,6 +336,27 @@ test.describe("Fact-check: integrate into article", () => {
     const onDisk = readFileSync(path.join(root, "note.md"), "utf8");
     expect(onDisk).toContain(CORRECTED_SENTENCE);
     expect(onDisk).not.toContain(ORIGINAL_SENTENCE);
+  });
+
+  test("persisted claim quotes ride the propose POST (seed → localStorage → rehydrate → POST)", async ({
+    page,
+  }) => {
+    // The whole persistence chain in one assertion: the quotes arrive on the
+    // transient `claims` SSE event, are lifted onto the turn, survive localStorage
+    // + the rehydrate validator, and are re-posted on a click made long after the
+    // stream ended. Nothing else re-derives them, so a break anywhere is silent.
+    let proposeBody: Record<string, unknown> | null = null;
+    await stubPropose(page, (b) => {
+      proposeBody = b;
+    });
+    const quotes = [{ index: 1, quote: "The device ships 4M units per year." }];
+    await seedSession(page, [seedTurn({ askedAt: 1_700_000_000_004, claimQuotes: quotes })]);
+    await openSeededTurn(page);
+    await page.locator("#wikiFactcheckIntegrateBtn").click();
+    await expect(page.locator("#wikiFcIntPanel")).toBeVisible();
+    await expect
+      .poll(() => (proposeBody as { quotes?: unknown } | null)?.quotes)
+      .toEqual(quotes);
   });
 
   test("an all-✅ fact check renders no integrate button", async ({ page }) => {

@@ -14,6 +14,7 @@ import {
   coerceClientEdits,
   confirmSynthesisCandidate,
   digestCacheDecision,
+  isAnnotatablePage,
   resolveExplainPreflight,
   fetchSavedNotes,
   fetchSavedNotesBlock,
@@ -558,6 +559,49 @@ describe("integrate routes — pre-model / pre-write rejections", () => {
     });
     expect(res.status).toBe(200);
     expect(((await res.json()) as { hasSentinelBlock: boolean }).hasSentinelBlock).toBe(true);
+  });
+
+  // ── Claim quotes (PR 2) ────────────────────────────────────────────────────
+  // Also reachable on the zero-claims early return, so no model call is spent.
+
+  test("propose echoes validated claim quotes", async () => {
+    const res = await post("/api/wiki/factcheck/integrate?wiki=intwiki", {
+      page: "Widgets",
+      answer: "### ✅ Claim 1/2 — Right\n\nAll good.\n\n### ✅ Claim 2/2 — Also right\n\nFine.",
+      baseHash: await hashOf("Widgets.md"),
+      quotes: [{ index: 2, quote: "The device ships 4M units." }],
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()) as { quotes: unknown[] }).toMatchObject({
+      quotes: [{ index: 2, quote: "The device ships 4M units." }],
+    });
+  });
+
+  test("propose drops a misaligned quote list whole and says so — still a 200", async () => {
+    const res = await post("/api/wiki/factcheck/integrate?wiki=intwiki", {
+      page: "Widgets",
+      answer: "### ✅ Claim 1/1 — Right\n\nAll good.",
+      baseHash: await hashOf("Widgets.md"),
+      // Claim 2 does not exist in this answer — an off-by-one here would later
+      // paint a passage with the wrong claim's verdict.
+      quotes: [{ index: 2, quote: "The device ships 4M units." }],
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { quotes: unknown[]; quotesNote?: string };
+    expect(body.quotes).toEqual([]);
+    expect(body.quotesNote).toContain("matches no claim");
+  });
+
+  test("propose without quotes reports an empty list and no note", async () => {
+    const res = await post("/api/wiki/factcheck/integrate?wiki=intwiki", {
+      page: "Widgets",
+      answer: "### ✅ Claim 1/1 — Right\n\nAll good.",
+      baseHash: await hashOf("Widgets.md"),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { quotes: unknown[]; quotesNote?: string };
+    expect(body.quotes).toEqual([]);
+    expect(body.quotesNote).toBeUndefined();
   });
 
   test("apply with appendCallout writes the edits AND the callout in ONE write", async () => {
@@ -1209,6 +1253,31 @@ describe("resolveExplainPreflight", () => {
     expect(
       resolveExplainPreflight({ wiki: "w", unknownWiki: false, entry, index, meta: undefined, page: "Nope" }),
     ).toBe('No wiki page named "Nope".');
+  });
+});
+
+/**
+ * `isAnnotatablePage` — the inline-`<Fact>` POLICY predicate. `renderWikiHtml` is
+ * extension-agnostic, so this is not about what CAN render: `.md` pages are read raw
+ * outside the reader (GitHub) and deliberately keep the blockquote callout form.
+ */
+describe("isAnnotatablePage", () => {
+  test("native .mdx pages are annotatable", () => {
+    expect(isAnnotatablePage("plans/thing.mdx", "plan")).toBe(true);
+    expect(isAnnotatablePage("Deep Dive.mdx", "note")).toBe(true);
+  });
+
+  test(".md pages are NOT annotatable (policy — they render raw on GitHub)", () => {
+    expect(isAnnotatablePage("concepts/thing.md", "concept")).toBe(false);
+    expect(isAnnotatablePage("index.md", "note")).toBe(false);
+  });
+
+  test("explainers and other extensions are never annotatable", () => {
+    expect(isAnnotatablePage("blogs/x.html", "explainer")).toBe(false);
+    // Belt-and-braces: a type/extension mismatch can't opt an explainer in.
+    expect(isAnnotatablePage("blogs/x.mdx", "explainer")).toBe(false);
+    expect(isAnnotatablePage("notes/x.txt", "note")).toBe(false);
+    expect(isAnnotatablePage("mdx", "note")).toBe(false);
   });
 });
 
