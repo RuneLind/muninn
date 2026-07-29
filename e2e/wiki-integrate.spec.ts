@@ -425,6 +425,81 @@ test.describe("Fact-check: integrate into article", () => {
     expect(onDisk).toContain("The filing reports 2.1M units.");
   });
 
+  test("a propose resolving after a turn switch never paints into the other turn's bar", async ({
+    page,
+  }) => {
+    // The write-action bars are SINGLETON nodes owned by whichever turn is on
+    // screen. A ~90s propose that resolves after the reader switched turns must
+    // not repaint them: doing so revived turn A's live ✎ button inside turn B's
+    // RETIRED bar, where a click fires a doomed one-shot against the wrong page.
+    await page.route(
+      (url) => url.pathname === "/api/wiki/factcheck/integrate",
+      async (route) => {
+        await new Promise((r) => setTimeout(r, 1500)); // stand-in for the real one-shot
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            edits: [
+              {
+                claimIndex: 1,
+                verdict: "❌",
+                old: "ships 4M units per year",
+                new: "ships 2.1M units per year",
+                reason: "The filing reports 2.1M units.",
+                start: 0,
+                end: 0,
+                tier: "exact",
+                resolvedText: "ships 4M units per year",
+                beforeCtx: "The device ",
+                afterCtx: ".",
+              },
+            ],
+            dropped: [],
+            budget: {
+              bodyLen: PAGE_BODY.length,
+              maxEdits: 12,
+              maxEditChars: 2000,
+              maxChangedChars: 2000,
+              proposedChangedChars: 23,
+            },
+            hasSentinelBlock: false,
+          }),
+        });
+      },
+    );
+    // History renders newest-first (the list walks the array backwards), so the
+    // LAST seeded turn is item 0.
+    await seedSession(page, [
+      seedTurn({ question: "Retired turn", wrote: "append", askedAt: 1_700_000_000_004 }),
+      seedTurn({ question: "Correctable turn", askedAt: 1_700_000_000_005 }),
+    ]);
+    await page.locator('.wiki-conn-tab[data-conntab="ask"]').click();
+    const items = page.locator(".wiki-ask-hist-item");
+
+    await items.nth(0).click(); // the correctable turn
+    const live = page.locator("#wikiFactcheckIntegrateBtn");
+    await expect(live).toBeVisible();
+    await live.click();
+    await expect(live).toBeDisabled(); // "Proposing edits…"
+
+    // Switch to the already-appended turn while the propose is still in flight.
+    await items.nth(1).click();
+    const retired = page.locator(".wiki-fc-int-open");
+    await expect(retired).toBeDisabled();
+
+    // Let the propose land. Its success path AND its `finally` both refresh the
+    // bars — for the OTHER turn, so nothing here may change.
+    await page.waitForTimeout(2500);
+    await expect(page.locator("#wikiFactcheckIntegrateBtn")).toHaveCount(0);
+    await expect(retired).toBeDisabled();
+    await expect(page.locator(".wiki-fc-integrate")).toContainText("re-run the fact check");
+    // The preview panel is turn-keyed too — it must not paint under this turn.
+    await expect(page.locator("#wikiFcIntPanel")).toHaveCount(0);
+    // …and the retired turn's ➕ bar keeps its own derived state.
+    await expect(page.locator("#wikiFactcheckAppendBar")).toContainText("Added to article");
+  });
+
   test("a turn that already appended a callout renders integrate disabled", async ({ page }) => {
     await seedSession(page, [
       seedTurn({ question: "Already appended", wrote: "append", askedAt: 1_700_000_000_002 }),

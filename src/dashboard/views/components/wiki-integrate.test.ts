@@ -414,6 +414,36 @@ test("droppedListHtml honors the open state so a re-render can't snap the disclo
   expect(droppedListHtml(rows, true)).toContain('<details class="wiki-fc-int-dropped" open>');
 });
 
+test("the two dropped lists carry INDEPENDENT open state", () => {
+  // Both render with `.wiki-fc-int-dropped`; only the apply-time one adds
+  // `apply-drops`. A single shared open flag let one list's toggle clobber the
+  // other's on the next wholesale re-render — so the two views are separate.
+  const proposal = { edits: [edit()], dropped: [{ edit: { old: "p" }, reason: "propose-drop" }] };
+  const applyDropped = [{ edit: { old: "a" }, reason: "apply-drop" }];
+
+  const proposeOpen = integratePreviewHtml(proposal, [true], false, {
+    applyDropped,
+    droppedOpen: true,
+    applyDroppedOpen: false,
+  });
+  expect(proposeOpen).toContain('<details class="wiki-fc-int-dropped" open>');
+  expect(proposeOpen).toContain('<details class="wiki-fc-int-dropped apply-drops">');
+
+  const applyOpen = integratePreviewHtml(proposal, [true], false, {
+    applyDropped,
+    droppedOpen: false,
+    applyDroppedOpen: true,
+  });
+  expect(applyOpen).toContain('<details class="wiki-fc-int-dropped">');
+  expect(applyOpen).toContain('<details class="wiki-fc-int-dropped apply-drops" open>');
+
+  // Default (nothing tracked yet): propose-time closed, apply-time OPEN — an
+  // `applied: 0` must name its reasons without a second click.
+  const dflt = integratePreviewHtml(proposal, [true], false, { applyDropped });
+  expect(dflt).toContain('<details class="wiki-fc-int-dropped">');
+  expect(dflt).toContain('<details class="wiki-fc-int-dropped apply-drops" open>');
+});
+
 test("editPreviewHtml guards a non-numeric claimIndex and escapes it", () => {
   const weird = editPreviewHtml(
     { ...edit(), claimIndex: "2<script>" as unknown as number },

@@ -390,6 +390,12 @@ export interface IntegratePreviewView {
   applyDropped?: DroppedEditRow[];
   /** `<details>` open state of the propose-time dropped list. */
   droppedOpen?: boolean;
+  /** `<details>` open state of the APPLY-time dropped list (`.apply-drops`).
+   *  Tracked separately from {@link droppedOpen}: both lists carry the same
+   *  `.wiki-fc-int-dropped` class, so one shared field let each list's toggle
+   *  clobber the other's open state on the next wholesale re-render. Defaults to
+   *  OPEN (an `applied: 0` must name its reasons without a second click). */
+  applyDroppedOpen?: boolean;
   /** The turn carries no answer, so no callout can be built from it — render the
    *  checkbox disabled instead of silently dropping the request at build time. */
   calloutDisabled?: boolean;
@@ -463,7 +469,7 @@ export function integratePreviewHtml(
     // `applied: 0`, which a generic "nothing could be applied" line discarded.
     droppedListHtml(
       view.applyDropped || [],
-      true,
+      view.applyDroppedOpen !== false,
       (view.applyDropped || []).length + " could not be applied to the current page",
       "apply-drops",
     ) +

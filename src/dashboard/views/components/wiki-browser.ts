@@ -1843,8 +1843,19 @@ let integrateProposing: AskTurn | null = null;
 
 /** Re-render BOTH write-action bars from the turn. Called at `done` (the pane was
  *  painted before the answer existed, so the gates couldn't run yet) and after any
- *  write. The rendered state is authoritative — `turn.wrote` drives it. */
+ *  write. The rendered state is authoritative — `turn.wrote` drives it.
+ *
+ *  TURN-GUARDED, exactly like `renderIntegratePreview`: the two bars are SINGLETON
+ *  nodes belonging to whichever turn is painted, so a late caller for another turn
+ *  (a ~90s propose or an SSE handler resolving after the reader switched turns)
+ *  would paint turn A's live ✎ button — or its 409 copy — into turn B's retired
+ *  bar, reviving a button whose click fires a doomed one-shot against the wrong
+ *  page. Nothing is lost by skipping: `showAskAnswer` re-renders both bars from
+ *  the newly shown turn (`askArticleHtml` → `askFactcheck*Html`), and every piece
+ *  of bar state is held off the DOM (`turn.wrote`, `integrateBarMsgs`,
+ *  `integratedNotes`, `integrateProposing`) so re-opening the turn reproduces it. */
 function refreshWriteActionBars(turn: AskTurn): void {
+  if (turn !== askShownTurn) return;
   const appendBar = document.getElementById("wikiFactcheckAppendBar");
   if (appendBar) appendBar.innerHTML = factcheckAppendInnerHtml(turn);
   const intBar = document.getElementById("wikiFactcheckIntegrateBar");
@@ -2482,6 +2493,11 @@ interface IntegratePreviewState {
   /** `<details>` open state of the propose-time dropped list, so a re-render
    *  doesn't snap it shut under the reader. */
   droppedOpen: boolean;
+  /** Same, for the APPLY-time dropped list. Kept as its OWN field because both
+   *  lists render with the `.wiki-fc-int-dropped` class — one shared flag meant
+   *  opening either one flipped the other on the next re-render. `undefined` ⇒
+   *  the renderer's default (open). */
+  applyDroppedOpen?: boolean;
   /** Index of the checkbox to refocus after a re-render (-1 = none). */
   focusEditIdx: number;
 }
@@ -2511,6 +2527,7 @@ function renderIntegratePreview(): void {
     applyBlocked: state.applyBlocked,
     applyDropped: state.applyDropped,
     droppedOpen: state.droppedOpen,
+    applyDroppedOpen: state.applyDroppedOpen,
     calloutDisabled: !state.turn.answer,
   });
   // A full re-render on every toggle is the simple, state-honest choice — but it
@@ -2649,6 +2666,7 @@ async function acceptFactcheckIntegrate(): Promise<void> {
   state.message = undefined;
   state.messageError = false;
   state.applyDropped = undefined;
+  state.applyDroppedOpen = undefined; // a fresh apply's reasons open by default again
   renderIntegratePreview();
   try {
     const res = await fetch("/api/wiki/factcheck/integrate/apply", {
@@ -2827,6 +2845,7 @@ document.addEventListener("change", (e) => {
       // block no longer applies — Apply becomes live again.
       state.applyBlocked = false;
       state.applyDropped = undefined;
+      state.applyDroppedOpen = undefined;
       state.focusEditIdx = idx; // restored after the full re-render
       renderIntegratePreview();
     }
@@ -2834,6 +2853,11 @@ document.addEventListener("change", (e) => {
 });
 // The dropped-list disclosure is state, not DOM: without this a checkbox toggle's
 // re-render snapped an opened "N not applied" list shut again.
+//
+// There are TWO such lists (propose-time drops, and the apply route's own
+// rejections) and they share the `.wiki-fc-int-dropped` class, so the `apply-drops`
+// modifier is what tells them apart — into two separate state fields. A single
+// shared field made each list's toggle clobber the other's open state.
 document.addEventListener(
   "toggle",
   (e) => {
@@ -2841,7 +2865,8 @@ document.addEventListener(
     if (!state) return;
     const t = e.target as HTMLElement;
     if (t instanceof HTMLDetailsElement && t.classList.contains("wiki-fc-int-dropped")) {
-      state.droppedOpen = t.open;
+      if (t.classList.contains("apply-drops")) state.applyDroppedOpen = t.open;
+      else state.droppedOpen = t.open;
     }
   },
   true, // `toggle` does not bubble — capture it
