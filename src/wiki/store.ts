@@ -15,6 +15,7 @@ import path from "node:path";
 import { stat } from "node:fs/promises";
 import { getLog } from "../logging.ts";
 import { sanitizeColorToken } from "../dashboard/views/components/wiki-filter.ts";
+import { COMPONENT_TAG_SOURCE } from "../format/markdown-ast.ts";
 
 const log = getLog("wiki", "store");
 
@@ -373,6 +374,18 @@ function flattenLinks(s: string): string {
     .replace(/[*_]+(\s|$)/g, "$1");
 }
 
+/** Whitelisted component tags (open/close/self-closing) on ONE line, derived from
+ *  the shared markdown-AST source of truth — the same strip `src/wiki/similar.ts`
+ *  applies to its search query. Compiled here rather than imported from
+ *  `similar.ts` because that module imports this one (the read side), and the
+ *  cycle would be a layering inversion for a two-line helper. */
+const COMPONENT_TAG_RE = new RegExp(COMPONENT_TAG_SOURCE, "g");
+
+/** Remove whitelisted component tags from a line, leaving their inner prose. */
+function stripComponentTags(line: string): string {
+  return line.replace(COMPONENT_TAG_RE, "");
+}
+
 const SOURCE_PUBDATE_RE = /^Source:.*?(\d{4}-\d{2}-\d{2})/m;
 
 /**
@@ -400,7 +413,11 @@ export function extractPubDate(content: string): string | undefined {
 export function extractDesc(content: string): string | undefined {
   const body = stripFrontmatter(content);
   for (const raw of body.split("\n")) {
-    const line = raw.trim();
+    // Component tags go FIRST, before the line-shape checks: a paragraph opening
+    // with `<Fact n="1" v="ok">…` is prose, not markup, and the `startsWith("<")`
+    // skip below would otherwise drop it and blurb the NEXT paragraph — while a
+    // mid-line `<Fact …>` would leak literal JSX into the Atlas node blurb.
+    const line = stripComponentTags(raw.trim()).trim();
     if (!line) continue;
     if (line.startsWith("#")) continue; // heading
     if (line.startsWith(">")) continue; // blockquote / callout

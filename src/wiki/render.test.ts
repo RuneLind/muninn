@@ -148,6 +148,61 @@ describe("renderWikiHtml", () => {
     expect(html).toContain("<strong>this</strong>");
   });
 
+  test("a fact-check sentinel line is stripped; the block between them still renders", () => {
+    // The sentinels are internal write markers, never content — but formatWebHtml
+    // escapes what it does not recognize, so an unstripped marker showed up as a
+    // literal `<!-- factcheck:start -->` line in the reader.
+    const md = "Before.\n\n<!-- factcheck:start -->\nInner content.\n<!-- factcheck:end -->\n\nAfter.";
+    const html = renderWikiHtml(md, resolve);
+    expect(html).not.toContain("factcheck:start");
+    expect(html).not.toContain("factcheck:end");
+    expect(html).toContain("Inner content.");
+    expect(html).toContain("Before.");
+    expect(html).toContain("After.");
+  });
+
+  test("the strip is LINE-ANCHORED — a marker quoted mid-sentence survives", () => {
+    // A page documenting this very feature must still be able to show the marker.
+    const html = renderWikiHtml("We write a <!-- factcheck:start --> marker inline here.", resolve);
+    expect(html).toContain("factcheck:start");
+    expect(html).toContain("marker inline here.");
+  });
+
+  test("an indented sentinel line is still stripped (leading whitespace tolerated)", () => {
+    const html = renderWikiHtml("Before.\n\n   <!-- factcheck:end -->\n\nAfter.", resolve);
+    expect(html).not.toContain("factcheck:end");
+    expect(html).toContain("Before.");
+    expect(html).toContain("After.");
+  });
+
+  test("a marker line owning only PART of its line keeps the marker", () => {
+    // Not end-anchored before this: the marker was stripped out of a line whose
+    // remainder is real prose, silently editing the sentence.
+    const html = renderWikiHtml("<!-- factcheck:start --> real prose follows.", resolve);
+    expect(html).toContain("factcheck:start");
+    expect(html).toContain("real prose follows.");
+  });
+
+  test("markers on their own line INSIDE a code fence survive (documenting the format)", () => {
+    const md = [
+      "Intro.",
+      "",
+      "```mdx",
+      "<!-- factcheck:start -->",
+      "> [!factcheck] Fact check (2026-07-29)",
+      "<!-- factcheck:end -->",
+      "```",
+      "",
+      "Outro.",
+    ].join("\n");
+    const html = renderWikiHtml(md, resolve);
+    expect(html).toContain("factcheck:start");
+    expect(html).toContain("factcheck:end");
+    expect(html).toContain("[!factcheck] Fact check (2026-07-29)");
+    expect(html).toContain("Intro.");
+    expect(html).toContain("Outro.");
+  });
+
   test("a ```mermaid fence renders as a plain code block (muninn has no mermaid renderer)", () => {
     const html = renderWikiHtml("```mermaid\ngraph TD; A-->B;\n```", resolve);
     // v1: no diagram rendering — the fence degrades to a labeled code block.

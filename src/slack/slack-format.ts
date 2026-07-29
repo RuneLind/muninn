@@ -2,11 +2,14 @@ import {
   parseBlocks,
   scanInlineComponents,
   normalizeVerdictValue,
+  normalizeFactVerdict,
+  FACT_VERDICT_MARK,
+  FACT_VERDICT_WORD,
   parseMeterAttrs,
   parseChecklist,
 } from "../format/markdown-ast.ts";
 import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
-import { Placeholders } from "../format/markdown-core.ts";
+import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
 
 /**
  * Converts Claude's markdown output to Slack mrkdwn.
@@ -69,6 +72,15 @@ const slackRenderer: BlockRenderer = {
         return children;
       case "Tab":
         return attrs.label ? `— ${renderInline(attrs.label)} —\n${children}` : children;
+      case "Fact":
+        // The passage itself is the content; the chip is a reader affordance with
+        // no plain-text equivalent worth the noise, so only the verdict glyph rides
+        // along. Never drop the passage — it is the article's own prose.
+        return `${children}${children.trim() ? ` ${FACT_VERDICT_MARK[normalizeFactVerdict(attrs.v)]}` : ""}`;
+      case "FactCheck":
+        // The collapsed appendix has no fold here, so it degrades to its summary
+        // line followed by the per-claim evidence.
+        return `${factCheckSummaryText(attrs)}\n${children}`;
       default: {
         const _exhaustive: never = name;
         return _exhaustive;
@@ -84,6 +96,8 @@ const slackRenderer: BlockRenderer = {
       }
       case "Pill":
         return `[${text.trim()}]`;
+      case "Fact":
+        return `${text}${text.trim() ? ` ${FACT_VERDICT_MARK[normalizeFactVerdict(attrs.v)]}` : ""}`;
       default: {
         const _exhaustive: never = name;
         return _exhaustive;
@@ -162,4 +176,24 @@ function renderInline(text: string): string {
   result = result.replace(/<\/?[^>]+>/g, "");
 
   return ph.restore(result);
+}
+
+/** Plain-text counts line for the `FactCheck` appendix — the platforms with no
+ *  disclosure widget render this instead of a collapsed summary strip. Absent or
+ *  non-numeric counts are omitted, never rendered as a misleading `0`.
+ *
+ *  Kept byte-identical to the Telegram twin: counts are DIGITS-ONLY (`Number`
+ *  alone reads `1e5` as 100000) and the date is escaped (cosmetic here, but the
+ *  two formatters must not drift). */
+function factCheckSummaryText(attrs: Record<string, string>): string {
+  const parts: string[] = [];
+  for (const key of ["ok", "warn", "bad"] as const) {
+    const raw = attrs[key]?.trim();
+    if (!raw || !/^\d+$/.test(raw)) continue;
+    const n = Number(raw);
+    if (Number.isSafeInteger(n)) parts.push(`${n} ${FACT_VERDICT_WORD[key]}`);
+  }
+  const date = attrs.date?.trim();
+  const lead = date ? `Fact-checked ${escapeHtml(date)}` : "Fact-checked";
+  return parts.length ? `${lead}: ${parts.join(", ")}` : lead;
 }

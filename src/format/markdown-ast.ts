@@ -46,6 +46,8 @@ export const COMPONENT_NAMES = [
   "AnnotatedCode",
   "CodeTabs",
   "Tab",
+  "Fact",
+  "FactCheck",
 ] as const;
 export type ComponentName = (typeof COMPONENT_NAMES)[number];
 
@@ -56,6 +58,7 @@ const SELF_CLOSING_ALLOWED: ReadonlySet<ComponentName> = new Set<ComponentName>(
   "FileRef",
   "Verdict",
   "Pill",
+  "Fact",
 ]);
 
 /** Attribute whitelist per component; any other attribute is dropped. */
@@ -73,6 +76,13 @@ const COMPONENT_ATTRS: Record<ComponentName, readonly string[]> = {
   AnnotatedCode: ["file", "lang"],
   CodeTabs: [],
   Tab: ["label"],
+  // Fact-check annotation pair. `Fact` wraps the checked passage inline and
+  // carries its claim number + verdict (`v`: ok | warn | bad | unknown); the
+  // verdict is DENORMALIZED onto the tag on purpose — a streaming block renderer
+  // cannot look ahead to the `FactCheck` appendix to colour a chip, and one write
+  // emits both sides so they cannot drift.
+  Fact: ["n", "v"],
+  FactCheck: ["date", "ok", "warn", "bad"],
 };
 
 /** Max nesting of component blocks. Bodies are parsed as blocks only while the
@@ -127,6 +137,75 @@ export function normalizePillTone(tone: string | undefined): "default" | "rec" |
 /** Normalize an untrusted `value` attr for Verdict. */
 export function normalizeVerdictValue(value: string | undefined): "yes" | "no" {
   return value === "no" ? "no" : "yes";
+}
+
+/**
+ * Fact-check verdict vocabulary, normalized from an untrusted `v` attr.
+ *
+ * `unknown` is the fallback rather than `ok`: a malformed or absent verdict must
+ * never render as a green "confirmed" chip on a passage nothing actually
+ * confirmed. The emoji the verify prompt emits (✅/⚠️/❌/❓, with or without the
+ * optional VS16) are accepted alongside the words, since the writer derives `v`
+ * from those blocks and a stray emoji is more likely than a typo'd word.
+ */
+export type FactVerdict = "ok" | "warn" | "bad" | "unknown";
+
+export function normalizeFactVerdict(value: string | undefined): FactVerdict {
+  if (!value) return "unknown";
+  const v = value.replace(/\uFE0F/g, "").trim().toLowerCase();
+  if (v === "ok" || v === "✅") return "ok";
+  if (v === "warn" || v === "⚠") return "warn";
+  if (v === "bad" || v === "❌") return "bad";
+  return "unknown";
+}
+
+/** Display vocabulary for a {@link FactVerdict} — the chip glyph and the word
+ *  used in tooltips, the appendix summary strip and every plain-text fallback. */
+export const FACT_VERDICT_MARK: Record<FactVerdict, string> = {
+  ok: "✓",
+  warn: "⚠",
+  bad: "✗",
+  unknown: "?",
+};
+export const FACT_VERDICT_WORD: Record<FactVerdict, string> = {
+  ok: "confirmed",
+  warn: "needs care",
+  bad: "corrected",
+  unknown: "unverified",
+};
+
+/**
+ * A `Fact`/claim index from an untrusted attr — a positive integer, or null.
+ * Null is a legitimate outcome (an anchor whose claim number was lost), and
+ * renders a verdict chip with no claim link rather than `data-fact="NaN"`.
+ *
+ * DIGITS-ONLY on purpose: `Number` accepts JS numeric literals, so a bare
+ * `Number()` read `n="0x10"` as 16 and `n="1e2"` as 100 — a chip silently linked
+ * to someone else's claim section. Only a plain decimal string is a claim index.
+ */
+export function factClaimIndex(value: string | undefined): number | null {
+  if (!value) return null;
+  const raw = value.trim();
+  if (!/^\d+$/.test(raw)) return null;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 && n < 1000 ? n : null;
+}
+
+/**
+ * The claim number in a `FactCheck` appendix heading (`### ✅ Claim 4/8 — …`), or
+ * null when the heading is not a claim heading.
+ *
+ * Deliberately LOOSER than `CLAIM_HEADING_RE` in
+ * `dashboard/views/components/wiki-integrate.ts` (which owns the strict prompt
+ * contract used to derive edits): this one only decides whether to open a
+ * `<section id="fc-claim-N">` wrapper, so over-matching costs an unused id and
+ * under-matching costs a card the client can't find. A shared strict regex would
+ * mean importing a dashboard view into the platform formatter — an inverted
+ * layering for no benefit.
+ */
+export function factClaimNumberFromHeading(content: string): number | null {
+  const m = content.match(/\bClaim\s+(\d+)\s*(?:\/\s*\d+)?/i);
+  return m ? factClaimIndex(m[1]) : null;
 }
 
 /** Normalize an untrusted `tone` attr for Meter (good/warn/bad → green/amber/red). */
@@ -449,7 +528,7 @@ function tryParseComponent(
 // Unclosed / malformed tags stay literal text — the same degradation contract as
 // blocks (the platform renderer then escapes them).
 
-export const INLINE_COMPONENT_NAMES = ["Verdict", "Pill"] as const;
+export const INLINE_COMPONENT_NAMES = ["Verdict", "Pill", "Fact"] as const;
 export type InlineComponentName = (typeof INLINE_COMPONENT_NAMES)[number];
 
 export type InlineSegment =

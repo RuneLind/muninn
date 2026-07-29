@@ -23,6 +23,9 @@ const WEB_TAGS = [
   "blockquote", "hr",
   "table", "thead", "tbody", "tr", "th", "td",
   "p", "details", "summary",
+  // The FactCheck appendix wraps each claim's evidence in a <section>; without
+  // it the client re-render flattens the whole appendix to text.
+  "section",
   // Component block markup (`web-format.ts`) + any raw component tags an answer
   // might emit before parsing lands them. Without these the sanitizer would
   // flatten components to text on the client re-render.
@@ -47,7 +50,19 @@ const COMPONENT_CLASS_ALLOW = new Set([
   "code-tabs", "code-tabs-bar", "code-tabs-tab", "code-tabs-panels",
   "code-tabs-panel", "code-tabs-fallback", "code-tab-standalone", "code-tab-label",
   "is-active",
+  // Fact-check annotation (`<Fact>` marks + the collapsed `<FactCheck>` appendix).
+  // `fc-chip-label` in particular is load-bearing: it is the visually-hidden
+  // screen-reader label, so a stripped class turns "Claim 1 — confirmed" into
+  // visible prose in the middle of the paragraph.
+  "fc-mark", "fc-mark-block", "fc-mark-ok", "fc-mark-warn", "fc-mark-bad", "fc-mark-unknown",
+  "fc-chip", "fc-chip-ok", "fc-chip-warn", "fc-chip-bad", "fc-chip-unknown", "fc-chip-label",
+  "fc-block", "fc-block-body", "fc-strip", "fc-strip-lead",
+  "fc-count", "fc-count-ok", "fc-count-warn", "fc-count-bad", "fc-claim",
 ]);
+
+/** The only `id` the sanitizer lets through — the fact-check appendix's per-claim
+ *  anchor, which the chip's expand-on-click resolves by id. */
+const FC_CLAIM_ID_RE = /^fc-claim-\d+$/;
 
 function classIsComponent(value: string): boolean {
   const tokens = value.trim().split(/\s+/);
@@ -76,6 +91,13 @@ function sanitizeHtml(html: string, isWeb: boolean): string {
         if (tag === "a" && (attr.name === "target" || attr.name === "rel")) continue;
         if (tag === "code" && attr.name === "class") continue;
         if (attr.name === "class" && classIsComponent(attr.value)) continue;
+        // Fact-check wiring: the chip needs its claim pointer + expanded state,
+        // the claim section needs the anchor the chip resolves, and the chip's
+        // glyph stays hidden from assistive tech (the label span carries it).
+        if (tag === "button" && (attr.name === "data-fact" || attr.name === "aria-expanded")) continue;
+        if (tag === "section" && attr.name === "data-claim") continue;
+        if (tag === "section" && attr.name === "id" && FC_CLAIM_ID_RE.test(attr.value)) continue;
+        if (attr.name === "aria-hidden" && attr.value === "true") continue;
         el.removeAttribute(attr.name);
       }
       if (tag === "a") {

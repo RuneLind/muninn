@@ -3,6 +3,9 @@ import {
   parseBlocks,
   parseMeterAttrs,
   normalizeMeterTone,
+  normalizeFactVerdict,
+  factClaimIndex,
+  factClaimNumberFromHeading,
   parseChecklistItem,
   parseChecklist,
   scanInlineComponents,
@@ -483,5 +486,86 @@ describe("parseMeterAttrs", () => {
     expect(normalizeMeterTone("good")).toBe("good");
     expect(normalizeMeterTone("warn")).toBe("warn");
     expect(normalizeMeterTone("bad")).toBe("bad");
+  });
+});
+
+describe("normalizeFactVerdict", () => {
+  test("absent or garbage input falls back to `unknown` — NEVER to `ok`", () => {
+    // The whole point of the fallback: a malformed or missing verdict must not
+    // paint a green "confirmed" chip on a passage nothing actually confirmed.
+    for (const bad of [undefined, "", "   ", "bogus", "true", "good", "yes", "0", "❓", "✔"]) {
+      expect(normalizeFactVerdict(bad)).toBe("unknown");
+    }
+    expect(normalizeFactVerdict("bogus")).not.toBe("ok");
+  });
+
+  test("the three words map through, case-insensitively and whitespace-trimmed", () => {
+    expect(normalizeFactVerdict("ok")).toBe("ok");
+    expect(normalizeFactVerdict("OK")).toBe("ok");
+    expect(normalizeFactVerdict(" Warn ")).toBe("warn");
+    expect(normalizeFactVerdict("BAD")).toBe("bad");
+  });
+
+  test("the verify prompt's emoji are accepted, with or without the VS16", () => {
+    expect(normalizeFactVerdict("✅")).toBe("ok");
+    expect(normalizeFactVerdict("⚠")).toBe("warn");
+    expect(normalizeFactVerdict("⚠️")).toBe("warn");
+    expect(normalizeFactVerdict("❌")).toBe("bad");
+  });
+});
+
+describe("factClaimIndex / factClaimNumberFromHeading", () => {
+  test("a positive in-range integer parses; everything else is null (not NaN)", () => {
+    expect(factClaimIndex("4")).toBe(4);
+    expect(factClaimIndex(" 12 ")).toBe(12);
+    for (const bad of [undefined, "", "abc", "0", "-1", "4.5", "1000"]) {
+      expect(factClaimIndex(bad)).toBeNull();
+    }
+  });
+
+  test("a claim heading yields its number; a non-claim heading yields null", () => {
+    expect(factClaimNumberFromHeading("✅ Claim 4/8 — the weight")).toBe(4);
+    expect(factClaimNumberFromHeading("claim 2")).toBe(2);
+    expect(factClaimNumberFromHeading("Sources")).toBeNull();
+  });
+});
+
+describe("Fact: own-line = block, mid-text = inline, self-closing allowed", () => {
+  test("a Fact owning its whole trimmed line is claimed by the BLOCK parser", () => {
+    expect(parseBlocks('<Fact n="4" v="bad">The weight was 1.32 kg.</Fact>')).toEqual([
+      {
+        type: "component",
+        name: "Fact",
+        attrs: { n: "4", v: "bad" },
+        children: [{ type: "text", lines: ["The weight was 1.32 kg."] }],
+      },
+    ]);
+  });
+
+  test("a mid-sentence Fact falls through to text and is picked up inline", () => {
+    const md = 'It was <Fact n="4" v="bad">1.32 kg</Fact> at launch.';
+    expect(parseBlocks(md)).toEqual([{ type: "text", lines: [md] }]);
+    expect(scanInlineComponents(md)).toEqual([
+      { kind: "text", text: "It was " },
+      { kind: "component", name: "Fact", attrs: { n: "4", v: "bad" }, text: "1.32 kg" },
+      { kind: "text", text: " at launch." },
+    ]);
+  });
+
+  test("the self-closing form parses as a childless component, block and inline", () => {
+    expect(parseBlocks('<Fact n="4" v="bad"/>')).toEqual([
+      { type: "component", name: "Fact", attrs: { n: "4", v: "bad" }, children: [] },
+    ]);
+    expect(scanInlineComponents('x <Fact n="4" v="bad"/> y')).toEqual([
+      { kind: "text", text: "x " },
+      { kind: "component", name: "Fact", attrs: { n: "4", v: "bad" }, text: "" },
+      { kind: "text", text: " y" },
+    ]);
+  });
+
+  test("FactCheck is BLOCK-only — a mid-text occurrence stays literal", () => {
+    expect(scanInlineComponents('mid <FactCheck date="2026-07-29">x</FactCheck> line')).toEqual([
+      { kind: "text", text: 'mid <FactCheck date="2026-07-29">x</FactCheck> line' },
+    ]);
   });
 });

@@ -286,6 +286,53 @@ describe("inline component fuzz — never throws, never injects", () => {
     expect(Date.now() - renderStart).toBeLessThan(5_000);
   });
 
+  test("self-closing Fact renders a bare chip without error on any platform", () => {
+    const md = 'Anchor lost its passage. <Fact n="4" v="bad"/> Still marked.';
+    expect(() => format(md)).not.toThrow();
+    const out = format(md);
+    expect(out.web).toContain('class="fc-chip fc-chip-bad"');
+    expect(out.web).toContain("Anchor lost its passage.");
+    // No empty mark span — a self-closing Fact wraps nothing.
+    expect(out.web).not.toContain('<span class="fc-mark fc-mark-bad" data-fact="4"></span>');
+    // Plain-text platforms have no chip affordance: nothing is added, and the
+    // surrounding prose must survive intact.
+    expect(out.telegram).toContain("Anchor lost its passage.");
+    expect(out.slack).toContain("Still marked.");
+  });
+
+  test("Fact n/v attr injection cannot escape into markup", () => {
+    const md =
+      '<Fact n="4\"><script>alert(1)</script>" v="bad\"><img src=x onerror=alert(1)>">payload</Fact>';
+    expect(() => format(md)).not.toThrow();
+    const out = format(md);
+    expect(out.web).not.toContain("<script>");
+    expect(out.web).not.toContain("<img");
+    expect(out.telegram).not.toContain("<script>");
+    expect(out.slack).not.toContain("<script>");
+  });
+
+  test("FactCheck date/count attr injection cannot escape into markup", () => {
+    const md =
+      '<FactCheck date="2026-07-29\"><script>alert(1)</script>" ok="1\"><img src=x onerror=alert(1)>">\nbody\n</FactCheck>';
+    expect(() => format(md)).not.toThrow();
+    const out = format(md);
+    expect(out.web).not.toContain("<script>");
+    expect(out.web).not.toContain("<img");
+    expect(out.telegram).not.toContain("<script>");
+    expect(out.slack).not.toContain("<script>");
+  });
+
+  test("unclosed FactCheck degrades to escaped text, not a details block", () => {
+    const md = '<FactCheck date="2026-07-29" ok="3">\nleft open forever\nmore lines';
+    expect(() => format(md)).not.toThrow();
+    const out = format(md);
+    expect(out.web).toContain("&lt;FactCheck");
+    expect(out.web).not.toContain("<details");
+    expect(out.telegram).toContain("&lt;FactCheck");
+    expect(out.slack).toContain("left open forever");
+    expect(out.slack).not.toContain("3 confirmed");
+  });
+
   test("inline component embedded inside a block component renders inline, safely", () => {
     // Callout body paragraph carries a mid-text Verdict → inline chip on web,
     // plain fallback in-sentence on telegram/slack. No injection, no throw.

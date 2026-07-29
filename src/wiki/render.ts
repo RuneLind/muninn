@@ -12,6 +12,7 @@
 import { formatWebHtml } from "../web/web-format.ts";
 import { escapeHtml } from "../format/markdown-core.ts";
 import { stripFrontmatter, type WikiPageMeta } from "./store.ts";
+import { FACTCHECK_SENTINEL_START, FACTCHECK_SENTINEL_END } from "./factcheck-context.ts";
 
 // stripFrontmatter's single home is store.ts (the read-side, which store.ts must
 // not import back from — that would invert layering). Re-exported here so the
@@ -20,12 +21,54 @@ export { stripFrontmatter } from "./store.ts";
 
 const WIKILINK_WITH_LABEL_RE = /\[\[([^\]|]+?)(?:\|([^\]]*?))?\]\]/g;
 
+/**
+ * Drop the fact-check sentinel MARKERS that own a whole line, leaving the block
+ * between them (real content) to render.
+ *
+ * Deliberately NOT the paired `start…end` regex the write-side authorities use,
+ * and deliberately a line filter rather than a regex:
+ *  - the marker literals come from `factcheck-context.ts` (the one authority)
+ *    instead of a third hand-copied spelling;
+ *  - a line must be EXACTLY the marker (surrounding whitespace ok), so
+ *    `<!-- factcheck:start --> real prose` keeps its marker — the line is not
+ *    the marker's to own;
+ *  - lines inside a ``` / ~~~ fence are left alone, because a page documenting
+ *    this format (a live mimir plan page does) shows the markers on their own
+ *    lines inside an ```mdx fence.
+ */
+function stripSentinelLines(body: string): string {
+  const lines = body.split("\n");
+  const out: string[] = [];
+  let inFence = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) {
+      inFence = !inFence;
+      out.push(line);
+      continue;
+    }
+    if (!inFence && (trimmed === FACTCHECK_SENTINEL_START || trimmed === FACTCHECK_SENTINEL_END)) {
+      continue;
+    }
+    out.push(line);
+  }
+  return out.join("\n");
+}
+
 export function renderWikiHtml(
   markdown: string,
   resolve: (target: string) => WikiPageMeta | undefined,
   opts?: { stripTitle?: string },
 ): string {
   let body = stripFrontmatter(markdown);
+  // The fact-check sentinels are internal write markers, never content — but
+  // `formatWebHtml` HTML-escapes everything it doesn't recognize, so on every page
+  // carrying a persisted fact-check block they rendered as a visible literal
+  // `<!-- factcheck:start -->` line in the reader (live on all three annotated
+  // pages before this). Dropped on their OWN lines only, so a page that quotes the
+  // marker mid-sentence (or inside a code fence) while documenting this feature
+  // still shows it.
+  body = stripSentinelLines(body);
   // The reader renders its own title header — drop the page's leading H1 when
   // it just repeats that title, but keep distinct ones (e.g. index.md's
   // "# Wiki Index" under the fallback title "index").
