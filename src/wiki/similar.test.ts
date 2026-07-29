@@ -130,6 +130,19 @@ describe("stripComponentTags", () => {
     );
   });
 
+  test("covers the fact-check pair automatically via COMPONENT_TAG_SOURCE", () => {
+    // Confirming test rather than an assumption: `Fact`/`FactCheck` were added to
+    // COMPONENT_NAMES, and the strip regex is derived from that list — so an
+    // annotated page's query embeds its prose, not its verdict markup.
+    expect(stripComponentTags('It weighed <Fact n="4" v="bad">1.32 kg</Fact> at launch.')).toBe(
+      "It weighed 1.32 kg at launch.",
+    );
+    expect(stripComponentTags('Anchor <Fact n="4" v="bad"/> only.')).toBe("Anchor  only.");
+    expect(
+      stripComponentTags('<FactCheck date="2026-07-29" ok="3">\nEvidence line.\n</FactCheck>'),
+    ).toBe("\nEvidence line.\n");
+  });
+
   test("leaves non-component angle-bracket text untouched", () => {
     expect(stripComponentTags("A <div> and <NotAComponent> stay.")).toBe(
       "A <div> and <NotAComponent> stay.",
