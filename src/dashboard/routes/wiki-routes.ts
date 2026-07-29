@@ -355,6 +355,25 @@ export function resolveExplainPreflight(input: {
   return null;
 }
 
+/**
+ * Should a fact-checked page carry INLINE `<Fact>`/`<FactCheck>` annotations?
+ *
+ * This is a **policy** predicate, not a capability one. `renderWikiHtml` is
+ * extension-agnostic, so a `.md` page would render the component pair in the
+ * reader just fine — but a `.md` page is also read as raw markdown outside the
+ * reader (GitHub, an editor), where the JSX-ish tags would show as literal text.
+ * So `.md` pages deliberately keep the `> [!factcheck]` blockquote form and get
+ * NO inline wrappers; native `.mdx` pages are reader-rendered by convention and
+ * are the only annotated form.
+ *
+ * The `type !== "explainer"` term is belt-and-braces: a real explainer is `.html`
+ * on disk and can never satisfy the extension test. It stays so a future
+ * type/extension mismatch can't quietly opt an explainer in.
+ */
+export function isAnnotatablePage(relPath: string, type: string): boolean {
+  return type !== "explainer" && relPath.endsWith(".mdx");
+}
+
 /** Listing shape sent to the client — meta plus connection counts for sorting. */
 interface WikiPageListing extends WikiPageMeta {
   linkCount: number;
@@ -1370,10 +1389,12 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     let body = "";
     let baseHash = "";
     let bodyLen: number | undefined;
-    // Can this page carry inline `<Fact>` annotations? ONLY a native `.mdx` page
-    // renders the component pair (a `.md` page would show the raw tags, an
-    // explainer is HTML on disk). Derived here, from the RESOLVED path — the
-    // client only ever holds a display name and must never guess the extension.
+    // Should this page carry inline `<Fact>` annotations? A POLICY call, not a
+    // capability one — `renderWikiHtml` would render the pair from a `.md` page
+    // too, but `.md` is read raw outside the reader (GitHub), so those pages keep
+    // the blockquote form and get no wrappers. See `isAnnotatablePage`. Derived
+    // here from the RESOLVED path — the client only ever holds a display name and
+    // must never guess the extension.
     let annotatable = false;
     if (!preflightError && entry && index && meta) {
       // Explainers are HTML on disk; reduce to prose so claim extraction / the
@@ -1387,7 +1408,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // are never integrable (HTML on disk), so they get NO bodyLen at all rather
       // than an HTML length nothing enforces.
       if (meta.type !== "explainer") bodyLen = integrateBodyLen(raw, meta.relPath.endsWith(".mdx"));
-      annotatable = meta.type !== "explainer" && meta.relPath.endsWith(".mdx");
+      annotatable = isAnnotatablePage(meta.relPath, meta.type);
       body = meta.type === "explainer" ? htmlToText(raw) : raw;
       log.info("Wiki factcheck: wiki={wiki} bot={bot} page={page} mode={mode}", {
         wiki: entry.name,

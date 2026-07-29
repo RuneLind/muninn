@@ -230,10 +230,43 @@ test("a malformed claimQuotes list is dropped but the turn survives", () => {
   expect(restored[3]!.claimQuotes).toEqual([{ index: 2, quote: "ok" }]);
 });
 
-test("a present-but-wrong-typed annotatable drops the turn", () => {
+test("a present-but-wrong-typed annotatable drops the FIELD, keeping the turn", () => {
+  // Deliberate deviation from the `bodyLen` scalar precedent beside it: the flag is
+  // advisory, and absent already means "not annotatable" — so dropping the hint
+  // degrades to the pre-field behaviour instead of discarding a fact-check answer.
   const raw = JSON.stringify([
     { ...turn({ question: "bogus" }), annotatable: "yes" },
     turn({ question: "clean", annotatable: false }),
   ]);
-  expect(deserializeAskSession(raw).map((t) => t.question)).toEqual(["clean"]);
+  const restored = deserializeAskSession(raw);
+  expect(restored.map((t) => t.question)).toEqual(["bogus", "clean"]);
+  expect(restored[0]!.annotatable).toBeUndefined();
+  expect(restored[1]!.annotatable).toBe(false);
+});
+
+test("claimQuotes entries the server would reject wholesale are not persisted", () => {
+  // Parity with `validateClaimQuotes`: a non-positive / non-integer / huge index can
+  // never name a `Claim n/m` heading, and a blank quote is dropped there too — so
+  // keeping them would only persist a payload the next propose throws away.
+  const raw = JSON.stringify([
+    { ...turn({ question: "negative" }), claimQuotes: [{ index: -1, quote: "x" }] },
+    { ...turn({ question: "zero" }), claimQuotes: [{ index: 0, quote: "x" }] },
+    { ...turn({ question: "fractional" }), claimQuotes: [{ index: 1.5, quote: "x" }] },
+    { ...turn({ question: "huge" }), claimQuotes: [{ index: 1e21, quote: "x" }] },
+    { ...turn({ question: "blank" }), claimQuotes: [{ index: 1, quote: "   " }] },
+    { ...turn({ question: "mixed" }), claimQuotes: [{ index: 1, quote: "ok" }, { index: 0, quote: "x" }] },
+    turn({ question: "clean", claimQuotes: [{ index: 1, quote: "ok" }] }),
+  ]);
+  const restored = deserializeAskSession(raw);
+  expect(restored.map((t) => t.question)).toEqual([
+    "negative",
+    "zero",
+    "fractional",
+    "huge",
+    "blank",
+    "mixed",
+    "clean",
+  ]);
+  for (let i = 0; i < 6; i++) expect(restored[i]!.claimQuotes).toBeUndefined();
+  expect(restored[6]!.claimQuotes).toEqual([{ index: 1, quote: "ok" }]);
 });

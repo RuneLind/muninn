@@ -14,6 +14,7 @@ import {
   coerceClientEdits,
   confirmSynthesisCandidate,
   digestCacheDecision,
+  isAnnotatablePage,
   resolveExplainPreflight,
   fetchSavedNotes,
   fetchSavedNotesBlock,
@@ -1252,6 +1253,31 @@ describe("resolveExplainPreflight", () => {
     expect(
       resolveExplainPreflight({ wiki: "w", unknownWiki: false, entry, index, meta: undefined, page: "Nope" }),
     ).toBe('No wiki page named "Nope".');
+  });
+});
+
+/**
+ * `isAnnotatablePage` — the inline-`<Fact>` POLICY predicate. `renderWikiHtml` is
+ * extension-agnostic, so this is not about what CAN render: `.md` pages are read raw
+ * outside the reader (GitHub) and deliberately keep the blockquote callout form.
+ */
+describe("isAnnotatablePage", () => {
+  test("native .mdx pages are annotatable", () => {
+    expect(isAnnotatablePage("plans/thing.mdx", "plan")).toBe(true);
+    expect(isAnnotatablePage("Deep Dive.mdx", "note")).toBe(true);
+  });
+
+  test(".md pages are NOT annotatable (policy — they render raw on GitHub)", () => {
+    expect(isAnnotatablePage("concepts/thing.md", "concept")).toBe(false);
+    expect(isAnnotatablePage("index.md", "note")).toBe(false);
+  });
+
+  test("explainers and other extensions are never annotatable", () => {
+    expect(isAnnotatablePage("blogs/x.html", "explainer")).toBe(false);
+    // Belt-and-braces: a type/extension mismatch can't opt an explainer in.
+    expect(isAnnotatablePage("blogs/x.mdx", "explainer")).toBe(false);
+    expect(isAnnotatablePage("notes/x.txt", "note")).toBe(false);
+    expect(isAnnotatablePage("mdx", "note")).toBe(false);
   });
 });
 

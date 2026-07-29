@@ -16,9 +16,12 @@ import {
   integrateSuccessCopy,
   INTEGRATE_BODY_MAX,
   validateClaimQuotes,
+  claimQuotesFromClaimsEvent,
   CLAIM_QUOTE_MAX,
+  CLAIM_QUOTES_TOTAL_MAX,
   type ProposedEdit,
 } from "./wiki-integrate.ts";
+import { FACTCHECK_MAX_CLAIMS } from "../../../wiki/factcheck-context.ts";
 
 const ANSWER = [
   "Mostly accurate, with one contradicted claim.",
@@ -518,13 +521,11 @@ test("fewer quotes than claims is legitimate (quote is optional at extraction)",
   expect(r.note).toBeUndefined();
 });
 
-test("drops the WHOLE list on any structural disagreement — never guesses alignment", () => {
+test("drops the WHOLE list when alignment is unknowable — never guesses", () => {
   const cases: unknown[] = [
     "not-a-list",
-    [{ index: 4, quote: "no such claim" }], // out of range
-    [{ index: 0, quote: "1-based, so 0 names nothing" }],
     [{ index: 1.5, quote: "non-integer" }],
-    [{ index: 1, quote: "a" }, { index: 1, quote: "b" }], // duplicate index
+    [{ index: 1, quote: "a" }, { index: 1, quote: "b" }], // duplicate posted index
     [{ index: 1, quote: "a" }, { index: 2, quote: "b" }, { index: 3, quote: "c" }, { index: 3, quote: "d" }],
     [null],
     ["just a string"],
@@ -535,6 +536,66 @@ test("drops the WHOLE list on any structural disagreement — never guesses alig
     expect(r.quotes).toEqual([]);
     expect(typeof r.note).toBe("string");
   }
+});
+
+test("a DUPLICATE claim index in the ANSWER drops the whole list (ambiguous anchors)", () => {
+  // The model wrote "Claim 1/2" twice with DIFFERENT verdicts — one quote would
+  // otherwise be attributable to either block, i.e. to either colour.
+  const dupAnswer = [
+    "### ✅ Claim 1/2 — Founded in 1998",
+    "",
+    "Confirmed.",
+    "",
+    "### ❌ Claim 1/2 — Ships 4M units",
+    "",
+    "Contradicted.",
+  ].join("\n");
+  const r = validateClaimQuotes([{ index: 1, quote: "Founded in 1998." }], dupAnswer);
+  expect(r.quotes).toEqual([]);
+  expect(r.note).toContain("repeats a claim index");
+});
+
+test("an entry whose index names no claim is dropped ALONE, keeping the others", () => {
+  const r = validateClaimQuotes(
+    [
+      { index: 2, quote: "Ships 4M units a year." },
+      { index: 9, quote: "a heading the model mangled" },
+      { index: 0, quote: "1-based, so 0 names nothing" },
+    ],
+    ANSWER,
+  );
+  expect(r.quotes).toEqual([{ index: 2, quote: "Ships 4M units a year." }]);
+  expect(r.note).toContain("2 claim quotes dropped");
+  expect(r.note).toContain("matches no claim");
+});
+
+test("the count rule compares against DISTINCT claim indexes", () => {
+  // 3 distinct claim indexes ⇒ 4 quotes can never align, whatever they name.
+  const r = validateClaimQuotes(
+    [
+      { index: 1, quote: "a" },
+      { index: 2, quote: "b" },
+      { index: 3, quote: "c" },
+      { index: 4, quote: "d" },
+    ],
+    ANSWER,
+  );
+  expect(r.quotes).toEqual([]);
+  expect(r.note).toContain("more quotes than claims");
+});
+
+test("both per-item drop reasons are reported together", () => {
+  const r = validateClaimQuotes(
+    [
+      { index: 1, quote: "  " },
+      { index: 7, quote: "no such claim" },
+      { index: 3, quote: "kept" },
+    ],
+    ANSWER,
+  );
+  expect(r.quotes).toEqual([{ index: 3, quote: "kept" }]);
+  expect(r.note).toContain("blank, non-string, or over");
+  expect(r.note).toContain("matches no claim");
 });
 
 test("an answer with no claim headings admits no quotes at all", () => {
@@ -562,10 +623,31 @@ test("a quote exactly at the cap is kept", () => {
   expect(r.note).toBeUndefined();
 });
 
+test("CLAIM_QUOTES_TOTAL_MAX is FACTCHECK_MAX_CLAIMS × CLAIM_QUOTE_MAX", () => {
+  // The mirror in wiki-integrate.ts exists only because that module must not import
+  // `src/wiki/*` (it is bundled into the browser client). This is the drift gate: a
+  // largest-legitimate extraction sits exactly AT the cap, so the total bound can
+  // only ever bind a crafted answer.
+  expect(CLAIM_QUOTES_TOTAL_MAX).toBe(FACTCHECK_MAX_CLAIMS * CLAIM_QUOTE_MAX);
+});
+
+test("a max-claims answer with max-length quotes sits exactly at the total cap", () => {
+  const wide = Array.from(
+    { length: FACTCHECK_MAX_CLAIMS },
+    (_, i) => "### ❌ Claim " + (i + 1) + "/" + FACTCHECK_MAX_CLAIMS + " — t\n\nbody",
+  ).join("\n\n");
+  const quotes = Array.from({ length: FACTCHECK_MAX_CLAIMS }, (_, i) => ({
+    index: i + 1,
+    quote: "x".repeat(CLAIM_QUOTE_MAX),
+  }));
+  const r = validateClaimQuotes(quotes, wide);
+  expect(r.quotes.length).toBe(FACTCHECK_MAX_CLAIMS);
+  expect(r.note).toBeUndefined();
+});
+
 test("an over-total list is dropped whole", () => {
-  // 8 claims x ~400 chars would be 3200; build a 3-claim answer that overshoots
-  // the total cap only via a long-but-legal per-quote size is impossible here, so
-  // assert the guard directly on a wider answer.
+  // A 12-claim answer is already past the extractor's own cap (a crafted payload) —
+  // 12 × 400 overshoots the derived total bound.
   const wide = Array.from(
     { length: 12 },
     (_, i) => "### \u274c Claim " + (i + 1) + "/12 \u2014 t\n\nbody",
@@ -577,4 +659,72 @@ test("an over-total list is dropped whole", () => {
   const r = validateClaimQuotes(quotes, wide);
   expect(r.quotes).toEqual([]);
   expect(r.note).toContain("total size");
+});
+
+// ── claimQuotesFromClaimsEvent (the client-side lift) ────────────────────────
+
+test("claimQuotesFromClaimsEvent lifts present quotes and skips absent ones", () => {
+  expect(
+    claimQuotesFromClaimsEvent([
+      { index: 1, title: "a", quote: "Founded in 1998." },
+      { index: 2, title: "b" }, // implicit claim — extractor gave no quote
+      { index: 3, title: "c", quote: "Ships 4M units a year." },
+    ]),
+  ).toEqual([
+    { index: 1, quote: "Founded in 1998." },
+    { index: 3, quote: "Ships 4M units a year." },
+  ]);
+});
+
+test("claimQuotesFromClaimsEvent skips blank and non-string quotes", () => {
+  expect(
+    claimQuotesFromClaimsEvent([
+      { index: 1, title: "a", quote: "" },
+      { index: 2, title: "b", quote: "   " },
+      { index: 3, title: "c", quote: 42 },
+      { index: 4, title: "d", quote: null },
+      { index: 5, title: "e", quote: "kept" },
+    ]),
+  ).toEqual([{ index: 5, quote: "kept" }]);
+});
+
+test("claimQuotesFromClaimsEvent tolerates junk without throwing", () => {
+  expect(claimQuotesFromClaimsEvent(undefined)).toEqual([]);
+  expect(claimQuotesFromClaimsEvent(null)).toEqual([]);
+  expect(claimQuotesFromClaimsEvent("nope")).toEqual([]);
+  expect(claimQuotesFromClaimsEvent([])).toEqual([]);
+  expect(claimQuotesFromClaimsEvent([null, "x", { title: "no index", quote: "q" }])).toEqual([]);
+});
+
+// ── quotesNote is USER-VISIBLE (not just a server log line) ──────────────────
+
+test("integratePreviewHtml renders the propose route's quotesNote", () => {
+  const edit: ProposedEdit = {
+    claimIndex: 1,
+    verdict: "❌",
+    old: "four million",
+    new: "2.1 million",
+    reason: "The filing reports 2.1M units.",
+    resolvedText: "four million",
+  };
+  const html = integratePreviewHtml(
+    { edits: [edit], dropped: [], quotesNote: "1 claim quote dropped (index matches no claim in the answer)" },
+    [true],
+    false,
+  );
+  expect(html).toContain("Claim anchors:");
+  expect(html).toContain("index matches no claim in the answer");
+  expect(html).toContain('class="wiki-fc-int-note"');
+});
+
+test("nothingIntegrableHtml also surfaces the quotesNote, and an absent one adds nothing", () => {
+  const withNote = integratePreviewHtml(
+    { edits: [], dropped: [], quotesNote: "claim quotes ignored — not a list" },
+    [],
+    false,
+  );
+  expect(withNote).toContain("Claim anchors:");
+  expect(withNote).toContain("not a list");
+  const without = integratePreviewHtml({ edits: [], dropped: [] }, [], false);
+  expect(without).not.toContain("Claim anchors:");
 });

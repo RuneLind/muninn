@@ -6,8 +6,10 @@ import {
   verdictOf,
   parseConfidence,
   realOutcome,
+  claimsEventPayload,
   type ClaimVerifyOutcome,
 } from "./factcheck-sse.ts";
+import { CLAIM_QUOTE_MAX } from "../views/components/wiki-integrate.ts";
 import { formatWebHtml } from "../../web/web-format.ts";
 
 const ok = (block: string): ClaimVerifyOutcome => ({ block, real: true, outcome: "verified" });
@@ -326,5 +328,43 @@ describe("realOutcome", () => {
 
   test("a bare ⚠ (no VS16) still maps to 'verified'", () => {
     expect(realOutcome("### ⚠ Claim 1/2 — a\n\nPartly.")).toBe("verified");
+  });
+});
+
+describe("claimsEventPayload", () => {
+  test("1-based indexes, and an absent quote stays absent (never \"\")", () => {
+    expect(
+      claimsEventPayload([
+        { title: "Ships 4M units", quote: "The device ships 4M units per year." },
+        { title: "An implicit claim" },
+      ]),
+    ).toEqual([
+      { index: 1, title: "Ships 4M units", quote: "The device ships 4M units per year." },
+      { index: 2, title: "An implicit claim" },
+    ]);
+  });
+
+  test("an over-cap quote is DROPPED, not truncated — parity with the propose route", () => {
+    // A truncated quote could resolve to a different span than the model meant, and
+    // the propose route rejects anything over the cap anyway: so the value that
+    // survives extraction is exactly the value that survives propose.
+    const out = claimsEventPayload([
+      { title: "too long", quote: "x".repeat(CLAIM_QUOTE_MAX + 1) },
+      { title: "exactly at the cap", quote: "y".repeat(CLAIM_QUOTE_MAX) },
+    ]);
+    expect(out[0]).toEqual({ index: 1, title: "too long" });
+    expect(out[1]!.quote).toHaveLength(CLAIM_QUOTE_MAX);
+  });
+
+  test("a blank / whitespace-only quote is omitted", () => {
+    expect(claimsEventPayload([{ title: "a", quote: "   " }, { title: "b", quote: "" }])).toEqual([
+      { index: 1, title: "a" },
+      { index: 2, title: "b" },
+    ]);
+  });
+
+  test("the cap is measured on the TRIMMED quote (padding alone can't drop it)", () => {
+    const padded = "  " + "z".repeat(CLAIM_QUOTE_MAX) + "  ";
+    expect(claimsEventPayload([{ title: "a", quote: padded }])[0]!.quote).toBe(padded);
   });
 });

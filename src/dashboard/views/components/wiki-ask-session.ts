@@ -111,7 +111,16 @@ function isValidTurn(v: unknown): v is StoredAskTurn {
   // just the type.
   if (typeof t.wrote !== "undefined" && t.wrote !== "append" && t.wrote !== "integrate") return false;
   if (typeof t.bodyLen !== "undefined" && typeof t.bodyLen !== "number") return false;
-  if (typeof t.annotatable !== "undefined" && typeof t.annotatable !== "boolean") return false;
+  // `annotatable` is a purely ADVISORY hint (does this page take inline `<Fact>`
+  // wrappers), and its absence already means "not annotatable" — so a malformed
+  // value is dropped like `toolSourceUrls`, not fatal like the `bodyLen` scalar
+  // beside it. The deviation from that precedent is deliberate: `bodyLen` gates a
+  // budget the server enforces, whereas a missing `annotatable` degrades to exactly
+  // the pre-field behaviour and throwing away a whole fact-check answer over a hint
+  // costs the user far more than it protects.
+  if (typeof t.annotatable !== "undefined" && typeof t.annotatable !== "boolean") {
+    delete t.annotatable;
+  }
   // A malformed quote list is DROPPED (the turn survives), the `toolSourceUrls`
   // precedent: absent quotes degrade to exactly the pre-PR behaviour, whereas
   // rejecting the turn would throw away a whole fact-check answer. All-or-nothing
@@ -135,18 +144,25 @@ function isValidOutcomeCounts(v: unknown): boolean {
   return true;
 }
 
-/** A well-formed claim-quote list: an array whose every entry is `{index:number,
- *  quote:string}`. The server re-validates against the answer's own claim anchors
- *  before anything is done with them — this is only shape hygiene on rehydrate. */
+/**
+ * A well-formed claim-quote list: an array whose every entry is `{index, quote}`
+ * with a **positive safe integer** index and a **non-blank** quote.
+ *
+ * Held at parity with the server's `validateClaimQuotes`: a bare `typeof === number`
+ * accepted `-1`, `1.5` and `1e21` (none of which can name a `Claim n/m` heading) and
+ * a bare `typeof === string` accepted `""` — all of which the propose route rejects.
+ * Since a single bad entry drops the whole field here, keeping them meant persisting
+ * a payload the server would throw away on the next propose. `isSafeInteger` rather
+ * than `isInteger` because `1e21` passes the latter.
+ */
 function isValidClaimQuotes(v: unknown): v is { index: number; quote: string }[] {
   if (!Array.isArray(v)) return false;
-  return v.every(
-    (q) =>
-      !!q &&
-      typeof q === "object" &&
-      typeof (q as Record<string, unknown>).index === "number" &&
-      typeof (q as Record<string, unknown>).quote === "string",
-  );
+  return v.every((q) => {
+    if (!q || typeof q !== "object") return false;
+    const o = q as Record<string, unknown>;
+    if (typeof o.index !== "number" || !Number.isSafeInteger(o.index) || o.index <= 0) return false;
+    return typeof o.quote === "string" && o.quote.trim().length > 0;
+  });
 }
 
 /** A well-formed host→url map: a plain object whose every value is a string.

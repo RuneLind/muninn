@@ -109,9 +109,22 @@ export function parseFactcheckClaims(answer: string): FactcheckClaimAnchor[] {
  */
 export const CLAIM_QUOTE_MAX = 400;
 
-/** Total character cap across the whole posted quote list. `FACTCHECK_MAX_CLAIMS`
- *  (8) × {@link CLAIM_QUOTE_MAX} plus slack — a bound, not a budget. */
-export const CLAIM_QUOTES_TOTAL_MAX = 4_000;
+/**
+ * Mirror of `FACTCHECK_MAX_CLAIMS` (`src/wiki/factcheck-context.ts`) — duplicated
+ * rather than imported to keep this module free of `src/wiki/*` (it is bundled into
+ * the browser client). Drift is pinned by an equality assertion in
+ * `wiki-integrate.test.ts`, which CAN import both.
+ */
+const FACTCHECK_MAX_CLAIMS_MIRROR = 8;
+
+/**
+ * Total character cap across the whole posted quote list, DERIVED as
+ * `FACTCHECK_MAX_CLAIMS × CLAIM_QUOTE_MAX` — the largest a legitimate extraction
+ * can be. It therefore only ever binds a CRAFTED answer (a client posting more
+ * claim blocks than the extractor's own cap allows); a real run is at or under it
+ * by construction.
+ */
+export const CLAIM_QUOTES_TOTAL_MAX = FACTCHECK_MAX_CLAIMS_MIRROR * CLAIM_QUOTE_MAX;
 
 /** One claim's verbatim supporting passage, keyed by the claim's 1-based index
  *  (the SAME `n` the `### … Claim n/m` heading carries). Alignment is ALWAYS by
@@ -136,21 +149,28 @@ export interface ClaimQuoteValidation {
  * route already applies to the claim list.
  *
  * The failure mode this guards is specific and bad: a quote wrongly paired with
- * claim k+1's verdict would wrap the passage in the WRONG verdict colour. So a
- * structural disagreement drops the WHOLE list rather than guessing an alignment:
- * a non-array payload, any malformed item, an index that names no claim block in
- * the answer, a duplicate index, more quotes than the answer has claims, or a
- * total size over {@link CLAIM_QUOTES_TOTAL_MAX}.
+ * claim k+1's verdict would wrap the passage in the WRONG verdict colour. So
+ * alignment safety is enforced by exactly two rules — **index membership** and
+ * **no duplicate indexes**, on BOTH sides:
+ *
+ * - The WHOLE list is dropped when alignment is unknowable: a non-array payload,
+ *   an item that is not an object or carries no integer `index`, a duplicate index
+ *   in the POSTED list, a duplicate `Claim n/m` index in the ANSWER (one quote
+ *   would then match two different-verdict blocks — `known` silently deduped it,
+ *   hence the size comparison), more quotes than the answer has DISTINCT claim
+ *   indexes, or a total size over {@link CLAIM_QUOTES_TOTAL_MAX}.
+ * - Individual entries are dropped, with a note, when only THAT entry is unusable:
+ *   a `quote` that is blank, non-string, or over {@link CLAIM_QUOTE_MAX} chars, and
+ *   an `index` naming no claim block in the answer (a heading the model mangled).
+ *   Dropping is safe because alignment is by explicit index, never by position —
+ *   removing one entry cannot shift another.
  *
  * NB the count rule is `≤`, not `===`: `Claim.quote` is OPTIONAL at extraction
  * ("Omit it if the claim is implicit" — `buildClaimExtractionPrompt`), so a
- * legitimate run routinely carries fewer quotes than claims. The safety property
- * is preserved by the index-membership + no-duplicates rules, which is where
- * alignment actually lives.
+ * legitimate run routinely carries fewer quotes than claims.
  *
- * A single over-cap or blank quote is dropped ON ITS OWN (index-keyed, so
- * dropping one cannot shift another). Never throws; degrading to "no quotes"
- * always leaves the caller with a working propose.
+ * Never throws; degrading to "no quotes" always leaves the caller with a working
+ * propose.
  */
 export function validateClaimQuotes(raw: unknown, answer: string): ClaimQuoteValidation {
   if (typeof raw === "undefined" || raw === null) return { quotes: [] };
@@ -158,13 +178,21 @@ export function validateClaimQuotes(raw: unknown, answer: string): ClaimQuoteVal
 
   const anchors = parseFactcheckClaims(answer);
   const known = new Set(anchors.map((a) => a.index));
-  if (raw.length > anchors.length) {
+  // A repeated `Claim n/m` index in the answer makes index-keyed alignment
+  // ambiguous — the same quote would sit under two blocks whose verdicts may
+  // differ. `known` dedupes silently, so compare its size against the anchor count.
+  if (known.size !== anchors.length) {
+    return { quotes: [], note: "claim quotes ignored — the answer repeats a claim index" };
+  }
+  // Compared against the DISTINCT index count, which is what the quotes key on.
+  if (raw.length > known.size) {
     return { quotes: [], note: "claim quotes ignored — more quotes than claims in the answer" };
   }
 
   const seen = new Set<number>();
   const kept: ClaimQuote[] = [];
-  let overCap = 0;
+  let badQuote = 0;
+  let unknownIndex = 0;
   let total = 0;
   for (const item of raw) {
     if (!item || typeof item !== "object") {
@@ -172,18 +200,23 @@ export function validateClaimQuotes(raw: unknown, answer: string): ClaimQuoteVal
     }
     const o = item as Record<string, unknown>;
     const index = typeof o.index === "number" && Number.isInteger(o.index) ? o.index : null;
-    if (index === null || !known.has(index)) {
-      return { quotes: [], note: "claim quotes ignored — an index matches no claim in the answer" };
+    if (index === null) {
+      return { quotes: [], note: "claim quotes ignored — an entry carries no claim index" };
     }
     if (seen.has(index)) {
       return { quotes: [], note: "claim quotes ignored — duplicate claim index" };
     }
     seen.add(index);
+    // An index naming no claim block is THIS entry's problem, not the list's: the
+    // surviving entries are still each provably on their own claim, so there is
+    // nothing to guess. Reported, never silent.
+    if (!known.has(index)) {
+      unknownIndex++;
+      continue;
+    }
     const quote = typeof o.quote === "string" ? o.quote.trim() : "";
-    // A blank or over-long quote is dropped alone — the remaining quotes stay
-    // correctly aligned because alignment is by `index`, not position.
     if (!quote || quote.length > CLAIM_QUOTE_MAX) {
-      overCap++;
+      badQuote++;
       continue;
     }
     total += quote.length;
@@ -192,9 +225,44 @@ export function validateClaimQuotes(raw: unknown, answer: string): ClaimQuoteVal
   if (total > CLAIM_QUOTES_TOTAL_MAX) {
     return { quotes: [], note: "claim quotes ignored — total size over the limit" };
   }
-  return overCap > 0
-    ? { quotes: kept, note: `${overCap} claim quote${overCap === 1 ? "" : "s"} dropped (blank or over ${CLAIM_QUOTE_MAX} chars)` }
-    : { quotes: kept };
+  const notes: string[] = [];
+  if (badQuote > 0) {
+    notes.push(
+      `${badQuote} claim quote${badQuote === 1 ? "" : "s"} dropped ` +
+        `(blank, non-string, or over ${CLAIM_QUOTE_MAX} chars)`,
+    );
+  }
+  if (unknownIndex > 0) {
+    notes.push(
+      `${unknownIndex} claim quote${unknownIndex === 1 ? "" : "s"} dropped ` +
+        "(index matches no claim in the answer)",
+    );
+  }
+  return notes.length ? { quotes: kept, note: notes.join("; ") } : { quotes: kept };
+}
+
+/**
+ * Lift the `claims` SSE event's list onto the flat `{index, quote}` pairs the turn
+ * carries (and later re-posts to the propose route). The event is the ONLY place
+ * the extractor's verbatim passages exist — the claim checklist is transient and
+ * dropped at `done` — so this runs once, on arrival.
+ *
+ * A claim the extractor gave no usable quote for is simply ABSENT from the result
+ * (never `{quote: ""}`): the server treats a blank quote as a dropped entry, so
+ * emitting one would only produce a note about nothing. Returns `[]` for a
+ * non-array / empty input; the caller stores `undefined` rather than an empty list.
+ */
+export function claimQuotesFromClaimsEvent(list: unknown): ClaimQuote[] {
+  if (!Array.isArray(list)) return [];
+  const out: ClaimQuote[] = [];
+  for (const item of list) {
+    if (!item || typeof item !== "object") continue;
+    const o = item as Record<string, unknown>;
+    if (typeof o.index !== "number" || typeof o.quote !== "string") continue;
+    if (!o.quote.trim()) continue;
+    out.push({ index: o.index, quote: o.quote });
+  }
+  return out;
 }
 
 /** Verdicts the integrate flow acts on (v1): contradicted + partly supported.
@@ -267,6 +335,13 @@ export interface IntegrateProposal {
   /** Additive (PR 2): the page already carries a `<!-- factcheck:start -->` block,
    *  so the "also refresh the summary callout" checkbox defaults ON. */
   hasSentinelBlock?: boolean;
+  /** The claim quotes the propose route ACCEPTED (echoed back from
+   *  {@link validateClaimQuotes}) — the posted list minus anything it dropped. */
+  quotes?: ClaimQuote[];
+  /** Why any posted quote was dropped. RENDERED in the preview panel: this is the
+   *  anti-silent-drop mechanism (#397's class), and a note that only ever reaches
+   *  the server log is a silent drop as far as the reader is concerned. */
+  quotesNote?: string;
 }
 
 // ── Render gate ──────────────────────────────────────────────────────────────
@@ -496,6 +571,18 @@ export interface IntegratePreviewView {
   calloutDisabled?: boolean;
 }
 
+/**
+ * The propose route's claim-quote drop note, rendered in the panel's note region
+ * (same `.wiki-fc-int-note` styling as the model's own note) so a dropped anchor is
+ * VISIBLE rather than log-only. Prefixed "Claim anchors:" so it can't be misread as
+ * a statement about the proposed edits.
+ */
+function quotesNoteHtml(proposal: IntegrateProposal): string {
+  return proposal.quotesNote
+    ? '<div class="wiki-fc-int-note">Claim anchors: ' + esc(proposal.quotesNote) + "</div>"
+    : "";
+}
+
 /** Copy for the "nothing integrable" outcome — an honest empty state, not an
  *  error: the model may legitimately have found nothing safe to change. */
 export function nothingIntegrableHtml(proposal: IntegrateProposal): string {
@@ -505,6 +592,7 @@ export function nothingIntegrableHtml(proposal: IntegrateProposal): string {
     '<div class="wiki-fc-int-note">' +
     esc(proposal.note || "The editor proposed no edits that could be placed in this page.") +
     "</div>" +
+    quotesNoteHtml(proposal) +
     droppedListHtml(proposal.dropped || []) +
     '<div class="wiki-fc-int-actions">' +
     '<button id="wikiFcIntCancel" class="wiki-fc-int-btn">Close</button>' +
@@ -558,6 +646,7 @@ export function integratePreviewHtml(
     '<div class="wiki-fc-int-head">' + edits.length +
     " proposed edit" + (edits.length === 1 ? "" : "s") + "</div>" +
     (proposal.note ? '<div class="wiki-fc-int-note">' + esc(proposal.note) + "</div>" : "") +
+    quotesNoteHtml(proposal) +
     edits.map((e, i) => editPreviewHtml(e, i, selected[i] !== false, applying)).join("") +
     droppedListHtml(proposal.dropped || [], view.droppedOpen === true) +
     // The apply route's OWN per-edit rejections — the honest reasons behind an

@@ -39,6 +39,7 @@ import {
 import {
   appendBlockedByIntegrate,
   buildIntegrateApplyBody,
+  claimQuotesFromClaimsEvent,
   integrateBarState,
   integratePreviewHtml,
   integrateSuccessCopy,
@@ -2124,11 +2125,10 @@ function runAskStream(url: string, turn: AskTurn): void {
         index: c.index, title: c.title, status: "pending", block: "",
       }));
       // The checklist itself is transient (cleared at `done`), so the quotes are
-      // lifted onto the turn HERE — this event is the only place they exist.
-      // Claims the extractor gave no quote for are simply absent from the list.
-      const quotes = list
-        .filter((c: { index: number; quote?: string }) => typeof c.quote === "string" && !!c.quote)
-        .map((c: { index: number; quote?: string }) => ({ index: c.index, quote: c.quote as string }));
+      // lifted onto the turn HERE — this event is the only place they exist. The
+      // lift is the pure, unit-tested `claimQuotesFromClaimsEvent`; claims the
+      // extractor gave no usable quote for are simply absent from the list.
+      const quotes = claimQuotesFromClaimsEvent(list);
       turn.claimQuotes = quotes.length ? quotes : undefined;
       composeText = "";
       rebuildFactcheckBuffer(turn);
