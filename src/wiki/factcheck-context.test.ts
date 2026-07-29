@@ -5,6 +5,7 @@ import {
   buildClaimVerifyPrompt,
   buildComposePrompt,
   stripFactcheckBlock,
+  hasFactcheckBlock,
   FACTCHECK_SENTINEL_START,
   FACTCHECK_SENTINEL_END,
   FACTCHECK_MAX_CLAIMS,
@@ -35,6 +36,41 @@ describe("stripFactcheckBlock", () => {
   test("is a no-op on a body with no block", () => {
     const body = "Just a normal page with no fact-check block.";
     expect(stripFactcheckBlock(body)).toBe(body);
+  });
+
+  test("the `g` regex is not shared state across calls", () => {
+    const body = `A\n${FACTCHECK_SENTINEL_START}x${FACTCHECK_SENTINEL_END}\nB`;
+    expect(stripFactcheckBlock(body)).toBe(stripFactcheckBlock(body));
+  });
+});
+
+describe("hasFactcheckBlock", () => {
+  test("true only for a COMPLETE paired block", () => {
+    expect(
+      hasFactcheckBlock(`page\n${FACTCHECK_SENTINEL_START}\n> [!factcheck] x\n${FACTCHECK_SENTINEL_END}\n`),
+    ).toBe(true);
+    expect(hasFactcheckBlock("a plain page")).toBe(false);
+  });
+
+  test("an ORPHAN start sentinel is NOT a block", () => {
+    // The bug a bare `includes(START)` produced: the checkbox defaulted ON, the
+    // apply APPENDED a second block (the splice found no pair to replace), and the
+    // next strip swallowed the prose between the two sentinels.
+    const orphan = `intro\n${FACTCHECK_SENTINEL_START}\n> half-written verdict\n\nmore prose`;
+    expect(orphan.includes(FACTCHECK_SENTINEL_START)).toBe(true);
+    expect(hasFactcheckBlock(orphan)).toBe(false);
+  });
+
+  test("an orphan END sentinel alone is not a block either", () => {
+    expect(hasFactcheckBlock(`prose\n${FACTCHECK_SENTINEL_END}\n`)).toBe(false);
+  });
+
+  test("agrees with stripFactcheckBlock on every case", () => {
+    const paired = `a\n${FACTCHECK_SENTINEL_START}x${FACTCHECK_SENTINEL_END}\nb`;
+    const orphan = `a\n${FACTCHECK_SENTINEL_START}x\nb`;
+    for (const body of [paired, orphan, "plain"]) {
+      expect(hasFactcheckBlock(body)).toBe(stripFactcheckBlock(body) !== body.trim());
+    }
   });
 });
 

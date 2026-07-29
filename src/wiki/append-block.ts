@@ -41,8 +41,11 @@ function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** Ensure exactly one trailing newline. */
-function withTrailingNewline(text: string): string {
+/** Ensure exactly one trailing newline. Exported so the fact-check INTEGRATE
+ *  write normalizes identically on BOTH its branches — otherwise ticking the
+ *  "also refresh the callout" checkbox would change trailing bytes an untouched
+ *  edits-only apply left alone. */
+export function withTrailingNewline(text: string): string {
   return `${text.replace(/\n+$/, "")}\n`;
 }
 

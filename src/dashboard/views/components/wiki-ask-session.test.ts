@@ -133,6 +133,47 @@ test("a present-but-wrong-typed claimOutcomes drops the turn", () => {
   expect(restored.map((t) => t.question)).toEqual(["clean", "unknown-key-ok", "absent"]);
 });
 
+test("round-trips a fact-check turn's wrote flag + bodyLen (v4 integrate)", () => {
+  const fc = turn({
+    question: "fact check",
+    kind: "factcheck",
+    page: "notes/thing",
+    pageType: "note",
+    baseHash: "abc",
+    wrote: "integrate",
+    bodyLen: 4210,
+  });
+  const restored = deserializeAskSession(serializeAskSession([fc], 10));
+  expect(restored).toEqual([fc]);
+  // The whole point of persisting these: the derived disable + the page-too-long
+  // gate both survive a reload.
+  expect(restored[0]!.wrote).toBe("integrate");
+  expect(restored[0]!.bodyLen).toBe(4210);
+});
+
+test("a present-but-wrong-typed wrote/bodyLen drops the turn", () => {
+  const raw = JSON.stringify([
+    { ...turn(), wrote: 1 }, // not a string → drop
+    { ...turn(), bodyLen: "4210" }, // not a number → drop
+    turn({ question: "clean", wrote: "append", bodyLen: 10 }), // valid
+    turn({ question: "absent" }), // absent is valid
+  ]);
+  const restored = deserializeAskSession(raw);
+  expect(restored.map((t) => t.question)).toEqual(["clean", "absent"]);
+});
+
+test("`wrote` is validated as the two-value union, not merely as a string", () => {
+  // An unknown value falls through every render branch and would silently
+  // re-enable BOTH write buttons against an already-staled baseHash.
+  const raw = JSON.stringify([
+    { ...turn({ question: "bogus" }), wrote: "appendd" },
+    { ...turn({ question: "empty" }), wrote: "" },
+    turn({ question: "append-ok", wrote: "append" }),
+    turn({ question: "integrate-ok", wrote: "integrate" }),
+  ]);
+  expect(deserializeAskSession(raw).map((t) => t.question)).toEqual(["append-ok", "integrate-ok"]);
+});
+
 test("per-turn shape validation drops only the malformed entries", () => {
   const good = turn({ question: "good" });
   const raw = JSON.stringify([

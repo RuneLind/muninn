@@ -43,8 +43,44 @@ export const FACTCHECK_MAX_CLAIMS = 8;
 export const FACTCHECK_SENTINEL_START = "<!-- factcheck:start -->";
 export const FACTCHECK_SENTINEL_END = "<!-- factcheck:end -->";
 
+/**
+ * Hard ceiling on a client-posted fact-check `answer`. Both write routes
+ * (`/factcheck/append` and `/factcheck/integrate/apply`) splice the answer into a
+ * page, so an unbounded answer is an unbounded write into an otherwise
+ * hard-bounded path. Generous enough that no real fact check (8 claims × a few
+ * paragraphs) ever comes close — this is a bound, not a budget. Peer of
+ * `INTEGRATE_BODY_MAX` in `integrate-edits.ts`.
+ */
+export const FACTCHECK_ANSWER_MAX = 32_000;
+
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** The paired non-greedy sentinel matcher — the ONE authority on "does this body
+ *  carry a fact-check block?". A fresh RegExp per call because the `g` variant
+ *  used by {@link stripFactcheckBlock} is stateful. */
+function factcheckBlockRe(global = false): RegExp {
+  return new RegExp(
+    escapeRegExp(FACTCHECK_SENTINEL_START) + "[\\s\\S]*?" + escapeRegExp(FACTCHECK_SENTINEL_END),
+    global ? "g" : "",
+  );
+}
+
+/**
+ * True when the body carries a COMPLETE sentinel-wrapped fact-check block.
+ *
+ * Deliberately the paired regex, not a bare `includes(FACTCHECK_SENTINEL_START)`:
+ * a page carrying an orphan START (a truncated write, a hand-edit) has no block
+ * the splice can replace, so treating it as "already has one" would default the
+ * reader's refresh-callout checkbox ON, make the apply APPEND a second block, and
+ * leave the next re-check's strip swallowing the prose between the two sentinels.
+ * The three existing authorities — `stripFactcheckBlock`, `spliceSentinelBlock`,
+ * and the integrate engine's exclusion zones — all use the paired form; this makes
+ * the fourth consumer agree with them.
+ */
+export function hasFactcheckBlock(body: string): boolean {
+  return factcheckBlockRe().test(body);
 }
 
 /**
@@ -53,11 +89,7 @@ function escapeRegExp(s: string): string {
  * blocks and surrounding whitespace; collapses the resulting 3+ blank lines.
  */
 export function stripFactcheckBlock(body: string): string {
-  const re = new RegExp(
-    escapeRegExp(FACTCHECK_SENTINEL_START) + "[\\s\\S]*?" + escapeRegExp(FACTCHECK_SENTINEL_END),
-    "g",
-  );
-  return body.replace(re, "").replace(/\n{3,}/g, "\n\n").trim();
+  return body.replace(factcheckBlockRe(true), "").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 /**

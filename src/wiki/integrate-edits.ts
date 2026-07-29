@@ -76,8 +76,13 @@ import type { FactcheckClaimAnchor } from "../dashboard/views/components/wiki-in
  * {@link integrateBodyLen}). ~2× `FACTCHECK_ARTICLE_BODY_MAX` — unlike claim
  * extraction the model must see the WHOLE page (it quotes `old` from it), so the
  * cap is a hard reject rather than a truncation.
+ *
+ * DECLARED in the import-safe `wiki-integrate.ts` and re-exported here: PR 2's
+ * bundled reader client gates on the same number, and importing THIS module in the
+ * browser would drag `explain-context.ts` → `research/answer.ts` (the whole server
+ * graph) into the bundle. One constant, two consumers, no drift.
  */
-export const INTEGRATE_BODY_MAX = 24_000;
+export { INTEGRATE_BODY_MAX } from "../dashboard/views/components/wiki-integrate.ts";
 /** Max edits accepted in one propose/apply call. */
 export const INTEGRATE_MAX_EDITS = 12;
 /** Max chars for one edit's `old` or `new`. */
@@ -89,6 +94,26 @@ export const ZONE_SENTINEL = "\uE000";
 
 /** Chars of surrounding body returned with each resolved edit for the client preview. */
 const PREVIEW_CONTEXT = 120;
+
+/**
+ * The preview context slices must stop at an exclusion-zone boundary. A naive
+ * `body.slice(start - 120, start)` reaches into frontmatter, a fenced code block
+ * or a persisted fact-check callout and renders those bytes to the reviewer as
+ * ordinary adjacent prose — text the edit provably cannot touch, shown as if it
+ * were its neighbourhood. The masked body already marks every zone code unit with
+ * {@link ZONE_SENTINEL}, so the clamp is a scan of the same window.
+ */
+function contextBefore(body: string, masked: string, start: number): string {
+  const from = Math.max(0, start - PREVIEW_CONTEXT);
+  const lastZone = masked.slice(from, start).lastIndexOf(ZONE_SENTINEL);
+  return body.slice(lastZone === -1 ? from : from + lastZone + 1, start);
+}
+
+function contextAfter(body: string, masked: string, end: number): string {
+  const to = Math.min(body.length, end + PREVIEW_CONTEXT);
+  const firstZone = masked.slice(end, to).indexOf(ZONE_SENTINEL);
+  return body.slice(end, firstZone === -1 ? to : end + firstZone);
+}
 
 // ── Exclusion zones ──────────────────────────────────────────────────────────
 
@@ -677,8 +702,8 @@ export function applyEdits(body: string, edits: IntegrateEdit[], isMdx = false):
       end: r.end,
       tier: r.tier,
       resolvedText,
-      beforeCtx: body.slice(Math.max(0, r.start - PREVIEW_CONTEXT), r.start),
-      afterCtx: body.slice(r.end, r.end + PREVIEW_CONTEXT),
+      beforeCtx: contextBefore(body, masked, r.start),
+      afterCtx: contextAfter(body, masked, r.end),
     };
   });
 
