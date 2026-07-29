@@ -280,7 +280,9 @@ export function componentBlockCss(scope: string): string {
       font-variant-numeric: tabular-nums;
       /* The chip is chrome, not prose: its glyph and its visually-hidden label
          must stay out of a copied paragraph and out of the reader's
-         Explain-selection payload (which reads the selection's text). */
+         Explain-selection payload (which reads the selection's text). The same
+         hazard covers the reader layer's toolbar and its cloned evidence card —
+         see the matching rules in factcheckReaderCss below. */
       -webkit-user-select: none;
       user-select: none;
     }
@@ -352,12 +354,21 @@ export function componentBlockCss(scope: string): string {
     ${scope} .fc-claim { padding: 0.5rem 0 0.6rem; }
     ${scope} .fc-claim + .fc-claim { border-top: 1px solid var(--border-primary); }
     ${scope} .fc-claim > :first-child { margin-top: 0.4rem; }
+  `;
+}
 
-    /* ── Reader interaction layer ───────────────────────────────────────────
-       Client-inserted by wiki-factcheck-reader.ts: a summary toolbar above the
-       article (the appendix's own date + counts, cloned) carrying the layer
-       toggle, and the evidence card a chip expands under its block. Both are
-       styled here so the annotation reads as one system in every scope. */
+/**
+ * CSS for the /wiki reader's fact-check INTERACTION layer — the toolbar
+ * `wiki-factcheck-reader.ts` inserts above the article, the evidence card a chip
+ * expands, and the layer-off state its toggle flips.
+ *
+ * Deliberately NOT part of `componentBlockCss`: nothing client-side inserts a
+ * toolbar or a card in web chat or the /research answer pane, so shipping these
+ * rules there was dead weight. The shared `.fc-mark`/`.fc-chip`/`.fc-block`
+ * rules stay above — those markup shapes DO render in every scope.
+ */
+export function factcheckReaderCss(scope: string): string {
+  return `
     ${scope} .fc-toolbar {
       display: flex;
       align-items: center;
@@ -370,6 +381,10 @@ export function componentBlockCss(scope: string): string {
       background: var(--bg-surface);
       font-size: 0.9em;
       color: var(--text-muted);
+      /* Same hazard as the chip: the toolbar is chrome, so its date and counts
+         must never enter a copied paragraph or the Explain-selection payload. */
+      -webkit-user-select: none;
+      user-select: none;
     }
     ${scope} .fc-toolbar-summary { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
     ${scope} .fc-toolbar-toggle {
@@ -394,6 +409,7 @@ export function componentBlockCss(scope: string): string {
     ${scope}.fc-off .fc-mark-block { border-left-color: transparent; }
     ${scope}.fc-off .fc-chip,
     ${scope}.fc-off .fc-block,
+    ${scope}.fc-off .fc-toolbar-summary,
     ${scope}.fc-off .fc-card { display: none; }
 
     ${scope} .fc-card {
@@ -401,11 +417,21 @@ export function componentBlockCss(scope: string): string {
       margin: 0.6rem 0 1.1rem;
       padding: 0.15rem 2.3rem 0.4rem 0.9rem;
       border: 1px solid var(--border-secondary);
-      border-left: 3px solid var(--accent);
+      border-left: 3px solid var(--border-secondary);
       border-radius: 8px;
       background: var(--bg-surface);
       font-size: 0.95em;
+      /* Cloned evidence — the appendix already carries it once. A card sitting
+         mid-article must not smuggle itself into a copy or an Explain selection. */
+      -webkit-user-select: none;
+      user-select: none;
     }
+    /* The rail carries the claim's own verdict, so an open card reads as part of
+       the mark it belongs to rather than as a generic accent panel. */
+    ${scope} .fc-card-ok { border-left-color: color-mix(in srgb, var(--status-success) 55%, transparent); }
+    ${scope} .fc-card-warn { border-left-color: var(--status-warning); }
+    ${scope} .fc-card-bad { border-left-color: var(--status-error); }
+    ${scope} .fc-card-unknown { border-left-color: var(--border-secondary); }
     ${scope} .fc-card .fc-claim { padding-top: 0; }
     ${scope} .fc-card-close {
       position: absolute;

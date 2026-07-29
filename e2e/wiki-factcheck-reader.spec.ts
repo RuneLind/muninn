@@ -63,8 +63,10 @@ function blankTelegramTokens(): Record<string, string> {
  * ```mermaid fence, so the reader injects the pinned mermaid CDN script (a
  * sandboxed/offline box logs a resource-load failure for it), and the throwaway
  * wiki has no huginn collections, so the reader's lazy `/api/wiki/similar` fetch
- * 404s by design. Uncaught page exceptions are collected separately and are
- * NEVER filtered.
+ * 404s by design. BOTH filters are narrowed to resource-load failures attributed
+ * by URL — a bare `/mermaid/i` text match would also swallow a real exception
+ * thrown from the mermaid enhancer. Uncaught page exceptions are collected
+ * separately and are NEVER filtered.
  */
 function collectErrors(page: Page): { console: string[]; page: string[] } {
   const out = { console: [] as string[], page: [] as string[] };
@@ -77,8 +79,10 @@ function collectErrors(page: Page): { console: string[]; page: string[] } {
   page.on("console", (msg) => {
     if (msg.type() !== "error") return;
     const text = msg.text();
-    if (/mermaid|jsdelivr/i.test(text)) return;
-    if (lastFailedUrl && /Failed to load resource/i.test(text) && /api\/wiki\/similar/.test(lastFailedUrl)) return;
+    const url = msg.location()?.url || lastFailedUrl;
+    const isLoadFailure = /Failed to load resource/i.test(text);
+    if (isLoadFailure && /jsdelivr|mermaid/i.test(url)) return;
+    if (isLoadFailure && /api\/wiki\/similar/.test(url)) return;
     out.console.push(text);
   });
   page.on("pageerror", (err) => out.page.push(String(err)));
@@ -164,6 +168,40 @@ test.describe("Fact-check reader interaction", () => {
     expect(errs.console).toEqual([]);
   });
 
+  test("an INLINE chip's card lands after the whole inline run, not mid-sentence", async ({
+    page,
+  }) => {
+    await openFixturePage(page);
+    // Chip 1 sits in the opening paragraph. `formatWebHtml` emits no <p>, so that
+    // paragraph is bare text nodes with the mark + chip as DIRECT children of
+    // .wiki-article — the case where a naive "block containing the chip" walk
+    // returns the chip itself and splices the card into the middle of a sentence.
+    await page.locator('.wiki-article .fc-chip[data-fact="1"]').click();
+    await expect(page.locator('.wiki-article .fc-card[data-fc-card="1"]')).toBeVisible();
+
+    const placement = await page.evaluate(() => {
+      const card = document.querySelector('.wiki-article .fc-card[data-fc-card="1"]')!;
+      const prev = card.previousSibling;
+      const next = card.nextElementSibling;
+      const BLOCK = /^(P|DIV|UL|OL|LI|TABLE|PRE|BLOCKQUOTE|SECTION|DETAILS|HR|H[1-6])$/;
+      return {
+        // Everything before the card is the tail of the paragraph's inline run …
+        prevText: (prev?.textContent ?? "").trim(),
+        prevIsBlock: prev?.nodeType === 1 && BLOCK.test((prev as Element).tagName),
+        // … and the next sibling is the block that ended it.
+        nextTag: next?.tagName ?? "",
+        nextIsBlock: !!next && BLOCK.test(next.tagName),
+      };
+    });
+
+    // The sentence the chip lives in is complete before the card — a mid-sentence
+    // splice would leave this text ending inside the clause instead.
+    expect(placement.prevIsBlock).toBe(false);
+    expect(placement.prevText.endsWith("misread lab marker.")).toBe(true);
+    expect(placement.nextIsBlock).toBe(true);
+    expect(placement.nextTag).toBe("H3");
+  });
+
   test("a second chip replaces the open card; close button and Escape both close it", async ({
     page,
   }) => {
@@ -183,12 +221,21 @@ test.describe("Fact-check reader interaction", () => {
     await expect(page.locator(".wiki-article .fc-card")).toHaveCount(0);
     await expect(chip7).toHaveAttribute("aria-expanded", "false");
 
-    // Escape closes too.
+    // Escape closes too — when focus is inside the annotation.
     await chip7.click();
     await expect(page.locator(".wiki-article .fc-card")).toHaveCount(1);
     await page.keyboard.press("Escape");
     await expect(page.locator(".wiki-article .fc-card")).toHaveCount(0);
     await expect(chip7).toHaveAttribute("aria-expanded", "false");
+
+    // …but Escape from OUTSIDE the article is somebody else's key: the card stays
+    // and focus must not be yanked back into the prose.
+    await chip7.click();
+    const search = page.locator("#wikiSearch");
+    await search.focus();
+    await page.keyboard.press("Escape");
+    await expect(page.locator(".wiki-article .fc-card")).toHaveCount(1);
+    await expect(search).toBeFocused();
   });
 
   test("the summary strip shows the run date and verdict counts", async ({ page }) => {
@@ -210,16 +257,25 @@ test.describe("Fact-check reader interaction", () => {
     const toggle = page.locator(".wiki-article .fc-toolbar-toggle");
     const chip1 = page.locator('.wiki-article .fc-chip[data-fact="1"]');
     const appendix = page.locator(".wiki-article .fc-block");
+    const counts = page.locator(".wiki-article .fc-toolbar-summary");
 
     await expect(chip1).toBeVisible();
     await expect(appendix).toBeVisible();
-    await expect(toggle).toHaveAttribute("aria-pressed", "true");
+    await expect(counts).toBeVisible();
+    // The label IS the state — a toggle button carrying aria-pressed too would
+    // announce "Hide fact-check layer, pressed".
+    await expect(toggle).toHaveText("Hide fact-check layer");
+    await expect(toggle).not.toHaveAttribute("aria-pressed", /.*/);
 
     await toggle.click();
     await expect(article).toHaveClass(/fc-off/);
-    await expect(toggle).toHaveAttribute("aria-pressed", "false");
+    await expect(toggle).toHaveText("Show fact-check layer");
     await expect(chip1).toBeHidden();
     await expect(appendix).toBeHidden();
+    // Layer off means OFF: the toolbar's date + counts go with it (only the
+    // toggle itself stays reachable).
+    await expect(counts).toBeHidden();
+    await expect(toggle).toBeVisible();
     // The prose itself is untouched — the article still reads.
     await expect(article).toContainText("stored primarily in skeletal muscle");
 
@@ -227,5 +283,6 @@ test.describe("Fact-check reader interaction", () => {
     await expect(article).not.toHaveClass(/fc-off/);
     await expect(chip1).toBeVisible();
     await expect(appendix).toBeVisible();
+    await expect(counts).toBeVisible();
   });
 });
