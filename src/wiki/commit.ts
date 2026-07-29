@@ -38,6 +38,7 @@
 
 import path from "node:path";
 import { realpath, stat } from "node:fs/promises";
+import { createQueue } from "./queue.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("wiki", "commit");
@@ -136,30 +137,20 @@ async function pathExists(abs: string): Promise<boolean> {
 // ── Per-repo (per-toplevel) serialization queue ──────────────────────────────
 //
 // Unlike the gardener mutex (which SKIPS when busy), a second wiki commit must
-// not be dropped — it queues behind the first. Same Map<key, Promise> shape,
-// released in `.finally()`, but callers await the previous run before starting.
+// not be dropped — it queues behind the first. The primitive itself lives in
+// `queue.ts` (the wiki-WRITE path needs the same shape); this is its OWN chain
+// map, deliberately not shared — a write critical section awaiting a commit on a
+// shared map would self-deadlock when a wiki root equals its git toplevel.
 
-const commitChains = new Map<string, Promise<unknown>>();
+const commitQueue = createQueue();
 
 function runExclusiveQueued<T>(key: string, work: () => Promise<T>): Promise<T> {
-  const prev = commitChains.get(key) ?? Promise.resolve();
-  const run = prev.then(
-    () => work(),
-    () => work(),
-  );
-  commitChains.set(
-    key,
-    run.then(
-      () => undefined,
-      () => undefined,
-    ),
-  );
-  return run;
+  return commitQueue.run(key, work);
 }
 
 /** Test-only: clear the per-repo commit queue between cases. */
 export function __resetForTest(): void {
-  commitChains.clear();
+  commitQueue.reset();
 }
 
 /**

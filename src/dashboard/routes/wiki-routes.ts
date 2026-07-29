@@ -43,6 +43,24 @@ import {
   FACTCHECK_HEADING_MAX,
 } from "../../wiki/factcheck-context.ts";
 import { appendBlockToPage } from "../../wiki/append-block.ts";
+import { writeWikiPage } from "../../wiki/page-write.ts";
+import {
+  applyEdits,
+  buildIntegratePrompt,
+  changedChars,
+  enforceEditBounds,
+  hasSourcesSection,
+  integrateBodyLen,
+  maxChangedChars,
+  parseEditList,
+  promptMaskBody,
+  INTEGRATE_BODY_MAX,
+  INTEGRATE_MAX_EDITS,
+  INTEGRATE_MAX_EDIT_CHARS,
+  type IntegrateEdit,
+} from "../../wiki/integrate-edits.ts";
+import { runIntegrateOneShot } from "../../wiki/integrate-oneshot.ts";
+import { correctableClaims } from "../views/components/wiki-integrate.ts";
 import { commitWikiChange } from "../../wiki/commit.ts";
 import { todayOslo } from "../../gardener/util.ts";
 import { connectorCapabilities } from "../../ai/one-shot.ts";
@@ -1346,12 +1364,17 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     // only reduces the body + computes the base hash.
     let body = "";
     let baseHash = "";
+    let bodyLen = 0;
     if (!preflightError && entry && index && meta) {
       // Explainers are HTML on disk; reduce to prose so claim extraction / the
       // locator see plain text. Markdown pages pass through verbatim. A missing/
       // unreadable file degrades to an empty body (no 500), like the explain branch.
       const raw = (await readWikiPage(index, meta)) ?? "";
       baseHash = createHash("sha256").update(raw).digest("hex");
+      // The ONE body-length referent shared with the integrate route's
+      // INTEGRATE_BODY_MAX check — same function, same arguments, so the number
+      // the client budgets against is the number the server enforces.
+      bodyLen = integrateBodyLen(raw, meta.relPath.endsWith(".mdx"));
       body = meta.type === "explainer" ? htmlToText(raw) : raw;
       log.info("Wiki factcheck: wiki={wiki} bot={bot} page={page} mode={mode}", {
         wiki: entry.name,
@@ -1375,6 +1398,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       ctx: mode === "sel" ? ctx : undefined,
       botDir: botConfig?.dir,
       baseHash,
+      bodyLen,
       // Same reader HTML pipeline as Ask/Explain (no citations — fact-check cites
       // raw URLs inline in the answer markdown, not numbered sources).
       renderAnswerHtml: (answer) => renderAskAnswerHtml(answer, []),
@@ -1595,4 +1619,352 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       return c.json({ error: "internal error" }, 500);
     }
   });
+
+  // Fact check "Integrate into article" — PROPOSE. Runs the fenced integrate
+  // one-shot on the wiki's synthesis bot and returns a validated, range-resolved
+  // edit list for the client to preview. It NEVER writes: the human accepts edits
+  // and the sibling /apply route below does the write under CAS + the per-wiki
+  // queue. Plain JSON route (400/404/409/502/500), whole body wrapped like the
+  // append route so an unexpected failure is a 500 JSON, never an unhandled throw.
+  app.post("/api/wiki/factcheck/integrate", async (c) => {
+    try {
+      type IntegrateBody = { wiki?: string; bot?: string; page?: string; answer?: string; baseHash?: string };
+      const reqBody = await c.req.json<IntegrateBody>().catch(() => ({}) as IntegrateBody);
+      const page = typeof reqBody.page === "string" ? reqBody.page.trim() : "";
+      const answer = typeof reqBody.answer === "string" ? reqBody.answer.trim() : "";
+      const baseHash = typeof reqBody.baseHash === "string" ? reqBody.baseHash.trim() : "";
+      if (!page) return c.json({ error: "page is required" }, 400);
+      if (!answer) return c.json({ error: "answer is required" }, 400);
+      if (!baseHash) return c.json({ error: "baseHash is required" }, 400);
+
+      const resolved = await resolveIntegrateTarget(c, reqBody);
+      if ("response" in resolved) return resolved.response;
+      const { entry, meta } = resolved;
+
+      const current = (await readWikiPage(resolved.index, meta)) ?? "";
+      // CAS FIRST — a drifted page invalidates the whole turn before we spend a
+      // model call on it (same raw-bytes convention as the fact-check route).
+      if (createHash("sha256").update(current).digest("hex") !== baseHash) {
+        return c.json({ error: "page changed since the fact check", stale: true }, 409);
+      }
+
+      const isMdx = meta.relPath.endsWith(".mdx");
+      const bodyLen = integrateBodyLen(current, isMdx);
+      if (bodyLen > INTEGRATE_BODY_MAX) {
+        return c.json({ error: "page too long to integrate", bodyLen, max: INTEGRATE_BODY_MAX }, 400);
+      }
+
+      // Claim anchors are derived SERVER-SIDE from the persisted answer markdown
+      // (its `### <emoji> Claim n/m — <title>` headings are a fixed prompt
+      // contract) — the extraction quotes never leave the server, and the turn's
+      // claim list is transient client state we must not trust.
+      const claims = correctableClaims(answer);
+      if (claims.length === 0) {
+        return c.json({
+          edits: [],
+          dropped: [],
+          note: "No ❌ or ⚠️ claims to integrate.",
+          budget: integrateBudget(bodyLen),
+        });
+      }
+
+      const { bot } = resolveWikiSynthesisBot(entry, discoverAllBots());
+      if (!bot) return c.json({ error: "No synthesis bot for this wiki" }, 409);
+
+      const prompts = buildIntegratePrompt({
+        pageTitle: meta.title,
+        wikiName: entry.name,
+        claims,
+        maskedBody: promptMaskBody(current, isMdx),
+        hasSourcesSection: hasSourcesSection(current),
+      });
+
+      let raw: string;
+      try {
+        const result = await runIntegrateOneShot({
+          pageTitle: meta.title,
+          wikiName: entry.name,
+          prompt: prompts.userPrompt,
+          systemPrompt: prompts.systemPrompt,
+          config,
+          botConfig: bot,
+        });
+        raw = result.result ?? "";
+      } catch (err) {
+        log.warn("Wiki fact-check integrate: one-shot failed for wiki={wiki} page={page}: {error}", {
+          wiki: entry.name,
+          page: meta.relPath,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return c.json({ error: "the editor model call failed" }, 502);
+      }
+
+      // Validate-to-null: a malformed response is a clean error, never a write.
+      const parsed = parseEditList(raw);
+      if (!parsed) {
+        log.warn("Wiki fact-check integrate: unparseable edit list wiki={wiki} raw={raw}", {
+          wiki: entry.name,
+          raw: raw.slice(0, 200),
+        });
+        return c.json({ error: "the editor model returned no usable edit list" }, 502);
+      }
+
+      // Payload bounds are enforced HERE too, so the preview only ever shows
+      // edits the apply route will accept.
+      const bounded = enforceEditBounds(parsed.edits);
+      const resolvedEdits = applyEdits(current, bounded.kept, isMdx);
+      const edits = resolvedEdits.outcomes
+        .filter((o) => o.applied)
+        .map((o) => ({
+          ...o.edit,
+          start: o.start,
+          end: o.end,
+          tier: o.tier,
+          beforeCtx: o.beforeCtx,
+          afterCtx: o.afterCtx,
+        }));
+      const dropped = [
+        ...bounded.dropped,
+        ...resolvedEdits.outcomes
+          .filter((o) => !o.applied)
+          .map((o) => ({ edit: o.edit, reason: o.reason ?? "could not be placed" })),
+      ];
+
+      log.info("Wiki fact-check integrate: wiki={wiki} page={page} proposed={n} dropped={d}", {
+        wiki: entry.name,
+        page: meta.relPath,
+        n: edits.length,
+        d: dropped.length,
+      });
+
+      return c.json({
+        edits,
+        dropped,
+        ...(parsed.note ? { note: parsed.note } : {}),
+        budget: { ...integrateBudget(bodyLen), proposedChangedChars: changedChars(edits) },
+      });
+    } catch (err) {
+      log.error("Wiki fact-check integrate: unexpected failure: {error}", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return c.json({ error: "internal error" }, 500);
+    }
+  });
+
+  // Fact check "Integrate into article" — APPLY. The client echoes the accepted
+  // edits back verbatim (stateless by design; a stated tradeoff — apply trusts the
+  // client payload, acceptable on the auth-less loopback dashboard but bounded
+  // HARD: edit count, per-edit chars, and total changed chars vs the body).
+  // Everything from the re-read through log.md runs inside the per-WIKI write
+  // queue (`writeWikiPage`); the commit is the tail after it releases.
+  app.post("/api/wiki/factcheck/integrate/apply", async (c) => {
+    try {
+      type ApplyBody = {
+        wiki?: string;
+        bot?: string;
+        page?: string;
+        baseHash?: string;
+        edits?: unknown;
+      };
+      const reqBody = await c.req.json<ApplyBody>().catch(() => ({}) as ApplyBody);
+      const page = typeof reqBody.page === "string" ? reqBody.page.trim() : "";
+      const baseHash = typeof reqBody.baseHash === "string" ? reqBody.baseHash.trim() : "";
+      if (!page) return c.json({ error: "page is required" }, 400);
+      if (!baseHash) return c.json({ error: "baseHash is required" }, 400);
+
+      const edits = coerceClientEdits(reqBody.edits);
+      if (!edits) return c.json({ error: "edits must be a non-empty array of {old,new}" }, 400);
+      if (edits.length > INTEGRATE_MAX_EDITS) {
+        return c.json({ error: `too many edits — the cap is ${INTEGRATE_MAX_EDITS} per apply` }, 400);
+      }
+      if (edits.some((e) => e.old.length > INTEGRATE_MAX_EDIT_CHARS || e.new.length > INTEGRATE_MAX_EDIT_CHARS)) {
+        return c.json(
+          { error: `an edit exceeds the ${INTEGRATE_MAX_EDIT_CHARS}-char per-edit limit` },
+          400,
+        );
+      }
+
+      const resolved = await resolveIntegrateTarget(c, reqBody);
+      if ("response" in resolved) return resolved.response;
+      const { entry, meta } = resolved;
+
+      const current = (await readWikiPage(resolved.index, meta)) ?? "";
+      const isMdx = meta.relPath.endsWith(".mdx");
+      const bodyLen = integrateBodyLen(current, isMdx);
+      const changed = changedChars(edits);
+      const maxChanged = maxChangedChars(bodyLen);
+      if (changed > maxChanged) {
+        return c.json(
+          {
+            error: `the accepted edits change ${changed} chars, over the ${maxChanged}-char limit for this page`,
+          },
+          400,
+        );
+      }
+
+      const owningBot =
+        entry.source === "bot"
+          ? discoverAllBots().find((b) => b.name.toLowerCase() === entry.name.toLowerCase())
+          : undefined;
+      const push = owningBot?.wikiAutoCommit?.push ?? true;
+
+      // Re-resolved INSIDE the critical section against the freshly-read body.
+      let applyResult: ReturnType<typeof applyEdits> | null = null;
+      const result = await writeWikiPage({
+        wikiDir: entry.root,
+        relPath: meta.relPath,
+        baseHash,
+        collections: entry.collections ?? [],
+        logKind: "factcheck-integrate",
+        logTitle: meta.title,
+        logLine: "fact-check corrections integrated via the wiki reader",
+        commitMessage: `[fact-check] integrate: ${meta.relPath}`,
+        now: () => Date.now(),
+        transform: (body) => {
+          applyResult = applyEdits(body, edits, isMdx);
+          // Zero survivors ⇒ short-circuit BEFORE the write: no write, no log
+          // entry, no reindex, no commit.
+          return applyResult.appliedCount === 0 ? null : applyResult.body;
+        },
+        readFile: async (absPath) => {
+          try {
+            return await Bun.file(absPath).text();
+          } catch {
+            return null;
+          }
+        },
+        writeFile: async (absPath, content) => {
+          await Bun.write(absPath, content);
+        },
+        refreshIndex: async () => {
+          await getWikiIndex({ root: entry.root, refresh: true });
+        },
+        reindex: async (collection) => {
+          await postCollectionUpdate(config.knowledgeApiUrl, collection);
+        },
+        commit: (paths, message) => commitWikiChange(entry.root, paths, message, { push }),
+      });
+
+      const droppedOf = (r: ReturnType<typeof applyEdits> | null) =>
+        (r?.outcomes ?? [])
+          .filter((o) => !o.applied)
+          .map((o) => ({ edit: o.edit, reason: o.reason ?? "could not be placed" }));
+
+      if (result.outcome === "stale") {
+        return c.json({ error: result.reason, stale: true }, 409);
+      }
+      if (result.outcome === "noop") {
+        log.info("Wiki fact-check integrate apply: nothing resolved wiki={wiki} page={page}", {
+          wiki: entry.name,
+          page: meta.relPath,
+        });
+        return c.json({ applied: 0, dropped: droppedOf(applyResult), page: meta.relPath });
+      }
+      if (result.outcome === "error") {
+        log.warn("Wiki fact-check integrate apply failed wiki={wiki} page={page}: {reason}", {
+          wiki: entry.name,
+          page,
+          reason: result.reason,
+        });
+        return c.json({ error: result.reason }, 500);
+      }
+
+      const applied = (applyResult as ReturnType<typeof applyEdits> | null)?.appliedCount ?? 0;
+      activityLog.push("system", `Wiki fact-check integrated: ${entry.name} — ${meta.title}`, {
+        metadata: { source: "wiki-factcheck-integrate", wiki: entry.name, page: meta.relPath },
+      });
+      log.info("Wiki fact-check integrated: wiki={wiki} page={page} applied={applied}", {
+        wiki: entry.name,
+        page: meta.relPath,
+        applied,
+      });
+      return c.json({
+        applied,
+        dropped: droppedOf(applyResult),
+        page: meta.relPath,
+        committed: result.commit?.committed ?? false,
+        ...(result.commit?.reason ? { reason: result.commit.reason } : {}),
+      });
+    } catch (err) {
+      log.error("Wiki fact-check integrate apply: unexpected failure: {error}", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return c.json({ error: "internal error" }, 500);
+    }
+  });
+}
+
+/**
+ * Resolve `{wiki|bot, page}` to a registered wiki entry + its index + the target
+ * page meta for BOTH integrate routes, or the error Response to return. Markdown
+ * only — an `.html` explainer is rejected before any model call or write, exactly
+ * like the append route (splicing markdown into a standalone explainer would
+ * corrupt it).
+ */
+async function resolveIntegrateTarget(
+  c: { req: { query: (k: string) => string | undefined }; json: (o: unknown, s?: 400 | 404) => Response },
+  body: { wiki?: string; bot?: string; page?: string },
+): Promise<
+  | { entry: WikiRegistryEntry; index: WikiIndex; meta: WikiPageMeta }
+  | { response: Response }
+> {
+  const page = typeof body.page === "string" ? body.page.trim() : "";
+  const { entry, unknownWiki } = resolveWikiRequest(
+    getWikiRegistry(),
+    c.req.query("wiki") ?? body.wiki,
+    c.req.query("bot") ?? body.bot,
+    process.env.WIKI_DIR,
+  );
+  if (unknownWiki || !entry) {
+    return { response: c.json({ error: "no wiki configured for that name" }, 404) };
+  }
+  const index = await getWikiIndex({ root: entry.root });
+  if (!index) return { response: c.json({ error: "wiki directory not found" }, 404) };
+  const meta = index.resolve(page);
+  if (!meta) return { response: c.json({ error: `no wiki page named "${page}"` }, 404) };
+  if (meta.type === "explainer") {
+    return {
+      response: c.json({ error: "fact-check edits can only be applied to markdown pages" }, 400),
+    };
+  }
+  return { entry, index, meta };
+}
+
+/** The edit budget echoed to the client so it can disable accept-all honestly. */
+function integrateBudget(bodyLen: number): {
+  bodyLen: number;
+  maxEdits: number;
+  maxEditChars: number;
+  maxChangedChars: number;
+} {
+  return {
+    bodyLen,
+    maxEdits: INTEGRATE_MAX_EDITS,
+    maxEditChars: INTEGRATE_MAX_EDIT_CHARS,
+    maxChangedChars: maxChangedChars(bodyLen),
+  };
+}
+
+/**
+ * Shape-validate the client-echoed edit list. Returns null when it isn't a
+ * non-empty array of objects carrying a non-empty string `old` and a string
+ * `new` — apply must never guess at a malformed payload.
+ */
+function coerceClientEdits(raw: unknown): IntegrateEdit[] | null {
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+  const edits: IntegrateEdit[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") return null;
+    const o = item as Record<string, unknown>;
+    if (typeof o.old !== "string" || !o.old || typeof o.new !== "string") return null;
+    const idx = Number(o.claimIndex);
+    edits.push({
+      claimIndex: Number.isFinite(idx) && idx > 0 ? Math.trunc(idx) : 0,
+      verdict: typeof o.verdict === "string" ? o.verdict : "",
+      old: o.old,
+      new: o.new,
+      reason: typeof o.reason === "string" ? o.reason : "",
+    });
+  }
+  return edits;
 }

@@ -1,0 +1,278 @@
+import { test, expect } from "bun:test";
+import { mkdtemp, rm, mkdir, writeFile, realpath } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { writeWikiPage, type PageWriteOptions } from "./page-write.ts";
+import { appendBlockToPage } from "./append-block.ts";
+import { applyEdits, type IntegrateEdit } from "./integrate-edits.ts";
+import { buildFactcheckBlock } from "./factcheck-context.ts";
+import { commitWikiChange, __resetForTest } from "./commit.ts";
+import { __resetWikiWriteQueueForTest } from "./queue.ts";
+import { sha256 } from "../gardener/util.ts";
+
+/** In-memory filesystem whose reads/writes yield to the event loop, so an
+ *  unqueued read→write pair WOULD interleave and lose a log entry. */
+function makeFs(files: Record<string, string>) {
+  return {
+    files,
+    readFile: async (p: string): Promise<string | null> => {
+      await Promise.resolve();
+      return p in files ? files[p]! : null;
+    },
+    writeFile: async (p: string, content: string): Promise<void> => {
+      await Promise.resolve();
+      files[p] = content;
+    },
+  };
+}
+
+function baseOpts(
+  fs: ReturnType<typeof makeFs>,
+  over: Partial<PageWriteOptions> = {},
+): PageWriteOptions {
+  return {
+    wikiDir: "/wiki",
+    relPath: "analyses/page.md",
+    baseHash: sha256(fs.files["/wiki/analyses/page.md"] ?? ""),
+    transform: (current) => `${current}appended\n`,
+    collections: ["wiki"],
+    logKind: "factcheck-integrate",
+    logTitle: "Page Title",
+    logLine: "fact-check corrections integrated via the wiki reader",
+    commitMessage: "[fact-check] integrate: analyses/page.md",
+    now: () => Date.UTC(2026, 6, 29, 12, 0, 0),
+    readFile: fs.readFile,
+    writeFile: fs.writeFile,
+    refreshIndex: async () => {},
+    reindex: async () => {},
+    ...over,
+  };
+}
+
+test("writeWikiPage writes, logs with the caller's kind/line, and reindexes", async () => {
+  __resetWikiWriteQueueForTest();
+  const fs = makeFs({ "/wiki/analyses/page.md": "# Page\n\nBody.\n" });
+  const reindexed: string[] = [];
+  const res = await writeWikiPage(baseOpts(fs, { reindex: async (c) => { reindexed.push(c); } }));
+  expect(res.outcome).toBe("written");
+  expect(fs.files["/wiki/analyses/page.md"]).toContain("appended");
+  expect(fs.files["/wiki/log.md"]).toContain("factcheck-integrate | Page Title");
+  expect(fs.files["/wiki/log.md"]).toContain("fact-check corrections integrated");
+  expect(reindexed).toEqual(["wiki"]);
+});
+
+test("writeWikiPage rejects a stale baseHash with no write (409-shaped)", async () => {
+  __resetWikiWriteQueueForTest();
+  const fs = makeFs({ "/wiki/analyses/page.md": "# Page\n\nBody.\n" });
+  const before = fs.files["/wiki/analyses/page.md"];
+  const res = await writeWikiPage(baseOpts(fs, { baseHash: "deadbeef" }));
+  expect(res.outcome).toBe("stale");
+  expect(fs.files["/wiki/analyses/page.md"]).toBe(before);
+  expect(fs.files["/wiki/log.md"]).toBeUndefined();
+});
+
+test("writeWikiPage: a null transform short-circuits — no write, log, reindex, or commit", async () => {
+  __resetWikiWriteQueueForTest();
+  const fs = makeFs({ "/wiki/analyses/page.md": "# Page\n\nBody.\n" });
+  const before = fs.files["/wiki/analyses/page.md"];
+  const reindexed: string[] = [];
+  let commits = 0;
+  const res = await writeWikiPage(
+    baseOpts(fs, {
+      transform: () => null,
+      reindex: async (c) => { reindexed.push(c); },
+      commit: async () => { commits++; },
+    }),
+  );
+  expect(res.outcome).toBe("noop");
+  expect(fs.files["/wiki/analyses/page.md"]).toBe(before);
+  expect(fs.files["/wiki/log.md"]).toBeUndefined();
+  expect(reindexed).toEqual([]);
+  expect(commits).toBe(0);
+});
+
+test("writeWikiPage surfaces the CommitWikiResult on the outcome", async () => {
+  __resetWikiWriteQueueForTest();
+  const fs = makeFs({ "/wiki/analyses/page.md": "# Page\n\nBody.\n" });
+  const res = await writeWikiPage(
+    baseOpts(fs, { commit: async () => ({ committed: false, reason: "not-a-repo" as const }) }),
+  );
+  expect(res).toMatchObject({ outcome: "written", commit: { committed: false, reason: "not-a-repo" } });
+});
+
+test("writeWikiPage rejects a path-escaping relPath before any read", async () => {
+  __resetWikiWriteQueueForTest();
+  const fs = makeFs({ "/wiki/analyses/page.md": "# Page\n" });
+  const res = await writeWikiPage(baseOpts(fs, { relPath: "../escape.md" }));
+  expect(res.outcome).toBe("error");
+  expect(fs.files["/wiki/log.md"]).toBeUndefined();
+});
+
+test("TOCTOU: a concurrent append + integrate-apply on one wiki serialize — no lost log entry", async () => {
+  __resetWikiWriteQueueForTest();
+  const initial = "# Page\n\nThe device ships 4M units.\n";
+  const fs = makeFs({ "/wiki/analyses/page.md": initial });
+
+  const edits: IntegrateEdit[] = [
+    { claimIndex: 1, verdict: "❌", old: "ships 4M units", new: "ships 2.1M units", reason: "filing" },
+  ];
+
+  // Both writers hold the SAME baseHash (both captured it from the same check).
+  // Whoever runs second must see the other's write and go stale — but BOTH must
+  // have serialized, so the first one's log.md entry can never be clobbered.
+  const applyP = writeWikiPage(
+    baseOpts(fs, {
+      baseHash: sha256(initial),
+      transform: (body) => {
+        const r = applyEdits(body, edits);
+        return r.appliedCount === 0 ? null : r.body;
+      },
+    }),
+  );
+  const appendP = appendBlockToPage({
+    wikiDir: "/wiki",
+    relPath: "analyses/page.md",
+    block: buildFactcheckBlock("Overall: one correction.", "2026-07-29"),
+    baseHash: sha256(initial),
+    collections: [],
+    logTitle: "Page Title",
+    now: () => Date.UTC(2026, 6, 29, 12, 0, 0),
+    readFile: fs.readFile,
+    writeFile: fs.writeFile,
+    refreshIndex: async () => {},
+    reindex: async () => {},
+  });
+
+  const [apply, append] = await Promise.all([applyP, appendP]);
+  const outcomes = [apply.outcome, append.outcome].sort();
+  // Exactly one wins; the loser is stale (never a silent lost update).
+  expect(outcomes).toEqual(["stale", "written"]);
+
+  // The winner's write AND its log entry both survive.
+  const log = fs.files["/wiki/log.md"] ?? "";
+  const logEntries = (log.match(/^## \[/gm) ?? []).length;
+  expect(logEntries).toBe(1);
+  if (apply.outcome === "written") {
+    expect(fs.files["/wiki/analyses/page.md"]).toContain("ships 2.1M units");
+    expect(log).toContain("factcheck-integrate | Page Title");
+  } else {
+    expect(fs.files["/wiki/analyses/page.md"]).toContain("factcheck:start");
+    expect(log).toContain("factcheck | Page Title");
+  }
+});
+
+test("the queue is keyed per WIKI ROOT — two pages in one wiki serialize, two wikis don't", async () => {
+  __resetWikiWriteQueueForTest();
+  const order: string[] = [];
+  const fs = makeFs({
+    "/wiki/a.md": "A\n",
+    "/wiki/b.md": "B\n",
+    "/other/c.md": "C\n",
+  });
+  // A transform that yields several times, so an unserialized pair interleaves.
+  const slowTransform = (tag: string) => (current: string) => {
+    order.push(`${tag}:start`);
+    return `${current}${tag}\n`;
+  };
+  const run = (wikiDir: string, relPath: string, tag: string) =>
+    writeWikiPage(
+      baseOpts(fs, {
+        wikiDir,
+        relPath,
+        baseHash: sha256(fs.files[`${wikiDir}/${relPath}`] ?? ""),
+        transform: slowTransform(tag),
+        collections: [],
+        refreshIndex: async () => { order.push(`${tag}:end`); },
+      }),
+    );
+
+  const results = await Promise.all([
+    run("/wiki", "a.md", "a"),
+    run("/wiki", "b.md", "b"),
+    run("/other", "c.md", "c"),
+  ]);
+  expect(results.map((r) => r.outcome)).toEqual(["written", "written", "written"]);
+  // Same wiki root ⇒ a's critical section completes before b's begins.
+  expect(order.indexOf("a:start")).toBeLessThan(order.indexOf("b:start"));
+  // Both log entries survived the serialization.
+  expect((fs.files["/wiki/log.md"] ?? "").match(/^## \[/gm)?.length).toBe(2);
+  // A different wiki root has its own chain (and its own log.md).
+  expect((fs.files["/other/log.md"] ?? "").match(/^## \[/gm)?.length).toBe(1);
+});
+
+test("no deadlock when the wiki root IS the git toplevel and the commit is awaited", async () => {
+  __resetForTest();
+  __resetWikiWriteQueueForTest();
+  const base = await mkdtemp(path.join(tmpdir(), "integrate-apply-"));
+  try {
+    // Wiki root == git toplevel: the shape that self-deadlocks if the write queue
+    // and the commit queue share one chain map.
+    const wikiDir = await mkdtemp(path.join(base, "wiki-"));
+    await mkdir(path.join(wikiDir, "analyses"), { recursive: true });
+    const relPath = "analyses/page.md";
+    const abs = path.join(wikiDir, relPath);
+    const initial = "# Page\n\nThe device ships 4M units.\n";
+    await writeFile(abs, initial);
+    const git = async (args: string[]) => {
+      const proc = Bun.spawn(["git", "-C", wikiDir, ...args], { stdout: "pipe", stderr: "pipe" });
+      const out = (await new Response(proc.stdout).text()).trim();
+      await proc.exited;
+      return out;
+    };
+    await git(["init", "-b", "main"]);
+    await git(["config", "user.email", "a@b.c"]);
+    await git(["config", "user.name", "Fixture"]);
+    await git(["add", "-A"]);
+    await git(["commit", "-q", "-m", "init"]);
+    // Assert the shape this test exists for: the wiki root IS the git toplevel.
+    expect(await git(["rev-parse", "--show-toplevel"])).toBe(await realpath(wikiDir));
+
+    const edits: IntegrateEdit[] = [
+      { claimIndex: 1, verdict: "❌", old: "ships 4M units", new: "ships 2.1M units", reason: "filing" },
+    ];
+    const res = await Promise.race([
+      writeWikiPage({
+        wikiDir,
+        relPath,
+        baseHash: sha256(initial),
+        transform: (body) => {
+          const r = applyEdits(body, edits);
+          return r.appliedCount === 0 ? null : r.body;
+        },
+        collections: [],
+        logKind: "factcheck-integrate",
+        logTitle: "Page Title",
+        logLine: "fact-check corrections integrated via the wiki reader",
+        commitMessage: `[fact-check] integrate: ${relPath}`,
+        now: () => Date.UTC(2026, 6, 29, 12, 0, 0),
+        readFile: async (p) => {
+          try {
+            return await Bun.file(p).text();
+          } catch {
+            return null;
+          }
+        },
+        writeFile: async (p, content) => {
+          await Bun.write(p, content);
+        },
+        refreshIndex: async () => {},
+        reindex: async () => {},
+        commit: (paths, message) => commitWikiChange(wikiDir, paths, message, { push: false }),
+      }),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("deadlocked")), 10_000)),
+    ]);
+
+    expect(res.outcome).toBe("written");
+    expect(res.outcome === "written" && res.commit?.committed).toBe(true);
+    expect(await Bun.file(abs).text()).toContain("ships 2.1M units");
+    const subjects = (await git(["log", "--format=%s"])).split("\n");
+    expect(subjects).toEqual([`[fact-check] integrate: ${relPath}`, "init"]);
+    const names = (await git(["show", "--name-only", "--format=", "HEAD"])).split("\n").sort();
+    expect(names).toEqual(["analyses/page.md", "log.md"]);
+    expect(await git(["status", "--porcelain"])).toBe("");
+  } finally {
+    __resetForTest();
+    __resetWikiWriteQueueForTest();
+    await rm(base, { recursive: true, force: true });
+  }
+}, 20_000);

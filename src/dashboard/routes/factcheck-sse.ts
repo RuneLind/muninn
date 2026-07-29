@@ -94,6 +94,14 @@ export interface FactcheckSseOptions {
   /** sha256 of the checked page's on-disk content — round-tripped on `done` so
    *  the ➕ POST can detect a drifted page. */
   baseHash: string;
+  /**
+   * The checked page's measured body length, round-tripped on `done` so the
+   * "Integrate into article" client can size its edit budget against the SAME
+   * number the integrate route enforces. Computed via the one pinned referent
+   * `integrateBodyLen` (`src/wiki/integrate-edits.ts`) — never a bespoke
+   * sentinel-only measure, which diverges by kilobytes on a code-heavy page.
+   */
+  bodyLen: number;
   /** Final-render hook: markdown answer → reader HTML, emitted as a trailing
    *  `answer_html` (same shape as Ask/Explain). A throw is swallowed — the
    *  streamed plain text stands. */
@@ -676,6 +684,7 @@ async function runFactcheck(
         lowConfidence: false,
         claimCount,
         baseHash: opts.baseHash,
+        bodyLen: opts.bodyLen,
         mode: opts.mode,
       }),
     });
