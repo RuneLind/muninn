@@ -37,6 +37,15 @@ import {
   type StoredAskTurn,
 } from "./wiki-ask-session.ts";
 import {
+  appendBlockedByIntegrate,
+  buildIntegrateApplyBody,
+  integrateBarState,
+  integratePreviewHtml,
+  integrateSuccessCopy,
+  INTEGRATE_STALE_COPY,
+  type IntegrateProposal,
+} from "./wiki-integrate.ts";
+import {
   connectionTypeOrder,
   filterPages,
   folderCounts,
@@ -1544,6 +1553,15 @@ interface AskTurn {
   claimOutcomes?: ClaimOutcomeCounts; // per-outcome tally for the honest fact-check meta line (persisted)
   claims?: ClaimRow[]; // per-claim checklist for a multi-claim fact check (transient; not persisted)
   toolLog?: ToolLogRow[]; // compact per-claim tool log during a fact check (transient; not persisted)
+  // Which write action this turn already performed. PERSISTED, because both write
+  // buttons' disabled state is derived from it at render time — a DOM-only disable
+  // would come back enabled after a reload and the click would only ever 409
+  // (whichever write happened staled this turn's baseHash).
+  wrote?: string; // "append" | "integrate"
+  // Integrate-relevant body length of the checked page (from the `done` payload;
+  // omitted for explainers). Drives the client-side page-too-long gate so ~10% of
+  // pages don't have to learn it from a server 400.
+  bodyLen?: number;
 }
 // One row of the fact-check claim checklist — pending until its verdict block lands.
 // `outcome` lands with the verdict (server `claim_result`) and drives the distinct
@@ -1723,13 +1741,87 @@ function askRememberHtml(turn: AskTurn): string {
  *  on the turn being committed (same `turn.answer` gate as the follow-up bar). */
 function askFactcheckAppendHtml(turn: AskTurn): string {
   if (turn.kind !== "factcheck" || turn.pageType === "explainer" || !turn.page) return "";
-  const disabled = turn.answer ? "" : " disabled";
   return (
     '<div class="wiki-fc-append" id="wikiFactcheckAppendBar">' +
-    '<button id="wikiFactcheckAppendBtn" class="wiki-fc-append-btn"' + disabled + ">➕ Add to article</button>" +
-    '<span class="wiki-fc-append-msg" id="wikiFactcheckAppendMsg"></span>' +
+    factcheckAppendInnerHtml(turn) +
     "</div>"
   );
+}
+
+/** Inner markup of the ➕ bar, DERIVED from the turn (never mutated in place only)
+ *  so a re-render — including a rehydrated turn after a reload — reproduces the
+ *  post-write state. An integrate write staled this turn's `baseHash`, so the
+ *  button goes disabled with the same copy a live 409 would show. */
+function factcheckAppendInnerHtml(turn: AskTurn): string {
+  if (turn.wrote === "append") {
+    return '<span class="wiki-fc-append-done">✓ Added to article</span>';
+  }
+  const blocked = appendBlockedByIntegrate(turn);
+  const disabled = turn.answer && !blocked ? "" : " disabled";
+  return (
+    '<button id="wikiFactcheckAppendBtn" class="wiki-fc-append-btn"' + disabled + ">➕ Add to article</button>" +
+    '<span class="wiki-fc-append-msg' + (blocked ? " error" : "") + '" id="wikiFactcheckAppendMsg">' +
+    (blocked ? esc(INTEGRATE_STALE_COPY) : "") +
+    "</span>"
+  );
+}
+
+/** "✎ Integrate into article" — the second write action on a fact-check turn.
+ *  Unlike ➕ (which appends a callout) it EDITS THE PROSE, so it only renders when
+ *  the check actually found something correctable (a ❌/⚠️ claim block, via the
+ *  shared heading parser — never a substring scan) on a markdown page within the
+ *  integrate body cap. The whole bar is derived from `integrateBarState`. */
+function askFactcheckIntegrateHtml(turn: AskTurn): string {
+  if (turn.kind !== "factcheck" || turn.pageType === "explainer" || !turn.page) return "";
+  return (
+    '<div class="wiki-fc-integrate" id="wikiFactcheckIntegrateBar">' +
+    factcheckIntegrateInnerHtml(turn) +
+    "</div>"
+  );
+}
+
+function factcheckIntegrateInnerHtml(turn: AskTurn): string {
+  const state = integrateBarState(turn);
+  if (state === "hidden" || state === "pending") return "";
+  if (state === "done") {
+    // Within the session the label carries the full outcome copy (edit count +
+    // whether it was committed); a rehydrated turn only knows THAT it integrated.
+    const note = integratedNotes[turn.askedAt];
+    return '<span class="wiki-fc-int-done">' + esc(note || "✓ Integrated") + "</span>";
+  }
+  if (state === "blocked-append") {
+    return (
+      '<button class="wiki-fc-int-open" disabled>✎ Integrate into article</button>' +
+      '<span class="wiki-fc-int-bar-msg error">' + esc(INTEGRATE_STALE_COPY) + "</span>"
+    );
+  }
+  if (state === "too-long") {
+    return (
+      '<button class="wiki-fc-int-open" disabled>✎ Integrate into article</button>' +
+      '<span class="wiki-fc-int-bar-msg">This page is too long to integrate automatically ' +
+      "— edit it by hand, or add the callout instead.</span>"
+    );
+  }
+  return (
+    '<button id="wikiFactcheckIntegrateBtn" class="wiki-fc-int-open">✎ Integrate into article</button>' +
+    '<span class="wiki-fc-int-bar-msg" id="wikiFactcheckIntegrateMsg"></span>'
+  );
+}
+
+/** Full success copy per integrated turn, keyed by `askedAt` (edit count + commit
+ *  outcome). Transient by design — the durable fact is the persisted `turn.wrote`;
+ *  this only enriches the label within the session, and a rehydrated turn falls
+ *  back to a bare "✓ Integrated". */
+const integratedNotes: Record<number, string> = {};
+
+/** Re-render BOTH write-action bars from the turn. Called at `done` (the pane was
+ *  painted before the answer existed, so the gates couldn't run yet) and after any
+ *  write. The rendered state is authoritative — `turn.wrote` drives it. */
+function refreshWriteActionBars(turn: AskTurn): void {
+  const appendBar = document.getElementById("wikiFactcheckAppendBar");
+  if (appendBar) appendBar.innerHTML = factcheckAppendInnerHtml(turn);
+  const intBar = document.getElementById("wikiFactcheckIntegrateBar");
+  if (intBar) intBar.innerHTML = factcheckIntegrateInnerHtml(turn);
 }
 
 /** Only http(s) URLs are safe to put in a chip href (the URL is model output). A
@@ -1840,7 +1932,12 @@ function askArticleHtml(turn: AskTurn, buffer: string): string {
     askSourcesHtml(turn.citations, turn.cited) + "</div>" +
     askFollowupHtml(turn) +
     askRememberHtml(turn) +
-    askFactcheckAppendHtml(turn)
+    askFactcheckAppendHtml(turn) +
+    askFactcheckIntegrateHtml(turn) +
+    // Transient per-turn preview host — the proposal is never persisted, so a
+    // rehydrated turn simply re-proposes on click (its inputs, the persisted
+    // answer + baseHash, are all the propose route needs).
+    '<div class="wiki-fc-int-host" id="wikiFcIntHost"></div>'
   );
 }
 
@@ -1856,6 +1953,8 @@ function setFollowupDisabled(disabled: boolean): void {
   if (remember) remember.disabled = disabled;
   const fcAppend = document.getElementById("wikiFactcheckAppendBtn") as HTMLButtonElement | null;
   if (fcAppend) fcAppend.disabled = disabled;
+  const fcIntegrate = document.getElementById("wikiFactcheckIntegrateBtn") as HTMLButtonElement | null;
+  if (fcIntegrate) fcIntegrate.disabled = disabled;
 }
 
 /** Paint an Ask turn into the main article pane (replaces the page/start view). */
@@ -1863,6 +1962,7 @@ function showAskAnswer(turn: AskTurn, buffer: string): void {
   currentName = null;
   hideBreadcrumb(); // an Ask answer replaces the page — no breadcrumb
   askShownTurn = turn; // the turn the in-pane Remember button acts on
+  integratePreview = null; // a different turn's proposal must never survive the swap
   document.getElementById("articleWrap")!.innerHTML = askArticleHtml(turn, buffer);
   // Rehydrated turns (history re-show) inject stored answer HTML that may carry
   // mermaid fences; the streaming paths hook separately. No-op when absent.
@@ -2060,6 +2160,10 @@ function runAskStream(url: string, turn: AskTurn): void {
       if (turn.kind === "factcheck") {
         // Fact-check has no retrieval sources — report the claim count instead.
         turn.baseHash = typeof d.baseHash === "string" ? d.baseHash : undefined;
+        // Integrate-relevant body length of the checked page — omitted entirely
+        // for explainers (they can never be integrated), so an absent value is
+        // meaningful and must stay undefined rather than defaulting to 0.
+        turn.bodyLen = typeof d.bodyLen === "number" ? d.bodyLen : undefined;
         // Tally the per-outcome breakdown from the checklist BEFORE it's cleared
         // below — it's persisted (drives the honest meta line on rehydrated turns).
         turn.claimOutcomes = tallyClaimOutcomes(turn.claims);
@@ -2092,6 +2196,9 @@ function runAskStream(url: string, turn: AskTurn): void {
       persistAskSession();
       btn.disabled = false;
       setFollowupDisabled(false); // committed — the follow-up bar is now usable
+      // The pane was painted before the answer existed, so neither write-action
+      // gate could run (both read the committed answer). Re-derive them now.
+      refreshWriteActionBars(turn);
       // Do NOT close here — the server emits a trailing `answer_html` after `done`.
       // We close on `answer_html` (or the `end` fallback if it never comes).
     },
@@ -2280,8 +2387,18 @@ async function submitFactcheckAppend(): Promise<void> {
     if (!res.ok || !data.written) {
       throw new Error(data.error || "HTTP " + res.status);
     }
+    // Record the write on the TURN and persist immediately: the session is only
+    // stored on explicit calls, so without this the derived disable would die on
+    // the next reload and the button would come back live against a stale
+    // baseHash. The innerHTML swap below is just immediate feedback — the render
+    // path (`factcheckAppendInnerHtml`) is what's authoritative on a re-render.
+    turn.wrote = "append";
+    persistAskSession();
     const bar = document.getElementById("wikiFactcheckAppendBar");
     if (bar) bar.innerHTML = '<span class="wiki-fc-append-done">✓ Added to article</span>';
+    // An append stales this turn's baseHash — reflect that on the ✎ bar too.
+    const intBar = document.getElementById("wikiFactcheckIntegrateBar");
+    if (intBar) intBar.innerHTML = factcheckIntegrateInnerHtml(turn);
     // Reload the page content so the freshly-written callout is visible.
     loadPage(turn.page, false);
   } catch (err) {
@@ -2289,6 +2406,197 @@ async function submitFactcheckAppend(): Promise<void> {
     btn.textContent = prevLabel;
     showErr("Couldn't add that — " + (err instanceof Error ? err.message : String(err)));
   }
+}
+
+// ── Integrate into article (fact-check v4) ────────────────────────────
+// The second write action on a fact-check turn: propose a structured edit list
+// (one 25–90s fenced one-shot server-side), preview it as a per-edit diff with
+// checkboxes, then apply the accepted subset in one CAS-guarded write.
+//
+// The proposal is per-turn TRANSIENT and never persisted — a rehydrated turn just
+// re-proposes on click, since the inputs (the persisted answer + baseHash) are all
+// the propose route takes.
+interface IntegratePreviewState {
+  turn: AskTurn;
+  proposal: IntegrateProposal;
+  /** Parallel to `proposal.edits` — all ON by default. */
+  selected: boolean[];
+  callout: boolean;
+}
+let integratePreview: IntegratePreviewState | null = null;
+
+/** Show a message on the ✎ bar (not the preview panel). */
+function setIntegrateBarMsg(text: string, isError: boolean): void {
+  const el = document.getElementById("wikiFactcheckIntegrateMsg");
+  if (!el) return;
+  el.textContent = text;
+  el.className = "wiki-fc-int-bar-msg" + (isError ? " error" : "");
+}
+
+/** Repaint the preview panel from `integratePreview` (checkbox toggles, and the
+ *  accept button's count/budget state, all derive from it). */
+function renderIntegratePreview(): void {
+  const host = document.getElementById("wikiFcIntHost");
+  if (!host) return;
+  if (!integratePreview) { host.innerHTML = ""; return; }
+  host.innerHTML = integratePreviewHtml(
+    integratePreview.proposal,
+    integratePreview.selected,
+    integratePreview.callout,
+  );
+}
+
+/**
+ * Ask the server to propose edits for the shown fact-check turn. One synchronous
+ * model call server-side, so the button carries an explicit "up to ~90s" label
+ * rather than a spinner with no expectation set.
+ */
+async function submitFactcheckIntegrate(): Promise<void> {
+  const btn = document.getElementById("wikiFactcheckIntegrateBtn") as HTMLButtonElement | null;
+  const turn = askShownTurn;
+  if (!btn || btn.disabled || !turn || !turn.answer || !turn.page) return;
+  if (!turn.baseHash) {
+    setIntegrateBarMsg("No page snapshot from this check — re-run the fact check, then integrate.", true);
+    return;
+  }
+  btn.disabled = true;
+  const prevLabel = btn.textContent || "✎ Integrate into article";
+  btn.textContent = "Proposing edits… up to ~90s";
+  setIntegrateBarMsg("", false);
+  integratePreview = null;
+  renderIntegratePreview();
+  try {
+    const res = await fetch("/api/wiki/factcheck/integrate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        wiki: WIKI || undefined,
+        page: turn.page,
+        answer: turn.answer,
+        baseHash: turn.baseHash,
+      }),
+    });
+    const data = (await res.json().catch(() => ({}))) as IntegrateProposal & {
+      error?: string;
+      stale?: boolean;
+    };
+    if (res.status === 409 || data.stale) {
+      setIntegrateBarMsg(INTEGRATE_STALE_COPY, true);
+      return;
+    }
+    // A page over the cap is a legitimate outcome, not a failure — the client
+    // usually catches it from `turn.bodyLen`, but a pre-`bodyLen` turn learns it
+    // here. Say the same thing either way.
+    if (res.status === 400 && (data.error || "").indexOf("too long") !== -1) {
+      setIntegrateBarMsg(
+        "This page is too long to integrate automatically — edit it by hand, or add the callout instead.",
+        true,
+      );
+      return;
+    }
+    if (!res.ok) throw new Error(data.error || "HTTP " + res.status);
+    const edits = Array.isArray(data.edits) ? data.edits : [];
+    integratePreview = {
+      turn,
+      proposal: { ...data, edits, dropped: Array.isArray(data.dropped) ? data.dropped : [] },
+      selected: edits.map(() => true),
+      // Default ON only when the page already carries a fact-check block: a stale
+      // callout beside freshly corrected prose is the case worth refreshing.
+      callout: data.hasSentinelBlock === true,
+    };
+    renderIntegratePreview();
+  } catch (err) {
+    setIntegrateBarMsg(
+      "Couldn't propose edits — " + (err instanceof Error ? err.message : String(err)),
+      true,
+    );
+  } finally {
+    // Restore the bar button unless the write already retired it.
+    const b = document.getElementById("wikiFactcheckIntegrateBtn") as HTMLButtonElement | null;
+    if (b) { b.disabled = false; b.textContent = prevLabel; }
+  }
+}
+
+/** Apply the selected edits. The accepted subset goes back VERBATIM with the same
+ *  `baseHash`, so the server's CAS still guards the write. */
+async function acceptFactcheckIntegrate(): Promise<void> {
+  const state = integratePreview;
+  const accept = document.getElementById("wikiFcIntAccept") as HTMLButtonElement | null;
+  const msg = document.getElementById("wikiFcIntMsg");
+  if (!state || !accept || accept.disabled) return;
+  const { turn } = state;
+  if (!turn.page || !turn.baseHash) return;
+  const body = buildIntegrateApplyBody({
+    wiki: WIKI || undefined,
+    page: turn.page,
+    baseHash: turn.baseHash,
+    edits: state.proposal.edits,
+    selected: state.selected,
+    appendCallout: state.callout,
+    answer: turn.answer,
+  });
+  if (!body) return;
+  const showErr = (text: string): void => {
+    if (msg) { msg.textContent = text; msg.className = "wiki-fc-int-msg error"; }
+  };
+  accept.disabled = true;
+  accept.textContent = "Applying…";
+  if (msg) { msg.textContent = ""; msg.className = "wiki-fc-int-msg"; }
+  try {
+    const res = await fetch("/api/wiki/factcheck/integrate/apply", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = (await res.json().catch(() => ({}))) as {
+      applied?: number;
+      committed?: boolean;
+      reason?: string;
+      error?: string;
+      stale?: boolean;
+    };
+    if (res.status === 409 || data.stale) {
+      showErr(INTEGRATE_STALE_COPY);
+      accept.disabled = false;
+      accept.textContent = "Apply";
+      return;
+    }
+    if (!res.ok) throw new Error(data.error || "HTTP " + res.status);
+    const applied = typeof data.applied === "number" ? data.applied : 0;
+    const copy = integrateSuccessCopy({
+      applied,
+      committed: data.committed,
+      reason: data.reason,
+    });
+    if (applied === 0) {
+      // Nothing was written — keep the ✎ button live so a re-propose is possible.
+      showErr(copy);
+      accept.disabled = false;
+      accept.textContent = "Apply";
+      return;
+    }
+    // Record the write on the TURN and persist IMMEDIATELY — the session only
+    // persists on explicit calls, and this flag is what makes both write buttons
+    // come back correctly disabled after a reload.
+    turn.wrote = "integrate";
+    integratedNotes[turn.askedAt] = copy;
+    persistAskSession();
+    integratePreview = null;
+    renderIntegratePreview();
+    refreshWriteActionBars(turn);
+    // Reload the page in the reader so the corrected prose is visible.
+    loadPage(turn.page, false);
+  } catch (err) {
+    accept.disabled = false;
+    accept.textContent = "Apply";
+    showErr("Couldn't apply — " + (err instanceof Error ? err.message : String(err)));
+  }
+}
+
+/** Dismiss the preview panel without writing anything. */
+function cancelFactcheckIntegrate(): void {
+  integratePreview = null;
+  renderIntegratePreview();
 }
 
 // ── Ask session persistence (localStorage) ────────────────────────────
@@ -2367,6 +2675,28 @@ document.addEventListener("click", (e) => {
   if (t.closest("#wikiFollowupBtn")) submitFollowup();
   else if (t.closest("#wikiRememberBtn")) submitRemember();
   else if (t.closest("#wikiFactcheckAppendBtn")) submitFactcheckAppend();
+  else if (t.closest("#wikiFactcheckIntegrateBtn")) submitFactcheckIntegrate();
+  else if (t.closest("#wikiFcIntAccept")) acceptFactcheckIntegrate();
+  else if (t.closest("#wikiFcIntCancel")) cancelFactcheckIntegrate();
+});
+// Preview-panel checkboxes — same document-level delegation (the panel is
+// re-rendered wholesale on every toggle, so direct listeners wouldn't survive).
+// State lives on `integratePreview`, never on the DOM.
+document.addEventListener("change", (e) => {
+  if (!integratePreview) return;
+  const t = e.target as HTMLElement;
+  if (t.id === "wikiFcIntCallout") {
+    integratePreview.callout = (t as HTMLInputElement).checked;
+    renderIntegratePreview();
+    return;
+  }
+  if (t.classList && t.classList.contains("wiki-fc-int-cb")) {
+    const idx = parseInt(t.getAttribute("data-edit-idx") || "-1", 10);
+    if (idx >= 0) {
+      integratePreview.selected[idx] = (t as HTMLInputElement).checked;
+      renderIntegratePreview();
+    }
+  }
 });
 document.addEventListener("keydown", (e) => {
   const ke = e as KeyboardEvent;

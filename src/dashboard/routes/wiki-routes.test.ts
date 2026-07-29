@@ -1,5 +1,6 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { mkdtemp, rm, mkdir } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
@@ -521,6 +522,125 @@ describe("integrate routes — pre-model / pre-write rejections", () => {
     });
     expect(res.status).toBe(409);
     expect(await Bun.file(path.join(root, "Widgets.md")).text()).toContain("ships 4M units");
+  });
+
+  // ── PR 2 additive fields ───────────────────────────────────────────────────
+  // Both reachable without a model call: `hasSentinelBlock` rides the zero-claims
+  // early return (which precedes bot resolution), and apply never calls a model.
+
+  const hashOf = async (rel: string) =>
+    createHash("sha256").update(await Bun.file(path.join(root, rel)).text()).digest("hex");
+
+  test("propose reports hasSentinelBlock:false for a page with no prior callout", async () => {
+    const res = await post("/api/wiki/factcheck/integrate?wiki=intwiki", {
+      page: "Widgets",
+      answer: "### ✅ Claim 1/1 — Right\n\nAll good.", // no ❌/⚠️ ⇒ early return, no one-shot
+      baseHash: await hashOf("Widgets.md"),
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()) as { hasSentinelBlock: boolean }).toMatchObject({
+      edits: [],
+      hasSentinelBlock: false,
+    });
+  });
+
+  test("propose reports hasSentinelBlock:true once the page carries a fact-check block", async () => {
+    await Bun.write(
+      path.join(root, "Widgets.md"),
+      `# Widgets\n\nThe device ships 4M units.\n\n${FACTCHECK_SENTINEL_START}\n> [!factcheck] old\n${FACTCHECK_SENTINEL_END}\n`,
+    );
+    __resetWikiCacheForTest();
+    const res = await post("/api/wiki/factcheck/integrate?wiki=intwiki", {
+      page: "Widgets",
+      answer: "### ✅ Claim 1/1 — Right\n\nAll good.",
+      baseHash: await hashOf("Widgets.md"),
+    });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { hasSentinelBlock: boolean }).hasSentinelBlock).toBe(true);
+  });
+
+  test("apply with appendCallout writes the edits AND the callout in ONE write", async () => {
+    const res = await post("/api/wiki/factcheck/integrate/apply?wiki=intwiki", {
+      page: "Widgets",
+      baseHash: await hashOf("Widgets.md"),
+      edits: editsFor("ships 4M units", "ships 2.1M units"),
+      appendCallout: true,
+      answer: "Mostly right.\n\n### ❌ Claim 1/1 — Ships 4M units\n\nThe filing reports 2.1M.",
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()) as { applied: number; calloutAdded: boolean }).toMatchObject({
+      applied: 1,
+      calloutAdded: true,
+      committed: false, // a bare temp dir is not a git repo
+      reason: "not-a-repo",
+    });
+    const written = await Bun.file(path.join(root, "Widgets.md")).text();
+    expect(written).toContain("ships 2.1M units"); // the prose edit landed
+    expect(written).not.toContain("ships 4M units");
+    expect(written).toContain(FACTCHECK_SENTINEL_START); // …and so did the callout
+    expect(written).toContain("The filing reports 2.1M.");
+  });
+
+  test("apply with appendCallout REPLACES an existing block instead of stacking one", async () => {
+    await Bun.write(
+      path.join(root, "Widgets.md"),
+      `# Widgets\n\nThe device ships 4M units.\n\n${FACTCHECK_SENTINEL_START}\n> [!factcheck] stale\n> Older verdicts.\n${FACTCHECK_SENTINEL_END}\n`,
+    );
+    __resetWikiCacheForTest();
+    const res = await post("/api/wiki/factcheck/integrate/apply?wiki=intwiki", {
+      page: "Widgets",
+      baseHash: await hashOf("Widgets.md"),
+      edits: editsFor("ships 4M units", "ships 2.1M units"),
+      appendCallout: true,
+      answer: "### ❌ Claim 1/1 — Ships 4M units\n\nFresh verdict.",
+    });
+    expect(res.status).toBe(200);
+    const written = await Bun.file(path.join(root, "Widgets.md")).text();
+    expect(written.split(FACTCHECK_SENTINEL_START).length - 1).toBe(1);
+    expect(written).toContain("Fresh verdict.");
+    expect(written).not.toContain("Older verdicts.");
+  });
+
+  test("apply without appendCallout writes prose only (no callout regression)", async () => {
+    const res = await post("/api/wiki/factcheck/integrate/apply?wiki=intwiki", {
+      page: "Widgets",
+      baseHash: await hashOf("Widgets.md"),
+      edits: editsFor("ships 4M units", "ships 2.1M units"),
+    });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { calloutAdded: boolean }).calloutAdded).toBe(false);
+    const written = await Bun.file(path.join(root, "Widgets.md")).text();
+    expect(written).toContain("ships 2.1M units");
+    expect(written).not.toContain(FACTCHECK_SENTINEL_START);
+  });
+
+  test("appendCallout without an answer is a 400 — never a callout-less silent write", async () => {
+    const res = await post("/api/wiki/factcheck/integrate/apply?wiki=intwiki", {
+      page: "Widgets",
+      baseHash: await hashOf("Widgets.md"),
+      edits: editsFor("ships 4M units", "ships 2.1M units"),
+      appendCallout: true,
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toContain("answer is required");
+    expect(await Bun.file(path.join(root, "Widgets.md")).text()).toContain("ships 4M units");
+  });
+
+  test("a zero-resolving apply stays a clean no-op even with appendCallout set", async () => {
+    const before = await Bun.file(path.join(root, "Widgets.md")).text();
+    const res = await post("/api/wiki/factcheck/integrate/apply?wiki=intwiki", {
+      page: "Widgets",
+      baseHash: await hashOf("Widgets.md"),
+      edits: editsFor("text that is not on the page", "replacement"),
+      appendCallout: true,
+      answer: "### ❌ Claim 1/1 — Nope\n\nUnfindable.",
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()) as { applied: number; calloutAdded: boolean }).toMatchObject({
+      applied: 0,
+      calloutAdded: false,
+    });
+    expect(await Bun.file(path.join(root, "Widgets.md")).text()).toBe(before);
   });
 });
 

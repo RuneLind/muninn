@@ -831,6 +831,69 @@ export async function renderWikiPage(opts?: {
     .wiki-fc-append-msg { font-size: 12px; color: var(--text-secondary); }
     .wiki-fc-append-msg.error { color: var(--status-error); }
     .wiki-fc-append-done { font-size: 12px; color: var(--accent-light); font-weight: 600; }
+    /* "✎ Integrate into article" — the second fact-check write action (v4).
+       Bar first, then the transient diff-preview panel it opens. */
+    .wiki-fc-integrate { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+    .wiki-fc-int-open {
+      padding: 6px 12px; border-radius: 8px;
+      border: 1px solid var(--border-secondary); background: var(--bg-inset);
+      color: var(--text-primary); font-size: 12px; font-weight: 600;
+      cursor: pointer; white-space: nowrap;
+    }
+    .wiki-fc-int-open:hover { border-color: var(--accent); }
+    .wiki-fc-int-open:disabled { opacity: 0.5; cursor: default; }
+    .wiki-fc-int-bar-msg { font-size: 12px; color: var(--text-secondary); }
+    .wiki-fc-int-bar-msg.error { color: var(--status-error); }
+    .wiki-fc-int-done { font-size: 12px; color: var(--accent-light); font-weight: 600; }
+    .wiki-fc-int-panel {
+      margin-top: 12px; padding: 12px 14px; border-radius: 10px;
+      border: 1px solid var(--border-secondary); background: var(--bg-surface);
+    }
+    .wiki-fc-int-head { font-size: 13px; font-weight: 600; color: var(--text-primary); margin-bottom: 4px; }
+    .wiki-fc-int-note { font-size: 12px; color: var(--text-secondary); margin-bottom: 10px; }
+    .wiki-fc-int-edit { border-top: 1px solid var(--border-secondary); padding: 10px 0; }
+    .wiki-fc-int-row { display: flex; align-items: baseline; gap: 8px; cursor: pointer; flex-wrap: wrap; }
+    .wiki-fc-int-verdict { flex-shrink: 0; }
+    .wiki-fc-int-claim {
+      flex-shrink: 0; font-size: 10px; text-transform: uppercase; letter-spacing: 0.03em;
+      color: var(--text-dim);
+    }
+    .wiki-fc-int-reason { font-size: 12px; color: var(--text-secondary); }
+    .wiki-fc-int-tier {
+      font-size: 10.5px; padding: 1px 7px; border-radius: 999px;
+      border: 1px solid color-mix(in srgb, var(--status-warning) 45%, transparent);
+      color: var(--status-warning); white-space: nowrap;
+    }
+    .wiki-fc-int-ctx { font-size: 11px; color: var(--text-dim); margin: 4px 0; }
+    /* Same palette as the gardener's update diff (.gard-diff), scoped here. */
+    .wiki-fc-int-diff {
+      background: var(--bg-inset); border-radius: 8px; padding: 8px 10px; overflow-x: auto;
+      font-family: var(--font-mono, monospace); font-size: 12px; line-height: 1.5; margin: 4px 0;
+    }
+    .wiki-fc-int-diff .d-add { color: var(--status-success); background: color-mix(in srgb, var(--status-success) 12%, transparent); display: block; white-space: pre-wrap; }
+    .wiki-fc-int-diff .d-del { color: var(--status-magenta); background: color-mix(in srgb, var(--status-magenta) 12%, transparent); display: block; white-space: pre-wrap; }
+    .wiki-fc-int-diff .d-ctx { color: var(--text-dim); display: block; white-space: pre-wrap; }
+    .wiki-fc-int-dropped { margin-top: 8px; font-size: 12px; color: var(--text-dim); }
+    .wiki-fc-int-dropped summary { cursor: pointer; }
+    .wiki-fc-int-drop { display: flex; gap: 8px; padding: 3px 0; }
+    .wiki-fc-int-drop-reason { color: var(--status-warning); flex-shrink: 0; }
+    .wiki-fc-int-drop-quote { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .wiki-fc-int-actions {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border-secondary);
+    }
+    .wiki-fc-int-callout { font-size: 12px; color: var(--text-secondary); display: flex; align-items: center; gap: 5px; cursor: pointer; }
+    .wiki-fc-int-btn {
+      padding: 6px 12px; border-radius: 8px;
+      border: 1px solid var(--border-secondary); background: var(--bg-inset);
+      color: var(--text-primary); font-size: 12px; font-weight: 600; cursor: pointer;
+    }
+    .wiki-fc-int-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .wiki-fc-int-btn:disabled { opacity: 0.5; cursor: default; }
+    .wiki-fc-int-budget { font-size: 11px; color: var(--text-dim); margin-left: auto; }
+    .wiki-fc-int-budget.over { color: var(--status-error); }
+    .wiki-fc-int-msg { font-size: 12px; color: var(--text-secondary); margin-top: 8px; }
+    .wiki-fc-int-msg.error { color: var(--status-error); }
     .wiki-fc-sources { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 2px 4px 10px; }
     .wiki-fc-src-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); }
     .wiki-fc-src-chip {

@@ -76,8 +76,13 @@ import type { FactcheckClaimAnchor } from "../dashboard/views/components/wiki-in
  * {@link integrateBodyLen}). ~2× `FACTCHECK_ARTICLE_BODY_MAX` — unlike claim
  * extraction the model must see the WHOLE page (it quotes `old` from it), so the
  * cap is a hard reject rather than a truncation.
+ *
+ * DECLARED in the import-safe `wiki-integrate.ts` and re-exported here: PR 2's
+ * bundled reader client gates on the same number, and importing THIS module in the
+ * browser would drag `explain-context.ts` → `research/answer.ts` (the whole server
+ * graph) into the bundle. One constant, two consumers, no drift.
  */
-export const INTEGRATE_BODY_MAX = 24_000;
+export { INTEGRATE_BODY_MAX } from "../dashboard/views/components/wiki-integrate.ts";
 /** Max edits accepted in one propose/apply call. */
 export const INTEGRATE_MAX_EDITS = 12;
 /** Max chars for one edit's `old` or `new`. */

@@ -41,8 +41,9 @@ import {
   buildFactcheckBlock,
   FACTCHECK_SELECTION_MAX,
   FACTCHECK_HEADING_MAX,
+  FACTCHECK_SENTINEL_START,
 } from "../../wiki/factcheck-context.ts";
-import { appendBlockToPage } from "../../wiki/append-block.ts";
+import { appendBlockToPage, spliceSentinelBlock } from "../../wiki/append-block.ts";
 import { writeWikiPage } from "../../wiki/page-write.ts";
 import {
   applyEdits,
@@ -1667,6 +1668,13 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // an answer can post any verdict blocks it likes, which is acceptable on the
       // auth-less loopback dashboard and is why every edit is previewed, bounded
       // and CAS-guarded before it can touch the page.
+      // Additive (PR 2): does the page already carry a persisted fact-check
+      // callout? The reader defaults its "also add summary callout" checkbox ON
+      // when it does (refreshing a stale block is almost always wanted) and OFF on
+      // a clean page. The client cannot derive this — the page body is not in the
+      // turn — so it rides the propose response.
+      const hasSentinelBlock = current.includes(FACTCHECK_SENTINEL_START);
+
       const claims = correctableClaims(answer);
       if (claims.length === 0) {
         return c.json({
@@ -1674,6 +1682,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
           dropped: [],
           note: "No ❌ or ⚠️ claims to integrate.",
           budget: integrateBudget(bodyLen),
+          hasSentinelBlock,
         });
       }
 
@@ -1761,6 +1770,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         ...(parsed.note ? { note: parsed.note } : {}),
         // Measured on RESOLVED spans, so accept-all is guaranteed within budget.
         budget: { ...integrateBudget(bodyLen), proposedChangedChars: budgetDrops.changedChars },
+        hasSentinelBlock,
       });
     } catch (err) {
       log.error("Wiki fact-check integrate: unexpected failure: {error}", {
@@ -1784,12 +1794,27 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         page?: string;
         baseHash?: string;
         edits?: unknown;
+        /** Also refresh the `> [!factcheck]` summary callout in this SAME write. */
+        appendCallout?: boolean;
+        /** The fact-check answer the callout is built from — required iff
+         *  `appendCallout`. It cannot be fetched server-side: the answer lives only
+         *  on the client's turn. */
+        answer?: string;
       };
       const reqBody = await c.req.json<ApplyBody>().catch(() => ({}) as ApplyBody);
       const page = typeof reqBody.page === "string" ? reqBody.page.trim() : "";
       const baseHash = typeof reqBody.baseHash === "string" ? reqBody.baseHash.trim() : "";
       if (!page) return c.json({ error: "page is required" }, 400);
       if (!baseHash) return c.json({ error: "baseHash is required" }, 400);
+
+      // The callout must ride the SAME write as the edits — a second POST to the
+      // append route would always 409, since applying the edits stales the very
+      // `baseHash` the client holds.
+      const appendCallout = reqBody.appendCallout === true;
+      const calloutAnswer = typeof reqBody.answer === "string" ? reqBody.answer.trim() : "";
+      if (appendCallout && !calloutAnswer) {
+        return c.json({ error: "answer is required when appendCallout is set" }, 400);
+      }
 
       const edits = coerceClientEdits(reqBody.edits);
       if (!edits) return c.json({ error: "edits must be a non-empty array of {old, new} with both non-empty" }, 400);
@@ -1835,6 +1860,9 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // declines the write, and the route reports it as a 400 naming the bound
       // (client-caused), not the 500 a thrown transform would produce.
       let budgetError: string | null = null;
+      // Set by the transform when the callout actually got spliced, so the response
+      // can't claim a callout on a run that short-circuited to `noop`.
+      let calloutAdded = false;
       const result = await writeWikiPage({
         wikiDir: entry.root,
         relPath: meta.relPath,
@@ -1842,7 +1870,9 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         collections: entry.collections ?? [],
         logKind: "factcheck-integrate",
         logTitle: meta.title,
-        logLine: "fact-check corrections integrated via the wiki reader",
+        logLine: appendCallout
+          ? "fact-check corrections integrated via the wiki reader (with summary callout)"
+          : "fact-check corrections integrated via the wiki reader",
         commitMessage: `[fact-check] integrate: ${meta.relPath}`,
         now: () => Date.now(),
         transform: (body) => {
@@ -1856,8 +1886,23 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
             return null;
           }
           // Zero survivors ⇒ short-circuit BEFORE the write: no write, no log
-          // entry, no reindex, no commit.
-          return applyResult.appliedCount === 0 ? null : applyResult.body;
+          // entry, no reindex, no commit. The callout deliberately does NOT rescue
+          // this into a write — "applied: 0" stays a clean no-op, and the ➕ button
+          // remains the way to add a callout on its own.
+          if (applyResult.appliedCount === 0) return null;
+          if (!appendCallout) return applyResult.body;
+          // Same splice the ➕ route uses: REPLACE an existing sentinel block in
+          // place (a stale callout is refreshed, never duplicated), else insert
+          // before a trailing `## Sources`, else append. Runs on the already-edited
+          // body inside the critical section, so page + callout are one write.
+          // Edit offsets were resolved BEFORE this, and the sentinel block is a
+          // masked exclusion zone, so the two can't collide.
+          const spliced = spliceSentinelBlock(
+            applyResult.body,
+            buildFactcheckBlock(calloutAnswer, todayOslo(Date.now())),
+          );
+          calloutAdded = true;
+          return `${spliced.replace(/\n+$/, "")}\n`;
         },
         readFile: async (absPath) => {
           try {
@@ -1894,7 +1939,15 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
           wiki: entry.name,
           page: meta.relPath,
         });
-        return c.json({ applied: 0, dropped: droppedOf(applyResult), page: meta.relPath });
+        // `calloutAdded` is reported on BOTH terminal paths so a caller never has
+        // to infer "no callout" from an absent field: a zero-resolving apply
+        // writes nothing at all, callout included.
+        return c.json({
+          applied: 0,
+          calloutAdded: false,
+          dropped: droppedOf(applyResult),
+          page: meta.relPath,
+        });
       }
       if (result.outcome === "error") {
         log.warn("Wiki fact-check integrate apply failed wiki={wiki} page={page}: {reason}", {
@@ -1919,6 +1972,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       });
       return c.json({
         applied,
+        calloutAdded,
         dropped: droppedOf(applyResult),
         page: meta.relPath,
         committed: result.commit?.committed ?? false,
