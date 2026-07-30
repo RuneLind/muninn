@@ -8,7 +8,9 @@ import { applyEdits, type IntegrateEdit } from "./integrate-edits.ts";
 import { buildFactcheckBlock } from "./factcheck-context.ts";
 import { commitWikiChange, __resetForTest } from "./commit.ts";
 import { __resetWikiWriteQueueForTest, wikiWriteQueueKey } from "./queue.ts";
+import { applyWikiProposal } from "../gardener/apply.ts";
 import { sha256 } from "../gardener/util.ts";
+import type { WikiProposal } from "../db/wiki-proposals.ts";
 
 /** In-memory filesystem whose reads/writes yield to the event loop, so an
  *  unqueued read→write pair WOULD interleave and lose a log entry. */
@@ -198,6 +200,72 @@ test("the queue is keyed per WIKI ROOT — two pages in one wiki serialize, two 
   expect((fs.files["/wiki/log.md"] ?? "").match(/^## \[/gm)?.length).toBe(2);
   // A different wiki root has its own chain (and its own log.md).
   expect((fs.files["/other/log.md"] ?? "").match(/^## \[/gm)?.length).toBe(1);
+});
+
+test("TOCTOU: a gardener apply + an append on one wiki serialize — both log entries survive", async () => {
+  __resetWikiWriteQueueForTest();
+  // The cross-FAMILY race (fixed 2026-07-30): `applyWikiProposal` used to hold a
+  // private per-wikiDir chain, so a gardener/source-drafter approve and a
+  // fact-check "Add to article" click could read log.md, then both write it —
+  // losing one entry. Two DIFFERENT pages here, so log.md is the only contended
+  // file and both writers must succeed.
+  const initial = "# Page\n\nBody.\n";
+  const fs = makeFs({ "/wiki/analyses/page.md": initial });
+
+  const proposal: WikiProposal = {
+    id: "22222222-2222-2222-2222-222222222222",
+    botName: "jarvis",
+    wikiName: null,
+    topicKey: "new-concept",
+    kind: "concept",
+    mode: "create",
+    targetPath: "concepts/New Concept.md",
+    baseHash: null,
+    draft: "---\ntype: concept\ntitle: New Concept\n---\n\n# New Concept\n\nBody.\n",
+    sourceDocs: [],
+    rationale: null,
+    containedLinks: null,
+    relatedPages: null,
+    status: "approved",
+    createdAt: Date.UTC(2026, 6, 30),
+    resolvedAt: null,
+  };
+
+  const applyP = applyWikiProposal(proposal, {
+    wikiDir: "/wiki",
+    now: () => Date.UTC(2026, 6, 30, 12, 0, 0),
+    readFile: fs.readFile,
+    writeFile: fs.writeFile,
+    // Null index ⇒ create mode skips the alias re-strip and body-link
+    // containment; neither is what this test is about.
+    getWikiIndex: async () => null,
+    refreshIndex: async () => {},
+    reindex: async () => {},
+  });
+  const appendP = appendBlockToPage({
+    wikiDir: "/wiki",
+    relPath: "analyses/page.md",
+    block: buildFactcheckBlock("Overall: one correction.", "2026-07-30"),
+    baseHash: sha256(initial),
+    collections: [],
+    logTitle: "Page Title",
+    now: () => Date.UTC(2026, 6, 30, 12, 0, 0),
+    readFile: fs.readFile,
+    writeFile: fs.writeFile,
+    refreshIndex: async () => {},
+    reindex: async () => {},
+  });
+
+  const [apply, append] = await Promise.all([applyP, appendP]);
+  expect(apply.outcome).toBe("applied");
+  expect(append.outcome).toBe("written");
+  expect(fs.files["/wiki/concepts/New Concept.md"]).toContain("# New Concept");
+  expect(fs.files["/wiki/analyses/page.md"]).toContain("factcheck:start");
+
+  const log = fs.files["/wiki/log.md"] ?? "";
+  expect((log.match(/^## \[/gm) ?? []).length).toBe(2);
+  expect(log).toContain("create | New Concept");
+  expect(log).toContain("factcheck | Page Title");
 });
 
 test("the queue key is realpath-derived — a symlinked root shares ONE chain", async () => {

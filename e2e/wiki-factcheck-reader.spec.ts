@@ -16,9 +16,10 @@
  * No model calls anywhere: everything under test is client-side behaviour over
  * markup the server renders from a file on disk.
  *
- * ENV PREREQUISITE + TELEGRAM: identical to `wiki-integrate.spec.ts` — a working
- * `.env` at the repo root, and every `TELEGRAM_BOT_TOKEN_*` blanked so this
- * process can't 409-fight the running production jarvis's long-poller.
+ * ENV PREREQUISITE + PLATFORM TOKENS: identical to `wiki-integrate.spec.ts` — a
+ * working `.env` at the repo root, and every Telegram/Slack token blanked via the
+ * shared `blankBotTokens()` so this server can't 409-fight the running production
+ * jarvis's long-poller.
  */
 
 import { test, expect, type Page } from "@playwright/test";
@@ -27,6 +28,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { blankBotTokens } from "./blank-bot-tokens.ts";
 
 const PORT = 3022;
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -37,25 +39,6 @@ const FIXTURE = path.join(REPO_ROOT, "src/wiki/__fixtures__/factcheck-annotated-
 
 let root: string;
 let server: ChildProcess | undefined;
-
-/** Every `TELEGRAM_BOT_TOKEN_*` name we can see, mapped to "" — see the header. */
-function blankTelegramTokens(): Record<string, string> {
-  const names = new Set(Object.keys(process.env).filter((k) => k.startsWith("TELEGRAM_BOT_TOKEN_")));
-  try {
-    for (const line of readFileSync(path.join(REPO_ROOT, ".env"), "utf8").split("\n")) {
-      const m = /^\s*(TELEGRAM_BOT_TOKEN_[A-Z0-9_]+)\s*=/i.exec(line);
-      if (m) names.add(m[1]!);
-    }
-  } catch {
-    /* no .env visible — the inherited names are all there is */
-  }
-  const blanked: Record<string, string> = {};
-  for (const n of names) {
-    blanked[n] = "";
-    process.env[n] = "";
-  }
-  return blanked;
-}
 
 /**
  * Console errors raised by OUR code. Two unrelated sources are filtered, both
@@ -107,7 +90,7 @@ test.beforeAll(async () => {
     cwd: REPO_ROOT,
     env: {
       ...process.env,
-      ...blankTelegramTokens(),
+      ...blankBotTokens(),
       DASHBOARD_PORT: String(PORT),
       DASHBOARD_HOST: "127.0.0.1",
       SCHEDULER_ENABLED: "false",

@@ -14,9 +14,11 @@
  *    the terminal status CAS is recovered by re-approving the stuck `approved`
  *    row, and a double-click is harmless.
  *  - **Serialized per wiki root**: applies against the same `wikiDir` run one at
- *    a time (in-process single-flight), so two create proposals racing to the
- *    same targetPath resolve deterministically — one applies, the other sees the
- *    file and goes stale. (The DB unique index is on topic_key, not target_path.)
+ *    a time, so two create proposals racing to the same targetPath resolve
+ *    deterministically — one applies, the other sees the file and goes stale.
+ *    (The DB unique index is on topic_key, not target_path.) Since 2026-07-30
+ *    that serialization is the SHARED wiki-write queue (`src/wiki/queue.ts`), the
+ *    same chain `writeWikiPage` holds — see `applyWikiProposal` below.
  *
  * Filesystem writes are the point — but nothing here touches the DB. The route
  * owns the status CAS (approved → applied | stale | error) based on the returned
@@ -30,6 +32,7 @@ import { containDraftBodyLinks, isPathConfined, stripOwnedAliases } from "./draf
 import { buildIndexEntry, buildSeeAlsoEdit, insertIndexLine, selectWirablePages } from "./wire.ts";
 import { parseFrontmatter } from "../wiki/store.ts";
 import { stripFrontmatter } from "../wiki/render.ts";
+import { runWikiWriteExclusive } from "../wiki/queue.ts";
 import { sha256, todayOslo } from "./util.ts";
 import { getLog } from "../logging.ts";
 
@@ -170,36 +173,55 @@ function withTrailingNewline(text: string): string {
   return `${text.replace(/\n+$/, "")}\n`;
 }
 
-/** Per-wiki-root apply chains — the in-process single-flight (see module doc). */
-const applyChains = new Map<string, Promise<unknown>>();
-
 /**
  * Apply one approved proposal: confinement → staleness → write → log.md → cache
  * refresh → fire-and-forget reindex. Returns the outcome; the caller flips the
  * DB status accordingly. Never throws for a recoverable condition — a stale
  * target or a confinement failure is a normal outcome, not an exception.
  *
- * Serialized per `wikiDir`: a second apply against the same root waits for the
- * first to finish before its exists/hash checks run.
+ * Serialized on the SHARED wiki-write queue, keyed per wiki ROOT: a second apply
+ * against the same root waits for the first to finish before its exists/hash
+ * checks run — AND so does every `writeWikiPage` caller (the fact-check append +
+ * integrate writers). That join is the point: `log.md` is wiki-GLOBAL, so this
+ * path and those two are read-modify-writing one file. Until 2026-07-30 the
+ * gardener kept a private per-wikiDir chain map, which serialized applies against
+ * each other but not against the append/integrate family — approving a draft
+ * while a fact-check write landed on the same wiki could lose a log entry.
+ *
+ * The commit tail runs AFTER the section releases, exactly as `writeWikiPage`
+ * does — and for the same reason, which joining the shared chain made load-bearing
+ * here too. `commitWikiChange` dispatches its push onto the per-git-toplevel commit
+ * queue WITHOUT awaiting it, so a later commit queues behind an in-flight push and
+ * a push to an unreachable origin has no timeout. Committing inside the section
+ * would therefore park every fact-check append/integrate on that wiki for the full
+ * ssh/TCP stall (measured: a 3s push stall blocked a concurrent append for 3s).
+ * That was harmless while the gardener held a PRIVATE chain; on the shared one the
+ * lock's blast radius is all three writer families, so the hold must stay short.
  */
-export function applyWikiProposal(proposal: WikiProposal, deps: ApplyDeps): Promise<ApplyOutcome> {
-  const key = path.resolve(deps.wikiDir);
-  const prev = applyChains.get(key) ?? Promise.resolve();
-  const run = prev.then(
-    () => applyInner(proposal, deps),
-    () => applyInner(proposal, deps),
+export async function applyWikiProposal(
+  proposal: WikiProposal,
+  deps: ApplyDeps,
+): Promise<ApplyOutcome> {
+  // A holder, not a `let` — TS narrows a closure-assigned local to `null`.
+  const tail: { commit?: () => Promise<void> } = {};
+  const outcome = await runWikiWriteExclusive(deps.wikiDir, () =>
+    applyInner(proposal, deps, (commit) => {
+      tail.commit = commit;
+    }),
   );
-  applyChains.set(
-    key,
-    run.then(
-      () => undefined,
-      () => undefined,
-    ),
-  );
-  return run;
+  if (tail.commit) await tail.commit();
+  return outcome;
 }
 
-async function applyInner(proposal: WikiProposal, deps: ApplyDeps): Promise<ApplyOutcome> {
+/** Hand the commit closure to `applyWikiProposal`, which runs it after the
+ *  per-wiki write section releases. */
+type DeferCommit = (commit: () => Promise<void>) => void;
+
+async function applyInner(
+  proposal: WikiProposal,
+  deps: ApplyDeps,
+  deferCommit: DeferCommit,
+): Promise<ApplyOutcome> {
   const domain: "ai" | "life" = proposal.targetPath.startsWith("life/") ? "life" : "ai";
 
   // The fresh index backs both the update-target check (1a) and the apply-time
@@ -298,9 +320,10 @@ async function applyInner(proposal: WikiProposal, deps: ApplyDeps): Promise<Appl
       log.warn("Wiki-gardener apply: cache refresh failed: {error}", { error: errMsg(err) });
     }
     reindexUnion(deps, proposal.targetPath, modified);
-    // Commit is the last step — a re-run that changed nothing on disk stages an
+    // Commit is the last step, and runs OUTSIDE the write section (see
+    // `applyWikiProposal`) — a re-run that changed nothing on disk stages an
     // empty diff and the helper skips the commit quietly.
-    await commitApply(proposal, deps, modified);
+    deferCommit(() => commitApply(proposal, deps, modified));
     return { outcome: "applied", writtenPath: proposal.targetPath };
   }
 
@@ -354,10 +377,11 @@ async function applyInner(proposal: WikiProposal, deps: ApplyDeps): Promise<Appl
   //    wait on a (potentially slow) best-effort POST.
   reindexUnion(deps, proposal.targetPath, modified);
 
-  // 7. Commit the write into the wiki repo (last step; must not delay or be
-  //    skipped by the fire-and-forget reindex). Non-fatal — a commit failure
-  //    never undoes the applied page.
-  await commitApply(proposal, deps, modified);
+  // 7. Commit the write into the wiki repo — last step, and the ONE step handed
+  //    back to `applyWikiProposal` to await after the per-wiki write section
+  //    releases (a stalled push must not park the other wiki writers; see there).
+  //    Non-fatal — a commit failure never undoes the applied page.
+  deferCommit(() => commitApply(proposal, deps, modified));
 
   return { outcome: "applied", writtenPath: proposal.targetPath };
 }

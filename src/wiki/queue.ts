@@ -23,11 +23,15 @@
  * when busy), a queued call is never dropped — it waits for the previous one, and
  * a rejection in the predecessor does not poison the chain.
  *
- * SCOPE NOTE: this queue serializes the programmatic APPEND + INTEGRATE writers
- * against each other. It is not a global log.md lock — the gardener apply path
- * (`src/gardener/apply.ts`) writes `log.md` under its OWN per-bot mutex, and the
- * cache refresh / reindex / commit tail deliberately runs outside the section.
- * Both are pre-existing and unchanged here.
+ * SCOPE NOTE: this queue serializes every programmatic `log.md` writer against
+ * every other — the APPEND + INTEGRATE writers (`page-write.ts`) and, since
+ * 2026-07-30, the gardener/source-drafter/consolidation apply path
+ * (`applyWikiProposal`, which previously kept a private per-wikiDir chain map and
+ * so raced the other two). Still not a global lock on the wiki: `writeWikiPage`
+ * deliberately leaves its cache refresh / reindex / commit tail outside the
+ * section, and the gardener's own per-BOT try-lock (`runExclusive` in
+ * `backlog.ts`) is a different thing — "one gardener run per bot", not one writer
+ * per wiki.
  */
 
 import { realpathSync } from "node:fs";
@@ -78,6 +82,10 @@ const queueKeyCache = new Map<string, string>();
 /**
  * The chain key for a wiki root: its REALPATH, falling back to the raw path when
  * that throws (a not-yet-created dir, a test fixture path, a permission error).
+ * The fallback is the RAW string, deliberately un-normalized — so on a root that
+ * doesn't exist, `/wiki` and `/wiki/` get separate chains. Every real caller passes
+ * an existing absolute root (bot discovery / the wiki registry), where realpath
+ * normalizes both, so this only shows up in tests against phantom paths.
  *
  * ONLY successful resolutions are cached: a fallback answer is a statement about
  * a path that does not exist YET (a wiki dir created after boot, a fixture dir
