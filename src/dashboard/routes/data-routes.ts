@@ -130,12 +130,22 @@ export function registerDataRoutes(app: Hono): void {
   });
 
   app.get("/api/goals/:userId", async (c) => {
-    const userId = c.req.param("userId");
-    if (!userId) {
-      return c.json({ error: "Invalid userId" }, 400);
+    try {
+      const userId = c.req.param("userId");
+      if (!userId) {
+        return c.json({ error: "Invalid userId" }, 400);
+      }
+      // `?bot=` must be honoured: both the chat inspector and the dashboard's
+      // detail panel send it, and a user's goals are per-bot rows. Dropping it
+      // listed every bot's goals under whichever bot was selected — and
+      // disagreed with the tab badge, which `getUsersSummary` already scopes.
+      const botName = c.req.query("bot") || undefined;
+      const goals = await getActiveGoals(userId, botName);
+      return c.json({ goals });
+    } catch (err) {
+      log.error("Failed to fetch goals for user: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "Failed to fetch goals for user" }, 500);
     }
-    const goals = await getActiveGoals(userId);
-    return c.json({ goals });
   });
 
   app.get("/api/tasks", async (c) => {
@@ -150,12 +160,19 @@ export function registerDataRoutes(app: Hono): void {
   });
 
   app.get("/api/scheduled-tasks/:userId", async (c) => {
-    const userId = c.req.param("userId");
-    if (!userId) {
-      return c.json({ error: "Invalid userId" }, 400);
+    try {
+      const userId = c.req.param("userId");
+      if (!userId) {
+        return c.json({ error: "Invalid userId" }, 400);
+      }
+      // Same as /api/goals/:userId above — the sent `?bot=` was being dropped.
+      const botName = c.req.query("bot") || undefined;
+      const tasks = await getScheduledTasksForUser(userId, botName);
+      return c.json({ tasks });
+    } catch (err) {
+      log.error("Failed to fetch scheduled tasks for user: {error}", { error: err instanceof Error ? err.message : String(err) });
+      return c.json({ error: "Failed to fetch scheduled tasks for user" }, 500);
     }
-    const tasks = await getScheduledTasksForUser(userId);
-    return c.json({ tasks });
   });
 
   app.get("/api/threads", async (c) => {
