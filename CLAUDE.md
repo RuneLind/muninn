@@ -365,6 +365,8 @@ bun run test:handlers     # Handler tests (with mocks)
 
 DB tests require the local Postgres container (`bun run db:up`) and a test database (`bun run db:setup:test`). Test files are co-located with source files (`*.test.ts`). Shared test infrastructure lives in `src/test/`.
 
+**`mock.module` needs its own process, not just its own file.** It invalidates the target module for the whole `bun test` process graph, so any OTHER file already loaded in that chunk which transitively imports the mocked module fails export resolution — e.g. mocking `db/goals.ts` inside `test:unit`'s first chunk breaks `src/profile/generator.ts` with `SyntaxError: Export named 'refreshInterestProfile' not found`. Spreading the real module into the mock (`{...real, override}`) fixes only the mocking file's OWN imports and does not prevent this. A mock.module test therefore gets its own `&& bun test <file>` link in the chain (see `src/profile/`, `task-executor.test.ts`, `data-routes-bot-scope.test.ts`), and says so in its header — the placement is load-bearing and invisible from the file alone.
+
 ### Conventions
 
 - DB access: `postgres` npm package (not Supabase client, not Bun.sql)
