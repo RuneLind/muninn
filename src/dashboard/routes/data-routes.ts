@@ -134,7 +134,11 @@ export function registerDataRoutes(app: Hono): void {
     if (!userId) {
       return c.json({ error: "Invalid userId" }, 400);
     }
-    const goals = await getActiveGoals(userId);
+    // `?bot=` must be honoured: both the chat inspector and the dashboard's
+    // detail panel send it, and a user's goals are per-bot rows. Dropping it
+    // listed every bot's goals under whichever bot was selected.
+    const botName = c.req.query("bot") || undefined;
+    const goals = await getActiveGoals(userId, botName);
     return c.json({ goals });
   });
 
@@ -154,7 +158,9 @@ export function registerDataRoutes(app: Hono): void {
     if (!userId) {
       return c.json({ error: "Invalid userId" }, 400);
     }
-    const tasks = await getScheduledTasksForUser(userId);
+    // Same as /api/goals/:userId above — the sent `?bot=` was being dropped.
+    const botName = c.req.query("bot") || undefined;
+    const tasks = await getScheduledTasksForUser(userId, botName);
     return c.json({ tasks });
   });
 

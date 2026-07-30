@@ -390,7 +390,7 @@ export const spec = {
         summary: "Active goals for user",
         description: "Active goals for a specific user.",
         operationId: "getUserGoals",
-        parameters: [pathId("userId", "User ID")],
+        parameters: [pathId("userId", "User ID"), botQuery],
         responses: {
           "200": { description: "OK", content: { "application/json": { schema: { type: "object", properties: { goals: { type: "array", items: { $ref: "#/components/schemas/Goal" } } } } } } },
           "400": errorResponse,
@@ -418,7 +418,7 @@ export const spec = {
         summary: "Scheduled tasks for user",
         description: "Scheduled tasks for a specific user.",
         operationId: "getUserScheduledTasks",
-        parameters: [pathId("userId", "User ID")],
+        parameters: [pathId("userId", "User ID"), botQuery],
         responses: {
           "200": { description: "OK", content: { "application/json": { schema: { type: "object", properties: { tasks: { type: "array", items: { $ref: "#/components/schemas/ScheduledTask" } } } } } } },
           "400": errorResponse,
