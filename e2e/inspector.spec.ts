@@ -323,7 +323,29 @@ test.describe("Inspector panel API integration", () => {
     expect(req.url()).toContain("/chat/context-usage/");
   });
 
-  test("fetches memories, goals, and tasks APIs when thread is selected", async ({ page }) => {
+  test("fetches memories, goals, and tasks APIs for the selected bot context", async ({ page }) => {
+    // These three are cached behind `inspectorContextKey` (`inspector-panel.ts`),
+    // keyed on user + bot — unlike context-usage above, which is per-thread and
+    // refires on every inspector render. Two consequences the old version of this
+    // test got wrong in both directions:
+    //
+    //  - They do NOT refire on a thread switch, by design: a different thread
+    //    doesn't change whose memories/goals/tasks these are, and none of the
+    //    three routes takes a thread param. So no thread click is needed here.
+    //  - They fire ~60ms after `goto`, before any pill is clicked, because `init()`
+    //    auto-selects the stored bot or `botNames[0]`. A listener attached after
+    //    the bot click misses that burst entirely — which is exactly how the old
+    //    test timed out permanently.
+    //
+    // Hence: collect from before `goto`, then prove the guard actually re-arms by
+    // switching to a SECOND bot, which is the only interaction that legitimately
+    // refires them. Without that half the assertion is satisfied by `goto` alone
+    // and a broken bot-pill handler would sail through.
+    const APIS = ["/api/memories/user/", "/api/goals/", "/api/scheduled-tasks/"];
+    const seen: string[] = [];
+    const hits = (api: string) => seen.filter((u) => u.includes(api)).length;
+    page.on("request", (req) => seen.push(req.url()));
+
     await page.goto("/chat");
 
     const botPills = page.locator(".bot-pill");
@@ -333,42 +355,22 @@ test.describe("Inspector panel API integration", () => {
       return;
     }
 
-    await botPills.first().click();
-    await expect(page.locator("#threadList")).not.toContainText("Select a bot", {
-      timeout: 5000,
-    });
+    // The auto-selected bot's context.
+    for (const api of APIS) {
+      await expect.poll(() => hits(api), { timeout: 10_000 }).toBeGreaterThan(0);
+    }
 
-    // Set up request interception for all three inspector APIs
-    const memoriesRequest = page.waitForRequest(
-      (req) => req.url().includes("/api/memories/user/"),
-      { timeout: 10000 },
-    );
-    const goalsRequest = page.waitForRequest(
-      (req) => req.url().includes("/api/goals/"),
-      { timeout: 10000 },
-    );
-    const tasksRequest = page.waitForRequest(
-      (req) => req.url().includes("/api/scheduled-tasks/"),
-      { timeout: 10000 },
-    );
-
-    const threadItems = page.locator(".thread-item");
-    const threadCount = await threadItems.count();
-    if (threadCount === 0) {
-      test.skip(true, "No threads available");
+    if (count < 2) {
+      test.skip(true, "Only one bot — cannot exercise a bot switch");
       return;
     }
-    await threadItems.first().click();
 
-    // All three APIs should be called
-    const [memReq, goalReq, taskReq] = await Promise.all([
-      memoriesRequest,
-      goalsRequest,
-      tasksRequest,
-    ]);
-
-    expect(memReq.url()).toContain("/api/memories/user/");
-    expect(goalReq.url()).toContain("/api/goals/");
-    expect(taskReq.url()).toContain("/api/scheduled-tasks/");
+    // Switching bots changes the cache key, so all three must be re-requested.
+    const before = APIS.map(hits);
+    await botPills.nth(1).click();
+    await expect(page.locator("#threadList")).not.toContainText("Select a bot", { timeout: 5000 });
+    for (const [i, api] of APIS.entries()) {
+      await expect.poll(() => hits(api), { timeout: 10_000 }).toBeGreaterThan(before[i]!);
+    }
   });
 });
