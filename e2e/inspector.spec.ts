@@ -323,7 +323,19 @@ test.describe("Inspector panel API integration", () => {
     expect(req.url()).toContain("/chat/context-usage/");
   });
 
-  test("fetches memories, goals, and tasks APIs when thread is selected", async ({ page }) => {
+  test("fetches memories, goals, and tasks APIs for the selected bot context", async ({ page }) => {
+    // These three are scoped to (userId, botName) and cached behind
+    // `inspectorContextKey` (`inspector-panel.ts`) — unlike context-usage above,
+    // which is per-thread and refires on every inspector render. So they fire when
+    // the BOT CONTEXT is established, and deliberately not again on a thread
+    // switch: a different thread doesn't change whose memories/goals/tasks these
+    // are. And "established" can mean page load, because the chat page restores
+    // the last selected bot — measured, all three fire ~60ms after `goto`, before
+    // any pill is clicked. Registering the listener after the bot click therefore
+    // misses the burst entirely and the test times out (it did, until 2026-07-30).
+    const seen: string[] = [];
+    page.on("request", (req) => seen.push(req.url()));
+
     await page.goto("/chat");
 
     const botPills = page.locator(".bot-pill");
@@ -338,20 +350,6 @@ test.describe("Inspector panel API integration", () => {
       timeout: 5000,
     });
 
-    // Set up request interception for all three inspector APIs
-    const memoriesRequest = page.waitForRequest(
-      (req) => req.url().includes("/api/memories/user/"),
-      { timeout: 10000 },
-    );
-    const goalsRequest = page.waitForRequest(
-      (req) => req.url().includes("/api/goals/"),
-      { timeout: 10000 },
-    );
-    const tasksRequest = page.waitForRequest(
-      (req) => req.url().includes("/api/scheduled-tasks/"),
-      { timeout: 10000 },
-    );
-
     const threadItems = page.locator(".thread-item");
     const threadCount = await threadItems.count();
     if (threadCount === 0) {
@@ -360,15 +358,11 @@ test.describe("Inspector panel API integration", () => {
     }
     await threadItems.first().click();
 
-    // All three APIs should be called
-    const [memReq, goalReq, taskReq] = await Promise.all([
-      memoriesRequest,
-      goalsRequest,
-      tasksRequest,
-    ]);
-
-    expect(memReq.url()).toContain("/api/memories/user/");
-    expect(goalReq.url()).toContain("/api/goals/");
-    expect(taskReq.url()).toContain("/api/scheduled-tasks/");
+    // All three must have been requested for the established context.
+    for (const api of ["/api/memories/user/", "/api/goals/", "/api/scheduled-tasks/"]) {
+      await expect
+        .poll(() => seen.filter((u) => u.includes(api)).length, { timeout: 10_000 })
+        .toBeGreaterThan(0);
+    }
   });
 });
