@@ -26,10 +26,10 @@
  * exists for, and a "➕ Add to article" click in a second tab is the realistic
  * concurrent writer.
  *
- * The queue serializes THESE writers (append + integrate) against each other. It
- * is not a global log.md lock: the gardener apply path (`src/gardener/apply.ts`)
- * writes log.md under its own per-bot mutex, and steps 6–7 run after the section
- * releases. Both pre-existing, both unchanged.
+ * The queue serializes these writers (append + integrate) against each other AND
+ * against the gardener apply path (`applyWikiProposal`), which joined the same
+ * chain on 2026-07-30 — it is the third read-modify-writer of the one wiki-global
+ * log.md. Steps 6–7 still run after the section releases (see below).
  *
  * ── Why the commit is OUTSIDE that section ───────────────────────────────────
  * `commitWikiChange` enqueues its work on the per-git-toplevel COMMIT queue. On a
