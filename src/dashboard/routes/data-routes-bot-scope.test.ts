@@ -9,6 +9,15 @@
  * Deliberately asserts on what reaches the DB layer rather than on filtered rows:
  * the filtering itself is already covered by the real-Postgres tests in
  * `src/db/{goals,scheduled-tasks}.test.ts`, and the defect was purely the wiring.
+ *
+ * RUNS IN ITS OWN `bun test` PROCESS (its own `&&` link in the `test:unit` chain,
+ * like `src/profile/` and `task-executor.test.ts`) — and it MUST stay that way.
+ * `mock.module` invalidates the target module for the whole process graph, so
+ * sharing a process with anything that transitively imports `db/goals.ts` breaks
+ * that importer's export resolution: dropped into `test:unit`'s first chunk it
+ * fails with `SyntaxError: Export named 'refreshInterestProfile' not found in
+ * module src/profile/generator.ts`. Spreading the real modules below does NOT
+ * prevent that — process isolation is the only thing that does.
  */
 
 import { test, expect, mock, beforeEach } from "bun:test";
@@ -17,8 +26,10 @@ const goalCalls: Array<[string, string | undefined]> = [];
 const taskCalls: Array<[string, string | undefined]> = [];
 
 // Spread the REAL modules and override only the two readers under test —
-// `mock.module` replaces the whole module, and other importers (the scheduler,
-// the task executor) need every other export to still resolve. Importing them is
+// `mock.module` replaces the whole module, so without the spread the route file's
+// other imports from them (`getAllGoals`, `getScheduledTaskById`, …) resolve to
+// undefined and the import throws. This is about THIS process's own imports; see
+// the header for why it can't protect other files. Importing the real modules is
 // safe: `getDb()` is called inside the functions, not at module load.
 const realGoals = await import("../../db/goals.ts");
 const realTasks = await import("../../db/scheduled-tasks.ts");
