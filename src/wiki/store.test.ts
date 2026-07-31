@@ -1581,4 +1581,23 @@ describe("buildWikiIndex + git dates", () => {
     expect(index.pages.find((p) => p.relPath === "plans/edited.md")!.gitDirty).toBe(true);
     expect(index.pages.find((p) => p.relPath === "plans/clean.md")!.gitDirty).toBeUndefined();
   });
+
+  test("pages in a wholly-untracked FOLDER are flagged dirty individually", async () => {
+    // `git status --porcelain` defaults to collapsing an untracked directory into ONE
+    // entry naming the directory (`?? newdir/`), never its files. Those pages would
+    // then be neither git-dated nor dirty — invisible to the mtime rule and counted as
+    // unexplained by the coverage warn, which would fire on every index build until
+    // someone committed the folder. `-uall` on the status spawn is what prevents it.
+    await Bun.write(path.join(root, "seed.md"), "# Seed");
+    await git("add", "-A");
+    await git("commit", "-qm", "seed");
+    await Bun.write(path.join(root, "brand-new-folder/a.md"), "# A");
+    await Bun.write(path.join(root, "brand-new-folder/b.md"), "# B");
+
+    __resetWikiCacheForTest();
+    const index = await buildWikiIndex(root);
+    for (const rel of ["brand-new-folder/a.md", "brand-new-folder/b.md"]) {
+      expect(index.pages.find((p) => p.relPath === rel)!.gitDirty).toBe(true);
+    }
+  });
 });

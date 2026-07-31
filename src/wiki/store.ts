@@ -297,7 +297,7 @@ export interface WikiPageMeta {
    * it is not moved by a mass edit, which is why mimir's 2026-07-31 backfill made all
    * 148 plans read as edited today. Undefined on the same degrade paths as
    * `gitCreatedMs`, PLUS the real case of a page every one of whose commits was a
-   * sweep (12 of mimir's 150 plans) — which `pageTimeMs` folds back onto the creation
+   * sweep (19 of mimir's 151 plans) — which `pageTimeMs` folds back onto the creation
    * date rather than treating as undated. See `src/wiki/git-dates.ts`.
    */
   gitTouchedMs?: number;
@@ -1183,6 +1183,22 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
           "dirty — the walk's keys may have stopped matching relPath, silently " +
           "reinstating filesystem-timestamp ranking",
         { root, unexplained, total: pages.length },
+      );
+    } else if (createdHits > 0 && touchedHits === 0) {
+      // The `touched` axis needs its OWN guard: the check above measures creation
+      // coverage only, so a regression that emptied the touch map (a broken rename
+      // rule, `SWEEP_THRESHOLD` slipping to 1) would leave every page silently
+      // falling back to its creation date with the creation alarm perfectly quiet.
+      //
+      // Zero-gated ON PURPOSE, and the reasoning is the opposite of the rate rule
+      // above rather than an exception to it: the healthy touch rate spans 23%
+      // (jarvis, bulk-ingested) to 100%, so no threshold separates healthy from
+      // broken. Zero is the only value that does — a wiki with a git history and not
+      // one ordinary commit in it does not exist.
+      log.warn(
+        "wiki {root}: git dated {createdHits}/{total} pages but found 0 non-sweep " +
+          'commits — every page is falling back to its creation date in "Recently updated"',
+        { root, createdHits, total: pages.length },
       );
     } else {
       log.debug("wiki {root}: git dates — created {createdHits}/{total}, touched {touchedHits}", {

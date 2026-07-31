@@ -81,7 +81,11 @@ test("a rename from OUTSIDE the walk dates to the rename commit", () => {
   expect(out.get("plans/new.md")).toBe(ms("2026-05-04T10:00:00Z"));
 });
 
-test("a copy leaves the source's date intact and gives the copy the source's date", () => {
+test("a copy is a NEW page: it keeps the copy commit's date, and the source keeps its own", () => {
+  // Unreachable today (`-C` is not passed to `git log`, so git never emits `C`), and
+  // pinned precisely because of that: a copy inheriting its source's creation date
+  // would sink a genuinely new page in "Recently added" — the exact failure this
+  // module exists to prevent — and there would be no live case to notice it.
   const out = created(
     [
       `${at("2026-04-02T10:00:00Z")}`,
@@ -91,7 +95,7 @@ test("a copy leaves the source's date intact and gives the copy the source's dat
     ].join("\n"),
   );
   expect(out.get("orig.md")).toBe(ms("2026-04-02T10:00:00Z"));
-  expect(out.get("dupe.md")).toBe(ms("2026-04-02T10:00:00Z"));
+  expect(out.get("dupe.md")).toBe(ms("2026-07-08T10:00:00Z"));
 });
 
 test("paths containing spaces survive parsing", () => {
@@ -193,7 +197,7 @@ test("touched: the threshold is a floor, not a ceiling — one file under it sti
 });
 
 test("touched: a page whose every commit was a sweep is ABSENT, not dated to a sweep", () => {
-  // 12 of mimir's 150 plans at threshold 10 (`huginn-graphrag-improvements.md` was
+  // 19 of mimir's 151 plans at threshold 10 (`huginn-graphrag-improvements.md` was
   // added in the 2026-05-04 consolidation and only ever swept since). Absence is the
   // contract: it is what lets `pageTimeMs` fall back to the creation date instead of
   // showing a sweep's timestamp as if it were an edit.
@@ -252,7 +256,8 @@ test("touched: a rename RETIRES the source path", () => {
 
 test("touched: a COPY does not retire the source, and does not touch it either", () => {
   // Unlike a rename, a copy emits one entry (for the new path) and leaves the source
-  // alone on disk — so the source keeps its OWN last edit, unmoved by the copy.
+  // alone on disk — so the source keeps its OWN last edit, unmoved by the copy. Also
+  // unreachable today; see the creation-side copy test above for why it is pinned.
   const out = touched(
     [
       `${at("2026-04-02T10:00:00Z")}`,

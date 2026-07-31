@@ -70,8 +70,8 @@ export const GIT_DATES_TIMEOUT_MS = 5_000;
  * the LAST commit for 62 of its 145 plans, so a naive `git log -1` dates them all
  * to a rename. Measured over mimir's 492 commits, 32 classify as sweeps at 10.
  *
- * Deliberately NOT scaled to wiki size, though mimir (150 plans) and jarvis (1001
- * pages) are an order of magnitude apart: "how many files did one intentional edit
+ * Deliberately NOT scaled to wiki size, though jarvis (952 pages) is ~2.5× mimir
+ * (387) and ~6× its plans folder: "how many files did one intentional edit
  * touch" is a property of how people work, not of how big the wiki is, and a
  * relative threshold would let a 50-file sweep count as real work on a large wiki.
  * The cost of the flat number is at the boundary — a genuine 12-file refactor reads
@@ -89,7 +89,7 @@ export interface WikiGitDates {
   created: Map<string, number>;
   /**
    * Epoch ms of the most recent NON-SWEEP commit to touch each path. Absent for a
-   * page every one of whose commits was a sweep (12 of mimir's 150 plans at
+   * page every one of whose commits was a sweep (19 of mimir's 151 plans at
    * threshold 10) — the caller falls back to the creation date rather than treating
    * such a page as undated.
    */
@@ -197,17 +197,26 @@ export function parseGitLog(
     if (!ts || entries.length === 0) return;
     const isSweep = entries.length >= sweepThreshold;
     for (const e of entries) {
-      if (e.from !== undefined) {
-        // Creation: a COPY leaves the source in place, so it must not lose its own
-        // date; `firstSeen` only ever fills an unset key, so the guard is implicit.
+      if (e.status === "R" && e.from !== undefined) {
+        // A RENAME moves a page: the destination IS the source, so it inherits both
+        // dates, and the source path is retired from `touched` so a later file
+        // reusing that exact path can't inherit a predecessor's edit history. If the
+        // source is unknown (renamed in from outside the pathspec) the destination
+        // falls back to the rename commit for creation, and to nothing for update.
         firstSeen(e.path, created.get(e.from) ?? ts);
-        // Update: inherit the source's history, then let a non-sweep rename count
-        // as its own touch (renaming a page IS an edit to it). A rename retires the
-        // source path, so its entry is dropped — a later file reusing that exact
-        // path must not inherit a predecessor's edit history.
         const carried = touched.get(e.from);
         if (carried !== undefined) touched.set(e.path, carried);
-        if (e.status === "R") touched.delete(e.from);
+        touched.delete(e.from);
+      } else if (e.from !== undefined) {
+        // A COPY is a NEW page that happens to share text with an existing one, so it
+        // inherits NEITHER date — dating it to its source would sink a genuinely new
+        // page in "Recently added", which is this module's whole job. The source is
+        // untouched by a copy and keeps its own dates (git emits no entry for it).
+        //
+        // Unreachable today: `-C` is not passed to `git log`, so git never emits a
+        // `C` status. Handled anyway so that turning `-C` on later is a behavior
+        // change to weigh, not a silent mis-dating.
+        firstSeen(e.path, ts);
       } else {
         firstSeen(e.path, ts);
       }
@@ -313,10 +322,22 @@ export async function buildWikiGitDates(root: string): Promise<WikiGitDates | nu
   // Kicked off BEFORE the log is awaited so the two subprocesses overlap. Already
   // best-effort internally (a failed `git status` degrades to empty); the catch is
   // belt-and-braces so a dirty-probe failure can never take the walk down with it.
-  const dirtyPromise = listWikiSubtreeDirty(toplevel, root).catch(() => ({
-    dirty: [] as string[],
-    deletions: [] as string[],
-  }));
+  //
+  // RACED against the same budget as the log walk, because `listWikiSubtreeDirty`
+  // uses `commit.ts`'s own git helper, which has no timer — and this promise is
+  // awaited on the index-build critical path. Without the race, `GIT_DATES_TIMEOUT_MS`
+  // would bound only half of what this function spawns, and a `git status` stat-walk
+  // over a large or network-mounted worktree could park every /wiki request behind a
+  // cold index build. Losing the race costs only the mtime rule for dirty pages.
+  const dirtyPromise = Promise.race([
+    listWikiSubtreeDirty(toplevel, root).then((d) => d.dirty),
+    new Promise<string[]>((resolve) =>
+      setTimeout(() => {
+        log.debug("wiki {root}: dirty probe exceeded its budget — mtime rule disabled", { root });
+        resolve([]);
+      }, GIT_DATES_TIMEOUT_MS).unref?.(),
+    ),
+  ]).catch(() => [] as string[]);
 
   const stdout = await git(toplevel, args);
   if (stdout === null) {
@@ -328,7 +349,7 @@ export async function buildWikiGitDates(root: string): Promise<WikiGitDates | nu
 
   const { created, touched } = parseGitLog(stdout);
   // `listWikiSubtreeDirty` already returns WIKI-relative paths, so it needs no strip.
-  const dirty = new Set((await dirtyPromise).dirty);
+  const dirty = new Set(await dirtyPromise);
   if (!rel) return { created, touched, dirty };
 
   // Translate repo-relative → wiki-relative, dropping anything outside the subtree

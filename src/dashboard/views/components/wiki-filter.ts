@@ -273,7 +273,7 @@ export function pageFolder(p: WikiListing): string {
  *    to the pre-sweep-awareness behavior.
  *  - **Git-tracked page:** frontmatter, the non-sweep touch date, and mtime-if-dirty
  *    compete; `gitCreatedMs` joins as a FLOOR so a page whose every commit was a
- *    sweep (12 of mimir's 150 plans) falls back to its creation date rather than
+ *    sweep (19 of mimir's 151 plans) falls back to its creation date rather than
  *    sorting as undated. The floor can never win over a real touch — creation
  *    precedes every touch by construction.
  *  - **Untracked page** (a draft never committed): no `gitCreatedMs`, so mtime is
@@ -286,26 +286,44 @@ export function pageFolder(p: WikiListing): string {
  * so render as LOCAL days — `toISOString()` would label a 00:30 edit in UTC+2 as the
  * previous day, the same drift `computeWikiFreshness` avoids for `log.md`.
  */
-function updatedSignal(p: WikiListing): { ms: number; label: string } {
+function updatedSignal(p: WikiListing): { ms: number; label: string; kind: WikiDateKind } {
   const fm = p.updated || p.created || "";
   const fmMs = fm ? Date.parse(fm) : NaN;
-  let best = { ms: 0, label: "" };
+  let best = { ms: 0, label: "", kind: "updated" as WikiDateKind };
   // Strictly greater, so the FIRST signal considered wins a tie — frontmatter, which
   // is the authored spelling and the one worth showing.
-  const consider = (ms: number, label: string) => {
+  const consider = (ms: number, label: string, kind: WikiDateKind = "updated") => {
     if (!Number.isFinite(ms) || ms <= 0) return;
-    if (ms > best.ms) best = { ms, label };
+    if (ms > best.ms) best = { ms, label, kind };
   };
   const day = (ms: number) => localDay(new Date(ms));
   if (Number.isFinite(fmMs)) consider(fmMs, fm);
   if (p.gitCreatedMs) {
     if (p.gitTouchedMs) consider(p.gitTouchedMs, day(p.gitTouchedMs));
     if (p.gitDirty && p.mtimeMs) consider(p.mtimeMs, day(p.mtimeMs));
-    consider(p.gitCreatedMs, day(p.gitCreatedMs));
+    // The floor, and the ONE branch that isn't an update: this page has never been
+    // touched outside a sweep, so the honest word for its date is "added".
+    consider(p.gitCreatedMs, day(p.gitCreatedMs), "added");
   } else if (p.mtimeMs) {
     consider(p.mtimeMs, day(p.mtimeMs));
   }
   return best;
+}
+
+/**
+ * Which question a page's recency date actually answers. `"added"` only for the
+ * creation-date fallback — a page whose every commit was a sweep, so nothing is known
+ * about when it was last *edited*. That is 19 of mimir's 151 plans but **734 of
+ * jarvis's 952 pages (77%)**, which are bulk-ingested and never edited again: at that
+ * scale a header reading "updated <creation date>" is a claim the data does not
+ * support, so the caller must render the word from this, not assume it.
+ */
+export type WikiDateKind = "updated" | "added";
+
+/** The word that honestly describes `pageDateLabel(p)` for this page. See
+ *  `WikiDateKind`. */
+export function pageDateKind(p: WikiListing): WikiDateKind {
+  return updatedSignal(p).kind;
 }
 
 /**

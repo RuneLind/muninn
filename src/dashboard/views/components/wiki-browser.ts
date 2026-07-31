@@ -61,6 +61,7 @@ import {
   hubTypeList,
   pageAddedLabel,
   pageDateLabel,
+  pageDateKind,
   pageFolder,
   pageFollowups,
   ROOT_FOLDER,
@@ -943,12 +944,17 @@ function renderBreadcrumb(m: WikiListing): void {
     crumbs.push('<span class="wiki-bc-folder">' + esc(folder) + "</span>");
   }
   crumbs.push('<span class="wiki-bc-cur">' + esc(m.title) + "</span>");
-  const updated = pageDateLabel(m);
+  // The WORD comes from the same signal as the date: a page whose every commit was a
+  // sweep has no known edit date and falls back to its creation date, so calling that
+  // "updated" would assert something the history doesn't say (77% of jarvis's pages).
+  const dateLabel = pageDateLabel(m);
   el.innerHTML =
     '<div class="wiki-bc-trail">' +
     crumbs.join('<span class="wiki-bc-sep">/</span>') +
     "</div>" +
-    (updated ? '<span class="wiki-bc-date">updated ' + esc(updated) + "</span>" : "") +
+    (dateLabel
+      ? '<span class="wiki-bc-date">' + pageDateKind(m) + " " + esc(dateLabel) + "</span>"
+      : "") +
     // Selection-gated actions (hidden until a selection exists — see maybeShowExplainPill).
     '<button class="wiki-bc-explain" id="wikiExplainBtn" style="display:none">✨ Explain</button>' +
     '<button class="wiki-bc-factcheck" id="wikiFactcheckBtn" style="display:none">✓ Fact check</button>' +

@@ -11,6 +11,7 @@ import {
   pageAddedLabel,
   pageAddedMs,
   pageDateLabel,
+  pageDateKind,
   pageFolder,
   pageFollowups,
   pageTimeMs,
@@ -176,6 +177,18 @@ test("pageTimeMs: a page edited but NOT yet committed still sorts to the top", (
   expect(pageTimeMs(dirty)).toBeGreaterThan(
     pageTimeMs(page({ ...dirty, gitDirty: undefined })),
   );
+});
+
+test("pageDateKind: only the creation-date fallback reads as 'added'", () => {
+  // The article header renders this word. Calling a creation date "updated" would
+  // assert an edit the history doesn't record — for 77% of jarvis's pages.
+  const onlySwept = page({ gitCreatedMs: Date.parse("2026-05-04T11:00:00Z") });
+  expect(pageDateKind(onlySwept)).toBe("added");
+  const touched = page({ ...onlySwept, gitTouchedMs: Date.parse("2026-07-24T11:00:00Z") });
+  expect(pageDateKind(touched)).toBe("updated");
+  // Frontmatter and a plain mtime are both genuine update claims.
+  expect(pageDateKind(page({ updated: "2026-06-01" }))).toBe("updated");
+  expect(pageDateKind(page({ mtimeMs: Date.parse("2026-07-11T09:00:00Z") }))).toBe("updated");
 });
 
 test("pageTimeMs: a page with NO non-sweep touch falls back to its creation date", () => {
