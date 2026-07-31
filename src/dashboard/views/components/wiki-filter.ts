@@ -339,10 +339,13 @@ export function pageDateKind(p: WikiListing): WikiDateKind {
  *
  * The rules, in order:
  *  - **No KNOWN edit** (`kind === "added"` — every commit that ever touched the page
- *    was a sweep) ⇒ the creation date ALONE. Deliberately not derived by comparing the
- *    two labels: a truer frontmatter `created` can be *older* than the git creation
- *    floor the update signal fell back to, so they'd differ and the header would
- *    invent an edit that never happened. Only `kind` knows.
+ *    was a sweep) ⇒ the creation date ALONE. Deliberately NOT derived by comparing the
+ *    two labels, because the creation signal takes the OLDEST of its three inputs while
+ *    the update signal fell back to the git floor — so the two legitimately differ and a
+ *    label comparison would render "updated <git floor>" for a page git records no edit
+ *    for. Measured on mimir: 6 pages, driven by `birthtimeMs` older than `gitCreatedMs`
+ *    (`blogs/2026-07-16-agent-maturity-assessment.html` — added 07-16, floor 07-17); a
+ *    truer frontmatter `created` is the same shape by a different field. Only `kind` knows.
  *  - **Created and last edited on the same day** ⇒ the creation date alone, since
  *    "created X · updated X" is noise.
  *  - Otherwise both, and either one alone when the other has no signal.

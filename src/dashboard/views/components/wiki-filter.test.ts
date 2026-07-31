@@ -204,9 +204,11 @@ test("pageHeaderDates: a normally-edited page shows both dates", () => {
 
 test("pageHeaderDates: no KNOWN edit shows the creation date ALONE", () => {
   // A page whose every commit was a sweep. The header must not invent an edit — and
-  // this case cannot be detected by comparing the two labels, because a truer
-  // frontmatter `created` is OLDER than the git floor the update signal fell back to,
-  // so they differ. Only `pageDateKind` knows.
+  // this case cannot be detected by comparing the two labels, because the creation
+  // signal takes the OLDEST of its inputs while the update signal fell back to the git
+  // floor, so the two legitimately differ. Real on mimir for 6 pages (driven by
+  // birthtime older than the git floor); spelled with frontmatter here because it is
+  // the same shape and reads clearer. Only `pageDateKind` knows.
   const p = page({
     created: "2026-01-20",
     gitCreatedMs: Date.parse("2026-05-04T11:00:00Z"),
