@@ -47,19 +47,28 @@ export interface WikiListing {
    * `status`, which melosys-kode-wiki already uses for an unrelated vocabulary.
    * Server-validated against the enum in `src/wiki/store.ts`
    * (`proposed`/`ready`/`in-flight`/`blocked`/`shipped`/`superseded`/`abandoned`),
-   * so an unrecognized value never reaches this field — it arrives absent.
+   * so an unrecognized value never reaches this field.
    * Client-side copy of the store's union, kept a plain `string` for the same
    * reason `WikiPageType` is: this file must stay server-dep-free.
+   *
+   * **"Absent" below means absent from the JSON payload**, which is what any
+   * client of `/api/wiki/pages` sees. In-process the four fields are spread off
+   * `WikiPageMeta` and so exist as own properties holding `undefined` on a page
+   * that declares none of them; `JSON.stringify` elides those, so the distinction
+   * matters only to a key-ITERATING consumer (`Object.keys`/`in`/spread), of which
+   * there are none today. Read the values, not the key set.
    */
   plan_status?: string;
   /** When `plan_status` was last affirmed (`YYYY-MM-DD`). Server-validated to that
-   *  exact shape; anything looser arrives absent. */
+   *  exact shape AND to being a real calendar day (`2026-02-31` is rejected);
+   *  anything looser arrives absent. */
   status_date?: string;
   /** `"open"` | `"none"` — whether the plan has open follow-ups. Absent ⇒ treat as
    *  `none` (both an undeclared field and a rejected value arrive absent). */
   followups?: string;
   /** One line of free prose qualifying the status. Unvalidated by nature; absent
-   *  when empty or undeclared. */
+   *  when empty or undeclared. Arrives **unescaped** — the first renderer of this
+   *  field owns escaping it at its own sink. */
   status_note?: string;
   linkCount: number;
   backlinkCount: number;

@@ -64,58 +64,151 @@ export type PlanStatus = (typeof PLAN_STATUS_VALUES)[number];
 export const PLAN_FOLLOWUPS_VALUES = ["open", "none"] as const;
 export type PlanFollowups = (typeof PLAN_FOLLOWUPS_VALUES)[number];
 
-/** `status_date` shape gate — an ISO calendar day, nothing looser. */
+/** `status_date` SHAPE gate — an ISO calendar day, nothing looser. Shape only:
+ *  it admits `2026-99-99` / `2026-02-31`, which `isCalendarDay` then rejects. */
 const STATUS_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * True when `raw` is a REAL calendar day, not merely `YYYY-MM-DD`-shaped.
+ *
+ * The shape gate alone admits `2026-99-99`, `2026-02-31` and `0000-00-00`. That
+ * matters downstream: a consumer comparing these for staleness gets
+ * `new Date("2026-99-99")` ⇒ `Invalid Date` ⇒ a `NaN` comparator ⇒ a
+ * non-deterministic sort, with the aggregated warn below reporting zero drops so
+ * nothing points at the offending file. So an impossible day is dropped AND
+ * counted here, exactly like any other invalid value.
+ *
+ * The check is a round-trip: JS rolls out-of-range date parts over (Feb 31 ⇒
+ * Mar 3), so a day that comes back out of `Date` unchanged is a day that exists.
+ * `setUTCFullYear` rather than the `Date.UTC(y, …)` constructor — the latter
+ * remaps years 0–99 onto 1900+y and would reject a legitimate `0099-01-01`.
+ */
+function isCalendarDay(raw: string): boolean {
+  if (!STATUS_DATE_RE.test(raw)) return false;
+  const y = Number(raw.slice(0, 4));
+  const m = Number(raw.slice(5, 7));
+  const d = Number(raw.slice(8, 10));
+  const t = new Date(0);
+  t.setUTCFullYear(y, m - 1, d);
+  return t.getUTCFullYear() === y && t.getUTCMonth() === m - 1 && t.getUTCDate() === d;
+}
+
+/**
+ * YAML block-scalar indicators. `parseFrontmatter` is line-oriented with no
+ * block-scalar support: given `status_note: >` + indented continuation lines it
+ * reads the value as the single character `">"` and never looks at the body. A
+ * literal `>` / `|` then passes the `typeof === "string"` check and ships to both
+ * `/api/wiki/pages` and `/api/wiki/page` as the page's status note. The body is
+ * unrecoverable at this layer (the parser dropped those lines), so the honest
+ * outcome is to treat the indicator as an absent note rather than to invent one.
+ */
+const YAML_BLOCK_SCALAR_INDICATORS = new Set([">", "|", ">-", "|-", ">+", "|+"]);
+
+/**
+ * Strip a trailing YAML comment (whitespace + `#` + the rest of the line) from a
+ * hand-written scalar. Applied to the three VALIDATED plan fields only — they are
+ * two enums and an ISO date, none of which can legitimately contain `#`, and the
+ * plan authoring contract tells humans to type these keys by hand, so
+ * `plan_status: shipped   # already merged` is a realistic authoring shape that
+ * would otherwise fail the enum and be dropped.
+ *
+ * Deliberately NOT applied to `status_note`: a note legitimately says
+ * "blocked on #399", and the documented contract for it is "quote the value".
+ * That asymmetry is the whole reason this is a helper and not a parser change.
+ */
+function stripTrailingComment(raw: string): string {
+  const i = raw.search(/\s#/);
+  return i === -1 ? raw : raw.slice(0, i).trim();
+}
+
+/** How many offending relPaths the aggregated warn names before collapsing the
+ *  rest into a "+N more" count (precedent: the gardener's `evictedTopics`). */
+const PLAN_DROP_SAMPLE_CAP = 5;
 
 /**
  * Per-index-build tally of frontmatter values REJECTED by the plan-status
  * validators. Aggregated into ONE warn at the end of the build rather than one
  * per page: a backfill writes these fields into ~145 files at once against a
- * 5-minute index TTL, and a per-page warn would flood the log.
+ * 5-minute index TTL, and a per-page warn would flood the log. Counts alone are
+ * not actionable on a 385-page wiki, so the tally also carries a capped sample of
+ * the offending `relPath`s.
  */
 interface PlanFieldDropTally {
   planStatus: number;
   statusDate: number;
   followups: number;
+  /** Number of PAGES with at least one drop (≠ `planStatus + …`, which counts
+   *  fields — one page can contribute three). Drives the "+N more" tail. */
+  pages: number;
+  /** First `PLAN_DROP_SAMPLE_CAP` offending relPaths, in read-completion order. */
+  samples: string[];
 }
 
 /**
  * Parse the four plan-status frontmatter fields, dropping any value that fails
- * its validator so an invalid value NEVER reaches a consumer as-is. A field that
- * is present but invalid is counted in `drops`; an absent field is not a drop.
+ * its validator so an invalid value NEVER reaches a consumer as-is.
  *
- * Validation is strict (exact enum member / exact ISO shape) — a lenient
- * `Proposed` or `2026-7-1` is dropped and counted, not silently normalized.
- * `status_note` is free prose with no vocabulary, so it has no validator and can
- * never be a drop; it is only emptiness-trimmed.
+ * Validation is strict (exact enum member / real ISO calendar day) — a lenient
+ * `Proposed`, a `2026-7-1`, or an impossible `2026-02-31` is dropped and counted,
+ * not silently normalized. `status_note` is free prose with no vocabulary, so it
+ * has no validator and can never be a drop; it is emptiness-trimmed, and a bare
+ * YAML block-scalar indicator is treated as absent (see
+ * `YAML_BLOCK_SCALAR_INDICATORS`).
+ *
+ * **What `drops` does and does not see.** It counts a field only when
+ * `parseFrontmatter` handed us a value for that key. The frontmatter parser skips
+ * any line whose value reads as empty (`if (!raw) continue`), so a key written as
+ * bare `plan_status:` — or as `plan_status:` followed by a YAML block SEQUENCE,
+ * whose `  - shipped` line the key regex doesn't match either — never reaches this
+ * function and is indistinguishable from an absent key: **0 drops**. Whereas
+ * `plan_status: ""` (an empty QUOTED string) and `plan_status: [shipped]` (an
+ * inline array) DO arrive, fail their validator, and count as 1 drop each. So the
+ * tally is partly a function of quoting style, not purely of how many fields are
+ * broken. Fixing that means changing `parseFrontmatter`, which title/tags/accent
+ * share — out of scope here; this docblock is the contract instead.
  */
 function parsePlanFields(
   fm: Record<string, string | string[]>,
+  relPath: string,
   drops: PlanFieldDropTally,
 ): Pick<WikiPageMeta, "plan_status" | "status_date" | "followups" | "status_note"> {
+  let counted = false;
+  const drop = (field: "planStatus" | "statusDate" | "followups") => {
+    drops[field]++;
+    if (counted) return;
+    counted = true;
+    drops.pages++;
+    if (drops.samples.length < PLAN_DROP_SAMPLE_CAP) drops.samples.push(relPath);
+  };
+  /** The validated fields' shared read: string-or-nothing, comment-stripped, trimmed. */
+  const scalar = (v: string | string[] | undefined) =>
+    typeof v === "string" ? stripTrailingComment(v.trim()).trim() : "";
+
   let plan_status: PlanStatus | undefined;
   if (fm.plan_status !== undefined) {
-    const raw = typeof fm.plan_status === "string" ? fm.plan_status.trim() : "";
+    const raw = scalar(fm.plan_status);
     if ((PLAN_STATUS_VALUES as readonly string[]).includes(raw)) plan_status = raw as PlanStatus;
-    else drops.planStatus++;
+    else drop("planStatus");
   }
 
   let status_date: string | undefined;
   if (fm.status_date !== undefined) {
-    const raw = typeof fm.status_date === "string" ? fm.status_date.trim() : "";
-    if (STATUS_DATE_RE.test(raw)) status_date = raw;
-    else drops.statusDate++;
+    const raw = scalar(fm.status_date);
+    if (isCalendarDay(raw)) status_date = raw;
+    else drop("statusDate");
   }
 
   let followups: PlanFollowups | undefined;
   if (fm.followups !== undefined) {
-    const raw = typeof fm.followups === "string" ? fm.followups.trim() : "";
+    const raw = scalar(fm.followups);
     if ((PLAN_FOLLOWUPS_VALUES as readonly string[]).includes(raw)) {
       followups = raw as PlanFollowups;
-    } else drops.followups++;
+    } else drop("followups");
   }
 
-  const note = typeof fm.status_note === "string" ? fm.status_note.trim() : "";
+  // NOT comment-stripped (see `stripTrailingComment`) — a note may say "#399".
+  const rawNote = typeof fm.status_note === "string" ? fm.status_note.trim() : "";
+  const note = YAML_BLOCK_SCALAR_INDICATORS.has(rawNote) ? "" : rawNote;
 
   return { plan_status, status_date, followups, status_note: note || undefined };
 }
@@ -191,21 +284,31 @@ export interface WikiPageMeta {
   desc?: string;
   /**
    * Plan lifecycle state, from the frontmatter key `plan_status` (NOT `status` —
-   * see `PLAN_STATUS_VALUES`). Wiki-agnostic: any page of any wiki may carry it,
-   * though in practice only mimir's `plans/` pages do. An unrecognized value is
-   * dropped at parse time (⇒ undefined), never passed through.
+   * see `PLAN_STATUS_VALUES`). Wiki-agnostic among FRONTMATTER pages: any `.md`
+   * or `.mdx` page of any wiki may carry it, though in practice only mimir's
+   * `plans/` pages do. Standalone `.html` explainers never carry it — they have no
+   * frontmatter and take `buildExplainerMeta`'s early return, which never calls
+   * `parsePlanFields`. An unrecognized value is dropped at parse time (⇒
+   * undefined), never passed through.
    */
   plan_status?: PlanStatus;
   /** When `plan_status` was last affirmed (`YYYY-MM-DD`). A value that isn't that
-   *  exact shape is dropped at parse time. */
+   *  exact shape — or is that shape but not a real calendar day, e.g. `2026-02-31`
+   *  — is dropped at parse time. See `isCalendarDay`. */
   status_date?: string;
   /** Whether the plan has open follow-ups. Absent ⇒ consumers treat it as `none`;
    *  an unrecognized value is dropped at parse time (also ⇒ absent). */
   followups?: PlanFollowups;
   /** One line of free prose qualifying the status. No vocabulary, so nothing to
-   *  validate — only an empty value is dropped. Deliberately NOT stripped from
-   *  `toListing`: `/api/wiki/page` builds its `meta` from the same call, so a
-   *  strip would put it out of reach of every client that renders it. */
+   *  validate — only an empty value (or a bare YAML block-scalar indicator, whose
+   *  body the frontmatter parser never read) is dropped. Deliberately NOT stripped
+   *  from `toListing`: `/api/wiki/page` builds its `meta` from the same call, so a
+   *  strip would put it out of reach of every client that renders it.
+   *
+   *  **Unescaped by design** — it reaches `/api/wiki/pages` and `/api/wiki/page`
+   *  as the author typed it. No consumer renders it yet; the FIRST one that does
+   *  owns the escaping, at its own sink (HTML text vs attribute vs `<style>` want
+   *  different escapes, so escaping it here would be both wrong and lossy). */
   status_note?: string;
 }
 
@@ -895,7 +998,13 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
   const pages: WikiPageMeta[] = [];
   // Build-scoped tally for the ONE aggregated plan-status warn below. Mutated from
   // inside the concurrent read pass — safe, since JS runs it single-threaded.
-  const planDrops: PlanFieldDropTally = { planStatus: 0, statusDate: 0, followups: 0 };
+  const planDrops: PlanFieldDropTally = {
+    planStatus: 0,
+    statusDate: 0,
+    followups: 0,
+    pages: 0,
+    samples: [],
+  };
   const byKey = new Map<string, WikiPageMeta>();
   const rawOutgoing = new Map<string, string[]>();
   /** Per-page resolved relative-markdown-link targets (normalized relPaths). */
@@ -926,6 +1035,10 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
       } catch {
         return; // unreadable file — skip, keep the rest of the wiki browsable
       }
+      // NB (pre-existing, wider than the plan fields): `parseFrontmatter`'s
+      // line regex ends in `(.*)$`, which does not match a trailing `\r`, so a
+      // CRLF-line-ending page parses to `{}` and loses title/tags/type/accent
+      // along with the plan fields. Not fixed here — it belongs with the parser.
       const fm = parseFrontmatter(content);
       // Native `.mdx` pages take the same branch as `.md` — same frontmatter,
       // same wikilink extraction, same graph membership. The only difference is
@@ -959,7 +1072,7 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
         // Plan lifecycle fields. Wiki-agnostic (any page may declare them) and
         // strictly validated — an invalid value is dropped here and only ever
         // surfaces as a count in the aggregated warn below.
-        ...parsePlanFields(fm, planDrops),
+        ...parsePlanFields(fm, relPath, planDrops),
       };
       pages.push(meta);
       rawOutgoing.set(relPath, extractWikilinks(content).filter((t) => t !== name));
@@ -969,13 +1082,26 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
 
   // ONE warn per index build, never one per page — a backfill writing these fields
   // across ~145 files at once would otherwise flood the log on every TTL refresh.
-  // Counts only; the offending pages stay browsable with the field simply absent.
+  // The offending pages stay browsable with the field simply absent. Counts alone
+  // gave an operator nothing to act on ("dropped 3" every 5 min across 385 pages),
+  // so the warn names a capped sample of the pages and collapses the rest into
+  // "+N more" — same shape as the gardener's `evictedTopics` tail.
   const planDropTotal = planDrops.planStatus + planDrops.statusDate + planDrops.followups;
   if (planDropTotal > 0) {
+    const hidden = planDrops.pages - planDrops.samples.length;
     log.warn(
-      "wiki {root}: dropped {count} invalid plan-status frontmatter value(s) — " +
-        "{planStatus} plan_status, {statusDate} status_date, {followups} followups",
-      { root, count: planDropTotal, ...planDrops },
+      "wiki {root}: dropped {count} invalid plan-status frontmatter value(s) across " +
+        "{pages} page(s) — {planStatus} plan_status, {statusDate} status_date, " +
+        "{followups} followups; in {samples}",
+      {
+        root,
+        count: planDropTotal,
+        planStatus: planDrops.planStatus,
+        statusDate: planDrops.statusDate,
+        followups: planDrops.followups,
+        pages: planDrops.pages,
+        samples: planDrops.samples.join(", ") + (hidden > 0 ? ` (+${hidden} more)` : ""),
+      },
     );
   }
 
