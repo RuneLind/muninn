@@ -215,6 +215,26 @@ export interface BacklogDoc {
   date?: string;
   /** The doc's original source URL (http(s) only is linkified). */
   url?: string;
+  /** The source drafter's last attempt (mirrors the route's `BacklogDocDraftAttempt`). */
+  draft?: BacklogDocDraft;
+}
+
+/**
+ * Why this doc has no wiki page — the drafter's last recorded outcome. Absent means
+ * the drafter never ran on it; before the attempt ledger, a `covered`/`skipped`/
+ * `error` attempt was indistinguishable from that (the reason lived only in a log
+ * line, and the doc just sat in the backlog looking untouched).
+ */
+export interface BacklogDocDraft {
+  outcome: "drafted" | "covered" | "skipped" | "error";
+  degraded: boolean;
+  reason?: string;
+  title?: string;
+  /** Wiki-relative path of the page that blocked the draft — deep-linked in the row. */
+  collidingPath?: string;
+  proposalId?: string;
+  trigger: "capture" | "run-now" | "backlog" | "doc";
+  at: number;
 }
 
 /**
@@ -260,6 +280,12 @@ export interface BacklogInspectorState {
    * re-entrancy guard for the dismiss verbs.
    */
   removing: string[];
+  /**
+   * Doc keys whose per-row DRAFT is in flight. A source draft is a real ~60s model
+   * one-shot, so the row has to say so — and, like `removing`, it lives in the
+   * module-level state because the 3s poll replaces the strip's innerHTML wholesale.
+   */
+  drafting: string[];
 }
 
 /** How many rows the inspector renders per page (Show more adds another page). */
@@ -277,6 +303,7 @@ export function initialInspectorState(): BacklogInspectorState {
     docs: null,
     limit: INSPECTOR_PAGE_SIZE,
     removing: [],
+    drafting: [],
   };
 }
 
@@ -1269,18 +1296,55 @@ export function filterBacklogDocs(
   );
 }
 
+/** Human label for a recorded outcome — the row chip's text. */
+const DRAFT_OUTCOME_LABEL: Record<BacklogDocDraft["outcome"], string> = {
+  drafted: "drafted",
+  covered: "already covered",
+  skipped: "skipped",
+  error: "failed",
+};
+
+/**
+ * The "why is there no page for this?" line under a row (pure). Renders nothing
+ * when the drafter never ran — an absent attempt is the honest "not yet attempted",
+ * and inventing a reason for it would be worse than the silence this fixes.
+ *
+ * A collision names the blocking page as a link into the reader, which is the whole
+ * point: "skipped" alone sent the reader to the log files.
+ */
+export function draftAttemptHtml(draft: BacklogDocDraft | undefined, wikiName: string): string {
+  if (!draft) return "";
+  const cls = draft.outcome === "error" || draft.degraded ? " bk-doc-why-warn" : "";
+  const stamp = new Date(draft.at).toISOString().slice(0, 10);
+  let body = `<b>${esc(DRAFT_OUTCOME_LABEL[draft.outcome])}</b> ${esc(stamp)}`;
+  if (draft.reason) body += ` — ${esc(draft.reason)}`;
+  if (draft.collidingPath) {
+    const href =
+      "/wiki?wiki=" + encodeURIComponent(wikiName) + "&relPath=" + encodeURIComponent(draft.collidingPath);
+    const label = draft.title || draft.collidingPath;
+    body += ` <a class="bk-doc-why-link" href="${href}">${esc(label)} ↗</a>`;
+  } else if (draft.outcome === "drafted" && draft.title) {
+    body += ` — “${esc(draft.title)}”`;
+  }
+  return `<div class="bk-doc-why${cls}">${body}</div>`;
+}
+
 /**
  * One inspector row — the Stats tab's never-clustered row shape (badge + title +
- * open link, `src/dashboard/views/components/sum-stats.ts`) with the backlog's two
- * extras: the doc date and its bucket chip. The label links to the dashboard doc
- * reader; the external "open ↗" only renders for an http(s) url (`esc()` does not
- * neutralize a `javascript:` scheme).
+ * open link, `src/dashboard/views/components/sum-stats.ts`) with the backlog's
+ * extras: the doc date, its bucket chip, the retry verbs, and the drafter's last
+ * outcome underneath. The label links to the dashboard doc reader; the external
+ * "open ↗" only renders for an http(s) url (`esc()` does not neutralize a
+ * `javascript:` scheme).
  */
 function inspectorRowHtml(
   d: BacklogDoc,
   sourceLabel: string,
   pruneEnabled: boolean,
   removing: Set<string>,
+  draftEnabled: boolean,
+  wikiName: string,
+  drafting: Set<string>,
 ): string {
   const open = d.url && /^https?:\/\//i.test(d.url)
     ? `<a class="bk-doc-open" href="${esc(d.url)}" target="_blank" rel="noopener">open ↗</a>`
@@ -1295,19 +1359,27 @@ function inspectorRowHtml(
     // this state until the reindex poll goes terminal, so the user never sees a doc
     // that looks deleted but is still listed.
     actions = '<span class="bk-doc-removing">removing…</span>';
-  } else if (pruneEnabled) {
-    actions =
-      d.bucket === "dismissed"
-        ? `<button type="button" class="bk-doc-btn" data-doc-action="undismiss" ${attrs} ` +
-          `title="Return this doc to the queue — runs can select it again.">un-dismiss</button>`
-        : `<button type="button" class="bk-doc-btn" data-doc-action="dismiss" ${attrs} ` +
-          `title="Never select this doc for a run — reversible, and it stays ingested and searchable.">` +
-          `dismiss</button>` +
-          `<button type="button" class="bk-doc-btn bk-doc-danger" data-doc-action="delete" ${attrs} ` +
-          `title="Move this doc's source file to huginn's trash and reindex — it leaves search. Irreversible from here.">` +
-          `delete</button>`;
+  } else if (drafting.has(key)) {
+    // One real model one-shot (~1 min) — the row owns the wait, and every other verb
+    // is suppressed for its duration so a dismiss can't race the draft it describes.
+    actions = '<span class="bk-doc-removing">drafting…</span>';
+  } else {
+    // Retry verbs first — on a row that carries a skip reason they are the answer to
+    // it. "rename & draft" exists because the dominant skip is a title collision the
+    // drafter resolved by giving up; a human-chosen title is the way out.
+    if (draftEnabled) {
+      actions +=
+        `<button type="button" class="bk-doc-btn" data-doc-action="draft" ${attrs} ` +
+        `title="Run the source drafter on this doc now — the draft lands in the review gate below.">` +
+        `draft</button>` +
+        `<button type="button" class="bk-doc-btn" data-doc-action="rename-draft" ${attrs} ` +
+        `title="Draft this doc under a title you choose — use this when the drafter skipped it for colliding with an existing page.">` +
+        `rename &amp; draft</button>`;
+    }
+    if (pruneEnabled) actions += pruneActionsHtml(d, attrs);
   }
   return (
+    '<div class="bk-doc-row-wrap">' +
     '<div class="bk-doc-row">' +
     `<span class="bk-doc-date">${esc(d.date ?? "—")}</span>` +
     `<span class="bk-doc-badge">${esc(sourceLabel)}</span>` +
@@ -1315,8 +1387,23 @@ function inspectorRowHtml(
     `<span class="bk-doc-chip bk-doc-${d.bucket}">${esc(BUCKET_LABEL[d.bucket])}</span>` +
     open +
     (actions ? `<span class="bk-doc-actions">${actions}</span>` : "") +
+    "</div>" +
+    draftAttemptHtml(d.draft, wikiName) +
     "</div>"
   );
+}
+
+/** The dismiss/un-dismiss/delete verbs (unchanged behaviour, lifted out of the row). */
+function pruneActionsHtml(d: BacklogDoc, attrs: string): string {
+  return d.bucket === "dismissed"
+    ? `<button type="button" class="bk-doc-btn" data-doc-action="undismiss" ${attrs} ` +
+        `title="Return this doc to the queue — runs can select it again.">un-dismiss</button>`
+    : `<button type="button" class="bk-doc-btn" data-doc-action="dismiss" ${attrs} ` +
+        `title="Never select this doc for a run — reversible, and it stays ingested and searchable.">` +
+        `dismiss</button>` +
+        `<button type="button" class="bk-doc-btn bk-doc-danger" data-doc-action="delete" ${attrs} ` +
+        `title="Move this doc's source file to huginn's trash and reindex — it leaves search. Irreversible from here.">` +
+        `delete</button>`;
 }
 
 /**
@@ -1336,11 +1423,17 @@ function inspectorRowHtml(
 export function backlogInspectorHtml(
   state: BacklogInspectorState,
   sources: { collection: string; label: string; queued?: number }[],
-  opts: { pruneEnabled?: boolean } = {},
+  opts: { pruneEnabled?: boolean; draftEnabled?: boolean; wikiName?: string } = {},
 ): string {
   if (!state.open) return "";
   const pruneEnabled = opts.pruneEnabled === true;
+  // The per-doc drafter needs the gardener enabled (its route 400s otherwise) —
+  // deliberately NOT the watcher-seeded gate the prune verbs take, since drafting
+  // touches no watcher snapshot.
+  const draftEnabled = opts.draftEnabled === true;
+  const wikiName = opts.wikiName ?? "";
   const removing = new Set(state.removing);
+  const drafting = new Set(state.drafting ?? []);
   const labelOf = (collection: string): string =>
     sources.find((s) => s.collection === collection)?.label || collection;
   const buckets: (BacklogBucket | "all")[] = ["all", "fresh", "drainable", "offered", "dismissed"];
@@ -1402,7 +1495,19 @@ export function backlogInspectorHtml(
       body =
         errNote +
         '<div class="bk-inspector-rows">' +
-        shown.map((d) => inspectorRowHtml(d, labelOf(d.collection), pruneEnabled, removing)).join("") +
+        shown
+          .map((d) =>
+            inspectorRowHtml(
+              d,
+              labelOf(d.collection),
+              pruneEnabled,
+              removing,
+              draftEnabled,
+              wikiName,
+              drafting,
+            ),
+          )
+          .join("") +
         "</div>";
       const more = filtered.length - shown.length;
       // Bulk is dismiss-ONLY (delete stays single-row + per-doc confirm) and acts on

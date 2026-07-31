@@ -15,6 +15,7 @@ import {
   backlogSourceDraftHtml,
   sourceDraftResultHtml,
   backlogInspectorHtml,
+  draftAttemptHtml,
   backlogDocHref,
   filterBacklogDocs,
   initialInspectorState,
@@ -1556,5 +1557,92 @@ describe("tooltips + glossary (PR 3)", () => {
     expect(backlogGlossaryHtml(backlogStripModel(base({ freshWindowDays: 0 }), 0))).toContain(
       "the fresh window",
     );
+  });
+});
+
+describe("draftAttemptHtml — why a queued doc has no wiki page", () => {
+  const skipped = {
+    outcome: "skipped" as const,
+    degraded: false,
+    reason: 'drafter judged the existing page "Graph Engineering" already covers this doc',
+    title: "Graph Engineering for Multi-Agentic Systems",
+    collidingPath: "concepts/Graph Engineering for Multi-Agentic Systems.md",
+    trigger: "capture" as const,
+    at: Date.UTC(2026, 6, 31, 14, 26),
+  };
+
+  test("no attempt → nothing (an absent row honestly means 'not yet attempted')", () => {
+    expect(draftAttemptHtml(undefined, "jarvis")).toBe("");
+  });
+
+  test("a collision names the reason AND deep-links the blocking page in the reader", () => {
+    const html = draftAttemptHtml(skipped, "jarvis");
+    expect(html).toContain("skipped");
+    expect(html).toContain("2026-07-31");
+    expect(html).toContain("already covers this doc");
+    expect(html).toContain(
+      'href="/wiki?wiki=jarvis&relPath=concepts%2FGraph%20Engineering%20for%20Multi-Agentic%20Systems.md"',
+    );
+  });
+
+  test("a degraded skip and an error both get the warning rail; a clean skip does not", () => {
+    expect(draftAttemptHtml({ ...skipped, degraded: true }, "jarvis")).toContain("bk-doc-why-warn");
+    expect(draftAttemptHtml({ ...skipped, outcome: "error", degraded: false }, "jarvis")).toContain(
+      "bk-doc-why-warn",
+    );
+    expect(draftAttemptHtml(skipped, "jarvis")).not.toContain("bk-doc-why-warn");
+  });
+
+  test("a drafted attempt shows its title and no collision link", () => {
+    const html = draftAttemptHtml(
+      { outcome: "drafted", degraded: false, title: "Graph Engineering", trigger: "doc", at: 0 },
+      "jarvis",
+    );
+    expect(html).toContain("drafted");
+    expect(html).toContain("Graph Engineering");
+    expect(html).not.toContain("bk-doc-why-link");
+  });
+
+  test("reason text is escaped — it carries model output and a page title", () => {
+    const html = draftAttemptHtml({ ...skipped, reason: '<img src=x onerror="alert(1)">' }, "jarvis");
+    expect(html).not.toContain("<img");
+    expect(html).toContain("&lt;img");
+  });
+});
+
+describe("inspector row verbs — draft / rename & draft", () => {
+  const docs: BacklogDoc[] = [
+    {
+      collection: "x-articles",
+      id: "a.md",
+      label: "a",
+      bucket: "drainable",
+      draft: { outcome: "skipped", degraded: false, reason: "collides", trigger: "capture", at: 0 },
+    },
+  ];
+  const sources = [{ collection: "x-articles", label: "X" }];
+  const open = (): BacklogInspectorState => ({ ...initialInspectorState(), open: true, docs });
+
+  test("hidden when the gardener is disabled (its route 400s then)", () => {
+    const html = backlogInspectorHtml(open(), sources, { draftEnabled: false });
+    expect(html).not.toContain('data-doc-action="draft"');
+  });
+
+  test("both verbs render when enabled — and need no seeded watcher, unlike the prune verbs", () => {
+    const html = backlogInspectorHtml(open(), sources, { draftEnabled: true, wikiName: "jarvis" });
+    expect(html).toContain('data-doc-action="draft"');
+    expect(html).toContain('data-doc-action="rename-draft"');
+    expect(html).not.toContain('data-doc-action="dismiss"'); // pruneEnabled is independent
+  });
+
+  test("a draft in flight replaces every verb on that row", () => {
+    const html = backlogInspectorHtml(
+      { ...open(), drafting: ["x-articles/a.md"] },
+      sources,
+      { draftEnabled: true, pruneEnabled: true },
+    );
+    expect(html).toContain("drafting…");
+    expect(html).not.toContain('data-doc-action="draft"');
+    expect(html).not.toContain('data-doc-action="delete"');
   });
 });

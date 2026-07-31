@@ -438,7 +438,13 @@ function renderBacklog(data: IngestBacklogResponse): void {
     backlogTailHtml(model, inspector) +
     // The inspector renders last (its own full-width row below the tail) and only
     // when open — its state lives at module level, so a poll re-render can't shut it.
-    backlogInspectorHtml(inspector, model.perSource, { pruneEnabled: model.pruneEnabled }) +
+    backlogInspectorHtml(inspector, model.perSource, {
+      pruneEnabled: model.pruneEnabled,
+      // The per-doc drafter's own route gate — `gardenerEnabled` only; unlike the
+      // prune verbs it writes no watcher snapshot, so it needs no seeded watcher.
+      draftEnabled: data.gardenerEnabled !== false,
+      wikiName: BOT,
+    }) +
     backlogGlossaryHtml(model);
   if (tailWasOpen) {
     const tail = el.querySelector<HTMLDetailsElement>(".bk-tail");
@@ -968,6 +974,63 @@ async function deleteBacklogDoc(collection: string, id: string, label: string): 
 }
 
 /**
+ * Run the source drafter on ONE doc — the row's `draft` / `rename & draft` verbs.
+ *
+ * `title` is the rename affordance: the drafter uses it verbatim and skips the
+ * collision retry whose SKIP branch is what dropped these docs in the first place.
+ * The outcome is reported through the sticky notice (a `covered`/`skipped` is a
+ * legitimate answer, not a failure) and the rows are refetched so the row's own
+ * "why" line reflects the attempt just recorded — one source of truth, server-side.
+ *
+ * No `refresh=1`: the attempt ledger is read per request, OUTSIDE the 5-min backlog
+ * cache, exactly like the dismissed set.
+ */
+async function draftBacklogDoc(
+  collection: string,
+  id: string,
+  label: string,
+  title?: string,
+): Promise<void> {
+  const key = `${collection}/${id}`;
+  if (inspector.drafting.includes(key) || inspector.removing.includes(key)) return;
+  inspector.drafting = [...inspector.drafting, key];
+  inspector.error = null;
+  setInspectorNotice(`drafting “${label}”… (one model call, up to a minute)`, "info");
+  rerenderStrip();
+
+  try {
+    const res = await fetch(withBot("/api/wiki/gardener/source-draft-doc"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ collection, id, ...(title ? { title } : {}) }),
+    });
+    const body = (await res.json().catch(() => ({}))) as {
+      error?: string;
+      outcome?: string;
+      reason?: string;
+      title?: string;
+    };
+    if (!res.ok) {
+      setInspectorNotice(body.error || `draft failed (${res.status})`, "err");
+    } else if (body.outcome === "drafted") {
+      setInspectorNotice(`drafted “${body.title || label}” — review it in the gate below`, "info");
+      loadProposals(); // a new draft card exists in the gate now
+    } else {
+      setInspectorNotice(
+        `${body.outcome ?? "no outcome"}${body.reason ? ` — ${body.reason}` : ""}`,
+        body.outcome === "error" ? "err" : "info",
+      );
+    }
+  } catch {
+    setInspectorNotice("couldn't reach the server", "err");
+  }
+
+  inspector.drafting = inspector.drafting.filter((k) => k !== key);
+  refreshInspectorAfterMutation();
+  rerenderStrip();
+}
+
+/**
  * Poll each collection's reindex until TERMINAL (bounded — never a wedged spinner).
  *
  * Terminal is `succeeded`/`failed` EXPLICITLY — huginn's status vocabulary is
@@ -1067,6 +1130,23 @@ document.getElementById("gardBacklog")?.addEventListener("click", (e) => {
         docAction.getAttribute("data-doc-id") || "",
         docAction.getAttribute("data-doc-label") || key,
       );
+    } else if (what === "draft" || what === "rename-draft") {
+      const collection = docAction.getAttribute("data-doc-collection") || "";
+      const id = docAction.getAttribute("data-doc-id") || "";
+      const label = docAction.getAttribute("data-doc-label") || key;
+      let title: string | undefined;
+      if (what === "rename-draft") {
+        // Seeded with the doc's own label: the collision case needs a title DIFFERENT
+        // from the existing page, and the article's own name is the obvious start.
+        const answer = window.prompt(
+          `Title for the new wiki page about "${label}":\n\nUse this when the drafter skipped the doc for colliding with an existing page — pick a title that says what THIS source adds.`,
+          label,
+        );
+        if (answer === null) return; // cancelled
+        title = answer.trim();
+        if (!title) return;
+      }
+      void draftBacklogDoc(collection, id, label, title);
     }
     return;
   }

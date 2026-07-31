@@ -9,6 +9,7 @@ import {
   computeBacklogFloorCounts,
   backlogDocLabel,
   sortBacklogDocsNewestFirst,
+  attachDraftAttempts,
   getIngestBacklogCached,
   invalidateIngestBacklogCache,
   mergeBacklogLiveFields,
@@ -612,6 +613,46 @@ describe("backlogDocLabel + sortBacklogDocsNewestFirst — inspector row shaping
     const sorted = sortBacklogDocsNewestFirst(docs);
     expect(sorted.map((d) => d.id)).toEqual(["a", "b", "u"]);
     expect(docs.map((d) => d.id)).toEqual(["b", "u", "a"]); // copy, not in place
+  });
+});
+
+describe("attachDraftAttempts — the drafter's last outcome on a row", () => {
+  const docs = [
+    { collection: "x-articles", id: "ai/general/First, the graph itself.md", label: "First, the graph itself", bucket: "drainable" as const },
+    { collection: "x-articles", id: "never-attempted.md", label: "never-attempted", bucket: "fresh" as const },
+  ];
+  const attempt = {
+    collection: "x-articles",
+    docId: "ai/general/First, the graph itself.md",
+    outcome: "skipped" as const,
+    degraded: false,
+    reason: 'drafter judged the existing page "Graph Engineering" already covers this doc',
+    title: "Graph Engineering",
+    collidingPath: "concepts/Graph Engineering.md",
+    proposalId: null,
+    trigger: "capture" as const,
+    attemptedAt: 1_700_000_000_000,
+  };
+
+  test("joins by <collection>/<id> and leaves un-attempted rows untouched", () => {
+    const out = attachDraftAttempts(docs, new Map([[`${attempt.collection}/${attempt.docId}`, attempt]]));
+    expect(out[0]!.draft?.outcome).toBe("skipped");
+    expect(out[0]!.draft?.collidingPath).toBe("concepts/Graph Engineering.md");
+    expect(out[0]!.draft?.at).toBe(1_700_000_000_000);
+    // Absent means "never attempted" — the one honest reading of no row.
+    expect(out[1]!.draft).toBeUndefined();
+  });
+
+  test("an empty map (missing migration / degraded read) returns the rows unchanged", () => {
+    const out = attachDraftAttempts(docs, new Map());
+    expect(out).toBe(docs); // same reference — the pre-ledger payload, byte for byte
+  });
+
+  test("null columns are omitted rather than emitted as nulls", () => {
+    const out = attachDraftAttempts(docs.slice(0, 1), new Map([
+      [`${attempt.collection}/${attempt.docId}`, { ...attempt, reason: null, title: null, collidingPath: null }],
+    ]));
+    expect(out[0]!.draft).toEqual({ outcome: "skipped", degraded: false, trigger: "capture", at: 1_700_000_000_000 });
   });
 });
 

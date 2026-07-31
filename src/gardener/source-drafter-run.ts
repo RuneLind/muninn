@@ -28,6 +28,10 @@ import {
   DEFAULT_COVERAGE_DEPS,
   type CoverageDeps,
 } from "../db/wiki-proposals.ts";
+import {
+  recordSourceDraftAttempt,
+  type SourceDraftTrigger,
+} from "../db/source-draft-attempts.ts";
 import { loadConfig } from "../config.ts";
 import { docDateMs } from "./harvest.ts";
 import { todayOslo } from "./util.ts";
@@ -71,15 +75,21 @@ function firstHttpUrl(...candidates: (string | undefined)[]): string {
  * be the bot's resolved wiki root. Every seam is either injected or reads the env
  * knowledge API directly, so this path takes no `apiUrl` — the run-now entry point
  * does its own huginn fetches with one.
+ *
+ * This is also the ONE place every drafter entry point funnels through, so it is
+ * where the attempt is recorded ({@link recordSourceDraftAttempt}). Three of the
+ * four outcomes persist nothing else, and the backlog row's whole diagnosis comes
+ * from that ledger — a caller that drafts around this function is invisible again.
  */
 export async function runSourceDraftForInput(
   botConfig: BotConfig,
   wikiDir: string,
   input: SourceDraftInput,
+  trigger: SourceDraftTrigger = "capture",
 ): Promise<SourceDraftOutcome> {
   const config = loadConfig();
   const index = await getWikiIndex({ root: wikiDir });
-  return draftSourcePage({
+  const outcome = await draftSourcePage({
     botName: botConfig.name,
     wikiDir,
     input,
@@ -101,6 +111,26 @@ export async function runSourceDraftForInput(
       return res.result;
     },
   });
+
+  await recordSourceDraftAttempt({
+    botName: botConfig.name,
+    collection: input.collection,
+    docId: input.docId,
+    outcome: outcome.outcome,
+    degraded: outcome.outcome === "skipped" && outcome.degraded === true,
+    reason: "reason" in outcome ? outcome.reason : null,
+    title: outcome.outcome === "drafted" ? outcome.title : (collidingTitle(outcome) ?? null),
+    collidingPath: outcome.outcome === "skipped" ? (outcome.collidingPage?.relPath ?? null) : null,
+    proposalId: outcome.outcome === "drafted" ? outcome.proposalId : null,
+    trigger,
+  });
+
+  return outcome;
+}
+
+/** The blocking page's title on a collision skip — the row's "covered by" label. */
+function collidingTitle(outcome: SourceDraftOutcome): string | undefined {
+  return outcome.outcome === "skipped" ? outcome.collidingPage?.title : undefined;
 }
 
 /**
@@ -169,13 +199,18 @@ export async function runSourceDraftForNewest(
   if (!url) return { outcome: "skipped", reason: `doc ${collection}/${newest.id} has no public URL` };
 
   log.info("Source drafter run-now: newest doc {collection}/{id}", { collection, id: newest.id });
-  return runSourceDraftForInput(botConfig, wikiDir, {
-    collection,
-    docId: newest.id,
-    url,
-    body,
-    category: categoryFromDocId(newest.id),
-  });
+  return runSourceDraftForInput(
+    botConfig,
+    wikiDir,
+    {
+      collection,
+      docId: newest.id,
+      url,
+      body,
+      category: categoryFromDocId(newest.id),
+    },
+    "run-now",
+  );
 }
 
 // ── Backlog drafter (batched, on-demand over the UNCOVERED tail) ─────────────
@@ -273,6 +308,7 @@ export function defaultSourceBacklogDeps(
   botConfig: BotConfig,
   wikiDir: string,
   apiUrl: string = DEFAULT_API_URL,
+  trigger: SourceDraftTrigger = "backlog",
 ): SourceBacklogDeps {
   return {
     listDocs: async (collection) => {
@@ -297,7 +333,7 @@ export function defaultSourceBacklogDeps(
         `/api/document/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`,
         { timeoutMs: DOC_FETCH_TIMEOUT_MS },
       ),
-    draftInput: (input) => runSourceDraftForInput(botConfig, wikiDir, input),
+    draftInput: (input) => runSourceDraftForInput(botConfig, wikiDir, input, trigger),
   };
 }
 
@@ -426,6 +462,7 @@ export async function runSourceDraftBacklog(
 export async function draftOneBacklogDoc(
   doc: QueuedDoc,
   deps: SourceBacklogDeps,
+  titleOverride?: string,
 ): Promise<SourceBacklogDocResult> {
   const base = { collection: doc.collection, docId: doc.id };
   let fetched: RawFetchedDoc | null;
@@ -447,6 +484,7 @@ export async function draftOneBacklogDoc(
       url,
       body,
       category: categoryFromDocId(doc.id),
+      ...(titleOverride && titleOverride.trim() ? { titleOverride: titleOverride.trim() } : {}),
     });
   } catch (err) {
     // draftSourcePage never throws, but runSourceDraftForInput's setup (config /
