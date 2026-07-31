@@ -7,8 +7,12 @@
  *
  * Three panes: filterable page list · rendered article with clickable
  * wikilinks · connections panel (backlinks + outgoing links grouped by type).
- * The whole page listing loads once (/api/wiki/pages) and filters client-side;
- * article + connections come per-page from /api/wiki/page.
+ * The whole page listing is fetched at load and re-fetched when the tab regains
+ * focus (with `?refresh=1`, so the server's index TTL can't serve it stale) or on
+ * a slow idle heartbeat — both throttled by `WIKI_REFETCH_MIN_INTERVAL_MS` — then
+ * filtered client-side; a fresh set is applied only on the browse/start view and
+ * otherwise stashed until the reader returns/navigates, so the list never
+ * re-sorts mid-article. Article + connections come per-page from /api/wiki/page.
  */
 
 import { escHtml as esc } from "./escape.ts";
@@ -38,6 +42,19 @@ import {
   type StoredAskTurn,
 } from "./wiki-ask-session.ts";
 import {
+  createRefreshModel,
+  markApplied,
+  pagesFingerprint,
+  receivePages,
+  shouldRefetch,
+  startFetch,
+  takePending,
+  viewStateOf,
+  WIKI_REFETCH_TICK_MS,
+  type PendingPages,
+  type WikiPagesResponse,
+} from "./wiki-refresh.ts";
+import {
   annotationIndexes,
   appendBlockedByIntegrate,
   buildIntegrateApplyBody,
@@ -55,6 +72,7 @@ import {
 import {
   anchorNow,
   connectionTypeOrder,
+  facetKeys,
   filterPages,
   folderCounts,
   followupCount,
@@ -102,12 +120,8 @@ interface WikiPageDetail {
   error?: string;
 }
 
-interface WikiPagesResponse {
-  pages: WikiListing[];
-  scannedAt: number | null;
-  types?: { order: string[]; labels: Record<string, string> };
-  error?: string;
-}
+// `WikiPagesResponse` is declared in `wiki-refresh.ts` (imported above) — the
+// refresh model stores whole payloads, so it needs the shape concretely.
 
 // ── Page state ────────────────────────────────────────────────────────
 /** Which wiki is being browsed — the server injects the *canonical* wiki name
@@ -158,6 +172,10 @@ function recencyNow(): number {
   return anchorNow(Date.now(), scannedAtMs);
 }
 let currentName: string | null = null;
+/** True from the moment a page navigation is requested until its response (or
+ *  error) lands. `currentName` is only assigned from that response, so this is the
+ *  only signal that the pane is "about to be an article" — see `viewStateOf`. */
+let navInFlight = false;
 const filters: WikiFilters = {
   q: "",
   domain: "",
@@ -738,14 +756,18 @@ function sortMode(): WikiSortMode {
 /** Populate the folder picker from the pages themselves — wikis differ wildly
  *  (mimir has blogs/plans/archive/…, huginn-jarvis has sources/concepts/…), so
  *  the options are derived, never hardcoded. A flat wiki (everything at the root)
- *  gets no picker at all. Rebuilt on a domain switch so the counts stay honest;
- *  a folder that the new domain filters away resets the facet. */
+ *  gets no picker at all. Rebuilt on a domain switch so the counts stay honest.
+ *
+ *  The ACTIVE folder is UNIONED into the options even at count 0 (the status and
+ *  tag rows' rule, made symmetric here): clearing `filters.folder` from a render
+ *  would let a domain switch — or a background listing refresh — silently rewrite
+ *  a filter the user set, and the picker is the only way back out of it. */
 function renderFolderSelect(): void {
   const sel = document.getElementById("wikiFolder") as HTMLSelectElement | null;
   const row = document.getElementById("wikiFolderRow");
   if (!sel || !row) return;
   const counts = folderCounts(allPages, filters.domain);
-  const folders = Object.keys(counts).sort((a, b) => {
+  const folders = facetKeys(counts, filters.folder).sort((a, b) => {
     if (a === ROOT_FOLDER) return 1; // root pages last — they're the odd ones out
     if (b === ROOT_FOLDER) return -1;
     return a.localeCompare(b);
@@ -754,15 +776,13 @@ function renderFolderSelect(): void {
   if (!real.length) {
     row.style.display = "none";
     sel.innerHTML = "";
-    filters.folder = "";
     return;
   }
   row.style.display = "";
-  if (filters.folder && !counts[filters.folder]) filters.folder = "";
   let html = `<option value="">All folders</option>`;
   folders.forEach((f) => {
     const label = f === ROOT_FOLDER ? "(root)" : f;
-    html += `<option value="${esc(f)}"${filters.folder === f ? " selected" : ""}>${esc(label)} ${counts[f]}</option>`;
+    html += `<option value="${esc(f)}"${filters.folder === f ? " selected" : ""}>${esc(label)} ${counts[f] || 0}</option>`;
   });
   sel.innerHTML = html;
 }
@@ -771,10 +791,11 @@ function renderTypeChips(): void {
   const counts = typeCounts(allPages, filters.domain);
   let html = `<button class="wiki-chip${filters.type === "" ? " active" : ""}" data-type="">All types</button>`;
   // Union the stored order with the types actually present, so a custom type is
-  // never dropped from the chip row even if the stored list is missing/late.
-  connectionTypeOrder(Object.keys(counts), typeOrder).forEach((t) => {
-    if (!counts[t]) return;
-    html += `<button class="wiki-chip${filters.type === t ? " active" : ""}" data-type="${esc(t)}">${esc(typeLabel(t))} ${counts[t]}</button>`;
+  // never dropped from the chip row even if the stored list is missing/late — and
+  // with the ACTIVE type even at count 0 (the status row's rule), so a scope
+  // change can't strand the very filter that is emptying the list.
+  connectionTypeOrder(facetKeys(counts, filters.type), typeOrder).forEach((t) => {
+    html += `<button class="wiki-chip${filters.type === t ? " active" : ""}" data-type="${esc(t)}">${esc(typeLabel(t))} ${counts[t] || 0}</button>`;
   });
   document.getElementById("typeChips")!.innerHTML = html;
 }
@@ -827,13 +848,10 @@ function renderStatusChips(): void {
   let html = `<button class="wiki-chip${filters.status === "" ? " active" : ""}" data-status="">All status</button>`;
   // Union the enum order with whatever is actually present, same belt-and-braces
   // as the type row: a status the client's copy of the enum doesn't know still
-  // shows. The ACTIVE status joins that union even at count 0 (the tag row's
-  // `shown.unshift(filters.tag)` precedent, here placed in STATUS_ORDER position)
-  // — a domain/type switch that empties it would otherwise hide the very filter
-  // that is emptying the list.
-  const present = Object.keys(counts);
-  if (filters.status) present.push(filters.status);
-  connectionTypeOrder(present, STATUS_ORDER).forEach((s) => {
+  // shows. The ACTIVE status joins that union even at count 0 (`facetKeys`, here
+  // placed in STATUS_ORDER position) — a domain/type switch that empties it would
+  // otherwise hide the very filter that is emptying the list.
+  connectionTypeOrder(facetKeys(counts, filters.status), STATUS_ORDER).forEach((s) => {
     html +=
       `<button class="wiki-chip${filters.status === s ? " active" : ""}" data-status="${esc(s)}">` +
       `<span class="wiki-status-dot plan-${esc(s)}"></span>${esc(s)} ${counts[s] || 0}</button>`;
@@ -877,8 +895,12 @@ function activeFilterCount(): number {
 
 /** Keep the Filters disclosure honest: badge the active-filter count and auto-open
  *  it whenever a filter is set (a hidden active filter is worse than a tall stack).
- *  Never force-closes — a user who opened it manually keeps it open. */
-function syncFilters(): void {
+ *  Never force-closes — a user who opened it manually keeps it open.
+ *
+ *  `autoOpen` is false for renders NOT caused by a user action (the background
+ *  listing refresh): a deliberately collapsed stack must not spring open because a
+ *  gardener wrote a page. The badge still updates on every path. */
+function syncFilters(autoOpen = true): void {
   const count = activeFilterCount();
   const badge = document.getElementById("wikiFilterCount");
   if (badge) {
@@ -886,7 +908,7 @@ function syncFilters(): void {
     badge.style.display = count ? "" : "none";
   }
   const details = document.getElementById("wikiFilters") as HTMLDetailsElement | null;
-  if (details && count && !details.open) details.open = true;
+  if (autoOpen && details && count && !details.open) details.open = true;
 }
 
 function renderList(): void {
@@ -917,9 +939,26 @@ function renderList(): void {
       `<div class="wiki-list-meta">${esc(meta)}</div>` +
       `</div>`;
   });
-  document.getElementById("wikiList")!.innerHTML =
-    html || '<div class="wiki-conn-empty">No pages match.</div>';
+  // Scroll restore lives HERE, not at the refresh call site (the `renderBacklog`
+  // precedent): every deferred-apply path ends in its caller's own renderList, so
+  // a capture/restore wrapped around the adopt was undone a frame later. Owning it
+  // inside the one function that replaces the rows makes the guarantee hold on
+  // every path — a background refresh can never yank a reader to the top.
+  const listEl = document.getElementById("wikiList")!;
+  const scroll = listEl.scrollTop;
+  listEl.innerHTML = html || '<div class="wiki-conn-empty">No pages match.</div>';
+  if (scroll) listEl.scrollTop = scroll;
   document.getElementById("wikiCount")!.textContent = pages.length + " / " + allPages.length;
+}
+
+/** The five payload-derived facet renders, in one place so the boot load and a
+ *  refresh adopt can't drift. Paints no rows — `renderList` owns those. */
+function renderPageFacets(autoOpen: boolean): void {
+  renderFolderSelect();
+  renderTypeChips();
+  renderStatusChips();
+  renderTagChips();
+  syncFilters(autoOpen);
 }
 
 // ── Coverage footer (under the page list) ─────────────────────────────
@@ -1100,9 +1139,31 @@ function startBodyHtml(): string {
   return startTab === "hubs" ? hubsHtml() : timelineHtml();
 }
 
+/** The per-type counters above the start view's tabs. Derived straight from
+ *  `allPages`, so a refreshed listing has to repaint them — a stale "10 Concepts"
+ *  above an 11-row list is exactly the staleness this refresh exists to kill. */
+function startStatsHtml(): string {
+  const counts = typeCounts(allPages, "");
+  let html = "";
+  connectionTypeOrder(Object.keys(counts), typeOrder).forEach((t) => {
+    if (!counts[t]) return;
+    html += `<div class="wiki-stat"><b>${counts[t]}</b><span>${esc(typeLabel(t))}</span></div>`;
+  });
+  return html;
+}
+
+function refreshStartStats(): void {
+  const el = document.getElementById("wikiStartStats");
+  if (el && currentName === null) el.innerHTML = startStatsHtml();
+}
+
 /** Re-render the hubs/timeline area in place when filters change on the start view.
  *  The Atlas tab isn't filter-driven (it reads its own `/api/wiki/atlas`
- *  projection), so a filter change must NOT wipe its built canvas + selection. */
+ *  projection), so a filter change must NOT wipe its built canvas + selection.
+ *  That early return is load-bearing for the background listing refresh too: an
+ *  adopt must not wipe an in-progress Atlas exploration. The accepted cost is that
+ *  the Atlas projection stays frozen at whatever it was built from until the next
+ *  tab switch rebuilds it. */
 function refreshStartBody(): void {
   if (startTab === "atlas") return;
   const el = document.getElementById("startBody");
@@ -1119,19 +1180,18 @@ function setAtlasFull(on: boolean): void {
 }
 
 function renderStart(): void {
+  // Returning to the browse view is the moment a page set stashed during reading
+  // becomes safe to apply — before anything below reads `allPages`.
+  applyPendingPages();
   currentName = null;
   hideBreadcrumb(); // no page open — the breadcrumb has nothing to show
-  const counts = typeCounts(allPages, "");
   let html =
     '<div class="wiki-start"><div class="wiki-article-head"><h1>Knowledge Wiki</h1>' +
     '<div class="wiki-meta-row"><span class="wiki-dates">Browse by search and filters on the left, or start from a hub below. Click any wikilink to follow connections.</span></div></div>' +
     '<div id="wikiWhatsNew" class="wiki-whatsnew" style="display:none"></div>' +
     '<div id="wikiIndexCard" class="wiki-index-card" style="display:none"></div>' +
-    '<div class="wiki-start-stats">';
-  connectionTypeOrder(Object.keys(counts), typeOrder).forEach((t) => {
-    if (!counts[t]) return;
-    html += `<div class="wiki-stat"><b>${counts[t]}</b><span>${esc(typeLabel(t))}</span></div>`;
-  });
+    '<div class="wiki-start-stats" id="wikiStartStats">' +
+    startStatsHtml();
   html +=
     "</div>" +
     '<div class="wiki-tabs">' +
@@ -1392,6 +1452,7 @@ function loadExplainer(m: WikiListing, push: boolean): void {
   hideExplainPill(); // a page switch drops any stale pill from the prior page
   setAtlasFull(false);
   currentName = m.name;
+  navInFlight = false; // `currentName` now carries the "article" signal on its own
   if (push) {
     history.pushState({ page: currentName }, "", pageUrl(currentName));
   }
@@ -1450,6 +1511,13 @@ function blogAccentStyleBlock(m: WikiListing): string {
 
 function loadPage(name: string, push: boolean): void {
   hideExplainPill(); // a page switch drops any stale pill from the prior page
+  // Raised BEFORE anything else: `currentName` is only set from the response, so
+  // without this signal the whole round-trip reads as the "start" view and a
+  // refetch resolving mid-click would re-sort the list under the row just clicked.
+  navInFlight = true;
+  // A navigation is a re-render anyway, so a stashed page set lands here too —
+  // and it must land BEFORE the explainer lookup below reads `allPages`.
+  applyPendingPages();
   const listing = allPages.find((p) => p.name === name);
   if (listing && listing.type === "explainer") {
     loadExplainer(listing, push);
@@ -1466,6 +1534,8 @@ function loadPage(name: string, push: boolean): void {
  *  SAME page; `push=false` on popstate/boot replays without re-pushing. */
 function loadPageByRelPath(relPath: string, push = true): void {
   hideExplainPill();
+  navInFlight = true; // same in-flight window as loadPage
+  applyPendingPages(); // same "navigating anyway" moment as loadPage
   fetchAndRenderPage(withWiki("/api/wiki/page?relPath=" + encodeURIComponent(relPath)), push, relPath);
 }
 
@@ -1480,9 +1550,16 @@ function fetchAndRenderPage(url: string, push: boolean, relPath?: string): void 
       // Restore the 3-pane layout on every outcome — an error rendered into
       // #articleWrap has replaced the atlas, so the panes must come back too.
       setAtlasFull(false);
+      navInFlight = false;
       if (data.error) {
         document.getElementById("articleWrap")!.innerHTML =
           `<div class="wiki-empty-state">${esc(data.error)}</div>`;
+        // The PREVIOUS page's `currentName` deliberately survives a failed load, so
+        // the view state keeps reading "article" and a refresh keeps deferring
+        // until the reader navigates somewhere that succeeds or returns to start.
+        // Erring toward "don't re-sort" is the right direction; the nav flag is
+        // cleared above so it isn't a second, permanent reason to defer.
+        renderList(); // the facets may have moved under us via applyPendingPages
         return;
       }
       currentName = data.meta.name;
@@ -1521,8 +1598,10 @@ function fetchAndRenderPage(url: string, push: boolean, relPath?: string): void 
     })
     .catch((err: Error) => {
       setAtlasFull(false);
+      navInFlight = false;
       document.getElementById("articleWrap")!.innerHTML =
         `<div class="wiki-empty-state">Failed to load page: ${esc(err.message)}</div>`;
+      renderList();
     });
 }
 
@@ -3274,58 +3353,211 @@ window.addEventListener("message", (e: MessageEvent) => {
   showExplainPill();
 });
 
+// ── Listing refresh ───────────────────────────────────────────────────
+// A tab left open for hours used to filter a page set frozen at load time. We
+// re-pull `/api/wiki/pages` on focus/visibility and on a slow heartbeat (the
+// never-blurred second-monitor tab fires neither event), throttled, and —
+// crucially — only ADOPT the fresh set while the reader is on the browse/start
+// view: applying it under an open article would re-sort the left list out from
+// under someone reading. Everything else is stashed and applied on the next
+// return/navigation. Throttle, ordering, guards and the apply/defer decision live
+// in the DOM-free `wiki-refresh.ts`; the boot load runs through the SAME
+// discipline so a slow boot response can't revert a newer refetch.
+const pagesRefresh = createRefreshModel();
+
+/** What the middle pane is showing right now — see `viewStateOf` for the rules.
+ *  An Ask/Explain/Fact-check answer nulls `currentName` but is just as much
+ *  "someone is reading" as an article; its body element is the only signal that
+ *  survives (`askShownTurn` is never cleared on navigation). */
+function currentViewState() {
+  return viewStateOf(currentName, navInFlight, !!document.getElementById("askAnswerBody"));
+}
+
+/** Swap in a page set + everything else the payload carries. Data only — paints
+ *  nothing; `adoptPagesAndRender`/`bootRender` own the painting. */
+function setPagesData(data: WikiPagesResponse): void {
+  allPages = data.pages;
+  // Anchor every recency read to the server's scan instant BEFORE the first render
+  // (`recencyNow`) — a viewer clock running >48h slow would otherwise trip the
+  // future-date guard on every frontmatter-dated page in the wiki at once.
+  scannedAtMs = typeof data.scannedAt === "number" ? data.scannedAt : null;
+  // Store the wiki's merged type list (defaults + `.wiki-reader.json` customs).
+  // Absent/empty (older server / degraded) keeps the built-in constants so
+  // standard types still render — the belt-and-suspenders unions in the chip/hub
+  // renderers then keep any custom-typed page from being dropped regardless.
+  if (data.types && Array.isArray(data.types.order) && data.types.order.length) {
+    typeOrder = data.types.order;
+    typeLabels = data.types.labels || { ...TYPE_LABEL };
+  }
+}
+
+/** Adopt a fresh page set and repaint everything derived from it. Filters, the
+ *  search box and the sort mode all live outside this render path (the `filters`
+ *  object / the DOM controls themselves), so they survive untouched, and the
+ *  Filters disclosure is NOT auto-opened — a background event must not reopen a
+ *  stack the reader collapsed. `renderList` restores the list's scroll offset. A
+ *  selection whose page has disappeared simply stops matching a row — the same
+ *  non-event as any name the listing doesn't carry. */
+function adoptPagesAndRender(applied: PendingPages): void {
+  adoptPagesDataAndFacets(applied);
+  renderList();
+  refreshStartBody();
+}
+
+/** Everything an adopt does EXCEPT painting the row list and the start body — the
+ *  shared half of `adoptPagesAndRender` and the deferred apply. */
+function adoptPagesDataAndFacets(applied: PendingPages): void {
+  setPagesData(applied.data);
+  markApplied(pagesRefresh, applied);
+  renderPageFacets(false);
+  refreshStartStats();
+  loadCoverageFooter();
+}
+
+/** The boot-success render: facets, the coverage footer, and the one-time
+ *  navigation from `location.search`. Runs on the FIRST successful adopt, which
+ *  is normally the boot response — but if boot failed (error pane painted, no
+ *  facets, no list) the next successful refetch must run this path too, or the
+ *  list heals beside a permanent error message. */
+function bootRender(applied: PendingPages): void {
+  setPagesData(applied.data);
+  markApplied(pagesRefresh, applied);
+  renderPageFacets(true);
+  loadCoverageFooter();
+  // The initial navigation is boot-only work. On a heal the reader may already be
+  // somewhere (a wikilink click out of an Ask answer, an answer in the pane) —
+  // re-reading `location.search` there would fight what is on screen, so just
+  // paint the rows the failed boot never painted.
+  if (currentViewState() !== "start") {
+    renderList();
+    return;
+  }
+  const params = new URLSearchParams(location.search);
+  // A shared/reloaded relPath URL re-resolves collision-proof; check it first.
+  const relPath = params.get("relPath");
+  if (relPath) {
+    loadPageByRelPath(relPath, false);
+  } else {
+    const page = params.get("page");
+    if (page) loadPage(page, false);
+    else renderStart(); // renders the list itself
+  }
+}
+
+function applyPagesResponse(applied: PendingPages): void {
+  if (pagesRefresh.bootRendered) adoptPagesAndRender(applied);
+  else bootRender(applied);
+}
+
+/** Apply a page set that arrived while the reader had something open. Called at
+ *  the top of every return-to-start / navigation path; a no-op when nothing is
+ *  stashed, and `takePending` guarantees it lands exactly once.
+ *
+ *  Data + facets only: every caller (`renderStart`, `loadPage`/`loadPageByRelPath`
+ *  → `fetchAndRenderPage`/`loadExplainer`) paints the list itself a moment later,
+ *  so painting here would mean two full 953-row renders per user action. */
+function applyPendingPages(): void {
+  const pending = takePending(pagesRefresh);
+  if (!pending) return;
+  if (!pagesRefresh.bootRendered) {
+    bootRender(pending);
+    return;
+  }
+  adoptPagesDataAndFacets(pending);
+}
+
+/** Paint the boot-only "this wiki isn't usable" pane. Suppressed once anything has
+ *  rendered successfully — a slow boot response must not bury a healed page. */
+function paintBootError(html: string): void {
+  if (pagesRefresh.bootRendered) return;
+  document.getElementById("articleWrap")!.innerHTML = `<div class="wiki-empty-state">${html}</div>`;
+}
+
+/** Distinguish the two WIKI-set failures the server reports: an unknown wiki
+ *  ("no wiki configured…") vs. a registered wiki whose directory is missing on
+ *  disk ("wiki directory not found") — different, accurate hints. */
+function paintWikiSetError(error: string): void {
+  const configured = /directory not found/i.test(error);
+  paintBootError(
+    WIKI
+      ? configured
+        ? `Wiki directory not found for <code>${esc(WIKI)}</code>. Check its configured path exists on disk.`
+        : `No wiki named <code>${esc(WIKI)}</code>. Add it as a bot <code>wikiDir</code> or a <code>WIKI_EXTRA</code> entry.`
+      : "Wiki directory not found. Set <code>WIKI_DIR</code> in .env to the wiki path.",
+  );
+}
+
+/** Fold an arrived `/api/wiki/pages` response in. Boot and refresh share every
+ *  guard; only the error PAINTING is boot-only (a refresh nobody asked for that
+ *  fails silently keeps the last good listing, which is strictly better). */
+function handlePagesResponse(text: string, seq: number, isBoot: boolean): void {
+  let data: WikiPagesResponse | null = null;
+  try {
+    data = JSON.parse(text) as WikiPagesResponse;
+  } catch {
+    if (isBoot) paintBootError("Failed to load wiki: malformed response");
+    return;
+  }
+  // Shape guard, not just `data.error`: without it a payload carrying no `pages`
+  // array would set `allPages = undefined` and take the whole reader down.
+  if (!data || !Array.isArray(data.pages)) {
+    if (isBoot) paintWikiSetError((data && data.error) || "");
+    return;
+  }
+  if (data.error && !data.pages.length) {
+    if (isBoot) paintWikiSetError(data.error);
+    return;
+  }
+  const fingerprint = pagesFingerprint(text);
+  const outcome = receivePages(pagesRefresh, {
+    data,
+    view: currentViewState(),
+    seq,
+    fingerprint,
+  });
+  if (outcome === "apply") applyPagesResponse({ data, fingerprint });
+}
+
+/**
+ * Issue one listing request.
+ *
+ * `refresh` sends `?refresh=1`, which makes the server re-scan the wiki index
+ * instead of serving its 5-minute TTL cache — without it a focus refetch usually
+ * returns the very listing the tab already has, which is the entire bug this
+ * exists to fix (measured ~140 ms warm rescan on a 953-page wiki; the 30 s
+ * throttle bounds the cost). Reserved for a user actively returning to the tab:
+ * the boot load and the idle heartbeat take the TTL-fresh plain fetch.
+ */
+function requestPages(opts: { refresh: boolean; boot?: boolean }): void {
+  // Sequence + throttle stamp at REQUEST time: a hung request must not leave the
+  // gate open for a pile-up, and responses are adopted in issue order.
+  const seq = startFetch(pagesRefresh, Date.now());
+  fetch(withWiki("/api/wiki/pages" + (opts.refresh ? "?refresh=1" : "")))
+    .then((r) => r.text())
+    .then((text) => handlePagesResponse(text, seq, !!opts.boot))
+    .catch((err: Error) => {
+      if (opts.boot) paintBootError(`Failed to load wiki: ${esc(err.message)}`);
+      // Otherwise silent — a failed refresh keeps the last good listing.
+    });
+}
+
+function maybeRefetchPages(refresh: boolean): void {
+  if (document.hidden) return;
+  if (!shouldRefetch(pagesRefresh, Date.now())) return;
+  requestPages({ refresh });
+}
+
+window.addEventListener("focus", () => maybeRefetchPages(true));
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) maybeRefetchPages(true);
+});
+// The never-blurred tab: visible on a second monitor for hours, firing neither
+// event. Same gate, but the PLAIN fetch — server TTL freshness is fine for idle
+// drift.
+setInterval(() => maybeRefetchPages(false), WIKI_REFETCH_TICK_MS);
+
 // ── Boot ──────────────────────────────────────────────────────────────
 // Rehydrate any persisted Ask session into the "This session" list (does not
 // auto-show an answer). Safe at module load — the history element is static.
 rehydrateAskSession();
-fetch(withWiki("/api/wiki/pages"))
-  .then((r) => r.json())
-  .then((data: WikiPagesResponse) => {
-    if (data.error && !(data.pages || []).length) {
-      // Distinguish the two WIKI-set failures the server reports: an unknown wiki
-      // ("no wiki configured…") vs. a registered wiki whose directory is missing
-      // on disk ("wiki directory not found") — different, accurate hints.
-      const configured = /directory not found/i.test(data.error);
-      const hint = WIKI
-        ? configured
-          ? `Wiki directory not found for <code>${esc(WIKI)}</code>. Check its configured path exists on disk.`
-          : `No wiki named <code>${esc(WIKI)}</code>. Add it as a bot <code>wikiDir</code> or a <code>WIKI_EXTRA</code> entry.`
-        : "Wiki directory not found. Set <code>WIKI_DIR</code> in .env to the wiki path.";
-      document.getElementById("articleWrap")!.innerHTML =
-        `<div class="wiki-empty-state">${hint}</div>`;
-      return;
-    }
-    allPages = data.pages;
-    // Anchor every recency read to the server's scan instant BEFORE the first render
-    // (`recencyNow`) — a viewer clock running >48h slow would otherwise trip the
-    // future-date guard on every frontmatter-dated page in the wiki at once.
-    scannedAtMs = typeof data.scannedAt === "number" ? data.scannedAt : null;
-    // Store the wiki's merged type list (defaults + `.wiki-reader.json` customs).
-    // Absent/empty (older server / degraded) keeps the built-in constants so
-    // standard types still render — the belt-and-suspenders unions below then keep
-    // any custom-typed page from being dropped regardless.
-    if (data.types && Array.isArray(data.types.order) && data.types.order.length) {
-      typeOrder = data.types.order;
-      typeLabels = data.types.labels || { ...TYPE_LABEL };
-    }
-    renderFolderSelect();
-    renderTypeChips();
-    renderStatusChips();
-    renderTagChips();
-    syncFilters();
-    loadCoverageFooter();
-    const params = new URLSearchParams(location.search);
-    // A shared/reloaded relPath URL re-resolves collision-proof; check it first.
-    const relPath = params.get("relPath");
-    if (relPath) {
-      loadPageByRelPath(relPath, false);
-    } else {
-      const page = params.get("page");
-      if (page) loadPage(page, false);
-      else renderStart();
-    }
-  })
-  .catch((err: Error) => {
-    document.getElementById("articleWrap")!.innerHTML =
-      `<div class="wiki-empty-state">Failed to load wiki: ${esc(err.message)}</div>`;
-  });
+requestPages({ refresh: false, boot: true });

@@ -706,6 +706,28 @@ export function topPages(
 }
 
 /**
+ * The values a facet control (folder picker, type/status chip row) should offer:
+ * everything present in the scoped counts, PLUS the currently active value even
+ * when its count has fallen to 0.
+ *
+ * The union is the whole point. A facet render happens on a domain/type switch and
+ * on a background listing refresh, and building the control purely from the scoped
+ * counts meant the active value's control vanished — leaving an empty list, a
+ * filter badge, and no visible way back out of it. Worse, the folder picker
+ * "solved" that by CLEARING `filters.folder` from inside a render, so a page
+ * arriving in the background silently rewrote a filter the user set.
+ *
+ * Zero-count keys in `counts` are dropped (a counter that emits explicit zeroes
+ * must not populate the control), which is why the active value is re-added after.
+ * Callers render the count as `counts[key] || 0`.
+ */
+export function facetKeys(counts: Record<string, number>, active: string): string[] {
+  const keys = Object.keys(counts).filter((k) => counts[k]);
+  if (active && keys.indexOf(active) === -1) keys.push(active);
+  return keys;
+}
+
+/**
  * Whether this wiki uses the plan-status convention at all — the gate for the
  * whole Status facet (chip row + follow-ups toggle). True as soon as ONE page
  * carries a `plan_status`.
