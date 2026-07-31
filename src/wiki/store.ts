@@ -16,6 +16,7 @@ import { stat } from "node:fs/promises";
 import { getLog } from "../logging.ts";
 import { sanitizeColorToken } from "../dashboard/views/components/wiki-filter.ts";
 import { COMPONENT_TAG_SOURCE } from "../format/markdown-ast.ts";
+import { buildGitCreatedMap } from "./git-created.ts";
 
 const log = getLog("wiki", "store");
 
@@ -262,6 +263,16 @@ export interface WikiPageMeta {
    * be stat'd or the filesystem doesn't track birthtime (reported as ≤ 0).
    */
   birthtimeMs?: number;
+  /**
+   * Creation time from GIT (epoch ms) — the commit that first introduced this path,
+   * rename-aware. The durable "Recently added" signal: unlike `birthtimeMs` it
+   * survives a `git mv`, a re-clone, and a sweep that rewrites files via
+   * temp-file+rename (all three reset birthtime for every file they touch — see
+   * `src/wiki/git-created.ts`). Undefined when the wiki isn't in a git repo, git is
+   * unavailable, the walk timed out, or the page is untracked (a brand-new file has
+   * no history yet — its birthtime is honest, so nothing is lost).
+   */
+  gitCreatedMs?: number;
   /**
    * Publication date (`YYYY-MM-DD`) parsed from the body's `Source: …, YYYY-MM-DD`
    * line — the day the referenced source was published (distinct from the
@@ -1010,6 +1021,11 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
   /** Per-page resolved relative-markdown-link targets (normalized relPaths). */
   const rawMdTargets = new Map<string, string[]>();
 
+  // Git creation dates — ONE subprocess per index build (inheriting the 5-min TTL),
+  // kicked off here so it overlaps the ~700-file read pass below instead of adding
+  // its latency to it. Never rejects; null ⇒ pages keep only frontmatter+birthtime.
+  const gitCreatedPromise = buildGitCreatedMap(root);
+
   const register = (key: string, meta: WikiPageMeta) => {
     const k = key.toLowerCase();
     if (!byKey.has(k)) byKey.set(k, meta);
@@ -1079,6 +1095,47 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
       rawMdTargets.set(relPath, resolveMarkdownTargets(relPath, extractMarkdownLinks(content)));
     }),
   );
+
+  // Stamp git creation dates. Done as a post-pass rather than inside the concurrent
+  // read above so the walk overlaps ALL the file reads rather than blocking the
+  // first one; keyed on the raw relPath, which is exactly what the walk emits
+  // (posix, wiki-relative) — no normalization, so a case-only difference simply
+  // misses and the page keeps its birthtime.
+  const gitCreated = await gitCreatedPromise;
+  if (gitCreated) {
+    let hits = 0;
+    for (const meta of pages) {
+      const ms = gitCreated.get(meta.relPath);
+      if (ms !== undefined) {
+        meta.gitCreatedMs = ms;
+        hits++;
+      }
+    }
+    // A partial hit rate is normal and uninteresting (untracked drafts, history
+    // shallower than the files) — debug. But git answering with paths and matching
+    // NOTHING means the walk's keys stopped lining up with `relPath`, which silently
+    // reinstates the sweep-collapse bug while every build still reports success. That
+    // one case earns a warn; it is the only failure mode with no other symptom.
+    //
+    // Gated on a NON-EMPTY map: a successful walk over a subtree with no tracked pages
+    // (a gitignored wiki dir, or one added but never committed) returns an empty map,
+    // not null, and would otherwise fire this alarm ~288×/day per wiki pointing at a
+    // key-mismatch bug that doesn't exist. `git-created.ts` owns the complementary
+    // warn for "git had paths but none survived the subtree strip".
+    if (gitCreated.size > 0 && hits === 0 && pages.length > 0) {
+      log.warn(
+        "wiki {root}: git returned history but matched 0 of {total} pages — " +
+          '"Recently added" is falling back to birthtime',
+        { root, total: pages.length },
+      );
+    } else {
+      log.debug("wiki {root}: git creation dates for {hits}/{total} pages", {
+        root,
+        hits,
+        total: pages.length,
+      });
+    }
+  }
 
   // ONE warn per index build, never one per page — a backfill writing these fields
   // across ~145 files at once would otherwise flood the log on every TTL refresh.

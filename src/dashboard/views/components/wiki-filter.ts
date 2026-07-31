@@ -39,9 +39,14 @@ export interface WikiListing {
   relPath: string;
   /** File mtime (epoch ms) — the recency signal for frontmatter-less wikis. */
   mtimeMs?: number;
-  /** File birthtime (epoch ms) — the "Recently added" signal for frontmatter-less
-   *  wikis. Absent when the filesystem doesn't track it. */
+  /** File birthtime (epoch ms) — a WEAK "Recently added" signal: `git mv`, a
+   *  re-clone, and any sweep writing via temp-file+rename all reset it. Absent when
+   *  the filesystem doesn't track it. */
   birthtimeMs?: number;
+  /** Creation time from git (epoch ms) — the commit that first introduced the page,
+   *  rename-aware. The DURABLE "Recently added" signal (see `src/wiki/git-created.ts`).
+   *  Absent for a non-git or untracked page. */
+  gitCreatedMs?: number;
   /**
    * Plan lifecycle state, from the frontmatter key `plan_status` — NOT the bare
    * `status`, which melosys-kode-wiki already uses for an unrelated vocabulary.
@@ -273,23 +278,54 @@ export function pageDateLabel(p: WikiListing): string {
 }
 
 /**
- * Creation time of a page in epoch ms — the sort key behind "Recently added".
+ * The winning "Recently added" signal for a page: its epoch ms and the label that
+ * explains it.
  *
- * The SMALLER of the file's birthtime and its frontmatter `created` date (the
- * mirror image of `pageTimeMs`'s max): a re-checked-out wiki recreates every
- * file, so a fresh birthtime is a lie the older frontmatter date corrects, and
- * a frontmatter `created` stamped after the fact never hides a genuinely older
- * file. Unlike "Recently updated", a mass edit sweep bumping every mtime leaves
- * this ordering untouched — which is the point. 0 when a page has neither
- * signal.
+ * **Oldest of every available signal wins** — frontmatter `created`, the git
+ * creation date, the file birthtime. This is the mirror image of `pageTimeMs`'s max,
+ * and the asymmetry is principled: every way a creation date gets corrupted moves it
+ * FORWARD (a re-clone, a `git mv`, a sweep writing via temp-file+rename, a `created:`
+ * stamped after the fact), so the oldest surviving claim is the most trustworthy one.
+ *
+ * Ordering the three by trustworthiness would be the wrong model — `git mv` resets
+ * birthtime but git remembers the rename, while a page hand-imported from another
+ * repo has a truer `created:` than git's import date. Neither dominates; the min
+ * picks whichever one still remembers.
+ *
+ * Sort key and label come from ONE function so they can never disagree — the list
+ * shows the date it actually sorted on. A frontmatter date is echoed verbatim (it was
+ * authored as a plain day; re-deriving it from the parsed UTC instant would shift it
+ * in negative-offset timezones), while git/birthtime are wall-clock instants and so
+ * render as LOCAL days — the same split `pageDateLabel` makes for mtime.
+ */
+function addedSignal(p: WikiListing): { ms: number; label: string } {
+  const fmMs = p.created ? Date.parse(p.created) : NaN;
+  let best = { ms: 0, label: "" };
+  const consider = (ms: number, label: string) => {
+    if (!Number.isFinite(ms) || ms <= 0) return;
+    if (best.ms === 0 || ms < best.ms) best = { ms, label };
+  };
+  if (Number.isFinite(fmMs)) consider(fmMs, p.created!);
+  const git = p.gitCreatedMs || 0;
+  if (git) consider(git, localDay(new Date(git)));
+  const bt = p.birthtimeMs || 0;
+  if (bt) consider(bt, localDay(new Date(bt)));
+  return best;
+}
+
+/**
+ * Creation time of a page in epoch ms — the sort key behind "Recently added". The
+ * oldest of frontmatter `created`, the git creation date, and the file birthtime;
+ * 0 when a page has none of them. See `addedSignal`.
+ *
+ * Unlike "Recently updated", a mass edit sweep bumping every mtime leaves this
+ * ordering untouched — which is the point. A sweep that rewrites files via
+ * temp-file+rename bumps every BIRTHTIME too (mimir's 2026-07-31 plan-status
+ * backfill did exactly that to 148 files, collapsing the sort into one day), which
+ * is why the git date is in the mix.
  */
 export function pageAddedMs(p: WikiListing): number {
-  const fmMs = p.created ? Date.parse(p.created) : NaN;
-  const fmValid = !Number.isNaN(fmMs);
-  const bt = p.birthtimeMs || 0;
-  if (fmValid && bt) return Math.min(fmMs, bt);
-  if (fmValid) return fmMs;
-  return bt;
+  return addedSignal(p).ms;
 }
 
 /** Meta/bookkeeping pages (index.md, log.md, CLAUDE.md — any folder). Rewritten
@@ -302,16 +338,11 @@ function isMetaPage(p: WikiListing): boolean {
 
 /**
  * `YYYY-MM-DD` for `pageAddedMs` — shown next to a page when sorted by
- * "Recently added", so the visible date explains the ordering. Same verbatim-
- * frontmatter / local-day-mtime rules as `pageDateLabel`.
+ * "Recently added", so the visible date explains the ordering. Derived from the same
+ * `addedSignal` as the sort key, so the two cannot drift apart.
  */
 export function pageAddedLabel(p: WikiListing): string {
-  const fmMs = p.created ? Date.parse(p.created) : NaN;
-  const fmValid = !Number.isNaN(fmMs);
-  const bt = p.birthtimeMs || 0;
-  if (fmValid && (!bt || fmMs <= bt)) return p.created!;
-  if (bt) return localDay(new Date(bt));
-  return fmValid ? p.created! : "";
+  return addedSignal(p).label;
 }
 
 /** `YYYY-MM-DD` in the viewer's timezone (no UTC shift). */

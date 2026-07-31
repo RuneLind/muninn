@@ -1428,3 +1428,104 @@ describe("buildWikiIndex — plan status fields", () => {
     expect(records.some((r) => r.rawMessage.includes("plan-status"))).toBe(false);
   });
 });
+
+/**
+ * Git creation dates reach the page metadata. The parser itself is covered in
+ * `git-created.test.ts`; what these assert is the WIRING — that the walk's keys line
+ * up with `WikiPageMeta.relPath`. A mismatch there (a normalization, a leading `./`,
+ * a case fold) would silently stamp nothing and quietly reinstate the sweep-collapse
+ * bug, with the index build still reporting success.
+ */
+describe("buildWikiIndex + git creation dates", () => {
+  let root: string;
+
+  /** Run git in the fixture with an identity supplied inline — the test host may
+   *  have no global user.name, and a repo-local config write would be one more
+   *  thing to clean up. Signing is forced off for the same reason. */
+  const git = async (...args: string[]) => {
+    const proc = Bun.spawn(
+      ["git", "-C", root, "-c", "user.name=T", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", ...args],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    const code = await proc.exited;
+    if (code !== 0) throw new Error(`git ${args.join(" ")}: ${await new Response(proc.stderr).text()}`);
+  };
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-git-"));
+    await git("init", "-q");
+  });
+
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("stamps gitCreatedMs on tracked pages, leaves untracked ones bare", async () => {
+    await Bun.write(path.join(root, "plans/one.md"), "# One");
+    await git("add", "-A");
+    await git("commit", "-qm", "add one");
+    // Written but never committed — no history, so nothing to stamp. Its birthtime
+    // is honest anyway, which is why an absent field costs nothing.
+    await Bun.write(path.join(root, "plans/untracked.md"), "# Untracked");
+
+    const index = await buildWikiIndex(root);
+    const one = index.pages.find((p) => p.relPath === "plans/one.md")!;
+    const untracked = index.pages.find((p) => p.relPath === "plans/untracked.md")!;
+    expect(one.gitCreatedMs).toBeGreaterThan(0);
+    expect(untracked.gitCreatedMs).toBeUndefined();
+  });
+
+  test("a renamed page keeps its ORIGINAL creation date, not the rename's", async () => {
+    // The end-to-end shape of mimir's `wiki/`→`projects/` reorg: `git mv` resets the
+    // filesystem birthtime, so if the git date followed the rename too there would be
+    // no surviving signal at all.
+    await Bun.write(path.join(root, "old-name.md"), "# Page");
+    await git("add", "-A");
+    await git("commit", "-qm", "add");
+    const firstCommit = (await buildWikiIndex(root)).pages.find(
+      (p) => p.relPath === "old-name.md",
+    )!.gitCreatedMs;
+    // Assert the premise, or the comparison below passes vacuously on two undefineds
+    // — which is exactly how the /tmp-symlink degrade first hid from this test.
+    expect(firstCommit).toBeGreaterThan(0);
+
+    await new Promise((r) => setTimeout(r, 1100)); // %at is second-granular
+    await git("mv", "old-name.md", "new-name.mdx");
+    await git("commit", "-qm", "rename");
+
+    __resetWikiCacheForTest();
+    const renamed = (await buildWikiIndex(root)).pages.find((p) => p.relPath === "new-name.mdx")!;
+    expect(renamed.gitCreatedMs).toBe(firstCommit);
+  });
+
+  test("a non-ASCII filename is stamped (core.quotePath regression guard)", async () => {
+    // git's `core.quotePath` defaults to TRUE and octal-escapes any non-ASCII path:
+    // `Årsavregning.md` arrives as `"wiki/concepts/\303\205rsavregning.md"`, a key that
+    // matches no relPath. This silently cost huginn-nav 171 of 540 pages (32%) — and it
+    // could never trip the zero-hit warn, because the ASCII majority still matched. This
+    // is a REAL-git test on purpose: the parser cannot detect the problem, only the
+    // spawn's `-c core.quotePath=false` prevents it, so a hand-written fixture would
+    // guard nothing.
+    await Bun.write(path.join(root, "concepts/Årsavregning.md"), "# Årsavregning");
+    await Bun.write(path.join(root, "entities/Carissa Véliz.md"), "# Carissa Véliz");
+    await git("add", "-A");
+    await git("commit", "-qm", "non-ascii names");
+
+    const index = await buildWikiIndex(root);
+    for (const rel of ["concepts/Årsavregning.md", "entities/Carissa Véliz.md"]) {
+      expect(index.pages.find((p) => p.relPath === rel)?.gitCreatedMs).toBeGreaterThan(0);
+    }
+  });
+
+  test("a non-git wiki builds cleanly with the field simply absent", async () => {
+    const plain = await mkdtemp(path.join(tmpdir(), "wiki-nogit-"));
+    try {
+      await Bun.write(path.join(plain, "p.md"), "# P");
+      const index = await buildWikiIndex(plain);
+      expect(index.pages).toHaveLength(1);
+      expect(index.pages[0]!.gitCreatedMs).toBeUndefined();
+    } finally {
+      await rm(plain, { recursive: true, force: true });
+    }
+  });
+});
