@@ -56,14 +56,19 @@ import {
   connectionTypeOrder,
   filterPages,
   folderCounts,
+  followupCount,
+  hasPlanStatus,
   hasTypedHubs,
   hubTypeList,
   pageAddedLabel,
   pageDateLabel,
   pageFolder,
+  pageFollowups,
   ROOT_FOLDER,
   sanitizeColorToken,
   sortPages,
+  statusCounts,
+  STATUS_ORDER,
   tagCounts,
   topPages,
   typeCounts,
@@ -133,7 +138,15 @@ function pageUrlByRelPath(relPath: string): string {
 
 let allPages: WikiListing[] = [];
 let currentName: string | null = null;
-const filters: WikiFilters = { q: "", domain: "", folder: "", type: "", tag: "" };
+const filters: WikiFilters = {
+  q: "",
+  domain: "",
+  folder: "",
+  type: "",
+  tag: "",
+  status: "",
+  followups: "",
+};
 let startTab: "hubs" | "timeline" | "atlas" = "hubs";
 let tagsExpanded = false;
 
@@ -746,6 +759,57 @@ function renderTypeChips(): void {
   document.getElementById("typeChips")!.innerHTML = html;
 }
 
+/** A colored `plan_status` pill — the ONE spelling shared by the page list and the
+ *  article header, so the two never drift. Empty string for a page without one. */
+function statusPillHtml(p: WikiListing): string {
+  if (!p.plan_status) return "";
+  // `status_note` arrives UNESCAPED from the server (free prose, no validator) —
+  // esc() before it reaches this attribute sink.
+  const note = [p.status_date, p.status_note].filter(Boolean).join(" — ");
+  const title = note ? ` title="${esc(note)}"` : "";
+  return `<span class="wiki-status plan-${esc(p.plan_status)}"${title}>${esc(p.plan_status)}</span>`;
+}
+
+/** The open-follow-ups marker — deliberately separate from the status pill so the
+ *  two axes stay distinguishable, and independent of `plan_status` (a page can
+ *  declare follow-ups without a status). */
+function followupFlagHtml(p: WikiListing): string {
+  return pageFollowups(p) === "open"
+    ? '<span class="wiki-followup-flag" title="has open follow-ups">⚑</span>'
+    : "";
+}
+
+/** The Status chip row + ⚑ follow-ups toggle. Rendered only on wikis that use the
+ *  plan-status convention (`hasPlanStatus`); everywhere else the row stays hidden
+ *  and empty, so a wiki without the convention looks exactly as it did before. */
+function renderStatusChips(): void {
+  const row = document.getElementById("statusChips");
+  if (!row) return;
+  if (!hasPlanStatus(allPages)) {
+    row.innerHTML = "";
+    row.style.display = "none";
+    return;
+  }
+  const counts = statusCounts(allPages, filters.domain, filters.type);
+  let html = `<button class="wiki-chip${filters.status === "" ? " active" : ""}" data-status="">All status</button>`;
+  // Union the enum order with whatever is actually present, same belt-and-braces
+  // as the type row: a status the client's copy of the enum doesn't know still shows.
+  connectionTypeOrder(Object.keys(counts), STATUS_ORDER).forEach((s) => {
+    // Keep the ACTIVE chip visible at count 0 — a domain/type switch that empties
+    // it would otherwise hide the very filter that is emptying the list.
+    if (!counts[s] && filters.status !== s) return;
+    html +=
+      `<button class="wiki-chip${filters.status === s ? " active" : ""}" data-status="${esc(s)}">` +
+      `<span class="wiki-status-dot plan-${esc(s)}"></span>${esc(s)} ${counts[s] || 0}</button>`;
+  });
+  const open = followupCount(allPages, filters.domain, filters.type);
+  if (open || filters.followups) {
+    html += `<button class="wiki-chip${filters.followups ? " active" : ""}" data-followups="open" title="Only pages with open follow-ups">⚑ has follow-ups ${open}</button>`;
+  }
+  row.innerHTML = html;
+  row.style.display = "";
+}
+
 function renderTagChips(): void {
   const counts = tagCounts(allPages, filters.domain, filters.type);
   const tags = Object.keys(counts).sort((a, b) => counts[b]! - counts[a]! || a.localeCompare(b));
@@ -762,14 +826,17 @@ function renderTagChips(): void {
   document.getElementById("tagChips")!.innerHTML = html;
 }
 
-/** Count of active secondary filters (folder + type + tag) — drives the Filters
- *  disclosure's badge and its auto-open. Domain lives in the compact head, so it
- *  is deliberately excluded here. */
+/** Count of active secondary filters (folder + type + tag + status + follow-ups) —
+ *  drives the Filters disclosure's badge and its auto-open. Status and follow-ups
+ *  count separately because they ARE separate axes. Domain lives in the compact
+ *  head, so it is deliberately excluded here. */
 function activeFilterCount(): number {
   let n = 0;
   if (filters.folder) n++;
   if (filters.type) n++;
   if (filters.tag) n++;
+  if (filters.status) n++;
+  if (filters.followups) n++;
   return n;
 }
 
@@ -805,6 +872,8 @@ function renderList(): void {
       `<div class="wiki-list-item${p.name === currentName ? " active" : ""}" data-page="${esc(p.name)}">` +
       `<div class="wiki-type-dot type-${esc(p.type)}"></div>` +
       `<div class="wiki-list-title">${esc(p.title)}</div>` +
+      followupFlagHtml(p) +
+      statusPillHtml(p) +
       `<div class="wiki-list-meta">${esc(meta)}</div>` +
       `</div>`;
   });
@@ -883,6 +952,10 @@ function badgeHtml(p: WikiListing): string {
   // type string can come from a wiki's `.wiki-reader.json`.
   let html = `<span class="wiki-badge badge-${esc(p.type)}">${esc(p.type)}</span>`;
   if (p.domain === "life") html += '<span class="wiki-badge badge-life">life</span>';
+  // Plan status sits beside the type badge (same row), with the follow-up flag as
+  // its own marker. Both are page-driven, not facet-driven: a page with no
+  // `plan_status` shows no pill here even on a wiki where the Status facet is live.
+  html += statusPillHtml(p) + followupFlagHtml(p);
   return html;
 }
 
@@ -1461,6 +1534,7 @@ document.getElementById("domainChips")!.addEventListener("click", function (this
   chip.classList.add("active");
   renderFolderSelect();
   renderTypeChips();
+  renderStatusChips();
   renderTagChips();
   renderList();
   refreshStartBody();
@@ -1480,7 +1554,28 @@ document.getElementById("typeChips")!.addEventListener("click", (e) => {
   if (!chip) return;
   filters.type = chip.getAttribute("data-type") || "";
   renderTypeChips();
+  renderStatusChips();
   renderTagChips();
+  renderList();
+  refreshStartBody();
+  syncFilters();
+});
+
+// Status facet: the enum chips and the ⚑ follow-ups toggle share one row (and so
+// one delegated handler), but write to two independent filter fields.
+document.getElementById("statusChips")!.addEventListener("click", (e) => {
+  const target = e.target as HTMLElement;
+  const chip = target.closest ? target.closest(".wiki-chip") : null;
+  if (!chip) return;
+  if (chip.hasAttribute("data-followups")) {
+    filters.followups = filters.followups ? "" : "open";
+  } else {
+    const status = chip.getAttribute("data-status") || "";
+    // Re-clicking the active chip clears it (the tag-row convention); "All status"
+    // carries an empty value and so clears by assignment.
+    filters.status = filters.status === status ? "" : status;
+  }
+  renderStatusChips();
   renderList();
   refreshStartBody();
   syncFilters();
@@ -3159,6 +3254,7 @@ fetch(withWiki("/api/wiki/pages"))
     }
     renderFolderSelect();
     renderTypeChips();
+    renderStatusChips();
     renderTagChips();
     syncFilters();
     loadCoverageFooter();

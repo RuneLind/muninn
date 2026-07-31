@@ -81,6 +81,13 @@ export interface WikiFilters {
   folder: string;
   type: string;
   tag: string;
+  /** Exact `plan_status` value, "" for all. Independent of `followups` below —
+   *  status answers "has it started / is it finished", follow-ups answers "is
+   *  anything left over", and a page can be `shipped` with open follow-ups. */
+  status: string;
+  /** `"open"` (the ⚑ toggle) or "" for all. Compared against the page's
+   *  `followups` with an ABSENT value read as `"none"`, per the field contract. */
+  followups: string;
 }
 
 /**
@@ -130,6 +137,25 @@ export const TYPE_LABEL: Record<string, string> = {
   explainer: "Explainers",
   note: "Notes",
 };
+
+/**
+ * Chip order for the plan-status facet — a client-side copy of the store's
+ * `PLAN_STATUS_VALUES` (`src/wiki/store.ts`), kept here for the same reason
+ * `TYPE_ORDER` is: this module must stay free of server deps. The server
+ * validates against its own list and DROPS anything else, so a value reaching a
+ * `WikiListing` is always one of these; the chip row still unions in whatever is
+ * actually present (`connectionTypeOrder`) so a future enum member added
+ * server-side surfaces instead of vanishing.
+ */
+export const STATUS_ORDER: string[] = [
+  "proposed",
+  "ready",
+  "in-flight",
+  "blocked",
+  "shipped",
+  "superseded",
+  "abandoned",
+];
 
 /** The ordered type list + labels the client renders chips/stats/hubs/connections
  *  from — the built-in defaults merged with a wiki's `.wiki-reader.json` customs. */
@@ -294,8 +320,16 @@ export function localDay(d: Date): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
-/** Filter pages by the current domain/folder/type/tag facets and the free-text query.
- *  Query matches title, canonical name, any alias, or any tag (all case-insensitive). */
+/** A page's follow-up state, with the contract's absent-⇒-`none` fold applied
+ *  once. An invalid frontmatter value is dropped server-side, so anything other
+ *  than `open`/`none` here means "the field never arrived". */
+export function pageFollowups(p: WikiListing): string {
+  return p.followups || "none";
+}
+
+/** Filter pages by the current domain/folder/type/tag/status/follow-ups facets and
+ *  the free-text query. Query matches title, canonical name, any alias, or any tag
+ *  (all case-insensitive). */
 export function filterPages(pages: WikiListing[], filters: WikiFilters): WikiListing[] {
   const q = filters.q.toLowerCase();
   return pages.filter((p) => {
@@ -303,6 +337,8 @@ export function filterPages(pages: WikiListing[], filters: WikiFilters): WikiLis
     if (filters.folder && pageFolder(p) !== filters.folder) return false;
     if (filters.type && p.type !== filters.type) return false;
     if (filters.tag && p.tags.indexOf(filters.tag) === -1) return false;
+    if (filters.status && p.plan_status !== filters.status) return false;
+    if (filters.followups && pageFollowups(p) !== filters.followups) return false;
     if (!q) return true;
     if (p.title.toLowerCase().indexOf(q) !== -1) return true;
     if (p.name.toLowerCase().indexOf(q) !== -1) return true;
@@ -377,6 +413,56 @@ export function topPages(
   limit = 12,
 ): WikiListing[] {
   return sortPages(pages.filter(predicate), "backlinks").slice(0, limit);
+}
+
+/**
+ * Whether this wiki uses the plan-status convention at all — the gate for the
+ * whole Status facet (chip row + follow-ups toggle). True as soon as ONE page
+ * carries a `plan_status`.
+ *
+ * Presence is equivalent to validity here: `parsePlanFields` (`src/wiki/store.ts`)
+ * drops any value failing the enum before it can reach the payload, so a page that
+ * declared a garbage status arrives with the field absent and does NOT open the
+ * facet. That is what keeps the row hidden on wikis without the convention (jarvis,
+ * melosys-kode-wiki) and on mimir mid-backfill.
+ */
+export function hasPlanStatus(pages: WikiListing[]): boolean {
+  return pages.some((p) => !!p.plan_status);
+}
+
+/**
+ * Count pages per `plan_status`, honoring the active domain + type filters — the
+ * same facets `tagCounts` honors, since the Status row sits beside the tag row
+ * below the type row in the Filters disclosure and each row counts within the
+ * selection the rows above it have already made. Deliberately NOT filtered by
+ * `followups`: the two are independent axes, so cross-filtering the counts would
+ * make the ⚑ toggle silently rewrite the status numbers.
+ */
+export function statusCounts(
+  pages: WikiListing[],
+  domain: string,
+  type: string,
+): Record<string, number> {
+  const counts: Record<string, number> = {};
+  pages.forEach((p) => {
+    if (domain && p.domain !== domain) return;
+    if (type && p.type !== type) return;
+    if (!p.plan_status) return;
+    counts[p.plan_status] = (counts[p.plan_status] || 0) + 1;
+  });
+  return counts;
+}
+
+/** How many pages have OPEN follow-ups — the ⚑ toggle's count. Same domain + type
+ *  scoping as `statusCounts`, and likewise independent of the status facet. */
+export function followupCount(pages: WikiListing[], domain: string, type: string): number {
+  let n = 0;
+  pages.forEach((p) => {
+    if (domain && p.domain !== domain) return;
+    if (type && p.type !== type) return;
+    if (pageFollowups(p) === "open") n++;
+  });
+  return n;
 }
 
 /** Count pages per tag, honoring the active domain + type filters (used for the tag chip row). */

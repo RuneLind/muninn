@@ -542,6 +542,33 @@ export async function renderWikiPage(opts?: {
     .badge-explainer { background: var(--tint-warning); color: var(--status-warning); }
     .badge-note { background: var(--tint-neutral); color: var(--text-muted); }
     .badge-life { background: var(--tint-success); color: var(--status-success); }
+
+    /* ── Plan status (frontmatter plan_status) ───────────────────────────
+       Its own class family rather than a reuse of badge-<type>: a page's type
+       and its plan status are independent axes and must never fight over one
+       color token. Modifiers are plan-<status> — status-* is already taken by
+       unrelated families on /serena and /summaries.
+       The neutral base covers proposed/ready/superseded/abandoned; only the three
+       states worth spotting from across the list carry a tint (shipped = quiet
+       green, in-flight = accent, blocked = warn). */
+    .wiki-status {
+      font-size: 10px; padding: 1px 7px; border-radius: 999px;
+      font-weight: 600; letter-spacing: 0.3px; white-space: nowrap; flex-shrink: 0;
+      background: var(--tint-neutral); color: var(--text-muted);
+    }
+    /* Same palette as a 6px dot, for the filter chips — the .wiki-type-dot
+       precedent, so a status chip stays visually a chip like type/tag chips. */
+    .wiki-status-dot {
+      width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+      display: inline-block; margin-right: 5px; vertical-align: middle;
+      background: var(--text-dim);
+    }
+    .plan-shipped { background: var(--tint-success); color: var(--status-success); }
+    .plan-in-flight { background: var(--tint-purple); color: var(--accent-light); }
+    .plan-blocked { background: var(--tint-warning); color: var(--status-warning); }
+    /* Open follow-ups is the OTHER axis — a separate marker, never a status color,
+       so "shipped with loose ends" reads as two facts and not one muddled pill. */
+    .wiki-followup-flag { font-size: 10.5px; color: var(--status-warning); flex-shrink: 0; }
     .wiki-tag { font-size: 11px; color: var(--text-muted); background: var(--bg-surface); padding: 2px 8px; border-radius: 999px; }
     .wiki-dates { font-size: 11.5px; color: var(--text-dim); }
     .wiki-source-url { font-size: 11.5px; color: var(--status-info); text-decoration: none; }
@@ -1016,6 +1043,9 @@ export async function renderWikiPage(opts?: {
               <select id="wikiFolder" class="wiki-sort wiki-folder"></select>
             </div>
             <div class="wiki-chip-row" id="typeChips"></div>
+            <!-- Plan-status facet — populated (and un-hidden) only on wikis where
+                 at least one page carries a valid plan_status. -->
+            <div class="wiki-chip-row" id="statusChips" style="display:none"></div>
             <div class="wiki-chip-row" id="tagChips"></div>
           </div>
         </details>
