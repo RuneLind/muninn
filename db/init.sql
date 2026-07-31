@@ -768,6 +768,30 @@ CREATE UNIQUE INDEX wiki_proposals_wiki_topic_live_idx
   ON wiki_proposals (COALESCE(wiki_name, bot_name), topic_key) WHERE status IN ('draft', 'approved');
 
 -- ============================================================================
+-- Source-drafter attempt ledger: why a captured doc has no wiki page.
+-- One row per (bot, collection, doc), latest attempt wins. Mirrors
+-- db/migrations/068-source-draft-attempts.sql: identical columns + constraints
+-- + index, or schema-drift.test.ts reds.
+-- ============================================================================
+CREATE TABLE source_draft_attempts (
+  bot_name       TEXT NOT NULL,
+  collection     TEXT NOT NULL,
+  doc_id         TEXT NOT NULL,
+  outcome        TEXT NOT NULL,           -- drafted | covered | skipped | error
+  degraded       BOOLEAN NOT NULL DEFAULT FALSE,
+  reason         TEXT,
+  title          TEXT,
+  colliding_path TEXT,                    -- existing page that blocked the draft
+  proposal_id    UUID,                    -- set on `drafted` (deliberately no FK)
+  trigger_source TEXT NOT NULL DEFAULT 'capture',  -- capture | run-now | backlog | doc
+  attempted_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (bot_name, collection, doc_id)
+);
+
+CREATE INDEX idx_source_draft_attempts_attempted_at
+  ON source_draft_attempts (attempted_at DESC);
+
+-- ============================================================================
 -- Schema migrations: tracks which migrations have been applied
 -- ============================================================================
 CREATE TABLE schema_migrations (

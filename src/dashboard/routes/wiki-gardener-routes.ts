@@ -78,6 +78,14 @@ import {
   getWatcherSnapshot,
   setWatcherSnapshot,
 } from "../../db/watchers.ts";
+import {
+  getSourceDraftAttempts,
+  deleteSourceDraftAttempt,
+  deleteSourceDraftAttemptForProposal,
+  type SourceDraftAttempt,
+  type SourceDraftAttemptOutcome,
+  type SourceDraftTrigger,
+} from "../../db/source-draft-attempts.ts";
 import { loadConfig } from "../../config.ts";
 import { Tracer } from "../../tracing/index.ts";
 import { getLog } from "../../logging.ts";
@@ -85,6 +93,18 @@ import { getLog } from "../../logging.ts";
 const log = getLog("dashboard", "wiki-gardener");
 
 const KNOWLEDGE_API_URL = process.env.KNOWLEDGE_API_URL ?? "http://localhost:8321";
+
+/**
+ * Cap on a client-supplied source-page title (the row's rename retry) — a sanity
+ * bound on a field that reaches a model prompt, generous for a real encyclopedic
+ * title. Explicitly NOT a security boundary: the value is operator-typed on an
+ * auth-less loopback dashboard and 120 chars is ample for a sentence of
+ * instructions, so the cap and `sanitizeTitleOverride` (whitespace + quotes) buy
+ * containment of accidents, not defence against a hostile author. The real
+ * containment is downstream — the draft is shape-gated, contained, and lands in a
+ * human review gate that writes nothing on its own.
+ */
+export const SOURCE_DRAFT_TITLE_MAX = 120;
 
 /** Bot configs are static until restart — discover once and memoize (see wiki-routes.ts). */
 let cachedBots: BotConfig[] | null = null;
@@ -463,6 +483,58 @@ export interface BacklogDocRow {
   bucket: BacklogBucket;
   date?: string;
   url?: string;
+  /**
+   * The source drafter's LAST attempt on this doc, when one was recorded. Absent
+   * means "never attempted" — which, before the ledger existed, was also what an
+   * attempt that ended in `covered`/`skipped`/`error` looked like from here.
+   */
+  draft?: BacklogDocDraftAttempt;
+}
+
+/** The wire shape of a recorded drafter attempt on a backlog row. */
+export interface BacklogDocDraftAttempt {
+  outcome: SourceDraftAttemptOutcome;
+  /** The skip burned model calls (as opposed to a cheap deterministic guard). */
+  degraded: boolean;
+  reason?: string;
+  /** The drafted title, or the page that owns the colliding stem. */
+  title?: string;
+  /** Wiki-relative path of the page that blocked the draft — the row's deep link. */
+  collidingPath?: string;
+  /** The resulting `wiki_proposals` row, on a `drafted` outcome. */
+  proposalId?: string;
+  trigger: SourceDraftTrigger;
+  /** Epoch ms of the attempt. */
+  at: number;
+}
+
+/**
+ * Decorate doc rows with the bot's recorded drafter attempts (pure). Rows with no
+ * attempt are returned untouched, so a missing migration / degraded read (an empty
+ * map) renders exactly the pre-ledger payload rather than an error.
+ */
+export function attachDraftAttempts(
+  docs: BacklogDocRow[],
+  attempts: Map<string, SourceDraftAttempt>,
+): BacklogDocRow[] {
+  if (attempts.size === 0) return docs;
+  return docs.map((d) => {
+    const a = attempts.get(`${d.collection}/${d.id}`);
+    if (!a) return d;
+    return {
+      ...d,
+      draft: {
+        outcome: a.outcome,
+        degraded: a.degraded,
+        ...(a.reason ? { reason: a.reason } : {}),
+        ...(a.title ? { title: a.title } : {}),
+        ...(a.collidingPath ? { collidingPath: a.collidingPath } : {}),
+        ...(a.proposalId ? { proposalId: a.proposalId } : {}),
+        trigger: a.trigger,
+        at: a.attemptedAt,
+      },
+    };
+  });
 }
 
 /**
@@ -1246,7 +1318,17 @@ export function registerWikiGardenerRoutes(
           watcher: watcherInfo,
           progress: getBacklogProgress(bot.name),
           interrupted,
-          ...(wantDocs ? { docs: sortBacklogDocsNewestFirst(docs) } : {}),
+          // Attempt ledger joined on the opt-in docs path only — the 3s poll must not
+          // pay for a table read, and a degraded read returns an empty map, which
+          // `attachDraftAttempts` renders as the untouched pre-ledger payload.
+          ...(wantDocs
+            ? {
+                docs: attachDraftAttempts(
+                  sortBacklogDocsNewestFirst(docs),
+                  await getSourceDraftAttempts(bot.name),
+                ),
+              }
+            : {}),
         }),
       );
     } catch (err) {
@@ -1624,6 +1706,9 @@ export function registerWikiGardenerRoutes(
       };
       await pruneKeyFrom(WIKI_GARDENER_OFFERED_KEY, readOffered);
       await pruneKeyFrom(WIKI_GARDENER_DISMISSED_KEY, readDismissed);
+      // Same rule for the attempt ledger: the doc is gone, and a re-capture under the
+      // same id must not inherit a months-old skip reason.
+      await deleteSourceDraftAttempt(target.bot.name, collection, id);
       return res;
     });
     if (run === null) return c.json({ error: "a gardener run is in flight" }, 409);
@@ -1812,6 +1897,80 @@ export function registerWikiGardenerRoutes(
     }
   });
 
+  // Per-doc source drafter — the backlog row's "draft" / "rename & draft" retry.
+  //
+  // The batch routes above pick their own docs (newest / oldest-first over the whole
+  // uncovered queue), which is the wrong tool for "this specific row didn't get a
+  // page, run it again". `title` is the rename affordance: the drafter uses it
+  // verbatim and, because a human chose it, forgoes the collision retry whose SKIP
+  // branch is what dropped the doc in the first place.
+  //
+  // Same guards as its siblings: gardener-enabled, known collection, per-bot mutex
+  // (409, never queue behind a drain). Always awaits the one-shot — a deliberate
+  // single-doc action — and reports the outcome the ledger just recorded.
+  app.post("/api/wiki/gardener/source-draft-doc", async (c) => {
+    const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
+    if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status);
+    const { bot, root } = resolved;
+
+    if (bot.gardener?.enabled === false) {
+      return c.json({ error: "the wiki gardener is disabled for this bot" }, 400);
+    }
+
+    let body: { collection?: unknown; id?: unknown; title?: unknown };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "invalid JSON body" }, 400);
+    }
+    const collection = typeof body.collection === "string" ? body.collection : "";
+    const id = typeof body.id === "string" ? body.id : "";
+    if (!collection || !id) return c.json({ error: "collection and id are required" }, 400);
+    if (!SUMMARY_SOURCES.some((s) => s.collection === collection)) {
+      return c.json({ error: `unknown summary collection "${collection}"` }, 400);
+    }
+    const title = typeof body.title === "string" ? body.title.trim() : "";
+    if (title.length > SOURCE_DRAFT_TITLE_MAX) {
+      return c.json({ error: `title exceeds ${SOURCE_DRAFT_TITLE_MAX} characters` }, 400);
+    }
+
+    // Deliberately NO dismissed-set exclusion here (unlike all four selection seams):
+    // this route drafts the doc the human just pointed at, and the row's own dismiss
+    // button is right beside it. A dismissal suppresses AUTOMATIC selection, not an
+    // explicit click.
+    const deps = defaultSourceBacklogDeps(bot, root, KNOWLEDGE_API_URL, "doc");
+    const run = runExclusive(bot.name, () =>
+      draftOneBacklogDoc({ collection, id, url: "" }, deps, title || undefined),
+    );
+    if (run === null) {
+      return c.json({ error: "a gardener run is already in flight for this bot" }, 409);
+    }
+
+    try {
+      const result = await run;
+      log.info("Source-draft one doc for {bot} ({collection}/{id}): {outcome}", {
+        bot: bot.name,
+        collection,
+        id,
+        outcome: result.outcome,
+        ...(title ? { title } : {}),
+      });
+      // Same status contract as `source-draft-run` (its single-doc sibling): a failed
+      // draft is a 500, so a caller reading `res.ok` can't record it as a success.
+      // `covered`/`skipped` stay 200 — they are answers, not failures.
+      return c.json(result, result.outcome === "error" ? 500 : 200);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log.error("Source-draft one doc failed for {bot} ({collection}/{id}): {error}", {
+        bot: bot.name,
+        collection,
+        id,
+        error: message,
+      });
+      return c.json({ error: message }, 500);
+    }
+  });
+
   // Approve → CAS draft→approved, run the apply step, flip to applied|stale|error.
   // A row already in `approved` is re-runnable (recovery for a crash between the
   // approve CAS and the terminal CAS — apply itself is re-run safe).
@@ -1903,6 +2062,13 @@ export function registerWikiGardenerRoutes(
     if (!rejected) {
       return c.json({ error: "proposal is no longer a draft", status: existing.status }, 409);
     }
+    // The doc returns to the backlog uncovered, so THIS proposal's attempt row must
+    // stop saying "drafted" — it would point at a gate entry the reject just removed.
+    // Keyed on the proposal id, never on its `source_docs`: a concept proposal lists
+    // every member doc, and a doc-keyed delete would blank the "why" line for members
+    // whose own source draft is still live in the gate. Best-effort — a ledger
+    // cleanup must never turn a successful reject into a failure.
+    await deleteSourceDraftAttemptForProposal(id);
     return c.json({ outcome: "rejected" });
   });
 }

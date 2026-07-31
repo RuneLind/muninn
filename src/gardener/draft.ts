@@ -294,6 +294,32 @@ export function appendPendingIngestionCallout(
  * when there's no terminated frontmatter fence (defensive; the shape-gate guarantees
  * one on the runner path).
  */
+/**
+ * Replace the frontmatter `title:` with `title` (sibling of {@link pinFrontmatterUrl},
+ * same fence-tolerant shape). Used only when a human-chosen title override matched
+ * the drafted one modulo typography/case: the editor's spelling wins the filename,
+ * so the frontmatter has to agree or the page's title and its stem disagree.
+ *
+ * Unlike the url pin this does NOT insert a missing key — a draft with no `title:`
+ * never reaches here (the no-title guard returns first), and inventing one would
+ * paper over exactly the malformed-reply case that guard exists to catch.
+ */
+export function pinFrontmatterTitle(draft: string, title: string): string {
+  if (!draft.startsWith("---")) return draft;
+  const fenceEnd = draft.indexOf("\n---", 3);
+  if (fenceEnd === -1) return draft;
+
+  const head = draft.slice(0, fenceEnd);
+  const rest = draft.slice(fenceEnd);
+  let replaced = false;
+  const out = head.split("\n").map((line) => {
+    if (replaced || !/^title:\s*/.test(line)) return line;
+    replaced = true;
+    return `title: ${title}`;
+  });
+  return out.join("\n") + rest;
+}
+
 export function pinFrontmatterUrl(draft: string, url: string): string {
   if (!draft.startsWith("---")) return draft;
   const fenceEnd = draft.indexOf("\n---", 3);

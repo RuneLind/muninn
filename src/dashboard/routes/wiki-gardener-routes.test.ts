@@ -9,6 +9,7 @@ import {
   computeBacklogFloorCounts,
   backlogDocLabel,
   sortBacklogDocsNewestFirst,
+  attachDraftAttempts,
   getIngestBacklogCached,
   invalidateIngestBacklogCache,
   mergeBacklogLiveFields,
@@ -612,6 +613,46 @@ describe("backlogDocLabel + sortBacklogDocsNewestFirst — inspector row shaping
     const sorted = sortBacklogDocsNewestFirst(docs);
     expect(sorted.map((d) => d.id)).toEqual(["a", "b", "u"]);
     expect(docs.map((d) => d.id)).toEqual(["b", "u", "a"]); // copy, not in place
+  });
+});
+
+describe("attachDraftAttempts — the drafter's last outcome on a row", () => {
+  const docs = [
+    { collection: "x-articles", id: "ai/general/First, the graph itself.md", label: "First, the graph itself", bucket: "drainable" as const },
+    { collection: "x-articles", id: "never-attempted.md", label: "never-attempted", bucket: "fresh" as const },
+  ];
+  const attempt = {
+    collection: "x-articles",
+    docId: "ai/general/First, the graph itself.md",
+    outcome: "skipped" as const,
+    degraded: false,
+    reason: 'drafter judged the existing page "Graph Engineering" already covers this doc',
+    title: "Graph Engineering",
+    collidingPath: "concepts/Graph Engineering.md",
+    proposalId: null,
+    trigger: "capture" as const,
+    attemptedAt: 1_700_000_000_000,
+  };
+
+  test("joins by <collection>/<id> and leaves un-attempted rows untouched", () => {
+    const out = attachDraftAttempts(docs, new Map([[`${attempt.collection}/${attempt.docId}`, attempt]]));
+    expect(out[0]!.draft?.outcome).toBe("skipped");
+    expect(out[0]!.draft?.collidingPath).toBe("concepts/Graph Engineering.md");
+    expect(out[0]!.draft?.at).toBe(1_700_000_000_000);
+    // Absent means "never attempted" — the one honest reading of no row.
+    expect(out[1]!.draft).toBeUndefined();
+  });
+
+  test("an empty map (missing migration / degraded read) returns the rows unchanged", () => {
+    const out = attachDraftAttempts(docs, new Map());
+    expect(out).toBe(docs); // same reference — the pre-ledger payload, byte for byte
+  });
+
+  test("null columns are omitted rather than emitted as nulls", () => {
+    const out = attachDraftAttempts(docs.slice(0, 1), new Map([
+      [`${attempt.collection}/${attempt.docId}`, { ...attempt, reason: null, title: null, collidingPath: null }],
+    ]));
+    expect(out[0]!.draft).toEqual({ outcome: "skipped", degraded: false, trigger: "capture", at: 1_700_000_000_000 });
   });
 });
 
@@ -1447,5 +1488,104 @@ describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
     const body = (await res.json()) as { status: string; error?: string };
     expect(body.status).toBe("unknown");
     expect(body.error).toBeDefined();
+  });
+});
+
+// Every guard that fires BEFORE any huginn/model I/O, so the whole set is testable
+// without a real one-shot. The post-guard body (fetch → draft → ledger) is covered by
+// `source-drafter.test.ts` + `source-drafter-run.test.ts`; what regressed silently
+// before this block existed was the route's own gating.
+describe("POST /api/wiki/gardener/source-draft-doc — pre-I/O guards", () => {
+  let root: string;
+  let app: Hono;
+  let gardenerEnabled: boolean;
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-draft-doc-route-"));
+    await Bun.write(path.join(root, "notes.md"), "# Notes\n");
+    gardenerEnabled = true;
+    __setBotsForTest([
+      {
+        name: "draftbot",
+        dir: root,
+        persona: "",
+        telegramAllowedUserIds: [],
+        slackAllowedUserIds: [],
+        wikiDir: root,
+        get gardener() {
+          return { enabled: gardenerEnabled };
+        },
+      },
+    ] as unknown as Parameters<typeof __setBotsForTest>[0]);
+    __setWikiRegistryForTest([{ name: "draftbot", root, source: "bot" }]);
+    __resetWikiCacheForTest();
+    __resetIngestBacklogCacheForTest();
+    __resetGardenerMutexForTest();
+
+    app = new Hono();
+    registerWikiGardenerRoutes(app, {
+      getConsumed: async () => new Set<string>(),
+      getPending: async () => new Set<string>(),
+      getWikiGardenerWatcher: async () => null,
+      getSnapshot: async () => null,
+      setSnapshot: async () => {},
+      listProposals: async () => [],
+    });
+  });
+
+  afterEach(async () => {
+    __setBotsForTest(null);
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    __resetIngestBacklogCacheForTest();
+    __resetGardenerMutexForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const post = async (body: unknown, query = "wiki=draftbot"): Promise<Response> =>
+    await app.request(`/api/wiki/gardener/source-draft-doc?${query}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+
+  test("unknown bot → 404, before any work", async () => {
+    expect((await post({ collection: "x-articles", id: "a.md" }, "wiki=nobody")).status).toBe(404);
+  });
+
+  test("gardener disabled → 400 (the route must not run what the UI hides)", async () => {
+    gardenerEnabled = false;
+    const res = await post({ collection: "x-articles", id: "a.md" });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("disabled");
+  });
+
+  test("malformed / incomplete body → 400", async () => {
+    expect((await post(undefined)).status).toBe(400); // no body at all
+    expect((await post({ id: "a.md" })).status).toBe(400);
+    expect((await post({ collection: "x-articles" })).status).toBe(400);
+    expect((await post({ collection: "x-articles", id: 42 })).status).toBe(400);
+  });
+
+  test("unknown collection → 400 (never a huginn fetch for a made-up name)", async () => {
+    const res = await post({ collection: "not-a-collection", id: "a.md" });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("unknown summary collection");
+  });
+
+  test("an over-length title → 400 naming the cap, before a model call is spent", async () => {
+    const res = await post({ collection: "x-articles", id: "a.md", title: "x".repeat(121) });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("120");
+  });
+
+  test("409 while a gardener run holds the per-bot mutex — never a second model run", async () => {
+    let release = (): void => {};
+    const held = runExclusive("draftbot", () => new Promise<void>((r) => (release = r)));
+    expect(held).not.toBeNull();
+    const res = await post({ collection: "x-articles", id: "a.md" });
+    expect(res.status).toBe(409);
+    release();
+    await held;
   });
 });

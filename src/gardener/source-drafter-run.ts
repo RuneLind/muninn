@@ -28,6 +28,11 @@ import {
   DEFAULT_COVERAGE_DEPS,
   type CoverageDeps,
 } from "../db/wiki-proposals.ts";
+import {
+  recordSourceDraftAttempt,
+  type SourceDraftAttemptOutcome,
+  type SourceDraftTrigger,
+} from "../db/source-draft-attempts.ts";
 import { loadConfig } from "../config.ts";
 import { docDateMs } from "./harvest.ts";
 import { todayOslo } from "./util.ts";
@@ -71,15 +76,23 @@ function firstHttpUrl(...candidates: (string | undefined)[]): string {
  * be the bot's resolved wiki root. Every seam is either injected or reads the env
  * knowledge API directly, so this path takes no `apiUrl` — the run-now entry point
  * does its own huginn fetches with one.
+ *
+ * Every drafter entry point that reaches the MODEL funnels through here, so it is
+ * where the attempt is recorded ({@link recordSourceDraftAttempt}). Three of the
+ * four outcomes persist nothing else, and the backlog row's whole diagnosis comes
+ * from that ledger — a caller that drafts around this function is invisible again.
+ * The pre-model guards that return before it ({@link draftOneBacklogDoc}) record
+ * through the `recordAttempt` seam instead.
  */
 export async function runSourceDraftForInput(
   botConfig: BotConfig,
   wikiDir: string,
   input: SourceDraftInput,
+  trigger: SourceDraftTrigger = "capture",
 ): Promise<SourceDraftOutcome> {
   const config = loadConfig();
   const index = await getWikiIndex({ root: wikiDir });
-  return draftSourcePage({
+  const outcome = await draftSourcePage({
     botName: botConfig.name,
     wikiDir,
     input,
@@ -101,6 +114,26 @@ export async function runSourceDraftForInput(
       return res.result;
     },
   });
+
+  await recordSourceDraftAttempt({
+    botName: botConfig.name,
+    collection: input.collection,
+    docId: input.docId,
+    outcome: outcome.outcome,
+    degraded: outcome.outcome === "skipped" && outcome.degraded === true,
+    reason: "reason" in outcome ? outcome.reason : null,
+    title: outcome.outcome === "drafted" ? outcome.title : (collidingTitle(outcome) ?? null),
+    collidingPath: outcome.outcome === "skipped" ? (outcome.collidingPage?.relPath ?? null) : null,
+    proposalId: outcome.outcome === "drafted" ? outcome.proposalId : null,
+    trigger,
+  });
+
+  return outcome;
+}
+
+/** The blocking page's title on a collision skip — the row's "covered by" label. */
+function collidingTitle(outcome: SourceDraftOutcome): string | undefined {
+  return outcome.outcome === "skipped" ? outcome.collidingPage?.title : undefined;
 }
 
 /**
@@ -152,6 +185,28 @@ export async function runSourceDraftForNewest(
       (docDateMs({ id: a.id, date: a.date }) ?? Number.NEGATIVE_INFINITY),
   )[0]!;
 
+  // The DOC-SCOPED guards below record too — they name a specific doc, so the row
+  // for that doc must be able to explain itself. The collection-scoped early returns
+  // above (empty / all-dismissed) deliberately don't: they belong to no doc.
+  const preModel = async (
+    outcome: "error" | "skipped",
+    reason: string,
+  ): Promise<SourceDraftOutcome> => {
+    await recordSourceDraftAttempt({
+      botName: botConfig.name,
+      collection,
+      docId: newest.id,
+      outcome,
+      degraded: false, // pre-model by construction
+      reason,
+      title: null,
+      collidingPath: null,
+      proposalId: null,
+      trigger: "run-now",
+    });
+    return { outcome, reason };
+  };
+
   let doc: RawFetchedDoc | null;
   try {
     doc = await fetchKnowledgeApi(
@@ -160,22 +215,27 @@ export async function runSourceDraftForNewest(
       { timeoutMs: DOC_FETCH_TIMEOUT_MS },
     );
   } catch (err) {
-    return { outcome: "error", reason: `fetching ${collection}/${newest.id} failed: ${errMsg(err)}` };
+    return preModel("error", `fetching ${collection}/${newest.id} failed: ${errMsg(err)}`);
   }
 
   const body = (doc?.text ?? "").trim();
   const url = firstHttpUrl(doc?.metadata?.url, doc?.url, newest.url);
-  if (!body) return { outcome: "skipped", reason: `doc ${collection}/${newest.id} has no body` };
-  if (!url) return { outcome: "skipped", reason: `doc ${collection}/${newest.id} has no public URL` };
+  if (!body) return preModel("skipped", `doc ${collection}/${newest.id} has no body`);
+  if (!url) return preModel("skipped", `doc ${collection}/${newest.id} has no public URL`);
 
   log.info("Source drafter run-now: newest doc {collection}/{id}", { collection, id: newest.id });
-  return runSourceDraftForInput(botConfig, wikiDir, {
-    collection,
-    docId: newest.id,
-    url,
-    body,
-    category: categoryFromDocId(newest.id),
-  });
+  return runSourceDraftForInput(
+    botConfig,
+    wikiDir,
+    {
+      collection,
+      docId: newest.id,
+      url,
+      body,
+      category: categoryFromDocId(newest.id),
+    },
+    "run-now",
+  );
 }
 
 // ── Backlog drafter (batched, on-demand over the UNCOVERED tail) ─────────────
@@ -262,6 +322,19 @@ export interface SourceBacklogDeps {
   fetchDoc: (collection: string, id: string) => Promise<RawFetchedDoc | null>;
   /** Draft ONE source page from a fully-formed input (the real model one-shot). */
   draftInput: (input: SourceDraftInput) => Promise<SourceDraftOutcome>;
+  /**
+   * Record a PRE-MODEL outcome in the attempt ledger. `draftInput` records its own,
+   * but {@link draftOneBacklogDoc}'s cheap guards (fetch failed / no body / no public
+   * URL) return BEFORE it — and those are exactly the outcomes a human clicking
+   * "draft" on a row needs explained. Without this seam the row would go back to
+   * showing nothing, which is the invisibility this whole surface exists to fix.
+   * Absent ⇒ no ledger write (the unit-test wiring).
+   */
+  recordAttempt?: (
+    collection: string,
+    docId: string,
+    outcome: { outcome: SourceDraftAttemptOutcome; reason: string },
+  ) => Promise<void>;
 }
 
 /**
@@ -273,6 +346,7 @@ export function defaultSourceBacklogDeps(
   botConfig: BotConfig,
   wikiDir: string,
   apiUrl: string = DEFAULT_API_URL,
+  trigger: SourceDraftTrigger = "backlog",
 ): SourceBacklogDeps {
   return {
     listDocs: async (collection) => {
@@ -297,7 +371,20 @@ export function defaultSourceBacklogDeps(
         `/api/document/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`,
         { timeoutMs: DOC_FETCH_TIMEOUT_MS },
       ),
-    draftInput: (input) => runSourceDraftForInput(botConfig, wikiDir, input),
+    draftInput: (input) => runSourceDraftForInput(botConfig, wikiDir, input, trigger),
+    recordAttempt: (collection, docId, outcome) =>
+      recordSourceDraftAttempt({
+        botName: botConfig.name,
+        collection,
+        docId,
+        outcome: outcome.outcome,
+        degraded: false, // pre-model by construction — no work thrown away
+        reason: outcome.reason,
+        title: null,
+        collidingPath: null,
+        proposalId: null,
+        trigger,
+      }),
   };
 }
 
@@ -426,18 +513,29 @@ export async function runSourceDraftBacklog(
 export async function draftOneBacklogDoc(
   doc: QueuedDoc,
   deps: SourceBacklogDeps,
+  titleOverride?: string,
 ): Promise<SourceBacklogDocResult> {
   const base = { collection: doc.collection, docId: doc.id };
+  // These three returns are drafter entry points too — record them, or a row whose
+  // doc can't be fetched shows the same nothing it did before the ledger existed.
+  const preModel = async (
+    outcome: "error" | "skipped",
+    reason: string,
+  ): Promise<SourceBacklogDocResult> => {
+    if (deps.recordAttempt) await deps.recordAttempt(doc.collection, doc.id, { outcome, reason });
+    return { ...base, outcome, reason };
+  };
+
   let fetched: RawFetchedDoc | null;
   try {
     fetched = await deps.fetchDoc(doc.collection, doc.id);
   } catch (err) {
-    return { ...base, outcome: "error", reason: `fetch failed: ${errMsg(err)}` };
+    return preModel("error", `fetch failed: ${errMsg(err)}`);
   }
   const body = (fetched?.text ?? "").trim();
   const url = firstHttpUrl(fetched?.metadata?.url, fetched?.url, doc.url);
-  if (!body) return { ...base, outcome: "skipped", reason: "doc has no body" };
-  if (!url) return { ...base, outcome: "skipped", reason: "doc has no public URL" };
+  if (!body) return preModel("skipped", "doc has no body");
+  if (!url) return preModel("skipped", "doc has no public URL");
 
   let outcome: SourceDraftOutcome;
   try {
@@ -447,11 +545,13 @@ export async function draftOneBacklogDoc(
       url,
       body,
       category: categoryFromDocId(doc.id),
+      ...(titleOverride && titleOverride.trim() ? { titleOverride: titleOverride.trim() } : {}),
     });
   } catch (err) {
     // draftSourcePage never throws, but runSourceDraftForInput's setup (config /
-    // index load) could — contain it so one bad doc can't abort the batch.
-    return { ...base, outcome: "error", reason: errMsg(err) };
+    // index load) could — contain it so one bad doc can't abort the batch. Recorded
+    // here because the throw happened BEFORE the ledger write inside it.
+    return preModel("error", errMsg(err));
   }
   return {
     ...base,

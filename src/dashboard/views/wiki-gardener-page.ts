@@ -220,11 +220,24 @@ export async function renderWikiGardenerPage(opts?: {
     }
     .gard-backlog .bk-inspector-close:hover { color: var(--text-primary); }
     .gard-backlog .bk-inspector-rows { max-height: 420px; overflow-y: auto; }
-    .gard-backlog .bk-doc-row {
-      display: flex; align-items: center; gap: 8px; padding: 4px 0;
-      border-bottom: 1px solid var(--border-primary); font-size: 12px;
+    /* The row's separator moved onto the wrapper so a doc's "why" line sits inside
+       the same block as the row it explains. */
+    .gard-backlog .bk-doc-row-wrap {
+      padding: 4px 0; border-bottom: 1px solid var(--border-primary);
     }
-    .gard-backlog .bk-doc-row:last-child { border-bottom: none; }
+    .gard-backlog .bk-doc-row-wrap:last-child { border-bottom: none; }
+    .gard-backlog .bk-doc-row {
+      display: flex; align-items: center; gap: 8px; font-size: 12px;
+    }
+    /* Why this doc has no page — the drafter's last recorded outcome. */
+    .gard-backlog .bk-doc-why {
+      margin: 3px 0 1px 0; padding-left: 10px; font-size: 11.5px; color: var(--text-muted);
+      border-left: 2px solid var(--border-secondary); line-height: 1.5;
+    }
+    .gard-backlog .bk-doc-why b { color: var(--text-secondary); font-weight: 600; }
+    .gard-backlog .bk-doc-why-warn { border-left-color: var(--status-warning); }
+    .gard-backlog .bk-doc-why-link { color: var(--status-info); text-decoration: none; }
+    .gard-backlog .bk-doc-why-link:hover { text-decoration: underline; }
     .gard-backlog .bk-doc-date { color: var(--text-dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
     .gard-backlog .bk-doc-badge {
       padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border-secondary);

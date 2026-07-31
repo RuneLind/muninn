@@ -5,6 +5,7 @@ import {
   selectSourceBacklogDocs,
   runSourceDraftBacklog,
   runSourceDraftForNewest,
+  draftOneBacklogDoc,
   SOURCE_BACKLOG_DEFAULT_LIMIT,
   SOURCE_BACKLOG_MAX_LIMIT,
   type SourceBacklogDeps,
@@ -396,5 +397,86 @@ describe("runSourceDraftForNewest — the dismissed seam", () => {
     } finally {
       globalThis.fetch = orig;
     }
+  });
+});
+
+// The pre-model guards are drafter entry points too. Without the `recordAttempt`
+// seam they return before `draftInput` (which owns the ledger write), so a row whose
+// doc can't be fetched shows nothing — the exact invisibility the ledger exists to
+// end.
+describe("draftOneBacklogDoc — pre-model outcomes reach the ledger", () => {
+  const recorder = () => {
+    const calls: { id: string; outcome: string; reason: string }[] = [];
+    return {
+      calls,
+      recordAttempt: async (_c: string, id: string, o: { outcome: string; reason: string }) => {
+        calls.push({ id, outcome: o.outcome, reason: o.reason });
+      },
+    };
+  };
+
+  test("a failed doc fetch records an `error` attempt", async () => {
+    const rec = recorder();
+    const { deps } = stubDeps({
+      fetch: async () => {
+        throw new Error("API returned 404");
+      },
+    });
+    const out = await draftOneBacklogDoc({ collection: "x-articles", id: "gone.md", url: "" }, {
+      ...deps,
+      recordAttempt: rec.recordAttempt,
+    });
+    expect(out.outcome).toBe("error");
+    expect(rec.calls).toEqual([
+      { id: "gone.md", outcome: "error", reason: "fetch failed: API returned 404" },
+    ]);
+  });
+
+  test("no body and no public URL each record a `skipped` attempt", async () => {
+    const rec = recorder();
+    const { deps } = stubDeps({ fetch: async () => ({ text: "   ", metadata: {} }) });
+    await draftOneBacklogDoc({ collection: "c", id: "empty.md", url: "" }, { ...deps, recordAttempt: rec.recordAttempt });
+
+    const rec2 = recorder();
+    const { deps: deps2 } = stubDeps({ fetch: async () => ({ text: "a real body", metadata: {} }) });
+    await draftOneBacklogDoc({ collection: "c", id: "nourl.md", url: "" }, { ...deps2, recordAttempt: rec2.recordAttempt });
+
+    expect(rec.calls[0]).toMatchObject({ outcome: "skipped", reason: "doc has no body" });
+    expect(rec2.calls[0]).toMatchObject({ outcome: "skipped", reason: "doc has no public URL" });
+  });
+
+  test("the model path does NOT double-record — draftInput owns that write", async () => {
+    const rec = recorder();
+    const { deps } = stubDeps();
+    const out = await draftOneBacklogDoc({ collection: "c", id: "ok.md", url: "" }, {
+      ...deps,
+      recordAttempt: rec.recordAttempt,
+    });
+    expect(out.outcome).toBe("drafted");
+    expect(rec.calls).toEqual([]);
+  });
+
+  test("an absent seam is a no-op (the pre-ledger unit wiring still works)", async () => {
+    const { deps } = stubDeps({
+      fetch: async () => {
+        throw new Error("boom");
+      },
+    });
+    const out = await draftOneBacklogDoc({ collection: "c", id: "x.md", url: "" }, deps);
+    expect(out.outcome).toBe("error");
+  });
+
+  test("a title override reaches draftInput; a blank one is dropped", async () => {
+    const seen: (string | undefined)[] = [];
+    const { deps } = stubDeps({
+      draft: async (input) => {
+        seen.push(input.titleOverride);
+        return { outcome: "drafted", proposalId: "p", targetPath: "sources/x.mdx", title: "X" };
+      },
+    });
+    await draftOneBacklogDoc({ collection: "c", id: "a.md", url: "" }, deps, "  A Chosen Title  ");
+    await draftOneBacklogDoc({ collection: "c", id: "b.md", url: "" }, deps, "   ");
+    await draftOneBacklogDoc({ collection: "c", id: "c.md", url: "" }, deps);
+    expect(seen).toEqual(["A Chosen Title", undefined, undefined]);
   });
 });

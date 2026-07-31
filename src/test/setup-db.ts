@@ -28,6 +28,7 @@ const ALL_TABLES = [
   "peer_correlation_tokens",
   "dev_run_handoffs",
   "dev_runs",
+  "source_draft_attempts",
 ];
 
 let dbInitialized = false;
