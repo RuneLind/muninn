@@ -441,7 +441,15 @@ export async function listWikiSubtreeDirty(
   const canonicalWiki = await realpath(wikiDirAbs).catch(() => wikiDirAbs);
   // Scope to the wiki subtree; `--porcelain -z` keeps parsing quote-free and
   // includes untracked files by default. Absolute pathspec ⇒ repo-relative output.
-  const r = await git(top, ["status", "--porcelain", "-z", "--", canonicalWiki], true);
+  //
+  // `-uall` is load-bearing, not verbosity. git's DEFAULT (`-unormal`) collapses a
+  // wholly-untracked directory into ONE entry naming the directory — `?? wiki/newdir/`
+  // — never its files. Every consumer here wants files: `wikiDirtyStat`'s badge would
+  // count a 30-page drop as "uncommitted changes: 1", and `buildWikiGitDates` looks
+  // the set up by page relPath, so those 30 pages would come back neither
+  // git-dated NOR dirty and trip the index build's coverage warn. The sweeper
+  // stages either spelling equally well, so this only ever makes callers more precise.
+  const r = await git(top, ["status", "--porcelain", "-z", "-uall", "--", canonicalWiki], true);
   if (r.code !== 0) {
     log.warn("Wiki sweep: git status failed in {top}: {error}", { top, error: r.stderr });
     return { dirty: [], deletions: [] };

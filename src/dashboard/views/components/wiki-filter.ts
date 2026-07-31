@@ -44,9 +44,19 @@ export interface WikiListing {
    *  the filesystem doesn't track it. */
   birthtimeMs?: number;
   /** Creation time from git (epoch ms) — the commit that first introduced the page,
-   *  rename-aware. The DURABLE "Recently added" signal (see `src/wiki/git-created.ts`).
-   *  Absent for a non-git or untracked page. */
+   *  rename-aware. The DURABLE "Recently added" signal (see `src/wiki/git-dates.ts`).
+   *  Absent for a non-git or untracked page — which also makes its PRESENCE the
+   *  "git knows this page" test `updatedSignal` gates the mtime rule on. */
   gitCreatedMs?: number;
+  /** Last-update time from git (epoch ms) — the newest NON-SWEEP commit to touch the
+   *  page, rename-aware. The DURABLE "Recently updated" signal: a mass edit moves
+   *  every mtime but contributes no touch date at all. Absent for a non-git or
+   *  untracked page, and for a page whose every commit was a sweep. */
+  gitTouchedMs?: number;
+  /** True when git reports the file dirty (modified / untracked). The one condition
+   *  under which `mtimeMs` still carries information rather than being a checkout or
+   *  sweep artifact. Absent (never `false`) otherwise. */
+  gitDirty?: boolean;
   /**
    * Plan lifecycle state, from the frontmatter key `plan_status` — NOT the bare
    * `status`, which melosys-kode-wiki already uses for an unrelated vocabulary.
@@ -243,38 +253,95 @@ export function pageFolder(p: WikiListing): string {
 }
 
 /**
- * Recency of a page in epoch ms — the sort key behind "Recently updated".
+ * The winning "Recently updated" signal for a page: its epoch ms and the label that
+ * explains it. **Newest of every TRUSTWORTHY signal wins** — the mirror image of
+ * `addedSignal`'s min, for the mirror-image reason: corruption moves a creation date
+ * forward and so the oldest claim survives, while an update date is genuinely a "most
+ * recent" question and the work is in deciding which signals get to answer it.
  *
- * The larger of the file's mtime and its frontmatter `updated`/`created` date.
- * Frontmatter-only ranking left wikis that carry no frontmatter (mimir,
- * melosys-kode-wiki) permanently undated at the bottom of the list; mtime-only
- * ranking would regress a wiki whose files were re-checked-out (mtime resets,
- * frontmatter doesn't). Taking the max keeps whichever signal claims the page was
- * touched more recently. 0 when a page has neither.
+ * mtime is the contested one. In a git-managed wiki a clean file's mtime is a
+ * checkout or sweep artifact — mimir's 2026-07-31 backfill made all 148 plans report
+ * as edited that minute, which is true of the sweep and useless about the pages. But
+ * mtime cannot simply be dropped: a page edited RIGHT NOW has no new commit, and its
+ * mtime is the only evidence it has. So mtime is trusted exactly when git says the
+ * file is DIRTY — which is precisely the case where history doesn't know yet.
+ *
+ * Three regimes, and the discriminator is `gitCreatedMs`:
+ *
+ *  - **No git at all** (non-repo wiki, walk failed/timed out): no page carries
+ *    `gitCreatedMs`, and this degrades to max(mtime, frontmatter) — byte-identical
+ *    to the pre-sweep-awareness behavior.
+ *  - **Git-tracked page:** frontmatter, the non-sweep touch date, and mtime-if-dirty
+ *    compete; `gitCreatedMs` joins as a FLOOR so a page whose every commit was a
+ *    sweep (19 of mimir's 151 plans) falls back to its creation date rather than
+ *    sorting as undated. The floor can never win over a real touch — creation
+ *    precedes every touch by construction.
+ *  - **Untracked page** (a draft never committed): no `gitCreatedMs`, so mtime is
+ *    trusted unconditionally and the page sorts to the top, where it belongs.
+ *
+ * Sort key and label come from ONE function so the list always shows the date it
+ * actually sorted on. A frontmatter date is echoed verbatim (it was authored as a
+ * plain day; re-deriving it from the parsed UTC instant would shift it in
+ * negative-offset timezones), while git dates and mtime are wall-clock instants and
+ * so render as LOCAL days — `toISOString()` would label a 00:30 edit in UTC+2 as the
+ * previous day, the same drift `computeWikiFreshness` avoids for `log.md`.
  */
-export function pageTimeMs(p: WikiListing): number {
+function updatedSignal(p: WikiListing): { ms: number; label: string; kind: WikiDateKind } {
   const fm = p.updated || p.created || "";
   const fmMs = fm ? Date.parse(fm) : NaN;
-  return Math.max(p.mtimeMs || 0, Number.isNaN(fmMs) ? 0 : fmMs);
+  let best = { ms: 0, label: "", kind: "updated" as WikiDateKind };
+  // Strictly greater, so the FIRST signal considered wins a tie — frontmatter, which
+  // is the authored spelling and the one worth showing.
+  const consider = (ms: number, label: string, kind: WikiDateKind = "updated") => {
+    if (!Number.isFinite(ms) || ms <= 0) return;
+    if (ms > best.ms) best = { ms, label, kind };
+  };
+  const day = (ms: number) => localDay(new Date(ms));
+  if (Number.isFinite(fmMs)) consider(fmMs, fm);
+  if (p.gitCreatedMs) {
+    if (p.gitTouchedMs) consider(p.gitTouchedMs, day(p.gitTouchedMs));
+    if (p.gitDirty && p.mtimeMs) consider(p.mtimeMs, day(p.mtimeMs));
+    // The floor, and the ONE branch that isn't an update: this page has never been
+    // touched outside a sweep, so the honest word for its date is "added".
+    consider(p.gitCreatedMs, day(p.gitCreatedMs), "added");
+  } else if (p.mtimeMs) {
+    consider(p.mtimeMs, day(p.mtimeMs));
+  }
+  return best;
+}
+
+/**
+ * Which question a page's recency date actually answers. `"added"` only for the
+ * creation-date fallback — a page whose every commit was a sweep, so nothing is known
+ * about when it was last *edited*. That is 19 of mimir's 151 plans but **734 of
+ * jarvis's 952 pages (77%)**, which are bulk-ingested and never edited again: at that
+ * scale a header reading "updated <creation date>" is a claim the data does not
+ * support, so the caller must render the word from this, not assume it.
+ */
+export type WikiDateKind = "updated" | "added";
+
+/** The word that honestly describes `pageDateLabel(p)` for this page. See
+ *  `WikiDateKind`. */
+export function pageDateKind(p: WikiListing): WikiDateKind {
+  return updatedSignal(p).kind;
+}
+
+/**
+ * Recency of a page in epoch ms — the sort key behind "Recently updated". 0 when a
+ * page has no usable signal at all. See `updatedSignal` for which signals count and
+ * why mtime is conditional.
+ */
+export function pageTimeMs(p: WikiListing): number {
+  return updatedSignal(p).ms;
 }
 
 /**
  * `YYYY-MM-DD` for `pageTimeMs` — what the list shows next to a page when it is
- * sorted by recency, so the visible date always explains the ordering.
- *
- * A frontmatter date is echoed back verbatim (it was authored as a plain day, and
- * re-deriving it from the parsed UTC instant would shift it in negative-offset
- * timezones). An mtime is a wall-clock instant, so it renders as a LOCAL day —
- * `toISOString()` would label a 00:30 edit in UTC+2 as the previous day, which is
- * exactly the drift `computeWikiFreshness` avoids for `log.md`.
+ * sorted by recency, so the visible date always explains the ordering. Derived from
+ * the same `updatedSignal` as the sort key, so the two cannot drift apart.
  */
 export function pageDateLabel(p: WikiListing): string {
-  const fm = p.updated || p.created || "";
-  const fmMs = fm ? Date.parse(fm) : NaN;
-  const fmValid = !Number.isNaN(fmMs);
-  if (fmValid && fmMs >= (p.mtimeMs || 0)) return fm;
-  if (!p.mtimeMs) return fmValid ? fm : "";
-  return localDay(new Date(p.mtimeMs));
+  return updatedSignal(p).label;
 }
 
 /**

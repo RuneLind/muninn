@@ -16,7 +16,7 @@ import { stat } from "node:fs/promises";
 import { getLog } from "../logging.ts";
 import { sanitizeColorToken } from "../dashboard/views/components/wiki-filter.ts";
 import { COMPONENT_TAG_SOURCE } from "../format/markdown-ast.ts";
-import { buildGitCreatedMap } from "./git-created.ts";
+import { buildWikiGitDates } from "./git-dates.ts";
 
 const log = getLog("wiki", "store");
 
@@ -125,6 +125,19 @@ function stripTrailingComment(raw: string): string {
 /** How many offending relPaths the aggregated warn names before collapsing the
  *  rest into a "+N more" count (precedent: the gardener's `evictedTopics`). */
 const PLAN_DROP_SAMPLE_CAP = 5;
+
+/**
+ * What fraction of a wiki's pages may be missing from git history — while ALSO not
+ * being dirty, i.e. with no innocent explanation — before the index build warns that
+ * the git date walk has probably stopped matching `relPath`.
+ *
+ * 10%. Measured across all four registered wikis at build time: mimir 0/387, jarvis
+ * 0/952, capra 0/70, huginn-nav 0/540 — the healthy state is exactly zero, so the
+ * headroom is entirely for gitignored-but-indexed pages, not for normal churn. The
+ * bug this is sized against (a `core.quotePath` regression) dropped 32% of
+ * huginn-nav.
+ */
+const GIT_DATE_MISS_WARN_RATE = 0.1;
 
 /**
  * Per-index-build tally of frontmatter values REJECTED by the plan-status
@@ -268,11 +281,34 @@ export interface WikiPageMeta {
    * rename-aware. The durable "Recently added" signal: unlike `birthtimeMs` it
    * survives a `git mv`, a re-clone, and a sweep that rewrites files via
    * temp-file+rename (all three reset birthtime for every file they touch — see
-   * `src/wiki/git-created.ts`). Undefined when the wiki isn't in a git repo, git is
+   * `src/wiki/git-dates.ts`). Undefined when the wiki isn't in a git repo, git is
    * unavailable, the walk timed out, or the page is untracked (a brand-new file has
    * no history yet — its birthtime is honest, so nothing is lost).
+   *
+   * Doubles as the **"git knows this page"** discriminator for the update signal:
+   * its presence is what tells `pageTimeMs` that this page's mtime is a checkout
+   * artifact rather than its only evidence. Safe because both maps come from one
+   * walk and `created` is a superset of `touched` by construction.
    */
   gitCreatedMs?: number;
+  /**
+   * Last-update time from GIT (epoch ms) — the most recent NON-SWEEP commit to touch
+   * this path, rename-aware. The durable "Recently updated" signal: unlike `mtimeMs`
+   * it is not moved by a mass edit, which is why mimir's 2026-07-31 backfill made all
+   * 148 plans read as edited today. Undefined on the same degrade paths as
+   * `gitCreatedMs`, PLUS the real case of a page every one of whose commits was a
+   * sweep (19 of mimir's 151 plans) — which `pageTimeMs` folds back onto the creation
+   * date rather than treating as undated. See `src/wiki/git-dates.ts`.
+   */
+  gitTouchedMs?: number;
+  /**
+   * True when `git status` reports this page dirty (modified / untracked) — the ONLY
+   * condition under which its mtime still means something. A clean file's mtime is a
+   * checkout or sweep artifact; a dirty file's mtime is an edit git hasn't recorded
+   * yet, and is the one signal a purely history-based ranking would lose. Absent
+   * (never `false`) otherwise, including on every degrade path.
+   */
+  gitDirty?: boolean;
   /**
    * Publication date (`YYYY-MM-DD`) parsed from the body's `Source: …, YYYY-MM-DD`
    * line — the day the referenced source was published (distinct from the
@@ -1021,10 +1057,11 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
   /** Per-page resolved relative-markdown-link targets (normalized relPaths). */
   const rawMdTargets = new Map<string, string[]>();
 
-  // Git creation dates — ONE subprocess per index build (inheriting the 5-min TTL),
-  // kicked off here so it overlaps the ~700-file read pass below instead of adding
-  // its latency to it. Never rejects; null ⇒ pages keep only frontmatter+birthtime.
-  const gitCreatedPromise = buildGitCreatedMap(root);
+  // Git date signals — ONE `git log` walk (plus a cheap concurrent `git status`) per
+  // index build, inheriting the 5-min TTL, kicked off here so it overlaps the
+  // ~700-file read pass below instead of adding its latency to it. Never rejects;
+  // null ⇒ pages keep exactly the pre-existing frontmatter+mtime+birthtime behavior.
+  const gitDatesPromise = buildWikiGitDates(root);
 
   const register = (key: string, meta: WikiPageMeta) => {
     const k = key.toLowerCase();
@@ -1096,42 +1133,78 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
     }),
   );
 
-  // Stamp git creation dates. Done as a post-pass rather than inside the concurrent
+  // Stamp git date signals. Done as a post-pass rather than inside the concurrent
   // read above so the walk overlaps ALL the file reads rather than blocking the
   // first one; keyed on the raw relPath, which is exactly what the walk emits
   // (posix, wiki-relative) — no normalization, so a case-only difference simply
-  // misses and the page keeps its birthtime.
-  const gitCreated = await gitCreatedPromise;
-  if (gitCreated) {
-    let hits = 0;
+  // misses and the page keeps its filesystem timestamps.
+  const gitDates = await gitDatesPromise;
+  if (gitDates) {
+    let createdHits = 0;
+    let touchedHits = 0;
+    let unexplained = 0;
     for (const meta of pages) {
-      const ms = gitCreated.get(meta.relPath);
-      if (ms !== undefined) {
-        meta.gitCreatedMs = ms;
-        hits++;
+      const c = gitDates.created.get(meta.relPath);
+      if (c !== undefined) {
+        meta.gitCreatedMs = c;
+        createdHits++;
       }
+      const t = gitDates.touched.get(meta.relPath);
+      if (t !== undefined) {
+        meta.gitTouchedMs = t;
+        touchedHits++;
+      }
+      if (gitDates.dirty.has(meta.relPath)) meta.gitDirty = true;
+      // A page git has never heard of is either genuinely new — and then the DIRTY
+      // probe knows it, since `git status` lists untracked files — or the walk's keys
+      // stopped lining up with `relPath`. Only the second is a bug, and pairing the
+      // two signals is what separates them.
+      if (c === undefined && !meta.gitDirty) unexplained++;
     }
-    // A partial hit rate is normal and uninteresting (untracked drafts, history
-    // shallower than the files) — debug. But git answering with paths and matching
-    // NOTHING means the walk's keys stopped lining up with `relPath`, which silently
-    // reinstates the sweep-collapse bug while every build still reports success. That
-    // one case earns a warn; it is the only failure mode with no other symptom.
+    // Warn on an unexpected RATE, never on "zero hits". PR A shipped a zero-gated
+    // guard here and it was blind by construction to the bug it was written for: a
+    // `core.quotePath` regression dropped 32% of huginn-nav's pages (every non-ASCII
+    // name) while the ASCII majority kept the hit count comfortably above zero.
+    // Partial loss is the LIKELIER shape whenever the cause is an encoding or
+    // path-spelling rule, so the alarm has to be sized for partial.
     //
-    // Gated on a NON-EMPTY map: a successful walk over a subtree with no tracked pages
-    // (a gitignored wiki dir, or one added but never committed) returns an empty map,
-    // not null, and would otherwise fire this alarm ~288×/day per wiki pointing at a
-    // key-mismatch bug that doesn't exist. `git-created.ts` owns the complementary
-    // warn for "git had paths but none survived the subtree strip".
-    if (gitCreated.size > 0 && hits === 0 && pages.length > 0) {
+    // Gated on a non-empty map: a successful walk over a subtree with no tracked
+    // pages (a gitignored wiki dir, or one added but never committed) returns an
+    // empty map, not null, and would otherwise fire ~288×/day per wiki pointing at a
+    // key-mismatch bug that doesn't exist. `git-dates.ts` owns the complementary warn
+    // for "git had paths but none survived the subtree strip".
+    if (
+      gitDates.created.size > 0 &&
+      pages.length > 0 &&
+      unexplained / pages.length > GIT_DATE_MISS_WARN_RATE
+    ) {
       log.warn(
-        "wiki {root}: git returned history but matched 0 of {total} pages — " +
-          '"Recently added" is falling back to birthtime',
-        { root, total: pages.length },
+        "wiki {root}: {unexplained} of {total} pages have no git history and are not " +
+          "dirty — the walk's keys may have stopped matching relPath, silently " +
+          "reinstating filesystem-timestamp ranking",
+        { root, unexplained, total: pages.length },
+      );
+    } else if (createdHits > 0 && touchedHits === 0) {
+      // The `touched` axis needs its OWN guard: the check above measures creation
+      // coverage only, so a regression that emptied the touch map (a broken rename
+      // rule, `SWEEP_THRESHOLD` slipping to 1) would leave every page silently
+      // falling back to its creation date with the creation alarm perfectly quiet.
+      //
+      // Zero-gated ON PURPOSE, and the reasoning is the opposite of the rate rule
+      // above rather than an exception to it: the healthy touch rate spans 23%
+      // (jarvis, bulk-ingested) to 100%, so no threshold separates healthy from
+      // broken. Zero is the only value that does — a wiki with a git history and not
+      // one ordinary commit in it does not exist.
+      log.warn(
+        "wiki {root}: git dated {createdHits}/{total} pages but found 0 non-sweep " +
+          'commits — every page is falling back to its creation date in "Recently updated"',
+        { root, createdHits, total: pages.length },
       );
     } else {
-      log.debug("wiki {root}: git creation dates for {hits}/{total} pages", {
+      log.debug("wiki {root}: git dates — created {createdHits}/{total}, touched {touchedHits}", {
         root,
-        hits,
+        createdHits,
+        touchedHits,
         total: pages.length,
       });
     }
