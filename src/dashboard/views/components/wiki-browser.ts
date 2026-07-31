@@ -61,7 +61,7 @@ import {
   hubTypeList,
   pageAddedLabel,
   pageDateLabel,
-  pageDateKind,
+  pageHeaderDates,
   pageFolder,
   pageFollowups,
   ROOT_FOLDER,
@@ -944,17 +944,23 @@ function renderBreadcrumb(m: WikiListing): void {
     crumbs.push('<span class="wiki-bc-folder">' + esc(folder) + "</span>");
   }
   crumbs.push('<span class="wiki-bc-cur">' + esc(m.title) + "</span>");
-  // The WORD comes from the same signal as the date: a page whose every commit was a
-  // sweep has no known edit date and falls back to its creation date, so calling that
-  // "updated" would assert something the history doesn't say (77% of jarvis's pages).
-  const dateLabel = pageDateLabel(m);
+  // BOTH dates, each labelled — unlike a list row, which shows the one date it sorted
+  // on. `pageHeaderDates` owns which slots appear; the "no known edit" case yields a
+  // creation date only, so the header never asserts an edit the history doesn't record.
+  const { created, updated } = pageHeaderDates(m);
+  const dateHtml =
+    created || updated
+      ? '<span class="wiki-bc-date">' +
+        (created ? "created " + esc(created) : "") +
+        (created && updated ? " · " : "") +
+        (updated ? "updated " + esc(updated) : "") +
+        "</span>"
+      : "";
   el.innerHTML =
     '<div class="wiki-bc-trail">' +
     crumbs.join('<span class="wiki-bc-sep">/</span>') +
     "</div>" +
-    (dateLabel
-      ? '<span class="wiki-bc-date">' + pageDateKind(m) + " " + esc(dateLabel) + "</span>"
-      : "") +
+    dateHtml +
     // Selection-gated actions (hidden until a selection exists — see maybeShowExplainPill).
     '<button class="wiki-bc-explain" id="wikiExplainBtn" style="display:none">✨ Explain</button>' +
     '<button class="wiki-bc-factcheck" id="wikiFactcheckBtn" style="display:none">✓ Fact check</button>' +

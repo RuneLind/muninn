@@ -12,6 +12,7 @@ import {
   pageAddedMs,
   pageDateLabel,
   pageDateKind,
+  pageHeaderDates,
   pageFolder,
   pageFollowups,
   pageTimeMs,
@@ -180,8 +181,9 @@ test("pageTimeMs: a page edited but NOT yet committed still sorts to the top", (
 });
 
 test("pageDateKind: only the creation-date fallback reads as 'added'", () => {
-  // The article header renders this word. Calling a creation date "updated" would
-  // assert an edit the history doesn't record — for 77% of jarvis's pages.
+  // Feeds `pageHeaderDates`, which drops the "updated" slot entirely on this kind.
+  // Calling a creation date "updated" would assert an edit the history doesn't
+  // record — for 77% of jarvis's pages.
   const onlySwept = page({ gitCreatedMs: Date.parse("2026-05-04T11:00:00Z") });
   expect(pageDateKind(onlySwept)).toBe("added");
   const touched = page({ ...onlySwept, gitTouchedMs: Date.parse("2026-07-24T11:00:00Z") });
@@ -189,6 +191,49 @@ test("pageDateKind: only the creation-date fallback reads as 'added'", () => {
   // Frontmatter and a plain mtime are both genuine update claims.
   expect(pageDateKind(page({ updated: "2026-06-01" }))).toBe("updated");
   expect(pageDateKind(page({ mtimeMs: Date.parse("2026-07-11T09:00:00Z") }))).toBe("updated");
+});
+
+test("pageHeaderDates: a normally-edited page shows both dates", () => {
+  const p = page({
+    gitCreatedMs: Date.parse("2026-07-29T09:00:00Z"),
+    gitTouchedMs: Date.parse("2026-07-30T11:00:00Z"),
+    mtimeMs: Date.parse("2026-07-31T12:31:00Z"), // sweep mtime, ignored
+  });
+  expect(pageHeaderDates(p)).toEqual({ created: "2026-07-29", updated: "2026-07-30" });
+});
+
+test("pageHeaderDates: no KNOWN edit shows the creation date ALONE", () => {
+  // A page whose every commit was a sweep. The header must not invent an edit — and
+  // this case cannot be detected by comparing the two labels, because a truer
+  // frontmatter `created` is OLDER than the git floor the update signal fell back to,
+  // so they differ. Only `pageDateKind` knows.
+  const p = page({
+    created: "2026-01-20",
+    gitCreatedMs: Date.parse("2026-05-04T11:00:00Z"),
+    mtimeMs: Date.parse("2026-07-31T12:31:00Z"),
+  });
+  expect(pageDateLabel(p)).toBe("2026-05-04"); // the labels DO differ…
+  expect(pageHeaderDates(p)).toEqual({ created: "2026-01-20" }); // …and no update is claimed
+});
+
+test("pageHeaderDates: created and edited the same day collapses to one slot", () => {
+  const p = page({
+    gitCreatedMs: Date.parse("2026-05-04T09:00:00Z"),
+    gitTouchedMs: Date.parse("2026-05-04T17:00:00Z"),
+  });
+  expect(pageHeaderDates(p)).toEqual({ created: "2026-05-04" });
+});
+
+test("pageHeaderDates: a non-git wiki still gets both from birthtime + mtime", () => {
+  const p = page({
+    birthtimeMs: Date.parse("2026-06-01T09:00:00Z"),
+    mtimeMs: Date.parse("2026-07-11T09:00:00Z"),
+  });
+  expect(pageHeaderDates(p)).toEqual({ created: "2026-06-01", updated: "2026-07-11" });
+});
+
+test("pageHeaderDates: an undated page yields nothing to render", () => {
+  expect(pageHeaderDates(page({}))).toEqual({});
 });
 
 test("pageTimeMs: a page with NO non-sweep touch falls back to its creation date", () => {
