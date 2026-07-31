@@ -2,6 +2,7 @@ import { test, expect } from "bun:test";
 import {
   anchorNow,
   connectionTypeOrder,
+  facetKeys,
   filterPages,
   folderCounts,
   FUTURE_DATE_SKEW_MS,
@@ -667,6 +668,33 @@ test("typeCounts: honors domain filter", () => {
 test("tagCounts: honors domain + type filters", () => {
   expect(tagCounts(PAGES, "", "")).toEqual({ search: 1, llm: 2, health: 1, org: 1 });
   expect(tagCounts(PAGES, "ai", "entity")).toEqual({ llm: 1, org: 1 });
+});
+
+// ── Facet option lists ───────────────────────────────────────────────
+// The rule the folder picker + the type and status chip rows share: a control
+// must never delete the filter that is currently emptying its own list.
+
+test("facetKeys offers exactly the present keys when nothing is active", () => {
+  expect(facetKeys({ plans: 3, blogs: 1 }, "")).toEqual(["plans", "blogs"]);
+});
+
+test("facetKeys unions the ACTIVE key in at count 0", () => {
+  // The regression: a domain switch (or a background listing refresh) that zeroes
+  // the active folder/type used to drop its option entirely — leaving an empty
+  // list with no visible way back.
+  expect(facetKeys({ plans: 3 }, "archive")).toEqual(["plans", "archive"]);
+  // …and it is not duplicated when it IS present.
+  expect(facetKeys({ plans: 3, archive: 2 }, "archive")).toEqual(["plans", "archive"]);
+});
+
+test("facetKeys drops explicit zero counts but keeps the active one", () => {
+  expect(facetKeys({ plans: 3, blogs: 0 }, "")).toEqual(["plans"]);
+  expect(facetKeys({ plans: 3, blogs: 0 }, "blogs")).toEqual(["plans", "blogs"]);
+});
+
+test("facetKeys on an empty scope still offers the active key", () => {
+  expect(facetKeys({}, "archive")).toEqual(["archive"]);
+  expect(facetKeys({}, "")).toEqual([]);
 });
 
 // ── Plan-status facet ────────────────────────────────────────────────
