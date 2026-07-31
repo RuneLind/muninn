@@ -316,7 +316,8 @@ function updatedSignal(p: WikiListing): { ms: number; label: string; kind: WikiD
  * about when it was last *edited*. That is 19 of mimir's 151 plans but **734 of
  * jarvis's 952 pages (77%)**, which are bulk-ingested and never edited again: at that
  * scale a header reading "updated <creation date>" is a claim the data does not
- * support, so the caller must render the word from this, not assume it.
+ * support. Consumed by `pageHeaderDates`, which omits the "updated" slot outright on
+ * this kind rather than relabelling it.
  */
 export type WikiDateKind = "updated" | "added";
 
@@ -324,6 +325,37 @@ export type WikiDateKind = "updated" | "added";
  *  `WikiDateKind`. */
 export function pageDateKind(p: WikiListing): WikiDateKind {
   return updatedSignal(p).kind;
+}
+
+/**
+ * BOTH dates for the article header — what the reader actually wants to know about a
+ * page it is looking at, as opposed to a list row, which shows the single date it was
+ * SORTED on and must keep doing so.
+ *
+ * One slot whose word flips between "added" and "updated" was the first attempt, and
+ * it is too subtle to read: a page showing `updated 2026-05-04` gives no hint whether
+ * it was also written that day, and a page showing `added` looks like a typo unless
+ * you already know the rule. Two labelled slots say the whole thing.
+ *
+ * The rules, in order:
+ *  - **No KNOWN edit** (`kind === "added"` — every commit that ever touched the page
+ *    was a sweep) ⇒ the creation date ALONE. Deliberately NOT derived by comparing the
+ *    two labels, because the creation signal takes the OLDEST of its three inputs while
+ *    the update signal fell back to the git floor — so the two legitimately differ and a
+ *    label comparison would render "updated <git floor>" for a page git records no edit
+ *    for. Measured on mimir: 6 pages, driven by `birthtimeMs` older than `gitCreatedMs`
+ *    (`blogs/2026-07-16-agent-maturity-assessment.html` — added 07-16, floor 07-17); a
+ *    truer frontmatter `created` is the same shape by a different field. Only `kind` knows.
+ *  - **Created and last edited on the same day** ⇒ the creation date alone, since
+ *    "created X · updated X" is noise.
+ *  - Otherwise both, and either one alone when the other has no signal.
+ */
+export function pageHeaderDates(p: WikiListing): { created?: string; updated?: string } {
+  const created = pageAddedLabel(p);
+  const updated = pageDateLabel(p);
+  if (pageDateKind(p) === "added") return created ? { created } : {};
+  if (!created) return updated ? { updated } : {};
+  return created === updated ? { created } : { created, updated };
 }
 
 /**
