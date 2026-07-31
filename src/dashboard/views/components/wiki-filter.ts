@@ -42,6 +42,25 @@ export interface WikiListing {
   /** File birthtime (epoch ms) — the "Recently added" signal for frontmatter-less
    *  wikis. Absent when the filesystem doesn't track it. */
   birthtimeMs?: number;
+  /**
+   * Plan lifecycle state, from the frontmatter key `plan_status` — NOT the bare
+   * `status`, which melosys-kode-wiki already uses for an unrelated vocabulary.
+   * Server-validated against the enum in `src/wiki/store.ts`
+   * (`proposed`/`ready`/`in-flight`/`blocked`/`shipped`/`superseded`/`abandoned`),
+   * so an unrecognized value never reaches this field — it arrives absent.
+   * Client-side copy of the store's union, kept a plain `string` for the same
+   * reason `WikiPageType` is: this file must stay server-dep-free.
+   */
+  plan_status?: string;
+  /** When `plan_status` was last affirmed (`YYYY-MM-DD`). Server-validated to that
+   *  exact shape; anything looser arrives absent. */
+  status_date?: string;
+  /** `"open"` | `"none"` — whether the plan has open follow-ups. Absent ⇒ treat as
+   *  `none` (both an undeclared field and a rejected value arrive absent). */
+  followups?: string;
+  /** One line of free prose qualifying the status. Unvalidated by nature; absent
+   *  when empty or undeclared. */
+  status_note?: string;
   linkCount: number;
   backlinkCount: number;
 }

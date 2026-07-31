@@ -13,6 +13,7 @@ import {
   readWikiPage,
   extractPubDate,
   extractDesc,
+  PLAN_STATUS_VALUES,
   __resetWikiCacheForTest,
 } from "./store.ts";
 
@@ -1108,5 +1109,163 @@ describe("buildWikiIndex — Atlas fields + trails", () => {
     const index = await buildWikiIndex(root);
     expect(index.trails).toEqual([]);
     expect(index.pages).toHaveLength(1);
+  });
+});
+
+describe("buildWikiIndex — plan status fields", () => {
+  let root: string;
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-planstatus-"));
+    await mkdir(path.join(root, "plans"), { recursive: true });
+  });
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const page = (name: string, fmLines: string[]) =>
+    Bun.write(
+      path.join(root, `plans/${name}.md`),
+      ["---", `title: ${name}`, ...fmLines, "---", "", "Plan body."].join("\n"),
+    );
+
+  test("parses all four fields off a well-formed plan page", async () => {
+    await page("Good Plan", [
+      "plan_status: in-flight",
+      "status_date: 2026-07-30",
+      "followups: open",
+      "status_note: waiting on the huginn tag-strip PR",
+    ]);
+    const meta = (await buildWikiIndex(root)).resolve("Good Plan")!;
+    expect(meta.plan_status).toBe("in-flight");
+    expect(meta.status_date).toBe("2026-07-30");
+    expect(meta.followups).toBe("open");
+    expect(meta.status_note).toBe("waiting on the huginn tag-strip PR");
+  });
+
+  test("every enum member is accepted", async () => {
+    for (const v of PLAN_STATUS_VALUES) await page(`Plan ${v}`, [`plan_status: ${v}`]);
+    const index = await buildWikiIndex(root);
+    for (const v of PLAN_STATUS_VALUES) {
+      expect(index.resolve(`Plan ${v}`)!.plan_status).toBe(v);
+    }
+  });
+
+  test("a page declaring none of them carries none of them", async () => {
+    await page("Bare", []);
+    const meta = (await buildWikiIndex(root)).resolve("Bare")!;
+    expect(meta.plan_status).toBeUndefined();
+    expect(meta.status_date).toBeUndefined();
+    expect(meta.followups).toBeUndefined();
+    expect(meta.status_note).toBeUndefined();
+  });
+
+  // The load-bearing key check: melosys-kode-wiki carries `status:` on 75 pages
+  // with an unrelated vocabulary (untracked / deleted-from-source / free prose).
+  // A bare `status` key would hijack every one of them, so it must be inert here.
+  test("the bare `status` key is ignored — it belongs to another wiki's vocabulary", async () => {
+    await page("Melosys Shaped", ["status: deleted-from-source"]);
+    const meta = (await buildWikiIndex(root)).resolve("Melosys Shaped")!;
+    expect(meta.plan_status).toBeUndefined();
+    expect(meta).not.toHaveProperty("status");
+  });
+
+  test("an invalid plan_status is dropped and uncounted — not passed through", async () => {
+    await page("Bad Status", ["plan_status: in_flight", "status_date: 2026-07-30"]);
+    await page("Wrong Case", ["plan_status: Shipped"]);
+    const index = await buildWikiIndex(root);
+
+    const bad = index.resolve("Bad Status")!;
+    expect(bad.plan_status).toBeUndefined();
+    // Dropping one field never collaterally drops its valid siblings.
+    expect(bad.status_date).toBe("2026-07-30");
+    // Strict membership: no case folding, no normalization.
+    expect(index.resolve("Wrong Case")!.plan_status).toBeUndefined();
+
+    // "Uncounted": the dropped values appear in NO plan_status tally anywhere in
+    // the index — the pages are present, the field simply is not.
+    const byStatus = new Map<string, number>();
+    for (const p of index.pages) {
+      if (p.plan_status) byStatus.set(p.plan_status, (byStatus.get(p.plan_status) ?? 0) + 1);
+    }
+    expect(byStatus.size).toBe(0);
+    expect(index.pages.filter((p) => p.plan_status !== undefined)).toHaveLength(0);
+    expect(index.pages).toHaveLength(2); // both pages still browsable
+  });
+
+  test("a malformed status_date is dropped", async () => {
+    await page("Loose Date", ["plan_status: shipped", "status_date: 2026-7-1"]);
+    await page("Prose Date", ["plan_status: shipped", "status_date: last tuesday"]);
+    await page("Datetime", ["status_date: 2026-07-30T12:00:00Z"]);
+    const index = await buildWikiIndex(root);
+    expect(index.resolve("Loose Date")!.status_date).toBeUndefined();
+    expect(index.resolve("Prose Date")!.status_date).toBeUndefined();
+    expect(index.resolve("Datetime")!.status_date).toBeUndefined();
+    // The sibling enum field is unaffected.
+    expect(index.resolve("Loose Date")!.plan_status).toBe("shipped");
+  });
+
+  test("followups accepts only open/none; anything else is dropped", async () => {
+    await page("Open", ["followups: open"]);
+    await page("None", ["followups: none"]);
+    await page("Yes", ["followups: yes"]);
+    const index = await buildWikiIndex(root);
+    expect(index.resolve("Open")!.followups).toBe("open");
+    expect(index.resolve("None")!.followups).toBe("none");
+    expect(index.resolve("Yes")!.followups).toBeUndefined();
+  });
+
+  test("status_note takes free prose verbatim; an empty value is absent", async () => {
+    await page("Prose", ['status_note: "capped at 4 rounds — R4 fixes unreviewed"']);
+    await page("Empty", ['status_note: ""']);
+    const index = await buildWikiIndex(root);
+    expect(index.resolve("Prose")!.status_note).toBe("capped at 4 rounds — R4 fixes unreviewed");
+    expect(index.resolve("Empty")!.status_note).toBeUndefined();
+  });
+
+  // The backfill writes these fields into ~145 files at once against a 5-min index
+  // TTL — one warn PER PAGE would flood the log on every refresh, so the build
+  // emits exactly one aggregated warn carrying the root and the drop counts.
+  test("drops are reported as ONE aggregated warn per build, not one per page", async () => {
+    for (let i = 0; i < 12; i++) {
+      await page(`Broken ${i}`, ["plan_status: nonsense", "status_date: nope", "followups: maybe"]);
+    }
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
+      reset: true,
+    });
+    try {
+      await buildWikiIndex(root);
+    } finally {
+      await reset();
+    }
+    const warns = records.filter(
+      (r) => r.level === "warning" && r.rawMessage.includes("plan-status"),
+    );
+    expect(warns).toHaveLength(1);
+    const props = warns[0]!.properties as Record<string, unknown>;
+    expect(props.count).toBe(36); // 12 pages × 3 rejected fields
+    expect(props.planStatus).toBe(12);
+    expect(props.statusDate).toBe(12);
+    expect(props.followups).toBe(12);
+    expect(props.root).toBe(root);
+  });
+
+  test("a build with no invalid values logs no plan-status warn at all", async () => {
+    await page("Clean", ["plan_status: shipped", "status_date: 2026-07-30", "followups: none"]);
+    await page("Bare", []);
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
+      reset: true,
+    });
+    try {
+      await buildWikiIndex(root);
+    } finally {
+      await reset();
+    }
+    expect(records.some((r) => r.rawMessage.includes("plan-status"))).toBe(false);
   });
 });

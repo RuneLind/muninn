@@ -395,6 +395,10 @@ function toListing(index: WikiIndex, meta: WikiPageMeta): WikiPageListing {
   // `desc` + `pubDate` are Atlas-only fields (only `GET /api/wiki/atlas` reads
   // them); excluded here so they don't bloat this hot pages-listing payload
   // (~100 KB on jarvis). The listing type keeps them optional/undefined.
+  // Nothing else may join this strip list without checking BOTH callers first:
+  // `/api/wiki/page` builds its single-page `meta` from this same function, so a
+  // field stripped for payload size (e.g. `status_note`) goes out of reach of the
+  // reader too. `desc`/`pubDate` are safe only because Atlas alone reads them.
   const { desc, pubDate, ...rest } = meta;
   void desc;
   void pubDate;

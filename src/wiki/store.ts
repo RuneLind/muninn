@@ -40,6 +40,86 @@ export interface WikiReaderConfig {
   typeLabels: Record<string, string>;
 }
 
+/**
+ * The plan-status lifecycle vocabulary — where a plan page stands.
+ *
+ * Read from the frontmatter key **`plan_status`**, deliberately NOT the bare
+ * `status`: `melosys-kode-wiki` (a registered wiki, mounted via `WIKI_EXTRA`)
+ * already carries `status:` on 75 pages with an entirely unrelated vocabulary
+ * (`untracked`, `deleted-from-source`, `resolved`, free prose…). Taking `status`
+ * would hijack that key and mislabel every one of those pages.
+ */
+export const PLAN_STATUS_VALUES = [
+  "proposed",
+  "ready",
+  "in-flight",
+  "blocked",
+  "shipped",
+  "superseded",
+  "abandoned",
+] as const;
+export type PlanStatus = (typeof PLAN_STATUS_VALUES)[number];
+
+/** Whether a plan has open follow-ups. Absent ⇒ treated as `none` by consumers. */
+export const PLAN_FOLLOWUPS_VALUES = ["open", "none"] as const;
+export type PlanFollowups = (typeof PLAN_FOLLOWUPS_VALUES)[number];
+
+/** `status_date` shape gate — an ISO calendar day, nothing looser. */
+const STATUS_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Per-index-build tally of frontmatter values REJECTED by the plan-status
+ * validators. Aggregated into ONE warn at the end of the build rather than one
+ * per page: a backfill writes these fields into ~145 files at once against a
+ * 5-minute index TTL, and a per-page warn would flood the log.
+ */
+interface PlanFieldDropTally {
+  planStatus: number;
+  statusDate: number;
+  followups: number;
+}
+
+/**
+ * Parse the four plan-status frontmatter fields, dropping any value that fails
+ * its validator so an invalid value NEVER reaches a consumer as-is. A field that
+ * is present but invalid is counted in `drops`; an absent field is not a drop.
+ *
+ * Validation is strict (exact enum member / exact ISO shape) — a lenient
+ * `Proposed` or `2026-7-1` is dropped and counted, not silently normalized.
+ * `status_note` is free prose with no vocabulary, so it has no validator and can
+ * never be a drop; it is only emptiness-trimmed.
+ */
+function parsePlanFields(
+  fm: Record<string, string | string[]>,
+  drops: PlanFieldDropTally,
+): Pick<WikiPageMeta, "plan_status" | "status_date" | "followups" | "status_note"> {
+  let plan_status: PlanStatus | undefined;
+  if (fm.plan_status !== undefined) {
+    const raw = typeof fm.plan_status === "string" ? fm.plan_status.trim() : "";
+    if ((PLAN_STATUS_VALUES as readonly string[]).includes(raw)) plan_status = raw as PlanStatus;
+    else drops.planStatus++;
+  }
+
+  let status_date: string | undefined;
+  if (fm.status_date !== undefined) {
+    const raw = typeof fm.status_date === "string" ? fm.status_date.trim() : "";
+    if (STATUS_DATE_RE.test(raw)) status_date = raw;
+    else drops.statusDate++;
+  }
+
+  let followups: PlanFollowups | undefined;
+  if (fm.followups !== undefined) {
+    const raw = typeof fm.followups === "string" ? fm.followups.trim() : "";
+    if ((PLAN_FOLLOWUPS_VALUES as readonly string[]).includes(raw)) {
+      followups = raw as PlanFollowups;
+    } else drops.followups++;
+  }
+
+  const note = typeof fm.status_note === "string" ? fm.status_note.trim() : "";
+
+  return { plan_status, status_date, followups, status_note: note || undefined };
+}
+
 export interface WikiPageMeta {
   /** Canonical page name — the filename stem; what [[wikilinks]] resolve against. */
   name: string;
@@ -109,6 +189,24 @@ export interface WikiPageMeta {
    * projection coalesces `desc ?? description` for them. See `extractDesc`.
    */
   desc?: string;
+  /**
+   * Plan lifecycle state, from the frontmatter key `plan_status` (NOT `status` —
+   * see `PLAN_STATUS_VALUES`). Wiki-agnostic: any page of any wiki may carry it,
+   * though in practice only mimir's `plans/` pages do. An unrecognized value is
+   * dropped at parse time (⇒ undefined), never passed through.
+   */
+  plan_status?: PlanStatus;
+  /** When `plan_status` was last affirmed (`YYYY-MM-DD`). A value that isn't that
+   *  exact shape is dropped at parse time. */
+  status_date?: string;
+  /** Whether the plan has open follow-ups. Absent ⇒ consumers treat it as `none`;
+   *  an unrecognized value is dropped at parse time (also ⇒ absent). */
+  followups?: PlanFollowups;
+  /** One line of free prose qualifying the status. No vocabulary, so nothing to
+   *  validate — only an empty value is dropped. Deliberately NOT stripped from
+   *  `toListing`: `/api/wiki/page` builds its `meta` from the same call, so a
+   *  strip would put it out of reach of every client that renders it. */
+  status_note?: string;
 }
 
 /** One authored step of a curated Atlas trail: a page reference (a wikilink
@@ -795,6 +893,9 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
   const trails = await readWikiTrails(root);
 
   const pages: WikiPageMeta[] = [];
+  // Build-scoped tally for the ONE aggregated plan-status warn below. Mutated from
+  // inside the concurrent read pass — safe, since JS runs it single-threaded.
+  const planDrops: PlanFieldDropTally = { planStatus: 0, statusDate: 0, followups: 0 };
   const byKey = new Map<string, WikiPageMeta>();
   const rawOutgoing = new Map<string, string[]>();
   /** Per-page resolved relative-markdown-link targets (normalized relPaths). */
@@ -855,12 +956,28 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
         // files per uncached Atlas request. Both undefined for pages that lack them.
         pubDate: extractPubDate(content),
         desc: extractDesc(content),
+        // Plan lifecycle fields. Wiki-agnostic (any page may declare them) and
+        // strictly validated — an invalid value is dropped here and only ever
+        // surfaces as a count in the aggregated warn below.
+        ...parsePlanFields(fm, planDrops),
       };
       pages.push(meta);
       rawOutgoing.set(relPath, extractWikilinks(content).filter((t) => t !== name));
       rawMdTargets.set(relPath, resolveMarkdownTargets(relPath, extractMarkdownLinks(content)));
     }),
   );
+
+  // ONE warn per index build, never one per page — a backfill writing these fields
+  // across ~145 files at once would otherwise flood the log on every TTL refresh.
+  // Counts only; the offending pages stay browsable with the field simply absent.
+  const planDropTotal = planDrops.planStatus + planDrops.statusDate + planDrops.followups;
+  if (planDropTotal > 0) {
+    log.warn(
+      "wiki {root}: dropped {count} invalid plan-status frontmatter value(s) — " +
+        "{planStatus} plan_status, {statusDate} status_date, {followups} followups",
+      { root, count: planDropTotal, ...planDrops },
+    );
+  }
 
   // Same-stem pages of DIFFERENT file types make resolve() (and wikilinks/paths
   // to that stem) ambiguous. Precedence is `.md` > `.mdx` > `.html`: the highest-
