@@ -1644,3 +1644,85 @@ describe("synthesis topic_key slug parity", () => {
     expect(confirmSynthesisCandidate(overlay, ["a.md", "b.md"])).toBe(false);
   });
 });
+
+// The four plan-status fields must survive `toListing` on BOTH read routes.
+// `/api/wiki/pages` and `/api/wiki/page` share that one function, so a field
+// stripped there for listing-payload size (as `desc`/`pubDate` deliberately are)
+// silently goes out of reach of the single-page reader too.
+describe("plan-status fields on /api/wiki/pages + /api/wiki/page", () => {
+  let root: string;
+  let app: Hono;
+  let prevWikiDir: string | undefined;
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-planstatus-route-"));
+    await mkdir(path.join(root, "plans"), { recursive: true });
+    await Bun.write(
+      path.join(root, "plans/Lifecycle Plan.md"),
+      [
+        "---",
+        'title: "Lifecycle Plan"',
+        "plan_status: in-flight",
+        "status_date: 2026-07-30",
+        "followups: open",
+        "status_note: capped at 4 rounds, R4 fixes unreviewed",
+        "---",
+        "",
+        "Plan body.",
+      ].join("\n"),
+    );
+    // A page whose plan_status is invalid: the field must be absent on the wire,
+    // never echoed through as an unrecognized string.
+    await Bun.write(
+      path.join(root, "plans/Bad Status.md"),
+      ["---", 'title: "Bad Status"', "plan_status: in_flight", "---", "", "Body."].join("\n"),
+    );
+    prevWikiDir = process.env.WIKI_DIR;
+    process.env.WIKI_DIR = root;
+    __resetWikiCacheForTest();
+    __resetWikiRegistryForTest();
+    app = new Hono();
+    registerWikiRoutes(app, {} as Parameters<typeof registerWikiRoutes>[1]);
+  });
+
+  afterEach(async () => {
+    if (prevWikiDir === undefined) delete process.env.WIKI_DIR;
+    else process.env.WIKI_DIR = prevWikiDir;
+    __resetWikiCacheForTest();
+    __resetWikiRegistryForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  type PlanListing = {
+    name: string;
+    plan_status?: string;
+    status_date?: string;
+    followups?: string;
+    status_note?: string;
+  };
+
+  test("all four fields survive on /api/wiki/pages", async () => {
+    const res = await app.request("/api/wiki/pages");
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { pages: PlanListing[] };
+    const listing = data.pages.find((p) => p.name === "Lifecycle Plan")!;
+    expect(listing.plan_status).toBe("in-flight");
+    expect(listing.status_date).toBe("2026-07-30");
+    expect(listing.followups).toBe("open");
+    expect(listing.status_note).toBe("capped at 4 rounds, R4 fixes unreviewed");
+    // An invalid value is absent, not echoed through.
+    expect(data.pages.find((p) => p.name === "Bad Status")!.plan_status).toBeUndefined();
+  });
+
+  test("all four fields survive on /api/wiki/page's meta", async () => {
+    const res = await app.request("/api/wiki/page?name=" + encodeURIComponent("Lifecycle Plan"));
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { meta: PlanListing };
+    expect(data.meta.plan_status).toBe("in-flight");
+    expect(data.meta.status_date).toBe("2026-07-30");
+    expect(data.meta.followups).toBe("open");
+    // The trap this test exists for: `toListing` is shared, so a strip here would
+    // put `status_note` out of reach of every single-page client.
+    expect(data.meta.status_note).toBe("capped at 4 rounds, R4 fixes unreviewed");
+  });
+});
