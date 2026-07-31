@@ -7,8 +7,11 @@
  *
  * Three panes: filterable page list · rendered article with clickable
  * wikilinks · connections panel (backlinks + outgoing links grouped by type).
- * The whole page listing loads once (/api/wiki/pages) and filters client-side;
- * article + connections come per-page from /api/wiki/page.
+ * The whole page listing is fetched at load and re-fetched when the tab regains
+ * focus (throttled — `WIKI_REFETCH_MIN_INTERVAL_MS`), then filtered client-side;
+ * a fresh set is applied only on the browse/start view and otherwise stashed
+ * until the reader returns/navigates, so the list never re-sorts mid-article.
+ * Article + connections come per-page from /api/wiki/page.
  */
 
 import { escHtml as esc } from "./escape.ts";
@@ -37,6 +40,14 @@ import {
   deserializeAskSession,
   type StoredAskTurn,
 } from "./wiki-ask-session.ts";
+import {
+  createRefreshModel,
+  markFetched,
+  receivePages,
+  shouldRefetch,
+  takePending,
+  type WikiViewState,
+} from "./wiki-refresh.ts";
 import {
   annotationIndexes,
   appendBlockedByIntegrate,
@@ -1119,6 +1130,9 @@ function setAtlasFull(on: boolean): void {
 }
 
 function renderStart(): void {
+  // Returning to the browse view is the moment a page set stashed during reading
+  // becomes safe to apply — before anything below reads `allPages`.
+  applyPendingPages();
   currentName = null;
   hideBreadcrumb(); // no page open — the breadcrumb has nothing to show
   const counts = typeCounts(allPages, "");
@@ -1450,6 +1464,9 @@ function blogAccentStyleBlock(m: WikiListing): string {
 
 function loadPage(name: string, push: boolean): void {
   hideExplainPill(); // a page switch drops any stale pill from the prior page
+  // A navigation is a re-render anyway, so a stashed page set lands here too —
+  // and it must land BEFORE the explainer lookup below reads `allPages`.
+  applyPendingPages();
   const listing = allPages.find((p) => p.name === name);
   if (listing && listing.type === "explainer") {
     loadExplainer(listing, push);
@@ -1466,6 +1483,7 @@ function loadPage(name: string, push: boolean): void {
  *  SAME page; `push=false` on popstate/boot replays without re-pushing. */
 function loadPageByRelPath(relPath: string, push = true): void {
   hideExplainPill();
+  applyPendingPages(); // same "navigating anyway" moment as loadPage
   fetchAndRenderPage(withWiki("/api/wiki/page?relPath=" + encodeURIComponent(relPath)), push, relPath);
 }
 
@@ -3274,10 +3292,109 @@ window.addEventListener("message", (e: MessageEvent) => {
   showExplainPill();
 });
 
+// ── Focus refetch of the page listing ─────────────────────────────────
+// A tab left open for hours used to filter a page set frozen at load time (the
+// route now sends `Cache-Control: no-store`, so a refetch always sees the real
+// index). We re-pull on focus/visibility, throttled, and — crucially — only ADOPT
+// the fresh set while the reader is on the browse/start view: applying it under
+// an open article would re-sort the left list out from under someone reading.
+// Everything else is stashed and applied on the next return/navigation. The
+// throttle + apply/defer decision live in the pure `wiki-refresh.ts`.
+const pagesRefresh = createRefreshModel<WikiPagesResponse>();
+
+/** What the middle pane is showing right now. An Ask/Explain/Fact-check answer
+ *  nulls `currentName` but is just as much "someone is reading" as an article —
+ *  its body element is the only signal that survives (`askShownTurn` is never
+ *  cleared on navigation, so it can't be used here). */
+function currentViewState(): WikiViewState {
+  if (currentName !== null) return "article";
+  if (document.getElementById("askAnswerBody")) return "answer";
+  return "start";
+}
+
+/** Swap in a page set + everything else the payload carries. Shared by the boot
+ *  load and the focus refetch so the two can't drift; paints nothing. */
+function adoptPagesData(data: WikiPagesResponse): void {
+  allPages = data.pages;
+  // Anchor every recency read to the server's scan instant BEFORE the first render
+  // (`recencyNow`) — a viewer clock running >48h slow would otherwise trip the
+  // future-date guard on every frontmatter-dated page in the wiki at once.
+  scannedAtMs = typeof data.scannedAt === "number" ? data.scannedAt : null;
+  // Store the wiki's merged type list (defaults + `.wiki-reader.json` customs).
+  // Absent/empty (older server / degraded) keeps the built-in constants so
+  // standard types still render — the belt-and-suspenders unions in the chip/hub
+  // renderers then keep any custom-typed page from being dropped regardless.
+  if (data.types && Array.isArray(data.types.order) && data.types.order.length) {
+    typeOrder = data.types.order;
+    typeLabels = data.types.labels || { ...TYPE_LABEL };
+  }
+}
+
+/** Adopt a fresh page set and repaint everything derived from it. Filters, the
+ *  search box and the sort mode all live outside this render path (the `filters`
+ *  object / the DOM controls themselves), so they survive untouched; the list's
+ *  scroll offset is captured and restored so a refresh can't yank a reader back
+ *  to the top of the list. A selection whose page has disappeared simply stops
+ *  matching a row — the same non-event as any name the listing doesn't carry. */
+function adoptPages(data: WikiPagesResponse): void {
+  adoptPagesData(data);
+  const list = document.getElementById("wikiList");
+  const scroll = list ? list.scrollTop : 0;
+  renderFolderSelect();
+  renderTypeChips();
+  renderStatusChips();
+  renderTagChips();
+  syncFilters();
+  renderList();
+  if (list) list.scrollTop = scroll;
+  refreshStartBody();
+}
+
+/** Apply a page set that arrived while the reader had something open. Called at
+ *  the top of every return-to-start / navigation path; a no-op when nothing is
+ *  stashed, and `takePending` guarantees it lands exactly once. */
+function applyPendingPages(): void {
+  const pending = takePending(pagesRefresh);
+  if (pending) adoptPages(pending);
+}
+
+/** Re-pull the listing. Failures are deliberately SILENT — the last good page set
+ *  stays on screen, which is strictly better than the boot path's error state for
+ *  a refresh nobody asked for. */
+function refetchPages(): void {
+  // Stamp at request time, not completion: a hung request must not leave the
+  // throttle gate open for a pile-up behind it.
+  markFetched(pagesRefresh, Date.now());
+  fetch(withWiki("/api/wiki/pages"))
+    .then((r) => r.json())
+    .then((data: WikiPagesResponse) => {
+      // Keep the current data on a failed/degraded response. An empty `pages` with
+      // no `error` is a legitimately empty wiki and does get adopted.
+      if (!data || !Array.isArray(data.pages)) return;
+      if (data.error && !data.pages.length) return;
+      if (receivePages(pagesRefresh, data, currentViewState()) === "apply") adoptPages(data);
+    })
+    .catch(() => {
+      /* silent — a failed refresh keeps the last good listing */
+    });
+}
+
+function maybeRefetchPages(): void {
+  if (document.hidden) return;
+  if (!shouldRefetch(pagesRefresh, Date.now())) return;
+  refetchPages();
+}
+
+window.addEventListener("focus", maybeRefetchPages);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) maybeRefetchPages();
+});
+
 // ── Boot ──────────────────────────────────────────────────────────────
 // Rehydrate any persisted Ask session into the "This session" list (does not
 // auto-show an answer). Safe at module load — the history element is static.
 rehydrateAskSession();
+markFetched(pagesRefresh, Date.now()); // the boot load starts the throttle window
 fetch(withWiki("/api/wiki/pages"))
   .then((r) => r.json())
   .then((data: WikiPagesResponse) => {
@@ -3295,19 +3412,7 @@ fetch(withWiki("/api/wiki/pages"))
         `<div class="wiki-empty-state">${hint}</div>`;
       return;
     }
-    allPages = data.pages;
-    // Anchor every recency read to the server's scan instant BEFORE the first render
-    // (`recencyNow`) — a viewer clock running >48h slow would otherwise trip the
-    // future-date guard on every frontmatter-dated page in the wiki at once.
-    scannedAtMs = typeof data.scannedAt === "number" ? data.scannedAt : null;
-    // Store the wiki's merged type list (defaults + `.wiki-reader.json` customs).
-    // Absent/empty (older server / degraded) keeps the built-in constants so
-    // standard types still render — the belt-and-suspenders unions below then keep
-    // any custom-typed page from being dropped regardless.
-    if (data.types && Array.isArray(data.types.order) && data.types.order.length) {
-      typeOrder = data.types.order;
-      typeLabels = data.types.labels || { ...TYPE_LABEL };
-    }
+    adoptPagesData(data);
     renderFolderSelect();
     renderTypeChips();
     renderStatusChips();
