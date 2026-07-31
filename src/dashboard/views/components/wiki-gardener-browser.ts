@@ -1187,11 +1187,10 @@ function loadProposals(): void {
 const unavailable = (window as unknown as { __WIKI_GARDENER_UNAVAILABLE__?: unknown })
   .__WIKI_GARDENER_UNAVAILABLE__ === true;
 if (!unavailable) loadBacklog();
-if (!unavailable) loadLint();
-else {
-  const lintEl = document.getElementById("lintList");
-  if (lintEl)
-    lintEl.innerHTML =
-      '<div class="gard-empty">The linter is only available for bot wikis.</div>';
-}
+// The lint is loaded UNCONDITIONALLY — unlike the proposals/backlog it needs nothing
+// from a bot or a search collection, just the wiki's own page index, so it works on
+// the very wikis this page otherwise reports as gardener-"unavailable" (a standalone
+// `WIKI_EXTRA` wiki with no collections). Those are exactly the hand-authored wikis
+// whose frontmatter the lint has the most to say about.
+loadLint();
 if (!unavailable) loadProposals();

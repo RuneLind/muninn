@@ -261,16 +261,23 @@ export function pageFolder(p: WikiListing): string {
  * from a machine with a skewed clock adds more. 48 h swallows both without admitting
  * the failure this guards: a model-emitted `updated: 2027-01-01`, which nothing can
  * ever exceed and which would therefore pin its page to the top of "Recently updated"
- * permanently. Only frontmatter is clamped — git commit stamps and mtime are machine
- * timestamps of events that actually happened.
+ * permanently.
+ *
+ * The same window is applied to the git and mtime branches too, for symmetry rather
+ * than for a known failure: git's `%at` is the AUTHOR date, which is settable
+ * (`GIT_AUTHOR_DATE`) and comes off whatever clock made the commit, and an mtime can
+ * likewise be stamped ahead by a skewed clock or a bad `touch`. Neither is the
+ * "machine timestamp of an event that actually happened" it is tempting to call it, so
+ * neither gets to outrank a real signal forever either. Every PAST date — which is all
+ * of them in practice — is untouched, so no existing ordering moves.
  */
 export const FUTURE_DATE_SKEW_MS = 48 * 60 * 60 * 1000;
 
 /**
- * True when a parsed frontmatter date is too far ahead of `now` to be a real date.
- * Applied to the frontmatter branch of BOTH recency signals, which then falls back
- * to whatever git/filesystem evidence the page has — so the label stays the date the
- * page actually sorted on.
+ * True when a parsed date is too far ahead of `now` to be a real date. Applied to
+ * EVERY branch of BOTH recency signals (frontmatter, git, mtime/birthtime) inside
+ * their `consider()` gates, so a page with one bad signal falls back to whatever
+ * remaining evidence it has — and the label stays the date the page actually sorted on.
  *
  * Exported because the wiki LINTER (`src/wiki/lint.ts`) reports the same condition
  * per page: the sort drops a bad stamp silently by design, so without a lint case a
@@ -280,6 +287,33 @@ export const FUTURE_DATE_SKEW_MS = 48 * 60 * 60 * 1000;
  */
 export function isImplausibleFutureDate(ms: number, now: number): boolean {
   return ms > now + FUTURE_DATE_SKEW_MS;
+}
+
+/**
+ * The `now` every recency read in this module should be given — the viewer's clock
+ * anchored forward to the server's own scan instant.
+ *
+ * This module is BUNDLED INTO THE BROWSER (`wiki-browser.ts` is a `Bun.build` IIFE
+ * entrypoint), so a bare `Date.now()` is the VIEWER's clock, and the future-date guard
+ * is a comparison against it. A viewer whose clock runs more than 48 h SLOW would
+ * therefore judge every legitimate frontmatter stamp implausible and silently collapse
+ * the entire wiki onto its git/mtime floors — a whole-listing failure caused by a
+ * machine setting, with no error anywhere.
+ *
+ * `Math.max` is the safe direction, and only that direction: `scannedAt` (sent by
+ * `/api/wiki/pages`, the server's index-build instant) rescues a slow clock, while a
+ * FAST clock keeps its own larger value — which only makes the guard MORE permissive
+ * and can never wrongly drop a real stamp. It is deliberately not a replacement:
+ * `scannedAt` can be up to the index TTL old, and clamping to it would start dropping
+ * stamps a viewer with a correct clock should keep.
+ *
+ * A null/absent/non-finite `scannedAt` (older server, degraded response) degrades to
+ * the bare clock — i.e. exactly the pre-anchor behavior.
+ */
+export function anchorNow(clockNow: number, scannedAt: number | null | undefined): number {
+  return typeof scannedAt === "number" && Number.isFinite(scannedAt)
+    ? Math.max(clockNow, scannedAt)
+    : clockNow;
 }
 
 /**
@@ -345,13 +379,15 @@ function authoredUpdatedDate(
  * previous day, the same drift `computeWikiFreshness` avoids for `log.md`.
  *
  * The frontmatter branch is the one signal that is AUTHORED rather than observed, so
- * it is also the one that can claim a date that hasn't happened: a model-emitted
+ * it is the LIKELIEST to claim a date that hasn't happened: a model-emitted
  * `updated: 2027-01-01` outranks every real signal forever, which no amount of
  * sweep-discounting can undo. A stamp more than `FUTURE_DATE_SKEW_MS` ahead of now is
  * therefore ignored outright — not clamped to now, which would invent a "last edited
  * today" the page never earned — and the page falls back to `created` if that is sound
- * (`authoredUpdatedDate`), else to its git/mtime evidence. Valid past dates are
- * untouched, so no existing ordering moves.
+ * (`authoredUpdatedDate`), else to its git/mtime evidence. The same test then runs
+ * inside `consider` for every OTHER branch too, since a git author date and an mtime
+ * are also only as honest as the clock that wrote them. Valid past dates are untouched,
+ * so no existing ordering moves.
  *
  * `now` is a parameter rather than a `Date.now()` read inside the body because this
  * function runs INSIDE a sort comparator: at the 48h boundary a clock read per call
@@ -368,6 +404,11 @@ function updatedSignal(
   // is the authored spelling and the one worth showing.
   const consider = (ms: number, label: string, kind: WikiDateKind = "updated") => {
     if (!Number.isFinite(ms) || ms <= 0) return;
+    // The future guard sits HERE rather than on the frontmatter branch alone, so it
+    // covers the git + mtime signals on the same terms (see `FUTURE_DATE_SKEW_MS`).
+    // Redundant for `authored`, which `authoredUpdatedDate` already vetted — it has
+    // to test earlier, because only it knows whether to retry `created`.
+    if (isImplausibleFutureDate(ms, now)) return;
     if (ms > best.ms) best = { ms, label, kind };
   };
   const day = (ms: number) => localDay(new Date(ms));
@@ -424,9 +465,14 @@ export function pageDateKind(p: WikiListing, now?: number): WikiDateKind {
  *    "created X · updated X" is noise.
  *  - Otherwise both, and either one alone when the other has no signal.
  */
-export function pageHeaderDates(p: WikiListing): { created?: string; updated?: string } {
-  // One clock read for all three signal reads on this page (they must agree).
-  const now = Date.now();
+export function pageHeaderDates(
+  p: WikiListing,
+  nowMs?: number,
+): { created?: string; updated?: string } {
+  // One clock read for all three signal reads on this page (they must agree). The
+  // caller passes a server-ANCHORED instant (`anchorNow`) where it has one — this
+  // module runs in the browser, so the bare default is the viewer's own clock.
+  const now = nowMs ?? Date.now();
   const created = pageAddedLabel(p, now);
   const updated = pageDateLabel(p, now);
   if (pageDateKind(p, now) === "added") return created ? { created } : {};
@@ -477,11 +523,12 @@ export function pageDateLabel(p: WikiListing, now?: number): string {
  * in negative-offset timezones), while git/birthtime are wall-clock instants and so
  * render as LOCAL days — the same split `pageDateLabel` makes for mtime.
  *
- * The same future-date clamp as `updatedSignal` applies to the frontmatter branch,
- * for a NARROWER but real hole: taking the min means a future `created:` loses to any
- * git date or birthtime the page has, so it only bites a page whose sole signal is the
- * bad stamp — which then sorts to the top of "Recently added" forever. Ignoring it
- * drops such a page to undated (ms 0), which is the honest answer.
+ * The same future-date guard as `updatedSignal` applies, in the same place (inside
+ * `consider`, so every branch is held to it), for a NARROWER but real hole: taking the
+ * min means an implausible signal loses to any sound one the page has, so the guard
+ * only bites a page whose EVERY signal is bad — which would otherwise sort to the top
+ * of "Recently added" forever. Ignoring them drops such a page to undated (ms 0),
+ * which is the honest answer.
  *
  * `now` is a parameter for the same reason `updatedSignal`'s is — this runs inside the
  * "Recently added" comparator, and one clock read per pass keeps it pure at the 48h
@@ -489,13 +536,18 @@ export function pageDateLabel(p: WikiListing, now?: number): string {
  */
 function addedSignal(p: WikiListing, now: number = Date.now()): { ms: number; label: string } {
   const parsedFm = p.created ? Date.parse(p.created) : NaN;
-  const fmMs = isImplausibleFutureDate(parsedFm, now) ? NaN : parsedFm;
   let best = { ms: 0, label: "" };
   const consider = (ms: number, label: string) => {
     if (!Number.isFinite(ms) || ms <= 0) return;
+    // Same placement as `updatedSignal`'s: one gate covering frontmatter, the git
+    // creation date and birthtime alike (see `FUTURE_DATE_SKEW_MS`). Under a MIN this
+    // is a narrower rule than it looks — an implausible signal loses to any sound one
+    // anyway — so it only bites the page whose every signal is bad, which then reads
+    // as undated (ms 0) rather than squatting on top of "Recently added" forever.
+    if (isImplausibleFutureDate(ms, now)) return;
     if (best.ms === 0 || ms < best.ms) best = { ms, label };
   };
-  if (Number.isFinite(fmMs)) consider(fmMs, p.created!);
+  if (Number.isFinite(parsedFm)) consider(parsedFm, p.created!);
   const git = p.gitCreatedMs || 0;
   if (git) consider(git, localDay(new Date(git)));
   const bt = p.birthtimeMs || 0;
@@ -580,11 +632,19 @@ export function filterPages(pages: WikiListing[], filters: WikiFilters): WikiLis
  *  `now` is captured ONCE for the whole pass and threaded into every recency read:
  *  the future-date guard compares against it, so a per-call `Date.now()` would make
  *  the comparator impure for a page sitting exactly at the 48h boundary (a > b and
- *  b > a both true within one sort). Server-side only, so there is no client-clock
- *  concern — this is purely about comparator consistency. */
-export function sortPages(pages: WikiListing[], mode: WikiSortMode): WikiListing[] {
+ *  b > a both true within one sort).
+ *
+ *  This runs in the BROWSER (`wiki-browser.ts` bundles this module), so the default
+ *  is the VIEWER's clock — pass the server-anchored `anchorNow(Date.now(), scannedAt)`
+ *  instead wherever the listing's `scannedAt` is known, or a >48h-slow viewer clock
+ *  silently collapses every frontmatter-dated page onto its git floor. */
+export function sortPages(
+  pages: WikiListing[],
+  mode: WikiSortMode,
+  nowMs?: number,
+): WikiListing[] {
   const copy = pages.slice();
-  const now = Date.now();
+  const now = nowMs ?? Date.now();
   if (mode === "title") {
     copy.sort((a, b) => a.title.localeCompare(b.title));
   } else if (mode === "backlinks") {

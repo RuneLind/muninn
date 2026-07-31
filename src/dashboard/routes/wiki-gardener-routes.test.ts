@@ -25,14 +25,15 @@ import { computeWatcherNextRun } from "../agents-overview.ts";
 import type { Watcher } from "../../types.ts";
 
 /**
- * Route-level resolution tests for `/api/wiki/linter-findings`. Mirrors the
- * `wiki-routes.test.ts` approach: only the deterministic resolution branches
- * that never reach real bot discovery are exercised here (a `WIKI_EXTRA`
- * standalone wiki is source !== "bot"; an unknown name resolves to nothing).
- * Both degrade to a 200 with an `error` field, never a 5xx. The actual lint
- * findings (broken link + orphan) are covered end-to-end in `src/wiki/lint.test.ts`.
+ * Route-level tests for `/api/wiki/linter-findings`. Mirrors the
+ * `wiki-routes.test.ts` approach: only the deterministic branches that never reach
+ * real bot discovery are exercised here — which, since the linter stopped being
+ * bot-gated, includes the HAPPY path on a `WIKI_EXTRA` standalone wiki (linting is a
+ * pure index read: no connector, no collections, no bot-keyed DB rows). Resolution
+ * failures degrade to a 200 with an `error` field, never a 5xx. The check logic
+ * itself is covered in `src/wiki/lint.test.ts`.
  */
-describe("GET /api/wiki/linter-findings — resolution errors", () => {
+describe("GET /api/wiki/linter-findings — standalone wikis + resolution errors", () => {
   let root: string;
   let app: Hono;
   let prevExtra: string | undefined;
@@ -41,7 +42,8 @@ describe("GET /api/wiki/linter-findings — resolution errors", () => {
     root = await mkdtemp(path.join(tmpdir(), "wiki-linter-route-"));
     await Bun.write(path.join(root, "A Concept.md"), "---\ntype: concept\ntitle: A Concept\n---\n\nBody.");
     prevExtra = process.env.WIKI_EXTRA;
-    // Standalone wiki (source !== "bot") — the linter is bot-wiki only.
+    // A STANDALONE wiki (source !== "bot"), owned by no bot and backed by no
+    // collections — exactly the shape the route used to refuse outright.
     process.env.WIKI_EXTRA = `lintwiki=${root}`;
     __resetWikiRegistryForTest();
     __resetWikiCacheForTest();
@@ -57,12 +59,50 @@ describe("GET /api/wiki/linter-findings — resolution errors", () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  test("standalone (non-bot) wiki → 200 with a bot-only error, no findings", async () => {
+  test("standalone (non-bot) wiki → real findings, NOT a bot-only refusal", async () => {
     const res = await app.request("/api/wiki/linter-findings?wiki=lintwiki");
     expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      findings: { check: string; relPath: string; message: string }[];
+      counts: Record<string, number>;
+      error?: string;
+    };
+    expect(body.error).toBeUndefined();
+    // The fixture page is a frontmatter concept with no `updated:`, no sources and
+    // no inbound links — one finding per frontmatter-shaped check, on a wiki that
+    // previously produced none at all.
+    expect(body.findings.length).toBeGreaterThan(0);
+    const checks = new Set(body.findings.map((f) => f.check));
+    expect(checks.has("stale-updated")).toBe(true);
+    expect(checks.has("missing-sources")).toBe(true);
+    expect(checks.has("orphan")).toBe(true);
+    expect(body.counts["stale-updated"]).toBe(1);
+  });
+
+  test("a future frontmatter stamp on a standalone wiki reaches the lint surface", async () => {
+    // The regression this whole route change exists for: the reader's recency sort
+    // drops an implausible future stamp SILENTLY by design, so the lint is its only
+    // operator-visible signal — and on a standalone wiki there was no lint at all.
+    const future = new Date(Date.now() + 400 * 86_400_000).toISOString().slice(0, 10);
+    await Bun.write(
+      path.join(root, "Future Page.md"),
+      `---\ntype: concept\ntitle: Future Page\nupdated: ${future}\nsources:\n  - https://example.com\n---\n\nBody.`,
+    );
+    __resetWikiCacheForTest();
+
+    const res = await app.request("/api/wiki/linter-findings?wiki=lintwiki");
+    const body = (await res.json()) as { findings: { relPath: string; message: string }[] };
+    const finding = body.findings.find((f) => f.relPath === "Future Page.md" && /in the future/.test(f.message));
+    expect(finding).toBeDefined();
+    expect(finding!.message).toContain(`updated: "${future}"`);
+  });
+
+  test("the legacy ?bot= alias resolves a standalone wiki too (the page's own client sends it)", async () => {
+    const res = await app.request("/api/wiki/linter-findings?bot=lintwiki");
+    expect(res.status).toBe(200);
     const body = (await res.json()) as { findings: unknown[]; error?: string };
-    expect(body.error).toContain("only available for bot wikis");
-    expect(body.findings).toEqual([]);
+    expect(body.error).toBeUndefined();
+    expect(body.findings.length).toBeGreaterThan(0);
   });
 
   test("unknown wiki → 200 with a not-configured error", async () => {

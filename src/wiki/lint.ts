@@ -187,6 +187,14 @@ function checkFutureDate(
  * check answers "is this page's date frontmatter usable", and a future stamp is
  * unusable for exactly the same reason and with exactly the same consequence (the page
  * falls back to its git/mtime evidence).
+ *
+ * The two fields are checked INDEPENDENTLY, and that is the whole shape of this
+ * function: `updated` and `created` are separate stamps feeding separate sorts
+ * ("Recently updated" / "Recently added"), so an unusable `updated:` must not
+ * short-circuit the `created:` check. Returning early on the missing/unparseable
+ * branches did exactly that, and hid the worst combination — a page with a future
+ * `created: 2027-01-01` and NO `updated:` reported only the (mild, ubiquitous) missing
+ * -updated finding while the stamp actually corrupting a sort went unmentioned.
  */
 function checkStaleUpdated(page: WikiPageMeta, content: string, now: number): LintFinding[] {
   // Only structured pages (those that carry a frontmatter fence) are held to the
@@ -195,29 +203,31 @@ function checkStaleUpdated(page: WikiPageMeta, content: string, now: number): Li
   if (!hasFrontmatterFence(content)) return [];
 
   const fm = parseFrontmatter(content);
+  const out: LintFinding[] = [];
+
   const updated = fm.updated;
   if (updated === undefined) {
-    return [
-      { check: "stale-updated", relPath: page.relPath, message: "Missing frontmatter: updated:" },
-    ];
-  }
-  // A single-line inline array (or any non-scalar) can't be a date.
-  if (Array.isArray(updated) || Number.isNaN(Date.parse(updated))) {
+    out.push({
+      check: "stale-updated",
+      relPath: page.relPath,
+      message: "Missing frontmatter: updated:",
+    });
+  } else if (Array.isArray(updated) || Number.isNaN(Date.parse(updated))) {
+    // A single-line inline array (or any non-scalar) can't be a date.
     const shown = Array.isArray(updated) ? `[${updated.join(", ")}]` : updated;
-    return [
-      {
-        check: "stale-updated",
-        relPath: page.relPath,
-        message: `Unparseable updated: "${shown}"`,
-      },
-    ];
-  }
-
-  const out: LintFinding[] = [];
-  for (const field of ["updated", "created"] as const) {
-    const finding = checkFutureDate(page, field, fm[field], now);
+    out.push({
+      check: "stale-updated",
+      relPath: page.relPath,
+      message: `Unparseable updated: "${shown}"`,
+    });
+  } else {
+    const finding = checkFutureDate(page, "updated", updated, now);
     if (finding) out.push(finding);
   }
+
+  const createdFinding = checkFutureDate(page, "created", fm.created, now);
+  if (createdFinding) out.push(createdFinding);
+
   return out;
 }
 

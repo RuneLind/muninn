@@ -1061,11 +1061,25 @@ export function registerWikiGardenerRoutes(
   });
 
   // Report-only wiki lint findings, recomputed on demand from the wiki tree (no
-  // DB table, no writes). Same bot resolution as `/api/wiki/proposals`; a
+  // DB table, no writes). Same wiki resolution as `/api/wiki/proposals`; a
   // missing/unreadable wiki degrades to a 200 with an `error` field, never a 5xx.
+  //
+  // **Available for EVERY registered wiki, bot-owned or standalone.** It used to
+  // refuse `entry.source !== "bot"` and then resolve a bot it never used — the bot
+  // was read for one `log.warn` field and nothing else. Linting is a pure index read
+  // (`getWikiIndex` + per-page file reads); it needs no connector, no collections, no
+  // bot-keyed DB rows. The refusal meant the standalone `WIKI_EXTRA` wikis — mimir
+  // and melosys-kode-wiki, i.e. the two that carry the most hand-authored
+  // frontmatter — had NO lint surface at all, so a finding like an implausible future
+  // `updated:` (which the reader's recency sort drops silently by design) was
+  // invisible there on every surface at once.
+  //
+  // The proactive `wiki-linter` WATCHER stays bot-only on purpose: it delivers a
+  // Telegram alert, and a bot is what owns a delivery channel. This on-demand read
+  // has no such dependency.
   app.get("/api/wiki/linter-findings", async (c) => {
     const empty = { findings: [], counts: {}, generatedAt: Date.now() };
-    const { entry, unknownWiki } = resolveWikiRequest(
+    const { wiki, entry, unknownWiki } = resolveWikiRequest(
       getWikiRegistry(),
       c.req.query("wiki"),
       c.req.query("bot"),
@@ -1074,14 +1088,9 @@ export function registerWikiGardenerRoutes(
     if (unknownWiki) {
       return c.json({ ...empty, error: "no wiki configured for that name" });
     }
-    if (entry && entry.source !== "bot") {
-      return c.json({ ...empty, error: "the linter is only available for bot wikis" });
-    }
+    // Absent entry = the `WIKI_DIR` env-override path; `getWikiIndex` resolves the
+    // same default root the reader uses.
     const root = entry?.root;
-    const bot = entry
-      ? getBots().find((b) => b.name.toLowerCase() === entry.name.toLowerCase() && !!b.wikiDir)
-      : undefined;
-    if (!bot) return c.json({ ...empty, error: "no wiki bot resolved" });
 
     // Never-5xx contract: any unexpected throw (index build, file reads) degrades
     // to a 200 with an `error` field, like the resolution failures above.
@@ -1093,7 +1102,10 @@ export function registerWikiGardenerRoutes(
       return c.json(report);
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
-      log.warn("Wiki-linter: lint run failed for {bot}: {error}", { bot: bot.name, error: reason });
+      log.warn("Wiki-linter: lint run failed for {wiki}: {error}", {
+        wiki: entry?.name || wiki || "(default)",
+        error: reason,
+      });
       return c.json({ ...empty, error: `lint failed: ${reason}` });
     }
   });

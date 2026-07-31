@@ -1,5 +1,6 @@
 import { test, expect } from "bun:test";
 import {
+  anchorNow,
   connectionTypeOrder,
   filterPages,
   folderCounts,
@@ -383,6 +384,88 @@ test("pageAddedMs: an implausibly future frontmatter `created` is ignored too", 
   const alone = page({ created: dayOffset(400 * 24 * HOUR) });
   expect(pageAddedMs(alone)).toBe(0);
   expect(pageAddedLabel(alone)).toBe("");
+});
+
+test("the future guard covers the git + mtime branches too, not only frontmatter", () => {
+  // git's `%at` is the AUTHOR date (settable, and off whatever clock made the commit)
+  // and an mtime can be stamped ahead by a bad clock — neither is an unimpeachable
+  // "machine timestamp", so neither gets to outrank a real signal forever either.
+  const now = Date.parse("2026-07-31T12:00:00Z");
+  const real = Date.parse("2026-07-11T09:00:00Z");
+  const born = Date.parse("2026-01-10T09:00:00Z"); // the git-creation floor
+  const ahead = now + 400 * 24 * HOUR;
+
+  // A future gitTouchedMs is ignored; the page keeps the frontmatter date it earned
+  // (rather than the creation floor it would fall back to if both were dropped).
+  const touched = page({ updated: "2026-07-11", gitCreatedMs: born, gitTouchedMs: ahead });
+  expect(pageTimeMs(touched, now)).toBe(Date.parse("2026-07-11T00:00:00Z"));
+  expect(pageDateLabel(touched, now)).toBe("2026-07-11");
+
+  // Same for a dirty file's future mtime.
+  const dirty = page({ updated: "2026-07-11", gitCreatedMs: born, gitDirty: true, mtimeMs: ahead });
+  expect(pageDateLabel(dirty, now)).toBe("2026-07-11");
+
+  // And for the no-git path, where mtime is otherwise trusted unconditionally.
+  expect(pageTimeMs(page({ mtimeMs: ahead }), now)).toBe(0);
+
+  // "Recently added": a future git creation date / birthtime is ignored the same way,
+  // so the oldest SOUND signal wins rather than the bad one being folded into the min.
+  const added = page({ gitCreatedMs: ahead, birthtimeMs: real });
+  expect(pageAddedMs(added, now)).toBe(real);
+  const allBad = page({ gitCreatedMs: ahead, birthtimeMs: ahead });
+  expect(pageAddedMs(allBad, now)).toBe(0);
+
+  // Past dates on every branch are untouched — no existing ordering moves.
+  const sound = page({ gitCreatedMs: real, gitTouchedMs: Date.parse("2026-07-20T09:00:00Z") });
+  expect(pageTimeMs(sound, now)).toBe(Date.parse("2026-07-20T09:00:00Z"));
+});
+
+test("anchorNow: a slow viewer clock is rescued by the server's scannedAt", () => {
+  // This module is BUNDLED INTO THE BROWSER, so the `now` the guard compares against is
+  // the VIEWER's clock. A viewer running >48h slow would judge every legitimate
+  // frontmatter stamp in the wiki implausible at once and collapse the whole listing
+  // onto its git floors. `anchorNow` is the fix: max(viewer clock, server scan instant).
+  const server = Date.parse("2026-07-31T12:00:00Z");
+  const slow = server - 30 * 24 * HOUR; // viewer clock a month behind
+  const stamped = page({ updated: "2026-07-30" }); // a perfectly ordinary recent stamp
+
+  // Unanchored, the recent stamp reads as ~30 days in the future and is dropped.
+  expect(pageTimeMs(stamped, slow)).toBe(0);
+  expect(pageDateLabel(stamped, slow)).toBe("");
+
+  // Anchored, it is trusted again.
+  const anchored = anchorNow(slow, server);
+  expect(anchored).toBe(server);
+  expect(pageTimeMs(stamped, anchored)).toBe(Date.parse("2026-07-30T00:00:00Z"));
+  expect(pageDateLabel(stamped, anchored)).toBe("2026-07-30");
+  expect(sortPages([stamped, page({ name: "old", updated: "2026-01-01" })], "updated", anchored)
+    .map((p) => p.name)).toEqual([stamped.name, "old"]);
+
+  // A FAST clock keeps its own larger value — max only ever makes the guard MORE
+  // permissive, so it can never wrongly drop a stamp a correct clock would keep.
+  const fast = server + 10 * 24 * HOUR;
+  expect(anchorNow(fast, server)).toBe(fast);
+
+  // A null/absent/non-finite scannedAt (older server, degraded response) degrades to
+  // the bare clock — exactly the pre-anchor behavior.
+  expect(anchorNow(slow, null)).toBe(slow);
+  expect(anchorNow(slow, undefined)).toBe(slow);
+  expect(anchorNow(slow, NaN)).toBe(slow);
+});
+
+test("pageHeaderDates + sortPages accept an explicit anchored now", () => {
+  // Both used to read `Date.now()` internally, which on a slow-clocked viewer is the
+  // very value that breaks the guard. The parameter is how the browser threads its
+  // anchored instant in.
+  const server = Date.parse("2026-07-31T12:00:00Z");
+  const slow = server - 30 * 24 * HOUR;
+  const p = page({ created: "2026-07-01", updated: "2026-07-30" });
+
+  expect(pageHeaderDates(p, slow)).toEqual({ created: "2026-07-01" }); // updated dropped
+  expect(pageHeaderDates(p, anchorNow(slow, server))).toEqual({
+    created: "2026-07-01",
+    updated: "2026-07-30",
+  });
 });
 
 test("sortPages: updated un-collapses a sweep that flattened every mtime", () => {
