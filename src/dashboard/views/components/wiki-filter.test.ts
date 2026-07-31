@@ -3,6 +3,8 @@ import {
   connectionTypeOrder,
   filterPages,
   folderCounts,
+  followupCount,
+  hasPlanStatus,
   hasTypedHubs,
   hubTypeList,
   mergeWikiTypes,
@@ -10,10 +12,14 @@ import {
   pageAddedMs,
   pageDateLabel,
   pageFolder,
+  pageFollowups,
   pageTimeMs,
   ROOT_FOLDER,
   sanitizeColorToken,
   sortPages,
+  statusCounts,
+  statusFacetVisible,
+  STATUS_ORDER,
   tagCounts,
   topPages,
   typeCounts,
@@ -22,6 +28,10 @@ import {
   type WikiFilters,
   type WikiListing,
 } from "./wiki-filter.ts";
+// The ONLY server import here, and only as a drift guard: `STATUS_ORDER` is a
+// hand-kept client copy of the store's enum (this module must stay server-dep-free
+// for the browser bundle), so nothing but a test can notice the two diverging.
+import { PLAN_STATUS_VALUES } from "../../../wiki/store.ts";
 
 function page(over: Partial<WikiListing>): WikiListing {
   return {
@@ -38,7 +48,15 @@ function page(over: Partial<WikiListing>): WikiListing {
   };
 }
 
-const NO_FILTER: WikiFilters = { q: "", domain: "", folder: "", type: "", tag: "" };
+const NO_FILTER: WikiFilters = {
+  q: "",
+  domain: "",
+  folder: "",
+  type: "",
+  tag: "",
+  status: "",
+  followups: "",
+};
 
 const PAGES: WikiListing[] = [
   page({ name: "rag", title: "Retrieval Augmented Generation", type: "concept", domain: "ai", tags: ["search", "llm"], aliases: ["RAG"], backlinkCount: 5, created: "2026-01-01", updated: "2026-03-01" }),
@@ -248,6 +266,111 @@ test("typeCounts: honors domain filter", () => {
 test("tagCounts: honors domain + type filters", () => {
   expect(tagCounts(PAGES, "", "")).toEqual({ search: 1, llm: 2, health: 1, org: 1 });
   expect(tagCounts(PAGES, "ai", "entity")).toEqual({ llm: 1, org: 1 });
+});
+
+// ── Plan-status facet ────────────────────────────────────────────────
+// Two INDEPENDENT axes: `plan_status` (has it started / is it finished) and
+// `followups` (is anything left over). A shipped plan with open follow-ups is the
+// case that keeps them from being collapsed into one vocabulary.
+const PLAN_PAGES: WikiListing[] = [
+  page({ name: "a", type: "plan", plan_status: "shipped", followups: "open" }),
+  page({ name: "b", type: "plan", plan_status: "shipped", followups: "none" }),
+  page({ name: "c", type: "plan", plan_status: "in-flight" }),
+  page({ name: "d", type: "plan", plan_status: "blocked", followups: "open" }),
+  page({ name: "e", type: "report", plan_status: "shipped", domain: "life" }),
+  page({ name: "f", type: "plan" }), // no plan_status at all — the mid-backfill page
+];
+
+test("filterPages: status facet matches the exact plan_status", () => {
+  expect(filterPages(PLAN_PAGES, { ...NO_FILTER, status: "shipped" }).map((p) => p.name)).toEqual([
+    "a",
+    "b",
+    "e",
+  ]);
+  expect(filterPages(PLAN_PAGES, { ...NO_FILTER, status: "blocked" }).map((p) => p.name)).toEqual([
+    "d",
+  ]);
+  // A page with no plan_status is never matched by a status filter.
+  expect(filterPages(PLAN_PAGES, { ...NO_FILTER, status: "proposed" })).toHaveLength(0);
+});
+
+test("pageFollowups: absent reads as none", () => {
+  expect(pageFollowups(page({}))).toBe("none");
+  expect(pageFollowups(page({ followups: "none" }))).toBe("none");
+  expect(pageFollowups(page({ followups: "open" }))).toBe("open");
+});
+
+test("filterPages: follow-ups facet, with absent folded to none", () => {
+  expect(filterPages(PLAN_PAGES, { ...NO_FILTER, followups: "open" }).map((p) => p.name)).toEqual([
+    "a",
+    "d",
+  ]);
+  // `none` covers both the explicit value and every page that declared nothing.
+  expect(filterPages(PLAN_PAGES, { ...NO_FILTER, followups: "none" }).map((p) => p.name)).toEqual([
+    "b",
+    "c",
+    "e",
+    "f",
+  ]);
+});
+
+test("filterPages: status and follow-ups are independent axes that AND together", () => {
+  // The whole reason for two facets: "shipped but with loose ends" is a real query.
+  const res = filterPages(PLAN_PAGES, { ...NO_FILTER, status: "shipped", followups: "open" });
+  expect(res.map((p) => p.name)).toEqual(["a"]);
+});
+
+test("statusCounts: honors domain + type, skips pages without a status", () => {
+  expect(statusCounts(PLAN_PAGES, "", "")).toEqual({ shipped: 3, "in-flight": 1, blocked: 1 });
+  // `e` is the only life page; `f` carries no status and is counted nowhere.
+  expect(statusCounts(PLAN_PAGES, "life", "")).toEqual({ shipped: 1 });
+  expect(statusCounts(PLAN_PAGES, "", "plan")).toEqual({ shipped: 2, "in-flight": 1, blocked: 1 });
+});
+
+test("followupCount: open only, same domain + type scoping as statusCounts", () => {
+  expect(followupCount(PLAN_PAGES, "", "")).toBe(2);
+  expect(followupCount(PLAN_PAGES, "life", "")).toBe(0);
+  expect(followupCount(PLAN_PAGES, "", "report")).toBe(0);
+});
+
+test("hasPlanStatus: the facet gate — one status opens it, none keeps it hidden", () => {
+  expect(hasPlanStatus(PLAN_PAGES)).toBe(true);
+  // A wiki without the convention (jarvis) — and mimir before the backfill.
+  expect(hasPlanStatus(PAGES)).toBe(false);
+  expect(hasPlanStatus([])).toBe(false);
+  // An invalid value is dropped server-side, so such a page arrives status-less
+  // and must NOT open the facet — presence is validity for this gate.
+  expect(hasPlanStatus([page({ followups: "open" })])).toBe(false);
+});
+
+test("STATUS_ORDER has not drifted from the store's PLAN_STATUS_VALUES", () => {
+  expect(STATUS_ORDER).toEqual([...PLAN_STATUS_VALUES]);
+});
+
+test("statusFacetVisible: opens on EITHER axis, so ⚑ flags are never orphaned", () => {
+  expect(statusFacetVisible(PLAN_PAGES)).toBe(true);
+  // A wiki using neither axis (jarvis, melosys-kode-wiki) stays exactly as before.
+  expect(statusFacetVisible(PAGES)).toBe(false);
+  expect(statusFacetVisible([])).toBe(false);
+  // The bug this predicate fixes: follow-ups WITHOUT any plan_status. The rows
+  // render ⚑ flags regardless, so the row carrying their legend + toggle must show.
+  const followupsOnly = [page({ name: "x", followups: "open" }), page({ name: "y" })];
+  expect(hasPlanStatus(followupsOnly)).toBe(false);
+  expect(statusFacetVisible(followupsOnly)).toBe(true);
+  // …but a wiki whose only declaration is `followups: none` has nothing to offer.
+  expect(statusFacetVisible([page({ name: "z", followups: "none" })])).toBe(false);
+});
+
+test("STATUS_ORDER drives the chip order, with an unknown status appended", () => {
+  // The chip row unions the enum order with what's present (same helper the type
+  // row uses), so a value a future server adds surfaces instead of vanishing.
+  const present = ["shipped", "blocked", "retired", "proposed"];
+  expect(connectionTypeOrder(present, STATUS_ORDER)).toEqual([
+    "proposed",
+    "blocked",
+    "shipped",
+    "retired",
+  ]);
 });
 
 test("hasTypedHubs: true with ≥2 non-note types, false for untyped/single-type wikis", () => {
