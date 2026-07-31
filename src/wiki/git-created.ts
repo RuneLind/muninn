@@ -58,7 +58,16 @@ const NAME_STATUS_RE = /^([A-Z])(\d*)\t(.*)$/;
  *  and never rejects — a failure is `null`, which the caller degrades on. */
 async function git(cwd: string, args: string[]): Promise<string | null> {
   try {
-    const proc = Bun.spawn(["git", "-C", cwd, ...args], {
+    // `core.quotePath=false` is LOAD-BEARING, not hygiene. It defaults to TRUE, and
+    // with it on, any path holding a non-ASCII byte comes back double-quoted and
+    // octal-escaped — `"wiki/concepts/\303\205rsavregning.md"` for `Årsavregning.md`.
+    // That key matches no `relPath` and doesn't even survive the subtree strip, so the
+    // page is dropped from the map and silently keeps the birthtime this module exists
+    // to replace. Measured on huginn-nav before the flag: 171 of 540 pages (32%) —
+    // every `æøå`/`é`/em-dash name — and INVISIBLE, because the ASCII majority still
+    // matched so the zero-hit warn could never fire. A command-line `-c` outranks every
+    // config file, so a repo that sets `quotePath` explicitly can't reintroduce it.
+    const proc = Bun.spawn(["git", "-C", cwd, "-c", "core.quotePath=false", ...args], {
       stdout: "pipe",
       stderr: "pipe",
       // A wiki root is never a credential-needing op here (log/rev-parse are
@@ -174,6 +183,12 @@ export async function buildGitCreatedMap(root: string): Promise<Map<string, numb
     "log",
     "--reverse",
     "--name-status",
+    // Bare `-M` (50% similarity) is deliberate — do NOT tighten it. A stricter
+    // threshold would stop an unrelated add/delete pair being read as a rename and
+    // inheriting a wrong date, but that is theoretical here (measured: 0 delete-then-
+    // re-add across mimir + huginn-nav + huginn-jarvis, 2257 paths) while real renames
+    // in mimir spread across R051–R100 — 70 at R100, but 6 genuine ones below 90%.
+    // `-M90%` would therefore mis-date 6 real pages to prevent 1 hypothetical.
     "-M",
     "--diff-merges=first-parent",
     "--format=%at",
@@ -198,6 +213,17 @@ export async function buildGitCreatedMap(root: string): Promise<Map<string, numb
   const out = new Map<string, number>();
   for (const [p, ms] of repoRelative) {
     if (p.startsWith(prefix)) out.set(p.slice(prefix.length), ms);
+  }
+  // The strip is the one step that can throw away EVERYTHING while git reported
+  // success — a wrong prefix, or paths in a spelling the prefix can't match (the
+  // `core.quotePath` class of bug). Distinguished here from the innocent
+  // empty-subtree case, which the caller must not mistake for a key mismatch.
+  if (repoRelative.size > 0 && out.size === 0) {
+    log.warn(
+      "wiki {root}: git returned {scanned} path(s) but none under the wiki subtree " +
+        "{prefix} — creation dates unavailable",
+      { root, scanned: repoRelative.size, prefix },
+    );
   }
   return out;
 }

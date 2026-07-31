@@ -81,20 +81,34 @@ test("a copy leaves the source's date intact and gives the copy the source's dat
   expect(out.get("dupe.md")).toBe(ms("2026-04-02T10:00:00Z"));
 });
 
-test("paths containing spaces and non-ASCII survive parsing", () => {
-  // Real mimir/melosys-kode-wiki filenames. The status regex captures the rest of
-  // the line wholesale, so only a TAB is special.
+test("paths containing spaces survive parsing", () => {
+  // A real mimir filename. The status regex captures the rest of the line wholesale,
+  // so only a TAB is special.
   const out = parseGitCreatedLog(
-    [
-      `${at("2026-04-02T10:00:00Z")}`,
-      "A\tplans/Mac-mini headless setup.md",
-      "A\tprojects/melosys/trygdeavgift-beregning-æøå.md",
-    ].join("\n"),
+    [`${at("2026-04-02T10:00:00Z")}`, "A\tplans/Mac-mini headless setup.md"].join("\n"),
   );
   expect(out.get("plans/Mac-mini headless setup.md")).toBe(ms("2026-04-02T10:00:00Z"));
-  expect(out.get("projects/melosys/trygdeavgift-beregning-æøå.md")).toBe(
-    ms("2026-04-02T10:00:00Z"),
+});
+
+test("non-ASCII paths arrive UNQUOTED because the spawn forces core.quotePath=false", () => {
+  // Captured from huginn-nav, which is 32% non-ASCII names. Both spellings below are
+  // real git output — the unquoted one only exists BECAUSE of the `-c
+  // core.quotePath=false` in `git()`. With git's default (quotePath=true) the second
+  // form is what arrives, and it is why this must be a flag at the spawn and not a
+  // parser feature: the escaped key matches no `relPath`, doesn't survive the subtree
+  // strip, and drops the page silently.
+  const good = parseGitCreatedLog(
+    [`${at("2026-04-02T10:00:00Z")}`, "M\twiki/concepts/Årsavregning.md"].join("\n"),
   );
+  expect(good.get("wiki/concepts/Årsavregning.md")).toBe(ms("2026-04-02T10:00:00Z"));
+
+  // Documenting the failure shape, not endorsing it: the parser does NOT unquote, so a
+  // regression that loses the flag produces this useless key rather than silently
+  // half-working. The real-git test below is what actually guards the flag.
+  const quoted = parseGitCreatedLog(
+    [`${at("2026-04-02T10:00:00Z")}`, 'M\t"wiki/concepts/\\303\\205rsavregning.md"'].join("\n"),
+  );
+  expect(quoted.has("wiki/concepts/Årsavregning.md")).toBe(false);
 });
 
 test("a deletion does not resurrect or shadow a later re-add", () => {

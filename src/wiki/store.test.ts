@@ -1498,6 +1498,25 @@ describe("buildWikiIndex + git creation dates", () => {
     expect(renamed.gitCreatedMs).toBe(firstCommit);
   });
 
+  test("a non-ASCII filename is stamped (core.quotePath regression guard)", async () => {
+    // git's `core.quotePath` defaults to TRUE and octal-escapes any non-ASCII path:
+    // `Årsavregning.md` arrives as `"wiki/concepts/\303\205rsavregning.md"`, a key that
+    // matches no relPath. This silently cost huginn-nav 171 of 540 pages (32%) — and it
+    // could never trip the zero-hit warn, because the ASCII majority still matched. This
+    // is a REAL-git test on purpose: the parser cannot detect the problem, only the
+    // spawn's `-c core.quotePath=false` prevents it, so a hand-written fixture would
+    // guard nothing.
+    await Bun.write(path.join(root, "concepts/Årsavregning.md"), "# Årsavregning");
+    await Bun.write(path.join(root, "entities/Carissa Véliz.md"), "# Carissa Véliz");
+    await git("add", "-A");
+    await git("commit", "-qm", "non-ascii names");
+
+    const index = await buildWikiIndex(root);
+    for (const rel of ["concepts/Årsavregning.md", "entities/Carissa Véliz.md"]) {
+      expect(index.pages.find((p) => p.relPath === rel)?.gitCreatedMs).toBeGreaterThan(0);
+    }
+  });
+
   test("a non-git wiki builds cleanly with the field simply absent", async () => {
     const plain = await mkdtemp(path.join(tmpdir(), "wiki-nogit-"));
     try {

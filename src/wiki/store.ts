@@ -1112,11 +1112,17 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
       }
     }
     // A partial hit rate is normal and uninteresting (untracked drafts, history
-    // shallower than the files) — debug. But git answering for a repo and matching
+    // shallower than the files) — debug. But git answering with paths and matching
     // NOTHING means the walk's keys stopped lining up with `relPath`, which silently
     // reinstates the sweep-collapse bug while every build still reports success. That
     // one case earns a warn; it is the only failure mode with no other symptom.
-    if (hits === 0 && pages.length > 0) {
+    //
+    // Gated on a NON-EMPTY map: a successful walk over a subtree with no tracked pages
+    // (a gitignored wiki dir, or one added but never committed) returns an empty map,
+    // not null, and would otherwise fire this alarm ~288×/day per wiki pointing at a
+    // key-mismatch bug that doesn't exist. `git-created.ts` owns the complementary
+    // warn for "git had paths but none survived the subtree strip".
+    if (gitCreated.size > 0 && hits === 0 && pages.length > 0) {
       log.warn(
         "wiki {root}: git returned history but matched 0 of {total} pages — " +
           '"Recently added" is falling back to birthtime',
