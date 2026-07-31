@@ -195,6 +195,59 @@ test("pageAddedLabel: a winning frontmatter created is echoed verbatim", () => {
   expect(pageAddedLabel(page({ created: "2026-06-01" }))).toBe("2026-06-01");
 });
 
+test("pageAddedMs: the git creation date beats a birthtime a sweep reset", () => {
+  // The bug this field exists for: mimir's 2026-07-31 plan-status backfill rewrote
+  // 148 files via temp-file+rename, resetting every birthtime to that day. With no
+  // frontmatter `created` there was nothing left to correct it, so every plan
+  // reported the same creation day and the sort collapsed to title order.
+  const swept = page({
+    gitCreatedMs: Date.parse("2026-05-04T11:00:00Z"),
+    birthtimeMs: Date.parse("2026-07-31T12:31:00Z"),
+    mtimeMs: Date.parse("2026-07-31T12:31:00Z"),
+  });
+  expect(pageAddedMs(swept)).toBe(Date.parse("2026-05-04T11:00:00Z"));
+  expect(pageAddedLabel(swept)).toBe("2026-05-04");
+});
+
+test("pageAddedMs: a truer frontmatter created still beats git's import date", () => {
+  // Neither signal dominates the other, which is why it's a min and not a priority
+  // order: a page hand-imported into the wiki has a git date no older than the
+  // import, while its frontmatter remembers when it was actually written.
+  const imported = page({
+    created: "2026-01-20",
+    gitCreatedMs: Date.parse("2026-05-04T11:00:00Z"),
+    birthtimeMs: Date.parse("2026-07-31T12:31:00Z"),
+  });
+  expect(pageAddedMs(imported)).toBe(Date.parse("2026-01-20"));
+  expect(pageAddedLabel(imported)).toBe("2026-01-20");
+});
+
+test("pageAddedMs: an untracked page falls back to birthtime unchanged", () => {
+  // No git date (brand-new file, or a non-git wiki) ⇒ exactly the old behavior.
+  const fresh = page({ birthtimeMs: Date.parse("2026-07-31T12:31:00Z") });
+  expect(pageAddedMs(fresh)).toBe(Date.parse("2026-07-31T12:31:00Z"));
+  expect(pageAddedLabel(fresh)).toBe("2026-07-31");
+});
+
+test("pageAddedMs: a git date alone carries a page with no other signal", () => {
+  const p = page({ gitCreatedMs: Date.parse("2026-06-15T08:00:00Z") });
+  expect(pageAddedMs(p)).toBe(Date.parse("2026-06-15T08:00:00Z"));
+  expect(pageAddedLabel(p)).toBe("2026-06-15");
+});
+
+test("sortPages: git dates un-collapse a sweep that flattened every birthtime", () => {
+  // The end-to-end shape of the mimir regression: three plans, all birthtimed and
+  // mtimed at the same sweep instant, ordered correctly by their git dates instead
+  // of alphabetically.
+  const sweep = Date.parse("2026-07-31T12:31:00Z");
+  const plans = [
+    page({ name: "old", title: "Alpha", gitCreatedMs: Date.parse("2026-05-04T11:00:00Z") }),
+    page({ name: "mid", title: "Charlie", gitCreatedMs: Date.parse("2026-07-08T11:00:00Z") }),
+    page({ name: "new", title: "Bravo", gitCreatedMs: Date.parse("2026-07-28T11:00:00Z") }),
+  ].map((p) => page({ ...p, birthtimeMs: sweep, mtimeMs: sweep }));
+  expect(sortPages(plans, "created").map((p) => p.name)).toEqual(["new", "mid", "old"]);
+});
+
 test("sortPages: created orders by added date and ignores updated/mtime churn", () => {
   const withBirth = PAGES.map((p) =>
     // Everything mass-touched today; anthropic (created 2026-01-15) still ranks
