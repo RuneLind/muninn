@@ -253,6 +253,28 @@ export function pageFolder(p: WikiListing): string {
 }
 
 /**
+ * How far past "now" a FRONTMATTER date may sit and still be trusted as a sort key.
+ *
+ * 48 hours. The stamps are plain days (`updated: 2026-06-10`) parsed as UTC midnight
+ * while "now" is a wall-clock instant, so a page stamped with the author's local day
+ * legitimately reads as up to ~14 h in the future in UTC+14 — and a wiki committed
+ * from a machine with a skewed clock adds more. 48 h swallows both without admitting
+ * the failure this guards: a model-emitted `updated: 2027-01-01`, which nothing can
+ * ever exceed and which would therefore pin its page to the top of "Recently updated"
+ * permanently. Only frontmatter is clamped — git commit stamps and mtime are machine
+ * timestamps of events that actually happened.
+ */
+export const FUTURE_DATE_SKEW_MS = 48 * 60 * 60 * 1000;
+
+/** True when a parsed frontmatter date is too far ahead of `now` to be a real date.
+ *  Applied to the frontmatter branch of BOTH recency signals, which then falls back
+ *  to whatever git/filesystem evidence the page has — so the label stays the date the
+ *  page actually sorted on. */
+function isImplausibleFutureDate(ms: number, now: number): boolean {
+  return ms > now + FUTURE_DATE_SKEW_MS;
+}
+
+/**
  * The winning "Recently updated" signal for a page: its epoch ms and the label that
  * explains it. **Newest of every TRUSTWORTHY signal wins** — the mirror image of
  * `addedSignal`'s min, for the mirror-image reason: corruption moves a creation date
@@ -285,10 +307,20 @@ export function pageFolder(p: WikiListing): string {
  * negative-offset timezones), while git dates and mtime are wall-clock instants and
  * so render as LOCAL days — `toISOString()` would label a 00:30 edit in UTC+2 as the
  * previous day, the same drift `computeWikiFreshness` avoids for `log.md`.
+ *
+ * The frontmatter branch is the one signal that is AUTHORED rather than observed, so
+ * it is also the one that can claim a date that hasn't happened: a model-emitted
+ * `updated: 2027-01-01` outranks every real signal forever, which no amount of
+ * sweep-discounting can undo. A stamp more than `FUTURE_DATE_SKEW_MS` ahead of now is
+ * therefore ignored outright — not clamped to now, which would invent a "last edited
+ * today" the page never earned — and the page falls back to its git/mtime evidence.
+ * Valid past dates are untouched, so no existing ordering moves.
  */
 function updatedSignal(p: WikiListing): { ms: number; label: string; kind: WikiDateKind } {
+  const now = Date.now();
   const fm = p.updated || p.created || "";
-  const fmMs = fm ? Date.parse(fm) : NaN;
+  const parsed = fm ? Date.parse(fm) : NaN;
+  const fmMs = isImplausibleFutureDate(parsed, now) ? NaN : parsed;
   let best = { ms: 0, label: "", kind: "updated" as WikiDateKind };
   // Strictly greater, so the FIRST signal considered wins a tie — frontmatter, which
   // is the authored spelling and the one worth showing.
@@ -396,9 +428,17 @@ export function pageDateLabel(p: WikiListing): string {
  * authored as a plain day; re-deriving it from the parsed UTC instant would shift it
  * in negative-offset timezones), while git/birthtime are wall-clock instants and so
  * render as LOCAL days — the same split `pageDateLabel` makes for mtime.
+ *
+ * The same future-date clamp as `updatedSignal` applies to the frontmatter branch,
+ * for a NARROWER but real hole: taking the min means a future `created:` loses to any
+ * git date or birthtime the page has, so it only bites a page whose sole signal is the
+ * bad stamp — which then sorts to the top of "Recently added" forever. Ignoring it
+ * drops such a page to undated (ms 0), which is the honest answer.
  */
 function addedSignal(p: WikiListing): { ms: number; label: string } {
-  const fmMs = p.created ? Date.parse(p.created) : NaN;
+  const now = Date.now();
+  const parsedFm = p.created ? Date.parse(p.created) : NaN;
+  const fmMs = isImplausibleFutureDate(parsedFm, now) ? NaN : parsedFm;
   let best = { ms: 0, label: "" };
   const consider = (ms: number, label: string) => {
     if (!Number.isFinite(ms) || ms <= 0) return;

@@ -260,14 +260,84 @@ test("pageTimeMs: an untracked page trusts its mtime unconditionally", () => {
 
 test("pageTimeMs: a frontmatter `updated` newer than every git signal still wins", () => {
   // Frontmatter is authored, not derived — a page can declare a date git can't know
-  // (a scheduled publication, a hand-corrected stamp) and it must not be overruled.
+  // (a hand-corrected stamp, an edit whose only commit was a sweep) and it must not be
+  // overruled. Dated in the PAST on purpose: the future case is the clamp's, below,
+  // and a hard-coded future literal here would silently change meaning as time passes.
   const declared = page({
-    updated: "2026-08-15",
+    updated: "2026-06-15",
     gitCreatedMs: Date.parse("2026-01-10T09:00:00Z"),
     gitTouchedMs: Date.parse("2026-05-04T11:00:00Z"),
   });
-  expect(pageTimeMs(declared)).toBe(Date.parse("2026-08-15"));
-  expect(pageDateLabel(declared)).toBe("2026-08-15");
+  expect(pageTimeMs(declared)).toBe(Date.parse("2026-06-15"));
+  expect(pageDateLabel(declared)).toBe("2026-06-15");
+});
+
+// ---------------------------------------------------------------------------
+// Future-date clamp. Dates are relative to `Date.now()` — a literal would flip
+// from future to past as the calendar moves and quietly stop testing anything.
+// ---------------------------------------------------------------------------
+
+/** `YYYY-MM-DD` `offsetMs` away from now, in UTC — the spelling frontmatter uses. */
+function dayOffset(offsetMs: number): string {
+  return new Date(Date.now() + offsetMs).toISOString().slice(0, 10);
+}
+const HOUR = 60 * 60 * 1000;
+
+test("pageTimeMs: an implausibly future frontmatter date does not become the sort key", () => {
+  // The hole: `consider()` accepts any positive ms, so a model-emitted `updated:
+  // 2027-01-01` outranks every real signal FOREVER — no later edit can exceed it, and
+  // the page squats at the top of "Recently updated". The page falls back to its git
+  // evidence instead, and the label follows the key so the row shows what it sorted on.
+  const future = page({
+    updated: dayOffset(400 * 24 * HOUR),
+    gitCreatedMs: Date.parse("2026-01-10T09:00:00Z"),
+    gitTouchedMs: Date.parse("2026-05-04T11:00:00Z"),
+  });
+  expect(pageTimeMs(future)).toBe(Date.parse("2026-05-04T11:00:00Z"));
+  expect(pageDateLabel(future)).toBe("2026-05-04");
+  expect(pageDateKind(future)).toBe("updated");
+  // …and it now sorts BELOW a page genuinely touched later, which is the whole point.
+  const real = page({
+    name: "real",
+    gitCreatedMs: Date.parse("2026-01-10T09:00:00Z"),
+    gitTouchedMs: Date.parse("2026-07-08T11:00:00Z"),
+  });
+  const ranked = sortPages([page({ ...future, name: "future" }), real], "updated");
+  expect(ranked.map((p) => p.name)).toEqual(["real", "future"]);
+});
+
+test("pageTimeMs: a future date within the skew allowance is still trusted", () => {
+  // A plain day stamped in UTC+14 reads as ~14h ahead in UTC, and a skewed clock adds
+  // more; 48h swallows both. Anything past that is not a timezone.
+  const nearly = page({ updated: dayOffset(24 * HOUR) });
+  expect(pageTimeMs(nearly)).toBe(Date.parse(dayOffset(24 * HOUR)));
+  expect(pageDateLabel(nearly)).toBe(dayOffset(24 * HOUR));
+  const beyond = page({ updated: dayOffset(96 * HOUR) });
+  expect(pageTimeMs(beyond)).toBe(0);
+  expect(pageDateLabel(beyond)).toBe("");
+});
+
+test("pageTimeMs: a future `updated` falls back to a valid frontmatter-less signal, not to nothing", () => {
+  // An untracked page (no git) keeps its mtime rather than sorting as undated.
+  const mtime = Date.parse("2026-07-11T09:00:00Z");
+  const p = page({ updated: dayOffset(400 * 24 * HOUR), mtimeMs: mtime });
+  expect(pageTimeMs(p)).toBe(mtime);
+  expect(pageDateLabel(p)).toBe("2026-07-11");
+});
+
+test("pageAddedMs: an implausibly future frontmatter `created` is ignored too", () => {
+  // Narrower hole than the update signal's — the min means a future stamp loses to any
+  // real signal — but a page whose ONLY signal is the bad stamp would pin the top of
+  // "Recently added" forever. Undated (0) is the honest answer there.
+  const withGit = page({
+    created: dayOffset(400 * 24 * HOUR),
+    gitCreatedMs: Date.parse("2026-01-10T09:00:00Z"),
+  });
+  expect(pageAddedMs(withGit)).toBe(Date.parse("2026-01-10T09:00:00Z"));
+  expect(pageAddedLabel(withGit)).toBe("2026-01-10");
+  const alone = page({ created: dayOffset(400 * 24 * HOUR) });
+  expect(pageAddedMs(alone)).toBe(0);
+  expect(pageAddedLabel(alone)).toBe("");
 });
 
 test("sortPages: updated un-collapses a sweep that flattened every mtime", () => {

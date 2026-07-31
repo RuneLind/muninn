@@ -17,6 +17,7 @@ import { getLog } from "../logging.ts";
 import { sanitizeColorToken } from "../dashboard/views/components/wiki-filter.ts";
 import { COMPONENT_TAG_SOURCE } from "../format/markdown-ast.ts";
 import { buildWikiGitDates } from "./git-dates.ts";
+import { detectBulkRestamps, RESTAMP_MIN_LEAD_DAYS } from "./restamp-detect.ts";
 
 const log = getLog("wiki", "store");
 
@@ -1207,6 +1208,30 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
         touchedHits,
         total: pages.length,
       });
+    }
+
+    // BULK-RESTAMP detection — the failure the two guards above cannot see, because it
+    // isn't a coverage problem: git dated every page correctly and a sweep then wrote
+    // one `updated:` day across hundreds of them, which is the ONE signal the sweep
+    // discount can't discount. Log-only and deliberately so — the stamps are
+    // page-by-page indistinguishable from real same-day edits, so there is nothing safe
+    // to do automatically. One warn per offending DAY per build; needs the git maps, so
+    // it lives inside this block. See `restamp-detect.ts` for why the obvious predicate
+    // (shared day + no touch) fires forever on every benign bulk ingest.
+    for (const cohort of detectBulkRestamps(pages)) {
+      const hidden = cohort.count - cohort.samples.length;
+      log.warn(
+        "wiki {root}: {count} pages carry frontmatter updated/created {day} but were " +
+          "first committed ≥{leadDays}d earlier with no non-sweep commit since — looks " +
+          'like a bulk restamp, which collapses "Recently updated" onto one day; in {samples}',
+        {
+          root,
+          count: cohort.count,
+          day: cohort.day,
+          leadDays: RESTAMP_MIN_LEAD_DAYS,
+          samples: cohort.samples.join(", ") + (hidden > 0 ? ` (+${hidden} more)` : ""),
+        },
+      );
     }
   }
 
