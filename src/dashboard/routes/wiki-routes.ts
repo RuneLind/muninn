@@ -611,7 +611,19 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
   });
 
   // Full page listing — the client filters/sorts locally (712 pages ≈ trivial).
+  //
+  // `no-store` is a correctness header, not a tuning knob. This listing is the ONLY
+  // source of the reader's page set, the client loads it exactly once at boot and
+  // never refetches, and the response carried no `Cache-Control` at all — which lets
+  // a browser heuristically cache it (RFC 9111 §4.2.2, permitted precisely when no
+  // freshness information is given). The visible failure is "I wrote a new page and
+  // the reader can't find it, even with the filters cleared, even after a reload":
+  // the search box filters an array that was stale before it was rendered, and a
+  // plain reload can replay the cached JSON rather than re-asking. A wiki gains
+  // pages constantly here — the gardener writes them, so does the user — so a
+  // listing that is allowed to go stale is a listing that will.
   app.get("/api/wiki/pages", async (c) => {
+    c.header("Cache-Control", "no-store");
     const { entry, unknownWiki } = resolveWikiRequest(
       getWikiRegistry(),
       c.req.query("wiki"),

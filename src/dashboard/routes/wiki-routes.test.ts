@@ -1714,6 +1714,18 @@ describe("plan-status fields on /api/wiki/pages + /api/wiki/page", () => {
     expect(data.pages.find((p) => p.name === "Bad Status")!.plan_status).toBeUndefined();
   });
 
+  test("the page listing is never cacheable", async () => {
+    // Not hygiene. The client loads this listing ONCE at boot and never refetches,
+    // so it is the only source of the reader's page set — and with no
+    // `Cache-Control` at all a browser may heuristically cache it, which made a
+    // freshly written page unfindable even by search with the filters cleared, and
+    // even after a plain reload. A wiki gains pages constantly (the gardener writes
+    // them, so does the user), so this response must never be served from a cache.
+    const res = await app.request("/api/wiki/pages");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+  });
+
   test("all four fields survive on /api/wiki/page's meta", async () => {
     const res = await app.request("/api/wiki/page?name=" + encodeURIComponent("Lifecycle Plan"));
     expect(res.status).toBe(200);
