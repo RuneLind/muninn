@@ -18,6 +18,7 @@ import {
   sanitizeColorToken,
   sortPages,
   statusCounts,
+  statusFacetVisible,
   STATUS_ORDER,
   tagCounts,
   topPages,
@@ -27,6 +28,10 @@ import {
   type WikiFilters,
   type WikiListing,
 } from "./wiki-filter.ts";
+// The ONLY server import here, and only as a drift guard: `STATUS_ORDER` is a
+// hand-kept client copy of the store's enum (this module must stay server-dep-free
+// for the browser bundle), so nothing but a test can notice the two diverging.
+import { PLAN_STATUS_VALUES } from "../../../wiki/store.ts";
 
 function page(over: Partial<WikiListing>): WikiListing {
   return {
@@ -336,6 +341,24 @@ test("hasPlanStatus: the facet gate — one status opens it, none keeps it hidde
   // An invalid value is dropped server-side, so such a page arrives status-less
   // and must NOT open the facet — presence is validity for this gate.
   expect(hasPlanStatus([page({ followups: "open" })])).toBe(false);
+});
+
+test("STATUS_ORDER has not drifted from the store's PLAN_STATUS_VALUES", () => {
+  expect(STATUS_ORDER).toEqual([...PLAN_STATUS_VALUES]);
+});
+
+test("statusFacetVisible: opens on EITHER axis, so ⚑ flags are never orphaned", () => {
+  expect(statusFacetVisible(PLAN_PAGES)).toBe(true);
+  // A wiki using neither axis (jarvis, melosys-kode-wiki) stays exactly as before.
+  expect(statusFacetVisible(PAGES)).toBe(false);
+  expect(statusFacetVisible([])).toBe(false);
+  // The bug this predicate fixes: follow-ups WITHOUT any plan_status. The rows
+  // render ⚑ flags regardless, so the row carrying their legend + toggle must show.
+  const followupsOnly = [page({ name: "x", followups: "open" }), page({ name: "y" })];
+  expect(hasPlanStatus(followupsOnly)).toBe(false);
+  expect(statusFacetVisible(followupsOnly)).toBe(true);
+  // …but a wiki whose only declaration is `followups: none` has nothing to offer.
+  expect(statusFacetVisible([page({ name: "z", followups: "none" })])).toBe(false);
 });
 
 test("STATUS_ORDER drives the chip order, with an unknown status appended", () => {

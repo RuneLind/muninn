@@ -431,6 +431,24 @@ export function hasPlanStatus(pages: WikiListing[]): boolean {
 }
 
 /**
+ * Whether to render the Status facet row at all — the WHOLE-WIKI gate, one level
+ * above `hasPlanStatus`.
+ *
+ * `status` and `followups` are independent axes, so a wiki can carry
+ * `followups: open` pages and no `plan_status` at all. `hasPlanStatus` alone left
+ * that wiki showing ⚑ flags on its rows with no legend and no way to filter by
+ * them — the flags are correct, the missing toggle was the bug. So the facet opens
+ * on EITHER axis being in use.
+ *
+ * Deliberately unscoped (whole wiki, not the active domain/type): this decides
+ * whether the row exists for this wiki, while `renderStatusChips` separately hides
+ * an empty row for the current scope.
+ */
+export function statusFacetVisible(pages: WikiListing[]): boolean {
+  return hasPlanStatus(pages) || followupCount(pages, "", "") > 0;
+}
+
+/**
  * Count pages per `plan_status`, honoring the active domain + type filters — the
  * same facets `tagCounts` honors, since the Status row sits beside the tag row
  * below the type row in the Filters disclosure and each row counts within the

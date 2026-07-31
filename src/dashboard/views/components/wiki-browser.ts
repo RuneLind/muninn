@@ -57,7 +57,6 @@ import {
   filterPages,
   folderCounts,
   followupCount,
-  hasPlanStatus,
   hasTypedHubs,
   hubTypeList,
   pageAddedLabel,
@@ -68,6 +67,7 @@ import {
   sanitizeColorToken,
   sortPages,
   statusCounts,
+  statusFacetVisible,
   STATUS_ORDER,
   tagCounts,
   topPages,
@@ -779,30 +779,45 @@ function followupFlagHtml(p: WikiListing): string {
     : "";
 }
 
-/** The Status chip row + ⚑ follow-ups toggle. Rendered only on wikis that use the
- *  plan-status convention (`hasPlanStatus`); everywhere else the row stays hidden
- *  and empty, so a wiki without the convention looks exactly as it did before. */
+/** The Status chip row + ⚑ follow-ups toggle. Rendered only on wikis that use
+ *  either plan-status axis (`statusFacetVisible`); everywhere else the row stays
+ *  hidden and empty, so a wiki without the convention looks exactly as it did
+ *  before. */
 function renderStatusChips(): void {
   const row = document.getElementById("statusChips");
   if (!row) return;
-  if (!hasPlanStatus(allPages)) {
+  const hide = () => {
     row.innerHTML = "";
     row.style.display = "none";
+  };
+  if (!statusFacetVisible(allPages)) {
+    hide();
     return;
   }
   const counts = statusCounts(allPages, filters.domain, filters.type);
+  const open = followupCount(allPages, filters.domain, filters.type);
+  // The whole-wiki gate above says the facet EXISTS here; this says whether it has
+  // anything to offer in the CURRENT domain/type scope. Without it a type switch
+  // could leave a row holding nothing but the inert "All status" chip. An active
+  // filter keeps the row up regardless — it is the only way back out of it.
+  if (!Object.keys(counts).length && !open && !filters.status && !filters.followups) {
+    hide();
+    return;
+  }
   let html = `<button class="wiki-chip${filters.status === "" ? " active" : ""}" data-status="">All status</button>`;
   // Union the enum order with whatever is actually present, same belt-and-braces
-  // as the type row: a status the client's copy of the enum doesn't know still shows.
-  connectionTypeOrder(Object.keys(counts), STATUS_ORDER).forEach((s) => {
-    // Keep the ACTIVE chip visible at count 0 — a domain/type switch that empties
-    // it would otherwise hide the very filter that is emptying the list.
-    if (!counts[s] && filters.status !== s) return;
+  // as the type row: a status the client's copy of the enum doesn't know still
+  // shows. The ACTIVE status joins that union even at count 0 (the tag row's
+  // `shown.unshift(filters.tag)` precedent, here placed in STATUS_ORDER position)
+  // — a domain/type switch that empties it would otherwise hide the very filter
+  // that is emptying the list.
+  const present = Object.keys(counts);
+  if (filters.status) present.push(filters.status);
+  connectionTypeOrder(present, STATUS_ORDER).forEach((s) => {
     html +=
       `<button class="wiki-chip${filters.status === s ? " active" : ""}" data-status="${esc(s)}">` +
       `<span class="wiki-status-dot plan-${esc(s)}"></span>${esc(s)} ${counts[s] || 0}</button>`;
   });
-  const open = followupCount(allPages, filters.domain, filters.type);
   if (open || filters.followups) {
     html += `<button class="wiki-chip${filters.followups ? " active" : ""}" data-followups="open" title="Only pages with open follow-ups">⚑ has follow-ups ${open}</button>`;
   }
@@ -872,8 +887,10 @@ function renderList(): void {
       `<div class="wiki-list-item${p.name === currentName ? " active" : ""}" data-page="${esc(p.name)}">` +
       `<div class="wiki-type-dot type-${esc(p.type)}"></div>` +
       `<div class="wiki-list-title">${esc(p.title)}</div>` +
-      followupFlagHtml(p) +
+      // Pill THEN flag, the same order as the article header's `badgeHtml` — the
+      // two surfaces show the same two facts and must not read differently.
       statusPillHtml(p) +
+      followupFlagHtml(p) +
       `<div class="wiki-list-meta">${esc(meta)}</div>` +
       `</div>`;
   });

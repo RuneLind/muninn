@@ -31,7 +31,7 @@
 
 import { test, expect } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { blankBotTokens } from "./blank-bot-tokens.ts";
@@ -54,7 +54,14 @@ function planPage(title: string, fields: Record<string, string>): string {
   );
 }
 
-/** shipped 2 · in-flight 1 · blocked 1 · ⚑ 2 · one page with no plan fields at all. */
+/**
+ * shipped 2 · in-flight 1 · blocked 1 · ⚑ 2 · one page with no plan fields at all.
+ *
+ * `delta` deliberately sits under `life/` — the store derives `domain` from that
+ * prefix, so it is the ONLY page outside the `ai` domain. That makes `blocked` a
+ * status the `AI` domain chip zeroes, which is exactly the scope switch the
+ * "active chip survives at count 0" case needs.
+ */
 const WITH_PAGES: Record<string, string> = {
   "alpha.md": planPage("Alpha", {
     plan_status: "shipped",
@@ -64,7 +71,7 @@ const WITH_PAGES: Record<string, string> = {
   }),
   "beta.md": planPage("Beta", { plan_status: "shipped", followups: "none" }),
   "gamma.md": planPage("Gamma", { plan_status: "in-flight" }),
-  "delta.md": planPage("Delta", { plan_status: "blocked", followups: "open" }),
+  "life/delta.md": planPage("Delta", { plan_status: "blocked", followups: "open" }),
   "plain.md": planPage("Plain", {}),
 };
 
@@ -82,7 +89,9 @@ test.beforeAll(async () => {
   rootWith = await mkdtemp(path.join(tmpdir(), "muninn-e2e-plans-"));
   rootWithout = await mkdtemp(path.join(tmpdir(), "muninn-e2e-plain-"));
   for (const [name, body] of Object.entries(WITH_PAGES)) {
-    await writeFile(path.join(rootWith, name), body, "utf8");
+    const dest = path.join(rootWith, name);
+    await mkdir(path.dirname(dest), { recursive: true });
+    await writeFile(dest, body, "utf8");
   }
   for (const [name, body] of Object.entries(WITHOUT_PAGES)) {
     await writeFile(path.join(rootWithout, name), body, "utf8");
@@ -155,6 +164,33 @@ test.describe("Wiki reader: plan-status facet", () => {
     await statusRow.locator('[data-status=""]').click();
     await expect(page.locator(".wiki-list-item")).toHaveCount(2);
     await expect(page.locator("#wikiFilterCount")).toHaveText("1");
+  });
+
+  test("the active status chip survives a scope switch that zeroes its count", async ({ page }) => {
+    // The regression: the chip row was built ONLY from the statuses present in the
+    // scoped counts, so a domain/type switch that emptied the active status deleted
+    // its chip — leaving an empty list, a badge of 1, and nothing highlighted to
+    // explain either, with no way back except reloading.
+    await page.goto(`${BASE}/wiki?wiki=${WIKI_WITH}`);
+    await page.locator("#wikiFilters summary").click();
+    const statusRow = page.locator("#statusChips");
+    const blocked = statusRow.locator('[data-status="blocked"]');
+
+    await blocked.click();
+    await expect(page.locator(".wiki-list-item")).toHaveCount(1); // Delta, under life/
+
+    // Narrow to the AI domain, which Delta is not in — `blocked` goes to 0.
+    await page.locator('#domainChips [data-domain="ai"]').click();
+    await expect(page.locator(".wiki-list-item")).toHaveCount(0);
+    await expect(blocked).toBeVisible();
+    await expect(blocked).toHaveClass(/active/);
+    await expect(blocked).toContainText("blocked 0");
+    await expect(page.locator("#wikiFilterCount")).toHaveText("1");
+
+    // …and it is still the way out: "All status" restores the four AI pages.
+    await statusRow.locator('[data-status=""]').click();
+    await expect(page.locator(".wiki-list-item")).toHaveCount(4);
+    await expect(page.locator("#wikiCount")).toHaveText("4 / 5");
   });
 
   test("status pills ride the page rows and the article header, escaped", async ({ page }) => {

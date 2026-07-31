@@ -566,6 +566,15 @@ export async function renderWikiPage(opts?: {
     .plan-shipped { background: var(--tint-success); color: var(--status-success); }
     .plan-in-flight { background: var(--tint-purple); color: var(--accent-light); }
     .plan-blocked { background: var(--tint-warning); color: var(--status-warning); }
+    /* The dot needs the SATURATED token, not the pill's tint: --tint-* is a pale
+       fill sized for text sitting on top of it, and at 6px it read as
+       near-invisible in both themes — while an untinted status kept the plain
+       --text-dim grey, inverting the salience. Scoped to .wiki-status-dot
+       (specificity 0,2,0) so the pill tints above are untouched. Mirrors the
+       .wiki-type-dot palette. */
+    .wiki-status-dot.plan-shipped { background: var(--status-success); }
+    .wiki-status-dot.plan-in-flight { background: var(--accent); }
+    .wiki-status-dot.plan-blocked { background: var(--status-warning); }
     /* Open follow-ups is the OTHER axis — a separate marker, never a status color,
        so "shipped with loose ends" reads as two facts and not one muddled pill. */
     .wiki-followup-flag { font-size: 10.5px; color: var(--status-warning); flex-shrink: 0; }
