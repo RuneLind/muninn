@@ -276,7 +276,7 @@ document.getElementById("gardList")!.addEventListener("click", (e) => {
 const LINT_LABELS: Record<string, string> = {
   "broken-link": "Broken links",
   orphan: "Orphan pages",
-  "stale-updated": "Stale/missing updated:",
+  "stale-updated": "Unusable updated: (missing / unparseable / future)",
   "missing-sources": "Missing sources",
 };
 

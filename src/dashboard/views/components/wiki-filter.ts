@@ -266,12 +266,48 @@ export function pageFolder(p: WikiListing): string {
  */
 export const FUTURE_DATE_SKEW_MS = 48 * 60 * 60 * 1000;
 
-/** True when a parsed frontmatter date is too far ahead of `now` to be a real date.
- *  Applied to the frontmatter branch of BOTH recency signals, which then falls back
- *  to whatever git/filesystem evidence the page has — so the label stays the date the
- *  page actually sorted on. */
-function isImplausibleFutureDate(ms: number, now: number): boolean {
+/**
+ * True when a parsed frontmatter date is too far ahead of `now` to be a real date.
+ * Applied to the frontmatter branch of BOTH recency signals, which then falls back
+ * to whatever git/filesystem evidence the page has — so the label stays the date the
+ * page actually sorted on.
+ *
+ * Exported because the wiki LINTER (`src/wiki/lint.ts`) reports the same condition
+ * per page: the sort drops a bad stamp silently by design, so without a lint case a
+ * single `updated: 2027-01-01` is invisible to an operator. One predicate, one
+ * constant, two consumers — the server importing this pure module is the established
+ * shape (`src/wiki/store.ts` already imports `sanitizeColorToken` from here).
+ */
+export function isImplausibleFutureDate(ms: number, now: number): boolean {
   return ms > now + FUTURE_DATE_SKEW_MS;
+}
+
+/**
+ * The authored stamp `updatedSignal` sorts on: frontmatter `updated`, falling back to
+ * `created` when `updated` is absent — **or when it is present but implausible**.
+ *
+ * That second clause is the whole reason this isn't a bare `p.updated || p.created`.
+ * Resolving the chain first and testing plausibility second meant an implausible
+ * `updated:` also discarded a perfectly valid `created:`, dropping the page to its git
+ * floor (or to undated on a page with no git evidence) — punishing the good stamp for
+ * the bad one's sake. An UNPARSEABLE `updated:` deliberately does NOT fall through
+ * (that was the pre-guard behavior and this is not the PR that changes it; the linter's
+ * `stale-updated` check is what surfaces it).
+ */
+function authoredUpdatedDate(
+  p: WikiListing,
+  now: number,
+): { ms: number; label: string } | null {
+  const primary = p.updated || p.created || "";
+  const parsed = primary ? Date.parse(primary) : NaN;
+  if (!Number.isFinite(parsed)) return null;
+  if (!isImplausibleFutureDate(parsed, now)) return { ms: parsed, label: primary };
+  // The resolved candidate is implausible. When it was `updated`, `created` has not had
+  // its turn yet.
+  if (primary !== p.updated || !p.created) return null;
+  const created = Date.parse(p.created);
+  if (!Number.isFinite(created) || isImplausibleFutureDate(created, now)) return null;
+  return { ms: created, label: p.created };
 }
 
 /**
@@ -313,14 +349,20 @@ function isImplausibleFutureDate(ms: number, now: number): boolean {
  * `updated: 2027-01-01` outranks every real signal forever, which no amount of
  * sweep-discounting can undo. A stamp more than `FUTURE_DATE_SKEW_MS` ahead of now is
  * therefore ignored outright — not clamped to now, which would invent a "last edited
- * today" the page never earned — and the page falls back to its git/mtime evidence.
- * Valid past dates are untouched, so no existing ordering moves.
+ * today" the page never earned — and the page falls back to `created` if that is sound
+ * (`authoredUpdatedDate`), else to its git/mtime evidence. Valid past dates are
+ * untouched, so no existing ordering moves.
+ *
+ * `now` is a parameter rather than a `Date.now()` read inside the body because this
+ * function runs INSIDE a sort comparator: at the 48h boundary a clock read per call
+ * makes the comparator impure, so `sortPages` captures one instant for the whole pass.
+ * Label-only call sites (`pageDateLabel` on a rendered row) take the default.
  */
-function updatedSignal(p: WikiListing): { ms: number; label: string; kind: WikiDateKind } {
-  const now = Date.now();
-  const fm = p.updated || p.created || "";
-  const parsed = fm ? Date.parse(fm) : NaN;
-  const fmMs = isImplausibleFutureDate(parsed, now) ? NaN : parsed;
+function updatedSignal(
+  p: WikiListing,
+  now: number = Date.now(),
+): { ms: number; label: string; kind: WikiDateKind } {
+  const authored = authoredUpdatedDate(p, now);
   let best = { ms: 0, label: "", kind: "updated" as WikiDateKind };
   // Strictly greater, so the FIRST signal considered wins a tie — frontmatter, which
   // is the authored spelling and the one worth showing.
@@ -329,7 +371,7 @@ function updatedSignal(p: WikiListing): { ms: number; label: string; kind: WikiD
     if (ms > best.ms) best = { ms, label, kind };
   };
   const day = (ms: number) => localDay(new Date(ms));
-  if (Number.isFinite(fmMs)) consider(fmMs, fm);
+  if (authored) consider(authored.ms, authored.label);
   if (p.gitCreatedMs) {
     if (p.gitTouchedMs) consider(p.gitTouchedMs, day(p.gitTouchedMs));
     if (p.gitDirty && p.mtimeMs) consider(p.mtimeMs, day(p.mtimeMs));
@@ -355,8 +397,8 @@ export type WikiDateKind = "updated" | "added";
 
 /** The word that honestly describes `pageDateLabel(p)` for this page. See
  *  `WikiDateKind`. */
-export function pageDateKind(p: WikiListing): WikiDateKind {
-  return updatedSignal(p).kind;
+export function pageDateKind(p: WikiListing, now?: number): WikiDateKind {
+  return updatedSignal(p, now).kind;
 }
 
 /**
@@ -383,9 +425,11 @@ export function pageDateKind(p: WikiListing): WikiDateKind {
  *  - Otherwise both, and either one alone when the other has no signal.
  */
 export function pageHeaderDates(p: WikiListing): { created?: string; updated?: string } {
-  const created = pageAddedLabel(p);
-  const updated = pageDateLabel(p);
-  if (pageDateKind(p) === "added") return created ? { created } : {};
+  // One clock read for all three signal reads on this page (they must agree).
+  const now = Date.now();
+  const created = pageAddedLabel(p, now);
+  const updated = pageDateLabel(p, now);
+  if (pageDateKind(p, now) === "added") return created ? { created } : {};
   if (!created) return updated ? { updated } : {};
   return created === updated ? { created } : { created, updated };
 }
@@ -394,9 +438,13 @@ export function pageHeaderDates(p: WikiListing): { created?: string; updated?: s
  * Recency of a page in epoch ms — the sort key behind "Recently updated". 0 when a
  * page has no usable signal at all. See `updatedSignal` for which signals count and
  * why mtime is conditional.
+ *
+ * `now` is optional: `sortPages` passes ONE instant captured for the whole pass so the
+ * comparator is pure across the 48h future-date boundary; everything else takes the
+ * default.
  */
-export function pageTimeMs(p: WikiListing): number {
-  return updatedSignal(p).ms;
+export function pageTimeMs(p: WikiListing, now?: number): number {
+  return updatedSignal(p, now).ms;
 }
 
 /**
@@ -404,8 +452,8 @@ export function pageTimeMs(p: WikiListing): number {
  * sorted by recency, so the visible date always explains the ordering. Derived from
  * the same `updatedSignal` as the sort key, so the two cannot drift apart.
  */
-export function pageDateLabel(p: WikiListing): string {
-  return updatedSignal(p).label;
+export function pageDateLabel(p: WikiListing, now?: number): string {
+  return updatedSignal(p, now).label;
 }
 
 /**
@@ -434,9 +482,12 @@ export function pageDateLabel(p: WikiListing): string {
  * git date or birthtime the page has, so it only bites a page whose sole signal is the
  * bad stamp — which then sorts to the top of "Recently added" forever. Ignoring it
  * drops such a page to undated (ms 0), which is the honest answer.
+ *
+ * `now` is a parameter for the same reason `updatedSignal`'s is — this runs inside the
+ * "Recently added" comparator, and one clock read per pass keeps it pure at the 48h
+ * boundary.
  */
-function addedSignal(p: WikiListing): { ms: number; label: string } {
-  const now = Date.now();
+function addedSignal(p: WikiListing, now: number = Date.now()): { ms: number; label: string } {
   const parsedFm = p.created ? Date.parse(p.created) : NaN;
   const fmMs = isImplausibleFutureDate(parsedFm, now) ? NaN : parsedFm;
   let best = { ms: 0, label: "" };
@@ -463,8 +514,8 @@ function addedSignal(p: WikiListing): { ms: number; label: string } {
  * backfill did exactly that to 148 files, collapsing the sort into one day), which
  * is why the git date is in the mix.
  */
-export function pageAddedMs(p: WikiListing): number {
-  return addedSignal(p).ms;
+export function pageAddedMs(p: WikiListing, now?: number): number {
+  return addedSignal(p, now).ms;
 }
 
 /** Meta/bookkeeping pages (index.md, log.md, CLAUDE.md — any folder). Rewritten
@@ -480,8 +531,8 @@ function isMetaPage(p: WikiListing): boolean {
  * "Recently added", so the visible date explains the ordering. Derived from the same
  * `addedSignal` as the sort key, so the two cannot drift apart.
  */
-export function pageAddedLabel(p: WikiListing): string {
-  return addedSignal(p).label;
+export function pageAddedLabel(p: WikiListing, now?: number): string {
+  return addedSignal(p, now).label;
 }
 
 /** `YYYY-MM-DD` in the viewer's timezone (no UTC shift). */
@@ -524,9 +575,16 @@ export function filterPages(pages: WikiListing[], filters: WikiFilters): WikiLis
 
 /** Sort a copy of `pages` by the given mode without mutating the input. Recency
  *  ties (two pages stamped the same day by frontmatter alone) fall back to title
- *  so the order is stable rather than scan-order. */
+ *  so the order is stable rather than scan-order.
+ *
+ *  `now` is captured ONCE for the whole pass and threaded into every recency read:
+ *  the future-date guard compares against it, so a per-call `Date.now()` would make
+ *  the comparator impure for a page sitting exactly at the 48h boundary (a > b and
+ *  b > a both true within one sort). Server-side only, so there is no client-clock
+ *  concern — this is purely about comparator consistency. */
 export function sortPages(pages: WikiListing[], mode: WikiSortMode): WikiListing[] {
   const copy = pages.slice();
+  const now = Date.now();
   if (mode === "title") {
     copy.sort((a, b) => a.title.localeCompare(b.title));
   } else if (mode === "backlinks") {
@@ -535,11 +593,13 @@ export function sortPages(pages: WikiListing[], mode: WikiSortMode): WikiListing
     copy.sort(
       (a, b) =>
         Number(isMetaPage(a)) - Number(isMetaPage(b)) ||
-        pageAddedMs(b) - pageAddedMs(a) ||
+        pageAddedMs(b, now) - pageAddedMs(a, now) ||
         a.title.localeCompare(b.title),
     );
   } else {
-    copy.sort((a, b) => pageTimeMs(b) - pageTimeMs(a) || a.title.localeCompare(b.title));
+    copy.sort(
+      (a, b) => pageTimeMs(b, now) - pageTimeMs(a, now) || a.title.localeCompare(b.title),
+    );
   }
   return copy;
 }

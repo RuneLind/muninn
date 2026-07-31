@@ -3,6 +3,7 @@ import {
   connectionTypeOrder,
   filterPages,
   folderCounts,
+  FUTURE_DATE_SKEW_MS,
   followupCount,
   hasPlanStatus,
   hasTypedHubs,
@@ -273,8 +274,10 @@ test("pageTimeMs: a frontmatter `updated` newer than every git signal still wins
 });
 
 // ---------------------------------------------------------------------------
-// Future-date clamp. Dates are relative to `Date.now()` — a literal would flip
-// from future to past as the calendar moves and quietly stop testing anything.
+// Future-date guard (ignore, never clamp). Dates are relative to `Date.now()` — a
+// literal would flip from future to past as the calendar moves and quietly stop
+// testing anything. The exact-boundary case below instead passes an explicit `now`,
+// which is what pins the constant itself.
 // ---------------------------------------------------------------------------
 
 /** `YYYY-MM-DD` `offsetMs` away from now, in UTC — the spelling frontmatter uses. */
@@ -309,12 +312,54 @@ test("pageTimeMs: an implausibly future frontmatter date does not become the sor
 test("pageTimeMs: a future date within the skew allowance is still trusted", () => {
   // A plain day stamped in UTC+14 reads as ~14h ahead in UTC, and a skewed clock adds
   // more; 48h swallows both. Anything past that is not a timezone.
-  const nearly = page({ updated: dayOffset(24 * HOUR) });
-  expect(pageTimeMs(nearly)).toBe(Date.parse(dayOffset(24 * HOUR)));
-  expect(pageDateLabel(nearly)).toBe(dayOffset(24 * HOUR));
+  // ONE `dayOffset` evaluation: three separate calls straddling UTC midnight would
+  // disagree on the day and flake sub-millisecond.
+  const tomorrow = dayOffset(24 * HOUR);
+  const nearly = page({ updated: tomorrow });
+  expect(pageTimeMs(nearly)).toBe(Date.parse(tomorrow));
+  expect(pageDateLabel(nearly)).toBe(tomorrow);
   const beyond = page({ updated: dayOffset(96 * HOUR) });
   expect(pageTimeMs(beyond)).toBe(0);
   expect(pageDateLabel(beyond)).toBe("");
+});
+
+test("pageTimeMs: the trusted/ignored cut sits exactly at FUTURE_DATE_SKEW_MS", () => {
+  // The +24h/+72h cases above bracket the constant loosely enough that widening it to
+  // 72h would leave them all green. This pins it: a stamp exactly `FUTURE_DATE_SKEW_MS`
+  // ahead is trusted (the predicate is strict `>`), one millisecond past it is not. An
+  // explicit `now` makes the boundary exact instead of racing the wall clock — which is
+  // the other reason the signals take a `now` at all.
+  const now = Date.parse("2026-07-31T12:00:00Z");
+  const at = new Date(now + FUTURE_DATE_SKEW_MS).toISOString();
+  const past = new Date(now + FUTURE_DATE_SKEW_MS + 1).toISOString();
+  expect(pageTimeMs(page({ updated: at }), now)).toBe(now + FUTURE_DATE_SKEW_MS);
+  expect(pageTimeMs(page({ updated: past }), now)).toBe(0);
+  // Same cut on the "Recently added" signal — one predicate, both signals.
+  expect(pageAddedMs(page({ created: at }), now)).toBe(now + FUTURE_DATE_SKEW_MS);
+  expect(pageAddedMs(page({ created: past }), now)).toBe(0);
+});
+
+test("pageTimeMs: an implausible `updated` falls back to a valid `created`, not to nothing", () => {
+  // The `p.updated || p.created` chain resolved BEFORE the plausibility test, so one bad
+  // `updated:` also threw away a perfectly good `created:` and dropped the page to the
+  // git floor — or, with no git at all, to undated. The good stamp must survive the bad
+  // one.
+  const p = page({ updated: dayOffset(400 * 24 * HOUR), created: "2026-03-09" });
+  expect(pageTimeMs(p)).toBe(Date.parse("2026-03-09"));
+  expect(pageDateLabel(p)).toBe("2026-03-09");
+  expect(pageDateKind(p)).toBe("updated");
+  // …so it outranks a page with an older creation date instead of sinking below it.
+  const older = page({ name: "older", created: "2026-01-02" });
+  const ranked = sortPages([older, page({ ...p, name: "rescued" })], "updated");
+  expect(ranked.map((q) => q.name)).toEqual(["rescued", "older"]);
+});
+
+test("pageTimeMs: an implausible `created` is not rescued by itself", () => {
+  // The fallback re-tries `created` only when `updated` was the implausible one — a page
+  // whose ONLY stamp is a bad `created:` still sorts as undated.
+  const p = page({ created: dayOffset(400 * 24 * HOUR) });
+  expect(pageTimeMs(p)).toBe(0);
+  expect(pageDateLabel(p)).toBe("");
 });
 
 test("pageTimeMs: a future `updated` falls back to a valid frontmatter-less signal, not to nothing", () => {
