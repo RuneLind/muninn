@@ -29,7 +29,11 @@ export interface SourceDraftAttempt {
   collection: string;
   docId: string;
   outcome: SourceDraftAttemptOutcome;
-  /** A skip that BURNED model calls, as opposed to a cheap deterministic guard. */
+  /**
+   * Mirrors `SourceDraftOutcome.degraded`: a skip representing WORK THROWN AWAY (an
+   * unusable model answer), NOT merely "a model call was spent" — the collision-SKIP
+   * verdict costs two calls and is still an honest answer.
+   */
   degraded: boolean;
   reason: string | null;
   /** The title the drafter chose, or (on a collision) the page that owns the stem. */
@@ -78,6 +82,33 @@ export async function recordSourceDraftAttempt(
     log.warn("Failed to record source-draft attempt for {collection}/{id}: {error}", {
       collection: params.collection,
       id: params.docId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * Drop the recorded attempt for one doc. Called when the attempt stops describing
+ * reality: the doc is deleted from huginn (a re-capture under the same id must not
+ * inherit a months-old skip reason), or the proposal it produced is rejected — a
+ * row still reading "drafted" would point at a gate entry that no longer exists.
+ * After a drop the doc reads as un-attempted, which is exactly what it is again.
+ */
+export async function deleteSourceDraftAttempt(
+  botName: string,
+  collection: string,
+  docId: string,
+): Promise<void> {
+  try {
+    const sql = getDb();
+    await sql`
+      DELETE FROM source_draft_attempts
+       WHERE bot_name = ${botName} AND collection = ${collection} AND doc_id = ${docId}
+    `;
+  } catch (err) {
+    log.warn("Failed to delete source-draft attempt for {collection}/{id}: {error}", {
+      collection,
+      id: docId,
       error: err instanceof Error ? err.message : String(err),
     });
   }

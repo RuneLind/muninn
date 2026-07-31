@@ -581,28 +581,39 @@ describe("titleOverride (the row's rename-and-draft retry)", () => {
     }
   });
 
-  test("an override forgoes the collision retry — no SKIP branch to lose the doc to", async () => {
+  // The override is only an INSTRUCTION in the prompt. A model that renames the page
+  // anyway would otherwise (a) file the editor's rename under a title they never
+  // chose, and (b) on a collision, blame their title for a clash it had no part in.
+  test("the drafter ignoring the override is a skip that names BOTH titles", async () => {
     let calls = 0;
     const out = await draftSourcePage(
       baseDeps({
-        // The override is free; the model then ignores it and returns a colliding title.
+        // The override is free; the model returns an entirely different title.
         input: { ...baseDeps().input, titleOverride: "Something Free" },
-        index: fakeIndex([
-          page({
-            title: "Retrieval-Augmented Generation",
-            name: "Retrieval-Augmented Generation",
-            relPath: "concepts/Retrieval-Augmented Generation.md",
-          }),
-        ]),
         callDrafter: async () => {
           calls++;
-          return mdxDraft();
+          return mdxDraft(); // titled "Retrieval-Augmented Generation"
         },
       }),
     );
-    expect(calls).toBe(1); // ONE call — no distinct-title-or-SKIP retry
+    expect(calls).toBe(1); // ONE call — no distinct-title-or-SKIP retry under an override
     expect(out.outcome).toBe("skipped");
-    if (out.outcome === "skipped") expect(out.reason).toContain("collides");
+    if (out.outcome === "skipped") {
+      expect(out.reason).toContain("Retrieval-Augmented Generation");
+      expect(out.reason).toContain("Something Free");
+      // NOT blamed on a colliding page — nothing collided.
+      expect(out.collidingPage).toBeUndefined();
+    }
+  });
+
+  test("enforcement compares SANITIZED stems — punctuation the filename drops isn't a mismatch", async () => {
+    const out = await draftSourcePage(
+      baseDeps({
+        input: { ...baseDeps().input, titleOverride: "First, the Graph Itself?" },
+        callDrafter: async () => mdxDraft({ title: "First, the graph itself" }),
+      }),
+    );
+    expect(out.outcome).toBe("drafted");
   });
 
   test("a free override drafts under exactly that title", async () => {

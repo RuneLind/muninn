@@ -1011,7 +1011,9 @@ async function draftBacklogDoc(
       title?: string;
     };
     if (!res.ok) {
-      setInspectorNotice(body.error || `draft failed (${res.status})`, "err");
+      // A per-doc `error` outcome rides a 500 with `reason` (not `error`) — read both,
+      // or the one message worth showing is replaced by the status code.
+      setInspectorNotice(body.error || body.reason || `draft failed (${res.status})`, "err");
     } else if (body.outcome === "drafted") {
       setInspectorNotice(`drafted “${body.title || label}” — review it in the gate below`, "info");
       loadProposals(); // a new draft card exists in the gate now

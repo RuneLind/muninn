@@ -107,10 +107,13 @@ export function sourceTopicKey(collection: string, docId: string): string {
 
 /**
  * Normalize a human-supplied title override. It is interpolated into the drafter
- * prompt, so every whitespace run — newlines above all — collapses to one space: a
- * multi-line "title" is how a paragraph of instructions would ride in past the
- * route's length cap. Quote characters are dropped so the value can't close the
- * quoted span it sits in.
+ * prompt, so every whitespace run — newlines above all — collapses to one space (a
+ * multi-line "title" is how a block of instructions would ride in past the route's
+ * length cap) and quote characters are dropped so the value can't close the quoted
+ * span it sits in. Structural containment only: a one-line sentence still reaches
+ * the prompt intact, which is acceptable because the field is operator-typed on a
+ * loopback dashboard and the enforcement below (the drafted title must MATCH this
+ * one) plus the review gate bound what a diverted draft can do.
  */
 export function sanitizeTitleOverride(raw: string | undefined): string {
   return (raw ?? "")
@@ -426,6 +429,20 @@ export async function draftSourcePage(deps: DraftSourcePageDeps): Promise<Source
       const stem = sanitizeFilename(title);
       if (!stem)
         return { outcome: "skipped", reason: "title sanitized to an empty stem", degraded: true };
+
+      // ENFORCE the override — the prompt only ASKS for it. Without this check a
+      // model that renamed the page anyway would (a) silently file the editor's
+      // rename under a title they never chose, and (b) on a collision, blame their
+      // title for a clash it had nothing to do with. Compared on the sanitized stem,
+      // case-insensitively, so punctuation the filename sanitizer drops isn't a
+      // spurious mismatch.
+      if (overrideTitle && stem.toLowerCase() !== sanitizeFilename(overrideTitle).toLowerCase()) {
+        return {
+          outcome: "skipped",
+          reason: `the drafter returned "${title}" instead of the chosen title "${overrideTitle}" — try again`,
+          degraded: true,
+        };
+      }
 
       targetPath = path.posix.join(expectedDir(domain, "source"), `${stem}.mdx`);
 

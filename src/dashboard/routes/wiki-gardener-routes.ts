@@ -80,6 +80,7 @@ import {
 } from "../../db/watchers.ts";
 import {
   getSourceDraftAttempts,
+  deleteSourceDraftAttempt,
   type SourceDraftAttempt,
   type SourceDraftAttemptOutcome,
   type SourceDraftTrigger,
@@ -93,9 +94,14 @@ const log = getLog("dashboard", "wiki-gardener");
 const KNOWLEDGE_API_URL = process.env.KNOWLEDGE_API_URL ?? "http://localhost:8321";
 
 /**
- * Cap on a client-supplied source-page title (the row's rename retry). Generous for
- * a real encyclopedic title, small enough that the value can't be used to smuggle a
- * paragraph of instructions into the drafter prompt.
+ * Cap on a client-supplied source-page title (the row's rename retry) — a sanity
+ * bound on a field that reaches a model prompt, generous for a real encyclopedic
+ * title. Explicitly NOT a security boundary: the value is operator-typed on an
+ * auth-less loopback dashboard and 120 chars is ample for a sentence of
+ * instructions, so the cap and `sanitizeTitleOverride` (whitespace + quotes) buy
+ * containment of accidents, not defence against a hostile author. The real
+ * containment is downstream — the draft is shape-gated, contained, and lands in a
+ * human review gate that writes nothing on its own.
  */
 export const SOURCE_DRAFT_TITLE_MAX = 120;
 
@@ -1699,6 +1705,9 @@ export function registerWikiGardenerRoutes(
       };
       await pruneKeyFrom(WIKI_GARDENER_OFFERED_KEY, readOffered);
       await pruneKeyFrom(WIKI_GARDENER_DISMISSED_KEY, readDismissed);
+      // Same rule for the attempt ledger: the doc is gone, and a re-capture under the
+      // same id must not inherit a months-old skip reason.
+      await deleteSourceDraftAttempt(target.bot.name, collection, id);
       return res;
     });
     if (run === null) return c.json({ error: "a gardener run is in flight" }, 409);
@@ -1945,7 +1954,10 @@ export function registerWikiGardenerRoutes(
         outcome: result.outcome,
         ...(title ? { title } : {}),
       });
-      return c.json(result);
+      // Same status contract as `source-draft-run` (its single-doc sibling): a failed
+      // draft is a 500, so a caller reading `res.ok` can't record it as a success.
+      // `covered`/`skipped` stay 200 — they are answers, not failures.
+      return c.json(result, result.outcome === "error" ? 500 : 200);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       log.error("Source-draft one doc failed for {bot} ({collection}/{id}): {error}", {
@@ -2048,6 +2060,13 @@ export function registerWikiGardenerRoutes(
     const rejected = await rejectWikiProposal(id);
     if (!rejected) {
       return c.json({ error: "proposal is no longer a draft", status: existing.status }, 409);
+    }
+    // The doc returns to the backlog uncovered, so its attempt row must stop saying
+    // "drafted" — that would point at a gate entry the reject just removed. Dropping
+    // it makes the row read un-attempted, which is what it is again. Best-effort: a
+    // ledger cleanup must never turn a successful reject into a failure.
+    for (const doc of existing.sourceDocs ?? []) {
+      await deleteSourceDraftAttempt(existing.botName, doc.collection, doc.docId);
     }
     return c.json({ outcome: "rejected" });
   });

@@ -1,6 +1,10 @@
 import { test, expect, describe } from "bun:test";
 import { setupTestDb } from "../test/setup-db.ts";
-import { recordSourceDraftAttempt, getSourceDraftAttempts } from "./source-draft-attempts.ts";
+import {
+  recordSourceDraftAttempt,
+  getSourceDraftAttempts,
+  deleteSourceDraftAttempt,
+} from "./source-draft-attempts.ts";
 
 setupTestDb();
 
@@ -53,6 +57,22 @@ describe("source-draft-attempts", () => {
     expect(rows[0]!.collidingPath).toBeNull();
     expect(rows[0]!.proposalId).toBe("11111111-1111-4111-8111-111111111111");
     expect(rows[0]!.attemptedAt).toBeGreaterThanOrEqual(first.attemptedAt);
+  });
+
+  // A rejected proposal / a deleted doc makes the recorded outcome a lie: the row
+  // would keep saying "drafted" about a gate entry that no longer exists, and a
+  // re-capture under the same id would inherit a months-old skip reason.
+  test("delete drops the row for that bot+doc only", async () => {
+    await recordSourceDraftAttempt(base);
+    await recordSourceDraftAttempt({ ...base, docId: "other.md" });
+    await deleteSourceDraftAttempt("jarvis", base.collection, base.docId);
+    const byKey = await getSourceDraftAttempts("jarvis");
+    expect(byKey.get(`${base.collection}/${base.docId}`)).toBeUndefined();
+    expect(byKey.get(`${base.collection}/other.md`)).toBeDefined();
+  });
+
+  test("deleting a doc that was never attempted is a no-op, not an error", async () => {
+    await deleteSourceDraftAttempt("jarvis", "x-articles", "never-seen.md");
   });
 
   test("scoped per bot — another bot's wiki never inherits an attempt", async () => {

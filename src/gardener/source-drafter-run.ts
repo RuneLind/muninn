@@ -30,6 +30,7 @@ import {
 } from "../db/wiki-proposals.ts";
 import {
   recordSourceDraftAttempt,
+  type SourceDraftAttemptOutcome,
   type SourceDraftTrigger,
 } from "../db/source-draft-attempts.ts";
 import { loadConfig } from "../config.ts";
@@ -76,10 +77,12 @@ function firstHttpUrl(...candidates: (string | undefined)[]): string {
  * knowledge API directly, so this path takes no `apiUrl` — the run-now entry point
  * does its own huginn fetches with one.
  *
- * This is also the ONE place every drafter entry point funnels through, so it is
+ * Every drafter entry point that reaches the MODEL funnels through here, so it is
  * where the attempt is recorded ({@link recordSourceDraftAttempt}). Three of the
  * four outcomes persist nothing else, and the backlog row's whole diagnosis comes
  * from that ledger — a caller that drafts around this function is invisible again.
+ * The pre-model guards that return before it ({@link draftOneBacklogDoc}) record
+ * through the `recordAttempt` seam instead.
  */
 export async function runSourceDraftForInput(
   botConfig: BotConfig,
@@ -297,6 +300,19 @@ export interface SourceBacklogDeps {
   fetchDoc: (collection: string, id: string) => Promise<RawFetchedDoc | null>;
   /** Draft ONE source page from a fully-formed input (the real model one-shot). */
   draftInput: (input: SourceDraftInput) => Promise<SourceDraftOutcome>;
+  /**
+   * Record a PRE-MODEL outcome in the attempt ledger. `draftInput` records its own,
+   * but {@link draftOneBacklogDoc}'s cheap guards (fetch failed / no body / no public
+   * URL) return BEFORE it — and those are exactly the outcomes a human clicking
+   * "draft" on a row needs explained. Without this seam the row would go back to
+   * showing nothing, which is the invisibility this whole surface exists to fix.
+   * Absent ⇒ no ledger write (the unit-test wiring).
+   */
+  recordAttempt?: (
+    collection: string,
+    docId: string,
+    outcome: { outcome: SourceDraftAttemptOutcome; reason: string },
+  ) => Promise<void>;
 }
 
 /**
@@ -334,6 +350,19 @@ export function defaultSourceBacklogDeps(
         { timeoutMs: DOC_FETCH_TIMEOUT_MS },
       ),
     draftInput: (input) => runSourceDraftForInput(botConfig, wikiDir, input, trigger),
+    recordAttempt: (collection, docId, outcome) =>
+      recordSourceDraftAttempt({
+        botName: botConfig.name,
+        collection,
+        docId,
+        outcome: outcome.outcome,
+        degraded: false, // pre-model by construction — no work thrown away
+        reason: outcome.reason,
+        title: null,
+        collidingPath: null,
+        proposalId: null,
+        trigger,
+      }),
   };
 }
 
@@ -465,16 +494,26 @@ export async function draftOneBacklogDoc(
   titleOverride?: string,
 ): Promise<SourceBacklogDocResult> {
   const base = { collection: doc.collection, docId: doc.id };
+  // These three returns are drafter entry points too — record them, or a row whose
+  // doc can't be fetched shows the same nothing it did before the ledger existed.
+  const preModel = async (
+    outcome: "error" | "skipped",
+    reason: string,
+  ): Promise<SourceBacklogDocResult> => {
+    if (deps.recordAttempt) await deps.recordAttempt(doc.collection, doc.id, { outcome, reason });
+    return { ...base, outcome, reason };
+  };
+
   let fetched: RawFetchedDoc | null;
   try {
     fetched = await deps.fetchDoc(doc.collection, doc.id);
   } catch (err) {
-    return { ...base, outcome: "error", reason: `fetch failed: ${errMsg(err)}` };
+    return preModel("error", `fetch failed: ${errMsg(err)}`);
   }
   const body = (fetched?.text ?? "").trim();
   const url = firstHttpUrl(fetched?.metadata?.url, fetched?.url, doc.url);
-  if (!body) return { ...base, outcome: "skipped", reason: "doc has no body" };
-  if (!url) return { ...base, outcome: "skipped", reason: "doc has no public URL" };
+  if (!body) return preModel("skipped", "doc has no body");
+  if (!url) return preModel("skipped", "doc has no public URL");
 
   let outcome: SourceDraftOutcome;
   try {

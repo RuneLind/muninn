@@ -24,8 +24,12 @@ CREATE TABLE IF NOT EXISTS source_draft_attempts (
   doc_id         TEXT NOT NULL,
   -- drafted | covered | skipped | error (SourceDraftOutcome's discriminant).
   outcome        TEXT NOT NULL,
-  -- Mirrors `SourceDraftOutcome.degraded`: a skip that BURNED model calls, as
-  -- opposed to a cheap deterministic guard. Drives the row's warning styling.
+  -- Mirrors `SourceDraftOutcome.degraded` exactly: a skip representing WORK THROWN
+  -- AWAY (an unusable model answer — no title, failed shape gate, a second
+  -- collision), as opposed to a deliberate guard or an honest verdict. Deliberately
+  -- NOT "spent a model call": the collision-SKIP verdict costs two calls but is a
+  -- real answer, which is why the auto-trigger logs it at INFO. Drives the row's
+  -- warning styling, so the two must not drift.
   degraded       BOOLEAN NOT NULL DEFAULT FALSE,
   reason         TEXT,
   -- The encyclopedic title the drafter chose (set on `drafted` and on both

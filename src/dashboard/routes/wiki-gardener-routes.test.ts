@@ -1490,3 +1490,102 @@ describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
     expect(body.error).toBeDefined();
   });
 });
+
+// Every guard that fires BEFORE any huginn/model I/O, so the whole set is testable
+// without a real one-shot. The post-guard body (fetch → draft → ledger) is covered by
+// `source-drafter.test.ts` + `source-drafter-run.test.ts`; what regressed silently
+// before this block existed was the route's own gating.
+describe("POST /api/wiki/gardener/source-draft-doc — pre-I/O guards", () => {
+  let root: string;
+  let app: Hono;
+  let gardenerEnabled: boolean;
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-draft-doc-route-"));
+    await Bun.write(path.join(root, "notes.md"), "# Notes\n");
+    gardenerEnabled = true;
+    __setBotsForTest([
+      {
+        name: "draftbot",
+        dir: root,
+        persona: "",
+        telegramAllowedUserIds: [],
+        slackAllowedUserIds: [],
+        wikiDir: root,
+        get gardener() {
+          return { enabled: gardenerEnabled };
+        },
+      },
+    ] as unknown as Parameters<typeof __setBotsForTest>[0]);
+    __setWikiRegistryForTest([{ name: "draftbot", root, source: "bot" }]);
+    __resetWikiCacheForTest();
+    __resetIngestBacklogCacheForTest();
+    __resetGardenerMutexForTest();
+
+    app = new Hono();
+    registerWikiGardenerRoutes(app, {
+      getConsumed: async () => new Set<string>(),
+      getPending: async () => new Set<string>(),
+      getWikiGardenerWatcher: async () => null,
+      getSnapshot: async () => null,
+      setSnapshot: async () => {},
+      listProposals: async () => [],
+    });
+  });
+
+  afterEach(async () => {
+    __setBotsForTest(null);
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    __resetIngestBacklogCacheForTest();
+    __resetGardenerMutexForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const post = async (body: unknown, query = "wiki=draftbot"): Promise<Response> =>
+    await app.request(`/api/wiki/gardener/source-draft-doc?${query}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+
+  test("unknown bot → 404, before any work", async () => {
+    expect((await post({ collection: "x-articles", id: "a.md" }, "wiki=nobody")).status).toBe(404);
+  });
+
+  test("gardener disabled → 400 (the route must not run what the UI hides)", async () => {
+    gardenerEnabled = false;
+    const res = await post({ collection: "x-articles", id: "a.md" });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("disabled");
+  });
+
+  test("malformed / incomplete body → 400", async () => {
+    expect((await post(undefined)).status).toBe(400); // no body at all
+    expect((await post({ id: "a.md" })).status).toBe(400);
+    expect((await post({ collection: "x-articles" })).status).toBe(400);
+    expect((await post({ collection: "x-articles", id: 42 })).status).toBe(400);
+  });
+
+  test("unknown collection → 400 (never a huginn fetch for a made-up name)", async () => {
+    const res = await post({ collection: "not-a-collection", id: "a.md" });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("unknown summary collection");
+  });
+
+  test("an over-length title → 400 naming the cap, before a model call is spent", async () => {
+    const res = await post({ collection: "x-articles", id: "a.md", title: "x".repeat(121) });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("120");
+  });
+
+  test("409 while a gardener run holds the per-bot mutex — never a second model run", async () => {
+    let release = (): void => {};
+    const held = runExclusive("draftbot", () => new Promise<void>((r) => (release = r)));
+    expect(held).not.toBeNull();
+    const res = await post({ collection: "x-articles", id: "a.md" });
+    expect(res.status).toBe(409);
+    release();
+    await held;
+  });
+});

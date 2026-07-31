@@ -227,6 +227,11 @@ export interface BacklogDoc {
  */
 export interface BacklogDocDraft {
   outcome: "drafted" | "covered" | "skipped" | "error";
+  /**
+   * Work thrown away (an unusable model answer) — NOT merely "a model call was
+   * spent". Drives the warning rail, so an honest verdict like "the existing page
+   * already covers this" renders as a plain note, matching how it's logged.
+   */
   degraded: boolean;
   reason?: string;
   title?: string;
