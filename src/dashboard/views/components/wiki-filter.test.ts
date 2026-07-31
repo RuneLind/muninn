@@ -143,6 +143,96 @@ test("pageTimeMs: undated page is 0 and shows no date", () => {
   expect(pageDateLabel(page({}))).toBe("");
 });
 
+// --- sweep-aware "Recently updated" ------------------------------------------
+// The mtime rule has three regimes and `gitCreatedMs` is the discriminator: absent
+// ⇒ git knows nothing about this page ⇒ mtime is all it has (and the pre-git
+// behavior is preserved byte-for-byte, which every test above this line asserts).
+
+test("pageTimeMs: the git touch date beats an mtime a sweep reset", () => {
+  // The bug: mimir's 2026-07-31 backfill rewrote 148 plans in one commit, so every
+  // one of them reported as edited that minute. `mimir-wiki-polish`'s real last
+  // edit is 2026-05-04 and that is what the list must show.
+  const swept = page({
+    gitCreatedMs: Date.parse("2026-01-10T09:00:00Z"),
+    gitTouchedMs: Date.parse("2026-05-04T11:00:00Z"),
+    mtimeMs: Date.parse("2026-07-31T12:31:00Z"),
+  });
+  expect(pageTimeMs(swept)).toBe(Date.parse("2026-05-04T11:00:00Z"));
+  expect(pageDateLabel(swept)).toBe("2026-05-04");
+});
+
+test("pageTimeMs: a page edited but NOT yet committed still sorts to the top", () => {
+  // The one thing a git-only signal would regress, and the reason mtime survives at
+  // all: the edit is real, git just hasn't recorded it. `gitDirty` is what makes the
+  // difference between this page and the swept one above, whose mtime is identical.
+  const dirty = page({
+    gitCreatedMs: Date.parse("2026-01-10T09:00:00Z"),
+    gitTouchedMs: Date.parse("2026-05-04T11:00:00Z"),
+    mtimeMs: Date.parse("2026-07-31T12:31:00Z"),
+    gitDirty: true,
+  });
+  expect(pageTimeMs(dirty)).toBe(Date.parse("2026-07-31T12:31:00Z"));
+  expect(pageDateLabel(dirty)).toBe("2026-07-31");
+  expect(pageTimeMs(dirty)).toBeGreaterThan(
+    pageTimeMs(page({ ...dirty, gitDirty: undefined })),
+  );
+});
+
+test("pageTimeMs: a page with NO non-sweep touch falls back to its creation date", () => {
+  // 19 of mimir's 151 plans: added in the 2026-05-04 consolidation and only ever
+  // swept since. Without the fallback they'd sort as undated at the very bottom —
+  // strictly worse than the mtime they'd have had before.
+  const onlySwept = page({
+    gitCreatedMs: Date.parse("2026-05-04T11:00:00Z"),
+    mtimeMs: Date.parse("2026-07-31T12:31:00Z"),
+  });
+  expect(pageTimeMs(onlySwept)).toBe(Date.parse("2026-05-04T11:00:00Z"));
+  expect(pageDateLabel(onlySwept)).toBe("2026-05-04");
+});
+
+test("pageTimeMs: an untracked page trusts its mtime unconditionally", () => {
+  // A brand-new draft has no git history at all — no created date, so no
+  // discriminator — and its mtime is the honest and only answer.
+  const draft = page({ mtimeMs: Date.parse("2026-07-31T12:31:00Z"), gitDirty: true });
+  expect(pageTimeMs(draft)).toBe(Date.parse("2026-07-31T12:31:00Z"));
+  expect(pageDateLabel(draft)).toBe("2026-07-31");
+});
+
+test("pageTimeMs: a frontmatter `updated` newer than every git signal still wins", () => {
+  // Frontmatter is authored, not derived — a page can declare a date git can't know
+  // (a scheduled publication, a hand-corrected stamp) and it must not be overruled.
+  const declared = page({
+    updated: "2026-08-15",
+    gitCreatedMs: Date.parse("2026-01-10T09:00:00Z"),
+    gitTouchedMs: Date.parse("2026-05-04T11:00:00Z"),
+  });
+  expect(pageTimeMs(declared)).toBe(Date.parse("2026-08-15"));
+  expect(pageDateLabel(declared)).toBe("2026-08-15");
+});
+
+test("sortPages: updated un-collapses a sweep that flattened every mtime", () => {
+  // The end-to-end shape of the regression: three plans all mtimed at the same sweep
+  // instant, ordered by their real touch dates instead of alphabetically — with the
+  // never-really-touched one falling back to creation and landing last.
+  const sweep = Date.parse("2026-07-31T12:31:00Z");
+  const plans = [
+    page({ name: "stale", title: "Alpha", gitCreatedMs: Date.parse("2026-05-04T11:00:00Z") }),
+    page({
+      name: "mid",
+      title: "Charlie",
+      gitCreatedMs: Date.parse("2026-01-10T09:00:00Z"),
+      gitTouchedMs: Date.parse("2026-07-08T11:00:00Z"),
+    }),
+    page({
+      name: "recent",
+      title: "Bravo",
+      gitCreatedMs: Date.parse("2026-01-10T09:00:00Z"),
+      gitTouchedMs: Date.parse("2026-07-28T11:00:00Z"),
+    }),
+  ].map((p) => page({ ...p, mtimeMs: sweep }));
+  expect(sortPages(plans, "updated").map((p) => p.name)).toEqual(["recent", "mid", "stale"]);
+});
+
 test("sortPages: updated ranks a frontmatter-less mimir page above older dated ones", () => {
   // The bug: mimir's blogs/plans/archive pages carry no frontmatter, so a
   // frontmatter-only sort key left them below every dated page regardless of

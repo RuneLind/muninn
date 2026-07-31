@@ -16,6 +16,7 @@ import {
   PLAN_STATUS_VALUES,
   __resetWikiCacheForTest,
 } from "./store.ts";
+import { SWEEP_THRESHOLD } from "./git-dates.ts";
 
 describe("parseFrontmatter", () => {
   test("parses scalars, quoted strings, and inline arrays", () => {
@@ -1430,13 +1431,13 @@ describe("buildWikiIndex — plan status fields", () => {
 });
 
 /**
- * Git creation dates reach the page metadata. The parser itself is covered in
- * `git-created.test.ts`; what these assert is the WIRING — that the walk's keys line
+ * Git date signals reach the page metadata. The parser itself is covered in
+ * `git-dates.test.ts`; what these assert is the WIRING — that the walk's keys line
  * up with `WikiPageMeta.relPath`. A mismatch there (a normalization, a leading `./`,
  * a case fold) would silently stamp nothing and quietly reinstate the sweep-collapse
  * bug, with the index build still reporting success.
  */
-describe("buildWikiIndex + git creation dates", () => {
+describe("buildWikiIndex + git dates", () => {
   let root: string;
 
   /** Run git in the fixture with an identity supplied inline — the test host may
@@ -1517,15 +1518,67 @@ describe("buildWikiIndex + git creation dates", () => {
     }
   });
 
-  test("a non-git wiki builds cleanly with the field simply absent", async () => {
+  test("a non-git wiki builds cleanly with the fields simply absent", async () => {
     const plain = await mkdtemp(path.join(tmpdir(), "wiki-nogit-"));
     try {
       await Bun.write(path.join(plain, "p.md"), "# P");
       const index = await buildWikiIndex(plain);
       expect(index.pages).toHaveLength(1);
       expect(index.pages[0]!.gitCreatedMs).toBeUndefined();
+      // All three degrade together — the client reads an absent `gitCreatedMs` as
+      // "git knows nothing here" and goes back to ranking on mtime.
+      expect(index.pages[0]!.gitTouchedMs).toBeUndefined();
+      expect(index.pages[0]!.gitDirty).toBeUndefined();
     } finally {
       await rm(plain, { recursive: true, force: true });
     }
+  });
+
+  test("a SWEEP contributes no gitTouchedMs, so the real edit survives it", async () => {
+    // The end-to-end shape of mimir's 2026-07-31 backfill: one commit rewriting more
+    // pages than the threshold allows. `target.md`'s own small edit must still be the
+    // date it reports, and the pages that arrived only in the sweep must report
+    // nothing at all — that absence is what `pageTimeMs` folds onto their creation date.
+    await Bun.write(path.join(root, "plans/target.md"), "# Target");
+    await git("add", "-A");
+    await git("commit", "-qm", "add target");
+    await new Promise((r) => setTimeout(r, 1100)); // %at is second-granular
+    await Bun.write(path.join(root, "plans/target.md"), "# Target (edited)");
+    await git("add", "-A");
+    await git("commit", "-qm", "real edit");
+    const realEdit = (await buildWikiIndex(root)).pages.find(
+      (p) => p.relPath === "plans/target.md",
+    )!.gitTouchedMs;
+    expect(realEdit).toBeGreaterThan(0); // premise, not a vacuous undefined===undefined
+
+    await new Promise((r) => setTimeout(r, 1100));
+    await Bun.write(path.join(root, "plans/target.md"), "# Target (swept)");
+    for (let i = 0; i < SWEEP_THRESHOLD; i++) {
+      await Bun.write(path.join(root, `plans/bulk-${i}.md`), "# Bulk");
+    }
+    await git("add", "-A");
+    await git("commit", "-qm", "sweep");
+
+    __resetWikiCacheForTest();
+    const after = await buildWikiIndex(root);
+    const target = after.pages.find((p) => p.relPath === "plans/target.md")!;
+    expect(target.gitTouchedMs).toBe(realEdit);
+    // Born in the sweep and never touched outside it — no update date at all.
+    const bulk = after.pages.find((p) => p.relPath === "plans/bulk-0.md")!;
+    expect(bulk.gitCreatedMs).toBeGreaterThan(0);
+    expect(bulk.gitTouchedMs).toBeUndefined();
+  });
+
+  test("an uncommitted edit is flagged gitDirty — the mtime rule's only opener", async () => {
+    await Bun.write(path.join(root, "plans/clean.md"), "# Clean");
+    await Bun.write(path.join(root, "plans/edited.md"), "# Edited");
+    await git("add", "-A");
+    await git("commit", "-qm", "add both");
+    await Bun.write(path.join(root, "plans/edited.md"), "# Edited, again");
+
+    __resetWikiCacheForTest();
+    const index = await buildWikiIndex(root);
+    expect(index.pages.find((p) => p.relPath === "plans/edited.md")!.gitDirty).toBe(true);
+    expect(index.pages.find((p) => p.relPath === "plans/clean.md")!.gitDirty).toBeUndefined();
   });
 });
