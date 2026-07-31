@@ -7,9 +7,11 @@ import {
   MIN_SOURCE_BODY_CHARS,
   COLLISION_SKIP_SENTINEL,
   sanitizeTitleOverride,
+  titleMatchKey,
   type DraftSourcePageDeps,
   type SourceDraftInput,
 } from "./source-drafter.ts";
+import { sanitizeFilename } from "./target-resolve.ts";
 import type { WikiIndex, WikiPageMeta } from "../wiki/store.ts";
 import type { WikiRefs } from "../wiki/ingest-backlog.ts";
 import type { InsertWikiProposalParams, WikiProposal } from "../db/wiki-proposals.ts";
@@ -616,6 +618,49 @@ describe("titleOverride (the row's rename-and-draft retry)", () => {
     expect(out.outcome).toBe("drafted");
   });
 
+  // Every one of these is a title that would fail to match ITSELF, leaving the doc
+  // undraftable by rename and burning a model call per click, with the useless
+  // advice "try again" against two visually identical strings.
+  test.each([
+    ["NFD vs NFC", "Café Culture Explained", "Café Culture Explained"],
+    ["curly vs straight quotes", 'The "Bitter Lesson" Revisited', "The “Bitter Lesson” Revisited"],
+    ["em vs en dash", "Agents — A Survey", "Agents – A Survey"],
+    ["case only", "First, the Graph Itself", "first, THE graph itself"],
+  ])("typography drift does not false-reject: %s", async (_label, override, modelTitle) => {
+    const out = await draftSourcePage(
+      baseDeps({
+        input: { ...baseDeps().input, titleOverride: override },
+        callDrafter: async () => mdxDraft({ title: modelTitle }),
+      }),
+    );
+    expect(out.outcome).toBe("drafted");
+    // The EDITOR's spelling wins the filename and the frontmatter — a match modulo
+    // typography must not become a quiet rename. (Compared against the SANITIZED
+    // override: `sanitizeTitleOverride` strips quotes on the way into the prompt,
+    // so that is the editor's title as the drafter was asked for it.)
+    const chosen = sanitizeTitleOverride(override);
+    if (out.outcome === "drafted") {
+      expect(out.title).toBe(chosen);
+      expect(out.targetPath).toBe(`sources/${sanitizeFilename(chosen)}.mdx`);
+    }
+  });
+
+  test("the persisted draft's frontmatter title is pinned to the editor's spelling", async () => {
+    let captured: InsertWikiProposalParams | null = null;
+    await draftSourcePage(
+      baseDeps({
+        input: { ...baseDeps().input, titleOverride: "First, the Graph Itself" },
+        callDrafter: async () => mdxDraft({ title: "first, THE graph itself" }),
+        insertProposal: async (p) => {
+          captured = p;
+          return { id: "r", ...p } as unknown as WikiProposal;
+        },
+      }),
+    );
+    expect(captured!.draft).toContain("title: First, the Graph Itself");
+    expect(captured!.draft).not.toContain("title: first, THE graph itself");
+  });
+
   test("a free override drafts under exactly that title", async () => {
     const out = await draftSourcePage(
       baseDeps({
@@ -628,5 +673,19 @@ describe("titleOverride (the row's rename-and-draft retry)", () => {
       expect(out.title).toBe("First, the Graph Itself");
       expect(out.targetPath).toBe("sources/First, the Graph Itself.mdx");
     }
+  });
+});
+
+describe("titleMatchKey", () => {
+  test("folds the drift that would make a title fail to match itself", () => {
+    expect(titleMatchKey("Café")).toBe(titleMatchKey("Café")); // NFC vs NFD
+    expect(titleMatchKey('The "X"')).toBe(titleMatchKey("The “X”"));
+    expect(titleMatchKey("A — B")).toBe(titleMatchKey("A – B"));
+    expect(titleMatchKey("First, the Graph")).toBe(titleMatchKey("first, THE graph"));
+  });
+
+  test("titles a reader would call different still differ", () => {
+    expect(titleMatchKey("Graph Engineering")).not.toBe(titleMatchKey("Graph Engineering v2"));
+    expect(titleMatchKey("RAG")).not.toBe(titleMatchKey("RAGs"));
   });
 });

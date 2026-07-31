@@ -81,6 +81,7 @@ import {
 import {
   getSourceDraftAttempts,
   deleteSourceDraftAttempt,
+  deleteSourceDraftAttemptForProposal,
   type SourceDraftAttempt,
   type SourceDraftAttemptOutcome,
   type SourceDraftTrigger,
@@ -2061,13 +2062,13 @@ export function registerWikiGardenerRoutes(
     if (!rejected) {
       return c.json({ error: "proposal is no longer a draft", status: existing.status }, 409);
     }
-    // The doc returns to the backlog uncovered, so its attempt row must stop saying
-    // "drafted" — that would point at a gate entry the reject just removed. Dropping
-    // it makes the row read un-attempted, which is what it is again. Best-effort: a
-    // ledger cleanup must never turn a successful reject into a failure.
-    for (const doc of existing.sourceDocs ?? []) {
-      await deleteSourceDraftAttempt(existing.botName, doc.collection, doc.docId);
-    }
+    // The doc returns to the backlog uncovered, so THIS proposal's attempt row must
+    // stop saying "drafted" — it would point at a gate entry the reject just removed.
+    // Keyed on the proposal id, never on its `source_docs`: a concept proposal lists
+    // every member doc, and a doc-keyed delete would blank the "why" line for members
+    // whose own source draft is still live in the gate. Best-effort — a ledger
+    // cleanup must never turn a successful reject into a failure.
+    await deleteSourceDraftAttemptForProposal(id);
     return c.json({ outcome: "rejected" });
   });
 }

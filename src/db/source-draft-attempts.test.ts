@@ -4,6 +4,7 @@ import {
   recordSourceDraftAttempt,
   getSourceDraftAttempts,
   deleteSourceDraftAttempt,
+  deleteSourceDraftAttemptForProposal,
 } from "./source-draft-attempts.ts";
 
 setupTestDb();
@@ -73,6 +74,39 @@ describe("source-draft-attempts", () => {
 
   test("deleting a doc that was never attempted is a no-op, not an error", async () => {
     await deleteSourceDraftAttempt("jarvis", "x-articles", "never-seen.md");
+  });
+
+  // A gardener CONCEPT proposal lists every member doc in `source_docs`. Keying the
+  // reject cleanup on those docs blanked the "why" line for members whose OWN source
+  // draft was still live in the gate — so it is keyed on the proposal instead.
+  test("deleteForProposal drops only the row that proposal produced", async () => {
+    const P = "22222222-2222-4222-8222-222222222222";
+    await recordSourceDraftAttempt({
+      ...base,
+      docId: "member-a.md",
+      outcome: "drafted",
+      proposalId: P,
+    });
+    await recordSourceDraftAttempt({ ...base, docId: "member-b.md" }); // same wave, own skip
+    await recordSourceDraftAttempt({
+      ...base,
+      docId: "member-c.md",
+      outcome: "drafted",
+      proposalId: "33333333-3333-4333-8333-333333333333",
+    });
+
+    await deleteSourceDraftAttemptForProposal(P);
+
+    const byKey = await getSourceDraftAttempts("jarvis");
+    expect(byKey.get(`${base.collection}/member-a.md`)).toBeUndefined();
+    expect(byKey.get(`${base.collection}/member-b.md`)).toBeDefined();
+    expect(byKey.get(`${base.collection}/member-c.md`)).toBeDefined();
+  });
+
+  test("deleteForProposal for an unknown proposal is a no-op", async () => {
+    await recordSourceDraftAttempt(base);
+    await deleteSourceDraftAttemptForProposal("44444444-4444-4444-8444-444444444444");
+    expect((await getSourceDraftAttempts("jarvis")).size).toBe(1);
   });
 
   test("scoped per bot — another bot's wiki never inherits an attempt", async () => {

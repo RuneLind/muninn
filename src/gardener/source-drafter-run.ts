@@ -185,6 +185,28 @@ export async function runSourceDraftForNewest(
       (docDateMs({ id: a.id, date: a.date }) ?? Number.NEGATIVE_INFINITY),
   )[0]!;
 
+  // The DOC-SCOPED guards below record too — they name a specific doc, so the row
+  // for that doc must be able to explain itself. The collection-scoped early returns
+  // above (empty / all-dismissed) deliberately don't: they belong to no doc.
+  const preModel = async (
+    outcome: "error" | "skipped",
+    reason: string,
+  ): Promise<SourceDraftOutcome> => {
+    await recordSourceDraftAttempt({
+      botName: botConfig.name,
+      collection,
+      docId: newest.id,
+      outcome,
+      degraded: false, // pre-model by construction
+      reason,
+      title: null,
+      collidingPath: null,
+      proposalId: null,
+      trigger: "run-now",
+    });
+    return { outcome, reason };
+  };
+
   let doc: RawFetchedDoc | null;
   try {
     doc = await fetchKnowledgeApi(
@@ -193,13 +215,13 @@ export async function runSourceDraftForNewest(
       { timeoutMs: DOC_FETCH_TIMEOUT_MS },
     );
   } catch (err) {
-    return { outcome: "error", reason: `fetching ${collection}/${newest.id} failed: ${errMsg(err)}` };
+    return preModel("error", `fetching ${collection}/${newest.id} failed: ${errMsg(err)}`);
   }
 
   const body = (doc?.text ?? "").trim();
   const url = firstHttpUrl(doc?.metadata?.url, doc?.url, newest.url);
-  if (!body) return { outcome: "skipped", reason: `doc ${collection}/${newest.id} has no body` };
-  if (!url) return { outcome: "skipped", reason: `doc ${collection}/${newest.id} has no public URL` };
+  if (!body) return preModel("skipped", `doc ${collection}/${newest.id} has no body`);
+  if (!url) return preModel("skipped", `doc ${collection}/${newest.id} has no public URL`);
 
   log.info("Source drafter run-now: newest doc {collection}/{id}", { collection, id: newest.id });
   return runSourceDraftForInput(
@@ -527,8 +549,9 @@ export async function draftOneBacklogDoc(
     });
   } catch (err) {
     // draftSourcePage never throws, but runSourceDraftForInput's setup (config /
-    // index load) could — contain it so one bad doc can't abort the batch.
-    return { ...base, outcome: "error", reason: errMsg(err) };
+    // index load) could — contain it so one bad doc can't abort the batch. Recorded
+    // here because the throw happened BEFORE the ledger write inside it.
+    return preModel("error", errMsg(err));
   }
   return {
     ...base,

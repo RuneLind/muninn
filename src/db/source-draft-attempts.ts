@@ -88,11 +88,37 @@ export async function recordSourceDraftAttempt(
 }
 
 /**
- * Drop the recorded attempt for one doc. Called when the attempt stops describing
- * reality: the doc is deleted from huginn (a re-capture under the same id must not
- * inherit a months-old skip reason), or the proposal it produced is rejected — a
- * row still reading "drafted" would point at a gate entry that no longer exists.
- * After a drop the doc reads as un-attempted, which is exactly what it is again.
+ * Drop the attempt row a specific proposal produced. Used when that proposal is
+ * REJECTED: the row would otherwise keep reading "drafted" about a gate entry that
+ * no longer exists, while nothing stops the doc being re-drafted (a rejected
+ * proposal leaves no live topic key).
+ *
+ * Keyed on `proposal_id` and NOT on the proposal's `source_docs`, which is the
+ * whole point: a gardener CONCEPT proposal lists 3–10 member docs, so a doc-keyed
+ * delete would blank the "why" line for every member — including docs whose own
+ * source-page draft is still sitting live in the gate. It also makes the call a
+ * single statement instead of one no-op DELETE per member.
+ *
+ * Deliberate tradeoff: this discards the fact that a human refused THIS draft. The
+ * doc reads un-attempted again, which matches what the pipeline will do next (a
+ * later batch may re-draft it). If "rejected once" ever needs to be visible, it
+ * wants its own outcome value, not a surviving `drafted` row.
+ */
+export async function deleteSourceDraftAttemptForProposal(proposalId: string): Promise<void> {
+  try {
+    const sql = getDb();
+    await sql`DELETE FROM source_draft_attempts WHERE proposal_id = ${proposalId}`;
+  } catch (err) {
+    log.warn("Failed to delete source-draft attempt for proposal {id}: {error}", {
+      id: proposalId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * Drop the recorded attempt for one doc — the doc was deleted from huginn, so a
+ * re-capture under the same id must not inherit a months-old skip reason.
  */
 export async function deleteSourceDraftAttempt(
   botName: string,

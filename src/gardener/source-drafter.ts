@@ -32,6 +32,7 @@ import {
   containDraftBodyLinks,
   isHttpUrl,
   normalizeDraftOutput,
+  pinFrontmatterTitle,
   pinFrontmatterUrl,
   replaceUnresolvedSourceLinks,
   shapeGate,
@@ -120,6 +121,32 @@ export function sanitizeTitleOverride(raw: string | undefined): string {
     .replace(/["“”`]/g, "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+/**
+ * The comparison key for "did the drafter use the title the editor chose?".
+ *
+ * Typography, not identity, is what differs between two titles that mean the same
+ * thing — and every difference here is a FALSE REJECT that makes the doc undraftable
+ * by rename, burning a model call per attempt with the useless advice "try again":
+ *   · **NFC** — an NFD `Café` from the model against an NFC `Café` from the editor's
+ *     keyboard are visually identical and byte-different;
+ *   · **quotes/dashes** — `sanitizeTitleOverride` strips STRAIGHT quotes from the
+ *     override while the model tends to emit CURLY ones, so a quoted title could
+ *     never match itself; en/em dashes drift the same way;
+ *   · **case + filename sanitation** — the stem is what actually has to be unique.
+ * Anything a reader would call a different title still differs after folding.
+ */
+export function titleMatchKey(title: string): string {
+  return sanitizeFilename(
+    title
+      .normalize("NFC")
+      .replace(/[“”„‟"«»]/g, "")
+      .replace(/[‘’‚‛']/g, "")
+      .replace(/[‐‑‒–—―]/g, "-")
+      .replace(/\s+/g, " ")
+      .trim(),
+  ).toLowerCase();
 }
 
 /**
@@ -426,23 +453,35 @@ export async function draftSourcePage(deps: DraftSourcePageDeps): Promise<Source
         return { outcome: "skipped", reason: "draft has no frontmatter title", degraded: true };
       }
       title = rawTitle.trim();
-      const stem = sanitizeFilename(title);
-      if (!stem)
-        return { outcome: "skipped", reason: "title sanitized to an empty stem", degraded: true };
 
       // ENFORCE the override — the prompt only ASKS for it. Without this check a
       // model that renamed the page anyway would (a) silently file the editor's
       // rename under a title they never chose, and (b) on a collision, blame their
-      // title for a clash it had nothing to do with. Compared on the sanitized stem,
-      // case-insensitively, so punctuation the filename sanitizer drops isn't a
-      // spurious mismatch.
-      if (overrideTitle && stem.toLowerCase() !== sanitizeFilename(overrideTitle).toLowerCase()) {
-        return {
-          outcome: "skipped",
-          reason: `the drafter returned "${title}" instead of the chosen title "${overrideTitle}" — try again`,
-          degraded: true,
-        };
+      // title for a clash it had nothing to do with. Compared through
+      // `titleMatchKey`, which folds the typography drift that would otherwise make
+      // a title fail to match ITSELF (see there). Runs BEFORE the stem so the
+      // filename is derived from whichever title wins.
+      if (overrideTitle) {
+        if (titleMatchKey(title) !== titleMatchKey(overrideTitle)) {
+          return {
+            outcome: "skipped",
+            reason: `the drafter returned "${title}" instead of the chosen title "${overrideTitle}" — try again`,
+            degraded: true,
+          };
+        }
+        // Matched, so the two differ only in typography/case — and the EDITOR's
+        // spelling is the one that was chosen. Take it for the filename and pin it
+        // into the frontmatter, or the page still lands under a title they never
+        // typed (the silent rename this check exists to stop, one fold weaker).
+        if (title !== overrideTitle) {
+          title = overrideTitle;
+          draftText = pinFrontmatterTitle(draftText, overrideTitle);
+        }
       }
+
+      const stem = sanitizeFilename(title);
+      if (!stem)
+        return { outcome: "skipped", reason: "title sanitized to an empty stem", degraded: true };
 
       targetPath = path.posix.join(expectedDir(domain, "source"), `${stem}.mdx`);
 
@@ -458,10 +497,12 @@ export async function draftSourcePage(deps: DraftSourcePageDeps): Promise<Source
       const collision = findCollidingPage(index, stem, targetPath);
       if (collision) {
         collidingPage = collision;
-        // A human-chosen title gets NO retry: the SKIP branch is what silently drops
-        // these docs, and re-asking the model to differentiate a title the editor
-        // already picked would just discard their decision. Name the collision and
-        // stop — the row's rename affordance is the way forward.
+        // Under an override this is unreachable: enforcement above pins the stem to
+        // the override's, and the pre-flight already answered that stem against the
+        // same index — for free, before the model call. The `!overrideTitle` guard
+        // stays as the statement of intent (a human-chosen title gets NO
+        // distinct-title-or-SKIP retry: that SKIP branch is what silently drops these
+        // docs, and it must not overrule a title an editor picked).
         if (collisionTitle === null && !overrideTitle) {
           collisionTitle = title;
           log.info("Source drafter title collision on {stem} for {topic} — retrying with distinct-title nudge", {
@@ -473,9 +514,7 @@ export async function draftSourcePage(deps: DraftSourcePageDeps): Promise<Source
         }
         return {
           outcome: "skipped",
-          reason: overrideTitle
-            ? `the chosen title collides with the existing page "${collision.title}" — pick another`
-            : `stem "${stem}" collides with an existing page`,
+          reason: `stem "${stem}" collides with an existing page`,
           degraded: true,
           collidingPage: collision,
         };
