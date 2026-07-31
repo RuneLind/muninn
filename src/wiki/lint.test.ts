@@ -15,9 +15,17 @@ describe("lintWiki", () => {
   let root: string;
   const write = (rel: string, content: string) => Bun.write(path.join(root, rel), content);
 
+  /**
+   * The pinned "now" every lint run in this file is judged against. Deliberately AFTER
+   * every fixture's `updated:` (2026-06-01…08): the future-date case below reads this
+   * clock, so a `now` in the past — the old literal `1_700_000_000_000` (2023-11-14) —
+   * would make every fixture page read as future-stamped.
+   */
+  const NOW = Date.parse("2026-06-20T12:00:00Z");
+
   async function lint(): Promise<LintFinding[]> {
     const index = await buildWikiIndex(root);
-    const { findings } = await lintWiki(index, { now: () => 1_700_000_000_000 });
+    const { findings } = await lintWiki(index, { now: () => NOW });
     return findings;
   }
 
@@ -236,6 +244,106 @@ describe("lintWiki", () => {
     expect(stale).not.toContain("index.md");
     // Good Concept has a valid updated: → not flagged.
     expect(stale).not.toContain("concepts/Good Concept.md");
+  });
+
+  test("a frontmatter date implausibly in the future fires stale-updated", async () => {
+    // The reader's recency sorts IGNORE such a stamp (`isImplausibleFutureDate`), which
+    // is right for the ordering but leaves the bad stamp with no operator-visible signal
+    // anywhere. This check is that signal. NOW is 2026-06-20T12:00Z, so +60h is past the
+    // 48h skew allowance and +36h is inside it.
+    await write(
+      "concepts/Future Updated.md",
+      ["---", "type: concept", "title: Future Updated", "updated: 2026-06-23", "sources: [x]", "---", "", "Linked [[Good Concept]]."].join("\n"),
+    );
+    await write(
+      "concepts/Future Created.md",
+      ["---", "type: concept", "title: Future Created", "updated: 2026-06-10", "created: 2026-06-23", "sources: [x]", "---", "", "Linked [[Good Concept]]."].join("\n"),
+    );
+    // Inside the skew allowance (a plain day authored in UTC+14, a slightly skewed
+    // clock) — trusted by the sort, so never flagged here either.
+    await write(
+      "concepts/Nearly Now.md",
+      ["---", "type: concept", "title: Nearly Now", "updated: 2026-06-22", "sources: [x]", "---", "", "Linked [[Good Concept]]."].join("\n"),
+    );
+    const findings = await lint();
+    const stale = relPathsFor(findings, "stale-updated");
+    expect(stale).toContain("concepts/Future Updated.md");
+    expect(stale).toContain("concepts/Future Created.md");
+    expect(stale).not.toContain("concepts/Nearly Now.md");
+    // Past-dated fixtures are untouched — no existing wiki starts reporting findings.
+    expect(stale).not.toContain("concepts/Good Concept.md");
+    expect(stale).not.toContain("sources/Real Source.md");
+
+    // The message names the offending FIELD and value, so the gate list is actionable.
+    const updatedFinding = findings.find(
+      (f) => f.check === "stale-updated" && f.relPath === "concepts/Future Updated.md",
+    )!;
+    expect(updatedFinding.message).toContain("updated:");
+    expect(updatedFinding.message).toContain("2026-06-23");
+    expect(updatedFinding.detail).toContain("48h");
+    const createdFinding = findings.find(
+      (f) => f.check === "stale-updated" && f.relPath === "concepts/Future Created.md",
+    )!;
+    expect(createdFinding.message).toContain("created:");
+  });
+
+  test("an unparseable updated: is reported as such, and never as a future date", async () => {
+    // The `updated` field itself reports ONE way: unparseable, not future — an
+    // unparseable value has no instant to compare.
+    await write(
+      "concepts/Bad Updated.md",
+      ["---", "type: concept", "title: Bad Updated", "updated: not-a-date", "sources: [x]", "---", "", "Linked [[Good Concept]]."].join("\n"),
+    );
+    const findings = await lint();
+    const mine = findings.filter(
+      (f) => f.check === "stale-updated" && f.relPath === "concepts/Bad Updated.md",
+    );
+    expect(mine.length).toBe(1);
+    expect(mine[0]!.message).toContain("Unparseable");
+    expect(mine[0]!.message).not.toContain("future");
+  });
+
+  test("a future created: is reported even when updated: is missing or unparseable", async () => {
+    // The two fields feed two different sorts, so the checks are independent. The
+    // pre-fix code returned early on the missing/unparseable `updated` branches, which
+    // hid the WORSE finding behind the milder one: a page whose `created: 2027-…`
+    // silently corrupts "Recently added" reported only "Missing frontmatter: updated:".
+    await write(
+      "concepts/No Updated Future Created.md",
+      ["---", "type: concept", "title: No Updated Future Created", "created: 2026-06-23", "sources: [x]", "---", "", "Linked [[Good Concept]]."].join("\n"),
+    );
+    await write(
+      "concepts/Bad Updated Future Created.md",
+      ["---", "type: concept", "title: Bad Updated Future Created", "updated: not-a-date", "created: 2026-06-23", "sources: [x]", "---", "", "Linked [[Good Concept]]."].join("\n"),
+    );
+    const findings = await lint();
+
+    const missing = findings.filter(
+      (f) => f.check === "stale-updated" && f.relPath === "concepts/No Updated Future Created.md",
+    );
+    expect(missing.length).toBe(2);
+    expect(missing.map((f) => f.message).join(" | ")).toContain("Missing frontmatter: updated:");
+    expect(missing.some((f) => /created: "2026-06-23" is in the future/.test(f.message))).toBe(true);
+
+    const unparseable = findings.filter(
+      (f) => f.check === "stale-updated" && f.relPath === "concepts/Bad Updated Future Created.md",
+    );
+    expect(unparseable.length).toBe(2);
+    expect(unparseable.some((f) => /Unparseable updated/.test(f.message))).toBe(true);
+    expect(unparseable.some((f) => /created: "2026-06-23" is in the future/.test(f.message))).toBe(true);
+
+    // A missing/unparseable `updated` with a SOUND `created` still reports only the
+    // one finding — the created check adds nothing when there is nothing wrong.
+    await write(
+      "concepts/No Updated Sound Created.md",
+      ["---", "type: concept", "title: No Updated Sound Created", "created: 2026-06-01", "sources: [x]", "---", "", "Linked [[Good Concept]]."].join("\n"),
+    );
+    const again = await lint();
+    expect(
+      again.filter(
+        (f) => f.check === "stale-updated" && f.relPath === "concepts/No Updated Sound Created.md",
+      ).length,
+    ).toBe(1);
   });
 
   test("concept without sources fires missing-sources; entity + sourced concept exempt", async () => {

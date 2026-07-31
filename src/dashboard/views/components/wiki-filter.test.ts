@@ -1,8 +1,10 @@
 import { test, expect } from "bun:test";
 import {
+  anchorNow,
   connectionTypeOrder,
   filterPages,
   folderCounts,
+  FUTURE_DATE_SKEW_MS,
   followupCount,
   hasPlanStatus,
   hasTypedHubs,
@@ -260,14 +262,210 @@ test("pageTimeMs: an untracked page trusts its mtime unconditionally", () => {
 
 test("pageTimeMs: a frontmatter `updated` newer than every git signal still wins", () => {
   // Frontmatter is authored, not derived — a page can declare a date git can't know
-  // (a scheduled publication, a hand-corrected stamp) and it must not be overruled.
+  // (a hand-corrected stamp, an edit whose only commit was a sweep) and it must not be
+  // overruled. Dated in the PAST on purpose: the future case is the clamp's, below,
+  // and a hard-coded future literal here would silently change meaning as time passes.
   const declared = page({
-    updated: "2026-08-15",
+    updated: "2026-06-15",
     gitCreatedMs: Date.parse("2026-01-10T09:00:00Z"),
     gitTouchedMs: Date.parse("2026-05-04T11:00:00Z"),
   });
-  expect(pageTimeMs(declared)).toBe(Date.parse("2026-08-15"));
-  expect(pageDateLabel(declared)).toBe("2026-08-15");
+  expect(pageTimeMs(declared)).toBe(Date.parse("2026-06-15"));
+  expect(pageDateLabel(declared)).toBe("2026-06-15");
+});
+
+// ---------------------------------------------------------------------------
+// Future-date guard (ignore, never clamp). Dates are relative to `Date.now()` — a
+// literal would flip from future to past as the calendar moves and quietly stop
+// testing anything. The exact-boundary case below instead passes an explicit `now`,
+// which is what pins the constant itself.
+// ---------------------------------------------------------------------------
+
+/** `YYYY-MM-DD` `offsetMs` away from now, in UTC — the spelling frontmatter uses. */
+function dayOffset(offsetMs: number): string {
+  return new Date(Date.now() + offsetMs).toISOString().slice(0, 10);
+}
+const HOUR = 60 * 60 * 1000;
+
+test("pageTimeMs: an implausibly future frontmatter date does not become the sort key", () => {
+  // The hole: `consider()` accepts any positive ms, so a model-emitted `updated:
+  // 2027-01-01` outranks every real signal FOREVER — no later edit can exceed it, and
+  // the page squats at the top of "Recently updated". The page falls back to its git
+  // evidence instead, and the label follows the key so the row shows what it sorted on.
+  const future = page({
+    updated: dayOffset(400 * 24 * HOUR),
+    gitCreatedMs: Date.parse("2026-01-10T09:00:00Z"),
+    gitTouchedMs: Date.parse("2026-05-04T11:00:00Z"),
+  });
+  expect(pageTimeMs(future)).toBe(Date.parse("2026-05-04T11:00:00Z"));
+  expect(pageDateLabel(future)).toBe("2026-05-04");
+  expect(pageDateKind(future)).toBe("updated");
+  // …and it now sorts BELOW a page genuinely touched later, which is the whole point.
+  const real = page({
+    name: "real",
+    gitCreatedMs: Date.parse("2026-01-10T09:00:00Z"),
+    gitTouchedMs: Date.parse("2026-07-08T11:00:00Z"),
+  });
+  const ranked = sortPages([page({ ...future, name: "future" }), real], "updated");
+  expect(ranked.map((p) => p.name)).toEqual(["real", "future"]);
+});
+
+test("pageTimeMs: a future date within the skew allowance is still trusted", () => {
+  // A plain day stamped in UTC+14 reads as ~14h ahead in UTC, and a skewed clock adds
+  // more; 48h swallows both. Anything past that is not a timezone.
+  // ONE `dayOffset` evaluation: three separate calls straddling UTC midnight would
+  // disagree on the day and flake sub-millisecond.
+  const tomorrow = dayOffset(24 * HOUR);
+  const nearly = page({ updated: tomorrow });
+  expect(pageTimeMs(nearly)).toBe(Date.parse(tomorrow));
+  expect(pageDateLabel(nearly)).toBe(tomorrow);
+  const beyond = page({ updated: dayOffset(96 * HOUR) });
+  expect(pageTimeMs(beyond)).toBe(0);
+  expect(pageDateLabel(beyond)).toBe("");
+});
+
+test("pageTimeMs: the trusted/ignored cut sits exactly at FUTURE_DATE_SKEW_MS", () => {
+  // The +24h/+72h cases above bracket the constant loosely enough that widening it to
+  // 72h would leave them all green. This pins it: a stamp exactly `FUTURE_DATE_SKEW_MS`
+  // ahead is trusted (the predicate is strict `>`), one millisecond past it is not. An
+  // explicit `now` makes the boundary exact instead of racing the wall clock — which is
+  // the other reason the signals take a `now` at all.
+  const now = Date.parse("2026-07-31T12:00:00Z");
+  const at = new Date(now + FUTURE_DATE_SKEW_MS).toISOString();
+  const past = new Date(now + FUTURE_DATE_SKEW_MS + 1).toISOString();
+  expect(pageTimeMs(page({ updated: at }), now)).toBe(now + FUTURE_DATE_SKEW_MS);
+  expect(pageTimeMs(page({ updated: past }), now)).toBe(0);
+  // Same cut on the "Recently added" signal — one predicate, both signals.
+  expect(pageAddedMs(page({ created: at }), now)).toBe(now + FUTURE_DATE_SKEW_MS);
+  expect(pageAddedMs(page({ created: past }), now)).toBe(0);
+});
+
+test("pageTimeMs: an implausible `updated` falls back to a valid `created`, not to nothing", () => {
+  // The `p.updated || p.created` chain resolved BEFORE the plausibility test, so one bad
+  // `updated:` also threw away a perfectly good `created:` and dropped the page to the
+  // git floor — or, with no git at all, to undated. The good stamp must survive the bad
+  // one.
+  const p = page({ updated: dayOffset(400 * 24 * HOUR), created: "2026-03-09" });
+  expect(pageTimeMs(p)).toBe(Date.parse("2026-03-09"));
+  expect(pageDateLabel(p)).toBe("2026-03-09");
+  expect(pageDateKind(p)).toBe("updated");
+  // …so it outranks a page with an older creation date instead of sinking below it.
+  const older = page({ name: "older", created: "2026-01-02" });
+  const ranked = sortPages([older, page({ ...p, name: "rescued" })], "updated");
+  expect(ranked.map((q) => q.name)).toEqual(["rescued", "older"]);
+});
+
+test("pageTimeMs: an implausible `created` is not rescued by itself", () => {
+  // The fallback re-tries `created` only when `updated` was the implausible one — a page
+  // whose ONLY stamp is a bad `created:` still sorts as undated.
+  const p = page({ created: dayOffset(400 * 24 * HOUR) });
+  expect(pageTimeMs(p)).toBe(0);
+  expect(pageDateLabel(p)).toBe("");
+});
+
+test("pageTimeMs: a future `updated` falls back to a valid frontmatter-less signal, not to nothing", () => {
+  // An untracked page (no git) keeps its mtime rather than sorting as undated.
+  const mtime = Date.parse("2026-07-11T09:00:00Z");
+  const p = page({ updated: dayOffset(400 * 24 * HOUR), mtimeMs: mtime });
+  expect(pageTimeMs(p)).toBe(mtime);
+  expect(pageDateLabel(p)).toBe("2026-07-11");
+});
+
+test("pageAddedMs: an implausibly future frontmatter `created` is ignored too", () => {
+  // Narrower hole than the update signal's — the min means a future stamp loses to any
+  // real signal — but a page whose ONLY signal is the bad stamp would pin the top of
+  // "Recently added" forever. Undated (0) is the honest answer there.
+  const withGit = page({
+    created: dayOffset(400 * 24 * HOUR),
+    gitCreatedMs: Date.parse("2026-01-10T09:00:00Z"),
+  });
+  expect(pageAddedMs(withGit)).toBe(Date.parse("2026-01-10T09:00:00Z"));
+  expect(pageAddedLabel(withGit)).toBe("2026-01-10");
+  const alone = page({ created: dayOffset(400 * 24 * HOUR) });
+  expect(pageAddedMs(alone)).toBe(0);
+  expect(pageAddedLabel(alone)).toBe("");
+});
+
+test("the future guard covers the git + mtime branches too, not only frontmatter", () => {
+  // git's `%at` is the AUTHOR date (settable, and off whatever clock made the commit)
+  // and an mtime can be stamped ahead by a bad clock — neither is an unimpeachable
+  // "machine timestamp", so neither gets to outrank a real signal forever either.
+  const now = Date.parse("2026-07-31T12:00:00Z");
+  const real = Date.parse("2026-07-11T09:00:00Z");
+  const born = Date.parse("2026-01-10T09:00:00Z"); // the git-creation floor
+  const ahead = now + 400 * 24 * HOUR;
+
+  // A future gitTouchedMs is ignored; the page keeps the frontmatter date it earned
+  // (rather than the creation floor it would fall back to if both were dropped).
+  const touched = page({ updated: "2026-07-11", gitCreatedMs: born, gitTouchedMs: ahead });
+  expect(pageTimeMs(touched, now)).toBe(Date.parse("2026-07-11T00:00:00Z"));
+  expect(pageDateLabel(touched, now)).toBe("2026-07-11");
+
+  // Same for a dirty file's future mtime.
+  const dirty = page({ updated: "2026-07-11", gitCreatedMs: born, gitDirty: true, mtimeMs: ahead });
+  expect(pageDateLabel(dirty, now)).toBe("2026-07-11");
+
+  // And for the no-git path, where mtime is otherwise trusted unconditionally.
+  expect(pageTimeMs(page({ mtimeMs: ahead }), now)).toBe(0);
+
+  // "Recently added": a future git creation date / birthtime is ignored the same way,
+  // so the oldest SOUND signal wins rather than the bad one being folded into the min.
+  const added = page({ gitCreatedMs: ahead, birthtimeMs: real });
+  expect(pageAddedMs(added, now)).toBe(real);
+  const allBad = page({ gitCreatedMs: ahead, birthtimeMs: ahead });
+  expect(pageAddedMs(allBad, now)).toBe(0);
+
+  // Past dates on every branch are untouched — no existing ordering moves.
+  const sound = page({ gitCreatedMs: real, gitTouchedMs: Date.parse("2026-07-20T09:00:00Z") });
+  expect(pageTimeMs(sound, now)).toBe(Date.parse("2026-07-20T09:00:00Z"));
+});
+
+test("anchorNow: a slow viewer clock is rescued by the server's scannedAt", () => {
+  // This module is BUNDLED INTO THE BROWSER, so the `now` the guard compares against is
+  // the VIEWER's clock. A viewer running >48h slow would judge every legitimate
+  // frontmatter stamp in the wiki implausible at once and collapse the whole listing
+  // onto its git floors. `anchorNow` is the fix: max(viewer clock, server scan instant).
+  const server = Date.parse("2026-07-31T12:00:00Z");
+  const slow = server - 30 * 24 * HOUR; // viewer clock a month behind
+  const stamped = page({ updated: "2026-07-30" }); // a perfectly ordinary recent stamp
+
+  // Unanchored, the recent stamp reads as ~30 days in the future and is dropped.
+  expect(pageTimeMs(stamped, slow)).toBe(0);
+  expect(pageDateLabel(stamped, slow)).toBe("");
+
+  // Anchored, it is trusted again.
+  const anchored = anchorNow(slow, server);
+  expect(anchored).toBe(server);
+  expect(pageTimeMs(stamped, anchored)).toBe(Date.parse("2026-07-30T00:00:00Z"));
+  expect(pageDateLabel(stamped, anchored)).toBe("2026-07-30");
+  expect(sortPages([stamped, page({ name: "old", updated: "2026-01-01" })], "updated", anchored)
+    .map((p) => p.name)).toEqual([stamped.name, "old"]);
+
+  // A FAST clock keeps its own larger value — max only ever makes the guard MORE
+  // permissive, so it can never wrongly drop a stamp a correct clock would keep.
+  const fast = server + 10 * 24 * HOUR;
+  expect(anchorNow(fast, server)).toBe(fast);
+
+  // A null/absent/non-finite scannedAt (older server, degraded response) degrades to
+  // the bare clock — exactly the pre-anchor behavior.
+  expect(anchorNow(slow, null)).toBe(slow);
+  expect(anchorNow(slow, undefined)).toBe(slow);
+  expect(anchorNow(slow, NaN)).toBe(slow);
+});
+
+test("pageHeaderDates + sortPages accept an explicit anchored now", () => {
+  // Both used to read `Date.now()` internally, which on a slow-clocked viewer is the
+  // very value that breaks the guard. The parameter is how the browser threads its
+  // anchored instant in.
+  const server = Date.parse("2026-07-31T12:00:00Z");
+  const slow = server - 30 * 24 * HOUR;
+  const p = page({ created: "2026-07-01", updated: "2026-07-30" });
+
+  expect(pageHeaderDates(p, slow)).toEqual({ created: "2026-07-01" }); // updated dropped
+  expect(pageHeaderDates(p, anchorNow(slow, server))).toEqual({
+    created: "2026-07-01",
+    updated: "2026-07-30",
+  });
 });
 
 test("sortPages: updated un-collapses a sweep that flattened every mtime", () => {

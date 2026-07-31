@@ -11,8 +11,10 @@
  *  1. broken-link    — [[wikilink]] / relative .md link that resolves to no page.
  *  2. orphan         — a page with no inbound links (reserved files discounted as
  *                      both subjects and sole-linkers).
- *  3. stale-updated  — a frontmatter page missing `updated:` or with an
- *                      unparseable `updated:` value.
+ *  3. stale-updated  — a frontmatter page missing `updated:`, with an unparseable
+ *                      `updated:` value, or with an `updated:`/`created:` stamped
+ *                      implausibly far in the future (the stamp the reader's recency
+ *                      sorts silently ignore — this is its only operator-visible signal).
  *  4. missing-sources — a synthesized `concept` page that cites no sources (no
  *                      `## Sources` heading AND no `sources:` frontmatter).
  *
@@ -29,6 +31,10 @@ import {
   parseFrontmatter,
   normalizeRelPath,
 } from "./store.ts";
+import {
+  FUTURE_DATE_SKEW_MS,
+  isImplausibleFutureDate,
+} from "../dashboard/views/components/wiki-filter.ts";
 
 export const LINT_CHECKS = ["broken-link", "orphan", "stale-updated", "missing-sources"] as const;
 export type LintCheck = (typeof LINT_CHECKS)[number];
@@ -141,28 +147,88 @@ function checkBrokenLinks(page: WikiPageMeta, rawContent: string, index: WikiInd
   return out;
 }
 
-/** Missing / unparseable `updated:` frontmatter on a structured (frontmatter) page. */
-function checkStaleUpdated(page: WikiPageMeta, content: string): LintFinding | null {
+/** Hours in `FUTURE_DATE_SKEW_MS`, for the finding message (48). */
+const FUTURE_SKEW_HOURS = Math.round(FUTURE_DATE_SKEW_MS / (60 * 60 * 1000));
+
+/**
+ * A parseable frontmatter date sitting implausibly far in the future — the same
+ * predicate the reader's recency sorts use to IGNORE such a stamp
+ * (`isImplausibleFutureDate`, `wiki-filter.ts`).
+ *
+ * This check exists precisely BECAUSE the sort drops the stamp silently: dropping is
+ * the right sort behavior (a `2027-01-01` would otherwise pin the page to the top of
+ * "Recently updated" forever) but it leaves a single bad stamp with no operator-visible
+ * signal anywhere. The lint surface + the weekly `wiki-linter` watcher is where it
+ * becomes visible. Both date fields are checked: `created` feeds "Recently added" and a
+ * future `created` is dropped there by the same predicate.
+ */
+function checkFutureDate(
+  page: WikiPageMeta,
+  field: "updated" | "created",
+  value: unknown,
+  now: number,
+): LintFinding | null {
+  if (typeof value !== "string") return null;
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms)) return null; // unparseable is the stale-updated case's job
+  if (!isImplausibleFutureDate(ms, now)) return null;
+  return {
+    check: "stale-updated",
+    relPath: page.relPath,
+    message: `${field}: "${value}" is in the future — ignored by the recency sort`,
+    detail: `more than ${FUTURE_SKEW_HOURS}h ahead of now`,
+  };
+}
+
+/**
+ * Unusable date frontmatter on a structured (frontmatter) page: a missing or
+ * unparseable `updated:`, plus an `updated:`/`created:` stamped implausibly far in the
+ * future (see `checkFutureDate`). All report under the one `stale-updated` key — the
+ * check answers "is this page's date frontmatter usable", and a future stamp is
+ * unusable for exactly the same reason and with exactly the same consequence (the page
+ * falls back to its git/mtime evidence).
+ *
+ * The two fields are checked INDEPENDENTLY, and that is the whole shape of this
+ * function: `updated` and `created` are separate stamps feeding separate sorts
+ * ("Recently updated" / "Recently added"), so an unusable `updated:` must not
+ * short-circuit the `created:` check. Returning early on the missing/unparseable
+ * branches did exactly that, and hid the worst combination — a page with a future
+ * `created: 2027-01-01` and NO `updated:` reported only the (mild, ubiquitous) missing
+ * -updated finding while the stamp actually corrupting a sort went unmentioned.
+ */
+function checkStaleUpdated(page: WikiPageMeta, content: string, now: number): LintFinding[] {
   // Only structured pages (those that carry a frontmatter fence) are held to the
   // `updated:` convention — a plain no-frontmatter markdown file isn't the
   // gardener's page shape, so flagging it would be reindex/hand-edit noise.
-  if (!hasFrontmatterFence(content)) return null;
+  if (!hasFrontmatterFence(content)) return [];
 
   const fm = parseFrontmatter(content);
+  const out: LintFinding[] = [];
+
   const updated = fm.updated;
   if (updated === undefined) {
-    return { check: "stale-updated", relPath: page.relPath, message: "Missing frontmatter: updated:" };
-  }
-  // A single-line inline array (or any non-scalar) can't be a date.
-  if (Array.isArray(updated) || Number.isNaN(Date.parse(updated))) {
+    out.push({
+      check: "stale-updated",
+      relPath: page.relPath,
+      message: "Missing frontmatter: updated:",
+    });
+  } else if (Array.isArray(updated) || Number.isNaN(Date.parse(updated))) {
+    // A single-line inline array (or any non-scalar) can't be a date.
     const shown = Array.isArray(updated) ? `[${updated.join(", ")}]` : updated;
-    return {
+    out.push({
       check: "stale-updated",
       relPath: page.relPath,
       message: `Unparseable updated: "${shown}"`,
-    };
+    });
+  } else {
+    const finding = checkFutureDate(page, "updated", updated, now);
+    if (finding) out.push(finding);
   }
-  return null;
+
+  const createdFinding = checkFutureDate(page, "created", fm.created, now);
+  if (createdFinding) out.push(createdFinding);
+
+  return out;
 }
 
 const SOURCES_HEADING_RE = /^#{2,6}\s+sources\b/im;
@@ -219,6 +285,7 @@ export async function lintWiki(
 ): Promise<LintReport> {
   const readFile = deps?.readFile ?? defaultReadFile;
   const now = deps?.now ?? (() => Date.now());
+  const nowMs = now();
   const findings: LintFinding[] = [];
 
   for (const page of index.pages) {
@@ -231,8 +298,9 @@ export async function lintWiki(
     findings.push(...checkBrokenLinks(page, content, index));
 
     if (!reservedBasename(page.relPath)) {
-      const stale = checkStaleUpdated(page, content);
-      if (stale) findings.push(stale);
+      // One clock read per lint pass, so two pages at the 48h boundary are judged
+      // against the same instant (and `deps.now` makes the case deterministic in tests).
+      findings.push(...checkStaleUpdated(page, content, nowMs));
       const sources = checkMissingSources(page, content);
       if (sources) findings.push(sources);
     }
@@ -244,5 +312,5 @@ export async function lintWiki(
   for (const c of LINT_CHECKS) counts[c] = 0;
   for (const f of findings) counts[f.check] = (counts[f.check] ?? 0) + 1;
 
-  return { findings, counts, generatedAt: now() };
+  return { findings, counts, generatedAt: nowMs };
 }

@@ -1147,9 +1147,17 @@ wiki or DB. v1 is purely a report.
      skipped as subjects AND discounted as sole-linkers (an index-of-contents
      must not mask a page nothing else references). Explainers (`.html`) never
      join the graph, so they're excluded as subjects.
-  3. **stale-updated** — a frontmatter page (`---` fence) missing `updated:` or
-     whose `updated:` is unparseable. Plain no-frontmatter files are skipped
-     (not the gardener's page shape); "older than mtime" is NOT flagged.
+  3. **stale-updated** — a frontmatter page (`---` fence) missing `updated:`,
+     whose `updated:` is unparseable, or whose `updated:`/`created:` is stamped
+     more than `FUTURE_DATE_SKEW_MS` (48h) in the future — the stamp the reader's
+     recency sorts drop SILENTLY by design (`isImplausibleFutureDate`, imported
+     from `wiki-filter.ts`: one predicate, one constant, two consumers), so this
+     is its only operator-visible signal. The two fields are checked
+     INDEPENDENTLY: the missing/unparseable `updated` branches deliberately do
+     NOT return early, or a page whose future `created:` is corrupting "Recently
+     added" would report only the mild missing-updated finding. Plain
+     no-frontmatter files are skipped (not the gardener's page shape); "older
+     than mtime" is NOT flagged.
   4. **missing-sources** — a `concept` page that cites no sources. **Scoping
      note:** the gardener's own draft convention (`draft.ts`) uses a `sources:`
      frontmatter list + a `## See also` section, NOT a `## Sources` heading — so
@@ -1157,12 +1165,21 @@ wiki or DB. v1 is purely a report.
      frontmatter (the conservative reading; a literal `## Sources`-only check
      would flag every gardener-written page). `entity` stubs + reserved files
      are out of scope.
-- **Route**: `GET /api/wiki/linter-findings?bot=` (in `wiki-gardener-routes.ts`)
-  resolves the bot's `wikiDir` like the proposals route, runs `lintWiki` on
-  demand, and returns `{ findings, counts, generatedAt }`. A missing/unreadable
-  wiki degrades to a 200 with an `error` field, never a 5xx. `getWikiIndex`
-  already TTL-caches, so no extra cache.
-- **Watcher** (`wiki-linter.ts`): skips (returns []) when `wikiDir` is unset or
+- **Route**: `GET /api/wiki/linter-findings?wiki=` (in `wiki-gardener-routes.ts`)
+  resolves the wiki like the proposals route, runs `lintWiki` on demand, and
+  returns `{ findings, counts, generatedAt }`. A missing/unreadable wiki degrades
+  to a 200 with an `error` field, never a 5xx. `getWikiIndex` already TTL-caches,
+  so no extra cache. **Works for EVERY registered wiki, bot-owned or standalone**
+  — it used to refuse `entry.source !== "bot"` and then resolve a bot it used for
+  nothing but a `log.warn` field, which left the standalone `WIKI_EXTRA` wikis
+  (mimir, melosys-kode-wiki — the two carrying the most hand-authored
+  frontmatter) with no lint surface at all. Linting is a pure index read: no
+  connector, no collections, no bot-keyed DB rows. The gardener page's client
+  therefore calls `loadLint()` UNCONDITIONALLY, including on a wiki it reports as
+  gardener-"unavailable" (standalone, no collections).
+- **Watcher** (`wiki-linter.ts`): stays deliberately BOT-ONLY — it delivers a
+  Telegram alert and a bot is what owns a delivery channel, unlike the on-demand
+  route above. Skips (returns []) when `wikiDir` is unset or
   the wiki is unreadable; otherwise summarizes the counts into one `WatcherAlert`
   (`Wiki lint: 3 broken links, 2 orphans, … — review at /wiki/gardener`) with a
   per-day-stable id `wiki-lint-<YYYY-MM-DD>` (`todayOslo`). The runner's

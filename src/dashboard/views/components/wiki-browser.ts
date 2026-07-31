@@ -53,6 +53,7 @@ import {
   type IntegrateProposal,
 } from "./wiki-integrate.ts";
 import {
+  anchorNow,
   connectionTypeOrder,
   filterPages,
   folderCounts,
@@ -138,6 +139,24 @@ function pageUrlByRelPath(relPath: string): string {
 }
 
 let allPages: WikiListing[] = [];
+/** The server's index-scan instant from `/api/wiki/pages`, kept solely to anchor the
+ *  recency reads' `now` (see `recencyNow`). Null until the listing lands / on a
+ *  degraded response. */
+let scannedAtMs: number | null = null;
+/**
+ * The `now` every recency read on this page must use — the viewer's clock anchored
+ * forward to the server's scan instant (`anchorNow`).
+ *
+ * This is not a nicety: `wiki-filter.ts`'s future-date guard drops any date more than
+ * 48 h ahead of the `now` it is given, and this bundle runs on the VIEWER's machine.
+ * A viewer clock set >48 h behind would therefore make EVERY frontmatter stamp in the
+ * wiki look implausible at once, collapsing the whole listing onto its git/mtime
+ * floors with nothing on screen to explain it. Read fresh per call (not captured at
+ * boot) so a long-open tab's dates keep tracking real time.
+ */
+function recencyNow(): number {
+  return anchorNow(Date.now(), scannedAtMs);
+}
 let currentName: string | null = null;
 const filters: WikiFilters = {
   q: "",
@@ -872,7 +891,10 @@ function syncFilters(): void {
 
 function renderList(): void {
   const mode = sortMode();
-  const pages = sortPages(filterPages(allPages, filters), mode);
+  // ONE anchored instant for the sort AND its row labels, so the date a row shows is
+  // the date it sorted on even for a page sitting at the 48h future-guard boundary.
+  const now = recencyNow();
+  const pages = sortPages(filterPages(allPages, filters), mode, now);
   let html = "";
   pages.forEach((p) => {
     // In recency modes show the date we actually sorted on (mtime/birthtime or
@@ -882,8 +904,8 @@ function renderList(): void {
       mode === "backlinks"
         ? p.backlinkCount + " ←"
         : mode === "created"
-          ? pageAddedLabel(p)
-          : pageDateLabel(p);
+          ? pageAddedLabel(p, now)
+          : pageDateLabel(p, now);
     html +=
       `<div class="wiki-list-item${p.name === currentName ? " active" : ""}" data-page="${esc(p.name)}">` +
       `<div class="wiki-type-dot type-${esc(p.type)}"></div>` +
@@ -947,7 +969,7 @@ function renderBreadcrumb(m: WikiListing): void {
   // BOTH dates, each labelled — unlike a list row, which shows the one date it sorted
   // on. `pageHeaderDates` owns which slots appear; the "no known edit" case yields a
   // creation date only, so the header never asserts an edit the history doesn't record.
-  const { created, updated } = pageHeaderDates(m);
+  const { created, updated } = pageHeaderDates(m, recencyNow());
   const dateHtml =
     created || updated
       ? '<span class="wiki-bc-date">' +
@@ -1026,6 +1048,7 @@ function hubsHtml(): string {
 
 function timelineHtml(): string {
   const groups: Record<string, { p: WikiListing; kind: "new" | "upd" }[]> = {};
+  const now = recencyNow();
   filterPages(allPages, filters).forEach((p) => {
     if (p.created) (groups[p.created] = groups[p.created] || []).push({ p, kind: "new" });
     if (p.updated && p.updated !== p.created) {
@@ -1034,7 +1057,7 @@ function timelineHtml(): string {
     // No frontmatter dates at all (mimir, melosys-kode-wiki) — file it under its
     // mtime date so a whole wiki isn't missing from its own timeline.
     if (!p.created && !p.updated) {
-      const d = pageDateLabel(p);
+      const d = pageDateLabel(p, now);
       if (d) (groups[d] = groups[d] || []).push({ p, kind: "upd" });
     }
   });
@@ -3273,6 +3296,10 @@ fetch(withWiki("/api/wiki/pages"))
       return;
     }
     allPages = data.pages;
+    // Anchor every recency read to the server's scan instant BEFORE the first render
+    // (`recencyNow`) — a viewer clock running >48h slow would otherwise trip the
+    // future-date guard on every frontmatter-dated page in the wiki at once.
+    scannedAtMs = typeof data.scannedAt === "number" ? data.scannedAt : null;
     // Store the wiki's merged type list (defaults + `.wiki-reader.json` customs).
     // Absent/empty (older server / degraded) keeps the built-in constants so
     // standard types still render — the belt-and-suspenders unions below then keep
