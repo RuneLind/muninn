@@ -860,6 +860,10 @@ export async function renderWikiPage(opts?: {
     .wiki-remember-done { font-size: 12px; color: var(--accent-light); font-weight: 600; }
     /* "Continue in chat →" bar — escalates an Ask turn into a real chat thread. */
     .wiki-chatesc { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+    /* The wrapper is always rendered so the stream's done handler can fill it in place; an
+       uncommitted (or fact-check) turn renders no inner markup and the row
+       collapses instead of leaving a phantom gap — same rule as .wiki-fc-integrate. */
+    .wiki-chatesc:empty { display: none; margin: 0; }
     .wiki-chatesc-btn {
       padding: 6px 12px; border-radius: 8px;
       border: 1px solid var(--border-secondary); background: var(--bg-inset);

@@ -1787,6 +1787,11 @@ describe("POST /api/wiki/ask/chat", () => {
     __setWikiRegistryForTest([
       { name: "jarviswiki", root, source: "bot" },
       { name: "lonewiki", root, source: "extra" },
+      // A standalone wiki carrying a synthesis-bot PIN (the `WIKI_EXTRA` 4th
+      // segment) — the real shape of mimir + melosys-kode-wiki on this install.
+      { name: "pinnedwiki", root, source: "extra", synthesisBot: "melosys" },
+      // …and one whose pin names no discovered bot (must NOT resolve).
+      { name: "ghostpinwiki", root, source: "extra", synthesisBot: "not-a-bot" },
     ]);
 
     created = [];
@@ -1802,13 +1807,17 @@ describe("POST /api/wiki/ask/chat", () => {
       getBotDefaultUser: async () => defaultUser,
       findThreadByName: async (_userId, _botName, name) =>
         existingThreadNames.includes(name) ? { id: "existing-thread", name } : null,
+      // Models the DB: a created name is thereafter FOUND, so a second escalation
+      // in the same minute collides on the timestamp-suffixed name exactly as it
+      // does live (where `createThread`'s ON CONFLICT DO UPDATE would otherwise
+      // hand back the first thread).
       createThread: async (userId, botName, name, description) => {
         created.push({ userId, botName, name, description });
+        existingThreadNames.push(name);
         return { id: "thread-" + created.length };
       },
       setPendingMessage: (threadId, text) => { pending.push({ threadId, text }); },
-      getConversations: () => [],
-      createConversation: () => ({ id: "conv-1" }),
+      findOrCreateConversation: async () => ({ id: "conv-1" }),
     });
 
     app = new Hono();
@@ -1947,7 +1956,13 @@ describe("POST /api/wiki/ask/chat", () => {
     expect(created).toHaveLength(0);
   });
 
-  test("reuses an existing web conversation instead of creating a second", async () => {
+  test("addresses the DETERMINISTIC web conversation for this user+bot", async () => {
+    // The seam is `findOrCreateBotConversation` (deterministicId "<user>:<bot>:web"),
+    // not `createConversation` with a fresh UUID: a randomly-id'd shell is invisible
+    // to later off-band broadcasters that address `botConversationId`, so their
+    // messages would never render in the tab this route just opened.
+    let calls = 0;
+    const seen: { botName: string; userId: string; username: string }[] = [];
     __setAskChatDepsForTest({
       discoverBots: () => bots.map((name) => ({ name }) as unknown as BotConfig),
       loadChatConfig: async () => ({ users }),
@@ -1955,15 +1970,81 @@ describe("POST /api/wiki/ask/chat", () => {
       findThreadByName: async () => null,
       createThread: async () => ({ id: "thread-x" }),
       setPendingMessage: (threadId, text) => { pending.push({ threadId, text }); },
-      getConversations: () => [
-        { id: "conv-existing", userId: "user-1", botName: "jarviswiki", type: "web" },
-      ],
-      createConversation: () => {
-        throw new Error("must not create a second conversation");
+      findOrCreateConversation: async (params) => {
+        calls++;
+        seen.push(params);
+        return { id: "conv-deterministic" };
       },
     });
     const res = await post(askBody());
     expect(res.status).toBe(200);
-    expect(((await res.json()) as { conversationId: string }).conversationId).toBe("conv-existing");
+    expect(((await res.json()) as { conversationId: string }).conversationId).toBe(
+      "conv-deterministic",
+    );
+    expect(calls).toBe(1);
+    expect(seen[0]).toEqual({ botName: "jarviswiki", userId: "user-1", username: "rune" });
+  });
+
+  test("a standalone wiki with a synthesis-bot PIN escalates to the pinned bot", async () => {
+    // `WIKI_EXTRA`'s 4th segment is the operator naming the bot that speaks for a
+    // wiki nobody owns — on this install that's mimir→jarvis and
+    // melosys-kode-wiki→melosys, i.e. the button was dead on 2 of 3 wikis.
+    const res = await post(askBody({ wiki: "pinnedwiki" }));
+    expect(res.status).toBe(200);
+    expect(created).toHaveLength(1);
+    expect(created[0]!.botName).toBe("melosys");
+  });
+
+  test("an explicit bot still beats the pin", async () => {
+    const res = await post(askBody({ wiki: "pinnedwiki", bot: "jarviswiki" }));
+    expect(res.status).toBe(200);
+    expect(created[0]!.botName).toBe("jarviswiki");
+  });
+
+  test("a pin naming no discovered bot falls through to the clean needsBot 400", async () => {
+    const res = await post(askBody({ wiki: "ghostpinwiki" }));
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { needsBot: boolean }).needsBot).toBe(true);
+    expect(created).toHaveLength(0);
+  });
+
+  test("two forceNew escalations in the same minute get DISTINCT threads", async () => {
+    // The suffix is minute-precision and `createThread` upserts, so a colliding
+    // name silently returned the FIRST thread and clobbered its unsent seed.
+    existingThreadNames = ["how does the gardener cluster summaries?"];
+    const first = await post(askBody({ forceNew: true }));
+    const second = await post(askBody({ forceNew: true }));
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    const a = (await first.json()) as { threadId: string };
+    const b = (await second.json()) as { threadId: string };
+    expect(a.threadId).not.toBe(b.threadId);
+    expect(created).toHaveLength(2);
+    expect(created[0]!.name).not.toBe(created[1]!.name);
+    expect(created[1]!.name.length).toBeLessThanOrEqual(50);
+    // Each thread got its OWN seed — the clobber this guards against.
+    expect(pending.map((p) => p.threadId)).toEqual([a.threadId, b.threadId]);
+  });
+
+  test("400 (and NO thread) for a non-string citation field", async () => {
+    // A number pageName used to reach `flatten`'s `.replace` and 500 — AFTER the
+    // thread was created, leaving a dead sidebar entry for a call the caller was
+    // told had failed. Validated up front now, before any side effect.
+    const res = await post(askBody({ citations: [{ pageName: 123 }] }));
+    expect(res.status).toBe(400);
+    expect(created).toHaveLength(0);
+    expect(pending).toHaveLength(0);
+    // A nameless entry is still just dropped — that's a shape the client can send.
+    const ok = await post(askBody({ citations: [{}, { pageName: "A Page" }] }));
+    expect(ok.status).toBe(200);
+    expect(pending[0]!.text).toContain("Sources cited by the wiki: A Page");
+  });
+
+  test("400 for a non-string wiki / bot / userId", async () => {
+    for (const over of [{ wiki: 123 }, { bot: 5 }, { userId: {} }]) {
+      const res = await post(askBody(over));
+      expect(res.status).toBe(400);
+    }
+    expect(created).toHaveLength(0);
   });
 });

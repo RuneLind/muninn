@@ -307,13 +307,17 @@ export interface AskChatDeps {
     description?: string,
   ) => Promise<{ id: string }>;
   setPendingMessage: (threadId: string, text: string, meta?: { title?: string }) => void;
-  getConversations: () => { id: string; userId: string; botName: string; type: string }[];
-  createConversation: (params: {
-    type: "web";
+  /** The web-conversation shell for this user+bot, by its DETERMINISTIC id
+   *  (`deterministicId("<user>:<bot>:web")`) — the same shell `hydrateFromDb` and
+   *  every other web-conversation creator address. A randomly-id'd shell would
+   *  leave later off-band broadcasters (dev_run roll-ups, hivemind replies routed
+   *  via `botConversationId`) talking to a different conversation than the tab the
+   *  reader just opened. */
+  findOrCreateConversation: (params: {
     botName: string;
     userId: string;
     username: string;
-  }) => { id: string };
+  }) => Promise<{ id: string }>;
 }
 const defaultAskChatDeps: AskChatDeps = {
   discoverBots: discoverAllBots,
@@ -322,10 +326,13 @@ const defaultAskChatDeps: AskChatDeps = {
   findThreadByName,
   createThread,
   setPendingMessage,
-  getConversations: () => chatState.getConversations(),
-  createConversation: (params) => chatState.createConversation(params),
+  findOrCreateConversation: (params) => chatState.findOrCreateBotConversation(params),
 };
 let askChatDeps: AskChatDeps = defaultAskChatDeps;
+
+/** How many `-2`, `-3`… disambiguators a `forceNew` escalation walks before
+ *  giving up (bounded — each step is a `findThreadByName` round-trip). */
+const ASK_CHAT_NAME_ATTEMPTS = 50;
 
 /** Test-only: override (pass a partial) or reset (no arg) the ask→chat deps. */
 export function __setAskChatDepsForTest(over?: Partial<AskChatDeps>): void {
@@ -1673,7 +1680,31 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       const answer = typeof body.answer === "string" ? body.answer.trim() : "";
       if (!question) return c.json({ error: "question is required" }, 400);
       if (!answer) return c.json({ error: "answer is required" }, 400);
-      const citations = Array.isArray(body.citations) ? body.citations : [];
+      // Body shape is client-controlled: a non-string `wiki` (or a citation whose
+      // pageName is a number) reached string methods and 500'd. Everything the
+      // route reads is therefore validated or coerced HERE, before any side effect.
+      if (body.wiki !== undefined && typeof body.wiki !== "string") {
+        return c.json({ error: "wiki must be a string" }, 400);
+      }
+      if (body.bot !== undefined && typeof body.bot !== "string") {
+        return c.json({ error: "bot must be a string" }, 400);
+      }
+      if (body.userId !== undefined && typeof body.userId !== "string") {
+        return c.json({ error: "userId must be a string" }, 400);
+      }
+      const rawCitations = Array.isArray(body.citations) ? body.citations : [];
+      const badCitation = rawCitations.some(
+        (ci) =>
+          !ci ||
+          typeof ci !== "object" ||
+          (ci.pageName !== undefined && typeof ci.pageName !== "string") ||
+          (ci.title !== undefined && typeof ci.title !== "string"),
+      );
+      if (badCitation) {
+        return c.json({ error: "citations[].pageName and .title must be strings" }, 400);
+      }
+      // Entries carrying neither name are simply dropped (nothing to show).
+      const citations: AskChatCitation[] = rawCitations.filter((ci) => ci.pageName || ci.title);
 
       const { entry, unknownWiki } = resolveWikiRequest(
         getWikiRegistry(),
@@ -1686,30 +1717,43 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       }
 
       // Owning bot (or the explicit override). A standalone `WIKI_EXTRA` wiki has
-      // no owner — there is no defensible bot whose memories the thread belongs
-      // to, so say that instead of silently picking one.
+      // no owner — but it MAY carry a synthesis-bot pin (the 4th `WIKI_EXTRA`
+      // segment / `wikiSynthesisBot`), which is the operator naming the bot that
+      // speaks for this wiki. That is a defensible owner for the thread, and
+      // without it the button is dead on every standalone wiki (on this install:
+      // mimir and melosys-kode-wiki, i.e. 2 of 3). Only a wiki with NEITHER an
+      // owner nor a pin still 400s rather than silently picking a bot.
       const allBots = askChatDeps.discoverBots();
       const wanted = typeof body.bot === "string" ? body.bot.trim() : "";
+      const findBot = (name: string): BotConfig | undefined =>
+        allBots.find((b) => b.name.toLowerCase() === name.toLowerCase());
       let botConfig: BotConfig | undefined;
       if (wanted) {
-        botConfig = allBots.find((b) => b.name.toLowerCase() === wanted.toLowerCase());
+        botConfig = findBot(wanted);
         if (!botConfig) return c.json({ error: `Unknown bot "${wanted}"` }, 400);
       } else if (entry.source === "bot") {
-        botConfig = allBots.find((b) => b.name.toLowerCase() === entry.name.toLowerCase());
+        botConfig = findBot(entry.name);
         if (!botConfig) {
           return c.json({ error: `Bot "${entry.name}" is no longer configured` }, 400);
         }
       } else {
-        return c.json(
-          {
-            error:
-              `The "${entry.name}" wiki belongs to no bot, so there is no chat to continue in ` +
-              "— pass an explicit bot to escalate anyway.",
-            needsBot: true,
-            bots: allBots.map((b) => ({ name: b.name })),
-          },
-          400,
-        );
+        // Pin, validated against discovered bots — a pin naming no bot falls
+        // through to the needsBot 400 (same "warn + ignore" posture as
+        // `resolveWikiSynthesisBot`), never to an arbitrary pick.
+        const pin = typeof entry.synthesisBot === "string" ? entry.synthesisBot.trim() : "";
+        botConfig = pin ? findBot(pin) : undefined;
+        if (!botConfig) {
+          return c.json(
+            {
+              error:
+                `The "${entry.name}" wiki belongs to no bot, so there is no chat to continue in ` +
+                "— pass an explicit bot to escalate anyway.",
+              needsBot: true,
+              bots: allBots.map((b) => ({ name: b.name })),
+            },
+            400,
+          );
+        }
       }
 
       // User resolution — explicit `userId` when the bot has more than one, so the
@@ -1761,23 +1805,54 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
           botName: botConfig.name,
         }, 409);
       }
-      const threadTitle = existing && body.forceNew ? uniqueAskThreadTitle(title) : title;
+      // `forceNew`: the timestamp suffix is MINUTE-precision and `createThread` is
+      // ON CONFLICT DO UPDATE, so a name collision would return the EXISTING thread
+      // and `setPendingMessage` would clobber its unsent seed (measured: three
+      // forceNew posts in one minute all resolved to one threadId). Walk
+      // disambiguators until the name is genuinely free.
+      let threadTitle = title;
+      if (existing) {
+        threadTitle = "";
+        const now = new Date();
+        for (let attempt = 1; attempt <= ASK_CHAT_NAME_ATTEMPTS; attempt++) {
+          const candidate = uniqueAskThreadTitle(title, now, attempt);
+          const clash = await askChatDeps.findThreadByName(
+            chatUser.id,
+            botConfig.name,
+            candidate,
+          );
+          if (!clash) {
+            threadTitle = candidate;
+            break;
+          }
+        }
+        if (!threadTitle) {
+          return c.json(
+            { error: "Too many chats already exist for this question — open one of them." },
+            409,
+          );
+        }
+      }
 
-      // Find or create the web conversation shell for this user+bot.
-      const existingConv = askChatDeps
-        .getConversations()
-        .find(
-          (conv) =>
-            conv.userId === chatUser.id && conv.botName === botConfig!.name && conv.type === "web",
-        );
-      const conversationId =
-        existingConv?.id ??
-        askChatDeps.createConversation({
-          type: "web",
-          botName: botConfig.name,
-          userId: chatUser.id,
-          username: chatUser.name,
-        }).id;
+      // Seed FIRST: everything that can still fail (string building over
+      // client-posted citations included) must fail before a thread exists, or a
+      // caller told "500" is left with a dead thread in their sidebar. After this
+      // point only the conversation shell, the insert and the handoff remain.
+      const seed = buildAskChatSeed({
+        wikiName: entry.name,
+        question,
+        answer,
+        citations,
+      });
+
+      // The web conversation shell for this user+bot, on its DETERMINISTIC id (see
+      // `AskChatDeps.findOrCreateConversation`).
+      const conversation = await askChatDeps.findOrCreateConversation({
+        botName: botConfig.name,
+        userId: chatUser.id,
+        username: chatUser.name,
+      });
+      const conversationId = conversation.id;
 
       const thread = await askChatDeps.createThread(
         chatUser.id,
@@ -1786,15 +1861,9 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         `Continued from the ${entry.name} wiki Ask tab`,
       );
 
-      // Seed the first message — the chat page's deep-link handler consumes it
-      // from `GET /chat/pending/:threadId` and sends it through the normal
-      // pipeline once the WebSocket is up (5-min TTL, one-shot).
-      const seed = buildAskChatSeed({
-        wikiName: entry.name,
-        question,
-        answer,
-        citations,
-      });
+      // Hand the seed to the chat page's deep-link handler, which consumes it from
+      // `GET /chat/pending/:threadId` and sends it through the normal pipeline once
+      // the WebSocket is up (5-min TTL, one-shot).
       askChatDeps.setPendingMessage(thread.id, seed, { title: question.slice(0, 80) });
 
       log.info("Wiki ask→chat: wiki={wiki} bot={bot} user={user} thread={threadId}", {
