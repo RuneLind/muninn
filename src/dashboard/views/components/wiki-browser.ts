@@ -1978,6 +1978,22 @@ function askRememberHtml(turn: AskTurn): string {
   );
 }
 
+/** "Continue in chat →" button, a sibling of Remember. Escalates the shown turn
+ *  into a real conversation thread for the wiki's OWNING bot (POST
+ *  /api/wiki/ask/chat), seeded with the question + this answer + its sources, and
+ *  opens the chat deep-link in a new tab. Its own bar (not the Remember bar,
+ *  whose innerHTML is swapped wholesale on a successful save). Gated on the turn
+ *  being committed and bound via document-level delegation, like its siblings. */
+function askChatEscalateHtml(turn: AskTurn): string {
+  const disabled = turn.answer ? "" : " disabled";
+  return (
+    '<div class="wiki-chatesc" id="wikiChatEscBar">' +
+    '<button id="wikiChatEscBtn" class="wiki-chatesc-btn"' + disabled + ">Continue in chat →</button>" +
+    '<span class="wiki-chatesc-msg" id="wikiChatEscMsg"></span>' +
+    "</div>"
+  );
+}
+
 /** "➕ Add to article" button — ONLY on committed fact-check turns whose page is
  *  markdown (never an explainer, whose .html can't take a markdown callout).
  *  Persists the fact-check answer as a `> [!factcheck]` callout on the page
@@ -2220,6 +2236,7 @@ function askArticleHtml(turn: AskTurn, buffer: string): string {
     askSourcesHtml(turn.citations, turn.cited) + "</div>" +
     askFollowupHtml(turn) +
     askRememberHtml(turn) +
+    askChatEscalateHtml(turn) +
     askFactcheckAppendHtml(turn) +
     askFactcheckIntegrateHtml(turn) +
     // Transient per-turn preview host — the proposal is never persisted, so a
@@ -2246,6 +2263,10 @@ function setFollowupDisabled(disabled: boolean): void {
   if (btn) btn.disabled = disabled;
   const remember = document.getElementById("wikiRememberBtn") as HTMLButtonElement | null;
   if (remember) remember.disabled = disabled;
+  // "Continue in chat →" rides the same commit gate (both act on the persisted
+  // answer text, which only exists once the turn commits).
+  const chatEsc = document.getElementById("wikiChatEscBtn") as HTMLButtonElement | null;
+  if (chatEsc) chatEsc.disabled = disabled;
 }
 
 /** Paint an Ask turn into the main article pane (replaces the page/start view). */
@@ -2650,6 +2671,56 @@ async function submitRemember(): Promise<void> {
       msg.textContent =
         "Couldn't remember that — " + (err instanceof Error ? err.message : String(err));
       msg.className = "wiki-remember-msg error";
+    }
+  }
+}
+
+/** Escalate the shown Ask turn into a real chat thread (POST /api/wiki/ask/chat)
+ *  and open the returned deep-link in a new tab, where the seeded message
+ *  auto-sends. A 409 means a thread of that name already exists — retried ONCE
+ *  with `forceNew`, which timestamp-suffixes the name (the reader asked to
+ *  continue, so a silent no-op or a modal would both be worse). Any other failure
+ *  re-enables the button and shows an inline error, like Remember. */
+async function submitChatEscalate(): Promise<void> {
+  const btn = document.getElementById("wikiChatEscBtn") as HTMLButtonElement | null;
+  const msg = document.getElementById("wikiChatEscMsg");
+  const turn = askShownTurn;
+  if (!btn || btn.disabled || !turn || !turn.answer) return;
+  btn.disabled = true;
+  const prevLabel = btn.textContent || "Continue in chat →";
+  btn.textContent = "Opening chat…";
+  if (msg) { msg.textContent = ""; msg.className = "wiki-chatesc-msg"; }
+  const post = (forceNew: boolean): Promise<Response> =>
+    fetch("/api/wiki/ask/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        wiki: WIKI || undefined,
+        question: turn.question,
+        answer: turn.answer,
+        citations: turn.citations.map((ci) => ({ title: ci.title, pageName: ci.pageName })),
+        forceNew: forceNew || undefined,
+      }),
+    });
+  try {
+    let res = await post(false);
+    if (res.status === 409) res = await post(true);
+    const data = (await res.json().catch(() => ({}))) as { chatUrl?: string; error?: string };
+    if (!res.ok || !data.chatUrl) throw new Error(data.error || "HTTP " + res.status);
+    window.open(data.chatUrl, "_blank");
+    const bar = document.getElementById("wikiChatEscBar");
+    if (bar) {
+      bar.innerHTML =
+        '<a class="wiki-chatesc-done" href="' + esc(data.chatUrl) + '" target="_blank">' +
+        "✓ Opened in chat →</a>";
+    }
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = prevLabel;
+    if (msg) {
+      msg.textContent =
+        "Couldn't open a chat — " + (err instanceof Error ? err.message : String(err));
+      msg.className = "wiki-chatesc-msg error";
     }
   }
 }
@@ -3084,6 +3155,7 @@ document.addEventListener("click", (e) => {
   const t = e.target as HTMLElement;
   if (t.closest("#wikiFollowupBtn")) submitFollowup();
   else if (t.closest("#wikiRememberBtn")) submitRemember();
+  else if (t.closest("#wikiChatEscBtn")) submitChatEscalate();
   else if (t.closest("#wikiFactcheckAppendBtn")) submitFactcheckAppend();
   else if (t.closest("#wikiFactcheckIntegrateBtn")) submitFactcheckIntegrate();
   else if (t.closest("#wikiFcIntAccept")) acceptFactcheckIntegrate();

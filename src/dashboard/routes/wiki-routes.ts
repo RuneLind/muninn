@@ -90,7 +90,17 @@ import {
   newestLogEntryDate,
   type WikiDigest,
 } from "../../wiki/digest.ts";
-import { discoverAllBots, resolveWikiSynthesisBot } from "../../bots/config.ts";
+import { discoverAllBots, resolveWikiSynthesisBot, type BotConfig } from "../../bots/config.ts";
+import { chatState } from "../../chat/state.ts";
+import { loadChatConfig } from "../../chat/chat-config.ts";
+import { setPendingMessage } from "../../chat/pending-messages.ts";
+import { createThread, findThreadByName } from "../../db/threads.ts";
+import {
+  buildAskChatSeed,
+  deriveAskThreadTitle,
+  uniqueAskThreadTitle,
+  type AskChatCitation,
+} from "../../wiki/ask-chat.ts";
 import { buildSynthesisSystemPrompt } from "../../research/answer.ts";
 import { streamResearchSSE } from "./research-sse.ts";
 import { parseResearchHistory } from "../../research/history-param.ts";
@@ -270,6 +280,56 @@ export function raceTimeout<T>(p: Promise<T>, fallback: T, ms = PRESTREAM_TIMEOU
   return Promise.race([p, timeout]).finally(() => {
     if (timer) clearTimeout(timer);
   });
+}
+
+/**
+ * Injectable seams for `POST /api/wiki/ask/chat` (the Ask tab's "Continue in
+ * chat →" escalation). The route otherwise needs a live DB (users + threads) and
+ * the in-memory chat state, so every side-effecting call goes through here and
+ * tests drive user resolution / 409+forceNew / seeding with fakes.
+ */
+export interface AskChatDeps {
+  discoverBots: () => BotConfig[];
+  loadChatConfig: (botName?: string) => Promise<{ users: { id: string; name: string }[] } | null>;
+  /** The bot's `bot_default_user` mapping — the same "whose bot is this?" answer
+   *  the sibling Remember button attributes memories to. Resolves the common
+   *  multi-user case without a picker the reader doesn't have. */
+  getBotDefaultUser: (botName: string) => Promise<string | null>;
+  findThreadByName: (
+    userId: string,
+    botName: string,
+    name: string,
+  ) => Promise<{ id: string; name: string } | null>;
+  createThread: (
+    userId: string,
+    botName: string,
+    name: string,
+    description?: string,
+  ) => Promise<{ id: string }>;
+  setPendingMessage: (threadId: string, text: string, meta?: { title?: string }) => void;
+  getConversations: () => { id: string; userId: string; botName: string; type: string }[];
+  createConversation: (params: {
+    type: "web";
+    botName: string;
+    userId: string;
+    username: string;
+  }) => { id: string };
+}
+const defaultAskChatDeps: AskChatDeps = {
+  discoverBots: discoverAllBots,
+  loadChatConfig,
+  getBotDefaultUser,
+  findThreadByName,
+  createThread,
+  setPendingMessage,
+  getConversations: () => chatState.getConversations(),
+  createConversation: (params) => chatState.createConversation(params),
+};
+let askChatDeps: AskChatDeps = defaultAskChatDeps;
+
+/** Test-only: override (pass a partial) or reset (no arg) the ask→chat deps. */
+export function __setAskChatDepsForTest(over?: Partial<AskChatDeps>): void {
+  askChatDeps = over ? { ...defaultAskChatDeps, ...over } : defaultAskChatDeps;
 }
 
 /** Injectable deps for {@link fetchSavedNotes} — the DB/embedding fns are passed
@@ -1576,6 +1636,184 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       return c.json({ saved: true, summary: distilled.summary });
     } catch (err) {
       log.error("Wiki remember: unexpected failure: {error}", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return c.json({ error: "internal error" }, 500);
+    }
+  });
+
+  // Wiki Ask → chat escalation ("Continue in chat →"): spawn a real conversation
+  // thread seeded with the Ask turn, so the reader can keep going with the FULL
+  // prompt-builder context (persona, memories incl. shared scope, goals, MCP
+  // tools) that the stateless Ask tab has none of. Mirrors `POST /api/research/chat`
+  // — same thread/conversation/pending-message plumbing and the same `chatUrl`
+  // shape the chat page's `handleDeepLink()` consumes — deliberately duplicated
+  // rather than refactored into a shared helper (surgical-changes rule).
+  //
+  // Bot routing is the ONE deliberate divergence from Ask: the conversation goes
+  // to the wiki's OWNING bot, not `resolveWikiSynthesisBot`'s answer. Synthesis
+  // routing optimizes for a fast model and falls back to the research bot, but a
+  // chat thread must land where the user's memories, goals and tools live.
+  //
+  // Body `bot` is the CHAT-bot override (not the legacy wiki alias — that stays
+  // the `?bot=` query param, as on every other reader route).
+  app.post("/api/wiki/ask/chat", async (c) => {
+    try {
+      type AskChatBody = {
+        wiki?: string;
+        bot?: string;
+        userId?: string;
+        question?: string;
+        answer?: string;
+        citations?: AskChatCitation[];
+        forceNew?: boolean;
+      };
+      const body = await c.req.json<AskChatBody>().catch(() => ({}) as AskChatBody);
+      const question = typeof body.question === "string" ? body.question.trim() : "";
+      const answer = typeof body.answer === "string" ? body.answer.trim() : "";
+      if (!question) return c.json({ error: "question is required" }, 400);
+      if (!answer) return c.json({ error: "answer is required" }, 400);
+      const citations = Array.isArray(body.citations) ? body.citations : [];
+
+      const { entry, unknownWiki } = resolveWikiRequest(
+        getWikiRegistry(),
+        c.req.query("wiki") ?? body.wiki,
+        c.req.query("bot"),
+        process.env.WIKI_DIR,
+      );
+      if (unknownWiki || !entry) {
+        return c.json({ error: "no wiki configured for that name" }, 404);
+      }
+
+      // Owning bot (or the explicit override). A standalone `WIKI_EXTRA` wiki has
+      // no owner — there is no defensible bot whose memories the thread belongs
+      // to, so say that instead of silently picking one.
+      const allBots = askChatDeps.discoverBots();
+      const wanted = typeof body.bot === "string" ? body.bot.trim() : "";
+      let botConfig: BotConfig | undefined;
+      if (wanted) {
+        botConfig = allBots.find((b) => b.name.toLowerCase() === wanted.toLowerCase());
+        if (!botConfig) return c.json({ error: `Unknown bot "${wanted}"` }, 400);
+      } else if (entry.source === "bot") {
+        botConfig = allBots.find((b) => b.name.toLowerCase() === entry.name.toLowerCase());
+        if (!botConfig) {
+          return c.json({ error: `Bot "${entry.name}" is no longer configured` }, 400);
+        }
+      } else {
+        return c.json(
+          {
+            error:
+              `The "${entry.name}" wiki belongs to no bot, so there is no chat to continue in ` +
+              "— pass an explicit bot to escalate anyway.",
+            needsBot: true,
+            bots: allBots.map((b) => ({ name: b.name })),
+          },
+          400,
+        );
+      }
+
+      // User resolution — explicit `userId` when the bot has more than one, so the
+      // thread can never land on an arbitrary user (mirrors /api/research/chat).
+      const chatConfig = await askChatDeps.loadChatConfig(botConfig.name);
+      const botUsers = chatConfig?.users ?? [];
+      if (body.userId && !botUsers.find((u) => u.id === body.userId)) {
+        return c.json({
+          error: `User "${body.userId}" not found for bot "${botConfig.name}"`,
+          needsUser: true,
+          users: botUsers.map((u) => ({ id: u.id, name: u.name })),
+        }, 400);
+      }
+      // Several users and no explicit pick: fall back to the bot's
+      // `bot_default_user` mapping — the same owner answer the sibling Remember
+      // button attributes memories to. Unlike the Jira extension (which can
+      // prompt), the reader has no user picker, and on a real install a bot
+      // routinely carries several historical user rows, so without this the
+      // button would be a permanent `needsUser` 400. No mapping ⇒ still a clean
+      // `needsUser`, never an arbitrary pick.
+      let defaultUserId: string | null = null;
+      if (!body.userId && botUsers.length > 1) {
+        defaultUserId = await askChatDeps.getBotDefaultUser(botConfig.name);
+        if (!defaultUserId || !botUsers.find((u) => u.id === defaultUserId)) {
+          return c.json({
+            error: "Multiple users available — please specify userId",
+            needsUser: true,
+            users: botUsers.map((u) => ({ id: u.id, name: u.name })),
+          }, 400);
+        }
+      }
+      const pickedId = body.userId ?? defaultUserId;
+      const chatUser = pickedId ? botUsers.find((u) => u.id === pickedId)! : botUsers[0];
+      if (!chatUser) {
+        return c.json({ error: `No user found for bot "${botConfig.name}"` }, 400);
+      }
+
+      // Thread name derived from the question (lowercased + ≤50 chars, the
+      // `createThread` contract). An existing thread of that name is a 409 the
+      // client retries with `forceNew`, which timestamp-suffixes the name.
+      const title = deriveAskThreadTitle(question);
+      const existing = await askChatDeps.findThreadByName(chatUser.id, botConfig.name, title);
+      if (existing && !body.forceNew) {
+        return c.json({
+          threadExists: true,
+          existingThreadId: existing.id,
+          existingThreadName: existing.name,
+          userId: chatUser.id,
+          botName: botConfig.name,
+        }, 409);
+      }
+      const threadTitle = existing && body.forceNew ? uniqueAskThreadTitle(title) : title;
+
+      // Find or create the web conversation shell for this user+bot.
+      const existingConv = askChatDeps
+        .getConversations()
+        .find(
+          (conv) =>
+            conv.userId === chatUser.id && conv.botName === botConfig!.name && conv.type === "web",
+        );
+      const conversationId =
+        existingConv?.id ??
+        askChatDeps.createConversation({
+          type: "web",
+          botName: botConfig.name,
+          userId: chatUser.id,
+          username: chatUser.name,
+        }).id;
+
+      const thread = await askChatDeps.createThread(
+        chatUser.id,
+        botConfig.name,
+        threadTitle,
+        `Continued from the ${entry.name} wiki Ask tab`,
+      );
+
+      // Seed the first message — the chat page's deep-link handler consumes it
+      // from `GET /chat/pending/:threadId` and sends it through the normal
+      // pipeline once the WebSocket is up (5-min TTL, one-shot).
+      const seed = buildAskChatSeed({
+        wikiName: entry.name,
+        question,
+        answer,
+        citations,
+      });
+      askChatDeps.setPendingMessage(thread.id, seed, { title: question.slice(0, 80) });
+
+      log.info("Wiki ask→chat: wiki={wiki} bot={bot} user={user} thread={threadId}", {
+        wiki: entry.name,
+        bot: botConfig.name,
+        user: chatUser.id,
+        threadId: thread.id,
+      });
+
+      return c.json({
+        threadId: thread.id,
+        conversationId,
+        chatUrl:
+          `/chat?bot=${encodeURIComponent(botConfig.name)}` +
+          `&thread=${encodeURIComponent(thread.id)}` +
+          `&user=${encodeURIComponent(chatUser.id)}`,
+      });
+    } catch (err) {
+      log.error("Wiki ask→chat: unexpected failure: {error}", {
         error: err instanceof Error ? err.message : String(err),
       });
       return c.json({ error: "internal error" }, 500);
