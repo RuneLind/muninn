@@ -1806,6 +1806,27 @@ interface AskTurn {
   // Whether the checked page can carry inline <Fact> annotations (server-derived
   // .mdx-ness of the resolved path). Absent on an older server ⇒ not annotatable.
   annotatable?: boolean;
+  // "Continue in chat →" state for THIS turn. In-memory only — deliberately NOT
+  // part of StoredAskTurn/localStorage: the escalation is a live action, and a
+  // rehydrated turn re-derives an offer-to-escalate bar rather than resurrecting a
+  // link to a thread from a previous session.
+  chatEsc?: ChatEscState;
+}
+/** Escalation state of one Ask turn, held on the TURN and never in the DOM:
+ *  `#wikiChatEscBar` is a singleton node owned by whichever turn is painted, so a
+ *  fetch resolving after a turn switch used to paint turn A's "✓ Opened in chat"
+ *  (linking A's thread) onto turn B's bar — and on the error path wrote into a
+ *  detached node, so the user saw no error at all. */
+interface ChatEscState {
+  status: "pending" | "done" | "exists" | "error";
+  /** `done`: the thread just created · `exists`: the thread that already covers
+   *  this question (built from the 409 body). Absent when the server didn't say. */
+  chatUrl?: string;
+  /** Whether the deep link actually got a tab — a blocked popup says so honestly
+   *  instead of claiming it opened one. */
+  opened?: boolean;
+  /** Failure copy for the `error` state. */
+  message?: string;
 }
 // One row of the fact-check claim checklist — pending until its verdict block lands.
 // `outcome` lands with the verdict (server `claim_result`) and drives the distinct
@@ -1978,6 +1999,73 @@ function askRememberHtml(turn: AskTurn): string {
   );
 }
 
+/** "Continue in chat →" bar, a sibling of Remember. Escalates the shown turn into
+ *  a real conversation thread for the wiki's owning bot (POST /api/wiki/ask/chat),
+ *  seeded with the question + this answer + its sources, and opens the chat
+ *  deep-link in a new tab. Its own bar (not the Remember bar, whose innerHTML is
+ *  swapped wholesale on a successful save). Bound via document-level delegation.
+ *
+ *  The WRAPPER is always rendered (even when the inner markup is empty): the pane
+ *  is painted before the answer exists, and `refreshChatEscalateBar` fills the bar
+ *  in place at `done` — which needs the node to be there. `.wiki-chatesc:empty`
+ *  hides the empty row. */
+function askChatEscalateHtml(turn: AskTurn): string {
+  return '<div class="wiki-chatesc" id="wikiChatEscBar">' + chatEscInnerHtml(turn) + "</div>";
+}
+
+/** Inner markup of the escalate bar, DERIVED from `turn.chatEsc` so a re-render —
+ *  a `done` refresh, a turn switch, re-opening the turn from history — reproduces
+ *  the state instead of losing (or misattributing) it. */
+function chatEscInnerHtml(turn: AskTurn): string {
+  // No committed answer (still streaming, or a turn that died at app_error / an
+  // SSE drop): the click's only possible outcome is a silent no-op, so render no
+  // bar at all rather than a button that does nothing.
+  if (!turn.answer) return "";
+  // Fact-check turns are excluded: the question is synthetic and the answer is
+  // tool-produced, so the seed's "answered from indexed page excerpts alone — no
+  // memories, no tools" framing would be false. (Same turn-kind gate shape as
+  // `askFactcheckAppendHtml`.)
+  if (turn.kind === "factcheck") return "";
+  const st = turn.chatEsc;
+  if (st?.status === "done") {
+    return (
+      '<a class="wiki-chatesc-done" href="' + esc(st.chatUrl || "") + '" target="_blank">' +
+      (st.opened ? "✓ Opened in chat →" : "Chat thread created — open it →") +
+      "</a>"
+    );
+  }
+  if (st?.status === "exists") {
+    // A 409 is NOT auto-retried with `forceNew` — that minted a fresh thread (and
+    // a fresh auto-sent model turn) on every re-click. Offer the existing thread,
+    // and make starting another an explicit second choice.
+    return (
+      '<span class="wiki-chatesc-msg">A chat for this question already exists' +
+      (st.chatUrl
+        ? ' — <a class="wiki-chatesc-done" href="' + esc(st.chatUrl) + '" target="_blank">Open it →</a>'
+        : "") +
+      "</span>" +
+      '<button id="wikiChatEscNewBtn" class="wiki-chatesc-btn">Start new thread</button>'
+    );
+  }
+  const pending = st?.status === "pending";
+  return (
+    '<button id="wikiChatEscBtn" class="wiki-chatesc-btn"' + (pending ? " disabled" : "") + ">" +
+    (pending ? "Opening chat…" : "Continue in chat →") + "</button>" +
+    '<span class="wiki-chatesc-msg' + (st?.status === "error" ? " error" : "") +
+    '" id="wikiChatEscMsg">' + esc(st?.status === "error" ? st.message || "" : "") + "</span>"
+  );
+}
+
+/** Re-render the escalate bar from the turn. TURN-GUARDED for the same reason
+ *  `refreshWriteActionBars` is: the bar is a singleton node belonging to whichever
+ *  turn is on screen. Nothing is lost by skipping — `showAskAnswer` renders the
+ *  bar from the newly shown turn's own `chatEsc`. */
+function refreshChatEscalateBar(turn: AskTurn): void {
+  if (turn !== askShownTurn) return;
+  const bar = document.getElementById("wikiChatEscBar");
+  if (bar) bar.innerHTML = chatEscInnerHtml(turn);
+}
+
 /** "➕ Add to article" button — ONLY on committed fact-check turns whose page is
  *  markdown (never an explainer, whose .html can't take a markdown callout).
  *  Persists the fact-check answer as a `> [!factcheck]` callout on the page
@@ -2110,6 +2198,11 @@ function refreshWriteActionBars(turn: AskTurn): void {
   if (appendBar) appendBar.innerHTML = factcheckAppendInnerHtml(turn);
   const intBar = document.getElementById("wikiFactcheckIntegrateBar");
   if (intBar) intBar.innerHTML = factcheckIntegrateInnerHtml(turn);
+  // The escalate bar is derived from the same turn and rides the same commit gate
+  // (it renders nothing until `turn.answer` exists), so it refreshes here rather
+  // than at five separate SSE call sites where one could quietly be missed. It is
+  // rendered from `turn.chatEsc`, so this is idempotent.
+  refreshChatEscalateBar(turn);
 }
 
 /** Only http(s) URLs are safe to put in a chip href (the URL is model output). A
@@ -2220,6 +2313,7 @@ function askArticleHtml(turn: AskTurn, buffer: string): string {
     askSourcesHtml(turn.citations, turn.cited) + "</div>" +
     askFollowupHtml(turn) +
     askRememberHtml(turn) +
+    askChatEscalateHtml(turn) +
     askFactcheckAppendHtml(turn) +
     askFactcheckIntegrateHtml(turn) +
     // Transient per-turn preview host — the proposal is never persisted, so a
@@ -2246,6 +2340,11 @@ function setFollowupDisabled(disabled: boolean): void {
   if (btn) btn.disabled = disabled;
   const remember = document.getElementById("wikiRememberBtn") as HTMLButtonElement | null;
   if (remember) remember.disabled = disabled;
+  // "Continue in chat →" is deliberately NOT here, for the same reason the two
+  // write buttons aren't: every terminal path (app_error / end / onerror) called
+  // `setFollowupDisabled(false)`, which force-enabled the button on turns that
+  // never committed — and clicking it was then a silent no-op. Its state is
+  // derived from the turn (`refreshChatEscalateBar`).
 }
 
 /** Paint an Ask turn into the main article pane (replaces the page/start view). */
@@ -2651,6 +2750,89 @@ async function submitRemember(): Promise<void> {
         "Couldn't remember that — " + (err instanceof Error ? err.message : String(err));
       msg.className = "wiki-remember-msg error";
     }
+  }
+}
+
+/** Cap on the answer this button POSTs — mirrors the server's FACTCHECK_ANSWER_MAX
+ *  (32k), the cap the two fact-check write routes enforce. The seed builder bounds
+ *  the answer at 6k anyway, so a rehydrated 500 KB turn would only be uploading
+ *  bytes the server is about to discard. */
+const CHAT_ESC_ANSWER_MAX = 32_000;
+
+/** The `/chat` deep link for the thread a 409 says already covers this question.
+ *  Built client-side from the conflict body (`existingThreadId` + `userId` +
+ *  `botName`); anything missing ⇒ no link, and the bar just offers a new thread. */
+function chatEscExistingUrl(d: {
+  existingThreadId?: string;
+  userId?: string;
+  botName?: string;
+}): string | undefined {
+  if (!d.existingThreadId || !d.userId || !d.botName) return undefined;
+  return (
+    "/chat?bot=" + encodeURIComponent(d.botName) +
+    "&thread=" + encodeURIComponent(d.existingThreadId) +
+    "&user=" + encodeURIComponent(d.userId)
+  );
+}
+
+/** Escalate the shown Ask turn into a real chat thread (POST /api/wiki/ask/chat)
+ *  and open the returned deep-link in a new tab, where the seeded message
+ *  auto-sends.
+ *
+ *  A 409 means a thread for this question already exists. It is NOT auto-retried
+ *  with `forceNew`: that minted a new thread — and a new auto-sent model turn —
+ *  on every re-click. The bar offers the existing thread, with "Start new thread"
+ *  as an explicit second choice.
+ *
+ *  All outcome state lands on the TURN (`turn.chatEsc`), never on the DOM node, so
+ *  a turn switch mid-flight can neither paint this result onto another turn's bar
+ *  nor swallow the error into a detached node. */
+async function submitChatEscalate(forceNew: boolean): Promise<void> {
+  const turn = askShownTurn;
+  if (!turn || !turn.answer || turn.kind === "factcheck") return;
+  if (turn.chatEsc?.status === "pending") return;
+  // Pre-open the tab SYNCHRONOUSLY, still inside the click's user gesture: Safari
+  // blocks a `window.open` issued after an await unconditionally, so opening after
+  // the fetch silently did nothing while the bar claimed "✓ Opened in chat →".
+  // Blocked anyway (win === null) ⇒ fall back to rendering an honest link.
+  const win = window.open("", "_blank");
+  turn.chatEsc = { status: "pending" };
+  refreshChatEscalateBar(turn);
+  try {
+    const res = await fetch("/api/wiki/ask/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        wiki: WIKI || undefined,
+        question: turn.question,
+        answer: turn.answer.slice(0, CHAT_ESC_ANSWER_MAX),
+        citations: turn.citations.map((ci) => ({ title: ci.title, pageName: ci.pageName })),
+        forceNew: forceNew || undefined,
+      }),
+    });
+    const data = (await res.json().catch(() => ({}))) as {
+      chatUrl?: string;
+      error?: string;
+      existingThreadId?: string;
+      userId?: string;
+      botName?: string;
+    };
+    if (res.status === 409 && !forceNew) {
+      if (win) win.close();
+      turn.chatEsc = { status: "exists", chatUrl: chatEscExistingUrl(data) };
+      return;
+    }
+    if (!res.ok || !data.chatUrl) throw new Error(data.error || "HTTP " + res.status);
+    if (win) win.location.href = data.chatUrl;
+    turn.chatEsc = { status: "done", chatUrl: data.chatUrl, opened: !!win };
+  } catch (err) {
+    if (win) win.close();
+    turn.chatEsc = {
+      status: "error",
+      message: "Couldn't open a chat — " + (err instanceof Error ? err.message : String(err)),
+    };
+  } finally {
+    refreshChatEscalateBar(turn);
   }
 }
 
@@ -3084,6 +3266,9 @@ document.addEventListener("click", (e) => {
   const t = e.target as HTMLElement;
   if (t.closest("#wikiFollowupBtn")) submitFollowup();
   else if (t.closest("#wikiRememberBtn")) submitRemember();
+  else if (t.closest("#wikiChatEscBtn")) submitChatEscalate(false);
+  // Explicit "start another thread anyway" after a 409 (never automatic).
+  else if (t.closest("#wikiChatEscNewBtn")) submitChatEscalate(true);
   else if (t.closest("#wikiFactcheckAppendBtn")) submitFactcheckAppend();
   else if (t.closest("#wikiFactcheckIntegrateBtn")) submitFactcheckIntegrate();
   else if (t.closest("#wikiFcIntAccept")) acceptFactcheckIntegrate();

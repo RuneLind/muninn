@@ -858,6 +858,26 @@ export async function renderWikiPage(opts?: {
     .wiki-remember-msg { font-size: 12px; color: var(--text-secondary); }
     .wiki-remember-msg.error { color: var(--status-error); }
     .wiki-remember-done { font-size: 12px; color: var(--accent-light); font-weight: 600; }
+    /* "Continue in chat →" bar — escalates an Ask turn into a real chat thread. */
+    .wiki-chatesc { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+    /* The wrapper is always rendered so the stream's done handler can fill it in place; an
+       uncommitted (or fact-check) turn renders no inner markup and the row
+       collapses instead of leaving a phantom gap — same rule as .wiki-fc-integrate. */
+    .wiki-chatesc:empty { display: none; margin: 0; }
+    .wiki-chatesc-btn {
+      padding: 6px 12px; border-radius: 8px;
+      border: 1px solid var(--border-secondary); background: var(--bg-inset);
+      color: var(--text-primary); font-size: 12px; font-weight: 600;
+      cursor: pointer; white-space: nowrap;
+    }
+    .wiki-chatesc-btn:hover { border-color: var(--accent); }
+    .wiki-chatesc-btn:disabled { opacity: 0.5; cursor: default; }
+    .wiki-chatesc-msg { font-size: 12px; color: var(--text-secondary); }
+    .wiki-chatesc-msg.error { color: var(--status-error); }
+    .wiki-chatesc-done {
+      font-size: 12px; color: var(--accent-light); font-weight: 600; text-decoration: none;
+    }
+    .wiki-chatesc-done:hover { text-decoration: underline; }
     .wiki-fc-append { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
     .wiki-fc-append-btn {
       padding: 6px 12px; border-radius: 8px;
