@@ -872,6 +872,13 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-chatesc-btn:hover { border-color: var(--accent); }
     .wiki-chatesc-btn:disabled { opacity: 0.5; cursor: default; }
+    /* Decline hook — the wiki had nothing (or nothing solid), so the chat escalation
+       is the primary next step rather than an optional extra: accent fill instead of
+       the ordinary bar's quiet inset button. */
+    .wiki-chatesc-decline {
+      border-color: var(--accent); background: var(--accent); color: #fff;
+    }
+    .wiki-chatesc-decline:hover { filter: brightness(1.08); }
     .wiki-chatesc-gear {
       padding: 6px 8px; border-radius: 8px; cursor: pointer; font-size: 12px;
       border: 1px solid var(--border-secondary); background: var(--bg-inset);

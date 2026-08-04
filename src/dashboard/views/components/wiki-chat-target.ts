@@ -221,3 +221,38 @@ export function conflictCopy(nameWasTyped: boolean): string {
     ? "A chat with that name already exists."
     : "A chat for this question already exists.";
 }
+
+/** Id of the decline hook's button — shared by {@link declineChatBarHtml}, the
+ *  reader's click delegation and its click-away opener test, so the three can't
+ *  drift. */
+export const DECLINE_CHAT_BTN_ID = "wikiChatDeclineBtn";
+
+/** Why the wiki declined, in the reader's words. `low_confidence` must NOT read as
+ *  "nothing found" — weak sources did ride out and are listed under the answer, so
+ *  the honest framing is "nothing solid", not "nothing". */
+function declineNote(reason: "no_hits" | "low_confidence"): string {
+  return reason === "low_confidence"
+    ? "The wiki had nothing solid on this."
+    : "The wiki had nothing on this.";
+}
+
+/**
+ * The decline hook: the whole inner markup of the escalate bar for a turn the wiki
+ * DECLINED to answer, rendered in place of the ordinary "Continue in chat →"
+ * button. Pure `reason → html` (no user content is interpolated, so nothing here
+ * needs escaping) and it is what makes the hook derivable from turn state alone —
+ * `wiki-browser.ts` holds only the wiring.
+ *
+ * The action is the direct-mode chat path: an honest failure is exactly the moment
+ * to offer the bot its tools and memories instead of the wiki index, and the reader
+ * should not have to retype the question to get there. (The complementary case —
+ * a confident answer the reader still wants to take further — is served by the
+ * always-visible "New chat" button beside the Ask box.)
+ */
+export function declineChatBarHtml(reason: "no_hits" | "low_confidence"): string {
+  return (
+    '<span class="wiki-chatesc-msg">' + declineNote(reason) + "</span>" +
+    '<button id="' + DECLINE_CHAT_BTN_ID + '" class="wiki-chatesc-btn wiki-chatesc-decline">' +
+    "Ask in chat instead →</button>"
+  );
+}

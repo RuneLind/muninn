@@ -37,6 +37,8 @@ import {
   chatUserStorageKey,
   chosenSupportsWebTools,
   conflictCopy,
+  declineChatBarHtml,
+  DECLINE_CHAT_BTN_ID,
   connectorOptionLabel,
   connectorStorageValue,
   pickConnectorId,
@@ -51,6 +53,7 @@ import { atlasBodyHtml, initAtlas } from "./wiki-atlas.ts";
 import { enhanceCodeTabs } from "./code-tabs.ts";
 import { enhanceFactCheck } from "./wiki-factcheck-reader.ts";
 import {
+  askDeclineReason,
   serializeAskSession,
   deserializeAskSession,
   type StoredAskTurn,
@@ -1820,6 +1823,12 @@ interface AskTurn {
   // Whether the checked page can carry inline <Fact> annotations (server-derived
   // .mdx-ness of the resolved path). Absent on an older server ⇒ not annotatable.
   annotatable?: boolean;
+  // The retrieval decline that ended this turn, mapped from the `done` payload by
+  // `askDeclineReason` (which checks lowConfidence FIRST — `noHits` is true on both
+  // decline branches). PERSISTED: the decline hook replaces the ordinary escalate
+  // bar and is re-derived on every turn switch / rehydrate, while the flags exist
+  // only on the transient `done` event.
+  declined?: "no_hits" | "low_confidence";
   // "Continue in chat →" state for THIS turn. In-memory only — deliberately NOT
   // part of StoredAskTurn/localStorage: the escalation is a live action, and a
   // rehydrated turn re-derives an offer-to-escalate bar rather than resurrecting a
@@ -2040,6 +2049,12 @@ function chatEscInnerHtml(turn: AskTurn): string {
   // memories, no tools" framing would be false. (Same turn-kind gate shape as
   // `askFactcheckAppendHtml`.)
   if (turn.kind === "factcheck") return "";
+  // The wiki declined this question (no hits, or only weak nearest-neighbours):
+  // offer the chat escalation as the PROMINENT next step instead of the ordinary
+  // "Continue in chat →" button, which reads as an optional extra on an answer
+  // that doesn't exist. Derived from `turn.declined`, so it survives a turn switch
+  // and a reload; the markup itself is the pure `declineChatBarHtml`.
+  if (turn.declined) return declineChatBarHtml(turn.declined);
   const st = turn.chatEsc;
   if (st?.status === "done") {
     return (
@@ -2597,9 +2612,16 @@ function runAskStream(url: string, turn: AskTurn): void {
         statusText = n > 0
           ? "Checked " + n + " claim" + (n === 1 ? "" : "s") + " against the web"
           : "Fact check complete";
-      } else if (d.lowConfidence) statusText = "No strong match — closest sources below";
-      else if (d.noHits) statusText = "No matching sources";
-      else statusText = "Answered from " + turn.citations.length + " source" + (turn.citations.length === 1 ? "" : "s");
+      } else {
+        // The decline lands on the TURN, not just on this status string: the
+        // escalate bar is re-derived from turn state on every switch/rehydrate,
+        // and `done` fires exactly once. `askDeclineReason` owns the
+        // lowConfidence-before-noHits order both branches below depend on.
+        turn.declined = askDeclineReason(d);
+        if (turn.declined === "low_confidence") statusText = "No strong match — closest sources below";
+        else if (turn.declined === "no_hits") statusText = "No matching sources";
+        else statusText = "Answered from " + turn.citations.length + " source" + (turn.citations.length === 1 ? "" : "s");
+      }
       setAskStatus(statusText, "done");
       // Drop the transient claim checklist before persisting — it's fully folded
       // into `turn.answer` by now (the final render above uses `turn.answer`, not
@@ -2964,6 +2986,21 @@ function openChatOptions(mode: "direct" | "escalate", anchor: HTMLElement | null
   };
   renderChatOptions(anchor);
   void loadChatTarget();
+}
+
+/** Open the popover from the decline hook — the same DIRECT path the "New chat"
+ *  button uses, but with the declined turn's question put back into the Ask box
+ *  first. That prefill is required, not cosmetic: direct mode reads (and re-reads
+ *  at submit) the live Ask box, `askQuestion` clears it on submit, and a follow-up
+ *  or Explain turn's question was never typed there at all — so without it the
+ *  panel would open on "Type a question first" and the reader would have to retype
+ *  the very question the wiki just failed to answer. */
+function openDeclineChat(anchor: HTMLElement | null): void {
+  const turn = askShownTurn;
+  if (!turn || !turn.declined) return;
+  const input = document.getElementById("wikiAskInput") as HTMLTextAreaElement | null;
+  if (input) input.value = turn.question;
+  openChatOptions("direct", anchor);
 }
 
 function closeChatOptions(): void {
@@ -3770,6 +3807,8 @@ document.addEventListener("click", (e) => {
     openChatOptions("escalate", t.closest("#wikiChatEscOptBtn") as HTMLElement);
   } else if (t.closest("#wikiNewChatBtn")) {
     openChatOptions("direct", t.closest("#wikiNewChatBtn") as HTMLElement);
+  } else if (t.closest("#" + DECLINE_CHAT_BTN_ID)) {
+    openDeclineChat(t.closest("#" + DECLINE_CHAT_BTN_ID) as HTMLElement);
   } else if (t.closest("#wikiChatOptClose")) closeChatOptions();
   else if (t.closest("#wikiChatOptSend")) void submitChatOptions(window.open("", "_blank"));
   else if (t.closest("#wikiChatOptSendThere")) {
@@ -3792,7 +3831,10 @@ document.addEventListener("click", (e) => {
       open: true,
       attached: document.contains(t),
       inPanel: !!t.closest("#wikiChatOpt"),
-      inOpener: !!t.closest("#wikiChatEscOptBtn") || !!t.closest("#wikiNewChatBtn"),
+      inOpener:
+        !!t.closest("#wikiChatEscOptBtn") ||
+        !!t.closest("#wikiNewChatBtn") ||
+        !!t.closest("#" + DECLINE_CHAT_BTN_ID),
       sending: chatOpt.sending,
       inQuestionBox: !!t.closest("#wikiAskInput"),
       mode: chatOpt.mode,

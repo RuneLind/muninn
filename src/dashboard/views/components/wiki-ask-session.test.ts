@@ -1,9 +1,11 @@
 import { test, expect } from "bun:test";
 import {
+  askDeclineReason,
   serializeAskSession,
   deserializeAskSession,
   type StoredAskTurn,
 } from "./wiki-ask-session.ts";
+import { declineChatBarHtml, DECLINE_CHAT_BTN_ID } from "./wiki-chat-target.ts";
 
 function turn(overrides: Partial<StoredAskTurn> = {}): StoredAskTurn {
   return {
@@ -242,6 +244,57 @@ test("a present-but-wrong-typed annotatable drops the FIELD, keeping the turn", 
   expect(restored.map((t) => t.question)).toEqual(["bogus", "clean"]);
   expect(restored[0]!.annotatable).toBeUndefined();
   expect(restored[1]!.annotatable).toBe(false);
+});
+
+// --- Decline hook (PR B) ---------------------------------------------------
+
+test("askDeclineReason checks lowConfidence FIRST — noHits is true on both branches", () => {
+  // The server's low-confidence decline emits {noHits: true, lowConfidence: true}
+  // (src/research/ask.ts), so a `noHits ? … : …` order would label every
+  // low-confidence decline "no_hits".
+  expect(askDeclineReason({ noHits: true, lowConfidence: true })).toBe("low_confidence");
+  expect(askDeclineReason({ noHits: true, lowConfidence: false })).toBe("no_hits");
+  expect(askDeclineReason({ noHits: false, lowConfidence: false })).toBeUndefined();
+  // A fact-check `done` payload carries neither flag — no retrieval, no decline.
+  expect(askDeclineReason({})).toBeUndefined();
+});
+
+test("round-trips a declined turn, so the decline bar survives a reload", () => {
+  const declined = turn({ question: "obscure thing", declined: "low_confidence" });
+  const restored = deserializeAskSession(serializeAskSession([declined], 10));
+  expect(restored).toEqual([declined]);
+  expect(restored[0]!.declined).toBe("low_confidence");
+  // What the rehydrated turn renders: the decline hook, not the ordinary bar.
+  const html = declineChatBarHtml(restored[0]!.declined!);
+  expect(html).toContain(DECLINE_CHAT_BTN_ID);
+  expect(html).toContain("Ask in chat instead");
+  expect(html).toContain("nothing solid"); // the low-confidence wording
+});
+
+test("`declined` is validated as the two-value union, not merely as a string", () => {
+  // An unknown value falls through both render branches and silently restores the
+  // ordinary escalate bar on a turn the wiki declined.
+  const raw = JSON.stringify([
+    { ...turn({ question: "bogus" }), declined: "nohits" },
+    { ...turn({ question: "numeric" }), declined: 1 },
+    { ...turn({ question: "empty" }), declined: "" },
+    turn({ question: "no-hits-ok", declined: "no_hits" }),
+    turn({ question: "low-conf-ok", declined: "low_confidence" }),
+    turn({ question: "absent" }), // an answered turn carries no field at all
+  ]);
+  expect(deserializeAskSession(raw).map((t) => t.question)).toEqual([
+    "no-hits-ok",
+    "low-conf-ok",
+    "absent",
+  ]);
+});
+
+test("the two decline reasons render distinct copy", () => {
+  // "no results" would be a lie for low confidence — weak sources DID ride out and
+  // are listed under the answer.
+  expect(declineChatBarHtml("no_hits")).toContain("nothing on this");
+  expect(declineChatBarHtml("no_hits")).not.toContain("nothing solid");
+  expect(declineChatBarHtml("low_confidence")).toContain("nothing solid");
 });
 
 test("claimQuotes entries the server would reject wholesale are not persisted", () => {

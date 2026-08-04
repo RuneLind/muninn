@@ -75,6 +75,38 @@ export interface StoredAskTurn {
    *  `.mdx`-ness of the resolved path). Absent on a pre-field turn / an older
    *  server ⇒ treat as not annotatable. */
   annotatable?: boolean;
+  /** The retrieval DECLINE that ended this turn — the wiki had nothing worth
+   *  synthesizing from (`no_hits`) or only weak nearest-neighbours
+   *  (`low_confidence`). Persisted because the decline hook (an "Ask in chat
+   *  instead →" action rendered in place of the ordinary escalate bar) is derived
+   *  from TURN state at render time, while the flags themselves arrive once on the
+   *  transient `done` SSE event: without this a rehydrated — or merely re-shown —
+   *  declined turn would silently get the ordinary bar back. Absent ⇒ the turn was
+   *  answered (or is a fact-check turn, which has no retrieval at all).
+   *  Validated as the two-value union: an unknown value falls through both render
+   *  branches, which is the same silent-wrong-bar bug in a different disguise. */
+  declined?: "no_hits" | "low_confidence";
+}
+
+/**
+ * Map an Ask/Explain `done` payload's decline flags onto {@link StoredAskTurn.declined}.
+ *
+ * **`lowConfidence` is checked FIRST and that order is load-bearing.** The server
+ * sets `noHits: true` unconditionally on BOTH decline branches (`src/research/ask.ts`
+ * — it means "no answer was synthesized", not "zero documents came back") and
+ * distinguishes them only by `lowConfidence`. The natural-reading
+ * `noHits ? "no_hits" : …` therefore mislabels EVERY low-confidence decline, which
+ * is the one the reader most needs named honestly: weak sources did ride out and
+ * are listed under the answer. The status line above the bar has always branched
+ * this way; this keeps the two derivations from drifting apart.
+ */
+export function askDeclineReason(payload: {
+  noHits?: unknown;
+  lowConfidence?: unknown;
+}): "no_hits" | "low_confidence" | undefined {
+  if (payload.lowConfidence) return "low_confidence";
+  if (payload.noHits) return "no_hits";
+  return undefined;
 }
 
 /** True when `v` is a well-formed persisted turn. Malformed entries (partial
@@ -127,6 +159,14 @@ function isValidTurn(v: unknown): v is StoredAskTurn {
   // per field — a half-trusted list is never kept.
   if (typeof t.claimQuotes !== "undefined" && !isValidClaimQuotes(t.claimQuotes)) {
     delete t.claimQuotes;
+  }
+  // `declined` is a two-value union that SELECTS which bar the turn renders, so an
+  // unknown value would silently restore the ordinary escalate bar on a turn the
+  // wiki actually declined — the exact failure this field exists to prevent. Same
+  // reject-the-turn treatment as `wrote`, not the drop-the-field treatment given to
+  // advisory hints.
+  if (typeof t.declined !== "undefined" && t.declined !== "no_hits" && t.declined !== "low_confidence") {
+    return false;
   }
   if (typeof t.claimCount !== "undefined" && typeof t.claimCount !== "number") return false;
   if (typeof t.claimOutcomes !== "undefined" && !isValidOutcomeCounts(t.claimOutcomes)) return false;
