@@ -135,7 +135,11 @@ export async function findThreadByName(userId: string, botName: string, name: st
   return row ? rowToThread(row) : null;
 }
 
-/** Create a new thread without deactivating others. For web UI thread creation. */
+/** Create a new thread without deactivating others. For web UI thread creation.
+ *  NB the upsert's `COALESCE(EXCLUDED.description, …)` means a NEW non-null
+ *  description WINS over the stored one; only an absent/blank one preserves it.
+ *  Callers that need a description to be stable (the wiki article threads, whose
+ *  description carries their identity tag) must not re-insert over the name. */
 export async function createThread(userId: string, botName: string, name: string, description?: string, connectorId?: string): Promise<Thread> {
   const sql = getDb();
   const normalized = name.toLowerCase().trim();

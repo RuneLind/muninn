@@ -33,13 +33,15 @@ import {
   type ToolLogRow,
 } from "./wiki-explain.ts";
 import {
-  articleChatQuestion,
   articleChatRowsHtml,
   botDefaultOptionLabel,
+  captureChatOptFocus,
   chatEscBarHtml,
   chatOptConflictFootHtml,
+  chatOptEscapeAction,
   chatOptNameSource,
   chatOptQuestion,
+  chatOptStatusLines,
   chatUserStorageKey,
   chosenSupportsWebTools,
   composeDeclineQuestion,
@@ -47,6 +49,8 @@ import {
   connectorOptionLabel,
   connectorStorageValue,
   discussArticleBtnHtml,
+  shouldCloseArticleChatOnNavigate,
+  CHAT_OPT_ESC_CONFIRM,
   CHAT_OPT_QUESTION_ID,
   DECLINE_CHAT_BTN_ID,
   DISCUSS_ARTICLE_BTN_ID,
@@ -57,6 +61,7 @@ import {
   wikiConnectorStorageKey,
   type ChatEscState,
   type ChatOptArticle,
+  type ChatOptFocus,
   type ChatOptMode,
   type ChatTarget,
 } from "./wiki-chat-target.ts";
@@ -1037,6 +1042,11 @@ function loadCoverageFooter(): void {
 // Select-to-Explain section). Hidden on the start view and on Ask answers.
 function renderBreadcrumb(m: WikiListing): void {
   const el = document.getElementById("wikiBreadcrumb");
+  // Navigating to a DIFFERENT page invalidates an open article popover: it still
+  // targets the page the reader just left, and its anchor button has been
+  // detached by this very render. Close it rather than let Send file the question
+  // against the wrong article.
+  if (shouldCloseArticleChatOnNavigate(chatOpt, m.relPath)) closeChatOptions();
   // Stamped even when there is no breadcrumb node: it is the "which page is open"
   // answer for the Discuss popover, and every render path funnels through here.
   currentArticle = m;
@@ -1079,6 +1089,11 @@ function renderBreadcrumb(m: WikiListing): void {
 function hideBreadcrumb(): void {
   const el = document.getElementById("wikiBreadcrumb");
   if (el) el.style.display = "none";
+  // No page is open any more, so there is nothing for the Discuss button to act
+  // on. Leaving the last page stamped here is the stale-state trap: the button is
+  // hidden with the breadcrumb, but every other path that reads `currentArticle`
+  // would still be handed a page the reader is no longer on.
+  currentArticle = null;
 }
 
 // ── Middle pane: article / start view ─────────────────────────────────
@@ -2796,6 +2811,10 @@ interface AskChatResponse {
   error?: string;
   threadId?: string;
   threadExists?: boolean;
+  /** Article mode: the derived name collided with a thread that is NOT this
+   *  article's (its description carries no matching article tag). Distinct from
+   *  `threadExists` precisely because "Send there →" must not be offered. */
+  nameTaken?: boolean;
   alreadyQueued?: boolean;
   existingThreadId?: string;
   /** Reuse path only: whether a posted `connectorId` was actually applied. An
@@ -2931,8 +2950,15 @@ interface ChatOptState {
   /** Typed thread-name override; "" ⇒ derive from the question. */
   threadName: string;
   sending: boolean;
-  /** A name collision the reader must resolve (409 `threadExists`). */
-  conflict?: { existingThreadId: string; typedName: boolean };
+  /** A name collision the reader must resolve. `threadExists` ⇒ the thread really
+   *  is this article's (or this question's) and "Send there →" is the primary
+   *  action; `nameTaken` ⇒ the route checked the colliding thread's identity and
+   *  it is an UNRELATED thread that owns the name, so a new thread is the only
+   *  offer and `existingThreadId` is empty. */
+  conflict?: { existingThreadId: string; typedName: boolean; nameTaken?: boolean };
+  /** One Escape has been pressed on a non-empty article question — the next one
+   *  discards it (`chatOptEscapeAction`). Cleared by typing. */
+  escArmed?: boolean;
   /** A 409 `alreadyQueued` — the thread already holds an unopened question. The
    *  deep link is the recovery: open it, and the queued seed is delivered. */
   queuedUrl?: string;
@@ -2994,10 +3020,13 @@ function openChatOptions(
     turn = opts.turn ?? null;
   } else if (mode === "article") {
     if (!opts.article) return;
-    // Editable, not pinned: only an AUTHORED frontmatter description prefills —
-    // the page's first prose line rides along as a hint instead of being armed
-    // in the box (see `articleChatQuestion`).
-    question = articleChatQuestion(opts.article);
+    // Editable, and ALWAYS EMPTY: neither page summary prefills. Both are
+    // declarative sentences about the topic, Send is enabled on whatever is in
+    // the box, and the frontmatter `description` that used to prefill was
+    // therefore one click away from being sent as the reader's own question —
+    // and appended to the seed a second time by the server. They ride along as a
+    // clamped hint instead (`articleChatHint`).
+    question = "";
   } else if (mode === "direct") {
     const input = document.getElementById("wikiAskInput") as HTMLTextAreaElement | null;
     question = (input?.value || "").trim();
@@ -3252,15 +3281,23 @@ function chatOptBodyHtml(state: ChatOptState, question: string): string {
 }
 
 /** The status line's inner markup (its container is always rendered, so the line
- *  can be repainted without disturbing the focused thread-name input). */
+ *  can be repainted without disturbing the focused thread-name input). The lines
+ *  themselves are the pure `chatOptStatusLines` — a status no longer HIDES the
+ *  "type a question first" guidance, which is what let an emptied question sit
+ *  under conflict copy beside two live buttons that POST it. */
 function chatOptStatusHtml(state: ChatOptState, question: string): string {
-  const line = (text: string, isError: boolean): string =>
-    '<div class="wiki-chatopt-line' + (isError ? " error" : "") + '">' + esc(text) + "</div>";
-  if (state.status) return line(state.status, !!state.statusIsError);
-  if (!state.target?.botName) return "";
-  if (!question) return line("Type a question first.", false);
-  if (!state.userId) return line("Pick who this chat belongs to.", false);
-  return "";
+  return chatOptStatusLines({
+    status: state.status,
+    statusIsError: state.statusIsError,
+    hasTarget: !!state.target?.botName,
+    question,
+    hasUser: !!state.userId,
+  })
+    .map(
+      (l) => '<div class="wiki-chatopt-line' + (l.error ? " error" : "") + '">' +
+        esc(l.text) + "</div>",
+    )
+    .join("");
 }
 
 /** The action row's inner markup. */
@@ -3281,7 +3318,14 @@ function chatOptFootHtml(state: ChatOptState, question: string): string {
       '<button id="wikiChatOptForce" class="wiki-chatopt-btn ghost">Start new thread</button>'
     );
   }
-  if (state.conflict) return chatOptConflictFootHtml();
+  // Both conflict actions POST the question, so an empty one disables them — a
+  // live button there opened a blank tab and closed it again with no feedback.
+  if (state.conflict) {
+    return chatOptConflictFootHtml({
+      nameTaken: state.conflict.nameTaken,
+      disabled: state.sending || !question,
+    });
+  }
   if (state.target?.botName) {
     const blocked = state.sending || !question || !state.userId;
     return (
@@ -3328,11 +3372,37 @@ function repaintChatOptFoot(): void {
   if (foot) foot.innerHTML = chatOptFootHtml(state, question);
 }
 
+/** Re-focus the field the innerHTML swap just destroyed, caret included. */
+function restoreChatOptFocus(snap: ChatOptFocus | null): void {
+  if (!snap) return;
+  const el = document.getElementById(snap.id) as
+    | (HTMLElement & { setSelectionRange?: (s: number, e: number) => void })
+    | null;
+  if (!el) return;
+  el.focus();
+  if (snap.start === null || snap.end === null || typeof el.setSelectionRange !== "function") {
+    return;
+  }
+  // A `<select>` has no selection range, and a caret past the (possibly shorter)
+  // new value throws on some engines — neither is worth losing the focus over.
+  try { el.setSelectionRange(snap.start, snap.end); } catch { /* not a text field */ }
+}
+
 /** Paint the panel, creating + positioning it on the first call of an open. */
 function renderChatOptions(anchor?: HTMLElement | null): void {
   const state = chatOpt;
   let panel = chatOptPanel();
   if (!state) { if (panel) panel.remove(); return; }
+  // The article question box is rendered BEFORE the chat target resolves, on
+  // purpose ("start typing immediately") — and `loadChatTarget`'s finally, the
+  // user picker and the connector picker all re-render the whole panel. Without
+  // this the reader loses focus and caret mid-word, and the rest of the sentence
+  // goes nowhere.
+  const active = document.activeElement as HTMLElement | null;
+  const focus = captureChatOptFocus(
+    active as { id?: string } | null,
+    !!panel && !!active && panel.contains(active),
+  );
   if (!panel) {
     panel = document.createElement("div");
     panel.id = "wikiChatOpt";
@@ -3340,6 +3410,7 @@ function renderChatOptions(anchor?: HTMLElement | null): void {
     document.body.appendChild(panel);
   }
   panel.innerHTML = chatOptionsHtml(state);
+  restoreChatOptFocus(focus);
   const at = anchor ?? state.anchor;
   if (at && at.isConnected) {
     const r = at.getBoundingClientRect();
@@ -3411,6 +3482,18 @@ async function submitChatOptions(
     }
     const { status, ok, data } = await postAskChat(payload);
     if (chatOpt !== state) { if (win) win.close(); return; }
+    if (status === 409 && data.nameTaken) {
+      // The name collided, but the route checked the colliding thread's own
+      // description and it is NOT this article's discussion — an unrelated
+      // thread (a `/topic` chat, another wiki's same-titled page) that happens to
+      // own the name. There is no "there" to send to, so the only offer is a new
+      // thread, which the forceNew walk names with a suffix.
+      if (win) win.close();
+      state.conflict = { existingThreadId: "", typedName, nameTaken: true };
+      state.status = conflictStatusLine(typedName, state.mode, true);
+      state.statusIsError = false;
+      return;
+    }
     if (status === 409 && data.threadExists && data.existingThreadId) {
       if (win) win.close();
       state.conflict = { existingThreadId: data.existingThreadId, typedName };
@@ -4022,6 +4105,10 @@ document.addEventListener("input", (e) => {
   // and then hit "Send there →", which needs the thread id still on state.
   if (state.mode === "article" && el.id === CHAT_OPT_QUESTION_ID) {
     state.question = (el as HTMLTextAreaElement).value;
+    // Typing disarms the discard confirmation — a stale "press Esc again" would
+    // otherwise discard a question the reader had gone back to editing.
+    state.escArmed = false;
+    if (state.status === CHAT_OPT_ESC_CONFIRM) state.status = undefined;
     repaintChatOptFoot();
     return;
   }
@@ -4035,9 +4122,27 @@ document.addEventListener("input", (e) => {
   }
 });
 
-// Escape closes the popover (a modal-ish panel with no backdrop).
+// Escape closes the popover (a modal-ish panel with no backdrop) — but an
+// ARTICLE question exists only inside this panel (direct mode's draft lives on in
+// the Ask box), so a typed one gets a confirm-then-discard: the first Escape says
+// so in the status line, the second closes. The decision is the pure
+// `chatOptEscapeAction`.
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && chatOpt) closeChatOptions();
+  const state = chatOpt;
+  if (e.key !== "Escape" || !state) return;
+  const action = chatOptEscapeAction({
+    mode: state.mode,
+    question: currentChatOptQuestion(state),
+    escArmed: state.escArmed,
+  });
+  if (action === "confirm") {
+    state.escArmed = true;
+    state.status = CHAT_OPT_ESC_CONFIRM;
+    state.statusIsError = false;
+    repaintChatOptFoot();
+    return;
+  }
+  closeChatOptions();
 });
 // Preview-panel checkboxes — same document-level delegation (the panel is
 // re-rendered wholesale on every toggle, so direct listeners wouldn't survive).

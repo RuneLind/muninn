@@ -259,28 +259,32 @@ export function discussArticleBtnHtml(): string {
 export const ARTICLE_QUESTION_PLACEHOLDER = "What do you want to know about this article?";
 
 /**
- * What the question box holds when the popover OPENS.
+ * How much of the page summary the hint renders.
  *
- * Only an authored frontmatter `description` prefills. `desc` deliberately does
- * NOT: it is the page's first prose LINE — a declarative sentence about the topic,
- * which reads wrong as the reader's own question and, prefilled, would be sent
- * verbatim by anyone who just hits Send. It is offered as a hint instead
- * ({@link articleChatHint}).
+ * `desc`/`description` are unbounded (mimir's longest is 1816 chars; 186 real
+ * pages exceed 400), and the popover has no scroll of its own worth the name —
+ * an unclamped hint pushed the Send button below the fold, i.e. the panel's only
+ * action became unreachable by rendering a page's own summary.
  */
-export function articleChatQuestion(article: ChatOptArticle): string {
-  return (article.description || "").trim();
-}
+export const ARTICLE_HINT_MAX = 240;
 
 /**
- * The dim line under the question box: the page's first prose line, as context
- * for what to ask — never as the question itself.
+ * The dim line under the question box: what the page says about itself, as
+ * context for what to ask — never as the question itself.
  *
- * Suppressed when {@link articleChatQuestion} already prefilled something (the
- * hint would then just echo a field two rows up).
+ * **Neither summary prefills the box.** The authored frontmatter `description`
+ * used to, and it is the same failure the `desc` demotion was written for: a
+ * description is a declarative sentence (blog subtitles, sniffed `<meta>`
+ * descriptions — 98 mimir pages carry one), Send is ENABLED on it, so one click
+ * sent the page's own subtitle as the reader's question. The server then appended
+ * the same string to the seed as the article parenthetical, so it arrived twice.
+ * Both now land here, clamped, and the box stays empty behind
+ * {@link ARTICLE_QUESTION_PLACEHOLDER}.
  */
 export function articleChatHint(article: ChatOptArticle): string {
-  if (articleChatQuestion(article)) return "";
-  return (article.desc || "").trim();
+  const text = (article.description || article.desc || "").trim();
+  if (text.length <= ARTICLE_HINT_MAX) return text;
+  return text.slice(0, ARTICLE_HINT_MAX).trimEnd() + "…";
 }
 
 /**
@@ -293,6 +297,13 @@ export function articleChatHint(article: ChatOptArticle): string {
  * after the first question would mint a sibling thread per visit instead.
  * A page with no usable title falls back to the question, so the name can never
  * collapse to the generic `wiki ask`.
+ *
+ * **The "no usable title" test is the ROUTE's**, not `.trim()`: the route asks
+ * `deriveAskThreadTitleOrNull(page.title)`, which flattens control characters
+ * away, so a title of `""` has no name in it there while `.trim()`
+ * called it usable here — the preview then said `wiki ask` (the generic fallback
+ * a truthy-but-nameless title lands on) while the server stored the
+ * question-derived name.
  */
 export function chatOptNameSource(
   mode: ChatOptMode,
@@ -300,7 +311,86 @@ export function chatOptNameSource(
   articleTitle?: string,
 ): string {
   if (mode !== "article") return question;
-  return (articleTitle || "").trim() || question;
+  return deriveAskThreadTitleOrNull(articleTitle || "") !== null ? (articleTitle as string) : question;
+}
+
+// ── Popover lifecycle: focus, Escape, navigation ──────────────────────
+
+/**
+ * A focused field's identity and caret, captured across an `innerHTML` swap.
+ *
+ * The panel is re-rendered wholesale from state — and in article mode the reader
+ * is TYPING into it while the chat-target fetch is still in flight ("start typing
+ * immediately" is the stated intent of rendering the question row above the
+ * loading return). `loadChatTarget`'s `finally`, the user picker and the connector
+ * picker all call `renderChatOptions()`, which replaces the node mid-word: focus
+ * and caret are gone, and the next keystroke goes nowhere.
+ */
+export interface ChatOptFocus {
+  id: string;
+  /** Caret/selection, when the field has one (`<select>` has none). */
+  start: number | null;
+  end: number | null;
+}
+
+/**
+ * The focus snapshot to restore after the swap, or `null` when nothing inside the
+ * panel had focus.
+ *
+ * Duck-typed on purpose (an `{id, selectionStart, selectionEnd}` shape) so the
+ * decision is unit-testable without a DOM; the caller supplies both the active
+ * element and whether it is inside the panel.
+ */
+export function captureChatOptFocus(
+  active: { id?: string; selectionStart?: number | null; selectionEnd?: number | null } | null,
+  insidePanel: boolean,
+): ChatOptFocus | null {
+  if (!active || !insidePanel) return null;
+  const id = typeof active.id === "string" ? active.id : "";
+  if (!id) return null;
+  return {
+    id,
+    start: typeof active.selectionStart === "number" ? active.selectionStart : null,
+    end: typeof active.selectionEnd === "number" ? active.selectionEnd : null,
+  };
+}
+
+/** Status copy for the first Escape on an article question with text in it. */
+export const CHAT_OPT_ESC_CONFIRM = "Press Esc again to discard this question.";
+
+/**
+ * What Escape does.
+ *
+ * Direct mode's draft lives in the Ask box and survives a close; an ARTICLE
+ * question lives only in this panel, so a stray Escape is the only copy of it
+ * gone. The first Escape therefore arms a confirmation, the second closes —
+ * `escArmed` is cleared again by typing, so the confirmation can't go stale.
+ */
+export function chatOptEscapeAction(state: {
+  mode: ChatOptMode;
+  question: string;
+  escArmed?: boolean;
+}): "close" | "confirm" {
+  if (state.mode !== "article") return "close";
+  if (!state.question.trim()) return "close";
+  return state.escArmed ? "close" : "confirm";
+}
+
+/**
+ * Whether an article-mode popover must close because the reader navigated the
+ * article pane to a DIFFERENT page.
+ *
+ * Nothing else invalidates it: the panel keeps targeting page A (its `article` is
+ * snapshotted at open) while the pane shows page B, its anchor button has been
+ * detached by the re-render, and Send would quietly file the question against the
+ * page the reader just left.
+ */
+export function shouldCloseArticleChatOnNavigate(
+  state: { mode: ChatOptMode; article?: { relPath: string } } | null | undefined,
+  relPath: string,
+): boolean {
+  if (!state || state.mode !== "article" || !state.article) return false;
+  return (state.article.relPath || "") !== (relPath || "");
 }
 
 /** The article popover's context + question block. Pure so the "editable, not
@@ -441,12 +531,64 @@ export const CHAT_OPT_FORCE_ID = "wikiChatOptForce";
  * nothing to cause. A TYPED name is a different story in every mode: there the
  * reader chose the name, and "the question already has a chat" would be a lie.
  */
-export function conflictStatusLine(nameWasTyped: boolean, mode: ChatOptMode): string {
+export function conflictStatusLine(
+  nameWasTyped: boolean,
+  mode: ChatOptMode,
+  /** The colliding thread is NOT this article's (the route's `nameTaken` 409):
+   *  its description carries no matching article tag, so it is an unrelated
+   *  thread — quite possibly an ordinary `/topic` chat — that merely owns the
+   *  name. Sending there would cross-seed someone else's conversation. */
+  nameTaken = false,
+): string {
+  if (nameTaken) {
+    return (
+      (nameWasTyped
+        ? "A different, unrelated chat already uses that name"
+        : "The name this article's thread would use is taken by an unrelated chat") +
+      " — start a new thread instead."
+    );
+  }
   if (mode === "article" && !nameWasTyped) {
     return "This article already has a chat thread — send your question there, " +
       "or start another.";
   }
   return conflictCopy(nameWasTyped) + " Send this question there, or start another.";
+}
+
+/** The status line's "you haven't typed anything yet" copy — shared by the model
+ *  and the tests, since it is also the line that has to survive conflict copy. */
+export const CHAT_OPT_EMPTY_QUESTION = "Type a question first.";
+
+/** One rendered status line. */
+export interface ChatOptStatusLine {
+  text: string;
+  error: boolean;
+}
+
+/**
+ * Every line the status area shows, in order.
+ *
+ * A `status` (a conflict, an error, a confirmation) no longer SUPPRESSES the
+ * blocked-Send guidance: after a 409 with an emptied question, the conflict copy
+ * owned the line, both conflict buttons stayed live, and clicking one fired a
+ * blank tab that opened and closed with no feedback at all. The guidance now
+ * renders under whatever status is there — and {@link chatOptConflictFootHtml}
+ * disables the buttons to match.
+ */
+export function chatOptStatusLines(input: {
+  status?: string;
+  statusIsError?: boolean;
+  /** A chat target resolved — before that, guidance about it is premature. */
+  hasTarget: boolean;
+  question: string;
+  hasUser: boolean;
+}): ChatOptStatusLine[] {
+  const lines: ChatOptStatusLine[] = [];
+  if (input.status) lines.push({ text: input.status, error: !!input.statusIsError });
+  if (!input.hasTarget) return lines;
+  if (!input.question.trim()) lines.push({ text: CHAT_OPT_EMPTY_QUESTION, error: false });
+  else if (!input.hasUser) lines.push({ text: "Pick who this chat belongs to.", error: false });
+  return lines;
 }
 
 /**
@@ -458,14 +600,28 @@ export function conflictStatusLine(nameWasTyped: boolean, mode: ChatOptMode): st
  * failure article mode is shaped to avoid. The wording is deliberately identical
  * across modes; what changes is the LINE above it ({@link conflictStatusLine}),
  * which is where "this is the normal, successful outcome" gets said.
+ *
+ * Two states change the row itself:
+ * - **`nameTaken`** — the colliding thread is not this article's, so there is no
+ *   "there" to send to. "Start new thread" is the only action, and it becomes the
+ *   primary (no `ghost`): offering "Send there →" would cross-seed an unrelated
+ *   conversation.
+ * - **`disabled`** — the question is empty, and both actions POST it. Live
+ *   buttons fired a blank tab that opened and closed with zero feedback.
  */
-export function chatOptConflictFootHtml(): string {
+export function chatOptConflictFootHtml(
+  opts: { nameTaken?: boolean; disabled?: boolean } = {},
+): string {
+  const dis = opts.disabled ? " disabled" : "";
+  const force =
+    '<button id="' + CHAT_OPT_FORCE_ID + '" class="wiki-chatopt-btn' +
+    (opts.nameTaken ? "" : " ghost") + '"' + dis + ">Start new thread</button>";
+  if (opts.nameTaken) return force;
   return (
-    '<button id="' + CHAT_OPT_SEND_THERE_ID + '" class="wiki-chatopt-btn">' +
+    '<button id="' + CHAT_OPT_SEND_THERE_ID + '" class="wiki-chatopt-btn"' + dis + ">" +
     "Send there →" +
     "</button>" +
-    '<button id="' + CHAT_OPT_FORCE_ID + '" class="wiki-chatopt-btn ghost">' +
-    "Start new thread</button>"
+    force
   );
 }
 

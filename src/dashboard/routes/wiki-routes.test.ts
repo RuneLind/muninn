@@ -1833,12 +1833,17 @@ describe("POST /api/wiki/ask/chat", () => {
   let created: { userId: string; botName: string; name: string; description?: string }[];
   let pending: { threadId: string; text: string }[];
   let existingThreadNames: string[];
+  /** Descriptions of the threads above, by name — the article-identity tag. */
+  let threadDescriptionsByName: Record<string, string | undefined>;
   let users: { id: string; name: string }[];
   let bots: string[];
   let defaultUser: string | null;
   // Connector / existing-thread / pending-store seam state.
   let connectorRows: { id: string; name: string; connectorType: string }[];
-  let threadsById: Record<string, { id: string; userId: string; botName: string; connectorId?: string }>;
+  let threadsById: Record<
+    string,
+    { id: string; userId: string; botName: string; connectorId?: string; description?: string }
+  >;
   let livePending: string[];
   let connectorStamps: { threadId: string; connectorId: string | null }[];
   let createdConnectorIds: (string | undefined)[];
@@ -1850,8 +1855,13 @@ describe("POST /api/wiki/ask/chat", () => {
     discoverBots: () => bots.map((name) => ({ name }) as unknown as BotConfig),
     loadChatConfig: async () => ({ users }),
     getBotDefaultUser: async () => defaultUser,
+    // Carries the DESCRIPTION, like the real row does — in article mode it is
+    // what says whether a name collision is this article's own thread or an
+    // unrelated thread that merely owns the name.
     findThreadByName: async (_userId: string, _botName: string, name: string) =>
-      existingThreadNames.includes(name) ? { id: "existing-thread", name } : null,
+      existingThreadNames.includes(name)
+        ? { id: "existing-thread", name, description: threadDescriptionsByName[name] }
+        : null,
     hasPendingMessage: (threadId: string) => livePending.includes(threadId),
     setPendingMessageIfAbsent: (threadId: string, text: string) => {
       if (livePending.includes(threadId)) return false;
@@ -1916,6 +1926,7 @@ describe("POST /api/wiki/ask/chat", () => {
     created = [];
     pending = [];
     existingThreadNames = [];
+    threadDescriptionsByName = {};
     users = [{ id: "user-1", name: "rune" }];
     bots = ["jarviswiki", "melosys"];
     defaultUser = null;
@@ -1938,6 +1949,7 @@ describe("POST /api/wiki/ask/chat", () => {
         created.push({ userId, botName, name, description });
         createdConnectorIds.push(connectorId);
         existingThreadNames.push(name);
+        threadDescriptionsByName[name] = description;
         return { id: "thread-" + created.length };
       },
       setPendingMessage: (threadId, text) => { pending.push({ threadId, text }); },
@@ -2308,8 +2320,10 @@ describe("POST /api/wiki/ask/chat", () => {
       // land in this same thread, which is what the name is doing.
       expect(created[0]!.name).toBe("a concept");
       expect(created[0]!.description).toContain('Discussion of the wiki article "A Concept"');
-      // NOT the Ask-tab line: this conversation never touched the Ask tab, and
-      // `createThread` COALESCEs, so a wrong description would stick forever.
+      // …and the description carries the machine tag that makes the thread
+      // IDENTIFIABLE, since the name alone can't be (see the identity suite).
+      expect(created[0]!.description).toContain("(jarviswiki:A Concept.md)");
+      // NOT the Ask-tab line: this conversation never touched the Ask tab.
       expect(created[0]!.description).not.toContain("Ask tab");
     });
 
@@ -2386,6 +2400,165 @@ describe("POST /api/wiki/ask/chat", () => {
       expect((await post(articleBody({ page: 7 }))).status).toBe(400);
       expect((await post(articleBody({ relPath: [] }))).status).toBe(400);
       expect(created).toHaveLength(0);
+    });
+
+    test("a stale relPath (a rename) falls back to the NAME instead of 404ing", async () => {
+      // An open tab holds the path from before the page moved; the name beside it
+      // still resolves, so the Discuss button used to 404 on a page plainly there.
+      const res = await post(articleBody({ page: "A Concept", relPath: "moved/away.md" }));
+      expect(res.status).toBe(200);
+      expect(pending[0]!.text).toContain("A Concept.md");
+      // Both unresolvable ⇒ still a 404, quoting BOTH references it was given.
+      const gone = await post(articleBody({ page: "No Such Page", relPath: "moved/away.md" }));
+      expect(gone.status).toBe(404);
+      const err = ((await gone.json()) as { error: string }).error;
+      expect(err).toContain("moved/away.md");
+      expect(err).toContain("No Such Page");
+    });
+
+    test("a page-less article POST is a 400 even on a wiki with no bot", async () => {
+      // Body shape is answered beside the other body-shape checks, before bot
+      // resolution — a wiki whose bot is gone used to reply "belongs to no bot",
+      // which is true but not what the caller got wrong.
+      const res = await post(articleBody({ wiki: "ghostpinwiki", page: undefined }));
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toContain("page is required");
+    });
+
+    /**
+     * Thread IDENTITY — the fix for a name-keyed lookup on a lossy key.
+     *
+     * `findThreadByName` is (user, bot, name)-scoped and an article thread's name
+     * is its page title: mimir + jarvis carry 13 colliding title groups over 30
+     * pages, two wikis owned by one bot collide with each other, and an ordinary
+     * `/topic` chat thread can own the name outright. So the 409 path asks the
+     * COLLIDING thread's description whether it is this article's.
+     */
+    describe("thread identity (the article tag)", () => {
+      beforeEach(async () => {
+        // A second page with the SAME title — the live collision, reproduced.
+        await Bun.write(path.join(root, "Dup.md"), "---\ntitle: A Concept\n---\n\nAnother page.\n");
+        __resetWikiCacheForTest();
+      });
+
+      test("the same article again 409s onto its OWN thread — Send there is offered", async () => {
+        await post(articleBody());
+        const again = await post(articleBody({ question: "and the cap?" }));
+        expect(again.status).toBe(409);
+        const data = (await again.json()) as {
+          threadExists?: boolean;
+          nameTaken?: boolean;
+          existingThreadId?: string;
+        };
+        expect(data.threadExists).toBe(true);
+        expect(data.nameTaken).toBeUndefined();
+        expect(data.existingThreadId).toBe("existing-thread");
+      });
+
+      test("a DIFFERENT page with the same title gets the nameTaken 409, no Send-there", async () => {
+        await post(articleBody()); // "A Concept.md" → thread "a concept"
+        const clash = await post(articleBody({ page: undefined, relPath: "Dup.md" }));
+        expect(clash.status).toBe(409);
+        const data = (await clash.json()) as {
+          nameTaken?: boolean;
+          threadExists?: boolean;
+          existingThreadId?: string;
+          error: string;
+        };
+        expect(data.nameTaken).toBe(true);
+        // The two fields "Send there →" needs are BOTH absent: offering it would
+        // seed a question about Dup.md into A Concept.md's conversation.
+        expect(data.threadExists).toBeUndefined();
+        expect(data.existingThreadId).toBeUndefined();
+        expect(data.error).toContain("start a new thread");
+        expect(created).toHaveLength(1);
+      });
+
+      test("…and forceNew then lands a suffixed thread of its own", async () => {
+        await post(articleBody());
+        await post(articleBody({ page: undefined, relPath: "Dup.md" }));
+        const forced = await post(articleBody({ page: undefined, relPath: "Dup.md", forceNew: true }));
+        expect(forced.status).toBe(200);
+        expect(created).toHaveLength(2);
+        expect(created[1]!.name).not.toBe(created[0]!.name);
+        expect(created[1]!.name.startsWith("a concept-")).toBe(true);
+        // Its OWN identity tag — so the next visit to Dup.md finds this thread.
+        expect(created[1]!.description).toContain("(jarviswiki:Dup.md)");
+      });
+
+      test("the same page in ANOTHER wiki on the same bot is a different article", async () => {
+        // `repos/huginn.md` in mimir vs `entities/Huginn.md` in jarvis, in
+        // miniature: two registered wikis resolving to one bot.
+        const first = await post(articleBody({ wiki: "pinnedwiki", bot: "melosys" }));
+        expect(first.status).toBe(200);
+        expect(created[0]!.description).toContain("(pinnedwiki:A Concept.md)");
+        const other = await post(articleBody({ wiki: "collwiki", bot: "melosys" }));
+        expect(other.status).toBe(409);
+        expect((await other.json()) as { nameTaken?: boolean }).toMatchObject({ nameTaken: true });
+      });
+
+      test("an ordinary chat thread that owns the name is never seeded", async () => {
+        // The worst case: `findThreadByName` is not article-scoped at all, so a
+        // `/topic` thread called "a concept" answers the lookup.
+        existingThreadNames.push("a concept");
+        threadDescriptionsByName["a concept"] = undefined;
+        const res = await post(articleBody());
+        expect(res.status).toBe(409);
+        expect((await res.json()) as { nameTaken?: boolean }).toMatchObject({ nameTaken: true });
+        expect(pending).toHaveLength(0);
+      });
+
+      test('"Send there →" re-verifies the thread it was handed', async () => {
+        const THREAD = "cccccccc-dddd-4eee-8fff-000000000000";
+        threadsById[THREAD] = {
+          id: THREAD,
+          userId: "user-1",
+          botName: "jarviswiki",
+          description: 'Discussion of the wiki article "Other" (jarviswiki:Dup.md)',
+        };
+        const wrong = await post(articleBody({ existingThreadId: THREAD }));
+        expect(wrong.status).toBe(409);
+        expect((await wrong.json()) as { nameTaken?: boolean }).toMatchObject({ nameTaken: true });
+        expect(pending).toHaveLength(0);
+
+        // A plain chat thread (no tag at all) is refused the same way…
+        threadsById[THREAD]!.description = "Started from the jarviswiki wiki";
+        expect((await post(articleBody({ existingThreadId: THREAD }))).status).toBe(409);
+        expect(pending).toHaveLength(0);
+
+        // …and the article's OWN thread is seeded, which is the designed path.
+        threadsById[THREAD]!.description =
+          'Discussion of the wiki article "A Concept" (jarviswiki:A Concept.md)';
+        const right = await post(articleBody({ existingThreadId: THREAD }));
+        expect(right.status).toBe(200);
+        expect(pending).toHaveLength(1);
+        expect(pending[0]!.threadId).toBe(THREAD);
+      });
+
+      test("direct and escalate modes are untouched by the tag logic", async () => {
+        // Their threads carry no article tag at all, so a tag check applied to
+        // them would turn every legitimate "Send this question there" into a
+        // nameTaken refusal.
+        existingThreadNames = ["how does the gardener cluster summaries?"];
+        const escalate = await post(askBody());
+        expect(escalate.status).toBe(409);
+        expect((await escalate.json()) as Record<string, unknown>).toMatchObject({
+          threadExists: true,
+          existingThreadId: "existing-thread",
+        });
+
+        const direct = await post(askBody({ answer: undefined, mode: "direct" }));
+        expect(direct.status).toBe(409);
+        const data = (await direct.json()) as { threadExists?: boolean; nameTaken?: boolean };
+        expect(data.threadExists).toBe(true);
+        expect(data.nameTaken).toBeUndefined();
+
+        // …including the reuse path, on a thread with no description whatsoever.
+        const THREAD = "cccccccc-dddd-4eee-8fff-000000000000";
+        threadsById[THREAD] = { id: THREAD, userId: "user-1", botName: "jarviswiki" };
+        expect((await post(askBody({ existingThreadId: THREAD }))).status).toBe(200);
+        expect(pending).toHaveLength(1);
+      });
     });
   });
 

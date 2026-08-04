@@ -1,14 +1,18 @@
 import { test, expect, describe } from "bun:test";
 import {
+  articleThreadTagMatches,
   ASK_CHAT_ANSWER_MIN,
+  ASK_CHAT_ARTICLE_DESC_MAX,
   ASK_CHAT_SEED_MAX,
   ASK_CHAT_SOURCES_MAX,
   ASK_CHAT_TITLE_MAX,
   buildArticleChatSeed,
+  buildArticleThreadDescription,
   buildAskChatSeed,
   buildDirectChatSeed,
   deriveAskThreadTitle,
   deriveAskThreadTitleOrNull,
+  parseArticleThreadTag,
   uniqueAskThreadTitle,
 } from "./ask-chat.ts";
 
@@ -373,6 +377,34 @@ describe("buildArticleChatSeed", () => {
     expect(without).toContain("the tools you have");
   });
 
+  test("the lookup is an ATTEMPT with a fallback, never a precondition", () => {
+    // `hasCollections` is config-PRESENCE, not capability: mimir declares a
+    // collection named `mimir` that doesn't exist in huginn, and a real turn on
+    // this seed opened with "I can't pull up this article…" — the retrieval
+    // failure became the answer. So the searchable branch has to say what to do
+    // when the page isn't there.
+    const seed = buildArticleChatSeed({ ...base, webSearch: true });
+    expect(seed).toContain("Try to pull it up");
+    expect(seed).toContain("isn't indexed");
+    expect(seed).toContain("ONE line");
+    expect(seed).toContain("never open with an apology");
+    // …and it never becomes a reason to stop.
+    expect(seed).toContain("cite what you find");
+  });
+
+  test("a >400-char description can't end the parenthetical in '.)' after the cut", () => {
+    // The trailing-period strip used to run BEFORE truncation, so it only ever
+    // cleaned the tail of a summary short enough not to be cut — a truncated one
+    // whose cut landed just after a mid-sentence period read `(… pages.).` anyway.
+    const description = "First sentence ends here." + " x".repeat(500);
+    const seed = buildArticleChatSeed({ ...base, webSearch: true, description });
+    expect(seed).not.toContain(".).");
+    // Exactly the boundary case: the cut falls immediately after a period.
+    const atCut = "y".repeat(ASK_CHAT_ARTICLE_DESC_MAX - 1) + "." + "z".repeat(50);
+    expect(buildArticleChatSeed({ ...base, webSearch: true, description: atCut }))
+      .not.toContain(".).");
+  });
+
   test("a wiki with NO collections is not told to look the page up in them", () => {
     const without = buildArticleChatSeed({ ...base, webSearch: true, hasCollections: false });
     expect(without).not.toContain("knowledge tools");
@@ -408,5 +440,96 @@ describe("buildArticleChatSeed", () => {
     expect(
       buildArticleChatSeed({ wikiName: 5, pageTitle: null, pagePath: 7, question: null, webSearch: true } as never),
     ).toBeString();
+  });
+});
+
+/**
+ * The article thread's IDENTITY tag.
+ *
+ * An article thread is looked up by NAME, and a name is a lossy key: mimir +
+ * jarvis carry 13 colliding title groups over 30 pages, two wikis owned by one
+ * bot collide with each other (`repos/huginn.md` vs `entities/Huginn.md`), and an
+ * ordinary `/topic` chat thread can hold the name outright. The description
+ * carries `(<wiki>:<relPath>)` so the route can tell "this article's thread" from
+ * "some thread that happens to have the same name" — without a schema migration.
+ */
+describe("article thread description tag", () => {
+  const built = buildArticleThreadDescription({
+    wikiName: "mimir",
+    pageTitle: "Wiki gardener",
+    relPath: "projects/muninn/wiki-gardener.md",
+  });
+
+  test("reads as prose AND round-trips as a tag", () => {
+    expect(built).toBe(
+      'Discussion of the wiki article "Wiki gardener" (mimir:projects/muninn/wiki-gardener.md)',
+    );
+    expect(parseArticleThreadTag(built)).toEqual({
+      wiki: "mimir",
+      relPath: "projects/muninn/wiki-gardener.md",
+    });
+    expect(articleThreadTagMatches(built, "mimir", "projects/muninn/wiki-gardener.md")).toBe(true);
+  });
+
+  test("the same TITLE on a different page (or in another wiki) does not match", () => {
+    // The live collisions this exists for.
+    expect(articleThreadTagMatches(built, "mimir", "repos/huginn.md")).toBe(false);
+    expect(articleThreadTagMatches(built, "jarvis", "projects/muninn/wiki-gardener.md"))
+      .toBe(false);
+    // …while the wiki name itself matches case-insensitively, as the registry does.
+    expect(articleThreadTagMatches(built, "MIMIR", "projects/muninn/wiki-gardener.md"))
+      .toBe(true);
+  });
+
+  test("anything that is NOT an article tag reads as no match", () => {
+    // A plain `/topic` thread, the direct/escalate descriptions, a pre-tag article
+    // thread, an empty description: each means "not provably this article's",
+    // which is the safe answer (start a new thread, never cross-seed).
+    for (const description of [
+      undefined,
+      null,
+      "",
+      "   ",
+      "Started from the mimir wiki",
+      "Continued from the mimir wiki Ask tab",
+      'Discussion of the wiki article "Wiki gardener" (mimir)',
+      "Discussion of the wiki article without a tag",
+    ]) {
+      expect(parseArticleThreadTag(description)).toBeNull();
+      expect(articleThreadTagMatches(description, "mimir", "projects/muninn/wiki-gardener.md"))
+        .toBe(false);
+    }
+  });
+
+  test("a hostile or awkward title cannot shadow the tag", () => {
+    // Parsing anchors on the LAST `" (`, so quotes and parentheses in the title —
+    // including a planted fake tag — are just characters.
+    const evil = buildArticleThreadDescription({
+      wikiName: "mimir",
+      pageTitle: 'Sneaky" (mimir:other/page.md) — really',
+      relPath: "real/page.md",
+    });
+    expect(articleThreadTagMatches(evil, "mimir", "real/page.md")).toBe(true);
+    expect(articleThreadTagMatches(evil, "mimir", "other/page.md")).toBe(false);
+    // A relPath carrying its own `)` or `:` still round-trips (the split is on the
+    // FIRST colon and the tail is read to the final `)`).
+    const odd = buildArticleThreadDescription({
+      wikiName: "mimir",
+      pageTitle: "Odd",
+      relPath: "notes/plan (draft): v2.md",
+    });
+    expect(articleThreadTagMatches(odd, "mimir", "notes/plan (draft): v2.md")).toBe(true);
+  });
+
+  test("the title is flattened and bounded — it used to reach the column raw", () => {
+    const desc = buildArticleThreadDescription({
+      wikiName: "mimir",
+      pageTitle: "Line one\nand\ttwo " + "x".repeat(500),
+      relPath: "a/b.md",
+    });
+    expect(/[\n\r\t]/.test(desc)).toBe(false);
+    expect(desc.length).toBeLessThan(260);
+    // …and the tag tail survives the truncation intact, which is the point.
+    expect(articleThreadTagMatches(desc, "mimir", "a/b.md")).toBe(true);
   });
 });

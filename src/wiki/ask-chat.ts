@@ -135,6 +135,96 @@ export function uniqueAskThreadTitle(
   return truncateUnits(title, room) + suffix;
 }
 
+// ── Article thread identity ───────────────────────────────────────────
+//
+// An article's discussion thread is found by NAME (`findThreadByName` is scoped
+// to user+bot), and a name is a lossy, collision-prone key: mimir + jarvis alone
+// carry 13 colliding title groups over 30 pages (`architecture` ×3), and two
+// DIFFERENT wikis owned by the same bot collide too (`repos/huginn.md` in mimir
+// vs `entities/Huginn.md` in jarvis derive the same name). A plain `/topic` chat
+// thread can hold the name as easily as an article thread can.
+//
+// So the thread's DESCRIPTION carries a deterministic article tag, and the
+// route's 409 path parses it: tag matches this wiki+relPath ⇒ this really is the
+// article's thread ("Send there →"); anything else ⇒ an unrelated thread that
+// happens to own the name, and seeding a question onto it would cross-seed a
+// conversation about a different page. Deliberately no schema migration — the
+// description column already exists and is already per-mode prose.
+
+/** Fixed head of an article thread's description. Also the parse anchor. */
+const ARTICLE_DESC_PREFIX = 'Discussion of the wiki article "';
+/** Separator between the (flattened, truncated) title and the machine tag. */
+const ARTICLE_DESC_MID = '" (';
+
+/**
+ * The description an article-mode thread is created with:
+ * `Discussion of the wiki article "<title>" (<wiki>:<relPath>)`.
+ *
+ * The title is flattened and truncated — it is authored text that used to reach
+ * the column raw (control characters, unbounded length) — while the
+ * `(<wiki>:<relPath>)` tail is kept whole, because that is the part
+ * {@link parseArticleThreadTag} reads back. Parsing anchors on the LAST `" (`,
+ * so a title containing quotes or parentheses cannot shadow the tag.
+ */
+export function buildArticleThreadDescription(input: {
+  wikiName: string;
+  pageTitle: string;
+  relPath: string;
+}): string {
+  const str = (v: unknown): string => (typeof v === "string" ? v : "");
+  const title = truncateUnits(flatten(str(input.pageTitle)), ASK_CHAT_ARTICLE_TITLE_MAX);
+  const wiki = flatten(str(input.wikiName));
+  const relPath = flatten(str(input.relPath));
+  return ARTICLE_DESC_PREFIX + title + ARTICLE_DESC_MID + wiki + ":" + relPath + ")";
+}
+
+/**
+ * The `(<wiki>:<relPath>)` tag out of a thread description, or `null` when the
+ * description isn't an article tag at all (a plain chat thread, a direct/escalate
+ * thread, or a pre-tag article thread).
+ *
+ * `null` is the SAFE answer everywhere it is consumed: it means "this thread is
+ * not provably this article's", which routes to "start a new thread" rather than
+ * to seeding someone else's conversation. The wiki name is split on the FIRST
+ * colon so a relPath containing one survives.
+ */
+export function parseArticleThreadTag(
+  description?: string | null,
+): { wiki: string; relPath: string } | null {
+  const text = typeof description === "string" ? description.trim() : "";
+  if (!text.startsWith(ARTICLE_DESC_PREFIX) || !text.endsWith(")")) return null;
+  const at = text.lastIndexOf(ARTICLE_DESC_MID);
+  // An empty title puts the separator's quote at the prefix's own last index.
+  if (at < ARTICLE_DESC_PREFIX.length - 1) return null;
+  const tag = text.slice(at + ARTICLE_DESC_MID.length, -1);
+  const colon = tag.indexOf(":");
+  if (colon <= 0) return null;
+  const wiki = tag.slice(0, colon).trim();
+  const relPath = tag.slice(colon + 1).trim();
+  if (!wiki || !relPath) return null;
+  return { wiki, relPath };
+}
+
+/**
+ * Whether a thread's description says it is THIS article's discussion thread.
+ *
+ * Wiki names are matched case-insensitively (the registry matches that way);
+ * relPaths are compared exactly, since both sides come from the same wiki index.
+ */
+export function articleThreadTagMatches(
+  description: string | null | undefined,
+  wikiName: string,
+  relPath: string,
+): boolean {
+  const tag = parseArticleThreadTag(description);
+  if (!tag) return false;
+  const str = (v: unknown): string => (typeof v === "string" ? v : "");
+  return (
+    tag.wiki.toLowerCase() === flatten(str(wikiName)).toLowerCase() &&
+    tag.relPath === flatten(str(relPath))
+  );
+}
+
 /** How many citations the seed lists before stopping. */
 const SEED_SOURCE_CAP = 8;
 
@@ -355,6 +445,14 @@ export function buildDirectChatSeed(input: {
  *   on a wiki with no backing huginn collections that lookup cannot work, and
  *   ordering it produces an answer that opens by apologizing.
  *
+ * **But `hasCollections` is config-PRESENCE, not capability**, and that is why the
+ * searchable branch is phrased as an attempt rather than a precondition: mimir
+ * declares a collection named `mimir` that does not exist in huginn, and a real
+ * model turn opened with "I can't pull up this article…" — the retrieval failure
+ * became the answer. So the seed says what to do when the page isn't indexed
+ * (one line, then answer from the question + research), which no
+ * collections-config check can ever guarantee on its own.
+ *
  * `description` is the page's own summary (frontmatter `description`, else the
  * first prose line). It is a parenthetical, and an ABSENT one leaves no trace —
  * an empty `()` would read as a page whose summary is the empty string.
@@ -385,10 +483,14 @@ export function buildArticleChatSeed(input: {
   const path = truncateUnits(flatten(str(input.pagePath)), ASK_CHAT_ARTICLE_PATH_MAX);
   // A page summary is a sentence and usually ends in one period; the parenthetical
   // it sits in ends in another, so the raw value reads `(… pages.).`
+  // TRUNCATE FIRST, then strip: stripping first only cleans the tail the reader
+  // would have seen if nothing were cut — a summary long enough to be truncated
+  // can land the cut right after a mid-sentence period and read `(… pages.).`
+  // anyway, which is the exact shape this strip exists to prevent.
   const description = truncateUnits(
-    flatten(str(input.description)).replace(/\.$/, ""),
+    flatten(str(input.description)),
     ASK_CHAT_ARTICLE_DESC_MAX,
-  );
+  ).replace(/\.$/, "");
   const searchable = input.hasCollections !== false;
 
   const opening = title
@@ -403,7 +505,10 @@ export function buildArticleChatSeed(input: {
     ". ";
   const framing =
     (searchable
-      ? "Pull it up with your knowledge tools before answering, then research beyond it with "
+      ? "Try to pull it up with your knowledge tools first — and if it isn't indexed " +
+        "there, say so in ONE line and answer the question from what you can research " +
+        "instead; never open with an apology about not finding the page. Research " +
+        "beyond it with "
       : "Answer from what you can establish about it — research it with ") +
     tools +
     ", and cite what you find. Say plainly which parts you couldn't verify.";
