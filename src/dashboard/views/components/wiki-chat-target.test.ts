@@ -14,6 +14,7 @@ import {
   chatOptNameSource,
   chatOptQuestion,
   chatOptQuestionHtml,
+  chatOptQuestionReadOnly,
   chatOptStatusLines,
   chatOptSuggestionsHtml,
   chatOptSummaryHtml,
@@ -341,14 +342,25 @@ describe("article popover prefill + hint", () => {
     expect(html).not.toContain("wiki-chatopt-pinned");
   });
 
-  test("the other modes get the same field with a mode-appropriate placeholder", () => {
-    for (const mode of ["direct", "escalate"] as const) {
-      const html = chatOptQuestionHtml(mode, "prefilled from the Ask box");
-      expect(html).toContain('id="' + CHAT_OPT_QUESTION_ID + '"');
-      expect(html).toContain(">prefilled from the Ask box</textarea>");
-      expect(html).toContain(DIRECT_QUESTION_PLACEHOLDER);
-      expect(html).not.toContain(ARTICLE_QUESTION_PLACEHOLDER);
-    }
+  test("direct mode gets the same field with a mode-appropriate placeholder", () => {
+    const html = chatOptQuestionHtml("direct", "prefilled from the Ask box");
+    expect(html).toContain('id="' + CHAT_OPT_QUESTION_ID + '"');
+    expect(html).toContain(">prefilled from the Ask box</textarea>");
+    expect(html).toContain(DIRECT_QUESTION_PLACEHOLDER);
+    expect(html).not.toContain(ARTICLE_QUESTION_PLACEHOLDER);
+  });
+
+  test("escalate and pinned questions are READ-ONLY, article and direct are not", () => {
+    // The seed carries the escalated turn's answer + citations VERBATIM, so an
+    // edited question ships a quoted answer to a question nobody asked, cited to
+    // sources that support the original. Before the dialog redesign this was
+    // structural (only article mode rendered a textarea); widening the field to
+    // every mode re-opened it, hence the explicit gate.
+    expect(chatOptQuestionReadOnly("escalate", false)).toBe(true);
+    expect(chatOptQuestionReadOnly("direct", true)).toBe(true);
+    expect(chatOptQuestionReadOnly("article", true)).toBe(true);
+    expect(chatOptQuestionReadOnly("direct", false)).toBe(false);
+    expect(chatOptQuestionReadOnly("article", false)).toBe(false);
   });
 
   test("page text is escaped at every sink", () => {
@@ -464,6 +476,46 @@ describe("suggestedQuestions", () => {
       "Or start from",
     );
     expect(html).not.toContain("x".repeat(SUGGESTION_LABEL_MAX + 1));
+  });
+
+  test("a title's quotes and markup are neutralised before they reach the prompt", () => {
+    // Not an escaping issue (every HTML sink runs `esc`) — a PROMPT-quality one: the
+    // templates wrap the title in "…", so a title carrying its own quotes produced
+    // unbalanced nesting, and an .mdx title's tags were sent to the model verbatim.
+    const out = suggestedQuestions({
+      mode: "article",
+      article: {
+        name: "p", relPath: "p.md",
+        title: 'Backlog "drain" <b>x</b>',
+      },
+    });
+    for (const s of out) {
+      expect(s.question).not.toContain('"drain"');
+      expect(s.question).not.toContain("<b>");
+      // Exactly the one quoted span the template opens, so the title's end is
+      // unambiguous.
+      expect((s.question.match(/"/g) || []).length).toBe(2);
+    }
+    expect(out[0]!.question).toContain("'drain'");
+  });
+
+  test("clipping never splits a surrogate pair", () => {
+    // A title ending in an emoji clipped mid-pair renders as U+FFFD — the same bug
+    // `ask-chat.ts`'s `truncateUnits` exists for, observed in real thread names.
+    const emoji = "🎉".repeat(80);
+    const out = suggestedQuestions({
+      mode: "article",
+      article: { name: "p", relPath: "p.md", title: emoji },
+    });
+    for (const s of out) {
+      expect(s.question).not.toContain("�");
+      // No lone surrogate survived the clip.
+      expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(s.question))
+        .toBe(false);
+    }
+    const chip = suggestedQuestions({ mode: "direct", wiki: "w", lastQuestion: emoji })
+      .find((s) => s.label.startsWith("Continue"));
+    expect(chip!.label).not.toContain("�");
   });
 });
 
@@ -782,6 +834,15 @@ describe("chatOptEscapeAction", () => {
     expect(chatOptEscapeAction({ question: "   ", dirty: true })).toBe("close");
   });
 
+  test("a SETTLED dialog closes at once — the question was sent, not lost", () => {
+    // After a success (`doneUrl`) or an `alreadyQueued` 409 (`queuedUrl`), "press Esc
+    // again to discard this question" warns about work the reader just completed.
+    const typed = { question: "why the cap?", dirty: true };
+    expect(chatOptEscapeAction({ ...typed, settled: true })).toBe("close");
+    // Sanity: without the flag this exact state confirms.
+    expect(chatOptEscapeAction(typed)).toBe("confirm");
+  });
+
   test("a PREFILLED question closes at once — it is not unsaved work", () => {
     // The gate is `dirty`, not the mode (it used to be "article only", which was
     // right when article mode owned the only in-panel textarea). Escalate's turn
@@ -990,9 +1051,15 @@ describe("wiki-browser wiring", () => {
     // Not in the Ask box (deliberately) and not the label shown on the turn (it is
     // composed), so without this row the only echo is the ≤50-char name preview.
     const body = fnBody(await browserSrc(), "chatOptBodyHtml");
-    expect(body).toContain("state.pinnedQuestion");
+    expect(body).toContain("chatOptQuestionReadOnly");
     expect(body).toContain("wiki-chatopt-pinned");
-    expect(body).toContain("esc(state.pinnedQuestion)");
+    // Read-only, and escaped — a composed decline question carries the page title
+    // and the selected passage.
+    expect(body).toContain("esc(state.pinnedQuestion ?? state.question)");
+    // …and the read-only branch is chosen INSTEAD of the editable field.
+    expect(body.indexOf("wiki-chatopt-pinned")).toBeLessThan(
+      body.indexOf("chatOptQuestionHtml(state.mode"),
+    );
   });
 
   test("the click-away opener list includes the decline button", async () => {
@@ -1106,10 +1173,15 @@ describe("wiki-browser wiring", () => {
     const src = await browserSrc();
     const at = src.indexOf("CHAT_OPT_SUGGEST_ATTR + \"]\")) {");
     expect(at).toBeGreaterThan(-1);
-    const branch = src.slice(at, at + 900);
+    const branch = src.slice(at, at + 1600);
     expect(branch).toContain("chatOpt.question = q");
     expect(branch).toContain("chatOpt.dirty = true");
-    expect(branch).not.toContain("submitChatOptions");
+    // No CALL to the submitter (the prose above it names the function deliberately).
+    expect(branch).not.toContain("submitChatOptions(");
+    // Inert while a submit is in flight: a 409's "Send there →" is a SECOND submit
+    // that re-reads the question, so a chip clicked mid-flight silently swapped the
+    // question that then went into the EXISTING thread.
+    expect(branch).toContain("!chatOpt.sending");
   });
 
   test("a thread-name chip clears the collision it was chosen against", async () => {

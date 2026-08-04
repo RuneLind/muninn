@@ -43,6 +43,7 @@ import {
   chatOptNameSource,
   chatOptQuestion,
   chatOptQuestionHtml,
+  chatOptQuestionReadOnly,
   chatOptStatusLines,
   chatOptSuggestionsHtml,
   chatOptSummaryHtml,
@@ -3049,6 +3050,23 @@ function lastAskedQuestion(): string {
   return "";
 }
 
+/**
+ * Clear an armed Escape confirmation, and the line that announced it.
+ *
+ * Every path that touches the dialog's state has to do BOTH: `escArmed` says "the
+ * next Escape discards", and the status line is the only thing telling the reader
+ * so. A path that cleared the status but left the flag armed (the thread-name field
+ * and its chips did) left the next single Escape discarding a typed question with
+ * no warning ever on screen.
+ */
+function disarmChatOptEscape(state: ChatOptState): void {
+  state.escArmed = false;
+  if (state.status === CHAT_OPT_ESC_CONFIRM) {
+    state.status = undefined;
+    state.statusIsError = false;
+  }
+}
+
 /** Short day label for the "dated" thread-name chip, e.g. `4 aug`. */
 function chatOptTodayLabel(): string {
   return new Date()
@@ -3291,12 +3309,13 @@ function chatOptBodyHtml(state: ChatOptState, question: string): string {
   if (state.mode === "article" && state.article) {
     rows.push(articleChatContextHtml(state.article));
   }
-  // A PINNED question is the one thing on this panel the reader can't see anywhere
-  // else: it isn't in the Ask box (deliberately) and it is COMPOSED, not the label
-  // shown on the turn. Rendered read-only — editing it would detach it from the
-  // declined turn whose failure it is escalating.
-  if (typeof state.pinnedQuestion === "string") {
-    rows.push('<div class="wiki-chatopt-pinned">' + esc(state.pinnedQuestion) + "</div>");
+  // READ-ONLY question modes (`chatOptQuestionReadOnly`): a PINNED decline question
+  // — which is composed, not the label shown on the turn, and lives nowhere else —
+  // and an ESCALATE question, whose turn's answer + citations ride the POST verbatim.
+  if (chatOptQuestionReadOnly(state.mode, typeof state.pinnedQuestion === "string")) {
+    rows.push(
+      '<div class="wiki-chatopt-pinned">' + esc(state.pinnedQuestion ?? state.question) + "</div>",
+    );
   } else {
     // ONE question box for every mode, rendered ABOVE the error/loading returns so
     // the reader can start typing while the chat target is still resolving (Send
@@ -3344,7 +3363,12 @@ function chatOptBodyHtml(state: ChatOptState, question: string): string {
     // Article mode names the thread after the PAGE, not the question — that is
     // what makes every later visit land in the same discussion thread (and 409
     // onto "Send there →") instead of minting a sibling per question.
-    const derived = previewThreadName(
+    // The field's placeholder is the SAME string the summary line reports (i.e. ""
+    // when there is nothing to name the thread after yet) — rendered as
+    // `previewThreadName`'s generic `wiki ask` fallback, it sat directly under a
+    // summary that deliberately omitted the thread part, so the two disagreed about
+    // the same value in the one state where both are visible.
+    const derived = summaryThreadName(
       "",
       chatOptNameSource(state.mode, question, state.article?.title),
     );
@@ -3404,23 +3428,18 @@ function chatOptBodyHtml(state: ChatOptState, question: string): string {
         state.threadName,
       ),
     );
-    // Only the seeds that INSTRUCT research act on this capability (direct and
-    // article); an escalation quotes an answer and instructs nothing about tools,
-    // so the note would be noise there.
-    const noWebTools =
-      state.mode !== "escalate" && !chosenSupportsWebTools(t, state.connectorId);
-    if (noWebTools) {
-      adv.push(
-        '<div class="wiki-chatopt-note">This model has no web search — the question will ask for ' +
-        "research with the tools it does have.</div>",
-      );
-    }
-    // The capability note is the one thing in here the reader has to see WITHOUT
-    // expanding: it changes what the seed can promise, and a collapsed disclosure
-    // would hide the difference between a model that can search the web and one
-    // that can't. Everything else stays behind the toggle.
     if (state.advOpen) rows.push('<div class="wiki-chatopt-adv">' + adv.join("") + "</div>");
-    else if (noWebTools) {
+    // The capability note lives OUTSIDE the disclosure, unconditionally: it changes
+    // what the seed may promise, so a collapsed panel must not hide the difference
+    // between a model that can search the web and one that can't. One spelling, one
+    // push — it was briefly rendered in both places with two hand-synced strings,
+    // which is a copy edit away from the reader seeing different words depending on
+    // whether the disclosure happened to be open.
+    //
+    // Only the seeds that INSTRUCT research act on this capability (direct and
+    // article); an escalation quotes an answer and instructs nothing about tools, so
+    // the note would be noise there.
+    if (state.mode !== "escalate" && !chosenSupportsWebTools(t, state.connectorId)) {
       rows.push(
         '<div class="wiki-chatopt-note">The chosen model has no web search — the question will ' +
         "ask for research with the tools it does have.</div>",
@@ -3569,6 +3588,7 @@ function renderChatOptions(): void {
     active as { id?: string } | null,
     !!panel && !!active && panel.contains(active),
   );
+  const created = !panel;
   if (!panel) {
     // The scrim goes in first so it sits UNDER the panel in paint order, and it
     // carries no listener of its own — the document-level click delegation already
@@ -3585,19 +3605,73 @@ function renderChatOptions(): void {
     panel.setAttribute("aria-label", "Start a chat from this wiki");
     document.body.appendChild(panel);
   }
+  // The panel has its own scroll (`max-height: 84vh`), and replacing its innerHTML
+  // resets that scroll to 0 — so on a short viewport every re-render (a connector
+  // pick, the target landing, a chip click) yanked the reader back to the top, taking
+  // Send off screen. Captured and restored around the swap, exactly as `renderList`
+  // does for `#wikiList`.
+  const scrollTop = panel.scrollTop;
   panel.innerHTML = chatOptionsHtml(state);
+  if (scrollTop) panel.scrollTop = scrollTop;
   restoreChatOptFocus(focus);
-  // First paint of an open: put the caret in the question box. It is the field the
-  // reader came here to fill, and a dialog that opens with nothing focused makes
-  // the suggestion chips look like the only way in.
-  if (!focus) {
+  // FIRST PAINT ONLY: put the caret in the question box. It is the field the reader
+  // came here to fill, and a dialog that opens with nothing focused makes the
+  // suggestion chips look like the only way in.
+  //
+  // Gated on `created`, not on `!focus`: `captureChatOptFocus` returns null for any
+  // focused element without an id — which every chip is — so a `!focus` gate
+  // re-focused the textarea on every chip click and scrolled a short dialog back to
+  // the top, taking Send off screen. The chip handler does its own (preventScroll)
+  // focus; this is only for the open.
+  if (created) {
     const q = document.getElementById(CHAT_OPT_QUESTION_ID) as HTMLTextAreaElement | null;
     if (q) {
-      q.focus();
+      q.focus({ preventScroll: true });
       // Caret at the END of a prefilled question (direct mode's copy of the Ask
       // box), so typing extends it instead of landing in front of it.
       try { q.setSelectionRange(q.value.length, q.value.length); } catch { /* ignore */ }
     }
+  }
+}
+
+/**
+ * Keep Tab inside the dialog while it is open.
+ *
+ * The panel declares `role="dialog"` + `aria-modal="true"`, and the scrim only
+ * blocks POINTER events: without this, Tab walked straight out of the dialog into
+ * the wiki's own list rows and links, which are greyed out and unclickable but still
+ * answer Enter — and a screen reader was told the dialog was modal and then read the
+ * whole page behind it. Wrapping at both ends is the smallest honest implementation
+ * of the claim the markup makes.
+ */
+function trapChatOptTab(e: KeyboardEvent): void {
+  const panel = chatOptPanel();
+  if (!panel) return;
+  const focusable = Array.prototype.slice
+    .call(
+      panel.querySelectorAll(
+        'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled])',
+      ),
+    )
+    .filter((el: HTMLElement) => el.offsetParent !== null || el === document.activeElement) as
+      HTMLElement[];
+  if (!focusable.length) return;
+  const first = focusable[0]!;
+  const last = focusable[focusable.length - 1]!;
+  const active = document.activeElement as HTMLElement | null;
+  // Focus that has already escaped the dialog (or never entered it) comes back to
+  // the top on the next Tab rather than continuing through the page behind.
+  if (!active || !panel.contains(active)) {
+    e.preventDefault();
+    (e.shiftKey ? last : first).focus();
+    return;
+  }
+  if (e.shiftKey && active === first) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && active === last) {
+    e.preventDefault();
+    first.focus();
   }
 }
 
@@ -4169,7 +4243,7 @@ document.addEventListener("click", (e) => {
   else if (t.closest("#" + CHAT_OPT_ADV_ID)) {
     // The options disclosure. State-held (never a class poked onto the node), so
     // the next re-render from state doesn't collapse it back under the reader.
-    if (chatOpt) {
+    if (chatOpt && !chatOpt.sending) {
       chatOpt.advOpen = !chatOpt.advOpen;
       renderChatOptions();
     }
@@ -4177,19 +4251,26 @@ document.addEventListener("click", (e) => {
     // A starter question FILLS the box and leaves it editable — deliberately not a
     // one-click send. The `desc` prefill in #420 is the cautionary case: a single
     // click from "a sentence about the page" to "the reader's own question, sent".
+    //
+    // INERT WHILE SENDING, like every other field: `submitChatOptions` reads the
+    // question at submit time, but a 409's "Send there →" is a SECOND submit that
+    // re-reads it — so a chip clicked while the first POST was in flight silently
+    // swapped the question that then went into the existing thread.
     const chip = t.closest("[" + CHAT_OPT_SUGGEST_ATTR + "]") as HTMLElement;
     const q = chip.getAttribute(CHAT_OPT_SUGGEST_ATTR) || "";
-    if (chatOpt) {
+    if (chatOpt && !chatOpt.sending) {
       chatOpt.question = q;
       // Counts as the reader's own work: a chip they picked is the only copy of
       // that choice, so Escape confirms before discarding it.
       chatOpt.dirty = true;
-      chatOpt.escArmed = false;
-      if (chatOpt.status === CHAT_OPT_ESC_CONFIRM) chatOpt.status = undefined;
+      disarmChatOptEscape(chatOpt);
       renderChatOptions();
       const box = document.getElementById(CHAT_OPT_QUESTION_ID) as HTMLTextAreaElement | null;
       if (box) {
-        box.focus();
+        // `preventScroll`: the dialog scrolls internally on a short viewport, and a
+        // scroll-into-view here jumped it back to the top on every chip click —
+        // taking Send off screen at the moment the reader was ready to press it.
+        box.focus({ preventScroll: true });
         try { box.setSelectionRange(box.value.length, box.value.length); } catch { /* ignore */ }
       }
     }
@@ -4197,14 +4278,14 @@ document.addEventListener("click", (e) => {
     // A thread-name chip writes the field. An empty value is the "default" chip:
     // `threadName: ""` is exactly what makes the route derive the name again.
     const chip = t.closest("[" + CHAT_OPT_NAME_CHIP_ATTR + "]") as HTMLElement;
-    if (chatOpt) {
+    if (chatOpt && !chatOpt.sending) {
       chatOpt.threadName = chip.getAttribute(CHAT_OPT_NAME_CHIP_ATTR) || "";
       // Same reason the typed path clears these: the collision was against the OLD
       // name, and a foot still offering "Send there →" would post a thread id the
       // new name has nothing to do with.
       chatOpt.conflict = undefined;
       chatOpt.queuedUrl = undefined;
-      chatOpt.status = undefined;
+      disarmChatOptEscape(chatOpt);
       renderChatOptions();
     }
   }
@@ -4237,7 +4318,26 @@ document.addEventListener("click", (e) => {
       sending: chatOpt.sending,
     })
   ) {
-    closeChatOptions();
+    // A click-away with a question the reader TYPED gets the same protection Escape
+    // gives it, rather than silently discarding it. This matters more now than it did
+    // for the anchored popover: with a scrim, EVERY outside click lands on the scrim,
+    // so one stray click over a dimmed page used to throw away a composed question.
+    // × and Escape (twice) remain the deliberate ways out, and the status line says so.
+    if (
+      chatOptEscapeAction({
+        question: currentChatOptQuestion(chatOpt),
+        escArmed: chatOpt.escArmed,
+        dirty: chatOpt.dirty,
+        settled: !!chatOpt.doneUrl || !!chatOpt.queuedUrl,
+      }) === "confirm"
+    ) {
+      chatOpt.escArmed = true;
+      chatOpt.status = CHAT_OPT_ESC_CONFIRM;
+      chatOpt.statusIsError = false;
+      repaintChatOptFoot();
+    } else {
+      closeChatOptions();
+    }
   }
 });
 
@@ -4289,8 +4389,8 @@ document.addEventListener("change", (e) => {
 //   • editing the thread name CLEARS a name collision, and a foot still offering
 //     "Send there →" then posts `existingThreadId: undefined`, which silently
 //     creates a brand-new thread instead of sending where it says;
-//   • in direct mode the question lives in the Ask box, so typing there is what
-//     un-blocks (or re-blocks) Send.
+//   • the question box un-blocks (or re-blocks) Send, and drives both the
+//     thread-name preview in the summary line and the name field's placeholder.
 document.addEventListener("input", (e) => {
   const state = chatOpt;
   const el = e.target as HTMLElement;
@@ -4300,6 +4400,9 @@ document.addEventListener("input", (e) => {
     state.conflict = undefined;
     state.queuedUrl = undefined;
     state.status = undefined;
+    // Editing the name clears the status line, which is where an armed Escape
+    // announced itself — so the flag has to go with it.
+    state.escArmed = false;
     repaintChatOptFoot();
     return;
   }
@@ -4312,8 +4415,7 @@ document.addEventListener("input", (e) => {
     state.dirty = true;
     // Typing disarms the discard confirmation — a stale "press Esc again" would
     // otherwise discard a question the reader had gone back to editing.
-    state.escArmed = false;
-    if (state.status === CHAT_OPT_ESC_CONFIRM) state.status = undefined;
+    disarmChatOptEscape(state);
     // The thread-name placeholder follows the question in the modes that derive the
     // name from it (i.e. not article mode, whose name comes from the page).
     const name = document.getElementById("wikiChatOptName") as HTMLInputElement | null;
@@ -4337,11 +4439,19 @@ document.addEventListener("input", (e) => {
 document.addEventListener("keydown", (e) => {
   const state = chatOpt;
   if (!state) return;
+  if (e.key === "Tab") {
+    trapChatOptTab(e);
+    return;
+  }
   if (e.key === "Escape") {
     const action = chatOptEscapeAction({
       question: currentChatOptQuestion(state),
       escArmed: state.escArmed,
       dirty: state.dirty,
+      // Sent, or already queued on the target thread: there is nothing left to
+      // protect, and "press Esc again to discard this question" read as a warning
+      // about work the reader had in fact just completed.
+      settled: !!state.doneUrl || !!state.queuedUrl,
     });
     if (action === "confirm") {
       state.escArmed = true;

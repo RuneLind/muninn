@@ -265,6 +265,77 @@ test.describe("Wiki reader: chat dialog", () => {
     await expect(page.locator(".wiki-chatopt-sum")).toContainText("wiki gardener");
   });
 
+  test("a chip click does not scroll Send off screen on a short viewport", async ({ page }) => {
+    // `captureChatOptFocus` returns null for any focused element without an id —
+    // which every chip is — so a `!focus` autofocus gate re-focused the textarea on
+    // every chip click and scrolled the dialog back to the top.
+    // Article mode has the most content (context row + six chips), and the viewport
+    // is shrunk AFTER opening — the breadcrumb's Discuss button is itself off screen
+    // at this height.
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&page=${encodeURIComponent("Wiki gardener")}`);
+    await page.locator("#wikiDiscussBtn").click();
+    await expect(page.locator("#wikiChatOpt")).toBeVisible();
+    await page.setViewportSize({ width: 900, height: 320 });
+    const panel = page.locator("#wikiChatOpt");
+    await panel.evaluate((el) => { el.scrollTop = el.scrollHeight; });
+    const before = await panel.evaluate((el) => el.scrollTop);
+    expect(before).toBeGreaterThan(0);
+    await page.locator(".wiki-chatopt-chip[data-chat-q]").first().click();
+    // Not an exact match: filling the question REMOVES the "Type a question first."
+    // line, so the panel gets ~16px shorter and the browser clamps the scroll to the
+    // new maximum. What must not happen is a reset to the top.
+    const after = await panel.evaluate((el) => el.scrollTop);
+    expect(after).toBeGreaterThan(before / 2);
+    // The point of all of it: Send is still where the reader can press it.
+    await expect(page.locator("#wikiChatOptSend")).toBeInViewport();
+    // …and the chip still did its job.
+    await expect(page.locator("#wikiChatOptQ")).not.toHaveValue("");
+  });
+
+  test("a click-away does not silently discard a question the reader typed", async ({ page }) => {
+    // With a scrim, EVERY outside click lands on the scrim — so one stray click over
+    // a dimmed page used to throw away a composed question with no confirmation.
+    await openDirect(page);
+    await page.locator("#wikiChatOptQ").fill("a question worth keeping");
+    await page.locator("#wikiChatOptScrim").click({ position: { x: 30, y: 30 } });
+    await expect(page.locator("#wikiChatOpt")).toBeVisible();
+    await expect(page.locator("#wikiChatOptStatus")).toContainText("Press Esc again");
+    await expect(page.locator("#wikiChatOptQ")).toHaveValue("a question worth keeping");
+    // A second deliberate dismissal does close it.
+    await page.locator("#wikiChatOptScrim").click({ position: { x: 30, y: 30 } });
+    await expect(page.locator("#wikiChatOpt")).toHaveCount(0);
+  });
+
+  test("editing the thread name re-arms the discard confirmation it cleared", async ({ page }) => {
+    // The name paths cleared the status line — the only thing announcing an armed
+    // Escape — but left `escArmed` set, so the NEXT single Escape discarded a typed
+    // question with no warning ever on screen.
+    await openDirect(page);
+    await page.locator("#wikiChatOptQ").fill("still composing this");
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#wikiChatOptStatus")).toContainText("Press Esc again");
+    await page.locator("#wikiChatOptAdv").click();
+    await page.locator("#wikiChatOptName").fill("my-thread");
+    await expect(page.locator("#wikiChatOptStatus")).not.toContainText("Press Esc again");
+    // Disarmed: this Escape warns again instead of discarding.
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#wikiChatOpt")).toBeVisible();
+    await expect(page.locator("#wikiChatOptStatus")).toContainText("Press Esc again");
+  });
+
+  test("Tab stays inside the dialog — it claims aria-modal", async ({ page }) => {
+    await openDirect(page);
+    await expect(page.locator("#wikiChatOpt")).toHaveAttribute("aria-modal", "true");
+    // Walk well past the dialog's own controls; focus must never leave it.
+    for (let i = 0; i < 12; i++) {
+      await page.keyboard.press("Tab");
+      const inside = await page.evaluate(
+        () => !!document.getElementById("wikiChatOpt")?.contains(document.activeElement),
+      );
+      expect(inside).toBe(true);
+    }
+  });
+
   test("Escape confirms before discarding a typed question, and the scrim dismisses", async ({
     page,
   }) => {

@@ -20,8 +20,11 @@ import { explainSelectionFromLabel } from "./wiki-explain.ts";
 /**
  * The three things the popover can be opened for. They differ ONLY in where the
  * question comes from and what rides into the seed:
- * - `escalate` — a committed Ask/Explain turn (its answer + citations),
- * - `direct`   — the "New chat" button beside the Ask box (the live box),
+ * - `escalate` — a committed Ask/Explain turn (its answer + citations). Its question
+ *   is READ-ONLY: the seed quotes that turn's answer and cites its sources, so an
+ *   edited question would ship a verbatim answer to a question nobody asked.
+ * - `direct`   — the "New chat" button beside the Ask box (which PREFILLS the
+ *   dialog's own field once at open, and is never read again),
  * - `article`  — the "💬 Discuss" button on an open page (a question typed in the
  *   panel itself, about that page). Article mode has nothing to do with the Ask
  *   tab and neither reads nor writes its textarea.
@@ -351,16 +354,42 @@ export interface ChatOptSuggestion {
  *  label makes a five-chip row unreadable. */
 export const SUGGESTION_LABEL_MAX = 34;
 
+/**
+ * Flatten and bound a string for a chip label or a prompt.
+ *
+ * Truncation walks CODE POINTS, not UTF-16 units: a title ending in an emoji or any
+ * astral character would otherwise be cut through a surrogate pair, and half a pair
+ * renders as U+FFFD — which is exactly why the server's own `truncateUnits` exists
+ * (real thread names were observed carrying it).
+ */
 function clip(text: string, max: number): string {
-  const flat = text.replace(/\s+/g, " ").trim();
+  const flat = (text || "").replace(/\s+/g, " ").trim();
   if (flat.length <= max) return flat;
-  return flat.slice(0, max).replace(/\s+\S*$/, "") + "…";
+  let out = "";
+  for (const ch of flat) {
+    if (out.length + ch.length > max) break;
+    out += ch;
+  }
+  // Prefer a word boundary, but never give back an empty string for a long first
+  // word (a 200-char unbroken title would otherwise clip to just the ellipsis).
+  const atWord = out.replace(/\s+\S*$/, "");
+  return (atWord || out) + "…";
 }
 
-/** A page title as it reads inside a sentence — bounded, because a title is as
- *  long as its author felt like making it. */
+/**
+ * A page title as it reads INSIDE a quoted sentence.
+ *
+ * Three treatments, all because the title is authored text that lands in a prompt:
+ * bounded (a title is as long as its author felt like making it), markup-stripped
+ * (an `.mdx` page titled `Turbo Fieldfare <b>x</b>` was sending the tags to the
+ * model), and its double quotes turned into single ones — every template wraps the
+ * title in `"…"`, so a title containing one produced unbalanced nesting the model
+ * had to guess its way out of. This is a PROMPT-quality fix, not an escaping one:
+ * every HTML sink here already runs `esc`.
+ */
 function titleForPrompt(title: string): string {
-  return clip(title, 90);
+  const plain = (title || "").replace(/<[^>]*>/g, " ").replace(/["“”]/g, "'");
+  return clip(plain, 90);
 }
 
 /**
@@ -488,9 +517,12 @@ export function threadNameSuggestions(input: {
   return out;
 }
 
-/** Class + data attribute shared by the question chips' render and the reader's
- *  click delegation. */
-export const CHAT_OPT_SUGGEST_CLASS = "wiki-chatopt-chip";
+/** Chip class — module-local on purpose. It is NOT the delegation's selector (both
+ *  chip kinds share it, so a class-based handler would confuse a starter question
+ *  with a thread name); the two data attributes below are. */
+const CHAT_OPT_SUGGEST_CLASS = "wiki-chatopt-chip";
+/** The starter-question chips' data attribute — shared by the render and the
+ *  reader's click delegation, so the two can't drift. */
 export const CHAT_OPT_SUGGEST_ATTR = "data-chat-q";
 /** Same, for the thread-name chips. */
 export const CHAT_OPT_NAME_CHIP_ATTR = "data-chat-name";
@@ -665,7 +697,13 @@ export function chatOptEscapeAction(state: {
   escArmed?: boolean;
   /** The reader has edited the question field in this dialog. */
   dirty?: boolean;
+  /** The dialog reached a terminal state — the question was SENT (`doneUrl`) or is
+   *  already queued on the target thread (`queuedUrl`). There is nothing left to
+   *  discard, so offering to protect it read as a warning about work the reader had
+   *  in fact just completed. */
+  settled?: boolean;
 }): "close" | "confirm" {
+  if (state.settled) return "close";
   if (!state.dirty) return "close";
   if (!state.question.trim()) return "close";
   return state.escArmed ? "close" : "confirm";
@@ -710,13 +748,35 @@ export function articleChatContextHtml(article: ChatOptArticle): string {
 export const DIRECT_QUESTION_PLACEHOLDER = "What do you want to ask?";
 
 /**
+ * Whether the question is shown READ-ONLY rather than as an editable field.
+ *
+ * Two modes, one reason: the question is bound to a turn the dialog did not compose.
+ * - **pinned** (the decline hook) — composed by `composeDeclineQuestion` out of the
+ *   failed turn, so editing it detaches it from what it is escalating.
+ * - **escalate** — the POST carries that turn's `answer` and `citations` verbatim
+ *   (`submitChatOptions`), so an edited question ships a quoted answer to a
+ *   question nobody asked, cited to sources that support the original. Before the
+ *   dialog redesign this was structural: only article mode rendered a textarea, so
+ *   an escalate question was frozen at open. Widening the field to every mode
+ *   re-opened it, hence this explicit gate. A reader who wants to ask something
+ *   else has "New chat", which seeds nothing.
+ */
+export function chatOptQuestionReadOnly(
+  mode: ChatOptMode,
+  pinned: boolean,
+): boolean {
+  return pinned || mode === "escalate";
+}
+
+/**
  * The question field — ONE textarea for all three modes (see
  * {@link chatOptQuestion}), rendered above the loading/error returns so the
  * reader can start typing while the chat target is still resolving.
  *
  * A PINNED question gets no textarea at all: it belongs to the declined turn, is
  * composed rather than verbatim, and editing it would silently detach it from the
- * turn whose failure it is escalating.
+ * turn whose failure it is escalating. {@link chatOptQuestionReadOnly} says which
+ * modes that covers — escalate is one of them, for the same reason.
  */
 export function chatOptQuestionHtml(mode: ChatOptMode, value: string): string {
   const placeholder = mode === "article"
