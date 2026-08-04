@@ -271,6 +271,12 @@ export function buildAskChatSeed(input: {
  * huginn collections (a `WIKI_EXTRA` entry without the 3rd segment), where it
  * produced answers that opened by apologizing for a search that could never work.
  *
+ * `askDeclined` is the third: this question reached chat FROM a wiki Ask that
+ * declined it, i.e. the wiki's own index has already been searched for this exact
+ * question and came up with nothing solid. Ordering that search again is ordering
+ * the one step known to fail — so the clause is replaced by what actually
+ * happened, which also tells the bot not to report the empty index as its finding.
+ *
  * **The opening is deliberately NOT first-person.** It used to read "I'm reading
  * the … wiki", and the memory extractor duly recorded a biographical fact about a
  * user who had merely clicked a button on a wiki they were browsing (observed: a
@@ -289,18 +295,28 @@ export function buildDirectChatSeed(input: {
   /** Whether the wiki has huginn collections its notes can actually be searched
    *  in. Absent ⇒ treated as true (the overwhelmingly common shape). */
   hasCollections?: boolean;
+  /** Whether the wiki's Ask already DECLINED this question (no hits / only weak
+   *  nearest-neighbours). Absent ⇒ false. */
+  askDeclined?: boolean;
 }): string {
   const rawQuestion = typeof input.question === "string" ? input.question.trim() : "";
   const wiki = flatten(typeof input.wikiName === "string" ? input.wikiName : "") || "knowledge";
+  const declined = input.askDeclined === true;
   const searchable = input.hasCollections !== false;
 
   const opening = `[Question asked from the "${wiki}" wiki reader]\n\n`;
   const tools = input.webSearch ? "your tools, including web search" : "the tools you have";
+  // The declined branch wins over `hasCollections`: a wiki that declined an Ask
+  // necessarily HAS collections (that is what ran), and what it knows now is the
+  // stronger fact.
   const framing =
     "\n\nAnswer it properly: " +
-    (searchable
-      ? `search the "${wiki}" wiki's own notes first, then research beyond them with ${tools}, `
-      : `research it with ${tools}, `) +
+    (declined
+      ? `the "${wiki}" wiki's own index has already been searched for this and had ` +
+        `nothing solid on it, so don't stop at that — research it with ${tools}, `
+      : searchable
+        ? `search the "${wiki}" wiki's own notes first, then research beyond them with ${tools}, `
+        : `research it with ${tools}, `) +
     "and cite what you find. Say plainly which parts you couldn't verify.";
 
   const question = clampQuestion(rawQuestion, opening.length + framing.length);

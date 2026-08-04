@@ -6,6 +6,7 @@ import { webFormatClientScript } from "../../chat/views/components/web-format-cl
 import { wikiMermaidClientScript } from "./components/wiki-mermaid-client.ts";
 import { codeTabsClientScript } from "./components/code-tabs-client.ts";
 import { clientCorpusJson, clientProfilesJson, DEFAULT_PROFILE } from "../../research/corpus.ts";
+import { askDeclineReason } from "./components/wiki-ask-session.ts";
 import { componentBlockCss } from "../../format/component-styles.ts";
 
 export async function renderResearchPage(): Promise<string> {
@@ -382,6 +383,16 @@ export async function renderResearchPage(): Promise<string> {
     ${wikiMermaid}
     ${codeTabs}
 
+    // The REAL \`askDeclineReason\` (src/dashboard/views/components/wiki-ask-session.ts),
+    // injected as source rather than hand-mirrored. This page's client is an inline
+    // script string — it has no bundler and cannot import — but the one thing worth
+    // sharing here is the ORDER: the server sets \`noHits\` on both decline branches
+    // (src/research/ask.ts), so a \`noHits ? … : …\` test mislabels every
+    // low-confidence decline. Injecting the function keeps that order in exactly one
+    // place. Safe to serialize: it is pure, closes over nothing, and its body carries
+    // no backtick or \${ that would break this template.
+    var askDeclineReason = ${askDeclineReason.toString()};
+
     var CORPUS = ${clientCorpusJson()};
     var PROFILES = ${clientProfilesJson()};
     var DEFAULT_PROFILE = ${JSON.stringify(DEFAULT_PROFILE)};
@@ -668,8 +679,9 @@ export async function renderResearchPage(): Promise<string> {
           a.sourcesEl.innerHTML = sourcesHtml(a.citations, d.cited || []);
           bindSources(a.sourcesEl, a.citations);
           var statusText;
-          if (d.lowConfidence) statusText = 'No strong match — showing the closest sources';
-          else if (d.noHits) statusText = 'No matching sources';
+          var declined = askDeclineReason(d);
+          if (declined === 'low_confidence') statusText = 'No strong match — showing the closest sources';
+          else if (declined === 'no_hits') statusText = 'No matching sources';
           else statusText = 'Answered from ' + a.citations.length + ' source' + (a.citations.length === 1 ? '' : 's');
           setCardStatus(a, statusText, 'done');
           // Commit the turn so the next ask carries it as context (only question +

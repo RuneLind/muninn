@@ -75,6 +75,49 @@ export interface StoredAskTurn {
    *  `.mdx`-ness of the resolved path). Absent on a pre-field turn / an older
    *  server ⇒ treat as not annotatable. */
   annotatable?: boolean;
+  /** The retrieval DECLINE that ended this turn — the wiki had nothing worth
+   *  synthesizing from (`no_hits`) or only weak nearest-neighbours
+   *  (`low_confidence`). Persisted because the decline hook (an "Ask in chat
+   *  instead →" action rendered in place of the ordinary escalate bar) is derived
+   *  from TURN state at render time, while the flags themselves arrive once on the
+   *  transient `done` SSE event: without this a rehydrated — or merely re-shown —
+   *  declined turn would silently get the ordinary bar back. Absent ⇒ the turn was
+   *  answered (or is a fact-check turn, which has no retrieval at all).
+   *  Validated as the two-value union, but FORWARD-TOLERANTLY: an unknown value
+   *  drops the field and keeps the turn (see `isValidTurn`). */
+  declined?: "no_hits" | "low_confidence";
+  /** Explain turns only: the page the passage was selected from (its title, else
+   *  its name). Persisted because an Explain turn's `question` is a display LABEL
+   *  (`Explain: "<slice>…"`) — the real question is built server-side from `sel`
+   *  and never comes back — so escalating a rehydrated one into chat needs the
+   *  page to restate the passage against (`composeDeclineQuestion`). */
+  explainPage?: string;
+  /** Follow-up turns only: the already-composed question that opened this chain.
+   *  Persisted for the same reason — "and what about the second one?" carries no
+   *  context of its own, and the `history` stream param it rode in on is long
+   *  gone by the time the turn escalates. */
+  originQuestion?: string;
+}
+
+/**
+ * Map an Ask/Explain `done` payload's decline flags onto {@link StoredAskTurn.declined}.
+ *
+ * **`lowConfidence` is checked FIRST and that order is load-bearing.** The server
+ * sets `noHits: true` unconditionally on BOTH decline branches (`src/research/ask.ts`
+ * — it means "no answer was synthesized", not "zero documents came back") and
+ * distinguishes them only by `lowConfidence`. The natural-reading
+ * `noHits ? "no_hits" : …` therefore mislabels EVERY low-confidence decline, which
+ * is the one the reader most needs named honestly: weak sources did ride out and
+ * are listed under the answer. The status line above the bar has always branched
+ * this way; this keeps the two derivations from drifting apart.
+ */
+export function askDeclineReason(payload: {
+  noHits?: unknown;
+  lowConfidence?: unknown;
+}): "no_hits" | "low_confidence" | undefined {
+  if (payload.lowConfidence) return "low_confidence";
+  if (payload.noHits) return "no_hits";
+  return undefined;
 }
 
 /** True when `v` is a well-formed persisted turn. Malformed entries (partial
@@ -127,6 +170,27 @@ function isValidTurn(v: unknown): v is StoredAskTurn {
   // per field — a half-trusted list is never kept.
   if (typeof t.claimQuotes !== "undefined" && !isValidClaimQuotes(t.claimQuotes)) {
     delete t.claimQuotes;
+  }
+  // `declined` is a two-value union that SELECTS which bar the turn renders, so an
+  // unknown value must not be trusted — but it is DROPPED, not fatal, the
+  // `annotatable`/`claimQuotes` treatment rather than `wrote`'s. The difference is
+  // what the field gates: `wrote` guards a destructive write against a staled
+  // baseHash, whereas an unknown `declined` costs the reader nothing worse than the
+  // ordinary escalate bar (still a working escalation) — and throwing away a whole
+  // answer over it is the strictly larger loss. Dropping also keeps a FUTURE
+  // reason value (a third decline kind) from wiping the reader's session on a
+  // downgrade.
+  if (typeof t.declined !== "undefined" && t.declined !== "no_hits" && t.declined !== "low_confidence") {
+    delete t.declined;
+  }
+  // Advisory context strings for the chat escalation — a malformed value degrades
+  // to exactly the pre-field behaviour (an uncomposed question), so it is dropped
+  // like the hints above rather than costing the turn.
+  if (typeof t.explainPage !== "undefined" && typeof t.explainPage !== "string") {
+    delete t.explainPage;
+  }
+  if (typeof t.originQuestion !== "undefined" && typeof t.originQuestion !== "string") {
+    delete t.originQuestion;
   }
   if (typeof t.claimCount !== "undefined" && typeof t.claimCount !== "number") return false;
   if (typeof t.claimOutcomes !== "undefined" && !isValidOutcomeCounts(t.claimOutcomes)) return false;

@@ -34,16 +34,21 @@ import {
 } from "./wiki-explain.ts";
 import {
   botDefaultOptionLabel,
+  chatEscBarHtml,
+  chatOptQuestion,
   chatUserStorageKey,
   chosenSupportsWebTools,
+  composeDeclineQuestion,
   conflictCopy,
   connectorOptionLabel,
   connectorStorageValue,
+  DECLINE_CHAT_BTN_ID,
   pickConnectorId,
   pickUserId,
   previewThreadName,
   shouldCloseChatOptions,
   wikiConnectorStorageKey,
+  type ChatEscState,
   type ChatTarget,
 } from "./wiki-chat-target.ts";
 import { enhanceMermaid } from "./wiki-mermaid.ts";
@@ -51,6 +56,7 @@ import { atlasBodyHtml, initAtlas } from "./wiki-atlas.ts";
 import { enhanceCodeTabs } from "./code-tabs.ts";
 import { enhanceFactCheck } from "./wiki-factcheck-reader.ts";
 import {
+  askDeclineReason,
   serializeAskSession,
   deserializeAskSession,
   type StoredAskTurn,
@@ -1820,27 +1826,30 @@ interface AskTurn {
   // Whether the checked page can carry inline <Fact> annotations (server-derived
   // .mdx-ness of the resolved path). Absent on an older server ⇒ not annotatable.
   annotatable?: boolean;
-  // "Continue in chat →" state for THIS turn. In-memory only — deliberately NOT
-  // part of StoredAskTurn/localStorage: the escalation is a live action, and a
-  // rehydrated turn re-derives an offer-to-escalate bar rather than resurrecting a
-  // link to a thread from a previous session.
+  // The retrieval decline that ended this turn, mapped from the `done` payload by
+  // `askDeclineReason` (which checks lowConfidence FIRST — `noHits` is true on both
+  // decline branches). PERSISTED: the decline hook replaces the ordinary escalate
+  // bar and is re-derived on every turn switch / rehydrate, while the flags exist
+  // only on the transient `done` event.
+  declined?: "no_hits" | "low_confidence";
+  // Explain turns only: the page the passage was selected from (its title, else
+  // its name). PERSISTED — without it an escalated Explain turn carries only the
+  // `Explain: "…"` display label, which names neither the page nor the real
+  // question (`composeDeclineQuestion`).
+  explainPage?: string;
+  // Follow-up turns only: the ALREADY-COMPOSED question that opened this chain.
+  // PERSISTED for the same reason — "and what about the second one?" is
+  // unanswerable on its own. Chains keep the ROOT (a follow-up of a follow-up
+  // inherits its parent's origin rather than nesting).
+  originQuestion?: string;
+  // "Continue in chat →" state for THIS turn. Not declared on StoredAskTurn — but
+  // `serializeAskSession` JSON-stringifies the live turns, so it DOES ride along
+  // into localStorage and a rehydrated turn can still show a link to a thread from
+  // a previous session (accepted, pre-existing; `isValidTurn` neither validates nor
+  // strips it). The field's real job is intra-session: `#wikiChatEscBar` is a
+  // singleton node owned by whichever turn is painted, so holding the outcome on
+  // the TURN is what stops a late fetch painting turn A's result onto turn B.
   chatEsc?: ChatEscState;
-}
-/** Escalation state of one Ask turn, held on the TURN and never in the DOM:
- *  `#wikiChatEscBar` is a singleton node owned by whichever turn is painted, so a
- *  fetch resolving after a turn switch used to paint turn A's "✓ Opened in chat"
- *  (linking A's thread) onto turn B's bar — and on the error path wrote into a
- *  detached node, so the user saw no error at all. */
-interface ChatEscState {
-  status: "pending" | "done" | "exists" | "error";
-  /** `done`: the thread just created · `exists`: the thread that already covers
-   *  this question (built from the 409 body). Absent when the server didn't say. */
-  chatUrl?: string;
-  /** Whether the deep link actually got a tab — a blocked popup says so honestly
-   *  instead of claiming it opened one. */
-  opened?: boolean;
-  /** Failure copy for the `error` state. */
-  message?: string;
 }
 // One row of the fact-check claim checklist — pending until its verdict block lands.
 // `outcome` lands with the verdict (server `claim_result`) and drives the distinct
@@ -2024,54 +2033,7 @@ function askRememberHtml(turn: AskTurn): string {
  *  in place at `done` — which needs the node to be there. `.wiki-chatesc:empty`
  *  hides the empty row. */
 function askChatEscalateHtml(turn: AskTurn): string {
-  return '<div class="wiki-chatesc" id="wikiChatEscBar">' + chatEscInnerHtml(turn) + "</div>";
-}
-
-/** Inner markup of the escalate bar, DERIVED from `turn.chatEsc` so a re-render —
- *  a `done` refresh, a turn switch, re-opening the turn from history — reproduces
- *  the state instead of losing (or misattributing) it. */
-function chatEscInnerHtml(turn: AskTurn): string {
-  // No committed answer (still streaming, or a turn that died at app_error / an
-  // SSE drop): the click's only possible outcome is a silent no-op, so render no
-  // bar at all rather than a button that does nothing.
-  if (!turn.answer) return "";
-  // Fact-check turns are excluded: the question is synthetic and the answer is
-  // tool-produced, so the seed's "answered from indexed page excerpts alone — no
-  // memories, no tools" framing would be false. (Same turn-kind gate shape as
-  // `askFactcheckAppendHtml`.)
-  if (turn.kind === "factcheck") return "";
-  const st = turn.chatEsc;
-  if (st?.status === "done") {
-    return (
-      '<a class="wiki-chatesc-done" href="' + esc(st.chatUrl || "") + '" target="_blank">' +
-      (st.opened ? "✓ Opened in chat →" : "Chat thread created — open it →") +
-      "</a>"
-    );
-  }
-  if (st?.status === "exists") {
-    // A 409 is NOT auto-retried with `forceNew` — that minted a fresh thread (and
-    // a fresh auto-sent model turn) on every re-click. Offer the existing thread,
-    // and make starting another an explicit second choice.
-    return (
-      '<span class="wiki-chatesc-msg">A chat for this question already exists' +
-      (st.chatUrl
-        ? ' — <a class="wiki-chatesc-done" href="' + esc(st.chatUrl) + '" target="_blank">Open it →</a>'
-        : "") +
-      "</span>" +
-      '<button id="wikiChatEscNewBtn" class="wiki-chatesc-btn">Start new thread</button>'
-    );
-  }
-  const pending = st?.status === "pending";
-  return (
-    '<button id="wikiChatEscBtn" class="wiki-chatesc-btn"' + (pending ? " disabled" : "") + ">" +
-    (pending ? "Opening chat…" : "Continue in chat →") + "</button>" +
-    // Same escalation, with the choices the one-click path decides for you (user,
-    // model, thread name). Opens the shared popover.
-    '<button id="wikiChatEscOptBtn" class="wiki-chatesc-gear" title="Chat options…"' +
-    (pending ? " disabled" : "") + ' aria-label="Chat options">⚙</button>' +
-    '<span class="wiki-chatesc-msg' + (st?.status === "error" ? " error" : "") +
-    '" id="wikiChatEscMsg">' + esc(st?.status === "error" ? st.message || "" : "") + "</span>"
-  );
+  return '<div class="wiki-chatesc" id="wikiChatEscBar">' + chatEscBarHtml(turn) + "</div>";
 }
 
 /** Re-render the escalate bar from the turn. TURN-GUARDED for the same reason
@@ -2081,7 +2043,7 @@ function chatEscInnerHtml(turn: AskTurn): string {
 function refreshChatEscalateBar(turn: AskTurn): void {
   if (turn !== askShownTurn) return;
   const bar = document.getElementById("wikiChatEscBar");
-  if (bar) bar.innerHTML = chatEscInnerHtml(turn);
+  if (bar) bar.innerHTML = chatEscBarHtml(turn);
 }
 
 /** "➕ Add to article" button — ONLY on committed fact-check turns whose page is
@@ -2597,9 +2559,16 @@ function runAskStream(url: string, turn: AskTurn): void {
         statusText = n > 0
           ? "Checked " + n + " claim" + (n === 1 ? "" : "s") + " against the web"
           : "Fact check complete";
-      } else if (d.lowConfidence) statusText = "No strong match — closest sources below";
-      else if (d.noHits) statusText = "No matching sources";
-      else statusText = "Answered from " + turn.citations.length + " source" + (turn.citations.length === 1 ? "" : "s");
+      } else {
+        // The decline lands on the TURN, not just on this status string: the
+        // escalate bar is re-derived from turn state on every switch/rehydrate,
+        // and `done` fires exactly once. `askDeclineReason` owns the
+        // lowConfidence-before-noHits order both branches below depend on.
+        turn.declined = askDeclineReason(d);
+        if (turn.declined === "low_confidence") statusText = "No strong match — closest sources below";
+        else if (turn.declined === "no_hits") statusText = "No matching sources";
+        else statusText = "Answered from " + turn.citations.length + " source" + (turn.citations.length === 1 ? "" : "s");
+      }
       setAskStatus(statusText, "done");
       // Drop the transient claim checklist before persisting — it's fully folded
       // into `turn.answer` by now (the final render above uses `turn.answer`, not
@@ -2698,10 +2667,12 @@ function buildAskUrl(q: string): string {
 }
 
 /** Start an Ask turn from a plain question string (shared by the Ask box and the
- *  in-pane follow-up bar). */
-function askPlainQuestion(q: string): void {
+ *  in-pane follow-up bar). `originQuestion` is set only by the follow-up bar —
+ *  see `submitFollowup`. */
+function askPlainQuestion(q: string, originQuestion?: string): void {
   const turn: AskTurn = {
     question: q, answer: "", citations: [], cited: [], html: null, askedAt: Date.now(),
+    originQuestion: originQuestion || undefined,
   };
   runAskStream(buildAskUrl(q), turn);
 }
@@ -2718,14 +2689,26 @@ function askQuestion(): void {
 
 /** Submit the in-pane follow-up bar under an answer. Reads + clears the input,
  *  then runs the same Ask stream — the turn lands in `askTurns` via the shared
- *  `done` handler, carrying the prior turns as `history`. */
+ *  `done` handler, carrying the prior turns as `history`.
+ *
+ *  The originating question is stamped onto the turn because `history` is a
+ *  STREAM param: nothing else survives to the point where a declined follow-up
+ *  escalates into chat, and "and what about the second one?" is unanswerable on
+ *  its own. Chains keep the ROOT (the parent's own origin wins over the parent's
+ *  question), and an Explain-rooted chain stores the composed page+passage form
+ *  rather than the bare `Explain: "…"` label. */
 function submitFollowup(): void {
   const input = document.getElementById("wikiFollowupInput") as HTMLInputElement | null;
   if (!input || input.disabled) return;
   const q = input.value.trim();
   if (!q) return;
   input.value = "";
-  askPlainQuestion(q);
+  const parent = askShownTurn;
+  const origin = parent
+    ? parent.originQuestion ||
+      composeDeclineQuestion({ question: parent.question, explainPage: parent.explainPage })
+    : undefined;
+  askPlainQuestion(q, origin);
 }
 
 /** Persist the shown answer as a durable memory (POST /api/wiki/remember).
@@ -2880,9 +2863,18 @@ async function submitChatEscalate(forceNew: boolean): Promise<void> {
 
 interface ChatOptState {
   mode: "direct" | "escalate";
-  /** Escalate mode: the turn whose answer + citations ride along. */
+  /** The turn this popover acts for: escalate mode carries its answer +
+   *  citations into the seed, and BOTH modes mirror the outcome back onto its
+   *  `chatEsc` bar. Null for the "New chat" opener, which has no turn. */
   turn: AskTurn | null;
   question: string;
+  /** Present ⇒ the question is PINNED to `turn` (the decline hook): it is not
+   *  read from the Ask box at open, not re-read at submit, and the box is never
+   *  written to. See `chatOptQuestion`. */
+  pinnedQuestion?: string;
+  /** The pinned question comes from a turn the WIKI DECLINED — the POST says so
+   *  (`askDeclined`) so the seed stops ordering the search that just failed. */
+  askDeclined?: boolean;
   target: ChatTarget | null;
   loading: boolean;
   /** Fatal load error (no target ⇒ nothing to send). */
@@ -2933,21 +2925,28 @@ function lsSet(key: string, value: string): void {
   try { localStorage.setItem(key, value); } catch { /* private mode */ }
 }
 
-/** The question the popover would send RIGHT NOW. In direct mode that is whatever
- *  the Ask box holds at this instant, not the snapshot taken when the panel
- *  opened — the reader can (and, when the panel says "Type a question first",
- *  must) keep typing with the panel up. */
+/** The question the popover would send RIGHT NOW — the pure `chatOptQuestion`
+ *  over the LIVE Ask box (which only the un-pinned direct mode reads). */
 function currentChatOptQuestion(state: ChatOptState): string {
-  if (state.mode !== "direct") return state.question;
   const input = document.getElementById("wikiAskInput") as HTMLTextAreaElement | null;
-  return (input?.value || "").trim();
+  return chatOptQuestion(state, input ? input.value : null);
 }
 
-/** Open the popover anchored under `anchor`. `mode` decides what gets sent. */
-function openChatOptions(mode: "direct" | "escalate", anchor: HTMLElement | null): void {
+/** Open the popover anchored under `anchor`. `mode` decides what gets sent; a
+ *  `pinnedQuestion` overrides where the question comes from entirely (the decline
+ *  hook — see `chatOptQuestion`). */
+function openChatOptions(
+  mode: "direct" | "escalate",
+  anchor: HTMLElement | null,
+  opts: { pinnedQuestion?: string; turn?: AskTurn | null; askDeclined?: boolean } = {},
+): void {
   let question = "";
   let turn: AskTurn | null = null;
-  if (mode === "direct") {
+  const pinned = typeof opts.pinnedQuestion === "string";
+  if (pinned) {
+    question = opts.pinnedQuestion!.trim();
+    turn = opts.turn ?? null;
+  } else if (mode === "direct") {
     const input = document.getElementById("wikiAskInput") as HTMLTextAreaElement | null;
     question = (input?.value || "").trim();
   } else {
@@ -2957,6 +2956,8 @@ function openChatOptions(mode: "direct" | "escalate", anchor: HTMLElement | null
   }
   chatOpt = {
     mode, turn, question,
+    pinnedQuestion: pinned ? question : undefined,
+    askDeclined: opts.askDeclined || undefined,
     target: null, loading: true,
     botName: "", bots: [], needsBotPicker: false,
     userId: "", connectorId: "", threadName: "",
@@ -2964,6 +2965,33 @@ function openChatOptions(mode: "direct" | "escalate", anchor: HTMLElement | null
   };
   renderChatOptions(anchor);
   void loadChatTarget();
+}
+
+/**
+ * Open the popover from the decline hook — the same DIRECT path the "New chat"
+ * button uses, but with the question PINNED to the declined turn.
+ *
+ * It is pinned rather than written into `#wikiAskInput` (which is what shipped
+ * first): the box is the reader's own draft space, and stuffing it destroyed
+ * whatever they had typed, left the failed question armed in the box after the
+ * popover closed, and — on the Connections tab — wrote into a textarea that isn't
+ * even visible. Pinning also carries the composition the plain label can't: an
+ * Explain turn's question is a display label and a follow-up's is a fragment, so
+ * `composeDeclineQuestion` restates the page/passage or the originating question
+ * before the seed ever quotes it.
+ */
+function openDeclineChat(anchor: HTMLElement | null): void {
+  const turn = askShownTurn;
+  if (!turn || !turn.declined) return;
+  openChatOptions("direct", anchor, {
+    pinnedQuestion: composeDeclineQuestion({
+      question: turn.question,
+      explainPage: turn.explainPage,
+      originQuestion: turn.originQuestion,
+    }),
+    turn,
+    askDeclined: true,
+  });
 }
 
 function closeChatOptions(): void {
@@ -3051,6 +3079,12 @@ async function fetchPreferredConnector(userId: string, botName: string): Promise
 function chatOptBodyHtml(state: ChatOptState, question: string): string {
   const t = state.target;
   const rows: string[] = [];
+  // A PINNED question is the one thing on this panel the reader can't see anywhere
+  // else: it isn't in the Ask box (deliberately) and it is COMPOSED, not the label
+  // shown on the turn. Rendered in every state, above the error/loading returns.
+  if (typeof state.pinnedQuestion === "string") {
+    rows.push('<div class="wiki-chatopt-pinned">' + esc(state.pinnedQuestion) + "</div>");
+  }
   // The bot picker outlives its own response: it is rendered from state (not from
   // the current payload) whenever this popover ever needed a bot, so a resolved
   // pick can still be changed, a re-fetch IN FLIGHT still shows the pick that
@@ -3245,9 +3279,9 @@ async function submitChatOptions(
 ): Promise<void> {
   const state = chatOpt;
   if (!state || state.sending || !state.target?.botName) { if (win) win.close(); return; }
-  // Re-read the question at SUBMIT time: in direct mode it lives in the Ask box,
-  // which the reader can keep editing while the panel is up (and must, when the
-  // panel opened on an empty one).
+  // Re-read the question at SUBMIT time: in un-pinned direct mode it lives in the
+  // Ask box, which the reader can keep editing while the panel is up (and must,
+  // when the panel opened on an empty one). A PINNED question ignores the box.
   const question = currentChatOptQuestion(state);
   state.question = question;
   if (!question || !state.userId) { if (win) win.close(); return; }
@@ -3274,6 +3308,10 @@ async function submitChatOptions(
     if (state.mode === "direct") {
       // The discriminator is explicit: a missing answer alone must stay a 400.
       payload.mode = "direct";
+      // The wiki already looked and came up empty on this exact question, and the
+      // route knows nothing about that — without the flag the seed opens by
+      // ordering the bot to run the search that just failed.
+      if (state.askDeclined) payload.askDeclined = true;
     } else {
       const turn = state.turn!;
       payload.answer = turn.answer.slice(0, CHAT_ESC_ANSWER_MAX);
@@ -3312,7 +3350,12 @@ async function submitChatOptions(
     state.conflict = undefined;
     state.doneUrl = data.chatUrl;
     state.openedTab = !!win;
-    // Mirror the outcome onto the turn's own bar so it survives closing the panel.
+    // Mirror the outcome onto the turn's own bar so it survives closing the panel
+    // — the panel is transient, and an Escape or a blocked popup would otherwise
+    // lose the only link to the thread this click just created. It matters most on
+    // the DECLINE path (which is why that opener passes its turn through): its bar
+    // would go on saying "Ask in chat instead →", and the second click would walk
+    // 409 recovery for a thread the reader can no longer reach.
     if (state.turn) {
       state.turn.chatEsc = { status: "done", chatUrl: data.chatUrl, opened: !!win };
       refreshChatEscalateBar(state.turn);
@@ -3770,6 +3813,8 @@ document.addEventListener("click", (e) => {
     openChatOptions("escalate", t.closest("#wikiChatEscOptBtn") as HTMLElement);
   } else if (t.closest("#wikiNewChatBtn")) {
     openChatOptions("direct", t.closest("#wikiNewChatBtn") as HTMLElement);
+  } else if (t.closest("#" + DECLINE_CHAT_BTN_ID)) {
+    openDeclineChat(t.closest("#" + DECLINE_CHAT_BTN_ID) as HTMLElement);
   } else if (t.closest("#wikiChatOptClose")) closeChatOptions();
   else if (t.closest("#wikiChatOptSend")) void submitChatOptions(window.open("", "_blank"));
   else if (t.closest("#wikiChatOptSendThere")) {
@@ -3792,9 +3837,13 @@ document.addEventListener("click", (e) => {
       open: true,
       attached: document.contains(t),
       inPanel: !!t.closest("#wikiChatOpt"),
-      inOpener: !!t.closest("#wikiChatEscOptBtn") || !!t.closest("#wikiNewChatBtn"),
+      inOpener:
+        !!t.closest("#wikiChatEscOptBtn") ||
+        !!t.closest("#wikiNewChatBtn") ||
+        !!t.closest("#" + DECLINE_CHAT_BTN_ID),
       sending: chatOpt.sending,
       inQuestionBox: !!t.closest("#wikiAskInput"),
+      pinned: typeof chatOpt.pinnedQuestion === "string",
       mode: chatOpt.mode,
     })
   ) {
@@ -4033,8 +4082,14 @@ function maybeShowExplainPill(): void {
 function activateExplain(): void {
   hideExplainPill();
   if (!pillSel || !currentName) return;
+  const explainMeta = allPages.find((p) => p.name === currentName);
   const turn: AskTurn = {
     question: explainLabel(pillSel),
+    // The page the passage was read on. The question is only a display LABEL, so
+    // without this an escalated Explain turn names neither the page nor the real
+    // question (`composeDeclineQuestion`). Title where there is one — it is what
+    // wikilinks and the bot's own notes search use.
+    explainPage: explainMeta?.title || currentName,
     answer: "", citations: [], cited: [], html: null, askedAt: Date.now(),
   };
   const url = buildExplainUrl({

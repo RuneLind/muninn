@@ -872,6 +872,18 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-chatesc-btn:hover { border-color: var(--accent); }
     .wiki-chatesc-btn:disabled { opacity: 0.5; cursor: default; }
+    /* Decline hook — the wiki had nothing (or nothing solid), so the chat escalation
+       is the primary next step rather than an optional extra: a filled button
+       instead of the ordinary bar's quiet inset one.
+       The fill is --accent-HOVER, not --accent: white on the dark theme's #6c63ff is
+       4.32:1 at 12px/600, under AA's 4.5. The darker token measures 5.65:1 (dark) and
+       6.46:1 (light), and the brightness hover still holds 5.0:1 — so the treatment
+       stays as loud as it was and passes in BOTH themes. --accent keeps the border,
+       which reads as a lighter rim rather than losing the edge. */
+    .wiki-chatesc-decline {
+      border-color: var(--accent); background: var(--accent-hover); color: #fff;
+    }
+    .wiki-chatesc-decline:hover { filter: brightness(1.08); }
     .wiki-chatesc-gear {
       padding: 6px 8px; border-radius: 8px; cursor: pointer; font-size: 12px;
       border: 1px solid var(--border-secondary); background: var(--bg-inset);
@@ -1067,6 +1079,16 @@ export async function renderWikiPage(opts?: {
     .wiki-chatopt-preview { font-size: 11px; color: var(--text-tertiary); padding-left: 62px; }
     .wiki-chatopt-preview code { font-size: 11px; color: var(--text-secondary); }
     .wiki-chatopt-note { font-size: 11px; color: var(--text-tertiary); line-height: 1.4; }
+    /* The PINNED question (decline hook). It comes from the turn, not from the Ask
+       box, and it is composed rather than verbatim — so it is shown in full here,
+       since the only other echo is the ≤50-char thread-name preview. Scrolls rather
+       than growing the panel past its clamp. */
+    .wiki-chatopt-pinned {
+      font-size: 11.5px; color: var(--text-secondary); line-height: 1.45;
+      background: var(--bg-inset); border: 1px solid var(--border-primary);
+      border-radius: 8px; padding: 6px 8px; max-height: 96px; overflow-y: auto;
+      overflow-wrap: anywhere;
+    }
     .wiki-chatopt-line { font-size: 11.5px; color: var(--text-secondary); line-height: 1.4; }
     .wiki-chatopt-line.error { color: var(--status-error); }
     .wiki-chatopt-foot { display: flex; gap: 8px; align-items: center; }

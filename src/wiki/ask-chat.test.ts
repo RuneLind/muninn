@@ -254,6 +254,45 @@ describe("buildDirectChatSeed", () => {
     expect(without).toContain("the tools you have");
   });
 
+  test("a DECLINED question is not sent back to search the index that just failed", () => {
+    // The decline hook's whole premise: muninn already ran this exact question
+    // against the wiki's own index and got nothing solid. "Search the wiki's own
+    // notes first" would order the one step known to fail, and an answer whose
+    // finding is "the wiki has nothing" is the finding the reader already has.
+    const seed = buildDirectChatSeed({ ...base, webSearch: true, askDeclined: true });
+    expect(seed).not.toContain("wiki's own notes first");
+    expect(seed).toContain("already been searched");
+    expect(seed).toContain("nothing solid");
+    expect(seed).toContain("research it with");
+    // The capability conditioning is untouched by the new branch.
+    expect(seed).toContain("including web search");
+    expect(
+      buildDirectChatSeed({ ...base, webSearch: false, askDeclined: true }),
+    ).not.toContain("web search");
+    // Absent/false ⇒ byte-identical to the pre-flag seed.
+    expect(buildDirectChatSeed({ ...base, webSearch: true, askDeclined: false })).toBe(
+      buildDirectChatSeed({ ...base, webSearch: true }),
+    );
+  });
+
+  test("a decline beats the collection-less clause — a wiki that declined HAS collections", () => {
+    const seed = buildDirectChatSeed({
+      ...base, webSearch: true, hasCollections: false, askDeclined: true,
+    });
+    expect(seed).toContain("already been searched");
+    expect(seed).not.toContain("wiki's own notes first");
+  });
+
+  test("the declined seed is bounded like every other", () => {
+    const seed = buildDirectChatSeed({
+      wikiName: "w".repeat(500),
+      question: "q".repeat(200_000),
+      webSearch: true,
+      askDeclined: true,
+    });
+    expect(seed.length).toBeLessThanOrEqual(ASK_CHAT_SEED_MAX);
+  });
+
   test("the WHOLE seed is bounded, however huge the inputs", () => {
     const seed = buildDirectChatSeed({
       wikiName: "w".repeat(500),

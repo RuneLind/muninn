@@ -14,13 +14,36 @@ export const EXPLAIN_SEL_MAX = 1500;
 /** How many chars of the selection to echo in the turn's display label. */
 export const EXPLAIN_LABEL_CHARS = 80;
 
+/** The one spelling of the Explain label's prefix — shared by the builder below
+ *  and {@link explainSelectionFromLabel}, which has to take it back off. */
+export const EXPLAIN_LABEL_PREFIX = 'Explain: "';
+
 /** Display-only turn label, e.g. `Explain: "the coverage gate…"`. This is what
  *  the user sees in the history list + answer headline; the SERVER builds its
  *  own question from `sel`, so this never has to be exact. */
 export function explainLabel(sel: string): string {
   const s = sel.trim().replace(/\s+/g, " ");
   const short = s.length > EXPLAIN_LABEL_CHARS ? s.slice(0, EXPLAIN_LABEL_CHARS) + "…" : s;
-  return 'Explain: "' + short + '"';
+  return EXPLAIN_LABEL_PREFIX + short + '"';
+}
+
+/**
+ * The selected passage back out of an {@link explainLabel} — `null` when the
+ * string isn't one (a plain Ask question, a fact-check label, an empty selection).
+ *
+ * Needed because the label is the ONLY form of an Explain turn's question the
+ * client keeps: the real question is built server-side from `sel`, which never
+ * comes back. Anything escalating an Explain turn into chat has to unwrap the
+ * display label and re-state the passage as context (`composeDeclineQuestion` in
+ * `wiki-chat-target.ts`) — a bare `Explain: "…"` reaching a chat bot is a
+ * context-free fragment it cannot answer. The truncating `…` is deliberately
+ * KEPT: it is honest about the passage being a slice.
+ */
+export function explainSelectionFromLabel(label: string): string | null {
+  const s = (label || "").trim();
+  if (!s.startsWith(EXPLAIN_LABEL_PREFIX) || !s.endsWith('"')) return null;
+  const inner = s.slice(EXPLAIN_LABEL_PREFIX.length, -1).trim();
+  return inner || null;
 }
 
 /** Build the `/api/wiki/explain` GET URL, omitting empty `ctx`/`history`/`wiki`

@@ -1944,6 +1944,9 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
          *  inference from a missing `answer`: a client bug that drops the answer
          *  must still 400 rather than silently escalate a context-free seed. */
         mode?: string;
+        /** Direct mode only: this question reached chat from an Ask the wiki
+         *  DECLINED, so the seed must not order the search that just failed. */
+        askDeclined?: boolean;
         connectorId?: string;
         threadName?: string;
         existingThreadId?: string;
@@ -1970,6 +1973,9 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         if (body[field] !== undefined && typeof body[field] !== "string") {
           return c.json({ error: `${field} must be a string` }, 400);
         }
+      }
+      if (body.askDeclined !== undefined && typeof body.askDeclined !== "boolean") {
+        return c.json({ error: "askDeclined must be a boolean" }, 400);
       }
       const connectorId = typeof body.connectorId === "string" ? body.connectorId.trim() : "";
       // A non-UUID reaching `getConnector`'s uuid-column WHERE is a Postgres error,
@@ -2073,6 +2079,11 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // apologized for a search that could never have worked.
       const hasCollections = (entry.collections ?? []).length > 0;
 
+      // Only meaningful in direct mode (the escalate seed quotes an answer the
+      // wiki DID produce), so it is scoped to that branch rather than trusted
+      // wherever the client happens to send it.
+      const askDeclined = direct && body.askDeclined === true;
+
       const buildSeed = (canWebSearch: boolean): string =>
         direct
           ? buildDirectChatSeed({
@@ -2080,6 +2091,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
               question,
               webSearch: canWebSearch,
               hasCollections,
+              askDeclined,
             })
           : buildAskChatSeed({ wikiName: entry.name, question, answer, citations });
 

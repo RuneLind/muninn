@@ -48,6 +48,22 @@ test("done fallback renders the answer body through the component-aware formatte
   expect(segment).toContain("linkifyCitations(a.bodyEl, a.citations)");
 });
 
+test("the done handler orders the decline reasons through the SHARED helper", async () => {
+  const html = await pageHtml();
+  // The real `askDeclineReason` is injected as source (this page's client is an
+  // inline script with no bundler), so the lowConfidence-before-noHits order — the
+  // server sets `noHits` on BOTH decline branches — lives in exactly one place.
+  expect(html).toContain("var askDeclineReason = function askDeclineReason(payload)");
+  const start = html.indexOf("done: function(e)");
+  const segment = html.slice(start, html.indexOf("answer_html: function(e)", start));
+  expect(segment).toContain("askDeclineReason(d)");
+  expect(segment).toContain("declined === 'low_confidence'");
+  expect(segment).toContain("declined === 'no_hits'");
+  // No second, hand-rolled ordering of the raw flags.
+  expect(segment).not.toContain("d.lowConfidence");
+  expect(segment).not.toContain("d.noHits");
+});
+
 test("answer-body scope carries the component block CSS", async () => {
   const html = await pageHtml();
   // componentBlockCss(".answer-body") injects the callout rule under that scope.

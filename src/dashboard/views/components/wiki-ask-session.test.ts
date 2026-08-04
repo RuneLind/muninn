@@ -1,5 +1,6 @@
 import { test, expect } from "bun:test";
 import {
+  askDeclineReason,
   serializeAskSession,
   deserializeAskSession,
   type StoredAskTurn,
@@ -242,6 +243,76 @@ test("a present-but-wrong-typed annotatable drops the FIELD, keeping the turn", 
   expect(restored.map((t) => t.question)).toEqual(["bogus", "clean"]);
   expect(restored[0]!.annotatable).toBeUndefined();
   expect(restored[1]!.annotatable).toBe(false);
+});
+
+// --- Decline hook (PR B) ---------------------------------------------------
+// Only the PERSISTENCE half lives here — the bar's markup, the escalation question
+// it composes and its branch order are tested in `wiki-chat-target.test.ts`, where
+// those helpers live.
+
+test("askDeclineReason checks lowConfidence FIRST — noHits is true on both branches", () => {
+  // The server's low-confidence decline emits {noHits: true, lowConfidence: true}
+  // (src/research/ask.ts), so a `noHits ? … : …` order would label every
+  // low-confidence decline "no_hits".
+  expect(askDeclineReason({ noHits: true, lowConfidence: true })).toBe("low_confidence");
+  expect(askDeclineReason({ noHits: true, lowConfidence: false })).toBe("no_hits");
+  expect(askDeclineReason({ noHits: false, lowConfidence: false })).toBeUndefined();
+  // A fact-check `done` payload carries neither flag — no retrieval, no decline.
+  expect(askDeclineReason({})).toBeUndefined();
+});
+
+test("round-trips a declined turn, so the decline bar survives a reload", () => {
+  const declined = turn({ question: "obscure thing", declined: "low_confidence" });
+  const restored = deserializeAskSession(serializeAskSession([declined], 10));
+  expect(restored).toEqual([declined]);
+  expect(restored[0]!.declined).toBe("low_confidence");
+});
+
+test("an unknown `declined` drops the FIELD, keeping the turn", () => {
+  // Forward-tolerant, the `annotatable`/`claimQuotes` treatment — NOT `wrote`'s
+  // reject-the-turn, which exists only because `wrote` gates a destructive write
+  // against a staled baseHash. An unknown reason costs the reader the ordinary
+  // escalate bar (still a working escalation); dropping the whole answer costs
+  // them far more, and a future third reason would wipe the session on a
+  // downgrade.
+  const raw = JSON.stringify([
+    { ...turn({ question: "bogus" }), declined: "nohits" },
+    { ...turn({ question: "numeric" }), declined: 1 },
+    { ...turn({ question: "empty" }), declined: "" },
+    turn({ question: "no-hits-ok", declined: "no_hits" }),
+    turn({ question: "low-conf-ok", declined: "low_confidence" }),
+    turn({ question: "absent" }), // an answered turn carries no field at all
+  ]);
+  const restored = deserializeAskSession(raw);
+  expect(restored.map((t) => t.question)).toEqual([
+    "bogus",
+    "numeric",
+    "empty",
+    "no-hits-ok",
+    "low-conf-ok",
+    "absent",
+  ]);
+  // The bad values are gone (so no render branch can trust them), the good ones intact.
+  expect(restored.slice(0, 3).map((t) => t.declined)).toEqual([undefined, undefined, undefined]);
+  expect(restored[3]!.declined).toBe("no_hits");
+  expect(restored[4]!.declined).toBe("low_confidence");
+  expect(restored[5]!.declined).toBeUndefined();
+});
+
+test("the escalation-context fields round-trip, and a malformed one is dropped", () => {
+  // Both exist so a REHYDRATED declined turn still composes an answerable question:
+  // an Explain turn's `question` is a display label, and a follow-up's is a fragment.
+  const explain = turn({ question: 'Explain: "the coverage gate…"', explainPage: "Wiki Gardener" });
+  const followup = turn({ question: "and the second one?", originQuestion: "Which two gardeners?" });
+  const restored = deserializeAskSession(serializeAskSession([explain, followup], 10));
+  expect(restored).toEqual([explain, followup]);
+
+  const bad = deserializeAskSession(
+    JSON.stringify([{ ...turn({ question: "bogus" }), explainPage: 7, originQuestion: {} }]),
+  );
+  expect(bad).toHaveLength(1);
+  expect(bad[0]!.explainPage).toBeUndefined();
+  expect(bad[0]!.originQuestion).toBeUndefined();
 });
 
 test("claimQuotes entries the server would reject wholesale are not persisted", () => {
