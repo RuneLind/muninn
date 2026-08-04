@@ -38,6 +38,19 @@ export function setPendingMessage(threadId: string, text: string, meta?: Pending
   pendingMessages.set(threadId, { text, jiraContent: meta?.jiraContent, title: meta?.title, timer });
 }
 
+/**
+ * Whether a pending message is still queued (and unexpired) for this thread.
+ *
+ * A read-only peek — deliberately NOT a consume. {@link setPendingMessage} is
+ * last-write-wins, so a second seed posted onto a thread whose first seed nobody
+ * opened yet silently destroys that first question. Writers that target an
+ * EXISTING thread (the wiki reader's "Send there →") check this first and refuse
+ * rather than clobber.
+ */
+export function hasPendingMessage(threadId: string): boolean {
+  return pendingMessages.has(threadId);
+}
+
 export function consumePendingMessage(threadId: string): PendingResult | null {
   const entry = pendingMessages.get(threadId);
   if (!entry) return null;

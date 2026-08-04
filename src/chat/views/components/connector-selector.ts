@@ -69,6 +69,20 @@ export function connectorSelectorScript(): string {
     }
   }
 
+  // Suppress the sidebar preference from filling a DELIBERATELY empty connector
+  // slot. Set for the whole seeded turn of a deep link that says the thread's
+  // connector was already decided elsewhere (\`&src=wiki\`: the wiki reader's
+  // escalation popover, where "(bot default)" is a real choice and is expressed
+  // as NO connector on the thread). onlyIfEmpty can't protect that case — it only
+  // guards threads that already HAVE a connector — so a connector-less thread got
+  // stamped with whatever the sidebar remembered, silently changing which model
+  // answered. The flag lives HERE rather than at a call site because there are
+  // TWO stamping paths on that one turn (handleDeepLink, then sendMessage right
+  // before the seed is delivered); gating only the first leaves the seeded turn
+  // stamped anyway.
+  var connectorStampSuppressed = false;
+  function suppressConnectorStamp(on) { connectorStampSuppressed = !!on; }
+
   // Stamp a connector on a thread (connectorId '' or null clears it → bot default).
   // When onlyIfEmpty=true, never overwrites an existing connector — used by the
   // deep-link and send-message paths so the Jira plugin's chosen connector
@@ -77,6 +91,10 @@ export function connectorSelectorScript(): string {
   // user's explicit pick to override.
   async function stampConnectorOnThread(threadId, connectorId, onlyIfEmpty) {
     if (!threadId) return;
+    // Suppression applies to the preference-stamping paths only (both pass
+    // onlyIfEmpty). An explicit dropdown pick still wins — that is the user
+    // deliberately changing this thread's model, not a remembered default.
+    if (onlyIfEmpty && connectorStampSuppressed) return;
     var effectiveId = connectorId || null;
     for (var i = 0; i < threads.length; i++) {
       if (threads[i].id === threadId) {

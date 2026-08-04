@@ -872,6 +872,13 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-chatesc-btn:hover { border-color: var(--accent); }
     .wiki-chatesc-btn:disabled { opacity: 0.5; cursor: default; }
+    .wiki-chatesc-gear {
+      padding: 6px 8px; border-radius: 8px; cursor: pointer; font-size: 12px;
+      border: 1px solid var(--border-secondary); background: var(--bg-inset);
+      color: var(--text-secondary); margin-left: -6px;
+    }
+    .wiki-chatesc-gear:hover { border-color: var(--accent); color: var(--text-primary); }
+    .wiki-chatesc-gear:disabled { opacity: 0.5; cursor: default; }
     .wiki-chatesc-msg { font-size: 12px; color: var(--text-secondary); }
     .wiki-chatesc-msg.error { color: var(--status-error); }
     .wiki-chatesc-done {
@@ -1021,6 +1028,54 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-ask-btn:hover { opacity: 0.9; }
     .wiki-ask-btn:disabled { opacity: 0.5; cursor: default; }
+    .wiki-ask-actions { display: flex; flex-direction: column; gap: 4px; }
+    .wiki-ask-newchat {
+      padding: 4px 10px; border-radius: 7px; font-size: 11.5px; cursor: pointer;
+      border: 1px solid var(--border-secondary); background: var(--bg-inset);
+      color: var(--text-secondary); white-space: nowrap;
+    }
+    .wiki-ask-newchat:hover { border-color: var(--accent); color: var(--text-primary); }
+    /* Chat options popover — one panel shared by the "New chat" button and the
+       ⚙ on a committed turn's escalate bar. Fixed-positioned under its trigger. */
+    .wiki-chatopt {
+      position: fixed; z-index: 60; display: flex; flex-direction: column; gap: 8px;
+      padding: 12px; border-radius: 10px; border: 1px solid var(--border-secondary);
+      background: var(--bg-elevated, var(--bg-secondary)); box-shadow: 0 8px 28px rgba(0,0,0,0.32);
+      font-size: 12.5px; color: var(--text-primary);
+    }
+    .wiki-chatopt-head {
+      display: flex; align-items: center; justify-content: space-between;
+      font-weight: 600; font-size: 12.5px;
+    }
+    .wiki-chatopt-x {
+      border: none; background: none; color: var(--text-tertiary);
+      font-size: 16px; line-height: 1; cursor: pointer; padding: 0 2px;
+    }
+    .wiki-chatopt-body { display: flex; flex-direction: column; gap: 7px; }
+    .wiki-chatopt-row { display: flex; align-items: center; gap: 8px; }
+    .wiki-chatopt-row > span { flex: 0 0 54px; color: var(--text-tertiary); font-size: 11.5px; }
+    .wiki-chatopt-row select, .wiki-chatopt-row input {
+      flex: 1; min-width: 0; padding: 5px 7px; border-radius: 6px; font-size: 12px;
+      border: 1px solid var(--border-secondary); background: var(--bg-inset);
+      color: var(--text-primary); font-family: inherit;
+    }
+    .wiki-chatopt-preview { font-size: 11px; color: var(--text-tertiary); padding-left: 62px; }
+    .wiki-chatopt-preview code { font-size: 11px; color: var(--text-secondary); }
+    .wiki-chatopt-note { font-size: 11px; color: var(--text-tertiary); line-height: 1.4; }
+    .wiki-chatopt-line { font-size: 11.5px; color: var(--text-secondary); line-height: 1.4; }
+    .wiki-chatopt-line.error { color: var(--status-error); }
+    .wiki-chatopt-foot { display: flex; gap: 8px; align-items: center; }
+    .wiki-chatopt-btn {
+      padding: 5px 12px; border-radius: 7px; border: none; cursor: pointer;
+      background: var(--accent); color: #fff; font-size: 12px; font-weight: 600;
+    }
+    .wiki-chatopt-btn.ghost {
+      background: var(--bg-inset); color: var(--text-secondary);
+      border: 1px solid var(--border-secondary); font-weight: 500;
+    }
+    .wiki-chatopt-btn:disabled { opacity: 0.5; cursor: default; }
+    .wiki-chatopt-done { color: var(--accent); font-size: 12px; text-decoration: none; }
+    .wiki-chatopt-done:hover { text-decoration: underline; }
     .wiki-conn-section { margin-bottom: 14px; }
     .wiki-conn-title { font-size: 12px; color: var(--text-tertiary); font-weight: 600; margin: 4px 4px 6px; }
     .wiki-conn-group { font-size: 10.5px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.4px; margin: 8px 4px 3px; }
@@ -1101,7 +1156,11 @@ export async function renderWikiPage(opts?: {
       <div class="wiki-conn-body wiki-ask-body" id="askBody" style="display:none">
         <div class="wiki-ask-compose">
           <textarea class="wiki-ask-input" id="wikiAskInput" rows="2" placeholder="Ask this wiki…"></textarea>
-          <button class="wiki-ask-btn" id="wikiAskBtn">Ask</button>
+          <div class="wiki-ask-actions">
+            <button class="wiki-ask-btn" id="wikiAskBtn">Ask</button>
+            <button class="wiki-ask-newchat" id="wikiNewChatBtn"
+              title="Send this question straight to a chat thread — full context and tools, no wiki-only answer first">New chat</button>
+          </div>
         </div>
         <div class="wiki-ask-status" id="wikiAskStatus" style="display:none"><span class="spinner"></span><span class="st"></span></div>
         <div class="wiki-ask-hint" id="wikiAskHint">Ask a question and this wiki answers in the main pane, with citations you can open as pages.</div>

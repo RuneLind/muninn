@@ -5,6 +5,7 @@ import {
   ASK_CHAT_SOURCES_MAX,
   ASK_CHAT_TITLE_MAX,
   buildAskChatSeed,
+  buildDirectChatSeed,
   deriveAskThreadTitle,
   uniqueAskThreadTitle,
 } from "./ask-chat.ts";
@@ -176,5 +177,51 @@ describe("buildAskChatSeed", () => {
       citations: [{ pageName: 123 }, { title: null }, { pageName: "Real Page" }] as never,
     });
     expect(seed).toContain("Sources cited by the wiki: Real Page");
+  });
+});
+
+/**
+ * `buildDirectChatSeed` — the seed for a question escalated WITHOUT asking the
+ * wiki first ("New chat"). No answer to quote, so it is a separate builder rather
+ * than the answer builder fed an empty string.
+ */
+describe("buildDirectChatSeed", () => {
+  const base = { wikiName: "mimir", question: "How does the gardener cluster summaries?" };
+
+  test("frames the question as fresh, naming the wiki, with no quoted answer", () => {
+    const seed = buildDirectChatSeed({ ...base, webSearch: true });
+    expect(seed).toContain('"mimir"');
+    expect(seed).toContain("How does the gardener cluster summaries?");
+    // Nothing quoted and no follow-up-to-nothing tail.
+    expect(seed).not.toContain("\n>");
+    expect(seed).not.toContain("What else should I know here?");
+    expect(seed).not.toContain("Ask tab answered");
+  });
+
+  test("names web search only when the effective connector can deliver it", () => {
+    expect(buildDirectChatSeed({ ...base, webSearch: true })).toContain("including web search");
+    const without = buildDirectChatSeed({ ...base, webSearch: false });
+    expect(without).not.toContain("web search");
+    // Still asks for real research — it just doesn't promise a tool that isn't there.
+    expect(without).toContain("the tools you have");
+  });
+
+  test("the WHOLE seed is bounded, however huge the inputs", () => {
+    const seed = buildDirectChatSeed({
+      wikiName: "w".repeat(500),
+      question: "q".repeat(200_000),
+      webSearch: true,
+    });
+    expect(seed.length).toBeLessThanOrEqual(ASK_CHAT_SEED_MAX);
+    expect(seed).toContain("(question truncated)");
+  });
+
+  test("a blank/absent question degrades instead of throwing", () => {
+    expect(buildDirectChatSeed({ wikiName: "", question: "   ", webSearch: false })).toContain(
+      "knowledge",
+    );
+    expect(
+      buildDirectChatSeed({ wikiName: 5, question: null, webSearch: true } as never),
+    ).toBeString();
   });
 });

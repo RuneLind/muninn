@@ -729,6 +729,13 @@ const CHAT_SCRIPT = `
 
     await selectBot(botName, threadParam || undefined);
 
+    // A thread deep-linked from the wiki reader had its connector decided in that
+    // popover — including "(bot default)", which is expressed as NO connector on
+    // the thread. Suppress the sidebar's remembered preference for this whole
+    // seeded turn (the stamp runs again inside sendMessage), then release it.
+    var fromWiki = params.get('src') === 'wiki';
+    if (fromWiki) suppressConnectorStamp(true);
+
     // Check for pending research message (e.g. from Chrome extension)
     if (threadParam && activeConvId && activeThreadId) {
       // Stamp connector from sidebar selection only if the thread has none.
@@ -742,10 +749,11 @@ const CHAT_SCRIPT = `
         var pendingData = await pendingRes.json();
         if (pendingData.text) {
           chatInput.value = pendingData.text;
-          sendMessage();
+          await sendMessage();
         }
       } catch {}
     }
+    if (fromWiki) suppressConnectorStamp(false);
   }
 
   // Send message (optional connector override for routing through a specific AI backend)

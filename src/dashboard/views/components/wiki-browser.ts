@@ -32,6 +32,18 @@ import {
   toolLogRowLabel,
   type ToolLogRow,
 } from "./wiki-explain.ts";
+import {
+  botDefaultOptionLabel,
+  chatUserStorageKey,
+  chosenSupportsWebTools,
+  conflictCopy,
+  connectorOptionLabel,
+  pickConnectorId,
+  pickUserId,
+  previewThreadName,
+  wikiConnectorStorageKey,
+  type ChatTarget,
+} from "./wiki-chat-target.ts";
 import { enhanceMermaid } from "./wiki-mermaid.ts";
 import { atlasBodyHtml, initAtlas } from "./wiki-atlas.ts";
 import { enhanceCodeTabs } from "./code-tabs.ts";
@@ -2051,6 +2063,10 @@ function chatEscInnerHtml(turn: AskTurn): string {
   return (
     '<button id="wikiChatEscBtn" class="wiki-chatesc-btn"' + (pending ? " disabled" : "") + ">" +
     (pending ? "Opening chat…" : "Continue in chat →") + "</button>" +
+    // Same escalation, with the choices the one-click path decides for you (user,
+    // model, thread name). Opens the shared popover.
+    '<button id="wikiChatEscOptBtn" class="wiki-chatesc-gear" title="Chat options…"' +
+    (pending ? " disabled" : "") + ' aria-label="Chat options">⚙</button>' +
     '<span class="wiki-chatesc-msg' + (st?.status === "error" ? " error" : "") +
     '" id="wikiChatEscMsg">' + esc(st?.status === "error" ? st.message || "" : "") + "</span>"
   );
@@ -2771,7 +2787,11 @@ function chatEscExistingUrl(d: {
   return (
     "/chat?bot=" + encodeURIComponent(d.botName) +
     "&thread=" + encodeURIComponent(d.existingThreadId) +
-    "&user=" + encodeURIComponent(d.userId)
+    "&user=" + encodeURIComponent(d.userId) +
+    // Same suppression flag the route's own chatUrl carries: this thread may have
+    // been created from here with "(bot default)", i.e. deliberately no connector,
+    // which the chat sidebar's remembered preference would otherwise stamp over.
+    "&src=wiki"
   );
 }
 
@@ -2833,6 +2853,349 @@ async function submitChatEscalate(forceNew: boolean): Promise<void> {
     };
   } finally {
     refreshChatEscalateBar(turn);
+  }
+}
+
+// ── Chat options popover ──────────────────────────────────────────────
+// One popover, two entry points: the "New chat" button beside the Ask box (a
+// DIRECT escalation — the reader's question goes straight to a real thread, no
+// Ask turn first) and the ⚙ on a committed turn's "Continue in chat →" bar. Both
+// resolve the same way and POST the same route; only `mode` and whether an answer
+// rides along differ.
+//
+// Everything the panel prefills comes from ONE `GET /api/wiki/chat-target` fetch:
+// the reader client holds a WIKI NAME, and which bot/user/connector a thread lands
+// on is a server question (a wiki name is not a bot name, and the bot that answers
+// Ask can differ from the bot that owns the chat). Defaults, labels and the thread
+// name preview are the pure `wiki-chat-target.ts`.
+
+interface ChatOptState {
+  mode: "direct" | "escalate";
+  /** Escalate mode: the turn whose answer + citations ride along. */
+  turn: AskTurn | null;
+  question: string;
+  target: ChatTarget | null;
+  loading: boolean;
+  /** Fatal load error (no target ⇒ nothing to send). */
+  error?: string;
+  /** Transient line under the fields (send failures, "already queued", …). */
+  status?: string;
+  statusIsError?: boolean;
+  /** Bot override in flight — set only once the reader picks one. */
+  botName: string;
+  userId: string;
+  connectorId: string;
+  /** Typed thread-name override; "" ⇒ derive from the question. */
+  threadName: string;
+  sending: boolean;
+  /** A name collision the reader must resolve (409 `threadExists`). */
+  conflict?: { existingThreadId: string; typedName: boolean };
+  /** Terminal success — the thread's deep link. */
+  doneUrl?: string;
+  openedTab?: boolean;
+}
+let chatOpt: ChatOptState | null = null;
+/** Monotonic id so a slow chat-target fetch can't repopulate a newer open. */
+let chatOptLoadSeq = 0;
+
+function chatOptPanel(): HTMLElement | null {
+  return document.getElementById("wikiChatOpt");
+}
+
+/** Read a localStorage key, tolerating a disabled/foreign-origin store. */
+function lsGet(key: string): string | null {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+function lsSet(key: string, value: string): void {
+  try { localStorage.setItem(key, value); } catch { /* private mode */ }
+}
+
+/** Open the popover anchored under `anchor`. `mode` decides what gets sent. */
+function openChatOptions(mode: "direct" | "escalate", anchor: HTMLElement | null): void {
+  let question = "";
+  let turn: AskTurn | null = null;
+  if (mode === "direct") {
+    const input = document.getElementById("wikiAskInput") as HTMLTextAreaElement | null;
+    question = (input?.value || "").trim();
+  } else {
+    turn = askShownTurn;
+    if (!turn || !turn.answer || turn.kind === "factcheck") return;
+    question = turn.question;
+  }
+  chatOpt = {
+    mode, turn, question,
+    target: null, loading: true,
+    botName: "", userId: "", connectorId: "", threadName: "",
+    sending: false,
+  };
+  renderChatOptions(anchor);
+  void loadChatTarget();
+}
+
+function closeChatOptions(): void {
+  chatOpt = null;
+  const panel = chatOptPanel();
+  if (panel) panel.remove();
+}
+
+/** Fetch the target for the current bot selection and derive every default.
+ *  Re-run whenever the bot picker changes — users, the default-user mapping and
+ *  the bot default connector are ALL bot-keyed. */
+async function loadChatTarget(): Promise<void> {
+  const state = chatOpt;
+  if (!state) return;
+  const seq = ++chatOptLoadSeq;
+  state.loading = true;
+  state.error = undefined;
+  renderChatOptions();
+  try {
+    let url = withWiki("/api/wiki/chat-target");
+    if (state.botName) {
+      url += (url.indexOf("?") === -1 ? "?" : "&") + "bot=" + encodeURIComponent(state.botName);
+    }
+    const res = await fetch(url);
+    const data = (await res.json().catch(() => ({}))) as ChatTarget & { error?: string };
+    if (chatOpt !== state || seq !== chatOptLoadSeq) return; // superseded
+    if (!res.ok) throw new Error(data.error || "HTTP " + res.status);
+    state.target = data;
+    if (data.botName) {
+      state.botName = data.botName;
+      state.userId = pickUserId(data, lsGet(chatUserStorageKey(data.botName)));
+      const preferred = state.userId ? await fetchPreferredConnector(state.userId, data.botName) : null;
+      if (chatOpt !== state || seq !== chatOptLoadSeq) return;
+      state.connectorId = pickConnectorId(data, lsGet(wikiConnectorStorageKey(WIKI)), preferred);
+    } else {
+      // `needs_bot` renders the picker; the other two reasons are real errors.
+      state.error = data.needsBot ? undefined : data.error || "No chat target for this wiki.";
+    }
+  } catch (err) {
+    if (chatOpt !== state || seq !== chatOptLoadSeq) return;
+    state.error = "Couldn't work out where this chat would go — " +
+      (err instanceof Error ? err.message : String(err));
+  } finally {
+    if (chatOpt === state && seq === chatOptLoadSeq) {
+      state.loading = false;
+      renderChatOptions();
+    }
+  }
+}
+
+/** The user+bot's persisted preferred connector (the chat page's own sidebar
+ *  memory, in DB). Never fatal — no preference just means "bot default". */
+async function fetchPreferredConnector(userId: string, botName: string): Promise<string | null> {
+  try {
+    const res = await fetch(
+      "/chat/preferences/" + encodeURIComponent(userId) + "/" + encodeURIComponent(botName),
+    );
+    if (!res.ok) return null;
+    const data = (await res.json()) as { connectorId?: string | null };
+    return data.connectorId || null;
+  } catch { return null; }
+}
+
+/** Panel markup, fully derived from `chatOpt` — every field re-renders from state
+ *  so a re-render can never lose (or misattribute) a pick. */
+function chatOptionsHtml(state: ChatOptState): string {
+  const t = state.target;
+  const title = state.mode === "direct" ? "New chat from this wiki" : "Continue in chat";
+  let body = "";
+  if (state.loading && !t) {
+    body = '<div class="wiki-chatopt-line">Working out where this chat lands…</div>';
+  } else if (state.error) {
+    body = '<div class="wiki-chatopt-line error">' + esc(state.error) + "</div>";
+  } else if (t) {
+    const rows: string[] = [];
+    // Bot — hidden once resolved; a picker when the wiki belongs to nobody.
+    if (!t.botName || t.needsBot) {
+      rows.push(
+        '<label class="wiki-chatopt-row"><span>Bot</span><select id="wikiChatOptBot">' +
+        '<option value="">Pick a bot…</option>' +
+        t.bots.map((b) =>
+          '<option value="' + esc(b.name) + '"' +
+          (b.name === state.botName ? " selected" : "") + ">" + esc(b.name) + "</option>",
+        ).join("") +
+        "</select></label>",
+      );
+    }
+    if (t.botName) {
+      if (t.users.length > 1) {
+        rows.push(
+          '<label class="wiki-chatopt-row"><span>As</span><select id="wikiChatOptUser">' +
+          t.users.map((u) =>
+            '<option value="' + esc(u.id) + '"' +
+            (u.id === state.userId ? " selected" : "") + ">" + esc(u.name) + "</option>",
+          ).join("") +
+          "</select></label>",
+        );
+      }
+      rows.push(
+        '<label class="wiki-chatopt-row"><span>Model</span><select id="wikiChatOptConn">' +
+        '<option value=""' + (state.connectorId ? "" : " selected") + ">" +
+        esc(botDefaultOptionLabel(t.botDefault)) + "</option>" +
+        t.connectors.map((cRow) =>
+          '<option value="' + esc(cRow.id) + '"' +
+          (cRow.id === state.connectorId ? " selected" : "") + ">" +
+          esc(connectorOptionLabel(cRow)) + "</option>",
+        ).join("") +
+        "</select></label>",
+      );
+      rows.push(
+        '<label class="wiki-chatopt-row"><span>Thread</span>' +
+        '<input id="wikiChatOptName" type="text" spellcheck="false" placeholder="' +
+        esc(previewThreadName("", state.question)) + '" value="' + esc(state.threadName) + '"></label>',
+      );
+      rows.push(
+        '<div class="wiki-chatopt-preview">will be named <code>' +
+        esc(previewThreadName(state.threadName, state.question)) + "</code></div>",
+      );
+      if (!chosenSupportsWebTools(t, state.connectorId)) {
+        rows.push(
+          '<div class="wiki-chatopt-note">This model has no web search — the question will ask for ' +
+          "research with the tools it does have.</div>",
+        );
+      }
+    }
+    body = rows.join("");
+  }
+
+  let foot = "";
+  if (state.doneUrl) {
+    foot =
+      '<a class="wiki-chatopt-done" href="' + esc(state.doneUrl) + '" target="_blank">' +
+      (state.openedTab ? "✓ Opened in chat →" : "Chat thread ready — open it →") + "</a>";
+  } else if (state.conflict) {
+    foot =
+      '<button id="wikiChatOptSendThere" class="wiki-chatopt-btn">Send there →</button>' +
+      '<button id="wikiChatOptForce" class="wiki-chatopt-btn ghost">Start new thread</button>';
+  } else if (state.target?.botName) {
+    const blocked = state.sending || !state.question || !state.userId;
+    foot =
+      '<button id="wikiChatOptSend" class="wiki-chatopt-btn"' + (blocked ? " disabled" : "") + ">" +
+      (state.sending ? "Opening…" : "Start chat →") + "</button>";
+  }
+  const status = state.status
+    ? '<div class="wiki-chatopt-line' + (state.statusIsError ? " error" : "") + '">' +
+      esc(state.status) + "</div>"
+    : state.target?.botName && !state.question
+      ? '<div class="wiki-chatopt-line">Type a question first.</div>'
+      : state.target?.botName && !state.userId
+        ? '<div class="wiki-chatopt-line">Pick who this chat belongs to.</div>'
+        : "";
+
+  return (
+    '<div class="wiki-chatopt-head">' + esc(title) +
+    '<button id="wikiChatOptClose" class="wiki-chatopt-x" aria-label="Close">×</button></div>' +
+    '<div class="wiki-chatopt-body">' + body + "</div>" +
+    status +
+    '<div class="wiki-chatopt-foot">' + foot + "</div>"
+  );
+}
+
+/** Paint the panel, creating + positioning it on the first call of an open. */
+function renderChatOptions(anchor?: HTMLElement | null): void {
+  const state = chatOpt;
+  let panel = chatOptPanel();
+  if (!state) { if (panel) panel.remove(); return; }
+  if (!panel) {
+    panel = document.createElement("div");
+    panel.id = "wikiChatOpt";
+    panel.className = "wiki-chatopt";
+    document.body.appendChild(panel);
+  }
+  panel.innerHTML = chatOptionsHtml(state);
+  if (anchor) {
+    const r = anchor.getBoundingClientRect();
+    const width = 340;
+    const left = Math.max(8, Math.min(window.innerWidth - width - 8, r.left));
+    panel.style.left = left + "px";
+    panel.style.top = Math.min(window.innerHeight - 40, r.bottom + 6) + "px";
+    panel.style.width = width + "px";
+  }
+}
+
+/** POST the escalation. `opts` carries the one field that differs per button:
+ *  nothing (first try) · `existingThreadId` (Send there) · `forceNew`. */
+async function submitChatOptions(
+  win: Window | null,
+  opts: { existingThreadId?: string; forceNew?: boolean } = {},
+): Promise<void> {
+  const state = chatOpt;
+  if (!state || state.sending || !state.target?.botName) { if (win) win.close(); return; }
+  if (!state.question || !state.userId) { if (win) win.close(); return; }
+  state.sending = true;
+  state.status = undefined;
+  state.statusIsError = false;
+  renderChatOptions();
+  const typedName = !!state.threadName.trim();
+  try {
+    const payload: Record<string, unknown> = {
+      wiki: WIKI || undefined,
+      bot: state.botName,
+      userId: state.userId,
+      question: state.question,
+      connectorId: state.connectorId || undefined,
+      threadName: state.threadName.trim() || undefined,
+      existingThreadId: opts.existingThreadId,
+      forceNew: opts.forceNew || undefined,
+    };
+    if (state.mode === "direct") {
+      // The discriminator is explicit: a missing answer alone must stay a 400.
+      payload.mode = "direct";
+    } else {
+      const turn = state.turn!;
+      payload.answer = turn.answer.slice(0, CHAT_ESC_ANSWER_MAX);
+      payload.citations = turn.citations.map((ci) => ({ title: ci.title, pageName: ci.pageName }));
+    }
+    const res = await fetch("/api/wiki/ask/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = (await res.json().catch(() => ({}))) as {
+      chatUrl?: string;
+      error?: string;
+      threadExists?: boolean;
+      alreadyQueued?: boolean;
+      existingThreadId?: string;
+    };
+    if (chatOpt !== state) { if (win) win.close(); return; }
+    if (res.status === 409 && data.threadExists && data.existingThreadId) {
+      if (win) win.close();
+      state.conflict = { existingThreadId: data.existingThreadId, typedName };
+      state.status = conflictCopy(typedName) + " Send this question there, or start another.";
+      return;
+    }
+    if (res.status === 409 && data.alreadyQueued) {
+      // The other question hasn't been opened yet; seeding over it would delete
+      // it. Keep the conflict affordances so "Start new thread" is one click.
+      if (win) win.close();
+      state.status = data.error || "A question is already queued on that thread — open it first.";
+      state.statusIsError = true;
+      state.doneUrl = undefined;
+      return;
+    }
+    if (!res.ok || !data.chatUrl) throw new Error(data.error || "HTTP " + res.status);
+    lsSet(chatUserStorageKey(state.botName), state.userId);
+    lsSet(wikiConnectorStorageKey(WIKI), state.connectorId);
+    if (win) win.location.href = data.chatUrl;
+    state.conflict = undefined;
+    state.doneUrl = data.chatUrl;
+    state.openedTab = !!win;
+    // Mirror the outcome onto the turn's own bar so it survives closing the panel.
+    if (state.turn) {
+      state.turn.chatEsc = { status: "done", chatUrl: data.chatUrl, opened: !!win };
+      refreshChatEscalateBar(state.turn);
+    }
+  } catch (err) {
+    if (win) win.close();
+    if (chatOpt !== state) return;
+    state.status = "Couldn't start the chat — " + (err instanceof Error ? err.message : String(err));
+    state.statusIsError = true;
+  } finally {
+    if (chatOpt === state) {
+      state.sending = false;
+      renderChatOptions();
+    }
   }
 }
 
@@ -3269,10 +3632,82 @@ document.addEventListener("click", (e) => {
   else if (t.closest("#wikiChatEscBtn")) submitChatEscalate(false);
   // Explicit "start another thread anyway" after a 409 (never automatic).
   else if (t.closest("#wikiChatEscNewBtn")) submitChatEscalate(true);
-  else if (t.closest("#wikiFactcheckAppendBtn")) submitFactcheckAppend();
+  // Chat options popover — two entry points, one panel. The tab is pre-opened
+  // SYNCHRONOUSLY inside the click (Safari blocks a `window.open` after an await
+  // unconditionally), exactly as the plain escalate button does.
+  else if (t.closest("#wikiChatEscOptBtn")) {
+    openChatOptions("escalate", t.closest("#wikiChatEscOptBtn") as HTMLElement);
+  } else if (t.closest("#wikiNewChatBtn")) {
+    openChatOptions("direct", t.closest("#wikiNewChatBtn") as HTMLElement);
+  } else if (t.closest("#wikiChatOptClose")) closeChatOptions();
+  else if (t.closest("#wikiChatOptSend")) void submitChatOptions(window.open("", "_blank"));
+  else if (t.closest("#wikiChatOptSendThere")) {
+    void submitChatOptions(window.open("", "_blank"), {
+      existingThreadId: chatOpt?.conflict?.existingThreadId,
+    });
+  } else if (t.closest("#wikiChatOptForce")) {
+    void submitChatOptions(window.open("", "_blank"), { forceNew: true });
+  } else if (t.closest("#wikiFactcheckAppendBtn")) submitFactcheckAppend();
   else if (t.closest("#wikiFactcheckIntegrateBtn")) submitFactcheckIntegrate();
   else if (t.closest("#wikiFcIntAccept")) acceptFactcheckIntegrate();
   else if (t.closest("#wikiFcIntCancel")) cancelFactcheckIntegrate();
+  // Click-away dismissal, evaluated AFTER the chain so a click on another control
+  // still does its own job (and the two openers above aren't self-closing).
+  if (
+    chatOpt && !t.closest("#wikiChatOpt") &&
+    !t.closest("#wikiChatEscOptBtn") && !t.closest("#wikiNewChatBtn")
+  ) {
+    closeChatOptions();
+  }
+});
+
+// Popover field changes — delegated (the panel is re-rendered from state on every
+// change, so direct listeners wouldn't survive). Nothing is read back off the DOM.
+document.addEventListener("change", (e) => {
+  const state = chatOpt;
+  if (!state) return;
+  const el = e.target as HTMLElement;
+  if (el.id === "wikiChatOptBot") {
+    state.botName = (el as HTMLSelectElement).value;
+    state.target = null;
+    state.conflict = undefined;
+    state.status = undefined;
+    if (state.botName) void loadChatTarget();
+    else renderChatOptions();
+  } else if (el.id === "wikiChatOptUser") {
+    state.userId = (el as HTMLSelectElement).value;
+    state.conflict = undefined;
+    // The connector preference is per user+bot, so re-resolve it for the new user.
+    void (async () => {
+      const preferred = await fetchPreferredConnector(state.userId, state.botName);
+      if (chatOpt !== state || !state.target) return;
+      state.connectorId = pickConnectorId(
+        state.target, lsGet(wikiConnectorStorageKey(WIKI)), preferred,
+      );
+      renderChatOptions();
+    })();
+    renderChatOptions();
+  } else if (el.id === "wikiChatOptConn") {
+    state.connectorId = (el as HTMLSelectElement).value;
+    renderChatOptions();
+  }
+});
+
+// The thread-name field re-renders its own lowercased preview as you type. The
+// input keeps focus + caret because only the preview node is rewritten.
+document.addEventListener("input", (e) => {
+  const state = chatOpt;
+  const el = e.target as HTMLElement;
+  if (!state || el.id !== "wikiChatOptName") return;
+  state.threadName = (el as HTMLInputElement).value;
+  state.conflict = undefined;
+  const preview = document.querySelector("#wikiChatOpt .wiki-chatopt-preview code");
+  if (preview) preview.textContent = previewThreadName(state.threadName, state.question);
+});
+
+// Escape closes the popover (a modal-ish panel with no backdrop).
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && chatOpt) closeChatOptions();
 });
 // Preview-panel checkboxes — same document-level delegation (the panel is
 // re-rendered wholesale on every toggle, so direct listeners wouldn't survive).

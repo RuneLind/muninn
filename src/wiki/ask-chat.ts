@@ -226,3 +226,50 @@ export function buildAskChatSeed(input: {
   const seed = head + quoted + "\n" + sources + tail;
   return seed.length <= ASK_CHAT_SEED_MAX ? seed : truncateUnits(seed, ASK_CHAT_SEED_MAX);
 }
+
+/**
+ * Build the message a DIRECT escalation auto-sends — the reader typed a question
+ * and skipped the Ask tab entirely, so there is no answer to quote.
+ *
+ * A separate builder rather than `buildAskChatSeed({answer: ""})`: that one's
+ * whole framing ("treat the answer below as PRIOR CONTEXT to build on") and its
+ * budget math are written around a quoted answer, and with an empty one it emits
+ * a stray blank quote plus a "What else should I know here?" tail that reads as
+ * a follow-up to nothing.
+ *
+ * `webSearch` reflects the EFFECTIVE connector of the thread being created (the
+ * chosen connector row's type, or the bot's own default) — `WebSearch` is a
+ * built-in of `claude-cli`/`claude-sdk` only, so promising it to a Copilot or
+ * openai-compat bot would instruct the agent to use a tool it does not have.
+ *
+ * Bounded by the same {@link ASK_CHAT_SEED_MAX} the sibling builder is, with the
+ * question carrying {@link ASK_CHAT_QUESTION_MAX} and a final surrogate-safe
+ * clamp so the bound holds whatever the constants become.
+ */
+export function buildDirectChatSeed(input: {
+  wikiName: string;
+  question: string;
+  webSearch: boolean;
+}): string {
+  const rawQuestion = typeof input.question === "string" ? input.question.trim() : "";
+  const wiki = flatten(typeof input.wikiName === "string" ? input.wikiName : "") || "knowledge";
+
+  const opening = `I'm reading the "${wiki}" wiki and want to dig into this:\n\n`;
+  const framing =
+    `\n\nAnswer it properly: search the "${wiki}" wiki's own notes first, then research ` +
+    (input.webSearch
+      ? "beyond them with your tools, including web search, "
+      : "beyond them with the tools you have, ") +
+    "and cite what you find. Say plainly which parts you couldn't verify.";
+
+  const fixed = opening.length + framing.length;
+  const questionBudget = Math.max(0, Math.min(ASK_CHAT_QUESTION_MAX, ASK_CHAT_SEED_MAX - fixed));
+  const question =
+    rawQuestion.length <= questionBudget
+      ? rawQuestion
+      : truncateUnits(rawQuestion, Math.max(0, questionBudget - QUESTION_TRUNC_NOTE.length)) +
+        QUESTION_TRUNC_NOTE;
+
+  const seed = opening + question + framing;
+  return seed.length <= ASK_CHAT_SEED_MAX ? seed : truncateUnits(seed, ASK_CHAT_SEED_MAX);
+}
