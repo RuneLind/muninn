@@ -5,23 +5,28 @@ import {
   chosenSupportsWebTools,
   conflictCopy,
   connectorOptionLabel,
+  connectorStorageValue,
   pickConnectorId,
   pickUserId,
   previewThreadName,
+  shouldCloseChatOptions,
   wikiConnectorStorageKey,
+  WIKI_CONNECTOR_DEFAULT,
+  type ChatOptClickContext,
   type ChatTarget,
+  type ChatTargetConnector,
 } from "./wiki-chat-target.ts";
+
+const CONNECTORS: ChatTargetConnector[] = [
+  { id: "c-cli", name: "Sonnet (CLI)", connectorType: "claude-cli", supportsWebTools: true },
+  { id: "c-cop", name: "Copilot", connectorType: "copilot-sdk", supportsWebTools: false },
+];
 
 const target = (over: Partial<ChatTarget> = {}): ChatTarget => ({
   botName: "jarvis",
-  needsBot: false,
-  bots: [{ name: "jarvis" }, { name: "melosys" }],
   users: [{ id: "u1", name: "rune" }, { id: "u2", name: "other" }],
   defaultUserId: "u2",
-  connectors: [
-    { id: "c-cli", name: "Sonnet (CLI)", connectorType: "claude-cli", supportsWebTools: true },
-    { id: "c-cop", name: "Copilot", connectorType: "copilot-sdk", supportsWebTools: false },
-  ],
+  connectors: CONNECTORS,
   botDefault: { connectorType: "claude-sdk", model: "sonnet", supportsWebTools: true },
   ...over,
 });
@@ -68,16 +73,81 @@ describe("pickConnectorId", () => {
     expect(pickConnectorId(target(), "deleted-row", "c-cli")).toBe("c-cli");
     expect(pickConnectorId(target(), "deleted-row", "also-gone")).toBe("");
   });
+
+  test('a remembered "(bot default)" is an ANSWER, and stops the chain', () => {
+    // Storing "" was indistinguishable from storing nothing: the membership test
+    // can never match it, so the reader's deliberate move OFF a named model was
+    // silently undone by the chat preference on the very next open.
+    expect(connectorStorageValue("")).toBe(WIKI_CONNECTOR_DEFAULT);
+    expect(connectorStorageValue("c-cli")).toBe("c-cli");
+    expect(pickConnectorId(target(), WIKI_CONNECTOR_DEFAULT, "c-cli")).toBe("");
+    // Sanity: the old value really does fall through (the bug being fixed).
+    expect(pickConnectorId(target(), "", "c-cli")).toBe("c-cli");
+  });
+
+  test("the failure branch's absent fields don't throw", () => {
+    // The route ships bot/reason/error ONLY when it couldn't resolve a target.
+    const failed: ChatTarget = { botName: null, reason: "needs_bot", bots: [{ name: "jarvis" }] };
+    expect(pickConnectorId(failed, "c-cli", "c-cop")).toBe("");
+    expect(pickUserId(failed, "u1")).toBe("");
+    expect(chosenSupportsWebTools(failed, "c-cli")).toBe(false);
+  });
+});
+
+describe("shouldCloseChatOptions", () => {
+  const ctx = (over: Partial<ChatOptClickContext> = {}): ChatOptClickContext => ({
+    open: true,
+    attached: true,
+    inPanel: false,
+    inOpener: false,
+    sending: false,
+    inQuestionBox: false,
+    mode: "escalate",
+    ...over,
+  });
+
+  test("an ordinary outside click closes it", () => {
+    expect(shouldCloseChatOptions(ctx())).toBe(true);
+  });
+
+  test("clicks inside the panel or on its openers never close it", () => {
+    expect(shouldCloseChatOptions(ctx({ inPanel: true }))).toBe(false);
+    expect(shouldCloseChatOptions(ctx({ inOpener: true }))).toBe(false);
+  });
+
+  test("a DETACHED target is not an outside click — the submit self-close", () => {
+    // `submitChatOptions` sets `sending` and re-renders synchronously before its
+    // first await, so the Send button the user just clicked is gone from the
+    // document by the time this listener runs. Reading `closest("#wikiChatOpt")`
+    // on it returns null, the panel closed, and the in-flight submit then saw
+    // `chatOpt !== state` and closed the pre-opened tab — thread and seed created
+    // server-side, nothing shown, retry hitting `alreadyQueued`.
+    expect(shouldCloseChatOptions(ctx({ attached: false, inPanel: false }))).toBe(false);
+    // Belt and braces: nothing closes it while a submit is in flight either.
+    expect(shouldCloseChatOptions(ctx({ sending: true }))).toBe(false);
+  });
+
+  test("direct mode keeps the panel open while the reader types the question", () => {
+    // The panel's own copy tells them to "Type a question first"; the Ask box is
+    // the recovery path, so clicking into it must not dismiss the panel.
+    expect(shouldCloseChatOptions(ctx({ mode: "direct", inQuestionBox: true }))).toBe(false);
+    // In escalate mode the question comes from the turn, so the box is outside.
+    expect(shouldCloseChatOptions(ctx({ mode: "escalate", inQuestionBox: true }))).toBe(true);
+  });
+
+  test("a closed popover is never closed again", () => {
+    expect(shouldCloseChatOptions(ctx({ open: false }))).toBe(false);
+  });
 });
 
 describe("option labels", () => {
   test("only the ABSENCE of web search is stated", () => {
-    expect(connectorOptionLabel(target().connectors[0]!)).toBe("Sonnet (CLI)");
-    expect(connectorOptionLabel(target().connectors[1]!)).toBe("Copilot · no web search");
+    expect(connectorOptionLabel(CONNECTORS[0]!)).toBe("Sonnet (CLI)");
+    expect(connectorOptionLabel(CONNECTORS[1]!)).toBe("Copilot · no web search");
   });
 
   test('"(bot default)" carries its resolved capability like every other option', () => {
-    expect(botDefaultOptionLabel(target().botDefault)).toBe("Bot default (claude-sdk · sonnet)");
+    expect(botDefaultOptionLabel(target().botDefault!)).toBe("Bot default (claude-sdk · sonnet)");
     expect(
       botDefaultOptionLabel({ connectorType: "openai-compat", supportsWebTools: false }),
     ).toBe("Bot default (openai-compat) · no web search");
@@ -105,6 +175,12 @@ describe("previewThreadName", () => {
   test("mirrors the route: typed name wins, else the question", () => {
     expect(previewThreadName("My Notes Thread", "How does X work?")).toBe("my notes thread");
     expect(previewThreadName("   ", "How does X work?")).toBe("how does x work?");
+  });
+
+  test("a typed name that flattens to NOTHING falls back to the question", () => {
+    // Not to the generic "wiki ask" — a name of only control characters carries
+    // no name, and the route makes exactly this fallback.
+    expect(previewThreadName("\u0000\u0007 \t", "How does X work?")).toBe("how does x work?");
   });
 
   test("shows the same lowercased, flattened, ≤50-char name createThread stores", () => {

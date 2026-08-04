@@ -40,6 +40,9 @@ interface Harness {
   patches: FetchCall[];
   run: () => Promise<void>;
   stamp: (threadId: string, connectorId: string, onlyIfEmpty?: boolean) => Promise<void>;
+  /** A LATER message in the same thread — the reader's own follow-up, which goes
+   *  through `sendMessage`'s stamp exactly as the seeded turn did. */
+  send: (text: string) => Promise<void>;
 }
 
 /** Build a running copy of the page's connector + deep-link code over stubs. */
@@ -98,17 +101,23 @@ async function harness(opts: {
     connectorSelectorScript() +
     (await deepLinkBlockSource()) +
     "selectedConnectorId = " + JSON.stringify(opts.selectedConnectorId) + ";" +
-    "return { handleDeepLink: handleDeepLink, stampConnectorOnThread: stampConnectorOnThread };";
+    "return { handleDeepLink: handleDeepLink, stampConnectorOnThread: stampConnectorOnThread," +
+    " sendMessage: sendMessage };";
 
   const made = new Function("ctx", body)(ctx) as {
     handleDeepLink: () => Promise<void>;
     stampConnectorOnThread: (id: string, cid: string, only?: boolean) => Promise<void>;
+    sendMessage: () => Promise<void>;
   };
   return {
     fetchCalls,
     get patches() { return fetchCalls.filter((f) => f.method === "PATCH"); },
     run: () => made.handleDeepLink(),
     stamp: (id, cid, only) => made.stampConnectorOnThread(id, cid, only),
+    send: async (text) => {
+      ctx.chatInput.value = text;
+      await made.sendMessage();
+    },
   };
 }
 
@@ -166,15 +175,36 @@ describe("connector stamp suppression (&src=wiki)", () => {
     expect(h.patches).toEqual([]);
   });
 
-  test("suppression is RELEASED once the seeded send is done", async () => {
+  test("the reader's FOLLOW-UP message in the same thread is still unstamped", async () => {
+    // The regression a single released boolean shipped with: suppression covered
+    // exactly the seeded turn, so the reader's SECOND message went through
+    // sendMessage's stamp and picked up the sidebar preference anyway — the same
+    // silent model swap, one turn later. Suppression is per THREAD and is never
+    // released for the page session.
+    const h = await harness({
+      threads: [{ id: "T1", connectorId: null }],
+      selectedConnectorId: "sidebar-conn", search: WIKI_LINK, pendingText: "seed",
+    });
+    await h.run();
+    expect(h.patches).toEqual([]);
+    await h.send("and what about the other case?");
+    expect(h.patches).toEqual([]);
+    // The follow-up really was sent (otherwise this passes for the wrong reason).
+    const posts = h.fetchCalls.filter((f) => f.method === "POST" && f.url.indexOf("/messages") > -1);
+    expect(posts).toHaveLength(2);
+    expect((posts[1]!.body as { text: string }).text).toBe("and what about the other case?");
+  });
+
+  test("suppression is scoped to the deep-linked thread — others are unaffected", async () => {
     const h = await harness({
       threads: [], selectedConnectorId: "sidebar-conn", search: WIKI_LINK, pendingText: "seed",
     });
     await h.run();
     expect(h.patches).toEqual([]);
-    // A later stamp — the user opening another thread in the same page — works.
+    // Another thread the user opens in the same page stamps normally.
     await h.stamp("T2", "sidebar-conn", true);
     expect(h.patches.length).toBe(1);
+    expect(h.patches[0]!.url).toContain("T2");
   });
 
   test("an explicit dropdown pick still wins while suppressed", async () => {

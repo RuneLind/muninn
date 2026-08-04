@@ -13,9 +13,7 @@
  * the name preview must be byte-identical to the name the route creates (the
  * `synthesisTopicKey` precedent).
  */
-import { deriveAskThreadTitle } from "../../../wiki/ask-chat.ts";
-
-export { deriveAskThreadTitle };
+import { deriveAskThreadTitle, deriveAskThreadTitleOrNull } from "../../../wiki/ask-chat.ts";
 
 /** One named connector row as `GET /api/wiki/chat-target` serves it — capability
  *  already resolved server-side (`connectorCapabilities` cannot run here). */
@@ -33,19 +31,30 @@ export interface ChatTargetBotDefault {
   supportsWebTools: boolean;
 }
 
-/** `GET /api/wiki/chat-target` response. `botName === null` ⇒ `reason` says why. */
+/**
+ * `GET /api/wiki/chat-target` response.
+ *
+ * `botName === null` ⇒ `reason` says why and `bots` carries the picker's options;
+ * NOTHING else is present on that branch (the route used to ship four dummy
+ * fields, and a `needsBot` boolean that only ever re-encoded `reason`). The
+ * fields the ok branch fills are therefore optional here, and every consumer
+ * below tolerates their absence.
+ */
 export interface ChatTarget {
-  wiki?: string;
   botName: string | null;
   reason?: "unknown_bot" | "bot_gone" | "needs_bot";
   error?: string;
-  needsBot: boolean;
-  bots: { name: string }[];
-  users: { id: string; name: string }[];
-  defaultUserId: string | null;
-  connectors: ChatTargetConnector[];
+  /** Only on the failure branch — the bot picker's options. */
+  bots?: { name: string }[];
+  users?: { id: string; name: string }[];
+  defaultUserId?: string | null;
+  /** Which user `preferredConnectorId` belongs to (a preference is per user+bot,
+   *  so a client landing on a different user must refetch it). */
+  preferredForUserId?: string | null;
+  preferredConnectorId?: string | null;
+  connectors?: ChatTargetConnector[];
   connectorsError?: string;
-  botDefault: ChatTargetBotDefault | null;
+  botDefault?: ChatTargetBotDefault | null;
 }
 
 /** Where the chat page stores the user it is on — SHARED with this popover on
@@ -63,6 +72,17 @@ export function wikiConnectorStorageKey(wiki: string): string {
 }
 
 /**
+ * Stored value meaning "(bot default) was a deliberate choice here".
+ *
+ * "(bot default)" is the empty connector id, and storing `""` was indistinguishable
+ * from storing nothing: {@link pickConnectorId}'s membership test can never match
+ * it, so the next open fell straight through to the user+bot chat preference and
+ * silently re-selected a named model the reader had explicitly moved off. A
+ * sentinel makes the choice rememberable; it is mapped back to `""` on read.
+ */
+export const WIKI_CONNECTOR_DEFAULT = "__default__";
+
+/**
  * Which user the popover preselects: the remembered one (if this bot still has
  * it) → the bot's `bot_default_user` mapping → the sole user → none.
  *
@@ -71,10 +91,11 @@ export function wikiConnectorStorageKey(wiki: string): string {
  * happens to sort first.
  */
 export function pickUserId(target: ChatTarget, stored?: string | null): string {
-  const has = (id?: string | null): boolean => !!id && target.users.some((u) => u.id === id);
+  const users = target.users ?? [];
+  const has = (id?: string | null): boolean => !!id && users.some((u) => u.id === id);
   if (has(stored)) return stored as string;
   if (has(target.defaultUserId)) return target.defaultUserId as string;
-  if (target.users.length === 1) return target.users[0]!.id;
+  if (users.length === 1) return users[0]!.id;
   return "";
 }
 
@@ -83,23 +104,32 @@ export function pickUserId(target: ChatTarget, stored?: string | null): string {
  * connector → the user+bot's persisted chat preference → `""` (bot default).
  *
  * A remembered id that no longer names a live connector row falls through rather
- * than preselecting an option the picker cannot show.
+ * than preselecting an option the picker cannot show — but a remembered
+ * {@link WIKI_CONNECTOR_DEFAULT} is a real remembered ANSWER and stops the chain.
  */
 export function pickConnectorId(
   target: ChatTarget,
   stored?: string | null,
   preferred?: string | null,
 ): string {
-  const has = (id?: string | null): boolean => !!id && target.connectors.some((c) => c.id === id);
+  if (stored === WIKI_CONNECTOR_DEFAULT) return "";
+  const rows = target.connectors ?? [];
+  const has = (id?: string | null): boolean => !!id && rows.some((c) => c.id === id);
   if (has(stored)) return stored as string;
   if (has(preferred)) return preferred as string;
   return "";
 }
 
+/** What to store for a pick so it survives to the next open — the sentinel for
+ *  "(bot default)", the id otherwise. */
+export function connectorStorageValue(connectorId: string): string {
+  return connectorId || WIKI_CONNECTOR_DEFAULT;
+}
+
 /** Suffix naming the one capability difference that changes what the seed may
  *  promise. Only ever states the ABSENCE — a "web search" badge on the majority
  *  of options is noise. */
-export function capabilitySuffix(supportsWebTools: boolean): string {
+function capabilitySuffix(supportsWebTools: boolean): string {
   return supportsWebTools ? "" : " · no web search";
 }
 
@@ -124,19 +154,63 @@ export function botDefaultOptionLabel(botDefault: ChatTargetBotDefault | null): 
  *  the route runs before deciding what the seed may claim. */
 export function chosenSupportsWebTools(target: ChatTarget, connectorId: string): boolean {
   if (!connectorId) return !!target.botDefault?.supportsWebTools;
-  const row = target.connectors.find((c) => c.id === connectorId);
+  const row = (target.connectors ?? []).find((c) => c.id === connectorId);
   return row ? row.supportsWebTools : !!target.botDefault?.supportsWebTools;
 }
 
 /**
- * The name the thread will really get: the typed override when it is non-blank,
- * else the question — through `deriveAskThreadTitle` either way, so the preview
- * shows the same lowercased, flattened, ≤50-char string the route creates instead
- * of leaving the reader to discover the normalization after the fact.
+ * The name the thread will really get: the typed override when it derives a name
+ * at all, else the question — mirroring the route's own fallback exactly (a typed
+ * name of only control characters has no name in it, so the question wins there
+ * too), and through the same derivation, so the preview shows the same
+ * lowercased, flattened, ≤50-char string `createThread` stores.
  */
 export function previewThreadName(typed: string, question: string): string {
-  const raw = typed && typed.trim() ? typed : question;
-  return deriveAskThreadTitle(raw || "");
+  return deriveAskThreadTitleOrNull(typed || "") ?? deriveAskThreadTitle(question || "");
+}
+
+/** What the popover's document-level click listener knows about one click. */
+export interface ChatOptClickContext {
+  /** The popover is open at all. */
+  open: boolean;
+  /** The click target is STILL in the document. A submit re-renders the panel
+   *  from state, which detaches the very button that was clicked. */
+  attached: boolean;
+  /** The click landed inside the panel. */
+  inPanel: boolean;
+  /** The click landed on one of the two buttons that OPEN the panel. */
+  inOpener: boolean;
+  /** A submit is in flight (its own click is what re-rendered the panel). */
+  sending: boolean;
+  /** The click landed in the Ask box — direct mode reads its question from
+   *  there, so it is part of the popover's flow, not an outside click. */
+  inQuestionBox: boolean;
+  mode: "direct" | "escalate";
+}
+
+/**
+ * Whether a document click should dismiss the popover.
+ *
+ * The two non-obvious rules both come from the same failure: `submitChatOptions`
+ * sets `sending` and re-renders SYNCHRONOUSLY before its first await, so by the
+ * time this listener runs, the Send button the user clicked is detached — a bare
+ * `closest("#wikiChatOpt")` test then reports "outside", the panel closes, and
+ * the in-flight submit sees `chatOpt !== state` and closes the pre-opened tab.
+ * Net effect: a thread and a seed were created server-side and the reader saw
+ * nothing, with the retry hitting `alreadyQueued`. So a detached target is never
+ * an outside click, and neither is anything at all while a submit is in flight.
+ *
+ * The third rule is the empty-question recovery path: in direct mode the panel
+ * tells the reader to "Type a question first", and clicking into the Ask box to
+ * do exactly that must not close the panel out from under them.
+ */
+export function shouldCloseChatOptions(ctx: ChatOptClickContext): boolean {
+  if (!ctx.open) return false;
+  if (ctx.sending) return false;
+  if (!ctx.attached) return false;
+  if (ctx.inPanel || ctx.inOpener) return false;
+  if (ctx.mode === "direct" && ctx.inQuestionBox) return false;
+  return true;
 }
 
 /** Copy for the 409 a colliding thread name produces. Parameterized on WHERE the

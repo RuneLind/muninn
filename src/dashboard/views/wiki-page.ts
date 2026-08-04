@@ -1042,6 +1042,11 @@ export async function renderWikiPage(opts?: {
       padding: 12px; border-radius: 10px; border: 1px solid var(--border-secondary);
       background: var(--bg-elevated, var(--bg-secondary)); box-shadow: 0 8px 28px rgba(0,0,0,0.32);
       font-size: 12.5px; color: var(--text-primary);
+      /* The panel is anchored UNDER its trigger, so on a short viewport (or with
+         the trigger low on the page) an unbounded panel pushes its Send button
+         off-screen with no way to reach it. Same treatment as the Atlas cluster
+         rail and the Index card's lists. */
+      max-height: calc(100vh - 24px); overflow-y: auto; scrollbar-width: thin;
     }
     .wiki-chatopt-head {
       display: flex; align-items: center; justify-content: space-between;
