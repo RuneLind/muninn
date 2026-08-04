@@ -7,6 +7,7 @@ import {
   buildAskChatSeed,
   buildDirectChatSeed,
   deriveAskThreadTitle,
+  deriveAskThreadTitleOrNull,
   uniqueAskThreadTitle,
 } from "./ask-chat.ts";
 
@@ -34,6 +35,15 @@ describe("deriveAskThreadTitle", () => {
   test("falls back to a stable name when the question flattens to nothing", () => {
     expect(deriveAskThreadTitle("\n\t  ")).toBe("wiki ask");
     expect(deriveAskThreadTitle("")).toBe("wiki ask");
+  });
+
+  test("the …OrNull variant reports 'no name here' instead of the fallback", () => {
+    // A caller with a SECOND source (the route's typed threadName, falling back to
+    // the question) needs to tell an empty name from one that names the fallback —
+    // otherwise a control-character name silently pins the thread to "wiki ask".
+    expect(deriveAskThreadTitleOrNull("\n\t  ")).toBeNull();
+    expect(deriveAskThreadTitleOrNull("")).toBeNull();
+    expect(deriveAskThreadTitleOrNull("Real Name")).toBe("real name");
   });
 });
 
@@ -196,6 +206,44 @@ describe("buildDirectChatSeed", () => {
     expect(seed).not.toContain("\n>");
     expect(seed).not.toContain("What else should I know here?");
     expect(seed).not.toContain("Ask tab answered");
+  });
+
+  test("provenance is BRACKETED, never a first-person claim about the reader", () => {
+    // The opening used to read "I'm reading the … wiki and want to dig into this",
+    // and the memory extractor duly recorded a biographical fact about a user who
+    // had only clicked a button (observed: a real memories row asserting the user
+    // "maintains" a throwaway test wiki). Provenance, not autobiography.
+    const seed = buildDirectChatSeed({ ...base, webSearch: true });
+    expect(seed.startsWith('[Question asked from the "mimir" wiki reader]')).toBe(true);
+    expect(seed).not.toContain("I'm reading");
+    expect(seed).not.toContain("I maintain");
+    // The instructions stay imperative.
+    expect(seed).toContain("Answer it properly");
+  });
+
+  test("a wiki with NO collections is not told to search notes it cannot search", () => {
+    // A `WIKI_EXTRA` entry without the collections segment has nothing behind the
+    // Ask tab, so "search the wiki's own notes first" is an order that can only
+    // fail — observed producing an answer that opened by apologizing for it.
+    const without = buildDirectChatSeed({ ...base, webSearch: true, hasCollections: false });
+    expect(without).not.toContain("wiki's own notes");
+    expect(without).toContain("research it with");
+    expect(without).toContain("cite what you find");
+    // Provenance is still named — the bot should know where the question came from.
+    expect(without).toContain('"mimir"');
+    // Absent flag ⇒ the overwhelmingly common searchable shape, unchanged.
+    expect(buildDirectChatSeed({ ...base, webSearch: true })).toContain("wiki's own notes");
+    expect(buildDirectChatSeed({ ...base, webSearch: true, hasCollections: true })).toContain(
+      "wiki's own notes",
+    );
+  });
+
+  test("the collection-less framing still names web search only when it exists", () => {
+    const on = buildDirectChatSeed({ ...base, webSearch: true, hasCollections: false });
+    const off = buildDirectChatSeed({ ...base, webSearch: false, hasCollections: false });
+    expect(on).toContain("including web search");
+    expect(off).not.toContain("web search");
+    expect(off).toContain("the tools you have");
   });
 
   test("names web search only when the effective connector can deliver it", () => {

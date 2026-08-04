@@ -41,6 +41,30 @@ export async function listConnectors(): Promise<Connector[]> {
   return rows.map(rowToConnector);
 }
 
+/** Just enough of a connector row to render a picker: id, display name and the
+ *  type its capabilities are derived from. */
+export interface ConnectorOption {
+  id: string;
+  name: string;
+  connectorType: ConnectorType;
+}
+
+/**
+ * Connector rows for reader-facing pickers — `SELECT`ing only the three columns
+ * a picker can use. {@link listConnectors} is `SELECT *`, which drags `base_url`
+ * (and any future credential column) through a route the wiki reader calls on
+ * every popover open; nothing downstream of a picker has any use for those.
+ */
+export async function listConnectorOptions(): Promise<ConnectorOption[]> {
+  const sql = getDb();
+  const rows = await sql`SELECT id, name, connector_type FROM connectors ORDER BY name`;
+  return rows.map((r) => ({
+    id: r.id as string,
+    name: r.name as string,
+    connectorType: r.connector_type as ConnectorType,
+  }));
+}
+
 export async function getConnector(id: string): Promise<Connector | null> {
   const sql = getDb();
   const [row] = await sql`SELECT * FROM connectors WHERE id = ${id}`;
