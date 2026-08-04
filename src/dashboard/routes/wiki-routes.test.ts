@@ -2174,6 +2174,31 @@ describe("POST /api/wiki/ask/chat", () => {
       expect(pending[0]!.text.length).toBeLessThanOrEqual(ASK_CHAT_SEED_MAX);
     });
 
+    test("askDeclined re-frames the seed instead of ordering the failed search", async () => {
+      // The decline hook posts this: the wiki's index has already been searched for
+      // this exact question and had nothing solid, which the route cannot know from
+      // anything else in the body.
+      // `collwiki` is the fixture WITH backing collections, i.e. the only shape
+      // whose ordinary seed carries the notes-first clause this flag replaces.
+      await post(directBody({ wiki: "collwiki", askDeclined: true }));
+      expect(pending[0]!.text).toContain("already been searched");
+      expect(pending[0]!.text).not.toContain("wiki's own notes first");
+      // Absent ⇒ the ordinary direct seed, unchanged.
+      pending = [];
+      await post(directBody({ wiki: "collwiki", forceNew: true }));
+      expect(pending[0]!.text).toContain("wiki's own notes first");
+    });
+
+    test("askDeclined is ignored outside direct mode, and 400s when it isn't a boolean", async () => {
+      // The escalate seed quotes an answer the wiki DID produce — a decline flag
+      // there is meaningless, so it is scoped rather than trusted wherever sent.
+      await post(askBody({ askDeclined: true }));
+      expect(pending[0]!.text).not.toContain("already been searched");
+      const res = await post(askBody({ askDeclined: "yes" }));
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toContain("askDeclined");
+    });
+
     test("a wiki with NO collections isn't told to search notes it can't search", async () => {
       // `collwiki` has collections, `lonewiki` (a bare WIKI_EXTRA entry) does not.
       await post(directBody({ wiki: "collwiki" }));

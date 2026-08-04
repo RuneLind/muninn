@@ -2,6 +2,7 @@ import { test, expect } from "bun:test";
 import {
   buildExplainUrl,
   explainLabel,
+  explainSelectionFromLabel,
   factcheckLabel,
   buildFactcheckUrl,
   applyToolLogEvent,
@@ -17,6 +18,24 @@ test("explainLabel wraps a short selection in quotes, no ellipsis", () => {
 
 test("explainLabel collapses internal whitespace/newlines", () => {
   expect(explainLabel("  the   coverage\n gate ")).toBe('Explain: "the coverage gate"');
+});
+
+test("explainSelectionFromLabel takes the label back apart", () => {
+  // The label is the ONLY form of an Explain turn's question the client keeps (the
+  // real question is built server-side from `sel`), so anything escalating such a
+  // turn into chat has to unwrap it — see `composeDeclineQuestion`.
+  expect(explainSelectionFromLabel(explainLabel("coverage gate"))).toBe("coverage gate");
+  // The truncating ellipsis is KEPT: it is honest about the passage being a slice.
+  const long = explainLabel("x".repeat(EXPLAIN_LABEL_CHARS + 20));
+  expect(explainSelectionFromLabel(long)).toBe("x".repeat(EXPLAIN_LABEL_CHARS) + "\u2026");
+});
+
+test("explainSelectionFromLabel returns null for anything that isn't one", () => {
+  expect(explainSelectionFromLabel("How does the gardener cluster?")).toBeNull();
+  expect(explainSelectionFromLabel(factcheckLabel("", "Some Page"))).toBeNull();
+  expect(explainSelectionFromLabel('Explain: "')).toBeNull(); // not even a closed label
+  expect(explainSelectionFromLabel(explainLabel("   "))).toBeNull(); // empty selection
+  expect(explainSelectionFromLabel("")).toBeNull();
 });
 
 test("explainLabel truncates past the label cap and appends an ellipsis", () => {

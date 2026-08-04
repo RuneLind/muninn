@@ -5,7 +5,6 @@ import {
   deserializeAskSession,
   type StoredAskTurn,
 } from "./wiki-ask-session.ts";
-import { declineChatBarHtml, DECLINE_CHAT_BTN_ID } from "./wiki-chat-target.ts";
 
 function turn(overrides: Partial<StoredAskTurn> = {}): StoredAskTurn {
   return {
@@ -247,6 +246,9 @@ test("a present-but-wrong-typed annotatable drops the FIELD, keeping the turn", 
 });
 
 // --- Decline hook (PR B) ---------------------------------------------------
+// Only the PERSISTENCE half lives here — the bar's markup, the escalation question
+// it composes and its branch order are tested in `wiki-chat-target.test.ts`, where
+// those helpers live.
 
 test("askDeclineReason checks lowConfidence FIRST — noHits is true on both branches", () => {
   // The server's low-confidence decline emits {noHits: true, lowConfidence: true}
@@ -264,16 +266,15 @@ test("round-trips a declined turn, so the decline bar survives a reload", () => 
   const restored = deserializeAskSession(serializeAskSession([declined], 10));
   expect(restored).toEqual([declined]);
   expect(restored[0]!.declined).toBe("low_confidence");
-  // What the rehydrated turn renders: the decline hook, not the ordinary bar.
-  const html = declineChatBarHtml(restored[0]!.declined!);
-  expect(html).toContain(DECLINE_CHAT_BTN_ID);
-  expect(html).toContain("Ask in chat instead");
-  expect(html).toContain("nothing solid"); // the low-confidence wording
 });
 
-test("`declined` is validated as the two-value union, not merely as a string", () => {
-  // An unknown value falls through both render branches and silently restores the
-  // ordinary escalate bar on a turn the wiki declined.
+test("an unknown `declined` drops the FIELD, keeping the turn", () => {
+  // Forward-tolerant, the `annotatable`/`claimQuotes` treatment — NOT `wrote`'s
+  // reject-the-turn, which exists only because `wrote` gates a destructive write
+  // against a staled baseHash. An unknown reason costs the reader the ordinary
+  // escalate bar (still a working escalation); dropping the whole answer costs
+  // them far more, and a future third reason would wipe the session on a
+  // downgrade.
   const raw = JSON.stringify([
     { ...turn({ question: "bogus" }), declined: "nohits" },
     { ...turn({ question: "numeric" }), declined: 1 },
@@ -282,19 +283,36 @@ test("`declined` is validated as the two-value union, not merely as a string", (
     turn({ question: "low-conf-ok", declined: "low_confidence" }),
     turn({ question: "absent" }), // an answered turn carries no field at all
   ]);
-  expect(deserializeAskSession(raw).map((t) => t.question)).toEqual([
+  const restored = deserializeAskSession(raw);
+  expect(restored.map((t) => t.question)).toEqual([
+    "bogus",
+    "numeric",
+    "empty",
     "no-hits-ok",
     "low-conf-ok",
     "absent",
   ]);
+  // The bad values are gone (so no render branch can trust them), the good ones intact.
+  expect(restored.slice(0, 3).map((t) => t.declined)).toEqual([undefined, undefined, undefined]);
+  expect(restored[3]!.declined).toBe("no_hits");
+  expect(restored[4]!.declined).toBe("low_confidence");
+  expect(restored[5]!.declined).toBeUndefined();
 });
 
-test("the two decline reasons render distinct copy", () => {
-  // "no results" would be a lie for low confidence — weak sources DID ride out and
-  // are listed under the answer.
-  expect(declineChatBarHtml("no_hits")).toContain("nothing on this");
-  expect(declineChatBarHtml("no_hits")).not.toContain("nothing solid");
-  expect(declineChatBarHtml("low_confidence")).toContain("nothing solid");
+test("the escalation-context fields round-trip, and a malformed one is dropped", () => {
+  // Both exist so a REHYDRATED declined turn still composes an answerable question:
+  // an Explain turn's `question` is a display label, and a follow-up's is a fragment.
+  const explain = turn({ question: 'Explain: "the coverage gate…"', explainPage: "Wiki Gardener" });
+  const followup = turn({ question: "and the second one?", originQuestion: "Which two gardeners?" });
+  const restored = deserializeAskSession(serializeAskSession([explain, followup], 10));
+  expect(restored).toEqual([explain, followup]);
+
+  const bad = deserializeAskSession(
+    JSON.stringify([{ ...turn({ question: "bogus" }), explainPage: 7, originQuestion: {} }]),
+  );
+  expect(bad).toHaveLength(1);
+  expect(bad[0]!.explainPage).toBeUndefined();
+  expect(bad[0]!.originQuestion).toBeUndefined();
 });
 
 test("claimQuotes entries the server would reject wholesale are not persisted", () => {

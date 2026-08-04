@@ -14,6 +14,8 @@
  * `synthesisTopicKey` precedent).
  */
 import { deriveAskThreadTitle, deriveAskThreadTitleOrNull } from "../../../wiki/ask-chat.ts";
+import { escHtml as esc } from "./escape.ts";
+import { explainSelectionFromLabel } from "./wiki-explain.ts";
 
 /** One named connector row as `GET /api/wiki/chat-target` serves it — capability
  *  already resolved server-side (`connectorCapabilities` cannot run here). */
@@ -169,6 +171,82 @@ export function previewThreadName(typed: string, question: string): string {
   return deriveAskThreadTitleOrNull(typed || "") ?? deriveAskThreadTitle(question || "");
 }
 
+/**
+ * The question the popover would send RIGHT NOW.
+ *
+ * Three sources, and the split is the whole point:
+ * - **Pinned** (the decline hook) — the question belongs to the TURN that failed
+ *   and is fixed at open time. It is never re-read from the Ask box, and the box
+ *   is never written to: overwriting it destroyed whatever draft the reader had
+ *   typed, left the failed question armed in the box afterwards, and on the
+ *   Connections tab wrote into a hidden textarea.
+ * - **Escalate** — the turn's own question, snapshotted at open.
+ * - **Direct** (the "New chat" button) — whatever the LIVE Ask box holds at this
+ *   instant, deliberately re-read at submit: the reader can (and, when the panel
+ *   says "Type a question first", must) keep typing with the panel up.
+ *
+ * `boxValue` is `null` when there is no Ask box in the document at all.
+ */
+export function chatOptQuestion(
+  state: { mode: "direct" | "escalate"; question: string; pinnedQuestion?: string },
+  boxValue: string | null,
+): string {
+  if (typeof state.pinnedQuestion === "string") return state.pinnedQuestion.trim();
+  if (state.mode !== "direct") return state.question;
+  return (boxValue || "").trim();
+}
+
+/** The turn fields {@link composeDeclineQuestion} needs — a structural subset of
+ *  the reader's `AskTurn` (and of the persisted `StoredAskTurn`, which carries
+ *  both extra fields precisely so a rehydrated declined turn still composes). */
+export interface DeclineQuestionTurn {
+  /** The turn's displayed question — for an Explain turn this is the LABEL. */
+  question: string;
+  /** Explain turns: the page the passage was selected from (title, else name). */
+  explainPage?: string;
+  /** Follow-up turns: the question that opened this chain, already composed. */
+  originQuestion?: string;
+}
+
+/**
+ * The question a declined turn actually escalates with — which is NOT always its
+ * displayed one.
+ *
+ * Two turn kinds carry a question that cannot be answered on its own, and both
+ * reach the decline hook:
+ * - an **Explain** turn's question is the display label `Explain: "<80-char
+ *   slice>…"` (the real question is built server-side from `sel` and never comes
+ *   back), so the passage is re-stated together with the page it was read on;
+ * - a **follow-up** turn's question is the raw follow-up text ("and what about
+ *   the second one?"), which only means anything after the question that opened
+ *   the chain — so that origin is prepended.
+ *
+ * A plain Ask question is returned untouched. The two branches are exclusive by
+ * construction (a follow-up always goes through the plain-question path, so it
+ * never carries `explainPage`), and the origin is deliberately NOT re-wrapped
+ * when it already equals the question.
+ *
+ * The framing stays third-person about the reader for the same reason
+ * `buildDirectChatSeed`'s opening does: a first-person "I first asked …" is prose
+ * the memory extractor happily records as a fact about the user.
+ */
+export function composeDeclineQuestion(turn: DeclineQuestionTurn): string {
+  const question = (turn.question || "").trim();
+  const page = (turn.explainPage || "").trim();
+  if (page) {
+    const sel = explainSelectionFromLabel(question);
+    return sel
+      ? `About the wiki page "${page}": explain this passage — "${sel}"`
+      : `About the wiki page "${page}": ${question}`;
+  }
+  const origin = (turn.originQuestion || "").trim();
+  if (origin && origin !== question) {
+    return `Context — the earlier question in this wiki session was "${origin}". ` +
+      `Follow-up: ${question}`;
+  }
+  return question;
+}
+
 /** What the popover's document-level click listener knows about one click. */
 export interface ChatOptClickContext {
   /** The popover is open at all. */
@@ -185,6 +263,9 @@ export interface ChatOptClickContext {
   /** The click landed in the Ask box — direct mode reads its question from
    *  there, so it is part of the popover's flow, not an outside click. */
   inQuestionBox: boolean;
+  /** The popover's question is PINNED to a turn (the decline hook), so the Ask
+   *  box is no longer part of its flow — see {@link chatOptQuestion}. */
+  pinned: boolean;
   mode: "direct" | "escalate";
 }
 
@@ -202,14 +283,16 @@ export interface ChatOptClickContext {
  *
  * The third rule is the empty-question recovery path: in direct mode the panel
  * tells the reader to "Type a question first", and clicking into the Ask box to
- * do exactly that must not close the panel out from under them.
+ * do exactly that must not close the panel out from under them. It does NOT
+ * apply to a PINNED question (the decline hook), which neither reads nor writes
+ * the box — there the box is an unrelated control like any other.
  */
 export function shouldCloseChatOptions(ctx: ChatOptClickContext): boolean {
   if (!ctx.open) return false;
   if (ctx.sending) return false;
   if (!ctx.attached) return false;
   if (ctx.inPanel || ctx.inOpener) return false;
-  if (ctx.mode === "direct" && ctx.inQuestionBox) return false;
+  if (ctx.mode === "direct" && !ctx.pinned && ctx.inQuestionBox) return false;
   return true;
 }
 
@@ -254,5 +337,92 @@ export function declineChatBarHtml(reason: "no_hits" | "low_confidence"): string
     '<span class="wiki-chatesc-msg">' + declineNote(reason) + "</span>" +
     '<button id="' + DECLINE_CHAT_BTN_ID + '" class="wiki-chatesc-btn wiki-chatesc-decline">' +
     "Ask in chat instead →</button>"
+  );
+}
+
+/** Escalation state of one Ask turn, held on the TURN and never in the DOM:
+ *  `#wikiChatEscBar` is a singleton node owned by whichever turn is painted, so a
+ *  fetch resolving after a turn switch used to paint turn A's "✓ Opened in chat"
+ *  (linking A's thread) onto turn B's bar — and on the error path wrote into a
+ *  detached node, so the user saw no error at all. */
+export interface ChatEscState {
+  status: "pending" | "done" | "exists" | "error";
+  /** `done`: the thread just created · `exists`: the thread that already covers
+   *  this question (built from the 409 body). Absent when the server didn't say. */
+  chatUrl?: string;
+  /** Whether the deep link actually got a tab — a blocked popup says so honestly
+   *  instead of claiming it opened one. */
+  opened?: boolean;
+  /** Failure copy for the `error` state. */
+  message?: string;
+}
+
+/** The turn fields {@link chatEscBarHtml} renders from — a structural subset of
+ *  the reader's `AskTurn`. */
+export interface ChatEscTurn {
+  answer: string;
+  kind?: string;
+  declined?: "no_hits" | "low_confidence";
+  chatEsc?: ChatEscState;
+}
+
+/**
+ * Inner markup of the escalate bar, DERIVED from turn state so a re-render — a
+ * `done` refresh, a turn switch, re-opening the turn from history — reproduces
+ * the state instead of losing (or misattributing) it.
+ *
+ * **Branch order is load-bearing.** A REALISED escalation (`done`/`exists` — a
+ * thread exists and the reader's only way back to it is this link) outranks the
+ * decline hook, which is an offer to start one. Ordering the decline check first
+ * shadowed the link silently: a declined turn whose escalation succeeded went on
+ * showing "Ask in chat instead →", and the second click walked 409 recovery for a
+ * thread the reader could no longer reach.
+ */
+export function chatEscBarHtml(turn: ChatEscTurn): string {
+  // No committed answer (still streaming, or a turn that died at app_error / an
+  // SSE drop): the click's only possible outcome is a silent no-op, so render no
+  // bar at all rather than a button that does nothing.
+  if (!turn.answer) return "";
+  // Fact-check turns are excluded: the question is synthetic and the answer is
+  // tool-produced, so the seed's "answered from indexed page excerpts alone — no
+  // memories, no tools" framing would be false.
+  if (turn.kind === "factcheck") return "";
+  const st = turn.chatEsc;
+  if (st?.status === "done") {
+    return (
+      '<a class="wiki-chatesc-done" href="' + esc(st.chatUrl || "") + '" target="_blank">' +
+      (st.opened ? "✓ Opened in chat →" : "Chat thread created — open it →") +
+      "</a>"
+    );
+  }
+  if (st?.status === "exists") {
+    // A 409 is NOT auto-retried with `forceNew` — that minted a fresh thread (and
+    // a fresh auto-sent model turn) on every re-click. Offer the existing thread,
+    // and make starting another an explicit second choice.
+    return (
+      '<span class="wiki-chatesc-msg">A chat for this question already exists' +
+      (st.chatUrl
+        ? ' — <a class="wiki-chatesc-done" href="' + esc(st.chatUrl) + '" target="_blank">Open it →</a>'
+        : "") +
+      "</span>" +
+      '<button id="wikiChatEscNewBtn" class="wiki-chatesc-btn">Start new thread</button>'
+    );
+  }
+  // The wiki declined this question (no hits, or only weak nearest-neighbours):
+  // offer the chat escalation as the PROMINENT next step instead of the ordinary
+  // "Continue in chat →" button, which reads as an optional extra on an answer
+  // that doesn't exist. Derived from `turn.declined`, so it survives a turn
+  // switch and a reload.
+  if (turn.declined) return declineChatBarHtml(turn.declined);
+  const pending = st?.status === "pending";
+  return (
+    '<button id="wikiChatEscBtn" class="wiki-chatesc-btn"' + (pending ? " disabled" : "") + ">" +
+    (pending ? "Opening chat…" : "Continue in chat →") + "</button>" +
+    // Same escalation, with the choices the one-click path decides for you (user,
+    // model, thread name). Opens the shared popover.
+    '<button id="wikiChatEscOptBtn" class="wiki-chatesc-gear" title="Chat options…"' +
+    (pending ? " disabled" : "") + ' aria-label="Chat options">⚙</button>' +
+    '<span class="wiki-chatesc-msg' + (st?.status === "error" ? " error" : "") +
+    '" id="wikiChatEscMsg">' + esc(st?.status === "error" ? st.message || "" : "") + "</span>"
   );
 }
