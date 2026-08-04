@@ -1049,23 +1049,90 @@ export async function renderWikiPage(opts?: {
       color: var(--text-secondary); white-space: nowrap;
     }
     .wiki-ask-newchat:hover { border-color: var(--accent); color: var(--text-primary); }
-    /* Chat options popover — one panel shared by the "New chat" button and the
-       ⚙ on a committed turn's escalate bar. Fixed-positioned under its trigger. */
+    /* Chat options dialog — ONE panel shared by all three openers ("New chat"
+       beside the Ask box, "💬 Discuss" in the breadcrumb, and the ⚙ / decline
+       action on a committed turn's escalate bar).
+       Centred with a scrim rather than anchored under its trigger: anchored, it
+       covered the very controls it depended on (the Ask box it read its question
+       from, the session history), and every viewport edge needed its own clamp. */
+    .wiki-chatopt-scrim {
+      position: fixed; inset: 0; z-index: 59; background: rgba(5, 5, 10, 0.55);
+    }
     .wiki-chatopt {
       position: fixed; z-index: 60; display: flex; flex-direction: column; gap: 8px;
-      padding: 12px; border-radius: 10px; border: 1px solid var(--border-secondary);
-      background: var(--bg-elevated, var(--bg-secondary)); box-shadow: 0 8px 28px rgba(0,0,0,0.32);
+      left: 50%; top: 8vh; transform: translateX(-50%);
+      width: min(480px, calc(100vw - 32px));
+      padding: 14px; border-radius: 12px; border: 1px solid var(--border-secondary);
+      /* NB: an explicit token. This was var(--bg-elevated, var(--bg-secondary)),
+         and NEITHER name is defined on this page (--bg-elevated exists only in the
+         chat page's own styles) — so the whole declaration was invalid and the
+         dialog rendered fully TRANSPARENT, with the article text showing through
+         it. Any replacement must name a token this page actually defines. */
+      background: var(--bg-surface); box-shadow: 0 18px 48px rgba(0,0,0,0.5);
       font-size: 12.5px; color: var(--text-primary);
-      /* The panel is anchored UNDER its trigger, so on a short viewport (or with
-         the trigger low on the page) an unbounded panel pushes its Send button
-         off-screen with no way to reach it. Same treatment as the Atlas cluster
-         rail and the Index card's lists. */
-      max-height: calc(100vh - 24px); overflow-y: auto; scrollbar-width: thin;
+      /* Its own scroll, so a long article excerpt or a six-chip suggestion row can
+         never push Send below the viewport. */
+      max-height: 84vh; overflow-y: auto; scrollbar-width: thin;
     }
     .wiki-chatopt-head {
       display: flex; align-items: center; justify-content: space-between;
-      font-weight: 600; font-size: 12.5px;
+      font-weight: 600; font-size: 14px;
     }
+    /* The question — one field for every mode, full width (it is the point of the
+       dialog, not a labelled row among six). */
+    .wiki-chatopt-q {
+      width: 100%; min-height: 72px; resize: vertical; padding: 8px 10px;
+      border-radius: 8px; border: 1px solid var(--border-secondary);
+      background: var(--bg-inset); color: var(--text-primary);
+      font-family: inherit; font-size: 13px; line-height: 1.45;
+    }
+    .wiki-chatopt-q:focus { outline: none; border-color: var(--accent); }
+    /* Article context: what page this is about + what it says about itself. Its own
+       bounded block ABOVE the question — interleaved with the fields it made the
+       pickers read as belonging to the excerpt. */
+    .wiki-chatopt-ctx {
+      font-size: 11.5px; color: var(--text-soft); line-height: 1.45;
+      background: var(--bg-inset); border: 1px solid var(--border-primary);
+      border-radius: 8px; padding: 7px 9px; overflow-wrap: anywhere;
+    }
+    .wiki-chatopt-ctx b { color: var(--text-secondary); font-weight: 600; }
+    .wiki-chatopt-says {
+      display: block; margin-top: 4px; color: var(--text-dim);
+      max-height: 46px; overflow: hidden;
+    }
+    /* Suggestion chips (starter questions + thread names). */
+    .wiki-chatopt-slab {
+      font-size: 10.5px; letter-spacing: 0.05em; text-transform: uppercase;
+      color: var(--text-dim);
+    }
+    .wiki-chatopt-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .wiki-chatopt-chip {
+      border: 1px solid var(--border-secondary); background: var(--bg-inset);
+      color: var(--text-tertiary); border-radius: 999px; padding: 4px 10px;
+      font-size: 11.5px; font-family: inherit; cursor: pointer; text-align: left;
+    }
+    .wiki-chatopt-chip:hover { border-color: var(--accent); color: var(--text-primary); }
+    .wiki-chatopt-chip.on {
+      border-color: var(--accent); background: var(--tint-purple); color: var(--text-primary);
+    }
+    .wiki-chatopt-chip.name { font-size: 11px; }
+    .wiki-chatopt-namechips { padding-left: 62px; }
+    /* Summary line: the collapsed state of every choice the options hold. */
+    .wiki-chatopt-sum {
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      font-size: 11.5px; color: var(--text-soft);
+      background: var(--bg-inset); border: 1px solid var(--border-primary);
+      border-radius: 8px; padding: 6px 9px;
+    }
+    .wiki-chatopt-sumtext { min-width: 0; overflow-wrap: anywhere; }
+    .wiki-chatopt-sum b { color: var(--text-secondary); font-weight: 600; }
+    .wiki-chatopt-sum .sep { color: var(--text-dim); }
+    .wiki-chatopt-advbtn {
+      margin-left: auto; background: none; border: none; color: var(--accent-light);
+      font-size: 11.5px; font-family: inherit; cursor: pointer; padding: 0; white-space: nowrap;
+    }
+    .wiki-chatopt-advbtn:hover { text-decoration: underline; }
+    .wiki-chatopt-adv { display: flex; flex-direction: column; gap: 7px; }
     .wiki-chatopt-x {
       border: none; background: none; color: var(--text-tertiary);
       font-size: 16px; line-height: 1; cursor: pointer; padding: 0 2px;
@@ -1078,18 +1145,6 @@ export async function renderWikiPage(opts?: {
       border: 1px solid var(--border-secondary); background: var(--bg-inset);
       color: var(--text-primary); font-family: inherit;
     }
-    /* Article mode's question box — the only field on this panel the reader
-       composes in, so it gets the top-aligned label + room to type. */
-    .wiki-chatopt-qrow { align-items: flex-start; }
-    .wiki-chatopt-qrow > span { padding-top: 6px; }
-    .wiki-chatopt-row textarea { resize: vertical; line-height: 1.45; }
-    .wiki-chatopt-article {
-      font-size: 11.5px; color: var(--text-tertiary); line-height: 1.4;
-      overflow-wrap: anywhere;
-    }
-    .wiki-chatopt-article b { color: var(--text-secondary); font-weight: 600; }
-    .wiki-chatopt-preview { font-size: 11px; color: var(--text-tertiary); padding-left: 62px; }
-    .wiki-chatopt-preview code { font-size: 11px; color: var(--text-secondary); }
     .wiki-chatopt-note { font-size: 11px; color: var(--text-tertiary); line-height: 1.4; }
     /* The PINNED question (decline hook). It comes from the turn, not from the Ask
        box, and it is composed rather than verbatim — so it is shown in full here,
