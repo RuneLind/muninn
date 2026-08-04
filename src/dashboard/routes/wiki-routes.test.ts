@@ -1682,6 +1682,13 @@ describe("plan-status fields on /api/wiki/pages + /api/wiki/page", () => {
       path.join(root, "plans/Bad Status.md"),
       ["---", 'title: "Bad Status"', "plan_status: in_flight", "---", "", "Body."].join("\n"),
     );
+    // A linking page, so BOTH `listings()` arrays on the single-page response are
+    // non-empty — that is the third `toListing` caller, and the one an `includeDesc`
+    // opt-in must never reach.
+    await Bun.write(
+      path.join(root, "plans/Linker.md"),
+      ["---", 'title: "Linker"', "---", "", "Points at [[Lifecycle Plan]]."].join("\n"),
+    );
     prevWikiDir = process.env.WIKI_DIR;
     process.env.WIKI_DIR = root;
     __resetWikiCacheForTest();
@@ -1742,6 +1749,45 @@ describe("plan-status fields on /api/wiki/pages + /api/wiki/page", () => {
     // put `status_note` out of reach of every single-page client.
     expect(data.meta.status_note).toBe("capped at 4 rounds, R4 fixes unreviewed");
   });
+
+  /**
+   * `desc` (the first prose line) is the mirror-image case: opted IN for exactly
+   * ONE of `toListing`'s three callers. The Discuss popover shows it as a question
+   * hint, and the single-page `meta` is the only place the reader's own page
+   * arrives — but the hot listing and the single-page LINK ARRAYS are the payload
+   * bulk this field was stripped from in the first place (~100 KB on jarvis).
+   */
+  describe("desc is scoped to the single-page meta", () => {
+    type DescListing = { name: string; desc?: string };
+
+    test("the hot /api/wiki/pages listing never carries it", async () => {
+      const res = await app.request("/api/wiki/pages");
+      const data = (await res.json()) as { pages: DescListing[] };
+      expect(data.pages.length).toBeGreaterThan(0);
+      expect(data.pages.some((p) => p.desc !== undefined)).toBe(false);
+    });
+
+    test("the single page's own meta DOES carry it", async () => {
+      const res = await app.request("/api/wiki/page?name=" + encodeURIComponent("Lifecycle Plan"));
+      const data = (await res.json()) as { meta: DescListing };
+      expect(data.meta.desc).toBe("Plan body.");
+    });
+
+    test("the outgoing/backlink arrays on that same response do NOT", async () => {
+      // Opting these in re-bloats exactly the link-heavy pages the strip protects.
+      const back = await app.request("/api/wiki/page?name=" + encodeURIComponent("Lifecycle Plan"));
+      const backData = (await back.json()) as { meta: DescListing; backlinks: DescListing[] };
+      expect(backData.backlinks.map((p) => p.name)).toContain("Linker");
+      expect(backData.backlinks.every((p) => p.desc === undefined)).toBe(true);
+
+      const out = await app.request("/api/wiki/page?name=Linker");
+      const outData = (await out.json()) as { meta: DescListing; outgoing: DescListing[] };
+      // The linking page's own meta still has one, so this isn't a wiki-wide absence.
+      expect(outData.meta.desc).toBe("Points at Lifecycle Plan.");
+      expect(outData.outgoing.map((p) => p.name)).toContain("Lifecycle Plan");
+      expect(outData.outgoing.every((p) => p.desc === undefined)).toBe(true);
+    });
+  });
 });
 
 /**
@@ -1787,12 +1833,17 @@ describe("POST /api/wiki/ask/chat", () => {
   let created: { userId: string; botName: string; name: string; description?: string }[];
   let pending: { threadId: string; text: string }[];
   let existingThreadNames: string[];
+  /** Descriptions of the threads above, by name — the article-identity tag. */
+  let threadDescriptionsByName: Record<string, string | undefined>;
   let users: { id: string; name: string }[];
   let bots: string[];
   let defaultUser: string | null;
   // Connector / existing-thread / pending-store seam state.
   let connectorRows: { id: string; name: string; connectorType: string }[];
-  let threadsById: Record<string, { id: string; userId: string; botName: string; connectorId?: string }>;
+  let threadsById: Record<
+    string,
+    { id: string; userId: string; botName: string; connectorId?: string; description?: string }
+  >;
   let livePending: string[];
   let connectorStamps: { threadId: string; connectorId: string | null }[];
   let createdConnectorIds: (string | undefined)[];
@@ -1804,8 +1855,13 @@ describe("POST /api/wiki/ask/chat", () => {
     discoverBots: () => bots.map((name) => ({ name }) as unknown as BotConfig),
     loadChatConfig: async () => ({ users }),
     getBotDefaultUser: async () => defaultUser,
+    // Carries the DESCRIPTION, like the real row does — in article mode it is
+    // what says whether a name collision is this article's own thread or an
+    // unrelated thread that merely owns the name.
     findThreadByName: async (_userId: string, _botName: string, name: string) =>
-      existingThreadNames.includes(name) ? { id: "existing-thread", name } : null,
+      existingThreadNames.includes(name)
+        ? { id: "existing-thread", name, description: threadDescriptionsByName[name] }
+        : null,
     hasPendingMessage: (threadId: string) => livePending.includes(threadId),
     setPendingMessageIfAbsent: (threadId: string, text: string) => {
       if (livePending.includes(threadId)) return false;
@@ -1870,6 +1926,7 @@ describe("POST /api/wiki/ask/chat", () => {
     created = [];
     pending = [];
     existingThreadNames = [];
+    threadDescriptionsByName = {};
     users = [{ id: "user-1", name: "rune" }];
     bots = ["jarviswiki", "melosys"];
     defaultUser = null;
@@ -1892,6 +1949,7 @@ describe("POST /api/wiki/ask/chat", () => {
         created.push({ userId, botName, name, description });
         createdConnectorIds.push(connectorId);
         existingThreadNames.push(name);
+        threadDescriptionsByName[name] = description;
         return { id: "thread-" + created.length };
       },
       setPendingMessage: (threadId, text) => { pending.push({ threadId, text }); },
@@ -2207,6 +2265,300 @@ describe("POST /api/wiki/ask/chat", () => {
       await post(directBody({ wiki: "lonewiki", bot: "melosys", forceNew: true }));
       expect(pending[0]!.text).not.toContain("wiki's own notes");
       expect(pending[0]!.text).toContain("research it with");
+    });
+  });
+
+  /**
+   * Article mode — the breadcrumb's "💬 Discuss" button. Like direct mode it
+   * carries no Ask answer; unlike it, the seed is anchored to ONE page, which the
+   * route re-resolves against the wiki index (the client posts a reference, never
+   * the title/path/summary the seed quotes).
+   */
+  describe("article mode", () => {
+    const articleBody = (over: Record<string, unknown> = {}) =>
+      askBody({
+        answer: undefined,
+        mode: "article",
+        page: "A Concept",
+        question: "Why does this matter for the gardener?",
+        ...over,
+      });
+
+    beforeEach(async () => {
+      // Three summary shapes: authored frontmatter `description`, first-prose-line
+      // `desc` only, and neither.
+      await Bun.write(
+        path.join(root, "Described.md"),
+        "---\ntitle: Described\ndescription: An authored one-liner.\n---\n\nFirst prose line.\n",
+      );
+      await Bun.write(path.join(root, "Plain.md"), "---\ntitle: Plain\n---\n\nJust a prose line.\n");
+      await Bun.write(path.join(root, "Bare.md"), "---\ntitle: Bare\n---\n\n# Heading only\n");
+      __resetWikiCacheForTest();
+    });
+
+    test("seeds a page-anchored message carrying the article's PATH", async () => {
+      const res = await post(articleBody());
+      expect(res.status).toBe(200);
+      expect(created).toHaveLength(1);
+      const seed = pending[0]!.text;
+      expect(seed).toContain("Why does this matter for the gardener?");
+      // The path is the whole point: it is what lets the bot pull the real page
+      // instead of re-searching for a title.
+      expect(seed).toContain("A Concept.md");
+      expect(seed).toContain("A Concept");
+      // No Ask answer behind this mode.
+      expect(seed).not.toContain("\n>");
+      expect(seed).not.toContain("Ask tab answered");
+      // A connector decision was made here, so the chat page must not re-stamp it.
+      const data = (await res.json()) as { chatUrl: string };
+      expect(data.chatUrl).toContain("&src=wiki");
+    });
+
+    test("the thread is named after the ARTICLE and says so in its description", async () => {
+      await post(articleBody());
+      // Not "why does this matter…" — every later question about this page has to
+      // land in this same thread, which is what the name is doing.
+      expect(created[0]!.name).toBe("a concept");
+      expect(created[0]!.description).toContain('Discussion of the wiki article "A Concept"');
+      // …and the description carries the machine tag that makes the thread
+      // IDENTIFIABLE, since the name alone can't be (see the identity suite).
+      expect(created[0]!.description).toContain("(jarviswiki:A Concept.md)");
+      // NOT the Ask-tab line: this conversation never touched the Ask tab.
+      expect(created[0]!.description).not.toContain("Ask tab");
+    });
+
+    test("a repeat visit 409s onto the SAME thread — that is the designed path", async () => {
+      await post(articleBody());
+      const again = await post(articleBody({ question: "and what about the cap?" }));
+      expect(again.status).toBe(409);
+      const data = (await again.json()) as { threadExists: boolean; existingThreadId: string; chatUrl: string };
+      expect(data.threadExists).toBe(true);
+      expect(data.existingThreadId).toBe("existing-thread");
+      // The client's "Send there →" is served the deep link by the ROUTE.
+      expect(data.chatUrl).toContain("&src=wiki");
+      expect(created).toHaveLength(1);
+    });
+
+    test("an empty question 400s, and no answer is required", async () => {
+      expect((await post(articleBody({ question: "   " }))).status).toBe(400);
+      // …while the missing `answer` — a 400 in every other mode — is fine here.
+      expect((await post(articleBody())).status).toBe(200);
+    });
+
+    test("a missing page 400s and an unresolvable one 404s — never a pathless seed", async () => {
+      const missing = await post(articleBody({ page: undefined }));
+      expect(missing.status).toBe(400);
+      expect(((await missing.json()) as { error: string }).error).toContain("page is required");
+      const unknown = await post(articleBody({ page: "No Such Page" }));
+      expect(unknown.status).toBe(404);
+      expect(created).toHaveLength(0);
+    });
+
+    test("relPath wins over name — the collision-proof reference", async () => {
+      await post(articleBody({ page: "Plain", relPath: "Described.md" }));
+      expect(pending[0]!.text).toContain("Described.md");
+      expect(pending[0]!.text).not.toContain("Plain.md");
+    });
+
+    test("the description parenthetical: frontmatter, else first prose line, else none", async () => {
+      await post(articleBody({ page: "Described" }));
+      expect(pending[0]!.text).toContain("(An authored one-liner)");
+      // No frontmatter description ⇒ the extracted first prose line stands in.
+      pending = [];
+      await post(articleBody({ page: "Plain" }));
+      expect(pending[0]!.text).toContain("(Just a prose line)");
+      // Neither ⇒ no empty parenthetical.
+      pending = [];
+      await post(articleBody({ page: "Bare" }));
+      expect(pending[0]!.text).not.toContain("()");
+      expect(pending[0]!.text).toContain("Bare.md");
+    });
+
+    test("the seed names web search only when the effective connector has it", async () => {
+      await post(articleBody());
+      expect(pending[0]!.text).toContain("including web search");
+      pending = [];
+      await post(articleBody({ page: "Plain", connectorId: CONNECTOR_UUID }));
+      expect(pending[0]!.text).not.toContain("web search");
+    });
+
+    test("a collection-less wiki isn't told to look the page up in collections", async () => {
+      await post(articleBody({ wiki: "collwiki" }));
+      expect(pending[0]!.text).toContain("knowledge tools");
+      pending = [];
+      await post(articleBody({ wiki: "lonewiki", bot: "melosys", page: "Plain" }));
+      expect(pending[0]!.text).not.toContain("knowledge tools");
+      expect(pending[0]!.text).toContain("research it with");
+    });
+
+    test("askDeclined is ignored here too — it is direct-mode only", async () => {
+      await post(articleBody({ wiki: "collwiki", askDeclined: true }));
+      expect(pending[0]!.text).not.toContain("already been searched");
+    });
+
+    test("a non-string page/relPath 400s before anything resolves", async () => {
+      expect((await post(articleBody({ page: 7 }))).status).toBe(400);
+      expect((await post(articleBody({ relPath: [] }))).status).toBe(400);
+      expect(created).toHaveLength(0);
+    });
+
+    test("a stale relPath (a rename) falls back to the NAME instead of 404ing", async () => {
+      // An open tab holds the path from before the page moved; the name beside it
+      // still resolves, so the Discuss button used to 404 on a page plainly there.
+      const res = await post(articleBody({ page: "A Concept", relPath: "moved/away.md" }));
+      expect(res.status).toBe(200);
+      expect(pending[0]!.text).toContain("A Concept.md");
+      // Both unresolvable ⇒ still a 404, quoting BOTH references it was given.
+      const gone = await post(articleBody({ page: "No Such Page", relPath: "moved/away.md" }));
+      expect(gone.status).toBe(404);
+      const err = ((await gone.json()) as { error: string }).error;
+      expect(err).toContain("moved/away.md");
+      expect(err).toContain("No Such Page");
+    });
+
+    test("a page-less article POST is a 400 even on a wiki with no bot", async () => {
+      // Body shape is answered beside the other body-shape checks, before bot
+      // resolution — a wiki whose bot is gone used to reply "belongs to no bot",
+      // which is true but not what the caller got wrong.
+      const res = await post(articleBody({ wiki: "ghostpinwiki", page: undefined }));
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toContain("page is required");
+    });
+
+    /**
+     * Thread IDENTITY — the fix for a name-keyed lookup on a lossy key.
+     *
+     * `findThreadByName` is (user, bot, name)-scoped and an article thread's name
+     * is its page title: mimir + jarvis carry 13 colliding title groups over 30
+     * pages, two wikis owned by one bot collide with each other, and an ordinary
+     * `/topic` chat thread can own the name outright. So the 409 path asks the
+     * COLLIDING thread's description whether it is this article's.
+     */
+    describe("thread identity (the article tag)", () => {
+      beforeEach(async () => {
+        // A second page with the SAME title — the live collision, reproduced.
+        await Bun.write(path.join(root, "Dup.md"), "---\ntitle: A Concept\n---\n\nAnother page.\n");
+        __resetWikiCacheForTest();
+      });
+
+      test("the same article again 409s onto its OWN thread — Send there is offered", async () => {
+        await post(articleBody());
+        const again = await post(articleBody({ question: "and the cap?" }));
+        expect(again.status).toBe(409);
+        const data = (await again.json()) as {
+          threadExists?: boolean;
+          nameTaken?: boolean;
+          existingThreadId?: string;
+        };
+        expect(data.threadExists).toBe(true);
+        expect(data.nameTaken).toBeUndefined();
+        expect(data.existingThreadId).toBe("existing-thread");
+      });
+
+      test("a DIFFERENT page with the same title gets the nameTaken 409, no Send-there", async () => {
+        await post(articleBody()); // "A Concept.md" → thread "a concept"
+        const clash = await post(articleBody({ page: undefined, relPath: "Dup.md" }));
+        expect(clash.status).toBe(409);
+        const data = (await clash.json()) as {
+          nameTaken?: boolean;
+          threadExists?: boolean;
+          existingThreadId?: string;
+          error: string;
+        };
+        expect(data.nameTaken).toBe(true);
+        // The two fields "Send there →" needs are BOTH absent: offering it would
+        // seed a question about Dup.md into A Concept.md's conversation.
+        expect(data.threadExists).toBeUndefined();
+        expect(data.existingThreadId).toBeUndefined();
+        expect(data.error).toContain("start a new thread");
+        expect(created).toHaveLength(1);
+      });
+
+      test("…and forceNew then lands a suffixed thread of its own", async () => {
+        await post(articleBody());
+        await post(articleBody({ page: undefined, relPath: "Dup.md" }));
+        const forced = await post(articleBody({ page: undefined, relPath: "Dup.md", forceNew: true }));
+        expect(forced.status).toBe(200);
+        expect(created).toHaveLength(2);
+        expect(created[1]!.name).not.toBe(created[0]!.name);
+        expect(created[1]!.name.startsWith("a concept-")).toBe(true);
+        // Its OWN identity tag — so the next visit to Dup.md finds this thread.
+        expect(created[1]!.description).toContain("(jarviswiki:Dup.md)");
+      });
+
+      test("the same page in ANOTHER wiki on the same bot is a different article", async () => {
+        // `repos/huginn.md` in mimir vs `entities/Huginn.md` in jarvis, in
+        // miniature: two registered wikis resolving to one bot.
+        const first = await post(articleBody({ wiki: "pinnedwiki", bot: "melosys" }));
+        expect(first.status).toBe(200);
+        expect(created[0]!.description).toContain("(pinnedwiki:A Concept.md)");
+        const other = await post(articleBody({ wiki: "collwiki", bot: "melosys" }));
+        expect(other.status).toBe(409);
+        expect((await other.json()) as { nameTaken?: boolean }).toMatchObject({ nameTaken: true });
+      });
+
+      test("an ordinary chat thread that owns the name is never seeded", async () => {
+        // The worst case: `findThreadByName` is not article-scoped at all, so a
+        // `/topic` thread called "a concept" answers the lookup.
+        existingThreadNames.push("a concept");
+        threadDescriptionsByName["a concept"] = undefined;
+        const res = await post(articleBody());
+        expect(res.status).toBe(409);
+        expect((await res.json()) as { nameTaken?: boolean }).toMatchObject({ nameTaken: true });
+        expect(pending).toHaveLength(0);
+      });
+
+      test('"Send there →" re-verifies the thread it was handed', async () => {
+        const THREAD = "cccccccc-dddd-4eee-8fff-000000000000";
+        threadsById[THREAD] = {
+          id: THREAD,
+          userId: "user-1",
+          botName: "jarviswiki",
+          description: 'Discussion of the wiki article "Other" (jarviswiki:Dup.md)',
+        };
+        const wrong = await post(articleBody({ existingThreadId: THREAD }));
+        expect(wrong.status).toBe(409);
+        expect((await wrong.json()) as { nameTaken?: boolean }).toMatchObject({ nameTaken: true });
+        expect(pending).toHaveLength(0);
+
+        // A plain chat thread (no tag at all) is refused the same way…
+        threadsById[THREAD]!.description = "Started from the jarviswiki wiki";
+        expect((await post(articleBody({ existingThreadId: THREAD }))).status).toBe(409);
+        expect(pending).toHaveLength(0);
+
+        // …and the article's OWN thread is seeded, which is the designed path.
+        threadsById[THREAD]!.description =
+          'Discussion of the wiki article "A Concept" (jarviswiki:A Concept.md)';
+        const right = await post(articleBody({ existingThreadId: THREAD }));
+        expect(right.status).toBe(200);
+        expect(pending).toHaveLength(1);
+        expect(pending[0]!.threadId).toBe(THREAD);
+      });
+
+      test("direct and escalate modes are untouched by the tag logic", async () => {
+        // Their threads carry no article tag at all, so a tag check applied to
+        // them would turn every legitimate "Send this question there" into a
+        // nameTaken refusal.
+        existingThreadNames = ["how does the gardener cluster summaries?"];
+        const escalate = await post(askBody());
+        expect(escalate.status).toBe(409);
+        expect((await escalate.json()) as Record<string, unknown>).toMatchObject({
+          threadExists: true,
+          existingThreadId: "existing-thread",
+        });
+
+        const direct = await post(askBody({ answer: undefined, mode: "direct" }));
+        expect(direct.status).toBe(409);
+        const data = (await direct.json()) as { threadExists?: boolean; nameTaken?: boolean };
+        expect(data.threadExists).toBe(true);
+        expect(data.nameTaken).toBeUndefined();
+
+        // …including the reuse path, on a thread with no description whatsoever.
+        const THREAD = "cccccccc-dddd-4eee-8fff-000000000000";
+        threadsById[THREAD] = { id: THREAD, userId: "user-1", botName: "jarviswiki" };
+        expect((await post(askBody({ existingThreadId: THREAD }))).status).toBe(200);
+        expect(pending).toHaveLength(1);
+      });
     });
   });
 

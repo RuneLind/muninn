@@ -1,17 +1,34 @@
 import { test, expect, describe } from "bun:test";
 import path from "node:path";
 import {
+  articleChatHint,
+  articleChatRowsHtml,
+  ARTICLE_HINT_MAX,
+  ARTICLE_QUESTION_PLACEHOLDER,
   botDefaultOptionLabel,
+  captureChatOptFocus,
   chatEscBarHtml,
+  chatOptConflictFootHtml,
+  chatOptEscapeAction,
+  chatOptNameSource,
   chatOptQuestion,
+  chatOptStatusLines,
   chatUserStorageKey,
   chosenSupportsWebTools,
   composeDeclineQuestion,
   conflictCopy,
+  conflictStatusLine,
   connectorOptionLabel,
   connectorStorageValue,
   declineChatBarHtml,
+  discussArticleBtnHtml,
+  shouldCloseArticleChatOnNavigate,
+  CHAT_OPT_EMPTY_QUESTION,
+  CHAT_OPT_FORCE_ID,
+  CHAT_OPT_QUESTION_ID,
+  CHAT_OPT_SEND_THERE_ID,
   DECLINE_CHAT_BTN_ID,
+  DISCUSS_ARTICLE_BTN_ID,
   pickConnectorId,
   pickUserId,
   previewThreadName,
@@ -19,6 +36,7 @@ import {
   wikiConnectorStorageKey,
   WIKI_CONNECTOR_DEFAULT,
   type ChatEscTurn,
+  type ChatOptArticle,
   type ChatOptClickContext,
   type ChatTarget,
   type ChatTargetConnector,
@@ -260,6 +278,318 @@ describe("chatOptQuestion", () => {
       chatOptQuestion({ mode: "escalate", question: "the turn's question" }, "unrelated draft"),
     ).toBe("the turn's question");
   });
+
+  test("article mode reads its OWN field, never the Ask box", () => {
+    // The reader is on an article; the Ask box may be on a hidden tab and holds
+    // someone else's draft. Article mode neither reads nor writes it.
+    const article = { mode: "article" as const, question: "  what changed in v4?  " };
+    expect(chatOptQuestion(article, "a draft in the Ask box")).toBe("what changed in v4?");
+    expect(chatOptQuestion(article, null)).toBe("what changed in v4?");
+    // Empty stays empty — that is what keeps Send disabled (the route 400s an
+    // empty question).
+    expect(chatOptQuestion({ mode: "article", question: "   " }, "box text")).toBe("");
+  });
+});
+
+// ── Article mode ("💬 Discuss") ──────────────────────────────────────
+
+describe("article popover prefill + hint", () => {
+  const page = (over: Partial<ChatOptArticle> = {}): ChatOptArticle => ({
+    name: "Wiki gardener",
+    title: "Wiki gardener",
+    relPath: "projects/muninn/wiki-gardener.md",
+    ...over,
+  });
+
+  test("NEITHER summary prefills the question — both are hints", () => {
+    // The authored `description` used to prefill, and it is exactly the failure
+    // the `desc` demotion was written for: a description is a declarative
+    // sentence (blog subtitles, sniffed <meta> descriptions — 98 mimir pages),
+    // Send is ENABLED on whatever is in the box, so one click sent the page's own
+    // subtitle as the reader's question — and the server appended the same string
+    // to the seed as its parenthetical, so it arrived twice.
+    const authored = page({ description: "How clustering works." });
+    expect(articleChatHint(authored)).toBe("How clustering works.");
+    expect(articleChatRowsHtml(authored, "")).toContain("></textarea>");
+
+    // `desc` — the page's first prose LINE — behaves the same way.
+    const prose = page({ desc: "The gardener clusters summaries every week." });
+    expect(articleChatHint(prose)).toBe("The gardener clusters summaries every week.");
+    expect(articleChatRowsHtml(prose, "")).toContain("></textarea>");
+
+    // The authored one wins the hint slot on a page carrying both.
+    expect(articleChatHint(page({ description: "Authored.", desc: "First line." })))
+      .toBe("Authored.");
+  });
+
+  test("a page with neither renders no hint at all", () => {
+    expect(articleChatHint(page())).toBe("");
+    expect(articleChatRowsHtml(page(), "")).not.toContain("wiki-chatopt-note");
+  });
+
+  test("an unbounded summary is CLAMPED — it used to bury the Send button", () => {
+    // mimir's longest is 1816 chars and 186 real pages exceed 400; rendered
+    // whole, the hint pushed the panel's only action below the popover fold.
+    const hint = articleChatHint(page({ desc: "x".repeat(1816) }));
+    expect(hint.length).toBeLessThanOrEqual(ARTICLE_HINT_MAX + 1);
+    expect(hint.endsWith("…")).toBe(true);
+    // A summary that fits is rendered verbatim, ellipsis-free.
+    expect(articleChatHint(page({ desc: "Short enough to read." })))
+      .toBe("Short enough to read.");
+  });
+
+  test("the rows render an EDITABLE question field, not a pinned line", () => {
+    const html = articleChatRowsHtml(page({ desc: "First prose line." }), "why the cap?");
+    expect(html).toContain('id="' + CHAT_OPT_QUESTION_ID + '"');
+    expect(html).toContain("<textarea");
+    expect(html).toContain(">why the cap?</textarea>");
+    expect(html).toContain(ARTICLE_QUESTION_PLACEHOLDER);
+    // The pinned (decline-hook) treatment must NOT appear — that one is read-only.
+    expect(html).not.toContain("wiki-chatopt-pinned");
+    // The hint rides along as a note.
+    expect(html).toContain("First prose line.");
+  });
+
+  test("page text is escaped at every sink", () => {
+    const html = articleChatRowsHtml(
+      page({ title: "<img src=x>", desc: '"><script>alert(1)</script>' }),
+      "<b>q</b>",
+    );
+    expect(html).not.toContain("<img src=x>");
+    expect(html).not.toContain("<script>");
+    expect(html).not.toContain("<b>q</b>");
+  });
+});
+
+describe("chatOptNameSource", () => {
+  test("article mode names the thread after the PAGE, not the question", () => {
+    // This is what makes every later question about the page land in the SAME
+    // thread (409 → "Send there →") instead of minting a sibling per visit.
+    expect(chatOptNameSource("article", "why the cap?", "Wiki gardener")).toBe("Wiki gardener");
+    expect(previewThreadName("", chatOptNameSource("article", "why the cap?", "Wiki gardener")))
+      .toBe("wiki gardener");
+  });
+
+  test("a title-less page falls back to the question, never to the generic name", () => {
+    expect(chatOptNameSource("article", "why the cap?", "   ")).toBe("why the cap?");
+    expect(chatOptNameSource("article", "why the cap?", undefined)).toBe("why the cap?");
+  });
+
+  test("'has a usable title' is the ROUTE's test, not .trim()", () => {
+    // A control-character title is TRUTHY and survives `.trim()`, so the preview
+    // used to derive from it and land on the generic `wiki ask` fallback — while
+    // the route (which asks `deriveAskThreadTitleOrNull`) stored the
+    // question-derived name. Two different names for one click.
+    const control = "\u0001\u0002";
+    expect(chatOptNameSource("article", "why the cap?", control)).toBe("why the cap?");
+    expect(previewThreadName("", chatOptNameSource("article", "why the cap?", control)))
+      .toBe("why the cap?");
+    expect(previewThreadName("", chatOptNameSource("article", "why the cap?", control)))
+      .not.toBe("wiki ask");
+  });
+
+  test("the other two modes are untouched", () => {
+    expect(chatOptNameSource("direct", "why the cap?", "Wiki gardener")).toBe("why the cap?");
+    expect(chatOptNameSource("escalate", "why the cap?", "Wiki gardener")).toBe("why the cap?");
+  });
+});
+
+describe("the 409 in article mode reads as success, not as a clash", () => {
+  test('"Send there →" is the PRIMARY action, "Start new thread" the ghost', () => {
+    const foot = chatOptConflictFootHtml();
+    const sendThere = foot.indexOf(CHAT_OPT_SEND_THERE_ID);
+    const startNew = foot.indexOf("Start new thread");
+    expect(sendThere).toBeGreaterThan(-1);
+    expect(foot).toContain("Send there →");
+    // Order (primary first) AND treatment: the Send-there button carries no
+    // `ghost` modifier, the "start another" one does. Reversing them would make
+    // every repeat visit to an article mint another thread.
+    expect(sendThere).toBeLessThan(startNew);
+    // The Send-there button's own tag carries no `ghost` modifier; the
+    // "start another" one does.
+    expect(foot.slice(sendThere, foot.indexOf("</button>", sendThere))).not.toContain("ghost");
+    expect(foot.slice(startNew - 60, startNew)).toContain("ghost");
+  });
+
+  test("the status line states the DESIGNED outcome, not a name clash", () => {
+    const line = conflictStatusLine(false, "article");
+    expect(line).toContain("This article already has a chat thread");
+    expect(line).toContain("send your question there");
+    // Not the generic "a chat for this question already exists" — the reader
+    // asked about a page, not about a question they'd asked before.
+    expect(line).not.toContain("for this question");
+  });
+
+  test("a TYPED name still gets the honest name-clash copy in every mode", () => {
+    for (const mode of ["article", "direct", "escalate"] as const) {
+      expect(conflictStatusLine(true, mode)).toContain(conflictCopy(true));
+    }
+    // …and the other two modes keep exactly the copy they shipped with.
+    expect(conflictStatusLine(false, "direct")).toBe(
+      conflictCopy(false) + " Send this question there, or start another.",
+    );
+  });
+});
+
+/**
+ * The OTHER 409: the name collided with a thread that is not this article's.
+ *
+ * `findThreadByName` is (user, bot, name)-scoped and article names are page
+ * titles, so a collision proves nothing — 13 colliding title groups over 30
+ * mimir+jarvis pages, cross-wiki collisions on one bot, and any `/topic` chat
+ * thread can own the name. The route checks the colliding thread's description
+ * tag; when it doesn't match, "Send there →" would cross-seed a conversation
+ * about something else entirely.
+ */
+describe("nameTaken — the collision that is NOT this article's thread", () => {
+  test("offers ONLY a new thread, and makes it the primary action", () => {
+    const foot = chatOptConflictFootHtml({ nameTaken: true });
+    expect(foot).not.toContain(CHAT_OPT_SEND_THERE_ID);
+    expect(foot).not.toContain("Send there");
+    expect(foot).toContain(CHAT_OPT_FORCE_ID);
+    expect(foot).toContain("Start new thread");
+    // Primary treatment: the sole action is no longer the ghost second choice.
+    expect(foot).not.toContain("ghost");
+  });
+
+  test("says the name is taken by something unrelated — never that this is normal", () => {
+    const line = conflictStatusLine(false, "article", true);
+    expect(line).toContain("unrelated");
+    expect(line).toContain("start a new thread");
+    // The designed-outcome copy would be a lie here: this article has NO thread.
+    expect(line).not.toContain("This article already has a chat thread");
+    expect(line).not.toContain("Send");
+    // A typed name gets its own honest phrasing.
+    expect(conflictStatusLine(true, "article", true)).toContain("already uses that name");
+  });
+
+  test("the ordinary conflict foot is untouched", () => {
+    expect(chatOptConflictFootHtml()).toContain(CHAT_OPT_SEND_THERE_ID);
+    expect(chatOptConflictFootHtml({})).toContain("Send there →");
+  });
+});
+
+/** M1 — an EMPTY question under conflict copy. */
+describe("an empty question blocks the conflict actions and says so", () => {
+  test("both buttons render disabled while the question is empty", () => {
+    const blocked = chatOptConflictFootHtml({ disabled: true });
+    // Two buttons, two `disabled` attributes — a live one fired a blank tab that
+    // opened and closed with zero feedback.
+    expect(blocked.match(/disabled/g)).toHaveLength(2);
+    expect(chatOptConflictFootHtml({ nameTaken: true, disabled: true })).toContain("disabled");
+    expect(chatOptConflictFootHtml()).not.toContain("disabled");
+  });
+
+  test('"Type a question first." survives conflict copy on the status line', () => {
+    // The status used to RETURN early, so after a 409 the conflict copy owned the
+    // line and the reader was told nothing about the empty box beside two live
+    // buttons.
+    const lines = chatOptStatusLines({
+      status: conflictStatusLine(false, "article"),
+      hasTarget: true,
+      question: "   ",
+      hasUser: true,
+    });
+    expect(lines.map((l) => l.text)).toEqual([
+      conflictStatusLine(false, "article"),
+      CHAT_OPT_EMPTY_QUESTION,
+    ]);
+    expect(lines.every((l) => !l.error)).toBe(true);
+  });
+
+  test("the ordinary guidance chain is unchanged", () => {
+    const of = (over: Parameters<typeof chatOptStatusLines>[0]) =>
+      chatOptStatusLines(over).map((l) => l.text);
+    // No target yet ⇒ no guidance about it (and no status ⇒ nothing at all).
+    expect(of({ hasTarget: false, question: "", hasUser: false })).toEqual([]);
+    expect(of({ hasTarget: true, question: "", hasUser: false })).toEqual([
+      CHAT_OPT_EMPTY_QUESTION,
+    ]);
+    // A question but no user ⇒ the user line, not both.
+    expect(of({ hasTarget: true, question: "q", hasUser: false })).toEqual([
+      "Pick who this chat belongs to.",
+    ]);
+    expect(of({ hasTarget: true, question: "q", hasUser: true })).toEqual([]);
+    // An error status keeps its error flag.
+    expect(
+      chatOptStatusLines({ status: "boom", statusIsError: true, hasTarget: true, question: "q", hasUser: true }),
+    ).toEqual([{ text: "boom", error: true }]);
+  });
+});
+
+/** H2 — the panel is re-rendered from state while the reader is typing into it. */
+describe("captureChatOptFocus", () => {
+  test("captures the focused field and its caret", () => {
+    expect(
+      captureChatOptFocus(
+        { id: CHAT_OPT_QUESTION_ID, selectionStart: 7, selectionEnd: 12 },
+        true,
+      ),
+    ).toEqual({ id: CHAT_OPT_QUESTION_ID, start: 7, end: 12 });
+  });
+
+  test("focus OUTSIDE the panel is not restored into it", () => {
+    // The Ask box, the page list, anything: re-focusing the panel would steal
+    // focus the reader deliberately moved away.
+    expect(captureChatOptFocus({ id: "wikiAskInput", selectionStart: 1, selectionEnd: 1 }, false))
+      .toBeNull();
+    expect(captureChatOptFocus(null, true)).toBeNull();
+  });
+
+  test("an id-less or selection-less element degrades instead of throwing", () => {
+    // `<select>` has no selectionStart; `document.body` has no id.
+    expect(captureChatOptFocus({ id: "wikiChatOptConn" }, true)).toEqual({
+      id: "wikiChatOptConn",
+      start: null,
+      end: null,
+    });
+    expect(captureChatOptFocus({ id: "" }, true)).toBeNull();
+    expect(captureChatOptFocus({}, true)).toBeNull();
+  });
+});
+
+/** M2 — an article question exists ONLY inside the panel. */
+describe("chatOptEscapeAction", () => {
+  test("a typed article question takes two Escapes to discard", () => {
+    const state = { mode: "article" as const, question: "why the cap?" };
+    expect(chatOptEscapeAction(state)).toBe("confirm");
+    expect(chatOptEscapeAction({ ...state, escArmed: true })).toBe("close");
+  });
+
+  test("an empty article question just closes", () => {
+    expect(chatOptEscapeAction({ mode: "article", question: "   " })).toBe("close");
+  });
+
+  test("the other modes are untouched — their draft lives in the Ask box", () => {
+    expect(chatOptEscapeAction({ mode: "direct", question: "typed in the Ask box" })).toBe("close");
+    expect(chatOptEscapeAction({ mode: "escalate", question: "the turn's question" })).toBe("close");
+  });
+});
+
+/** M7 — the pane navigated out from under an open popover. */
+describe("shouldCloseArticleChatOnNavigate", () => {
+  const open = { mode: "article" as const, article: { relPath: "projects/muninn/a.md" } };
+
+  test("a different page closes it — the popover still targets the old one", () => {
+    expect(shouldCloseArticleChatOnNavigate(open, "projects/muninn/b.md")).toBe(true);
+  });
+
+  test("re-rendering the SAME page leaves it open", () => {
+    expect(shouldCloseArticleChatOnNavigate(open, "projects/muninn/a.md")).toBe(false);
+  });
+
+  test("no popover, or a non-article one, is never closed by navigation", () => {
+    expect(shouldCloseArticleChatOnNavigate(null, "x.md")).toBe(false);
+    expect(shouldCloseArticleChatOnNavigate({ mode: "direct" }, "x.md")).toBe(false);
+    expect(shouldCloseArticleChatOnNavigate({ mode: "article" }, "x.md")).toBe(false);
+  });
+});
+
+describe("discussArticleBtnHtml", () => {
+  test("carries the shared id the click delegation and click-away both bind", () => {
+    expect(discussArticleBtnHtml()).toContain('id="' + DISCUSS_ARTICLE_BTN_ID + '"');
+    expect(discussArticleBtnHtml()).toContain("Discuss");
+  });
 });
 
 describe("composeDeclineQuestion", () => {
@@ -402,11 +732,15 @@ describe("wiki-browser wiring", () => {
     return cached;
   }
 
-  /** One top-level `function <name>(` body, up to the next top-level function. */
+  /** One top-level `[async] function <name>(` body, up to the next top-level
+   *  function of either flavour. */
   function fnBody(src: string, name: string): string {
-    const start = src.indexOf("\nfunction " + name + "(");
+    let start = src.indexOf("\nfunction " + name + "(");
+    if (start === -1) start = src.indexOf("\nasync function " + name + "(");
     expect(start).toBeGreaterThan(-1);
-    const next = src.indexOf("\nfunction ", start + 1);
+    let next = src.indexOf("\nfunction ", start + 1);
+    const nextAsync = src.indexOf("\nasync function ", start + 1);
+    if (nextAsync !== -1 && (next === -1 || nextAsync < next)) next = nextAsync;
     return src.slice(start, next === -1 ? undefined : next);
   }
 
@@ -443,5 +777,105 @@ describe("wiki-browser wiring", () => {
     // By identifier, not by literal — the id is shared with the render and the
     // click delegation precisely so the three can't drift.
     expect(src.slice(start, src.indexOf("sending:", start))).toContain("DECLINE_CHAT_BTN_ID");
+  });
+
+  test("the click-away opener list includes the Discuss button", async () => {
+    // Same trap as the decline button: without it, the opening click reads as a
+    // click-away and closes the panel it just opened.
+    const src = await browserSrc();
+    const start = src.indexOf("inOpener:");
+    expect(src.slice(start, src.indexOf("sending:", start))).toContain("DISCUSS_ARTICLE_BTN_ID");
+  });
+
+  test("the article opener NEVER touches the Ask box", async () => {
+    // Article mode has nothing to do with the Ask tab — its question is typed in
+    // the panel. (The decline hook's own regression, restated for this mode.)
+    const body = fnBody(await browserSrc(), "openArticleChat");
+    expect(body).not.toContain("wikiAskInput");
+    expect(body).not.toMatch(/\.value\s*=/);
+    // It reads the page from `currentArticle` — the single-page payload — because
+    // that is the ONLY one carrying `desc` (the listing strips it).
+    expect(body).toContain("currentArticle");
+    expect(body).toContain("desc: m.desc");
+    expect(body).toContain('openChatOptions("article"');
+  });
+
+  test("the breadcrumb renders Discuss beside the whole-article fact check", async () => {
+    // One row for the article-level actions: split across two, neither is findable.
+    const body = fnBody(await browserSrc(), "renderBreadcrumb");
+    expect(body).toContain("wikiFactcheckArticleBtn");
+    expect(body).toContain("discussArticleBtnHtml()");
+    // And it stamps the open page for the popover to read.
+    expect(body).toContain("currentArticle = m");
+  });
+
+  test("the article POST sends the page as a REFERENCE, never a quoted summary", async () => {
+    // The seed's title/path/description are re-resolved server-side against the
+    // index; a stale client copy must not be able to put an unresolvable path in
+    // front of the bot.
+    const body = fnBody(await browserSrc(), "submitChatOptions");
+    expect(body).toContain('payload.mode = "article"');
+    expect(body).toContain("payload.page = ");
+    expect(body).toContain("payload.relPath = ");
+    expect(body).not.toContain("payload.description");
+  });
+
+  test("the article opener prefills NOTHING into the question box", async () => {
+    // The prefill chain is gone from the opener: an authored `description` is a
+    // declarative sentence, Send is enabled on it, and one click sent the page's
+    // own subtitle as the reader's question.
+    const body = fnBody(await browserSrc(), "openChatOptions");
+    expect(body).not.toContain("articleChatQuestion");
+    expect(body).toContain('question = ""');
+  });
+
+  test("the render preserves focus + caret across its innerHTML swap", async () => {
+    // The article question box renders BEFORE the chat-target fetch settles (so
+    // the reader can start typing), and that fetch's `finally` re-renders the
+    // whole panel — replacing the textarea mid-word.
+    const body = fnBody(await browserSrc(), "renderChatOptions");
+    expect(body).toContain("captureChatOptFocus");
+    expect(body).toContain("restoreChatOptFocus");
+    // Captured BEFORE the swap, restored after it.
+    expect(body.indexOf("captureChatOptFocus")).toBeLessThan(body.indexOf("panel.innerHTML ="));
+    expect(body.indexOf("panel.innerHTML =")).toBeLessThan(body.indexOf("restoreChatOptFocus("));
+  });
+
+  test("Escape asks before discarding a typed article question", async () => {
+    // Direct mode's draft survives in the Ask box; an article question exists
+    // only in this panel, so a stray Escape used to be the only copy gone.
+    const src = await browserSrc();
+    const start = src.indexOf('if (e.key !== "Escape"');
+    expect(start).toBeGreaterThan(-1);
+    const handler = src.slice(start, start + 900);
+    expect(handler).toContain("chatOptEscapeAction");
+    expect(handler).toContain("CHAT_OPT_ESC_CONFIRM");
+    expect(handler).toContain("escArmed = true");
+  });
+
+  test("navigating the pane closes an article popover, and clears the open page", async () => {
+    const src = await browserSrc();
+    // It must run BEFORE `currentArticle` is re-stamped — the decision compares
+    // the popover's page against the incoming one.
+    const crumb = fnBody(src, "renderBreadcrumb");
+    expect(crumb).toContain("shouldCloseArticleChatOnNavigate");
+    expect(crumb.indexOf("shouldCloseArticleChatOnNavigate")).toBeLessThan(
+      crumb.indexOf("currentArticle = m"),
+    );
+    // …and with no page open there is nothing for Discuss to act on.
+    expect(fnBody(src, "hideBreadcrumb")).toContain("currentArticle = null");
+  });
+
+  test("a nameTaken 409 offers no Send-there at all", async () => {
+    const body = fnBody(await browserSrc(), "submitChatOptions");
+    const at = body.indexOf("data.nameTaken");
+    expect(at).toBeGreaterThan(-1);
+    const branch = body.slice(at, at + 700);
+    expect(branch).toContain("nameTaken: true");
+    // The thread id is deliberately NOT carried: there is no thread to send to.
+    expect(branch).toContain('existingThreadId: ""');
+    expect(branch).toContain("conflictStatusLine(typedName, state.mode, true)");
+    // …and it is decided BEFORE the ordinary threadExists branch.
+    expect(at).toBeLessThan(body.indexOf("data.threadExists"));
   });
 });

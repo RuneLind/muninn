@@ -507,13 +507,15 @@ export async function renderWikiPage(opts?: {
     /* Fact check buttons — a quieter outline treatment so they read as a
        secondary action next to the filled ✨ Explain. The whole-article variant
        is always visible; the selection-gated one rides the same show/hide. */
-    .wiki-bc-factcheck {
+    /* …and "💬 Discuss" (the article-level chat action) shares that treatment:
+       both are article-level actions sitting on the same breadcrumb row. */
+    .wiki-bc-factcheck, .wiki-bc-discuss {
       flex-shrink: 0; padding: 4px 11px; border-radius: 999px;
       background: transparent; color: var(--text-secondary);
       border: 1px solid var(--border-primary);
       font-size: 12px; font-weight: 600; line-height: 1; cursor: pointer; font-family: inherit;
     }
-    .wiki-bc-factcheck:hover {
+    .wiki-bc-factcheck:hover, .wiki-bc-discuss:hover {
       background: var(--tint-neutral); color: var(--text-primary);
       border-color: color-mix(in srgb, var(--accent) 45%, var(--border-primary));
     }
@@ -1071,11 +1073,21 @@ export async function renderWikiPage(opts?: {
     .wiki-chatopt-body { display: flex; flex-direction: column; gap: 7px; }
     .wiki-chatopt-row { display: flex; align-items: center; gap: 8px; }
     .wiki-chatopt-row > span { flex: 0 0 54px; color: var(--text-tertiary); font-size: 11.5px; }
-    .wiki-chatopt-row select, .wiki-chatopt-row input {
+    .wiki-chatopt-row select, .wiki-chatopt-row input, .wiki-chatopt-row textarea {
       flex: 1; min-width: 0; padding: 5px 7px; border-radius: 6px; font-size: 12px;
       border: 1px solid var(--border-secondary); background: var(--bg-inset);
       color: var(--text-primary); font-family: inherit;
     }
+    /* Article mode's question box — the only field on this panel the reader
+       composes in, so it gets the top-aligned label + room to type. */
+    .wiki-chatopt-qrow { align-items: flex-start; }
+    .wiki-chatopt-qrow > span { padding-top: 6px; }
+    .wiki-chatopt-row textarea { resize: vertical; line-height: 1.45; }
+    .wiki-chatopt-article {
+      font-size: 11.5px; color: var(--text-tertiary); line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+    .wiki-chatopt-article b { color: var(--text-secondary); font-weight: 600; }
     .wiki-chatopt-preview { font-size: 11px; color: var(--text-tertiary); padding-left: 62px; }
     .wiki-chatopt-preview code { font-size: 11px; color: var(--text-secondary); }
     .wiki-chatopt-note { font-size: 11px; color: var(--text-tertiary); line-height: 1.4; }

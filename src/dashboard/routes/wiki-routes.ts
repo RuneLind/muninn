@@ -108,6 +108,9 @@ import { getConnector, listConnectorOptions } from "../../db/connectors.ts";
 import { isValidUuid } from "./route-utils.ts";
 import type { ConnectorType } from "../../bots/config.ts";
 import {
+  articleThreadTagMatches,
+  buildArticleChatSeed,
+  buildArticleThreadDescription,
   buildAskChatSeed,
   buildDirectChatSeed,
   deriveAskThreadTitle,
@@ -309,11 +312,16 @@ export interface AskChatDeps {
    *  the sibling Remember button attributes memories to. Resolves the common
    *  multi-user case without a picker the reader doesn't have. */
   getBotDefaultUser: (botName: string) => Promise<string | null>;
+  /** The thread of this name for this user+bot, INCLUDING its description — which
+   *  is what says whether an article-mode collision is this article's own
+   *  discussion thread or an unrelated thread that merely owns the name (see
+   *  `articleThreadTagMatches`). The real `findThreadByName` selects the whole
+   *  row, so carrying it costs nothing and saves a second lookup. */
   findThreadByName: (
     userId: string,
     botName: string,
     name: string,
-  ) => Promise<{ id: string; name: string } | null>;
+  ) => Promise<{ id: string; name: string; description?: string } | null>;
   createThread: (
     userId: string,
     botName: string,
@@ -349,7 +357,15 @@ export interface AskChatDeps {
    *  belongs to the resolved user+bot before seeding a question onto it. */
   getThreadById: (
     threadId: string,
-  ) => Promise<{ id: string; userId: string; botName: string; connectorId?: string } | null>;
+  ) => Promise<{
+    id: string;
+    userId: string;
+    botName: string;
+    connectorId?: string;
+    /** Carries the article tag on an article thread — a "Send there →" naming a
+     *  thread that isn't this article's must not be seeded. */
+    description?: string;
+  } | null>;
   /** Stamp a connector on an EXISTING thread — only ever called when that thread
    *  carries none, so an established thread keeps the model it has been using. */
   updateThreadConnector: (threadId: string, connectorId: string | null) => Promise<boolean>;
@@ -618,19 +634,35 @@ interface WikiPageListing extends WikiPageMeta {
   backlinkCount: number;
 }
 
-function toListing(index: WikiIndex, meta: WikiPageMeta): WikiPageListing {
-  // `desc` + `pubDate` are Atlas-only fields (only `GET /api/wiki/atlas` reads
-  // them); excluded here so they don't bloat this hot pages-listing payload
-  // (~100 KB on jarvis). The listing type keeps them optional/undefined.
-  // Nothing else may join this strip list without checking BOTH callers first:
-  // `/api/wiki/page` builds its single-page `meta` from this same function, so a
-  // field stripped for payload size (e.g. `status_note`) goes out of reach of the
-  // reader too. `desc`/`pubDate` are safe only because Atlas alone reads them.
+function toListing(
+  index: WikiIndex,
+  meta: WikiPageMeta,
+  opts: { includeDesc?: boolean } = {},
+): WikiPageListing {
+  // `desc` + `pubDate` are stripped by default: they are page-body fields no
+  // LISTING consumer reads, and on jarvis they add ~100 KB to the hot
+  // `/api/wiki/pages` payload.
+  //
+  // Nothing may join (or leave) this strip list without checking ALL THREE
+  // callers, because they share this one function:
+  //   1. `/api/wiki/pages`      — the hot listing. Strip.
+  //   2. `/api/wiki/page` meta  — the single page the reader has open.
+  //   3. `/api/wiki/page`'s `listings()` — the outgoing/backlink ARRAYS on that
+  //      same response, which are link-heavy pages' bulk. Strip.
+  // So a field stripped for payload size (e.g. `status_note`) also goes out of
+  // reach of the reader, and a field opted IN for caller 2 must not be opted in
+  // for caller 3, which would re-bloat exactly the pages this strip protects.
+  //
+  // `includeDesc` is that opt-in, passed ONLY by caller 2: the "💬 Discuss"
+  // popover shows the open page's first prose line as a question HINT, and the
+  // single-page response is the only place the reader's own page arrives.
+  // `pubDate` stays Atlas-only (`GET /api/wiki/atlas` reads it directly off the
+  // index, never through here).
   const { desc, pubDate, ...rest } = meta;
-  void desc;
   void pubDate;
   return {
     ...rest,
+    ...(opts.includeDesc && desc ? { desc } : {}),
     linkCount: index.outgoing.get(normalizeRelPath(meta.relPath))?.length ?? 0,
     backlinkCount: index.backlinks.get(normalizeRelPath(meta.relPath))?.length ?? 0,
   };
@@ -1303,7 +1335,9 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         .map((m) => toListing(index, m));
 
     return c.json({
-      meta: toListing(index, meta),
+      // The one caller that opts `desc` in — see `toListing`. Deliberately NOT
+      // `listings()` below, whose arrays are the link-heavy pages' bulk.
+      meta: toListing(index, meta, { includeDesc: true }),
       html: renderWikiHtml(markdown, index.resolve, { stripTitle: meta.title }),
       outgoing: listings(index.outgoing.get(normalizeRelPath(meta.relPath))),
       backlinks: listings(index.backlinks.get(normalizeRelPath(meta.relPath))),
@@ -1940,10 +1974,19 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         citations?: AskChatCitation[];
         forceNew?: boolean;
         /** `"direct"` = the reader typed a question WITHOUT asking the wiki first,
-         *  so there is no answer to quote. An explicit discriminator, never an
-         *  inference from a missing `answer`: a client bug that drops the answer
-         *  must still 400 rather than silently escalate a context-free seed. */
+         *  so there is no answer to quote. `"article"` = the same, but asked while
+         *  reading ONE page, which the seed names and paths. An explicit
+         *  discriminator, never an inference from a missing `answer`: a client bug
+         *  that drops the answer must still 400 rather than silently escalate a
+         *  context-free seed. */
         mode?: string;
+        /** Article mode: which page the question is about. `relPath` is tried
+         *  first (collision-proof, as on `GET /api/wiki/page`) and `page` — the
+         *  page NAME — is the fallback when it resolves nothing, which is what a
+         *  rename leaves an open tab holding. Error copy quotes whichever
+         *  reference was actually sent, both when both were. */
+        page?: string;
+        relPath?: string;
         /** Direct mode only: this question reached chat from an Ask the wiki
          *  DECLINED, so the seed must not order the search that just failed. */
         askDeclined?: boolean;
@@ -1955,8 +1998,11 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       const question = typeof body.question === "string" ? body.question.trim() : "";
       const answer = typeof body.answer === "string" ? body.answer.trim() : "";
       const direct = body.mode === "direct";
+      // Article mode is the "💬 Discuss" button on an open page: no Ask turn, no
+      // answer — but a page whose title/path/summary the seed carries.
+      const article = body.mode === "article";
       if (!question) return c.json({ error: "question is required" }, 400);
-      if (!answer && !direct) return c.json({ error: "answer is required" }, 400);
+      if (!answer && !direct && !article) return c.json({ error: "answer is required" }, 400);
       // Body shape is client-controlled: a non-string `wiki` (or a citation whose
       // pageName is a number) reached string methods and 500'd. Everything the
       // route reads is therefore validated or coerced HERE, before any side effect.
@@ -1969,13 +2015,25 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       if (body.userId !== undefined && typeof body.userId !== "string") {
         return c.json({ error: "userId must be a string" }, 400);
       }
-      for (const field of ["connectorId", "threadName", "existingThreadId"] as const) {
+      for (const field of [
+        "connectorId", "threadName", "existingThreadId", "page", "relPath",
+      ] as const) {
         if (body[field] !== undefined && typeof body[field] !== "string") {
           return c.json({ error: `${field} must be a string` }, 400);
         }
       }
       if (body.askDeclined !== undefined && typeof body.askDeclined !== "boolean") {
         return c.json({ error: "askDeclined must be a boolean" }, 400);
+      }
+      // Article mode needs a page REFERENCE, and its absence is a body-shape
+      // problem like every other check in this block — so it is answered here,
+      // beside them, rather than after bot resolution. A wiki whose bot is gone
+      // used to answer a page-less article POST with "belongs to no bot", which
+      // is true but not the thing the caller got wrong.
+      const pageRef = typeof body.page === "string" ? body.page.trim() : "";
+      const relPathRef = typeof body.relPath === "string" ? body.relPath.trim() : "";
+      if (body.mode === "article" && !pageRef && !relPathRef) {
+        return c.json({ error: "page is required in article mode" }, 400);
       }
       const connectorId = typeof body.connectorId === "string" ? body.connectorId.trim() : "";
       // A non-UUID reaching `getConnector`'s uuid-column WHERE is a Postgres error,
@@ -2084,8 +2142,50 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // wherever the client happens to send it.
       const askDeclined = direct && body.askDeclined === true;
 
-      const buildSeed = (canWebSearch: boolean): string =>
-        direct
+      // Article mode resolves the page SERVER-side against the wiki index rather
+      // than trusting a client-posted title/path: the path is the part the seed
+      // hands the bot to pull the real page with, and a page the index can't
+      // resolve is a 404 the reader can act on — not a seed pointing at nothing.
+      let articlePage: WikiPageMeta | undefined;
+      if (article) {
+        const index = await getWikiIndex({ root: entry.root });
+        if (!index) return c.json({ error: "wiki directory not found" }, 404);
+        // `relPath` wins (collision-proof, as on `GET /api/wiki/page`) — but it
+        // FALLS BACK to the name, because the client's copy of the path goes stale
+        // the moment a page is renamed or moved: the reader's open tab then posts
+        // a path nothing resolves while the name beside it resolves fine, and the
+        // Discuss button 404s on a page that is plainly there.
+        articlePage =
+          (relPathRef ? index.resolveRelPath(relPathRef) : undefined) ??
+          (pageRef ? index.resolve(pageRef) : undefined);
+        if (!articlePage) {
+          // Quote whichever reference the caller actually sent — `relPath` is what
+          // the reader's UI always sends, so naming `page` here described a
+          // lookup that hadn't happened.
+          const which = relPathRef
+            ? `relPath "${relPathRef}"` + (pageRef ? ` or name "${pageRef}"` : "")
+            : `name "${pageRef}"`;
+          return c.json({ error: `no wiki page for ${which}` }, 404);
+        }
+      }
+
+      const buildSeed = (canWebSearch: boolean): string => {
+        if (article) {
+          const meta = articlePage!;
+          return buildArticleChatSeed({
+            wikiName: entry.name,
+            pageTitle: meta.title,
+            pagePath: meta.relPath,
+            question,
+            // The page's own summary — the authored frontmatter `description`
+            // when there is one, else the extracted first prose line. Both are
+            // page-derived and index-resolved; neither is client-posted.
+            description: meta.description || meta.desc,
+            webSearch: canWebSearch,
+            hasCollections,
+          });
+        }
+        return direct
           ? buildDirectChatSeed({
               wikiName: entry.name,
               question,
@@ -2094,6 +2194,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
               askDeclined,
             })
           : buildAskChatSeed({ wikiName: entry.name, question, answer, citations });
+      };
 
       // Seed FIRST: everything that can still fail (string building over
       // client-posted citations included) must fail before a thread exists or is
@@ -2110,7 +2211,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // The plain one-click "Continue in chat →" offers no such choice, and
       // flagging it would silently cost that path the sidebar stamping it has
       // always had.
-      const connectorDecided = direct || body.connectorId !== undefined;
+      const connectorDecided = direct || article || body.connectorId !== undefined;
       const chatUrlFor = (threadId: string): string =>
         `/chat?bot=${encodeURIComponent(botConfig.name)}` +
         `&thread=${encodeURIComponent(threadId)}` +
@@ -2131,6 +2232,20 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
             { error: "That thread doesn't belong to this user and bot." },
             400,
           );
+        }
+        // Article mode re-verifies the thread's IDENTITY here, not just its
+        // ownership: the id came back from a name collision, and a name is not an
+        // article (13 colliding title groups over 30 mimir+jarvis pages; a plain
+        // `/topic` thread can hold the name too). Without this, "Send there →"
+        // cross-seeds a question about page A into a conversation about page B —
+        // or into an ordinary chat thread. Same `nameTaken` answer the 409 path
+        // gives, so the client walks the same "start a new thread" recovery.
+        if (article && !articleThreadTagMatches(thread.description, entry.name, articlePage!.relPath)) {
+          return c.json({
+            nameTaken: true,
+            error:
+              "That chat thread isn't this article's discussion — start a new thread for it.",
+          }, 409);
         }
         // Cheap fail-fast on the common case, so an "already queued" refusal costs
         // no connector stamp and no conversation shell. The narrow race it cannot
@@ -2198,10 +2313,48 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // A typed name that FLATTENS to nothing (control characters only) must fall
       // back to the question, not to the generic "wiki ask" — `deriveAskThreadTitle`
       // alone can't express that difference, hence the `…OrNull` variant.
+      // Article mode derives its default name from the PAGE, not the question —
+      // and it does so HERE, not client-side: that is what makes an article
+      // collect ONE discussion thread that every later question 409s onto, for
+      // any caller. (The popover's preview runs the same two pure functions in the
+      // same order, so what it shows is what `createThread` stores.) A page whose
+      // title flattens to nothing falls back to the question rather than to the
+      // generic `wiki ask`, exactly as a control-character `threadName` does.
+      const derivedFallback =
+        article
+          ? (deriveAskThreadTitleOrNull(articlePage!.title) ?? deriveAskThreadTitle(question))
+          : deriveAskThreadTitle(question);
       const title =
         deriveAskThreadTitleOrNull(typeof body.threadName === "string" ? body.threadName : "") ??
-        deriveAskThreadTitle(question);
+        derivedFallback;
       const existing = await askChatDeps.findThreadByName(chatUser.id, botConfig.name, title);
+      // A collision on the NAME is not evidence the thread is this article's.
+      // `findThreadByName` is (user, bot, name)-scoped, and article names are
+      // page titles: mimir + jarvis carry 13 colliding title groups over 30 pages
+      // (`architecture` ×3), two different wikis owned by one bot collide with
+      // each other (`repos/huginn.md` vs `entities/Huginn.md`), and an ordinary
+      // `/topic` chat thread can hold the name outright. So the thread's own
+      // description is asked whether it is THIS article's (see
+      // `buildArticleThreadDescription`); when it isn't, the answer is a DISTINCT
+      // 409 whose only offered action is a new thread — "Send there →" on an
+      // unrelated thread seeds a question about page A into a conversation about
+      // something else entirely.
+      if (
+        article &&
+        existing &&
+        !body.forceNew &&
+        !articleThreadTagMatches(existing.description, entry.name, articlePage!.relPath)
+      ) {
+        return c.json({
+          nameTaken: true,
+          error:
+            `Another chat thread is already called "${title}" — start a new thread ` +
+            "for this article.",
+          existingThreadName: existing.name,
+          userId: chatUser.id,
+          botName: botConfig.name,
+        }, 409);
+      }
       if (existing && !body.forceNew) {
         return c.json({
           threadExists: true,
@@ -2253,13 +2406,32 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       });
       const conversationId = conversation.id;
 
+      // One description per mode, and in article mode it is also the thread's
+      // IDENTITY (`<wiki>:<relPath>`, parsed back by `articleThreadTagMatches`) —
+      // which is why the title inside it is flattened and truncated rather than
+      // interpolated raw, and why the tail is left intact.
+      //
+      // NB the "set once" property is NOT `createThread`'s COALESCE: that reads
+      // `COALESCE(EXCLUDED.description, threads.description)`, i.e. a NEW non-null
+      // description WINS on conflict. What actually keeps an article thread's tag
+      // stable is that this route 409s before ever re-inserting over a colliding
+      // name (only `forceNew` gets past, and it inserts under a fresh name). The
+      // remaining overwrite path is a genuine race between two concurrent posts,
+      // which is documented rather than locked.
+      const threadDescription = article
+        ? buildArticleThreadDescription({
+            wikiName: entry.name,
+            pageTitle: articlePage!.title,
+            relPath: articlePage!.relPath,
+          })
+        : direct
+          ? `Started from the ${entry.name} wiki`
+          : `Continued from the ${entry.name} wiki Ask tab`;
       const thread = await askChatDeps.createThread(
         chatUser.id,
         botConfig.name,
         threadTitle,
-        direct
-          ? `Started from the ${entry.name} wiki`
-          : `Continued from the ${entry.name} wiki Ask tab`,
+        threadDescription,
         connectorId || undefined,
       );
 
