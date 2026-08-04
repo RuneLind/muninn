@@ -69,6 +69,31 @@ export function connectorSelectorScript(): string {
     }
   }
 
+  // Suppress the sidebar preference from filling a DELIBERATELY empty connector
+  // slot, PER THREAD. Registered by a deep link that says the thread's connector
+  // was already decided elsewhere (\`&src=wiki\`: the wiki reader's escalation
+  // popover, where "(bot default)" is a real choice and is expressed as NO
+  // connector on the thread). onlyIfEmpty can't protect that case — it only guards
+  // threads that already HAVE a connector — so a connector-less thread got stamped
+  // with whatever the sidebar remembered, silently changing which model answered.
+  //
+  // The registry lives HERE rather than at a call site because there are TWO
+  // stamping paths (handleDeepLink, then sendMessage right before each send);
+  // gating only the first leaves the seeded turn stamped anyway.
+  //
+  // It is keyed by THREAD and never released. A single boolean released after the
+  // seeded turn protected exactly one message: the reader's SECOND message in the
+  // same connector-less thread went through sendMessage's stamp and picked up the
+  // sidebar preference after all — the same silent model swap, one turn later.
+  // KNOWN LIMITATION (accepted): the registry is page-session memory, so opening
+  // that thread in a fresh tab — without the \`src=wiki\` deep link — is not
+  // protected. Fixing that needs a durable "this thread means bot default" fact,
+  // which the threads table cannot currently express (no connector IS the value).
+  var connectorStampSuppressedThreads = {};
+  function suppressConnectorStamp(threadId) {
+    if (threadId) connectorStampSuppressedThreads[threadId] = true;
+  }
+
   // Stamp a connector on a thread (connectorId '' or null clears it → bot default).
   // When onlyIfEmpty=true, never overwrites an existing connector — used by the
   // deep-link and send-message paths so the Jira plugin's chosen connector
@@ -77,6 +102,11 @@ export function connectorSelectorScript(): string {
   // user's explicit pick to override.
   async function stampConnectorOnThread(threadId, connectorId, onlyIfEmpty) {
     if (!threadId) return;
+    // Suppression applies to the preference-stamping paths only (both pass
+    // onlyIfEmpty) and only to the threads that registered it. An explicit
+    // dropdown pick still wins — that is the user deliberately changing this
+    // thread's model, not a remembered default — and other threads are untouched.
+    if (onlyIfEmpty && connectorStampSuppressedThreads[threadId]) return;
     var effectiveId = connectorId || null;
     for (var i = 0; i < threads.length; i++) {
       if (threads[i].id === threadId) {

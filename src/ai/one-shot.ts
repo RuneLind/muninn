@@ -103,15 +103,28 @@ export interface ConnectorCapabilities {
   supportsWebTools: boolean;
 }
 
-/** Query a bot's connector capabilities without spawning anything. */
-export function connectorCapabilities(botConfig: BotConfig): ConnectorCapabilities {
-  const connector: ConnectorType = botConfig.connector ?? "claude-cli";
+/**
+ * Capabilities of a connector TYPE, with no bot in hand.
+ *
+ * Extracted from {@link connectorCapabilities} (which now delegates) for the one
+ * caller that legitimately has no `BotConfig`: the wiki chat-target endpoint
+ * flags each named `connectors` row — a DB row carrying a `connectorType`, not a
+ * bot — so the reader's connector picker can say "no web search" honestly.
+ * Deriving that in the browser from a second hardcoded list is exactly the drift
+ * this single implementation exists to prevent.
+ */
+export function capabilitiesForConnectorType(connector: ConnectorType): ConnectorCapabilities {
   const isClaude = connector === "claude-cli" || connector === "claude-sdk";
   return {
     supportsExtraDirs: isClaude,
     supportsThinkingBudget: isClaude,
     supportsWebTools: isClaude,
   };
+}
+
+/** Query a bot's connector capabilities without spawning anything. */
+export function connectorCapabilities(botConfig: BotConfig): ConnectorCapabilities {
+  return capabilitiesForConnectorType(botConfig.connector ?? "claude-cli");
 }
 
 /**

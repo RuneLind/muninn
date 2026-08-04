@@ -70,6 +70,26 @@ function truncateUnits(text: string, max: number): string {
   return out;
 }
 
+/** Name used when a question flattens to nothing — an empty name throws in
+ *  `createThread`, so SOMETHING has to be stored. */
+export const ASK_CHAT_TITLE_FALLBACK = "wiki ask";
+
+/**
+ * Derive a thread name, or `null` when the source flattens to nothing.
+ *
+ * The null case is the whole point of the split: a caller with a SECOND source
+ * (the route's typed `threadName`, falling back to the question) must be able to
+ * tell "this text has no name in it" from "this text names the fallback" —
+ * otherwise a name of only control characters silently pins the thread to the
+ * generic fallback instead of falling back to the question it was typed beside.
+ */
+export function deriveAskThreadTitleOrNull(question: string): string | null {
+  const flat = flatten(question || "").toLowerCase();
+  if (!flat) return null;
+  if (flat.length <= ASK_CHAT_TITLE_MAX) return flat;
+  return truncateUnits(flat, ASK_CHAT_TITLE_MAX - 3) + "...";
+}
+
 /**
  * Derive a thread name from the escalated question. `createThread` lowercases,
  * trims, rejects newlines/tabs and hard-fails above 50 chars — so the name is
@@ -78,10 +98,7 @@ function truncateUnits(text: string, max: number): string {
  * control chars) falls back to a stable generic name, since an empty name throws.
  */
 export function deriveAskThreadTitle(question: string): string {
-  const flat = flatten(question || "").toLowerCase();
-  if (!flat) return "wiki ask";
-  if (flat.length <= ASK_CHAT_TITLE_MAX) return flat;
-  return truncateUnits(flat, ASK_CHAT_TITLE_MAX - 3) + "...";
+  return deriveAskThreadTitleOrNull(question) ?? ASK_CHAT_TITLE_FALLBACK;
 }
 
 /**
@@ -135,6 +152,21 @@ const QUESTION_TRUNC_NOTE = " …(question truncated)";
 
 /** Marker appended when the quoted answer didn't fit its budget. */
 const ANSWER_TRUNC_NOTE = "\n> …(answer truncated)";
+
+/**
+ * The question, clamped to whatever {@link ASK_CHAT_SEED_MAX} leaves it after the
+ * seed's fixed parts (and any `reserve` a later part is guaranteed), never more
+ * than {@link ASK_CHAT_QUESTION_MAX}. Shared by both seed builders — the budget
+ * arithmetic was duplicated and is exactly the kind of thing that drifts.
+ */
+function clampQuestion(raw: string, fixedLen: number, reserve = 0): string {
+  const budget = Math.max(
+    0,
+    Math.min(ASK_CHAT_QUESTION_MAX, ASK_CHAT_SEED_MAX - fixedLen - reserve),
+  );
+  if (raw.length <= budget) return raw;
+  return truncateUnits(raw, Math.max(0, budget - QUESTION_TRUNC_NOTE.length)) + QUESTION_TRUNC_NOTE;
+}
 
 /**
  * The `Sources cited by the wiki: …` line, capped at {@link ASK_CHAT_SOURCES_MAX}.
@@ -197,15 +229,7 @@ export function buildAskChatSeed(input: {
   // newline between the quote and the sources line.
   const fixed = opening.length + framing.length + sources.length + tail.length + 1;
   const reserve = answer ? ASK_CHAT_ANSWER_MIN + ANSWER_TRUNC_NOTE.length : 0;
-  const questionBudget = Math.max(
-    0,
-    Math.min(ASK_CHAT_QUESTION_MAX, ASK_CHAT_SEED_MAX - fixed - reserve),
-  );
-  const question =
-    rawQuestion.length <= questionBudget
-      ? rawQuestion
-      : truncateUnits(rawQuestion, Math.max(0, questionBudget - QUESTION_TRUNC_NOTE.length)) +
-        QUESTION_TRUNC_NOTE;
+  const question = clampQuestion(rawQuestion, fixed, reserve);
 
   const head = opening + question + framing;
 
@@ -224,5 +248,63 @@ export function buildAskChatSeed(input: {
   }
 
   const seed = head + quoted + "\n" + sources + tail;
+  return seed.length <= ASK_CHAT_SEED_MAX ? seed : truncateUnits(seed, ASK_CHAT_SEED_MAX);
+}
+
+/**
+ * Build the message a DIRECT escalation auto-sends — the reader typed a question
+ * and skipped the Ask tab entirely, so there is no answer to quote.
+ *
+ * A separate builder rather than `buildAskChatSeed({answer: ""})`: that one's
+ * whole framing ("treat the answer below as PRIOR CONTEXT to build on") and its
+ * budget math are written around a quoted answer, and with an empty one it emits
+ * a stray blank quote plus a "What else should I know here?" tail that reads as
+ * a follow-up to nothing.
+ *
+ * `webSearch` reflects the EFFECTIVE connector of the thread being created (the
+ * chosen connector row's type, or the bot's own default) — `WebSearch` is a
+ * built-in of `claude-cli`/`claude-sdk` only, so promising it to a Copilot or
+ * openai-compat bot would instruct the agent to use a tool it does not have.
+ *
+ * `hasCollections` is the same kind of promise about the OTHER tool: "search the
+ * wiki's own notes first" is a doomed instruction on a wiki with no backing
+ * huginn collections (a `WIKI_EXTRA` entry without the 3rd segment), where it
+ * produced answers that opened by apologizing for a search that could never work.
+ *
+ * **The opening is deliberately NOT first-person.** It used to read "I'm reading
+ * the … wiki", and the memory extractor duly recorded a biographical fact about a
+ * user who had merely clicked a button on a wiki they were browsing (observed: a
+ * real memories row asserting the user "maintains" a throwaway test wiki). A
+ * bracketed provenance line says where the question came from without putting
+ * words in the reader's mouth.
+ *
+ * Bounded by the same {@link ASK_CHAT_SEED_MAX} the sibling builder is, with the
+ * question carrying {@link ASK_CHAT_QUESTION_MAX} and a final surrogate-safe
+ * clamp so the bound holds whatever the constants become.
+ */
+export function buildDirectChatSeed(input: {
+  wikiName: string;
+  question: string;
+  webSearch: boolean;
+  /** Whether the wiki has huginn collections its notes can actually be searched
+   *  in. Absent ⇒ treated as true (the overwhelmingly common shape). */
+  hasCollections?: boolean;
+}): string {
+  const rawQuestion = typeof input.question === "string" ? input.question.trim() : "";
+  const wiki = flatten(typeof input.wikiName === "string" ? input.wikiName : "") || "knowledge";
+  const searchable = input.hasCollections !== false;
+
+  const opening = `[Question asked from the "${wiki}" wiki reader]\n\n`;
+  const tools = input.webSearch ? "your tools, including web search" : "the tools you have";
+  const framing =
+    "\n\nAnswer it properly: " +
+    (searchable
+      ? `search the "${wiki}" wiki's own notes first, then research beyond them with ${tools}, `
+      : `research it with ${tools}, `) +
+    "and cite what you find. Say plainly which parts you couldn't verify.";
+
+  const question = clampQuestion(rawQuestion, opening.length + framing.length);
+
+  const seed = opening + question + framing;
   return seed.length <= ASK_CHAT_SEED_MAX ? seed : truncateUnits(seed, ASK_CHAT_SEED_MAX);
 }

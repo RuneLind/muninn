@@ -1,5 +1,9 @@
 import { test, expect, beforeEach } from "bun:test";
-import { setPendingMessage, consumePendingMessage } from "./pending-messages.ts";
+import {
+  setPendingMessage,
+  setPendingMessageIfAbsent,
+  consumePendingMessage,
+} from "./pending-messages.ts";
 
 // Reset state between tests by consuming any leftover entries
 beforeEach(() => {
@@ -52,4 +56,28 @@ test("setPendingMessage without meta has undefined jiraContent/title", () => {
   const result = consumePendingMessage("test-thread-1");
   expect(result!.jiraContent).toBeUndefined();
   expect(result!.title).toBeUndefined();
+});
+
+test("setPendingMessageIfAbsent refuses to clobber a queued seed", () => {
+  // The peek-then-write pair it replaces is a real TOCTOU for callers that target
+  // an EXISTING thread: several awaits sit between the check and the write, and
+  // `setPendingMessage` is last-write-wins — so a second escalation landing in
+  // that window silently deletes a question nobody has opened yet.
+  expect(setPendingMessageIfAbsent("test-thread-1", "first")).toBe(true);
+  expect(setPendingMessageIfAbsent("test-thread-1", "second")).toBe(false);
+  expect(consumePendingMessage("test-thread-1")!.text).toBe("first");
+});
+
+test("setPendingMessageIfAbsent writes again once the seed is consumed", () => {
+  setPendingMessageIfAbsent("test-thread-1", "first");
+  consumePendingMessage("test-thread-1");
+  expect(setPendingMessageIfAbsent("test-thread-1", "second")).toBe(true);
+  expect(consumePendingMessage("test-thread-1")!.text).toBe("second");
+});
+
+test("setPendingMessageIfAbsent carries its meta and leaves other threads alone", () => {
+  setPendingMessageIfAbsent("test-thread-1", "one", { title: "a title" });
+  expect(setPendingMessageIfAbsent("test-thread-2", "two")).toBe(true);
+  expect(consumePendingMessage("test-thread-1")!.title).toBe("a title");
+  expect(consumePendingMessage("test-thread-2")!.text).toBe("two");
 });
