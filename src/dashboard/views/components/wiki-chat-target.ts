@@ -183,33 +183,46 @@ export function previewThreadName(typed: string, question: string): string {
 }
 
 /**
- * The question the popover would send RIGHT NOW.
+ * The thread name for the SUMMARY LINE — `""` when there is nothing to name it
+ * after yet.
  *
- * Three sources, and the split is the whole point:
+ * {@link previewThreadName} answers `wiki ask` for a blank question, because
+ * `createThread` needs SOME name and that is the stable generic fallback. Reporting
+ * it in the summary of a dialog whose question box is still empty states a decision
+ * nothing has made: the name-chip row (which refuses to offer the fallback as a
+ * choice) is empty at exactly the same moment, so the two disagreed. Send is
+ * blocked on an empty question anyway, so no name is ever actually derived from
+ * one — and the moment the reader types, this fills in.
+ */
+export function summaryThreadName(typed: string, nameSource: string): string {
+  if (!(typed || "").trim() && !(nameSource || "").trim()) return "";
+  return previewThreadName(typed, nameSource);
+}
+
+/**
+ * The question the popover would send RIGHT NOW — always its OWN field.
+ *
+ * Two sources now, and the collapse is deliberate:
  * - **Pinned** (the decline hook) — the question belongs to the TURN that failed
- *   and is fixed at open time. It is never re-read from the Ask box, and the box
- *   is never written to: overwriting it destroyed whatever draft the reader had
+ *   and is fixed at open time. It is never read from the Ask box, and the box is
+ *   never written to: overwriting it destroyed whatever draft the reader had
  *   typed, left the failed question armed in the box afterwards, and on the
  *   Connections tab wrote into a hidden textarea.
- * - **Escalate** — the turn's own question, snapshotted at open.
- * - **Direct** (the "New chat" button) — whatever the LIVE Ask box holds at this
- *   instant, deliberately re-read at submit: the reader can (and, when the panel
- *   says "Type a question first", must) keep typing with the panel up.
+ * - **Everything else** — `state.question`, the dialog's own textarea, updated on
+ *   input. Escalate seeds it from the turn, article starts it empty, direct
+ *   PREFILLS it from the Ask box once at open ({@link openChatOptions}).
  *
- * `boxValue` is `null` when there is no Ask box in the document at all.
+ * Direct mode used to re-read the live Ask box at submit instead. That is what
+ * made an empty box a dead end: the dialog said "Type a question first" while the
+ * only field that could satisfy it sat UNDERNEATH the dialog, and on the
+ * Connections tab it wasn't even rendered. Prefill-once keeps the reader's draft
+ * (the box is left untouched) without making a covered control load-bearing.
  */
 export function chatOptQuestion(
   state: { mode: ChatOptMode; question: string; pinnedQuestion?: string },
-  boxValue: string | null,
 ): string {
   if (typeof state.pinnedQuestion === "string") return state.pinnedQuestion.trim();
-  // Article mode types its question into the PANEL's own field (`state.question`,
-  // updated on input). It must never reach for the Ask box: the reader is on an
-  // article, the Connections tab may be showing, and the box holds someone
-  // else's draft.
-  if (state.mode === "article") return state.question.trim();
-  if (state.mode !== "direct") return state.question;
-  return (boxValue || "").trim();
+  return (state.question || "").trim();
 }
 
 // ── Article mode ("💬 Discuss" on an open page) ───────────────────────
@@ -226,6 +239,10 @@ export interface ChatOptArticle {
   description?: string;
   /** The page's first prose line, extracted at index time. */
   desc?: string;
+  /** Frontmatter `updated`, verbatim, when the page declares one — only used to
+   *  offer a "what changed since <date>" starter question, so a frontmatter-less
+   *  wiki simply gets one chip fewer rather than a fabricated date. */
+  updated?: string;
 }
 
 /** Id of the article popover's question field — shared by the render, the `input`
@@ -314,6 +331,278 @@ export function chatOptNameSource(
   return deriveAskThreadTitleOrNull(articleTitle || "") !== null ? (articleTitle as string) : question;
 }
 
+// ── Suggestions: what to ask, and what to call the thread ─────────────
+//
+// Both sets are TEMPLATES over data the reader's client already holds (the
+// article's title/links/`updated`, the wiki name, the session's last question), so
+// they cost no round-trip, no model call and no spend, and they are deterministic
+// enough to unit-test. The empty question box beside a wall of pickers is the
+// actual reason this dialog gets opened and abandoned; a model-generated set is a
+// later, opt-in addition, not the v1 that has to work offline.
+
+/** One suggestion chip. `label` is what the chip says; `question` is what it puts
+ *  in the box — never what it sends (see {@link chatOptSuggestionsHtml}). */
+export interface ChatOptSuggestion {
+  label: string;
+  question: string;
+}
+
+/** Longest chip label before it is clipped — chips wrap, and a full question as a
+ *  label makes a five-chip row unreadable. */
+export const SUGGESTION_LABEL_MAX = 34;
+
+function clip(text: string, max: number): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  if (flat.length <= max) return flat;
+  return flat.slice(0, max).replace(/\s+\S*$/, "") + "…";
+}
+
+/** A page title as it reads inside a sentence — bounded, because a title is as
+ *  long as its author felt like making it. */
+function titleForPrompt(title: string): string {
+  return clip(title, 90);
+}
+
+/**
+ * The starter questions for this dialog, in chip order.
+ *
+ * Article mode asks about the page (and, when the rail gave us its outgoing
+ * links, about how it connects); direct mode asks about the wiki as a whole. An
+ * ESCALATE dialog gets none: its question came from a turn the reader already
+ * asked, so a row of alternatives is an invitation to throw it away. A PINNED
+ * question likewise has no chips — the call site renders no question box at all.
+ */
+export function suggestedQuestions(input: {
+  mode: ChatOptMode;
+  pinned?: boolean;
+  article?: ChatOptArticle;
+  /** Titles of pages this article links to (the rail's "Links to"), newest first.
+   *  At most two are named, so the question stays a question. */
+  links?: string[];
+  /** Display name of the wiki being read — direct mode's chips are about it. */
+  wiki?: string;
+  /** The question that opened this reader's Ask session, if there was one. */
+  lastQuestion?: string;
+}): ChatOptSuggestion[] {
+  if (input.pinned || input.mode === "escalate") return [];
+  const out: ChatOptSuggestion[] = [];
+  if (input.mode === "article") {
+    const article = input.article;
+    if (!article) return [];
+    const t = titleForPrompt(article.title || "");
+    if (!t) return [];
+    out.push(
+      { label: "Summarise it", question: `Summarise "${t}" and tell me what it is actually claiming.` },
+      {
+        label: "Strongest objection",
+        question: `What is the strongest objection to the argument in "${t}", ` +
+          "and does the page answer it?",
+      },
+      {
+        label: "What would settle it",
+        question: `What evidence would decide the central question in "${t}"?`,
+      },
+      { label: "Push back on it", question: `Which claims in "${t}" would you push back on, and why?` },
+    );
+    const links = (input.links || []).filter((l) => !!l && l !== article.title).slice(0, 2);
+    if (links.length) {
+      out.push({
+        label: "How it connects",
+        question: `How does "${t}" relate to ` +
+          links.map((l) => `"${titleForPrompt(l)}"`).join(" and ") + "?",
+      });
+    }
+    // Only offered when the page says when it was last touched: "what changed
+    // since" with no since is not a question anyone can answer.
+    if (article.updated) {
+      out.push({
+        label: "What changed since",
+        question: `What has changed on this topic since "${t}" was last updated (${article.updated})?`,
+      });
+    }
+    return out;
+  }
+  const wiki = clip(input.wiki || "", 40);
+  const where = wiki ? `the "${wiki}" wiki` : "this wiki";
+  out.push(
+    { label: "What's new here", question: `What has been added to ${where} recently, and what is worth reading?` },
+    {
+      label: "Recurring themes",
+      question: `Across ${where}, which themes keep coming up that I have not synthesised into a page yet?`,
+    },
+    { label: "Contradictions", question: `Where does ${where} contradict itself?` },
+  );
+  const last = (input.lastQuestion || "").trim();
+  if (last) {
+    out.push({
+      label: "Continue “" + clip(last, 20) + "”",
+      question: `Picking up an earlier question from this wiki session: ${clip(last, 400)}`,
+    });
+  }
+  return out;
+}
+
+/** One thread-name chip: `value` goes into the name field verbatim (so an empty
+ *  one is the "clear it" chip), `label` says where it came from. */
+export interface ChatOptNameSuggestion {
+  label: string;
+  value: string;
+}
+
+/**
+ * Names to offer for the thread.
+ *
+ * The DEFAULT is untouched — {@link chatOptNameSource} still derives it from the
+ * page in article mode and the question everywhere else, which is what makes a
+ * second Discuss on the same article land in the same thread (409 → "Send there
+ * →") instead of minting a sibling per question. These chips are the opt-out:
+ * "from question" is offered in article mode precisely so a reader who wants a
+ * separate thread for a separate question can say so, and the dated chip is the
+ * escape hatch from a collision the reader would rather not join.
+ *
+ * `today` is passed in, never read from the clock here: this runs inside a render,
+ * and a function that reads `Date.now()` mid-render is untestable for the same
+ * reason `sortPages` takes its `now`.
+ */
+export function threadNameSuggestions(input: {
+  mode: ChatOptMode;
+  question: string;
+  articleTitle?: string;
+  /** Short day label for the dated chip, e.g. `4 aug`. */
+  today?: string;
+}): ChatOptNameSuggestion[] {
+  const out: ChatOptNameSuggestion[] = [];
+  const fromPage = deriveAskThreadTitleOrNull(input.articleTitle || "");
+  const fromQuestion = deriveAskThreadTitleOrNull(input.question || "");
+  if (fromPage) out.push({ label: "from page", value: fromPage });
+  if (fromQuestion && fromQuestion !== fromPage) {
+    out.push({ label: "from question", value: fromQuestion });
+  }
+  const base = fromPage || fromQuestion;
+  const day = (input.today || "").trim();
+  if (base && day) {
+    // Through the same derivation the field itself uses, so the chip can never
+    // offer a name the route would truncate differently.
+    out.push({ label: "dated", value: deriveAskThreadTitle(base + " " + day) });
+  }
+  return out;
+}
+
+/** Class + data attribute shared by the question chips' render and the reader's
+ *  click delegation. */
+export const CHAT_OPT_SUGGEST_CLASS = "wiki-chatopt-chip";
+export const CHAT_OPT_SUGGEST_ATTR = "data-chat-q";
+/** Same, for the thread-name chips. */
+export const CHAT_OPT_NAME_CHIP_ATTR = "data-chat-name";
+
+/**
+ * The starter-question chip row.
+ *
+ * A chip FILLS the question box and leaves it editable — it never submits. That
+ * is the same rule the `desc` prefill broke in #420: a one-click path from "a
+ * sentence the page wrote about itself" to "a question sent as the reader's own"
+ * is how the wiki ended up being asked its own subtitle. The full question rides
+ * in `title=` so a clipped label is still readable before it is chosen.
+ */
+export function chatOptSuggestionsHtml(
+  suggestions: ChatOptSuggestion[],
+  heading: string,
+): string {
+  if (!suggestions.length) return "";
+  return (
+    '<div class="wiki-chatopt-slab">' + esc(heading) + "</div>" +
+    '<div class="wiki-chatopt-chips">' +
+    suggestions
+      .map(
+        (s) =>
+          '<button type="button" class="' + CHAT_OPT_SUGGEST_CLASS + '" ' +
+          CHAT_OPT_SUGGEST_ATTR + '="' + esc(s.question) + '" title="' + esc(s.question) + '">' +
+          esc(clip(s.label, SUGGESTION_LABEL_MAX)) + "</button>",
+      )
+      .join("") +
+    "</div>"
+  );
+}
+
+/** The thread-name chip row, under the name field. `active` marks the chip whose
+ *  value the field currently holds, so the row reports the state instead of just
+ *  offering choices. */
+export function chatOptNameChipsHtml(
+  suggestions: ChatOptNameSuggestion[],
+  active: string,
+): string {
+  if (!suggestions.length) return "";
+  const typed = (active || "").trim();
+  return (
+    '<div class="wiki-chatopt-chips wiki-chatopt-namechips">' +
+    suggestions
+      .map(
+        (s) =>
+          '<button type="button" class="' + CHAT_OPT_SUGGEST_CLASS + " name" +
+          (typed && typed === s.value ? " on" : "") + '" ' +
+          CHAT_OPT_NAME_CHIP_ATTR + '="' + esc(s.value) + '" title="' + esc(s.value) + '">' +
+          esc(s.label) + "</button>",
+      )
+      .join("") +
+    // Always last, and always available: the field's own default (derived from the
+    // page or the question) is what an empty value means, so "clear" is how the
+    // reader gets back to it after trying a chip.
+    '<button type="button" class="' + CHAT_OPT_SUGGEST_CLASS + " name" +
+    (typed ? "" : " on") + '" ' + CHAT_OPT_NAME_CHIP_ATTR + '="" title="Use the default name">' +
+    "default</button>" +
+    "</div>"
+  );
+}
+
+/**
+ * Just the summary line's TEXT — the typing paths repaint this in place (a
+ * wholesale re-render would take the caret with it), so it has to be one
+ * implementation rather than two spellings that drift.
+ *
+ * A part is omitted when its value is unknown (a single-user install has no user
+ * to name, a still-resolving target has no model), so the line never renders a
+ * dangling separator or the word "thread" with nothing after it.
+ */
+export function chatOptSummaryTextHtml(input: {
+  userName: string;
+  modelLabel: string;
+  threadName: string;
+}): string {
+  const parts: string[] = [];
+  if (input.userName) parts.push("as <b>" + esc(input.userName) + "</b>");
+  if (input.modelLabel) parts.push("<b>" + esc(input.modelLabel) + "</b>");
+  if (input.threadName) parts.push("thread <b>" + esc(input.threadName) + "</b>");
+  return parts.join(' <span class="sep">·</span> ');
+}
+
+/**
+ * The one-line summary of every choice the collapsed options hold: who the chat
+ * belongs to, which model answers, what the thread will be called.
+ *
+ * It replaces three always-open picker rows AND the separate "will be named
+ * `…`" preview line — the panel opened at seven rows before the question, and the
+ * three values it was asking about are already correct nearly every time.
+ */
+export function chatOptSummaryHtml(input: {
+  userName: string;
+  modelLabel: string;
+  threadName: string;
+  advOpen: boolean;
+}): string {
+  return (
+    '<div class="wiki-chatopt-sum">' +
+    '<span class="wiki-chatopt-sumtext">' + chatOptSummaryTextHtml(input) + "</span>" +
+    '<button type="button" id="' + CHAT_OPT_ADV_ID + '" class="wiki-chatopt-advbtn" ' +
+    'aria-expanded="' + (input.advOpen ? "true" : "false") + '">' +
+    (input.advOpen ? "⚙ Hide options" : "⚙ Options") +
+    "</button></div>"
+  );
+}
+
+/** Id of the options disclosure toggle — shared by the render and the click
+ *  delegation, the `CHAT_OPT_QUESTION_ID` precedent. */
+export const CHAT_OPT_ADV_ID = "wikiChatOptAdv";
+
 // ── Popover lifecycle: focus, Escape, navigation ──────────────────────
 
 /**
@@ -355,23 +644,29 @@ export function captureChatOptFocus(
   };
 }
 
-/** Status copy for the first Escape on an article question with text in it. */
+/** Status copy for the first Escape on a typed question. */
 export const CHAT_OPT_ESC_CONFIRM = "Press Esc again to discard this question.";
 
 /**
  * What Escape does.
  *
- * Direct mode's draft lives in the Ask box and survives a close; an ARTICLE
- * question lives only in this panel, so a stray Escape is the only copy of it
- * gone. The first Escape therefore arms a confirmation, the second closes —
- * `escArmed` is cleared again by typing, so the confirmation can't go stale.
+ * A question the reader TYPED exists only inside this dialog, so a stray Escape
+ * is the only copy of it gone: the first Escape arms a confirmation, the second
+ * closes, and typing clears `escArmed` again so the confirmation can't go stale.
+ *
+ * The gate is `dirty`, not the mode. It used to be "article mode only", which was
+ * right when article mode owned the only in-panel textarea; now every mode types
+ * here. But a question the dialog PREFILLED (escalate's turn question, direct's
+ * copy of the Ask box, a pinned decline question) is not the reader's unsaved
+ * work — it is reproducible by re-opening, and prompting to discard it is noise.
  */
 export function chatOptEscapeAction(state: {
-  mode: ChatOptMode;
   question: string;
   escArmed?: boolean;
+  /** The reader has edited the question field in this dialog. */
+  dirty?: boolean;
 }): "close" | "confirm" {
-  if (state.mode !== "article") return "close";
+  if (!state.dirty) return "close";
   if (!state.question.trim()) return "close";
   return state.escArmed ? "close" : "confirm";
 }
@@ -393,16 +688,43 @@ export function shouldCloseArticleChatOnNavigate(
   return (state.article.relPath || "") !== (relPath || "");
 }
 
-/** The article popover's context + question block. Pure so the "editable, not
- *  pinned" contract and the prefill/hint split are testable without a DOM. */
-export function articleChatRowsHtml(article: ChatOptArticle, value: string): string {
+/**
+ * The article context block — what page this is about, and what the page says
+ * about itself.
+ *
+ * Its own bounded row ABOVE the question, not interleaved with the fields: the
+ * anchored popover rendered "About …" and then "Page says: …" between the
+ * textarea and the As/Model/Thread rows, which made the pickers read as belonging
+ * to the excerpt and pushed Send toward the fold.
+ */
+export function articleChatContextHtml(article: ChatOptArticle): string {
   const hint = articleChatHint(article);
   return (
-    '<div class="wiki-chatopt-article">About <b>' + esc(article.title) + "</b></div>" +
-    '<label class="wiki-chatopt-row wiki-chatopt-qrow"><span>Ask</span>' +
-    '<textarea id="' + CHAT_OPT_QUESTION_ID + '" rows="3" placeholder="' +
-    esc(ARTICLE_QUESTION_PLACEHOLDER) + '">' + esc(value) + "</textarea></label>" +
-    (hint ? '<div class="wiki-chatopt-note">Page says: ' + esc(hint) + "</div>" : "")
+    '<div class="wiki-chatopt-ctx">About <b>' + esc(article.title) + "</b>" +
+    (hint ? '<span class="wiki-chatopt-says">Page says: ' + esc(hint) + "</span>" : "") +
+    "</div>"
+  );
+}
+
+/** Placeholder for the modes that are NOT about one page. */
+export const DIRECT_QUESTION_PLACEHOLDER = "What do you want to ask?";
+
+/**
+ * The question field — ONE textarea for all three modes (see
+ * {@link chatOptQuestion}), rendered above the loading/error returns so the
+ * reader can start typing while the chat target is still resolving.
+ *
+ * A PINNED question gets no textarea at all: it belongs to the declined turn, is
+ * composed rather than verbatim, and editing it would silently detach it from the
+ * turn whose failure it is escalating.
+ */
+export function chatOptQuestionHtml(mode: ChatOptMode, value: string): string {
+  const placeholder = mode === "article"
+    ? ARTICLE_QUESTION_PLACEHOLDER
+    : DIRECT_QUESTION_PLACEHOLDER;
+  return (
+    '<textarea class="wiki-chatopt-q" id="' + CHAT_OPT_QUESTION_ID + '" rows="3" ' +
+    'placeholder="' + esc(placeholder) + '">' + esc(value) + "</textarea>"
   );
 }
 
@@ -470,13 +792,6 @@ export interface ChatOptClickContext {
   inOpener: boolean;
   /** A submit is in flight (its own click is what re-rendered the panel). */
   sending: boolean;
-  /** The click landed in the Ask box — direct mode reads its question from
-   *  there, so it is part of the popover's flow, not an outside click. */
-  inQuestionBox: boolean;
-  /** The popover's question is PINNED to a turn (the decline hook), so the Ask
-   *  box is no longer part of its flow — see {@link chatOptQuestion}. */
-  pinned: boolean;
-  mode: ChatOptMode;
 }
 
 /**
@@ -491,18 +806,17 @@ export interface ChatOptClickContext {
  * nothing, with the retry hitting `alreadyQueued`. So a detached target is never
  * an outside click, and neither is anything at all while a submit is in flight.
  *
- * The third rule is the empty-question recovery path: in direct mode the panel
- * tells the reader to "Type a question first", and clicking into the Ask box to
- * do exactly that must not close the panel out from under them. It does NOT
- * apply to a PINNED question (the decline hook), which neither reads nor writes
- * the box — there the box is an unrelated control like any other.
+ * There used to be a third rule — a click in the Ask box didn't dismiss, because
+ * direct mode read its question from there and "Type a question first" sent the
+ * reader to a control OUTSIDE the panel to satisfy it. The dialog owns its
+ * question now ({@link chatOptQuestion}), so the box is an ordinary outside click
+ * again, and the exemption (plus the `mode`/`pinned` context it needed) is gone.
  */
 export function shouldCloseChatOptions(ctx: ChatOptClickContext): boolean {
   if (!ctx.open) return false;
   if (ctx.sending) return false;
   if (!ctx.attached) return false;
   if (ctx.inPanel || ctx.inOpener) return false;
-  if (ctx.mode === "direct" && !ctx.pinned && ctx.inQuestionBox) return false;
   return true;
 }
 

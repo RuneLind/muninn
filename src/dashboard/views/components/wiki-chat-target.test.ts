@@ -2,7 +2,7 @@ import { test, expect, describe } from "bun:test";
 import path from "node:path";
 import {
   articleChatHint,
-  articleChatRowsHtml,
+  articleChatContextHtml,
   ARTICLE_HINT_MAX,
   ARTICLE_QUESTION_PLACEHOLDER,
   botDefaultOptionLabel,
@@ -10,9 +10,14 @@ import {
   chatEscBarHtml,
   chatOptConflictFootHtml,
   chatOptEscapeAction,
+  chatOptNameChipsHtml,
   chatOptNameSource,
   chatOptQuestion,
+  chatOptQuestionHtml,
   chatOptStatusLines,
+  chatOptSuggestionsHtml,
+  chatOptSummaryHtml,
+  chatOptSummaryTextHtml,
   chatUserStorageKey,
   chosenSupportsWebTools,
   composeDeclineQuestion,
@@ -23,7 +28,14 @@ import {
   declineChatBarHtml,
   discussArticleBtnHtml,
   shouldCloseArticleChatOnNavigate,
+  suggestedQuestions,
+  threadNameSuggestions,
+  CHAT_OPT_ADV_ID,
   CHAT_OPT_EMPTY_QUESTION,
+  CHAT_OPT_NAME_CHIP_ATTR,
+  CHAT_OPT_SUGGEST_ATTR,
+  DIRECT_QUESTION_PLACEHOLDER,
+  SUGGESTION_LABEL_MAX,
   CHAT_OPT_FORCE_ID,
   CHAT_OPT_QUESTION_ID,
   CHAT_OPT_SEND_THERE_ID,
@@ -33,6 +45,7 @@ import {
   pickUserId,
   previewThreadName,
   shouldCloseChatOptions,
+  summaryThreadName,
   wikiConnectorStorageKey,
   WIKI_CONNECTOR_DEFAULT,
   type ChatEscTurn,
@@ -127,9 +140,6 @@ describe("shouldCloseChatOptions", () => {
     inPanel: false,
     inOpener: false,
     sending: false,
-    inQuestionBox: false,
-    pinned: false,
-    mode: "escalate",
     ...over,
   });
 
@@ -154,20 +164,13 @@ describe("shouldCloseChatOptions", () => {
     expect(shouldCloseChatOptions(ctx({ sending: true }))).toBe(false);
   });
 
-  test("direct mode keeps the panel open while the reader types the question", () => {
-    // The panel's own copy tells them to "Type a question first"; the Ask box is
-    // the recovery path, so clicking into it must not dismiss the panel.
-    expect(shouldCloseChatOptions(ctx({ mode: "direct", inQuestionBox: true }))).toBe(false);
-    // In escalate mode the question comes from the turn, so the box is outside.
-    expect(shouldCloseChatOptions(ctx({ mode: "escalate", inQuestionBox: true }))).toBe(true);
-  });
-
-  test("a PINNED question makes the Ask box an ordinary outside click again", () => {
-    // The decline hook neither reads nor writes the box, so clicking into it is
-    // the reader moving on to a new question — not part of this popover's flow.
-    expect(
-      shouldCloseChatOptions(ctx({ mode: "direct", inQuestionBox: true, pinned: true })),
-    ).toBe(true);
+  test("the Ask box is an ordinary outside click — the dialog owns its question", () => {
+    // Direct mode used to read its question from `#wikiAskInput`, so clicking
+    // there (the recovery path from "Type a question first") had to be exempt. The
+    // dialog has its own field in every mode now, so the exemption — and the
+    // `mode`/`pinned`/`inQuestionBox` context it needed — is gone: a click in the
+    // box is the reader moving on, and the dialog closes.
+    expect(shouldCloseChatOptions(ctx())).toBe(true);
   });
 
   test("a closed popover is never closed again", () => {
@@ -251,43 +254,31 @@ describe("conflictCopy", () => {
 // Only the PERSISTENCE of `declined`/`explainPage`/`originQuestion` belongs there.
 
 describe("chatOptQuestion", () => {
-  const direct = { mode: "direct" as const, question: "snapshot at open" };
+  const direct = { mode: "direct" as const, question: "typed in the dialog" };
 
-  test("a PINNED question ignores the live Ask box entirely", () => {
-    // The decline hook's whole point: the reader's own draft in the box is
-    // untouched and irrelevant, and the failed question is what gets sent.
+  test("a PINNED question wins over the dialog's own field", () => {
+    // The decline hook's whole point: the question belongs to the turn that
+    // failed, so it is fixed at open and the field is not even rendered.
     expect(
-      chatOptQuestion({ ...direct, pinnedQuestion: "why did X fail?" }, "a draft I was typing"),
+      chatOptQuestion({ ...direct, pinnedQuestion: "  why did X fail?  " }),
     ).toBe("why did X fail?");
-    // …including when the box is empty, or absent from the document altogether.
-    expect(chatOptQuestion({ ...direct, pinnedQuestion: "why did X fail?" }, "")).toBe(
-      "why did X fail?",
-    );
-    expect(chatOptQuestion({ ...direct, pinnedQuestion: "why did X fail?" }, null)).toBe(
-      "why did X fail?",
-    );
   });
 
-  test("un-pinned direct mode still re-reads the live box (PR A's M9)", () => {
-    expect(chatOptQuestion(direct, "  what I typed just now  ")).toBe("what I typed just now");
-    expect(chatOptQuestion(direct, null)).toBe("");
+  test("every un-pinned mode reads the dialog's OWN field", () => {
+    // This is the collapse: direct mode used to re-read the live `#wikiAskInput`
+    // at submit, which made opening the dialog on an empty box a dead end — it
+    // asked for a question while covering the only field that could supply one.
+    expect(chatOptQuestion(direct)).toBe("typed in the dialog");
+    expect(chatOptQuestion({ mode: "escalate", question: "the turn's question" }))
+      .toBe("the turn's question");
+    expect(chatOptQuestion({ mode: "article", question: "  what changed in v4?  " }))
+      .toBe("what changed in v4?");
   });
 
-  test("escalate mode reads the turn's question, never the box", () => {
-    expect(
-      chatOptQuestion({ mode: "escalate", question: "the turn's question" }, "unrelated draft"),
-    ).toBe("the turn's question");
-  });
-
-  test("article mode reads its OWN field, never the Ask box", () => {
-    // The reader is on an article; the Ask box may be on a hidden tab and holds
-    // someone else's draft. Article mode neither reads nor writes it.
-    const article = { mode: "article" as const, question: "  what changed in v4?  " };
-    expect(chatOptQuestion(article, "a draft in the Ask box")).toBe("what changed in v4?");
-    expect(chatOptQuestion(article, null)).toBe("what changed in v4?");
-    // Empty stays empty — that is what keeps Send disabled (the route 400s an
-    // empty question).
-    expect(chatOptQuestion({ mode: "article", question: "   " }, "box text")).toBe("");
+  test("an empty question stays empty — that is what keeps Send disabled", () => {
+    // The route 400s an empty question, so the button must never be live on one.
+    expect(chatOptQuestion({ mode: "direct", question: "   " })).toBe("");
+    expect(chatOptQuestion({ mode: "article", question: "" })).toBe("");
   });
 });
 
@@ -310,12 +301,14 @@ describe("article popover prefill + hint", () => {
     // to the seed as its parenthetical, so it arrived twice.
     const authored = page({ description: "How clustering works." });
     expect(articleChatHint(authored)).toBe("How clustering works.");
-    expect(articleChatRowsHtml(authored, "")).toContain("></textarea>");
+    expect(chatOptQuestionHtml("article", "")).toContain("></textarea>");
 
     // `desc` — the page's first prose LINE — behaves the same way.
     const prose = page({ desc: "The gardener clusters summaries every week." });
     expect(articleChatHint(prose)).toBe("The gardener clusters summaries every week.");
-    expect(articleChatRowsHtml(prose, "")).toContain("></textarea>");
+    // Neither summary reaches the question field — they render in the context row.
+    expect(articleChatContextHtml(prose)).toContain("The gardener clusters summaries every week.");
+    expect(chatOptQuestionHtml("article", "")).not.toContain("gardener clusters");
 
     // The authored one wins the hint slot on a page carrying both.
     expect(articleChatHint(page({ description: "Authored.", desc: "First line." })))
@@ -324,7 +317,7 @@ describe("article popover prefill + hint", () => {
 
   test("a page with neither renders no hint at all", () => {
     expect(articleChatHint(page())).toBe("");
-    expect(articleChatRowsHtml(page(), "")).not.toContain("wiki-chatopt-note");
+    expect(articleChatContextHtml(page())).not.toContain("wiki-chatopt-says");
   });
 
   test("an unbounded summary is CLAMPED — it used to bury the Send button", () => {
@@ -338,26 +331,255 @@ describe("article popover prefill + hint", () => {
       .toBe("Short enough to read.");
   });
 
-  test("the rows render an EDITABLE question field, not a pinned line", () => {
-    const html = articleChatRowsHtml(page({ desc: "First prose line." }), "why the cap?");
+  test("the question field is EDITABLE, not a pinned line", () => {
+    const html = chatOptQuestionHtml("article", "why the cap?");
     expect(html).toContain('id="' + CHAT_OPT_QUESTION_ID + '"');
     expect(html).toContain("<textarea");
     expect(html).toContain(">why the cap?</textarea>");
     expect(html).toContain(ARTICLE_QUESTION_PLACEHOLDER);
     // The pinned (decline-hook) treatment must NOT appear — that one is read-only.
     expect(html).not.toContain("wiki-chatopt-pinned");
-    // The hint rides along as a note.
-    expect(html).toContain("First prose line.");
+  });
+
+  test("the other modes get the same field with a mode-appropriate placeholder", () => {
+    for (const mode of ["direct", "escalate"] as const) {
+      const html = chatOptQuestionHtml(mode, "prefilled from the Ask box");
+      expect(html).toContain('id="' + CHAT_OPT_QUESTION_ID + '"');
+      expect(html).toContain(">prefilled from the Ask box</textarea>");
+      expect(html).toContain(DIRECT_QUESTION_PLACEHOLDER);
+      expect(html).not.toContain(ARTICLE_QUESTION_PLACEHOLDER);
+    }
   });
 
   test("page text is escaped at every sink", () => {
-    const html = articleChatRowsHtml(
-      page({ title: "<img src=x>", desc: '"><script>alert(1)</script>' }),
-      "<b>q</b>",
-    );
+    const html =
+      articleChatContextHtml(page({ title: "<img src=x>", desc: '"><script>alert(1)</script>' })) +
+      chatOptQuestionHtml("article", "<b>q</b>");
     expect(html).not.toContain("<img src=x>");
     expect(html).not.toContain("<script>");
     expect(html).not.toContain("<b>q</b>");
+  });
+});
+
+// ── Suggestions: starter questions + thread names ────────────────────
+
+describe("suggestedQuestions", () => {
+  const page: ChatOptArticle = {
+    name: "Wiki gardener",
+    title: "Wiki gardener",
+    relPath: "projects/muninn/wiki-gardener.md",
+  };
+
+  test("article mode asks about the page, and names it in every question", () => {
+    const out = suggestedQuestions({ mode: "article", article: page });
+    expect(out.length).toBeGreaterThanOrEqual(4);
+    for (const s of out) {
+      expect(s.label).toBeTruthy();
+      expect(s.question).toContain("Wiki gardener");
+    }
+  });
+
+  test("the link and date chips are offered ONLY when their data exists", () => {
+    const bare = suggestedQuestions({ mode: "article", article: page });
+    expect(bare.some((s) => s.label === "How it connects")).toBe(false);
+    // "what changed since" with no since is not a question anyone can answer, so a
+    // frontmatter-less wiki gets one chip fewer rather than a fabricated date.
+    expect(bare.some((s) => s.label === "What changed since")).toBe(false);
+
+    const rich = suggestedQuestions({
+      mode: "article",
+      article: { ...page, updated: "2026-07-31" },
+      links: ["Backlog drain", "Source drafter", "A third one"],
+    });
+    const connects = rich.find((s) => s.label === "How it connects");
+    expect(connects?.question).toContain("Backlog drain");
+    expect(connects?.question).toContain("Source drafter");
+    // At most TWO neighbours are named — three turns the question into a list.
+    expect(connects?.question).not.toContain("A third one");
+    expect(rich.find((s) => s.label === "What changed since")?.question).toContain("2026-07-31");
+  });
+
+  test("the page's own title is never offered as its own neighbour", () => {
+    const out = suggestedQuestions({
+      mode: "article",
+      article: page,
+      links: ["Wiki gardener", "Backlog drain"],
+    });
+    const connects = out.find((s) => s.label === "How it connects");
+    expect(connects?.question).toContain("Backlog drain");
+    expect((connects?.question.match(/Wiki gardener/g) || []).length).toBe(1);
+  });
+
+  test("direct mode asks about the WIKI, named when we know it", () => {
+    const named = suggestedQuestions({ mode: "direct", wiki: "mimir" });
+    expect(named.every((s) => s.question.includes('"mimir" wiki'))).toBe(true);
+    // Bare /wiki has no name to use, and must not render a dangling quote pair.
+    const unnamed = suggestedQuestions({ mode: "direct" });
+    expect(unnamed.every((s) => s.question.includes("this wiki"))).toBe(true);
+    expect(unnamed.some((s) => s.question.includes('""'))).toBe(false);
+  });
+
+  test("the session's last question becomes a continue chip, clipped in the LABEL only", () => {
+    const long = "why does the gardener drop clusters below the minimum size every single week";
+    const out = suggestedQuestions({ mode: "direct", wiki: "mimir", lastQuestion: long });
+    const chip = out.find((s) => s.label.startsWith("Continue"));
+    expect(chip).toBeTruthy();
+    expect(chip!.label.length).toBeLessThan(long.length);
+    // The QUESTION keeps the whole thing — the label is decoration, the question
+    // is what gets sent.
+    expect(chip!.question).toContain(long);
+  });
+
+  test("escalate mode and a pinned question get NO suggestions", () => {
+    // The reader already asked something; a row of alternatives beside it is an
+    // invitation to throw their own question away.
+    expect(suggestedQuestions({ mode: "escalate", wiki: "mimir" })).toEqual([]);
+    expect(suggestedQuestions({ mode: "direct", wiki: "mimir", pinned: true })).toEqual([]);
+  });
+
+  test("article mode with no article — or a title that flattens away — offers nothing", () => {
+    expect(suggestedQuestions({ mode: "article" })).toEqual([]);
+    expect(suggestedQuestions({ mode: "article", article: { ...page, title: "  " } })).toEqual([]);
+  });
+
+  test("the chips render as fill-the-box buttons, escaped, with the full question in title=", () => {
+    const html = chatOptSuggestionsHtml(
+      [{ label: "Summarise it", question: 'Summarise "<b>x</b>" & tell me' }],
+      "Ask about this page",
+    );
+    expect(html).toContain(CHAT_OPT_SUGGEST_ATTR + "=");
+    expect(html).toContain("Ask about this page");
+    expect(html).toContain("title=");
+    expect(html).not.toContain("<b>x</b>");
+    expect(html).toContain("&amp;");
+    // A chip is a button, never a submit — the whole rule is "fills the box".
+    expect(html).toContain('type="button"');
+    // Nothing to suggest ⇒ no heading either (an empty labelled row reads broken).
+    expect(chatOptSuggestionsHtml([], "Ask about this page")).toBe("");
+  });
+
+  test("a long chip label is clipped for the row", () => {
+    const html = chatOptSuggestionsHtml(
+      [{ label: "x".repeat(SUGGESTION_LABEL_MAX + 20), question: "q" }],
+      "Or start from",
+    );
+    expect(html).not.toContain("x".repeat(SUGGESTION_LABEL_MAX + 1));
+  });
+});
+
+describe("threadNameSuggestions", () => {
+  test("article mode offers the page name, the question name and a dated one", () => {
+    const out = threadNameSuggestions({
+      mode: "article",
+      question: "Why is the cluster cap 3?",
+      articleTitle: "Wiki gardener",
+      today: "4 aug",
+    });
+    expect(out.map((s) => s.label)).toEqual(["from page", "from question", "dated"]);
+    // Through the SAME derivation the field uses, so a chip can never offer a name
+    // the route would then store differently.
+    expect(out[0]!.value).toBe("wiki gardener");
+    expect(out[1]!.value).toBe("why is the cluster cap 3?");
+    expect(out[2]!.value).toBe("wiki gardener 4 aug");
+  });
+
+  test("no article ⇒ the question is the only source", () => {
+    const out = threadNameSuggestions({ mode: "direct", question: "How does drain work?" });
+    expect(out.map((s) => s.label)).toEqual(["from question"]);
+  });
+
+  test("nothing to derive from ⇒ no chips, never a generic fallback name", () => {
+    // `deriveAskThreadTitle` would answer "wiki ask" here; offering that as a
+    // CHOICE would let a reader pin a thread to the generic fallback on purpose.
+    expect(threadNameSuggestions({ mode: "direct", question: "   " })).toEqual([]);
+    expect(threadNameSuggestions({ mode: "article", question: "", articleTitle: " " }))
+      .toEqual([]);
+  });
+
+  test("a question that derives the SAME name as the page isn't offered twice", () => {
+    const out = threadNameSuggestions({
+      mode: "article",
+      question: "Wiki gardener",
+      articleTitle: "Wiki gardener",
+    });
+    expect(out.map((s) => s.label)).toEqual(["from page"]);
+  });
+
+  test("the dated chip needs both a base and a day", () => {
+    expect(
+      threadNameSuggestions({ mode: "article", question: "q", articleTitle: "T" })
+        .some((s) => s.label === "dated"),
+    ).toBe(false);
+  });
+
+  test("the chip row marks the ACTIVE name and always offers the default", () => {
+    const chips = [{ label: "from page", value: "wiki gardener" }];
+    const active = chatOptNameChipsHtml(chips, "wiki gardener");
+    expect(active).toContain(CHAT_OPT_NAME_CHIP_ATTR + '="wiki gardener"');
+    expect(active).toContain("on");
+    // The default chip is an EMPTY value — `threadName: ""` is exactly what makes
+    // the route derive the name itself again.
+    expect(active).toContain(CHAT_OPT_NAME_CHIP_ATTR + '=""');
+    // With nothing typed, the default chip is the active one.
+    expect(chatOptNameChipsHtml(chips, "")).toContain('=""');
+    expect(chatOptNameChipsHtml([], "")).toBe("");
+  });
+});
+
+describe("chatOptSummaryHtml", () => {
+  test("reports all three collapsed choices, and the toggle states itself", () => {
+    const html = chatOptSummaryHtml({
+      userName: "rune",
+      modelLabel: "Sonnet (CLI)",
+      threadName: "wiki gardener",
+      advOpen: false,
+    });
+    expect(html).toContain("rune");
+    expect(html).toContain("Sonnet (CLI)");
+    expect(html).toContain("wiki gardener");
+    expect(html).toContain('id="' + CHAT_OPT_ADV_ID + '"');
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).toContain("⚙ Options");
+    const open = chatOptSummaryHtml({
+      userName: "rune", modelLabel: "m", threadName: "t", advOpen: true,
+    });
+    expect(open).toContain('aria-expanded="true"');
+    expect(open).toContain("Hide options");
+  });
+
+  test("an unknown value is OMITTED, never rendered as a dangling separator", () => {
+    // A single-user install has no user to name, and a still-resolving target has
+    // no model — the line has to read as a sentence in both cases.
+    const html = chatOptSummaryTextHtml({
+      userName: "", modelLabel: "", threadName: "wiki gardener",
+    });
+    expect(html).toBe("thread <b>wiki gardener</b>");
+    expect(chatOptSummaryTextHtml({ userName: "", modelLabel: "", threadName: "" })).toBe("");
+  });
+
+  test("the summary names no thread until there is something to name it after", () => {
+    // `previewThreadName` answers the generic `wiki ask` for a blank question,
+    // because `createThread` needs SOME name. Reporting that in the summary of a
+    // dialog whose question box is still empty states a decision nothing has made —
+    // and the name-chip row (which refuses to offer the fallback as a choice) is
+    // empty at exactly the same moment, so the two disagreed.
+    expect(summaryThreadName("", "")).toBe("");
+    expect(summaryThreadName("", "   ")).toBe("");
+    // Either source filling in is enough, and both go through the real derivation.
+    expect(summaryThreadName("", "Why is the cap three?")).toBe("why is the cap three?");
+    expect(summaryThreadName("My Thread", "")).toBe("my thread");
+    // Sanity: this is a DIFFERENCE from the field's own derivation, not a rewrite
+    // of it — the route really would store the fallback if it ever got that far.
+    expect(previewThreadName("", "")).toBe("wiki ask");
+  });
+
+  test("every part is escaped", () => {
+    const html = chatOptSummaryTextHtml({
+      userName: "<img src=x>", modelLabel: "<b>m</b>", threadName: '"><script>',
+    });
+    expect(html).not.toContain("<img src=x>");
+    expect(html).not.toContain("<b>m</b>");
+    expect(html).not.toContain("<script>");
   });
 });
 
@@ -548,21 +770,26 @@ describe("captureChatOptFocus", () => {
   });
 });
 
-/** M2 — an article question exists ONLY inside the panel. */
+/** M2 — a question the reader typed exists ONLY inside the dialog. */
 describe("chatOptEscapeAction", () => {
-  test("a typed article question takes two Escapes to discard", () => {
-    const state = { mode: "article" as const, question: "why the cap?" };
+  test("a question the reader typed takes two Escapes to discard", () => {
+    const state = { question: "why the cap?", dirty: true };
     expect(chatOptEscapeAction(state)).toBe("confirm");
     expect(chatOptEscapeAction({ ...state, escArmed: true })).toBe("close");
   });
 
-  test("an empty article question just closes", () => {
-    expect(chatOptEscapeAction({ mode: "article", question: "   " })).toBe("close");
+  test("an emptied field just closes, even after editing", () => {
+    expect(chatOptEscapeAction({ question: "   ", dirty: true })).toBe("close");
   });
 
-  test("the other modes are untouched — their draft lives in the Ask box", () => {
-    expect(chatOptEscapeAction({ mode: "direct", question: "typed in the Ask box" })).toBe("close");
-    expect(chatOptEscapeAction({ mode: "escalate", question: "the turn's question" })).toBe("close");
+  test("a PREFILLED question closes at once — it is not unsaved work", () => {
+    // The gate is `dirty`, not the mode (it used to be "article only", which was
+    // right when article mode owned the only in-panel textarea). Escalate's turn
+    // question, direct's copy of the Ask box and a pinned decline question are all
+    // reproducible by re-opening, so prompting to discard them is noise.
+    expect(chatOptEscapeAction({ question: "the turn's question" })).toBe("close");
+    expect(chatOptEscapeAction({ question: "prefilled from the box", dirty: false }))
+      .toBe("close");
   });
 });
 
@@ -841,16 +1068,71 @@ describe("wiki-browser wiring", () => {
     expect(body.indexOf("panel.innerHTML =")).toBeLessThan(body.indexOf("restoreChatOptFocus("));
   });
 
-  test("Escape asks before discarding a typed article question", async () => {
-    // Direct mode's draft survives in the Ask box; an article question exists
-    // only in this panel, so a stray Escape used to be the only copy gone.
+  test("Escape asks before discarding a question the reader typed", async () => {
+    // The question exists only inside the dialog now (in every mode), so a stray
+    // Escape used to be the only copy of it gone.
     const src = await browserSrc();
-    const start = src.indexOf('if (e.key !== "Escape"');
+    const start = src.indexOf('if (e.key === "Escape")');
     expect(start).toBeGreaterThan(-1);
     const handler = src.slice(start, start + 900);
     expect(handler).toContain("chatOptEscapeAction");
     expect(handler).toContain("CHAT_OPT_ESC_CONFIRM");
     expect(handler).toContain("escArmed = true");
+    // The confirm is gated on the reader's own edit, not on the mode.
+    expect(handler).toContain("dirty: state.dirty");
+  });
+
+  test("⌘↵ submits through the SAME pre-opened-tab discipline as the button", async () => {
+    // Safari blocks a `window.open` issued after an await unconditionally, so the
+    // shortcut has to open the tab synchronously inside the keydown exactly as the
+    // Send click does — and it must be gated like the button's disabled state, or
+    // it fires a blank tab that opens and closes with no feedback.
+    const src = await browserSrc();
+    const at = src.indexOf('if (e.key !== "Enter" || !(e.metaKey || e.ctrlKey)) return;');
+    expect(at).toBeGreaterThan(-1);
+    const handler = src.slice(at, at + 900);
+    expect(handler).toContain('window.open("", "_blank")');
+    expect(handler).toContain("submitChatOptions");
+    expect(handler).toContain("state.userId");
+    expect(handler).toContain("currentChatOptQuestion(state)");
+    // A conflict/queued/done state has no single primary action left to stand for.
+    expect(handler).toContain("state.conflict");
+    expect(handler).toContain("state.queuedUrl");
+  });
+
+  test("a suggestion chip FILLS the question box and never submits", async () => {
+    // The `desc` prefill in #420 is the cautionary case: one click from "a
+    // sentence the page wrote about itself" to "the reader's own question, sent".
+    const src = await browserSrc();
+    const at = src.indexOf("CHAT_OPT_SUGGEST_ATTR + \"]\")) {");
+    expect(at).toBeGreaterThan(-1);
+    const branch = src.slice(at, at + 900);
+    expect(branch).toContain("chatOpt.question = q");
+    expect(branch).toContain("chatOpt.dirty = true");
+    expect(branch).not.toContain("submitChatOptions");
+  });
+
+  test("a thread-name chip clears the collision it was chosen against", async () => {
+    // The 409 was against the OLD name; a foot still offering "Send there →" would
+    // post a thread id the new name has nothing to do with.
+    const src = await browserSrc();
+    const at = src.indexOf("CHAT_OPT_NAME_CHIP_ATTR + \"]\")) {");
+    expect(at).toBeGreaterThan(-1);
+    const branch = src.slice(at, at + 900);
+    expect(branch).toContain("chatOpt.threadName =");
+    expect(branch).toContain("chatOpt.conflict = undefined");
+    expect(branch).toContain("chatOpt.queuedUrl = undefined");
+  });
+
+  test("the dialog is centred with a scrim — no anchor maths left", async () => {
+    const body = fnBody(await browserSrc(), "renderChatOptions");
+    expect(body).toContain("wikiChatOptScrim");
+    expect(body).toContain('setAttribute("aria-modal", "true")');
+    // The anchored-popover positioning is gone, along with the clamping it needed.
+    expect(body).not.toContain("getBoundingClientRect");
+    expect(body).not.toContain("panel.style.top");
+    // …and the scrim is removed with the panel, or it would swallow every click.
+    expect(fnBody(await browserSrc(), "closeChatOptions")).toContain("wikiChatOptScrim");
   });
 
   test("navigating the pane closes an article popover, and clears the open page", async () => {
