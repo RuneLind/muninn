@@ -93,20 +93,25 @@ import {
 import { discoverAllBots, resolveWikiSynthesisBot, type BotConfig } from "../../bots/config.ts";
 import { chatState } from "../../chat/state.ts";
 import { loadChatConfig } from "../../chat/chat-config.ts";
-import { hasPendingMessage, setPendingMessage } from "../../chat/pending-messages.ts";
+import {
+  hasPendingMessage,
+  setPendingMessage,
+  setPendingMessageIfAbsent,
+} from "../../chat/pending-messages.ts";
 import {
   createThread,
   findThreadByName,
   getThreadById,
   updateThreadConnector,
 } from "../../db/threads.ts";
-import { getConnector, listConnectors } from "../../db/connectors.ts";
+import { getConnector, listConnectorOptions } from "../../db/connectors.ts";
 import { isValidUuid } from "./route-utils.ts";
 import type { ConnectorType } from "../../bots/config.ts";
 import {
   buildAskChatSeed,
   buildDirectChatSeed,
   deriveAskThreadTitle,
+  deriveAskThreadTitleOrNull,
   uniqueAskThreadTitle,
   type AskChatCitation,
 } from "../../wiki/ask-chat.ts";
@@ -134,7 +139,7 @@ import { buildDistillPrompt, parseDistillResult, buildSavedNotesBlock } from "..
 import { callHaikuWithFallback } from "../../ai/haiku-direct.ts";
 import { generateEmbedding } from "../../ai/embeddings.ts";
 import { saveMemory, searchMemoriesHybrid } from "../../db/memories.ts";
-import { getBotDefaultUser } from "../../db/chat-preferences.ts";
+import { getBotDefaultUser, getChatPreferences } from "../../db/chat-preferences.ts";
 import { activityLog } from "../../observability/activity-log.ts";
 import { getLog } from "../../logging.ts";
 
@@ -317,13 +322,26 @@ export interface AskChatDeps {
     connectorId?: string,
   ) => Promise<{ id: string }>;
   setPendingMessage: (threadId: string, text: string, meta?: { title?: string }) => void;
-  /** Whether a seed is STILL queued (unopened, unexpired) on a thread. The
-   *  pending store is last-write-wins, so seeding an existing thread that already
-   *  carries an unconsumed question would destroy that question. */
+  /** Whether a seed is STILL queued (unopened, unexpired) on a thread — a cheap
+   *  fail-fast so the common "already queued" case refuses BEFORE any side effect
+   *  (connector stamp, conversation shell). Not the race guard; see below. */
   hasPendingMessage: (threadId: string) => boolean;
+  /** Queue a seed ONLY if the thread carries none — the atomic form of the
+   *  peek-then-write pair. The pending store is last-write-wins, so seeding a
+   *  thread that already holds an unconsumed question would destroy it, and the
+   *  peek above is separated from the write by several awaits (connector lookup,
+   *  the connector stamp, the conversation shell). Returns false ⇒ 409. */
+  setPendingMessageIfAbsent: (
+    threadId: string,
+    text: string,
+    meta?: { title?: string },
+  ) => boolean;
   /** Named connector rows, for the reader's connector picker (`GET
    *  /api/wiki/chat-target`). A seam because tests must never touch the live DB. */
   listConnectors: () => Promise<{ id: string; name: string; connectorType: ConnectorType }[]>;
+  /** The user+bot's persisted sidebar connector preference — folded into `GET
+   *  /api/wiki/chat-target` so the popover's common path is ONE fetch. */
+  getPreferredConnector: (userId: string, botName: string) => Promise<string | null>;
   /** One connector row — validates a posted `connectorId` before it reaches
    *  `createThread`'s FK. */
   getConnector: (id: string) => Promise<{ id: string; connectorType: ConnectorType } | null>;
@@ -355,7 +373,10 @@ const defaultAskChatDeps: AskChatDeps = {
   createThread,
   setPendingMessage,
   hasPendingMessage,
-  listConnectors,
+  setPendingMessageIfAbsent,
+  listConnectors: listConnectorOptions,
+  getPreferredConnector: async (userId, botName) =>
+    (await getChatPreferences(userId, botName)).preferredConnectorId,
   getConnector,
   getThreadById,
   updateThreadConnector,
@@ -383,8 +404,11 @@ export type AskChatTarget =
   | {
       ok: true;
       botConfig: BotConfig;
-      /** Every discovered bot — the popover's bot picker offers these even on a
-       *  wiki that resolved cleanly, so a reader can retarget the thread. */
+      /** Every discovered bot. Carried on the ok path only for callers that need
+       *  the full list; the popover's bot picker exists only for a wiki that did
+       *  NOT resolve, so `GET /api/wiki/chat-target` deliberately does not ship
+       *  this on its ok path (the client caches the list from the failure
+       *  response it opened with). */
       bots: { name: string }[];
       users: { id: string; name: string }[];
       /** The bot's `bot_default_user`, **only when it is a member of `users`**.
@@ -436,11 +460,43 @@ export async function resolveAskChatTarget(
     if (!botConfig) return { ok: false, reason: "needs_bot", bots };
   }
 
-  const chatConfig = await deps.loadChatConfig(botConfig.name);
+  // Concurrent: the two queries are independent, and this runs on every popover
+  // open as well as on every escalation.
+  const [chatConfig, mapped] = await Promise.all([
+    deps.loadChatConfig(botConfig.name),
+    // A `bot_default_user` lookup is a CONVENIENCE — it resolves the multi-user
+    // case without a picker. Making it unconditional (so the GET can prefill)
+    // also handed every sole-user escalation a brand-new way to 500, on a query
+    // that path never needed. Degrade to "no mapping", which is a state the
+    // callers already handle.
+    deps.getBotDefaultUser(botConfig.name).catch((err: unknown) => {
+      log.warn("Wiki chat target: bot_default_user lookup failed for {bot}: {error}", {
+        bot: botConfig!.name,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }),
+  ]);
   const users = (chatConfig?.users ?? []).map((u) => ({ id: u.id, name: u.name }));
-  const mapped = await deps.getBotDefaultUser(botConfig.name);
   const defaultUserId = mapped && users.some((u) => u.id === mapped) ? mapped : null;
   return { ok: true, botConfig, bots, users, defaultUserId };
+}
+
+/** The message each {@link AskChatTargetFailure} carries. ONE spelling, shared by
+ *  the POST's 400 bodies and the GET's `error` field — the two had already drifted
+ *  (the POST's `needs_bot` copy names the escalation, the GET's named the popover)
+ *  while the tests pinned both. */
+export function askChatTargetErrorMessage(
+  reason: AskChatTargetFailure,
+  wikiName: string,
+  wantedBot: string,
+): string {
+  if (reason === "unknown_bot") return `Unknown bot "${wantedBot}"`;
+  if (reason === "bot_gone") return `Bot "${wikiName}" is no longer configured`;
+  return (
+    `The "${wikiName}" wiki belongs to no bot, so there is no chat to continue in ` +
+    "— pass an explicit bot to escalate anyway."
+  );
 }
 
 /** Injectable deps for {@link fetchSavedNotes} — the DB/embedding fns are passed
@@ -1781,56 +1837,67 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         return c.json({ error: "no wiki configured for that name" }, 404);
       }
       const wanted = (c.req.query("bot") ?? "").trim();
+      // Connector rows are bot-INDEPENDENT, so the listing runs concurrently with
+      // the (bot-keyed) target resolution rather than after it.
+      const connectorsPromise = askChatDeps
+        .listConnectors()
+        .then((rows) => ({
+          connectors: rows.map((row) => ({
+            id: row.id,
+            name: row.name,
+            connectorType: row.connectorType,
+            // Capability is flagged HERE, not in the browser: `connectorCapabilities`
+            // can't run client-side, and re-deriving it from a second hardcoded list
+            // of connector types is exactly the drift that makes a picker promise a
+            // bot web search it doesn't have.
+            supportsWebTools: capabilitiesForConnectorType(row.connectorType).supportsWebTools,
+          })),
+          connectorsError: undefined as string | undefined,
+        }))
+        .catch((err: unknown) => {
+          // A dead connectors table must not cost the reader the whole popover —
+          // "(bot default)" alone is a complete, working choice. The client RENDERS
+          // this string, so the degrade is visible rather than a silently short list.
+          const connectorsError = err instanceof Error ? err.message : String(err);
+          log.warn("Wiki chat-target: connector listing failed: {error}", { error: connectorsError });
+          return { connectors: [], connectorsError };
+        });
+
       const target = await resolveAskChatTarget(entry, wanted, askChatDeps);
       if (!target.ok) {
-        // The reason rides through untranslated: `needs_bot` renders the popover's
-        // bot picker, the other two render the POST's corresponding message.
+        void connectorsPromise;
+        // The reason rides through as the client's ONLY branch key — `needs_bot`
+        // renders the popover's bot picker, the other two render the message.
+        // `bots` is meaningful only here (the picker's options).
         return c.json({
-          wiki: entry.name,
           botName: null,
           reason: target.reason,
-          error:
-            target.reason === "unknown_bot"
-              ? `Unknown bot "${wanted}"`
-              : target.reason === "bot_gone"
-                ? `Bot "${entry.name}" is no longer configured`
-                : `The "${entry.name}" wiki belongs to no bot — pick one to chat with.`,
-          needsBot: target.reason === "needs_bot",
+          error: askChatTargetErrorMessage(target.reason, entry.name, wanted),
           bots: target.bots,
-          users: [],
-          defaultUserId: null,
-          connectors: [],
-          botDefault: null,
         });
       }
-      // Capability is flagged HERE, not in the browser: `connectorCapabilities`
-      // can't run client-side, and re-deriving it from a second hardcoded list of
-      // connector types is exactly the drift that makes a picker promise a bot
-      // web search it doesn't have.
-      let connectors: { id: string; name: string; connectorType: string; supportsWebTools: boolean }[] =
-        [];
-      let connectorsError: string | undefined;
-      try {
-        connectors = (await askChatDeps.listConnectors()).map((row) => ({
-          id: row.id,
-          name: row.name,
-          connectorType: row.connectorType,
-          supportsWebTools: capabilitiesForConnectorType(row.connectorType).supportsWebTools,
-        }));
-      } catch (err) {
-        // A dead connectors table must not cost the reader the whole popover —
-        // "(bot default)" alone is a complete, working choice.
-        connectorsError = err instanceof Error ? err.message : String(err);
-        log.warn("Wiki chat-target: connector listing failed: {error}", { error: connectorsError });
+      const { connectors, connectorsError } = await connectorsPromise;
+      // The user+bot sidebar preference the popover would otherwise fetch in a
+      // SECOND round-trip right after this one. Folded in for the user the client
+      // would resolve WITHOUT a remembered override (the mapping, else a sole
+      // user), and stamped with WHICH user it belongs to — a preference is per
+      // user+bot, so a client that lands on a different user must still refetch
+      // rather than silently apply someone else's model.
+      const preferredForUserId =
+        target.defaultUserId ?? (target.users.length === 1 ? target.users[0]!.id : null);
+      let preferredConnectorId: string | null = null;
+      if (preferredForUserId) {
+        preferredConnectorId = await askChatDeps
+          .getPreferredConnector(preferredForUserId, target.botConfig.name)
+          .catch(() => null);
       }
       const botDefaultType = target.botConfig.connector ?? "claude-cli";
       return c.json({
-        wiki: entry.name,
         botName: target.botConfig.name,
-        needsBot: false,
-        bots: target.bots,
         users: target.users,
         defaultUserId: target.defaultUserId,
+        preferredForUserId,
+        preferredConnectorId,
         connectors,
         connectorsError,
         botDefault: {
@@ -1947,22 +2014,11 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       const wanted = typeof body.bot === "string" ? body.bot.trim() : "";
       const target = await resolveAskChatTarget(entry, wanted, askChatDeps);
       if (!target.ok) {
-        if (target.reason === "unknown_bot") {
-          return c.json({ error: `Unknown bot "${wanted}"` }, 400);
+        const error = askChatTargetErrorMessage(target.reason, entry.name, wanted);
+        if (target.reason === "needs_bot") {
+          return c.json({ error, needsBot: true, bots: target.bots }, 400);
         }
-        if (target.reason === "bot_gone") {
-          return c.json({ error: `Bot "${entry.name}" is no longer configured` }, 400);
-        }
-        return c.json(
-          {
-            error:
-              `The "${entry.name}" wiki belongs to no bot, so there is no chat to continue in ` +
-              "— pass an explicit bot to escalate anyway.",
-            needsBot: true,
-            bots: target.bots,
-          },
-          400,
-        );
+        return c.json({ error }, 400);
       }
       const botConfig = target.botConfig;
 
@@ -2011,23 +2067,43 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         connectorType = row.connectorType;
       }
       const webSearch = capabilitiesForConnectorType(connectorType).supportsWebTools;
+      // A collection-less wiki (a `WIKI_EXTRA` entry with no 3rd segment) cannot
+      // have its "own notes" searched at all, so the direct seed must not open by
+      // ordering one — observed producing an answer whose first paragraph
+      // apologized for a search that could never have worked.
+      const hasCollections = (entry.collections ?? []).length > 0;
+
+      const buildSeed = (canWebSearch: boolean): string =>
+        direct
+          ? buildDirectChatSeed({
+              wikiName: entry.name,
+              question,
+              webSearch: canWebSearch,
+              hasCollections,
+            })
+          : buildAskChatSeed({ wikiName: entry.name, question, answer, citations });
 
       // Seed FIRST: everything that can still fail (string building over
       // client-posted citations included) must fail before a thread exists or is
       // written to, or a caller told "500" is left with a dead thread in their
       // sidebar. After this point only the conversation shell, the insert and the
       // handoff remain.
-      const seed = direct
-        ? buildDirectChatSeed({ wikiName: entry.name, question, webSearch })
-        : buildAskChatSeed({ wikiName: entry.name, question, answer, citations });
+      const seed = buildSeed(webSearch);
       const pendingMeta = { title: question.slice(0, 80) };
+      // `&src=wiki` tells the chat page this thread's connector was decided HERE,
+      // so its sidebar preference must not stamp over it (see
+      // `stampConnectorOnThread`). It is appended ONLY when the request actually
+      // expressed a connector decision — direct mode, or any POST from the options
+      // popover (which always sends `connectorId`, "" meaning "(bot default)").
+      // The plain one-click "Continue in chat →" offers no such choice, and
+      // flagging it would silently cost that path the sidebar stamping it has
+      // always had.
+      const connectorDecided = direct || body.connectorId !== undefined;
       const chatUrlFor = (threadId: string): string =>
         `/chat?bot=${encodeURIComponent(botConfig.name)}` +
         `&thread=${encodeURIComponent(threadId)}` +
         `&user=${encodeURIComponent(chatUser.id)}` +
-        // Tells the chat page this thread's connector was chosen HERE, so its
-        // sidebar preference must not stamp over it (see `stampConnectorOnThread`).
-        `&src=wiki`;
+        (connectorDecided ? "&src=wiki" : "");
 
       // "Send there →": seed the question onto a thread the caller already has
       // (the 409 they just got), instead of minting another one.
@@ -2044,23 +2120,34 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
             400,
           );
         }
-        // `setPendingMessage` is last-write-wins on a 5-min TTL: seeding over an
-        // unconsumed question would delete a question nobody has seen yet, and the
-        // caller would be told it succeeded. Refuse, and point at the thread.
-        if (askChatDeps.hasPendingMessage(thread.id)) {
-          return c.json(
-            {
-              alreadyQueued: true,
-              error: "A question is already queued on that thread — open it first.",
-              threadId: thread.id,
-              chatUrl: chatUrlFor(thread.id),
-            },
-            409,
-          );
+        // Cheap fail-fast on the common case, so an "already queued" refusal costs
+        // no connector stamp and no conversation shell. The narrow race it cannot
+        // close is closed by the atomic write below.
+        const queuedError = {
+          alreadyQueued: true,
+          error: "A question is already queued on that thread — open it first.",
+          threadId: thread.id,
+          chatUrl: chatUrlFor(thread.id),
+        };
+        if (askChatDeps.hasPendingMessage(thread.id)) return c.json(queuedError, 409);
+        // A thread's OWN connector wins at processing time, so on reuse the seed's
+        // capability claim must come from THAT row — not from the picked/bot-default
+        // resolution above, which is only effective for a thread with an empty slot.
+        // (Observed: a copilot-pinned thread seeded with a promise of web search.)
+        let reuseSeed = seed;
+        if (thread.connectorId) {
+          const row = await askChatDeps.getConnector(thread.connectorId);
+          // A thread pointing at a deleted connector row falls back to the bot's
+          // own default, which is what resolution does at processing time too.
+          const effectiveType = row?.connectorType ?? botConfig.connector ?? "claude-cli";
+          reuseSeed = buildSeed(capabilitiesForConnectorType(effectiveType).supportsWebTools);
         }
         // An established thread keeps the model it has been answering with; the
-        // chosen connector only fills an empty slot.
-        if (connectorId && !thread.connectorId) {
+        // chosen connector only fills an empty slot. When it doesn't, SAY so —
+        // silently dropping the pick left the reader with a "sent" confirmation
+        // and a thread answering on a different model than the one they picked.
+        const connectorApplied = !!connectorId && !thread.connectorId;
+        if (connectorApplied) {
           await askChatDeps.updateThreadConnector(thread.id, connectorId);
         }
         const conv = await askChatDeps.findOrCreateConversation({
@@ -2068,7 +2155,13 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
           userId: chatUser.id,
           username: chatUser.name,
         });
-        askChatDeps.setPendingMessage(thread.id, seed, pendingMeta);
+        // Atomic set-if-absent: `setPendingMessage` is last-write-wins on a 5-min
+        // TTL, so seeding over an unconsumed question would delete a question
+        // nobody has seen yet and the caller would be told it succeeded. A
+        // peek-then-write pair leaves that window open across the awaits above.
+        if (!askChatDeps.setPendingMessageIfAbsent(thread.id, reuseSeed, pendingMeta)) {
+          return c.json(queuedError, 409);
+        }
         log.info("Wiki ask→chat (existing thread): wiki={wiki} bot={bot} thread={threadId}", {
           wiki: entry.name,
           bot: botConfig.name,
@@ -2079,6 +2172,9 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
           conversationId: conv.id,
           chatUrl: chatUrlFor(thread.id),
           reusedThread: true,
+          ...(connectorId
+            ? { connectorApplied, ...(connectorApplied ? {} : { keptConnectorId: thread.connectorId }) }
+            : {}),
         });
       }
 
@@ -2087,11 +2183,12 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // pipeline (the `createThread` contract doesn't care where the name came
       // from). An existing thread of that name is a 409 the client retries with
       // `forceNew`, which timestamp-suffixes the name.
-      const nameSource =
-        typeof body.threadName === "string" && body.threadName.trim()
-          ? body.threadName
-          : question;
-      const title = deriveAskThreadTitle(nameSource);
+      // A typed name that FLATTENS to nothing (control characters only) must fall
+      // back to the question, not to the generic "wiki ask" — `deriveAskThreadTitle`
+      // alone can't express that difference, hence the `…OrNull` variant.
+      const title =
+        deriveAskThreadTitleOrNull(typeof body.threadName === "string" ? body.threadName : "") ??
+        deriveAskThreadTitle(question);
       const existing = await askChatDeps.findThreadByName(chatUser.id, botConfig.name, title);
       if (existing && !body.forceNew) {
         return c.json({
@@ -2100,6 +2197,10 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
           existingThreadName: existing.name,
           userId: chatUser.id,
           botName: botConfig.name,
+          // The deep link for that thread, built by the SAME `chatUrlFor` the 200
+          // paths use — so the client never has to re-derive one (and can't get
+          // the `&src=wiki` scoping wrong doing it).
+          chatUrl: chatUrlFor(existing.id),
         }, 409);
       }
       // `forceNew`: the timestamp suffix is MINUTE-precision and `createThread` is

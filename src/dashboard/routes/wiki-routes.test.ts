@@ -1751,6 +1751,34 @@ describe("plan-status fields on /api/wiki/pages + /api/wiki/page", () => {
  * with no DB and no chat process: what's under test is the resolution chain
  * (owning bot → user → thread name → 409/forceNew) and the seeded message.
  */
+/**
+ * Every ask→chat seam, stubbed to THROW. Both HTTP suites below spread this
+ * before their own overrides, so a seam added to `AskChatDeps` later can never
+ * silently fall through to the live database in a test that didn't think about
+ * it — it fails loudly on first use instead.
+ */
+const throwingAskChatDeps = (): AskChatDeps => {
+  const nope = (seam: string) => () => {
+    throw new Error("unstubbed ask-chat seam: " + seam);
+  };
+  return {
+    discoverBots: nope("discoverBots"),
+    loadChatConfig: nope("loadChatConfig"),
+    getBotDefaultUser: nope("getBotDefaultUser"),
+    findThreadByName: nope("findThreadByName"),
+    createThread: nope("createThread"),
+    setPendingMessage: nope("setPendingMessage"),
+    hasPendingMessage: nope("hasPendingMessage"),
+    setPendingMessageIfAbsent: nope("setPendingMessageIfAbsent"),
+    listConnectors: nope("listConnectors"),
+    getPreferredConnector: nope("getPreferredConnector"),
+    getConnector: nope("getConnector"),
+    getThreadById: nope("getThreadById"),
+    updateThreadConnector: nope("updateThreadConnector"),
+    findOrCreateConversation: nope("findOrCreateConversation"),
+  } as unknown as AskChatDeps;
+};
+
 describe("POST /api/wiki/ask/chat", () => {
   let root: string;
   let app: Hono;
@@ -1772,12 +1800,18 @@ describe("POST /api/wiki/ask/chat", () => {
   /** Every non-DB seam, so no test can reach the live database. Shared by the
    *  suite's two `__setAskChatDepsForTest` blocks. */
   const fakeDeps = () => ({
+    ...throwingAskChatDeps(),
     discoverBots: () => bots.map((name) => ({ name }) as unknown as BotConfig),
     loadChatConfig: async () => ({ users }),
     getBotDefaultUser: async () => defaultUser,
     findThreadByName: async (_userId: string, _botName: string, name: string) =>
       existingThreadNames.includes(name) ? { id: "existing-thread", name } : null,
     hasPendingMessage: (threadId: string) => livePending.includes(threadId),
+    setPendingMessageIfAbsent: (threadId: string, text: string) => {
+      if (livePending.includes(threadId)) return false;
+      pending.push({ threadId, text });
+      return true;
+    },
     listConnectors: async () => connectorRows as never,
     getConnector: async (id: string) => (connectorRows.find((r) => r.id === id) ?? null) as never,
     getThreadById: async (id: string) => threadsById[id] ?? null,
@@ -1791,7 +1825,10 @@ describe("POST /api/wiki/ask/chat", () => {
 
   /** A syntactically valid UUID that names no connector row. */
   const UNKNOWN_UUID = "11111111-2222-4333-8444-555555555555";
+  /** A copilot-sdk row — no web tools. */
   const CONNECTOR_UUID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  /** A claude-cli row — web tools. */
+  const CLI_CONNECTOR_UUID = "dddddddd-eeee-4fff-8000-111111111111";
 
   const post = (body: unknown, query = "") =>
     app.request("/api/wiki/ask/chat" + query, {
@@ -1825,6 +1862,9 @@ describe("POST /api/wiki/ask/chat", () => {
       { name: "pinnedwiki", root, source: "extra", synthesisBot: "melosys" },
       // …and one whose pin names no discovered bot (must NOT resolve).
       { name: "ghostpinwiki", root, source: "extra", synthesisBot: "not-a-bot" },
+      // A standalone wiki WITH backing collections — the direct seed may tell the
+      // bot to search this one's own notes, unlike `lonewiki`.
+      { name: "collwiki", root, source: "extra", synthesisBot: "melosys", collections: ["wiki"] },
     ]);
 
     created = [];
@@ -1835,6 +1875,7 @@ describe("POST /api/wiki/ask/chat", () => {
     defaultUser = null;
     connectorRows = [
       { id: CONNECTOR_UUID, name: "Copilot", connectorType: "copilot-sdk" },
+      { id: CLI_CONNECTOR_UUID, name: "Sonnet CLI", connectorType: "claude-cli" },
     ];
     threadsById = {};
     livePending = [];
@@ -1894,7 +1935,10 @@ describe("POST /api/wiki/ask/chat", () => {
     const data = (await res.json()) as { threadId: string; conversationId: string; chatUrl: string };
     expect(data.threadId).toBe("thread-1");
     expect(data.conversationId).toBe("conv-1");
-    expect(data.chatUrl).toBe("/chat?bot=jarviswiki&thread=thread-1&user=user-1&src=wiki");
+    // No `&src=wiki`: this body expressed no connector decision (see the
+    // stamp-suppression block below), so the chat page's sidebar preference must
+    // keep stamping the thread exactly as it always has.
+    expect(data.chatUrl).toBe("/chat?bot=jarviswiki&thread=thread-1&user=user-1");
 
     // The thread belongs to the wiki's OWNER, not a synthesis/research fallback.
     expect(created).toHaveLength(1);
@@ -2129,6 +2173,16 @@ describe("POST /api/wiki/ask/chat", () => {
       await post(directBody({ question: "q".repeat(200_000) }));
       expect(pending[0]!.text.length).toBeLessThanOrEqual(ASK_CHAT_SEED_MAX);
     });
+
+    test("a wiki with NO collections isn't told to search notes it can't search", async () => {
+      // `collwiki` has collections, `lonewiki` (a bare WIKI_EXTRA entry) does not.
+      await post(directBody({ wiki: "collwiki" }));
+      expect(pending[0]!.text).toContain("wiki's own notes");
+      pending = [];
+      await post(directBody({ wiki: "lonewiki", bot: "melosys", forceNew: true }));
+      expect(pending[0]!.text).not.toContain("wiki's own notes");
+      expect(pending[0]!.text).toContain("research it with");
+    });
   });
 
   // ── connectorId ─────────────────────────────────────────────────────
@@ -2174,6 +2228,14 @@ describe("POST /api/wiki/ask/chat", () => {
 
   test("a blank threadName falls back to the question", async () => {
     await post(askBody({ threadName: "   " }));
+    expect(created[0]!.name).toBe("how does the gardener cluster summaries?");
+  });
+
+  test("a threadName of only CONTROL chars falls back to the question, not 'wiki ask'", async () => {
+    // Truthy, so the old `.trim()` gate let it through — and it then flattened to
+    // nothing, pinning every such thread to the stable generic fallback while the
+    // perfectly good question sat right there.
+    await post(askBody({ threadName: "\u0001\u0002" }));
     expect(created[0]!.name).toBe("how does the gardener cluster summaries?");
   });
 
@@ -2237,14 +2299,124 @@ describe("POST /api/wiki/ask/chat", () => {
       await post(askBody({ existingThreadId: THREAD, connectorId: CONNECTOR_UUID }));
       expect(connectorStamps).toEqual([]);
     });
+
+    // ── the DROPPED pick is reported, never silent ────────────────────
+    test("connectorApplied says whether the pick actually landed", async () => {
+      const applied = await post(askBody({ existingThreadId: THREAD, connectorId: CONNECTOR_UUID }));
+      expect(applied.status).toBe(200);
+      expect((await applied.json()) as { connectorApplied: boolean }).toMatchObject({
+        connectorApplied: true,
+      });
+
+      // Now the thread carries one of its own: the pick is dropped, and the caller
+      // must be told — it used to 200 with no signal at all, so the client wrote
+      // the ignored pick to localStorage as if it had been honored.
+      threadsById[THREAD]!.connectorId = CLI_CONNECTOR_UUID;
+      const dropped = await post(askBody({ existingThreadId: THREAD, connectorId: CONNECTOR_UUID }));
+      expect(dropped.status).toBe(200);
+      const body = (await dropped.json()) as { connectorApplied: boolean; keptConnectorId: string };
+      expect(body.connectorApplied).toBe(false);
+      expect(body.keptConnectorId).toBe(CLI_CONNECTOR_UUID);
+    });
+
+    test("no pick ⇒ no connectorApplied field at all (nothing was decided)", async () => {
+      const res = await post(askBody({ existingThreadId: THREAD }));
+      const body = (await res.json()) as Record<string, unknown>;
+      expect("connectorApplied" in body).toBe(false);
+    });
+
+    // ── the seed reflects the thread's EFFECTIVE connector ────────────
+    describe("seed capability on reuse", () => {
+      const directTo = (over: Record<string, unknown> = {}) =>
+        post(askBody({ answer: undefined, mode: "direct", existingThreadId: THREAD, ...over }));
+
+      test("a connector-CARRYING thread's own model decides, not the pick", async () => {
+        // The thread's connector wins at processing time, so a seed built from the
+        // picked (or bot-default) connector promised web search a copilot-pinned
+        // thread cannot deliver — reproduced live before this fix.
+        threadsById[THREAD]!.connectorId = CONNECTOR_UUID; // copilot-sdk
+        await directTo({ connectorId: CLI_CONNECTOR_UUID });
+        expect(pending).toHaveLength(1);
+        expect(pending[0]!.text).not.toContain("web search");
+        expect(pending[0]!.text).toContain("the tools you have");
+      });
+
+      test("an EMPTY thread takes the pick — which really is applied", async () => {
+        await directTo({ connectorId: CLI_CONNECTOR_UUID });
+        expect(connectorStamps).toEqual([
+          { threadId: THREAD, connectorId: CLI_CONNECTOR_UUID },
+        ]);
+        expect(pending[0]!.text).toContain("including web search");
+      });
+
+      test("an empty thread with a copilot pick claims no web search", async () => {
+        await directTo({ connectorId: CONNECTOR_UUID });
+        expect(pending[0]!.text).not.toContain("web search");
+      });
+
+      test("a thread pointing at a DELETED connector row falls back to the bot default", async () => {
+        threadsById[THREAD]!.connectorId = UNKNOWN_UUID;
+        await directTo();
+        // The fabricated bot has no `connector` field ⇒ claude-cli ⇒ web tools,
+        // which is also what connector resolution does at processing time.
+        expect(pending[0]!.text).toContain("including web search");
+      });
+    });
   });
 
-  // ── chatUrl carries the stamp-suppression flag ──────────────────────
-  test("the chatUrl tells the chat page not to stamp its remembered connector", async () => {
-    // "(bot default)" is expressed as NO connector on the thread, which is exactly
-    // what the chat page's `onlyIfEmpty` stamp would fill in from the sidebar.
-    const res = await post(askBody());
-    expect(((await res.json()) as { chatUrl: string }).chatUrl).toContain("&src=wiki");
+  // ── chatUrl's stamp-suppression flag is SCOPED ──────────────────────
+  //
+  // `&src=wiki` tells the chat page not to stamp its remembered sidebar connector
+  // on the thread — necessary when the reader chose "(bot default)", which is
+  // expressed as NO connector and is exactly what the `onlyIfEmpty` stamp fills
+  // in. But it is only correct for a request that MADE that choice: flagging the
+  // plain one-click escalation (which offers no picker and posts no connector
+  // fields) silently costs it the sidebar preference it has always applied.
+  //
+  // The signal is the `connectorId` KEY's presence. The popover always sends it —
+  // `""` meaning "(bot default)", a real decision — and the one-click path omits
+  // it entirely.
+  describe("&src=wiki scoping", () => {
+    const chatUrlOf = async (body: unknown): Promise<string> => {
+      const res = await post(body);
+      expect(res.status).toBe(200);
+      return ((await res.json()) as { chatUrl: string }).chatUrl;
+    };
+
+    test("a plain one-click escalation does NOT carry it", async () => {
+      expect(await chatUrlOf(askBody())).not.toContain("src=wiki");
+    });
+
+    test('an explicit "(bot default)" pick DOES — an empty connectorId is a choice', async () => {
+      // The whole regression this flag exists for: `connectorId: ""` is the reader
+      // deliberately asking for no connector at all.
+      expect(await chatUrlOf(askBody({ connectorId: "", forceNew: true }))).toContain("&src=wiki");
+    });
+
+    test("a named connector pick carries it too", async () => {
+      const url = await chatUrlOf(askBody({ connectorId: CONNECTOR_UUID, forceNew: true }));
+      expect(url).toContain("&src=wiki");
+    });
+
+    test("direct mode always carries it — it only ever comes from the popover", async () => {
+      const url = await chatUrlOf(askBody({ answer: undefined, mode: "direct", forceNew: true }));
+      expect(url).toContain("&src=wiki");
+    });
+
+    test("the threadExists 409 offers a chatUrl under the SAME scoping", async () => {
+      // The client used to re-derive this link itself and hardcoded the flag onto
+      // it, so even the plain path's "Open it →" suppressed the stamp.
+      existingThreadNames = ["how does the gardener cluster summaries?"];
+      const plain = await post(askBody());
+      expect(plain.status).toBe(409);
+      const plainBody = (await plain.json()) as { threadExists: boolean; chatUrl: string };
+      expect(plainBody.threadExists).toBe(true);
+      expect(plainBody.chatUrl).toBe("/chat?bot=jarviswiki&thread=existing-thread&user=user-1");
+
+      const chosen = await post(askBody({ connectorId: "" }));
+      expect(chosen.status).toBe(409);
+      expect(((await chosen.json()) as { chatUrl: string }).chatUrl).toContain("&src=wiki");
+    });
   });
 });
 
@@ -2347,6 +2519,9 @@ describe("GET /api/wiki/chat-target", () => {
   let defaultUser: string | null;
   let connectorRows: { id: string; name: string; connectorType: string }[];
   let listThrows: boolean;
+  let defaultUserThrows: boolean;
+  let preferredByUser: Record<string, string | null>;
+  let preferenceCalls: string[];
 
   beforeEach(async () => {
     root = await mkdtemp(path.join(tmpdir(), "wiki-chattarget-route-"));
@@ -2367,14 +2542,27 @@ describe("GET /api/wiki/chat-target", () => {
       { id: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff", name: "Sonnet CLI", connectorType: "claude-cli" },
     ];
     listThrows = false;
+    preferredByUser = {};
+    preferenceCalls = [];
+    defaultUserThrows = false;
 
+    // Spread the shared throwing factory, never a hand-picked subset: a seam added
+    // to `AskChatDeps` later must fail loudly here, not fall through to a live DB.
     __setAskChatDepsForTest({
+      ...throwingAskChatDeps(),
       discoverBots: () => bots as unknown as BotConfig[],
       loadChatConfig: async () => ({ users }),
-      getBotDefaultUser: async () => defaultUser,
+      getBotDefaultUser: async () => {
+        if (defaultUserThrows) throw new Error("bot_default_user table is gone");
+        return defaultUser;
+      },
       listConnectors: async () => {
         if (listThrows) throw new Error("connectors table is gone");
         return connectorRows as never;
+      },
+      getPreferredConnector: async (userId: string, botName: string) => {
+        preferenceCalls.push(userId + ":" + botName);
+        return preferredByUser[userId] ?? null;
       },
     });
 
@@ -2395,13 +2583,14 @@ describe("GET /api/wiki/chat-target", () => {
     botName: string | null;
     reason?: string;
     error?: string;
-    needsBot: boolean;
-    bots: { name: string }[];
-    users: { id: string; name: string }[];
-    defaultUserId: string | null;
-    connectors: { id: string; name: string; connectorType: string; supportsWebTools: boolean }[];
+    bots?: { name: string }[];
+    users?: { id: string; name: string }[];
+    defaultUserId?: string | null;
+    preferredForUserId?: string | null;
+    preferredConnectorId?: string | null;
+    connectors?: { id: string; name: string; connectorType: string; supportsWebTools: boolean }[];
     connectorsError?: string;
-    botDefault: { connectorType: string; supportsWebTools: boolean } | null;
+    botDefault?: { connectorType: string; supportsWebTools: boolean } | null;
   };
 
   test("an owner wiki resolves bot, users, default user and capability-flagged connectors", async () => {
@@ -2409,8 +2598,7 @@ describe("GET /api/wiki/chat-target", () => {
     expect(res.status).toBe(200);
     const data = (await res.json()) as TargetBody;
     expect(data.botName).toBe("jarviswiki");
-    expect(data.needsBot).toBe(false);
-    expect(data.users.map((u) => u.id)).toEqual(["user-1", "user-2"]);
+    expect(data.users!.map((u) => u.id)).toEqual(["user-1", "user-2"]);
     expect(data.defaultUserId).toBe("user-2");
     // Capability is decided HERE — the browser cannot run connectorCapabilities.
     expect(data.connectors).toEqual([
@@ -2434,9 +2622,14 @@ describe("GET /api/wiki/chat-target", () => {
     expect(res.status).toBe(200);
     const data = (await res.json()) as TargetBody;
     expect(data.botName).toBeNull();
+    // `reason` is the ONLY branch key — the `needsBot` boolean it duplicated is
+    // gone, as are the four dummy filler fields the failure branch used to ship.
     expect(data.reason).toBe("needs_bot");
-    expect(data.needsBot).toBe(true);
-    expect(data.bots.map((b) => b.name)).toEqual(["jarviswiki", "melosys"]);
+    expect(data.bots!.map((b) => b.name)).toEqual(["jarviswiki", "melosys"]);
+    expect(data.users).toBeUndefined();
+    expect(data.connectors).toBeUndefined();
+    expect(data.botDefault).toBeUndefined();
+    expect(data.defaultUserId).toBeUndefined();
   });
 
   test("unknown_bot and bot_gone surface as reasons with the POST's messages", async () => {
@@ -2444,7 +2637,6 @@ describe("GET /api/wiki/chat-target", () => {
       await app.request("/api/wiki/chat-target?wiki=jarviswiki&bot=ghost")
     ).json()) as TargetBody;
     expect(unknown.reason).toBe("unknown_bot");
-    expect(unknown.needsBot).toBe(false);
     expect(unknown.error).toContain("Unknown bot");
 
     bots = [{ name: "melosys" }];
@@ -2468,5 +2660,101 @@ describe("GET /api/wiki/chat-target", () => {
     expect(data.connectorsError).toContain("connectors table is gone");
     // "(bot default)" alone is still a complete, working choice.
     expect(data.botDefault).not.toBeNull();
+  });
+
+  test("the ok path ships no bot list — the picker exists only when unresolved", async () => {
+    const data = (await (
+      await app.request("/api/wiki/chat-target?wiki=jarviswiki")
+    ).json()) as TargetBody;
+    expect(data.bots).toBeUndefined();
+  });
+
+  test("the default user's connector preference is folded in, stamped with its user", async () => {
+    // The popover used to make a SECOND round-trip for this immediately after the
+    // one it already made. It is per user+bot, so the response says which user it
+    // belongs to — a client landing on a remembered OTHER user must still refetch.
+    preferredByUser["user-2"] = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+    const data = (await (
+      await app.request("/api/wiki/chat-target?wiki=jarviswiki")
+    ).json()) as TargetBody;
+    expect(data.preferredForUserId).toBe("user-2");
+    expect(data.preferredConnectorId).toBe("bbbbbbbb-cccc-4ddd-8eee-ffffffffffff");
+    expect(preferenceCalls).toEqual(["user-2:jarviswiki"]);
+  });
+
+  test("a SOLE user gets the fold-in too, even with no bot_default_user mapping", async () => {
+    users = [{ id: "only-user", name: "rune" }];
+    defaultUser = null;
+    preferredByUser["only-user"] = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    const data = (await (
+      await app.request("/api/wiki/chat-target?wiki=jarviswiki")
+    ).json()) as TargetBody;
+    expect(data.preferredForUserId).toBe("only-user");
+    expect(data.preferredConnectorId).toBe("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+  });
+
+  test("several users and no mapping ⇒ no fold-in (there is no user to fold for)", async () => {
+    defaultUser = null;
+    const data = (await (
+      await app.request("/api/wiki/chat-target?wiki=jarviswiki")
+    ).json()) as TargetBody;
+    expect(data.preferredForUserId).toBeNull();
+    expect(data.preferredConnectorId).toBeNull();
+    expect(preferenceCalls).toEqual([]);
+  });
+
+  test("a failing bot_default_user lookup DEGRADES — it must never 500 the popover", async () => {
+    // The lookup became unconditional when the GET was added (the POST used to run
+    // it only for a multi-user bot), which handed every request — and every
+    // sole-user escalation — a brand new way to fail on a query neither needs.
+    defaultUserThrows = true;
+    const res = await app.request("/api/wiki/chat-target?wiki=jarviswiki");
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as TargetBody;
+    expect(data.botName).toBe("jarviswiki");
+    expect(data.defaultUserId).toBeNull();
+    expect(data.users!.map((u) => u.id)).toEqual(["user-1", "user-2"]);
+  });
+
+  test("a sole-user ESCALATION survives the same failure", async () => {
+    defaultUserThrows = true;
+    const out = await resolveAskChatTarget({ name: "jarviswiki", source: "bot" }, "", {
+      ...throwingAskChatDeps(),
+      discoverBots: () => bots as unknown as BotConfig[],
+      loadChatConfig: async () => ({ users: [{ id: "only", name: "rune" }] }),
+      getBotDefaultUser: async () => {
+        throw new Error("bot_default_user table is gone");
+      },
+    } as unknown as AskChatDeps);
+    expect(out.ok).toBe(true);
+    expect(out.ok && out.defaultUserId).toBeNull();
+    expect(out.ok && out.users.map((u) => u.id)).toEqual(["only"]);
+  });
+
+  test("the GET and the POST spell each failure message identically", async () => {
+    // They were separately worded (the GET's needs_bot copy named the popover, the
+    // POST's named the escalation) with tests pinning both spellings.
+    const getBody = async (q: string): Promise<TargetBody> =>
+      (await (await app.request("/api/wiki/chat-target" + q)).json()) as TargetBody;
+    const postBody = async (body: unknown): Promise<{ error: string }> =>
+      (await (
+        await app.request("/api/wiki/ask/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        })
+      ).json()) as { error: string };
+    const q = { question: "why?", answer: "because" };
+
+    expect((await getBody("?wiki=lonewiki")).error).toBe(
+      (await postBody({ ...q, wiki: "lonewiki" })).error,
+    );
+    expect((await getBody("?wiki=jarviswiki&bot=ghost")).error).toBe(
+      (await postBody({ ...q, wiki: "jarviswiki", bot: "ghost" })).error,
+    );
+    bots = [{ name: "melosys" }];
+    expect((await getBody("?wiki=jarviswiki")).error).toBe(
+      (await postBody({ ...q, wiki: "jarviswiki" })).error,
+    );
   });
 });
