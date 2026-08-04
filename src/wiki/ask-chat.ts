@@ -29,6 +29,14 @@ export const ASK_CHAT_QUESTION_MAX = 1500;
 /** Sub-budget for the whole `Sources cited by the wiki: …` line. */
 export const ASK_CHAT_SOURCES_MAX = 500;
 
+/** Sub-budgets for the article seed's three page-derived parts. All three come
+ *  from the wiki INDEX (title, wiki-relative path, frontmatter description), so
+ *  they are as long as an author cared to make them — bounded here so the seed
+ *  cap stays a real bound rather than one the question alone pays for. */
+export const ASK_CHAT_ARTICLE_TITLE_MAX = 120;
+export const ASK_CHAT_ARTICLE_PATH_MAX = 200;
+export const ASK_CHAT_ARTICLE_DESC_MAX = 400;
+
 /** Chars the answer is guaranteed whenever it is non-empty — the question's
  *  budget shrinks before the answer's does, since a seed that carries the
  *  question and NONE of the answer defeats the point of escalating. */
@@ -322,5 +330,86 @@ export function buildDirectChatSeed(input: {
   const question = clampQuestion(rawQuestion, opening.length + framing.length);
 
   const seed = opening + question + framing;
+  return seed.length <= ASK_CHAT_SEED_MAX ? seed : truncateUnits(seed, ASK_CHAT_SEED_MAX);
+}
+
+/**
+ * Build the message an ARTICLE escalation auto-sends — the reader was reading one
+ * wiki page and asked about it, without going through the Ask tab at all.
+ *
+ * A third builder rather than a flag on {@link buildDirectChatSeed}: the whole
+ * point of this mode is that the question is ABOUT a specific page, so the seed
+ * has to name that page and hand the bot the one thing the chat side cannot
+ * derive — its **wiki-relative path**, which is exactly what a knowledge search
+ * resolves a hit to. Without it the bot re-searches for the article by title and
+ * frequently answers from a different page.
+ *
+ * The framing follows its two siblings' rules:
+ * - **Not first-person.** `buildDirectChatSeed`'s comment has the history: an
+ *   "I'm reading the … wiki" opening got a biographical `memories` row written
+ *   about a reader who had only clicked a button. Bracketed provenance instead.
+ * - **`webSearch` reflects the EFFECTIVE connector** of the thread being created,
+ *   so the seed never orders a tool the bot doesn't have.
+ * - **`hasCollections`** gates the "pull the page up with your knowledge tools"
+ *   instruction for the same reason the direct seed gates its notes-first clause:
+ *   on a wiki with no backing huginn collections that lookup cannot work, and
+ *   ordering it produces an answer that opens by apologizing.
+ *
+ * `description` is the page's own summary (frontmatter `description`, else the
+ * first prose line). It is a parenthetical, and an ABSENT one leaves no trace —
+ * an empty `()` would read as a page whose summary is the empty string.
+ *
+ * Bounded by the same {@link ASK_CHAT_SEED_MAX} as both siblings: each
+ * page-derived part carries its own cap, the question keeps
+ * {@link ASK_CHAT_QUESTION_MAX} (shrunk by whatever the fixed parts take), and a
+ * final surrogate-safe clamp holds the total whatever the constants become.
+ */
+export function buildArticleChatSeed(input: {
+  wikiName: string;
+  /** The page's display title, for the provenance line. */
+  pageTitle: string;
+  /** The page's wiki-relative path — what the bot needs to pull the real page. */
+  pagePath: string;
+  question: string;
+  /** The page's own summary. Absent/empty ⇒ no parenthetical at all. */
+  description?: string;
+  webSearch: boolean;
+  /** Whether the wiki has huginn collections its pages can be looked up in.
+   *  Absent ⇒ treated as true (the overwhelmingly common shape). */
+  hasCollections?: boolean;
+}): string {
+  const str = (v: unknown): string => (typeof v === "string" ? v : "");
+  const rawQuestion = str(input.question).trim();
+  const wiki = flatten(str(input.wikiName)) || "knowledge";
+  const title = truncateUnits(flatten(str(input.pageTitle)), ASK_CHAT_ARTICLE_TITLE_MAX);
+  const path = truncateUnits(flatten(str(input.pagePath)), ASK_CHAT_ARTICLE_PATH_MAX);
+  // A page summary is a sentence and usually ends in one period; the parenthetical
+  // it sits in ends in another, so the raw value reads `(… pages.).`
+  const description = truncateUnits(
+    flatten(str(input.description)).replace(/\.$/, ""),
+    ASK_CHAT_ARTICLE_DESC_MAX,
+  );
+  const searchable = input.hasCollections !== false;
+
+  const opening = title
+    ? `[Question asked while reading the "${wiki}" wiki article "${title}"]\n\n`
+    : `[Question asked while reading the "${wiki}" wiki]\n\n`;
+  const tools = input.webSearch ? "your tools, including web search" : "the tools you have";
+  const article =
+    "\n\nThe article is " +
+    (path ? `\`${path}\`` : `"${title || "untitled"}"`) +
+    ` in the "${wiki}" wiki` +
+    (description ? ` (${description})` : "") +
+    ". ";
+  const framing =
+    (searchable
+      ? "Pull it up with your knowledge tools before answering, then research beyond it with "
+      : "Answer from what you can establish about it — research it with ") +
+    tools +
+    ", and cite what you find. Say plainly which parts you couldn't verify.";
+
+  const question = clampQuestion(rawQuestion, opening.length + article.length + framing.length);
+
+  const seed = opening + question + article + framing;
   return seed.length <= ASK_CHAT_SEED_MAX ? seed : truncateUnits(seed, ASK_CHAT_SEED_MAX);
 }

@@ -17,6 +17,17 @@ import { deriveAskThreadTitle, deriveAskThreadTitleOrNull } from "../../../wiki/
 import { escHtml as esc } from "./escape.ts";
 import { explainSelectionFromLabel } from "./wiki-explain.ts";
 
+/**
+ * The three things the popover can be opened for. They differ ONLY in where the
+ * question comes from and what rides into the seed:
+ * - `escalate` — a committed Ask/Explain turn (its answer + citations),
+ * - `direct`   — the "New chat" button beside the Ask box (the live box),
+ * - `article`  — the "💬 Discuss" button on an open page (a question typed in the
+ *   panel itself, about that page). Article mode has nothing to do with the Ask
+ *   tab and neither reads nor writes its textarea.
+ */
+export type ChatOptMode = "direct" | "escalate" | "article";
+
 /** One named connector row as `GET /api/wiki/chat-target` serves it — capability
  *  already resolved server-side (`connectorCapabilities` cannot run here). */
 export interface ChatTargetConnector {
@@ -188,12 +199,121 @@ export function previewThreadName(typed: string, question: string): string {
  * `boxValue` is `null` when there is no Ask box in the document at all.
  */
 export function chatOptQuestion(
-  state: { mode: "direct" | "escalate"; question: string; pinnedQuestion?: string },
+  state: { mode: ChatOptMode; question: string; pinnedQuestion?: string },
   boxValue: string | null,
 ): string {
   if (typeof state.pinnedQuestion === "string") return state.pinnedQuestion.trim();
+  // Article mode types its question into the PANEL's own field (`state.question`,
+  // updated on input). It must never reach for the Ask box: the reader is on an
+  // article, the Connections tab may be showing, and the box holds someone
+  // else's draft.
+  if (state.mode === "article") return state.question.trim();
   if (state.mode !== "direct") return state.question;
   return (boxValue || "").trim();
+}
+
+// ── Article mode ("💬 Discuss" on an open page) ───────────────────────
+
+/** The page fields the article popover renders from — a structural subset of the
+ *  reader's `WikiListing`. `desc` rides ONLY the single-page `/api/wiki/page`
+ *  response (see `toListing`'s `includeDesc`), so it is absent on an explainer
+ *  opened straight from the list. */
+export interface ChatOptArticle {
+  name: string;
+  title: string;
+  relPath: string;
+  /** Authored frontmatter `description` — rare (2/975 jarvis pages, 92/686 mimir). */
+  description?: string;
+  /** The page's first prose line, extracted at index time. */
+  desc?: string;
+}
+
+/** Id of the article popover's question field — shared by the render, the `input`
+ *  delegation and any test, so the three can't drift. */
+export const CHAT_OPT_QUESTION_ID = "wikiChatOptQ";
+
+/** Id of the breadcrumb's article action — shared by the render, the click
+ *  delegation and the click-away `inOpener` test (the `DECLINE_CHAT_BTN_ID`
+ *  precedent: omitting it from `inOpener` makes the opening click read as a
+ *  click-away and close the panel it just opened). */
+export const DISCUSS_ARTICLE_BTN_ID = "wikiDiscussBtn";
+
+/**
+ * The breadcrumb's always-visible "💬 Discuss" action.
+ *
+ * It sits BESIDE the whole-article "🔎 Fact check" button rather than in the meta
+ * row: both are article-level actions on the open page, and splitting them across
+ * two rows makes neither findable. No user content is interpolated, so nothing
+ * here needs escaping.
+ */
+export function discussArticleBtnHtml(): string {
+  return (
+    '<button class="wiki-bc-discuss" id="' + DISCUSS_ARTICLE_BTN_ID + '" ' +
+    'title="Ask this wiki\'s bot about this article, in a real chat thread">' +
+    "💬 Discuss</button>"
+  );
+}
+
+/** Placeholder = the honest default. An empty question box on an article says
+ *  "ask me something about this page"; a prefilled statement says "send this". */
+export const ARTICLE_QUESTION_PLACEHOLDER = "What do you want to know about this article?";
+
+/**
+ * What the question box holds when the popover OPENS.
+ *
+ * Only an authored frontmatter `description` prefills. `desc` deliberately does
+ * NOT: it is the page's first prose LINE — a declarative sentence about the topic,
+ * which reads wrong as the reader's own question and, prefilled, would be sent
+ * verbatim by anyone who just hits Send. It is offered as a hint instead
+ * ({@link articleChatHint}).
+ */
+export function articleChatQuestion(article: ChatOptArticle): string {
+  return (article.description || "").trim();
+}
+
+/**
+ * The dim line under the question box: the page's first prose line, as context
+ * for what to ask — never as the question itself.
+ *
+ * Suppressed when {@link articleChatQuestion} already prefilled something (the
+ * hint would then just echo a field two rows up).
+ */
+export function articleChatHint(article: ChatOptArticle): string {
+  if (articleChatQuestion(article)) return "";
+  return (article.desc || "").trim();
+}
+
+/**
+ * The text a mode derives its DEFAULT thread name from.
+ *
+ * Article mode names the thread after the PAGE, not the question — the whole
+ * design of this mode is that the article gets ONE discussion thread which every
+ * later visit adds to (repeat visits therefore 409 by construction, and the
+ * popover's "Send there →" is the primary, successful resolution). Naming it
+ * after the first question would mint a sibling thread per visit instead.
+ * A page with no usable title falls back to the question, so the name can never
+ * collapse to the generic `wiki ask`.
+ */
+export function chatOptNameSource(
+  mode: ChatOptMode,
+  question: string,
+  articleTitle?: string,
+): string {
+  if (mode !== "article") return question;
+  return (articleTitle || "").trim() || question;
+}
+
+/** The article popover's context + question block. Pure so the "editable, not
+ *  pinned" contract and the prefill/hint split are testable without a DOM. */
+export function articleChatRowsHtml(article: ChatOptArticle, value: string): string {
+  const hint = articleChatHint(article);
+  return (
+    '<div class="wiki-chatopt-article">About <b>' + esc(article.title) + "</b></div>" +
+    '<label class="wiki-chatopt-row wiki-chatopt-qrow"><span>Ask</span>' +
+    '<textarea id="' + CHAT_OPT_QUESTION_ID + '" rows="3" placeholder="' +
+    esc(ARTICLE_QUESTION_PLACEHOLDER) + '">' + esc(value) + "</textarea></label>" +
+    (hint ? '<div class="wiki-chatopt-note">Page says: ' + esc(hint) + "</div>" : "")
+  );
 }
 
 /** The turn fields {@link composeDeclineQuestion} needs — a structural subset of
@@ -266,7 +386,7 @@ export interface ChatOptClickContext {
   /** The popover's question is PINNED to a turn (the decline hook), so the Ask
    *  box is no longer part of its flow — see {@link chatOptQuestion}. */
   pinned: boolean;
-  mode: "direct" | "escalate";
+  mode: ChatOptMode;
 }
 
 /**
@@ -303,6 +423,50 @@ export function conflictCopy(nameWasTyped: boolean): string {
   return nameWasTyped
     ? "A chat with that name already exists."
     : "A chat for this question already exists.";
+}
+
+/** Ids of the two 409 buttons — shared by {@link chatOptConflictFootHtml} and the
+ *  reader's click delegation, so the markup and the handler can't drift. */
+export const CHAT_OPT_SEND_THERE_ID = "wikiChatOptSendThere";
+export const CHAT_OPT_FORCE_ID = "wikiChatOptForce";
+
+/**
+ * The whole 409 status line, per mode.
+ *
+ * In article mode a collision is the DESIGNED outcome, not a problem: the thread
+ * is named after the page, so the second question about that page necessarily
+ * collides with the first — and sending it to the existing thread is what makes
+ * the article accumulate one discussion instead of a sibling thread per visit.
+ * So the copy states that, rather than reporting a name clash the reader did
+ * nothing to cause. A TYPED name is a different story in every mode: there the
+ * reader chose the name, and "the question already has a chat" would be a lie.
+ */
+export function conflictStatusLine(nameWasTyped: boolean, mode: ChatOptMode): string {
+  if (mode === "article" && !nameWasTyped) {
+    return "This article already has a chat thread — send your question there, " +
+      "or start another.";
+  }
+  return conflictCopy(nameWasTyped) + " Send this question there, or start another.";
+}
+
+/**
+ * The 409 action row.
+ *
+ * "Send there →" is the PRIMARY action in every mode (filled button, first in the
+ * row) and "Start new thread" the ghost second choice — the reverse would make
+ * every repeat visit to an article mint a new thread, which is exactly the
+ * failure article mode is shaped to avoid. The wording is deliberately identical
+ * across modes; what changes is the LINE above it ({@link conflictStatusLine}),
+ * which is where "this is the normal, successful outcome" gets said.
+ */
+export function chatOptConflictFootHtml(): string {
+  return (
+    '<button id="' + CHAT_OPT_SEND_THERE_ID + '" class="wiki-chatopt-btn">' +
+    "Send there →" +
+    "</button>" +
+    '<button id="' + CHAT_OPT_FORCE_ID + '" class="wiki-chatopt-btn ghost">' +
+    "Start new thread</button>"
+  );
 }
 
 /** Id of the decline hook's button — shared by {@link declineChatBarHtml}, the

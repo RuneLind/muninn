@@ -27,6 +27,16 @@ export interface WikiListing {
    *  native blog `.mdx` pages (frontmatter `description`). Rendered as the article
    *  subtitle for `type: blog` pages; feeds the Similar query for explainers only. */
   description?: string;
+  /**
+   * The page's first prose line, extracted at index time.
+   *
+   * **Single-page payloads only.** `/api/wiki/pages` strips it (see `toListing`'s
+   * `includeDesc` — on jarvis it is ~100 KB of listing bulk nothing in the list
+   * renders), and so do the outgoing/backlink arrays on `/api/wiki/page`. Only
+   * that response's own `meta` carries it, for the Discuss popover's question
+   * hint — so any consumer must tolerate its absence.
+   */
+  desc?: string;
   /** Validated CSS color token (`#hex` / `rgb()` / `hsl()`) from a blog page's
    *  frontmatter `accent`. Server-sanitized (see `sanitizeColorToken`) — anything
    *  that isn't a strict color token is dropped before it reaches this field, so

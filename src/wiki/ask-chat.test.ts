@@ -4,6 +4,7 @@ import {
   ASK_CHAT_SEED_MAX,
   ASK_CHAT_SOURCES_MAX,
   ASK_CHAT_TITLE_MAX,
+  buildArticleChatSeed,
   buildAskChatSeed,
   buildDirectChatSeed,
   deriveAskThreadTitle,
@@ -309,6 +310,103 @@ describe("buildDirectChatSeed", () => {
     );
     expect(
       buildDirectChatSeed({ wikiName: 5, question: null, webSearch: true } as never),
+    ).toBeString();
+  });
+});
+
+/**
+ * `buildArticleChatSeed` — the "💬 Discuss" button on an open article. Same
+ * bracketed-provenance / capability-conditioning rules as the direct seed, plus
+ * the one thing this mode exists for: the article's wiki-relative PATH, which is
+ * what lets the bot pull the real page instead of re-searching for its title.
+ */
+describe("buildArticleChatSeed", () => {
+  const base = {
+    wikiName: "mimir",
+    pageTitle: "Wiki gardener",
+    pagePath: "projects/muninn/wiki-gardener.md",
+    question: "Why does the cluster cap starve fresh arrivals?",
+  };
+
+  test("names the article and carries its PATH so the bot can pull the page", () => {
+    const seed = buildArticleChatSeed({ ...base, webSearch: true });
+    expect(seed).toContain('"mimir"');
+    expect(seed).toContain("Wiki gardener");
+    // The whole reason this mode has its own builder.
+    expect(seed).toContain("projects/muninn/wiki-gardener.md");
+    expect(seed).toContain("Why does the cluster cap starve fresh arrivals?");
+    // Nothing quoted — there is no Ask answer behind this mode.
+    expect(seed).not.toContain("\n>");
+    expect(seed).not.toContain("Ask tab answered");
+  });
+
+  test("provenance is BRACKETED, never a first-person claim about the reader", () => {
+    // Same failure the direct seed's opening was rewritten for: a first-person
+    // line got recorded as a biographical fact about someone who clicked a button.
+    const seed = buildArticleChatSeed({ ...base, webSearch: true });
+    expect(
+      seed.startsWith('[Question asked while reading the "mimir" wiki article "Wiki gardener"]'),
+    ).toBe(true);
+    expect(seed).not.toContain("I'm reading");
+    expect(seed).not.toContain("I asked");
+  });
+
+  test("the description parenthetical is omitted entirely when empty", () => {
+    // An empty `()` reads as a page whose summary IS the empty string.
+    const withDesc = buildArticleChatSeed({
+      ...base, webSearch: true, description: "How the weekly gardener clusters summaries.",
+    });
+    // The parenthetical owns the sentence-ending period, so the summary's own
+    // trailing one is dropped (`(… summaries.).` read as a typo).
+    expect(withDesc).toContain("(How the weekly gardener clusters summaries)");
+    for (const description of ["", "   ", undefined]) {
+      const seed = buildArticleChatSeed({ ...base, webSearch: true, description });
+      expect(seed).not.toContain("()");
+      expect(seed).toContain("wiki-gardener.md` in the \"mimir\" wiki.");
+    }
+  });
+
+  test("names web search only when the effective connector can deliver it", () => {
+    expect(buildArticleChatSeed({ ...base, webSearch: true })).toContain("including web search");
+    const without = buildArticleChatSeed({ ...base, webSearch: false });
+    expect(without).not.toContain("web search");
+    expect(without).toContain("the tools you have");
+  });
+
+  test("a wiki with NO collections is not told to look the page up in them", () => {
+    const without = buildArticleChatSeed({ ...base, webSearch: true, hasCollections: false });
+    expect(without).not.toContain("knowledge tools");
+    expect(without).toContain("research it with");
+    // The path is still named — it is the reader's own reference, not just a
+    // search instruction.
+    expect(without).toContain("projects/muninn/wiki-gardener.md");
+    // Absent/true ⇒ the common searchable shape.
+    expect(buildArticleChatSeed({ ...base, webSearch: true })).toContain("knowledge tools");
+    expect(buildArticleChatSeed({ ...base, webSearch: true, hasCollections: true })).toContain(
+      "knowledge tools",
+    );
+  });
+
+  test("the WHOLE seed is bounded, however huge the inputs", () => {
+    const seed = buildArticleChatSeed({
+      wikiName: "w".repeat(500),
+      pageTitle: "t".repeat(5000),
+      pagePath: "p".repeat(5000),
+      description: "d".repeat(50_000),
+      question: "q".repeat(200_000),
+      webSearch: true,
+    });
+    expect(seed.length).toBeLessThanOrEqual(ASK_CHAT_SEED_MAX);
+    expect(seed).toContain("(question truncated)");
+  });
+
+  test("blank/absent page fields degrade instead of throwing", () => {
+    const seed = buildArticleChatSeed({
+      wikiName: "", pageTitle: "", pagePath: "", question: "  ", webSearch: false,
+    });
+    expect(seed).toContain("knowledge");
+    expect(
+      buildArticleChatSeed({ wikiName: 5, pageTitle: null, pagePath: 7, question: null, webSearch: true } as never),
     ).toBeString();
   });
 });

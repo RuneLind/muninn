@@ -108,6 +108,7 @@ import { getConnector, listConnectorOptions } from "../../db/connectors.ts";
 import { isValidUuid } from "./route-utils.ts";
 import type { ConnectorType } from "../../bots/config.ts";
 import {
+  buildArticleChatSeed,
   buildAskChatSeed,
   buildDirectChatSeed,
   deriveAskThreadTitle,
@@ -618,19 +619,35 @@ interface WikiPageListing extends WikiPageMeta {
   backlinkCount: number;
 }
 
-function toListing(index: WikiIndex, meta: WikiPageMeta): WikiPageListing {
-  // `desc` + `pubDate` are Atlas-only fields (only `GET /api/wiki/atlas` reads
-  // them); excluded here so they don't bloat this hot pages-listing payload
-  // (~100 KB on jarvis). The listing type keeps them optional/undefined.
-  // Nothing else may join this strip list without checking BOTH callers first:
-  // `/api/wiki/page` builds its single-page `meta` from this same function, so a
-  // field stripped for payload size (e.g. `status_note`) goes out of reach of the
-  // reader too. `desc`/`pubDate` are safe only because Atlas alone reads them.
+function toListing(
+  index: WikiIndex,
+  meta: WikiPageMeta,
+  opts: { includeDesc?: boolean } = {},
+): WikiPageListing {
+  // `desc` + `pubDate` are stripped by default: they are page-body fields no
+  // LISTING consumer reads, and on jarvis they add ~100 KB to the hot
+  // `/api/wiki/pages` payload.
+  //
+  // Nothing may join (or leave) this strip list without checking ALL THREE
+  // callers, because they share this one function:
+  //   1. `/api/wiki/pages`      — the hot listing. Strip.
+  //   2. `/api/wiki/page` meta  — the single page the reader has open.
+  //   3. `/api/wiki/page`'s `listings()` — the outgoing/backlink ARRAYS on that
+  //      same response, which are link-heavy pages' bulk. Strip.
+  // So a field stripped for payload size (e.g. `status_note`) also goes out of
+  // reach of the reader, and a field opted IN for caller 2 must not be opted in
+  // for caller 3, which would re-bloat exactly the pages this strip protects.
+  //
+  // `includeDesc` is that opt-in, passed ONLY by caller 2: the "💬 Discuss"
+  // popover shows the open page's first prose line as a question HINT, and the
+  // single-page response is the only place the reader's own page arrives.
+  // `pubDate` stays Atlas-only (`GET /api/wiki/atlas` reads it directly off the
+  // index, never through here).
   const { desc, pubDate, ...rest } = meta;
-  void desc;
   void pubDate;
   return {
     ...rest,
+    ...(opts.includeDesc && desc ? { desc } : {}),
     linkCount: index.outgoing.get(normalizeRelPath(meta.relPath))?.length ?? 0,
     backlinkCount: index.backlinks.get(normalizeRelPath(meta.relPath))?.length ?? 0,
   };
@@ -1303,7 +1320,9 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         .map((m) => toListing(index, m));
 
     return c.json({
-      meta: toListing(index, meta),
+      // The one caller that opts `desc` in — see `toListing`. Deliberately NOT
+      // `listings()` below, whose arrays are the link-heavy pages' bulk.
+      meta: toListing(index, meta, { includeDesc: true }),
       html: renderWikiHtml(markdown, index.resolve, { stripTitle: meta.title }),
       outgoing: listings(index.outgoing.get(normalizeRelPath(meta.relPath))),
       backlinks: listings(index.backlinks.get(normalizeRelPath(meta.relPath))),
@@ -1940,10 +1959,17 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         citations?: AskChatCitation[];
         forceNew?: boolean;
         /** `"direct"` = the reader typed a question WITHOUT asking the wiki first,
-         *  so there is no answer to quote. An explicit discriminator, never an
-         *  inference from a missing `answer`: a client bug that drops the answer
-         *  must still 400 rather than silently escalate a context-free seed. */
+         *  so there is no answer to quote. `"article"` = the same, but asked while
+         *  reading ONE page, which the seed names and paths. An explicit
+         *  discriminator, never an inference from a missing `answer`: a client bug
+         *  that drops the answer must still 400 rather than silently escalate a
+         *  context-free seed. */
         mode?: string;
+        /** Article mode: which page the question is about. `relPath` wins when
+         *  present (collision-proof, as on `GET /api/wiki/page`); `page` is the
+         *  page NAME and is what error copy quotes. */
+        page?: string;
+        relPath?: string;
         /** Direct mode only: this question reached chat from an Ask the wiki
          *  DECLINED, so the seed must not order the search that just failed. */
         askDeclined?: boolean;
@@ -1955,8 +1981,11 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       const question = typeof body.question === "string" ? body.question.trim() : "";
       const answer = typeof body.answer === "string" ? body.answer.trim() : "";
       const direct = body.mode === "direct";
+      // Article mode is the "💬 Discuss" button on an open page: no Ask turn, no
+      // answer — but a page whose title/path/summary the seed carries.
+      const article = body.mode === "article";
       if (!question) return c.json({ error: "question is required" }, 400);
-      if (!answer && !direct) return c.json({ error: "answer is required" }, 400);
+      if (!answer && !direct && !article) return c.json({ error: "answer is required" }, 400);
       // Body shape is client-controlled: a non-string `wiki` (or a citation whose
       // pageName is a number) reached string methods and 500'd. Everything the
       // route reads is therefore validated or coerced HERE, before any side effect.
@@ -1969,7 +1998,9 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       if (body.userId !== undefined && typeof body.userId !== "string") {
         return c.json({ error: "userId must be a string" }, 400);
       }
-      for (const field of ["connectorId", "threadName", "existingThreadId"] as const) {
+      for (const field of [
+        "connectorId", "threadName", "existingThreadId", "page", "relPath",
+      ] as const) {
         if (body[field] !== undefined && typeof body[field] !== "string") {
           return c.json({ error: `${field} must be a string` }, 400);
         }
@@ -2084,8 +2115,43 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // wherever the client happens to send it.
       const askDeclined = direct && body.askDeclined === true;
 
-      const buildSeed = (canWebSearch: boolean): string =>
-        direct
+      // Article mode resolves the page SERVER-side against the wiki index rather
+      // than trusting a client-posted title/path: the path is the part the seed
+      // hands the bot to pull the real page with, and a page the index can't
+      // resolve is a 404 the reader can act on — not a seed pointing at nothing.
+      let articlePage: WikiPageMeta | undefined;
+      if (article) {
+        const pageRef = typeof body.page === "string" ? body.page.trim() : "";
+        const relPathRef = typeof body.relPath === "string" ? body.relPath.trim() : "";
+        if (!pageRef && !relPathRef) {
+          return c.json({ error: "page is required in article mode" }, 400);
+        }
+        const index = await getWikiIndex({ root: entry.root });
+        if (!index) return c.json({ error: "wiki directory not found" }, 404);
+        articlePage = relPathRef ? index.resolveRelPath(relPathRef) : index.resolve(pageRef);
+        if (!articlePage) {
+          const which = relPathRef ? `relPath "${relPathRef}"` : `name "${pageRef}"`;
+          return c.json({ error: `no wiki page for ${which}` }, 404);
+        }
+      }
+
+      const buildSeed = (canWebSearch: boolean): string => {
+        if (article) {
+          const meta = articlePage!;
+          return buildArticleChatSeed({
+            wikiName: entry.name,
+            pageTitle: meta.title,
+            pagePath: meta.relPath,
+            question,
+            // The page's own summary — the authored frontmatter `description`
+            // when there is one, else the extracted first prose line. Both are
+            // page-derived and index-resolved; neither is client-posted.
+            description: meta.description || meta.desc,
+            webSearch: canWebSearch,
+            hasCollections,
+          });
+        }
+        return direct
           ? buildDirectChatSeed({
               wikiName: entry.name,
               question,
@@ -2094,6 +2160,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
               askDeclined,
             })
           : buildAskChatSeed({ wikiName: entry.name, question, answer, citations });
+      };
 
       // Seed FIRST: everything that can still fail (string building over
       // client-posted citations included) must fail before a thread exists or is
@@ -2110,7 +2177,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // The plain one-click "Continue in chat →" offers no such choice, and
       // flagging it would silently cost that path the sidebar stamping it has
       // always had.
-      const connectorDecided = direct || body.connectorId !== undefined;
+      const connectorDecided = direct || article || body.connectorId !== undefined;
       const chatUrlFor = (threadId: string): string =>
         `/chat?bot=${encodeURIComponent(botConfig.name)}` +
         `&thread=${encodeURIComponent(threadId)}` +
@@ -2198,9 +2265,20 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // A typed name that FLATTENS to nothing (control characters only) must fall
       // back to the question, not to the generic "wiki ask" — `deriveAskThreadTitle`
       // alone can't express that difference, hence the `…OrNull` variant.
+      // Article mode derives its default name from the PAGE, not the question —
+      // and it does so HERE, not client-side: that is what makes an article
+      // collect ONE discussion thread that every later question 409s onto, for
+      // any caller. (The popover's preview runs the same two pure functions in the
+      // same order, so what it shows is what `createThread` stores.) A page whose
+      // title flattens to nothing falls back to the question rather than to the
+      // generic `wiki ask`, exactly as a control-character `threadName` does.
+      const derivedFallback =
+        article
+          ? (deriveAskThreadTitleOrNull(articlePage!.title) ?? deriveAskThreadTitle(question))
+          : deriveAskThreadTitle(question);
       const title =
         deriveAskThreadTitleOrNull(typeof body.threadName === "string" ? body.threadName : "") ??
-        deriveAskThreadTitle(question);
+        derivedFallback;
       const existing = await askChatDeps.findThreadByName(chatUser.id, botConfig.name, title);
       if (existing && !body.forceNew) {
         return c.json({
@@ -2253,13 +2331,21 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       });
       const conversationId = conversation.id;
 
+      // One description per mode. It is set ONCE — `createThread` COALESCEs, so a
+      // reused thread keeps the description its first escalation gave it — which is
+      // exactly why the wrong one can't be quietly generic: an article thread that
+      // says "Continued from the … Ask tab" is a false claim about a conversation
+      // that never touched the Ask tab, and it sticks.
+      const threadDescription = article
+        ? `Discussion of the wiki article "${articlePage!.title}" (${entry.name})`
+        : direct
+          ? `Started from the ${entry.name} wiki`
+          : `Continued from the ${entry.name} wiki Ask tab`;
       const thread = await askChatDeps.createThread(
         chatUser.id,
         botConfig.name,
         threadTitle,
-        direct
-          ? `Started from the ${entry.name} wiki`
-          : `Continued from the ${entry.name} wiki Ask tab`,
+        threadDescription,
         connectorId || undefined,
       );
 

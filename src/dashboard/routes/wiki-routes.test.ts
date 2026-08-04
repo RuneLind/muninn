@@ -1682,6 +1682,13 @@ describe("plan-status fields on /api/wiki/pages + /api/wiki/page", () => {
       path.join(root, "plans/Bad Status.md"),
       ["---", 'title: "Bad Status"', "plan_status: in_flight", "---", "", "Body."].join("\n"),
     );
+    // A linking page, so BOTH `listings()` arrays on the single-page response are
+    // non-empty — that is the third `toListing` caller, and the one an `includeDesc`
+    // opt-in must never reach.
+    await Bun.write(
+      path.join(root, "plans/Linker.md"),
+      ["---", 'title: "Linker"', "---", "", "Points at [[Lifecycle Plan]]."].join("\n"),
+    );
     prevWikiDir = process.env.WIKI_DIR;
     process.env.WIKI_DIR = root;
     __resetWikiCacheForTest();
@@ -1741,6 +1748,45 @@ describe("plan-status fields on /api/wiki/pages + /api/wiki/page", () => {
     // The trap this test exists for: `toListing` is shared, so a strip here would
     // put `status_note` out of reach of every single-page client.
     expect(data.meta.status_note).toBe("capped at 4 rounds, R4 fixes unreviewed");
+  });
+
+  /**
+   * `desc` (the first prose line) is the mirror-image case: opted IN for exactly
+   * ONE of `toListing`'s three callers. The Discuss popover shows it as a question
+   * hint, and the single-page `meta` is the only place the reader's own page
+   * arrives — but the hot listing and the single-page LINK ARRAYS are the payload
+   * bulk this field was stripped from in the first place (~100 KB on jarvis).
+   */
+  describe("desc is scoped to the single-page meta", () => {
+    type DescListing = { name: string; desc?: string };
+
+    test("the hot /api/wiki/pages listing never carries it", async () => {
+      const res = await app.request("/api/wiki/pages");
+      const data = (await res.json()) as { pages: DescListing[] };
+      expect(data.pages.length).toBeGreaterThan(0);
+      expect(data.pages.some((p) => p.desc !== undefined)).toBe(false);
+    });
+
+    test("the single page's own meta DOES carry it", async () => {
+      const res = await app.request("/api/wiki/page?name=" + encodeURIComponent("Lifecycle Plan"));
+      const data = (await res.json()) as { meta: DescListing };
+      expect(data.meta.desc).toBe("Plan body.");
+    });
+
+    test("the outgoing/backlink arrays on that same response do NOT", async () => {
+      // Opting these in re-bloats exactly the link-heavy pages the strip protects.
+      const back = await app.request("/api/wiki/page?name=" + encodeURIComponent("Lifecycle Plan"));
+      const backData = (await back.json()) as { meta: DescListing; backlinks: DescListing[] };
+      expect(backData.backlinks.map((p) => p.name)).toContain("Linker");
+      expect(backData.backlinks.every((p) => p.desc === undefined)).toBe(true);
+
+      const out = await app.request("/api/wiki/page?name=Linker");
+      const outData = (await out.json()) as { meta: DescListing; outgoing: DescListing[] };
+      // The linking page's own meta still has one, so this isn't a wiki-wide absence.
+      expect(outData.meta.desc).toBe("Points at Lifecycle Plan.");
+      expect(outData.outgoing.map((p) => p.name)).toContain("Lifecycle Plan");
+      expect(outData.outgoing.every((p) => p.desc === undefined)).toBe(true);
+    });
   });
 });
 
@@ -2207,6 +2253,139 @@ describe("POST /api/wiki/ask/chat", () => {
       await post(directBody({ wiki: "lonewiki", bot: "melosys", forceNew: true }));
       expect(pending[0]!.text).not.toContain("wiki's own notes");
       expect(pending[0]!.text).toContain("research it with");
+    });
+  });
+
+  /**
+   * Article mode — the breadcrumb's "💬 Discuss" button. Like direct mode it
+   * carries no Ask answer; unlike it, the seed is anchored to ONE page, which the
+   * route re-resolves against the wiki index (the client posts a reference, never
+   * the title/path/summary the seed quotes).
+   */
+  describe("article mode", () => {
+    const articleBody = (over: Record<string, unknown> = {}) =>
+      askBody({
+        answer: undefined,
+        mode: "article",
+        page: "A Concept",
+        question: "Why does this matter for the gardener?",
+        ...over,
+      });
+
+    beforeEach(async () => {
+      // Three summary shapes: authored frontmatter `description`, first-prose-line
+      // `desc` only, and neither.
+      await Bun.write(
+        path.join(root, "Described.md"),
+        "---\ntitle: Described\ndescription: An authored one-liner.\n---\n\nFirst prose line.\n",
+      );
+      await Bun.write(path.join(root, "Plain.md"), "---\ntitle: Plain\n---\n\nJust a prose line.\n");
+      await Bun.write(path.join(root, "Bare.md"), "---\ntitle: Bare\n---\n\n# Heading only\n");
+      __resetWikiCacheForTest();
+    });
+
+    test("seeds a page-anchored message carrying the article's PATH", async () => {
+      const res = await post(articleBody());
+      expect(res.status).toBe(200);
+      expect(created).toHaveLength(1);
+      const seed = pending[0]!.text;
+      expect(seed).toContain("Why does this matter for the gardener?");
+      // The path is the whole point: it is what lets the bot pull the real page
+      // instead of re-searching for a title.
+      expect(seed).toContain("A Concept.md");
+      expect(seed).toContain("A Concept");
+      // No Ask answer behind this mode.
+      expect(seed).not.toContain("\n>");
+      expect(seed).not.toContain("Ask tab answered");
+      // A connector decision was made here, so the chat page must not re-stamp it.
+      const data = (await res.json()) as { chatUrl: string };
+      expect(data.chatUrl).toContain("&src=wiki");
+    });
+
+    test("the thread is named after the ARTICLE and says so in its description", async () => {
+      await post(articleBody());
+      // Not "why does this matter…" — every later question about this page has to
+      // land in this same thread, which is what the name is doing.
+      expect(created[0]!.name).toBe("a concept");
+      expect(created[0]!.description).toContain('Discussion of the wiki article "A Concept"');
+      // NOT the Ask-tab line: this conversation never touched the Ask tab, and
+      // `createThread` COALESCEs, so a wrong description would stick forever.
+      expect(created[0]!.description).not.toContain("Ask tab");
+    });
+
+    test("a repeat visit 409s onto the SAME thread — that is the designed path", async () => {
+      await post(articleBody());
+      const again = await post(articleBody({ question: "and what about the cap?" }));
+      expect(again.status).toBe(409);
+      const data = (await again.json()) as { threadExists: boolean; existingThreadId: string; chatUrl: string };
+      expect(data.threadExists).toBe(true);
+      expect(data.existingThreadId).toBe("existing-thread");
+      // The client's "Send there →" is served the deep link by the ROUTE.
+      expect(data.chatUrl).toContain("&src=wiki");
+      expect(created).toHaveLength(1);
+    });
+
+    test("an empty question 400s, and no answer is required", async () => {
+      expect((await post(articleBody({ question: "   " }))).status).toBe(400);
+      // …while the missing `answer` — a 400 in every other mode — is fine here.
+      expect((await post(articleBody())).status).toBe(200);
+    });
+
+    test("a missing page 400s and an unresolvable one 404s — never a pathless seed", async () => {
+      const missing = await post(articleBody({ page: undefined }));
+      expect(missing.status).toBe(400);
+      expect(((await missing.json()) as { error: string }).error).toContain("page is required");
+      const unknown = await post(articleBody({ page: "No Such Page" }));
+      expect(unknown.status).toBe(404);
+      expect(created).toHaveLength(0);
+    });
+
+    test("relPath wins over name — the collision-proof reference", async () => {
+      await post(articleBody({ page: "Plain", relPath: "Described.md" }));
+      expect(pending[0]!.text).toContain("Described.md");
+      expect(pending[0]!.text).not.toContain("Plain.md");
+    });
+
+    test("the description parenthetical: frontmatter, else first prose line, else none", async () => {
+      await post(articleBody({ page: "Described" }));
+      expect(pending[0]!.text).toContain("(An authored one-liner)");
+      // No frontmatter description ⇒ the extracted first prose line stands in.
+      pending = [];
+      await post(articleBody({ page: "Plain" }));
+      expect(pending[0]!.text).toContain("(Just a prose line)");
+      // Neither ⇒ no empty parenthetical.
+      pending = [];
+      await post(articleBody({ page: "Bare" }));
+      expect(pending[0]!.text).not.toContain("()");
+      expect(pending[0]!.text).toContain("Bare.md");
+    });
+
+    test("the seed names web search only when the effective connector has it", async () => {
+      await post(articleBody());
+      expect(pending[0]!.text).toContain("including web search");
+      pending = [];
+      await post(articleBody({ page: "Plain", connectorId: CONNECTOR_UUID }));
+      expect(pending[0]!.text).not.toContain("web search");
+    });
+
+    test("a collection-less wiki isn't told to look the page up in collections", async () => {
+      await post(articleBody({ wiki: "collwiki" }));
+      expect(pending[0]!.text).toContain("knowledge tools");
+      pending = [];
+      await post(articleBody({ wiki: "lonewiki", bot: "melosys", page: "Plain" }));
+      expect(pending[0]!.text).not.toContain("knowledge tools");
+      expect(pending[0]!.text).toContain("research it with");
+    });
+
+    test("askDeclined is ignored here too — it is direct-mode only", async () => {
+      await post(articleBody({ wiki: "collwiki", askDeclined: true }));
+      expect(pending[0]!.text).not.toContain("already been searched");
+    });
+
+    test("a non-string page/relPath 400s before anything resolves", async () => {
+      expect((await post(articleBody({ page: 7 }))).status).toBe(400);
+      expect((await post(articleBody({ relPath: [] }))).status).toBe(400);
+      expect(created).toHaveLength(0);
     });
   });
 
