@@ -7,10 +7,13 @@ import {
   claimCountFromMap,
   claimRefFromHeadingText,
   claimRetryBatchLabel,
+  claimRetryDoneCopy,
   claimRetryRunningCopy,
+  claimRetryStoppedCopy,
   claimRetryUrlFor,
   isRetryableOutcome,
   outcomeCountsFromMap,
+  renumberClaimBlockHeading,
   retryableClaims,
   spliceClaimBlock,
 } from "./wiki-claim-retry.ts";
@@ -365,13 +368,99 @@ test("retryableClaims skips a DUPLICATED index — ambiguous, not retryable", ()
   expect(retryableClaims(dup, { 1: "timeout", 2: "timeout" }).map((c) => c.index)).toEqual([2]);
 });
 
-test("spliceClaimBlock refuses a block whose heading names a DIFFERENT claim", () => {
-  // A model answering `Claim 2/3` for a retry of claim 3 would create a
-  // duplicate-index answer and retire the wrong ↻.
-  expect(spliceClaimBlock(MULTI, 3, RETRIED_BLOCK)).toBeNull();
-  // …and a reply with no claim heading at all destroys the anchor everything
-  // downstream reads.
+// ── renumbered headings are CORRECTED, not thrown away (defect A4) ────
+
+test("spliceClaimBlock RENUMBERS a block whose heading drifted, and splices it", () => {
+  // The route accepts a renumbered heading on purpose (`isClaimVerdictBlock` calls
+  // it a formatting wobble rather than a wrong claim, because refusing it discards
+  // a completed 180s verification). The client refusing it moved that loss to the
+  // last hop. It is rewritten to the claim that was ASKED about, keeping the
+  // verdict emoji and the title as returned.
+  const out = spliceClaimBlock(MULTI, 3, "### ✅ Claim 1/1 — Founded in 1994\n\nCorrected.")!;
+  expect(out).toContain("### ✅ Claim 3/3 — Founded in 1994");
+  expect(out).not.toContain("Claim 1/1");
+  expect(out).toContain("Corrected.");
+  // No duplicate index, siblings untouched, still three claims in order.
+  expect(parseFactcheckClaims(out).map((c) => c.index)).toEqual([1, 2, 3]);
+  expect(parseFactcheckClaims(out).map((c) => c.verdict)).toEqual(["✅", "❓", "✅"]);
+  // `m` comes from the block being REPLACED, so the heading stays in step with the
+  // siblings even when the model renumbered both halves.
+  expect(spliceClaimBlock(MULTI, 2, "### ⚠️ claim 5 / 9 — Revenue")!).toContain(
+    "### ⚠️ claim 2 / 3 — Revenue",
+  );
+});
+
+test("renumberClaimBlockHeading rewrites only the numbers", () => {
+  expect(renumberClaimBlockHeading("### ✅ Claim 1/1 — Title\n\nBody.", 3, 4)).toBe(
+    "### ✅ Claim 3/4 — Title\n\nBody.",
+  );
+  // Spelling and spacing survive; a block with no claim heading is refused.
+  expect(renumberClaimBlockHeading("### ❓ claim 5 / 9 — T", 2, 3)).toBe("### ❓ claim 2 / 3 — T");
+  expect(renumberClaimBlockHeading("Just prose.", 1, 1)).toBeNull();
+});
+
+test("spliceClaimBlock still refuses a block with NO claim heading at all", () => {
+  // Without the `### <emoji> Claim n/m` anchor everything downstream stops seeing
+  // the claim — there is nothing to renumber.
   expect(spliceClaimBlock(MULTI, 2, "Just some prose, no heading.")).toBeNull();
+  // A heading only visible inside a fence is not an anchor either.
+  expect(spliceClaimBlock(MULTI, 2, "```\n### ✅ Claim 2/3 — quoted\n```")).toBeNull();
+});
+
+// ── post-splice invariant guard (defect A1) ───────────────────────────
+
+/** A fence that OPENS inside claim 1's block and CLOSES after claim 2's heading.
+ *  The heading is masked, so the extent scan runs straight through it and the
+ *  splice would replace both claims with one — deleting claim 2 from an answer
+ *  ➕/integrate then commit to the wiki page. The pre-adc4063 fence-blind splicer
+ *  stopped at the first `###` and kept claim 2. */
+const MASKED_SIBLING = [
+  LEDE,
+  "",
+  "### ❓ Claim 1/2 — First",
+  "",
+  "Here is what a verdict looks like:",
+  "",
+  "```md",
+  "some sample",
+  "",
+  "### ✅ Claim 2/2 — Second",
+  "",
+  "ok",
+  "```",
+  "",
+  "Verification timed out after 110s.",
+].join("\n");
+
+test("the invariant guard REFUSES a splice that would delete a masked sibling", () => {
+  // The parse itself cannot see claim 2 (it is inside a fence), which is exactly
+  // why the guard is a line-SHAPE check and not a parse comparison.
+  expect(parseFactcheckClaims(MASKED_SIBLING).map((c) => c.index)).toEqual([1]);
+  expect(spliceClaimBlock(MASKED_SIBLING, 1, "### ✅ Claim 1/2 — First\n\nFresh verdict.")).toBeNull();
+});
+
+test("the guard refuses any region carrying a fence delimiter", () => {
+  // A retryable claim's block is a one-line synthetic stub — timed out / skipped /
+  // errored — so a fence inside the region means the extent is not trustworthy.
+  // Costing a failed retry is the deliberate trade against a corrupted answer.
+  const fencedRegion = [
+    LEDE,
+    "",
+    "### ❓ Claim 1/2 — First",
+    "",
+    "```",
+    "quoted",
+    "```",
+    "",
+    "timed out",
+    "",
+    "### ✅ Claim 2/2 — Second",
+    "",
+    "ok",
+  ].join("\n");
+  expect(spliceClaimBlock(fencedRegion, 1, "### ✅ Claim 1/2 — First\n\nFresh.")).toBeNull();
+  // The sibling whose block is clean still splices.
+  expect(spliceClaimBlock(fencedRegion, 2, "### ⚠️ Claim 2/2 — Second\n\nHedged.")).not.toBeNull();
 });
 
 test("claimBlockIndex reads the block's own claim index", () => {
@@ -386,6 +475,42 @@ test("claimRefFromHeadingText is ANCHORED — prose mentioning a claim gets no �
   // The real shapes still match.
   expect(claimRefFromHeadingText("Claim 2/3")).toEqual({ index: 2, total: 3 });
   expect(claimRefFromHeadingText("  ❌️ Claim 2/3 — Revenue")).toEqual({ index: 2, total: 3 });
+});
+
+// ── the amendment can never land mid-answer (defect A3) ───────────────
+
+test("appendLedeAmendment lands ABOVE claim 1 when a pseudo-fence sits in the lede", () => {
+  // The failure: a stray ``` in the lede masked claim 1's heading, so the "first
+  // claim heading" was claim 2's — and the amendment was inserted BETWEEN the two
+  // verdict blocks, in an answer ➕/integrate commit to the wiki page.
+  const strayFence = [
+    LEDE,
+    "",
+    "```unclosed",
+    "",
+    "### ❓ Claim 1/2 — First",
+    "",
+    "timed out",
+    "",
+    "### ❓ Claim 2/2 — Second",
+    "",
+    "timed out",
+  ].join("\n");
+  const out = appendLedeAmendment(strayFence, 2);
+  expect(out).toContain("_Claim 2 was re-checked after the initial run._");
+  expect(out.indexOf("_Claim 2 was")).toBeLessThan(out.indexOf("### ❓ Claim 1/2"));
+});
+
+test("appendLedeAmendment NEVER changes the claim set (the invariant guard)", () => {
+  // Belt-and-braces backstop: the amendment is a lede edit by definition, so if the
+  // rewrite moved any claim block the answer is returned untouched. A missing
+  // amendment is cosmetic; a mid-answer one is durable corruption.
+  for (const src of [MULTI, WITH_FENCE, appendLedeAmendment(MULTI, 2)]) {
+    const before = parseFactcheckClaims(src);
+    const after = parseFactcheckClaims(appendLedeAmendment(src, 3));
+    expect(after.map((c) => c.index)).toEqual(before.map((c) => c.index));
+    expect(after.map((c) => c.block)).toEqual(before.map((c) => c.block));
+  }
 });
 
 test("appendLedeAmendment matches and preserves a blockquote lede's prefix", () => {
@@ -407,4 +532,25 @@ test("appendLedeAmendment matches and preserves a blockquote lede's prefix", () 
   expect(out).toContain("_Claims 2 and 3 were re-checked after the initial run._");
   // …and it stayed inside the blockquote it belonged to.
   expect(out).toContain("> _Claims 2 and 3 were re-checked after the initial run._");
+});
+
+// ── batch lifecycle copy ──────────────────────────────────────────────
+
+test("a STOPPED batch does not report itself as a completed one", () => {
+  // A batch broken by a turn switch / a navigation / a mid-run ➕ or ✎ rendered
+  // "Re-checked 1 of 4", which reads as a finished run whose other three claims
+  // were unfixable.
+  expect(claimRetryDoneCopy(1, 4)).toBe("Re-checked 1 of 4");
+  expect(claimRetryStoppedCopy("switched", 1, 4)).toBe(
+    "Stopped after 1 of 4 — you opened another answer.",
+  );
+  expect(claimRetryStoppedCopy("navigated", 0, 3)).toBe(
+    "Stopped after 0 of 3 — you left this page.",
+  );
+  expect(claimRetryStoppedCopy("wrote", 2, 3)).toBe(
+    "Stopped after 2 of 3 — the article was written from this answer.",
+  );
+  for (const reason of ["switched", "navigated", "wrote"] as const) {
+    expect(claimRetryStoppedCopy(reason, 1, 4)).not.toBe(claimRetryDoneCopy(1, 4));
+  }
 });

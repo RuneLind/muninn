@@ -102,21 +102,23 @@ import {
 } from "./wiki-refresh.ts";
 import {
   appendLedeAmendment,
-  claimBlockIndex,
   claimCountFromMap,
   claimOutcomeMapFromRows,
   claimRefFromHeadingText,
   claimRetryBatchLabel,
   claimRetryDoneCopy,
   claimRetryRunningCopy,
+  claimRetryStoppedCopy,
   claimRetryUrlFor,
   isClaimOutcome,
   outcomeCountsFromMap,
   retryableClaims,
   spliceClaimBlock,
+  CLAIM_RETRY_APPLY_RACE_COPY,
   CLAIM_RETRY_CANCEL_COPY,
   CLAIM_RETRY_WROTE_COPY,
   type ClaimOutcomeByIndex,
+  type ClaimRetryStopReason,
   type RetryableClaim,
 } from "./wiki-claim-retry.ts";
 import {
@@ -2350,10 +2352,23 @@ interface ClaimRetryRun {
 }
 let claimRetryRun: ClaimRetryRun | null = null;
 
+/**
+ * Is `turn` still part of the session?
+ *
+ * `clearAskSession` empties `askTurns` and drops both message records, but the ↻ it
+ * aborts resolves AFTERWARDS — `driveClaimRetry`'s tail and `retryAllClaims`'
+ * terminal `setClaimRetryBarMsg` both run on the evicted turn and would re-create
+ * its key, leaking a record nothing will ever read or drop again. Both setters are
+ * gated on this, so a late write on an evicted turn PRUNES instead of resurrecting.
+ */
+function askTurnIsLive(turn: AskTurn): boolean {
+  return askTurns.indexOf(turn) !== -1;
+}
+
 /** Set (or clear, with an empty `text`) one ↻ row's message and repaint that row. */
 function setClaimRetryMsg(turn: AskTurn, index: number, text: string, error = false): void {
   const forTurn = claimRetryMsgs[turn.askedAt] || (claimRetryMsgs[turn.askedAt] = {});
-  if (text) forTurn[index] = { text, error };
+  if (text && askTurnIsLive(turn)) forTurn[index] = { text, error };
   else delete forTurn[index];
   // Prune the empty per-turn bucket, the `integrateBarMsgs` lifecycle: the record
   // is keyed by `askedAt` and nothing else would ever drop it.
@@ -2361,9 +2376,12 @@ function setClaimRetryMsg(turn: AskTurn, index: number, text: string, error = fa
   paintClaimRetryRow(turn, index);
 }
 
-/** Set (or clear) the ↻ bar's persistent per-turn message and repaint the bar. */
+/** Set (or clear) the ↻ bar's persistent per-turn message and repaint the bar.
+ *  Same evicted-turn pruning as {@link setClaimRetryMsg} — the bar record used to be
+ *  the one that got resurrected, since the batch's terminal line is written after
+ *  everything else has settled. */
 function setClaimRetryBarMsg(turn: AskTurn, text: string): void {
-  if (text) claimRetryBarMsgs[turn.askedAt] = text;
+  if (text && askTurnIsLive(turn)) claimRetryBarMsgs[turn.askedAt] = text;
   else delete claimRetryBarMsgs[turn.askedAt];
   refreshClaimRetryBar(turn);
 }
@@ -2493,8 +2511,12 @@ function claimRetryBarInnerHtml(turn: AskTurn): string {
   // last splice.
   if (!claims.length && !run) return msgHtml;
   if (turn.wrote) {
+    // The persistent line comes FIRST and is not shadowed: a batch stopped BY the
+    // write ("Stopped after 2 of 3 — the article was written from this answer")
+    // says what happened to the run, while the wrote copy only explains the
+    // disable. Rendering the second alone lost the first.
     if (claims.length < 2) return msgHtml;
-    return '<span class="wiki-fc-retryall-msg">' + esc(CLAIM_RETRY_WROTE_COPY) + "</span>";
+    return msgHtml + '<span class="wiki-fc-retryall-msg">' + esc(CLAIM_RETRY_WROTE_COPY) + "</span>";
   }
   if (run && run.batch) {
     const status = run.cancelled
@@ -2682,16 +2704,20 @@ function applyClaimRetryResult(
     return false;
   }
   const markdown = typeof d.markdown === "string" ? d.markdown : "";
-  // The returned block must name the claim it was asked about. A model answering
-  // `Claim 2/3` for a retry of claim 3 would otherwise splice a duplicate-index
-  // answer, retire claim 3's ↻ (`map[3] = "verified"`) and make the whole quote
-  // list fail `isValidClaimQuotes` on the next load. `spliceClaimBlock` enforces
-  // the same rule on the block itself; this also cross-checks the wire field, so a
-  // disagreement between the two is caught rather than averaged.
+  // A block whose heading RENUMBERED is corrected, not thrown away. The route
+  // deliberately accepts one (`isClaimVerdictBlock` in `factcheck-sse.ts` calls a
+  // renumbered heading a formatting wobble rather than a wrong claim, because
+  // refusing it discards a completed 180s verification), so refusing it here just
+  // moved that loss to the last hop; `spliceClaimBlock` rewrites the `n/m` to the
+  // claim it was asked about — which is also what keeps the answer free of the
+  // duplicate index that would retire the wrong ↻. A block carrying NO claim
+  // heading at all is still refused there: it has no anchor to correct.
+  //
+  // The WIRE index is a different check and stays strict — the route echoes the
+  // index it was asked for, so a disagreement is a transport-level problem, not a
+  // model wobble.
   const wireIndex = typeof d.index === "number" ? d.index : undefined;
-  const blockIndex = claimBlockIndex(markdown);
-  const mismatched =
-    (wireIndex !== undefined && wireIndex !== claim.index) || blockIndex !== claim.index;
+  const mismatched = wireIndex !== undefined && wireIndex !== claim.index;
   const spliced = mismatched ? null : spliceClaimBlock(turn.answer, claim.index, markdown);
   if (!spliced) {
     setClaimRetryMsg(
@@ -2721,7 +2747,9 @@ function applyClaimRetryResult(
   // ranges came from that body and its Apply would post edits computed for text
   // this splice just changed. Invalidate it rather than let it write.
   invalidateIntegratePreviewAfterSplice(turn);
-  persistAskSession();
+  // NB no `persistAskSession()` here — `driveClaimRetry` owns it and calls it on
+  // EVERY path (it also has to persist the tool chips a failed retry grew), so a
+  // second call was one write of the same session per success.
   // Everything above is turn-scoped. Everything below touches singleton DOM nodes.
   if (turn !== askShownTurn) return true;
   setClaimRetryMsg(turn, claim.index, "");
@@ -2737,9 +2765,17 @@ function applyClaimRetryResult(
  *  Drop it with an honest message instead. */
 function invalidateIntegratePreviewAfterSplice(turn: AskTurn): void {
   if (!integratePreview || integratePreview.turn !== turn) return;
-  // An apply already in flight owns its own response path — leave it alone; the
-  // `turn.wrote` re-check above is what stops a splice landing after one succeeds.
-  if (integratePreview.applying) return;
+  // An apply already in flight owns its own response path and cannot be recalled —
+  // it is posting the PRE-splice answer and will set `turn.wrote` when it lands, so
+  // the page ends up written from a version of the answer this turn no longer
+  // holds. Nothing here can prevent that ordering; what it must not do is stay
+  // SILENT about it. The `turn.wrote` re-check in `applyClaimRetryResult` only
+  // covers the other order (apply first, splice after).
+  if (integratePreview.applying) {
+    setIntegrateBarMsg(turn, CLAIM_RETRY_APPLY_RACE_COPY, true);
+    setClaimRetryBarMsg(turn, CLAIM_RETRY_APPLY_RACE_COPY);
+    return;
+  }
   integratePreview = null;
   renderIntegratePreview();
   setIntegrateBarMsg(turn, "The answer changed — propose the edits again.", true);
@@ -2765,6 +2801,13 @@ async function retryOneClaim(turn: AskTurn, claim: RetryableClaim, batch: boolea
     turn, index: claim.index, batch, cancelled: false, total: 1, done: 0, cancel: () => {},
   };
   claimRetryRun = run;
+  // A row ↻ runs UNDER the bar, so the bar's persistent line — a previous batch's
+  // "Stopped after 1 of 4 — …" or its "Re-checked 2 of 3" — would sit there
+  // describing a run that ended, while this one is live. Clear it here rather than
+  // in `driveClaimRetry`, which the batch also drives and whose own terminal line
+  // `retryAllClaims` writes afterwards. `driveClaimRetry`'s finally re-derives the
+  // bar from the turn at the end.
+  setClaimRetryBarMsg(turn, "");
   return await driveClaimRetry(turn, claim, run, claimRetryUrlFor(turn, claim, WIKI));
 }
 
@@ -2874,16 +2917,20 @@ async function retryAllClaims(turn: AskTurn): Promise<void> {
   claimRetryRun = run;
   setClaimRetryBarMsg(turn, ""); // a prior batch's terminal line must not linger
   refreshClaimRetryBar(turn);
+  // WHY the loop ended, so the terminal line can say so. A batch stopped by a turn
+  // switch / a navigation / a mid-run write is NOT a completed batch, and reporting
+  // "Re-checked 1 of 4" for one told the reader the other three were unfixable.
+  let stopped: ClaimRetryStopReason | null = null;
   for (const claim of queue) {
     if (run.cancelled) break;
     // The reader switched turns — stop rather than rewriting an off-screen answer.
-    if (turn !== askShownTurn) break;
+    if (turn !== askShownTurn) { stopped = "switched"; break; }
     // …or navigated away entirely, which leaves `askShownTurn` set but destroys
     // the pane (and with it Cancel).
-    if (!claimRetryPaneAlive()) break;
+    if (!claimRetryPaneAlive()) { stopped = "navigated"; break; }
     // A ➕/✎ that landed between claims commits the answer as it stands; keep
     // going would splice into a turn the page has already been written from.
-    if (turn.wrote) break;
+    if (turn.wrote) { stopped = "wrote"; break; }
     run.index = claim.index;
     refreshClaimRetryBar(turn);
     // Each claim owns the run record for the duration of its own stream.
@@ -2901,7 +2948,11 @@ async function retryAllClaims(turn: AskTurn): Promise<void> {
   // click can only 409).
   setClaimRetryBarMsg(
     turn,
-    run.cancelled ? CLAIM_RETRY_CANCEL_COPY : claimRetryDoneCopy(run.done, run.total),
+    run.cancelled
+      ? CLAIM_RETRY_CANCEL_COPY
+      : stopped
+        ? claimRetryStoppedCopy(stopped, run.done, run.total)
+        : claimRetryDoneCopy(run.done, run.total),
   );
   paintAllClaimRetryRows(turn);
 }

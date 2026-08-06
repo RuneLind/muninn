@@ -21,11 +21,14 @@
  */
 
 import {
+  claimHeadingShapeIndexes,
+  countFenceDelimiterLines,
   parseFactcheckClaims,
   scanClaimLines,
   CLAIM_REF_SOURCE,
   CLAIM_VERDICT_SOURCE,
 } from "./wiki-integrate.ts";
+import type { FactcheckClaimAnchor } from "./wiki-integrate.ts";
 import type { ClaimOutcomeCounts } from "./wiki-factcheck-outcomes.ts";
 
 /**
@@ -139,9 +142,11 @@ export function retryableClaims(
 
 /**
  * The `Claim n/m` index of the FIRST claim heading in `text`, or null when it
- * carries none. Shared by {@link spliceClaimBlock} (which must refuse a block
- * whose heading names a different claim) and the client's wire cross-check.
- * Fence-aware via {@link scanClaimLines}, like every other heading probe here.
+ * carries none — the client's "did this reply come back as a verdict block at all?"
+ * probe. Fence-aware via {@link scanClaimLines}, like every other heading probe here.
+ *
+ * NB a DIFFERING index is not a rejection: {@link renumberClaimBlockHeading}
+ * corrects it, matching the route's own `isClaimVerdictBlock` contract.
  */
 export function claimBlockIndex(text: string): number | null {
   const scan = scanClaimLines(text);
@@ -153,6 +158,55 @@ export function claimBlockIndex(text: string): number | null {
 function firstClaimHeadingLine(scan: { claimMatch: (RegExpMatchArray | null)[] }): number {
   for (let i = 0; i < scan.claimMatch.length; i++) if (scan.claimMatch[i]) return i;
   return -1;
+}
+
+/** The `Claim n/m` fragment on its own, for rewriting a heading's numbering. */
+const CLAIM_REF_RE = new RegExp(CLAIM_REF_SOURCE, "iu");
+
+/**
+ * Rewrite the first claim heading's `n/m` to `index/total`, leaving the verdict
+ * emoji, the title and the heading's own spelling (`Claim` vs `claim`, the spacing
+ * around the slash) exactly as the model wrote them.
+ *
+ * **Why rewrite instead of reject.** The route deliberately ACCEPTS a retried block
+ * whose heading renumbered — `isClaimVerdictBlock` (`factcheck-sse.ts`) calls that a
+ * formatting wobble, not a wrong claim, because the alternative is throwing away a
+ * completed 180s verification. The client refusing the same block re-introduced
+ * exactly that loss on the last hop. Renumbering keeps the retry AND the anchor
+ * integrity the splice depends on: `n` is what `parseFactcheckClaims` keys the
+ * claim by and `m` is what its siblings all carry, so a block landing with either
+ * out of step would create a duplicate index or a heading disagreeing with the rest
+ * of the answer.
+ *
+ * Returns null only when the block carries NO claim heading at all — that block has
+ * no anchor to correct and splicing it would destroy the claim.
+ */
+export function renumberClaimBlockHeading(
+  block: string,
+  index: number,
+  total: number,
+): string | null {
+  const scan = scanClaimLines(block);
+  const line = firstClaimHeadingLine(scan);
+  if (line === -1) return null;
+  const src = scan.lines[line]!;
+  const m = src.match(CLAIM_REF_RE);
+  if (!m || m.index === undefined) return null;
+  let seen = 0;
+  const ref = m[0].replace(/\d+/g, () => (seen++ === 0 ? String(index) : String(total)));
+  const lines = [...scan.lines];
+  lines[line] = src.slice(0, m.index) + ref + src.slice(m.index + m[0].length);
+  return lines.join("\n");
+}
+
+/** Same claim set, block for block? The splice guard's equality — an index-only
+ *  comparison would miss a sibling whose CONTENT the splice damaged. */
+function sameAnchors(a: FactcheckClaimAnchor[], b: FactcheckClaimAnchor[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i]!.index !== b[i]!.index || a[i]!.block !== b[i]!.block) return false;
+  }
+  return true;
 }
 
 /**
@@ -174,18 +228,30 @@ function firstClaimHeadingLine(scan: { claimMatch: (RegExpMatchArray | null)[] }
  * the separation between blocks is the same number of bytes it was — a retried
  * block must not silently reflow the answer around it.
  *
- * Returns `null` when no block carries that index, when the block is blank, or
- * when `newBlock`'s own heading names a DIFFERENT claim (a model that answers
- * `Claim 2/3` for a retry of claim 3 would otherwise create a duplicate-index
- * answer and retire the wrong ↻). The caller treats null as a failed retry —
+ * A heading that RENUMBERED is corrected in place rather than refused — see
+ * {@link renumberClaimBlockHeading} for why the route and this must agree on that.
+ * The `m` it is corrected to is the one the block being REPLACED carried, so the
+ * spliced heading stays in step with its siblings.
+ *
+ * **The post-splice invariant guard is the backstop of the whole feature.** The
+ * block extent comes from a fence-aware line walk, and a walk bug is not a
+ * cosmetic problem here: a fence opening inside claim N's block and closing after
+ * claim N+1's heading masks that heading, so the extent runs past it and the splice
+ * DELETES a sibling claim — into an answer ➕/integrate then commit to the wiki
+ * page. So the result is verified before it is returned: every sibling claim must
+ * survive byte-identical, the target must still be there exactly once, and the
+ * fence-delimiter line count must add up. A violation returns `null`, i.e. a failed
+ * retry the caller reports on the row — a residual walk bug then costs one wasted
+ * verification instead of a corrupted answer.
+ *
+ * Returns `null` when no block carries that index, when the block is blank, when
+ * `newBlock` carries NO claim heading at all (nothing downstream could anchor to
+ * it), or when the guard above fails. The caller treats null as a failed retry —
  * nothing is written — rather than appending an orphan block.
  */
 export function spliceClaimBlock(answer: string, index: number, newBlock: string): string | null {
   const block = (newBlock || "").trim();
   if (!block) return null;
-  // The replacement must carry the anchor everything downstream reads, for the
-  // claim it is replacing — not merely "a" claim heading.
-  if (claimBlockIndex(block) !== index) return null;
   const scan = scanClaimLines(answer || "");
   const lines = scan.lines;
   let start = -1;
@@ -197,6 +263,11 @@ export function spliceClaimBlock(answer: string, index: number, newBlock: string
     }
   }
   if (start === -1) return null;
+  // The replacement must carry the anchor everything downstream reads, for the
+  // claim it is replacing — a renumbered heading is corrected, a missing one refused.
+  const total = Number(scan.claimMatch[start]![3]);
+  const anchored = renumberClaimBlockHeading(block, index, total);
+  if (anchored === null) return null;
   let end = lines.length;
   for (let i = start + 1; i < lines.length; i++) {
     if (scan.blockEnd[i]) {
@@ -207,9 +278,44 @@ export function spliceClaimBlock(answer: string, index: number, newBlock: string
   // Preserve the exact blank-line separation the replaced region ended with.
   let trailingBlanks = 0;
   for (let i = end - 1; i > start && lines[i]!.trim() === ""; i--) trailingBlanks++;
-  const replacement = block.split("\n");
+  const replacement = anchored.split("\n");
   for (let i = 0; i < trailingBlanks; i++) replacement.push("");
-  return [...lines.slice(0, start), ...replacement, ...lines.slice(end)].join("\n");
+  const spliced = [...lines.slice(0, start), ...replacement, ...lines.slice(end)].join("\n");
+
+  // ── invariant guard ───────────────────────────────────────────────────
+  const region = lines.slice(start, end).join("\n");
+  // (1) SHAPE level, and this is the one that catches the masked-sibling class.
+  // A claim heading hidden inside a fence is invisible to `parseFactcheckClaims` by
+  // construction, so a parse-level check can never notice that the extent ran
+  // through it — the claim it deleted was never in the parse to begin with. Line
+  // shape is the evidence that survives: if the region about to be deleted carries
+  // a fence delimiter, or another claim's heading text, its extent is not
+  // trustworthy and the retry fails instead of writing. Neither can occur in a
+  // legitimate target — every retryable outcome (timeout/skipped/error) leaves a
+  // one-line synthetic stub as the block.
+  if (countFenceDelimiterLines(region) !== 0) return null;
+  if (claimHeadingShapeIndexes(region).some((n) => n !== index)) return null;
+  // (2) PARSE level: every claim the original answer had must still be there, and
+  // every one OTHER than the target byte-identical.
+  const before = parseFactcheckClaims(answer || "");
+  const after = parseFactcheckClaims(spliced);
+  if (before.length !== after.length) return null;
+  for (let i = 0; i < before.length; i++) {
+    if (before[i]!.index !== after[i]!.index) return null;
+    if (before[i]!.index !== index && before[i]!.block !== after[i]!.block) return null;
+  }
+  if (after.filter((a) => a.index === index).length !== 1) return null;
+  // (3) Fence balance across the rewrite: the delimiter count must be the
+  // original's minus the region's plus the replacement's. Implied by the pure
+  // concatenation above TODAY — it is here as a net under any future splice that
+  // reflows, trims or re-joins, which is precisely where a swallowed closing fence
+  // would come back.
+  const expectedFences =
+    countFenceDelimiterLines(answer || "") -
+    countFenceDelimiterLines(region) +
+    countFenceDelimiterLines(replacement.join("\n"));
+  if (countFenceDelimiterLines(spliced) !== expectedFences) return null;
+  return spliced;
 }
 
 /** The amendment sentence's shape, matched so repeated retries ACCUMULATE into one
@@ -257,6 +363,14 @@ function amendmentLine(indexes: number[]): string {
  * lede — writing one would invent a paragraph above the `###` heading in exactly
  * the sel-mode single-claim case the ↻ matters most for. Belt and braces, an
  * answer whose lede region is blank is left alone for the same reason.
+ *
+ * **The write is verified before it is returned**, the {@link spliceClaimBlock}
+ * discipline one level down: the amendment may only land STRICTLY ABOVE the first
+ * parsed claim's heading, so re-parsing the result must yield exactly the claim set
+ * (and blocks) the input had. If it does not — the walk put the "first heading"
+ * somewhere the parser disagrees with, and the sentence would be inserted INSIDE a
+ * verdict block — the answer is returned unchanged. A missing amendment is
+ * cosmetic; a mid-answer one is corruption that ➕/integrate commit to disk.
  */
 export function appendLedeAmendment(answer: string, index: number): string {
   const anchors = parseFactcheckClaims(answer);
@@ -273,21 +387,26 @@ export function appendLedeAmendment(answer: string, index: number): string {
   // sentence) and must stay where it is (else the rewrite yanks it out of the
   // quote it belonged to).
   const existing = lede.findIndex((l) => AMENDMENT_RE.test(splitLinePrefix(l)[1].trim()));
+  let out: string;
   if (existing !== -1) {
     const [prefix, body] = splitLinePrefix(lede[existing]!);
     const prior = (body.match(/\d+/g) || []).map(Number);
     lede[existing] = prefix + amendmentLine([...prior, index]);
-    return [...lede, ...lines.slice(firstHeading)].join("\n");
+    out = [...lede, ...lines.slice(firstHeading)].join("\n");
+  } else {
+    // Insert after the lede's last non-blank line, keeping the blank separation the
+    // answer already had between the lede and the first block. The inserted line is
+    // FLUSH and preceded by a blank line — which is also what keeps it out of a
+    // blockquote/list lede rather than becoming a lazy continuation of it.
+    let lastText = lede.length - 1;
+    while (lastText >= 0 && lede[lastText]!.trim() === "") lastText--;
+    const head = lede.slice(0, lastText + 1);
+    const gap = lede.slice(lastText + 1);
+    out = [...head, "", amendmentLine([index]), ...gap, ...lines.slice(firstHeading)].join("\n");
   }
-  // Insert after the lede's last non-blank line, keeping the blank separation the
-  // answer already had between the lede and the first block. The inserted line is
-  // FLUSH and preceded by a blank line — which is also what keeps it out of a
-  // blockquote/list lede rather than becoming a lazy continuation of it.
-  let lastText = lede.length - 1;
-  while (lastText >= 0 && lede[lastText]!.trim() === "") lastText--;
-  const head = lede.slice(0, lastText + 1);
-  const gap = lede.slice(lastText + 1);
-  return [...head, "", amendmentLine([index]), ...gap, ...lines.slice(firstHeading)].join("\n");
+  // The amendment is a LEDE edit by definition — if the claim set moved, it landed
+  // somewhere it had no business being.
+  return sameAnchors(anchors, parseFactcheckClaims(out)) ? out : answer;
 }
 
 /** Minimal shape read off a live claim checklist row (a full `ClaimRow` satisfies
@@ -500,12 +619,48 @@ export function claimRetryBatchLabel(count: number): string {
   return "↻ Retry " + count + " unverified claim" + (count === 1 ? "" : "s");
 }
 
-/** Terminal copy for a finished batch, held on the bar until the turn is
- *  repainted from scratch. Counts SUCCESSES — a batch whose claims all 409'd
- *  reporting "Re-checked 3 of 3" is the lie this exists to avoid. */
+/** Terminal copy for a batch that RAN TO THE END of its queue, held on the bar
+ *  until the turn is repainted from scratch. Counts SUCCESSES — a batch whose
+ *  claims all 409'd reporting "Re-checked 3 of 3" is the lie this exists to
+ *  avoid. A batch that STOPPED early gets {@link claimRetryStoppedCopy}, not this. */
 export function claimRetryDoneCopy(done: number, total: number): string {
   return "Re-checked " + done + " of " + total;
 }
+
+/** Why a batch stopped before its queue was empty. `cancelled` has its own copy
+ *  ({@link CLAIM_RETRY_CANCEL_COPY}) because it also has to explain the slot the
+ *  in-flight claim keeps holding. */
+export type ClaimRetryStopReason = "switched" | "navigated" | "wrote";
+
+const STOP_REASON_COPY: Record<ClaimRetryStopReason, string> = {
+  switched: "you opened another answer",
+  navigated: "you left this page",
+  wrote: "the article was written from this answer",
+};
+
+/**
+ * Terminal copy for a batch that stopped EARLY.
+ *
+ * Distinct from {@link claimRetryDoneCopy} on purpose: all three of these break the
+ * loop mid-queue, and reporting "Re-checked 1 of 4" reads as a completed run that
+ * managed one success — so a reader who navigated away mid-batch was told the batch
+ * had finished and three claims were simply unfixable.
+ */
+export function claimRetryStoppedCopy(
+  reason: ClaimRetryStopReason,
+  done: number,
+  total: number,
+): string {
+  return `Stopped after ${done} of ${total} — ${STOP_REASON_COPY[reason]}.`;
+}
+
+/** A ✎ apply was already in flight when a retry spliced the answer under it. The
+ *  apply posts the PRE-splice answer and sets `turn.wrote` when it lands, so the
+ *  page and the turn end up disagreeing about what the check found. Nothing can
+ *  recall the apply — the one thing that must not happen is for the disagreement to
+ *  be silent. */
+export const CLAIM_RETRY_APPLY_RACE_COPY =
+  "The article is being written from the answer as it was BEFORE this re-check — re-run the check to reconcile.";
 
 /** The cancel affordance's honest copy. There is NO abort plumbing on this path
  *  (`streamFactcheckSSE` treats a gone client as a launch gate; `tracedOneShot`

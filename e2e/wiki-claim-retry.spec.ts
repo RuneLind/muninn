@@ -523,6 +523,63 @@ test.describe("Wiki reader: fact-check claim retry", () => {
     await expect(page.locator(".wiki-fc-retry")).toHaveAttribute("data-claim-retry", "3");
   });
 
+  test("a RENUMBERED block is corrected and spliced, not thrown away", async ({ page }) => {
+    // The route deliberately accepts a heading that renumbered (`isClaimVerdictBlock`
+    // treats it as a formatting wobble rather than a wrong claim, because refusing
+    // it discards a completed 180s verification) — so the client must not refuse it
+    // on the last hop. It rewrites the `n/m` to the claim it asked about.
+    await stubRetry(page, {
+      block: [
+        "### ✅ Claim 9/9 — Revenue doubled",
+        "",
+        "The 2025 filing reports revenue up 104% year over year.",
+        "",
+        "Confidence: 82/100",
+      ].join("\n"),
+    });
+    await seedSession(page, [seedTurn()]);
+    await openSeededTurn(page);
+    await page.locator('.wiki-fc-retry[data-claim-retry="2"] .wiki-fc-retry-btn').click();
+
+    await expect(page.locator("#askAnswerBody")).toContainText("revenue up 104%");
+    // The heading is back in step with its siblings — no `Claim 9/9`, no duplicate.
+    await expect(page.locator("#askAnswerBody")).toContainText("Claim 2/3 — Revenue doubled");
+    await expect(page.locator("#askAnswerBody")).not.toContainText("Claim 9/9");
+    await expect(page.locator(".wiki-fc-retry")).toHaveCount(0);
+    await expect(page.locator("#askAnswerMeta")).toContainText("3 checked");
+  });
+
+  test("a line of inline code does not swallow the claims below it", async ({ page }) => {
+    // Per CommonMark a backtick fence's info string may carry no backtick, so a
+    // prose line of inline code is not a fence — but "any line starting with ```"
+    // opened one that never closed, and every ↻ after it silently vanished.
+    const inlineCode = [
+      LEDE,
+      "",
+      "### ✅ Claim 1/3 — Ships 2.1M units",
+      "",
+      "```2.1M``` is the figure the page uses.",
+      "",
+      "Confirmed by the filing.",
+      "",
+      "### ❓ Claim 2/3 — Revenue doubled",
+      "",
+      "Verification timed out after 110s — the claim was not checked.",
+      "",
+      "### ❌ Claim 3/3 — Founded in 1990",
+      "",
+      "The company was founded in 1994.",
+    ].join("\n");
+    await stubRetry(page);
+    await seedSession(page, [seedTurn({ answer: inlineCode })]);
+    await openSeededTurn(page);
+    await expect(page.locator(".wiki-fc-retry")).toHaveCount(1);
+    await expect(page.locator(".wiki-fc-retry")).toHaveAttribute("data-claim-retry", "2");
+    await page.locator(".wiki-fc-retry .wiki-fc-retry-btn").click();
+    await expect(page.locator("#askAnswerBody")).toContainText("revenue up 104%");
+    await expect(page.locator("#askAnswerBody")).toContainText("The company was founded in 1994.");
+  });
+
   test("a turn persisted before the outcome map offers no ↻ at all", async ({ page }) => {
     const legacy = seedTurn();
     delete (legacy as Partial<SeedTurn>).claimOutcomeByIndex;

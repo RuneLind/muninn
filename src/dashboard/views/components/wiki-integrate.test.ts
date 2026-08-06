@@ -113,6 +113,105 @@ test("parseFactcheckClaims returns [] for a malformed answer", () => {
   expect(parseFactcheckClaims("Just prose, no headings at all.")).toEqual([]);
 });
 
+// ── fence detection: CommonMark shape, not "starts with ```" (defect A2) ─────
+
+/** Three claims where claim 1's block opens with a line of INLINE code. Per
+ *  CommonMark a backtick fence's info string may not contain a backtick, so this
+ *  is not a fence at all — but "any line starting with ```" opened one, and since
+ *  nothing ever closed it, claims 2 and 3 vanished from the parse. */
+const INLINE_BACKTICK_ANSWER = [
+  "Overall: none of the three could be checked.",
+  "",
+  "### ❓ Claim 1/3 — First",
+  "",
+  "```code``` is what the page uses.",
+  "",
+  "Verification timed out after 110s.",
+  "",
+  "### ❓ Claim 2/3 — Second",
+  "",
+  "Verification timed out after 110s.",
+  "",
+  "### ❓ Claim 3/3 — Third",
+  "",
+  "Verification timed out after 110s.",
+].join("\n");
+
+test("a line of inline code is not a fence — it must not swallow later claims", () => {
+  expect(parseFactcheckClaims(INLINE_BACKTICK_ANSWER).map((c) => c.index)).toEqual([1, 2, 3]);
+});
+
+test("a ≥4-space-indented ``` is indented code, never a fence", () => {
+  const indented = [
+    "Overall: neither could be checked.",
+    "",
+    "### ❓ Claim 1/2 — First",
+    "",
+    "    ```",
+    "    indented code, not a fence",
+    "",
+    "Verification timed out after 110s.",
+    "",
+    "### ❓ Claim 2/2 — Second",
+    "",
+    "Verification timed out after 110s.",
+  ].join("\n");
+  expect(parseFactcheckClaims(indented).map((c) => c.index)).toEqual([1, 2]);
+});
+
+test("an UNCLOSED fence is retired to a literal line rather than masking the tail", () => {
+  // CommonMark says an unclosed fence runs to EOF. Here that is the runaway-masking
+  // bug: one stray opener deletes every claim after it from the parse. A real
+  // answer's fences close, so a dangling one is far more likely prose.
+  const dangling = [
+    "Overall: neither could be checked.",
+    "",
+    "```",
+    "",
+    "### ❓ Claim 1/2 — First",
+    "",
+    "Verification timed out after 110s.",
+    "",
+    "### ❓ Claim 2/2 — Second",
+    "",
+    "Verification timed out after 110s.",
+  ].join("\n");
+  expect(parseFactcheckClaims(dangling).map((c) => c.index)).toEqual([1, 2]);
+});
+
+test("a properly CLOSED fence still hides the headings inside it", () => {
+  const closed = [
+    "### ❓ Claim 1/1 — Only claim",
+    "",
+    "I was asked to check:",
+    "",
+    "```",
+    "### ✅ Claim 7/9 — quoted, not real",
+    "```",
+    "",
+    "Verification timed out after 110s.",
+  ].join("\n");
+  expect(parseFactcheckClaims(closed).map((c) => c.index)).toEqual([1]);
+  // …and a tilde fence closes only on tildes, with the closer at least as long.
+  const tilde = ["~~~~", "### ✅ Claim 7/9 — quoted", "~~~", "### ✅ Claim 8/9 — also quoted", "~~~~"].join("\n");
+  expect(parseFactcheckClaims(tilde)).toEqual([]);
+});
+
+test("a phantom fence no longer drops the WHOLE quote list", () => {
+  // With claims 2 and 3 masked, `known` held one index while three quotes were
+  // posted, so the size rule dropped every quote on the run.
+  const r = validateClaimQuotes(
+    [
+      { index: 1, quote: "first" },
+      { index: 2, quote: "second" },
+      { index: 3, quote: "third" },
+    ],
+    INLINE_BACKTICK_ANSWER,
+  );
+  expect(r.quotes.map((q) => q.index)).toEqual([1, 2, 3]);
+  expect(r.note).toBeUndefined();
+});
+
 test("correctableClaims keeps only ❌ and ⚠️", () => {
   const answer = ANSWER + "\n\n### ⚠ Claim 4/4 — Loosely stated\n\nHedge it.";
   const claims = correctableClaims(answer);
