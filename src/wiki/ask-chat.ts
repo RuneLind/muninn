@@ -66,8 +66,12 @@ function flatten(text: string): string {
  * the unit count would exceed `max`. The `slice(0, max + 1)` pre-cut keeps the
  * walk O(max) on a huge input; a pair straddling the cut is left incomplete in
  * the head and is rejected by the same length test.
+ *
+ * Exported because every OTHER bounded-string surface has the same problem and
+ * must not grow a fourth hand-rolled copy: the fact-check claim retry bounds a
+ * client-echoed claim `title` and clips its `/agents` run name the same way.
  */
-function truncateUnits(text: string, max: number): string {
+export function truncateUnits(text: string, max: number): string {
   if (max <= 0) return "";
   if (text.length <= max) return text;
   let out = "";

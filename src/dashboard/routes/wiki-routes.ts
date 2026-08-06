@@ -87,6 +87,8 @@ import { streamFactcheckSSE } from "./factcheck-sse.ts";
 import {
   acquireClaimRetry,
   claimRetryKey,
+  neutralizePromptFence,
+  shapeClaimTitle,
   streamFactcheckRetrySSE,
   CLAIM_INDEX_MAX,
   CLAIM_TITLE_MAX,
@@ -125,6 +127,7 @@ import {
   buildDirectChatSeed,
   deriveAskThreadTitle,
   deriveAskThreadTitleOrNull,
+  truncateUnits,
   uniqueAskThreadTitle,
   type AskChatCitation,
 } from "../../wiki/ask-chat.ts";
@@ -1804,14 +1807,29 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     if (mode === "sel" && !sel) return c.json({ error: "Missing query parameter: sel" }, 400);
     const ctx = (c.req.query("ctx") ?? "").trim().slice(0, FACTCHECK_HEADING_MAX) || undefined;
 
-    // The claim itself. `title` is presentation (it renders in the block heading),
-    // so an over-cap one is truncated; `quote` is a RESOLUTION hint the model reads
-    // the claim's source span from, so an over-cap one is DROPPED rather than
-    // truncated — the `claimsEventPayload` rule, for the same reason.
-    const title = (c.req.query("title") ?? "").trim().slice(0, CLAIM_TITLE_MAX);
+    // The claim itself, bounded AND shape-neutralized — two different jobs, stated
+    // apart because they answer to different threats. BOUNDING (below) is for
+    // accident and payload size, a non-trust decision this route makes explicitly.
+    // SHAPE-NEUTRALIZING (`shapeClaimTitle` / `neutralizePromptFence`) protects the
+    // verify prompt's DELIMITER CONTRACT: `buildClaimVerifyPrompt` writes the title
+    // as one `CLAIM (n/m): …` line and fences the quote between `"""` markers, so a
+    // raw newline or a client-supplied `"""` closes a block early and gets what
+    // follows read as instruction rather than as quoted wiki text. The title's
+    // newlines also reach the `/agents` run name, where they render a multi-line
+    // card. Flatten BEFORE the length cap so the cap counts real content, and clip
+    // surrogate-safely so an astral character can't be halved into a U+FFFD.
+    //
+    // `title` is presentation (it renders in the block heading), so an over-cap one
+    // is TRUNCATED; `quote` is a RESOLUTION hint the model reads the claim's source
+    // span from, so an over-cap one is DROPPED rather than truncated — the
+    // `claimsEventPayload` rule, for the same reason. The quote's cap is tested on
+    // the value the CLIENT sent (neutralizing only ever shortens), so the drop rule
+    // stays keyed on the same number `claimsEventPayload` dropped on.
+    const title = truncateUnits(shapeClaimTitle(c.req.query("title") ?? ""), CLAIM_TITLE_MAX);
     if (!title) return c.json({ error: "Missing query parameter: title" }, 400);
     const rawQuote = (c.req.query("quote") ?? "").trim();
-    const quote = rawQuote && rawQuote.length <= CLAIM_QUOTE_MAX ? rawQuote : undefined;
+    const quote =
+      rawQuote && rawQuote.length <= CLAIM_QUOTE_MAX ? neutralizePromptFence(rawQuote) : undefined;
 
     const index1 = Number(c.req.query("index"));
     const total = Number(c.req.query("total"));
@@ -1884,18 +1902,32 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       });
     }
 
-    return streamFactcheckRetrySSE(c, {
-      config,
-      botConfig: botConfig ?? null,
-      preflightError,
-      claim: { index: index1, total, title, ...(quote ? { quote } : {}) },
-      meta: { title: meta?.title ?? page },
-      wikiName: entry?.name ?? "",
-      mode,
-      ...(excerpt ? { excerpt } : {}),
-      ...(mode === "sel" && ctx ? { ctx } : {}),
-      ...(release ? { onSettled: release } : {}),
-    });
+    // The slot is handed over to the stream via `onSettled` — but only once
+    // `streamFactcheckRetrySSE` has RETURNED a Response. A synchronous throw
+    // between the acquire above and that return (a bad option shape, an OOM in
+    // `streamSSE`'s own setup) would leave the callback unwired and wedge the page
+    // for the full expiry with nothing running. Releasing here is safe precisely
+    // because it is unreachable once the stream owns the slot: on the normal path
+    // this `catch` never fires, and on the throwing path the scaffold's `finally`
+    // never will. Release is identity-checked, so a double release is a no-op
+    // anyway.
+    try {
+      return streamFactcheckRetrySSE(c, {
+        config,
+        botConfig: botConfig ?? null,
+        preflightError,
+        claim: { index: index1, total, title, ...(quote ? { quote } : {}) },
+        meta: { title: meta?.title ?? page },
+        wikiName: entry?.name ?? "",
+        mode,
+        ...(excerpt ? { excerpt } : {}),
+        ...(mode === "sel" && ctx ? { ctx } : {}),
+        ...(release ? { onSettled: release } : {}),
+      });
+    } catch (err) {
+      release?.();
+      throw err;
+    }
   });
 
   // Wiki "Remember this": persist a durable memory distilled from an Ask/Explain

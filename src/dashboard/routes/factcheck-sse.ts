@@ -48,7 +48,7 @@ import {
   FACTCHECK_MAX_CLAIMS,
   type Claim,
 } from "../../wiki/factcheck-context.ts";
-import { CLAIM_QUOTE_MAX } from "../views/components/wiki-integrate.ts";
+import { CLAIM_QUOTE_MAX, parseFactcheckClaims } from "../views/components/wiki-integrate.ts";
 import { getLog } from "../../logging.ts";
 
 const log = getLog("dashboard", "factcheck-sse");
@@ -432,6 +432,137 @@ export function pairToolEvents(
   return out.map(({ _idx, ...tc }) => tc);
 }
 
+/**
+ * Rebuild a failed model call's tool child spans onto its (already-ended) span.
+ *
+ * Shared by the article fan-out and the claim retry because it encodes trace
+ * invariants that must not drift between them: `tracedOneShot` reaches
+ * `attachToolSpans` on the SUCCESS path only, so a claim that threw would
+ * otherwise be the one span on `/traces` with zero children — exactly the run you
+ * most want to inspect. `tracer.end` does NOT drop the label→span entry, so
+ * `addChildSpan` still resolves `label` to the real parent.
+ *
+ * Two details are load-bearing and are why this is one function rather than two
+ * copies: the offset origin must be the SAME instant `addChildSpan` adds
+ * `startOffsetMs` to — the parent span's own `startedAt` (`src/core/tool-spans.ts`
+ * uses `spanStartedAt` for exactly this) — or every child is pushed right by
+ * however long elapsed between the two reads; and the whole thing is fail-SOFT,
+ * because pure trace ornamentation must never turn a reported failure into a
+ * thrown one. `onError` lets each caller keep its own log line.
+ */
+export async function rebuildToolSpansAfterFailure(opts: {
+  tracer: Tracer;
+  label: string;
+  toolEvents: StampedToolEvent[];
+  captureToolOutputs: boolean;
+  onError: (message: string) => void;
+}): Promise<void> {
+  const failedAtMs = Date.now();
+  // The label is registered by `tracedOneShot` before its first await, so the
+  // fallbacks are unreachable in practice and only cost precision.
+  const spanStartMs =
+    opts.tracer.spanStartedAt(opts.label)?.getTime() ?? opts.toolEvents[0]?.atMs ?? failedAtMs;
+  try {
+    await attachToolSpans(
+      opts.tracer,
+      pairToolEvents(opts.toolEvents, spanStartMs, failedAtMs),
+      opts.captureToolOutputs,
+      opts.label,
+    );
+  } catch (spanErr) {
+    opts.onError(spanErr instanceof Error ? spanErr.message : String(spanErr));
+  }
+}
+
+/** A gone-guarded SSE writer: skips once the client is gone, and flips
+ *  `clientState.gone` on the first failed write (the one-shot keeps producing
+ *  events after a client abort — stop writing then). Shared verbatim by both
+ *  fact-check runners so the abort contract has ONE implementation. */
+export function makeSafeWrite(
+  stream: SseStream,
+  clientState: ClientState,
+): (event: string, data: unknown) => void {
+  return (event, data) => {
+    if (clientState.gone) return;
+    stream.writeSSE({ event, data: JSON.stringify(data) }).catch(() => { clientState.gone = true; });
+  };
+}
+
+/**
+ * The per-claim `onProgress` forwarder: accumulates every tool event for the
+ * failure-path span rebuild AND forwards `tool_start`/`tool_end` to the client as
+ * `tool` SSE events stamped with `claimIndex`.
+ *
+ * Shared by the article fan-out and the claim retry because it carries a LIVE
+ * client contract — the client's `tool` listener drives the status line and builds
+ * the "Consulting: host · host" chip row from `detail`/`url` — and one
+ * load-bearing ordering rule: the accumulation happens **BEFORE** the
+ * `clientState.gone` guard, which wraps the WRITES only. A reader who navigates
+ * away from a claim that then times out must still get its tool spans; the trace
+ * outlives the stream.
+ *
+ * Text deltas are deliberately NOT forwarded (index-less parallel deltas would
+ * interleave into garbage in the fan-out, and the retry keeps the same wire shape).
+ */
+export function makeClaimToolForwarder(opts: {
+  clientState: ClientState;
+  safeWrite: (event: string, data: unknown) => void;
+  /** 1-based claim index stamped onto every emitted `tool` payload. */
+  claimIndex: number;
+  /** Mutated in place — the failure path's only surviving record of the call. */
+  toolEvents: StampedToolEvent[];
+}): (event: StreamProgressEvent) => void {
+  return (event) => {
+    if (event.type === "tool_start" || event.type === "tool_end") {
+      opts.toolEvents.push({ event, atMs: Date.now() });
+    }
+    if (opts.clientState.gone) return;
+    if (event.type === "tool_start") {
+      const prog = getToolProgress(event.name, event.input);
+      // Full URL alongside the hostname `detail` — the client keeps the first one
+      // seen per host to build the Consulting chip's href (hostname stays the dedup
+      // key + label). Only forwarded when present.
+      const url = rawUrlField(event.input);
+      opts.safeWrite("tool", {
+        type: "tool",
+        state: "start",
+        name: event.displayName,
+        label: prog?.label ?? event.displayName,
+        detail: prog?.detail,
+        ...(url ? { url } : {}),
+        claimIndex: opts.claimIndex,
+      });
+    } else if (event.type === "tool_end") {
+      opts.safeWrite("tool", {
+        type: "tool",
+        state: "end",
+        name: event.displayName,
+        claimIndex: opts.claimIndex,
+      });
+    }
+  };
+}
+
+/**
+ * Does `block` OPEN with a well-formed `### <emoji> Claim n/m — <title>` heading?
+ *
+ * The heading is a fixed prompt contract and the anchor everything downstream
+ * depends on (`parseFactcheckClaims` → `correctableClaims` → the integrate route's
+ * edit anchors, and the client's per-claim splice). This runs the contract's ONE
+ * implementation over the block's first non-blank line rather than re-spelling the
+ * regex — a second copy is exactly how the two would drift.
+ *
+ * Deliberately does NOT check that `n`/`m` match the requested pair: the model is
+ * told the numbering in the prompt, but a reply that renumbered while otherwise
+ * being a perfectly good verdict block is a formatting wobble, not a wrong claim,
+ * and rejecting it would turn a usable retry into a failure.
+ */
+export function isClaimVerdictBlock(block: string): boolean {
+  const first = block.split("\n").find((line) => line.trim() !== "");
+  if (first === undefined) return false;
+  return parseFactcheckClaims(first).length === 1;
+}
+
 /** Per-claim live-UI outcome. Distinct from the block's ❓ markdown vocabulary
  *  (which stays unchanged in the persisted answer) — the disambiguation between
  *  "the web genuinely doesn't know" (`unverifiable`) and "we ran out of time /
@@ -771,10 +902,7 @@ async function runFactcheck(
 
   // Write helper that flips `clientState.gone` on the first failed write (the
   // one-shot keeps producing events after a client abort — stop writing then).
-  const safeWrite = (event: string, data: unknown) => {
-    if (clientState.gone) return;
-    stream.writeSSE({ event, data: JSON.stringify(data) }).catch(() => { clientState.gone = true; });
-  };
+  const safeWrite = makeSafeWrite(stream, clientState);
 
   const runStart = Date.now();
   const deadline = runStart + FACTCHECK_TIMEOUT_MS - COMPOSE_BUDGET_MS;
@@ -875,36 +1003,15 @@ async function runFactcheck(
       // own `toolCalls` array, and without this the claim you most want to inspect
       // is the one span on `/traces` with zero children.
       const toolEvents: StampedToolEvent[] = [];
-      // Per-claim tool progress — forward tool_start/tool_end (with claimIndex) as
-      // `tool` SSE events. Text deltas are NOT forwarded during the fan-out
-      // (index-less parallel deltas would interleave into garbage).
-      const onProgress = (event: StreamProgressEvent) => {
-        // Accumulate BEFORE the client-gone guard, which stays around the WRITES
-        // only: a reader who navigates away from a claim that then times out must
-        // still get its tool spans — the trace outlives the stream.
-        if (event.type === "tool_start" || event.type === "tool_end") {
-          toolEvents.push({ event, atMs: Date.now() });
-        }
-        if (clientState.gone) return;
-        if (event.type === "tool_start") {
-          const prog = getToolProgress(event.name, event.input);
-          // Full URL alongside the hostname `detail` — the client keeps the first
-          // one seen per host to build the Consulting chip's href (hostname stays
-          // the dedup key + label). Only forwarded when present.
-          const url = rawUrlField(event.input);
-          safeWrite("tool", {
-            type: "tool",
-            state: "start",
-            name: event.displayName,
-            label: prog?.label ?? event.displayName,
-            detail: prog?.detail,
-            ...(url ? { url } : {}),
-            claimIndex: index,
-          });
-        } else if (event.type === "tool_end") {
-          safeWrite("tool", { type: "tool", state: "end", name: event.displayName, claimIndex: index });
-        }
-      };
+      // Per-claim tool progress — the SHARED forwarder (accumulate-before-the-gone-
+      // guard + the `tool` event payload the client's Consulting chips read), so the
+      // retry route and this fan-out can't drift on either contract.
+      const onProgress = makeClaimToolForwarder({
+        clientState,
+        safeWrite,
+        claimIndex: index,
+        toolEvents,
+      });
 
       const { systemPrompt, userPrompt } = buildClaimVerifyPrompt(claim, {
         index,
@@ -943,35 +1050,22 @@ async function runFactcheck(
         const failure = classifyClaimFailure(message);
         const isTimeout = failure.isTimeout;
         // The seam already ended the claim span with `{ error }` — but it never
-        // reached `attachToolSpans` (that runs on the success path only), so the
-        // claim span has no tool children. Rebuild them from the progress events.
-        // `tracer.end` does NOT drop the label→span entry, so `addChildSpan` still
-        // resolves `label` to the real (already-ended) parent. Fail-soft for the
-        // same reason the seam's own call is: pure trace ornamentation must never
-        // turn a degraded claim into a failed run.
-        //
-        // The offset origin must be the SAME instant `addChildSpan` adds
-        // `startOffsetMs` to — the parent span's own `startedAt` — or every child
-        // is pushed right by however long elapsed between the two reads
-        // (`src/core/tool-spans.ts` uses `spanStartedAt` for exactly this). The
-        // label is registered by `tracedOneShot` before its first await, so the
-        // fallback is unreachable in practice and only costs precision.
-        const failedAtMs = Date.now();
-        const spanStartMs = tracer.spanStartedAt(label)?.getTime() ?? toolEvents[0]?.atMs ?? failedAtMs;
-        try {
-          await attachToolSpans(
-            tracer,
-            pairToolEvents(toolEvents, spanStartMs, failedAtMs),
-            !!config.tracingCaptureToolOutputs,
-            label,
-          );
-        } catch (spanErr) {
-          log.warn("Fact check bot={bot} claim={index}: rebuilding tool spans failed (ignoring): {error}", {
-            bot: botConfig.name,
-            index,
-            error: spanErr instanceof Error ? spanErr.message : String(spanErr),
-          });
-        }
+        // reached `attachToolSpans` (success path only), so the claim span has no
+        // tool children. The SHARED rebuild owns the offset origin + the fail-soft
+        // contract (see `rebuildToolSpansAfterFailure`); this call keeps its own
+        // log line.
+        await rebuildToolSpansAfterFailure({
+          tracer,
+          label,
+          toolEvents,
+          captureToolOutputs: !!config.tracingCaptureToolOutputs,
+          onError: (error) =>
+            log.warn("Fact check bot={bot} claim={index}: rebuilding tool spans failed (ignoring): {error}", {
+              bot: botConfig.name,
+              index,
+              error,
+            }),
+        });
         log.warn("Fact check claim failed bot={bot} claim={index} timeout={timeout} error={error}", {
           bot: botConfig.name,
           index,
