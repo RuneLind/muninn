@@ -40,8 +40,94 @@ import { escHtml as esc } from "./escape.ts";
  * prompt contract (`factcheckVerifySystemPrompt`), and accepting `##`/`####` would
  * start matching prose that merely mentions a claim.
  */
-const CLAIM_HEADING_RE =
-  /^###\s*(✅️?|⚠️?|❌️?|❓️?)\s*Claim\s+(\d+)\s*\/\s*(\d+)\s*(?:[—–:-]\s*(.*))?$/iu;
+/** The verdict-emoji alternation, VS16-optional on all four. Exported as SOURCE
+ *  (not a compiled regex) because the DOM-side matcher in `wiki-claim-retry.ts`
+ *  reads a RENDERED heading, where the `###` is gone — deriving both from one
+ *  spelling is what stops the markdown contract and the DOM contract drifting. */
+export const CLAIM_VERDICT_SOURCE = "(✅️?|⚠️?|❌️?|❓️?)";
+
+/** The `Claim n/m` reference itself — group 1 = index, group 2 = total (relative
+ *  to this fragment; both consumers place it after the verdict group). */
+export const CLAIM_REF_SOURCE = "Claim\\s+(\\d+)\\s*\\/\\s*(\\d+)";
+
+/** The optional `— <title>` tail, anchored to end of line. */
+const CLAIM_TITLE_SOURCE = "\\s*(?:[—–:-]\\s*(.*))?$";
+
+const CLAIM_HEADING_RE = new RegExp(
+  "^###\\s*" + CLAIM_VERDICT_SOURCE + "\\s*" + CLAIM_REF_SOURCE + CLAIM_TITLE_SOURCE,
+  "iu",
+);
+
+/**
+ * The ONE block-extent rule: a `###` heading line closes the block above it.
+ *
+ * Deliberately `^###\s` and not `startsWith("###")` — a `#### Sub-heading` inside
+ * a verdict block is CONTENT, and treating it as a terminator truncated the block
+ * (the splicer left a stale tail under a fresh verdict). Both
+ * {@link parseFactcheckClaims} and `spliceClaimBlock` read this through
+ * {@link scanClaimLines}, so parity is by construction rather than by comment.
+ */
+const CLAIM_BLOCK_END_RE = /^###\s/;
+
+/** A fenced-code delimiter line: a run of ≥3 backticks or tildes, plus its tail
+ *  (an info string on the opener; a closer must carry nothing). */
+const FENCE_RE = /^(`{3,}|~{3,})(.*)$/;
+
+/** Per-line classification of a fact-check answer — see {@link scanClaimLines}. */
+export interface ClaimLineScan {
+  /** The answer's lines, `split("\n")`, unmodified. */
+  lines: string[];
+  /** Per line: its `CLAIM_HEADING_RE` match, or null. Always null inside a fence. */
+  claimMatch: (RegExpMatchArray | null)[];
+  /** Per line: true when it is a `###` heading OUTSIDE any fence — i.e. when it
+   *  ends the block above it. Always false inside a fence. */
+  blockEnd: boolean[];
+}
+
+/**
+ * Walk an answer's lines ONCE, tracking fenced code blocks, and classify each line
+ * as a claim heading / a block terminator / neither.
+ *
+ * **Fence tracking is load-bearing, not tidiness.** A verdict block may quote a
+ * `### ❓ Claim 2/3` heading inside a ``` fence (models do this when explaining
+ * what they were asked to check). Without this walk the parser sees a phantom
+ * claim and the splicer targets the QUOTED heading — replacing the region from
+ * inside the fence to the next `###`, which swallows the closing ``` and renders
+ * the entire rest of the answer as code. Both consumers therefore share this one
+ * implementation; neither re-spells the heading or extent rules.
+ *
+ * Fence matching follows the CommonMark closer rule the integrate engine already
+ * uses: the closing run must use the same marker character, be at least as long as
+ * the opener's, and carry nothing after it. An unclosed fence runs to EOF, exactly
+ * as CommonMark says.
+ */
+export function scanClaimLines(answer: string): ClaimLineScan {
+  const lines = (answer || "").split("\n");
+  const claimMatch: (RegExpMatchArray | null)[] = [];
+  const blockEnd: boolean[] = [];
+  let fence: { marker: string; len: number } | null = null;
+  for (const raw of lines) {
+    const line = raw.trim();
+    const fm = line.match(FENCE_RE);
+    if (fence) {
+      if (fm && fm[1]![0] === fence.marker && fm[1]!.length >= fence.len && fm[2]!.trim() === "") {
+        fence = null;
+      }
+      claimMatch.push(null);
+      blockEnd.push(false);
+      continue;
+    }
+    if (fm) {
+      fence = { marker: fm[1]![0]!, len: fm[1]!.length };
+      claimMatch.push(null);
+      blockEnd.push(false);
+      continue;
+    }
+    claimMatch.push(line.match(CLAIM_HEADING_RE));
+    blockEnd.push(CLAIM_BLOCK_END_RE.test(line));
+  }
+  return { lines, claimMatch, blockEnd };
+}
 
 /** One claim anchor derived SERVER-SIDE from the persisted fact-check answer. */
 export interface FactcheckClaimAnchor {
@@ -83,7 +169,7 @@ function normalizeVerdict(v: string): string {
  */
 export function parseFactcheckClaims(answer: string): FactcheckClaimAnchor[] {
   if (!answer || typeof answer !== "string") return [];
-  const lines = answer.split("\n");
+  const scan = scanClaimLines(answer);
   const anchors: FactcheckClaimAnchor[] = [];
   let current: FactcheckClaimAnchor | null = null;
   let buffer: string[] = [];
@@ -94,8 +180,9 @@ export function parseFactcheckClaims(answer: string): FactcheckClaimAnchor[] {
     buffer = [];
   };
 
-  for (const line of lines) {
-    const m = line.trim().match(CLAIM_HEADING_RE);
+  for (let i = 0; i < scan.lines.length; i++) {
+    const line = scan.lines[i]!;
+    const m = scan.claimMatch[i];
     if (m) {
       flush();
       current = {
@@ -109,7 +196,7 @@ export function parseFactcheckClaims(answer: string): FactcheckClaimAnchor[] {
       continue;
     }
     // A non-claim `###` heading closes the current block without opening one.
-    if (current && /^###\s/.test(line.trim())) {
+    if (current && scan.blockEnd[i]) {
       flush();
       continue;
     }

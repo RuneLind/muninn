@@ -20,7 +20,12 @@
  *    heading levels and keyed on the `Claim n/m` text instead of on a tag name.
  */
 
-import { parseFactcheckClaims, type FactcheckClaimAnchor } from "./wiki-integrate.ts";
+import {
+  parseFactcheckClaims,
+  scanClaimLines,
+  CLAIM_REF_SOURCE,
+  CLAIM_VERDICT_SOURCE,
+} from "./wiki-integrate.ts";
 import type { ClaimOutcomeCounts } from "./wiki-factcheck-outcomes.ts";
 
 /**
@@ -42,6 +47,14 @@ export const CLAIM_OUTCOMES = [
   "error",
 ] as const;
 
+/** One of the five wire outcomes. */
+export type ClaimOutcome = (typeof CLAIM_OUTCOMES)[number];
+
+/** The two outcomes a REAL model verdict block can carry — what the server's
+ *  `outcomes.filter(o => o.real)` counts, and therefore what the meta line's claim
+ *  count means. Named here so `claimCountFromMap` doesn't re-spell it. */
+export const REAL_CLAIM_OUTCOMES = ["verified", "unverifiable"] as const;
+
 /** index (1-based, as the `Claim n/m` heading carries it) → outcome. */
 export type ClaimOutcomeByIndex = Record<number, string>;
 
@@ -50,9 +63,16 @@ export function isRetryableOutcome(outcome: string | undefined): boolean {
   return !!outcome && (RETRYABLE_OUTCOMES as readonly string[]).includes(outcome);
 }
 
-/** True when `v` is one of the five wire outcomes. */
-export function isClaimOutcome(v: unknown): boolean {
+/** True when `v` is one of the five wire outcomes. The ONE gate every consumer
+ *  runs — the persisted-map validator, the tally, the count, and the client's
+ *  write of a `claim_result.outcome` off the wire. */
+export function isClaimOutcome(v: unknown): v is ClaimOutcome {
   return typeof v === "string" && (CLAIM_OUTCOMES as readonly string[]).includes(v);
+}
+
+/** True when `v` names an outcome produced by a real model verdict block. */
+export function isRealClaimOutcome(v: unknown): boolean {
+  return typeof v === "string" && (REAL_CLAIM_OUTCOMES as readonly string[]).includes(v);
 }
 
 /** One claim the reader can re-check, joined to the quote its extraction carried. */
@@ -76,6 +96,13 @@ export interface RetryableClaim {
  * An absent outcome map means the turn predates the field: it correctly yields no
  * ↻ rather than guessing from the ❓ emoji, which cannot tell a model-chosen
  * "unverifiable" apart from a claim that timed out.
+ *
+ * **A DUPLICATED index is skipped, not offered.** With the fence-aware scan a
+ * heading quoted inside a code fence can no longer produce a second anchor, but a
+ * malformed model answer genuinely can (two blocks both claiming `Claim 2/3`).
+ * There is then no single block a retry could replace — `spliceClaimBlock` would
+ * silently rewrite the first and the batch would launch the same claim twice — so
+ * the honest answer is "ambiguous, not retryable".
  */
 export function retryableClaims(
   answer: string,
@@ -89,8 +116,12 @@ export function retryableClaims(
       quoteByIndex.set(q.index, q.quote);
     }
   }
+  const anchors = parseFactcheckClaims(answer);
+  const seen = new Map<number, number>();
+  for (const a of anchors) seen.set(a.index, (seen.get(a.index) || 0) + 1);
   const out: RetryableClaim[] = [];
-  for (const anchor of parseFactcheckClaims(answer)) {
+  for (const anchor of anchors) {
+    if ((seen.get(anchor.index) || 0) > 1) continue;
     const outcome = outcomeByIndex[anchor.index];
     if (!isRetryableOutcome(outcome)) continue;
     const quote = quoteByIndex.get(anchor.index);
@@ -106,16 +137,21 @@ export function retryableClaims(
   return out;
 }
 
-/** True when this line IS a `### <emoji> Claim n/m` heading — run through the
- *  contract's ONE implementation rather than a re-spelled regex (the
- *  `isClaimVerdictBlock` trick). */
-function isClaimHeadingLine(line: string): boolean {
-  return parseFactcheckClaims(line.trim()).length === 1;
+/**
+ * The `Claim n/m` index of the FIRST claim heading in `text`, or null when it
+ * carries none. Shared by {@link spliceClaimBlock} (which must refuse a block
+ * whose heading names a different claim) and the client's wire cross-check.
+ * Fence-aware via {@link scanClaimLines}, like every other heading probe here.
+ */
+export function claimBlockIndex(text: string): number | null {
+  const scan = scanClaimLines(text);
+  for (const m of scan.claimMatch) if (m) return Number(m[2]);
+  return null;
 }
 
 /** Line index of the first claim heading, or -1. */
-function firstClaimHeadingLine(lines: string[]): number {
-  for (let i = 0; i < lines.length; i++) if (isClaimHeadingLine(lines[i]!)) return i;
+function firstClaimHeadingLine(scan: { claimMatch: (RegExpMatchArray | null)[] }): number {
+  for (let i = 0; i < scan.claimMatch.length; i++) if (scan.claimMatch[i]) return i;
   return -1;
 }
 
@@ -123,24 +159,39 @@ function firstClaimHeadingLine(lines: string[]): number {
  * Replace exactly the block whose `Claim n/m` index is `index` with `newBlock`,
  * leaving every sibling byte-identical.
  *
- * Block extent matches {@link parseFactcheckClaims}'s own rule: from the heading
- * line up to (not including) the next line starting with `###`, whether that is
- * another claim or an unrelated heading. The trailing blank lines of the replaced
- * region are counted and re-emitted, so the separation between blocks is the same
- * number of bytes it was — a retried block must not silently reflow the answer
- * around it.
+ * Both the anchor search and the block extent run through the SHARED, fence-aware
+ * {@link scanClaimLines}, so parity with {@link parseFactcheckClaims} is by
+ * construction. Two failures this closes, both reproduced in a live browser:
  *
- * Returns `null` when no block carries that index; the caller treats that as a
- * failed retry (nothing is written) rather than appending an orphan block.
+ *  - a `### … Claim n/m` heading QUOTED inside a ``` fence was taken as the
+ *    anchor, so the splice started mid-fence and ate the closing ``` — the rest
+ *    of the answer then rendered as one code block;
+ *  - the extent rule was `trim().startsWith("###")` while the parser's was
+ *    `/^###\s/`, so a `#### Sub-heading` ended the splice early and left a stale
+ *    tail sitting under the fresh verdict.
+ *
+ * The trailing blank lines of the replaced region are counted and re-emitted, so
+ * the separation between blocks is the same number of bytes it was — a retried
+ * block must not silently reflow the answer around it.
+ *
+ * Returns `null` when no block carries that index, when the block is blank, or
+ * when `newBlock`'s own heading names a DIFFERENT claim (a model that answers
+ * `Claim 2/3` for a retry of claim 3 would otherwise create a duplicate-index
+ * answer and retire the wrong ↻). The caller treats null as a failed retry —
+ * nothing is written — rather than appending an orphan block.
  */
 export function spliceClaimBlock(answer: string, index: number, newBlock: string): string | null {
   const block = (newBlock || "").trim();
   if (!block) return null;
-  const lines = (answer || "").split("\n");
+  // The replacement must carry the anchor everything downstream reads, for the
+  // claim it is replacing — not merely "a" claim heading.
+  if (claimBlockIndex(block) !== index) return null;
+  const scan = scanClaimLines(answer || "");
+  const lines = scan.lines;
   let start = -1;
   for (let i = 0; i < lines.length; i++) {
-    const parsed = parseFactcheckClaims(lines[i]!.trim());
-    if (parsed.length === 1 && parsed[0]!.index === index) {
+    const m = scan.claimMatch[i];
+    if (m && Number(m[2]) === index) {
       start = i;
       break;
     }
@@ -148,7 +199,7 @@ export function spliceClaimBlock(answer: string, index: number, newBlock: string
   if (start === -1) return null;
   let end = lines.length;
   for (let i = start + 1; i < lines.length; i++) {
-    if (lines[i]!.trim().startsWith("###")) {
+    if (scan.blockEnd[i]) {
       end = i;
       break;
     }
@@ -164,6 +215,20 @@ export function spliceClaimBlock(answer: string, index: number, newBlock: string
 /** The amendment sentence's shape, matched so repeated retries ACCUMULATE into one
  *  line instead of stacking near-identical sentences under the lede. */
 const AMENDMENT_RE = /^_Claims? [\d,\s and]+ (?:was|were) re-checked after the initial run\._$/;
+
+/** A line's leading BLOCK markup — blockquote markers and/or one list bullet.
+ *  Split off before {@link AMENDMENT_RE} is applied and re-attached on rewrite:
+ *  the regex is anchored at `_`, so a lede whose amendment sits inside a
+ *  blockquote (`> _Claim 1 was re-checked…_`) matched nothing, and a naive rewrite
+ *  would have dropped the `>` and pulled the sentence out of its quote. */
+const LINE_PREFIX_RE = /^([ \t]*(?:>[ \t]*)*(?:[-*+][ \t]+|\d+[.)][ \t]+)?)([\s\S]*)$/;
+
+/** `["> ", "_Claim 1 …_"]` — the block prefix and the rest of the line. */
+function splitLinePrefix(line: string): [string, string] {
+  const m = line.match(LINE_PREFIX_RE);
+  if (!m) return ["", line];
+  return [m[1] ?? "", m[2] ?? ""];
+}
 
 /** Render the amendment for a set of 1-based claim indexes (ascending, deduped). */
 function amendmentLine(indexes: number[]): string {
@@ -196,20 +261,28 @@ function amendmentLine(indexes: number[]): string {
 export function appendLedeAmendment(answer: string, index: number): string {
   const anchors = parseFactcheckClaims(answer);
   if (anchors.length < 2) return answer;
-  const lines = (answer || "").split("\n");
-  const firstHeading = firstClaimHeadingLine(lines);
+  const scan = scanClaimLines(answer || "");
+  const lines = scan.lines;
+  const firstHeading = firstClaimHeadingLine(scan);
   if (firstHeading <= 0) return answer;
   const lede = lines.slice(0, firstHeading);
   if (lede.join("").trim() === "") return answer;
 
-  const existing = lede.findIndex((l) => AMENDMENT_RE.test(l.trim()));
+  // Match through the block prefix, and re-emit it: an amendment sitting inside a
+  // blockquote/list lede must be RECOGNISED (else every retry stacks another
+  // sentence) and must stay where it is (else the rewrite yanks it out of the
+  // quote it belonged to).
+  const existing = lede.findIndex((l) => AMENDMENT_RE.test(splitLinePrefix(l)[1].trim()));
   if (existing !== -1) {
-    const prior = (lede[existing]!.match(/\d+/g) || []).map(Number);
-    lede[existing] = amendmentLine([...prior, index]);
+    const [prefix, body] = splitLinePrefix(lede[existing]!);
+    const prior = (body.match(/\d+/g) || []).map(Number);
+    lede[existing] = prefix + amendmentLine([...prior, index]);
     return [...lede, ...lines.slice(firstHeading)].join("\n");
   }
   // Insert after the lede's last non-blank line, keeping the blank separation the
-  // answer already had between the lede and the first block.
+  // answer already had between the lede and the first block. The inserted line is
+  // FLUSH and preceded by a blank line — which is also what keeps it out of a
+  // blockquote/list lede rather than becoming a lazy continuation of it.
   let lastText = lede.length - 1;
   while (lastText >= 0 && lede[lastText]!.trim() === "") lastText--;
   const head = lede.slice(0, lastText + 1);
@@ -258,9 +331,10 @@ export function claimOutcomeMapFromRows(
 export function outcomeCountsFromMap(map: ClaimOutcomeByIndex | undefined): ClaimOutcomeCounts {
   const counts: ClaimOutcomeCounts = {};
   for (const v of Object.values(map || {})) {
-    if (v === "verified" || v === "unverifiable" || v === "timeout" || v === "skipped" || v === "error") {
-      counts[v] = (counts[v] || 0) + 1;
-    }
+    // ONE spelling of the vocabulary (`isClaimOutcome`), never a re-listed
+    // alternation: three separate hand-written copies of the five values is
+    // exactly how a sixth outcome ships half-handled.
+    if (isClaimOutcome(v)) counts[v as ClaimOutcome] = (counts[v as ClaimOutcome] || 0) + 1;
   }
   return counts;
 }
@@ -274,7 +348,7 @@ export function outcomeCountsFromMap(map: ClaimOutcomeByIndex | undefined): Clai
  */
 export function claimCountFromMap(map: ClaimOutcomeByIndex | undefined): number {
   let n = 0;
-  for (const v of Object.values(map || {})) if (v === "verified" || v === "unverifiable") n++;
+  for (const v of Object.values(map || {})) if (isRealClaimOutcome(v)) n++;
   return n;
 }
 
@@ -285,18 +359,35 @@ export interface ClaimRef {
 }
 
 /**
+ * The rendered-heading form of the markdown heading contract: optional verdict
+ * emoji, then `Claim n/m`, ANCHORED at the start of the heading text.
+ *
+ * Built from the same `CLAIM_VERDICT_SOURCE` / `CLAIM_REF_SOURCE` fragments as
+ * `CLAIM_HEADING_RE`, minus the `###` (which `formatWebHtml` has consumed by the
+ * time this sees the text) — so the two contracts cannot drift silently.
+ *
+ * **The anchor is the fix, not decoration:** the previous `\bclaim\s+(\d+)…`
+ * matched ANYWHERE in ANY heading, so a prose heading like "Revisiting claim 2/3
+ * later" grew a stray ↻ row pointed at a claim it doesn't own.
+ */
+const CLAIM_HEADING_TEXT_RE = new RegExp(
+  "^\\s*(?:" + CLAIM_VERDICT_SOURCE + "\\s*)?" + CLAIM_REF_SOURCE + "\\b",
+  "iu",
+);
+
+/**
  * Read `Claim n/m` out of a rendered heading's text content.
  *
  * Keyed on the text, never on the tag: the markdown contract is `###` but the DOM
  * contract is `<h4>` (see the module header), so the caller queries every heading
- * level and lets this decide. Tolerant of the emoji prefix, the VS16 variants and
- * the separator zoo for the same reason `CLAIM_HEADING_RE` is.
+ * level and lets this decide. Tolerant of the emoji prefix and the VS16 variants
+ * for the same reason `CLAIM_HEADING_RE` is — it shares their spelling.
  */
 export function claimRefFromHeadingText(text: string): ClaimRef | null {
-  const m = (text || "").match(/\bclaim\s+(\d+)\s*\/\s*(\d+)\b/i);
+  const m = (text || "").match(CLAIM_HEADING_TEXT_RE);
   if (!m) return null;
-  const index = Number(m[1]);
-  const total = Number(m[2]);
+  const index = Number(m[2]);
+  const total = Number(m[3]);
   if (!Number.isInteger(index) || !Number.isInteger(total) || index < 1 || total < 1) return null;
   return { index, total };
 }
@@ -341,6 +432,45 @@ export function buildClaimRetryUrl(opts: ClaimRetryUrlOptions): string {
   return url;
 }
 
+/** The persisted fact-check context a retry re-issues its call against — the
+ *  structural subset of `AskTurn` this module needs (it stays DOM-free). */
+export interface ClaimRetryTurnContext {
+  page?: string;
+  fcMode?: string;
+  fcSel?: string;
+  fcCtx?: string;
+}
+
+/**
+ * Build the retry URL for one claim ON one turn — the single spelling of the
+ * ten-line argument object the row ↻ and the batch loop used to carry a copy of
+ * each (they had already drifted once).
+ *
+ * **`title` is `claim.title` and NOTHING else.** The earlier `claim.title ||
+ * turn.question` fell back to the turn's question, which on a fact-check turn is
+ * the synthetic label `Fact check: <page>` — so an untitled claim spent a 180s
+ * tool-enabled one-shot re-verifying the string "Fact check: Retry Note" as if it
+ * were the claim. `buildClaimRetryUrl`'s `"(untitled claim)"` fallback exists for
+ * exactly this case; letting it be reachable is the fix.
+ */
+export function claimRetryUrlFor(
+  turn: ClaimRetryTurnContext,
+  claim: RetryableClaim,
+  wiki?: string,
+): string {
+  return buildClaimRetryUrl({
+    page: turn.page || "",
+    ...(wiki ? { wiki } : {}),
+    ...(turn.fcMode ? { mode: turn.fcMode } : {}),
+    ...(turn.fcSel ? { sel: turn.fcSel } : {}),
+    ...(turn.fcCtx ? { ctx: turn.fcCtx } : {}),
+    index: claim.index,
+    total: claim.total,
+    title: claim.title,
+    ...(claim.quote ? { quote: claim.quote } : {}),
+  });
+}
+
 /**
  * Copy for the route's 409 `{state:"running", expiresAtMs}`. The deadline rides
  * the 409 precisely so this needs no second route — including for a row-level ↻
@@ -363,9 +493,18 @@ export const CLAIM_RETRY_WROTE_COPY =
   "already added to the article — re-run the check to fill this in";
 
 /** The batch bar's label. Rendered only above ONE claim (a single retryable claim
- *  is served by its own row ↻). */
+ *  is served by its own row ↻) — but the singular is still spelled, because the
+ *  RUNNING bar renders `claimRetryBatchLabel(run.total)` and a batch whose queue
+ *  shrank to one would otherwise read "Retry 1 unverified claims". */
 export function claimRetryBatchLabel(count: number): string {
-  return "↻ Retry " + count + " unverified claims";
+  return "↻ Retry " + count + " unverified claim" + (count === 1 ? "" : "s");
+}
+
+/** Terminal copy for a finished batch, held on the bar until the turn is
+ *  repainted from scratch. Counts SUCCESSES — a batch whose claims all 409'd
+ *  reporting "Re-checked 3 of 3" is the lie this exists to avoid. */
+export function claimRetryDoneCopy(done: number, total: number): string {
+  return "Re-checked " + done + " of " + total;
 }
 
 /** The cancel affordance's honest copy. There is NO abort plumbing on this path
@@ -373,6 +512,10 @@ export function claimRetryBatchLabel(count: number): string {
  *  carries no cancellation token), so cancel stops the BATCH from launching the
  *  next claim and detaches this client — the in-flight claim finishes server-side
  *  holding the page's single-flight slot. Saying otherwise would be a lie the 409
- *  immediately exposes. */
+ *  immediately exposes, which is why the slot's lifetime is named too: the
+ *  `~4 min` mirrors `FACTCHECK_RETRY_TIMEOUT_MS` (180s) + `CLAIM_RETRY_SLOT_SLACK_MS`
+ *  (30s) from `factcheck-retry-sse.ts`. This copy must PERSIST after the run
+ *  record clears — the first cut painted it for one frame and then repainted an
+ *  enabled bar whose next click could only 409. */
 export const CLAIM_RETRY_CANCEL_COPY =
-  "Stopped — the claim already running finishes on the server.";
+  "Stopped — the claim already running finishes on the server (it holds this page's retry slot for up to ~4 min).";

@@ -14,15 +14,16 @@
  *      verdict, the meta line's outcome breakdown moves, and the write-action bars
  *      re-derive.
  *
- * **What is stubbed and why.** The two model-backed SSE routes are stubbed at the
- * network boundary with `page.route` — `wiki-integrate.spec.ts`'s precedent, for
- * the same reason: a real `/api/wiki/factcheck` run is a multi-minute tool-enabled
- * fan-out, and a real `/api/wiki/factcheck/claim` is a 180s one-shot. Forcing a
- * REAL timeout is additionally not drivable from outside the process: the per-claim
- * budget is enforced inside each connector (shortening `FACTCHECK_CLAIM_TIMEOUT_MS`
- * forces nothing), and the `oneShot` test seam is not reachable through the route.
- * Everything ELSE here is real — the booted muninn, the real `/api/wiki/factcheck/claim`
- * URL construction, the real client bundle, the real localStorage round-trip.
+ * **What is stubbed and why.** Exactly ONE model-backed SSE route is stubbed at the
+ * network boundary with `page.route` — `/api/wiki/factcheck/claim`, a 180s one-shot
+ * (`wiki-integrate.spec.ts`'s precedent). The fact-check RUN itself is never made
+ * at all: committed turns are seeded straight into localStorage, so there is no
+ * second route to stub. Forcing a REAL timeout is additionally not drivable from
+ * outside the process: the per-claim budget is enforced inside each connector
+ * (shortening `FACTCHECK_CLAIM_TIMEOUT_MS` forces nothing), and the `oneShot` test
+ * seam is not reachable through the route. Everything ELSE here is real — the
+ * booted muninn, the real `/api/wiki/factcheck/claim` URL construction, the real
+ * client bundle, the real localStorage round-trip.
  *
  * Fact-check turns are seeded straight into `localStorage` (the reader persists
  * committed Ask turns under `wikiAskSession:<wiki>`), so the tested path is the
@@ -145,15 +146,27 @@ function sse(event: string, data: unknown): string {
 }
 
 /** Stub the retry route with a successful re-verify (a tool event so the
- *  Consulting chips path is exercised, then the verdict block). */
+ *  Consulting chips path is exercised, then the verdict block).
+ *
+ *  `firstDelayMs` holds the FIRST call open, which is how the batch's running
+ *  state (and therefore Cancel) is reachable from a test at all. */
 async function stubRetry(
   page: Page,
-  opts: { urls?: string[]; block?: string; status?: number; body?: unknown } = {},
+  opts: {
+    urls?: string[];
+    block?: string;
+    status?: number;
+    body?: unknown;
+    outcome?: string;
+    firstDelayMs?: number;
+  } = {},
 ): Promise<void> {
+  let calls = 0;
   await page.route(
     (url) => url.pathname === "/api/wiki/factcheck/claim",
-    (route) => {
+    async (route) => {
       opts.urls?.push(route.request().url());
+      const nth = calls++;
       if (opts.status && opts.status !== 200) {
         return route.fulfill({
           status: opts.status,
@@ -163,31 +176,32 @@ async function stubRetry(
       }
       const index = Number(new URL(route.request().url()).searchParams.get("index"));
       const block = opts.block ?? (index === 3 ? RETRIED_BLOCK_3 : RETRIED_BLOCK);
-      return route.fulfill({
-        status: 200,
-        contentType: "text/event-stream",
-        body:
-          sse("tool", {
-            type: "tool",
-            state: "start",
-            name: "WebFetch",
-            label: "Reading",
-            detail: "sec.gov",
-            url: "https://sec.gov/filing",
-            claimIndex: index,
-          }) +
-          sse("tool", { type: "tool", state: "end", name: "WebFetch", claimIndex: index }) +
-          sse("claim_result", {
-            type: "claim_result",
-            index,
-            verdict: "✅",
-            outcome: "verified",
-            confidence: 82,
-            markdown: block,
-          }) +
-          sse("done", { type: "done", index }) +
-          sse("end", {}),
-      });
+      if (nth === 0 && opts.firstDelayMs) {
+        await new Promise((r) => setTimeout(r, opts.firstDelayMs));
+      }
+      const body =
+        sse("tool", {
+          type: "tool",
+          state: "start",
+          name: "WebFetch",
+          label: "Reading",
+          detail: "sec.gov",
+          url: "https://sec.gov/filing",
+          claimIndex: index,
+        }) +
+        sse("tool", { type: "tool", state: "end", name: "WebFetch", claimIndex: index }) +
+        sse("claim_result", {
+          type: "claim_result",
+          index,
+          verdict: "✅",
+          outcome: opts.outcome ?? "verified",
+          confidence: 82,
+          markdown: block,
+        }) +
+        sse("done", { type: "done", index }) +
+        sse("end", {});
+      // A cancelled request is aborted client-side; fulfilling it then throws.
+      await route.fulfill({ status: 200, contentType: "text/event-stream", body }).catch(() => {});
     },
   );
 }
@@ -405,6 +419,108 @@ test.describe("Wiki reader: fact-check claim retry", () => {
     await expect(page.locator("#askAnswerBody")).toContainText(
       "Claims 2 and 3 were re-checked after the initial run",
     );
+    // The terminal count RENDERS. It is held on the turn, not the run record —
+    // rendered off the run it never appeared at all, because the run is nulled
+    // before the last repaint.
+    await expect(page.locator("#wikiClaimRetryBar")).toContainText("Re-checked 2 of 2");
+  });
+
+  test("Cancel leaves honest copy that SURVIVES the run settling", async ({ page }) => {
+    const urls: string[] = [];
+    await stubRetry(page, { urls, firstDelayMs: 3000 });
+    await seedSession(page, [
+      seedTurn({
+        claimOutcomeByIndex: { 1: "verified", 2: "timeout", 3: "error" },
+        claimOutcomes: { verified: 1, timeout: 1, error: 1 },
+        claimCount: 1,
+      }),
+    ]);
+    await openSeededTurn(page);
+    await page.locator("#wikiClaimRetryAll").click();
+
+    const cancel = page.locator("#wikiClaimRetryCancel");
+    await expect(cancel).toBeVisible();
+    await cancel.click();
+
+    // The copy is honest about what cancel can and cannot do…
+    const bar = page.locator("#wikiClaimRetryBar");
+    await expect(bar).toContainText("finishes on the server");
+    await expect(bar).toContainText("~4 min");
+    // …and it is STILL there after the aborted claim's stream settles and the run
+    // record clears. Rendered off the run it lasted exactly one frame, and what
+    // replaced it was an idle bar promising a retry that could only 409.
+    await page.waitForTimeout(1500);
+    await expect(bar).toContainText("finishes on the server");
+    // The batch never launched the second claim.
+    expect(urls).toHaveLength(1);
+    // Nothing was spliced; the holes are still holes.
+    await expect(page.locator("#askAnswerBody")).toContainText("Verification timed out");
+    await expect(page.locator(".wiki-fc-retry")).toHaveCount(2);
+  });
+
+  test("a claim heading QUOTED inside a code fence is not the splice target", async ({ page }) => {
+    // Confirmed in a live browser before the fix: the splice anchored on the
+    // fenced copy, ate the closing ``` and rendered the rest of the answer as one
+    // code block. `<pre>` count is the assertion that catches exactly that.
+    const fenced = [
+      LEDE,
+      "",
+      "### ✅ Claim 1/3 — Ships 2.1M units",
+      "",
+      "I was asked to check:",
+      "",
+      "```",
+      "### ❓ Claim 2/3 — Revenue doubled",
+      "```",
+      "",
+      "Confirmed by the filing.",
+      "",
+      "### ❓ Claim 2/3 — Revenue doubled",
+      "",
+      "Verification timed out after 110s — the claim was not checked.",
+      "",
+      "### ❌ Claim 3/3 — Founded in 1990",
+      "",
+      "The company was founded in 1994.",
+    ].join("\n");
+    await stubRetry(page);
+    await seedSession(page, [seedTurn({ answer: fenced })]);
+    await openSeededTurn(page);
+
+    const before = await page.locator("#askAnswerBody pre").count();
+    expect(before).toBe(1);
+    // Only the REAL claim-2 heading gets a row (the fenced one is inside a <pre>).
+    await expect(page.locator(".wiki-fc-retry")).toHaveCount(1);
+    await page.locator(".wiki-fc-retry .wiki-fc-retry-btn").click();
+
+    await expect(page.locator("#askAnswerBody")).toContainText("revenue up 104%");
+    // The fence still opens AND closes — the tail is prose, not code.
+    expect(await page.locator("#askAnswerBody pre").count()).toBe(1);
+    await expect(page.locator("#askAnswerBody")).toContainText("The company was founded in 1994.");
+    await expect(page.locator("#askAnswerBody")).toContainText("Confirmed by the filing.");
+  });
+
+  test("an unknown wire outcome cannot destroy the whole persisted outcome map", async ({ page }) => {
+    // `isValidOutcomeMap`'s `.every` drops the ENTIRE map on one bad value, taking
+    // every OTHER claim's outcome with it — so the wire value is validated before
+    // it is written, and falls back to `verified`.
+    await stubRetry(page, { outcome: "definitely-not-an-outcome" });
+    await seedSession(page, [
+      seedTurn({
+        claimOutcomeByIndex: { 1: "verified", 2: "timeout", 3: "error" },
+        claimOutcomes: { verified: 1, timeout: 1, error: 1 },
+        claimCount: 1,
+      }),
+    ]);
+    await openSeededTurn(page);
+    await page.locator('.wiki-fc-retry[data-claim-retry="2"] .wiki-fc-retry-btn').click();
+    await expect(page.locator("#askAnswerBody")).toContainText("revenue up 104%");
+
+    // Reload: claim 3 still remembers it errored, so it still offers a ↻.
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await openSeededTurn(page);
+    await expect(page.locator(".wiki-fc-retry")).toHaveCount(1);
+    await expect(page.locator(".wiki-fc-retry")).toHaveAttribute("data-claim-retry", "3");
   });
 
   test("a turn persisted before the outcome map offers no ↻ at all", async ({ page }) => {

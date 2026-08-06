@@ -11,6 +11,13 @@
  * the existing history-click path.
  */
 
+// The claim-outcome vocabulary is owned by `wiki-claim-retry.ts` and consumed
+// here rather than re-spelled: this validator, `outcomeCountsFromMap` and
+// `claimCountFromMap` each carried their own copy of the five values, which is
+// exactly how a sixth outcome ships half-handled. Import direction is one-way
+// (claim-retry knows nothing about persistence), so no cycle.
+import { isClaimOutcome } from "./wiki-claim-retry.ts";
+
 /** The full shape of a persisted Ask turn — mirrors `AskTurn` in wiki-browser.ts.
  *  `citations` is kept loose (`unknown[]`) so this module stays free of the
  *  DOM-side `AskCitation` type; the client casts back to `AskTurn[]` on rehydrate. */
@@ -246,13 +253,7 @@ function isValidOutcomeMap(v: unknown): boolean {
   return Object.entries(v as Record<string, unknown>).every(([k, val]) => {
     const n = Number(k);
     if (!Number.isSafeInteger(n) || n <= 0) return false;
-    return (
-      val === "verified" ||
-      val === "unverifiable" ||
-      val === "timeout" ||
-      val === "skipped" ||
-      val === "error"
-    );
+    return isClaimOutcome(val);
   });
 }
 

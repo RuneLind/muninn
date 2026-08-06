@@ -976,16 +976,20 @@ export async function renderWikiPage(opts?: {
     }
     .wiki-fc-int-anno-badge { flex-shrink: 0; }
     .wiki-fc-int-anno-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .wiki-fc-int-btn {
+    /* The ↻ batch bar's button/cancel/message shipped as byte-identical copies of
+       these three rules — they are the same control at the same size, so they share
+       one declaration rather than drifting apart on the next palette change. */
+    .wiki-fc-int-btn, .wiki-fc-retryall-btn, .wiki-fc-retryall-cancel {
       padding: 6px 12px; border-radius: 8px;
       border: 1px solid var(--border-secondary); background: var(--bg-inset);
       color: var(--text-primary); font-size: 12px; font-weight: 600; cursor: pointer;
     }
     .wiki-fc-int-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-    .wiki-fc-int-btn:disabled { opacity: 0.5; cursor: default; }
+    .wiki-fc-int-btn:disabled, .wiki-fc-retryall-btn:disabled { opacity: 0.5; cursor: default; }
     .wiki-fc-int-budget { font-size: 11px; color: var(--text-dim); margin-left: auto; }
     .wiki-fc-int-budget.over { color: var(--status-error); }
-    .wiki-fc-int-msg { font-size: 12px; color: var(--text-secondary); margin-top: 8px; }
+    .wiki-fc-int-msg, .wiki-fc-retryall-msg { font-size: 12px; color: var(--text-secondary); }
+    .wiki-fc-int-msg { margin-top: 8px; }
     .wiki-fc-int-msg.error { color: var(--status-error); }
     /* ↻ Claim retry — one row injected under each retryable claim heading by the
        DOM pass in wiki-browser.ts (the answer body is opaque HTML, so the rows are
@@ -1005,14 +1009,7 @@ export async function renderWikiPage(opts?: {
     .wiki-fc-retry-msg.error { color: var(--status-error); }
     .wiki-fc-retryall { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 10px 4px 0; }
     .wiki-fc-retryall:empty { display: none; }
-    .wiki-fc-retryall-btn, .wiki-fc-retryall-cancel {
-      padding: 6px 12px; border-radius: 8px;
-      border: 1px solid var(--border-secondary); background: var(--bg-inset);
-      color: var(--text-primary); font-size: 12px; font-weight: 600; cursor: pointer;
-    }
-    .wiki-fc-retryall-btn:disabled { opacity: 0.5; cursor: default; }
     .wiki-fc-retryall-cancel { font-weight: 400; color: var(--text-secondary); }
-    .wiki-fc-retryall-msg { font-size: 12px; color: var(--text-secondary); }
     .wiki-fc-sources { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 2px 4px 10px; }
     .wiki-fc-src-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); }
     .wiki-fc-src-chip {
