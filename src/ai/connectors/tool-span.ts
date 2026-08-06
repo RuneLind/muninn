@@ -81,6 +81,7 @@ export function recordToolSpan(args: RecordToolSpanArgs): RecordedToolSpan {
 
   const toolEndEvent = {
     type: "tool_end" as const,
+    id: args.id,
     name: args.name,
     displayName,
     outputSize: truncated ? truncated.length : undefined,

@@ -203,7 +203,7 @@ export async function executePrompt(
         const startMs = performance.now();
         const input = abbreviateInput(event.data.arguments);
         pendingTools.set(event.data.toolCallId, { name, startMs, input });
-        onProgress?.({ type: "tool_start", name, displayName, input });
+        onProgress?.({ type: "tool_start", id: event.data.toolCallId, name, displayName, input });
         break;
       }
 

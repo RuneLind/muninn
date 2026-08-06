@@ -7,7 +7,13 @@ import {
   parseConfidence,
   realOutcome,
   claimsEventPayload,
+  classifyClaimFailure,
+  claimTimeoutReason,
+  shortFailureReason,
+  pairToolEvents,
+  FACTCHECK_CLAIM_TIMEOUT_MS,
   type ClaimVerifyOutcome,
+  type StampedToolEvent,
 } from "./factcheck-sse.ts";
 import { CLAIM_QUOTE_MAX } from "../views/components/wiki-integrate.ts";
 import { formatWebHtml } from "../../web/web-format.ts";
@@ -366,5 +372,285 @@ describe("claimsEventPayload", () => {
   test("the cap is measured on the TRIMMED quote (padding alone can't drop it)", () => {
     const padded = "  " + "z".repeat(CLAIM_QUOTE_MAX) + "  ";
     expect(claimsEventPayload([{ title: "a", quote: padded }])[0]!.quote).toBe(padded);
+  });
+});
+
+describe("classifyClaimFailure", () => {
+  // The four literal strings the connectors throw. Pinned verbatim (not
+  // regex-ish paraphrases) so a reworded connector message fails HERE rather
+  // than silently relabelling every timed-out claim as an error in production.
+  const CONNECTOR_TIMEOUTS: [string, string][] = [
+    ["claude-sdk", "Claude Agent SDK timed out after 90000ms"],
+    ["claude-cli", "Claude timed out after 110000ms"],
+    ["copilot-sdk", "Copilot SDK timed out after 45000ms"],
+    ["openai-compat", "OpenAI-compat request timed out after 30000ms"],
+  ];
+
+  for (const [connector, message] of CONNECTOR_TIMEOUTS) {
+    test(`${connector}'s literal throw string reads as a timeout, with its budget`, () => {
+      const out = classifyClaimFailure(message);
+      expect(out.isTimeout).toBe(true);
+      expect(out.ms).toBe(Number(message.match(/(\d+)ms/)![1]));
+    });
+  }
+
+  test("a non-timeout connector error is NOT a timeout", () => {
+    expect(classifyClaimFailure("OpenAI-compat API error 500: upstream exploded")).toEqual({
+      isTimeout: false,
+      ms: null,
+      msRejected: false,
+    });
+  });
+
+  test("an empty / reasonless message is not a timeout", () => {
+    expect(classifyClaimFailure("")).toEqual({ isTimeout: false, ms: null, msRejected: false });
+  });
+
+  test("timeout detection is case-insensitive", () => {
+    expect(classifyClaimFailure("Request TIMED OUT AFTER 5000ms").isTimeout).toBe(true);
+  });
+
+  test("an UPPERCASE unit still yields its budget (phrase and unit share one pattern)", () => {
+    // A case-insensitive phrase test beside a case-sensitive unit test read the
+    // message as a timeout and then lost the number it named.
+    expect(classifyClaimFailure("CLAUDE TIMED OUT AFTER 110000MS")).toEqual({
+      isTimeout: true,
+      ms: 110_000,
+      msRejected: false,
+    });
+  });
+
+  test("an earlier `ms` token elsewhere in the message never wins over the clause", () => {
+    // A fetched URL carrying its own `ms` token, BEFORE the timeout clause: an
+    // unanchored `(\d+)\s*ms` takes the URL's figure and renders "0s".
+    const out = classifyClaimFailure(
+      "Claude Agent SDK timed out after 110000ms while fetching https://ex.com/a?delay=250ms",
+    );
+    expect(out).toEqual({ isTimeout: true, ms: 110_000, msRejected: false });
+
+    const before = classifyClaimFailure(
+      "WebFetch https://ex.com/a?delay=250ms failed: Claude Agent SDK timed out after 110000ms",
+    );
+    expect(before.ms).toBe(110_000);
+  });
+
+  test("a wrapped message takes the figure adjacent to the OUTER clause", () => {
+    // Two clauses, two budgets — the first (the caller we are reporting on) wins.
+    expect(
+      classifyClaimFailure(
+        "Claude Agent SDK timed out after 110000ms (upstream: request timed out after 5000ms)",
+      ).ms,
+    ).toBe(110_000);
+  });
+
+  test("a CLI crash passthrough is an error, even when stderr says 'timed out after'", () => {
+    // `ai/executor.ts` throws `Claude exited with code <n>: <stderr>` and stderr is
+    // whatever the child wrote. Reporting that as ⏱️ invents a budget this route
+    // never set and hides that the process died.
+    const wrapped =
+      "Claude exited with code 1: Error: connection to upstream timed out after 30000ms\n" +
+      "    at Object.<anonymous> (/app/dist/index.js:42:11)";
+    expect(classifyClaimFailure(wrapped)).toEqual({
+      isTimeout: false,
+      ms: null,
+      msRejected: false,
+    });
+  });
+
+  test("a timeout with no millisecond figure yields ms=null and NO rejection", () => {
+    // Nothing was named ⇒ the caller may honestly stand the constant in for it.
+    expect(classifyClaimFailure("Claude timed out after a while")).toEqual({
+      isTimeout: true,
+      ms: null,
+      msRejected: false,
+    });
+  });
+
+  test("tolerates a space between the number and the unit", () => {
+    expect(classifyClaimFailure("Claude timed out after 90000 ms").ms).toBe(90_000);
+  });
+
+  test("an implausible budget is rejected AND flagged, so the caller can't stand the constant in", () => {
+    // Over the absolute 1h plausibility window — a nested/foreign figure.
+    expect(classifyClaimFailure("Claude timed out after 99999999ms")).toEqual({
+      isTimeout: true,
+      ms: null,
+      msRejected: true,
+    });
+    expect(classifyClaimFailure("Claude timed out after 0ms")).toEqual({
+      isTimeout: true,
+      ms: null,
+      msRejected: true,
+    });
+  });
+
+  test("the window is ABSOLUTE, so a test-shortened budget still parses", () => {
+    // The guard must not be a ratio against FACTCHECK_CLAIM_TIMEOUT_MS: a 50ms
+    // budget is wildly off that constant and still perfectly legitimate.
+    expect(classifyClaimFailure("Claude Agent SDK timed out after 50ms").ms).toBe(50);
+    expect(classifyClaimFailure(`Claude timed out after ${FACTCHECK_CLAIM_TIMEOUT_MS}ms`).ms).toBe(
+      FACTCHECK_CLAIM_TIMEOUT_MS,
+    );
+  });
+});
+
+describe("claimTimeoutReason", () => {
+  test("a message-named budget is reported verbatim, in seconds", () => {
+    expect(claimTimeoutReason({ ms: 90_000, msRejected: false })).toBe(
+      "Verification timed out after 90s — the claim was not checked.",
+    );
+  });
+
+  test("NO figure in the message ⇒ the constant stands in for it", () => {
+    expect(claimTimeoutReason({ ms: null, msRejected: false })).toBe(
+      `Verification timed out after ${Math.round(FACTCHECK_CLAIM_TIMEOUT_MS / 1000)}s — the claim was not checked.`,
+    );
+  });
+
+  test("a REJECTED figure ⇒ figure-free prose, never the constant", () => {
+    // The constant here would print a measured-looking number over a figure we
+    // just refused to believe.
+    const out = claimTimeoutReason({ ms: null, msRejected: true });
+    expect(out).toBe("Verification timed out — the claim was not checked.");
+    expect(out).not.toContain("s —");
+    expect(out).not.toContain(String(Math.round(FACTCHECK_CLAIM_TIMEOUT_MS / 1000)));
+  });
+
+  test("end to end: an implausible budget never renders the constant", () => {
+    const failure = classifyClaimFailure("Claude timed out after 0ms");
+    expect(claimTimeoutReason(failure)).toBe("Verification timed out — the claim was not checked.");
+  });
+});
+
+describe("shortFailureReason", () => {
+  test("flattens newlines and ends the clause with a period", () => {
+    expect(shortFailureReason("upstream\n  exploded")).toBe("upstream exploded.");
+  });
+
+  test("keeps an existing terminator", () => {
+    expect(shortFailureReason("upstream exploded!")).toBe("upstream exploded!");
+  });
+
+  test("bounds a blob and marks the clip", () => {
+    const out = shortFailureReason("x".repeat(500));
+    expect(out).toHaveLength(200);
+    expect(out.endsWith("…")).toBe(true);
+  });
+
+  test("a blank message still yields a sentence", () => {
+    expect(shortFailureReason("   ")).toBe("the verifier reported no reason.");
+  });
+});
+
+describe("pairToolEvents", () => {
+  const start = (id: string, name = "WebFetch", atMs = 0, input?: string): StampedToolEvent => ({
+    event: { type: "tool_start", id, name, displayName: name, ...(input ? { input } : {}) },
+    atMs,
+  });
+  const end = (id: string, name = "WebFetch", atMs = 0): StampedToolEvent => ({
+    event: { type: "tool_end", id, name, displayName: name, outputSize: 10 },
+    atMs,
+  });
+
+  test("zero events → zero tool calls", () => {
+    expect(pairToolEvents([], 1_000, 2_000)).toEqual([]);
+  });
+
+  test("interleaved same-name starts/ends pair by id, not arrival order", () => {
+    // Two WebFetches in flight at once, finishing in REVERSE order — the case a
+    // LIFO-by-displayName heuristic gets wrong (it would swap the durations).
+    const out = pairToolEvents(
+      [start("a", "WebFetch", 1_100), start("b", "WebFetch", 1_200), end("b", "WebFetch", 1_500), end("a", "WebFetch", 1_900)],
+      1_000,
+      3_000,
+    );
+    expect(out.map((t) => t.id)).toEqual(["a", "b"]); // start order
+    expect(out.find((t) => t.id === "a")).toMatchObject({ durationMs: 800, startOffsetMs: 100 });
+    expect(out.find((t) => t.id === "b")).toMatchObject({ durationMs: 300, startOffsetMs: 200 });
+    expect(out.every((t) => t.unterminated === undefined)).toBe(true);
+  });
+
+  test("an unpaired start runs to the failure instant and is flagged unterminated", () => {
+    const out = pairToolEvents(
+      [start("a", "WebFetch", 1_100), end("a", "WebFetch", 1_400), start("b", "WebSearch", 1_500, '{"q":"x"}')],
+      1_000,
+      3_000,
+    );
+    expect(out).toHaveLength(2);
+    const hung = out[1]!;
+    expect(hung).toMatchObject({
+      id: "b",
+      displayName: "WebSearch",
+      durationMs: 1_500, // 3000 − 1500
+      startOffsetMs: 500,
+      input: '{"q":"x"}',
+      unterminated: true,
+    });
+    // The completed sibling is NOT flagged.
+    expect(out[0]!.unterminated).toBeUndefined();
+  });
+
+  test("an unpaired END is dropped (no start instant to anchor or measure it)", () => {
+    expect(pairToolEvents([end("ghost", "WebFetch", 1_500)], 1_000, 3_000)).toEqual([]);
+  });
+
+  test("offsets and durations are clamped at 0, never negative", () => {
+    // A start stamped before the span-start instant (clock jitter at the seam).
+    const out = pairToolEvents([start("a", "WebFetch", 900), end("a", "WebFetch", 800)], 1_000, 3_000);
+    expect(out[0]).toMatchObject({ startOffsetMs: 0, durationMs: 0 });
+  });
+
+  test("input is omitted when the start carried none", () => {
+    const out = pairToolEvents([start("a", "Read", 1_000)], 1_000, 2_000);
+    expect("input" in out[0]!).toBe(false);
+  });
+
+  test("id-less starts each survive as their own unterminated call, never collapsed", () => {
+    // `id` is typed required but three emit sites read it off untyped runtime
+    // JSON, so `undefined` is reachable. Keyed naively, all in-flight starts
+    // collapse onto ONE map entry and every earlier call vanishes.
+    const out = pairToolEvents(
+      [
+        start("", "WebFetch", 1_100),
+        start(undefined as unknown as string, "WebFetch", 1_200),
+        start(undefined as unknown as string, "WebSearch", 1_300),
+      ],
+      1_000,
+      3_000,
+    );
+    expect(out).toHaveLength(3);
+    expect(out.map((t) => t.displayName)).toEqual(["WebFetch", "WebFetch", "WebSearch"]);
+    // Unpairable by construction, so each is honestly reported as still running.
+    expect(out.every((t) => t.unterminated === true)).toBe(true);
+    expect(out.map((t) => t.startOffsetMs)).toEqual([100, 200, 300]);
+    // The synthetic keys are distinct, so nothing shares a toolId on the spans.
+    expect(new Set(out.map((t) => t.id)).size).toBe(3);
+  });
+
+  test("an id-less END is dropped rather than closing an unrelated call", () => {
+    const out = pairToolEvents(
+      [start("", "WebFetch", 1_100), end("", "WebFetch", 1_400)],
+      1_000,
+      3_000,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ displayName: "WebFetch", unterminated: true });
+  });
+
+  test("a duplicated start id flushes the displaced call as unterminated, never deletes it", () => {
+    // A connector reusing an id must cost the earlier call its END pairing, not
+    // its existence — this function is the only surviving record of the call.
+    const out = pairToolEvents(
+      [start("dup", "WebFetch", 1_100), start("dup", "WebSearch", 1_200), end("dup", "WebSearch", 1_600)],
+      1_000,
+      3_000,
+    );
+    expect(out).toHaveLength(2);
+    // Output stays in START order.
+    expect(out.map((t) => t.displayName)).toEqual(["WebFetch", "WebSearch"]);
+    expect(out[0]).toMatchObject({ startOffsetMs: 100, durationMs: 1_900, unterminated: true });
+    // The end belongs to the latest start — the only one it could belong to.
+    expect(out[1]).toMatchObject({ startOffsetMs: 200, durationMs: 400 });
+    expect(out[1]!.unterminated).toBeUndefined();
   });
 });

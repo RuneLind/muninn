@@ -33,6 +33,9 @@ import { getToolProgress, rawUrlField } from "../../ai/tool-status.ts";
 import { agentStatus, setConnectorInfo } from "../../observability/agent-status.ts";
 import { Tracer } from "../../tracing/tracer.ts";
 import { tracedOneShot } from "../../core/traced-one-shot.ts";
+import { attachToolSpans } from "../../core/tool-spans.ts";
+import type { executeOneShot } from "../../ai/one-shot.ts";
+import type { ToolCall } from "../../types.ts";
 import { locateExcerpt } from "../../wiki/explain-context.ts";
 import { stripFactWrappers } from "../../format/markdown-ast.ts";
 import {
@@ -59,9 +62,20 @@ const log = getLog("dashboard", "factcheck-sse");
  */
 export const FACTCHECK_TIMEOUT_MS = 280_000;
 
-/** Per-claim verify timeout. A hung claim yields one ❓ "verification timed out"
- *  block, not a dead run. Generous — task 0 measured ~15s/web-verified-claim. */
-export const FACTCHECK_CLAIM_TIMEOUT_MS = 90_000;
+/**
+ * Per-claim verify timeout. A hung claim yields one ❓ "verification timed out"
+ * block, not a dead run. Must stay generous enough that a claim still genuinely
+ * fetching is not killed — task 0 measured ~15s/web-verified-claim, and 90s was
+ * already cutting real fetches short.
+ *
+ * **The bound on raising it, stated:** the fan-out enforces
+ * {@link FACTCHECK_TIMEOUT_MS} as a LAUNCH deadline, not an abort, so an in-flight
+ * claim may overrun it by up to this budget — bounded by one claim per worker, so
+ * worst-case run wall-clock is `FACTCHECK_TIMEOUT_MS + this`. That fits inside the
+ * 255s-per-response idleTimeout only because the 30s heartbeat holds the stream
+ * open; a value large enough to break that arithmetic is not safe here.
+ */
+export const FACTCHECK_CLAIM_TIMEOUT_MS = 110_000;
 
 /** Max claims verified concurrently in the fan-out (bounded worker pool). */
 export const FACTCHECK_CLAIM_CONCURRENCY = 2;
@@ -126,6 +140,17 @@ export interface FactcheckSseOptions {
    *  `answer_html` (same shape as Ask/Explain). A throw is swallowed — the
    *  streamed plain text stands. */
   renderAnswerHtml?: (answer: string) => string;
+  /**
+   * Test seam — production callers omit it (defaults to `executeOneShot`). Forwarded
+   * verbatim into `tracedOneShot`'s own `oneShot` option for BOTH the per-claim
+   * verify calls and the compose call.
+   *
+   * This is the ONLY way to force a claim failure from a test: the per-claim budget
+   * is enforced INSIDE each connector (four separate `setTimeout`s — see
+   * {@link classifyClaimFailure}), so shortening {@link FACTCHECK_CLAIM_TIMEOUT_MS}
+   * forces nothing without a real model call to outlast it.
+   */
+  oneShot?: typeof executeOneShot;
 }
 
 /** Shared liveness flag: the client-abort handler (registered on the outer stream)
@@ -180,6 +205,231 @@ export function claimsEventPayload(
  *  Excluded from the final claim count (only real verify blocks are counted). */
 function synthBlock(index: number, total: number, title: string, reason: string): string {
   return `### ❓ Claim ${index}/${total} — ${title}\n\n${reason}`;
+}
+
+/**
+ * Plausibility window for a budget parsed out of a timeout message. Deliberately
+ * an ABSOLUTE range, not a ratio against {@link FACTCHECK_CLAIM_TIMEOUT_MS} — a
+ * ratio would reject the very numbers a test that shortens the budget produces.
+ * 1 hour is far above any per-claim budget this route will ever set, and nothing
+ * legitimate lands above it.
+ *
+ * Honest note on what this guards: NOT a nested timeout message today. The two
+ * other `timed out after <n>ms` producers a verify call could plausibly wrap
+ * (`mcp-tool-caller.ts`, `mcp-status.ts`) are unreachable on this path —
+ * `mcp-status` swallows its own rejections, and `mcp-tool-caller`'s only connector
+ * consumer is `openai-compat`, which the fact-check route preflights out on
+ * `supportsWebTools`. So this is a guard against a hypothetical future wrapper
+ * whose own budget rides in the same string, not against a live failure mode.
+ */
+const CLAIM_BUDGET_MS_MAX = 3_600_000;
+
+/**
+ * A connector's timeout clause AND its budget in ONE anchored pattern. The figure
+ * must sit adjacent to the phrase, because the message is otherwise arbitrary text
+ * a model or an upstream chose: a free-floating `(\d+)\s*ms` also matches a `ms`
+ * token inside a fetched URL (`?delay=250ms`), and `String.match` takes the FIRST
+ * hit, so an earlier token wins over the real budget and the reason renders a
+ * figure nothing measured. Case-insensitive as ONE pattern so the phrase and its
+ * unit can't disagree about casing (a `TIMED OUT AFTER 110000MS` matched the
+ * phrase but not a case-sensitive unit ⇒ `isTimeout` true, budget silently lost).
+ *
+ * On a wrapped message carrying two clauses the FIRST (outermost) wins — the
+ * budget the caller we are reporting on actually set.
+ */
+const CLAIM_TIMEOUT_MS_RE = /timed out after\s*(\d+)\s*ms/i;
+
+/**
+ * A connector crash passed through verbatim — `ai/executor.ts` throws
+ * `Claude exited with code <n>: <stderr>`, and stderr is whatever the child wrote,
+ * including an upstream's own `timed out after <n>ms`. A crash reported as ⏱️
+ * "timed out after Ns" states a budget this route never set and hides that the
+ * process died, so the crash shape wins over the phrase wherever both appear.
+ */
+const CRASH_PASSTHROUGH_RE = /exited with code \d+:/i;
+
+/** What a failed claim verification was, read off the connector's thrown message. */
+export interface ClaimFailure {
+  /**
+   * Did the per-claim budget kill it? Every connector spells its own timeout
+   * differently but all four share `timed out after`:
+   * `Claude Agent SDK timed out after <n>ms` (`ai/connectors/claude-sdk.ts`),
+   * `Claude timed out after <n>ms` (`ai/executor.ts`),
+   * `Copilot SDK timed out after <n>ms` (`ai/connectors/copilot-sdk.ts`),
+   * `OpenAI-compat request timed out after <n>ms` (`ai/connectors/openai-compat-stream.ts`).
+   */
+  isTimeout: boolean;
+  /**
+   * The budget it died against, when the message named a PLAUSIBLE one. Preferred
+   * over {@link FACTCHECK_CLAIM_TIMEOUT_MS}, so the reason reports the number that
+   * actually applied rather than the current constant — a constant bump must not
+   * make an older or foreign caller's reason lie.
+   */
+  ms: number | null;
+  /**
+   * A figure WAS present next to the phrase and was rejected as implausible. This
+   * is what separates `ms: null` meaning "the message named no budget" (⇒ the
+   * constant is the honest best guess) from "the message named one we don't
+   * believe" (⇒ say nothing about seconds at all — substituting the constant there
+   * would print a measured-looking figure over a number we just refused).
+   */
+  msRejected: boolean;
+}
+
+/**
+ * Classify a failed claim verification from the connector's thrown message.
+ * `isTimeout` and the budget are separate questions with separate consumers; only
+ * the timeout arm of the reason consumes `ms`/`msRejected`.
+ */
+export function classifyClaimFailure(message: string): ClaimFailure {
+  if (CRASH_PASSTHROUGH_RE.test(message)) return { isTimeout: false, ms: null, msRejected: false };
+  const isTimeout = /timed out after/i.test(message);
+  const m = message.match(CLAIM_TIMEOUT_MS_RE);
+  if (!m) return { isTimeout, ms: null, msRejected: false };
+  const n = Number(m[1]);
+  const plausible = Number.isFinite(n) && n > 0 && n <= CLAIM_BUDGET_MS_MAX;
+  return { isTimeout, ms: plausible ? n : null, msRejected: !plausible };
+}
+
+/**
+ * The ❓ block's prose for a timed-out claim. Figure-free when the message named a
+ * budget we rejected — the seconds figure must always be something the message
+ * itself carried or the constant standing in for a message that carried nothing,
+ * never a constant dressed up as a measurement.
+ */
+export function claimTimeoutReason(failure: Pick<ClaimFailure, "ms" | "msRejected">): string {
+  if (failure.ms === null && failure.msRejected) {
+    return "Verification timed out — the claim was not checked.";
+  }
+  const ms = failure.ms ?? FACTCHECK_CLAIM_TIMEOUT_MS;
+  return `Verification timed out after ${Math.round(ms / 1000)}s — the claim was not checked.`;
+}
+
+/** Longest connector message we inline into a user-facing failure reason. Past
+ *  this it is a stack-ish blob, not a reason. */
+const FAILURE_REASON_MAX = 200;
+
+/**
+ * Reduce a connector's thrown message to one bounded, single-line, sentence-ended
+ * clause for the ❓ block's prose. Never parsed by anything — presentation only.
+ *
+ * Deliberately does NOT escape or strip markup, even though the input is RAW
+ * connector stderr: the output is markdown, and every sink that renders it escapes
+ * plain text itself (`formatWebHtml` → `&lt;script&gt;`). Escaping here would
+ * double-escape in the reader and still not cover a sink that doesn't. If a new
+ * sink renders this unescaped, fix the sink.
+ */
+export function shortFailureReason(message: string): string {
+  const flat = message.replace(/\s+/g, " ").trim();
+  if (!flat) return "the verifier reported no reason.";
+  const clipped = flat.length > FAILURE_REASON_MAX
+    ? `${flat.slice(0, FAILURE_REASON_MAX - 1)}…`
+    : flat;
+  return /[.!?…]$/.test(clipped) ? clipped : `${clipped}.`;
+}
+
+/** A `tool_start`/`tool_end` progress event with the arrival instant the consumer
+ *  stamped on it. {@link StreamProgressEvent} carries no timestamp of its own — the
+ *  connectors emit into a synchronous callback and never say when. */
+export interface StampedToolEvent {
+  event: StreamProgressEvent;
+  atMs: number;
+}
+
+/**
+ * Rebuild {@link ToolCall}s from the tool progress events a dead model call emitted,
+ * so a timed-out claim's span still gets its tool children. On the SUCCESS path the
+ * connector hands back a `toolCalls` array and this is never used; on the throw path
+ * that array is lost with the call, and the progress channel is the only surviving
+ * record of what the claim was doing.
+ *
+ * Pairing is by the event's `id` (the connector's own tool-call id — see
+ * {@link StreamProgressEvent}), so two in-flight tools sharing a `displayName` —
+ * routine for parallel WebFetch — can't swap durations.
+ *
+ * Rules:
+ *   - paired start+end ⇒ a normal completed call;
+ *   - **unpaired start ⇒ a call running to `failedAtMs`, flagged `unterminated`.**
+ *     That one is the point of the whole function: the tool still in flight IS what
+ *     the claim was doing when it hung, so dropping it would attach exactly the
+ *     tools that were never the problem;
+ *   - unpaired end (an end whose start we never saw) ⇒ dropped, since there is no
+ *     start instant to place or measure it from.
+ *
+ * **`id` is typed required but is not trusted here.** Three of the four emit sites
+ * read it off untyped runtime JSON (`block.id`, `t.id`, `tc.id`), so a connector
+ * that stops sending one makes every event carry `undefined` — and a Map keyed on
+ * that collapses every in-flight call onto ONE entry, silently deleting the
+ * earlier ones. This function's whole job is to be the last surviving record of a
+ * dead call, so an id problem must degrade the PAIRING and never the record: a
+ * falsy id gets a synthetic per-start key (unpairable ⇒ the call shows as
+ * unterminated), and a genuinely duplicated id flushes the displaced open call as
+ * unterminated instead of dropping it.
+ *
+ * `startedAtMs` is the span-start instant — `attachToolSpans` anchors each child at
+ * `parentSpan.startedAt + startOffsetMs`, so offsets must be relative to it.
+ * Output is in start order.
+ */
+export function pairToolEvents(
+  stamped: StampedToolEvent[],
+  startedAtMs: number,
+  failedAtMs: number,
+): ToolCall[] {
+  interface Open {
+    idx: number;
+    id: string;
+    name: string;
+    displayName: string;
+    input?: string;
+    atMs: number;
+  }
+  const open = new Map<string, Open>();
+  const out: (ToolCall & { _idx: number })[] = [];
+  let seq = 0;
+  let fallbackKeys = 0;
+
+  const build = (o: Open, endMs: number, unterminated: boolean): ToolCall & { _idx: number } => ({
+    _idx: o.idx,
+    id: o.id,
+    name: o.name,
+    displayName: o.displayName,
+    durationMs: Math.max(0, Math.round(endMs - o.atMs)),
+    startOffsetMs: Math.max(0, Math.round(o.atMs - startedAtMs)),
+    ...(o.input !== undefined ? { input: o.input } : {}),
+    ...(unterminated ? { unterminated: true } : {}),
+  });
+
+  for (const { event, atMs } of stamped) {
+    if (event.type === "tool_start") {
+      // A falsy id gets a key no end can ever match, which is the honest outcome:
+      // the call is recorded, and unpairable ⇒ unterminated.
+      const key = event.id || `${event.displayName}#${fallbackKeys++}`;
+      // A repeated id means the connector reused one. The LATEST start is the only
+      // one a later end could belong to, so it takes the key — but the displaced
+      // call still happened, so it is flushed as unterminated rather than dropped.
+      const displaced = open.get(key);
+      if (displaced) out.push(build(displaced, failedAtMs, true));
+      open.set(key, {
+        idx: seq++,
+        id: key,
+        name: event.name,
+        displayName: event.displayName,
+        input: event.input,
+        atMs,
+      });
+    } else if (event.type === "tool_end") {
+      // An end with no id can't name a start; treat it like an unpaired end.
+      if (!event.id) continue;
+      const o = open.get(event.id);
+      if (!o) continue; // unpaired end — no start instant to anchor it to
+      open.delete(event.id);
+      out.push(build(o, atMs, false));
+    }
+  }
+  for (const o of open.values()) out.push(build(o, failedAtMs, true));
+
+  out.sort((a, b) => a._idx - b._idx);
+  return out.map(({ _idx, ...tc }) => tc);
 }
 
 /** Per-claim live-UI outcome. Distinct from the block's ❓ markdown vocabulary
@@ -572,10 +822,21 @@ async function runFactcheck(
       const claim = claims[i]!;
       const index = i + 1;
       const label = `claude:claim-${i}`;
+      // Every tool event this claim emits, stamped with its arrival instant. Fed to
+      // `pairToolEvents` on the FAILURE path only — a throw loses the connector's
+      // own `toolCalls` array, and without this the claim you most want to inspect
+      // is the one span on `/traces` with zero children.
+      const toolEvents: StampedToolEvent[] = [];
       // Per-claim tool progress — forward tool_start/tool_end (with claimIndex) as
       // `tool` SSE events. Text deltas are NOT forwarded during the fan-out
       // (index-less parallel deltas would interleave into garbage).
       const onProgress = (event: StreamProgressEvent) => {
+        // Accumulate BEFORE the client-gone guard, which stays around the WRITES
+        // only: a reader who navigates away from a claim that then times out must
+        // still get its tool spans — the trace outlives the stream.
+        if (event.type === "tool_start" || event.type === "tool_end") {
+          toolEvents.push({ event, atMs: Date.now() });
+        }
         if (clientState.gone) return;
         if (event.type === "tool_start") {
           const prog = getToolProgress(event.name, event.input);
@@ -620,6 +881,7 @@ async function runFactcheck(
           onProgress,
           timeoutMs: FACTCHECK_CLAIM_TIMEOUT_MS,
           startAttrs: { claimIndex: index },
+          ...(opts.oneShot ? { oneShot: opts.oneShot } : {}),
         });
         addUsage(claude);
         const result = (claude.result ?? "").trim();
@@ -630,16 +892,61 @@ async function runFactcheck(
           : { block: synthBlock(index, total, claim.title, "The verifier returned no verdict for this claim."), real: false, outcome: "error" };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        // The seam already ended the claim span with `{ error }`.
-        log.warn("Fact check claim failed bot={bot} claim={index} error={error}", {
+        const failure = classifyClaimFailure(message);
+        const isTimeout = failure.isTimeout;
+        // The seam already ended the claim span with `{ error }` — but it never
+        // reached `attachToolSpans` (that runs on the success path only), so the
+        // claim span has no tool children. Rebuild them from the progress events.
+        // `tracer.end` does NOT drop the label→span entry, so `addChildSpan` still
+        // resolves `label` to the real (already-ended) parent. Fail-soft for the
+        // same reason the seam's own call is: pure trace ornamentation must never
+        // turn a degraded claim into a failed run.
+        //
+        // The offset origin must be the SAME instant `addChildSpan` adds
+        // `startOffsetMs` to — the parent span's own `startedAt` — or every child
+        // is pushed right by however long elapsed between the two reads
+        // (`src/core/tool-spans.ts` uses `spanStartedAt` for exactly this). The
+        // label is registered by `tracedOneShot` before its first await, so the
+        // fallback is unreachable in practice and only costs precision.
+        const failedAtMs = Date.now();
+        const spanStartMs = tracer.spanStartedAt(label)?.getTime() ?? toolEvents[0]?.atMs ?? failedAtMs;
+        try {
+          await attachToolSpans(
+            tracer,
+            pairToolEvents(toolEvents, spanStartMs, failedAtMs),
+            !!config.tracingCaptureToolOutputs,
+            label,
+          );
+        } catch (spanErr) {
+          log.warn("Fact check bot={bot} claim={index}: rebuilding tool spans failed (ignoring): {error}", {
+            bot: botConfig.name,
+            index,
+            error: spanErr instanceof Error ? spanErr.message : String(spanErr),
+          });
+        }
+        log.warn("Fact check claim failed bot={bot} claim={index} timeout={timeout} error={error}", {
           bot: botConfig.name,
           index,
+          timeout: isTimeout,
           error: message,
         });
-        // Single undistinguished catch (timeout OR failure) — the block text and
-        // the outcome both lead with the timeout reading (the common cause under
-        // the 90s per-claim budget); no signal here separates a true timeout.
-        return { block: synthBlock(index, total, claim.title, "Verification timed out or failed for this claim."), real: false, outcome: "timeout" };
+        // The reason names the CAUSE; the ❓ emoji must not change with it — the
+        // verdict vocabulary is a PARSED contract (`verdictOf`,
+        // `correctableClaims`) while the reason prose is parsed by nothing.
+        // Any seconds figure comes from the message itself (see
+        // {@link claimTimeoutReason}), never a literal.
+        const reason = isTimeout
+          ? claimTimeoutReason(failure)
+          : `Verification failed: ${shortFailureReason(message)}`;
+        return {
+          block: synthBlock(index, total, claim.title, reason),
+          real: false,
+          // Both values are in `tallyClaimOutcomes`' five-value enum and the client
+          // renders them apart (`factcheckRowMarkdown`: ⏱️ "timed out" vs ⚠️
+          // "verification failed"), so a cause split here needs no client change —
+          // this path just stops reporting a crash as a timeout.
+          outcome: isTimeout ? "timeout" : "error",
+        };
       }
     };
 
@@ -698,6 +1005,7 @@ async function runFactcheck(
           thinkingMaxTokens: 0,
           timeoutMs: COMPOSE_BUDGET_MS,
           onProgress: composeProgress,
+          ...(opts.oneShot ? { oneShot: opts.oneShot } : {}),
         });
         addUsage(compose, "compose");
         lede = (compose.result ?? "").trim();
