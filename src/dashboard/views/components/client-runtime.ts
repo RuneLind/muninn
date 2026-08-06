@@ -45,6 +45,92 @@ export function sseClient(url: string, handlers: SseHandlers = {}): SseHandle {
   return { source: es, close: () => es.close() };
 }
 
+// ── Raw `text/event-stream` framing ───────────────────────────────────
+// `sseClient` above covers the ordinary case. Some streams cannot use
+// `EventSource` at all — it exposes neither status nor body on a non-200 (so a
+// 409's JSON payload is unreadable) and it auto-reconnects on a drop, straight
+// back into whatever single-flight slot the first connection was holding. Those
+// consume `fetch` + a ReadableStream and need their OWN framing, which is what
+// these two are. They live here — beside `sseClient` — rather than in a DOM
+// module, so they can be unit-tested without a browser.
+
+/** One decoded SSE frame: the event name (`message` when the frame named none)
+ *  and its `data:` lines joined with newlines. */
+export interface SseFrame {
+  event: string;
+  data: string;
+}
+
+/**
+ * Decode ONE raw frame (the text between two blank lines).
+ *
+ * Per the spec: `:` lines are comments, `field: value` drops ONE leading space
+ * after the colon, and multiple `data:` lines join with `\n`. Returns null for a
+ * frame carrying neither an `event:` nor a `data:` line (a comment-only keepalive
+ * dispatches nothing).
+ */
+export function parseSseFrame(raw: string): SseFrame | null {
+  let event = "";
+  const dataLines: string[] = [];
+  let sawData = false;
+  for (const line of raw.split("\n")) {
+    const l = line.replace(/\r$/, "");
+    if (!l || l.charAt(0) === ":") continue;
+    if (l.indexOf("event:") === 0) event = l.slice(6).replace(/^ /, "").trim();
+    else if (l.indexOf("data:") === 0) {
+      sawData = true;
+      dataLines.push(l.slice(5).replace(/^ /, ""));
+    }
+  }
+  if (!sawData && !event) return null;
+  return { event: event || "message", data: dataLines.join("\n") };
+}
+
+/** Incremental frame splitter returned by {@link makeSseFrameParser}. */
+export interface SseFrameParser {
+  /** Feed a decoded chunk; emits every COMPLETE frame it now holds. */
+  push: (text: string) => void;
+  /** End of stream: emit a final frame the server never terminated with a blank
+   *  line. Idempotent. */
+  end: () => void;
+}
+
+/**
+ * Split a byte stream into SSE frames, tolerating chunk boundaries anywhere.
+ *
+ * Two details are load-bearing and were both wrong in the hand-rolled version
+ * this replaces: the delimiter is `\r?\n\r?\n`, because a proxy (or any server
+ * writing CRLF) produces frames a bare `\n\n` scan never finds at all; and
+ * {@link end} flushes the buffered tail, because a server that closes right after
+ * its last frame without a trailing blank line otherwise LOSES that frame — for
+ * the claim-retry stream that is the verdict itself, dropped silently.
+ */
+export function makeSseFrameParser(onFrame: (frame: SseFrame) => void): SseFrameParser {
+  let buf = "";
+  const emit = (raw: string): void => {
+    const frame = parseSseFrame(raw);
+    if (frame) onFrame(frame);
+  };
+  return {
+    push(text: string): void {
+      if (!text) return;
+      buf += text;
+      for (;;) {
+        const m = /\r?\n\r?\n/.exec(buf);
+        if (!m) break;
+        const raw = buf.slice(0, m.index);
+        buf = buf.slice(m.index + m[0].length);
+        emit(raw);
+      }
+    },
+    end(): void {
+      const tail = buf;
+      buf = "";
+      if (tail.trim()) emit(tail);
+    },
+  };
+}
+
 /** Thrown by {@link getJson} on a non-2xx response. Carries the HTTP status and
  *  the parsed JSON error body when the server sent one (else `undefined`). */
 export class HttpError extends Error {

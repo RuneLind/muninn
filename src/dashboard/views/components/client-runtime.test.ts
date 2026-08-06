@@ -1,5 +1,12 @@
 import { test, expect, mock } from "bun:test";
-import { sseClient, getJson, HttpError } from "./client-runtime.ts";
+import {
+  sseClient,
+  getJson,
+  makeSseFrameParser,
+  parseSseFrame,
+  HttpError,
+  type SseFrame,
+} from "./client-runtime.ts";
 
 // --- Fake EventSource -------------------------------------------------------
 
@@ -159,4 +166,55 @@ test("getJson forwards fetch options", async () => {
   );
   await promise;
   expect(seenOpts).toEqual({ method: "POST" });
+});
+
+// --- SSE framing (fetch + ReadableStream consumers) -------------------------
+
+function collect(chunks: string[], opts: { end?: boolean } = {}): SseFrame[] {
+  const out: SseFrame[] = [];
+  const parser = makeSseFrameParser((f) => out.push(f));
+  for (const c of chunks) parser.push(c);
+  if (opts.end !== false) parser.end();
+  return out;
+}
+
+test("makeSseFrameParser reassembles frames split across chunk boundaries", () => {
+  // The split lands mid-field, mid-JSON and mid-delimiter.
+  const frames = collect(['event: claim_res', 'ult\ndata: {"in', 'dex":2}\n', '\nevent: end\ndata: {}\n\n']);
+  expect(frames).toEqual([
+    { event: "claim_result", data: '{"index":2}' },
+    { event: "end", data: "{}" },
+  ]);
+});
+
+test("makeSseFrameParser handles CRLF frame delimiters", () => {
+  // A proxy (or any server writing CRLF) produces frames a bare `\n\n` scan never
+  // finds at all — the stream then looks silently empty.
+  const frames = collect(['event: tool\r\ndata: {"state":"start"}\r\n\r\n']);
+  expect(frames).toEqual([{ event: "tool", data: '{"state":"start"}' }]);
+});
+
+test("makeSseFrameParser flushes an UNTERMINATED final frame at end()", () => {
+  // A server closing right after `claim_result` without a trailing blank line
+  // otherwise loses the verdict silently.
+  const chunks = ['event: claim_result\ndata: {"index":3}\n'];
+  expect(collect(chunks, { end: false })).toEqual([]);
+  expect(collect(chunks)).toEqual([{ event: "claim_result", data: '{"index":3}' }]);
+});
+
+test("makeSseFrameParser joins multi-line data and ignores comment lines", () => {
+  const frames = collect([": keepalive\nevent: msg\ndata: line one\ndata: line two\n\n"]);
+  expect(frames).toEqual([{ event: "msg", data: "line one\nline two" }]);
+});
+
+test("parseSseFrame defaults the event name and drops comment-only frames", () => {
+  expect(parseSseFrame("data: hello")).toEqual({ event: "message", data: "hello" });
+  expect(parseSseFrame(": just a comment")).toBeNull();
+  expect(parseSseFrame("")).toBeNull();
+  // Exactly ONE leading space is stripped after the colon (the spec's rule).
+  expect(parseSseFrame("data:  two spaces")).toEqual({ event: "message", data: " two spaces" });
+});
+
+test("makeSseFrameParser emits nothing for a comment-only keepalive frame", () => {
+  expect(collect([": ping\n\nevent: end\ndata: {}\n\n"])).toEqual([{ event: "end", data: "{}" }]);
 });

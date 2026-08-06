@@ -40,13 +40,232 @@ import { escHtml as esc } from "./escape.ts";
  * prompt contract (`factcheckVerifySystemPrompt`), and accepting `##`/`####` would
  * start matching prose that merely mentions a claim.
  */
-const CLAIM_HEADING_RE =
-  /^###\s*(✅️?|⚠️?|❌️?|❓️?)\s*Claim\s+(\d+)\s*\/\s*(\d+)\s*(?:[—–:-]\s*(.*))?$/iu;
+/** The verdict-emoji alternation, VS16-optional on all four. Exported as SOURCE
+ *  (not a compiled regex) because the DOM-side matcher in `wiki-claim-retry.ts`
+ *  reads a RENDERED heading, where the `###` is gone — deriving both from one
+ *  spelling is what stops the markdown contract and the DOM contract drifting. */
+export const CLAIM_VERDICT_SOURCE = "(✅️?|⚠️?|❌️?|❓️?)";
+
+/** The `Claim n/m` reference itself — group 1 = index, group 2 = total (relative
+ *  to this fragment; both consumers place it after the verdict group). */
+export const CLAIM_REF_SOURCE = "Claim\\s+(\\d+)\\s*\\/\\s*(\\d+)";
+
+/** The optional `— <title>` tail, anchored to end of line. */
+const CLAIM_TITLE_SOURCE = "\\s*(?:[—–:-]\\s*(.*))?$";
+
+const CLAIM_HEADING_RE = new RegExp(
+  "^###\\s*" + CLAIM_VERDICT_SOURCE + "\\s*" + CLAIM_REF_SOURCE + CLAIM_TITLE_SOURCE,
+  "iu",
+);
+
+/**
+ * The ONE block-extent rule: a `###` heading line closes the block above it.
+ *
+ * Deliberately `^###\s` and not `startsWith("###")` — a `#### Sub-heading` inside
+ * a verdict block is CONTENT, and treating it as a terminator truncated the block
+ * (the splicer left a stale tail under a fresh verdict). Both
+ * {@link parseFactcheckClaims} and `spliceClaimBlock` read this through
+ * {@link scanClaimLines}, so parity is by construction rather than by comment.
+ */
+const CLAIM_BLOCK_END_RE = /^###\s/;
+
+/**
+ * A fenced-code delimiter's SHAPE: up to 3 leading spaces, a run of ≥3 backticks
+ * or tildes, then its tail (an info string on an opener; a closer carries nothing).
+ *
+ * **Matched against the RAW line, never a trimmed one.** Trimming first made every
+ * indented line a candidate, so a ```` ``` ```` sitting inside a 4-space INDENTED
+ * code block opened a phantom fence — and per CommonMark a ≥4-space-indented line
+ * is indented code and can never be a fence delimiter. A leading TAB is ≥4 columns
+ * for the same reason and deliberately does not match either.
+ */
+const FENCE_SHAPE_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+
+/** A closer's tail rule: nothing but spaces/tabs after the run. */
+const FENCE_CLOSE_TAIL_RE = /^[ \t]*$/;
+
+/** An open fence: which marker character opened it, and how long its run was. */
+interface OpenFence {
+  marker: string;
+  len: number;
+}
+
+/**
+ * Is `line` a fence OPENER, and which fence does it open?
+ *
+ * The backtick rule is the one that bit: per CommonMark an info string on a
+ * BACKTICK fence may not contain a backtick, so an ordinary prose line like
+ * `` ```code``` `` (inline code the page happens to start a line with) is not a
+ * fence at all. Treating it as one opened a fence that never closed, and every
+ * claim heading after it was masked — `parseFactcheckClaims` lost claims on
+ * already-persisted answers, `retryableClaims` silently dropped their ↻, and
+ * `validateClaimQuotes` rejected the whole quote list as "more quotes than claims".
+ */
+function fenceOpener(line: string): OpenFence | null {
+  const m = line.match(FENCE_SHAPE_RE);
+  if (!m) return null;
+  const run = m[1]!;
+  const info = m[2] ?? "";
+  if (run[0] === "`" && info.includes("`")) return null;
+  return { marker: run[0]!, len: run.length };
+}
+
+/** Does `line` CLOSE `fence`? Same marker, at least as long, nothing after it. */
+function isFenceCloser(line: string, fence: OpenFence): boolean {
+  const m = line.match(FENCE_SHAPE_RE);
+  if (!m) return false;
+  const run = m[1]!;
+  return (
+    run[0] === fence.marker &&
+    run.length >= fence.len &&
+    FENCE_CLOSE_TAIL_RE.test(m[2] ?? "")
+  );
+}
+
+/**
+ * Could `line` be a fence delimiter at all (opener OR closer), judged context-free?
+ *
+ * Used only by the post-splice invariant guard, which compares a count across a
+ * rewrite rather than tracking state — so it deliberately does not care WHICH of
+ * the two a given line would be.
+ */
+function isFenceDelimiterLine(line: string): boolean {
+  const m = line.match(FENCE_SHAPE_RE);
+  if (!m) return false;
+  const run = m[1]!;
+  const info = m[2] ?? "";
+  // A tilde fence may carry backticks in its info string; a backtick fence may not,
+  // and a backtick-carrying tail is not a legal closer either.
+  return run[0] === "~" || !info.includes("`");
+}
+
+/** How many lines of `text` carry a fence-delimiter shape. See
+ *  {@link isFenceDelimiterLine} — the splice guard's cheap balance check. */
+export function countFenceDelimiterLines(text: string): number {
+  let n = 0;
+  for (const line of (text || "").split("\n")) if (isFenceDelimiterLine(line)) n++;
+  return n;
+}
+
+/**
+ * The `n` of a claim heading judged by SHAPE ALONE — no fence tracking, no
+ * document context.
+ *
+ * The counterpart of {@link scanClaimLines}, and it exists for exactly one caller:
+ * the splice guard. A heading MASKED by a fence is invisible to the parse by
+ * construction, so "did the splice delete a sibling claim?" cannot be answered from
+ * the parse — the deleted claim was never in it. Line shape is the only evidence
+ * left, and it is enough: a region about to be deleted that carries some OTHER
+ * claim's heading text is a region whose extent nobody should trust.
+ */
+export function claimHeadingShapeIndexes(text: string): number[] {
+  const out: number[] = [];
+  for (const line of (text || "").split("\n")) {
+    const m = line.trim().match(CLAIM_HEADING_RE);
+    if (m) out.push(Number(m[2]));
+  }
+  return out;
+}
+
+/** Per-line classification of a fact-check answer — see {@link scanClaimLines}. */
+export interface ClaimLineScan {
+  /** The answer's lines, `split("\n")`, unmodified. */
+  lines: string[];
+  /** Per line: its `CLAIM_HEADING_RE` match, or null. Always null inside a fence. */
+  claimMatch: (RegExpMatchArray | null)[];
+  /** Per line: true when it is a `###` heading OUTSIDE any fence — i.e. when it
+   *  ends the block above it. Always false inside a fence. */
+  blockEnd: boolean[];
+}
+
+/**
+ * Walk an answer's lines ONCE, tracking fenced code blocks, and classify each line
+ * as a claim heading / a block terminator / neither.
+ *
+ * **Fence tracking is load-bearing, not tidiness.** A verdict block may quote a
+ * `### ❓ Claim 2/3` heading inside a ``` fence (models do this when explaining
+ * what they were asked to check). Without this walk the parser sees a phantom
+ * claim and the splicer targets the QUOTED heading — replacing the region from
+ * inside the fence to the next `###`, which swallows the closing ``` and renders
+ * the entire rest of the answer as code. Both consumers therefore share this one
+ * implementation; neither re-spells the heading or extent rules.
+ *
+ * Fence matching follows the CommonMark closer rule the integrate engine already
+ * uses: the closing run must use the same marker character, be at least as long as
+ * the opener's, and carry nothing after it — and the OPENER rules are CommonMark's
+ * too ({@link fenceOpener}), because "any line starting with ```" turned inline
+ * code and indented code into fences that never closed.
+ *
+ * **An unclosed fence at EOF is not believed.** CommonMark says such a fence runs
+ * to the end of the document, but here that is the runaway-masking failure: one
+ * stray opener silently deletes every claim after it from the parse. A real
+ * fact-check answer's fences close, so a dangling opener is far more likely prose —
+ * it is retired to a literal line and the walk is re-run. Each pass retires exactly
+ * one opener, so the loop terminates.
+ */
+export function scanClaimLines(answer: string): ClaimLineScan {
+  const lines = (answer || "").split("\n");
+  const literalOpeners = new Set<number>();
+  let walk = walkClaimLines(lines, literalOpeners);
+  while (walk.openAtEof !== -1) {
+    literalOpeners.add(walk.openAtEof);
+    walk = walkClaimLines(lines, literalOpeners);
+  }
+  return { lines, claimMatch: walk.claimMatch, blockEnd: walk.blockEnd };
+}
+
+/** One fence-tracking pass. `literalOpeners` names line indexes that must NOT be
+ *  treated as openers (the unclosed-fence fallback's retirement list);
+ *  `openAtEof` reports the line index of a fence still open at EOF, else -1. */
+function walkClaimLines(
+  lines: string[],
+  literalOpeners: ReadonlySet<number>,
+): { claimMatch: (RegExpMatchArray | null)[]; blockEnd: boolean[]; openAtEof: number } {
+  const claimMatch: (RegExpMatchArray | null)[] = [];
+  const blockEnd: boolean[] = [];
+  let fence: OpenFence | null = null;
+  let fenceLine = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i]!;
+    if (fence) {
+      if (isFenceCloser(raw, fence)) {
+        fence = null;
+        fenceLine = -1;
+      }
+      claimMatch.push(null);
+      blockEnd.push(false);
+      continue;
+    }
+    const opener = literalOpeners.has(i) ? null : fenceOpener(raw);
+    if (opener) {
+      fence = opener;
+      fenceLine = i;
+      claimMatch.push(null);
+      blockEnd.push(false);
+      continue;
+    }
+    const line = raw.trim();
+    claimMatch.push(line.match(CLAIM_HEADING_RE));
+    blockEnd.push(CLAIM_BLOCK_END_RE.test(line));
+  }
+  return { claimMatch, blockEnd, openAtEof: fence ? fenceLine : -1 };
+}
 
 /** One claim anchor derived SERVER-SIDE from the persisted fact-check answer. */
 export interface FactcheckClaimAnchor {
   /** `n` from the `Claim n/m` heading (1-based, as the model wrote it). */
   index: number;
+  /**
+   * `m` from the `Claim n/m` heading — the claim TOTAL the model itself wrote.
+   *
+   * Deliberately NOT derivable as `anchors.length` by the caller: the two differ
+   * exactly when a verify block failed the heading contract (the failure class the
+   * ↻ retry exists for), and `total` is interpolated straight back into the heading
+   * the retried block carries — a wrong value splices a block whose `n/m` disagrees
+   * with its siblings. The claim-retry route takes it as a required param, and the
+   * client has no other source for it.
+   */
+  total: number;
   /** Verdict emoji, normalized to the VS16 form for ⚠️. */
   verdict: string;
   /** Short claim title from the heading (empty when the heading carried none). */
@@ -72,7 +291,7 @@ function normalizeVerdict(v: string): string {
  */
 export function parseFactcheckClaims(answer: string): FactcheckClaimAnchor[] {
   if (!answer || typeof answer !== "string") return [];
-  const lines = answer.split("\n");
+  const scan = scanClaimLines(answer);
   const anchors: FactcheckClaimAnchor[] = [];
   let current: FactcheckClaimAnchor | null = null;
   let buffer: string[] = [];
@@ -83,12 +302,14 @@ export function parseFactcheckClaims(answer: string): FactcheckClaimAnchor[] {
     buffer = [];
   };
 
-  for (const line of lines) {
-    const m = line.trim().match(CLAIM_HEADING_RE);
+  for (let i = 0; i < scan.lines.length; i++) {
+    const line = scan.lines[i]!;
+    const m = scan.claimMatch[i];
     if (m) {
       flush();
       current = {
         index: Number(m[2]),
+        total: Number(m[3]),
         verdict: normalizeVerdict(m[1]!),
         title: (m[4] ?? "").trim(),
         block: "",
@@ -97,7 +318,7 @@ export function parseFactcheckClaims(answer: string): FactcheckClaimAnchor[] {
       continue;
     }
     // A non-claim `###` heading closes the current block without opening one.
-    if (current && /^###\s/.test(line.trim())) {
+    if (current && scan.blockEnd[i]) {
       flush();
       continue;
     }
