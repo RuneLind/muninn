@@ -34,6 +34,7 @@ import {
   buildExplainAskOptions,
   buildExplainQuestion,
   htmlToText,
+  locateExcerpt,
   EXPLAIN_HEADING_MAX,
   EXPLAIN_SELECTION_MAX,
 } from "../../wiki/explain-context.ts";
@@ -41,6 +42,7 @@ import {
   buildFactcheckAppendix,
   buildFactcheckBlock,
   hasFactcheckBlock,
+  stripFactcheckBlock,
   FACTCHECK_ANSWER_MAX,
   FACTCHECK_SELECTION_MAX,
   FACTCHECK_HEADING_MAX,
@@ -76,11 +78,19 @@ import {
   correctableClaims,
   parseFactcheckClaims,
   validateClaimQuotes,
+  CLAIM_QUOTE_MAX,
 } from "../views/components/wiki-integrate.ts";
 import { commitWikiChange } from "../../wiki/commit.ts";
 import { todayOslo } from "../../gardener/util.ts";
 import { capabilitiesForConnectorType, connectorCapabilities } from "../../ai/one-shot.ts";
 import { streamFactcheckSSE } from "./factcheck-sse.ts";
+import {
+  acquireClaimRetry,
+  claimRetryKey,
+  streamFactcheckRetrySSE,
+  CLAIM_INDEX_MAX,
+  CLAIM_TITLE_MAX,
+} from "./factcheck-retry-sse.ts";
 import { createHash } from "node:crypto";
 import { mergeWikiTypes } from "../views/components/wiki-filter.ts";
 import { renderAskAnswerHtml } from "../../wiki/ask-render.ts";
@@ -606,6 +616,46 @@ export function resolveExplainPreflight(input: {
   if ((entry.collections ?? []).length === 0) return "No search collection connected for this wiki.";
   if (!index) return "wiki directory not found";
   if (!meta) return `No wiki page named "${page}".`;
+  return null;
+}
+
+/**
+ * The `/api/wiki/factcheck` preflight decision chain, extracted as a pure function
+ * for the same reason `resolveExplainPreflight` was — and, since the claim-retry
+ * route (`GET /api/wiki/factcheck/claim`) runs the identical chain, so that the
+ * load-bearing web-tools-connector check cannot drift between two copies.
+ *
+ * Differs from Explain's in exactly two ways: fact-check is corpus-independent, so
+ * there is NO collections check; and it needs a connector with web tools, so it
+ * ADDS one. Order is preserved from the original inline chain: unknown wiki →
+ * unloadable index → unknown page → non-web connector. The connector term is
+ * guarded on `botConfig` being present — a bot-less wiki is not a connector
+ * problem, and the scaffold reports it as the "no bots configured" app_error
+ * instead (the route resolves `index`/`meta` only on the happy path, so a null
+ * index / undefined meta from an earlier short-circuit is never reached below).
+ *
+ * Explainer pages are NOT a preflight error (they are reduced via `htmlToText`),
+ * and a missing/unreadable file is not either — it degrades to an empty body.
+ */
+export function resolveFactcheckPreflight(input: {
+  wiki: string;
+  unknownWiki: boolean;
+  entry: WikiRegistryEntry | undefined;
+  index: WikiIndex | null;
+  meta: WikiPageMeta | undefined;
+  page: string;
+  botConfig: BotConfig | null | undefined;
+}): string | null {
+  const { wiki, unknownWiki, entry, index, meta, page, botConfig } = input;
+  if (unknownWiki || !entry) return `No wiki configured for "${wiki || "(none)"}".`;
+  if (!index) return "wiki directory not found";
+  if (!meta) return `No wiki page named "${page}".`;
+  if (botConfig && !connectorCapabilities(botConfig).supportsWebTools) {
+    return (
+      `This wiki's bot (${botConfig.name}) can't run web fact-checks — its connector has no web tools. ` +
+      `Point the wiki at a claude-cli or claude-sdk bot.`
+    );
+  }
   return null;
 }
 
@@ -1651,25 +1701,24 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     // Preflight (never-5xx: app_error on the committed 200 stream). Fact-check
     // needs NO collections, so this chain omits Explain's collection check but
     // ADDS the web-tools connector check. Resolve index/meta only on the happy
-    // path (unknown wiki short-circuits before any filesystem touch).
+    // path (unknown wiki short-circuits before any filesystem touch); the decision
+    // chain itself is the pure `resolveFactcheckPreflight`, shared verbatim with
+    // the claim-retry route below.
     let index: WikiIndex | null = null;
     let meta: WikiPageMeta | undefined;
     if (entry && !unknownWiki) {
       index = await getWikiIndex({ root: entry.root });
       if (index) meta = index.resolve(page);
     }
-    let preflightError: string | null = null;
-    if (unknownWiki || !entry) {
-      preflightError = `No wiki configured for "${wiki || "(none)"}".`;
-    } else if (!index) {
-      preflightError = "wiki directory not found";
-    } else if (!meta) {
-      preflightError = `No wiki page named "${page}".`;
-    } else if (botConfig && !connectorCapabilities(botConfig).supportsWebTools) {
-      preflightError =
-        `This wiki's bot (${botConfig.name}) can't run web fact-checks — its connector has no web tools. ` +
-        `Point the wiki at a claude-cli or claude-sdk bot.`;
-    }
+    const preflightError = resolveFactcheckPreflight({
+      wiki,
+      unknownWiki,
+      entry,
+      index,
+      meta,
+      page,
+      botConfig,
+    });
 
     // Context assembly — ONLY when preflight passed (entry/index/meta set). The
     // SSE now builds the extraction/verify/compose prompts at runtime; the route
@@ -1730,6 +1779,122 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // Same reader HTML pipeline as Ask/Explain (no citations — fact-check cites
       // raw URLs inline in the answer markdown, not numbered sources).
       renderAnswerHtml: (answer) => renderAskAnswerHtml(answer, []),
+    });
+  });
+
+  // Wiki Fact check — RE-VERIFY ONE CLAIM (`GET /api/wiki/factcheck/claim`). The
+  // server half of the reader's ↻ affordance on a claim that timed out, crashed or
+  // came back unverifiable. Same SSE wire shape as the article route (heartbeat,
+  // `app_error`, terminal `end`), same preflight chain, same web-tools connector
+  // requirement — but ONE claim, no extraction phase, no fan-out, no compose.
+  //
+  // The claim text is CLIENT-SUPPLIED and re-extraction is not an option:
+  // extraction is a model call and non-deterministic, so "claim 2" on a re-extract
+  // need not be the claim that timed out. Every echoed field is therefore bounded
+  // here (`title` truncated, `quote` dropped over-cap like `claimsEventPayload`,
+  // `sel`/`ctx` on the article route's own caps, `index`/`total` small positive
+  // integers). This is loopback-only and no worse than the existing integrate POST,
+  // which accepts a whole client-posted answer — a stated decision: the bounds are
+  // for accident and payload size, not trust.
+  app.get("/api/wiki/factcheck/claim", async (c) => {
+    const mode = c.req.query("mode") === "article" ? "article" : "sel";
+    const page = c.req.query("page");
+    if (!page) return c.json({ error: "Missing query parameter: page" }, 400);
+    const sel = (c.req.query("sel") ?? "").trim().slice(0, FACTCHECK_SELECTION_MAX);
+    if (mode === "sel" && !sel) return c.json({ error: "Missing query parameter: sel" }, 400);
+    const ctx = (c.req.query("ctx") ?? "").trim().slice(0, FACTCHECK_HEADING_MAX) || undefined;
+
+    // The claim itself. `title` is presentation (it renders in the block heading),
+    // so an over-cap one is truncated; `quote` is a RESOLUTION hint the model reads
+    // the claim's source span from, so an over-cap one is DROPPED rather than
+    // truncated — the `claimsEventPayload` rule, for the same reason.
+    const title = (c.req.query("title") ?? "").trim().slice(0, CLAIM_TITLE_MAX);
+    if (!title) return c.json({ error: "Missing query parameter: title" }, 400);
+    const rawQuote = (c.req.query("quote") ?? "").trim();
+    const quote = rawQuote && rawQuote.length <= CLAIM_QUOTE_MAX ? rawQuote : undefined;
+
+    const index1 = Number(c.req.query("index"));
+    const total = Number(c.req.query("total"));
+    const smallPositive = (n: number) => Number.isInteger(n) && n >= 1 && n <= CLAIM_INDEX_MAX;
+    if (!smallPositive(index1) || !smallPositive(total) || index1 > total) {
+      return c.json(
+        { error: `index and total must be integers with 1 ≤ index ≤ total ≤ ${CLAIM_INDEX_MAX}` },
+        400,
+      );
+    }
+
+    const registry = getWikiRegistry();
+    const { entry, unknownWiki, wiki } = resolveWikiRequest(
+      registry,
+      c.req.query("wiki"),
+      c.req.query("bot"),
+      process.env.WIKI_DIR,
+    );
+    // Owner-routing, identical to the article fact-check route.
+    const { bot: botConfig } = resolveWikiSynthesisBot(entry, discoverAllBots());
+
+    let index: WikiIndex | null = null;
+    let meta: WikiPageMeta | undefined;
+    if (entry && !unknownWiki) {
+      index = await getWikiIndex({ root: entry.root });
+      if (index) meta = index.resolve(page);
+    }
+    const preflightError = resolveFactcheckPreflight({
+      wiki,
+      unknownWiki,
+      entry,
+      index,
+      meta,
+      page,
+      botConfig,
+    });
+
+    // sel-mode surrounding excerpt, located against the page AS IT IS NOW. The
+    // persisted `sel` reconstructs the SELECTION, not the excerpt — so a page
+    // edited since the original check can have moved or lost the passage, and the
+    // locator degrades (to a nearby window, or to the head of the body). That is
+    // acceptable and stated rather than papered over: the prompt frames this block
+    // as "reference only", and the CLAIM being verified comes from the turn.
+    let excerpt: string | undefined;
+    if (!preflightError && index && meta && mode === "sel") {
+      const raw = (await readWikiPage(index, meta)) ?? "";
+      const text = meta.type === "explainer" ? htmlToText(raw) : raw;
+      excerpt = locateExcerpt(stripFactcheckBlock(text), sel, ctx);
+    }
+
+    // Per-page single-flight. Bounding the INPUTS is not bounding the RATE: one GET
+    // buys a tool-enabled 180s one-shot, so the page-scoped slot is the real spend
+    // guard. An expired holder counts as free (evaluated lazily on this hit — no
+    // sweeper to leak), and the 409 reports the holder's deadline so the client can
+    // say when to try again. Only taken on the happy path: a preflight failure runs
+    // no model call and must not wedge the page.
+    let release: (() => void) | undefined;
+    if (!preflightError && entry && meta) {
+      const acquired = acquireClaimRetry(claimRetryKey(entry.name, meta.relPath));
+      if (!acquired.ok) {
+        return c.json({ state: "running", expiresAtMs: acquired.expiresAtMs }, 409);
+      }
+      release = acquired.release;
+      log.info("Wiki factcheck retry: wiki={wiki} bot={bot} page={page} claim={index}/{total}", {
+        wiki: entry.name,
+        bot: botConfig?.name,
+        page,
+        index: index1,
+        total,
+      });
+    }
+
+    return streamFactcheckRetrySSE(c, {
+      config,
+      botConfig: botConfig ?? null,
+      preflightError,
+      claim: { index: index1, total, title, ...(quote ? { quote } : {}) },
+      meta: { title: meta?.title ?? page },
+      wikiName: entry?.name ?? "",
+      mode,
+      ...(excerpt ? { excerpt } : {}),
+      ...(mode === "sel" && ctx ? { ctx } : {}),
+      ...(release ? { onSettled: release } : {}),
     });
   });
 

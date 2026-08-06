@@ -19,6 +19,7 @@ import {
   digestCacheDecision,
   isAnnotatablePage,
   resolveExplainPreflight,
+  resolveFactcheckPreflight,
   fetchSavedNotes,
   fetchSavedNotesBlock,
   raceTimeout,
@@ -1258,6 +1259,87 @@ describe("resolveExplainPreflight", () => {
     expect(
       resolveExplainPreflight({ wiki: "w", unknownWiki: false, entry, index, meta: undefined, page: "Nope" }),
     ).toBe('No wiki page named "Nope".');
+  });
+});
+
+/**
+ * `resolveFactcheckPreflight` — the fact-check decision chain, extracted for the
+ * same reason `resolveExplainPreflight` was AND because the claim-retry route
+ * (`GET /api/wiki/factcheck/claim`) runs the identical chain: the web-tools
+ * connector check must not exist twice. Table-driven over the five outcomes the
+ * chain can produce, plus the two things a status-only route assertion can never
+ * show — that collections are deliberately NOT required (fact-check is
+ * corpus-independent) and that a bot-less wiki is not reported as a connector
+ * problem (the scaffold's "no bots configured" app_error owns that).
+ */
+describe("resolveFactcheckPreflight", () => {
+  const entry = { name: "w", root: "/x", source: "extra", collections: ["c"] } as WikiRegistryEntry;
+  const index = {} as WikiIndex;
+  const meta = { type: "concept" } as WikiPageMeta;
+  const webBot = { name: "jarvis", connector: "claude-sdk" } as BotConfig;
+  const noWebBot = { name: "melosys", connector: "copilot-sdk" } as BotConfig;
+  const base = { wiki: "w", unknownWiki: false, entry, index, meta, page: "P" };
+
+  test("happy path (web-tools connector) → null", () => {
+    expect(resolveFactcheckPreflight({ ...base, botConfig: webBot })).toBeNull();
+  });
+
+  test("unknown wiki → configured error (interpolates the raw wiki name)", () => {
+    expect(
+      resolveFactcheckPreflight({
+        wiki: "ghost",
+        unknownWiki: true,
+        entry: undefined,
+        index: null,
+        meta: undefined,
+        page: "P",
+        botConfig: webBot,
+      }),
+    ).toBe('No wiki configured for "ghost".');
+  });
+
+  test("no entry with blank wiki → (none) fallback", () => {
+    expect(
+      resolveFactcheckPreflight({
+        wiki: "",
+        unknownWiki: false,
+        entry: undefined,
+        index: null,
+        meta: undefined,
+        page: "P",
+        botConfig: webBot,
+      }),
+    ).toBe('No wiki configured for "(none)".');
+  });
+
+  test("unloadable index → directory-not-found error", () => {
+    expect(
+      resolveFactcheckPreflight({ ...base, index: null, meta: undefined, botConfig: webBot }),
+    ).toBe("wiki directory not found");
+  });
+
+  test("unknown page → named error (interpolates the page)", () => {
+    expect(
+      resolveFactcheckPreflight({ ...base, meta: undefined, page: "Nope", botConfig: webBot }),
+    ).toBe('No wiki page named "Nope".');
+  });
+
+  test("non-web connector → the web-tools refusal, naming the bot", () => {
+    const err = resolveFactcheckPreflight({ ...base, botConfig: noWebBot });
+    expect(err).toContain("melosys");
+    expect(err).toContain("no web tools");
+  });
+
+  test("a collection-less wiki is NOT a preflight error (fact-check is corpus-independent)", () => {
+    const noColl = { name: "w", root: "/x", source: "extra" } as WikiRegistryEntry;
+    expect(
+      resolveFactcheckPreflight({ ...base, entry: noColl, botConfig: webBot }),
+    ).toBeNull();
+  });
+
+  test("no bot resolved → null (the scaffold reports 'no bots configured', not a connector fault)", () => {
+    expect(resolveFactcheckPreflight({ ...base, botConfig: null })).toBeNull();
+    expect(resolveFactcheckPreflight({ ...base, botConfig: undefined })).toBeNull();
   });
 });
 

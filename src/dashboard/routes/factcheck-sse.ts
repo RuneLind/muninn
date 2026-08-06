@@ -155,7 +155,7 @@ export interface FactcheckSseOptions {
 
 /** Shared liveness flag: the client-abort handler (registered on the outer stream)
  *  flips `gone`, and both the launch-gate and every write-guard read it. */
-interface ClientState {
+export interface ClientState {
   gone: boolean;
 }
 
@@ -612,12 +612,48 @@ export function assembleFactcheckAnswer(lede: string, blocks: string[]): string 
   return linkifySourcesLines(answer);
 }
 
+export type SseStream = { writeSSE: (m: { event: string; data: string }) => Promise<void> };
+
+/** The body of a fact-check-family SSE run: everything between the preflight
+ *  checks and the terminal `end`. Must never throw — a model failure is the
+ *  runner's own `app_error`, not an exception the scaffold has to mask. */
+export type FactcheckRunner = (
+  stream: SseStream,
+  botConfig: BotConfig,
+  clientState: ClientState,
+) => Promise<void>;
+
+export interface FactcheckScaffoldOptions {
+  /** `null` ⇒ the scaffold emits {@link noBotMessage} and runs nothing. */
+  botConfig: BotConfig | null;
+  /** Route-computed preflight error. When set, emitted as an `app_error`; no run. */
+  preflightError?: string | null;
+  /** The bot-less app_error message (the retry route words it per-claim). */
+  noBotMessage?: string;
+  /** The pipeline this stream runs. */
+  run: FactcheckRunner;
+  /**
+   * Fired in the scaffold's `finally`, on EVERY terminal path (done, app_error,
+   * client abort). The claim-retry route releases its per-page single-flight
+   * entry here — the route hands back a `Response` the instant `streamSSE`
+   * returns, so this callback is the only place that knows the run is over.
+   */
+  onSettled?: () => void;
+}
+
 /**
- * Run the whole SSE lifecycle for one fact-check request. Never throws (a model
- * failure is reported as an `app_error` event); always emits a terminal `end`
- * sentinel so the client can close deterministically.
+ * The shared fact-check SSE scaffold: heartbeat, `app_error` masking of the
+ * preflight/bot-less cases, the terminal `end` sentinel, and the `finally`
+ * teardown. Extracted from {@link streamFactcheckSSE} so the whole-article run and
+ * the single-claim retry (`factcheck-retry-sse.ts`) share ONE implementation of
+ * the wire contract the client's `runAskStream` consumes — two copies would drift
+ * on the next heartbeat/abort change, and the abort flag is load-bearing on both
+ * (it gates every write).
+ *
+ * Never throws: the runner owns its own error reporting, and the terminal `end`
+ * is emitted on the same path it always was.
  */
-export function streamFactcheckSSE(c: Context, opts: FactcheckSseOptions): Response {
+export function streamFactcheckScaffold(c: Context, opts: FactcheckScaffoldOptions): Response {
   return streamSSE(c, async (stream) => {
     // A web-verification pass can leave a long gap with no client-visible events
     // (the model is fetching pages); a heartbeat keeps the connection alive
@@ -640,9 +676,9 @@ export function streamFactcheckSSE(c: Context, opts: FactcheckSseOptions): Respo
       if (opts.preflightError) {
         await appError(opts.preflightError);
       } else if (!opts.botConfig) {
-        await appError("No bots configured to run a fact check.");
+        await appError(opts.noBotMessage ?? "No bots configured to run a fact check.");
       } else {
-        await runFactcheck(stream, opts, opts.botConfig, clientState);
+        await opts.run(stream, opts.botConfig, clientState);
       }
       // Terminal sentinel so the client closes the EventSource deterministically.
       await stream.writeSSE({ event: "end", data: "{}" });
@@ -650,11 +686,23 @@ export function streamFactcheckSSE(c: Context, opts: FactcheckSseOptions): Respo
       alive = false;
       clientState.gone = true;
       clearInterval(heartbeat);
+      opts.onSettled?.();
     }
   });
 }
 
-type SseStream = { writeSSE: (m: { event: string; data: string }) => Promise<void> };
+/**
+ * Run the whole SSE lifecycle for one fact-check request. Never throws (a model
+ * failure is reported as an `app_error` event); always emits a terminal `end`
+ * sentinel so the client can close deterministically.
+ */
+export function streamFactcheckSSE(c: Context, opts: FactcheckSseOptions): Response {
+  return streamFactcheckScaffold(c, {
+    botConfig: opts.botConfig,
+    preflightError: opts.preflightError,
+    run: (stream, botConfig, clientState) => runFactcheck(stream, opts, botConfig, clientState),
+  });
+}
 
 /** Aggregate usage across the extraction + verify + compose calls, for the
  *  completed `/agents` run + the trace finish. */
