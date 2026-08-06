@@ -53,7 +53,7 @@ All three streaming connectors converge on the same completion work once a tool 
 
 Parses Claude CLI NDJSON output line-by-line for real-time progress:
 
-- `StreamProgressEvent`: `tool_start`, `tool_end`, `text`, `text_delta`, `intent`
+- `StreamProgressEvent`: `tool_start`, `tool_end`, `text`, `text_delta`, `intent`. The two tool variants carry a **required `id`** — the connector's own tool-call id (`tool_use.id` / `toolCallId` / `tool_call.id`), the same value that lands on `ToolCall.id`. It is what pairs a start with its end for a consumer that only sees the progress channel (the fact-check claim fan-out rebuilds tool child spans from these when a claim times out); pairing by `displayName` mis-attributes durations whenever two same-named tools are in flight, routine for parallel WebFetch. A new connector must forward it.
 - Tool timing: computed from line arrival timestamps (feed lines as they arrive, not all at once)
 - `formatToolDisplayName()`: converts `mcp__server__tool` to `tool (server)`
 - Falls back to `result-parser.ts` if no result event received (known CLI bug)

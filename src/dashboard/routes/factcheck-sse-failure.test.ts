@@ -5,8 +5,9 @@
  *   1. **which** failure it was. Every connector's timeout says `timed out after
  *      <n>ms`, and the route hardcoded `outcome: "timeout"` for a timeout AND a
  *      crash alike, under one undistinguished "Verification timed out or failed"
- *      block. The client has rendered ⏱️/⚠️ apart all along — the ⚠️ row was
- *      simply unreachable.
+ *      block. The client has rendered ⏱️/⚠️ apart all along (and the empty-result
+ *      branch already reached ⚠️), so the fix is server-side only: a crash must
+ *      stop arriving under the timeout label with a budget nothing measured.
  *   2. **the tool spans**. `attachToolSpans` runs on the success path only, so the
  *      one claim you most want to inspect on `/traces` was the one with zero
  *      children (reference trace 994e1b3e — `claude:claim-1`, 0 children, siblings
@@ -143,13 +144,25 @@ async function runFactcheckWith(message: string): Promise<{ events: SseEvent[]; 
 
 const TIMEOUT_MESSAGE = "Claude Agent SDK timed out after 90000ms";
 const ERROR_MESSAGE = "OpenAI-compat API error 500: upstream exploded";
+/**
+ * A CLI crash passed through verbatim by `ai/executor.ts`
+ * (`Claude exited with code <n>: <stderr>`), where the stderr an upstream wrote
+ * happens to carry a timeout phrase and a budget of its own. The process died;
+ * the per-claim budget did not expire.
+ */
+const CRASH_MESSAGE =
+  "Claude exited with code 1: node:internal/errors: FetchError: request to " +
+  "https://api.example.com/v1 failed, upstream timed out after 30000ms\n" +
+  "    at ClientRequest.<anonymous> (/app/node_modules/node-fetch/index.js:1491:11)";
 
 let timeoutRun: Awaited<ReturnType<typeof runFactcheckWith>>;
 let errorRun: Awaited<ReturnType<typeof runFactcheckWith>>;
+let crashRun: Awaited<ReturnType<typeof runFactcheckWith>>;
 
 beforeEach(async () => {
   if (!timeoutRun) timeoutRun = await runFactcheckWith(TIMEOUT_MESSAGE);
   if (!errorRun) errorRun = await runFactcheckWith(ERROR_MESSAGE);
+  if (!crashRun) crashRun = await runFactcheckWith(CRASH_MESSAGE);
 });
 
 const claimResult = (r: { events: SseEvent[] }) =>
@@ -159,8 +172,9 @@ describe("failed claim — cause-specific outcome + block", () => {
   test("a connector timeout yields outcome 'timeout' and names the budget in seconds", () => {
     const cr = claimResult(timeoutRun);
     expect(cr.outcome).toBe("timeout");
-    // 90000ms came from the MESSAGE, not from the constant (which is now 110s) —
-    // the reason must never hardcode a figure the constant bump would make lie.
+    // The figure must be the one the MESSAGE named, not the current constant — a
+    // constant bump must not make an older or foreign caller's reason lie. Pinned
+    // against the constant so the two can never quietly become the same number.
     expect(cr.markdown).toContain("Verification timed out after 90s — the claim was not checked.");
     expect(String(cr.markdown)).not.toContain(`${Math.round(FACTCHECK_CLAIM_TIMEOUT_MS / 1000)}s`);
   });
@@ -169,6 +183,16 @@ describe("failed claim — cause-specific outcome + block", () => {
     const cr = claimResult(errorRun);
     expect(cr.outcome).toBe("error");
     expect(cr.markdown).toContain("Verification failed: OpenAI-compat API error 500: upstream exploded.");
+  });
+
+  test("a CLI crash whose stderr says 'timed out after' is an error, not a ⏱️ timeout", () => {
+    const cr = claimResult(crashRun);
+    expect(cr.outcome).toBe("error");
+    expect(String(cr.markdown)).toContain("Verification failed:");
+    // The crashed claim must never claim a budget: neither the upstream's 30s nor
+    // this route's own constant is a budget that expired here.
+    expect(String(cr.markdown)).not.toContain("timed out after 30s");
+    expect(String(cr.markdown)).not.toContain(`${Math.round(FACTCHECK_CLAIM_TIMEOUT_MS / 1000)}s`);
   });
 
   test("the two blocks are distinguishable, and both keep the ❓ verdict vocabulary", () => {

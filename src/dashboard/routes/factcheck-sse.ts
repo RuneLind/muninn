@@ -64,15 +64,16 @@ export const FACTCHECK_TIMEOUT_MS = 280_000;
 
 /**
  * Per-claim verify timeout. A hung claim yields one ❓ "verification timed out"
- * block, not a dead run. Generous — task 0 measured ~15s/web-verified-claim.
+ * block, not a dead run. Must stay generous enough that a claim still genuinely
+ * fetching is not killed — task 0 measured ~15s/web-verified-claim, and 90s was
+ * already cutting real fetches short.
  *
- * Raised 90s → 110s: at 90s the budget was killing claims that were still
- * genuinely fetching (the reference trace's `claude:claim-1`). **Tradeoff, stated:**
- * the fan-out enforces {@link FACTCHECK_TIMEOUT_MS} as a LAUNCH deadline, not an
- * abort, so an in-flight claim may overrun it — bounded by one claim per worker,
- * i.e. worst-case run wall-clock moves ~370s → ~390s. That still fits inside the
+ * **The bound on raising it, stated:** the fan-out enforces
+ * {@link FACTCHECK_TIMEOUT_MS} as a LAUNCH deadline, not an abort, so an in-flight
+ * claim may overrun it by up to this budget — bounded by one claim per worker, so
+ * worst-case run wall-clock is `FACTCHECK_TIMEOUT_MS + this`. That fits inside the
  * 255s-per-response idleTimeout only because the 30s heartbeat holds the stream
- * open; without it this bump would not be safe.
+ * open; a value large enough to break that arithmetic is not safe here.
  */
 export const FACTCHECK_CLAIM_TIMEOUT_MS = 110_000;
 
@@ -224,42 +225,100 @@ function synthBlock(index: number, total: number, title: string, reason: string)
 const CLAIM_BUDGET_MS_MAX = 3_600_000;
 
 /**
- * Classify a failed claim verification from the connector's thrown message.
+ * A connector's timeout clause AND its budget in ONE anchored pattern. The figure
+ * must sit adjacent to the phrase, because the message is otherwise arbitrary text
+ * a model or an upstream chose: a free-floating `(\d+)\s*ms` also matches a `ms`
+ * token inside a fetched URL (`?delay=250ms`), and `String.match` takes the FIRST
+ * hit, so an earlier token wins over the real budget and the reason renders a
+ * figure nothing measured. Case-insensitive as ONE pattern so the phrase and its
+ * unit can't disagree about casing (a `TIMED OUT AFTER 110000MS` matched the
+ * phrase but not a case-sensitive unit ⇒ `isTimeout` true, budget silently lost).
  *
- * TWO deliberately separate questions, because they have different answers and
- * different consumers:
- *   - `isTimeout` — did the per-claim budget kill it? Every connector spells its
- *     own timeout differently but all four share `timed out after`:
- *     `Claude Agent SDK timed out after <n>ms` (`ai/connectors/claude-sdk.ts`),
- *     `Claude timed out after <n>ms` (`ai/executor.ts`),
- *     `Copilot SDK timed out after <n>ms` (`ai/connectors/copilot-sdk.ts`),
- *     `OpenAI-compat request timed out after <n>ms` (`ai/connectors/openai-compat-stream.ts`).
- *   - `ms` — what budget did it die against? Preferred over
- *     {@link FACTCHECK_CLAIM_TIMEOUT_MS} when present, so the user-facing reason
- *     reports the number that actually applied rather than the current constant
- *     (which a bump would make lie about older/other callers).
- *
- * `ms` is parsed independently of `isTimeout` — a non-timeout message that happens
- * to contain a millisecond figure still yields it; only the timeout arm consumes
- * the value.
+ * On a wrapped message carrying two clauses the FIRST (outermost) wins — the
+ * budget the caller we are reporting on actually set.
  */
-export function classifyClaimFailure(message: string): { isTimeout: boolean; ms: number | null } {
+const CLAIM_TIMEOUT_MS_RE = /timed out after\s*(\d+)\s*ms/i;
+
+/**
+ * A connector crash passed through verbatim — `ai/executor.ts` throws
+ * `Claude exited with code <n>: <stderr>`, and stderr is whatever the child wrote,
+ * including an upstream's own `timed out after <n>ms`. A crash reported as ⏱️
+ * "timed out after Ns" states a budget this route never set and hides that the
+ * process died, so the crash shape wins over the phrase wherever both appear.
+ */
+const CRASH_PASSTHROUGH_RE = /exited with code \d+:/i;
+
+/** What a failed claim verification was, read off the connector's thrown message. */
+export interface ClaimFailure {
+  /**
+   * Did the per-claim budget kill it? Every connector spells its own timeout
+   * differently but all four share `timed out after`:
+   * `Claude Agent SDK timed out after <n>ms` (`ai/connectors/claude-sdk.ts`),
+   * `Claude timed out after <n>ms` (`ai/executor.ts`),
+   * `Copilot SDK timed out after <n>ms` (`ai/connectors/copilot-sdk.ts`),
+   * `OpenAI-compat request timed out after <n>ms` (`ai/connectors/openai-compat-stream.ts`).
+   */
+  isTimeout: boolean;
+  /**
+   * The budget it died against, when the message named a PLAUSIBLE one. Preferred
+   * over {@link FACTCHECK_CLAIM_TIMEOUT_MS}, so the reason reports the number that
+   * actually applied rather than the current constant — a constant bump must not
+   * make an older or foreign caller's reason lie.
+   */
+  ms: number | null;
+  /**
+   * A figure WAS present next to the phrase and was rejected as implausible. This
+   * is what separates `ms: null` meaning "the message named no budget" (⇒ the
+   * constant is the honest best guess) from "the message named one we don't
+   * believe" (⇒ say nothing about seconds at all — substituting the constant there
+   * would print a measured-looking figure over a number we just refused).
+   */
+  msRejected: boolean;
+}
+
+/**
+ * Classify a failed claim verification from the connector's thrown message.
+ * `isTimeout` and the budget are separate questions with separate consumers; only
+ * the timeout arm of the reason consumes `ms`/`msRejected`.
+ */
+export function classifyClaimFailure(message: string): ClaimFailure {
+  if (CRASH_PASSTHROUGH_RE.test(message)) return { isTimeout: false, ms: null, msRejected: false };
   const isTimeout = /timed out after/i.test(message);
-  const m = message.match(/(\d+)\s*ms/);
-  let ms: number | null = null;
-  if (m) {
-    const n = Number(m[1]);
-    if (Number.isFinite(n) && n > 0 && n <= CLAIM_BUDGET_MS_MAX) ms = n;
+  const m = message.match(CLAIM_TIMEOUT_MS_RE);
+  if (!m) return { isTimeout, ms: null, msRejected: false };
+  const n = Number(m[1]);
+  const plausible = Number.isFinite(n) && n > 0 && n <= CLAIM_BUDGET_MS_MAX;
+  return { isTimeout, ms: plausible ? n : null, msRejected: !plausible };
+}
+
+/**
+ * The ❓ block's prose for a timed-out claim. Figure-free when the message named a
+ * budget we rejected — the seconds figure must always be something the message
+ * itself carried or the constant standing in for a message that carried nothing,
+ * never a constant dressed up as a measurement.
+ */
+export function claimTimeoutReason(failure: Pick<ClaimFailure, "ms" | "msRejected">): string {
+  if (failure.ms === null && failure.msRejected) {
+    return "Verification timed out — the claim was not checked.";
   }
-  return { isTimeout, ms };
+  const ms = failure.ms ?? FACTCHECK_CLAIM_TIMEOUT_MS;
+  return `Verification timed out after ${Math.round(ms / 1000)}s — the claim was not checked.`;
 }
 
 /** Longest connector message we inline into a user-facing failure reason. Past
  *  this it is a stack-ish blob, not a reason. */
 const FAILURE_REASON_MAX = 200;
 
-/** Reduce a connector's thrown message to one bounded, single-line, sentence-ended
- *  clause for the ❓ block's prose. Never parsed by anything — presentation only. */
+/**
+ * Reduce a connector's thrown message to one bounded, single-line, sentence-ended
+ * clause for the ❓ block's prose. Never parsed by anything — presentation only.
+ *
+ * Deliberately does NOT escape or strip markup, even though the input is RAW
+ * connector stderr: the output is markdown, and every sink that renders it escapes
+ * plain text itself (`formatWebHtml` → `&lt;script&gt;`). Escaping here would
+ * double-escape in the reader and still not cover a sink that doesn't. If a new
+ * sink renders this unescaped, fix the sink.
+ */
 export function shortFailureReason(message: string): string {
   const flat = message.replace(/\s+/g, " ").trim();
   if (!flat) return "the verifier reported no reason.";
@@ -297,6 +356,16 @@ export interface StampedToolEvent {
  *   - unpaired end (an end whose start we never saw) ⇒ dropped, since there is no
  *     start instant to place or measure it from.
  *
+ * **`id` is typed required but is not trusted here.** Three of the four emit sites
+ * read it off untyped runtime JSON (`block.id`, `t.id`, `tc.id`), so a connector
+ * that stops sending one makes every event carry `undefined` — and a Map keyed on
+ * that collapses every in-flight call onto ONE entry, silently deleting the
+ * earlier ones. This function's whole job is to be the last surviving record of a
+ * dead call, so an id problem must degrade the PAIRING and never the record: a
+ * falsy id gets a synthetic per-start key (unpairable ⇒ the call shows as
+ * unterminated), and a genuinely duplicated id flushes the displaced open call as
+ * unterminated instead of dropping it.
+ *
  * `startedAtMs` is the span-start instant — `attachToolSpans` anchors each child at
  * `parentSpan.startedAt + startOffsetMs`, so offsets must be relative to it.
  * Output is in start order.
@@ -317,6 +386,7 @@ export function pairToolEvents(
   const open = new Map<string, Open>();
   const out: (ToolCall & { _idx: number })[] = [];
   let seq = 0;
+  let fallbackKeys = 0;
 
   const build = (o: Open, endMs: number, unterminated: boolean): ToolCall & { _idx: number } => ({
     _idx: o.idx,
@@ -331,17 +401,25 @@ export function pairToolEvents(
 
   for (const { event, atMs } of stamped) {
     if (event.type === "tool_start") {
-      // A repeated id would mean the connector reused one — keep the latest start,
-      // which is the only one an end could belong to.
-      open.set(event.id, {
+      // A falsy id gets a key no end can ever match, which is the honest outcome:
+      // the call is recorded, and unpairable ⇒ unterminated.
+      const key = event.id || `${event.displayName}#${fallbackKeys++}`;
+      // A repeated id means the connector reused one. The LATEST start is the only
+      // one a later end could belong to, so it takes the key — but the displaced
+      // call still happened, so it is flushed as unterminated rather than dropped.
+      const displaced = open.get(key);
+      if (displaced) out.push(build(displaced, failedAtMs, true));
+      open.set(key, {
         idx: seq++,
-        id: event.id,
+        id: key,
         name: event.name,
         displayName: event.displayName,
         input: event.input,
         atMs,
       });
     } else if (event.type === "tool_end") {
+      // An end with no id can't name a start; treat it like an unpaired end.
+      if (!event.id) continue;
       const o = open.get(event.id);
       if (!o) continue; // unpaired end — no start instant to anchor it to
       open.delete(event.id);
@@ -790,12 +868,6 @@ async function runFactcheck(
         heading: opts.ctx,
       });
 
-      // Wall-clock instant the claim span starts, for `pairToolEvents`' offset
-      // origin. Read here rather than inside the seam because `attachToolSpans`
-      // anchors child spans at the PARENT span's `startedAt`, which `tracer.start`
-      // stamps a hair later inside `tracedOneShot` — sub-millisecond, and erring
-      // early can only push a child left, never past the parent's own start clamp.
-      const startedAtMs = Date.now();
       try {
         // The shared seam owns the `claude:claim-<i>` span (start + end + tool
         // child spans under `label`). These spans are named claude:claim-<i>
@@ -820,7 +892,8 @@ async function runFactcheck(
           : { block: synthBlock(index, total, claim.title, "The verifier returned no verdict for this claim."), real: false, outcome: "error" };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        const { isTimeout, ms } = classifyClaimFailure(message);
+        const failure = classifyClaimFailure(message);
+        const isTimeout = failure.isTimeout;
         // The seam already ended the claim span with `{ error }` — but it never
         // reached `attachToolSpans` (that runs on the success path only), so the
         // claim span has no tool children. Rebuild them from the progress events.
@@ -828,10 +901,19 @@ async function runFactcheck(
         // resolves `label` to the real (already-ended) parent. Fail-soft for the
         // same reason the seam's own call is: pure trace ornamentation must never
         // turn a degraded claim into a failed run.
+        //
+        // The offset origin must be the SAME instant `addChildSpan` adds
+        // `startOffsetMs` to — the parent span's own `startedAt` — or every child
+        // is pushed right by however long elapsed between the two reads
+        // (`src/core/tool-spans.ts` uses `spanStartedAt` for exactly this). The
+        // label is registered by `tracedOneShot` before its first await, so the
+        // fallback is unreachable in practice and only costs precision.
+        const failedAtMs = Date.now();
+        const spanStartMs = tracer.spanStartedAt(label)?.getTime() ?? toolEvents[0]?.atMs ?? failedAtMs;
         try {
           await attachToolSpans(
             tracer,
-            pairToolEvents(toolEvents, startedAtMs, Date.now()),
+            pairToolEvents(toolEvents, spanStartMs, failedAtMs),
             !!config.tracingCaptureToolOutputs,
             label,
           );
@@ -848,22 +930,21 @@ async function runFactcheck(
           timeout: isTimeout,
           error: message,
         });
-        // Cause-specific, because the server has always known which it was and
-        // threw it away. The ❓ emoji stays — the verdict vocabulary is a PARSED
-        // contract (`verdictOf`, `correctableClaims`); the reason prose is parsed
-        // by nothing. The seconds figure comes from the message's own budget,
-        // falling back to the constant — never a literal, which the bump above
-        // would have made lie.
+        // The reason names the CAUSE; the ❓ emoji must not change with it — the
+        // verdict vocabulary is a PARSED contract (`verdictOf`,
+        // `correctableClaims`) while the reason prose is parsed by nothing.
+        // Any seconds figure comes from the message itself (see
+        // {@link claimTimeoutReason}), never a literal.
         const reason = isTimeout
-          ? `Verification timed out after ${Math.round((ms ?? FACTCHECK_CLAIM_TIMEOUT_MS) / 1000)}s — the claim was not checked.`
+          ? claimTimeoutReason(failure)
           : `Verification failed: ${shortFailureReason(message)}`;
         return {
           block: synthBlock(index, total, claim.title, reason),
           real: false,
-          // The client already renders these two apart (`factcheckRowMarkdown`:
-          // ⏱️ "timed out" vs ⚠️ "verification failed") and both are in
-          // `tallyClaimOutcomes`' five-value enum — the ⚠️ row was simply
-          // unreachable while the server hardcoded "timeout". No client change.
+          // Both values are in `tallyClaimOutcomes`' five-value enum and the client
+          // renders them apart (`factcheckRowMarkdown`: ⏱️ "timed out" vs ⚠️
+          // "verification failed"), so a cause split here needs no client change —
+          // this path just stops reporting a crash as a timeout.
           outcome: isTimeout ? "timeout" : "error",
         };
       }

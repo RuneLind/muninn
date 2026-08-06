@@ -8,6 +8,7 @@ import {
   realOutcome,
   claimsEventPayload,
   classifyClaimFailure,
+  claimTimeoutReason,
   shortFailureReason,
   pairToolEvents,
   FACTCHECK_CLAIM_TIMEOUT_MS,
@@ -397,21 +398,71 @@ describe("classifyClaimFailure", () => {
     expect(classifyClaimFailure("OpenAI-compat API error 500: upstream exploded")).toEqual({
       isTimeout: false,
       ms: null,
+      msRejected: false,
     });
   });
 
   test("an empty / reasonless message is not a timeout", () => {
-    expect(classifyClaimFailure("")).toEqual({ isTimeout: false, ms: null });
+    expect(classifyClaimFailure("")).toEqual({ isTimeout: false, ms: null, msRejected: false });
   });
 
   test("timeout detection is case-insensitive", () => {
     expect(classifyClaimFailure("Request TIMED OUT AFTER 5000ms").isTimeout).toBe(true);
   });
 
-  test("a timeout with no millisecond figure yields ms=null (caller falls back to the constant)", () => {
+  test("an UPPERCASE unit still yields its budget (phrase and unit share one pattern)", () => {
+    // A case-insensitive phrase test beside a case-sensitive unit test read the
+    // message as a timeout and then lost the number it named.
+    expect(classifyClaimFailure("CLAUDE TIMED OUT AFTER 110000MS")).toEqual({
+      isTimeout: true,
+      ms: 110_000,
+      msRejected: false,
+    });
+  });
+
+  test("an earlier `ms` token elsewhere in the message never wins over the clause", () => {
+    // A fetched URL carrying its own `ms` token, BEFORE the timeout clause: an
+    // unanchored `(\d+)\s*ms` takes the URL's figure and renders "0s".
+    const out = classifyClaimFailure(
+      "Claude Agent SDK timed out after 110000ms while fetching https://ex.com/a?delay=250ms",
+    );
+    expect(out).toEqual({ isTimeout: true, ms: 110_000, msRejected: false });
+
+    const before = classifyClaimFailure(
+      "WebFetch https://ex.com/a?delay=250ms failed: Claude Agent SDK timed out after 110000ms",
+    );
+    expect(before.ms).toBe(110_000);
+  });
+
+  test("a wrapped message takes the figure adjacent to the OUTER clause", () => {
+    // Two clauses, two budgets — the first (the caller we are reporting on) wins.
+    expect(
+      classifyClaimFailure(
+        "Claude Agent SDK timed out after 110000ms (upstream: request timed out after 5000ms)",
+      ).ms,
+    ).toBe(110_000);
+  });
+
+  test("a CLI crash passthrough is an error, even when stderr says 'timed out after'", () => {
+    // `ai/executor.ts` throws `Claude exited with code <n>: <stderr>` and stderr is
+    // whatever the child wrote. Reporting that as ⏱️ invents a budget this route
+    // never set and hides that the process died.
+    const wrapped =
+      "Claude exited with code 1: Error: connection to upstream timed out after 30000ms\n" +
+      "    at Object.<anonymous> (/app/dist/index.js:42:11)";
+    expect(classifyClaimFailure(wrapped)).toEqual({
+      isTimeout: false,
+      ms: null,
+      msRejected: false,
+    });
+  });
+
+  test("a timeout with no millisecond figure yields ms=null and NO rejection", () => {
+    // Nothing was named ⇒ the caller may honestly stand the constant in for it.
     expect(classifyClaimFailure("Claude timed out after a while")).toEqual({
       isTimeout: true,
       ms: null,
+      msRejected: false,
     });
   });
 
@@ -419,13 +470,18 @@ describe("classifyClaimFailure", () => {
     expect(classifyClaimFailure("Claude timed out after 90000 ms").ms).toBe(90_000);
   });
 
-  test("an implausible budget is rejected, not carried into the reason", () => {
+  test("an implausible budget is rejected AND flagged, so the caller can't stand the constant in", () => {
     // Over the absolute 1h plausibility window — a nested/foreign figure.
     expect(classifyClaimFailure("Claude timed out after 99999999ms")).toEqual({
       isTimeout: true,
       ms: null,
+      msRejected: true,
     });
-    expect(classifyClaimFailure("Claude timed out after 0ms").ms).toBeNull();
+    expect(classifyClaimFailure("Claude timed out after 0ms")).toEqual({
+      isTimeout: true,
+      ms: null,
+      msRejected: true,
+    });
   });
 
   test("the window is ABSOLUTE, so a test-shortened budget still parses", () => {
@@ -435,6 +491,34 @@ describe("classifyClaimFailure", () => {
     expect(classifyClaimFailure(`Claude timed out after ${FACTCHECK_CLAIM_TIMEOUT_MS}ms`).ms).toBe(
       FACTCHECK_CLAIM_TIMEOUT_MS,
     );
+  });
+});
+
+describe("claimTimeoutReason", () => {
+  test("a message-named budget is reported verbatim, in seconds", () => {
+    expect(claimTimeoutReason({ ms: 90_000, msRejected: false })).toBe(
+      "Verification timed out after 90s — the claim was not checked.",
+    );
+  });
+
+  test("NO figure in the message ⇒ the constant stands in for it", () => {
+    expect(claimTimeoutReason({ ms: null, msRejected: false })).toBe(
+      `Verification timed out after ${Math.round(FACTCHECK_CLAIM_TIMEOUT_MS / 1000)}s — the claim was not checked.`,
+    );
+  });
+
+  test("a REJECTED figure ⇒ figure-free prose, never the constant", () => {
+    // The constant here would print a measured-looking number over a figure we
+    // just refused to believe.
+    const out = claimTimeoutReason({ ms: null, msRejected: true });
+    expect(out).toBe("Verification timed out — the claim was not checked.");
+    expect(out).not.toContain("s —");
+    expect(out).not.toContain(String(Math.round(FACTCHECK_CLAIM_TIMEOUT_MS / 1000)));
+  });
+
+  test("end to end: an implausible budget never renders the constant", () => {
+    const failure = classifyClaimFailure("Claude timed out after 0ms");
+    expect(claimTimeoutReason(failure)).toBe("Verification timed out — the claim was not checked.");
   });
 });
 
@@ -519,5 +603,54 @@ describe("pairToolEvents", () => {
   test("input is omitted when the start carried none", () => {
     const out = pairToolEvents([start("a", "Read", 1_000)], 1_000, 2_000);
     expect("input" in out[0]!).toBe(false);
+  });
+
+  test("id-less starts each survive as their own unterminated call, never collapsed", () => {
+    // `id` is typed required but three emit sites read it off untyped runtime
+    // JSON, so `undefined` is reachable. Keyed naively, all in-flight starts
+    // collapse onto ONE map entry and every earlier call vanishes.
+    const out = pairToolEvents(
+      [
+        start("", "WebFetch", 1_100),
+        start(undefined as unknown as string, "WebFetch", 1_200),
+        start(undefined as unknown as string, "WebSearch", 1_300),
+      ],
+      1_000,
+      3_000,
+    );
+    expect(out).toHaveLength(3);
+    expect(out.map((t) => t.displayName)).toEqual(["WebFetch", "WebFetch", "WebSearch"]);
+    // Unpairable by construction, so each is honestly reported as still running.
+    expect(out.every((t) => t.unterminated === true)).toBe(true);
+    expect(out.map((t) => t.startOffsetMs)).toEqual([100, 200, 300]);
+    // The synthetic keys are distinct, so nothing shares a toolId on the spans.
+    expect(new Set(out.map((t) => t.id)).size).toBe(3);
+  });
+
+  test("an id-less END is dropped rather than closing an unrelated call", () => {
+    const out = pairToolEvents(
+      [start("", "WebFetch", 1_100), end("", "WebFetch", 1_400)],
+      1_000,
+      3_000,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ displayName: "WebFetch", unterminated: true });
+  });
+
+  test("a duplicated start id flushes the displaced call as unterminated, never deletes it", () => {
+    // A connector reusing an id must cost the earlier call its END pairing, not
+    // its existence — this function is the only surviving record of the call.
+    const out = pairToolEvents(
+      [start("dup", "WebFetch", 1_100), start("dup", "WebSearch", 1_200), end("dup", "WebSearch", 1_600)],
+      1_000,
+      3_000,
+    );
+    expect(out).toHaveLength(2);
+    // Output stays in START order.
+    expect(out.map((t) => t.displayName)).toEqual(["WebFetch", "WebSearch"]);
+    expect(out[0]).toMatchObject({ startOffsetMs: 100, durationMs: 1_900, unterminated: true });
+    // The end belongs to the latest start — the only one it could belong to.
+    expect(out[1]).toMatchObject({ startOffsetMs: 200, durationMs: 400 });
+    expect(out[1]!.unterminated).toBeUndefined();
   });
 });
