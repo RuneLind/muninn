@@ -625,7 +625,7 @@ test("buildIntegratePrompt carries the verdict blocks, the masked body, and the 
   const { systemPrompt, userPrompt } = buildIntegratePrompt({
     pageTitle: "Widgets",
     wikiName: "jarvis",
-    claims: [{ index: 2, verdict: "❌", title: "Ships 4M units", block: "### ❌ Claim 2/3 — Ships 4M units\n\nThe filing says 2.1M." }],
+    claims: [{ index: 2, total: 3, verdict: "❌", title: "Ships 4M units", block: "### ❌ Claim 2/3 — Ships 4M units\n\nThe filing says 2.1M." }],
     maskedBody: promptMaskBody(ZONED_PAGE),
     hasSourcesSection: hasSourcesSection(ZONED_PAGE),
   });

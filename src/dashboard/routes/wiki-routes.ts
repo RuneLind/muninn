@@ -1786,8 +1786,8 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
   });
 
   // Wiki Fact check — RE-VERIFY ONE CLAIM (`GET /api/wiki/factcheck/claim`). The
-  // server half of the reader's ↻ affordance on a claim that timed out, crashed or
-  // came back unverifiable. Same SSE wire shape as the article route (heartbeat,
+  // server half of the reader's ↻ affordance on a claim that timed out, was
+  // skipped, or crashed. Same SSE wire shape as the article route (heartbeat,
   // `app_error`, terminal `end`), same preflight chain, same web-tools connector
   // requirement — but ONE claim, no extraction phase, no fan-out, no compose.
   //

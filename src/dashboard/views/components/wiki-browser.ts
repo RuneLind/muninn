@@ -101,6 +101,22 @@ import {
   type WikiPagesResponse,
 } from "./wiki-refresh.ts";
 import {
+  appendLedeAmendment,
+  buildClaimRetryUrl,
+  claimCountFromMap,
+  claimOutcomeMapFromRows,
+  claimRefFromHeadingText,
+  claimRetryBatchLabel,
+  claimRetryRunningCopy,
+  outcomeCountsFromMap,
+  retryableClaims,
+  spliceClaimBlock,
+  CLAIM_RETRY_CANCEL_COPY,
+  CLAIM_RETRY_WROTE_COPY,
+  type ClaimOutcomeByIndex,
+  type RetryableClaim,
+} from "./wiki-claim-retry.ts";
+import {
   annotationIndexes,
   appendBlockedByIntegrate,
   buildIntegrateApplyBody,
@@ -1880,6 +1896,18 @@ interface AskTurn {
   toolSourceUrls?: Record<string, string>; // host → first full URL seen (feeds the Consulting chip hrefs). Persisted intentionally; a pre-PR / malformed-dropped turn lacks it ⇒ chips fall back to https://<host>/.
   claimCount?: number; // claims verified in a fact check (from the `done` payload; drives the meta line)
   claimOutcomes?: ClaimOutcomeCounts; // per-outcome tally for the honest fact-check meta line (persisted)
+  // Per-claim outcome keyed by the claim's 1-based index. PERSISTED: it is what
+  // decides which claims get a ↻ retry, while the outcomes themselves arrive only
+  // on the transient `claim_result` events. The tally beside it counts but can't
+  // say WHICH claim timed out. After a successful retry this map is the single
+  // authority — `claimOutcomes` + `claimCount` are re-derived from it.
+  claimOutcomeByIndex?: ClaimOutcomeByIndex;
+  // The fact-check mode + the selection/heading it ran against, so a ↻ can re-issue
+  // the same scoped call (a sel-mode turn retried in article mode would verify the
+  // claim against a passage nobody selected). PERSISTED.
+  fcMode?: string;
+  fcSel?: string;
+  fcCtx?: string;
   claims?: ClaimRow[]; // per-claim checklist for a multi-claim fact check (transient; not persisted)
   toolLog?: ToolLogRow[]; // compact per-claim tool log during a fact check (transient; not persisted)
   // Which write action this turn already performed. PERSISTED, because both write
@@ -2256,6 +2284,477 @@ function refreshWriteActionBars(turn: AskTurn): void {
   // than at five separate SSE call sites where one could quietly be missed. It is
   // rendered from `turn.chatEsc`, so this is idempotent.
   refreshChatEscalateBar(turn);
+  // Same reasoning for the ↻ retry bar: it is derived from `turn.answer` +
+  // `turn.claimOutcomeByIndex`, neither of which exists when the pane is painted.
+  refreshClaimRetryBar(turn);
+}
+
+// ── Claim retry (↻) ───────────────────────────────────────────────────
+// The client half of `GET /api/wiki/factcheck/claim`: re-verify ONE claim that
+// timed out, was skipped, or errored, and splice its fresh verdict block into the
+// persisted answer. A model-chosen ❓ (`unverifiable`) is deliberately NOT
+// retryable — see `RETRYABLE_OUTCOMES`.
+//
+// TWO CONTRACTS this code lives or dies on:
+//
+//  - **`###` in markdown, `<h4>` in the DOM.** `formatWebHtml`'s heading renderer
+//    emits `h${Math.min(level + 1, 6)}`, so the `### <emoji> Claim n/m` prompt
+//    contract lands in the pane as an `<h4>`. An `h3` selector here would match
+//    NOTHING and ship an invisible button, so the DOM pass queries ALL heading
+//    levels and filters on the `Claim n/m` TEXT (`claimRefFromHeadingText`) —
+//    a future level shift can't silently kill it either.
+//  - **The affordance is re-applied at EVERY paint, never injected once.** The
+//    answer body is replaced wholesale by `showAskAnswer`, by the `done` paint, by
+//    the `answer_html` paint and by this feature's OWN repaint after a splice, so
+//    a one-shot injection would vanish on the very next render.
+//
+// **Cancel is client-side only** and the UI says so: there is no abort plumbing on
+// this path (`streamFactcheckSSE` treats a gone client as a launch GATE, and
+// `tracedOneShot` carries no cancellation token). Cancel stops the BATCH from
+// launching the next claim and detaches this client; the in-flight claim finishes
+// server-side while holding the page's single-flight slot — which is exactly why a
+// row ↻ clicked mid-batch 409s, and why the 409's `expiresAtMs` is rendered.
+
+/** Per-turn, per-claim ↻ row message (live progress · a failure · a 409's
+ *  deadline), keyed `askedAt` → claim index, the `integrateBarMsgs` precedent.
+ *  Held OFF the DOM so the repaint after a splice — or a turn switch and back —
+ *  reproduces it instead of wiping it. */
+const claimRetryMsgs: Record<number, Record<number, { text: string; error: boolean }>> = {};
+
+/** The retry currently in flight — at most ONE. The route is per-page
+ *  single-flight anyway, and a batch runs SEQUENTIALLY so the tool chips and the
+ *  status line stay legible (bounded by FACTCHECK_MAX_CLAIMS × 180s ≈ 24 min worst
+ *  case, hence a visible running state rather than a silent spinner). */
+let claimRetryRun: {
+  turn: AskTurn;
+  index: number;
+  batch: boolean;
+  cancelled: boolean;
+  total: number;
+  done: number;
+  cancel: () => void;
+} | null = null;
+
+/** Set (or clear, with an empty `text`) one ↻ row's message and repaint that row. */
+function setClaimRetryMsg(turn: AskTurn, index: number, text: string, error = false): void {
+  const forTurn = claimRetryMsgs[turn.askedAt] || (claimRetryMsgs[turn.askedAt] = {});
+  if (text) forTurn[index] = { text, error };
+  else delete forTurn[index];
+  paintClaimRetryRow(turn, index);
+}
+
+/** Inner markup of one ↻ row, DERIVED from turn + run state (never mutated in
+ *  place only), so every repaint reproduces it. */
+function claimRetryRowInnerHtml(turn: AskTurn, claim: RetryableClaim): string {
+  const running = !!claimRetryRun && claimRetryRun.turn === turn && claimRetryRun.index === claim.index;
+  const busy = !!claimRetryRun && !running;
+  const msg = (claimRetryMsgs[turn.askedAt] || {})[claim.index];
+  // A turn that already wrote to the page gets a DISABLED ↻ with one line of copy,
+  // not nothing: check → ➕ → notice-the-❓ is a common sequence, and every other
+  // derived-disable state here explains itself (the INTEGRATE_STALE_COPY precedent).
+  // Silently removing the affordance reads as a bug.
+  const wrote = !!turn.wrote;
+  const label = running ? "↻ Re-checking… up to ~3 min" : "↻ Re-check this claim";
+  const disabled = wrote || running || busy ? " disabled" : "";
+  const text = wrote ? CLAIM_RETRY_WROTE_COPY : msg?.text || "";
+  return (
+    '<button class="wiki-fc-retry-btn" data-claim-retry-btn="' + claim.index + '"' + disabled + ">" +
+    label + "</button>" +
+    '<span class="wiki-fc-retry-msg' + (!wrote && msg?.error ? " error" : "") + '">' +
+    esc(text) + "</span>"
+  );
+}
+
+/**
+ * Insert a ↻ row under every retryable claim's heading in the rendered answer.
+ *
+ * Idempotent by construction (it removes its own rows first), because it runs at
+ * every paint site the other body enhancers run at. See the section header for the
+ * h4 trap driving the all-levels query.
+ */
+function applyRetryAffordances(bodyEl: HTMLElement | null, turn: AskTurn): void {
+  if (!bodyEl) return;
+  bodyEl.querySelectorAll(".wiki-fc-retry").forEach((n) => n.remove());
+  if (turn.kind !== "factcheck" || !turn.answer) return;
+  const claims = retryableClaims(turn.answer, turn.claimOutcomeByIndex, turn.claimQuotes);
+  if (!claims.length) return;
+  const byIndex: Record<number, RetryableClaim> = {};
+  claims.forEach((c) => { byIndex[c.index] = c; });
+  // Markdown contract `###`, DOM contract `h4` — both load-bearing, so match on the
+  // heading TEXT across every level rather than on a tag name.
+  bodyEl.querySelectorAll("h1,h2,h3,h4,h5,h6").forEach((h) => {
+    const ref = claimRefFromHeadingText(h.textContent || "");
+    if (!ref) return;
+    const claim = byIndex[ref.index];
+    if (!claim) return;
+    const row = document.createElement("div");
+    row.className = "wiki-fc-retry";
+    row.setAttribute("data-claim-retry", String(claim.index));
+    row.innerHTML = claimRetryRowInnerHtml(turn, claim);
+    h.insertAdjacentElement("afterend", row);
+  });
+}
+
+/** Repaint ONE ↻ row in place (live progress during a 180s run — the common path
+ *  is a single claim, not the batch, so the progress belongs on the row itself). */
+function paintClaimRetryRow(turn: AskTurn, index: number): void {
+  if (turn !== askShownTurn) return;
+  const row = document.querySelector('.wiki-fc-retry[data-claim-retry="' + index + '"]');
+  if (!row) return;
+  const claim = retryableClaims(turn.answer, turn.claimOutcomeByIndex, turn.claimQuotes).find(
+    (c) => c.index === index,
+  );
+  if (!claim) return;
+  row.innerHTML = claimRetryRowInnerHtml(turn, claim);
+}
+
+/** "Retry N unverified claims" bar — rendered only above ONE retryable claim (a
+ *  lone one is served by its own row ↻). Always emitted as a wrapper so the `done`
+ *  refresh can fill it in place; `.wiki-fc-retryall:empty` collapses it. */
+function askClaimRetryBarHtml(turn: AskTurn): string {
+  if (turn.kind !== "factcheck") return "";
+  return '<div class="wiki-fc-retryall" id="wikiClaimRetryBar">' + claimRetryBarInnerHtml(turn) + "</div>";
+}
+
+function claimRetryBarInnerHtml(turn: AskTurn): string {
+  if (turn.kind !== "factcheck" || !turn.answer || !turn.page) return "";
+  const claims = retryableClaims(turn.answer, turn.claimOutcomeByIndex, turn.claimQuotes);
+  const run = claimRetryRun && claimRetryRun.turn === turn ? claimRetryRun : null;
+  // Nothing left to retry — but keep reporting a finished batch until the turn is
+  // repainted from scratch, so "Re-checked 3 of 3" doesn't vanish on the last splice.
+  if (!claims.length && !run) return "";
+  if (turn.wrote) {
+    if (claims.length < 2) return "";
+    return '<span class="wiki-fc-retryall-msg">' + esc(CLAIM_RETRY_WROTE_COPY) + "</span>";
+  }
+  if (run && run.batch) {
+    const status = run.cancelled
+      ? CLAIM_RETRY_CANCEL_COPY
+      : "Re-checking claim " + run.index + " — " + run.done + " of " + run.total + " done";
+    return (
+      '<button class="wiki-fc-retryall-btn" disabled>' + esc(claimRetryBatchLabel(run.total)) + "</button>" +
+      (run.cancelled
+        ? ""
+        : '<button class="wiki-fc-retryall-cancel" id="wikiClaimRetryCancel">Cancel</button>') +
+      '<span class="wiki-fc-retryall-msg">' + esc(status) + "</span>"
+    );
+  }
+  if (claims.length < 2) return "";
+  const busy = !!run;
+  return (
+    '<button class="wiki-fc-retryall-btn" id="wikiClaimRetryAll"' + (busy ? " disabled" : "") + ">" +
+    esc(claimRetryBatchLabel(claims.length)) + "</button>" +
+    '<span class="wiki-fc-retryall-msg">one at a time · up to ~3 min each</span>'
+  );
+}
+
+/** Re-render the ↻ bar from the turn. TURN-GUARDED for the same reason
+ *  `refreshWriteActionBars` is — it is a singleton node owned by whichever turn is
+ *  painted. */
+function refreshClaimRetryBar(turn: AskTurn): void {
+  if (turn !== askShownTurn) return;
+  const bar = document.getElementById("wikiClaimRetryBar");
+  if (bar) bar.innerHTML = claimRetryBarInnerHtml(turn);
+}
+
+/** Repaint the answer body from `turn.answer` and re-run every enhancer the `done`
+ *  path runs — including the retry affordances, which the repaint would otherwise
+ *  destroy.
+ *
+ *  No server round-trip is needed after a splice: the fact-check route's
+ *  `renderAnswerHtml` is `renderAskAnswerHtml(answer, [])`, and with an empty
+ *  citation list that reduces to `formatWebHtml(answer)` — the same function
+ *  `renderStreamingBody` wraps (plus the confidence enhancement the client applies
+ *  on every paint anyway). */
+function repaintAskAnswerBody(turn: AskTurn): void {
+  if (turn !== askShownTurn) return;
+  const b = document.getElementById("askAnswerBody");
+  if (!b) return;
+  b.innerHTML = renderStreamingBody(turn.answer);
+  enhanceMermaid(b);
+  enhanceCodeTabs(b);
+  applyRetryAffordances(b, turn);
+}
+
+/** Handlers for one retry stream. */
+interface ClaimRetryStreamHandlers {
+  tool?: (d: Record<string, unknown>) => void;
+  claim_result?: (d: Record<string, unknown>) => void;
+  app_error?: (message: string) => void;
+  /** The route's per-page single-flight 409 `{state:"running", expiresAtMs}`. */
+  conflict?: (expiresAtMs: unknown) => void;
+  /** Transport-level failure (unreachable server, non-200 that isn't the 409). */
+  failed?: (message: string) => void;
+}
+
+/**
+ * Consume the retry SSE through **fetch + a ReadableStream**, deliberately NOT
+ * `sseClient`/`EventSource`.
+ *
+ * Two reasons, both empirical: `EventSource` exposes neither the status nor the
+ * body on a non-200, so the route's 409 `{state:"running", expiresAtMs}` — the
+ * whole point of the deadline riding that body — would be unreadable; and it
+ * auto-reconnects on a network drop, where the reconnect would hit the very
+ * single-flight slot the first connection is holding and fail opaquely while
+ * wedging the row.
+ */
+function openClaimRetryStream(
+  url: string,
+  h: ClaimRetryStreamHandlers,
+): { done: Promise<void>; cancel: () => void } {
+  const ctrl = new AbortController();
+  const done = (async () => {
+    let res: Response;
+    try {
+      res = await fetch(url, { headers: { Accept: "text/event-stream" }, signal: ctrl.signal });
+    } catch {
+      if (!ctrl.signal.aborted) h.failed?.("Could not reach the server — nothing was changed.");
+      return;
+    }
+    if (res.status === 409) {
+      let body: { expiresAtMs?: unknown } = {};
+      try { body = (await res.json()) as { expiresAtMs?: unknown }; } catch { /* keep the default copy */ }
+      h.conflict?.(body?.expiresAtMs);
+      return;
+    }
+    if (!res.ok || !res.body) {
+      let msg = "The re-check could not start (HTTP " + res.status + ").";
+      try {
+        const b = (await res.json()) as { error?: unknown };
+        if (b && typeof b.error === "string") msg = b.error;
+      } catch { /* non-JSON body — keep the status copy */ }
+      h.failed?.(msg);
+      return;
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    try {
+      for (;;) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        buf += decoder.decode(chunk.value, { stream: true });
+        let sep = buf.indexOf("\n\n");
+        while (sep !== -1) {
+          dispatchClaimRetryFrame(buf.slice(0, sep), h);
+          buf = buf.slice(sep + 2);
+          sep = buf.indexOf("\n\n");
+        }
+      }
+    } catch {
+      if (!ctrl.signal.aborted) h.failed?.("The connection dropped — nothing was changed.");
+    }
+  })();
+  return { done, cancel: () => ctrl.abort() };
+}
+
+/** Parse one `event:`/`data:` SSE frame and fan it out. `heartbeat` and the
+ *  terminal `end` sentinel carry nothing the client acts on. */
+function dispatchClaimRetryFrame(frame: string, h: ClaimRetryStreamHandlers): void {
+  let event = "message";
+  const dataLines: string[] = [];
+  for (const raw of frame.split("\n")) {
+    const line = raw.replace(/\r$/, "");
+    if (!line || line.charAt(0) === ":") continue;
+    if (line.indexOf("event:") === 0) event = line.slice(6).trim();
+    else if (line.indexOf("data:") === 0) dataLines.push(line.slice(5).replace(/^ /, ""));
+  }
+  if (event === "heartbeat" || event === "end") return;
+  let d: Record<string, unknown>;
+  try { d = JSON.parse(dataLines.join("\n")) as Record<string, unknown>; } catch { return; }
+  if (event === "tool") h.tool?.(d);
+  else if (event === "claim_result") h.claim_result?.(d);
+  else if (event === "app_error") {
+    h.app_error?.(typeof d.message === "string" ? d.message : "The re-check failed.");
+  }
+}
+
+/**
+ * Fold a retry's `tool` event into the turn's Consulting chips, exactly as the
+ * article run's own handler does — a retried claim's sources belong on the turn
+ * that will carry its verdict.
+ */
+function recordToolSource(turn: AskTurn, d: Record<string, unknown>): boolean {
+  const detail = typeof d.detail === "string" ? d.detail : "";
+  if (!detail || d.name !== "WebFetch") return false;
+  if (!turn.toolSources) turn.toolSources = [];
+  if (turn.toolSources.indexOf(detail) !== -1) return false;
+  turn.toolSources.push(detail);
+  if (typeof d.url === "string" && d.url) {
+    if (!turn.toolSourceUrls) turn.toolSourceUrls = {};
+    if (!turn.toolSourceUrls[detail]) turn.toolSourceUrls[detail] = d.url;
+  }
+  return true;
+}
+
+/**
+ * Fold a successful `claim_result` into the turn: splice the block, amend the lede,
+ * re-derive the counts, repaint, persist. Returns whether anything was written.
+ */
+function applyClaimRetryResult(
+  turn: AskTurn,
+  claim: RetryableClaim,
+  d: Record<string, unknown>,
+): boolean {
+  // A superseded retry (the reader switched turns mid-run) DROPS its result rather
+  // than splicing into an off-screen turn and repainting someone else's pane.
+  if (turn !== askShownTurn) return false;
+  const markdown = typeof d.markdown === "string" ? d.markdown : "";
+  const spliced = spliceClaimBlock(turn.answer, claim.index, markdown);
+  if (!spliced) {
+    setClaimRetryMsg(
+      turn,
+      claim.index,
+      "The re-checked block didn't match this claim — nothing was changed.",
+      true,
+    );
+    return false;
+  }
+  // The outcome map is written FIRST and is the single authority from here on:
+  // `tallyClaimOutcomes` reads `turn.claims`, which `done` cleared, and `claimCount`
+  // was a server-side count of real blocks. Skipping this write is the silent
+  // failure mode — the claim would keep offering ↻ forever.
+  const map: ClaimOutcomeByIndex = turn.claimOutcomeByIndex || (turn.claimOutcomeByIndex = {});
+  map[claim.index] = typeof d.outcome === "string" ? d.outcome : "verified";
+  turn.answer = appendLedeAmendment(spliced, claim.index);
+  turn.claimOutcomes = outcomeCountsFromMap(map);
+  turn.claimCount = claimCountFromMap(map);
+  // The stored server-rendered HTML describes the pre-splice answer; drop it so
+  // every later paint (including a history re-show) renders the new markdown.
+  turn.html = null;
+  setClaimRetryMsg(turn, claim.index, "");
+  repaintAskAnswerBody(turn);
+  refreshAskSources(turn); // the meta line reads claimOutcomes / claimCount
+  persistAskSession();
+  refreshWriteActionBars(turn);
+  return true;
+}
+
+/** Re-verify ONE claim end to end. Resolves `true` when the answer was rewritten. */
+async function retryOneClaim(turn: AskTurn, claim: RetryableClaim, batch: boolean): Promise<boolean> {
+  if (claimRetryRun || turn.wrote || !turn.page || !turn.answer) return false;
+  const url = buildClaimRetryUrl({
+    page: turn.page,
+    ...(WIKI ? { wiki: WIKI } : {}),
+    ...(turn.fcMode ? { mode: turn.fcMode } : {}),
+    ...(turn.fcSel ? { sel: turn.fcSel } : {}),
+    ...(turn.fcCtx ? { ctx: turn.fcCtx } : {}),
+    index: claim.index,
+    total: claim.total,
+    title: claim.title || turn.question,
+    ...(claim.quote ? { quote: claim.quote } : {}),
+  });
+  const run = { turn, index: claim.index, batch, cancelled: false, total: 1, done: 0, cancel: () => {} };
+  claimRetryRun = run;
+  return await driveClaimRetry(turn, claim, run, url);
+}
+
+/** The stream half of {@link retryOneClaim} / the batch, split out so the batch can
+ *  own the counters on the shared run record. */
+async function driveClaimRetry(
+  turn: AskTurn,
+  claim: RetryableClaim,
+  run: NonNullable<typeof claimRetryRun>,
+  url: string,
+): Promise<boolean> {
+  let ok = false;
+  setClaimRetryMsg(turn, claim.index, "Re-checking…");
+  refreshClaimRetryBar(turn);
+  const stream = openClaimRetryStream(url, {
+    tool: (d) => {
+      if (recordToolSource(turn, d)) refreshAskToolSources(turn);
+      if (d.state === "start") {
+        const label = typeof d.label === "string" && d.label ? d.label : "Working";
+        const detail = typeof d.detail === "string" ? d.detail : "";
+        setClaimRetryMsg(turn, claim.index, label + (detail ? ": " + detail : "") + "…");
+      } else if (d.state === "end") {
+        setClaimRetryMsg(turn, claim.index, "Re-checking…");
+      }
+    },
+    claim_result: (d) => { ok = applyClaimRetryResult(turn, claim, d); },
+    // A FAILED retry leaves the persisted answer byte-untouched (the route emits no
+    // claim_result) — the reason lands on the row and the ↻ stays live.
+    app_error: (m) => setClaimRetryMsg(turn, claim.index, m, true),
+    conflict: (expiresAtMs) =>
+      setClaimRetryMsg(turn, claim.index, claimRetryRunningCopy(expiresAtMs), true),
+    failed: (m) => setClaimRetryMsg(turn, claim.index, m, true),
+  });
+  run.cancel = stream.cancel;
+  await stream.done;
+  // Clear a stale live-progress line (an error/409 line is left in place).
+  const msg = (claimRetryMsgs[turn.askedAt] || {})[claim.index];
+  if (msg && !msg.error) setClaimRetryMsg(turn, claim.index, "");
+  if (claimRetryRun === run) claimRetryRun = null;
+  // Tool chips grew during the run; persist them even on a failed retry.
+  persistAskSession();
+  paintClaimRetryRow(turn, claim.index);
+  refreshClaimRetryBar(turn);
+  return ok;
+}
+
+/** Retry every unverified claim on the shown turn, SEQUENTIALLY (concurrency 1):
+ *  the route is per-page single-flight, and parallel runs would interleave tool
+ *  chips and status text into noise. */
+async function retryAllClaims(turn: AskTurn): Promise<void> {
+  if (claimRetryRun || turn.wrote || !turn.page) return;
+  const queue = retryableClaims(turn.answer, turn.claimOutcomeByIndex, turn.claimQuotes);
+  if (queue.length < 2) return;
+  const run = {
+    turn,
+    index: queue[0]!.index,
+    batch: true,
+    cancelled: false,
+    total: queue.length,
+    done: 0,
+    cancel: () => {},
+  };
+  claimRetryRun = run;
+  refreshClaimRetryBar(turn);
+  for (const claim of queue) {
+    if (run.cancelled) break;
+    // The reader switched turns — stop rather than rewriting an off-screen answer.
+    if (turn !== askShownTurn) break;
+    run.index = claim.index;
+    refreshClaimRetryBar(turn);
+    // Each claim owns the run record for the duration of its own stream.
+    claimRetryRun = run;
+    await driveClaimRetry(turn, claim, run, buildClaimRetryUrl({
+      page: turn.page,
+      ...(WIKI ? { wiki: WIKI } : {}),
+      ...(turn.fcMode ? { mode: turn.fcMode } : {}),
+      ...(turn.fcSel ? { sel: turn.fcSel } : {}),
+      ...(turn.fcCtx ? { ctx: turn.fcCtx } : {}),
+      index: claim.index,
+      total: claim.total,
+      title: claim.title || turn.question,
+      ...(claim.quote ? { quote: claim.quote } : {}),
+    }));
+    run.done++;
+    claimRetryRun = run;
+    refreshClaimRetryBar(turn);
+  }
+  if (claimRetryRun === run) claimRetryRun = null;
+  refreshClaimRetryBar(turn);
+}
+
+/** Cancel the batch — CLIENT-SIDE ONLY. Stops the next launch and detaches this
+ *  client; the claim already running finishes server-side holding the page's slot. */
+function cancelClaimRetryBatch(): void {
+  if (!claimRetryRun || !claimRetryRun.batch) return;
+  claimRetryRun.cancelled = true;
+  claimRetryRun.cancel();
+  refreshClaimRetryBar(claimRetryRun.turn);
+}
+
+/** Click entry point for one row's ↻. */
+function submitClaimRetry(index: number): void {
+  const turn = askShownTurn;
+  if (!turn || turn.kind !== "factcheck") return;
+  const claim = retryableClaims(turn.answer, turn.claimOutcomeByIndex, turn.claimQuotes).find(
+    (c) => c.index === index,
+  );
+  if (!claim) return;
+  void retryOneClaim(turn, claim, false);
 }
 
 /** Only http(s) URLs are safe to put in a chip href (the URL is model output). A
@@ -2367,6 +2866,7 @@ function askArticleHtml(turn: AskTurn, buffer: string): string {
     askFollowupHtml(turn) +
     askRememberHtml(turn) +
     askChatEscalateHtml(turn) +
+    askClaimRetryBarHtml(turn) +
     askFactcheckAppendHtml(turn) +
     askFactcheckIntegrateHtml(turn) +
     // Transient per-turn preview host — the proposal is never persisted, so a
@@ -2420,6 +2920,9 @@ function showAskAnswer(turn: AskTurn, buffer: string): void {
     // Confidence chips are already baked into the body HTML by askAnswerBodyHtml.
     enhanceMermaid(askBody);
     enhanceCodeTabs(askBody);
+    // The ↻ rows are re-applied at EVERY paint site (never injected once): this is
+    // the turn-switch / history-click repaint.
+    applyRetryAffordances(askBody, turn);
   }
   document.getElementById("articleWrap")!.scrollTop = 0;
   document.getElementById("connBody")!.innerHTML =
@@ -2581,18 +3084,9 @@ function runAskStream(url: string, turn: AskTurn): void {
           setAskStatus(label + (detail ? ": " + detail : "") + "…", "");
         }
         // WebFetch carries a hostname detail — record deduped consulted sources,
-        // keeping the FIRST full URL seen per host for the chip href.
-        if (detail && d.name === "WebFetch") {
-          if (!turn.toolSources) turn.toolSources = [];
-          if (turn.toolSources.indexOf(detail) === -1) {
-            turn.toolSources.push(detail);
-            if (typeof d.url === "string" && d.url) {
-              if (!turn.toolSourceUrls) turn.toolSourceUrls = {};
-              if (!turn.toolSourceUrls[detail]) turn.toolSourceUrls[detail] = d.url;
-            }
-            refreshAskToolSources(turn);
-          }
-        }
+        // keeping the FIRST full URL seen per host for the chip href. Shared with
+        // the ↻ retry's own handler set so the two can't drift on the chip contract.
+        if (recordToolSource(turn, d)) refreshAskToolSources(turn);
       } else if (d.state === "end") {
         if (!multiClaim) setAskStatus("Checking the web…", "");
       }
@@ -2612,6 +3106,8 @@ function runAskStream(url: string, turn: AskTurn): void {
       if (b && !turn.html) { b.innerHTML = renderStreamingBody(turn.answer); enhanceMermaid(b); enhanceCodeTabs(b); } // chip baked into renderStreamingBody
       refreshAskSources(turn);
       let statusText: string;
+      // NB the ↻ rows are applied further down, AFTER `claimOutcomeByIndex` is
+      // written — they are derived from it, so a pass here would find nothing.
       if (turn.kind === "factcheck") {
         // Fact-check has no retrieval sources — report the claim count instead.
         turn.baseHash = typeof d.baseHash === "string" ? d.baseHash : undefined;
@@ -2626,6 +3122,11 @@ function runAskStream(url: string, turn: AskTurn): void {
         // Tally the per-outcome breakdown from the checklist BEFORE it's cleared
         // below — it's persisted (drives the honest meta line on rehydrated turns).
         turn.claimOutcomes = tallyClaimOutcomes(turn.claims);
+        // …and keep the PER-CLAIM outcomes too, for the same reason and one more:
+        // the tally counts, but only this map says WHICH claim timed out, which is
+        // what decides where a ↻ retry affordance goes. Same last chance to read it
+        // — the checklist is dropped a few lines below.
+        turn.claimOutcomeByIndex = claimOutcomeMapFromRows(turn.claims);
         const n = typeof d.claimCount === "number" ? d.claimCount : 0;
         turn.claimCount = n; // drives the meta line's "N claims · M sites consulted"
         refreshAskSources(turn); // repaint the meta line now that claimCount is set
@@ -2665,6 +3166,9 @@ function runAskStream(url: string, turn: AskTurn): void {
       // The pane was painted before the answer existed, so neither write-action
       // gate could run (both read the committed answer). Re-derive them now.
       refreshWriteActionBars(turn);
+      // The `done` paint above ran before the outcome map existed; apply the ↻ rows
+      // now that both the answer and the map are on the turn.
+      applyRetryAffordances(document.getElementById("askAnswerBody"), turn);
       // Do NOT close here — the server emits a trailing `answer_html` after `done`.
       // We close on `answer_html` (or the `end` fallback if it never comes).
     },
@@ -2679,7 +3183,7 @@ function runAskStream(url: string, turn: AskTurn): void {
       // progressive-render frame so it can't repaint over the final article.
       cancelAskStreamRender();
       const b = document.getElementById("askAnswerBody");
-      if (b && turn.html) { b.innerHTML = enhanceConfidenceHtml(turn.html); enhanceMermaid(b); enhanceCodeTabs(b); }
+      if (b && turn.html) { b.innerHTML = enhanceConfidenceHtml(turn.html); enhanceMermaid(b); enhanceCodeTabs(b); applyRetryAffordances(b, turn); }
       refreshAskSources(turn);
       persistAskSession(); // re-store so the rehydrated turn carries the final HTML
       setFollowupDisabled(false); // belt: `done` enabled it, but never re-render since
@@ -4297,6 +4801,15 @@ document.addEventListener("click", (e) => {
   } else if (t.closest("#wikiChatOptForce")) {
     void submitChatOptions(window.open("", "_blank"), { forceNew: true });
   } else if (t.closest("#wikiFactcheckAppendBtn")) submitFactcheckAppend();
+  // ↻ claim retry — the row buttons are injected into the answer body by a DOM
+  // pass, so they are delegated by ATTRIBUTE rather than by id.
+  else if (t.closest("[data-claim-retry-btn]")) {
+    const btn = t.closest("[data-claim-retry-btn]") as HTMLButtonElement;
+    if (!btn.disabled) submitClaimRetry(Number(btn.getAttribute("data-claim-retry-btn")));
+  } else if (t.closest("#wikiClaimRetryAll")) {
+    if (askShownTurn) void retryAllClaims(askShownTurn);
+  }
+  else if (t.closest("#wikiClaimRetryCancel")) cancelClaimRetryBatch();
   else if (t.closest("#wikiFactcheckIntegrateBtn")) submitFactcheckIntegrate();
   else if (t.closest("#wikiFcIntAccept")) acceptFactcheckIntegrate();
   else if (t.closest("#wikiFcIntCancel")) cancelFactcheckIntegrate();
@@ -4655,6 +5168,10 @@ function activateFactcheckSel(): void {
     question: factcheckLabel(pillSel),
     answer: "", citations: [], cited: [], html: null, askedAt: Date.now(), kind: "factcheck",
     page: currentName, pageType: selMeta ? selMeta.type : undefined,
+    // Persisted so a later ↻ can re-issue the SAME scoped call: the retry route
+    // re-locates the excerpt from `sel`, and retrying a sel-mode claim in article
+    // mode would verify it against a passage nobody selected.
+    fcMode: "sel", fcSel: pillSel, fcCtx: pillHeading || undefined,
   };
   const url = buildFactcheckUrl({ mode: "sel", page: currentName, wiki: WIKI, sel: pillSel, ctx: pillHeading });
   runAskStream(url, turn);
@@ -4671,6 +5188,7 @@ function activateFactcheckArticle(): void {
     question: factcheckLabel("", meta ? meta.title : currentName),
     answer: "", citations: [], cited: [], html: null, askedAt: Date.now(), kind: "factcheck",
     page: currentName, pageType: meta ? meta.type : undefined,
+    fcMode: "article", // the ↻ retry re-issues the same mode (see activateFactcheckSel)
   };
   const url = buildFactcheckUrl({ mode: "article", page: currentName, wiki: WIKI });
   runAskStream(url, turn);

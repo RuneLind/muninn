@@ -29,6 +29,7 @@ import {
 
 const anchor = (index: number, verdict: string): FactcheckClaimAnchor => ({
   index,
+  total: 9,
   verdict,
   title: "claim " + index,
   block: `### ${verdict} Claim ${index}/9 — claim ${index}`,

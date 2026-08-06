@@ -54,6 +54,28 @@ export interface StoredAskTurn {
     skipped?: number;
     error?: number;
   };
+  /** Per-claim OUTCOME, keyed by the claim's 1-based index (the same `n` the
+   *  `### … Claim n/m` heading carries) — `verified` / `unverifiable` / `timeout` /
+   *  `skipped` / `error`. Persisted because it is what decides whether a claim gets
+   *  a ↻ retry affordance, and the outcomes themselves arrive only on the transient
+   *  `claim_result` events (the checklist they live on is dropped at `done`). The
+   *  per-outcome TALLY beside it is not a substitute — it counts, it doesn't say
+   *  WHICH claim timed out. After a successful retry this map is the single
+   *  authority: `claimOutcomes` and `claimCount` are re-derived FROM it.
+   *  Absent ⇒ a turn persisted before this field, which correctly shows no ↻
+   *  (migration behaviour: the ❓ emoji alone cannot tell a model-chosen
+   *  "unverifiable" apart from a claim that timed out). */
+  claimOutcomeByIndex?: Record<number, string>;
+  /** The fact-check MODE this turn ran in (`"sel"` / `"article"`), plus the
+   *  selection + heading it ran against. Persisted so a ↻ can re-issue the same
+   *  scoped call: `GET /api/wiki/factcheck/claim` re-locates the excerpt from `sel`,
+   *  and a sel-mode turn retried in article mode would verify the claim against a
+   *  passage nobody selected. `fcSel` is already capped client-side at
+   *  `FACTCHECK_SELECTION_MAX` (1500) by the URL builder. Absent ⇒ the retry falls
+   *  back to article mode. */
+  fcMode?: string;
+  fcSel?: string;
+  fcCtx?: string;
   /** Which write action this fact-check turn already performed — `"append"` (the
    *  ➕ callout) or `"integrate"` (in-place prose edits). Persisted because BOTH
    *  buttons' disabled state is derived from it at render time: either write
@@ -194,7 +216,44 @@ function isValidTurn(v: unknown): v is StoredAskTurn {
   }
   if (typeof t.claimCount !== "undefined" && typeof t.claimCount !== "number") return false;
   if (typeof t.claimOutcomes !== "undefined" && !isValidOutcomeCounts(t.claimOutcomes)) return false;
+  // A malformed outcome map is DROPPED (the turn survives) — the `claimQuotes`
+  // treatment, not `wrote`'s. It gates no destructive write: without it the turn
+  // simply offers no ↻, which is exactly the pre-field behaviour, whereas throwing
+  // away a whole fact-check answer over an advisory map is the larger loss.
+  if (typeof t.claimOutcomeByIndex !== "undefined" && !isValidOutcomeMap(t.claimOutcomeByIndex)) {
+    delete t.claimOutcomeByIndex;
+  }
+  // Same treatment for the retry's mode/selection context: a bad value degrades the
+  // ↻ to an article-mode retry, it never costs the turn. `fcMode` is validated as
+  // the two-value union — an unknown mode would be sent verbatim to a route that
+  // only knows `sel`/`article`.
+  if (typeof t.fcMode !== "undefined" && t.fcMode !== "sel" && t.fcMode !== "article") {
+    delete t.fcMode;
+  }
+  if (typeof t.fcSel !== "undefined" && typeof t.fcSel !== "string") delete t.fcSel;
+  if (typeof t.fcCtx !== "undefined" && typeof t.fcCtx !== "string") delete t.fcCtx;
   return true;
+}
+
+/** A well-formed per-claim outcome map: a plain object whose keys are positive
+ *  safe-integer claim indexes and whose values are the five wire outcomes. Held at
+ *  parity with the SSE `claim_result.outcome` vocabulary — an unknown value would
+ *  fall through `isRetryableOutcome` and silently retire a ↻ that should be live,
+ *  and a non-integer key can name no `Claim n/m` heading (the `isValidClaimQuotes`
+ *  rule, for the same reason). */
+function isValidOutcomeMap(v: unknown): boolean {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return false;
+  return Object.entries(v as Record<string, unknown>).every(([k, val]) => {
+    const n = Number(k);
+    if (!Number.isSafeInteger(n) || n <= 0) return false;
+    return (
+      val === "verified" ||
+      val === "unverifiable" ||
+      val === "timeout" ||
+      val === "skipped" ||
+      val === "error"
+    );
+  });
 }
 
 /** A well-formed per-outcome tally: an object whose known count fields, when

@@ -987,6 +987,32 @@ export async function renderWikiPage(opts?: {
     .wiki-fc-int-budget.over { color: var(--status-error); }
     .wiki-fc-int-msg { font-size: 12px; color: var(--text-secondary); margin-top: 8px; }
     .wiki-fc-int-msg.error { color: var(--status-error); }
+    /* ↻ Claim retry — one row injected under each retryable claim heading by the
+       DOM pass in wiki-browser.ts (the answer body is opaque HTML, so the rows are
+       built from the headings, not rendered with them), plus the batch bar. */
+    .wiki-fc-retry {
+      display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+      margin: 2px 0 10px;
+    }
+    .wiki-fc-retry-btn {
+      padding: 3px 10px; border-radius: 999px;
+      border: 1px solid var(--border-secondary); background: var(--bg-inset);
+      color: var(--text-secondary); font-size: 11px; cursor: pointer; white-space: nowrap;
+    }
+    .wiki-fc-retry-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--text-primary); }
+    .wiki-fc-retry-btn:disabled { opacity: 0.5; cursor: default; }
+    .wiki-fc-retry-msg { font-size: 11px; color: var(--text-dim); }
+    .wiki-fc-retry-msg.error { color: var(--status-error); }
+    .wiki-fc-retryall { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 10px 4px 0; }
+    .wiki-fc-retryall:empty { display: none; }
+    .wiki-fc-retryall-btn, .wiki-fc-retryall-cancel {
+      padding: 6px 12px; border-radius: 8px;
+      border: 1px solid var(--border-secondary); background: var(--bg-inset);
+      color: var(--text-primary); font-size: 12px; font-weight: 600; cursor: pointer;
+    }
+    .wiki-fc-retryall-btn:disabled { opacity: 0.5; cursor: default; }
+    .wiki-fc-retryall-cancel { font-weight: 400; color: var(--text-secondary); }
+    .wiki-fc-retryall-msg { font-size: 12px; color: var(--text-secondary); }
     .wiki-fc-sources { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 2px 4px 10px; }
     .wiki-fc-src-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); }
     .wiki-fc-src-chip {

@@ -341,3 +341,65 @@ test("claimQuotes entries the server would reject wholesale are not persisted", 
   for (let i = 0; i < 6; i++) expect(restored[i]!.claimQuotes).toBeUndefined();
   expect(restored[6]!.claimQuotes).toEqual([{ index: 1, quote: "ok" }]);
 });
+
+test("round-trips a retryable fact-check turn's outcome map + retry context", () => {
+  const fc = turn({
+    question: "fact check",
+    kind: "factcheck",
+    page: "concepts/Creatine.mdx",
+    claimOutcomeByIndex: { 1: "verified", 2: "timeout", 3: "unverifiable" },
+    claimOutcomes: { verified: 1, timeout: 1, unverifiable: 1 },
+    claimCount: 2,
+    fcMode: "sel",
+    fcSel: "the selected passage",
+    fcCtx: "A Heading",
+  });
+  const restored = deserializeAskSession(serializeAskSession([fc], 10));
+  expect(restored).toEqual([fc]);
+  // JSON object keys round-trip as strings; index access still resolves.
+  expect(restored[0]!.claimOutcomeByIndex![2]).toBe("timeout");
+});
+
+test("a malformed claimOutcomeByIndex drops the FIELD, keeping the turn", () => {
+  // The `claimQuotes` treatment, not `wrote`'s: the map gates no destructive write,
+  // and without it the turn simply offers no ↻ (the pre-field behaviour).
+  const raw = JSON.stringify([
+    { ...turn({ question: "array" }), claimOutcomeByIndex: ["verified"] },
+    { ...turn({ question: "null" }), claimOutcomeByIndex: null },
+    { ...turn({ question: "unknown-outcome" }), claimOutcomeByIndex: { 1: "pending" } },
+    { ...turn({ question: "non-index-key" }), claimOutcomeByIndex: { first: "verified" } },
+    { ...turn({ question: "zero-key" }), claimOutcomeByIndex: { 0: "verified" } },
+    { ...turn({ question: "fractional-key" }), claimOutcomeByIndex: { 1.5: "verified" } },
+    turn({ question: "clean", claimOutcomeByIndex: { 1: "timeout" } }),
+  ]);
+  const restored = deserializeAskSession(raw);
+  expect(restored.map((t) => t.question)).toEqual([
+    "array",
+    "null",
+    "unknown-outcome",
+    "non-index-key",
+    "zero-key",
+    "fractional-key",
+    "clean",
+  ]);
+  for (let i = 0; i < 6; i++) expect(restored[i]!.claimOutcomeByIndex).toBeUndefined();
+  expect(restored[6]!.claimOutcomeByIndex).toEqual({ 1: "timeout" });
+});
+
+test("a malformed fcMode/fcSel/fcCtx drops the FIELD, keeping the turn", () => {
+  // An unknown mode would be sent verbatim to a route that only knows sel/article;
+  // dropping it degrades the ↻ to an article-mode retry.
+  const raw = JSON.stringify([
+    { ...turn({ question: "bad-mode" }), fcMode: "whole-wiki", fcSel: "s" },
+    { ...turn({ question: "bad-sel" }), fcMode: "sel", fcSel: 42, fcCtx: { a: 1 } },
+    turn({ question: "clean", fcMode: "article" }),
+  ]);
+  const restored = deserializeAskSession(raw);
+  expect(restored.map((t) => t.question)).toEqual(["bad-mode", "bad-sel", "clean"]);
+  expect(restored[0]!.fcMode).toBeUndefined();
+  expect(restored[0]!.fcSel).toBe("s"); // only the bad FIELD is dropped
+  expect(restored[1]!.fcSel).toBeUndefined();
+  expect(restored[1]!.fcCtx).toBeUndefined();
+  expect(restored[1]!.fcMode).toBe("sel");
+  expect(restored[2]!.fcMode).toBe("article");
+});

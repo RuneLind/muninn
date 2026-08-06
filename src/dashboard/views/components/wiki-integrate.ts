@@ -47,6 +47,17 @@ const CLAIM_HEADING_RE =
 export interface FactcheckClaimAnchor {
   /** `n` from the `Claim n/m` heading (1-based, as the model wrote it). */
   index: number;
+  /**
+   * `m` from the `Claim n/m` heading — the claim TOTAL the model itself wrote.
+   *
+   * Deliberately NOT derivable as `anchors.length` by the caller: the two differ
+   * exactly when a verify block failed the heading contract (the failure class the
+   * ↻ retry exists for), and `total` is interpolated straight back into the heading
+   * the retried block carries — a wrong value splices a block whose `n/m` disagrees
+   * with its siblings. The claim-retry route takes it as a required param, and the
+   * client has no other source for it.
+   */
+  total: number;
   /** Verdict emoji, normalized to the VS16 form for ⚠️. */
   verdict: string;
   /** Short claim title from the heading (empty when the heading carried none). */
@@ -89,6 +100,7 @@ export function parseFactcheckClaims(answer: string): FactcheckClaimAnchor[] {
       flush();
       current = {
         index: Number(m[2]),
+        total: Number(m[3]),
         verdict: normalizeVerdict(m[1]!),
         title: (m[4] ?? "").trim(),
         block: "",
