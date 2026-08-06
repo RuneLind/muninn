@@ -7,7 +7,12 @@ import {
   parseConfidence,
   realOutcome,
   claimsEventPayload,
+  classifyClaimFailure,
+  shortFailureReason,
+  pairToolEvents,
+  FACTCHECK_CLAIM_TIMEOUT_MS,
   type ClaimVerifyOutcome,
+  type StampedToolEvent,
 } from "./factcheck-sse.ts";
 import { CLAIM_QUOTE_MAX } from "../views/components/wiki-integrate.ts";
 import { formatWebHtml } from "../../web/web-format.ts";
@@ -366,5 +371,153 @@ describe("claimsEventPayload", () => {
   test("the cap is measured on the TRIMMED quote (padding alone can't drop it)", () => {
     const padded = "  " + "z".repeat(CLAIM_QUOTE_MAX) + "  ";
     expect(claimsEventPayload([{ title: "a", quote: padded }])[0]!.quote).toBe(padded);
+  });
+});
+
+describe("classifyClaimFailure", () => {
+  // The four literal strings the connectors throw. Pinned verbatim (not
+  // regex-ish paraphrases) so a reworded connector message fails HERE rather
+  // than silently relabelling every timed-out claim as an error in production.
+  const CONNECTOR_TIMEOUTS: [string, string][] = [
+    ["claude-sdk", "Claude Agent SDK timed out after 90000ms"],
+    ["claude-cli", "Claude timed out after 110000ms"],
+    ["copilot-sdk", "Copilot SDK timed out after 45000ms"],
+    ["openai-compat", "OpenAI-compat request timed out after 30000ms"],
+  ];
+
+  for (const [connector, message] of CONNECTOR_TIMEOUTS) {
+    test(`${connector}'s literal throw string reads as a timeout, with its budget`, () => {
+      const out = classifyClaimFailure(message);
+      expect(out.isTimeout).toBe(true);
+      expect(out.ms).toBe(Number(message.match(/(\d+)ms/)![1]));
+    });
+  }
+
+  test("a non-timeout connector error is NOT a timeout", () => {
+    expect(classifyClaimFailure("OpenAI-compat API error 500: upstream exploded")).toEqual({
+      isTimeout: false,
+      ms: null,
+    });
+  });
+
+  test("an empty / reasonless message is not a timeout", () => {
+    expect(classifyClaimFailure("")).toEqual({ isTimeout: false, ms: null });
+  });
+
+  test("timeout detection is case-insensitive", () => {
+    expect(classifyClaimFailure("Request TIMED OUT AFTER 5000ms").isTimeout).toBe(true);
+  });
+
+  test("a timeout with no millisecond figure yields ms=null (caller falls back to the constant)", () => {
+    expect(classifyClaimFailure("Claude timed out after a while")).toEqual({
+      isTimeout: true,
+      ms: null,
+    });
+  });
+
+  test("tolerates a space between the number and the unit", () => {
+    expect(classifyClaimFailure("Claude timed out after 90000 ms").ms).toBe(90_000);
+  });
+
+  test("an implausible budget is rejected, not carried into the reason", () => {
+    // Over the absolute 1h plausibility window — a nested/foreign figure.
+    expect(classifyClaimFailure("Claude timed out after 99999999ms")).toEqual({
+      isTimeout: true,
+      ms: null,
+    });
+    expect(classifyClaimFailure("Claude timed out after 0ms").ms).toBeNull();
+  });
+
+  test("the window is ABSOLUTE, so a test-shortened budget still parses", () => {
+    // The guard must not be a ratio against FACTCHECK_CLAIM_TIMEOUT_MS: a 50ms
+    // budget is wildly off that constant and still perfectly legitimate.
+    expect(classifyClaimFailure("Claude Agent SDK timed out after 50ms").ms).toBe(50);
+    expect(classifyClaimFailure(`Claude timed out after ${FACTCHECK_CLAIM_TIMEOUT_MS}ms`).ms).toBe(
+      FACTCHECK_CLAIM_TIMEOUT_MS,
+    );
+  });
+});
+
+describe("shortFailureReason", () => {
+  test("flattens newlines and ends the clause with a period", () => {
+    expect(shortFailureReason("upstream\n  exploded")).toBe("upstream exploded.");
+  });
+
+  test("keeps an existing terminator", () => {
+    expect(shortFailureReason("upstream exploded!")).toBe("upstream exploded!");
+  });
+
+  test("bounds a blob and marks the clip", () => {
+    const out = shortFailureReason("x".repeat(500));
+    expect(out).toHaveLength(200);
+    expect(out.endsWith("…")).toBe(true);
+  });
+
+  test("a blank message still yields a sentence", () => {
+    expect(shortFailureReason("   ")).toBe("the verifier reported no reason.");
+  });
+});
+
+describe("pairToolEvents", () => {
+  const start = (id: string, name = "WebFetch", atMs = 0, input?: string): StampedToolEvent => ({
+    event: { type: "tool_start", id, name, displayName: name, ...(input ? { input } : {}) },
+    atMs,
+  });
+  const end = (id: string, name = "WebFetch", atMs = 0): StampedToolEvent => ({
+    event: { type: "tool_end", id, name, displayName: name, outputSize: 10 },
+    atMs,
+  });
+
+  test("zero events → zero tool calls", () => {
+    expect(pairToolEvents([], 1_000, 2_000)).toEqual([]);
+  });
+
+  test("interleaved same-name starts/ends pair by id, not arrival order", () => {
+    // Two WebFetches in flight at once, finishing in REVERSE order — the case a
+    // LIFO-by-displayName heuristic gets wrong (it would swap the durations).
+    const out = pairToolEvents(
+      [start("a", "WebFetch", 1_100), start("b", "WebFetch", 1_200), end("b", "WebFetch", 1_500), end("a", "WebFetch", 1_900)],
+      1_000,
+      3_000,
+    );
+    expect(out.map((t) => t.id)).toEqual(["a", "b"]); // start order
+    expect(out.find((t) => t.id === "a")).toMatchObject({ durationMs: 800, startOffsetMs: 100 });
+    expect(out.find((t) => t.id === "b")).toMatchObject({ durationMs: 300, startOffsetMs: 200 });
+    expect(out.every((t) => t.unterminated === undefined)).toBe(true);
+  });
+
+  test("an unpaired start runs to the failure instant and is flagged unterminated", () => {
+    const out = pairToolEvents(
+      [start("a", "WebFetch", 1_100), end("a", "WebFetch", 1_400), start("b", "WebSearch", 1_500, '{"q":"x"}')],
+      1_000,
+      3_000,
+    );
+    expect(out).toHaveLength(2);
+    const hung = out[1]!;
+    expect(hung).toMatchObject({
+      id: "b",
+      displayName: "WebSearch",
+      durationMs: 1_500, // 3000 − 1500
+      startOffsetMs: 500,
+      input: '{"q":"x"}',
+      unterminated: true,
+    });
+    // The completed sibling is NOT flagged.
+    expect(out[0]!.unterminated).toBeUndefined();
+  });
+
+  test("an unpaired END is dropped (no start instant to anchor or measure it)", () => {
+    expect(pairToolEvents([end("ghost", "WebFetch", 1_500)], 1_000, 3_000)).toEqual([]);
+  });
+
+  test("offsets and durations are clamped at 0, never negative", () => {
+    // A start stamped before the span-start instant (clock jitter at the seam).
+    const out = pairToolEvents([start("a", "WebFetch", 900), end("a", "WebFetch", 800)], 1_000, 3_000);
+    expect(out[0]).toMatchObject({ startOffsetMs: 0, durationMs: 0 });
+  });
+
+  test("input is omitted when the start carried none", () => {
+    const out = pairToolEvents([start("a", "Read", 1_000)], 1_000, 2_000);
+    expect("input" in out[0]!).toBe(false);
   });
 });

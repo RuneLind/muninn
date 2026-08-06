@@ -42,6 +42,7 @@ test("tool_end event carries the post-truncation output size", () => {
 
   expect(toolEndEvent).toEqual({
     type: "tool_end",
+    id: "call_2",
     name: "Read",
     displayName: "Read",
     outputSize: "hello world".length,

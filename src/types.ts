@@ -44,6 +44,15 @@ export interface ToolCall {
   startOffsetMs: number; // offset from Claude CLI start (for waterfall positioning)
   input?: string;      // abbreviated JSON, max 500 chars
   /**
+   * True when the call was still IN FLIGHT when its parent model call died — i.e.
+   * a `tool_start` that never got its `tool_end`. Only set by consumers that
+   * rebuild tool calls from the progress channel (the fact-check claim fan-out's
+   * timeout path); a connector-returned `ToolCall` always completed, so it is
+   * absent there. `durationMs` on such a call runs to the failure instant, not to
+   * a real result, and `output` is necessarily undefined.
+   */
+  unterminated?: boolean;
+  /**
    * Tool result captured from the connector. JSON-stringified, capped at 16 KB.
    * If the original exceeded the cap, the value is `{"_truncated":true,"_originalBytes":N,"head":"..."}`.
    * Undefined when `TRACING_CAPTURE_TOOL_OUTPUTS=false` or the connector could not surface a result.

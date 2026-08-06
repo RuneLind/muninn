@@ -469,7 +469,9 @@ describe("StreamParser progress callbacks", () => {
 
     // tool_start should have fired
     expect(events).toHaveLength(1);
-    expect(events[0]).toEqual({ type: "tool_start", name: "mcp__gmail__search_emails", displayName: "search_emails (gmail)", input: '{"query":"test"}' });
+    // `id` is the CLI's own `tool_use.id` — what makes start/end pairable by a
+    // consumer that only sees the progress channel (see StreamProgressEvent).
+    expect(events[0]).toEqual({ type: "tool_start", id: "toolu_01", name: "mcp__gmail__search_emails", displayName: "search_emails (gmail)", input: '{"query":"test"}' });
 
     // Tool result resolves the tool
     parser.parseLine(JSON.stringify(makeUser([
@@ -481,6 +483,7 @@ describe("StreamParser progress callbacks", () => {
     expect(events).toHaveLength(2);
     expect(events[1]).toEqual({
       type: "tool_end",
+      id: "toolu_01",
       name: "mcp__gmail__search_emails",
       displayName: "search_emails (gmail)",
       outputSize: "emails".length,

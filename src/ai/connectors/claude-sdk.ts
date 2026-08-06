@@ -219,7 +219,7 @@ export async function executePrompt(
             const intentText = extractIntentText(t.input);
             if (intentText) onProgress?.({ type: "intent", text: intentText });
           }
-          onProgress?.({ type: "tool_start", name: t.name, displayName, input });
+          onProgress?.({ type: "tool_start", id: t.id, name: t.name, displayName, input });
         }
       }
 

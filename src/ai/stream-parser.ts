@@ -19,9 +19,19 @@ import { processMcpToolResult, fetchHuginnTrace } from "./huginn-trace-pointer.t
  * For accurate timing, feed lines as they arrive (not all at once after process exits).
  */
 
+/**
+ * `id` on the two tool variants is the connector's own tool-call id (Claude CLI
+ * `tool_use.id`, Copilot `toolCallId`, openai-compat `tool_call.id`) — the SAME
+ * value that lands on {@link ToolCall.id}. It is what makes a `tool_start` and its
+ * `tool_end` pairable by a consumer that only ever sees the progress channel (the
+ * fact-check claim fan-out rebuilds tool child spans from these events when the
+ * claim times out and the connector never returns a `toolCalls` array). Pairing by
+ * `displayName` instead would mis-attribute durations whenever two same-named
+ * tools are in flight at once — routine for parallel WebFetch calls.
+ */
 export type StreamProgressEvent =
-  | { type: "tool_start"; name: string; displayName: string; input?: string }
-  | { type: "tool_end"; name: string; displayName: string; outputSize?: number }
+  | { type: "tool_start"; id: string; name: string; displayName: string; input?: string }
+  | { type: "tool_end"; id: string; name: string; displayName: string; outputSize?: number }
   | { type: "text" }
   | { type: "text_delta"; text: string }
   | { type: "intent"; text: string }
@@ -170,7 +180,7 @@ export class StreamParser {
           const intentText = extractIntentText(block.input);
           if (intentText) this.onProgress?.({ type: "intent", text: intentText });
         }
-        this.onProgress?.({ type: "tool_start", name: block.name, displayName, input: abbreviateInput(block.input) });
+        this.onProgress?.({ type: "tool_start", id: block.id, name: block.name, displayName, input: abbreviateInput(block.input) });
       }
     }
 
@@ -246,6 +256,7 @@ export class StreamParser {
     });
     this.onProgress?.({
       type: "tool_end",
+      id: pending.id,
       name: pending.name,
       displayName,
       outputSize: pending.output ? pending.output.length : undefined,

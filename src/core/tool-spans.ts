@@ -84,6 +84,11 @@ export async function attachToolSpans(
       input: tool.input,
       statusText: getToolStatus(tool.name, tool.input),
     };
+    // Only ever set on rebuilt-from-progress tool calls (see ToolCall.unterminated):
+    // the tool was still running when its parent model call died, so its duration
+    // is a floor, not a measurement. Stamped so the span row says so; the waterfall
+    // renders no chip for it today.
+    if (tool.unterminated) attrs.unterminated = true;
     // Snapshot the trace env muninn intends MCP children to inherit, so a
     // missing searchTrace can be diagnosed against the current process'
     // configuration rather than guessed at. The actual adapter env may
