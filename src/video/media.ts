@@ -18,6 +18,27 @@ const FRAMES_TIMEOUT_MS = 60_000;
 // --break-match-filters). We map it to a clear "too long" job error.
 const YTDLP_BREAK_EXIT_CODE = 101;
 
+/**
+ * yt-dlp format selector. Two traps, both measured on TikTok 7646424593388883214
+ * (a 353s narrated video our pipeline reported as having no audio):
+ *
+ *  1. `height` is the LONG edge, so a portrait "540p/720p/1080p" TikTok reports
+ *     height 1024/1280/1920. The old `mp4[height<=720]` therefore matched ZERO
+ *     formats on every portrait video and silently fell through to `best`.
+ *  2. TikTok's `bytevc1_*` (h265) formats advertise `acodec=aac` but download as
+ *     video-only. `best` picked `bytevc1_1080p` — hence "no audio". The `h264_*`
+ *     formats at the same resolutions carry a real aac track.
+ *
+ * So: prefer h264, the only codec family here that reliably muxes audio. Match it
+ * by regex because the spelling is host-dependent — TikTok reports a bare `h264`,
+ * most other hosts an `avc1.4d401f`-style profile string, and a plain `^=avc1`
+ * silently matches nothing on TikTok (it re-picked bytevc1_1080p in testing).
+ * The 1280 cap is the portrait-correct spelling of "roughly 720p" and still admits
+ * landscape 720p/1080p; the bare `b` tail keeps h264-less hosts working.
+ */
+export const VIDEO_FORMAT_SELECTOR =
+  "b[vcodec~='^(avc1|h264)'][height<=1280]/b[vcodec~='^(avc1|h264)']/b";
+
 export interface YtDlpInfo {
   id: string;
   title: string;
@@ -273,7 +294,7 @@ export async function downloadVideo(
   const args = [
     "yt-dlp",
     "-f",
-    "mp4[height<=720]/best",
+    VIDEO_FORMAT_SELECTOR,
     "--no-playlist",
     "-o",
     outputTemplate,
@@ -383,9 +404,21 @@ export async function transcribeVideo(
       "ffprobe audio probe",
     );
     if (probe.exitCode === 0 && probe.stdout.trim() === "") {
-      log.info("No audio stream in {videoPath} — summary will rely on frames", {
-        videoPath,
-      });
+      // Warn, not info: a genuinely silent clip and a format-selection bug that
+      // threw the narration away look identical from here, and the second kind
+      // hid for months at info level. Name the video codec — `hevc` is the tell
+      // that the selector landed on a bytevc1 format again (see
+      // VIDEO_FORMAT_SELECTOR).
+      const vcodec = await runProc(
+        ["ffprobe", "-v", "error", "-select_streams", "v",
+         "-show_entries", "stream=codec_name", "-of", "csv=p=0", videoPath],
+        FFMPEG_AUDIO_TIMEOUT_MS,
+        "ffprobe video codec probe",
+      ).then((r) => r.stdout.trim() || "unknown").catch(() => "unknown");
+      log.warn(
+        "No audio stream in {videoPath} (video codec {vcodec}) — summary will rely on frames",
+        { videoPath, vcodec },
+      );
       return "";
     }
   } catch (err) {
