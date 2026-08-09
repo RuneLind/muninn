@@ -6,45 +6,64 @@ import {
   frameBudgetFor,
   parseYtDlpJson,
   parseShowinfoTimestamps,
-  VIDEO_FORMAT_SELECTOR,
+  YTDLP_FORMAT_SELECTOR,
 } from "./media.ts";
 
-// -- VIDEO_FORMAT_SELECTOR --------------------------------------------------
-// These pin the two properties that cost us the narration on TikTok
-// 7646424593388883214. They are assertions about a string because yt-dlp owns
+// -- YTDLP_FORMAT_SELECTOR --------------------------------------------------
+// These pin the properties that cost us the narration on TikTok
+// 7646424593388883214, plus the size cap whose absence blew a real X capture
+// from 173 MB to 824 MB. They are assertions about a string because yt-dlp owns
 // the actual selection; the empirical check is "download a portrait video and
 // ffprobe it for an audio stream", which lives outside the unit suite.
+//
+// No `/` appears inside the quoted regexes, so a plain split gives the tiers.
+const TIERS = YTDLP_FORMAT_SELECTOR.split("/");
 
-test("VIDEO_FORMAT_SELECTOR prefers h264 before any unconstrained fallback", () => {
-  // Split on the `/` that separates tiers, not the ones inside a `~='…'` regex.
-  const tiers = VIDEO_FORMAT_SELECTOR.split(/\/(?![^']*')/);
-  const firstH264 = tiers.findIndex((t) => /vcodec/.test(t));
-  const firstBare = tiers.findIndex((t) => !/\[/.test(t));
+test("YTDLP_FORMAT_SELECTOR prefers h264 before any unconstrained fallback", () => {
+  const firstH264 = TIERS.findIndex((t) => /vcodec/.test(t));
+  const firstUnfiltered = TIERS.findIndex((t) => !t.includes("["));
   expect(firstH264).toBeGreaterThanOrEqual(0);
-  // A bare tier matches anything, so one ahead of the h264 tiers would re-admit
-  // TikTok's audio-less bytevc1 (h265) formats.
-  expect(firstBare === -1 || firstBare > firstH264).toBe(true);
+  // An unfiltered tier matches anything, so one ahead of the h264 tiers would
+  // re-admit TikTok's audio-less bytevc1 (h265) formats.
+  expect(firstUnfiltered).toBeGreaterThan(firstH264);
 });
 
-test("VIDEO_FORMAT_SELECTOR matches both h264 spellings hosts use", () => {
-  // TikTok reports `h264`; X and most others report `avc1.4d401f`. Matching only
-  // one spelling is the bug this pins — `^=avc1` alone selected nothing on
-  // TikTok and fell through to an audio-less h265 format.
-  const pattern = VIDEO_FORMAT_SELECTOR.match(/vcodec~='([^']+)'/)?.[1];
-  expect(pattern).toBeTruthy();
-  const re = new RegExp(pattern!);
-  expect(re.test("h264")).toBe(true);
-  expect(re.test("avc1.4d401f")).toBe(true);
-  expect(re.test("h265")).toBe(false);
-  expect(re.test("hevc")).toBe(false);
-});
-
-test("VIDEO_FORMAT_SELECTOR does not cap height at 720 (portrait long-edge trap)", () => {
-  // Portrait TikToks report height 1024/1280/1920 for 540p/720p/1080p, so any
-  // cap at or below 1024 matches nothing and falls through to the bare tier.
-  for (const cap of VIDEO_FORMAT_SELECTOR.matchAll(/height\s*<=\s*(\d+)/g)) {
-    expect(Number(cap[1])).toBeGreaterThanOrEqual(1280);
+test("YTDLP_FORMAT_SELECTOR matches every h264 spelling hosts use", () => {
+  // TikTok reports a bare `h264`, YouTube `avc1.42001E`. Matching only one
+  // spelling is the bug this pins — `^=avc1` alone selected nothing on TikTok
+  // and fell through to an audio-less h265 format.
+  const patterns = [...YTDLP_FORMAT_SELECTOR.matchAll(/vcodec~='([^']+)'/g)];
+  expect(patterns.length).toBeGreaterThan(0);
+  for (const [, pattern] of patterns) {
+    const re = new RegExp(pattern!);
+    expect(re.test("h264")).toBe(true);
+    expect(re.test("avc1.42001E")).toBe(true);
+    expect(re.test("h265")).toBe(false);
+    expect(re.test("hevc")).toBe(false);
   }
+});
+
+test("YTDLP_FORMAT_SELECTOR caps width and height together, above 1024", () => {
+  // Two traps in one: a cap at or below 1024 matches nothing on portrait TikTok
+  // (heights are 1024/1280/1920), and capping only `height` leaves landscape
+  // uncapped — which is how X's vcodec-less formats reached 824 MB.
+  const capped = TIERS.filter((t) => t.includes("<="));
+  expect(capped.length).toBeGreaterThan(0);
+  for (const tier of capped) {
+    const dims = Object.fromEntries(
+      [...tier.matchAll(/(width|height)\s*<=\s*(\d+)/g)].map(
+        ([, dim, n]) => [dim, Number(n)],
+      ),
+    );
+    expect(dims.width).toBeGreaterThanOrEqual(1280);
+    expect(dims.height).toBeGreaterThanOrEqual(1280);
+  }
+});
+
+test("YTDLP_FORMAT_SELECTOR ends with a split-stream fallback", () => {
+  // Every `b`-family tier is pre-merged-only, so a DASH/HLS host with separate
+  // audio and video streams matches none of them and yt-dlp exits 1.
+  expect(TIERS.at(-1)).toBe("bv*+ba");
 });
 
 // -- extractTikTokVideoId ---------------------------------------------------

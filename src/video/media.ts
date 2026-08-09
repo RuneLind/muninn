@@ -29,15 +29,29 @@ const YTDLP_BREAK_EXIT_CODE = 101;
  *     video-only. `best` picked `bytevc1_1080p` — hence "no audio". The `h264_*`
  *     formats at the same resolutions carry a real aac track.
  *
- * So: prefer h264, the only codec family here that reliably muxes audio. Match it
- * by regex because the spelling is host-dependent — TikTok reports a bare `h264`,
- * most other hosts an `avc1.4d401f`-style profile string, and a plain `^=avc1`
- * silently matches nothing on TikTok (it re-picked bytevc1_1080p in testing).
- * The 1280 cap is the portrait-correct spelling of "roughly 720p" and still admits
- * landscape 720p/1080p; the bare `b` tail keeps h264-less hosts working.
+ * Hence the tiers. Prefer h264, the only codec family here that reliably muxes
+ * audio, matched by regex because the spelling is host-dependent: TikTok reports a
+ * bare `h264`, YouTube an `avc1.42001E`-style profile string. A plain `^=avc1`
+ * matches nothing on TikTok and re-picks bytevc1_1080p (measured).
+ *
+ * The codec tiers cannot be the whole story, because X reports `vcodec: unknown`
+ * on its muxed `http-*` formats — both h264 tiers are inert there, so X needs a
+ * capped any-codec tier to fall into. Without one it lands on the uncapped tail:
+ * a real 636s X video went 173 MB -> 824 MB, which does not finish inside
+ * DOWNLOAD_TIMEOUT_MS.
+ *
+ * Capping BOTH width and height is what makes "roughly 720p" orientation-agnostic:
+ * portrait 720x1280 and landscape 1280x720 pass, 1080x1920 and 1920x1080 do not.
+ * The uncapped h264 tier is the deliberate size-for-audio trade on hosts whose only
+ * h264 rung is larger; `bv*+ba` is a last resort for split-stream (DASH/HLS) hosts,
+ * where every pre-merged tier — including the old `best` — finds nothing at all.
  */
-export const VIDEO_FORMAT_SELECTOR =
-  "b[vcodec~='^(avc1|h264)'][height<=1280]/b[vcodec~='^(avc1|h264)']/b";
+export const YTDLP_FORMAT_SELECTOR =
+  "b[vcodec~='^(avc1|h264)'][width<=1280][height<=1280]" +
+  "/b[width<=1280][height<=1280]" +
+  "/b[vcodec~='^(avc1|h264)']" +
+  "/b" +
+  "/bv*+ba";
 
 export interface YtDlpInfo {
   id: string;
@@ -294,7 +308,7 @@ export async function downloadVideo(
   const args = [
     "yt-dlp",
     "-f",
-    VIDEO_FORMAT_SELECTOR,
+    YTDLP_FORMAT_SELECTOR,
     "--no-playlist",
     "-o",
     outputTemplate,
@@ -410,7 +424,7 @@ export async function transcribeVideo(
       // that the selector landed on a bytevc1 format again (see
       // VIDEO_FORMAT_SELECTOR).
       const vcodec = await runProc(
-        ["ffprobe", "-v", "error", "-select_streams", "v",
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
          "-show_entries", "stream=codec_name", "-of", "csv=p=0", videoPath],
         FFMPEG_AUDIO_TIMEOUT_MS,
         "ffprobe video codec probe",
