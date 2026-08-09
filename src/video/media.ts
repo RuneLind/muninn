@@ -18,6 +18,41 @@ const FRAMES_TIMEOUT_MS = 60_000;
 // --break-match-filters). We map it to a clear "too long" job error.
 const YTDLP_BREAK_EXIT_CODE = 101;
 
+/**
+ * yt-dlp format selector. Two traps, both measured on TikTok 7646424593388883214
+ * (a 353s narrated video our pipeline reported as having no audio):
+ *
+ *  1. `height` is the LONG edge, so a portrait "540p/720p/1080p" TikTok reports
+ *     height 1024/1280/1920. The old `mp4[height<=720]` therefore matched ZERO
+ *     formats on every portrait video and silently fell through to `best`.
+ *  2. TikTok's `bytevc1_*` (h265) formats advertise `acodec=aac` but download as
+ *     video-only. `best` picked `bytevc1_1080p` — hence "no audio". The `h264_*`
+ *     formats at the same resolutions carry a real aac track.
+ *
+ * Hence the tiers. Prefer h264, the only codec family here that reliably muxes
+ * audio, matched by regex because the spelling is host-dependent: TikTok reports a
+ * bare `h264`, YouTube an `avc1.42001E`-style profile string. A plain `^=avc1`
+ * matches nothing on TikTok and re-picks bytevc1_1080p (measured).
+ *
+ * The codec tiers cannot be the whole story, because X reports `vcodec: unknown`
+ * on its muxed `http-*` formats — both h264 tiers are inert there, so X needs a
+ * capped any-codec tier to fall into. Without one it lands on the uncapped tail:
+ * a real 636s X video went 173 MB -> 824 MB, which does not finish inside
+ * DOWNLOAD_TIMEOUT_MS.
+ *
+ * Capping BOTH width and height is what makes "roughly 720p" orientation-agnostic:
+ * portrait 720x1280 and landscape 1280x720 pass, 1080x1920 and 1920x1080 do not.
+ * The uncapped h264 tier is the deliberate size-for-audio trade on hosts whose only
+ * h264 rung is larger; `bv*+ba` is a last resort for split-stream (DASH/HLS) hosts,
+ * where every pre-merged tier — including the old `best` — finds nothing at all.
+ */
+export const YTDLP_FORMAT_SELECTOR =
+  "b[vcodec~='^(avc1|h264)'][width<=1280][height<=1280]" +
+  "/b[width<=1280][height<=1280]" +
+  "/b[vcodec~='^(avc1|h264)']" +
+  "/b" +
+  "/bv*+ba";
+
 export interface YtDlpInfo {
   id: string;
   title: string;
@@ -273,7 +308,7 @@ export async function downloadVideo(
   const args = [
     "yt-dlp",
     "-f",
-    "mp4[height<=720]/best",
+    YTDLP_FORMAT_SELECTOR,
     "--no-playlist",
     "-o",
     outputTemplate,
@@ -383,9 +418,21 @@ export async function transcribeVideo(
       "ffprobe audio probe",
     );
     if (probe.exitCode === 0 && probe.stdout.trim() === "") {
-      log.info("No audio stream in {videoPath} — summary will rely on frames", {
-        videoPath,
-      });
+      // Warn, not info: a genuinely silent clip and a format-selection bug that
+      // threw the narration away look identical from here, and the second kind
+      // hid for months at info level. Name the video codec — `hevc` is the tell
+      // that the selector landed on a bytevc1 format again (see
+      // VIDEO_FORMAT_SELECTOR).
+      const vcodec = await runProc(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=codec_name", "-of", "csv=p=0", videoPath],
+        FFMPEG_AUDIO_TIMEOUT_MS,
+        "ffprobe video codec probe",
+      ).then((r) => r.stdout.trim() || "unknown").catch(() => "unknown");
+      log.warn(
+        "No audio stream in {videoPath} (video codec {vcodec}) — summary will rely on frames",
+        { videoPath, vcodec },
+      );
       return "";
     }
   } catch (err) {
