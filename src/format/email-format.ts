@@ -33,7 +33,13 @@ import {
 } from "./markdown-ast.ts";
 import type { Block, FactVerdict } from "./markdown-ast.ts";
 import { renderBlocks, type BlockRenderer } from "./block-renderer.ts";
-import { Placeholders, escapeHtml, FLANKING_ITALIC_SOURCE } from "./markdown-core.ts";
+import {
+  Placeholders,
+  escapeHtml,
+  FLANKING_ITALIC_SOURCE,
+  TRIPLE_EMPHASIS_SOURCE,
+  LINKABLE_TARGET_RE,
+} from "./markdown-core.ts";
 
 type ComponentBlock = Extract<Block, { type: "component" }>;
 const isTab = (b: Block): b is ComponentBlock => b.type === "component" && b.name === "Tab";
@@ -294,6 +300,12 @@ function factCheckSummaryHtml(attrs: Record<string, string>): string {
  *  {@link FLANKING_ITALIC_SOURCE}; `u` is required by its `\p{…}` classes. */
 const EMAIL_ITALIC_RE = new RegExp(FLANKING_ITALIC_SOURCE, "gu");
 
+/** `***x***` → `<strong><em>x</em></strong>`, rewritten BEFORE the bold pass.
+ *  Without it the non-greedy `\*\*(.+?)\*\*` claims the first two stars and the
+ *  third leaks into the body as a literal `*` (`<strong>*triple</strong>*`).
+ *  Shared source with Slack (`markdown-core.ts`). */
+const EMAIL_TRIPLE_RE = new RegExp(TRIPLE_EMPHASIS_SOURCE, "g");
+
 function renderInline(text: string): string {
   const ph = new Placeholders();
 
@@ -328,20 +340,28 @@ function renderInline(text: string): string {
 
   result = escapeHtml(result);
 
-  // Markdown links → <a>. http/https only — a `javascript:` target must never
-  // become a live href, and a relative target has nothing to resolve against in a
-  // mail client, so it degrades to its label.
+  // Markdown links → <a>, through the SHARED linkable gate Slack uses
+  // (`LINKABLE_TARGET_RE`): http/https/mailto, case-insensitive, target trimmed.
+  // Spelled locally as a case-SENSITIVE `^https?://` until the review, this
+  // column dropped a `mailto:` address and a `HTTPS://X.COM` link to bare label
+  // text while the Slack column linked both. Everything else still degrades to
+  // its label — a `javascript:` target must never become a live href, and a
+  // relative target has nothing to resolve against in a mail client.
   //
   // The generated TAGS are parked, the label is not: the emphasis passes below
   // must reach a `**bold**` link label but must never reach the href. Emitted
   // unparked (as this did until the review), `[the doc](https://ex.com/a/*b*/c)`
   // came out with `<em>` inside its own href.
-  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, label: string, url: string) =>
-    /^https?:\/\//.test(url)
-      ? ph.add("LINKOPEN", `<a href="${url}" style="${S.link}">`) + label + ph.add("LINKCLOSE", "</a>")
-      : label,
-  );
+  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, label: string, url: string) => {
+    const target = url.trim();
+    return LINKABLE_TARGET_RE.test(target)
+      ? ph.add("LINKOPEN", `<a href="${target}" style="${S.link}">`) + label + ph.add("LINKCLOSE", "</a>")
+      : label;
+  });
 
+  // Triple emphasis BEFORE the bold pass — the non-greedy bold pattern cannot see
+  // `***x***` whole and leaves its third star behind.
+  result = result.replace(EMAIL_TRIPLE_RE, "<strong><em>$1</em></strong>");
   result = result.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
   // Italics under the shared strict word-flanking rule — the same regex source
   // Slack compiles, so the two cannot drift (`markdown-core.ts`). Telegram and web

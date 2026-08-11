@@ -273,12 +273,19 @@ Found it ~~wrong~~ correct.`;
       "<https://ex.com/x/*b*/c>",
       "\\*not italic\\*",
       "glob **/*.test.ts here",
-      "a (*b*) in parens is not flanked",
     ]) {
       test(`strict flanking leaves it alone: ${input}`, () => {
         expect(formatSlackMrkdwn(input)).toBe(input);
       });
     }
+
+    // Round-2 widening, the one knock-on flip: `(` joined the allowed preceders
+    // (so `«*økta*»` and friends work), which makes a parenthesized span emphasize
+    // where it used to be left alone. Pinned as behaviour rather than left as a
+    // surprise — it is what CommonMark does. Full table: markdown-all-platforms.
+    test("a parenthesized span now emphasizes (deliberate flip, was inert)", () => {
+      expect(formatSlackMrkdwn("a (*b*) in parens")).toBe("a (_b_) in parens");
+    });
 
     test("a non-ASCII word still italicizes (the rule is unicode-aware)", () => {
       expect(formatSlackMrkdwn("dette er *økta* nå")).toBe("dette er _økta_ nå");
@@ -336,6 +343,30 @@ Found it ~~wrong~~ correct.`;
         const out = formatSlackMrkdwn("[a < b](https://x.com) and c > d");
         expect(out).toContain("and c > d");
         expect(out).toContain("a < b");
+      });
+    });
+
+    // The ACCEPTED COST of that NUL exclusion, pinned as behaviour so a future
+    // "tidy-up" of the strip has to argue with the trade instead of rediscovering
+    // it. Because the tag body may not run through a sentinel, a tag-shaped span
+    // that CONTAINS a parked placeholder is no longer strippable and survives into
+    // the posted message. Deliberate: the alternative is the data loss above, and
+    // a leaked tag is visible in a message the user reads, while eaten prose is
+    // not. Documented in `src/slack/CLAUDE.md`.
+    describe("a tag-shaped span containing a parked placeholder survives the strip", () => {
+      test("a plain tag is still stripped (the rule still does its job)", () => {
+        expect(formatSlackMrkdwn("plain <span> stripped")).toBe("plain  stripped");
+        expect(formatSlackMrkdwn('<span class="x">kept?</span>')).toBe("kept?");
+      });
+
+      test("a backticked attr parks inline code, so the whole span survives", () => {
+        expect(formatSlackMrkdwn("a <span title=`code`> b")).toBe("a <span title=`code`> b");
+      });
+
+      test("an embedded markdown link parks link delimiters, same effect", () => {
+        expect(formatSlackMrkdwn("a <div data=[lab](https://x.com)> b")).toBe(
+          "a <div data=<https://x.com|lab>> b",
+        );
       });
     });
 

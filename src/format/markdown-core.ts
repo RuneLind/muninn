@@ -13,6 +13,46 @@ export function escapeHtml(text: string): string {
     .replace(/"/g, "&quot;");
 }
 
+// ── The strict word-flanking italics rule, in four named pieces ─────────────
+// Spelled out rather than written as one opaque string: every widening below was
+// argued case by case against two tables (must-emphasize / must-stay-inert), and
+// a future widening has to be argued against the same two.
+
+/** What may sit immediately BEFORE the opening `*`: start of text, whitespace, a
+ *  placeholder sentinel (`\x00` — a parked link delimiter, so emphasis still
+ *  renders inside a link LABEL), or an opening quote/bracket/hyphen. What is
+ *  deliberately NOT here is the whole safety story: a `*` after `/`, `.`, `\` or
+ *  another `*` never opens a span, which is what keeps a pair of path globs on
+ *  one line, a double-star recursive glob, regexes (`^.` + star + `$`), escaped
+ *  asterisks (`\*x\*`) and bare URLs with an asterisk pair in a path segment
+ *  whole. All of them are pinned in `markdown-all-platforms.test.ts`. */
+const ITALIC_PRECEDER = "(?<![^\\s\\x00«\"'([\\-])";
+
+/** Content may OPEN on a letter, digit or emoji… */
+const ITALIC_EDGE_WORD = "[\\p{L}\\p{N}\\p{Extended_Pictographic}]";
+/** …or on an opening quote/bracket/`#`/`§` — `*"quoted phrase"*`,
+ *  `*(parenthetical aside)*`, `*§4*`. Never on `.`, `/` or whitespace: that
+ *  rejection is what protects a `cp` line whose glob opens on a dot, the
+ *  `SELECT *, count(*) FROM t` opener, and the prose arithmetic
+ *  `2 * 3 and 4 * 5` — each of whose "content" opens on `.`, `,` or a space.
+ *
+ *  `&` is in the set for the EMAIL column specifically: that renderer escapes
+ *  before it emphasizes, so by the time this pattern runs `*"quoted phrase"*`
+ *  reads `*&quot;quoted phrase&quot;*` and the content's real opening edge is the
+ *  entity's `&` (its closing `;` is already a closing edge). Without it the
+ *  quoted-phrase case emphasized on Slack and stayed literal on email — measured,
+ *  and exactly the kind of silent divergence one shared source exists to stop. */
+const ITALIC_EDGE_OPEN_PUNCT = "[\"'«([#§&]";
+/** Content may CLOSE on a letter/digit/emoji or on trailing punctuation that
+ *  belongs to the emphasized phrase — `*word,*`, `*important.*`, `*really!*`,
+ *  `*C#*`, `*"quoted"*`. */
+const ITALIC_EDGE_CLOSE = "[\\p{L}\\p{N}\\p{Extended_Pictographic}\"'»)\\].,!?;:#]";
+
+/** What may sit immediately AFTER the closing `*`: end of text, whitespace, a
+ *  sentinel, closing punctuation, `»`, or a hyphen (`*emphasis*-hyphenated`).
+ *  Never a slash or a letter. */
+const ITALIC_FOLLOWER = "(?![^\\s\\x00.,;:!?)\\]}'\"\\-»])";
+
 /**
  * Regex SOURCE (not a compiled regex — callers pick their own flags) for a
  * markdown `*italic*` span under a STRICT word-flanking rule. The ONE home for
@@ -26,22 +66,66 @@ export function escapeHtml(text: string): string {
  *
  * Four constraints, each closing a MEASURED failure. The safe direction is
  * "leave unchanged": anything short of a real emphasis span must not match.
- *  - opener flanking `(?<![^\s\x00])` — the `*` must sit at the start of the
- *    text, after whitespace, or after a placeholder sentinel (a parked link
- *    delimiter, so emphasis still renders inside a link LABEL). Without it a `*`
- *    after `/`, `(`, `.` or `\` opens a span: a pair of path globs on one line,
- *    `SELECT *, count(*) FROM t`, a `^.*$` regex, a bare URL with an asterisk
- *    pair in a path segment, and an escaped `\*not italic\*` all came out
- *    mangled. All are pinned in `markdown-all-platforms.test.ts`.
- *  - content starts AND ends with a letter/digit — this is what rejects the
- *    prose-arithmetic span (`2 * 3 and 4 * 5`) and the `SELECT *,` opener.
- *  - closer flanking — the `*` must be followed by whitespace, end of text, a
- *    sentinel, or closing punctuation; never by a slash or a letter.
+ *  - opener flanking ({@link ITALIC_PRECEDER}).
+ *  - content edges — the two-branch alternation below. A letter/digit/emoji
+ *    opener may stand alone (`*a*`); a PUNCTUATION opener must be followed by a
+ *    closing edge, so a lone `*(*` in prose is not a one-character emphasis span.
+ *  - closer flanking ({@link ITALIC_FOLLOWER}).
  *  - `[^*\n]` — a span never crosses a line or swallows another delimiter, so a
  *    `**bold**` run and a double-star glob stay whole.
+ *
+ * Round-2 widening, every case executed against both tables before it landed:
+ * quoted/parenthetical/`§`/`#`/emoji content, trailing `,.!?` inside the span,
+ * a `-`/`»` follower and a `«"'([-` preceder. ONE knock-on flip came with it —
+ * `a (*b*) in parens` now emphasizes, because `(` had to join the preceders.
+ * That is what CommonMark does, and it is pinned as behaviour rather than left
+ * as a surprise.
+ *
+ * KNOWN MISSES, left inert deliberately (the safe direction): raw-HTML-adjacent
+ * italics (`<span>*i*</span>`) stay literal on both platforms — email escapes the
+ * tags to `&lt;span&gt;` before this pass, so the flanks are `;` and `&`, and
+ * Slack's tag-strip runs after it, so the flanks are `>` and `<`. Adding `>` to
+ * the preceders alone would not close it (the FOLLOWER `<` still rejects), so it
+ * buys nothing but surface. Equal to `origin/main`, which had no italics pass at
+ * all here.
  */
 export const FLANKING_ITALIC_SOURCE =
-  "(?<![^\\s\\x00])\\*([\\p{L}\\p{N}](?:[^*\\n]*[\\p{L}\\p{N}])?)\\*(?![^\\s\\x00.,;:!?)\\]}'\"])";
+  ITALIC_PRECEDER +
+  "\\*(" +
+  ITALIC_EDGE_WORD + "(?:[^*\\n]*" + ITALIC_EDGE_CLOSE + ")?" +
+  "|" +
+  ITALIC_EDGE_OPEN_PUNCT + "[^*\\n]*" + ITALIC_EDGE_CLOSE +
+  ")\\*" +
+  ITALIC_FOLLOWER;
+
+/**
+ * Regex SOURCE for `***triple***` emphasis (bold + italic), which every platform
+ * here rewrites in ONE step before its `**bold**` pass.
+ *
+ * Why it needs its own pass: the bold pattern `\*\*(.+?)\*\*` is non-greedy, so
+ * on `***x***` it claims the FIRST two stars and stops at the next two, leaving
+ * the third star dangling — email came out `<strong>*triple</strong>*`, a literal
+ * asterisk in the rendered body. `[^*\n]+` keeps it from spanning a delimiter or
+ * a line, exactly as the italics rule does.
+ */
+export const TRIPLE_EMPHASIS_SOURCE = "\\*\\*\\*([^*\\n]+)\\*\\*\\*";
+
+/**
+ * Link targets a formatter may turn into a REAL link. The ONE home for the gate,
+ * compiled once and shared by `slack-format.ts` and `email-format.ts` — the two
+ * had drifted (email accepted `https?://` only and case-sensitively, so a
+ * `mailto:` address and a `HTTPS://X.COM` link both degraded to bare label text
+ * on email while Slack linked them).
+ *
+ * Everything else degrades to its LABEL, deliberately: a `javascript:` target
+ * must never become a live href, a relative wiki path has nothing to resolve
+ * against in a mail client, and Slack renders a non-scheme `<…|…>` as something
+ * between a broken link and raw text.
+ *
+ * No `g` flag — `.test` on a shared global regex carries `lastIndex` between
+ * calls and would answer differently on alternate invocations.
+ */
+export const LINKABLE_TARGET_RE = /^(?:https?:\/\/|mailto:)/i;
 
 /**
  * Placeholder store using `\x00<MARKER><idx>\x00` sentinels. Use to protect

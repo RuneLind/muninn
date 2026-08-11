@@ -54,14 +54,22 @@ export const SHARE_BODY_CLIP_MARKER = "\n\n[The source was longer than this and 
  *
  * The MARKER IS INSIDE THE CAP — the prose budget is `max` minus the marker, so a
  * "hard cap" is one. Appended on top (as it was until the review) every clipped
- * body came back 62 characters over the bound the caller asked for. A `max`
- * smaller than the marker itself is degenerate; the marker still rides along,
- * because an unmarked clip hands the model half a document and asks it to
- * summarize "it".
+ * body came back 62 characters over the bound the caller asked for.
+ *
+ * The cap is UNCONDITIONAL: when `max` is smaller than the marker itself, the
+ * marker is dropped rather than emitted over budget. Clamping only the budget
+ * (as the first fix did) still returned a 62-character result for `max = 10` —
+ * a caller's hard bound quietly violated at exactly the sizes where it is
+ * tightest. A marked clip is better than an unmarked one, but not at the cost of
+ * the bound, and no real caller passes a max this small.
+ *
+ * Post-condition, for every `max >= 0`: `result.length <= max`.
  */
 export function clipShareBody(body: string, max: number = SHARE_BODY_MAX): string {
   if (body.length <= max) return body;
-  const budget = Math.max(0, max - SHARE_BODY_CLIP_MARKER.length);
+  if (max < SHARE_BODY_CLIP_MARKER.length) return truncateUnits(body, max);
+  const budget = max - SHARE_BODY_CLIP_MARKER.length;
+  // `trimEnd` only ever shortens, so the sum stays inside `max`.
   return truncateUnits(body, budget).trimEnd() + SHARE_BODY_CLIP_MARKER;
 }
 
@@ -89,11 +97,20 @@ function finish(body: string): string {
  *  3. `stripFactWrappers` — zone-aware: a `<Fact>` inside a fence or backticks is
  *     documentation and survives (see `src/web/CLAUDE.md`).
  *  4. `stripComponentTags` (local, single-line — see above): keep the prose, drop
- *     the JSX-ish markup a native `.mdx` carries. Known limitation, shared with
- *     every other copy of this strip: unlike step 3 it is NOT code-region-aware,
- *     so a fenced sample that DOCUMENTS a component (a page about the component
- *     vocabulary) loses its tags. Accepted — the fence case is rarer than the
- *     cost of a second zone-aware parser.
+ *     the JSX-ish markup a native `.mdx` carries. TWO accepted limitations, both
+ *     the price of the single-line source:
+ *
+ *      - It is NOT code-region-aware (unlike step 3), so a fenced sample that
+ *        DOCUMENTS a component — a page about the component vocabulary — loses
+ *        its tags. Rarer than the cost of a second zone-aware parser.
+ *      - The other side of the malformed-opener fix: a WELL-FORMED tag whose
+ *        attribute list is wrapped across lines is not matched either, so it
+ *        leaks raw into the shared body. That is the trade the single-line source
+ *        buys — a leaked tag in a post the user reads before sending, instead of
+ *        silently deleted prose. Measured across the 699 live mimir `.md`/`.mdx`
+ *        pages before choosing it: zero carry a multi-line component tag (the one
+ *        newline-crossing regex hit is a prose fragment discussing `<Fact`, not a
+ *        tag). Both behaviours are pinned in `body-prep.test.ts`.
  *  5. `flattenWikiLinks` — wiki-internal targets resolve only inside the reader.
  *  6. blank-run tidy + the `SHARE_BODY_MAX` clip.
  */
@@ -115,14 +132,35 @@ export function prepareExplainerBody(raw: string): string {
 /**
  * A capture summary doc's leading `[collection > path > title]` breadcrumb.
  *
- * The breadcrumb OWNS ITS LINE — nothing but optional trailing spaces may follow
- * the `]` before the newline, and a newline must be there at all. Without that
- * anchor the pattern ate any document opening with a bracket: a lead-in
- * (`[TL;DR] Everything you need`) lost its first words, and a markdown link
- * (`[Read the original](https://…)`) lost its label and opened on a bare URL in
- * parentheses. All 58 live capture docs put the breadcrumb on its own line.
+ * Two constraints, both measured:
+ *
+ *  1. The breadcrumb OWNS ITS LINE — nothing but optional trailing spaces may
+ *     follow its `]` before the newline, and a newline must be there at all.
+ *     Without that anchor the pattern ate any document opening with a bracket: a
+ *     markdown link (`[Read the original](https://…)`) lost its label and opened
+ *     on a bare URL in parentheses.
+ *
+ *     The line body is `[^\n]*` — GREEDY TO THE LAST `]` ON THE LINE. Spelled
+ *     `[^\]\n]*` (as it was until the review) a breadcrumb whose title contains a
+ *     bracket — `[tech > … [2026 Guide]]`, and real capture titles do — matched
+ *     nothing at all and leaked whole into the shared post.
+ *
+ *  2. A ` > ` separator must appear inside the brackets. Huginn builds every
+ *     capture breadcrumb as `"[" + " > ".join(parts) + "]"` over a file path of
+ *     `<category>/<title>.md` — `write_summary` always files under a category
+ *     from a closed list, so the shortest possible breadcrumb still has two parts
+ *     and one separator (checked against `huginn/main/ingest/_summary_ingest.py`
+ *     + `sources/files/files_document_converter.py`). Requiring it is what keeps
+ *     a bracketed prose lead-in on its own line (`[TL;DR]\nEverything you need`)
+ *     from being read as a breadcrumb and deleted — constraint 1 alone let that
+ *     through, since it does own its line.
+ *
+ *     NB this is a capture-doc rule, not a universal one: huginn's generic
+ *     builder DOES emit a separator-less `[Title]` for a file at a collection
+ *     root. No capture collection produces one, and `prepareSummaryDocBody` is
+ *     only ever handed capture summary docs.
  */
-const SUMMARY_BREADCRUMB_RE = /^\[[^\]\n]*\][ \t]*\r?\n\s*/;
+const SUMMARY_BREADCRUMB_RE = /^\[[^\n]* > [^\n]*\][ \t]*\r?\n\s*/;
 
 /**
  * A residual `tags: …` line, ANCHORED AT THE HEAD.

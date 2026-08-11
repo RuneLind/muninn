@@ -9,7 +9,13 @@ import {
   parseChecklist,
 } from "../format/markdown-ast.ts";
 import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
-import { Placeholders, escapeHtml, FLANKING_ITALIC_SOURCE } from "../format/markdown-core.ts";
+import {
+  Placeholders,
+  escapeHtml,
+  FLANKING_ITALIC_SOURCE,
+  TRIPLE_EMPHASIS_SOURCE,
+  LINKABLE_TARGET_RE,
+} from "../format/markdown-core.ts";
 
 /**
  * Converts Claude's markdown output to Slack mrkdwn.
@@ -143,11 +149,10 @@ function renderTable(headers: string[], rows: string[][]): string {
  */
 const SLACK_ITALIC_RE = new RegExp(FLANKING_ITALIC_SOURCE, "gu");
 
-/** Link targets that may become a real `<url|label>`. Slack renders a non-scheme
- *  `<…|…>` (a relative path, a wiki target) as something between a broken link and
- *  raw text, so those degrade to their LABEL instead — deliberately, rather than
- *  by the trailing tag-strip eating the whole thing as it used to. */
-const SLACK_LINKABLE_RE = /^(?:https?:\/\/|mailto:)/i;
+/** `***x***` → `*_x_*`, rewritten BEFORE both emphasis passes. Without it the
+ *  non-greedy `\*\*(.+?)\*\*` bold pass claims the first two stars and leaves the
+ *  third dangling. Shared source with email (`markdown-core.ts`). */
+const SLACK_TRIPLE_RE = new RegExp(TRIPLE_EMPHASIS_SOURCE, "g");
 
 function renderInline(text: string): string {
   const ph = new Placeholders();
@@ -179,9 +184,12 @@ function renderInline(text: string): string {
   // still render inside link text, as they did when this pass ran last.
   result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, label: string, url: string) => {
     const target = url.trim();
-    if (!SLACK_LINKABLE_RE.test(target)) return label;
+    if (!LINKABLE_TARGET_RE.test(target)) return label;
     return ph.add("LINKOPEN", `<${target}|`) + label + ph.add("LINKCLOSE", ">");
   });
+
+  // Triple emphasis BEFORE either single pass — neither can see `***x***` whole.
+  result = result.replace(SLACK_TRIPLE_RE, "*_$1_*");
 
   // Italics BEFORE the bold rewrite, and both guards are load-bearing (measured on
   // `**b** and *i*`): placed AFTER the bold rewrite, even the `(?<!\*)…(?!\*)`

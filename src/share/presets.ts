@@ -16,7 +16,14 @@
  * Pure + IO-free: everything here is testable without a model call or a filesystem.
  */
 
-import { DEFAULT_VARIANT_ID, DEFAULT_VARIANT_LABEL, type BotPrompts } from "../bots/config.ts";
+// `BotPrompts` is imported as a TYPE ONLY — under `verbatimModuleSyntax` an
+// inline `{ type X }` still emits the import statement, which would load
+// `bots/config.ts` (and its `node:fs`/db/hivemind graph) at runtime. The two
+// value constants come from the dependency-free leaf instead, which is what keeps
+// the "pure + IO-free" claim above true rather than aspirational (measured: the
+// value import cost this module ~2ms → ~20ms).
+import type { BotPrompts } from "../bots/config.ts";
+import { DEFAULT_VARIANT_ID, DEFAULT_VARIANT_LABEL } from "../bots/prompt-defaults.ts";
 
 /** Id of the synthetic entry that maps back to the bare `share.md` / the shipped
  *  default prompt. A VALUE RE-EXPORT of the loader's constant, not a second
@@ -117,10 +124,21 @@ export const SHIPPED_SHARE_PRESETS: readonly SharePreset[] = [
  *
  * The result is never empty — a bot with no prompt files at all still gets the
  * whole shipped set, which is the point of shipping them here.
+ *
+ * BLANK IS ABSENT, at this layer too. The file loader already drops an empty
+ * `share.md`, but a `??` here only catches `undefined`, so any OTHER producer of
+ * a `BotPrompts` — a test, a future DB-backed or API-supplied prompt source —
+ * handing over `""` or `"  \n "` would have replaced the shipped default with an
+ * instruction-free prompt and sent whatever the model made of a bare document.
+ * A guard that lives only in the loader is a guard on one caller, not on the
+ * contract; the same trim applies to each variant's content.
  */
 export function resolveSharePresets(prompts: BotPrompts | undefined): SharePreset[] {
   const overrides = new Map<string, SharePreset>();
   for (const v of prompts?.shareVariants ?? []) {
+    // A blank variant is no variant: dropping it lets a shipped preset of the
+    // same id survive intact, rather than being overridden by nothing.
+    if (v.content.trim() === "") continue;
     overrides.set(v.id, { id: v.id, label: v.label, content: v.content });
   }
 
@@ -128,7 +146,7 @@ export function resolveSharePresets(prompts: BotPrompts | undefined): SharePrese
     {
       id: DEFAULT_SHARE_PRESET_ID,
       label: DEFAULT_SHARE_PRESET_LABEL,
-      content: prompts?.share ?? DEFAULT_SHARE_PROMPT,
+      content: prompts?.share?.trim() ? prompts.share : DEFAULT_SHARE_PROMPT,
     },
   ];
 

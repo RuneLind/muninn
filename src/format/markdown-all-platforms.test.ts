@@ -67,6 +67,60 @@ describe("link [label](https://example.com)", () => {
     expect(formatSlackMrkdwn("[label](plans/x.md)")).toBe("label"));
 });
 
+// The linkable gate is ONE regex (`LINKABLE_TARGET_RE` in markdown-core.ts), and
+// this block is why it had to become one. Email spelled its own case-SENSITIVE
+// `^https?://` with no trim, so all three of these linked on Slack and degraded to
+// bare label text in the mail body — a silent per-platform divergence in a share
+// feature whose whole job is producing the same post twice.
+describe("the linkable-target gate is shared by slack + email", () => {
+  test("mailto: is a real link on both", () => {
+    expect(formatSlackMrkdwn("[mail](mailto:a@b.no)")).toBe("<mailto:a@b.no|mail>");
+    expect(formatEmailHtml("[mail](mailto:a@b.no)")).toContain('<a href="mailto:a@b.no"');
+  });
+
+  test("the scheme match is case-insensitive on both", () => {
+    expect(formatSlackMrkdwn("[t](HTTPS://X.COM/a)")).toBe("<HTTPS://X.COM/a|t>");
+    expect(formatEmailHtml("[t](HTTPS://X.COM/a)")).toContain('<a href="HTTPS://X.COM/a"');
+  });
+
+  test("the target is trimmed before the gate AND in the emitted href", () => {
+    expect(formatSlackMrkdwn("[lab](  https://x.com  )")).toBe("<https://x.com|lab>");
+    const out = formatEmailHtml("[lab](  https://x.com  )");
+    expect(out).toContain('<a href="https://x.com"');
+    expect(out).not.toContain('href="  ');
+  });
+
+  test("…and a javascript: target is still no link at all, on either", () => {
+    // The gate is an allow-list; widening it to mailto must not widen it further.
+    expect(formatSlackMrkdwn("[x](javascript:alert)")).not.toContain("<javascript");
+    expect(formatEmailHtml("[x](javascript:alert)")).not.toContain("<a ");
+  });
+});
+
+// Adversarial review, EXECUTED repro: `***x***` met the non-greedy bold pattern
+// `\*\*(.+?)\*\*`, which claimed the FIRST two stars and stopped at the next two —
+// email rendered `<strong>*triple</strong>*`, leaking a literal asterisk into the
+// mail body (worse than main's mis-nested but styled output). Both strict-rule
+// platforms now rewrite the triple in one step, BEFORE their bold pass.
+describe("triple emphasis (***x***) is bold + italic, with no star left over", () => {
+  const md = "a ***triple*** span";
+  test("slack → *_x_*, mrkdwn's bold-italic", () =>
+    expect(formatSlackMrkdwn(md)).toBe("a *_triple_* span"));
+  test("email → nested <strong><em>, no literal asterisk", () => {
+    const out = formatEmailHtml(md);
+    expect(out).toContain("<strong><em>triple</em></strong>");
+    expect(out).not.toContain("*");
+  });
+  // Telegram and web are PINNED TO TODAY'S OUTPUT — they keep their own weaker
+  // passes, which produce mis-NESTED but correctly styled tags. Not corrected
+  // here for the same reason their italics rule isn't: it would move
+  // long-standing live output as a side effect of a share feature.
+  test("web → today's mis-nested-but-styled output (known, deliberate)", () =>
+    expect(formatWebHtml(md)).toBe("a <strong><em>triple</strong></em> span"));
+  test("telegram → today's mis-nested-but-styled output (known, deliberate)", () =>
+    expect(formatTelegramHtml(md)).toBe("a <b><i>triple</b></i> span"));
+});
+
 // Adversarial review, EXECUTED repro: email emitted its `<a href="…">` BEFORE the
 // emphasis passes, so markdown characters inside a URL were rewritten into the
 // href — the exact bug the Slack column already pins. The absence of an email
@@ -180,17 +234,52 @@ describe("italics (*i*) — Slack + email use the flanking rule, telegram + web 
   // EXECUTED adversarial-review repro of the earlier, looser rule, which paired
   // two unrelated asterisks across non-word characters.
   describe("the strict flanking rule is shared by slack + email", () => {
+    // TABLE 1 — must STAY INERT. Every entry is an EXECUTED repro of a looser
+    // rule that paired two unrelated asterisks across non-word characters. This
+    // is the table any future widening of the rule has to survive; the safe
+    // direction is always "leave unchanged".
     const inert = [
       "Files live in /usr/*/bin and /var/*/log",
       "SELECT *, count(*) FROM t",
       "regex ^.*$ and .*?",
+      "cp *.md dir/*",
       "see https://ex.com/x/*b*/c",
+      "<https://ex.com/x/*b*/c>",
       "2 * 3 and 4 * 5",
-      "a (*b*) in parens",
+      "\\*escaped\\*",
+      "src/**/*.ts",
     ];
     for (const md of inert) {
       test(`slack leaves it alone: ${md}`, () => expect(formatSlackMrkdwn(md)).toBe(md));
       test(`email leaves it alone: ${md}`, () => expect(formatEmailHtml(md)).not.toContain("<em>"));
+    }
+
+    // TABLE 2 — must EMPHASIZE. The round-2 widening: the first rule's content
+    // edges (`\p{L}\p{N}` at both ends) and follower set were tight enough to
+    // reject ordinary prose — a quoted phrase, a parenthetical, any span ending
+    // in a comma or a full stop, a language name with a `#`. All measured against
+    // TABLE 1 before landing.
+    const emphasized: [string, string][] = [
+      ['*"quoted phrase"* is what he said', '"quoted phrase"'],
+      ["*(parenthetical aside)* follows", "(parenthetical aside)"],
+      ["a *word,* then continuation", "word,"],
+      ["it is *important.* Next sentence.", "important."],
+      ["really *important!* yes", "important!"],
+      ["*emphasis*-hyphenated", "emphasis"],
+      ["«*økta*» norsk", "økta"],
+      ["*C#* and *F#*", "C#"],
+      ["see *§4* now", "§4"],
+      ["*🚀 launch*", "🚀 launch"],
+    ];
+    for (const [md, inner] of emphasized) {
+      test(`slack emphasizes it: ${md}`, () => expect(formatSlackMrkdwn(md)).toContain(`_${inner}_`));
+      test(`email emphasizes it: ${md}`, () => {
+        // The email column escapes BEFORE it emphasizes, so a quoted phrase
+        // reaches the pattern as `&quot;…&quot;` — which is why `&` is a content
+        // opening edge. Compare against the escaped form.
+        const escaped = inner.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+        expect(formatEmailHtml(md)).toContain(`<em>${escaped}</em>`);
+      });
     }
 
     test("and both still emphasize a real span, including a non-ASCII word", () => {
@@ -198,10 +287,29 @@ describe("italics (*i*) — Slack + email use the flanking rule, telegram + web 
       expect(formatEmailHtml("den *økta* der")).toContain("<em>økta</em>");
     });
 
+    // The ONE knock-on flip of the widening, pinned as behaviour rather than left
+    // as a surprise: `(` had to join the allowed preceders, so a parenthesized
+    // emphasis span now emphasizes. It was inert under the first strict rule and
+    // is listed here, not in TABLE 1, because this IS what CommonMark does.
+    test("a parenthesized span now emphasizes — the deliberate flip", () => {
+      expect(formatSlackMrkdwn("a (*b*) in parens")).toBe("a (_b_) in parens");
+      expect(formatEmailHtml("a (*b*) in parens")).toContain("(<em>b</em>)");
+    });
+
+    // KNOWN MISS, pinned so it stays a known one: raw-HTML-adjacent italics stay
+    // literal on both. Email has escaped the tags to `&lt;span&gt;` by the time
+    // the pattern runs; Slack's tag-strip runs after it. Equal to origin/main,
+    // which had no italics pass here at all.
+    test("raw-HTML-adjacent italics stay literal (documented miss)", () => {
+      expect(formatSlackMrkdwn("<span>*i*</span>")).toBe("*i*");
+      expect(formatEmailHtml("<span>*i*</span>")).not.toContain("<em>");
+    });
+
     test("the rule itself, compiled from the shared source", () => {
       const re = new RegExp(FLANKING_ITALIC_SOURCE, "gu");
       expect("this is *italic* text".replace(re, "_$1_")).toBe("this is _italic_ text");
       for (const md of inert) expect(md.replace(re, "_$1_")).toBe(md);
+      for (const [md, inner] of emphasized) expect(md.replace(re, "_$1_")).toContain(`_${inner}_`);
     });
   });
 });

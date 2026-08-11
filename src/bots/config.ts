@@ -7,6 +7,7 @@ import type { HaikuBackend } from "../ai/haiku-direct.ts";
 import type { GardenerConfig } from "../gardener/types.ts";
 import { getRoleOverride } from "../db/role-overrides.ts";
 import type { WikiRegistryEntry } from "../wiki/registry.ts";
+import { DEFAULT_VARIANT_ID } from "./prompt-defaults.ts";
 
 const log = getLog("bots");
 
@@ -256,11 +257,11 @@ const VARIANT_PROMPT_FIELDS = {
 
 const VARIANT_PROMPT_KEYS = Object.keys(VARIANT_PROMPT_FIELDS) as (keyof typeof VARIANT_PROMPT_FIELDS)[];
 
-/** Synthetic variant that maps back to the bare `jiraAnalysis.md` prompt. Reserved as
- *  a variant id so a `jiraAnalysis.default.md` file can't collide with it. Shared by the
- *  `/api/research/variants` endpoint and the `promptVariant` resolution in research-routes. */
-export const DEFAULT_VARIANT_ID = "default";
-export const DEFAULT_VARIANT_LABEL = "Standard";
+/** Re-exported from the dependency-free `prompt-defaults.ts`, where they live so
+ *  the IO-free share preset layer can have them without pulling this module's
+ *  `node:fs`/db graph. Shared by the `/api/research/variants` endpoint, the
+ *  `promptVariant` resolution in research-routes, and `share/presets.ts`. */
+export { DEFAULT_VARIANT_ID, DEFAULT_VARIANT_LABEL } from "./prompt-defaults.ts";
 
 const LABEL_COMMENT_RE = /^\s*<!--\s*label:\s*(.+?)\s*-->\s*\r?\n?/;
 

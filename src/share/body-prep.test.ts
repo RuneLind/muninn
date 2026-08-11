@@ -68,6 +68,20 @@ describe("prepareWikiPageBody", () => {
     expect(out).toContain("stray angle bracket");
   });
 
+  // The OTHER side of that same single-line source, pinned as today's behaviour:
+  // a WELL-FORMED tag whose attribute list wraps across lines is not matched
+  // either, so it leaks raw into the shared body. Accepted trade — a leaked tag
+  // in a post the user reads before sending, versus the malformed-opener case
+  // above silently deleting prose. Measured across the 699 live mimir pages:
+  // zero carry a multi-line component tag.
+  test("a well-formed MULTI-LINE component tag leaks raw (known, deliberate)", () => {
+    const raw = ['<Callout', '  tone="info"', ">", "The prose.", "</Callout>"].join("\n");
+    const out = prepareWikiPageBody(raw);
+    expect(out).toContain("The prose.");
+    expect(out).toContain("<Callout");
+    expect(out).toContain('tone="info"');
+  });
+
   test("flattens wiki-internal links and keeps external ones", () => {
     const raw = "See [[Harness Engineering]], [the plan](plans/x.mdx) and [docs](https://example.com).";
     expect(prepareWikiPageBody(raw)).toBe(
@@ -168,6 +182,30 @@ describe("prepareSummaryDocBody", () => {
   test("a real full-line breadcrumb is still stripped", () => {
     expect(prepareSummaryDocBody("[youtube-summaries > 2026-08-01 > Talk]   \nBody")).toBe("Body");
   });
+
+  // Round-2 review, EXECUTED repros: the line body was `[^\]\n]*`, which cannot
+  // cross the inner `]` of a bracketed TITLE — so a real breadcrumb matched
+  // nothing and leaked whole into the shared post. Greedy-to-the-last-`]` fixes
+  // it, and the ` > ` requirement is what stops the greediness from eating a
+  // bracketed prose line.
+  test("a breadcrumb whose title contains brackets is still stripped", () => {
+    const raw = "[tech > guides > The [2026 Guide]]\n\nThe summary body.";
+    expect(prepareSummaryDocBody(raw)).toBe("The summary body.");
+  });
+
+  test("a bracketed lead-in ON ITS OWN LINE is NOT a breadcrumb", () => {
+    // Owns its line, so the line anchor alone let this through — it is the ` > `
+    // requirement that saves it. Huginn builds every capture breadcrumb as
+    // `"[" + " > ".join(parts) + "]"` over `<category>/<title>.md`, so a real one
+    // always has at least one separator.
+    const raw = "[TL;DR]\nEverything you need";
+    expect(prepareSummaryDocBody(raw)).toBe(raw);
+  });
+
+  test("a leading markdown link on its own line is still not a breadcrumb", () => {
+    const raw = "[Read the original](https://x)\n\nBody";
+    expect(prepareSummaryDocBody(raw)).toBe(raw);
+  });
 });
 
 describe("clipShareBody", () => {
@@ -184,12 +222,58 @@ describe("clipShareBody", () => {
     expect(out.length).toBe(SHARE_BODY_MAX);
   });
 
-  test("truncation is surrogate-safe — no U+FFFD from a cut astral char", () => {
-    const out = clipShareBody("🚀".repeat(200), 100);
+  // The budget must be ODD for this test to mean anything. Each 🚀 is two code
+  // units, so an EVEN budget lands on a pair boundary and a bare `slice` would
+  // pass unnoticed — which is exactly what happened when this case was re-based
+  // to max=100 (budget 38). max=101 gives budget 39: an unsafe slice splits the
+  // 20th rocket and leaves a U+FFFD, so the assertion fails as intended.
+  test("truncation is surrogate-safe — no U+FFFD from a cut astral char (ODD budget)", () => {
+    const max = 101;
+    const budget = max - SHARE_BODY_CLIP_MARKER.length;
+    expect(budget % 2).toBe(1); // the whole point — guard the guard
+    const out = clipShareBody("🚀".repeat(200), max);
     expect(out).not.toContain("�");
     expect(out.startsWith("🚀🚀")).toBe(true);
-    expect(out.length).toBeLessThanOrEqual(100);
+    expect(out.length).toBeLessThanOrEqual(max);
     expect(out.endsWith(SHARE_BODY_CLIP_MARKER)).toBe(true);
+    // A bare `slice` would have produced the lone high surrogate this rejects.
+    expect("🚀".repeat(200).slice(0, budget)).toContain("\ud83d");
+    expect(out.slice(0, -SHARE_BODY_CLIP_MARKER.length)).not.toContain("\ud83d\ud83d");
+  });
+
+  // Round-2 review, MEASURED: clamping only the budget still returned a
+  // 62-character result for max=10 — the caller's hard bound violated at exactly
+  // the sizes where it binds hardest. The cap is unconditional now: below the
+  // marker's own length the marker is dropped rather than emitted over budget.
+  describe("the cap is hard at every boundary, marker or no marker", () => {
+    const body = "z".repeat(500);
+    const markerLen = SHARE_BODY_CLIP_MARKER.length;
+
+    test("the marker's length is the boundary these cases straddle", () => {
+      expect(markerLen).toBe(62);
+    });
+
+    test("max=10 — too small for the marker, so it is dropped, not overflowed", () => {
+      const out = clipShareBody(body, 10);
+      expect(out.length).toBe(10);
+      expect(out).not.toContain(SHARE_BODY_CLIP_MARKER);
+    });
+
+    test("max=61 — one under the marker, still unmarked and still inside", () => {
+      expect(clipShareBody(body, 61).length).toBe(61);
+    });
+
+    test("max=62 — exactly the marker, which fits with an empty prose budget", () => {
+      const out = clipShareBody(body, 62);
+      expect(out.length).toBe(62);
+      expect(out).toBe(SHARE_BODY_CLIP_MARKER);
+    });
+
+    test("no max in 0..200 ever produces a result over its own bound", () => {
+      for (let max = 0; max <= 200; max++) {
+        expect(clipShareBody(body, max).length).toBeLessThanOrEqual(max);
+      }
+    });
   });
 
   test("the clip applies through the preparers", () => {
