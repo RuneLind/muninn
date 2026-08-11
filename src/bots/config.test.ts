@@ -273,6 +273,96 @@ describe("bot discovery", () => {
       ]);
     });
 
+    // The prompt-file allowlist used to be closed around the Jira flow: a
+    // `share.md` / `share.slack.md` dropped in hit the "unknown prompt file" warn
+    // branch and was discarded, which would have shipped the share feature dead.
+    test("discovers share.md as a single prompt key", () => {
+      setupTestBot("_test_share", { prompts: { share: "Our house share prompt" } });
+
+      const found = discoverAllBots().find((b) => b.name === "_test_share");
+      expect(found!.prompts).toEqual({ share: "Our house share prompt" });
+    });
+
+    test("discovers share.<id>.md variants, sorted, with label + fallback", () => {
+      setupTestBot("_test_sharevariants", {
+        prompts: {
+          share: "Default share body",
+          "share.slack": "<!-- label: Slack · dev + security -->\nSlack body",
+          "share.kunde": "Kunde body without label",
+        },
+      });
+
+      const found = discoverAllBots().find((b) => b.name === "_test_sharevariants");
+      expect(found!.prompts?.share).toBe("Default share body");
+      expect(found!.prompts?.shareVariants).toEqual([
+        { id: "kunde", label: "Kunde", content: "Kunde body without label" },
+        { id: "slack", label: "Slack · dev + security", content: "Slack body" },
+      ]);
+    });
+
+    test("share variants need no bare share.md to be discovered", () => {
+      setupTestBot("_test_sharevonly", { prompts: { "share.slack": "Body" } });
+
+      const found = discoverAllBots().find((b) => b.name === "_test_sharevonly");
+      expect(found!.prompts?.share).toBeUndefined();
+      expect(found!.prompts?.shareVariants).toEqual([{ id: "slack", label: "Slack", content: "Body" }]);
+    });
+
+    test("both variant families are collected independently in one prompts/ dir", () => {
+      setupTestBot("_test_bothvariants", {
+        prompts: {
+          "jiraAnalysis.coder": "Jira coder",
+          "share.slack": "Share slack",
+        },
+      });
+
+      const found = discoverAllBots().find((b) => b.name === "_test_bothvariants");
+      expect(found!.prompts?.jiraAnalysisVariants).toEqual([
+        { id: "coder", label: "Coder", content: "Jira coder" },
+      ]);
+      expect(found!.prompts?.shareVariants).toEqual([
+        { id: "slack", label: "Slack", content: "Share slack" },
+      ]);
+    });
+
+    // Adversarial review: an empty file is ABSENT, not an empty prompt. Kept, an
+    // empty share.md replaced the shipped default with "" (`?? DEFAULT` keeps a
+    // present-but-empty string) and the share flow ran instruction-free.
+    test("a blank prompt file is treated as absent, not as an empty prompt", () => {
+      setupTestBot("_test_blankprompt", {
+        prompts: { share: "   \n\n\t\n", jiraAnalysis: "Real prompt" },
+      });
+
+      const found = discoverAllBots().find((b) => b.name === "_test_blankprompt");
+      expect(found!.prompts).toEqual({ jiraAnalysis: "Real prompt" });
+      expect(found!.prompts?.share).toBeUndefined();
+    });
+
+    test("a blank variant file is skipped, label-only body included", () => {
+      setupTestBot("_test_blankvariant", {
+        prompts: {
+          "share.empty": "\n  \n",
+          "share.labelonly": "<!-- label: Nothing below -->\n   \n",
+          "share.real": "Real body",
+        },
+      });
+
+      const found = discoverAllBots().find((b) => b.name === "_test_blankvariant");
+      expect(found!.prompts?.shareVariants).toEqual([
+        { id: "real", label: "Real", content: "Real body" },
+      ]);
+    });
+
+    test("the reserved \"default\" id is refused for share too", () => {
+      setupTestBot("_test_sharereserved", {
+        prompts: { share: "The default body", "share.default": "Unreachable" },
+      });
+
+      const found = discoverAllBots().find((b) => b.name === "_test_sharereserved");
+      expect(found!.prompts?.share).toBe("The default body");
+      expect(found!.prompts?.shareVariants).toBeUndefined();
+    });
+
     test("loads restrictedTools from config.json", () => {
       setupTestBot("_test_restrict", {
         config: {

@@ -604,6 +604,55 @@ export function stripFrontmatter(content: string): string {
 }
 
 /**
+ * Code region (fenced ``` block or an inline `…` span — group 1, left verbatim)
+ * OR a wikilink (`[[target]]` / `[[target|label]]` — groups 2/3) OR a markdown
+ * link/image (`[text](target)` / `![alt](target)` — groups 4/5). Alternation
+ * order matters: the code branch is tried FIRST so a link inside a fence is
+ * swallowed by the fence match and never rewritten. Shape mirrors
+ * `CONTAIN_BODY_RE` in `src/gardener/draft.ts`.
+ */
+const FLATTEN_WIKI_LINKS_RE =
+  /(```[\s\S]*?```|`[^`\n]*`)|\[\[([^\[\]|]+)(?:\|([^\[\]]*))?\]\]|!?\[([^\]]*)\]\(([^)]*)\)/g;
+
+/** A link target that survives outside the wiki — everything else is a path only
+ *  the reader can resolve. Deliberately a SCHEME test, not an extension test:
+ *  mimir links `.md`, `.mdx`, `.html` AND extension-less relative paths. */
+const EXTERNAL_LINK_SCHEME_RE = /^\s*(?:https?|mailto):/i;
+
+/**
+ * Flatten a page body's INTERNAL links to their display text, for a body that is
+ * about to leave the wiki (a shared summary, a pasted post): `[[Target|Display]]`
+ * and `[[Target]]` become their label, and any `[text](target)` — or
+ * `![alt](target)` — whose target is not `http(s):`/`mailto:` becomes its label,
+ * because that target resolves only inside the reader.
+ *
+ * Real external links and ALL emphasis are left untouched — this is deliberately
+ * NOT the Atlas blurb's private `flattenLinks`, which also discards external URLs
+ * and strips `*`/`_`/backtick markers. A shared post must keep its working links
+ * and its bold.
+ *
+ * Code-region-aware: fenced blocks and inline backtick spans pass through
+ * verbatim, so a documented `[[wikilink]]` or a relative path in a code sample
+ * survives.
+ */
+export function flattenWikiLinks(body: string): string {
+  return body.replace(
+    FLATTEN_WIKI_LINKS_RE,
+    (match, code, wikiTarget, wikiLabel, linkText, linkTarget) => {
+      if (code !== undefined) return match; // code region — verbatim
+      if (wikiTarget !== undefined) {
+        const label = typeof wikiLabel === "string" && wikiLabel.trim() ? wikiLabel : wikiTarget;
+        return (label as string).trim();
+      }
+      // Markdown link/image: external targets keep the whole construct (including
+      // any link title), everything else collapses to its label.
+      if (EXTERNAL_LINK_SCHEME_RE.test(linkTarget as string)) return match;
+      return (linkText as string).trim();
+    },
+  );
+}
+
+/**
  * Flatten a prose line into genuinely plain text for the Atlas blurb:
  * `[[Target|Display]]`→`Display`, `[[Target]]`→`Target`, images `![alt](url)`→`alt`
  * (dropping the leading `!`), links `[text](url)`→`text`, and inline emphasis/code

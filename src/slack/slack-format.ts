@@ -9,7 +9,13 @@ import {
   parseChecklist,
 } from "../format/markdown-ast.ts";
 import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
-import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
+import {
+  Placeholders,
+  escapeHtml,
+  RAW_EMPHASIS_SOURCES,
+  parkLeftoverStarRuns,
+  LINKABLE_TARGET_RE,
+} from "../format/markdown-core.ts";
 
 /**
  * Converts Claude's markdown output to Slack mrkdwn.
@@ -131,6 +137,36 @@ function renderTable(headers: string[], rows: string[][]): string {
   return lines.join("\n");
 }
 
+/**
+ * Markdown `*italic*` → mrkdwn `_italic_`. Slack renders a single `*` as BOLD, so
+ * without this pass an italic word arrives looking like a second bold word.
+ *
+ * The rule itself lives in `markdown-core.ts` ({@link RAW_EMPHASIS_SOURCES}) and is
+ * built from the same pieces as the email renderer's variant — one home, so the
+ * two cannot drift. Slack takes the RAW variant because it escapes nothing before
+ * this pass; email takes the entity-aware one. Its strictness is the whole safety
+ * story: an earlier, looser version paired two unrelated asterisks across non-word
+ * characters and mangled paths, SQL, regexes and bare URLs. See that constant for
+ * the measured cases.
+ */
+const SLACK_ITALIC_RE = new RegExp(RAW_EMPHASIS_SOURCES.italic, "gu");
+
+/** `***x***` → `*_x_*`, rewritten BEFORE both emphasis passes. Without it the
+ *  non-greedy `\*\*(.+?)\*\*` bold pass claims the first two stars and leaves the
+ *  third dangling. Carries the SAME flanking guards as the italics rule (round 3 —
+ *  the unguarded version re-opened every protected case three stars wide), and
+ *  whatever it rejects is parked literal by `parkLeftoverStarRuns` below. */
+const SLACK_TRIPLE_RE = new RegExp(RAW_EMPHASIS_SOURCES.triple, "gu");
+
+/** The two COMPOSITION shapes, rewritten BEFORE the triple rule and the park —
+ *  `**bold *italic***` → `*bold _italic_*` and `***italic* bold**` → `*_italic_ bold*`.
+ *  Round 4: their `***` run is a real delimiter with a `**` on its other side, so
+ *  the triple rule can't claim it and the park used to swallow it, orphaning the
+ *  `**` opener onto the NEXT bold on the line (measured — every following bold
+ *  inverted). Same guards as the rules above; see `markdown-core.ts`. */
+const SLACK_BOLD_THEN_ITALIC_RE = new RegExp(RAW_EMPHASIS_SOURCES.boldThenItalic, "gu");
+const SLACK_ITALIC_THEN_BOLD_RE = new RegExp(RAW_EMPHASIS_SOURCES.italicThenBold, "gu");
+
 function renderInline(text: string): string {
   const ph = new Placeholders();
 
@@ -153,9 +189,37 @@ function renderInline(text: string): string {
     )
     .join("");
 
+  // Markdown links BEFORE the emphasis passes. Slack's link rewrite used to run
+  // last, which meant the `**bold**` pass ran over raw link URLs — `[docs](https://
+  // ex.com/a**b**c)` came out with a rewritten URL. Only the generated `<url|`
+  // and `>` delimiters are parked (sentinels carry no `<`/`>`, so the trailing
+  // tag-strip leaves them alone); the LABEL stays in the stream so bold/italics
+  // still render inside link text, as they did when this pass ran last.
+  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, label: string, url: string) => {
+    const target = url.trim();
+    if (!LINKABLE_TARGET_RE.test(target)) return label;
+    return ph.add("LINKOPEN", `<${target}|`) + label + ph.add("LINKCLOSE", ">");
+  });
+
+  // Composition FIRST — `**a *b***` / `***a* b**` mix a two-star and a three-star
+  // delimiter, so neither the triple rule nor the bold pass can see them whole,
+  // and the park below would claim the `***` half and orphan the `**` half.
+  result = result.replace(SLACK_BOLD_THEN_ITALIC_RE, "*$1_$2_*");
+  result = result.replace(SLACK_ITALIC_THEN_BOLD_RE, "*_$1_$2*");
+
+  // Triple emphasis BEFORE either single pass — neither can see `***x***` whole.
+  result = result.replace(SLACK_TRIPLE_RE, "*_$1_*");
+
+  // …and every 3+ star run the guarded triple rule REJECTED is parked literal
+  // here, before the unguardable `\*\*(.+?)\*\*` bold pass can chew on it.
+  result = parkLeftoverStarRuns(result, ph);
+
+  // Italics BEFORE the bold rewrite, and both guards are load-bearing (measured on
+  // `**b** and *i*`): placed AFTER the bold rewrite, even the `(?<!\*)…(?!\*)`
+  // guarded pattern re-reads the just-produced `*b*` and inverts the emphasis.
+  result = result.replace(SLACK_ITALIC_RE, "_$1_");
   result = result.replace(/\*\*(.+?)\*\*/g, "*$1*");
   result = result.replace(/~~(.+?)~~/g, "~$1~");
-  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, "<$2|$1>");
 
   // Claude occasionally emits raw HTML tags; convert the recognised ones to
   // mrkdwn before the catch-all strip below removes them.
@@ -173,7 +237,12 @@ function renderInline(text: string): string {
     ph.add("LINK", `<${url}>`),
   );
 
-  result = result.replace(/<\/?[^>]+>/g, "");
+  // Catch-all strip for whatever tag-shaped text is left. `[^>\x00]` is
+  // load-bearing: without the NUL exclusion the "tag" body runs THROUGH a
+  // placeholder sentinel, so a `<` in a link LABEL swallows the parked `>` and
+  // every character up to the next `>` in the document — measured on
+  // `[a<b](https://x.com) then more > text`, which lost its trailing prose.
+  result = result.replace(/<\/?[^>\x00]+>/g, "");
 
   return ph.restore(result);
 }

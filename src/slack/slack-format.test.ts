@@ -226,6 +226,188 @@ Found it ~~wrong~~ correct.`;
     });
   });
 
+  // --- Italics (`*x*` → `_x_`) ---
+  // Slack renders a single `*` as BOLD, so markdown italics arrived looking like a
+  // second bold word. This pass changes live Slack output for every bot.
+
+  describe("italics conversion", () => {
+    test("converts *italic* to _italic_", () => {
+      expect(formatSlackMrkdwn("this is *italic* text")).toBe("this is _italic_ text");
+    });
+
+    test("bold and italics in one line keep their own emphasis", () => {
+      // Measured: the guarded pattern placed AFTER the bold rewrite re-reads the
+      // just-produced `*b*` and yields `_b_ and _i_`. Before it, both are right.
+      expect(formatSlackMrkdwn("**b** and *i*")).toBe("*b* and _i_");
+    });
+
+    test("_underscore italics_ pass through as mrkdwn already", () => {
+      expect(formatSlackMrkdwn("this is _italic_ text")).toBe("this is _italic_ text");
+    });
+
+    // The flanking rule: no whitespace immediately inside the delimiters. Without
+    // it, prose arithmetic reads as one emphasis span.
+    for (const input of [
+      "2 * 3 and 4 * 5",
+      "a * b",
+      "select * from t",
+      "src/**/*.ts",
+      "a*b*c",
+      "5 * 5 = 25",
+    ]) {
+      test(`leaves non-emphasis asterisks alone: ${input}`, () => {
+        expect(formatSlackMrkdwn(input)).toBe(input);
+      });
+    }
+
+    // Adversarial review, EXECUTED repros: the first flanking rule only rejected
+    // whitespace immediately inside the delimiters, so any two asterisks on a line
+    // separated by non-word characters paired up. Every input below came back
+    // mangled (`/usr/_/bin`, `SELECT _, count(_)`, `\_not italic\_`). The rule is
+    // now strict word-flanking; the safe direction is "leave unchanged".
+    for (const input of [
+      "Files live in /usr/*/bin and /var/*/log",
+      "SELECT *, count(*) FROM t",
+      "regex ^.*$ and .*?",
+      "see https://ex.com/x/*b*/c",
+      "<https://ex.com/x/*b*/c>",
+      "\\*not italic\\*",
+      "glob **/*.test.ts here",
+
+      // Round 3: a QUOTED literal asterisk. `"` and `'` left the allowed
+      // preceders — an opening `*` immediately inside a quote is the quoted
+      // character, not a delimiter. Round 2 paired the two literals into one span
+      // (measured: `use "_" and "_" as wildcards`, `sep='_' and end='_'`).
+      `use "*" and "*" as wildcards`,
+      `SELECT "*" , count("*") FROM t`,
+      "sep='*' and end='*'",
+      "('*', '*')",
+      // Same removal, seen from the other side: quotes-inside-quotes is now a
+      // documented miss — and it is a SYMMETRIC one, which round 2's wasn't
+      // (Slack italicized it, email didn't). Full argument: markdown-all-platforms.
+      `he said "*hi*" loudly`,
+
+      // Round 3: the `***triple***` rule carries the same flanking guards, and
+      // whatever it rejects is parked LITERAL before the unguardable
+      // `\*\*(.+?)\*\*` bold pass. Round 2's bare triple mangled all of these.
+      "Files live in /usr/***/bin and /var/***/log",
+      "see https://ex.com/x/***b***/c",
+      "2 *** 3 and 4 *** 5",
+      "\\***escaped\\***",
+      "cp ***.md dir/***",
+      "x***mid***y",
+      "****four****",
+    ]) {
+      test(`strict flanking leaves it alone: ${input}`, () => {
+        expect(formatSlackMrkdwn(input)).toBe(input);
+      });
+    }
+
+    // The guards reject; they do not disable. Both emphasis rules still fire.
+    test("a real ***span*** still becomes mrkdwn bold-italic", () => {
+      expect(formatSlackMrkdwn("***word***")).toBe("*_word_*");
+      expect(formatSlackMrkdwn("a ***triple*** span")).toBe("a *_triple_* span");
+    });
+
+    // Round-2 widening, the one knock-on flip: `(` joined the allowed preceders
+    // (so `«*økta*»` and friends work), which makes a parenthesized span emphasize
+    // where it used to be left alone. Pinned as behaviour rather than left as a
+    // surprise — it is what CommonMark does. Full table: markdown-all-platforms.
+    test("a parenthesized span now emphasizes (deliberate flip, was inert)", () => {
+      expect(formatSlackMrkdwn("a (*b*) in parens")).toBe("a (_b_) in parens");
+    });
+
+    test("a non-ASCII word still italicizes (the rule is unicode-aware)", () => {
+      expect(formatSlackMrkdwn("dette er *økta* nå")).toBe("dette er _økta_ nå");
+    });
+
+    test("italics inside inline code stay literal", () => {
+      expect(formatSlackMrkdwn("use `a *b* c` here")).toBe("use `a *b* c` here");
+    });
+
+    test("italics inside a fenced block stay literal", () => {
+      expect(formatSlackMrkdwn("```\na *b* c\n```")).toBe("```\na *b* c\n```");
+    });
+  });
+
+  // --- Link/emphasis ordering ---
+  // The link rewrite runs BEFORE the emphasis passes; only the generated `<url|`
+  // and `>` are parked, so the label still gets bold/italics while the URL can't.
+
+  describe("link + emphasis ordering", () => {
+    test("an asterisk pair inside a URL is never read as emphasis", () => {
+      expect(formatSlackMrkdwn("[docs](https://ex.com/a*b*c)")).toBe("<https://ex.com/a*b*c|docs>");
+      expect(formatSlackMrkdwn("[docs](https://ex.com/x/*b*/c)")).toBe("<https://ex.com/x/*b*/c|docs>");
+    });
+
+    test("an intraword asterisk pair in a link LABEL is left alone (as in prose)", () => {
+      expect(formatSlackMrkdwn("[a*b*c](https://x.com)")).toBe("<https://x.com|a*b*c>");
+    });
+
+    test("emphasis inside a link label still renders", () => {
+      expect(formatSlackMrkdwn("[**bold**](https://x.com)")).toBe("<https://x.com|*bold*>");
+      expect(formatSlackMrkdwn("[see *this*](https://x.com)")).toBe("<https://x.com|see _this_>");
+    });
+
+    test("a `>` inside a URL survives the trailing tag-strip", () => {
+      expect(formatSlackMrkdwn("[q](https://x.com/?a=1>2)")).toBe("<https://x.com/?a=1>2|q>");
+    });
+
+    // Adversarial review, EXECUTED repro: the tag-strip ran THROUGH the parked
+    // `>` sentinel, so a `<` in a link label ate everything up to the next `>`
+    // anywhere later in the message. Text loss on live output.
+    describe("a `<` in a link label never eats the text after the link", () => {
+      test("bare `<` in the label", () => {
+        const out = formatSlackMrkdwn("[a<b](https://x.com) then more > text");
+        expect(out).toContain("then more > text");
+        expect(out).toContain("https://x.com");
+      });
+
+      test("a tag-shaped label loses only the tag, never what follows the link", () => {
+        const out = formatSlackMrkdwn("[Foo <Bar>](https://x.com) and after");
+        expect(out).toContain("and after");
+        expect(out).toContain("Foo");
+      });
+
+      test("spaced comparison operators around a link", () => {
+        const out = formatSlackMrkdwn("[a < b](https://x.com) and c > d");
+        expect(out).toContain("and c > d");
+        expect(out).toContain("a < b");
+      });
+    });
+
+    // The ACCEPTED COST of that NUL exclusion, pinned as behaviour so a future
+    // "tidy-up" of the strip has to argue with the trade instead of rediscovering
+    // it. Because the tag body may not run through a sentinel, a tag-shaped span
+    // that CONTAINS a parked placeholder is no longer strippable and survives into
+    // the posted message. Deliberate: the alternative is the data loss above, and
+    // a leaked tag is visible in a message the user reads, while eaten prose is
+    // not. Documented in `src/slack/CLAUDE.md`.
+    describe("a tag-shaped span containing a parked placeholder survives the strip", () => {
+      test("a plain tag is still stripped (the rule still does its job)", () => {
+        expect(formatSlackMrkdwn("plain <span> stripped")).toBe("plain  stripped");
+        expect(formatSlackMrkdwn('<span class="x">kept?</span>')).toBe("kept?");
+      });
+
+      test("a backticked attr parks inline code, so the whole span survives", () => {
+        expect(formatSlackMrkdwn("a <span title=`code`> b")).toBe("a <span title=`code`> b");
+      });
+
+      test("an embedded markdown link parks link delimiters, same effect", () => {
+        expect(formatSlackMrkdwn("a <div data=[lab](https://x.com)> b")).toBe(
+          "a <div data=<https://x.com|lab>> b",
+        );
+      });
+    });
+
+    test("a non-scheme link target degrades to its LABEL (Slack renders `</path|x>` oddly)", () => {
+      expect(formatSlackMrkdwn("[rel](/path/to.md)")).toBe("rel");
+      expect(formatSlackMrkdwn("[page](plans/x.mdx)")).toBe("page");
+      // mailto is linkable, like http(s).
+      expect(formatSlackMrkdwn("[mail](mailto:a@b.no)")).toBe("<mailto:a@b.no|mail>");
+    });
+  });
+
   describe("component blocks", () => {
     test("Callout → bold title + body", () => {
       expect(formatSlackMrkdwn("<Callout title=\"Heads up\">\nbody\n</Callout>")).toBe("*Heads up*\nbody");

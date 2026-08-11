@@ -7,6 +7,7 @@ import type { HaikuBackend } from "../ai/haiku-direct.ts";
 import type { GardenerConfig } from "../gardener/types.ts";
 import { getRoleOverride } from "../db/role-overrides.ts";
 import type { WikiRegistryEntry } from "../wiki/registry.ts";
+import { DEFAULT_VARIANT_ID } from "./prompt-defaults.ts";
 
 const log = getLog("bots");
 
@@ -208,7 +209,7 @@ export interface WikiAutoCommitConfig {
   catalogKinds?: string[];
 }
 
-export interface JiraAnalysisVariant {
+export interface PromptVariant {
   /** Variant id derived from the filename (e.g. "coder" for jiraAnalysis.coder.md). */
   id: string;
   /** Human-readable label from `<!-- label: ... -->` on the first line, or title-cased id. */
@@ -221,7 +222,7 @@ export interface BotPrompts {
   /** Default Jira task analysis prompt (from Chrome extension). The Jira content is appended automatically. */
   jiraAnalysis?: string;
   /** Named variants of the Jira analysis prompt — discovered from `prompts/jiraAnalysis.<id>.md`. */
-  jiraAnalysisVariants?: JiraAnalysisVariant[];
+  jiraAnalysisVariants?: PromptVariant[];
   /** Prompt for the "Investigate Code" follow-up button after Jira analysis. */
   investigateCode?: string;
   /** Prompt for the "Deep Analysis" follow-up button after code investigation — parallel agent verification. */
@@ -232,16 +233,35 @@ export interface BotPrompts {
    *  (Forretningsregel + Gitt/Når/Så + Akseptansekriterier) drafted early, before code, for the
    *  fagperson review gate. Distinct from `specGeneration`, which runs late and folds in code findings. */
   specDomain?: string;
+  /** Per-bot override of the SHIPPED default share preset (`prompts/share.md`).
+   *  The shipped non-default presets survive alongside it — the merge lives in the
+   *  share service (`src/share/presets.ts`), not here. */
+  share?: string;
+  /** Named share presets — discovered from `prompts/share.<id>.md`. An id colliding
+   *  with a shipped preset overrides it; a new id appends. */
+  shareVariants?: PromptVariant[];
 }
 
-const SINGLE_PROMPT_KEYS = ["jiraAnalysis", "investigateCode", "deepAnalysis", "specGeneration", "specDomain"] as const satisfies readonly (keyof BotPrompts)[];
-const VARIANT_PROMPT_KEYS = ["jiraAnalysis"] as const;
+const SINGLE_PROMPT_KEYS = ["jiraAnalysis", "investigateCode", "deepAnalysis", "specGeneration", "specDomain", "share"] as const satisfies readonly (keyof BotPrompts)[];
 
-/** Synthetic variant that maps back to the bare `jiraAnalysis.md` prompt. Reserved as
- *  a variant id so a `jiraAnalysis.default.md` file can't collide with it. Shared by the
- *  `/api/research/variants` endpoint and the `promptVariant` resolution in research-routes. */
-export const DEFAULT_VARIANT_ID = "default";
-export const DEFAULT_VARIANT_LABEL = "Standard";
+/** Prompt keys that ALSO accept `<key>.<id>.md` variant files, mapped to the
+ *  `BotPrompts` field the collected variants are exposed on. The map (rather than
+ *  a bare key list plus a hardcoded assignment) is what keeps adding a variant key
+ *  a one-line change that the compiler checks — and `Partial<Record<keyof …>>` is
+ *  what makes it check the KEYS as well as the values (a `Record<string, …>`
+ *  constraint accepts a typo'd key silently; this one raises TS2561). */
+const VARIANT_PROMPT_FIELDS = {
+  jiraAnalysis: "jiraAnalysisVariants",
+  share: "shareVariants",
+} as const satisfies Partial<Record<keyof BotPrompts, keyof BotPrompts>>;
+
+const VARIANT_PROMPT_KEYS = Object.keys(VARIANT_PROMPT_FIELDS) as (keyof typeof VARIANT_PROMPT_FIELDS)[];
+
+/** Re-exported from the dependency-free `prompt-defaults.ts`, where they live so
+ *  the IO-free share preset layer can have them without pulling this module's
+ *  `node:fs`/db graph. Shared by the `/api/research/variants` endpoint, the
+ *  `promptVariant` resolution in research-routes, and `share/presets.ts`. */
+export { DEFAULT_VARIANT_ID, DEFAULT_VARIANT_LABEL } from "./prompt-defaults.ts";
 
 const LABEL_COMMENT_RE = /^\s*<!--\s*label:\s*(.+?)\s*-->\s*\r?\n?/;
 
@@ -279,12 +299,24 @@ function loadPromptsFromDir(botDir: string, botName: string): BotPrompts | undef
   const result: BotPrompts = {};
   const singleKeys = new Set<string>(SINGLE_PROMPT_KEYS);
   const variantKeys = new Set<string>(VARIANT_PROMPT_KEYS);
-  const variantsByKey: Record<string, JiraAnalysisVariant[]> = {};
+  const variantsByKey: Record<string, PromptVariant[]> = {};
 
   for (const entry of entries) {
     if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
     const stem = entry.name.slice(0, -3);
     const raw = readFileSync(join(promptsDir, entry.name), "utf-8");
+
+    // A blank file is ABSENT, not an empty prompt. Kept whole, an empty `share.md`
+    // replaced the shipped default with "" (`prompts.share ?? DEFAULT` keeps a
+    // present-but-empty string) and the flow would have run on an instruction-free
+    // prompt. Same for a variant: an empty preset is worse than no preset.
+    if (raw.trim() === "") {
+      log.warn("Bot \"{name}\" prompt file prompts/{file} is empty — ignoring it", {
+        name: botName,
+        file: entry.name,
+      });
+      continue;
+    }
 
     if (singleKeys.has(stem)) {
       result[stem as keyof BotPrompts] = raw as never;
@@ -306,20 +338,29 @@ function loadPromptsFromDir(botDir: string, botName: string): BotPrompts | undef
           continue;
         }
         const { label, content } = parseLabel(raw, variantId);
+        // A file carrying ONLY a `<!-- label: … -->` line is blank too.
+        if (content.trim() === "") {
+          log.warn("Bot \"{name}\" prompt file prompts/{file} has no body below its label — ignoring it", {
+            name: botName,
+            file: entry.name,
+          });
+          continue;
+        }
         (variantsByKey[baseKey] ??= []).push({ id: variantId, label, content });
         continue;
       }
     }
 
-    log.warn("Bot \"{name}\" has unknown prompt file prompts/{file} — expected <key>.md or jiraAnalysis.<id>.md", {
+    log.warn("Bot \"{name}\" has unknown prompt file prompts/{file} — expected <key>.md, or <key>.<id>.md for a variant key ({variantKeys})", {
       name: botName,
       file: entry.name,
+      variantKeys: VARIANT_PROMPT_KEYS.join(", "),
     });
   }
 
-  if (variantsByKey.jiraAnalysis) {
-    variantsByKey.jiraAnalysis.sort((a, b) => a.id.localeCompare(b.id));
-    result.jiraAnalysisVariants = variantsByKey.jiraAnalysis;
+  for (const [baseKey, variants] of Object.entries(variantsByKey)) {
+    variants.sort((a, b) => a.id.localeCompare(b.id));
+    result[VARIANT_PROMPT_FIELDS[baseKey as keyof typeof VARIANT_PROMPT_FIELDS]] = variants;
   }
 
   return Object.keys(result).length > 0 ? result : undefined;
