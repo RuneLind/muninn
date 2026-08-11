@@ -131,6 +131,23 @@ function renderTable(headers: string[], rows: string[][]): string {
   return lines.join("\n");
 }
 
+/**
+ * Markdown `*italic*` → mrkdwn `_italic_`. Slack renders a single `*` as BOLD, so
+ * without this pass an italic word arrives looking like a second bold word.
+ *
+ * Three constraints, each closing a measured failure:
+ *  - `(?<![\w*])` / `(?![\w*])` — the `*` neighbours must not be word chars (so
+ *    intraword `a*b*c` is left alone, matching what the telegram/web formatters
+ *    do) and must not be another `*` (so a `**bold**` run and `src/**\/*.ts` are
+ *    untouched).
+ *  - CommonMark-style FLANKING: no whitespace immediately inside the delimiters —
+ *    `(?=\S)` on the left, the trailing `[^\s*]` on the right. Without it prose
+ *    arithmetic (`2 * 3 and 4 * 5`) reads as one emphasis span and comes out as
+ *    `2 _ 3 and 4 _ 5`.
+ *  - `[^*\n]` — a span never crosses a line or swallows another delimiter.
+ */
+const SLACK_ITALIC_RE = /(?<![\w*])\*(?=\S)([^*\n]*[^\s*])\*(?![\w*])/g;
+
 function renderInline(text: string): string {
   const ph = new Placeholders();
 
@@ -153,9 +170,22 @@ function renderInline(text: string): string {
     )
     .join("");
 
+  // Markdown links BEFORE the emphasis passes. Slack's link rewrite used to run
+  // last, which meant an emphasis pass ran over raw link URLs — `[docs](https://
+  // ex.com/x/*b*/c)` came out with a rewritten URL. Only the generated `<url|`
+  // and `>` delimiters are parked (sentinels carry no `<`/`>`, so the trailing
+  // tag-strip leaves them alone); the LABEL stays in the stream so bold/italics
+  // still render inside link text, as they did when this pass ran last.
+  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, label: string, url: string) =>
+    ph.add("LINKOPEN", `<${url}|`) + label + ph.add("LINKCLOSE", ">"),
+  );
+
+  // Italics BEFORE the bold rewrite, and both guards are load-bearing (measured on
+  // `**b** and *i*`): placed AFTER the bold rewrite, even the `(?<!\*)…(?!\*)`
+  // guarded pattern re-reads the just-produced `*b*` and inverts the emphasis.
+  result = result.replace(SLACK_ITALIC_RE, "_$1_");
   result = result.replace(/\*\*(.+?)\*\*/g, "*$1*");
   result = result.replace(/~~(.+?)~~/g, "~$1~");
-  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, "<$2|$1>");
 
   // Claude occasionally emits raw HTML tags; convert the recognised ones to
   // mrkdwn before the catch-all strip below removes them.

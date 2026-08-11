@@ -226,6 +226,73 @@ Found it ~~wrong~~ correct.`;
     });
   });
 
+  // --- Italics (`*x*` → `_x_`) ---
+  // Slack renders a single `*` as BOLD, so markdown italics arrived looking like a
+  // second bold word. This pass changes live Slack output for every bot.
+
+  describe("italics conversion", () => {
+    test("converts *italic* to _italic_", () => {
+      expect(formatSlackMrkdwn("this is *italic* text")).toBe("this is _italic_ text");
+    });
+
+    test("bold and italics in one line keep their own emphasis", () => {
+      // Measured: the guarded pattern placed AFTER the bold rewrite re-reads the
+      // just-produced `*b*` and yields `_b_ and _i_`. Before it, both are right.
+      expect(formatSlackMrkdwn("**b** and *i*")).toBe("*b* and _i_");
+    });
+
+    test("_underscore italics_ pass through as mrkdwn already", () => {
+      expect(formatSlackMrkdwn("this is _italic_ text")).toBe("this is _italic_ text");
+    });
+
+    // The flanking rule: no whitespace immediately inside the delimiters. Without
+    // it, prose arithmetic reads as one emphasis span.
+    for (const input of [
+      "2 * 3 and 4 * 5",
+      "a * b",
+      "select * from t",
+      "src/**/*.ts",
+      "a*b*c",
+      "5 * 5 = 25",
+    ]) {
+      test(`leaves non-emphasis asterisks alone: ${input}`, () => {
+        expect(formatSlackMrkdwn(input)).toBe(input);
+      });
+    }
+
+    test("italics inside inline code stay literal", () => {
+      expect(formatSlackMrkdwn("use `a *b* c` here")).toBe("use `a *b* c` here");
+    });
+
+    test("italics inside a fenced block stay literal", () => {
+      expect(formatSlackMrkdwn("```\na *b* c\n```")).toBe("```\na *b* c\n```");
+    });
+  });
+
+  // --- Link/emphasis ordering ---
+  // The link rewrite runs BEFORE the emphasis passes; only the generated `<url|`
+  // and `>` are parked, so the label still gets bold/italics while the URL can't.
+
+  describe("link + emphasis ordering", () => {
+    test("an asterisk pair inside a URL is never read as emphasis", () => {
+      expect(formatSlackMrkdwn("[docs](https://ex.com/a*b*c)")).toBe("<https://ex.com/a*b*c|docs>");
+      expect(formatSlackMrkdwn("[docs](https://ex.com/x/*b*/c)")).toBe("<https://ex.com/x/*b*/c|docs>");
+    });
+
+    test("an intraword asterisk pair in a link LABEL is left alone (as in prose)", () => {
+      expect(formatSlackMrkdwn("[a*b*c](https://x.com)")).toBe("<https://x.com|a*b*c>");
+    });
+
+    test("emphasis inside a link label still renders", () => {
+      expect(formatSlackMrkdwn("[**bold**](https://x.com)")).toBe("<https://x.com|*bold*>");
+      expect(formatSlackMrkdwn("[see *this*](https://x.com)")).toBe("<https://x.com|see _this_>");
+    });
+
+    test("a `>` inside a URL survives the trailing tag-strip", () => {
+      expect(formatSlackMrkdwn("[q](https://x.com/?a=1>2)")).toBe("<https://x.com/?a=1>2|q>");
+    });
+  });
+
   describe("component blocks", () => {
     test("Callout → bold title + body", () => {
       expect(formatSlackMrkdwn("<Callout title=\"Heads up\">\nbody\n</Callout>")).toBe("*Heads up*\nbody");

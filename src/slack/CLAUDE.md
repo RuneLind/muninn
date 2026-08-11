@@ -112,10 +112,18 @@ In-memory `activeThreads` map with 24-hour TTL:
 
 Claude outputs markdown. Slack uses mrkdwn (different!):
 - `**bold**` → `*bold*`
+- `*italic*` → `_italic_` — a single `*` is BOLD in mrkdwn, so an unconverted italic word arrives looking like a second bold word
 - `## heading` → `*heading*` (bold line)
 - `~~strike~~` → `~strike~`
 - `[text](url)` → `<url|text>`
 - Code blocks and inline code preserved as-is
+
+Two ordering rules in `renderInline` are load-bearing, both measured:
+
+1. **The link rewrite runs BEFORE the emphasis passes.** It used to run last, which meant the emphasis passes ran over raw link URLs (`[docs](https://ex.com/x/*b*/c)` came back with a rewritten URL). Only the generated `<url|` and `>` delimiters are parked (the sentinels carry no `<`/`>`, so the trailing tag-strip leaves them); the LABEL stays in the stream, so bold/italics still render inside link text.
+2. **The italics pass runs BEFORE the `**x**` → `*x*` rewrite**, and its guards are not optional. Placed after, even a `(?<!\*)…(?!\*)`-guarded pattern re-reads the just-produced `*b*` and inverts the emphasis (`**b** and *i*` → `_b_ and _i_`). The pattern (`SLACK_ITALIC_RE`) also carries a CommonMark-style flanking rule — no whitespace immediately inside the delimiters — without which prose arithmetic (`2 * 3 and 4 * 5`) reads as one emphasis span.
+
+Telegram and web keep an older, weaker italics rule that still has the `2 * 3` defect; the four formatters' columns are pinned side by side in `src/format/markdown-all-platforms.test.ts`, which is where that divergence is documented.
 
 ## Common Pitfalls
 

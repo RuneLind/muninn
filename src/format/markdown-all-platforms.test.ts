@@ -2,27 +2,49 @@ import { test, expect, describe } from "bun:test";
 import { formatWebHtml } from "../web/web-format.ts";
 import { formatTelegramHtml } from "../bot/telegram-format.ts";
 import { formatSlackMrkdwn } from "../slack/slack-format.ts";
+import { formatEmailHtml } from "./email-format.ts";
 
-// Early-warning system for divergence: the three platform formatters share one
+// Early-warning system for divergence: the FOUR platform formatters share one
 // block AST + dispatcher, so the same markdown must keep producing each
 // platform's expected shape. A drift in one formatter trips exactly one column.
+//
+// The email column asserts STRUCTURE plus the load-bearing inline `style=`, not
+// the full style string — mail clients drop <style> blocks and ignore classes, so
+// "the rule is inline at all" is the contract; its exact px values are not.
 
 describe("heading (## Hello)", () => {
   test("web → h3", () => expect(formatWebHtml("## Hello")).toBe("<h3>Hello</h3>"));
   test("telegram → bold", () => expect(formatTelegramHtml("## Hello")).toBe("<b>Hello</b>"));
   test("slack → *bold*", () => expect(formatSlackMrkdwn("## Hello")).toBe("*Hello*"));
+  test("email → h3 carrying its own inline style", () => {
+    const out = formatEmailHtml("## Hello");
+    expect(out.startsWith("<h3 style=")).toBe(true);
+    expect(out).toContain(">Hello</h3>");
+    expect(out).toContain("font-weight:600");
+  });
 });
 
 describe("bold (**x**)", () => {
   test("web", () => expect(formatWebHtml("**x**")).toBe("<strong>x</strong>"));
   test("telegram", () => expect(formatTelegramHtml("**x**")).toBe("<b>x</b>"));
   test("slack", () => expect(formatSlackMrkdwn("**x**")).toBe("*x*"));
+  test("email → <strong> inside a styled <p>", () => {
+    const out = formatEmailHtml("**x**");
+    expect(out).toContain("<strong>x</strong>");
+    expect(out.startsWith("<p style=")).toBe(true);
+  });
 });
 
 describe("inline code (`x`)", () => {
   test("web", () => expect(formatWebHtml("`x`")).toBe("<code>x</code>"));
   test("telegram", () => expect(formatTelegramHtml("`x`")).toBe("<code>x</code>"));
   test("slack", () => expect(formatSlackMrkdwn("`x`")).toBe("`x`"));
+  test("email → <code> with an inline mono/background rule", () => {
+    const out = formatEmailHtml("`x`");
+    expect(out).toContain("<code style=");
+    expect(out).toContain("font-family:ui-monospace");
+    expect(out).toContain(">x</code>");
+  });
 });
 
 describe("link [label](https://example.com)", () => {
@@ -32,6 +54,14 @@ describe("link [label](https://example.com)", () => {
   test("telegram → bare anchor", () =>
     expect(formatTelegramHtml(md)).toBe('<a href="https://example.com">label</a>'));
   test("slack → mrkdwn link", () => expect(formatSlackMrkdwn(md)).toBe("<https://example.com|label>"));
+  test("email → anchor with an inline colour (mail has no stylesheet to inherit)", () => {
+    const out = formatEmailHtml(md);
+    expect(out).toContain('<a href="https://example.com" style=');
+    expect(out).toContain("text-decoration:underline");
+    expect(out).toContain(">label</a>");
+  });
+  test("email → a NON-http target degrades to its label, never a dead href", () =>
+    expect(formatEmailHtml("[label](plans/x.md)")).not.toContain("<a "));
 });
 
 describe("fenced code block", () => {
@@ -42,6 +72,12 @@ describe("fenced code block", () => {
     expect(formatTelegramHtml(md)).toBe('<pre><code class="language-ts">const x = 1;</code></pre>'));
   test("slack → triple-backtick block (no language, no escaping)", () =>
     expect(formatSlackMrkdwn(md)).toBe("```\nconst x = 1;\n```"));
+  test("email → styled <pre>, no language class (nothing highlights it)", () => {
+    const out = formatEmailHtml(md);
+    expect(out.startsWith("<pre style=")).toBe(true);
+    expect(out).toContain("<code>const x = 1;</code>");
+    expect(out).not.toContain("language-ts");
+  });
 });
 
 describe("unordered list", () => {
@@ -49,6 +85,12 @@ describe("unordered list", () => {
   test("web → <ul>", () => expect(formatWebHtml(md)).toBe("<ul><li>a</li><li>b</li></ul>"));
   test("telegram → dash lines", () => expect(formatTelegramHtml(md)).toBe("- a\n- b"));
   test("slack → dash lines", () => expect(formatSlackMrkdwn(md)).toBe("- a\n- b"));
+  test("email → styled <ul>/<li>", () => {
+    const out = formatEmailHtml(md);
+    expect(out.startsWith("<ul style=")).toBe(true);
+    expect(out).toContain(">a</li>");
+    expect(out).toContain(">b</li>");
+  });
 });
 
 describe("table renders without throwing and matches each platform's shape", () => {
@@ -56,6 +98,51 @@ describe("table renders without throwing and matches each platform's shape", () 
   test("web → <table>", () => expect(formatWebHtml(md)).toContain("<table>"));
   test("telegram → pipe table preserved", () => expect(formatTelegramHtml(md)).toContain("| H1 | H2 |"));
   test("slack → labeled bullets", () => expect(formatSlackMrkdwn(md)).toBe("• *H1:* a  *H2:* b"));
+  test("email → <table> whose CELLS carry their own borders", () => {
+    // A bare <table> renders borderless in most mail clients, and the border
+    // cannot come from a stylesheet — so every th/td states it.
+    const out = formatEmailHtml(md);
+    expect(out).toContain("border-collapse:collapse");
+    expect(out).toContain("<th style=");
+    expect(out).toContain("<td style=");
+    expect((out.match(/border:1px solid/g) ?? []).length).toBe(4);
+  });
+});
+
+// The italics divergence, in one place. Slack was fixed (a single `*` renders as
+// BOLD there, so markdown italics arrived looking like a second bold word) and
+// email — new code — was written with the same CommonMark-style flanking rule.
+// Telegram and web are PINNED TO TODAY'S OUTPUT with their older, weaker
+// `(?<!\w)\*([^*]+?)\*(?!\w)`: it has the `2 * 3` defect below, but unifying the
+// rule would change long-standing output on two live platforms as a side effect
+// of a share feature. The divergence is documented here rather than hidden.
+describe("italics (*i*) — Slack + email use the flanking rule, telegram + web the weaker one", () => {
+  describe("a real italic span", () => {
+    const md = "this is *italic* text";
+    test("web → <em>", () => expect(formatWebHtml(md)).toBe("this is <em>italic</em> text"));
+    test("telegram → <i>", () => expect(formatTelegramHtml(md)).toBe("this is <i>italic</i> text"));
+    test("slack → _italic_", () => expect(formatSlackMrkdwn(md)).toBe("this is _italic_ text"));
+    test("email → <em>", () => expect(formatEmailHtml(md)).toContain("<em>italic</em>"));
+  });
+
+  describe("prose arithmetic (2 * 3 and 4 * 5) is NOT emphasis", () => {
+    const md = "2 * 3 and 4 * 5";
+    test("slack → unchanged (flanking rule)", () => expect(formatSlackMrkdwn(md)).toBe(md));
+    test("email → unchanged (flanking rule)", () => expect(formatEmailHtml(md)).toContain(md));
+    // Pinned to today's output, NOT to what it should be: see the note above.
+    test("web → today's weaker rule emphasizes it (known, deliberate)", () =>
+      expect(formatWebHtml(md)).toBe("2 <em> 3 and 4 </em> 5"));
+    test("telegram → today's weaker rule emphasizes it (known, deliberate)", () =>
+      expect(formatTelegramHtml(md)).toBe("2 <i> 3 and 4 </i> 5"));
+  });
+
+  describe("bold and italics on one line keep their own emphasis everywhere", () => {
+    const md = "**b** and *i*";
+    test("web", () => expect(formatWebHtml(md)).toBe("<strong>b</strong> and <em>i</em>"));
+    test("telegram", () => expect(formatTelegramHtml(md)).toBe("<b>b</b> and <i>i</i>"));
+    test("slack", () => expect(formatSlackMrkdwn(md)).toBe("*b* and _i_"));
+    test("email", () => expect(formatEmailHtml(md)).toContain("<strong>b</strong> and <em>i</em>"));
+  });
 });
 
 describe("inline Verdict mid-list — chip on web, plain fallback in-sentence elsewhere", () => {
@@ -66,6 +153,8 @@ describe("inline Verdict mid-list — chip on web, plain fallback in-sentence el
     expect(formatTelegramHtml(md)).toBe("- Result: ✅ shipped"));
   test("slack → ✅ label sits inline in the list line", () =>
     expect(formatSlackMrkdwn(md)).toBe("- Result: ✅ shipped"));
+  test("email → coloured inline span inside the <li>", () =>
+    expect(formatEmailHtml(md)).toContain("<li style=\"margin:0 0 4px;\">Result: <span style=\"color:#1a7f37;font-weight:600;\">✅ shipped</span></li>"));
 });
 
 describe("inline Pill mid-sentence — chip on web, [text] fallback elsewhere", () => {
@@ -76,6 +165,12 @@ describe("inline Pill mid-sentence — chip on web, [text] fallback elsewhere", 
     expect(formatTelegramHtml(md)).toBe("Ship it [beta] today"));
   test("slack → [beta] inline", () =>
     expect(formatSlackMrkdwn(md)).toBe("Ship it [beta] today"));
+  test("email → an inline-styled pill span (no class to hang CSS on)", () => {
+    const out = formatEmailHtml(md);
+    expect(out).toContain("border-radius:10px");
+    expect(out).toContain(">beta</span> today");
+    expect(out).not.toContain("class=");
+  });
 });
 
 // Regression (PR #307 review): a COMPLETE component tag inside an inline-code
@@ -103,6 +198,12 @@ describe("complete component tag inside backticks stays literal code", () => {
   test("slack → backticked literal tag, no NUL", () => {
     const out = formatSlackMrkdwn(md);
     expect(out).toBe('Use `<Verdict value="yes">x</Verdict>` in code.');
+    expect(out).not.toContain("\x00");
+    expect(out).not.toContain("✅");
+  });
+  test("email → <code> with the escaped tag, no NUL, no chip", () => {
+    const out = formatEmailHtml(md);
+    expect(out).toContain("&lt;Verdict value=&quot;yes&quot;&gt;x&lt;/Verdict&gt;</code>");
     expect(out).not.toContain("\x00");
     expect(out).not.toContain("✅");
   });
@@ -162,6 +263,12 @@ describe("inline Fact mid-sentence — underline + chip on web, glyph elsewhere"
     expect(formatTelegramHtml(md)).toBe("It weighed 1.32 kg ✗ at launch."));
   test("slack → passage kept, verdict glyph appended", () =>
     expect(formatSlackMrkdwn(md)).toBe("It weighed 1.32 kg ✗ at launch."));
+  test("email → underlined passage + glyph, no chip button (nothing to expand in mail)", () => {
+    const out = formatEmailHtml(md);
+    expect(out).toContain('<span style="border-bottom:2px solid #cf222e;">1.32 kg</span>');
+    expect(out).toContain("✗");
+    expect(out).not.toContain("<button");
+  });
 });
 
 describe("own-line Fact is claimed by the BLOCK parser — still visibly marked", () => {
@@ -201,6 +308,12 @@ describe("markdown inside a paired Fact keeps rendering (prose, not an escaped l
     expect(formatTelegramHtml(md)).toContain("<b>1.32 kg</b>"));
   test("slack → *bold* inside the passage", () =>
     expect(formatSlackMrkdwn(md)).toContain("*1.32 kg*"));
+  test("email → <strong> and <a> inside the mark, no literal asterisks", () => {
+    const out = formatEmailHtml(md);
+    expect(out).toContain("<strong>1.32 kg</strong>");
+    expect(out).toContain('<a href="https://example.com"');
+    expect(out).not.toContain("**1.32 kg**");
+  });
 });
 
 describe("Fact with an absent/garbage verdict degrades to `unknown`, never to ok", () => {
@@ -248,6 +361,19 @@ describe("FactCheck appendix renders collapsed, with per-claim sections", () => 
     const out = formatSlackMrkdwn(md);
     expect(out.startsWith("Fact-checked 2026-07-29: 3 confirmed, 1 needs care, 2 corrected")).toBe(true);
     expect(out).toContain("Evidence line.");
+  });
+  test("email → summary line then the evidence, OPEN (no <details> in mail)", () => {
+    const out = formatEmailHtml(md);
+    expect(out).toContain("Fact-checked <strong>2026-07-29</strong>");
+    expect(out).toContain("3 confirmed");
+    expect(out).toContain("Evidence line.");
+    expect(out).not.toContain("<details");
+  });
+  test("email → an absent count is omitted, never rendered as a 0 nobody wrote", () => {
+    const out = formatEmailHtml('<FactCheck date="2026-07-29" ok="5">\nbody\n</FactCheck>');
+    expect(out).toContain("5 confirmed");
+    expect(out).not.toContain("0 corrected");
+    expect(out).not.toContain("not checked");
   });
 });
 

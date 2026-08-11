@@ -208,7 +208,7 @@ export interface WikiAutoCommitConfig {
   catalogKinds?: string[];
 }
 
-export interface JiraAnalysisVariant {
+export interface PromptVariant {
   /** Variant id derived from the filename (e.g. "coder" for jiraAnalysis.coder.md). */
   id: string;
   /** Human-readable label from `<!-- label: ... -->` on the first line, or title-cased id. */
@@ -216,6 +216,10 @@ export interface JiraAnalysisVariant {
   /** Prompt body with the label comment stripped. */
   content: string;
 }
+
+/** Pre-`share` name for {@link PromptVariant}, kept so existing Jira-flow callers
+ *  (and their tests) don't have to be touched by a rename. */
+export type JiraAnalysisVariant = PromptVariant;
 
 export interface BotPrompts {
   /** Default Jira task analysis prompt (from Chrome extension). The Jira content is appended automatically. */
@@ -232,10 +236,27 @@ export interface BotPrompts {
    *  (Forretningsregel + Gitt/Når/Så + Akseptansekriterier) drafted early, before code, for the
    *  fagperson review gate. Distinct from `specGeneration`, which runs late and folds in code findings. */
   specDomain?: string;
+  /** Per-bot override of the SHIPPED default share preset (`prompts/share.md`).
+   *  The shipped non-default presets survive alongside it — the merge lives in the
+   *  share service (`src/share/presets.ts`), not here. */
+  share?: string;
+  /** Named share presets — discovered from `prompts/share.<id>.md`. An id colliding
+   *  with a shipped preset overrides it; a new id appends. */
+  shareVariants?: PromptVariant[];
 }
 
-const SINGLE_PROMPT_KEYS = ["jiraAnalysis", "investigateCode", "deepAnalysis", "specGeneration", "specDomain"] as const satisfies readonly (keyof BotPrompts)[];
-const VARIANT_PROMPT_KEYS = ["jiraAnalysis"] as const;
+const SINGLE_PROMPT_KEYS = ["jiraAnalysis", "investigateCode", "deepAnalysis", "specGeneration", "specDomain", "share"] as const satisfies readonly (keyof BotPrompts)[];
+
+/** Prompt keys that ALSO accept `<key>.<id>.md` variant files, mapped to the
+ *  `BotPrompts` field the collected variants are exposed on. The map (rather than
+ *  a bare key list plus a hardcoded assignment) is what keeps adding a variant key
+ *  a one-line change that the compiler checks. */
+const VARIANT_PROMPT_FIELDS = {
+  jiraAnalysis: "jiraAnalysisVariants",
+  share: "shareVariants",
+} as const satisfies Record<string, keyof BotPrompts>;
+
+const VARIANT_PROMPT_KEYS = Object.keys(VARIANT_PROMPT_FIELDS) as (keyof typeof VARIANT_PROMPT_FIELDS)[];
 
 /** Synthetic variant that maps back to the bare `jiraAnalysis.md` prompt. Reserved as
  *  a variant id so a `jiraAnalysis.default.md` file can't collide with it. Shared by the
@@ -279,7 +300,7 @@ function loadPromptsFromDir(botDir: string, botName: string): BotPrompts | undef
   const result: BotPrompts = {};
   const singleKeys = new Set<string>(SINGLE_PROMPT_KEYS);
   const variantKeys = new Set<string>(VARIANT_PROMPT_KEYS);
-  const variantsByKey: Record<string, JiraAnalysisVariant[]> = {};
+  const variantsByKey: Record<string, PromptVariant[]> = {};
 
   for (const entry of entries) {
     if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
@@ -311,15 +332,16 @@ function loadPromptsFromDir(botDir: string, botName: string): BotPrompts | undef
       }
     }
 
-    log.warn("Bot \"{name}\" has unknown prompt file prompts/{file} — expected <key>.md or jiraAnalysis.<id>.md", {
+    log.warn("Bot \"{name}\" has unknown prompt file prompts/{file} — expected <key>.md, or <key>.<id>.md for a variant key ({variantKeys})", {
       name: botName,
       file: entry.name,
+      variantKeys: VARIANT_PROMPT_KEYS.join(", "),
     });
   }
 
-  if (variantsByKey.jiraAnalysis) {
-    variantsByKey.jiraAnalysis.sort((a, b) => a.id.localeCompare(b.id));
-    result.jiraAnalysisVariants = variantsByKey.jiraAnalysis;
+  for (const [baseKey, variants] of Object.entries(variantsByKey)) {
+    variants.sort((a, b) => a.id.localeCompare(b.id));
+    result[VARIANT_PROMPT_FIELDS[baseKey as keyof typeof VARIANT_PROMPT_FIELDS]] = variants;
   }
 
   return Object.keys(result).length > 0 ? result : undefined;

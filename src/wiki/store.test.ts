@@ -13,6 +13,7 @@ import {
   readWikiPage,
   extractPubDate,
   extractDesc,
+  flattenWikiLinks,
   PLAN_STATUS_VALUES,
   __resetWikiCacheForTest,
 } from "./store.ts";
@@ -1599,5 +1600,72 @@ describe("buildWikiIndex + git dates", () => {
     for (const rel of ["brand-new-folder/a.md", "brand-new-folder/b.md"]) {
       expect(index.pages.find((p) => p.relPath === rel)!.gitDirty).toBe(true);
     }
+  });
+});
+
+// ── flattenWikiLinks (share body prep) ───────────────────────────────────────
+// The rule is by SCHEME, not by extension: mimir links `.md`, `.mdx`, `.html` AND
+// extension-less relative paths, and all four resolve only inside the reader.
+// Emphasis and real external links are deliberately untouched — this is not the
+// Atlas blurb's private `flattenLinks`.
+
+describe("flattenWikiLinks", () => {
+  test("wikilinks collapse to their display label", () => {
+    expect(flattenWikiLinks("see [[Harness Engineering]] today")).toBe("see Harness Engineering today");
+    expect(flattenWikiLinks("see [[repos/huginn.md|Huginn]] today")).toBe("see Huginn today");
+  });
+
+  test("an empty pipe label falls back to the target", () => {
+    expect(flattenWikiLinks("[[Target|]]")).toBe("Target");
+  });
+
+  for (const [target, label] of [
+    ["plans/x.md", ".md"],
+    ["plans/x.mdx", ".mdx"],
+    ["blogs/x.html", ".html"],
+    ["projects/muninn", "extension-less bare path"],
+    ["../repos/huginn.md", "relative with .."],
+    ["#a-section", "same-page anchor"],
+  ] as const) {
+    test(`internal link (${label}) collapses to its text`, () => {
+      expect(flattenWikiLinks(`read [the plan](${target}) first`)).toBe("read the plan first");
+    });
+  }
+
+  test("external http(s) and mailto links survive untouched", () => {
+    const md = "see [docs](https://example.com/a) and [mail](mailto:x@example.com) and [p](http://x.test)";
+    expect(flattenWikiLinks(md)).toBe(md);
+  });
+
+  test("an external link keeps its title attribute verbatim", () => {
+    const md = '[docs](https://example.com "The docs")';
+    expect(flattenWikiLinks(md)).toBe(md);
+  });
+
+  test("emphasis, bold and inline code are left alone", () => {
+    const md = "**bold** and *italic* and `code` with [[Link]]";
+    expect(flattenWikiLinks(md)).toBe("**bold** and *italic* and `code` with Link");
+  });
+
+  test("links inside a fenced code block are untouched", () => {
+    const md = "before [x](y.md)\n```md\n[x](y.md) and [[Wiki Link]]\n```\nafter [z](z.md)";
+    expect(flattenWikiLinks(md)).toBe("before x\n```md\n[x](y.md) and [[Wiki Link]]\n```\nafter z");
+  });
+
+  test("links inside an inline backtick span are untouched", () => {
+    expect(flattenWikiLinks("write `[x](y.md)` like this, not [x](y.md)")).toBe(
+      "write `[x](y.md)` like this, not x",
+    );
+  });
+
+  test("an internal image collapses to its alt text; an external one survives", () => {
+    expect(flattenWikiLinks("![diagram](img/x.png)")).toBe("diagram");
+    expect(flattenWikiLinks("![d](https://x.test/x.png)")).toBe("![d](https://x.test/x.png)");
+  });
+
+  test("a body with no links is returned unchanged", () => {
+    expect(flattenWikiLinks("plain prose, 2 * 3 and a [bracket] alone")).toBe(
+      "plain prose, 2 * 3 and a [bracket] alone",
+    );
   });
 });
