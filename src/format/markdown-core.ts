@@ -17,7 +17,8 @@ export function escapeHtml(text: string): string {
 // Spelled out rather than written as one opaque string: every widening below was
 // argued case by case against two tables (must-emphasize / must-stay-inert), and
 // a future widening has to be argued against the same two. ONE set of pieces
-// builds BOTH guarded rules — `*italic*` and `***triple***` — so the two cannot
+// builds ALL FOUR guarded rules — `*italic*`, `***triple***` and the two
+// composition shapes (`**bold *italic***`, `***italic* bold**`) — so they cannot
 // protect different things.
 
 /** What may sit immediately BEFORE the opening `*`: start of text, whitespace, a
@@ -55,8 +56,9 @@ const ITALIC_EDGE_CLOSE = "[\\p{L}\\p{N}\\p{Extended_Pictographic}\"'»)\\].,!?;
 
 /** What may sit immediately AFTER the closing `*`: end of text, whitespace, a
  *  sentinel, closing punctuation, `»`, or a hyphen (`*emphasis*-hyphenated`).
- *  Never a slash or a letter. */
-const ITALIC_FOLLOWER = "(?![^\\s\\x00.,;:!?)\\]}'\"\\-»])";
+ *  Never a slash or a letter. Spelled as the DISALLOWED class plus a wrapper, so
+ *  the entity-aware variant below can punch a hole in it without restating it. */
+const ITALIC_FOLLOWER_DISALLOWED = "[^\\s\\x00.,;:!?)\\]}'\"\\-»]";
 
 /**
  * Extra content-OPENING edges for a renderer that HTML-escapes BEFORE it
@@ -72,6 +74,20 @@ const ITALIC_FOLLOWER = "(?![^\\s\\x00.,;:!?)\\]}'\"\\-»])";
 const ENTITY_QUOTE_OPEN_EDGES = ["&quot;", "&#39;"];
 
 /**
+ * The same asymmetry on the FOLLOWER side. A raw `"` is an allowed follower
+ * ({@link ITALIC_FOLLOWER_DISALLOWED}) — `he called it ***critical***"` — but here
+ * the closing quote has already become `&quot;`, whose first character `&` is a
+ * rejected follower — so the span emphasized on Slack and stayed literal on
+ * email. Measured on 70 corpus rows; cosmetic, but a silent divergence.
+ *
+ * Only `&quot;` is listed: {@link escapeHtml} escapes `& < > "` and never emits
+ * `&#39;`, so an apostrophe reaches the pattern as a raw `'` and is already
+ * allowed. A bare `&` is deliberately NOT allowed — that would make every entity
+ * a legal follower, the same over-reach {@link ENTITY_QUOTE_OPEN_EDGES} avoids.
+ */
+const ENTITY_QUOTE_FOLLOW_EDGES = ["&quot;"];
+
+/**
  * Build both guarded emphasis rules for one renderer's edge vocabulary.
  *
  * Returns regex SOURCES, not compiled regexes — callers pick their own flags, and
@@ -84,7 +100,7 @@ const ENTITY_QUOTE_OPEN_EDGES = ["&quot;", "&#39;"];
  *  - content edges — the two-branch alternation below. A letter/digit/emoji
  *    opener may stand alone (`*a*`); a PUNCTUATION opener must be followed by a
  *    closing edge, so a lone `*(*` in prose is not a one-character emphasis span.
- *  - closer flanking ({@link ITALIC_FOLLOWER}).
+ *  - closer flanking ({@link ITALIC_FOLLOWER_DISALLOWED}).
  *  - `[^*\n]` — a span never crosses a line or swallows another delimiter, so a
  *    `**bold**` run and a double-star glob stay whole.
  *
@@ -97,16 +113,58 @@ const ENTITY_QUOTE_OPEN_EDGES = ["&quot;", "&#39;"];
  * mangled (measured; the six literals are the inert table in
  * `markdown-all-platforms.test.ts` — they cannot be written here, since a
  * triple-star glob closes this comment). Sharing the guards fixes all six at once.
+ *
+ * Round 4 adds the two COMPOSITION shapes — `**bold *italic***` and
+ * `***italic* bold**` — and they are not a nicety. Their closing/opening `***`
+ * run is a real delimiter, but the triple rule cannot claim it (its other half is
+ * a `**`), so it fell through to {@link parkLeftoverStarRuns}, which parked it and
+ * orphaned the `**` opener — the orphan then paired with the NEXT `**` on the
+ * line and INVERTED every bold after it. Measured on
+ * `**bold with *italic*** then **second bold** and **third bold** end`: email
+ * emitted `<strong>bold with *italic*** then </strong>second bold<strong> and …`,
+ * swallowing an adjoining link into the inverted span. Three shapes of real wiki
+ * prose hit this (`…as a *tool***`, `…that *naturally hill-climbs***`), so the
+ * fix is to MATCH the composition rather than to park it: with these two rules
+ * running first, the genuine shapes never reach the park and the park keeps
+ * claiming only true leftovers.
  */
-function buildEmphasisSources(entityOpenEdges: readonly string[]) {
+function buildEmphasisSources(
+  entityOpenEdges: readonly string[],
+  entityFollowEdges: readonly string[] = [],
+) {
   const openPunct = `(?:${[ITALIC_EDGE_OPEN_PUNCT, ...entityOpenEdges].join("|")})`;
+  const contentOpen = `(?:${ITALIC_EDGE_WORD}|${openPunct})`;
   const content =
     ITALIC_EDGE_WORD + "(?:[^*\\n]*" + ITALIC_EDGE_CLOSE + ")?" +
     "|" +
     openPunct + "[^*\\n]*" + ITALIC_EDGE_CLOSE;
+  // The follower, with a hole punched in it for each allowed entity: reject the
+  // next character only if it is disallowed AND does not start one of them.
+  const follower = entityFollowEdges.length
+    ? `(?!(?!${entityFollowEdges.join("|")})${ITALIC_FOLLOWER_DISALLOWED})`
+    : `(?!${ITALIC_FOLLOWER_DISALLOWED})`;
   const guarded = (delimiter: string) =>
-    ITALIC_PRECEDER + delimiter + "(" + content + ")" + delimiter + ITALIC_FOLLOWER;
-  return { italic: guarded("\\*"), triple: guarded("\\*\\*\\*") } as const;
+    ITALIC_PRECEDER + delimiter + "(" + content + ")" + delimiter + follower;
+
+  // The two COMPOSITION shapes. Both carry the same three guards as the rules
+  // above — preceder before the opening run, follower after the closing run, and
+  // the full content edges on the ITALIC half — plus a one-sided edge on the
+  // bold-only half (its opening edge for `boldThenItalic`, its closing edge for
+  // `italicThenBold`); the other end of that half abuts the inner `*` and is
+  // whatever the writer's phrase ends/starts with, typically a space.
+  const boldThenItalic =
+    ITALIC_PRECEDER + "\\*\\*((?:" + contentOpen + "[^*\\n]*)?)\\*(" + content + ")\\*\\*\\*" +
+    follower;
+  const italicThenBold =
+    ITALIC_PRECEDER + "\\*\\*\\*(" + content + ")\\*((?:[^*\\n]*" + ITALIC_EDGE_CLOSE + ")?)\\*\\*" +
+    follower;
+
+  return {
+    italic: guarded("\\*"),
+    triple: guarded("\\*\\*\\*"),
+    boldThenItalic,
+    italicThenBold,
+  } as const;
 }
 
 /**
@@ -133,9 +191,12 @@ function buildEmphasisSources(entityOpenEdges: readonly string[]) {
  *  - Raw-HTML-adjacent italics (`<span>*i*</span>`): email has escaped the tags
  *    to `&lt;span&gt;` before this pass, Slack's tag-strip runs after it. Equal to
  *    `origin/main`, which had no italics pass here at all.
- *  - Mixed nesting (`**x *y***`, `a ***b** c*`): a pre-existing class neither
- *    guarded rule addresses — both delimiters are ambiguous and CommonMark's
- *    answer needs a real inline parser. Today both stay fully literal.
+ *  - Mixed nesting whose two delimiters do not compose into one span
+ *    (`a ***b** c*`, `***a* and *b***`): a pre-existing class no rule here
+ *    addresses — the delimiters are genuinely ambiguous and CommonMark's answer
+ *    needs a real inline parser. Stays fully literal. The two shapes that DO
+ *    compose (`**bold *italic***`, `***italic* bold**`) are handled by the
+ *    composition rules and are no longer misses.
  *  - Four-or-more-star runs (`****four****`): see
  *    {@link parkLeftoverStarRuns} — literal, by construction.
  */
@@ -143,9 +204,11 @@ export const RAW_EMPHASIS_SOURCES = buildEmphasisSources([]);
 
 /**
  * The same rules for a renderer that HTML-escapes BEFORE it emphasizes — email.
- * Identical except that the content-opening edge also accepts the two quote
- * ENTITIES ({@link ENTITY_QUOTE_OPEN_EDGES}), so `*"quoted phrase"*` emphasizes on
- * both columns instead of only on Slack.
+ * Identical except at the two edges a quote can occupy: the content-opening edge
+ * also accepts the two quote ENTITIES ({@link ENTITY_QUOTE_OPEN_EDGES}), so
+ * `*"quoted phrase"*` emphasizes on both columns instead of only on Slack, and
+ * the follower accepts `&quot;` ({@link ENTITY_QUOTE_FOLLOW_EDGES}), so a span
+ * that ends just before a closing quote does too.
  *
  * Residual, deliberately not chased: `;` is a content-CLOSING edge (for `*word;*`
  * on both columns), which also closes an entity — so `*x<*` stays literal on Slack
@@ -153,20 +216,31 @@ export const RAW_EMPHASIS_SOURCES = buildEmphasisSources([]);
  * the cost of `*word;*` diverging instead. Same pre-existing raw-tag-handling
  * class as the `<span>*i*</span>` miss above: email escapes, Slack strips.
  */
-export const ESCAPED_EMPHASIS_SOURCES = buildEmphasisSources(ENTITY_QUOTE_OPEN_EDGES);
+export const ESCAPED_EMPHASIS_SOURCES = buildEmphasisSources(
+  ENTITY_QUOTE_OPEN_EDGES,
+  ENTITY_QUOTE_FOLLOW_EDGES,
+);
 
 /**
- * Park every run of THREE OR MORE asterisks that the guarded `***triple***` rule
- * did not claim, so it survives to the output verbatim.
+ * Park every run of THREE OR MORE asterisks that the guarded emphasis rules did
+ * not claim, so it survives to the output verbatim.
  *
- * Call it AFTER the triple pass and BEFORE the `**bold**` pass. The invariant it
- * buys is the whole point: a 3+ star run is claimed by the triple rule or it is
- * literal — never chewed on by the non-greedy `\*\*(.+?)\*\*` bold pattern, which
+ * Call it AFTER the composition + triple passes and BEFORE the `**bold**` pass.
+ * The ordering is load-bearing in BOTH directions. Late enough, and the invariant
+ * it buys is the whole point: a 3+ star run is claimed by an emphasis rule or it
+ * is literal — never chewed on by the non-greedy `\*\*(.+?)\*\*` bold pattern, which
  * has no flanking guards at all and cannot grow any (it must keep matching
  * `**bold**` anywhere). Without this the guarded triple rule merely hands its
  * rejects to the bold pass, which mangles them just as badly: measured, the
  * triple-star path-glob pair lost two of its six stars, and `****four****` came
  * out as a six-star run (two gone).
+ *
+ * Early enough, and it does not park a run that is HALF of a real span. Round 4:
+ * the closing `***` of `**bold *italic***` is a genuine delimiter the triple rule
+ * cannot claim, and parking it orphaned the `**` opener, which then paired with
+ * the next `**` on the line and inverted every bold after it (see
+ * {@link buildEmphasisSources}). The composition rules now run first, so what
+ * reaches this function is a true leftover.
  *
  * The cost, pinned as behaviour: `**bold*** trailing` no longer renders bold with
  * a stray star, it stays literal. That is the safe direction — the input is

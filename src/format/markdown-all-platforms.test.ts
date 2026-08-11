@@ -395,6 +395,21 @@ describe("italics (*i*) — Slack + email use the flanking rule, telegram + web 
       expect("a ***triple*** span".replace(re, "*_$1_*")).toBe("a *_triple_* span");
       for (const md of inert) expect(md.replace(re, "*_$1_*")).toBe(md);
     });
+
+    // Round 4: the two COMPOSITION rules come from the same pieces, so TABLE 1
+    // has to survive each of them in isolation as well. They are the widest
+    // patterns in the file — each spans a two-star AND a three-star run — so this
+    // is the check that matters most for a future widening.
+    test("…and both composition rules leave TABLE 1 alone", () => {
+      const bti = new RegExp(RAW_EMPHASIS_SOURCES.boldThenItalic, "gu");
+      const itb = new RegExp(RAW_EMPHASIS_SOURCES.italicThenBold, "gu");
+      expect("a **bold *ital*** span".replace(bti, "*$1_$2_*")).toBe("a *bold _ital_* span");
+      expect("a ***ital* bold** span".replace(itb, "*_$1_$2*")).toBe("a *_ital_ bold* span");
+      for (const md of inert) {
+        expect(md.replace(bti, "*$1_$2_*")).toBe(md);
+        expect(md.replace(itb, "*_$1_$2*")).toBe(md);
+      }
+    });
   });
 
   // ── Round 3: a 3+ star run is claimed by the triple rule, or it is LITERAL ──
@@ -444,12 +459,13 @@ describe("italics (*i*) — Slack + email use the flanking rule, telegram + web 
       expect(out).toContain("<strong><em>lab</em></strong>");
     });
 
-    // KNOWN MISS, pre-existing class: mixed nesting. Both delimiters are ambiguous
-    // and CommonMark's answer needs a real inline parser, which neither renderer
-    // has. Round 2 rendered a half-span and dropped stars (`*x *y**`,
-    // `a **b* c*`); today's output is fully literal — still not right, but nothing
-    // is silently lost, which is the invariant this block defends.
-    for (const md of ["**x *y***", "a ***b** c*"]) {
+    // KNOWN MISS, narrowed in round 4 to the shapes that genuinely do not compose:
+    // the delimiters are ambiguous and CommonMark's answer needs a real inline
+    // parser, which neither renderer has. Round 2 rendered a half-span and dropped
+    // stars; today's output is fully literal — still not right, but nothing is
+    // silently lost, which is the invariant this block defends. (`**x *y***` used
+    // to live here and now RENDERS — see the composition block below.)
+    for (const md of ["a ***b** c*", "***a* and *b***"]) {
       test(`mixed nesting stays literal (documented miss): ${md}`, () => {
         expect(formatSlackMrkdwn(md)).toBe(md);
         expect(formatEmailHtml(md)).toContain(md);
@@ -472,6 +488,110 @@ describe("italics (*i*) — Slack + email use the flanking rule, telegram + web 
     test("plain bold is unaffected by the star-run park", () => {
       expect(formatSlackMrkdwn("**b** and *i*")).toBe("*b* and _i_");
       expect(formatEmailHtml("**b** and *i*")).toContain("<strong>b</strong> and <em>i</em>");
+    });
+  });
+
+  // ── Round 4: bold and italic that COMPOSE into one span ────────────────────
+  // The defect this block closes, EXECUTED before the fix: `**bold *italic***`
+  // ends on a three-star run that IS a delimiter, but the triple rule cannot claim
+  // it (the run at the other end is two stars), so `parkLeftoverStarRuns` parked
+  // it — and parking a delimiter ORPHANS the `**` that opened the span. The orphan
+  // then paired with the next `**` on the line and inverted every bold after it:
+  //
+  //   `**bold with *italic*** then **second bold** and **third bold** end`
+  //     → `<strong>bold with *italic*** then </strong>second bold<strong> and
+  //        </strong>third bold** end`
+  //
+  // — three bolds wrong, a literal `**` leaked, and an adjoining link swallowed
+  // into the inverted span. Round 2 and `origin/main` rendered all three bolds
+  // correctly, so the park was a REGRESSION on multi-bold lines. The fix matches
+  // the composition instead of parking it: two more rules from the same guard
+  // pieces (`boldThenItalic`, `italicThenBold`), run BEFORE the triple rule and
+  // the park, so only true leftovers ever reach the park.
+  describe("bold composed with italic renders, and does not invert the rest of the line", () => {
+    test("the cascade: all three bolds render, the inner italic renders, no star leaks", () => {
+      const md = "**bold with *italic*** then **second bold** and **third bold** end";
+      expect(formatSlackMrkdwn(md)).toBe(
+        "*bold with _italic_* then *second bold* and *third bold* end",
+      );
+      const out = formatEmailHtml(md);
+      expect(out).toContain(
+        "<strong>bold with <em>italic</em></strong> then <strong>second bold</strong> " +
+          "and <strong>third bold</strong> end",
+      );
+      expect(out).not.toContain("**");
+    });
+
+    test("an adjoining link stays intact and OUTSIDE every emphasis span", () => {
+      const md = "**bold *ital*** and [link](https://ex.com) and **more**";
+      expect(formatSlackMrkdwn(md)).toBe("*bold _ital_* and <https://ex.com|link> and *more*");
+      const out = formatEmailHtml(md);
+      expect(out).toContain("<strong>bold <em>ital</em></strong> and ");
+      expect(out).toContain('<a href="https://ex.com"');
+      expect(out).toContain(">link</a> and <strong>more</strong>");
+    });
+
+    test("the mirror shape, bold STARTING with italic", () => {
+      expect(formatSlackMrkdwn("***italic* then bold**")).toBe("*_italic_ then bold*");
+      expect(formatEmailHtml("***italic* then bold**")).toContain(
+        "<strong><em>italic</em> then bold</strong>",
+      );
+    });
+
+    // Real corpus, verbatim. Re-running the round-4 sweep over the two wikis
+    // (`grep -rE '\*\*[^*]+\*[^*]+\*\*\*'` across mimir + huginn-jarvis) returns
+    // 20+ LLM-written prose lines in this shape; these two are pinned as written.
+    // The first carries TWO composed spans plus a plain italic on one line, which
+    // is exactly the cascade the old park inverted.
+    test("real wiki line: two composed spans and a plain italic on one line", () => {
+      const md =
+        "**Anthropic treats the model as a *potentially sentient life form*** " +
+        "(to be respected); **OpenAI treats it as a *tool*** (designed for utility).";
+      expect(formatSlackMrkdwn(md)).toBe(
+        "*Anthropic treats the model as a _potentially sentient life form_* " +
+          "(to be respected); *OpenAI treats it as a _tool_* (designed for utility).",
+      );
+      const out = formatEmailHtml(md);
+      expect(out).toContain(
+        "<strong>Anthropic treats the model as a <em>potentially sentient life form</em></strong>",
+      );
+      expect(out).toContain("<strong>OpenAI treats it as a <em>tool</em></strong>");
+      expect(out).not.toContain("**");
+    });
+
+    test("real wiki line: a composed span followed by an em-dash clause", () => {
+      const md =
+        "- **Opus 4.7 is the first model that *naturally hill-climbs*** — give it a target.";
+      expect(formatSlackMrkdwn(md)).toBe(
+        "- *Opus 4.7 is the first model that _naturally hill-climbs_* — give it a target.",
+      );
+      expect(formatEmailHtml(md)).toContain(
+        "<strong>Opus 4.7 is the first model that <em>naturally hill-climbs</em></strong> — give it a target.",
+      );
+    });
+
+    // The composition rules must not become a second way in for TABLE 1. The
+    // guards are what makes `***word***` still a plain triple and `****four****`
+    // still literal — both patterns reject the moment the flanks or content edges
+    // do not hold. (Full TABLE-1 sweep against both rules lives above.)
+    test("…and the plain triple is unchanged by the two new rules", () => {
+      expect(formatSlackMrkdwn("***word***")).toBe("*_word_*");
+      expect(formatEmailHtml("***word***")).toContain("<strong><em>word</em></strong>");
+      expect(formatSlackMrkdwn("****four****")).toBe("****four****");
+      expect(formatSlackMrkdwn("**bold*** trailing")).toBe("**bold*** trailing");
+    });
+
+    // Round 4 minor: the trailing-quote FOLLOWER. `"` is an allowed follower, but
+    // email had already escaped it to `&quot;`, whose leading `&` is a rejected
+    // one — so the span rendered on Slack and stayed literal on email (70 corpus
+    // rows). `&quot;` is now a follower atom in the escaped variant only.
+    test("a span closing just before a quote agrees across platforms", () => {
+      expect(formatSlackMrkdwn(`he called it ***critical***"`)).toBe(`he called it *_critical_*"`);
+      expect(formatEmailHtml(`he called it ***critical***"`)).toContain(
+        "<strong><em>critical</em></strong>&quot;",
+      );
+      expect(formatSlackMrkdwn(`he called it *critical*"`)).toBe(`he called it _critical_"`);
+      expect(formatEmailHtml(`he called it *critical*"`)).toContain("<em>critical</em>&quot;");
     });
   });
 });

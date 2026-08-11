@@ -158,6 +158,15 @@ const SLACK_ITALIC_RE = new RegExp(RAW_EMPHASIS_SOURCES.italic, "gu");
  *  whatever it rejects is parked literal by `parkLeftoverStarRuns` below. */
 const SLACK_TRIPLE_RE = new RegExp(RAW_EMPHASIS_SOURCES.triple, "gu");
 
+/** The two COMPOSITION shapes, rewritten BEFORE the triple rule and the park —
+ *  `**bold *italic***` → `*bold _italic_*` and `***italic* bold**` → `*_italic_ bold*`.
+ *  Round 4: their `***` run is a real delimiter with a `**` on its other side, so
+ *  the triple rule can't claim it and the park used to swallow it, orphaning the
+ *  `**` opener onto the NEXT bold on the line (measured — every following bold
+ *  inverted). Same guards as the rules above; see `markdown-core.ts`. */
+const SLACK_BOLD_THEN_ITALIC_RE = new RegExp(RAW_EMPHASIS_SOURCES.boldThenItalic, "gu");
+const SLACK_ITALIC_THEN_BOLD_RE = new RegExp(RAW_EMPHASIS_SOURCES.italicThenBold, "gu");
+
 function renderInline(text: string): string {
   const ph = new Placeholders();
 
@@ -191,6 +200,12 @@ function renderInline(text: string): string {
     if (!LINKABLE_TARGET_RE.test(target)) return label;
     return ph.add("LINKOPEN", `<${target}|`) + label + ph.add("LINKCLOSE", ">");
   });
+
+  // Composition FIRST — `**a *b***` / `***a* b**` mix a two-star and a three-star
+  // delimiter, so neither the triple rule nor the bold pass can see them whole,
+  // and the park below would claim the `***` half and orphan the `**` half.
+  result = result.replace(SLACK_BOLD_THEN_ITALIC_RE, "*$1_$2_*");
+  result = result.replace(SLACK_ITALIC_THEN_BOLD_RE, "*_$1_$2*");
 
   // Triple emphasis BEFORE either single pass — neither can see `***x***` whole.
   result = result.replace(SLACK_TRIPLE_RE, "*_$1_*");

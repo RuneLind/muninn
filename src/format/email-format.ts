@@ -309,6 +309,15 @@ const EMAIL_ITALIC_RE = new RegExp(ESCAPED_EMPHASIS_SOURCES.italic, "gu");
  *  whatever it rejects is parked literal by `parkLeftoverStarRuns`. */
 const EMAIL_TRIPLE_RE = new RegExp(ESCAPED_EMPHASIS_SOURCES.triple, "gu");
 
+/** The two COMPOSITION shapes — `**bold *italic***` and `***italic* bold**` —
+ *  rewritten BEFORE the triple rule and the park. Round 4: their `***` run is a
+ *  real delimiter whose other half is a `**`, so the triple rule cannot claim it
+ *  and the park used to swallow it, orphaning the `**` opener onto the NEXT bold
+ *  on the line — measured, every following bold inverted and an adjoining link
+ *  was swallowed. Same guards and edge vocabulary as the rules above. */
+const EMAIL_BOLD_THEN_ITALIC_RE = new RegExp(ESCAPED_EMPHASIS_SOURCES.boldThenItalic, "gu");
+const EMAIL_ITALIC_THEN_BOLD_RE = new RegExp(ESCAPED_EMPHASIS_SOURCES.italicThenBold, "gu");
+
 function renderInline(text: string): string {
   const ph = new Placeholders();
 
@@ -361,6 +370,12 @@ function renderInline(text: string): string {
       ? ph.add("LINKOPEN", `<a href="${target}" style="${S.link}">`) + label + ph.add("LINKCLOSE", "</a>")
       : label;
   });
+
+  // Composition FIRST — `**a *b***` / `***a* b**` mix a two-star and a three-star
+  // delimiter, so neither the triple rule nor the bold pass can see them whole,
+  // and the park below would claim the `***` half and orphan the `**` half.
+  result = result.replace(EMAIL_BOLD_THEN_ITALIC_RE, "<strong>$1<em>$2</em></strong>");
+  result = result.replace(EMAIL_ITALIC_THEN_BOLD_RE, "<strong><em>$1</em>$2</strong>");
 
   // Triple emphasis BEFORE the bold pass — the non-greedy bold pattern cannot see
   // `***x***` whole and leaves its third star behind.
