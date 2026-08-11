@@ -12,8 +12,8 @@ import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
 import {
   Placeholders,
   escapeHtml,
-  FLANKING_ITALIC_SOURCE,
-  TRIPLE_EMPHASIS_SOURCE,
+  RAW_EMPHASIS_SOURCES,
+  parkLeftoverStarRuns,
   LINKABLE_TARGET_RE,
 } from "../format/markdown-core.ts";
 
@@ -141,18 +141,22 @@ function renderTable(headers: string[], rows: string[][]): string {
  * Markdown `*italic*` → mrkdwn `_italic_`. Slack renders a single `*` as BOLD, so
  * without this pass an italic word arrives looking like a second bold word.
  *
- * The rule itself lives in `markdown-core.ts` ({@link FLANKING_ITALIC_SOURCE}) and
- * is shared with the email renderer — one home, so the two cannot drift. Its
- * strictness is the whole safety story: an earlier, looser version paired two
- * unrelated asterisks across non-word characters and mangled paths, SQL, regexes
- * and bare URLs. See that constant for the measured cases.
+ * The rule itself lives in `markdown-core.ts` ({@link RAW_EMPHASIS_SOURCES}) and is
+ * built from the same pieces as the email renderer's variant — one home, so the
+ * two cannot drift. Slack takes the RAW variant because it escapes nothing before
+ * this pass; email takes the entity-aware one. Its strictness is the whole safety
+ * story: an earlier, looser version paired two unrelated asterisks across non-word
+ * characters and mangled paths, SQL, regexes and bare URLs. See that constant for
+ * the measured cases.
  */
-const SLACK_ITALIC_RE = new RegExp(FLANKING_ITALIC_SOURCE, "gu");
+const SLACK_ITALIC_RE = new RegExp(RAW_EMPHASIS_SOURCES.italic, "gu");
 
 /** `***x***` → `*_x_*`, rewritten BEFORE both emphasis passes. Without it the
  *  non-greedy `\*\*(.+?)\*\*` bold pass claims the first two stars and leaves the
- *  third dangling. Shared source with email (`markdown-core.ts`). */
-const SLACK_TRIPLE_RE = new RegExp(TRIPLE_EMPHASIS_SOURCE, "g");
+ *  third dangling. Carries the SAME flanking guards as the italics rule (round 3 —
+ *  the unguarded version re-opened every protected case three stars wide), and
+ *  whatever it rejects is parked literal by `parkLeftoverStarRuns` below. */
+const SLACK_TRIPLE_RE = new RegExp(RAW_EMPHASIS_SOURCES.triple, "gu");
 
 function renderInline(text: string): string {
   const ph = new Placeholders();
@@ -190,6 +194,10 @@ function renderInline(text: string): string {
 
   // Triple emphasis BEFORE either single pass — neither can see `***x***` whole.
   result = result.replace(SLACK_TRIPLE_RE, "*_$1_*");
+
+  // …and every 3+ star run the guarded triple rule REJECTED is parked literal
+  // here, before the unguardable `\*\*(.+?)\*\*` bold pass can chew on it.
+  result = parkLeftoverStarRuns(result, ph);
 
   // Italics BEFORE the bold rewrite, and both guards are load-bearing (measured on
   // `**b** and *i*`): placed AFTER the bold rewrite, even the `(?<!\*)…(?!\*)`

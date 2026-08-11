@@ -36,8 +36,8 @@ import { renderBlocks, type BlockRenderer } from "./block-renderer.ts";
 import {
   Placeholders,
   escapeHtml,
-  FLANKING_ITALIC_SOURCE,
-  TRIPLE_EMPHASIS_SOURCE,
+  ESCAPED_EMPHASIS_SOURCES,
+  parkLeftoverStarRuns,
   LINKABLE_TARGET_RE,
 } from "./markdown-core.ts";
 
@@ -296,15 +296,18 @@ function factCheckSummaryHtml(attrs: Record<string, string>): string {
   return parts.length ? `${lead}: ${parts.join(", ")}` : lead;
 }
 
-/** The shared strict word-flanking italics rule, compiled once. See
- *  {@link FLANKING_ITALIC_SOURCE}; `u` is required by its `\p{…}` classes. */
-const EMAIL_ITALIC_RE = new RegExp(FLANKING_ITALIC_SOURCE, "gu");
+/** The shared strict word-flanking italics rule, compiled once — the
+ *  ENTITY-AWARE variant, because this renderer escapes before it emphasizes and
+ *  a quote content-edge therefore arrives as `&quot;`. See
+ *  {@link ESCAPED_EMPHASIS_SOURCES}; `u` is required by its `\p{…}` classes. */
+const EMAIL_ITALIC_RE = new RegExp(ESCAPED_EMPHASIS_SOURCES.italic, "gu");
 
 /** `***x***` → `<strong><em>x</em></strong>`, rewritten BEFORE the bold pass.
  *  Without it the non-greedy `\*\*(.+?)\*\*` claims the first two stars and the
  *  third leaks into the body as a literal `*` (`<strong>*triple</strong>*`).
- *  Shared source with Slack (`markdown-core.ts`). */
-const EMAIL_TRIPLE_RE = new RegExp(TRIPLE_EMPHASIS_SOURCE, "g");
+ *  Same flanking guards and same edge vocabulary as the italics rule above;
+ *  whatever it rejects is parked literal by `parkLeftoverStarRuns`. */
+const EMAIL_TRIPLE_RE = new RegExp(ESCAPED_EMPHASIS_SOURCES.triple, "gu");
 
 function renderInline(text: string): string {
   const ph = new Placeholders();
@@ -362,6 +365,9 @@ function renderInline(text: string): string {
   // Triple emphasis BEFORE the bold pass — the non-greedy bold pattern cannot see
   // `***x***` whole and leaves its third star behind.
   result = result.replace(EMAIL_TRIPLE_RE, "<strong><em>$1</em></strong>");
+  // …and every 3+ star run the guarded triple rule REJECTED is parked literal
+  // here, before the unguardable `\*\*(.+?)\*\*` bold pass can chew on it.
+  result = parkLeftoverStarRuns(result, ph);
   result = result.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
   // Italics under the shared strict word-flanking rule — the same regex source
   // Slack compiles, so the two cannot drift (`markdown-core.ts`). Telegram and web

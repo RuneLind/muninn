@@ -3,7 +3,7 @@ import { formatWebHtml } from "../web/web-format.ts";
 import { formatTelegramHtml } from "../bot/telegram-format.ts";
 import { formatSlackMrkdwn } from "../slack/slack-format.ts";
 import { formatEmailHtml } from "./email-format.ts";
-import { FLANKING_ITALIC_SOURCE } from "./markdown-core.ts";
+import { RAW_EMPHASIS_SOURCES } from "./markdown-core.ts";
 
 // Early-warning system for divergence: the FOUR platform formatters share one
 // block AST + dispatcher, so the same markdown must keep producing each
@@ -101,7 +101,10 @@ describe("the linkable-target gate is shared by slack + email", () => {
 // `\*\*(.+?)\*\*`, which claimed the FIRST two stars and stopped at the next two —
 // email rendered `<strong>*triple</strong>*`, leaking a literal asterisk into the
 // mail body (worse than main's mis-nested but styled output). Both strict-rule
-// platforms now rewrite the triple in one step, BEFORE their bold pass.
+// platforms now rewrite the triple in one step, BEFORE their bold pass — under
+// the SAME flanking guards as their italics rule (round 3), with everything the
+// guards reject parked literal. Both halves are pinned in "stars are never
+// silently dropped" below.
 describe("triple emphasis (***x***) is bold + italic, with no star left over", () => {
   const md = "a ***triple*** span";
   test("slack → *_x_*, mrkdwn's bold-italic", () =>
@@ -248,10 +251,48 @@ describe("italics (*i*) — Slack + email use the flanking rule, telegram + web 
       "2 * 3 and 4 * 5",
       "\\*escaped\\*",
       "src/**/*.ts",
+
+      // ROUND 3, group A — a QUOTED literal asterisk. The opening `*` sits
+      // immediately inside a quote, so it is the quoted character, not a
+      // delimiter. Round 2 had `"` and `'` among the allowed preceders and paired
+      // the two literals into one span on both platforms (measured:
+      // `use "_" and "_" as wildcards`, `sep='_' and end='_'`). Removing the two
+      // quote preceders is what makes all four inert.
+      `use "*" and "*" as wildcards`,
+      `SELECT "*" , count("*") FROM t`,
+      "sep='*' and end='*'",
+      "('*', '*')",
+
+      // ROUND 3, group B — the entity-aware EMAIL edge. Round 2 admitted a bare
+      // `&` as a content-opening edge (for `*&quot;quoted phrase&quot;*`), which
+      // opened EVERY entity: email rendered `<em>&amp;</em>` here while Slack left
+      // the line alone. Only the two quote entities are quote edges now.
+      "escape *&* alone",
+
+      // ROUND 3, group C — the `***triple***` rule now carries the SAME flanking
+      // guards as the italics rule. Round 2 spelled it as a bare
+      // `\*\*\*([^*\n]+)\*\*\*`, which re-opened this entire table three stars
+      // wide (measured: `/usr/*_/bin and /var/_*/log`, `x*_mid_*y`, …). Whatever
+      // the guarded rule rejects is then parked LITERAL before the unguardable
+      // `\*\*(.+?)\*\*` bold pass, which otherwise mangles the rejects just as
+      // badly — see the star-run block below.
+      "Files live in /usr/***/bin and /var/***/log",
+      "see https://ex.com/x/***b***/c",
+      "2 *** 3 and 4 *** 5",
+      "\\***escaped\\***",
+      "cp ***.md dir/***",
+      "x***mid***y",
     ];
     for (const md of inert) {
       test(`slack leaves it alone: ${md}`, () => expect(formatSlackMrkdwn(md)).toBe(md));
-      test(`email leaves it alone: ${md}`, () => expect(formatEmailHtml(md)).not.toContain("<em>"));
+      test(`email leaves it alone: ${md}`, () => {
+        // `<strong>` joined the assertion in round 3: the triple-star entries
+        // above are only inert if the BOLD pass leaves them alone too, and an
+        // `<em>`-only check cannot see a `<strong>` mangle.
+        const out = formatEmailHtml(md);
+        expect(out).not.toContain("<em>");
+        expect(out).not.toContain("<strong>");
+      });
     }
 
     // TABLE 2 — must EMPHASIZE. The round-2 widening: the first rule's content
@@ -275,8 +316,10 @@ describe("italics (*i*) — Slack + email use the flanking rule, telegram + web 
       test(`slack emphasizes it: ${md}`, () => expect(formatSlackMrkdwn(md)).toContain(`_${inner}_`));
       test(`email emphasizes it: ${md}`, () => {
         // The email column escapes BEFORE it emphasizes, so a quoted phrase
-        // reaches the pattern as `&quot;…&quot;` — which is why `&` is a content
-        // opening edge. Compare against the escaped form.
+        // reaches the pattern as `&quot;…&quot;` — which is why the email variant
+        // of the rule accepts the quote ENTITIES as content opening edges (round
+        // 3; round 2 accepted a bare `&`, which opened every entity). Compare
+        // against the escaped form.
         const escaped = inner.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
         expect(formatEmailHtml(md)).toContain(`<em>${escaped}</em>`);
       });
@@ -305,11 +348,130 @@ describe("italics (*i*) — Slack + email use the flanking rule, telegram + web 
       expect(formatEmailHtml("<span>*i*</span>")).not.toContain("<em>");
     });
 
+    // KNOWN MISS (round 3), the price of killing the quoted-literal pairing in
+    // TABLE 1 group A: an emphasis span that opens immediately inside a quote is
+    // now rejected, so quotes-inside-quotes stays literal. It stays literal on
+    // BOTH columns, which is the improvement — under round 2 Slack italicized it
+    // and email did not, because only email had escaped its `"` to `&quot;` by the
+    // time the pattern ran. A silent divergence traded for a loud, symmetric miss.
+    test("quotes inside quotes stay literal on both (documented miss)", () => {
+      expect(formatSlackMrkdwn(`he said "*hi*" loudly`)).toBe(`he said "*hi*" loudly`);
+      expect(formatEmailHtml(`he said "*hi*" loudly`)).not.toContain("<em>");
+    });
+
+    // The RESIDUAL of the entity-aware email edge, pinned rather than chased. `;`
+    // is a content-CLOSING edge (it has to be — `*word;*` emphasizes on both), and
+    // `;` also ends an entity, so a span whose content ends in an escaped `<`
+    // closes on email and not on Slack. Same pre-existing raw-tag-handling class
+    // as `<span>*i*</span>` above: email ESCAPES the tag, Slack STRIPS it. Removing
+    // `;` from the closing edge would just move the divergence onto `*word;*`.
+    test("raw-tag handling (escape vs strip) is the residual divergence, not italics", () => {
+      // The opening `<` is rejected on both, so a whole tag never italicizes.
+      expect(formatSlackMrkdwn("x *<b>* y")).toBe("x ** y"); // tag-strip leaves `**`
+      expect(formatEmailHtml("x *<b>* y")).toContain("*&lt;b&gt;*"); // literal escaped text
+      expect(formatEmailHtml("x *<b>* y")).not.toContain("<em>");
+      expect(formatSlackMrkdwn("tag *<Callout>* here")).toBe("tag ** here");
+      expect(formatEmailHtml("tag *<Callout>* here")).toContain("*&lt;Callout&gt;*");
+      expect(formatEmailHtml("tag *<Callout>* here")).not.toContain("<em>");
+      // …but a content edge that ends ON the escaped tag still closes on email.
+      expect(formatSlackMrkdwn("*x<*")).toBe("*x<*");
+      expect(formatEmailHtml("*x<*")).toContain("<em>x&lt;</em>");
+      // The `;` that makes that possible is load-bearing for ordinary prose.
+      expect(formatSlackMrkdwn("*word;*")).toBe("_word;_");
+      expect(formatEmailHtml("*word;*")).toContain("<em>word;</em>");
+    });
+
     test("the rule itself, compiled from the shared source", () => {
-      const re = new RegExp(FLANKING_ITALIC_SOURCE, "gu");
+      const re = new RegExp(RAW_EMPHASIS_SOURCES.italic, "gu");
       expect("this is *italic* text".replace(re, "_$1_")).toBe("this is _italic_ text");
       for (const md of inert) expect(md.replace(re, "_$1_")).toBe(md);
       for (const [md, inner] of emphasized) expect(md.replace(re, "_$1_")).toContain(`_${inner}_`);
+    });
+
+    // The TRIPLE rule is built from the same pieces, so TABLE 1 has to survive it
+    // in isolation too — that is the whole content of round 3's third fix.
+    test("…and the triple rule, from the same pieces, leaves TABLE 1 alone", () => {
+      const re = new RegExp(RAW_EMPHASIS_SOURCES.triple, "gu");
+      expect("a ***triple*** span".replace(re, "*_$1_*")).toBe("a *_triple_* span");
+      for (const md of inert) expect(md.replace(re, "*_$1_*")).toBe(md);
+    });
+  });
+
+  // ── Round 3: a 3+ star run is claimed by the triple rule, or it is LITERAL ──
+  // The guarded triple rule can only reject; the `\*\*(.+?)\*\*` bold pass that
+  // runs after it has no flanking guards and cannot grow any (it must keep
+  // matching `**bold**` anywhere). So every run the triple rule rejects is parked
+  // literal in between. Without that park the guards bought nothing: measured on
+  // round 3 without it, the triple-star path-glob pair lost two of its six stars
+  // and `****four****` came out a six-star run.
+  describe("stars are never silently dropped", () => {
+    const stars = (s: string) => (s.match(/\*/g) ?? []).length;
+
+    // Star-count arithmetic, stated per case: input stars − stars consumed by a
+    // RENDERED emphasis span = stars left in the output.
+    const runs: [string, number][] = [
+      ["Files live in /usr/***/bin and /var/***/log", 6], // nothing rendered → all 6 survive
+      ["see https://ex.com/x/***b***/c", 6],
+      ["2 *** 3 and 4 *** 5", 6],
+      ["\\***escaped\\***", 6],
+      ["cp ***.md dir/***", 6],
+      ["x***mid***y", 6],
+      ["****four****", 8], // four-star runs: literal by construction
+    ];
+    for (const [md, expected] of runs) {
+      test(`slack keeps every star: ${md}`, () => {
+        expect(stars(formatSlackMrkdwn(md))).toBe(expected);
+        expect(formatSlackMrkdwn(md)).toBe(md);
+      });
+      test(`email keeps every star: ${md}`, () => {
+        const out = formatEmailHtml(md);
+        expect(stars(out)).toBe(expected);
+        expect(out).not.toContain("<strong>");
+        expect(out).not.toContain("<em>");
+      });
+    }
+
+    // The real triple spans still render — the guards reject, they do not disable.
+    test("a real ***span*** still renders on both", () => {
+      expect(formatSlackMrkdwn("***word***")).toBe("*_word_*");
+      expect(formatEmailHtml("***word***")).toContain("<strong><em>word</em></strong>");
+    });
+
+    test("…including inside a link label, whose parked delimiters are legal flanks", () => {
+      expect(formatSlackMrkdwn("[***lab***](https://x.com)")).toBe("<https://x.com|*_lab_*>");
+      const out = formatEmailHtml("[***lab***](https://x.com)");
+      expect(out).toContain('<a href="https://x.com"');
+      expect(out).toContain("<strong><em>lab</em></strong>");
+    });
+
+    // KNOWN MISS, pre-existing class: mixed nesting. Both delimiters are ambiguous
+    // and CommonMark's answer needs a real inline parser, which neither renderer
+    // has. Round 2 rendered a half-span and dropped stars (`*x *y**`,
+    // `a **b* c*`); today's output is fully literal — still not right, but nothing
+    // is silently lost, which is the invariant this block defends.
+    for (const md of ["**x *y***", "a ***b** c*"]) {
+      test(`mixed nesting stays literal (documented miss): ${md}`, () => {
+        expect(formatSlackMrkdwn(md)).toBe(md);
+        expect(formatEmailHtml(md)).toContain(md);
+      });
+    }
+
+    // The ARGUED COST of the park, pinned as behaviour. `**bold*** trailing` used
+    // to render bold with a stray star (`<strong>bold</strong>*`); its 3-star run
+    // is now literal, so the whole line is. Malformed input either way, and the
+    // safe direction is the one that does not eat a star the writer typed.
+    test("a malformed bold+star run is literal rather than half-rendered", () => {
+      expect(formatSlackMrkdwn("**bold*** trailing")).toBe("**bold*** trailing");
+      const out = formatEmailHtml("**bold*** trailing");
+      expect(out).toContain("**bold*** trailing");
+      expect(out).not.toContain("<strong>");
+    });
+
+    // …and a plain `**bold**` run is untouched by the park: it is two stars, not
+    // three. The park must not become a bold-pass killswitch.
+    test("plain bold is unaffected by the star-run park", () => {
+      expect(formatSlackMrkdwn("**b** and *i*")).toBe("*b* and _i_");
+      expect(formatEmailHtml("**b** and *i*")).toContain("<strong>b</strong> and <em>i</em>");
     });
   });
 });

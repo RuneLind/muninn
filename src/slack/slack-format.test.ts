@@ -273,11 +273,41 @@ Found it ~~wrong~~ correct.`;
       "<https://ex.com/x/*b*/c>",
       "\\*not italic\\*",
       "glob **/*.test.ts here",
+
+      // Round 3: a QUOTED literal asterisk. `"` and `'` left the allowed
+      // preceders — an opening `*` immediately inside a quote is the quoted
+      // character, not a delimiter. Round 2 paired the two literals into one span
+      // (measured: `use "_" and "_" as wildcards`, `sep='_' and end='_'`).
+      `use "*" and "*" as wildcards`,
+      `SELECT "*" , count("*") FROM t`,
+      "sep='*' and end='*'",
+      "('*', '*')",
+      // Same removal, seen from the other side: quotes-inside-quotes is now a
+      // documented miss — and it is a SYMMETRIC one, which round 2's wasn't
+      // (Slack italicized it, email didn't). Full argument: markdown-all-platforms.
+      `he said "*hi*" loudly`,
+
+      // Round 3: the `***triple***` rule carries the same flanking guards, and
+      // whatever it rejects is parked LITERAL before the unguardable
+      // `\*\*(.+?)\*\*` bold pass. Round 2's bare triple mangled all of these.
+      "Files live in /usr/***/bin and /var/***/log",
+      "see https://ex.com/x/***b***/c",
+      "2 *** 3 and 4 *** 5",
+      "\\***escaped\\***",
+      "cp ***.md dir/***",
+      "x***mid***y",
+      "****four****",
     ]) {
       test(`strict flanking leaves it alone: ${input}`, () => {
         expect(formatSlackMrkdwn(input)).toBe(input);
       });
     }
+
+    // The guards reject; they do not disable. Both emphasis rules still fire.
+    test("a real ***span*** still becomes mrkdwn bold-italic", () => {
+      expect(formatSlackMrkdwn("***word***")).toBe("*_word_*");
+      expect(formatSlackMrkdwn("a ***triple*** span")).toBe("a *_triple_* span");
+    });
 
     // Round-2 widening, the one knock-on flip: `(` joined the allowed preceders
     // (so `«*økta*»` and friends work), which makes a parenthesized span emphasize
