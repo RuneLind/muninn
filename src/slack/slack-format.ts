@@ -9,7 +9,7 @@ import {
   parseChecklist,
 } from "../format/markdown-ast.ts";
 import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
-import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
+import { Placeholders, escapeHtml, FLANKING_ITALIC_SOURCE } from "../format/markdown-core.ts";
 
 /**
  * Converts Claude's markdown output to Slack mrkdwn.
@@ -135,18 +135,19 @@ function renderTable(headers: string[], rows: string[][]): string {
  * Markdown `*italic*` → mrkdwn `_italic_`. Slack renders a single `*` as BOLD, so
  * without this pass an italic word arrives looking like a second bold word.
  *
- * Three constraints, each closing a measured failure:
- *  - `(?<![\w*])` / `(?![\w*])` — the `*` neighbours must not be word chars (so
- *    intraword `a*b*c` is left alone, matching what the telegram/web formatters
- *    do) and must not be another `*` (so a `**bold**` run and `src/**\/*.ts` are
- *    untouched).
- *  - CommonMark-style FLANKING: no whitespace immediately inside the delimiters —
- *    `(?=\S)` on the left, the trailing `[^\s*]` on the right. Without it prose
- *    arithmetic (`2 * 3 and 4 * 5`) reads as one emphasis span and comes out as
- *    `2 _ 3 and 4 _ 5`.
- *  - `[^*\n]` — a span never crosses a line or swallows another delimiter.
+ * The rule itself lives in `markdown-core.ts` ({@link FLANKING_ITALIC_SOURCE}) and
+ * is shared with the email renderer — one home, so the two cannot drift. Its
+ * strictness is the whole safety story: an earlier, looser version paired two
+ * unrelated asterisks across non-word characters and mangled paths, SQL, regexes
+ * and bare URLs. See that constant for the measured cases.
  */
-const SLACK_ITALIC_RE = /(?<![\w*])\*(?=\S)([^*\n]*[^\s*])\*(?![\w*])/g;
+const SLACK_ITALIC_RE = new RegExp(FLANKING_ITALIC_SOURCE, "gu");
+
+/** Link targets that may become a real `<url|label>`. Slack renders a non-scheme
+ *  `<…|…>` (a relative path, a wiki target) as something between a broken link and
+ *  raw text, so those degrade to their LABEL instead — deliberately, rather than
+ *  by the trailing tag-strip eating the whole thing as it used to. */
+const SLACK_LINKABLE_RE = /^(?:https?:\/\/|mailto:)/i;
 
 function renderInline(text: string): string {
   const ph = new Placeholders();
@@ -171,14 +172,16 @@ function renderInline(text: string): string {
     .join("");
 
   // Markdown links BEFORE the emphasis passes. Slack's link rewrite used to run
-  // last, which meant an emphasis pass ran over raw link URLs — `[docs](https://
-  // ex.com/x/*b*/c)` came out with a rewritten URL. Only the generated `<url|`
+  // last, which meant the `**bold**` pass ran over raw link URLs — `[docs](https://
+  // ex.com/a**b**c)` came out with a rewritten URL. Only the generated `<url|`
   // and `>` delimiters are parked (sentinels carry no `<`/`>`, so the trailing
   // tag-strip leaves them alone); the LABEL stays in the stream so bold/italics
   // still render inside link text, as they did when this pass ran last.
-  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, label: string, url: string) =>
-    ph.add("LINKOPEN", `<${url}|`) + label + ph.add("LINKCLOSE", ">"),
-  );
+  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, label: string, url: string) => {
+    const target = url.trim();
+    if (!SLACK_LINKABLE_RE.test(target)) return label;
+    return ph.add("LINKOPEN", `<${target}|`) + label + ph.add("LINKCLOSE", ">");
+  });
 
   // Italics BEFORE the bold rewrite, and both guards are load-bearing (measured on
   // `**b** and *i*`): placed AFTER the bold rewrite, even the `(?<!\*)…(?!\*)`
@@ -203,7 +206,12 @@ function renderInline(text: string): string {
     ph.add("LINK", `<${url}>`),
   );
 
-  result = result.replace(/<\/?[^>]+>/g, "");
+  // Catch-all strip for whatever tag-shaped text is left. `[^>\x00]` is
+  // load-bearing: without the NUL exclusion the "tag" body runs THROUGH a
+  // placeholder sentinel, so a `<` in a link LABEL swallows the parked `>` and
+  // every character up to the next `>` in the document — measured on
+  // `[a<b](https://x.com) then more > text`, which lost its trailing prose.
+  result = result.replace(/<\/?[^>\x00]+>/g, "");
 
   return ph.restore(result);
 }

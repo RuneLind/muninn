@@ -16,13 +16,15 @@
  * Pure + IO-free: everything here is testable without a model call or a filesystem.
  */
 
-import type { BotPrompts } from "../bots/config.ts";
+import { DEFAULT_VARIANT_ID, DEFAULT_VARIANT_LABEL, type BotPrompts } from "../bots/config.ts";
 
 /** Id of the synthetic entry that maps back to the bare `share.md` / the shipped
- *  default prompt. Reserved: a `share.default.md` file can't collide with it (the
- *  loader already refuses the `default` variant id). Peer of `DEFAULT_VARIANT_ID`. */
-export const DEFAULT_SHARE_PRESET_ID = "default";
-export const DEFAULT_SHARE_PRESET_LABEL = "Standard";
+ *  default prompt. A VALUE RE-EXPORT of the loader's constant, not a second
+ *  spelling of `"default"`: the loader refuses exactly this id as a variant
+ *  (`share.default.md`), so if the two literals ever drifted, the id the picker
+ *  reserves and the id the loader blocks would no longer be the same string. */
+export const DEFAULT_SHARE_PRESET_ID = DEFAULT_VARIANT_ID;
+export const DEFAULT_SHARE_PRESET_LABEL = DEFAULT_VARIANT_LABEL;
 
 /** One resolved preset the picker offers and the share service runs. */
 export interface SharePreset {
@@ -32,9 +34,10 @@ export interface SharePreset {
 }
 
 // ── Rules every shipped preset carries ───────────────────────────────────────
-// Repeated verbatim rather than composed from a shared constant per preset, so a
-// per-bot override that copies a preset file can see the whole contract in one
-// place. The three that are NOT style preferences:
+// Composed from ONE constant here, but interpolated into each preset so the rules
+// appear VERBATIM in every rendered prompt — a per-bot override that copies a
+// preset out of the picker takes the whole contract with it. The three that are
+// NOT style preferences:
 //
 //   * markdown only — every consumer (Slack mrkdwn, the email renderer, the web
 //     preview) converts FROM markdown; HTML or a code fence around the whole post

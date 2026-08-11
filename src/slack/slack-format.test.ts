@@ -260,6 +260,30 @@ Found it ~~wrong~~ correct.`;
       });
     }
 
+    // Adversarial review, EXECUTED repros: the first flanking rule only rejected
+    // whitespace immediately inside the delimiters, so any two asterisks on a line
+    // separated by non-word characters paired up. Every input below came back
+    // mangled (`/usr/_/bin`, `SELECT _, count(_)`, `\_not italic\_`). The rule is
+    // now strict word-flanking; the safe direction is "leave unchanged".
+    for (const input of [
+      "Files live in /usr/*/bin and /var/*/log",
+      "SELECT *, count(*) FROM t",
+      "regex ^.*$ and .*?",
+      "see https://ex.com/x/*b*/c",
+      "<https://ex.com/x/*b*/c>",
+      "\\*not italic\\*",
+      "glob **/*.test.ts here",
+      "a (*b*) in parens is not flanked",
+    ]) {
+      test(`strict flanking leaves it alone: ${input}`, () => {
+        expect(formatSlackMrkdwn(input)).toBe(input);
+      });
+    }
+
+    test("a non-ASCII word still italicizes (the rule is unicode-aware)", () => {
+      expect(formatSlackMrkdwn("dette er *økta* nå")).toBe("dette er _økta_ nå");
+    });
+
     test("italics inside inline code stay literal", () => {
       expect(formatSlackMrkdwn("use `a *b* c` here")).toBe("use `a *b* c` here");
     });
@@ -290,6 +314,36 @@ Found it ~~wrong~~ correct.`;
 
     test("a `>` inside a URL survives the trailing tag-strip", () => {
       expect(formatSlackMrkdwn("[q](https://x.com/?a=1>2)")).toBe("<https://x.com/?a=1>2|q>");
+    });
+
+    // Adversarial review, EXECUTED repro: the tag-strip ran THROUGH the parked
+    // `>` sentinel, so a `<` in a link label ate everything up to the next `>`
+    // anywhere later in the message. Text loss on live output.
+    describe("a `<` in a link label never eats the text after the link", () => {
+      test("bare `<` in the label", () => {
+        const out = formatSlackMrkdwn("[a<b](https://x.com) then more > text");
+        expect(out).toContain("then more > text");
+        expect(out).toContain("https://x.com");
+      });
+
+      test("a tag-shaped label loses only the tag, never what follows the link", () => {
+        const out = formatSlackMrkdwn("[Foo <Bar>](https://x.com) and after");
+        expect(out).toContain("and after");
+        expect(out).toContain("Foo");
+      });
+
+      test("spaced comparison operators around a link", () => {
+        const out = formatSlackMrkdwn("[a < b](https://x.com) and c > d");
+        expect(out).toContain("and c > d");
+        expect(out).toContain("a < b");
+      });
+    });
+
+    test("a non-scheme link target degrades to its LABEL (Slack renders `</path|x>` oddly)", () => {
+      expect(formatSlackMrkdwn("[rel](/path/to.md)")).toBe("rel");
+      expect(formatSlackMrkdwn("[page](plans/x.mdx)")).toBe("page");
+      // mailto is linkable, like http(s).
+      expect(formatSlackMrkdwn("[mail](mailto:a@b.no)")).toBe("<mailto:a@b.no|mail>");
     });
   });
 

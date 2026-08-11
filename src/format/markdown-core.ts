@@ -14,6 +14,36 @@ export function escapeHtml(text: string): string {
 }
 
 /**
+ * Regex SOURCE (not a compiled regex — callers pick their own flags) for a
+ * markdown `*italic*` span under a STRICT word-flanking rule. The ONE home for
+ * the rule: `slack-format.ts` and `email-format.ts` both compile it, so the two
+ * cannot drift. Telegram and web deliberately keep their older, weaker
+ * `(?<!\w)\*([^*]+?)\*(?!\w)` — changing those would move long-standing live
+ * output; the four columns are pinned in `markdown-all-platforms.test.ts`.
+ *
+ * Compile with `"gu"` — the `\p{…}` classes require the unicode flag (so `*økt*`
+ * emphasizes like `*item*` does).
+ *
+ * Four constraints, each closing a MEASURED failure. The safe direction is
+ * "leave unchanged": anything short of a real emphasis span must not match.
+ *  - opener flanking `(?<![^\s\x00])` — the `*` must sit at the start of the
+ *    text, after whitespace, or after a placeholder sentinel (a parked link
+ *    delimiter, so emphasis still renders inside a link LABEL). Without it a `*`
+ *    after `/`, `(`, `.` or `\` opens a span: a pair of path globs on one line,
+ *    `SELECT *, count(*) FROM t`, a `^.*$` regex, a bare URL with an asterisk
+ *    pair in a path segment, and an escaped `\*not italic\*` all came out
+ *    mangled. All are pinned in `markdown-all-platforms.test.ts`.
+ *  - content starts AND ends with a letter/digit — this is what rejects the
+ *    prose-arithmetic span (`2 * 3 and 4 * 5`) and the `SELECT *,` opener.
+ *  - closer flanking — the `*` must be followed by whitespace, end of text, a
+ *    sentinel, or closing punctuation; never by a slash or a letter.
+ *  - `[^*\n]` — a span never crosses a line or swallows another delimiter, so a
+ *    `**bold**` run and a double-star glob stay whole.
+ */
+export const FLANKING_ITALIC_SOURCE =
+  "(?<![^\\s\\x00])\\*([\\p{L}\\p{N}](?:[^*\\n]*[\\p{L}\\p{N}])?)\\*(?![^\\s\\x00.,;:!?)\\]}'\"])";
+
+/**
  * Placeholder store using `\x00<MARKER><idx>\x00` sentinels. Use to protect
  * regions (code blocks, inline code, links) from further markdown processing,
  * then restore them at the end.

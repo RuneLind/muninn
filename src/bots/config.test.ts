@@ -325,6 +325,34 @@ describe("bot discovery", () => {
       ]);
     });
 
+    // Adversarial review: an empty file is ABSENT, not an empty prompt. Kept, an
+    // empty share.md replaced the shipped default with "" (`?? DEFAULT` keeps a
+    // present-but-empty string) and the share flow ran instruction-free.
+    test("a blank prompt file is treated as absent, not as an empty prompt", () => {
+      setupTestBot("_test_blankprompt", {
+        prompts: { share: "   \n\n\t\n", jiraAnalysis: "Real prompt" },
+      });
+
+      const found = discoverAllBots().find((b) => b.name === "_test_blankprompt");
+      expect(found!.prompts).toEqual({ jiraAnalysis: "Real prompt" });
+      expect(found!.prompts?.share).toBeUndefined();
+    });
+
+    test("a blank variant file is skipped, label-only body included", () => {
+      setupTestBot("_test_blankvariant", {
+        prompts: {
+          "share.empty": "\n  \n",
+          "share.labelonly": "<!-- label: Nothing below -->\n   \n",
+          "share.real": "Real body",
+        },
+      });
+
+      const found = discoverAllBots().find((b) => b.name === "_test_blankvariant");
+      expect(found!.prompts?.shareVariants).toEqual([
+        { id: "real", label: "Real", content: "Real body" },
+      ]);
+    });
+
     test("the reserved \"default\" id is refused for share too", () => {
       setupTestBot("_test_sharereserved", {
         prompts: { share: "The default body", "share.default": "Unreachable" },

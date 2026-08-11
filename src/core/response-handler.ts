@@ -27,7 +27,7 @@ export function slackPostCapability(channelContext?: string): string {
 You can post messages directly to Slack channels using this directive in your response:${channelInfo}
 
 <slack-post channel="#channel-name">
-Your message here (supports full Slack mrkdwn formatting)
+Your message here (write STANDARD MARKDOWN — **bold**, *italic*, [text](url); it is converted to Slack formatting on send)
 </slack-post>
 
 Rules:

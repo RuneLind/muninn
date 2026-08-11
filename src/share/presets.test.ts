@@ -3,13 +3,22 @@ import {
   resolveSharePresets,
   findSharePreset,
   DEFAULT_SHARE_PRESET_ID,
+  DEFAULT_SHARE_PRESET_LABEL,
   DEFAULT_SHARE_PROMPT,
   SHIPPED_SHARE_PRESETS,
   SLACK_DEV_SECURITY_PROMPT,
 } from "./presets.ts";
-import type { BotPrompts } from "../bots/config.ts";
+import { DEFAULT_VARIANT_ID, DEFAULT_VARIANT_LABEL, type BotPrompts } from "../bots/config.ts";
 
 const variant = (id: string, label: string, content: string) => ({ id, label, content });
+
+// The picker's reserved id and the LOADER's refused variant id must be the same
+// string: the loader blocks `share.default.md` because this entry owns "default".
+// Re-exported rather than re-spelled so the two can never drift apart.
+describe("the default entry's id/label are the loader's constants", () => {
+  test("id", () => expect(DEFAULT_SHARE_PRESET_ID).toBe(DEFAULT_VARIANT_ID));
+  test("label", () => expect(DEFAULT_SHARE_PRESET_LABEL).toBe(DEFAULT_VARIANT_LABEL));
+});
 
 describe("resolveSharePresets", () => {
   test("a bot with NO prompt files still gets the full shipped set", () => {

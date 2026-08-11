@@ -33,7 +33,7 @@ import {
 } from "./markdown-ast.ts";
 import type { Block, FactVerdict } from "./markdown-ast.ts";
 import { renderBlocks, type BlockRenderer } from "./block-renderer.ts";
-import { Placeholders, escapeHtml } from "./markdown-core.ts";
+import { Placeholders, escapeHtml, FLANKING_ITALIC_SOURCE } from "./markdown-core.ts";
 
 type ComponentBlock = Extract<Block, { type: "component" }>;
 const isTab = (b: Block): b is ComponentBlock => b.type === "component" && b.name === "Tab";
@@ -290,6 +290,10 @@ function factCheckSummaryHtml(attrs: Record<string, string>): string {
   return parts.length ? `${lead}: ${parts.join(", ")}` : lead;
 }
 
+/** The shared strict word-flanking italics rule, compiled once. See
+ *  {@link FLANKING_ITALIC_SOURCE}; `u` is required by its `\p{…}` classes. */
+const EMAIL_ITALIC_RE = new RegExp(FLANKING_ITALIC_SOURCE, "gu");
+
 function renderInline(text: string): string {
   const ph = new Placeholders();
 
@@ -327,19 +331,24 @@ function renderInline(text: string): string {
   // Markdown links → <a>. http/https only — a `javascript:` target must never
   // become a live href, and a relative target has nothing to resolve against in a
   // mail client, so it degrades to its label.
+  //
+  // The generated TAGS are parked, the label is not: the emphasis passes below
+  // must reach a `**bold**` link label but must never reach the href. Emitted
+  // unparked (as this did until the review), `[the doc](https://ex.com/a/*b*/c)`
+  // came out with `<em>` inside its own href.
   result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_m, label: string, url: string) =>
-    /^https?:\/\//.test(url) ? `<a href="${url}" style="${S.link}">${label}</a>` : label,
+    /^https?:\/\//.test(url)
+      ? ph.add("LINKOPEN", `<a href="${url}" style="${S.link}">`) + label + ph.add("LINKCLOSE", "</a>")
+      : label,
   );
 
   result = result.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-  // Italics with the CommonMark-style flanking rule (no whitespace immediately
-  // inside the delimiters), the twin of `SLACK_ITALIC_RE` in `slack-format.ts`.
-  // Deliberately duplicated rather than hoisted into a shared home: telegram and
-  // web ship the weaker `(?<!\w)\*([^*]+?)\*(?!\w)` — under which prose
-  // arithmetic (`2 * 3 and 4 * 5`) becomes one emphasis span — and a shared rule
-  // would change their long-standing output as a side effect of adding email.
-  // The four columns are pinned side by side in `markdown-all-platforms.test.ts`.
-  result = result.replace(/(?<![\w*])\*(?=\S)([^*\n]*[^\s*])\*(?![\w*])/g, "<em>$1</em>");
+  // Italics under the shared strict word-flanking rule — the same regex source
+  // Slack compiles, so the two cannot drift (`markdown-core.ts`). Telegram and web
+  // keep the weaker `(?<!\w)\*([^*]+?)\*(?!\w)`, under which prose arithmetic
+  // (`2 * 3 and 4 * 5`) becomes one emphasis span; the four columns are pinned
+  // side by side in `markdown-all-platforms.test.ts`.
+  result = result.replace(EMAIL_ITALIC_RE, "<em>$1</em>");
   result = result.replace(/(?<!\w)_([^_]+?)_(?!\w)/g, "<em>$1</em>");
   result = result.replace(/~~(.+?)~~/g, "<s>$1</s>");
 

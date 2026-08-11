@@ -52,6 +52,22 @@ describe("prepareWikiPageBody", () => {
     expect(prepareWikiPageBody(raw)).toBe("The important bit.");
   });
 
+  // Adversarial review, EXECUTED repro: the component strip used to be
+  // `similar.ts`'s, built on the newline-CROSSING tag source. A malformed opener
+  // plus any later `>` deleted the prose between them.
+  test("a malformed component opener does not swallow the prose below it", () => {
+    const raw = [
+      '<Callout tone="info"',
+      "",
+      "The paragraph that must survive.",
+      "",
+      "A quote> with a stray angle bracket.",
+    ].join("\n");
+    const out = prepareWikiPageBody(raw);
+    expect(out).toContain("The paragraph that must survive.");
+    expect(out).toContain("stray angle bracket");
+  });
+
   test("flattens wiki-internal links and keeps external ones", () => {
     const raw = "See [[Harness Engineering]], [the plan](plans/x.mdx) and [docs](https://example.com).";
     expect(prepareWikiPageBody(raw)).toBe(
@@ -134,6 +150,24 @@ describe("prepareSummaryDocBody", () => {
   test("a doc with neither breadcrumb nor frontmatter is unchanged", () => {
     expect(prepareSummaryDocBody("Just the body.")).toBe("Just the body.");
   });
+
+  // Adversarial review, EXECUTED repros: the pattern only required a bracketed
+  // segment at the head, so any document OPENING with a bracket lost it — a
+  // markdown link came back as a bare URL in parentheses, a bracketed lead-in
+  // lost its first words. The breadcrumb now has to own its whole line.
+  test("a leading markdown link is NOT a breadcrumb", () => {
+    const raw = "[Read the original](https://example.com/post)\n\nBody";
+    expect(prepareSummaryDocBody(raw)).toBe(raw);
+  });
+
+  test("a bracketed lead-in on a prose line is NOT a breadcrumb", () => {
+    const raw = "[TL;DR] Everything you need";
+    expect(prepareSummaryDocBody(raw)).toBe(raw);
+  });
+
+  test("a real full-line breadcrumb is still stripped", () => {
+    expect(prepareSummaryDocBody("[youtube-summaries > 2026-08-01 > Talk]   \nBody")).toBe("Body");
+  });
 });
 
 describe("clipShareBody", () => {
@@ -142,16 +176,20 @@ describe("clipShareBody", () => {
     expect(clipShareBody(body)).toBe(body);
   });
 
-  test("an over-cap body is clipped AND marked — never silently halved", () => {
+  test("an over-cap body is clipped AND marked — the marker rides INSIDE the cap", () => {
+    // The cap is hard: marker included, the result never exceeds `max`. Appended
+    // on top (as it was until review) every clipped body came back 62 over.
     const out = clipShareBody("y".repeat(SHARE_BODY_MAX + 500));
     expect(out.endsWith(SHARE_BODY_CLIP_MARKER)).toBe(true);
-    expect(out.length).toBe(SHARE_BODY_MAX + SHARE_BODY_CLIP_MARKER.length);
+    expect(out.length).toBe(SHARE_BODY_MAX);
   });
 
   test("truncation is surrogate-safe — no U+FFFD from a cut astral char", () => {
-    const out = clipShareBody("🚀".repeat(10), 5);
+    const out = clipShareBody("🚀".repeat(200), 100);
     expect(out).not.toContain("�");
     expect(out.startsWith("🚀🚀")).toBe(true);
+    expect(out.length).toBeLessThanOrEqual(100);
+    expect(out.endsWith(SHARE_BODY_CLIP_MARKER)).toBe(true);
   });
 
   test("the clip applies through the preparers", () => {

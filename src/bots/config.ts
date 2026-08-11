@@ -217,15 +217,11 @@ export interface PromptVariant {
   content: string;
 }
 
-/** Pre-`share` name for {@link PromptVariant}, kept so existing Jira-flow callers
- *  (and their tests) don't have to be touched by a rename. */
-export type JiraAnalysisVariant = PromptVariant;
-
 export interface BotPrompts {
   /** Default Jira task analysis prompt (from Chrome extension). The Jira content is appended automatically. */
   jiraAnalysis?: string;
   /** Named variants of the Jira analysis prompt — discovered from `prompts/jiraAnalysis.<id>.md`. */
-  jiraAnalysisVariants?: JiraAnalysisVariant[];
+  jiraAnalysisVariants?: PromptVariant[];
   /** Prompt for the "Investigate Code" follow-up button after Jira analysis. */
   investigateCode?: string;
   /** Prompt for the "Deep Analysis" follow-up button after code investigation — parallel agent verification. */
@@ -250,11 +246,13 @@ const SINGLE_PROMPT_KEYS = ["jiraAnalysis", "investigateCode", "deepAnalysis", "
 /** Prompt keys that ALSO accept `<key>.<id>.md` variant files, mapped to the
  *  `BotPrompts` field the collected variants are exposed on. The map (rather than
  *  a bare key list plus a hardcoded assignment) is what keeps adding a variant key
- *  a one-line change that the compiler checks. */
+ *  a one-line change that the compiler checks — and `Partial<Record<keyof …>>` is
+ *  what makes it check the KEYS as well as the values (a `Record<string, …>`
+ *  constraint accepts a typo'd key silently; this one raises TS2561). */
 const VARIANT_PROMPT_FIELDS = {
   jiraAnalysis: "jiraAnalysisVariants",
   share: "shareVariants",
-} as const satisfies Record<string, keyof BotPrompts>;
+} as const satisfies Partial<Record<keyof BotPrompts, keyof BotPrompts>>;
 
 const VARIANT_PROMPT_KEYS = Object.keys(VARIANT_PROMPT_FIELDS) as (keyof typeof VARIANT_PROMPT_FIELDS)[];
 
@@ -307,6 +305,18 @@ function loadPromptsFromDir(botDir: string, botName: string): BotPrompts | undef
     const stem = entry.name.slice(0, -3);
     const raw = readFileSync(join(promptsDir, entry.name), "utf-8");
 
+    // A blank file is ABSENT, not an empty prompt. Kept whole, an empty `share.md`
+    // replaced the shipped default with "" (`prompts.share ?? DEFAULT` keeps a
+    // present-but-empty string) and the flow would have run on an instruction-free
+    // prompt. Same for a variant: an empty preset is worse than no preset.
+    if (raw.trim() === "") {
+      log.warn("Bot \"{name}\" prompt file prompts/{file} is empty — ignoring it", {
+        name: botName,
+        file: entry.name,
+      });
+      continue;
+    }
+
     if (singleKeys.has(stem)) {
       result[stem as keyof BotPrompts] = raw as never;
       continue;
@@ -327,6 +337,14 @@ function loadPromptsFromDir(botDir: string, botName: string): BotPrompts | undef
           continue;
         }
         const { label, content } = parseLabel(raw, variantId);
+        // A file carrying ONLY a `<!-- label: … -->` line is blank too.
+        if (content.trim() === "") {
+          log.warn("Bot \"{name}\" prompt file prompts/{file} has no body below its label — ignoring it", {
+            name: botName,
+            file: entry.name,
+          });
+          continue;
+        }
         (variantsByKey[baseKey] ??= []).push({ id: variantId, label, content });
         continue;
       }

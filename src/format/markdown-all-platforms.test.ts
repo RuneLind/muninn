@@ -3,6 +3,7 @@ import { formatWebHtml } from "../web/web-format.ts";
 import { formatTelegramHtml } from "../bot/telegram-format.ts";
 import { formatSlackMrkdwn } from "../slack/slack-format.ts";
 import { formatEmailHtml } from "./email-format.ts";
+import { FLANKING_ITALIC_SOURCE } from "./markdown-core.ts";
 
 // Early-warning system for divergence: the FOUR platform formatters share one
 // block AST + dispatcher, so the same markdown must keep producing each
@@ -62,6 +63,35 @@ describe("link [label](https://example.com)", () => {
   });
   test("email → a NON-http target degrades to its label, never a dead href", () =>
     expect(formatEmailHtml("[label](plans/x.md)")).not.toContain("<a "));
+  test("slack → a NON-scheme target degrades to its label (mrkdwn has no relative link)", () =>
+    expect(formatSlackMrkdwn("[label](plans/x.md)")).toBe("label"));
+});
+
+// Adversarial review, EXECUTED repro: email emitted its `<a href="…">` BEFORE the
+// emphasis passes, so markdown characters inside a URL were rewritten into the
+// href — the exact bug the Slack column already pins. The absence of an email
+// column here is why it shipped green. All three emphasis markers are covered.
+describe("emphasis characters inside a link URL never reach the href", () => {
+  const cases = [
+    ["asterisks", "[the doc](https://example.com/a/*b*/c)", "https://example.com/a/*b*/c"],
+    ["underscores", "[the doc](https://example.com/a/_b_/c)", "https://example.com/a/_b_/c"],
+    ["double tilde", "[the doc](https://example.com/a~~b~~c)", "https://example.com/a~~b~~c"],
+  ] as const;
+  for (const [name, md, url] of cases) {
+    test(`email → ${name} survive verbatim in the href`, () => {
+      const out = formatEmailHtml(md);
+      expect(out).toContain(`<a href="${url}"`);
+      expect(out).toContain(">the doc</a>");
+    });
+    test(`slack → ${name} survive verbatim in the target`, () =>
+      expect(formatSlackMrkdwn(md)).toBe(`<${url}|the doc>`));
+  }
+
+  test("email → emphasis in the link LABEL still renders (only the tags are parked)", () => {
+    const out = formatEmailHtml("[**bold** and *i*](https://example.com/x)");
+    expect(out).toContain('<a href="https://example.com/x"');
+    expect(out).toContain("<strong>bold</strong> and <em>i</em>");
+  });
 });
 
 describe("fenced code block", () => {
@@ -142,6 +172,37 @@ describe("italics (*i*) — Slack + email use the flanking rule, telegram + web 
     test("telegram", () => expect(formatTelegramHtml(md)).toBe("<b>b</b> and <i>i</i>"));
     test("slack", () => expect(formatSlackMrkdwn(md)).toBe("*b* and _i_"));
     test("email", () => expect(formatEmailHtml(md)).toContain("<strong>b</strong> and <em>i</em>"));
+  });
+
+  // ONE home for the strict rule (`FLANKING_ITALIC_SOURCE` in markdown-core.ts),
+  // compiled by both Slack and email — pinned here as behaviour, so a second
+  // literal re-introduced in either file trips this block. Every input is an
+  // EXECUTED adversarial-review repro of the earlier, looser rule, which paired
+  // two unrelated asterisks across non-word characters.
+  describe("the strict flanking rule is shared by slack + email", () => {
+    const inert = [
+      "Files live in /usr/*/bin and /var/*/log",
+      "SELECT *, count(*) FROM t",
+      "regex ^.*$ and .*?",
+      "see https://ex.com/x/*b*/c",
+      "2 * 3 and 4 * 5",
+      "a (*b*) in parens",
+    ];
+    for (const md of inert) {
+      test(`slack leaves it alone: ${md}`, () => expect(formatSlackMrkdwn(md)).toBe(md));
+      test(`email leaves it alone: ${md}`, () => expect(formatEmailHtml(md)).not.toContain("<em>"));
+    }
+
+    test("and both still emphasize a real span, including a non-ASCII word", () => {
+      expect(formatSlackMrkdwn("den *økta* der")).toBe("den _økta_ der");
+      expect(formatEmailHtml("den *økta* der")).toContain("<em>økta</em>");
+    });
+
+    test("the rule itself, compiled from the shared source", () => {
+      const re = new RegExp(FLANKING_ITALIC_SOURCE, "gu");
+      expect("this is *italic* text".replace(re, "_$1_")).toBe("this is _italic_ text");
+      for (const md of inert) expect(md.replace(re, "_$1_")).toBe(md);
+    });
   });
 });
 
