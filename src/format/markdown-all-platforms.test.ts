@@ -282,6 +282,11 @@ describe("italics (*i*) — Slack + email use the flanking rule, telegram + web 
       "\\***escaped\\***",
       "cp ***.md dir/***",
       "x***mid***y",
+      // The inner `*` of `**a *b***` must not open on a writer-escaped star:
+      // without the `(?<!\\)` guard, `boldThenItalic` consumed the `\*` as its
+      // italic opener and emitted a stray `\` plus emphasis the writer suppressed.
+      "**a \\*b***",
+      "**pass the flag as \\*x***",
     ];
     for (const md of inert) {
       test(`slack leaves it alone: ${md}`, () => expect(formatSlackMrkdwn(md)).toBe(md));

@@ -153,7 +153,7 @@ function buildEmphasisSources(
   // `italicThenBold`); the other end of that half abuts the inner `*` and is
   // whatever the writer's phrase ends/starts with, typically a space.
   const boldThenItalic =
-    ITALIC_PRECEDER + "\\*\\*((?:" + contentOpen + "[^*\\n]*)?)\\*(" + content + ")\\*\\*\\*" +
+    ITALIC_PRECEDER + "\\*\\*((?:" + contentOpen + "[^*\\n]*)?)(?<!\\\\)\\*(" + content + ")\\*\\*\\*" +
     follower;
   const italicThenBold =
     ITALIC_PRECEDER + "\\*\\*\\*(" + content + ")\\*((?:[^*\\n]*" + ITALIC_EDGE_CLOSE + ")?)\\*\\*" +
