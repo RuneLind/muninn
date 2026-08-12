@@ -865,8 +865,14 @@ function hostLabel(): string {
  */
 export function sortedLockRoots(repo: SyncRepo): string[] {
   const roots = repo.mode === "wiki" && repo.wikiRoot ? [repo.wikiRoot] : repo.containedWikiRoots ?? [];
+  // Dedupe on the same key: the registry dedupes wikis by NAME only, so two
+  // entries can name one wiki through different spellings (symlink, /tmp vs
+  // /private/tmp) — and taking the same chain key twice nests a lock inside
+  // itself, which never resolves.
+  const seen = new Set<string>();
   return roots
     .map((root) => ({ root, key: wikiWriteQueueKey(root) }))
+    .filter((r) => (seen.has(r.key) ? false : (seen.add(r.key), true)))
     .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
     .map((r) => r.root);
 }

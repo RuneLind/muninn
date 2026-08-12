@@ -1019,6 +1019,13 @@ describe("syncRepo", () => {
     const repo: SyncRepo = { name: "multi", path: base, mode: "plain", containedWikiRoots: [link, m2] };
     expect([link, m2].slice().sort()).toEqual([m2, link]); // the raw order…
     expect(sortedLockRoots(repo)).toEqual([link, m2]); // …is not the key order
+
+    // Two spellings of ONE wiki (the registry dedupes by name only, so aliases
+    // reach here) must collapse to one lock take — the same chain key nested
+    // inside itself never resolves.
+    const aliased: SyncRepo = { name: "alias", path: base, mode: "plain", containedWikiRoots: [m1, link, m2] };
+    expect(sortedLockRoots(aliased)).toHaveLength(2);
+    expect(new Set(sortedLockRoots(aliased).map((r) => [m1, link].includes(r) ? "m1" : "m2")).size).toBe(2);
   });
 
   test("a five-line git failure is clamped to one card line, with the full text on lastError", async () => {
