@@ -4,6 +4,11 @@
  * markdown streams to the dialog as it is written, and on completion the server
  * renders the per-platform strings the tabs show.
  *
+ * **Two surfaces, one runner.** `POST /api/summaries/share` streams through this
+ * same function (see `summaries-share.ts`), so anything here that NAMES a surface
+ * — the `/agents` deep link, the bot-less copy — is an option with the /wiki
+ * wording as its default, never a constant.
+ *
  * **Why the fact-check scaffold and not `streamResearchSSE`.** Research brings
  * retrieval, a coverage gate and cited synthesis; share has a single source
  * document already in hand and cites nothing. What it needs from the family is the
@@ -130,6 +135,19 @@ export interface ShareSseOptions {
   userPrompt: string;
   /** `/agents` card name — truncated here, so callers don't each re-do it. */
   runName: string;
+  /**
+   * Where the run card DEEP-LINKS back to. `/wiki` for the reader's dialog,
+   * `/summaries` for the doc panel's — an option rather than a constant because
+   * this module is shared by both surfaces, and a hardcoded `/wiki` sent every
+   * /summaries share's `/agents` card to a reader that cannot show the document.
+   */
+  sourcePage?: string;
+  /**
+   * The bot-less `app_error` copy. The default names a wiki, which is true on
+   * the surface this runner was written for and a lie on `/summaries`, where the
+   * document came out of a capture archive and there is no wiki in the story.
+   */
+  noBotMessage?: string;
   /** Test seam — production callers omit it (forwarded into `runFencedOneShot`). */
   oneShot?: typeof executeOneShot;
   /** Fired on every terminal path — the route releases its single-flight slot. */
@@ -157,7 +175,7 @@ export function streamShareSSE(c: Context, opts: ShareSseOptions): Response {
   return streamFactcheckScaffold(c, {
     botConfig: opts.botConfig,
     preflightError: opts.preflightError,
-    noBotMessage: "No bots configured to write a share summary for this wiki.",
+    noBotMessage: opts.noBotMessage ?? "No bots configured to write a share summary for this wiki.",
     run: (stream, botConfig, clientState) => runShare(stream, opts, botConfig, clientState),
     ...(opts.onSettled ? { onSettled: opts.onSettled } : {}),
   });
@@ -180,7 +198,7 @@ async function runShare(
       // an astral character stores a U+FFFD on the run card.
       runName:
         opts.runName.length > 60 ? `${truncateUnits(opts.runName, 57)}…` : opts.runName,
-      sourcePage: "/wiki",
+      sourcePage: opts.sourcePage ?? "/wiki",
       source: "share",
       prompt: opts.userPrompt,
       systemPrompt: opts.systemPrompt,

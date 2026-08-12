@@ -15,6 +15,15 @@
  * a dialog whose halves disagree about which one is open.
  */
 
-import { openShareDialog, closeShareDialog } from "./share-dialog.ts";
+import {
+  openShareDialog,
+  closeShareDialog,
+  closeShareDialogOnNavigate,
+} from "./share-dialog.ts";
 
-Object.assign(globalThis, { openShareDialog, closeShareDialog });
+// `closeShareDialogOnNavigate` is published for the same reason the reader calls
+// it: a host that RETARGETS its viewer (the /summaries doc panel, /wiki's
+// breadcrumb) wants "close it only if this is a different document", not an
+// unconditional close that throws away an un-copied post when the reader re-opens
+// the one they were already sharing.
+Object.assign(globalThis, { openShareDialog, closeShareDialog, closeShareDialogOnNavigate });

@@ -6,6 +6,7 @@ import {
   shareBlockingError,
   shareCapError,
   shareConflictCopy,
+  shareCopyOf,
   shareDialogHtml,
   sharePromptError,
   shareRequestBody,
@@ -14,12 +15,19 @@ import {
   slackLengthWarning,
   shareLangChipId,
   shareTabId,
+  shareTargetOf,
+  summaryShareTarget,
+  summaryShareTargetScript,
+  wikiShareTarget,
+  SUMMARY_SHARE_COPY,
+  WIKI_SHARE_COPY,
   SHARE_PRESET_RETRY_ID,
   SHARE_PROMPT_TOGGLE_ID,
   SHARE_TABS,
   type ShareDialogState,
   type SharePresetOption,
 } from "./wiki-share-dialog.ts";
+import { escJsonScript } from "./escape.ts";
 import {
   SHARE_LANGS,
   SLACK_PASTE_MAX,
@@ -82,6 +90,28 @@ describe("the POST body", () => {
   test("a blank extra is omitted rather than sent as an empty string", () => {
     expect(shareRequestBody(state({ extra: "   " })).extra).toBeUndefined();
     expect(shareRequestBody(state({ extra: " focus on risk " })).extra).toBe("focus on risk");
+  });
+
+  test("a TARGET replaces the identity fields — and only those", () => {
+    // The /summaries surface shares a capture document, identified by
+    // `{source, docId}`; everything the share layer itself owns (preset, lang,
+    // the two optional text fields) is unchanged.
+    const body = shareRequestBody(
+      state({
+        target: summaryShareTarget("x-article", "ai/x/Some Post.md"),
+        extra: "keep it short",
+      }),
+    );
+    expect(body).toEqual({
+      source: "x-article",
+      docId: "ai/x/Some Post.md",
+      preset: "default",
+      lang: "en",
+      extra: "keep it short",
+    });
+    // …and no trace of the wiki surface's own fields.
+    expect(body.wiki).toBeUndefined();
+    expect(body.page).toBeUndefined();
   });
 
   test("promptIsEdited is false while the preset list is still loading", () => {
@@ -322,5 +352,121 @@ describe("dismissal and conflict copy", () => {
     const s = state({ conflictExpiresAtMs: NOW + 30_000 });
     expect(shareDialogHtml(s, "", NOW)).toContain("~30s");
     expect(shareDialogHtml(s, "", NOW + 20_000)).toContain("~10s");
+  });
+});
+
+describe("share targets", () => {
+  test("the DEFAULT target is the /wiki surface, derived from wiki+page", () => {
+    // Additive seam: a state with no target must post exactly where PR B posted.
+    expect(shareTargetOf(state())).toEqual(wikiShareTarget("mimir", "Wiki gardener"));
+    expect(shareTargetOf(state()).endpoint).toBe("/api/wiki/share");
+    expect(shareTargetOf(state()).presetsUrl).toBe("/api/wiki/share/presets?wiki=mimir");
+  });
+
+  test("the bare /wiki (no registered name) asks for the preset list unqualified", () => {
+    expect(shareTargetOf(state({ wiki: "" })).presetsUrl).toBe("/api/wiki/share/presets");
+  });
+
+  test("a wiki name is URL-encoded into the preset query", () => {
+    expect(wikiShareTarget("my wiki/x", "p").presetsUrl).toBe(
+      "/api/wiki/share/presets?wiki=my%20wiki%2Fx",
+    );
+  });
+
+  test("an explicit target wins over wiki+page", () => {
+    const target = summaryShareTarget("youtube", "ai/Some Title.md");
+    expect(shareTargetOf(state({ target }))).toBe(target);
+    expect(target.endpoint).toBe("/api/summaries/share");
+    // No `?wiki=` — the summaries preset list is resolved for the summarizer
+    // bot, which is a server-side role, not a client-supplied one.
+    expect(target.presetsUrl).toBe("/api/summaries/share/presets");
+  });
+});
+
+describe("surface copy", () => {
+  test("the /wiki wording is what a target-less state renders — unchanged", () => {
+    expect(shareCopyOf(state())).toEqual(WIKI_SHARE_COPY);
+    expect(shareDialogHtml(state({ presets: [] }), "", NOW)).toContain(
+      "This wiki offers no share presets.",
+    );
+    expect(shareConflictCopy(NOW + 30_000, NOW)).toBe(
+      "A share is already running for this page. It frees up in at most ~30s.",
+    );
+  });
+
+  test("a /summaries state says document and archive, never page and wiki", () => {
+    // The three strings that NAME the surface. Everything else in the dialog is
+    // the same sentence on both, which is why only these three are carried.
+    const target = summaryShareTarget("youtube", "ai/Some Title.md");
+    const s = state({ target, presets: [] });
+    const empty = shareDialogHtml(s, "", NOW);
+    expect(empty).toContain("This archive offers no share presets.");
+    // Not the /wiki sentence — asserted on the copy itself, since the markup is
+    // full of legitimate `wiki-share-*` class names.
+    expect(empty).not.toContain(WIKI_SHARE_COPY.noPresets);
+    const conflict = shareDialogHtml(state({ target, conflictExpiresAtMs: NOW + 30_000 }), "", NOW);
+    expect(conflict).toContain("A share is already running for this document.");
+    expect(conflict).not.toContain("for this page");
+    expect(shareCopyOf(s).stopped).toContain("The document stays reserved");
+  });
+});
+
+describe("summaryShareTargetScript", () => {
+  test("emits the builder's OWN keys, with only the two values substituted", () => {
+    // The point of the seam: the /summaries page script cannot import, and
+    // hand-writing `fields: { source, docId }` there gave the field names a
+    // second spelling that nothing pinned. A rename of either key must move this
+    // string too.
+    const js = summaryShareTargetScript("_shareDoc.source", "_shareDoc.docId");
+    expect(js).toContain('"endpoint":"/api/summaries/share"');
+    expect(js).toContain('"source":_shareDoc.source');
+    expect(js).toContain('"docId":_shareDoc.docId');
+    // No sentinel survives, and the surface copy rides along.
+    expect(js).not.toContain("slot__");
+    expect(js).toContain("A share is already running for this document.");
+    // It is a JS object EXPRESSION: evaluating it reproduces the builder.
+    const evaluated = new Function(
+      "_shareDoc",
+      "return " + js,
+    )({ source: "youtube", docId: "ai/Some Title.md" }) as unknown;
+    expect(evaluated).toEqual(summaryShareTarget("youtube", "ai/Some Title.md"));
+  });
+
+  test("substitution is ONE pass — an argument spelling a sentinel is not re-substituted", () => {
+    // Two sequential split/joins re-scanned the text the first pass inserted, so
+    // an argument containing the OTHER slot's sentinel got rewritten by the
+    // second — silently swapping the two identity values.
+    const js = summaryShareTargetScript('"__share_doc_id_slot__"', "_d");
+    const evaluated = new Function("_d", "return " + js)("real-doc") as {
+      fields: { source: string; docId: string };
+    };
+    expect(evaluated.fields.source).toBe("__share_doc_id_slot__");
+    expect(evaluated.fields.docId).toBe("real-doc");
+  });
+
+  test("no raw `<` survives — the string is interpolated into a page <script>", () => {
+    // Weak by construction (nothing in the target carries a `<` today), so it is
+    // only the wiring pin: the escape ITSELF is exercised below, on a value that
+    // actually contains one. Deleting `escJsonScript` from the builder still
+    // passes this assertion — hence the pair.
+    expect(summaryShareTargetScript("_a", "_b")).not.toContain("<");
+  });
+
+  test("escJsonScript neutralizes `</script>` and round-trips byte-for-byte", () => {
+    // The builder's escape, tested where it can FAIL: the day a copy string
+    // carries a `<`, this is what stops `</script>` ending the block the target
+    // is emitted into — while the value the page evaluates must stay identical
+    // to the one that was serialized.
+    const target = {
+      ...summaryShareTarget("youtube", "ai/Some Title.md"),
+      copy: {
+        ...SUMMARY_SHARE_COPY,
+        conflictLead: 'A share is running </script><script>alert("x")</script>',
+      },
+    };
+    const js = escJsonScript(target);
+    expect(js).not.toContain("<");
+    expect(js).toContain("\\u003c/script>");
+    expect(new Function("return " + js)()).toEqual(target);
   });
 });

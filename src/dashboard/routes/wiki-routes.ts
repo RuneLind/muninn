@@ -80,6 +80,10 @@ import {
   validateClaimQuotes,
   CLAIM_QUOTE_MAX,
 } from "../views/components/wiki-integrate.ts";
+// The dialog's surface copy — imported, never re-spelled: the 409 below and the
+// dialog's own conflict line are the same sentence, and a reword that touched
+// only one of them would split the route from the screen it answers.
+import { WIKI_SHARE_COPY } from "../views/components/wiki-share-dialog.ts";
 import { commitWikiChange } from "../../wiki/commit.ts";
 import { todayOslo } from "../../gardener/util.ts";
 import { capabilitiesForConnectorType, connectorCapabilities } from "../../ai/one-shot.ts";
@@ -93,12 +97,7 @@ import {
   buildShareUserPrompt,
   shareBodyKindForPageType,
 } from "../../share/prompt.ts";
-import {
-  isShareLang,
-  SHARE_EXTRA_MAX,
-  SHARE_LANGS,
-  SHARE_PROMPT_OVERRIDE_MAX,
-} from "../../share/wire.ts";
+import { parseShareRequestBody, SHARE_LANGS } from "../../share/wire.ts";
 import {
   acquireClaimRetry,
   claimRetryKey,
@@ -2062,55 +2061,34 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       };
       const body = await c.req.json<ShareBody>().catch(() => ({}) as ShareBody);
 
-      // Body shape is client-controlled, so every field the route reads is
-      // type-checked HERE (the `/api/wiki/ask/chat` precedent). A non-string `wiki`
-      // used to reach `rawWiki.trim()` inside `resolveWikiRequest` and 500.
-      for (const field of [
-        "wiki", "bot", "page", "preset", "promptOverride", "extra",
-      ] as const) {
-        if (body[field] !== undefined && typeof body[field] !== "string") {
-          return c.json({ error: `${field} must be a string` }, 400);
-        }
-      }
-
-      const page = typeof body.page === "string" ? body.page.trim() : "";
-      if (!page) return c.json({ error: "page is required" }, 400);
-      const presetId = typeof body.preset === "string" ? body.preset.trim() : "";
-      if (!presetId) return c.json({ error: "preset is required" }, 400);
-      if (!isShareLang(body.lang)) {
-        return c.json(
-          { error: `lang must be one of: ${SHARE_LANGS.map((l) => l.id).join(", ")}` },
-          400,
-        );
-      }
-      const lang = body.lang;
-      const promptOverride = typeof body.promptOverride === "string" ? body.promptOverride : "";
-      if (promptOverride.length > SHARE_PROMPT_OVERRIDE_MAX) {
-        return c.json(
-          { error: `promptOverride is longer than ${SHARE_PROMPT_OVERRIDE_MAX} characters` },
-          400,
-        );
-      }
-      // A PRESENT but blank override is a 400, not a fall-back to the preset. The
-      // client sends `promptOverride: ""` when the reader empties the textarea, and
-      // `promptOverride.trim() || preset.content` then ran the PRESET — the model
-      // following an instruction the screen was no longer showing, reported as that
-      // preset's output. (An ABSENT field is the unedited case and stays silent.)
+      // Every body-shape check — the type-check loop (a non-string `wiki` used to
+      // reach `rawWiki.trim()` inside `resolveWikiRequest` and 500), the required
+      // fields, the language, both caps and the present-but-BLANK
+      // `promptOverride` — is the shared `parseShareRequestBody`, so the
+      // /summaries twin cannot answer the same malformed body differently.
       //
       // **The ordering rule for this route: BODY-SHAPE checks precede
-      // RESOLUTION-DEPENDENT ones.** This 400 runs before the wiki resolves — it
-      // needs nothing but the body, and it is wrong under every wiki — while the
-      // unknown-preset check below deliberately waits, because the valid preset set
-      // is a function of the resolved wiki's bot. Both are still pre-`streamSSE`,
-      // which is the invariant that actually matters.
-      if (body.promptOverride !== undefined && promptOverride.trim() === "") {
-        return c.json({ error: "promptOverride is empty — omit it to use the preset" }, 400);
-      }
-      const extra = typeof body.extra === "string" ? body.extra : "";
-      if (extra.length > SHARE_EXTRA_MAX) {
-        return c.json({ error: `extra is longer than ${SHARE_EXTRA_MAX} characters` }, 400);
-      }
+      // RESOLUTION-DEPENDENT ones.** Everything in the parser needs nothing but
+      // the body and is wrong under every wiki, while the unknown-preset check
+      // below deliberately waits, because the valid preset set is a function of
+      // the resolved wiki's bot. Both are still pre-`streamSSE`, which is the
+      // invariant that actually matters.
+      const parsed = parseShareRequestBody(body as Record<string, unknown>, {
+        stringFields: ["wiki", "bot", "page", "preset", "promptOverride", "extra"],
+        required: ["page", "preset"],
+      });
+      if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+      const page = parsed.body.values.page ?? "";
+      const presetId = parsed.body.preset;
+      const { lang, promptOverride, extra } = parsed.body;
 
+      // The RAW `body.wiki`/`body.bot`, deliberately NOT the parser's trimmed
+      // `parsed.body.values.*`: the parser only TYPE-checks these two (neither is
+      // `required`), and `resolveWikiRequest` owns its own trimming and
+      // absent-vs-blank rule. Feeding it the parser's values instead — where
+      // absent arrives as `""` — is behaviour-identical only because that rule
+      // treats both as unset; keeping the raw values means resolution does not
+      // silently depend on the parser's normalization. Not an oversight.
       const { entry, unknownWiki, wiki } = resolveWikiRequest(
         getWikiRegistry(),
         c.req.query("wiki") ?? body.wiki,
@@ -2186,7 +2164,18 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       if (botConfig && userPrompt && entry && meta) {
         const acquired = acquireShareFlight(shareFlightKey(entry.name, meta.relPath));
         if (!acquired.ok) {
-          return c.json({ state: "running", expiresAtMs: acquired.expiresAtMs }, 409);
+          // `error` rides along with the machine-readable pair so a caller that
+          // is not the dialog (curl, a future surface) gets a sentence rather
+          // than having to know what `{state:"running"}` means. The dialog
+          // ignores it — its own `shareConflictCopy` owns the countdown.
+          return c.json(
+            {
+              state: "running",
+              expiresAtMs: acquired.expiresAtMs,
+              error: WIKI_SHARE_COPY.conflictLead,
+            },
+            409,
+          );
         }
         release = acquired.release;
         log.info("Wiki share: wiki={wiki} bot={bot} page={page} preset={preset} lang={lang}", {

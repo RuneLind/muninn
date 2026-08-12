@@ -11,6 +11,8 @@ import { sumOutcomesStyles, sumOutcomesHtml, sumOutcomesScript } from "./compone
 import { sumStatsStyles, sumStatsHtml, sumStatsScript } from "./components/sum-stats.ts";
 import { sumShelfStyles, sumShelfHtml, sumShelfScript } from "./components/sum-shelf.ts";
 import { sumArticleLibraryStyles, sumArticleLibraryHtml, sumArticleLibraryScript } from "./components/sum-article-library.ts";
+import { shareDialogStyles } from "./components/wiki-share-dialog.ts";
+import { shareDialogClientScript } from "./components/share-dialog-client.ts";
 import { agentPresenceStyles, agentPresenceHtml, agentPresenceScript } from "./components/agent-presence.ts";
 import {
   sectionTabsStyles,
@@ -41,6 +43,10 @@ const SUMMARIES_TABS: SectionTabsConfig = {
 
 export async function renderSummariesPage(): Promise<string> {
   const helpers = await helpersClientScript();
+  // The share dialog, as the STANDALONE bundle (this page composes
+  // template-string scripts in one scope and cannot import). Exactly one copy
+  // per page: /wiki imports the module instead and never loads this.
+  const shareDialog = await shareDialogClientScript();
   // Percentile cuts on the CURRENT huginn author ranking, computed once at render and
   // embedded — the page is fully server-rendered, so the X author tier badges + "Top
   // authors" filter read these directly (no extra endpoint). null when the scores file
@@ -71,6 +77,19 @@ export async function renderSummariesPage(): Promise<string> {
     ${sumOutcomesStyles()}
     ${sumStatsStyles()}
     ${agentPresenceStyles()}
+
+    /* Share dialog. The CSS is rendered SERVER-SIDE and the DOM module comes
+       from the standalone bundle, because the bundle TREE-SHAKES
+       shareDialogStyles() — it is never referenced from the browser entrypoint,
+       so a page that only loads the script gets an unstyled (transparent,
+       unpositioned) dialog. The e2e asserts the computed background for exactly
+       that reason. */
+    ${shareDialogStyles()}
+    /* …and it must sit ABOVE the doc panel it opens over: .doc-overlay is
+       z-index 1000 here, while the dialog ships 59/60 for /wiki (which has no
+       overlay). Scoped to this page, like the 3-column .doc-panel override. */
+    .wiki-share-scrim { z-index: 1001; }
+    .wiki-share { z-index: 1002; }
 
     /* Page head: title + live presence + the collapsed paste-article affordance. */
     .sum-page-head {
@@ -165,9 +184,12 @@ export async function renderSummariesPage(): Promise<string> {
     </div>
   </div>
 
-  ${docPanelHtml({ askFollowUp: true })}
+  ${docPanelHtml({ askFollowUp: true, share: true })}
 
   ${MARKED_CDN_SCRIPT}
+  <!-- Publishes openShareDialog/closeShareDialog on globalThis. Loaded BEFORE
+       the component scripts so their wiring can see it. -->
+  <script>${shareDialog}</script>
   <script>
     // Summary-source registry projection (from src/summaries/sources.ts).
     const SOURCES = ${clientSourcesJson()};

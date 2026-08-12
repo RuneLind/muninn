@@ -8,6 +8,7 @@ import { docDateMs } from "../../gardener/harvest.ts";
 import { buildStats, type StatsDoc, type SummariesStats } from "../../summaries/stats.ts";
 import { listSummaryCollections } from "../../summaries/list-collections.ts";
 import { DEFAULT_COVERAGE_DEPS, type CoverageDeps } from "../../db/wiki-proposals.ts";
+import { registerSummariesShareRoutes } from "./summaries-share.ts";
 
 const log = getLog("dashboard");
 
@@ -108,6 +109,11 @@ export function registerSummariesRoutes(
   app.get("/summaries", async (c) => {
     return c.html(await renderSummariesPage());
   });
+
+  // Share: `POST /api/summaries/share` (SSE) + its preset list — the doc panel's
+  // 📤 Share button. Its own module (`summaries-share.ts`) because it is an
+  // adapter onto the shared share layer, with its own injectable seams.
+  registerSummariesShareRoutes(app, config);
 
   app.get("/api/summaries/stats", async (c) => {
     const botName = c.req.query("bot") || "jarvis";

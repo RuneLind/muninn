@@ -251,13 +251,31 @@ const emailRenderer: BlockRenderer = {
     }
   },
   text(lines) {
-    // Blank lines are dropped rather than joined: `<br>` is a VISIBLE line here
-    // (web joins with `\n`, which collapses), so a text block that opens with an
-    // empty line — as a `FactCheck` claim's evidence does — otherwise renders a
-    // stray blank line under every heading.
-    const kept = lines.filter((l) => l.trim() !== "");
-    if (kept.length === 0) return "";
-    return `<p style="${S.p}">${kept.map(renderInline).join("<br>")}</p>`;
+    // **One `<p>` per markdown PARAGRAPH.** A `text` block carries every line
+    // between two structural blocks, blank separators included, so filtering the
+    // blanks out and joining the rest with `<br>` fused a whole multi-paragraph
+    // post into a single wall of text with no paragraph spacing anywhere — the
+    // shape every share's Email tab is in.
+    //
+    // The blank line still never becomes a `<br>` of its own: `<br>` is a VISIBLE
+    // line here (web joins with `\n`, which collapses), so a block that opens with
+    // an empty one — as a `FactCheck` claim's evidence does — would otherwise
+    // render a stray blank line under every heading. It is a SEPARATOR, and runs
+    // of them collapse to one, exactly as in markdown.
+    const paras: string[][] = [];
+    let current: string[] = [];
+    for (const line of lines) {
+      if (line.trim() === "") {
+        if (current.length) paras.push(current);
+        current = [];
+        continue;
+      }
+      current.push(line);
+    }
+    if (current.length) paras.push(current);
+    return paras
+      .map((p) => `<p style="${S.p}">${p.map(renderInline).join("<br>")}</p>`)
+      .join("");
   },
 };
 
