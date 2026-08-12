@@ -1,4 +1,7 @@
 import { test, expect, describe, mock } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // Mock DB to prevent real SQL calls
 mock.module("../db/client.ts", () => ({
@@ -70,9 +73,21 @@ describe("spawnHaiku timeout", () => {
   test("kills hanging process after timeout", async () => {
     // Call spawnHaiku directly with a very short timeout.
     // "claude" won't be found or will hang — either way it exceeds 100ms.
-    await expect(
-      spawnHaiku("test", { source: "timeout-test", entrypoint: "test", botName: "test-bot", timeoutMs: 100 }),
-    ).rejects.toThrow(/timed out after 100ms|exited with code/);
+    // This spawn passes no cwd, so it resolves one via resolveAgentCwd and
+    // CREATES it: point that at a scratch root so the suite doesn't leave a
+    // `test-bot` dir in the developer's real ~/.muninn/agent-cwd.
+    const previous = process.env.MUNINN_AGENT_CWD;
+    const scratch = mkdtempSync(join(tmpdir(), "muninn-executor-test-"));
+    process.env.MUNINN_AGENT_CWD = scratch;
+    try {
+      await expect(
+        spawnHaiku("test", { source: "timeout-test", entrypoint: "test", botName: "test-bot", timeoutMs: 100 }),
+      ).rejects.toThrow(/timed out after 100ms|exited with code/);
+    } finally {
+      if (previous === undefined) delete process.env.MUNINN_AGENT_CWD;
+      else process.env.MUNINN_AGENT_CWD = previous;
+      rmSync(scratch, { recursive: true, force: true });
+    }
   });
 
   test("clearTimeout runs in finally block even on success", async () => {
