@@ -20,6 +20,7 @@
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { ClaudeExecResult } from "../ai/executor.ts";
+import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import { executeOneShot, connectorCapabilities } from "../ai/one-shot.ts";
 import { tracedOneShot } from "./traced-one-shot.ts";
 import { Tracer } from "../tracing/tracer.ts";
@@ -100,6 +101,18 @@ export interface FencedOneShotOptions {
   thinkingMaxTokens?: number | null;
   /** Vertical-specific attributes stamped on the span at START. */
   startAttrs?: Record<string, unknown>;
+  /**
+   * Live progress from the connector, forwarded verbatim into `tracedOneShot`.
+   *
+   * Additive and opt-in: the drafter and the integrate proposer omit it and are
+   * byte-identically unaffected (the option is spread in only when present, so
+   * `tracedOneShot` sees the same call shape it always did). The share route is
+   * the first caller that needs it — its product is STREAMED to a reader while
+   * the model writes it, and `tracedOneShot` has always had the callback; it
+   * simply was not reachable from here, which is the whole reason a streaming
+   * consumer could not use the fence.
+   */
+  onProgress?: StreamProgressCallback;
   /** Called with the error message on failure, so each vertical keeps its own
    *  log line. The error is rethrown regardless. */
   onError?: (message: string) => void;
@@ -154,6 +167,7 @@ export async function runFencedOneShot(opts: FencedOneShotOptions): Promise<Clau
     const result = await tracedOneShot(tracer, "claude", opts.prompt, config, fencedBotConfig, {
       ...(opts.systemPrompt ? { systemPrompt: opts.systemPrompt } : {}),
       ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+      ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
       ...(thinking !== null ? { thinkingMaxTokens: thinking } : {}),
       ...(opts.oneShot ? { oneShot: opts.oneShot } : {}),
       startAttrs: {

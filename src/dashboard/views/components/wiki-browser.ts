@@ -77,6 +77,11 @@ import {
   type ChatOptMode,
   type ChatTarget,
 } from "./wiki-chat-target.ts";
+// The share dialog: IMPORTED, never the standalone bundle. This file is itself a
+// `Bun.build` entrypoint, so loading both would give the page two copies of the
+// module — two states, two document listener sets, one split dialog.
+import { openShareDialog, closeShareDialogOnNavigate } from "./share-dialog.ts";
+import { shareArticleBtnHtml, SHARE_BTN_ID } from "./wiki-share-dialog.ts";
 import { enhanceMermaid } from "./wiki-mermaid.ts";
 import { atlasBodyHtml, initAtlas } from "./wiki-atlas.ts";
 import { enhanceCodeTabs } from "./code-tabs.ts";
@@ -1089,6 +1094,11 @@ function renderBreadcrumb(m: WikiListing): void {
   // detached by this very render. Close it rather than let Send file the question
   // against the wrong article.
   if (shouldCloseArticleChatOnNavigate(chatOpt, m.relPath)) closeChatOptions();
+  // Same rule for the Share dialog, and it needs its own call: the scrim eats a
+  // pointer click on a list row (so that path dismisses it for free), but Back /
+  // popstate involves no click at all and left it open over the new article,
+  // still targeting — and about to summarize — the page the reader had left.
+  closeShareDialogOnNavigate(m.name);
   // Stamped even when there is no breadcrumb node: it is the "which page is open"
   // answer for the Discuss popover, and every render path funnels through here.
   currentArticle = m;
@@ -1128,7 +1138,9 @@ function renderBreadcrumb(m: WikiListing): void {
     'title="Fact-check this whole page against the web">🔎 Fact check</button>' +
     // …and its sibling article-level action: take this page into a real chat
     // thread. Same row deliberately — see `discussArticleBtnHtml`.
-    discussArticleBtnHtml();
+    discussArticleBtnHtml() +
+    // Third article-level action, same row: turn the page into a pasteable post.
+    shareArticleBtnHtml();
   el.style.display = "flex";
 }
 function hideBreadcrumb(): void {
@@ -3922,6 +3934,27 @@ function openArticleChat(): void {
   });
 }
 
+/**
+ * 📤 Share on the open article.
+ *
+ * `page` is the page NAME (`m.name`) — the route resolves it with
+ * `index.resolve`, exactly as Explain / fact-check / Similar do. A relPath would
+ * fail to resolve on most pages.
+ *
+ * `SHARE_BTN_ID` is declared as the opener so the click that opens the dialog is
+ * not also read as a click-away by its own document listener.
+ */
+function openArticleShare(): void {
+  const m = currentArticle;
+  if (!m) return;
+  openShareDialog({
+    wiki: WIKI || "",
+    page: m.name,
+    title: m.title,
+    openerIds: [SHARE_BTN_ID],
+  });
+}
+
 function closeChatOptions(): void {
   chatOpt = null;
   const panel = chatOptPanel();
@@ -4988,6 +5021,10 @@ document.addEventListener("click", (e) => {
   else if (t.closest("#wikiChatEscOptBtn")) openChatOptions("escalate");
   else if (t.closest("#wikiNewChatBtn")) openChatOptions("direct");
   else if (t.closest("#" + DISCUSS_ARTICLE_BTN_ID)) openArticleChat();
+  // 📤 Share — the dialog is IMPORTED here rather than loaded as the standalone
+  // bundle: this file IS a bundle, and doing both would put two copies of the
+  // module (two states, two listener sets) on the same page.
+  else if (t.closest("#" + SHARE_BTN_ID)) openArticleShare();
   else if (t.closest("#" + DECLINE_CHAT_BTN_ID)) openDeclineChat();
   else if (t.closest("#wikiChatOptClose")) closeChatOptions();
   else if (t.closest("#" + CHAT_OPT_ADV_ID)) {

@@ -3,6 +3,9 @@ import { componentBlockCss, factcheckReaderCss } from "../../format/component-st
 import { wikiClientScript } from "./components/wiki-client.ts";
 import { escHtml, escAttr, escJsonScript } from "./components/escape.ts";
 import { agentPresenceStyles, agentPresenceHtml, agentPresenceScript } from "./components/agent-presence.ts";
+// The share dialog's CSS lives WITH the dialog (exported from its pure half) so
+// the /summaries mount in PR C cannot end up with a hand-copied second copy.
+import { shareDialogStyles } from "./components/wiki-share-dialog.ts";
 
 /**
  * /wiki — reader for the huginn-jarvis knowledge wiki.
@@ -507,15 +510,15 @@ export async function renderWikiPage(opts?: {
     /* Fact check buttons — a quieter outline treatment so they read as a
        secondary action next to the filled ✨ Explain. The whole-article variant
        is always visible; the selection-gated one rides the same show/hide. */
-    /* …and "💬 Discuss" (the article-level chat action) shares that treatment:
-       both are article-level actions sitting on the same breadcrumb row. */
-    .wiki-bc-factcheck, .wiki-bc-discuss {
+    /* …and "💬 Discuss" (chat) and "📤 Share" (a pasteable post) share that
+       treatment: all three are article-level actions on the same breadcrumb row. */
+    .wiki-bc-factcheck, .wiki-bc-discuss, .wiki-bc-share {
       flex-shrink: 0; padding: 4px 11px; border-radius: 999px;
       background: transparent; color: var(--text-secondary);
       border: 1px solid var(--border-primary);
       font-size: 12px; font-weight: 600; line-height: 1; cursor: pointer; font-family: inherit;
     }
-    .wiki-bc-factcheck:hover, .wiki-bc-discuss:hover {
+    .wiki-bc-factcheck:hover, .wiki-bc-discuss:hover, .wiki-bc-share:hover {
       background: var(--tint-neutral); color: var(--text-primary);
       border-color: color-mix(in srgb, var(--accent) 45%, var(--border-primary));
     }
@@ -1209,6 +1212,7 @@ export async function renderWikiPage(opts?: {
       .wiki-conn-pane { display: none; }
     }
     ${agentPresenceStyles()}
+    ${shareDialogStyles()}
   </style>
 </head>
 <body>

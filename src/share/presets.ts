@@ -161,11 +161,25 @@ export function resolveSharePresets(prompts: BotPrompts | undefined): SharePrese
   return resolved;
 }
 
-/** Look one preset up by id, falling back to the default entry — the shape a
- *  route needs when an unknown/absent id arrives from a client. */
-export function findSharePreset(presets: SharePreset[], id: string | undefined): SharePreset {
+/**
+ * Look one preset up by id.
+ *
+ * ABSENT (or blank) ⇒ the default entry: "no preference" is a real answer, and
+ * `resolveSharePresets` always puts the default first and never returns empty.
+ *
+ * PRESENT BUT UNKNOWN ⇒ **undefined**, so the caller can refuse. This function
+ * used to fall back to the default there too, which is a silent wrong answer: a
+ * client asking for `slack-dev-security` on a bot that doesn't have it would have
+ * generated with the neutral summary prompt and returned it as though the picked
+ * preset had run — the reader has no way to see which instruction produced the
+ * post they are about to paste. The share route turns the `undefined` into a
+ * pre-commit 400 naming the id.
+ */
+export function findSharePreset(
+  presets: SharePreset[],
+  id: string | undefined,
+): SharePreset | undefined {
   const wanted = id?.trim();
-  const match = wanted ? presets.find((p) => p.id === wanted) : undefined;
-  // `resolveSharePresets` always puts the default first and never returns empty.
-  return match ?? presets[0]!;
+  if (!wanted) return presets[0];
+  return presets.find((p) => p.id === wanted);
 }
