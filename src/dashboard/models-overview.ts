@@ -17,7 +17,8 @@
  */
 
 import os from "node:os";
-import { schedulerEnabledFromEnv, wikiReadonlyFromEnv } from "../config.ts";
+import { schedulerEnabledFromEnv } from "../config.ts";
+import { isWikiReadonly } from "../wiki/readonly.ts";
 import type { BotConfig } from "../bots/config.ts";
 import { discoverAllBots, resolveResearchBot, resolveSummarizerBot, resolveWikiSynthesisBot } from "../bots/config.ts";
 import type { WikiRegistryEntry } from "../wiki/registry.ts";
@@ -190,10 +191,27 @@ export interface MachineInfo {
    * reads as an absence rather than a responsibility.
    */
   wikiWriteOwner: boolean;
-  /** Active bot names (discovered bot folders), in discovery order. */
-  bots: string[];
-  /** Registered wikis — the set this instance could write if it owned writes. */
-  wikis: { name: string; source: WikiRegistryEntry["source"]; root: string }[];
+  /**
+   * Discovered bot folders in discovery order, each flagged with whether the
+   * process actually STARTED it. `discoverAllBots` lists every folder with a
+   * `CLAUDE.md`, but `discoverActiveBots` (what `src/index.ts` starts) requires a
+   * platform token and logs "Skipping bot X — no platform tokens" for the rest.
+   * On the readonly mini that is typically ALL of them, so a bare name list
+   * claimed bots that poll nothing.
+   */
+  bots: { name: string; polling: boolean }[];
+  /**
+   * Registered wikis — the set this instance could write if it owned writes.
+   * Deliberately NO `root`: it was never rendered, and publishing absolute
+   * filesystem paths on a reader-facing API is the `base_url` mistake again.
+   */
+  wikis: { name: string; source: WikiRegistryEntry["source"] }[];
+  /**
+   * Did the registry actually load? `wikis: []` is ambiguous — an install with no
+   * wikis and a registry that THREW look identical, and the second reading makes
+   * a readonly instance look harmless. The detail is in `errors[]`.
+   */
+  wikisKnown: boolean;
 }
 
 export interface ModelsOverview {
@@ -547,9 +565,13 @@ export async function assembleModelsOverview(
   // and whether that's the owning bot (`owner`) or the research-bot fallback
   // (`fallback`, for standalone or opus-owned wikis). Read-only diagnostic.
   let wikiRegistry: WikiRegistryEntry[] = [];
+  // Tracked separately from the (empty) list: the Machine card must be able to
+  // say "unknown" rather than "none" when this threw.
+  let wikiRegistryKnown = true;
   try {
     wikiRegistry = deps.getWikiRegistry();
   } catch (err) {
+    wikiRegistryKnown = false;
     errors.push(`wiki_registry: ${err instanceof Error ? err.message : String(err)}`);
   }
   const wikiSynthesis: WikiSynthesisEntry[] = wikiRegistry.map((entry) => {
@@ -729,14 +751,24 @@ export async function assembleModelsOverview(
   // fixed for the process, but reading them here keeps the card honest under a
   // test that sets them). `wikiRegistry` is the same list the synthesis group
   // used, so the two cards can never disagree about which wikis exist.
-  const wikiReadonly = wikiReadonlyFromEnv();
+  // `isWikiReadonly()` — the SAME reader the write seams and route guards use,
+  // not `wikiReadonlyFromEnv()`. The card's whole job is to report what this
+  // instance actually enforces; reading a level below the enforcement point let
+  // the two disagree.
+  const wikiReadonly = isWikiReadonly();
   const machine: MachineInfo = {
     hostname: deps.getHostname(),
     schedulerEnabled: schedulerEnabledFromEnv(),
     wikiReadonly,
     wikiWriteOwner: !wikiReadonly,
-    bots: bots.map((b) => b.name),
-    wikis: wikiRegistry.map((e) => ({ name: e.name, source: e.source, root: e.root })),
+    // "Polling" mirrors `discoverBotsInternal`'s own token test: a Telegram token,
+    // or BOTH Slack tokens.
+    bots: bots.map((b) => ({
+      name: b.name,
+      polling: !!b.telegramBotToken || (!!b.slackBotToken && !!b.slackAppToken),
+    })),
+    wikis: wikiRegistry.map((e) => ({ name: e.name, source: e.source })),
+    wikisKnown: wikiRegistryKnown,
   };
 
   return {

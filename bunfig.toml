@@ -1,0 +1,5 @@
+# Test-scoped preload. Deliberately NOT the top-level `preload` key, which would
+# also run for `bun run start` / `bun run dev` — the point is to neutralize an
+# instance-profile env flag for TESTS only. See src/test/preload.ts.
+[test]
+preload = ["./src/test/preload.ts"]

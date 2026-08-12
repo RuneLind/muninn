@@ -615,12 +615,30 @@ export async function renderModelsPage(): Promise<string> {
         m.wikiReadonly
           ? 'MUNINN_WIKI_READONLY=1 — gardener applies and fact-check writes 403 here; git commits are still allowed'
           : 'no MUNINN_WIKI_READONLY — this instance writes wiki pages');
-      h += machineRow('Bots',
-        (m.bots && m.bots.length) ? val(m.bots.join(', ')) : val('none discovered', 'none'));
+      // Discovered ≠ running: a bot folder with no platform token is skipped at
+      // startup ("Skipping bot X — no platform tokens"), which on the readonly
+      // mini is typically every one of them. Lead with what actually polls.
+      var bots = m.bots || [];
+      var polling = bots.filter(function (b) { return b.polling; });
+      var idle = bots.filter(function (b) { return !b.polling; });
+      var botsVal = polling.length
+        ? val(polling.map(function (b) { return b.name; }).join(', '))
+        : val('none polling', 'none');
+      var botsNote = idle.length
+        ? esc(idle.map(function (b) { return b.name; }).join(', ')) +
+          ' — discovered but no platform tokens, not polling'
+        : '';
+      h += machineRow('Bots', botsVal, botsNote);
       var wikis = m.wikis || [];
+      // wikisKnown === false means the registry THREW. "none" would read as a
+      // harmless instance; the count is genuinely unknown (detail in errors[]).
       h += machineRow('Registered wikis',
-        wikis.length ? val(String(wikis.length)) : val('none', 'none'),
-        wikis.map(function (w) { return esc(w.name) + ' <span class="lc-via">(' + esc(w.source) + ')</span>'; }).join(' · '));
+        m.wikisKnown === false
+          ? val('unknown — registry failed to load', 'none')
+          : wikis.length ? val(String(wikis.length)) : val('none', 'none'),
+        m.wikisKnown === false
+          ? 'see the errors banner above'
+          : wikis.map(function (w) { return esc(w.name) + ' <span class="lc-via">(' + esc(w.source) + ')</span>'; }).join(' · '));
       body.innerHTML = h;
     }
 

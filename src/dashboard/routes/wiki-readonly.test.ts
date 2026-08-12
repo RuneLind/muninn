@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
+import { configure, reset, type LogRecord } from "@logtape/logtape";
 import { registerWikiRoutes } from "./wiki-routes.ts";
 import { registerWikiGardenerRoutes } from "./wiki-gardener-routes.ts";
 import { __resetWikiRegistryForTest } from "../../wiki/registry-memo.ts";
@@ -123,6 +124,17 @@ describe("MUNINN_WIKI_READONLY — routes", () => {
       ["/api/wiki/gardener/source-draft-doc?wiki=rowiki", { collection: "youtube-summaries", id: "x" }],
       ["/api/wiki/proposals/00000000-0000-0000-0000-000000000000/approve"],
       ["/api/wiki/atlas/draft-synthesis?wiki=rowiki", { members: ["Widgets"], label: "Widgets" }],
+      // The backlog state verbs: they mutate the write-owner's shared watcher
+      // snapshots (offered / dismissed / the interrupted-run journal) and huginn
+      // docs, so a readonly mini must not corrupt an in-flight drain it can't see.
+      ["/api/wiki/gardener/backlog-reset?wiki=rowiki"],
+      ["/api/wiki/gardener/backlog-cancel?wiki=rowiki"],
+      ["/api/wiki/gardener/backlog-recover?wiki=rowiki"],
+      ["/api/wiki/gardener/backlog-dismiss?wiki=rowiki"],
+      ["/api/wiki/gardener/backlog-docs-dismiss?wiki=rowiki", { keys: ["youtube-summaries/x"] }],
+      ["/api/wiki/gardener/backlog-docs-undismiss?wiki=rowiki", { keys: ["youtube-summaries/x"] }],
+      ["/api/wiki/gardener/backlog-docs-dismiss-reset?wiki=rowiki"],
+      ["/api/wiki/gardener/backlog-doc-delete?wiki=rowiki", { collection: "youtube-summaries", id: "x" }],
     ];
     for (const [url, body] of routes) {
       const res = await post(url, body);
@@ -130,12 +142,56 @@ describe("MUNINN_WIKI_READONLY — routes", () => {
     }
   });
 
+  test("a route refusal is logged — the seams warn, the routes were silent", async () => {
+    // The two write SEAMS log their refusal, but a route guard answers BEFORE the
+    // seam is reached, so every refused drafting/backlog POST left no trace at
+    // all: "why did the mini do nothing?" was unanswerable from the logs.
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
+      reset: true,
+    });
+    try {
+      __setWikiReadonlyForTest(true);
+      const res = await post("/api/wiki/gardener/backlog-reset?wiki=rowiki");
+      expect(res.status).toBe(403);
+      const infos = records.filter((r) => r.level === "info");
+      const hit = infos.find((r) => r.message.join("").includes("readonly"));
+      expect(hit).toBeDefined();
+      // The refusal must name WHICH route refused — one line per surface is the
+      // only way to tell a guarded drafting POST from a guarded prune POST.
+      expect(JSON.stringify(hit!.properties)).toContain("/api/wiki/gardener/backlog-reset");
+    } finally {
+      await reset();
+    }
+  });
+
+  test("the fact-check integrate PROPOSE route 403s — before the ~90s one-shot", async () => {
+    __setWikiReadonlyForTest(true);
+    // Propose-only (it writes nothing), but its only consumer is the /apply route
+    // this instance already 403s — so the one-shot could only ever be burnt for a
+    // preview nothing can commit. Same rationale as the guarded drafting routes.
+    // A stale baseHash is what this body would otherwise answer with (409), so a
+    // 403 proves the guard ran first.
+    const res = await post("/api/wiki/factcheck/integrate?wiki=rowiki", {
+      page: "Widgets",
+      answer: "### ❌ Claim 1/1 — Wrong\n\nNope.",
+      baseHash: "deadbeef",
+    });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { readonly: boolean }).readonly).toBe(true);
+    expect(await pageOnDisk()).toBe(PAGE);
+  });
+
   test("without the flag the same route is NOT 403", async () => {
     __setWikiReadonlyForTest(false);
     const res = await post("/api/wiki/gardener/backlog-run?wiki=rowiki");
-    // It fails for its own reasons (a standalone wiki owns no gardener) — the
-    // point is only that the readonly guard is not what answered.
-    expect(res.status).not.toBe(403);
+    // It fails for its OWN reason — `resolveBacklogBot` refuses a standalone
+    // wiki. Asserting that concrete status (rather than "not 403") is what makes
+    // this a control: a route that started answering 404, or 500 on a thrown DB
+    // call, would also satisfy `not.toBe(403)` while proving nothing.
+    expect(res.status).toBe(400);
   });
 
   test("reject is deliberately NOT guarded — it mutates no wiki", async () => {
@@ -143,7 +199,17 @@ describe("MUNINN_WIKI_READONLY — routes", () => {
     // No DB in this suite, so the route throws past its guard-free head; a 403
     // would mean a guard was added where the plan says there must not be one.
     const res = await post("/api/wiki/proposals/00000000-0000-0000-0000-000000000000/reject");
-    expect(res.status).not.toBe(403);
+    // It runs past its (deliberately absent) guard into a DB call, which answers
+    // 404 (no such proposal) when the local Postgres is up and 500 through the
+    // fixture's onError when it is not — so the STATUS is a property of the
+    // runner, not of this route. The stable, non-tautological assertion is on the
+    // BODY: a readonly refusal is identified by `readonly: true` +
+    // WIKI_READONLY_REASON, and neither may appear here. ("not 403" would also be
+    // satisfied by a route that had stopped existing.)
+    const body = (await res.json()) as { error?: string; readonly?: boolean };
+    expect(body.readonly).toBeUndefined();
+    expect(body.error).not.toBe(WIKI_READONLY_REASON);
+    expect([404, 500]).toContain(res.status);
   });
 
   test("the fact-check append route 403s and the page is byte-unchanged", async () => {
@@ -316,15 +382,36 @@ describe("MUNINN_WIKI_READONLY — client guard", () => {
       '[data-action="approve"]',
       '[data-backlog-action="run"]',
       "#wikiFactcheckAppendBtn",
+      // The propose half of Integrate — guarded server-side too (its only
+      // consumer is the /apply this instance refuses).
+      "#wikiFactcheckIntegrateBtn",
       "#wikiFcIntAccept",
       ".wiki-atlas-cdraft",
+      // Every control behind a route the readonly guard now 403s.
+      '[data-backlog-action="confirm"]',
+      '[data-backlog-action="cancel-run"]',
+      '[data-backlog-action="reset"]',
+      '[data-backlog-action="reset-dismissed"]',
+      '[data-backlog-action="recover"]',
+      '[data-backlog-action="dismiss"]',
+      '[data-backlog-action="run-watcher"]',
+      '[data-doc-action="dismiss"]',
+      '[data-doc-action="undismiss"]',
+      '[data-doc-action="delete"]',
+      '[data-inspect-action="bulk-dismiss"]',
     ]) {
       expect(WIKI_READONLY_BLOCKED_SELECTOR).toContain(sel);
     }
     // Reject flips a DB status and writes no wiki — it must stay clickable.
     expect(WIKI_READONLY_BLOCKED_SELECTOR).not.toContain('data-action="reject"');
-    // The inspector's filters/pagination are reads.
-    expect(WIKI_READONLY_BLOCKED_SELECTOR).not.toContain("data-inspect-");
+    // The inspector's filters/pagination are reads; so are its close/more
+    // controls — only its `bulk-dismiss` verb writes.
+    expect(WIKI_READONLY_BLOCKED_SELECTOR).not.toContain("data-inspect-bucket");
+    expect(WIKI_READONLY_BLOCKED_SELECTOR).not.toContain('data-inspect-action="close"');
+    expect(WIKI_READONLY_BLOCKED_SELECTOR).not.toContain('data-inspect-action="more"');
+    // The confirm panel's own close button is a panel toggle, not a POST —
+    // blocking it would strand the panel open with no way to dismiss it.
+    expect(WIKI_READONLY_BLOCKED_SELECTOR).not.toContain('data-backlog-action="cancel"]');
   });
 
   test("the flag is read off the injected global, and a null target is not blocked", () => {
@@ -332,5 +419,17 @@ describe("MUNINN_WIKI_READONLY — client guard", () => {
     expect(wikiReadonlyFlag({ __WIKI_READONLY__: "true" })).toBe(false); // strict true only
     expect(wikiReadonlyFlag({ __WIKI_READONLY__: true })).toBe(true);
     expect(isBlockedByReadonly(null)).toBe(false);
+  });
+
+  test("a non-Element target fails CLOSED (no throw) — a throwing capture listener lets the click through", () => {
+    // `e.target` is not always an Element: a click dispatched at `document`, a
+    // synthetic/programmatic event, or a text node target all reach the guard.
+    // `target.closest(...)` throws TypeError there — and a capture-phase listener
+    // that THROWS never reaches preventDefault, so the very click the guard
+    // exists to stop proceeds. Fail-open on the fail-closed path.
+    for (const target of [{}, { closest: "not a function" }, "text"] as unknown as (Element | null)[]) {
+      expect(() => isBlockedByReadonly(target)).not.toThrow();
+      expect(isBlockedByReadonly(target)).toBe(false);
+    }
   });
 });

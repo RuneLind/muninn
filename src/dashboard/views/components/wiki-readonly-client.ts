@@ -20,16 +20,37 @@
  */
 
 /**
- * Controls that would POST to a route the readonly guard 403s. Read-only
- * affordances — the inspector's filters/toggles, `reject` (a DB status flip that
- * mutates no wiki), the panel open/close buttons — are deliberately absent.
+ * Controls that would POST to a route the readonly guard 403s.
+ *
+ * Deliberately ABSENT, and each for its own reason:
+ *   - `[data-action="reject"]` — a DB status flip that mutates no wiki, and the
+ *     server leaves it unguarded on purpose.
+ *   - the inspector's `data-inspect-bucket` filters and its `close`/`more`
+ *     controls — pure reads/pagination (only its `bulk-dismiss` verb writes).
+ *   - `[data-backlog-action="cancel"]` — the confirm PANEL's close button (not
+ *     the drain's `cancel-run`); blocking it would strand the panel open.
  */
 export const WIKI_READONLY_BLOCKED_SELECTOR = [
   '[data-action="approve"]',
+  // Backlog drain: opening the confirm panel is blocked too — every action
+  // inside it is refused, so the panel is a dead end on a readonly instance.
+  '[data-backlog-action="confirm"]',
   '[data-backlog-action="run"]',
+  '[data-backlog-action="cancel-run"]',
+  '[data-backlog-action="reset"]',
+  '[data-backlog-action="reset-dismissed"]',
+  '[data-backlog-action="recover"]',
+  '[data-backlog-action="dismiss"]',
+  // "Run gardener now" — POSTs the watcher trigger, which the readonly guard
+  // refuses for wiki-drafting watcher types.
+  '[data-backlog-action="run-watcher"]',
   '[data-backlog-action="source-draft"]',
   '[data-doc-action="draft"]',
   '[data-doc-action="rename-draft"]',
+  '[data-doc-action="dismiss"]',
+  '[data-doc-action="undismiss"]',
+  '[data-doc-action="delete"]',
+  '[data-inspect-action="bulk-dismiss"]',
   "#wikiFactcheckAppendBtn",
   "#wikiFactcheckIntegrateBtn",
   "#wikiFcIntAccept",
@@ -51,8 +72,15 @@ export function wikiReadonlyFlag(win: unknown = globalThis): boolean {
 /**
  * Does this click target a control the readonly instance would refuse? Pure, so
  * the selector list is unit-testable without a DOM event.
+ *
+ * The `closest` capability test is load-bearing, not defensive noise: `e.target`
+ * is only *usually* an Element (a click dispatched at `document`, a synthetic
+ * event, a text-node target are all reachable), and a capture-phase listener that
+ * THROWS never reaches its `preventDefault` — so a TypeError here would let
+ * through exactly the click this guard exists to stop.
  */
 export function isBlockedByReadonly(target: Element | null): boolean {
+  if (typeof (target as Element | null)?.closest !== "function") return false;
   return !!target?.closest(WIKI_READONLY_BLOCKED_SELECTOR);
 }
 
