@@ -2051,169 +2051,177 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     // The inner handover `catch` rethrows AFTER releasing the slot, so a throw on
     // that path still frees the page and lands here.
     try {
-    type ShareBody = {
-      wiki?: string;
-      bot?: string;
-      page?: string;
-      preset?: string;
-      lang?: string;
-      promptOverride?: string;
-      extra?: string;
-    };
-    const body = await c.req.json<ShareBody>().catch(() => ({}) as ShareBody);
+      type ShareBody = {
+        wiki?: string;
+        bot?: string;
+        page?: string;
+        preset?: string;
+        lang?: string;
+        promptOverride?: string;
+        extra?: string;
+      };
+      const body = await c.req.json<ShareBody>().catch(() => ({}) as ShareBody);
 
-    // Body shape is client-controlled, so every field the route reads is
-    // type-checked HERE (the `/api/wiki/ask/chat` precedent). A non-string `wiki`
-    // used to reach `rawWiki.trim()` inside `resolveWikiRequest` and 500.
-    for (const field of [
-      "wiki", "bot", "page", "preset", "promptOverride", "extra",
-    ] as const) {
-      if (body[field] !== undefined && typeof body[field] !== "string") {
-        return c.json({ error: `${field} must be a string` }, 400);
+      // Body shape is client-controlled, so every field the route reads is
+      // type-checked HERE (the `/api/wiki/ask/chat` precedent). A non-string `wiki`
+      // used to reach `rawWiki.trim()` inside `resolveWikiRequest` and 500.
+      for (const field of [
+        "wiki", "bot", "page", "preset", "promptOverride", "extra",
+      ] as const) {
+        if (body[field] !== undefined && typeof body[field] !== "string") {
+          return c.json({ error: `${field} must be a string` }, 400);
+        }
       }
-    }
 
-    const page = typeof body.page === "string" ? body.page.trim() : "";
-    if (!page) return c.json({ error: "page is required" }, 400);
-    const presetId = typeof body.preset === "string" ? body.preset.trim() : "";
-    if (!presetId) return c.json({ error: "preset is required" }, 400);
-    if (!isShareLang(body.lang)) {
-      return c.json(
-        { error: `lang must be one of: ${SHARE_LANGS.map((l) => l.id).join(", ")}` },
-        400,
+      const page = typeof body.page === "string" ? body.page.trim() : "";
+      if (!page) return c.json({ error: "page is required" }, 400);
+      const presetId = typeof body.preset === "string" ? body.preset.trim() : "";
+      if (!presetId) return c.json({ error: "preset is required" }, 400);
+      if (!isShareLang(body.lang)) {
+        return c.json(
+          { error: `lang must be one of: ${SHARE_LANGS.map((l) => l.id).join(", ")}` },
+          400,
+        );
+      }
+      const lang = body.lang;
+      const promptOverride = typeof body.promptOverride === "string" ? body.promptOverride : "";
+      if (promptOverride.length > SHARE_PROMPT_OVERRIDE_MAX) {
+        return c.json(
+          { error: `promptOverride is longer than ${SHARE_PROMPT_OVERRIDE_MAX} characters` },
+          400,
+        );
+      }
+      // A PRESENT but blank override is a 400, not a fall-back to the preset. The
+      // client sends `promptOverride: ""` when the reader empties the textarea, and
+      // `promptOverride.trim() || preset.content` then ran the PRESET — the model
+      // following an instruction the screen was no longer showing, reported as that
+      // preset's output. (An ABSENT field is the unedited case and stays silent.)
+      //
+      // **The ordering rule for this route: BODY-SHAPE checks precede
+      // RESOLUTION-DEPENDENT ones.** This 400 runs before the wiki resolves — it
+      // needs nothing but the body, and it is wrong under every wiki — while the
+      // unknown-preset check below deliberately waits, because the valid preset set
+      // is a function of the resolved wiki's bot. Both are still pre-`streamSSE`,
+      // which is the invariant that actually matters.
+      if (body.promptOverride !== undefined && promptOverride.trim() === "") {
+        return c.json({ error: "promptOverride is empty — omit it to use the preset" }, 400);
+      }
+      const extra = typeof body.extra === "string" ? body.extra : "";
+      if (extra.length > SHARE_EXTRA_MAX) {
+        return c.json({ error: `extra is longer than ${SHARE_EXTRA_MAX} characters` }, 400);
+      }
+
+      const { entry, unknownWiki, wiki } = resolveWikiRequest(
+        getWikiRegistry(),
+        c.req.query("wiki") ?? body.wiki,
+        c.req.query("bot") ?? body.bot,
+        process.env.WIKI_DIR,
       );
-    }
-    const lang = body.lang;
-    const promptOverride = typeof body.promptOverride === "string" ? body.promptOverride : "";
-    if (promptOverride.length > SHARE_PROMPT_OVERRIDE_MAX) {
-      return c.json(
-        { error: `promptOverride is longer than ${SHARE_PROMPT_OVERRIDE_MAX} characters` },
-        400,
-      );
-    }
-    // A PRESENT but blank override is a 400, not a fall-back to the preset. The
-    // client sends `promptOverride: ""` when the reader empties the textarea, and
-    // `promptOverride.trim() || preset.content` then ran the PRESET — the model
-    // following an instruction the screen was no longer showing, reported as that
-    // preset's output. (An ABSENT field is the unedited case and stays silent.)
-    if (body.promptOverride !== undefined && promptOverride.trim() === "") {
-      return c.json({ error: "promptOverride is empty — omit it to use the preset" }, 400);
-    }
-    const extra = typeof body.extra === "string" ? body.extra : "";
-    if (extra.length > SHARE_EXTRA_MAX) {
-      return c.json({ error: `extra is longer than ${SHARE_EXTRA_MAX} characters` }, 400);
-    }
+      // Owner-routing, identical to Ask / fact-check / integrate.
+      const { bot: botConfig } = resolveWikiSynthesisBot(entry, discoverAllBots());
 
-    const { entry, unknownWiki, wiki } = resolveWikiRequest(
-      getWikiRegistry(),
-      c.req.query("wiki") ?? body.wiki,
-      c.req.query("bot") ?? body.bot,
-      process.env.WIKI_DIR,
-    );
-    // Owner-routing, identical to Ask / fact-check / integrate.
-    const { bot: botConfig } = resolveWikiSynthesisBot(entry, discoverAllBots());
+      let index: WikiIndex | null = null;
+      let meta: WikiPageMeta | undefined;
+      if (entry && !unknownWiki) {
+        index = await getWikiIndex({ root: entry.root });
+        if (index) meta = index.resolve(page);
+      }
+      let preflightError = resolveSharePreflight({ wiki, unknownWiki, entry, index, meta, page });
 
-    let index: WikiIndex | null = null;
-    let meta: WikiPageMeta | undefined;
-    if (entry && !unknownWiki) {
-      index = await getWikiIndex({ root: entry.root });
-      if (index) meta = index.resolve(page);
-    }
-    let preflightError = resolveSharePreflight({ wiki, unknownWiki, entry, index, meta, page });
+      // **Preset validation runs after the WIKI is resolved, and independently of
+      // the bot** — the resolution-dependent half of the ordering rule stated at
+      // the blank-`promptOverride` 400 above. Two orderings were wrong before:
+      //   · preset-first reported `unknown share preset "…"` for a request whose
+      //     real problem was an unknown WIKI — the reader picked a preset that is
+      //     perfectly valid for the wiki they meant. The wiki's own failure is the
+      //     one worth reporting, so a failed preflight skips this check and lets the
+      //     stream say what is actually wrong.
+      //   · gating on `botConfig` skipped it entirely on a zero-bot install, and the
+      //     bogus id sailed past into a committed-200 app_error. A bot's
+      //     `prompts/share*.md` files only override or EXTEND the shipped set, so
+      //     `resolveSharePresets(undefined)` is a sound list to validate against
+      //     whenever no bot resolved.
+      let preset: SharePreset | undefined;
+      if (!preflightError) {
+        preset = findSharePreset(resolveSharePresets(botConfig?.prompts), presetId);
+        if (!preset) return c.json({ error: `unknown share preset "${presetId}"` }, 400);
+      }
 
-    // **Preset validation runs after the WIKI is resolved, and independently of
-    // the bot.** Two orderings were wrong before:
-    //   · preset-first reported `unknown share preset "…"` for a request whose
-    //     real problem was an unknown WIKI — the reader picked a preset that is
-    //     perfectly valid for the wiki they meant. The wiki's own failure is the
-    //     one worth reporting, so a failed preflight skips this check and lets the
-    //     stream say what is actually wrong.
-    //   · gating on `botConfig` skipped it entirely on a zero-bot install, and the
-    //     bogus id sailed past into a committed-200 app_error. A bot's
-    //     `prompts/share*.md` files only override or EXTEND the shipped set, so
-    //     `resolveSharePresets(undefined)` is a sound list to validate against
-    //     whenever no bot resolved.
-    let preset: SharePreset | undefined;
-    if (!preflightError) {
-      preset = findSharePreset(resolveSharePresets(botConfig?.prompts), presetId);
-      if (!preset) return c.json({ error: `unknown share preset "${presetId}"` }, 400);
-    }
+      // Body prep — the intended (and only) consumer of PR A's `prepareShareBody`
+      // dispatcher: the page's `type` picks the preparer, an explainer going through
+      // the HTML reduction and everything else through the markdown strips.
+      let systemPrompt = "";
+      let userPrompt = "";
+      if (!preflightError && entry && index && meta && preset) {
+        const raw = (await readWikiPage(index, meta)) ?? "";
+        const prepared = prepareShareBody(shareBodyKindForPageType(meta.type), raw);
+        if (!prepared.trim()) {
+          // Nothing to summarize. Reported before the slot is taken, so an empty
+          // page can neither spend a model call nor wedge the page.
+          preflightError = `"${meta.title}" has no text to summarize.`;
+        } else {
+          systemPrompt = buildShareSystemPrompt(entry.name);
+          userPrompt = buildShareUserPrompt({
+            // The reader's edit REPLACES the preset's instruction; the language
+            // rider is appended after it either way (see `buildShareUserPrompt`).
+            instruction: promptOverride.trim() || preset.content,
+            lang,
+            extra: extra.trim(),
+            body: prepared,
+            title: meta.title,
+            wikiName: entry.name,
+          });
+        }
+      }
 
-    // Body prep — the intended (and only) consumer of PR A's `prepareShareBody`
-    // dispatcher: the page's `type` picks the preparer, an explainer going through
-    // the HTML reduction and everything else through the markdown strips.
-    let systemPrompt = "";
-    let userPrompt = "";
-    if (!preflightError && entry && index && meta && preset) {
-      const raw = (await readWikiPage(index, meta)) ?? "";
-      const prepared = prepareShareBody(shareBodyKindForPageType(meta.type), raw);
-      if (!prepared.trim()) {
-        // Nothing to summarize. Reported before the slot is taken, so an empty
-        // page can neither spend a model call nor wedge the page.
-        preflightError = `"${meta.title}" has no text to summarize.`;
-      } else {
-        systemPrompt = buildShareSystemPrompt(entry.name);
-        userPrompt = buildShareUserPrompt({
-          // The reader's edit REPLACES the preset's instruction; the language
-          // rider is appended after it either way (see `buildShareUserPrompt`).
-          instruction: promptOverride.trim() || preset.content,
+      // Per-page single-flight. One POST buys a whole-page summarization (tens of
+      // thousands of input tokens), and a double-click, a reload mid-stream or a
+      // second tab each buy another — this is the only guard that survives all
+      // three. Taken ONLY when a model call will actually run: `userPrompt` is
+      // non-empty exactly when preflight, the page read and the body prep all
+      // succeeded, and `botConfig` is what the scaffold needs to get past its
+      // "no bots configured" app_error. Without the bot term a bot-less install
+      // reserved the page for two minutes to emit a refusal.
+      let release: (() => void) | undefined;
+      if (botConfig && userPrompt && entry && meta) {
+        const acquired = acquireShareFlight(shareFlightKey(entry.name, meta.relPath));
+        if (!acquired.ok) {
+          return c.json({ state: "running", expiresAtMs: acquired.expiresAtMs }, 409);
+        }
+        release = acquired.release;
+        log.info("Wiki share: wiki={wiki} bot={bot} page={page} preset={preset} lang={lang}", {
+          wiki: entry.name,
+          bot: botConfig.name,
+          page,
+          preset: presetId,
           lang,
-          extra: extra.trim(),
-          body: prepared,
-          title: meta.title,
-          wikiName: entry.name,
         });
       }
-    }
 
-    // Per-page single-flight. One POST buys a whole-page summarization (tens of
-    // thousands of input tokens), and a double-click, a reload mid-stream or a
-    // second tab each buy another — this is the only guard that survives all
-    // three. Taken ONLY when a model call will actually run: `userPrompt` is
-    // non-empty exactly when preflight, the page read and the body prep all
-    // succeeded, and `botConfig` is what the scaffold needs to get past its
-    // "no bots configured" app_error. Without the bot term a bot-less install
-    // reserved the page for two minutes to emit a refusal.
-    let release: (() => void) | undefined;
-    if (botConfig && userPrompt && entry && meta) {
-      const acquired = acquireShareFlight(shareFlightKey(entry.name, meta.relPath));
-      if (!acquired.ok) {
-        return c.json({ state: "running", expiresAtMs: acquired.expiresAtMs }, 409);
+      // The slot is handed to the stream via `onSettled` — but only once
+      // `streamShareSSE` has RETURNED a Response. A synchronous throw before that
+      // would leave the callback unwired and wedge the page for the full expiry with
+      // nothing running; releasing here is safe precisely because it is unreachable
+      // once the stream owns the slot (release is identity-checked anyway). The
+      // claim-retry route's handover, verbatim.
+      try {
+        return streamShareSSE(c, {
+          config,
+          botConfig: botConfig ?? null,
+          preflightError,
+          systemPrompt,
+          userPrompt,
+          runName: `Share: ${meta?.title ?? page}`,
+          // Test seam — production leaves it unset. Without it no route test can
+          // reach `done`, so the prepareShareBody → buildShareUserPrompt →
+          // streamShareSSE wiring had no coverage at all.
+          ...(shareOneShot ? { oneShot: shareOneShot } : {}),
+          ...(release ? { onSettled: release } : {}),
+        });
+      } catch (err) {
+        release?.();
+        throw err;
       }
-      release = acquired.release;
-      log.info("Wiki share: wiki={wiki} bot={bot} page={page} preset={preset} lang={lang}", {
-        wiki: entry.name,
-        bot: botConfig.name,
-        page,
-        preset: presetId,
-        lang,
-      });
-    }
-
-    // The slot is handed to the stream via `onSettled` — but only once
-    // `streamShareSSE` has RETURNED a Response. A synchronous throw before that
-    // would leave the callback unwired and wedge the page for the full expiry with
-    // nothing running; releasing here is safe precisely because it is unreachable
-    // once the stream owns the slot (release is identity-checked anyway). The
-    // claim-retry route's handover, verbatim.
-    try {
-      return streamShareSSE(c, {
-        config,
-        botConfig: botConfig ?? null,
-        preflightError,
-        systemPrompt,
-        userPrompt,
-        runName: `Share: ${meta?.title ?? page}`,
-        // Test seam — production leaves it unset. Without it no route test can
-        // reach `done`, so the prepareShareBody → buildShareUserPrompt →
-        // streamShareSSE wiring had no coverage at all.
-        ...(shareOneShot ? { oneShot: shareOneShot } : {}),
-        ...(release ? { onSettled: release } : {}),
-      });
-    } catch (err) {
-      release?.();
-      throw err;
-    }
     } catch (err) {
       log.error("Wiki share failed: {error}", {
         error: err instanceof Error ? err.message : String(err),

@@ -226,13 +226,16 @@ async function runShare(
     });
     // The payload is EXACTLY the three tab strings — see `renderSharePayload`.
     //
-    // Through `safeWrite`, like every other write in this runner: a raw
-    // `stream.writeSSE` to a client that has already gone REJECTS, which lands in
-    // the catch below — whose own raw write then rejects too and escapes
-    // `runShare` entirely, past the scaffold's terminal `end`. The guard makes
-    // both terminals no-ops for a departed reader instead. Ordering with the
-    // scaffold's `end` still holds: every write goes through the same underlying
-    // writable stream, which delivers chunks in call order.
+    // Through `safeWrite`, like every other write in this runner. NOT because a
+    // raw write would throw: Hono's `StreamingApi.write` wraps the writer in a
+    // bare `try {} catch {}`, so `stream.writeSSE` to a departed client is a
+    // silent no-op that resolves. The guard buys CONSISTENCY of the gone-client
+    // discipline — one rule for every write in the family, checked against the
+    // same `clientState.gone` flag `onAbort` sets, so a reader who navigated away
+    // costs no render and no write rather than each site deciding for itself.
+    // Ordering with the scaffold's `end` holds either way: every write goes
+    // through the same underlying writable stream, which delivers chunks in call
+    // order.
     safeWrite("done", renderSharePayload(markdown));
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

@@ -68,8 +68,12 @@ let openerIds: string[] = [];
 let wired = false;
 let inFlight: AbortController | null = null;
 let copiedTimer: ReturnType<typeof setTimeout> | null = null;
-/** Pending until the first paint that can take focus — see {@link applyAutofocus}. */
+/** Pending until the paint that first offers the preset picker — see
+ *  {@link applyAutofocus}. */
 let autofocusPending = false;
+/** The id THIS module last auto-focused, so a paint can tell its OWN focus (the
+ *  loading paint's ✕) apart from focus the reader chose. See {@link applyAutofocus}. */
+let autofocusedId = "";
 /** Ticks the 409 countdown; cleared the moment the deadline passes. */
 let conflictTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -91,6 +95,7 @@ export function openShareDialog(opts: OpenShareOptions): void {
   // the 📤 button behind the scrim is a lie to a screen reader and leaves the
   // keyboard reader outside a dialog Tab is trapped inside of.
   autofocusPending = true;
+  autofocusedId = "";
   openerIds = opts.openerIds ?? [];
   state = {
     wiki: opts.wiki,
@@ -135,6 +140,7 @@ export function closeShareDialog(): void {
   inFlight = null;
   stopConflictTimer();
   autofocusPending = false;
+  autofocusedId = "";
   state = null;
   panel()?.remove();
   document.getElementById(SHARE_SCRIM_ID)?.remove();
@@ -303,20 +309,40 @@ function detachPreviewLinks(p: HTMLElement): void {
 }
 
 /**
- * Move focus INTO the dialog on the paint that first offers something to focus.
+ * Move focus INTO the dialog, exactly once per open.
  *
- * The loading paint has only ✕, so focus lands there and the flag stays pending;
- * the paint that brings the preset picker takes it and clears the flag. Skipped
- * whenever focus was already inside the panel (`focus` non-null), so a repaint
- * mid-typing never yanks the caret out of the textarea.
+ * The loading paint has only ✕, so focus parks there while the presets load, and
+ * the paint that first offers the preset picker takes it and **retires the flag** —
+ * that paint is the last one allowed to move focus, because everything after it is
+ * the reader's.
+ *
+ * **Both halves of that are load-bearing, and the first cut got both wrong.**
+ * `captureFocus` reports any id-carrying element inside the panel, so the ✕ this
+ * function focused itself read as "the reader is already somewhere" and made every
+ * later paint early-return: the flag never cleared, the picker never took focus,
+ * and the first Tab started from the dismiss button. Meanwhile the language/tab
+ * chips carry NO id, so `captureFocus` returns null on a chip click — and the
+ * still-armed flag answered that click by yanking focus onto the `<select>`.
+ * Hence {@link autofocusedId}: focus this module placed is not the reader having
+ * chosen anything, and the flag is retired on the picker paint whether or not it
+ * ends up taking focus.
  */
 function applyAutofocus(p: HTMLElement, focus: FieldFocus | null): void {
-  if (!autofocusPending || focus) return;
+  if (!autofocusPending) return;
+  const readerHasFocus = !!focus && focus.id !== autofocusedId;
   const preferred = document.getElementById(SHARE_PRESET_ID) as HTMLElement | null;
-  const el = preferred ?? (p.querySelector("button, select, textarea, input") as HTMLElement | null);
+  if (preferred) {
+    autofocusPending = false;
+    autofocusedId = "";
+    // A reader who has already put the caret somewhere of their own keeps it.
+    if (!readerHasFocus) preferred.focus({ preventScroll: true });
+    return;
+  }
+  if (readerHasFocus) return;
+  const el = p.querySelector("button, select, textarea, input") as HTMLElement | null;
   if (!el) return;
   el.focus({ preventScroll: true });
-  if (preferred) autofocusPending = false;
+  autofocusedId = el.id;
 }
 
 /** Coalesce a burst of stream deltas into one paint per animation frame. */

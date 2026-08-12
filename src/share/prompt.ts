@@ -135,6 +135,12 @@ export function buildShareUserPrompt(input: ShareTaskInput): string {
  * and not a wrapper. The length test keeps the legitimate case working — a
  * ````-wrapped post whose interior holds ordinary ``` blocks still unwraps,
  * because a shorter run cannot close a longer opener.
+ *
+ * **The tradeoff is deliberate and one-directional:** a GENUINE whole-post wrapper
+ * whose interior happens to hold a same-marker run (a ```-wrapped post containing
+ * its own ``` block) is left unstripped, so the reader sees the wrapper instead of
+ * a mangled post. Under-stripping costs one visible fence the reader can delete;
+ * over-stripping silently splices prose into code in all three tabs at once.
  */
 export function stripWrappingFence(text: string): string {
   const trimmed = text.trim();

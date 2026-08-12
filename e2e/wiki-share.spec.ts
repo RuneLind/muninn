@@ -328,12 +328,34 @@ test.describe("Wiki reader: share dialog", () => {
     // Focus left on the 📤 button behind the scrim is a lie to a screen reader,
     // and leaves a keyboard reader outside the panel Tab is trapped inside of.
     await openShare(page);
-    const focused = await page.evaluate(() => {
-      const el = document.activeElement as HTMLElement | null;
-      return { id: el?.id ?? "", inPanel: !!el && !!document.getElementById("wikiShare")?.contains(el) };
-    });
-    expect(focused.inPanel).toBe(true);
-    expect(focused.id).not.toBe("wikiShareBtn");
+    const activeId = () => page.evaluate(() => document.activeElement?.id ?? "");
+    const inPanel = () =>
+      page.evaluate(() => {
+        const el = document.activeElement;
+        return !!el && !!document.getElementById("wikiShare")?.contains(el);
+      });
+    expect(await inPanel()).toBe(true);
+    // …and it lands on the PICKER, not on ✕. The loading paint (no picker yet)
+    // parks focus on the dismiss button; the paint that brings the picker has to
+    // take it, or the reader's first Tab starts from "close this dialog".
+    // Measured before the fix: `wikiShareClose`, because the ✕ this module had
+    // focused itself read as the reader already being somewhere.
+    await expect.poll(activeId).toBe("wikiSharePreset");
+  });
+
+  test("a chip click does NOT yank focus back to the preset picker", async ({ page }) => {
+    // The other half of the same bug. The language/tab chips carry no id, so the
+    // render's focus capture returns null on a chip click — and a still-armed
+    // autofocus answered that by moving focus onto the `<select>`, deterministically
+    // on the first chip click of every open. The flag must retire on the picker
+    // paint, so every later paint leaves focus alone.
+    await openShare(page);
+    await expect
+      .poll(() => page.evaluate(() => document.activeElement?.id ?? ""))
+      .toBe("wikiSharePreset");
+    await page.locator('[data-share-lang="nb"]').click();
+    await expect(page.locator('[data-share-lang="nb"].is-active')).toBeVisible();
+    expect(await page.evaluate(() => document.activeElement?.id ?? "")).not.toBe("wikiSharePreset");
   });
 
   test("a POINTER navigation can't strand the dialog — the scrim eats the click", async ({
