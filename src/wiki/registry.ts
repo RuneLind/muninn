@@ -54,6 +54,22 @@ function expandTilde(p: string): string {
 }
 
 /**
+ * Resolve a path written in muninn's env-config dialect to an absolute path:
+ * trim, expand a leading `~`, and resolve a relative path against the muninn
+ * repo root (the same base `WIKI_DIR`'s default uses).
+ *
+ * Exported because `SYNC_REPOS` (`src/sync/config.ts`) must resolve its paths
+ * with EXACTLY these rules — a `wiki`-mode sync entry has to land on the same
+ * absolute string the registry produced for that wiki, or the write-lock key
+ * it derives is for a different chain. Re-spelling `~`-expansion + repo-root
+ * resolution in a second module is precisely how those two drift apart.
+ */
+export function resolveConfiguredPath(raw: string, repoRoot: string = REPO_ROOT): string {
+  const expanded = expandTilde(raw.trim());
+  return path.isAbsolute(expanded) ? expanded : path.resolve(repoRoot, expanded);
+}
+
+/**
  * Build the wiki registry from discovered bots + the raw `WIKI_EXTRA` env string.
  * Bot wikis come first (names stay `jarvis`/`melosys`/…); then standalone wikis
  * from comma-separated `name=path` pairs. Malformed pairs and names colliding
@@ -151,8 +167,7 @@ export function buildWikiRegistry(
     const collections = rawColls
       ? rawColls.split("+").map((s) => s.trim()).filter(Boolean)
       : undefined;
-    const absPath = expandTilde(rawPath);
-    const root = path.isAbsolute(absPath) ? absPath : path.resolve(repoRoot, absPath);
+    const root = resolveConfiguredPath(rawPath, repoRoot);
     if (!add(name, root, "extra", collections, rawPin)) {
       log.warn("WIKI_EXTRA: skipping {name} — name collides with an existing wiki", { name });
     }

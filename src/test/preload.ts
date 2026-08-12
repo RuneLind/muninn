@@ -19,3 +19,13 @@
  */
 
 delete process.env.MUNINN_WIKI_READONLY;
+
+/**
+ * `SYNC_REPOS` is the same class of ambient flag, and it reaches further: it
+ * makes the `wiki-committer` sweeper STAND DOWN for any repo it covers
+ * (`syncCoversToplevel`), so a developer with the real mimir/huginn-jarvis
+ * entries in `.env` would see the sweeper's tests exercise the subsumption
+ * branch instead of the branch they assert. The sync tests build their own
+ * repos and set the variable explicitly.
+ */
+delete process.env.SYNC_REPOS;

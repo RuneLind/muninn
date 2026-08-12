@@ -9,8 +9,14 @@
  * wiki repo that silently accumulates uncommitted pages is one `git clean` away
  * from losing them (the 2026-07-23 huginn-jarvis incident).
  *
+ * On a machine running the repo-sync loop (`SYNC_REPOS`, `src/sync/`) this
+ * sweeper is SUBSUMED for every repo the loop owns in `wiki` mode and stands
+ * down — the loop does the same job with a quiet period and a rebase, and
+ * running both would void both guarantees.
+ *
  * Per tick, for the bot's `wikiDir`:
  *  - resolve the git toplevel; not-a-repo ⇒ no-op.
+ *  - covered by a `wiki`-mode `SYNC_REPOS` entry ⇒ no-op (subsumed).
  *  - off the default branch ⇒ no-op (a feature checkout is left alone — the same
  *    rule the commit seam applies; committing onto a feature branch would be
  *    surprising).
@@ -34,6 +40,7 @@ import {
   listWikiSubtreeDirty,
   commitWikiChange,
 } from "../wiki/commit.ts";
+import { syncCoversToplevel } from "../sync/config.ts";
 import { todayOslo } from "../gardener/util.ts";
 import { openSourceHealth } from "./source-health.ts";
 import { getLog } from "../logging.ts";
@@ -90,6 +97,24 @@ export async function checkWikiCommitter(
       botName: name,
       dir: wikiDir,
     });
+    health.mark(SRC, "ok");
+    return health.finish();
+  }
+
+  // The repo-sync loop SUBSUMES this sweeper for any repo it owns in `wiki`
+  // mode. Running both would be actively harmful, not merely redundant: the
+  // sweeper has no quiet period, so it commits the file the loop is deliberately
+  // holding back because it was edited 30 seconds ago — and it pushes without
+  // ever rebasing, so on a two-machine setup its pushes are silent
+  // non-fast-forward failures. Compared on git TOPLEVELS (see
+  // `syncCoversToplevel`). Marked `ok`, not `skipped`: the work IS being done,
+  // by the loop, so a streak here would escalate a health alert on a healthy
+  // configuration.
+  if (await syncCoversToplevel(top)) {
+    log.info(
+      "Wiki-committer: {top} is covered by the SYNC_REPOS sync loop — sweep subsumed, standing down",
+      { botName: name, top },
+    );
     health.mark(SRC, "ok");
     return health.finish();
   }

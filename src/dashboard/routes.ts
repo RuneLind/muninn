@@ -25,6 +25,7 @@ import { registerBenchmarkRoutes } from "./routes/benchmark-routes.ts";
 import { registerModelsRoutes } from "./routes/models-routes.ts";
 import { registerIndexingRoutes } from "./routes/indexing-routes.ts";
 import { registerAgentsRoutes } from "./routes/agents-routes.ts";
+import { registerSyncRoutes } from "./routes/sync-routes.ts";
 
 export function createDashboardRoutes(config: Config): Hono {
   const app = new Hono();
@@ -77,6 +78,7 @@ export function createDashboardRoutes(config: Config): Hono {
   registerModelsRoutes(app);
   registerIndexingRoutes(app, config);
   registerAgentsRoutes(app);
+  registerSyncRoutes(app, config);
 
   return app;
 }
