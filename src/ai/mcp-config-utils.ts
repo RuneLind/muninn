@@ -119,6 +119,17 @@ export function buildInlineMcpConfig(botDir: string): string | null {
  * revoke everything the shared file granted.
  *
  * Returns `null` when neither file is readable, so the caller omits the flag.
+ *
+ * **Known limits**, both the same shape as {@link buildInlineMcpConfig}'s:
+ *  - **No path relocation.** A `hooks` command, an `additionalDirectories` entry
+ *    or a path-scoped rule like `Read(./notes/**)` resolved against the bot dir
+ *    under the old spawn cwd and now resolves against the agent home. No bot uses
+ *    those shapes today; one that did would find them silently missing.
+ *  - **The union carries local grants for servers the fence excludes.** capra's
+ *    `settings.local.json` allows `mcp__jetbrains__execute_terminal_command`, so
+ *    the merged document grants it — harmless only because `--strict-mcp-config`
+ *    keeps the jetbrains server off the surface entirely. Anything that later
+ *    weakens that fence re-exposes the server WITH a standing grant.
  */
 export function buildInlineSettings(botDir: string): string | null {
   const read = (name: string): Record<string, unknown> | null => {
@@ -138,8 +149,12 @@ export function buildInlineSettings(botDir: string): string | null {
 
   const merged: Record<string, unknown> = { ...(shared ?? {}), ...(local ?? {}) };
 
-  const sharedPerms = (shared?.permissions ?? {}) as Record<string, unknown>;
-  const localPerms = (local?.permissions ?? {}) as Record<string, unknown>;
+  // Guarded, not cast: `{"permissions": "all"}` spread character-by-character
+  // yields `{"0":"a","1":"l","2":"l"}` — garbage the CLI would silently accept.
+  const asRecord = (v: unknown): Record<string, unknown> =>
+    v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+  const sharedPerms = asRecord(shared?.permissions);
+  const localPerms = asRecord(local?.permissions);
   if (shared?.permissions || local?.permissions) {
     const perms: Record<string, unknown> = { ...sharedPerms, ...localPerms };
     for (const key of ["allow", "deny", "ask"]) {
@@ -150,4 +165,34 @@ export function buildInlineSettings(botDir: string): string | null {
     merged.permissions = perms;
   }
   return JSON.stringify(merged);
+}
+
+/**
+ * Bot config files that EXIST but do not parse — the corruption both loaders above
+ * deliberately swallow (they degrade to "absent", which is the right runtime
+ * behaviour and the wrong thing to be silent about).
+ *
+ * Absence and corruption need separate signals because they are not equally
+ * likely to be intentional: a bot with no `.mcp.json` is a normal tool-less bot,
+ * while a trailing comma in one is always a mistake. The gap this closes is
+ * sharper still — `buildInlineSettings` returns non-null when EITHER settings file
+ * parses, so a broken `settings.json` alongside a healthy `settings.local.json`
+ * produced a spawn whose Gmail calls were all denied, with nothing logged.
+ */
+export function unreadableBotConfigs(botDir: string): string[] {
+  const candidates = [
+    join(botDir, ".mcp.json"),
+    join(botDir, ".claude", "settings.json"),
+    join(botDir, ".claude", "settings.local.json"),
+  ];
+  const broken: string[] = [];
+  for (const path of candidates) {
+    if (!existsSync(path)) continue;
+    try {
+      JSON.parse(readFileSync(path, "utf-8"));
+    } catch {
+      broken.push(path);
+    }
+  }
+  return broken;
 }

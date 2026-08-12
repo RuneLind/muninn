@@ -262,13 +262,18 @@ describe("runScheduledTasksFromList — task tracing", () => {
     expect(tt.finished?.status).toBe("ok");
   });
 
-  // A `custom` task's prompt is written by the USER and may perfectly reasonably
-  // say "check my calendar". Under the old bot-dir spawn cwd the bot's MCP servers
-  // were live for it; without `botDir` the spawn is fenced by --strict-mcp-config
-  // and the same prompt returns a confident hallucination with no error anywhere.
-  test("a custom task keeps the bot's MCP tools; our own prose prompts stay fenced", async () => {
+  // Scheduled tasks are TOOL-LESS on every backend, `custom` included. Worth
+  // pinning because it is a real capability change: under the old bot-dir spawn
+  // cwd a user-authored "check my calendar" prompt could reach the bot's MCP
+  // servers on the CLI backend. Restoring that via `botDir` was tried and
+  // reverted — it is inert on every configured bot (all three resolve to the
+  // `anthropic` Haiku backend, which has no tools parameter at all and ignores
+  // `botDir`), and on the one path where it DID activate — the router's CLI
+  // fallback after an Anthropic 429 — it started three MCP servers inside the
+  // 60s HAIKU_TIMEOUT_MS, turning a slow fallback into a timed-out task.
+  test("scheduled tasks are tool-less on every backend, custom included", async () => {
     await runScheduledTasksFromList(api, config, botConfig, [makeTask({ taskType: "custom", prompt: "check my calendar" })], CTX);
-    expect(callHaikuMsgCalls[0]!.opts.botDir).toBe(botConfig.dir);
+    expect(callHaikuMsgCalls[0]!.opts.botDir).toBeUndefined();
 
     callHaikuMsgCalls.length = 0;
     await runScheduledTasksFromList(api, config, botConfig, [makeTask({ taskType: "reminder", title: "Take a break" })], CTX);

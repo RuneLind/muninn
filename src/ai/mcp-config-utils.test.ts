@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { buildInlineMcpConfig, buildInlineSettings, loadRawMcpServers, resolveBotCwd } from "./mcp-config-utils.ts";
+import { buildInlineMcpConfig, buildInlineSettings, loadRawMcpServers, resolveBotCwd, unreadableBotConfigs } from "./mcp-config-utils.ts";
 
 /**
  * A throwaway `<tmp>/bots/jarvis` holding one `.mcp.json`. Every root is recorded
@@ -199,6 +199,17 @@ describe("buildInlineSettings", () => {
     expect(buildInlineSettings(broken)).toBeNull();
     expect(buildInlineSettings(array)).toBeNull();
   });
+
+  test("a non-object `permissions` value is dropped, not spread into garbage", () => {
+    // `{"permissions": "all"}` spread character-by-character yields
+    // {"0":"a","1":"l","2":"l"} — which the CLI would silently accept.
+    const botDir = scratchBot();
+    write(botDir, "settings.json", { permissions: "all", enableAllProjectMcpServers: true });
+
+    const merged = JSON.parse(buildInlineSettings(botDir)!);
+    expect(merged.permissions).toEqual({});
+    expect(merged.enableAllProjectMcpServers).toBe(true);
+  });
 });
 
 describe("loadRawMcpServers / resolveBotCwd", () => {
@@ -209,5 +220,37 @@ describe("loadRawMcpServers / resolveBotCwd", () => {
     expect(resolveBotCwd(undefined, botDir)).toBe(botDir);
     expect(resolveBotCwd("../sib", botDir)).toBe(join(botDir, "../sib"));
     expect(resolveBotCwd("/abs", botDir)).toBe("/abs");
+  });
+});
+
+describe("unreadableBotConfigs", () => {
+  const write = (botDir: string, rel: string, body: string) => {
+    mkdirSync(join(botDir, rel.includes("/") ? rel.split("/")[0]! : "."), { recursive: true });
+    writeFileSync(join(botDir, rel), body);
+  };
+
+  test("reports a file that exists but does not parse, and stays quiet about absence", () => {
+    // Absence can be intentional (a tool-less bot has no .mcp.json); a trailing
+    // comma never is. The two must not share one signal.
+    const botDir = scratchBot();
+    write(botDir, ".mcp.json", '{"mcpServers":{},}');
+    write(botDir, ".claude/settings.json", JSON.stringify({ permissions: { allow: ["A"] } }));
+
+    const broken = unreadableBotConfigs(botDir);
+    expect(broken).toEqual([join(botDir, ".mcp.json")]);
+  });
+
+  test("catches the corrupt-shared/healthy-local pair the settings merge cannot", () => {
+    const botDir = scratchBot();
+    write(botDir, ".claude/settings.json", '{"permissions":{"allow":["A"],}}');
+    write(botDir, ".claude/settings.local.json", JSON.stringify({ permissions: { allow: ["B"] } }));
+
+    // The merge succeeds off the healthy file, so absence-checking sees nothing wrong.
+    expect(buildInlineSettings(botDir)).not.toBeNull();
+    expect(unreadableBotConfigs(botDir)).toEqual([join(botDir, ".claude", "settings.json")]);
+  });
+
+  test("is empty for a bot with no config files at all", () => {
+    expect(unreadableBotConfigs(scratchBot())).toEqual([]);
   });
 });

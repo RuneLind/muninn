@@ -3,7 +3,7 @@ import { getLog } from "../logging.ts";
 import { pickPrimaryModel } from "../ai/result-parser.ts";
 import { StreamParser, type StreamProgressCallback } from "../ai/stream-parser.ts";
 import { resolveAgentCwd } from "../ai/agent-cwd.ts";
-import { buildInlineMcpConfig, buildInlineSettings } from "../ai/mcp-config-utils.ts";
+import { buildInlineMcpConfig, buildInlineSettings, unreadableBotConfigs } from "../ai/mcp-config-utils.ts";
 import { attachToolSpans } from "../core/tool-spans.ts";
 import type { ClaudeResult, ToolCall } from "../types.ts";
 import type { Tracer } from "../tracing/index.ts";
@@ -227,9 +227,24 @@ export function buildHaikuArgs(opts: {
   }
   if (opts.botDir && !settings) {
     warnOnce(`settings:${opts.botDir}`,
-      "No readable .claude/settings.json under {botDir} — this spawn's MCP tool calls will be DENIED " +
-        "(the denial is reported to the model, not thrown, so the caller sees an empty result).",
+      "No readable .claude/settings.json or settings.local.json under {botDir} — this spawn's MCP tool " +
+        "calls will be DENIED (the denial is reported to the model, not thrown, so the caller sees an " +
+        "empty result).",
       { botDir: opts.botDir });
+  }
+  // Corruption, reported separately from absence. Absence can be intentional (a
+  // tool-less bot has no .mcp.json); a file that exists and does not parse never
+  // is. It also catches what the two checks above structurally cannot: a broken
+  // `settings.json` next to a healthy `settings.local.json` still yields a
+  // non-null merge, so `!settings` is false while every Gmail call gets denied.
+  if (opts.botDir) {
+    const broken = unreadableBotConfigs(opts.botDir);
+    if (broken.length > 0) {
+      warnOnce(`broken:${broken.join(",")}`,
+        "Unparseable bot config under {botDir}: {files} — it is being IGNORED, so this spawn silently " +
+          "loses the MCP servers or tool permissions that file was carrying.",
+        { botDir: opts.botDir, files: broken.join(", ") });
+    }
   }
 
   // ALWAYS fence the spawn to the servers we passed (none, when we passed none).

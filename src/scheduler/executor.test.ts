@@ -432,7 +432,13 @@ describe("spawnHaiku degrade warnings", () => {
     const { configure } = await import("@logtape/logtape");
     await configure({
       sinks: { capture: (r: any) => records.push(r.message.join("")) },
-      loggers: [{ category: ["muninn", "scheduler", "executor"], lowestLevel: "warning", sinks: ["capture"] }],
+      loggers: [
+        { category: ["muninn", "scheduler", "executor"], lowestLevel: "warning", sinks: ["capture"] },
+        // Without this LogTape prints an 8-line meta notice into every suite run.
+        // Root CLAUDE.md says tests never configure logging; this file is the one
+        // exception, because a warning that never fires is the same as no guard.
+        { category: ["logtape", "meta"], lowestLevel: "error", sinks: [] },
+      ],
       reset: true,
     });
     _resetSpawnWarningsForTests();
@@ -455,9 +461,29 @@ describe("spawnHaiku degrade warnings", () => {
       records.length = 0;
       buildHaikuArgs({ prompt: "x", model: "m" });
       expect(records).toHaveLength(0);
+
+      // The case the two checks above structurally CANNOT see: a corrupt
+      // settings.json next to a healthy settings.local.json. The merge returns
+      // non-null, so `!settings` is false — while every mcp__gmail__* call in
+      // production gets denied and the checker reports a quiet inbox.
+      const capraish = join(root, "capra");
+      mkdirSync(join(capraish, ".claude"), { recursive: true });
+      writeFileSync(join(capraish, ".mcp.json"), JSON.stringify({ mcpServers: { gmail: { command: "npx" } } }));
+      writeFileSync(join(capraish, ".claude", "settings.json"), '{"permissions":{"allow":["mcp__gmail__x"],}}');
+      writeFileSync(join(capraish, ".claude", "settings.local.json"), JSON.stringify({ permissions: { allow: ["other"] } }));
+
+      const args = buildHaikuArgs({ prompt: "x", model: "m", botDir: capraish });
+      expect(args).toContain("--settings"); // the healthy local file still merges
+      expect(records.filter((r) => r.includes("Unparseable bot config"))).toHaveLength(1);
+      // ...and it must NOT be reported as mere absence, which reads as intentional.
+      expect(records.filter((r) => r.includes("No readable"))).toHaveLength(0);
     } finally {
       rmSync(root, { recursive: true, force: true });
-      await configure({ sinks: {}, loggers: [], reset: true });
+      await configure({
+        sinks: {},
+        loggers: [{ category: ["logtape", "meta"], lowestLevel: "error", sinks: [] }],
+        reset: true,
+      });
     }
   });
 });
