@@ -236,13 +236,20 @@ export function registerSummariesShareRoutes(
           );
         }
         release = acquired.release;
-        log.info("Summary share: source={source} bot={bot} doc={doc} preset={preset} lang={lang}", {
-          source: source.id,
-          bot: botConfig.name,
-          doc: docId,
-          preset: presetId,
-          lang,
-        });
+        // "requested", not "running": the slot is now claimed BEFORE the huginn
+        // fetch, so at this point nothing has established that the document is
+        // even readable. The line records an accepted request that holds the
+        // document; the app_error paths below say what became of it.
+        log.info(
+          "Summary share requested: source={source} bot={bot} doc={doc} preset={preset} lang={lang}",
+          {
+            source: source.id,
+            bot: botConfig.name,
+            doc: docId,
+            preset: presetId,
+            lang,
+          },
+        );
       }
 
       // Everything from here on is resolution-dependent and therefore reported

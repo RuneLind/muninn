@@ -203,13 +203,28 @@ export function summaryShareTarget(source: string, docId: string): ShareTarget {
 const SHARE_SCRIPT_SLOT_SOURCE = "__share_source_slot__";
 const SHARE_SCRIPT_SLOT_DOC_ID = "__share_doc_id_slot__";
 export function summaryShareTargetScript(sourceExpr: string, docIdExpr: string): string {
+  const slots = new Map([
+    [JSON.stringify(SHARE_SCRIPT_SLOT_SOURCE), sourceExpr],
+    [JSON.stringify(SHARE_SCRIPT_SLOT_DOC_ID), docIdExpr],
+  ]);
   // The sentinels cannot occur in a URL or a copy string, and `JSON.stringify`
-  // spells them identically in both passes, so the substitution is exact.
-  return JSON.stringify(summaryShareTarget(SHARE_SCRIPT_SLOT_SOURCE, SHARE_SCRIPT_SLOT_DOC_ID))
-    .split(JSON.stringify(SHARE_SCRIPT_SLOT_SOURCE))
-    .join(sourceExpr)
-    .split(JSON.stringify(SHARE_SCRIPT_SLOT_DOC_ID))
-    .join(docIdExpr);
+  // spells them identically here and in the serialized target — but the
+  // substitution is exact because it is ONE pass, not two: sequential
+  // `split`/`join`s re-scan the text the previous pass inserted, so an argument
+  // expression that itself contained the other slot's sentinel corrupted the
+  // output. The sentinels carry no regex metacharacters (`[A-Za-z_]` plus the
+  // quotes), so they go into the alternation as-is, and a replacement FUNCTION
+  // is inserted verbatim (no `$&` expansion in the caller's expression).
+  //
+  // `<` is escaped first, and only in the serialized JSON — never in the
+  // caller's expressions, where `<` would not be a comparison operator.
+  // This string is interpolated into a page `<script>` block, and `<` can only
+  // occur inside a JSON string literal, where `<` is the same character:
+  // a future copy string containing `</script>` cannot break out of the block.
+  const json = JSON.stringify(
+    summaryShareTarget(SHARE_SCRIPT_SLOT_SOURCE, SHARE_SCRIPT_SLOT_DOC_ID),
+  ).replace(/</g, "\\u003c");
+  return json.replace(new RegExp([...slots.keys()].join("|"), "g"), (m) => slots.get(m) ?? m);
 }
 
 /** Everything the dialog renders from. Held by the DOM module, never on the DOM

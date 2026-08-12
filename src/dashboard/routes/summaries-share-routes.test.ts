@@ -347,9 +347,13 @@ describe("per-document single-flight", () => {
     expect(held.ok).toBe(true);
     const res = await post(app, ok);
     expect(res.status).toBe(409);
-    const body = (await res.json()) as { state: string; expiresAtMs: number };
+    const body = (await res.json()) as { state: string; expiresAtMs: number; error?: string };
     expect(body.state).toBe("running");
     expect(body.expiresAtMs).toBeGreaterThan(Date.now());
+    // The sentence rides ALONGSIDE the machine-readable pair, for a caller that
+    // is not the dialog. It names the DOCUMENT — the wiki surface's twin says
+    // "page", and the two must not be able to drift into each other's copy.
+    expect(body.error).toBe("A share is already running for this document.");
   });
 
   test("another document — and the same id in another collection — is unaffected", async () => {
@@ -383,6 +387,36 @@ describe("per-document single-flight", () => {
     const res = await post(healthy, ok);
     expect(res.status).toBe(200);
     await res.text();
+    expect(seen.ran).toBe(1);
+  });
+
+  test("a throw AFTER the fetch releases the slot — the rethrowing catch, not the early release", async () => {
+    // The `throwOnFetch` case above never reaches `catch { release?.(); throw }`:
+    // the route's own fetch catch absorbs it (`doc = null`) and the slot is freed
+    // by the `!userPrompt` early release. So this drives the other half of the
+    // window — the prep — with a document whose body read throws, and proves both
+    // halves: the slot IS held at the moment of the throw (probed from inside the
+    // getter; a failed acquire claims nothing, so the probe is non-mutating), and
+    // it is free again afterwards.
+    let heldAtThrow = false;
+    const { app } = makeApp({
+      doc: {
+        title: "Some Title",
+        get text(): string {
+          heldAtThrow = !acquireShareFlight(summaryShareFlightKey("youtube-summaries", DOC_ID)).ok;
+          throw new Error("prep exploded");
+        },
+      },
+    });
+    const res = await post(app, ok);
+    // The outer wrapper turns it into JSON — never an unhandled rejection.
+    expect(res.status).toBe(500);
+    expect(heldAtThrow).toBe(true);
+    // …and the document is free: the next POST runs instead of 409ing.
+    const { app: healthy, seen } = makeApp();
+    const next = await post(healthy, ok);
+    expect(next.status).toBe(200);
+    await next.text();
     expect(seen.ran).toBe(1);
   });
 

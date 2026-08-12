@@ -429,4 +429,24 @@ describe("summaryShareTargetScript", () => {
     )({ source: "youtube", docId: "ai/Some Title.md" }) as unknown;
     expect(evaluated).toEqual(summaryShareTarget("youtube", "ai/Some Title.md"));
   });
+
+  test("substitution is ONE pass — an argument spelling a sentinel is not re-substituted", () => {
+    // Two sequential split/joins re-scanned the text the first pass inserted, so
+    // an argument containing the OTHER slot's sentinel got rewritten by the
+    // second — silently swapping the two identity values.
+    const js = summaryShareTargetScript('"__share_doc_id_slot__"', "_d");
+    const evaluated = new Function("_d", "return " + js)("real-doc") as {
+      fields: { source: string; docId: string };
+    };
+    expect(evaluated.fields.source).toBe("__share_doc_id_slot__");
+    expect(evaluated.fields.docId).toBe("real-doc");
+  });
+
+  test("no raw `<` survives — the string is interpolated into a page <script>", () => {
+    // `<` can only occur inside a JSON string literal here, where `<` is the
+    // same character. Nothing in the target carries one TODAY, which is exactly
+    // why this is pinned: the day a copy string does, `</script>` must not be
+    // able to end the block it is emitted into.
+    expect(summaryShareTargetScript("_a", "_b")).not.toContain("<");
+  });
 });

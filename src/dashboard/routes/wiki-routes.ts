@@ -2078,6 +2078,13 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       const presetId = parsed.body.preset;
       const { lang, promptOverride, extra } = parsed.body;
 
+      // The RAW `body.wiki`/`body.bot`, deliberately NOT the parser's trimmed
+      // `parsed.body.values.*`: the parser only TYPE-checks these two (neither is
+      // `required`), and `resolveWikiRequest` owns its own trimming and
+      // absent-vs-blank rule. Feeding it the parser's values instead — where
+      // absent arrives as `""` — is behaviour-identical only because that rule
+      // treats both as unset; keeping the raw values means resolution does not
+      // silently depend on the parser's normalization. Not an oversight.
       const { entry, unknownWiki, wiki } = resolveWikiRequest(
         getWikiRegistry(),
         c.req.query("wiki") ?? body.wiki,

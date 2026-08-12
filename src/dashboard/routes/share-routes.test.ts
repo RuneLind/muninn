@@ -358,9 +358,13 @@ describe("POST /api/wiki/share — pre-commit guards", () => {
     expect(held.ok).toBe(true);
     const res = await post(ok);
     expect(res.status).toBe(409);
-    const body = (await res.json()) as { state: string; expiresAtMs: number };
+    const body = (await res.json()) as { state: string; expiresAtMs: number; error?: string };
     expect(body.state).toBe("running");
     expect(body.expiresAtMs).toBeGreaterThan(Date.now());
+    // The sentence rides ALONGSIDE the machine-readable pair, for a caller that
+    // is not the dialog (curl, a future surface) and cannot know what
+    // `{state:"running"}` means. It names the PAGE — this is the wiki surface.
+    expect(body.error).toBe("A share is already running for this page.");
   });
 
   test("`page` is a NAME: a nested page resolves through index.resolve", async () => {
