@@ -281,7 +281,7 @@ export async function renderModelsPage(): Promise<string> {
       <div class="list-card">
         <div class="lc-head">
           <h3>Pipeline ledger</h3>
-          <div class="lc-sub">Headline numbers from the claude-usage aggregator (served on port 8787 of the host running muninn). Fetched server-side — this page never reaches that port from your browser, so there is no link to follow from here.</div>
+          <div class="lc-sub" id="usageSub">Headline numbers from the claude-usage aggregator, read server-side — this page never reaches that service from your browser, so there is no link to follow from here.</div>
         </div>
         <div class="lc-body" id="usageBody"><div class="empty-msg">Loading…</div></div>
       </div>
@@ -890,11 +890,24 @@ export async function renderModelsPage(): Promise<string> {
       // service it was never meant to have.
       if (!data || (!data.reachable && !data.configured)) { section.hidden = true; return; }
       section.hidden = false;
+      // Name the endpoint actually read. A hardcoded "port 8787" is a lie the
+      // moment CLAUDE_USAGE_URL points somewhere else, and it is the first thing
+      // to check when the card degrades.
+      var sub = document.getElementById('usageSub');
+      if (sub && data.baseUrl) {
+        sub.textContent = 'Headline numbers from the claude-usage aggregator at ' + data.baseUrl +
+          ', read server-side — this page never reaches that service from your browser, so there is no link to follow from here.';
+      }
       var h = (data.rows || []).map(function (r) {
         var tone = USAGE_TONE[r.tone] || '';
+        var cvTone = USAGE_TONE[r.caveatTone] || '';
         return '<div class="lc-row hover-wash">' +
           '<div class="lc-main"><div class="lc-title">' + esc(r.label) + '</div>' +
-          (r.note ? '<div class="lc-note' + (tone ? ' ' + tone : '') + '">' + esc(r.note) + '</div>' : '') + '</div>' +
+          (r.note ? '<div class="lc-note' + (tone ? ' ' + tone : '') + '">' + esc(r.note) + '</div>' : '') +
+          // The upstream caveats, verbatim and on the row whose numbers they
+          // qualify — a caveat rendered anywhere else is a footnote nobody reads.
+          (r.caveat ? '<div class="lc-note' + (cvTone ? ' ' + cvTone : '') + '">' + esc(r.caveat) + '</div>' : '') +
+          '</div>' +
           '<span class="lc-val' + (tone ? ' ' + tone : '') + '">' + esc(r.value) + '</span>' +
         '</div>';
       }).join('');

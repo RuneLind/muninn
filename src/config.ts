@@ -20,6 +20,21 @@ function optionalEnv(name: string, defaultValue: string): string {
 }
 
 /**
+ * An optional env var with NO default: trimmed once, blank ⇒ null.
+ *
+ * The point is the SINGLE read. A defaulted string paired with a separate
+ * `<name>Configured` boolean derives two facts from two reads that can disagree:
+ * `CLAUDE_USAGE_URL="   "` made the boolean true (a non-empty string) while the
+ * URL fell back to the default. Null-when-unset says both things at once, and
+ * the feature layer applies its own default — which is also the house idiom
+ * (`src/sync/` derives `configured` at the feature layer, not on `Config`).
+ */
+function nullableEnv(name: string): string | null {
+  const raw = (process.env[name] ?? "").trim();
+  return raw === "" ? null : raw;
+}
+
+/**
  * Values already warned about, keyed `<var>=<value>` — the flags here are read at
  * CALL time (the readonly seam reads on every write), so a per-call warn would
  * flood the log. Keyed by value, not just name, so correcting one typo into
@@ -115,13 +130,12 @@ export function loadConfig() {
     logDir: optionalEnv("LOG_DIR", "./logs"),
     knowledgeApiUrl: optionalEnv("KNOWLEDGE_API_URL", "http://localhost:8321"),
     // The claude-usage pipeline-ledger service (launchd, port 8787 on the mini).
-    // `claudeUsageConfigured` is the EXPLICIT-set flag, not a second URL: with a
-    // default in place, "unset" is otherwise indistinguishable from "set to the
-    // default", and the /models card uses the distinction to decide whether an
-    // unreachable service is an error worth showing or simply a service this
-    // host was never meant to have.
-    claudeUsageUrl: optionalEnv("CLAUDE_USAGE_URL", "http://127.0.0.1:8787"),
-    claudeUsageConfigured: Boolean(process.env.CLAUDE_USAGE_URL),
+    // NULL when unset, and that null IS the "configured?" answer the /models card
+    // needs — it decides whether an unreachable service is an error worth showing
+    // or simply a service this host was never meant to have. The default URL
+    // lives with the feature (`CLAUDE_USAGE_DEFAULT_URL`, applied at the route),
+    // so this layer never has to carry a second field that can contradict it.
+    claudeUsageUrl: nullableEnv("CLAUDE_USAGE_URL"),
     knowledgeViewableCollections: optionalEnv("KNOWLEDGE_VIEWABLE_COLLECTIONS", "").split(",").map(s => s.trim()).filter(Boolean),
     yggdrasilMcpUrl: optionalEnv("YGGDRASIL_MCP_URL", "http://127.0.0.1:9130"),
     tracingEnabled: optionalEnv("TRACING_ENABLED", "true") === "true",
