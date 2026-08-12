@@ -6,7 +6,7 @@
  * wiki surface (`routes/share-sse.ts` for the runner + the single-flight
  * registry, `src/share/*` for the presets, the body prep and the prompt).
  *
- * Three things differ from `POST /api/wiki/share`, and each is a decision:
+ * Four things differ from `POST /api/wiki/share`, and each is a decision:
  *
  *  1. **The client sends `{source, docId}`, never a collection.** Which huginn
  *     collection backs a source is a server-side registration detail
@@ -26,6 +26,15 @@
  *     `openDocPanel` only the breadcrumb); the point of doing it here is that
  *     the shared post is not at the mercy of which viewer happened to open the
  *     document.
+ *  4. **The single-flight key is NAMESPACED** (`summaryShareFlightKey`) — one
+ *     process-wide registry backs both surfaces, and a wiki whose registered
+ *     name equalled a collection name would otherwise share slots with that
+ *     collection's documents.
+ *
+ * Everything else the two routes have in common is now literally shared code:
+ * the body validation is `parseShareRequestBody` (`src/share/wire.ts`) and the
+ * two strings that name a surface — the `/agents` deep link and the bot-less
+ * copy — are `ShareSseOptions` fields this route sets.
  *
  * The POST+SSE ordering contract is the wiki route's, verbatim and for the same
  * reason: every body check returns a plain JSON 400 BEFORE `streamShareSSE`
@@ -44,12 +53,7 @@ import { getSummarySource } from "../../summaries/sources.ts";
 import { findSharePreset, resolveSharePresets, type SharePreset } from "../../share/presets.ts";
 import { prepareSummaryDocBody } from "../../share/body-prep.ts";
 import { buildShareSystemPrompt, buildShareUserPrompt } from "../../share/prompt.ts";
-import {
-  isShareLang,
-  SHARE_EXTRA_MAX,
-  SHARE_LANGS,
-  SHARE_PROMPT_OVERRIDE_MAX,
-} from "../../share/wire.ts";
+import { parseShareRequestBody, SHARE_LANGS } from "../../share/wire.ts";
 import { acquireShareFlight, shareFlightKey, streamShareSSE } from "./share-sse.ts";
 import { getLog } from "../../logging.ts";
 
@@ -96,10 +100,20 @@ export function defaultSummariesShareDeps(knowledgeApiUrl: string): SummariesSha
 
 /**
  * Display title for a summary doc — huginn's own `title` when it has one, else
- * the id's basename with the extension dropped, which is exactly what the
- * `/summaries` client's `docTitle` shows. It reaches the model (the SOURCE
- * header) and the `/agents` run card, so a mismatch with the row the reader
- * clicked is a real confusion, not cosmetics.
+ * the id's basename with the extension dropped.
+ *
+ * **It is deliberately NOT the client's `docTitle`, which never consults huginn
+ * and strips only `.md`.** The two agree on the common case (an `.md` id whose
+ * document carries no title) and diverge otherwise, on purpose: this title
+ * reaches the MODEL (the `SOURCE:` header) and names the `/agents` run card, and
+ * for both of those huginn's own title is the better answer — it is what the
+ * document says it is called, rather than what its filename happens to be. The
+ * extension list is wider here for the same reason: a run card reading
+ * `Share: Some Title.txt` is a filename leaking into a label.
+ *
+ * The residual is cosmetic and accepted: a document whose huginn title differs
+ * from its filename shows one string in the panel header and the other on the
+ * run card.
  */
 export function summaryDocTitle(docId: string, doc: SummaryShareDoc | null): string {
   const fromDoc = doc?.title?.trim();
@@ -155,44 +169,20 @@ export function registerSummariesShareRoutes(
       };
       const body = await c.req.json<Body>().catch(() => ({}) as Body);
 
-      // Body shape is client-controlled, so every field is type-checked before
-      // any of them is used (the wiki route's precedent).
-      for (const field of ["source", "docId", "preset", "promptOverride", "extra"] as const) {
-        if (body[field] !== undefined && typeof body[field] !== "string") {
-          return c.json({ error: `${field} must be a string` }, 400);
-        }
-      }
-
-      const sourceId = typeof body.source === "string" ? body.source.trim() : "";
-      if (!sourceId) return c.json({ error: "source is required" }, 400);
-      const docId = typeof body.docId === "string" ? body.docId.trim() : "";
-      if (!docId) return c.json({ error: "docId is required" }, 400);
-      const presetId = typeof body.preset === "string" ? body.preset.trim() : "";
-      if (!presetId) return c.json({ error: "preset is required" }, 400);
-      if (!isShareLang(body.lang)) {
-        return c.json(
-          { error: `lang must be one of: ${SHARE_LANGS.map((l) => l.id).join(", ")}` },
-          400,
-        );
-      }
-      const lang = body.lang;
-      const promptOverride = typeof body.promptOverride === "string" ? body.promptOverride : "";
-      if (promptOverride.length > SHARE_PROMPT_OVERRIDE_MAX) {
-        return c.json(
-          { error: `promptOverride is longer than ${SHARE_PROMPT_OVERRIDE_MAX} characters` },
-          400,
-        );
-      }
-      // A PRESENT but blank override is a 400, never a silent fall back to the
-      // preset — the model would follow an instruction the screen is no longer
-      // showing, reported as that preset's output. (ABSENT is the unedited case.)
-      if (body.promptOverride !== undefined && promptOverride.trim() === "") {
-        return c.json({ error: "promptOverride is empty — omit it to use the preset" }, 400);
-      }
-      const extra = typeof body.extra === "string" ? body.extra : "";
-      if (extra.length > SHARE_EXTRA_MAX) {
-        return c.json({ error: `extra is longer than ${SHARE_EXTRA_MAX} characters` }, 400);
-      }
+      // Every body-shape check is the SHARED `parseShareRequestBody`, error copy
+      // included — the wiki route runs the same call with its own field list, so
+      // the two surfaces cannot answer the same malformed body differently. The
+      // ordering it encodes is this route's too: identity fields first (`source`
+      // outranks `docId` outranks `preset`), then the language, then the caps.
+      const parsed = parseShareRequestBody(body as Record<string, unknown>, {
+        stringFields: ["source", "docId", "preset", "promptOverride", "extra"],
+        required: ["source", "docId", "preset"],
+      });
+      if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+      const sourceId = parsed.body.values.source ?? "";
+      const docId = parsed.body.values.docId ?? "";
+      const presetId = parsed.body.preset;
+      const { lang, promptOverride, extra } = parsed.body;
 
       // Source → collection, through the registry FIELD. An unknown source is a
       // 400 rather than an app_error: the client picked it out of the same
@@ -213,56 +203,37 @@ export function registerSummariesShareRoutes(
       );
       if (!preset) return c.json({ error: `unknown share preset "${presetId}"` }, 400);
 
-      // Everything from here on is resolution-dependent and therefore reported
-      // on the committed stream (the scaffold owns the bot-less case itself).
-      let preflightError: string | null = null;
-      let doc: SummaryShareDoc | null = null;
-      try {
-        doc = await deps.fetchDoc(source.collection, docId);
-      } catch (err) {
-        log.warn("Summary share: doc fetch failed collection={collection} id={id}: {error}", {
-          collection: source.collection,
-          id: docId,
-          error: err instanceof Error ? err.message : String(err),
-        });
-        doc = null;
-      }
-      const title = summaryDocTitle(docId, doc);
-
-      let systemPrompt = "";
-      let userPrompt = "";
-      if (!doc) {
-        preflightError = `Could not read "${title}" from the ${source.label} archive.`;
-      } else {
-        // The canonical strip — the server owns it so the post never depends on
-        // which client rendered the document.
-        const prepared = prepareSummaryDocBody(doc.text ?? "");
-        if (!prepared.trim()) {
-          preflightError = `"${title}" has no text to summarize.`;
-        } else {
-          // No wiki name: this document came from a capture archive, and
-          // claiming a wiki in the framing would be a fact the model repeats.
-          systemPrompt = buildShareSystemPrompt("");
-          userPrompt = buildShareUserPrompt({
-            instruction: promptOverride.trim() || preset.content,
-            lang,
-            extra: extra.trim(),
-            body: prepared,
-            title,
-          });
-        }
-      }
-
-      // Per-document single-flight, taken ONLY when a model call will actually
-      // run (`userPrompt` non-empty ⇒ fetch + prep succeeded; `botConfig` ⇒ the
-      // scaffold gets past its "no bots" app_error). Same guard, same reason as
-      // the wiki route: one POST buys a whole-document summarization, and a
-      // double-click, a reload mid-stream or a second tab each buy another.
+      // **Per-document single-flight, claimed BEFORE the huginn fetch** — every
+      // pre-commit 400 is behind us, so from here a second POST for this
+      // document can only be a double-click, a reload mid-stream or a second
+      // tab, and each of those buys a whole-document summarization.
+      //
+      // **This is the one place the two routes' orderings deliberately DIVERGE.**
+      // The wiki route reads its page first because that read is local disk and
+      // costs microseconds; here it is a network round-trip to huginn under a
+      // 10s budget, so taken after the fetch two clicks a second apart both see
+      // a free slot and both spend that round-trip before either 409s. It also
+      // puts the code back in line with what `SHARE_SLOT_SLACK_MS` already says
+      // it assumes — that the slot is taken first and the run's budget starts
+      // inside it.
+      //
+      // `botConfig` still gates it: without a bot the scaffold only emits its
+      // "no bots" app_error, and reserving the document for two minutes to say
+      // so would be a wedge.
       let release: (() => void) | undefined;
-      if (botConfig && userPrompt) {
+      if (botConfig) {
         const acquired = acquireShareFlight(summaryShareFlightKey(source.collection, docId));
         if (!acquired.ok) {
-          return c.json({ state: "running", expiresAtMs: acquired.expiresAtMs }, 409);
+          return c.json(
+            {
+              state: "running",
+              expiresAtMs: acquired.expiresAtMs,
+              // The machine-readable pair, plus a sentence for a caller that is
+              // not the dialog (the dialog's own countdown copy ignores it).
+              error: "A share is already running for this document.",
+            },
+            409,
+          );
         }
         release = acquired.release;
         log.info("Summary share: source={source} bot={bot} doc={doc} preset={preset} lang={lang}", {
@@ -274,7 +245,59 @@ export function registerSummariesShareRoutes(
         });
       }
 
+      // Everything from here on is resolution-dependent and therefore reported
+      // on the committed stream (the scaffold owns the bot-less case itself).
+      // The whole tail runs under a `catch` that RELEASES before rethrowing: the
+      // slot is held now, and an unexpected throw in the prep would otherwise
+      // reserve the document for the full expiry with nothing running.
       try {
+        let preflightError: string | null = null;
+        let doc: SummaryShareDoc | null = null;
+        try {
+          doc = await deps.fetchDoc(source.collection, docId);
+        } catch (err) {
+          log.warn("Summary share: doc fetch failed collection={collection} id={id}: {error}", {
+            collection: source.collection,
+            id: docId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          doc = null;
+        }
+        const title = summaryDocTitle(docId, doc);
+
+        let systemPrompt = "";
+        let userPrompt = "";
+        if (!doc) {
+          preflightError = `Could not read "${title}" from the ${source.label} archive.`;
+        } else {
+          // The canonical strip — the server owns it so the post never depends on
+          // which client rendered the document.
+          const prepared = prepareSummaryDocBody(doc.text ?? "");
+          if (!prepared.trim()) {
+            preflightError = `"${title}" has no text to summarize.`;
+          } else {
+            // No wiki name: this document came from a capture archive, and
+            // claiming a wiki in the framing would be a fact the model repeats.
+            systemPrompt = buildShareSystemPrompt("");
+            userPrompt = buildShareUserPrompt({
+              instruction: promptOverride.trim() || preset.content,
+              lang,
+              extra: extra.trim(),
+              body: prepared,
+              title,
+            });
+          }
+        }
+
+        // No prompt ⇒ no model call, so the document is freed HERE rather than
+        // riding the stream's `onSettled`. Same outcome either way (the scaffold
+        // settles an app_error immediately), but an unreadable document should
+        // not stay reserved for even one more await.
+        if (!userPrompt) {
+          release?.();
+          release = undefined;
+        }
+
         return streamShareSSE(c, {
           config,
           botConfig: botConfig ?? null,
@@ -282,6 +305,11 @@ export function registerSummariesShareRoutes(
           systemPrompt,
           userPrompt,
           runName: `Share: ${title}`,
+          // This surface's own two strings — without them the run card deep-links
+          // to /wiki and the bot-less refusal talks about a wiki that isn't in
+          // this story.
+          sourcePage: "/summaries",
+          noBotMessage: "No bots configured to write a share summary.",
           ...(deps.oneShot ? { oneShot: deps.oneShot } : {}),
           ...(release ? { onSettled: release } : {}),
         });

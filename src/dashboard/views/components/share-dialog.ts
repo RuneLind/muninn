@@ -27,6 +27,7 @@ import {
   copyPayloadFor,
   selectedPreset,
   shareConflictCopy,
+  shareCopyOf,
   shareDialogHtml,
   shareRequestBody,
   shareTargetOf,
@@ -85,6 +86,18 @@ let autofocusPending = false;
 let autofocusedId = "";
 /** Ticks the 409 countdown; cleared the moment the deadline passes. */
 let conflictTimer: ReturnType<typeof setInterval> | null = null;
+/**
+ * Where focus goes when the dialog closes — the element that had it when the
+ * dialog opened, i.e. the 📤 button in every real case.
+ *
+ * The other half of the autofocus contract, and it was missing: `openShareDialog`
+ * deliberately pulls focus INTO a panel claiming `aria-modal="true"`, and closing
+ * removed that panel from under `document.activeElement`, which browsers reset to
+ * `<body>`. On /wiki that is merely the top of the page; on /summaries the reader
+ * is left on `<body>` BEHIND a still-open doc-panel overlay, so the next Tab walks
+ * the page under the article they are reading.
+ */
+let returnFocusTo: HTMLElement | null = null;
 
 function panel(): HTMLElement | null {
   return document.getElementById(SHARE_DIALOG_ID);
@@ -100,6 +113,15 @@ export function openShareDialog(opts: OpenShareOptions): void {
   inFlight?.abort();
   inFlight = null;
   stopConflictTimer();
+  // Where focus came FROM, stashed before autofocus takes it. Captured only when
+  // it is outside the panel, so a RE-TARGET (a second open while the dialog is
+  // up) cannot overwrite the real opener with one of the dialog's own controls —
+  // and never `<body>`, which is the state this exists to avoid restoring to.
+  const active = document.activeElement as HTMLElement | null;
+  const alreadyOpen = panel();
+  if (!alreadyOpen || !active || !alreadyOpen.contains(active)) {
+    returnFocusTo = active && active !== document.body ? active : null;
+  }
   // The panel claims `aria-modal="true"`, so leaving `document.activeElement` on
   // the 📤 button behind the scrim is a lie to a screen reader and leaves the
   // keyboard reader outside a dialog Tab is trapped inside of.
@@ -144,7 +166,7 @@ export function closeShareDialogOnNavigate(page: string): void {
   if (state && state.page !== page) closeShareDialog();
 }
 
-/** Close it, cancelling any run. */
+/** Close it, cancelling any run, and hand focus back to whatever opened it. */
 export function closeShareDialog(): void {
   inFlight?.abort();
   inFlight = null;
@@ -154,6 +176,13 @@ export function closeShareDialog(): void {
   state = null;
   panel()?.remove();
   document.getElementById(SHARE_SCRIM_ID)?.remove();
+  // AFTER the removal, or the panel is still the focus scope. Guarded on
+  // `isConnected`: a close driven by a navigation (or by /summaries retargeting
+  // its doc panel) can have detached the opener, and focusing a detached node
+  // silently leaves focus on `<body>` — the same place doing nothing would.
+  const back = returnFocusTo;
+  returnFocusTo = null;
+  if (back?.isConnected) back.focus({ preventScroll: true });
 }
 
 // ── 409 countdown ────────────────────────────────────────────────────────────
@@ -618,6 +647,16 @@ function onKeydown(e: KeyboardEvent): void {
   if (e.key === "Tab") { trapTab(e); return; }
   if (e.key === "Escape") {
     e.preventDefault();
+    // **This dialog OWNS Escape while it is open**, and says so to every other
+    // document-level listener rather than relying on being wired last.
+    // `/summaries` opens this over a doc panel whose own Escape closes the
+    // article, and that panel's listener is registered at page load while this
+    // module's is wired lazily on the first open — so today the panel's runs
+    // FIRST and is held off only by its own `#wikiShare` guard. That ordering is
+    // an accident of when each listener happened to be added; this makes the
+    // contract enforceable from the dialog's side too, so a future host that
+    // wires its listener after us cannot eat the same keypress.
+    e.stopImmediatePropagation();
     // A run in flight is cancelled first (client-side: the server keeps the slot
     // until its own budget expires, which the 409 copy reports), and the dialog
     // stays open so the reader can see that it stopped.
@@ -625,7 +664,7 @@ function onKeydown(e: KeyboardEvent): void {
       inFlight.abort();
       inFlight = null;
       state.running = false;
-      state.error = "Stopped. The page stays reserved until the run on the server finishes.";
+      state.error = shareCopyOf(state).stopped;
       render();
       return;
     }
@@ -686,7 +725,12 @@ async function generate(): Promise<void> {
     try { body = (await res.json()) as { expiresAtMs?: unknown }; } catch { /* keep the default */ }
     if (ctrl.signal.aborted) return;
     const at = typeof body.expiresAtMs === "number" ? body.expiresAtMs : Date.now();
-    settle({ conflictExpiresAtMs: at, error: shareConflictCopy(at, Date.now()) });
+    // The surface's own noun — the route's `error` string is deliberately not
+    // used: this copy carries the live countdown the 1s timer repaints.
+    settle({
+      conflictExpiresAtMs: at,
+      error: shareConflictCopy(at, Date.now(), shareCopyOf(target).conflictLead),
+    });
     return;
   }
   if (!res.ok || !res.body) {

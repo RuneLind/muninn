@@ -359,6 +359,33 @@ describe("per-document single-flight", () => {
     expect((await post(app, { ...ok, source: "x-article" })).status).toBe(200);
   });
 
+  test("a pre-commit 400 leaves the document FREE — the slot is claimed after them", async () => {
+    // The slot is now taken BEFORE the huginn fetch (so a double-click costs one
+    // round-trip, not two), which puts it one line away from the validation
+    // 400s. Taken one line too early, a typo'd preset would reserve the document
+    // for the full expiry and the reader's corrected retry would 409 at them.
+    const { app, seen } = makeApp();
+    expect((await post(app, { ...ok, preset: "no-such-preset" })).status).toBe(400);
+    // Proven by the ROUTE, not by peeking at the registry: the next POST runs.
+    const res = await post(app, ok);
+    expect(res.status).toBe(200);
+    await res.text();
+    expect(seen.ran).toBe(1);
+  });
+
+  test("a fetchDoc throw releases the slot — an unreachable huginn can't wedge the document", async () => {
+    // Same window, other end: the slot is held across the fetch, so a throw in
+    // it (or in the prep) must free the document rather than leave it reserved
+    // by a request that produced nothing.
+    const { app } = makeApp({ throwOnFetch: true });
+    await (await post(app, ok)).text();
+    const { app: healthy, seen } = makeApp();
+    const res = await post(healthy, ok);
+    expect(res.status).toBe(200);
+    await res.text();
+    expect(seen.ran).toBe(1);
+  });
+
   test("the key is namespaced away from the wiki surface's slots", () => {
     // One process-wide registry backs both surfaces. Without the namespace a
     // wiki whose registered name equalled a collection name would share slots

@@ -6,6 +6,7 @@ import {
   shareBlockingError,
   shareCapError,
   shareConflictCopy,
+  shareCopyOf,
   shareDialogHtml,
   sharePromptError,
   shareRequestBody,
@@ -16,7 +17,9 @@ import {
   shareTabId,
   shareTargetOf,
   summaryShareTarget,
+  summaryShareTargetScript,
   wikiShareTarget,
+  WIKI_SHARE_COPY,
   SHARE_PRESET_RETRY_ID,
   SHARE_PROMPT_TOGGLE_ID,
   SHARE_TABS,
@@ -375,5 +378,55 @@ describe("share targets", () => {
     // No `?wiki=` — the summaries preset list is resolved for the summarizer
     // bot, which is a server-side role, not a client-supplied one.
     expect(target.presetsUrl).toBe("/api/summaries/share/presets");
+  });
+});
+
+describe("surface copy", () => {
+  test("the /wiki wording is what a target-less state renders — unchanged", () => {
+    expect(shareCopyOf(state())).toEqual(WIKI_SHARE_COPY);
+    expect(shareDialogHtml(state({ presets: [] }), "", NOW)).toContain(
+      "This wiki offers no share presets.",
+    );
+    expect(shareConflictCopy(NOW + 30_000, NOW)).toBe(
+      "A share is already running for this page. It frees up in at most ~30s.",
+    );
+  });
+
+  test("a /summaries state says document and archive, never page and wiki", () => {
+    // The three strings that NAME the surface. Everything else in the dialog is
+    // the same sentence on both, which is why only these three are carried.
+    const target = summaryShareTarget("youtube", "ai/Some Title.md");
+    const s = state({ target, presets: [] });
+    const empty = shareDialogHtml(s, "", NOW);
+    expect(empty).toContain("This archive offers no share presets.");
+    // Not the /wiki sentence — asserted on the copy itself, since the markup is
+    // full of legitimate `wiki-share-*` class names.
+    expect(empty).not.toContain(WIKI_SHARE_COPY.noPresets);
+    const conflict = shareDialogHtml(state({ target, conflictExpiresAtMs: NOW + 30_000 }), "", NOW);
+    expect(conflict).toContain("A share is already running for this document.");
+    expect(conflict).not.toContain("for this page");
+    expect(shareCopyOf(s).stopped).toContain("The document stays reserved");
+  });
+});
+
+describe("summaryShareTargetScript", () => {
+  test("emits the builder's OWN keys, with only the two values substituted", () => {
+    // The point of the seam: the /summaries page script cannot import, and
+    // hand-writing `fields: { source, docId }` there gave the field names a
+    // second spelling that nothing pinned. A rename of either key must move this
+    // string too.
+    const js = summaryShareTargetScript("_shareDoc.source", "_shareDoc.docId");
+    expect(js).toContain('"endpoint":"/api/summaries/share"');
+    expect(js).toContain('"source":_shareDoc.source');
+    expect(js).toContain('"docId":_shareDoc.docId');
+    // No sentinel survives, and the surface copy rides along.
+    expect(js).not.toContain("slot__");
+    expect(js).toContain("A share is already running for this document.");
+    // It is a JS object EXPRESSION: evaluating it reproduces the builder.
+    const evaluated = new Function(
+      "_shareDoc",
+      "return " + js,
+    )({ source: "youtube", docId: "ai/Some Title.md" }) as unknown;
+    expect(evaluated).toEqual(summaryShareTarget("youtube", "ai/Some Title.md"));
   });
 });

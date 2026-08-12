@@ -124,7 +124,47 @@ export interface ShareTarget {
   presetsUrl: string;
   /** Merged into the POST body — the surface's identity of "what to share". */
   fields: Record<string, string>;
+  /** The three strings that NAME what is being shared. */
+  copy: ShareSurfaceCopy;
 }
+
+/**
+ * The dialog's surface-specific nouns.
+ *
+ * Three of its sentences say "page" and "wiki", which is true on the reader and
+ * false on `/summaries`, where the thing being shared is a capture document that
+ * belongs to no wiki. They ride the TARGET rather than being branched on inside
+ * the renderer: the surface already tells the dialog where to post, and telling
+ * it what to call the thing in the same breath keeps the dialog itself free of
+ * any knowledge that there is more than one surface.
+ *
+ * Only the strings that name a surface are here. Everything else — the caps, the
+ * empty-prompt refusal, the Slack budget warning — is the same sentence
+ * everywhere and stays where it is written.
+ */
+export interface ShareSurfaceCopy {
+  /** Shown when the resolved preset list is EMPTY. */
+  noPresets: string;
+  /** The 409's lead sentence; {@link shareConflictCopy} appends the deadline. */
+  conflictLead: string;
+  /** Escape while a run is in flight — the client-side cancel. */
+  stopped: string;
+}
+
+/** The /wiki wording. Byte-identical to what PR B hard-coded, and the DEFAULT
+ *  for a state carrying no target at all. */
+export const WIKI_SHARE_COPY: ShareSurfaceCopy = {
+  noPresets: "This wiki offers no share presets.",
+  conflictLead: "A share is already running for this page.",
+  stopped: "Stopped. The page stays reserved until the run on the server finishes.",
+};
+
+/** The /summaries wording — a capture document out of an archive, no wiki. */
+export const SUMMARY_SHARE_COPY: ShareSurfaceCopy = {
+  noPresets: "This archive offers no share presets.",
+  conflictLead: "A share is already running for this document.",
+  stopped: "Stopped. The document stays reserved until the run on the server finishes.",
+};
 
 /** The /wiki surface's target. Byte-identical to what PR B hard-coded. */
 export function wikiShareTarget(wiki: string, page: string): ShareTarget {
@@ -132,6 +172,7 @@ export function wikiShareTarget(wiki: string, page: string): ShareTarget {
     endpoint: "/api/wiki/share",
     presetsUrl: "/api/wiki/share/presets" + (wiki ? "?wiki=" + encodeURIComponent(wiki) : ""),
     fields: { wiki, page },
+    copy: WIKI_SHARE_COPY,
   };
 }
 
@@ -143,7 +184,32 @@ export function summaryShareTarget(source: string, docId: string): ShareTarget {
     endpoint: "/api/summaries/share",
     presetsUrl: "/api/summaries/share/presets",
     fields: { source, docId },
+    copy: SUMMARY_SHARE_COPY,
   };
+}
+
+/**
+ * The /summaries target as a browser-script EXPRESSION, with the two identity
+ * values supplied as JS the page evaluates at click time.
+ *
+ * `/summaries` composes template-string scripts and cannot import, so it used to
+ * read `.endpoint`/`.presetsUrl` off the builder and then hand-write
+ * `fields: { source, docId }` in the script — i.e. the field NAMES had two
+ * spellings, one of which the route tests pin and one of which nothing did. A
+ * rename would have split the wire silently. Serializing the builder's own
+ * output and substituting only the VALUES leaves exactly one authority for every
+ * key, `copy` included.
+ */
+const SHARE_SCRIPT_SLOT_SOURCE = "__share_source_slot__";
+const SHARE_SCRIPT_SLOT_DOC_ID = "__share_doc_id_slot__";
+export function summaryShareTargetScript(sourceExpr: string, docIdExpr: string): string {
+  // The sentinels cannot occur in a URL or a copy string, and `JSON.stringify`
+  // spells them identically in both passes, so the substitution is exact.
+  return JSON.stringify(summaryShareTarget(SHARE_SCRIPT_SLOT_SOURCE, SHARE_SCRIPT_SLOT_DOC_ID))
+    .split(JSON.stringify(SHARE_SCRIPT_SLOT_SOURCE))
+    .join(sourceExpr)
+    .split(JSON.stringify(SHARE_SCRIPT_SLOT_DOC_ID))
+    .join(docIdExpr);
 }
 
 /** Everything the dialog renders from. Held by the DOM module, never on the DOM
@@ -216,6 +282,11 @@ export function promptIsEdited(state: ShareDialogState): boolean {
 /** The target this state posts to — its own, or the /wiki default. */
 export function shareTargetOf(state: ShareDialogState): ShareTarget {
   return state.target ?? wikiShareTarget(state.wiki, state.page);
+}
+
+/** The surface nouns this state renders with — its target's, or /wiki's. */
+export function shareCopyOf(state: ShareDialogState): ShareSurfaceCopy {
+  return state.target?.copy ?? WIKI_SHARE_COPY;
 }
 
 /** The POST body for the state's {@link ShareTarget}: the surface's identity
@@ -311,11 +382,23 @@ export function copyPayloadFor(
   return { text: result.markdown };
 }
 
-/** "another share is running on this page" copy, with the deadline the 409 carried. */
-export function shareConflictCopy(expiresAtMs: number, now: number): string {
+/**
+ * "another share is running on this thing" copy, with the deadline the 409
+ * carried.
+ *
+ * `lead` is the surface's own sentence ({@link ShareSurfaceCopy.conflictLead});
+ * it defaults to /wiki's so the existing callers and their pinned strings are
+ * untouched. Only the noun differs — the deadline clause is the same everywhere,
+ * and it is the half that actually carries information.
+ */
+export function shareConflictCopy(
+  expiresAtMs: number,
+  now: number,
+  lead: string = WIKI_SHARE_COPY.conflictLead,
+): string {
   const secs = Math.max(0, Math.round((expiresAtMs - now) / 1000));
   const when = secs > 90 ? `~${Math.ceil(secs / 60)} min` : `~${secs}s`;
-  return `A share is already running for this page. It frees up in at most ${when}.`;
+  return `${lead} It frees up in at most ${when}.`;
 }
 
 // ── Markup ───────────────────────────────────────────────────────────────────
@@ -455,10 +538,10 @@ export function shareDialogHtml(state: ShareDialogState, slackHtml: string, now:
     shareBlockingError(state) ??
     state.error ??
     (state.conflictExpiresAtMs
-      ? shareConflictCopy(state.conflictExpiresAtMs, now)
+      ? shareConflictCopy(state.conflictExpiresAtMs, now, shareCopyOf(state).conflictLead)
       : preset
         ? ""
-        : "This wiki offers no share presets.");
+        : shareCopyOf(state).noPresets);
   const statusHtml = status ? '<div class="wiki-share-status">' + esc(status) + "</div>" : "";
 
   // While the model writes, the raw markdown IS the preview — the tabs need the

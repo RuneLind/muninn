@@ -14,11 +14,13 @@
  * collection (SOURCES[source].apiBase). */
 
 import { docPanelStyles, DOC_PANEL_SHARE_BTN_ID } from "./doc-panel.ts";
-import { summaryShareTarget } from "./wiki-share-dialog.ts";
+import { SHARE_DIALOG_ID, summaryShareTargetScript } from "./wiki-share-dialog.ts";
 
-/** The /summaries share target's two URLs, interpolated into the page script —
- *  the builder is the single authority the route tests also read. */
-const SUMMARY_SHARE_TARGET = summaryShareTarget("", "");
+/** The whole /summaries share target as a browser expression — URLs, surface
+ *  copy AND the two identity field NAMES, all emitted by the shared builder so
+ *  the page script cannot spell a key the route does not read. Only the two
+ *  VALUES are ours. */
+const SUMMARY_SHARE_TARGET_JS = summaryShareTargetScript("_shareDoc.source", "_shareDoc.docId");
 
 export function sumArticleLibraryStyles(): string {
   return `
@@ -358,8 +360,11 @@ export function sumArticleLibraryScript(): string {
       if (e.key !== 'Escape') return;
       // The share dialog handles its OWN Escape (cancel a run, then close), and
       // both listeners sit on the document — without this guard one Escape closed
-      // the dialog AND the panel behind it, throwing away an un-copied post.
-      if (document.getElementById('wikiShare')) return;
+      // the dialog AND the panel behind it, throwing away an un-copied post. (The
+      // dialog also calls stopImmediatePropagation, but THIS listener is wired at
+      // page load and the dialog's lazily on first open, so ours runs first: the
+      // guard is what actually holds today.)
+      if (document.getElementById('${SHARE_DIALOG_ID}')) return;
       if (document.getElementById('docOverlay').classList.contains('visible')) {
         closeDocPanel();
       }
@@ -377,7 +382,16 @@ export function sumArticleLibraryScript(): string {
         // Resolved at CLICK time, not at wire time: the bundle publishing this
         // global is a separate <script>, and depending on tag order for a
         // silent no-op is the kind of thing that survives review.
-        if (!_shareDoc || typeof openShareDialog !== 'function') return;
+        if (typeof openShareDialog !== 'function') {
+          // A page that rendered the button without mounting
+          // share-dialog-client.ts is a wiring mistake, not a state the reader
+          // can cause — so it says so instead of dying quietly on every click.
+          console.warn('[summaries] Share is unavailable: the share-dialog bundle is not loaded on this page.');
+          return;
+        }
+        // No doc, or a doc whose source is not registered (see openSummaryDoc)
+        // — the button is hidden in that case, so this is the belt to its braces.
+        if (!_shareDoc) return;
         openShareDialog({
           // wiki/page are the /wiki surface's identity; this surface posts
           // {source, docId} to /api/summaries/share via the target below. page
@@ -387,14 +401,10 @@ export function sumArticleLibraryScript(): string {
           page: _shareDoc.docId,
           title: _shareDoc.title,
           openerIds: ['${DOC_PANEL_SHARE_BTN_ID}'],
-          // URLs come from the shared summaryShareTarget builder (one
-          // authority for both halves of the wire); only the two field NAMES are
-          // spelled here, and they are pinned by the route tests.
-          target: {
-            endpoint: ${JSON.stringify(SUMMARY_SHARE_TARGET.endpoint)},
-            presetsUrl: ${JSON.stringify(SUMMARY_SHARE_TARGET.presetsUrl)},
-            fields: { source: _shareDoc.source, docId: _shareDoc.docId },
-          },
+          // Emitted WHOLE by the shared summaryShareTarget builder — endpoint,
+          // presets URL, surface copy and both identity field NAMES. Only the
+          // two values below are this page's.
+          target: ${SUMMARY_SHARE_TARGET_JS},
         });
       });
     })();
@@ -516,11 +526,22 @@ export function sumArticleLibraryScript(): string {
       var myRequest = ++_docRequestId;
 
       // The share dialog acts on the doc the panel is showing. Retargeting the
-      // panel (a similar/category link) must therefore either re-point it or
-      // close it — an open dialog naming the previous article would summarize a
-      // document the reader has navigated away from.
-      _shareDoc = { docId: docId, source: source, title: docTitle(docId) };
-      if (typeof closeShareDialog === 'function') closeShareDialog();
+      // panel (a similar/category link) must therefore close it — an open dialog
+      // naming the previous article would summarize a document the reader has
+      // navigated away from. closeShareDialogOnNavigate, not a bare close, for
+      // the reason the reader uses it: re-opening the SAME document (a category
+      // link back to it, a repeat click) must not throw away a finished post the
+      // reader hasn't copied yet.
+      //
+      // Shareable only when the source is REGISTERED: docApiBase falls back to
+      // /api/youtube for an unknown one, so a hand-edited ?source=bogus deep link
+      // would otherwise render a live button whose POST can only 400.
+      _shareDoc = SOURCES[source]
+        ? { docId: docId, source: source, title: docTitle(docId) }
+        : null;
+      var shareBtnEl = document.getElementById('${DOC_PANEL_SHARE_BTN_ID}');
+      if (shareBtnEl) shareBtnEl.hidden = !_shareDoc;
+      if (typeof closeShareDialogOnNavigate === 'function') closeShareDialogOnNavigate(docId);
 
       var overlay = document.getElementById('docOverlay');
       var titleEl = document.getElementById('docPanelTitle');

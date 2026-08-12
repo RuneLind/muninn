@@ -121,6 +121,10 @@ export function docPanelStyles(animationName = "slideIn"): string {
     /* The opt-in 📤 Share action is a <button> in the same header slot — a bare
        button inherits neither the page font nor a transparent background. */
     button.doc-panel-followup { background: none; font-family: inherit; cursor: pointer; }
+    /* …and it is HIDDEN for a document no share route can serve (an unregistered
+       source). Spelled out rather than left to the UA rule, because this button
+       sits in a flex row where an author display rule would silently win. */
+    button.doc-panel-followup[hidden] { display: none; }
     .doc-panel-body {
       flex: 1;
       overflow-y: auto;

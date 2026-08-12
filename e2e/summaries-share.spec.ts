@@ -314,6 +314,45 @@ test.describe("Summaries: doc-panel share", () => {
     await expect(page.locator("#docOverlay")).not.toHaveClass(/visible/);
   });
 
+  test("closing hands focus BACK to the Share button, not to the body behind the panel", async ({
+    page,
+  }) => {
+    // The dialog pulls focus into itself on open (it claims `aria-modal`). Closing
+    // removed the panel from under `document.activeElement`, which the browser
+    // resets to `<body>` — here that is BEHIND a still-open doc-panel overlay, so
+    // the reader's next Tab walks the page under the article they are reading.
+    await openPanel(page);
+    await openShare(page);
+    await expect
+      .poll(() => page.evaluate(() => document.activeElement?.id ?? ""))
+      .toBe("wikiSharePreset");
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#wikiShare")).toHaveCount(0);
+    expect(await page.evaluate(() => document.activeElement?.id ?? "")).toBe("docPanelShare");
+  });
+
+  test("an UNREGISTERED source hides the button — it has no route that could serve it", async ({
+    page,
+  }) => {
+    // `docApiBase` falls back to `/api/youtube` for an unknown source, so a
+    // hand-edited `?source=bogus` deep link opened a panel with a live Share
+    // button whose POST could only ever 400.
+    await openPanel(page);
+    await expect(page.locator("#docPanelShare")).toBeVisible();
+    await page.evaluate(() =>
+      (globalThis as unknown as { openSummaryDoc: (a: string, b: string, c: string) => void })
+        .openSummaryDoc("ai/other/Another.md", "", "myspace"),
+    );
+    await expect(page.locator("#docPanelTitle")).toHaveText("Another");
+    await expect(page.locator("#docPanelShare")).toBeHidden();
+    // …and it comes back for the next registered document.
+    await page.evaluate(() =>
+      (globalThis as unknown as { openSummaryDoc: (a: string, b: string, c: string) => void })
+        .openSummaryDoc("ai/other/Another.md", "", "youtube"),
+    );
+    await expect(page.locator("#docPanelShare")).toBeVisible();
+  });
+
   test("the preset list is the SUMMARIZER bot's, served without a wiki", async ({ page }) => {
     // Fetched for real. A /summaries share has no wiki to own it, so the list
     // comes from `/api/summaries/share/presets` — the wiki route would 404 on a
