@@ -218,7 +218,16 @@ export function defaultClaudeUsageDeps(
       if (!res.ok) {
         throw new Error(`claude-usage returned HTTP ${res.status} for ${url}`);
       }
-      const text = await readBounded(res, maxBytes, url);
+      // The bounded read fails too (a timeout that fires AFTER headers, a
+      // mid-stream socket error) — those must name the URL like every other
+      // failure here, or exactly the slow/wrong-service case loses it.
+      let text: string;
+      try {
+        text = await readBounded(res, maxBytes, url);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        throw new Error(msg.includes(url) ? msg : `${msg} (${url})`);
+      }
       // A non-JSON body (an HTML error page from something else on the port) must
       // read as a degraded source, not as an empty ledger.
       try {
@@ -310,9 +319,12 @@ export function buildRows(payload: PipelinePayload, days: number, now: number): 
   // they should add up. If a future state appears, SAY the remainder rather than
   // rendering a total the note silently fails to explain.
   const accounted = [c.landed, c.mergeUnconfirmed, c.composedUnconfirmed];
-  if (typeof c.merges === "number" && accounted.every((n) => typeof n === "number")) {
-    const rest = c.merges - (accounted as number[]).reduce((a, b) => a + b, 0);
+  if (Number.isFinite(c.merges) && accounted.every((n) => Number.isFinite(n))) {
+    const rest = (c.merges as number) - (accounted as number[]).reduce((a, b) => a + b, 0);
+    // A NEGATIVE remainder (states summing past the total) is as much a
+    // cannot-be-true-together render as a positive one — say either.
     if (rest > 0) mergeParts.push(`+${rest} unaccounted`);
+    else if (rest < 0) mergeParts.push(`states overcount by ${-rest}`);
   }
   rows.push(
     withCaveat(
@@ -363,7 +375,13 @@ export function buildRows(payload: PipelinePayload, days: number, now: number): 
       {
         label: "Precision bar",
         value: bar == null ? "—" : bar ? "met" : "NOT met",
-        note: bar === false ? "ledger numbers are provisional" : `markers v${num(payload.markersVersion?.current)}`,
+        // The markers version stays in the note whenever its caveat rides the
+        // row — a caveat about "an older marker version" beside a note that
+        // names no version qualifies nothing.
+        note:
+          bar === false
+            ? `ledger numbers are provisional${payload.markersVersionCaveat ? ` · markers v${num(payload.markersVersion?.current)}` : ""}`
+            : `markers v${num(payload.markersVersion?.current)}`,
         ...(bar === false ? { tone: "error" as const } : bar === true ? { tone: "success" as const } : {}),
       },
       payload.markersVersionCaveat,
