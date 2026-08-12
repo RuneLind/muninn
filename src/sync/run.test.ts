@@ -8,7 +8,7 @@
  */
 
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm, mkdir, writeFile, utimes, readFile } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, writeFile, utimes, readFile, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { __resetForTest } from "../wiki/commit.ts";
@@ -18,6 +18,7 @@ import {
   getSyncLedgerEntry,
   readRepoStatus,
   remoteMovedUnderUs,
+  sortedLockRoots,
   stagePaths,
   syncRepo,
   syncSubsumesSweeper,
@@ -254,6 +255,12 @@ describe("syncRepo", () => {
     expect(await Bun.file(path.join(f.A, "README.md")).text()).toBe("the other process was here\n");
     // …and the narration says why no rebase ran.
     expect(r.actions.join(" | ")).toContain("outside the wiki subtree");
+    // The outside path rides `deferredFiles`, so it must not read as something
+    // this loop is holding back for a moment: it will NEVER commit it, and a
+    // green `ok` card carrying it as an "uncommitted tracked change" invites
+    // waiting for a tick that cannot help.
+    const outside = r.deferredFiles.find((d) => d.path === "README.md");
+    expect(outside?.reason).toContain("outside the sync scope");
   });
 
   test("outside-subtree dirt WHILE behind defers with an honest reason naming the real paths", async () => {
@@ -688,6 +695,44 @@ describe("syncRepo", () => {
     expect(staged.out).toBe("wiki/concepts/Here.md");
   });
 
+  test("every staged path vanishing mid-tick commits NOTHING — least of all another process's staged work", async () => {
+    // The C5 skip taken to its limit. `git commit -m … -m "" -- ` with an EMPTY
+    // pathspec is a BARE `--`, which is no pathspec at all: git then commits
+    // whatever happens to be in the index, i.e. the other process's staged work
+    // (verified against real git before this test was written).
+    //
+    // The vanish is forced deterministically with a clean filter that removes
+    // BOTH pages while git is staging the first: the batched add then exits 128
+    // on the second, and each per-path retry finds its path gone ("did not match
+    // any files") — exactly the editor-atomic-replace race `stagePaths`
+    // tolerates, with nothing left over to commit.
+    const f = await makeFixture(base);
+    const goneA = path.join(f.wikiA, "concepts", "GoneA.md");
+    const goneB = path.join(f.wikiA, "concepts", "GoneB.md");
+    await writeFile(path.join(f.A, ".gitattributes"), "wiki/concepts/Gone*.md filter=vanish\n");
+    await git(f.A, ["add", "-A"]);
+    await git(f.A, ["commit", "-q", "-m", "attrs"]);
+    await git(f.A, ["push", "-q"]);
+    await git(f.A, ["config", "filter.vanish.clean", `rm -f "${goneA}" "${goneB}"; cat`]);
+    await writeFile(goneA, "# A\n");
+    await ageFile(goneA);
+    await writeFile(goneB, "# B\n");
+    await ageFile(goneB);
+    // Another process's work, staged in the same repo and outside the wiki
+    // subtree — the loop must never author a commit containing it.
+    await writeFile(path.join(f.A, "README.md"), "the other process staged this\n");
+    await git(f.A, ["add", "--", "README.md"]);
+
+    const r = await syncRepo(wikiRepo(f), deps());
+
+    expect(r.committed).toEqual([]);
+    expect((await git(f.A, ["log", "--format=%s"])).out).not.toContain("[sync]");
+    // Still staged, untouched, waiting for its own author to commit it.
+    expect((await git(f.A, ["diff", "--cached", "--name-only"])).out).toBe("README.md");
+    expect(r.actions.join(" | ")).toContain("nothing to commit — 2 path(s) vanished mid-tick");
+    expect(r.pushed).toBe(false);
+  });
+
   test("a real add failure is still an error", async () => {
     // A path that EXISTS and still cannot be staged — the tolerance is scoped to
     // "it vanished", never to "git refused".
@@ -795,6 +840,34 @@ describe("syncRepo", () => {
     const noRenames = (await git(f.A, ["show", "--name-status", "--no-renames", "--format=", "HEAD"])).out;
     expect(noRenames).toMatch(/D\s+wiki\/concepts\/Old Name\.md/);
     expect(noRenames).toMatch(/A\s+wiki\/concepts\/New Name\.md/);
+  });
+
+  test("a held deletion is not reported as a file someone edited in the last 5 min", async () => {
+    // The quiet filter holds the fresh page, and pass 3 holds the deletion
+    // BEHIND it (an unstaged `mv` is ` D old` + `?? new`). Both landed in the
+    // same `quietHeld` list, so the card claimed two files were being edited —
+    // one of which does not exist any more. The count sends you looking for an
+    // editing session that is half imaginary.
+    const f = await makeFixture(base);
+    const doomed = path.join(f.wikiA, "concepts", "Doomed.md");
+    await writeFile(doomed, "# Doomed\n");
+    await git(f.A, ["add", "-A"]);
+    await git(f.A, ["commit", "-q", "-m", "seed doomed"]);
+    await git(f.A, ["push", "-q"]);
+    await rm(doomed);
+    await writeFile(path.join(f.wikiA, "concepts", "Fresh.md"), "# Fresh\n");
+
+    const r = await syncRepo(wikiRepo(f), deps());
+
+    expect(r.state).toBe("deferred");
+    expect(r.reason).toContain("holding 1 file edited in the last 5 min");
+    expect(r.reason).toContain("wiki/concepts/Fresh.md");
+    // The deletion is still NAMED — it is genuinely held — but under its own
+    // clause, never inflating the edit count.
+    expect(r.reason).toContain("wiki/concepts/Doomed.md");
+    expect(r.reason).toContain("deletion");
+    expect(r.reason).not.toContain("2 files edited");
+    expect(r.committed).toEqual([]);
   });
 
   test("the log.md union attribute lets both machines' entries survive a rebase", async () => {
@@ -925,6 +998,27 @@ describe("syncRepo", () => {
     expect(status.lastRunMs).toBeNull();
     expect(status.label).toBe("not synced yet");
     expect(status.tone).toBe("neutral");
+    // …and the machine-readable field agrees with the two human ones. The
+    // ledger's default `ok` rode the payload while the label said otherwise, so
+    // any consumer reading `state` (rather than `label`) saw a green lie.
+    expect(status.state).toBe("unknown");
+  });
+
+  test("lock order is pinned on the QUEUE KEY, not the configured spelling", async () => {
+    // The locks are realpath-keyed (`wikiWriteQueueKey`), so sorting the raw
+    // configured strings is an incidental total order: two repos naming one wiki
+    // through different paths would take the same two locks in OPPOSITE orders,
+    // which is the deadlock the sort exists to prevent.
+    const m1 = path.join(base, "m1");
+    const m2 = path.join(base, "m2");
+    await mkdir(m1);
+    await mkdir(m2);
+    const link = path.join(base, "z-link"); // spells m1, sorts after m2
+    await symlink(m1, link);
+
+    const repo: SyncRepo = { name: "multi", path: base, mode: "plain", containedWikiRoots: [link, m2] };
+    expect([link, m2].slice().sort()).toEqual([m2, link]); // the raw order…
+    expect(sortedLockRoots(repo)).toEqual([link, m2]); // …is not the key order
   });
 
   test("a five-line git failure is clamped to one card line, with the full text on lastError", async () => {

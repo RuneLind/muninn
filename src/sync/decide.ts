@@ -88,11 +88,40 @@ export function isTransientGitLockFailure(text: string): boolean {
   return s.includes("index.lock") || s.includes("another git process");
 }
 
-/** The three INDEPENDENT reasons a tick can hold back, kept apart because they
+/**
+ * The reason string stamped on each kind of hold. Exported and matched on by
+ * name because the card's clauses are keyed off them: spelled twice, a deletion
+ * hold silently drifts back into being counted as a fresh edit.
+ */
+export const DEFER_REASON_FRESH_EDIT = "edited <5 min ago";
+export const DEFER_REASON_FRESH_RENAME = "renamed <5 min ago";
+export const DEFER_REASON_RENAME_PAIR = "rename pair held with its new half";
+export const DEFER_REASON_DELETION_HOLD =
+  "deletion held — an edit in this tick is still quiet-filtered";
+
+/** True for a hold whose path was judged by its OWN mtime — the only ones the
+ *  card may describe as "edited in the last N min". */
+export function isFreshMtimeHold(reason: string): boolean {
+  return reason === DEFER_REASON_FRESH_EDIT || reason === DEFER_REASON_FRESH_RENAME;
+}
+
+/** True for a hold carried along by someone else's freshness: a deletion waiting
+ *  for the quiet tick to pass, or the old half of a rename. Neither has a fresh
+ *  mtime of its own (a deletion has no mtime at all). */
+export function isCompanionHold(reason: string): boolean {
+  return reason === DEFER_REASON_RENAME_PAIR || reason === DEFER_REASON_DELETION_HOLD;
+}
+
+/** The four INDEPENDENT reasons a tick can hold back, kept apart because they
  *  need different responses from a human (wait / commit elsewhere / investigate). */
 export interface DeferralCause {
-  /** Paths this tick's quiet filter held (an edit in progress on THIS machine). */
+  /** Paths this tick's quiet filter held on their OWN mtime (an edit in progress
+   *  on THIS machine). */
   quietHeld: string[];
+  /** Paths held only BECAUSE something else was fresh — deletions and rename
+   *  halves that must move in the same commit. Counting these as edits claimed
+   *  someone was editing a file that no longer exists. */
+  companionHeld: string[];
   /** Rebase-blocking tracked paths OUTSIDE the sync scope — another process's
    *  work in the same repo, which the loop will never commit. */
   outside: string[];
@@ -125,6 +154,14 @@ export function describeDeferralReason(cause: DeferralCause): string {
   if (cause.quietHeld.length > 0) {
     parts.push(
       `holding ${plural(cause.quietHeld.length, "file", "files")} edited in the last ${quietMinutes} min (${sample(cause.quietHeld)})`,
+    );
+  }
+  if (cause.companionHeld.length > 0) {
+    // Its own clause, not the mtime one: a deletion has no mtime to be fresh,
+    // and the old half of a rename was not touched at all — folded into the
+    // count above, the card claimed edits to files that no longer exist.
+    parts.push(
+      `also holding ${plural(cause.companionHeld.length, "deletion/rename half", "deletions/rename halves")} (${sample(cause.companionHeld)})`,
     );
   }
   if (cause.outside.length > 0) {
@@ -260,8 +297,8 @@ export function decideStaging(
       // Staged rename: judged by the NEW half, both halves move together.
       if (fresh) {
         quietHeld = true;
-        deferred.push({ path: e.path, reason: "renamed <5 min ago" });
-        deferred.push({ path: renameOrig, reason: "rename pair held with its new half" });
+        deferred.push({ path: e.path, reason: DEFER_REASON_FRESH_RENAME });
+        deferred.push({ path: renameOrig, reason: DEFER_REASON_RENAME_PAIR });
         continue;
       }
       stage.push(e.path);
@@ -277,7 +314,7 @@ export function decideStaging(
 
     if (fresh) {
       quietHeld = true;
-      deferred.push({ path: e.path, reason: "edited <5 min ago" });
+      deferred.push({ path: e.path, reason: DEFER_REASON_FRESH_EDIT });
       continue;
     }
     stage.push(e.path);
@@ -286,7 +323,7 @@ export function decideStaging(
   // Pass 3 — deletions ride only in a tick that held nothing back.
   for (const p of pendingDeletions) {
     if (quietHeld) {
-      deferred.push({ path: p, reason: "deletion held — an edit in this tick is still quiet-filtered" });
+      deferred.push({ path: p, reason: DEFER_REASON_DELETION_HOLD });
       continue;
     }
     stage.push(p);
@@ -303,6 +340,7 @@ export function decideStaging(
  * `deferred` are the loop working as designed and resolve themselves.
  */
 export type SyncState =
+  | "unknown" // no tick has run in this process — the ledger's DEFAULT, never recorded
   | "ok" // committed / rebased / pushed, or nothing to do
   | "status-only" // reported, by configuration
   | "deferred" // will retry next tick, nothing wrong
@@ -336,6 +374,8 @@ export interface SyncLedgerEntry {
  * the card must stop looking healthy. A `blocked`/`error` state is always bad.
  */
 export function syncTone(entry: SyncLedgerEntry, now: number): SyncTone {
+  // Nothing has happened yet in this process — not healthy, not unhealthy.
+  if (entry.state === "unknown") return "neutral";
   if (entry.state === "blocked" || entry.state === "error") return "bad";
   if (entry.consecutiveDeferrals >= SYNC_DEFERRAL_WARN_AFTER) return "warn";
   if (entry.state === "paused" || entry.state === "retrying") return "warn";
@@ -352,6 +392,7 @@ export function syncTone(entry: SyncLedgerEntry, now: number): SyncTone {
 /** One-line human label for a state + reason, used by the card and the log. */
 export function describeSyncState(state: SyncState, reason?: string): string {
   const base: Record<SyncState, string> = {
+    unknown: "not synced yet",
     ok: "in sync",
     "status-only": "status only",
     deferred: "deferred",

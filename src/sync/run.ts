@@ -24,7 +24,7 @@ import {
   runGit,
   type PorcelainStatusEntry,
 } from "../wiki/commit.ts";
-import { runWikiWriteExclusive } from "../wiki/queue.ts";
+import { runWikiWriteExclusive, wikiWriteQueueKey } from "../wiki/queue.ts";
 import { getWikiIndex } from "../wiki/store.ts";
 import { buildReindexResponse, postCollectionUpdate } from "../wiki/reindex.ts";
 import {
@@ -33,6 +33,8 @@ import {
   decideStaging,
   describeDeferralReason,
   describeSyncState,
+  isCompanionHold,
+  isFreshMtimeHold,
   isTransientGitLockFailure,
   isUnmergedStatus,
   syncTone,
@@ -176,7 +178,10 @@ const inFlight = new Set<string>();
 export function getSyncLedgerEntry(name: string): SyncLedgerEntry {
   return (
     ledger.get(name) ?? {
-      state: "ok",
+      // NOT `ok`: the default is the absence of evidence, and rendered as a
+      // state it rode the card payload as "in sync" while the label beside it
+      // said "not synced yet". `recordLedger` never writes this value back.
+      state: "unknown",
       consecutiveDeferrals: 0,
       lastSuccessMs: null,
       lastRunMs: null,
@@ -439,17 +444,18 @@ async function readCard(repo: SyncRepo, top: string): Promise<RepoCard> {
 export async function readRepoStatus(repo: SyncRepo, now: number): Promise<RepoSyncResult> {
   const top = await gitToplevel(repo.path);
   const led = getSyncLedgerEntry(repo.name);
-  // Never synced in this process ⇒ the ledger's DEFAULT `ok` is not evidence of
-  // anything. Rendered as "in sync" it was the card's one unforgivable lie: a
-  // green row on a machine whose loop had never run at all (a fresh restart, a
-  // launchd job that never fired).
-  const neverSynced = led.lastRunMs === null;
+  // Never synced in this process ⇒ the ledger's default `unknown`, which all
+  // three fields now derive from. Rendered as "in sync" it was the card's one
+  // unforgivable lie: a green row on a machine whose loop had never run at all
+  // (a fresh restart, a launchd job that never fired). Deriving beats a
+  // `lastRunMs === null` ternary here — the label and the payload's `state`
+  // cannot disagree if only one of them is authored.
   const base: RepoSyncResult = {
     ...emptyCard(repo),
     state: led.state,
     reason: led.reason,
-    tone: neverSynced ? "neutral" : syncTone(led, now),
-    label: neverSynced ? "not synced yet" : describeSyncState(led.state, led.reason),
+    tone: syncTone(led, now),
+    label: describeSyncState(led.state, led.reason),
     dryRun: false,
     committed: [],
     deferredFiles: [],
@@ -639,14 +645,22 @@ async function localSection(
   /** What a dry run WOULD have committed — the projection the rebase gate below
    *  must apply, since those paths would no longer be dirty by then. */
   const wouldStage = new Set<string>();
+  /** Held on their OWN fresh mtime — the only paths the card may call edits. */
   let quietHeld: string[] = [];
+  /** Held only BECAUSE those are fresh (deletions, rename halves). Split out
+   *  because folding them into the count above claimed someone was editing a
+   *  file that had just been deleted. */
+  let companionHeld: string[] = [];
 
   if (repo.mode === "wiki") {
     const entries = await decorate(top, await listDirtyEntries(top, repo.wikiRoot));
     const decision = decideStaging(entries, now);
     out.denied = decision.denied;
     out.deferredFiles = decision.deferred;
-    if (decision.quietHeld) quietHeld = decision.deferred.map((d) => d.path);
+    if (decision.quietHeld) {
+      quietHeld = decision.deferred.filter((d) => isFreshMtimeHold(d.reason)).map((d) => d.path);
+      companionHeld = decision.deferred.filter((d) => isCompanionHold(d.reason)).map((d) => d.path);
+    }
 
     if (decision.stage.length > 0) {
       if (dryRun) {
@@ -674,38 +688,53 @@ async function localSection(
           actions.push(`skipped ${staged.skipped.length} path(s) that vanished mid-tick`);
         }
         const toCommit = decision.stage.filter((p) => !staged.skipped.includes(p));
-        const message = `[sync] ${toCommit.length} file(s) from ${hostLabel()}`;
-        // The pathspec keeps the commit to OUR paths (another writer may have
-        // staged its own). Bounded by the same chunking rationale as the add:
-        // this list is the sync's own decision, never the whole repo.
-        const committed = await runGit(top, [
-          "commit",
-          "-m",
-          message,
-          "-m",
-          commitBody(toCommit),
-          "--",
-          ...toCommit,
-        ]);
-        if (committed.code !== 0) {
-          // "nothing to commit" is not a failure — the paths may have been
-          // committed by a writer between the listing and here.
-          if (/nothing to commit|no changes added/i.test(committed.stdout + committed.stderr)) {
-            actions.push("nothing to commit");
-          } else if (isTransientGitLockFailure(committed.stderr)) {
-            out.state = "transient";
-            out.reason = clampReason(`git commit failed: ${committed.stderr}`);
-            out.error = committed.stderr;
-            return out;
-          } else {
-            out.state = "error";
-            out.reason = clampReason(`git commit failed: ${committed.stderr}`);
-            out.error = committed.stderr;
-            return out;
-          }
+        if (toCommit.length === 0) {
+          // EVERY path vanished mid-tick. There is nothing to commit — and the
+          // commit must not be attempted, because an empty pathspec argv ends in
+          // a BARE `--`, which is no pathspec at all: git then commits whatever
+          // ANOTHER process happens to have staged, under a `[sync] 0 file(s)`
+          // subject (verified against real git). The `-- <paths>` guard is only
+          // a guard while the list is non-empty.
+          //
+          // Deletions cannot be stranded here: they are a subset of
+          // `decision.stage` and are never members of `skipped` (only the `add`
+          // half can skip), so an empty `toCommit` implies no deletions either.
+          actions.push(`nothing to commit — ${staged.skipped.length} path(s) vanished mid-tick`);
         } else {
-          out.committed = toCommit;
-          actions.push(`committed ${toCommit.length} file(s)`);
+          const message = `[sync] ${toCommit.length} file(s) from ${hostLabel()}`;
+          // The pathspec keeps the commit to OUR paths (another writer may have
+          // staged its own). Bounded by the same chunking rationale as the add:
+          // this list is the sync's own decision, never the whole repo.
+          const body = commitBody(toCommit);
+          const committed = await runGit(top, [
+            "commit",
+            "-m",
+            message,
+            // An empty `-m ""` is a real (blank) message paragraph, not a no-op.
+            ...(body ? ["-m", body] : []),
+            "--",
+            ...toCommit,
+          ]);
+          if (committed.code !== 0) {
+            // "nothing to commit" is not a failure — the paths may have been
+            // committed by a writer between the listing and here.
+            if (/nothing to commit|no changes added/i.test(committed.stdout + committed.stderr)) {
+              actions.push("nothing to commit");
+            } else if (isTransientGitLockFailure(committed.stderr)) {
+              out.state = "transient";
+              out.reason = clampReason(`git commit failed: ${committed.stderr}`);
+              out.error = committed.stderr;
+              return out;
+            } else {
+              out.state = "error";
+              out.reason = clampReason(`git commit failed: ${committed.stderr}`);
+              out.error = committed.stderr;
+              return out;
+            }
+          } else {
+            out.committed = toCommit;
+            actions.push(`committed ${toCommit.length} file(s)`);
+          }
         }
       }
     }
@@ -714,8 +743,13 @@ async function localSection(
   // A quiet hold is not a failure, but it is not "in sync" either: the held page
   // is uncommitted and stays that way until it settles. Soft, so the rebase and
   // the push below still run — holding one file must never stop the repo pulling.
-  if (quietHeld.length > 0) {
-    out.holdReason = describeDeferralReason({ quietHeld, outside: [], inScope: [] });
+  if (quietHeld.length > 0 || companionHeld.length > 0) {
+    out.holdReason = describeDeferralReason({
+      quietHeld,
+      companionHeld,
+      outside: [],
+      inScope: [],
+    });
   }
 
   // ── Rebase ────────────────────────────────────────────────────────────────
@@ -733,17 +767,31 @@ async function localSection(
     .filter((e) => !wouldStage.has(e.path));
   if (remaining.length > 0) {
     const { inScope, outside } = await partitionByScope(repo, top, remaining);
-    const held = new Set(quietHeld);
+    // Both hold sets are already accounted for above — a deletion held with a
+    // fresh edit blocks the rebase too, and without this it was ALSO counted as
+    // an unexplained "uncommitted tracked change".
+    const held = new Set([...quietHeld, ...companionHeld]);
     const reason = describeDeferralReason({
       quietHeld,
+      companionHeld,
       outside,
       inScope: inScope.filter((p) => !held.has(p)),
     });
+    const outsideScope = new Set(outside);
     out.deferredFiles = [
       ...out.deferredFiles,
       ...remaining
         .filter((e) => !out.deferredFiles.some((d) => d.path === e.path))
-        .map((e) => ({ path: e.path, reason: "uncommitted tracked change" })),
+        .map((e) => ({
+          path: e.path,
+          // An out-of-scope path is not "deferred" in the sense the rest of this
+          // list means it — the loop will NEVER commit it, however long you wait.
+          // Labelled like an in-scope hold it turned up on `ok` cards as work
+          // pending on a tick that cannot do anything about it.
+          reason: outsideScope.has(e.path)
+            ? "outside the sync scope — another process's work, never committed by the loop"
+            : "uncommitted tracked change",
+        })),
     ];
 
     // A rebase exists to integrate REMOTE work. With nothing to integrate, a
@@ -807,6 +855,23 @@ function hostLabel(): string {
 }
 
 /**
+ * This repo's wiki-write lock roots, in the order they must be TAKEN.
+ *
+ * Sorted on the KEY the lock is actually taken with (`wikiWriteQueueKey`, a
+ * realpath), not on the configured spelling. The two orders agree today only
+ * incidentally: they diverge the moment one entry names a wiki through a symlink
+ * or a `/tmp` path, and two repos taking two shared wikis in opposite orders is
+ * exactly the deadlock the sort exists to prevent.
+ */
+export function sortedLockRoots(repo: SyncRepo): string[] {
+  const roots = repo.mode === "wiki" && repo.wikiRoot ? [repo.wikiRoot] : repo.containedWikiRoots ?? [];
+  return roots
+    .map((root) => ({ root, key: wikiWriteQueueKey(root) }))
+    .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+    .map((r) => r.root);
+}
+
+/**
  * Take EVERY lock this repo's local section needs, in the pinned order: the
  * commit queue first, then each affected wiki's write queue.
  *
@@ -814,14 +879,12 @@ function hostLabel(): string {
  * (`containedWikiRoots`) takes those wikis' write locks too: its rebase rewrites
  * their working trees, and a gardener write landing mid-rebase is the same
  * corruption a wiki-mode entry's lock exists to prevent. Multiple roots nest in
- * SORTED order — an arbitrary order across two repos sharing two wikis is a
- * deadlock, and sorted is the cheapest total order both sides can agree on
- * without coordination.
+ * {@link sortedLockRoots} order — an arbitrary order across two repos sharing two
+ * wikis is a deadlock, and a shared total order is the cheapest thing both sides
+ * can agree on without coordination.
  */
 function withLocks<T>(repo: SyncRepo, top: string, work: () => Promise<T>): Promise<T> {
-  const roots = (repo.mode === "wiki" && repo.wikiRoot ? [repo.wikiRoot] : repo.containedWikiRoots ?? [])
-    .slice()
-    .sort();
+  const roots = sortedLockRoots(repo);
   // No wiki root ⇒ no page writes to serialize against; the commit queue alone
   // is the repo's lock.
   const nested = roots.reduceRight<() => Promise<T>>(

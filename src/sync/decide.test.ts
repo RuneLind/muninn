@@ -3,6 +3,9 @@ import {
   blocksRebase,
   clampReason,
   decideStaging,
+  DEFER_REASON_DELETION_HOLD,
+  DEFER_REASON_FRESH_EDIT,
+  DEFER_REASON_RENAME_PAIR,
   describeDeferralReason,
   describeSyncState,
   FUTURE_MTIME_SKEW_MS,
@@ -236,6 +239,7 @@ describe("deferral reasons", () => {
   test("names the real blocking sets and distinguishes outside-subtree dirt", () => {
     const r = describeDeferralReason({
       quietHeld: ["wiki/concepts/Live.md"],
+      companionHeld: [],
       outside: ["src/main.py", "README.md"],
       inScope: [],
     });
@@ -248,16 +252,67 @@ describe("deferral reasons", () => {
   });
 
   test("outside-subtree dirt alone never reads as a quiet hold", () => {
-    const r = describeDeferralReason({ quietHeld: [], outside: ["data/x.json"], inScope: [] });
+    const r = describeDeferralReason({
+      quietHeld: [],
+      companionHeld: [],
+      outside: ["data/x.json"],
+      inScope: [],
+    });
     expect(r).toContain("outside the wiki subtree");
     expect(r).not.toContain("last 5 min");
   });
 
   test("a long list is sampled, not dumped", () => {
     const many = Array.from({ length: 12 }, (_, i) => `p/${i}.md`);
-    const r = describeDeferralReason({ quietHeld: [], outside: [], inScope: many });
+    const r = describeDeferralReason({
+      quietHeld: [],
+      companionHeld: [],
+      outside: [],
+      inScope: many,
+    });
     expect(r).toContain("+9 more");
     expect(r.length).toBeLessThanOrEqual(SYNC_REASON_MAX);
+  });
+
+  test("a held deletion / rename half gets its own clause, never the mtime one", () => {
+    // Both kinds are held BECAUSE something else is fresh — neither has a fresh
+    // mtime of its own (a deletion has no mtime at all), so counting them under
+    // "edited in the last 5 min" invents editing that never happened.
+    const r = describeDeferralReason({
+      quietHeld: ["wiki/Live.md"],
+      companionHeld: ["wiki/Doomed.md", "wiki/Old Name.md"],
+      outside: [],
+      inScope: [],
+    });
+    expect(r).toContain("holding 1 file edited in the last 5 min (wiki/Live.md)");
+    expect(r).toContain("wiki/Doomed.md");
+    expect(r).toContain("wiki/Old Name.md");
+    expect(r).not.toContain("3 files edited");
+  });
+});
+
+describe("deferral reason keys", () => {
+  test("decideStaging labels each hold with the reason the card's clauses key off", () => {
+    // The clause split is keyed on these exact strings — spelled twice, the
+    // deletion hold silently reverts to being counted as a fresh edit.
+    const d = decideStaging(
+      [
+        item({ path: "concepts/Live.md", xy: "??", mtimeMs: fresh() }),
+        item({ path: "concepts/Doomed.md", xy: " D", mtimeMs: null }),
+      ],
+      NOW,
+    );
+    const byPath = new Map(d.deferred.map((x) => [x.path, x.reason]));
+    expect(byPath.get("concepts/Live.md")).toBe(DEFER_REASON_FRESH_EDIT);
+    expect(byPath.get("concepts/Doomed.md")).toBe(DEFER_REASON_DELETION_HOLD);
+
+    const renamed = decideStaging(
+      [item({ path: "concepts/New.md", xy: "R ", origPath: "concepts/Old.md", mtimeMs: fresh() })],
+      NOW,
+    );
+    expect(renamed.deferred.find((x) => x.path === "concepts/Old.md")?.reason).toBe(
+      DEFER_REASON_RENAME_PAIR,
+    );
   });
 });
 

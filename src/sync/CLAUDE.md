@@ -83,6 +83,19 @@ tick deferred while `ahead` grew and the wiki's own commits never left the machi
 The deferral reason is derived from the actual blocking sets
 (`describeDeferralReason`) and distinguishes a quiet hold from outside-subtree dirt.
 
+Two things the deferral REPORT must not conflate, both fixed after they shipped:
+
+- **Only a path held on its own mtime is an "edit".** A deletion has no mtime
+  and the old half of a rename was never touched — they are held BECAUSE
+  something else is fresh, so they carry their own clause
+  (`companionHeld`, keyed off the exported `DEFER_REASON_*` strings via
+  `isFreshMtimeHold`/`isCompanionHold`). Folded into the mtime count, the card
+  claimed edits to a file that had just been deleted.
+- **Out-of-scope dirt is not "deferred".** It rides `deferredFiles` for
+  visibility, but the loop will never commit it however long you wait, so it is
+  labelled as another process's work rather than as an uncommitted change
+  pending on a tick that cannot help.
+
 ## Rules that are not obvious from the code
 
 - **The denylist applies to UNTRACKED entries only.** A tracked file is already the
@@ -112,6 +125,20 @@ The deferral reason is derived from the actual blocking sets
   fails every tick — so the loop refuses with a `blocked` card telling you to run
   `git push -u origin <branch>` once. Pushing an explicit `HEAD:<branch>` would be
   the loop guessing which remote branch this one tracks.
+- **An empty pathspec is not a narrow commit, it is the WHOLE INDEX.** When every
+  path vanished mid-tick the argv ends in a bare `--`, and git then commits
+  whatever ANOTHER process has staged under a `[sync] 0 file(s)` subject
+  (verified against real git). Nothing left to commit ⇒ no commit is attempted.
+  Same class: `commitBody([])` would pass `-m ""`, a real blank paragraph.
+- **Lock roots sort on the QUEUE KEY, not the configured string.** The locks are
+  realpath-keyed (`wikiWriteQueueKey`), so sorting raw spellings is an incidental
+  total order that a symlinked or `/tmp` root breaks — and two repos taking two
+  shared wikis in opposite orders is precisely the deadlock the sort prevents
+  (`sortedLockRoots`).
+- **The ledger's default state is `unknown`, not `ok`.** `unknown` is the absence
+  of evidence: it renders "not synced yet" in a neutral tone, and the card's
+  label, tone AND payload `state` all derive from it rather than the label alone
+  saying so while the machine-readable field said "in sync".
 - **The ledger is in-memory, per process, and `running` never touches it.** A dry
   run and an in-flight `running` answer both REPORT without recording: recording
   `running` zeroed the deferral streak and cleared `lastError`, so a card polled
