@@ -6,6 +6,7 @@ import { parse as parseYaml } from "yaml";
 import { extractJson } from "../ai/json-extract.ts";
 import { parseClaudeOutput } from "../ai/result-parser.ts";
 import { StreamParser, type StreamProgressCallback } from "../ai/stream-parser.ts";
+import { resolveAgentCwd } from "../ai/agent-cwd.ts";
 import { getLog } from "../logging.ts";
 import { Tracer } from "../tracing/index.ts";
 import type { TraceContext } from "../tracing/tracer.ts";
@@ -371,8 +372,11 @@ async function spawnSonnetStreaming(
   timeoutMs: number,
   onProgress?: StreamProgressCallback,
 ): Promise<SpawnSonnetResult> {
-  // Run from /tmp so Claude CLI doesn't auto-discover muninn's .mcp.json
-  // and waste startup time loading MCP servers we don't need for judging.
+  // Run from muninn's agent home so the Claude CLI doesn't auto-discover
+  // muninn's .mcp.json/CLAUDE.md and waste startup time (and prompt tokens) on
+  // context this judge doesn't need. Was a bare `/tmp`; the shared helper adds a
+  // stable per-caller project folder, so judge sessions group under their own
+  // name instead of an anonymous `-tmp` pile.
   const proc = Bun.spawn(
     [
       "claude",
@@ -384,7 +388,7 @@ async function spawnSonnetStreaming(
       "--", prompt,
     ],
     {
-      cwd: "/tmp",
+      cwd: resolveAgentCwd("benchmark-judge"),
       env: { ...process.env, CLAUDE_CODE_ENTRYPOINT: "benchmark-judge" },
       stdout: "pipe",
       stderr: "pipe",
