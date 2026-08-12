@@ -10,6 +10,7 @@ import {
   type ChatModelRow,
 } from "./models-overview.ts";
 import { _resetSnapshotForTests } from "../db/role-overrides.ts";
+import { __setWikiReadonlyForTest } from "../wiki/readonly.ts";
 
 /** Minimal BotConfig factory — only the fields the overview reads. */
 function bot(name: string, over: Partial<BotConfig> = {}): BotConfig {
@@ -54,6 +55,7 @@ function deps(over: Partial<ModelsOverviewDeps> & {
     getHaikuUsage: over.getHaikuUsage ?? (async () => over.haiku ?? []),
     getChatModels: over.getChatModels ?? (async () => over.chat ?? []),
     getWikiRegistry: over.getWikiRegistry ?? (() => over.wikiRegistry ?? []),
+    getHostname: over.getHostname ?? (() => "test-host"),
   };
 }
 
@@ -423,4 +425,90 @@ test("degraded sources are collected, never thrown", async () => {
   expect(o.errors!.join(" ")).toContain("no usage");
   // Still renders the bot row.
   expect(o.bots).toHaveLength(1);
+});
+
+// ---------------------------------------------------------------------------
+// Machine card — "which instance am I looking at?"
+//
+// The card is the ONLY surface where the env-only profile difference between the
+// laptop and the Mac mini is readable, so every row on it has to be true. Each
+// test below pins a way it was previously able to lie.
+// ---------------------------------------------------------------------------
+
+test("machine: the readonly row reflects what the SEAMS enforce, not just the env", async () => {
+  // The card read `wikiReadonlyFromEnv()` while every write seam reads
+  // `isWikiReadonly()` — so a test override (and any future hot toggle) made the
+  // card state the opposite of what the instance actually does.
+  __setWikiReadonlyForTest(true);
+  try {
+    const out = await assembleModelsOverview("jarvis", deps({ bots: [bot("jarvis")] }));
+    expect(out.machine.wikiReadonly).toBe(true);
+    expect(out.machine.wikiWriteOwner).toBe(false);
+  } finally {
+    __setWikiReadonlyForTest();
+  }
+  const back = await assembleModelsOverview("jarvis", deps({ bots: [bot("jarvis")] }));
+  expect(back.machine.wikiReadonly).toBe(false);
+  expect(back.machine.wikiWriteOwner).toBe(true);
+});
+
+test("machine: a failed wiki registry renders as UNKNOWN, never as `none`", async () => {
+  // `wikiRegistry` starts as `[]` and the catch only pushes to errors[], so a
+  // registry that THREW rendered identically to an install with no wikis — the
+  // reading that makes a readonly instance look harmless.
+  const out = await assembleModelsOverview(
+    "jarvis",
+    deps({
+      bots: [bot("jarvis")],
+      getWikiRegistry: () => {
+        throw new Error("WIKI_EXTRA is malformed");
+      },
+    }),
+  );
+  expect(out.machine.wikisKnown).toBe(false);
+  expect(out.machine.wikis).toEqual([]);
+  expect(out.errors?.some((e) => e.startsWith("wiki_registry:"))).toBe(true);
+});
+
+test("machine: a healthy registry is marked known", async () => {
+  const out = await assembleModelsOverview(
+    "jarvis",
+    deps({ bots: [bot("jarvis")], wikiRegistry: [wiki("mimir", "extra")] }),
+  );
+  expect(out.machine.wikisKnown).toBe(true);
+  expect(out.machine.wikis).toEqual([{ name: "mimir", source: "extra" }]);
+});
+
+test("machine: the wikis payload carries no on-disk root", async () => {
+  // `root` was published on a reader-facing API and rendered nowhere — an
+  // absolute filesystem path for free. (`listConnectorOptions`' `base_url` rule.)
+  const out = await assembleModelsOverview(
+    "jarvis",
+    deps({ bots: [bot("jarvis")], wikiRegistry: [wiki("mimir", "extra")] }),
+  );
+  expect(JSON.stringify(out.machine)).not.toContain("/wikis/mimir");
+  expect(Object.keys(out.machine.wikis[0]!).sort()).toEqual(["name", "source"]);
+});
+
+test("machine: bots distinguish DISCOVERED from actually polling", async () => {
+  // `discoverAllBots` returns every bot folder; the process only starts the ones
+  // with platform tokens ("Skipping bot X — no platform tokens"). On the mini
+  // that is ALL of them, so a bare name list claimed bots that poll nothing.
+  const out = await assembleModelsOverview(
+    "jarvis",
+    deps({
+      bots: [
+        bot("jarvis", { telegramBotToken: "t" }),
+        bot("slackonly", { slackBotToken: "b", slackAppToken: "a" }),
+        bot("halfslack", { slackBotToken: "b" }), // needs BOTH Slack tokens
+        bot("tokenless"),
+      ],
+    }),
+  );
+  expect(out.machine.bots).toEqual([
+    { name: "jarvis", polling: true },
+    { name: "slackonly", polling: true },
+    { name: "halfslack", polling: false },
+    { name: "tokenless", polling: false },
+  ]);
 });

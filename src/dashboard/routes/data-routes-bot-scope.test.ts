@@ -20,7 +20,8 @@
  * prevent that — process isolation is the only thing that does.
  */
 
-import { test, expect, mock, beforeEach } from "bun:test";
+import { test, expect, mock, beforeEach, afterEach } from "bun:test";
+import { __setWikiReadonlyForTest, WIKI_READONLY_REASON } from "../../wiki/readonly.ts";
 
 const goalCalls: Array<[string, string | undefined]> = [];
 const taskCalls: Array<[string, string | undefined]> = [];
@@ -49,6 +50,21 @@ mock.module("../../db/scheduled-tasks.ts", () => ({
   },
 }));
 
+// The watcher trigger route is the third thing this file covers (same process,
+// same mock.module constraint): a readonly instance must not force-run a
+// WIKI-DRAFTING watcher, whose whole job is to mint proposals it can never apply.
+const realWatchers = await import("../../db/watchers.ts");
+const forcedWatcherIds: string[] = [];
+let stubWatcher: { id: string; type: string } | null = null;
+mock.module("../../db/watchers.ts", () => ({
+  ...realWatchers,
+  getWatcherById: async (id: string) =>
+    stubWatcher && stubWatcher.id === id ? stubWatcher : null,
+  forceRunWatcher: async (id: string) => {
+    forcedWatcherIds.push(id);
+  },
+}));
+
 const { Hono } = await import("hono");
 const { registerDataRoutes } = await import("./data-routes.ts");
 
@@ -61,6 +77,9 @@ function app() {
 beforeEach(() => {
   goalCalls.length = 0;
   taskCalls.length = 0;
+  forcedWatcherIds.length = 0;
+  stubWatcher = null;
+  __setWikiReadonlyForTest();
 });
 
 test("GET /api/goals/:userId forwards ?bot= to the DB layer", async () => {
@@ -89,4 +108,45 @@ test("an empty ?bot= is unscoped, not a literal empty bot name", async () => {
   await app().request("/api/scheduled-tasks/u1?bot=");
   expect(goalCalls).toEqual([["u1", undefined]]);
   expect(taskCalls).toEqual([["u1", undefined]]);
+});
+
+// ── POST /api/watchers/:id/trigger under MUNINN_WIKI_READONLY ────────────────
+//
+// The trigger route is a live write surface the flag missed: `wiki-gardener` and
+// `consolidation-gardener` runs draft wiki proposals (and the gardener run also
+// writes the offered snapshot the write owner's drain reads). Non-wiki watchers
+// — email, x, anthropic — are unaffected and stay triggerable, which is the
+// whole point of guarding by TYPE rather than closing the route.
+
+afterEach(() => __setWikiReadonlyForTest());
+
+const WATCHER_ID = "11111111-1111-1111-1111-111111111111";
+
+test("a readonly instance 403s a wiki-drafting watcher trigger, and never queues it", async () => {
+  __setWikiReadonlyForTest(true);
+  for (const type of ["wiki-gardener", "consolidation-gardener"]) {
+    stubWatcher = { id: WATCHER_ID, type };
+    const res = await app().request(`/api/watchers/${WATCHER_ID}/trigger`, { method: "POST" });
+    expect(`${type} → ${res.status}`).toBe(`${type} → 403`);
+    const body = (await res.json()) as { error: string; readonly: boolean };
+    expect(body.readonly).toBe(true);
+    expect(body.error).toBe(WIKI_READONLY_REASON);
+  }
+  expect(forcedWatcherIds).toEqual([]);
+});
+
+test("a readonly instance still triggers non-wiki watchers", async () => {
+  __setWikiReadonlyForTest(true);
+  stubWatcher = { id: WATCHER_ID, type: "email" };
+  const res = await app().request(`/api/watchers/${WATCHER_ID}/trigger`, { method: "POST" });
+  expect(res.status).toBe(200);
+  expect(forcedWatcherIds).toEqual([WATCHER_ID]);
+});
+
+test("with writes allowed the gardener watcher triggers normally", async () => {
+  __setWikiReadonlyForTest(false);
+  stubWatcher = { id: WATCHER_ID, type: "wiki-gardener" };
+  const res = await app().request(`/api/watchers/${WATCHER_ID}/trigger`, { method: "POST" });
+  expect(res.status).toBe(200);
+  expect(forcedWatcherIds).toEqual([WATCHER_ID]);
 });

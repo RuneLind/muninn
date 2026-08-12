@@ -1,5 +1,5 @@
 import path from "node:path";
-import type { Hono } from "hono";
+import type { Context, Hono } from "hono";
 import type { Config } from "../../config.ts";
 import { renderWikiPage } from "../views/wiki-page.ts";
 import { getWikiIndex, normalizeRelPath, readWikiPage, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
@@ -85,6 +85,7 @@ import {
 // only one of them would split the route from the screen it answers.
 import { WIKI_SHARE_COPY } from "../views/components/wiki-share-dialog.ts";
 import { commitWikiChange } from "../../wiki/commit.ts";
+import { isWikiReadonly, WIKI_READONLY_REASON } from "../../wiki/readonly.ts";
 import { todayOslo } from "../../gardener/util.ts";
 import { capabilitiesForConnectorType, connectorCapabilities } from "../../ai/one-shot.ts";
 import type { executeOneShot } from "../../ai/one-shot.ts";
@@ -174,6 +175,22 @@ import { activityLog } from "../../observability/activity-log.ts";
 import { getLog } from "../../logging.ts";
 
 const log = getLog("dashboard", "wiki");
+
+/**
+ * The wiki-readonly refusal for this file's model-spending routes (the sibling of
+ * `wiki-gardener-routes.ts`'s helper of the same name). Returns null when writes
+ * are allowed. Logged with its route path because a route guard answers BEFORE
+ * the write seams — which log on their own — so a refused POST otherwise left no
+ * trace at all.
+ */
+function readonlyRefusal(c: Context) {
+  if (!isWikiReadonly()) return null;
+  log.info("Wiki-readonly instance refused {method} {path}", {
+    method: c.req.method,
+    path: new URL(c.req.url).pathname,
+  });
+  return c.json({ error: WIKI_READONLY_REASON, readonly: true }, 403);
+}
 
 /**
  * In-memory "what's new" digest cache, keyed by canonical wiki name. A digest is
@@ -1096,6 +1113,11 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
   // throw returns 500 JSON (mirrors POST /api/wiki/remember).
   app.post("/api/wiki/atlas/draft-synthesis", async (c) => {
     try {
+      // Wiki-readonly instance: refuse before the one-shot is even considered.
+      // It drafts a PROPOSAL rather than a page, but a readonly instance must not
+      // build a gate backlog it can never apply (nor spend the model call).
+      const refused = readonlyRefusal(c);
+      if (refused) return refused;
       type Body = { wiki?: string; members?: unknown; label?: unknown };
       const body = await c.req.json<Body>().catch(() => ({}) as Body);
       const label = typeof body.label === "string" ? body.label.trim() : "";
@@ -3038,6 +3060,11 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         commit: (paths, message) => commitWikiChange(entry.root, paths, message, { push }),
       });
 
+      // Wiki-readonly instance — a refusal from the write seam, not a failure:
+      // 403, and the page was never opened.
+      if (result.outcome === "forbidden") {
+        return c.json({ error: result.reason, readonly: true }, 403);
+      }
       if (result.outcome === "stale") {
         return c.json({ error: result.reason, stale: true }, 409);
       }
@@ -3074,6 +3101,12 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
   // append route so an unexpected failure is a 500 JSON, never an unhandled throw.
   app.post("/api/wiki/factcheck/integrate", async (c) => {
     try {
+      // Wiki-readonly instance: refuse first. This route writes nothing, but its
+      // ONLY consumer is the sibling /apply, which this instance already 403s —
+      // so the ~90s one-shot could only ever buy a preview nothing can commit.
+      // Same reasoning as the guarded drafting / atlas draft-synthesis routes.
+      const refused = readonlyRefusal(c);
+      if (refused) return refused;
       type IntegrateBody = {
         wiki?: string;
         bot?: string;
@@ -3516,6 +3549,15 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
           .filter((o) => !o.applied)
           .map((o) => ({ edit: o.edit, reason: o.reason ?? "could not be placed" }));
 
+      // Wiki-readonly instance — a refusal from the write seam (403), checked
+      // before the outcome branches that describe an attempted write. The route
+      // HAS already read the page (the cap check above), but the seam refused
+      // before its own read and before the queue, so nothing was written, no
+      // log.md exists, and the `transform` never ran — which is why
+      // `budgetError`/`applyResult` are still untouched here.
+      if (result.outcome === "forbidden") {
+        return c.json({ error: result.reason, readonly: true }, 403);
+      }
       if (result.outcome === "stale") {
         return c.json({ error: result.reason, stale: true }, 409);
       }

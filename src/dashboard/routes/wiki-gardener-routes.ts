@@ -16,6 +16,7 @@ import { fetchKnowledgeApi, KnowledgeApiError } from "../../ai/knowledge-api-cli
 import { lineDiff, type DiffLine } from "../../gardener/diff.ts";
 import { applyWikiProposal, draftTitle, type ApplyDeps } from "../../gardener/apply.ts";
 import { commitWikiChange } from "../../wiki/commit.ts";
+import { isWikiReadonly, WIKI_READONLY_REASON } from "../../wiki/readonly.ts";
 import {
   approveWikiProposal,
   rejectWikiProposal,
@@ -105,6 +106,32 @@ const KNOWLEDGE_API_URL = process.env.KNOWLEDGE_API_URL ?? "http://localhost:832
  * human review gate that writes nothing on its own.
  */
 export const SOURCE_DRAFT_TITLE_MAX = 120;
+
+/**
+ * The wiki-readonly refusal, as the FIRST statement of every gardener mutation
+ * route (`MUNINN_WIKI_READONLY=1`). Returns null when writes are allowed.
+ *
+ * The two write seams (`applyWikiProposal`, `writeWikiPage`) refuse on their own,
+ * so this is not the only line of defence — it exists so the refusal costs no DB
+ * round-trip, no model call and no status CAS, and so the *drafting* routes
+ * (backlog-run / source-draft-*) are covered too: they persist proposals rather
+ * than pages, and a readonly instance must not build a backlog it can never apply.
+ *
+ * `reject` is deliberately NOT guarded — it flips a DB status and mutates no wiki.
+ *
+ * The refusal is LOGGED with its route path: the two write seams warn on their
+ * own, but a route guard answers before the seam is reached, so a refused POST
+ * otherwise left no trace at all and "why did the mini do nothing?" was
+ * unanswerable from the logs.
+ */
+function readonlyRefusal(c: Context) {
+  if (!isWikiReadonly()) return null;
+  log.info("Wiki-readonly instance refused {method} {path}", {
+    method: c.req.method,
+    path: new URL(c.req.url).pathname,
+  });
+  return c.json({ error: WIKI_READONLY_REASON, readonly: true }, 403);
+}
 
 /** Bot configs are static until restart — discover once and memoize (see wiki-routes.ts). */
 let cachedBots: BotConfig[] | null = null;
@@ -1347,6 +1374,8 @@ export function registerWikiGardenerRoutes(
   // Telegram alert (the user is at the dashboard). Responds immediately with the
   // run state; the client polls the GET while `running`.
   app.post("/api/wiki/gardener/backlog-run", async (c) => {
+    const refused = readonlyRefusal(c);
+    if (refused) return refused;
     const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
     if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status);
     const { bot, root } = resolved;
@@ -1457,6 +1486,8 @@ export function registerWikiGardenerRoutes(
   // Refused while a run is in flight: the run's persistOffered was computed from
   // a pre-reset read and would silently clobber the empty set.
   app.post("/api/wiki/gardener/backlog-reset", async (c) => {
+    const refused = readonlyRefusal(c);
+    if (refused) return refused;
     const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
     if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status);
     const { bot } = resolved;
@@ -1477,6 +1508,8 @@ export function registerWikiGardenerRoutes(
   // as backlog-reset. No run in flight (a cancel racing the natural settle — the
   // likely case) is a no-op 200 `{cancelled:false}`, not an error.
   app.post("/api/wiki/gardener/backlog-cancel", async (c) => {
+    const refused = readonlyRefusal(c);
+    if (refused) return refused;
     const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
     if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status);
     const { bot } = resolved;
@@ -1496,6 +1529,8 @@ export function registerWikiGardenerRoutes(
   // rather than interleaving (the same check-then-persist TOCTOU §3a rejects for
   // run-start). No journal (a refresh race) ⇒ a clean no-op 200 `{recovered:0}`.
   app.post("/api/wiki/gardener/backlog-recover", async (c) => {
+    const refused = readonlyRefusal(c);
+    if (refused) return refused;
     const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
     if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status);
     const { bot } = resolved;
@@ -1525,6 +1560,8 @@ export function registerWikiGardenerRoutes(
   // racing a fresh Ingest must NOT null the live run's journal, which would strand
   // that batch unrecoverably if it crashed.
   app.post("/api/wiki/gardener/backlog-dismiss", async (c) => {
+    const refused = readonlyRefusal(c);
+    if (refused) return refused;
     const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
     if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status);
     const { bot } = resolved;
@@ -1574,10 +1611,16 @@ export function registerWikiGardenerRoutes(
    * prune can't interleave with a drain's offered read/persist. Returns a Response on
    * refusal, else the resolved `{ bot, watcher }` (the wiki `root` is deliberately not
    * returned — no prune verb touches the wiki on disk).
+   *
+   * The readonly refusal leads it: a prune verb writes no wiki page, but it DOES
+   * mutate snapshots the write owner's in-flight drain reads (and, for delete,
+   * huginn itself) — so a non-owner instance must not touch them.
    */
   const resolvePruneTarget = async (
     c: Context,
   ): Promise<{ bot: BotConfig; watcher: GardenerWatcherRef } | { refusal: Response }> => {
+    const refused = readonlyRefusal(c);
+    if (refused) return { refusal: refused };
     const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
     if ("error" in resolved) {
       return { refusal: c.json({ error: resolved.error }, resolved.status) };
@@ -1802,6 +1845,8 @@ export function registerWikiGardenerRoutes(
   // one traced model call (a deliberate manual action) and returns the outcome; a
   // covered/empty collection is a normal 200, a model/DB failure a 500.
   app.post("/api/wiki/gardener/source-draft-run", async (c) => {
+    const refused = readonlyRefusal(c);
+    if (refused) return refused;
     const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
     if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status);
     const { bot, root } = resolved;
@@ -1838,6 +1883,8 @@ export function registerWikiGardenerRoutes(
   // per-doc outcomes + totals; a batch always returns 200 (a per-doc error is a
   // recorded outcome, not a route failure).
   app.post("/api/wiki/gardener/source-draft-backlog", async (c) => {
+    const refused = readonlyRefusal(c);
+    if (refused) return refused;
     const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
     if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status);
     const { bot, root } = resolved;
@@ -1909,6 +1956,8 @@ export function registerWikiGardenerRoutes(
   // (409, never queue behind a drain). Always awaits the one-shot — a deliberate
   // single-doc action — and reports the outcome the ledger just recorded.
   app.post("/api/wiki/gardener/source-draft-doc", async (c) => {
+    const refused = readonlyRefusal(c);
+    if (refused) return refused;
     const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
     if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status);
     const { bot, root } = resolved;
@@ -1975,6 +2024,10 @@ export function registerWikiGardenerRoutes(
   // A row already in `approved` is re-runnable (recovery for a crash between the
   // approve CAS and the terminal CAS — apply itself is re-run safe).
   app.post("/api/wiki/proposals/:id/approve", async (c) => {
+    // Before the draft→approved CAS: a refusal must leave the row reviewable,
+    // and the seam's own `forbidden` (mapped below) would arrive after the flip.
+    const refused = readonlyRefusal(c);
+    if (refused) return refused;
     const id = c.req.param("id");
     const existing = await getWikiProposalById(id);
     if (!existing) return c.json({ error: "proposal not found" }, 404);
@@ -2039,6 +2092,17 @@ export function registerWikiGardenerRoutes(
       }
       log.info("Wiki-gardener applied proposal {id} → {path}", { id, path: result.writtenPath });
       return c.json({ outcome: "applied", writtenPath: result.writtenPath });
+    }
+    // Defense in depth behind the route guard above (which normally answers
+    // first). A REFUSAL: the proposal keeps its `approved` status — which is
+    // re-runnable by design — so the write-owning instance can apply it later.
+    // Flipping it to `error` would burn a perfectly good draft on a policy answer.
+    if (result.outcome === "forbidden") {
+      log.warn("Wiki-gardener approve refused for {id} — instance is wiki-readonly", { id });
+      // Same body as every other readonly refusal (`{error, readonly}`): a client
+      // must be able to recognize the refusal by one shape, and the extra
+      // `outcome: "forbidden"` here was a third spelling nothing read.
+      return c.json({ error: result.reason, readonly: true }, 403);
     }
     if (result.outcome === "stale") {
       if (!(await finishProposal(id, markWikiProposalStale, "stale"))) {

@@ -411,6 +411,22 @@ If the model call fails (timeout, crash), the watcher returns `[]` — no Telegr
 
 The dashboard "Run" button sets `force_next_run = true` in the DB. The next scheduler tick picks it up through the same `runWatchers` path (with tracing). Forced watchers skip `isScheduledTimeDue` and quiet hours. The flag is cleared by `updateWatcherLastRun()`.
 
+### Wiki-readonly skip (`MUNINN_WIKI_READONLY`)
+
+`runChecker` returns `[]` with one `log.info` for the wiki-DRAFTING types
+(`wiki-gardener`, `consolidation-gardener` — `shouldSkipWikiDraftingRun` /
+`WIKI_DRAFTING_WATCHER_TYPES` in `./wiki-drafting.ts`) when `isWikiReadonly()`.
+`POST /api/watchers/:id/trigger` already refused those two, but the SCHEDULED
+path reached the same checkers unguarded, so a readonly instance left with
+`SCHEDULER_ENABLED=true` kept minting weekly proposals — and spending model calls
+— that only the write owner can apply. Both call sites read the same set, which
+is why it lives here rather than in `data-routes.ts`. `wiki-linter` (report-only)
+and `wiki-committer` (git, which the flag deliberately leaves open) are NOT
+skipped. The skip is not an error: the run still advances `last_run_at`. The four
+wiki checkers are reachable through the injectable `WikiCheckers` seam
+(`runChecker`'s 4th arg) purely so a test can assert WHICH checker a run reaches
+— every checker degrades to `[]`, so a return value proves nothing.
+
 ### Time-of-day scheduling
 
 Watchers with `config.hour`/`config.minute` only run once per day at/after that time. Uses cached `Intl.DateTimeFormat` (Europe/Oslo). The `isScheduledTimeDue` filter runs AFTER `getWatchersDueNow` (interval-based), so both conditions must be true.

@@ -26,6 +26,9 @@ import type { CommitWikiResult } from "./commit.ts";
 export type AppendOutcome =
   | { outcome: "written"; writtenPath: string; commit?: CommitWikiResult }
   | { outcome: "stale"; reason: string }
+  /** Propagated from `writeWikiPage` on a wiki-readonly instance — a refusal the
+   *  caller maps to 403, deliberately NOT collapsed into `error` (⇒ 500). */
+  | { outcome: "forbidden"; reason: string }
   | { outcome: "error"; reason: string };
 
 export interface AppendBlockOptions

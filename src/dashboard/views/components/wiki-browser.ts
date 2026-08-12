@@ -16,6 +16,7 @@
  */
 
 import { escHtml as esc } from "./escape.ts";
+import { installWikiReadonlyGuard } from "./wiki-readonly-client.ts";
 import { makeSseFrameParser, sseClient, type SseFrame, type SseHandle } from "./client-runtime.ts";
 import { askAnswerBodyHtml, renderStreamingBody, enhanceConfidenceHtml } from "./wiki-ask-render.ts";
 import {
@@ -5749,6 +5750,10 @@ document.addEventListener("visibilitychange", () => {
 setInterval(() => maybeRefetchPages(false), WIKI_REFETCH_TICK_MS);
 
 // ── Boot ──────────────────────────────────────────────────────────────
+// A wiki-readonly instance dims + blocks the write actions (➕ / ✎ / Apply /
+// Draft synthesis) so the refusal is visible before the click, not after a 403.
+// No-op when this instance owns writes.
+installWikiReadonlyGuard();
 // Rehydrate any persisted Ask session into the "This session" list (does not
 // auto-show an answer). Safe at module load — the history element is static.
 rehydrateAskSession();

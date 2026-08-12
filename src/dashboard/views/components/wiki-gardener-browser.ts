@@ -8,6 +8,7 @@
  */
 
 import { escHtml as esc } from "./escape.ts";
+import { installWikiReadonlyGuard } from "./wiki-readonly-client.ts";
 import {
   backlogStripModel,
   backlogStripHtml,
@@ -1263,6 +1264,11 @@ function loadProposals(): void {
         `<div class="gard-empty">Failed to load proposals: ${esc(err.message)}</div>`;
     });
 }
+
+// A wiki-readonly instance dims + blocks Approve, Start batch, Backfill oldest
+// and the per-row draft verbs, so the 403 is visible before the click. No-op
+// when this instance owns writes.
+installWikiReadonlyGuard();
 
 // Boot. A non-bot (extra) wiki has no proposals — the server already rendered the
 // "unavailable" notice into #gardList, so skip the fetch and leave it in place.

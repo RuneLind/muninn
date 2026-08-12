@@ -2,6 +2,8 @@ import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { gardenerClientScript } from "./components/wiki-gardener-client.ts";
 import { escHtml, escAttr, escJsonScript } from "./components/escape.ts";
 import { agentPresenceStyles, agentPresenceHtml, agentPresenceScript } from "./components/agent-presence.ts";
+import { wikiReadonlyStyles } from "./components/wiki-readonly-client.ts";
+import { isWikiReadonly } from "../../wiki/readonly.ts";
 
 /**
  * /wiki/gardener — the wiki-gardener review gate.
@@ -29,6 +31,9 @@ export async function renderWikiGardenerPage(opts?: {
   const selected = opts?.selected ?? "";
   const envOverride = opts?.envOverride ?? false;
   const notBotWiki = opts?.notBotWiki ?? false;
+  // Server-resolved once per render — the client mirrors it via
+  // `window.__WIKI_READONLY__` (it cannot read the process env).
+  const readonly = isWikiReadonly();
   // A non-bot wiki matches no bot option — render its raw name as a disabled,
   // selected placeholder so the picker agrees with the "unavailable" body. Show
   // the picker for any non-empty bot registry so there's always a way back.
@@ -418,6 +423,12 @@ export async function renderWikiGardenerPage(opts?: {
     .lint-items li:hover { background: var(--bg-surface); }
     .lint-path { color: var(--text-secondary); font-family: var(--font-mono, monospace); font-size: 11.5px; }
     .lint-msg { color: var(--text-muted); }
+    ${wikiReadonlyStyles()}
+    .gard-readonly {
+      margin: 0 0 12px; padding: 9px 13px; border-radius: 8px; font-size: 12.5px;
+      background: color-mix(in srgb, var(--status-warning) 12%, transparent);
+      border: 1px solid var(--status-warning); color: var(--text-primary);
+    }
   </style>
 </head>
 <body>
@@ -432,7 +443,8 @@ export async function renderWikiGardenerPage(opts?: {
       </div>
     </div>
     <div class="gard-sub">Drafted knowledge-wiki pages awaiting review. Approve writes the page into the wiki and triggers a reindex; reject skips the topic on future runs.</div>
-    <div id="gardBacklog" class="gard-backlog"></div>
+${readonly ? `    <div class="gard-readonly">This muninn instance is <strong>wiki-readonly</strong> (<code>MUNINN_WIKI_READONLY=1</code>) — Approve, Start batch and the source-draft actions are disabled here and return 403. Apply proposals from the write-owning instance.</div>
+` : ""}    <div id="gardBacklog" class="gard-backlog"></div>
     <div class="gard-filter-row" id="gardFilters">
       <button class="gard-filter active" data-status="">All</button>
       <button class="gard-filter" data-status="draft">Pending</button>
@@ -455,6 +467,7 @@ export async function renderWikiGardenerPage(opts?: {
   <script>
     window.__WIKI_BOT__ = ${escJsonScript(selected)};
     window.__WIKI_GARDENER_UNAVAILABLE__ = ${notBotWiki ? "true" : "false"};
+    window.__WIKI_READONLY__ = ${readonly ? "true" : "false"};
   </script>
   <script>
     ${clientScript}
