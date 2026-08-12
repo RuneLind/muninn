@@ -97,38 +97,130 @@ interface GitResult {
   stderr: string;
 }
 
+/** Options for one {@link runGit} invocation. */
+export interface GitRunOptions {
+  /** Skip the stdout trim (see {@link runGit}). */
+  raw?: boolean;
+  /**
+   * Kill the child after this many ms and report a synthetic failure.
+   *
+   * **Only ever pass this for a NETWORK verb** (`push`, `fetch`). Local verbs
+   * (`add`/`commit`/`status`/`rev-parse`/…) stay untimed DELIBERATELY: `git()`
+   * serves hot dashboard paths where a spurious kill would be a new failure
+   * mode, and a killed `add`/`commit` leaves `.git/index.lock` behind — which
+   * the repo-sync pre-flight escalates to a human, i.e. a timeout on a local
+   * verb would WEDGE the repo it was meant to protect.
+   */
+  timeoutMs?: number;
+}
+
+/** The network-verb budget shared by the auto-commit push and the repo-sync
+ *  loop's fetch/push. Sized to be generous for a real remote over ssh while
+ *  still bounding a hung child: an un-awaited untimed push is what could pin
+ *  the per-repo commit queue forever. */
+export const GIT_NETWORK_TIMEOUT_MS = 60_000;
+
 /** Spawn `git -C <cwd> <args…>` and collect its output. Never throws.
  *
  * `GIT_TERMINAL_PROMPT=0` (merged over the process env) makes any git op that
  * would otherwise prompt for credentials — e.g. a `push` to an https remote with
- * no credential helper — fail fast instead of hanging waiting on stdin.
+ * no credential helper — fail fast instead of hanging waiting on stdin. That env
+ * var is exactly what makes a credential-less push fail fast, which is why every
+ * caller goes through this helper instead of spawning git itself.
  *
- * `rawStdout` skips the trim — REQUIRED for `status --porcelain -z`, whose
+ * `opts.raw` skips the trim — REQUIRED for `status --porcelain -z`, whose
  * first status column is a leading space that `.trim()` would strip, corrupting
  * the first entry's 2-char `XY` prefix. Every other caller wants the trimmed
- * form (e.g. `rev-parse` toplevel), so trim stays the default. */
-async function git(cwd: string, args: string[], rawStdout = false): Promise<GitResult> {
+ * form (e.g. `rev-parse` toplevel), so trim stays the default.
+ *
+ * A TIMED call additionally runs in its own process group (`detached`), so the
+ * timeout can kill the GROUP — see the kill site below.
+ *
+ * Exported so the repo-sync loop (`src/sync/`) reuses this one spawn seam. */
+export async function runGit(
+  cwd: string,
+  args: string[],
+  opts: GitRunOptions = {},
+): Promise<GitResult> {
+  const timed = !!opts.timeoutMs && opts.timeoutMs > 0;
   try {
     const proc = Bun.spawn(["git", "-C", cwd, ...args], {
       stdout: "pipe",
       stderr: "pipe",
       env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+      // Only the timed (network) verbs, and only because they are the ones we
+      // ever kill: `setsid()` makes git the leader of a fresh process group, so
+      // `kill(-pid)` reaches the transport it spawned. Detaching an untimed
+      // local verb would buy nothing and let it outlive the process.
+      ...(timed ? { detached: true } : {}),
     });
-    const [stdout, stderr] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ]);
-    const code = await proc.exited;
-    return { code, stdout: rawStdout ? stdout : stdout.trim(), stderr: stderr.trim() };
+    const collect = (async (): Promise<GitResult> => {
+      const [stdout, stderr] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ]);
+      const code = await proc.exited;
+      return { code, stdout: opts.raw ? stdout : stdout.trim(), stderr: stderr.trim() };
+    })();
+    if (!timed) return await collect;
+
+    // The timeout RACES the output collection instead of awaiting it after the
+    // kill, because git's own children (ssh, a credential helper) inherit the
+    // pipes: killing git does not necessarily close them, so a reader awaited
+    // after the kill can hang exactly in the case the timeout exists for.
+    collect.catch(() => {}); // the losing branch must never surface as unhandled
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expiry = new Promise<null>((resolve) => {
+      timer = setTimeout(() => {
+        // Kill the GROUP, not the pid. Measured on a fixture push through a
+        // hung `GIT_SSH_COMMAND`: `proc.kill(9)` alone left the ssh child alive
+        // (it holds the connection and the inherited pipes), so every timed-out
+        // 15-minute tick would leak one. `-pid` works because the spawn above
+        // asked for `detached`, making git its own group leader; the plain kill
+        // stays as the fallback for a platform where that did not take.
+        try {
+          process.kill(-proc.pid, 9);
+        } catch {
+          try {
+            proc.kill(9);
+          } catch {
+            /* already exited */
+          }
+        }
+        resolve(null);
+      }, opts.timeoutMs);
+    });
+    const winner = await Promise.race([collect, expiry]);
+    if (timer) clearTimeout(timer);
+    if (winner === null) {
+      return {
+        code: -1,
+        stdout: "",
+        stderr: `git ${args[0] ?? "?"} timed out after ${opts.timeoutMs}ms`,
+      };
+    }
+    return winner;
   } catch (err) {
     return { code: -1, stdout: "", stderr: err instanceof Error ? err.message : String(err) };
   }
 }
 
-/** True when `abs` exists on disk (a file). Never throws. */
-async function pathExists(abs: string): Promise<boolean> {
+/** Local alias — every in-module call site is a LOCAL verb unless it passes a
+ *  timeout explicitly (only `pushInner` does). */
+const git = runGit;
+
+/**
+ * True when `abs` exists on disk. Never throws.
+ *
+ * `stat`, not `Bun.file().exists()`, because the repo-sync pre-flight asks this
+ * about `.git/rebase-merge` — a DIRECTORY, which `Bun.file().exists()` reports as
+ * absent. One implementation for both callers is only safe if it answers for both
+ * kinds; every path this module passes is a file, so nothing here changes.
+ */
+export async function pathExists(abs: string): Promise<boolean> {
   try {
-    return await Bun.file(abs).exists();
+    await stat(abs);
+    return true;
   } catch {
     return false;
   }
@@ -144,7 +236,23 @@ async function pathExists(abs: string): Promise<boolean> {
 
 const commitQueue = createQueue();
 
-function runExclusiveQueued<T>(key: string, work: () => Promise<T>): Promise<T> {
+/**
+ * Serialize `work` on the per-git-toplevel COMMIT chain.
+ *
+ * Exported for the repo-sync loop (`src/sync/run.ts`), whose local section
+ * (status → add/commit → rebase) must hold this lock for its WHOLE span.
+ * Routing that through `commitWikiChange` is NOT equivalent: that helper
+ * acquires and releases around its own commit, leaving the rebase unprotected
+ * against the gardener/page-write commit tails (which run OUTSIDE the wiki-write
+ * section by design), and it dispatches an immediate push that would be
+ * non-fast-forward before the rebase has run.
+ *
+ * `key` MUST be a git toplevel from {@link gitToplevel} — this map is keyed on a
+ * plain string with NO realpath normalization of its own, and `rev-parse
+ * --show-toplevel` is what supplies the canonical spelling. Deriving the key by
+ * string manipulation would open a second, independent chain on one repo.
+ */
+export function runExclusiveQueued<T>(key: string, work: () => Promise<T>): Promise<T> {
   return commitQueue.run(key, work);
 }
 
@@ -178,14 +286,20 @@ async function defaultBranch(top: string): Promise<string | null> {
   return null;
 }
 
+/** Is `branch` this repo's default branch? Split out of {@link onDefaultBranch}
+ *  for a caller that has ALREADY read the current branch (the sync card reads it
+ *  for its own display), so the answer costs one spawn instead of two. */
+export async function isDefaultBranch(top: string, branch: string | null): Promise<boolean> {
+  if (!branch) return false; // detached HEAD — never our default
+  const def = await defaultBranch(top);
+  return def ? branch === def : branch === "main" || branch === "master";
+}
+
 /** True when the repo is currently checked out on its default branch. Exported
  *  so the sweeper can skip a feature-branch checkout (same rule the commit path
  *  applies — a non-default branch is left for a later sweep). */
 export async function onDefaultBranch(top: string): Promise<boolean> {
-  const current = (await git(top, ["branch", "--show-current"])).stdout;
-  if (!current) return false; // detached HEAD — never our default
-  const def = await defaultBranch(top);
-  return def ? current === def : current === "main" || current === "master";
+  return isDefaultBranch(top, (await git(top, ["branch", "--show-current"])).stdout || null);
 }
 
 /**
@@ -379,7 +493,10 @@ async function pushInner(top: string): Promise<void> {
     log.warn("Wiki commit: no upstream for the current branch in {top} — skipping push", { top });
     return;
   }
-  const pushed = await git(top, ["push"]);
+  // The ONE network verb on this path — timed, because it is dispatched
+  // un-awaited onto the per-repo commit queue and a hung push would otherwise
+  // park every later commit on that repo for the process's lifetime.
+  const pushed = await git(top, ["push"], { timeoutMs: GIT_NETWORK_TIMEOUT_MS });
   if (pushed.code !== 0) {
     log.warn("Wiki commit: git push failed in {top}: {error}", { top, error: pushed.stderr });
   }
@@ -401,26 +518,116 @@ interface PorcelainEntry {
 }
 
 /**
- * Parse `git status --porcelain -z` output. NUL-separated (no path quoting), so
- * paths with spaces/unicode are safe. A rename/copy record (`X`/`Y` = R/C) is
- * followed by a second NUL field carrying the ORIGINAL path — we surface BOTH the
- * new path and the original (the original is a deletion the caller will stage), so
- * a pre-staged rename commits as delete + add rather than a half-recorded rename.
+ * One STATUS-CARRYING entry from `git status --porcelain -z -uall`.
+ *
+ * The sweeper's {@link listWikiSubtreeDirty} deliberately discards `XY` — it
+ * only ever needs "which paths are dirty" and derives deletions from absence on
+ * disk. The repo-sync loop cannot: an ordinary unstaged `mv` shows as `D old`
+ * plus a fresh `?? new` (verified against real git — an UNSTAGED rename is never
+ * paired, only a staged `git mv` produces an `R` record), so a rule that staged
+ * deletions unconditionally would push a bare page deletion while the
+ * quiet-period filter still held back the new half, and the other machine would
+ * pull a 404. Deciding that needs the status letters and the rename pairing.
  */
-function parsePorcelainZ(out: string): PorcelainEntry[] {
+export interface PorcelainStatusEntry {
+  /** repo-relative path (posix separators, as git emits). For a rename/copy
+   *  record this is the NEW path. */
+  path: string;
+  /** The 2-char `XY` status field, verbatim (`" M"`, `"??"`, `"R "`, `"UU"`…). */
+  xy: string;
+  /** For a rename/copy record (`X` or `Y` = `R`/`C`): the ORIGINAL path. */
+  origPath?: string;
+}
+
+/**
+ * Parse `git status --porcelain -z` output, KEEPING the status field and pairing
+ * renames. NUL-separated (no path quoting), so paths with spaces/unicode are
+ * safe — which is load-bearing: plain `--porcelain` C-quotes the em-dash
+ * filenames both wikis contain, and `git add` exits 128 on the quoted string.
+ *
+ * A rename/copy record (`X`/`Y` = R/C) is followed by a second NUL field
+ * carrying the ORIGINAL path; it is attached to the same entry rather than
+ * emitted as a sibling, so a caller can treat the pair as one unit.
+ */
+export function parsePorcelainZWithStatus(out: string): PorcelainStatusEntry[] {
   const tokens = out.split("\0");
-  const entries: PorcelainEntry[] = [];
+  const entries: PorcelainStatusEntry[] = [];
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i];
     if (!tok || tok.length < 4) continue; // "XY p" is the minimum
     const xy = tok.slice(0, 2);
-    entries.push({ path: tok.slice(3) });
+    const entry: PorcelainStatusEntry = { path: tok.slice(3), xy };
     if (xy[0] === "R" || xy[0] === "C" || xy[1] === "R" || xy[1] === "C") {
       const orig = tokens[++i];
-      if (orig) entries.push({ path: orig });
+      if (orig) entry.origPath = orig;
     }
+    entries.push(entry);
   }
   return entries;
+}
+
+/**
+ * Parse `git status --porcelain -z` into the FLAT path list the sweeper wants —
+ * a rename's original path becomes its own entry right after the new path (the
+ * original is a deletion the caller will stage), so a pre-staged rename commits
+ * as delete + add rather than a half-recorded rename. Derived from
+ * {@link parsePorcelainZWithStatus} so there is one parser, not two.
+ */
+function parsePorcelainZ(out: string): PorcelainEntry[] {
+  const entries: PorcelainEntry[] = [];
+  for (const e of parsePorcelainZWithStatus(out)) {
+    entries.push({ path: e.path });
+    if (e.origPath) entries.push({ path: e.origPath });
+  }
+  return entries;
+}
+
+/**
+ * The prefix EVERY `git status` in this module runs with.
+ *
+ * `--no-optional-locks` is not a micro-optimisation: a plain `git status`
+ * opportunistically refreshes the index stat cache, which means taking
+ * `.git/index.lock` and rewriting `.git/index` (measured — the index mtime moves
+ * on a plain status and does not move with this flag). These listings are called
+ * from unlocked read paths (the `/models` card polls them up to three times per
+ * tick) while the sync loop's own `git add`/`commit` holds that same lock under
+ * the commit queue, so an unlocked opportunistic WRITER is a real collision — and
+ * git's answer to a lost index.lock on `add` is exit 128, i.e. a whole tick
+ * reported as an error. The flag makes every status here read-only; nothing else
+ * about the output changes.
+ */
+const STATUS_READONLY_ARGS = ["--no-optional-locks", "status"] as const;
+
+/**
+ * Status-carrying sibling of {@link listWikiSubtreeDirty}: enumerate the dirty
+ * entries of a repo (optionally scoped to a subtree) as REPO-relative paths with
+ * their `XY` status and rename pairing intact. Best-effort — a failed
+ * `git status` degrades to an empty list, never throws.
+ *
+ * `-uall` is load-bearing exactly as it is for the sweeper: git's default
+ * (`-unormal`) collapses a wholly-untracked directory into ONE `dir/` entry
+ * whose mtime does not move when a child is edited — which would make the
+ * quiet-period filter judge a live edit by a stale directory timestamp.
+ *
+ * `--no-optional-locks` is load-bearing too: see {@link STATUS_READONLY_ARGS}.
+ *
+ * @param top       the repo toplevel (from {@link gitToplevel})
+ * @param scopeAbs  optional absolute pathspec to scope to (e.g. a wiki root
+ *                  nested inside a bigger repo); omitted ⇒ the whole repo
+ */
+export async function listDirtyEntries(
+  top: string,
+  scopeAbs?: string,
+): Promise<PorcelainStatusEntry[]> {
+  const scope = scopeAbs ? await realpath(scopeAbs).catch(() => scopeAbs) : undefined;
+  const args = [...STATUS_READONLY_ARGS, "--porcelain", "-z", "-uall"];
+  if (scope) args.push("--", scope);
+  const r = await git(top, args, { raw: true });
+  if (r.code !== 0) {
+    log.warn("Dirty listing: git status failed in {top}: {error}", { top, error: r.stderr });
+    return [];
+  }
+  return parsePorcelainZWithStatus(r.stdout);
 }
 
 /**
@@ -449,7 +656,11 @@ export async function listWikiSubtreeDirty(
   // the set up by page relPath, so those 30 pages would come back neither
   // git-dated NOR dirty and trip the index build's coverage warn. The sweeper
   // stages either spelling equally well, so this only ever makes callers more precise.
-  const r = await git(top, ["status", "--porcelain", "-z", "-uall", "--", canonicalWiki], true);
+  const r = await git(
+    top,
+    [...STATUS_READONLY_ARGS, "--porcelain", "-z", "-uall", "--", canonicalWiki],
+    { raw: true },
+  );
   if (r.code !== 0) {
     log.warn("Wiki sweep: git status failed in {top}: {error}", { top, error: r.stderr });
     return { dirty: [], deletions: [] };

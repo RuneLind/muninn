@@ -173,6 +173,36 @@ export async function renderModelsPage(): Promise<string> {
     .lc-reason { font-size: 10px; color: var(--text-faint); margin-top: 2px; }
     .lc-reason.bad { color: var(--status-error); }
 
+    /* --- Repo sync card ------------------------------------------------------
+       "Behind 0 · dirty 0 · not blocked" is the whole question this card exists
+       to answer: do I have everything from both machines? The remote-seen age is
+       beside it because that answer is only as fresh as the last fetch. */
+    .sync-state { font-size: 12px; font-weight: 600; flex-shrink: 0; }
+    .sync-state.ok { color: var(--status-success); }
+    .sync-state.warn { color: var(--status-warning); }
+    .sync-state.bad { color: var(--status-error); }
+    /* Never-synced is NOT healthy — it is "no evidence yet", so it must not
+       borrow the green that means "in sync with both machines". */
+    .sync-state.neutral { color: var(--text-dim); }
+    .sync-warn { font-size: 11px; color: var(--status-warning); margin-top: 2px; }
+    /* Head actions sit in the head's own flex row rather than a floated span:
+       a float escapes the head box and overlapped the sub-line at narrow widths. */
+    .lc-head.lc-head-actions { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+    .lc-head.lc-head-actions .lc-head-text { min-width: 0; }
+    .sync-counts { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--text-dim); }
+    .sync-counts .hot { color: var(--status-warning); }
+    .btn-sync {
+      background: var(--bg-surface); border: 1px solid var(--border-primary); color: var(--text-secondary);
+      font-size: 11px; padding: 4px 10px; border-radius: 6px; cursor: pointer; flex-shrink: 0;
+    }
+    .btn-sync:hover { border-color: var(--accent); color: var(--text-primary); }
+    .btn-sync:disabled { opacity: 0.5; cursor: default; }
+    .sync-head-actions { display: flex; gap: 8px; align-items: center; }
+    .sync-out {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; color: var(--text-dim);
+      white-space: pre-wrap; margin: 2px 12px 8px; line-height: 1.5;
+    }
+
     /* --- Pipeline jobs list card ------------------------------------------- */
     .pl-card { background: var(--bg-panel); border: 1px solid var(--border-primary); border-radius: 12px; overflow-x: auto; }
     .pl-head, .pl-row {
@@ -238,6 +268,23 @@ export async function renderModelsPage(): Promise<string> {
           <div class="lc-sub">Which muninn instance this is. Muninn runs on more than one host against the same wikis — the profile is env-only, so it is shown rather than implied.</div>
         </div>
         <div class="lc-body" id="machineBody"><div class="empty-msg">Loading…</div></div>
+      </div>
+    </div>
+
+    <div class="section" id="syncSection" hidden>
+      <div class="list-card">
+        <div class="lc-head lc-head-actions">
+          <div class="lc-head-text">
+            <h3>Repo sync</h3>
+            <div class="lc-sub">Shared repos converge only through GitHub. Behind 0 · dirty 0 · not blocked means this machine has everything from both — but only as fresh as the last fetch, so the fetch age is shown beside it.</div>
+          </div>
+          <span class="sync-head-actions">
+            <button class="btn-sync" id="syncDryBtn" title="Report what would be committed, rebased and pushed — changes nothing">Dry run</button>
+            <button class="btn-sync" id="syncAllBtn" title="Run the same endpoint the 15-minute launchd job curls">Sync all</button>
+          </span>
+        </div>
+        <div class="lc-body" id="syncBody"><div class="empty-msg">Loading…</div></div>
+        <div class="sync-out" id="syncOut" hidden></div>
       </div>
     </div>
 
@@ -753,6 +800,129 @@ export async function renderModelsPage(): Promise<string> {
         'Saved ' + changes.length + ' field(s) to ' + name + '/config.json — applies on restart.' + (anyWarning ? ' ' + anyWarning : ''));
       load();
     }
+
+    // ---- Repo sync card ---------------------------------------------------
+    // Its own fetch loop: the sync status is a git read, not part of the models
+    // overview assembly, and it must stay readable when that assembly degrades.
+    // The GET never fetches from the remote (see readRepoStatus) — only the
+    // buttons, which POST the same endpoint the launchd job curls.
+    // One age formatter for the whole dashboard (the shared timeAgo helper);
+    // only the null case is ours, since "never" is a real state here.
+    function agoLabel(ms) { return ms ? timeAgo(ms) : 'never'; }
+
+    function syncRow(r) {
+      var counts = [];
+      counts.push('<span class="' + (r.behind ? 'hot' : '') + '">behind ' + (r.behind === null ? '?' : r.behind) + '</span>');
+      counts.push('<span class="' + (r.ahead ? 'hot' : '') + '">ahead ' + (r.ahead === null ? '?' : r.ahead) + '</span>');
+      counts.push('<span class="' + (r.dirtyCount ? 'hot' : '') + '">dirty ' + r.dirtyCount + '</span>');
+      var notes = [];
+      notes.push(esc(r.branch || 'detached') + (r.upstreamFallback ? ' → ' + esc(r.upstream || '') + ' (no upstream set — fallback)' : ''));
+      // The remote TIP's commit date (how fresh the other machine's newest work
+      // is) — a different question from when we last fetched, hence two entries.
+      notes.push('remote tip ' + agoLabel(r.remoteCommitMs));
+      // How old the ahead/behind numbers are: the poll never fetches, so a
+      // "behind 0" from three hours ago must not read as "up to date now".
+      notes.push('fetched ' + agoLabel(r.lastFetchMs));
+      notes.push('last sync ' + agoLabel(r.lastRunMs));
+      if (r.consecutiveDeferrals > 1) notes.push(r.consecutiveDeferrals + ' deferrals in a row');
+      if (r.error) notes.push('last error: ' + esc(String(r.error).slice(0, 160)));
+      var warns = (r.warnings || []).map(function (w) {
+        return '<div class="sync-warn">⚠ ' + esc(w) + '</div>';
+      }).join('');
+      return '<div class="lc-row hover-wash">' +
+        '<span class="lc-wiki">' + esc(r.name) + '</span>' +
+        '<div class="lc-main">' +
+          '<div class="sync-counts">' + counts.join(' · ') + '</div>' +
+          '<div class="lc-note">' + notes.join(' · ') + '</div>' +
+          warns +
+        '</div>' +
+        '<div class="lc-right">' +
+          '<div class="sync-state ' + esc(r.tone || 'ok') + '">' + esc(r.label || r.state) + '</div>' +
+          '<div class="lc-via">' + esc(r.mode) + '</div>' +
+        '</div>' +
+        '<button class="btn-sync" data-syncrepo="' + esc(r.name) + '">Sync now</button>' +
+      '</div>';
+    }
+
+    function renderSync(data) {
+      var section = document.getElementById('syncSection');
+      var body = document.getElementById('syncBody');
+      if (!section || !body) return;
+      // No SYNC_REPOS on this instance ⇒ the card is not a feature this machine
+      // has; hide it rather than render an empty promise.
+      if (!data || !data.configured) { section.hidden = true; return; }
+      section.hidden = false;
+      var h = (data.repos || []).map(syncRow).join('');
+      var notes = (data.warnings || []).concat(data.errors || []);
+      if (notes.length) {
+        h += '<div class="lc-row"><div class="lc-main"><div class="lc-note bad">' +
+          notes.map(esc).join('<br>') + '</div></div></div>';
+      }
+      body.innerHTML = h || '<div class="empty-msg">No repos configured</div>';
+    }
+
+    async function loadSync() {
+      try {
+        var data = await fetch('/api/sync/status').then(r => r.json());
+        renderSync(data);
+      } catch (e) { /* leave the last good render */ }
+    }
+
+    function showSyncReport(report) {
+      var out = document.getElementById('syncOut');
+      if (!out) return;
+      var lines = (report.repos || []).map(function (r) {
+        var parts = [r.name + ': ' + (r.label || r.state)];
+        if (r.actions && r.actions.length) parts.push('  ' + r.actions.join('; '));
+        if (r.committed && r.committed.length) {
+          parts.push('  ' + (report.dryRun ? 'would commit' : 'committed') + ': ' + r.committed.join(', '));
+        }
+        if (r.deferredFiles && r.deferredFiles.length) {
+          parts.push('  held: ' + r.deferredFiles.map(function (d) { return d.path + ' (' + d.reason + ')'; }).join(', '));
+        }
+        return parts.join('\\n');
+      });
+      out.hidden = false;
+      out.textContent = (report.dryRun ? '[dry run] ' : '') + new Date().toLocaleTimeString() + '\\n' + lines.join('\\n');
+    }
+
+    async function runSyncPost(query, btn, busyLabel) {
+      var label = btn ? btn.textContent : '';
+      if (btn) { btn.disabled = true; btn.textContent = busyLabel || 'Syncing…'; }
+      try {
+        var res = await fetch('/api/sync/run' + query, { method: 'POST' });
+        var data = await res.json();
+        // 409 = every selected repo was already in flight (the route's
+        // single-flight answer). It carries a human-readable error field, so the
+        // existing toast branch handles it — but the report must not be
+        // rendered as if this call had done the work.
+        if (data.error) { showToast('bad', data.error); }
+        else {
+          showSyncReport(data);
+          var bad = (data.repos || []).filter(function (r) { return r.tone === 'bad'; });
+          var warn = (data.repos || []).filter(function (r) { return r.tone === 'warn'; });
+          showToast(bad.length ? 'bad' : warn.length ? 'warn' : 'ok',
+            (data.dryRun ? 'Dry run: ' : 'Sync: ') + (data.repos || []).map(function (r) { return r.name + ' ' + (r.label || r.state); }).join(' · '));
+        }
+      } catch (e) {
+        showToast('bad', 'Sync failed: ' + String(e));
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = label; }
+        loadSync();
+      }
+    }
+
+    document.getElementById('syncBody').addEventListener('click', function (e) {
+      var btn = e.target.closest('[data-syncrepo]');
+      if (!btn) return;
+      runSyncPost('?repo=' + encodeURIComponent(btn.dataset.syncrepo), btn);
+    });
+    document.getElementById('syncAllBtn').addEventListener('click', function (e) { runSyncPost('', e.target); });
+    // A dry run writes nothing, so "Syncing…" was an outright lie about what the
+    // button was doing.
+    document.getElementById('syncDryBtn').addEventListener('click', function (e) { runSyncPost('?dry-run=1', e.target, 'Checking…'); });
+    loadSync();
+    setInterval(loadSync, 60000);
 
     // Role Apply (delegated off the roles list body — re-rendered on each load()).
     document.getElementById('rolesBody').addEventListener('click', async (e) => {

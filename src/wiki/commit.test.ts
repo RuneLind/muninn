@@ -1,8 +1,16 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, writeFile, chmod, stat, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { commitWikiChange, listWikiSubtreeDirty, gitToplevel, __resetForTest } from "./commit.ts";
+import {
+  commitWikiChange,
+  listDirtyEntries,
+  listWikiSubtreeDirty,
+  gitToplevel,
+  parsePorcelainZWithStatus,
+  runGit,
+  __resetForTest,
+} from "./commit.ts";
 
 /**
  * A barrier over the async-push seam: `onPushSettled` resolves `done`, so a test
@@ -367,5 +375,214 @@ describe("commitWikiChange", () => {
     expect((await git(repo, ["status", "--porcelain"])).out).toBe("");
     const status = await git(repo, ["show", "--name-status", "--format=", "HEAD"]);
     expect(status.out).toMatch(/D\s+data\/wiki\/concepts\/Doomed\.md/);
+  });
+});
+
+/**
+ * The STATUS-CARRYING listing added for the repo-sync loop. `parsePorcelainZ`
+ * (the sweeper's flat list) is derived from this parser, so these cases also
+ * pin the sweeper's own parse.
+ */
+describe("parsePorcelainZWithStatus", () => {
+  test("keeps the XY field verbatim, including the leading-space forms", () => {
+    const out = " M concepts/A.md\0?? concepts/B.md\0 D concepts/C.md\0";
+    expect(parsePorcelainZWithStatus(out)).toEqual([
+      { path: "concepts/A.md", xy: " M" },
+      { path: "concepts/B.md", xy: "??" },
+      { path: "concepts/C.md", xy: " D" },
+    ]);
+  });
+
+  test("pairs a rename onto ONE entry (new path + origPath)", () => {
+    // git's -z rename record is `XY new\0orig\0`.
+    const out = "R  concepts/New.md\0concepts/Old.md\0 M concepts/Other.md\0";
+    expect(parsePorcelainZWithStatus(out)).toEqual([
+      { path: "concepts/New.md", xy: "R ", origPath: "concepts/Old.md" },
+      { path: "concepts/Other.md", xy: " M" },
+    ]);
+  });
+
+  test("survives unicode + spaces (the reason -z is used at all)", () => {
+    const out = "?? concepts/Claude — notes.md\0";
+    expect(parsePorcelainZWithStatus(out)).toEqual([
+      { path: "concepts/Claude — notes.md", xy: "??" },
+    ]);
+  });
+
+  test("unmerged and copy records parse", () => {
+    const out = "UU concepts/Fight.md\0C  concepts/Copy.md\0concepts/Src.md\0";
+    expect(parsePorcelainZWithStatus(out)).toEqual([
+      { path: "concepts/Fight.md", xy: "UU" },
+      { path: "concepts/Copy.md", xy: "C ", origPath: "concepts/Src.md" },
+    ]);
+  });
+
+  test("empty / trailing-NUL input yields nothing", () => {
+    expect(parsePorcelainZWithStatus("")).toEqual([]);
+    expect(parsePorcelainZWithStatus("\0")).toEqual([]);
+  });
+});
+
+describe("listDirtyEntries", () => {
+  let base: string;
+  beforeEach(async () => {
+    base = await mkdtemp(path.join(tmpdir(), "wiki-dirty-"));
+  });
+  afterEach(async () => {
+    await rm(base, { recursive: true, force: true });
+  });
+
+  test("reports repo-relative paths with status, scoped to a subtree", async () => {
+    const { repo, wikiDir } = await makeRepo(base);
+    await writeFile(path.join(wikiDir, "concepts", "Fresh.md"), "# Fresh\n");
+    await writeFile(path.join(repo, "README.md"), "root changed\n");
+
+    const top = await gitToplevel(wikiDir);
+    const scoped = await listDirtyEntries(top!, wikiDir);
+    expect(scoped).toEqual([{ path: "data/wiki/concepts/Fresh.md", xy: "??" }]);
+
+    const whole = await listDirtyEntries(top!);
+    expect(whole.map((e) => e.path).sort()).toEqual([
+      "README.md",
+      "data/wiki/concepts/Fresh.md",
+    ]);
+    expect(whole.find((e) => e.path === "README.md")!.xy).toBe(" M");
+  });
+
+  test("-uall lists the FILES inside a wholly-untracked directory, not the directory", async () => {
+    // Load-bearing: a `dir/` entry's mtime does not move when a child is edited,
+    // so the quiet-period filter would judge a live edit by a stale timestamp.
+    const { wikiDir } = await makeRepo(base);
+    await mkdir(path.join(wikiDir, "brandnew"), { recursive: true });
+    await writeFile(path.join(wikiDir, "brandnew", "One.md"), "# One\n");
+    await writeFile(path.join(wikiDir, "brandnew", "Two.md"), "# Two\n");
+
+    const top = await gitToplevel(wikiDir);
+    const entries = await listDirtyEntries(top!, wikiDir);
+    expect(entries.map((e) => e.path).sort()).toEqual([
+      "data/wiki/brandnew/One.md",
+      "data/wiki/brandnew/Two.md",
+    ]);
+  });
+
+  test("a staged rename comes back paired", async () => {
+    const { repo, wikiDir } = await makeRepo(base);
+    await writeFile(path.join(wikiDir, "concepts", "Old.md"), "# Old\n");
+    await git(repo, ["add", "-A"]);
+    await git(repo, ["commit", "-q", "-m", "seed"]);
+    await git(repo, ["mv", "data/wiki/concepts/Old.md", "data/wiki/concepts/New.md"]);
+
+    const top = await gitToplevel(wikiDir);
+    const entries = await listDirtyEntries(top!, wikiDir);
+    expect(entries).toEqual([
+      { path: "data/wiki/concepts/New.md", xy: "R ", origPath: "data/wiki/concepts/Old.md" },
+    ]);
+  });
+
+  test("a non-repo degrades to an empty list, never a throw", async () => {
+    const loose = await mkdtemp(path.join(base, "loose-"));
+    expect(await listDirtyEntries(loose)).toEqual([]);
+  });
+
+  test("the listing does NOT rewrite .git/index — no index.lock to collide with", async () => {
+    // A plain `git status` opportunistically refreshes the index stat cache,
+    // which means taking `.git/index.lock` and WRITING the file (measured: the
+    // index mtime moves). The sync loop's own locked `git add` runs against the
+    // same index, and the card path calls this listing up to three times per
+    // tick — an unlocked writer racing a locked one is how a whole tick dies on
+    // exit 128. `--no-optional-locks` is exactly the "read, never write" mode.
+    const { repo, wikiDir } = await makeRepo(base);
+    await writeFile(path.join(wikiDir, "concepts", "Fresh.md"), "# Fresh\n");
+    await writeFile(path.join(repo, "README.md"), "root changed\n");
+    const top = (await gitToplevel(wikiDir))!;
+    // Prime: let git see the tree once, then invalidate the stat cache so the
+    // next status genuinely WANTS to write.
+    await listDirtyEntries(top);
+    const now = new Date();
+    await utimes(path.join(repo, "README.md"), now, now);
+    await utimes(path.join(wikiDir, "concepts", "Fresh.md"), now, now);
+
+    const indexFile = path.join(repo, ".git", "index");
+    const before = (await stat(indexFile)).mtimeMs;
+    await listDirtyEntries(top);
+    await listDirtyEntries(top, wikiDir);
+    await listWikiSubtreeDirty(top, wikiDir);
+    expect((await stat(indexFile)).mtimeMs).toBe(before);
+  });
+});
+
+describe("runGit timeout", () => {
+  test("kills the child and reports a synthetic failure", async () => {
+    const base = await mkdtemp(path.join(tmpdir(), "wiki-timeout-"));
+    try {
+      const { repo } = await makeRepo(base);
+      // A shell alias is the deterministic offline stand-in for a hung network
+      // verb (a real unreachable remote is neither fast nor reliable in a test).
+      const res = await runGit(repo, ["-c", "alias.hang=!sleep 30", "hang"], {
+        timeoutMs: 200,
+      });
+      expect(res.code).toBe(-1);
+      expect(res.stderr).toContain("timed out after 200ms");
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  test("a timed-out network verb takes its GRANDCHILD with it", async () => {
+    // Killing only the git pid leaves the transport (ssh, a credential helper)
+    // running: it inherited the pipes and the connection, so a hung push's ssh
+    // survives every 15-minute tick and they accumulate. Measured before the
+    // fix: the fake-ssh pid was still alive 700 ms after the kill.
+    const base = await mkdtemp(path.join(tmpdir(), "wiki-grandchild-"));
+    try {
+      const { repo } = await makeRepo(base);
+      await git(repo, ["remote", "add", "origin", "ssh://example.invalid/x.git"]);
+      const pidFile = path.join(base, "ssh.pid");
+      const fakeSsh = path.join(base, "fake-ssh");
+      await writeFile(fakeSsh, `#!/bin/sh\necho $$ > ${JSON.stringify(pidFile)}\nsleep 60\n`);
+      await chmod(fakeSsh, 0o755);
+      const saved = process.env.GIT_SSH_COMMAND;
+      process.env.GIT_SSH_COMMAND = fakeSsh;
+      try {
+        const res = await runGit(repo, ["push", "origin", "main"], { timeoutMs: 1500 });
+        expect(res.code).toBe(-1);
+        const pid = Number((await Bun.file(pidFile).text().catch(() => "0")).trim());
+        expect(pid).toBeGreaterThan(0); // the grandchild really did start
+        // Give the signal a moment to land, then assert the pid is gone.
+        await Bun.sleep(400);
+        let alive = false;
+        try {
+          process.kill(pid, 0);
+          alive = true;
+        } catch {
+          alive = false;
+        }
+        if (alive) {
+          try {
+            process.kill(pid, 9);
+          } catch {
+            /* best effort cleanup */
+          }
+        }
+        expect(alive).toBe(false);
+      } finally {
+        if (saved === undefined) delete process.env.GIT_SSH_COMMAND;
+        else process.env.GIT_SSH_COMMAND = saved;
+      }
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  test("an untimed call is unaffected (local verbs stay untimed by design)", async () => {
+    const base = await mkdtemp(path.join(tmpdir(), "wiki-untimed-"));
+    try {
+      const { repo } = await makeRepo(base);
+      const res = await runGit(repo, ["rev-parse", "--abbrev-ref", "HEAD"]);
+      expect(res.code).toBe(0);
+      expect(res.stdout).toBe("main");
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
   });
 });

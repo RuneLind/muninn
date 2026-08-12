@@ -79,7 +79,7 @@ Turns one wiki page into a pasteable post — the reader's **📤 Share** breadc
 
 ## Write queue (`queue.ts`)
 
-Per-wiki write queue, realpath-keyed on the wiki ROOT. `log.md` is wiki-GLOBAL, so every read-modify-writer of it (gardener apply, fact-check append/integrate, `writeWikiPage`) must serialize on this one chain. Rules for joining: the queued section must span read→CAS→write→log.md, and the commit tail must run OUTSIDE the queue (push is dispatched un-awaited with no timeout — an unreachable origin would otherwise park every writer). Full rationale: `src/gardener/CLAUDE.md`.
+Per-wiki write queue, realpath-keyed on the wiki ROOT. `log.md` is wiki-GLOBAL, so every read-modify-writer of it (gardener apply, fact-check append/integrate, `writeWikiPage`) must serialize on this one chain. Rules for joining: the queued section must span read→CAS→write→log.md, and the commit tail must run OUTSIDE the queue (push is dispatched un-awaited and bounded only by `GIT_NETWORK_TIMEOUT_MS` (60s) — an unreachable origin would otherwise park every writer for that minute). Full rationale: `src/gardener/CLAUDE.md`.
 
 ## Readonly instances (`readonly.ts`, `MUNINN_WIKI_READONLY`)
 
@@ -113,6 +113,54 @@ Which instance is which is readable on `/models` (the **Machine** card: hostname
 Three accuracy rules the card follows, each closing a way it could lie: the readonly row reads `isWikiReadonly()` — the SAME function the seams enforce with, never the env one level below it; a registry that THREW renders as **unknown**, not `none` (`machine.wikisKnown`, detail in `errors[]`), since "no wikis" makes a readonly instance look harmless; and `machine.bots` carries `{name, polling}` rather than bare names, because `discoverAllBots` lists every folder while the process only starts the token-carrying ones — typically none of them on the mini. The payload publishes no wiki `root` (absolute on-disk paths on a reader-facing API, rendered nowhere).
 
 **Test hermeticity:** the mini's `.env` carries the flag, and Bun auto-loads `.env` for `bun test` too — 45 pre-existing wiki/gardener write tests failed there because the seams read it through their default. `bunfig.toml`'s `[test] preload` runs `src/test/preload.ts`, which clears `MUNINN_WIKI_READONLY` for tests only. The flag's own tests never relied on the env (they drive `__setWikiReadonlyForTest`), so nothing is lost. **Run the suite from the repo root on a flag-bearing host:** that preload path is resolved against the CWD (not against `bunfig.toml`) and an unresolvable bunfig preload is ignored silently, so `cd src/wiki && bun test ./page-write.test.ts` reintroduces the exact 9 failures the preload exists to prevent — from a subdirectory, pass it yourself (`bun test --preload ../test/preload.ts …`).
+
+## Repo sync loop (`src/sync/`, `SYNC_REPOS`, `POST /api/sync/run`)
+
+Two machines (laptop + Mac mini) edit the same repos — mimir, huginn-jarvis (a wiki
+nested in a bigger repo), the skills repo, muninn itself — and converge ONLY through
+GitHub. The loop is one endpoint driven by two triggers: a 15-minute launchd `curl`
+and the `/models` **Repo sync** card's Sync now / Sync all buttons.
+
+**The loop's own contract — locking, deferral semantics, the quiet period, the
+non-obvious git rules — lives in `src/sync/CLAUDE.md`, stated once.** Config surface
++ mode semantics: the `SYNC_REPOS` row in the repo `CLAUDE.md`. Route contract: the
+`sync-routes.ts` row in `src/dashboard/CLAUDE.md`. What matters from the WIKI side:
+
+- **It joins this directory's two queues, in a pinned order** — the commit queue
+  (`runExclusiveQueued`, now exported from `commit.ts`) FIRST, the per-wiki write
+  queue (`runWikiWriteExclusive`) SECOND — for a short, entirely local section
+  (status → path-scoped add/commit → rebase). Network I/O is outside both, so a hung
+  push can park the sync but never a page write. The deadlock invariant that makes
+  that order safe is the one stated in `queue.ts` + `src/gardener/CLAUDE.md`: every
+  current writer keeps its commit tail OUTSIDE its write section. A `plain`-mode
+  entry over a repo CONTAINING a registered wiki takes that wiki's write lock too —
+  its rebase rewrites the wiki's working tree.
+- **Git timeouts are network-verb only**, at `GIT_NETWORK_TIMEOUT_MS` (60s), and a
+  timed call runs in its own process group so the kill reaches the transport. Local
+  verbs stay untimed deliberately — a killed `add`/`commit` leaves `.git/index.lock`
+  behind, which the sync's own pre-flight escalates to a human.
+- **Every `git status` in `commit.ts` runs `--no-optional-locks`** — a plain status
+  opportunistically rewrites `.git/index` (measured), i.e. takes `index.lock`, from
+  unlocked read paths that race the loop's own locked `git add`.
+- **It commits wiki pages behind a 5-minute quiet period**, with the deletion-hold
+  and rename-pair rules, over `listDirtyEntries`/`parsePorcelainZWithStatus`
+  (`--porcelain -z -uall`, both flags load-bearing for the same reasons the sweeper
+  documents). The denylist is UNTRACKED-only: a tracked denied path stays dirty and
+  would refuse the rebase every tick.
+- **Post-sync it refreshes the reader cache** (`getWikiIndex({root, refresh: true})`)
+  for a wiki whose HEAD moved — including a head that moved during the push retry's
+  second rebase — else the 5-minute TTL keeps a pulled page invisible. Then a
+  CONDITIONAL, silent huginn reindex through the SHARED `buildReindexResponse` +
+  `postCollectionUpdate` (`src/wiki/reindex.ts`), so huginn's CAS 409 reads as
+  `already-running` rather than a failure.
+- **Sweeper subsumption:** `checkWikiCommitter` stands down for a repo a `wiki`-mode
+  entry covers — but only when the ledger shows a sync run within ~26h
+  (`syncSubsumesSweeper`). Configuration alone used to stand it down forever, which
+  is the 2026-07-23 page-loss shape with a new cause. Marked `ok`, not `skipped`.
+- **`log.md merge=union`:** mimir declares it and a fixture test asserts both
+  machines' entries survive a rebase. A wiki that does NOT declare it gets a standing
+  card warning (`git check-attr merge -- <wiki>/log.md`, memoized per repo) — the
+  conflict it prevents is one whose correct resolution is always "keep both".
 
 ## Auto-commit (`commit.ts`, `wikiAutoCommit`)
 

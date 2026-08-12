@@ -155,7 +155,7 @@ import { listCollections } from "../../summaries/list-collections.ts";
 import {
   buildReindexResponse,
   buildReindexStatusResponse,
-  type PostOutcome,
+  postCollectionUpdate,
   type StatusOutcome,
 } from "../../wiki/reindex.ts";
 import {
@@ -870,32 +870,6 @@ async function fetchCollectionPatterns(
     });
   }
   return out;
-}
-
-/**
- * POST huginn's `/api/collections/<c>/update` for one collection, normalizing the
- * outcome for the pure reindex assembler. huginn's CAS 409 (a rebuild — nightly
- * job or a prior trigger — already in flight) maps to `conflict` (⇒ the honest
- * `already-running` state), not an error. An unreachable huginn / any other status
- * maps to `error`. Never throws.
- */
-async function postCollectionUpdate(
-  knowledgeApiUrl: string,
-  collection: string,
-): Promise<PostOutcome> {
-  try {
-    await fetchKnowledgeApi(
-      knowledgeApiUrl,
-      `/api/collections/${encodeURIComponent(collection)}/update`,
-      { method: "POST", timeoutMs: 10_000 },
-    );
-    return { kind: "ok" };
-  } catch (err) {
-    if (err instanceof KnowledgeApiError && err.upstreamStatus === 409) {
-      return { kind: "conflict" };
-    }
-    return { kind: "error", error: err instanceof Error ? err.message : String(err) };
-  }
 }
 
 /**
