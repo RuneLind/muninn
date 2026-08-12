@@ -114,6 +114,14 @@ export function loadConfig() {
     // ever disagree with what the seams enforce.
     logDir: optionalEnv("LOG_DIR", "./logs"),
     knowledgeApiUrl: optionalEnv("KNOWLEDGE_API_URL", "http://localhost:8321"),
+    // The claude-usage pipeline-ledger service (launchd, port 8787 on the mini).
+    // `claudeUsageConfigured` is the EXPLICIT-set flag, not a second URL: with a
+    // default in place, "unset" is otherwise indistinguishable from "set to the
+    // default", and the /models card uses the distinction to decide whether an
+    // unreachable service is an error worth showing or simply a service this
+    // host was never meant to have.
+    claudeUsageUrl: optionalEnv("CLAUDE_USAGE_URL", "http://127.0.0.1:8787"),
+    claudeUsageConfigured: Boolean(process.env.CLAUDE_USAGE_URL),
     knowledgeViewableCollections: optionalEnv("KNOWLEDGE_VIEWABLE_COLLECTIONS", "").split(",").map(s => s.trim()).filter(Boolean),
     yggdrasilMcpUrl: optionalEnv("YGGDRASIL_MCP_URL", "http://127.0.0.1:9130"),
     tracingEnabled: optionalEnv("TRACING_ENABLED", "true") === "true",

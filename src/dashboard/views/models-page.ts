@@ -162,8 +162,14 @@ export async function renderModelsPage(): Promise<string> {
     .lc-note { font-size: 11px; color: var(--text-dim); margin-top: 1px; }
     .lc-note.bad { color: var(--status-error); }
     .lc-note.ok { color: var(--status-success); }
+    .lc-note.warn { color: var(--status-warning); }
     .lc-val { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--text-secondary); flex-shrink: 0; }
     .lc-val.none { color: var(--text-disabled); }
+    /* Tone classes for the Pipeline ledger rows — the row VALUE is the number a
+       reader scans, so the tone lands there as well as on the note. */
+    .lc-val.warn { color: var(--status-warning); }
+    .lc-val.bad { color: var(--status-error); }
+    .lc-val.ok { color: var(--status-success); }
     .role-edit { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
     .role-edit .m-select { width: auto; }
     .lc-wiki { font-size: 13px; font-weight: 600; color: var(--text-primary); width: 150px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -268,6 +274,16 @@ export async function renderModelsPage(): Promise<string> {
           <div class="lc-sub">Which muninn instance this is. Muninn runs on more than one host against the same wikis — the profile is env-only, so it is shown rather than implied.</div>
         </div>
         <div class="lc-body" id="machineBody"><div class="empty-msg">Loading…</div></div>
+      </div>
+    </div>
+
+    <div class="section" id="usageSection" hidden>
+      <div class="list-card">
+        <div class="lc-head">
+          <h3>Pipeline ledger</h3>
+          <div class="lc-sub">Headline numbers from the claude-usage aggregator (served on port 8787 of the host running muninn). Fetched server-side — this page never reaches that port from your browser, so there is no link to follow from here.</div>
+        </div>
+        <div class="lc-body" id="usageBody"><div class="empty-msg">Loading…</div></div>
       </div>
     </div>
 
@@ -861,6 +877,43 @@ export async function renderModelsPage(): Promise<string> {
       body.innerHTML = h || '<div class="empty-msg">No repos configured</div>';
     }
 
+    // ---- Pipeline ledger card (claude-usage) ------------------------------
+    // Every row is built server-side (label/value/note/tone) — this only paints.
+    var USAGE_TONE = { warning: 'warn', error: 'bad', success: 'ok' };
+
+    function renderUsage(data) {
+      var section = document.getElementById('usageSection');
+      var body = document.getElementById('usageBody');
+      if (!section || !body) return;
+      // Neither configured nor reachable ⇒ this host is not a claude-usage host.
+      // Hide rather than show every muninn install a permanent error about a
+      // service it was never meant to have.
+      if (!data || (!data.reachable && !data.configured)) { section.hidden = true; return; }
+      section.hidden = false;
+      var h = (data.rows || []).map(function (r) {
+        var tone = USAGE_TONE[r.tone] || '';
+        return '<div class="lc-row hover-wash">' +
+          '<div class="lc-main"><div class="lc-title">' + esc(r.label) + '</div>' +
+          (r.note ? '<div class="lc-note' + (tone ? ' ' + tone : '') + '">' + esc(r.note) + '</div>' : '') + '</div>' +
+          '<span class="lc-val' + (tone ? ' ' + tone : '') + '">' + esc(r.value) + '</span>' +
+        '</div>';
+      }).join('');
+      if (!data.reachable) {
+        h += '<div class="lc-row"><div class="lc-main">' +
+          '<div class="lc-title">claude-usage unreachable</div>' +
+          '<div class="lc-note bad">' + esc((data.errors || []).join(' · ') || 'no detail') + '</div>' +
+        '</div></div>';
+      }
+      body.innerHTML = h || '<div class="empty-msg">No ledger data</div>';
+    }
+
+    async function loadUsage() {
+      try {
+        var data = await fetch('/api/claude-usage/overview').then(r => r.json());
+        renderUsage(data);
+      } catch (e) { /* leave the last good render */ }
+    }
+
     async function loadSync() {
       try {
         var data = await fetch('/api/sync/status').then(r => r.json());
@@ -923,6 +976,10 @@ export async function renderModelsPage(): Promise<string> {
     document.getElementById('syncDryBtn').addEventListener('click', function (e) { runSyncPost('?dry-run=1', e.target, 'Checking…'); });
     loadSync();
     setInterval(loadSync, 60000);
+    // The ledger is rebuilt by claude-usage on its own cadence; a 5-min poll is
+    // plenty and keeps the ~170 KB upstream payload off a per-minute loop.
+    loadUsage();
+    setInterval(loadUsage, 300000);
 
     // Role Apply (delegated off the roles list body — re-rendered on each load()).
     document.getElementById('rolesBody').addEventListener('click', async (e) => {
