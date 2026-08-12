@@ -14,6 +14,9 @@ import {
   slackLengthWarning,
   shareLangChipId,
   shareTabId,
+  shareTargetOf,
+  summaryShareTarget,
+  wikiShareTarget,
   SHARE_PRESET_RETRY_ID,
   SHARE_PROMPT_TOGGLE_ID,
   SHARE_TABS,
@@ -82,6 +85,28 @@ describe("the POST body", () => {
   test("a blank extra is omitted rather than sent as an empty string", () => {
     expect(shareRequestBody(state({ extra: "   " })).extra).toBeUndefined();
     expect(shareRequestBody(state({ extra: " focus on risk " })).extra).toBe("focus on risk");
+  });
+
+  test("a TARGET replaces the identity fields — and only those", () => {
+    // The /summaries surface shares a capture document, identified by
+    // `{source, docId}`; everything the share layer itself owns (preset, lang,
+    // the two optional text fields) is unchanged.
+    const body = shareRequestBody(
+      state({
+        target: summaryShareTarget("x-article", "ai/x/Some Post.md"),
+        extra: "keep it short",
+      }),
+    );
+    expect(body).toEqual({
+      source: "x-article",
+      docId: "ai/x/Some Post.md",
+      preset: "default",
+      lang: "en",
+      extra: "keep it short",
+    });
+    // …and no trace of the wiki surface's own fields.
+    expect(body.wiki).toBeUndefined();
+    expect(body.page).toBeUndefined();
   });
 
   test("promptIsEdited is false while the preset list is still loading", () => {
@@ -322,5 +347,33 @@ describe("dismissal and conflict copy", () => {
     const s = state({ conflictExpiresAtMs: NOW + 30_000 });
     expect(shareDialogHtml(s, "", NOW)).toContain("~30s");
     expect(shareDialogHtml(s, "", NOW + 20_000)).toContain("~10s");
+  });
+});
+
+describe("share targets", () => {
+  test("the DEFAULT target is the /wiki surface, derived from wiki+page", () => {
+    // Additive seam: a state with no target must post exactly where PR B posted.
+    expect(shareTargetOf(state())).toEqual(wikiShareTarget("mimir", "Wiki gardener"));
+    expect(shareTargetOf(state()).endpoint).toBe("/api/wiki/share");
+    expect(shareTargetOf(state()).presetsUrl).toBe("/api/wiki/share/presets?wiki=mimir");
+  });
+
+  test("the bare /wiki (no registered name) asks for the preset list unqualified", () => {
+    expect(shareTargetOf(state({ wiki: "" })).presetsUrl).toBe("/api/wiki/share/presets");
+  });
+
+  test("a wiki name is URL-encoded into the preset query", () => {
+    expect(wikiShareTarget("my wiki/x", "p").presetsUrl).toBe(
+      "/api/wiki/share/presets?wiki=my%20wiki%2Fx",
+    );
+  });
+
+  test("an explicit target wins over wiki+page", () => {
+    const target = summaryShareTarget("youtube", "ai/Some Title.md");
+    expect(shareTargetOf(state({ target }))).toBe(target);
+    expect(target.endpoint).toBe("/api/summaries/share");
+    // No `?wiki=` — the summaries preset list is resolved for the summarizer
+    // bot, which is a server-side role, not a client-supplied one.
+    expect(target.presetsUrl).toBe("/api/summaries/share/presets");
   });
 });

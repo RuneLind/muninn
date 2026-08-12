@@ -103,15 +103,64 @@ export interface SharePresetOption {
   content: string;
 }
 
+/**
+ * WHERE a share posts, and which identity fields it carries.
+ *
+ * The dialog was built for one surface (`POST /api/wiki/share`, identified by
+ * `{wiki, page}`); `/summaries` shares a capture document, identified by
+ * `{source, docId}` against a different endpoint. Rather than teach the dialog
+ * about two surfaces, the surface tells the dialog: a target names the two URLs
+ * and the identity fields, and everything else — presets, language, the prompt
+ * panel, the caps, the three tabs — is shared verbatim.
+ *
+ * Additive on purpose: the wiki call sites pass no target and go through
+ * {@link wikiShareTarget}, which reproduces exactly the URLs and body fields
+ * they used before.
+ */
+export interface ShareTarget {
+  /** The POST endpoint the generate call streams from. */
+  endpoint: string;
+  /** The preset-list URL (already carrying whatever query it needs). */
+  presetsUrl: string;
+  /** Merged into the POST body — the surface's identity of "what to share". */
+  fields: Record<string, string>;
+}
+
+/** The /wiki surface's target. Byte-identical to what PR B hard-coded. */
+export function wikiShareTarget(wiki: string, page: string): ShareTarget {
+  return {
+    endpoint: "/api/wiki/share",
+    presetsUrl: "/api/wiki/share/presets" + (wiki ? "?wiki=" + encodeURIComponent(wiki) : ""),
+    fields: { wiki, page },
+  };
+}
+
+/** The /summaries surface's target. `source` + `docId`, never a collection —
+ *  which collection backs a source is a server-side registration detail, and
+ *  the two names diverge (`x-article` → `x-articles`). */
+export function summaryShareTarget(source: string, docId: string): ShareTarget {
+  return {
+    endpoint: "/api/summaries/share",
+    presetsUrl: "/api/summaries/share/presets",
+    fields: { source, docId },
+  };
+}
+
 /** Everything the dialog renders from. Held by the DOM module, never on the DOM
  *  itself — the panel's innerHTML is replaced wholesale on every change. */
 export interface ShareDialogState {
-  /** Registered wiki name (`?wiki=`), or "" for the default wiki. */
+  /** Registered wiki name (`?wiki=`), or "" for the default wiki. Empty on any
+   *  non-wiki surface — read only to build the DEFAULT target. */
   wiki: string;
-  /** The page NAME — what `index.resolve(page)` takes, never a relPath. */
+  /** The page NAME — what `index.resolve(page)` takes, never a relPath. On a
+   *  non-wiki surface it is that surface's document identity (the doc id), used
+   *  for the header default and the navigate-away comparison. */
   page: string;
   /** Display title for the header. */
   title: string;
+  /** Which surface this share posts to. Absent ⇒ the /wiki surface, i.e.
+   *  {@link wikiShareTarget} over `wiki`/`page` — the PR B behaviour. */
+  target?: ShareTarget;
   /** `null` while the preset fetch is in flight. */
   presets: SharePresetOption[] | null;
   presetId: string;
@@ -164,12 +213,17 @@ export function promptIsEdited(state: ShareDialogState): boolean {
   return state.prompt.trim() !== preset.content.trim();
 }
 
-/** The POST body for `/api/wiki/share`. */
+/** The target this state posts to — its own, or the /wiki default. */
+export function shareTargetOf(state: ShareDialogState): ShareTarget {
+  return state.target ?? wikiShareTarget(state.wiki, state.page);
+}
+
+/** The POST body for the state's {@link ShareTarget}: the surface's identity
+ *  fields, then the four the share layer itself owns. */
 export function shareRequestBody(state: ShareDialogState): Record<string, unknown> {
   const extra = state.extra.trim();
   return {
-    wiki: state.wiki,
-    page: state.page,
+    ...shareTargetOf(state).fields,
     preset: state.presetId,
     lang: state.lang,
     ...(promptIsEdited(state) ? { promptOverride: state.prompt } : {}),

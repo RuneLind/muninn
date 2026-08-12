@@ -118,6 +118,9 @@ export function docPanelStyles(animationName = "slideIn"): string {
       white-space: nowrap;
     }
     .doc-panel-followup:hover { border-color: var(--accent); text-decoration: none; }
+    /* The opt-in 📤 Share action is a <button> in the same header slot — a bare
+       button inherits neither the page font nor a transparent background. */
+    button.doc-panel-followup { background: none; font-family: inherit; cursor: pointer; }
     .doc-panel-body {
       flex: 1;
       overflow-y: auto;
@@ -130,6 +133,11 @@ export function docPanelStyles(animationName = "slideIn"): string {
   `;
 }
 
+/** The 📤 Share button's id — shared by the render, the click handler and the
+ *  dialog's click-away `openerIds` (an opener missing from that list dismisses
+ *  the dialog its own click just opened). */
+export const DOC_PANEL_SHARE_BTN_ID = "docPanelShare";
+
 /**
  * HTML markup for the slide-in doc panel overlay.
  *
@@ -140,14 +148,23 @@ export function docPanelStyles(animationName = "slideIn"): string {
  * Search), so they call `docPanelHtml()` with no args and get byte-identical
  * markup. The opener JS (`openDocPanel` / `openSummaryDoc`) sets the href from the
  * current doc title, guarded by `if (el)` so it's a no-op when the flag is off.
+ *
+ * `share` is the SAME opt-in shape, for the 📤 Share button: it needs the page to
+ * have mounted the share-dialog bundle (`shareDialogClientScript`) AND its CSS,
+ * which only `/summaries` does. `/search`, `/research` and chat render this panel
+ * too and pass neither flag, so their markup stays byte-identical.
  */
-export function docPanelHtml({ askFollowUp = false }: { askFollowUp?: boolean } = {}): string {
+export function docPanelHtml(
+  { askFollowUp = false, share = false }: { askFollowUp?: boolean; share?: boolean } = {},
+): string {
   return `
   <div class="doc-overlay" id="docOverlay" onclick="if(event.target===this)closeDocPanel()">
     <div class="doc-panel">
       <div class="doc-panel-header">
         <button class="doc-panel-close" onclick="closeDocPanel()">&larr; Back</button>
-        <span class="doc-panel-title" id="docPanelTitle"></span>${askFollowUp ? `
+        <span class="doc-panel-title" id="docPanelTitle"></span>${share ? `
+        <button class="doc-panel-followup" id="${DOC_PANEL_SHARE_BTN_ID}" type="button"
+          title="Turn this summary into a post you can paste into Slack or an email">&#128228; Share</button>` : ""}${askFollowUp ? `
         <a class="doc-panel-followup" id="docPanelFollowUp" href="/research">Ask a follow-up &rarr;</a>` : ""}
         <div class="doc-panel-links" id="docPanelLinks"></div>
       </div>

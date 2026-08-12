@@ -13,7 +13,12 @@
  * each doc carries its `source` so opens/similar/original-link route to the right
  * collection (SOURCES[source].apiBase). */
 
-import { docPanelStyles } from "./doc-panel.ts";
+import { docPanelStyles, DOC_PANEL_SHARE_BTN_ID } from "./doc-panel.ts";
+import { summaryShareTarget } from "./wiki-share-dialog.ts";
+
+/** The /summaries share target's two URLs, interpolated into the page script —
+ *  the builder is the single authority the route tests also read. */
+const SUMMARY_SHARE_TARGET = summaryShareTarget("", "");
 
 export function sumArticleLibraryStyles(): string {
   return `
@@ -341,14 +346,58 @@ export function sumArticleLibraryScript(): string {
 
     function closeDocPanel() {
       _docRequestId++;  // invalidate any in-flight openSummaryDoc/loadDocSimilar
+      // The share dialog opens OVER this panel and its state is module-held —
+      // leaving it up over a closed panel would name a document nothing is
+      // showing, and Generate would still summarize it. Same seam (and same
+      // reason) as the reader's closeShareDialogOnNavigate.
+      if (typeof closeShareDialog === 'function') closeShareDialog();
       document.getElementById('docOverlay').classList.remove('visible');
       document.body.style.overflow = '';
     }
     document.addEventListener('keydown', function(e) {
-      if (e.key === 'Escape' && document.getElementById('docOverlay').classList.contains('visible')) {
+      if (e.key !== 'Escape') return;
+      // The share dialog handles its OWN Escape (cancel a run, then close), and
+      // both listeners sit on the document — without this guard one Escape closed
+      // the dialog AND the panel behind it, throwing away an un-copied post.
+      if (document.getElementById('wikiShare')) return;
+      if (document.getElementById('docOverlay').classList.contains('visible')) {
         closeDocPanel();
       }
     });
+
+    // --- 📤 Share (opt-in: only pages rendering docPanelHtml({share:true}) and
+    // mounting the share-dialog bundle have the button and the global). The
+    // panel is retargeted in place by the similar/category links, so the doc the
+    // button acts on is held here rather than read off the DOM.
+    var _shareDoc = null;
+    (function() {
+      var btn = document.getElementById('${DOC_PANEL_SHARE_BTN_ID}');
+      if (!btn) return;
+      btn.addEventListener('click', function() {
+        // Resolved at CLICK time, not at wire time: the bundle publishing this
+        // global is a separate <script>, and depending on tag order for a
+        // silent no-op is the kind of thing that survives review.
+        if (!_shareDoc || typeof openShareDialog !== 'function') return;
+        openShareDialog({
+          // wiki/page are the /wiki surface's identity; this surface posts
+          // {source, docId} to /api/summaries/share via the target below. page
+          // still carries the doc id, so the dialog's own re-target comparison
+          // keeps working.
+          wiki: '',
+          page: _shareDoc.docId,
+          title: _shareDoc.title,
+          openerIds: ['${DOC_PANEL_SHARE_BTN_ID}'],
+          // URLs come from the shared summaryShareTarget builder (one
+          // authority for both halves of the wire); only the two field NAMES are
+          // spelled here, and they are pinned by the route tests.
+          target: {
+            endpoint: ${JSON.stringify(SUMMARY_SHARE_TARGET.endpoint)},
+            presetsUrl: ${JSON.stringify(SUMMARY_SHARE_TARGET.presetsUrl)},
+            fields: { source: _shareDoc.source, docId: _shareDoc.docId },
+          },
+        });
+      });
+    })();
 
     // --- Article Library ---
     var allDocuments = [];
@@ -465,6 +514,13 @@ export function sumArticleLibraryScript(): string {
       // continuations will see _docRequestId !== myRequest and bail before
       // overwriting the new panel's #sumArticleMain / #docSimilarPanel.
       var myRequest = ++_docRequestId;
+
+      // The share dialog acts on the doc the panel is showing. Retargeting the
+      // panel (a similar/category link) must therefore either re-point it or
+      // close it — an open dialog naming the previous article would summarize a
+      // document the reader has navigated away from.
+      _shareDoc = { docId: docId, source: source, title: docTitle(docId) };
+      if (typeof closeShareDialog === 'function') closeShareDialog();
 
       var overlay = document.getElementById('docOverlay');
       var titleEl = document.getElementById('docPanelTitle');

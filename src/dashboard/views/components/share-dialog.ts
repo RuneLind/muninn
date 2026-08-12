@@ -29,6 +29,7 @@ import {
   shareConflictCopy,
   shareDialogHtml,
   shareRequestBody,
+  shareTargetOf,
   shouldCloseShareDialog,
   promptIsEdited,
   shareBlockingError,
@@ -48,19 +49,27 @@ import {
   type ShareDialogState,
   type SharePresetOption,
   type ShareTab,
+  type ShareTarget,
 } from "./wiki-share-dialog.ts";
 
 /** What a caller must know to share something. */
 export interface OpenShareOptions {
-  /** Registered wiki name; "" for the default wiki. */
+  /** Registered wiki name; "" for the default wiki. Ignored when `target` is set. */
   wiki: string;
-  /** The page NAME (`index.resolve` input) — never a relPath. */
+  /** The page NAME (`index.resolve` input) — never a relPath. On a non-wiki
+   *  surface, that surface's document identity (used for the header default and
+   *  {@link closeShareDialogOnNavigate}); the POST identity is `target.fields`. */
   page: string;
   /** Header title; defaults to the page name. */
   title?: string;
   /** Ids of the elements that OPEN this dialog, so their click isn't a
    *  click-away. The breadcrumb button by default. */
   openerIds?: string[];
+  /**
+   * Which surface to post to. Omit for /wiki (the default target reproduces PR
+   * B's URLs and body exactly); `/summaries` passes `summaryShareTarget(...)`.
+   */
+  target?: ShareTarget;
 }
 
 let state: ShareDialogState | null = null;
@@ -111,6 +120,7 @@ export function openShareDialog(opts: OpenShareOptions): void {
     streamed: "",
     result: null,
     tab: "slack",
+    ...(opts.target ? { target: opts.target } : {}),
   };
   render();
   void loadPresets();
@@ -196,7 +206,7 @@ function rememberLang(lang: ShareLang): void {
 async function loadPresets(): Promise<void> {
   const target = state;
   if (!target) return;
-  const url = "/api/wiki/share/presets" + (target.wiki ? "?wiki=" + encodeURIComponent(target.wiki) : "");
+  const url = shareTargetOf(target).presetsUrl;
   let presets: SharePresetOption[] = [];
   try {
     const res = await fetch(url, { headers: { Accept: "application/json" } });
@@ -654,7 +664,7 @@ async function generate(): Promise<void> {
 
   let res: Response;
   try {
-    res = await fetch("/api/wiki/share", {
+    res = await fetch(shareTargetOf(target).endpoint, {
       method: "POST",
       headers: { "content-type": "application/json", Accept: "text/event-stream" },
       body: JSON.stringify(shareRequestBody(target)),
