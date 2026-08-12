@@ -271,6 +271,8 @@ function render(): void {
     p.setAttribute("role", "dialog");
     p.setAttribute("aria-modal", "true");
     p.setAttribute("aria-label", "Share this page");
+    // Focusable only programmatically — {@link rehomeFocus}'s floor.
+    p.setAttribute("tabindex", "-1");
     document.body.appendChild(p);
   }
   const scrollTop = p.scrollTop;
@@ -285,6 +287,37 @@ function render(): void {
   detachPreviewLinks(p);
   restoreFocus(focus);
   applyAutofocus(p, focus);
+  rehomeFocus(p);
+}
+
+/**
+ * Last line of defence: never leave focus stranded outside an `aria-modal` panel.
+ *
+ * `restoreFocus` can only re-find a control that still exists AND can still take
+ * focus, and several controls here retire themselves on the very click that
+ * activates them: "Reset to preset" exists only while the prompt is edited and
+ * un-edits it (pinned in `e2e/wiki-share.spec.ts`), and Generate renders
+ * `disabled` for the run it just started, so `focus()` on the re-found node is a
+ * no-op. Autofocus has long retired by then, so focus falls to `<body>`: behind
+ * the scrim, outside a panel claiming `aria-modal`, and invisible until the reader
+ * presses Tab (which `trapTab` then answers by jumping to the top of the panel).
+ *
+ * Deliberately narrow — it fires ONLY when nothing meaningful holds focus (no
+ * active element, `<body>`, or a node this paint detached). Focus the reader
+ * placed anywhere real is never taken.
+ */
+function rehomeFocus(p: HTMLElement): void {
+  const active = document.activeElement as HTMLElement | null;
+  const stranded = !active || active === document.body || !active.isConnected;
+  if (!stranded) return;
+  const el = p.querySelector(
+    "button:not([disabled]), select:not([disabled]), textarea:not([disabled]), " +
+      "input:not([disabled]), summary",
+  ) as HTMLElement | null;
+  // The panel carries `tabindex="-1"` so it can hold focus itself when it offers
+  // no focusable control at all (the loading paint of a dialog whose ✕ is the
+  // only button is already covered; this is the empty-markup floor).
+  (el ?? p).focus({ preventScroll: true });
 }
 
 /**
@@ -330,7 +363,10 @@ function detachPreviewLinks(p: HTMLElement): void {
 function applyAutofocus(p: HTMLElement, focus: FieldFocus | null): void {
   if (!autofocusPending) return;
   const readerHasFocus = !!focus && focus.id !== autofocusedId;
-  const preferred = document.getElementById(SHARE_PRESET_ID) as HTMLElement | null;
+  // Scoped to the panel, like the fallback query two lines down: this function's
+  // whole job is to place focus INSIDE `p`, and a bare document lookup would
+  // happily hand it an id-alike belonging to the page behind the scrim.
+  const preferred = p.querySelector("#" + SHARE_PRESET_ID) as HTMLElement | null;
   if (preferred) {
     autofocusPending = false;
     autofocusedId = "";
@@ -365,10 +401,10 @@ function wire(): void {
   document.addEventListener("input", onInput);
   document.addEventListener("change", onChange);
   document.addEventListener("keydown", onKeydown);
-  // `toggle` does NOT bubble, so the disclosure's open state has to be caught in
-  // the capture phase (the `/wiki/gardener` inspector precedent). It is held on
-  // state because the panel re-renders whenever the "· edited" badge flips —
-  // i.e. on the first keystroke in the very textarea the reader just opened.
+  // `toggle` does NOT bubble, so it has to be caught in the capture phase (the
+  // `/wiki/gardener` inspector precedent). It is only a BACKSTOP now — see
+  // {@link notePromptToggle} for why the open state cannot be learned from this
+  // event, and what does learn it.
   document.addEventListener("toggle", onToggle, true);
 }
 
@@ -377,6 +413,52 @@ function onToggle(e: Event): void {
   const el = e.target as HTMLDetailsElement | null;
   if (!el || el.id !== SHARE_PROMPT_PANEL_ID) return;
   state.promptOpen = el.open;
+}
+
+/**
+ * Record the prompt disclosure's open state **synchronously, from the activation**.
+ *
+ * `toggle` is queued as a task, not fired inline, and the panel's whole innerHTML
+ * is replaced on every state change — so the ordering is a live race, not a
+ * theoretical one:
+ *
+ *   summary click → DOM `open = true`, toggle task QUEUED
+ *   → any repaint (the first keystroke flips the "· edited" badge) paints
+ *     `<details>` CLOSED from the still-stale `promptOpen`, detaching the node
+ *   → the queued toggle then fires on a node that is no longer in the document,
+ *     so it never reaches the document-level listener and the state is wrong
+ *     FOREVER — the panel collapses under the reader's hands and stays collapsed.
+ *
+ * Measured: `e2e/wiki-share.spec.ts`'s prompt test failed ~2 of 3 full-suite runs
+ * on a cold server, and an instrumented run showed the toggle listener firing
+ * ZERO times for a click that had already opened the disclosure.
+ *
+ * So the activation itself writes the state, from the capture-phase `click` — i.e.
+ * **before** the default action toggles the element, which is why the intended
+ * value is the negation of what the DOM currently says.
+ *
+ * **The keyboard needs no second handler, and deliberately does not get one.** A
+ * summary's Enter/Space activation dispatches a SIMULATED CLICK, and the element
+ * is still un-toggled when that click is captured — measured in this browser on
+ * both keys, and pinned by the keyboard case in `e2e/wiki-share.spec.ts`. A
+ * `keydown` handler negating the same way would be redundant on that ordering and
+ * actively WRONG on any engine that toggled in the keydown default action: the
+ * simulated click would then read the already-new value and flip the state back.
+ * `toggle` stays wired as the backstop for the paths nothing here models
+ * (find-in-page auto-expansion, a programmatic `open` flip), where no repaint is
+ * racing it.
+ */
+function notePromptToggle(el: HTMLDetailsElement): void {
+  if (!state) return;
+  state.promptOpen = !el.open;
+}
+
+/** The prompt `<details>` this event is activating, or null. */
+function promptPanelFor(target: HTMLElement): HTMLDetailsElement | null {
+  const summary = target.closest("summary");
+  const details = summary?.parentElement;
+  if (!details || details.id !== SHARE_PROMPT_PANEL_ID) return null;
+  return details as HTMLDetailsElement;
 }
 
 function onClick(e: MouseEvent): void {
@@ -401,6 +483,10 @@ function onClick(e: MouseEvent): void {
       void loadPresets();
       return;
     }
+    // Pointer AND keyboard activation of the prompt disclosure — see
+    // {@link notePromptToggle}; Enter/Space on a summary arrives here too.
+    const promptPanel = promptPanelFor(target);
+    if (promptPanel) { notePromptToggle(promptPanel); return; }
     const lang = target.closest("[" + SHARE_LANG_ATTR + "]") as HTMLElement | null;
     if (lang) {
       const value = lang.getAttribute(SHARE_LANG_ATTR);

@@ -40,7 +40,9 @@ export const SHARE_PROMPT_ID = "wikiSharePrompt";
 /** The `<details>` the prompt textarea lives in — its open state is STATE-held
  *  (`promptOpen`), never left to the DOM: the panel re-renders whenever the
  *  "· edited" badge flips, which is mid-typing, and a DOM-only `open` collapses
- *  the textarea under the reader's hands on the first keystroke. */
+ *  the textarea under the reader's hands on the first keystroke. That state is
+ *  written SYNCHRONOUSLY from the activation click, not from `toggle` — see
+ *  `notePromptToggle` in `share-dialog.ts` for the race that forced it. */
 export const SHARE_PROMPT_PANEL_ID = "wikiSharePromptPanel";
 export const SHARE_EXTRA_ID = "wikiShareExtra";
 export const SHARE_GENERATE_ID = "wikiShareGen";
@@ -53,6 +55,23 @@ export const SHARE_PRESET_RETRY_ID = "wikiSharePresetRetry";
 /** `data-` hooks for the two chip rows (language, format tab). */
 export const SHARE_LANG_ATTR = "data-share-lang";
 export const SHARE_TAB_ATTR = "data-share-tab";
+/**
+ * Both chip rows carry DETERMINISTIC ids, and that is a focus contract rather
+ * than decoration: the panel's whole `innerHTML` is replaced on every change, and
+ * `captureFocus`/`restoreFocus` re-find the focused element **by id**. Id-less
+ * `<button>`s therefore could not be tracked across the swap — measured, a chip or
+ * tab click left `document.activeElement` on `<body>`, outside a panel that claims
+ * `aria-modal="true"`. The id survives the repaint because it is derived from the
+ * chip's own value, not from its position.
+ */
+export const SHARE_LANG_ID_PREFIX = "wikiShareLang-";
+export const SHARE_TAB_ID_PREFIX = "wikiShareTab-";
+export function shareLangChipId(lang: string): string {
+  return SHARE_LANG_ID_PREFIX + lang;
+}
+export function shareTabId(tab: ShareTab): string {
+  return SHARE_TAB_ID_PREFIX + tab;
+}
 
 /** The three formats v1 ships. **Telegram is deliberately absent** (product
  *  decision, 2026-08-11): there is no send action yet, and a disabled placeholder
@@ -236,6 +255,7 @@ export function shareConflictCopy(expiresAtMs: number, now: number): string {
 
 function chipRow(
   attr: string,
+  idPrefix: string,
   items: readonly { id: string; label: string }[],
   active: string,
   disabled: boolean,
@@ -244,6 +264,7 @@ function chipRow(
     .map(
       (i) =>
         `<button class="wiki-share-chip${i.id === active ? " is-active" : ""}" ` +
+        `id="${esc(idPrefix + i.id)}" ` +
         `${attr}="${esc(i.id)}"${disabled ? " disabled" : ""}>${esc(i.label)}</button>`,
     )
     .join("");
@@ -258,6 +279,7 @@ export function shareResultHtml(state: ShareDialogState, slackHtml: string): str
     SHARE_TABS.map(
       (t) =>
         `<button class="wiki-share-tab${t.id === state.tab ? " is-active" : ""}" ` +
+        `id="${esc(shareTabId(t.id))}" ` +
         `${SHARE_TAB_ATTR}="${t.id}" role="tab" aria-selected="${t.id === state.tab}">` +
         `${esc(t.label)}</button>`,
     ).join("") +
@@ -330,7 +352,7 @@ export function shareDialogHtml(state: ShareDialogState, slackHtml: string, now:
 
   const langRow =
     '<div class="wiki-share-row"><span>Language</span><div class="wiki-share-chips">' +
-    chipRow(SHARE_LANG_ATTR, SHARE_LANGS, state.lang, state.running) +
+    chipRow(SHARE_LANG_ATTR, SHARE_LANG_ID_PREFIX, SHARE_LANGS, state.lang, state.running) +
     "</div></div>";
 
   // The prompt is VISIBLE and editable, but collapsed by default: the preset is

@@ -12,12 +12,19 @@ import {
   shareResultHtml,
   shouldCloseShareDialog,
   slackLengthWarning,
+  shareLangChipId,
+  shareTabId,
   SHARE_PRESET_RETRY_ID,
   SHARE_TABS,
   type ShareDialogState,
   type SharePresetOption,
 } from "./wiki-share-dialog.ts";
-import { SLACK_PASTE_MAX, SHARE_EXTRA_MAX, SHARE_PROMPT_OVERRIDE_MAX } from "../../../share/wire.ts";
+import {
+  SHARE_LANGS,
+  SLACK_PASTE_MAX,
+  SHARE_EXTRA_MAX,
+  SHARE_PROMPT_OVERRIDE_MAX,
+} from "../../../share/wire.ts";
 
 const PRESETS: SharePresetOption[] = [
   { id: "default", label: "Default", content: "Summarize the source." },
@@ -211,6 +218,16 @@ describe("the dialog markup", () => {
     const edited = html(state({ prompt: "Mine." }));
     expect(edited).toContain("wiki-share-edited");
     expect(edited).toContain('id="wikiSharePromptReset"');
+  });
+
+  test("both chip rows carry deterministic ids — the focus contract, not decoration", () => {
+    // `captureFocus`/`restoreFocus` re-find the focused element BY ID across the
+    // wholesale innerHTML swap. Id-less chips escaped focus to `<body>`, outside a
+    // panel that claims `aria-modal="true"`.
+    const langs = html(state());
+    for (const l of SHARE_LANGS) expect(langs).toContain(`id="${shareLangChipId(l.id)}"`);
+    const tabs = shareResultHtml(state({ result: RESULT }), "");
+    for (const t of SHARE_TABS) expect(tabs).toContain(`id="${shareTabId(t.id)}"`);
   });
 
   test("the live pane streams while running and gives way to the tabs on a result", () => {

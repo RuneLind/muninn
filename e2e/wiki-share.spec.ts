@@ -209,6 +209,25 @@ test.describe("Wiki reader: share dialog", () => {
     await expect(prompt).toBeVisible();
   });
 
+  test("the disclosure survives a repaint when opened from the KEYBOARD too", async ({ page }) => {
+    // Same mechanism as above, different activation. The open state is written
+    // from the capture-phase `click` — and a summary's Enter dispatches a
+    // simulated click, still un-toggled at capture time. If that ever stops being
+    // true, `toggle` alone cannot save it: it is queued, and the repaint the first
+    // keystroke causes detaches the node before it fires, so the event never
+    // reaches the document listener at all (measured — zero toggle events for a
+    // click that had already opened the panel).
+    await openShare(page);
+    await page.locator("#wikiSharePromptPanel summary").focus();
+    await page.keyboard.press("Enter");
+    const prompt = page.locator("#wikiSharePrompt");
+    await expect(prompt).toBeVisible();
+    // Typing flips the "· edited" badge, which repaints the whole panel.
+    await prompt.fill("Write two bullets.");
+    await expect(page.locator(".wiki-share-edited")).toBeVisible();
+    await expect(prompt).toBeVisible();
+  });
+
   test("the POST body is the contract the route parses — `page` is the NAME", async ({ page }) => {
     // The stub hides this completely otherwise: a client that posted a relPath (or
     // dropped `wiki`/`preset`/`lang`) would pass every other test in this file and
@@ -356,6 +375,43 @@ test.describe("Wiki reader: share dialog", () => {
     await page.locator('[data-share-lang="nb"]').click();
     await expect(page.locator('[data-share-lang="nb"].is-active')).toBeVisible();
     expect(await page.evaluate(() => document.activeElement?.id ?? "")).not.toBe("wikiSharePreset");
+  });
+
+  test("a chip or tab click KEEPS focus on the chip across the repaint", async ({ page }) => {
+    // `captureFocus`/`restoreFocus` re-find the focused element by id, so the
+    // id-less chips the first cut shipped could not be tracked across the wholesale
+    // innerHTML swap: focus escaped to `<body>`, outside a panel that claims
+    // `aria-modal="true"` (measured). Deterministic ids make the existing focus
+    // machinery just work — no heuristic.
+    const activeId = () => page.evaluate(() => document.activeElement?.id ?? "");
+    await openShare(page);
+    await page.locator('[data-share-lang="nb"]').click();
+    expect(await activeId()).toBe("wikiShareLang-nb");
+    await generate(page);
+    await page.locator('[data-share-tab="markdown"]').click();
+    expect(await activeId()).toBe("wikiShareTab-markdown");
+  });
+
+  test("focus comes HOME when the repaint destroys the control it was on", async ({ page }) => {
+    // "Reset to preset" DELETES ITSELF: it exists only while the prompt is edited,
+    // and clicking it un-edits the prompt. So `restoreFocus` has no node to return
+    // to, and autofocus retired back on the picker paint — focus fell to `<body>`
+    // behind the scrim, outside a panel claiming `aria-modal`, and stayed there
+    // until the reader pressed Tab. Nothing repaints afterwards to rescue it,
+    // which is exactly why the re-home has to happen in the paint itself.
+    await openShare(page);
+    await page.locator("#wikiSharePromptPanel summary").click();
+    await page.locator("#wikiSharePrompt").fill("Write two bullets.");
+    const reset = page.locator("#wikiSharePromptReset");
+    await expect(reset).toBeVisible();
+    await reset.focus();
+    await reset.click();
+    await expect(reset).toHaveCount(0);
+    const inPanel = await page.evaluate(() => {
+      const el = document.activeElement;
+      return !!el && !!document.getElementById("wikiShare")?.contains(el);
+    });
+    expect(inPanel).toBe(true);
   });
 
   test("a POINTER navigation can't strand the dialog — the scrim eats the click", async ({
