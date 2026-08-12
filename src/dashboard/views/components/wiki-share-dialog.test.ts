@@ -15,6 +15,7 @@ import {
   shareLangChipId,
   shareTabId,
   SHARE_PRESET_RETRY_ID,
+  SHARE_PROMPT_TOGGLE_ID,
   SHARE_TABS,
   type ShareDialogState,
   type SharePresetOption,
@@ -220,7 +221,7 @@ describe("the dialog markup", () => {
     expect(edited).toContain('id="wikiSharePromptReset"');
   });
 
-  test("both chip rows carry deterministic ids — the focus contract, not decoration", () => {
+  test("every focusable control carries a deterministic id — the focus contract, not decoration", () => {
     // `captureFocus`/`restoreFocus` re-find the focused element BY ID across the
     // wholesale innerHTML swap. Id-less chips escaped focus to `<body>`, outside a
     // panel that claims `aria-modal="true"`.
@@ -228,6 +229,27 @@ describe("the dialog markup", () => {
     for (const l of SHARE_LANGS) expect(langs).toContain(`id="${shareLangChipId(l.id)}"`);
     const tabs = shareResultHtml(state({ result: RESULT }), "");
     for (const t of SHARE_TABS) expect(tabs).toContain(`id="${shareTabId(t.id)}"`);
+    // The prompt disclosure's `<summary>` is focusable too, and was the last
+    // id-less control: a repaint while it held focus (the 1s 409 countdown, a
+    // stream frame) sent the reader to `#wikiShareClose`, the destructive button.
+    expect(langs).toContain(`<summary id="${SHARE_PROMPT_TOGGLE_ID}">`);
+  });
+
+  test("no focusable control in the panel is left without an id", () => {
+    // The rule above, enforced over the WHOLE rendered panel rather than the three
+    // controls someone remembered — a control added later without an id reopens
+    // exactly the bug, and every existing assertion keeps passing.
+    const panels = [
+      html(state()),
+      html(state({ prompt: "Mine." })), // adds "Reset to preset"
+      shareResultHtml(state({ result: RESULT }), "<p>x</p>"),
+      html(state({ presets: null, error: "huginn is down" })), // adds Retry
+    ];
+    for (const panel of panels) {
+      for (const tag of panel.matchAll(/<(button|select|textarea|input|summary)\b[^>]*>/g)) {
+        expect(tag[0]).toMatch(/\sid="/);
+      }
+    }
   });
 
   test("the live pane streams while running and gives way to the tabs on a result", () => {

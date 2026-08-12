@@ -44,6 +44,19 @@ export const SHARE_PROMPT_ID = "wikiSharePrompt";
  *  written SYNCHRONOUSLY from the activation click, not from `toggle` — see
  *  `notePromptToggle` in `share-dialog.ts` for the race that forced it. */
 export const SHARE_PROMPT_PANEL_ID = "wikiSharePromptPanel";
+/**
+ * The prompt disclosure's `<summary>` — the SAME focus contract the chip rows
+ * carry, and for the same measured reason.
+ *
+ * A `<summary>` is focusable, so a keyboard reader lands on it; it was the only
+ * focusable control in the panel WITHOUT an id, so `captureFocus` (which tracks by
+ * id) returned null for it. Any repaint that arrived while it held focus — the 1s
+ * 409 countdown, a stream frame — therefore detached it unrecoverably, and
+ * `rehomeFocus`'s "nothing meaningful holds focus" floor relocated the reader onto
+ * the FIRST focusable node in the panel: `#wikiShareClose`. The next Enter/Space
+ * dismissed the dialog.
+ */
+export const SHARE_PROMPT_TOGGLE_ID = "wikiSharePromptToggle";
 export const SHARE_EXTRA_ID = "wikiShareExtra";
 export const SHARE_GENERATE_ID = "wikiShareGen";
 export const SHARE_COPY_ID = "wikiShareCopy";
@@ -253,9 +266,13 @@ export function shareConflictCopy(expiresAtMs: number, now: number): string {
 
 // ── Markup ───────────────────────────────────────────────────────────────────
 
+/** `idFor` is the exported id BUILDER, not a prefix to re-concatenate: the tab row
+ *  already renders through `shareTabId`, and a chip row spelling the same id a
+ *  second way is a rename away from a focus contract that silently stops holding
+ *  (the tests would keep passing — they call the builder). */
 function chipRow(
   attr: string,
-  idPrefix: string,
+  idFor: (id: string) => string,
   items: readonly { id: string; label: string }[],
   active: string,
   disabled: boolean,
@@ -264,7 +281,7 @@ function chipRow(
     .map(
       (i) =>
         `<button class="wiki-share-chip${i.id === active ? " is-active" : ""}" ` +
-        `id="${esc(idPrefix + i.id)}" ` +
+        `id="${esc(idFor(i.id))}" ` +
         `${attr}="${esc(i.id)}"${disabled ? " disabled" : ""}>${esc(i.label)}</button>`,
     )
     .join("");
@@ -352,7 +369,7 @@ export function shareDialogHtml(state: ShareDialogState, slackHtml: string, now:
 
   const langRow =
     '<div class="wiki-share-row"><span>Language</span><div class="wiki-share-chips">' +
-    chipRow(SHARE_LANG_ATTR, SHARE_LANG_ID_PREFIX, SHARE_LANGS, state.lang, state.running) +
+    chipRow(SHARE_LANG_ATTR, shareLangChipId, SHARE_LANGS, state.lang, state.running) +
     "</div></div>";
 
   // The prompt is VISIBLE and editable, but collapsed by default: the preset is
@@ -363,7 +380,7 @@ export function shareDialogHtml(state: ShareDialogState, slackHtml: string, now:
   const promptPanel =
     `<details class="wiki-share-prompt" id="${SHARE_PROMPT_PANEL_ID}"` +
     (state.promptOpen ? " open" : "") + ">" +
-    "<summary>Prompt" +
+    `<summary id="${SHARE_PROMPT_TOGGLE_ID}">Prompt` +
     (edited ? ' <span class="wiki-share-edited">· edited</span>' : "") +
     "</summary>" +
     `<textarea id="${SHARE_PROMPT_ID}" rows="10" spellcheck="false"` +

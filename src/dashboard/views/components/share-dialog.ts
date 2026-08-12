@@ -310,10 +310,16 @@ function rehomeFocus(p: HTMLElement): void {
   const active = document.activeElement as HTMLElement | null;
   const stranded = !active || active === document.body || !active.isConnected;
   if (!stranded) return;
-  const el = p.querySelector(
-    "button:not([disabled]), select:not([disabled]), textarea:not([disabled]), " +
-      "input:not([disabled]), summary",
-  ) as HTMLElement | null;
+  // Same visibility filter as {@link trapTab}: a control inside the COLLAPSED
+  // prompt `<details>` is in the DOM and matches the selector, but `focus()` on it
+  // puts the caret somewhere the reader cannot see. (`offsetParent` is non-null for
+  // children of the panel — the panel itself is the positioned ancestor.)
+  const el = (Array.prototype.slice.call(
+    p.querySelectorAll(
+      "button:not([disabled]), select:not([disabled]), textarea:not([disabled]), " +
+        "input:not([disabled]), summary",
+    ),
+  ) as HTMLElement[]).find((c) => c.offsetParent !== null) ?? null;
   // The panel carries `tabindex="-1"` so it can hold focus itself when it offers
   // no focusable control at all (the loading paint of a dialog whose ✕ is the
   // only button is already covered; this is the empty-markup floor).
@@ -573,7 +579,17 @@ function trapTab(e: KeyboardEvent): void {
   const active = document.activeElement as HTMLElement | null;
   // Focus that has already escaped (or never entered) comes back to the top on
   // the next Tab rather than continuing through the page behind.
-  if (!active || !p.contains(active)) {
+  //
+  // **`active === p` counts as escaped, and that is the load-bearing clause.** The
+  // panel carries `tabindex="-1"` (for `rehomeFocus`), so ANY click on non-focusable
+  // dialog chrome — the heading, the preview text, a drag-select — focuses the panel
+  // itself. It is inside itself, so `p.contains(active)` is true, and it is absent
+  // from `focusable`, so neither the first nor the last branch below matches: both
+  // fall through, and native Shift+Tab walks to the previous tabbable BEHIND the
+  // scrim (measured: the wiki rail's "Ask" button, where Enter activates it and the
+  // bubbling click reads as a click-away, dismissing the dialog and destroying an
+  // un-copied post).
+  if (!active || active === p || !p.contains(active)) {
     e.preventDefault();
     (e.shiftKey ? last : first).focus();
     return;

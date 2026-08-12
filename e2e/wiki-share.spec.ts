@@ -392,6 +392,58 @@ test.describe("Wiki reader: share dialog", () => {
     expect(await activeId()).toBe("wikiShareTab-markdown");
   });
 
+  test("Shift+Tab cannot walk out of the panel from the panel ITSELF", async ({ page }) => {
+    // The panel carries `tabindex="-1"` (so `rehomeFocus` has a floor), which means
+    // a click on any non-focusable dialog chrome — the heading, the preview text, a
+    // drag-select — focuses the PANEL. It is inside itself, so the trap's
+    // "escaped or absent" branch used to miss it, and it is not in the focusable
+    // list, so neither the first- nor the last-element branch matched either: both
+    // fell through and native Shift+Tab walked to the previous tabbable behind the
+    // scrim (measured: the wiki rail's "Ask" button — Enter there activates it AND
+    // the bubbling click reads as a click-away, dismissing the dialog and destroying
+    // an un-copied post).
+    await openShare(page);
+    await page.locator(".wiki-share-head span").click();
+    expect(await page.evaluate(() => document.activeElement?.id ?? "")).toBe("wikiShare");
+    await page.keyboard.press("Shift+Tab");
+    const where = await page.evaluate(() => {
+      const el = document.activeElement as HTMLElement | null;
+      const p = document.getElementById("wikiShare");
+      return { inPanel: !!el && !!p?.contains(el), isPanel: el === p, id: el?.id ?? "" };
+    });
+    expect(where.inPanel).toBe(true);
+    // …and on a real CONTROL, not parked back on the panel — the reader pressed Tab
+    // to reach something.
+    expect(where.isPanel).toBe(false);
+    expect(where.id.length).toBeGreaterThan(0);
+  });
+
+  test("the prompt disclosure KEEPS focus across a repaint", async ({ page }) => {
+    // The `<summary>` is focusable and was the last control in the panel without an
+    // id, so `captureFocus` (which tracks by id) could not carry it across the
+    // wholesale innerHTML swap. `rehomeFocus`'s stranded-focus floor then relocated
+    // the reader onto the first focusable node — `#wikiShareClose` — and the next
+    // Enter/Space dismissed the dialog. The repaint here is driven the way a real
+    // one arrives (an `input` event flipping the "· edited" badge) rather than by
+    // typing, which would move focus off the summary first.
+    await openShare(page);
+    await page.locator("#wikiSharePromptPanel summary").focus();
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#wikiSharePrompt")).toBeVisible();
+    expect(await page.evaluate(() => document.activeElement?.id ?? "")).toBe(
+      "wikiSharePromptToggle",
+    );
+    await page.evaluate(() => {
+      const ta = document.getElementById("wikiSharePrompt") as HTMLTextAreaElement;
+      ta.value = "Write two bullets.";
+      ta.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await expect(page.locator(".wiki-share-edited")).toBeVisible();
+    expect(await page.evaluate(() => document.activeElement?.id ?? "")).toBe(
+      "wikiSharePromptToggle",
+    );
+  });
+
   test("focus comes HOME when the repaint destroys the control it was on", async ({ page }) => {
     // "Reset to preset" DELETES ITSELF: it exists only while the prompt is edited,
     // and clicking it un-edits the prompt. So `restoreFocus` has no node to return
