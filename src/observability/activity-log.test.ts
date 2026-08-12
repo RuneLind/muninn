@@ -1,3 +1,15 @@
+/**
+ * **This file gets its OWN `&& bun test <file>` link in both `test` and
+ * `test:unit`** (package.json) — the placement is load-bearing and invisible
+ * from the file alone. It calls `mock.module("../logging.ts")`, which
+ * invalidates the real logger for the WHOLE `bun test` process graph, so any
+ * other file sharing the chunk that asserts on emitted log records sees none.
+ * Measured: with this file in `test:unit`'s first chunk,
+ * `wiki-readonly.test.ts`'s "a route refusal is logged" failed
+ * (`expect(hit).toBeDefined()` → undefined) while passing alone — the trap
+ * `watchers/runner.test.ts` documents, in the logging direction.
+ */
+
 import { describe, test, expect, mock, beforeEach } from "bun:test";
 import type { ActivityEvent } from "../types.ts";
 
