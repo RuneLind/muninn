@@ -2,6 +2,7 @@ import { getDb } from "../db/client.ts";
 import { getLog } from "../logging.ts";
 import { pickPrimaryModel } from "../ai/result-parser.ts";
 import { StreamParser, type StreamProgressCallback } from "../ai/stream-parser.ts";
+import { resolveAgentCwd } from "../ai/agent-cwd.ts";
 import { attachToolSpans } from "../core/tool-spans.ts";
 import type { ClaudeResult, ToolCall } from "../types.ts";
 import type { Tracer } from "../tracing/index.ts";
@@ -104,6 +105,14 @@ export function parseHaikuJson(stdout: string): any {
 export interface SpawnHaikuOptions extends HaikuTelemetry {
   source: string;
   entrypoint?: string;
+  /**
+   * Working directory for the `claude -p` spawn. Set it only when the run needs
+   * something from that directory — the email watcher passes `bots/<name>/` for
+   * Gmail MCP discovery, the extractors for the bot persona. Omitted ⇒
+   * {@link resolveAgentCwd}, a dedicated empty dir outside the repo, so the run
+   * neither loads muninn's CLAUDE.md/`.claude/` surface nor files its transcript
+   * into the developer's own project folder.
+   */
   cwd?: string;
   botName?: string;
   timeoutMs?: number;
@@ -157,7 +166,8 @@ export async function spawnHaiku(
   const proc = Bun.spawn(
     args,
     {
-      cwd,
+      // No explicit cwd ⇒ muninn's own agent home, never the inherited repo root.
+      cwd: cwd ?? resolveAgentCwd(botName),
       env: {
         ...process.env,
         CLAUDE_CODE_ENTRYPOINT: entrypoint,
