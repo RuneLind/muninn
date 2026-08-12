@@ -121,6 +121,7 @@ async function executeTask(task: ScheduledTask, config: Config, botConfig: BotCo
         "task",
         botConfig,
         tracer,
+        true, // user-authored prompt — keep the bot's MCP tools reachable
       );
   }
 }
@@ -146,12 +147,22 @@ async function runHaikuTask(
   source: string,
   botConfig: BotConfig,
   tracer?: Tracer,
+  /**
+   * Give this call the bot's MCP tools. Set for `custom` tasks ONLY, where the
+   * prompt is written by the USER and can perfectly reasonably say "check my
+   * calendar" — under the old bot-dir spawn cwd those servers were live, and
+   * dropping them would turn a real tool call into a confident hallucination
+   * with no error anywhere. The `reminder`/`checkin` prose prompts are ours, are
+   * tool-less by construction, and stay fenced.
+   */
+  withBotTools = false,
 ): Promise<TaskResult> {
   const { text, usage } = await callHaikuMessageWithFallback(prompt, fallback, {
     source,
     botName: botConfig.name,
     connector: botConfig.connector,
     haikuBackend: botConfig.haikuBackend,
+    ...(withBotTools ? { botDir: botConfig.dir } : {}),
     // The bot persona, on EVERY backend — see generateReminderMessage in goal-runner.ts.
     system: botConfig.persona,
     ...(tracer ? { tracer } : {}),

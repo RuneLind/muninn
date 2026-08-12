@@ -105,7 +105,6 @@ export interface FactcheckSseOptions {
   ctx?: string;
   /** Claim cap (defaults to {@link FACTCHECK_MAX_CLAIMS}). */
   maxClaims?: number;
-  /** Bot folder — CWD for the extraction Haiku CLI fallback (MCP/settings). */
   /** sha256 of the checked page's on-disk content — round-tripped on `done` so
    *  the ➕ POST can detect a drifted page. */
   baseHash: string;

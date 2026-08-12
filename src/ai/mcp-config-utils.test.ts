@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { buildInlineMcpConfig, loadRawMcpServers, resolveBotCwd } from "./mcp-config-utils.ts";
+import { buildInlineMcpConfig, buildInlineSettings, loadRawMcpServers, resolveBotCwd } from "./mcp-config-utils.ts";
 
 /**
  * A throwaway `<tmp>/bots/jarvis` holding one `.mcp.json`. Every root is recorded
@@ -110,6 +110,94 @@ describe("buildInlineMcpConfig", () => {
 
     expect(out).not.toContain("\n");
     expect(JSON.parse(out).mcpServers.a.command).toBe("x");
+  });
+
+  test("relocates a relative `command`, not just relative args", () => {
+    // `"command": "./scripts/mcp.sh"` resolved against the bot dir under the old
+    // spawn cwd; left alone it now resolves against the agent home and the server
+    // simply fails to start — which reads downstream as "the tool wasn't there".
+    const botDir = scratchBot({
+      mcpServers: { local: { type: "stdio", command: "./scripts/mcp.sh", args: ["--flag"] } },
+    });
+    const entry = JSON.parse(buildInlineMcpConfig(botDir)!).mcpServers.local;
+
+    expect(entry.command).toBe(join(botDir, "scripts/mcp.sh"));
+    expect(entry.args).toEqual(["--flag"]); // a plain flag is not a path
+  });
+
+  test("treats a url-only entry as remote even with no `type`", () => {
+    // `{"url": "..."}` with no `type` is legal shorthand; reading `type` alone
+    // drops it into the stdio branch and stamps a meaningless `cwd` on it.
+    const botDir = scratchBot({ mcpServers: { remote: { url: "http://127.0.0.1:9121/mcp" } } });
+
+    expect(JSON.parse(buildInlineMcpConfig(botDir)!).mcpServers.remote).toEqual({
+      url: "http://127.0.0.1:9121/mcp",
+    });
+  });
+});
+
+describe("buildInlineSettings", () => {
+  const write = (botDir: string, name: string, json: unknown) => {
+    mkdirSync(join(botDir, ".claude"), { recursive: true });
+    writeFileSync(join(botDir, ".claude", name), JSON.stringify(json));
+  };
+
+  test("merges settings.local.json over settings.json, UNIONING the permission lists", () => {
+    // `--settings` is not repeatable, and settings.local.json is the file Claude
+    // Code writes when a permission is approved in place — passing only the shared
+    // file denies an interactively-granted tool on the next watcher run.
+    const botDir = scratchBot();
+    write(botDir, "settings.json", {
+      permissions: { allow: ["mcp__gmail__search_emails"], deny: ["Bash"] },
+      enableAllProjectMcpServers: true,
+    });
+    write(botDir, "settings.local.json", {
+      permissions: { allow: ["mcp__jetbrains__execute_terminal_command"] },
+    });
+
+    const merged = JSON.parse(buildInlineSettings(botDir)!);
+    // A local file granting ONE extra tool must not revoke what the shared file granted.
+    expect(merged.permissions.allow).toEqual([
+      "mcp__gmail__search_emails",
+      "mcp__jetbrains__execute_terminal_command",
+    ]);
+    expect(merged.permissions.deny).toEqual(["Bash"]);
+    expect(merged.enableAllProjectMcpServers).toBe(true);
+  });
+
+  test("de-duplicates a permission listed in both files", () => {
+    const botDir = scratchBot();
+    write(botDir, "settings.json", { permissions: { allow: ["A", "B"] } });
+    write(botDir, "settings.local.json", { permissions: { allow: ["B", "C"] } });
+
+    expect(JSON.parse(buildInlineSettings(botDir)!).permissions.allow).toEqual(["A", "B", "C"]);
+  });
+
+  test("works with either file alone, and a non-permission key is local-wins", () => {
+    const onlyShared = scratchBot();
+    write(onlyShared, "settings.json", { permissions: { allow: ["A"] } });
+    const onlyLocal = scratchBot();
+    write(onlyLocal, "settings.local.json", { permissions: { allow: ["B"] } });
+    const both = scratchBot();
+    write(both, "settings.json", { enableAllProjectMcpServers: true });
+    write(both, "settings.local.json", { enableAllProjectMcpServers: false });
+
+    expect(JSON.parse(buildInlineSettings(onlyShared)!).permissions.allow).toEqual(["A"]);
+    expect(JSON.parse(buildInlineSettings(onlyLocal)!).permissions.allow).toEqual(["B"]);
+    expect(JSON.parse(buildInlineSettings(both)!).enableAllProjectMcpServers).toBe(false);
+  });
+
+  test("returns null when neither file is readable, and ignores a broken or non-object one", () => {
+    const none = scratchBot();
+    const broken = scratchBot();
+    mkdirSync(join(broken, ".claude"), { recursive: true });
+    writeFileSync(join(broken, ".claude", "settings.json"), "{ not json");
+    const array = scratchBot();
+    write(array, "settings.json", ["not", "an", "object"]);
+
+    expect(buildInlineSettings(none)).toBeNull();
+    expect(buildInlineSettings(broken)).toBeNull();
+    expect(buildInlineSettings(array)).toBeNull();
   });
 });
 

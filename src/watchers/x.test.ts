@@ -2305,7 +2305,7 @@ describe("checkX: X Article capture (real-doc replay)", () => {
     // only exists because `**Type:** article` exempts it from the raise.
     gateResult = JSON.stringify([{ n: 1, score: 0.65, why: "context-engineering rules for Claude 5" }]);
 
-    await checkX(watcher(), undefined, "jarvis");
+    await checkX(watcher(), "jarvis");
 
     expect(upsertCalls.length).toBe(1);
     const row = upsertCalls[0]!;
@@ -2342,7 +2342,7 @@ describe("checkX: X Article capture (real-doc replay)", () => {
     // 0.8 clears the non-top raise (0.75) the note — unlike an article — still takes.
     gateResult = JSON.stringify([{ n: 1, score: 0.8, why: "solid pointer" }]);
 
-    await checkX(watcher(), undefined, "jarvis");
+    await checkX(watcher(), "jarvis");
 
     expect(upsertCalls.length).toBe(1);
     expect(upsertCalls[0]!.url).toBe(tweetUrl); // NOT another author's article permalink

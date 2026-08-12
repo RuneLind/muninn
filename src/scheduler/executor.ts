@@ -2,10 +2,8 @@ import { getDb } from "../db/client.ts";
 import { getLog } from "../logging.ts";
 import { pickPrimaryModel } from "../ai/result-parser.ts";
 import { StreamParser, type StreamProgressCallback } from "../ai/stream-parser.ts";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
 import { resolveAgentCwd } from "../ai/agent-cwd.ts";
-import { buildInlineMcpConfig } from "../ai/mcp-config-utils.ts";
+import { buildInlineMcpConfig, buildInlineSettings } from "../ai/mcp-config-utils.ts";
 import { attachToolSpans } from "../core/tool-spans.ts";
 import type { ClaudeResult, ToolCall } from "../types.ts";
 import type { Tracer } from "../tracing/index.ts";
@@ -77,14 +75,6 @@ export interface HaikuUsage {
   costUsd?: number;
 }
 
-/**
- * Low-level Haiku spawn: runs Claude Haiku and returns result + token usage.
- * All async Haiku calls should use this to get token tracking.
- *
- * The spawn ALWAYS runs in muninn's agent home ({@link resolveAgentCwd}), never
- * in a bot folder — see {@link SpawnHaikuOptions.botDir} for what replaced the
- * old bot-dir cwd and why.
- */
 export const HAIKU_TIMEOUT_MS = 60_000;
 
 export const DEFAULT_MODEL = "claude-haiku-4-5-20251001";
@@ -110,7 +100,7 @@ export interface SpawnHaikuOptions extends HaikuTelemetry {
   entrypoint?: string;
   /**
    * Bot folder this call needs TOOLS from. Its `.mcp.json` is passed as
-   * `--mcp-config` and its `.claude/settings.json` as `--settings` — it is NOT
+   * `--mcp-config` and its `.claude/settings*.json` as `--settings` — it is NOT
    * the process cwd.
    *
    * Callers used to hand `bots/<name>/` in as the cwd, which bought THREE things
@@ -122,12 +112,13 @@ export interface SpawnHaikuOptions extends HaikuTelemetry {
    * filed its transcript into the developer's own project folder. The three wanted
    * things are now requested by name — MCP + permissions via this field, persona
    * via {@link system} — and the spawn runs in the agent home like every other
-   * muninn-spawned agent. Same run, measured: $0.041 with the Gmail tool surface.
+   * muninn-spawned agent. Same shape, same prompt, measured on the argv this
+   * function emits: 8 577 cache_creation, $0.0199.
    *
    * Set it ONLY for a call that actually uses MCP tools (today: the email
-   * watcher's Gmail). Omitting it is what earns `--strict-mcp-config`, which also
-   * fences the spawn off from the developer's global `~/.claude.json` servers —
-   * worth ~6 000 further cache tokens on a tool-less prompt ($0.031 → $0.020).
+   * watcher's Gmail). `--strict-mcp-config` is applied EITHER WAY, so what this
+   * field changes is which servers exist, never whether the developer's ambient
+   * `~/.claude.json` ones leak in.
    */
   botDir?: string;
   botName?: string;
@@ -148,6 +139,29 @@ export interface SpawnHaikuOptions extends HaikuTelemetry {
    * makes the CLI match rather than diverge.
    */
   system?: string;
+}
+
+/**
+ * Every condition warned about below is PERMANENT (a bad path, a broken JSON
+ * edit) while the callers are watcher ticks, so an unthrottled warn repeats at
+ * tick rate forever. Same shape as `agent-cwd.ts`'s: one warn per distinct
+ * value, with a cap, and a clear rather than a stop-admitting rule — a full set
+ * that kept warning for every NEW key would reinstate the flood it prevents.
+ */
+const warnedSpawnPaths = new Set<string>();
+const WARNED_SPAWN_MAX = 64;
+
+function warnOnce(key: string, message: string, props: Record<string, unknown>): void {
+  if (warnedSpawnPaths.has(key)) return;
+  if (warnedSpawnPaths.size >= WARNED_SPAWN_MAX) warnedSpawnPaths.clear();
+  warnedSpawnPaths.add(key);
+  log.warn(message, props);
+}
+
+/** Test seam: the warn set is process-lifetime, which would make the SECOND test
+ *  asserting a warn silently pass on zero warns. */
+export function _resetSpawnWarningsForTests(): void {
+  warnedSpawnPaths.clear();
 }
 
 /**
@@ -185,40 +199,64 @@ export function buildHaikuArgs(opts: {
   // The bot's tool PERMISSIONS. Load-bearing and easy to miss: the bot-dir cwd
   // was quietly supplying three things, not two, and this is the third. With the
   // cwd moved, `bots/<name>/.claude/settings.json` stops being discovered, and
-  // MCP tool calls are then DENIED — measured: the email watcher's
-  // `mcp__gmail__search_emails` call came back "Gmail search permission not
-  // granted", which the checker would have surfaced as a routine empty inbox.
+  // MCP tool calls are then DENIED — measured two ways on the same argv:
+  // `mcp__gmail__list_email_labels` returns "77" WITH `--settings` and
+  // "Permission needed for mcp__gmail__list_email_labels" without it. The
+  // checker would have surfaced that as a routine empty inbox.
   //
   // (`src/ai/CLAUDE.md` long claimed this file was dead config. That was concluded
   // from a probe of Bash + Write — both already allowed by the user-scope
   // `~/.claude/settings.json`, so the probe could not tell the two scopes apart.
   // For `mcp__*` tools, which no user-scope rule covers, it is decisive.)
-  if (opts.botDir) {
-    const settingsPath = join(opts.botDir, ".claude", "settings.json");
-    if (existsSync(settingsPath)) args.push("--settings", settingsPath);
+  const settings = opts.botDir ? buildInlineSettings(opts.botDir) : null;
+  if (settings) args.push("--settings", settings);
+
+  // The bot's MCP servers, re-expressed location-independently — the spawn no
+  // longer runs inside the bot folder, so a `.mcp.json` carrying relative paths
+  // would otherwise resolve them against the agent home.
+  const mcpConfig = opts.botDir ? buildInlineMcpConfig(opts.botDir) : null;
+
+  // A botDir that yields NEITHER is almost always a typo or a broken JSON edit
+  // rather than an intent — and every downstream symptom of it (no tools, no
+  // permissions) reads as a quiet, empty, successful run. Say so once per path.
+  if (opts.botDir && !mcpConfig) {
+    warnOnce(`mcp:${opts.botDir}`,
+      "No usable .mcp.json under {botDir} — this spawn asked for bot MCP tools and will run with NONE. " +
+        "A tool-using checker (the email watcher) degrades to an empty result that looks like a quiet run.",
+      { botDir: opts.botDir });
+  }
+  if (opts.botDir && !settings) {
+    warnOnce(`settings:${opts.botDir}`,
+      "No readable .claude/settings.json under {botDir} — this spawn's MCP tool calls will be DENIED " +
+        "(the denial is reported to the model, not thrown, so the caller sees an empty result).",
+      { botDir: opts.botDir });
   }
 
-  // The bot's MCP servers, if this call needs them, re-expressed location-
-  // independently — the spawn no longer runs inside the bot folder, so a
-  // `.mcp.json` carrying relative paths would otherwise resolve them against the
-  // agent home. A bot with no readable/non-empty `.mcp.json` yields null and is
-  // treated as "no MCP wanted", exactly like a caller that passed no botDir.
-  const mcpConfig = opts.botDir ? buildInlineMcpConfig(opts.botDir) : null;
-  if (!mcpConfig) {
-    // Tool-less prompt: fence it off from every ambient MCP source (the
-    // developer's user-scope `~/.claude.json` servers, any project config the
-    // agent home might acquire). These prompts never call a tool, so those tool
-    // definitions are pure prompt weight — and one less spawned subprocess per tick.
-    args.push("--strict-mcp-config");
-  } else {
-    // `--mcp-config` is VARIADIC, so it must stay last: any argument appended
-    // after the JSON would be parsed as a second config file rather than as its
-    // own flag.
-    args.push("--mcp-config", mcpConfig);
-  }
+  // ALWAYS fence the spawn to the servers we passed (none, when we passed none).
+  // Without this the CLI also merges the developer's user-scope `~/.claude.json`
+  // servers: measured on the as-shipped jarvis argv, 9 servers / 112 `mcp__` tools
+  // instead of the bot's 3 — including a `claude.ai Gmail` the bot's allow-list
+  // does not cover, which the gate could reach for and be silently denied on, and
+  // a jetbrains server exposing `execute_terminal_command`. Fencing costs one
+  // token and saves 1 764 cache_creation on the email shape (10 347 → 8 583).
+  args.push("--strict-mcp-config");
+
+  // `--mcp-config` is variadic: it stops at the next `-`-prefixed token, so a
+  // following FLAG is safe, but a bare positional would be swallowed as a second
+  // config. Keeping it last means nobody has to re-derive that.
+  if (mcpConfig) args.push("--mcp-config", mcpConfig);
+
   return args;
 }
 
+/**
+ * Low-level Haiku spawn: runs Claude Haiku and returns result + token usage.
+ * All async Haiku calls should use this to get token tracking.
+ *
+ * The spawn ALWAYS runs in muninn's agent home ({@link resolveAgentCwd}), never
+ * in a bot folder — see {@link SpawnHaikuOptions.botDir} for what replaced the
+ * old bot-dir cwd and why.
+ */
 export async function spawnHaiku(
   prompt: string,
   opts: SpawnHaikuOptions,

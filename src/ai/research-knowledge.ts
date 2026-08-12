@@ -20,7 +20,7 @@ export interface ResearchKnowledgeOptions {
   collections?: string[];
   /** Optional per-search limit forwarded to /api/search?limit=. */
   limit?: number;
-  /** Bot context for tracing + haiku spawn cwd. */
+  /** Bot context for tracing + Haiku backend resolution. */
   botName: string;
   /** Huginn base URL (e.g. http://localhost:8321). */
   knowledgeApiUrl: string;

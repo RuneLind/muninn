@@ -262,6 +262,19 @@ describe("runScheduledTasksFromList — task tracing", () => {
     expect(tt.finished?.status).toBe("ok");
   });
 
+  // A `custom` task's prompt is written by the USER and may perfectly reasonably
+  // say "check my calendar". Under the old bot-dir spawn cwd the bot's MCP servers
+  // were live for it; without `botDir` the spawn is fenced by --strict-mcp-config
+  // and the same prompt returns a confident hallucination with no error anywhere.
+  test("a custom task keeps the bot's MCP tools; our own prose prompts stay fenced", async () => {
+    await runScheduledTasksFromList(api, config, botConfig, [makeTask({ taskType: "custom", prompt: "check my calendar" })], CTX);
+    expect(callHaikuMsgCalls[0]!.opts.botDir).toBe(botConfig.dir);
+
+    callHaikuMsgCalls.length = 0;
+    await runScheduledTasksFromList(api, config, botConfig, [makeTask({ taskType: "reminder", title: "Take a break" })], CTX);
+    expect(callHaikuMsgCalls[0]!.opts.botDir).toBeUndefined();
+  });
+
   test("error path (send throws) settles the span as error, no leaked/unfinished span", async () => {
     sendThrows = true;
 
