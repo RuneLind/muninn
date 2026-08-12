@@ -54,6 +54,7 @@ function deps(over: Partial<ModelsOverviewDeps> & {
     getHaikuUsage: over.getHaikuUsage ?? (async () => over.haiku ?? []),
     getChatModels: over.getChatModels ?? (async () => over.chat ?? []),
     getWikiRegistry: over.getWikiRegistry ?? (() => over.wikiRegistry ?? []),
+    getHostname: over.getHostname ?? (() => "test-host"),
   };
 }
 

@@ -6,6 +6,8 @@ import { agentPresenceStyles, agentPresenceHtml, agentPresenceScript } from "./c
 // The share dialog's CSS lives WITH the dialog (exported from its pure half) so
 // the /summaries mount in PR C cannot end up with a hand-copied second copy.
 import { shareDialogStyles } from "./components/wiki-share-dialog.ts";
+import { wikiReadonlyStyles } from "./components/wiki-readonly-client.ts";
+import { isWikiReadonly } from "../../wiki/readonly.ts";
 
 /**
  * /wiki — reader for the huginn-jarvis knowledge wiki.
@@ -1213,6 +1215,7 @@ export async function renderWikiPage(opts?: {
     }
     ${agentPresenceStyles()}
     ${shareDialogStyles()}
+    ${wikiReadonlyStyles()}
   </style>
 </head>
 <body>
@@ -1293,6 +1296,9 @@ export async function renderWikiPage(opts?: {
 
   <script>
     window.__WIKI_NAME__ = ${escJsonScript(selected)};
+    // Wiki-readonly instance: the client dims + blocks the write actions so the
+    // 403 is visible before the click (the server is still the authority).
+    window.__WIKI_READONLY__ = ${isWikiReadonly() ? "true" : "false"};
   </script>
   <script>
     ${clientScript}

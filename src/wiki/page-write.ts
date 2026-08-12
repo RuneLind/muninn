@@ -48,6 +48,7 @@ import { isPathConfined } from "../gardener/draft.ts";
 import { insertLogEntry } from "../gardener/apply.ts";
 import { sha256, todayOslo } from "../gardener/util.ts";
 import { runWikiWriteExclusive } from "./queue.ts";
+import { isWikiReadonly, WIKI_READONLY_REASON } from "./readonly.ts";
 import type { CommitWikiResult } from "./commit.ts";
 import { getLog } from "../logging.ts";
 
@@ -58,6 +59,12 @@ export type PageWriteOutcome =
   /** `transform` declined to change anything — nothing was written or logged. */
   | { outcome: "noop" }
   | { outcome: "stale"; reason: string }
+  /**
+   * This instance is wiki-readonly (`MUNINN_WIKI_READONLY=1`). A REFUSAL, not a
+   * failure: its own variant so the route maps it to 403 instead of the 500 a
+   * generic `error` earns. Nothing was read, written or logged.
+   */
+  | { outcome: "forbidden"; reason: string }
   | { outcome: "error"; reason: string };
 
 export interface PageWriteOptions {
@@ -98,6 +105,14 @@ export interface PageWriteOptions {
    * report it; a `void`-returning stub stays assignable.
    */
   commit?: (paths: string[], message: string) => Promise<CommitWikiResult | void>;
+  /**
+   * Is this instance forbidden from writing wiki page content? Injectable so a
+   * test drives the refusal without touching the process env; defaults to the
+   * shared `isWikiReadonly` (`MUNINN_WIKI_READONLY`). Callers do NOT pass it —
+   * the default is what makes the guard fail-closed for every call site,
+   * including ones added later.
+   */
+  isReadonly?: () => boolean;
 }
 
 function errMsg(err: unknown): string {
@@ -111,6 +126,16 @@ function errMsg(err: unknown): string {
  */
 export async function writeWikiPage(opts: PageWriteOptions): Promise<PageWriteOutcome> {
   const { wikiDir, relPath, baseHash } = opts;
+
+  // 0. Readonly instance: refuse BEFORE the read, so nothing is even opened.
+  //    A refusal, not an error — the route answers 403.
+  if ((opts.isReadonly ?? isWikiReadonly)()) {
+    log.warn("Wiki page write refused — instance is wiki-readonly: {path}", {
+      kind: opts.logKind,
+      path: relPath,
+    });
+    return { outcome: "forbidden", reason: WIKI_READONLY_REASON };
+  }
 
   // 1. Path confinement — pure and cheap, so it runs BEFORE the queue.
   //    `existingRelPath: relPath` selects the exists-page confinement branch

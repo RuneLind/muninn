@@ -16,6 +16,8 @@
  *   - `haiku_usage` + `traces` for the "actually used" column.
  */
 
+import os from "node:os";
+import { schedulerEnabledFromEnv, wikiReadonlyFromEnv } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import { discoverAllBots, resolveResearchBot, resolveSummarizerBot, resolveWikiSynthesisBot } from "../bots/config.ts";
 import type { WikiRegistryEntry } from "../wiki/registry.ts";
@@ -169,9 +171,35 @@ export interface WikiSynthesisEntry {
   ignoredPin?: string;
 }
 
+/**
+ * Which muninn instance the reader is looking at — the "Machine" card.
+ *
+ * Muninn runs on two machines (laptop + Mac mini) against the same wikis, and
+ * the profile difference is entirely env: no bot tokens, `SCHEDULER_ENABLED`
+ * off, `MUNINN_WIKI_READONLY` on. None of that is visible anywhere else, so a
+ * flag set on the wrong host is invisible until two instances write one wiki.
+ * This makes the drift readable instead of implied.
+ */
+export interface MachineInfo {
+  hostname: string;
+  schedulerEnabled: boolean;
+  wikiReadonly: boolean;
+  /**
+   * Does THIS instance own programmatic wiki page writes? Exactly
+   * `!wikiReadonly` — named for the question it answers, since "readonly: false"
+   * reads as an absence rather than a responsibility.
+   */
+  wikiWriteOwner: boolean;
+  /** Active bot names (discovered bot folders), in discovery order. */
+  bots: string[];
+  /** Registered wikis — the set this instance could write if it owned writes. */
+  wikis: { name: string; source: WikiRegistryEntry["source"]; root: string }[];
+}
+
 export interface ModelsOverview {
   selectedBot: string;
   generatedAt: number;
+  machine: MachineInfo;
   bots: BotEntry[];
   roles: RoleEntry[];
   wikiSynthesis: WikiSynthesisEntry[];
@@ -201,6 +229,9 @@ export interface ModelsOverviewDeps {
   /** Registered wikis (shared memo in prod; fabricated in tests). Drives the
    *  read-only Wiki synthesis group — one row per wiki with its resolved bot. */
   getWikiRegistry: () => WikiRegistryEntry[];
+  /** This machine's hostname (the Machine card's identity). Injected so a test
+   *  asserts a fixed string rather than the runner's host. */
+  getHostname: () => string;
 }
 
 const USAGE_WINDOW_DAYS = 7;
@@ -241,6 +272,7 @@ export const DEFAULT_MODELS_OVERVIEW_DEPS: ModelsOverviewDeps = {
   getHaikuUsage: defaultGetHaikuUsage,
   getChatModels: defaultGetChatModels,
   getWikiRegistry,
+  getHostname: () => os.hostname(),
 };
 
 /** Sorted, de-duplicated model list — stable output for tests + rendering. */
@@ -692,9 +724,25 @@ export async function assembleModelsOverview(
     log.warn("models overview assembled with {count} degraded source(s)", { count: errors.length });
   }
 
+  // ---- Machine (which instance is this?) -----------------------------------
+  // Env-only profile, read at request time (the flags are process-scoped and
+  // fixed for the process, but reading them here keeps the card honest under a
+  // test that sets them). `wikiRegistry` is the same list the synthesis group
+  // used, so the two cards can never disagree about which wikis exist.
+  const wikiReadonly = wikiReadonlyFromEnv();
+  const machine: MachineInfo = {
+    hostname: deps.getHostname(),
+    schedulerEnabled: schedulerEnabledFromEnv(),
+    wikiReadonly,
+    wikiWriteOwner: !wikiReadonly,
+    bots: bots.map((b) => b.name),
+    wikis: wikiRegistry.map((e) => ({ name: e.name, source: e.source, root: e.root })),
+  };
+
   return {
     selectedBot: selectedName,
     generatedAt: now,
+    machine,
     bots: botEntries,
     roles,
     wikiSynthesis,

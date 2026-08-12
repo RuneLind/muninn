@@ -232,6 +232,16 @@ export async function renderModelsPage(): Promise<string> {
     </div>
 
     <div class="section">
+      <div class="list-card">
+        <div class="lc-head">
+          <h3>Machine</h3>
+          <div class="lc-sub">Which muninn instance this is. Muninn runs on more than one host against the same wikis — the profile is env-only, so it is shown rather than implied.</div>
+        </div>
+        <div class="lc-body" id="machineBody"><div class="empty-msg">Loading…</div></div>
+      </div>
+    </div>
+
+    <div class="section">
       <div class="lc-grid">
         <div class="list-card">
           <div class="lc-head">
@@ -420,6 +430,7 @@ export async function renderModelsPage(): Promise<string> {
       renderMeta(data);
       renderTiles(data);
       renderBots(data);
+      renderMachine(data);
       renderRoles(data);
       renderWiki(data);
       renderPipeline(data);
@@ -573,6 +584,44 @@ export async function renderModelsPage(): Promise<string> {
           val + originChip(r.origin) + roleEditor(r) +
         '</div>';
       }).join('') || '<div class="empty-msg">No roles</div>';
+    }
+
+    // ---- Machine card -----------------------------------------------------
+    // Read-only. The write-owner row is the one that matters operationally: two
+    // instances against one wiki working tree is the failure this makes visible.
+    function machineRow(label, valueHtml, noteHtml) {
+      return '<div class="lc-row hover-wash">' +
+        '<div class="lc-main"><div class="lc-title">' + esc(label) + '</div>' +
+        (noteHtml ? '<div class="lc-note">' + noteHtml + '</div>' : '') + '</div>' +
+        valueHtml +
+      '</div>';
+    }
+
+    function renderMachine(data) {
+      var body = document.getElementById('machineBody');
+      if (!body) return;
+      var m = data.machine;
+      if (!m) { body.innerHTML = '<div class="empty-msg">No machine info</div>'; return; }
+      var val = function (text, kind) {
+        return '<span class="lc-val' + (kind === 'none' ? ' none' : '') + '">' + esc(text) + '</span>';
+      };
+      var h = '';
+      h += machineRow('Hostname', val(m.hostname || '—'));
+      h += machineRow('Scheduler',
+        m.schedulerEnabled ? val('enabled') : val('disabled', 'none'),
+        m.schedulerEnabled ? '' : 'SCHEDULER_ENABLED=false — gates the runner only, not the HTTP write surface');
+      h += machineRow('Wiki page writes',
+        m.wikiWriteOwner ? val('this instance owns them') : val('read-only', 'none'),
+        m.wikiReadonly
+          ? 'MUNINN_WIKI_READONLY=1 — gardener applies and fact-check writes 403 here; git commits are still allowed'
+          : 'no MUNINN_WIKI_READONLY — this instance writes wiki pages');
+      h += machineRow('Bots',
+        (m.bots && m.bots.length) ? val(m.bots.join(', ')) : val('none discovered', 'none'));
+      var wikis = m.wikis || [];
+      h += machineRow('Registered wikis',
+        wikis.length ? val(String(wikis.length)) : val('none', 'none'),
+        wikis.map(function (w) { return esc(w.name) + ' <span class="lc-via">(' + esc(w.source) + ')</span>'; }).join(' · '));
+      body.innerHTML = h;
     }
 
     function renderWiki(data) {

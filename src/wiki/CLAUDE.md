@@ -81,6 +81,23 @@ Turns one wiki page into a pasteable post — the reader's **📤 Share** breadc
 
 Per-wiki write queue, realpath-keyed on the wiki ROOT. `log.md` is wiki-GLOBAL, so every read-modify-writer of it (gardener apply, fact-check append/integrate, `writeWikiPage`) must serialize on this one chain. Rules for joining: the queued section must span read→CAS→write→log.md, and the commit tail must run OUTSIDE the queue (push is dispatched un-awaited with no timeout — an unreachable origin would otherwise park every writer). Full rationale: `src/gardener/CLAUDE.md`.
 
+## Readonly instances (`readonly.ts`, `MUNINN_WIKI_READONLY`)
+
+`MUNINN_WIKI_READONLY=1` marks an instance as NOT the wiki write owner. Muninn runs on two machines against the same wiki working trees, and `SCHEDULER_ENABLED=false` closes only the scheduler — `createDashboardRoutes` registers every route unconditionally, so the whole HTTP write surface stays live on the non-owner.
+
+**It forbids page CONTENT writes, not git.** Enforced at exactly two seams, both taking an injectable `isReadonly` that defaults to `isWikiReadonly()` (so a call site added later is guarded by default, and a test drives one seam without touching the process env):
+
+- `writeWikiPage` → new `forbidden` outcome variant, returned BEFORE the read (nothing is opened, no `log.md` is created). `appendBlockToPage` propagates it.
+- `applyWikiProposal` → same variant, returned before the write queue is entered.
+
+Both map to **403** at the route, deliberately not collapsed into the generic `error` (⇒ 500) — a refusal is not a failure. The gardener/atlas mutation routes additionally refuse as their FIRST statement (`readonlyRefusal`), so the answer costs no DB round-trip, no model call and no status CAS: `proposals/:id/approve` (before the draft→approved CAS, so the row stays reviewable for the write owner), `gardener/backlog-run`, `gardener/source-draft-{run,backlog,doc}`, `atlas/draft-synthesis`. The three drafting routes are guarded even though they persist proposals rather than pages — a readonly instance must not build a gate backlog it can never apply.
+
+**Not guarded, on purpose:** `commitWikiChange` (the repo-sync loop on the readonly instance commits and pushes through it), the `wiki-committer` watcher (it commits stray dirty files, writes no page content), `proposals/:id/reject` (a DB status flip that mutates no wiki), `/api/wiki/remember` (a DB memory) and `/api/wiki/reindex` (huginn indexing). Offline scripts writing via a bare `Bun.write` are out of scope — this guards the HTTP surface.
+
+Client half: the pages inject `window.__WIKI_READONLY__` and `wiki-readonly-client.ts` stamps `body.wiki-readonly` + installs ONE capture-phase click blocker. Deliberately not a per-render `disabled` sweep — the gardener strip and the answer pane replace their innerHTML on every poll/SSE event, so any state written into a button is gone by the next paint; a body class is a selector and survives. The blocked list uses the SAME attributes the real delegated handlers key on, so the two cannot drift.
+
+Which instance is which is readable on `/models` (the **Machine** card: hostname, `SCHEDULER_ENABLED`, `MUNINN_WIKI_READONLY`, bots, registered wikis, and whether this instance owns writes) — the profile is env-only, so it is shown rather than implied.
+
 ## Auto-commit (`commit.ts`, `wikiAutoCommit`)
 
 Per-bot `wikiAutoCommit` config: `{ push?: boolean, catalogKinds?: string[] }`. After a gardener apply / source-drafter write / fact-check "Add to article" append / fact-check "Integrate into article" apply, muninn stages exactly the touched files and commits them (message `[gardener] apply: <page>` / `[source-drafter] draft: <page>` / `[fact-check] annotate: <page>` / `[fact-check] integrate: <page>`), on the wiki repo's **default branch only** (a feature-branch checkout is left for the sweeper), then pushes to the current branch's upstream.

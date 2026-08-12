@@ -15,6 +15,35 @@ function optionalEnv(name: string, defaultValue: string): string {
   return process.env[name] || defaultValue;
 }
 
+/**
+ * Boolean env flag accepting `1` / `true` (case-insensitive, trimmed). Distinct
+ * from the `=== "true"` idiom used below because the flags that use it are
+ * documented as `NAME=1`.
+ */
+export function optionalEnvFlag(name: string): boolean {
+  const raw = (process.env[name] || "").trim().toLowerCase();
+  return raw === "1" || raw === "true";
+}
+
+/**
+ * `MUNINN_WIKI_READONLY=1` — this instance must make NO programmatic wiki page
+ * CONTENT writes. Exported as a function (not only a `loadConfig()` field)
+ * because the enforcement seams live below the config layer and must not
+ * require `DATABASE_URL`, which `loadConfig` demands.
+ *
+ * Deliberately narrow: it forbids page writes, NOT git. `commitWikiChange` stays
+ * unguarded so the repo-sync loop on a readonly instance can still commit/push.
+ */
+export function wikiReadonlyFromEnv(): boolean {
+  return optionalEnvFlag("MUNINN_WIKI_READONLY");
+}
+
+/** The scheduler switch, as its own function so the `/models` machine card can
+ *  report it without constructing a full `Config`. */
+export function schedulerEnabledFromEnv(): boolean {
+  return optionalEnv("SCHEDULER_ENABLED", optionalEnv("GOAL_CHECK_ENABLED", "true")) === "true";
+}
+
 export function optionalEnvInt(name: string, defaultValue: number): number {
   const raw = process.env[name];
   if (!raw) return defaultValue;
@@ -39,8 +68,9 @@ export function loadConfig() {
       "SCHEDULER_INTERVAL_MS",
       optionalEnvInt("GOAL_CHECK_INTERVAL_MS", 60000),
     ),
-    schedulerEnabled:
-      optionalEnv("SCHEDULER_ENABLED", optionalEnv("GOAL_CHECK_ENABLED", "true")) === "true",
+    schedulerEnabled: schedulerEnabledFromEnv(),
+    /** No programmatic wiki PAGE writes from this instance (git still allowed). */
+    wikiReadonly: wikiReadonlyFromEnv(),
     logDir: optionalEnv("LOG_DIR", "./logs"),
     knowledgeApiUrl: optionalEnv("KNOWLEDGE_API_URL", "http://localhost:8321"),
     knowledgeViewableCollections: optionalEnv("KNOWLEDGE_VIEWABLE_COLLECTIONS", "").split(",").map(s => s.trim()).filter(Boolean),
