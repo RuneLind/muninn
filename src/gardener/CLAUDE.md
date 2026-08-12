@@ -29,6 +29,6 @@ Both collision skips carry the BLOCKING PAGE (`findCollidingPage` returns the pa
 **`applyWikiProposal` serializes on the SHARED per-wiki write queue** (`src/wiki/queue.ts`, realpath-keyed on the wiki ROOT) — the same chain `writeWikiPage` holds, because `log.md` is wiki-GLOBAL and the gardener + fact-check append/integrate families are three read-modify-writers of one file (they raced until 2026-07-30). Two rules for anything joining that chain:
 
 1. The section must span read→CAS→write→log.md — a queue entered after the CAS can't close the race.
-2. The **commit tail must run outside it** — `commitWikiChange` dispatches its push without awaiting it and the push has no timeout, so one unreachable origin would park every other writer on that wiki for the full stall.
+2. The **commit tail must run outside it** — `commitWikiChange` dispatches its push without awaiting it, and the push is bounded only by `GIT_NETWORK_TIMEOUT_MS` (60s, added with the repo-sync loop), so one unreachable origin would park every other writer on that wiki for up to a minute.
 
 Cataloging policy (`catalogKinds`) and commit/push behavior: see `src/wiki/CLAUDE.md` (`wikiAutoCommit`); code in `src/wiki/commit.ts` + `catalogPage`/`buildIndexEntry` in `wire.ts`.

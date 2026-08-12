@@ -29,6 +29,62 @@ import { getLog } from "../../logging.ts";
 
 const log = getLog("dashboard", "sync");
 
+/**
+ * Read the `?dry-run` flag.
+ *
+ * The first cut tested `=== "1"`, so `?dry-run=true` and a bare `?dry-run` both
+ * ran FOR REAL — a silent misread of the one flag whose entire job is "change
+ * nothing", on the one route that commits and pushes. Ambiguity therefore 400s
+ * rather than falling through to the destructive branch; a bare `?dry-run`
+ * (empty value) is the usual "flag present" spelling and counts as dry.
+ */
+export function parseDryRunParam(
+  raw: string | undefined,
+): { ok: true; dryRun: boolean } | { ok: false; error: string } {
+  if (raw === undefined) return { ok: true, dryRun: false };
+  const v = raw.trim().toLowerCase();
+  if (v === "" || v === "1" || v === "true") return { ok: true, dryRun: true };
+  return {
+    ok: false,
+    error: `invalid dry-run value "${raw}" — use "1", "true", or the bare flag (omit it to sync for real)`,
+  };
+}
+
+/** The card row for a repo whose status read THREW — see the GET handler. */
+function errorRow(repo: { name: string; mode: RepoSyncResult["mode"]; path: string }, message: string): RepoSyncResult {
+  return {
+    name: repo.name,
+    mode: repo.mode,
+    path: repo.path,
+    branch: null,
+    onDefaultBranch: false,
+    upstream: null,
+    upstreamFallback: false,
+    ahead: null,
+    behind: null,
+    dirtyCount: 0,
+    warnings: [],
+    remoteCommitMs: null,
+    lastFetchMs: null,
+    state: "error",
+    reason: message,
+    error: message,
+    tone: "bad",
+    label: `error: ${message}`,
+    dryRun: false,
+    committed: [],
+    deferredFiles: [],
+    denied: [],
+    rebased: false,
+    pushed: false,
+    actions: [],
+    durationMs: 0,
+    lastRunMs: null,
+    lastSuccessMs: null,
+    consecutiveDeferrals: 0,
+  };
+}
+
 export function registerSyncRoutes(app: Hono, config: Config): void {
   const deps = defaultSyncDeps(config.knowledgeApiUrl);
 
@@ -42,17 +98,22 @@ export function registerSyncRoutes(app: Hono, config: Config): void {
     const { repos, warnings } = getSyncRepos();
     const now = Date.now();
     const out: RepoSyncResult[] = [];
+    const errors: string[] = [];
     for (const repo of repos) {
       try {
         out.push(await readRepoStatus(repo, now));
       } catch (err) {
-        log.warn("Sync status failed for {name}: {error}", {
-          name: repo.name,
-          error: err instanceof Error ? err.message : String(err),
-        });
+        // A repo that cannot be READ still has to appear, as an error row. The
+        // family's `errors[]` convention plus a visible row — dropping it made a
+        // broken repo look exactly like an unconfigured one (the card simply
+        // stopped listing it, which reads as "not set up" rather than "broken").
+        const message = err instanceof Error ? err.message : String(err);
+        log.warn("Sync status failed for {name}: {error}", { name: repo.name, error: message });
+        errors.push(`${repo.name}: ${message}`);
+        out.push(errorRow(repo, message));
       }
     }
-    return c.json({ repos: out, warnings, configured: repos.length > 0 });
+    return c.json({ repos: out, warnings, errors, configured: repos.length > 0 });
   });
 
   /**
@@ -64,7 +125,9 @@ export function registerSyncRoutes(app: Hono, config: Config): void {
    */
   app.post("/api/sync/run", async (c) => {
     const { repos, warnings } = getSyncRepos();
-    const dryRun = c.req.query("dry-run") === "1" || c.req.query("dryRun") === "1";
+    const dry = parseDryRunParam(c.req.query("dry-run") ?? c.req.query("dryRun"));
+    if (!dry.ok) return c.json({ repos: [], warnings, error: dry.error }, 400);
+    const dryRun = dry.dryRun;
     const wanted = c.req.query("repo");
 
     let selected = repos;
@@ -86,9 +149,6 @@ export function registerSyncRoutes(app: Hono, config: Config): void {
 
     const report = await runSync(selected, deps, { dryRun, warnings });
     if (!dryRun) {
-      const notable = report.repos.filter(
-        (r) => r.state !== "ok" && r.state !== "status-only",
-      );
       activityLog.push(
         "system",
         `Repo sync: ${report.repos.map((r) => `${r.name} ${r.label}`).join(" · ")}`,
@@ -96,9 +156,25 @@ export function registerSyncRoutes(app: Hono, config: Config): void {
           metadata: {
             source: "sync",
             repos: report.repos.length,
-            notable: notable.length,
+            notable: report.repos.filter((r) => r.state !== "ok" && r.state !== "status-only").length,
           },
         },
+      );
+    }
+    // Every repo answered `running` ⇒ this call did nothing at all, because
+    // another tick owns them. 409 is the family's single-flight answer (the
+    // claim-retry / share routes), and it keeps the click distinguishable from a
+    // real run in the logs. Mixed outcomes stay 200 — some work DID happen.
+    const running = report.repos.filter((r) => r.state === "running");
+    if (running.length > 0 && running.length === report.repos.length) {
+      return c.json(
+        {
+          ...report,
+          configured: true,
+          state: "running",
+          error: `a sync is already in flight for ${running.map((r) => r.name).join(", ")}`,
+        },
+        409,
       );
     }
     return c.json({ ...report, configured: true });

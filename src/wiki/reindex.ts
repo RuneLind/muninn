@@ -14,11 +14,14 @@
  *    is `idle` | `running` | `succeeded` | `failed`.
  *
  * There is deliberately NO muninn-side mutex or run state — huginn's CAS is the
- * single serialization point. The route implements the HTTP posters/getters that
- * feed the injectable functions below; this module is pure over them so the 409
- * mapping, the unreachable→error entries, and the multi-collection fan-out shape
- * are unit-testable without a live huginn. Mirrors `buildIndexCoverageResponse`.
+ * single serialization point. The assemblers below are pure over an INJECTED
+ * per-collection poster/getter, so the 409 mapping, the unreachable→error entries
+ * and the multi-collection fan-out shape are unit-testable without a live huginn
+ * (mirrors `buildIndexCoverageResponse`). The one shared HTTP adapter,
+ * `postCollectionUpdate`, sits at the bottom of the file with its own rationale;
+ * the status getter stays in the route, which is its only caller.
  */
+import { fetchKnowledgeApi, KnowledgeApiError } from "../ai/knowledge-api-client.ts";
 
 /** Per-collection POST outcome, normalized from huginn's HTTP layer. */
 export type PostOutcome =
@@ -102,6 +105,36 @@ export async function buildReindexResponse(
     }
   }
   return { collections: results };
+}
+
+/**
+ * The one HTTP adapter in this otherwise-pure module.
+ *
+ * It lives here rather than in a route file because it has TWO callers now — the
+ * reader's Index card (`POST /api/wiki/reindex`) and the repo-sync loop's
+ * post-pull kick — and the sync loop's own hand-spelled copy got the contract
+ * wrong in the way this module exists to prevent: it had no 409 branch, so
+ * huginn's CAS conflict (a nightly rebuild already in flight — the honest
+ * `already-running` state) was counted as a failure. The pure assemblers above
+ * still take an injected poster, so nothing here is untestable.
+ */
+export async function postCollectionUpdate(
+  knowledgeApiUrl: string,
+  collection: string,
+): Promise<PostOutcome> {
+  try {
+    await fetchKnowledgeApi(
+      knowledgeApiUrl,
+      `/api/collections/${encodeURIComponent(collection)}/update`,
+      { method: "POST", timeoutMs: 10_000 },
+    );
+    return { kind: "ok" };
+  } catch (err) {
+    if (err instanceof KnowledgeApiError && err.upstreamStatus === 409) {
+      return { kind: "conflict" };
+    }
+    return { kind: "error", error: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 /**

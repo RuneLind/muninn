@@ -1218,17 +1218,23 @@ branch when they landed (the seam deliberately defers those). It exists because 
 wiki repo silently accumulating uncommitted pages is one `git clean` away from
 losing them (the 2026-07-23 huginn-jarvis incident).
 
-- **Subsumed by the repo-sync loop.** On a machine running `SYNC_REPOS`
-  (`src/sync/`), this sweeper stands down for every repo a `wiki`-mode entry
-  covers — `checkWikiCommitter` no-ops with one log line after resolving the
-  toplevel (`syncCoversToplevel`, compared on git TOPLEVELS so huginn-jarvis's
-  nested wiki root matches its repo). Not merely redundant: the sweeper has NO
-  quiet period, so it would commit the file the loop is deliberately holding back
-  because it was edited 30 seconds ago, and it pushes without ever rebasing, so on
-  a two-machine setup its pushes are silent non-fast-forward failures. The skip is
-  marked `ok`, not `skipped` — the work IS being done, by the loop, so a health
-  streak here would escalate an alert on a healthy configuration. With `SYNC_REPOS`
-  unset the sweeper behaves exactly as before.
+- **Subsumed by the repo-sync loop — but only on EVIDENCE it runs.** On a machine
+  running `SYNC_REPOS` (`src/sync/`), this sweeper stands down for every repo a
+  `wiki`-mode entry covers AND whose sync ledger shows a run within
+  `SYNC_SUBSUME_MAX_AGE_MS` (~26h, just over this sweeper's own daily cadence) —
+  `syncSubsumesSweeper` in `src/sync/run.ts`, compared on git TOPLEVELS so
+  huginn-jarvis's nested wiki root matches its repo. Standing down is not merely
+  a de-duplication: the sweeper has NO quiet period, so it would commit the file
+  the loop is deliberately holding back because it was edited 30 seconds ago, and
+  it pushes without ever rebasing, so on a two-machine setup its pushes are silent
+  non-fast-forward failures. The skip is marked `ok`, not `skipped` — the work IS
+  being done, by the loop, so a health streak here would escalate an alert on a
+  healthy configuration. **Configuration alone is NOT evidence:** parseable
+  `SYNC_REPOS` used to stand the sweeper down forever, so a machine whose launchd
+  tick was never installed (or whose plist silently failed to load) had nobody
+  committing the wiki at all — the 2026-07-23 page-loss shape reached through the
+  fix for it. A covered-but-idle repo therefore gets swept AND a `log.warn` naming
+  the idle loop. With `SYNC_REPOS` unset the sweeper behaves exactly as before.
 - Per tick, for the bot's `wikiDir`: resolve the git toplevel (reusing the
   exported `gitToplevel`/`onDefaultBranch` from `commit.ts`, not reimplemented);
   **not-a-repo / off-default-branch ⇒ no-op** (a feature checkout is left for a

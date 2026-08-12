@@ -34,7 +34,7 @@
  */
 
 import path from "node:path";
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { resolveConfiguredPath } from "../wiki/registry.ts";
 import { getWikiRegistry } from "../wiki/registry-memo.ts";
 import type { WikiRegistryEntry } from "../wiki/registry.ts";
@@ -56,8 +56,11 @@ export interface SyncRepo {
   /** `wiki` mode only: the registered wiki this entry resolved to. The ROOT is
    *  the registry's own string, so `wikiWriteQueueKey` derives the same chain
    *  key the page writers use. */
-  wikiName?: string;
   wikiRoot?: string;
+  /** NON-`wiki` modes only: registered wiki roots that live INSIDE this repo. A
+   *  `plain` rebase rewrites their working trees, so the run takes each one's
+   *  write lock. Absent ⇒ this repo contains no wiki anyone else writes. */
+  containedWikiRoots?: string[];
   /** `wiki` mode only: the wiki's huginn collections (drives the optional
    *  post-sync reindex kick). Absent/empty ⇒ no reindex is ever attempted. */
   collections?: string[];
@@ -86,9 +89,47 @@ function sameDir(a: string, b: string): boolean {
   return norm(a) === norm(b);
 }
 
+/** Normalize for comparison: absolute, symlinks resolved when the path exists. */
+function normDir(p: string): string {
+  const resolved = path.resolve(p);
+  try {
+    return realpathSync(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+/** Is `inner` the same directory as `outer`, or below it? Compared on normalized
+ *  paths with a separator-terminated prefix, so `/a/wiki-old` is not "inside"
+ *  `/a/wiki`. */
+function containsDir(outer: string, inner: string): boolean {
+  const o = normDir(outer);
+  const i = normDir(inner);
+  return i === o || i.startsWith(o.endsWith(path.sep) ? o : `${o}${path.sep}`);
+}
+
+/**
+ * The git toplevel containing `abs`, found by walking up for a `.git` entry —
+ * SYNCHRONOUSLY, because this parse is pure and has no business spawning git.
+ * Falls back to the path itself when nothing is found (a directory that is not a
+ * repo yet dedups by its own path, which is the strictest safe answer).
+ *
+ * Only used for the same-repo dedup below, where an approximate answer degrades
+ * to "we did not notice these two are one repo" — the pre-existing behaviour.
+ */
+function gitToplevelSync(abs: string): string {
+  let dir = normDir(abs);
+  for (;;) {
+    if (existsSync(path.join(dir, ".git"))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) return normDir(abs);
+    dir = parent;
+  }
+}
+
 /**
  * Parse a raw `SYNC_REPOS` string against the wiki registry. Pure apart from the
- * `realpathSync` probe in {@link sameDir} — no git, no env reads — so the whole
+ * `realpathSync`/`existsSync` probes (no git spawn, no env reads), so the whole
  * config surface is unit-testable.
  */
 export function parseSyncRepos(
@@ -99,6 +140,11 @@ export function parseSyncRepos(
   const repos: SyncRepo[] = [];
   const warnings: string[] = [];
   const seen = new Set<string>();
+  /** Resolved git toplevel → the entry that claimed it. Two entries on ONE repo
+   *  (e.g. `jarvis=…/data/wiki:wiki` beside `jarvis-code=…:status-only`) pass
+   *  every later check — the in-flight guard and the ledger are keyed by NAME —
+   *  and then run two ticks against one index and one branch. */
+  const seenTops = new Map<string, string>();
 
   for (const rawEntry of (raw ?? "").split(",")) {
     const entry = rawEntry.trim();
@@ -131,6 +177,15 @@ export function parseSyncRepos(
     }
 
     const abs = resolveConfiguredPath(pathRaw, repoRoot);
+    const top = gitToplevelSync(abs);
+    const owner = seenTops.get(top);
+    if (owner) {
+      warnings.push(
+        `SYNC_REPOS: skipping "${name}" — the same git repo as "${owner}" (${top}); ` +
+          `two entries on one repo would run two ticks against one index`,
+      );
+      continue;
+    }
 
     if (mode === "wiki") {
       const wiki = wikis.find((w) => sameDir(w.root, abs));
@@ -142,11 +197,11 @@ export function parseSyncRepos(
         continue;
       }
       seen.add(key);
+      seenTops.set(top, name);
       repos.push({
         name,
         path: abs,
         mode,
-        wikiName: wiki.name,
         wikiRoot: wiki.root,
         ...(wiki.collections && wiki.collections.length > 0
           ? { collections: wiki.collections }
@@ -155,8 +210,28 @@ export function parseSyncRepos(
       continue;
     }
 
+    // A non-wiki entry over a repo that CONTAINS a registered wiki is the shape
+    // the wiki-mode failure message actively steers people into ("… or use mode
+    // plain"): a `plain` rebase rewrites that wiki's working tree, and without
+    // the wiki write lock it can land mid-gardener-write. Warned loudly here;
+    // the run takes the contained roots' locks (see `withLocks`).
+    const contained = wikis.filter((w) => containsDir(abs, w.root));
+    if (contained.length > 0) {
+      warnings.push(
+        `SYNC_REPOS: "${name}" (mode "${mode}") contains the registered wiki ` +
+          `${contained.map((w) => `"${w.name}"`).join(", ")} — its rebase will take that wiki's ` +
+          `write lock, but nothing here commits the wiki's pages; use mode "wiki" on the wiki root if that is what you meant`,
+      );
+    }
+
     seen.add(key);
-    repos.push({ name, path: abs, mode });
+    seenTops.set(top, name);
+    repos.push({
+      name,
+      path: abs,
+      mode,
+      ...(contained.length > 0 ? { containedWikiRoots: contained.map((w) => w.root) } : {}),
+    });
   }
 
   return { repos, warnings };
@@ -211,12 +286,22 @@ export function findSyncRepo(repos: SyncRepo[], name: string | undefined): SyncR
  * directory inside the repo. The toplevel is the only spelling that is the same
  * question on both sides.
  */
-export async function syncCoversToplevel(top: string, repos?: SyncRepo[]): Promise<boolean> {
+export async function findSyncRepoCoveringToplevel(
+  top: string,
+  repos?: SyncRepo[],
+): Promise<SyncRepo | null> {
   const list = repos ?? getSyncRepos().repos;
   for (const repo of list) {
     if (repo.mode !== "wiki") continue;
     const repoTop = await gitToplevel(repo.path);
-    if (repoTop && sameDir(repoTop, top)) return true;
+    if (repoTop && sameDir(repoTop, top)) return repo;
   }
-  return false;
+  return null;
+}
+
+/** Boolean form of {@link findSyncRepoCoveringToplevel} — CONFIGURATION only. A
+ *  caller deciding whether the sweeper may stand down wants `syncSubsumesSweeper`
+ *  (`run.ts`), which also requires evidence that the loop has actually run. */
+export async function syncCoversToplevel(top: string, repos?: SyncRepo[]): Promise<boolean> {
+  return (await findSyncRepoCoveringToplevel(top, repos)) !== null;
 }

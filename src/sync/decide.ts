@@ -20,9 +20,20 @@
  *    deletions stage freely, EXCEPT in a tick where anything was quiet-filtered.
  *  - **Rename pairs move as a unit.** A staged `git mv` IS paired (`R  new\0old`),
  *    so the pair is judged by the NEW half's mtime and both halves defer together.
+ *    A COPY record (`C`) is paired by git too but is NOT a rename: the source
+ *    still exists on disk, so only the new path is staged and `origPath` is
+ *    ignored — treating it as a rename would stage a deletion of a file nobody
+ *    removed.
  *
  * The denylist runs BEFORE the quiet filter: a denied path is not "held back",
  * it is not ours at all, and it must not make the tick look quiet-filtered.
+ *
+ * **The denylist applies to UNTRACKED entries ONLY.** A tracked file is already
+ * the repo's own decision to version it (a committed `.obsidian/workspace.json`
+ * is routine in an Obsidian vault), and dropping a tracked path from staging
+ * cannot make it clean — it stays dirty, and tracked dirt is exactly what makes
+ * `git rebase` refuse, so the entry would wedge the repo on every tick forever.
+ * Denying can only ever help for a path git is not tracking yet.
  */
 
 /** How long a file must sit unmodified before the loop will commit it. */
@@ -39,13 +50,104 @@ export const SYNC_DEFERRAL_WARN_AFTER = 4;
 export const SYNC_STALE_SUCCESS_MS = 2 * 60 * 60 * 1000;
 
 /**
+ * An mtime further than this AHEAD of now is not a fresh edit, it is a broken
+ * clock or a restored file — so the quiet filter ages it instead of treating it
+ * as fresh. Unclamped, `now - mtime < quietMs` is permanently true for a future
+ * stamp: the file defers itself every tick AND (via `quietHeld`) holds every
+ * deletion in the repo with it, forever. Same 48h skew allowance, for the same
+ * reason, as the wiki store's `FUTURE_DATE_SKEW_MS` page-date guard.
+ */
+export const FUTURE_MTIME_SKEW_MS = 48 * 60 * 60 * 1000;
+
+/** One card line's budget. A raw `git fetch` failure is five lines of stderr and
+ *  the state chip is one line wide; the full text still rides `lastError`. */
+export const SYNC_REASON_MAX = 160;
+
+/**
+ * Reduce any git output to ONE card-sized line: first non-blank line, whitespace
+ * runs collapsed, truncated at {@link SYNC_REASON_MAX}. Applied where a reason is
+ * BUILT (not where it is rendered), so every consumer — card, log line, ledger —
+ * sees the same clamped string and only `lastError` carries the full text.
+ */
+export function clampReason(text: string): string {
+  const first = (text.split("\n").find((l) => l.trim().length > 0) ?? "").trim().replace(/\s+/g, " ");
+  return first.length <= SYNC_REASON_MAX ? first : `${first.slice(0, SYNC_REASON_MAX - 1)}…`;
+}
+
+/**
+ * Is this git failure the same self-healing `index.lock` contention the
+ * pre-flight already classifies as transient?
+ *
+ * The pre-flight only looks at the START of a tick, so a shell `git status` or an
+ * editor's git integration taking the lock one step later produced a hard `error`
+ * card for the identical condition. Matching on git's own wording (both spellings
+ * it uses) keeps the two ends of the tick consistent.
+ */
+export function isTransientGitLockFailure(text: string): boolean {
+  const s = text.toLowerCase();
+  return s.includes("index.lock") || s.includes("another git process");
+}
+
+/** The three INDEPENDENT reasons a tick can hold back, kept apart because they
+ *  need different responses from a human (wait / commit elsewhere / investigate). */
+export interface DeferralCause {
+  /** Paths this tick's quiet filter held (an edit in progress on THIS machine). */
+  quietHeld: string[];
+  /** Rebase-blocking tracked paths OUTSIDE the sync scope — another process's
+   *  work in the same repo, which the loop will never commit. */
+  outside: string[];
+  /** Rebase-blocking tracked paths inside the scope that the quiet filter did not
+   *  explain (a staged-but-uncommitted change, a failed commit). */
+  inScope: string[];
+}
+
+function sample(paths: string[]): string {
+  const shown = paths.slice(0, 3).join(", ");
+  return paths.length > 3 ? `${shown}, +${paths.length - 3} more` : shown;
+}
+
+function plural(n: number, one: string, many: string): string {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+/**
+ * The honest deferral reason, derived from the actual blocking sets.
+ *
+ * The first cut hardcoded "active edits (N files < 5 min)" for every wiki-mode
+ * deferral, so a repo wedged by a tracked file OUTSIDE the wiki subtree (the
+ * huginn-jarvis normal state: another process writes the rest of that repo) got a
+ * card claiming someone was editing wiki pages — the one reading that sends you
+ * looking in the wrong place.
+ */
+export function describeDeferralReason(cause: DeferralCause): string {
+  const quietMinutes = Math.round(SYNC_QUIET_MS / 60_000);
+  const parts: string[] = [];
+  if (cause.quietHeld.length > 0) {
+    parts.push(
+      `holding ${plural(cause.quietHeld.length, "file", "files")} edited in the last ${quietMinutes} min (${sample(cause.quietHeld)})`,
+    );
+  }
+  if (cause.outside.length > 0) {
+    parts.push(
+      `${plural(cause.outside.length, "tracked edit", "tracked edits")} outside the wiki subtree (${sample(cause.outside)})`,
+    );
+  }
+  if (cause.inScope.length > 0) {
+    parts.push(
+      `${plural(cause.inScope.length, "uncommitted tracked change", "uncommitted tracked changes")} (${sample(cause.inScope)})`,
+    );
+  }
+  return clampReason(parts.join("; "));
+}
+
+/**
  * Paths the loop never commits, applied to the repo-relative path.
  *
  * Deliberately narrow: editor scratch and Obsidian's workspace churn. It is NOT
  * a general ignore mechanism — that is `.gitignore`'s job, and a path that
  * reaches this list is one git already thinks belongs in the repo.
  */
-export const SYNC_DENY_PATTERNS: readonly RegExp[] = [
+const SYNC_DENY_PATTERNS: readonly RegExp[] = [
   /(^|\/)\.obsidian(\/|$)/, // Obsidian workspace + plugin state
   /\.tmp$/i,
   /\.swp$/i, // vim
@@ -60,6 +162,18 @@ export const SYNC_DENY_PATTERNS: readonly RegExp[] = [
 
 export function isDeniedSyncPath(relPath: string): boolean {
   return SYNC_DENY_PATTERNS.some((re) => re.test(relPath));
+}
+
+/** True for a porcelain status git has no record of — the only kind of entry the
+ *  denylist may drop (see the module doc). */
+export function isUntrackedStatus(xy: string): boolean {
+  return xy === "??" || xy === "!!";
+}
+
+/** True for a status git PAIRED as a rename (`R`). A copy (`C`) is paired too but
+ *  its `origPath` is an ordinary file that still exists — see the module doc. */
+function isRenameStatus(xy: string): boolean {
+  return xy[0] === "R" || xy[1] === "R";
 }
 
 /** One dirty entry, decorated with what the filesystem says about it. */
@@ -122,11 +236,11 @@ export function decideStaging(
   const denied: string[] = [];
   let quietHeld = false;
 
-  // Pass 1 — denylist. A denied path never enters the quiet accounting.
+  // Pass 1 — denylist, UNTRACKED entries only (module doc). A denied path never
+  // enters the quiet accounting.
   const kept: DirtyItem[] = [];
   for (const e of entries) {
-    const deniedHere = isDeniedSyncPath(e.path) || (e.origPath ? isDeniedSyncPath(e.origPath) : false);
-    if (deniedHere) {
+    if (isUntrackedStatus(e.xy) && isDeniedSyncPath(e.path)) {
       denied.push(e.path);
       continue;
     }
@@ -137,19 +251,22 @@ export function decideStaging(
   // deletions are collected but not committed to yet.
   const pendingDeletions: string[] = [];
   for (const e of kept) {
-    const fresh = e.mtimeMs !== null && now - e.mtimeMs < quietMs;
+    const fresh =
+      e.mtimeMs !== null && now - e.mtimeMs < quietMs && e.mtimeMs - now <= FUTURE_MTIME_SKEW_MS;
+    // A COPY's `origPath` is an untouched file, not half of a pair.
+    const renameOrig = isRenameStatus(e.xy) ? e.origPath : undefined;
 
-    if (e.origPath) {
-      // Staged rename/copy: judged by the NEW half, both halves move together.
+    if (renameOrig) {
+      // Staged rename: judged by the NEW half, both halves move together.
       if (fresh) {
         quietHeld = true;
         deferred.push({ path: e.path, reason: "renamed <5 min ago" });
-        deferred.push({ path: e.origPath, reason: "rename pair held with its new half" });
+        deferred.push({ path: renameOrig, reason: "rename pair held with its new half" });
         continue;
       }
       stage.push(e.path);
-      stage.push(e.origPath);
-      deletions.push(e.origPath); // the origin is gone from disk
+      stage.push(renameOrig);
+      deletions.push(renameOrig); // the origin is gone from disk
       continue;
     }
 
@@ -196,7 +313,10 @@ export type SyncState =
   | "running" // a sync for this repo is already in flight
   | "error";
 
-export type SyncTone = "ok" | "warn" | "bad";
+/** `neutral` is NOT a healthy green: it is "nothing has happened yet in this
+ *  process". A never-synced repo rendered as `ok` read as "in sync" on the card,
+ *  which is the one thing the card must never say without evidence. */
+export type SyncTone = "ok" | "warn" | "bad" | "neutral";
 
 /** The per-repo ledger entry the card reads (see `run.ts`). */
 export interface SyncLedgerEntry {

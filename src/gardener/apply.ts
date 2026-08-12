@@ -204,10 +204,11 @@ function withTrailingNewline(text: string): string {
  * The commit tail runs AFTER the section releases, exactly as `writeWikiPage`
  * does — and for the same reason, which joining the shared chain made load-bearing
  * here too. `commitWikiChange` dispatches its push onto the per-git-toplevel commit
- * queue WITHOUT awaiting it, so a later commit queues behind an in-flight push and
- * a push to an unreachable origin has no timeout. Committing inside the section
- * would therefore park every fact-check append/integrate on that wiki for the full
- * ssh/TCP stall (measured: a 3s push stall blocked a concurrent append for 3s).
+ * queue WITHOUT awaiting it, so a later commit queues behind an in-flight push —
+ * bounded since the repo-sync PR at `GIT_NETWORK_TIMEOUT_MS` (60s), which caps the
+ * stall but does not remove it. Committing inside the section would therefore park
+ * every fact-check append/integrate on that wiki for up to that minute
+ * (measured: a 3s push stall blocked a concurrent append for 3s).
  * That was harmless while the gardener held a PRIVATE chain; on the shared one the
  * lock's blast radius is all three writer families, so the hold must stay short.
  */

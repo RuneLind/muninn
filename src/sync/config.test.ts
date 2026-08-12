@@ -31,7 +31,6 @@ describe("parseSyncRepos", () => {
     // The wiki entry carries the REGISTRY's root string + collections, so the
     // write-lock key and the reindex kick both come from one source.
     expect(repos[0]!.wikiRoot).toBe(wikis[0]!.root);
-    expect(repos[0]!.wikiName).toBe("mimir");
     expect(repos[0]!.collections).toEqual(["mimir"]);
   });
 
@@ -59,7 +58,7 @@ describe("parseSyncRepos", () => {
       const { repos, warnings } = parseSyncRepos(`v=${root}/:wiki`, [wiki("v", root)]);
       expect(warnings).toEqual([]);
       expect(repos).toHaveLength(1);
-      expect(repos[0]!.wikiName).toBe("v");
+      expect(repos[0]!.wikiRoot).toBe(root);
     } finally {
       await rm(base, { recursive: true, force: true });
     }
@@ -101,6 +100,54 @@ describe("parseSyncRepos", () => {
     const { repos } = parseSyncRepos("v=/w:wiki", [wiki("v", "/w")]);
     expect(repos[0]!.collections).toBeUndefined();
   });
+
+  test("two entries on ONE repo are refused — different names, same git toplevel", async () => {
+    // The in-flight guard and the ledger are keyed by NAME, so two entries for
+    // one repo pass every later check and then race each other's rebase.
+    const base = await mkdtemp(path.join(tmpdir(), "sync-dedupe-"));
+    try {
+      const repo = path.join(base, "repo");
+      const nested = path.join(repo, "data", "wiki");
+      await mkdir(nested, { recursive: true });
+      await mkdir(path.join(repo, ".git"), { recursive: true });
+
+      const { repos, warnings } = parseSyncRepos(
+        `jarvis=${nested}:wiki,jarvis-code=${repo}:status-only`,
+        [wiki("jarvis", nested)],
+      );
+      expect(repos.map((r) => r.name)).toEqual(["jarvis"]);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain("jarvis-code");
+      expect(warnings[0]).toContain("same git repo");
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  test("a plain-mode repo CONTAINING a registered wiki is warned about, not silently accepted", async () => {
+    // The wiki-mode error message actively steers people here ("or use mode
+    // plain"), and a plain-mode rebase rewrites the working tree under a
+    // gardener write with no wiki lock held.
+    const base = await mkdtemp(path.join(tmpdir(), "sync-plain-wiki-"));
+    try {
+      const repo = path.join(base, "repo");
+      const nested = path.join(repo, "data", "wiki");
+      await mkdir(nested, { recursive: true });
+      const { repos, warnings } = parseSyncRepos(`code=${repo}:plain`, [wiki("jarvis", nested)]);
+      expect(repos).toHaveLength(1);
+      expect(repos[0]!.containedWikiRoots).toEqual([nested]);
+      expect(warnings[0]).toContain("contains the registered wiki");
+      expect(warnings[0]).toContain("jarvis");
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  test("a plain-mode repo with no registered wiki inside it is warning-free", () => {
+    const { repos, warnings } = parseSyncRepos("skills=/a/skills:plain", [wiki("v", "/w/vault")]);
+    expect(warnings).toEqual([]);
+    expect(repos[0]!.containedWikiRoots).toBeUndefined();
+  });
 });
 
 describe("syncCoversToplevel (sweeper subsumption)", () => {
@@ -125,7 +172,7 @@ describe("syncCoversToplevel (sweeper subsumption)", () => {
     const top = repo;
 
     const covered: SyncRepo[] = [
-      { name: "jarvis", path: wikiDir, mode: "wiki", wikiName: "jarvis", wikiRoot: wikiDir },
+      { name: "jarvis", path: wikiDir, mode: "wiki", wikiRoot: wikiDir },
     ];
     expect(await syncCoversToplevel(top, covered)).toBe(true);
   });

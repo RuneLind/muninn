@@ -15,8 +15,13 @@ import { __resetForTest } from "../wiki/commit.ts";
 import { __resetWikiWriteQueueForTest } from "../wiki/queue.ts";
 import {
   INDEX_LOCK_STALE_MS,
+  getSyncLedgerEntry,
+  readRepoStatus,
   remoteMovedUnderUs,
+  stagePaths,
   syncRepo,
+  syncSubsumesSweeper,
+  SYNC_SUBSUME_MAX_AGE_MS,
   __resetSyncStateForTest,
   type SyncDeps,
 } from "./run.ts";
@@ -73,7 +78,7 @@ async function makeFixture(base: string): Promise<Fixture> {
 }
 
 function wikiRepo(f: Fixture): SyncRepo {
-  return { name: "fixture", path: f.wikiA, mode: "wiki", wikiName: "fixture", wikiRoot: f.wikiA };
+  return { name: "fixture", path: f.wikiA, mode: "wiki", wikiRoot: f.wikiA };
 }
 
 /** Deps with both post-sync side effects stubbed — the cache refresh and the
@@ -171,7 +176,10 @@ describe("syncRepo", () => {
     const r = await syncRepo(wikiRepo(f), deps());
 
     expect(r.state).toBe("deferred");
-    expect(r.reason).toMatch(/^active edits \(1 file < 5 min\)$/);
+    // The reason NAMES the file and the actual cause (a quiet hold), rather than
+    // the old hardcoded "active edits (N files < 5 min)" that every wiki-mode
+    // deferral got whatever had really blocked it.
+    expect(r.reason).toBe("holding 1 file edited in the last 5 min (wiki/concepts/Seed.md)");
     expect(r.committed).toEqual([]);
     expect(r.pushed).toBe(false);
     expect(r.rebased).toBe(false);
@@ -180,9 +188,12 @@ describe("syncRepo", () => {
     expect((await git(f.A, ["log", "--format=%s"])).out).toBe("init");
   });
 
-  test("untracked-only dirt does NOT defer — the repo still pulls", async () => {
+  test("untracked-only dirt still PULLS, but the held file is reported as deferred", async () => {
     // Empirically verified against git: untracked files never make a rebase
     // refuse, so counting them would strand a repo that could have converged.
+    // But the held page is NOT committed, so the tick is not "in sync" either —
+    // reporting `ok` with a green card is how a new page sits uncommitted
+    // forever while the card says everything is fine.
     const f = await makeFixture(base);
     await writeFile(path.join(f.wikiB, "concepts", "FromB.md"), "# FromB\n");
     await git(f.B, ["add", "-A"]);
@@ -194,13 +205,95 @@ describe("syncRepo", () => {
 
     const r = await syncRepo(wikiRepo(f), deps());
 
-    expect(r.state).toBe("ok");
+    expect(r.state).toBe("deferred");
+    expect(r.reason).toContain("wiki/concepts/Draft.md");
+    expect(r.consecutiveDeferrals).toBe(1);
+    // …and the pull still happened, which is the whole point of not blocking on
+    // untracked dirt.
     expect(r.rebased).toBe(true);
     expect(r.committed).toEqual([]);
     expect(r.deferredFiles.map((d) => d.path)).toEqual(["wiki/concepts/Draft.md"]);
     expect(await Bun.file(path.join(f.wikiA, "concepts", "FromB.md")).exists()).toBe(true);
     // The draft is untouched on disk.
     expect(await Bun.file(path.join(f.wikiA, "concepts", "Draft.md")).text()).toBe("# Draft\n");
+  });
+
+  test("a quiet-held page escalates like any other deferral", async () => {
+    // Reported `ok` with streak 0, a held page would never reach the warn tone
+    // no matter how many ticks it sat there.
+    const f = await makeFixture(base);
+    await writeFile(path.join(f.wikiA, "concepts", "Draft.md"), "# Draft\n");
+    let last = await syncRepo(wikiRepo(f), deps());
+    for (let i = 0; i < 4; i++) last = await syncRepo(wikiRepo(f), deps());
+    expect(last.state).toBe("deferred");
+    expect(last.consecutiveDeferrals).toBeGreaterThanOrEqual(4);
+    expect(last.tone).toBe("warn");
+  });
+
+  // ── Nested wiki: dirt OUTSIDE the wiki subtree ────────────────────────────
+
+  test("tracked dirt OUTSIDE the wiki subtree does not stop the push when we are not behind", async () => {
+    // huginn-jarvis's normal state: another process writes the rest of the repo
+    // while the wiki subtree is ours. The rebase gate is whole-repo, so that
+    // dirt refuses the rebase — but a rebase is only needed to integrate REMOTE
+    // work, and there is none. Deferring here strands the wiki's own commits
+    // forever while `ahead` grows.
+    const f = await makeFixture(base);
+    await writeFile(path.join(f.A, "README.md"), "the other process was here\n");
+    const page = path.join(f.wikiA, "concepts", "Settled.md");
+    await writeFile(page, "# Settled\n");
+    await ageFile(page);
+
+    const r = await syncRepo(wikiRepo(f), deps());
+
+    expect(r.committed).toEqual(["wiki/concepts/Settled.md"]);
+    expect(r.pushed).toBe(true);
+    expect(r.state).toBe("ok");
+    // The outside file was neither committed nor touched.
+    expect((await git(f.A, ["status", "--porcelain"])).out).toContain("README.md");
+    expect(await Bun.file(path.join(f.A, "README.md")).text()).toBe("the other process was here\n");
+    // …and the narration says why no rebase ran.
+    expect(r.actions.join(" | ")).toContain("outside the wiki subtree");
+  });
+
+  test("outside-subtree dirt WHILE behind defers with an honest reason naming the real paths", async () => {
+    const f = await makeFixture(base);
+    await writeFile(path.join(f.wikiB, "concepts", "FromB.md"), "# FromB\n");
+    await git(f.B, ["add", "-A"]);
+    await git(f.B, ["commit", "-q", "-m", "B page"]);
+    await git(f.B, ["push", "-q"]);
+    await writeFile(path.join(f.A, "README.md"), "the other process was here\n");
+
+    const r = await syncRepo(wikiRepo(f), deps());
+
+    expect(r.state).toBe("deferred");
+    expect(r.reason).toContain("outside the wiki subtree");
+    expect(r.reason).toContain("README.md");
+    // The old hardcoded reason blamed a wiki edit that was never happening.
+    expect(r.reason).not.toContain("active edits");
+    expect(r.behind).toBe(1);
+  });
+
+  test("a TRACKED denylisted file is committed rather than wedging the repo", async () => {
+    // A committed `.obsidian/workspace.json` is routine in an Obsidian vault.
+    // Dropped from staging it stays dirty, and tracked dirt refuses the rebase
+    // on EVERY tick — the repo never converges again.
+    const f = await makeFixture(base);
+    await mkdir(path.join(f.wikiA, ".obsidian"), { recursive: true });
+    const ws = path.join(f.wikiA, ".obsidian", "workspace.json");
+    await writeFile(ws, "{}\n");
+    await git(f.A, ["add", "-A"]);
+    await git(f.A, ["commit", "-q", "-m", "track the vault workspace"]);
+    await git(f.A, ["push", "-q"]);
+    await writeFile(ws, '{"changed":true}\n');
+    await ageFile(ws);
+
+    const r = await syncRepo(wikiRepo(f), deps());
+
+    expect(r.state).toBe("ok");
+    expect(r.committed).toEqual(["wiki/.obsidian/workspace.json"]);
+    expect(r.denied).toEqual([]);
+    expect((await git(f.A, ["status", "--porcelain"])).out).toBe("");
   });
 
   test("consecutive deferrals accrue and flip the card tone to warn", async () => {
@@ -291,6 +384,53 @@ describe("syncRepo", () => {
     const subjects = (await git(f.bare, ["log", "--format=%s"])).out.split("\n");
     expect(subjects[0]).toContain("[sync]");
     expect(subjects[1]).toBe("B page");
+  });
+
+  test("the RETRY's own commit and pull reach the report and the cache refresh", async () => {
+    // The retry runs a second local section. Its results were thrown away: a
+    // page it committed never appeared in `committed`, and — worse — the wiki
+    // cache refresh was gated on the FIRST pass's headMoved, so pages pulled
+    // during the retry rebase stayed invisible for the full 5-minute TTL.
+    const f = await makeFixture(base);
+    await writeFile(path.join(f.wikiB, "concepts", "FromB.md"), "# FromB\n");
+    await git(f.B, ["add", "-A"]);
+    await git(f.B, ["commit", "-q", "-m", "B page"]);
+
+    const hookDir = path.join(f.A, ".git", "hooks");
+    await mkdir(hookDir, { recursive: true });
+    // Fires ONCE, between A's fetch and A's push: pushes B's commit (so A's push
+    // is rejected) AND drops a settled page into A's wiki, which only the RETRY's
+    // local section can pick up.
+    const late = path.join(f.wikiA, "concepts", "Late.md");
+    await writeFile(
+      path.join(hookDir, "pre-push"),
+      `#!/bin/sh\nif [ ! -f "$(git rev-parse --git-dir)/nff-fired" ]; then\n` +
+        `  touch "$(git rev-parse --git-dir)/nff-fired"\n` +
+        `  git -C ${JSON.stringify(f.B)} push -q\n` +
+        `  printf '# Late\\n' > ${JSON.stringify(late)}\n` +
+        `  touch -t 200001010000 ${JSON.stringify(late)}\n` +
+        `fi\nexit 0\n`,
+      { mode: 0o755 },
+    );
+
+    const page = path.join(f.wikiA, "concepts", "FromA.md");
+    await writeFile(page, "# FromA\n");
+    await ageFile(page);
+
+    const refreshed: string[] = [];
+    const r = await syncRepo(
+      wikiRepo(f),
+      deps({ refreshWikiIndex: async (root) => { refreshed.push(root); } }),
+    );
+
+    expect(r.state).toBe("ok");
+    expect(r.pushed).toBe(true);
+    expect(r.committed.sort()).toEqual(["wiki/concepts/FromA.md", "wiki/concepts/Late.md"]);
+    // The retry's rebase pulled B's page — the reader must be told.
+    expect(await Bun.file(path.join(f.wikiA, "concepts", "FromB.md")).exists()).toBe(true);
+    expect(refreshed).toEqual([f.wikiA]);
+    // Both machines' work is on the remote.
+    expect((await git(f.A, ["status", "--porcelain"])).out).toBe("");
   });
 
   test("both real spellings of 'the remote moved' are recognised", () => {
@@ -453,21 +593,43 @@ describe("syncRepo", () => {
     expect((await git(f.A, ["status", "--porcelain"])).out).toContain("wiki/concepts/Settled.md");
   });
 
-  test("plain mode defers on an unstaged TRACKED modification (git would refuse)", async () => {
+  test("plain mode defers on an unstaged TRACKED modification when there is something to pull", async () => {
     const f = await makeFixture(base);
+    await writeFile(path.join(f.wikiB, "concepts", "FromB.md"), "# FromB\n");
+    await git(f.B, ["add", "-A"]);
+    await git(f.B, ["commit", "-q", "-m", "B page"]);
+    await git(f.B, ["push", "-q"]);
     await writeFile(path.join(f.wikiA, "concepts", "Seed.md"), "# locally edited\n");
     const r = await syncRepo({ name: "skills", path: f.A, mode: "plain" }, deps());
     expect(r.state).toBe("deferred");
-    expect(r.reason).toContain("local edits");
+    expect(r.reason).toContain("uncommitted tracked change");
     expect(r.reason).toContain("wiki/concepts/Seed.md");
+  });
+
+  test("plain mode with local edits and NOTHING to pull is not a deferral", async () => {
+    // A rebase exists to integrate remote work. With none, the refused rebase
+    // costs nothing and the repo is genuinely up to date — deferring here just
+    // accrued a streak that eventually turned the card amber for no reason.
+    const f = await makeFixture(base);
+    await writeFile(path.join(f.wikiA, "concepts", "Seed.md"), "# locally edited\n");
+    const r = await syncRepo({ name: "skills", path: f.A, mode: "plain" }, deps());
+    expect(r.state).toBe("ok");
+    expect(r.actions.join(" | ")).toContain("rebase skipped");
+    expect(r.dirtyCount).toBe(1);
   });
 
   // ── Dry run ───────────────────────────────────────────────────────────────
 
   test("dry-run reports the same plan the real run executes, and changes nothing", async () => {
     const f = await makeFixture(base);
-    const page = path.join(f.wikiA, "concepts", "Settled.md");
-    await writeFile(page, "# Settled\n");
+    // A TRACKED modification, not a new untracked file: the untracked shape is
+    // the ONE case that hid the projection bug, because untracked dirt does not
+    // block a rebase. A tracked edit the dry run says it "would commit" is then
+    // counted as rebase-blocking by the same dry run, so it reported a deferral
+    // where the real run rebases and pushes — the two disagreed on the normal
+    // case, which is the only case anyone dry-runs.
+    const page = path.join(f.wikiA, "concepts", "Seed.md");
+    await writeFile(page, "# Seed, edited and settled\n");
     await ageFile(page);
     await writeFile(path.join(f.wikiB, "concepts", "FromB.md"), "# FromB\n");
     await git(f.B, ["add", "-A"]);
@@ -476,20 +638,103 @@ describe("syncRepo", () => {
 
     const dry = await syncRepo(wikiRepo(f), deps(), true);
     expect(dry.dryRun).toBe(true);
-    expect(dry.committed).toEqual(["wiki/concepts/Settled.md"]);
+    expect(dry.state).toBe("ok");
+    expect(dry.committed).toEqual(["wiki/concepts/Seed.md"]);
     expect(dry.actions.join(" | ")).toContain("would commit 1 file(s)");
     expect(dry.actions.join(" | ")).toContain("would rebase onto");
+    expect(dry.actions.join(" | ")).toContain("would push");
     // Nothing moved.
     expect((await git(f.A, ["log", "--format=%s"])).out).toBe("init");
-    expect((await git(f.A, ["status", "--porcelain"])).out).toContain("wiki/concepts/Settled.md");
+    expect((await git(f.A, ["status", "--porcelain"])).out).toContain("wiki/concepts/Seed.md");
     // …and the ledger was NOT written, so a dry-run poll can't reset a streak.
     expect(dry.lastRunMs).toBeNull();
 
     const real = await syncRepo(wikiRepo(f), deps());
     expect(real.committed).toEqual(dry.committed);
-    expect(real.state).toBe("ok");
+    expect(real.state).toBe(dry.state);
     expect(real.pushed).toBe(true);
     expect(real.lastRunMs).not.toBeNull();
+  });
+
+  test("dry-run counts pre-existing commits honestly, not as work it would cause", async () => {
+    const f = await makeFixture(base);
+    // One commit already ahead of the remote, made by something else.
+    await writeFile(path.join(f.wikiA, "concepts", "Earlier.md"), "# Earlier\n");
+    await git(f.A, ["add", "-A"]);
+    await git(f.A, ["commit", "-q", "-m", "an earlier commit"]);
+
+    const dry = await syncRepo(wikiRepo(f), deps(), true);
+    const narration = dry.actions.join(" | ");
+    expect(narration).toContain("already ahead");
+    expect(narration).not.toContain("would commit");
+  });
+
+  // ── Staging tolerance ─────────────────────────────────────────────────────
+
+  test("a path that vanishes mid-tick is skipped, not turned into a whole-tick error", async () => {
+    // An editor's atomic replace (write temp → rename over) lands between the
+    // status listing and the `git add`. A batched add exits 128 for the whole
+    // batch when ONE pathspec matches nothing.
+    const f = await makeFixture(base);
+    await writeFile(path.join(f.wikiA, "concepts", "Here.md"), "# Here\n");
+    const res = await stagePaths(
+      f.A,
+      ["wiki/concepts/Here.md", "wiki/concepts/Vanished.md"],
+      [],
+    );
+    expect(res.ok).toBe(true);
+    expect(res.skipped).toEqual(["wiki/concepts/Vanished.md"]);
+    const staged = await git(f.A, ["diff", "--cached", "--name-only"]);
+    expect(staged.out).toBe("wiki/concepts/Here.md");
+  });
+
+  test("a real add failure is still an error", async () => {
+    // A path that EXISTS and still cannot be staged — the tolerance is scoped to
+    // "it vanished", never to "git refused".
+    const f = await makeFixture(base);
+    await writeFile(path.join(f.base, "outside-the-repo.md"), "x\n");
+    const res = await stagePaths(f.A, ["../outside-the-repo.md"], []);
+    expect(res.ok).toBe(false);
+    expect(res.error).toBeTruthy();
+    expect(res.skipped).toEqual([]);
+  });
+
+  test("the commit body is capped rather than listing every staged path", async () => {
+    const f = await makeFixture(base);
+    for (let i = 0; i < 25; i++) {
+      const p = path.join(f.wikiA, "concepts", `P${String(i).padStart(2, "0")}.md`);
+      await writeFile(p, `# P${i}\n`);
+      await ageFile(p);
+    }
+    const r = await syncRepo(wikiRepo(f), deps());
+    expect(r.state).toBe("ok");
+    expect(r.committed).toHaveLength(25);
+    const body = (await git(f.A, ["log", "-1", "--format=%b"])).out;
+    expect(body.split("\n").filter((l) => l.startsWith("- "))).toHaveLength(20);
+    expect(body).toContain("and 5 more");
+  });
+
+  // ── Upstream fallback ─────────────────────────────────────────────────────
+
+  test("a branch with no upstream is not pushed by guesswork — it says so instead", async () => {
+    // `git push` with no argument and no upstream fails "no upstream" on EVERY
+    // tick, which the card reported as a hard error forever.
+    const f = await makeFixture(base);
+    await git(f.A, ["branch", "--unset-upstream"]);
+    const page = path.join(f.wikiA, "concepts", "Settled.md");
+    await writeFile(page, "# Settled\n");
+    await ageFile(page);
+
+    const r = await syncRepo(wikiRepo(f), deps());
+
+    expect(r.upstreamFallback).toBe(true);
+    expect(r.committed).toEqual(["wiki/concepts/Settled.md"]); // the work is safe locally
+    expect(r.pushed).toBe(false);
+    expect(r.state).toBe("blocked");
+    expect(r.reason).toContain("no upstream");
+    expect(r.reason).toContain("git push -u");
+    // Nothing was pushed under a guessed refspec.
+    expect((await git(f.bare, ["log", "--format=%s"])).out).not.toContain("[sync]");
   });
 
   // ── Denylist + quiet interaction, end to end ──────────────────────────────
@@ -582,11 +827,114 @@ describe("syncRepo", () => {
 
   // ── Guards ────────────────────────────────────────────────────────────────
 
+  // ── Sweeper subsumption ───────────────────────────────────────────────────
+
+  test("subsumption requires EVIDENCE the loop actually runs, not just configuration", async () => {
+    // `SYNC_REPOS` being parseable made the daily sweeper stand down forever —
+    // even on a machine where nothing ever curls the endpoint (a launchd job
+    // that was never installed, a plist that silently failed to load). That
+    // recreates the 2026-07-23 page-loss shape: nobody commits the wiki at all.
+    const f = await makeFixture(base);
+    const repos = [wikiRepo(f)];
+    const top = (await git(f.A, ["rev-parse", "--show-toplevel"])).out;
+
+    const cold = await syncSubsumesSweeper(top, { repos });
+    expect(cold.subsumed).toBe(false);
+    expect(cold.configuredButIdle).toBe(true);
+
+    // One real tick, and the sweeper stands down.
+    await syncRepo(wikiRepo(f), deps());
+    const warm = await syncSubsumesSweeper(top, { repos });
+    expect(warm.subsumed).toBe(true);
+    expect(warm.configuredButIdle).toBe(false);
+
+    // …but a run that is older than the sweeper's own daily cadence is no
+    // longer evidence of anything.
+    const stale = await syncSubsumesSweeper(top, {
+      repos,
+      now: Date.now() + SYNC_SUBSUME_MAX_AGE_MS + 60_000,
+    });
+    expect(stale.subsumed).toBe(false);
+    expect(stale.configuredButIdle).toBe(true);
+  });
+
+  test("an uncovered repo is not 'configured but idle' — it is simply not ours", async () => {
+    const f = await makeFixture(base);
+    const top = (await git(f.A, ["rev-parse", "--show-toplevel"])).out;
+    const res = await syncSubsumesSweeper(top, { repos: [] });
+    expect(res.subsumed).toBe(false);
+    expect(res.configuredButIdle).toBe(false);
+  });
+
   test("a non-repo path is an error, never a throw", async () => {
     const loose = await mkdtemp(path.join(base, "loose-"));
     const r = await syncRepo({ name: "nope", path: loose, mode: "plain" }, deps());
     expect(r.state).toBe("error");
     expect(r.reason).toContain("not a git repo");
+  });
+
+  test("the in-flight 'running' answer never touches the ledger", async () => {
+    // `running` means "we did nothing" — recording it zeroed the deferral streak
+    // and cleared the last error, so a card polled during a slow tick went green
+    // and the escalation restarted from scratch.
+    const f = await makeFixture(base);
+    await writeFile(path.join(f.wikiA, "concepts", "Seed.md"), "# live edit\n");
+    for (let i = 0; i < 4; i++) await syncRepo(wikiRepo(f), deps());
+    expect(getSyncLedgerEntry("fixture").consecutiveDeferrals).toBe(4);
+
+    const [a, b] = await Promise.all([
+      syncRepo(wikiRepo(f), deps()),
+      syncRepo(wikiRepo(f), deps()),
+    ]);
+    const running = [a, b].find((r) => r.state === "running")!;
+    expect(running).toBeDefined();
+    // The streak the card shows is the REAL one, both on the answer and after.
+    expect(running.consecutiveDeferrals).toBe(4);
+    expect(getSyncLedgerEntry("fixture").consecutiveDeferrals).toBe(5);
+    expect(getSyncLedgerEntry("fixture").state).toBe("deferred");
+  });
+
+  test("a push failure lands on the card's lastError, not only in the reason", async () => {
+    const f = await makeFixture(base);
+    // A pre-push hook that refuses for a reason that is NOT "the remote moved".
+    const hookDir = path.join(f.A, ".git", "hooks");
+    await mkdir(hookDir, { recursive: true });
+    await writeFile(
+      path.join(hookDir, "pre-push"),
+      "#!/bin/sh\necho 'refusing: pre-push policy said no' 1>&2\nexit 1\n",
+      { mode: 0o755 },
+    );
+    const page = path.join(f.wikiA, "concepts", "Settled.md");
+    await writeFile(page, "# Settled\n");
+    await ageFile(page);
+
+    const r = await syncRepo(wikiRepo(f), deps());
+
+    expect(r.state).toBe("error");
+    expect(r.reason).toContain("git push failed");
+    expect(r.error).toContain("pre-push policy said no");
+    // The card reads the LEDGER, which is where the error has to survive.
+    expect(getSyncLedgerEntry("fixture").lastError).toContain("pre-push policy said no");
+    const status = await readRepoStatus(wikiRepo(f), Date.now());
+    expect(status.error).toContain("pre-push policy said no");
+  });
+
+  test("a repo that has never synced reads as 'not synced yet', not as 'in sync'", async () => {
+    const f = await makeFixture(base);
+    const status = await readRepoStatus(wikiRepo(f), Date.now());
+    expect(status.lastRunMs).toBeNull();
+    expect(status.label).toBe("not synced yet");
+    expect(status.tone).toBe("neutral");
+  });
+
+  test("a five-line git failure is clamped to one card line, with the full text on lastError", async () => {
+    const f = await makeFixture(base);
+    await git(f.A, ["remote", "set-url", "origin", "ssh://127.0.0.1:1/nope.git"]);
+    const r = await syncRepo(wikiRepo(f), deps());
+    expect(r.state).toBe("error");
+    expect(r.reason).not.toContain("\n");
+    expect(r.reason!.length).toBeLessThanOrEqual(160);
+    expect(r.label).not.toContain("\n");
   });
 
   test("two concurrent runs of one repo do not interleave — the second reports running", async () => {

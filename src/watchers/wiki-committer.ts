@@ -40,7 +40,7 @@ import {
   listWikiSubtreeDirty,
   commitWikiChange,
 } from "../wiki/commit.ts";
-import { syncCoversToplevel } from "../sync/config.ts";
+import { syncSubsumesSweeper } from "../sync/run.ts";
 import { todayOslo } from "../gardener/util.ts";
 import { openSourceHealth } from "./source-health.ts";
 import { getLog } from "../logging.ts";
@@ -106,17 +106,30 @@ export async function checkWikiCommitter(
   // sweeper has no quiet period, so it commits the file the loop is deliberately
   // holding back because it was edited 30 seconds ago — and it pushes without
   // ever rebasing, so on a two-machine setup its pushes are silent
-  // non-fast-forward failures. Compared on git TOPLEVELS (see
-  // `syncCoversToplevel`). Marked `ok`, not `skipped`: the work IS being done,
-  // by the loop, so a streak here would escalate a health alert on a healthy
-  // configuration.
-  if (await syncCoversToplevel(top)) {
+  // non-fast-forward failures. Compared on git TOPLEVELS.
+  //
+  // But CONFIGURATION alone is not evidence the loop runs: `SYNC_REPOS` being
+  // parseable used to stand this sweeper down forever, so a machine whose launchd
+  // job was never installed had nobody committing the wiki at all — the 2026-07-23
+  // page-loss shape this watcher exists for. `syncSubsumesSweeper` additionally
+  // requires a ledger run inside ~26h; short of that we sweep AND say the loop
+  // looks configured-but-idle. Genuine subsumption is marked `ok`, not `skipped`:
+  // the work IS being done, by the loop, so a streak would escalate a health
+  // alert on a healthy configuration.
+  const subsumption = await syncSubsumesSweeper(top);
+  if (subsumption.subsumed) {
     log.info(
       "Wiki-committer: {top} is covered by the SYNC_REPOS sync loop — sweep subsumed, standing down",
       { botName: name, top },
     );
     health.mark(SRC, "ok");
     return health.finish();
+  }
+  if (subsumption.configuredButIdle) {
+    log.warn(
+      "Wiki-committer: {top} is configured for the SYNC_REPOS loop but it has not run in ~26h — sweeping anyway (is the launchd tick firing?)",
+      { botName: name, top, repo: subsumption.name },
+    );
   }
 
   if (!(await onDefaultBranch(top))) {

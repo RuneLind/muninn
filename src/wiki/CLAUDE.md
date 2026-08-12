@@ -79,7 +79,7 @@ Turns one wiki page into a pasteable post — the reader's **📤 Share** breadc
 
 ## Write queue (`queue.ts`)
 
-Per-wiki write queue, realpath-keyed on the wiki ROOT. `log.md` is wiki-GLOBAL, so every read-modify-writer of it (gardener apply, fact-check append/integrate, `writeWikiPage`) must serialize on this one chain. Rules for joining: the queued section must span read→CAS→write→log.md, and the commit tail must run OUTSIDE the queue (push is dispatched un-awaited with no timeout — an unreachable origin would otherwise park every writer). Full rationale: `src/gardener/CLAUDE.md`.
+Per-wiki write queue, realpath-keyed on the wiki ROOT. `log.md` is wiki-GLOBAL, so every read-modify-writer of it (gardener apply, fact-check append/integrate, `writeWikiPage`) must serialize on this one chain. Rules for joining: the queued section must span read→CAS→write→log.md, and the commit tail must run OUTSIDE the queue (push is dispatched un-awaited and bounded only by `GIT_NETWORK_TIMEOUT_MS` (60s) — an unreachable origin would otherwise park every writer for that minute). Full rationale: `src/gardener/CLAUDE.md`.
 
 ## Readonly instances (`readonly.ts`, `MUNINN_WIKI_READONLY`)
 
@@ -119,90 +119,48 @@ Three accuracy rules the card follows, each closing a way it could lie: the read
 Two machines (laptop + Mac mini) edit the same repos — mimir, huginn-jarvis (a wiki
 nested in a bigger repo), the skills repo, muninn itself — and converge ONLY through
 GitHub. The loop is one endpoint driven by two triggers: a 15-minute launchd `curl`
-and the `/models` **Repo sync** card's Sync now / Sync all buttons. Config surface +
-mode semantics: the `SYNC_REPOS` row in the repo `CLAUDE.md`.
+and the `/models` **Repo sync** card's Sync now / Sync all buttons.
 
-- **Locking is the load-bearing part.** Per repo: (1) `git fetch` with NO lock; (2)
-  both locks in a **PINNED ORDER — commit queue FIRST (`runExclusiveQueued`, now
-  exported from `commit.ts`), wiki-write queue SECOND (`runWikiWriteExclusive`)** —
-  for the short local section (status → path-scoped add/commit → rebase onto the
-  already-fetched ref); (3) release both, then push on the commit queue only,
-  matching `pushInner`'s dispatch posture. Network I/O never holds a lock (the
-  measured 3s-push-stall rationale at `src/gardener/apply.ts:191-199`), so a hung
-  push can only ever park the sync, never a page write. **Deadlock invariant:**
-  commit-first/write-second is safe because every current writer keeps its commit
-  tail OUTSIDE its write section; a future in-section commit would break it.
-  Routing the section through `commitWikiChange` is NOT equivalent — it releases
-  around its own commit (leaving the rebase unprotected against gardener/page-write
-  commit tails) and dispatches a push that would be non-fast-forward before the
-  rebase. The commit queue is a plain string-keyed map with no realpath
-  normalization, so its key is always `gitToplevel(path)`, never string surgery.
-- **Git timeouts are network-verb only.** `runGit` (the exported `git()` helper,
-  which sets `GIT_TERMINAL_PROMPT=0` — exactly what makes a credential-less push
-  fail fast) takes a per-call `timeoutMs`, applied to `push` + `fetch` at
-  `GIT_NETWORK_TIMEOUT_MS` (60s) and to nothing else. Local verbs stay untimed
-  deliberately: `git()` serves hot dashboard paths, and a killed `add`/`commit`
-  leaves `.git/index.lock` behind, which the sync's own pre-flight escalates to a
-  human — a timeout there would wedge the repo it was meant to protect. The
-  timeout RACES the output readers rather than awaiting them after the kill,
-  because git's children (ssh, credential helpers) inherit the pipes.
-- **Pre-flight.** An in-progress `rebase-merge`/`rebase-apply`/`MERGE_HEAD`/
-  `CHERRY_PICK_HEAD` (tested by EXISTENCE — `rev-parse --git-path` always PRINTS a
-  path) ⇒ **blocked: needs human**, tree untouched. An `index.lock` is judged by
-  AGE: younger than `INDEX_LOCK_STALE_MS` (3 min) ⇒ **transient** (a live
-  concurrent git op), older ⇒ blocked, and it is never removed automatically.
-  Unmerged paths never auto-commit. Off the default branch (`onDefaultBranch`) ⇒
-  **paused**, but the fetch-status display stays live on any branch.
-- **Quiet period + deletions + renames** (`decide.ts`, pure): modified/untracked
-  files must sit still `SYNC_QUIET_MS` (5 min) before staging; deletions get no
-  mtime test BUT are held in any tick that quiet-filtered something (an ordinary
-  unstaged `mv` is `D old` + `?? new` with NO pairing — pushing the deletion alone
-  gives the other machine a 404); a STAGED rename (`R  new\0old`) IS paired and both
-  halves move together, judged by the new half. The denylist (`.obsidian/`, `*.tmp`,
-  editor scratch) runs FIRST and a denied path never counts as a quiet exclusion.
-  The listing is the new status-carrying `listDirtyEntries`/`parsePorcelainZWithStatus`
-  in `commit.ts` (`--porcelain -z -uall`, both flags load-bearing for the same
-  reasons the sweeper documents; the sweeper's flat `parsePorcelainZ` is now derived
-  from the same parser). Paths are staged REPO-relative straight from git's output,
-  so the wiki-relative → absolute → repo-relative translation `commitInner` performs
-  is not re-done here.
-- **Deferral is not failure.** Tracked modifications remaining after the commit make
-  git refuse to rebase ⇒ **deferred: active edits (N files < 5 min)**, counting
-  TRACKED changes only (untracked dirt does not make a rebase refuse — verified
-  empirically — and must not inflate the reason). Ruled against `rebase --autostash`.
-  It escalates visibly: `syncTone` flips the card to warn after
-  `SYNC_DEFERRAL_WARN_AFTER` (4) consecutive deferrals or a successful sync older
-  than ~2h.
-- **Conflict + non-fast-forward.** A failed rebase runs `git rebase --abort` ONLY
-  when a rebase directory actually exists (a failure BEFORE a rebase started is
-  reported verbatim), then **blocked: conflict** with the conflicting paths and no
-  push. A rejected push is NOT an error — `remoteMovedUnderUs` matches BOTH real
-  spellings (client-side `fetch first`/`non-fast-forward` AND the server-side
-  `cannot lock ref … failed to update ref`, which is what a local bare remote
-  produces) and the tick re-fetches, re-rebases and pushes ONCE more before
-  reporting `retrying: remote moved`.
-- **Post-sync:** `getWikiIndex({root, refresh: true})` for a wiki whose HEAD moved
-  (else the reader's 5-min TTL keeps a pulled page invisible), then a CONDITIONAL,
-  silent huginn reindex kick (only when the wiki declares collections; huginn is
-  unreachable from the mini and must never colour the tick).
-- **Sweeper subsumption:** `checkWikiCommitter` no-ops with one log line when a
-  `wiki`-mode entry covers that bot's wiki repo (`syncCoversToplevel`, compared on
-  git TOPLEVELS). Running both would void the quiet-period guarantee and produce
-  silent non-fast-forward sweeper pushes. Marked `ok`, not `skipped` — the work is
-  being done, so a health streak would alert on a healthy config.
-- **The card's read path (`GET /api/sync/status`) does NOT fetch** — a poll that
-  fetched would spend network per open tab. So it publishes `lastFetchMs`
-  (`.git/FETCH_HEAD` mtime) beside `ahead`/`behind`/`remoteCommitMs`: without it
-  "behind 0" is indistinguishable from "behind 0 as of three hours ago", which is
-  exactly the stale-mini case the card exists to expose. Ahead/behind are measured
-  against the branch's UPSTREAM, falling back to `origin/main` only when there is
-  none — labelled `upstreamFallback` so the card never implies a tracking branch.
-- **`?dry-run=1`** reports what WOULD be committed/rebased/pushed and writes
-  nothing — including the ledger, so a dry-run poll can never reset a deferral
-  streak or clear the error the card is showing. The ledger itself is in-memory per
-  process (a restart just reports "no sync yet"; the next tick refills it).
-- **`log.md merge=union`**: mimir already declares it, nothing is built for it, and
-  a fixture test asserts both machines' entries survive a rebase over `log.md`.
+**The loop's own contract — locking, deferral semantics, the quiet period, the
+non-obvious git rules — lives in `src/sync/CLAUDE.md`, stated once.** Config surface
++ mode semantics: the `SYNC_REPOS` row in the repo `CLAUDE.md`. Route contract: the
+`sync-routes.ts` row in `src/dashboard/CLAUDE.md`. What matters from the WIKI side:
+
+- **It joins this directory's two queues, in a pinned order** — the commit queue
+  (`runExclusiveQueued`, now exported from `commit.ts`) FIRST, the per-wiki write
+  queue (`runWikiWriteExclusive`) SECOND — for a short, entirely local section
+  (status → path-scoped add/commit → rebase). Network I/O is outside both, so a hung
+  push can park the sync but never a page write. The deadlock invariant that makes
+  that order safe is the one stated in `queue.ts` + `src/gardener/CLAUDE.md`: every
+  current writer keeps its commit tail OUTSIDE its write section. A `plain`-mode
+  entry over a repo CONTAINING a registered wiki takes that wiki's write lock too —
+  its rebase rewrites the wiki's working tree.
+- **Git timeouts are network-verb only**, at `GIT_NETWORK_TIMEOUT_MS` (60s), and a
+  timed call runs in its own process group so the kill reaches the transport. Local
+  verbs stay untimed deliberately — a killed `add`/`commit` leaves `.git/index.lock`
+  behind, which the sync's own pre-flight escalates to a human.
+- **Every `git status` in `commit.ts` runs `--no-optional-locks`** — a plain status
+  opportunistically rewrites `.git/index` (measured), i.e. takes `index.lock`, from
+  unlocked read paths that race the loop's own locked `git add`.
+- **It commits wiki pages behind a 5-minute quiet period**, with the deletion-hold
+  and rename-pair rules, over `listDirtyEntries`/`parsePorcelainZWithStatus`
+  (`--porcelain -z -uall`, both flags load-bearing for the same reasons the sweeper
+  documents). The denylist is UNTRACKED-only: a tracked denied path stays dirty and
+  would refuse the rebase every tick.
+- **Post-sync it refreshes the reader cache** (`getWikiIndex({root, refresh: true})`)
+  for a wiki whose HEAD moved — including a head that moved during the push retry's
+  second rebase — else the 5-minute TTL keeps a pulled page invisible. Then a
+  CONDITIONAL, silent huginn reindex through the SHARED `buildReindexResponse` +
+  `postCollectionUpdate` (`src/wiki/reindex.ts`), so huginn's CAS 409 reads as
+  `already-running` rather than a failure.
+- **Sweeper subsumption:** `checkWikiCommitter` stands down for a repo a `wiki`-mode
+  entry covers — but only when the ledger shows a sync run within ~26h
+  (`syncSubsumesSweeper`). Configuration alone used to stand it down forever, which
+  is the 2026-07-23 page-loss shape with a new cause. Marked `ok`, not `skipped`.
+- **`log.md merge=union`:** mimir declares it and a fixture test asserts both
+  machines' entries survive a rebase. A wiki that does NOT declare it gets a standing
+  card warning (`git check-attr merge -- <wiki>/log.md`, memoized per repo) — the
+  conflict it prevents is one whose correct resolution is always "keep both".
 
 ## Auto-commit (`commit.ts`, `wikiAutoCommit`)
 

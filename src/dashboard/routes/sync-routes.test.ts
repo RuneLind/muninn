@@ -73,7 +73,7 @@ describe("sync routes", () => {
     const status = await app().request("/api/sync/status");
     expect(status.status).toBe(200);
     const body = await status.json();
-    expect(body).toEqual({ repos: [], warnings: [], configured: false });
+    expect(body).toEqual({ repos: [], warnings: [], errors: [], configured: false });
 
     const run = await app().request("/api/sync/run", { method: "POST" });
     expect(run.status).toBe(200);
@@ -171,6 +171,64 @@ describe("sync routes", () => {
       delete process.env.WIKI_EXTRA;
       __resetWikiRegistryForTest();
     }
+  });
+
+  test("every truthy spelling of ?dry-run is a dry run, and a wrong value is a 400", async () => {
+    // `=== "1"` meant `?dry-run=true` and a bare `?dry-run` RAN FOR REAL — a
+    // silent, irreversible misread of the one flag whose whole job is "change
+    // nothing". Ambiguity here must fail loudly, never fall through to the
+    // destructive branch.
+    const repo = await fixture();
+    process.env.SYNC_REPOS = `code=${repo}:status-only`;
+
+    for (const q of ["?dry-run=1", "?dry-run=true", "?dry-run=TRUE", "?dry-run", "?dryRun=true"]) {
+      const res = await app().request(`/api/sync/run${q}`, { method: "POST" });
+      expect(res.status).toBe(200);
+      expect((await res.json()).dryRun).toBe(true);
+    }
+
+    const real = await app().request("/api/sync/run", { method: "POST" });
+    expect((await real.json()).dryRun).toBe(false);
+
+    for (const q of ["?dry-run=0", "?dry-run=yes", "?dry-run=please"]) {
+      const bad = await app().request(`/api/sync/run${q}`, { method: "POST" });
+      expect(bad.status).toBe(400);
+      expect((await bad.json()).error).toContain("dry-run");
+    }
+  });
+
+  test("a POST landing on an in-flight sync answers 409, like every other single-flight route", async () => {
+    // 200 for "we did nothing" is the answer that makes a launchd tick and a
+    // dashboard click indistinguishable from a real run in the logs.
+    const repo = await fixture();
+    process.env.SYNC_REPOS = `code=${repo}:status-only`;
+    const a = app();
+    const first = a.request("/api/sync/run", { method: "POST" });
+    const second = a.request("/api/sync/run", { method: "POST" });
+    const [r1, r2] = await Promise.all([first, second]);
+    const codes = [r1.status, r2.status].sort();
+    expect(codes).toEqual([200, 409]);
+    const conflict = r1.status === 409 ? r1 : r2;
+    const body = await conflict.json();
+    expect(body.state).toBe("running");
+    // The toast reads `error`; without it the click looks like it did nothing.
+    expect(body.error).toBeTruthy();
+  });
+
+  test("a repo whose status read throws is an error ROW, not a vanished one", async () => {
+    // Dropping the row made a broken repo indistinguishable from an unconfigured
+    // one — the card simply stopped showing it.
+    const repo = await fixture();
+    process.env.SYNC_REPOS = `code=${repo}:status-only`;
+    await rm(repo, { recursive: true, force: true });
+
+    const res = await app().request("/api/sync/status");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.repos).toHaveLength(1);
+    expect(body.repos[0].name).toBe("code");
+    expect(body.repos[0].state).toBe("error");
+    expect(body.repos[0].tone).toBe("bad");
   });
 
   test("a misconfigured entry is dropped and surfaced as a warning, not a failure", async () => {
