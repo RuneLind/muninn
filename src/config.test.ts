@@ -1,6 +1,6 @@
 import { test, expect, describe, afterEach } from "bun:test";
 import { configure, reset, type LogRecord } from "@logtape/logtape";
-import { optionalEnvFlag, __resetEnvFlagWarningsForTest } from "./config.ts";
+import { loadConfig, optionalEnvFlag, __resetEnvFlagWarningsForTest } from "./config.ts";
 
 /**
  * `optionalEnvFlag` is how the instance-profile switches (`MUNINN_WIKI_READONLY`)
@@ -90,5 +90,54 @@ describe("optionalEnvFlag", () => {
     process.env[VAR] = "2";
     optionalEnvFlag(VAR);
     expect(records.filter((r) => r.level === "warning").length).toBe(2);
+  });
+});
+
+/**
+ * `CLAUDE_USAGE_URL` is nullable-when-unset rather than defaulted-plus-a-boolean,
+ * so "is this a claude-usage host?" and "what URL do we read?" are ONE fact
+ * derived from ONE trimmed read. The pair it replaced could disagree: a
+ * whitespace-only value made `configured` true (a non-empty string) while the URL
+ * fell back to the default — a card promising an error about a service the
+ * operator never actually pointed anywhere.
+ */
+describe("claudeUsageUrl", () => {
+  const VAR = "CLAUDE_USAGE_URL";
+  let prev: string | undefined;
+  let prevDb: string | undefined;
+
+  function config() {
+    // loadConfig requires DATABASE_URL; this suite is about one field.
+    prevDb = process.env.DATABASE_URL;
+    process.env.DATABASE_URL ??= "postgresql://x@127.0.0.1:5432/x";
+    try {
+      return loadConfig();
+    } finally {
+      if (prevDb === undefined) delete process.env.DATABASE_URL;
+    }
+  }
+
+  afterEach(() => {
+    if (prev === undefined) delete process.env[VAR];
+    else process.env[VAR] = prev;
+    prev = undefined;
+  });
+
+  test("unset ⇒ null — the route applies the default, the config claims nothing", () => {
+    prev = process.env[VAR];
+    delete process.env[VAR];
+    expect(config().claudeUsageUrl).toBeNull();
+  });
+
+  test("set ⇒ the trimmed value", () => {
+    prev = process.env[VAR];
+    process.env[VAR] = "  http://mini.local:9999/  ";
+    expect(config().claudeUsageUrl).toBe("http://mini.local:9999/");
+  });
+
+  test("whitespace-only ⇒ null, NOT a configured-but-garbage URL", () => {
+    prev = process.env[VAR];
+    process.env[VAR] = "   ";
+    expect(config().claudeUsageUrl).toBeNull();
   });
 });
