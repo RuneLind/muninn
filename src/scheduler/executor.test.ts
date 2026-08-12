@@ -1,4 +1,7 @@
 import { test, expect, describe, mock } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // Mock DB to prevent real SQL calls
 mock.module("../db/client.ts", () => ({
@@ -62,6 +65,25 @@ describe("parseHaikuJson", () => {
   });
 });
 
+/**
+ * Any cwd-less `spawnHaiku`/`callHaiku` call resolves its cwd via
+ * `resolveAgentCwd` and CREATES it — in the developer's real
+ * `~/.muninn/agent-cwd` unless redirected. Every test in this file that reaches a
+ * real spawn goes through here so the suite leaves nothing in `$HOME`.
+ */
+async function withScratchAgentCwd(body: () => Promise<void>): Promise<void> {
+  const previous = process.env.MUNINN_AGENT_CWD;
+  const scratch = mkdtempSync(join(tmpdir(), "muninn-executor-test-"));
+  process.env.MUNINN_AGENT_CWD = scratch;
+  try {
+    await body();
+  } finally {
+    if (previous === undefined) delete process.env.MUNINN_AGENT_CWD;
+    else process.env.MUNINN_AGENT_CWD = previous;
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
 describe("spawnHaiku timeout", () => {
   test("HAIKU_TIMEOUT_MS defaults to 60s", () => {
     expect(HAIKU_TIMEOUT_MS).toBe(60_000);
@@ -70,9 +92,11 @@ describe("spawnHaiku timeout", () => {
   test("kills hanging process after timeout", async () => {
     // Call spawnHaiku directly with a very short timeout.
     // "claude" won't be found or will hang — either way it exceeds 100ms.
-    await expect(
-      spawnHaiku("test", { source: "timeout-test", entrypoint: "test", botName: "test-bot", timeoutMs: 100 }),
-    ).rejects.toThrow(/timed out after 100ms|exited with code/);
+    await withScratchAgentCwd(async () => {
+      await expect(
+        spawnHaiku("test", { source: "timeout-test", entrypoint: "test", botName: "test-bot", timeoutMs: 100 }),
+      ).rejects.toThrow(/timed out after 100ms|exited with code/);
+    });
   });
 
   test("clearTimeout runs in finally block even on success", async () => {
@@ -105,8 +129,11 @@ describe("spawnHaiku timeout", () => {
 
 describe("callHaiku", () => {
   test("returns fallback when process fails", async () => {
-    const result = await callHaiku("test", "fallback-value", "test-source", undefined, undefined, 100);
-    expect(result).toBe("fallback-value");
+    // cwd-less, like the spawnHaiku timeout test above — same scratch guard.
+    await withScratchAgentCwd(async () => {
+      const result = await callHaiku("test", "fallback-value", "test-source", undefined, undefined, 100);
+      expect(result).toBe("fallback-value");
+    });
   });
 });
 

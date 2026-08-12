@@ -2,6 +2,7 @@ import { getDb } from "../db/client.ts";
 import { getLog } from "../logging.ts";
 import { pickPrimaryModel } from "../ai/result-parser.ts";
 import { StreamParser, type StreamProgressCallback } from "../ai/stream-parser.ts";
+import { spawnCwd } from "../ai/agent-cwd.ts";
 import { attachToolSpans } from "../core/tool-spans.ts";
 import type { ClaudeResult, ToolCall } from "../types.ts";
 import type { Tracer } from "../tracing/index.ts";
@@ -104,6 +105,14 @@ export function parseHaikuJson(stdout: string): any {
 export interface SpawnHaikuOptions extends HaikuTelemetry {
   source: string;
   entrypoint?: string;
+  /**
+   * Working directory for the `claude -p` spawn. Set it only when the run needs
+   * something from that directory — the email watcher passes `bots/<name>/` for
+   * Gmail MCP discovery, the extractors for the bot persona. Omitted ⇒
+   * {@link spawnCwd}'s agent home, a dedicated empty dir outside the repo, so the run
+   * neither loads muninn's CLAUDE.md/`.claude/` surface nor files its transcript
+   * into the developer's own project folder.
+   */
   cwd?: string;
   botName?: string;
   timeoutMs?: number;
@@ -111,8 +120,8 @@ export interface SpawnHaikuOptions extends HaikuTelemetry {
   /** Max output tokens for direct-SDK backends (anthropic). Ignored by the CLI spawn. */
   maxTokens?: number;
   /** System prompt (bot persona) for direct-SDK backends (anthropic `system` /
-   *  copilot `systemMessage`). **Ignored by the CLI spawn** — spawnHaiku runs with
-   *  `cwd: bots/<name>/`, so the Claude CLI already auto-loads the bot's CLAUDE.md
+   *  copilot `systemMessage`). **Ignored by the CLI spawn** — every caller that sets
+   *  this also passes `cwd: bots/<name>/`, so the Claude CLI auto-loads the bot's CLAUDE.md
    *  persona; passing it here too would double-inject. Only the prose callers (goal
    *  + task reminders) set this, to restore the persona voice the non-CLI backends
    *  otherwise send NO system prompt for. */
@@ -157,7 +166,8 @@ export async function spawnHaiku(
   const proc = Bun.spawn(
     args,
     {
-      cwd,
+      // No explicit cwd ⇒ muninn's own agent home, never the inherited repo root.
+      cwd: spawnCwd(cwd, botName),
       env: {
         ...process.env,
         CLAUDE_CODE_ENTRYPOINT: entrypoint,
