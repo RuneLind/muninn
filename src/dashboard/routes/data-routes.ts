@@ -31,6 +31,11 @@ import { getUserSettings } from "../../db/user-settings.ts";
 import { listConnectors, createConnector, updateConnector, deleteConnector } from "../../db/connectors.ts";
 import type { ConnectorType } from "../../bots/config.ts";
 import { parseIntParam, isValidUuid } from "./route-utils.ts";
+import { isWikiReadonly, WIKI_READONLY_REASON } from "../../wiki/readonly.ts";
+// Shared with the SCHEDULED path (`runChecker` in src/watchers/runner.ts) so the
+// manual trigger and the weekly run can never disagree about which watcher types
+// draft into a wiki.
+import { shouldSkipWikiDraftingRun } from "../../watchers/wiki-drafting.ts";
 
 const log = getLog("dashboard");
 
@@ -383,6 +388,19 @@ export function registerDataRoutes(app: Hono): void {
       if (!isValidUuid(id)) return c.json({ error: "Invalid watcher ID" }, 400);
       const watcher = await getWatcherById(id);
       if (!watcher) return c.json({ error: "Watcher not found" }, 404);
+      // Wiki-readonly instance: refuse the WIKI-DRAFTING watchers only. Both mint
+      // wiki proposals (and the gardener run also persists the offered snapshot
+      // the write owner's drain reads back), so force-running one here is the
+      // same spend-and-corrupt the guarded drafting routes refuse. Everything
+      // else — email, x, anthropic, the linter (report-only) and the committer
+      // (git, which the flag deliberately leaves open) — stays triggerable.
+      if (shouldSkipWikiDraftingRun(watcher.type, isWikiReadonly())) {
+        log.info("Watcher trigger refused for {id} ({type}) — instance is wiki-readonly", {
+          id,
+          type: watcher.type,
+        });
+        return c.json({ error: WIKI_READONLY_REASON, readonly: true }, 403);
+      }
       await forceRunWatcher(id);
       return c.json({ ok: true, queued: true });
     } catch (err) {

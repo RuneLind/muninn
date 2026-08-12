@@ -34,6 +34,7 @@ import {
   type SourceDraftTrigger,
 } from "../db/source-draft-attempts.ts";
 import { loadConfig } from "../config.ts";
+import { isWikiReadonly } from "../wiki/readonly.ts";
 import { docDateMs } from "./harvest.ts";
 import { todayOslo } from "./util.ts";
 import { DRAFT_TIMEOUT_MS } from "./backlog.ts";
@@ -569,14 +570,36 @@ export async function draftOneBacklogDoc(
  * The summary is handed in IN-PROCESS (no huginn re-fetch — best-effort ingest may
  * lag). Swallows every failure (logged) — a drafter hiccup must never fail the
  * capture job it rides behind. Skips silently when the bot has no `wikiDir`.
+ *
+ * **The readonly check lives HERE, not at the call sites.** Six capture
+ * summarizers call this, every one of them behind an auth-less HTTP route a
+ * readonly instance still serves — so a per-caller guard is six chances to miss
+ * one, and a seventh caller added later would be unguarded by default. The
+ * drafter persists a PROPOSAL rather than a page (so the write seams never see
+ * it) while spending a real model call, which is exactly the drafting-route
+ * rationale: a non-owner must not build a gate backlog it can never apply.
+ *
+ * Both seams are injectable so the guard is unit-testable without a DB or a model
+ * call; the defaults are the production wiring.
  */
 export function triggerSourceDraftFromCapture(
   botConfig: BotConfig,
   input: SourceDraftInput,
+  opts: {
+    isReadonly?: () => boolean;
+    run?: (bot: BotConfig, wikiDir: string, input: SourceDraftInput) => Promise<SourceDraftOutcome>;
+  } = {},
 ): void {
   if (!botConfig.wikiDir) return;
+  if ((opts.isReadonly ?? isWikiReadonly)()) {
+    log.info(
+      "Source drafter auto-trigger skipped for {collection}/{id} — instance is wiki-readonly",
+      { collection: input.collection, id: input.docId },
+    );
+    return;
+  }
   const wikiDir = botConfig.wikiDir;
-  void runSourceDraftForInput(botConfig, wikiDir, input)
+  void (opts.run ?? runSourceDraftForInput)(botConfig, wikiDir, input)
     .then((outcome) => {
       // A capture that produced nothing usable must not read like a capture that was
       // deliberately passed over: `error` and `degraded` skips are work thrown away —

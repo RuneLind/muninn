@@ -33,6 +33,7 @@ import { buildIndexEntry, buildSeeAlsoEdit, insertIndexLine, selectWirablePages 
 import { parseFrontmatter } from "../wiki/store.ts";
 import { stripFrontmatter } from "../wiki/render.ts";
 import { runWikiWriteExclusive } from "../wiki/queue.ts";
+import { isWikiReadonly, WIKI_READONLY_REASON } from "../wiki/readonly.ts";
 import { sha256, todayOslo } from "./util.ts";
 import { getLog } from "../logging.ts";
 
@@ -41,6 +42,12 @@ const log = getLog("gardener", "apply");
 export type ApplyOutcome =
   | { outcome: "applied"; writtenPath: string }
   | { outcome: "stale"; reason: string }
+  /**
+   * This instance is wiki-readonly (`MUNINN_WIKI_READONLY=1`). A REFUSAL, not a
+   * failure — the route answers 403 and leaves the proposal's status alone, so
+   * the write-owning instance can still approve it later.
+   */
+  | { outcome: "forbidden"; reason: string }
   | { outcome: "error"; reason: string };
 
 export interface ApplyDeps {
@@ -78,6 +85,12 @@ export interface ApplyDeps {
    * "source"]`); entities are never cataloged regardless.
    */
   catalogKinds?: string[];
+  /**
+   * Is this instance forbidden from writing wiki page content? Injectable for
+   * tests; defaults to the shared `isWikiReadonly` (`MUNINN_WIKI_READONLY`), so
+   * the guard is fail-closed for every caller including ones added later.
+   */
+  isReadonly?: () => boolean;
 }
 
 /**
@@ -202,6 +215,15 @@ export async function applyWikiProposal(
   proposal: WikiProposal,
   deps: ApplyDeps,
 ): Promise<ApplyOutcome> {
+  // Readonly instance: refuse before the queue is even entered. A refusal, not
+  // an error — the route answers 403 and leaves the row reviewable.
+  if ((deps.isReadonly ?? isWikiReadonly)()) {
+    log.warn("Wiki-gardener apply refused — instance is wiki-readonly: {path}", {
+      path: proposal.targetPath,
+    });
+    return { outcome: "forbidden", reason: WIKI_READONLY_REASON };
+  }
+
   // A holder, not a `let` — TS narrows a closure-assigned local to `null`.
   const tail: { commit?: () => Promise<void> } = {};
   const outcome = await runWikiWriteExclusive(deps.wikiDir, () =>

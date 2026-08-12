@@ -17,6 +17,7 @@ import { hivemindManager } from "./hivemind/manager.ts";
 import { researchMcpServer } from "./research/mcp-server.ts";
 import { startStaleHandoffSweep, stopStaleHandoffSweep } from "./chat/stale-sweep.ts";
 import { auditMcpAdapters } from "./startup/adapter-audit.ts";
+import { isWikiReadonly, WIKI_READONLY_ENV } from "./wiki/readonly.ts";
 import { Hono } from "hono";
 import type { Bot } from "grammy";
 
@@ -187,6 +188,18 @@ const server = Bun.serve<import("./chat/index.ts").ChatWsData>({
 
 log.info("Dashboard: http://localhost:{port}", { port: server.port });
 activityLog.push("system", `Dashboard running on http://localhost:${server.port}`);
+
+// The instance profile is env-only and otherwise invisible until two instances
+// write one wiki, so the non-owner says so at boot. Announced only when ON: a
+// line on every start of the write owner is noise, and the whole question here is
+// "which machine am I looking at?".
+if (isWikiReadonly()) {
+  log.info(
+    "{env}=1 — this instance is NOT the wiki write owner: programmatic wiki page writes are refused (git commits are still allowed). Profile is visible on /models.",
+    { env: WIKI_READONLY_ENV },
+  );
+  activityLog.push("system", `Wiki-readonly instance (${WIKI_READONLY_ENV}=1) — no wiki page writes`);
+}
 
 // Start real Telegram/Slack bots + scheduler
 for (const botConfig of botConfigs) {

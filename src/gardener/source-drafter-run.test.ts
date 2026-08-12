@@ -6,6 +6,7 @@ import {
   runSourceDraftBacklog,
   runSourceDraftForNewest,
   draftOneBacklogDoc,
+  triggerSourceDraftFromCapture,
   SOURCE_BACKLOG_DEFAULT_LIMIT,
   SOURCE_BACKLOG_MAX_LIMIT,
   type SourceBacklogDeps,
@@ -15,6 +16,7 @@ import type { ListedDoc as BacklogListedDoc, WikiRefs } from "../wiki/ingest-bac
 import type { RawFetchedDoc } from "./types.ts";
 import type { SourceDraftInput, SourceDraftOutcome } from "./source-drafter.ts";
 import type { BotConfig } from "../bots/config.ts";
+import { __setWikiReadonlyForTest } from "../wiki/readonly.ts";
 
 const emptyRefs: WikiRefs = { urls: new Set(), idTokens: new Set() };
 
@@ -478,5 +480,55 @@ describe("draftOneBacklogDoc — pre-model outcomes reach the ledger", () => {
     await draftOneBacklogDoc({ collection: "c", id: "b.md", url: "" }, deps, "   ");
     await draftOneBacklogDoc({ collection: "c", id: "c.md", url: "" }, deps);
     expect(seen).toEqual(["A Chosen Title", undefined, undefined]);
+  });
+});
+
+/**
+ * The AUTO trigger is the drafter's widest entry point — fire-and-forget from six
+ * capture summarizers, every one of them reachable over the tokenless HTTP surface
+ * a readonly instance still serves. Left unguarded it mints proposals and burns
+ * model calls on the machine that owns no writes.
+ */
+describe("triggerSourceDraftFromCapture — the readonly guard", () => {
+  const botWithWiki = { name: "jarvis", wikiDir: "/tmp/wiki" } as unknown as BotConfig;
+  const input = {
+    collection: "youtube-summaries",
+    docId: "vid00000001",
+    url: "https://youtu.be/vid00000001",
+    body: "A summary.",
+    category: "youtube",
+  } as unknown as SourceDraftInput;
+
+  const spyRun = () => {
+    const calls: string[] = [];
+    return {
+      calls,
+      run: async (_b: BotConfig, _d: string, i: SourceDraftInput) => {
+        calls.push(i.docId);
+        return { outcome: "covered" } as unknown as SourceDraftOutcome;
+      },
+    };
+  };
+
+  test("an injected readonly flag skips the draft — the same call drafts without it", () => {
+    const spy = spyRun();
+    triggerSourceDraftFromCapture(botWithWiki, input, { isReadonly: () => true, run: spy.run });
+    expect(spy.calls).toEqual([]);
+    // Same bot, same input, one flag apart: the guard is the only difference.
+    triggerSourceDraftFromCapture(botWithWiki, input, { isReadonly: () => false, run: spy.run });
+    expect(spy.calls).toEqual(["vid00000001"]);
+  });
+
+  test("it defaults to the shared flag — a caller that injects nothing is still guarded", () => {
+    const spy = spyRun();
+    __setWikiReadonlyForTest(true);
+    try {
+      triggerSourceDraftFromCapture(botWithWiki, input, { run: spy.run });
+      expect(spy.calls).toEqual([]);
+    } finally {
+      __setWikiReadonlyForTest();
+    }
+    triggerSourceDraftFromCapture(botWithWiki, input, { run: spy.run });
+    expect(spy.calls).toEqual(["vid00000001"]);
   });
 });

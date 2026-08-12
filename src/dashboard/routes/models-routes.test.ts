@@ -21,6 +21,7 @@ const DEPS: ModelsOverviewDeps = {
   getHaikuUsage: async () => [],
   getChatModels: async () => [],
   getWikiRegistry: () => [],
+  getHostname: () => "test-host",
 };
 
 // Isolate env knobs the assembly reads (Bun auto-loads the developer's .env,
