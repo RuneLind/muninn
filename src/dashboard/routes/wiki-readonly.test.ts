@@ -421,12 +421,13 @@ describe("MUNINN_WIKI_READONLY — client guard", () => {
     expect(isBlockedByReadonly(null)).toBe(false);
   });
 
-  test("a non-Element target fails CLOSED (no throw) — a throwing capture listener lets the click through", () => {
+  test("a non-Element target fails SOFT — never throws, and nothing blockable is lost", () => {
     // `e.target` is not always an Element: a click dispatched at `document`, a
     // synthetic/programmatic event, or a text node target all reach the guard.
     // `target.closest(...)` throws TypeError there — and a capture-phase listener
-    // that THROWS never reaches preventDefault, so the very click the guard
-    // exists to stop proceeds. Fail-open on the fail-closed path.
+    // that THROWS never reaches preventDefault, so EVERY blocked control on the
+    // page starts letting its click through. Returning false costs nothing: a
+    // non-Element cannot match a selector, so it was never a mutation control.
     for (const target of [{}, { closest: "not a function" }, "text"] as unknown as (Element | null)[]) {
       expect(() => isBlockedByReadonly(target)).not.toThrow();
       expect(isBlockedByReadonly(target)).toBe(false);

@@ -32,6 +32,11 @@ export function __resetEnvFlagWarningsForTest(): void {
   warnedEnvFlagValues.clear();
 }
 
+/** Spellings that mean "off" explicitly. Turning a flag OFF on purpose is not a
+ *  misconfiguration, so these are recognized and silent — unlike `on`/`yes`,
+ *  which ASK for ON and would silently get OFF (the failure the warn reports). */
+const OFF_VALUES = new Set(["0", "false", "no", "off"]);
+
 /**
  * Boolean env flag accepting `1` / `true` (case-insensitive, trimmed). Distinct
  * from the `=== "true"` idiom used below because the flags that use it are
@@ -41,11 +46,14 @@ export function __resetEnvFlagWarningsForTest(): void {
  * but says so once. The failure this reports is silent-OFF:
  * `MUNINN_WIKI_READONLY=yes` reads as "this instance owns wiki writes", which is
  * precisely the misconfiguration the flag exists to prevent, arriving with no
- * signal at all.
+ * signal at all. An explicit OFF spelling (`OFF_VALUES`) is therefore NOT that
+ * failure and warns about nothing — warning on `MUNINN_WIKI_READONLY=0` teaches
+ * the operator to ignore the one line that matters.
  */
 export function optionalEnvFlag(name: string): boolean {
   const raw = (process.env[name] || "").trim().toLowerCase();
   if (raw === "1" || raw === "true") return true;
+  if (OFF_VALUES.has(raw)) return false;
   if (raw !== "" && !warnedEnvFlagValues.has(`${name}=${raw}`)) {
     warnedEnvFlagValues.add(`${name}=${raw}`);
     log.warn(

@@ -32,21 +32,12 @@ import { listConnectors, createConnector, updateConnector, deleteConnector } fro
 import type { ConnectorType } from "../../bots/config.ts";
 import { parseIntParam, isValidUuid } from "./route-utils.ts";
 import { isWikiReadonly, WIKI_READONLY_REASON } from "../../wiki/readonly.ts";
-import type { WatcherType } from "../../types.ts";
+// Shared with the SCHEDULED path (`runChecker` in src/watchers/runner.ts) so the
+// manual trigger and the weekly run can never disagree about which watcher types
+// draft into a wiki.
+import { WIKI_DRAFTING_WATCHER_TYPES } from "../../watchers/wiki-drafting.ts";
 
 const log = getLog("dashboard");
-
-/**
- * Watcher types whose run DRAFTS into a wiki — refused on a readonly instance.
- *
- * Deliberately not "every wiki-ish type": `wiki-linter` is report-only and
- * `wiki-committer` only commits (git is exactly what `MUNINN_WIKI_READONLY`
- * leaves open, since the readonly instance's repo-sync loop needs it).
- */
-const WIKI_DRAFTING_WATCHER_TYPES: ReadonlySet<WatcherType> = new Set<WatcherType>([
-  "wiki-gardener",
-  "consolidation-gardener",
-]);
 
 export function registerDataRoutes(app: Hono): void {
   app.get("/api/openapi.json", (c) => c.json(spec));

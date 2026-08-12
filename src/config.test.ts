@@ -43,6 +43,21 @@ describe("optionalEnvFlag", () => {
     expect(optionalEnvFlag(VAR)).toBe(false);
   });
 
+  test("explicit OFF spellings (0/false/no/off, case-insensitive, trimmed) are OFF and warn about NOTHING", async () => {
+    // The warn exists to report SILENT-OFF: a value the operator meant as ON
+    // that reads as OFF. `MUNINN_WIKI_READONLY=0` is not that — it is the flag
+    // being turned off on purpose, and it got the same "unrecognized" warning as
+    // a typo, which teaches operators to ignore the one line that matters.
+    // NB the asymmetry with `on` (below) is deliberate, not an oversight: `off`
+    // asks for OFF and gets OFF, while `on` asks for ON and silently gets OFF.
+    const records = await capture();
+    for (const raw of ["0", "false", "FALSE", " false ", "no", "NO", "off", "Off", " 0 "]) {
+      process.env[VAR] = raw;
+      expect(`${raw} → ${optionalEnvFlag(VAR)}`).toBe(`${raw} → false`);
+    }
+    expect(records.filter((r) => r.level === "warning")).toEqual([]);
+  });
+
   test("an unrecognized non-empty value warns ONCE, naming the var and that it is OFF", async () => {
     const records = await capture();
     process.env[VAR] = "yes";

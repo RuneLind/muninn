@@ -1,5 +1,12 @@
 # Test-scoped preload. Deliberately NOT the top-level `preload` key, which would
 # also run for `bun run start` / `bun run dev` — the point is to neutralize an
 # instance-profile env flag for TESTS only. See src/test/preload.ts.
+#
+# This path is resolved against the CURRENT WORKING DIRECTORY, not against this
+# file, and a bunfig preload that fails to resolve is ignored SILENTLY (unlike
+# `--preload`, which errors) — so `cd src/wiki && bun test ./page-write.test.ts`
+# on a host whose .env sets MUNINN_WIKI_READONLY=1 is NOT hermetic (measured: 9
+# failures). Run the suite from the repo root; from a subdirectory pass the
+# preload yourself (`bun test --preload ../test/preload.ts …`).
 [test]
 preload = ["./src/test/preload.ts"]

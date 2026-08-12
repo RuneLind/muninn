@@ -1,5 +1,8 @@
-import { test, expect, describe, beforeEach } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { shouldSkipWikiDraftingRun } from "./wiki-drafting.ts";
+import { __setWikiReadonlyForTest } from "../wiki/readonly.ts";
 import {
+  runChecker,
   contentHash,
   extractProperNouns,
   formatAlerts,
@@ -507,5 +510,101 @@ describe("checker in-flight guard", () => {
   test("different watcher ids don't block each other", () => {
     expect(claimChecker("w1", TIMEOUT, 1000)).not.toBeNull();
     expect(claimChecker("w2", TIMEOUT, 1000)).not.toBeNull();
+  });
+});
+
+// ── wiki-readonly guard on SCHEDULED gardener runs ────────────────────────
+//
+// The SEAM test (that `runChecker` never reaches the two gardener checkers on a
+// readonly instance) lives in `runner-readonly.test.ts`: proving the checker was
+// not invoked needs `mock.module`, and this chunk already has a file mocking
+// `../logging.ts`, which makes a log-based assertion invisible here. What stays
+// is the pure predicate both call sites — the manual trigger route and the
+// scheduled run — share.
+
+const wikiCheckerSpies = () => {
+  const calls: string[] = [];
+  const alertsFrom = (source: string): WatcherAlert[] => [
+    { id: `${source}-1`, source, summary: "ran", urgency: "low" },
+  ];
+  const spy = (name: string) => async () => {
+    calls.push(name);
+    return alertsFrom(name);
+  };
+  return {
+    calls,
+    alertsFrom,
+    checkers: {
+      checkWikiGardener: spy("wiki-gardener"),
+      checkWikiLinter: spy("wiki-linter"),
+      checkWikiCommitter: spy("wiki-committer"),
+      checkConsolidationGardener: spy("consolidation-gardener"),
+    } as any,
+  };
+};
+
+const readonlyWatcher = (type: string): Watcher => ({
+  id: "w-ro",
+  userId: "u-1",
+  botName: "jarvis",
+  name: `${type} row`,
+  type: type as any,
+  config: {},
+  intervalMs: 604_800_000,
+  enabled: true,
+  lastRunAt: null,
+  lastNotifiedIds: [],
+  forceNextRun: false,
+  createdAt: Date.now(),
+  updatedAt: Date.now(),
+});
+const fakeBot = { name: "jarvis", dir: "/nonexistent", persona: "", telegramAllowedUserIds: [], slackAllowedUserIds: [] } as any;
+
+describe("runChecker — wiki-readonly guard", () => {
+  // Asserted on WHICH CHECKER THE RUN REACHES, not on the returned `[]`: every
+  // checker degrades to `[]` on a degraded bot config, so an empty array proves
+  // nothing about whether the drafting work ran.
+  afterEach(() => __setWikiReadonlyForTest());
+
+  test("a readonly instance never reaches the wiki-DRAFTING checkers", async () => {
+    __setWikiReadonlyForTest(true);
+    const { calls, checkers } = wikiCheckerSpies();
+    expect(await runChecker(readonlyWatcher("wiki-gardener"), fakeBot, undefined, checkers)).toEqual([]);
+    expect(await runChecker(readonlyWatcher("consolidation-gardener"), fakeBot, undefined, checkers)).toEqual([]);
+    expect(calls).toEqual([]);
+  });
+
+  test("the write owner still runs them — the guard is the FLAG, not the type", async () => {
+    __setWikiReadonlyForTest(false);
+    const { calls, alertsFrom, checkers } = wikiCheckerSpies();
+    expect(await runChecker(readonlyWatcher("wiki-gardener"), fakeBot, undefined, checkers))
+      .toEqual(alertsFrom("wiki-gardener"));
+    expect(await runChecker(readonlyWatcher("consolidation-gardener"), fakeBot, undefined, checkers))
+      .toEqual(alertsFrom("consolidation-gardener"));
+    expect(calls).toEqual(["wiki-gardener", "consolidation-gardener"]);
+  });
+
+  test("the report-only linter and the git committer run on a readonly instance too", async () => {
+    __setWikiReadonlyForTest(true);
+    const { calls, alertsFrom, checkers } = wikiCheckerSpies();
+    expect(await runChecker(readonlyWatcher("wiki-linter"), fakeBot, undefined, checkers))
+      .toEqual(alertsFrom("wiki-linter"));
+    expect(await runChecker(readonlyWatcher("wiki-committer"), fakeBot, undefined, checkers))
+      .toEqual(alertsFrom("wiki-committer"));
+    expect(calls).toEqual(["wiki-linter", "wiki-committer"]);
+  });
+});
+
+describe("shouldSkipWikiDraftingRun", () => {
+  test("only the two wiki-DRAFTING types, and only when readonly", () => {
+    for (const type of ["wiki-gardener", "consolidation-gardener"] as const) {
+      expect(`${type} readonly: ${shouldSkipWikiDraftingRun(type, true)}`).toBe(`${type} readonly: true`);
+      expect(`${type} write-owner: ${shouldSkipWikiDraftingRun(type, false)}`).toBe(`${type} write-owner: false`);
+    }
+    // wiki-linter is report-only and wiki-committer is git — the flag deliberately
+    // leaves both open, exactly as the trigger route does.
+    for (const type of ["wiki-linter", "wiki-committer", "email", "x", "anthropic", "news"] as const) {
+      expect(`${type}: ${shouldSkipWikiDraftingRun(type, true)}`).toBe(`${type}: false`);
+    }
   });
 });

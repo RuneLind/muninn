@@ -12,6 +12,8 @@ import { checkWikiGardener } from "./wiki-gardener.ts";
 import { checkWikiLinter } from "./wiki-linter.ts";
 import { checkWikiCommitter } from "./wiki-committer.ts";
 import { checkConsolidationGardener } from "./consolidation-gardener.ts";
+import { shouldSkipWikiDraftingRun } from "./wiki-drafting.ts";
+import { isWikiReadonly, WIKI_READONLY_REASON } from "../wiki/readonly.ts";
 import { activityLog } from "../observability/activity-log.ts";
 import { agentStatus, getConnectorLabel, createProgressCallback } from "../observability/agent-status.ts";
 import { DEFAULT_MODEL, type HaikuTelemetry, type HaikuUsage } from "../scheduler/executor.ts";
@@ -629,9 +631,57 @@ async function sendToSlackChannels(botName: string, markdown: string, channels: 
   }
 }
 
-async function runChecker(watcher: Watcher, botConfig: BotConfig, telemetry?: HaikuTelemetry): Promise<WatcherAlert[]> {
+/**
+ * The four WIKI-family checkers, injectable. Scoped to this family on purpose:
+ * they are exactly the ones `MUNINN_WIKI_READONLY` partitions (the two drafting
+ * types are refused, linter + committer stay open), and the readonly guard's
+ * whole claim is about which of them a run REACHES — which an empty return value
+ * cannot show, since every checker degrades to `[]` on a degraded bot config.
+ * A `mock.module` spy would leak across the `bun test src/watchers/` chunk into
+ * the gardener/linter tests beside it, so the seam is a parameter instead.
+ */
+export interface WikiCheckers {
+  checkWikiGardener: typeof checkWikiGardener;
+  checkWikiLinter: typeof checkWikiLinter;
+  checkWikiCommitter: typeof checkWikiCommitter;
+  checkConsolidationGardener: typeof checkConsolidationGardener;
+}
+
+const DEFAULT_WIKI_CHECKERS: WikiCheckers = {
+  checkWikiGardener,
+  checkWikiLinter,
+  checkWikiCommitter,
+  checkConsolidationGardener,
+};
+
+/**
+ * Dispatch one watcher to its checker. Exported (with the checker seam) for the
+ * readonly-guard test — it is the single seam where every scheduled checker is
+ * invoked, and the one the manual-trigger route's guard did not cover.
+ */
+export async function runChecker(
+  watcher: Watcher,
+  botConfig: BotConfig,
+  telemetry?: HaikuTelemetry,
+  checkers: WikiCheckers = DEFAULT_WIKI_CHECKERS,
+): Promise<WatcherAlert[]> {
   const cwd = botConfig.dir;
   const botName = botConfig.name;
+  // A readonly instance must not DRAFT into a wiki. `POST /api/watchers/:id/trigger`
+  // already refuses these two types, but the scheduler reaches the same checkers
+  // here — so on a readonly box left with SCHEDULER_ENABLED=true the weekly
+  // gardeners kept minting proposals (and spending model calls) that only the
+  // write owner can ever apply. `wiki-linter` (report-only) and `wiki-committer`
+  // (git, deliberately exempt from the flag) stay unguarded.
+  if (shouldSkipWikiDraftingRun(watcher.type, isWikiReadonly())) {
+    log.info("Skipping {type} watcher \"{name}\" — {reason}", {
+      botName,
+      type: watcher.type,
+      name: watcher.name,
+      reason: WIKI_READONLY_REASON,
+    });
+    return [];
+  }
   switch (watcher.type) {
     case "email":
       return await checkEmail(watcher, cwd, botName, telemetry);
@@ -649,22 +699,22 @@ async function runChecker(watcher: Watcher, botConfig: BotConfig, telemetry?: Ha
       // connected trace) rather than a disconnected self-minted root. The gardener
       // ignores `onProgress`/`onUsage` (no spawnHaiku) — so its watcher span never
       // becomes token-bearing (tokens ride the `wiki_gardener_*` extractor rows).
-      return await checkWikiGardener(watcher, botConfig, telemetry);
+      return await checkers.checkWikiGardener(watcher, botConfig, telemetry);
     case "wiki-linter":
       // Report-only lint over the bot's wikiDir — needs the full BotConfig for
       // its wikiDir; never writes to the wiki or DB.
-      return await checkWikiLinter(watcher, botConfig);
+      return await checkers.checkWikiLinter(watcher, botConfig);
     case "wiki-committer":
       // Daily sweeper: commits uncommitted wiki-subtree changes on the default
       // branch. Needs the full BotConfig for its wikiDir + wikiAutoCommit.push.
-      return await checkWikiCommitter(watcher, botConfig);
+      return await checkers.checkWikiCommitter(watcher, botConfig);
     case "consolidation-gardener":
       // Weekly consolidation: clusters a wiki's OWN pages and drafts synthesis-page
       // proposals into the gate. Threads the runner's `watcher:consolidation-gardener`
       // span through `telemetry.tracer` so each draft's `claude` child span attaches
       // under it (like wiki-gardener). Resolves the wiki + synthesis bot itself from
       // `watcher.config.wiki`.
-      return await checkConsolidationGardener(watcher, botConfig, telemetry);
+      return await checkers.checkConsolidationGardener(watcher, botConfig, telemetry);
     default:
       log.warn("Watcher type \"{type}\" not yet implemented", { type: watcher.type });
       return [];
