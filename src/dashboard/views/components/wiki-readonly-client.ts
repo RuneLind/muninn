@@ -74,13 +74,13 @@ export function wikiReadonlyFlag(win: unknown = globalThis): boolean {
  * the selector list is unit-testable without a DOM event.
  *
  * The `closest` capability test is load-bearing, not defensive noise: `e.target`
- * is only *usually* an Element (a click dispatched at `document`, a synthetic
- * event, a text-node target are all reachable), and a capture-phase listener that
+ * is only *usually* an Element (a click dispatched at `document` or a synthetic
+ * event can carry a non-Element target), and a capture-phase listener that
  * THROWS never reaches its `preventDefault`. So the test FAILS SOFT — it never
- * throws — and nothing blockable is lost by returning false: a non-Element cannot
- * match a selector, so it was never a mutation control in the first place. The
- * clicks it would have let through are the ones the THROW let through, on every
- * blocked control on the page.
+ * throws — and nothing blockable is lost by returning false: a non-Element
+ * target carries no mutation control (real clicks on a blocked button retarget
+ * to the Element), so the only clicks let through are ones the THROW would have
+ * let through anyway.
  */
 export function isBlockedByReadonly(target: Element | null): boolean {
   if (typeof (target as Element | null)?.closest !== "function") return false;

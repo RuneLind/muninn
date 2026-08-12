@@ -35,7 +35,7 @@ import { isWikiReadonly, WIKI_READONLY_REASON } from "../../wiki/readonly.ts";
 // Shared with the SCHEDULED path (`runChecker` in src/watchers/runner.ts) so the
 // manual trigger and the weekly run can never disagree about which watcher types
 // draft into a wiki.
-import { WIKI_DRAFTING_WATCHER_TYPES } from "../../watchers/wiki-drafting.ts";
+import { shouldSkipWikiDraftingRun } from "../../watchers/wiki-drafting.ts";
 
 const log = getLog("dashboard");
 
@@ -394,7 +394,7 @@ export function registerDataRoutes(app: Hono): void {
       // same spend-and-corrupt the guarded drafting routes refuse. Everything
       // else — email, x, anthropic, the linter (report-only) and the committer
       // (git, which the flag deliberately leaves open) — stays triggerable.
-      if (WIKI_DRAFTING_WATCHER_TYPES.has(watcher.type) && isWikiReadonly()) {
+      if (shouldSkipWikiDraftingRun(watcher.type, isWikiReadonly())) {
         log.info("Watcher trigger refused for {id} ({type}) — instance is wiki-readonly", {
           id,
           type: watcher.type,

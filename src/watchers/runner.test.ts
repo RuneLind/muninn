@@ -15,6 +15,7 @@ import {
   newWatcherUsage,
   accumulateWatcherUsage,
   isQuietHoursRunExempt,
+  type WikiCheckers,
 } from "./runner.ts";
 import { DEFAULT_MODEL } from "../scheduler/executor.ts";
 import type { Watcher, WatcherAlert } from "../types.ts";
@@ -515,12 +516,12 @@ describe("checker in-flight guard", () => {
 
 // ── wiki-readonly guard on SCHEDULED gardener runs ────────────────────────
 //
-// The SEAM test (that `runChecker` never reaches the two gardener checkers on a
-// readonly instance) lives in `runner-readonly.test.ts`: proving the checker was
-// not invoked needs `mock.module`, and this chunk already has a file mocking
-// `../logging.ts`, which makes a log-based assertion invisible here. What stays
-// is the pure predicate both call sites — the manual trigger route and the
-// scheduled run — share.
+// The SEAM tests (that `runChecker` never reaches the two gardener checkers on a
+// readonly instance) are the `runChecker — wiki-readonly guard` describe below,
+// via the injectable `checkers` seam — NOT `mock.module`: this chunk already has
+// a file mocking `../logging.ts`, which makes log-based assertions invisible
+// here, and a second `mock.module` file in the chunk would leak into the
+// gardener/linter tests beside it.
 
 const wikiCheckerSpies = () => {
   const calls: string[] = [];
@@ -539,7 +540,7 @@ const wikiCheckerSpies = () => {
       checkWikiLinter: spy("wiki-linter"),
       checkWikiCommitter: spy("wiki-committer"),
       checkConsolidationGardener: spy("consolidation-gardener"),
-    } as any,
+    } satisfies WikiCheckers,
   };
 };
 
