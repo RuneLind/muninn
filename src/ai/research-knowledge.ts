@@ -20,9 +20,8 @@ export interface ResearchKnowledgeOptions {
   collections?: string[];
   /** Optional per-search limit forwarded to /api/search?limit=. */
   limit?: number;
-  /** Bot context for tracing + haiku spawn cwd. */
+  /** Bot context for tracing + Haiku backend resolution. */
   botName: string;
-  botDir?: string;
   /** Huginn base URL (e.g. http://localhost:8321). */
   knowledgeApiUrl: string;
   /** Optional parent trace context — root span attaches under it. */
@@ -96,7 +95,7 @@ interface SearchResponse {
 }
 
 export async function researchKnowledge(opts: ResearchKnowledgeOptions): Promise<ResearchKnowledgeResult> {
-  const { question, collections, limit, botName, botDir, knowledgeApiUrl, traceContext, userId, connector, haikuBackend } = opts;
+  const { question, collections, limit, botName, knowledgeApiUrl, traceContext, userId, connector, haikuBackend } = opts;
 
   const tracer = new Tracer("research_knowledge", {
     botName,
@@ -105,7 +104,7 @@ export async function researchKnowledge(opts: ResearchKnowledgeOptions): Promise
     parentId: traceContext?.parentId,
   });
 
-  const decomposition = await decomposeQuestion({ question, botName, botDir, connector, haikuBackend, tracer });
+  const decomposition = await decomposeQuestion({ question, botName, connector, haikuBackend, tracer });
   tracer.addChildSpan(
     "knowledge_decompose",
     "knowledge_decompose",

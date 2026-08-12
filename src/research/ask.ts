@@ -121,7 +121,6 @@ export async function streamResearchAnswer(
       collections,
       limit: PER_SEARCH_LIMIT,
       botName: botConfig.name,
-      botDir: botConfig.dir,
       knowledgeApiUrl: config.knowledgeApiUrl,
       connector: botConfig.connector,
       haikuBackend: botConfig.haikuBackend,

@@ -1856,7 +1856,7 @@ function silentAlert(trackingIds: string[]): WatcherAlert {
   };
 }
 
-export async function checkX(watcher: Watcher, _cwd?: string, botName?: string, telemetry?: HaikuTelemetry): Promise<WatcherAlert[]> {
+export async function checkX(watcher: Watcher, botName?: string, telemetry?: HaikuTelemetry): Promise<WatcherAlert[]> {
   const config = watcher.config as XWatcherConfig;
   const known = new Set(watcher.lastNotifiedIds);
 

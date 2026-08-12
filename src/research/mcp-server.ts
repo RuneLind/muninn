@@ -17,7 +17,6 @@ interface Session {
 
 interface BotEntry {
   botName: string;
-  botDir: string;
   knowledgeApiUrl: string;
   /** Resolved once at registration from the bot's .mcp.json KNOWLEDGE_COLLECTIONS.
    *  `undefined` means "search all collections huginn knows about". */
@@ -176,7 +175,6 @@ function createMcpServerForBot(entry: BotEntry): McpServer {
           collections: effectiveCollections,
           limit,
           botName: entry.botName,
-          botDir: entry.botDir,
           knowledgeApiUrl: entry.knowledgeApiUrl,
           connector: entry.connector,
           haikuBackend: entry.haikuBackend,

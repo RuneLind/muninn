@@ -23,8 +23,6 @@ export type ReengageRole = "build" | "test";
 
 export interface ClassifyOptions {
   botName: string;
-  /** Bot dir = cwd for the Haiku call (CLI/Copilot auth + MCP discovery). */
-  botDir: string;
   connector?: ConnectorType;
   haikuBackend?: HaikuBackend;
   /** Telemetry tracer for the enclosing `devloop_autostep` turn. Threaded into
@@ -77,7 +75,6 @@ export async function classifyReengageRole(
     const haiku = await callHaiku(prompt, {
       source: "devloop-reengage-classify",
       entrypoint: "devloop-classifier",
-      cwd: opts.botDir,
       botName: opts.botName,
       connector: opts.connector,
       haikuBackend: opts.haikuBackend,

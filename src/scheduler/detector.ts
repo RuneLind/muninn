@@ -13,7 +13,6 @@ const log = getLog("scheduler", "detector");
 interface DetectionInput {
   userId: string;
   botName: string;
-  botDir?: string;
   userMessage: string;
   assistantResponse: string;
   platform?: Platform;
@@ -136,7 +135,6 @@ export function extractScheduleAsync(
     botName: input.botName,
     userId: input.userId,
     prompt,
-    cwd: input.botDir,
     connector: input.connector,
     haikuBackend: input.haikuBackend,
     log,

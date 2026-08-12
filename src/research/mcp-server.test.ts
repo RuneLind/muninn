@@ -20,8 +20,8 @@ afterAll(async () => {
 
 describe("ResearchMcpServer HTTP surface", () => {
   test("/health returns the registered bot list", async () => {
-    server.registerBot({ botName: "alpha", botDir: "/tmp/alpha", knowledgeApiUrl: "http://huginn" });
-    server.registerBot({ botName: "beta", botDir: "/tmp/beta", knowledgeApiUrl: "http://huginn" });
+    server.registerBot({ botName: "alpha", knowledgeApiUrl: "http://huginn" });
+    server.registerBot({ botName: "beta", knowledgeApiUrl: "http://huginn" });
 
     const res = await fetch(`${base}/health`);
     expect(res.status).toBe(200);
@@ -37,7 +37,7 @@ describe("ResearchMcpServer HTTP surface", () => {
   });
 
   test("unregisterBot removes the bot from /health", async () => {
-    server.registerBot({ botName: "gamma", botDir: "/tmp/gamma", knowledgeApiUrl: "http://huginn" });
+    server.registerBot({ botName: "gamma", knowledgeApiUrl: "http://huginn" });
     server.unregisterBot("gamma");
     const res = await fetch(`${base}/health`);
     const body = await res.json() as { bots: string[] };

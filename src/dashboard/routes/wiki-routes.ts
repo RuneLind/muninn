@@ -1854,7 +1854,6 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       mode,
       sel: mode === "sel" ? sel : undefined,
       ctx: mode === "sel" ? ctx : undefined,
-      botDir: botConfig?.dir,
       baseHash,
       ...(bodyLen !== undefined ? { bodyLen } : {}),
       annotatable,
@@ -2295,7 +2294,6 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         source: "wiki_remember",
         entrypoint: `${bot.name}-wiki-remember`,
         botName: bot.name,
-        cwd: bot.dir,
         connector: bot.connector,
         haikuBackend: bot.haikuBackend,
       });

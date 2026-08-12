@@ -44,3 +44,155 @@ export function loadRawMcpServers(botDir: string): Record<string, RawMcpServerEn
     return null;
   }
 }
+
+/**
+ * A bot's `.mcp.json` re-expressed as a **location-independent** JSON string,
+ * suitable for `claude --mcp-config <string>` (the CLI accepts a literal JSON
+ * document, not just a path — verified against CLI 2.1.228).
+ *
+ * Why the rewrite rather than passing the file path: the Claude CLI ignores an
+ * stdio entry's own `cwd` field and spawns the server from the CLI's cwd, so
+ * jarvis's `uv --directory ../../../huginn` only resolves while the CLI itself
+ * runs in `bots/<name>/`. A `spawnHaiku` call now runs in muninn's agent home
+ * instead (outside the checkout), which would silently break that server. Every
+ * relative `./`/`../` token in `args`, plus the entry's `cwd`, is therefore
+ * pre-resolved against the bot dir — the same fix `benchmarks/scratch-bot.ts`
+ * applies for the same reason. `env` values are left verbatim: the documented
+ * convention (root CLAUDE.md, "Config Sync") is that env blocks are read
+ * literally, so rewriting them would change meaning, not preserve it.
+ *
+ * Returns `null` when the bot has no readable `.mcp.json`, or when it declares
+ * no servers — in both cases there is nothing to pass and the caller should
+ * omit the flag entirely rather than hand the CLI an empty server set.
+ *
+ * **Known limit:** only `./`- and `../`-prefixed tokens are rewritten, in `args`
+ * and in `command`. A BARE relative token (`scripts/adapter.py`) and a `~`-prefixed
+ * one are left alone, because neither is distinguishable from a value that is
+ * meant to be literal — a bare `command` is a PATH lookup, and a bare arg is
+ * usually a subcommand. No bot on this machine uses those shapes; one that did
+ * would find its server failing to start from the agent home. Prefer an absolute
+ * path or an explicit `./` in `.mcp.json`.
+ */
+export function buildInlineMcpConfig(botDir: string): string | null {
+  const servers = loadRawMcpServers(botDir);
+  if (!servers || Object.keys(servers).length === 0) return null;
+
+  const relocate = (token: string): string =>
+    token.startsWith("./") || token.startsWith("../") ? resolve(botDir, token) : token;
+
+  const resolved: Record<string, RawMcpServerEntry> = {};
+  for (const [name, entry] of Object.entries(servers)) {
+    // Remote servers carry a URL and never a filesystem path. Keyed on the URL
+    // rather than on `type`, because `{"url": "..."}` with no `type` is legal
+    // shorthand — reading `type` alone stamps a meaningless `cwd` onto it.
+    if (entry.type === "http" || entry.type === "sse" || (entry.url && !entry.command)) {
+      resolved[name] = entry;
+      continue;
+    }
+    resolved[name] = {
+      ...entry,
+      // `command` is relocated too: `"command": "./scripts/mcp.sh"` resolved
+      // against the bot dir under the old spawn cwd and would otherwise now
+      // resolve against the agent home and fail to start.
+      ...(entry.command ? { command: relocate(entry.command) } : {}),
+      ...(entry.args ? { args: entry.args.map((a) => (typeof a === "string" ? relocate(a) : a)) } : {}),
+      cwd: resolveBotCwd(entry.cwd, botDir),
+    };
+  }
+  return JSON.stringify({ mcpServers: resolved });
+}
+
+/**
+ * A bot's tool PERMISSIONS as a JSON string for `claude --settings <string>`.
+ *
+ * Two files, merged, because `--settings` is not repeatable and the CLI's own
+ * discovery reads both: `.claude/settings.json` (checked in / synced) and
+ * `.claude/settings.local.json` (per-machine — **and the file Claude Code itself
+ * writes when a permission is approved in place**). Passing only the first means
+ * a tool the user granted interactively is denied on the next watcher run, which
+ * surfaces as an empty inbox rather than an error. `bots/capra/` carries a local
+ * file today.
+ *
+ * Merge rule mirrors the CLI's precedence: local wins per key, except the
+ * `permissions` allow/deny/ask lists, which are UNIONED (order-preserving,
+ * de-duplicated) — a local file that grants one extra tool must not silently
+ * revoke everything the shared file granted.
+ *
+ * Returns `null` when neither file is readable, so the caller omits the flag.
+ *
+ * **Known limits**, both the same shape as {@link buildInlineMcpConfig}'s:
+ *  - **No path relocation.** A `hooks` command, an `additionalDirectories` entry
+ *    or a path-scoped rule like `Read(./notes/**)` resolved against the bot dir
+ *    under the old spawn cwd and now resolves against the agent home. No bot uses
+ *    those shapes today; one that did would find them silently missing.
+ *  - **The union carries local grants for servers the fence excludes.** capra's
+ *    `settings.local.json` allows `mcp__jetbrains__execute_terminal_command`, so
+ *    the merged document grants it — harmless only because `--strict-mcp-config`
+ *    keeps the jetbrains server off the surface entirely. Anything that later
+ *    weakens that fence re-exposes the server WITH a standing grant.
+ */
+export function buildInlineSettings(botDir: string): string | null {
+  const read = (name: string): Record<string, unknown> | null => {
+    const path = join(botDir, ".claude", name);
+    if (!existsSync(path)) return null;
+    try {
+      const parsed = JSON.parse(readFileSync(path, "utf-8"));
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const shared = read("settings.json");
+  const local = read("settings.local.json");
+  if (!shared && !local) return null;
+
+  const merged: Record<string, unknown> = { ...(shared ?? {}), ...(local ?? {}) };
+
+  // Guarded, not cast: `{"permissions": "all"}` spread character-by-character
+  // yields `{"0":"a","1":"l","2":"l"}` — garbage the CLI would silently accept.
+  const asRecord = (v: unknown): Record<string, unknown> =>
+    v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+  const sharedPerms = asRecord(shared?.permissions);
+  const localPerms = asRecord(local?.permissions);
+  if (shared?.permissions || local?.permissions) {
+    const perms: Record<string, unknown> = { ...sharedPerms, ...localPerms };
+    for (const key of ["allow", "deny", "ask"]) {
+      const a = Array.isArray(sharedPerms[key]) ? (sharedPerms[key] as unknown[]) : [];
+      const b = Array.isArray(localPerms[key]) ? (localPerms[key] as unknown[]) : [];
+      if (a.length || b.length) perms[key] = [...new Set([...a, ...b])];
+    }
+    merged.permissions = perms;
+  }
+  return JSON.stringify(merged);
+}
+
+/**
+ * Bot config files that EXIST but do not parse — the corruption both loaders above
+ * deliberately swallow (they degrade to "absent", which is the right runtime
+ * behaviour and the wrong thing to be silent about).
+ *
+ * Absence and corruption need separate signals because they are not equally
+ * likely to be intentional: a bot with no `.mcp.json` is a normal tool-less bot,
+ * while a trailing comma in one is always a mistake. The gap this closes is
+ * sharper still — `buildInlineSettings` returns non-null when EITHER settings file
+ * parses, so a broken `settings.json` alongside a healthy `settings.local.json`
+ * produced a spawn whose Gmail calls were all denied, with nothing logged.
+ */
+export function unreadableBotConfigs(botDir: string): string[] {
+  const candidates = [
+    join(botDir, ".mcp.json"),
+    join(botDir, ".claude", "settings.json"),
+    join(botDir, ".claude", "settings.local.json"),
+  ];
+  const broken: string[] = [];
+  for (const path of candidates) {
+    if (!existsSync(path)) continue;
+    try {
+      JSON.parse(readFileSync(path, "utf-8"));
+    } catch {
+      broken.push(path);
+    }
+  }
+  return broken;
+}

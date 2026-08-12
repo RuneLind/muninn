@@ -665,7 +665,9 @@ export async function runChecker(
   telemetry?: HaikuTelemetry,
   checkers: WikiCheckers = DEFAULT_WIKI_CHECKERS,
 ): Promise<WatcherAlert[]> {
-  const cwd = botConfig.dir;
+  // The bot folder is no longer a cwd — it is where a checker's MCP servers and
+  // tool permissions are declared (`--mcp-config` / `--settings`). Only the email
+  // watcher needs them (Gmail), so only it is handed the dir.
   const botName = botConfig.name;
   // A readonly instance must not DRAFT into a wiki. `POST /api/watchers/:id/trigger`
   // already refuses these two types, but the scheduler reaches the same checkers
@@ -684,11 +686,11 @@ export async function runChecker(
   }
   switch (watcher.type) {
     case "email":
-      return await checkEmail(watcher, cwd, botName, telemetry);
+      return await checkEmail(watcher, botConfig.dir, botName, telemetry);
     case "news":
       return await checkNews(watcher);
     case "x":
-      return await checkX(watcher, cwd, botName, telemetry);
+      return await checkX(watcher, botName, telemetry);
     case "anthropic":
       return await checkAnthropic(watcher, telemetry);
     case "wiki-gardener":

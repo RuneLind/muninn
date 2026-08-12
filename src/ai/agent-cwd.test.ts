@@ -2,7 +2,7 @@ import { test, expect, afterEach } from "bun:test";
 import { existsSync, mkdtempSync, rmSync, symlinkSync, writeFileSync, chmodSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import { agentCwdRoot, resolveAgentCwd, spawnCwd } from "./agent-cwd.ts";
+import { agentCwdRoot, resolveAgentCwd } from "./agent-cwd.ts";
 
 const REPO_ROOT = resolve(import.meta.dir, "../..");
 const ORIGINAL = process.env.MUNINN_AGENT_CWD;
@@ -174,19 +174,3 @@ test("unusable root degrades to ONE private temp dir, never bare $TMPDIR", () =>
   expect(resolveAgentCwd("melosys")).toBe(dir);
 });
 
-/**
- * Pins the precedence at the one production call site (`spawnHaiku`'s Bun.spawn).
- * Inverting it would strip the email watcher's Gmail MCP discovery and the
- * extractors' persona — both invisible to every other test in the suite.
- */
-test("spawnCwd prefers the caller's explicit cwd, falls back to the agent home", () => {
-  const root = scratchRoot();
-  const botDir = join(REPO_ROOT, "bots", "jarvis");
-
-  expect(spawnCwd(botDir, "jarvis")).toBe(botDir);
-  expect(existsSync(join(root, "jarvis"))).toBe(false); // no dir made when unused
-  expect(spawnCwd(undefined, "jarvis")).toBe(join(root, "jarvis"));
-  expect(spawnCwd(undefined)).toBe(join(root, "shared"));
-  // An empty cwd is a caller bug, not a choice — Bun.spawn would take it literally.
-  expect(spawnCwd("", "jarvis")).toBe(join(root, "jarvis"));
-});

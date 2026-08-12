@@ -10,7 +10,6 @@ const log = getLog("ai", "knowledge-decomposer");
 export interface DecomposeOptions {
   question: string;
   botName: string;
-  botDir?: string;
   /** Bot's main connector — drives the connector-derived Haiku default. */
   connector?: ConnectorType;
   /** Per-bot override from `BotConfig.haikuBackend`. */
@@ -67,7 +66,7 @@ interface RawResult {
 }
 
 export async function decomposeQuestion(opts: DecomposeOptions): Promise<DecomposeResult> {
-  const { question, botName, botDir, connector, haikuBackend, tracer } = opts;
+  const { question, botName, connector, haikuBackend, tracer } = opts;
   const prompt = fillTemplate(DECOMPOSE_PROMPT, { QUESTION: question });
 
   const t0 = performance.now();
@@ -76,7 +75,6 @@ export async function decomposeQuestion(opts: DecomposeOptions): Promise<Decompo
     const haiku = await callHaikuWithFallback(prompt, {
       source: "knowledge-decompose",
       entrypoint: "knowledge-decomposer",
-      cwd: botDir,
       botName,
       connector,
       haikuBackend,

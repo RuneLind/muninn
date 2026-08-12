@@ -1,5 +1,5 @@
 import { test, expect, describe, mock } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -23,9 +23,11 @@ mock.module("../config.ts", () => ({
   loadConfig: () => ({ tracingEnabled: true, tracingCaptureToolOutputs: true }),
 }));
 
-const { spawnHaiku, callHaiku, HAIKU_TIMEOUT_MS, parseHaikuJson, parseLegacyHaikuOutput, readAndParseHaikuStream } =
+const { spawnHaiku, callHaiku, HAIKU_TIMEOUT_MS, parseHaikuJson, parseLegacyHaikuOutput, readAndParseHaikuStream, buildHaikuArgs, _resetSpawnWarningsForTests } =
   await import("./executor.ts");
 const { attachToolSpans } = await import("../core/tool-spans.ts");
+const { resolveAgentCwd } = await import("../ai/agent-cwd.ts");
+const REPO_ROOT = join(import.meta.dir, "..", "..");
 const { Tracer } = await import("../tracing/index.ts");
 
 /** Build a ReadableStream from NDJSON lines (mimics `claude` stream-json stdout). */
@@ -263,5 +265,225 @@ describe("tool child spans under watcher:<type>", () => {
     // on a watcher Tracer, so addChildSpan falls back to the root span).
     expect(toolSpan!.parentId).toBe(rootId);
     expect((toolSpan!.attributes as any).toolName).toBe("mcp__gmail__search_emails");
+  });
+});
+
+/**
+ * The flag policy is the whole point of the bot-dir → agent-home move: what a
+ * spawn used to absorb implicitly from its cwd (persona, MCP) it must now ask for
+ * by name. Each of these is silent when wrong — a persona-less reminder still
+ * reads fine, a fenced-off Gmail watcher still returns `[]`.
+ */
+describe("buildHaikuArgs", () => {
+  const base = { prompt: "hi", model: "claude-haiku-4-5-20251001" };
+
+  test("a tool-less call is fenced off from every ambient MCP source", () => {
+    const args = buildHaikuArgs(base);
+    expect(args).toContain("--strict-mcp-config");
+    expect(args).not.toContain("--mcp-config");
+    expect(args).not.toContain("--system-prompt");
+  });
+
+  test("persona rides --system-prompt, adjacent to its value", () => {
+    const args = buildHaikuArgs({ ...base, system: "You are Jarvis." });
+    expect(args[args.indexOf("--system-prompt") + 1]).toBe("You are Jarvis.");
+  });
+
+  test("a bot dir with real servers becomes an inline --mcp-config, and drops the fence", () => {
+    const root = mkdtempSync(join(tmpdir(), "muninn-haiku-args-"));
+    try {
+      const botDir = join(root, "jarvis");
+      mkdirSync(botDir, { recursive: true });
+      writeFileSync(
+        join(botDir, ".mcp.json"),
+        JSON.stringify({ mcpServers: { gmail: { type: "stdio", command: "npx" } } }),
+      );
+
+      const args = buildHaikuArgs({ ...base, botDir });
+      expect(args).not.toContain("--settings"); // no settings file in this bot dir
+      const idx = args.indexOf("--mcp-config");
+      expect(idx).toBeGreaterThan(-1);
+      expect(JSON.parse(args[idx + 1]!).mcpServers.gmail.command).toBe("npx");
+      // --mcp-config is variadic: it stops at the next `-`-prefixed token, so a
+      // following FLAG is safe — but a bare positional would be swallowed as a
+      // second config. Last position is the cheap way to never have to check.
+      expect(idx + 1).toBe(args.length - 1);
+      // The fence applies HERE TOO. Without it the CLI also merges the developer's
+      // user-scope ~/.claude.json servers — measured 9 servers / 112 mcp__ tools
+      // instead of the bot's own, including a `claude.ai Gmail` pointing at a
+      // different mailbox that the bot's allow-list does not cover.
+      expect(args).toContain("--strict-mcp-config");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a bot dir with no readable .mcp.json falls back to the fence, not an empty config", () => {
+    const root = mkdtempSync(join(tmpdir(), "muninn-haiku-args-"));
+    try {
+      const args = buildHaikuArgs({ ...base, botDir: root });
+      expect(args).toContain("--strict-mcp-config");
+      expect(args).not.toContain("--mcp-config");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+
+  test("the bot's tool permissions ride --settings, or the MCP call is denied", () => {
+    // Regression guard for the defect this PR introduced and then measured: with
+    // the cwd moved out of the bot folder, `.claude/settings.json` stops being
+    // discovered and `mcp__gmail__*` comes back "permission not granted" — which
+    // the email checker reports as an ordinary empty inbox.
+    const root = mkdtempSync(join(tmpdir(), "muninn-haiku-args-"));
+    try {
+      const botDir = join(root, "jarvis");
+      mkdirSync(join(botDir, ".claude"), { recursive: true });
+      writeFileSync(
+        join(botDir, ".mcp.json"),
+        JSON.stringify({ mcpServers: { gmail: { type: "stdio", command: "npx" } } }),
+      );
+      writeFileSync(
+        join(botDir, ".claude", "settings.json"),
+        JSON.stringify({ permissions: { allow: ["mcp__gmail__search_emails"] } }),
+      );
+      // The file Claude Code itself writes when a permission is approved in place.
+      writeFileSync(
+        join(botDir, ".claude", "settings.local.json"),
+        JSON.stringify({ permissions: { allow: ["mcp__jetbrains__execute_terminal_command"] } }),
+      );
+
+      const args = buildHaikuArgs({ ...base, botDir });
+      // A JSON document, not the path — `--settings` is not repeatable, and the
+      // bot's per-machine `settings.local.json` has to be merged into it.
+      const passed = JSON.parse(args[args.indexOf("--settings") + 1]!);
+      expect(passed.permissions.allow).toContain("mcp__gmail__search_emails");
+      expect(passed.permissions.allow).toContain("mcp__jetbrains__execute_terminal_command");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a tool-less call carries no --settings (nothing to permit)", () => {
+    expect(buildHaikuArgs(base)).not.toContain("--settings");
+  });
+
+  test("keeps the stream-json contract the parser depends on", () => {
+    const args = buildHaikuArgs(base);
+    expect(args.slice(0, 3)).toEqual(["claude", "-p", "hi"]);
+    expect(args).toContain("--verbose");
+    expect(args[args.indexOf("--output-format") + 1]).toBe("stream-json");
+    expect(args[args.indexOf("--model") + 1]).toBe("claude-haiku-4-5-20251001");
+  });
+});
+
+/**
+ * The whole PR reduces to ONE production line — the `cwd:` on `Bun.spawn`. The
+ * removed `spawnCwd` seam used to pin it; nothing did afterwards, and passing
+ * `botDir` through to `cwd` by accident would silently restore every symptom
+ * (repo CLAUDE.md reloaded, transcripts back in the developer's project folder)
+ * while every other test stayed green.
+ */
+describe("spawnHaiku cwd", () => {
+  test("always runs in the agent home, even when a botDir is supplied", async () => {
+    const spawned: Array<{ cmd: string[]; cwd: string }> = [];
+    const realSpawn = Bun.spawn;
+    (Bun as any).spawn = (cmd: string[], o: any) => {
+      spawned.push({ cmd, cwd: o.cwd });
+      return {
+        pid: 1,
+        stdout: ndjsonStream([
+          JSON.stringify({ type: "result", subtype: "success", result: "ok", usage: { input_tokens: 1, output_tokens: 1 } }),
+        ]),
+        stderr: new ReadableStream({ start: (c) => c.close() }),
+        exited: Promise.resolve(0),
+        kill: () => {},
+      };
+    };
+    try {
+      await spawnHaiku("hi", {
+        source: "cwd-test",
+        botName: "jarvis",
+        botDir: join(REPO_ROOT, "bots", "jarvis"),
+      }).catch(() => {});
+    } finally {
+      (Bun as any).spawn = realSpawn;
+    }
+
+    expect(spawned).toHaveLength(1);
+    expect(spawned[0]!.cwd).toBe(resolveAgentCwd("jarvis"));
+    expect(spawned[0]!.cwd).not.toContain(`${REPO_ROOT}/bots`);
+    // The bot dir must reach the CLI as configuration, never as a working directory.
+    expect(spawned[0]!.cmd).toContain("--mcp-config");
+  });
+});
+
+/**
+ * The silent-degrade guards. Both conditions produce a spawn that RUNS, succeeds,
+ * and returns nothing useful — a broken `.mcp.json` edit means no Gmail, a missing
+ * settings file means every MCP call is denied — and both read downstream as an
+ * ordinary quiet inbox. A warning that never fires is the same as no guard, so it
+ * is asserted against a real LogTape sink rather than assumed.
+ */
+describe("spawnHaiku degrade warnings", () => {
+  const records: string[] = [];
+
+  test("warns once per path when a botDir yields no MCP config and no settings", async () => {
+    const { configure } = await import("@logtape/logtape");
+    await configure({
+      sinks: { capture: (r: any) => records.push(r.message.join("")) },
+      loggers: [
+        { category: ["muninn", "scheduler", "executor"], lowestLevel: "warning", sinks: ["capture"] },
+        // Without this LogTape prints an 8-line meta notice into every suite run.
+        // Root CLAUDE.md says tests never configure logging; this file is the one
+        // exception, because a warning that never fires is the same as no guard.
+        { category: ["logtape", "meta"], lowestLevel: "error", sinks: [] },
+      ],
+      reset: true,
+    });
+    _resetSpawnWarningsForTests();
+
+    const root = mkdtempSync(join(tmpdir(), "muninn-warn-"));
+    try {
+      // A bot dir with neither file — the shape a typo'd path or a broken JSON
+      // edit produces.
+      buildHaikuArgs({ prompt: "x", model: "m", botDir: root });
+      expect(records.filter((r) => r.includes("No usable .mcp.json"))).toHaveLength(1);
+      expect(records.filter((r) => r.includes("will be DENIED"))).toHaveLength(1);
+
+      // Throttled: these run at watcher-tick rate, so a permanent condition must
+      // not produce a permanent log flood.
+      buildHaikuArgs({ prompt: "x", model: "m", botDir: root });
+      buildHaikuArgs({ prompt: "x", model: "m", botDir: root });
+      expect(records.filter((r) => r.includes("No usable .mcp.json"))).toHaveLength(1);
+
+      // A tool-less call asked for nothing and must say nothing.
+      records.length = 0;
+      buildHaikuArgs({ prompt: "x", model: "m" });
+      expect(records).toHaveLength(0);
+
+      // The case the two checks above structurally CANNOT see: a corrupt
+      // settings.json next to a healthy settings.local.json. The merge returns
+      // non-null, so `!settings` is false — while every mcp__gmail__* call in
+      // production gets denied and the checker reports a quiet inbox.
+      const capraish = join(root, "capra");
+      mkdirSync(join(capraish, ".claude"), { recursive: true });
+      writeFileSync(join(capraish, ".mcp.json"), JSON.stringify({ mcpServers: { gmail: { command: "npx" } } }));
+      writeFileSync(join(capraish, ".claude", "settings.json"), '{"permissions":{"allow":["mcp__gmail__x"],}}');
+      writeFileSync(join(capraish, ".claude", "settings.local.json"), JSON.stringify({ permissions: { allow: ["other"] } }));
+
+      const args = buildHaikuArgs({ prompt: "x", model: "m", botDir: capraish });
+      expect(args).toContain("--settings"); // the healthy local file still merges
+      expect(records.filter((r) => r.includes("Unparseable bot config"))).toHaveLength(1);
+      // ...and it must NOT be reported as mere absence, which reads as intentional.
+      expect(records.filter((r) => r.includes("No readable"))).toHaveLength(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      await configure({
+        sinks: {},
+        loggers: [{ category: ["logtape", "meta"], lowestLevel: "error", sinks: [] }],
+        reset: true,
+      });
+    }
   });
 });

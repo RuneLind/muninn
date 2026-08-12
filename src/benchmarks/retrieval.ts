@@ -296,7 +296,6 @@ export function defaultSearchRunners(opts: RunRetrievalEvalOptions): SearchRunne
       collections: q.collection ? [q.collection] : undefined,
       limit: q.k && q.k > 0 ? q.k : DEFAULT_K,
       botName: opts.botName,
-      botDir: opts.botDir,
       knowledgeApiUrl,
       connector: opts.connector,
     });
@@ -330,7 +329,6 @@ export interface RunRetrievalEvalOptions {
   knowledgeApiUrl: string;
   /** Bot context for the research decomposition path. */
   botName: string;
-  botDir?: string;
   connector?: ConnectorType;
   /** Restrict the run to a single target. */
   target?: RetrievalTarget;
