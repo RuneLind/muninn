@@ -231,7 +231,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     if (!isResearch && !params.skipExtractions) {
       runExtractionPipelines(
         {
-          userId, botName: botConfig.name, botDir: botConfig.dir,
+          userId, botName: botConfig.name,
           userMessage: text, assistantResponse: result.result,
           sourceMessageId: messageId, platform,
           connector: botConfig.connector,

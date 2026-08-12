@@ -139,7 +139,6 @@ try {
     queries,
     knowledgeApiUrl,
     botName: researchBot?.name ?? "retrieval-eval",
-    botDir: researchBot?.dir,
     connector: researchBot?.connector,
     target: args.target,
     memoryBotName: MEMORY_FIXTURE_BOT_NAME,

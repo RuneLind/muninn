@@ -19,8 +19,6 @@ interface HaikuExtractionOptions<T> {
   userId: string;
   /** The prompt to send to Haiku */
   prompt: string;
-  /** Working directory for the CLI fallback — keeps sessions out of project root */
-  cwd?: string;
   /** Bot's main connector — fed into `resolveBackend()` for the connector-derived default. */
   connector?: ConnectorType;
   /** Per-bot override from `BotConfig.haikuBackend`. */
@@ -78,7 +76,10 @@ async function doExtract<T>(opts: HaikuExtractionOptions<T>): Promise<void> {
     const haiku = await callHaikuWithFallback(opts.prompt, {
       source: opts.source,
       entrypoint: opts.entrypoint,
-      cwd: opts.cwd,
+      // No botDir, no system: these are self-contained JSON format contracts that
+      // call no tools. They used to run in `bots/<name>/` (persona + repo CLAUDE.md
+      // by cwd) on the CLI backend only — the anthropic/copilot backends have always
+      // run them persona-less, so dropping it makes the three backends agree.
       botName: opts.botName,
       connector: opts.connector,
       haikuBackend: opts.haikuBackend,

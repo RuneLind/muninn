@@ -10,7 +10,6 @@ import { extractScheduleAsync } from "../scheduler/detector.ts";
 export interface ExtractionParams {
   userId: string;
   botName: string;
-  botDir: string;
   userMessage: string;
   assistantResponse: string;
   sourceMessageId: string;
@@ -30,20 +29,20 @@ export function runExtractionPipelines(
   config: Config,
   traceCtx: TraceContext,
 ): void {
-  const { userId, botName, botDir, userMessage, assistantResponse, sourceMessageId, platform, connector, haikuBackend } = params;
+  const { userId, botName, userMessage, assistantResponse, sourceMessageId, platform, connector, haikuBackend } = params;
 
   extractMemoryAsync(
-    { userId, botName, botDir, userMessage, assistantResponse, sourceMessageId, connector, haikuBackend },
+    { userId, botName, userMessage, assistantResponse, sourceMessageId, connector, haikuBackend },
     config,
     traceCtx,
   );
   extractGoalAsync(
-    { userId, botName, botDir, userMessage, assistantResponse, sourceMessageId, platform, connector, haikuBackend },
+    { userId, botName, userMessage, assistantResponse, sourceMessageId, platform, connector, haikuBackend },
     config,
     traceCtx,
   );
   extractScheduleAsync(
-    { userId, botName, botDir, userMessage, assistantResponse, platform, connector, haikuBackend },
+    { userId, botName, userMessage, assistantResponse, platform, connector, haikuBackend },
     config,
     traceCtx,
   );

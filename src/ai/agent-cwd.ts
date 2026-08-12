@@ -11,14 +11,20 @@
  * benchmark judge used to hardcode, but per-caller and stable, so each caller's
  * runs group into their own project folder rather than one anonymous pile.
  *
- * Used by `spawnHaiku` (`src/scheduler/executor.ts`) for calls that pass no cwd,
- * and unconditionally by the benchmark judge (`src/benchmarks/judge.ts`).
- * `spawnHaiku` callers that DO pass a cwd keep it — the email watcher needs
- * `bots/<name>/` for Gmail MCP discovery, the extractors for the bot persona.
- * Those dirs are INSIDE the repo, so they still load the repo's CLAUDE.md via
- * parent-directory walk; only their transcript folder differs. Cutting that
- * needs `--mcp-config` + `--system-prompt` (what `src/ai/executor.ts` does for
- * the chat connector), not a cwd change.
+ * Used unconditionally by `spawnHaiku` (`src/scheduler/executor.ts`) and by the
+ * benchmark judge (`src/benchmarks/judge.ts`) — there is no longer any way for a
+ * `spawnHaiku` caller to opt out. The callers that used to pass `bots/<name>/`
+ * (email watcher, the memory/goal/schedule extractors, the prose reminders, the
+ * research decomposer, fact-check extraction, wiki-remember, the devloop
+ * classifier) sat INSIDE the repo, so the parent-directory walk loaded muninn's
+ * own CLAUDE.md on every call — 33 900 cache_creation tokens, measured. They now
+ * request what they actually needed from the bot folder explicitly instead:
+ * `--mcp-config` via `SpawnHaikuOptions.botDir`, persona via `.system`.
+ *
+ * NOT used by the chat connector (`src/ai/executor.ts`) or `claude-sdk`, which
+ * still run in `botConfig.dir` — a chat turn's tool surface genuinely wants the
+ * bot folder, and its prompt is large enough that the CLAUDE.md load is a smaller
+ * relative share. Out of scope here, deliberately.
  */
 
 import { existsSync, mkdirSync, mkdtempSync, realpathSync } from "node:fs";
@@ -219,17 +225,4 @@ export function resolveAgentCwd(name?: string): string {
     );
     return degradedCwd();
   }
-}
-
-/**
- * Resolve the cwd for one `claude -p` spawn: the caller's explicit choice wins,
- * otherwise muninn's agent home. Exported as its own function so the precedence
- * is pinned by a test — inverting it inside the spawn call would break the email
- * watcher's Gmail MCP discovery and the extractors' persona, invisibly.
- *
- * `||`, not `??`: an empty-string cwd is a caller bug (`Bun.spawn` would take it
- * literally), never an explicit choice.
- */
-export function spawnCwd(explicitCwd: string | undefined, name?: string): string {
-  return explicitCwd || resolveAgentCwd(name);
 }

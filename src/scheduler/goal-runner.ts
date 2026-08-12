@@ -164,12 +164,12 @@ async function generateReminderMessage(
     `**Deadline approaching:** ${goal.title}\nDue: ${deadlineStr}`,
     {
       source: "checkin",
-      cwd: botConfig.dir,
       botName: botConfig.name,
       connector: botConfig.connector,
       haikuBackend: botConfig.haikuBackend,
-      // Restore the bot persona on the non-CLI backends (anthropic/copilot send NO
-      // system prompt otherwise). Ignored by the CLI path (cwd auto-loads CLAUDE.md).
+      // The bot persona, on EVERY backend. The CLI used to absorb it implicitly by
+      // running in `bots/<name>/`; it now runs in the agent home, so `--system-prompt`
+      // is what carries the voice (and it no longer drags muninn's own CLAUDE.md along).
       system: botConfig.persona,
       ...(tracer ? { tracer } : {}),
     },
@@ -191,12 +191,12 @@ async function generateCheckinMessage(
     `**Goal check-in:** ${goal.title}\nHow's this going?`,
     {
       source: "checkin",
-      cwd: botConfig.dir,
       botName: botConfig.name,
       connector: botConfig.connector,
       haikuBackend: botConfig.haikuBackend,
-      // Restore the bot persona on the non-CLI backends (anthropic/copilot send NO
-      // system prompt otherwise). Ignored by the CLI path (cwd auto-loads CLAUDE.md).
+      // The bot persona, on EVERY backend. The CLI used to absorb it implicitly by
+      // running in `bots/<name>/`; it now runs in the agent home, so `--system-prompt`
+      // is what carries the voice (and it no longer drags muninn's own CLAUDE.md along).
       system: botConfig.persona,
       ...(tracer ? { tracer } : {}),
     },

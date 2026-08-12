@@ -630,15 +630,18 @@ async function sendToSlackChannels(botName: string, markdown: string, channels: 
 }
 
 async function runChecker(watcher: Watcher, botConfig: BotConfig, telemetry?: HaikuTelemetry): Promise<WatcherAlert[]> {
-  const cwd = botConfig.dir;
+  // The bot folder is no longer a cwd — it is where a checker's MCP servers are
+  // declared (`--mcp-config`). Only the email watcher needs them (Gmail); checkX
+  // has taken and ignored this argument since before that distinction existed.
+  const botDir = botConfig.dir;
   const botName = botConfig.name;
   switch (watcher.type) {
     case "email":
-      return await checkEmail(watcher, cwd, botName, telemetry);
+      return await checkEmail(watcher, botDir, botName, telemetry);
     case "news":
       return await checkNews(watcher);
     case "x":
-      return await checkX(watcher, cwd, botName, telemetry);
+      return await checkX(watcher, botDir, botName, telemetry);
     case "anthropic":
       return await checkAnthropic(watcher, telemetry);
     case "wiki-gardener":

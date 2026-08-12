@@ -145,7 +145,6 @@ test("passes the full corpus + bot context to researchKnowledge", async () => {
     "wiki",
   ]);
   expect(lastResearchOpts!.botName).toBe("jarvis");
-  expect(lastResearchOpts!.botDir).toBe("/tmp/jarvis");
 });
 
 test("synthesis prompt carries the question and numbered sources, with the grounding system prompt", async () => {

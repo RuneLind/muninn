@@ -12,7 +12,6 @@ const log = getLog("goals");
 interface DetectionInput {
   userId: string;
   botName: string;
-  botDir?: string;
   userMessage: string;
   assistantResponse: string;
   sourceMessageId?: string;
@@ -69,7 +68,6 @@ async function doGoalExtraction(input: DetectionInput, traceContext?: TraceConte
     botName: input.botName,
     userId: input.userId,
     prompt,
-    cwd: input.botDir,
     connector: input.connector,
     haikuBackend: input.haikuBackend,
     log,

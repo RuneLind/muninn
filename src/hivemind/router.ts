@@ -715,7 +715,6 @@ export class HivemindRouter {
       try {
         role = await classify(context, {
           botName: run.botName,
-          botDir: botCfg.dir,
           connector: botCfg.connector,
           haikuBackend: botCfg.haikuBackend,
           tracer,

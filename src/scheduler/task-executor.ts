@@ -149,12 +149,10 @@ async function runHaikuTask(
 ): Promise<TaskResult> {
   const { text, usage } = await callHaikuMessageWithFallback(prompt, fallback, {
     source,
-    cwd: botConfig.dir,
     botName: botConfig.name,
     connector: botConfig.connector,
     haikuBackend: botConfig.haikuBackend,
-    // Restore the bot persona on the non-CLI backends (anthropic/copilot send NO
-    // system prompt otherwise). Ignored by the CLI path (cwd auto-loads CLAUDE.md).
+    // The bot persona, on EVERY backend — see generateReminderMessage in goal-runner.ts.
     system: botConfig.persona,
     ...(tracer ? { tracer } : {}),
   });

@@ -1,5 +1,5 @@
 import { test, expect, describe, mock } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -23,7 +23,7 @@ mock.module("../config.ts", () => ({
   loadConfig: () => ({ tracingEnabled: true, tracingCaptureToolOutputs: true }),
 }));
 
-const { spawnHaiku, callHaiku, HAIKU_TIMEOUT_MS, parseHaikuJson, parseLegacyHaikuOutput, readAndParseHaikuStream } =
+const { spawnHaiku, callHaiku, HAIKU_TIMEOUT_MS, parseHaikuJson, parseLegacyHaikuOutput, readAndParseHaikuStream, buildHaikuArgs } =
   await import("./executor.ts");
 const { attachToolSpans } = await import("../core/tool-spans.ts");
 const { Tracer } = await import("../tracing/index.ts");
@@ -263,5 +263,99 @@ describe("tool child spans under watcher:<type>", () => {
     // on a watcher Tracer, so addChildSpan falls back to the root span).
     expect(toolSpan!.parentId).toBe(rootId);
     expect((toolSpan!.attributes as any).toolName).toBe("mcp__gmail__search_emails");
+  });
+});
+
+/**
+ * The flag policy is the whole point of the bot-dir → agent-home move: what a
+ * spawn used to absorb implicitly from its cwd (persona, MCP) it must now ask for
+ * by name. Each of these is silent when wrong — a persona-less reminder still
+ * reads fine, a fenced-off Gmail watcher still returns `[]`.
+ */
+describe("buildHaikuArgs", () => {
+  const base = { prompt: "hi", model: "claude-haiku-4-5-20251001" };
+
+  test("a tool-less call is fenced off from every ambient MCP source", () => {
+    const args = buildHaikuArgs(base);
+    expect(args).toContain("--strict-mcp-config");
+    expect(args).not.toContain("--mcp-config");
+    expect(args).not.toContain("--system-prompt");
+  });
+
+  test("persona rides --system-prompt, adjacent to its value", () => {
+    const args = buildHaikuArgs({ ...base, system: "You are Jarvis." });
+    expect(args[args.indexOf("--system-prompt") + 1]).toBe("You are Jarvis.");
+  });
+
+  test("a bot dir with real servers becomes an inline --mcp-config, and drops the fence", () => {
+    const root = mkdtempSync(join(tmpdir(), "muninn-haiku-args-"));
+    try {
+      const botDir = join(root, "jarvis");
+      mkdirSync(botDir, { recursive: true });
+      writeFileSync(
+        join(botDir, ".mcp.json"),
+        JSON.stringify({ mcpServers: { gmail: { type: "stdio", command: "npx" } } }),
+      );
+
+      const args = buildHaikuArgs({ ...base, botDir });
+      expect(args).not.toContain("--settings"); // no settings file in this bot dir
+      const idx = args.indexOf("--mcp-config");
+      expect(idx).toBeGreaterThan(-1);
+      expect(JSON.parse(args[idx + 1]!).mcpServers.gmail.command).toBe("npx");
+      // --mcp-config is variadic: anything appended after the JSON would be eaten
+      // as a second config file rather than parsed as its own flag.
+      expect(idx + 1).toBe(args.length - 1);
+      // A call that HAS bot MCP must not also be fenced off from it.
+      expect(args).not.toContain("--strict-mcp-config");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a bot dir with no readable .mcp.json falls back to the fence, not an empty config", () => {
+    const root = mkdtempSync(join(tmpdir(), "muninn-haiku-args-"));
+    try {
+      const args = buildHaikuArgs({ ...base, botDir: root });
+      expect(args).toContain("--strict-mcp-config");
+      expect(args).not.toContain("--mcp-config");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+
+  test("the bot's tool permissions ride --settings, or the MCP call is denied", () => {
+    // Regression guard for the defect this PR introduced and then measured: with
+    // the cwd moved out of the bot folder, `.claude/settings.json` stops being
+    // discovered and `mcp__gmail__*` comes back "permission not granted" — which
+    // the email checker reports as an ordinary empty inbox.
+    const root = mkdtempSync(join(tmpdir(), "muninn-haiku-args-"));
+    try {
+      const botDir = join(root, "jarvis");
+      mkdirSync(join(botDir, ".claude"), { recursive: true });
+      writeFileSync(
+        join(botDir, ".mcp.json"),
+        JSON.stringify({ mcpServers: { gmail: { type: "stdio", command: "npx" } } }),
+      );
+      const settings = join(botDir, ".claude", "settings.json");
+      writeFileSync(settings, JSON.stringify({ permissions: { allow: ["mcp__gmail__search_emails"] } }));
+
+      const args = buildHaikuArgs({ ...base, botDir });
+      expect(args[args.indexOf("--settings") + 1]).toBe(settings);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a tool-less call carries no --settings (nothing to permit)", () => {
+    expect(buildHaikuArgs(base)).not.toContain("--settings");
+  });
+
+  test("keeps the stream-json contract the parser depends on", () => {
+    const args = buildHaikuArgs(base);
+    expect(args.slice(0, 3)).toEqual(["claude", "-p", "hi"]);
+    expect(args).toContain("--verbose");
+    expect(args[args.indexOf("--output-format") + 1]).toBe("stream-json");
+    expect(args[args.indexOf("--model") + 1]).toBe("claude-haiku-4-5-20251001");
   });
 });

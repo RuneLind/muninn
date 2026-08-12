@@ -29,7 +29,14 @@ Not worth notifying:
 - Social-network noise (LinkedIn connection suggestions, follow recommendations, digests)`;
 
 
-export async function checkEmail(watcher: Watcher, cwd?: string, botName?: string, telemetry?: HaikuTelemetry): Promise<WatcherAlert[]> {
+/**
+ * `botDir` is the bot folder whose `.mcp.json` declares the Gmail server. It used
+ * to be the spawn's cwd (MCP by auto-discovery); it is now handed to the CLI as
+ * `--mcp-config` so the run itself happens outside the repo. This is the ONLY
+ * spawnHaiku caller that still needs bot MCP — every other one is a tool-less
+ * prompt and runs `--strict-mcp-config`.
+ */
+export async function checkEmail(watcher: Watcher, botDir?: string, botName?: string, telemetry?: HaikuTelemetry): Promise<WatcherAlert[]> {
   const config = watcher.config as { filter?: string; prompt?: string; model?: string };
   const query = buildGmailQuery(config.filter, watcher.lastRunAt);
 
@@ -57,7 +64,7 @@ Return ONLY a JSON array (no markdown fences):
 If nothing worth notifying, return: []`;
   const prompt = withInterestProfile(basePrompt, interestProfile);
 
-  const { result } = await spawnHaiku(prompt, { source: "watcher-email", entrypoint: "jarvis-watcher", cwd, botName, model: config.model, ...telemetry });
+  const { result } = await spawnHaiku(prompt, { source: "watcher-email", entrypoint: "jarvis-watcher", botDir, botName, model: config.model, ...telemetry });
   try {
     return extractJson<WatcherAlert[]>(result);
   } catch {

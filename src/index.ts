@@ -136,7 +136,6 @@ try {
   for (const bot of allBotConfigs) {
     researchMcpServer.registerBot({
       botName: bot.name,
-      botDir: bot.dir,
       knowledgeApiUrl: config.knowledgeApiUrl,
       defaultCollections: bot.defaultKnowledgeCollections,
       connector: bot.connector,
