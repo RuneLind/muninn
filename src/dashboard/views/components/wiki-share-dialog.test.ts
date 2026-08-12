@@ -19,6 +19,7 @@ import {
   summaryShareTarget,
   summaryShareTargetScript,
   wikiShareTarget,
+  SUMMARY_SHARE_COPY,
   WIKI_SHARE_COPY,
   SHARE_PRESET_RETRY_ID,
   SHARE_PROMPT_TOGGLE_ID,
@@ -26,6 +27,7 @@ import {
   type ShareDialogState,
   type SharePresetOption,
 } from "./wiki-share-dialog.ts";
+import { escJsonScript } from "./escape.ts";
 import {
   SHARE_LANGS,
   SLACK_PASTE_MAX,
@@ -443,10 +445,28 @@ describe("summaryShareTargetScript", () => {
   });
 
   test("no raw `<` survives — the string is interpolated into a page <script>", () => {
-    // `<` can only occur inside a JSON string literal here, where `<` is the
-    // same character. Nothing in the target carries one TODAY, which is exactly
-    // why this is pinned: the day a copy string does, `</script>` must not be
-    // able to end the block it is emitted into.
+    // Weak by construction (nothing in the target carries a `<` today), so it is
+    // only the wiring pin: the escape ITSELF is exercised below, on a value that
+    // actually contains one. Deleting `escJsonScript` from the builder still
+    // passes this assertion — hence the pair.
     expect(summaryShareTargetScript("_a", "_b")).not.toContain("<");
+  });
+
+  test("escJsonScript neutralizes `</script>` and round-trips byte-for-byte", () => {
+    // The builder's escape, tested where it can FAIL: the day a copy string
+    // carries a `<`, this is what stops `</script>` ending the block the target
+    // is emitted into — while the value the page evaluates must stay identical
+    // to the one that was serialized.
+    const target = {
+      ...summaryShareTarget("youtube", "ai/Some Title.md"),
+      copy: {
+        ...SUMMARY_SHARE_COPY,
+        conflictLead: 'A share is running </script><script>alert("x")</script>',
+      },
+    };
+    const js = escJsonScript(target);
+    expect(js).not.toContain("<");
+    expect(js).toContain("\\u003c/script>");
+    expect(new Function("return " + js)()).toEqual(target);
   });
 });

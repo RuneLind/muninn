@@ -70,6 +70,12 @@ function parseSse(body: string): SseEvent[] {
 }
 
 const DOC_ID = "ai/claude-code/Some Title.md";
+/** The collection behind the `youtube` source the happy-path body names —
+ *  DERIVED from the registry, never re-spelled. Point 1 of this file's own
+ *  header is that source id and collection name diverge; a hardcoded
+ *  `"youtube-summaries"` in the flight-key probes below would be a second copy
+ *  of exactly the mapping this file exists to pin. */
+const OK_COLLECTION = SUMMARY_SOURCES.find((s) => s.id === "youtube")!.collection;
 /** A real capture doc's shape: the bracketed breadcrumb owns line 1, and huginn's
  *  tagger injects the tags as YAML frontmatter. Both must be gone from the
  *  prompt; the body's own "tags:" mention must NOT be. */
@@ -202,7 +208,7 @@ describe("POST /api/summaries/share — pre-commit guards", () => {
     );
     // Exactly at the cap passes validation — proven against a HELD slot, so the
     // proof is a 409 rather than a committed stream.
-    acquireShareFlight(summaryShareFlightKey("youtube-summaries", DOC_ID));
+    acquireShareFlight(summaryShareFlightKey(OK_COLLECTION, DOC_ID));
     expect((await post(app, { ...ok, extra: "x".repeat(SHARE_EXTRA_MAX) })).status).toBe(409);
   });
 
@@ -305,7 +311,7 @@ describe("the stream", () => {
     expect(done.markdown).toBe(POST_MD);
     // …and the document is free again.
     await new Promise((r) => setTimeout(r, 20));
-    expect(acquireShareFlight(summaryShareFlightKey("youtube-summaries", DOC_ID)).ok).toBe(true);
+    expect(acquireShareFlight(summaryShareFlightKey(OK_COLLECTION, DOC_ID)).ok).toBe(true);
   });
 
   test("a document huginn cannot serve is an app_error on a committed 200, with a terminal end", async () => {
@@ -322,7 +328,7 @@ describe("the stream", () => {
       expect(events[events.length - 1]!.event).toBe("end");
       expect(seen.ran).toBe(0);
       // …and it claimed no slot: an unreachable huginn can't wedge the document.
-      expect(acquireShareFlight(summaryShareFlightKey("youtube-summaries", DOC_ID)).ok).toBe(true);
+      expect(acquireShareFlight(summaryShareFlightKey(OK_COLLECTION, DOC_ID)).ok).toBe(true);
       __resetShareFlightsForTest();
     }
   });
@@ -336,14 +342,14 @@ describe("the stream", () => {
       "no text to summarize",
     );
     expect(seen.ran).toBe(0);
-    expect(acquireShareFlight(summaryShareFlightKey("youtube-summaries", DOC_ID)).ok).toBe(true);
+    expect(acquireShareFlight(summaryShareFlightKey(OK_COLLECTION, DOC_ID)).ok).toBe(true);
   });
 });
 
 describe("per-document single-flight", () => {
   test("a second share of the same document 409s with a READABLE {state, expiresAtMs}", async () => {
     const { app } = makeApp();
-    const held = acquireShareFlight(summaryShareFlightKey("youtube-summaries", DOC_ID));
+    const held = acquireShareFlight(summaryShareFlightKey(OK_COLLECTION, DOC_ID));
     expect(held.ok).toBe(true);
     const res = await post(app, ok);
     expect(res.status).toBe(409);
@@ -358,7 +364,7 @@ describe("per-document single-flight", () => {
 
   test("another document — and the same id in another collection — is unaffected", async () => {
     const { app } = makeApp();
-    acquireShareFlight(summaryShareFlightKey("youtube-summaries", DOC_ID));
+    acquireShareFlight(summaryShareFlightKey(OK_COLLECTION, DOC_ID));
     expect((await post(app, { ...ok, docId: "ai/other.md" })).status).toBe(200);
     expect((await post(app, { ...ok, source: "x-article" })).status).toBe(200);
   });
@@ -403,7 +409,7 @@ describe("per-document single-flight", () => {
       doc: {
         title: "Some Title",
         get text(): string {
-          heldAtThrow = !acquireShareFlight(summaryShareFlightKey("youtube-summaries", DOC_ID)).ok;
+          heldAtThrow = !acquireShareFlight(summaryShareFlightKey(OK_COLLECTION, DOC_ID)).ok;
           throw new Error("prep exploded");
         },
       },
@@ -424,7 +430,7 @@ describe("per-document single-flight", () => {
     // One process-wide registry backs both surfaces. Without the namespace a
     // wiki whose registered name equalled a collection name would share slots
     // with that collection's documents — a 409 nothing could explain.
-    const key = summaryShareFlightKey("youtube-summaries", DOC_ID);
+    const key = summaryShareFlightKey(OK_COLLECTION, DOC_ID);
     expect(key.startsWith("summaries:")).toBe(true);
   });
 });

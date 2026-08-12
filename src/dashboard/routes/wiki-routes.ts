@@ -80,6 +80,10 @@ import {
   validateClaimQuotes,
   CLAIM_QUOTE_MAX,
 } from "../views/components/wiki-integrate.ts";
+// The dialog's surface copy — imported, never re-spelled: the 409 below and the
+// dialog's own conflict line are the same sentence, and a reword that touched
+// only one of them would split the route from the screen it answers.
+import { WIKI_SHARE_COPY } from "../views/components/wiki-share-dialog.ts";
 import { commitWikiChange } from "../../wiki/commit.ts";
 import { todayOslo } from "../../gardener/util.ts";
 import { capabilitiesForConnectorType, connectorCapabilities } from "../../ai/one-shot.ts";
@@ -2168,7 +2172,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
             {
               state: "running",
               expiresAtMs: acquired.expiresAtMs,
-              error: "A share is already running for this page.",
+              error: WIKI_SHARE_COPY.conflictLead,
             },
             409,
           );

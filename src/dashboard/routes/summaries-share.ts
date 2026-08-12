@@ -54,6 +54,10 @@ import { findSharePreset, resolveSharePresets, type SharePreset } from "../../sh
 import { prepareSummaryDocBody } from "../../share/body-prep.ts";
 import { buildShareSystemPrompt, buildShareUserPrompt } from "../../share/prompt.ts";
 import { parseShareRequestBody, SHARE_LANGS } from "../../share/wire.ts";
+// The dialog's surface copy — imported, never re-spelled: the 409 below and the
+// dialog's own conflict line are the same sentence, and a reword that touched
+// only one of them would split the route from the screen it answers.
+import { SUMMARY_SHARE_COPY } from "../views/components/wiki-share-dialog.ts";
 import { acquireShareFlight, shareFlightKey, streamShareSSE } from "./share-sse.ts";
 import { getLog } from "../../logging.ts";
 
@@ -230,7 +234,7 @@ export function registerSummariesShareRoutes(
               expiresAtMs: acquired.expiresAtMs,
               // The machine-readable pair, plus a sentence for a caller that is
               // not the dialog (the dialog's own countdown copy ignores it).
-              error: "A share is already running for this document.",
+              error: SUMMARY_SHARE_COPY.conflictLead,
             },
             409,
           );

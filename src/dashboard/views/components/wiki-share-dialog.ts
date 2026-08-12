@@ -16,7 +16,7 @@
  * imports; nothing on it injects the standalone bundle.
  */
 
-import { escHtml as esc } from "./escape.ts";
+import { escHtml as esc, escJsonScript } from "./escape.ts";
 import {
   SHARE_LANGS,
   SLACK_PASTE_MAX,
@@ -216,14 +216,18 @@ export function summaryShareTargetScript(sourceExpr: string, docIdExpr: string):
   // quotes), so they go into the alternation as-is, and a replacement FUNCTION
   // is inserted verbatim (no `$&` expansion in the caller's expression).
   //
-  // `<` is escaped first, and only in the serialized JSON — never in the
-  // caller's expressions, where `<` would not be a comparison operator.
-  // This string is interpolated into a page `<script>` block, and `<` can only
-  // occur inside a JSON string literal, where `<` is the same character:
-  // a future copy string containing `</script>` cannot break out of the block.
-  const json = JSON.stringify(
+  // The serialized JSON is `<`-escaped (the shared `escJsonScript`) BEFORE the
+  // substitution, and covers exactly that JSON — the caller's expressions are
+  // spliced in afterwards and are the CALLER's responsibility. They are left
+  // alone precisely because a `<` there might be a real comparison operator;
+  // today's sole caller passes plain identifiers.
+  //
+  // Inside the JSON, `<` can only occur within a string literal, where `<`
+  // is the same character — so a future copy string containing `</script>`
+  // cannot end the page `<script>` block this is interpolated into.
+  const json = escJsonScript(
     summaryShareTarget(SHARE_SCRIPT_SLOT_SOURCE, SHARE_SCRIPT_SLOT_DOC_ID),
-  ).replace(/</g, "\\u003c");
+  );
   return json.replace(new RegExp([...slots.keys()].join("|"), "g"), (m) => slots.get(m) ?? m);
 }
 
