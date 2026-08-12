@@ -48,7 +48,7 @@ const {
   SHARE_TIMEOUT_MS,
   SHARE_SLOT_SLACK_MS,
 } = await import("./share-sse.ts");
-const { registerWikiRoutes } = await import("./wiki-routes.ts");
+const { registerWikiRoutes, __setShareOneShotForTest } = await import("./wiki-routes.ts");
 const { SHARE_EXTRA_MAX, SHARE_PROMPT_OVERRIDE_MAX } = await import("../../share/wire.ts");
 const { __resetWikiRegistryForTest, __setWikiRegistryForTest } = await import(
   "../../wiki/registry-memo.ts"
@@ -302,6 +302,7 @@ describe("POST /api/wiki/share — pre-commit guards", () => {
     __resetWikiRegistryForTest();
     __resetWikiCacheForTest();
     __resetShareFlightsForTest();
+    __setShareOneShotForTest();
     await rm(root, { recursive: true, force: true });
   });
 
@@ -407,6 +408,106 @@ describe("POST /api/wiki/share — pre-commit guards", () => {
     );
     expect(acquireShareFlight(shareFlightKey("sharewiki", "Empty.md")).ok).toBe(true);
   });
+
+  test("a non-string wiki/bot/page is a 400, not a 500 out of `rawWiki.trim`", async () => {
+    // Body shape is client-controlled; every field the route reads is type-checked
+    // before any of them is used (the `/api/wiki/ask/chat` precedent).
+    for (const over of [
+      { wiki: 3 },
+      { bot: { name: "x" } },
+      { page: 7 },
+      { preset: [] },
+      { promptOverride: 1 },
+      { extra: false },
+    ]) {
+      const res = await post({ ...ok, ...over });
+      expect(res.status).toBe(400);
+      expect(String(((await res.json()) as { error: string }).error)).toContain("must be a string");
+    }
+  });
+
+  test("a PRESENT but blank promptOverride is a 400 — it must not run the preset", async () => {
+    // The client sends `promptOverride: ""` when the reader empties the textarea.
+    // Falling back to the preset ran an instruction the screen was not showing.
+    for (const blank of ["", "   ", "\n\t"]) {
+      const res = await post({ ...ok, promptOverride: blank });
+      expect(res.status).toBe(400);
+      expect(String(((await res.json()) as { error: string }).error)).toContain("empty");
+    }
+    // An ABSENT field is the unedited case and stays silent — proven by a 409
+    // against a held slot rather than a real model call.
+    acquireShareFlight(shareFlightKey("sharewiki", "A Concept.md"));
+    expect((await post(ok)).status).toBe(409);
+  });
+
+  test("an unknown WIKI outranks a bad preset — the wiki is the real problem", async () => {
+    // Preset-first reported `unknown share preset "…"` for a preset that is
+    // perfectly valid on the wiki the reader meant.
+    const res = await app.request("/api/wiki/share?wiki=nope", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...ok, preset: "no-such-preset" }),
+    });
+    expect(res.status).toBe(200);
+    const events = parseSse(await res.text());
+    const msg = String(events.find((e) => e.event === "app_error")!.data.message);
+    expect(msg).toContain("No wiki configured");
+    expect(msg).not.toContain("preset");
+  });
+
+  test("the happy path streams the post and releases the slot", async () => {
+    // The ONE route test that reaches `done`: body prep → prompt assembly →
+    // `streamShareSSE` → the three tab strings. Reachable only through the
+    // injected one-shot; no model call is made.
+    const POST_MD = "## Gardener\n\nIt clusters **summaries** into proposals.";
+    let sawPrompt = "";
+    let sawSystem = "";
+    __setShareOneShotForTest((async (
+      prompt: string,
+      _config: unknown,
+      _bot: unknown,
+      opts?: { systemPrompt?: string; onProgress?: (e: never) => void },
+    ) => {
+      sawPrompt = prompt;
+      sawSystem = opts?.systemPrompt ?? "";
+      opts?.onProgress?.({ type: "text_delta", text: POST_MD } as never);
+      return { result: POST_MD, inputTokens: 10, outputTokens: 5, numTurns: 1, durationMs: 1 };
+    }) as never);
+
+    const res = await post({ ...ok, extra: "lead with the risk" });
+    expect(res.status).toBe(200);
+    const events = parseSse(await res.text());
+    const done = events.find((e) => e.event === "done")!.data;
+    expect(Object.keys(done).sort()).toEqual(["mailHtml", "markdown", "slack"]);
+    expect(done.markdown).toBe(POST_MD);
+    expect(String(done.slack)).toContain("*summaries*");
+    expect(String(done.mailHtml)).toContain("<strong");
+    expect(events.map((e) => e.event).filter((n) => n !== "heartbeat")).toContain("delta");
+    expect(events[events.length - 1]!.event).toBe("end");
+
+    // The assembled prompt is the real one: the preset instruction, the language
+    // rider, the reader's steer and the PREPARED page body, in that order.
+    expect(sawSystem).toContain("sharewiki");
+    expect(sawPrompt).toContain("LANGUAGE: write the post in English");
+    expect(sawPrompt).toContain("lead with the risk");
+    expect(sawPrompt).toContain("Body prose here.");
+    expect(sawPrompt.indexOf("LANGUAGE:")).toBeLessThan(sawPrompt.indexOf("SOURCE:"));
+
+    // …and the page is free again.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(acquireShareFlight(shareFlightKey("sharewiki", "A Concept.md")).ok).toBe(true);
+  });
+
+  test("an EDITED prompt replaces the preset instruction verbatim", async () => {
+    let sawPrompt = "";
+    __setShareOneShotForTest((async (prompt: string) => {
+      sawPrompt = prompt;
+      return { result: "# Post", inputTokens: 1, outputTokens: 1, numTurns: 1, durationMs: 1 };
+    }) as never);
+    await post({ ...ok, promptOverride: "Write exactly two bullets.", lang: "nb" });
+    expect(sawPrompt.startsWith("Write exactly two bullets.")).toBe(true);
+    expect(sawPrompt).toContain("Norwegian (bokmål)");
+  });
 });
 
 describe("GET /api/wiki/share/presets", () => {
@@ -442,6 +543,11 @@ describe("GET /api/wiki/share/presets", () => {
     // ride along or every picker change is a round-trip.
     expect(body.presets.every((p) => p.content.length > 0)).toBe(true);
     expect(body.langs.map((l) => l.id)).toEqual(["en", "nb"]);
+  });
+
+  test("it is `no-store` — a heuristically cached list 400s the POST unclearably", async () => {
+    const res = await app.request("/api/wiki/share/presets?wiki=sharewiki");
+    expect(res.headers.get("cache-control")).toContain("no-store");
   });
 
   test("an unknown wiki is a 404", async () => {

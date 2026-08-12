@@ -46,6 +46,10 @@ export const SHARE_EXTRA_ID = "wikiShareExtra";
 export const SHARE_GENERATE_ID = "wikiShareGen";
 export const SHARE_COPY_ID = "wikiShareCopy";
 export const SHARE_RESET_ID = "wikiSharePromptReset";
+/** Retry on a FAILED preset fetch. Without it the dialog is a dead end: the
+ *  loading branch renders the error in place of the spinner and nothing in the
+ *  panel can re-run the fetch, so a blip means close-and-reopen. */
+export const SHARE_PRESET_RETRY_ID = "wikiSharePresetRetry";
 /** `data-` hooks for the two chip rows (language, format tab). */
 export const SHARE_LANG_ATTR = "data-share-lang";
 export const SHARE_TAB_ATTR = "data-share-tab";
@@ -157,9 +161,36 @@ export function shareCapError(state: ShareDialogState): string | null {
   return null;
 }
 
+/**
+ * Is the EFFECTIVE instruction empty?
+ *
+ * Blanking the textarea makes `promptIsEdited` true and sends `promptOverride:
+ * ""`. The route used to read that as "no override" (`promptOverride.trim() ||
+ * preset.content`) and run the PRESET — the model answering an instruction the
+ * screen was no longer showing. The server 400s it now; this is the same rule
+ * where the reader typed it, so Generate is simply not pressable.
+ *
+ * Null while no preset has resolved: that case has its own copy, and stacking
+ * "the prompt is empty" on top of "this wiki offers no share presets" says
+ * nothing extra.
+ */
+export function sharePromptError(state: ShareDialogState): string | null {
+  if (!selectedPreset(state)) return null;
+  if (promptIsEdited(state) && state.prompt.trim() === "") {
+    return "The prompt is empty — type an instruction, or reset it to the preset.";
+  }
+  return null;
+}
+
+/** Every reason Generate (and the result pane's Regenerate) is unpressable, in
+ *  the order they are reported. */
+export function shareBlockingError(state: ShareDialogState): string | null {
+  return shareCapError(state) ?? sharePromptError(state);
+}
+
 /** Can Generate be pressed? */
 export function canGenerate(state: ShareDialogState): boolean {
-  return !state.running && !!selectedPreset(state) && shareCapError(state) === null;
+  return !state.running && !!selectedPreset(state) && shareBlockingError(state) === null;
 }
 
 /**
@@ -250,7 +281,10 @@ export function shareResultHtml(state: ShareDialogState, slackHtml: string): str
     body +
     '<div class="wiki-share-foot">' +
     `<button class="wiki-share-primary" id="${SHARE_COPY_ID}">${esc(copyLabel)}</button>` +
-    `<button class="wiki-share-ghost" id="${SHARE_GENERATE_ID}"${state.running ? " disabled" : ""}>` +
+    // The SAME derivation as the main Generate, not just `running`. `generate()`
+    // early-returns on `!canGenerate(state)`, so an over-cap prompt or a blanked
+    // one made this button a live-looking silent no-op.
+    `<button class="wiki-share-ghost" id="${SHARE_GENERATE_ID}"${canGenerate(state) ? "" : " disabled"}>` +
     "Regenerate</button>" +
     "</div>"
   );
@@ -260,15 +294,25 @@ function activeTabLabel(tab: ShareTab): string {
   return SHARE_TABS.find((t) => t.id === tab)?.label ?? tab;
 }
 
-/** The whole dialog. Rendered from state on every change — nothing is DOM-held. */
-export function shareDialogHtml(state: ShareDialogState, slackHtml = ""): string {
+/**
+ * The whole dialog. Rendered from state on every change — nothing is DOM-held.
+ *
+ * `now` is a PARAMETER, never a `Date.now()` read in here: this is the pure half,
+ * and the 409 countdown was the one value that reached for the clock mid-render
+ * (the `wiki-filter.ts` rule — the DOM half captures one instant per paint).
+ */
+export function shareDialogHtml(state: ShareDialogState, slackHtml: string, now: number): string {
   const head =
     '<div class="wiki-share-head"><span>📤 Share “' + esc(state.title) + "”</span>" +
     `<button class="wiki-share-x" id="${SHARE_CLOSE_ID}" aria-label="Close">✕</button></div>`;
 
   if (state.presets === null) {
+    // A failed fetch offers a way out other than close-and-reopen.
+    const retry = state.error
+      ? ` <button class="wiki-share-ghost" id="${SHARE_PRESET_RETRY_ID}">Retry</button>`
+      : "";
     return head + '<div class="wiki-share-note">' +
-      (state.error ? esc(state.error) : "Loading presets…") + "</div>";
+      (state.error ? esc(state.error) : "Loading presets…") + retry + "</div>";
   }
 
   const preset = selectedPreset(state);
@@ -314,12 +358,11 @@ export function shareDialogHtml(state: ShareDialogState, slackHtml = ""): string
     'placeholder="e.g. lead with the security angle"' + (state.running ? " disabled" : "") +
     "></label>";
 
-  const capError = shareCapError(state);
   const status =
-    capError ??
+    shareBlockingError(state) ??
     state.error ??
     (state.conflictExpiresAtMs
-      ? shareConflictCopy(state.conflictExpiresAtMs, Date.now())
+      ? shareConflictCopy(state.conflictExpiresAtMs, now)
       : preset
         ? ""
         : "This wiki offers no share presets.");
@@ -327,7 +370,7 @@ export function shareDialogHtml(state: ShareDialogState, slackHtml = ""): string
 
   // While the model writes, the raw markdown IS the preview — the tabs need the
   // server's three renderings, which only exist at `done`.
-  const live = state.running || (state.streamed && !state.result)
+  const live = state.running || state.streamed
     ? '<pre class="wiki-share-preview wiki-share-md wiki-share-live">' +
       esc(state.streamed) + (state.running ? "▍" : "") + "</pre>"
     : "";
@@ -339,15 +382,19 @@ export function shareDialogHtml(state: ShareDialogState, slackHtml = ""): string
     (state.running ? "Generating…" : state.streamed ? "Regenerate" : "Generate") +
     "</button></div>";
 
-  return (
-    head +
-    presetRow +
-    langRow +
-    promptPanel +
-    extraRow +
-    statusHtml +
-    (state.result ? shareResultHtml(state, slackHtml) : live + generate)
-  );
+  // **`running` outranks `result`.** A REGENERATE keeps the previous post in
+  // state until a new `done` lands (clearing it up front meant an app_error, a
+  // 409, a dropped connection or an Escape destroyed a finished post the reader
+  // had not copied yet), so the result pane must give way to the live stream
+  // while the new run is in flight — and come back, intact, beside the error
+  // line if that run fails.
+  const body = state.running
+    ? live + generate
+    : state.result
+      ? shareResultHtml(state, slackHtml)
+      : live + generate;
+
+  return head + presetRow + langRow + promptPanel + extraRow + statusHtml + body;
 }
 
 /**

@@ -38,7 +38,14 @@ const BASE = `http://127.0.0.1:${PORT}`;
 const WIKI = "e2e-share";
 const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
 
+/** Title (what the breadcrumb shows) vs page NAME (the file stem — what
+ *  `index.resolve` takes, and what the client must post). */
 const PAGE_NAME = "Wiki gardener";
+const PAGE_STEM = "gardener";
+/** A second page, so navigation away from the first can be driven. The store's
+ *  page NAME is the file stem; the title is what the breadcrumb shows. */
+const OTHER_STEM = "linter";
+const OTHER_TITLE = "Wiki linter";
 const PAGES: Record<string, string> = {
   "gardener.md": [
     "---",
@@ -51,14 +58,29 @@ const PAGES: Record<string, string> = {
     "The gardener clusters summaries into wiki-page proposals.",
     "",
   ].join("\n"),
+  "linter.md": [
+    "---",
+    "title: Wiki linter",
+    "type: concept",
+    "---",
+    "",
+    "# Wiki linter",
+    "",
+    "The linter reports hygiene findings over the index.",
+    "",
+  ].join("\n"),
 };
 
 /** The canned post the stubbed route "generates". Markdown on the wire; the three
  *  renderings below are what the tabs must show. */
 const MARKDOWN = "## Gardener\n\nIt clusters **summaries** into proposals.";
 const SLACK = "*Gardener*\n\nIt clusters *summaries* into proposals.";
+/** Carries a LINK on purpose: `formatEmailHtml` output is the exact rich text the
+ *  copy button puts on the clipboard, so the "open in a new tab" fix has to be
+ *  applied to the inserted preview and NOT baked into the renderer. */
 const MAIL_HTML =
-  '<h2 style="font-size:18px">Gardener</h2><p>It clusters <strong>summaries</strong> into proposals.</p>';
+  '<h2 style="font-size:18px">Gardener</h2><p>It clusters <strong>summaries</strong> into ' +
+  '<a href="https://example.com/proposals">proposals</a>.</p>';
 
 /** The stub's SSE body: two deltas, then the three-string `done`, then `end`. */
 function shareSseBody(): string {
@@ -123,11 +145,17 @@ test.afterAll(async () => {
   if (root) await rm(root, { recursive: true, force: true });
 });
 
+/** Every POST body the stub saw, so a test can assert the client→route contract
+ *  (which the stub would otherwise hide completely). Reset per `openShare`. */
+let posted: Record<string, unknown>[] = [];
+
 /** Open the article and its Share dialog. The generate route is stubbed for every
  *  test in this file — no model call is ever made. */
 async function openShare(page: import("@playwright/test").Page): Promise<void> {
+  posted = [];
   await page.route("**/api/wiki/share", async (route) => {
     if (route.request().method() !== "POST") return route.fallback();
+    posted.push(JSON.parse(route.request().postData() ?? "{}") as Record<string, unknown>);
     await route.fulfill({
       status: 200,
       headers: { "content-type": "text/event-stream" },
@@ -179,6 +207,29 @@ test.describe("Wiki reader: share dialog", () => {
     await expect(page.locator(".wiki-share-edited")).toHaveCount(0);
     // …and the panel is still open across that repaint.
     await expect(prompt).toBeVisible();
+  });
+
+  test("the POST body is the contract the route parses — `page` is the NAME", async ({ page }) => {
+    // The stub hides this completely otherwise: a client that posted a relPath (or
+    // dropped `wiki`/`preset`/`lang`) would pass every other test in this file and
+    // fail against the real route, which resolves `page` with `index.resolve`.
+    await openShare(page);
+    await generate(page);
+    expect(posted).toHaveLength(1);
+    const body = posted[0]!;
+    // The page NAME the store indexes by (the stem) — NOT the title, and not a
+    // relPath (which carries directories and an extension the route would fail to
+    // resolve). `?page=` in the URL is title-tolerant; this POST field is not.
+    expect(body.page).toBe(PAGE_STEM);
+    expect(String(body.page)).not.toContain(".md");
+    expect(String(body.page)).not.toContain("/");
+    expect(body.wiki).toBe(WIKI);
+    expect(typeof body.preset).toBe("string");
+    expect(String(body.preset).length).toBeGreaterThan(0);
+    expect(["en", "nb"]).toContain(body.lang);
+    // Unedited ⇒ no promptOverride at all (the route 400s a blank one, and echoing
+    // the preset back would freeze wording the bot may since have overridden).
+    expect(body.promptOverride).toBeUndefined();
   });
 
   test("Generate streams, then shows Slack | Email | Markdown — and no Telegram", async ({
@@ -253,6 +304,84 @@ test.describe("Wiki reader: share dialog", () => {
     // …and it is a Slack-tab concern only.
     await page.locator('[data-share-tab="markdown"]').click();
     await expect(page.locator(".wiki-share-warn")).toHaveCount(0);
+  });
+
+  test("a link in the EMAIL preview opens in a new tab, not over the un-copied post", async ({
+    page,
+  }) => {
+    // The dialog's state is module-held and does not survive a page load, so a
+    // same-tab navigation from the preview destroys a finished post the reader has
+    // not copied yet. The fix is preview-only by necessity: `mailHtml` IS the
+    // clipboard payload, and a `target=` baked into `formatEmailHtml` would ride
+    // into every pasted email.
+    await openShare(page);
+    await generate(page);
+    await page.locator('[data-share-tab="email"]').click();
+    const link = page.locator(".wiki-share-mail a");
+    await expect(link).toHaveAttribute("target", "_blank");
+    await expect(link).toHaveAttribute("rel", /noopener/);
+    // …and the copied rich text is still the SERVER's bytes, untouched.
+    expect(MAIL_HTML).not.toContain("target=");
+  });
+
+  test("opening the dialog moves focus into it — it claims aria-modal", async ({ page }) => {
+    // Focus left on the 📤 button behind the scrim is a lie to a screen reader,
+    // and leaves a keyboard reader outside the panel Tab is trapped inside of.
+    await openShare(page);
+    const focused = await page.evaluate(() => {
+      const el = document.activeElement as HTMLElement | null;
+      return { id: el?.id ?? "", inPanel: !!el && !!document.getElementById("wikiShare")?.contains(el) };
+    });
+    expect(focused.inPanel).toBe(true);
+    expect(focused.id).not.toBe("wikiShareBtn");
+  });
+
+  test("a POINTER navigation can't strand the dialog — the scrim eats the click", async ({
+    page,
+  }) => {
+    // Measured, not assumed: with the dialog open, a click on a left-list row does
+    // not reach the row at all. The scrim is `position: fixed; inset: 0` above the
+    // page, so the click lands there, reads as a click-away, and closes the dialog
+    // WITHOUT navigating. (Tab is trapped in the panel, so the keyboard can't reach
+    // those rows either.) This is why only `popstate` — the next test — could ever
+    // leave the dialog pointing at a page the reader had left.
+    await openShare(page);
+    const row = page.locator(`.wiki-list-item[data-page="${OTHER_STEM}"]`);
+    await expect(row).toBeVisible();
+    await expect(
+      page.locator("#wikiShareScrim").evaluate((el, r) => {
+        const box = (r as HTMLElement).getBoundingClientRect();
+        return document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2) === el;
+      }, await row.elementHandle()),
+    ).resolves.toBe(true);
+    // One real click: dialog gone, page unchanged.
+    await row.click({ trial: false, force: true, position: { x: 5, y: 5 } }).catch(() => {});
+    await expect(page.locator(".wiki-bc-cur")).toHaveText(PAGE_NAME);
+  });
+
+  test("Back/popstate CLOSES the dialog instead of stranding it on the page you left", async ({
+    page,
+  }) => {
+    // popstate involves NO click, so the click-away listener never fires. A
+    // surviving dialog then targets the page the reader has just left: Generate
+    // would summarize the wrong article, under the new article's breadcrumb, and
+    // the header would still name the old one. `renderBreadcrumb` closes it, the
+    // same seam the Discuss dialog uses (`shouldCloseArticleChatOnNavigate`).
+    // An SPA navigation (a list-row click pushes history), so Back is a real
+    // `popstate` into `loadPage` — NOT a document reload, which would destroy the
+    // dialog for free and prove nothing.
+    await openShare(page);
+    await page.keyboard.press("Escape");
+    await expect(page.locator("#wikiShare")).toHaveCount(0);
+    await page.locator(`.wiki-list-item[data-page="${OTHER_STEM}"]`).click();
+    await expect(page.locator(".wiki-bc-cur")).toHaveText(OTHER_TITLE);
+
+    await page.locator("#wikiShareBtn").click();
+    await expect(page.locator("#wikiShare")).toBeVisible();
+    await page.goBack();
+    await expect(page.locator(".wiki-bc-cur")).toHaveText(PAGE_NAME);
+    await expect(page.locator("#wikiShare")).toHaveCount(0);
+    await expect(page.locator("#wikiShareScrim")).toHaveCount(0);
   });
 
   test("a 409 tells the reader when the page frees up, instead of failing opaquely", async ({

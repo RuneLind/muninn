@@ -3,13 +3,16 @@ import {
   canGenerate,
   copyPayloadFor,
   promptIsEdited,
+  shareBlockingError,
   shareCapError,
   shareConflictCopy,
   shareDialogHtml,
+  sharePromptError,
   shareRequestBody,
   shareResultHtml,
   shouldCloseShareDialog,
   slackLengthWarning,
+  SHARE_PRESET_RETRY_ID,
   SHARE_TABS,
   type ShareDialogState,
   type SharePresetOption,
@@ -41,6 +44,11 @@ function state(over: Partial<ShareDialogState> = {}): ShareDialogState {
 }
 
 const RESULT = { markdown: "# Post\n\nBody.", slack: "*Post*\n\nBody.", mailHtml: "<h2>Post</h2>" };
+
+/** `shareDialogHtml` takes `now` as a parameter — the pure half never reads the
+ *  clock (the `wiki-filter.ts` rule). Fixed here so the 409 countdown is stable. */
+const NOW = 1_000_000;
+const html = (s: ShareDialogState, slackHtml = ""): string => shareDialogHtml(s, slackHtml, NOW);
 
 describe("the POST body", () => {
   test("carries the preset ID and the language, and NO promptOverride when unedited", () => {
@@ -144,44 +152,107 @@ describe("tabs and copy", () => {
   });
 });
 
+describe("an EMPTIED prompt is refused, never a silent fall back to the preset", () => {
+  // Blanking the textarea makes `promptIsEdited` true, so the POST carries
+  // `promptOverride: ""` — which the route used to read as "no override" and run
+  // the preset instruction while the screen showed an empty box.
+  const blank = state({ prompt: "   " });
+
+  test("it blocks Generate and says so", () => {
+    expect(sharePromptError(blank)).toContain("empty");
+    expect(shareBlockingError(blank)).toBe(sharePromptError(blank));
+    expect(canGenerate(blank)).toBe(false);
+    expect(html(blank)).toContain("The prompt is empty");
+  });
+
+  test("a cap error still wins the status line", () => {
+    const both = state({ prompt: "", extra: "x".repeat(SHARE_EXTRA_MAX + 1) });
+    expect(shareBlockingError(both)).toBe(shareCapError(both));
+  });
+
+  test("no preset resolved yet has its OWN copy, not this one", () => {
+    expect(sharePromptError(state({ presetId: "gone", prompt: "" }))).toBeNull();
+  });
+
+  test("the result pane's Regenerate is disabled by the SAME derivation", () => {
+    // `generate()` early-returns on `!canGenerate`, so gating this button on
+    // `running` alone made an over-cap or emptied prompt a silent no-op click.
+    const ok = shareResultHtml(state({ result: RESULT }), "");
+    expect(/id="wikiShareGen"(?![^>]*disabled)/.test(ok)).toBe(true);
+    for (const bad of [
+      state({ result: RESULT, prompt: "" }),
+      state({ result: RESULT, extra: "x".repeat(SHARE_EXTRA_MAX + 1) }),
+      state({ result: RESULT, running: true }),
+    ]) {
+      expect(/id="wikiShareGen"[^>]*disabled/.test(shareResultHtml(bad, ""))).toBe(true);
+    }
+  });
+});
+
 describe("the dialog markup", () => {
   test("loading state says so, and a failed preset load says what went wrong", () => {
-    expect(shareDialogHtml(state({ presets: null }))).toContain("Loading presets…");
-    const failed = shareDialogHtml(state({ presets: null, error: "huginn is down" }));
+    expect(html(state({ presets: null }))).toContain("Loading presets…");
+    const failed = html(state({ presets: null, error: "huginn is down" }));
     expect(failed).toContain("huginn is down");
   });
 
+  test("a FAILED preset load offers a Retry — the loading branch is otherwise a dead end", () => {
+    expect(html(state({ presets: null, error: "huginn is down" }))).toContain(
+      SHARE_PRESET_RETRY_ID,
+    );
+    // …and the still-loading branch does not.
+    expect(html(state({ presets: null }))).not.toContain(SHARE_PRESET_RETRY_ID);
+  });
+
   test("the prompt panel is visible, editable and flagged once edited", () => {
-    const clean = shareDialogHtml(state());
+    const clean = html(state());
     expect(clean).toContain('id="wikiSharePrompt"');
     expect(clean).not.toContain("wiki-share-edited");
-    const edited = shareDialogHtml(state({ prompt: "Mine." }));
+    const edited = html(state({ prompt: "Mine." }));
     expect(edited).toContain("wiki-share-edited");
     expect(edited).toContain('id="wikiSharePromptReset"');
   });
 
   test("the live pane streams while running and gives way to the tabs on a result", () => {
-    const streaming = shareDialogHtml(state({ running: true, streamed: "# Half a p" }));
+    const streaming = html(state({ running: true, streamed: "# Half a p" }));
     expect(streaming).toContain("wiki-share-live");
     expect(streaming).toContain("Generating…");
     expect(streaming).not.toContain("wiki-share-tabs");
-    const done = shareDialogHtml(state({ streamed: "x", result: RESULT }), "<p>x</p>");
+    const done = html(state({ streamed: "x", result: RESULT }), "<p>x</p>");
     expect(done).toContain("wiki-share-tabs");
     expect(done).not.toContain("wiki-share-live");
   });
 
+  test("a REGENERATE shows the live stream over the kept result, and the result survives a failure", () => {
+    // `generate()` no longer nulls `result`, so `running` has to outrank it in the
+    // render — otherwise the reader watches a stale post while a new one streams.
+    const rerunning = html(
+      state({ running: true, streamed: "# New", result: RESULT }),
+      "<p>x</p>",
+    );
+    expect(rerunning).toContain("wiki-share-live");
+    expect(rerunning).not.toContain("wiki-share-tabs");
+    // …and when that run fails, the old tabs + Copy are back, beside the error.
+    const failed = html(
+      state({ running: false, streamed: "# New", result: RESULT, error: "The share failed." }),
+      "<p>x</p>",
+    );
+    expect(failed).toContain("wiki-share-tabs");
+    expect(failed).toContain("wikiShareCopy");
+    expect(failed).toContain("The share failed.");
+  });
+
   test("markup escapes the title, the prompt and the markdown pane", () => {
-    const html = shareDialogHtml(
+    const out = html(
       state({
         title: '<img src=x onerror="boom">',
         prompt: "<script>alert(1)</script>",
         result: { ...RESULT, markdown: "<script>alert(2)</script>" },
         tab: "markdown",
       }),
-      "",
     );
-    expect(html).not.toContain("<img src=x");
-    expect(html).not.toContain("<script>");
+    expect(out).not.toContain("<img src=x");
+    expect(out).not.toContain("<script>");
   });
 });
 
@@ -204,5 +275,13 @@ describe("dismissal and conflict copy", () => {
     expect(shareConflictCopy(now + 150_000, now)).toContain("~3 min");
     // A deadline already past reads as "0s", never as a negative.
     expect(shareConflictCopy(now - 5_000, now)).toContain("~0s");
+  });
+
+  test("`now` is a PARAMETER of the render — the pure half never reads the clock", () => {
+    // A `Date.now()` inside the render makes the countdown untestable and the
+    // function impure (the `wiki-filter.ts` rule).
+    const s = state({ conflictExpiresAtMs: NOW + 30_000 });
+    expect(shareDialogHtml(s, "", NOW)).toContain("~30s");
+    expect(shareDialogHtml(s, "", NOW + 20_000)).toContain("~10s");
   });
 });

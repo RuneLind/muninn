@@ -94,6 +94,30 @@ describe("stripWrappingFence", () => {
     expect(stripWrappingFence(post)).toBe(post);
     expect(stripWrappingFence("  plain post  ")).toBe("plain post");
   });
+
+  test("a post that BOTH starts and ends with a code block keeps both fences", () => {
+    // The greedy-match bug: first-opener → last-closer matched the whole post,
+    // and stripping it destroyed BOTH real code blocks (and spliced the prose
+    // between them into the code).
+    const post = [
+      "```",
+      "npm install foo",
+      "```",
+      "",
+      "Then run it and enjoy.",
+      "",
+      "```",
+      "foo --run",
+      "```",
+    ].join("\n");
+    expect(stripWrappingFence(post)).toBe(post);
+  });
+
+  test("a genuine wrapper around a post that CONTAINS a shorter fence still unwraps", () => {
+    // A ```` wrapper cannot be closed by a ``` line, so the interior is content.
+    const inner = "Intro.\n\n```bash\nls\n```\n\nOutro.";
+    expect(stripWrappingFence("````\n" + inner + "\n````")).toBe(inner);
+  });
 });
 
 describe("misc", () => {

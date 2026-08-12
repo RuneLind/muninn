@@ -83,6 +83,7 @@ import {
 import { commitWikiChange } from "../../wiki/commit.ts";
 import { todayOslo } from "../../gardener/util.ts";
 import { capabilitiesForConnectorType, connectorCapabilities } from "../../ai/one-shot.ts";
+import type { executeOneShot } from "../../ai/one-shot.ts";
 import { streamFactcheckSSE } from "./factcheck-sse.ts";
 import { acquireShareFlight, shareFlightKey, streamShareSSE } from "./share-sse.ts";
 import { findSharePreset, resolveSharePresets, type SharePreset } from "../../share/presets.ts";
@@ -702,6 +703,21 @@ export function resolveSharePreflight(input: {
   if (!index) return "wiki directory not found";
   if (!meta) return `No wiki page named "${page}".`;
   return null;
+}
+
+/**
+ * Model seam for `POST /api/wiki/share`, threaded into `ShareSseOptions.oneShot`.
+ *
+ * Null in production (the runner then uses the real `executeOneShot`). It exists
+ * so a route test can drive the HAPPY path — body prep → prompt assembly → stream
+ * → `done` → slot release — which is otherwise unreachable without spending a
+ * real model call, and was therefore the one part of this route with no coverage.
+ */
+let shareOneShot: typeof executeOneShot | null = null;
+
+/** Test-only: install (or clear, with no arg) the share one-shot. */
+export function __setShareOneShotForTest(fn?: typeof executeOneShot): void {
+  shareOneShot = fn ?? null;
 }
 
 /**
@@ -1985,6 +2001,13 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
   // the reader edit it — that is the whole "visible/editable prompt panel", and
   // fetching one body per picker change would be a round-trip per click.
   app.get("/api/wiki/share/presets", (c) => {
+    // `no-store`, for the same reason `/api/wiki/pages` carries it (see the note
+    // there): with no freshness information at all a browser may heuristically
+    // cache this (RFC 9111 §4.2.2). The failure is a closed loop — the dialog
+    // renders a preset id from a stale list, the POST 400s "unknown share preset",
+    // and a reload replays the same cached list. The list is bot-derived and
+    // changes whenever a bot's `prompts/share*.md` files do.
+    c.header("Cache-Control", "no-store");
     const { entry, unknownWiki, wiki } = resolveWikiRequest(
       getWikiRegistry(),
       c.req.query("wiki"),
@@ -2023,6 +2046,11 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
   // changes what the model was asked without telling anyone, and the reader reads
   // the result as an answer to the instruction they wrote.
   app.post("/api/wiki/share", async (c) => {
+    // Wrapped like `remember` / `factcheck/append` / `integrate`: an unexpected
+    // throw anywhere below returns 500 JSON rather than an unhandled rejection.
+    // The inner handover `catch` rethrows AFTER releasing the slot, so a throw on
+    // that path still frees the page and lands here.
+    try {
     type ShareBody = {
       wiki?: string;
       bot?: string;
@@ -2033,6 +2061,17 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       extra?: string;
     };
     const body = await c.req.json<ShareBody>().catch(() => ({}) as ShareBody);
+
+    // Body shape is client-controlled, so every field the route reads is
+    // type-checked HERE (the `/api/wiki/ask/chat` precedent). A non-string `wiki`
+    // used to reach `rawWiki.trim()` inside `resolveWikiRequest` and 500.
+    for (const field of [
+      "wiki", "bot", "page", "preset", "promptOverride", "extra",
+    ] as const) {
+      if (body[field] !== undefined && typeof body[field] !== "string") {
+        return c.json({ error: `${field} must be a string` }, 400);
+      }
+    }
 
     const page = typeof body.page === "string" ? body.page.trim() : "";
     if (!page) return c.json({ error: "page is required" }, 400);
@@ -2052,6 +2091,14 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         400,
       );
     }
+    // A PRESENT but blank override is a 400, not a fall-back to the preset. The
+    // client sends `promptOverride: ""` when the reader empties the textarea, and
+    // `promptOverride.trim() || preset.content` then ran the PRESET — the model
+    // following an instruction the screen was no longer showing, reported as that
+    // preset's output. (An ABSENT field is the unedited case and stays silent.)
+    if (body.promptOverride !== undefined && promptOverride.trim() === "") {
+      return c.json({ error: "promptOverride is empty — omit it to use the preset" }, 400);
+    }
     const extra = typeof body.extra === "string" ? body.extra : "";
     if (extra.length > SHARE_EXTRA_MAX) {
       return c.json({ error: `extra is longer than ${SHARE_EXTRA_MAX} characters` }, 400);
@@ -2066,17 +2113,6 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     // Owner-routing, identical to Ask / fact-check / integrate.
     const { bot: botConfig } = resolveWikiSynthesisBot(entry, discoverAllBots());
 
-    // The preset is resolved against the RESOLVED BOT (its `share.md` /
-    // `share.<id>.md` files override the shipped set), so this check can only run
-    // once the bot is known — and an unknown id is refused rather than falling
-    // back to the default, which would generate with a different instruction than
-    // the one the reader picked and report it as that preset's output.
-    let preset: SharePreset | undefined;
-    if (botConfig) {
-      preset = findSharePreset(resolveSharePresets(botConfig.prompts), presetId);
-      if (!preset) return c.json({ error: `unknown share preset "${presetId}"` }, 400);
-    }
-
     let index: WikiIndex | null = null;
     let meta: WikiPageMeta | undefined;
     if (entry && !unknownWiki) {
@@ -2084,6 +2120,24 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       if (index) meta = index.resolve(page);
     }
     let preflightError = resolveSharePreflight({ wiki, unknownWiki, entry, index, meta, page });
+
+    // **Preset validation runs after the WIKI is resolved, and independently of
+    // the bot.** Two orderings were wrong before:
+    //   · preset-first reported `unknown share preset "…"` for a request whose
+    //     real problem was an unknown WIKI — the reader picked a preset that is
+    //     perfectly valid for the wiki they meant. The wiki's own failure is the
+    //     one worth reporting, so a failed preflight skips this check and lets the
+    //     stream say what is actually wrong.
+    //   · gating on `botConfig` skipped it entirely on a zero-bot install, and the
+    //     bogus id sailed past into a committed-200 app_error. A bot's
+    //     `prompts/share*.md` files only override or EXTEND the shipped set, so
+    //     `resolveSharePresets(undefined)` is a sound list to validate against
+    //     whenever no bot resolved.
+    let preset: SharePreset | undefined;
+    if (!preflightError) {
+      preset = findSharePreset(resolveSharePresets(botConfig?.prompts), presetId);
+      if (!preset) return c.json({ error: `unknown share preset "${presetId}"` }, 400);
+    }
 
     // Body prep — the intended (and only) consumer of PR A's `prepareShareBody`
     // dispatcher: the page's `type` picks the preparer, an explainer going through
@@ -2115,10 +2169,13 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     // Per-page single-flight. One POST buys a whole-page summarization (tens of
     // thousands of input tokens), and a double-click, a reload mid-stream or a
     // second tab each buy another — this is the only guard that survives all
-    // three. Taken on the happy path only: a preflight failure runs no model call
-    // and must not wedge the page.
+    // three. Taken ONLY when a model call will actually run: `userPrompt` is
+    // non-empty exactly when preflight, the page read and the body prep all
+    // succeeded, and `botConfig` is what the scaffold needs to get past its
+    // "no bots configured" app_error. Without the bot term a bot-less install
+    // reserved the page for two minutes to emit a refusal.
     let release: (() => void) | undefined;
-    if (!preflightError && entry && meta) {
+    if (botConfig && userPrompt && entry && meta) {
       const acquired = acquireShareFlight(shareFlightKey(entry.name, meta.relPath));
       if (!acquired.ok) {
         return c.json({ state: "running", expiresAtMs: acquired.expiresAtMs }, 409);
@@ -2126,7 +2183,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       release = acquired.release;
       log.info("Wiki share: wiki={wiki} bot={bot} page={page} preset={preset} lang={lang}", {
         wiki: entry.name,
-        bot: botConfig?.name,
+        bot: botConfig.name,
         page,
         preset: presetId,
         lang,
@@ -2147,11 +2204,21 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         systemPrompt,
         userPrompt,
         runName: `Share: ${meta?.title ?? page}`,
+        // Test seam — production leaves it unset. Without it no route test can
+        // reach `done`, so the prepareShareBody → buildShareUserPrompt →
+        // streamShareSSE wiring had no coverage at all.
+        ...(shareOneShot ? { oneShot: shareOneShot } : {}),
         ...(release ? { onSettled: release } : {}),
       });
     } catch (err) {
       release?.();
       throw err;
+    }
+    } catch (err) {
+      log.error("Wiki share failed: {error}", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return c.json({ error: "share failed" }, 500);
     }
   });
 

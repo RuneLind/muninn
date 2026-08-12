@@ -31,7 +31,7 @@ import {
   shareRequestBody,
   shouldCloseShareDialog,
   promptIsEdited,
-  shareCapError,
+  shareBlockingError,
   SHARE_CLOSE_ID,
   SHARE_COPY_ID,
   SHARE_DIALOG_ID,
@@ -39,6 +39,7 @@ import {
   SHARE_GENERATE_ID,
   SHARE_LANG_ATTR,
   SHARE_PRESET_ID,
+  SHARE_PRESET_RETRY_ID,
   SHARE_PROMPT_ID,
   SHARE_PROMPT_PANEL_ID,
   SHARE_RESET_ID,
@@ -67,6 +68,10 @@ let openerIds: string[] = [];
 let wired = false;
 let inFlight: AbortController | null = null;
 let copiedTimer: ReturnType<typeof setTimeout> | null = null;
+/** Pending until the first paint that can take focus — see {@link applyAutofocus}. */
+let autofocusPending = false;
+/** Ticks the 409 countdown; cleared the moment the deadline passes. */
+let conflictTimer: ReturnType<typeof setInterval> | null = null;
 
 function panel(): HTMLElement | null {
   return document.getElementById(SHARE_DIALOG_ID);
@@ -81,6 +86,11 @@ export function openShareDialog(opts: OpenShareOptions): void {
   // and the page's server-side slot — for the rest of the budget.
   inFlight?.abort();
   inFlight = null;
+  stopConflictTimer();
+  // The panel claims `aria-modal="true"`, so leaving `document.activeElement` on
+  // the 📤 button behind the scrim is a lie to a screen reader and leaves the
+  // keyboard reader outside a dialog Tab is trapped inside of.
+  autofocusPending = true;
   openerIds = opts.openerIds ?? [];
   state = {
     wiki: opts.wiki,
@@ -101,13 +111,58 @@ export function openShareDialog(opts: OpenShareOptions): void {
   void loadPresets();
 }
 
+/**
+ * Close the dialog when the reader navigates to a DIFFERENT page.
+ *
+ * The Discuss dialog's `shouldCloseArticleChatOnNavigate` seam, same reason and
+ * same call site (`renderBreadcrumb`, before `currentArticle` is re-stamped). The
+ * pointer path cannot strand it — the scrim is above the page and eats a list-row
+ * click as a click-away — but **`popstate` involves no click at all**, so Back
+ * left the panel open over the new article, its header naming the old page and
+ * its Generate about to summarize it. Measured, then pinned in
+ * `e2e/wiki-share.spec.ts`.
+ *
+ * Comparing the page NAME (not relPath) because that is what the dialog holds and
+ * posts; a same-page re-render must not close a dialog the reader has open.
+ */
+export function closeShareDialogOnNavigate(page: string): void {
+  if (state && state.page !== page) closeShareDialog();
+}
+
 /** Close it, cancelling any run. */
 export function closeShareDialog(): void {
   inFlight?.abort();
   inFlight = null;
+  stopConflictTimer();
+  autofocusPending = false;
   state = null;
   panel()?.remove();
   document.getElementById(SHARE_SCRIM_ID)?.remove();
+}
+
+// ── 409 countdown ────────────────────────────────────────────────────────────
+// The conflict copy names a deadline ("frees up in at most ~45s"), and a frozen
+// number that never reaches zero is worse than none: the reader waits, re-clicks,
+// and gets the same sentence. One 1s tick repaints it, and the tick that finds
+// the deadline PASSED clears both the deadline and the copy, so the next click
+// starts from a clean panel rather than under a stale refusal.
+
+function stopConflictTimer(): void {
+  if (conflictTimer) clearInterval(conflictTimer);
+  conflictTimer = null;
+}
+
+function startConflictTimer(): void {
+  stopConflictTimer();
+  conflictTimer = setInterval(() => {
+    if (!state?.conflictExpiresAtMs) { stopConflictTimer(); return; }
+    if (Date.now() >= state.conflictExpiresAtMs) {
+      stopConflictTimer();
+      state.conflictExpiresAtMs = undefined;
+      state.error = undefined;
+    }
+    render();
+  }, 1000);
 }
 
 // ── Language memory ──────────────────────────────────────────────────────────
@@ -217,9 +272,51 @@ function render(): void {
   // page already ships — a faithful preview of the exact string being copied, at
   // no new cost and with no second implementation to drift.
   const slackHtml = state.result ? renderSlackMrkdwn(state.result.slack) : "";
-  p.innerHTML = shareDialogHtml(state, slackHtml);
+  // ONE clock read per paint, threaded into the pure half (which must not reach
+  // for `Date.now()` itself — the `wiki-filter.ts` rule).
+  p.innerHTML = shareDialogHtml(state, slackHtml, Date.now());
   if (scrollTop) p.scrollTop = scrollTop;
+  detachPreviewLinks(p);
   restoreFocus(focus);
+  applyAutofocus(p, focus);
+}
+
+/**
+ * Make every link in a PREVIEW open in a new tab.
+ *
+ * The email preview is `formatEmailHtml`'s real output — the exact bytes the copy
+ * button puts on the clipboard as `text/html` — so the fix cannot live in the
+ * renderer: a `target="_blank"` baked in there would ride into the pasted email
+ * body. It has to be preview-only, hence a DOM pass over the inserted markup.
+ * Without it a click on a link in the preview navigates /wiki away and destroys a
+ * finished, un-copied post: the dialog's state is module-held and does not
+ * survive the page load.
+ *
+ * Applied to `.wiki-share-preview` generally, so the Slack preview's anchors are
+ * covered by the same pass rather than by trusting a second renderer.
+ */
+function detachPreviewLinks(p: HTMLElement): void {
+  p.querySelectorAll(".wiki-share-preview a[href]").forEach((a) => {
+    a.setAttribute("target", "_blank");
+    a.setAttribute("rel", "noopener noreferrer");
+  });
+}
+
+/**
+ * Move focus INTO the dialog on the paint that first offers something to focus.
+ *
+ * The loading paint has only ✕, so focus lands there and the flag stays pending;
+ * the paint that brings the preset picker takes it and clears the flag. Skipped
+ * whenever focus was already inside the panel (`focus` non-null), so a repaint
+ * mid-typing never yanks the caret out of the textarea.
+ */
+function applyAutofocus(p: HTMLElement, focus: FieldFocus | null): void {
+  if (!autofocusPending || focus) return;
+  const preferred = document.getElementById(SHARE_PRESET_ID) as HTMLElement | null;
+  const el = preferred ?? (p.querySelector("button, select, textarea, input") as HTMLElement | null);
+  if (!el) return;
+  el.focus({ preventScroll: true });
+  if (preferred) autofocusPending = false;
 }
 
 /** Coalesce a burst of stream deltas into one paint per animation frame. */
@@ -272,6 +369,12 @@ function onClick(e: MouseEvent): void {
       if (preset) { state.prompt = preset.content; state.promptOpen = true; render(); }
       return;
     }
+    if (target.closest("#" + SHARE_PRESET_RETRY_ID)) {
+      state.error = undefined;
+      render();
+      void loadPresets();
+      return;
+    }
     const lang = target.closest("[" + SHARE_LANG_ATTR + "]") as HTMLElement | null;
     if (lang) {
       const value = lang.getAttribute(SHARE_LANG_ATTR);
@@ -314,7 +417,7 @@ function onInput(e: Event): void {
 
 /** The bits of the markup that are DERIVED from the text fields. */
 function derivedSignature(s: ShareDialogState): string {
-  return `${promptIsEdited(s)}|${shareCapError(s) ?? ""}|${canGenerate(s)}`;
+  return `${promptIsEdited(s)}|${shareBlockingError(s) ?? ""}|${canGenerate(s)}`;
 }
 
 function onChange(e: Event): void {
@@ -400,9 +503,14 @@ async function generate(): Promise<void> {
   const ctrl = new AbortController();
   inFlight?.abort();
   inFlight = ctrl;
+  stopConflictTimer();
   target.running = true;
   target.streamed = "";
-  target.result = null;
+  // `result` is DELIBERATELY left alone. A Regenerate that fails — app_error,
+  // 409, dropped connection, Escape — used to leave the reader with nothing,
+  // having destroyed a finished post they had not copied yet. It is replaced
+  // only when a new `done` actually lands; `shareDialogHtml` shows the live
+  // stream over it while the run is in flight.
   target.error = undefined;
   target.conflictExpiresAtMs = undefined;
   target.copied = false;
@@ -412,6 +520,7 @@ async function generate(): Promise<void> {
     if (state !== target) return;
     Object.assign(target, patch, { running: false });
     if (inFlight === ctrl) inFlight = null;
+    if (target.conflictExpiresAtMs) startConflictTimer();
     render();
   };
 
@@ -428,11 +537,16 @@ async function generate(): Promise<void> {
     return;
   }
 
+  // Every terminal path is abort-guarded, including these two. `settle` only
+  // checks that the STATE object is still the same one — which it is after an
+  // Escape-then-second-Generate — so an unguarded late settle from run A would
+  // flip `running: false` and paint its error over live run B.
   if (res.status === 409) {
     // The whole reason this is a fetch and not an EventSource: the deadline is in
     // the body of a non-200, which an EventSource never surfaces.
     let body: { expiresAtMs?: unknown } = {};
     try { body = (await res.json()) as { expiresAtMs?: unknown }; } catch { /* keep the default */ }
+    if (ctrl.signal.aborted) return;
     const at = typeof body.expiresAtMs === "number" ? body.expiresAtMs : Date.now();
     settle({ conflictExpiresAtMs: at, error: shareConflictCopy(at, Date.now()) });
     return;
@@ -443,6 +557,7 @@ async function generate(): Promise<void> {
       const b = (await res.json()) as { error?: unknown };
       if (b && typeof b.error === "string") msg = b.error;
     } catch { /* non-JSON body — keep the status copy */ }
+    if (ctrl.signal.aborted) return;
     settle({ error: msg });
     return;
   }
@@ -469,7 +584,10 @@ async function generate(): Promise<void> {
     return;
   }
   if (ctrl.signal.aborted) return;
-  if (done) settle({ result: done, tab: "slack", error: undefined });
+  // `tab` is NOT reset. A reader regenerating from the Email tab is regenerating
+  // the email; snapping back to Slack loses the tab they were working in — and on
+  // the first run the tab is "slack" already, so resetting it bought nothing.
+  if (done) settle({ result: done, error: undefined });
   else settle({ error: appError ?? "The post never arrived — nothing was generated." });
 }
 

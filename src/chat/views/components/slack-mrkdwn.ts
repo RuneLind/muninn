@@ -8,7 +8,14 @@ import { Placeholders, escapeHtml } from "../../../format/markdown-core.ts";
 export function renderSlackMrkdwn(text: string): string {
   const ph = new Placeholders();
   let t = text.replace(/<(https?:\/\/[^|>]+)\|([^>]+)>/g, (_match, url: string, label: string) =>
-    ph.add("SLINK", `<a href="${escapeHtml(url)}" target="_blank">${escapeHtml(label)}</a>`),
+    // `rel="noopener"` alongside the existing `target="_blank"`: a rendered link
+    // here is untrusted model/source output, and an opener handle lets the opened
+    // page rewrite this one's location. Safe for every consumer (the chat page and
+    // the share dialog's Slack preview) — it removes a capability, adds none.
+    ph.add(
+      "SLINK",
+      `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">${escapeHtml(label)}</a>`,
+    ),
   );
   t = escapeHtml(t)
     .replace(/\*([^*]+)\*/g, "<strong>$1</strong>")

@@ -123,11 +123,31 @@ export function buildShareUserPrompt(input: ShareTaskInput): string {
  * one ```ts block — rare, but possible from a code-heavy page — opens with
  * ```` ```ts ````, and unwrapping that would destroy real formatting). Anything
  * else is returned untouched.
+ *
+ * **The interior check is what makes "first line + last line" mean "ONE fence".**
+ * The outer match is greedy by construction (`$` pins the closer to the last
+ * line), so a post that merely BEGINS and ENDS with a code block — `` ``` npm
+ * install ``` `` , prose, `` ``` foo --run ``` `` — matched first-opener to
+ * last-closer and had BOTH of its real fences stripped, splicing the prose into
+ * the code. So a run of the same marker at the start of an interior line, at
+ * least as long as the opener, disqualifies the match: by CommonMark's rule that
+ * run IS a closer, which means the two lines we matched are two separate blocks
+ * and not a wrapper. The length test keeps the legitimate case working — a
+ * ````-wrapped post whose interior holds ordinary ``` blocks still unwraps,
+ * because a shorter run cannot close a longer opener.
  */
 export function stripWrappingFence(text: string): string {
   const trimmed = text.trim();
   const m = /^(`{3,}|~{3,})[ \t]*\r?\n([\s\S]*)\r?\n\1[ \t]*$/.exec(trimmed);
-  return m ? m[2]!.trim() : trimmed;
+  if (!m) return trimmed;
+  const marker = m[1]!;
+  const interior = m[2]!;
+  // `[<char>]` rather than an escape: `\`` is an identity escape that a future
+  // `u`-flagged rewrite would reject, and a char class needs no escaping for
+  // either marker.
+  const innerCloser = new RegExp(`(?:^|\\n)[ \\t]{0,3}[${marker[0]}]{${marker.length},}`);
+  if (innerCloser.test(interior)) return trimmed;
+  return interior.trim();
 }
 
 /**
