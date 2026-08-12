@@ -47,7 +47,10 @@ const WARNED_MAX = 64;
 
 function warnOnce(key: string, message: string, props: Record<string, unknown>): void {
   if (warned.has(key)) return;
-  if (warned.size < WARNED_MAX) warned.add(key);
+  // Clear rather than stop admitting keys: a full set that keeps warning for every
+  // NEW key would reinstate exactly the tick-rate flood this function prevents.
+  if (warned.size >= WARNED_MAX) warned.clear();
+  warned.add(key);
   log.warn(message, props);
 }
 
@@ -77,14 +80,18 @@ function bucket(name?: string): string {
  * `chdir` time — so a symlink pointing into the checkout would give the spawned
  * CLI a real cwd inside the repo while every lexical check said otherwise.
  */
-function realPathish(path: string): string {
+function realPathish(path: string): string | null {
   const tail: string[] = [];
   let head = path;
   for (;;) {
     try {
       const real = realpathSync(head);
       return tail.length ? join(real, ...tail.reverse()) : real;
-    } catch {
+    } catch (err) {
+      // Only ENOENT means "not created yet", which is normal for the leaf. EACCES /
+      // ELOOP / ENOTDIR mean we cannot see where this path really points, so the
+      // caller must treat it as unusable rather than trusting the lexical name.
+      if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") return null;
       const parent = dirname(head);
       if (parent === head) return path;
       tail.push(basename(head));
@@ -101,11 +108,17 @@ function realPathish(path: string): string {
  * even though a byte-wise prefix test says it isn't.
  */
 function insideRepo(path: string): boolean {
+  // Folded on platform, not on the volume: a case-SENSITIVE mac volume would refuse
+  // a legitimately distinct case-variant root. Fail-safe direction, negligible impact.
   const fold = (p: string) =>
     process.platform === "darwin" || process.platform === "win32" ? p.toLowerCase() : p;
-  const candidate = fold(realPathish(path));
-  const root = fold(realPathish(REPO_ROOT));
-  return candidate === root || candidate.startsWith(root + sep);
+  const resolved = realPathish(path);
+  const root = realPathish(REPO_ROOT);
+  // Unresolvable ⇒ refuse: we cannot prove it lands outside the checkout.
+  if (resolved === null || root === null) return true;
+  const candidate = fold(resolved);
+  const repo = fold(root);
+  return candidate === repo || candidate.startsWith(repo + sep);
 }
 
 /**
@@ -135,6 +148,16 @@ export function agentCwdRoot(): string {
   }
 
   const abs = resolve(override);
+  if (dirname(abs) === abs) {
+    // The filesystem root. Harmless as a normal user (mkdir EACCES ⇒ degrade), but
+    // muninn also ships a docker-compose path running as root, where this would
+    // create real top-level `/jarvis`, `/shared`, … dirs and make the CLI treat `/`
+    // as the project.
+    warnOnce(`root:${abs}`, "MUNINN_AGENT_CWD={override} is the filesystem root — ignoring it and using {fallback}.", {
+      override, fallback: DEFAULT_ROOT,
+    });
+    return DEFAULT_ROOT;
+  }
   if (insideRepo(abs)) {
     warnOnce(
       `repo:${abs}`,
@@ -188,10 +211,12 @@ export function resolveAgentCwd(name?: string): string {
     mkdirSync(dir, { recursive: true });
     return dir;
   } catch (err) {
-    warnOnce(`mkdir:${dir}`, "Could not create agent cwd {dir}, falling back to a temp dir: {error}", {
-      dir,
-      error: err instanceof Error ? err.message : String(err),
-    });
+    warnOnce(
+      `mkdir:${dir}`,
+      "Could not create agent cwd {dir}, falling back to the shared temp dir {fallback} — " +
+        "while this lasts, ALL callers share one cwd and one ~/.claude/projects/ folder: {error}",
+      { dir, fallback: degradedCwd(), error: err instanceof Error ? err.message : String(err) },
+    );
     return degradedCwd();
   }
 }

@@ -8,9 +8,13 @@ const REPO_ROOT = resolve(import.meta.dir, "../..");
 const ORIGINAL = process.env.MUNINN_AGENT_CWD;
 const scratch: string[] = [];
 
+/** Prefixes this file is allowed to recursively delete. Anything else is a bug, not a leak. */
+const SCRATCH_PREFIX = join(tmpdir(), "muninn-agent-cwd-test-");
+const DEGRADE_PREFIX = join(tmpdir(), "muninn-agent-");
+
 /** A fresh root per test — fixed `$TMPDIR` names race when `test` and `test:unit` run concurrently. */
 function scratchRoot(): string {
-  const dir = mkdtempSync(join(tmpdir(), "muninn-agent-cwd-test-"));
+  const dir = mkdtempSync(SCRATCH_PREFIX);
   scratch.push(dir);
   process.env.MUNINN_AGENT_CWD = dir;
   return dir;
@@ -20,6 +24,8 @@ afterEach(() => {
   if (ORIGINAL === undefined) delete process.env.MUNINN_AGENT_CWD;
   else process.env.MUNINN_AGENT_CWD = ORIGINAL;
   for (const dir of scratch.splice(0)) {
+    // Second belt: never rm -rf anything that isn't one of this file's own temp dirs.
+    if (!dir.startsWith(SCRATCH_PREFIX) && !dir.startsWith(DEGRADE_PREFIX)) continue;
     try { chmodSync(dir, 0o700); } catch { /* already writable */ }
     rmSync(dir, { recursive: true, force: true });
   }
@@ -87,6 +93,19 @@ test("a symlink pointing into the repo is refused", () => {
  * rather than merely in-repo-risky, and no caller has a use for one. `~/...`
  * written literally into .env lands here too.
  */
+/**
+ * Harmless as a normal user (mkdir EACCES ⇒ degrade), but muninn also ships a
+ * docker-compose path running as root, where this would create real top-level
+ * dirs and hand the CLI `/` as the project.
+ */
+test("the filesystem root is refused as an override", () => {
+  const DEFAULT = join(homedir(), ".muninn", "agent-cwd");
+  for (const value of ["/", "//", "/.."]) {
+    process.env.MUNINN_AGENT_CWD = value;
+    expect(agentCwdRoot()).toBe(DEFAULT);
+  }
+});
+
 test("a non-absolute override is refused, wherever it would point", () => {
   const DEFAULT = join(homedir(), ".muninn", "agent-cwd");
   for (const value of [".agents", "./agents", "agents", "..", "../..", "~/.muninn/agent-cwd"]) {
@@ -139,7 +158,12 @@ test("unusable root degrades to ONE private temp dir, never bare $TMPDIR", () =>
   process.env.MUNINN_AGENT_CWD = blocked;
 
   const dir = resolveAgentCwd("jarvis");
-  scratch.push(dir); // registered before the assertions, so a red run doesn't leak it
+  // Registered before the assertions so a red run doesn't leak it — but ONLY if it
+  // is really one of our own mkdtemp dirs. resolveAgentCwd's double-failure path
+  // returns bare $TMPDIR, and afterEach runs on failed tests too: registering that
+  // would chmod and rm -rf the machine's whole temp dir, with the assertion that
+  // would have caught it already failed and unable to stop the cleanup.
+  if (dir.startsWith(DEGRADE_PREFIX)) scratch.push(dir);
   expect(dir).not.toBe(tmpdir());
   expect(dir.startsWith(join(tmpdir(), "muninn-agent-"))).toBe(true);
   expect(existsSync(dir)).toBe(true);
