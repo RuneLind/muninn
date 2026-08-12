@@ -84,6 +84,20 @@ import { commitWikiChange } from "../../wiki/commit.ts";
 import { todayOslo } from "../../gardener/util.ts";
 import { capabilitiesForConnectorType, connectorCapabilities } from "../../ai/one-shot.ts";
 import { streamFactcheckSSE } from "./factcheck-sse.ts";
+import { acquireShareFlight, shareFlightKey, streamShareSSE } from "./share-sse.ts";
+import { findSharePreset, resolveSharePresets, type SharePreset } from "../../share/presets.ts";
+import { prepareShareBody } from "../../share/body-prep.ts";
+import {
+  buildShareSystemPrompt,
+  buildShareUserPrompt,
+  shareBodyKindForPageType,
+} from "../../share/prompt.ts";
+import {
+  isShareLang,
+  SHARE_EXTRA_MAX,
+  SHARE_LANGS,
+  SHARE_PROMPT_OVERRIDE_MAX,
+} from "../../share/wire.ts";
 import {
   acquireClaimRetry,
   claimRetryKey,
@@ -659,6 +673,34 @@ export function resolveFactcheckPreflight(input: {
       `Point the wiki at a claude-cli or claude-sdk bot.`
     );
   }
+  return null;
+}
+
+/**
+ * Preflight for `POST /api/wiki/share` — the decision chain whose failures become
+ * an `app_error` on the committed stream (never a 5xx, matching Ask/Explain/
+ * fact-check).
+ *
+ * Deliberately SHORTER than `resolveFactcheckPreflight`: share needs no
+ * collections (it summarizes one page, it retrieves nothing) and no web-tools
+ * connector (the web pair is fenced OFF — see `SHARE_EXCLUDED_TOOLS`), so any
+ * connector can write a post. The bot-less case is the scaffold's own
+ * `noBotMessage`, so it is not repeated here.
+ *
+ * Explainer pages are NOT an error — they go through `prepareExplainerBody`.
+ */
+export function resolveSharePreflight(input: {
+  wiki: string;
+  unknownWiki: boolean;
+  entry: WikiRegistryEntry | undefined;
+  index: WikiIndex | null;
+  meta: WikiPageMeta | undefined;
+  page: string;
+}): string | null {
+  const { wiki, unknownWiki, entry, index, meta, page } = input;
+  if (unknownWiki || !entry) return `No wiki configured for "${wiki || "(none)"}".`;
+  if (!index) return "wiki directory not found";
+  if (!meta) return `No wiki page named "${page}".`;
   return null;
 }
 
@@ -1922,6 +1964,189 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         mode,
         ...(excerpt ? { excerpt } : {}),
         ...(mode === "sel" && ctx ? { ctx } : {}),
+        ...(release ? { onSettled: release } : {}),
+      });
+    } catch (err) {
+      release?.();
+      throw err;
+    }
+  });
+
+  // Share — the preset list the dialog's picker renders (`GET /api/wiki/share/presets`).
+  //
+  // Read-only and model-free. The presets are the SHIPPED set merged with the
+  // resolved bot's own `prompts/share*.md` files, so the list is bot-dependent —
+  // but a wiki with no resolvable bot still gets the shipped set and a `bot: null`
+  // rather than an error: the picker and the editable prompt panel are useful
+  // before Generate is ever pressed, and the bot-less case is reported where it
+  // actually bites (an `app_error` on the generate stream).
+  //
+  // The preset CONTENT rides along because the dialog shows the prompt and lets
+  // the reader edit it — that is the whole "visible/editable prompt panel", and
+  // fetching one body per picker change would be a round-trip per click.
+  app.get("/api/wiki/share/presets", (c) => {
+    const { entry, unknownWiki, wiki } = resolveWikiRequest(
+      getWikiRegistry(),
+      c.req.query("wiki"),
+      c.req.query("bot"),
+      process.env.WIKI_DIR,
+    );
+    if (unknownWiki || !entry) {
+      return c.json({ error: `No wiki configured for "${wiki || "(none)"}".` }, 404);
+    }
+    const { bot: botConfig } = resolveWikiSynthesisBot(entry, discoverAllBots());
+    return c.json({
+      bot: botConfig?.name ?? null,
+      presets: resolveSharePresets(botConfig?.prompts),
+      langs: SHARE_LANGS,
+    });
+  });
+
+  // Share — generate a pasteable post from one wiki page (`POST /api/wiki/share`, SSE).
+  //
+  // **POST, because the reader can EDIT the prompt** before pressing Generate, and
+  // an edited preset does not belong in a query string. It is also the first
+  // POST+SSE route in this family, which makes the ORDERING below load-bearing
+  // rather than stylistic: every body check — missing fields, both text caps, an
+  // unknown preset id — runs and returns a plain JSON 400 BEFORE
+  // `streamShareSSE` is called. Once `streamSSE` has committed a 200 the only way
+  // to report a validation failure is an `app_error` inside a successful response,
+  // where no client can tell it from a model failure and no status code says the
+  // request was malformed. The route tests pin each of these as a pre-commit 400.
+  //
+  // `page` is the page NAME, resolved with `index.resolve(page)` exactly as
+  // `/api/wiki/explain`, `/factcheck` and `/similar` do — NOT a relPath (which
+  // carries directories and an extension, and which the reader's client does not
+  // hold for the page it has open).
+  //
+  // Over-cap text is a 400 and NEVER a truncation: a silently shortened prompt
+  // changes what the model was asked without telling anyone, and the reader reads
+  // the result as an answer to the instruction they wrote.
+  app.post("/api/wiki/share", async (c) => {
+    type ShareBody = {
+      wiki?: string;
+      bot?: string;
+      page?: string;
+      preset?: string;
+      lang?: string;
+      promptOverride?: string;
+      extra?: string;
+    };
+    const body = await c.req.json<ShareBody>().catch(() => ({}) as ShareBody);
+
+    const page = typeof body.page === "string" ? body.page.trim() : "";
+    if (!page) return c.json({ error: "page is required" }, 400);
+    const presetId = typeof body.preset === "string" ? body.preset.trim() : "";
+    if (!presetId) return c.json({ error: "preset is required" }, 400);
+    if (!isShareLang(body.lang)) {
+      return c.json(
+        { error: `lang must be one of: ${SHARE_LANGS.map((l) => l.id).join(", ")}` },
+        400,
+      );
+    }
+    const lang = body.lang;
+    const promptOverride = typeof body.promptOverride === "string" ? body.promptOverride : "";
+    if (promptOverride.length > SHARE_PROMPT_OVERRIDE_MAX) {
+      return c.json(
+        { error: `promptOverride is longer than ${SHARE_PROMPT_OVERRIDE_MAX} characters` },
+        400,
+      );
+    }
+    const extra = typeof body.extra === "string" ? body.extra : "";
+    if (extra.length > SHARE_EXTRA_MAX) {
+      return c.json({ error: `extra is longer than ${SHARE_EXTRA_MAX} characters` }, 400);
+    }
+
+    const { entry, unknownWiki, wiki } = resolveWikiRequest(
+      getWikiRegistry(),
+      c.req.query("wiki") ?? body.wiki,
+      c.req.query("bot") ?? body.bot,
+      process.env.WIKI_DIR,
+    );
+    // Owner-routing, identical to Ask / fact-check / integrate.
+    const { bot: botConfig } = resolveWikiSynthesisBot(entry, discoverAllBots());
+
+    // The preset is resolved against the RESOLVED BOT (its `share.md` /
+    // `share.<id>.md` files override the shipped set), so this check can only run
+    // once the bot is known — and an unknown id is refused rather than falling
+    // back to the default, which would generate with a different instruction than
+    // the one the reader picked and report it as that preset's output.
+    let preset: SharePreset | undefined;
+    if (botConfig) {
+      preset = findSharePreset(resolveSharePresets(botConfig.prompts), presetId);
+      if (!preset) return c.json({ error: `unknown share preset "${presetId}"` }, 400);
+    }
+
+    let index: WikiIndex | null = null;
+    let meta: WikiPageMeta | undefined;
+    if (entry && !unknownWiki) {
+      index = await getWikiIndex({ root: entry.root });
+      if (index) meta = index.resolve(page);
+    }
+    let preflightError = resolveSharePreflight({ wiki, unknownWiki, entry, index, meta, page });
+
+    // Body prep — the intended (and only) consumer of PR A's `prepareShareBody`
+    // dispatcher: the page's `type` picks the preparer, an explainer going through
+    // the HTML reduction and everything else through the markdown strips.
+    let systemPrompt = "";
+    let userPrompt = "";
+    if (!preflightError && entry && index && meta && preset) {
+      const raw = (await readWikiPage(index, meta)) ?? "";
+      const prepared = prepareShareBody(shareBodyKindForPageType(meta.type), raw);
+      if (!prepared.trim()) {
+        // Nothing to summarize. Reported before the slot is taken, so an empty
+        // page can neither spend a model call nor wedge the page.
+        preflightError = `"${meta.title}" has no text to summarize.`;
+      } else {
+        systemPrompt = buildShareSystemPrompt(entry.name);
+        userPrompt = buildShareUserPrompt({
+          // The reader's edit REPLACES the preset's instruction; the language
+          // rider is appended after it either way (see `buildShareUserPrompt`).
+          instruction: promptOverride.trim() || preset.content,
+          lang,
+          extra: extra.trim(),
+          body: prepared,
+          title: meta.title,
+          wikiName: entry.name,
+        });
+      }
+    }
+
+    // Per-page single-flight. One POST buys a whole-page summarization (tens of
+    // thousands of input tokens), and a double-click, a reload mid-stream or a
+    // second tab each buy another — this is the only guard that survives all
+    // three. Taken on the happy path only: a preflight failure runs no model call
+    // and must not wedge the page.
+    let release: (() => void) | undefined;
+    if (!preflightError && entry && meta) {
+      const acquired = acquireShareFlight(shareFlightKey(entry.name, meta.relPath));
+      if (!acquired.ok) {
+        return c.json({ state: "running", expiresAtMs: acquired.expiresAtMs }, 409);
+      }
+      release = acquired.release;
+      log.info("Wiki share: wiki={wiki} bot={bot} page={page} preset={preset} lang={lang}", {
+        wiki: entry.name,
+        bot: botConfig?.name,
+        page,
+        preset: presetId,
+        lang,
+      });
+    }
+
+    // The slot is handed to the stream via `onSettled` — but only once
+    // `streamShareSSE` has RETURNED a Response. A synchronous throw before that
+    // would leave the callback unwired and wedge the page for the full expiry with
+    // nothing running; releasing here is safe precisely because it is unreachable
+    // once the stream owns the slot (release is identity-checked anyway). The
+    // claim-retry route's handover, verbatim.
+    try {
+      return streamShareSSE(c, {
+        config,
+        botConfig: botConfig ?? null,
+        preflightError,
+        systemPrompt,
+        userPrompt,
+        runName: `Share: ${meta?.title ?? page}`,
         ...(release ? { onSettled: release } : {}),
       });
     } catch (err) {

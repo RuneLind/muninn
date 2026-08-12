@@ -179,12 +179,17 @@ describe("findSharePreset", () => {
   const presets = resolveSharePresets(undefined);
 
   test("finds by id", () => {
-    expect(findSharePreset(presets, "email").id).toBe("email");
+    expect(findSharePreset(presets, "email")?.id).toBe("email");
   });
 
-  test("an absent or unknown id falls back to the default entry", () => {
-    expect(findSharePreset(presets, undefined).id).toBe(DEFAULT_SHARE_PRESET_ID);
-    expect(findSharePreset(presets, "  ").id).toBe(DEFAULT_SHARE_PRESET_ID);
-    expect(findSharePreset(presets, "nope").id).toBe(DEFAULT_SHARE_PRESET_ID);
+  test("an absent or blank id falls back to the default entry", () => {
+    expect(findSharePreset(presets, undefined)?.id).toBe(DEFAULT_SHARE_PRESET_ID);
+    expect(findSharePreset(presets, "  ")?.id).toBe(DEFAULT_SHARE_PRESET_ID);
+  });
+
+  test("an UNKNOWN id resolves to nothing — never quietly to the default", () => {
+    // The silent fallback generated with the wrong prompt and returned it as
+    // though the picked preset had run. The route 400s on the undefined.
+    expect(findSharePreset(presets, "nope")).toBeUndefined();
   });
 });

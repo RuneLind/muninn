@@ -1,0 +1,547 @@
+/// <reference lib="dom" />
+/**
+ * The share dialog's DOM half — state, render, listeners, the SSE run and the
+ * clipboard write. Everything testable lives next door in `wiki-share-dialog.ts`.
+ *
+ * **One module state, one listener registration.** The document-level listeners
+ * are wired on the FIRST open and never again (`wired`), and `openShareDialog` is
+ * the module's only entry point. That is why a page must reach this module ONE
+ * way — an import (what /wiki does) or the standalone `share-dialog-browser.ts`
+ * bundle's global (what /summaries will do), never both: two copies would mean two
+ * `state` objects, two click handlers, and a Generate button that renders from one
+ * of them while writing to the other.
+ *
+ * **The stream is `fetch` + ReadableStream, not EventSource.** Not a preference —
+ * the route answers a 409 `{state, expiresAtMs}` when a share is already running
+ * on the page, and an EventSource exposes neither status nor body on a non-200
+ * (so the deadline the copy needs is unreadable) and auto-reconnects on a drop,
+ * straight back into the single-flight slot its own first connection is holding.
+ * Framing is the shared, unit-tested `makeSseFrameParser`.
+ */
+
+import { renderSlackMrkdwn } from "../../../chat/views/components/slack-mrkdwn.ts";
+import { makeSseFrameParser, type SseFrame } from "./client-runtime.ts";
+import { isShareLang, type ShareDonePayload, type ShareLang } from "../../../share/wire.ts";
+import {
+  canGenerate,
+  copyPayloadFor,
+  selectedPreset,
+  shareConflictCopy,
+  shareDialogHtml,
+  shareRequestBody,
+  shouldCloseShareDialog,
+  promptIsEdited,
+  shareCapError,
+  SHARE_CLOSE_ID,
+  SHARE_COPY_ID,
+  SHARE_DIALOG_ID,
+  SHARE_EXTRA_ID,
+  SHARE_GENERATE_ID,
+  SHARE_LANG_ATTR,
+  SHARE_PRESET_ID,
+  SHARE_PROMPT_ID,
+  SHARE_PROMPT_PANEL_ID,
+  SHARE_RESET_ID,
+  SHARE_SCRIM_ID,
+  SHARE_TAB_ATTR,
+  type ShareDialogState,
+  type SharePresetOption,
+  type ShareTab,
+} from "./wiki-share-dialog.ts";
+
+/** What a caller must know to share something. */
+export interface OpenShareOptions {
+  /** Registered wiki name; "" for the default wiki. */
+  wiki: string;
+  /** The page NAME (`index.resolve` input) — never a relPath. */
+  page: string;
+  /** Header title; defaults to the page name. */
+  title?: string;
+  /** Ids of the elements that OPEN this dialog, so their click isn't a
+   *  click-away. The breadcrumb button by default. */
+  openerIds?: string[];
+}
+
+let state: ShareDialogState | null = null;
+let openerIds: string[] = [];
+let wired = false;
+let inFlight: AbortController | null = null;
+let copiedTimer: ReturnType<typeof setTimeout> | null = null;
+
+function panel(): HTMLElement | null {
+  return document.getElementById(SHARE_DIALOG_ID);
+}
+
+/** Open (or re-target) the dialog for one page. The module's only entry point. */
+export function openShareDialog(opts: OpenShareOptions): void {
+  wire();
+  // Re-opening (a second 📤 click, or the same dialog re-targeted at another
+  // page) abandons any run in flight. Without the abort the old fetch keeps
+  // streaming into a state nothing paints, and its reader holds the connection —
+  // and the page's server-side slot — for the rest of the budget.
+  inFlight?.abort();
+  inFlight = null;
+  openerIds = opts.openerIds ?? [];
+  state = {
+    wiki: opts.wiki,
+    page: opts.page,
+    title: opts.title || opts.page,
+    presets: null,
+    presetId: "",
+    lang: rememberedLang(),
+    prompt: "",
+    extra: "",
+    promptOpen: false,
+    running: false,
+    streamed: "",
+    result: null,
+    tab: "slack",
+  };
+  render();
+  void loadPresets();
+}
+
+/** Close it, cancelling any run. */
+export function closeShareDialog(): void {
+  inFlight?.abort();
+  inFlight = null;
+  state = null;
+  panel()?.remove();
+  document.getElementById(SHARE_SCRIM_ID)?.remove();
+}
+
+// ── Language memory ──────────────────────────────────────────────────────────
+// The language a reader shares in is a property of the reader, not of the page —
+// a Norwegian team picks "Norsk" on every share, and re-picking it each time is
+// the kind of friction that gets a feature abandoned. localStorage, like the
+// chat dialog's connector/user preferences.
+
+const LANG_KEY = "muninn-wiki-share-lang";
+
+function rememberedLang(): ShareLang {
+  try {
+    const v = localStorage.getItem(LANG_KEY);
+    if (isShareLang(v)) return v;
+  } catch { /* private mode — fall through to the default */ }
+  return "en";
+}
+
+function rememberLang(lang: ShareLang): void {
+  try { localStorage.setItem(LANG_KEY, lang); } catch { /* not worth reporting */ }
+}
+
+// ── Presets ──────────────────────────────────────────────────────────────────
+
+async function loadPresets(): Promise<void> {
+  const target = state;
+  if (!target) return;
+  const url = "/api/wiki/share/presets" + (target.wiki ? "?wiki=" + encodeURIComponent(target.wiki) : "");
+  let presets: SharePresetOption[] = [];
+  try {
+    const res = await fetch(url, { headers: { Accept: "application/json" } });
+    const body = (await res.json()) as { presets?: SharePresetOption[]; error?: string };
+    if (!res.ok) throw new Error(body?.error || "HTTP " + res.status);
+    presets = Array.isArray(body.presets) ? body.presets : [];
+  } catch (err) {
+    // The dialog is still open and still says what went wrong — `presets: null`
+    // keeps the loading branch, which renders `error` in place of the spinner.
+    if (state === target) {
+      state.error = "Could not load the share presets: " + errText(err);
+      render();
+    }
+    return;
+  }
+  // A dialog closed (or re-opened on another page) while the fetch was in flight
+  // must not be repainted from this response.
+  if (state !== target) return;
+  state.presets = presets;
+  state.error = undefined;
+  const first = presets[0];
+  if (first) {
+    state.presetId = first.id;
+    state.prompt = first.content;
+  }
+  render();
+}
+
+function errText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+// ── Render ───────────────────────────────────────────────────────────────────
+
+/** Focus + caret survive the innerHTML swap — the prompt textarea is re-rendered
+ *  whenever the "edited" badge flips, which happens mid-word. */
+interface FieldFocus {
+  id: string;
+  start: number;
+  end: number;
+}
+
+function captureFocus(): FieldFocus | null {
+  const el = document.activeElement as HTMLInputElement | HTMLTextAreaElement | null;
+  const p = panel();
+  if (!el || !el.id || !p || !p.contains(el)) return null;
+  const start = typeof el.selectionStart === "number" ? el.selectionStart : 0;
+  const end = typeof el.selectionEnd === "number" ? el.selectionEnd : start;
+  return { id: el.id, start, end };
+}
+
+function restoreFocus(focus: FieldFocus | null): void {
+  if (!focus) return;
+  const el = document.getElementById(focus.id) as HTMLInputElement | HTMLTextAreaElement | null;
+  if (!el) return;
+  el.focus({ preventScroll: true });
+  try { el.setSelectionRange(focus.start, focus.end); } catch { /* not a text field */ }
+}
+
+function render(): void {
+  if (!state) { closeShareDialog(); return; }
+  let p = panel();
+  const focus = captureFocus();
+  if (!p) {
+    const scrim = document.createElement("div");
+    scrim.id = SHARE_SCRIM_ID;
+    scrim.className = "wiki-share-scrim";
+    document.body.appendChild(scrim);
+    p = document.createElement("div");
+    p.id = SHARE_DIALOG_ID;
+    p.className = "wiki-share";
+    p.setAttribute("role", "dialog");
+    p.setAttribute("aria-modal", "true");
+    p.setAttribute("aria-label", "Share this page");
+    document.body.appendChild(p);
+  }
+  const scrollTop = p.scrollTop;
+  // The Slack tab's preview is the shared browser-side mrkdwn renderer the chat
+  // page already ships — a faithful preview of the exact string being copied, at
+  // no new cost and with no second implementation to drift.
+  const slackHtml = state.result ? renderSlackMrkdwn(state.result.slack) : "";
+  p.innerHTML = shareDialogHtml(state, slackHtml);
+  if (scrollTop) p.scrollTop = scrollTop;
+  restoreFocus(focus);
+}
+
+/** Coalesce a burst of stream deltas into one paint per animation frame. */
+let paintQueued = false;
+function renderSoon(): void {
+  if (paintQueued) return;
+  paintQueued = true;
+  requestAnimationFrame(() => {
+    paintQueued = false;
+    if (state) render();
+  });
+}
+
+// ── Listeners (wired once) ───────────────────────────────────────────────────
+
+function wire(): void {
+  if (wired) return;
+  wired = true;
+  document.addEventListener("click", onClick, true);
+  document.addEventListener("input", onInput);
+  document.addEventListener("change", onChange);
+  document.addEventListener("keydown", onKeydown);
+  // `toggle` does NOT bubble, so the disclosure's open state has to be caught in
+  // the capture phase (the `/wiki/gardener` inspector precedent). It is held on
+  // state because the panel re-renders whenever the "· edited" badge flips —
+  // i.e. on the first keystroke in the very textarea the reader just opened.
+  document.addEventListener("toggle", onToggle, true);
+}
+
+function onToggle(e: Event): void {
+  if (!state) return;
+  const el = e.target as HTMLDetailsElement | null;
+  if (!el || el.id !== SHARE_PROMPT_PANEL_ID) return;
+  state.promptOpen = el.open;
+}
+
+function onClick(e: MouseEvent): void {
+  if (!state) return;
+  const target = e.target as HTMLElement | null;
+  if (!target) return;
+  const p = panel();
+  const inPanel = !!p && p.contains(target);
+
+  if (inPanel) {
+    if (target.closest("#" + SHARE_CLOSE_ID)) { closeShareDialog(); return; }
+    if (target.closest("#" + SHARE_GENERATE_ID)) { void generate(); return; }
+    if (target.closest("#" + SHARE_COPY_ID)) { void copyActive(); return; }
+    if (target.closest("#" + SHARE_RESET_ID)) {
+      const preset = selectedPreset(state);
+      if (preset) { state.prompt = preset.content; state.promptOpen = true; render(); }
+      return;
+    }
+    const lang = target.closest("[" + SHARE_LANG_ATTR + "]") as HTMLElement | null;
+    if (lang) {
+      const value = lang.getAttribute(SHARE_LANG_ATTR);
+      if (isShareLang(value) && !state.running) {
+        state.lang = value;
+        rememberLang(value);
+        render();
+      }
+      return;
+    }
+    const tab = target.closest("[" + SHARE_TAB_ATTR + "]") as HTMLElement | null;
+    if (tab) {
+      const value = tab.getAttribute(SHARE_TAB_ATTR) as ShareTab | null;
+      if (value) { state.tab = value; state.copied = false; render(); }
+      return;
+    }
+    return;
+  }
+
+  const inOpener = openerIds.some((id) => !!target.closest("#" + id));
+  if (shouldCloseShareDialog({ inPanel, inOpener, running: state.running })) closeShareDialog();
+}
+
+/**
+ * Field edits update state WITHOUT a re-render — a repaint per keystroke is how a
+ * textarea loses its caret. The exception is a change that alters the markup the
+ * fields sit in (the "· edited" badge and the Reset button appearing, a cap error
+ * appearing or clearing, Generate flipping enabled): those are re-rendered, and
+ * the caret is restored around the swap.
+ */
+function onInput(e: Event): void {
+  if (!state) return;
+  const el = e.target as HTMLInputElement | HTMLTextAreaElement | null;
+  if (!el || (el.id !== SHARE_PROMPT_ID && el.id !== SHARE_EXTRA_ID)) return;
+  const before = derivedSignature(state);
+  if (el.id === SHARE_PROMPT_ID) state.prompt = el.value;
+  else state.extra = el.value;
+  if (derivedSignature(state) !== before) render();
+}
+
+/** The bits of the markup that are DERIVED from the text fields. */
+function derivedSignature(s: ShareDialogState): string {
+  return `${promptIsEdited(s)}|${shareCapError(s) ?? ""}|${canGenerate(s)}`;
+}
+
+function onChange(e: Event): void {
+  if (!state) return;
+  const el = e.target as HTMLSelectElement | null;
+  if (!el || el.id !== SHARE_PRESET_ID) return;
+  state.presetId = el.value;
+  const preset = selectedPreset(state);
+  // Switching preset replaces the prompt: the panel shows the instruction that
+  // will run, and keeping an edit of the PREVIOUS preset under a new preset's
+  // name is the same silent-wrong-instruction failure the route's unknown-id 400
+  // exists to prevent.
+  if (preset) state.prompt = preset.content;
+  render();
+}
+
+/**
+ * Keep Tab inside the dialog.
+ *
+ * The panel declares `role="dialog"` + `aria-modal="true"` and the scrim blocks
+ * only POINTER events — without this, Tab walks out into the wiki's list rows and
+ * links behind a dimmed page that still answers Enter, and a screen reader is told
+ * the dialog is modal and then reads the page behind it. The chat dialog's
+ * `trapChatOptTab`, same shape.
+ */
+function trapTab(e: KeyboardEvent): void {
+  const p = panel();
+  if (!p) return;
+  const focusable = Array.prototype.slice
+    .call(
+      p.querySelectorAll(
+        'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), summary',
+      ),
+    )
+    .filter(
+      (el: HTMLElement) => el.offsetParent !== null || el === document.activeElement,
+    ) as HTMLElement[];
+  if (!focusable.length) return;
+  const first = focusable[0]!;
+  const last = focusable[focusable.length - 1]!;
+  const active = document.activeElement as HTMLElement | null;
+  // Focus that has already escaped (or never entered) comes back to the top on
+  // the next Tab rather than continuing through the page behind.
+  if (!active || !p.contains(active)) {
+    e.preventDefault();
+    (e.shiftKey ? last : first).focus();
+    return;
+  }
+  if (e.shiftKey && active === first) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && active === last) {
+    e.preventDefault();
+    first.focus();
+  }
+}
+
+function onKeydown(e: KeyboardEvent): void {
+  if (!state) return;
+  if (e.key === "Tab") { trapTab(e); return; }
+  if (e.key === "Escape") {
+    e.preventDefault();
+    // A run in flight is cancelled first (client-side: the server keeps the slot
+    // until its own budget expires, which the 409 copy reports), and the dialog
+    // stays open so the reader can see that it stopped.
+    if (state.running && inFlight) {
+      inFlight.abort();
+      inFlight = null;
+      state.running = false;
+      state.error = "Stopped. The page stays reserved until the run on the server finishes.";
+      render();
+      return;
+    }
+    closeShareDialog();
+  }
+}
+
+// ── Generate ─────────────────────────────────────────────────────────────────
+
+async function generate(): Promise<void> {
+  if (!state || !canGenerate(state)) return;
+  const target = state;
+  const ctrl = new AbortController();
+  inFlight?.abort();
+  inFlight = ctrl;
+  target.running = true;
+  target.streamed = "";
+  target.result = null;
+  target.error = undefined;
+  target.conflictExpiresAtMs = undefined;
+  target.copied = false;
+  render();
+
+  const settle = (patch: Partial<ShareDialogState>): void => {
+    if (state !== target) return;
+    Object.assign(target, patch, { running: false });
+    if (inFlight === ctrl) inFlight = null;
+    render();
+  };
+
+  let res: Response;
+  try {
+    res = await fetch("/api/wiki/share", {
+      method: "POST",
+      headers: { "content-type": "application/json", Accept: "text/event-stream" },
+      body: JSON.stringify(shareRequestBody(target)),
+      signal: ctrl.signal,
+    });
+  } catch (err) {
+    if (!ctrl.signal.aborted) settle({ error: "Could not reach the server: " + errText(err) });
+    return;
+  }
+
+  if (res.status === 409) {
+    // The whole reason this is a fetch and not an EventSource: the deadline is in
+    // the body of a non-200, which an EventSource never surfaces.
+    let body: { expiresAtMs?: unknown } = {};
+    try { body = (await res.json()) as { expiresAtMs?: unknown }; } catch { /* keep the default */ }
+    const at = typeof body.expiresAtMs === "number" ? body.expiresAtMs : Date.now();
+    settle({ conflictExpiresAtMs: at, error: shareConflictCopy(at, Date.now()) });
+    return;
+  }
+  if (!res.ok || !res.body) {
+    let msg = "The share could not start (HTTP " + res.status + ").";
+    try {
+      const b = (await res.json()) as { error?: unknown };
+      if (b && typeof b.error === "string") msg = b.error;
+    } catch { /* non-JSON body — keep the status copy */ }
+    settle({ error: msg });
+    return;
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let done: ShareDonePayload | null = null;
+  let appError: string | undefined;
+  const parser = makeSseFrameParser((frame) => {
+    const parsed = dispatchShareFrame(frame, target);
+    if (parsed.done) done = parsed.done;
+    if (parsed.error) appError = parsed.error;
+  });
+  try {
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      parser.push(decoder.decode(chunk.value, { stream: true }));
+    }
+    parser.push(decoder.decode());
+    parser.end();
+  } catch {
+    if (!ctrl.signal.aborted) settle({ error: "The connection dropped before the post arrived." });
+    return;
+  }
+  if (ctrl.signal.aborted) return;
+  if (done) settle({ result: done, tab: "slack", error: undefined });
+  else settle({ error: appError ?? "The post never arrived — nothing was generated." });
+}
+
+/**
+ * Decode one frame. `delta` repaints live (that is the point of the stream);
+ * `done`/`app_error` are returned to the caller, which owns the terminal state so
+ * an aborted run can't paint over a newer one.
+ *
+ * The route's vocabulary is `delta` · `done` · `app_error` · `end` · `heartbeat`.
+ * The last two are named explicitly rather than falling through, so a future event
+ * can't be swallowed as "probably a sentinel".
+ */
+function dispatchShareFrame(
+  frame: SseFrame,
+  target: ShareDialogState,
+): { done?: ShareDonePayload; error?: string } {
+  if (frame.event === "heartbeat" || frame.event === "end") return {};
+  let d: Record<string, unknown>;
+  try { d = JSON.parse(frame.data) as Record<string, unknown>; } catch { return {}; }
+  if (frame.event === "delta") {
+    if (state === target && typeof d.text === "string") {
+      target.streamed += d.text;
+      // Throttled to ONE paint per animation frame: a full innerHTML swap per
+      // token is the same burst the reader's Ask pane throttles, and here each
+      // swap also re-runs the focus/caret restore.
+      renderSoon();
+    }
+    return {};
+  }
+  if (frame.event === "app_error") {
+    return { error: typeof d.message === "string" ? d.message : "The share failed." };
+  }
+  if (frame.event === "done") {
+    const { markdown, slack, mailHtml } = d as Partial<ShareDonePayload>;
+    if (typeof markdown === "string" && typeof slack === "string" && typeof mailHtml === "string") {
+      return { done: { markdown, slack, mailHtml } };
+    }
+    return { error: "The server sent a post in a shape this page can't render." };
+  }
+  return {};
+}
+
+// ── Clipboard ────────────────────────────────────────────────────────────────
+
+async function copyActive(): Promise<void> {
+  if (!state?.result) return;
+  const payload = copyPayloadFor(state.tab, state.result);
+  try {
+    // Rich text for the EMAIL tab only: pasting the inline-styled body into a mail
+    // client is the whole point of that renderer, and a `text/plain` sibling keeps
+    // a plain target (a terminal, a code editor) from getting nothing at all.
+    const w = window as unknown as { ClipboardItem?: typeof ClipboardItem };
+    if (payload.html && w.ClipboardItem && navigator.clipboard?.write) {
+      await navigator.clipboard.write([
+        new w.ClipboardItem({
+          "text/html": new Blob([payload.html], { type: "text/html" }),
+          "text/plain": new Blob([payload.text], { type: "text/plain" }),
+        }),
+      ]);
+    } else {
+      await navigator.clipboard.writeText(payload.text);
+    }
+  } catch (err) {
+    state.error = "Could not copy: " + errText(err);
+    render();
+    return;
+  }
+  state.copied = true;
+  state.error = undefined;
+  render();
+  if (copiedTimer) clearTimeout(copiedTimer);
+  copiedTimer = setTimeout(() => {
+    if (state?.copied) { state.copied = false; render(); }
+  }, 2500);
+}

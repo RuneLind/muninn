@@ -39,6 +39,21 @@ export function researchStageForPrompt(text: string): "investigation" | "deep" |
 }
 
 /**
+ * Drop the SHARE presets from the `prompts` blob `GET /bots` ships.
+ *
+ * The four research-flow bodies stay — the chat client types them into the
+ * composer verbatim, so they are load-bearing on that page. `share`/`shareVariants`
+ * are read by nothing here: the share dialog fetches its own merged list (which
+ * includes the shipped defaults this payload never carried). Returned as a fresh
+ * object, never a mutation of the discovered config.
+ */
+function stripSharePrompts(prompts: BotConfig["prompts"]): BotConfig["prompts"] {
+  if (!prompts) return prompts;
+  const { share: _share, shareVariants: _shareVariants, ...rest } = prompts;
+  return rest;
+}
+
+/**
  * Creates the chat Hono sub-router.
  * Mounted at /chat on the main dashboard server.
  */
@@ -73,7 +88,14 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
       baseUrl: b.baseUrl ?? null,
       showWaterfall: b.showWaterfall !== false,
       contextWindow: b.contextWindow ?? null,
-      prompts: b.prompts,
+      // The research-flow prompt BODIES ride along because the chat client types
+      // them into the composer (`research-card.ts` inserts `investigateCode` /
+      // `deepAnalysis` / `specGeneration` / `specDomain` verbatim). The SHARE
+      // presets are stripped: nothing on this page reads them, they are the
+      // longest prompts a bot carries, and the share dialog has its own route
+      // (`GET /api/wiki/share/presets`) which resolves the shipped defaults too —
+      // this payload never could have served it.
+      prompts: stripSharePrompts(b.prompts),
       hivemindNamespaceCount: b.hivemind?.enabled ? b.hivemind.namespaces.length : 0,
     }));
     let connectors: Awaited<ReturnType<typeof listConnectors>> = [];
