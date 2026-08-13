@@ -458,7 +458,9 @@ bot's chat connector. `watcherConnectorInfo(watcher, botConfig, botFallbackModel
 
 ### Per-watcher safety-net timeout
 
-Each watcher's `runChecker` call is wrapped in `withWatcherTimeout` so a hung checker (stuck MCP connection, wedged subprocess) can't block the scheduler tick or starve the watchers behind it. `computeWatcherTimeoutMs(watcher)` (defined in `src/watchers/timeout.ts` alongside `TICK_TIMEOUT_MS` + `WATCHER_TIMEOUT_MARGIN_MS`; re-exported from `runner.ts` for its legacy import site, but **new importers should take it from `./timeout.ts` directly** — `checkX` needs those numbers to derive its capture budget and importing them from `runner.ts` would close an import cycle) returns `max(120_000, config.timeoutMs + 30_000)` — a 2-min floor for watchers with no configured timeout, otherwise 30s of headroom ABOVE the checker's own `config.timeoutMs` so a legitimately slow Sonnet/X digest is never cut off prematurely (the net only fires when the inner model timeout is itself stuck). On timeout the existing per-watcher catch advances `last_run_at` (retry-storm prevention), and the orphaned checker promise is swallowed so it doesn't surface as an unhandledRejection.
+Each watcher's `runChecker` call is wrapped in `withWatcherTimeout` so a hung checker (stuck MCP connection, wedged subprocess) can't block the scheduler tick or starve the watchers behind it. `computeWatcherTimeoutMs(watcher)` (defined in `src/watchers/timeout.ts` alongside `TICK_TIMEOUT_MS` + `WATCHER_TIMEOUT_MARGIN_MS`; re-exported from `runner.ts` for its legacy import site, but **new importers should take it from `./timeout.ts` directly** — `checkX` needs those numbers to derive its capture budget and importing them from `runner.ts` would close an import cycle) returns `max(floor, config.timeoutMs + 30_000)` — a 2-min floor for watchers with no configured timeout, otherwise 30s of headroom ABOVE the checker's own `config.timeoutMs` so a legitimately slow Sonnet/X digest is never cut off prematurely (the net only fires when the inner model timeout is itself stuck). On timeout the existing per-watcher catch advances `last_run_at` (retry-storm prevention), and the orphaned checker promise is swallowed so it doesn't surface as an unhandledRejection.
+
+**The floor is type-specific: `email` gets 180_000, everything else 120_000.** `checkEmail` is the one checker that can spawn TWICE (its bounded retry — see the Email Watcher section), and two 60s attempts plus the retry budget's 10s margin need 130s. At the generic floor the retry was clamped to ~50s against a slowest-HEALTHY tick of 56.5s, so the top decile of good runs could not be rescued. The alternative — telling operators to set `config.timeoutMs: 150000` on the row — was rejected on this repo's own rule that a fix requiring a hand-edited DB row is inert where it matters. A configured `timeoutMs` still only ever RAISES the net. This widens the safety NET only; no single spawn gets longer, and watchers run concurrently so a slower net never starves the others.
 
 Due watchers now run **concurrently**: `runWatchers` fans the due list out through `Promise.allSettled(dueWatchers.map(async (watcher) => …))`. This is safe because each watcher owns its own `requestId` (`agentStatus` is per-`requestId` since the Map rework, so parallel runs don't clobber each other's progress), its own `Tracer`, and its own per-watcher timeout + catch — one slow or failing watcher can't block or skip the others. `allSettled` (not `all`) because each iteration is self-contained error-wise; a rejection must never abort the batch.
 
@@ -505,27 +507,38 @@ spawn, which is exactly what a retry fixes: ~12.5% ⇒ ~1.6%.
   config can shorten the one attempt that used to be the whole check.
 - **Budget** = `min(computeWatcherTimeoutMs, TICK_TIMEOUT_MS) − 10s`, anchored at
   `checkEmail` entry (`emailRetryBudgetMs`). The margin is small vs `checkX`'s 60s
-  because the only post-spawn work is one `extractJson`. The runner's **120s net
-  FLOOR** means this can never be under 110s whatever the row says — so the
+  because the only post-spawn work is one `extractJson`. Email's **180s net floor**
+  means this is never under 170s whatever the row says — so the
   `EMAIL_MIN_ATTEMPT_MS` (45s) guard is **not** a misconfiguration check (an earlier
-  cut warned about that and the warn was unreachable); it guards WALL CLOCK, because
-  a 60s timer can fire ~17 min late after laptop sleep. Three attempts don't fit
-  under 110s, hence `EMAIL_MAX_ATTEMPTS = 2`.
-- **Known tightness:** on the live row (no `config.timeoutMs`) a 60s attempt 1 leaves
-  the retry a clamped ~50s, against a 56.5s slowest-healthy-run. Setting
-  `config.timeoutMs: 150000` widens the net to 180s and gives both attempts their
-  full 60s. Deliberately NOT required to ship — a fix that only works after a
-  hand-edited DB row is inert where it matters. ⚠️ Note the semantic wart: for
-  `x`/`anthropic` `config.timeoutMs` IS the model-call timeout, but `checkEmail` has
-  never passed it to `spawnHaiku`, so on an email row it widens the runner's net
-  **only**.
-- **Measurement surface:** one grep-stable line per check — `email-check
-  <ok|failed|budget-exhausted>: attempt=k/2 durationMs=… attemptTimeoutMs=…
-  [reason=…|error=…]`. Rescues are countable as `email-check ok: attempt=2`.
+  cut warned about that and the warn was provably unreachable); it guards WALL CLOCK,
+  because a 60s timer can fire ~17 min late after laptop sleep. Three attempts still
+  don't fit, hence `EMAIL_MAX_ATTEMPTS = 2`.
+- **The two decision points are PURE and separately tested** —
+  `emailAttemptTimeoutMs(attempt, remainingMs)` and
+  `shouldStartEmailAttempt(attempt, remainingMs)`. This is not stylistic: both are
+  **mutation-survivable through `checkEmail`**, because every retry test returns from
+  attempt 1 instantly and so cannot distinguish a clamped retry from an unclamped
+  one. A review deleted the clamp outright with all 29 tests still green — and at the
+  old generic net its absence overran the runner by 3ms, which costs the whole
+  batch's `lastNotifiedIds`. Anything that moves this logic back inline loses the
+  only assertions that fail when it is removed.
+- ⚠️ **Semantic wart:** for `x`/`anthropic`, `config.timeoutMs` IS the model-call
+  timeout, but `checkEmail` has never passed it to `spawnHaiku` — on an email row it
+  widens the runner's net **only**. It is not needed for the retry to work.
+- **Measurement surface:** one grep-stable line per check.
+  - `email-check ok: attempt=k/2 durationMs=… attemptTimeoutMs=… alerts=N` — logged
+    only AFTER the parse succeeds, so `attempt=2` is a true rescue count. A run that
+    reached Gmail and returned unparseable text is **not** counted as ok.
+  - `email-check unparseable: attempt=k/2 … raw=…` — reached Gmail, delivered nothing.
+  - `email-check failed: attempt=k/2 … reason=… | error=…` — predicate vs spawn throw.
+  - `email-check budget-exhausted: attempt=k/2 remainingMs=… budgetMs=…` — `attempt`
+    counts attempts actually MADE (so it reports `1` when the retry is refused),
+    matching the `x-capture-gate` line's convention so one parser can mine both.
 - **Acceptance (2026-08-13, 8 real runs against live Gmail):** 7/8 ok. Two first
   attempts failed; one was rescued (attempt 1 timed out at 60s, attempt 2 ran on a
   clamped 49.9s budget, finished in 43.2s, returned 4 alerts), one failed both and
-  threw. Never a third spawn.
+  threw. Never a third spawn. Measured before the 180s floor landed — under it that
+  rescue would have had the full 60s rather than 49.9s.
 
 ## Anthropic Watcher (anthropic.ts)
 

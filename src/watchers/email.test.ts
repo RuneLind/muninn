@@ -63,7 +63,8 @@ mock.module("../profile/generator.ts", () => ({
   loadInterestProfileForBot: async () => "WRONG-DEFAULT-USER-PROFILE",
 }));
 
-const { buildGmailQuery, checkEmail, gmailToolPrefixes, emailRetryBudgetMs } = await import("./email.ts");
+const { buildGmailQuery, checkEmail, gmailToolPrefixes, emailRetryBudgetMs, emailAttemptTimeoutMs, shouldStartEmailAttempt } =
+  await import("./email.ts");
 
 describe("buildGmailQuery", () => {
   test("always includes is:unread", () => {
@@ -345,21 +346,76 @@ describe("checkEmail bounded retry", () => {
   });
 
   test("attempt 1 gets the FULL attempt timeout — byte-identical to pre-retry", async () => {
-    // The safety property: the budget governs only the retry. A misconfigured row can
-    // never shorten the one attempt that used to be the whole check.
     spawnScript = [{ toolCalls: NEVER_REACHED_GMAIL, result: "[]" }, { toolCalls: GMAIL_CALL, result: "[]" }];
     await checkEmail(baseWatcher({ config: { timeoutMs: 1 } }), gmailBotDir, "jarvis");
     expect(spawnOpts[0]!.timeoutMs).toBe(60_000);
   });
 
-  test("the retry is CLAMPED to what is left of the budget", async () => {
-    // Live row (no config.timeoutMs ⇒ 120s net ⇒ 110s budget): attempt 1 returns
-    // instantly here, so attempt 2 gets the full 60s rather than the clamped ~50s a
-    // real 60s attempt 1 would leave. Assert the clamp is applied at all.
-    spawnScript = [{ toolCalls: NEVER_REACHED_GMAIL, result: "[]" }, { toolCalls: GMAIL_CALL, result: "[]" }];
-    await checkEmail(baseWatcher(), gmailBotDir, "jarvis");
-    expect(spawnOpts[1]!.timeoutMs).toBeGreaterThan(0);
-    expect(spawnOpts[1]!.timeoutMs).toBeLessThanOrEqual(60_000);
+  // The three decision points below are MUTATION-SURVIVABLE through checkEmail: every
+  // retry test returns from attempt 1 instantly, so no integration test can tell a
+  // clamped retry from an unclamped one. A review deleted the clamp outright with all
+  // 29 tests green — and at the old 120s net its absence overran the runner by 3ms,
+  // which costs the whole batch's lastNotifiedIds. Hence direct tests on the pure
+  // deciders: these fail when the behavior is removed, not merely pass while present.
+  describe("attempt-timeout decider (pure)", () => {
+    test("attempt 1 ignores the remaining budget entirely", () => {
+      // The safety invariant: nothing — no config, no elapsed time — can shorten the
+      // attempt that used to be the whole check.
+      expect(emailAttemptTimeoutMs(1, 200_000)).toBe(60_000);
+      expect(emailAttemptTimeoutMs(1, 1_000)).toBe(60_000);
+      expect(emailAttemptTimeoutMs(1, 0)).toBe(60_000);
+    });
+
+    test("a RETRY is clamped to what is left", () => {
+      // The live shape at the old 120s net: 110s budget − a 60s attempt 1 = 50s.
+      expect(emailAttemptTimeoutMs(2, 50_000)).toBe(50_000);
+      expect(emailAttemptTimeoutMs(2, 45_000)).toBe(45_000);
+    });
+
+    test("a retry never EXCEEDS the per-attempt timeout when budget is ample", () => {
+      expect(emailAttemptTimeoutMs(2, 110_000)).toBe(60_000);
+    });
+  });
+
+  describe("start-attempt guard (pure)", () => {
+    test("attempt 1 always starts", () => {
+      expect(shouldStartEmailAttempt(1, 0)).toBe(true);
+      expect(shouldStartEmailAttempt(1, -5_000)).toBe(true);
+    });
+
+    test("a retry needs EMAIL_MIN_ATTEMPT_MS left", () => {
+      expect(shouldStartEmailAttempt(2, 45_000)).toBe(true);
+      expect(shouldStartEmailAttempt(2, 44_999)).toBe(false);
+      // Laptop sleep is the reachable case: a 60s timer that fired ~17 min late
+      // leaves the deadline far in the past.
+      expect(shouldStartEmailAttempt(2, -900_000)).toBe(false);
+    });
+  });
+
+  test("the WORST CASE — two full attempts — fits inside the runner's net", async () => {
+    // The property the clamp and the floor jointly exist to hold. Written against the
+    // real formulas so it fails if either the floor shrinks or the clamp is removed:
+    // overrunning the net makes the runner re-save the OLD lastNotifiedIds, so the
+    // whole batch is re-evaluated and the tick's work is lost.
+    const { computeWatcherTimeoutMs } = await import("./timeout.ts");
+    for (const config of [{}, { timeoutMs: 1 }, { timeoutMs: 150_000 }]) {
+      const watcher = baseWatcher({ config });
+      const net = computeWatcherTimeoutMs(watcher);
+      const budget = emailRetryBudgetMs(watcher);
+      const first = emailAttemptTimeoutMs(1, budget);
+      const second = emailAttemptTimeoutMs(2, budget - first);
+      expect(first + second).toBeLessThanOrEqual(net);
+    }
+  });
+
+  test("email's net floor holds two FULL attempts — no row edit required", async () => {
+    // The reason the floor is email-specific. At the generic 120s floor the retry was
+    // clamped to ~50s against a 56.5s slowest-healthy tick, so the top decile of good
+    // runs could not be rescued without a hand-edited DB row.
+    const { computeWatcherTimeoutMs } = await import("./timeout.ts");
+    expect(computeWatcherTimeoutMs(baseWatcher())).toBe(180_000);
+    const budget = emailRetryBudgetMs(baseWatcher());
+    expect(emailAttemptTimeoutMs(2, budget - 60_000)).toBe(60_000);
   });
 
   test("a run that REACHED Gmail is never retried, however empty the inbox", async () => {
@@ -385,12 +441,14 @@ describe("checkEmail bounded retry", () => {
     expect(spawnOpts).toHaveLength(1);
   });
 
-  test("budget floors at 110s, so the retry is never config-starved", () => {
-    // The runner's net has a 120s FLOOR, so no row value can push the budget below
-    // one full attempt + a minimum retry. This pins why the guard is a wall-clock
+  test("budget floors at 170s, so the retry is never config-starved", () => {
+    // Email's net has its own 180s FLOOR, so no row value can push the budget below
+    // one full attempt + a full retry. This pins why the start guard is a wall-clock
     // guard (laptop sleep) and not a misconfiguration check.
-    expect(emailRetryBudgetMs(baseWatcher())).toBe(110_000);
-    expect(emailRetryBudgetMs(baseWatcher({ config: { timeoutMs: 1 } }))).toBe(110_000);
-    expect(emailRetryBudgetMs(baseWatcher({ config: { timeoutMs: 150_000 } }))).toBe(170_000);
+    expect(emailRetryBudgetMs(baseWatcher())).toBe(170_000);
+    expect(emailRetryBudgetMs(baseWatcher({ config: { timeoutMs: 1 } }))).toBe(170_000);
+    expect(emailRetryBudgetMs(baseWatcher({ config: { timeoutMs: 0 } }))).toBe(170_000);
+    // A configured value only ever RAISES it.
+    expect(emailRetryBudgetMs(baseWatcher({ config: { timeoutMs: 300_000 } }))).toBe(320_000);
   });
 });

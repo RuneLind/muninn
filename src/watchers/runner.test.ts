@@ -356,12 +356,15 @@ describe("isQuietHoursRunExempt", () => {
 // ── computeWatcherTimeoutMs ──────────────────────────────────────────
 
 describe("computeWatcherTimeoutMs", () => {
-  const watcherWith = (config: Record<string, unknown>): Watcher => ({
+  const watcherWith = (config: Record<string, unknown>, type = "x"): Watcher => ({
     id: "w-1",
     userId: "u-1",
     botName: "jarvis",
     name: "W",
-    type: "email" as any,
+    // NOT email: the floor is type-specific (email's is 180s because checkEmail can
+    // spawn twice), and these cases are about the GENERIC formula. Email gets its own
+    // assertions below.
+    type: type as any,
     config,
     intervalMs: 300000,
     enabled: true,
@@ -393,6 +396,20 @@ describe("computeWatcherTimeoutMs", () => {
   test("ignores a zero or negative configured timeout", () => {
     expect(computeWatcherTimeoutMs(watcherWith({ timeoutMs: 0 }))).toBe(120_000);
     expect(computeWatcherTimeoutMs(watcherWith({ timeoutMs: -5 }))).toBe(120_000);
+  });
+
+  // `email` is the one checker that can spawn TWICE (its bounded retry), and two 60s
+  // attempts plus the retry budget's 10s margin need 130s — which the generic floor
+  // cannot hold. The whole point is that no row edit is required, so the floor must
+  // hold for the UNCONFIGURED row, which is what the live one is.
+  test("email gets a 180s floor so two full attempts fit", () => {
+    expect(computeWatcherTimeoutMs(watcherWith({}, "email"))).toBe(180_000);
+    expect(computeWatcherTimeoutMs(watcherWith({ timeoutMs: 60_000 }, "email"))).toBe(180_000);
+    expect(computeWatcherTimeoutMs(watcherWith({ timeoutMs: 0 }, "email"))).toBe(180_000);
+  });
+
+  test("a configured email timeout still only ever RAISES the net", () => {
+    expect(computeWatcherTimeoutMs(watcherWith({ timeoutMs: 300_000 }, "email"))).toBe(330_000);
   });
 });
 

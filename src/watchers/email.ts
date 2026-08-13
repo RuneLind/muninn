@@ -118,19 +118,20 @@ If nothing worth notifying, return: []`;
   let lastError: Error | undefined;
 
   for (let attempt = 1; attempt <= EMAIL_MAX_ATTEMPTS; attempt++) {
-    // ATTEMPT 1 IS BYTE-IDENTICAL TO PRE-RETRY BEHAVIOR: full attempt timeout, run
-    // unconditionally, budget never consulted. The budget governs only whether — and
-    // for how long — a RETRY runs, so a misconfigured row can never shorten the one
-    // attempt that used to be the whole check.
-    if (attempt > 1 && deadline - Date.now() < EMAIL_MIN_ATTEMPT_MS) {
+    // ONE clock read per iteration — the guard below and the logged `remainingMs`
+    // must describe the same instant, or the log cannot reproduce the decision.
+    const remainingMs = deadline - Date.now();
+    if (!shouldStartEmailAttempt(attempt, remainingMs)) {
       log.warn(
         "email-check budget-exhausted: attempt={attempt}/{max} remainingMs={remainingMs} budgetMs={budgetMs} — not retrying",
-        { botName, attempt, max: EMAIL_MAX_ATTEMPTS, remainingMs: deadline - Date.now(), budgetMs },
+        // `attempt` counts attempts actually MADE, matching the sibling
+        // `x-capture-gate` line's documented convention — a budget-exhausted line
+        // before attempt 2 reports 1. One parser must be able to mine both prefixes.
+        { botName, attempt: attempt - 1, max: EMAIL_MAX_ATTEMPTS, remainingMs, budgetMs },
       );
       break;
     }
-    const attemptTimeoutMs =
-      attempt === 1 ? EMAIL_ATTEMPT_TIMEOUT_MS : Math.min(EMAIL_ATTEMPT_TIMEOUT_MS, deadline - Date.now());
+    const attemptTimeoutMs = emailAttemptTimeoutMs(attempt, remainingMs);
     const attemptStart = Date.now();
 
     try {
@@ -154,20 +155,30 @@ If nothing worth notifying, return: []`;
         continue;
       }
 
-      // One grep-stable outcome line per check, so "how often does the retry rescue
-      // a tick?" is countable (`email-check ok: attempt=2`) rather than inferred.
-      log.info(
-        "email-check ok: attempt={attempt}/{max} durationMs={durationMs} attemptTimeoutMs={attemptTimeoutMs}",
-        { botName, attempt, max: EMAIL_MAX_ATTEMPTS, durationMs: Date.now() - attemptStart, attemptTimeoutMs },
-      );
+      // One grep-stable outcome line per check, so "how often does the retry rescue a
+      // tick?" is countable (`email-check ok: attempt=2`) rather than inferred. Logged
+      // only AFTER the parse succeeds: a run that reached Gmail on attempt 2 and then
+      // returned unparseable text delivers nothing, and counting it as a rescue would
+      // inflate the exact metric this PR asks to be watched. Unparseable is its own
+      // outcome word, so the two stay separable when mining.
+      const durationMs = Date.now() - attemptStart;
+      let alerts: WatcherAlert[];
       try {
-        return extractJson<WatcherAlert[]>(result);
+        alerts = extractJson<WatcherAlert[]>(result);
       } catch {
         // NOT retried: this run DID reach Gmail, so the answer is real and only its
         // formatting is wrong — a different failure from the one the retry exists for.
-        log.warn("Failed to parse Haiku response as JSON, skipping. Raw: {raw}", { raw: result.slice(0, 300) });
+        log.warn(
+          "email-check unparseable: attempt={attempt}/{max} durationMs={durationMs} attemptTimeoutMs={attemptTimeoutMs} raw={raw}",
+          { botName, attempt, max: EMAIL_MAX_ATTEMPTS, durationMs, attemptTimeoutMs, raw: result.slice(0, 300) },
+        );
         return [];
       }
+      log.info(
+        "email-check ok: attempt={attempt}/{max} durationMs={durationMs} attemptTimeoutMs={attemptTimeoutMs} alerts={alerts}",
+        { botName, attempt, max: EMAIL_MAX_ATTEMPTS, durationMs, attemptTimeoutMs, alerts: alerts.length },
+      );
+      return alerts;
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
       log.warn(
@@ -216,6 +227,38 @@ export function emailRetryBudgetMs(watcher: Watcher): number {
 }
 
 /**
+ * Timeout for one attempt. Attempt 1 always gets the FULL budget — the invariant
+ * that keeps this change safe to reason about — and only a retry is clamped to what
+ * is left.
+ *
+ * Pure and separately tested because both halves are mutation-survivable inside the
+ * loop: every retry test returns from attempt 1 instantly, so no integration test
+ * can distinguish a clamped retry from an unclamped one, and the review that caught
+ * this deleted the clamp outright with all 29 tests still green. The clamp is
+ * load-bearing (at the old 120s net its absence overran the runner by 3ms and cost
+ * the whole batch's `lastNotifiedIds`), so it needs an assertion that fails when it
+ * is removed, not an assertion that merely passes while it is present.
+ */
+export function emailAttemptTimeoutMs(attempt: number, remainingMs: number): number {
+  if (attempt === 1) return EMAIL_ATTEMPT_TIMEOUT_MS;
+  return Math.min(EMAIL_ATTEMPT_TIMEOUT_MS, remainingMs);
+}
+
+/**
+ * Whether to START this attempt. Attempt 1 is unconditional; a retry needs
+ * {@link EMAIL_MIN_ATTEMPT_MS} left.
+ *
+ * With email's own 180s net floor a full 60s attempt 1 leaves ~110s, so on a healthy
+ * box this never blocks. It exists for WALL CLOCK: a 60s timer can fire ~17 minutes
+ * after arming when macOS suspends the process on laptop sleep and replays every
+ * overdue timer on wake (observed 2026-08-13 16:03). That is the one way attempt 1
+ * eats the budget, and it is why this is not a misconfiguration check.
+ */
+export function shouldStartEmailAttempt(attempt: number, remainingMs: number): boolean {
+  return attempt === 1 || remainingMs >= EMAIL_MIN_ATTEMPT_MS;
+}
+
+/**
  * The liveness predicate, as a message describing HOW the run failed — or `null`
  * when the run is trustworthy (reached Gmail) or unjudgeable (see below).
  *
@@ -250,7 +293,7 @@ export function emailRetryBudgetMs(watcher: Watcher): number {
  * and burning a second spawn on every legacy-parser degradation would double the
  * cost of a CLI bug that has nothing to do with Gmail.
  */
-export function gmailLivenessFailure(
+function gmailLivenessFailure(
   toolCalls: { name: string }[] | undefined,
   botDir: string | undefined,
 ): string | null {
