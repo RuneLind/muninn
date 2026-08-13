@@ -25,7 +25,21 @@ export interface HaikuResult {
    * `../ai/haiku-direct.ts`) to avoid an import cycle — that module imports this.
    */
   backend?: "cli" | "anthropic" | "copilot";
-  /** Tool calls parsed from the stream (empty/undefined for tool-less Haiku prompts). */
+  /**
+   * Tool calls the run made.
+   *
+   * ⚠️ `undefined` vs `[]` is load-bearing on the **`spawnHaiku` (CLI) path only**:
+   * there, `[]` means "the stream parser saw the whole run and it called nothing"
+   * and `undefined` means "the parser never saw the run" (`parseLegacyHaikuOutput`).
+   * The email watcher's Gmail liveness predicate depends on that distinction.
+   *
+   * It does NOT hold for `HaikuResult`s from the ROUTER: `callHaikuDirect` /
+   * `callHaikuViaCopilot` (`src/ai/haiku-direct.ts`) never set this field, so on the
+   * `anthropic`/`copilot` backends `undefined` just means "not the CLI". Any future
+   * tool-liveness check routed through `callHaikuWithFallback` would be silently
+   * 100% inert there — and would pass its unit tests, since mocks return `undefined`
+   * too. Check `backend === "cli"` before reading this as evidence of anything.
+   */
   toolCalls?: ToolCall[];
   /** Number of assistant turns (from the CLI result event). Undefined for direct-SDK backends. */
   numTurns?: number;
@@ -383,7 +397,7 @@ export async function spawnHaiku(
 }
 
 /** Map a StreamParser `ClaudeResult` into a `HaikuResult`. */
-function claudeResultToHaiku(r: ClaudeResult, effectiveModel: string): HaikuResult {
+export function claudeResultToHaiku(r: ClaudeResult, effectiveModel: string): HaikuResult {
   return {
     result: r.result,
     inputTokens: r.inputTokens,
@@ -391,7 +405,16 @@ function claudeResultToHaiku(r: ClaudeResult, effectiveModel: string): HaikuResu
     model: r.model && r.model !== "unknown" ? r.model : effectiveModel,
     // spawnHaiku unconditionally spawns `claude -p` — the honest backend is CLI.
     backend: "cli",
-    toolCalls: r.toolCalls,
+    // `??  []` is load-bearing, not tidying. StreamParser collapses "the model
+    // called no tools" to `undefined` (`toolCalls.length > 0 ? … : undefined`),
+    // which is the SAME value `parseLegacyHaikuOutput` leaves behind when the
+    // parser couldn't see the run at all. Those two are opposites: one is a
+    // complete observation of zero tools, the other is no observation. Callers
+    // that treat a tool-less answer as a failure signal (the email watcher's
+    // Gmail liveness predicate) need to tell them apart, so the STREAM path
+    // always reports a definite list and `undefined` is reserved for the legacy
+    // fallback. Every other consumer guards on `.length > 0` and is unaffected.
+    toolCalls: r.toolCalls ?? [],
     numTurns: r.numTurns,
     costUsd: r.costUsd,
   };

@@ -1,4 +1,7 @@
-import { test, expect, describe, beforeEach, mock } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach, mock } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Watcher } from "../types.ts";
 
 // --- Module mocks (registered before the dynamic import below) ---
@@ -8,6 +11,11 @@ import type { Watcher } from "../types.ts";
 // interest-profile injection (augment-only) and the null-profile byte-identity.
 
 let lastPrompt = "";
+// What the mocked spawn reports having called. `undefined` is the DEFAULT because
+// that is what the legacy-JSON parser fallback produces, and it is the value every
+// pre-existing test in this file runs under — the liveness predicate must stay inert
+// for them.
+let nextToolCalls: { name: string }[] | undefined;
 // NB: mock.module leaks across the watcher test files in a shared process (see the
 // same note in x.test.ts). runner.test.ts — co-located in the test:unit group and
 // evaluated after this file — transitively imports `trackUsage`, so export the full
@@ -18,7 +26,7 @@ mock.module("../scheduler/executor.ts", () => ({
   HAIKU_TIMEOUT_MS: 60_000,
   spawnHaiku: async (prompt: string) => {
     lastPrompt = prompt;
-    return { result: "[]", inputTokens: 0, outputTokens: 0, model: "claude-haiku-4-5-20251001" };
+    return { result: "[]", inputTokens: 0, outputTokens: 0, model: "claude-haiku-4-5-20251001", toolCalls: nextToolCalls };
   },
   parseHaikuJson: () => ({}),
   parseLegacyHaikuOutput: () => ({ result: "", inputTokens: 0, outputTokens: 0, model: "" }),
@@ -37,7 +45,7 @@ mock.module("../profile/generator.ts", () => ({
   loadInterestProfileForBot: async () => "WRONG-DEFAULT-USER-PROFILE",
 }));
 
-const { buildGmailQuery, checkEmail } = await import("./email.ts");
+const { buildGmailQuery, checkEmail, gmailToolPrefixes } = await import("./email.ts");
 
 describe("buildGmailQuery", () => {
   test("always includes is:unread", () => {
@@ -141,5 +149,119 @@ If nothing worth notifying, return: []`;
     expect(withoutProfile).toBe(expected);
     // And no augmentation wording leaked in.
     expect(withoutProfile).not.toContain("do NOT narrow");
+  });
+});
+
+describe("checkEmail Gmail liveness predicate", () => {
+  // The predicate only engages when it can NAME the Gmail server, so these tests
+  // need a botDir whose .mcp.json declares one — passing `undefined` would leave
+  // the check standing down and assert nothing.
+  let gmailBotDir: string;
+  beforeEach(() => {
+    nextToolCalls = undefined;
+    profileByUser.clear();
+    gmailBotDir = mkdtempSync(join(tmpdir(), "muninn-email-bot-"));
+    writeFileSync(join(gmailBotDir, ".mcp.json"), JSON.stringify({ mcpServers: { gmail: { type: "stdio", command: "x" } } }));
+  });
+  afterEach(() => rmSync(gmailBotDir, { recursive: true, force: true }));
+
+  test("a Gmail tool call makes an empty result a TRUSTWORTHY quiet inbox", async () => {
+    nextToolCalls = [{ name: "ToolSearch" }, { name: "mcp__gmail__search_emails" }];
+    expect(await checkEmail(baseWatcher(), gmailBotDir, "jarvis")).toEqual([]);
+  });
+
+  test("NO Gmail tool call throws instead of reporting a quiet inbox", async () => {
+    // The measured live failure: the model loops on ToolSearch, simulates the call
+    // through Bash, and answers `[]`. Pre-fix that reached the runner as an ordinary
+    // empty inbox; the whole point of the predicate is that it must not.
+    nextToolCalls = [{ name: "ToolSearch" }, { name: "Bash" }, { name: "Bash" }];
+    await expect(checkEmail(baseWatcher(), gmailBotDir, "jarvis")).rejects.toThrow(/no Gmail tool call/);
+  });
+
+  test("zero tool calls throws — the model answered without reaching any tool", async () => {
+    // THE case this predicate exists for: Gmail MCP down or its permission denied,
+    // so the model answers `[]` in one turn having called nothing. Reaching it
+    // depends on `spawnHaiku` normalizing StreamParser's zero-tools `undefined` to
+    // `[]` — without that this state is unreachable and the branch is dead code.
+    // `executor.test.ts` → describe("toolCalls: 'saw zero tools' vs 'could not see
+    // the run'") pins that normalization at the real seam; THIS test passes against
+    // the broken build too, so it does not stand alone.
+    nextToolCalls = [];
+    await expect(checkEmail(baseWatcher(), gmailBotDir, "jarvis")).rejects.toThrow(/no Gmail tool call/);
+  });
+
+  test("UNDEFINED toolCalls does NOT throw — the legacy parser can't tell", async () => {
+    // Distinct from `[]`. The legacy-JSON fallback carries no tool list at all, so a
+    // throw here would fire on every run that hits the known missing-result-event CLI
+    // bug, turning a parser degradation into a watcher outage.
+    nextToolCalls = undefined;
+    expect(await checkEmail(baseWatcher(), gmailBotDir, "jarvis")).toEqual([]);
+  });
+
+  test("a non-string tool name degrades to the diagnostic, not a TypeError", async () => {
+    nextToolCalls = [{ name: undefined as unknown as string }];
+    await expect(checkEmail(baseWatcher(), gmailBotDir, "jarvis")).rejects.toThrow(/no Gmail tool call/);
+  });
+
+  test("a RENAMED gmail server key still counts as reaching Gmail", async () => {
+    // The trap this closes: bot folders other than jarvis are gitignored and synced
+    // from another repo, so a `.mcp.json` rename could turn every healthy run into
+    // an hourly hard failure with no code change to point at.
+    const dir = mkdtempSync(join(tmpdir(), "muninn-email-mcp-"));
+    try {
+      writeFileSync(join(dir, ".mcp.json"), JSON.stringify({ mcpServers: { "gmail-mcp": { type: "stdio", command: "x" } } }));
+      expect(gmailToolPrefixes(dir)).toEqual(["mcp__gmail-mcp__"]);
+      nextToolCalls = [{ name: "mcp__gmail-mcp__search_emails" }];
+      expect(await checkEmail(baseWatcher(), dir, "jarvis")).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("no identifiable gmail server ⇒ null ⇒ the predicate stands DOWN", async () => {
+    // Deliberately NOT a fallback to `mcp__gmail__`. A bot that renamed the key to
+    // something without "gmail" in it has a WORKING server we merely cannot name;
+    // guessing would hard-fail every healthy tick — the trap this derivation
+    // removes. Failing closed on no evidence is the one thing not allowed here.
+    const dir = mkdtempSync(join(tmpdir(), "muninn-email-mcp-"));
+    try {
+      writeFileSync(join(dir, ".mcp.json"), JSON.stringify({ mcpServers: { "google-mail": { type: "stdio", command: "x" } } }));
+      expect(gmailToolPrefixes(dir)).toBeNull();
+      // …and a run that called only that server is therefore trusted, not thrown on.
+      nextToolCalls = [{ name: "mcp__google-mail__search_emails" }];
+      expect(await checkEmail(baseWatcher(), dir, "jarvis")).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a malformed .mcp.json ⇒ null, never a throw", () => {
+    const dir = mkdtempSync(join(tmpdir(), "muninn-email-mcp-"));
+    try {
+      writeFileSync(join(dir, ".mcp.json"), "{ not json at all");
+      expect(gmailToolPrefixes(dir)).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("multiple gmail-like keys ⇒ ANY of them counts", () => {
+    const dir = mkdtempSync(join(tmpdir(), "muninn-email-mcp-"));
+    try {
+      writeFileSync(join(dir, ".mcp.json"), JSON.stringify({ mcpServers: { gmail: {}, "gmail-backup": {} } }));
+      expect(gmailToolPrefixes(dir)?.sort()).toEqual(["mcp__gmail-backup__", "mcp__gmail__"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("no botDir ⇒ null, so a botDir-less caller is never judged", () => {
+    expect(gmailToolPrefixes(undefined)).toBeNull();
+  });
+
+  test("the throw names what WAS called, so the log says how it failed", async () => {
+    nextToolCalls = [{ name: "Bash" }, { name: "Bash" }, { name: "ToolSearch" }];
+    // Deduped — 4 Bash calls should not print "Bash, Bash, Bash, Bash".
+    await expect(checkEmail(baseWatcher(), gmailBotDir, "jarvis")).rejects.toThrow(/Bash, ToolSearch/);
   });
 });
