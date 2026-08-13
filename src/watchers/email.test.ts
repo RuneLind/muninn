@@ -1,4 +1,7 @@
 import { test, expect, describe, beforeEach, mock } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Watcher } from "../types.ts";
 
 // --- Module mocks (registered before the dynamic import below) ---
@@ -42,7 +45,7 @@ mock.module("../profile/generator.ts", () => ({
   loadInterestProfileForBot: async () => "WRONG-DEFAULT-USER-PROFILE",
 }));
 
-const { buildGmailQuery, checkEmail } = await import("./email.ts");
+const { buildGmailQuery, checkEmail, gmailToolPrefixes } = await import("./email.ts");
 
 describe("buildGmailQuery", () => {
   test("always includes is:unread", () => {
@@ -173,8 +176,9 @@ describe("checkEmail Gmail liveness predicate", () => {
     // so the model answers `[]` in one turn having called nothing. Reaching it
     // depends on `spawnHaiku` normalizing StreamParser's zero-tools `undefined` to
     // `[]` — without that this state is unreachable and the branch is dead code.
-    // `spawn-haiku-toolcalls.test.ts` pins the normalization at the real seam;
-    // this test would pass against the broken build, so it does not stand alone.
+    // `executor.test.ts` → describe("toolCalls: 'saw zero tools' vs 'could not see
+    // the run'") pins that normalization at the real seam; THIS test passes against
+    // the broken build too, so it does not stand alone.
     nextToolCalls = [];
     await expect(checkEmail(baseWatcher(), undefined, "jarvis")).rejects.toThrow(/no Gmail tool call/);
   });
@@ -190,6 +194,35 @@ describe("checkEmail Gmail liveness predicate", () => {
   test("a non-string tool name degrades to the diagnostic, not a TypeError", async () => {
     nextToolCalls = [{ name: undefined as unknown as string }];
     await expect(checkEmail(baseWatcher(), undefined, "jarvis")).rejects.toThrow(/no Gmail tool call/);
+  });
+
+  test("a RENAMED gmail server key still counts as reaching Gmail", async () => {
+    // The trap this closes: bot folders other than jarvis are gitignored and synced
+    // from another repo, so a `.mcp.json` rename could turn every healthy run into
+    // an hourly hard failure with no code change to point at.
+    const dir = mkdtempSync(join(tmpdir(), "muninn-email-mcp-"));
+    try {
+      writeFileSync(join(dir, ".mcp.json"), JSON.stringify({ mcpServers: { "gmail-mcp": { type: "stdio", command: "x" } } }));
+      expect(gmailToolPrefixes(dir)).toEqual(["mcp__gmail-mcp__"]);
+      nextToolCalls = [{ name: "mcp__gmail-mcp__search_emails" }];
+      expect(await checkEmail(baseWatcher(), dir, "jarvis")).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a bot with no gmail-like server falls back to the default prefix", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "muninn-email-mcp-"));
+    try {
+      writeFileSync(join(dir, ".mcp.json"), JSON.stringify({ mcpServers: { knowledge: { type: "stdio", command: "x" } } }));
+      expect(gmailToolPrefixes(dir)).toEqual(["mcp__gmail__"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("no botDir ⇒ the default prefix, so the predicate still works", () => {
+    expect(gmailToolPrefixes(undefined)).toEqual(["mcp__gmail__"]);
   });
 
   test("the throw names what WAS called, so the log says how it failed", async () => {

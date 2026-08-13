@@ -25,7 +25,21 @@ export interface HaikuResult {
    * `../ai/haiku-direct.ts`) to avoid an import cycle — that module imports this.
    */
   backend?: "cli" | "anthropic" | "copilot";
-  /** Tool calls parsed from the stream (empty/undefined for tool-less Haiku prompts). */
+  /**
+   * Tool calls the run made.
+   *
+   * ⚠️ `undefined` vs `[]` is load-bearing on the **`spawnHaiku` (CLI) path only**:
+   * there, `[]` means "the stream parser saw the whole run and it called nothing"
+   * and `undefined` means "the parser never saw the run" (`parseLegacyHaikuOutput`).
+   * The email watcher's Gmail liveness predicate depends on that distinction.
+   *
+   * It does NOT hold for `HaikuResult`s from the ROUTER: `callHaikuDirect` /
+   * `callHaikuViaCopilot` (`src/ai/haiku-direct.ts`) never set this field, so on the
+   * `anthropic`/`copilot` backends `undefined` just means "not the CLI". Any future
+   * tool-liveness check routed through `callHaikuWithFallback` would be silently
+   * 100% inert there — and would pass its unit tests, since mocks return `undefined`
+   * too. Check `backend === "cli"` before reading this as evidence of anything.
+   */
   toolCalls?: ToolCall[];
   /** Number of assistant turns (from the CLI result event). Undefined for direct-SDK backends. */
   numTurns?: number;

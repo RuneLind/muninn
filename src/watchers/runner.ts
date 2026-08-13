@@ -605,8 +605,27 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       // worth seeing: the tick that motivated the predicate burned 445 603 input
       // tokens looping on ToolSearch. `usage.calls === 0` (no model call reached)
       // stamps nothing, keeping the "no model call" badge honest.
+      // Mirrors the success tail's shape exactly — including `costUsd` (the Cost
+      // column on /agents is the most legible "this failure was expensive" signal)
+      // and `connector` (without it /traces resolves a model but no backend, and
+      // renders a bare model id where every successful tick says "Claude Code").
+      //
+      // Only covers a throw AFTER a completed, billed call: `usage.calls` advances
+      // in `onUsage`, which fires on a successful result parse. A Haiku TIMEOUT
+      // fires `onModelError` instead, so `calls` stays 0 and this stamps nothing —
+      // correct (no usage was ever reported) but worth knowing, since timeouts are
+      // the most common watcher failure and stay token-less on both surfaces.
       const failedUsage = usage.calls > 0
-        ? { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, model: usage.model, modelCalls: usage.calls, ...(usage.errors > 0 ? { modelErrors: usage.errors } : {}) }
+        ? {
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            ...(usage.numTurns > 0 ? { numTurns: usage.numTurns } : {}),
+            ...(usage.costUsd != null ? { costUsd: usage.costUsd } : {}),
+            ...(usage.model ? { model: usage.model } : {}),
+            connector: "claude-cli",
+            modelCalls: usage.calls,
+            ...(usage.errors > 0 ? { modelErrors: usage.errors } : {}),
+          }
         : {};
       wt?.error(err instanceof Error ? err : String(err), failedUsage);
       log.error("Watcher \"{name}\" ({watcherId}) failed: {error}", { botName: tag, name: watcher.name, watcherId: watcher.id, error: err instanceof Error ? err.message : String(err) });

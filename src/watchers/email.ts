@@ -1,6 +1,7 @@
 import type { Watcher, WatcherAlert } from "../types.ts";
 import { spawnHaiku, type HaikuTelemetry } from "../scheduler/executor.ts";
 import { extractJson } from "../ai/json-extract.ts";
+import { loadRawMcpServers } from "../ai/mcp-config-utils.ts";
 import { loadInterestProfile } from "../profile/generator.ts";
 import { withInterestProfile } from "../profile/inject.ts";
 import { getLog } from "../logging.ts";
@@ -88,12 +89,9 @@ If nothing worth notifying, return: []`;
   // one turn having called nothing — is caught here instead of being mistaken for a
   // parser degradation. Before that normalization this branch could not see it.
   //
-  // The prefix is `mcp__<serverKey>__`, where serverKey is the key in the bot's
-  // `.mcp.json` ("gmail" on every bot that has one). Renaming that key — bot folders
-  // other than jarvis are gitignored and synced from another repo — makes every
-  // HEALTHY run throw, with no code change to point at.
+  const prefixes = gmailToolPrefixes(botDir);
   const reachedGmail = toolCalls?.some(
-    (t) => typeof t.name === "string" && t.name.startsWith("mcp__gmail__"),
+    (t) => typeof t.name === "string" && prefixes.some((p) => t.name.startsWith(p)),
   );
   if (toolCalls && !reachedGmail) {
     const called = [...new Set(toolCalls.map((t) => String(t.name)))].join(", ") || "none";
@@ -109,6 +107,49 @@ If nothing worth notifying, return: []`;
     log.warn("Failed to parse Haiku response as JSON, skipping. Raw: {raw}", { raw: result.slice(0, 300) });
     return [];
   }
+}
+
+/** Fallback when there is no botDir, or its `.mcp.json` is absent/unreadable. */
+const DEFAULT_GMAIL_TOOL_PREFIX = "mcp__gmail__";
+
+/**
+ * MCP tool-name prefixes that count as "reached Gmail", derived from the bot's OWN
+ * `.mcp.json` rather than hardcoded.
+ *
+ * A tool is named `mcp__<serverKey>__<tool>`, and serverKey is whatever the bot's
+ * config calls the server — "gmail" on every bot that has one today, but bot folders
+ * other than jarvis are gitignored and synced from a separate repo. Hardcoding the
+ * prefix means a rename there turns every HEALTHY run into an hourly hard failure,
+ * with no code change to point at and nothing that would catch it in review.
+ *
+ * Matching is on the server KEY containing "gmail" (case-insensitive), so `gmail`,
+ * `gmail-mcp` and `Gmail` all resolve. A bot with no gmail-ish server keeps the
+ * default prefix and warns once: that spawn cannot reach Gmail at all, so the
+ * predicate firing every tick is the correct outcome, but the reason should be
+ * legible in the log rather than inferred from the thrown message.
+ */
+export function gmailToolPrefixes(botDir?: string): string[] {
+  if (!botDir) return [DEFAULT_GMAIL_TOOL_PREFIX];
+  const servers = loadRawMcpServers(botDir);
+  if (!servers) return [DEFAULT_GMAIL_TOOL_PREFIX];
+  const keys = Object.keys(servers).filter((k) => k.toLowerCase().includes("gmail"));
+  if (keys.length === 0) {
+    warnNoGmailServerOnce(botDir, Object.keys(servers));
+    return [DEFAULT_GMAIL_TOOL_PREFIX];
+  }
+  return keys.map((k) => `mcp__${k}__`);
+}
+
+const warnedNoGmailServer = new Set<string>();
+function warnNoGmailServerOnce(botDir: string, present: string[]): void {
+  if (warnedNoGmailServer.has(botDir)) return;
+  warnedNoGmailServer.add(botDir);
+  log.warn(
+    "No gmail-like MCP server in {botDir} (servers: {present}) — the email checker " +
+      "cannot reach Gmail, so its liveness predicate will fail every run. Fix the " +
+      "bot's .mcp.json, or disable the watcher.",
+    { botDir, present: present.join(", ") || "none" },
+  );
 }
 
 export function buildGmailQuery(filter: string | undefined, lastRunAt: number | null): string {
