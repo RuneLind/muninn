@@ -64,7 +64,31 @@ Return ONLY a JSON array (no markdown fences):
 If nothing worth notifying, return: []`;
   const prompt = withInterestProfile(basePrompt, interestProfile);
 
-  const { result } = await spawnHaiku(prompt, { source: "watcher-email", entrypoint: "jarvis-watcher", botDir, botName, model: config.model, ...telemetry });
+  const { result, toolCalls } = await spawnHaiku(prompt, { source: "watcher-email", entrypoint: "jarvis-watcher", botDir, botName, model: config.model, ...telemetry });
+
+  // Liveness predicate. "No important email today" is this checker's modal CORRECT
+  // output, which is exactly what makes a broken run invisible: every failure mode
+  // here — denied Gmail permissions, no MCP server, a model that never invokes the
+  // tool — arrives as `[]` and reads as a quiet inbox. The distinguishing signal is
+  // whether Gmail was reached at all: there is no path to a truthful answer that
+  // skips `search_emails`, so zero Gmail tool calls means the check never happened.
+  //
+  // Measured 2026-08-13 on the live row: of 7 organic ticks, 3 (08:56, 11:59, 13:00)
+  // returned `[]` having never called a Gmail tool — the model looped on ToolSearch
+  // (11 times on the 11:59 tick, 445k input tokens) or simulated the call through
+  // Bash, then answered `[]`. All three logged nothing and advanced last_run_at.
+  //
+  // `toolCalls` is UNDEFINED when the stream parser didn't complete (the legacy JSON
+  // fallback carries no tool list). That means "can't tell", not "no calls", so only
+  // a DEFINED list can fail the check — the fallback already warns on its own.
+  if (toolCalls && !toolCalls.some((t) => t.name.startsWith("mcp__gmail__"))) {
+    throw new Error(
+      `Email check made no Gmail tool call (${toolCalls.length} tool call(s): ` +
+        `${[...new Set(toolCalls.map((t) => t.name))].join(", ") || "none"}) — ` +
+        `the empty result is not a quiet inbox`,
+    );
+  }
+
   try {
     return extractJson<WatcherAlert[]>(result);
   } catch {
