@@ -474,6 +474,59 @@ Caveats of the parallel model:
 
 Spawns Haiku with the bot's Gmail MCP tools. The prompt has structural parts (Gmail search, JSON format) that are hardcoded, plus a configurable evaluation criteria section (`config.prompt`). Returns individual `WatcherAlert[]` per email with Gmail message IDs for dedup.
 
+### Bounded retry (2026-08-13)
+
+**The check spawns up to TWICE.** The #434 liveness predicate made a broken run
+loud; it did not make it succeed. Root cause, from 96 probe runs on byte-identical
+argv: the Gmail tools are presented to the spawn as **DEFERRED**, so 95 of 96 runs
+had to resolve `mcp__gmail__search_emails` through a ToolSearch round-trip first —
+and when that fails the tool never becomes callable, so the model loops on ToolSearch
+(12× observed) or improvises with Bash and answers `[]`. **7 of 56 production-shape
+runs (12.5%) never reached Gmail.** Ruled out by measurement and not worth
+re-litigating: CLI version (.228 4/8 vs .231 3/8), #431's argv shape (12/16 vs
+11/16), `--allowed-tools` (5/12 vs 4/12), gmail-only `--mcp-config` (5/12 vs 7/12).
+Deferral tracks the CLI's **built-in tool surface in the agent home**, not the MCP
+server count, so muninn cannot switch it off — but the failures are INDEPENDENT per
+spawn, which is exactly what a retry fixes: ~12.5% ⇒ ~1.6%.
+
+- **Retried on BOTH shapes** — the predicate failure AND a `spawnHaiku` throw. They
+  are one mechanism (a run that loops long enough hits the 60s timeout instead of
+  answering `[]`; the 08-13 17:04 transcript shows `search_emails` called at the 10s
+  mark then stalling 49s), and some 60s "timeouts" are legitimately slow healthy runs
+  — the slowest SUCCESSFUL tick measured **56.5s** against a 60s budget.
+- **NOT retried:** a run that reached Gmail (however empty the inbox — that's the
+  modal correct output), an unjudgeable run (`toolCalls` undefined ⇒ no evidence of
+  failure), or unparseable JSON from a run that did reach Gmail (the answer is real,
+  only its formatting is wrong). A post-model `spawnHaiku` throw (e.g. a Postgres
+  blip in `attachToolSpans`) IS retried — the result is discarded either way, so a
+  re-spawn is the only path to an answer.
+- **Attempt 1 is byte-identical to pre-retry**: full 60s timeout, run
+  unconditionally, budget never consulted. The budget governs only the retry, so no
+  config can shorten the one attempt that used to be the whole check.
+- **Budget** = `min(computeWatcherTimeoutMs, TICK_TIMEOUT_MS) − 10s`, anchored at
+  `checkEmail` entry (`emailRetryBudgetMs`). The margin is small vs `checkX`'s 60s
+  because the only post-spawn work is one `extractJson`. The runner's **120s net
+  FLOOR** means this can never be under 110s whatever the row says — so the
+  `EMAIL_MIN_ATTEMPT_MS` (45s) guard is **not** a misconfiguration check (an earlier
+  cut warned about that and the warn was unreachable); it guards WALL CLOCK, because
+  a 60s timer can fire ~17 min late after laptop sleep. Three attempts don't fit
+  under 110s, hence `EMAIL_MAX_ATTEMPTS = 2`.
+- **Known tightness:** on the live row (no `config.timeoutMs`) a 60s attempt 1 leaves
+  the retry a clamped ~50s, against a 56.5s slowest-healthy-run. Setting
+  `config.timeoutMs: 150000` widens the net to 180s and gives both attempts their
+  full 60s. Deliberately NOT required to ship — a fix that only works after a
+  hand-edited DB row is inert where it matters. ⚠️ Note the semantic wart: for
+  `x`/`anthropic` `config.timeoutMs` IS the model-call timeout, but `checkEmail` has
+  never passed it to `spawnHaiku`, so on an email row it widens the runner's net
+  **only**.
+- **Measurement surface:** one grep-stable line per check — `email-check
+  <ok|failed|budget-exhausted>: attempt=k/2 durationMs=… attemptTimeoutMs=…
+  [reason=…|error=…]`. Rescues are countable as `email-check ok: attempt=2`.
+- **Acceptance (2026-08-13, 8 real runs against live Gmail):** 7/8 ok. Two first
+  attempts failed; one was rescued (attempt 1 timed out at 60s, attempt 2 ran on a
+  clamped 49.9s budget, finished in 43.2s, returned 4 alerts), one failed both and
+  threw. Never a third spawn.
+
 ## Anthropic Watcher (anthropic.ts)
 
 Two tiers over the Anthropic firehose, alert-only. The companion *indexing* half (Huginn `anthropic-knowledge`) already content-hash-diffs the same surfaces, so this watcher is Muninn-only.
@@ -666,7 +719,7 @@ linger with a frozen chip.
 | `x` author-scores file unavailable | **Fixed** — health at `x:author-scores`. Documented as "transparency-only, never load-bearing", but `isLinkTweet` requires a non-null tier, so a missing/short file silently kills the **entire `x-link` pointer-capture class** and quietly raises every `x-post` floor. The module warns **once per process**, which is an anti-surface. |
 | `consolidation-gardener` unknown wiki / no collections / index unreadable / overlay unavailable | **Fixed** — health at `consolidation:<wiki>`. A renamed `WIKI_EXTRA` entry kills the watcher for months at one warn per week. No data is lost (clusters persist; the Atlas button is an independent path), but the feature is 100% dead. |
 | `wiki-gardener` `runExclusive` mutex | **Fixed differently** — the right remedy is a bound, not a surface. `GARDENER_MUTEX_MAX_HOLD_MS` (90 min) force-reclaims an abandoned lock with a loud `log.error`, mirroring the runner's `claimChecker` 2×-timeout reclaim; a reclaimed orphan settling later can't free the new holder's slot. Previously a never-settling drain one-shot held the lock forever, skipping every weekly run at INFO (one line per week) and swallowing manual triggers, recoverable only by restart. |
-| `email` returning `[]` | **Fixed (2026-08-13)** — the liveness predicate this row asked for now lives in `checkEmail`, reading `spawnHaiku`'s returned `toolCalls` rather than the tracer: zero `mcp__gmail__*` calls ⇒ **throw**, because there is no path to a truthful answer that skips `search_emails`. **Be precise about the surface this buys:** the runner's catch does `log.error` + an errored `watcher:email` span (now carrying the run's tokens — see below), then advances `last_run_at` as always. There is **no activity row** (`activityLog.push` is on the success path only), no Telegram, and deliberately no `recordOutcome`/health escalation. Note the errored span is the CHILD: the `scheduler_tick` root still finishes `ok`, so the **`/traces` list row stays green** and only the waterfall detail shows red. `/agents` Recent is DB-backed and does show it, but the failure never enters the in-memory completed-runs ring (the catch calls `clearRequest`, not `completeRequest`), so a live viewer sees the Running card vanish rather than flip to failed. So a persistently broken Gmail produces an hourly `log.error`, an unbounded one at that (no dedup, unlike `x`'s once-per-process author-scores warn), and little else — strictly better than a silent `[]`, but a **user-visible surface remains the open item here**. Note what it does NOT do: `recordOutcome` still can't be applied naively here ("no important email today" remains the modal *correct* output, so 3 quiet hours would escalate) — the predicate distinguishes **reached Gmail and found nothing** from **never reached Gmail**, which is the distinction health was missing. `toolCalls` undefined (legacy-JSON parser fallback) means "can't tell" and never fires — **but only because `claudeResultToHaiku` now normalizes the stream path's zero-tools `undefined` to `[]`**. StreamParser collapses "called no tools" to `undefined`, the same value the legacy fallback leaves; without that normalization the predicate was inert on exactly the case this row names (broken Gmail MCP ⇒ model answers `[]` having called nothing) and caught only the model-flails-through-Bash shape. Pinned by `executor.test.ts` "saw zero tools vs could not see the run". Measured on the live row the day it shipped: 3 of 7 organic ticks had been returning `[]` without calling Gmail. |
+| `email` returning `[]` | **Fixed (2026-08-13)** — predicate + a bounded retry keyed on it (see "Bounded retry" below; the predicate alone made the failure loud, the retry is what makes the check succeed). The liveness predicate lives in `checkEmail`, reading `spawnHaiku`'s returned `toolCalls` rather than the tracer: zero `mcp__gmail__*` calls ⇒ **throw**, because there is no path to a truthful answer that skips `search_emails`. **Be precise about the surface this buys:** the runner's catch does `log.error` + an errored `watcher:email` span (now carrying the run's tokens — see below), then advances `last_run_at` as always. There is **no activity row** (`activityLog.push` is on the success path only), no Telegram, and deliberately no `recordOutcome`/health escalation. Note the errored span is the CHILD: the `scheduler_tick` root still finishes `ok`, so the **`/traces` list row stays green** and only the waterfall detail shows red. `/agents` Recent is DB-backed and does show it, but the failure never enters the in-memory completed-runs ring (the catch calls `clearRequest`, not `completeRequest`), so a live viewer sees the Running card vanish rather than flip to failed. So a persistently broken Gmail produces an hourly `log.error`, an unbounded one at that (no dedup, unlike `x`'s once-per-process author-scores warn), and little else — strictly better than a silent `[]`, but a **user-visible surface remains the open item here**. Note what it does NOT do: `recordOutcome` still can't be applied naively here ("no important email today" remains the modal *correct* output, so 3 quiet hours would escalate) — the predicate distinguishes **reached Gmail and found nothing** from **never reached Gmail**, which is the distinction health was missing. `toolCalls` undefined (legacy-JSON parser fallback) means "can't tell" and never fires — **but only because `claudeResultToHaiku` now normalizes the stream path's zero-tools `undefined` to `[]`**. StreamParser collapses "called no tools" to `undefined`, the same value the legacy fallback leaves; without that normalization the predicate was inert on exactly the case this row names (broken Gmail MCP ⇒ model answers `[]` having called nothing) and caught only the model-flails-through-Bash shape. Pinned by `executor.test.ts` "saw zero tools vs could not see the run". Measured on the live row the day it shipped: 3 of 7 organic ticks had been returning `[]` without calling Gmail. |
 | `news` (`!res.ok`, fetch throw, zero parsed items) | **Noted, latent** — no `news` watcher row exists. Worst shape of all if one is created: zero parsed items logs *nothing*, and `recent` filters on a `lastRunAt` the runner advances even on failure, so articles published during an outage are permanently skipped when the feed recovers. Needs health **plus** a floor on the `since` cursor. |
 | Quiet-hours whole-run skip for a ≥24h watcher | **Noted, latent.** `updateWatcherLastRun` is called on the skip with no log line, so the next due moment is the same clock time — a weekly row whose slot once lands in 23:00–07:00 stays there permanently. Not exposed today (every hour-gated row sits 09–18). |
 

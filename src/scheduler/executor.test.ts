@@ -95,9 +95,13 @@ describe("spawnHaiku timeout", () => {
     // Call spawnHaiku directly with a very short timeout.
     // "claude" won't be found or will hang — either way it exceeds 100ms.
     await withScratchAgentCwd(async () => {
+      // The message reports ELAPSED, then the budget in parens — elapsed is a real
+      // measurement (103ms here) and must not be asserted exactly. The budget is the
+      // deterministic half. Elapsed is what distinguishes a genuine timeout from a
+      // laptop-sleep artifact, where a 60s timer fires ~17 min after arming.
       await expect(
         spawnHaiku("test", { source: "timeout-test", entrypoint: "test", botName: "test-bot", timeoutMs: 100 }),
-      ).rejects.toThrow(/timed out after 100ms|exited with code/);
+      ).rejects.toThrow(/timed out after \d+ms \(budget 100ms\)|exited with code/);
     });
   });
 
