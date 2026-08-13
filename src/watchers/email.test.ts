@@ -169,6 +169,12 @@ describe("checkEmail Gmail liveness predicate", () => {
   });
 
   test("zero tool calls throws — the model answered without reaching any tool", async () => {
+    // THE case this predicate exists for: Gmail MCP down or its permission denied,
+    // so the model answers `[]` in one turn having called nothing. Reaching it
+    // depends on `spawnHaiku` normalizing StreamParser's zero-tools `undefined` to
+    // `[]` — without that this state is unreachable and the branch is dead code.
+    // `spawn-haiku-toolcalls.test.ts` pins the normalization at the real seam;
+    // this test would pass against the broken build, so it does not stand alone.
     nextToolCalls = [];
     await expect(checkEmail(baseWatcher(), undefined, "jarvis")).rejects.toThrow(/no Gmail tool call/);
   });
@@ -179,6 +185,11 @@ describe("checkEmail Gmail liveness predicate", () => {
     // bug, turning a parser degradation into a watcher outage.
     nextToolCalls = undefined;
     expect(await checkEmail(baseWatcher(), undefined, "jarvis")).toEqual([]);
+  });
+
+  test("a non-string tool name degrades to the diagnostic, not a TypeError", async () => {
+    nextToolCalls = [{ name: undefined as unknown as string }];
+    await expect(checkEmail(baseWatcher(), undefined, "jarvis")).rejects.toThrow(/no Gmail tool call/);
   });
 
   test("the throw names what WAS called, so the log says how it failed", async () => {

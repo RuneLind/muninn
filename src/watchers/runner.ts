@@ -363,6 +363,12 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
     // the whole-run skip (wiki-committer): the checker runs, but its user-facing
     // Telegram/Slack send is suppressed below.
     let quietHours = false;
+    // Accumulate token usage across a checker's spawnHaiku calls. x/anthropic make
+    // MULTIPLE calls (gate + digest / capture gate) per run, so sum here; the total
+    // is stamped onto the `watcher:<type>` span + the Running card. Declared OUTSIDE
+    // the try so the catch can stamp what a failed run already spent — a checker can
+    // fail long after its model call succeeded and was billed.
+    const usage = newWatcherUsage();
     try {
       // Check quiet hours — skip notifications but still mark as run (forced runs bypass)
       if (!forced) {
@@ -417,11 +423,6 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
         agentStatus.setConnectorLabel(requestId, cinfo.label);
         if (cinfo.model) agentStatus.setModel(requestId, cinfo.model);
       }
-
-      // Accumulate token usage across a checker's spawnHaiku calls. x/anthropic
-      // make MULTIPLE calls (gate + digest / capture gate) per run, so sum here;
-      // the total is stamped onto the `watcher:<type>` span + the Running card.
-      const usage = newWatcherUsage();
 
       // Telemetry seams for the Haiku-driven checkers (email/x/anthropic): the
       // live progress callback fills this run's `/agents` tool mini-log, `wt`
@@ -596,7 +597,18 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       wt?.finish("ok", { type: watcher.type, alertsFound: alerts.length, alertsSent: visibleAlerts.length, alertsSilent: silentAlerts.length, ...usageMeta, ...callMeta, ...(forced && { manualTrigger: true }) });
     } catch (err) {
       if (requestId) agentStatus.clearRequest(requestId);
-      wt?.error(err instanceof Error ? err : String(err));
+      // Stamp whatever the run DID spend before it failed. A checker can fail long
+      // after its model call succeeded (the email watcher's Gmail liveness predicate
+      // throws on a completed, fully-billed spawn), and the success tail is the only
+      // place that used to attach tokens — so those runs vanished from the token
+      // surfaces on /agents and /traces. The expensive failures are exactly the ones
+      // worth seeing: the tick that motivated the predicate burned 445 603 input
+      // tokens looping on ToolSearch. `usage.calls === 0` (no model call reached)
+      // stamps nothing, keeping the "no model call" badge honest.
+      const failedUsage = usage.calls > 0
+        ? { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, model: usage.model, modelCalls: usage.calls, ...(usage.errors > 0 ? { modelErrors: usage.errors } : {}) }
+        : {};
+      wt?.error(err instanceof Error ? err : String(err), failedUsage);
       log.error("Watcher \"{name}\" ({watcherId}) failed: {error}", { botName: tag, name: watcher.name, watcherId: watcher.id, error: err instanceof Error ? err.message : String(err) });
 
       // Still advance lastRunAt on failure to prevent retry storms

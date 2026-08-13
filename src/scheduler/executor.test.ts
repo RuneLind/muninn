@@ -23,7 +23,7 @@ mock.module("../config.ts", () => ({
   loadConfig: () => ({ tracingEnabled: true, tracingCaptureToolOutputs: true }),
 }));
 
-const { spawnHaiku, callHaiku, HAIKU_TIMEOUT_MS, parseHaikuJson, parseLegacyHaikuOutput, readAndParseHaikuStream, buildHaikuArgs, _resetSpawnWarningsForTests } =
+const { spawnHaiku, callHaiku, HAIKU_TIMEOUT_MS, parseHaikuJson, parseLegacyHaikuOutput, readAndParseHaikuStream, buildHaikuArgs, claudeResultToHaiku, _resetSpawnWarningsForTests } =
   await import("./executor.ts");
 const { attachToolSpans } = await import("../core/tool-spans.ts");
 const { resolveAgentCwd } = await import("../ai/agent-cwd.ts");
@@ -485,5 +485,51 @@ describe("spawnHaiku degrade warnings", () => {
         reset: true,
       });
     }
+  });
+});
+
+describe("toolCalls: 'saw zero tools' vs 'could not see the run'", () => {
+  // These two states are opposites, and both used to surface as `undefined`.
+  // The email watcher's Gmail liveness predicate is built on telling them apart:
+  // a complete observation of zero tools means the checker never reached Gmail
+  // (throw); no observation at all means we cannot judge (stay inert). If this
+  // collapses back, that predicate silently stops catching its primary case —
+  // a broken Gmail MCP — while its own unit tests keep passing.
+
+  test("a healthy stream run with NO tool calls yields [], not undefined", async () => {
+    const stream = ndjsonStream([
+      JSON.stringify({ type: "system", subtype: "init", model: "claude-haiku-4-5-20251001" }),
+      JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "[]" }] } }),
+      JSON.stringify({ type: "result", subtype: "success", result: "[]", usage: { input_tokens: 10, output_tokens: 2 } }),
+    ]);
+    const { result: streamed } = await readAndParseHaikuStream(stream, performance.now(), undefined, "jarvis");
+    expect(streamed).not.toBeNull();
+
+    // The parser itself still collapses zero tools to undefined...
+    expect(streamed!.toolCalls).toBeUndefined();
+    // ...and the HaikuResult mapping is what makes the observation definite.
+    const haiku = claudeResultToHaiku(streamed!, "claude-haiku-4-5-20251001");
+    expect(haiku.toolCalls).toEqual([]);
+  });
+
+  test("a stream run WITH tool calls reports them", async () => {
+    const stream = ndjsonStream([
+      JSON.stringify({ type: "system", subtype: "init", model: "claude-haiku-4-5-20251001" }),
+      JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "mcp__gmail__search_emails", input: {} }] } }),
+      JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }] } }),
+      JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "[]" }] } }),
+      JSON.stringify({ type: "result", subtype: "success", result: "[]", usage: { input_tokens: 10, output_tokens: 2 } }),
+    ]);
+    const { result: streamed } = await readAndParseHaikuStream(stream, performance.now(), undefined, "jarvis");
+    const haiku = claudeResultToHaiku(streamed!, "claude-haiku-4-5-20251001");
+    expect(haiku.toolCalls?.map((t) => t.name)).toEqual(["mcp__gmail__search_emails"]);
+  });
+
+  test("the legacy JSON fallback still yields undefined — it saw no stream at all", () => {
+    const haiku = parseLegacyHaikuOutput(
+      JSON.stringify({ result: "[]", usage: { input_tokens: 10, output_tokens: 2 } }),
+      "claude-haiku-4-5-20251001",
+    );
+    expect(haiku.toolCalls).toBeUndefined();
   });
 });

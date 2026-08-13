@@ -251,9 +251,15 @@ export class Tracer {
   }
 
   /** End root span with error */
-  error(err: Error | string): void {
+  /**
+   * `attrs` lets a caller keep the work the span DID do when it ends in failure —
+   * token/model attributes that otherwise only the success tail attaches, leaving
+   * an expensive failed run looking free on /agents and /traces. `error` stays last
+   * so a caller cannot accidentally overwrite the message.
+   */
+  error(err: Error | string, attrs?: Record<string, unknown>): void {
     const message = err instanceof Error ? err.message : err;
-    this.finish("error", { error: message });
+    this.finish("error", { ...attrs, error: message });
   }
 
   // Backward compat — delegates to Timing

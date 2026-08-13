@@ -76,15 +76,29 @@ If nothing worth notifying, return: []`;
   // Measured 2026-08-13 on the live row: of 7 organic ticks, 3 (08:56, 11:59, 13:00)
   // returned `[]` having never called a Gmail tool — the model looped on ToolSearch
   // (11 times on the 11:59 tick, 445k input tokens) or simulated the call through
-  // Bash, then answered `[]`. All three logged nothing and advanced last_run_at.
+  // Bash, then answered `[]`. Two were fully silent; the third tripped the JSON
+  // parse warning below. All three advanced last_run_at.
   //
-  // `toolCalls` is UNDEFINED when the stream parser didn't complete (the legacy JSON
-  // fallback carries no tool list). That means "can't tell", not "no calls", so only
-  // a DEFINED list can fail the check — the fallback already warns on its own.
-  if (toolCalls && !toolCalls.some((t) => t.name.startsWith("mcp__gmail__"))) {
+  // `toolCalls` is UNDEFINED only when the stream parser never saw the run and
+  // `parseLegacyHaikuOutput` took over — no tool list exists, so we genuinely cannot
+  // tell, and the check stays inert (that path warns on its own). A run the parser
+  // DID see always yields a definite list, INCLUDING the empty one: `spawnHaiku`
+  // normalizes StreamParser's zero-tools `undefined` to `[]` precisely so the most
+  // dangerous case — Gmail MCP down or its permission denied, model answers `[]` in
+  // one turn having called nothing — is caught here instead of being mistaken for a
+  // parser degradation. Before that normalization this branch could not see it.
+  //
+  // The prefix is `mcp__<serverKey>__`, where serverKey is the key in the bot's
+  // `.mcp.json` ("gmail" on every bot that has one). Renaming that key — bot folders
+  // other than jarvis are gitignored and synced from another repo — makes every
+  // HEALTHY run throw, with no code change to point at.
+  const reachedGmail = toolCalls?.some(
+    (t) => typeof t.name === "string" && t.name.startsWith("mcp__gmail__"),
+  );
+  if (toolCalls && !reachedGmail) {
+    const called = [...new Set(toolCalls.map((t) => String(t.name)))].join(", ") || "none";
     throw new Error(
-      `Email check made no Gmail tool call (${toolCalls.length} tool call(s): ` +
-        `${[...new Set(toolCalls.map((t) => t.name))].join(", ") || "none"}) — ` +
+      `Email check made no Gmail tool call (${toolCalls.length} tool call(s): ${called}) — ` +
         `the empty result is not a quiet inbox`,
     );
   }
