@@ -511,8 +511,18 @@ spawn, which is exactly what a retry fixes: ~12.5% ⇒ ~1.6%.
   means this is never under 170s whatever the row says — so the
   `EMAIL_MIN_ATTEMPT_MS` (45s) guard is **not** a misconfiguration check (an earlier
   cut warned about that and the warn was provably unreachable); it guards WALL CLOCK,
-  because a 60s timer can fire ~17 min late after laptop sleep. Three attempts still
-  don't fit, hence `EMAIL_MAX_ATTEMPTS = 2`.
+  because a 60s timer can fire ~17 min late after laptop sleep. ⚠️ `EMAIL_MAX_ATTEMPTS
+  = 2` is a **cost** decision, not an arithmetic limit — a third attempt *would* now
+  fit (60 + 60 leaves 50s, clearing the guard). At ~12.5% per-spawn failure one retry
+  reaches ~1.6% and a second ~0.2%, which is not worth a third 60s spawn and ~110k
+  input tokens on an hourly job. An earlier note here said three attempts "don't fit";
+  that was true only under the old 120s floor.
+- **The floor↔constants dependency is asserted, not just documented.** `timeout.ts`'s
+  180s floor exists to satisfy constants in `email.ts`, and a real import would close a
+  cycle — so `email.test.ts` ("the net holds EMAIL_MAX_ATTEMPTS attempts at FULL
+  length") is the only thing binding them. Raising `EMAIL_ATTEMPT_TIMEOUT_MS` (or
+  `HAIKU_TIMEOUT_MS`, which it aliases) to 100s would otherwise silently overrun the
+  net — the same defect the clamp prevents, re-entering through a different constant.
 - **The two decision points are PURE and separately tested** —
   `emailAttemptTimeoutMs(attempt, remainingMs)` and
   `shouldStartEmailAttempt(attempt, remainingMs)`. This is not stylistic: both are

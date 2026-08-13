@@ -36,6 +36,20 @@ const WATCHER_TIMEOUT_FLOOR_MS = 120_000; // 2 min for watchers with no configur
  * where it matters, and the live row has carried no `timeoutMs` for its whole life.
  * A type-specific floor is the honest place for a per-checker requirement.
  *
+ * **Why 180 and not 130.** The requirement is 130s (`EMAIL_MAX_ATTEMPTS ×
+ * EMAIL_ATTEMPT_TIMEOUT_MS + EMAIL_BUDGET_SAFETY_MARGIN_MS`); 180 is that plus
+ * deliberate slack, and it matches what the `config.timeoutMs: 150000` row edit this
+ * replaces would have produced — so the shipped net is unchanged from the documented
+ * workaround. Sizing it at exactly 130 would put the net one constant-bump away from
+ * the overrun this exists to prevent.
+ *
+ * ⚠️ **The inputs to that arithmetic live in `email.ts`, and a real import would close
+ * a cycle** — so the dependency is semantic and unenforceable from here. It is
+ * asserted in `email.test.ts` ("the net holds EMAIL_MAX_ATTEMPTS attempts at FULL
+ * length"), which can import both modules. Changing `EMAIL_ATTEMPT_TIMEOUT_MS`,
+ * `EMAIL_MAX_ATTEMPTS` or `HAIKU_TIMEOUT_MS` (which the first aliases) without
+ * re-checking that test is how this silently regresses.
+ *
  * NB this widens only the SAFETY NET. It does not make any single spawn longer (the
  * per-attempt timeout is `EMAIL_ATTEMPT_TIMEOUT_MS`, still 60s), so a wedged email
  * tick occupies at most ~120s of its 180s net — and watchers run concurrently, so a

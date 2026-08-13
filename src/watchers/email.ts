@@ -14,7 +14,19 @@ const log = getLog("watchers", "email");
  * retry budget below is derived against it and the two must not drift.
  */
 const EMAIL_ATTEMPT_TIMEOUT_MS = HAIKU_TIMEOUT_MS;
-/** Attempts per check. 2, not 3 — see the budget note on `emailRetryBudgetMs`. */
+/**
+ * Attempts per check.
+ *
+ * ⚠️ **This is a COST decision, not an arithmetic limit — do not "fix" it by
+ * re-deriving the budget.** A third attempt now *would* fit (170s budget: 60 + 60
+ * leaves 50s, which clears `EMAIL_MIN_ATTEMPT_MS`); an earlier revision of this
+ * comment claimed it did not, which was true only under the old 120s floor. The cap
+ * is 2 because the returns collapse: at the measured ~12.5% per-spawn failure rate,
+ * one retry takes a tick to ~1.6% and a second would take it to ~0.2% — buying that
+ * 1.4 points costs a third 60s spawn and another ~110k input tokens on an HOURLY
+ * background job that nothing waits on. Raise it only against a measured failure
+ * rate, and re-check the net still holds N attempts (`email.test.ts` asserts it).
+ */
 export const EMAIL_MAX_ATTEMPTS = 2;
 /**
  * Headroom left under the runner's net. Small (vs `checkX`'s 60s) because the
@@ -205,16 +217,15 @@ If nothing worth notifying, return: []`;
  * the runner's catch re-saves the OLD `lastNotifiedIds`, and the whole batch is
  * re-evaluated next run.
  *
- * On the live row (no `config.timeoutMs`, so the 120s floor) this yields 110s:
- * a 60s attempt 1 leaves 50s, which clears `EMAIL_MIN_ATTEMPT_MS` and buys a
- * clamped-but-real retry. Setting `config.timeoutMs: 150000` on the row widens the
- * net to 180s and gives BOTH attempts their full 60s — worth doing if the clamped
- * retries show up as attempt-2 timeouts, but deliberately not required to ship,
- * because a fix that only works after a hand-edited DB row is a fix that is inert
- * where it matters. Three attempts do not fit under the 120s floor at all, which
- * is why {@link EMAIL_MAX_ATTEMPTS} is 2.
+ * On the live row (no `config.timeoutMs`) email's own 180s net floor yields **170s**,
+ * so BOTH attempts get their full 60s and neither is clamped. Setting
+ * `config.timeoutMs` on the row is NOT needed and NOT recommended: anything at or
+ * below 150 000 is a no-op (it resolves to the same 180s net), and the field means
+ * something different here than on x/anthropic — `checkEmail` has never passed it to
+ * `spawnHaiku`, so on an email row it widens the runner's net only. The floor lives
+ * in `timeout.ts` precisely so no row edit is required; see it for why.
  *
- * The net's 120s FLOOR means this can never return less than 110s, whatever the row
+ * The 180s floor means this can never return less than 170s, whatever the row
  * says — so the `EMAIL_MIN_ATTEMPT_MS` guard is NOT a misconfiguration check (an
  * earlier cut warned about that and the warn was unreachable). It guards WALL CLOCK:
  * a `setTimeout(60s)` can fire far later than 60s after arming, because macOS

@@ -63,8 +63,15 @@ mock.module("../profile/generator.ts", () => ({
   loadInterestProfileForBot: async () => "WRONG-DEFAULT-USER-PROFILE",
 }));
 
-const { buildGmailQuery, checkEmail, gmailToolPrefixes, emailRetryBudgetMs, emailAttemptTimeoutMs, shouldStartEmailAttempt } =
-  await import("./email.ts");
+const {
+  buildGmailQuery,
+  checkEmail,
+  gmailToolPrefixes,
+  emailRetryBudgetMs,
+  emailAttemptTimeoutMs,
+  shouldStartEmailAttempt,
+  EMAIL_MAX_ATTEMPTS,
+} = await import("./email.ts");
 
 describe("buildGmailQuery", () => {
   test("always includes is:unread", () => {
@@ -346,6 +353,10 @@ describe("checkEmail bounded retry", () => {
   });
 
   test("attempt 1 gets the FULL attempt timeout — byte-identical to pre-retry", async () => {
+    // Integration smoke only: it confirms the loop wires the decider to the spawn. It
+    // does NOT pin the attempt-1 rule — under the 180s floor `timeoutMs: 1` no longer
+    // shortens anything (the budget is 170s regardless), so this passes even with the
+    // `attempt === 1` branch deleted. The rule is pinned by the pure test above.
     spawnScript = [{ toolCalls: NEVER_REACHED_GMAIL, result: "[]" }, { toolCalls: GMAIL_CALL, result: "[]" }];
     await checkEmail(baseWatcher({ config: { timeoutMs: 1 } }), gmailBotDir, "jarvis");
     expect(spawnOpts[0]!.timeoutMs).toBe(60_000);
@@ -392,19 +403,30 @@ describe("checkEmail bounded retry", () => {
     });
   });
 
-  test("the WORST CASE — two full attempts — fits inside the runner's net", async () => {
-    // The property the clamp and the floor jointly exist to hold. Written against the
-    // real formulas so it fails if either the floor shrinks or the clamp is removed:
-    // overrunning the net makes the runner re-save the OLD lastNotifiedIds, so the
-    // whole batch is re-evaluated and the tick's work is lost.
+  test("the net holds EMAIL_MAX_ATTEMPTS attempts at FULL length", async () => {
+    // The cross-module invariant: email's floor in timeout.ts exists solely to satisfy
+    // constants that live in email.ts, and a real import would close a cycle — so the
+    // two can only be bound together HERE. Without this, raising
+    // EMAIL_ATTEMPT_TIMEOUT_MS (or HAIKU_TIMEOUT_MS, which it aliases) to 100s is a
+    // one-line change that silently overruns the net: withWatcherTimeout rejects, the
+    // runner re-saves the OLD lastNotifiedIds, and the batch is lost. That is the same
+    // 3ms-overrun defect the clamp was written to prevent, re-entering through a
+    // different constant.
+    //
+    // NB this deliberately does NOT test the clamp — at a 170s budget the clamp is
+    // unreachable (Math.min(60s, 110s) is inert), so a version of this test that
+    // claimed to cover it was vacuous. The clamp is pinned by the pure decider tests
+    // above; those are not redundant with this one and must not be deleted as such.
     const { computeWatcherTimeoutMs } = await import("./timeout.ts");
+    // Recover the per-attempt timeout through the public API rather than re-stating
+    // the constant, so this tracks a change to it instead of masking one.
+    const attemptMs = emailAttemptTimeoutMs(1, Number.MAX_SAFE_INTEGER);
     for (const config of [{}, { timeoutMs: 1 }, { timeoutMs: 150_000 }]) {
       const watcher = baseWatcher({ config });
-      const net = computeWatcherTimeoutMs(watcher);
-      const budget = emailRetryBudgetMs(watcher);
-      const first = emailAttemptTimeoutMs(1, budget);
-      const second = emailAttemptTimeoutMs(2, budget - first);
-      expect(first + second).toBeLessThanOrEqual(net);
+      // Every attempt affordable at full length — no attempt should need clamping.
+      expect(emailRetryBudgetMs(watcher)).toBeGreaterThanOrEqual(EMAIL_MAX_ATTEMPTS * attemptMs);
+      // …and the whole worst case still inside the net the runner actually enforces.
+      expect(EMAIL_MAX_ATTEMPTS * attemptMs).toBeLessThanOrEqual(computeWatcherTimeoutMs(watcher));
     }
   });
 
