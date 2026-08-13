@@ -1,4 +1,4 @@
-import { test, expect, describe, beforeEach, mock } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach, mock } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -153,14 +153,21 @@ If nothing worth notifying, return: []`;
 });
 
 describe("checkEmail Gmail liveness predicate", () => {
+  // The predicate only engages when it can NAME the Gmail server, so these tests
+  // need a botDir whose .mcp.json declares one — passing `undefined` would leave
+  // the check standing down and assert nothing.
+  let gmailBotDir: string;
   beforeEach(() => {
     nextToolCalls = undefined;
     profileByUser.clear();
+    gmailBotDir = mkdtempSync(join(tmpdir(), "muninn-email-bot-"));
+    writeFileSync(join(gmailBotDir, ".mcp.json"), JSON.stringify({ mcpServers: { gmail: { type: "stdio", command: "x" } } }));
   });
+  afterEach(() => rmSync(gmailBotDir, { recursive: true, force: true }));
 
   test("a Gmail tool call makes an empty result a TRUSTWORTHY quiet inbox", async () => {
     nextToolCalls = [{ name: "ToolSearch" }, { name: "mcp__gmail__search_emails" }];
-    expect(await checkEmail(baseWatcher(), undefined, "jarvis")).toEqual([]);
+    expect(await checkEmail(baseWatcher(), gmailBotDir, "jarvis")).toEqual([]);
   });
 
   test("NO Gmail tool call throws instead of reporting a quiet inbox", async () => {
@@ -168,7 +175,7 @@ describe("checkEmail Gmail liveness predicate", () => {
     // through Bash, and answers `[]`. Pre-fix that reached the runner as an ordinary
     // empty inbox; the whole point of the predicate is that it must not.
     nextToolCalls = [{ name: "ToolSearch" }, { name: "Bash" }, { name: "Bash" }];
-    await expect(checkEmail(baseWatcher(), undefined, "jarvis")).rejects.toThrow(/no Gmail tool call/);
+    await expect(checkEmail(baseWatcher(), gmailBotDir, "jarvis")).rejects.toThrow(/no Gmail tool call/);
   });
 
   test("zero tool calls throws — the model answered without reaching any tool", async () => {
@@ -180,7 +187,7 @@ describe("checkEmail Gmail liveness predicate", () => {
     // the run'") pins that normalization at the real seam; THIS test passes against
     // the broken build too, so it does not stand alone.
     nextToolCalls = [];
-    await expect(checkEmail(baseWatcher(), undefined, "jarvis")).rejects.toThrow(/no Gmail tool call/);
+    await expect(checkEmail(baseWatcher(), gmailBotDir, "jarvis")).rejects.toThrow(/no Gmail tool call/);
   });
 
   test("UNDEFINED toolCalls does NOT throw — the legacy parser can't tell", async () => {
@@ -188,12 +195,12 @@ describe("checkEmail Gmail liveness predicate", () => {
     // throw here would fire on every run that hits the known missing-result-event CLI
     // bug, turning a parser degradation into a watcher outage.
     nextToolCalls = undefined;
-    expect(await checkEmail(baseWatcher(), undefined, "jarvis")).toEqual([]);
+    expect(await checkEmail(baseWatcher(), gmailBotDir, "jarvis")).toEqual([]);
   });
 
   test("a non-string tool name degrades to the diagnostic, not a TypeError", async () => {
     nextToolCalls = [{ name: undefined as unknown as string }];
-    await expect(checkEmail(baseWatcher(), undefined, "jarvis")).rejects.toThrow(/no Gmail tool call/);
+    await expect(checkEmail(baseWatcher(), gmailBotDir, "jarvis")).rejects.toThrow(/no Gmail tool call/);
   });
 
   test("a RENAMED gmail server key still counts as reaching Gmail", async () => {
@@ -211,23 +218,50 @@ describe("checkEmail Gmail liveness predicate", () => {
     }
   });
 
-  test("a bot with no gmail-like server falls back to the default prefix", async () => {
+  test("no identifiable gmail server ⇒ null ⇒ the predicate stands DOWN", async () => {
+    // Deliberately NOT a fallback to `mcp__gmail__`. A bot that renamed the key to
+    // something without "gmail" in it has a WORKING server we merely cannot name;
+    // guessing would hard-fail every healthy tick — the trap this derivation
+    // removes. Failing closed on no evidence is the one thing not allowed here.
     const dir = mkdtempSync(join(tmpdir(), "muninn-email-mcp-"));
     try {
-      writeFileSync(join(dir, ".mcp.json"), JSON.stringify({ mcpServers: { knowledge: { type: "stdio", command: "x" } } }));
-      expect(gmailToolPrefixes(dir)).toEqual(["mcp__gmail__"]);
+      writeFileSync(join(dir, ".mcp.json"), JSON.stringify({ mcpServers: { "google-mail": { type: "stdio", command: "x" } } }));
+      expect(gmailToolPrefixes(dir)).toBeNull();
+      // …and a run that called only that server is therefore trusted, not thrown on.
+      nextToolCalls = [{ name: "mcp__google-mail__search_emails" }];
+      expect(await checkEmail(baseWatcher(), dir, "jarvis")).toEqual([]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  test("no botDir ⇒ the default prefix, so the predicate still works", () => {
-    expect(gmailToolPrefixes(undefined)).toEqual(["mcp__gmail__"]);
+  test("a malformed .mcp.json ⇒ null, never a throw", () => {
+    const dir = mkdtempSync(join(tmpdir(), "muninn-email-mcp-"));
+    try {
+      writeFileSync(join(dir, ".mcp.json"), "{ not json at all");
+      expect(gmailToolPrefixes(dir)).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("multiple gmail-like keys ⇒ ANY of them counts", () => {
+    const dir = mkdtempSync(join(tmpdir(), "muninn-email-mcp-"));
+    try {
+      writeFileSync(join(dir, ".mcp.json"), JSON.stringify({ mcpServers: { gmail: {}, "gmail-backup": {} } }));
+      expect(gmailToolPrefixes(dir)?.sort()).toEqual(["mcp__gmail-backup__", "mcp__gmail__"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("no botDir ⇒ null, so a botDir-less caller is never judged", () => {
+    expect(gmailToolPrefixes(undefined)).toBeNull();
   });
 
   test("the throw names what WAS called, so the log says how it failed", async () => {
     nextToolCalls = [{ name: "Bash" }, { name: "Bash" }, { name: "ToolSearch" }];
     // Deduped — 4 Bash calls should not print "Bash, Bash, Bash, Bash".
-    await expect(checkEmail(baseWatcher(), undefined, "jarvis")).rejects.toThrow(/Bash, ToolSearch/);
+    await expect(checkEmail(baseWatcher(), gmailBotDir, "jarvis")).rejects.toThrow(/Bash, ToolSearch/);
   });
 });

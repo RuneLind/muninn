@@ -89,11 +89,20 @@ If nothing worth notifying, return: []`;
   // one turn having called nothing — is caught here instead of being mistaken for a
   // parser degradation. Before that normalization this branch could not see it.
   //
-  const prefixes = gmailToolPrefixes(botDir);
+  // Resolved only when there IS something to judge — a `undefined` toolCalls run
+  // can't fail the check, so reading the config (and possibly warning about it)
+  // would be noise.
+  const prefixes = toolCalls ? gmailToolPrefixes(botDir) : null;
   const reachedGmail = toolCalls?.some(
-    (t) => typeof t.name === "string" && prefixes.some((p) => t.name.startsWith(p)),
+    (t) => typeof t.name === "string" && prefixes?.some((p) => t.name.startsWith(p)),
   );
-  if (toolCalls && !reachedGmail) {
+  // `prefixes === null` means we could not identify which server IS Gmail — same
+  // "can't tell" stance as an undefined toolCalls, and for the same reason: the
+  // alternative is failing closed on no evidence. A bot that renamed the key to
+  // something without "gmail" in it (google-mail, workspace-mail) has a WORKING
+  // Gmail server that we simply cannot name, and hard-failing every healthy tick
+  // there would be the very trap this derivation was written to remove.
+  if (toolCalls && prefixes && !reachedGmail) {
     const called = [...new Set(toolCalls.map((t) => String(t.name)))].join(", ") || "none";
     throw new Error(
       `Email check made no Gmail tool call (${toolCalls.length} tool call(s): ${called}) — ` +
@@ -109,12 +118,10 @@ If nothing worth notifying, return: []`;
   }
 }
 
-/** Fallback when there is no botDir, or its `.mcp.json` is absent/unreadable. */
-const DEFAULT_GMAIL_TOOL_PREFIX = "mcp__gmail__";
-
 /**
  * MCP tool-name prefixes that count as "reached Gmail", derived from the bot's OWN
- * `.mcp.json` rather than hardcoded.
+ * `.mcp.json` — or `null` when we cannot tell which server is Gmail, in which case
+ * the caller must NOT judge the run.
  *
  * A tool is named `mcp__<serverKey>__<tool>`, and serverKey is whatever the bot's
  * config calls the server — "gmail" on every bot that has one today, but bot folders
@@ -122,20 +129,35 @@ const DEFAULT_GMAIL_TOOL_PREFIX = "mcp__gmail__";
  * prefix means a rename there turns every HEALTHY run into an hourly hard failure,
  * with no code change to point at and nothing that would catch it in review.
  *
- * Matching is on the server KEY containing "gmail" (case-insensitive), so `gmail`,
- * `gmail-mcp` and `Gmail` all resolve. A bot with no gmail-ish server keeps the
- * default prefix and warns once: that spawn cannot reach Gmail at all, so the
- * predicate firing every tick is the correct outcome, but the reason should be
- * legible in the log rather than inferred from the thrown message.
+ * Matching is the server KEY containing "gmail" (case-insensitive): `gmail`,
+ * `gmail-mcp` and `Gmail` all resolve. Two known trades, both deliberate:
+ *
+ *  - **ANY match passes.** `{gmail, gmail-backup}` yields two prefixes and a call to
+ *    either counts. Both servers are genuinely on the spawn's tool surface, so a call
+ *    to either is evidence the model reached mail.
+ *  - **The substring can over-match** (`gmail-old` left beside a live server by a
+ *    sloppy sync). A call to the stale server would then read as success. That is a
+ *    narrow false-PASS, versus the false-FAIL of the hardcode it replaces, which
+ *    broke on every rename; the false-fail was the live-fire risk.
+ *
+ * When no key matches we return `null` rather than guessing, because the failure is
+ * asymmetric: a bot that renamed the key to `google-mail` has a WORKING server we
+ * merely cannot name, and throwing on every healthy tick there is the exact trap this
+ * derivation exists to remove. Warns once per botDir so the misconfiguration is
+ * legible in the log instead of inferred from a thrown message.
+ *
+ * NB: this reads the SAME `botDir` that `spawnHaiku` hands to `buildInlineMcpConfig`
+ * / `buildInlineSettings` (`runner.ts` passes `botConfig.dir` to both). A refactor
+ * that lets those two diverge desyncs the predicate from the argv it is judging.
  */
-export function gmailToolPrefixes(botDir?: string): string[] {
-  if (!botDir) return [DEFAULT_GMAIL_TOOL_PREFIX];
+export function gmailToolPrefixes(botDir?: string): string[] | null {
+  if (!botDir) return null;
   const servers = loadRawMcpServers(botDir);
-  if (!servers) return [DEFAULT_GMAIL_TOOL_PREFIX];
+  if (!servers) return null;
   const keys = Object.keys(servers).filter((k) => k.toLowerCase().includes("gmail"));
   if (keys.length === 0) {
     warnNoGmailServerOnce(botDir, Object.keys(servers));
-    return [DEFAULT_GMAIL_TOOL_PREFIX];
+    return null;
   }
   return keys.map((k) => `mcp__${k}__`);
 }
@@ -145,9 +167,10 @@ function warnNoGmailServerOnce(botDir: string, present: string[]): void {
   if (warnedNoGmailServer.has(botDir)) return;
   warnedNoGmailServer.add(botDir);
   log.warn(
-    "No gmail-like MCP server in {botDir} (servers: {present}) — the email checker " +
-      "cannot reach Gmail, so its liveness predicate will fail every run. Fix the " +
-      "bot's .mcp.json, or disable the watcher.",
+    "No gmail-like MCP server key in {botDir} (servers: {present}) — the email " +
+      "checker cannot tell which server is Gmail, so its liveness predicate is " +
+      "DISABLED for this bot and an empty result is trusted as a quiet inbox again. " +
+      "Rename the server key to contain \"gmail\", or disable the watcher.",
     { botDir, present: present.join(", ") || "none" },
   );
 }
