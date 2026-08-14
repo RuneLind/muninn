@@ -747,9 +747,14 @@ type, off the runner's `catch`:
   FIRST failure of a healthy watcher red `stale` rather than amber `warn`. The alert
   says "last completed a run Xh ago", the weaker claim, because `last_run_at` advances
   on failures too.
-- **Activity rows are deduped**: one on the first failure of an episode, one when it
-  escalates, none in between. `X Daily Digest` polls every 5 min, so an undeduped row
-  meant 288 `activity_log` writes/day plus 288 SSE events to every open tab.
+- **Activity rows are keyed on what was RENDERED, not on what was DUE**: one on the
+  first failure of an episode, one when an escalation is delivered, and one EVERY run
+  when an escalation was due but was held by quiet hours or lost to a Telegram error
+  (a broken watcher plus a broken channel is where a fallback surface matters most).
+  Deduped otherwise: the hourly email row would write 24 `activity_log` rows a day —
+  and fan 24 SSE events to every open tab — for one wedged watcher. A FLAPPING
+  watcher still writes one row per failure; each failure resets the streak, so each
+  is genuinely a new episode.
 - **Delivery** (`deliverFailureAlerts`) is Telegram-only, records only the ids it
   actually SENT (a quiet-hours hold or a Telegram error leaves the id unrecorded, so
   it re-emits next run), and saves the message under source **`watcher:health`** —
@@ -762,7 +767,16 @@ type, off the runner's `catch`:
   exactly that and silently broke six of `x.test.ts`'s assertions. Same call
   `runChecker` makes for `WikiCheckers`.
 - **Surface:** `GET /api/watchers` merges both snapshot keys into the one
-  `sourceHealth[]` chip list (run entry sorted first, pane label now "Health").
+  `sourceHealth[]` chip list (run entry sorted first, pane label now "Health"). The
+  merge/cadence/ordering live in the pure `mergeHealthChips`, not inline in the route
+  — the route needs a live DB, so reverting the sort, swapping the spreads, or
+  deleting the run-health read outright each left the whole suite green.
+- **Alert ids are built here, not by `healthAlertId`**: the nag bucket must count
+  from THIS watcher's threshold (dividing by the shared constant made a row that
+  escalates at 1 fire again at 3), and a record whose `lastOkAt` came from the
+  `last_run_at` seed uses the fixed episode `"seed"` — that column advances on every
+  failure, so an id keyed on it changes every run once the snapshot write starts
+  failing, and dedup stops working exactly during a Postgres outage.
 
 ### Skip-forever audit (2026-07-27) — dispositions
 

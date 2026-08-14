@@ -17,11 +17,13 @@ import {
   deliverFailureAlerts,
   handleWatcherFailure,
   runEscalateAfter,
+  effectiveCadenceMs,
+  mergeHealthChips,
   RUN_HEALTH_KEY,
   RUN_HEALTH_ENTRY,
   type FailureNotifyDeps,
 } from "./run-health.ts";
-import { HEALTH_ESCALATE_AFTER, SOURCE_HEALTH_KEY, recordOutcome } from "./source-health.ts";
+import { HEALTH_ESCALATE_AFTER, HEALTH_RE_ESCALATE_EVERY, SOURCE_HEALTH_KEY, recordOutcome } from "./source-health.ts";
 
 const NOW = 1_800_000_000_000;
 const H = 3_600_000;
@@ -178,6 +180,34 @@ describe("markRunHealth", () => {
 
 // ── escalation threshold ─────────────────────────────────────────────
 
+describe("effectiveCadenceMs", () => {
+  test("an hour-gated row runs DAILY however short its interval column says", () => {
+    // The live `X Daily Digest`: interval_ms 300000 AND config.hour 12, so
+    // isScheduledTimeDue lets it run once a day. Reading the column alone gave it a
+    // 3-run (= 3-DAY) escalation threshold and a 24h staleness window that painted
+    // its first failure red — the two defects the threshold and the seed exist to
+    // prevent, surviving on the one row where the column lies.
+    const daily = { intervalMs: 300_000, config: { hour: 12 } };
+    expect(effectiveCadenceMs(daily)).toBe(24 * H);
+    expect(runEscalateAfter(effectiveCadenceMs(daily))).toBe(1);
+  });
+
+  test("an ungated row is its interval", () => {
+    expect(effectiveCadenceMs({ intervalMs: H, config: {} })).toBe(H);
+    expect(effectiveCadenceMs({ intervalMs: H })).toBe(H);
+    // A non-numeric `hour` is not a gate.
+    expect(effectiveCadenceMs({ intervalMs: H, config: { hour: "12" } })).toBe(H);
+  });
+
+  test("markRunHealth uses it — an hour-gated row escalates on the first failure", async () => {
+    const { alerts } = await markRunHealth(
+      watcher({ intervalMs: 300_000, config: { hour: 12 }, lastRunAt: NOW - 24 * H }),
+      "error", NOW, "boom", deps(),
+    );
+    expect(alerts).toHaveLength(1);
+  });
+});
+
 describe("runEscalateAfter", () => {
   test("a daily-or-slower watcher escalates on the FIRST failure", () => {
     // Three runs is ~3h on the hourly email row but THREE WEEKS on a weekly one,
@@ -330,6 +360,43 @@ describe("handleWatcherFailure", () => {
     expect(activityRows[0]!.text).toContain("escalated");
   });
 
+  test("a HELD escalation still renders something — quiet hours must not silence the run", async () => {
+    // Regression: gating the activity row on `alerts.length === 0` meant that past the
+    // threshold, a quiet-hours hold suppressed the row too. quietHours is only ever
+    // true for the run-exempt wiki-committer — the 24h row whose failure mode is the
+    // 2026-07-23 87-page loss — so it failed invisibly on every run inside its window.
+    const { api, sent } = fakeApi();
+    const w = watcher({ type: "wiki-committer", intervalMs: 24 * H, lastRunAt: NOW - 24 * H });
+    const ids = await handleWatcherFailure(api, w, "jarvis", "off default branch", true, deps(), NOW);
+    expect(ids).toEqual([]);
+    expect(sent).toHaveLength(0);
+    expect(activityRows).toHaveLength(1);
+    expect(activityRows[0]!.text).toContain("escalation not delivered");
+  });
+
+  test("a FAILED send still renders something, every run — the deduping channel is what is broken", async () => {
+    const { api } = fakeApi("hard-error");
+    const w = watcher({ intervalMs: 24 * H, lastRunAt: NOW - 24 * H });
+    for (let run = 1; run <= 3; run++) {
+      await handleWatcherFailure(api, w, "jarvis", "boom", false, deps(), NOW + run * 24 * H);
+    }
+    // A broken watcher AND a broken Telegram channel is exactly where a fallback
+    // surface matters; one stale row from hours ago is not one.
+    expect(activityRows).toHaveLength(3);
+    expect(activityRows[2]!.text).toContain("3 in a row");
+  });
+
+  test("a delivery whose activity push throws does NOT re-send next run", async () => {
+    // Nothing may throw after the irreversible send, or the delivered id is lost and
+    // the same escalation ships again.
+    const { api, sent } = fakeApi();
+    const w = watcher({ intervalMs: 24 * H, lastRunAt: NOW - 24 * H });
+    const throwing = deps({ pushActivity: () => { throw new Error("activity log down"); } });
+    const ids = await handleWatcherFailure(api, w, "jarvis", "boom", false, throwing, NOW);
+    expect(sent).toHaveLength(1);
+    expect(ids).toHaveLength(1);
+  });
+
   test("NEVER throws — the caller still has to advance last_run_at", async () => {
     const { api } = fakeApi("hard-error");
     const w = watcher({ intervalMs: 7 * 24 * H, lastRunAt: NOW - 7 * 24 * H });
@@ -344,5 +411,64 @@ describe("handleWatcherFailure", () => {
     const ids = await handleWatcherFailure(api, watcher(), "jarvis", "boom", false, deps(), NOW);
     expect(ids).toEqual([]);
     expect(activityRows).toHaveLength(1);
+  });
+});
+
+// ── alert-id episode + nag bucket ────────────────────────────────────
+
+describe("alert id", () => {
+  test("a seeded episode is STABLE even when the snapshot write keeps failing", async () => {
+    // The seed is re-derived from `last_run_at`, which the runner advances on every
+    // failure — so if the write fails the record is never found, the seed re-fires
+    // with a newer timestamp, and an id keyed on it changes every run. That turned a
+    // Postgres outage (watchers throwing AND snapshots failing, i.e. the same
+    // outage) into one Telegram alert per run.
+    snapshotSetThrows = true;
+    const ids: string[] = [];
+    for (let run = 1; run <= 4; run++) {
+      const w = watcher({ intervalMs: 7 * 24 * H, lastRunAt: NOW + run * 24 * H });
+      const { alerts } = await markRunHealth(w, "error", NOW + run * 24 * H, "boom", deps());
+      ids.push(alerts[0]!.id);
+    }
+    expect(new Set(ids).size).toBe(1);
+  });
+
+  test("the nag bucket counts from THIS watcher's threshold", () => {
+    // healthAlertId divides by the shared HEALTH_ESCALATE_AFTER, so on a row
+    // escalating at 1 the bucket ran -1, -1, 0, 0… — crossing zero at consecutive 3
+    // and firing an undesigned second alert two runs after the first.
+    const failing = (n: number) => ({ outcome: "error" as const, at: NOW, consecutive: n, lastOkAt: NOW - H });
+    const idAt = (n: number) => buildRunHealthAlert("W", failing(n), NOW, 1)[0]!.id;
+    expect(idAt(1)).toBe(idAt(2));
+    expect(idAt(2)).toBe(idAt(HEALTH_RE_ESCALATE_EVERY));
+    expect(idAt(HEALTH_RE_ESCALATE_EVERY + 1)).not.toBe(idAt(1));
+  });
+});
+
+// ── dashboard chip list ──────────────────────────────────────────────
+
+describe("mergeHealthChips", () => {
+  const ok = { outcome: "ok" as const, at: NOW, consecutive: 0, lastOkAt: NOW };
+  const bad = { outcome: "error" as const, at: NOW, consecutive: 3, lastOkAt: NOW - H };
+  const hourly = { intervalMs: H, config: {} };
+
+  test("run health is rendered, and FIRST", () => {
+    const chips = mergeHealthChips({ [RUN_HEALTH_ENTRY]: bad }, { "a:first": ok, "z:last": ok }, hourly, NOW);
+    expect(chips.map((c) => c.key)).toEqual([RUN_HEALTH_ENTRY, "a:first", "z:last"]);
+  });
+
+  test("per-source chips survive on their own, and so does run health on its own", () => {
+    expect(mergeHealthChips(null, { "x:digest": ok }, hourly, NOW).map((c) => c.key)).toEqual(["x:digest"]);
+    expect(mergeHealthChips({ [RUN_HEALTH_ENTRY]: bad }, null, hourly, NOW).map((c) => c.key)).toEqual([RUN_HEALTH_ENTRY]);
+    expect(mergeHealthChips(null, null, hourly, NOW)).toEqual([]);
+    expect(mergeHealthChips("garbage", { "x:digest": ok }, hourly, NOW).map((c) => c.key)).toEqual(["x:digest"]);
+  });
+
+  test("levels use the CADENCE, so an hour-gated row is not stale after one day", () => {
+    const dayOld = { outcome: "error" as const, at: NOW, consecutive: 1, lastOkAt: NOW - 25 * H };
+    const gated = { intervalMs: 300_000, config: { hour: 12 } };
+    // On the raw 5-minute column the window is 24h and this reads `stale` — a red chip
+    // for a watcher that ran on schedule this morning.
+    expect(mergeHealthChips({ [RUN_HEALTH_ENTRY]: dayOld }, null, gated, NOW)[0]!.level).toBe("warn");
   });
 });

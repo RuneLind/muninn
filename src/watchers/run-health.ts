@@ -42,8 +42,11 @@ import { activityLog } from "../observability/activity-log.ts";
 import { formatAlerts } from "./format-alerts.ts";
 import {
   recordOutcome,
-  healthAlertId,
+  healthLevel,
+  isSourceHealthMap,
   HEALTH_ESCALATE_AFTER,
+  HEALTH_RE_ESCALATE_EVERY,
+  type HealthLevel,
   type SourceHealth,
   type SourceOutcome,
 } from "./source-health.ts";
@@ -77,8 +80,22 @@ export const RUN_HEALTH_ENTRY = "watcher:run";
  */
 export const SLOW_WATCHER_INTERVAL_MS = 24 * 3_600_000;
 
-export function runEscalateAfter(intervalMs: number): number {
-  return intervalMs >= SLOW_WATCHER_INTERVAL_MS ? 1 : HEALTH_ESCALATE_AFTER;
+/**
+ * How often this watcher can ACTUALLY run — which is not `intervalMs` whenever
+ * `config.hour` is set, because `isScheduledTimeDue` then gates it to once a day.
+ * `X Daily Digest` carries `interval_ms: 300000` AND `config.hour: 12`: reading the
+ * column alone gives it a 3-run (=3-day) escalation threshold and a 24h staleness
+ * window that paints its FIRST failure red — the two exact defects the threshold and
+ * the `lastOkAt` seed exist to prevent, surviving on the one row where the column
+ * lies about the cadence.
+ */
+export function effectiveCadenceMs(w: { intervalMs: number; config?: unknown }): number {
+  const hour = (w.config as { hour?: unknown } | undefined)?.hour;
+  return typeof hour === "number" ? Math.max(w.intervalMs, SLOW_WATCHER_INTERVAL_MS) : w.intervalMs;
+}
+
+export function runEscalateAfter(cadenceMs: number): number {
+  return cadenceMs >= SLOW_WATCHER_INTERVAL_MS ? 1 : HEALTH_ESCALATE_AFTER;
 }
 
 export interface RunHealthDeps {
@@ -124,11 +141,40 @@ export async function loadRunHealth(
  * what is not fine, and the user's real question — *am I missing email?* — needs
  * answering explicitly.
  */
+/**
+ * Stable alert id for one unhealthy EPISODE and nag bucket — source-health's shape
+ * (`watcher-health:<watcher>:<key>:<episode>:<bucket>`) with two corrections it
+ * cannot make from over there.
+ *
+ * The BUCKET counts from this watcher's own threshold. `healthAlertId` divides by
+ * the shared `HEALTH_ESCALATE_AFTER`, so on a row escalating at 1 the bucket runs
+ * -1, -1, 0, 0… — crossing zero at consecutive 3 and firing an undesigned second
+ * alert two runs after the first (measured: week 1, week 3, week 27).
+ *
+ * The EPISODE is `"seed"` for a record whose `lastOkAt` came from the `last_run_at`
+ * seed rather than a real `ok` mark. That seed is re-derived from a column the runner
+ * ADVANCES on every failure, so if the snapshot write keeps failing the discriminator
+ * moves every run, the id is never stable, and `lastNotifiedIds` dedups nothing —
+ * measured as one Telegram alert per run under a snapshot-write outage, where before
+ * the seed there were none.
+ */
+export function runHealthAlertId(
+  watcherName: string,
+  h: SourceHealth,
+  escalateAfter: number,
+  seeded: boolean,
+): string {
+  const episode = h.lastOkAt == null ? "never" : seeded ? "seed" : h.lastOkAt;
+  const bucket = Math.floor((h.consecutive - escalateAfter) / HEALTH_RE_ESCALATE_EVERY);
+  return `watcher-health:${watcherName}:${RUN_HEALTH_ENTRY}:${episode}:${bucket}`;
+}
+
 export function buildRunHealthAlert(
   watcherName: string,
   h: SourceHealth,
   now: number,
   escalateAfter: number = HEALTH_ESCALATE_AFTER,
+  seeded = false,
 ): WatcherAlert[] {
   if (h.outcome === "ok" || h.consecutive < escalateAfter) return [];
   const hours = h.lastOkAt == null ? null : Math.round((now - h.lastOkAt) / 3_600_000);
@@ -141,14 +187,14 @@ export function buildRunHealthAlert(
   const runs = h.consecutive === 1 ? "1 run" : `${h.consecutive} runs in a row`;
   return [
     {
-      id: healthAlertId(watcherName, RUN_HEALTH_ENTRY, h),
+      id: runHealthAlertId(watcherName, h, escalateAfter, seeded),
       source: "watcher-health",
       sender: "Watcher health",
       subject: `${watcherName}: ${h.consecutive} run(s) failed`,
       summary:
         `⚠️ **Watcher failing** — \`${watcherName}\` has failed **${runs}** ` +
         `and ${since}.` +
-        (h.detail ? `\n_${h.detail}_` : "") +
+        (h.detail ? `\n${h.detail}` : "") +
         `\nIt is still scheduled and still retrying — but assume anything it watches has gone unreported since then.`,
       urgency: "high",
     },
@@ -171,7 +217,7 @@ export interface MarkRunHealthResult {
  * `catch` block it is called from.
  */
 export async function markRunHealth(
-  watcher: Pick<Watcher, "id" | "name" | "intervalMs" | "lastRunAt">,
+  watcher: Pick<Watcher, "id" | "name" | "intervalMs" | "lastRunAt" | "config">,
   outcome: SourceOutcome,
   now: number = Date.now(),
   detail?: string,
@@ -185,11 +231,18 @@ export async function markRunHealth(
   // than amber `warn`. The column is the only evidence that exists before this
   // module has ever run; the alert's wording is chosen to match exactly what it
   // attests (a run completed, not a run succeeded).
+  let seeded = false;
   if (!prior && watcher.lastRunAt != null) {
+    // Only `consecutive` and `lastOkAt` are read back out of this by `recordOutcome`;
+    // the `outcome` is inert and deliberately claims nothing (the surrounding comment
+    // is explicit that a completed run is not a successful one).
     prior = { outcome: "ok", at: watcher.lastRunAt, consecutive: 0, lastOkAt: watcher.lastRunAt };
+    seeded = true;
   }
   const next = recordOutcome(prior, outcome, now, detail);
-  const alerts = buildRunHealthAlert(watcher.name, next, now, runEscalateAfter(watcher.intervalMs));
+  const alerts = buildRunHealthAlert(
+    watcher.name, next, now, runEscalateAfter(effectiveCadenceMs(watcher)), seeded,
+  );
   if (alerts.length > 0) {
     log.error("Watcher \"{name}\" has failed {n} consecutive run(s): {detail}", {
       name: watcher.name,
@@ -206,6 +259,45 @@ export async function markRunHealth(
     });
   }
   return { alerts, health: next };
+}
+
+export interface HealthChip extends SourceHealth {
+  key: string;
+  level: HealthLevel;
+}
+
+/**
+ * The chip list `GET /api/watchers` renders: the per-source map and the run-level
+ * record merged into one list, run entry FIRST.
+ *
+ * Pure and here rather than inline in the route, because the route is only reachable
+ * with a live Postgres — so every decision in it was mutation-survivable. Measured:
+ * reverting the sort, swapping the two spreads, and DELETING the run-health read
+ * outright (i.e. removing the chip this whole feature renders) each left the entire
+ * suite green.
+ *
+ * Cadence, not `intervalMs`: `healthLevel`'s staleness window is derived from it, and
+ * an hour-gated row's column understates its real period by orders of magnitude —
+ * which paints a chip red `stale` on a watcher that ran on schedule this morning.
+ */
+export function mergeHealthChips(
+  runSnap: unknown,
+  sourceSnap: unknown,
+  watcher: { intervalMs: number; config?: unknown },
+  now: number,
+): HealthChip[] {
+  const merged: Record<string, SourceHealth> = {
+    ...(isSourceHealthMap(runSnap) ? runSnap : {}),
+    // Source entries win a key collision, which is why the run entry is namespaced —
+    // an un-namespaced `run` key could be shadowed by a source of the same name.
+    ...(isSourceHealthMap(sourceSnap) ? sourceSnap : {}),
+  };
+  const cadence = effectiveCadenceMs(watcher);
+  return Object.entries(merged)
+    .map(([key, h]) => ({ key, ...h, level: healthLevel(h, cadence, now) }))
+    // Run health first: it is the one entry that says whether the watcher ran at all,
+    // so it must not sort alphabetically into the middle of the per-source chips.
+    .sort((a, b) => (a.key === RUN_HEALTH_ENTRY ? -1 : b.key === RUN_HEALTH_ENTRY ? 1 : a.key.localeCompare(b.key)));
 }
 
 export interface FailureNotifyDeps extends RunHealthDeps {
@@ -292,11 +384,18 @@ export async function deliverFailureAlerts(
     log.error("Failed to persist watcher failure escalation: {error}", { botName: tag, name: watcher.name, error: saveErr instanceof Error ? saveErr.message : String(saveErr) });
   }
 
-  deps.pushActivity(
-    "error",
-    `Watcher "${watcher.name}" escalated: ${fresh.length} failure alert(s) sent`,
-    { userId: watcher.userId, botName: tag, metadata: { totalMs: 0, watcherName: watcher.name, watcherId: watcher.id } },
-  );
+  // Guarded for the same reason the save above is: the user has ALREADY been told,
+  // and anything that throws here un-records the delivery and re-sends next run.
+  // (Measured with a throwing `pushActivity`: two Telegram messages for one episode.)
+  try {
+    deps.pushActivity(
+      "error",
+      `Watcher "${watcher.name}" escalated: ${fresh.length} failure alert(s) sent`,
+      { userId: watcher.userId, botName: tag, metadata: { totalMs: 0, watcherName: watcher.name, watcherId: watcher.id } },
+    );
+  } catch (activityErr) {
+    log.error("Failed to log watcher failure escalation: {error}", { botName: tag, name: watcher.name, error: activityErr instanceof Error ? activityErr.message : String(activityErr) });
+  }
   log.info("Watcher \"{name}\" failure escalation sent to user {userId}", { botName: tag, name: watcher.name, userId: watcher.userId });
   return fresh.map((a) => a.id);
 }
@@ -326,21 +425,53 @@ export async function handleWatcherFailure(
 ): Promise<string[]> {
   try {
     const { alerts, health } = await markRunHealth(watcher, "error", now, errText, deps);
-    // An activity row on the FIRST failure of an episode, and on the escalating
-    // runs (which push their own row from `deliverFailureAlerts`). NOT on every
-    // failure: `X Daily Digest` polls every 5 minutes, so a wedged row would push
-    // 288 error rows a day into `activity_log` AND fan 288 SSE events out to every
-    // open dashboard tab, indefinitely. The Telegram side is carefully deduped;
-    // this side had no dedup at all, which is backwards.
-    if (health.consecutive === 1 && alerts.length === 0) {
+
+    let delivered: string[] = [];
+    let escalationRendered = false;
+    if (alerts.length > 0) {
+      try {
+        delivered = await deliverFailureAlerts(api, watcher, tag, alerts, quietHours, deps);
+        // An escalation that was HELD (quiet hours) or LOST (Telegram error) renders
+        // nothing and records nothing — it is not a surface.
+        escalationRendered = delivered.length > 0;
+      } catch (sendErr) {
+        log.error("Watcher \"{name}\": failure escalation could not be sent: {error}", {
+          botName: tag,
+          name: watcher.name,
+          error: sendErr instanceof Error ? sendErr.message : String(sendErr),
+        });
+      }
+    }
+
+    // The activity row is keyed on what was RENDERED, not on what was DUE. Gating it
+    // on `alerts.length === 0` was a regression with a nasty shape: past the
+    // threshold, a quiet-hours hold or a dead Telegram channel suppressed the row too
+    // — so a broken watcher AND a broken notification channel, the state where a
+    // fallback surface matters most, showed nothing anywhere but `logs/`. The
+    // wiki-committer (the only quiet-hours-exempt type, and the 87-page-loss row) hit
+    // that on every failure inside its quiet window.
+    //
+    // Still deduped for the ordinary case: a continuously wedged watcher writes ONE
+    // row per episode rather than one per run — the hourly email row is the worst
+    // configured case at 24 rows a day, each fanned as an SSE event to every open
+    // dashboard tab. (A FLAPPING watcher does write one per failure: each failure
+    // resets the streak, so each is genuinely a new episode.)
+    if (!escalationRendered && alerts.length > 0) {
+      // An escalation was DUE and nothing went out. Say so EVERY run and say which
+      // it was, because the channel the dedup relies on is precisely what is broken.
+      deps.pushActivity(
+        "error",
+        `Watcher "${watcher.name}" failed (${health.consecutive} in a row, escalation not delivered): ${errText}`,
+        { userId: watcher.userId, botName: tag, metadata: { totalMs: 0, watcherName: watcher.name, watcherId: watcher.id } },
+      );
+    } else if (!escalationRendered && health.consecutive === 1) {
       deps.pushActivity(
         "error",
         `Watcher "${watcher.name}" failed: ${errText}`,
         { userId: watcher.userId, botName: tag, metadata: { totalMs: 0, watcherName: watcher.name, watcherId: watcher.id } },
       );
     }
-    if (alerts.length === 0) return [];
-    return await deliverFailureAlerts(api, watcher, tag, alerts, quietHours, deps);
+    return delivered;
   } catch (err) {
     log.error("Watcher \"{name}\": failure notification failed: {error}", {
       botName: tag,

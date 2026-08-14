@@ -20,8 +20,8 @@ import {
   forceRunWatcher,
   getWatcherSnapshot,
 } from "../../db/watchers.ts";
-import { SOURCE_HEALTH_KEY, healthLevel, isSourceHealthMap } from "../../watchers/source-health.ts";
-import { RUN_HEALTH_KEY, RUN_HEALTH_ENTRY } from "../../watchers/run-health.ts";
+import { SOURCE_HEALTH_KEY } from "../../watchers/source-health.ts";
+import { RUN_HEALTH_KEY, mergeHealthChips } from "../../watchers/run-health.ts";
 import { getScheduledTaskById } from "../../db/scheduled-tasks.ts";
 import { updateScheduledTask } from "../../db/scheduled-tasks.ts";
 import { getActivityForJob } from "../../db/activity.ts";
@@ -311,25 +311,16 @@ export function registerDataRoutes(app: Hono): void {
       const withHealth = await Promise.all(
         watchers.map(async (w) => {
           try {
-            // Two snapshot keys, one chip list. `run:health` (src/watchers/run-health.ts)
-            // is whether the RUN itself succeeded — the level above per-source, and the
-            // only one that exists for a checker that throws rather than returning.
+            // Two snapshot keys, one chip list — see `mergeHealthChips`, which owns
+            // the merge, the cadence and the ordering because this route is only
+            // reachable with a live DB and every decision in it was otherwise
+            // pinned by nothing.
             const [sourceSnap, runSnap] = await Promise.all([
               getWatcherSnapshot(w.id, SOURCE_HEALTH_KEY),
               getWatcherSnapshot(w.id, RUN_HEALTH_KEY),
             ]);
-            const merged = {
-              ...(isSourceHealthMap(runSnap) ? runSnap : {}),
-              ...(isSourceHealthMap(sourceSnap) ? sourceSnap : {}),
-            };
-            if (Object.keys(merged).length === 0) return w;
-            const now = Date.now();
-            const sourceHealth = Object.entries(merged)
-              .map(([key, h]) => ({ key, ...h, level: healthLevel(h, w.intervalMs, now) }))
-              // Run health first — it is the one entry that says whether the watcher
-              // ran at all, so it must not sort alphabetically into the middle of the
-              // per-source chips.
-              .sort((a, b) => (a.key === RUN_HEALTH_ENTRY ? -1 : b.key === RUN_HEALTH_ENTRY ? 1 : a.key.localeCompare(b.key)));
+            const sourceHealth = mergeHealthChips(runSnap, sourceSnap, w, Date.now());
+            if (sourceHealth.length === 0) return w;
             return { ...w, sourceHealth };
           } catch {
             return w;
