@@ -2,6 +2,7 @@ services:
   postgres:
     image: pgvector/pgvector:pg17
     container_name: muninn-postgres
+    restart: unless-stopped
     ports:
       - "5435:5432"
     environment:
