@@ -4,7 +4,7 @@ import type { Watcher, WatcherAlert } from "../types.ts";
 import { getWatchersDueNow, updateWatcherLastRun, markWatcherSuccess } from "../db/watchers.ts";
 import { isQuietHours } from "./quiet-hours.ts";
 import { computeWatcherTimeoutMs } from "./timeout.ts";
-import { checkEmail, type EmailCoverage } from "./email.ts";
+import { checkEmail, type EmailCheckResult } from "./email.ts";
 import { checkNews } from "./news.ts";
 import { checkX } from "./x.ts";
 import { checkAnthropic } from "./anthropic.ts";
@@ -35,22 +35,7 @@ import { getLog } from "../logging.ts";
 
 const log = getLog("watchers");
 
-/**
- * Record a checker's coverage watermark, non-fatally.
- *
- * The alerts are already delivered by the time this runs, so failing the run
- * over a bookkeeping UPDATE would turn a degraded state into a broken one. The
- * case worth naming: a box running this code before `bun run db:migrate` has
- * applied 069 has no `last_success_at` column, so every call throws. Swallowing
- * it degrades the email checker to the pre-PR date-only query — the old
- * behaviour, not a new failure — and the warn says which.
- *
- * Kept OUT of `updateWatcherLastRun`, which every watcher of every type calls on
- * every outcome: folding it in there meant an unmigrated box threw on all three
- * call sites, so `last_run_at` never advanced, every enabled watcher was
- * re-selected on every 60s tick, and the hourly email row spawned Haiku 60× an
- * hour.
- */
+/** Injected so `finishWatcherRun`'s watermark write has a unit-test seam. */
 export interface FinishRunDeps {
   updateWatcherLastRun: typeof updateWatcherLastRun;
   markWatcherSuccess: typeof markWatcherSuccess;
@@ -72,29 +57,43 @@ const DEFAULT_FINISH_DEPS: FinishRunDeps = { updateWatcherLastRun, markWatcherSu
  * Callers must only reach this AFTER the alerts are out: the watermark says
  * "everything in that window has been dealt with", and the next query steps over
  * everything older.
+ *
+ * The write is non-fatal — the alerts are already delivered, so failing the run
+ * over a bookkeeping UPDATE would turn a degraded state into a broken one. That
+ * matters most on a box running this before `bun run db:migrate` applied 069:
+ * no column, so every call throws, and swallowing degrades the email checker to
+ * the pre-PR date-only query rather than breaking it. It is also why the write
+ * is NOT folded into `updateWatcherLastRun`, which every watcher of every type
+ * calls on every outcome — folded in, an unmigrated box threw on all three of
+ * its call sites, `last_run_at` never advanced, and every enabled watcher was
+ * re-dispatched on every 60s tick.
  */
+/**
+ * The watermark a completed run may record.
+ *
+ * `quietHoursSuppressed` is a RUN-EXEMPT type whose user-facing send was
+ * deliberately skipped (`wiki-committer` today). Coverage must not be claimed
+ * there: the checker ran, but the alerts did not go out, so `finishWatcherRun`'s
+ * "only after the alerts are out" contract is not met. Inert while only the
+ * email checker claims coverage and email is not exempt — but it is the one live
+ * path that would otherwise re-open the deliver-then-record ordering the moment a
+ * coverage-claiming checker joins QUIET_HOURS_RUN_EXEMPT.
+ */
+export function coverageToRecord(coveredFrom: Date | null, quietHoursSuppressed: boolean): Date | null {
+  return quietHoursSuppressed ? null : coveredFrom;
+}
+
 export async function finishWatcherRun(
   watcherId: string,
   notifiedIds: string[],
-  coverage: EmailCoverage,
+  coveredFrom: Date | null,
   deps: FinishRunDeps = DEFAULT_FINISH_DEPS,
 ): Promise<void> {
   await deps.updateWatcherLastRun(watcherId, notifiedIds);
-  if (!coverage.at) return;
+  if (!coveredFrom) return;
   try {
-    await deps.markWatcherSuccess(watcherId, coverage.at);
+    await deps.markWatcherSuccess(watcherId, coveredFrom);
   } catch (err) {
-    // Non-fatal: the alerts are already delivered, so failing the run over a
-    // bookkeeping UPDATE would turn a degraded state into a broken one. The case
-    // worth naming is a box running this before `bun run db:migrate` applied 069
-    // — no column, so every call throws. Swallowing degrades the email checker to
-    // the pre-PR date-only query (the old behaviour, not a new failure).
-    //
-    // This is also why the watermark is NOT folded into `updateWatcherLastRun`,
-    // which every watcher of every type calls on every outcome: folded in, an
-    // unmigrated box threw on all three of its call sites, so `last_run_at` never
-    // advanced, every enabled watcher was re-selected on every 60s tick, and the
-    // hourly email row spawned Haiku 60× an hour.
     log.warn(
       "Could not record watcher success watermark ({error}) — the email checker's next tick falls back to " +
         "the date-only Gmail query (the whole day's unread pile). If this says the last_success_at column " +
@@ -515,13 +514,15 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       // Key the guard on the RAW checker promise, created BEFORE the timeout wrap
       // and released in its OWN .finally — keying the timeout-raced promise would
       // free the slot while an orphaned checker keeps running.
-      // Filled in by the checker when the run demonstrably covered its window.
-      // Consumed AFTER delivery below — see `markWatcherSuccessSafely`.
-      const coverage: EmailCoverage = {};
-      const raw = runChecker(watcher, botConfig, telemetry, DEFAULT_WIKI_CHECKERS, coverage);
+      const raw = runChecker(watcher, botConfig, telemetry);
       void raw.finally(() => releaseChecker(watcher.id, claim.token));
 
-      const alerts = await withWatcherTimeout(
+      // `coveredFrom` is the checker's own claim that it demonstrably covered
+      // its query window; it is consumed AFTER delivery below. Destructured from
+      // the return value rather than handed in as a mutable out-param, so that
+      // dropping it anywhere in the chain is a compile error rather than a
+      // silently inert feature.
+      const { alerts, coveredFrom } = await withWatcherTimeout(
         raw,
         watcher.name,
         timeoutMs,
@@ -643,7 +644,7 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       // recorded in `lastNotifiedIds`, and the next tick's narrower window
       // stepped straight past them. Unread mail is re-offered by nothing else,
       // so that loss is permanent.
-      await finishWatcherRun(watcher.id, updatedIds, coverage);
+      await finishWatcherRun(watcher.id, updatedIds, coverageToRecord(coveredFrom, quietHours));
       // Token totals from the checker's spawnHaiku call(s) — stamped onto the
       // span (read back into Recent via getRecentAgentTraces off the childless
       // watcher span's OWN attributes) and onto the Running/completed card.
@@ -792,11 +793,7 @@ export async function runChecker(
   botConfig: BotConfig,
   telemetry?: HaikuTelemetry,
   checkers: WikiCheckers = DEFAULT_WIKI_CHECKERS,
-  // Out-param, email only today. Threaded through rather than returned because
-  // this signature is shared by every checker and the runner needs coverage even
-  // for a run whose delivery subsequently fails.
-  coverage?: EmailCoverage,
-): Promise<WatcherAlert[]> {
+): Promise<EmailCheckResult> {
   // The bot folder is no longer a cwd — it is where a checker's MCP servers and
   // tool permissions are declared (`--mcp-config` / `--settings`). Only the email
   // watcher needs them (Gmail), so only it is handed the dir.
@@ -814,11 +811,21 @@ export async function runChecker(
       name: watcher.name,
       reason: WIKI_READONLY_REASON,
     });
-    return [];
+    return { alerts: [], coveredFrom: null };
   }
+  return { alerts: await dispatchChecker(watcher, botConfig, botName, telemetry, checkers), coveredFrom: null };
+}
+
+/** The per-type dispatch. Only `email` reports coverage, so it is handled by
+ *  {@link runChecker} directly and never reaches here. */
+async function dispatchChecker(
+  watcher: Watcher,
+  botConfig: BotConfig,
+  botName: string,
+  telemetry: HaikuTelemetry | undefined,
+  checkers: WikiCheckers,
+): Promise<WatcherAlert[]> {
   switch (watcher.type) {
-    case "email":
-      return await checkEmail(watcher, botConfig.dir, botName, telemetry, coverage);
     case "news":
       return await checkNews(watcher);
     case "x":

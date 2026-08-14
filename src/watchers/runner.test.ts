@@ -4,6 +4,7 @@ import { __setWikiReadonlyForTest } from "../wiki/readonly.ts";
 import {
   runChecker,
   finishWatcherRun,
+  coverageToRecord,
   contentHash,
   extractProperNouns,
   formatAlerts,
@@ -582,6 +583,23 @@ const readonlyWatcher = (type: string): Watcher => ({
 });
 const fakeBot = { name: "jarvis", dir: "/nonexistent", persona: "", telegramAllowedUserIds: [], slackAllowedUserIds: [] } as any;
 
+describe("coverageToRecord", () => {
+  const at = new Date(1_700_000_000_000);
+
+  test("passes the checker's coverage through on a normal run", () => {
+    expect(coverageToRecord(at, false)).toBe(at);
+  });
+
+  test("drops coverage when quiet hours suppressed the send", () => {
+    // The alerts did not go out, so the window was not dealt with.
+    expect(coverageToRecord(at, true)).toBeNull();
+  });
+
+  test("stays null when the checker claimed nothing", () => {
+    expect(coverageToRecord(null, false)).toBeNull();
+  });
+});
+
 describe("finishWatcherRun", () => {
   // The watermark write has no other unit-testable seam: runWatchers is not
   // exercised by this file, and this chunk deliberately avoids mock.module. Deps
@@ -599,14 +617,14 @@ describe("finishWatcherRun", () => {
 
   test("always advances last_run_at", async () => {
     const { calls, d } = deps();
-    await finishWatcherRun("w1", ["a"], {}, d);
+    await finishWatcherRun("w1", ["a"], null, d);
     expect(calls.lastRun).toEqual([["w1", ["a"]]]);
   });
 
   test("does NOT write the watermark when the checker claimed no coverage", async () => {
     // The quiet-hours skip and every failed/unjudgeable run land here.
     const { calls, d } = deps();
-    await finishWatcherRun("w1", ["a"], {}, d);
+    await finishWatcherRun("w1", ["a"], null, d);
     expect(calls.marks).toEqual([]);
   });
 
@@ -615,7 +633,7 @@ describe("finishWatcherRun", () => {
     // NULL forever and the whole feature dead with the suite green.
     const at = new Date(1_700_000_000_000);
     const { calls, d } = deps();
-    await finishWatcherRun("w1", ["a"], { at }, d);
+    await finishWatcherRun("w1", ["a"], at, d);
     expect(calls.marks).toEqual([["w1", at]]);
   });
 
@@ -623,7 +641,7 @@ describe("finishWatcherRun", () => {
     // Kills "write now() instead" — the anchor must stay at check ENTRY.
     const at = new Date(1_700_000_000_000);
     const { calls, d } = deps();
-    await finishWatcherRun("w1", [], { at }, d);
+    await finishWatcherRun("w1", [], at, d);
     expect(calls.marks[0]![1].getTime()).toBe(at.getTime());
   });
 
@@ -632,7 +650,7 @@ describe("finishWatcherRun", () => {
     // are already delivered by this point, so it must degrade to the date-only
     // query rather than turning a degraded state into a broken one.
     const { calls, d } = deps(async () => { throw new Error('column "last_success_at" does not exist'); });
-    await expect(finishWatcherRun("w1", ["a"], { at: new Date() }, d)).resolves.toBeUndefined();
+    await expect(finishWatcherRun("w1", ["a"], new Date(), d)).resolves.toBeUndefined();
     expect(calls.lastRun).toHaveLength(1);
   });
 });
@@ -646,17 +664,17 @@ describe("runChecker — wiki-readonly guard", () => {
   test("a readonly instance never reaches the wiki-DRAFTING checkers", async () => {
     __setWikiReadonlyForTest(true);
     const { calls, checkers } = wikiCheckerSpies();
-    expect(await runChecker(readonlyWatcher("wiki-gardener"), fakeBot, undefined, checkers)).toEqual([]);
-    expect(await runChecker(readonlyWatcher("consolidation-gardener"), fakeBot, undefined, checkers)).toEqual([]);
+    expect((await runChecker(readonlyWatcher("wiki-gardener"), fakeBot, undefined, checkers)).alerts).toEqual([]);
+    expect((await runChecker(readonlyWatcher("consolidation-gardener"), fakeBot, undefined, checkers)).alerts).toEqual([]);
     expect(calls).toEqual([]);
   });
 
   test("the write owner still runs them — the guard is the FLAG, not the type", async () => {
     __setWikiReadonlyForTest(false);
     const { calls, alertsFrom, checkers } = wikiCheckerSpies();
-    expect(await runChecker(readonlyWatcher("wiki-gardener"), fakeBot, undefined, checkers))
+    expect((await runChecker(readonlyWatcher("wiki-gardener"), fakeBot, undefined, checkers)).alerts)
       .toEqual(alertsFrom("wiki-gardener"));
-    expect(await runChecker(readonlyWatcher("consolidation-gardener"), fakeBot, undefined, checkers))
+    expect((await runChecker(readonlyWatcher("consolidation-gardener"), fakeBot, undefined, checkers)).alerts)
       .toEqual(alertsFrom("consolidation-gardener"));
     expect(calls).toEqual(["wiki-gardener", "consolidation-gardener"]);
   });
@@ -664,9 +682,9 @@ describe("runChecker — wiki-readonly guard", () => {
   test("the report-only linter and the git committer run on a readonly instance too", async () => {
     __setWikiReadonlyForTest(true);
     const { calls, alertsFrom, checkers } = wikiCheckerSpies();
-    expect(await runChecker(readonlyWatcher("wiki-linter"), fakeBot, undefined, checkers))
+    expect((await runChecker(readonlyWatcher("wiki-linter"), fakeBot, undefined, checkers)).alerts)
       .toEqual(alertsFrom("wiki-linter"));
-    expect(await runChecker(readonlyWatcher("wiki-committer"), fakeBot, undefined, checkers))
+    expect((await runChecker(readonlyWatcher("wiki-committer"), fakeBot, undefined, checkers)).alerts)
       .toEqual(alertsFrom("wiki-committer"));
     expect(calls).toEqual(["wiki-linter", "wiki-committer"]);
   });

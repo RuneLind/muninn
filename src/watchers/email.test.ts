@@ -4,6 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Watcher } from "../types.ts";
 
+// buildGmailQuery takes an explicit clock now (the shared-clock invariant with
+// the coverage anchor); these cases pass no watermark, so the value is inert.
+const NOW_FIXED = Date.UTC(2026, 0, 15, 12, 0, 0);
+
 // --- Module mocks (registered before the dynamic import below) ---
 // checkEmail spawns Haiku (Gmail MCP) and loads the interest profile. Both are
 // mocked so the gate assembles + runs without a real `claude -p` spawn or a live
@@ -73,6 +77,8 @@ const {
   EMAIL_QUERY_OVERLAP_MS,
   EMAIL_MAX_LOOKBACK_MS,
   emailLookbackClampMs,
+  emailClampWarning,
+  EMAIL_CLAMP_WARN_MIN_MS,
   buildEmailPrompt,
   DEFAULT_EMAIL_PROMPT,
   checkEmail,
@@ -88,11 +94,11 @@ describe("buildGmailQuery (success-watermark window)", () => {
   const NOW = SINCE + 3_600_000; // one tick later, so the 24h clamp is not in play
 
   test("always includes is:unread", () => {
-    expect(buildGmailQuery(undefined, null)).toBe("is:unread");
+    expect(buildGmailQuery(undefined, null, NOW_FIXED)).toBe("is:unread");
   });
 
   test("appends the custom filter", () => {
-    expect(buildGmailQuery("from:boss", null)).toBe("is:unread from:boss");
+    expect(buildGmailQuery("from:boss", null, NOW_FIXED)).toBe("is:unread from:boss");
   });
 
   test("emits after: as Unix SECONDS, not a date", () => {
@@ -232,28 +238,53 @@ describe("checkEmail query-window selection", () => {
   });
 });
 
+describe("emailClampWarning (the operator surface's gate)", () => {
+  const NOW = Date.UTC(2026, 0, 15, 12, 0, 0);
+  const stale = (h: number) => NOW - h * 3_600_000;
+
+  test("is silent when nothing is skipped", () => {
+    expect(emailClampWarning(stale(3), NOW)).toBeNull();
+  });
+
+  test("is silent for a trivial skip below the gate", () => {
+    // Kills gate -> 0: a watermark barely past the ceiling must not tell the
+    // operator to go search Gmail by hand over a few minutes.
+    expect(emailClampWarning(stale(24) - 60_000, NOW)).toBeNull();
+  });
+
+  test("WARNS once the skipped span clears the gate", () => {
+    // Kills gate -> Infinity, which silences the only signal a human ever gets
+    // that mail was permanently skipped — with the whole suite green.
+    const w = emailClampWarning(stale(72), NOW);
+    expect(w).not.toBeNull();
+    expect(w!.skippedMs).toBe(48 * 3_600_000);
+    expect(w!.staleMs).toBe(72 * 3_600_000);
+  });
+
+  test("warns just above the gate, not just below it", () => {
+    const justUnder = stale(24) - (EMAIL_CLAMP_WARN_MIN_MS - 60_000);
+    const justOver = stale(24) - (EMAIL_CLAMP_WARN_MIN_MS + 60_000);
+    expect(emailClampWarning(justUnder, NOW)).toBeNull();
+    expect(emailClampWarning(justOver, NOW)).not.toBeNull();
+  });
+});
+
 describe("checkEmail coverage reporting", () => {
-  // Asserts on the coverage OUT-PARAM, so the one decision that makes the feature
-  // exist (`coverage.at = ...` in checkEmail) is killed by deletion. Without it
-  // `last_success_at` stays NULL forever, the checker takes the date query every
-  // tick, and the change is inert with the whole suite green.
-  //
-  // The DB write itself lives in the runner, deliberately AFTER delivery — see
-  // EmailCoverage. That means these tests pin WHEN coverage is claimed, which is
-  // the half with all the judgement in it.
+  // `coveredFrom` is a RETURN value, so these tests pin the half with all the
+  // judgement in it: WHEN a run may claim its window was covered. The DB write
+  // lives in the runner, deliberately after delivery (see EmailCheckResult), and
+  // is pinned separately by `finishWatcherRun`'s tests.
   const GMAIL = [{ name: "mcp__gmail__search_emails" }];
   // The predicate reads the bot's OWN .mcp.json to learn which server is Gmail,
   // so the two dirs below are what separate "reached Gmail" from "cannot tell".
   let botDirWithGmail = "";
   let botDirNoGmail = "";
-  let cov: { at?: Date };
 
   beforeEach(() => {
     botDirWithGmail = mkdtempSync(join(tmpdir(), "muninn-email-cov-gmail-"));
     writeFileSync(join(botDirWithGmail, ".mcp.json"), JSON.stringify({ mcpServers: { gmail: { type: "stdio", command: "x" } } }));
     botDirNoGmail = mkdtempSync(join(tmpdir(), "muninn-email-cov-nogmail-"));
     writeFileSync(join(botDirNoGmail, ".mcp.json"), JSON.stringify({ mcpServers: { "google-mail": { type: "stdio", command: "x" } } }));
-    cov = {};
     lastPrompt = "";
     profileByUser.clear();
     spawnScript = [];
@@ -268,9 +299,9 @@ describe("checkEmail coverage reporting", () => {
 
   test("claims coverage when the run reached Gmail and parsed", async () => {
     spawnScript = [{ toolCalls: GMAIL, result: "[]" }];
-    await checkEmail(baseWatcher(), botDirWithGmail, "jarvis", undefined, cov);
+    const r = await checkEmail(baseWatcher(), botDirWithGmail, "jarvis");
 
-    expect(cov.at).toBeInstanceOf(Date);
+    expect(r.coveredFrom).toBeInstanceOf(Date);
   });
 
   test("anchors coverage at check ENTRY, not at the end of the spawn", async () => {
@@ -281,34 +312,34 @@ describe("checkEmail coverage reporting", () => {
     // test asserted `at <= Date.now()` and could not tell the two apart.
     spawnScript = [{ toolCalls: GMAIL, result: "[]", delayMs: 40 }];
     const entry = Date.now();
-    await checkEmail(baseWatcher(), botDirWithGmail, "jarvis", undefined, cov);
+    const r = await checkEmail(baseWatcher(), botDirWithGmail, "jarvis");
     const finished = Date.now();
 
     // Entry precedes the 40ms spawn, so the anchor must sit at least that far
     // back from the finish. A `new Date()` anchor lands within a millisecond of
     // `finished` and fails here.
-    expect(cov.at!.getTime()).toBeGreaterThanOrEqual(entry);
-    expect(finished - cov.at!.getTime()).toBeGreaterThanOrEqual(30);
+    expect(r.coveredFrom!.getTime()).toBeGreaterThanOrEqual(entry);
+    expect(finished - r.coveredFrom!.getTime()).toBeGreaterThanOrEqual(30);
   });
 
   test("does NOT claim coverage when the answer is unparseable", async () => {
-    // This path returns [] having delivered nothing. Claiming coverage here cost
-    // a permanent hour of mail: the window advanced past messages no run had
-    // evaluated, and unread mail is re-offered by nothing else.
+    // This path returns no alerts having delivered nothing. Claiming coverage
+    // here cost a permanent hour of mail: the window advanced past messages no
+    // run had evaluated, and unread mail is re-offered by nothing else.
     spawnScript = [{ toolCalls: GMAIL, result: "I looked through your inbox and nothing seemed urgent." }];
-    const alerts = await checkEmail(baseWatcher(), botDirWithGmail, "jarvis", undefined, cov);
+    const r = await checkEmail(baseWatcher(), botDirWithGmail, "jarvis");
 
-    expect(alerts).toEqual([]);
-    expect(cov.at).toBeUndefined();
+    expect(r.alerts).toEqual([]);
+    expect(r.coveredFrom).toBeNull();
   });
 
   test("does NOT claim coverage when the run is unjudgeable (legacy parser, no tool list)", async () => {
     // toolCalls undefined ⇒ "can't tell". Deliberately not a FAILURE (no evidence
     // it broke) but equally not COVERAGE (no evidence it worked).
     spawnScript = [{ toolCalls: undefined, result: "[]" }];
-    await checkEmail(baseWatcher(), botDirWithGmail, "jarvis", undefined, cov);
+    const r = await checkEmail(baseWatcher(), botDirWithGmail, "jarvis");
 
-    expect(cov.at).toBeUndefined();
+    expect(r.coveredFrom).toBeNull();
   });
 
   test("does NOT claim coverage when no MCP server key looks like Gmail", async () => {
@@ -316,9 +347,9 @@ describe("checkEmail coverage reporting", () => {
     // claimed coverage, the row would step forward an hour per tick while reading
     // no mail at all — and never recover, because the mail stays unread.
     spawnScript = [{ toolCalls: [{ name: "mcp__google-mail__search" }], result: "[]" }];
-    await checkEmail(baseWatcher(), botDirNoGmail, "jarvis", undefined, cov);
+    const r = await checkEmail(baseWatcher(), botDirNoGmail, "jarvis");
 
-    expect(cov.at).toBeUndefined();
+    expect(r.coveredFrom).toBeNull();
   });
 
   test("does NOT claim coverage when the liveness predicate fails on every attempt", async () => {
@@ -326,8 +357,7 @@ describe("checkEmail coverage reporting", () => {
       { toolCalls: [{ name: "ToolSearch" }], result: "[]" },
       { toolCalls: [{ name: "Bash" }], result: "[]" },
     ];
-    await expect(checkEmail(baseWatcher(), botDirWithGmail, "jarvis", undefined, cov)).rejects.toThrow();
-    expect(cov.at).toBeUndefined();
+    await expect(checkEmail(baseWatcher(), botDirWithGmail, "jarvis")).rejects.toThrow();
   });
 
   test("claims coverage when attempt 1 fails the predicate and attempt 2 reaches Gmail", async () => {
@@ -335,15 +365,9 @@ describe("checkEmail coverage reporting", () => {
       { toolCalls: [{ name: "ToolSearch" }], result: "[]" },
       { toolCalls: GMAIL, result: "[]" },
     ];
-    await checkEmail(baseWatcher(), botDirWithGmail, "jarvis", undefined, cov);
+    const r = await checkEmail(baseWatcher(), botDirWithGmail, "jarvis");
 
-    expect(cov.at).toBeInstanceOf(Date);
-  });
-
-  test("tolerates being called without a coverage object", async () => {
-    // runChecker's other checkers pass none; checkEmail must not throw.
-    spawnScript = [{ toolCalls: GMAIL, result: "[]" }];
-    expect(await checkEmail(baseWatcher(), botDirWithGmail, "jarvis")).toEqual([]);
+    expect(r.coveredFrom).toBeInstanceOf(Date);
   });
 });
 
@@ -355,8 +379,26 @@ describe("emailLookbackClampMs", () => {
   });
 
   test("is 0 exactly at the boundary", () => {
-    // Kills `floor >= wanted`: at the boundary nothing is skipped.
+    expect(emailLookbackClampMs(NOW - EMAIL_MAX_LOOKBACK_MS, NOW)).toBe(0);
+  });
+
+  test("is 0 for a watermark just inside the overlap of the ceiling", () => {
+    // The case the overlap-counting version got wrong: 24h + 4min stale reported
+    // a 9-min "loss" and stayed under the warn gate, so genuinely-skipped mail
+    // went unreported while a no-loss run was being counted as lossy.
     expect(emailLookbackClampMs(NOW - EMAIL_MAX_LOOKBACK_MS + EMAIL_QUERY_OVERLAP_MS, NOW)).toBe(0);
+  });
+
+  test("never returns a negative span", () => {
+    expect(emailLookbackClampMs(NOW, NOW)).toBe(0);
+    expect(emailLookbackClampMs(NOW + 3_600_000, NOW)).toBe(0);
+  });
+
+  test("returns 0 for a falsy watermark, matching buildGmailQuery's own guard", () => {
+    // buildGmailQuery emits NO after: clause for a 0 watermark, so nothing is
+    // skipped. Without this guard the two disagreed by ~57 years.
+    expect(emailLookbackClampMs(0, NOW)).toBe(0);
+    expect(buildGmailQuery(undefined, 0, NOW)).toBe("is:unread");
   });
 
   test("reports the span given up when the ceiling wins", () => {
@@ -364,8 +406,11 @@ describe("emailLookbackClampMs", () => {
     // and stayed silent on every clamped one — destroying the skip's only surface
     // while the whole suite stayed green.
     const stale = NOW - 72 * 3_600_000;
-    // (now − 24h) − (stale − overlap) = 48h + overlap.
-    expect(emailLookbackClampMs(stale, NOW)).toBe(48 * 3_600_000 + EMAIL_QUERY_OVERLAP_MS);
+    // (now − 24h) − stale = 48h. The 5-min overlap is NOT counted: that window
+    // was already read by the previous successful check, so including it would
+    // overstate every warning and report a "loss" for a watermark barely past the
+    // ceiling where nothing new is dropped at all.
+    expect(emailLookbackClampMs(stale, NOW)).toBe(48 * 3_600_000);
   });
 
   test("never returns a negative span", () => {
@@ -412,7 +457,7 @@ describe("checkEmail interest-profile injection", () => {
     const withoutProfile = lastPrompt;
 
     // Reconstruct the expected base prompt exactly as email.ts assembles it.
-    const query = buildGmailQuery(undefined, null);
+    const query = buildGmailQuery(undefined, null, NOW_FIXED);
     const { DEFAULT_EMAIL_PROMPT } = await import("./email.ts");
     const expected = `You have access to Gmail MCP tools.
 Search for unread emails matching: "${query}"
@@ -451,7 +496,7 @@ describe("checkEmail Gmail liveness predicate", () => {
 
   test("a Gmail tool call makes an empty result a TRUSTWORTHY quiet inbox", async () => {
     nextToolCalls = [{ name: "ToolSearch" }, { name: "mcp__gmail__search_emails" }];
-    expect(await checkEmail(baseWatcher(), gmailBotDir, "jarvis")).toEqual([]);
+    expect((await checkEmail(baseWatcher(), gmailBotDir, "jarvis")).alerts).toEqual([]);
   });
 
   test("NO Gmail tool call throws instead of reporting a quiet inbox", async () => {
@@ -479,7 +524,7 @@ describe("checkEmail Gmail liveness predicate", () => {
     // throw here would fire on every run that hits the known missing-result-event CLI
     // bug, turning a parser degradation into a watcher outage.
     nextToolCalls = undefined;
-    expect(await checkEmail(baseWatcher(), gmailBotDir, "jarvis")).toEqual([]);
+    expect((await checkEmail(baseWatcher(), gmailBotDir, "jarvis")).alerts).toEqual([]);
   });
 
   test("a non-string tool name degrades to the diagnostic, not a TypeError", async () => {
@@ -496,7 +541,7 @@ describe("checkEmail Gmail liveness predicate", () => {
       writeFileSync(join(dir, ".mcp.json"), JSON.stringify({ mcpServers: { "gmail-mcp": { type: "stdio", command: "x" } } }));
       expect(gmailToolPrefixes(dir)).toEqual(["mcp__gmail-mcp__"]);
       nextToolCalls = [{ name: "mcp__gmail-mcp__search_emails" }];
-      expect(await checkEmail(baseWatcher(), dir, "jarvis")).toEqual([]);
+      expect((await checkEmail(baseWatcher(), dir, "jarvis")).alerts).toEqual([]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -513,7 +558,7 @@ describe("checkEmail Gmail liveness predicate", () => {
       expect(gmailToolPrefixes(dir)).toBeNull();
       // …and a run that called only that server is therefore trusted, not thrown on.
       nextToolCalls = [{ name: "mcp__google-mail__search_emails" }];
-      expect(await checkEmail(baseWatcher(), dir, "jarvis")).toEqual([]);
+      expect((await checkEmail(baseWatcher(), dir, "jarvis")).alerts).toEqual([]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -577,7 +622,7 @@ describe("checkEmail bounded retry", () => {
       { toolCalls: NEVER_REACHED_GMAIL, result: "[]" },
       { toolCalls: GMAIL_CALL, result: ONE_ALERT },
     ];
-    const alerts = await checkEmail(baseWatcher(), gmailBotDir, "jarvis");
+    const { alerts } = await checkEmail(baseWatcher(), gmailBotDir, "jarvis");
     expect(spawnOpts).toHaveLength(2);
     // The rescued run's OWN result, not attempt 1's `[]` — a retry that returned the
     // failed attempt's body would be indistinguishable from no retry at all.
@@ -590,7 +635,7 @@ describe("checkEmail bounded retry", () => {
     // answering `[]`. Retrying only the `[]` shape would leave the larger half of the
     // observed failures (3 of the last 30 live ticks) unaddressed.
     spawnScript = [{ throws: "Haiku timed out after 60000ms (budget 60000ms)" }, { toolCalls: GMAIL_CALL, result: ONE_ALERT }];
-    const alerts = await checkEmail(baseWatcher(), gmailBotDir, "jarvis");
+    const { alerts } = await checkEmail(baseWatcher(), gmailBotDir, "jarvis");
     expect(spawnOpts).toHaveLength(2);
     expect(alerts).toHaveLength(1);
   });
@@ -698,7 +743,7 @@ describe("checkEmail bounded retry", () => {
     // The modal correct output. Retrying a quiet inbox would double the cost of every
     // healthy tick — the exact opposite of what this is for.
     spawnScript = [{ toolCalls: GMAIL_CALL, result: "[]" }];
-    expect(await checkEmail(baseWatcher(), gmailBotDir, "jarvis")).toEqual([]);
+    expect((await checkEmail(baseWatcher(), gmailBotDir, "jarvis")).alerts).toEqual([]);
     expect(spawnOpts).toHaveLength(1);
   });
 
@@ -706,14 +751,14 @@ describe("checkEmail bounded retry", () => {
     // Legacy-JSON parser fallback: no tool list, so the predicate stands down. A retry
     // here would burn a second spawn on a CLI bug unrelated to Gmail.
     spawnScript = [{ toolCalls: undefined, result: "[]" }];
-    expect(await checkEmail(baseWatcher(), gmailBotDir, "jarvis")).toEqual([]);
+    expect((await checkEmail(baseWatcher(), gmailBotDir, "jarvis")).alerts).toEqual([]);
     expect(spawnOpts).toHaveLength(1);
   });
 
   test("unparseable JSON from a run that reached Gmail is not retried either", async () => {
     // Different failure: the answer is real, only its formatting is wrong.
     spawnScript = [{ toolCalls: GMAIL_CALL, result: "I looked and found nothing!" }];
-    expect(await checkEmail(baseWatcher(), gmailBotDir, "jarvis")).toEqual([]);
+    expect((await checkEmail(baseWatcher(), gmailBotDir, "jarvis")).alerts).toEqual([]);
     expect(spawnOpts).toHaveLength(1);
   });
 

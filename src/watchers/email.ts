@@ -10,22 +10,28 @@ import { getLog } from "../logging.ts";
 const log = getLog("watchers", "email");
 
 /**
- * What a completed check reports about the window it actually covered.
+ * What a completed check reports: its alerts, and the window it actually covered.
  *
- * An OUT-parameter rather than a return value because `checkEmail` returns the
- * alert array through `runChecker`'s shared signature, and because the runner
- * must be able to read coverage on a run whose delivery then fails.
- *
- * The runner — not this module — performs the write, and only AFTER the alerts
+ * The RUNNER — not this module — writes the watermark, and only AFTER the alerts
  * have been delivered. Writing it here (an earlier cut did) re-opened the very
  * hole this PR closes, one door along: a Telegram 502 between the write and the
  * send left the watermark advanced over alerts that were never delivered AND
  * never recorded in `lastNotifiedIds`, so the next tick's narrower window
  * stepped straight over them. Unread mail is re-offered by nothing else.
  */
-export interface EmailCoverage {
-  /** Set only for a run that reached Gmail AND returned a parseable answer. */
-  at?: Date;
+export interface EmailCheckResult {
+  alerts: WatcherAlert[];
+  /**
+   * The instant this run's window is covered UP TO — set only for a run that
+   * reached Gmail AND returned a parseable answer; `null` otherwise.
+   *
+   * A RETURN value, not an out-parameter. As an optional out-param it could be
+   * dropped at either call hop with `tsc` clean and every test green, leaving
+   * `last_success_at` NULL forever and the whole feature inert — this repo's
+   * named recurring defect. Threading it through the return type makes that
+   * edit a compile error instead.
+   */
+  coveredFrom: Date | null;
 }
 
 /**
@@ -136,13 +142,7 @@ export async function checkEmail(
   botDir?: string,
   botName?: string,
   telemetry?: HaikuTelemetry,
-  // Out-param. Passing a plain object (rather than doing the DB write here) is
-  // what lets the ONE decision that makes this feature exist have a killing
-  // test: without it, deleting the assignment leaves `last_success_at` NULL
-  // forever and the whole change inert with `tsc` and the suite green — this
-  // repo's named recurring defect.
-  coverage?: EmailCoverage,
-): Promise<WatcherAlert[]> {
+): Promise<EmailCheckResult> {
   // Anchored at ENTRY, not at the first spawn: the runner's net starts here too, and
   // the profile load below is a DB read that must come out of the same budget.
   const startedAt = Date.now();
@@ -159,20 +159,18 @@ export async function checkEmail(
   // surface. Logged at the CALLER so the query builder stays pure. Gated on a
   // meaningful span so a watermark a few seconds past the ceiling does not print
   // "skipping 0.0h … search Gmail manually".
-  if (watcher.lastSuccessAt) {
-    const skippedMs = emailLookbackClampMs(watcher.lastSuccessAt, startedAt);
-    if (skippedMs > EMAIL_CLAMP_WARN_MIN_MS) {
-      log.warn(
-        "email-check lookback clamped to {maxHours}h — skipping {skippedHours}h of unread mail that no run " +
-          "will now evaluate (last successful check was {staleHours}h ago). Search Gmail manually for that window.",
-        {
-          botName,
-          maxHours: EMAIL_MAX_LOOKBACK_MS / 3_600_000,
-          skippedHours: +(skippedMs / 3_600_000).toFixed(1),
-          staleHours: +((startedAt - watcher.lastSuccessAt) / 3_600_000).toFixed(1),
-        },
-      );
-    }
+  const clamp = watcher.lastSuccessAt ? emailClampWarning(watcher.lastSuccessAt, startedAt) : null;
+  if (clamp) {
+    log.warn(
+      "email-check lookback clamped to {maxHours}h — skipping {skippedHours}h of unread mail that no run " +
+        "will now evaluate (last successful check was {staleHours}h ago). Search Gmail manually for that window.",
+      {
+        botName,
+        maxHours: EMAIL_MAX_LOOKBACK_MS / 3_600_000,
+        skippedHours: +(clamp.skippedMs / 3_600_000).toFixed(1),
+        staleHours: +(clamp.staleMs / 3_600_000).toFixed(1),
+      },
+    );
   }
 
   const userPrompt = config.prompt || DEFAULT_EMAIL_PROMPT;
@@ -260,7 +258,7 @@ export async function checkEmail(
           "email-check unparseable: attempt={attempt}/{max} durationMs={durationMs} attemptTimeoutMs={attemptTimeoutMs} raw={raw}",
           { botName, attempt, max: EMAIL_MAX_ATTEMPTS, durationMs, attemptTimeoutMs, raw: result.slice(0, 300) },
         );
-        return [];
+        return { alerts: [], coveredFrom: null };
       }
       log.info(
         "email-check ok: attempt={attempt}/{max} durationMs={durationMs} attemptTimeoutMs={attemptTimeoutMs} alerts={alerts}",
@@ -276,8 +274,7 @@ export async function checkEmail(
       // the spawn, and therefore the model's own `search_emails` call, by the
       // 21–56s the check takes. Anchoring at the end would silently drop every
       // message that arrived while the check ran.
-      if (reached && coverage) coverage.at = new Date(startedAt);
-      return alerts;
+      return { alerts, coveredFrom: reached ? new Date(startedAt) : null };
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
       log.warn(
@@ -548,8 +545,17 @@ export const EMAIL_CLAMP_WARN_MIN_MS = 15 * 60_000;
  * form.
  */
 /**
- * How much mail the 24h ceiling is about to discard — `0` when the watermark is
- * inside the ceiling and nothing is skipped.
+ * How much genuinely-unevaluated mail the 24h ceiling is about to discard — `0`
+ * when nothing is lost.
+ *
+ * NOT the same quantity as the clamp `buildGmailQuery` applies, and deliberately
+ * so: the query floor is `now − 24h` against a WANTED floor of
+ * `watermark − overlap`, but the overlap window was already read by the previous
+ * successful check. Counting it here would overstate every warning by 5 minutes
+ * and, worse, make the function report a non-zero "loss" for a watermark barely
+ * past the ceiling where nothing new is dropped at all. Mail is only unevaluated
+ * if it arrived after the last successful check and before the query floor —
+ * hence `(now − 24h) − watermark`.
  *
  * A separate PURE function, not an `if` inside `buildGmailQuery`, for two
  * reasons the review made concrete. It keeps `buildGmailQuery` free of side
@@ -562,10 +568,31 @@ export const EMAIL_CLAMP_WARN_MIN_MS = 15 * 60_000;
  * the skip has.
  */
 export function emailLookbackClampMs(sinceMs: number, nowMs: number): number {
-  return Math.max(0, (nowMs - EMAIL_MAX_LOOKBACK_MS) - (sinceMs - EMAIL_QUERY_OVERLAP_MS));
+  // Mirrors `buildGmailQuery`'s own falsy guard: with no watermark there is no
+  // window, so there is nothing to have skipped. Without this, a `0` watermark
+  // reports a ~57-year loss for a query that carries no `after:` clause at all.
+  if (!sinceMs) return 0;
+  return Math.max(0, (nowMs - EMAIL_MAX_LOOKBACK_MS) - sinceMs);
 }
 
-export function buildGmailQuery(filter: string | undefined, sinceMs: number | null, nowMs: number = Date.now()): string {
+/**
+ * The clamp warning to emit, or `null` for silence.
+ *
+ * The GATE lives here rather than at the log call so it is testable: as an
+ * inline `if` in `checkEmail` both `EMAIL_CLAMP_WARN_MIN_MS → 0` and
+ * `→ Infinity` were mutation-survivable, and the second silences the only
+ * surface a human ever gets that mail was permanently skipped.
+ */
+export function emailClampWarning(
+  sinceMs: number,
+  nowMs: number,
+): { skippedMs: number; staleMs: number } | null {
+  const skippedMs = emailLookbackClampMs(sinceMs, nowMs);
+  if (skippedMs <= EMAIL_CLAMP_WARN_MIN_MS) return null;
+  return { skippedMs, staleMs: nowMs - sinceMs };
+}
+
+export function buildGmailQuery(filter: string | undefined, sinceMs: number | null, nowMs: number): string {
   const parts: string[] = ["is:unread"];
   if (filter) parts.push(filter);
   if (sinceMs) {
