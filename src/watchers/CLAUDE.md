@@ -722,6 +722,48 @@ under **`source:health`**, so there is no migration.
   last-ok age and streak in its tooltip. **`last_run_at` being fresh no longer implies the
   watcher is actually doing anything.**
 
+### Run-level health (2026-08-14, `run-health.ts`)
+
+The audit table above is about guards INSIDE a run. A checker that **throws** never
+reaches its own recorder, and its entire consequence was one `log.error` plus a red
+CHILD span — so the email watcher failed 7 of 12 organic ticks on 2026-08-13 with the
+user told nothing. `src/watchers/run-health.ts` closes that, generically for every
+type, off the runner's `catch`:
+
+- **Storage:** its own `watcher_snapshots` key **`run:health`**, entry key
+  `watcher:run`. NOT `source:health` — the per-source recorder rebuilds that map from
+  the sources configured this run and drops anything it did not mark, so the two would
+  delete each other. The entry key is namespaced for the same reason `healthAlertId`
+  keys on it: a per-source key literally called `run` would hide the chip AND let a
+  source escalation suppress a run escalation through `lastNotifiedIds`.
+- **Threshold is cadence-aware.** `runEscalateAfter(intervalMs)` — 3 consecutive
+  failures normally, but **1** at `intervalMs >= 24h`. A run COUNT is nonsense at the
+  weekly rows: three runs is ~3h on the hourly email row and three WEEKS on the two
+  weekly digests and both gardeners, after which the nag bucket waits 24 more weeks.
+  Same arithmetic source-health's own docstring calls out for alert ids.
+- **The first record seeds `lastOkAt` from the row's `last_run_at`.** Without it the
+  first escalation after deploy claims a months-old watcher "has never completed a
+  run", and `healthLevel` reads a null `lastOkAt` as infinite staleness — painting the
+  FIRST failure of a healthy watcher red `stale` rather than amber `warn`. The alert
+  says "last completed a run Xh ago", the weaker claim, because `last_run_at` advances
+  on failures too.
+- **Activity rows are deduped**: one on the first failure of an episode, one when it
+  escalates, none in between. `X Daily Digest` polls every 5 min, so an undeduped row
+  meant 288 `activity_log` writes/day plus 288 SSE events to every open tab.
+- **Delivery** (`deliverFailureAlerts`) is Telegram-only, records only the ids it
+  actually SENT (a quiet-hours hold or a Telegram error leaves the id unrecorded, so
+  it re-emits next run), and saves the message under source **`watcher:health`** —
+  still inside `PROACTIVE_SOURCE_PREFIXES`, but no longer indistinguishable from a
+  real email digest inside the prompt's bounded alerts block.
+- **`handleWatcherFailure` is the whole path in one call and NEVER throws** — the run
+  already failed and the catch must still advance `last_run_at`.
+- **Every DB seam is a parameter, not a module mock.** A `mock.module` test here
+  invalidates `db/*` for the whole `bun test src/watchers/` chunk; the first cut did
+  exactly that and silently broke six of `x.test.ts`'s assertions. Same call
+  `runChecker` makes for `WikiCheckers`.
+- **Surface:** `GET /api/watchers` merges both snapshot keys into the one
+  `sourceHealth[]` chip list (run entry sorted first, pane label now "Health").
+
 ### Skip-forever audit (2026-07-27) — dispositions
 
 The llms.txt wedge was a defect *class*, not a one-off, so every other watcher was audited
@@ -742,7 +784,7 @@ linger with a frozen chip.
 | `x` author-scores file unavailable | **Fixed** — health at `x:author-scores`. Documented as "transparency-only, never load-bearing", but `isLinkTweet` requires a non-null tier, so a missing/short file silently kills the **entire `x-link` pointer-capture class** and quietly raises every `x-post` floor. The module warns **once per process**, which is an anti-surface. |
 | `consolidation-gardener` unknown wiki / no collections / index unreadable / overlay unavailable | **Fixed** — health at `consolidation:<wiki>`. A renamed `WIKI_EXTRA` entry kills the watcher for months at one warn per week. No data is lost (clusters persist; the Atlas button is an independent path), but the feature is 100% dead. |
 | `wiki-gardener` `runExclusive` mutex | **Fixed differently** — the right remedy is a bound, not a surface. `GARDENER_MUTEX_MAX_HOLD_MS` (90 min) force-reclaims an abandoned lock with a loud `log.error`, mirroring the runner's `claimChecker` 2×-timeout reclaim; a reclaimed orphan settling later can't free the new holder's slot. Previously a never-settling drain one-shot held the lock forever, skipping every weekly run at INFO (one line per week) and swallowing manual triggers, recoverable only by restart. |
-| `email` returning `[]` | **Fixed (2026-08-13)** — predicate + a bounded retry keyed on it (see "Bounded retry" below; the predicate alone made the failure loud, the retry is what makes the check succeed). The liveness predicate lives in `checkEmail`, reading `spawnHaiku`'s returned `toolCalls` rather than the tracer: zero `mcp__gmail__*` calls ⇒ **throw**, because there is no path to a truthful answer that skips `search_emails`. **Be precise about the surface this buys:** the runner's catch does `log.error` + an errored `watcher:email` span (now carrying the run's tokens — see below), then advances `last_run_at` as always. There is **no activity row** (`activityLog.push` is on the success path only), no Telegram, and deliberately no `recordOutcome`/health escalation. Note the errored span is the CHILD: the `scheduler_tick` root still finishes `ok`, so the **`/traces` list row stays green** and only the waterfall detail shows red. `/agents` Recent is DB-backed and does show it, but the failure never enters the in-memory completed-runs ring (the catch calls `clearRequest`, not `completeRequest`), so a live viewer sees the Running card vanish rather than flip to failed. So a persistently broken Gmail produces an hourly `log.error`, an unbounded one at that (no dedup, unlike `x`'s once-per-process author-scores warn), and little else — strictly better than a silent `[]`, but a **user-visible surface remains the open item here**. Note what it does NOT do: `recordOutcome` still can't be applied naively here ("no important email today" remains the modal *correct* output, so 3 quiet hours would escalate) — the predicate distinguishes **reached Gmail and found nothing** from **never reached Gmail**, which is the distinction health was missing. `toolCalls` undefined (legacy-JSON parser fallback) means "can't tell" and never fires — **but only because `claudeResultToHaiku` now normalizes the stream path's zero-tools `undefined` to `[]`**. StreamParser collapses "called no tools" to `undefined`, the same value the legacy fallback leaves; without that normalization the predicate was inert on exactly the case this row names (broken Gmail MCP ⇒ model answers `[]` having called nothing) and caught only the model-flails-through-Bash shape. Pinned by `executor.test.ts` "saw zero tools vs could not see the run". Measured on the live row the day it shipped: 3 of 7 organic ticks had been returning `[]` without calling Gmail. |
+| `email` returning `[]` | **Fixed (2026-08-13)** — predicate + a bounded retry keyed on it (see "Bounded retry" below; the predicate alone made the failure loud, the retry is what makes the check succeed). The liveness predicate lives in `checkEmail`, reading `spawnHaiku`'s returned `toolCalls` rather than the tracer: zero `mcp__gmail__*` calls ⇒ **throw**, because there is no path to a truthful answer that skips `search_emails`. **Be precise about the surface this buys:** the runner's catch does `log.error` + an errored `watcher:email` span (now carrying the run's tokens — see below), then advances `last_run_at` as always. There is **no activity row** (`activityLog.push` is on the success path only), no Telegram, and deliberately no `recordOutcome`/health escalation. Note the errored span is the CHILD: the `scheduler_tick` root still finishes `ok`, so the **`/traces` list row stays green** and only the waterfall detail shows red. `/agents` Recent is DB-backed and does show it, but the failure never enters the in-memory completed-runs ring (the catch calls `clearRequest`, not `completeRequest`), so a live viewer sees the Running card vanish rather than flip to failed. **That open item is CLOSED as of 2026-08-14** — see "Run-level health" below: a failing run now writes an activity row (first failure of an episode only) and escalates one Telegram alert once the streak reaches its threshold. The clauses above describe what the predicate alone bought; the span behaviour (errored CHILD, green `scheduler_tick` root, vanished Running card) is unchanged. Note what it does NOT do: `recordOutcome` still can't be applied naively here ("no important email today" remains the modal *correct* output, so 3 quiet hours would escalate) — the predicate distinguishes **reached Gmail and found nothing** from **never reached Gmail**, which is the distinction health was missing. `toolCalls` undefined (legacy-JSON parser fallback) means "can't tell" and never fires — **but only because `claudeResultToHaiku` now normalizes the stream path's zero-tools `undefined` to `[]`**. StreamParser collapses "called no tools" to `undefined`, the same value the legacy fallback leaves; without that normalization the predicate was inert on exactly the case this row names (broken Gmail MCP ⇒ model answers `[]` having called nothing) and caught only the model-flails-through-Bash shape. Pinned by `executor.test.ts` "saw zero tools vs could not see the run". Measured on the live row the day it shipped: 3 of 7 organic ticks had been returning `[]` without calling Gmail. |
 | `news` (`!res.ok`, fetch throw, zero parsed items) | **Noted, latent** — no `news` watcher row exists. Worst shape of all if one is created: zero parsed items logs *nothing*, and `recent` filters on a `lastRunAt` the runner advances even on failure, so articles published during an outage are permanently skipped when the feed recovers. Needs health **plus** a floor on the `since` cursor. |
 | Quiet-hours whole-run skip for a ≥24h watcher | **Noted, latent.** `updateWatcherLastRun` is called on the skip with no log line, so the next due moment is the same clock time — a weekly row whose slot once lands in 23:00–07:00 stays there permanently. Not exposed today (every hour-gated row sits 09–18). |
 

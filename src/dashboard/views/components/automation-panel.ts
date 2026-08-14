@@ -753,7 +753,9 @@ export function automationPanelScript(): string {
           escapeHtml(s.key) + ' · ' + escapeHtml(s.level === 'ok' ? 'ok' : s.outcome) +
           (s.level === 'stale' ? ' · stale' : '') + '</span>';
       }).join('');
-      return '<div class="detail-field"><div class="detail-label">Source health</div>' +
+      // "Health", not "Source health": the list now also carries the RUN-level
+      // entry (src/watchers/run-health.ts), which is about the watcher itself.
+      return '<div class="detail-field"><div class="detail-label">Health</div>' +
         '<div class="detail-value">' + chips + '</div></div>';
     }
 

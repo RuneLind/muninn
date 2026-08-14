@@ -21,7 +21,7 @@ import {
   getWatcherSnapshot,
 } from "../../db/watchers.ts";
 import { SOURCE_HEALTH_KEY, healthLevel, isSourceHealthMap } from "../../watchers/source-health.ts";
-import { RUN_HEALTH_KEY } from "../../watchers/run-health.ts";
+import { RUN_HEALTH_KEY, RUN_HEALTH_ENTRY } from "../../watchers/run-health.ts";
 import { getScheduledTaskById } from "../../db/scheduled-tasks.ts";
 import { updateScheduledTask } from "../../db/scheduled-tasks.ts";
 import { getActivityForJob } from "../../db/activity.ts";
@@ -326,7 +326,10 @@ export function registerDataRoutes(app: Hono): void {
             const now = Date.now();
             const sourceHealth = Object.entries(merged)
               .map(([key, h]) => ({ key, ...h, level: healthLevel(h, w.intervalMs, now) }))
-              .sort((a, b) => a.key.localeCompare(b.key));
+              // Run health first — it is the one entry that says whether the watcher
+              // ran at all, so it must not sort alphabetically into the middle of the
+              // per-source chips.
+              .sort((a, b) => (a.key === RUN_HEALTH_ENTRY ? -1 : b.key === RUN_HEALTH_ENTRY ? 1 : a.key.localeCompare(b.key)));
             return { ...w, sourceHealth };
           } catch {
             return w;

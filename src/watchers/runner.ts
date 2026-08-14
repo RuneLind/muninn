@@ -13,7 +13,7 @@ import { checkWikiLinter } from "./wiki-linter.ts";
 import { checkWikiCommitter } from "./wiki-committer.ts";
 import { checkConsolidationGardener } from "./consolidation-gardener.ts";
 import { shouldSkipWikiDraftingRun } from "./wiki-drafting.ts";
-import { markRunHealth, deliverFailureAlerts } from "./run-health.ts";
+import { markRunHealth, handleWatcherFailure } from "./run-health.ts";
 // Moved to a leaf module so `run-health.ts` can format an escalation without
 // importing this file (and with it every checker). Re-exported: `runner.ts` has
 // been its import site since it was written.
@@ -599,7 +599,7 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       // The run got all the way here, so the watcher itself is healthy — this is
       // what resets a failure streak (and it must be recorded on a run that found
       // NOTHING too, which is the modal case for email/x).
-      await markRunHealth(watcher.id, watcher.name, "ok");
+      await markRunHealth(watcher, "ok");
       // `wt` is a child span sharing the scheduler_tick trace id, so the card's
       // trace link opens the whole tick — coarser than chat's per-request link,
       // but the only handle in scope here.
@@ -641,31 +641,13 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       wt?.error(err instanceof Error ? err : String(err), failedUsage);
       log.error("Watcher \"{name}\" ({watcherId}) failed: {error}", { botName: tag, name: watcher.name, watcherId: watcher.id, error: errText });
 
-      // Every failure gets an activity row — the dashboard feed is the one surface
-      // that shows a single bad run at all. The Telegram escalation below is
-      // deliberately much quieter (3 in a row), so without this an isolated
-      // failure would still be visible only to whoever reads `logs/`.
-      activityLog.push(
-        "error",
-        `Watcher "${watcher.name}" failed: ${errText}`,
-        { userId: watcher.userId, botName: tag, metadata: { totalMs: 0, watcherName: watcher.name, watcherId: watcher.id } as any },
-      );
-
-      // Ids delivered by the escalation below, folded into the rolling window with
-      // the same slice the success path uses — an escalation the user has already
-      // been sent must not be re-sent every hour for the rest of the episode.
-      let deliveredIds: string[] = [];
-      try {
-        const healthAlerts = await markRunHealth(watcher.id, watcher.name, "error", Date.now(), errText);
-        if (healthAlerts.length > 0) {
-          deliveredIds = await deliverFailureAlerts(api, watcher, tag, healthAlerts, quietHours);
-        }
-      } catch (healthErr) {
-        // The notification path must never replace the original failure with its
-        // own — the run already failed, and this catch exists so the lastRunAt
-        // advance below still happens.
-        log.error("Watcher \"{name}\": failure notification failed: {error}", { botName: tag, name: watcher.name, error: healthErr instanceof Error ? healthErr.message : String(healthErr) });
-      }
+      // Record the failure, put a row where a human can see it, and escalate if the
+      // streak says so. Never throws (the run already failed; the `last_run_at`
+      // advance below must still happen), and returns only the ids it actually
+      // DELIVERED — folded into the rolling window with the same slice the success
+      // path uses, so an escalation the user has been sent is not re-sent hourly
+      // for the rest of the episode.
+      const deliveredIds = await handleWatcherFailure(api, watcher, tag, errText, quietHours);
 
       // Still advance lastRunAt on failure to prevent retry storms
       try {
