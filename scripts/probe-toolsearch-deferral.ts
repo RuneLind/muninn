@@ -20,11 +20,17 @@
  * surface in the agent home, not the MCP server count.
  *
  * ⚠️ **THOSE NUMBERS ARE NOT REPRODUCIBLE BY THIS VERSION, AND THAT IS THE POINT.**
- * They were measured at a 90s timeout, with a killed run scored `CLEAN`, and with
- * "reached Gmail" read from a tool NAME. This build kills at production's 60s, scores
- * a killed run `TIMEOUT`, and checks the tool RESULT — so the same population scores
- * materially worse here. Do not diff a fresh run against 12.5% and read the
- * difference as a regression; re-baseline first.
+ * They were measured at a 90s timeout, with a killed run scored `CLEAN`, and without
+ * separating the budget from deferral. This build kills at production's 60s and scores
+ * a killed run `TIMEOUT`, so the same population scores materially worse here. Do not
+ * diff a fresh run against 12.5% and read the difference as a regression; re-baseline
+ * first.
+ *
+ * NB the buckets are a TOOL-TRAJECTORY claim and deliberately blind to whether the
+ * call worked: a run whose Gmail call was DENIED is `CLEAN`, because the deferred tool
+ * resolved and was called, which is the question. The denial is on its own axis — the
+ * row's `[gmail tool_result is_error]` marker and the summary's `gmail tool errors: N`,
+ * printed on the same line as the CLEAN count.
  *
  * ⚠️ **`CLEAN` IS FLOOR-LIMITED BY THE 60s BUDGET.** A run that resolves on the first
  * ToolSearch and calls Gmail still scores `TIMEOUT` if it exceeds the budget, and real
@@ -148,7 +154,7 @@ async function loadLiveTask(): Promise<{
   const fallback = () => {
     const dir = resolve(REPO, "bots/jarvis");
     if (!existsSync(dir)) {
-      console.error(`[probe] falling back to the shipped defaults, but ${dir} does not exist — nothing to probe`);
+      console.error(`[probe] shipped defaults need ${dir}, which does not exist — nothing to probe`);
       process.exit(1);
     }
     return {
@@ -330,7 +336,7 @@ async function once(arm: string, bin: string, i: number): Promise<Run> {
     // fires. Reading to the end is what let events emitted AFTER the kill reclassify
     // a run: making the Gmail flag real on TIMEOUT (the fix one round ago) meant a
     // Gmail call the model got out during the teardown moved the run from "never
-    // called Gmail" (deferral — what production would have seen) to "reached Gmail
+    // called Gmail" (deferral — what production would have seen) to "called Gmail
     // but timed out" (budget). Measured: a real run yielded 60721ms of stream against
     // a 60000ms budget, and a child that survives SIGTERM makes the window unbounded.
     const readStdout = async () => {

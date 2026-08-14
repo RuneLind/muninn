@@ -499,10 +499,13 @@ describe("buildEmailPrompt", () => {
     expect(out.indexOf("CRITICAL:")).toBeLessThan(out.indexOf("Return ONLY a JSON array"));
   });
 
-  test("the assembled prompt is EXACTLY this — the extraction's whole claim", () => {
-    // A golden string, because every other assertion here is structural and would
-    // survive an edit to the prompt text. This is the one that fails if the
-    // extraction ever stops producing what `checkEmail` produced.
+  test("the SCAFFOLDING is exactly this, criteria aside", () => {
+    // A golden string, because the other assertions here are structural and survive an
+    // edit to the prompt text. It pins the SCAFFOLDING only — the criteria are a
+    // parameter, so `DEFAULT_EMAIL_PROMPT`'s own body is not pinned by it. The
+    // end-to-end claim (what `checkEmail` actually sends) is covered by "no profile row
+    // ⇒ prompt is byte-identical to the un-wrapped gate prompt" above, which drives the
+    // real checker; this is the cheap unit-level guard beside it.
     expect(buildEmailPrompt(QUERY, "CRITERIA-HERE", null)).toBe(
       `You have access to Gmail MCP tools.\nSearch for unread emails matching: "${QUERY}"\n\nCRITERIA-HERE\n\nCRITICAL:\n- "id" MUST be the exact Gmail message ID from the API (e.g. "19abc123def"). Copy it verbatim.\n- "sender" MUST be the exact From header value (e.g. "Posten Norge")\n- "subject" MUST be the exact email subject line, verbatim — do NOT rephrase or shorten it.\n\nReturn ONLY a JSON array (no markdown fences):\n[{"id":"msg_id","source":"email","sender":"exact sender","subject":"exact subject","summary":"**Fra:** sender — subject brief","urgency":"high|medium|low"}]\nIf nothing worth notifying, return: []`,
     );
@@ -515,8 +518,8 @@ describe("buildEmailPrompt", () => {
   });
 
   test("a blank profile is the same as no profile", () => {
-    // `withInterestProfile` returns its input verbatim for null/blank. NB this pins
-    // that behaviour only — the byte-identity claim is the golden string above.
+    // `withInterestProfile` returns its input verbatim for null/blank. This pins that
+    // behaviour only; the byte-identity claim is the end-to-end `checkEmail` test.
     const base = buildEmailPrompt(QUERY, DEFAULT_EMAIL_PROMPT, null);
     expect(buildEmailPrompt(QUERY, DEFAULT_EMAIL_PROMPT, "")).toBe(base);
     expect(buildEmailPrompt(QUERY, DEFAULT_EMAIL_PROMPT, "   ")).toBe(base);
