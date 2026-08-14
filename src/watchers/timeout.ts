@@ -23,6 +23,39 @@ import type { Watcher } from "../types.ts";
  * without ever closing a cycle.
  */
 const WATCHER_TIMEOUT_FLOOR_MS = 120_000; // 2 min for watchers with no configured timeout
+/**
+ * Email's floor is higher because `checkEmail` is the one checker that can spawn
+ * TWICE — its Gmail tools arrive deferred and ~12.5% of spawns never resolve them,
+ * so a bounded retry is the fix (see `email.ts`). Two 60s attempts plus the retry
+ * budget's own 10s margin need 130s, which the generic 120s floor cannot hold: at
+ * that floor the retry is clamped to ~50s, against a slowest-HEALTHY tick of 56.5s,
+ * so the top decile of good runs was unrescuable.
+ *
+ * The alternative was documenting a `config.timeoutMs: 150000` row edit. Rejected on
+ * this repo's own rule — a fix that only works after a hand-edited DB row is inert
+ * where it matters, and the live row has carried no `timeoutMs` for its whole life.
+ * A type-specific floor is the honest place for a per-checker requirement.
+ *
+ * **Why 180 and not 130.** The requirement is 130s (`EMAIL_MAX_ATTEMPTS ×
+ * EMAIL_ATTEMPT_TIMEOUT_MS + EMAIL_BUDGET_SAFETY_MARGIN_MS`); 180 is that plus
+ * deliberate slack, and it matches what the `config.timeoutMs: 150000` row edit this
+ * replaces would have produced — so the shipped net is unchanged from the documented
+ * workaround. Sizing it at exactly 130 would put the net one constant-bump away from
+ * the overrun this exists to prevent.
+ *
+ * ⚠️ **The inputs to that arithmetic live in `email.ts`, and a real import would close
+ * a cycle** — so the dependency is semantic and unenforceable from here. It is
+ * asserted in `email.test.ts` ("the net holds EMAIL_MAX_ATTEMPTS attempts at FULL
+ * length"), which can import both modules. Changing `EMAIL_ATTEMPT_TIMEOUT_MS`,
+ * `EMAIL_MAX_ATTEMPTS` or `HAIKU_TIMEOUT_MS` (which the first aliases) without
+ * re-checking that test is how this silently regresses.
+ *
+ * NB this widens only the SAFETY NET. It does not make any single spawn longer (the
+ * per-attempt timeout is `EMAIL_ATTEMPT_TIMEOUT_MS`, still 60s), so a wedged email
+ * tick occupies at most ~120s of its 180s net — and watchers run concurrently, so a
+ * slower net never starves the others.
+ */
+const EMAIL_TIMEOUT_FLOOR_MS = 180_000;
 /** Headroom the runner's net adds above the checker's own configured timeout. */
 export const WATCHER_TIMEOUT_MARGIN_MS = 30_000;
 
@@ -43,5 +76,6 @@ export function computeWatcherTimeoutMs(watcher: Watcher): number {
   const configured = (watcher.config as { timeoutMs?: number })?.timeoutMs;
   const base =
     typeof configured === "number" && configured > 0 ? configured + WATCHER_TIMEOUT_MARGIN_MS : 0;
-  return Math.max(WATCHER_TIMEOUT_FLOOR_MS, base);
+  const floor = watcher.type === "email" ? EMAIL_TIMEOUT_FLOOR_MS : WATCHER_TIMEOUT_FLOOR_MS;
+  return Math.max(floor, base);
 }

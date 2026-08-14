@@ -16,6 +16,15 @@ let lastPrompt = "";
 // pre-existing test in this file runs under — the liveness predicate must stay inert
 // for them.
 let nextToolCalls: { name: string }[] | undefined;
+// Per-ATTEMPT scripting for the retry tests. When non-empty each entry is consumed
+// by one spawn, so a test can say "attempt 1 fails the predicate, attempt 2 reaches
+// Gmail". Empty ⇒ every spawn answers from `nextToolCalls` (the pre-retry behavior
+// every other test in this file relies on).
+type SpawnScript = { toolCalls?: { name: string }[]; result?: string; throws?: string };
+let spawnScript: SpawnScript[] = [];
+// One entry per spawn actually made — the attempt COUNT is the thing under test, so
+// it has to be observable rather than inferred from the return value.
+let spawnOpts: { timeoutMs?: number }[] = [];
 // NB: mock.module leaks across the watcher test files in a shared process (see the
 // same note in x.test.ts). runner.test.ts — co-located in the test:unit group and
 // evaluated after this file — transitively imports `trackUsage`, so export the full
@@ -24,9 +33,18 @@ let nextToolCalls: { name: string }[] | undefined;
 mock.module("../scheduler/executor.ts", () => ({
   DEFAULT_MODEL: "claude-haiku-4-5-20251001",
   HAIKU_TIMEOUT_MS: 60_000,
-  spawnHaiku: async (prompt: string) => {
+  spawnHaiku: async (prompt: string, opts: { timeoutMs?: number }) => {
     lastPrompt = prompt;
-    return { result: "[]", inputTokens: 0, outputTokens: 0, model: "claude-haiku-4-5-20251001", toolCalls: nextToolCalls };
+    spawnOpts.push({ timeoutMs: opts?.timeoutMs });
+    const step = spawnScript.shift();
+    if (step?.throws) throw new Error(step.throws);
+    return {
+      result: step?.result ?? "[]",
+      inputTokens: 0,
+      outputTokens: 0,
+      model: "claude-haiku-4-5-20251001",
+      toolCalls: step ? step.toolCalls : nextToolCalls,
+    };
   },
   parseHaikuJson: () => ({}),
   parseLegacyHaikuOutput: () => ({ result: "", inputTokens: 0, outputTokens: 0, model: "" }),
@@ -45,7 +63,15 @@ mock.module("../profile/generator.ts", () => ({
   loadInterestProfileForBot: async () => "WRONG-DEFAULT-USER-PROFILE",
 }));
 
-const { buildGmailQuery, checkEmail, gmailToolPrefixes } = await import("./email.ts");
+const {
+  buildGmailQuery,
+  checkEmail,
+  gmailToolPrefixes,
+  emailRetryBudgetMs,
+  emailAttemptTimeoutMs,
+  shouldStartEmailAttempt,
+  EMAIL_MAX_ATTEMPTS,
+} = await import("./email.ts");
 
 describe("buildGmailQuery", () => {
   test("always includes is:unread", () => {
@@ -99,6 +125,8 @@ describe("checkEmail interest-profile injection", () => {
   beforeEach(() => {
     lastPrompt = "";
     profileByUser.clear();
+    spawnScript = [];
+    spawnOpts = [];
   });
 
   test("gate prompt carries the WATCHER OWNER's profile, not bot_default_user's", async () => {
@@ -160,6 +188,8 @@ describe("checkEmail Gmail liveness predicate", () => {
   beforeEach(() => {
     nextToolCalls = undefined;
     profileByUser.clear();
+    spawnScript = [];
+    spawnOpts = [];
     gmailBotDir = mkdtempSync(join(tmpdir(), "muninn-email-bot-"));
     writeFileSync(join(gmailBotDir, ".mcp.json"), JSON.stringify({ mcpServers: { gmail: { type: "stdio", command: "x" } } }));
   });
@@ -263,5 +293,184 @@ describe("checkEmail Gmail liveness predicate", () => {
     nextToolCalls = [{ name: "Bash" }, { name: "Bash" }, { name: "ToolSearch" }];
     // Deduped — 4 Bash calls should not print "Bash, Bash, Bash, Bash".
     await expect(checkEmail(baseWatcher(), gmailBotDir, "jarvis")).rejects.toThrow(/Bash, ToolSearch/);
+  });
+});
+
+describe("checkEmail bounded retry", () => {
+  // The retry's whole premise is that deferred-tool resolution fails INDEPENDENTLY
+  // per spawn (95 of 96 probe runs had to resolve the Gmail tool through a ToolSearch
+  // round-trip; ~12.5% never got there). So the unit under test is: does a second
+  // spawn actually happen, is it bounded at two, and does a rescue return real data.
+  const GMAIL_CALL = [{ name: "mcp__gmail__search_emails" }];
+  const NEVER_REACHED_GMAIL = [{ name: "ToolSearch" }, { name: "Bash" }];
+  const ONE_ALERT = JSON.stringify([
+    { id: "19abc", source: "email", sender: "Posten", subject: "Pakke", summary: "s", urgency: "low" },
+  ]);
+
+  let gmailBotDir: string;
+  beforeEach(() => {
+    nextToolCalls = undefined;
+    profileByUser.clear();
+    spawnScript = [];
+    spawnOpts = [];
+    gmailBotDir = mkdtempSync(join(tmpdir(), "muninn-email-retry-"));
+    writeFileSync(join(gmailBotDir, ".mcp.json"), JSON.stringify({ mcpServers: { gmail: { type: "stdio", command: "x" } } }));
+  });
+  afterEach(() => rmSync(gmailBotDir, { recursive: true, force: true }));
+
+  test("a predicate failure is RETRIED, and the retry's alerts are returned", async () => {
+    spawnScript = [
+      { toolCalls: NEVER_REACHED_GMAIL, result: "[]" },
+      { toolCalls: GMAIL_CALL, result: ONE_ALERT },
+    ];
+    const alerts = await checkEmail(baseWatcher(), gmailBotDir, "jarvis");
+    expect(spawnOpts).toHaveLength(2);
+    // The rescued run's OWN result, not attempt 1's `[]` — a retry that returned the
+    // failed attempt's body would be indistinguishable from no retry at all.
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]!.id).toBe("19abc");
+  });
+
+  test("a spawn THROW is retried too — same root cause, different shape", async () => {
+    // A run that loops on ToolSearch long enough hits the 60s timeout instead of
+    // answering `[]`. Retrying only the `[]` shape would leave the larger half of the
+    // observed failures (3 of the last 30 live ticks) unaddressed.
+    spawnScript = [{ throws: "Haiku timed out after 60000ms (budget 60000ms)" }, { toolCalls: GMAIL_CALL, result: ONE_ALERT }];
+    const alerts = await checkEmail(baseWatcher(), gmailBotDir, "jarvis");
+    expect(spawnOpts).toHaveLength(2);
+    expect(alerts).toHaveLength(1);
+  });
+
+  test("two failures throw the LAST error and stop at 2 attempts", async () => {
+    spawnScript = [
+      { toolCalls: NEVER_REACHED_GMAIL, result: "[]" },
+      { throws: "Haiku timed out after 58000ms (budget 60000ms)" },
+    ];
+    await expect(checkEmail(baseWatcher(), gmailBotDir, "jarvis")).rejects.toThrow(/timed out after 58000ms/);
+    // Bounded: never a third spawn. At 60s per attempt a third does not fit under the
+    // runner's 120s net, and overrunning it re-saves the OLD lastNotifiedIds.
+    expect(spawnOpts).toHaveLength(2);
+  });
+
+  test("attempt 1 gets the FULL attempt timeout — byte-identical to pre-retry", async () => {
+    // Integration smoke only: it confirms the loop wires the decider to the spawn. It
+    // does NOT pin the attempt-1 rule — under the 180s floor `timeoutMs: 1` no longer
+    // shortens anything (the budget is 170s regardless), so this passes even with the
+    // `attempt === 1` branch deleted. The rule is pinned by the pure test above.
+    spawnScript = [{ toolCalls: NEVER_REACHED_GMAIL, result: "[]" }, { toolCalls: GMAIL_CALL, result: "[]" }];
+    await checkEmail(baseWatcher({ config: { timeoutMs: 1 } }), gmailBotDir, "jarvis");
+    expect(spawnOpts[0]!.timeoutMs).toBe(60_000);
+  });
+
+  // The three decision points below are MUTATION-SURVIVABLE through checkEmail: every
+  // retry test returns from attempt 1 instantly, so no integration test can tell a
+  // clamped retry from an unclamped one. A review deleted the clamp outright with all
+  // 29 tests green — and at the old 120s net its absence overran the runner by 3ms,
+  // which costs the whole batch's lastNotifiedIds. Hence direct tests on the pure
+  // deciders: these fail when the behavior is removed, not merely pass while present.
+  describe("attempt-timeout decider (pure)", () => {
+    test("attempt 1 ignores the remaining budget entirely", () => {
+      // The safety invariant: nothing — no config, no elapsed time — can shorten the
+      // attempt that used to be the whole check.
+      expect(emailAttemptTimeoutMs(1, 200_000)).toBe(60_000);
+      expect(emailAttemptTimeoutMs(1, 1_000)).toBe(60_000);
+      expect(emailAttemptTimeoutMs(1, 0)).toBe(60_000);
+    });
+
+    test("a RETRY is clamped to what is left", () => {
+      // The live shape at the old 120s net: 110s budget − a 60s attempt 1 = 50s.
+      expect(emailAttemptTimeoutMs(2, 50_000)).toBe(50_000);
+      expect(emailAttemptTimeoutMs(2, 45_000)).toBe(45_000);
+    });
+
+    test("a retry never EXCEEDS the per-attempt timeout when budget is ample", () => {
+      expect(emailAttemptTimeoutMs(2, 110_000)).toBe(60_000);
+    });
+  });
+
+  describe("start-attempt guard (pure)", () => {
+    test("attempt 1 always starts", () => {
+      expect(shouldStartEmailAttempt(1, 0)).toBe(true);
+      expect(shouldStartEmailAttempt(1, -5_000)).toBe(true);
+    });
+
+    test("a retry needs EMAIL_MIN_ATTEMPT_MS left", () => {
+      expect(shouldStartEmailAttempt(2, 45_000)).toBe(true);
+      expect(shouldStartEmailAttempt(2, 44_999)).toBe(false);
+      // Laptop sleep is the reachable case: a 60s timer that fired ~17 min late
+      // leaves the deadline far in the past.
+      expect(shouldStartEmailAttempt(2, -900_000)).toBe(false);
+    });
+  });
+
+  test("the net holds EMAIL_MAX_ATTEMPTS attempts at FULL length", async () => {
+    // The cross-module invariant: email's floor in timeout.ts exists solely to satisfy
+    // constants that live in email.ts, and a real import would close a cycle — so the
+    // two can only be bound together HERE. Without this, raising
+    // EMAIL_ATTEMPT_TIMEOUT_MS (or HAIKU_TIMEOUT_MS, which it aliases) to 100s is a
+    // one-line change that silently overruns the net: withWatcherTimeout rejects, the
+    // runner re-saves the OLD lastNotifiedIds, and the batch is lost. That is the same
+    // 3ms-overrun defect the clamp was written to prevent, re-entering through a
+    // different constant.
+    //
+    // NB this deliberately does NOT test the clamp — at a 170s budget the clamp is
+    // unreachable (Math.min(60s, 110s) is inert), so a version of this test that
+    // claimed to cover it was vacuous. The clamp is pinned by the pure decider tests
+    // above; those are not redundant with this one and must not be deleted as such.
+    const { computeWatcherTimeoutMs } = await import("./timeout.ts");
+    // Recover the per-attempt timeout through the public API rather than re-stating
+    // the constant, so this tracks a change to it instead of masking one.
+    const attemptMs = emailAttemptTimeoutMs(1, Number.MAX_SAFE_INTEGER);
+    for (const config of [{}, { timeoutMs: 1 }, { timeoutMs: 150_000 }]) {
+      const watcher = baseWatcher({ config });
+      // Every attempt affordable at full length — no attempt should need clamping.
+      expect(emailRetryBudgetMs(watcher)).toBeGreaterThanOrEqual(EMAIL_MAX_ATTEMPTS * attemptMs);
+      // …and the whole worst case still inside the net the runner actually enforces.
+      expect(EMAIL_MAX_ATTEMPTS * attemptMs).toBeLessThanOrEqual(computeWatcherTimeoutMs(watcher));
+    }
+  });
+
+  test("email's net floor holds two FULL attempts — no row edit required", async () => {
+    // The reason the floor is email-specific. At the generic 120s floor the retry was
+    // clamped to ~50s against a 56.5s slowest-healthy tick, so the top decile of good
+    // runs could not be rescued without a hand-edited DB row.
+    const { computeWatcherTimeoutMs } = await import("./timeout.ts");
+    expect(computeWatcherTimeoutMs(baseWatcher())).toBe(180_000);
+    const budget = emailRetryBudgetMs(baseWatcher());
+    expect(emailAttemptTimeoutMs(2, budget - 60_000)).toBe(60_000);
+  });
+
+  test("a run that REACHED Gmail is never retried, however empty the inbox", async () => {
+    // The modal correct output. Retrying a quiet inbox would double the cost of every
+    // healthy tick — the exact opposite of what this is for.
+    spawnScript = [{ toolCalls: GMAIL_CALL, result: "[]" }];
+    expect(await checkEmail(baseWatcher(), gmailBotDir, "jarvis")).toEqual([]);
+    expect(spawnOpts).toHaveLength(1);
+  });
+
+  test("an UNJUDGEABLE run is not retried — no evidence of failure", async () => {
+    // Legacy-JSON parser fallback: no tool list, so the predicate stands down. A retry
+    // here would burn a second spawn on a CLI bug unrelated to Gmail.
+    spawnScript = [{ toolCalls: undefined, result: "[]" }];
+    expect(await checkEmail(baseWatcher(), gmailBotDir, "jarvis")).toEqual([]);
+    expect(spawnOpts).toHaveLength(1);
+  });
+
+  test("unparseable JSON from a run that reached Gmail is not retried either", async () => {
+    // Different failure: the answer is real, only its formatting is wrong.
+    spawnScript = [{ toolCalls: GMAIL_CALL, result: "I looked and found nothing!" }];
+    expect(await checkEmail(baseWatcher(), gmailBotDir, "jarvis")).toEqual([]);
+    expect(spawnOpts).toHaveLength(1);
+  });
+
+  test("budget floors at 170s, so the retry is never config-starved", () => {
+    // Email's net has its own 180s FLOOR, so no row value can push the budget below
+    // one full attempt + a full retry. This pins why the start guard is a wall-clock
+    // guard (laptop sleep) and not a misconfiguration check.
+    expect(emailRetryBudgetMs(baseWatcher())).toBe(170_000);
+    expect(emailRetryBudgetMs(baseWatcher({ config: { timeoutMs: 1 } }))).toBe(170_000);
+    expect(emailRetryBudgetMs(baseWatcher({ config: { timeoutMs: 0 } }))).toBe(170_000);
+    // A configured value only ever RAISES it.
+    expect(emailRetryBudgetMs(baseWatcher({ config: { timeoutMs: 300_000 } }))).toBe(320_000);
   });
 });

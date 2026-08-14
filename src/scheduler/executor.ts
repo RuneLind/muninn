@@ -327,9 +327,18 @@ export async function spawnHaiku(
 
   const timeoutPromise = new Promise<never>((_, reject) => {
     timeoutTimer = setTimeout(() => {
-      log.error("Haiku process timed out after {timeoutMs}ms — killing PID {pid}", { botName: botName ?? "haiku", timeoutMs, pid: proc.pid });
+      // ELAPSED, not just the configured budget. A timer set for 60s can fire far
+      // later than 60s after it was armed: macOS suspends the process on laptop
+      // sleep, and on wake every overdue timer fires at once. Reporting only the
+      // configured number made 2026-08-13 16:03 — the machine slept 18s into the
+      // run and woke 16.8 min later — indistinguishable in the log from a real 60s
+      // timeout, and it cost a diagnosis. The tell was elsewhere (`duration_ms`
+      // 20 711 on a "60000ms" timeout, because the monotonic clock does not advance
+      // across Darwin sleep); it belongs in the message itself.
+      const elapsedMs = Math.round(performance.now() - wallStart);
+      log.error("Haiku process timed out after {elapsedMs}ms (budget {timeoutMs}ms) — killing PID {pid}", { botName: botName ?? "haiku", elapsedMs, timeoutMs, pid: proc.pid });
       proc.kill();
-      reject(new Error(`Haiku timed out after ${timeoutMs}ms`));
+      reject(new Error(`Haiku timed out after ${elapsedMs}ms (budget ${timeoutMs}ms)`));
     }, timeoutMs);
   });
 
