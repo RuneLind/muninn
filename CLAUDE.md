@@ -21,18 +21,6 @@ Default to using Bun instead of Node.js.
 ## Debugging
 When debugging issues, exhaust the most likely root cause hypothesis thoroughly before moving to the next. Avoid shotgun debugging — form a clear hypothesis, test it, and only move on when it's definitively ruled out. Especially for Slack bot issues, check app configuration and permissions before assuming code bugs.
 
-## Testing
-
-Use `bun test` to run tests.
-
-```ts#index.test.ts
-import { test, expect } from "bun:test";
-
-test("hello world", () => {
-  expect(1).toBe(1);
-});
-```
-
 ## Frontend
 
 Muninn's web UI (chat + dashboard) is **server-rendered** via `Bun.serve()` + Hono — not React/vite. If a client bundle is ever needed, use Bun HTML imports (`Bun.serve({ routes: { "/": index } })`), never webpack/vite.
@@ -58,19 +46,7 @@ bun run dev:chat            # Chat-only (no scheduler, port 3011)
 
 ### Multi-Bot Architecture
 
-```
-                    ┌────────────────────────────────────┐
-                    │       Single muninn process        │
-                    │                                    │
-Telegram user A ───►│  Grammy Bot 1 (Jarvis)             │
-                    │    → AI connector (claude-cli)     │
-                    │                                    │
-Telegram user B ───►│  Grammy Bot 2 (Your Bot)           │
-                    │    → AI connector (copilot-sdk)    │
-                    │                                    │
-                    │  Shared: DB, Dashboard, Scheduler  │
-                    └────────────────────────────────────┘
-```
+One muninn process runs every bot: each gets its own Grammy Telegram bot and AI connector, and they share the DB, dashboard and scheduler.
 
 Each bot lives in `bots/<name>/` with its own:
 - `CLAUDE.md` — persona (auto-loaded by Claude CLI as project instructions)
@@ -113,20 +89,6 @@ A bot is active if its folder has a `CLAUDE.md` and a matching `TELEGRAM_BOT_TOK
 | TikTok | `src/tiktok/` | TikTok video summarization *including visual content* — `src/video/media.ts` → `summarizer.ts` (Claude reads frame JPEGs via `extraDirs` → `--add-dir`) → `tiktok-summaries` collection. **Requires `yt-dlp` on PATH**; `SUMMARIZER_BOT` needs a connector with `supportsExtraDirs` (route pre-flights and 503s before the expensive download/whisper work). Optional `TIKTOK_WHISPER_MODEL_PATH` overrides the shared whisper model. |
 | Extensions | `extensions/` | Chrome extensions (Jira research, YouTube summarizer) — each subfolder is a standalone extension |
 
-### Bot Folder Structure
-
-```
-bots/
-├── jarvis/                      ← example bot (included)
-│   ├── CLAUDE.md                ← persona + rules
-│   ├── config.json              ← connector, model, thinking, timeout overrides
-│   ├── .mcp.json                ← Gmail, Calendar MCPs
-│   └── .claude/
-│       └── settings.json  ← tool permissions
-├── your-bot/                    ← add your own here
-│   └── ...
-```
-
 #### Per-bot config.json
 
 All fields are optional — falls back to global `.env` values:
@@ -166,10 +128,6 @@ PostgreSQL + pgvector via Docker (single container).
 - URL: `postgresql://muninn:muninn@127.0.0.1:5435/muninn`
 - Schema: `db/init.sql` (full consolidated schema, applied by Docker on first start)
 - Migrations: `db/migrations/` (numbered `.sql` and `.ts` files, tracked in `schema_migrations` table)
-- Start: `bun run db:up` / Stop: `bun run db:down`
-- Migrate: `bun run db:migrate` / Status: `bun run db:migrate:status` / Baseline: `bun run db:migrate:baseline`
-- Test DB: `bun run db:setup:test` (creates `muninn_test`, applies schema + baseline)
-- Backup: `bun run db:backup` / Restore: `bun run db:restore`
 - Tables: `users` (canonical user identity), `messages`, `activity_log`, `memories` (with vector embeddings + scope), `goals`, `scheduled_tasks`, `watchers` (incl. `last_success_at` — "the checker last covered its window up to here", NOT moved by quiet-hours skips or failures the way `last_run_at` is; the email checker bounds its Gmail query on it, see `src/watchers/CLAUDE.md`), `connectors` (named AI connector configurations), `threads` (per-user+bot conversation isolation, optional FK to connectors), `user_settings`, `haiku_usage`, `traces` (spans with parent-child hierarchy + JSONB attributes), `research_citations` + `search_signals` (durable retrieval signals — citations per research answer; hourly harvest of huginn quality attrs before trace cleanup), `message_feedback` (per-assistant-message 👍/👎 from Telegram reactions + web chat), `interest_profiles` (per user+bot Haiku-distilled interests, injected into watcher gate prompts), `role_overrides` (DB-backed hot overrides for `SUMMARIZER_BOT`/`RESEARCH_BOT`/`HAIKU_BACKEND`, edited from `/models`; beat env at resolution time), `x_link_amplifiers` (cross-run X pointer votes per destination URL; shipped flag-gated OFF — see `captureAmplifyMin` in `src/watchers/CLAUDE.md`)
 
 ### Configuration (.env)
@@ -245,94 +203,15 @@ The `claude-sdk` connector uses `@anthropic-ai/claude-agent-sdk` with `bypassPer
 
 The **/models** dashboard page shows the active connector per bot — use it to confirm any flip or rollback landed.
 
-### Adding a New Bot
+### Adding a New Bot / Config Sync / Serena
 
-1. Create `bots/<name>/CLAUDE.md` with the bot's persona
-2. Optionally add `bots/<name>/config.json` (connector, model, thinking, timeout overrides)
-3. Optionally add `bots/<name>/.mcp.json` and `bots/<name>/.claude/settings.json`
-4. Add `TELEGRAM_BOT_TOKEN_<NAME>=...` and `TELEGRAM_ALLOWED_USER_IDS_<NAME>=...` to `.env`
-5. Restart — the bot is auto-discovered
-
-### Config Sync
-
-Bot folders (except `jarvis`) are gitignored. The manifest at `bots.config.json` (repo root) maps each bot to its source-of-truth repo — either a local path (e.g. `~/source/private/muninn-config`) or a git URL (e.g. `git@github.com:capraconsulting/huginn-capra.git`). Git-URL repos are sparse-cloned into `~/.muninn/bot-repos/<name>/`.
-
-`.env` is **per-developer** — each dev maintains their own with the tokens for the bots they actually run. It is not synced by this tool.
-
-```bash
-bun run config:sync                # push local bots/<name>/ → each repo
-bun run config:sync -- --pull      # fetch latest from git remotes first
-bun run config:sync -- --commit    # commit + push in every touched repo
-bun run config:restore             # reverse: pull each repo subpath → bots/<name>/
-```
-
-Entries in the manifest whose `repo` path doesn't exist (or whose git clone fails) are skipped with a warning, so a contributor only needs access to the repos for the bots they care about. `--restore` skips entries whose source-of-truth doesn't have a `CLAUDE.md` yet (i.e. has never been populated).
-
-Manifest entry shapes:
-```json
-{
-  "jarvis":  { "inline": true },
-  "capra":   { "repo": "https://github.com/capraconsulting/huginn-capra.git", "subpath": "bot" },
-  "melosys": { "repo": "~/source/private/muninn-config", "subpath": "bots/melosys" }
-}
-```
-
-Path conventions inside synced `.mcp.json`: paths are resolved relative to `cwd: bots/<name>/`. To reference a sibling project (e.g. `~/source/private/huginn` when muninn is at `~/source/private/muninn`), use `../../../huginn`. Paths in `env` blocks are read literally — for HOME-relative paths use shell expansion in a `bash -c` command instead.
-
-## Serena Code Analysis (MCP Proxy)
-
-Serena provides code search and analysis tools (find_symbol, search_for_pattern, etc.) for large codebases. Instead of spawning Serena per chat session, instances run as persistent HTTP servers managed from the dashboard.
-
-### How it works
-
-1. Open the **Serena** page in the dashboard (`/serena`)
-2. Click **Start** on the instances you need (or **Start All**)
-3. Each instance spawns Serena with `--transport streamable-http` on a dedicated port
-4. The bot's `.mcp.json` has `type: "http"` entries pointing directly to these ports
-5. The copilot-sdk connects to Serena over HTTP — no proxy, no per-session spawning
-6. Click **Stop** when done to free resources
-
-### Configuration
-
-Serena instances are defined in the bot's `config.json` under a `serena` key:
-
-```json
-{
-  "serena": [
-    { "name": "serena-api", "displayName": "Backend API", "projectPath": "/path/to/project", "port": 9121 }
-  ]
-}
-```
-
-The matching `.mcp.json` entry points to the instance's HTTP endpoint:
-
-```json
-{
-  "serena-api": { "type": "http", "url": "http://127.0.0.1:9121/mcp" }
-}
-```
-
-### Manual usage
-
-Start an instance outside muninn: `uvx --from "git+https://github.com/oraios/serena" serena start-mcp-server --transport streamable-http --port 9121 --host 127.0.0.1 --context claude-code --project /path/to/project --open-web-dashboard False`. Pre-index for faster startup: `… serena project index /path/to/project --timeout 300`.
-
-### Key files
-
-| File | Purpose |
-|---|---|
-| `src/serena/manager.ts` | SerenaManager singleton — start/stop/index lifecycle |
-| `src/serena/config.ts` | Config types + discovery from bot config.json |
-| `src/dashboard/views/serena-page.ts` | Dashboard UI for managing instances |
-| `src/ai/mcp-tool-caller.ts` | MCP Debug client — supports both stdio and HTTP servers |
+Adding a bot: `bots/CLAUDE.md`. Syncing gitignored bot folders to their source-of-truth repos (`bots.config.json`, `bun run config:sync`): the `muninn-config-sync` skill. Serena MCP code-analysis instances (`src/serena/`, the `/serena` dashboard page): the `muninn-serena` skill.
 
 ## Corrective Retrieval (Path D, in huginn)
 
 The rescue for weak knowledge searches runs inside huginn (`main/core/search_response_formatter.py` — `run_corrective_search`): on a weak signal with a usable broader/narrower-query hint it re-queries, merges + dedupes, and returns one consolidated tool result — no model re-call, no `.mcp.json` change. Per-call knob `corrective="auto"/"off"/"force"`. The dashboard waterfall shows a blue `rescue ⟲N` chip when it fired (muninn side: `src/dashboard/views/components/span-label.ts`); other chips: red `0 hits`, yellow low-confidence flip. History (incl. the removed muninn-side Path C): `mimir/plans/muninn-corrective-rag-rework.md` + siblings.
 
-## Slack Bot
-When implementing Slack bot features, be aware of the different message contexts (DMs, threads, channels, Assistant API) — each has different API constraints and capabilities. Check Slack app configuration settings (like 'Agent or Assistant' toggle) as a potential root cause before writing code fixes.
-
-### Testing
+## Testing
 
 Always run `bun run test` after adding or changing a feature to verify nothing is broken. Tests are split into three sub-scripts (unit / db / handlers) to avoid `mock.module()` leakage between files:
 
@@ -347,7 +226,7 @@ DB tests require the local Postgres container (`bun run db:up`) and a test datab
 
 **`mock.module` needs its own process, not just its own file.** It invalidates the target module for the whole `bun test` process graph, so any OTHER file already loaded in that chunk which transitively imports the mocked module fails export resolution — e.g. mocking `db/goals.ts` inside `test:unit`'s first chunk breaks `src/profile/generator.ts` with `SyntaxError: Export named 'refreshInterestProfile' not found`. Spreading the real module into the mock (`{...real, override}`) fixes only the mocking file's OWN imports and does not prevent this. A mock.module test therefore gets its own `&& bun test <file>` link in the chain (see `src/profile/`, `task-executor.test.ts`, `data-routes-bot-scope.test.ts`), and says so in its header — the placement is load-bearing and invisible from the file alone.
 
-### Conventions
+## Conventions
 
 - DB access: `postgres` npm package (not Supabase client, not Bun.sql)
 - Memory/goal/schedule extraction: fire-and-forget async Claude Haiku calls
@@ -399,9 +278,3 @@ After creating database migrations, always remind the user to run them against t
 
 ## Code Quality
 This project is primarily TypeScript. Always ensure code compiles cleanly (`tsc --noEmit` or equivalent) before committing. When fixing TypeScript errors, fix all of them — don't leave partial fixes.
-
-## Working Principles
-- **Think before coding** — state assumptions, ask rather than guess, stop when confused.
-- **Simplicity first** — minimum code that solves the problem; no speculative abstractions for single-use code.
-- **Surgical changes** — touch only what you must; don't refactor adjacent code; match existing style.
-- **Goal-driven** — define success criteria, then loop until verified.

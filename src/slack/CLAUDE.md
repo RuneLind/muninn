@@ -2,6 +2,8 @@
 
 > See also: skills `slack-bolt-patterns` for deeper reference.
 
+**Debugging rule of thumb:** the four message contexts (DMs, threads, channels, Assistant API) each have different API constraints and capabilities. Check Slack app configuration settings (like the 'Agent or Assistant' toggle) as a potential root cause before writing code fixes.
+
 ## File Overview
 
 | File | Role |
