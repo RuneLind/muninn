@@ -160,7 +160,8 @@ export async function loadRunHealth(
  * It reads the flag off the RECORD (`h.seeded`), not from whether THIS call did the
  * seeding: seeding happens only on the run that finds no prior, so a run-local flag
  * flipped the key between run 1 and run 2 and delivered the same episode twice — on
- * every row that escalates at 1, i.e. all seven daily/weekly ones.
+ * every row that escalates at 1, which is eight of the eleven live rows (five weekly,
+ * plus the committer and both daily digests).
  *
  * ⚠️ ACCEPTED TRADE, stated because it is not free: while snapshot WRITES are failing
  * nothing persists, `consecutive` is pinned at 1, and the id is therefore constant
@@ -326,6 +327,19 @@ const DEFAULT_NOTIFY_DEPS: FailureNotifyDeps = {
   pushActivity: (type, text, extra) => activityLog.push(type, text, extra as never),
 };
 
+export type DeliveryOutcome =
+  /** Went out to the user on this run. */
+  | "sent"
+  /** Already delivered on an earlier run — the user HAS been told. */
+  | "deduped"
+  /** Suppressed by the owner's quiet hours; will re-emit. */
+  | "held";
+
+export interface DeliveryResult {
+  ids: string[];
+  outcome: DeliveryOutcome;
+}
+
 /**
  * Deliver a run-health escalation for a watcher whose checker THREW.
  *
@@ -347,19 +361,6 @@ const DEFAULT_NOTIFY_DEPS: FailureNotifyDeps = {
  * ~23 activity rows a day on the hourly email row, each one claiming the user had not
  * been told when they had.
  */
-export type DeliveryOutcome =
-  /** Went out to the user on this run. */
-  | "sent"
-  /** Already delivered on an earlier run — the user HAS been told. */
-  | "deduped"
-  /** Suppressed by the owner's quiet hours; will re-emit. */
-  | "held";
-
-export interface DeliveryResult {
-  ids: string[];
-  outcome: DeliveryOutcome;
-}
-
 export async function deliverFailureAlerts(
   api: Api,
   watcher: Watcher,
