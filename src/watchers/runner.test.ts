@@ -3,6 +3,7 @@ import { shouldSkipWikiDraftingRun } from "./wiki-drafting.ts";
 import { __setWikiReadonlyForTest } from "../wiki/readonly.ts";
 import {
   runChecker,
+  finishWatcherRun,
   contentHash,
   extractProperNouns,
   formatAlerts,
@@ -580,6 +581,61 @@ const readonlyWatcher = (type: string): Watcher => ({
   updatedAt: Date.now(),
 });
 const fakeBot = { name: "jarvis", dir: "/nonexistent", persona: "", telegramAllowedUserIds: [], slackAllowedUserIds: [] } as any;
+
+describe("finishWatcherRun", () => {
+  // The watermark write has no other unit-testable seam: runWatchers is not
+  // exercised by this file, and this chunk deliberately avoids mock.module. Deps
+  // injection is the run-health.ts idiom, used here for the same reason.
+  function deps(markImpl?: (id: string, at: Date) => Promise<void>) {
+    const calls: { lastRun: [string, string[]][]; marks: [string, Date][] } = { lastRun: [], marks: [] };
+    return {
+      calls,
+      d: {
+        updateWatcherLastRun: async (id: string, ids: string[]) => { calls.lastRun.push([id, ids]); },
+        markWatcherSuccess: markImpl ?? (async (id: string, at: Date) => { calls.marks.push([id, at]); }),
+      },
+    };
+  }
+
+  test("always advances last_run_at", async () => {
+    const { calls, d } = deps();
+    await finishWatcherRun("w1", ["a"], {}, d);
+    expect(calls.lastRun).toEqual([["w1", ["a"]]]);
+  });
+
+  test("does NOT write the watermark when the checker claimed no coverage", async () => {
+    // The quiet-hours skip and every failed/unjudgeable run land here.
+    const { calls, d } = deps();
+    await finishWatcherRun("w1", ["a"], {}, d);
+    expect(calls.marks).toEqual([]);
+  });
+
+  test("writes the watermark when the checker claimed coverage", async () => {
+    // Kills the inert-fix mutation: dropping this call leaves last_success_at
+    // NULL forever and the whole feature dead with the suite green.
+    const at = new Date(1_700_000_000_000);
+    const { calls, d } = deps();
+    await finishWatcherRun("w1", ["a"], { at }, d);
+    expect(calls.marks).toEqual([["w1", at]]);
+  });
+
+  test("passes the checker's timestamp through unchanged", async () => {
+    // Kills "write now() instead" — the anchor must stay at check ENTRY.
+    const at = new Date(1_700_000_000_000);
+    const { calls, d } = deps();
+    await finishWatcherRun("w1", [], { at }, d);
+    expect(calls.marks[0]![1].getTime()).toBe(at.getTime());
+  });
+
+  test("a failing watermark write does not fail the run", async () => {
+    // An unmigrated box (069 not applied) throws here on every tick. The alerts
+    // are already delivered by this point, so it must degrade to the date-only
+    // query rather than turning a degraded state into a broken one.
+    const { calls, d } = deps(async () => { throw new Error('column "last_success_at" does not exist'); });
+    await expect(finishWatcherRun("w1", ["a"], { at: new Date() }, d)).resolves.toBeUndefined();
+    expect(calls.lastRun).toHaveLength(1);
+  });
+});
 
 describe("runChecker — wiki-readonly guard", () => {
   // Asserted on WHICH CHECKER THE RUN REACHES, not on the returned `[]`: every

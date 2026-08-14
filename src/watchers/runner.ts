@@ -1,10 +1,10 @@
 import type { Api } from "grammy";
 import type { BotConfig } from "../bots/config.ts";
 import type { Watcher, WatcherAlert } from "../types.ts";
-import { getWatchersDueNow, updateWatcherLastRun } from "../db/watchers.ts";
+import { getWatchersDueNow, updateWatcherLastRun, markWatcherSuccess } from "../db/watchers.ts";
 import { isQuietHours } from "./quiet-hours.ts";
 import { computeWatcherTimeoutMs } from "./timeout.ts";
-import { checkEmail } from "./email.ts";
+import { checkEmail, type EmailCoverage } from "./email.ts";
 import { checkNews } from "./news.ts";
 import { checkX } from "./x.ts";
 import { checkAnthropic } from "./anthropic.ts";
@@ -34,6 +34,75 @@ import { Tracer, type TraceContext } from "../tracing/index.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("watchers");
+
+/**
+ * Record a checker's coverage watermark, non-fatally.
+ *
+ * The alerts are already delivered by the time this runs, so failing the run
+ * over a bookkeeping UPDATE would turn a degraded state into a broken one. The
+ * case worth naming: a box running this code before `bun run db:migrate` has
+ * applied 069 has no `last_success_at` column, so every call throws. Swallowing
+ * it degrades the email checker to the pre-PR date-only query — the old
+ * behaviour, not a new failure — and the warn says which.
+ *
+ * Kept OUT of `updateWatcherLastRun`, which every watcher of every type calls on
+ * every outcome: folding it in there meant an unmigrated box threw on all three
+ * call sites, so `last_run_at` never advanced, every enabled watcher was
+ * re-selected on every 60s tick, and the hourly email row spawned Haiku 60× an
+ * hour.
+ */
+export interface FinishRunDeps {
+  updateWatcherLastRun: typeof updateWatcherLastRun;
+  markWatcherSuccess: typeof markWatcherSuccess;
+}
+const DEFAULT_FINISH_DEPS: FinishRunDeps = { updateWatcherLastRun, markWatcherSuccess };
+
+/**
+ * Close out a DELIVERED run: advance the cadence, and record the coverage
+ * watermark if the checker claimed one.
+ *
+ * A function with injected deps rather than two statements inline, because the
+ * watermark half is otherwise the single line that makes this whole feature
+ * exist — delete it and `last_success_at` stays NULL forever, the email checker
+ * takes the date-only query on every tick, and the change is inert with `tsc`
+ * and the entire suite green. That is this repo's named recurring defect, and
+ * `runWatchers` has no other seam a unit test can reach (`runner.test.ts`
+ * deliberately avoids `mock.module` in its chunk).
+ *
+ * Callers must only reach this AFTER the alerts are out: the watermark says
+ * "everything in that window has been dealt with", and the next query steps over
+ * everything older.
+ */
+export async function finishWatcherRun(
+  watcherId: string,
+  notifiedIds: string[],
+  coverage: EmailCoverage,
+  deps: FinishRunDeps = DEFAULT_FINISH_DEPS,
+): Promise<void> {
+  await deps.updateWatcherLastRun(watcherId, notifiedIds);
+  if (!coverage.at) return;
+  try {
+    await deps.markWatcherSuccess(watcherId, coverage.at);
+  } catch (err) {
+    // Non-fatal: the alerts are already delivered, so failing the run over a
+    // bookkeeping UPDATE would turn a degraded state into a broken one. The case
+    // worth naming is a box running this before `bun run db:migrate` applied 069
+    // — no column, so every call throws. Swallowing degrades the email checker to
+    // the pre-PR date-only query (the old behaviour, not a new failure).
+    //
+    // This is also why the watermark is NOT folded into `updateWatcherLastRun`,
+    // which every watcher of every type calls on every outcome: folded in, an
+    // unmigrated box threw on all three of its call sites, so `last_run_at` never
+    // advanced, every enabled watcher was re-selected on every 60s tick, and the
+    // hourly email row spawned Haiku 60× an hour.
+    log.warn(
+      "Could not record watcher success watermark ({error}) — the email checker's next tick falls back to " +
+        "the date-only Gmail query (the whole day's unread pile). If this says the last_success_at column " +
+        "is missing, migration 069 has not been applied to this database.",
+      { watcherId, error: err instanceof Error ? err.message : String(err) },
+    );
+  }
+}
 
 /** Running token/cost totals across a checker's (possibly multiple) spawnHaiku
  *  calls — x/anthropic make a gate + a digest/capture call per run, so the
@@ -446,7 +515,10 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       // Key the guard on the RAW checker promise, created BEFORE the timeout wrap
       // and released in its OWN .finally — keying the timeout-raced promise would
       // free the slot while an orphaned checker keeps running.
-      const raw = runChecker(watcher, botConfig, telemetry);
+      // Filled in by the checker when the run demonstrably covered its window.
+      // Consumed AFTER delivery below — see `markWatcherSuccessSafely`.
+      const coverage: EmailCoverage = {};
+      const raw = runChecker(watcher, botConfig, telemetry, DEFAULT_WIKI_CHECKERS, coverage);
       void raw.finally(() => releaseChecker(watcher.id, claim.token));
 
       const alerts = await withWatcherTimeout(
@@ -565,7 +637,13 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
         ...newEntries,
       ].slice(-MAX_NOTIFIED_IDS);
 
-      await updateWatcherLastRun(watcher.id, updatedIds);
+      // AFTER delivery, deliberately — see `finishWatcherRun`. An earlier cut
+      // wrote the watermark inside the checker, before the send: a Telegram 502
+      // then left it advanced over alerts that were neither delivered nor
+      // recorded in `lastNotifiedIds`, and the next tick's narrower window
+      // stepped straight past them. Unread mail is re-offered by nothing else,
+      // so that loss is permanent.
+      await finishWatcherRun(watcher.id, updatedIds, coverage);
       // Token totals from the checker's spawnHaiku call(s) — stamped onto the
       // span (read back into Recent via getRecentAgentTraces off the childless
       // watcher span's OWN attributes) and onto the Running/completed card.
@@ -714,6 +792,10 @@ export async function runChecker(
   botConfig: BotConfig,
   telemetry?: HaikuTelemetry,
   checkers: WikiCheckers = DEFAULT_WIKI_CHECKERS,
+  // Out-param, email only today. Threaded through rather than returned because
+  // this signature is shared by every checker and the runner needs coverage even
+  // for a run whose delivery subsequently fails.
+  coverage?: EmailCoverage,
 ): Promise<WatcherAlert[]> {
   // The bot folder is no longer a cwd — it is where a checker's MCP servers and
   // tool permissions are declared (`--mcp-config` / `--settings`). Only the email
@@ -736,7 +818,7 @@ export async function runChecker(
   }
   switch (watcher.type) {
     case "email":
-      return await checkEmail(watcher, botConfig.dir, botName, telemetry);
+      return await checkEmail(watcher, botConfig.dir, botName, telemetry, coverage);
     case "news":
       return await checkNews(watcher);
     case "x":
