@@ -65,6 +65,8 @@ mock.module("../profile/generator.ts", () => ({
 
 const {
   buildGmailQuery,
+  buildEmailPrompt,
+  DEFAULT_EMAIL_PROMPT,
   checkEmail,
   gmailToolPrefixes,
   emailRetryBudgetMs,
@@ -472,5 +474,48 @@ describe("checkEmail bounded retry", () => {
     expect(emailRetryBudgetMs(baseWatcher({ config: { timeoutMs: 0 } }))).toBe(170_000);
     // A configured value only ever RAISES it.
     expect(emailRetryBudgetMs(baseWatcher({ config: { timeoutMs: 300_000 } }))).toBe(320_000);
+  });
+});
+
+// ── buildEmailPrompt ─────────────────────────────────────────────────
+//
+// Extracted from `checkEmail` so the deferral probe can send the REAL prompt
+// instead of a copy that had already drifted (it omitted the interest-profile
+// block). The extraction's whole justification is byte-identical output, and
+// nothing pinned it — a future edit would change every production email check
+// and the probe's fidelity claim together, silently.
+
+describe("buildEmailPrompt", () => {
+  const QUERY = "is:unread after:2026/08/14";
+
+  test("carries the query, the criteria and the format contract, in that order", () => {
+    const out = buildEmailPrompt(QUERY, DEFAULT_EMAIL_PROMPT, null);
+    expect(out.indexOf(QUERY)).toBeLessThan(out.indexOf("Worth notifying:"));
+    expect(out.indexOf("Worth notifying:")).toBeLessThan(out.indexOf("CRITICAL:"));
+    expect(out.indexOf("CRITICAL:")).toBeLessThan(out.indexOf("Return ONLY a JSON array"));
+  });
+
+  test("a watcher's own criteria replace the default outright", () => {
+    const out = buildEmailPrompt(QUERY, "Only mail from my accountant.", null);
+    expect(out).toContain("Only mail from my accountant.");
+    expect(out).not.toContain("Worth notifying:");
+  });
+
+  test("no profile ⇒ byte-identical to the unwrapped prompt", () => {
+    // `withInterestProfile` returns its input verbatim for null/blank, which is what
+    // makes the profile-less path provably unchanged by the extraction.
+    const base = buildEmailPrompt(QUERY, DEFAULT_EMAIL_PROMPT, null);
+    expect(buildEmailPrompt(QUERY, DEFAULT_EMAIL_PROMPT, "")).toBe(base);
+    expect(buildEmailPrompt(QUERY, DEFAULT_EMAIL_PROMPT, "   ")).toBe(base);
+  });
+
+  test("the profile block lands LAST, after the format contract", () => {
+    // Load-bearing: `withInterestProfile`'s trailer says "the output-format
+    // instructions above still apply", which is only true if the format block is
+    // above it. This is why the FULL assembled prompt is wrapped, not the criteria.
+    const out = buildEmailPrompt(QUERY, DEFAULT_EMAIL_PROMPT, "Cares about Rust and boats.");
+    expect(out).toContain("Cares about Rust and boats.");
+    expect(out.indexOf("Return ONLY a JSON array")).toBeLessThan(out.indexOf("Cares about Rust and boats."));
+    expect(out.startsWith(buildEmailPrompt(QUERY, DEFAULT_EMAIL_PROMPT, null))).toBe(true);
   });
 });

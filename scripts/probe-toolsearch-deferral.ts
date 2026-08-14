@@ -62,25 +62,7 @@ import { resolveAgentCwd } from "../src/ai/agent-cwd.ts";
 const REPO = resolve(__dirname, "..");
 
 /** Positive integer or bust — `N=abc` used to print a confident `CLEAN 0/0`. */
-const MAX_N = 100;
-function intEnv(name: string, fallback: number, max: number): number {
-  const raw = process.env[name];
-  if (raw == null || raw === "") return fallback;
-  // Decimal digits only. `Number.isInteger` alone accepts `1e3`, and every run is a
-  // real Haiku spawn plus a real Gmail search — a fat-fingered `N=1e2` is a far more
-  // expensive typo than the `N=abc` the guard was written for.
-  if (!/^\d+$/.test(raw.trim())) {
-    console.error(`[probe] ${name}="${raw}" is not a plain positive integer`);
-    process.exit(1);
-  }
-  const n = Number(raw);
-  if (n < 1 || n > max) {
-    console.error(`[probe] ${name}=${n} out of range (1..${max}) — each run is a real spawn and a real Gmail search`);
-    process.exit(1);
-  }
-  return n;
-}
-const N = intEnv("N", 12, MAX_N);
+
 
 /**
  * The per-attempt budget production actually enforces. Imported, not copied: at the
@@ -122,6 +104,32 @@ const ARMS: Array<{ label: string; bin: string }> = (process.env.PROBE_ARMS
 const CONCURRENCY = ARMS.length;
 
 /**
+ * Cap on TOTAL spawns, not spawns per arm. `N=100` with five arms is 500 real
+ * Haiku spawns and 500 real Gmail searches, which the per-arm reading of this
+ * number waved through while its own error message said "each run is a real
+ * spawn". This is why the arm list is parsed above.
+ */
+const MAX_TOTAL_RUNS = 100;
+function intEnv(name: string, fallback: number, max: number): number {
+  const raw = process.env[name];
+  if (raw == null || raw === "") return fallback;
+  // Decimal digits only. `Number.isInteger` alone accepts `1e3`, and every run is a
+  // real Haiku spawn plus a real Gmail search — a fat-fingered `N=1e2` is a far more
+  // expensive typo than the `N=abc` the guard was written for.
+  if (!/^\d+$/.test(raw.trim())) {
+    console.error(`[probe] ${name}="${raw}" is not a plain positive integer`);
+    process.exit(1);
+  }
+  const n = Number(raw);
+  if (n < 1 || n > max) {
+    console.error(`[probe] ${name}=${n} out of range (1..${max} for ${ARMS.length} arm(s)) — every run is a real spawn and a real Gmail search`);
+    process.exit(1);
+  }
+  return n;
+}
+const N = intEnv("N", 12, Math.floor(MAX_TOTAL_RUNS / ARMS.length));
+
+/**
  * The live watcher row's own inputs. A hardcoded filter/prompt/model matches
  * production only until someone edits the row, after which the probe keeps
  * measuring the old shape while claiming to track the current one.
@@ -133,13 +141,20 @@ async function loadLiveTask(): Promise<{
   botDir: string;
   source: string;
 }> {
-  const fallback = () => ({
+  const fallback = () => {
+    const dir = resolve(REPO, "bots/jarvis");
+    if (!existsSync(dir)) {
+      console.error(`[probe] no watcher row to read and ${dir} does not exist — nothing to probe`);
+      process.exit(1);
+    }
+    return {
     query: buildGmailQuery(undefined, Date.now()),
     prompt: buildEmailPrompt(buildGmailQuery(undefined, Date.now()), DEFAULT_EMAIL_PROMPT, null),
     model: DEFAULT_MODEL,
-    botDir: resolve(REPO, "bots/jarvis"),
+    botDir: dir,
     source: "shipped defaults (no DB)",
-  });
+    };
+  };
   if (process.env.PROBE_NO_DB === "1") return fallback();
   try {
     const { initDb } = await import("../src/db/client.ts");
@@ -168,7 +183,7 @@ async function loadLiveTask(): Promise<{
     // reported as the production shape.
     const botDir = resolve(REPO, "bots", String(row.bot_name));
     if (!existsSync(botDir)) {
-      console.error(`[probe] watcher row belongs to bot "${row.bot_name}" but ${botDir} does not exist`);
+      console.error(`[probe] watcher row belongs to bot "${row.bot_name}" but ${botDir} does not exist — run with PROBE_NO_DB=1 to probe the shipped defaults instead`);
       process.exit(1);
     }
     return {
@@ -213,10 +228,16 @@ interface Run {
   arm: string;
   i: number;
   outcome: Outcome;
-  /** Called a Gmail tool AND that call did not come back an error. */
-  reachedGmail: boolean;
-  /** Called a Gmail tool that returned `is_error` (denied / MCP failure). */
+  /**
+   * Issued a `mcp__gmail__*` tool CALL at all. This — and only this — answers the
+   * deferral question, which is whether the deferred tool ever became callable.
+   * Deliberately blind to whether the call then worked.
+   */
+  calledGmail: boolean;
+  /** A Gmail call came back `is_error` (permission denied / MCP failure). */
   gmailError: boolean;
+  /** Called Gmail AND at least one of those calls succeeded. */
+  reachedGmail: boolean;
   toolSearches: number;
   tools: string[];
   exitCode: number | null;
@@ -248,16 +269,17 @@ function classify(tools: string[], gmail: boolean): Outcome {
   if (bash) return "BASH";
   if (gmail) return "SLOW";
   if (ts > 1) return "LOOP";
-  // Exactly one ToolSearch and nothing else: it resolved (or failed to) and then gave
-  // up without calling anything. That is a DIFFERENT population from "called literally
-  // nothing", which is what NOTOOL means — the first cut of this bucket conflated them
-  // right after adding OTHER to stop exactly that.
+  // Everything else: tools were called, none of them Gmail or Bash, with at most one
+  // ToolSearch. Covers `["ToolSearch"]` (resolved or failed, then gave up) and
+  // `["Read"]`/`["ToolSearch","Read"]` (wandered off). A DIFFERENT population from
+  // NOTOOL, which now means only "called literally nothing" — conflating the two is
+  // what OTHER was added to stop, and the first cut of it re-conflated them.
   return "OTHER";
 }
 
 async function once(arm: string, bin: string, i: number): Promise<Run> {
   const t0 = performance.now();
-  const base: Omit<Run, "outcome" | "reachedGmail" | "gmailError" | "toolSearches" | "tools" | "exitCode" | "ms"> =
+  const base: Omit<Run, "outcome" | "calledGmail" | "reachedGmail" | "gmailError" | "toolSearches" | "tools" | "exitCode" | "ms"> =
     { arm, i };
   try {
     const args = buildHaikuArgs({
@@ -298,8 +320,32 @@ async function once(arm: string, bin: string, i: number): Promise<Run> {
     }, RUN_TIMEOUT_MS);
     // stderr is drained CONCURRENTLY — `executor.ts` does the same and says why:
     // an undrained pipe fills at ~64KB and blocks the child while we read stdout.
+    //
+    // stdout is read CHUNK BY CHUNK, and stops accumulating the moment the deadline
+    // fires. Reading to the end is what let events emitted AFTER the kill reclassify
+    // a run: making `reachedGmail` real on TIMEOUT (the fix one round ago) meant a
+    // Gmail call the model got out during the teardown moved the run from "never
+    // called Gmail" (deferral — what production would have seen) to "reached Gmail
+    // but timed out" (budget). Measured: a real run yielded 60721ms of stream against
+    // a 60000ms budget, and a child that survives SIGTERM makes the window unbounded.
+    const readStdout = async () => {
+      const reader = proc.stdout.getReader();
+      const dec = new TextDecoder();
+      let acc = "";
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          // Checked BEFORE appending: whatever arrived in the chunk that raced the
+          // deadline is not evidence about what the run had done by the deadline.
+          if (killed) break;
+          if (value) acc += dec.decode(value, { stream: true });
+        }
+      } catch { /* killed mid-read — keep what we have */ }
+      return acc;
+    };
     const [out, errText] = await Promise.all([
-      new Response(proc.stdout).text().catch(() => ""),
+      readStdout().catch(() => ""),
       new Response(proc.stderr).text().catch(() => ""),
     ]);
     const exitCode = await proc.exited;
@@ -333,9 +379,15 @@ async function once(arm: string, bin: string, i: number): Promise<Run> {
     const gmailCalls = [...byId.entries()].filter(([, name]) => name.startsWith("mcp__gmail__"));
     const gmailOk = gmailCalls.some(([id]) => !erroredIds.has(id));
     const gmailErrored = gmailCalls.some(([id]) => erroredIds.has(id));
+    // THE DEFERRAL QUESTION IS "was it called", NOT "did it work". Deriving the
+    // headline count from `reachedGmail` reported a DENIED Gmail call — deferral
+    // having plainly succeeded — as "never called Gmail", and made the same run land
+    // in CRASH or OTHER depending only on the CLI's exit code. Three fields, each
+    // used at exactly one place, is the fix for a field that meant two things.
+    const called = tools.some((t) => t.startsWith("mcp__gmail__"));
     // Fallback for a Gmail call whose stream carried no usable id: treat presence
     // as reached, since the alternative is under-counting the healthy case.
-    const gmailByName = tools.some((t) => t.startsWith("mcp__gmail__"));
+    const gmailByName = called;
 
     const ms = Math.round(performance.now() - t0);
     const reached = gmailCalls.length > 0 ? gmailOk : gmailByName;
@@ -345,18 +397,19 @@ async function once(arm: string, bin: string, i: number): Promise<Run> {
       // exceeded the budget count as "never reached Gmail" — folding the budget
       // failure into the deferral rate under the deferral rate's name. They are
       // different mechanisms with different fixes; the summary now reports both.
-      return { ...base, outcome: "TIMEOUT", reachedGmail: reached, gmailError: gmailErrored, toolSearches: tools.filter((t) => t === "ToolSearch").length, tools, exitCode, ms, note: `killed at ${RUN_TIMEOUT_MS}ms` };
+      return { ...base, outcome: "TIMEOUT", calledGmail: called, reachedGmail: reached, gmailError: gmailErrored, toolSearches: tools.filter((t) => t === "ToolSearch").length, tools, exitCode, ms, note: `killed at ${RUN_TIMEOUT_MS}ms` };
     }
     // A non-zero exit says nothing about ToolSearch — but only the tool-less case was
     // caught. A rate-limit exit or an OAuth expiry AFTER two ToolSearch calls landed
     // in LOOP/OTHER and counted in the deferral denominator, which is the inflation
     // this bucket exists to remove.
-    if (exitCode !== 0 && !reached) {
-      return { ...base, outcome: "CRASH", reachedGmail: false, gmailError: gmailErrored, toolSearches: tools.filter((t) => t === "ToolSearch").length, tools, exitCode, ms, note: errText.trim().split("\n").pop()?.slice(0, 120) || `exit ${exitCode}` };
+    if (exitCode !== 0 && !called) {
+      return { ...base, outcome: "CRASH", calledGmail: false, reachedGmail: false, gmailError: gmailErrored, toolSearches: tools.filter((t) => t === "ToolSearch").length, tools, exitCode, ms, note: errText.trim().split("\n").pop()?.slice(0, 120) || `exit ${exitCode}` };
     }
     return {
       ...base,
       outcome: classify(tools, reached),
+      calledGmail: called,
       reachedGmail: reached,
       gmailError: gmailErrored,
       toolSearches: tools.filter((t) => t === "ToolSearch").length,
@@ -368,7 +421,7 @@ async function once(arm: string, bin: string, i: number): Promise<Run> {
     // A spawn that throws (bad PROBE_ARMS path, unwritable cwd) used to abort
     // Promise.all and destroy the whole batch's summary AFTER the other runs had
     // already been paid for.
-    return { ...base, outcome: "CRASH", reachedGmail: false, gmailError: false, toolSearches: 0, tools: [], exitCode: null, ms: Math.round(performance.now() - t0), note: err instanceof Error ? err.message : String(err) };
+    return { ...base, outcome: "CRASH", calledGmail: false, reachedGmail: false, gmailError: false, toolSearches: 0, tools: [], exitCode: null, ms: Math.round(performance.now() - t0), note: err instanceof Error ? err.message : String(err) };
   }
 }
 
@@ -416,14 +469,19 @@ for (const { label } of ARMS) {
   // the thing this probe exists to measure. "Timed out having called Gmail" is the
   // budget, which #436's retry addresses for a different reason. One number covering
   // both is how a 60s budget problem gets read as a deferral regression.
-  const neverCalled = measurable.filter((r) => !r.reachedGmail).length;
-  const timedOutReached = rs.filter((r) => r.outcome === "TIMEOUT" && r.reachedGmail).length;
+  const neverCalled = measurable.filter((r) => !r.calledGmail).length;
+  const timedOutReached = rs.filter((r) => r.outcome === "TIMEOUT" && r.calledGmail).length;
+  // A spawn can exit non-zero having done everything right, which `classify` scores
+  // CLEAN — true of the tool trajectory, and silent about the crash. Production
+  // would have counted that tick a failure.
+  const badExit = measurable.filter((r) => r.exitCode != null && r.exitCode !== 0).length;
   console.log(
     `${label}: CLEAN ${c("CLEAN")}/${measurable.length}  SLOW ${c("SLOW")}  LOOP ${c("LOOP")}  ` +
       `BASH ${c("BASH")}  NOTOOL ${c("NOTOOL")}  OTHER ${c("OTHER")}  TIMEOUT ${c("TIMEOUT")}` +
       `  |  never called Gmail: ${neverCalled}/${measurable.length}` +
       (timedOutReached ? `  |  reached Gmail but timed out: ${timedOutReached}` : "") +
       (c("CRASH") ? `  |  CRASH ${c("CRASH")} (excluded)` : "") +
+      (badExit ? `  |  non-zero exit: ${badExit}` : "") +
       (rs.some((r) => r.gmailError) ? `  |  gmail tool errors: ${rs.filter((r) => r.gmailError).length}` : ""),
   );
   // Timeouts are CENSORED at the budget, so folding them into a median reports the
@@ -431,8 +489,8 @@ for (const { label } of ARMS) {
   const finished = measurable.filter((r) => r.outcome !== "TIMEOUT").map((r) => r.ms).sort((a, b) => a - b);
   if (finished.length) {
     console.log(`${" ".repeat(label.length + 2)}durations (finished runs): min ${finished[0]}ms  median ${finished[Math.floor(finished.length / 2)]}ms  max ${finished[finished.length - 1]}ms` +
-      (c("TIMEOUT") ? `  (+${c("TIMEOUT")} censored at ${RUN_TIMEOUT_MS}ms)` : ""));
+      (c("TIMEOUT") ? `  (+${c("TIMEOUT")} killed at the ${RUN_TIMEOUT_MS}ms budget; their rows show wall time, which overshoots by the teardown)` : ""));
   } else if (c("TIMEOUT")) {
-    console.log(`${" ".repeat(label.length + 2)}durations: every run hit the ${RUN_TIMEOUT_MS}ms budget — no finished-run distribution to report`);
+    console.log(`${" ".repeat(label.length + 2)}durations: every run was killed at the ${RUN_TIMEOUT_MS}ms budget — no finished-run distribution to report (row times are wall clock and overshoot it)`);
   }
 }
