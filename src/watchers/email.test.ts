@@ -394,6 +394,14 @@ describe("emailLookbackClampMs", () => {
     expect(emailLookbackClampMs(NOW + 3_600_000, NOW)).toBe(0);
   });
 
+  test("a watermark AHEAD of the clock cannot produce a future query floor", () => {
+    // A backwards clock step would otherwise ask for mail newer than a future
+    // instant — matching nothing, while the run still claims coverage and moves
+    // the watermark forward over a window nothing evaluated.
+    const future = NOW + 3_600_000;
+    expect(buildGmailQuery(undefined, future, NOW)).toBe(`is:unread after:${NOW / 1000}`);
+  });
+
   test("returns 0 for a falsy watermark, matching buildGmailQuery's own guard", () => {
     // buildGmailQuery emits NO after: clause for a 0 watermark, so nothing is
     // skipped. Without this guard the two disagreed by ~57 years.

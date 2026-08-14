@@ -12,6 +12,11 @@ const log = getLog("watchers", "email");
 /**
  * What a completed check reports: its alerts, and the window it actually covered.
  *
+ * Named for WATCHERS, not email: `runChecker` returns this for all eight types.
+ * Only the email checker ever sets `coveredFrom`, but an email-specific name here
+ * is what made a false "email never reaches this" comment read plausibly during
+ * the refactor that deleted email's dispatch entirely.
+ *
  * The RUNNER — not this module — writes the watermark, and only AFTER the alerts
  * have been delivered. Writing it here (an earlier cut did) re-opened the very
  * hole this PR closes, one door along: a Telegram 502 between the write and the
@@ -19,7 +24,7 @@ const log = getLog("watchers", "email");
  * never recorded in `lastNotifiedIds`, so the next tick's narrower window
  * stepped straight over them. Unread mail is re-offered by nothing else.
  */
-export interface EmailCheckResult {
+export interface WatcherCheckResult {
   alerts: WatcherAlert[];
   /**
    * The instant this run's window is covered UP TO — set only for a run that
@@ -142,7 +147,7 @@ export async function checkEmail(
   botDir?: string,
   botName?: string,
   telemetry?: HaikuTelemetry,
-): Promise<EmailCheckResult> {
+): Promise<WatcherCheckResult> {
   // Anchored at ENTRY, not at the first spawn: the runner's net starts here too, and
   // the profile load below is a DB read that must come out of the same budget.
   const startedAt = Date.now();
@@ -599,7 +604,16 @@ export function buildGmailQuery(filter: string | undefined, sinceMs: number | nu
     // `Math.max` clamps a stale watermark to the ceiling; `Math.floor` because
     // Gmail wants whole seconds and rounding UP would exclude the boundary
     // message the overlap was added to include.
-    const since = Math.max(sinceMs - EMAIL_QUERY_OVERLAP_MS, nowMs - EMAIL_MAX_LOOKBACK_MS);
+    // The `Math.min(…, nowMs)` ceiling matters when the watermark is AHEAD of the
+    // clock — a backwards clock step (NTP correction, VM resume, a second muninn
+    // on a shared DB with skew). Without it the query asks for mail newer than a
+    // future instant, matches nothing, still counts as "reached Gmail", and the
+    // run then overwrites the watermark forward — so the window in between is
+    // never evaluated by any run and, the mail being unread, nothing re-offers it.
+    const since = Math.min(
+      Math.max(sinceMs - EMAIL_QUERY_OVERLAP_MS, nowMs - EMAIL_MAX_LOOKBACK_MS),
+      nowMs,
+    );
     parts.push(`after:${Math.floor(since / 1000)}`);
   }
   return parts.join(" ");

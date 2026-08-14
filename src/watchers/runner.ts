@@ -4,7 +4,7 @@ import type { Watcher, WatcherAlert } from "../types.ts";
 import { getWatchersDueNow, updateWatcherLastRun, markWatcherSuccess } from "../db/watchers.ts";
 import { isQuietHours } from "./quiet-hours.ts";
 import { computeWatcherTimeoutMs } from "./timeout.ts";
-import { checkEmail, type EmailCheckResult } from "./email.ts";
+import { checkEmail, type WatcherCheckResult } from "./email.ts";
 import { checkNews } from "./news.ts";
 import { checkX } from "./x.ts";
 import { checkAnthropic } from "./anthropic.ts";
@@ -770,6 +770,10 @@ async function sendToSlackChannels(botName: string, markdown: string, channels: 
  * the gardener/linter tests beside it, so the seam is a parameter instead.
  */
 export interface WikiCheckers {
+  checkEmail: typeof checkEmail;
+  checkNews: typeof checkNews;
+  checkX: typeof checkX;
+  checkAnthropic: typeof checkAnthropic;
   checkWikiGardener: typeof checkWikiGardener;
   checkWikiLinter: typeof checkWikiLinter;
   checkWikiCommitter: typeof checkWikiCommitter;
@@ -777,6 +781,10 @@ export interface WikiCheckers {
 }
 
 const DEFAULT_WIKI_CHECKERS: WikiCheckers = {
+  checkEmail,
+  checkNews,
+  checkX,
+  checkAnthropic,
   checkWikiGardener,
   checkWikiLinter,
   checkWikiCommitter,
@@ -793,7 +801,7 @@ export async function runChecker(
   botConfig: BotConfig,
   telemetry?: HaikuTelemetry,
   checkers: WikiCheckers = DEFAULT_WIKI_CHECKERS,
-): Promise<EmailCheckResult> {
+): Promise<WatcherCheckResult> {
   // The bot folder is no longer a cwd — it is where a checker's MCP servers and
   // tool permissions are declared (`--mcp-config` / `--settings`). Only the email
   // watcher needs them (Gmail), so only it is handed the dir.
@@ -813,11 +821,23 @@ export async function runChecker(
     });
     return { alerts: [], coveredFrom: null };
   }
+  // Email is the ONLY type that reports coverage, so it is dispatched here rather
+  // than in `dispatchChecker` (whose contract is "alerts only"). Extracting that
+  // switch is what deleted this branch once: the refactor dropped `case "email"`,
+  // every tick returned `[]` through the `default:` warn, and NOTHING caught it —
+  // tsc was silent (`checkEmail` merely became unused, and `noUnusedLocals` is
+  // off), the suite stayed green, and the runner reads `[]` as a quiet inbox, so
+  // run-health saw a healthy run and the user simply stopped getting mail alerts.
+  // That is why every branch below now goes through the injected `checkers` seam
+  // and has a test asserting WHICH checker a run reaches.
+  if (watcher.type === "email") {
+    return await checkers.checkEmail(watcher, botConfig.dir, botName, telemetry);
+  }
   return { alerts: await dispatchChecker(watcher, botConfig, botName, telemetry, checkers), coveredFrom: null };
 }
 
-/** The per-type dispatch. Only `email` reports coverage, so it is handled by
- *  {@link runChecker} directly and never reaches here. */
+/** The per-type dispatch for every checker that reports alerts only. `email` is
+ *  handled by {@link runChecker} itself because it also reports coverage. */
 async function dispatchChecker(
   watcher: Watcher,
   botConfig: BotConfig,
@@ -827,11 +847,11 @@ async function dispatchChecker(
 ): Promise<WatcherAlert[]> {
   switch (watcher.type) {
     case "news":
-      return await checkNews(watcher);
+      return await checkers.checkNews(watcher);
     case "x":
-      return await checkX(watcher, botName, telemetry);
+      return await checkers.checkX(watcher, botName, telemetry);
     case "anthropic":
-      return await checkAnthropic(watcher, telemetry);
+      return await checkers.checkAnthropic(watcher, telemetry);
     case "wiki-gardener":
       // The gardener needs the full BotConfig (wikiDir, connector, gardener block)
       // for executeOneShot — passed through instead of re-running bot discovery.

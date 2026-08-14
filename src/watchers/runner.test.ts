@@ -557,6 +557,11 @@ const wikiCheckerSpies = () => {
     calls,
     alertsFrom,
     checkers: {
+      // Email's checker returns the {alerts, coveredFrom} shape, not a bare array.
+      checkEmail: async () => { calls.push("email"); return { alerts: alertsFrom("email"), coveredFrom: null }; },
+      checkNews: spy("news"),
+      checkX: spy("x"),
+      checkAnthropic: spy("anthropic"),
       checkWikiGardener: spy("wiki-gardener"),
       checkWikiLinter: spy("wiki-linter"),
       checkWikiCommitter: spy("wiki-committer"),
@@ -652,6 +657,45 @@ describe("finishWatcherRun", () => {
     const { calls, d } = deps(async () => { throw new Error('column "last_success_at" does not exist'); });
     await expect(finishWatcherRun("w1", ["a"], new Date(), d)).resolves.toBeUndefined();
     expect(calls.lastRun).toHaveLength(1);
+  });
+});
+
+describe("runChecker — every type reaches its own checker", () => {
+  // The regression this exists for: a refactor extracting the per-type switch
+  // dropped `case "email"`. Every tick then fell through to `default:`, returned
+  // `[]`, and the runner read that as a quiet inbox — so run-health saw a healthy
+  // run, the dashboard stayed green, and the user just stopped receiving email
+  // alerts. tsc was silent (the import merely went unused; `noUnusedLocals` is
+  // off) and all 5457 tests passed. Before this block, deleting the `news`, `x`
+  // or `anthropic` case was equally invisible.
+  const TYPES = [
+    "email", "news", "x", "anthropic",
+    "wiki-gardener", "wiki-linter", "wiki-committer", "consolidation-gardener",
+  ] as const;
+
+  afterEach(() => __setWikiReadonlyForTest());
+
+  for (const type of TYPES) {
+    test(`${type} dispatches to check${type}`, async () => {
+      // Write-owner, so the readonly guard never short-circuits a drafting type.
+      __setWikiReadonlyForTest(false);
+      const { calls, alertsFrom, checkers } = wikiCheckerSpies();
+      const { alerts } = await runChecker(readonlyWatcher(type), fakeBot, undefined, checkers);
+      expect(calls).toEqual([type]);
+      expect(alerts).toEqual(alertsFrom(type));
+    });
+  }
+
+  test("email is the only type that can report coverage", async () => {
+    __setWikiReadonlyForTest(false);
+    const at = new Date(1_700_000_000_000);
+    const { checkers } = wikiCheckerSpies();
+    const covering = { ...checkers, checkEmail: async () => ({ alerts: [], coveredFrom: at }) };
+
+    expect((await runChecker(readonlyWatcher("email"), fakeBot, undefined, covering)).coveredFrom).toBe(at);
+    for (const type of TYPES.filter((t) => t !== "email")) {
+      expect((await runChecker(readonlyWatcher(type), fakeBot, undefined, covering)).coveredFrom).toBeNull();
+    }
   });
 });
 
