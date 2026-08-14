@@ -78,37 +78,39 @@ export async function getEnabledWatcherOwners(botName: string): Promise<string[]
   return rows.map((r) => r.user_id as string);
 }
 
-/**
- * Close out a watcher run.
- *
- * `successAt` is the ONLY way `last_success_at` moves, and it is passed as the
- * instant the checker STARTED — not `now()`. The column is a query watermark:
- * the next run asks "what arrived after it", so anchoring it at run END would
- * skip everything that arrived while a 40s check was in flight. Anchoring at
- * run start instead re-offers that sliver next tick, which dedup absorbs.
- *
- * Omitting it leaves the column untouched, which is what the quiet-hours skip
- * and the failure path both want — they advance `last_run_at` (to keep the
- * cadence and prevent retry storms) while explicitly NOT claiming the window
- * was covered.
- */
 export async function updateWatcherLastRun(
   id: string,
   notifiedIds: string[],
-  successAt?: Date,
 ): Promise<void> {
   const sql = getDb();
   await sql`
     UPDATE watchers
     SET last_run_at = now(),
-        -- COALESCE, not a plain assignment: an omitted successAt must LEAVE the
-        -- column, not blank it. The cast is load-bearing — postgres.js sends a
-        -- bare null untyped and COALESCE then cannot resolve its argument types.
-        last_success_at = COALESCE(${successAt ?? null}::timestamptz, last_success_at),
         last_notified_ids = ${sql.json(notifiedIds)},
         force_next_run = false
     WHERE id = ${id}
   `;
+}
+
+/**
+ * Advance the "this checker last covered the window up to here" watermark.
+ *
+ * Deliberately NOT folded into {@link updateWatcherLastRun}, which every watcher
+ * run calls on every outcome. Only the checker itself knows whether a run can be
+ * trusted to have covered its window — a run can return `[]` having reached the
+ * source and found nothing (covered) or having never reached it at all (not
+ * covered), and those are indistinguishable from the runner. Keeping the write
+ * separate also means a box that has not yet applied migration 069 fails only
+ * this call, rather than every watcher's run bookkeeping.
+ *
+ * `at` is the instant the check STARTED, not `now()`: the next run asks "what
+ * arrived after this", so anchoring at run END would skip everything that
+ * arrived while a 40s check was in flight. Anchoring at run start re-offers that
+ * sliver next tick, which dedup absorbs.
+ */
+export async function markWatcherSuccess(id: string, at: Date): Promise<void> {
+  const sql = getDb();
+  await sql`UPDATE watchers SET last_success_at = ${at} WHERE id = ${id}`;
 }
 
 export async function forceRunWatcher(id: string): Promise<void> {

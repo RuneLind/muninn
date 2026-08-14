@@ -446,11 +446,6 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       // Key the guard on the RAW checker promise, created BEFORE the timeout wrap
       // and released in its OWN .finally — keying the timeout-raced promise would
       // free the slot while an orphaned checker keeps running.
-      // Stamped BEFORE the checker starts, and written to `last_success_at` only
-      // if this run succeeds. It is the watermark the email checker bounds its
-      // Gmail query on, so it must predate the checker's own query — see
-      // `updateWatcherLastRun` for why run-start and not run-end.
-      const checkStartedAt = new Date();
       const raw = runChecker(watcher, botConfig, telemetry);
       void raw.finally(() => releaseChecker(watcher.id, claim.token));
 
@@ -570,10 +565,7 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
         ...newEntries,
       ].slice(-MAX_NOTIFIED_IDS);
 
-      // The ONE call site that advances `last_success_at`: reached only after the
-      // checker returned and its alerts were delivered. The quiet-hours skip and
-      // the failure path deliberately omit it.
-      await updateWatcherLastRun(watcher.id, updatedIds, checkStartedAt);
+      await updateWatcherLastRun(watcher.id, updatedIds);
       // Token totals from the checker's spawnHaiku call(s) — stamped onto the
       // span (read back into Recent via getRecentAgentTraces off the childless
       // watcher span's OWN attributes) and onto the Running/completed card.

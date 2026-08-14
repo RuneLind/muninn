@@ -227,6 +227,102 @@ describe("checkEmail query-window selection", () => {
   });
 });
 
+describe("checkEmail success-watermark write", () => {
+  // Every test here asserts on this spy rather than on the DB, so the ONE line
+  // that makes the feature exist (`markSuccess(...)` in checkEmail) is killed by
+  // deletion — the defect the review caught: without it `last_success_at` stays
+  // NULL forever, the checker takes the date query every tick, and the change is
+  // inert with the whole suite green.
+  let marks: { id: string; at: number }[] = [];
+  const spy = async (id: string, at: Date) => { marks.push({ id, at: at.getTime() }); };
+  const GMAIL = [{ name: "mcp__gmail__search_emails" }];
+  // The predicate reads the bot's OWN .mcp.json to learn which server is Gmail,
+  // so the two dirs below are what separate "reached Gmail" from "cannot tell".
+  let botDirWithGmail = "";
+  let botDirNoGmail = "";
+
+  beforeEach(() => {
+    botDirWithGmail = mkdtempSync(join(tmpdir(), "muninn-email-mark-gmail-"));
+    writeFileSync(join(botDirWithGmail, ".mcp.json"), JSON.stringify({ mcpServers: { gmail: { type: "stdio", command: "x" } } }));
+    botDirNoGmail = mkdtempSync(join(tmpdir(), "muninn-email-mark-nogmail-"));
+    writeFileSync(join(botDirNoGmail, ".mcp.json"), JSON.stringify({ mcpServers: { "google-mail": { type: "stdio", command: "x" } } }));
+    marks = [];
+    lastPrompt = "";
+    profileByUser.clear();
+    spawnScript = [];
+    spawnOpts = [];
+    nextToolCalls = undefined;
+  });
+
+  afterEach(() => {
+    rmSync(botDirWithGmail, { recursive: true, force: true });
+    rmSync(botDirNoGmail, { recursive: true, force: true });
+  });
+
+  test("marks the watermark when the run reached Gmail and parsed", async () => {
+    const before = Date.now();
+    spawnScript = [{ toolCalls: GMAIL, result: "[]" }];
+    await checkEmail(baseWatcher(), botDirWithGmail, "jarvis", undefined, spy);
+
+    expect(marks).toHaveLength(1);
+    const mark = marks[0]!;
+    expect(mark.id).toBe("w-email-1");
+    // Stamped at checkEmail ENTRY, so it predates the spawn's own search.
+    expect(mark.at).toBeGreaterThanOrEqual(before);
+    expect(mark.at).toBeLessThanOrEqual(Date.now());
+  });
+
+  test("does NOT mark when the answer is unparseable", async () => {
+    // The regression the review found: this path returns [] (delivering nothing)
+    // and used to take the runner's success tail, advancing the watermark past a
+    // window whose mail was never evaluated. Unread mail is not re-offered by
+    // anything else, so the loss was permanent.
+    spawnScript = [{ toolCalls: GMAIL, result: "I looked through your inbox and nothing seemed urgent." }];
+    const alerts = await checkEmail(baseWatcher(), botDirWithGmail, "jarvis", undefined, spy);
+
+    expect(alerts).toEqual([]);
+    expect(marks).toEqual([]);
+  });
+
+  test("does NOT mark when the run is unjudgeable (legacy parser, no tool list)", async () => {
+    // toolCalls undefined ⇒ "can't tell". Deliberately not a FAILURE (no evidence
+    // it broke) but equally not COVERAGE (no evidence it worked).
+    spawnScript = [{ toolCalls: undefined, result: "[]" }];
+    await checkEmail(baseWatcher(), botDirWithGmail, "jarvis", undefined, spy);
+
+    expect(marks).toEqual([]);
+  });
+
+  test("does NOT mark when no MCP server key looks like Gmail", async () => {
+    // The predicate is DISABLED for such a bot by design. If that state also
+    // advanced the watermark, the row would step forward an hour per tick while
+    // reading no mail at all — and never recover, because the mail stays unread.
+    spawnScript = [{ toolCalls: [{ name: "mcp__google-mail__search" }], result: "[]" }];
+    await checkEmail(baseWatcher(), botDirNoGmail, "jarvis", undefined, spy);
+
+    expect(marks).toEqual([]);
+  });
+
+  test("does NOT mark when the liveness predicate fails on every attempt", async () => {
+    spawnScript = [
+      { toolCalls: [{ name: "ToolSearch" }], result: "[]" },
+      { toolCalls: [{ name: "Bash" }], result: "[]" },
+    ];
+    await expect(checkEmail(baseWatcher(), botDirWithGmail, "jarvis", undefined, spy)).rejects.toThrow();
+    expect(marks).toEqual([]);
+  });
+
+  test("marks once when attempt 1 fails the predicate and attempt 2 reaches Gmail", async () => {
+    spawnScript = [
+      { toolCalls: [{ name: "ToolSearch" }], result: "[]" },
+      { toolCalls: GMAIL, result: "[]" },
+    ];
+    await checkEmail(baseWatcher(), botDirWithGmail, "jarvis", undefined, spy);
+
+    expect(marks).toHaveLength(1);
+  });
+});
+
 describe("checkEmail interest-profile injection", () => {
   beforeEach(() => {
     lastPrompt = "";

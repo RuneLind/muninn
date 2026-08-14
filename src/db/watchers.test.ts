@@ -5,6 +5,7 @@ import {
   saveWatcher,
   getWatchersDueNow,
   updateWatcherLastRun,
+  markWatcherSuccess,
   getAllWatchers,
   getWatchersForUser,
   deleteWatcher,
@@ -153,40 +154,40 @@ describe("watchers", () => {
     expect(watcher.lastRunAt).not.toBeNull();
   });
 
-  test("updateWatcherLastRun leaves last_success_at NULL when successAt is omitted", async () => {
-    // The quiet-hours skip and the failure path both call it this way: the run
-    // happened (cadence advances) but covered nothing.
+  test("updateWatcherLastRun does NOT touch last_success_at", async () => {
+    // It is called on every outcome — success, quiet-hours skip, failure — so it
+    // must never imply coverage. Only the checker knows that; see
+    // markWatcherSuccess.
     const id = await saveWatcher(makeWatcher({ botName: "bot1" }));
+    await markWatcherSuccess(id, new Date(Date.now() - 90_000));
+    const before = (await getAllWatchers("bot1")).find((x) => x.id === id)!.lastSuccessAt;
+
     await updateWatcherLastRun(id, ["email-1"]);
 
     const w = (await getAllWatchers("bot1")).find((x) => x.id === id)!;
     expect(w.lastRunAt).not.toBeNull();
-    expect(w.lastSuccessAt).toBeNull();
+    expect(w.lastSuccessAt).toBe(before);
   });
 
-  test("updateWatcherLastRun records successAt when given", async () => {
+  test("markWatcherSuccess records the watermark and leaves it NULL until called", async () => {
     const id = await saveWatcher(makeWatcher({ botName: "bot1" }));
+    expect((await getAllWatchers("bot1")).find((x) => x.id === id)!.lastSuccessAt).toBeNull();
+
     const at = new Date(Date.now() - 90_000);
-    await updateWatcherLastRun(id, ["email-1"], at);
+    await markWatcherSuccess(id, at);
 
     const w = (await getAllWatchers("bot1")).find((x) => x.id === id)!;
     expect(w.lastSuccessAt).toBe(at.getTime());
-    // Stamped at the CHECK's start, so it is deliberately older than last_run_at.
-    expect(w.lastSuccessAt!).toBeLessThan(w.lastRunAt!);
   });
 
-  test("a later run WITHOUT successAt does not blank an existing last_success_at", async () => {
-    // Kills the COALESCE mutation. A plain `last_success_at = ${successAt ?? null}`
-    // passes both tests above and still destroys the watermark on the first
-    // quiet-hours skip — which is every night — silently widening the next query
-    // back to the unbounded fallback.
-    const id = await saveWatcher(makeWatcher({ botName: "bot1" }));
-    const at = new Date(Date.now() - 90_000);
-    await updateWatcherLastRun(id, ["email-1"], at);
-    await updateWatcherLastRun(id, ["email-2"]);
+  test("markWatcherSuccess scopes its write to the given watcher", async () => {
+    const a = await saveWatcher(makeWatcher({ botName: "bot1", name: "a" }));
+    const b = await saveWatcher(makeWatcher({ botName: "bot1", name: "b" }));
+    await markWatcherSuccess(a, new Date());
 
-    const w = (await getAllWatchers("bot1")).find((x) => x.id === id)!;
-    expect(w.lastSuccessAt).toBe(at.getTime());
+    const all = await getAllWatchers("bot1");
+    expect(all.find((x) => x.id === a)!.lastSuccessAt).not.toBeNull();
+    expect(all.find((x) => x.id === b)!.lastSuccessAt).toBeNull();
   });
 
   test("getAllWatchers sorts enabled first", async () => {
