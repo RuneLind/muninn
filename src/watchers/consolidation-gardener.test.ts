@@ -28,6 +28,7 @@ function watcher(config: Record<string, unknown> = { wiki: WIKI }): Watcher {
     intervalMs: 604_800_000,
     enabled: true,
     lastRunAt: null,
+    lastSuccessAt: null,
     lastNotifiedIds: [],
     forceNextRun: false,
     createdAt: 0,

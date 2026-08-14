@@ -47,6 +47,7 @@ function watcher(over: Partial<Watcher> = {}): Watcher {
     intervalMs: 3_600_000,
     enabled: true,
     lastRunAt: null,
+    lastSuccessAt: null,
     lastNotifiedIds: [],
     forceNextRun: false,
     createdAt: 0,

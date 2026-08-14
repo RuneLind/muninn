@@ -22,6 +22,7 @@ function watcher(over: Partial<Watcher> = {}): Watcher {
     intervalMs: HOUR,
     enabled: true,
     lastRunAt: NOW - 10 * 60_000, // 10m ago (fresh)
+    lastSuccessAt: null,
     lastNotifiedIds: [],
     forceNextRun: false,
     createdAt: NOW,

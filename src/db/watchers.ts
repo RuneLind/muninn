@@ -78,14 +78,33 @@ export async function getEnabledWatcherOwners(botName: string): Promise<string[]
   return rows.map((r) => r.user_id as string);
 }
 
+/**
+ * Close out a watcher run.
+ *
+ * `successAt` is the ONLY way `last_success_at` moves, and it is passed as the
+ * instant the checker STARTED — not `now()`. The column is a query watermark:
+ * the next run asks "what arrived after it", so anchoring it at run END would
+ * skip everything that arrived while a 40s check was in flight. Anchoring at
+ * run start instead re-offers that sliver next tick, which dedup absorbs.
+ *
+ * Omitting it leaves the column untouched, which is what the quiet-hours skip
+ * and the failure path both want — they advance `last_run_at` (to keep the
+ * cadence and prevent retry storms) while explicitly NOT claiming the window
+ * was covered.
+ */
 export async function updateWatcherLastRun(
   id: string,
   notifiedIds: string[],
+  successAt?: Date,
 ): Promise<void> {
   const sql = getDb();
   await sql`
     UPDATE watchers
     SET last_run_at = now(),
+        -- COALESCE, not a plain assignment: an omitted successAt must LEAVE the
+        -- column, not blank it. The cast is load-bearing — postgres.js sends a
+        -- bare null untyped and COALESCE then cannot resolve its argument types.
+        last_success_at = COALESCE(${successAt ?? null}::timestamptz, last_success_at),
         last_notified_ids = ${sql.json(notifiedIds)},
         force_next_run = false
     WHERE id = ${id}
@@ -252,6 +271,7 @@ function mapRow(r: Record<string, any>): Watcher {
     intervalMs: r.interval_ms,
     enabled: r.enabled,
     lastRunAt: r.last_run_at ? new Date(r.last_run_at).getTime() : null,
+    lastSuccessAt: r.last_success_at ? new Date(r.last_success_at).getTime() : null,
     lastNotifiedIds: Array.isArray(r.last_notified_ids) ? r.last_notified_ids : [],
     forceNextRun: r.force_next_run ?? false,
     createdAt: new Date(r.created_at).getTime(),

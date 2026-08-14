@@ -65,6 +65,9 @@ mock.module("../profile/generator.ts", () => ({
 
 const {
   buildGmailQuery,
+  buildGmailQueryByDate,
+  EMAIL_QUERY_OVERLAP_MS,
+  EMAIL_MAX_LOOKBACK_MS,
   buildEmailPrompt,
   DEFAULT_EMAIL_PROMPT,
   checkEmail,
@@ -75,7 +78,10 @@ const {
   EMAIL_MAX_ATTEMPTS,
 } = await import("./email.ts");
 
-describe("buildGmailQuery", () => {
+describe("buildGmailQuery (success-watermark window)", () => {
+  const SINCE = Date.UTC(2026, 0, 15, 12, 0, 0);
+  const NOW = SINCE + 3_600_000; // one tick later, so the 24h clamp is not in play
+
   test("always includes is:unread", () => {
     expect(buildGmailQuery(undefined, null)).toBe("is:unread");
   });
@@ -84,27 +90,86 @@ describe("buildGmailQuery", () => {
     expect(buildGmailQuery("from:boss", null)).toBe("is:unread from:boss");
   });
 
+  test("emits after: as Unix SECONDS, not a date", () => {
+    // The whole point of the window: a date-granular after: re-evaluates the
+    // entire day every hour. Asserting the numeric form (no slashes) is what
+    // fails if someone reverts to OSLO_DATE_FMT here.
+    const q = buildGmailQuery(undefined, SINCE, NOW);
+    expect(q).toMatch(/^is:unread after:\d+$/);
+    expect(q).not.toContain("/");
+  });
+
+  test("subtracts the overlap from the watermark", () => {
+    // Kills the mutation that drops EMAIL_QUERY_OVERLAP_MS: without it the
+    // boundary message is straddled and lost silently.
+    expect(buildGmailQuery(undefined, SINCE, NOW)).toBe(
+      `is:unread after:${(SINCE - EMAIL_QUERY_OVERLAP_MS) / 1000}`,
+    );
+    expect(buildGmailQuery(undefined, SINCE, NOW)).not.toBe(`is:unread after:${SINCE / 1000}`);
+  });
+
+  test("clamps a stale watermark to the 24h lookback ceiling", () => {
+    // A row disabled for three days must not ask for three days of mail.
+    const stale = NOW - 3 * 24 * 3_600_000;
+    expect(buildGmailQuery(undefined, stale, NOW)).toBe(
+      `is:unread after:${(NOW - EMAIL_MAX_LOOKBACK_MS) / 1000}`,
+    );
+  });
+
+  test("does NOT clamp a watermark inside the ceiling", () => {
+    // Guards the max() direction: a min() here would pin every query to 24h ago
+    // and re-introduce exactly the accumulation this replaces.
+    const recent = NOW - 2 * 3_600_000;
+    expect(buildGmailQuery(undefined, recent, NOW)).toBe(
+      `is:unread after:${(recent - EMAIL_QUERY_OVERLAP_MS) / 1000}`,
+    );
+  });
+
+  test("floors sub-second precision rather than rounding up", () => {
+    // Rounding up would exclude the very boundary message the overlap adds.
+    // since = 1_700_000_000_500 ⇒ 1700000000.5s. Math.round would give ...001.
+    const odd = 1_700_000_000_500 + EMAIL_QUERY_OVERLAP_MS;
+    expect(buildGmailQuery(undefined, odd, odd + 1000)).toBe("is:unread after:1700000000");
+    expect(buildGmailQuery(undefined, odd, odd + 1000)).not.toBe("is:unread after:1700000001");
+  });
+
+  test("combines filter and window", () => {
+    expect(buildGmailQuery("from:boss", SINCE, NOW)).toBe(
+      `is:unread from:boss after:${(SINCE - EMAIL_QUERY_OVERLAP_MS) / 1000}`,
+    );
+  });
+});
+
+describe("buildGmailQueryByDate (cold-start fallback)", () => {
+  test("always includes is:unread", () => {
+    expect(buildGmailQueryByDate(undefined, null)).toBe("is:unread");
+  });
+
+  test("appends the custom filter", () => {
+    expect(buildGmailQueryByDate("from:boss", null)).toBe("is:unread from:boss");
+  });
+
   test("formats after: as YYYY/MM/DD", () => {
     // 2026-01-15 12:00 UTC — well inside the same Oslo day.
     const ts = Date.UTC(2026, 0, 15, 12, 0, 0);
-    expect(buildGmailQuery(undefined, ts)).toBe("is:unread after:2026/01/15");
+    expect(buildGmailQueryByDate(undefined, ts)).toBe("is:unread after:2026/01/15");
   });
 
   test("uses the Oslo date, not UTC, just after UTC midnight", () => {
     // 2026-06-15 23:30 UTC is already 2026-06-16 01:30 in Oslo (UTC+2 in summer).
     const ts = Date.UTC(2026, 5, 15, 23, 30, 0);
-    expect(buildGmailQuery(undefined, ts)).toBe("is:unread after:2026/06/16");
+    expect(buildGmailQueryByDate(undefined, ts)).toBe("is:unread after:2026/06/16");
   });
 
   test("uses the Oslo date in winter (UTC+1)", () => {
     // 2026-01-15 23:30 UTC is 2026-01-16 00:30 in Oslo (UTC+1 in winter).
     const ts = Date.UTC(2026, 0, 15, 23, 30, 0);
-    expect(buildGmailQuery(undefined, ts)).toBe("is:unread after:2026/01/16");
+    expect(buildGmailQueryByDate(undefined, ts)).toBe("is:unread after:2026/01/16");
   });
 
   test("combines filter and date", () => {
     const ts = Date.UTC(2026, 0, 15, 12, 0, 0);
-    expect(buildGmailQuery("from:boss", ts)).toBe("is:unread from:boss after:2026/01/15");
+    expect(buildGmailQueryByDate("from:boss", ts)).toBe("is:unread from:boss after:2026/01/15");
   });
 });
 
@@ -118,10 +183,49 @@ function baseWatcher(overrides: Partial<Watcher> = {}): Watcher {
     config: {},
     enabled: true,
     lastRunAt: null,
+    lastSuccessAt: null,
     lastNotifiedIds: [],
     ...overrides,
   } as Watcher;
 }
+
+describe("checkEmail query-window selection", () => {
+  beforeEach(() => {
+    lastPrompt = "";
+    profileByUser.clear();
+    spawnScript = [];
+    spawnOpts = [];
+  });
+
+  test("bounds the query on lastSuccessAt when there is one", async () => {
+    const since = Date.now() - 3_600_000;
+    await checkEmail(baseWatcher({ lastSuccessAt: since, lastRunAt: Date.now() }), undefined, "jarvis");
+    expect(lastPrompt).toContain(`after:${Math.floor((since - EMAIL_QUERY_OVERLAP_MS) / 1000)}`);
+  });
+
+  test("IGNORES lastRunAt when a watermark exists", async () => {
+    // The load-bearing distinction. `lastRunAt` advances on quiet-hours skips and
+    // on failures, so a window derived from it would exclude the overnight pile
+    // and every failed tick's mail having never looked at either. If someone
+    // "simplifies" the selection to `lastSuccessAt ?? lastRunAt` this still
+    // passes — which is why the fallback test below asserts the DATE form.
+    const since = Date.now() - 6 * 3_600_000;
+    const lastRun = Date.now() - 60_000;
+    await checkEmail(baseWatcher({ lastSuccessAt: since, lastRunAt: lastRun }), undefined, "jarvis");
+    expect(lastPrompt).toContain(`after:${Math.floor((since - EMAIL_QUERY_OVERLAP_MS) / 1000)}`);
+    expect(lastPrompt).not.toContain(`after:${Math.floor((lastRun - EMAIL_QUERY_OVERLAP_MS) / 1000)}`);
+  });
+
+  test("falls back to the DATE query when no success has been recorded", async () => {
+    // Cold start (every row for one tick after migration 069). Broad is the safe
+    // direction here; asserting the slash form is what fails if the fallback is
+    // collapsed into the epoch window, which would silently narrow a row whose
+    // watermark does not exist yet.
+    const lastRun = Date.UTC(2026, 0, 15, 12, 0, 0);
+    await checkEmail(baseWatcher({ lastSuccessAt: null, lastRunAt: lastRun }), undefined, "jarvis");
+    expect(lastPrompt).toContain("after:2026/01/15");
+  });
+});
 
 describe("checkEmail interest-profile injection", () => {
   beforeEach(() => {

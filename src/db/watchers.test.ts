@@ -153,6 +153,42 @@ describe("watchers", () => {
     expect(watcher.lastRunAt).not.toBeNull();
   });
 
+  test("updateWatcherLastRun leaves last_success_at NULL when successAt is omitted", async () => {
+    // The quiet-hours skip and the failure path both call it this way: the run
+    // happened (cadence advances) but covered nothing.
+    const id = await saveWatcher(makeWatcher({ botName: "bot1" }));
+    await updateWatcherLastRun(id, ["email-1"]);
+
+    const w = (await getAllWatchers("bot1")).find((x) => x.id === id)!;
+    expect(w.lastRunAt).not.toBeNull();
+    expect(w.lastSuccessAt).toBeNull();
+  });
+
+  test("updateWatcherLastRun records successAt when given", async () => {
+    const id = await saveWatcher(makeWatcher({ botName: "bot1" }));
+    const at = new Date(Date.now() - 90_000);
+    await updateWatcherLastRun(id, ["email-1"], at);
+
+    const w = (await getAllWatchers("bot1")).find((x) => x.id === id)!;
+    expect(w.lastSuccessAt).toBe(at.getTime());
+    // Stamped at the CHECK's start, so it is deliberately older than last_run_at.
+    expect(w.lastSuccessAt!).toBeLessThan(w.lastRunAt!);
+  });
+
+  test("a later run WITHOUT successAt does not blank an existing last_success_at", async () => {
+    // Kills the COALESCE mutation. A plain `last_success_at = ${successAt ?? null}`
+    // passes both tests above and still destroys the watermark on the first
+    // quiet-hours skip — which is every night — silently widening the next query
+    // back to the unbounded fallback.
+    const id = await saveWatcher(makeWatcher({ botName: "bot1" }));
+    const at = new Date(Date.now() - 90_000);
+    await updateWatcherLastRun(id, ["email-1"], at);
+    await updateWatcherLastRun(id, ["email-2"]);
+
+    const w = (await getAllWatchers("bot1")).find((x) => x.id === id)!;
+    expect(w.lastSuccessAt).toBe(at.getTime());
+  });
+
   test("getAllWatchers sorts enabled first", async () => {
     const id1 = await saveWatcher(makeWatcher({ botName: "bot1", name: "disabled" }));
     await toggleWatcher(id1, false);

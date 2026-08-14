@@ -117,7 +117,13 @@ export async function checkEmail(watcher: Watcher, botDir?: string, botName?: st
   // the profile load below is a DB read that must come out of the same budget.
   const startedAt = Date.now();
   const config = watcher.config as { filter?: string; prompt?: string; model?: string };
-  const query = buildGmailQuery(config.filter, watcher.lastRunAt);
+  // Bounded on the SUCCESS watermark. A row that has never succeeded (every row
+  // for one tick after migration 069) has no window to trust, so it takes the
+  // old date-only query — broad, and broad is the safe direction for a cold
+  // start: the failure mode of guessing narrow is mail that is never looked at.
+  const query = watcher.lastSuccessAt
+    ? buildGmailQuery(config.filter, watcher.lastSuccessAt)
+    : buildGmailQueryByDate(config.filter, watcher.lastRunAt);
 
   const userPrompt = config.prompt || DEFAULT_EMAIL_PROMPT;
   const interestProfile = await loadInterestProfile(watcher.userId, botName ?? watcher.botName);
@@ -403,7 +409,69 @@ function warnNoGmailServerOnce(botDir: string, present: string[]): void {
   );
 }
 
-export function buildGmailQuery(filter: string | undefined, lastRunAt: number | null): string {
+/**
+ * Overlap subtracted from the watermark, so the boundary is re-offered rather
+ * than straddled. Covers the gap between `checkStartedAt` and the moment the
+ * model actually calls `search_emails` (measured 5–12s of prompt + startup),
+ * plus Gmail's internal-date vs delivery-time skew. Re-offering is free: an
+ * already-notified message is dropped by `lastNotifiedIds` dedup, whereas a
+ * message that falls in the gap is dropped SILENTLY and forever.
+ */
+export const EMAIL_QUERY_OVERLAP_MS = 5 * 60_000;
+/**
+ * Ceiling on the lookback, whatever the watermark says. A row disabled for a
+ * week (or whose success watermark is otherwise stale) would otherwise ask for
+ * a week of mail on its first tick back — the exact overload this window exists
+ * to prevent, arriving by a different door. 24h also bounds the worst case
+ * BELOW today's behaviour: the date-only `after:` this replaces expands to a
+ * full week in the same scenario, because it is derived from `lastRunAt`.
+ */
+export const EMAIL_MAX_LOOKBACK_MS = 24 * 3_600_000;
+
+/**
+ * The Gmail query for one check.
+ *
+ * `sinceMs` is the run's SUCCESS watermark (`watcher.lastSuccessAt`), not
+ * `lastRunAt`. Passing `lastRunAt` here would be a silent data-loss bug: it
+ * advances on quiet-hours skips and on failures, so the overnight pile and every
+ * failed tick's window would be excluded from the next query having never been
+ * looked at. `null` (no success yet) falls back to the previous date-only form,
+ * which is broad and therefore safe as a cold start.
+ *
+ * Why epoch seconds rather than the date-only `after:YYYY/MM/DD` this replaces:
+ * a date-granular filter makes every hourly tick re-evaluate the WHOLE day's
+ * unread pile, so the work per tick grows monotonically until it exceeds the
+ * per-attempt budget. Measured on the live mailbox 2026-08-14 18:50 —
+ * `is:unread after:2026/08/14` returned 38 threads, `is:unread after:<epoch 1h
+ * ago>` returned 6. Over 48h of ticks, output tokens explained 91% of tick
+ * duration (R²=0.914, ~8.9ms/token) while turn count explained none (R²=0.000),
+ * and duration tracked hour-of-day at r=0.776 — mean 21s at 08:00 against 56s at
+ * 21:00, with every 60s timeout falling in the back half of the day. The set
+ * size is the cost driver, and this is what bounds it.
+ *
+ * Gmail accepts a Unix-seconds argument to `after:` (verified against the live
+ * API, above); it is not in the operator help, which documents only the date
+ * form.
+ */
+export function buildGmailQuery(filter: string | undefined, sinceMs: number | null, nowMs: number = Date.now()): string {
+  const parts: string[] = ["is:unread"];
+  if (filter) parts.push(filter);
+  if (sinceMs) {
+    // `Math.max` clamps a stale watermark to the ceiling; `Math.floor` because
+    // Gmail wants whole seconds and rounding UP would exclude the boundary
+    // message the overlap was added to include.
+    const since = Math.max(sinceMs - EMAIL_QUERY_OVERLAP_MS, nowMs - EMAIL_MAX_LOOKBACK_MS);
+    parts.push(`after:${Math.floor(since / 1000)}`);
+  }
+  return parts.join(" ");
+}
+
+/**
+ * The date-only query this checker used before the window above. Retained ONLY
+ * as the cold-start fallback for a row with no success watermark yet — every
+ * row is in that state for exactly one tick after migration 069.
+ */
+export function buildGmailQueryByDate(filter: string | undefined, lastRunAt: number | null): string {
   const parts: string[] = ["is:unread"];
   if (filter) parts.push(filter);
   if (lastRunAt) {

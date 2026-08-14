@@ -226,6 +226,7 @@ describe("watcher nextRunAt projection honors the time-of-day gate (FIX 1)", () 
       intervalMs: 7 * DAY,
       enabled: true,
       lastRunAt: null,
+      lastSuccessAt: null,
       lastNotifiedIds: [],
       forceNextRun: false,
       createdAt: 0,

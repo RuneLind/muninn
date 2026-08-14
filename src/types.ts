@@ -165,6 +165,13 @@ export interface Watcher {
   intervalMs: number;
   enabled: boolean;
   lastRunAt: number | null;
+  /**
+   * When the checker last completed a TRUSTWORTHY run — not moved by a
+   * quiet-hours skip or a failure, both of which advance `lastRunAt`. `null`
+   * until the first success (including on every row migrated in), so readers
+   * must treat `null` as "no watermark" and fall back, never as epoch 0.
+   */
+  lastSuccessAt: number | null;
   lastNotifiedIds: string[];
   forceNextRun: boolean;
   createdAt: number;
