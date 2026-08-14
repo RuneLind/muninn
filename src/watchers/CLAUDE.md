@@ -747,10 +747,18 @@ type, off the runner's `catch`:
   FIRST failure of a healthy watcher red `stale` rather than amber `warn`. The alert
   says "last completed a run Xh ago", the weaker claim, because `last_run_at` advances
   on failures too.
-- **Activity rows are keyed on what was RENDERED, not on what was DUE**: one on the
-  first failure of an episode, one when an escalation is delivered, and one EVERY run
-  when an escalation was due but was held by quiet hours or lost to a Telegram error
-  (a broken watcher plus a broken channel is where a fallback surface matters most).
+- **Activity rows are keyed on whether the USER WAS INFORMED** — not on what was due,
+  and not on whether something went out on this particular run. `deliverFailureAlerts`
+  returns a `DeliveryOutcome` (`sent` / `deduped` / `held`) because "sent nothing" has
+  three causes: a DEDUPED repeat means the user was told on an earlier run and the id
+  is doing its job, while a HOLD or a send failure means they were not told at all.
+  Collapsing them into `ids.length === 0` made the steady state of every wedged
+  watcher report as "escalation not delivered" on every run — ~23 rows a day on the
+  hourly email row, each one false.
+- **Rows fire**: one on the first failure of an episode, one when an escalation is
+  delivered, and one EVERY run when an escalation was due but the user was not
+  informed — held by quiet hours, or the send failed (a broken watcher plus a broken
+  channel is where a fallback surface matters most).
   Deduped otherwise: the hourly email row would write 24 `activity_log` rows a day —
   and fan 24 SSE events to every open tab — for one wedged watcher. A FLAPPING
   watcher still writes one row per failure; each failure resets the streak, so each
@@ -771,12 +779,22 @@ type, off the runner's `catch`:
   merge/cadence/ordering live in the pure `mergeHealthChips`, not inline in the route
   — the route needs a live DB, so reverting the sort, swapping the spreads, or
   deleting the run-health read outright each left the whole suite green.
+- **Cadence is applied to the WHOLE chip list**, per-source entries included. On the
+  one live row where that changes anything (`X Daily Digest`, the only hour-gated row
+  whose `interval_ms` is under a day) a source's staleness window widens 24h → 72h, so
+  a dead source shows amber for three days instead of red after one. Accepted: the row
+  really does run daily, and the 24h window was tripping on its normal cadence.
 - **Alert ids are built here, not by `healthAlertId`**: the nag bucket must count
   from THIS watcher's threshold (dividing by the shared constant made a row that
   escalates at 1 fire again at 3), and a record whose `lastOkAt` came from the
   `last_run_at` seed uses the fixed episode `"seed"` — that column advances on every
   failure, so an id keyed on it changes every run once the snapshot write starts
-  failing, and dedup stops working exactly during a Postgres outage.
+  failing, and dedup stops working exactly during a Postgres outage. The flag rides on
+  the RECORD, not on whether this call did the seeding — a run-local flag flipped the
+  key between run 1 and run 2 and delivered one episode twice. ⚠️ The accepted cost:
+  while writes are failing nothing persists, `consecutive` is pinned at 1 and the id
+  is constant, so after the first delivery a genuinely new episode is deduped away for
+  as long as that id sits in the 600-id window.
 
 ### Skip-forever audit (2026-07-27) — dispositions
 

@@ -54,6 +54,14 @@ export interface SourceHealth {
   consecutive: number;
   /** Epoch ms of the last run whose outcome was `ok` — the real freshness signal. */
   lastOkAt?: number;
+  /**
+   * RUN-health only (`run-health.ts`): this record's `lastOkAt` was seeded from the
+   * watcher row's `last_run_at`, not observed by an `ok` mark. Carried forward so the
+   * alert-id episode key stays stable across runs — the seed is re-derived from a
+   * column that ADVANCES on every failure, so an id keyed on its value changes every
+   * run. The per-source recorder never sets it.
+   */
+  seeded?: boolean;
 }
 
 /** The whole map for one watcher, keyed by source key (e.g. `tier2:llms`). */

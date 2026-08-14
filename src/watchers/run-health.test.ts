@@ -151,6 +151,17 @@ describe("markRunHealth", () => {
     expect(stored[RUN_HEALTH_ENTRY]!.lastOkAt).toBe(NOW - 2 * H);
   });
 
+  test("the detail rides as plain text — Telegram does not render markdown italics", async () => {
+    // `formatTelegramHtml` converts `**bold**` and backticks but not `_italics_`, and
+    // the email detail is a string already full of underscores (`mcp__gmail__*`).
+    let alerts: WatcherAlert[] = [];
+    for (let run = 1; run <= HEALTH_ESCALATE_AFTER; run++) {
+      ({ alerts } = await markRunHealth(watcher(), "error", NOW + run, "no mcp__gmail__* call", deps()));
+    }
+    expect(alerts[0]!.summary).toContain("\nno mcp__gmail__* call");
+    expect(alerts[0]!.summary).not.toContain("_no mcp");
+  });
+
   test("a watcher that has genuinely never run says so", async () => {
     let alerts: WatcherAlert[] = [];
     for (let run = 1; run <= HEALTH_ESCALATE_AFTER; run++) {
@@ -181,6 +192,15 @@ describe("markRunHealth", () => {
 // ── escalation threshold ─────────────────────────────────────────────
 
 describe("effectiveCadenceMs", () => {
+  test("an hour-gated WEEKLY row keeps its WEEKLY cadence, not 24h", () => {
+    // `Math.max`, not a flat 24h: the five hour-gated weekly rows would otherwise
+    // report a daily cadence, cutting the staleness window from 14 days to 72h — so a
+    // weekly row whose lastOkAt is a week old, i.e. its NORMAL state on its very next
+    // run, renders a red `stale` chip. That is the defect `stalenessMs`' own ceiling
+    // floor exists to prevent.
+    expect(effectiveCadenceMs({ intervalMs: 7 * 24 * H, config: { hour: 10 } })).toBe(7 * 24 * H);
+  });
+
   test("an hour-gated row runs DAILY however short its interval column says", () => {
     // The live `X Daily Digest`: interval_ms 300000 AND config.hour 12, so
     // isScheduledTimeDue lets it run once a day. Reading the column alone gave it a
@@ -277,8 +297,8 @@ describe("deliverFailureAlerts", () => {
 
   test("sends and returns the delivered id", async () => {
     const { api, sent } = fakeApi();
-    const ids = await deliverFailureAlerts(api, watcher(), "jarvis", [alert()], false, deps());
-    expect(ids).toEqual([alert().id]);
+    const res = await deliverFailureAlerts(api, watcher(), "jarvis", [alert()], false, deps());
+    expect(res).toEqual({ ids: [alert().id], outcome: "sent" });
     expect(sent).toHaveLength(1);
     expect(savedMessages).toHaveLength(1);
     // Distinguishable from a real email digest in the prompt's proactive-alerts block,
@@ -288,23 +308,25 @@ describe("deliverFailureAlerts", () => {
 
   test("an already-notified id is neither re-sent nor re-recorded", async () => {
     const { api, sent } = fakeApi();
-    const ids = await deliverFailureAlerts(api, watcher({ lastNotifiedIds: [alert().id] }), "jarvis", [alert()], false, deps());
-    expect(ids).toEqual([]);
+    const res = await deliverFailureAlerts(api, watcher({ lastNotifiedIds: [alert().id] }), "jarvis", [alert()], false, deps());
+    // "deduped", NOT a bare empty list: the user HAS been told, and a caller that
+    // cannot tell this from a hold reports every repeat as an undelivered escalation.
+    expect(res).toEqual({ ids: [], outcome: "deduped" });
     expect(sent).toHaveLength(0);
   });
 
   test("quiet hours HOLD the escalation — nothing sent, nothing recorded, so it re-emits", async () => {
     const { api, sent } = fakeApi();
-    const ids = await deliverFailureAlerts(api, watcher(), "jarvis", [alert()], true, deps());
-    expect(ids).toEqual([]);
+    const res = await deliverFailureAlerts(api, watcher(), "jarvis", [alert()], true, deps());
+    expect(res).toEqual({ ids: [], outcome: "held" });
     expect(sent).toHaveLength(0);
     expect(savedMessages).toHaveLength(0);
   });
 
   test("falls back to plain text when Telegram rejects the HTML, and still records", async () => {
     const { api, sent } = fakeApi("parse-error");
-    const ids = await deliverFailureAlerts(api, watcher(), "jarvis", [alert()], false, deps());
-    expect(ids).toEqual([alert().id]);
+    const res = await deliverFailureAlerts(api, watcher(), "jarvis", [alert()], false, deps());
+    expect(res.ids).toEqual([alert().id]);
     expect(sent).toHaveLength(1);
     expect(sent[0]!.html).toBe(false);
   });
@@ -318,9 +340,9 @@ describe("deliverFailureAlerts", () => {
   test("a failed message-save does NOT un-record a delivery the user already got", async () => {
     saveMessageThrows = true;
     const { api, sent } = fakeApi();
-    const ids = await deliverFailureAlerts(api, watcher(), "jarvis", [alert()], false, deps());
+    const res = await deliverFailureAlerts(api, watcher(), "jarvis", [alert()], false, deps());
     expect(sent).toHaveLength(1);
-    expect(ids).toEqual([alert().id]);
+    expect(res.ids).toEqual([alert().id]);
   });
 });
 
@@ -358,6 +380,22 @@ describe("handleWatcherFailure", () => {
     // event, one row, not two.
     expect(activityRows).toHaveLength(1);
     expect(activityRows[0]!.text).toContain("escalated");
+  });
+
+  test("a DEDUPED escalation is not reported as undelivered — the steady state of every wedge", async () => {
+    // The regression this replaces: `delivered.length === 0` conflated "already sent,
+    // correctly deduped" with "held or lost", so from run 4 onward a wedged hourly
+    // watcher wrote an error row EVERY run claiming the user had not been told —
+    // measured 23 rows a day, each of them false, plus an SSE event to every tab.
+    const { api, sent } = fakeApi();
+    const w = watcher({ lastRunAt: NOW - H });
+    for (let run = 1; run <= 12; run++) {
+      const ids = await handleWatcherFailure(api, w, "jarvis", "no Gmail tool call", false, deps(), NOW + run * H);
+      w.lastNotifiedIds = [...w.lastNotifiedIds, ...ids];
+    }
+    expect(sent).toHaveLength(1);
+    expect(activityRows).toHaveLength(2); // the first failure, and the escalation
+    expect(activityRows.filter((r) => r.text.includes("not delivered"))).toHaveLength(0);
   });
 
   test("a HELD escalation still renders something — quiet hours must not silence the run", async () => {
@@ -417,6 +455,28 @@ describe("handleWatcherFailure", () => {
 // ── alert-id episode + nag bucket ────────────────────────────────────
 
 describe("alert id", () => {
+  test("a seeded episode is STABLE from run 1 to run 2 — one episode, one alert", async () => {
+    // `seeded` is only true on the run that finds no prior, so a run-local flag flipped
+    // the episode key between run 1 (seeded ⇒ "seed") and run 2 (record found ⇒ the
+    // carried timestamp) and delivered the SAME episode twice, on every row that
+    // escalates at 1. The flag rides on the record now.
+    const w = watcher({ intervalMs: 7 * 24 * H, lastRunAt: NOW - 7 * 24 * H });
+    const ids: string[] = [];
+    for (let run = 1; run <= 3; run++) {
+      const { alerts } = await markRunHealth(w, "error", NOW + run * 24 * H, "boom", deps());
+      ids.push(alerts[0]!.id);
+    }
+    expect(new Set(ids).size).toBe(1);
+  });
+
+  test("a real ok clears the seed, so the NEXT episode is heard", async () => {
+    const w = watcher({ intervalMs: 7 * 24 * H, lastRunAt: NOW - 7 * 24 * H });
+    const first = (await markRunHealth(w, "error", NOW, "boom", deps())).alerts[0]!.id;
+    await markRunHealth(w, "ok", NOW + 24 * H, undefined, deps());
+    const second = (await markRunHealth(w, "error", NOW + 48 * H, "boom", deps())).alerts[0]!.id;
+    expect(second).not.toBe(first);
+  });
+
   test("a seeded episode is STABLE even when the snapshot write keeps failing", async () => {
     // The seed is re-derived from `last_run_at`, which the runner advances on every
     // failure — so if the write fails the record is never found, the seed re-fires
@@ -462,6 +522,16 @@ describe("mergeHealthChips", () => {
     expect(mergeHealthChips({ [RUN_HEALTH_ENTRY]: bad }, null, hourly, NOW).map((c) => c.key)).toEqual([RUN_HEALTH_ENTRY]);
     expect(mergeHealthChips(null, null, hourly, NOW)).toEqual([]);
     expect(mergeHealthChips("garbage", { "x:digest": ok }, hourly, NOW).map((c) => c.key)).toEqual(["x:digest"]);
+  });
+
+  test("a source key can never displace the run chip", () => {
+    // Source entries win a key collision by design; the run entry is namespaced so
+    // that can never reach it. Swapping the spreads must not silently change which
+    // record renders.
+    const runRec = { outcome: "error" as const, at: NOW, consecutive: 9, lastOkAt: NOW - H };
+    const chips = mergeHealthChips({ [RUN_HEALTH_ENTRY]: runRec }, { [RUN_HEALTH_ENTRY]: ok }, hourly, NOW);
+    expect(chips).toHaveLength(1);
+    expect(chips[0]!.outcome).toBe("ok");
   });
 
   test("levels use the CADENCE, so an hour-gated row is not stale after one day", () => {
