@@ -144,6 +144,14 @@ describe("buildGmailQuery (success-watermark window)", () => {
     expect(buildGmailQuery(undefined, odd, odd + 1000)).not.toBe("is:unread after:1700000001");
   });
 
+  test("a watermark AHEAD of the clock cannot produce a future query floor", () => {
+    // A backwards clock step (NTP, VM resume, a second muninn on a shared DB)
+    // would otherwise hand Gmail a future `after:` argument. See the ceiling's
+    // comment for what that does and does not buy.
+    const future = NOW + 3_600_000;
+    expect(buildGmailQuery(undefined, future, NOW)).toBe(`is:unread after:${NOW / 1000}`);
+  });
+
   test("combines filter and window", () => {
     expect(buildGmailQuery("from:boss", SINCE, NOW)).toBe(
       `is:unread from:boss after:${(SINCE - EMAIL_QUERY_OVERLAP_MS) / 1000}`,
@@ -392,14 +400,6 @@ describe("emailLookbackClampMs", () => {
   test("never returns a negative span", () => {
     expect(emailLookbackClampMs(NOW, NOW)).toBe(0);
     expect(emailLookbackClampMs(NOW + 3_600_000, NOW)).toBe(0);
-  });
-
-  test("a watermark AHEAD of the clock cannot produce a future query floor", () => {
-    // A backwards clock step would otherwise ask for mail newer than a future
-    // instant — matching nothing, while the run still claims coverage and moves
-    // the watermark forward over a window nothing evaluated.
-    const future = NOW + 3_600_000;
-    expect(buildGmailQuery(undefined, future, NOW)).toBe(`is:unread after:${NOW / 1000}`);
   });
 
   test("returns 0 for a falsy watermark, matching buildGmailQuery's own guard", () => {

@@ -761,15 +761,23 @@ async function sendToSlackChannels(botName: string, markdown: string, channels: 
 }
 
 /**
- * The four WIKI-family checkers, injectable. Scoped to this family on purpose:
- * they are exactly the ones `MUNINN_WIKI_READONLY` partitions (the two drafting
- * types are refused, linter + committer stay open), and the readonly guard's
- * whole claim is about which of them a run REACHES — which an empty return value
- * cannot show, since every checker degrades to `[]` on a degraded bot config.
- * A `mock.module` spy would leak across the `bun test src/watchers/` chunk into
- * the gardener/linter tests beside it, so the seam is a parameter instead.
+ * The checker seam: every type `runChecker` dispatches, injectable.
+ *
+ * It began life scoped to the four wiki checkers, for the readonly-guard test —
+ * whose claim is about which checker a run REACHES, something an empty return
+ * value cannot show, since every checker degrades to `[]` on a degraded bot
+ * config. A `mock.module` spy would leak across the `bun test src/watchers/`
+ * chunk into the gardener/linter tests beside it, so the seam is a parameter.
+ *
+ * It now covers ALL EIGHT because the four without a seam had no dispatch
+ * coverage at all: a refactor deleted `case "email"` outright and every tick
+ * returned `[]` — read by the runner as a quiet inbox, so run-health saw a
+ * healthy run and the user would have silently stopped receiving mail alerts,
+ * with tsc clean and the full suite green. Deleting the `news`, `x` or
+ * `anthropic` case was equally invisible. Every branch now goes through here and
+ * has a test asserting which checker it reaches.
  */
-export interface WikiCheckers {
+export interface WatcherCheckers {
   checkEmail: typeof checkEmail;
   checkNews: typeof checkNews;
   checkX: typeof checkX;
@@ -780,7 +788,7 @@ export interface WikiCheckers {
   checkConsolidationGardener: typeof checkConsolidationGardener;
 }
 
-const DEFAULT_WIKI_CHECKERS: WikiCheckers = {
+export const DEFAULT_WATCHER_CHECKERS: WatcherCheckers = {
   checkEmail,
   checkNews,
   checkX,
@@ -800,7 +808,7 @@ export async function runChecker(
   watcher: Watcher,
   botConfig: BotConfig,
   telemetry?: HaikuTelemetry,
-  checkers: WikiCheckers = DEFAULT_WIKI_CHECKERS,
+  checkers: WatcherCheckers = DEFAULT_WATCHER_CHECKERS,
 ): Promise<WatcherCheckResult> {
   // The bot folder is no longer a cwd — it is where a checker's MCP servers and
   // tool permissions are declared (`--mcp-config` / `--settings`). Only the email
@@ -843,7 +851,7 @@ async function dispatchChecker(
   botConfig: BotConfig,
   botName: string,
   telemetry: HaikuTelemetry | undefined,
-  checkers: WikiCheckers,
+  checkers: WatcherCheckers,
 ): Promise<WatcherAlert[]> {
   switch (watcher.type) {
     case "news":

@@ -604,12 +604,16 @@ export function buildGmailQuery(filter: string | undefined, sinceMs: number | nu
     // `Math.max` clamps a stale watermark to the ceiling; `Math.floor` because
     // Gmail wants whole seconds and rounding UP would exclude the boundary
     // message the overlap was added to include.
-    // The `Math.min(…, nowMs)` ceiling matters when the watermark is AHEAD of the
-    // clock — a backwards clock step (NTP correction, VM resume, a second muninn
-    // on a shared DB with skew). Without it the query asks for mail newer than a
-    // future instant, matches nothing, still counts as "reached Gmail", and the
-    // run then overwrites the watermark forward — so the window in between is
-    // never evaluated by any run and, the mail being unread, nothing re-offers it.
+    // `Math.min(…, nowMs)` handles a watermark AHEAD of the clock — a backwards
+    // clock step (NTP correction, VM resume, a second muninn on a shared DB with
+    // skew). Be precise about what it does and does not buy, because the first
+    // version of this comment overclaimed: the window between the true last
+    // coverage and now is skipped EITHER WAY on that tick, and `markWatcherSuccess`
+    // is a plain SET (not GREATEST) so the watermark self-heals backwards next
+    // run. What the ceiling actually prevents is handing Gmail a FUTURE `after:`
+    // argument — if that is ever rejected rather than merely matching nothing, the
+    // run fails, coverage is never claimed, and the future watermark stays put
+    // permanently instead of self-healing.
     const since = Math.min(
       Math.max(sinceMs - EMAIL_QUERY_OVERLAP_MS, nowMs - EMAIL_MAX_LOOKBACK_MS),
       nowMs,
