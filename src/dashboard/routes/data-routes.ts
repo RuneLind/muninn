@@ -20,7 +20,8 @@ import {
   forceRunWatcher,
   getWatcherSnapshot,
 } from "../../db/watchers.ts";
-import { SOURCE_HEALTH_KEY, healthLevel, isSourceHealthMap } from "../../watchers/source-health.ts";
+import { SOURCE_HEALTH_KEY } from "../../watchers/source-health.ts";
+import { RUN_HEALTH_KEY, mergeHealthChips } from "../../watchers/run-health.ts";
 import { getScheduledTaskById } from "../../db/scheduled-tasks.ts";
 import { updateScheduledTask } from "../../db/scheduled-tasks.ts";
 import { getActivityForJob } from "../../db/activity.ts";
@@ -310,12 +311,16 @@ export function registerDataRoutes(app: Hono): void {
       const withHealth = await Promise.all(
         watchers.map(async (w) => {
           try {
-            const snap = await getWatcherSnapshot(w.id, SOURCE_HEALTH_KEY);
-            if (!isSourceHealthMap(snap)) return w;
-            const now = Date.now();
-            const sourceHealth = Object.entries(snap)
-              .map(([key, h]) => ({ key, ...h, level: healthLevel(h, w.intervalMs, now) }))
-              .sort((a, b) => a.key.localeCompare(b.key));
+            // Two snapshot keys, one chip list — see `mergeHealthChips`, which owns
+            // the merge, the cadence and the ordering because this route is only
+            // reachable with a live DB and every decision in it was otherwise
+            // pinned by nothing.
+            const [sourceSnap, runSnap] = await Promise.all([
+              getWatcherSnapshot(w.id, SOURCE_HEALTH_KEY),
+              getWatcherSnapshot(w.id, RUN_HEALTH_KEY),
+            ]);
+            const sourceHealth = mergeHealthChips(runSnap, sourceSnap, w, Date.now());
+            if (sourceHealth.length === 0) return w;
             return { ...w, sourceHealth };
           } catch {
             return w;

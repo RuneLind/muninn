@@ -13,6 +13,12 @@ import { checkWikiLinter } from "./wiki-linter.ts";
 import { checkWikiCommitter } from "./wiki-committer.ts";
 import { checkConsolidationGardener } from "./consolidation-gardener.ts";
 import { shouldSkipWikiDraftingRun } from "./wiki-drafting.ts";
+import { markRunHealth, handleWatcherFailure } from "./run-health.ts";
+// Moved to a leaf module so `run-health.ts` can format an escalation without
+// importing this file (and with it every checker). Re-exported: `runner.ts` has
+// been its import site since it was written.
+import { formatAlerts } from "./format-alerts.ts";
+export { formatAlerts };
 import { isWikiReadonly, WIKI_READONLY_REASON } from "../wiki/readonly.ts";
 import { activityLog } from "../observability/activity-log.ts";
 import { agentStatus, getConnectorLabel, createProgressCallback } from "../observability/agent-status.ts";
@@ -590,6 +596,10 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
             modelCalls: usage.calls,
             ...(usage.errors > 0 ? { modelErrors: usage.errors } : {}),
           };
+      // The run got all the way here, so the watcher itself is healthy — this is
+      // what resets a failure streak (and it must be recorded on a run that found
+      // NOTHING too, which is the modal case for email/x).
+      await markRunHealth(watcher, "ok");
       // `wt` is a child span sharing the scheduler_tick trace id, so the card's
       // trace link opens the whole tick — coarser than chat's per-request link,
       // but the only handle in scope here.
@@ -627,12 +637,21 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
             ...(usage.errors > 0 ? { modelErrors: usage.errors } : {}),
           }
         : {};
+      const errText = err instanceof Error ? err.message : String(err);
       wt?.error(err instanceof Error ? err : String(err), failedUsage);
-      log.error("Watcher \"{name}\" ({watcherId}) failed: {error}", { botName: tag, name: watcher.name, watcherId: watcher.id, error: err instanceof Error ? err.message : String(err) });
+      log.error("Watcher \"{name}\" ({watcherId}) failed: {error}", { botName: tag, name: watcher.name, watcherId: watcher.id, error: errText });
+
+      // Record the failure, put a row where a human can see it, and escalate if the
+      // streak says so. Never throws (the run already failed; the `last_run_at`
+      // advance below must still happen), and returns only the ids it actually
+      // DELIVERED — folded into the rolling window with the same slice the success
+      // path uses, so an escalation the user has been sent is not re-sent hourly
+      // for the rest of the episode.
+      const deliveredIds = await handleWatcherFailure(api, watcher, tag, errText, quietHours);
 
       // Still advance lastRunAt on failure to prevent retry storms
       try {
-        await updateWatcherLastRun(watcher.id, watcher.lastNotifiedIds);
+        await updateWatcherLastRun(watcher.id, [...watcher.lastNotifiedIds, ...deliveredIds].slice(-MAX_NOTIFIED_IDS));
       } catch (updateErr) {
         log.error("Failed to update watcher last_run_at after error: {error}", { botName: tag, watcherId: watcher.id, error: updateErr instanceof Error ? updateErr.message : String(updateErr) });
       }
@@ -755,12 +774,3 @@ export async function runChecker(
 }
 
 
-export function formatAlerts(watcher: Watcher, alerts: WatcherAlert[]): string {
-  const icon = watcher.type === "email" ? "\u{1F4E8}" : watcher.type === "news" ? "\u{1F4F0}" : watcher.type === "x" ? "\u{1D54F}" : watcher.type === "anthropic" ? "\u{1F9E0}" : watcher.type === "wiki-gardener" ? "\u{1F331}" : watcher.type === "wiki-linter" ? "\u{1F9F9}" : watcher.type === "wiki-committer" ? "\u{1F4BE}" : watcher.type === "consolidation-gardener" ? "\u{1F9E9}" : "\u{1F514}";
-  const header = `${icon} **${watcher.name}**\n`;
-  const lines = alerts.map((a) => {
-    const urgencyTag = a.urgency === "high" ? " \u{1F534}" : a.urgency === "medium" ? " \u{1F7E1}" : "";
-    return `${urgencyTag} ${a.summary}`;
-  });
-  return header + lines.join("\n\n");
-}
