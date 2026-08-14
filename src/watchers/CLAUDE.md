@@ -422,10 +422,17 @@ path reached the same checkers unguarded, so a readonly instance left with
 — that only the write owner can apply. Both call sites read the same set, which
 is why it lives here rather than in `data-routes.ts`. `wiki-linter` (report-only)
 and `wiki-committer` (git, which the flag deliberately leaves open) are NOT
-skipped. The skip is not an error: the run still advances `last_run_at`. The four
-wiki checkers are reachable through the injectable `WikiCheckers` seam
+skipped. The skip is not an error: the run still advances `last_run_at`. **All eight**
+checkers are reachable through the injectable `WatcherCheckers` seam
 (`runChecker`'s 4th arg) purely so a test can assert WHICH checker a run reaches
-— every checker degrades to `[]`, so a return value proves nothing.
+— every checker degrades to `[]`, so a return value proves nothing. It began
+scoped to the four wiki checkers, for the readonly guard; it was widened
+2026-08-14 because the four types WITHOUT a seam had no dispatch coverage at all
+— a refactor deleted `case "email"` and every tick returned `[]`, which the
+runner reads as a quiet inbox, so run-health saw a healthy run and the user
+would have silently stopped receiving mail alerts, with tsc clean and the full
+suite green. **A ninth checker type must be wired through this seam and given a
+dispatch test**, or deleting its branch is invisible.
 
 ### Time-of-day scheduling
 
@@ -839,7 +846,7 @@ type, off the runner's `catch`:
 - **Every DB seam is a parameter, not a module mock.** A `mock.module` test here
   invalidates `db/*` for the whole `bun test src/watchers/` chunk; the first cut did
   exactly that and silently broke six of `x.test.ts`'s assertions. Same call
-  `runChecker` makes for `WikiCheckers`.
+  `runChecker` makes for `WatcherCheckers`.
 - **Surface:** `GET /api/watchers` merges both snapshot keys into the one
   `sourceHealth[]` chip list (run entry sorted first, pane label now "Health"). The
   merge/cadence/ordering live in the pure `mergeHealthChips`, not inline in the route
