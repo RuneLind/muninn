@@ -11,8 +11,8 @@
       ],
       "env": {
         "KNOWLEDGE_API_URL": "http://localhost:8321",
-        "KNOWLEDGE_COLLECTIONS": "wiki,wiki-life,youtube-summaries,x-feed",
-        "KNOWLEDGE_DESCRIPTION": "wiki (synthesized AI/tech knowledge pages), wiki-life (synthesized life knowledge — health, parenting, entertainment), youtube-summaries, x-feed (X/Twitter timeline tweets)"
+        "KNOWLEDGE_COLLECTIONS": "wiki,wiki-life,youtube-summaries,x-feed,anthropic-knowledge",
+        "KNOWLEDGE_DESCRIPTION": "wiki (synthesized AI/tech knowledge pages), wiki-life (synthesized life knowledge — health, parenting, entertainment), youtube-summaries, x-feed (X/Twitter timeline tweets), anthropic-knowledge"
       }
     },
     "gmail": {
@@ -28,14 +28,11 @@
     },
     "google-calendar": {
       "type": "stdio",
-      "command": "npx",
+      "command": "bash",
       "args": [
-        "-y",
-        "@cocal/google-calendar-mcp"
-      ],
-      "env": {
-        "GOOGLE_OAUTH_CREDENTIALS": "/path/to/gcp-oauth.keys.json"
-      }
+        "-c",
+        "GOOGLE_OAUTH_CREDENTIALS=\"$HOME/.gmail-mcp/gcp-oauth.keys.json\" exec npx -y @cocal/google-calendar-mcp"
+      ]
     }
   }
 }
