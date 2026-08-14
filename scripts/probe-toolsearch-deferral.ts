@@ -30,7 +30,7 @@
  * ToolSearch and calls Gmail still scores `TIMEOUT` if it exceeds the budget, and real
  * runs measured 60.8s during this rewrite. A low `CLEAN` count is therefore not
  * automatically a deferral finding — read "never called Gmail" for that, and
- * "reached Gmail but timed out" for the budget.
+ * "called Gmail but timed out" for the budget.
  *
  * ⚠️ **A RUN IS ONE SPAWN, NOT ONE TICK.** Since #436 a production check spawns up
  * to twice, so a tick fails only when both spawns do. Read these numbers as the
@@ -112,7 +112,9 @@ const CONCURRENCY = ARMS.length;
 const MAX_TOTAL_RUNS = 100;
 function intEnv(name: string, fallback: number, max: number): number {
   const raw = process.env[name];
-  if (raw == null || raw === "") return fallback;
+  // The default is capped too. Returning `fallback` before the range check meant an
+  // unset N ran 12 per arm however many arms there were.
+  if (raw == null || raw === "") return Math.min(fallback, max);
   // Decimal digits only. `Number.isInteger` alone accepts `1e3`, and every run is a
   // real Haiku spawn plus a real Gmail search — a fat-fingered `N=1e2` is a far more
   // expensive typo than the `N=abc` the guard was written for.
@@ -127,7 +129,9 @@ function intEnv(name: string, fallback: number, max: number): number {
   }
   return n;
 }
-const N = intEnv("N", 12, Math.floor(MAX_TOTAL_RUNS / ARMS.length));
+// Floored at 1: with more arms than the cap, `Math.floor` gives 0 and every explicit
+// N is refused as "out of range (1..0)" while an unset N would still have run.
+const N = intEnv("N", 12, Math.max(1, Math.floor(MAX_TOTAL_RUNS / ARMS.length)));
 
 /**
  * The live watcher row's own inputs. A hardcoded filter/prompt/model matches
@@ -144,15 +148,15 @@ async function loadLiveTask(): Promise<{
   const fallback = () => {
     const dir = resolve(REPO, "bots/jarvis");
     if (!existsSync(dir)) {
-      console.error(`[probe] no watcher row to read and ${dir} does not exist — nothing to probe`);
+      console.error(`[probe] falling back to the shipped defaults, but ${dir} does not exist — nothing to probe`);
       process.exit(1);
     }
     return {
-    query: buildGmailQuery(undefined, Date.now()),
-    prompt: buildEmailPrompt(buildGmailQuery(undefined, Date.now()), DEFAULT_EMAIL_PROMPT, null),
-    model: DEFAULT_MODEL,
-    botDir: dir,
-    source: "shipped defaults (no DB)",
+      query: buildGmailQuery(undefined, Date.now()),
+      prompt: buildEmailPrompt(buildGmailQuery(undefined, Date.now()), DEFAULT_EMAIL_PROMPT, null),
+      model: DEFAULT_MODEL,
+      botDir: dir,
+      source: "shipped defaults (no DB)",
     };
   };
   if (process.env.PROBE_NO_DB === "1") return fallback();
@@ -231,13 +235,13 @@ interface Run {
   /**
    * Issued a `mcp__gmail__*` tool CALL at all. This — and only this — answers the
    * deferral question, which is whether the deferred tool ever became callable.
-   * Deliberately blind to whether the call then worked.
+   * Deliberately blind to whether the call then worked; that is `gmailError`'s job,
+   * reported on its own axis. A third "called and it worked" field existed for one
+   * round, was written at four sites and read at none, and is gone.
    */
   calledGmail: boolean;
   /** A Gmail call came back `is_error` (permission denied / MCP failure). */
   gmailError: boolean;
-  /** Called Gmail AND at least one of those calls succeeded. */
-  reachedGmail: boolean;
   toolSearches: number;
   tools: string[];
   exitCode: number | null;
@@ -252,10 +256,11 @@ interface Run {
  * clean and hides the effect being measured — that generosity is exactly what made
  * the first cut of this probe read 7/8 where the strict metric read 3/8.
  *
- * `reachedGmail` is tracked separately because it is the decision-relevant number
- * for the watcher's correctness: a run that never reached Gmail is a tick that
- * silently reports an empty inbox. It is also #434's predicate, so it inherits that
- * predicate's blind spot — hence `gmailError`, reported beside it.
+ * `calledGmail` is tracked separately because it is the decision-relevant number for
+ * the watcher's correctness: a run that never called Gmail is a tick that silently
+ * reports an empty inbox. It is #434's predicate exactly, blind spot included — that
+ * predicate cannot see a call that came back an error either, which is why
+ * `gmailError` is reported beside it rather than folded into it.
  *
  * `LOOP` and `BASH` are not exclusive in reality (a run can do both); BASH wins,
  * and `toolSearches` carries the loop length for every bucket, so the ToolSearch
@@ -279,7 +284,7 @@ function classify(tools: string[], gmail: boolean): Outcome {
 
 async function once(arm: string, bin: string, i: number): Promise<Run> {
   const t0 = performance.now();
-  const base: Omit<Run, "outcome" | "calledGmail" | "reachedGmail" | "gmailError" | "toolSearches" | "tools" | "exitCode" | "ms"> =
+  const base: Omit<Run, "outcome" | "calledGmail" | "gmailError" | "toolSearches" | "tools" | "exitCode" | "ms"> =
     { arm, i };
   try {
     const args = buildHaikuArgs({
@@ -323,7 +328,7 @@ async function once(arm: string, bin: string, i: number): Promise<Run> {
     //
     // stdout is read CHUNK BY CHUNK, and stops accumulating the moment the deadline
     // fires. Reading to the end is what let events emitted AFTER the kill reclassify
-    // a run: making `reachedGmail` real on TIMEOUT (the fix one round ago) meant a
+    // a run: making the Gmail flag real on TIMEOUT (the fix one round ago) meant a
     // Gmail call the model got out during the teardown moved the run from "never
     // called Gmail" (deferral — what production would have seen) to "reached Gmail
     // but timed out" (budget). Measured: a real run yielded 60721ms of stream against
@@ -377,40 +382,33 @@ async function once(arm: string, bin: string, i: number): Promise<Run> {
       }
     }
     const gmailCalls = [...byId.entries()].filter(([, name]) => name.startsWith("mcp__gmail__"));
-    const gmailOk = gmailCalls.some(([id]) => !erroredIds.has(id));
     const gmailErrored = gmailCalls.some(([id]) => erroredIds.has(id));
     // THE DEFERRAL QUESTION IS "was it called", NOT "did it work". Deriving the
-    // headline count from `reachedGmail` reported a DENIED Gmail call — deferral
+    // headline count from a did-it-WORK field reported a DENIED Gmail call — deferral
     // having plainly succeeded — as "never called Gmail", and made the same run land
     // in CRASH or OTHER depending only on the CLI's exit code. Three fields, each
     // used at exactly one place, is the fix for a field that meant two things.
     const called = tools.some((t) => t.startsWith("mcp__gmail__"));
-    // Fallback for a Gmail call whose stream carried no usable id: treat presence
-    // as reached, since the alternative is under-counting the healthy case.
-    const gmailByName = called;
-
     const ms = Math.round(performance.now() - t0);
-    const reached = gmailCalls.length > 0 ? gmailOk : gmailByName;
     if (killed) {
-      // `reachedGmail` is REAL here, not false. Hardcoding false made a run that
+      // `calledGmail` is REAL here, not false. Hardcoding false made a run that
       // resolved the deferred tool on its first try, called `search_emails`, and then
       // exceeded the budget count as "never reached Gmail" — folding the budget
       // failure into the deferral rate under the deferral rate's name. They are
       // different mechanisms with different fixes; the summary now reports both.
-      return { ...base, outcome: "TIMEOUT", calledGmail: called, reachedGmail: reached, gmailError: gmailErrored, toolSearches: tools.filter((t) => t === "ToolSearch").length, tools, exitCode, ms, note: `killed at ${RUN_TIMEOUT_MS}ms` };
+      return { ...base, outcome: "TIMEOUT", calledGmail: called, gmailError: gmailErrored, toolSearches: tools.filter((t) => t === "ToolSearch").length, tools, exitCode, ms, note: `killed at ${RUN_TIMEOUT_MS}ms` };
     }
     // A non-zero exit says nothing about ToolSearch — but only the tool-less case was
     // caught. A rate-limit exit or an OAuth expiry AFTER two ToolSearch calls landed
     // in LOOP/OTHER and counted in the deferral denominator, which is the inflation
     // this bucket exists to remove.
     if (exitCode !== 0 && !called) {
-      return { ...base, outcome: "CRASH", calledGmail: false, reachedGmail: false, gmailError: gmailErrored, toolSearches: tools.filter((t) => t === "ToolSearch").length, tools, exitCode, ms, note: errText.trim().split("\n").pop()?.slice(0, 120) || `exit ${exitCode}` };
+      return { ...base, outcome: "CRASH", calledGmail: false, gmailError: gmailErrored, toolSearches: tools.filter((t) => t === "ToolSearch").length, tools, exitCode, ms, note: errText.trim().split("\n").pop()?.slice(0, 120) || `exit ${exitCode}` };
     }
     return {
       ...base,
-      outcome: classify(tools, reached),
+      outcome: classify(tools, called),
       calledGmail: called,
-      reachedGmail: reached,
       gmailError: gmailErrored,
       toolSearches: tools.filter((t) => t === "ToolSearch").length,
       tools,
@@ -421,7 +419,7 @@ async function once(arm: string, bin: string, i: number): Promise<Run> {
     // A spawn that throws (bad PROBE_ARMS path, unwritable cwd) used to abort
     // Promise.all and destroy the whole batch's summary AFTER the other runs had
     // already been paid for.
-    return { ...base, outcome: "CRASH", calledGmail: false, reachedGmail: false, gmailError: false, toolSearches: 0, tools: [], exitCode: null, ms: Math.round(performance.now() - t0), note: err instanceof Error ? err.message : String(err) };
+    return { ...base, outcome: "CRASH", calledGmail: false, gmailError: false, toolSearches: 0, tools: [], exitCode: null, ms: Math.round(performance.now() - t0), note: err instanceof Error ? err.message : String(err) };
   }
 }
 
@@ -470,16 +468,22 @@ for (const { label } of ARMS) {
   // budget, which #436's retry addresses for a different reason. One number covering
   // both is how a 60s budget problem gets read as a deferral regression.
   const neverCalled = measurable.filter((r) => !r.calledGmail).length;
-  const timedOutReached = rs.filter((r) => r.outcome === "TIMEOUT" && r.calledGmail).length;
+  const timedOutCalled = rs.filter((r) => r.outcome === "TIMEOUT" && r.calledGmail).length;
   // A spawn can exit non-zero having done everything right, which `classify` scores
   // CLEAN — true of the tool trajectory, and silent about the crash. Production
   // would have counted that tick a failure.
-  const badExit = measurable.filter((r) => r.exitCode != null && r.exitCode !== 0).length;
+  //
+  // TIMEOUT runs are EXCLUDED: we killed them, so they exit 143 (SIGTERM) or 137
+  // (SIGKILL) by construction. Counting them made a batch with four benign timeouts
+  // and zero crashes report `non-zero exit: 4`, which reads as four OAuth or
+  // rate-limit failures — diluting the counter with exactly the case it was added
+  // to separate out.
+  const badExit = measurable.filter((r) => r.outcome !== "TIMEOUT" && r.exitCode != null && r.exitCode !== 0).length;
   console.log(
     `${label}: CLEAN ${c("CLEAN")}/${measurable.length}  SLOW ${c("SLOW")}  LOOP ${c("LOOP")}  ` +
       `BASH ${c("BASH")}  NOTOOL ${c("NOTOOL")}  OTHER ${c("OTHER")}  TIMEOUT ${c("TIMEOUT")}` +
       `  |  never called Gmail: ${neverCalled}/${measurable.length}` +
-      (timedOutReached ? `  |  reached Gmail but timed out: ${timedOutReached}` : "") +
+      (timedOutCalled ? `  |  called Gmail but timed out: ${timedOutCalled}` : "") +
       (c("CRASH") ? `  |  CRASH ${c("CRASH")} (excluded)` : "") +
       (badExit ? `  |  non-zero exit: ${badExit}` : "") +
       (rs.some((r) => r.gmailError) ? `  |  gmail tool errors: ${rs.filter((r) => r.gmailError).length}` : ""),

@@ -490,9 +490,22 @@ describe("buildEmailPrompt", () => {
 
   test("carries the query, the criteria and the format contract, in that order", () => {
     const out = buildEmailPrompt(QUERY, DEFAULT_EMAIL_PROMPT, null);
+    // `toContain` FIRST: `indexOf` returns -1 for an absent needle, and -1 is less
+    // than everything — so the ordering assertions alone passed with the query
+    // dropped from the prompt entirely (mutation-verified).
+    expect(out).toContain(QUERY);
     expect(out.indexOf(QUERY)).toBeLessThan(out.indexOf("Worth notifying:"));
     expect(out.indexOf("Worth notifying:")).toBeLessThan(out.indexOf("CRITICAL:"));
     expect(out.indexOf("CRITICAL:")).toBeLessThan(out.indexOf("Return ONLY a JSON array"));
+  });
+
+  test("the assembled prompt is EXACTLY this — the extraction's whole claim", () => {
+    // A golden string, because every other assertion here is structural and would
+    // survive an edit to the prompt text. This is the one that fails if the
+    // extraction ever stops producing what `checkEmail` produced.
+    expect(buildEmailPrompt(QUERY, "CRITERIA-HERE", null)).toBe(
+      `You have access to Gmail MCP tools.\nSearch for unread emails matching: "${QUERY}"\n\nCRITERIA-HERE\n\nCRITICAL:\n- "id" MUST be the exact Gmail message ID from the API (e.g. "19abc123def"). Copy it verbatim.\n- "sender" MUST be the exact From header value (e.g. "Posten Norge")\n- "subject" MUST be the exact email subject line, verbatim — do NOT rephrase or shorten it.\n\nReturn ONLY a JSON array (no markdown fences):\n[{"id":"msg_id","source":"email","sender":"exact sender","subject":"exact subject","summary":"**Fra:** sender — subject brief","urgency":"high|medium|low"}]\nIf nothing worth notifying, return: []`,
+    );
   });
 
   test("a watcher's own criteria replace the default outright", () => {
@@ -501,9 +514,9 @@ describe("buildEmailPrompt", () => {
     expect(out).not.toContain("Worth notifying:");
   });
 
-  test("no profile ⇒ byte-identical to the unwrapped prompt", () => {
-    // `withInterestProfile` returns its input verbatim for null/blank, which is what
-    // makes the profile-less path provably unchanged by the extraction.
+  test("a blank profile is the same as no profile", () => {
+    // `withInterestProfile` returns its input verbatim for null/blank. NB this pins
+    // that behaviour only — the byte-identity claim is the golden string above.
     const base = buildEmailPrompt(QUERY, DEFAULT_EMAIL_PROMPT, null);
     expect(buildEmailPrompt(QUERY, DEFAULT_EMAIL_PROMPT, "")).toBe(base);
     expect(buildEmailPrompt(QUERY, DEFAULT_EMAIL_PROMPT, "   ")).toBe(base);
