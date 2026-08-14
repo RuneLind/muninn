@@ -67,6 +67,45 @@ Not worth notifying:
 
 
 /**
+ * The full prompt one email check sends, assembled from the pieces a run varies:
+ * the Gmail query, the watcher row's criteria, and the owner's interest profile.
+ *
+ * Extracted from `checkEmail` (byte-identical output) so the deferral probe in
+ * `scripts/probe-toolsearch-deferral.ts` can send the REAL prompt instead of a
+ * copy. The copy had already drifted: it omitted the interest-profile block,
+ * which the live jarvis owner HAS — so the probe's "byte-identical argv" claim
+ * was false about the one argument that carries the most bytes, in a study whose
+ * whole subject is model behaviour.
+ *
+ * Email's criteria sit mid-prompt (the CRITICAL + "Return ONLY a JSON array"
+ * format contract comes AFTER the user criteria), so the FULL assembled prompt is
+ * wrapped — the interest-profile block lands last, after the format contract, and
+ * `withInterestProfile`'s "the output-format instructions above still apply"
+ * trailer then correctly refers to the format block above it. With no profile the
+ * wrapper returns the base string verbatim.
+ */
+export function buildEmailPrompt(
+  query: string,
+  userPrompt: string,
+  interestProfile: string | null,
+): string {
+  const basePrompt = `You have access to Gmail MCP tools.
+Search for unread emails matching: "${query}"
+
+${userPrompt}
+
+CRITICAL:
+- "id" MUST be the exact Gmail message ID from the API (e.g. "19abc123def"). Copy it verbatim.
+- "sender" MUST be the exact From header value (e.g. "Posten Norge")
+- "subject" MUST be the exact email subject line, verbatim — do NOT rephrase or shorten it.
+
+Return ONLY a JSON array (no markdown fences):
+[{"id":"msg_id","source":"email","sender":"exact sender","subject":"exact subject","summary":"**Fra:** sender — subject brief","urgency":"high|medium|low"}]
+If nothing worth notifying, return: []`;
+  return withInterestProfile(basePrompt, interestProfile);
+}
+
+/**
  * `botDir` is the bot folder whose `.mcp.json` declares the Gmail server. It used
  * to be the spawn's cwd (MCP by auto-discovery); it is now handed to the CLI as
  * `--mcp-config` so the run itself happens outside the repo. This is the ONLY
@@ -83,26 +122,7 @@ export async function checkEmail(watcher: Watcher, botDir?: string, botName?: st
   const userPrompt = config.prompt || DEFAULT_EMAIL_PROMPT;
   const interestProfile = await loadInterestProfile(watcher.userId, botName ?? watcher.botName);
 
-  // Email's criteria sit mid-prompt (the CRITICAL + "Return ONLY a JSON array"
-  // format contract comes AFTER the user criteria), so we wrap the FULL assembled
-  // prompt — the interest-profile block lands last, after the format contract, and
-  // `withInterestProfile`'s "the output-format instructions above still apply"
-  // trailer then correctly refers to the format block above it. With no profile the
-  // wrapper returns this string verbatim, so the prompt is byte-identical to before.
-  const basePrompt = `You have access to Gmail MCP tools.
-Search for unread emails matching: "${query}"
-
-${userPrompt}
-
-CRITICAL:
-- "id" MUST be the exact Gmail message ID from the API (e.g. "19abc123def"). Copy it verbatim.
-- "sender" MUST be the exact From header value (e.g. "Posten Norge")
-- "subject" MUST be the exact email subject line, verbatim — do NOT rephrase or shorten it.
-
-Return ONLY a JSON array (no markdown fences):
-[{"id":"msg_id","source":"email","sender":"exact sender","subject":"exact subject","summary":"**Fra:** sender — subject brief","urgency":"high|medium|low"}]
-If nothing worth notifying, return: []`;
-  const prompt = withInterestProfile(basePrompt, interestProfile);
+  const prompt = buildEmailPrompt(query, userPrompt, interestProfile);
 
   // Bounded retry (2026-08-13). The liveness predicate below turned a silent wrong
   // answer into a loud failure; it did not make the check succeed. Root cause, from

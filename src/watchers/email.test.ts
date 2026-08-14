@@ -65,6 +65,8 @@ mock.module("../profile/generator.ts", () => ({
 
 const {
   buildGmailQuery,
+  buildEmailPrompt,
+  DEFAULT_EMAIL_PROMPT,
   checkEmail,
   gmailToolPrefixes,
   emailRetryBudgetMs,
@@ -472,5 +474,64 @@ describe("checkEmail bounded retry", () => {
     expect(emailRetryBudgetMs(baseWatcher({ config: { timeoutMs: 0 } }))).toBe(170_000);
     // A configured value only ever RAISES it.
     expect(emailRetryBudgetMs(baseWatcher({ config: { timeoutMs: 300_000 } }))).toBe(320_000);
+  });
+});
+
+// ── buildEmailPrompt ─────────────────────────────────────────────────
+//
+// Extracted from `checkEmail` so the deferral probe can send the REAL prompt
+// instead of a copy that had already drifted (it omitted the interest-profile
+// block). The extraction's whole justification is byte-identical output, and
+// nothing pinned it — a future edit would change every production email check
+// and the probe's fidelity claim together, silently.
+
+describe("buildEmailPrompt", () => {
+  const QUERY = "is:unread after:2026/08/14";
+
+  test("carries the query, the criteria and the format contract, in that order", () => {
+    const out = buildEmailPrompt(QUERY, DEFAULT_EMAIL_PROMPT, null);
+    // `toContain` FIRST: `indexOf` returns -1 for an absent needle, and -1 is less
+    // than everything — so the ordering assertions alone passed with the query
+    // dropped from the prompt entirely (mutation-verified).
+    expect(out).toContain(QUERY);
+    expect(out.indexOf(QUERY)).toBeLessThan(out.indexOf("Worth notifying:"));
+    expect(out.indexOf("Worth notifying:")).toBeLessThan(out.indexOf("CRITICAL:"));
+    expect(out.indexOf("CRITICAL:")).toBeLessThan(out.indexOf("Return ONLY a JSON array"));
+  });
+
+  test("the SCAFFOLDING is exactly this, criteria aside", () => {
+    // A golden string, because the other assertions here are structural and survive an
+    // edit to the prompt text. It pins the SCAFFOLDING only — the criteria are a
+    // parameter, so `DEFAULT_EMAIL_PROMPT`'s own body is not pinned by it. The
+    // end-to-end claim (what `checkEmail` actually sends) is covered by "no profile row
+    // ⇒ prompt is byte-identical to the un-wrapped gate prompt" above, which drives the
+    // real checker; this is the cheap unit-level guard beside it.
+    expect(buildEmailPrompt(QUERY, "CRITERIA-HERE", null)).toBe(
+      `You have access to Gmail MCP tools.\nSearch for unread emails matching: "${QUERY}"\n\nCRITERIA-HERE\n\nCRITICAL:\n- "id" MUST be the exact Gmail message ID from the API (e.g. "19abc123def"). Copy it verbatim.\n- "sender" MUST be the exact From header value (e.g. "Posten Norge")\n- "subject" MUST be the exact email subject line, verbatim — do NOT rephrase or shorten it.\n\nReturn ONLY a JSON array (no markdown fences):\n[{"id":"msg_id","source":"email","sender":"exact sender","subject":"exact subject","summary":"**Fra:** sender — subject brief","urgency":"high|medium|low"}]\nIf nothing worth notifying, return: []`,
+    );
+  });
+
+  test("a watcher's own criteria replace the default outright", () => {
+    const out = buildEmailPrompt(QUERY, "Only mail from my accountant.", null);
+    expect(out).toContain("Only mail from my accountant.");
+    expect(out).not.toContain("Worth notifying:");
+  });
+
+  test("a blank profile is the same as no profile", () => {
+    // `withInterestProfile` returns its input verbatim for null/blank. This pins that
+    // behaviour only; the byte-identity claim is the end-to-end `checkEmail` test.
+    const base = buildEmailPrompt(QUERY, DEFAULT_EMAIL_PROMPT, null);
+    expect(buildEmailPrompt(QUERY, DEFAULT_EMAIL_PROMPT, "")).toBe(base);
+    expect(buildEmailPrompt(QUERY, DEFAULT_EMAIL_PROMPT, "   ")).toBe(base);
+  });
+
+  test("the profile block lands LAST, after the format contract", () => {
+    // Load-bearing: `withInterestProfile`'s trailer says "the output-format
+    // instructions above still apply", which is only true if the format block is
+    // above it. This is why the FULL assembled prompt is wrapped, not the criteria.
+    const out = buildEmailPrompt(QUERY, DEFAULT_EMAIL_PROMPT, "Cares about Rust and boats.");
+    expect(out).toContain("Cares about Rust and boats.");
+    expect(out.indexOf("Return ONLY a JSON array")).toBeLessThan(out.indexOf("Cares about Rust and boats."));
+    expect(out.startsWith(buildEmailPrompt(QUERY, DEFAULT_EMAIL_PROMPT, null))).toBe(true);
   });
 });
