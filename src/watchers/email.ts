@@ -10,6 +10,36 @@ import { getLog } from "../logging.ts";
 const log = getLog("watchers", "email");
 
 /**
+ * What a completed check reports: its alerts, and the window it actually covered.
+ *
+ * Named for WATCHERS, not email: `runChecker` returns this for all eight types.
+ * Only the email checker ever sets `coveredFrom`, but an email-specific name here
+ * is what made a false "email never reaches this" comment read plausibly during
+ * the refactor that deleted email's dispatch entirely.
+ *
+ * The RUNNER — not this module — writes the watermark, and only AFTER the alerts
+ * have been delivered. Writing it here (an earlier cut did) re-opened the very
+ * hole this PR closes, one door along: a Telegram 502 between the write and the
+ * send left the watermark advanced over alerts that were never delivered AND
+ * never recorded in `lastNotifiedIds`, so the next tick's narrower window
+ * stepped straight over them. Unread mail is re-offered by nothing else.
+ */
+export interface WatcherCheckResult {
+  alerts: WatcherAlert[];
+  /**
+   * The instant this run's window is covered UP TO — set only for a run that
+   * reached Gmail AND returned a parseable answer; `null` otherwise.
+   *
+   * A RETURN value, not an out-parameter. As an optional out-param it could be
+   * dropped at either call hop with `tsc` clean and every test green, leaving
+   * `last_success_at` NULL forever and the whole feature inert — this repo's
+   * named recurring defect. Threading it through the return type makes that
+   * edit a compile error instead.
+   */
+  coveredFrom: Date | null;
+}
+
+/**
  * Per-attempt model timeout — `spawnHaiku`'s own default, named here because the
  * retry budget below is derived against it and the two must not drift.
  */
@@ -112,12 +142,41 @@ If nothing worth notifying, return: []`;
  * spawnHaiku caller that still needs bot MCP — every other one is a tool-less
  * prompt and runs `--strict-mcp-config`.
  */
-export async function checkEmail(watcher: Watcher, botDir?: string, botName?: string, telemetry?: HaikuTelemetry): Promise<WatcherAlert[]> {
+export async function checkEmail(
+  watcher: Watcher,
+  botDir?: string,
+  botName?: string,
+  telemetry?: HaikuTelemetry,
+): Promise<WatcherCheckResult> {
   // Anchored at ENTRY, not at the first spawn: the runner's net starts here too, and
   // the profile load below is a DB read that must come out of the same budget.
   const startedAt = Date.now();
   const config = watcher.config as { filter?: string; prompt?: string; model?: string };
-  const query = buildGmailQuery(config.filter, watcher.lastRunAt);
+  // Bounded on the SUCCESS watermark. A row that has never succeeded (every row
+  // for one tick after migration 069) has no window to trust, so it takes the
+  // old date-only query — broad, and broad is the safe direction for a cold
+  // start: the failure mode of guessing narrow is mail that is never looked at.
+  const query = watcher.lastSuccessAt
+    ? buildGmailQuery(config.filter, watcher.lastSuccessAt, startedAt)
+    : buildGmailQueryByDate(config.filter, watcher.lastRunAt);
+  // A defensive skip that persists across runs needs a counter, a bound AND a
+  // surface (`src/watchers/CLAUDE.md`); the clamp has a bound, and this is the
+  // surface. Logged at the CALLER so the query builder stays pure. Gated on a
+  // meaningful span so a watermark a few seconds past the ceiling does not print
+  // "skipping 0.0h … search Gmail manually".
+  const clamp = watcher.lastSuccessAt ? emailClampWarning(watcher.lastSuccessAt, startedAt) : null;
+  if (clamp) {
+    log.warn(
+      "email-check lookback clamped to {maxHours}h — skipping {skippedHours}h of unread mail that no run " +
+        "will now evaluate (last successful check was {staleHours}h ago). Search Gmail manually for that window.",
+      {
+        botName,
+        maxHours: EMAIL_MAX_LOOKBACK_MS / 3_600_000,
+        skippedHours: +(clamp.skippedMs / 3_600_000).toFixed(1),
+        staleHours: +(clamp.staleMs / 3_600_000).toFixed(1),
+      },
+    );
+  }
 
   const userPrompt = config.prompt || DEFAULT_EMAIL_PROMPT;
   const interestProfile = await loadInterestProfile(watcher.userId, botName ?? watcher.botName);
@@ -177,7 +236,7 @@ export async function checkEmail(watcher: Watcher, botDir?: string, botName?: st
         ...telemetry,
       });
 
-      const failure = gmailLivenessFailure(toolCalls, botDir);
+      const { failure, reached } = gmailLiveness(toolCalls, botDir);
       if (failure) {
         lastError = new Error(failure);
         log.warn(
@@ -204,13 +263,23 @@ export async function checkEmail(watcher: Watcher, botDir?: string, botName?: st
           "email-check unparseable: attempt={attempt}/{max} durationMs={durationMs} attemptTimeoutMs={attemptTimeoutMs} raw={raw}",
           { botName, attempt, max: EMAIL_MAX_ATTEMPTS, durationMs, attemptTimeoutMs, raw: result.slice(0, 300) },
         );
-        return [];
+        return { alerts: [], coveredFrom: null };
       }
       log.info(
         "email-check ok: attempt={attempt}/{max} durationMs={durationMs} attemptTimeoutMs={attemptTimeoutMs} alerts={alerts}",
         { botName, attempt, max: EMAIL_MAX_ATTEMPTS, durationMs, attemptTimeoutMs, alerts: alerts.length },
       );
-      return alerts;
+      // The ONLY place coverage is claimed, and only for a run that BOTH
+      // demonstrably reached Gmail and produced a parseable answer. Every other
+      // exit — unparseable, predicate failure, unjudgeable run, throw, budget
+      // exhaustion — leaves it unset, so the next tick re-offers this window
+      // instead of stepping over mail nothing ever looked at.
+      //
+      // Anchored on `startedAt` (function ENTRY), not `now()`: entry predates
+      // the spawn, and therefore the model's own `search_emails` call, by the
+      // 21–56s the check takes. Anchoring at the end would silently drop every
+      // message that arrived while the check ran.
+      return { alerts, coveredFrom: reached ? new Date(startedAt) : null };
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
       log.warn(
@@ -323,15 +392,42 @@ export function shouldStartEmailAttempt(attempt: number, remainingMs: number): b
  * is deliberate and unchanged by the retry loop: we have no evidence the run failed,
  * and burning a second spawn on every legacy-parser degradation would double the
  * cost of a CLI bug that has nothing to do with Gmail.
+ *
+ * ---
+ *
+ * Read TWO ways, because the retry and the query watermark ask different
+ * questions of the same evidence.
+ *
+ * `failure` is the predicate above, unchanged, and drives the retry. `reached`
+ * is STRICTER: did this run *demonstrably* touch Gmail? They differ exactly on
+ * the unjudgeable cases — `toolCalls` undefined, and "no MCP server key looks
+ * like Gmail" — where `failure` is `null` ("no evidence it broke, so don't fail
+ * it") but `reached` is `false` ("no evidence it worked either").
+ *
+ * Collapsing the two is a data-loss bug, not a style choice. A bot whose
+ * `.mcp.json` names the server `google-mail` has the predicate DISABLED by
+ * design (see {@link gmailToolPrefixes}); if that state also claimed coverage,
+ * the row would march its watermark forward an hour per tick while never
+ * reading a single message, and because the mail stays unread nothing would ever
+ * re-offer it. Under the date-only query this cost nothing — every tick re-swept
+ * the day — which is why the distinction only becomes load-bearing now.
  */
-function gmailLivenessFailure(
+export function gmailLiveness(
   toolCalls: { name: string }[] | undefined,
   botDir: string | undefined,
-): string | null {
+): { failure: string | null; reached: boolean } {
   const prefixes = toolCalls ? gmailToolPrefixes(botDir) : null;
   const reachedGmail = toolCalls?.some(
     (t) => typeof t.name === "string" && prefixes?.some((p) => t.name.startsWith(p)),
   );
+  return { failure: livenessFailureMessage(toolCalls, prefixes, reachedGmail), reached: reachedGmail === true };
+}
+
+function livenessFailureMessage(
+  toolCalls: { name: string }[] | undefined,
+  prefixes: string[] | null,
+  reachedGmail: boolean | undefined,
+): string | null {
   // `prefixes === null` means we could not identify which server IS Gmail — same
   // "can't tell" stance as an undefined toolCalls, and for the same reason: the
   // alternative is failing closed on no evidence. A bot that renamed the key to
@@ -403,7 +499,136 @@ function warnNoGmailServerOnce(botDir: string, present: string[]): void {
   );
 }
 
-export function buildGmailQuery(filter: string | undefined, lastRunAt: number | null): string {
+/**
+ * Overlap subtracted from the watermark, so the boundary is re-offered rather
+ * than straddled. Covers the gap between `checkStartedAt` and the moment the
+ * model actually calls `search_emails` (measured 5–12s of prompt + startup),
+ * plus Gmail's internal-date vs delivery-time skew. Re-offering is free: an
+ * already-notified message is dropped by `lastNotifiedIds` dedup, whereas a
+ * message that falls in the gap is dropped SILENTLY and forever.
+ */
+export const EMAIL_QUERY_OVERLAP_MS = 5 * 60_000;
+/**
+ * Ceiling on the lookback, whatever the watermark says. A row disabled for a
+ * week (or whose success watermark is otherwise stale) would otherwise ask for
+ * a week of mail on its first tick back — the exact overload this window exists
+ * to prevent, arriving by a different door. 24h also bounds the worst case
+ * BELOW today's behaviour: the date-only `after:` this replaces expands to a
+ * full week in the same scenario, because it is derived from `lastRunAt`.
+ */
+export const EMAIL_MAX_LOOKBACK_MS = 24 * 3_600_000;
+/**
+ * Don't shout about a trivial clamp. A watermark a few seconds past the ceiling
+ * skips essentially nothing, and the warn's copy tells the operator to go search
+ * Gmail by hand — advice worth giving for hours of mail, not for seconds of it.
+ */
+export const EMAIL_CLAMP_WARN_MIN_MS = 15 * 60_000;
+
+/**
+ * The Gmail query for one check.
+ *
+ * `sinceMs` is the run's SUCCESS watermark (`watcher.lastSuccessAt`), not
+ * `lastRunAt`. Passing `lastRunAt` here would be a silent data-loss bug: it
+ * advances on quiet-hours skips and on failures, so the overnight pile and every
+ * failed tick's window would be excluded from the next query having never been
+ * looked at. `null` (no success yet) falls back to the previous date-only form,
+ * which is broad and therefore safe as a cold start.
+ *
+ * Why epoch seconds rather than the date-only `after:YYYY/MM/DD` this replaces:
+ * a date-granular filter makes every hourly tick re-evaluate the WHOLE day's
+ * unread pile, so the work per tick grows monotonically until it exceeds the
+ * per-attempt budget. Measured on the live mailbox 2026-08-14 18:50 —
+ * `is:unread after:2026/08/14` returned 38 threads, `is:unread after:<epoch 1h
+ * ago>` returned 6. Over 48h of ticks, output tokens explained 91% of tick
+ * duration (R²=0.914, ~8.9ms/token) while turn count explained none (R²=0.000),
+ * and duration tracked hour-of-day at r=0.776 — mean 21s at 08:00 against 56s at
+ * 21:00, with every 60s timeout falling in the back half of the day. The set
+ * size is the cost driver, and this is what bounds it.
+ *
+ * Gmail accepts a Unix-seconds argument to `after:` (verified against the live
+ * API, above); it is not in the operator help, which documents only the date
+ * form.
+ */
+/**
+ * How much genuinely-unevaluated mail the 24h ceiling is about to discard — `0`
+ * when nothing is lost.
+ *
+ * NOT the same quantity as the clamp `buildGmailQuery` applies, and deliberately
+ * so: the query floor is `now − 24h` against a WANTED floor of
+ * `watermark − overlap`, but the overlap window was already read by the previous
+ * successful check. Counting it here would overstate every warning by 5 minutes
+ * and, worse, make the function report a non-zero "loss" for a watermark barely
+ * past the ceiling where nothing new is dropped at all. Mail is only unevaluated
+ * if it arrived after the last successful check and before the query floor —
+ * hence `(now − 24h) − watermark`.
+ *
+ * A separate PURE function, not an `if` inside `buildGmailQuery`, for two
+ * reasons the review made concrete. It keeps `buildGmailQuery` free of side
+ * effects (it is called from `scripts/probe-toolsearch-deferral.ts`, which would
+ * otherwise emit an operator-directed warning about a query it never sends); and
+ * it puts the comparison somewhere a test can assert on. Inside the query
+ * builder the guard was fully mutation-survivable — flipping `floor > wanted` to
+ * `wanted > floor` left the whole suite green while warning on every HEALTHY run
+ * and staying silent on every genuinely clamped one, destroying the only surface
+ * the skip has.
+ */
+export function emailLookbackClampMs(sinceMs: number, nowMs: number): number {
+  // Mirrors `buildGmailQuery`'s own falsy guard: with no watermark there is no
+  // window, so there is nothing to have skipped. Without this, a `0` watermark
+  // reports a ~57-year loss for a query that carries no `after:` clause at all.
+  if (!sinceMs) return 0;
+  return Math.max(0, (nowMs - EMAIL_MAX_LOOKBACK_MS) - sinceMs);
+}
+
+/**
+ * The clamp warning to emit, or `null` for silence.
+ *
+ * The GATE lives here rather than at the log call so it is testable: as an
+ * inline `if` in `checkEmail` both `EMAIL_CLAMP_WARN_MIN_MS → 0` and
+ * `→ Infinity` were mutation-survivable, and the second silences the only
+ * surface a human ever gets that mail was permanently skipped.
+ */
+export function emailClampWarning(
+  sinceMs: number,
+  nowMs: number,
+): { skippedMs: number; staleMs: number } | null {
+  const skippedMs = emailLookbackClampMs(sinceMs, nowMs);
+  if (skippedMs <= EMAIL_CLAMP_WARN_MIN_MS) return null;
+  return { skippedMs, staleMs: nowMs - sinceMs };
+}
+
+export function buildGmailQuery(filter: string | undefined, sinceMs: number | null, nowMs: number): string {
+  const parts: string[] = ["is:unread"];
+  if (filter) parts.push(filter);
+  if (sinceMs) {
+    // `Math.max` clamps a stale watermark to the ceiling; `Math.floor` because
+    // Gmail wants whole seconds and rounding UP would exclude the boundary
+    // message the overlap was added to include.
+    // `Math.min(…, nowMs)` handles a watermark AHEAD of the clock — a backwards
+    // clock step (NTP correction, VM resume, a second muninn on a shared DB with
+    // skew). Be precise about what it does and does not buy, because the first
+    // version of this comment overclaimed: the window between the true last
+    // coverage and now is skipped EITHER WAY on that tick, and `markWatcherSuccess`
+    // is a plain SET (not GREATEST) so the watermark self-heals backwards next
+    // run. What the ceiling actually prevents is handing Gmail a FUTURE `after:`
+    // argument — if that is ever rejected rather than merely matching nothing, the
+    // run fails, coverage is never claimed, and the future watermark stays put
+    // permanently instead of self-healing.
+    const since = Math.min(
+      Math.max(sinceMs - EMAIL_QUERY_OVERLAP_MS, nowMs - EMAIL_MAX_LOOKBACK_MS),
+      nowMs,
+    );
+    parts.push(`after:${Math.floor(since / 1000)}`);
+  }
+  return parts.join(" ");
+}
+
+/**
+ * The date-only query this checker used before the window above. Retained ONLY
+ * as the cold-start fallback for a row with no success watermark yet — every
+ * row is in that state for exactly one tick after migration 069.
+ */
+export function buildGmailQueryByDate(filter: string | undefined, lastRunAt: number | null): string {
   const parts: string[] = ["is:unread"];
   if (filter) parts.push(filter);
   if (lastRunAt) {

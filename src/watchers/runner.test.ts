@@ -3,6 +3,8 @@ import { shouldSkipWikiDraftingRun } from "./wiki-drafting.ts";
 import { __setWikiReadonlyForTest } from "../wiki/readonly.ts";
 import {
   runChecker,
+  finishWatcherRun,
+  coverageToRecord,
   contentHash,
   extractProperNouns,
   formatAlerts,
@@ -15,9 +17,20 @@ import {
   newWatcherUsage,
   accumulateWatcherUsage,
   isQuietHoursRunExempt,
-  type WikiCheckers,
+  DEFAULT_WATCHER_CHECKERS,
+  type WatcherCheckers,
 } from "./runner.ts";
 import { DEFAULT_MODEL } from "../scheduler/executor.ts";
+// Imported to assert the DEFAULT table's bindings identity-wise — the production
+// path uses that table, and every dispatch test injects spies instead.
+import { checkEmail } from "./email.ts";
+import { checkNews } from "./news.ts";
+import { checkX } from "./x.ts";
+import { checkAnthropic } from "./anthropic.ts";
+import { checkWikiGardener } from "./wiki-gardener.ts";
+import { checkWikiLinter } from "./wiki-linter.ts";
+import { checkWikiCommitter } from "./wiki-committer.ts";
+import { checkConsolidationGardener } from "./consolidation-gardener.ts";
 import type { Watcher, WatcherAlert } from "../types.ts";
 
 // ── extractProperNouns ───────────────────────────────────────────────
@@ -199,6 +212,7 @@ describe("formatAlerts", () => {
     intervalMs: 300000,
     enabled: true,
     lastRunAt: null,
+    lastSuccessAt: null,
     lastNotifiedIds: [],
     forceNextRun: false,
     createdAt: Date.now(),
@@ -369,6 +383,7 @@ describe("computeWatcherTimeoutMs", () => {
     intervalMs: 300000,
     enabled: true,
     lastRunAt: null,
+    lastSuccessAt: null,
     lastNotifiedIds: [],
     forceNextRun: false,
     createdAt: Date.now(),
@@ -542,6 +557,7 @@ describe("checker in-flight guard", () => {
 
 const wikiCheckerSpies = () => {
   const calls: string[] = [];
+  const emailArgs: unknown[][] = [];
   const alertsFrom = (source: string): WatcherAlert[] => [
     { id: `${source}-1`, source, summary: "ran", urgency: "low" },
   ];
@@ -551,17 +567,27 @@ const wikiCheckerSpies = () => {
   };
   return {
     calls,
+    emailArgs,
     alertsFrom,
     checkers: {
+      // Email's checker returns the {alerts, coveredFrom} shape, not a bare array.
+      checkEmail: async (...args: unknown[]) => {
+        calls.push("email");
+        emailArgs.push(args);
+        return { alerts: alertsFrom("email"), coveredFrom: null };
+      },
+      checkNews: spy("news"),
+      checkX: spy("x"),
+      checkAnthropic: spy("anthropic"),
       checkWikiGardener: spy("wiki-gardener"),
       checkWikiLinter: spy("wiki-linter"),
       checkWikiCommitter: spy("wiki-committer"),
       checkConsolidationGardener: spy("consolidation-gardener"),
-    } satisfies WikiCheckers,
+    } satisfies WatcherCheckers,
   };
 };
 
-const readonlyWatcher = (type: string): Watcher => ({
+const watcherOfType = (type: string): Watcher => ({
   id: "w-ro",
   userId: "u-1",
   botName: "jarvis",
@@ -571,12 +597,156 @@ const readonlyWatcher = (type: string): Watcher => ({
   intervalMs: 604_800_000,
   enabled: true,
   lastRunAt: null,
+  lastSuccessAt: null,
   lastNotifiedIds: [],
   forceNextRun: false,
   createdAt: Date.now(),
   updatedAt: Date.now(),
 });
 const fakeBot = { name: "jarvis", dir: "/nonexistent", persona: "", telegramAllowedUserIds: [], slackAllowedUserIds: [] } as any;
+
+describe("coverageToRecord", () => {
+  const at = new Date(1_700_000_000_000);
+
+  test("passes the checker's coverage through on a normal run", () => {
+    expect(coverageToRecord(at, false)).toBe(at);
+  });
+
+  test("drops coverage when quiet hours suppressed the send", () => {
+    // The alerts did not go out, so the window was not dealt with.
+    expect(coverageToRecord(at, true)).toBeNull();
+  });
+
+  test("stays null when the checker claimed nothing", () => {
+    expect(coverageToRecord(null, false)).toBeNull();
+  });
+});
+
+describe("finishWatcherRun", () => {
+  // The watermark write has no other unit-testable seam: runWatchers is not
+  // exercised by this file, and this chunk deliberately avoids mock.module. Deps
+  // injection is the run-health.ts idiom, used here for the same reason.
+  function deps(markImpl?: (id: string, at: Date) => Promise<void>) {
+    const calls: { lastRun: [string, string[]][]; marks: [string, Date][] } = { lastRun: [], marks: [] };
+    return {
+      calls,
+      d: {
+        updateWatcherLastRun: async (id: string, ids: string[]) => { calls.lastRun.push([id, ids]); },
+        markWatcherSuccess: markImpl ?? (async (id: string, at: Date) => { calls.marks.push([id, at]); }),
+      },
+    };
+  }
+
+  test("always advances last_run_at", async () => {
+    const { calls, d } = deps();
+    await finishWatcherRun("w1", ["a"], null, d);
+    expect(calls.lastRun).toEqual([["w1", ["a"]]]);
+  });
+
+  test("does NOT write the watermark when the checker claimed no coverage", async () => {
+    // The quiet-hours skip and every failed/unjudgeable run land here.
+    const { calls, d } = deps();
+    await finishWatcherRun("w1", ["a"], null, d);
+    expect(calls.marks).toEqual([]);
+  });
+
+  test("writes the watermark when the checker claimed coverage", async () => {
+    // Kills the inert-fix mutation: dropping this call leaves last_success_at
+    // NULL forever and the whole feature dead with the suite green.
+    const at = new Date(1_700_000_000_000);
+    const { calls, d } = deps();
+    await finishWatcherRun("w1", ["a"], at, d);
+    expect(calls.marks).toEqual([["w1", at]]);
+  });
+
+  test("passes the checker's timestamp through unchanged", async () => {
+    // Kills "write now() instead" — the anchor must stay at check ENTRY.
+    const at = new Date(1_700_000_000_000);
+    const { calls, d } = deps();
+    await finishWatcherRun("w1", [], at, d);
+    expect(calls.marks[0]![1].getTime()).toBe(at.getTime());
+  });
+
+  test("a failing watermark write does not fail the run", async () => {
+    // An unmigrated box (069 not applied) throws here on every tick. The alerts
+    // are already delivered by this point, so it must degrade to the date-only
+    // query rather than turning a degraded state into a broken one.
+    const { calls, d } = deps(async () => { throw new Error('column "last_success_at" does not exist'); });
+    await expect(finishWatcherRun("w1", ["a"], new Date(), d)).resolves.toBeUndefined();
+    expect(calls.lastRun).toHaveLength(1);
+  });
+});
+
+describe("runChecker — every type reaches its own checker", () => {
+  // The regression this exists for: a refactor extracting the per-type switch
+  // dropped `case "email"`. Every tick then fell through to `default:`, returned
+  // `[]`, and the runner read that as a quiet inbox — so run-health saw a healthy
+  // run, the dashboard stayed green, and the user just stopped receiving email
+  // alerts. tsc was silent (the import merely went unused; `noUnusedLocals` is
+  // off) and all 5457 tests passed. Before this block, deleting the `news`, `x`
+  // or `anthropic` case was equally invisible.
+  const TYPES = [
+    "email", "news", "x", "anthropic",
+    "wiki-gardener", "wiki-linter", "wiki-committer", "consolidation-gardener",
+  ] as const;
+
+  afterEach(() => __setWikiReadonlyForTest());
+
+  for (const type of TYPES) {
+    test(`${type} dispatches to check${type}`, async () => {
+      // Write-owner, so the readonly guard never short-circuits a drafting type.
+      __setWikiReadonlyForTest(false);
+      const { calls, alertsFrom, checkers } = wikiCheckerSpies();
+      const { alerts } = await runChecker(watcherOfType(type), fakeBot, undefined, checkers);
+      expect(calls).toEqual([type]);
+      expect(alerts).toEqual(alertsFrom(type));
+    });
+  }
+
+  test("email is handed the bot DIR and the bot NAME, in that order", async () => {
+    // Both params are `string | undefined`, so swapping them typechecks cleanly
+    // and every other test still passes. Live, the swap resolves --mcp-config
+    // under a directory named "jarvis", which does not exist ⇒ no Gmail server ⇒
+    // the liveness predicate cannot identify Gmail ⇒ the run is UNJUDGEABLE, so
+    // no failure is reported and no coverage claimed: a permanently quiet inbox
+    // behind a green dashboard, the exact class this PR exists to kill.
+    __setWikiReadonlyForTest(false);
+    const { emailArgs, checkers } = wikiCheckerSpies();
+    await runChecker(watcherOfType("email"), fakeBot, undefined, checkers);
+
+    expect(emailArgs).toHaveLength(1);
+    expect(emailArgs[0]![1]).toBe(fakeBot.dir);
+    expect(emailArgs[0]![2]).toBe(fakeBot.name);
+    expect(fakeBot.dir).not.toBe(fakeBot.name);
+  });
+
+  test("the DEFAULT table binds every name to its own checker", async () => {
+    // The dispatch tests all inject spies, so the table the PRODUCTION path
+    // actually uses is exercised by none of them. A transposed pair — e.g.
+    // `checkWikiLinter: checkWikiCommitter` — typechecks (identical signatures)
+    // and would run the git sweeper on the report-only linter's schedule.
+    expect(DEFAULT_WATCHER_CHECKERS.checkEmail).toBe(checkEmail);
+    expect(DEFAULT_WATCHER_CHECKERS.checkNews).toBe(checkNews);
+    expect(DEFAULT_WATCHER_CHECKERS.checkX).toBe(checkX);
+    expect(DEFAULT_WATCHER_CHECKERS.checkAnthropic).toBe(checkAnthropic);
+    expect(DEFAULT_WATCHER_CHECKERS.checkWikiGardener).toBe(checkWikiGardener);
+    expect(DEFAULT_WATCHER_CHECKERS.checkWikiLinter).toBe(checkWikiLinter);
+    expect(DEFAULT_WATCHER_CHECKERS.checkWikiCommitter).toBe(checkWikiCommitter);
+    expect(DEFAULT_WATCHER_CHECKERS.checkConsolidationGardener).toBe(checkConsolidationGardener);
+  });
+
+  test("email is the only type that can report coverage", async () => {
+    __setWikiReadonlyForTest(false);
+    const at = new Date(1_700_000_000_000);
+    const { checkers } = wikiCheckerSpies();
+    const covering = { ...checkers, checkEmail: async () => ({ alerts: [], coveredFrom: at }) };
+
+    expect((await runChecker(watcherOfType("email"), fakeBot, undefined, covering)).coveredFrom).toBe(at);
+    for (const type of TYPES.filter((t) => t !== "email")) {
+      expect((await runChecker(watcherOfType(type), fakeBot, undefined, covering)).coveredFrom).toBeNull();
+    }
+  });
+});
 
 describe("runChecker — wiki-readonly guard", () => {
   // Asserted on WHICH CHECKER THE RUN REACHES, not on the returned `[]`: every
@@ -587,17 +757,17 @@ describe("runChecker — wiki-readonly guard", () => {
   test("a readonly instance never reaches the wiki-DRAFTING checkers", async () => {
     __setWikiReadonlyForTest(true);
     const { calls, checkers } = wikiCheckerSpies();
-    expect(await runChecker(readonlyWatcher("wiki-gardener"), fakeBot, undefined, checkers)).toEqual([]);
-    expect(await runChecker(readonlyWatcher("consolidation-gardener"), fakeBot, undefined, checkers)).toEqual([]);
+    expect((await runChecker(watcherOfType("wiki-gardener"), fakeBot, undefined, checkers)).alerts).toEqual([]);
+    expect((await runChecker(watcherOfType("consolidation-gardener"), fakeBot, undefined, checkers)).alerts).toEqual([]);
     expect(calls).toEqual([]);
   });
 
   test("the write owner still runs them — the guard is the FLAG, not the type", async () => {
     __setWikiReadonlyForTest(false);
     const { calls, alertsFrom, checkers } = wikiCheckerSpies();
-    expect(await runChecker(readonlyWatcher("wiki-gardener"), fakeBot, undefined, checkers))
+    expect((await runChecker(watcherOfType("wiki-gardener"), fakeBot, undefined, checkers)).alerts)
       .toEqual(alertsFrom("wiki-gardener"));
-    expect(await runChecker(readonlyWatcher("consolidation-gardener"), fakeBot, undefined, checkers))
+    expect((await runChecker(watcherOfType("consolidation-gardener"), fakeBot, undefined, checkers)).alerts)
       .toEqual(alertsFrom("consolidation-gardener"));
     expect(calls).toEqual(["wiki-gardener", "consolidation-gardener"]);
   });
@@ -605,9 +775,9 @@ describe("runChecker — wiki-readonly guard", () => {
   test("the report-only linter and the git committer run on a readonly instance too", async () => {
     __setWikiReadonlyForTest(true);
     const { calls, alertsFrom, checkers } = wikiCheckerSpies();
-    expect(await runChecker(readonlyWatcher("wiki-linter"), fakeBot, undefined, checkers))
+    expect((await runChecker(watcherOfType("wiki-linter"), fakeBot, undefined, checkers)).alerts)
       .toEqual(alertsFrom("wiki-linter"));
-    expect(await runChecker(readonlyWatcher("wiki-committer"), fakeBot, undefined, checkers))
+    expect((await runChecker(watcherOfType("wiki-committer"), fakeBot, undefined, checkers)).alerts)
       .toEqual(alertsFrom("wiki-committer"));
     expect(calls).toEqual(["wiki-linter", "wiki-committer"]);
   });

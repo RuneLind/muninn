@@ -422,10 +422,17 @@ path reached the same checkers unguarded, so a readonly instance left with
 — that only the write owner can apply. Both call sites read the same set, which
 is why it lives here rather than in `data-routes.ts`. `wiki-linter` (report-only)
 and `wiki-committer` (git, which the flag deliberately leaves open) are NOT
-skipped. The skip is not an error: the run still advances `last_run_at`. The four
-wiki checkers are reachable through the injectable `WikiCheckers` seam
+skipped. The skip is not an error: the run still advances `last_run_at`. **All eight**
+checkers are reachable through the injectable `WatcherCheckers` seam
 (`runChecker`'s 4th arg) purely so a test can assert WHICH checker a run reaches
-— every checker degrades to `[]`, so a return value proves nothing.
+— every checker degrades to `[]`, so a return value proves nothing. It began
+scoped to the four wiki checkers, for the readonly guard; it was widened
+2026-08-14 because the four types WITHOUT a seam had no dispatch coverage at all
+— a refactor deleted `case "email"` and every tick returned `[]`, which the
+runner reads as a quiet inbox, so run-health saw a healthy run and the user
+would have silently stopped receiving mail alerts, with tsc clean and the full
+suite green. **A ninth checker type must be wired through this seam and given a
+dispatch test**, or deleting its branch is invisible.
 
 ### Time-of-day scheduling
 
@@ -475,6 +482,72 @@ Caveats of the parallel model:
 ## Email Watcher (email.ts)
 
 Spawns Haiku with the bot's Gmail MCP tools. The prompt has structural parts (Gmail search, JSON format) that are hardcoded, plus a configurable evaluation criteria section (`config.prompt`). Returns individual `WatcherAlert[]` per email with Gmail message IDs for dedup.
+
+### Query window + the success watermark (2026-08-14)
+
+**The Gmail query is bounded to "since the last SUCCESSFUL check", not "today".**
+`buildGmailQuery` emits `after:<unix seconds>` (Gmail accepts the epoch form; its
+operator help documents only `YYYY/MM/DD`). Before this, `after:` was date-only,
+so every hourly tick re-evaluated the whole day's unread pile and the work per
+tick grew monotonically until it blew the 60s per-attempt budget.
+
+Measured over 48h of live ticks (2026-08-12..14), n=18 successes: output tokens
+explain **91%** of tick duration (R²=0.914, ~8.9ms/token) while turn count
+explains **none** (R²=0.000); duration tracks hour-of-day at **r=0.776** — mean
+21s at 08:00 against 56s at 21:00 — and every 60s timeout fell in the back half
+of the day (2/11 before 13:00 vs 7/21 after). Live mailbox at 18:50:
+`is:unread after:2026/08/14` → 38 threads, `after:<epoch 1h ago>` → 6. This is
+**additive** with the #436 retry, which addresses deferral churn spikes; the
+window addresses the baseline they ride on (see
+`mimir/plans/muninn-email-watcher-failure-classes.mdx`).
+
+The watermark is a NEW column, `watchers.last_success_at` (migration 069), and
+**not** `last_run_at` — which advances on quiet-hours skips and on failures, so a
+window derived from it would exclude the overnight pile and every failed tick's
+mail having never looked at either. This is the same defect the `news` row in the
+silent-failure table below still carries as latent.
+
+Who writes it, and when, is load-bearing — three review rounds landed here:
+
+- **The checker decides coverage; the runner writes it.** `gmailLiveness` returns
+  `{failure, reached}`: `failure` drives the retry (unchanged), `reached` is the
+  stricter question. They differ on the *unjudgeable* cases — `toolCalls`
+  undefined, and "no MCP server key contains gmail" — where there is no evidence
+  the run broke and equally none that it worked. An unparseable answer is also
+  not coverage. Coverage rides out on `checkEmail`'s **return value**
+  (`EmailCheckResult.coveredFrom`), never an out-param: as an optional out-param
+  it could be dropped at either call hop with `tsc` clean and the suite green,
+  leaving the whole feature inert.
+- **The write happens AFTER delivery.** `finishWatcherRun` claims "everything in
+  that window has been dealt with", and the next query steps over everything
+  older — so it must not run until the alerts are actually out and their ids are
+  in `lastNotifiedIds`. A cut that wrote it inside the checker meant a Telegram
+  502 advanced the watermark over alerts that were neither delivered nor
+  recorded, and the narrower window then stepped past them permanently. The
+  ordering is enforced by a **data dependency**, not a comment: `finishWatcherRun`
+  consumes `updatedIds`, declared after the delivery block, so moving the call up
+  is a `TS2448`.
+- **`updateWatcherLastRun` deliberately does NOT touch the column.** It is called
+  on every outcome by every watcher type; folding the watermark in meant an
+  unmigrated box threw on all three call sites, `last_run_at` never advanced, and
+  every enabled watcher was re-dispatched on every 60s tick (the hourly email row
+  → 60 Haiku spawns an hour). Separate `markWatcherSuccess`, wrapped non-fatally,
+  degrades an unmigrated box to the old date-only query instead.
+
+Bounds: a **5-min overlap** re-offers the boundary (dedup absorbs a re-offer; a
+straddled boundary is silent loss), and a **24h ceiling** stops a row disabled for
+a week asking for a week of mail — below the old worst case, since the date-only
+form derived from `lastRunAt` and expanded to a full week in the same scenario.
+`emailLookbackClampMs` reports only *genuinely unevaluated* mail (it does not
+count the overlap, which the previous check already read), and
+`emailClampWarning` gates the operator warning at 15 min so a marginally-stale
+watermark does not print "skipping 0.0h … search Gmail manually".
+
+Cold start (`lastSuccessAt` NULL — every row for one tick after 069, and any row
+that has never succeeded) falls back to `buildGmailQueryByDate`. Broad is the safe
+direction with no watermark to trust. Consequence worth knowing: a row failing
+EVERY tick never records a success, so it keeps the full-day query — the growth
+this bounds is preserved on exactly the row already failing.
 
 ### Bounded retry (2026-08-13)
 
@@ -773,7 +846,7 @@ type, off the runner's `catch`:
 - **Every DB seam is a parameter, not a module mock.** A `mock.module` test here
   invalidates `db/*` for the whole `bun test src/watchers/` chunk; the first cut did
   exactly that and silently broke six of `x.test.ts`'s assertions. Same call
-  `runChecker` makes for `WikiCheckers`.
+  `runChecker` makes for `WatcherCheckers`.
 - **Surface:** `GET /api/watchers` merges both snapshot keys into the one
   `sourceHealth[]` chip list (run entry sorted first, pane label now "Health"). The
   merge/cadence/ordering live in the pure `mergeHealthChips`, not inline in the route

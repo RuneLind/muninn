@@ -35,6 +35,7 @@ function watcher(name: string, type: Watcher["type"], config: Record<string, unk
     intervalMs: 3600_000,
     enabled: true,
     lastRunAt: null,
+    lastSuccessAt: null,
     lastNotifiedIds: [],
     forceNextRun: false,
     createdAt: 0,

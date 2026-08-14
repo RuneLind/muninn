@@ -1,10 +1,10 @@
 import type { Api } from "grammy";
 import type { BotConfig } from "../bots/config.ts";
 import type { Watcher, WatcherAlert } from "../types.ts";
-import { getWatchersDueNow, updateWatcherLastRun } from "../db/watchers.ts";
+import { getWatchersDueNow, updateWatcherLastRun, markWatcherSuccess } from "../db/watchers.ts";
 import { isQuietHours } from "./quiet-hours.ts";
 import { computeWatcherTimeoutMs } from "./timeout.ts";
-import { checkEmail } from "./email.ts";
+import { checkEmail, type WatcherCheckResult } from "./email.ts";
 import { checkNews } from "./news.ts";
 import { checkX } from "./x.ts";
 import { checkAnthropic } from "./anthropic.ts";
@@ -34,6 +34,74 @@ import { Tracer, type TraceContext } from "../tracing/index.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("watchers");
+
+/** Injected so `finishWatcherRun`'s watermark write has a unit-test seam. */
+export interface FinishRunDeps {
+  updateWatcherLastRun: typeof updateWatcherLastRun;
+  markWatcherSuccess: typeof markWatcherSuccess;
+}
+const DEFAULT_FINISH_DEPS: FinishRunDeps = { updateWatcherLastRun, markWatcherSuccess };
+
+/**
+ * Close out a DELIVERED run: advance the cadence, and record the coverage
+ * watermark if the checker claimed one.
+ *
+ * A function with injected deps rather than two statements inline, because the
+ * watermark half is otherwise the single line that makes this whole feature
+ * exist — delete it and `last_success_at` stays NULL forever, the email checker
+ * takes the date-only query on every tick, and the change is inert with `tsc`
+ * and the entire suite green. That is this repo's named recurring defect, and
+ * `runWatchers` has no other seam a unit test can reach (`runner.test.ts`
+ * deliberately avoids `mock.module` in its chunk).
+ *
+ * Callers must only reach this AFTER the alerts are out: the watermark says
+ * "everything in that window has been dealt with", and the next query steps over
+ * everything older.
+ *
+ * The write is non-fatal — the alerts are already delivered, so failing the run
+ * over a bookkeeping UPDATE would turn a degraded state into a broken one. That
+ * matters most on a box running this before `bun run db:migrate` applied 069:
+ * no column, so every call throws, and swallowing degrades the email checker to
+ * the pre-PR date-only query rather than breaking it. It is also why the write
+ * is NOT folded into `updateWatcherLastRun`, which every watcher of every type
+ * calls on every outcome — folded in, an unmigrated box threw on all three of
+ * its call sites, `last_run_at` never advanced, and every enabled watcher was
+ * re-dispatched on every 60s tick.
+ */
+/**
+ * The watermark a completed run may record.
+ *
+ * `quietHoursSuppressed` is a RUN-EXEMPT type whose user-facing send was
+ * deliberately skipped (`wiki-committer` today). Coverage must not be claimed
+ * there: the checker ran, but the alerts did not go out, so `finishWatcherRun`'s
+ * "only after the alerts are out" contract is not met. Inert while only the
+ * email checker claims coverage and email is not exempt — but it is the one live
+ * path that would otherwise re-open the deliver-then-record ordering the moment a
+ * coverage-claiming checker joins QUIET_HOURS_RUN_EXEMPT.
+ */
+export function coverageToRecord(coveredFrom: Date | null, quietHoursSuppressed: boolean): Date | null {
+  return quietHoursSuppressed ? null : coveredFrom;
+}
+
+export async function finishWatcherRun(
+  watcherId: string,
+  notifiedIds: string[],
+  coveredFrom: Date | null,
+  deps: FinishRunDeps = DEFAULT_FINISH_DEPS,
+): Promise<void> {
+  await deps.updateWatcherLastRun(watcherId, notifiedIds);
+  if (!coveredFrom) return;
+  try {
+    await deps.markWatcherSuccess(watcherId, coveredFrom);
+  } catch (err) {
+    log.warn(
+      "Could not record watcher success watermark ({error}) — the email checker's next tick falls back to " +
+        "the date-only Gmail query (the whole day's unread pile). If this says the last_success_at column " +
+        "is missing, migration 069 has not been applied to this database.",
+      { watcherId, error: err instanceof Error ? err.message : String(err) },
+    );
+  }
+}
 
 /** Running token/cost totals across a checker's (possibly multiple) spawnHaiku
  *  calls — x/anthropic make a gate + a digest/capture call per run, so the
@@ -449,7 +517,12 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       const raw = runChecker(watcher, botConfig, telemetry);
       void raw.finally(() => releaseChecker(watcher.id, claim.token));
 
-      const alerts = await withWatcherTimeout(
+      // `coveredFrom` is the checker's own claim that it demonstrably covered
+      // its query window; it is consumed AFTER delivery below. Destructured from
+      // the return value rather than handed in as a mutable out-param, so that
+      // dropping it anywhere in the chain is a compile error rather than a
+      // silently inert feature.
+      const { alerts, coveredFrom } = await withWatcherTimeout(
         raw,
         watcher.name,
         timeoutMs,
@@ -565,7 +638,13 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
         ...newEntries,
       ].slice(-MAX_NOTIFIED_IDS);
 
-      await updateWatcherLastRun(watcher.id, updatedIds);
+      // AFTER delivery, deliberately — see `finishWatcherRun`. An earlier cut
+      // wrote the watermark inside the checker, before the send: a Telegram 502
+      // then left it advanced over alerts that were neither delivered nor
+      // recorded in `lastNotifiedIds`, and the next tick's narrower window
+      // stepped straight past them. Unread mail is re-offered by nothing else,
+      // so that loss is permanent.
+      await finishWatcherRun(watcher.id, updatedIds, coverageToRecord(coveredFrom, quietHours));
       // Token totals from the checker's spawnHaiku call(s) — stamped onto the
       // span (read back into Recent via getRecentAgentTraces off the childless
       // watcher span's OWN attributes) and onto the Running/completed card.
@@ -682,22 +761,38 @@ async function sendToSlackChannels(botName: string, markdown: string, channels: 
 }
 
 /**
- * The four WIKI-family checkers, injectable. Scoped to this family on purpose:
- * they are exactly the ones `MUNINN_WIKI_READONLY` partitions (the two drafting
- * types are refused, linter + committer stay open), and the readonly guard's
- * whole claim is about which of them a run REACHES — which an empty return value
- * cannot show, since every checker degrades to `[]` on a degraded bot config.
- * A `mock.module` spy would leak across the `bun test src/watchers/` chunk into
- * the gardener/linter tests beside it, so the seam is a parameter instead.
+ * The checker seam: every type `runChecker` dispatches, injectable.
+ *
+ * It began life scoped to the four wiki checkers, for the readonly-guard test —
+ * whose claim is about which checker a run REACHES, something an empty return
+ * value cannot show, since every checker degrades to `[]` on a degraded bot
+ * config. A `mock.module` spy would leak across the `bun test src/watchers/`
+ * chunk into the gardener/linter tests beside it, so the seam is a parameter.
+ *
+ * It now covers ALL EIGHT because the four without a seam had no dispatch
+ * coverage at all: a refactor deleted `case "email"` outright and every tick
+ * returned `[]` — read by the runner as a quiet inbox, so run-health saw a
+ * healthy run and the user would have silently stopped receiving mail alerts,
+ * with tsc clean and the full suite green. Deleting the `news`, `x` or
+ * `anthropic` case was equally invisible. Every branch now goes through here and
+ * has a test asserting which checker it reaches.
  */
-export interface WikiCheckers {
+export interface WatcherCheckers {
+  checkEmail: typeof checkEmail;
+  checkNews: typeof checkNews;
+  checkX: typeof checkX;
+  checkAnthropic: typeof checkAnthropic;
   checkWikiGardener: typeof checkWikiGardener;
   checkWikiLinter: typeof checkWikiLinter;
   checkWikiCommitter: typeof checkWikiCommitter;
   checkConsolidationGardener: typeof checkConsolidationGardener;
 }
 
-const DEFAULT_WIKI_CHECKERS: WikiCheckers = {
+export const DEFAULT_WATCHER_CHECKERS: WatcherCheckers = {
+  checkEmail,
+  checkNews,
+  checkX,
+  checkAnthropic,
   checkWikiGardener,
   checkWikiLinter,
   checkWikiCommitter,
@@ -713,8 +808,8 @@ export async function runChecker(
   watcher: Watcher,
   botConfig: BotConfig,
   telemetry?: HaikuTelemetry,
-  checkers: WikiCheckers = DEFAULT_WIKI_CHECKERS,
-): Promise<WatcherAlert[]> {
+  checkers: WatcherCheckers = DEFAULT_WATCHER_CHECKERS,
+): Promise<WatcherCheckResult> {
   // The bot folder is no longer a cwd — it is where a checker's MCP servers and
   // tool permissions are declared (`--mcp-config` / `--settings`). Only the email
   // watcher needs them (Gmail), so only it is handed the dir.
@@ -732,17 +827,39 @@ export async function runChecker(
       name: watcher.name,
       reason: WIKI_READONLY_REASON,
     });
-    return [];
+    return { alerts: [], coveredFrom: null };
   }
+  // Email is the ONLY type that reports coverage, so it is dispatched here rather
+  // than in `dispatchChecker` (whose contract is "alerts only"). Extracting that
+  // switch is what deleted this branch once: the refactor dropped `case "email"`,
+  // every tick returned `[]` through the `default:` warn, and NOTHING caught it —
+  // tsc was silent (`checkEmail` merely became unused, and `noUnusedLocals` is
+  // off), the suite stayed green, and the runner reads `[]` as a quiet inbox, so
+  // run-health saw a healthy run and the user simply stopped getting mail alerts.
+  // That is why every branch below now goes through the injected `checkers` seam
+  // and has a test asserting WHICH checker a run reaches.
+  if (watcher.type === "email") {
+    return await checkers.checkEmail(watcher, botConfig.dir, botName, telemetry);
+  }
+  return { alerts: await dispatchChecker(watcher, botConfig, botName, telemetry, checkers), coveredFrom: null };
+}
+
+/** The per-type dispatch for every checker that reports alerts only. `email` is
+ *  handled by {@link runChecker} itself because it also reports coverage. */
+async function dispatchChecker(
+  watcher: Watcher,
+  botConfig: BotConfig,
+  botName: string,
+  telemetry: HaikuTelemetry | undefined,
+  checkers: WatcherCheckers,
+): Promise<WatcherAlert[]> {
   switch (watcher.type) {
-    case "email":
-      return await checkEmail(watcher, botConfig.dir, botName, telemetry);
     case "news":
-      return await checkNews(watcher);
+      return await checkers.checkNews(watcher);
     case "x":
-      return await checkX(watcher, botName, telemetry);
+      return await checkers.checkX(watcher, botName, telemetry);
     case "anthropic":
-      return await checkAnthropic(watcher, telemetry);
+      return await checkers.checkAnthropic(watcher, telemetry);
     case "wiki-gardener":
       // The gardener needs the full BotConfig (wikiDir, connector, gardener block)
       // for executeOneShot — passed through instead of re-running bot discovery.

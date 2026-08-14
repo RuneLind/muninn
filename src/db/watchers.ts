@@ -92,6 +92,27 @@ export async function updateWatcherLastRun(
   `;
 }
 
+/**
+ * Advance the "this checker last covered the window up to here" watermark.
+ *
+ * Deliberately NOT folded into {@link updateWatcherLastRun}, which every watcher
+ * run calls on every outcome. Only the checker itself knows whether a run can be
+ * trusted to have covered its window — a run can return `[]` having reached the
+ * source and found nothing (covered) or having never reached it at all (not
+ * covered), and those are indistinguishable from the runner. Keeping the write
+ * separate also means a box that has not yet applied migration 069 fails only
+ * this call, rather than every watcher's run bookkeeping.
+ *
+ * `at` is the instant the check STARTED, not `now()`: the next run asks "what
+ * arrived after this", so anchoring at run END would skip everything that
+ * arrived while a 40s check was in flight. Anchoring at run start re-offers that
+ * sliver next tick, which dedup absorbs.
+ */
+export async function markWatcherSuccess(id: string, at: Date): Promise<void> {
+  const sql = getDb();
+  await sql`UPDATE watchers SET last_success_at = ${at} WHERE id = ${id}`;
+}
+
 export async function forceRunWatcher(id: string): Promise<void> {
   const sql = getDb();
   await sql`UPDATE watchers SET force_next_run = true WHERE id = ${id}`;
@@ -252,6 +273,7 @@ function mapRow(r: Record<string, any>): Watcher {
     intervalMs: r.interval_ms,
     enabled: r.enabled,
     lastRunAt: r.last_run_at ? new Date(r.last_run_at).getTime() : null,
+    lastSuccessAt: r.last_success_at ? new Date(r.last_success_at).getTime() : null,
     lastNotifiedIds: Array.isArray(r.last_notified_ids) ? r.last_notified_ids : [],
     forceNextRun: r.force_next_run ?? false,
     createdAt: new Date(r.created_at).getTime(),

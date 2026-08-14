@@ -158,8 +158,8 @@ async function loadLiveTask(): Promise<{
       process.exit(1);
     }
     return {
-      query: buildGmailQuery(undefined, Date.now()),
-      prompt: buildEmailPrompt(buildGmailQuery(undefined, Date.now()), DEFAULT_EMAIL_PROMPT, null),
+      query: buildGmailQuery(undefined, Date.now(), Date.now()),
+      prompt: buildEmailPrompt(buildGmailQuery(undefined, Date.now(), Date.now()), DEFAULT_EMAIL_PROMPT, null),
       model: DEFAULT_MODEL,
       botDir: dir,
       source: "shipped defaults (no DB)",
@@ -184,7 +184,7 @@ async function loadLiveTask(): Promise<{
     // spans days. Those are the largest-context, most timeout-prone runs there are —
     // exactly the population this probe most needs to be able to produce.
     const lastRunAt = row.last_run_at ? new Date(row.last_run_at as string).getTime() : null;
-    const query = buildGmailQuery(config.filter, lastRunAt);
+    const query = buildGmailQuery(config.filter, lastRunAt, Date.now());
     const { loadInterestProfile } = await import("../src/profile/generator.ts");
     const profile = await loadInterestProfile(row.user_id as string, row.bot_name as string);
     // The bot dir must follow the ROW, not a hardcoded `bots/jarvis`: `--mcp-config`

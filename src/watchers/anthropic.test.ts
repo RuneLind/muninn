@@ -408,6 +408,7 @@ describe("checkAnthropic", () => {
     intervalMs: 7_200_000,
     enabled: true,
     lastRunAt: null,
+    lastSuccessAt: null,
     lastNotifiedIds: [],
     forceNextRun: false,
     createdAt: 0,

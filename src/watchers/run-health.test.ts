@@ -68,6 +68,7 @@ const watcher = (over: Partial<Watcher> = {}): Watcher => ({
   intervalMs: H,
   enabled: true,
   lastRunAt: null,
+  lastSuccessAt: null,
   lastNotifiedIds: [],
   forceNextRun: false,
   createdAt: NOW,

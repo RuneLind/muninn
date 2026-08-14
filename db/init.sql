@@ -317,6 +317,11 @@ CREATE TABLE watchers (
   interval_ms INTEGER NOT NULL DEFAULT 300000,  -- 5 min default
   enabled BOOLEAN NOT NULL DEFAULT true,
   last_run_at TIMESTAMPTZ,
+  -- Advances ONLY when a checker completed a trustworthy run. Unlike last_run_at
+  -- it is not moved by quiet-hours skips or failures, so a checker can bound its
+  -- query window on it without a skipped tick dropping that window's work.
+  -- NULL = never succeeded; readers fall back to their unbounded behaviour.
+  last_success_at TIMESTAMPTZ,
   last_notified_ids JSONB DEFAULT '[]',
   force_next_run BOOLEAN NOT NULL DEFAULT false,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),

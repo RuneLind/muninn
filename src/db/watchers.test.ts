@@ -5,6 +5,7 @@ import {
   saveWatcher,
   getWatchersDueNow,
   updateWatcherLastRun,
+  markWatcherSuccess,
   getAllWatchers,
   getWatchersForUser,
   deleteWatcher,
@@ -151,6 +152,42 @@ describe("watchers", () => {
     const watcher = all.find((w) => w.id === id)!;
     expect(watcher.lastNotifiedIds).toEqual(["email-1", "email-2"]);
     expect(watcher.lastRunAt).not.toBeNull();
+  });
+
+  test("updateWatcherLastRun does NOT touch last_success_at", async () => {
+    // It is called on every outcome — success, quiet-hours skip, failure — so it
+    // must never imply coverage. Only the checker knows that; see
+    // markWatcherSuccess.
+    const id = await saveWatcher(makeWatcher({ botName: "bot1" }));
+    await markWatcherSuccess(id, new Date(Date.now() - 90_000));
+    const before = (await getAllWatchers("bot1")).find((x) => x.id === id)!.lastSuccessAt;
+
+    await updateWatcherLastRun(id, ["email-1"]);
+
+    const w = (await getAllWatchers("bot1")).find((x) => x.id === id)!;
+    expect(w.lastRunAt).not.toBeNull();
+    expect(w.lastSuccessAt).toBe(before);
+  });
+
+  test("markWatcherSuccess records the watermark and leaves it NULL until called", async () => {
+    const id = await saveWatcher(makeWatcher({ botName: "bot1" }));
+    expect((await getAllWatchers("bot1")).find((x) => x.id === id)!.lastSuccessAt).toBeNull();
+
+    const at = new Date(Date.now() - 90_000);
+    await markWatcherSuccess(id, at);
+
+    const w = (await getAllWatchers("bot1")).find((x) => x.id === id)!;
+    expect(w.lastSuccessAt).toBe(at.getTime());
+  });
+
+  test("markWatcherSuccess scopes its write to the given watcher", async () => {
+    const a = await saveWatcher(makeWatcher({ botName: "bot1", name: "a" }));
+    const b = await saveWatcher(makeWatcher({ botName: "bot1", name: "b" }));
+    await markWatcherSuccess(a, new Date());
+
+    const all = await getAllWatchers("bot1");
+    expect(all.find((x) => x.id === a)!.lastSuccessAt).not.toBeNull();
+    expect(all.find((x) => x.id === b)!.lastSuccessAt).toBeNull();
   });
 
   test("getAllWatchers sorts enabled first", async () => {
