@@ -202,6 +202,44 @@ describe("GET /plans", () => {
     expect(html).toContain("WIKI_EXTRA");
   });
 
+  test("a render that THROWS is still a 200 naming the failure, never a bare Hono 500", async () => {
+    // The assembly is defensive everywhere, but the RENDER is not covered by
+    // that: a bundle build failure, or a payload shape the page chokes on,
+    // would otherwise take /plans down with an unexplained 500.
+    const res = await app(
+      deps({
+        renderPage: async () => {
+          throw new Error("bundle build failed: esbuild exited 1");
+        },
+      }),
+    ).request("/plans");
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("bundle build failed");
+    expect(html).toContain("/api/plans/board");
+  });
+
+  test("an assembly that THROWS outright is a 200 with the reason, on both routes", async () => {
+    // A dep that fails on ACCESS, not on call — i.e. before any of the
+    // assembly's own defences can run.
+    const boom = (): PlanBoardDeps =>
+      ({
+        ...deps(),
+        get loadSource(): never {
+          throw new Error("deps exploded");
+        },
+      }) as PlanBoardDeps;
+
+    const page = await app(boom()).request("/plans");
+    expect(page.status).toBe(200);
+    expect(await page.text()).toContain("deps exploded");
+
+    const api = await app(boom()).request("/api/plans/board");
+    expect(api.status).toBe(200);
+    const body = await api.json();
+    expect(body.errors.join(" ")).toContain("deps exploded");
+  });
+
   test("a payload value carrying </script> cannot break out of the embed", async () => {
     const res = await app(
       deps({

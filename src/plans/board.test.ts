@@ -103,13 +103,23 @@ describe("column membership", () => {
 
   test("age is measured from status_date only — an undated plan has none", () => {
     const p = build();
-    expect(p.cards.find((c) => c.slug === "board-a")!.ageDays).toBe(48);
+    // 2026-07-01 → 2026-08-17T12:00Z is 47½ days; the card says 47, because a
+    // day is only counted once it has actually elapsed.
+    expect(p.cards.find((c) => c.slug === "board-a")!.ageDays).toBe(47);
     expect(p.cards.find((c) => c.slug === "board-b")!.ageDays).toBeNull();
   });
 
-  test("the reader link points at the plan page, not the board", () => {
-    expect(planWikiUrl("a-b")).toBe("/wiki?wiki=mimir&page=a-b");
-    expect(planWikiUrl("a b/c")).toBe("/wiki?wiki=mimir&page=a%20b%2Fc");
+  test("the reader link addresses the plan by relPath, so a same-stem page cannot shadow it", () => {
+    // `?page=` resolves first-stem-match in the reader; `?relPath=` is the
+    // collision-proof form the Atlas tab already uses.
+    expect(planWikiUrl("plans/a-b.mdx")).toBe("/wiki?wiki=mimir&relPath=plans%2Fa-b.mdx");
+    expect(planWikiUrl("plans/a b.md")).toBe("/wiki?wiki=mimir&relPath=plans%2Fa%20b.md");
+  });
+
+  test("the card's reader link is its own relPath", () => {
+    const p = build();
+    const a = p.cards.find((c) => c.slug === "board-a")!;
+    expect(a.wikiUrl).toBe(`/wiki?wiki=mimir&relPath=${encodeURIComponent(a.relPath)}`);
   });
 });
 
@@ -219,6 +229,9 @@ describe("degrade: the money is one switch, and it is named", () => {
     const p = build(source(), ledger({ plans: thin }));
     expect(p.money.available).toBe(false);
     expect(p.money.reason).toContain("shipped plan(s) with a cost");
+    // Every other blocked reason names the host it read; a thin pool is the one
+    // a reader is most likely to check against the wrong claude-usage.
+    expect(p.money.reason).toContain("http://127.0.0.1:8787");
   });
 
   test("errors[] with reachable:true is a caveat, not a blackout", () => {

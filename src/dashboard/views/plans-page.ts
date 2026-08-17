@@ -1,6 +1,8 @@
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { escHtml, escJsonScript } from "./components/escape.ts";
+import { helpersClientScript } from "./components/helpers-client.ts";
 import { planBoardClientScript } from "./components/plan-board-client.ts";
+import { buildHashMetaTag, getDashboardBuildHash } from "../dashboard-build-hash.ts";
 import type { BoardPayload } from "../../plans/board.ts";
 
 /**
@@ -27,7 +29,11 @@ import type { BoardPayload } from "../../plans/board.ts";
  * toggle, while the status and priority tints stay the prototype's assignment.
  */
 export async function renderPlansPage(payload: BoardPayload): Promise<string> {
-  const client = await planBoardClientScript();
+  const [client, helpers, buildHash] = await Promise.all([
+    planBoardClientScript(),
+    helpersClientScript(),
+    getDashboardBuildHash(),
+  ]);
   const asOf = new Date(payload.generatedAt).toISOString().slice(0, 16).replace("T", " ");
 
   return `<!DOCTYPE html>
@@ -36,6 +42,7 @@ export async function renderPlansPage(payload: BoardPayload): Promise<string> {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  ${buildHashMetaTag(buildHash)}
   <title>Muninn - Plans</title>
   <style>
     ${SHARED_STYLES}
@@ -97,6 +104,9 @@ export async function renderPlansPage(payload: BoardPayload): Promise<string> {
     window.PLAN_BOARD = ${escJsonScript(payload)};
   </script>
   <script>
+    ${helpers}
+  </script>
+  <script>
     ${client}
   </script>
 </body>
@@ -128,6 +138,9 @@ function renderBanners(payload: BoardPayload): string {
     parts.push(`<div class="pb-banner pb-banner-warn">
       <strong>No money on this board.</strong> ${escHtml(payload.money.reason ?? "")}.
       Columns, priorities and the hand order are unaffected; every estimate and cost is hidden rather than guessed.
+      <strong>Repo chips can move</strong>: with the ledger up a plan's family is the repo its PRs actually landed in,
+      and without it every plan falls back to what its slug suggests — so a chip that changed on its own is this,
+      not the filter.
       Tried <code>${escHtml(payload.ledger.baseUrl)}</code>${payload.ledger.urlConfigured ? "" : " (the default — <code>CLAUDE_USAGE_URL</code> is not set)"}.
       ${errors}
     </div>`);
@@ -155,6 +168,7 @@ function renderBanners(payload: BoardPayload): string {
       <p>Usually a rename or a retired plan upstream. They still price the board — a retired plan's cost is
       evidence about what a PR in that repo costs.</p>
       <ul>${payload.ledgerOnlySlugs.slice(0, 20).map((s) => `<li><code>${escHtml(s)}</code></li>`).join("")}</ul>
+      ${payload.ledgerOnlySlugs.length > 20 ? `<p>…and ${payload.ledgerOnlySlugs.length - 20} more.</p>` : ""}
     </details>`);
   }
 
@@ -290,7 +304,11 @@ const PLAN_BOARD_STYLES = `
     .pb-card:hover { transform: translateY(-1px); border-color: var(--pb-accent); }
     .pb-card.pb-sel { border-color: var(--pb-accent); }
     .pb-title { font-size: 13px; font-weight: 600; line-height: 1.3; color: var(--pb-ink); padding-right: 20px; }
-    .pb-slug { font-family: var(--pb-mono); font-size: 10.5px; color: var(--pb-faint); overflow-wrap: anywhere; }
+    /* Card body text is held at --pb-muted, never --pb-faint: measured on the
+       card's own background, faint is 2.5:1 in dark and 2.7:1 in light — below
+       the 4.5:1 floor for text this size. The de-emphasis these carried in
+       colour is carried in italics instead. */
+    .pb-slug { font-family: var(--pb-mono); font-size: 10.5px; color: var(--pb-muted); overflow-wrap: anywhere; }
     .pb-r1 { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding-right: 18px; }
     .pb-r2 { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; font-size: 11.5px; color: var(--pb-muted); }
     .pb-pri {
@@ -300,10 +318,10 @@ const PLAN_BOARD_STYLES = `
     .pb-pri-unset { background: transparent; color: var(--pb-faint); border: 1px dashed var(--pb-line); }
     .pb-pri-draft { outline: 1px dashed var(--status-warning); outline-offset: 1px; }
     .pb-fam { font-size: 10.5px; color: var(--pb-muted); background: var(--pb-surface-3); border-radius: 3px; padding: 1px 6px; }
-    .pb-fam-soft { color: var(--pb-faint); font-style: italic; }
+    .pb-fam-soft { color: var(--pb-muted); font-style: italic; }
     .pb-flag { font-size: 11px; color: var(--pb-followups); font-weight: 600; }
     .pb-est { font-family: var(--pb-mono); font-size: 11.5px; color: var(--pb-ink-2); }
-    .pb-est-guess, .pb-prs-guess { color: var(--pb-faint); }
+    .pb-est-guess, .pb-prs-guess { color: var(--pb-muted); font-style: italic; }
     .pb-prs { font-family: var(--pb-mono); font-size: 11.5px; }
     .pb-age { font-size: 11.5px; }
     .pb-rank { font-family: var(--pb-mono); font-size: 10.5px; font-weight: 700; color: var(--pb-accent-ink); background: var(--pb-accent-wash); border-radius: 3px; padding: 1px 5px; flex: none; }
@@ -325,9 +343,12 @@ const PLAN_BOARD_STYLES = `
     .pb-nudge button:disabled { opacity: .3; cursor: default; }
 
     /* ---- drawer --------------------------------------------------------- */
-    .pb-scrim { position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 20; }
+    /* Above the nav's own dropdown (z-index 60) — the drawer lives inside
+       .pb now (for the tokens), and .pb creates no stacking context, so these
+       are still root-level layers. */
+    .pb-scrim { position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 200; }
     .pb-drawer {
-      position: fixed; top: 0; right: 0; bottom: 0; width: min(540px, 100%); z-index: 21;
+      position: fixed; top: 0; right: 0; bottom: 0; width: min(540px, 100%); z-index: 201;
       background: var(--bg-panel); border-left: 1px solid var(--border-primary);
       display: flex; flex-direction: column; color: var(--text-secondary);
       --pb-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;

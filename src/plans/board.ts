@@ -24,6 +24,15 @@
  *   3. **The family survives the degrade.** A card's repo family is resolved
  *      from the ledger's PRs when there are any and from the slug otherwise, so
  *      the repo filter still works on a board with no ledger at all.
+ *
+ * One consequence of (3) is worth stating where it can be read from the card:
+ * **family attribution can SHIFT when the ledger is down.** With the ledger up,
+ * a plan's family is the repo its PRs actually landed in; with the ledger down,
+ * every plan falls back to what its slug suggests — so a `muninn-…`-named plan
+ * whose PRs landed in huginn files under a different chip than it did an hour
+ * ago, and the repo filter's counts move with it. The degrade banner on the
+ * page says so, because a chip that changed on its own otherwise reads as a
+ * bug in the filter.
  */
 
 import {
@@ -204,16 +213,27 @@ export function moneyBlockedReason(ledger: PlanLedgerResult, pricing: Pricing): 
     return `the ledger at ${ledger.baseUrl} has no plans directory configured`;
   }
   if (pricing.global.n < MIN_FAMILY_SAMPLES) {
-    return `the ledger has ${pricing.global.n} shipped plan(s) with a cost — ${MIN_FAMILY_SAMPLES} are needed before a band means anything`;
+    // Names the host like every branch above it: this is the reason a reader is
+    // most likely to be reading on the WRONG claude-usage (a fresh one, or a
+    // second machine's), and "the ledger" alone gives them nothing to check.
+    return `the ledger at ${ledger.baseUrl} has ${pricing.global.n} shipped plan(s) with a cost — ${MIN_FAMILY_SAMPLES} are needed before a band means anything`;
   }
   return null;
 }
 
-/** The reader link for a plan page in muninn's own wiki reader. Relative on
- *  purpose: the board is reached over the tailnet as often as over loopback,
- *  and an absolute link would name whichever host rendered it. */
-export function planWikiUrl(slug: string): string {
-  return `/wiki?wiki=${encodeURIComponent(PLANS_WIKI_NAME)}&page=${encodeURIComponent(slug)}`;
+/**
+ * The reader link for a plan page in muninn's own wiki reader.
+ *
+ * By **relPath**, not by page name: `?page=` resolves first-stem-match across
+ * the whole wiki, so a plan sharing a stem with a page in another folder opens
+ * whichever the index happened to hit first. `?relPath=` is the collision-proof
+ * form the reader already supports for the Atlas tab.
+ *
+ * Relative on purpose: the board is reached over the tailnet as often as over
+ * loopback, and an absolute link would name whichever host rendered it.
+ */
+export function planWikiUrl(relPath: string): string {
+  return `/wiki?wiki=${encodeURIComponent(PLANS_WIKI_NAME)}&relPath=${encodeURIComponent(relPath)}`;
 }
 
 function buildCard(
@@ -247,7 +267,7 @@ function buildCard(
     relPath: plan.relPath,
     hash: plan.hash,
     followupsOpen: plan.followupsOpen,
-    wikiUrl: planWikiUrl(plan.slug),
+    wikiUrl: planWikiUrl(plan.relPath),
     family: fam.family ?? UNKNOWN_REPO,
     familySource: fam.familySource,
     familyConfident: fam.confident,

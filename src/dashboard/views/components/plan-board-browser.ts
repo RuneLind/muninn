@@ -14,7 +14,21 @@ import type { BoardPayload } from "../../../plans/board.ts";
 function start(): void {
   const payload = (globalThis as { PLAN_BOARD?: BoardPayload }).PLAN_BOARD;
   const root = document.getElementById("pbRoot");
-  if (!payload || !root) return;
+  if (!root) return;
+  if (!payload) {
+    // A silent return here is a blank page with no explanation — the exact
+    // state where the reader most needs to be told where the data lives. The
+    // server-rendered banners above are still on screen; this replaces only
+    // the board area.
+    const board = document.getElementById("pbBoard") ?? root;
+    board.textContent = "";
+    const note = document.createElement("p");
+    note.className = "pb-empty";
+    note.textContent =
+      "The board payload did not arrive — nothing embedded this page's data. The same object is served by GET /api/plans/board.";
+    board.append(note);
+    return;
+  }
   mountPlanBoard(payload, root);
 }
 

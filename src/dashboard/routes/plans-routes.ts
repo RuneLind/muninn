@@ -40,10 +40,13 @@ import { renderPlansPage } from "../views/plans-page.ts";
 const log = getLog("dashboard", "plans");
 
 /** Injectable seam: the tests drive the whole route without a mimir checkout
- *  and without a live claude-usage. */
+ *  and without a live claude-usage. `renderPage` is a seam too, so the "a page
+ *  render that throws is still a 200" contract can be driven without breaking
+ *  the bundler. */
 export interface PlanBoardDeps {
   ledger: PlanLedgerDeps;
   loadSource: () => Promise<PlanSourceResult>;
+  renderPage?: (payload: BoardPayload) => Promise<string>;
 }
 
 export function defaultPlanBoardDeps(config: Config): PlanBoardDeps {
@@ -54,6 +57,24 @@ export function defaultPlanBoardDeps(config: Config): PlanBoardDeps {
     ),
     loadSource: () => loadPlanSource(),
   };
+}
+
+/** Warn-once per distinct source failure. `/plans` is polled by every open tab,
+ *  and a mimir checkout that has gone missing writes the same line forever —
+ *  the ledger card's `warnedX` idiom, for the same reason. */
+const warnedSourceErrors = new Set<string>();
+
+function warnSourceOnce(message: string): void {
+  if (warnedSourceErrors.has(message)) {
+    log.info("plan board: reading mimir's plans failed: {error}", { error: message });
+    return;
+  }
+  warnedSourceErrors.add(message);
+  log.error("plan board: reading mimir's plans failed: {error}", { error: message });
+}
+
+function errText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 /** An empty corpus carrying the reason it is empty — the shape an unexpected
@@ -67,25 +88,69 @@ function failedSource(err: unknown): PlanSourceResult {
   };
 }
 
+/** The ledger side's own degrade, for the one case `fetchPlanLedger` cannot
+ *  report itself: it threw. Same shape a refused payload produces. */
+function failedLedger(deps: PlanBoardDeps, now: number, err: unknown): PlanLedgerResult {
+  return {
+    fetchedAt: now,
+    baseUrl: deps.ledger.baseUrl,
+    urlConfigured: deps.ledger.urlConfigured,
+    ledgerConfigured: null,
+    reachable: false,
+    generatedAt: null,
+    refreshedAt: null,
+    plans: [],
+    errors: [`reading the claude-usage ledger failed: ${errText(err)}`],
+  };
+}
+
 /**
  * Read both sides in parallel and join them. The two reads are independent —
  * a dead ledger must not delay the wiki read, and neither may take the board
- * down — so they are settled, not awaited in sequence.
+ * down — so they are genuinely SETTLED: `fetchPlanLedger` is written not to
+ * reject, but "the comment says settled" is not the same as settled, and a
+ * rejection on that arm would take out a board whose wiki read was fine.
  */
 export async function assemblePlanBoard(
   deps: PlanBoardDeps,
   now: number = Date.now(),
 ): Promise<BoardPayload> {
-  const [sourceResult, ledgerResult] = await Promise.all([
-    deps.loadSource().catch((err): PlanSourceResult => {
-      log.error("plan board: reading mimir's plans failed: {error}", {
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return failedSource(err);
-    }),
+  const [source, ledger] = await Promise.allSettled([
+    deps.loadSource(),
     fetchPlanLedger(deps.ledger, now) as Promise<PlanLedgerResult>,
   ]);
+
+  let sourceResult: PlanSourceResult;
+  if (source.status === "fulfilled") {
+    sourceResult = source.value;
+  } else {
+    warnSourceOnce(errText(source.reason));
+    sourceResult = failedSource(source.reason);
+  }
+
+  let ledgerResult: PlanLedgerResult;
+  if (ledger.status === "fulfilled") {
+    ledgerResult = ledger.value;
+  } else {
+    log.error("plan board: the ledger read threw: {error}", { error: errText(ledger.reason) });
+    ledgerResult = failedLedger(deps, now, ledger.reason);
+  }
+
   return buildBoardPayload({ source: sourceResult, ledger: ledgerResult, now });
+}
+
+/**
+ * The last resort: the whole assembly threw before it could produce a payload
+ * (a dep that fails on access, a bug in the join). Neither route may 5xx, so
+ * this is the state they degrade to — a board with no cards that SAYS why, in
+ * the `warnings` the page already renders as a banner.
+ */
+function failedPayload(deps: PlanBoardDeps, now: number, err: unknown): BoardPayload {
+  return buildBoardPayload({
+    source: failedSource(err),
+    ledger: failedLedger(deps, now, err),
+    now,
+  });
 }
 
 export function registerPlansRoutes(
@@ -93,11 +158,49 @@ export function registerPlansRoutes(
   config: Config,
   deps: PlanBoardDeps = defaultPlanBoardDeps(config),
 ): void {
+  const render = deps.renderPage ?? renderPlansPage;
+
   app.get("/plans", async (c) => {
-    return c.html(await renderPlansPage(await assemblePlanBoard(deps)));
+    // TWO throwing surfaces, and the handler owns both: the assembly (which is
+    // defensive per-input but can still fail whole) and the RENDER — a bundle
+    // build failure is exactly the state where an unexplained Hono 500 is the
+    // least useful thing the page could do.
+    let payload: BoardPayload;
+    try {
+      payload = await assemblePlanBoard(deps);
+    } catch (err) {
+      log.error("plan board: assembling /plans failed: {error}", { error: errText(err) });
+      payload = failedPayload(deps, Date.now(), err);
+    }
+    try {
+      return c.html(await render(payload));
+    } catch (err) {
+      log.error("plan board: rendering /plans failed: {error}", { error: errText(err) });
+      return c.html(renderPlansFallback(errText(err)), 200);
+    }
   });
 
   app.get("/api/plans/board", async (c) => {
-    return c.json(await assemblePlanBoard(deps));
+    try {
+      return c.json(await assemblePlanBoard(deps));
+    } catch (err) {
+      log.error("plan board: assembling the board payload failed: {error}", { error: errText(err) });
+      const payload = failedPayload(deps, Date.now(), err);
+      return c.json({ ...payload, errors: payload.warnings });
+    }
   });
+}
+
+/** The page the page degrades to: no styling, no bundle, one sentence naming
+ *  the failure and the endpoint that still works. */
+function renderPlansFallback(message: string): string {
+  const esc = (s: string) =>
+    s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  return `<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><title>Muninn - Plans</title></head>
+<body>
+  <h1>Plan board</h1>
+  <p>The board could not be rendered: <code>${esc(message)}</code></p>
+  <p>The payload itself is still served by <code>GET /api/plans/board</code>.</p>
+</body></html>`;
 }

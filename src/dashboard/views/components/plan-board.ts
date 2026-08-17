@@ -22,23 +22,28 @@
 import {
   BOARD_PRIORITIES,
   applyOverlay,
+  canNudge,
   computeMeters,
   familyCounts,
   filterCards,
   formatAge,
   formatUsd,
   isTerminalColumn,
-  nudgeOrder,
+  nudgeRanked,
   rankOf,
+  sanitizeOverlay,
   showRankUi,
   sortCards,
+  viewStateFromQuery,
+  viewStateToQuery,
   visibleColumns,
+  type BoardColumnKey,
   type BoardColumnMeta,
-  type BoardFilters,
   type BoardOrder,
   type BoardOverlay,
   type BoardScope,
   type BoardSort,
+  type BoardViewState,
   type EffectiveCard,
 } from "../../../plans/board-client-pure.ts";
 import type { BoardPayload } from "../../../plans/board.ts";
@@ -46,10 +51,11 @@ import type { PlanPriority } from "../../../plans/constants.ts";
 
 const OVERLAY_KEY = "muninn.planboard.draft.v1";
 
-interface ViewState {
-  scope: BoardScope;
-  sort: BoardSort;
-  filters: BoardFilters;
+/** Why a nudge is refused, in the words the button's tooltip uses. */
+const NUDGE_OFF_SORT = "Switch Sort to “My order” to rank by hand";
+const NUDGE_ON_DISK = "ranked in mimir's queue.yaml — editing arrives when the board can write";
+
+interface ViewState extends BoardViewState {
   openSlug: string | null;
 }
 
@@ -66,8 +72,10 @@ function loadOverlay(): BoardOverlay {
   try {
     const raw = localStorage.getItem(OVERLAY_KEY);
     if (!raw) return { priority: {}, order: {} };
-    const parsed = JSON.parse(raw) as Partial<BoardOverlay>;
-    return { priority: parsed.priority ?? {}, order: parsed.order ?? {} };
+    // Validated field by field, never cast: an older build of this page, a hand
+    // edit, or a half-finished write can leave a priority the pill has no
+    // colour for and an order entry no card can ever match.
+    return sanitizeOverlay(JSON.parse(raw));
   } catch {
     // A corrupt draft is not worth taking the board down for.
     return { priority: {}, order: {} };
@@ -85,12 +93,14 @@ function saveOverlay(overlay: BoardOverlay): void {
 // ---------------------------------------------------------------- mount
 
 export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
-  const view: ViewState = {
-    scope: "active",
-    sort: "rank",
-    filters: { families: [], priority: null, query: "" },
-    openSlug: null,
-  };
+  // The URL is the view's home: a board someone filtered down to "huginn, p0,
+  // by cost" is worth linking to, and a reload that silently threw the filter
+  // away read as the board losing the plans it was just showing.
+  const view: ViewState = { ...viewStateFromQuery(location.search), openSlug: null };
+  // A `?sort=cost` link opened against a board with no money would sort by a
+  // number nothing renders; the Cost button is disabled in that state, so the
+  // URL must land where the button would.
+  if (!payload.money.available && view.sort === "cost") view.sort = "rank";
   let overlay = loadOverlay();
 
   const metersBox = root.querySelector<HTMLElement>("#pbMeters")!;
@@ -101,24 +111,67 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
   const columnMeta = new Map<string, BoardColumnMeta>(payload.columns.map((c) => [c.key, c]));
   const money = payload.money.available;
 
+  interface Merged {
+    cards: EffectiveCard[];
+    order: BoardOrder;
+    draftCols: Set<string>;
+    /** Columns queue.yaml ranks — no ▲▼ until the board can write. */
+    diskCols: Set<string>;
+  }
+
   /** Merge the draft under the payload — disk wins, every render. */
-  function merged(): { cards: EffectiveCard[]; order: BoardOrder; draftCols: Set<string> } {
+  function merged(): Merged {
     const res = applyOverlay(payload.cards, payload.queue.order, overlay);
+    // A draft the merge threw away (the disk took the column over, or none of
+    // its slugs is in the column any more) is deleted from the STORED overlay
+    // too, so it cannot reappear the day someone edits queue.yaml. Purging
+    // here is stable: the next applyOverlay reports nothing stale, so this
+    // cannot loop.
+    if (res.staleDraftColumns.some((key) => overlay.order[key])) {
+      const order = { ...overlay.order };
+      for (const key of res.staleDraftColumns) delete order[key];
+      overlay = { priority: { ...overlay.priority }, order };
+      saveOverlay(overlay);
+    }
     const draftCols = new Set(
       Object.entries(res.orderIsDraft)
         .filter(([, isDraft]) => isDraft)
         .map(([key]) => key),
     );
-    return { cards: res.cards, order: res.order, draftCols };
+    return { cards: res.cards, order: res.order, draftCols, diskCols: new Set(res.diskRanked) };
+  }
+
+  /** Mirror the view into the URL. `replaceState`, not `pushState`: a chip
+   *  click is not a navigation, and Back must leave the board, not walk back
+   *  through eleven filter changes. */
+  function syncUrl(): void {
+    try {
+      history.replaceState(history.state, "", `${location.pathname}${viewStateToQuery(view)}`);
+    } catch {
+      /* sandboxed / opaque origin — the board works, the link just is not shareable */
+    }
   }
 
   function render(): void {
-    const { cards, order, draftCols } = merged();
+    // A chip or segment click re-renders the controls it was fired from, which
+    // destroys the focused button. Remember which one it was by its stable key
+    // and give focus back after the rebuild — otherwise keyboard filtering
+    // dumps the user back at the top of the document on every click.
+    const active = document.activeElement as HTMLElement | null;
+    const focusKey = active && controlsBox.contains(active) ? active.dataset.key ?? null : null;
+
+    const { cards, order, draftCols, diskCols } = merged();
     const shown = filterCards(cards, view.filters);
     renderMeters(shown);
     renderControls(cards);
-    renderBoard(shown, cards, order, draftCols);
+    renderBoard(shown, order, draftCols, diskCols);
     renderDraftNote(cards, order, draftCols);
+    syncUrl();
+
+    if (focusKey) {
+      const sel = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(focusKey) : focusKey;
+      controlsBox.querySelector<HTMLElement>(`[data-key="${sel}"]`)?.focus();
+    }
   }
 
   // ---------------------------------------------------------------- meters
@@ -192,11 +245,21 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     famBox.append(el("span", "pb-lab", "Repo"));
     const chips = el("div", "pb-chips");
     const visible = new Set(visibleColumns(view.scope).map((c) => c.key));
-    for (const { family, count } of familyCounts(cards.filter((c) => visible.has(c.column)))) {
+    const counts = familyCounts(cards.filter((c) => visible.has(c.column)));
+    // A selected family with no chip in the current scope still gets one, at
+    // count 0. Without it, narrowing the scope deletes the very control that
+    // is emptying the board — the facet rule the wiki reader learned the hard
+    // way (`facetKeys`): a control may never remove its own active value.
+    for (const family of view.filters.families) {
+      if (!counts.some((c) => c.family === family)) counts.push({ family, count: 0 });
+    }
+    for (const { family, count } of counts) {
       const b = el("button", "pb-chip") as HTMLButtonElement;
       b.type = "button";
+      b.dataset.key = `repo:${family}`;
       b.append(document.createTextNode(family), el("span", "pb-c", String(count)));
       b.setAttribute("aria-pressed", String(view.filters.families.includes(family)));
+      if (count === 0) b.title = `no ${family} plan in this scope — click to clear the filter`;
       b.onclick = () => {
         const on = view.filters.families.includes(family);
         view.filters = {
@@ -218,6 +281,7 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     for (const p of [...BOARD_PRIORITIES, "unset"] as Array<PlanPriority | "unset">) {
       const b = el("button", "pb-chip", p) as HTMLButtonElement;
       b.type = "button";
+      b.dataset.key = `pri:${p}`;
       b.setAttribute("aria-pressed", String(view.filters.priority === p));
       b.onclick = () => {
         view.filters = { ...view.filters, priority: view.filters.priority === p ? null : p };
@@ -234,16 +298,31 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
       ["priority", "Priority"],
       ["cost", "Cost"],
     ];
+    // With no money there is nothing to sort by: every card's cost is hidden,
+    // so a live Cost button can only reshuffle the board into an order the
+    // reader cannot see the reason for. Disabled, carrying the reason.
+    const disabledSorts = money
+      ? undefined
+      : new Map<BoardSort, string>([
+          ["cost", payload.money.reason ?? "no cost on this board — the ledger is not answering"],
+        ]);
     controlsBox.append(
-      segment("Sort", sorts, view.sort, (k) => {
-        view.sort = k;
-        render();
-      }),
+      segment(
+        "Sort",
+        sorts,
+        view.sort,
+        (k) => {
+          view.sort = k;
+          render();
+        },
+        disabledSorts,
+      ),
     );
 
     const search = document.createElement("input");
     search.type = "search";
     search.className = "pb-search";
+    search.dataset.key = "search";
     search.placeholder = "Filter by title, slug or tag";
     search.value = view.filters.query;
     search.setAttribute("aria-label", "Filter plans");
@@ -251,10 +330,11 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     // the input under the caret is how a search box loses focus mid-word.
     search.oninput = () => {
       view.filters = { ...view.filters, query: search.value };
-      const { cards: all, order, draftCols } = merged();
+      const { cards: all, order, draftCols, diskCols } = merged();
       const shown = filterCards(all, view.filters);
       renderMeters(shown);
-      renderBoard(shown, all, order, draftCols);
+      renderBoard(shown, order, draftCols, diskCols);
+      syncUrl();
     };
     controlsBox.append(search);
   }
@@ -264,6 +344,7 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     options: Array<[T, string]>,
     active: T,
     onPick: (value: T) => void,
+    disabled?: Map<T, string>,
   ): HTMLElement {
     const box = el("div", "pb-ctl");
     box.append(el("span", "pb-lab", label));
@@ -271,7 +352,13 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     for (const [key, text] of options) {
       const b = el("button", null, text) as HTMLButtonElement;
       b.type = "button";
+      b.dataset.key = `${label}:${key}`;
       b.setAttribute("aria-pressed", String(active === key));
+      const why = disabled?.get(key);
+      if (why) {
+        b.disabled = true;
+        b.title = why;
+      }
       b.onclick = () => onPick(key);
       seg.append(b);
     }
@@ -282,9 +369,9 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
   // ---------------------------------------------------------------- board
   function renderBoard(
     shown: readonly EffectiveCard[],
-    all: readonly EffectiveCard[],
     order: BoardOrder,
     draftCols: Set<string>,
+    diskCols: Set<string>,
   ): void {
     boardBox.textContent = "";
     for (const col of visibleColumns(view.scope)) {
@@ -314,16 +401,14 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
 
       const stack = el("div", "pb-stack");
       if (inColumn.length === 0) stack.append(el("div", "pb-empty", "nothing here"));
-      // The order a nudge writes is the FULL column, not the filtered view: a
-      // rank stored while a repo filter was on would drop every plan the filter
-      // hid, and the next unfiltered render would read as a reshuffle nobody
-      // asked for.
-      const fullOrder = sortCards(
-        all.filter((c) => c.column === col.key),
-        view.sort,
-        order[col.key] ?? [],
-      ).map((c) => c.slug);
-      for (const card of inColumn) stack.append(renderCard(card, col, order, fullOrder));
+      // A nudge edits the column's RANKED LIST — the prefix someone actually
+      // placed — never the displayed column and never the filtered view. Every
+      // position in it is explicit, so a repo filter or a search cannot change
+      // what ▲▼ does, and ranking one card ranks exactly one card.
+      const ranked = order[col.key] ?? [];
+      for (const card of inColumn) {
+        stack.append(renderCard(card, col, order, ranked, diskCols.has(col.key)));
+      }
       box.append(stack);
       boardBox.append(box);
     }
@@ -333,7 +418,8 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     card: EffectiveCard,
     col: BoardColumnMeta,
     order: BoardOrder,
-    fullOrder: readonly string[],
+    ranked: readonly string[],
+    diskRanked: boolean,
   ): HTMLElement {
     const wrap = el("div", "pb-cardwrap");
     wrap.dataset.slug = card.slug;
@@ -357,7 +443,15 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     if (card.priorityIsDraft) pill.title = "Draft — not saved to mimir yet";
     r1.append(pill);
     const fam = el("span", `pb-fam${card.familyConfident ? "" : " pb-fam-soft"}`, card.family);
-    fam.title = card.familySource === "prs" ? "family from the PRs this plan landed" : "family guessed from the slug";
+    // Three-way, exactly as the drawer's basis line reads it — "guessed from
+    // the slug" over a family nothing attributed at all is a claim the board
+    // did not make.
+    fam.title =
+      card.familySource === "prs"
+        ? "family from the PRs this plan landed"
+        : card.familySource === "slug"
+          ? "family guessed from the slug"
+          : "not attributable — no PRs in the ledger and nothing in the slug";
     r1.append(fam);
     if (card.mixedRepos) r1.append(el("span", "pb-fam pb-fam-soft", "mixed"));
     if (card.followupsOpen && card.column !== "followups") {
@@ -368,13 +462,28 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     button.append(r1);
 
     button.append(el("div", "pb-title", card.title));
-    button.append(el("div", "pb-slug", card.slug));
+    // 91 of mimir's 185 plans carry no title, so the store falls back to the
+    // slug — printing it twice is noise on half the board.
+    if (card.title !== card.slug) button.append(el("div", "pb-slug", card.slug));
 
     const r2 = el("div", "pb-r2");
     if (money) {
       if (isTerminalColumn(card.column) && card.ledger) {
         const landed = card.ledger.landed ?? 0;
         r2.append(el("span", "pb-est", `${formatUsd(card.ledger.costUSD)} · ${landed} PR${landed === 1 ? "" : "s"}`));
+      } else if (isTerminalColumn(card.column)) {
+        // A terminal card with no ledger row has no SPEND, and the column
+        // header sums actuals only — so the card says "—" too, and the
+        // estimate rides along muted and labelled. Rendering the band here
+        // unlabelled read as money that was spent.
+        const dash = el("span", "pb-est pb-est-guess", "—");
+        dash.title = "no ledger row in claude-usage for this plan — nothing recorded to sum";
+        r2.append(dash);
+        if (card.estimate?.mid != null) {
+          r2.append(
+            el("span", "pb-prs pb-prs-guess", `est ${formatUsd(card.estimate.mid)} · no ledger row`),
+          );
+        }
       } else if (card.estimate?.mid != null) {
         const e = card.estimate;
         const est = el(
@@ -398,33 +507,45 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     r2.append(age);
     button.append(r2);
 
-    button.onclick = () => openDrawer(card);
+    button.onclick = () => openDrawer(card, button);
     wrap.append(button);
 
     const link = openLink(card.wikiUrl, `Open ${card.title} in the mimir reader`);
     link.className = "pb-open";
     wrap.append(link);
 
-    if (showRankUi(view.sort)) {
-      const nudges = el("div", "pb-nudge");
-      const i = fullOrder.indexOf(card.slug);
-      for (const [delta, glyph, word] of [
-        [-1, "▲", "up"],
-        [1, "▼", "down"],
-      ] as Array<[-1 | 1, string, string]>) {
-        const b = el("button", null, glyph) as HTMLButtonElement;
-        b.type = "button";
-        b.title = `Move ${word} in ${col.label}`;
-        b.setAttribute("aria-label", `Move ${card.title} ${word}`);
-        b.disabled = delta < 0 ? i <= 0 : i < 0 || i >= fullOrder.length - 1;
-        b.onclick = (ev) => {
-          ev.stopPropagation();
-          nudge(card.slug, col.key, fullOrder, delta);
-        };
-        nudges.append(b);
-      }
-      wrap.append(nudges);
+    // The nudges are ALWAYS rendered, disabled where they cannot act, and the
+    // tooltip says which of the three reasons applies. A control that vanishes
+    // under another sort reads as a board that lost the ability to rank.
+    const nudges = el("div", "pb-nudge");
+    const rankUi = showRankUi(view.sort);
+    const isRanked = ranked.includes(card.slug);
+    for (const [delta, glyph, word] of [
+      [-1, "▲", "up"],
+      [1, "▼", "down"],
+    ] as Array<[-1 | 1, string, string]>) {
+      const b = el("button", null, glyph) as HTMLButtonElement;
+      b.type = "button";
+      const blocked = !rankUi || diskRanked;
+      b.disabled = blocked || !canNudge(ranked, card.slug, delta);
+      // The action is stated, not the direction: ▲ on an unranked card RANKS
+      // it, and ▼ on the last ranked card un-ranks it.
+      const action = !isRanked
+        ? delta === -1
+          ? `Rank in ${col.label}`
+          : `Not ranked in ${col.label}`
+        : delta === 1 && ranked[ranked.length - 1] === card.slug
+          ? `Un-rank in ${col.label}`
+          : `Move ${word} in ${col.label}`;
+      b.title = !rankUi ? NUDGE_OFF_SORT : diskRanked ? NUDGE_ON_DISK : action;
+      b.setAttribute("aria-label", `${action}: ${card.title}`);
+      b.onclick = (ev) => {
+        ev.stopPropagation();
+        nudge(card.slug, col.key, ranked, delta);
+      };
+      nudges.append(b);
     }
+    wrap.append(nudges);
     return wrap;
   }
 
@@ -438,6 +559,11 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     const a = document.createElement("a");
     a.href = href;
     a.title = title;
+    // Prototype parity, and the reason for it: the board is a place someone
+    // works THROUGH — opening a plan must not replace the filtered board they
+    // spent the last minute building.
+    a.target = "_blank";
+    a.rel = "noopener";
     a.setAttribute("aria-label", title);
     a.innerHTML =
       '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" ' +
@@ -449,31 +575,52 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
   }
 
   /**
-   * Rank a card by hand. The order written is the FULL column in the order the
-   * board is showing it — never the filtered view, whose gaps would silently
-   * drop every plan a filter hid.
+   * Rank a card by hand — the ranked PREFIX is what is written, never the
+   * displayed column: ranking one card must leave the other 48 unranked, and
+   * a filter that hides half the column cannot change what the move means.
+   *
+   * An emptied list DELETES the column's entry rather than storing `[]`: an
+   * empty order is the same statement as no order ("nothing here is
+   * hand-ranked"), and keeping it would make the column read as drafted.
    */
-  function nudge(slug: string, column: string, fullOrder: readonly string[], delta: -1 | 1): void {
-    const next = nudgeOrder(fullOrder, slug, delta);
+  function nudge(
+    slug: string,
+    column: BoardColumnKey,
+    ranked: readonly string[],
+    delta: -1 | 1,
+  ): void {
+    const next = nudgeRanked(ranked, slug, delta);
     if (!next) return;
-    overlay = {
-      priority: { ...overlay.priority },
-      order: { ...overlay.order, [column]: next },
-    };
+    const order = { ...overlay.order };
+    if (next.length === 0) delete order[column];
+    else order[column] = next;
+    overlay = { priority: { ...overlay.priority }, order };
     saveOverlay(overlay);
     render();
   }
 
   // ---------------------------------------------------------------- drawer
-  function openDrawer(card: EffectiveCard): void {
-    closeDrawer();
+
+  /** The card button the drawer was opened from — focus goes back to it on
+   *  close, so Escape leaves the keyboard where it was, not at `<body>`. */
+  let drawerOpener: HTMLElement | null = null;
+
+  function openDrawer(card: EffectiveCard, opener?: HTMLElement | null): void {
+    const restoreTo = opener ?? drawerOpener;
+    closeDrawer({ silent: true });
+    drawerOpener = restoreTo ?? null;
     view.openSlug = card.slug;
 
     const scrim = el("div", "pb-scrim");
-    scrim.onclick = closeDrawer;
+    scrim.onclick = () => closeDrawer();
     const drawer = el("aside", "pb-drawer");
     drawer.setAttribute("role", "dialog");
+    drawer.setAttribute("aria-modal", "true");
     drawer.setAttribute("aria-label", card.title);
+    // Focusable so the panel itself can hold focus — a dialog whose focus is
+    // still on the card behind the scrim tabs into a board the reader cannot
+    // see and cannot click.
+    drawer.tabIndex = -1;
     const col = columnMeta.get(card.column);
     if (col) drawer.style.setProperty("--pb-tone", `var(${col.tone})`);
 
@@ -491,7 +638,7 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     big.append(document.createTextNode("Open plan"));
     const close = el("button", "pb-x", "Close") as HTMLButtonElement;
     close.type = "button";
-    close.onclick = closeDrawer;
+    close.onclick = () => closeDrawer();
     acts.append(big, close);
     head.append(titleBox, acts);
 
@@ -512,7 +659,23 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     }
 
     body.append(estimateSection(card));
-    if (card.ledger) body.append(ledgerSection(card));
+    if (card.ledger) {
+      body.append(ledgerSection(card));
+    } else if (money && isTerminalColumn(card.column)) {
+      // Terminal and unrecorded: say so under the same heading the recorded
+      // ones use, so the card, the drawer and the column total tell one story
+      // (the header sums actuals, and this plan contributes none).
+      const s = el("div", "pb-sec");
+      s.append(
+        el("h3", null, "What it actually cost"),
+        el(
+          "p",
+          "pb-basis",
+          "No ledger row — claude-usage has nothing recorded against this plan, so it adds nothing to the column's total.",
+        ),
+      );
+      body.append(s);
+    }
     body.append(prioritySection(card));
 
     const fileSec = el("div", "pb-sec");
@@ -520,6 +683,8 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     const fileLink = document.createElement("a");
     fileLink.className = "pb-filelink";
     fileLink.href = card.wikiUrl;
+    fileLink.target = "_blank";
+    fileLink.rel = "noopener";
     fileLink.textContent = card.relPath;
     fileSec.append(fileLink);
     fileSec.append(
@@ -532,14 +697,33 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     body.append(fileSec);
 
     drawer.append(head, body);
-    document.body.append(scrim, drawer);
+    // Mounted INSIDE `#pbRoot`, not on `<body>`: every `--pb-*` token is
+    // defined on `.pb`, so a drawer outside it renders with each of them
+    // undefined — which is how the selected priority button lost its fill in
+    // light theme and the status note lost its coloured spine.
+    root.append(scrim, drawer);
     document.addEventListener("keydown", escClose);
-    render();
+    // Selection is a one-class change on two buttons, NOT a re-render: a full
+    // render rebuilds every card, which throws away the focus the drawer just
+    // took and the caret in the search box.
+    markSelected(card.slug);
+    drawer.focus();
+  }
+
+  /** Paint the `pb-sel` ring without touching the rest of the board. */
+  function markSelected(slug: string | null): void {
+    boardBox.querySelectorAll<HTMLElement>(".pb-card").forEach((b) => {
+      b.classList.toggle("pb-sel", slug !== null && b.dataset.slug === slug);
+    });
   }
 
   function estimateSection(card: EffectiveCard): HTMLElement {
+    const terminal = isTerminalColumn(card.column);
     const sec = el("div", "pb-sec");
-    sec.append(el("h3", null, isTerminalColumn(card.column) ? "What it cost" : "What it should cost"));
+    // On a terminal card this section is the PREDICTION, not the spend — the
+    // actuals live under "What it actually cost" below it. Heading it "What it
+    // cost" put an estimate under the one word that means money that left.
+    sec.append(el("h3", null, terminal ? "What the model would have estimated" : "What it should cost"));
     if (!money || !card.estimate || card.estimate.mid === null) {
       sec.append(
         el("p", "pb-basis", payload.money.reason ?? "No shipped plan in the ledger prices this one yet."),
@@ -576,10 +760,39 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     return sec;
   }
 
+  /**
+   * A URL we are willing to put in an `href`. The ledger's `url` is a string
+   * from another service's JSON, and an anchor is the one sink where that
+   * matters — `javascript:` and `data:` both execute on click. Anything that
+   * is not http(s) falls through to the plain-span branch this function's
+   * caller already has for a PR with no URL at all.
+   */
+  function httpUrl(raw: string | null): string | null {
+    if (!raw) return null;
+    try {
+      const u = new URL(raw, location.origin);
+      return u.protocol === "http:" || u.protocol === "https:" ? u.href : null;
+    } catch {
+      return null;
+    }
+  }
+
   function ledgerSection(card: EffectiveCard): HTMLElement {
     const facts = card.ledger!;
     const sec = el("div", "pb-sec");
-    sec.append(el("h3", null, "What the ledger recorded"));
+    sec.append(el("h3", null, "What it actually cost"));
+    // A ledger row exists for every plan claude-usage has ever seen, including
+    // the ones it has recorded NOTHING about. Six "—" cells under "what it
+    // actually cost" read as data that failed to load; one sentence says the
+    // true thing.
+    const recorded =
+      (facts.landed ?? 0) > 0 || (facts.costUSD ?? 0) > 0 || (facts.sessions ?? 0) > 0;
+    if (!recorded) {
+      sec.append(
+        el("p", "pb-basis", "Nothing recorded yet — no session, no cost and no landed PR against this plan."),
+      );
+      return sec;
+    }
     const kv = el("div", "pb-kv");
     const cell = (k: string, v: string) => {
       const c = el("div");
@@ -600,9 +813,10 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
       for (const pr of facts.prs.slice(0, 40)) {
         const label = `#${pr.number ?? "?"}`;
         let node: HTMLElement;
-        if (pr.url) {
+        const href = httpUrl(pr.url);
+        if (href) {
           const a = document.createElement("a");
-          a.href = pr.url;
+          a.href = href;
           a.target = "_blank";
           a.rel = "noopener";
           a.textContent = label;
@@ -629,9 +843,11 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     for (const p of BOARD_PRIORITIES) {
       const b = el("button", null, p) as HTMLButtonElement;
       b.type = "button";
+      b.dataset.key = `pri-${p}`;
       b.style.setProperty("--pb-pri-color", `var(--pb-${p})`);
       b.setAttribute("aria-pressed", String(card.effectivePriority === p));
       b.disabled = onDisk;
+      if (onDisk) b.title = `priority: ${card.priority} is on disk — edit it in mimir, not here`;
       b.onclick = () => {
         const next = { ...overlay.priority };
         if (next[card.slug] === p) delete next[card.slug];
@@ -640,7 +856,14 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
         saveOverlay(overlay);
         render();
         const updated = merged().cards.find((c) => c.slug === card.slug);
-        if (updated) openDrawer(updated);
+        if (updated) {
+          openDrawer(updated);
+          // The drawer was rebuilt under the pointer; put focus back on the
+          // button that was just pressed rather than on the panel.
+          root
+            .querySelector<HTMLElement>(`.pb-drawer .pb-priset button[data-key="pri-${p}"]`)
+            ?.focus();
+        }
       };
       set.append(b);
     }
@@ -661,13 +884,30 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     if (ev.key === "Escape") closeDrawer();
   }
 
-  function closeDrawer(): void {
-    document.querySelectorAll(".pb-scrim,.pb-drawer").forEach((n) => n.remove());
+  /** `silent` is the re-open path (a priority click rebuilds the drawer):
+   *  neither the focus restore nor the selection clear should run there. */
+  function closeDrawer(opts: { silent?: boolean } = {}): void {
+    root.querySelectorAll(".pb-scrim,.pb-drawer").forEach((n) => n.remove());
     document.removeEventListener("keydown", escClose);
+    if (opts.silent) return;
     if (view.openSlug) {
       view.openSlug = null;
-      render();
+      markSelected(null);
     }
+    const back = drawerOpener;
+    drawerOpener = null;
+    // The card may have been re-rendered since; find it again by slug rather
+    // than focusing a node that is no longer in the document.
+    if (back?.isConnected) back.focus();
+    else if (back?.dataset.slug) {
+      boardBox
+        .querySelector<HTMLElement>(`.pb-card[data-slug="${cssEscape(back.dataset.slug)}"]`)
+        ?.focus();
+    }
+  }
+
+  function cssEscape(value: string): string {
+    return typeof CSS !== "undefined" && CSS.escape ? CSS.escape(value) : value;
   }
 
   // ---------------------------------------------------------------- draft note
@@ -677,7 +917,11 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     draftCols: Set<string>,
   ): void {
     const drafted = cards.filter((c) => c.priorityIsDraft).length;
-    const ranked = Object.keys(order).filter((key) => draftCols.has(key));
+    // Column LABELS, not the payload's keys: "hand order on in-flight" is a
+    // raw enum value leaking into a sentence someone is meant to read.
+    const ranked = Object.keys(order)
+      .filter((key) => draftCols.has(key))
+      .map((key) => columnMeta.get(key)?.label ?? key);
     draftBox.textContent = "";
     if (!drafted && ranked.length === 0) {
       draftBox.classList.remove("pb-visible");
