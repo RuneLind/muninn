@@ -485,6 +485,450 @@
           "reviewed": true
         }
       ]
+    },
+    {
+      "slug": "muninn-feed-quality-improvements",
+      "title": "Muninn feed-quality improvements — Anthropic + X fusion into one reading shelf",
+      "planStatus": "shipped",
+      "relPath": "plans/muninn-feed-quality-improvements.md",
+      "mtimeIso": "2026-07-31T13:09:17.557Z",
+      "slate": [],
+      "total": null,
+      "costUSD": 120.22411149999999,
+      "totalTokens": 73144842,
+      "merges": 3,
+      "landed": 3,
+      "findings": 3,
+      "prs": [
+        {
+          "repo": "/Users/rune/source/private/muninn",
+          "prNumber": 192,
+          "subject": null,
+          "mergedAt": "2026-07-04T10:06:56.186Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/muninn/pull/192",
+          "reviewed": false
+        },
+        {
+          "repo": "/Users/rune/source/private/muninn",
+          "prNumber": 193,
+          "subject": null,
+          "mergedAt": "2026-07-04T10:39:44.050Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/muninn/pull/193",
+          "reviewed": true
+        },
+        {
+          "repo": "/Users/rune/source/private/huginn/huginn-jarvis",
+          "prNumber": 6,
+          "subject": null,
+          "mergedAt": "2026-07-04T11:57:55.761Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/huginn-jarvis/pull/6",
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "slug": "muninn-native-mdx-visual-parity",
+      "title": "Muninn — native .mdx visual parity with compiled explainers",
+      "planStatus": "shipped",
+      "relPath": "plans/muninn-native-mdx-visual-parity.md",
+      "mtimeIso": "2026-07-31T13:09:17.561Z",
+      "slate": [],
+      "total": null,
+      "costUSD": 59.37280425000001,
+      "totalTokens": 46805867,
+      "merges": 3,
+      "landed": 3,
+      "findings": 14,
+      "prs": [
+        {
+          "repo": "/private/tmp",
+          "prNumber": 298,
+          "subject": null,
+          "mergedAt": "2026-07-18T10:31:26.058Z",
+          "state": "merged",
+          "url": null,
+          "reviewed": true
+        },
+        {
+          "repo": "/private/tmp",
+          "prNumber": 300,
+          "subject": null,
+          "mergedAt": "2026-07-18T10:56:32.083Z",
+          "state": "merged",
+          "url": null,
+          "reviewed": true
+        },
+        {
+          "repo": "/private/tmp",
+          "prNumber": 301,
+          "subject": null,
+          "mergedAt": "2026-07-18T11:16:13.209Z",
+          "state": "merged",
+          "url": null,
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "slug": "muninn-spec-driven-dev-loop",
+      "title": "Plan — Spec-driven dev loop (extend Muninn's research flow into a closed ATDD loop)",
+      "planStatus": "shipped",
+      "relPath": "plans/muninn-spec-driven-dev-loop.md",
+      "mtimeIso": "2026-07-31T13:09:17.563Z",
+      "slate": [],
+      "total": null,
+      "costUSD": 285.71972235000004,
+      "totalTokens": 337358122,
+      "merges": 8,
+      "landed": 8,
+      "findings": 452,
+      "prs": [
+        {
+          "repo": "/Users/rune/source/private/muninn",
+          "prNumber": 139,
+          "subject": null,
+          "mergedAt": "2026-05-24T07:08:48.799Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/muninn/pull/139",
+          "reviewed": false
+        },
+        {
+          "repo": "/Users/rune/source/private/muninn",
+          "prNumber": 138,
+          "subject": null,
+          "mergedAt": "2026-05-24T07:12:53.228Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/muninn/pull/138",
+          "reviewed": false
+        },
+        {
+          "repo": "/Users/rune/source/private/muninn",
+          "prNumber": 140,
+          "subject": null,
+          "mergedAt": "2026-05-24T07:50:19.642Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/muninn/pull/140",
+          "reviewed": true
+        },
+        {
+          "repo": "/Users/rune/source/private/muninn",
+          "prNumber": 141,
+          "subject": null,
+          "mergedAt": "2026-05-24T08:25:53.241Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/muninn/pull/141",
+          "reviewed": true
+        },
+        {
+          "repo": "/Users/rune/source/private/muninn",
+          "prNumber": 144,
+          "subject": null,
+          "mergedAt": "2026-05-24T10:56:05.633Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/muninn/pull/144",
+          "reviewed": true
+        },
+        {
+          "repo": "/Users/rune/source/private/muninn",
+          "prNumber": 145,
+          "subject": null,
+          "mergedAt": "2026-05-24T12:17:50.211Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/muninn/pull/145",
+          "reviewed": true
+        },
+        {
+          "repo": "/Users/rune/source/private/muninn",
+          "prNumber": 146,
+          "subject": null,
+          "mergedAt": "2026-05-24T17:46:45.978Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/muninn/pull/146",
+          "reviewed": true
+        },
+        {
+          "repo": "RuneLind/muninn",
+          "prNumber": 148,
+          "subject": null,
+          "mergedAt": "2026-05-24T20:21:52.440Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/muninn/pull/148",
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "slug": "muninn-wiki-commit-hygiene",
+      "title": "Wiki commit + index hygiene — every organic write recoverable",
+      "planStatus": "shipped",
+      "relPath": "plans/muninn-wiki-commit-hygiene.mdx",
+      "mtimeIso": "2026-07-31T13:09:17.565Z",
+      "slate": [
+        1,
+        2,
+        3
+      ],
+      "total": 3,
+      "costUSD": 182.4008205,
+      "totalTokens": 184021373,
+      "merges": 7,
+      "landed": 7,
+      "findings": 25,
+      "prs": [
+        {
+          "repo": "/Users/rune/source/private/muninn",
+          "prNumber": 354,
+          "subject": null,
+          "mergedAt": "2026-07-23T09:13:33.035Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/muninn/pull/354",
+          "reviewed": false
+        },
+        {
+          "repo": "/Users/rune/source/private/muninn",
+          "prNumber": 355,
+          "subject": null,
+          "mergedAt": "2026-07-23T09:53:34.224Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/muninn/pull/355",
+          "reviewed": true
+        },
+        {
+          "repo": "/Users/rune/source/private/muninn",
+          "prNumber": 356,
+          "subject": null,
+          "mergedAt": "2026-07-23T10:21:08.962Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/muninn/pull/356",
+          "reviewed": true
+        },
+        {
+          "repo": "/Users/rune/source/private/huginn/huginn-jarvis",
+          "prNumber": 9,
+          "subject": null,
+          "mergedAt": "2026-07-23T10:30:43.888Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/huginn-jarvis/pull/9",
+          "reviewed": false
+        },
+        {
+          "repo": "/Users/rune/source/private/muninn",
+          "prNumber": 357,
+          "subject": null,
+          "mergedAt": "2026-07-23T12:47:56.970Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/muninn/pull/357",
+          "reviewed": true
+        },
+        {
+          "repo": "/Users/rune/source/private/muninn",
+          "prNumber": 358,
+          "subject": null,
+          "mergedAt": "2026-07-23T13:23:38.698Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/muninn/pull/358",
+          "reviewed": true
+        },
+        {
+          "repo": "/Users/rune/source/private/muninn",
+          "prNumber": 359,
+          "subject": null,
+          "mergedAt": "2026-07-23T14:03:19.652Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/muninn/pull/359",
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "slug": "muninn-youtube-recently-added-followups",
+      "title": "YouTube \"Recently Added\" follow-ups",
+      "planStatus": "shipped",
+      "relPath": "plans/muninn-youtube-recently-added-followups.md",
+      "mtimeIso": "2026-07-31T13:09:17.567Z",
+      "slate": [],
+      "total": null,
+      "costUSD": 47.63904835,
+      "totalTokens": 54956806,
+      "merges": 3,
+      "landed": 3,
+      "findings": 37,
+      "prs": [
+        {
+          "repo": "RuneLind/huginn",
+          "prNumber": 48,
+          "subject": null,
+          "mergedAt": "2026-05-25T09:25:18.153Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/huginn/pull/48",
+          "reviewed": true
+        },
+        {
+          "repo": "RuneLind/muninn",
+          "prNumber": 152,
+          "subject": null,
+          "mergedAt": "2026-05-25T09:25:41.847Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/muninn/pull/152",
+          "reviewed": false
+        },
+        {
+          "repo": "RuneLind/muninn",
+          "prNumber": 153,
+          "subject": null,
+          "mergedAt": "2026-05-26T07:51:03.862Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/muninn/pull/153",
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "slug": "claude-usage-agent-sheet-v3",
+      "title": "claude-usage — subagent drill-down v3: the agent sheet (Story default, Log toggle)",
+      "planStatus": "shipped",
+      "relPath": "plans/claude-usage-agent-sheet-v3.mdx",
+      "mtimeIso": "2026-08-16T14:01:02.337Z",
+      "slate": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "total": 5,
+      "costUSD": 337.27643250000006,
+      "totalTokens": 436757660,
+      "merges": 5,
+      "landed": 5,
+      "findings": 145,
+      "prs": [
+        {
+          "repo": "/Users/rune/source/private/claude-usage",
+          "prNumber": 77,
+          "subject": "Serve one subagent's activity feed behind ?steps=1 (#77)",
+          "mergedAt": "2026-08-04T07:42:19.945Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/claude-usage/pull/77",
+          "reviewed": true
+        },
+        {
+          "repo": "/Users/rune/source/private/claude-usage",
+          "prNumber": 78,
+          "subject": "Open the subagent drill-down in a full-screen sheet (#78)",
+          "mergedAt": "2026-08-04T08:28:05.224Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/claude-usage/pull/78",
+          "reviewed": true
+        },
+        {
+          "repo": "/Users/rune/source/private/claude-usage",
+          "prNumber": 79,
+          "subject": "Draw a subagent's steps as a ribbon under the sheet header (#79)",
+          "mergedAt": "2026-08-04T09:46:23.683Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/claude-usage/pull/79",
+          "reviewed": true
+        },
+        {
+          "repo": "/Users/rune/source/private/claude-usage",
+          "prNumber": 80,
+          "subject": "Fold a subagent's steps into a chaptered Story with two rails (#80)",
+          "mergedAt": "2026-08-04T11:17:40.740Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/claude-usage/pull/80",
+          "reviewed": true
+        },
+        {
+          "repo": "/Users/rune/source/private/claude-usage",
+          "prNumber": 84,
+          "subject": "Lay steps out as a filterable Log and delete the prototype (#84)",
+          "mergedAt": "2026-08-04T12:44:49.454Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/claude-usage/pull/84",
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "slug": "claude-usage-architecture-hardening",
+      "title": "claude-usage — architecture hardening campaign (6 PRs)",
+      "planStatus": "shipped",
+      "relPath": "plans/claude-usage-architecture-hardening.mdx",
+      "mtimeIso": "2026-08-03T17:51:25.690Z",
+      "slate": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ],
+      "total": 6,
+      "costUSD": 276.31911175000005,
+      "totalTokens": 316630464,
+      "merges": 6,
+      "landed": 6,
+      "findings": 192,
+      "prs": [
+        {
+          "repo": "/Users/rune/source/private/claude-usage",
+          "prNumber": 69,
+          "subject": "Add CI, shellcheck and a type-checked, smoke-tested restart (#69)",
+          "mergedAt": "2026-08-03T08:57:55.452Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/claude-usage/pull/69",
+          "reviewed": true
+        },
+        {
+          "repo": "/Users/rune/source/private/claude-usage",
+          "prNumber": 70,
+          "subject": "Wire every ingest sink through one scanner factory (#70)",
+          "mergedAt": "2026-08-03T09:45:55.722Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/claude-usage/pull/70",
+          "reviewed": true
+        },
+        {
+          "repo": "/Users/rune/source/private/claude-usage",
+          "prNumber": 71,
+          "subject": "Give the web client a mount() seam, guarded prefs and typed DTOs (#71)",
+          "mergedAt": "2026-08-03T10:03:02.856Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/claude-usage/pull/71",
+          "reviewed": true
+        },
+        {
+          "repo": "/Users/rune/source/private/claude-usage",
+          "prNumber": 72,
+          "subject": "Add backup, pipeline self-metrics and a /tmp-free launchd log home (#72)",
+          "mergedAt": "2026-08-03T10:47:54.937Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/claude-usage/pull/72",
+          "reviewed": true
+        },
+        {
+          "repo": "/Users/rune/source/private/claude-usage",
+          "prNumber": 73,
+          "subject": "Give the store a path base, a version stamp and one project rule (#73)",
+          "mergedAt": "2026-08-03T13:04:56.262Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/claude-usage/pull/73",
+          "reviewed": true
+        },
+        {
+          "repo": "/Users/rune/source/private/claude-usage",
+          "prNumber": 74,
+          "subject": "Split server.ts into a route table over http/limits/transcripts (#74)",
+          "mergedAt": "2026-08-03T13:44:07.310Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/claude-usage/pull/74",
+          "reviewed": true
+        }
+      ]
     }
   ]
 }

@@ -2,32 +2,32 @@
  * `/plans` — the kanban board over mimir's `plans/` directory, priced from the
  * claude-usage ledger.
  *
- * This barrel is the surface PR 2's page and PR 4's write path consume. Three
- * modules, one job each, and the split is deliberate: {@link estimate} is pure so
- * the pricing rule is testable against a fixture, {@link source} touches only the
- * filesystem, {@link ledger} touches only the network.
+ * Four modules, one job each, and the split is deliberate: {@link estimate} and
+ * {@link queue} are pure so the pricing rule and the file grammar are testable
+ * against a fixture, {@link source} touches only the filesystem, {@link ledger}
+ * touches only the network.
+ *
+ * **This barrel is deliberately IMPORT-LIGHT**: types, the pure functions, and
+ * the network proxy. `source.ts`'s runtime is NOT re-exported, because it
+ * resolves mimir through the wiki registry and so drags `src/bots/config.ts` and
+ * `src/db/` in at import time. A caller that needs the filesystem side imports
+ * `./source.ts` directly and pays for it knowingly; a caller that only wants to
+ * price something does not pay at all.
  */
 
-export {
-  loadPlanSource,
-  planRecordFromContent,
-  resolvePlansRoot,
-  PLAN_STATUSES,
-  PLAN_PRIORITIES,
-  PLANS_WIKI_NAME,
-  PLANS_DIR,
-  QUEUE_REL_PATH,
-  type PlanRecord,
-  type PlanStatus,
-  type PlanPriority,
-  type PlanQueue,
-  type PlanSourceResult,
-  type PlanSourceOptions,
+export type {
+  PlanRecord,
+  PlanStatus,
+  PlanPriority,
+  PlanQueue,
+  PlanSourceResult,
+  PlanSourceOptions,
 } from "./source.ts";
 
 export {
   parseQueueYaml,
   serializeQueue,
+  isValidSlug,
   QUEUE_COLUMNS,
   type QueueColumn,
   type QueueOrder,
@@ -37,7 +37,7 @@ export {
 export {
   fetchPlanLedger,
   defaultPlanLedgerDeps,
-  CLAUDE_USAGE_DEFAULT_URL,
+  ledgerWarnKey,
   type LedgerPlan,
   type LedgerPr,
   type PlanLedgerDeps,
@@ -50,6 +50,7 @@ export {
   calibration,
   poolFor,
   planFamily,
+  familyFromSlug,
   normalizeRepo,
   repoFamily,
   declaredPrCount,
@@ -58,12 +59,15 @@ export {
   CLAUDE_FAMILY,
   GLOBAL_POOL,
   MIN_FAMILY_SAMPLES,
+  UNKNOWN_REPO,
   type Pricing,
   type PoolStats,
   type PlanEstimate,
   type PlanFamily,
   type ShippedSample,
   type Calibration,
+  type CalibrationScore,
+  type PlanFamilyOptions,
 } from "./estimate.ts";
 
 export { joinPlans, type JoinedPlan, type JoinResult } from "./join.ts";

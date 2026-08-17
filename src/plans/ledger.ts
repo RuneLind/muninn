@@ -3,21 +3,28 @@
  * claude-usage's `GET /api/plans`.
  *
  * Copied in shape from `src/dashboard/claude-usage-overview.ts`, and for the same
- * three reasons:
+ * first three reasons:
  *
  *   1. **The BROWSER never reaches port 8787.** The dashboard is viewed over the
  *      tailnet, where a client-side loopback fetch hits the viewer's own machine
  *      and a cross-host one is mixed content under `tailscale serve` HTTPS. So
  *      the fetch is server-side and the result NAMES the base URL it tried,
  *      because a degraded board has no honest URL to link to.
- *   2. **Bounded in time AND in bytes**, reusing the overview's own constants and
- *      bounded-read loop rather than a second copy of them. Measured 2026-08-17
- *      against the live service: **641 KB in ~0.45 s cold** for the whole corpus,
- *      well inside the 8 MB / 10 s envelope the overview established.
+ *   2. **Bounded in time AND in bytes**, through the shared
+ *      `src/utils/bounded-fetch.ts` rather than a second copy of either bound.
+ *      Measured 2026-08-17 against the live service on this host: **643 KB in
+ *      ~10 ms warm** for the whole corpus (185 plans), well inside the 8 MB /
+ *      10 s envelope.
  *   3. **Never throws.** An unreachable / non-200 / timed-out / oversized /
  *      malformed service is a board state (`reachable: false` + `errors[]`), never
  *      a 5xx — and a persistently-down service warns once per distinct error and
  *      then drops to info, because the board is polled by every open tab.
+ *   4. **A 200 is not health.** claude-usage answers 200 with an empty `plans`
+ *      array in two states worth telling apart from "no plans exist": its rollup
+ *      THREW on the last tick (`refreshError`, rows are the previous build's or
+ *      none), and the host has no plans directory at all (`configured: false`).
+ *      Both land in `errors[]`; neither flips `reachable`, because the service
+ *      answered.
  *
  * There is deliberately **no window parameter**: the bare `/api/plans` returns the
  * full corpus, and a board that priced only the last N days would silently change
@@ -27,14 +34,11 @@
 import { getLog } from "../logging.ts";
 import {
   readBounded,
-  CLAUDE_USAGE_DEFAULT_URL,
-  CLAUDE_USAGE_TIMEOUT_MS,
-  CLAUDE_USAGE_MAX_BYTES,
-} from "../dashboard/claude-usage-overview.ts";
+  BOUNDED_FETCH_TIMEOUT_MS,
+  BOUNDED_FETCH_MAX_BYTES,
+} from "../utils/bounded-fetch.ts";
 
 const log = getLog("plans", "ledger");
-
-export { CLAUDE_USAGE_DEFAULT_URL };
 
 // ---- Raw claude-usage contract (only the fields the board consumes) --------
 //
@@ -79,6 +83,16 @@ export interface LedgerPlan {
 
 export interface PlanLedgerPayload {
   generatedAt?: string | null;
+  /** When upstream's warm rollup last finished REBUILDING (null when it never
+   *  has). Not the same instant as `generatedAt`, which is when this response
+   *  was assembled — the gap between them is the data's age. */
+  refreshedAt?: string | null;
+  /** Upstream's last rebuild threw, and this is the error. Its rows are then
+   *  the previous build's, or none. */
+  refreshError?: string | null;
+  /** Upstream has a `planDir` configured. A CONFIG fact about claude-usage —
+   *  emphatically not muninn's `urlConfigured`, which is about this end. */
+  configured?: boolean | null;
   plans?: unknown;
 }
 
@@ -87,12 +101,22 @@ export interface PlanLedgerResult {
   fetchedAt: number;
   /** The base URL actually tried, so a degraded board can name its endpoint. */
   baseUrl: string;
-  /** True when `CLAUDE_USAGE_URL` was set explicitly (vs falling back to the
-   *  default). Drives visibility the same way the Pipeline ledger card's does. */
-  configured: boolean;
+  /** True when `CLAUDE_USAGE_URL` was set explicitly on THIS host (vs falling
+   *  back to the default). Drives visibility the same way the Pipeline ledger
+   *  card's does. Named apart from {@link ledgerConfigured} on purpose: the two
+   *  are different questions and upstream owns a field of the same name. */
+  urlConfigured: boolean;
+  /** claude-usage's own `configured` — it has a plans directory. Null when the
+   *  payload did not say (an older service, or a body we rejected). */
+  ledgerConfigured: boolean | null;
   reachable: boolean;
-  /** claude-usage's own build instant, verbatim. */
+  /** claude-usage's own build instant, verbatim. Null whenever the payload was
+   *  rejected — a build instant read out of a body we refused would date the
+   *  board off something it did not accept. */
   generatedAt: string | null;
+  /** claude-usage's last successful rollup rebuild, verbatim. The age of the
+   *  rows, which `generatedAt` is not. */
+  refreshedAt: string | null;
   plans: LedgerPlan[];
   errors?: string[];
 }
@@ -101,7 +125,8 @@ export interface PlanLedgerResult {
 export interface PlanLedgerDeps {
   /** Must reject on timeout / non-200 / over-cap / malformed JSON. */
   fetchPlans: () => Promise<PlanLedgerPayload>;
-  configured: boolean;
+  /** `CLAUDE_USAGE_URL` is set on this host — see `PlanLedgerResult`. */
+  urlConfigured: boolean;
   baseUrl: string;
 }
 
@@ -111,13 +136,13 @@ export interface PlanLedgerDeps {
  */
 export function defaultPlanLedgerDeps(
   baseUrl: string,
-  configured: boolean,
-  timeoutMs: number = CLAUDE_USAGE_TIMEOUT_MS,
-  maxBytes: number = CLAUDE_USAGE_MAX_BYTES,
+  urlConfigured: boolean,
+  timeoutMs: number = BOUNDED_FETCH_TIMEOUT_MS,
+  maxBytes: number = BOUNDED_FETCH_MAX_BYTES,
 ): PlanLedgerDeps {
   const root = baseUrl.replace(/\/+$/, "");
   return {
-    configured,
+    urlConfigured,
     baseUrl: root,
     fetchPlans: async () => {
       const url = `${root}/api/plans`;
@@ -158,10 +183,22 @@ function isLedgerPlan(v: unknown): v is LedgerPlan {
   );
 }
 
-/** Errors already warned about, keyed by message — same reason as the overview's:
- *  a configured-but-down service is polled by every open tab, so the first
+/** Errors already warned about — same reason as the overview's: a
+ *  configured-but-down service is polled by every open tab, so the first
  *  sighting warns and repeats drop to info. */
 const warnedLedgerErrors = new Set<string>();
+
+/**
+ * The dedup key for one error message.
+ *
+ * Keying on the raw message defeats warn-once for any message carrying a
+ * per-call NUMBER: "3 row(s) carried no slug" and "4 row(s) carried no slug" are
+ * the same condition, and a corpus in flux would warn on every poll. The count
+ * still reaches the log — as the message, in the detail.
+ */
+export function ledgerWarnKey(message: string): string {
+  return message.replace(/\b\d+ row\(s\)/, "N row(s)");
+}
 
 /**
  * Fetch and shape the ledger. Pure over its injected `fetchPlans`; never throws.
@@ -175,36 +212,64 @@ export async function fetchPlanLedger(
   try {
     const res = await deps.fetchPlans();
     // A JSON body that is not an object is a wrong service on the port, not an
-    // empty ledger.
+    // empty ledger — and WHICH port is the operator's first question, so the
+    // base URL rides along here exactly as it does on the fetch failures.
     if (res && typeof res === "object" && !Array.isArray(res)) payload = res;
-    else errors.push("claude-usage plans: response was not a JSON object");
+    else errors.push(`claude-usage plans: response was not a JSON object (${deps.baseUrl})`);
   } catch (err) {
     errors.push(`claude-usage plans: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   let plans: LedgerPlan[] = [];
   let generatedAt: string | null = null;
+  let refreshedAt: string | null = null;
+  let ledgerConfigured: boolean | null = null;
   if (payload) {
     generatedAt = typeof payload.generatedAt === "string" ? payload.generatedAt : null;
+    refreshedAt = typeof payload.refreshedAt === "string" ? payload.refreshedAt : null;
+    ledgerConfigured = typeof payload.configured === "boolean" ? payload.configured : null;
     if (Array.isArray(payload.plans)) {
       plans = payload.plans.filter(isLedgerPlan);
       const dropped = payload.plans.length - plans.length;
       if (dropped > 0) errors.push(`claude-usage plans: ${dropped} row(s) carried no slug — dropped`);
     } else {
-      errors.push("claude-usage plans: payload carried no `plans` array");
+      errors.push(`claude-usage plans: payload carried no \`plans\` array (${deps.baseUrl})`);
       // A payload we cannot read the plans out of is not a reachable ledger —
-      // an empty board with no error would read as "no plans exist".
+      // an empty board with no error would read as "no plans exist". Its dates
+      // go with it: they described a body we just refused.
       payload = null;
+      generatedAt = null;
+      refreshedAt = null;
+      ledgerConfigured = null;
+    }
+  }
+
+  // Upstream's own two ways of answering 200 with nothing useful. Both are
+  // sentences the board must be able to say; neither is an unreachable service.
+  if (payload) {
+    const refreshError =
+      typeof payload.refreshError === "string" && payload.refreshError.trim()
+        ? payload.refreshError.trim()
+        : null;
+    if (refreshError) {
+      errors.push(
+        `claude-usage plans: the ledger's last rebuild failed: ${refreshError}` +
+          (refreshedAt ? ` (rows are from ${refreshedAt})` : " (no rows were ever built)"),
+      );
+    }
+    if (ledgerConfigured === false) {
+      errors.push(`claude-usage plans: claude-usage has no plans directory (${deps.baseUrl})`);
     }
   }
 
   if (errors.length > 0) {
     const first = errors[0]!;
-    if (warnedLedgerErrors.has(first)) {
+    const key = ledgerWarnKey(first);
+    if (warnedLedgerErrors.has(key)) {
       log.info("plan ledger still degraded: {error}", { error: first });
     } else {
       if (warnedLedgerErrors.size > 100) warnedLedgerErrors.clear();
-      warnedLedgerErrors.add(first);
+      warnedLedgerErrors.add(key);
       log.warn("plan ledger degraded: {error}", { error: first });
     }
   }
@@ -212,9 +277,11 @@ export async function fetchPlanLedger(
   return {
     fetchedAt: now,
     baseUrl: deps.baseUrl,
-    configured: deps.configured,
+    urlConfigured: deps.urlConfigured,
+    ledgerConfigured,
     reachable: payload != null,
     generatedAt,
+    refreshedAt,
     plans,
     ...(errors.length > 0 ? { errors } : {}),
   };

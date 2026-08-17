@@ -31,6 +31,11 @@
 
 import { getLog } from "../logging.ts";
 import { formatRelative, parseTs } from "./indexing-overview.ts";
+import {
+  readBounded,
+  BOUNDED_FETCH_TIMEOUT_MS,
+  BOUNDED_FETCH_MAX_BYTES,
+} from "../utils/bounded-fetch.ts";
 
 const log = getLog("dashboard", "claude-usage");
 
@@ -46,14 +51,10 @@ export const CLAUDE_USAGE_DEFAULT_DAYS = 14;
  *  bad query is answered here rather than silently re-interpreted upstream. */
 const CLAUDE_USAGE_MIN_DAYS = 1;
 const CLAUDE_USAGE_MAX_DAYS = 90;
-/** Fetch budget, sized on the 90-day clamp FLOOR rather than the 14-day common
- *  case — the widest legal query must not become a false "unreachable". Measured
- *  2026-08-13 against the live service: 640 KB in ~0.2 s for `?days=90`. */
-export const CLAUDE_USAGE_TIMEOUT_MS = 10_000;
-/** Body cap. Two orders of magnitude above the measured 640 KB worst case, and
- *  far below the 145 MB the sqlite behind this endpoint would be — the point is
- *  that a wrong service on the port cannot stream the dashboard out of memory. */
-export const CLAUDE_USAGE_MAX_BYTES = 8 * 1024 * 1024;
+// The fetch budget and the byte cap are NOT defined here: they live in
+// `src/utils/bounded-fetch.ts` together with the bounded read, because the
+// SECOND claude-usage proxy (`src/plans/ledger.ts`) reads under the same two
+// bounds and two copies of a byte cap drift.
 
 // ---- Raw claude-usage contract (only the fields the card reads) ------------
 
@@ -154,46 +155,6 @@ export interface ClaudeUsageDeps {
 }
 
 /**
- * Read a response body without buffering more than `maxBytes`. The declared
- * `content-length` is the cheap check; the read loop is the guarantee, because a
- * chunked response declares no length at all — and the service behind this
- * endpoint is backed by a 145 MB sqlite file.
- *
- * Exported because `src/plans/ledger.ts` proxies a SECOND claude-usage endpoint
- * (`/api/plans`) under the same two bounds. Two copies of a byte cap drift; one
- * does not.
- */
-export async function readBounded(res: Response, maxBytes: number, url: string): Promise<string> {
-  const declared = Number(res.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > maxBytes) {
-    throw new Error(
-      `claude-usage body is ${declared} bytes, over the ${maxBytes}-byte cap (${url})`,
-    );
-  }
-  const body = res.body;
-  if (!body) return await res.text(); // no stream to bound (empty body)
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let text = "";
-  let total = 0;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > maxBytes) {
-        throw new Error(`claude-usage body exceeded the ${maxBytes}-byte cap (${url})`);
-      }
-      text += decoder.decode(value, { stream: true });
-    }
-  } finally {
-    // Releases the socket on the over-cap path; a no-op once the stream is done.
-    await reader.cancel().catch(() => {});
-  }
-  return text + decoder.decode();
-}
-
-/**
  * Production deps hitting the live claude-usage. `timeoutMs` and `maxBytes` are
  * parameters so both bounds are testable against a real socket rather than only
  * against a fabricated rejection.
@@ -201,8 +162,8 @@ export async function readBounded(res: Response, maxBytes: number, url: string):
 export function defaultClaudeUsageDeps(
   baseUrl: string,
   configured: boolean,
-  timeoutMs: number = CLAUDE_USAGE_TIMEOUT_MS,
-  maxBytes: number = CLAUDE_USAGE_MAX_BYTES,
+  timeoutMs: number = BOUNDED_FETCH_TIMEOUT_MS,
+  maxBytes: number = BOUNDED_FETCH_MAX_BYTES,
 ): ClaudeUsageDeps {
   const root = baseUrl.replace(/\/+$/, "");
   return {
