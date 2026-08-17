@@ -27,6 +27,7 @@ import { registerIndexingRoutes } from "./routes/indexing-routes.ts";
 import { registerAgentsRoutes } from "./routes/agents-routes.ts";
 import { registerSyncRoutes } from "./routes/sync-routes.ts";
 import { registerClaudeUsageRoutes } from "./routes/claude-usage-routes.ts";
+import { registerPlansRoutes } from "./routes/plans-routes.ts";
 
 export function createDashboardRoutes(config: Config): Hono {
   const app = new Hono();
@@ -81,6 +82,7 @@ export function createDashboardRoutes(config: Config): Hono {
   registerAgentsRoutes(app);
   registerSyncRoutes(app, config);
   registerClaudeUsageRoutes(app, config);
+  registerPlansRoutes(app, config);
 
   return app;
 }
