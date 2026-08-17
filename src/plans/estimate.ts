@@ -169,11 +169,14 @@ export function familyFromSlug(slug: string | null | undefined): string | null {
 /**
  * Which family a plan belongs to.
  *
- * Decided by a STRICT MAJORITY of its PRs — all of them, including the ones
- * whose repo string normalizes to nothing. Short of a majority the PRs have not
- * settled it (a 1-muninn/5-unreadable plan is not a muninn plan on that
- * evidence), and the SLUG is consulted instead; only if the slug names no repo
- * either does the plurality stand, flagged `confident: false`.
+ * Decided by a STRICT MAJORITY of its PRs — counted over all of them, including
+ * the ones whose repo string normalizes to nothing. Only a KNOWN family can ever
+ * be the answer, so an unrecognized repo string never wins the card; it only
+ * enlarges the divisor and thereby lowers `confident`. Short of a majority the
+ * PRs have not settled it (a 1-muninn/5-unreadable plan is not a muninn plan on
+ * that evidence), and the SLUG is consulted instead; only if the slug names no
+ * repo either does the PLURALITY AMONG KNOWN FAMILIES stand, flagged
+ * `confident: false`.
  *
  * Ties are broken deterministically — slug-named family, then the thicker pool,
  * then alphabetically — because the PR array's order is the ledger's, not a fact

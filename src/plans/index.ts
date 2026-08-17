@@ -17,12 +17,22 @@
 
 export type {
   PlanRecord,
-  PlanStatus,
-  PlanPriority,
   PlanQueue,
   PlanSourceResult,
   PlanSourceOptions,
 } from "./source.ts";
+
+// Runtime values, not just types: the enums and the two wiki-relative paths come
+// from `constants.ts`, which imports nothing — so re-exporting them here costs
+// the barrel none of `source.ts`'s registry/`src/db/` weight.
+export {
+  PLANS_DIR,
+  QUEUE_REL_PATH,
+  PLAN_STATUSES,
+  PLAN_PRIORITIES,
+  type PlanStatus,
+  type PlanPriority,
+} from "./constants.ts";
 
 export {
   parseQueueYaml,

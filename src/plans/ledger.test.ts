@@ -112,6 +112,25 @@ describe("ledgerWarnKey", () => {
     expect(a).not.toContain("3");
     expect(ledgerWarnKey("claude-usage plans: HTTP 503 for x")).toContain("503");
   });
+
+  test("collapses the refreshedAt tail and any counter inside a rebuild failure", () => {
+    // Upstream's refreshError is its OWN message: it carries whatever varies per
+    // tick (a retry counter, a pid, a duration), and the tail we append carries
+    // the refresh timestamp. Neither is a new condition to warn about.
+    const a = ledgerWarnKey(
+      "claude-usage plans: the ledger's last rebuild failed: git pull timed out (attempt 41) (rows are from 2026-08-17T09:00:00.000Z)",
+    );
+    const b = ledgerWarnKey(
+      "claude-usage plans: the ledger's last rebuild failed: git pull timed out (attempt 42) (rows are from 2026-08-17T09:05:00.000Z)",
+    );
+    expect(a).toBe(b);
+    // …but a DIFFERENT root cause is still a different condition.
+    expect(a).not.toBe(
+      ledgerWarnKey(
+        "claude-usage plans: the ledger's last rebuild failed: ENOENT reading plandir (rows are from 2026-08-17T09:00:00.000Z)",
+      ),
+    );
+  });
 });
 
 describe("defaultPlanLedgerDeps", () => {

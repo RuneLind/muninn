@@ -34,6 +34,16 @@ describe("parseQueueYaml", () => {
     expect(warnings.some((w) => w.includes("non-slug entry"))).toBe(true);
   });
 
+  test("a non-string entry is named, so `- true` / `- ~` are attributable", () => {
+    // The YAML shapes that reach this branch have no slug text to quote — the
+    // parser hands over a boolean or a null. Without the value in the message a
+    // reader cannot find the offending line in a hand-edited file.
+    const { order, warnings } = parseQueueYaml("proposed:\n  - true\n  - ~\n  - a-plan\n", KNOWN);
+    expect(order).toEqual({ proposed: ["a-plan"] });
+    expect(warnings.some((w) => w.includes('"proposed"') && w.includes("true"))).toBe(true);
+    expect(warnings.some((w) => w.includes('"proposed"') && w.includes("null"))).toBe(true);
+  });
+
   test("drops a slug naming no plan on disk", () => {
     const { order, warnings } = parseQueueYaml("proposed:\n  - a-plan\n  - gone\n", KNOWN);
     expect(order).toEqual({ proposed: ["a-plan"] });

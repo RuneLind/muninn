@@ -23,10 +23,14 @@
  *   3. **The SLUG GRAMMAR is shared with mimir's parser**, pinned here because
  *      it is the one thing both sides must agree on byte for byte:
  *      `^[A-Za-z][A-Za-z0-9-]*$`, and never the YAML literals `true`/`false`/
- *      `null` in any casing (mimir cannot tell a quoted `true` from the boolean
- *      on the way back in). A non-conforming entry is warned about and DROPPED
- *      on read; {@link serializeQueue} THROWS on one rather than quoting it,
- *      because quoting emits a file mimir's parser would silently drop. Slugs
+ *      `null` in any casing. The leading-LETTER rule is what makes the QUOTED
+ *      form unreachable: mimir's `scripts/plan-status/queue.ts` is a strict,
+ *      dependency-free line parser, and its item rule (`  - <bare slug>`) reads
+ *      `- "2026-plan"` as the slug `"2026-plan"`, quotes and all — which fails
+ *      its slug regex and THROWS, rejecting the WHOLE FILE, not just that entry.
+ *      So a non-conforming entry is warned about and DROPPED on read, while
+ *      {@link serializeQueue} THROWS on one rather than quoting it: quoting
+ *      would emit bytes that take mimir's every column down with them. Slugs
  *      are compared byte-exact and case-sensitively — a slug IS a plan file's
  *      basename, and two basenames differing in case are two files.
  *
@@ -143,7 +147,12 @@ export function parseQueueYaml(
     const slugs: string[] = [];
     for (const entry of value) {
       if (typeof entry !== "string" || !entry.trim()) {
-        warnings.push(`queue.yaml: column "${key}" has a non-slug entry — dropped`);
+        // Name the VALUE: the shapes that land here (`- true`, `- Null`, `- ~`,
+        // `- 7`) have already been resolved by the YAML parser, so the message
+        // is all the reader gets to find the line with in a hand-edited file.
+        warnings.push(
+          `queue.yaml: column "${key}" has a non-slug entry (${String(entry)}) — dropped`,
+        );
         continue;
       }
       const slug = entry.trim();
@@ -178,10 +187,11 @@ export function parseQueueYaml(
  * Emit one slug, or refuse.
  *
  * Quoting an off-grammar slug was the earlier behaviour and it is the wrong
- * failure: the bytes would round-trip through THIS parser and be dropped by
- * mimir's, so the board and the wiki would disagree about the ordering with
- * nothing on either side saying so. Throwing keeps the two readers in lockstep
- * — the caller (PR 4's order endpoint) turns it into a 4xx.
+ * failure: the bytes would round-trip through THIS parser and be REJECTED
+ * WHOLESALE by mimir's, which throws on the first item that is not a bare slug
+ * — so one quoted entry costs the wiki every column's ordering and reddens its
+ * lint, at the moment of an ordinary drag. Throwing here keeps the two readers
+ * in lockstep — the caller (PR 4's order endpoint) turns it into a 4xx.
  */
 function scalar(slug: string): string {
   if (!isValidSlug(slug)) {

@@ -155,6 +155,24 @@ describe("planRecordFromContent", () => {
     expect(quiet).toEqual([]);
   });
 
+  test("the broken-fence warning needs an ATTEMPTED fence, not a fenced example", () => {
+    // A page that merely SHOWS frontmatter in a code block is not a plan with a
+    // broken fence — it is prose. Warning on it puts a permanent line in the
+    // aggregated warn for a file that is behaving correctly.
+    const example =
+      "# How plan_status works\n\nEvery plan opens with:\n\n```yaml\n---\nplan_status: ready\n---\n```\n";
+    const quiet: string[] = [];
+    expect(planRecordFromContent("plans/lifecycle-doc.md", example, 0, quiet)).toBeNull();
+    expect(quiet).toEqual([]);
+
+    // …while a fence attempted at the top of the file (here: opened, never
+    // closed, after a title line) still warns — that IS a lost plan.
+    const attempted = "\n\n---\nplan_status: ready\ntitle: X\n";
+    const warnings: string[] = [];
+    expect(planRecordFromContent("plans/broken.md", attempted, 0, warnings)).toBeNull();
+    expect(warnings.join()).toContain("plans/broken.md");
+  });
+
   test("the fence-scoped parse ignores a plan_status inside a fenced YAML example", async () => {
     // The real trap: mimir-plan-status-lifecycle.mdx carries `plan_status:` in
     // its frontmatter AND inside a ```yaml block ~140 lines down. A line grep

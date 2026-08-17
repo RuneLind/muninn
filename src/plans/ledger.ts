@@ -188,16 +188,39 @@ function isLedgerPlan(v: unknown): v is LedgerPlan {
  *  sighting warns and repeats drop to info. */
 const warnedLedgerErrors = new Set<string>();
 
+/** Marker after which a message is upstream's own words plus our timestamp tail
+ *  — everything past it is normalized, see {@link ledgerWarnKey}. */
+const REBUILD_FAILED = "rebuild failed:";
+/** ISO-8601 instants, wherever they appear. A timestamp is never the condition. */
+const ISO_INSTANT_RE = /\d{4}-\d{2}-\d{2}T[\d:.]+(?:Z|[+-]\d{2}:?\d{2})?/g;
+
 /**
  * The dedup key for one error message.
  *
  * Keying on the raw message defeats warn-once for any message carrying a
- * per-call NUMBER: "3 row(s) carried no slug" and "4 row(s) carried no slug" are
- * the same condition, and a corpus in flux would warn on every poll. The count
- * still reaches the log — as the message, in the detail.
+ * per-call VARIABLE: "3 row(s) carried no slug" and "4 row(s) carried no slug"
+ * are the same condition, and a corpus in flux would warn on every poll. The
+ * varying part still reaches the log — as the message, in the detail.
+ *
+ * Two things vary per tick and neither is a new condition:
+ *
+ *   - the row count (collapsed to `N row(s)`), and
+ *   - anything inside a `rebuild failed:` message. That text is UPSTREAM's, so
+ *     it can carry a retry counter, a pid or a duration, and we append
+ *     `(rows are from <iso>)` — which moves on every rebuild. Everything after
+ *     the marker therefore gets its digits collapsed, which keys the warning on
+ *     the stable prefix + the root cause's WORDS. A genuinely different cause
+ *     ("ENOENT reading plandir" vs "git pull timed out") still keys apart.
+ *
+ * Digits are NOT collapsed globally: an `HTTP 503` and an `HTTP 404` are two
+ * conditions and each deserves its own first warn.
  */
 export function ledgerWarnKey(message: string): string {
-  return message.replace(/\b\d+ row\(s\)/, "N row(s)");
+  const collapsed = message.replace(/\b\d+ row\(s\)/, "N row(s)").replace(ISO_INSTANT_RE, "<iso>");
+  const at = collapsed.indexOf(REBUILD_FAILED);
+  if (at < 0) return collapsed;
+  const cut = at + REBUILD_FAILED.length;
+  return collapsed.slice(0, cut) + collapsed.slice(cut).replace(/\d+/g, "N");
 }
 
 /**
