@@ -1,0 +1,1014 @@
+<!--
+  Mimir plan board — the DESIGN PROTOTYPE the /plans page was transcribed from
+  (muninn PR "the read-only board page"). Open it in a browser; it is one
+  self-contained file with no build step and no network calls.
+
+  THE DATA BELOW IS A FIXTURE, not live data. The original file carried a
+  200 KB point-in-time dump of claude-usage's `GET /api/plans` joined with
+  mimir's `plans/` frontmatter, which drifts the moment it is committed. It has
+  been replaced by 56 real rows trimmed out of that dump, chosen for the SHAPES
+  the layout has to survive: a 24-card Proposed column (nobody hand-ranks 24),
+  plans with and without a declared PR slate, and plans the ledger has never
+  seen at all (no sessions, no PRs, no cost). Counts in the masthead and the
+  footer prose are the live corpus's, from the day the prototype was drawn.
+
+  Four things this prototype settled, all of them reproduced (and unit-tested)
+  in the real page:
+
+    1. Rank belongs to the COLUMN, not to the plan — `order` is keyed by column,
+       and a card that changes column loses its rank.
+    2. The rank badge and the ▲▼ nudges are live only under "My order"; under
+       any other sort a "#3" contradicts what the reader can see.
+    3. Ranking DEGRADES: hand-ranked cards hold the top of the column in placed
+       order, everything untouched falls in behind them on priority then age,
+       undated plans last. That is what makes ranking usable on a 49-card
+       column — rank the six that matter, let the rest sort themselves.
+    4. One drop must not pin 49 cards: dropping on empty column space appends to
+       the order only if that column is ALREADY ranked.
+
+  Kept as a reference, not as a dependency: nothing in muninn loads this file.
+-->
+<title>Mimir Plan Board</title>
+<style>
+:root{
+  --ground:#F6F7F4; --surface:#FFFFFF; --surface-2:#EEF1EB; --surface-3:#E4E8E0;
+  --line:#DCE1D7; --line-soft:#E9EDE5;
+  --ink:#16211D; --ink-2:#3A4A44; --muted:#63706A; --faint:#8B968F;
+  --accent:#0B6E5F; --accent-ink:#08564A; --accent-wash:rgba(11,110,95,.09);
+  --s-proposed:#5F7482; --s-ready:#0B6E5F; --s-inflight:#A96A0E; --s-blocked:#A33B33;
+  --s-shipped:#4C7A4A; --s-followups:#6E559B;
+  --p0:#A33B33; --p1:#A96A0E; --p2:#5F7482; --p3:#8B968F;
+  --shadow:0 1px 2px rgba(22,33,29,.06), 0 6px 18px rgba(22,33,29,.05);
+  --shadow-lift:0 2px 6px rgba(22,33,29,.10), 0 18px 40px rgba(22,33,29,.12);
+  --serif:"Iowan Old Style","Charter","Palatino Linotype",Palatino,Georgia,serif;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
+  --r:7px;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ground:#0E1412; --surface:#161D1A; --surface-2:#1C2421; --surface-3:#232C29;
+    --line:#2B3532; --line-soft:#212A27;
+    --ink:#E7EEEA; --ink-2:#C3CFC9; --muted:#93A29B; --faint:#6E7C76;
+    --accent:#3EC7AA; --accent-ink:#6FDCC4; --accent-wash:rgba(62,199,170,.12);
+    --s-proposed:#8AA0AE; --s-ready:#3EC7AA; --s-inflight:#D9A03F; --s-blocked:#D9736A;
+    --s-shipped:#7FB37C; --s-followups:#A78BD4;
+    --p0:#D9736A; --p1:#D9A03F; --p2:#8AA0AE; --p3:#6E7C76;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 18px rgba(0,0,0,.3);
+    --shadow-lift:0 2px 6px rgba(0,0,0,.5), 0 18px 40px rgba(0,0,0,.45);
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0E1412; --surface:#161D1A; --surface-2:#1C2421; --surface-3:#232C29;
+  --line:#2B3532; --line-soft:#212A27;
+  --ink:#E7EEEA; --ink-2:#C3CFC9; --muted:#93A29B; --faint:#6E7C76;
+  --accent:#3EC7AA; --accent-ink:#6FDCC4; --accent-wash:rgba(62,199,170,.12);
+  --s-proposed:#8AA0AE; --s-ready:#3EC7AA; --s-inflight:#D9A03F; --s-blocked:#D9736A;
+  --s-shipped:#7FB37C; --s-followups:#A78BD4;
+  --p0:#D9736A; --p1:#D9A03F; --p2:#8AA0AE; --p3:#6E7C76;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 6px 18px rgba(0,0,0,.3);
+  --shadow-lift:0 2px 6px rgba(0,0,0,.5), 0 18px 40px rgba(0,0,0,.45);
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--ground); color:var(--ink);
+  font-family:var(--sans); font-size:14px; line-height:1.45;
+  -webkit-font-smoothing:antialiased;
+}
+h1,h2,h3{margin:0; text-wrap:balance}
+button{font:inherit; color:inherit; cursor:pointer}
+a{color:var(--accent-ink); text-underline-offset:2px}
+:focus-visible{outline:2px solid var(--accent); outline-offset:2px; border-radius:3px}
+.num{font-family:var(--mono); font-variant-numeric:tabular-nums}
+
+/* ---------------------------------------------------------------- masthead */
+header.top{
+  padding:22px 24px 0; max-width:1600px; margin:0 auto;
+}
+.mast{display:flex; flex-wrap:wrap; align-items:baseline; gap:14px; justify-content:space-between}
+.mast h1{font-family:var(--serif); font-size:27px; font-weight:600; letter-spacing:-.01em}
+.mast .sub{color:var(--muted); font-size:12.5px; max-width:62ch}
+.mast .sub code{font-family:var(--mono); font-size:11.5px; color:var(--ink-2)}
+.proto{
+  display:inline-block; font-size:10.5px; letter-spacing:.09em; text-transform:uppercase;
+  font-weight:600; color:var(--s-inflight); border:1px solid currentColor;
+  border-radius:3px; padding:1px 6px; vertical-align:middle; margin-left:8px;
+}
+
+/* ---------------------------------------------------------------- meters */
+.meters{
+  display:grid; gap:1px; background:var(--line-soft);
+  grid-template-columns:repeat(auto-fit,minmax(148px,1fr));
+  border:1px solid var(--line); border-radius:var(--r); overflow:hidden;
+  margin:18px 0 0;
+}
+.meter{background:var(--surface); padding:11px 14px 12px}
+.meter .k{font-size:10.5px; letter-spacing:.07em; text-transform:uppercase; color:var(--faint); font-weight:600}
+.meter .v{font-family:var(--mono); font-size:21px; font-weight:600; letter-spacing:-.02em; margin-top:3px; display:flex; align-items:baseline; gap:5px}
+.meter .v small{font-family:var(--sans); font-size:11.5px; font-weight:500; color:var(--muted); letter-spacing:0}
+.meter .n{font-size:11.5px; color:var(--muted); margin-top:2px}
+.meter.warn .v{color:var(--s-inflight)}
+.meter.crit .v{color:var(--s-blocked)}
+
+/* ---------------------------------------------------------------- controls */
+.controls{
+  display:flex; flex-wrap:wrap; gap:10px 16px; align-items:center;
+  padding:14px 0 12px; border-bottom:1px solid var(--line); margin-top:14px;
+}
+.ctl{display:flex; align-items:center; gap:7px}
+.ctl > .lab{font-size:10.5px; letter-spacing:.07em; text-transform:uppercase; color:var(--faint); font-weight:600}
+.chips{display:flex; flex-wrap:wrap; gap:5px}
+.chip{
+  border:1px solid var(--line); background:var(--surface); color:var(--ink-2);
+  border-radius:999px; padding:3px 10px; font-size:12px; line-height:1.4;
+  display:inline-flex; align-items:center; gap:5px; transition:background .12s,border-color .12s;
+}
+.chip:hover{border-color:var(--accent); color:var(--ink)}
+.chip[aria-pressed="true"]{background:var(--accent-wash); border-color:var(--accent); color:var(--accent-ink); font-weight:600}
+.chip .c{font-family:var(--mono); font-size:10.5px; color:var(--faint)}
+.chip[aria-pressed="true"] .c{color:var(--accent-ink)}
+.seg{display:inline-flex; border:1px solid var(--line); border-radius:var(--r); overflow:hidden; background:var(--surface)}
+.seg button{border:0; background:transparent; padding:4px 11px; font-size:12px; color:var(--muted); border-right:1px solid var(--line)}
+.seg button:last-child{border-right:0}
+.seg button[aria-pressed="true"]{background:var(--accent-wash); color:var(--accent-ink); font-weight:600}
+input[type="search"]{
+  font:inherit; font-size:12.5px; padding:4px 9px; border-radius:var(--r);
+  border:1px solid var(--line); background:var(--surface); color:var(--ink); min-width:190px;
+}
+input[type="search"]::placeholder{color:var(--faint)}
+
+/* ---------------------------------------------------------------- board */
+main{max-width:1600px; margin:0 auto; padding:16px 24px 40px}
+.board{
+  display:flex; gap:14px; align-items:flex-start;
+  overflow-x:auto; padding-bottom:14px; scrollbar-width:thin;
+}
+.col{
+  flex:0 0 288px; background:var(--surface-2); border:1px solid var(--line);
+  border-radius:var(--r); display:flex; flex-direction:column; max-height:calc(100vh - 120px);
+}
+.col.drop{border-color:var(--accent); background:var(--accent-wash)}
+.col > .head{
+  position:sticky; top:0; z-index:2; background:var(--surface-2);
+  border-bottom:1px solid var(--line); border-radius:var(--r) var(--r) 0 0;
+  padding:9px 11px 8px; display:flex; align-items:center; gap:8px;
+}
+.col > .head .swatch{width:8px; height:8px; border-radius:2px; background:var(--st); flex:none}
+.col > .head .name{font-size:12px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; color:var(--st)}
+.col > .head .count{margin-left:auto; font-family:var(--mono); font-size:12px; color:var(--muted)}
+.col > .head .money{font-family:var(--mono); font-size:11px; color:var(--faint)}
+.stack{overflow-y:auto; padding:8px; display:flex; flex-direction:column; gap:7px; scrollbar-width:thin}
+.empty{color:var(--faint); font-size:12px; padding:10px 4px; font-style:italic}
+
+.cardwrap{position:relative; display:flex}
+.card{
+  background:var(--surface); border:1px solid var(--line); border-left:3px solid var(--st);
+  border-radius:5px; padding:8px 10px 9px; text-align:left; width:100%;
+  display:flex; flex-direction:column; gap:6px; box-shadow:var(--shadow);
+  transition:box-shadow .12s, transform .12s, border-color .12s;
+}
+.card .t{padding-right:20px}
+.card:hover{box-shadow:var(--shadow-lift); transform:translateY(-1px)}
+/* The one thing on a card that is not "select this plan": open the plan itself. */
+a.open{
+  position:absolute; top:6px; right:6px; z-index:1; line-height:0;
+  color:var(--faint); border-radius:3px; padding:2px; transition:color .12s, background .12s;
+}
+a.open:hover{color:var(--accent-ink); background:var(--accent-wash)}
+a.open svg{display:block}
+
+/* Manual rank: the nudge buttons and the insertion line the drag draws. */
+.nudge{
+  position:absolute; right:5px; bottom:5px; z-index:1; display:flex; gap:2px;
+  opacity:0; transition:opacity .12s;
+}
+.cardwrap:hover .nudge, .cardwrap:focus-within .nudge{opacity:1}
+.nudge button{
+  border:1px solid var(--line); background:var(--surface); color:var(--muted);
+  border-radius:3px; width:19px; height:17px; line-height:1; padding:0; font-size:10px;
+}
+.nudge button:hover:not(:disabled){border-color:var(--accent); color:var(--accent-ink); background:var(--accent-wash)}
+.nudge button:disabled{opacity:.3; cursor:default}
+.rank{
+  font-family:var(--mono); font-size:10.5px; font-weight:700; color:var(--accent-ink);
+  background:var(--accent-wash); border-radius:3px; padding:1px 5px; flex:none;
+}
+.cardwrap.ins-before::before, .cardwrap.ins-after::after{
+  content:""; display:block; position:absolute; left:0; right:0; height:2px;
+  background:var(--accent); border-radius:2px;
+}
+.cardwrap.ins-before::before{top:-5px}
+.cardwrap.ins-after::after{bottom:-5px}
+.card.sel{border-color:var(--accent); box-shadow:var(--shadow-lift)}
+.card.dragging{opacity:.45}
+.card .t{font-size:13px; font-weight:600; line-height:1.3; color:var(--ink); letter-spacing:-.005em}
+.card .r1{display:flex; align-items:center; gap:6px; flex-wrap:wrap}
+.card .r2{display:flex; align-items:center; gap:9px; flex-wrap:wrap; font-size:11.5px; color:var(--muted)}
+.pri{
+  font-family:var(--mono); font-size:10px; font-weight:700; letter-spacing:.02em;
+  border-radius:3px; padding:1px 5px; color:#fff; background:var(--pc); flex:none;
+}
+.pri.unset{background:transparent; color:var(--faint); border:1px dashed var(--line); font-weight:600}
+.fam{font-size:10.5px; color:var(--muted); background:var(--surface-3); border-radius:3px; padding:1px 6px; letter-spacing:.01em}
+.flag{font-size:11px; color:var(--s-followups); font-weight:600}
+.stale{color:var(--s-blocked); font-weight:600}
+.est{font-family:var(--mono); font-size:11.5px; color:var(--ink-2)}
+.est.guess{color:var(--faint)}
+.bar{height:3px; border-radius:2px; background:var(--surface-3); overflow:hidden; margin-top:1px}
+.bar i{display:block; height:100%; background:var(--st)}
+.pill-edit{
+  font-size:10px; font-family:var(--mono); color:var(--s-inflight);
+  border:1px solid currentColor; border-radius:3px; padding:0 4px;
+}
+
+/* ---------------------------------------------------------------- drawer */
+.scrim{position:fixed; inset:0; background:rgba(10,16,14,.35); backdrop-filter:blur(1.5px); z-index:20}
+.drawer{
+  position:fixed; top:0; right:0; bottom:0; width:min(520px,100%); z-index:21;
+  background:var(--surface); border-left:1px solid var(--line);
+  box-shadow:var(--shadow-lift); display:flex; flex-direction:column;
+}
+.drawer .dh{padding:16px 20px 12px; border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:flex-start}
+.drawer .dh h2{font-family:var(--serif); font-size:19px; font-weight:600; line-height:1.25}
+.drawer .dh .x{background:transparent; border:1px solid var(--line); border-radius:var(--r); padding:2px 8px; color:var(--muted); flex:none}
+.drawer .dh .acts{display:flex; gap:6px; flex:none; align-items:center}
+a.openbig{
+  display:inline-flex; align-items:center; gap:5px; text-decoration:none; flex:none;
+  border:1px solid var(--accent); background:var(--accent-wash); color:var(--accent-ink);
+  border-radius:var(--r); padding:2px 9px; font-size:12px; font-weight:600; white-space:nowrap;
+}
+a.openbig:hover{background:var(--accent); color:var(--surface)}
+a.openbig svg{display:block}
+a.filelink{font-family:var(--mono); font-size:12px; color:var(--accent-ink); text-decoration:none; overflow-wrap:anywhere}
+a.filelink:hover{text-decoration:underline}
+.drawer .db{overflow-y:auto; padding:16px 20px 28px; display:flex; flex-direction:column; gap:16px}
+.drawer .dh .r2{display:flex; align-items:center; gap:9px; flex-wrap:wrap; font-size:11.5px; color:var(--muted)}
+.drawer .desc{color:var(--ink-2); font-size:13px}
+.sec > h3{font-size:10.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--faint); font-weight:700; margin-bottom:7px}
+.kv{display:grid; grid-template-columns:repeat(auto-fit,minmax(112px,1fr)); gap:1px; background:var(--line-soft); border:1px solid var(--line); border-radius:var(--r); overflow:hidden}
+.kv > div{background:var(--surface); padding:7px 10px}
+.kv .k{font-size:10.5px; text-transform:uppercase; letter-spacing:.06em; color:var(--faint); font-weight:600}
+.kv .v{font-family:var(--mono); font-size:15px; font-weight:600; margin-top:1px}
+.basis{font-size:12px; color:var(--muted); margin-top:7px}
+.note{
+  font-size:12.5px; color:var(--ink-2); background:var(--surface-2);
+  border:1px solid var(--line); border-left:3px solid var(--st); border-radius:5px; padding:8px 11px;
+}
+.prlist{display:flex; flex-wrap:wrap; gap:5px}
+.prlist a, .prlist span{
+  font-family:var(--mono); font-size:11.5px; text-decoration:none; color:var(--ink-2);
+  border:1px solid var(--line); border-radius:3px; padding:1px 6px; background:var(--surface-2);
+}
+.prlist .unrev{border-color:var(--s-blocked); color:var(--s-blocked)}
+table.legs{width:100%; border-collapse:collapse; font-size:12px}
+table.legs th{text-align:left; font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:var(--faint); padding:0 8px 4px 0; font-weight:700}
+table.legs td{padding:3px 8px 3px 0; border-top:1px solid var(--line-soft); color:var(--ink-2)}
+table.legs td.n{font-family:var(--mono); font-variant-numeric:tabular-nums; text-align:right}
+.priset{display:flex; gap:5px; flex-wrap:wrap}
+.priset button{border:1px solid var(--line); background:var(--surface); border-radius:var(--r); padding:3px 11px; font-family:var(--mono); font-size:12px; color:var(--muted)}
+.priset button[aria-pressed="true"]{background:var(--pc); border-color:var(--pc); color:#fff; font-weight:700}
+pre.patch{
+  font-family:var(--mono); font-size:11.5px; background:var(--surface-2); border:1px solid var(--line);
+  border-radius:5px; padding:9px 11px; overflow-x:auto; margin:0; color:var(--ink-2);
+}
+pre.patch b{color:var(--accent-ink); font-weight:600}
+
+/* ---------------------------------------------------------------- edit tray */
+.tray{
+  position:fixed; left:50%; transform:translateX(-50%); bottom:16px; z-index:15;
+  background:var(--surface); border:1px solid var(--s-inflight); border-radius:var(--r);
+  box-shadow:var(--shadow-lift); padding:9px 13px; display:flex; align-items:center; gap:12px;
+  max-width:calc(100% - 32px); font-size:12.5px;
+}
+.tray .n{font-family:var(--mono); font-weight:700; color:var(--s-inflight)}
+.tray button{border:1px solid var(--line); background:var(--surface-2); border-radius:5px; padding:3px 10px; font-size:12px}
+.tray button.primary{border-color:var(--accent); background:var(--accent-wash); color:var(--accent-ink); font-weight:600}
+
+footer{max-width:1600px; margin:0 auto; padding:0 24px 34px; color:var(--muted); font-size:12px}
+footer .fgrid{display:grid; gap:14px; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); border-top:1px solid var(--line); padding-top:14px}
+footer h3{font-size:10.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--faint); font-weight:700; margin-bottom:5px}
+footer li{margin-bottom:4px}
+footer ul{margin:0; padding-left:16px}
+
+@media (prefers-reduced-motion:reduce){*{transition:none!important; animation:none!important}}
+@media (max-width:640px){
+  header.top,main,footer{padding-left:14px; padding-right:14px}
+  .col{flex-basis:82vw}
+}
+</style>
+
+<header class="top">
+  <div class="mast">
+    <div>
+      <h1>Mimir Plan Board<span class="proto">prototype</span></h1>
+      <p class="sub">All 181 plans in <code>mimir/plans/</code>, filed by <code>plan_status</code>, priced against what
+      comparable work actually cost in the claude-usage ledger. Real data, read <span id="asof"></span>.
+      Drag a card, or nudge it with ▲▼, to rank a column by hand; the ↗ opens the plan itself.
+      Priority, ranking and column moves are <b>local only</b> — nothing writes back; the tray shows the patch it would make.</p>
+    </div>
+  </div>
+  <div class="meters" id="meters"></div>
+  <div class="controls" id="controls"></div>
+</header>
+
+<main>
+  <div class="board" id="board"></div>
+</main>
+
+<footer>
+  <div class="fgrid">
+    <div>
+      <h3>Where the numbers come from</h3>
+      <ul>
+        <li><b>Status, tags, follow-ups</b> — the plan file's own frontmatter.</li>
+        <li><b>Cost, hours, PRs, findings</b> — claude-usage <code>GET /api/plans</code>, which attributes a session to a plan on 3+ path references or a title hit.</li>
+        <li><b>Estimates</b> — median $/PR of shipped plans in the same repo, × the PR count the plan declares.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>How good the estimate is</h3>
+      <p id="calib">—</p>
+    </div>
+    <div>
+      <h3>Proposed vs Ready</h3>
+      <p>mimir's own legend: <b>proposed</b> is "written; awaiting go/no-go", <b>ready</b> is
+      "reviewed / plan-review-looped; safe to dispatch". So Ready is not a queue position — it is a
+      <i>gate</i>: someone said yes, and the plan survived a review. Today 49 plans sit in Proposed
+      against 3 in Ready, which is what an unused gate looks like. Keep both — that gate is exactly
+      what an agent would need to pull work unsupervised — and use the ranking here to say which
+      Proposed plans should go through it next.</p>
+    </div>
+    <div>
+      <h3>What this prototype does not do</h3>
+      <ul>
+        <li>Write anything. Drags and priorities live in <code>localStorage</code>.</li>
+        <li>Know a plan's size when it declares no PR slate — 47 of 60 active plans don't, and those cards say so.</li>
+        <li>Split cost between two plans a session worked at once.</li>
+      </ul>
+    </div>
+  </div>
+</footer>
+
+<script>
+window.BOARD_DATA = {"generatedAt":"2026-08-17T18:19:02.069Z","fixture":true,"totals":{"plans":56,"executed":40,"backlog":16,"legs":78,"handovers":25,"merges":113,"landed":109,"findings":2092,"costUSD":4742.56,"totalTokens":5468226152},"rows":[{"slug":"claude-hivemind-builtin-messaging","title":"Keep the broker, fix enrolment — Claude Code's built-in peer messaging is a different network","desc":"Claude Code now ships ListAgents/SendMessage cross-session messaging. It cannot reach muninn's melosys bot, it has no non-model programmatic surface, and right now it and the hivemind broker have zero members in common —","status":"proposed","note":"Investigation complete and measured against the live broker + live ListAgents on 2026-08-17. Slate is 2 PRs, PR 2 explicitly skippable.","tags":["claude-hivemind","muninn","claude-code","protocol","plan"],"fam":"muninn","rel":"plans/claude-hivemind-builtin-messaging.mdx","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=claude-hivemind-builtin-messaging","slate":[1,2],"total":2,"legs":1,"buildLegs":0,"handovers":0,"prs":[],"landed":0,"merges":0,"findings":0,"maxRounds":0,"cost":11.6,"tokens":14589406,"activeH":0.16,"spanH":0.16,"firstAt":"2026-08-17T16:26:15.311Z","lastAt":"2026-08-17T16:36:08.817Z","backlog":false,"statusDate":"2026-08-17","followups":"open","mtime":"2026-08-17T16:52:35.743Z"},{"slug":"claude-hivemind-peer-identity-trust","title":"claude-hivemind — Peer identity & trust (envelope-only trust + signed registration)","desc":"","status":"proposed","note":"","tags":["hivemind","plan","identity","security"],"fam":"claude-hivemind","rel":"plans/claude-hivemind-peer-identity-trust.md","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=claude-hivemind-peer-identity-trust","slate":[],"total":null,"legs":1,"buildLegs":1,"handovers":0,"prs":[{"n":210,"at":"2026-07-07T09:28:06.022Z","rev":false,"f":0,"url":"https://github.com/RuneLind/muninn/pull/210"}],"landed":1,"merges":1,"findings":0,"maxRounds":0,"cost":36.84,"tokens":23121377,"activeH":3.79,"spanH":3.79,"firstAt":"2026-07-07T07:01:17.906Z","lastAt":"2026-07-07T10:48:30.235Z","backlog":false,"statusDate":"2026-07-07","followups":null,"mtime":"2026-07-31T13:09:17.532Z"},{"slug":"claude-usage-codex-view","title":"A Codex view, not a Codex lens","desc":"Rebuild Codex visibility in claude-usage as a separate view behind a Claude/Codex switch, porting the Codex-only query work forward from the closed provider-lens PR and leaving every Claude path untouched by construction","status":"proposed","note":"Successor to the cut shared lens; see 2026-08-11-provider-lens-cut for the measurements that decided the shape.","tags":["claude-usage","dashboard","plan","dev-loop"],"fam":"claude-usage","rel":"plans/claude-usage-codex-view.mdx","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=claude-usage-codex-view","slate":[1,2,3],"total":3,"legs":1,"buildLegs":1,"handovers":0,"prs":[{"n":142,"at":"2026-08-11T16:51:55.377Z","rev":true,"f":1,"url":"https://github.com/RuneLind/claude-usage/pull/142"}],"landed":1,"merges":1,"findings":1,"maxRounds":1,"cost":96.98,"tokens":160041067,"activeH":4.23,"spanH":4.23,"firstAt":"2026-08-11T14:45:21.908Z","lastAt":"2026-08-11T18:59:24.944Z","backlog":false,"statusDate":null,"followups":"open","mtime":"2026-08-11T18:58:46.173Z"},{"slug":"claude-usage-effort-ab","title":"Effort A/B — validate the finder-medium and implementer-high pins","desc":"The round-4 carryover, finally designed: paired-finder instrumentation on a real campaign (arm 1, folded into share-summary PR D) and a conditional worktree implementer duel (arm 2), measured through the pipeline ledger.","status":"proposed","note":"Drafted 2026-08-12 out of the round-6 audit; arm 1 is folded into muninn share-summary PR D's review phase.","tags":["claude-usage","skills","plan"],"fam":"claude-usage","rel":"plans/claude-usage-effort-ab.mdx","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=claude-usage-effort-ab","slate":[],"total":null,"legs":0,"buildLegs":0,"handovers":0,"prs":[],"landed":0,"merges":0,"findings":0,"maxRounds":0,"cost":0,"tokens":0,"activeH":0,"spanH":0,"firstAt":null,"lastAt":null,"backlog":true,"statusDate":null,"followups":"none","mtime":"2026-08-12T18:04:32.252Z"},{"slug":"claude-usage-plan-progress","title":"claude-usage: how far into the plan is this session?","desc":"Join a live orchestration session to the mimir plan it is executing, so the dashboard can say which PR is in flight, how much of the slate is landed, and roughly how long is left. One shared engine, two renderings: a str","status":"proposed","note":"Written 2026-08-07 from two working prototypes built against the real database. Two full plan-review-loops (10 Opus rounds) both ended CAPPED, then a targeted 11th diff-scoped round reviewed the post-gate fixes and found","tags":["claude-usage","plan","dashboard"],"fam":"claude-usage","rel":"plans/claude-usage-plan-progress.mdx","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=claude-usage-plan-progress","slate":[1,2,3,4,5,6],"total":6,"legs":3,"buildLegs":0,"handovers":1,"prs":[],"landed":0,"merges":0,"findings":0,"maxRounds":0,"cost":116.19,"tokens":114879726,"activeH":9.71,"spanH":6.84,"firstAt":"2026-08-07T10:56:06.793Z","lastAt":"2026-08-07T17:46:40.229Z","backlog":false,"statusDate":null,"followups":"none","mtime":"2026-08-14T14:05:47.394Z"},{"slug":"claude-usage-skuld-rewrite-and-rename","title":"claude-usage → Skuld: history rewrite and rename","desc":"Successor to the shipped 2026-08-10 sanitization: rewrite history with git-filter-repo, drop two third-party contributors, rename the project to Skuld, and publish to a new repo rather than flipping this one.","status":"proposed","note":"Successor to claude-usage-public-release-sanitization; reverses its keep-history and flip-this-repo calls after the 2026-08-17 re-audit. Round 1 of plan-review-loop applied.","tags":["claude-usage","plan","security","process"],"fam":"claude-usage","rel":"plans/claude-usage-skuld-rewrite-and-rename.mdx","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=claude-usage-skuld-rewrite-and-rename","slate":[],"total":null,"legs":1,"buildLegs":0,"handovers":0,"prs":[],"landed":0,"merges":0,"findings":0,"maxRounds":0,"cost":27.58,"tokens":31025939,"activeH":4.54,"spanH":4.54,"firstAt":"2026-08-17T13:46:41.840Z","lastAt":"2026-08-17T18:18:50.215Z","backlog":false,"statusDate":null,"followups":null,"mtime":"2026-08-17T18:00:18.928Z"},{"slug":"huginn-confluence-image-text-extraction","title":"Tekstutvinning fra bilder i Confluence-sider","desc":"","status":"proposed","note":"","tags":["huginn","plan","search"],"fam":"huginn","rel":"plans/huginn-confluence-image-text-extraction.md","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=huginn-confluence-image-text-extraction","slate":[],"total":null,"legs":0,"buildLegs":0,"handovers":0,"prs":[],"landed":0,"merges":0,"findings":0,"maxRounds":0,"cost":0,"tokens":0,"activeH":0,"spanH":0,"firstAt":null,"lastAt":null,"backlog":true,"statusDate":"2026-05-04","followups":null,"mtime":"2026-07-31T13:09:17.538Z"},{"slug":"huginn-contextual-prefix-retry-on-mismatch","title":"Plan — Retry-on-count-mismatch in ChunkPrefixer","desc":"","status":"proposed","note":"","tags":["huginn","plan","rag"],"fam":"huginn","rel":"plans/huginn-contextual-prefix-retry-on-mismatch.md","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=huginn-contextual-prefix-retry-on-mismatch","slate":[],"total":null,"legs":0,"buildLegs":0,"handovers":0,"prs":[],"landed":0,"merges":0,"findings":0,"maxRounds":0,"cost":0,"tokens":0,"activeH":0,"spanH":0,"firstAt":null,"lastAt":null,"backlog":true,"statusDate":"2026-05-18","followups":null,"mtime":"2026-07-31T13:09:17.538Z"},{"slug":"huginn-copilot-sdk-contextual-backend","title":"Plan — copilot-sdk contextual-prefix backend (deferred / speculative)","desc":"","status":"proposed","note":"","tags":["huginn","plan","rag","copilot"],"fam":"huginn","rel":"plans/huginn-copilot-sdk-contextual-backend.md","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=huginn-copilot-sdk-contextual-backend","slate":[],"total":null,"legs":1,"buildLegs":0,"handovers":0,"prs":[],"landed":0,"merges":0,"findings":0,"maxRounds":0,"cost":3.78,"tokens":3430761,"activeH":7.17,"spanH":7.17,"firstAt":"2026-05-17T10:29:13.391Z","lastAt":"2026-05-17T17:39:39.343Z","backlog":false,"statusDate":"2026-05-17","followups":"open","mtime":"2026-07-31T13:09:17.538Z"},{"slug":"huginn-fetcher-data-hygiene","title":"Fetcher data hygiene — sjekkliste og funn","desc":"","status":"proposed","note":"","tags":["huginn","plan","search"],"fam":"huginn","rel":"plans/huginn-fetcher-data-hygiene.md","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=huginn-fetcher-data-hygiene","slate":[],"total":null,"legs":0,"buildLegs":0,"handovers":0,"prs":[],"landed":0,"merges":0,"findings":0,"maxRounds":0,"cost":0,"tokens":0,"activeH":0,"spanH":0,"firstAt":null,"lastAt":null,"backlog":true,"statusDate":"2026-04-30","followups":null,"mtime":"2026-07-31T13:09:17.540Z"},{"slug":"huginn-indexing-job-observability","title":"Indexing job observability — run ledger, API, and muninn dashboard","desc":"","status":"proposed","note":"","tags":["huginn","muninn","plan","observability","indexing"],"fam":"muninn","rel":"plans/huginn-indexing-job-observability.md","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=huginn-indexing-job-observability","slate":[1,2,3],"total":3,"legs":2,"buildLegs":1,"handovers":1,"prs":[{"n":89,"at":"2026-07-19T06:31:10.503Z","rev":true,"f":22,"url":"https://github.com/RuneLind/huginn/pull/89"}],"landed":1,"merges":1,"findings":22,"maxRounds":1,"cost":58.94,"tokens":68484204,"activeH":11.99,"spanH":12.07,"firstAt":"2026-07-18T19:17:30.837Z","lastAt":"2026-07-19T07:21:28.609Z","backlog":false,"statusDate":"2026-07-20","followups":null,"mtime":"2026-07-31T13:09:17.540Z"},{"slug":"huginn-melosys-bot-tool-gaps-2026-05","title":"Melosys-bot tool-gap rapport 2026-05-18 — Huginn-arbeidsplan","desc":"","status":"proposed","note":"","tags":["huginn","plan","knowledge-graph"],"fam":"huginn","rel":"plans/huginn-melosys-bot-tool-gaps-2026-05.md","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=huginn-melosys-bot-tool-gaps-2026-05","slate":[],"total":null,"legs":2,"buildLegs":1,"handovers":1,"prs":[{"n":44,"at":"2026-05-18T17:30:15.629Z","rev":true,"f":19,"url":"https://github.com/RuneLind/huginn/pull/44"},{"n":45,"at":"2026-05-18T18:02:30.880Z","rev":true,"f":16,"url":"https://github.com/RuneLind/huginn/pull/45"},{"n":46,"at":"2026-05-18T18:54:48.796Z","rev":false,"f":0,"url":"https://github.com/RuneLind/huginn/pull/46"},{"n":47,"at":"2026-05-18T19:12:21.255Z","rev":false,"f":0,"url":"https://github.com/RuneLind/huginn/pull/47"}],"landed":4,"merges":4,"findings":35,"maxRounds":1,"cost":34.09,"tokens":37700967,"activeH":6.73,"spanH":78.3,"firstAt":"2026-05-18T13:07:38.578Z","lastAt":"2026-05-21T19:25:28.485Z","backlog":false,"statusDate":"2026-05-18","followups":"open","mtime":"2026-07-31T13:09:17.542Z"},{"slug":"huginn-nav-wiki-followup-2026-05","title":"Wiki followup batch — SHA-harmonisering, strukturelle hull, lint","desc":"","status":"proposed","note":"","tags":["huginn","plan","wiki"],"fam":"huginn","rel":"plans/huginn-nav-wiki-followup-2026-05.md","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=huginn-nav-wiki-followup-2026-05","slate":[],"total":null,"legs":1,"buildLegs":0,"handovers":0,"prs":[],"landed":0,"merges":0,"findings":0,"maxRounds":0,"cost":36.31,"tokens":51460362,"activeH":1.28,"spanH":1.28,"firstAt":"2026-05-10T09:32:47.604Z","lastAt":"2026-05-10T10:49:50.808Z","backlog":false,"statusDate":"2026-07-24","followups":null,"mtime":"2026-07-31T13:09:17.543Z"},{"slug":"huginn-nav-wiki-hub-runde-2-2026-05","title":"Wiki batch — Se-også-fix, eksterne hub-er runde 2, kontrakts-modul, hjemmelsgrunnlag, lint","desc":"","status":"proposed","note":"","tags":["huginn","plan","wiki"],"fam":"huginn","rel":"plans/huginn-nav-wiki-hub-runde-2-2026-05.md","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=huginn-nav-wiki-hub-runde-2-2026-05","slate":[],"total":null,"legs":0,"buildLegs":0,"handovers":0,"prs":[],"landed":0,"merges":0,"findings":0,"maxRounds":0,"cost":0,"tokens":0,"activeH":0,"spanH":0,"firstAt":null,"lastAt":null,"backlog":true,"statusDate":"2026-07-24","followups":null,"mtime":"2026-07-31T13:09:17.543Z"},{"slug":"huginn-nav-wiki-x-sed-og-hull-2026-05","title":"Wiki batch — X-SED dybdesider, strukturelle hull, Tilgangsmaskinen-hub, lint","desc":"","status":"proposed","note":"","tags":["huginn","plan","wiki"],"fam":"huginn","rel":"plans/huginn-nav-wiki-x-sed-og-hull-2026-05.md","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=huginn-nav-wiki-x-sed-og-hull-2026-05","slate":[],"total":null,"legs":1,"buildLegs":0,"handovers":0,"prs":[],"landed":0,"merges":0,"findings":0,"maxRounds":0,"cost":31.53,"tokens":33699659,"activeH":2.31,"spanH":2.31,"firstAt":"2026-05-10T10:50:55.262Z","lastAt":"2026-05-10T13:09:48.019Z","backlog":false,"statusDate":"2026-05-11","followups":null,"mtime":"2026-07-31T13:09:17.543Z"},{"slug":"huginn-nav-wiki-x006-og-konsistens-2026-05","title":"Wiki batch — SED X006, A005/A012-konsistens, hull-samleanalyse, lint","desc":"","status":"proposed","note":"","tags":["huginn","plan","wiki"],"fam":"huginn","rel":"plans/huginn-nav-wiki-x006-og-konsistens-2026-05.md","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=huginn-nav-wiki-x006-og-konsistens-2026-05","slate":[],"total":null,"legs":0,"buildLegs":0,"handovers":0,"prs":[],"landed":0,"merges":0,"findings":0,"maxRounds":0,"cost":0,"tokens":0,"activeH":0,"spanH":0,"firstAt":null,"lastAt":null,"backlog":true,"statusDate":"2026-05-11","followups":null,"mtime":"2026-07-31T13:09:17.544Z"},{"slug":"huginn-vipps-teknisk-plan","title":"Teknisk plan — Vipps MobilePay","desc":"","status":"proposed","note":"","tags":["huginn","plan","design"],"fam":"huginn","rel":"plans/huginn-vipps-teknisk-plan.md","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=huginn-vipps-teknisk-plan","slate":[],"total":null,"legs":0,"buildLegs":0,"handovers":0,"prs":[],"landed":0,"merges":0,"findings":0,"maxRounds":0,"cost":0,"tokens":0,"activeH":0,"spanH":0,"firstAt":null,"lastAt":null,"backlog":true,"statusDate":"2026-04-24","followups":null,"mtime":"2026-07-31T13:09:17.545Z"},{"slug":"Mac-mini-headless-setup-field-notes","title":"Mac Mini Headless Setup — Field Notes (real-world deltas & gotchas)","desc":"","status":"proposed","note":"","tags":["hivemind","plan","docker"],"fam":"other","rel":"plans/Mac-mini-headless-setup-field-notes.md","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=Mac-mini-headless-setup-field-notes","slate":[],"total":null,"legs":3,"buildLegs":0,"handovers":2,"prs":[],"landed":0,"merges":0,"findings":0,"maxRounds":0,"cost":14.66,"tokens":10414701,"activeH":261.63,"spanH":2117.08,"firstAt":"2026-05-20T10:52:07.541Z","lastAt":"2026-08-16T15:57:06.868Z","backlog":false,"statusDate":"2026-07-29","followups":null,"mtime":"2026-08-16T15:46:24.836Z"},{"slug":"Mac-mini-headless-setup-runbook","title":"Mac Mini 24/7 Headless Setup — Agent Runbook","desc":"","status":"proposed","note":"","tags":["mimir","plan"],"fam":"mimir","rel":"plans/Mac-mini-headless-setup-runbook.md","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=Mac-mini-headless-setup-runbook","slate":[],"total":null,"legs":0,"buildLegs":0,"handovers":0,"prs":[],"landed":0,"merges":0,"findings":0,"maxRounds":0,"cost":0,"tokens":0,"activeH":0,"spanH":0,"firstAt":null,"lastAt":null,"backlog":true,"statusDate":"2026-05-20","followups":null,"mtime":"2026-07-31T13:09:17.531Z"},{"slug":"mac-mini-torrent-vpn-stack","title":"Mac mini — Njalla WireGuard + torrent/media stack (port from Windows)","desc":"","status":"proposed","note":"","tags":["hivemind","plan","connectors"],"fam":"other","rel":"plans/mac-mini-torrent-vpn-stack.md","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=mac-mini-torrent-vpn-stack","slate":[],"total":null,"legs":1,"buildLegs":1,"handovers":0,"prs":[{"n":1,"at":"2026-06-09T14:10:13.417Z","rev":true,"f":17,"url":"https://github.com/RuneLind/samsung-tv-media/pull/1"}],"landed":1,"merges":1,"findings":17,"maxRounds":1,"cost":22.22,"tokens":22877304,"activeH":238.56,"spanH":238.56,"firstAt":"2026-05-30T15:37:14.557Z","lastAt":"2026-06-09T14:10:35.566Z","backlog":false,"statusDate":"2026-05-30","followups":"open","mtime":"2026-07-31T13:09:17.546Z"},{"slug":"melosys-console-wiki-graph-runtime-derive","title":"melosys-console — Derive wiki graph at runtime from frontmatter","desc":"","status":"proposed","note":"","tags":["huginn","plan","wiki","knowledge-graph"],"fam":"huginn","rel":"plans/melosys-console-wiki-graph-runtime-derive.md","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=melosys-console-wiki-graph-runtime-derive","slate":[],"total":null,"legs":0,"buildLegs":0,"handovers":0,"prs":[],"landed":0,"merges":0,"findings":0,"maxRounds":0,"cost":0,"tokens":0,"activeH":0,"spanH":0,"firstAt":null,"lastAt":null,"backlog":true,"statusDate":"2026-05-11","followups":null,"mtime":"2026-07-31T13:09:17.547Z"},{"slug":"melosys-e2e-local-tooling-preservation","title":"Plan: preserve melosys-e2e local Claude tooling (commit without sharing to team)","desc":"","status":"proposed","note":"","tags":["mimir","plan"],"fam":"mimir","rel":"plans/melosys-e2e-local-tooling-preservation.md","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=melosys-e2e-local-tooling-preservation","slate":[],"total":null,"legs":0,"buildLegs":0,"handovers":0,"prs":[],"landed":0,"merges":0,"findings":0,"maxRounds":0,"cost":0,"tokens":0,"activeH":0,"spanH":0,"firstAt":null,"lastAt":null,"backlog":true,"statusDate":"2026-06-11","followups":null,"mtime":"2026-07-31T13:09:17.547Z"},{"slug":"memory-research-project-brief","title":"Memory research — Claude Desktop project brief","desc":"","status":"proposed","note":"","tags":["muninn","plan","memory","research"],"fam":"muninn","rel":"plans/memory-research-project-brief.md","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=memory-research-project-brief","slate":[],"total":null,"legs":0,"buildLegs":0,"handovers":0,"prs":[],"landed":0,"merges":0,"findings":0,"maxRounds":0,"cost":0,"tokens":0,"activeH":0,"spanH":0,"firstAt":null,"lastAt":null,"backlog":true,"statusDate":"2026-05-18","followups":null,"mtime":"2026-07-31T13:09:17.547Z"},{"slug":"mimir-as-huginn-collection","title":"Mimir as a Huginn collection (+ ADR log convention)","desc":"","status":"proposed","note":"","tags":["mimir","huginn","plan","search"],"fam":"huginn","rel":"plans/mimir-as-huginn-collection.md","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=mimir-as-huginn-collection","slate":[],"total":null,"legs":1,"buildLegs":0,"handovers":0,"prs":[],"landed":0,"merges":0,"findings":0,"maxRounds":0,"cost":1.02,"tokens":533060,"activeH":0.05,"spanH":0.05,"firstAt":"2026-05-18T19:57:23.910Z","lastAt":"2026-05-18T20:00:06.631Z","backlog":false,"statusDate":"2026-07-24","followups":"open","mtime":"2026-07-31T13:09:17.547Z"},{"slug":"huginn-capra-notion-collection-fix","title":"Fix the capra-notion / capra-notion-v9 collection mismatch","desc":"Notion search answers from a February index while the update script writes a May one. Repointing start.sh is a one-line fix — but it only closes half the gap, and the half it does close is not the half it looks like.","status":"ready","note":"Live wrong-answers bug — API serves February Notion index; specced, dispatchable.","tags":["huginn","plan","collections","notion"],"fam":"huginn","rel":"plans/huginn-capra-notion-collection-fix.mdx","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=huginn-capra-notion-collection-fix","slate":[],"total":null,"legs":0,"buildLegs":0,"handovers":0,"prs":[],"landed":0,"merges":0,"findings":0,"maxRounds":0,"cost":0,"tokens":0,"activeH":0,"spanH":0,"firstAt":null,"lastAt":null,"backlog":true,"statusDate":"2026-07-31","followups":null,"mtime":"2026-07-31T13:09:17.538Z"},{"slug":"muninn-maturity-improvements","title":"Plan: Agent-maturity improvements — eval gate, drain auto-recovery, postmortem taxonomy, smoke-evidence line","desc":"Executes the Tier 1 + cheap-Tier 2 rows of the 2026-07-16 maturity self-assessment: 2 small muninn PRs + 2 convention/skill edits.","status":"ready","note":"","tags":["muninn","plan","maturity","evals","observability"],"fam":"muninn","rel":"plans/muninn-maturity-improvements.mdx","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=muninn-maturity-improvements","slate":[],"total":null,"legs":2,"buildLegs":0,"handovers":1,"prs":[],"landed":0,"merges":0,"findings":0,"maxRounds":0,"cost":18.51,"tokens":11312348,"activeH":2.29,"spanH":678.23,"firstAt":"2026-07-19T08:15:14.156Z","lastAt":"2026-08-16T14:29:02.942Z","backlog":false,"statusDate":"2026-07-31","followups":"open","mtime":"2026-08-16T14:46:16.347Z"},{"slug":"muninn-x-watcher-migration","title":"X Watcher: Migrate from direct fetcher to x-feed collection","desc":"","status":"ready","note":"Migration live; dispatchable decision: remove the legacy Python Bun.spawn path.","tags":["muninn","plan","watchers","search"],"fam":"muninn","rel":"plans/muninn-x-watcher-migration.md","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=muninn-x-watcher-migration","slate":[],"total":null,"legs":0,"buildLegs":0,"handovers":0,"prs":[],"landed":0,"merges":0,"findings":0,"maxRounds":0,"cost":0,"tokens":0,"activeH":0,"spanH":0,"firstAt":null,"lastAt":null,"backlog":true,"statusDate":"2026-07-31","followups":null,"mtime":"2026-07-31T13:09:17.567Z"},{"slug":"huginn-architecture-followups-2","title":"Huginn architecture follow-ups, round 2","desc":"Overnight fable-orchestrate execution plan for the 2026-07-20 scoped review findings plus the deferred backlog from 2026-07-06. PR A (jobs-endpoint contract) landed same day; B–G specced for autonomous execution.","status":"in-flight","note":"PR A merged 2026-07-20; B–G specced and ready to dispatch.","tags":["huginn","plan","design","dashboard"],"fam":"huginn","rel":"plans/huginn-architecture-followups-2.mdx","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=huginn-architecture-followups-2","slate":[],"total":null,"legs":3,"buildLegs":3,"handovers":1,"prs":[{"n":97,"at":"2026-07-20T20:48:05.219Z","rev":false,"f":0,"url":"https://github.com/RuneLind/huginn/pull/97"},{"n":98,"at":"2026-07-20T21:29:33.579Z","rev":true,"f":0,"url":"https://github.com/RuneLind/huginn/pull/98"},{"n":99,"at":"2026-07-20T21:36:52.690Z","rev":true,"f":11,"url":"https://github.com/RuneLind/huginn/pull/99"},{"n":100,"at":"2026-07-20T21:49:07.667Z","rev":true,"f":15,"url":"https://github.com/RuneLind/huginn/pull/100"},{"n":101,"at":"2026-07-20T22:21:01.214Z","rev":true,"f":13,"url":"https://github.com/RuneLind/huginn/pull/101"},{"n":102,"at":"2026-07-20T22:35:23.794Z","rev":true,"f":0,"url":"https://github.com/RuneLind/huginn/pull/102"},{"n":103,"at":"2026-07-25T15:06:34.018Z","rev":false,"f":0,"url":"https://github.com/RuneLind/huginn/pull/103"}],"landed":7,"merges":7,"findings":39,"maxRounds":1,"cost":105.99,"tokens":82874011,"activeH":3.31,"spanH":114.91,"firstAt":"2026-07-20T20:16:40.344Z","lastAt":"2026-07-25T15:11:02.578Z","backlog":false,"statusDate":"2026-07-31","followups":"open","mtime":"2026-07-31T13:09:17.537Z"},{"slug":"muninn-x-candidate-vs-digest-pipeline","title":"Muninn — X candidates vs the Telegram digest: same corpus, two different selection disciplines","desc":"Rune's read is right, and the reason is structural: the /summaries X shelf and the Telegram X digest read the SAME huginn corpus but fork at the decision step — the digest gets Sonnet, a hard 3–5 budget and one global re","status":"in-flight","note":"muninn #399 open; then 3-day census.","tags":["muninn","plan","x-feed","capture","curation"],"fam":"muninn","rel":"plans/muninn-x-candidate-vs-digest-pipeline.mdx","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=muninn-x-candidate-vs-digest-pipeline","slate":[],"total":null,"legs":1,"buildLegs":1,"handovers":0,"prs":[{"n":399,"at":"2026-07-29T17:39:38.380Z","rev":false,"f":0,"url":"https://github.com/RuneLind/muninn/pull/399"}],"landed":1,"merges":1,"findings":0,"maxRounds":0,"cost":46.83,"tokens":55852608,"activeH":4.23,"spanH":4.23,"firstAt":"2026-07-29T13:26:27.790Z","lastAt":"2026-07-29T17:40:28.587Z","backlog":false,"statusDate":"2026-07-29","followups":"open","mtime":"2026-07-31T13:09:17.567Z"},{"slug":"claude-usage-post-v2-followups","title":"claude-usage — post-v2 follow-ups: reaper-diagnostics UI and the soak-period backlog","desc":"What remains after the live-agents v2 hooks campaign (PRs #43–#46, 2026-07-29). Items 1–4 are closed — the reaper-diagnostics UI (#47) and the told-idle idle_prompt suppression (#48) are merged and deployed. What is left","status":"blocked","note":"Soak-gated cleanup PR outstanding.","tags":["claude-usage","plan","dashboard"],"fam":"claude-usage","rel":"plans/claude-usage-post-v2-followups.mdx","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=claude-usage-post-v2-followups","slate":[],"total":null,"legs":1,"buildLegs":1,"handovers":0,"prs":[{"n":47,"at":"2026-07-29T14:00:38.090Z","rev":false,"f":0,"url":"https://github.com/RuneLind/claude-usage/pull/47"},{"n":48,"at":"2026-07-29T18:39:06.357Z","rev":true,"f":0,"url":"https://github.com/RuneLind/claude-usage/pull/48"}],"landed":2,"merges":2,"findings":0,"maxRounds":1,"cost":28.33,"tokens":36531360,"activeH":5.22,"spanH":5.22,"firstAt":"2026-07-29T13:38:51.080Z","lastAt":"2026-07-29T18:51:57.002Z","backlog":false,"statusDate":"2026-07-31","followups":"open","mtime":"2026-07-31T13:09:17.535Z"},{"slug":"huginn-melosys-bot-followups","title":"Melosys-bot ↔ index — oppfølgings-backlog","desc":"","status":"blocked","note":"NAV-side; parked pending Capra/NAV priority.","tags":["huginn","plan","search","knowledge-graph"],"fam":"huginn","rel":"plans/huginn-melosys-bot-followups.md","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=huginn-melosys-bot-followups","slate":[],"total":null,"legs":1,"buildLegs":0,"handovers":0,"prs":[],"landed":0,"merges":0,"findings":0,"maxRounds":0,"cost":10.91,"tokens":7784501,"activeH":6.25,"spanH":6.25,"firstAt":"2026-05-24T14:04:18.102Z","lastAt":"2026-05-24T20:19:11.995Z","backlog":false,"statusDate":"2026-07-31","followups":"open","mtime":"2026-07-31T13:09:17.541Z"},{"slug":"huginn-melosys-bot-graph-chunking-2026-05","title":"Melosys-bot graf/chunking-feedback 2026-05-21 — Huginn-arbeidsplan","desc":"","status":"blocked","note":"NAV-side; parked pending Capra/NAV priority.","tags":["huginn","plan","knowledge-graph","rag"],"fam":"huginn","rel":"plans/huginn-melosys-bot-graph-chunking-2026-05.md","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=huginn-melosys-bot-graph-chunking-2026-05","slate":[],"total":null,"legs":0,"buildLegs":0,"handovers":0,"prs":[],"landed":0,"merges":0,"findings":0,"maxRounds":0,"cost":0,"tokens":0,"activeH":0,"spanH":0,"firstAt":null,"lastAt":null,"backlog":true,"statusDate":"2026-07-31","followups":"open","mtime":"2026-07-31T13:09:17.541Z"},{"slug":"huginn-muninn-indexing-dashboard","title":"PR 3 — Muninn indexing dashboard page","desc":"The read surface for the run ledger: one page answering when each indexing job last ran, how long it took, and whether it is drifting. The endpoint returns about twenty rows in three classes, not the ten the parent plan ","status":"blocked","note":"","tags":["muninn","huginn","plan","observability","indexing"],"fam":"muninn","rel":"plans/huginn-muninn-indexing-dashboard.mdx","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=huginn-muninn-indexing-dashboard","slate":[],"total":null,"legs":3,"buildLegs":2,"handovers":1,"prs":[{"n":90,"at":"2026-07-20T08:05:22.067Z","rev":false,"f":0,"url":"https://github.com/RuneLind/huginn/pull/90"},{"n":316,"at":"2026-07-20T10:33:08.779Z","rev":true,"f":14,"url":"https://github.com/RuneLind/muninn/pull/316"},{"n":317,"at":"2026-07-20T10:53:34.764Z","rev":true,"f":5,"url":"https://github.com/RuneLind/muninn/pull/317"}],"landed":3,"merges":3,"findings":19,"maxRounds":1,"cost":101.17,"tokens":121813931,"activeH":27.25,"spanH":27.24,"firstAt":"2026-07-19T07:42:59.751Z","lastAt":"2026-07-20T10:57:20.463Z","backlog":false,"statusDate":"2026-07-19","followups":null,"mtime":"2026-07-31T13:09:17.543Z"},{"slug":"claude-usage-architecture-hardening","title":"claude-usage — architecture hardening campaign (6 PRs)","desc":"Execute the 6-PR roadmap from the 2026-08-03 architecture review via fable-orchestrate: gates/CI first as a hard block, then ingest integrity, ops floor, client entry seam, store hygiene, server decomposition.","status":"shipped","note":"All 6 PRs landed (#69/#70/#71/#72/#73/#74) and deployed on the mini; campaign-level named acceptance test passed end-to-end 2026-08-03 (CI red + refused restart on a deliberate tsc error; wrong-cwd ingest rewrote nothing","tags":["claude-usage","plan","design","testing"],"fam":"claude-usage","rel":"plans/claude-usage-architecture-hardening.mdx","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=claude-usage-architecture-hardening","slate":[1,2,3,4,5,6],"total":6,"legs":2,"buildLegs":2,"handovers":1,"prs":[{"n":69,"at":"2026-08-03T08:57:55.452Z","rev":true,"f":53,"url":"https://github.com/RuneLind/claude-usage/pull/69"},{"n":70,"at":"2026-08-03T09:45:55.722Z","rev":true,"f":26,"url":"https://github.com/RuneLind/claude-usage/pull/70"},{"n":71,"at":"2026-08-03T10:03:02.856Z","rev":true,"f":18,"url":"https://github.com/RuneLind/claude-usage/pull/71"},{"n":72,"at":"2026-08-03T10:47:54.937Z","rev":true,"f":22,"url":"https://github.com/RuneLind/claude-usage/pull/72"},{"n":73,"at":"2026-08-03T13:04:56.262Z","rev":true,"f":60,"url":"https://github.com/RuneLind/claude-usage/pull/73"},{"n":74,"at":"2026-08-03T13:44:07.310Z","rev":true,"f":13,"url":"https://github.com/RuneLind/claude-usage/pull/74"}],"landed":6,"merges":6,"findings":192,"maxRounds":1,"cost":276.32,"tokens":316630464,"activeH":11.09,"spanH":11.13,"firstAt":"2026-08-03T06:44:12.578Z","lastAt":"2026-08-03T17:52:12.611Z","backlog":false,"statusDate":"2026-08-03","followups":"open","mtime":"2026-08-03T17:51:25.690Z"},{"slug":"claude-usage-limit-projection","title":"claude-usage: a rate-limit projection that knows when you are asleep","desc":"Replace the weekly gauge's flat 24 h-rate projection with a two-state burst-persistence model, give the verdict a clock time, and put the burn-up chart on the 5-hour and Fable cards. Five PRs plus a sixth gated on eviden","status":"shipped","note":"Executed 2026-08-07 by fable-orchestrate: PRs #104-#109 merged and deployed (the sixth, #109, is the first-day rule — not the band). Backtest gates green: 8.6 median / 25.0 P90 vs baseline 15.0 / 43.1. All four CAPPED IM","tags":["claude-usage","plan","rate-limits","dashboard"],"fam":"claude-usage","rel":"plans/claude-usage-limit-projection.mdx","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=claude-usage-limit-projection","slate":[1,2,3,4,5,6],"total":6,"legs":2,"buildLegs":1,"handovers":0,"prs":[{"n":104,"at":"2026-08-06T22:21:07.043Z","rev":true,"f":39,"url":"https://github.com/RuneLind/claude-usage/pull/104"},{"n":105,"at":"2026-08-06T22:28:02.128Z","rev":true,"f":38,"url":"https://github.com/RuneLind/claude-usage/pull/105"},{"n":106,"at":"2026-08-06T23:47:04.799Z","rev":true,"f":26,"url":"https://github.com/RuneLind/claude-usage/pull/106"},{"n":107,"at":"2026-08-07T01:21:42.766Z","rev":true,"f":42,"url":"https://github.com/RuneLind/claude-usage/pull/107"},{"n":108,"at":"2026-08-07T03:22:20.790Z","rev":true,"f":16,"url":"https://github.com/RuneLind/claude-usage/pull/108"},{"n":109,"at":"2026-08-07T04:12:25.774Z","rev":true,"f":9,"url":"https://github.com/RuneLind/claude-usage/pull/109"}],"landed":6,"merges":6,"findings":170,"maxRounds":1,"cost":294.91,"tokens":364358958,"activeH":24.56,"spanH":23.2,"firstAt":"2026-08-06T07:06:07.828Z","lastAt":"2026-08-07T06:17:58.665Z","backlog":false,"statusDate":"2026-08-07","followups":"open","mtime":"2026-08-08T19:52:59.808Z"},{"slug":"claude-usage-live-agents-hooks","title":"claude-usage — Live agents v2: hooks as the liveness signal","desc":"Re-plan of the live-agents signal source after PR 0 on the mac pro fired the stop trigger: the status line renders only while a session works, so liveness moves to Claude Code hook events (told state, not inferred), sess","status":"shipped","note":"","tags":["claude-usage","plan","dashboard"],"fam":"claude-usage","rel":"plans/claude-usage-live-agents-hooks.mdx","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=claude-usage-live-agents-hooks","slate":[],"total":null,"legs":4,"buildLegs":2,"handovers":2,"prs":[{"n":39,"at":"2026-07-28T17:09:49.957Z","rev":true,"f":19,"url":"https://github.com/RuneLind/claude-usage/pull/39"},{"n":40,"at":"2026-07-28T18:08:54.135Z","rev":true,"f":10,"url":"https://github.com/RuneLind/claude-usage/pull/40"},{"n":41,"at":"2026-07-28T19:04:39.855Z","rev":true,"f":14,"url":"https://github.com/RuneLind/claude-usage/pull/41"},{"n":42,"at":"2026-07-28T20:08:57.334Z","rev":true,"f":6,"url":"https://github.com/RuneLind/claude-usage/pull/42"},{"n":43,"at":"2026-07-29T09:45:53.629Z","rev":true,"f":13,"url":"https://github.com/RuneLind/claude-usage/pull/43"},{"n":44,"at":"2026-07-29T10:44:47.715Z","rev":true,"f":30,"url":"https://github.com/RuneLind/claude-usage/pull/44"},{"n":46,"at":"2026-07-29T12:01:44.713Z","rev":true,"f":24,"url":"https://github.com/RuneLind/claude-usage/pull/46"},{"n":45,"at":"2026-07-29T12:19:34.078Z","rev":true,"f":36,"url":"https://github.com/RuneLind/claude-usage/pull/45"}],"landed":8,"merges":8,"findings":152,"maxRounds":1,"cost":406.21,"tokens":476985251,"activeH":21.87,"spanH":21.84,"firstAt":"2026-07-28T15:59:12.760Z","lastAt":"2026-07-29T13:49:23.775Z","backlog":false,"statusDate":"2026-07-29","followups":"open","mtime":"2026-08-06T20:06:16.357Z"},{"slug":"claude-usage-live-attach-prototype","title":"Live-attach prototype — browser into a supacode/zmx session","desc":"Smallest possible test of the Tier-0/Tier-1 attach idea: ttyd -W wrapping zmx attach on the mini's Tailscale IP, so a browser can view and steer the same session supacode owns. Prototype only — no dashboard code changes.","status":"shipped","note":"All 3 acceptance checks passed same day, plus cross-machine: Rune attached from the mac pro's browser over the tailnet. Open: auth + launchd + Tier-1 dashboard link.","tags":["claude-usage","plan","zmx","ttyd"],"fam":"claude-usage","rel":"plans/claude-usage-live-attach-prototype.mdx","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=claude-usage-live-attach-prototype","slate":[],"total":null,"legs":1,"buildLegs":1,"handovers":0,"prs":[{"n":68,"at":"2026-08-02T06:37:21.037Z","rev":true,"f":7,"url":"https://github.com/RuneLind/claude-usage/pull/68"}],"landed":1,"merges":1,"findings":7,"maxRounds":1,"cost":58.57,"tokens":54566741,"activeH":14.5,"spanH":14.5,"firstAt":"2026-08-01T16:31:34.510Z","lastAt":"2026-08-02T07:01:33.496Z","backlog":false,"statusDate":"2026-08-01","followups":"open","mtime":"2026-08-01T19:39:13.606Z"},{"slug":"claude-hivemind-architecture-fixes","title":"claude-hivemind — Correctness + DRY fixes","desc":"","status":"shipped","note":"","tags":["hivemind","plan","design"],"fam":"claude-hivemind","rel":"plans/claude-hivemind-architecture-fixes.md","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=claude-hivemind-architecture-fixes","slate":[1,2,3,4,5,6],"total":6,"legs":2,"buildLegs":2,"handovers":1,"prs":[{"n":14,"at":"2026-05-07T17:43:19.223Z","rev":false,"f":0,"url":"https://github.com/RuneLind/claude-hivemind/pull/14"},{"n":15,"at":"2026-05-07T17:59:22.567Z","rev":false,"f":0,"url":"https://github.com/RuneLind/claude-hivemind/pull/15"},{"n":16,"at":"2026-05-07T18:46:38.513Z","rev":false,"f":0,"url":"https://github.com/RuneLind/claude-hivemind/pull/16"},{"n":17,"at":"2026-05-07T19:12:01.206Z","rev":false,"f":0,"url":"https://github.com/RuneLind/claude-hivemind/pull/17"},{"n":18,"at":"2026-05-07T19:45:56.693Z","rev":true,"f":15,"url":"https://github.com/RuneLind/claude-hivemind/pull/18"},{"n":19,"at":"2026-05-07T19:55:16.047Z","rev":true,"f":11,"url":"https://github.com/RuneLind/claude-hivemind/pull/19"}],"landed":6,"merges":6,"findings":26,"maxRounds":1,"cost":32.42,"tokens":46363466,"activeH":3.88,"spanH":3.94,"firstAt":"2026-05-07T16:02:39.359Z","lastAt":"2026-05-07T19:59:11.405Z","backlog":false,"statusDate":"2026-05-07","followups":null,"mtime":"2026-07-31T13:09:17.531Z"},{"slug":"claude-hivemind-reply-correlation","title":"claude-hivemind — reply correlation at the protocol level","desc":"","status":"shipped","note":"","tags":["hivemind","plan","design"],"fam":"claude-hivemind","rel":"plans/claude-hivemind-reply-correlation.md","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=claude-hivemind-reply-correlation","slate":[],"total":null,"legs":3,"buildLegs":3,"handovers":0,"prs":[{"n":136,"at":"2026-05-23T07:19:54.142Z","rev":false,"f":0,"url":"https://github.com/RuneLind/muninn/pull/136"},{"n":20,"at":"2026-05-23T08:49:24.176Z","rev":true,"f":12,"url":"https://github.com/RuneLind/claude-hivemind/pull/20"},{"n":137,"at":"2026-05-23T08:50:46.883Z","rev":true,"f":3,"url":"https://github.com/RuneLind/muninn/pull/137"}],"landed":2,"merges":3,"findings":15,"maxRounds":1,"cost":122.44,"tokens":154651684,"activeH":29.9,"spanH":25.47,"firstAt":"2026-05-22T08:16:10.447Z","lastAt":"2026-05-23T09:44:31.001Z","backlog":false,"statusDate":"2026-05-23","followups":null,"mtime":"2026-07-31T13:09:17.532Z"},{"slug":"claude-usage-agent-sheet-v3","title":"claude-usage — subagent drill-down v3: the agent sheet (Story default, Log toggle)","desc":"Replace the inline subagent detail panel with an almost-full-screen sheet you leave with Escape and walk with J/K, and make a 180-message agent legible: an activity ribbon that turns the message count into a shape, a Sto","status":"shipped","note":"COMPLETE 2026-08-04: all 5 PRs merged (#77, #78, #79, #80, #84), named acceptance test passed clause-by-clause on the live dashboard, prototype deleted, deployed via make restart. Every CAPPED item was verified against t","tags":["claude-usage","plan","dashboard"],"fam":"claude-usage","rel":"plans/claude-usage-agent-sheet-v3.mdx","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=claude-usage-agent-sheet-v3","slate":[1,2,3,4,5],"total":5,"legs":2,"buildLegs":1,"handovers":1,"prs":[{"n":77,"at":"2026-08-04T07:42:19.945Z","rev":true,"f":50,"url":"https://github.com/RuneLind/claude-usage/pull/77"},{"n":78,"at":"2026-08-04T08:28:05.224Z","rev":true,"f":31,"url":"https://github.com/RuneLind/claude-usage/pull/78"},{"n":79,"at":"2026-08-04T09:46:23.683Z","rev":true,"f":20,"url":"https://github.com/RuneLind/claude-usage/pull/79"},{"n":80,"at":"2026-08-04T11:17:40.740Z","rev":true,"f":29,"url":"https://github.com/RuneLind/claude-usage/pull/80"},{"n":84,"at":"2026-08-04T12:44:49.454Z","rev":true,"f":15,"url":"https://github.com/RuneLind/claude-usage/pull/84"}],"landed":5,"merges":5,"findings":145,"maxRounds":2,"cost":337.28,"tokens":436757660,"activeH":16.79,"spanH":16.79,"firstAt":"2026-08-03T20:01:14.249Z","lastAt":"2026-08-04T12:48:38.030Z","backlog":false,"statusDate":"2026-08-04","followups":"none","mtime":"2026-08-16T14:01:02.337Z"},{"slug":"claude-usage-drilldown-layout-v2","title":"claude-usage — Drill-down layout v2: tabs, full width, model+effort on the timeline","desc":"Rebuild the project and session drill-down pages around how they are actually read: sessions first behind tabs, the whole page width, model and reasoning effort on every timeline row, a short ai-title instead of a wall o","status":"shipped","note":"SHIPPED 2026-07-30 — all 8 PRs (#51-#58) merged, acceptance 9/9, the /proto page deleted after transcription. The frontmatter was never flipped when the campaign closed; corrected 2026-08-08 during the live-row-v3 wrap-u","tags":["claude-usage","plan","dashboard"],"fam":"claude-usage","rel":"plans/claude-usage-drilldown-layout-v2.mdx","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=claude-usage-drilldown-layout-v2","slate":[1,2,3,4,5,6,7,8],"total":8,"legs":3,"buildLegs":2,"handovers":2,"prs":[{"n":51,"at":"2026-07-30T13:20:28.465Z","rev":true,"f":29,"url":"https://github.com/RuneLind/claude-usage/pull/51"},{"n":52,"at":"2026-07-30T13:49:10.273Z","rev":true,"f":41,"url":"https://github.com/RuneLind/claude-usage/pull/52"},{"n":53,"at":"2026-07-30T14:05:54.526Z","rev":true,"f":27,"url":"https://github.com/RuneLind/claude-usage/pull/53"},{"n":54,"at":"2026-07-30T14:42:45.451Z","rev":true,"f":45,"url":"https://github.com/RuneLind/claude-usage/pull/54"},{"n":55,"at":"2026-07-30T15:11:04.049Z","rev":true,"f":36,"url":"https://github.com/RuneLind/claude-usage/pull/55"},{"n":56,"at":"2026-07-30T16:38:12.335Z","rev":true,"f":35,"url":"https://github.com/RuneLind/claude-usage/pull/56"},{"n":57,"at":"2026-07-30T17:24:27.153Z","rev":true,"f":44,"url":"https://github.com/RuneLind/claude-usage/pull/57"},{"n":58,"at":"2026-07-30T17:40:32.736Z","rev":true,"f":3,"url":"https://github.com/RuneLind/claude-usage/pull/58"}],"landed":8,"merges":8,"findings":260,"maxRounds":2,"cost":321.13,"tokens":399041557,"activeH":9.44,"spanH":9.47,"firstAt":"2026-07-30T10:03:17.903Z","lastAt":"2026-07-30T19:31:24.806Z","backlog":false,"statusDate":"2026-08-08","followups":null,"mtime":"2026-08-08T17:24:08.308Z"},{"slug":"claude-usage-live-agents-nesting","title":"claude-usage — Live sessions: subagents nested under their parent","desc":"Six PRs turning the live panel's flat agent chips into a tree: each session and everything it delegated to as one block, the session's own tool tail as a main-loop child row, per-agent state and cost on their own rows, a","status":"shipped","note":"All 7 PRs #59–#65 merged+deployed 2026-07-31 over two orchestrator sessions; acceptance 9/9 on the live dashboard (table in #65); mockup deleted; mini serves 75d649f, 1110 tests + tsc.","tags":["claude-usage","plan","dashboard","live"],"fam":"claude-usage","rel":"plans/claude-usage-live-agents-nesting.mdx","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=claude-usage-live-agents-nesting","slate":[1,2,3,4,5,6],"total":6,"legs":3,"buildLegs":3,"handovers":2,"prs":[{"n":59,"at":"2026-07-31T08:34:26.596Z","rev":false,"f":0,"url":"https://github.com/RuneLind/claude-usage/pull/59"},{"n":60,"at":"2026-07-31T09:18:30.885Z","rev":true,"f":18,"url":"https://github.com/RuneLind/claude-usage/pull/60"},{"n":61,"at":"2026-07-31T10:11:23.998Z","rev":true,"f":23,"url":"https://github.com/RuneLind/claude-usage/pull/61"},{"n":62,"at":"2026-07-31T11:13:43.154Z","rev":true,"f":22,"url":"https://github.com/RuneLind/claude-usage/pull/62"},{"n":63,"at":"2026-07-31T12:08:40.406Z","rev":true,"f":21,"url":"https://github.com/RuneLind/claude-usage/pull/63"},{"n":64,"at":"2026-07-31T13:38:41.327Z","rev":true,"f":24,"url":"https://github.com/RuneLind/claude-usage/pull/64"},{"n":65,"at":"2026-07-31T13:40:33.265Z","rev":false,"f":0,"url":"https://github.com/RuneLind/claude-usage/pull/65"}],"landed":7,"merges":7,"findings":108,"maxRounds":1,"cost":214.88,"tokens":240522623,"activeH":17.18,"spanH":17.2,"firstAt":"2026-07-30T20:38:34.859Z","lastAt":"2026-07-31T13:50:26.902Z","backlog":false,"statusDate":"2026-07-31","followups":null,"mtime":"2026-07-31T14:23:56.321Z"},{"slug":"claude-usage-live-narration-tail","title":"claude-usage — the live row says what the model said","desc":"Replace the delegating main-loop row's shell-command tail with the model's own last sentence, a counter for how far past it the loop has got, and a narration log behind a twisty that is closed until you open it.","status":"shipped","note":"SHIPPED 2026-08-06 as claude-usage PRs #100-#103 (fable-orchestrate, 4/4 merged, deployed on the mini). Each PR got a 3-finder Opus review + fix round; biggest catches: a measured 50 req/s client fetch loop (PR 4), a for","tags":["claude-usage","plan","live-sessions"],"fam":"claude-usage","rel":"plans/claude-usage-live-narration-tail.mdx","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=claude-usage-live-narration-tail","slate":[1,2,3,4],"total":4,"legs":2,"buildLegs":2,"handovers":1,"prs":[{"n":99,"at":"2026-08-06T11:23:06.052Z","rev":true,"f":0,"url":"https://github.com/RuneLind/claude-usage/pull/99"},{"n":100,"at":"2026-08-06T14:02:01.306Z","rev":true,"f":21,"url":"https://github.com/RuneLind/claude-usage/pull/100"},{"n":101,"at":"2026-08-06T14:56:38.001Z","rev":true,"f":14,"url":"https://github.com/RuneLind/claude-usage/pull/101"},{"n":102,"at":"2026-08-06T16:20:02.168Z","rev":true,"f":15,"url":"https://github.com/RuneLind/claude-usage/pull/102"},{"n":103,"at":"2026-08-06T17:37:08.507Z","rev":true,"f":27,"url":"https://github.com/RuneLind/claude-usage/pull/103"}],"landed":5,"merges":5,"findings":77,"maxRounds":1,"cost":166.56,"tokens":189185908,"activeH":13.42,"spanH":13.42,"firstAt":"2026-08-06T06:45:10.765Z","lastAt":"2026-08-06T20:10:33.079Z","backlog":false,"statusDate":"2026-08-06","followups":"none","mtime":"2026-08-16T14:01:02.338Z"},{"slug":"claude-usage-pipeline-ledger","title":"Pipeline ledger — the R5-5 cost/finding ledger, finally","desc":"Turn the shipping-pipeline audits from transcript archaeology into a query: extract merges, gate lines, review runs, and campaign membership from the transcripts claude-usage already ingests, and serve the audit tables f","status":"shipped","note":"Shipped 2026-08-08: PRs #114 (markers+sinks), #115 (backfill), #116 (ledger views+CLI), #118 (acceptance fixes), #117 (dashboard page). Acceptance test 1 PASSED on merge identification (83/83, both machines); compliance ","tags":["claude-usage","muninn","process","plan"],"fam":"muninn","rel":"plans/claude-usage-pipeline-ledger.mdx","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=claude-usage-pipeline-ledger","slate":[],"total":null,"legs":2,"buildLegs":1,"handovers":0,"prs":[{"n":114,"at":"2026-08-07T16:30:01.410Z","rev":true,"f":51,"url":"https://github.com/RuneLind/claude-usage/pull/114"},{"n":115,"at":"2026-08-07T17:29:55.165Z","rev":true,"f":29,"url":"https://github.com/RuneLind/claude-usage/pull/115"},{"n":116,"at":"2026-08-07T19:29:53.005Z","rev":true,"f":26,"url":"https://github.com/RuneLind/claude-usage/pull/116"},{"n":118,"at":"2026-08-07T21:43:56.347Z","rev":true,"f":24,"url":"https://github.com/RuneLind/claude-usage/pull/118"},{"n":117,"at":"2026-08-07T23:03:37.534Z","rev":true,"f":38,"url":"https://github.com/RuneLind/claude-usage/pull/117"}],"landed":5,"merges":5,"findings":168,"maxRounds":1,"cost":401.54,"tokens":496817636,"activeH":23.8,"spanH":19.01,"firstAt":"2026-08-07T10:44:13.074Z","lastAt":"2026-08-08T05:44:59.156Z","backlog":false,"statusDate":"2026-08-08","followups":null,"mtime":"2026-08-16T14:01:02.339Z"},{"slug":"claude-usage-plan-overview","title":"Plan overview — one row per plan, and a live strip that says which step you are on","desc":"Group claude-usage's ledger by the mimir PLAN rather than the session, so a plan built across handovers reads as one thing, and put the same join on the live panel so a running campaign says which step and review round i","status":"shipped","note":"SHIPPED 2026-08-15: all six PRs landed and deployed — campaign 1 (#156, #157), campaign 2 (#158, #159, #160) and PR 6 (#161, squash 84e8ae1). PR 6's gate held on the real corpus (94 campaign sessions, 82 plan-attributed,","tags":["claude-usage","mimir","muninn","process","plan"],"fam":"muninn","rel":"plans/claude-usage-plan-overview.mdx","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=claude-usage-plan-overview","slate":[1,2,3,4,5,6],"total":6,"legs":5,"buildLegs":3,"handovers":2,"prs":[{"n":156,"at":"2026-08-14T18:01:36.044Z","rev":true,"f":60,"url":"https://github.com/RuneLind/claude-usage/pull/156"},{"n":157,"at":"2026-08-14T19:56:32.516Z","rev":true,"f":42,"url":"https://github.com/RuneLind/claude-usage/pull/157"},{"n":158,"at":"2026-08-14T22:41:47.505Z","rev":true,"f":56,"url":"https://github.com/RuneLind/claude-usage/pull/158"},{"n":159,"at":"2026-08-15T01:32:34.726Z","rev":true,"f":51,"url":"https://github.com/RuneLind/claude-usage/pull/159"},{"n":160,"at":"2026-08-15T03:02:10.761Z","rev":true,"f":40,"url":"https://github.com/RuneLind/claude-usage/pull/160"},{"n":161,"at":"2026-08-15T09:01:28.559Z","rev":true,"f":59,"url":"https://github.com/RuneLind/claude-usage/pull/161"}],"landed":3,"merges":6,"findings":308,"maxRounds":2,"cost":515.92,"tokens":630094234,"activeH":19.81,"spanH":19.93,"firstAt":"2026-08-14T13:08:35.341Z","lastAt":"2026-08-15T09:04:11.985Z","backlog":false,"statusDate":"2026-08-15","followups":"open","mtime":"2026-08-15T09:02:35.194Z"},{"slug":"huginn-phase-2-research-knowledge","title":"Plan — Phase 2: research_knowledge query decomposition","desc":"","status":"shipped","note":"","tags":["muninn","huginn","plan","rag","research"],"fam":"muninn","rel":"plans/huginn-phase-2-research-knowledge.md","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=huginn-phase-2-research-knowledge","slate":[],"total":null,"legs":1,"buildLegs":1,"handovers":0,"prs":[{"n":118,"at":"2026-05-16T20:00:56.115Z","rev":false,"f":0,"url":"https://github.com/RuneLind/muninn/pull/118"},{"n":119,"at":"2026-05-16T20:17:58.755Z","rev":false,"f":0,"url":"https://github.com/RuneLind/muninn/pull/119"}],"landed":2,"merges":2,"findings":0,"maxRounds":0,"cost":41.61,"tokens":57372736,"activeH":11.21,"spanH":11.21,"firstAt":"2026-05-16T18:39:02.331Z","lastAt":"2026-05-17T05:51:27.811Z","backlog":false,"statusDate":"2026-05-16","followups":null,"mtime":"2026-07-31T13:09:17.545Z"},{"slug":"mimir-plan-status-lifecycle","title":"Plan status — make a plan's state machine-readable, filterable, and self-maintaining","desc":"A scan of all 145 mimir plans found no usable status metadata, a plans/index.md that has drifted ~39 entries out of date, 23 plans it never lists at all, and four lint checks broken by a rename and an extension default. ","status":"shipped","note":"A–E shipped 2026-07-31 (muninn #408 #409, mimir #1 #2 #3); PR F (retirement) deferred + review-found tail.","tags":["mimir","muninn","plan","wiki","dashboard"],"fam":"muninn","rel":"plans/mimir-plan-status-lifecycle.mdx","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=mimir-plan-status-lifecycle","slate":[],"total":null,"legs":3,"buildLegs":3,"handovers":2,"prs":[{"n":408,"at":"2026-07-31T06:57:25.751Z","rev":true,"f":23,"url":"https://github.com/RuneLind/muninn/pull/408"},{"n":1,"at":"2026-07-31T06:58:18.464Z","rev":true,"f":50,"url":"https://github.com/RuneLind/mimir/pull/1"},{"n":409,"at":"2026-07-31T08:04:39.546Z","rev":true,"f":30,"url":"https://github.com/RuneLind/muninn/pull/409"},{"n":2,"at":"2026-07-31T10:31:39.446Z","rev":true,"f":28,"url":"https://github.com/RuneLind/mimir/pull/2"},{"n":3,"at":"2026-07-31T10:51:02.912Z","rev":true,"f":9,"url":"https://github.com/RuneLind/mimir/pull/3"}],"landed":5,"merges":5,"findings":140,"maxRounds":1,"cost":177.44,"tokens":198760028,"activeH":13.65,"spanH":14.76,"firstAt":"2026-07-30T20:09:27.462Z","lastAt":"2026-07-31T10:55:16.901Z","backlog":false,"statusDate":"2026-07-31","followups":"open","mtime":"2026-07-31T13:09:17.548Z"},{"slug":"huginn-architecture-followups","title":"Huginn architecture-review follow-ups — PRs 1–5 ✅ DONE 2026-07-07","desc":"","status":"shipped","note":"","tags":["huginn","plan","search","design"],"fam":"huginn","rel":"plans/huginn-architecture-followups.md","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=huginn-architecture-followups","slate":[1,2,3,4,5],"total":5,"legs":1,"buildLegs":1,"handovers":0,"prs":[{"n":78,"at":"2026-07-06T20:59:00.642Z","rev":false,"f":0,"url":"https://github.com/RuneLind/huginn/pull/78"},{"n":79,"at":"2026-07-07T05:36:11.233Z","rev":false,"f":0,"url":"https://github.com/RuneLind/huginn/pull/79"},{"n":81,"at":"2026-07-07T05:45:22.938Z","rev":true,"f":0,"url":"https://github.com/RuneLind/huginn/pull/81"},{"n":80,"at":"2026-07-07T05:51:58.528Z","rev":false,"f":0,"url":"https://github.com/RuneLind/huginn/pull/80"},{"n":82,"at":"2026-07-07T06:11:11.903Z","rev":false,"f":0,"url":"https://github.com/RuneLind/huginn/pull/82"}],"landed":5,"merges":5,"findings":0,"maxRounds":1,"cost":109.86,"tokens":63591516,"activeH":14.45,"spanH":14.45,"firstAt":"2026-07-06T20:15:42.164Z","lastAt":"2026-07-07T10:42:53.885Z","backlog":false,"statusDate":"2026-07-06","followups":"open","mtime":"2026-07-31T13:09:17.538Z"},{"slug":"huginn-corrective-observability-phase-0c","title":"Plan — Phase 0c: corrective observability + signal-quality refinements","desc":"","status":"shipped","note":"","tags":["huginn","plan","rag","tracing"],"fam":"huginn","rel":"plans/huginn-corrective-observability-phase-0c.md","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=huginn-corrective-observability-phase-0c","slate":[],"total":null,"legs":2,"buildLegs":2,"handovers":0,"prs":[{"n":116,"at":"2026-05-16T15:03:26.746Z","rev":false,"f":0,"url":"https://github.com/RuneLind/muninn/pull/116"},{"n":39,"at":"2026-05-16T15:10:48.759Z","rev":true,"f":19,"url":"https://github.com/RuneLind/huginn/pull/39"},{"n":117,"at":"2026-05-16T16:31:21.381Z","rev":true,"f":0,"url":"https://github.com/RuneLind/muninn/pull/117"}],"landed":3,"merges":3,"findings":19,"maxRounds":1,"cost":26.08,"tokens":28075080,"activeH":4.56,"spanH":3.43,"firstAt":"2026-05-16T13:06:29.565Z","lastAt":"2026-05-16T16:32:20.107Z","backlog":false,"statusDate":"2026-05-15","followups":"open","mtime":"2026-07-31T13:09:17.539Z"},{"slug":"huginn-corrective-observability-phase-0c2","title":"Plan — Phase 0c.2: surface rescueStrategy in MCP marker for non-muninn callers","desc":"","status":"shipped","note":"","tags":["huginn","plan","rag","mcp"],"fam":"huginn","rel":"plans/huginn-corrective-observability-phase-0c2.md","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=huginn-corrective-observability-phase-0c2","slate":[],"total":null,"legs":1,"buildLegs":1,"handovers":0,"prs":[{"n":41,"at":"2026-05-16T17:28:06.767Z","rev":false,"f":0,"url":"https://github.com/RuneLind/huginn/pull/41"}],"landed":1,"merges":1,"findings":0,"maxRounds":0,"cost":13.63,"tokens":17337217,"activeH":2.73,"spanH":2.73,"firstAt":"2026-05-16T15:52:30.404Z","lastAt":"2026-05-16T18:36:14.451Z","backlog":false,"statusDate":"2026-05-16","followups":"open","mtime":"2026-07-31T13:09:17.539Z"},{"slug":"huginn-corrective-rag-in-adapter","title":"Plan — Corrective retrieval inside huginn (Path D)","desc":"","status":"shipped","note":"","tags":["huginn","plan","rag","search"],"fam":"huginn","rel":"plans/huginn-corrective-rag-in-adapter.md","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=huginn-corrective-rag-in-adapter","slate":[],"total":null,"legs":2,"buildLegs":2,"handovers":0,"prs":[{"n":38,"at":"2026-05-14T20:43:15.920Z","rev":true,"f":15,"url":"https://github.com/RuneLind/huginn/pull/38"},{"n":115,"at":"2026-05-16T13:05:34.194Z","rev":false,"f":0,"url":"https://github.com/RuneLind/muninn/pull/115"}],"landed":2,"merges":2,"findings":15,"maxRounds":1,"cost":109.59,"tokens":133069062,"activeH":89.98,"spanH":48.44,"firstAt":"2026-05-14T12:39:43.795Z","lastAt":"2026-05-16T13:06:11.844Z","backlog":false,"statusDate":"2026-05-14","followups":null,"mtime":"2026-07-31T13:09:17.539Z"},{"slug":"torrent-manager-discover-hardening","title":"torrent-manager — Discover hardening campaign (4 PRs)","desc":"Execute the 2026-08-03 architect review: fix the correctness bugs (uncancellable SSE fan-outs + single VPN snapshot, posterUrl injection, permanent negative TMDB caching, normalizeTitle split), then remove the growth tax","status":"shipped","note":"FOLLOW-UPS CLOSED 2026-08-17 in two PRs: #13 (1bf8b85) shows-stream cancellation — the 'Controller is already closed' late-write, plus the abandoned fan-out and a CALLER_GONE abort reason so a reload stops printing prowl","tags":["torrent-manager","plan"],"fam":"torrent","rel":"plans/torrent-manager-discover-hardening.mdx","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=torrent-manager-discover-hardening","slate":[1,2,3,4],"total":4,"legs":3,"buildLegs":2,"handovers":2,"prs":[{"n":9,"at":"2026-08-03T09:46:17.080Z","rev":true,"f":29,"url":"https://github.com/RuneLind/torrent-manager/pull/9"},{"n":10,"at":"2026-08-03T10:23:30.520Z","rev":true,"f":31,"url":"https://github.com/RuneLind/torrent-manager/pull/10"},{"n":11,"at":"2026-08-03T11:12:35.844Z","rev":true,"f":22,"url":"https://github.com/RuneLind/torrent-manager/pull/11"},{"n":12,"at":"2026-08-03T12:03:40.533Z","rev":true,"f":35,"url":"https://github.com/RuneLind/torrent-manager/pull/12"},{"n":13,"at":"2026-08-17T16:36:13.598Z","rev":true,"f":10,"url":"https://github.com/RuneLind/torrent-manager/pull/13"},{"n":14,"at":"2026-08-17T16:53:08.186Z","rev":true,"f":9,"url":"https://github.com/RuneLind/torrent-manager/pull/14"}],"landed":6,"merges":6,"findings":136,"maxRounds":1,"cost":175.25,"tokens":185292723,"activeH":9.39,"spanH":345.77,"firstAt":"2026-08-03T07:38:18.312Z","lastAt":"2026-08-17T17:24:47.126Z","backlog":false,"statusDate":"2026-08-03","followups":"none","mtime":"2026-08-17T16:56:14.833Z"},{"slug":"yggdrasil-empty-search-results","title":"Yggdrasil — empty results from natural-language search","desc":"","status":"shipped","note":"","tags":["yggdrasil","plan","search","embeddings"],"fam":"yggdrasil","rel":"plans/yggdrasil-empty-search-results.md","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=yggdrasil-empty-search-results","slate":[],"total":null,"legs":2,"buildLegs":1,"handovers":0,"prs":[{"n":3,"at":"2026-05-05T14:29:45.876Z","rev":true,"f":7,"url":"https://github.com/RuneLind/yggdrasil/pull/3"}],"landed":1,"merges":1,"findings":7,"maxRounds":1,"cost":20.55,"tokens":22096525,"activeH":21.77,"spanH":20.94,"firstAt":"2026-05-04T17:33:39.999Z","lastAt":"2026-05-05T14:30:14.165Z","backlog":false,"statusDate":"2026-05-23","followups":null,"mtime":"2026-07-31T13:09:17.568Z"},{"slug":"yggdrasil-review-followups","title":"Yggdrasil — Review Follow-ups (ranks 7–22)","desc":"","status":"shipped","note":"","tags":["yggdrasil","plan","design"],"fam":"yggdrasil","rel":"plans/yggdrasil-review-followups.md","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=yggdrasil-review-followups","slate":[],"total":null,"legs":2,"buildLegs":1,"handovers":1,"prs":[{"n":7,"at":"2026-05-31T10:29:37.231Z","rev":true,"f":14,"url":"https://github.com/RuneLind/yggdrasil/pull/7"}],"landed":1,"merges":1,"findings":14,"maxRounds":1,"cost":116.89,"tokens":68227791,"activeH":23.49,"spanH":23.96,"firstAt":"2026-05-30T20:18:11.022Z","lastAt":"2026-05-31T20:15:30.302Z","backlog":false,"statusDate":"2026-06-01","followups":"open","mtime":"2026-07-31T13:09:17.568Z"},{"slug":"claude-usage-agent-row-tail-read","title":"claude-usage — subagent rows narrate on demand (tail-read, no ingest)","desc":"Give the live panel's subagent rows the agent's own last sentence via a bounded on-expand transcript tail-read — the cheap middle path that skips the ingest-column + backfill campaign entirely.","status":"superseded","note":"Superseded 2026-08-08 by claude-usage-live-row-v3 — SHIPPED same day (PRs #120-#123). Two of this plan's conclusions were corrected there: agent rows DO get a count, anchored by the counter entry's own existence (created","tags":["claude-usage","plan","live-sessions"],"fam":"claude-usage","rel":"plans/claude-usage-agent-row-tail-read.mdx","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=claude-usage-agent-row-tail-read","slate":[],"total":null,"legs":0,"buildLegs":0,"handovers":0,"prs":[],"landed":0,"merges":0,"findings":0,"maxRounds":0,"cost":0,"tokens":0,"activeH":0,"spanH":0,"firstAt":null,"lastAt":null,"backlog":true,"statusDate":"2026-08-08","followups":"none","mtime":"2026-08-08T17:23:08.651Z"},{"slug":"yggdrasil-roadmap","title":"Yggdrasil — Work Plan","desc":"","status":"abandoned","note":"Dormant, closed out 2026-08-16 during a mimir lint: no non-sweep touch of this file since 2026-05-23 and no yggdrasil commit since 2026-05-31 (last: #7/#8 review fixes). Not a judgement on the roadmap items — the work si","tags":["yggdrasil","plan","search"],"fam":"yggdrasil","rel":"plans/yggdrasil-roadmap.md","url":"https://rune-mini-m4.tail7b311e.ts.net/wiki?wiki=mimir&page=yggdrasil-roadmap","slate":[],"total":null,"legs":0,"buildLegs":0,"handovers":0,"prs":[],"landed":0,"merges":0,"findings":0,"maxRounds":0,"cost":0,"tokens":0,"activeH":0,"spanH":0,"firstAt":null,"lastAt":null,"backlog":true,"statusDate":"2026-08-16","followups":"open","mtime":"2026-08-16T14:21:23.389Z"}]};
+</script>
+<script>
+(() => {
+"use strict";
+const D = window.BOARD_DATA;
+const rows = D.rows;
+const DAY = 86400000;
+const NOW = Date.parse(D.generatedAt) || Date.now();
+
+// ---------------------------------------------------------------- columns
+// Legend text is mimir's own, verbatim from scripts/plan-status/plans.ts — the board
+// must not invent a second definition of a status the repo already defines.
+const COLS = [
+  {key:"proposed",  label:"Proposed",  st:"var(--s-proposed)", scope:"active",
+   hint:"Written; awaiting go/no-go."},
+  {key:"ready",     label:"Ready",     st:"var(--s-ready)",    scope:"active",
+   hint:"Reviewed / plan-review-looped; safe to dispatch."},
+  {key:"in-flight", label:"In flight", st:"var(--s-inflight)", scope:"active",
+   hint:"Actively executing."},
+  {key:"blocked",   label:"Blocked",   st:"var(--s-blocked)",  scope:"active",
+   hint:"Waiting on something external."},
+  {key:"followups", label:"Follow-ups open", st:"var(--s-followups)", scope:"followups",
+   hint:"Shipped, but the plan still carries followups: open."},
+  {key:"shipped",   label:"Shipped",   st:"var(--s-shipped)",  scope:"all",
+   hint:"All planned work landed (incl. superseded and abandoned)."},
+];
+const PRIORITIES = ["p0","p1","p2","p3"];
+const PRI_COLOR = {p0:"var(--p0)",p1:"var(--p1)",p2:"var(--p2)",p3:"var(--p3)"};
+
+// ---------------------------------------------------------------- estimate model
+// Per repo family: cost-per-landed-PR quartiles and hours-per-PR median, over shipped
+// plans that actually landed something. Fewer than 3 samples => fall back to the global
+// pool and say so on the card.
+function quantile(sorted, q){
+  if (!sorted.length) return 0;
+  const i = Math.min(sorted.length - 1, Math.floor(sorted.length * q));
+  return sorted[i];
+}
+function statsFrom(pool){
+  const perPr = pool.map(r => r.cost / Math.max(1, r.landed)).sort((a,b)=>a-b);
+  const hrPr  = pool.map(r => r.activeH / Math.max(1, r.landed)).sort((a,b)=>a-b);
+  const prs   = pool.map(r => r.landed).sort((a,b)=>a-b);
+  return {n:pool.length, lo:quantile(perPr,.25), mid:quantile(perPr,.5), hi:quantile(perPr,.75),
+          hours:quantile(hrPr,.5), prs:quantile(prs,.5)};
+}
+const shippedPool = rows.filter(r => r.status === "shipped" && r.landed > 0);
+const GLOBAL = statsFrom(shippedPool);
+const FAM_STATS = {};
+for (const r of shippedPool) (FAM_STATS[r.fam] ??= []).push(r);
+for (const k of Object.keys(FAM_STATS)) FAM_STATS[k] = statsFrom(FAM_STATS[k]);
+
+const MIN_SAMPLES = 3;
+function estimate(r){
+  const fs = FAM_STATS[r.fam];
+  const s = fs && fs.n >= MIN_SAMPLES ? fs : GLOBAL;
+  const basisFam = s === GLOBAL ? "all repos" : r.fam;
+  const declared = r.total != null;
+  const prs = declared ? r.total : Math.round(s.prs);
+  return {
+    prs, declared, n: s.n, basisFam,
+    lo: s.lo * prs, mid: s.mid * prs, hi: s.hi * prs,
+    hours: s.hours * prs,
+    perPr: s.mid,
+    // confidence: a declared slate against a well-sampled repo is the only "firm" case
+    firm: declared && s !== GLOBAL,
+  };
+}
+
+// ---------------------------------------------------------------- calibration
+// The fairest test available in-page: give the model the PR count a shipped plan
+// ACTUALLY landed (the thing a good slate would have told it) and see what it says.
+// In-sample — each plan is one of the samples behind its own repo median — so read
+// this as a floor on the error, not a forecast of it.
+function calibration(){
+  const errs = [], hits = [];
+  for (const r of shippedPool){
+    const fs = FAM_STATS[r.fam];
+    const s = fs && fs.n >= MIN_SAMPLES ? fs : GLOBAL;
+    const est = s.mid * r.landed;
+    if (!est || !r.cost) continue;
+    errs.push(Math.abs(est - r.cost) / r.cost);
+    hits.push(r.cost >= s.lo * r.landed && r.cost <= s.hi * r.landed);
+  }
+  errs.sort((a,b)=>a-b);
+  return {
+    n: errs.length,
+    medErr: errs.length ? errs[Math.floor(errs.length/2)] : 0,
+    inBand: hits.length ? hits.filter(Boolean).length / hits.length : 0,
+  };
+}
+
+// ---------------------------------------------------------------- local edits
+const LS = "planboard.v1";
+// `order` is PER COLUMN: {proposed:[slug,...], ready:[...]}. Rank is a statement about
+// a queue, not about the plan — "third thing I want built" only means anything inside
+// the column it was said in, and a card dragged to another column should lose it.
+let store = {pri:{}, moved:{}, order:{}};
+try { store = Object.assign(store, JSON.parse(localStorage.getItem(LS) || "{}")); } catch {}
+const save = () => { try { localStorage.setItem(LS, JSON.stringify(store)); } catch {} };
+const statusOf = r => store.moved[r.slug] || r.status || "proposed";
+const priOf = r => store.pri[r.slug] || null;
+store.order ??= {};
+
+/** Manual position of a plan inside its column, or -1 when it has never been ranked. */
+function rankOf(r){
+  const list = store.order[columnOf(r)];
+  return list ? list.indexOf(r.slug) : -1;
+}
+/** Every row of a column, in the order the board is currently showing them. */
+function columnRows(colKey){
+  return sortRows(rows.filter(r => columnOf(r) === colKey));
+}
+/**
+ * Persist a column's order. Written from the FULL column, never the filtered view:
+ * a rank stored while a repo filter was on would silently drop every plan the filter
+ * hid, and the next unfiltered render would read as a reshuffle nobody asked for.
+ */
+function setOrder(colKey, slugs){ store.order[colKey] = slugs; save(); }
+
+/** Move a card one place up (-1) or down (+1) inside its own column. */
+function nudge(r, delta){
+  const colKey = columnOf(r);
+  const list = columnRows(colKey).map(x => x.slug);
+  const i = list.indexOf(r.slug), j = i + delta;
+  if (i < 0 || j < 0 || j >= list.length) return;
+  [list[i], list[j]] = [list[j], list[i]];
+  setOrder(colKey, list);
+  render();
+}
+
+/** Drop `slug` into `colKey` at the position of `beforeSlug` (or last when null). */
+function placeAt(slug, colKey, beforeSlug){
+  const list = columnRows(colKey).map(x => x.slug).filter(s => s !== slug);
+  const at = beforeSlug ? list.indexOf(beforeSlug) : -1;
+  list.splice(at < 0 ? list.length : at, 0, slug);
+  setOrder(colKey, list);
+}
+
+// ---------------------------------------------------------------- derived per row
+for (const r of rows){
+  r._age = r.statusDate ? Math.round((NOW - Date.parse(r.statusDate)) / DAY) : null;
+  r._est = estimate(r);
+  r._search = (r.slug + " " + r.title + " " + (r.tags||[]).join(" ")).toLowerCase();
+}
+const STALE_DAYS = 60;
+
+function columnOf(r){
+  const st = statusOf(r);
+  if (st === "shipped" && r.followups === "open") return "followups";
+  if (st === "shipped" || st === "superseded" || st === "abandoned") return "shipped";
+  return COLS.some(c => c.key === st) ? st : "proposed";
+}
+
+// ---------------------------------------------------------------- view state
+const view = {
+  scope: "active",       // active | followups | all
+  fams: new Set(),
+  pri: null,             // null | p0..p3 | "unset"
+  q: "",
+  sort: "rank",          // rank | priority | stale | cost
+};
+
+const fams = [...new Set(rows.map(r => r.fam))]
+  .sort((a,b) => rows.filter(r=>r.fam===b).length - rows.filter(r=>r.fam===a).length);
+
+function visibleCols(){
+  if (view.scope === "active") return COLS.filter(c => c.scope === "active");
+  if (view.scope === "followups") return COLS.filter(c => c.scope !== "all");
+  return COLS;
+}
+function passes(r){
+  if (view.fams.size && !view.fams.has(r.fam)) return false;
+  if (view.pri === "unset" ? priOf(r) : view.pri && priOf(r) !== view.pri) return false;
+  if (view.q && !r._search.includes(view.q)) return false;
+  return true;
+}
+function sortRows(list){
+  const pri = r => PRIORITIES.indexOf(priOf(r) ?? "") < 0 ? 9 : PRIORITIES.indexOf(priOf(r));
+  const byPriority = (a,b) => pri(a)-pri(b) || (b._age??-1)-(a._age??-1);
+  const copy = [...list];
+  if (view.sort === "rank"){
+    // Hand-ranked cards hold the top of the column in the order they were placed;
+    // everything never touched falls in behind them on priority, then age. The
+    // fallback is what makes ranking usable on a 49-card column: rank the six that
+    // matter and let the rest sort themselves.
+    const manual = store.order[list.length ? columnOf(list[0]) : ""] || [];
+    const at = r => { const i = manual.indexOf(r.slug); return i < 0 ? Infinity : i; };
+    copy.sort((a,b) => at(a)-at(b) || byPriority(a,b));
+  }
+  else if (view.sort === "priority") copy.sort(byPriority);
+  else if (view.sort === "stale") copy.sort((a,b) => (b._age??-1)-(a._age??-1));
+  else copy.sort((a,b) => (b.status==="shipped"?b.cost:b._est.mid) - (a.status==="shipped"?a.cost:a._est.mid));
+  return copy;
+}
+
+// ---------------------------------------------------------------- formatting
+const usd = v => v >= 1000 ? "$" + (v/1000).toFixed(1) + "k" : "$" + Math.round(v);
+const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
+const fmtDate = iso => iso ? new Date(iso).toISOString().slice(0,10) : "—";
+
+// ---------------------------------------------------------------- meters
+function renderMeters(){
+  const active = rows.filter(r => ["proposed","ready","in-flight","blocked"].includes(statusOf(r)));
+  const inflight = rows.filter(r => statusOf(r) === "in-flight");
+  const fu = rows.filter(r => statusOf(r) === "shipped" && r.followups === "open");
+  const ages = active.map(r => r._age).filter(a => a != null).sort((a,b)=>a-b);
+  const medAge = ages.length ? ages[Math.floor(ages.length/2)] : 0;
+  const backlogCost = active.reduce((s,r) => s + r._est.mid, 0);
+  const spentActive = active.reduce((s,r) => s + r.cost, 0);
+
+  const items = [
+    {k:"Active plans", v:active.length, s:"of " + rows.length, n:"proposed · ready · in flight · blocked"},
+    {k:"In flight", v:inflight.length, n: inflight.length ? inflight.map(r=>r.fam).join(", ") : "nothing running"},
+    {k:"Backlog, priced", v:usd(backlogCost), n:"median estimate for all " + active.length + " active plans", cls: backlogCost > 2000 ? "warn" : ""},
+    {k:"Already sunk there", v:usd(spentActive), n:"spent on active plans so far"},
+    {k:"Median age", v:medAge, s:"days", n:"since last status_date on an active plan", cls: medAge > 30 ? "warn" : ""},
+    {k:"Shipped, follow-ups open", v:fu.length, n:"the backlog nobody files", cls:"crit"},
+    {k:"Spent to date", v:usd(D.totals.costUSD), n:D.totals.landed + " PRs across " + D.totals.legs + " sessions"},
+  ];
+  const box = document.getElementById("meters");
+  box.textContent = "";
+  for (const it of items){
+    const m = el("div", "meter " + (it.cls || ""));
+    m.append(el("div","k",it.k));
+    const v = el("div","v"); v.append(document.createTextNode(String(it.v)));
+    if (it.s) v.append(el("small",null,it.s));
+    m.append(v, el("div","n",it.n));
+    box.append(m);
+  }
+}
+
+// ---------------------------------------------------------------- controls
+function renderControls(){
+  const c = document.getElementById("controls");
+  c.textContent = "";
+
+  const scope = el("div","ctl");
+  scope.append(el("span","lab","Show"));
+  const seg = el("div","seg");
+  for (const [k,label] of [["active","Active only"],["followups","+ Follow-ups"],["all","Everything"]]){
+    const b = el("button",null,label);
+    b.setAttribute("aria-pressed", String(view.scope === k));
+    b.onclick = () => { view.scope = k; render(); };
+    seg.append(b);
+  }
+  scope.append(seg);
+
+  const famBox = el("div","ctl");
+  famBox.append(el("span","lab","Repo"));
+  const chips = el("div","chips");
+  for (const f of fams){
+    const n = rows.filter(r => r.fam === f && (view.scope === "all" || columnOf(r) !== "shipped")).length;
+    if (!n && view.scope !== "all") continue;
+    const b = el("button","chip");
+    b.append(document.createTextNode(f), el("span","c",String(n)));
+    b.setAttribute("aria-pressed", String(view.fams.has(f)));
+    b.onclick = () => { view.fams.has(f) ? view.fams.delete(f) : view.fams.add(f); render(); };
+    chips.append(b);
+  }
+  famBox.append(chips);
+
+  const priBox = el("div","ctl");
+  priBox.append(el("span","lab","Priority"));
+  const pchips = el("div","chips");
+  for (const p of [...PRIORITIES,"unset"]){
+    const b = el("button","chip", p);
+    b.setAttribute("aria-pressed", String(view.pri === p));
+    b.onclick = () => { view.pri = view.pri === p ? null : p; render(); };
+    pchips.append(b);
+  }
+  priBox.append(pchips);
+
+  const sortBox = el("div","ctl");
+  sortBox.append(el("span","lab","Sort"));
+  const sseg = el("div","seg");
+  for (const [k,label] of [["rank","My order"],["priority","Priority"],["stale","Stalest"],["cost","Biggest"]]){
+    const b = el("button",null,label);
+    b.setAttribute("aria-pressed", String(view.sort === k));
+    b.onclick = () => { view.sort = k; render(); };
+    sseg.append(b);
+  }
+  sortBox.append(sseg);
+
+  const search = document.createElement("input");
+  search.type = "search"; search.placeholder = "Filter by title, slug or tag";
+  search.value = view.q;
+  search.oninput = () => { view.q = search.value.trim().toLowerCase(); renderBoard(); };
+
+  c.append(scope, famBox, priBox, sortBox, search);
+}
+
+// ---------------------------------------------------------------- cards
+let selected = null;
+
+/**
+ * The open-the-plan link. Its own anchor rather than a click handler, so
+ * middle-click and cmd-click open a tab the way every other link on the machine
+ * does — and so it can sit on a card whose body already means "select this plan".
+ * `r.url` is claude-usage's muninn reader link; null with no configured reader,
+ * in which case the card shows no glyph rather than a dead one.
+ */
+function openLink(r, size, label){
+  if (!r.url) return null;
+  const a = document.createElement("a");
+  a.href = r.url; a.target = "_blank"; a.rel = "noopener";
+  a.title = "Open " + r.rel + " in the mimir reader";
+  a.setAttribute("aria-label", "Open plan " + (r.title || r.slug));
+  a.innerHTML = '<svg width="' + size + '" height="' + size + '" viewBox="0 0 16 16" fill="none" ' +
+    'stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M6.5 3H3.5A1.5 1.5 0 0 0 2 4.5v8A1.5 1.5 0 0 0 3.5 14h8a1.5 1.5 0 0 0 1.5-1.5v-3"/>' +
+    '<path d="M9.5 2.5H14v4.5"/><path d="M7 9l6.5-6.5"/></svg>';
+  if (label) a.append(document.createTextNode(label));
+  a.onclick = ev => ev.stopPropagation();
+  return a;
+}
+
+function card(r){
+  const b = el("button","card");
+  b.style.setProperty("--st", COLS.find(c => c.key === columnOf(r)).st);
+  const p = priOf(r);
+  b.draggable = true;
+  b.dataset.slug = r.slug;
+  if (selected === r.slug) b.classList.add("sel");
+
+  const r1 = el("div","r1");
+  // Only under "My order" — a #3 badge on the card sitting fifth because the column is
+  // sorted by age is a number that contradicts what the reader can see.
+  const rk = rankOf(r);
+  if (rk >= 0 && view.sort === "rank") r1.append(el("span","rank","#" + (rk + 1)));
+  const pill = el("span","pri" + (p ? "" : " unset"), p || "—");
+  if (p) pill.style.setProperty("--pc", PRI_COLOR[p]);
+  r1.append(pill, el("span","fam",r.fam));
+  if (store.moved[r.slug]) r1.append(el("span","pill-edit","moved"));
+  if (r.followups === "open" && columnOf(r) !== "followups") r1.append(el("span","flag","⚑"));
+
+  b.append(r1, el("div","t",r.title || r.slug));
+
+  const r2 = el("div","r2");
+  const shipped = ["shipped","superseded","abandoned"].includes(statusOf(r));
+  if (shipped){
+    r2.append(el("span","est", usd(r.cost) + " · " + r.landed + " PR" + (r.landed===1?"":"s")));
+    if (r.findings) r2.append(el("span",null, r.findings + " findings"));
+  } else {
+    const e = r._est;
+    const est = el("span","est" + (e.firm ? "" : " guess"),
+      "~" + usd(e.mid) + " · " + e.prs + " PR" + (e.prs===1?"":"s") + (e.declared ? "" : "?"));
+    est.title = "Band " + usd(e.lo) + "–" + usd(e.hi) + " from " + e.n + " shipped plans in " + e.basisFam +
+      (e.declared ? " × the " + e.prs + " PRs this plan declares" : " × the median plan size (this plan declares none)");
+    r2.append(est);
+    if (r.cost > 0) r2.append(el("span",null, usd(r.cost) + " spent"));
+  }
+  if (r._age != null){
+    const a = el("span", r._age > STALE_DAYS && !shipped ? "stale" : null, r._age + "d");
+    a.title = "status_date " + r.statusDate;
+    r2.append(a);
+  }
+  b.append(r2);
+
+  if (!shipped && r.cost > 0 && r._est.mid > 0){
+    const bar = el("div","bar"); const i = el("i");
+    i.style.width = Math.min(100, (r.cost / r._est.mid) * 100).toFixed(0) + "%";
+    bar.append(i); bar.title = usd(r.cost) + " spent of a ~" + usd(r._est.mid) + " estimate";
+    b.append(bar);
+  }
+
+  b.onclick = () => openDrawer(r);
+  b.ondragstart = ev => { ev.dataTransfer.setData("text/plain", r.slug); b.classList.add("dragging"); };
+  b.ondragend = () => b.classList.remove("dragging");
+
+  const wrap = el("div","cardwrap");
+  wrap.dataset.slug = r.slug;
+  wrap.append(b);
+  const link = openLink(r, 13);
+  if (link){ link.className = "open"; wrap.append(link); }
+
+  // Nudge buttons: the keyboard-and-trackpad way to say the same thing the drag says.
+  // Drag is the fast path; these are the one that works when the column is scrolled.
+  const nb = el("div","nudge");
+  const list = columnRows(columnOf(r)).map(x => x.slug);
+  const i = list.indexOf(r.slug);
+  for (const [d, glyph, label] of [[-1,"▲","up"],[1,"▼","down"]]){
+    const btn = el("button", null, glyph);
+    btn.title = "Move " + label + " in " + (COLS.find(c => c.key === columnOf(r)).label);
+    btn.setAttribute("aria-label", "Move " + (r.title || r.slug) + " " + label);
+    // Ranking is only meaningful while the column is showing MY order; under any other
+    // sort the card would jump straight back and read as a broken button.
+    const atEdge = d < 0 ? i <= 0 : i < 0 || i >= list.length - 1;
+    btn.disabled = atEdge || view.sort !== "rank";
+    if (view.sort !== "rank") btn.title = "Switch Sort to “My order” to rank by hand";
+    btn.onclick = ev => { ev.stopPropagation(); nudge(r, d); };
+    nb.append(btn);
+  }
+  wrap.append(nb);
+
+  // Drop ON a card = "put it here", in this column, at this position.
+  wrap.ondragover = ev => {
+    ev.preventDefault(); ev.stopPropagation();
+    const box = wrap.getBoundingClientRect();
+    const before = ev.clientY < box.top + box.height / 2;
+    wrap.classList.toggle("ins-before", before);
+    wrap.classList.toggle("ins-after", !before);
+  };
+  wrap.ondragleave = () => wrap.classList.remove("ins-before","ins-after");
+  wrap.ondrop = ev => {
+    ev.preventDefault(); ev.stopPropagation();
+    const before = wrap.classList.contains("ins-before");
+    wrap.classList.remove("ins-before","ins-after");
+    const slug = ev.dataTransfer.getData("text/plain");
+    const moved = rows.find(x => x.slug === slug);
+    if (!moved || moved.slug === r.slug) return;
+    const colKey = columnOf(r);
+    dropInto(moved, colKey);
+    const neighbours = columnRows(colKey).map(x => x.slug).filter(s => s !== slug);
+    const at = neighbours.indexOf(r.slug);
+    placeAt(slug, colKey, before ? r.slug : neighbours[at + 1] ?? null);
+    render();
+  };
+  return wrap;
+}
+
+/** Apply a column change to a plan — the status half of a drop, without the ordering. */
+function dropInto(r, colKey){
+  const target = colKey === "followups" ? "shipped" : colKey;
+  if (target === r.status) delete store.moved[r.slug]; else store.moved[r.slug] = target;
+  save();
+}
+
+// ---------------------------------------------------------------- board
+function renderBoard(){
+  const board = document.getElementById("board");
+  board.textContent = "";
+  const cols = visibleCols();
+  const shown = rows.filter(passes);
+
+  for (const c of cols){
+    const list = sortRows(shown.filter(r => columnOf(r) === c.key));
+    const money = list.reduce((s,r) => s + (["shipped","superseded","abandoned"].includes(statusOf(r)) ? r.cost : r._est.mid), 0);
+    const col = el("div","col");
+    col.style.setProperty("--st", c.st);
+
+    const head = el("div","head");
+    head.title = c.hint;
+    head.append(el("span","swatch"), el("span","name",c.label));
+    head.append(el("span","money", list.length ? usd(money) : ""));
+    head.append(el("span","count",String(list.length)));
+    col.append(head);
+
+    const stack = el("div","stack");
+    if (!list.length) stack.append(el("div","empty","nothing here"));
+    const cap = c.key === "shipped" || c.key === "followups" ? 40 : 200;
+    for (const r of list.slice(0, cap)) stack.append(card(r));
+    if (list.length > cap) stack.append(el("div","empty","+ " + (list.length - cap) + " more (capped in this prototype)"));
+    col.append(stack);
+
+    col.ondragover = ev => { ev.preventDefault(); col.classList.add("drop"); };
+    col.ondragleave = () => col.classList.remove("drop");
+    col.ondrop = ev => {
+      ev.preventDefault(); col.classList.remove("drop");
+      const slug = ev.dataTransfer.getData("text/plain");
+      const r = rows.find(x => x.slug === slug);
+      if (!r) return;
+      dropInto(r, c.key);
+      // Dropped on the column rather than between two cards: it goes to the bottom,
+      // and only if the column is already hand-ranked. An unranked column stays
+      // unranked — one stray drop should not pin 49 cards into a manual order.
+      if (store.order[c.key]) placeAt(slug, c.key, null);
+      render();
+    };
+    board.append(col);
+  }
+  renderTray();
+}
+
+// ---------------------------------------------------------------- drawer
+function openDrawer(r){
+  closeDrawer();
+  selected = r.slug;
+  const scrim = el("div","scrim"); scrim.onclick = closeDrawer;
+  const d = el("aside","drawer");
+  d.setAttribute("role","dialog"); d.setAttribute("aria-label", r.title || r.slug);
+  d.style.setProperty("--st", COLS.find(c => c.key === columnOf(r)).st);
+
+  const dh = el("div","dh");
+  const ttl = el("div");
+  ttl.append(el("h2", null, r.title || r.slug));
+  const sub = el("div","r2"); sub.style.marginTop = "5px";
+  sub.append(el("span","fam",r.fam), el("span","est", statusOf(r) + (store.moved[r.slug] ? " (moved locally)" : "")));
+  if (r.statusDate) sub.append(el("span",null,"since " + r.statusDate));
+  ttl.append(sub);
+  const x = el("button","x","Close"); x.onclick = closeDrawer;
+  const acts = el("div","acts");
+  const big = openLink(r, 13, "Open plan");
+  if (big){ big.className = "openbig"; acts.append(big); }
+  acts.append(x);
+  dh.append(ttl, acts);
+
+  const db = el("div","db");
+
+  if (r.desc) db.append(el("p","desc",r.desc));
+
+  // --- estimate / actuals
+  const shipped = ["shipped","superseded","abandoned"].includes(statusOf(r));
+  const sec1 = el("div","sec");
+  sec1.append(el("h3", null, shipped ? "What it actually cost" : "What it should cost"));
+  const kv = el("div","kv");
+  const cell = (k,v) => { const c = el("div"); c.append(el("div","k",k), el("div","v",v)); return c; };
+  const e = r._est;
+  if (shipped){
+    kv.append(cell("Cost", usd(r.cost)), cell("PRs landed", String(r.landed)),
+              cell("Sessions", String(r.legs)), cell("Active hours", r.activeH.toFixed(1)),
+              cell("Findings", String(r.findings)), cell("Handovers", String(r.handovers)));
+    sec1.append(kv);
+    if (r._est.mid) sec1.append(el("p","basis",
+      "The model would have estimated " + usd(e.mid) + " (band " + usd(e.lo) + "–" + usd(e.hi) + ") — actual " + usd(r.cost) + "."));
+  } else {
+    kv.append(cell("Estimate", usd(e.mid)), cell("Band", usd(e.lo) + "–" + usd(e.hi)),
+              cell("PRs", e.prs + (e.declared ? "" : "?")), cell("Hours", "~" + e.hours.toFixed(0)),
+              cell("Spent so far", usd(r.cost)), cell("Sessions", String(r.legs)));
+    sec1.append(kv);
+    sec1.append(el("p","basis",
+      "Median " + usd(e.perPr) + " per PR across " + e.n + " shipped plans in " + e.basisFam +
+      (e.declared ? ", × the " + e.prs + " PRs this plan's slate names."
+                  : ". This plan declares no PR slate, so " + e.prs + " is the median plan size — treat the number as an order of magnitude.")));
+  }
+  db.append(sec1);
+
+  if (r.note){
+    const s = el("div","sec"); s.append(el("h3",null,"Status note"), el("div","note",r.note)); db.append(s);
+  }
+
+  // --- priority
+  const s2 = el("div","sec");
+  s2.append(el("h3",null,"Priority (local)"));
+  const pset = el("div","priset");
+  for (const p of PRIORITIES){
+    const b = el("button",null,p);
+    b.style.setProperty("--pc", PRI_COLOR[p]);
+    b.setAttribute("aria-pressed", String(priOf(r) === p));
+    b.onclick = () => { priOf(r) === p ? delete store.pri[r.slug] : store.pri[r.slug] = p; save(); render(); openDrawer(r); };
+    pset.append(b);
+  }
+  s2.append(pset);
+  const patch = el("pre","patch");
+  const lines = [];
+  if (priOf(r)) lines.push("priority: " + priOf(r));
+  if (store.moved[r.slug]) lines.push("plan_status: " + store.moved[r.slug], "status_date: " + new Date(NOW).toISOString().slice(0,10));
+  const rkNow = rankOf(r);
+  const tail = rkNow >= 0
+    ? "\n# queue order — " + columnOf(r) + " #" + (rkNow + 1) + " of " + store.order[columnOf(r)].length +
+      "\n# (belongs in a sidecar like plans/index-extra.yaml, not in the plan's own frontmatter)"
+    : "";
+  patch.textContent = (lines.length
+    ? "# " + r.rel + "\n" + lines.map(l => "+ " + l).join("\n")
+    : "# " + r.rel + "\n(no local change — set a priority, drag the card, or nudge it up)") + tail;
+  s2.append(el("p","basis","What a writing board would put in the plan's frontmatter:"), patch);
+  db.append(s2);
+
+  // --- PRs
+  if (r.prs.length){
+    const s3 = el("div","sec");
+    s3.append(el("h3",null,"PRs landed (" + r.prs.length + ")"));
+    const list = el("div","prlist");
+    for (const pr of r.prs.slice(0,40)){
+      const label = "#" + (pr.n ?? "?");
+      const node = pr.url ? Object.assign(document.createElement("a"), {href:pr.url, target:"_blank", rel:"noopener", textContent:label}) : el("span",null,label);
+      if (!pr.rev) node.classList.add("unrev");
+      node.title = fmtDate(pr.at) + (pr.rev ? " · reviewed, " + pr.f + " findings" : " · no review recorded");
+      list.append(node);
+    }
+    s3.append(list); db.append(s3);
+  }
+
+  // --- legs
+  if (r.legs){
+    const s4 = el("div","sec");
+    s4.append(el("h3",null,"Sessions that worked it"));
+    const t = el("table","legs");
+    t.innerHTML = "<thead><tr><th>Span</th><th>Sessions</th><th>Handovers</th><th>Hours</th><th>Tokens</th></tr></thead>";
+    const tb = document.createElement("tbody");
+    const tr = document.createElement("tr");
+    const td = (v,n) => { const c = el("td", n ? "n" : null, v); return c; };
+    tr.append(td(fmtDate(r.firstAt) + " → " + fmtDate(r.lastAt)), td(String(r.legs),1), td(String(r.handovers),1),
+              td(r.activeH.toFixed(1),1), td((r.tokens/1e6).toFixed(0) + "M",1));
+    tb.append(tr); t.append(tb); s4.append(t); db.append(s4);
+  }
+
+  const s5 = el("div","sec");
+  s5.append(el("h3",null,"File"));
+  if (r.url){
+    const fl = document.createElement("a");
+    fl.className = "filelink"; fl.href = r.url; fl.target = "_blank"; fl.rel = "noopener";
+    fl.textContent = r.rel;
+    s5.append(fl);
+    s5.append(el("p","basis","Opens in muninn's mimir reader — reachable on the tailnet."));
+  } else {
+    s5.append(el("div","est", r.rel));
+  }
+  db.append(s5);
+
+  d.append(dh, db);
+  document.body.append(scrim, d);
+  document.addEventListener("keydown", escClose);
+  renderBoard();
+}
+function escClose(ev){ if (ev.key === "Escape") closeDrawer(); }
+function closeDrawer(){
+  document.querySelectorAll(".scrim,.drawer").forEach(n => n.remove());
+  document.removeEventListener("keydown", escClose);
+  if (selected){ selected = null; renderBoard(); }
+}
+
+// ---------------------------------------------------------------- tray
+function renderTray(){
+  document.querySelectorAll(".tray").forEach(n => n.remove());
+  const ranked = Object.keys(store.order);
+  const n = Object.keys(store.pri).length + Object.keys(store.moved).length;
+  if (!n && !ranked.length) return;
+  const t = el("div","tray");
+  const what = [
+    n ? n + " priority/status edit" + (n===1?"":"s") : null,
+    ranked.length ? "order set on " + ranked.join(" + ") : null,
+  ].filter(Boolean).join(" · ");
+  t.append(el("span","n",String(n + ranked.length)), el("span",null, what + " — not written anywhere"));
+  const copy = el("button","primary","Copy frontmatter patch");
+  copy.onclick = async () => {
+    const out = [];
+    for (const r of rows){
+      const lines = [];
+      if (store.pri[r.slug]) lines.push("priority: " + store.pri[r.slug]);
+      if (store.moved[r.slug]) lines.push("plan_status: " + store.moved[r.slug]);
+      if (lines.length) out.push(r.rel + "\n  " + lines.join("\n  "));
+    }
+    for (const col of ranked){
+      const named = store.order[col].slice(0, 12);
+      out.push("# queue order — " + col + " (first " + named.length + ")\n" + col + ":\n" +
+        named.map(s => "  - " + s).join("\n"));
+    }
+    const text = out.join("\n\n");
+    try { await navigator.clipboard.writeText(text); copy.textContent = "Copied"; }
+    catch { copy.textContent = "Copy blocked — see console"; console.log(text); }
+    setTimeout(() => copy.textContent = "Copy frontmatter patch", 1600);
+  };
+  const clear = el("button",null,"Discard");
+  clear.onclick = () => { store = {pri:{},moved:{},order:{}}; save(); render(); };
+  t.append(copy, clear);
+  document.body.append(t);
+}
+
+// ---------------------------------------------------------------- boot
+function render(){ renderMeters(); renderControls(); renderBoard(); }
+document.getElementById("asof").textContent = fmtDate(D.generatedAt);
+const cal = calibration();
+document.getElementById("calib").textContent =
+  "Handed the PR count a plan actually landed, the repo-median model lands inside its own p25–p75 band on " +
+  Math.round(cal.inBand * 100) + "% of the " + cal.n + " shipped plans, with a median error of " +
+  Math.round(cal.medErr * 100) + "%. That is in-sample and it is the optimistic case: a plan that " +
+  "declares no slate is being sized by the median plan, not by itself. Use the band, never the midpoint.";
+render();
+})();
+</script>

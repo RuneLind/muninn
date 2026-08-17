@@ -379,7 +379,7 @@ export const SHARED_STYLES = `
 
 /** Shared header HTML with nav links */
 export function renderNav(
-  activePage: "dashboard" | "traces" | "search" | "research" | "logs" | "mcp-debug" | "chat" | "summaries" | "serena" | "wiki" | "graph" | "benchmark" | "models" | "indexing" | "agents",
+  activePage: "dashboard" | "traces" | "search" | "research" | "logs" | "mcp-debug" | "chat" | "summaries" | "serena" | "wiki" | "graph" | "plans" | "benchmark" | "models" | "indexing" | "agents",
   options?: { headerLeftExtra?: string; headerRight?: string },
 ): string {
   // Pages collapsed under the "Tools ▾" dropdown. The trigger reads as active
@@ -448,6 +448,7 @@ export function renderNav(
         <a href="/summaries" class="nav-link${activePage === "summaries" ? " active" : ""}">Summaries</a>
         <a href="/wiki" class="nav-link${activePage === "wiki" ? " active" : ""}">Wiki</a>
         <a href="/graph" class="nav-link${activePage === "graph" ? " active" : ""}">Graph</a>
+        <a href="/plans" class="nav-link${activePage === "plans" ? " active" : ""}">Plans</a>
         <span class="nav-sep" aria-hidden="true"></span>
         <details class="nav-dropdown">
           <summary class="nav-link${toolsActive ? " active" : ""}">Tools <span class="nav-caret" aria-hidden="true">▾</span></summary>
