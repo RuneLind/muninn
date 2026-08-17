@@ -1,0 +1,490 @@
+{
+  "generatedAt": "2026-08-17T20:33:06.628Z",
+  "plans": [
+    {
+      "slug": "claude-usage-series-weekly-pct",
+      "title": "By model over time — hourly buckets and a weekly-budget line",
+      "planStatus": "shipped",
+      "relPath": "plans/claude-usage-series-weekly-pct.mdx",
+      "mtimeIso": "2026-08-09T08:38:52.171Z",
+      "slate": [
+        1,
+        2,
+        3
+      ],
+      "total": 3,
+      "costUSD": 164.18199995,
+      "totalTokens": 208268954,
+      "merges": 4,
+      "landed": 4,
+      "findings": 138,
+      "prs": [
+        {
+          "repo": "/Users/rune/source/private/claude-usage;",
+          "prNumber": 124,
+          "subject": null,
+          "mergedAt": "2026-08-08T21:20:24.017Z",
+          "state": "merged",
+          "url": null,
+          "reviewed": true
+        },
+        {
+          "repo": "/Users/rune/source/private/claude-usage;",
+          "prNumber": 125,
+          "subject": null,
+          "mergedAt": "2026-08-09T06:36:28.155Z",
+          "state": "merged",
+          "url": null,
+          "reviewed": true
+        },
+        {
+          "repo": "/Users/rune/source/private/claude-usage",
+          "prNumber": 126,
+          "subject": null,
+          "mergedAt": "2026-08-09T08:15:16.181Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/claude-usage/pull/126",
+          "reviewed": true
+        },
+        {
+          "repo": "/Users/rune/source/private/claude-usage",
+          "prNumber": 128,
+          "subject": null,
+          "mergedAt": "2026-08-09T09:49:17.491Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/claude-usage/pull/128",
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "slug": "claude-hivemind-reply-correlation",
+      "title": "claude-hivemind — reply correlation at the protocol level",
+      "planStatus": "shipped",
+      "relPath": "plans/claude-hivemind-reply-correlation.md",
+      "mtimeIso": "2026-07-31T13:09:17.532Z",
+      "slate": [],
+      "total": null,
+      "costUSD": 122.44323320000001,
+      "totalTokens": 154651684,
+      "merges": 3,
+      "landed": 2,
+      "findings": 15,
+      "prs": [
+        {
+          "repo": "/Users/rune/source/private/muninn",
+          "prNumber": 136,
+          "subject": null,
+          "mergedAt": "2026-05-23T07:19:54.142Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/muninn/pull/136",
+          "reviewed": false
+        },
+        {
+          "repo": "/Users/rune/source/private/claude-hivemind",
+          "prNumber": 20,
+          "subject": null,
+          "mergedAt": "2026-05-23T08:49:24.176Z",
+          "state": "merge-unconfirmed",
+          "url": "https://github.com/RuneLind/claude-hivemind/pull/20",
+          "reviewed": true
+        },
+        {
+          "repo": "/Users/rune/source/private/muninn",
+          "prNumber": 137,
+          "subject": null,
+          "mergedAt": "2026-05-23T08:50:46.883Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/muninn/pull/137",
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "slug": "mimir-plan-status-lifecycle",
+      "title": "Plan status — make a plan's state machine-readable, filterable, and self-maintaining",
+      "planStatus": "shipped",
+      "relPath": "plans/mimir-plan-status-lifecycle.mdx",
+      "mtimeIso": "2026-07-31T13:09:17.548Z",
+      "slate": [],
+      "total": null,
+      "costUSD": 177.43970000000002,
+      "totalTokens": 198760028,
+      "merges": 5,
+      "landed": 5,
+      "findings": 140,
+      "prs": [
+        {
+          "repo": "/Users/rune/source/private/muninn",
+          "prNumber": 408,
+          "subject": "Parse the plan-status frontmatter fields into the wiki index (#408)",
+          "mergedAt": "2026-07-31T06:57:25.751Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/muninn/pull/408",
+          "reviewed": true
+        },
+        {
+          "repo": "/Users/rune/source/private/mimir",
+          "prNumber": 1,
+          "subject": "Fix lint.sh's dead paths and .mdx blindness, add index generator (#1)",
+          "mergedAt": "2026-07-31T06:58:18.464Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/mimir/pull/1",
+          "reviewed": true
+        },
+        {
+          "repo": "/Users/rune/source/private/muninn",
+          "prNumber": 409,
+          "subject": "Add the plan-status facet to the /wiki reader (#409)",
+          "mergedAt": "2026-07-31T08:04:39.546Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/muninn/pull/409",
+          "reviewed": true
+        },
+        {
+          "repo": "/Users/rune/source/private/mimir",
+          "prNumber": 2,
+          "subject": "Plan status D — fold, backfill 145 plans, generate plans/index.md (#2)",
+          "mergedAt": "2026-07-31T10:31:39.446Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/mimir/pull/2",
+          "reviewed": true
+        },
+        {
+          "repo": "/Users/rune/source/private/mimir",
+          "prNumber": 3,
+          "subject": "Document the plan_status contract and retirement mapping (#3)",
+          "mergedAt": "2026-07-31T10:51:02.912Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/mimir/pull/3",
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "slug": "huginn-corrective-rag-in-adapter",
+      "title": "Plan — Corrective retrieval inside huginn (Path D)",
+      "planStatus": "shipped",
+      "relPath": "plans/huginn-corrective-rag-in-adapter.md",
+      "mtimeIso": "2026-07-31T13:09:17.539Z",
+      "slate": [],
+      "total": null,
+      "costUSD": 109.586167,
+      "totalTokens": 133069062,
+      "merges": 2,
+      "landed": 2,
+      "findings": 15,
+      "prs": [
+        {
+          "repo": "/Users/rune/source/private/huginn",
+          "prNumber": 38,
+          "subject": null,
+          "mergedAt": "2026-05-14T20:43:15.920Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/huginn/pull/38",
+          "reviewed": true
+        },
+        {
+          "repo": "/Users/rune/source/private/muninn",
+          "prNumber": 115,
+          "subject": null,
+          "mergedAt": "2026-05-16T13:05:34.194Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/muninn/pull/115",
+          "reviewed": false
+        }
+      ]
+    },
+    {
+      "slug": "muninn-code-review-fixes",
+      "title": "Muninn — Code review fix plan (2026-05-29)",
+      "planStatus": "shipped",
+      "relPath": "plans/muninn-code-review-fixes.md",
+      "mtimeIso": "2026-07-31T13:09:17.551Z",
+      "slate": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "total": 7,
+      "costUSD": 60.45671375000001,
+      "totalTokens": 73662751,
+      "merges": 6,
+      "landed": 6,
+      "findings": 18,
+      "prs": [
+        {
+          "repo": "/Users/rune/source/private/muninn",
+          "prNumber": 156,
+          "subject": null,
+          "mergedAt": "2026-05-29T15:20:21.519Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/muninn/pull/156",
+          "reviewed": true
+        },
+        {
+          "repo": "/Users/rune/source/private",
+          "prNumber": 157,
+          "subject": null,
+          "mergedAt": "2026-05-30T05:45:26.272Z",
+          "state": "merged",
+          "url": null,
+          "reviewed": true
+        },
+        {
+          "repo": "/Users/rune/source/private",
+          "prNumber": 158,
+          "subject": null,
+          "mergedAt": "2026-05-30T05:50:16.533Z",
+          "state": "merged",
+          "url": null,
+          "reviewed": false
+        },
+        {
+          "repo": "/Users/rune/source/private",
+          "prNumber": 159,
+          "subject": null,
+          "mergedAt": "2026-05-30T05:53:35.759Z",
+          "state": "merged",
+          "url": null,
+          "reviewed": false
+        },
+        {
+          "repo": "/Users/rune/source/private",
+          "prNumber": 160,
+          "subject": null,
+          "mergedAt": "2026-05-30T05:58:57.906Z",
+          "state": "merged",
+          "url": null,
+          "reviewed": false
+        },
+        {
+          "repo": "/Users/rune/source/private",
+          "prNumber": 161,
+          "subject": null,
+          "mergedAt": "2026-05-30T06:00:33.555Z",
+          "state": "merged",
+          "url": null,
+          "reviewed": false
+        }
+      ]
+    },
+    {
+      "slug": "claude-hivemind-architecture-fixes",
+      "title": "claude-hivemind — Correctness + DRY fixes",
+      "planStatus": "shipped",
+      "relPath": "plans/claude-hivemind-architecture-fixes.md",
+      "mtimeIso": "2026-07-31T13:09:17.531Z",
+      "slate": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ],
+      "total": 6,
+      "costUSD": 32.42241025000001,
+      "totalTokens": 46363466,
+      "merges": 6,
+      "landed": 6,
+      "findings": 26,
+      "prs": [
+        {
+          "repo": "/Users/rune/source/private/claude-hivemind",
+          "prNumber": 14,
+          "subject": null,
+          "mergedAt": "2026-05-07T17:43:19.223Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/claude-hivemind/pull/14",
+          "reviewed": false
+        },
+        {
+          "repo": "/Users/rune/source/private/claude-hivemind",
+          "prNumber": 15,
+          "subject": null,
+          "mergedAt": "2026-05-07T17:59:22.567Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/claude-hivemind/pull/15",
+          "reviewed": false
+        },
+        {
+          "repo": "/Users/rune/source/private/claude-hivemind",
+          "prNumber": 16,
+          "subject": null,
+          "mergedAt": "2026-05-07T18:46:38.513Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/claude-hivemind/pull/16",
+          "reviewed": false
+        },
+        {
+          "repo": "/Users/rune/source/private/claude-hivemind",
+          "prNumber": 17,
+          "subject": null,
+          "mergedAt": "2026-05-07T19:12:01.206Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/claude-hivemind/pull/17",
+          "reviewed": false
+        },
+        {
+          "repo": "/Users/rune/source/private/claude-hivemind",
+          "prNumber": 18,
+          "subject": null,
+          "mergedAt": "2026-05-07T19:45:56.693Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/claude-hivemind/pull/18",
+          "reviewed": true
+        },
+        {
+          "repo": "/Users/rune/source/private/claude-hivemind",
+          "prNumber": 19,
+          "subject": null,
+          "mergedAt": "2026-05-07T19:55:16.047Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/claude-hivemind/pull/19",
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "slug": "claude-skills-followup-audit-fixes",
+      "title": "Plan: Follow-up audit fixes — split trigger, terminal-state labels, empirical finder coverage",
+      "planStatus": "shipped",
+      "relPath": "plans/claude-skills-followup-audit-fixes.md",
+      "mtimeIso": "2026-07-31T13:09:17.533Z",
+      "slate": [],
+      "total": null,
+      "costUSD": 35.83216625,
+      "totalTokens": 16836538,
+      "merges": 0,
+      "landed": 0,
+      "findings": 0,
+      "prs": []
+    },
+    {
+      "slug": "claude-usage-live-attach-tier1",
+      "title": "Live-attach Tier 1 — an attach link on every dashboard session row",
+      "planStatus": "shipped",
+      "relPath": "plans/claude-usage-live-attach-tier1.mdx",
+      "mtimeIso": "2026-08-02T06:39:03.774Z",
+      "slate": [],
+      "total": null,
+      "costUSD": 0,
+      "totalTokens": 0,
+      "merges": 0,
+      "landed": 0,
+      "findings": 0,
+      "prs": []
+    },
+    {
+      "slug": "claude-usage-codex-view",
+      "title": "A Codex view, not a Codex lens",
+      "planStatus": "proposed",
+      "relPath": "plans/claude-usage-codex-view.mdx",
+      "mtimeIso": "2026-08-11T18:58:46.173Z",
+      "slate": [
+        1,
+        2,
+        3
+      ],
+      "total": 3,
+      "costUSD": 96.98379,
+      "totalTokens": 160041067,
+      "merges": 1,
+      "landed": 1,
+      "findings": 1,
+      "prs": [
+        {
+          "repo": "/Users/rune/source/private/claude-usage",
+          "prNumber": 142,
+          "subject": null,
+          "mergedAt": "2026-08-11T16:51:55.377Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/claude-usage/pull/142",
+          "reviewed": true
+        }
+      ]
+    },
+    {
+      "slug": "claude-hivemind-builtin-messaging",
+      "title": "Keep the broker, fix enrolment — Claude Code's built-in peer messaging is a different network",
+      "planStatus": "proposed",
+      "relPath": "plans/claude-hivemind-builtin-messaging.mdx",
+      "mtimeIso": "2026-08-17T16:52:35.743Z",
+      "slate": [
+        1,
+        2
+      ],
+      "total": 2,
+      "costUSD": 11.604244000000001,
+      "totalTokens": 14589406,
+      "merges": 0,
+      "landed": 0,
+      "findings": 0,
+      "prs": []
+    },
+    {
+      "slug": "claude-hivemind-peer-identity-trust",
+      "title": "claude-hivemind — Peer identity & trust (envelope-only trust + signed registration)",
+      "planStatus": "proposed",
+      "relPath": "plans/claude-hivemind-peer-identity-trust.md",
+      "mtimeIso": "2026-07-31T13:09:17.532Z",
+      "slate": [],
+      "total": null,
+      "costUSD": 36.835133,
+      "totalTokens": 23121377,
+      "merges": 1,
+      "landed": 1,
+      "findings": 0,
+      "prs": [
+        {
+          "repo": "/Users/rune/source/private/muninn",
+          "prNumber": 210,
+          "subject": null,
+          "mergedAt": "2026-07-07T09:28:06.022Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/muninn/pull/210",
+          "reviewed": false
+        }
+      ]
+    },
+    {
+      "slug": "claude-usage-post-v2-followups",
+      "title": "claude-usage — post-v2 follow-ups: reaper-diagnostics UI and the soak-period backlog",
+      "planStatus": "blocked",
+      "relPath": "plans/claude-usage-post-v2-followups.mdx",
+      "mtimeIso": "2026-07-31T13:09:17.535Z",
+      "slate": [],
+      "total": null,
+      "costUSD": 28.32973325,
+      "totalTokens": 36531360,
+      "merges": 2,
+      "landed": 2,
+      "findings": 0,
+      "prs": [
+        {
+          "repo": "/Users/rune/source/private/claude-usage",
+          "prNumber": 47,
+          "subject": "Show what the pid reaper is doing, on the panel (#47)",
+          "mergedAt": "2026-07-29T14:00:38.090Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/claude-usage/pull/47",
+          "reviewed": false
+        },
+        {
+          "repo": "/Users/rune/source/private/claude-usage",
+          "prNumber": 48,
+          "subject": "Stop painting every abandoned session red (#48)",
+          "mergedAt": "2026-07-29T18:39:06.357Z",
+          "state": "merged",
+          "url": "https://github.com/RuneLind/claude-usage/pull/48",
+          "reviewed": true
+        }
+      ]
+    }
+  ]
+}

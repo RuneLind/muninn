@@ -1,0 +1,348 @@
+---
+title: "Plan status — make a plan's state machine-readable, filterable, and self-maintaining"
+description: "A scan of all 145 mimir plans found no usable status metadata, a plans/index.md that has drifted ~39 entries out of date, 23 plans it never lists at all, and four lint checks broken by a rename and an extension default. Plan: a namespaced plan_status frontmatter contract, a status facet in the /wiki reader, a GENERATED plans/index.md with its prose migrated first, and the lint that keeps it honest."
+tags: [mimir, muninn, plan, wiki, dashboard]
+plan_status: shipped
+status_date: 2026-07-31
+followups: open
+status_note: "A–E shipped 2026-07-31 (muninn #408 #409, mimir #1 #2 #3); PR F (retirement) deferred + review-found tail."
+---
+
+# Plan status — make a plan's state machine-readable
+
+_Today you cannot answer "has this plan started, is it finished, is anything left over?" without opening the file. This plan makes the answer a frontmatter field, renders it in the `/wiki` reader as a filterable facet, and generates `plans/index.md` from it — after migrating the 87 KB of synthesis that index currently holds._
+
+<Callout tone="warn" title="Review status: CAPPED at 4 rounds — the R4 fixes are UNREVIEWED">
+
+plan-review-loop, Opus. **R1** discovery, two blind reviewers, both `NEEDS_WORK` → 2 Blockers + 9 Importants. **R2** diff-scoped → 5 Importants. **R3** full-blind gate → 4 Importants + 6 Minors. **R4** diff-scoped over the gate's fixes → **3 Importants + 5 Minors**. All applied. The loop is **CAPPED, not converged**: R4 still surfaced Importants and the gate is never re-run, so **no reviewer has seen the R4 fixes**.
+
+**Executor briefs MUST carry this list and verify each against the code before relying on it:**
+
+1. **Four** `wiki`→`projects` sites in `lint.sh`, not three — check 3's find (`:61`) was missed, and the check-3 baseline of 2 depends on it.
+2. The generated index's banner is an **italic markdown line, not an HTML comment** — `plans/index.md` is a reader page and `formatWebHtml` would render a comment as visible escaped text.
+3. **Two** baseline tables — the PR C gate (check 2 = 23) and the end-of-PR-D state (check 2 = **0**). Asserting the C table at end-of-D accepts a generator that dropped plans.
+4. Checks 9 and 10 guarded on `command -v bun` **only**, not check 6's full puppeteer guard.
+5. D2 must also assert the 11 removed free-prose `status:` values survive in their plan bodies.
+6. D4's section mapping and legend regeneration are fixed by spec — check 9 is a byte-diff, so implementer discretion is a hard failure.
+
+Every quantitative claim below was re-measured against the repos across all four rounds. **Nine were wrong and are corrected** — including three of the seven figures in the original scan table.
+
+</Callout>
+
+<Callout tone="good" title="Execution status: PRs A–E SHIPPED 2026-07-31 — F deferred">
+
+**D** — mimir [#2](https://github.com/RuneLind/mimir/pull/2), squash `4eca7d3`. D0–D4 as gated commits (snapshot → fold → verify-fold → backfill → generate), checks 8/10/11 landed, end-of-D baseline hit (check 2 = 0, 10 = 1 recorded: yggdrasil-roadmap). 4 opus finders confirmed zero prose/SHA loss and caught: 12 old-index Done entries misfiled `proposed` (redisposed), one Catalog note swallowed by an unclosed fence, a 114-link backlink flood onto the D0 snapshot (de-linked to code spans), the sidecar's claimed-but-absent fidelity gate (made real: verify-fold acceptance C + lint check 11), two latent check-8 awk failure modes (quoting/hang), and the banner hijacking the catalog's reader blurb (blurb now line 1, banner line 3).
+
+**E** — mimir [#3](https://github.com/RuneLind/mimir/pull/3), squash `3ff0461`, + `~/.claude/skills/mdx-explainer/SKILL.md` edited in place. code-reviewer pass verified every claim against shipped behavior; 9 defects fixed, incl. the qualified `open-proposal` retirement mapping (see the reconcile section) and the honest "retirement path is NOT built yet — PR F" note.
+
+**Open tail after E:** PR F (retirement mechanics — verify-fold exemption records, sidecar handling); `followups` flags unassessed on 9 of the 12 redisposed Done plans; muninn renders `[[wikilink]]` in status_note tooltips as literal text; lint exits 1 permanently on the recorded baselines (checks 1/3/4/10) — gate semantics deferred; snapshot's 154 plans-relative links unresolvable from archive/ (accepted, fidelity wins).
+
+
+
+**A** — muninn [#408](https://github.com/RuneLind/muninn/pull/408), squash `ff07132`. Store parse + validate + aggregated warn, `WikiPageMeta` + `WikiListing` mirror, `status_note` kept on `toListing`. 3 opus finders → 5 fixes (`409defa`), orchestrator-verified against a live index build.
+
+**B** — muninn [#409](https://github.com/RuneLind/muninn/pull/409), squash `9fd5919`. Status chip row + ⚑ has-follow-ups toggle in the Filters disclosure, `statusCounts`/`followupCount`/`statusFacetVisible` in `wiki-filter.ts`, status pill + ⚑ flag on rows and article header; e2e over two temp wikis in one `WIKI_EXTRA` as specced. 4 opus finders (incl. empirical against real mimir + melosys-kode-wiki — facet absent, no warnings from the 75 bare `status:` pages) → 5 confirmed fixes (`8e3e0dc`): active-chip-at-zero-count disappearance, tint-token dots invisible (now saturated tokens per the `.wiki-type-dot` precedent), ⚑ flags orphaned on followups-only wikis (gate widened to `hasPlanStatus || open followups`), lone "All status" row on scoped-empty counts, pill/⚑ order drift between surfaces. Note for D: the facet gate also opens on `followups: open` alone, so the backfill may light it before the first `plan_status` lands — intended.
+
+**C** — mimir [#1](https://github.com/RuneLind/mimir/pull/1), squash `dfb59ea`. All four dead `wiki/` refs repointed, checks 1–4 widened to `.mdx`, `blogs/src` pruned, `build-plans-index.ts` + `propose-plan-status.ts` + the 14-entry sidecar + check 9. 3 opus finders → 30+ findings, fixed in `6732614`.
+
+**What review changed, that the plan had not anticipated:**
+
+- **The generator shipped without a clobber guard, and lint told you to run it.** A bare run took `plans/index.md` from 87,820 → 22,698 bytes (119 → 10 notes) — and *any* unrecognized flag fell through to the write. The sibling `mdx-explainer/build.ts` has this guard; this one had dropped it. Now: unknown args are a usage error, and the write refuses unless line 1 is already the generated banner. `--force` is the explicit hatch.
+- **Check 9 now SKIPs** until `plans/index.md` carries the banner, so lint stays green in the C→D window and self-activates at D4. The plan had said "land check 9 in D4"; the machinery ships in C but inert.
+- **The proposer's inference was wrong on ~15 of 145 rows.** `/i` on every rule turned `"Not superseded"` → `superseded` and `"No longer blocked on huginn"` → `blocked`; a greedy `\bPR .*\bOPEN\b` made three not-started plans `in-flight`; `FOLLOWUP_RE` was case-locked and missed 8 real open tails. Post-fix: `needs_review` went from **0 → 127 rows** with itemized reasons.
+
+**Carry into PR D:**
+
+1. `git-touch.ts`'s `maxCommits` (50) is applied *before* the sweep filter; "no commits" and "all 50 were sweeps" both return `null` indistinguishably. Documented at the call site, surfaced via `needs_review`, not fixed.
+2. Two of the 14 sidecar rows (`huginn-vipps-moetereferat.txt`, `mac-mini-headless-agent-setup.html`) are **newly authored, not migrated** — they have no bullet in `plans/index.md`, only inline mentions. Marked `# NEWLY AUTHORED` in the file; they need one human approval, and D2's fold-verifier is explicitly told to skip them.
+3. Check 10 must call `scripts/plan-status-stale.ts` — do **not** re-implement `lastNonSweepTouch` in bash.
+
+</Callout>
+
+## What the scan found
+
+I read every plan's frontmatter, every `plans/index.md` entry, and ran `scripts/lint.sh`. The state is worse than "some plans lack a status".
+
+| Signal | Count |
+|---|---|
+| Plan pages in `plans/` (`.md` + `.mdx`, excl. `index.md`) | **145** (99 + 46) |
+| Non-markdown files in `plans/` (listed in `plans/index.md`, can't carry frontmatter) | 4 `.html` + 1 `.txt` — note the `.txt` is invisible to **both** the reader (`buildWikiIndex` globs `{md,mdx,html}`) and lint check 2 |
+| Carrying **any** `status:` frontmatter key | **11** |
+| …of those, in a machine-readable form | **0** — free prose, three languages (`åpen`, `delvis utført`, `2 of 3 complete`, and one 400-character paragraph carrying PR numbers and SHAs) |
+| Entries under `## Active` in `plans/index.md` | **96** (91 linked + 5 struck-through retired; one is this plan's own entry) |
+| Total entry bullets in `plans/index.md` | **124** (129 `- ` lines − 5 legend bullets) |
+| …of the 90 linked Active entries present at scan time, whose own text says shipped/executed/complete | **39** |
+| …that say "not started" but whose *plan file* says SHIPPED | at least **9** more (factcheck-integrate, trace-unification, wiki-commit-hygiene, x-articles-invisible, anthropic-wedge, semantic-atlas-overlay, indexing-ledger-followups, dashboard-ux-review, arch-review-execution) |
+| Plans on disk that `plans/index.md` never lists | **23** |
+| `plans/index.md` size | 87 KB, hand-maintained |
+
+Note the struck-through row: 5 `## Active` entries are retired items whose title carries **no link at all** — their only file reference is an `../archive/…` link buried in the prose. A `^- \[`-shaped scan (mine, first pass) misses them entirely, which is why the earlier counts read 91/119.
+
+So roughly **half the "Active" list is finished work**, and the catalog's own status legend (`Not started / In flight / Blocked / Proposal / Done`) is used by nothing — entries carry ad-hoc emoji instead, with no documented vocabulary.
+
+<Callout tone="warn" title="Four lint checks are broken, in two ways">
+
+**The `wiki/` → `projects/` rename of 2026-07-08 was never applied to `lint.sh`.** There are **four** dead references: check 1's find (`lint.sh:30`), check 3's find (`:61`), check 5's find (`:102`) and check 5's inbound-reference grep (`:104`). Check 5 at least prints `find: wiki: No such file or directory` before reporting `ok`; checks 1 and 3 both have `2>/dev/null`, so they fail **completely silently** — `projects/`, 42 pages and the wiki's largest content directory, has not been index-checked or link-checked in three weeks.
+
+**Checks 1, 2, 3 and 4 are blind to `.mdx`.** All glob `*.md` (+ `*.html` on 1 and 2) — and `.mdx` became the mimir default for new narrative docs on 2026-07-19. Lint reports 15 unindexed plans; the real number is 23. Check 3 has never link-checked any of the 46 `.mdx` plans. Check 4 reports 4 past-due obligations; extending it to `.mdx` surfaces more (e.g. `huginn-indexing-ledger-followups.mdx:145`, dated 2026-07-21 — written here without the tilde form deliberately, so this plan does not permanently flag itself in the very check it is fixing).
+
+</Callout>
+
+**This has been diagnosed here before.** `plans/mimir-wiki-improvements-2026-07.md` Angle 3 — "Lifecycle: plans index stopped being a triage tool" — found the same drift and fixed it on 2026-07-07 with a **manual triage**. Three weeks later it is back to 39 wrong entries out of 91. That is the strongest available evidence for this plan's central claim: the fix is generation, not triage. Angle 2 of that plan also proposed a `last_verified:` convention, still marked "not yet adopted" — reconciled below.
+
+## What is actually left over
+
+Best-effort, and its unreliability is the argument for the feature: with no status field the only ground truth is each plan's prose, and the catalog contradicts it. Treat this as a **disposition queue**, not a verdict.
+
+**Dormant with a named open tail** — last substantively touched before the 2026-07-08 tagging sweep:
+
+- `huginn-graphrag-improvements` — items 1+2 done, item 3 (global map-reduce search) open since April.
+- `huginn-fetcher-data-hygiene` — `status: åpen` since 2026-04-30. Per-source post-validation, re-fetch script, hygiene cron.
+- `muninn-architecture-review-followups` — prompt-injection nonces in the async extractors still open.
+- `muninn-dashboard-views-refactor` — oversized `src/dashboard/views/` files; the 2026-07 review re-flagged it.
+- `muninn-x-watcher-migration` — an open *decision*: remove the legacy Python `Bun.spawn` path now the HTTP `x-feed` path is live.
+- `muninn-haiku-router-extractors` — PR 2 is a one-line swap of `runHaikuExtraction` to `callHaikuWithFallback`.
+- `yggdrasil-roadmap` — Phase 3 (multi-repo, Jira, auto-reindex, dashboard page).
+- `huginn-local-tagging` — "delvis utført" since May.
+- `huginn-melosys-bot-followups` / `-graph-chunking-2026-05` — `åpen` since May; NAV-side, may be genuinely parked.
+
+**Written, never started:**
+
+- `huginn-capra-notion-collection-fix` — the API server serves a February Notion index while the update script writes a May one. A live wrong-answers bug, found 2026-07-19, untouched.
+- `muninn-maturity-improvements` — 🟡 PLANNED 2026-07-17, 13 days idle.
+- `huginn-architecture-followups-2` — PR A merged 2026-07-20; B–G specced and "ready to dispatch", idle 10 days.
+- `muninn-jarvis-wiki-sources` — researched; blocked on your tier-1 subscribe.
+- `huginn-confluence-image-text-extraction`, `huginn-contextual-prefix-retry-on-mismatch`, `melosys-console-wiki-graph-runtime-derive`, `memory-research-project-brief`, `melosys-e2e-local-tooling-preservation` — speculative or externally-blocked.
+
+**Shipped but with a live tail** (the dominant shape — see the note below):
+
+- `claude-usage-session-drilldown-details` — PRs 1–4 of 6 landed; 2 remain.
+- `claude-usage-post-v2-followups` — soak-gated cleanup PR outstanding.
+- `muninn-factcheck-inline-annotation` — extraction-prompt tightening, fixture re-approval, a huginn `.mdx`-tag-strip PR flagged urgent, a paragraph-merge PR.
+- `muninn-consolidation-gardener` — the approve leg is UNVERIFIED; 4 gate drafts await your review.
+- `muninn-capture-summary-quality` — the PR B "deep" option decision.
+- `muninn-x-candidate-vs-digest-pipeline` — muninn #399 open, then a 3-day census.
+- `yggdrasil-review-followups` — ranks 7–22 deferred.
+- `muninn-youtube-recently-added-followups` — 3 low-severity deferred items.
+
+## The design
+
+<Callout tone="info" title="Status and follow-ups are two axes, not one">
+
+The single most common state in this wiki is **"shipped, with a tail"** — nearly every completed campaign leaves pending items, and that is exactly what you cannot see today. A one-dimensional enum collapses it: `shipped` would hide the tail, and a `shipped-with-followups` value would make the enum unfilterable.
+
+So: `plan_status` answers *has it started / is it finished*, and `followups` answers *is anything left over*. The reader filters on both, independently. (Both round-1 reviewers examined this split independently and endorsed it as a correct read of the corpus.)
+
+</Callout>
+
+### Frontmatter contract
+
+```yaml
+---
+title: …
+description: …
+tags: [muninn, plan, …]
+plan_status: shipped
+status_date: 2026-07-30
+followups: open
+status_note: "PRs 1–4 of 6 landed; 5 and 6 gated on the soak (muninn #399)."
+---
+```
+
+| Field | Required | Meaning |
+|---|---|---|
+| `plan_status` | yes, on `plans/*.{md,mdx}` | The lifecycle value — enum below. |
+| `status_date` | yes, except on `proposed` | ISO day the status last **changed**. |
+| `followups` | no (absent ⇒ `none`) | `open` \| `none`. |
+| `status_note` | no | One line of free prose. **Must be quoted** — see the trap below. |
+
+<Callout tone="warn" title="Why the key is `plan_status`, not `status`">
+
+`status` is already taken by a **registered wiki**. `melosys-kode-wiki` (mounted via `WIKI_EXTRA`) carries `status:` on **75 pages** with an unrelated vocabulary — `untracked` (21), `deleted-from-source` (9), `resolved`, `open-proposal`, `implemented`, `complete`, `in-progress`, `tracked`, `todo`, and free prose. Taking the bare `status` key would have hijacked it: the facet would have appeared on the nav wiki showing one valid value out of 75, with ~74 pages failing validation on every 5-minute index rebuild.
+
+Namespacing to `plan_status` also means mimir's 11 existing free-prose `status:` values (PR numbers, commit SHAs) **do not collide and are not overwritten** — they are real content, and step D0 folds them into the body before the bare key is removed from `plans/`.
+
+</Callout>
+
+`plan_status` values, deliberately few:
+
+| Value | Means |
+|---|---|
+| `proposed` | Written; awaiting go/no-go. |
+| `ready` | Reviewed / plan-review-looped; safe to dispatch. |
+| `in-flight` | Actively executing. |
+| `blocked` | Waiting on something external (a subscription, a customer, another repo). |
+| `shipped` | All planned work landed. |
+| `superseded` | Replaced by another plan — pair with a wikilink in `status_note`. |
+| `abandoned` | Won't do. |
+
+`ready` earns its own value: the plan-review-loop is a real gate here, and "hardened, just needs a session" is the state you most want to filter for when picking work.
+
+<Callout tone="bad" title="Frontmatter trap — quote anything containing `#`">
+
+muninn's `parseFrontmatter` is a bespoke YAML *subset*, not YAML: it takes the rest of the line verbatim and strips no comments. Standard YAML (gray-matter, which mimir's own MDX pipeline uses, and Obsidian) reads an unquoted `#` as a comment and truncates the value. `status_note: muninn #399 open` therefore means two different things to two parsers — the exact bug lint check 7 exists to catch for `accent:`.
+
+So: `status_note` **must** be quoted, and check 8 validates it. A `[[wikilink]]` in a note becomes a real graph edge (`extractWikilinks` reads the whole file, frontmatter included) — desirable for `superseded`, but stated rather than discovered.
+
+</Callout>
+
+### Reader surface
+
+<FileRef path="muninn/src/wiki/store.ts" />
+
+1. **PR A** — parse `plan_status` / `status_date` / `followups` / `status_note` in `buildWikiIndex`; validate `plan_status` against the enum, invalid ⇒ dropped and **uncounted**. Add the fields to `WikiPageMeta` **and to the hand-maintained client mirror `WikiListing`** in `wiki-filter.ts` — the wire payload is free because `toListing` spreads `WikiPageMeta`, but that interface is an independent copy and does not update itself. **Keep `status_note` on `toListing`.** An earlier draft proposed stripping it alongside `desc`/`pubDate`: that is wrong, because `/api/wiki/page` builds its `meta` from the *same* `toListing` call (`wiki-routes.ts:1063`), so stripping would make the field unreachable by every client including the article header that wants it. `desc`/`pubDate` are strippable only because the Atlas route alone reads them. 145 one-line strings are not the ~100 KB problem `desc` was.
+2. **PR A** — logging: **one aggregated `log.warn` per index build** carrying the wiki name and a count of dropped values, never per page. The risk this guards is **mimir's own backfill** — 145 plans acquiring a mistyped enum value in one sweep, on a 5-minute rebuild cycle. (It is *not* protection against other wikis: post-rename, melosys-kode-wiki carries `status:` and zero `plan_status:`, so it can never trip this path. Note also that the plan previously claimed the drop "matches how `type` degrades" — it does not. `typeFromFrontmatter` falls through **silently**; the aggregated warn is new behaviour, not a copied pattern.)
+3. **PR B** — add `status` + `followups` to `WikiFilters` / `filterPages`, plus `statusCounts` alongside `typeCounts`/`tagCounts`.
+4. **PR B** — a **Status** chip row inside the existing Filters disclosure and a `⚑ has follow-ups` toggle, rendered **only when the wiki has ≥1 page with a *valid* `plan_status`**. Isolation from other wikis is already bought by the rename (melosys-kode-wiki and jarvis carry no `plan_status` at all, so mere *presence* would suffice for them). The **valid**-not-merely-present refinement earns its keep elsewhere: it keeps the facet hidden on mimir itself mid-backfill, when the first mistyped value would otherwise render a one-chip facet.
+5. **PR B** — a status chip per page row and in the article header beside the type chip, colored by state (shipped = quiet green, in-flight = accent, blocked = warn, proposed/ready = neutral), with the follow-up flag as a separate marker so the two axes stay visually distinct.
+
+<Callout tone="info" title="Decision: gate on valid-value presence, not a config flag">
+
+A reviewer proposed an explicit `"statusFacet": true` opt-in in `.wiki-reader.json`. Declined: after the `plan_status` rename, no other registered wiki carries the key at all, so the isolation the opt-in would buy is already free — and every wiki adopting the convention would then need two edits instead of one. Revisit if a wiki ever wants the facet suppressed despite carrying valid statuses.
+
+</Callout>
+
+### Migrate the prose, then generate `plans/index.md`
+
+This is the load-bearing half, and the destructive one. `plans/index.md` is **87 KB / 124 entry bullets** (119 of them linked) of hand-written synthesis — PR numbers, commit SHAs, dispositions, cross-links, much of it existing nowhere else. Entries average ~700 characters and run past 1.2 kB. `status_note` is one line. **A regenerate without migration is an uncompensated deletion of the wiki's densest page**, and the flow is self-consuming: `propose-plan-status.ts` reads that same prose as its inference signal.
+
+So the order is fixed, and **D0 gates everything after it**:
+
+- **D0 — snapshot.** Copy the current `plans/index.md` to `archive/mimir/2026-07-30-plans-index-pre-generation.md` with the literal `signal: none` + a `signal-reason:` line — check 1's escape hatch greps for exactly `^signal: none`, so any other value leaves the snapshot permanently flagged. Committed before anything else runs. The disposition queue survives regardless of what follows.
+- **D1 — fold.** For each plan, append its index-entry prose into the plan's own body as a `## Catalog note` section, and fold any existing free-prose `status:` value in with it. Then remove the bare `status:` key from `plans/` so `plan_status` is the single authority there.
+- **D2 — verify the fold.** A script diffs the set of entry texts against the plan bodies and **fails on any text not found** — except entries the sidecar owns (below), which it is given explicitly so it does not fail by construction. It must **also** assert that each of the 11 free-prose `status:` values D1 removes survives in its plan's body: those carry PR numbers and SHAs found nowhere else (`huginn-indexing-job-observability.md`'s alone names three PRs and three commits), and nothing else gates their deletion. Named acceptance: *no unique index prose and no removed `status:` value is lost.*
+- **D3 — backfill** `plan_status` / `status_date` / `followups` from the reviewed TSV.
+- **D4 — generate** and only then land check 9. The generator's **section mapping is fixed, not left to the implementer** (check 9 is a byte-diff — two implementers guessing differently is a hard failure): `shipped` / `abandoned` / `superseded` → `## Done`; `proposed` / `ready` / `in-flight` / `blocked` → `## Active`; sidecar rows use their own `section` field. The `## Status legend` block is **regenerated from the `plan_status` enum**, replacing today's five-value legend that nothing uses.
+
+The generator reads `plans/*.{md,mdx}` frontmatter — but the index it replaces contains more than that:
+
+- **4 `.html` + 1 `.txt`** in `plans/`, all currently listed, and lint **check 2 explicitly globs `plans/*.html`**. Without rows for these, the freshly generated index fails check 2 on day one while passing check 9.
+- **4 bullets whose primary link points outside `plans/`** (all `../archive/…`) — one of them under `## Active`. Inline `../blogs/…` links inside entry prose are secondary and need no row.
+- **5 struck-through retired entries under `## Active`** whose title carries **no link at all** (`plans/index.md:56–62`) — ~3.5 kB of real synthesis with no `plans/` file to fold into and nothing for a frontmatter scan to emit.
+
+All **14** of these are carried by a small hand-maintained **sidecar** the generator splices in (`plans/index-extra.yaml`: title, href, section, note, optional `plan_status`). D1 is told the same list so it does not look for a plan body that does not exist; D2 is told it so it does not fail on their prose. The sidecar's `plan_status` is **index-only and unreachable by the reader facet** — `buildExplainerMeta` hardcodes `type: "explainer"` for `.html` and check 8 excludes non-markdown, so these rows can never carry a reader-visible status. Stated rather than left to contradict the "one authority per location" rule.
+
+`scripts/lint.sh` gains a `--check` byte-diff modelled on the MDX pipeline's check 6, guarded on **`command -v bun` only** so `lint.sh` stays standalone-runnable. Deliberately *not* check 6's full guard: that also requires `scripts/mdx-explainer/node_modules`, which exists because `build.ts` needs puppeteer/Chromium for mermaid. `build-plans-index.ts` and `lastNonSweepTouch()` have no third-party deps, and reusing the full guard would silently SKIP the campaign's two core checks on any clone that hasn't run `bun install` in an unrelated directory.
+
+**The generated file must announce itself — but not as an HTML comment.** `plans/index.md` is a real reader page (`buildWikiIndex` globs `**/*.{md,mdx,html}` with no index exclusion), and `formatWebHtml` escapes anything it doesn't recognize, so a `<!-- generated by … -->` line 1 renders as visible literal text at the top of the article — the same bug class `render.ts` already had to add a line-stripper for with the fact-check sentinels. The `<!-- generated from` precedent is safe only because it lives in `.html` explainers. So the banner uses the existing italic-subtitle convention instead:
+
+```markdown
+_Generated by `bun scripts/build-plans-index.ts` — do not edit. Set `plan_status` in the plan's frontmatter and re-run._
+```
+
+Check 9's failure message prints that same command. Without this the only signal that a hand edit is wrong is a lint failure the editor may never run — mimir's `CLAUDE.md` carries **no `plans/index.md` maintenance rule at all** today (its index rules are about the *root* `index.md`). PR E adds one, carrying the regenerate command too.
+
+**Regeneration is manual; lint is the only backstop.** There is no git hook, no CI (mimir has neither today) and no scheduled run in this campaign's scope. A newly created plan therefore reds check 9 until someone runs `lint.sh`. That is a deliberate v1 limit — stated plainly so "kept accurate automatically" is not read as more than it is. A pre-commit hook is the obvious follow-up and is explicitly **not** in PRs A–F.
+
+<Callout tone="info" title="Decision: a generated index, not no index">
+
+The simplest alternative is to delete `plans/index.md` entirely and let the reader's facet be the only catalog — the same argument this plan makes for retiring `mimir-product-priorities.md`. Declined for one concrete reason: **the reader is loopback-only** (`DASHBOARD_HOST` defaults to `127.0.0.1`) and requires muninn running, while `plans/index.md` is readable on GitHub, in Obsidian, and by any agent with a filesystem. A generated index keeps that reach at near-zero maintenance cost. If the reader ever becomes the only way anyone browses mimir, revisit.
+
+</Callout>
+
+### Backfill
+
+145 files need a status. Not an LLM sweep — a script proposes, a human confirms.
+
+`scripts/propose-plan-status.ts` emits a reviewable TSV with **three** inferred columns (`plan_status`, `followups`, `status_date`) from the signals that already exist:
+
+- the index entry's emoji and SHIPPED/EXECUTED/not-started phrasing;
+- the plan file's own first Callout title or bold `Status:` line;
+- **last non-sweep git touch** — defined as the last commit touching the file that modified **fewer than 10** files under `plans/`. This matters: a single 2026-07-08 frontmatter sweep (`3575dc6`) is the last commit for **62 of the 145** plans, so naive git recency reports "22 days ago" for work that shipped in April and for work that is live today. The naive signal is dead for 43% of the corpus.
+
+`status_date` inference chain, in order: a date named in the plan's own status prose → last non-sweep commit date → frontmatter `updated`/`created` → today, **flagged for review**. Check 8 tolerates an absent `status_date` only on `plan_status: proposed`.
+
+Expect the inference to be right on the ~39 obviously-shipped and the ~15 obviously-not-started, and to need real judgement on the ~30 dormant middle — the disposition queue above, done once. The `proposed` / `ready` distinction is **not** mechanically inferable; the script emits `proposed` for both and the TSV review promotes.
+
+### Lint
+
+Fixes (all in PR C):
+
+- **`wiki` → `projects`** at all **four** sites: check 1's `find` (`lint.sh:30`), check 3's `find` (`:61`), check 5's `find` (`:102`) and check 5's inbound-reference `grep` (`:104`). Check 3's is load-bearing for the baseline below — without it check 3 stays at 1, not 2.
+- **`.md` → `{md,mdx}`** in checks 1, 2, 3 and 4. Two consequences to handle in the same PR: check 3's `find` recurses into **`blogs/src/`**, whose compile-source relative links are written for the compiled output one directory up — link-checking them from `src/` reports every one broken (measured: **7 of 9** hits are this class, and muninn's store already excludes these files from the wiki index entirely). **Prune `blogs/src` from check 3.** And check 1's deliberate-unindexed escape hatch tests `"${missing%.md}" != "$missing"`, so the `signal: none` exemption is `.md`-only — widen it to both extensions. (Not because of D0's snapshot: that is specified as `.md` and is already exempt. The reason is that `.mdx` is mimir's default for new narrative docs since 2026-07-19, so the hatch is latent-dead for every future archive page.)
+- **New check 8** — every `plans/*.{md,mdx}` carries a valid `plan_status` and (unless `proposed`) a `status_date` **matching `^\d{4}-\d{2}-\d{2}$`** (presence alone is not enough: a `2026-7-3` or `July 2026` would pass a presence test and silently defeat check 10's date comparison — the plan's own "a field that goes stale silently is worse than no field" failure); `status_note`, if present, is quoted. Implemented as a **frontmatter-scoped parse**, explicitly **not** a line grep: a naive `grep '^plan_status:'` would match the fenced YAML example inside this very plan file. Exclusion list: `index.md` and every non-markdown file in `plans/`.
+- **New check 9** — `plans/index.md` matches a fresh build (`--check`, guarded).
+- **New check 10 — staleness.** Flag `plan_status: in-flight` or `ready` whose `status_date` is older than 30 days, or older than the file's last non-sweep git touch. This is the half that makes the objective's word *accurate* true rather than just *present*; check 4 is the existing precedent for exactly this class. **Implementation constraint:** `lint.sh` today is pure POSIX shell and invokes `git` nowhere. Check 10 must **not** re-implement the non-sweep-touch heuristic in bash — that would put the campaign's most load-bearing signal in two runtimes that can drift. Export one `lastNonSweepTouch()` from the same bun module backing `build-plans-index.ts` / `propose-plan-status.ts`, and run check 10 through it **behind check 6's toolchain guard**. Budget it: a bare `git log -1` per plan already costs ~3.4 s over 145 files, and the non-sweep variant walks several commits per file plus a `--name-only` count each.
+
+**Declared acceptance baseline — the PR C gate.** After C's fixes and *before* PR D, these counts are expected, not regressions:
+
+| Check | Before | After | Note |
+|---|---|---|---|
+| 1 (index drift) | 38 | **47** | +9, all `.mdx`. The `wiki`→`projects` fix contributes **0** — all 42 `projects/` pages are already indexed. |
+| 2 (plans index drift) | 15 | **23** | +8, all `.mdx`. |
+| 3 (broken links) | 1 | **2** | With `blogs/src` pruned. The new one is `projects/muninn/dashboard.md -> ../page.md`, newly visible from the `wiki`→`projects` fix. Without the prune it is ~9, mostly false. |
+| 4 (past-due) | 4 | **5** | +1 `.mdx`. |
+| 5 (orphans) | 0 (dead) | **0** | Measured against `projects/`: no orphans, no hidden regression. |
+
+**End-of-PR-D baseline — a different table.** The one above is the C gate and is *wrong* at end-of-D: check 2 must be **0**, because D4's generator emits a row for every plan plus the 14 sidecar rows. Asserting `23` there would either fail a correct build or accept a generator that silently dropped plans.
+
+| Check | End of PR D |
+|---|---|
+| 1 (index drift) | 47 (unchanged — `projects/` + `.mdx` gaps are outside this campaign's scope) |
+| 2 (plans index drift) | **0** |
+| 3 (broken links) | 2 |
+| 4 (past-due) | 5 (transiently 6 between D1 and D4) |
+| 5 (orphans) | 0 |
+| 8 (status contract) | 0 |
+| 9 (index drift vs fresh build) | 0 |
+| 10 (staleness) | **whatever the reviewed TSV leaves** — D3 backfills inferred, often old `status_date`s, so a plan backfilled `in-flight`/`ready` with a >30-day date fires check 10 on the commit that introduces it. Record the number the TSV review produces; that is the baseline, not zero. |
+
+**Sequencing:** checks 8 and 10 ship in **PR D**, not PR C, so `lint.sh` is never red on 145 files in the window between them. Checks 1/3/4/5 fixes and check 9's machinery ship in C.
+
+### Reconcile with the conventions already here
+
+Two existing conventions overlap and must be squared in **PR E**:
+
+- **`verified-status:`** (`CLAUDE.md`, archive conventions) — `accurate | resolved | open-proposal | superseded | obsolete | uncertain`. `superseded` appears in both enums with different meanings. Rule: `plan_status` governs a page while it lives in `plans/`; on retirement to `archive/<project>/` the page **drops `plan_status` and gains `verified-status`**, mapped `shipped → resolved`, `abandoned → obsolete`, `superseded → superseded`, `proposed`/`ready` → `open-proposal` **when commits or a feature/draft-PR branch exist, else `obsolete`** (PR E's reviewer found the unqualified mapping contradicted `open-proposal`'s own commits-exist definition; the qualified form is what `CLAUDE.md` carries). (`in-flight` and `blocked` are not retirable states — nothing maps them.) One authority per location.
+- **`last_verified:`** — proposed by `mimir-wiki-improvements-2026-07.md` Angle 2, never adopted. `status_date` supersedes it for `plans/`; that plan is marked `plan_status: superseded` by this one — the first live use of the new enum.
+
+`~/.claude/skills/mdx-explainer/SKILL.md` gains the contract, and its doc-type table's Plan row states a new plan is created `plan_status: proposed`.
+
+## PR breakdown
+
+| PR | Scope | Acceptance check |
+|---|---|---|
+| A | Store parse + validate + aggregated warn; `WikiPageMeta` **and** `WikiListing` mirror | `store.test.ts` incl. invalid-enum-dropped-and-uncounted; a route test asserting all four fields survive on **both** `/api/wiki/pages` and `/api/wiki/page` (they share `toListing`) |
+| B | `filterPages`/`statusCounts` facet, chip row, follow-up toggle, article-header chip | `wiki-filter.test.ts` cases **plus** an e2e over **two temp wikis in one `WIKI_EXTRA`** — one seeded with `plan_status`-bearing pages (facet renders, chips filter), one without (facet absent). It cannot assert against real mimir: B ships before D3's backfill, so at B time **no page anywhere carries `plan_status`**, and the cited `wiki-integrate.spec.ts` harness boots its own muninn with only a throwaway temp wiki mounted (`e2e/wiki-integrate.spec.ts:299`) — neither `?wiki=mimir` nor `?wiki=melosys-kode-wiki` exists in it |
+| C | Lint 1/3/4/5 fixes, check 9 machinery + guard, `build-plans-index.ts`, `propose-plan-status.ts` | `lint.sh` run showing the declared baseline counts; `--check` idempotency (build twice, byte-identical) |
+| D | D0–D4: snapshot → fold → verify-fold → backfill → generate; checks 8 + 10 land here | **Per-step diff gates** (a single "frontmatter-only" gate is impossible — D1 appends bodies and D4 rewrites 87 KB): D1's commit = body-append-only, every hunk a trailing `## Catalog note`, zero deletions; D3's commit = frontmatter-only hunks; D4's commit = `plans/index.md` (+ sidecar) only. Plus: D2's fold-verifier passes; `lint.sh` clean at the declared baseline **asserted at the END of PR D, not between its steps** (D1 transiently pushes check 4 to 6 — it folds `index.md:75`'s `~2026-07-11` into `muninn-feed-quality-improvements.md`, which already carries the same date at line 7; D4 returns it to 5); spot re-audit of 10 random rows |
+| E | `mdx-explainer` SKILL.md + mimir `CLAUDE.md`: contract, `verified-status` mapping, `last_verified` supersession (edit **`CLAUDE.md:108`**, where the convention actually lives), and the **"`plans/index.md` is generated — set `plan_status`, don't edit the catalog"** rule | A fresh `/mdx-explainer` plan is created carrying `plan_status: proposed`; `CLAUDE.md:108` no longer offers `last_verified:` as the freshness convention and points at `status_date` for `plans/`; `CLAUDE.md` carries the generated-catalog rule. (**Not** `grep -rl 'last_verified' plans/` — that always hits the superseded plan's own historical prose, and the frontmatter form has never been used anywhere: `grep -rn '^last_verified:'` over mimir returns 0 today.) |
+| F | Retirement rule: `shipped` + `followups: none` + 30d → `archive/<project>/`, generator scans archive for those rows | Deferred — see below |
+
+`A → B` is a chain (B filters a field A must first put on `WikiListing`). `C` is independent of both. `D` depends on C **and** on your dispositions of the queue above. E follows D. **F is explicitly deferred** and not part of this campaign.
+
+## My take, and what else to fix
+
+**The status field is the smaller half.** The real defect is that plan status is maintained in two places and neither is authoritative — the file says one thing, the catalog another, both prose. Adding a third would make it worse. Generating `plans/index.md` from frontmatter is what closes it, which is why PR C+D matter more than PR B. The 2026-07-07 manual triage that drifted back within three weeks is the proof.
+
+**`plans/` has no retirement rule and has become an append-only pile.** 145 markdown plans, of which perhaps 20 are live work, against a `CLAUDE.md` that says plans hold "active/in-flight work… kept outside the wiki so ephemeral planning doesn't pollute the durable knowledge base". That contract is broken by volume alone. PR F is the fix, and it is deliberately **deferred out of this campaign** — it changes what `archive/` means and interacts with the `verified-status` mapping above, which deserves its own decision rather than riding along.
+
+**The live status tracker is currently outside the wiki.** `~/.claude/projects/…/memory/MEMORY.md` carries genuinely accurate per-project status with explicit PENDING items — doing the job `plans/index.md` claims to do, per-machine and invisible to the reader. Once `followups` exists in frontmatter, that content should flow into the plans it describes; the memory index keeps the pointers, the wiki keeps the state.
+
+**Accepted consequence — the mtime flood.** mimir's pages carry almost no frontmatter dates, so the reader's "Recently updated" key is effectively file mtime (`pageTimeMs` takes the *larger* of mtime and any frontmatter date, so adding a truthful `updated:` cannot rescue it). Rewriting 145 plans in one sweep makes every plan the newest page in the wiki, and the Timeline tab and picker freshness label inherit it. This is self-healing as other pages are touched, and "Recently added" (birthtime-based) is unaffected. Stated here so it is not filed as a regression.
+
+**Two smaller ones worth folding in:**
+
+- `mimir-product-priorities.md` self-declares "⚠ Stale as of…" and is the designated "read this when picking a session topic" page. Once the reader can filter `plan_status: ready`, the facet does its job — retire it rather than maintain it.
+- The past-due `~date` obligations lint already reports have been ignored because check 4's output is buried under checks 1 and 2's noise. Fixing 1 and 2 makes 4 visible again — though note that is *visibility*, not coverage; the `.mdx` extension is what makes it complete.
+
+**What I would not do:** don't add a per-plan progress percentage or a PR-count rollup. The PR numbers in these plans are already prose and would need a GitHub round-trip to stay true — a field that goes stale silently is worse than no field, which is the exact lesson of the current `plans/index.md`.
+
+## Sources
+
+- `mimir/plans/` — all 145 markdown plans + 5 non-markdown, frontmatter and index entries scanned 2026-07-30
+- `mimir/plans/index.md` — the hand-maintained catalog (87 KB, 124 entry bullets of which 119 linked, 96 Active)
+- `mimir/plans/mimir-wiki-improvements-2026-07.md` — Angle 2 (`last_verified:`), Angle 3 (the 2026-07-07 manual triage that drifted back)
+- `mimir/scripts/lint.sh` — checks 1–7
+- `mimir/CLAUDE.md` — page conventions, reader frontmatter, archive + verification conventions
+- `muninn/src/wiki/store.ts` — `parseFrontmatter`, `WikiPageMeta`, `buildWikiIndex`, `typeFromFrontmatter`, `extractWikilinks`
+- `muninn/src/dashboard/routes/wiki-routes.ts` — `WikiPageListing`, `toListing`
+- `muninn/src/dashboard/views/components/wiki-filter.ts` — `WikiListing`, `WikiFilters`, `filterPages`, `typeCounts`, `pageTimeMs`
+- `muninn/.env` — `WIKI_EXTRA` registry (mimir, melosys-kode-wiki)
+- `~/.claude/skills/mdx-explainer/SKILL.md` — frontmatter contract, doc-type routing
+
+## Catalog note
+
+_Folded from the hand-maintained `plans/index.md` at step D1 of the plan-status lifecycle campaign; the verbatim pre-generation catalog is archived at `archive/mimir/2026-07-30-plans-index-pre-generation.md`. From step D4 the catalog is generated from `plan_status` frontmatter, so this entry's prose lives here._
+
+- [Plan status — make a plan's state machine-readable, filterable, and self-maintaining](mimir-plan-status-lifecycle.mdx) — 🟡 **planned 2026-07-30, not started.** Rune's ask: knowing from the wiki whether a plan has started, finished, or has anything left over. The scan behind it: 154 plans, 10 carry any `status:` key and **0** in a machine-readable form; 39 of this list's 90 Active entries say shipped in their own text (9 more say "not started" while their plan file says SHIPPED); 23 plans are missing from this index; lint check 5 has been dead since the 2026-07-08 `wiki/`→`projects/` rename and checks 1+2 are blind to `.mdx`. Design: a `status` / `status_date` / `followups` / `status_note` frontmatter contract (status and follow-ups as **two axes** — "shipped with a tail" is the dominant state here), a Status facet + follow-up toggle in the `/wiki` reader's Filters disclosure (free plumbing — `toListing` spreads `WikiPageMeta`), and a **generated** `plans/index.md` with a `--check` byte-diff so this catalog can never drift again. 5 PRs (A+B muninn, C+D mimir, E conventions). Carries the disposition queue of what the scan flagged as genuinely open, plus a proposed retirement rule (`shipped` + no follow-ups + 30d → `archive/<project>/`).

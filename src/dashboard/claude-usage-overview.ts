@@ -49,11 +49,11 @@ const CLAUDE_USAGE_MAX_DAYS = 90;
 /** Fetch budget, sized on the 90-day clamp FLOOR rather than the 14-day common
  *  case — the widest legal query must not become a false "unreachable". Measured
  *  2026-08-13 against the live service: 640 KB in ~0.2 s for `?days=90`. */
-const CLAUDE_USAGE_TIMEOUT_MS = 10_000;
+export const CLAUDE_USAGE_TIMEOUT_MS = 10_000;
 /** Body cap. Two orders of magnitude above the measured 640 KB worst case, and
  *  far below the 145 MB the sqlite behind this endpoint would be — the point is
  *  that a wrong service on the port cannot stream the dashboard out of memory. */
-const CLAUDE_USAGE_MAX_BYTES = 8 * 1024 * 1024;
+export const CLAUDE_USAGE_MAX_BYTES = 8 * 1024 * 1024;
 
 // ---- Raw claude-usage contract (only the fields the card reads) ------------
 
@@ -158,8 +158,12 @@ export interface ClaudeUsageDeps {
  * `content-length` is the cheap check; the read loop is the guarantee, because a
  * chunked response declares no length at all — and the service behind this
  * endpoint is backed by a 145 MB sqlite file.
+ *
+ * Exported because `src/plans/ledger.ts` proxies a SECOND claude-usage endpoint
+ * (`/api/plans`) under the same two bounds. Two copies of a byte cap drift; one
+ * does not.
  */
-async function readBounded(res: Response, maxBytes: number, url: string): Promise<string> {
+export async function readBounded(res: Response, maxBytes: number, url: string): Promise<string> {
   const declared = Number(res.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > maxBytes) {
     throw new Error(
