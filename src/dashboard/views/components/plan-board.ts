@@ -236,14 +236,15 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     const m = computeMeters(inScope, money);
     const corpus = computeMeters(shown, money);
     const showsFollowups = visibleColumns(view.scope).some((c) => c.key === "followups");
-    const scoped = view.scope === "all" ? "" : " in this scope";
     metersBox.textContent = "";
     const tiles: Array<{ k: string; v: string; sub?: string; note: string }> = [
       {
         k: "Active plans",
         v: String(m.activeCount),
-        sub: `of ${m.totalCount}`,
-        note: `proposed · ready · in flight · blocked — of the ${m.totalCount} card(s) this scope shows`,
+        // Under the default scope every shown card IS active, so "N of N" would be a tautology;
+        // the corpus size is the denominator that carries information there.
+        sub: view.scope === "active" ? `of ${corpus.totalCount} in the corpus` : `of ${m.totalCount} shown`,
+        note: `proposed · ready · in flight · blocked — ${view.scope === "active" ? `the whole corpus holds ${corpus.totalCount} card(s)` : `of the ${m.totalCount} card(s) this scope shows`}`,
       },
       {
         k: "In flight",
@@ -254,7 +255,7 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
         k: "Backlog, priced",
         v: m.backlog ? formatUsd(m.backlog.mid) : "—",
         note: m.backlog
-          ? `${formatUsd(m.backlog.low)}–${formatUsd(m.backlog.high)} band over the ${m.backlog.count} active plan(s)${scoped} that can be priced`
+          ? `${formatUsd(m.backlog.low)}–${formatUsd(m.backlog.high)} band over the ${m.backlog.count} active plan(s) that can be priced`
           : payload.money.reason ?? "no estimate available",
       },
       {
@@ -269,7 +270,7 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
         k: "Median age",
         v: m.medianAgeDays !== null ? String(m.medianAgeDays) : "—",
         sub: m.medianAgeDays !== null ? "days" : undefined,
-        note: `since the last status_date on an active plan${scoped}`,
+        note: "since the last status_date on an active plan",
       },
       {
         k: "Follow-ups open",
@@ -973,7 +974,11 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
    *  draft note is in the list too: it carries a live "Discard drafts" button,
    *  which is the worst thing to reach by accident from behind a scrim. */
   function setBackdropInert(on: boolean): void {
-    for (const box of [metersBox, controlsBox, draftBox, boardBox]) {
+    // The degrade banners (`<details>` disclosures) sit above the meters inside `#pbRoot` and
+    // are focusable too. The site nav is deliberately NOT covered: it is chrome outside the
+    // board's region, and the scrim already blocks the pointer over it.
+    const banners = Array.from(root.querySelectorAll<HTMLElement>(":scope > details.pb-banner"));
+    for (const box of [metersBox, controlsBox, draftBox, boardBox, ...banners]) {
       if (on) box.setAttribute("inert", "");
       else box.removeAttribute("inert");
     }
