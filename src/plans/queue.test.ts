@@ -52,6 +52,61 @@ describe("parseQueueYaml", () => {
     );
     expect(order).toEqual({ proposed: ["a-plan"], ready: ["b-plan"] });
     expect(warnings.join()).toContain("more than one column");
+    expect(warnings.join()).toContain('"proposed"');
+    expect(warnings.join()).toContain('"ready"');
+  });
+
+  test("a slug twice in ONE column says so, rather than blaming two columns", () => {
+    const { order, warnings } = parseQueueYaml(
+      "ready:\n  - a-plan\n  - a-plan\n  - b-plan\n",
+      KNOWN,
+    );
+    expect(order).toEqual({ ready: ["a-plan", "b-plan"] });
+    expect(warnings.join()).toContain('twice in column "ready"');
+    expect(warnings.join()).not.toContain("more than one column");
+  });
+
+  test("a duplicate top-level key cannot blank the board", () => {
+    // `yaml`'s default uniqueKeys THROWS here, which would drop every column.
+    const { order, warnings } = parseQueueYaml(
+      "proposed:\n  - a-plan\nproposed:\n  - b-plan\nready:\n  - c-plan\n",
+      KNOWN,
+    );
+    expect(order).toEqual({ proposed: ["b-plan"], ready: ["c-plan"] });
+    expect(warnings.join()).toContain('duplicate column "proposed"');
+  });
+
+  test("an end-of-line comment is legal", () => {
+    const { order, warnings } = parseQueueYaml("proposed:\n  - a-plan # next up\n", KNOWN);
+    expect(order).toEqual({ proposed: ["a-plan"] });
+    expect(warnings).toEqual([]);
+  });
+
+  test("a null document and a null column are 'unranked', not errors", () => {
+    expect(parseQueueYaml("# only a comment\n")).toEqual({ order: {}, warnings: [] });
+    const { order, warnings } = parseQueueYaml("proposed:\nready:\n  - a-plan\n", KNOWN);
+    expect(order).toEqual({ ready: ["a-plan"] });
+    expect(warnings).toEqual([]);
+  });
+
+  test("off-grammar slugs are dropped with a warning", () => {
+    const { order, warnings } = parseQueueYaml(
+      "proposed:\n  - 9lives\n  - has_underscore\n  - a.plan\n  - ok-plan\n",
+    );
+    expect(order).toEqual({ proposed: ["ok-plan"] });
+    expect(warnings).toHaveLength(3);
+    expect(warnings.join()).toContain("not a valid slug");
+  });
+
+  test("the YAML boolean/null literals are never slugs, quoted or not", () => {
+    // Bare `true` parses as a boolean (a non-string entry); the QUOTED forms
+    // reach the grammar as strings and must still be refused, because mimir's
+    // parser cannot tell a quoted `true` from the literal on the way back in.
+    const { order, warnings } = parseQueueYaml(
+      'proposed:\n  - true\n  - "True"\n  - "null"\n  - ok-plan\n',
+    );
+    expect(order).toEqual({ proposed: ["ok-plan"] });
+    expect(warnings).toHaveLength(3);
   });
 
   test("unparseable YAML degrades to unranked rather than throwing", () => {
@@ -85,8 +140,12 @@ describe("serializeQueue", () => {
     expect(serializeQueue({})).toBe("");
   });
 
-  test("quotes a slug that would not survive as a bare scalar", () => {
-    expect(serializeQueue({ proposed: ["a: b"] })).toBe('proposed:\n  - "a: b"\n');
+  test("THROWS on a slug the shared grammar rejects, rather than quoting it", () => {
+    // Quoting would emit a file mimir's parser drops on read — a silent
+    // divergence between the two readers is worse than a loud writer failure.
+    expect(() => serializeQueue({ proposed: ["a: b"] })).toThrow(/not a valid slug/);
+    expect(() => serializeQueue({ proposed: ["9lives"] })).toThrow(/not a valid slug/);
+    expect(() => serializeQueue({ proposed: ["true"] })).toThrow(/not a valid slug/);
   });
 
   test("round-trips through the parser", () => {

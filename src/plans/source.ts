@@ -69,17 +69,19 @@ const STATUS_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 export interface PlanRecord {
   /** Filename without extension — the join key against the ledger and the
-   *  identity `queue.yaml` ranks by. */
+   *  identity `queue.yaml` ranks by. Matched BYTE-EXACT and case-sensitively
+   *  everywhere (the queue's known-slug set, the ledger join): the slug IS a
+   *  file's basename, and two basenames differing in case are two files. */
   slug: string;
   title: string;
   /** Undefined when the file carries a `plan_status` the enum does not know:
    *  the file is still a plan (it opted in), its state is just unknown. */
   planStatus: PlanStatus | undefined;
-  /** `YYYY-MM-DD`, or undefined. **8 active plans carry none**, so no sort may
-   *  assume it — {@link PlanRecord.mtimeMs} is the tie-breaker. */
+  /** `YYYY-MM-DD`, or undefined. Active plans in the live corpus carry none, so
+   *  no sort may assume it — {@link PlanRecord.mtimeMs} is the tie-breaker. */
   statusDate: string | undefined;
   statusNote: string | undefined;
-  /** True only for the literal `followups: open`. */
+  /** True for `followups: open`, in any casing. */
   followupsOpen: boolean;
   priority: PlanPriority | undefined;
   tags: string[];
@@ -94,12 +96,21 @@ export interface PlanRecord {
 
 export interface PlanQueue {
   order: QueueOrder;
-  /** sha256 of `queue.yaml`'s bytes, or `""` when the file does not exist.
-   *  The empty string is the BOOTSTRAP SENTINEL: PR 4's order endpoint accepts
-   *  it only for an absent file, which is how the very first drag has a base to
-   *  send. (Note it cannot be handed to `writeWikiPage`, whose CAS rejects a
-   *  falsy `baseHash` outright — the order writer needs its own branch.) */
-  hash: string;
+  /**
+   * sha256 of `queue.yaml`'s bytes — with two non-hash states that must not be
+   * confused, because a writer treats them oppositely:
+   *
+   *   - `""` — the file DOES NOT EXIST. The bootstrap sentinel: PR 4's order
+   *     endpoint accepts it only for an absent file, which is how the very
+   *     first drag has a base to send. (It cannot be handed to `writeWikiPage`,
+   *     whose CAS rejects a falsy `baseHash` outright — the order writer needs
+   *     its own branch.)
+   *   - `null` — the file exists but COULD NOT BE READ (permissions, a
+   *     directory in its place, an I/O error). There is no base hash, so the
+   *     writer must REFUSE: writing against `""` here would clobber an ordering
+   *     that is still on disk.
+   */
+  hash: string | null;
 }
 
 export interface PlanSourceResult {
@@ -129,19 +140,38 @@ function asList(v: string | string[] | undefined): string[] {
   return one ? [one] : [];
 }
 
-/** Build one record from a plan file's bytes. Exported so the parse is testable
- *  against a fixture without touching a filesystem at all. */
+/**
+ * Build one record from a plan file's bytes. Exported so the parse is testable
+ * against a fixture without touching a filesystem at all.
+ *
+ * The bytes are CRLF-normalized before parsing but hashed AS GIVEN:
+ * `parseFrontmatter`'s per-line regex ends in `.*$`, and JS `.` matches no `\r`
+ * — so an unnormalized CRLF plan parses as "no frontmatter" and drops off the
+ * board silently. The hash must still be over the original content, since it is
+ * the `baseHash` a later compare-and-swap presents against what is on disk.
+ */
 export function planRecordFromContent(
   relPath: string,
   content: string,
   mtimeMs: number,
   warnings: string[],
 ): PlanRecord | null {
-  const fm = parseFrontmatter(content);
+  const normalized = content.includes("\r\n") ? content.replace(/\r\n/g, "\n") : content;
+  const fm = parseFrontmatter(normalized);
   const rawStatus = firstString(fm.plan_status);
   // The membership test: a plan is a file that OPTED IN by carrying the key.
   // Non-plan markdown that wanders into `plans/` is simply not a card.
-  if (!rawStatus) return null;
+  if (!rawStatus) {
+    // …but a file that carries the key SOMEWHERE and still parsed to nothing is
+    // a broken fence (unterminated, or offset by a leading blank line), not a
+    // non-plan. Dropping that one silently is how a real plan disappears.
+    if (/^plan_status:/m.test(normalized)) {
+      warnings.push(
+        `${relPath}: carries plan_status but no parseable frontmatter fence — not a card`,
+      );
+    }
+    return null;
+  }
 
   const slug = path.basename(relPath).replace(/\.mdx?$/i, "");
 
@@ -171,13 +201,22 @@ export function planRecordFromContent(
     else warnings.push(`${relPath}: status_date "${rawDate}" is not YYYY-MM-DD — dropped`);
   }
 
+  // `followups` is hand-written prose in the frontmatter, so casing varies.
+  // Anything outside the two known values is a typo worth naming rather than a
+  // silent "no followups".
+  const rawFollowups = firstString(fm.followups);
+  const followups = rawFollowups?.toLowerCase();
+  if (followups && followups !== "open" && followups !== "none") {
+    warnings.push(`${relPath}: followups "${rawFollowups}" is neither open nor none — read as none`);
+  }
+
   return {
     slug,
     title: firstString(fm.title) ?? slug,
     planStatus,
     statusDate,
     statusNote: firstString(fm.status_note),
-    followupsOpen: firstString(fm.followups) === "open",
+    followupsOpen: followups === "open",
     priority,
     tags: asList(fm.tags),
     relPath,
@@ -219,7 +258,12 @@ export async function loadPlanSource(opts: PlanSourceOptions = {}): Promise<Plan
     return { root, plans: [], queue: empty, warnings };
   }
 
-  const plans: PlanRecord[] = [];
+  // Slug → record. A slug is a BASENAME WITHOUT EXTENSION, so `foo.md` beside
+  // `foo.mdx` is one identity claimed by two files — and the queue, the ledger
+  // join and PR 4's write path all key on that identity, so emitting both would
+  // put two cards on the board that a drag cannot tell apart. `.mdx` wins: it is
+  // mimir's default for new narrative pages, so the `.md` is the leftover.
+  const bySlug = new Map<string, PlanRecord>();
   for (const name of entries.sort()) {
     if (!/\.mdx?$/i.test(name)) continue;
     if (NON_PLAN_BASENAMES.has(name.toLowerCase())) continue;
@@ -234,23 +278,42 @@ export async function loadPlanSource(opts: PlanSourceOptions = {}): Promise<Plan
       continue;
     }
     const record = planRecordFromContent(`${PLANS_DIR}/${name}`, content, mtimeMs, warnings);
-    if (record) plans.push(record);
+    if (!record) continue;
+    const existing = bySlug.get(record.slug);
+    if (existing) {
+      const winner = /\.mdx$/i.test(record.relPath) ? record : existing;
+      const loser = winner === record ? existing : record;
+      warnings.push(
+        `${PLANS_DIR}/: "${record.slug}" is claimed by two files (${existing.relPath}, ${record.relPath}) — keeping ${winner.relPath} (.mdx wins), dropping ${loser.relPath}`,
+      );
+      bySlug.set(record.slug, winner);
+      continue;
+    }
+    bySlug.set(record.slug, record);
   }
+  const plans: PlanRecord[] = [...bySlug.values()];
 
   // The queue is validated against the slugs we just read, so an entry left
   // behind by a rename is dropped rather than ranking a card that is not there.
   const queueAbs = path.join(root, QUEUE_REL_PATH);
   let queue: PlanQueue = empty;
-  const queueFile = Bun.file(queueAbs);
-  if (await queueFile.exists()) {
-    try {
-      const text = await queueFile.text();
-      const parsed = parseQueueYaml(text, new Set(plans.map((p) => p.slug)));
-      warnings.push(...parsed.warnings);
-      queue = { order: parsed.order, hash: sha256(text) };
-    } catch (err) {
+  // Read first, ask questions on the error — an `exists()` pre-check answers
+  // false for a file that is merely UNREADABLE, which is the one case that must
+  // not look like "absent" (see `PlanQueue.hash`).
+  let text: string | null = null;
+  try {
+    text = await Bun.file(queueAbs).text();
+  } catch (err) {
+    const code = (err as { code?: string }).code;
+    if (code !== "ENOENT") {
       warnings.push(`${QUEUE_REL_PATH}: unreadable (${err instanceof Error ? err.message : String(err)})`);
+      queue = { order: {}, hash: null };
     }
+  }
+  if (text !== null) {
+    const parsed = parseQueueYaml(text, new Set(plans.map((p) => p.slug)));
+    warnings.push(...parsed.warnings);
+    queue = { order: parsed.order, hash: sha256(text) };
   }
 
   // ONE aggregated warn per load. mimir's plans are re-read on every board

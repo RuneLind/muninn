@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { loadPlanSource, planRecordFromContent } from "./source.ts";
@@ -103,6 +103,58 @@ describe("planRecordFromContent", () => {
     expect(mk("none").followupsOpen).toBe(false);
   });
 
+  test("followups is case-insensitive, and an unknown value warns", () => {
+    const mk = (v: string, warnings: string[] = []) =>
+      planRecordFromContent(
+        "plans/x.md",
+        `---\nplan_status: shipped\nfollowups: ${v}\n---\n`,
+        0,
+        warnings,
+      )!;
+    expect(mk("Open").followupsOpen).toBe(true);
+    expect(mk("OPEN").followupsOpen).toBe(true);
+    expect(mk("None").followupsOpen).toBe(false);
+    const warnings: string[] = [];
+    expect(mk("maybe", warnings).followupsOpen).toBe(false);
+    expect(warnings.join()).toContain('followups "maybe"');
+  });
+
+  test("a CRLF plan file parses like its LF twin, and hashes its ORIGINAL bytes", () => {
+    // `parseFrontmatter`'s per-line regex uses `.`/`$`, neither of which match a
+    // `\r` — so an unnormalized CRLF plan reads as "not a plan" and vanishes
+    // from the board with no warning at all.
+    const crlf = PLAN_A.replace(/\n/g, "\r\n");
+    const warnings: string[] = [];
+    const rec = planRecordFromContent("plans/a.md", crlf, 5, warnings)!;
+    expect(rec).not.toBeNull();
+    expect(rec.title).toBe("Plan A");
+    expect(rec.planStatus).toBe("shipped");
+    expect(rec.statusDate).toBe("2026-07-31");
+    expect(rec.tags).toEqual(["muninn", "plan"]);
+    expect(rec.followupsOpen).toBe(true);
+    // The CAS hash must match what is ON DISK, not the normalized copy.
+    expect(rec.hash).toBe(sha256(crlf));
+    expect(rec.hash).not.toBe(sha256(PLAN_A));
+    expect(warnings).toEqual([]);
+  });
+
+  test("frontmatter that carries plan_status but does not parse warns by name", () => {
+    // Unterminated fence and an offset fence both read as "no frontmatter".
+    // Silently returning null there loses a real plan off the board.
+    const unterminated = "---\nplan_status: ready\ntitle: X\n";
+    const offset = "\n---\nplan_status: ready\n---\n";
+    for (const content of [unterminated, offset]) {
+      const warnings: string[] = [];
+      expect(planRecordFromContent("plans/broken.md", content, 0, warnings)).toBeNull();
+      expect(warnings.join()).toContain("plans/broken.md");
+      expect(warnings.join()).toContain("plan_status");
+    }
+    // A file that never mentions plan_status is still a silent non-plan.
+    const quiet: string[] = [];
+    expect(planRecordFromContent("plans/notes.md", "# just notes\n", 0, quiet)).toBeNull();
+    expect(quiet).toEqual([]);
+  });
+
   test("the fence-scoped parse ignores a plan_status inside a fenced YAML example", async () => {
     // The real trap: mimir-plan-status-lifecycle.mdx carries `plan_status:` in
     // its frontmatter AND inside a ```yaml block ~140 lines down. A line grep
@@ -149,6 +201,32 @@ describe("loadPlanSource", () => {
     expect(res.queue.hash).toBe(sha256(queue));
     expect(res.queue.order).toEqual({ proposed: ["b"], ready: ["a"] });
     expect(res.warnings.join()).toContain('"ghost" names no plan on disk');
+  });
+
+  test("foo.md beside foo.mdx yields ONE card, deterministically the .mdx", async () => {
+    const root = await makeWiki({ "dup.md": PLAN_A, "dup.mdx": PLAN_B });
+    const res = await loadPlanSource({ root });
+    expect(res.plans.map((p) => p.slug)).toEqual(["dup"]);
+    expect(res.plans[0]!.relPath).toBe("plans/dup.mdx");
+    expect(res.plans[0]!.title).toBe("Plan B");
+    expect(res.warnings.join()).toContain("dup");
+    expect(res.warnings.join()).toContain(".mdx");
+  });
+
+  test("an UNREADABLE queue.yaml is a third state, not the bootstrap sentinel", async () => {
+    if (process.getuid?.() === 0) return; // root reads a 000 file; nothing to test
+    const root = await makeWiki({ "a.md": PLAN_A }, "proposed:\n  - a\n");
+    await chmod(path.join(root, "plans", "queue.yaml"), 0o000);
+    try {
+      const res = await loadPlanSource({ root });
+      // `""` means "no file, first drag may bootstrap"; null means "we could not
+      // read it, so a writer must refuse rather than clobber".
+      expect(res.queue.hash).toBeNull();
+      expect(res.queue.order).toEqual({});
+      expect(res.warnings.join()).toContain("queue.yaml");
+    } finally {
+      await chmod(path.join(root, "plans", "queue.yaml"), 0o600);
+    }
   });
 
   test("a missing plans/ directory degrades to a warning, not a throw", async () => {
