@@ -10,6 +10,7 @@ import {
   applyOverlay,
   canNudge,
   cardMatches,
+  cardsInScope,
   columnForStatus,
   computeMeters,
   DEFAULT_VIEW,
@@ -89,6 +90,18 @@ describe("columns", () => {
     // A superseded plan carrying followups: open is still terminal — the
     // follow-ups column is about shipped work that left something behind.
     expect(columnForStatus("superseded", true)).toBe("shipped");
+  });
+
+  test("a scope's cards are exactly the cards its columns render", () => {
+    const cards = [
+      card({ slug: "a", column: "proposed" }),
+      card({ slug: "b", column: "in-flight" }),
+      card({ slug: "f", column: "followups" }),
+      card({ slug: "s", column: "shipped" }),
+    ];
+    expect(cardsInScope(cards, "active").map((c) => c.slug)).toEqual(["a", "b"]);
+    expect(cardsInScope(cards, "followups").map((c) => c.slug)).toEqual(["a", "b", "f"]);
+    expect(cardsInScope(cards, "all").map((c) => c.slug)).toEqual(["a", "b", "f", "s"]);
   });
 
   test("scopes add columns rather than replacing them", () => {
@@ -525,6 +538,14 @@ describe("the view is in the URL", () => {
     };
     expect(viewStateFromQuery(viewStateToQuery(view))).toEqual(view);
     expect(viewStateFromQuery("")).toEqual(DEFAULT_VIEW);
+  });
+
+  test("the query is trimmed on the way IN as well as on the way out", () => {
+    // `viewStateToQuery` trims, so a hand-typed `?q=%20board%20` was the only
+    // way to get an untrimmed query into the state — and it round-trips into a
+    // search box whose value differs from the URL that produced it.
+    expect(viewStateFromQuery("?q=%20board%20").filters.query).toBe("board");
+    expect(viewStateFromQuery("?q=%20%20").filters.query).toBe("");
   });
 
   test("a hand-edited value the board has no branch for lands on the default", () => {

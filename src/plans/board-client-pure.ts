@@ -98,6 +98,22 @@ export function visibleColumns(scope: BoardScope): BoardColumnMeta[] {
   return [...BOARD_COLUMNS];
 }
 
+/**
+ * The cards a scope actually RENDERS — the ones in {@link visibleColumns}.
+ *
+ * The meter strip counts through this rather than over every filtered card,
+ * because a tile counting cards no column on screen shows is a number the
+ * reader cannot check: under `active`, "Active plans 41 of 186" counted the
+ * whole corpus as the denominator while four columns held 41 cards.
+ */
+export function cardsInScope<T extends { column: BoardColumnKey }>(
+  cards: readonly T[],
+  scope: BoardScope,
+): T[] {
+  const keys = new Set(visibleColumns(scope).map((c) => c.key));
+  return cards.filter((c) => keys.has(c.column));
+}
+
 /** The column a plan belongs in. `followups` beats `shipped`, and the three
  *  terminal states share one column. A status the enum does not know (or none
  *  at all) files under Proposed rather than vanishing off the board. */
@@ -589,7 +605,11 @@ export function viewStateFromQuery(search: string): BoardViewState {
     filters: {
       families: (p.get("repo") ?? "").split(",").map((f) => f.trim()).filter(Boolean),
       priority: pri && prios.includes(pri) ? (pri as PlanPriority | "unset") : null,
-      query: p.get("q") ?? "",
+      // Trimmed on the way IN as well as out: `viewStateToQuery` writes the
+      // trimmed query, so an untrimmed `?q=` can only be hand-typed — and it
+      // would seed a search box whose value no longer matches the URL that
+      // produced it.
+      query: (p.get("q") ?? "").trim(),
     },
   };
 }

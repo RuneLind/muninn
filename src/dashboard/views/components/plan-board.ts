@@ -23,6 +23,7 @@ import {
   BOARD_PRIORITIES,
   applyOverlay,
   canNudge,
+  cardsInScope,
   computeMeters,
   familyCounts,
   filterCards,
@@ -159,6 +160,14 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     // dumps the user back at the top of the document on every click.
     const active = document.activeElement as HTMLElement | null;
     const focusKey = active && controlsBox.contains(active) ? active.dataset.key ?? null : null;
+    // A ▲/▼ press rebuilds the whole board, so the pressed button is destroyed
+    // too — and it lives in `boardBox`, which the key above deliberately does
+    // not cover. Remember it the way the drawer remembers its opener: by the
+    // stable pair (slug, direction), re-found after the rebuild.
+    const nudgeFocus =
+      active && boardBox.contains(active) && active.dataset.slug && active.dataset.dir
+        ? { slug: active.dataset.slug, dir: active.dataset.dir }
+        : null;
 
     const { cards, order, draftCols, diskCols } = merged();
     const shown = filterCards(cards, view.filters);
@@ -169,21 +178,72 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     syncUrl();
 
     if (focusKey) {
-      const sel = typeof CSS !== "undefined" && CSS.escape ? CSS.escape(focusKey) : focusKey;
-      controlsBox.querySelector<HTMLElement>(`[data-key="${sel}"]`)?.focus();
+      controlsBox.querySelector<HTMLElement>(`[data-key="${cssEscape(focusKey)}"]`)?.focus();
     }
+    if (nudgeFocus) restoreNudgeFocus(nudgeFocus.slug, nudgeFocus.dir);
+  }
+
+  /**
+   * Put focus back on the nudge that was just pressed.
+   *
+   * The same button first — but a nudge can DISABLE the button that fired it:
+   * ▲ on an unranked card ranks it, and a card that lands at #1 has no ▲ any
+   * more. A disabled button cannot hold focus, so the card's other nudge takes
+   * it (same control group, one button away, and it is the move that undoes
+   * what was just done), and the card itself is the last resort — anything
+   * rather than dropping the keyboard back to `<body>`.
+   */
+  function restoreNudgeFocus(slug: string, dir: string): void {
+    const base = `.pb-nudge button[data-slug="${cssEscape(slug)}"]`;
+    const pick = (d: string) =>
+      boardBox.querySelector<HTMLButtonElement>(`${base}[data-dir="${d}"]`);
+    const same = pick(dir);
+    if (same && !same.disabled) {
+      same.focus();
+      return;
+    }
+    const other = pick(dir === "up" ? "down" : "up");
+    if (other && !other.disabled) {
+      other.focus();
+      return;
+    }
+    boardBox.querySelector<HTMLElement>(`.pb-card[data-slug="${cssEscape(slug)}"]`)?.focus();
   }
 
   // ---------------------------------------------------------------- meters
+  /**
+   * The meter strip.
+   *
+   * **Every COUNT is over the cards this scope actually renders** — the strip
+   * used to count the filtered corpus, so under `Active` the "of N"
+   * denominator and the follow-ups tile described columns that were not on
+   * screen. What each tile means, one line each:
+   *
+   *   - **Active plans** — active cards visible now, of all cards visible now.
+   *   - **In flight** — visible cards in the in-flight column (an active
+   *     column, so it is in every scope).
+   *   - **Backlog, priced** — visible active cards carrying an estimate.
+   *   - **Spent to date** — deliberately CORPUS-WIDE (over the filtered cards,
+   *     every scope): it is the context the estimates are read against, not a
+   *     count of what is on screen, and it would otherwise read `$0` under the
+   *     default scope, which shows no terminal column at all. The note says so.
+   *   - **Median age** — visible active cards that carry a `status_date`.
+   *   - **Follow-ups open** — visible follow-up cards; `—`, never `0`, in a
+   *     scope with no follow-ups column, because absent is not zero.
+   */
   function renderMeters(shown: readonly EffectiveCard[]): void {
-    const m = computeMeters(shown, money);
+    const inScope = cardsInScope(shown, view.scope);
+    const m = computeMeters(inScope, money);
+    const corpus = computeMeters(shown, money);
+    const showsFollowups = visibleColumns(view.scope).some((c) => c.key === "followups");
+    const scoped = view.scope === "all" ? "" : " in this scope";
     metersBox.textContent = "";
     const tiles: Array<{ k: string; v: string; sub?: string; note: string }> = [
       {
         k: "Active plans",
         v: String(m.activeCount),
         sub: `of ${m.totalCount}`,
-        note: "proposed · ready · in flight · blocked",
+        note: `proposed · ready · in flight · blocked — of the ${m.totalCount} card(s) this scope shows`,
       },
       {
         k: "In flight",
@@ -194,24 +254,29 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
         k: "Backlog, priced",
         v: m.backlog ? formatUsd(m.backlog.mid) : "—",
         note: m.backlog
-          ? `${formatUsd(m.backlog.low)}–${formatUsd(m.backlog.high)} band over the ${m.backlog.count} active plan(s) that can be priced`
+          ? `${formatUsd(m.backlog.low)}–${formatUsd(m.backlog.high)} band over the ${m.backlog.count} active plan(s)${scoped} that can be priced`
           : payload.money.reason ?? "no estimate available",
       },
       {
         k: "Spent to date",
-        v: m.spentToDate !== null ? formatUsd(m.spentToDate) : "—",
-        note: m.spentToDate !== null ? "recorded cost of the shipped plans" : "the ledger is not answering",
+        v: corpus.spentToDate !== null ? formatUsd(corpus.spentToDate) : "—",
+        note:
+          corpus.spentToDate !== null
+            ? "recorded cost of every shipped plan — all scopes, not just the columns shown"
+            : "the ledger is not answering",
       },
       {
         k: "Median age",
         v: m.medianAgeDays !== null ? String(m.medianAgeDays) : "—",
         sub: m.medianAgeDays !== null ? "days" : undefined,
-        note: "since the last status_date on an active plan",
+        note: `since the last status_date on an active plan${scoped}`,
       },
       {
         k: "Follow-ups open",
-        v: String(m.followupsCount),
-        note: "shipped, but the plan still carries followups: open",
+        v: showsFollowups ? String(m.followupsCount) : "—",
+        note: showsFollowups
+          ? "shipped, but the plan still carries followups: open"
+          : "no follow-ups column in this scope — switch to “+ Follow-ups”",
       },
     ];
     for (const t of tiles) {
@@ -526,6 +591,11 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     ] as Array<[-1 | 1, string, string]>) {
       const b = el("button", null, glyph) as HTMLButtonElement;
       b.type = "button";
+      // The pair that survives the rebuild a nudge causes — see
+      // `restoreNudgeFocus`. `data-key` is the controls' namespace; these are
+      // per-card, so they carry their own.
+      b.dataset.slug = card.slug;
+      b.dataset.dir = delta === -1 ? "up" : "down";
       const blocked = !rankUi || diskRanked;
       b.disabled = blocked || !canNudge(ranked, card.slug, delta);
       // The action is stated, not the direction: ▲ on an unranked card RANKS
@@ -582,6 +652,14 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
    * An emptied list DELETES the column's entry rather than storing `[]`: an
    * empty order is the same statement as no order ("nothing here is
    * hand-ranked"), and keeping it would make the column read as drafted.
+   *
+   * **What is written is the MERGED list, not the stored one.** `ranked` comes
+   * from `applyOverlay`, which filters a column's order to the slugs actually
+   * in that column right now — so a nudge rewrites the column's draft as
+   * "these cards, in this order", and any slug that has moved column or left
+   * the corpus is pruned by the same write. That is the intended behaviour:
+   * the reader ranks what they can see, and a dead slug holding position #1
+   * pushes every real badge down by one.
    */
   function nudge(
     slug: string,
@@ -703,6 +781,12 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     // light theme and the status note lost its coloured spine.
     root.append(scrim, drawer);
     document.addEventListener("keydown", escClose);
+    // `aria-modal="true"` is a CLAIM, and these two are what make it true: the
+    // scrim stops the pointer, `inert` stops the tab order and the screen
+    // reader from reaching the board underneath, and the Tab handler wraps
+    // within the panel so the keyboard cannot walk out of it either.
+    drawer.addEventListener("keydown", trapDrawerTab);
+    setBackdropInert(true);
     // Selection is a one-class change on two buttons, NOT a re-render: a full
     // render rebuilds every card, which throws away the focus the drawer just
     // took and the caret in the search box.
@@ -884,11 +968,58 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     if (ev.key === "Escape") closeDrawer();
   }
 
+  /** Everything the drawer covers. `inert` rather than `aria-hidden`, because
+   *  the board behind a modal must be unfocusable as well as unreadable — the
+   *  draft note is in the list too: it carries a live "Discard drafts" button,
+   *  which is the worst thing to reach by accident from behind a scrim. */
+  function setBackdropInert(on: boolean): void {
+    for (const box of [metersBox, controlsBox, draftBox, boardBox]) {
+      if (on) box.setAttribute("inert", "");
+      else box.removeAttribute("inert");
+    }
+  }
+
+  const FOCUSABLE =
+    'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
+
+  /** Wrap Tab/Shift+Tab inside the open drawer. Read off the live DOM on every
+   *  press rather than captured at open: the priority buttons rebuild the panel
+   *  (and change which of them are disabled), so a list taken once goes stale. */
+  function trapDrawerTab(ev: KeyboardEvent): void {
+    if (ev.key !== "Tab") return;
+    const drawer = root.querySelector<HTMLElement>(".pb-drawer");
+    if (!drawer) return;
+    // `Array.from`, not a spread: this file compiles without `dom.iterable`.
+    const items = Array.from(drawer.querySelectorAll<HTMLElement>(FOCUSABLE));
+    if (items.length === 0) {
+      // Nothing to move to — hold the panel rather than tabbing into the page.
+      ev.preventDefault();
+      drawer.focus();
+      return;
+    }
+    const first = items[0]!;
+    const last = items[items.length - 1]!;
+    const active = document.activeElement as HTMLElement | null;
+    // Shift+Tab off the panel itself wraps to the end: the drawer takes focus
+    // on open, and its own node sits BEFORE its children in document order.
+    if (ev.shiftKey && (active === first || active === drawer || !drawer.contains(active))) {
+      ev.preventDefault();
+      last.focus();
+    } else if (!ev.shiftKey && active === last) {
+      ev.preventDefault();
+      first.focus();
+    }
+  }
+
   /** `silent` is the re-open path (a priority click rebuilds the drawer):
    *  neither the focus restore nor the selection clear should run there. */
   function closeDrawer(opts: { silent?: boolean } = {}): void {
     root.querySelectorAll(".pb-scrim,.pb-drawer").forEach((n) => n.remove());
     document.removeEventListener("keydown", escClose);
+    // Before the early return AND before any focus restore below: a board left
+    // inert is a page nothing can be clicked or tabbed on, and the restore
+    // targets a card inside it. (The re-open path sets it straight back.)
+    setBackdropInert(false);
     if (opts.silent) return;
     if (view.openSlug) {
       view.openSlug = null;

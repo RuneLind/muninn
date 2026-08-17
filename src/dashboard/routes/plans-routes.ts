@@ -61,7 +61,9 @@ export function defaultPlanBoardDeps(config: Config): PlanBoardDeps {
 
 /** Warn-once per distinct source failure. `/plans` is polled by every open tab,
  *  and a mimir checkout that has gone missing writes the same line forever —
- *  the ledger card's `warnedX` idiom, for the same reason. */
+ *  the ledger card's `warnedX` idiom, for the same reason. Cleared wholesale
+ *  past a sane size (same 100 as `warnedClaudeUsageErrors`) so a message
+ *  carrying a varying detail — a path, an errno, a file name — cannot leak. */
 const warnedSourceErrors = new Set<string>();
 
 function warnSourceOnce(message: string): void {
@@ -69,6 +71,7 @@ function warnSourceOnce(message: string): void {
     log.info("plan board: reading mimir's plans failed: {error}", { error: message });
     return;
   }
+  if (warnedSourceErrors.size > 100) warnedSourceErrors.clear();
   warnedSourceErrors.add(message);
   log.error("plan board: reading mimir's plans failed: {error}", { error: message });
 }
