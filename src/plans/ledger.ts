@@ -212,8 +212,10 @@ const ISO_INSTANT_RE = /\d{4}-\d{2}-\d{2}T[\d:.]+(?:Z|[+-]\d{2}:?\d{2})?/g;
  *     the stable prefix + the root cause's WORDS. A genuinely different cause
  *     ("ENOENT reading plandir" vs "git pull timed out") still keys apart.
  *
- * Digits are NOT collapsed globally: an `HTTP 503` and an `HTTP 404` are two
- * conditions and each deserves its own first warn.
+ * Digits are NOT collapsed OUTSIDE the `rebuild failed:` tail: an `HTTP 503`
+ * and an `HTTP 404` from the proxy itself key apart. Inside the tail they DO
+ * collapse (`HTTP N`), so two upstream causes that differ only by a number
+ * share one first warn — accepted, since the tail is free text we do not own.
  */
 export function ledgerWarnKey(message: string): string {
   const collapsed = message.replace(/\b\d+ row\(s\)/, "N row(s)").replace(ISO_INSTANT_RE, "<iso>");

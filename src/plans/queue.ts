@@ -24,7 +24,8 @@
  *      it is the one thing both sides must agree on byte for byte:
  *      `^[A-Za-z][A-Za-z0-9-]*$`, and never the YAML literals `true`/`false`/
  *      `null` in any casing. The leading-LETTER rule is what makes the QUOTED
- *      form unreachable: mimir's `scripts/plan-status/queue.ts` is a strict,
+ *      form unreachable: mimir's `scripts/plan-status/queue.ts` (landed by mimir
+ *      PR #4, campaign PR 3) is a strict,
  *      dependency-free line parser, and its item rule (`  - <bare slug>`) reads
  *      `- "2026-plan"` as the slug `"2026-plan"`, quotes and all — which fails
  *      its slug regex and THROWS, rejecting the WHOLE FILE, not just that entry.
@@ -151,7 +152,7 @@ export function parseQueueYaml(
         // `- 7`) have already been resolved by the YAML parser, so the message
         // is all the reader gets to find the line with in a hand-edited file.
         warnings.push(
-          `queue.yaml: column "${key}" has a non-slug entry (${String(entry)}) — dropped`,
+          `queue.yaml: column "${key}" has a non-slug entry (${JSON.stringify(entry) ?? "<empty>"}) — dropped`,
         );
         continue;
       }
