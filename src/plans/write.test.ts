@@ -39,7 +39,7 @@ describe("writePlanQueue", () => {
     __resetWikiWriteQueueForTest();
     const root = await makeRoot();
     const content = serializeQueue({ ready: ["a-plan"] });
-    const res = await writePlanQueue({ wikiDir: root, baseHash: "", content });
+    const res = await writePlanQueue({ wikiDir: root, baseHash: "", buildContent: () => content });
     expect(res).toEqual({ outcome: "written", hash: sha256(content) });
     expect(await readQueueFile(root)).toBe(content);
   });
@@ -50,7 +50,7 @@ describe("writePlanQueue", () => {
     const res = await writePlanQueue({
       wikiDir: root,
       baseHash: sha256("something"),
-      content: serializeQueue({ ready: ["a-plan"] }),
+      buildContent: () => serializeQueue({ ready: ["a-plan"] }),
     });
     expect(res.outcome).toBe("stale");
   });
@@ -62,7 +62,7 @@ describe("writePlanQueue", () => {
     const res = await writePlanQueue({
       wikiDir: root,
       baseHash: "",
-      content: serializeQueue({ ready: ["a-plan"] }),
+      buildContent: () => serializeQueue({ ready: ["a-plan"] }),
     });
     expect(res.outcome).toBe("stale");
     expect(await readQueueFile(root)).toBe(existing);
@@ -74,7 +74,7 @@ describe("writePlanQueue", () => {
     let hash = "";
     for (const slugs of [["a"], ["a", "b"], ["b", "a"]]) {
       const content = serializeQueue({ ready: slugs });
-      const res = await writePlanQueue({ wikiDir: root, baseHash: hash, content });
+      const res = await writePlanQueue({ wikiDir: root, baseHash: hash, buildContent: () => content });
       expect(res.outcome).toBe("written");
       hash = (res as { hash: string }).hash;
       expect(hash).toBe(sha256(await readQueueFile(root)));
@@ -82,7 +82,7 @@ describe("writePlanQueue", () => {
     const stale = await writePlanQueue({
       wikiDir: root,
       baseHash: "",
-      content: serializeQueue({ ready: ["c"] }),
+      buildContent: () => serializeQueue({ ready: ["c"] }),
     });
     expect(stale.outcome).toBe("stale");
   });
@@ -91,7 +91,7 @@ describe("writePlanQueue", () => {
     __resetWikiWriteQueueForTest();
     const content = serializeQueue({ ready: ["a-plan"] });
     const root = await makeRoot(content);
-    const res = await writePlanQueue({ wikiDir: root, baseHash: sha256(content), content });
+    const res = await writePlanQueue({ wikiDir: root, baseHash: sha256(content), buildContent: () => content });
     expect(res).toEqual({ outcome: "noop", hash: sha256(content) });
   });
 
@@ -99,11 +99,11 @@ describe("writePlanQueue", () => {
     __resetWikiWriteQueueForTest();
     const content = serializeQueue({ ready: ["a-plan"] });
     const root = await makeRoot(content);
-    const res = await writePlanQueue({ wikiDir: root, baseHash: sha256(content), content: "" });
+    const res = await writePlanQueue({ wikiDir: root, baseHash: sha256(content), buildContent: () => "" });
     expect(res).toEqual({ outcome: "deleted", hash: "" });
     expect(await Bun.file(path.join(root, QUEUE_REL_PATH)).exists()).toBe(false);
     // …and the hash it handed back is a valid base for the next write.
-    const again = await writePlanQueue({ wikiDir: root, baseHash: "", content: serializeQueue({ ready: ["a"] }) });
+    const again = await writePlanQueue({ wikiDir: root, baseHash: "", buildContent: () => serializeQueue({ ready: ["a"] }) });
     expect(again.outcome).toBe("written");
   });
 
@@ -116,7 +116,7 @@ describe("writePlanQueue", () => {
     const res = await writePlanQueue({
       wikiDir: root,
       baseHash: "",
-      content: serializeQueue({ ready: ["a-plan"] }),
+      buildContent: () => serializeQueue({ ready: ["a-plan"] }),
     });
     expect(res.outcome).toBe("stale");
     expect((res as { reason: string }).reason).toContain("could not be read");
@@ -128,7 +128,7 @@ describe("writePlanQueue", () => {
     const res = await writePlanQueue({
       wikiDir: root,
       baseHash: "",
-      content: serializeQueue({ ready: ["a-plan"] }),
+      buildContent: () => serializeQueue({ ready: ["a-plan"] }),
       isReadonly: () => true,
     });
     expect(res.outcome).toBe("forbidden");

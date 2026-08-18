@@ -80,6 +80,17 @@ function ledger(over: Partial<PlanLedgerResult> = {}): PlanLedgerResult {
 
 const build = (s = source(), l = ledger()) => buildBoardPayload({ source: s, ledger: l, now: NOW });
 
+describe("the readonly flag", () => {
+  // Injected rather than read off the process env, so this assertion says what
+  // the payload does with the answer instead of what host it ran on.
+  test("rides the payload from the injected seam, both ways", () => {
+    for (const readonly of [true, false]) {
+      const p = buildBoardPayload({ source: source(), ledger: ledger(), now: NOW, readonly });
+      expect(p.readonly).toBe(readonly);
+    }
+  });
+});
+
 describe("column membership", () => {
   test("every plan lands in exactly one column, follow-ups included", () => {
     const p = build();

@@ -194,6 +194,58 @@ describe("POST /api/plans/priority", () => {
     expect(unregistered.status).toBe(404);
   });
 
+  test("a 200 never claims a priority the file does not carry", async () => {
+    // A loose closing fence (`--- `) is frontmatter to the READER, so the board
+    // renders this file as a card. A writer that draws the fence differently
+    // either edits body bytes or declines — and a decline that answers 200 with
+    // the REQUESTED priority tells the board a value is on disk that is not.
+    const root = await makeWiki([]);
+    await writeFile(
+      path.join(root, "plans", "loose-plan.mdx"),
+      `--- \ntitle: loose\nplan_status: ready\n---\n\n# loose\n`,
+    );
+    const a = app(root);
+    const res = await post(a, "/api/plans/priority", {
+      slug: "loose-plan",
+      priority: "p1",
+      baseHash: await hashOf(root, "loose-plan"),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    const onDisk = (await loadPlanSource({ root })).plans.find((p) => p.slug === "loose-plan")!;
+    expect(body.priority).toBe(onDisk.priority ?? null);
+    expect(body.hash).toBe(onDisk.hash);
+  });
+
+  test("503s (naming the reason) when the source read fails", async () => {
+    const a = app(await makeWiki(), {
+      loadSource: () => Promise.reject(new Error("mimir went missing")),
+    });
+    const res = await post(a, "/api/plans/priority", {
+      slug: "alpha-plan",
+      priority: "p1",
+      baseHash: "h",
+    });
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toContain("mimir went missing");
+  });
+
+  test("400s on a null JSON body instead of 500ing", async () => {
+    const res = await post(app(await makeWiki()), "/api/plans/priority", null);
+    expect(res.status).toBe(400);
+  });
+
+  test("413s on an oversized body, writing nothing", async () => {
+    const root = await makeWiki();
+    const res = await post(app(root), "/api/plans/priority", {
+      slug: "alpha-plan",
+      priority: "p1",
+      baseHash: "x".repeat(300_000),
+    });
+    expect(res.status).toBe(413);
+    expect(await pageText(root, "alpha-plan")).toBe(plan("alpha-plan"));
+  });
+
   test("403s on a readonly instance, leaving the tree untouched", async () => {
     const root = await makeWiki();
     const a = app(root);
@@ -271,17 +323,115 @@ describe("POST /api/plans/order", () => {
     expect((await res.json()).error).toContain("could not be read");
   });
 
-  test("an empty order deletes the file", async () => {
+  test("a posted column REPLACES that column and preserves every absent one", async () => {
+    const root = await makeWiki(["alpha-plan", "beta-plan", "gamma-plan"]);
+    const a = app(root);
+    const created = await post(a, "/api/plans/order", {
+      order: { ready: ["alpha-plan"], blocked: ["beta-plan", "gamma-plan"] },
+      baseHash: "",
+    });
+    const hash = (await created.json()).hash;
+
+    const res = await post(a, "/api/plans/order", { order: { ready: ["alpha-plan"] }, baseHash: hash });
+    expect(res.status).toBe(200);
+    // `blocked` was not posted, so it is still on disk — and in the response.
+    expect(await queueText(root)).toBe(
+      serializeQueue({ ready: ["alpha-plan"], blocked: ["beta-plan", "gamma-plan"] }),
+    );
+    const body = await res.json();
+    expect(body.order).toEqual({ ready: ["alpha-plan"], blocked: ["beta-plan", "gamma-plan"] });
+    expect(body.hash).toBe(sha256(await queueText(root)));
+  });
+
+  test("an explicitly posted empty array un-ranks exactly that column", async () => {
+    const root = await makeWiki(["alpha-plan", "beta-plan"]);
+    const a = app(root);
+    const created = await post(a, "/api/plans/order", {
+      order: { ready: ["alpha-plan"], blocked: ["beta-plan"] },
+      baseHash: "",
+    });
+    const res = await post(a, "/api/plans/order", {
+      order: { ready: [] },
+      baseHash: (await created.json()).hash,
+    });
+    expect(res.status).toBe(200);
+    expect(await queueText(root)).toBe(serializeQueue({ blocked: ["beta-plan"] }));
+  });
+
+  test("a slug moved into a posted column is not left ranked in a preserved one", async () => {
+    const root = await makeWiki(["alpha-plan", "beta-plan"]);
+    const a = app(root);
+    const created = await post(a, "/api/plans/order", {
+      order: { ready: ["alpha-plan"], blocked: ["beta-plan"] },
+      baseHash: "",
+    });
+    const res = await post(a, "/api/plans/order", {
+      order: { ready: ["alpha-plan", "beta-plan"] },
+      baseHash: (await created.json()).hash,
+    });
+    expect(res.status).toBe(200);
+    // `blocked` was preserved, but its only slug now ranks in `ready` — a file
+    // ranking one slug twice round-trips through `parseQueueYaml` as a DIFFERENT
+    // file, so the preserved copy loses.
+    expect(await queueText(root)).toBe(serializeQueue({ ready: ["alpha-plan", "beta-plan"] }));
+  });
+
+  test("an order posting no columns at all is a 400, never a delete", async () => {
+    const root = await makeWiki();
+    const a = app(root);
+    const created = await post(a, "/api/plans/order", {
+      order: { ready: ["alpha-plan"] },
+      baseHash: "",
+    });
+    const hash = (await created.json()).hash;
+    // The second one is a body whose only key is one `Object.entries` reports
+    // but the column loop consumes nothing from — the shape that used to reduce
+    // to `{}` and delete every column's ordering.
+    for (const order of [{}, JSON.parse(String.raw`{"__proto__": ["alpha-plan"]}`)]) {
+      const res = await post(a, "/api/plans/order", { order, baseHash: hash });
+      expect(res.status).toBe(400);
+      expect(await queueText(root)).toBe("ready:\n  - alpha-plan\n");
+    }
+  });
+
+  test("400s on a null JSON body, and 413s on an oversized one", async () => {
+    const root = await makeWiki();
+    expect((await post(app(root), "/api/plans/order", null)).status).toBe(400);
+    const big = await post(app(root), "/api/plans/order", {
+      baseHash: "x".repeat(300_000),
+      order: { ready: ["alpha-plan"] },
+    });
+    expect(big.status).toBe(413);
+    expect(await Bun.file(path.join(root, QUEUE_REL_PATH)).exists()).toBe(false);
+  });
+
+  test("503s (naming the reason) when the source read fails", async () => {
+    const a = app(await makeWiki(), {
+      loadSource: () => Promise.reject(new Error("mimir went missing")),
+    });
+    const res = await post(a, "/api/plans/order", {
+      order: { ready: ["alpha-plan"] },
+      baseHash: "",
+    });
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toContain("mimir went missing");
+  });
+
+  test("un-ranking the last ranked column deletes the file", async () => {
     const root = await makeWiki();
     const a = app(root);
     const created = await post(a, "/api/plans/order", {
       order: { proposed: ["alpha-plan"] },
       baseHash: "",
     });
-    const res = await post(a, "/api/plans/order", { order: {}, baseHash: (await created.json()).hash });
+    const res = await post(a, "/api/plans/order", {
+      order: { proposed: [] },
+      baseHash: (await created.json()).hash,
+    });
     expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body).toMatchObject({ hash: "", deleted: true });
+    // One truthful shape: `written` is "bytes were written", `deleted` is "the
+    // file is gone". A state change is `written || deleted`, never both true.
+    expect(await res.json()).toMatchObject({ hash: "", deleted: true, written: false });
     expect(await Bun.file(path.join(root, QUEUE_REL_PATH)).exists()).toBe(false);
   });
 

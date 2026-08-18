@@ -2,24 +2,38 @@
  * The `/plans` board's one write into a plan PAGE: setting or clearing the
  * `priority:` line in its frontmatter.
  *
- * Three rules, all load-bearing:
+ * Four rules, all load-bearing:
  *
  *   1. **Fence-scoped, never a whole-file line upsert.** A `^priority:` replace
  *      over the whole file edits plan BODIES:
  *      `plans/mimir-plan-status-lifecycle.mdx` carries `plan_status:` at line 5
  *      (frontmatter) and again at line 145, inside a ```yaml example whose own
  *      `---` lines sit right beside it — mimir's `lint.sh` documents getting
- *      burned by exactly this shape. So the edit is confined to the leading
- *      `---` … `---` byte range, and the produced string is CHECKED against the
- *      original from the closing fence on before it is returned.
- *   2. **A line upsert, never parse-and-reserialize.** `parseFrontmatter` has no
+ *      burned by exactly this shape.
+ *   2. **The fence boundaries are the READER's**, byte for byte:
+ *      `parseFrontmatter` (`src/wiki/store.ts`) opens on a line STARTING with
+ *      `---` and closes at the first LATER line starting with `---`. Requiring
+ *      the fences to be exactly `---` is a different rule, and every file the two
+ *      rules disagree about is a file this corrupts or refuses to touch: a
+ *      closing `--- ` (one trailing space) made the writer take body bytes for
+ *      frontmatter — a body line reading `priority: …` was rewritten, and a clear
+ *      DELETED it — while a loose OPENING fence made a file the board renders as
+ *      a card permanently un-editable behind a 200. So both boundaries are
+ *      derived here with `indexOf`/`startsWith` exactly as the reader draws them,
+ *      and the produced bytes are CHECKED against that same rule before return.
+ *   3. **A line upsert, never parse-and-reserialize.** `parseFrontmatter` has no
  *      writer, and a round trip through one would re-quote every hand-written
  *      `status_note` in the corpus. One line is replaced, inserted or deleted;
- *      every other byte is the file's own.
- *   3. **Fail closed to `null`** (⇒ `writeWikiPage` answers `noop`, nothing is
- *      written) whenever the fence is not the shape this can edit safely: line 1
- *      is not `---`, or the fence never closes. A file we cannot read the fence
- *      of is a file we must not write.
+ *      every other byte is the file's own — with two measured caveats:
+ *      `Bun.file().text()` strips a leading BOM, so a BOM'd file loses it on the
+ *      first write (the caller hashes the same stripped text, so nothing goes
+ *      stale — the byte is simply gone), and a multi-line YAML scalar whose
+ *      continuation line begins `priority:` at column 0 is a shape
+ *      `parseFrontmatter` ALSO mis-reads as a key, so this rewrites the line the
+ *      reader would have read. Neither shape exists in mimir today.
+ *   4. **Fail closed, and say so.** A fence this cannot read the boundaries of —
+ *      no opening `---`, no closing one — is a REFUSAL (`{kind: "refused"}`, ⇒ a
+ *      422), deliberately not the `noop` a caller would report as success.
  *
  * Key matching is `parseFrontmatter`'s own shape — the key at column 0 followed
  * immediately by `:` — so this writes exactly the line the board reads back.
@@ -38,38 +52,61 @@ const FENCE = "---";
 const PRIORITY_LINE = /^priority:/;
 const PLAN_STATUS_LINE = /^plan_status:/;
 
-/** A line without its CRLF carriage return, for comparing against `---`. */
-function bare(line: string): string {
-  return line.endsWith("\r") ? line.slice(0, -1) : line;
+/**
+ * The outcome of one priority edit. A REFUSAL is not a noop: the caller answers
+ * 422 for the first and 200 for the second, because "nothing to do" and "this
+ * file is not a shape I may write" are different sentences to a reader whose
+ * click did nothing.
+ */
+export type PlanPriorityEdit =
+  | { kind: "changed"; content: string }
+  | { kind: "noop" }
+  | { kind: "refused"; reason: string };
+
+/**
+ * Where `parseFrontmatter` draws the fence, in byte offsets over the RAW string.
+ *
+ * `openEnd` is the newline ending line 1; `closeNl` is the newline immediately
+ * before the closing fence line. The frontmatter body is `(openEnd, closeNl)` —
+ * empty when the two coincide, which is what `---\n---` looks like.
+ */
+function fenceBounds(content: string): { openEnd: number; closeNl: number } | null {
+  if (!content.startsWith(FENCE)) return null;
+  const openEnd = content.indexOf("\n");
+  if (openEnd === -1) return null;
+  // The reader's own expression, not a re-derivation: any line starting `---`.
+  const closeNl = content.indexOf(`\n${FENCE}`, 3);
+  if (closeNl === -1 || closeNl < openEnd) return null;
+  return { openEnd, closeNl };
 }
 
 /**
  * Set (or, with `null`, clear) a plan's frontmatter `priority`.
  *
- * Returns the new file content, or `null` for "nothing to do" — the same value
- * already set, a clear on a file that carries no `priority:`, or a fence this
- * cannot safely edit. `writeWikiPage` turns `null` into a `noop`: no write, no
- * log entry, no reindex.
- *
  * A duplicate `priority:` inside one fence (a malformed file — the reader takes
- * the first) is normalized: the first is rewritten and the rest are dropped, so
+ * the last) is normalized: the first is rewritten and the rest are dropped, so
  * the value the board shows and the value on disk cannot disagree afterwards.
- *
- * @throws if the produced string differs after the closing fence — the
- *   invariant this module exists for, asserted on the bytes rather than
- *   inferred from how they were built.
  */
-export function setPlanPriority(content: string, priority: PlanPriority | null): string | null {
-  const lines = content.split("\n");
-  if (bare(lines[0] ?? "") !== FENCE) return null;
-  const close = lines.findIndex((line, i) => i > 0 && bare(line) === FENCE);
-  if (close === -1) return null;
+export function setPlanPriority(content: string, priority: PlanPriority | null): PlanPriorityEdit {
+  const bounds = fenceBounds(content);
+  if (!bounds) {
+    return {
+      kind: "refused",
+      reason: "the file has no readable frontmatter fence — refusing to edit it",
+    };
+  }
+  const { openEnd, closeNl } = bounds;
+  const openLine = content.slice(0, openEnd);
+  const tail = content.slice(closeNl);
+  // `closeNl === openEnd` means the close IS line 2: there is no body region at
+  // all, which is a different thing from a body region holding one empty line.
+  const body = closeNl > openEnd ? content.slice(openEnd + 1, closeNl) : null;
 
-  const cr = (lines[0] ?? "").endsWith("\r") ? "\r" : "";
+  const cr = openLine.endsWith("\r") ? "\r" : "";
   const fence: string[] = [];
   let replaced = false;
   let hadPriority = false;
-  for (const line of lines.slice(1, close)) {
+  for (const line of body === null ? [] : body.split("\n")) {
     if (!PRIORITY_LINE.test(line)) {
       fence.push(line);
       continue;
@@ -79,7 +116,7 @@ export function setPlanPriority(content: string, priority: PlanPriority | null):
     fence.push(`priority: ${priority}${cr}`);
     replaced = true;
   }
-  if (priority === null && !hadPriority) return null;
+  if (priority === null && !hadPriority) return { kind: "noop" };
   if (priority !== null && !replaced) {
     // Insert anchor: after `plan_status:` (present in every plan on disk — it is
     // what makes a file a plan at all), else as the fence's last line.
@@ -87,13 +124,21 @@ export function setPlanPriority(content: string, priority: PlanPriority | null):
     fence.splice(anchor === -1 ? fence.length : anchor + 1, 0, `priority: ${priority}${cr}`);
   }
 
-  const out = [lines[0]!, ...fence, ...lines.slice(close)].join("\n");
-  if (out === content) return null;
+  const out = openLine + (fence.length > 0 ? `\n${fence.join("\n")}` : "") + tail;
+  if (out === content) return { kind: "noop" };
 
-  const tail = lines.slice(close).join("\n");
-  const tailStart = out.length - tail.length;
-  if (out.slice(tailStart) !== tail || out[tailStart - 1] !== "\n") {
-    throw new Error("plan priority edit would have changed bytes outside the frontmatter fence");
+  // The guard, re-derived from the OUTPUT with the reader's rule rather than
+  // from the pieces this was built out of — a comparison against the same slice
+  // the string was concatenated from is a tautology, and a tautology is what let
+  // rule 2's corruption through. This catches a fence boundary that MOVED (a
+  // body line promoted into the frontmatter, or vice versa) as well as any byte
+  // after it differing.
+  const outBounds = fenceBounds(out);
+  if (!outBounds || out.slice(outBounds.closeNl) !== tail) {
+    return {
+      kind: "refused",
+      reason: "the edit would have changed bytes outside the frontmatter fence",
+    };
   }
-  return out;
+  return { kind: "changed", content: out };
 }

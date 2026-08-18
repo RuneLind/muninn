@@ -65,10 +65,19 @@ export interface QueueWriteOptions {
   wikiDir: string;
   /** sha256 of the file at read time, or `""` meaning "it was absent". */
   baseHash: string;
-  /** The canonical bytes from `serializeQueue`. `""` (a fully empty order) means
-   *  DELETE — the file and its absence are the same state to the reader, and a
-   *  stub of nothing but a trailing newline is not a shape the grammar has. */
-  content: string;
+  /**
+   * Produce the bytes to write from the CURRENT file (`null` when absent). Runs
+   * INSIDE the critical section, after the CAS passes — an ordering write is a
+   * read-modify-write (a POST carries only the columns the reader touched, so
+   * the rest are merged in from disk), and a merge performed before the section
+   * merges against a file this write may not be the next writer of.
+   *
+   * Must return the canonical bytes from `serializeQueue`. `""` (a fully empty
+   * order) means DELETE — the file and its absence are the same state to the
+   * reader, and a stub of nothing but a trailing newline is not a shape the
+   * grammar has. A throw is an `error` outcome; nothing is written.
+   */
+  buildContent: (current: string | null) => string;
   readQueue?: (absPath: string) => Promise<QueueReadState>;
   writeFile?: (absPath: string, content: string) => Promise<void>;
   deleteFile?: (absPath: string) => Promise<void>;
@@ -114,17 +123,27 @@ export async function writePlanQueue(opts: QueueWriteOptions): Promise<QueueWrit
         reason: `${QUEUE_REL_PATH} exists but could not be read (${current.reason}) — refusing to overwrite an ordering that is still on disk`,
       };
     }
+    if (current.state === "absent" && opts.baseHash !== "") {
+      return { outcome: "stale", reason: `${QUEUE_REL_PATH} does not exist yet — the order was written or removed since it was read` };
+    }
+    if (current.state === "present" && (opts.baseHash === "" || sha256(current.content) !== opts.baseHash)) {
+      return { outcome: "stale", reason: `${QUEUE_REL_PATH} changed since the board was loaded` };
+    }
+
+    // The CAS has passed, so the bytes the merge reads are the bytes the base
+    // hash describes — which is the whole reason it runs in here.
+    let content: string;
+    try {
+      content = opts.buildContent(current.state === "present" ? current.content : null);
+    } catch (err) {
+      return { outcome: "error", reason: `building ${QUEUE_REL_PATH} failed: ${errMsg(err)}` };
+    }
+
     if (current.state === "absent") {
-      if (opts.baseHash !== "") {
-        return { outcome: "stale", reason: `${QUEUE_REL_PATH} does not exist yet — the order was written or removed since it was read` };
-      }
-      if (opts.content === "") return { outcome: "noop", hash: "" };
+      if (content === "") return { outcome: "noop", hash: "" };
     } else {
-      if (opts.baseHash === "" || sha256(current.content) !== opts.baseHash) {
-        return { outcome: "stale", reason: `${QUEUE_REL_PATH} changed since the board was loaded` };
-      }
-      if (current.content === opts.content) return { outcome: "noop", hash: opts.baseHash };
-      if (opts.content === "") {
+      if (current.content === content) return { outcome: "noop", hash: opts.baseHash };
+      if (content === "") {
         try {
           await (opts.deleteFile ?? unlink)(absPath);
         } catch (err) {
@@ -137,7 +156,7 @@ export async function writePlanQueue(opts: QueueWriteOptions): Promise<QueueWrit
     try {
       await (opts.writeFile ?? ((p: string, c: string) => Bun.write(p, c).then(() => undefined)))(
         absPath,
-        opts.content,
+        content,
       );
     } catch (err) {
       return { outcome: "error", reason: `writing ${QUEUE_REL_PATH} failed: ${errMsg(err)}` };
@@ -145,6 +164,6 @@ export async function writePlanQueue(opts: QueueWriteOptions): Promise<QueueWrit
     // Hashed from the string we wrote, never by re-reading: the section is about
     // to release, and a concurrent writer's bytes handed back as "your new base"
     // would arm the next edit to overwrite them.
-    return { outcome: "written", hash: sha256(opts.content) };
+    return { outcome: "written", hash: sha256(content) };
   });
 }

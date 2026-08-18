@@ -108,8 +108,9 @@ export interface BoardPayload {
   /** Whether the board may show money at all, and why not when it may not. */
   money: { available: boolean; reason: string | null };
   /** This instance refuses wiki writes (`MUNINN_WIKI_READONLY=1`), so the write
-   *  endpoints answer 403. The page renders a banner rather than letting a
-   *  reader on the mini discover it one refused click at a time. */
+   *  endpoints answer 403. Carried for PR 5, which renders the banner: no
+   *  consumer reads it yet, and a reader on the mini still discovers the refusal
+   *  one click at a time until then. */
   readonly: boolean;
   columns: BoardColumnMeta[];
   cards: BoardCard[];

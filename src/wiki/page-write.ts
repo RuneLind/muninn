@@ -49,6 +49,7 @@ import { isPathConfined } from "../gardener/draft.ts";
 import { insertLogEntry } from "../gardener/apply.ts";
 import { sha256, todayOslo } from "../gardener/util.ts";
 import { runWikiWriteExclusive } from "./queue.ts";
+import { getWikiIndex } from "./store.ts";
 import { isWikiReadonly, WIKI_READONLY_REASON } from "./readonly.ts";
 import type { CommitWikiResult } from "./commit.ts";
 import { getLog } from "../logging.ts";
@@ -88,9 +89,6 @@ export interface PageWriteCommonOptions {
   transform: (current: string) => string | null;
   /** Huginn collections to reindex. Empty ⇒ reindex skipped; write + log still happen. */
   collections: string[];
-  /** Commit subject, e.g. `[fact-check] annotate: <relPath>`. Read only when
-   *  `commit` is set — a caller that passes no committer needs no subject. */
-  commitMessage?: string;
   now: () => number;
   /** Read a file's text, or null when it doesn't exist / is unreadable. */
   readFile: (absPath: string) => Promise<string | null>;
@@ -99,13 +97,6 @@ export interface PageWriteCommonOptions {
   refreshIndex: () => Promise<void>;
   /** Best-effort huginn reindex for a collection; must never throw. */
   reindex: (collection: string) => Promise<void>;
-  /**
-   * Commit the just-written page + log.md into their git repo. Optional — absent
-   * in tests that don't exercise the commit seam. Wired to `commitWikiChange` at
-   * the route. Returns the truthful `CommitWikiResult` where the caller wants to
-   * report it; a `void`-returning stub stays assignable.
-   */
-  commit?: (paths: string[], message: string) => Promise<CommitWikiResult | void>;
   /**
    * Is this instance forbidden from writing wiki page content? Injectable so a
    * test drives the refusal without touching the process env; defaults to the
@@ -116,15 +107,37 @@ export interface PageWriteCommonOptions {
   isReadonly?: () => boolean;
 }
 
+/**
+ * The commit tail, as a PAIR. A committer with no subject used to fall back to a
+ * generic `[wiki] write: <relPath>` that no caller has ever taken — a default
+ * whose only reachable use would be an accident, on the one seam whose output is
+ * a permanent line in a shared repo's history. So the two fields travel together
+ * or not at all, and the type says so.
+ */
+export type PageWriteCommitOptions =
+  | { commit?: undefined; commitMessage?: undefined }
+  | {
+      /**
+       * Commit the just-written page + log.md into their git repo. Wired to
+       * `commitWikiChange` at the route; absent in tests that don't exercise the
+       * seam. Returns the truthful `CommitWikiResult` where the caller wants to
+       * report it; a `void`-returning stub stays assignable.
+       */
+      commit: (paths: string[], message: string) => Promise<CommitWikiResult | void>;
+      /** Commit subject, e.g. `[fact-check] annotate: <relPath>`. */
+      commitMessage: string;
+    };
+
 /** The ordinary write: it earns a `log.md` entry and a reindex. */
-export interface PageWriteOptions extends PageWriteCommonOptions {
-  /** Log entry kind, rendered as `## [date] <logKind> | <logTitle>`. */
-  logKind: string;
-  /** Title for the log.md entry. */
-  logTitle: string;
-  /** The log entry's single bullet line (without the leading `- `). */
-  logLine: string;
-}
+export type PageWriteOptions = PageWriteCommonOptions &
+  PageWriteCommitOptions & {
+    /** Log entry kind, rendered as `## [date] <logKind> | <logTitle>`. */
+    logKind: string;
+    /** Title for the log.md entry. */
+    logTitle: string;
+    /** The log entry's single bullet line (without the leading `- `). */
+    logLine: string;
+  };
 
 /**
  * NO-LOG MODE. The write, the CAS, the queue and the wiki-store cache refresh
@@ -138,12 +151,51 @@ export interface PageWriteOptions extends PageWriteCommonOptions {
  * A separate interface rather than three optional fields, so the ordinary path
  * still cannot compile without its title and line.
  */
-export interface PageWriteNoLogOptions extends PageWriteCommonOptions {
-  logKind: null;
-}
+export type PageWriteNoLogOptions = PageWriteCommonOptions &
+  PageWriteCommitOptions & { logKind: null };
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/** The commit half as one narrowed value, or null. The union above cannot be
+ *  narrowed through an intersection in place, so it is read here. */
+function commitPair(
+  opts: PageWriteCommitOptions,
+): { run: NonNullable<PageWriteCommitOptions["commit"]>; message: string } | null {
+  return opts.commit ? { run: opts.commit, message: opts.commitMessage } : null;
+}
+
+/**
+ * The three filesystem/index seams every page writer passes, wired to the real
+ * ones. Extracted because the identical closure trio was copy-pasted at three
+ * call sites (`wiki-routes`' append + integrate applies, `plans-routes`'
+ * priority) — three chances for one of them to grow a different read-failure
+ * convention than the `null`-means-absent one `writeWikiPage` maps to `stale`.
+ *
+ * `refreshIndex` is the seam a caller may override: the `/plans` board reads
+ * `loadPlanSource`, not the wiki index, so it passes a no-op rather than paying
+ * a full rebuild per click.
+ */
+export function defaultPageWriteIo(root: string): Pick<
+  PageWriteCommonOptions,
+  "readFile" | "writeFile" | "refreshIndex"
+> {
+  return {
+    readFile: async (absPath) => {
+      try {
+        return await Bun.file(absPath).text();
+      } catch {
+        return null;
+      }
+    },
+    writeFile: async (absPath, content) => {
+      await Bun.write(absPath, content);
+    },
+    refreshIndex: async () => {
+      await getWikiIndex({ root, refresh: true });
+    },
+  };
 }
 
 /**
@@ -253,10 +305,11 @@ export async function writeWikiPage(
   // 7. Commit the page + log.md — OUTSIDE the critical section (see module doc).
   //    Non-fatal: a commit failure never undoes the applied write.
   let commit: CommitWikiResult | undefined;
-  if (opts.commit) {
+  const committer = commitPair(opts);
+  if (committer) {
     try {
       const paths = logging ? [relPath, "log.md"] : [relPath];
-      const res = await opts.commit(paths, opts.commitMessage ?? `[wiki] write: ${relPath}`);
+      const res = await committer.run(paths, committer.message);
       if (res && typeof res === "object" && "committed" in res) commit = res;
     } catch (err) {
       log.warn("Wiki page write: commit failed for {path}: {error}", {

@@ -185,6 +185,40 @@ export function parseQueueYaml(
 }
 
 /**
+ * Merge one POSTED ordering over the one on disk.
+ *
+ * A write carries the columns the reader touched, never the whole board: the
+ * `/plans` client ranks within one column at a time, and a wholesale replace
+ * silently un-ranks every column the request left out. So a posted column
+ * REPLACES that column, `postedColumns` (not the presence of a key in `posted` —
+ * rule 2 leaves an emptied column keyless) says which ones those are, and every
+ * other column is carried over from disk.
+ *
+ * The one thing a carried-over column loses is a slug the posted set has
+ * CLAIMED: the columns are mutually exclusive board states, `parseQueueYaml`
+ * drops the later copy of a twice-ranked slug, and a file that round-trips to a
+ * different file is exactly what rule 2 exists to prevent. The posted column
+ * wins, because it is the newer intent.
+ */
+export function mergeQueueOrder(
+  disk: QueueOrder,
+  posted: QueueOrder,
+  postedColumns: readonly QueueColumn[],
+): QueueOrder {
+  const claimed = new Set<string>();
+  for (const col of postedColumns) for (const slug of posted[col] ?? []) claimed.add(slug);
+
+  const merged: QueueOrder = {};
+  for (const col of QUEUE_COLUMNS) {
+    const slugs = postedColumns.includes(col)
+      ? [...(posted[col] ?? [])]
+      : (disk[col] ?? []).filter((slug) => !claimed.has(slug));
+    if (slugs.length > 0) merged[col] = slugs;
+  }
+  return merged;
+}
+
+/**
  * Emit one slug, or refuse.
  *
  * Quoting an off-grammar slug was the earlier behaviour and it is the wrong

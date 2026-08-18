@@ -48,7 +48,7 @@ import {
   FACTCHECK_HEADING_MAX,
 } from "../../wiki/factcheck-context.ts";
 import { appendBlockToPage, spliceSentinelBlock, withTrailingNewline } from "../../wiki/append-block.ts";
-import { writeWikiPage } from "../../wiki/page-write.ts";
+import { defaultPageWriteIo, writeWikiPage } from "../../wiki/page-write.ts";
 import {
   annotateEdits,
   annotatedMaxEdits,
@@ -85,7 +85,6 @@ import {
 // only one of them would split the route from the screen it answers.
 import { WIKI_SHARE_COPY } from "../views/components/wiki-share-dialog.ts";
 import { commitWikiChange } from "../../wiki/commit.ts";
-import { isWikiReadonly, WIKI_READONLY_REASON } from "../../wiki/readonly.ts";
 import { todayOslo } from "../../gardener/util.ts";
 import { capabilitiesForConnectorType, connectorCapabilities } from "../../ai/one-shot.ts";
 import type { executeOneShot } from "../../ai/one-shot.ts";
@@ -132,7 +131,7 @@ import {
   updateThreadConnector,
 } from "../../db/threads.ts";
 import { getConnector, listConnectorOptions } from "../../db/connectors.ts";
-import { isValidUuid } from "./route-utils.ts";
+import { isValidUuid, readonlyRefusal as sharedReadonlyRefusal } from "./route-utils.ts";
 import type { ConnectorType } from "../../bots/config.ts";
 import {
   articleThreadTagMatches,
@@ -176,21 +175,9 @@ import { getLog } from "../../logging.ts";
 
 const log = getLog("dashboard", "wiki");
 
-/**
- * The wiki-readonly refusal for this file's model-spending routes (the sibling of
- * `wiki-gardener-routes.ts`'s helper of the same name). Returns null when writes
- * are allowed. Logged with its route path because a route guard answers BEFORE
- * the write seams — which log on their own — so a refused POST otherwise left no
- * trace at all.
- */
-function readonlyRefusal(c: Context) {
-  if (!isWikiReadonly()) return null;
-  log.info("Wiki-readonly instance refused {method} {path}", {
-    method: c.req.method,
-    path: new URL(c.req.url).pathname,
-  });
-  return c.json({ error: WIKI_READONLY_REASON, readonly: true }, 403);
-}
+/** The shared `readonlyRefusal` (`route-utils.ts`) bound to this file's logger,
+ *  as the FIRST statement of this file's model-spending write routes. */
+const readonlyRefusal = (c: Context) => sharedReadonlyRefusal(c, log);
 
 /**
  * In-memory "what's new" digest cache, keyed by canonical wiki name. A digest is
@@ -3013,19 +3000,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         collections: entry.collections ?? [],
         logTitle: meta.title,
         now: () => Date.now(),
-        readFile: async (absPath) => {
-          try {
-            return await Bun.file(absPath).text();
-          } catch {
-            return null;
-          }
-        },
-        writeFile: async (absPath, content) => {
-          await Bun.write(absPath, content);
-        },
-        refreshIndex: async () => {
-          await getWikiIndex({ root: entry.root, refresh: true });
-        },
+        ...defaultPageWriteIo(entry.root),
         reindex: async (collection) => {
           await postCollectionUpdate(config.knowledgeApiUrl, collection);
         },
@@ -3497,19 +3472,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
           calloutAdded = true;
           return withTrailingNewline(spliced);
         },
-        readFile: async (absPath) => {
-          try {
-            return await Bun.file(absPath).text();
-          } catch {
-            return null;
-          }
-        },
-        writeFile: async (absPath, content) => {
-          await Bun.write(absPath, content);
-        },
-        refreshIndex: async () => {
-          await getWikiIndex({ root: entry.root, refresh: true });
-        },
+        ...defaultPageWriteIo(entry.root),
         reindex: async (collection) => {
           await postCollectionUpdate(config.knowledgeApiUrl, collection);
         },

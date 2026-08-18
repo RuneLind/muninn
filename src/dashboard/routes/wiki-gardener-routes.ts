@@ -16,7 +16,6 @@ import { fetchKnowledgeApi, KnowledgeApiError } from "../../ai/knowledge-api-cli
 import { lineDiff, type DiffLine } from "../../gardener/diff.ts";
 import { applyWikiProposal, draftTitle, type ApplyDeps } from "../../gardener/apply.ts";
 import { commitWikiChange } from "../../wiki/commit.ts";
-import { isWikiReadonly, WIKI_READONLY_REASON } from "../../wiki/readonly.ts";
 import {
   approveWikiProposal,
   rejectWikiProposal,
@@ -90,6 +89,7 @@ import {
 import { loadConfig } from "../../config.ts";
 import { Tracer } from "../../tracing/index.ts";
 import { getLog } from "../../logging.ts";
+import { readonlyRefusal as sharedReadonlyRefusal } from "./route-utils.ts";
 
 const log = getLog("dashboard", "wiki-gardener");
 
@@ -108,8 +108,8 @@ const KNOWLEDGE_API_URL = process.env.KNOWLEDGE_API_URL ?? "http://localhost:832
 export const SOURCE_DRAFT_TITLE_MAX = 120;
 
 /**
- * The wiki-readonly refusal, as the FIRST statement of every gardener mutation
- * route (`MUNINN_WIKI_READONLY=1`). Returns null when writes are allowed.
+ * The shared `readonlyRefusal` (`route-utils.ts`) bound to this file's logger,
+ * as the FIRST statement of every gardener mutation route.
  *
  * The two write seams (`applyWikiProposal`, `writeWikiPage`) refuse on their own,
  * so this is not the only line of defence — it exists so the refusal costs no DB
@@ -118,20 +118,8 @@ export const SOURCE_DRAFT_TITLE_MAX = 120;
  * than pages, and a readonly instance must not build a backlog it can never apply.
  *
  * `reject` is deliberately NOT guarded — it flips a DB status and mutates no wiki.
- *
- * The refusal is LOGGED with its route path: the two write seams warn on their
- * own, but a route guard answers before the seam is reached, so a refused POST
- * otherwise left no trace at all and "why did the mini do nothing?" was
- * unanswerable from the logs.
  */
-function readonlyRefusal(c: Context) {
-  if (!isWikiReadonly()) return null;
-  log.info("Wiki-readonly instance refused {method} {path}", {
-    method: c.req.method,
-    path: new URL(c.req.url).pathname,
-  });
-  return c.json({ error: WIKI_READONLY_REASON, readonly: true }, 403);
-}
+const readonlyRefusal = (c: Context) => sharedReadonlyRefusal(c, log);
 
 /** Bot configs are static until restart — discover once and memoize (see wiki-routes.ts). */
 let cachedBots: BotConfig[] | null = null;

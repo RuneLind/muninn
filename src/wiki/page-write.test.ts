@@ -28,10 +28,11 @@ function makeFs(files: Record<string, string>) {
   };
 }
 
-function baseOpts(
-  fs: ReturnType<typeof makeFs>,
-  over: Partial<PageWriteOptions> = {},
-): PageWriteOptions {
+/** The logged-mode options MINUS the commit pair, which `PageWriteCommitOptions`
+ *  requires to travel together — the tests that commit build it themselves. */
+type LoggedOpts = Omit<PageWriteOptions, "commit" | "commitMessage">;
+
+function baseOpts(fs: ReturnType<typeof makeFs>, over: Partial<LoggedOpts> = {}): LoggedOpts {
   return {
     wikiDir: "/wiki",
     relPath: "analyses/page.md",
@@ -41,7 +42,6 @@ function baseOpts(
     logKind: "factcheck-integrate",
     logTitle: "Page Title",
     logLine: "fact-check corrections integrated via the wiki reader",
-    commitMessage: "[fact-check] integrate: analyses/page.md",
     now: () => Date.UTC(2026, 6, 29, 12, 0, 0),
     readFile: fs.readFile,
     writeFile: fs.writeFile,
@@ -79,13 +79,14 @@ test("writeWikiPage: a null transform short-circuits — no write, log, reindex,
   const before = fs.files["/wiki/analyses/page.md"];
   const reindexed: string[] = [];
   let commits = 0;
-  const res = await writeWikiPage(
-    baseOpts(fs, {
+  const res = await writeWikiPage({
+    ...baseOpts(fs, {
       transform: () => null,
       reindex: async (c) => { reindexed.push(c); },
-      commit: async () => { commits++; },
     }),
-  );
+    commit: async () => { commits++; },
+    commitMessage: "[fact-check] integrate: analyses/page.md",
+  });
   expect(res.outcome).toBe("noop");
   expect(fs.files["/wiki/analyses/page.md"]).toBe(before);
   expect(fs.files["/wiki/log.md"]).toBeUndefined();
@@ -96,9 +97,11 @@ test("writeWikiPage: a null transform short-circuits — no write, log, reindex,
 test("writeWikiPage surfaces the CommitWikiResult on the outcome", async () => {
   __resetWikiWriteQueueForTest();
   const fs = makeFs({ "/wiki/analyses/page.md": "# Page\n\nBody.\n" });
-  const res = await writeWikiPage(
-    baseOpts(fs, { commit: async () => ({ committed: false, reason: "not-a-repo" as const }) }),
-  );
+  const res = await writeWikiPage({
+    ...baseOpts(fs),
+    commit: async () => ({ committed: false, reason: "not-a-repo" as const }),
+    commitMessage: "[fact-check] integrate: analyses/page.md",
+  });
   expect(res).toMatchObject({ outcome: "written", commit: { committed: false, reason: "not-a-repo" } });
 });
 
@@ -410,9 +413,10 @@ test("no-log mode commits the page alone, never a log.md it did not write", asyn
   await writeWikiPage({
     ...common,
     logKind: null,
-    commit: async (paths) => {
+    commit: async (paths: string[]) => {
       committed.push(paths);
     },
+    commitMessage: "[plans] priority: analyses/page.md",
   });
   expect(committed).toEqual([["analyses/page.md"]]);
 });

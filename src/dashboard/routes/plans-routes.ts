@@ -32,6 +32,33 @@
  * **Neither passes a `commit`.** mimir is in the repo-sync loop in `wiki` mode;
  * the sync loop is the committer, behind its 5-minute quiet period.
  *
+ * ── The wire contract PR 5's client is written against ───────────────────────
+ *
+ *   - **`/priority`** answers `{slug, priority, hash, written, relPath}`.
+ *     `priority` and `hash` are what is ON DISK, never what was asked for: a
+ *     `noop` (same value re-set, clear on a plan carrying none) echoes the
+ *     unchanged pair, which the CAS just proved. A fence the transform must not
+ *     edit is a **422**, not a 200 with `written: false` — a refusal and "nothing
+ *     to do" are different sentences to a reader whose click did nothing. NB the
+ *     422 is currently unreachable over HTTP and is kept as a fail-closed
+ *     backstop: the transform now draws the fence with `parseFrontmatter`'s own
+ *     rule, so any file the board renders as a card is a file it can edit. It
+ *     becomes reachable again the moment those two rules drift — which is
+ *     exactly when a silent 200 would be worst.
+ *   - **`/order`** answers `{order, hash, written, deleted}`, where `order` is
+ *     the MERGED result on disk. A POST carries only the columns the reader
+ *     touched: a posted column replaces that column, a posted `[]` un-ranks it,
+ *     and an absent column is preserved — a wholesale replace silently un-ranked
+ *     every omitted column. The merge runs INSIDE the CAS section. The file is
+ *     deleted only when the MERGE comes out empty; a body posting no columns at
+ *     all is a 400, because "delete every ordering" must be an instruction
+ *     somebody wrote, not the residue of a body that parsed to nothing.
+ *     `written` is "bytes were written", `deleted` is "the file is gone", and a
+ *     state change is `written || deleted` — never both true.
+ *   - Both: 403 readonly · 404 unregistered wiki / unknown slug · 409 stale ·
+ *     413 over `PLAN_BODY_MAX_BYTES` · **503 when the source read failed**,
+ *     naming the reason the GET path's banner would have named.
+ *
  * **Both return the NEW sha256 in the 200 body, taken from the string that was
  * written** — never from a re-read after the write section released, which would
  * hand back a concurrent writer's bytes and arm the next edit to overwrite them.
@@ -59,11 +86,17 @@ import {
 } from "../../plans/source.ts";
 import { setPlanPriority } from "../../plans/frontmatter.ts";
 import { writePlanQueue } from "../../plans/write.ts";
-import { QUEUE_COLUMNS, serializeQueue, type QueueColumn, type QueueOrder } from "../../plans/queue.ts";
-import { writeWikiPage } from "../../wiki/page-write.ts";
-import { isWikiReadonly, WIKI_READONLY_REASON } from "../../wiki/readonly.ts";
-import { getWikiIndex } from "../../wiki/store.ts";
+import {
+  QUEUE_COLUMNS,
+  mergeQueueOrder,
+  parseQueueYaml,
+  serializeQueue,
+  type QueueColumn,
+  type QueueOrder,
+} from "../../plans/queue.ts";
+import { defaultPageWriteIo, writeWikiPage } from "../../wiki/page-write.ts";
 import { sha256 } from "../../gardener/util.ts";
+import { readonlyRefusal } from "./route-utils.ts";
 import { renderPlansPage } from "../views/plans-page.ts";
 
 const log = getLog("dashboard", "plans");
@@ -225,11 +258,12 @@ export function registerPlansRoutes(
   // ---- writes -------------------------------------------------------------
 
   app.post("/api/plans/priority", async (c) => {
-    const refusal = readonlyRefusal(c);
+    const refusal = readonlyRefusal(c, log);
     if (refusal) return refusal;
     try {
-      const body = await c.req.json<{ slug?: unknown; priority?: unknown; baseHash?: unknown }>()
-        .catch(() => ({}) as Record<string, unknown>);
+      const read = await readJsonBody(c);
+      if ("error" in read) return c.json({ error: read.error }, read.status);
+      const body = read.body;
 
       const slug = typeof body.slug === "string" ? body.slug.trim() : "";
       if (!slug) return c.json({ error: "slug is required" }, 400);
@@ -248,15 +282,21 @@ export function registerPlansRoutes(
       const baseHash = typeof body.baseHash === "string" ? body.baseHash.trim() : "";
       if (!baseHash) return c.json({ error: "baseHash is required" }, 400);
 
-      const source = await deps.loadSource();
+      const loaded = await loadSourceOrDegrade(deps);
+      if ("error" in loaded) return c.json({ error: loaded.error }, 503);
+      const source = loaded.source;
       const root = source.root;
       if (!root) return c.json({ error: unregisteredMessage() }, 404);
       const plan = source.plans.find((p) => p.slug === slug);
       if (!plan) return c.json({ error: `no plan named "${slug}"` }, 404);
 
       // The transform's own return value is what gets hashed — stashed here
-      // rather than re-read afterwards (see the module doc).
+      // rather than re-read afterwards (see the module doc). A REFUSAL comes
+      // back the same way: `writeWikiPage`'s `transform` seam speaks `null` for
+      // "nothing to do", so the reason rides out on a closure variable rather
+      // than widening a contract three other writers share.
       let written: string | null = null;
+      let refused: string | null = null;
       const result = await writeWikiPage({
         wikiDir: root,
         relPath: plan.relPath,
@@ -268,25 +308,25 @@ export function registerPlansRoutes(
         logKind: null,
         now: () => Date.now(),
         transform: (raw) => {
-          written = setPlanPriority(raw, priority);
+          const edit = setPlanPriority(raw, priority);
+          refused = edit.kind === "refused" ? edit.reason : null;
+          written = edit.kind === "changed" ? edit.content : null;
           return written;
         },
-        readFile: async (absPath) => {
-          try {
-            return await Bun.file(absPath).text();
-          } catch {
-            return null;
-          }
-        },
-        writeFile: async (absPath, content) => {
-          await Bun.write(absPath, content);
-        },
-        refreshIndex: async () => {
-          await getWikiIndex({ root, refresh: true });
-        },
+        ...defaultPageWriteIo(root),
+        // The board reads `loadPlanSource` off disk, not the wiki index, so a
+        // rebuild buys this route nothing — and it is not free: measured
+        // 110–140 ms over mimir's 449 pages (2026-08-18), on a surface whose
+        // unit of work is a triage click. The seam stays wired so a later caller
+        // that DOES read the index can put the rebuild back.
+        refreshIndex: async () => {},
         reindex: async () => {},
       });
 
+      if (refused) {
+        log.warn("plan priority: refused {slug}: {reason}", { slug, reason: refused });
+        return c.json({ error: refused }, 422);
+      }
       if (result.outcome === "forbidden") {
         return c.json({ error: result.reason, readonly: true }, 403);
       }
@@ -297,15 +337,17 @@ export function registerPlansRoutes(
         log.error("plan priority: write failed for {slug}: {error}", { slug, error: result.reason });
         return c.json({ error: result.reason }, 500);
       }
-      // A `noop` — the same value already set, a clear on a plan carrying none,
-      // or a fence this must not edit — echoes the UNCHANGED hash, which the CAS
-      // just proved is what is on disk. Without it the card's next edit 409s.
-      const hash = result.outcome === "written" && written !== null ? sha256(written) : baseHash;
+      // A `noop` is an HONEST one — the same value already set, or a clear on a
+      // plan carrying none; a fence this must not edit took the 422 above. It
+      // echoes the UNCHANGED hash, which the CAS just proved is what is on disk,
+      // and the priority ON DISK rather than the requested one: a 200 must never
+      // tell the board a value is in the file that is not.
+      const changed = result.outcome === "written" && written !== null;
       return c.json({
         slug,
-        priority,
-        hash,
-        written: result.outcome === "written",
+        priority: changed ? priority : plan.priority ?? null,
+        hash: changed ? sha256(written!) : baseHash,
+        written: changed,
         relPath: plan.relPath,
       });
     } catch (err) {
@@ -315,11 +357,12 @@ export function registerPlansRoutes(
   });
 
   app.post("/api/plans/order", async (c) => {
-    const refusal = readonlyRefusal(c);
+    const refusal = readonlyRefusal(c, log);
     if (refusal) return refusal;
     try {
-      const body = await c.req.json<{ order?: unknown; baseHash?: unknown }>()
-        .catch(() => ({}) as Record<string, unknown>);
+      const read = await readJsonBody(c);
+      if ("error" in read) return c.json({ error: read.error }, read.status);
+      const body = read.body;
 
       // `""` is a legal base (the file is absent) — so the check is on the TYPE,
       // never on truthiness, or the bootstrap write could never be made.
@@ -330,7 +373,9 @@ export function registerPlansRoutes(
       const parsed = parseOrderBody(body.order);
       if ("error" in parsed) return c.json({ error: parsed.error }, 400);
 
-      const source = await deps.loadSource();
+      const loaded = await loadSourceOrDegrade(deps);
+      if ("error" in loaded) return c.json({ error: loaded.error }, 503);
+      const source = loaded.source;
       const root = source.root;
       if (!root) return c.json({ error: unregisteredMessage() }, 404);
 
@@ -342,17 +387,33 @@ export function registerPlansRoutes(
           if (!known.has(slug)) return c.json({ error: `no plan named "${slug}"` }, 400);
         }
       }
-
-      let content: string;
+      // Fail on the POSTED slugs before the write section opens, so a bad slug
+      // costs no queue turn; the merged order is serialized inside it, where the
+      // same throw is a 500-worthy surprise rather than a client error.
       try {
-        content = serializeQueue(parsed.order);
+        serializeQueue(parsed.order);
       } catch (err) {
         // `serializeQueue` throws on a slug outside the grammar mimir's own
         // parser shares — bytes that would take its every column down.
         return c.json({ error: errText(err) }, 400);
       }
 
-      const result = await writePlanQueue({ wikiDir: root, baseHash, content });
+      // The MERGE happens inside the CAS section, over the bytes the compare
+      // just validated: a POST carries the columns the reader touched, and a
+      // wholesale replace un-ranked every column it omitted (proven: posting
+      // `{ready:[…]}` over a file that also ranked `blocked` deleted `blocked`,
+      // 200). Merging outside the section would read a file the write may not be
+      // the next writer of.
+      let mergedOrder: QueueOrder = parsed.order;
+      const result = await writePlanQueue({
+        wikiDir: root,
+        baseHash,
+        buildContent: (current) => {
+          const disk = current === null ? {} : parseQueueYaml(current).order;
+          mergedOrder = mergeQueueOrder(disk, parsed.order, parsed.columns);
+          return serializeQueue(mergedOrder);
+        },
+      });
       if (result.outcome === "forbidden") {
         return c.json({ error: result.reason, readonly: true }, 403);
       }
@@ -363,10 +424,12 @@ export function registerPlansRoutes(
         log.error("plan order: write failed: {error}", { error: result.reason });
         return c.json({ error: result.reason }, 500);
       }
+      // `written` is "bytes were written", `deleted` is "the file is gone" — a
+      // state change is `written || deleted`, and the two are never both true.
       return c.json({
-        order: parsed.order,
+        order: mergedOrder,
         hash: result.hash,
-        written: result.outcome !== "noop",
+        written: result.outcome === "written",
         deleted: result.outcome === "deleted",
       });
     } catch (err) {
@@ -377,19 +440,61 @@ export function registerPlansRoutes(
 }
 
 /**
- * The wiki-readonly refusal, as the FIRST statement of both write routes
- * (`wiki-gardener-routes.ts`'s pattern). The write seams refuse on their own, so
- * this is not the only line of defence — it exists so the refusal costs no
- * filesystem read, and so it leaves a trace: a seam that is never reached warns
- * about nothing, and "why did the mini do nothing?" was otherwise unanswerable.
+ * The largest body either write route will read. Both are machine-generated by
+ * the board — one slug and a hash, or a few hundred ranked slugs — so this is
+ * three orders of magnitude of headroom, and it exists because neither route
+ * should buffer whatever a loopback client happens to send. Checked against the
+ * declared `content-length` first (cheap, and refuses before the read) and again
+ * on the bytes actually read, because a chunked body declares no length.
  */
-function readonlyRefusal(c: Context) {
-  if (!isWikiReadonly()) return null;
-  log.info("Wiki-readonly instance refused {method} {path}", {
-    method: c.req.method,
-    path: new URL(c.req.url).pathname,
-  });
-  return c.json({ error: WIKI_READONLY_REASON, readonly: true }, 403);
+const PLAN_BODY_MAX_BYTES = 256 * 1024;
+
+/**
+ * The posted JSON, or the status to answer with.
+ *
+ * Anything that is not a plain object — `null` (which `c.req.json()` resolves
+ * happily, and whose first `typeof body.x` access threw a 500), an array, a bare
+ * scalar, unparseable bytes — normalizes to `{}`, so it takes the routes'
+ * ordinary "slug is required" / "baseHash is required" 400s instead of an
+ * internal error naming nothing.
+ */
+async function readJsonBody(
+  c: Context,
+): Promise<{ body: Record<string, unknown> } | { error: string; status: 400 | 413 }> {
+  const overLimit = {
+    error: `request body is larger than the ${PLAN_BODY_MAX_BYTES}-byte limit`,
+    status: 413 as const,
+  };
+  const declared = Number(c.req.header("content-length"));
+  if (Number.isFinite(declared) && declared > PLAN_BODY_MAX_BYTES) return overLimit;
+
+  const text = await c.req.text().catch(() => "");
+  if (Buffer.byteLength(text) > PLAN_BODY_MAX_BYTES) return overLimit;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { body: {} };
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return { body: {} };
+  return { body: parsed as Record<string, unknown> };
+}
+
+/**
+ * The write routes' source read, degraded the way the GET path degrades: a
+ * failure names its reason instead of arriving as an opaque 500 that says only
+ * "internal error" about a checkout that has gone missing.
+ */
+async function loadSourceOrDegrade(
+  deps: PlanBoardDeps,
+): Promise<{ source: PlanSourceResult } | { error: string }> {
+  try {
+    return { source: await deps.loadSource() };
+  } catch (err) {
+    const message = `reading mimir's plans failed: ${errText(err)}`;
+    warnSourceOnce(message);
+    return { error: message };
+  }
 }
 
 function unregisteredMessage(): string {
@@ -409,14 +514,29 @@ function isPriorityInput(v: unknown): v is PlanPriority | "clear" {
  * A slug placed in two columns (or twice in one) is refused rather than written:
  * `parseQueueYaml` DROPS the later copy on the way back in, so those bytes would
  * read back as a different ordering than the one that was saved.
+ *
+ * **`columns` is the posted KEY SET, and it is not derivable from `order`.**
+ * Rule 2 of the grammar says an empty column has no key, so a posted `[]` —
+ * which is how a reader un-ranks a column — leaves no trace in `order`. The
+ * writer needs the difference: a column that was posted empty is CLEARED, a
+ * column that was not posted at all is preserved from disk.
+ *
+ * That gap is also why a body whose keys reduce to NOTHING is refused here.
+ * Reducing to `{}` meant "no columns ranked", which the writer implements by
+ * DELETING the file — so a body carrying only keys this loop consumes nothing
+ * from erased every column's ordering and answered 200.
  */
-function parseOrderBody(raw: unknown): { order: QueueOrder } | { error: string } {
+function parseOrderBody(
+  raw: unknown,
+): { order: QueueOrder; columns: QueueColumn[] } | { error: string } {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return { error: "order must be an object of column → slugs" };
   }
   const order: QueueOrder = {};
+  const columns: QueueColumn[] = [];
   const placed = new Set<string>();
-  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+  const entries = Object.entries(raw as Record<string, unknown>);
+  for (const [key, value] of entries) {
     if (!(QUEUE_COLUMNS as readonly string[]).includes(key)) {
       return { error: `unknown column "${key}" — expected one of ${QUEUE_COLUMNS.join(", ")}` };
     }
@@ -431,10 +551,16 @@ function parseOrderBody(raw: unknown): { order: QueueOrder } | { error: string }
       placed.add(slug);
       slugs.push(slug);
     }
+    columns.push(key as QueueColumn);
     // Rule 2 of the grammar: an emptied column leaves no key behind.
     if (slugs.length > 0) order[key as QueueColumn] = slugs;
   }
-  return { order };
+  // Every key must have been CONSUMED as a column: a body the loop walked
+  // without taking a column from it is not an instruction, whatever it is.
+  if (columns.length !== entries.length || columns.length === 0) {
+    return { error: "no columns posted — send the columns to rank, `[]` to un-rank one" };
+  }
+  return { order, columns };
 }
 
 /** The page the page degrades to: no styling, no bundle, one sentence naming
