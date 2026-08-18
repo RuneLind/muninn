@@ -105,6 +105,29 @@ test("writeWikiPage surfaces the CommitWikiResult on the outcome", async () => {
   expect(res).toMatchObject({ outcome: "written", commit: { committed: false, reason: "not-a-repo" } });
 });
 
+test("a throwing commitMessage thunk degrades to a warn — the applied write still reports written", async () => {
+  // The thunk is resolved AFTER `transform` (it reports what the transform found),
+  // so it can throw on real input. Resolved outside the try it propagated out of a
+  // write that had already touched the page and log.md, turning a landed write into
+  // a 500 — the same failure the logLine thunk is already degraded for.
+  __resetWikiWriteQueueForTest();
+  const fs = makeFs({ "/wiki/analyses/page.md": "# Page\n\nBody.\n" });
+  let commits = 0;
+  const res = await writeWikiPage({
+    ...baseOpts(fs),
+    commit: async () => { commits++; },
+    commitMessage: () => {
+      throw new Error("subject builder blew up");
+    },
+  });
+  expect(res).toMatchObject({ outcome: "written", writtenPath: "analyses/page.md" });
+  expect("commit" in res).toBe(false);
+  expect(commits).toBe(0);
+  // The page and its log entry survived the throw.
+  expect(fs.files["/wiki/analyses/page.md"]).toContain("appended");
+  expect(fs.files["/wiki/log.md"]).toContain("factcheck-integrate | Page Title");
+});
+
 test("writeWikiPage rejects a path-escaping relPath before any read", async () => {
   __resetWikiWriteQueueForTest();
   const fs = makeFs({ "/wiki/analyses/page.md": "# Page\n" });

@@ -4,12 +4,14 @@
  *
  * Deliberately NOT the gardener `applyWikiProposal` path: that runs
  * `containDraftBodyLinks` + alias-strip over the WHOLE page and could rewrite
- * existing content. This helper only splices one block and never touches the rest
- * of the body — {@link spliceSentinelBlock} is that splice, and everything around
- * it (confinement → CAS → write → log.md → refresh → reindex → commit, the whole
- * sequence serialized on the per-wiki write queue) is the SHARED `writeWikiPage`
- * in `page-write.ts`, which the fact-check integrate path uses with its own
- * strings. Behaviour here is unchanged by that extraction.
+ * existing content. This helper splices one block — {@link spliceSentinelBlock} is
+ * that splice — and touches the rest of the body ONLY through the caller's
+ * optional {@link AppendBlockOptions.prepareBody} pass, which the ➕ fact-check
+ * route uses to supersede stale `<Fact>` marks (no hook ⇒ the body reaches the
+ * splice untouched). Everything around it (confinement → CAS → write → log.md →
+ * refresh → reindex → commit, the whole sequence serialized on the per-wiki write
+ * queue) is the SHARED `writeWikiPage` in `page-write.ts`, which the fact-check
+ * integrate path uses with its own strings.
  *
  * The splice itself: replace an existing
  * `<!-- factcheck:start -->…<!-- factcheck:end -->` in place, else insert before a
@@ -38,6 +40,35 @@ export interface AppendBlockOptions
   > {
   /** The full sentinel-wrapped block to splice in (see `buildFactcheckBlock`). */
   block: string;
+  /**
+   * Optional caller-owned pass over the FRESHLY-READ body, run inside the write
+   * section immediately before the splice. Absent ⇒ the body reaches
+   * `spliceSentinelBlock` untouched and the log line + commit subject are the
+   * bare ones below, i.e. every existing caller is byte-identical.
+   *
+   * It exists for ONE caller: the ➕ route, which must run the fact-check strip
+   * here and nowhere else — the strip is a fact-check policy, not a property of
+   * splicing a sentinel block, so it stays in the route (which also needs to
+   * COUNT what it removed, off the same bytes, to report the supersede note).
+   * Doing it before the call is not an option: the body is read inside the
+   * section, after the CAS.
+   */
+  prepareBody?: (current: string) => PreparedBody;
+}
+
+/** What a {@link AppendBlockOptions.prepareBody} pass hands back. */
+export interface PreparedBody {
+  /** The body the splice runs against. */
+  body: string;
+  /**
+   * Short clause naming what the pass CHANGED, e.g. `2 prior marks superseded`.
+   * Appended to both the `log.md` line and the commit subject, because a pass
+   * that rewrote prose the caller never asked about must not hide behind a line
+   * that says only "fact-check block added" — the log and the history are where
+   * a reader finds out a page lost its marks. Absent ⇒ both strings are the bare
+   * ones, so a pass that changed nothing reads exactly like no pass at all.
+   */
+  note?: string;
 }
 
 function escapeRegExp(s: string): string {
@@ -85,17 +116,31 @@ export function spliceSentinelBlock(content: string, block: string): string {
  * stale→409, error→400/500). Never throws for a recoverable condition.
  */
 export async function appendBlockToPage(opts: AppendBlockOptions): Promise<AppendOutcome> {
-  const { block, commit, ...rest } = opts;
+  const { block, commit, prepareBody, ...rest } = opts;
+  // Set by `transform` and read by the two thunks below — `writeWikiPage`
+  // resolves both AFTER the transform has run, which is the only point at which
+  // what the prepare pass found is known (the body is read inside the section).
+  let prepareNote: string | undefined;
+  const withNote = (base: string, wrap: (n: string) => string): string =>
+    prepareNote ? base + wrap(prepareNote) : base;
   const result = await writeWikiPage({
     ...rest,
     // Committer and subject travel together (`PageWriteCommitOptions`): this
     // path owns the subject, the caller owns whether there is a committer.
     ...(commit
-      ? { commit, commitMessage: `[fact-check] annotate: ${opts.relPath}` }
+      ? {
+          commit,
+          commitMessage: () =>
+            withNote(`[fact-check] annotate: ${opts.relPath}`, (n) => ` (${n})`),
+        }
       : { commit: undefined, commitMessage: undefined }),
-    transform: (current) => withTrailingNewline(spliceSentinelBlock(current, block)),
+    transform: (current) => {
+      const prepared = prepareBody?.(current);
+      prepareNote = prepared?.note;
+      return withTrailingNewline(spliceSentinelBlock(prepared ? prepared.body : current, block));
+    },
     logKind: "factcheck",
-    logLine: "fact-check block added via the wiki reader",
+    logLine: () => withNote("fact-check block added via the wiki reader", (n) => `; ${n}`),
   });
   // The append transform always returns content, so `noop` is unreachable here —
   // map it defensively rather than widening this path's outcome vocabulary.

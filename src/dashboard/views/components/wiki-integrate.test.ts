@@ -1025,11 +1025,11 @@ test("the supersede statement rides its own field, not a blank dropped row", () 
     { claimIndex: 1, verdict: "❌", old: "a", new: "b", reason: "", resolvedText: "a" },
   ];
   const html = integratePreviewHtml(
-    { edits, dropped: [], supersededNote: "3 inline marks from a previous check superseded" },
+    { edits, dropped: [], supersededNote: "3 marks from a previous check superseded" },
     [true],
     false,
   );
-  expect(html).toContain("Previous marks: 3 inline marks from a previous check superseded");
+  expect(html).toContain("Previous marks: 3 marks from a previous check superseded");
   // …and it does not inflate the "not applied" list.
   expect(html).not.toContain("not applied");
   const without = integratePreviewHtml({ edits, dropped: [] }, [true], false);

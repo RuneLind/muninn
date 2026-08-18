@@ -53,3 +53,25 @@ export function factcheckOutcomeSummary(counts: ClaimOutcomeCounts): string {
   push(counts.error, "failed");
   return parts.join(" · ");
 }
+
+/**
+ * The ➕ "Add to article" success line, folding in the route's `supersededNote`
+ * when the write removed marks from a previous check.
+ *
+ * The note is the ONLY place a reader is ever told that clicking ➕ deleted the
+ * `<Fact>` marks an earlier ✎ Integrate put on the page — the write is silent
+ * otherwise, and the reload that follows shows a page whose underlines are simply
+ * gone. A fixed "✓ Added to article" makes that look like a rendering bug.
+ *
+ * Pure so it unit-tests; the caller does the DOM. An absent/blank note ⇒ the plain
+ * confirmation, byte-identical to what shipped before.
+ *
+ * Joined with ": ", not " — ": the note is `supersededMarksNote`'s output, which
+ * already carries an em-dash between its lead and its per-route tail, and a second
+ * one made the line read as three peer clauses instead of a confirmation and its
+ * explanation.
+ */
+export function appendSuccessStatus(supersededNote?: string): string {
+  const note = (supersededNote || "").trim();
+  return note ? "✓ Added to article: " + note : "✓ Added to article";
+}

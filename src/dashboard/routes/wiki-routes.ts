@@ -742,6 +742,62 @@ export function isAnnotatablePage(relPath: string, type: string): boolean {
   return type !== "explainer" && relPath.endsWith(".mdx");
 }
 
+/**
+ * The strip and its measurement in ONE pass: the stripped body, plus how many
+ * marks that strip ACTUALLY removed from these exact bytes. The ONE measurement
+ * behind {@link supersededMarksNote}, so the ➕ append route and integrate PROPOSE
+ * can never report different numbers for the same page — and, more importantly,
+ * so neither can report a number its own write disproves.
+ *
+ * `removed` means "marks removed by this write", nothing narrower. That INCLUDES
+ * a `<Fact>` quoted inside the previous `<!-- factcheck -->` region (a `Was:` line,
+ * a hand-edit): the strip runs over the whole body, so the tag really does come
+ * off — the fact that the region is then replaced wholesale doesn't unremove it.
+ *
+ * It is a delta rather than a bare `countFactWrappers(current)` because the count
+ * and the strip must be derived from ONE evaluation, not from two calls a reader
+ * has to prove equivalent. The old spelling took the count over a
+ * `stripFactcheckBlock`ped body while the strip ran on the full one, and the two
+ * disagree whenever removing the sentinel region changes FENCE PARITY:
+ * `buildFactcheckAppendix` does not balance fences, so an appendix quoting an
+ * unterminated ``` opens a CommonMark fence that runs to EOF and makes every mark
+ * below it documentation. The strip then removes 0 while the count answered 2, and
+ * the note, the log.md line and the commit subject all claimed a deletion the file
+ * disproved.
+ */
+export function stripSupersededMarks(current: string): { body: string; removed: number } {
+  const body = stripFactWrappers(current);
+  return { body, removed: countFactWrappers(current) - countFactWrappers(body) };
+}
+
+/**
+ * The SUPERSEDE rule made visible, in ONE spelling for the two fact-check write
+ * routes that report it — integrate PROPOSE and the ➕ append route. (Integrate
+ * APPLY strips too, but re-measures rather than reporting; the proposal the human
+ * accepted already carried the note.) A RUN-level note, so a shrinking claim set
+ * never reads as marks silently disappearing off the page.
+ *
+ * "marks", not "inline marks": a `<Fact>` owning its whole line is claimed by the
+ * BLOCK parser and renders as a left rail rather than an underline (see
+ * `src/web/CLAUDE.md`), and those count here too.
+ *
+ * The lead is a participial noun phrase with no finite verb — deliberately, since
+ * the two callers sit on opposite sides of the write: integrate PROPOSE renders it
+ * in a preview of a write that has not happened, ➕ returns it from one that has.
+ * "N marks … superseded" is true read either way; "were superseded" or "will be"
+ * would be false for one of them. `tail` is per route for the same reason the lead
+ * is shared: the two writes leave the page in different states — integrate re-marks
+ * it from this run's claims, while ➕ changes no prose and so removes the marks
+ * without replacing them.
+ *
+ * Zero ⇒ undefined, i.e. no field at all: "0 superseded" is a sentence about an
+ * event that did not happen.
+ */
+export function supersededMarksNote(count: number, tail: string): string | undefined {
+  if (count <= 0) return undefined;
+  return `${count} mark${count === 1 ? "" : "s"} from a previous check superseded — ${tail}`;
+}
+
 /** Listing shape sent to the client — meta plus connection counts for sorting. */
 interface WikiPageListing extends WikiPageMeta {
   linkCount: number;
@@ -2989,9 +3045,35 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // the `> [!factcheck]` blockquote, because it is read raw outside the reader
       // where JSX-ish tags would show as literal text. No `Was:` lines here — the ➕
       // action changes no prose, so there is no "was" to state.
-      const block = isAnnotatablePage(meta.relPath, meta.type)
+      const annotatable = isAnnotatablePage(meta.relPath, meta.type);
+      const block = annotatable
         ? buildFactcheckAppendix(answer, todayOslo(Date.now()))
         : buildFactcheckBlock(answer, todayOslo(Date.now()));
+
+      // SUPERSEDE — the same rule the integrate routes run, for the same reason.
+      // Claim numbering is PER RUN, and this route rebuilds the whole block: a
+      // `<Fact n="2">` left over from an earlier integrate would keep pointing at
+      // `#fc-claim-2`, which this run's appendix fills with an unrelated claim
+      // (and, on a shorter run, does not contain at all). The CAS cannot catch it —
+      // `baseHash` is computed over the raw file, marks included, so the page is
+      // not "changed" in the sense it tests.
+      //
+      // UNCONDITIONAL, `.md` included. "A `.md` page never carries marks" is a real
+      // invariant of the write paths (integrate only annotates `.mdx`) but nothing
+      // enforces it on the FILE — a hand-edit, a rename from `.mdx`, or a page
+      // written before the extension gate existed all produce a `.md` carrying
+      // marks, and that page would otherwise be left with every chip dangling off a
+      // rebuilt callout. A mark-free `.md` is unaffected: `stripFactWrappers` is
+      // identity on a body with no tag, so the blockquote path stays byte-for-byte
+      // what it was.
+      //
+      // The strip is zone-aware, so a `<Fact>` inside frontmatter, a fence or a
+      // backtick span is documentation and survives. It runs on the freshly-read
+      // body inside the write section (hence the `prepareBody` hook rather than a
+      // pre-read here), and `stripSupersededMarks` takes the count off that SAME
+      // pass — so the note reports the marks this write removed, byte-for-byte,
+      // including any quoted inside the appendix region it is about to replace.
+      let supersededWrappers = 0;
       const result = await appendBlockToPage({
         wikiDir: entry.root,
         relPath: meta.relPath,
@@ -3000,6 +3082,21 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         collections: entry.collections ?? [],
         logTitle: meta.title,
         now: () => Date.now(),
+        prepareBody: (current: string) => {
+          const stripped = stripSupersededMarks(current);
+          supersededWrappers = stripped.removed;
+          return {
+            body: stripped.body,
+            // The log.md line and the commit subject say what the page LOST, not
+            // just what it gained — this write removes marks the reader never
+            // asked about, and the repo history is where that has to be findable.
+            ...(supersededWrappers > 0
+              ? {
+                  note: `${supersededWrappers} prior mark${supersededWrappers === 1 ? "" : "s"} superseded`,
+                }
+              : {}),
+          };
+        },
         ...defaultPageWriteIo(entry.root),
         reindex: async (collection) => {
           await postCollectionUpdate(config.knowledgeApiUrl, collection);
@@ -3027,11 +3124,23 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       activityLog.push("system", `Wiki fact-check appended: ${entry.name} — ${meta.title}`, {
         metadata: { source: "wiki-factcheck-append", wiki: entry.name, page: meta.relPath },
       });
-      log.info("Wiki fact-check appended: wiki={wiki} page={page}", {
+      log.info("Wiki fact-check appended: wiki={wiki} page={page} superseded={superseded}", {
         wiki: entry.name,
         page: meta.relPath,
+        superseded: supersededWrappers,
       });
-      return c.json({ written: true, page: meta.relPath });
+      // Tail is written for BOTH branches — the `.mdx` appendix and the `.md`
+      // callout are the same "fact-check block" from the reader's side, and the
+      // hook now runs on both.
+      const supersededNote = supersededMarksNote(
+        supersededWrappers,
+        "this action rebuilds the fact-check block and adds no new marks",
+      );
+      return c.json({
+        written: true,
+        page: meta.relPath,
+        ...(supersededNote ? { supersededNote } : {}),
+      });
     } catch (err) {
       log.error("Wiki fact-check append: unexpected failure: {error}", {
         error: err instanceof Error ? err.message : String(err),
@@ -3089,9 +3198,17 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // model sees the page and before any offset is resolved, so (a) the anchors
       // the model quotes exist in the body we resolve against, and (b) a re-run
       // cannot nest a wrapper inside a wrapper. Prior wrappers not re-emitted by
-      // THIS run are reported as superseded, never silently vanished.
-      const supersededWrappers = countFactWrappers(current);
-      const editable = stripFactWrappers(current);
+      // THIS run are reported as superseded, never silently vanished — and the
+      // number is the one `stripSupersededMarks` takes off the strip ITSELF, i.e.
+      // exactly what apply's `stripFactWrappers(raw)` will remove from the same
+      // CAS-pinned bytes. That includes marks quoted inside the sentinel region:
+      // the strip is whole-body, so they come off whether or not the region is
+      // then replaced — and on apply's `!appendCallout && !wroteWrapper` branch the
+      // region is NOT replaced, so the block survives with its quoted tags already
+      // stripped out of it.
+      const superseded = stripSupersededMarks(current);
+      const supersededWrappers = superseded.removed;
+      const editable = superseded.body;
       const bodyLen = integrateBodyLen(editable, isMdx);
       if (bodyLen > INTEGRATE_BODY_MAX) {
         return c.json({ error: "page too long to integrate", bodyLen, max: INTEGRATE_BODY_MAX }, 400);
@@ -3255,16 +3372,13 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
           .filter((o) => !o.applied)
           .map((o) => ({ edit: o.edit, reason: o.reason ?? "could not be placed" })),
       ];
-      // The SUPERSEDE rule made visible: the strip removed every prior mark, and
-      // only this run's claims are re-marked. Reported so a shrinking claim set never
-      // reads as marks silently disappearing off the page — as a RUN-level note, not
-      // a blank row in `dropped` (which inflated the "N not applied" count with an
-      // entry that corresponds to no proposed edit).
-      const supersededNote =
-        supersededWrappers > 0
-          ? `${supersededWrappers} inline mark${supersededWrappers === 1 ? "" : "s"} ` +
-            "from a previous check superseded — this run re-marks the page from its own claims"
-          : undefined;
+      // The SUPERSEDE rule made visible (wording: `supersededMarksNote`). A RUN-level
+      // note, deliberately not a blank row in `dropped` — that inflated the "N not
+      // applied" count with an entry corresponding to no proposed edit.
+      const supersededNote = supersededMarksNote(
+        supersededWrappers,
+        "this run re-marks the page from its own claims",
+      );
 
       log.info(
         "Wiki fact-check integrate: wiki={wiki} page={page} proposed={n} dropped={d} quotes={q}",

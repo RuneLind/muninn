@@ -22,6 +22,7 @@ import { askAnswerBodyHtml, renderStreamingBody, enhanceConfidenceHtml } from ".
 import {
   tallyClaimOutcomes,
   factcheckOutcomeSummary,
+  appendSuccessStatus,
   type ClaimOutcomeCounts,
 } from "./wiki-factcheck-outcomes.ts";
 import {
@@ -4600,9 +4601,17 @@ async function submitFactcheckAppend(): Promise<void> {
         baseHash: turn.baseHash,
       }),
     });
-    const data = await res
-      .json()
-      .catch(() => ({} as { written?: boolean; error?: string; stale?: boolean }));
+    const data = await res.json().catch(
+      () =>
+        ({}) as {
+          written?: boolean;
+          error?: string;
+          stale?: boolean;
+          /** Set when the write removed `<Fact>` marks left by an earlier check —
+           *  the only notice the reader gets that the page lost its underlines. */
+          supersededNote?: string;
+        },
+    );
     if (res.status === 409 || data.stale) {
       btn.disabled = false;
       btn.textContent = prevLabel;
@@ -4624,7 +4633,10 @@ async function submitFactcheckAppend(): Promise<void> {
     refreshWriteActionBars(turn);
     // …and the outcome goes on the rail's Ask status line, the only surface that
     // survives the `loadPage` below (which replaces #articleWrap, bars included).
-    setAskStatus("✓ Added to article", "done");
+    // It carries the route's `supersededNote` when there is one: the reload that
+    // follows shows a page whose marks are simply gone, and a fixed "✓ Added to
+    // article" leaves that looking like a rendering fault rather than this click.
+    setAskStatus(appendSuccessStatus(data.supersededNote), "done");
     // Reload the page content so the freshly-written callout is visible.
     loadPage(turn.page, false);
   } catch (err) {

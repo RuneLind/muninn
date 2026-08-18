@@ -651,7 +651,7 @@ export interface IntegrateProposal {
    *  anti-silent-drop mechanism (#397's class), and a note that only ever reaches
    *  the server log is a silent drop as far as the reader is concerned. */
   quotesNote?: string;
-  /** The SUPERSEDE rule made visible: prior inline marks the strip removed and this
+  /** The SUPERSEDE rule made visible: prior marks the strip removed and this
    *  run does not re-emit. A RUN-level statement, so it rides its own field rather
    *  than a blank row in `dropped` (which inflated the "N not applied" count). */
   supersededNote?: string;

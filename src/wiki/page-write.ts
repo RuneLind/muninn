@@ -124,8 +124,14 @@ export type PageWriteCommitOptions =
        * report it; a `void`-returning stub stays assignable.
        */
       commit: (paths: string[], message: string) => Promise<CommitWikiResult | void>;
-      /** Commit subject, e.g. `[fact-check] annotate: <relPath>`. */
-      commitMessage: string;
+      /**
+       * Commit subject, e.g. `[fact-check] annotate: <relPath>`. A THUNK is
+       * allowed and is resolved at step 7 — i.e. AFTER `transform` has run — so a
+       * caller whose subject depends on what the transform found in the
+       * freshly-read body (the ➕ route's "N prior marks superseded") can state it
+       * without a second read. A plain string is unchanged in every respect.
+       */
+      commitMessage: string | (() => string);
     };
 
 /** The ordinary write: it earns a `log.md` entry and a reindex. */
@@ -135,8 +141,14 @@ export type PageWriteOptions = PageWriteCommonOptions &
     logKind: string;
     /** Title for the log.md entry. */
     logTitle: string;
-    /** The log entry's single bullet line (without the leading `- `). */
-    logLine: string;
+    /**
+     * The log entry's single bullet line (without the leading `- `). A THUNK is
+     * allowed and is resolved inside the write section AFTER `transform` has run
+     * (same reason as `commitMessage` above): the ➕ route's line names how many
+     * prior marks the transform superseded, which is only known once it has seen
+     * the freshly-read body. A plain string is unchanged in every respect.
+     */
+    logLine: string | (() => string);
   };
 
 /**
@@ -163,7 +175,14 @@ function errMsg(err: unknown): string {
 function commitPair(
   opts: PageWriteCommitOptions,
 ): { run: NonNullable<PageWriteCommitOptions["commit"]>; message: string } | null {
-  return opts.commit ? { run: opts.commit, message: opts.commitMessage } : null;
+  return opts.commit ? { run: opts.commit, message: resolveLate(opts.commitMessage) } : null;
+}
+
+/** Read a string-or-thunk option. Called at the point in the sequence where the
+ *  value is USED, which is what makes a thunk able to report what `transform`
+ *  found. */
+function resolveLate(value: string | (() => string)): string {
+  return typeof value === "function" ? value() : value;
 }
 
 /**
@@ -263,7 +282,7 @@ export async function writeWikiPage(
         if (logging) {
           const logPath = path.join(wikiDir, "log.md");
           const existingLog = await opts.readFile(logPath);
-          const entry = `## [${todayOslo(opts.now())}] ${logging.logKind} | ${logging.logTitle}\n- ${logging.logLine}`;
+          const entry = `## [${todayOslo(opts.now())}] ${logging.logKind} | ${logging.logTitle}\n- ${resolveLate(logging.logLine)}`;
           await opts.writeFile(logPath, insertLogEntry(existingLog, entry));
         }
       } catch (err) {
@@ -304,20 +323,24 @@ export async function writeWikiPage(
 
   // 7. Commit the page + log.md — OUTSIDE the critical section (see module doc).
   //    Non-fatal: a commit failure never undoes the applied write.
+  //    `commitPair` is INSIDE the try: it resolves the late-bound `commitMessage`
+  //    thunk, which reads what `transform` found — a throw there would propagate
+  //    out of an already-applied write and turn it into a 500, exactly the way a
+  //    throwing `logLine` thunk is degraded to a warn a few lines above.
   let commit: CommitWikiResult | undefined;
-  const committer = commitPair(opts);
-  if (committer) {
-    try {
+  try {
+    const committer = commitPair(opts);
+    if (committer) {
       const paths = logging ? [relPath, "log.md"] : [relPath];
       const res = await committer.run(paths, committer.message);
       if (res && typeof res === "object" && "committed" in res) commit = res;
-    } catch (err) {
-      log.warn("Wiki page write: commit failed for {path}: {error}", {
-        kind: opts.logKind,
-        path: relPath,
-        error: errMsg(err),
-      });
     }
+  } catch (err) {
+    log.warn("Wiki page write: commit failed for {path}: {error}", {
+      kind: opts.logKind,
+      path: relPath,
+      error: errMsg(err),
+    });
   }
 
   return { outcome: "written", writtenPath: relPath, ...(commit ? { commit } : {}) };
