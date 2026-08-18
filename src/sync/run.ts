@@ -941,10 +941,12 @@ export async function syncRepo(
    * forever — "the loop runs but never commits", one step later.
    *
    * What happens AFTER the local section does not un-say it: the final return
-   * passes `true` unconditionally, so a push `error`/`transient` and the
-   * no-upstream `blocked` all stamp. Deliberate — the commit is on disk and a
-   * sweep could add nothing to it; a failed push is a push problem, and the card
-   * says so by pairing a red state with a fresh "last commit pass".
+   * passes `true` for a push `error`/`retrying` and the no-upstream `blocked`,
+   * so those all stamp. Deliberate — the commit is on disk and a sweep could add
+   * nothing to it; a failed push is a push problem, and the card says so by
+   * pairing a red/yellow state with a fresh "last commit pass". The ONE thing
+   * after step 5 that withholds the stamp is the push retry's own second local
+   * section failing (`git commit` refused there) — same shape, other door.
    *
    * It defaults to FALSE so a new early return can only ever under-claim: the
    * failure mode being guarded against is a tick claiming coverage it never
@@ -1120,6 +1122,14 @@ export async function syncRepo(
     //    dispatch posture). `plain` mode never pushes, by definition.
     let pushed = false;
     let pushState: SyncState | null = null;
+    // Evidence for `syncSubsumesSweeper`: the first local section got through
+    // (we are past step 5 with no failure state), so this tick stamps — UNLESS
+    // the push retry's SECOND local section failed. That section can refuse at
+    // `git add`/`git commit`/rebase exactly like the first one, and a failure
+    // there is the same "loop runs but never commits" shape (a broken signing
+    // key reached through the remote-moved door), so it must not count. A hard
+    // `deferred` from the retry stamps, for the same reason the first pass's does.
+    let commitPathOk = true;
     let pushReason: string | undefined;
     let pushError: string | undefined;
     /** HEAD moved in EITHER local section — see the retry merge below. */
@@ -1161,6 +1171,7 @@ export async function syncRepo(
         // tick: a page it committed belongs in the report, and — load-bearing —
         // a page it PULLED must invalidate the reader's 5-minute index cache,
         // which the first pass's `headMoved` alone cannot know about.
+        if (res.local?.state && res.local.state !== "deferred") commitPathOk = false;
         if (res.local) {
           carry.committed = [...carry.committed, ...res.local.committed];
           carry.rebased = carry.rebased || res.local.rebased;
@@ -1200,7 +1211,7 @@ export async function syncRepo(
         ...(pushReason ?? local.holdReason ? { reason: pushReason ?? local.holdReason } : {}),
         ...(pushError ? { error: pushError } : {}),
       },
-      true,
+      commitPathOk,
     );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -1332,7 +1343,8 @@ export const SYNC_SUBSUME_MAX_AGE_MS = 26 * 60 * 60 * 1000;
  * from BEFORE or INSIDE the local section stamps no evidence — but one from
  * AFTER it (a failed push, the no-upstream `blocked`) DOES stamp, because the
  * local commit path genuinely worked and the sweeper could add nothing the loop
- * did not already commit. A hard `deferred` stamps too (the commit path ran; the
+ * did not already commit — with one exception on that side: the push RETRY runs
+ * a second local section, and a failure INSIDE that one stamps nothing either. A hard `deferred` stamps too (the commit path ran; the
  * loop chose to wait), including the case where nothing was staged because only
  * out-of-subtree dirt was dirty.
  *

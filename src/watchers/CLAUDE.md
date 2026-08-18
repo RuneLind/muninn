@@ -1467,8 +1467,9 @@ losing them (the 2026-07-23 huginn-jarvis incident).
   `blocked` outcome from BEFORE or INSIDE the local section stamps no evidence —
   but one from AFTER it (a failed push, the no-upstream `blocked`) DOES stamp,
   because the local commit path genuinely worked and this sweeper could add
-  nothing the loop did not already commit; a hard `deferred` stamps for the same
-  reason. Two residuals, accepted: (a) a loop whose PUSH has failed for days keeps
+  nothing the loop did not already commit (except a failure INSIDE the push retry's
+  second local section, which stamps nothing either); a hard `deferred` stamps for
+  the same reason. Two residuals, accepted: (a) a loop whose PUSH has failed for days keeps
   subsuming and this daily warn stays silent — the `/models` Repo sync card is red
   with a FRESH "last commit pass", which says the diagnosis is the push, not the
   commit; (b) a repeating hard `deferred` with nothing in-subtree dirty stamps

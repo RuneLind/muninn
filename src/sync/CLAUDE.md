@@ -163,7 +163,9 @@ Two things the deferral REPORT must not conflate, both fixed after they shipped:
   implemented: an `error`, `transient` or `blocked` outcome from BEFORE or INSIDE the
   local section stamps no evidence — but one from AFTER it (a failed push, the
   no-upstream `blocked`) DOES stamp, because the local commit path genuinely worked
-  and the sweeper could add nothing the loop did not already commit.** A hard
+  and the sweeper could add nothing the loop did not already commit — except that the
+  push RETRY runs a second local section, and a failure INSIDE that one (`git commit`
+  refused after a re-rebase) stamps nothing either.** A hard
   `deferred` stamps (the commit path ran, the loop chose to wait), and so does a soft
   hold, which never reaches that branch at all — it sets `holdReason`, pushes, and
   exits through the final return, which passes `commitPathOk: true` unconditionally. A

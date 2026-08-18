@@ -1012,6 +1012,57 @@ describe("syncRepo", () => {
     expect(res.configuredButIdle).toBe(true);
   });
 
+  test("a commit that fails INSIDE the push retry's second local section is not evidence either", async () => {
+    // Same hole, other door. The first local section commits fine, the push is
+    // rejected because the remote moved, and the retry runs a SECOND local
+    // section — which finds new in-scope dirt and refuses at `git commit`
+    // (signing broke in between). The tick ends `error` with the new page
+    // uncommitted; stamping evidence here would renew the stand-down behind a
+    // loop that has stopped committing, exactly like the first-pass case above.
+    const f = await makeFixture(base);
+    const repos = [wikiRepo(f)];
+    const top = (await git(f.A, ["rev-parse", "--show-toplevel"])).out;
+    await writeFile(path.join(f.wikiB, "concepts", "FromB.md"), "# FromB\n");
+    await git(f.B, ["add", "-A"]);
+    await git(f.B, ["commit", "-q", "-m", "B page"]);
+    // The pre-push hook fires between A's fetch and A's push: it lands B's
+    // commit (the real race), breaks signing in A, and drops an AGED page into
+    // A's wiki so the retry's local section has something to commit — and fails.
+    const hookDir = path.join(f.A, ".git", "hooks");
+    await mkdir(hookDir, { recursive: true });
+    const late = path.join(f.wikiA, "concepts", "Late.md");
+    const stamp = new Date(Date.now() - SYNC_QUIET_MS - 120_000);
+    const touchArg = `${stamp.getFullYear()}${String(stamp.getMonth() + 1).padStart(2, "0")}${String(
+      stamp.getDate(),
+    ).padStart(2, "0")}${String(stamp.getHours()).padStart(2, "0")}${String(stamp.getMinutes()).padStart(2, "0")}`;
+    await writeFile(
+      path.join(hookDir, "pre-push"),
+      `#!/bin/sh\nif [ ! -f "$(git rev-parse --git-dir)/nff-fired" ]; then\n` +
+        `  touch "$(git rev-parse --git-dir)/nff-fired"\n` +
+        `  git -C ${JSON.stringify(f.B)} push -q\n` +
+        `  git config commit.gpgsign true\n  git config gpg.program /bin/false\n` +
+        `  printf '# Late\\n' > ${JSON.stringify(late)}\n  touch -t ${touchArg} ${JSON.stringify(late)}\n` +
+        `fi\nexit 0\n`,
+      { mode: 0o755 },
+    );
+    const page = path.join(f.wikiA, "concepts", "FromA.md");
+    await writeFile(page, "# FromA\n");
+    await ageFile(page);
+
+    const r = await syncRepo(wikiRepo(f), deps());
+    expect(r.state).toBe("error");
+    expect(r.reason).toContain("git commit failed");
+    // The FIRST section's commit exists (FromA), the retry's does not (Late).
+    expect(r.committed).toEqual(["wiki/concepts/FromA.md"]);
+    expect((await git(f.A, ["status", "--porcelain"])).out).toContain("Late.md");
+    // Ran, yes; evidence, no.
+    expect(getSyncLedgerEntry("fixture").lastRunMs).not.toBeNull();
+    expect(getSyncLedgerEntry("fixture").lastLocalSectionMs).toBeNull();
+    const res = await syncSubsumesSweeper(top, { repos });
+    expect(res.subsumed).toBe(false);
+    expect(res.configuredButIdle).toBe(true);
+  });
+
   test("a DEFERRED tick IS evidence — the commit path ran, it just held a file", async () => {
     // The other side of the same rule, and the reason the flag is not simply
     // "the tick ended cleanly": a hard deferral means status → add/commit →

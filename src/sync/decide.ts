@@ -379,7 +379,7 @@ export interface SyncLedgerEntry {
    * A failure AFTER the local section — a failed push, the no-upstream `blocked`
    * — still counts, because the sweeper could add nothing the loop did not
    * already commit. Only a failure BEFORE or INSIDE the section withholds the
-   * stamp. Full rule + its two accepted residuals: `syncSubsumesSweeper`.
+   * stamp — and "inside" includes the push retry's second local section. Full rule + its two accepted residuals: `syncSubsumesSweeper`.
    */
   lastLocalSectionMs: number | null;
   lastError?: string;

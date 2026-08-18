@@ -168,7 +168,8 @@ non-obvious git rules — lives in `src/sync/CLAUDE.md`, stated once.** Config s
   exactly as implemented: an `error`, `transient` or `blocked` outcome from BEFORE or
   INSIDE the local section stamps no evidence — but one from AFTER it (a failed push,
   the no-upstream `blocked`) DOES stamp, because the local commit path genuinely
-  worked and the sweeper could add nothing the loop did not already commit. Two
+  worked and the sweeper could add nothing the loop did not already commit (except a
+  failure INSIDE the push retry's second local section, which stamps nothing). Two
   residuals, accepted: (a) a loop whose PUSH has failed for days keeps subsuming and
   the daily warn stays silent (the `/models` Repo sync card is red with a FRESH "last
   commit pass" — the diagnosis is the push, not the commit); (b) a repeating hard
