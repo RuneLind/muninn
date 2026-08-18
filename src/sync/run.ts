@@ -114,9 +114,9 @@ export interface RepoSyncResult extends RepoCard {
   /** Ledger echo, so the card needs no second endpoint. */
   lastRunMs: number | null;
   lastSuccessMs: number | null;
-  /** Last tick that reached the local (commit) section — the clock
-   *  `syncSubsumesSweeper` reads. Rendered beside "last sync" because the two
-   *  differing IS the diagnosis: ticking but never committing. */
+  /** Last tick that got THROUGH the local (commit) section without failing in
+   *  it — the clock `syncSubsumesSweeper` reads. Rendered beside "last sync"
+   *  because the two differing IS the diagnosis: ticking but never committing. */
   lastLocalSectionMs: number | null;
   consecutiveDeferrals: number;
 }
@@ -201,16 +201,19 @@ export function __resetSyncStateForTest(): void {
 }
 
 /**
- * `localSectionRan` is passed by the caller rather than derived from the state:
+ * `commitPathOk` is passed by the caller rather than derived from the state:
  * the SAME state can land on either side of the local section (a rebase failure
- * is `error` and committed; a failed fetch is `error` and could not). Only the
- * call site knows which, and `syncSubsumesSweeper` reads the difference.
+ * is `error` and reached the commit path; a failed fetch is `error` and never
+ * did). Only the call site knows which, and `syncSubsumesSweeper` reads the
+ * difference. It means "this tick exercised the commit path AND the commit path
+ * did not fail" — not merely "we got as far as trying", which is what let a
+ * repo whose every commit failed renew the sweeper stand-down forever.
  */
 function recordLedger(
   name: string,
   result: RepoSyncResult,
   now: number,
-  localSectionRan: boolean,
+  commitPathOk: boolean,
 ): SyncLedgerEntry {
   const prev = getSyncLedgerEntry(name);
   const entry: SyncLedgerEntry = {
@@ -220,7 +223,7 @@ function recordLedger(
     lastSuccessMs:
       result.state === "ok" || result.state === "status-only" ? now : prev.lastSuccessMs,
     lastRunMs: now,
-    lastLocalSectionMs: localSectionRan ? now : prev.lastLocalSectionMs,
+    lastLocalSectionMs: commitPathOk ? now : prev.lastLocalSectionMs,
     lastError: result.error ?? (result.state === "blocked" ? result.reason : undefined),
   };
   ledger.set(name, entry);
@@ -926,14 +929,21 @@ export async function syncRepo(
 ): Promise<RepoSyncResult> {
   const startedAt = deps.now();
   /**
-   * `localSectionRan` says whether this tick got as far as step 5 — i.e. whether
-   * the loop was in a position to commit at all. It defaults to FALSE so a new
-   * early return can only ever under-claim: the failure mode being guarded
-   * against is a tick claiming coverage it never provided.
+   * `commitPathOk` says whether this tick reached step 5 — the local (commit)
+   * section — AND came out of it without failing there. Reaching it is not
+   * enough: a tick that reaches the commit path and dies inside it every 15
+   * minutes (a signing key that expired over a reboot, a pre-commit hook that
+   * started refusing, a bad `user.email`) commits exactly as little as a tick
+   * that never got there, and stamping it renewed the sweeper stand-down
+   * forever — "the loop runs but never commits", one step later.
+   *
+   * It defaults to FALSE so a new early return can only ever under-claim: the
+   * failure mode being guarded against is a tick claiming coverage it never
+   * provided.
    *
    * Same direction for the outer catch: a throw AFTER the local section (the
-   * push, the cache refresh) records `localSectionRan: false` even though the
-   * loop did commit. Accepted — the cost is a sweeper that may run beside a
+   * push, the cache refresh) records `commitPathOk: false` even though the loop
+   * did commit. Accepted — the cost is a sweeper that may run beside a
    * committing loop, which is the same collision two machines already survive,
    * and it is strictly safer than the alternative of claiming a commit pass that
    * a `git rebase` explosion may have rolled back.
@@ -942,7 +952,7 @@ export async function syncRepo(
     card: RepoCard,
     state: SyncState,
     extra: Partial<RepoSyncResult> = {},
-    localSectionRan = false,
+    commitPathOk = false,
   ): RepoSyncResult => {
     const now = deps.now();
     const result: RepoSyncResult = {
@@ -974,7 +984,7 @@ export async function syncRepo(
     const observeOnly = dryRun || state === "running";
     const led = observeOnly
       ? getSyncLedgerEntry(repo.name)
-      : recordLedger(repo.name, result, now, localSectionRan);
+      : recordLedger(repo.name, result, now, commitPathOk);
     result.lastRunMs = led.lastRunMs;
     result.lastSuccessMs = led.lastSuccessMs;
     result.lastLocalSectionMs = led.lastLocalSectionMs;
@@ -1062,6 +1072,24 @@ export async function syncRepo(
     };
     if (local.state) {
       const after = await readCard(repo, top);
+      // Every state the local section can END on, decided explicitly — this is
+      // the branch where "reached the commit path" and "the commit path worked"
+      // part company, and conflating them is what let a repo whose every commit
+      // failed hold the sweeper down forever:
+      //   - `deferred` — a HARD deferral: status, add/commit and the rebase gate
+      //     all ran and the loop chose to wait (behind, with rebase-blocking
+      //     dirt). The design working, per "Why deferral is not failure". A soft
+      //     hold (quiet period, deletion-hold) does not even land here — it sets
+      //     `holdReason`, pushes, and exits through the final return, which
+      //     stamps for the same reason. EVIDENCE.
+      //   - `blocked` — a rebase conflict, aborted. A human must clear it and
+      //     the tick's work never leaves the machine. NOT evidence: `blocked`
+      //     subsumes on its own explicit exception in `syncSubsumesSweeper`, so
+      //     withholding the stamp costs nothing there and buys the daily warn
+      //     that a wiki nobody is converging must keep getting.
+      //   - `error` / `transient` — `git add` or `git commit` refused, or the
+      //     rebase never started. Nothing was committed. NOT evidence.
+      const commitPathOk = local.state === "deferred";
       return finish(
         after,
         local.state,
@@ -1071,7 +1099,7 @@ export async function syncRepo(
           ...(local.conflicts ? { conflicts: local.conflicts } : {}),
           ...(local.error ? { error: local.error } : {}),
         },
-        true,
+        commitPathOk,
       );
     }
 
@@ -1279,13 +1307,21 @@ export const SYNC_SUBSUME_MAX_AGE_MS = 26 * 60 * 60 * 1000;
  * down, an expired deploy key — commits nothing, yet it used to refresh
  * `lastRunMs` and hold the sweeper down anyway. That is the same page-loss shape
  * again, reached through "the loop runs but never commits", so the freshness
- * clock is `lastLocalSectionMs`: stamped only once a tick reaches the local
- * section (status → commit → rebase).
+ * clock is `lastLocalSectionMs`.
+ *
+ * That clock is stamped on a tick that reached the local section (status →
+ * commit → rebase) AND did not FAIL inside it. Reaching it is not enough: a
+ * broken signing key, a refusing pre-commit hook or a bad `user.email` produces
+ * a tick that gets all the way to `git commit`, dies there, and commits exactly
+ * as little as one that never left the fetch — the same shape one step later. So
+ * an `error` or `transient` outcome ANYWHERE in the tick stamps no evidence,
+ * whichever side of the local section it came from; only a clean pass or a
+ * deferral (the commit path ran; the loop chose to wait) does.
  *
  * So EVIDENCE is the only thing that subsumes, with exactly one exception:
  *
- *  - fresh `lastLocalSectionMs` — the loop demonstrably reached its commit path
- *    inside the window; sweeping on top of it would fight it.
+ *  - fresh `lastLocalSectionMs` — the loop demonstrably got through its commit
+ *    path inside the window; sweeping on top of it would fight it.
  *  - `state === "blocked"` — subsumes REGARDLESS of freshness, because the
  *    sweeper is not a safe substitute there at all: `blocked` is the
  *    unmerged-paths / interrupted-operation refusal and the sweeper has no
@@ -1296,11 +1332,15 @@ export const SYNC_SUBSUME_MAX_AGE_MS = 26 * 60 * 60 * 1000;
  *    persist across ticks until a human clears them.
  *
  * Everything else — `error`, `transient`, `paused`, no-upstream, not-a-repo, a
- * cold ledger — falls through to the sweeper once the evidence goes stale. It
- * used to be `fresh(lastRunMs) && state !== "error"`, which meant ANY tick that
- * stopped before the local section in a non-error state (a young index.lock, a
- * feature-branch checkout, a missing upstream) renewed the stand-down every 15
- * minutes forever. `state` is a one-tick SAMPLE, not a claim about the window.
+ * cold ledger, and a rebase conflict that never converges — falls through to the
+ * sweeper once the evidence goes stale (a rebase-conflict `blocked` still
+ * subsumes on the exception above, but it stamps no evidence, so it keeps
+ * warning). It used to be `fresh(lastRunMs) && state !== "error"`, which meant
+ * ANY tick that stopped before the local section in a non-error state (a young
+ * index.lock, a feature-branch checkout, a missing upstream) renewed it every 15
+ * minutes forever — and, for a tick failing inside the local section, so did
+ * `fresh(lastLocalSectionMs)` before the stamp was narrowed to a commit path
+ * that WORKED. `state` is a one-tick SAMPLE, not a claim about the window.
  * `paused` falling through is harmless: the sweeper applies the same
  * off-default-branch rule to itself (`onDefaultBranch(top)` guard,
  * `src/watchers/wiki-committer.ts:154`) and no-ops.

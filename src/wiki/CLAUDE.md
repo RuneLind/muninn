@@ -157,13 +157,14 @@ non-obvious git rules — lives in `src/sync/CLAUDE.md`, stated once.** Config s
   `postCollectionUpdate` (`src/wiki/reindex.ts`), so huginn's CAS 409 reads as
   `already-running` rather than a failure.
 - **Sweeper subsumption:** `checkWikiCommitter` stands down for a repo a `wiki`-mode
-  entry covers only on EVIDENCE — a tick that reached its LOCAL (commit) section
-  within ~26h (`syncSubsumesSweeper`) — plus the one `blocked` case, which subsumes
-  regardless of freshness because this sweeper has no unmerged-paths pre-flight and
-  would commit the half-finished merge. Every other state falls through once the
-  evidence is stale. Configuration alone used to stand it down forever, and so did a
-  tick that errored at the fetch having committed nothing — both the 2026-07-23
-  page-loss shape with a new cause. The warn is separate from the stand-down: no
+  entry covers only on EVIDENCE — a tick that got THROUGH its LOCAL (commit) section
+  without failing in it within ~26h (`syncSubsumesSweeper`) — plus the one `blocked`
+  case, which subsumes regardless of freshness because this sweeper has no
+  unmerged-paths pre-flight and would commit the half-finished merge. Every other
+  state falls through once the evidence is stale. Configuration alone used to stand it
+  down forever; so did a tick that errored at the fetch having committed nothing; and
+  so did one that reached `git commit` and failed there (a broken signing key, a
+  refusing hook) — all three the 2026-07-23 page-loss shape with a new cause. The warn is separate from the stand-down: no
   commit pass in ~26h always warns, subsumed or not. Marked `ok`, not `skipped`.
 - **`log.md merge=union`:** mimir declares it and a fixture test asserts both
   machines' entries survive a rebase. A wiki that does NOT declare it gets a standing

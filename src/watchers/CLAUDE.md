@@ -1443,8 +1443,8 @@ losing them (the 2026-07-23 huginn-jarvis incident).
 
 - **Subsumed by the repo-sync loop — but only on EVIDENCE it runs.** On a machine
   running `SYNC_REPOS` (`src/sync/`), this sweeper stands down for every repo a
-  `wiki`-mode entry covers AND whose sync ledger shows a tick that actually reached
-  its LOCAL (commit) section within
+  `wiki`-mode entry covers AND whose sync ledger shows a tick that got THROUGH
+  its LOCAL (commit) section without failing in it, within
   `SYNC_SUBSUME_MAX_AGE_MS` (~26h, just over this sweeper's own daily cadence) —
   `syncSubsumesSweeper` in `src/sync/run.ts`, compared on git TOPLEVELS so
   huginn-jarvis's nested wiki root matches its repo. Standing down is not merely
@@ -1460,7 +1460,11 @@ losing them (the 2026-07-23 huginn-jarvis incident).
   fix for it. **Nor is a tick that RAN evidence:** a tick whose fetch fails
   (unreachable origin) commits nothing and used to refresh the freshness clock
   anyway, holding the sweeper down for as long as the machine stayed offline —
-  hence the local-section clock above. **One state subsumes without evidence:**
+  hence the local-section clock above. **Nor is a tick that merely REACHED the
+  commit path:** one that dies inside it every 15 minutes (a signing key that
+  expired over a reboot, a refusing pre-commit hook, a bad `user.email`) commits
+  just as little, so an `error`/`transient` outcome stamps nothing wherever it
+  came from — only a clean pass or a deferral does. **One state subsumes without evidence:**
   `blocked`, because the sweeper has no unmerged-paths pre-flight of its own
   (`listWikiSubtreeDirty` treats a `UU` entry as ordinary dirt) and would commit a
   human's half-finished merge; the conditions producing `blocked` persist across

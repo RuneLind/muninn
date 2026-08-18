@@ -341,6 +341,17 @@ describe("syncRepo", () => {
     expect((await git(f.A, ["log", "-1", "--format=%s"])).out).toContain("[sync]");
     const remoteSubjects = await git(f.bare, ["log", "--format=%s"]);
     expect(remoteSubjects.out).not.toContain("[sync]");
+
+    // …and a conflict is NOT a commit pass, even though the commit itself
+    // landed: the tick needs a human and its work never leaves the machine. It
+    // still subsumes — on `blocked`'s own freshness-independent exception, since
+    // the sweeper would commit over the conflict — but with no evidence stamped
+    // it keeps saying, once a day, that nobody is converging this wiki.
+    const top = (await git(f.A, ["rev-parse", "--show-toplevel"])).out;
+    expect(getSyncLedgerEntry("fixture").lastLocalSectionMs).toBeNull();
+    const res = await syncSubsumesSweeper(top, { repos: [wikiRepo(f)] });
+    expect(res.subsumed).toBe(true);
+    expect(res.configuredButIdle).toBe(true);
   });
 
   test("a failure BEFORE any rebase starts is reported verbatim, with no abort attempt", async () => {
@@ -963,6 +974,70 @@ describe("syncRepo", () => {
     expect(res.subsumed).toBe(false);
     expect(res.configuredButIdle).toBe(true);
   });
+
+  test("a tick that fails INSIDE the local section is not evidence either", async () => {
+    // One step past the failed fetch: the tick reaches the commit path and the
+    // commit itself fails — a signing key that expired over a reboot, a
+    // pre-commit hook that started refusing, a bad `user.email`. Stamping the
+    // evidence clock on "we got as far as trying" made every failing tick renew
+    // the stand-down, so the sweeper stayed down forever behind a loop that
+    // committed nothing: the 2026-07-23 page-loss shape, reached through "the
+    // loop runs, reaches its commit path, and fails there every time".
+    //
+    // A real signing failure, not a simulated one: gpg is asked for, and the
+    // program asked for cannot succeed.
+    const f = await makeFixture(base);
+    const repos = [wikiRepo(f)];
+    const top = (await git(f.A, ["rev-parse", "--show-toplevel"])).out;
+    await git(f.A, ["config", "commit.gpgsign", "true"]);
+    await git(f.A, ["config", "gpg.program", "/bin/false"]);
+
+    const page = path.join(f.wikiA, "concepts", "Settled.md");
+    await writeFile(page, "# Settled\n");
+    await ageFile(page);
+
+    const r = await syncRepo(wikiRepo(f), deps());
+    expect(r.state).toBe("error");
+    expect(r.reason).toContain("git commit failed");
+    expect(r.committed).toEqual([]);
+    // The tick RAN — the card must show the failing tick — but nothing was
+    // committed, so the evidence clock stays exactly where it was: null.
+    expect(getSyncLedgerEntry("fixture").lastRunMs).not.toBeNull();
+    expect(getSyncLedgerEntry("fixture").lastLocalSectionMs).toBeNull();
+    // And the page is still uncommitted, which is what the sweeper is for.
+    expect((await git(f.A, ["status", "--porcelain"])).out).toContain("Settled.md");
+
+    const res = await syncSubsumesSweeper(top, { repos });
+    expect(res.subsumed).toBe(false);
+    expect(res.configuredButIdle).toBe(true);
+  });
+
+  test("a DEFERRED tick IS evidence — the commit path ran, it just held a file", async () => {
+    // The other side of the same rule, and the reason the flag is not simply
+    // "the tick ended cleanly": a hard deferral means status → add/commit →
+    // rebase-gate all ran and the loop chose to wait, which is the design
+    // working (`src/sync/CLAUDE.md`, "Why deferral is not failure"). Sweeping on
+    // top of it would commit the very file the quiet period is protecting.
+    const f = await makeFixture(base);
+    const repos = [wikiRepo(f)];
+    const top = (await git(f.A, ["rev-parse", "--show-toplevel"])).out;
+
+    // Something to pull, plus fresh in-scope dirt ⇒ the rebase is deferred.
+    await writeFile(path.join(f.wikiB, "concepts", "FromB.md"), "# FromB\n");
+    await git(f.B, ["add", "-A"]);
+    await git(f.B, ["commit", "-q", "-m", "B page"]);
+    await git(f.B, ["push", "-q"]);
+    await writeFile(path.join(f.wikiA, "concepts", "Seed.md"), "# Seed edited right now\n");
+
+    const r = await syncRepo(wikiRepo(f), deps());
+    expect(r.state).toBe("deferred");
+    expect(getSyncLedgerEntry("fixture").lastLocalSectionMs).not.toBeNull();
+
+    const res = await syncSubsumesSweeper(top, { repos });
+    expect(res.subsumed).toBe(true);
+    expect(res.configuredButIdle).toBe(false);
+  });
+
 
   test("a local pass keeps subsuming while the remote is down — for one sweeper period, not forever", async () => {
     const f = await makeFixture(base);

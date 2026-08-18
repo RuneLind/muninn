@@ -154,7 +154,19 @@ Two things the deferral REPORT must not conflate, both fixed after they shipped:
   offline, VPN down, an expired deploy key) commits nothing yet used to refresh that
   clock — the same page-loss shape again, reached through "the loop runs but never
   commits". So the clock is stamped only once a tick reaches step 5, the local section,
-  and `finish`'s `localSectionRan` flag defaults to FALSE so a new early return can
+  **AND comes out of it without failing there** — reaching it is not enough. A tick
+  that gets all the way to `git commit` and dies inside it every 15 minutes (a signing
+  key that expired over a reboot, a pre-commit hook that started refusing, a bad
+  `user.email` — reproduced with `commit.gpgsign=true` + `gpg.program=/bin/false`)
+  commits exactly as little as one that never left the fetch, and stamping it renewed
+  the stand-down forever: the same shape one step later. So an `error` or `transient`
+  outcome ANYWHERE stamps no evidence, whichever side of the local section it came
+  from; a hard `deferred` DOES (the commit path ran, the loop chose to wait), and so
+  does a soft hold, which never reaches that branch at all — it sets `holdReason`,
+  pushes, and exits through the final return. A rebase-conflict `blocked` does NOT: it
+  needs a human and its work never leaves the machine, and it subsumes on the explicit
+  exception below anyway, so withholding the stamp costs nothing and keeps the daily
+  warn. `finish`'s `commitPathOk` flag defaults to FALSE so a new early return can
   only ever under-claim coverage.
   **Evidence is the ONLY thing that subsumes, with one exception.** `subsumed =
   fresh(lastLocalSectionMs) || state === "blocked"`. `blocked` subsumes regardless of
@@ -165,8 +177,8 @@ Two things the deferral REPORT must not conflate, both fixed after they shipped:
   conditions that produce `blocked` (a leftover `MERGE_HEAD`, a stale `index.lock`,
   conflict markers) persist across ticks until a human clears them, which is what
   makes a one-tick sample sound there and nowhere else. Every OTHER state — `error`,
-  `transient`, `paused`, no-upstream, not-a-repo, a cold ledger — falls through once
-  the evidence is stale; `paused` harmlessly, since the sweeper applies the same
+  `transient`, `paused`, no-upstream, not-a-repo, a cold ledger, and a rebase conflict
+  that never converges — falls through once the evidence is stale; `paused` harmlessly, since the sweeper applies the same
   off-default-branch rule to itself and no-ops (`onDefaultBranch` guard,
   `src/watchers/wiki-committer.ts`). The rejected spelling was `fresh(lastRunMs) &&
   state !== "error"`: `lastRunMs` is re-stamped every 15 minutes, so ANY tick stopping
