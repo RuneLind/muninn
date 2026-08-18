@@ -1,4 +1,4 @@
-import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach, spyOn } from "bun:test";
 import { mkdtemp, rm, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -10,6 +10,7 @@ import {
   draftAndPersistSynthesis,
   runSynthesisOneShot,
   SYNTHESIS_ONESHOT_IDENTITY,
+  SYNTHESIS_THINKING_MAX_TOKENS,
   MEMBER_EXCERPT_MAX,
   SYNTHESIS_EXCERPT_BUDGET,
   type SynthesisMember,
@@ -25,8 +26,11 @@ import type { WikiRegistryEntry } from "../wiki/registry.ts";
 import type { ClaudeExecResult } from "../ai/executor.ts";
 import type { Tracer } from "../tracing/tracer.ts";
 import type { InsertWikiProposalParams, WikiProposal } from "../db/wiki-proposals.ts";
-import { FENCED_EXCLUDED_TOOLS } from "../core/fenced-one-shot.ts";
+import { FENCED_EXCLUDED_TOOLS, FENCED_THINKING_MAX_TOKENS } from "../core/fenced-one-shot.ts";
 import { agentStatus } from "../observability/agent-status.ts";
+// Spied (not mocked) so the REAL `Tracer` can be exercised without `mock.module`,
+// which would invalidate `db/traces.ts` for every other file in this test chunk.
+import * as traceStore from "../db/traces.ts";
 
 /** DB-free recording tracer (mirrors summarizer-shared.test's). */
 function fakeTracer(): Tracer {
@@ -338,8 +342,13 @@ describe("runSynthesisOneShot — tool fence + observability identity", () => {
     } as unknown as Tracer;
   }
 
-  /** Runs the seam; hands back the botConfig + options the connector actually saw. */
-  async function run(botConfig: never, label = "The Alpha-Gamma Story") {
+  /** Runs the seam; hands back the botConfig + options the connector actually saw.
+   *  `tracer: false` injects NO tracer, so the real `Tracer` is constructed. */
+  async function run(
+    botConfig: never,
+    label = "The Alpha-Gamma Story",
+    extra: { tracer?: false; thinkingMaxTokens?: number } = {},
+  ) {
     const startAttrs: Record<string, unknown>[] = [];
     let seenBot: Record<string, unknown> | undefined;
     let seenOpts: Record<string, unknown> | undefined;
@@ -348,7 +357,10 @@ describe("runSynthesisOneShot — tool fence + observability identity", () => {
       prompt: "draft it",
       config: { tracingEnabled: false, tracingCaptureToolOutputs: false } as never,
       botConfig,
-      tracer: recordingTracer(startAttrs),
+      ...(extra.tracer === false ? {} : { tracer: recordingTracer(startAttrs) }),
+      ...(extra.thinkingMaxTokens !== undefined
+        ? { thinkingMaxTokens: extra.thinkingMaxTokens }
+        : {}),
       oneShot: (async (_p: string, _c: unknown, b: unknown, o: unknown) => {
         seenBot = b as Record<string, unknown>;
         seenOpts = o as Record<string, unknown>;
@@ -392,7 +404,7 @@ describe("runSynthesisOneShot — tool fence + observability identity", () => {
   // Moving onto the shared seam must not renumber the vertical: these strings are
   // what `/traces`, `/agents` Recent and the gate deep-link key off, and existing
   // rows carry them.
-  test("pins the six observability strings, wired end to end", async () => {
+  test("pins the seven observability strings, wired end to end", async () => {
     expect(SYNTHESIS_ONESHOT_IDENTITY).toEqual({
       traceName: "consolidation:draft",
       platform: "capture",
@@ -403,7 +415,7 @@ describe("runSynthesisOneShot — tool fence + observability identity", () => {
       source: "consolidation-draft",
     });
 
-    const { startAttrs, seenOpts } = await run(bot(), "Alpha Saga");
+    const { startAttrs } = await run(bot(), "Alpha Saga");
     const row = agentStatus
       .getRecentCompleted()
       .find((r) => r.name === "Synthesis page: Alpha Saga");
@@ -413,7 +425,41 @@ describe("runSynthesisOneShot — tool fence + observability identity", () => {
     expect(row!.sourcePage).toBe("/wiki/gardener");
     expect(startAttrs[0]!.source).toBe("consolidation-draft");
     expect(startAttrs[0]!.title).toBe("Alpha Saga");
-    // The 8k cap survived the move (claude-sdk supports a thinking budget).
-    expect(seenOpts!.thinkingMaxTokens).toBe(8000);
+  });
+
+  // `traceName` + `platform` live only on the Tracer the seam CONSTRUCTS, so an
+  // injected tracer can never see them — asserting them against the literal
+  // identity object is self-referential (a bogus value stays green). This case
+  // injects no tracer and reads the root span's INSERT instead. `saveSpan` is
+  // spied, not `mock.module`d, so `db/traces.ts` stays intact for the rest of the
+  // chunk. Requires tracing enabled, which is the default (`TRACING_ENABLED`).
+  test("stamps traceName + platform on the REAL trace root", async () => {
+    const save = spyOn(traceStore, "saveSpan").mockImplementation(async () => undefined);
+    const update = spyOn(traceStore, "updateSpan").mockImplementation(async () => undefined);
+    try {
+      await run(bot(), "Alpha Saga", { tracer: false });
+      const roots = save.mock.calls
+        .map((c) => c[0] as { kind: string; name: string; platform?: string | null })
+        .filter((s) => s.kind === "root");
+      expect(roots).toHaveLength(1);
+      expect(roots[0]!.name).toBe("consolidation:draft");
+      expect(roots[0]!.platform).toBe("capture");
+    } finally {
+      save.mockRestore();
+      update.mockRestore();
+    }
+  });
+
+  // The seam DEFAULTS to the same 8000, so "the connector saw 8000" alone proves
+  // nothing about this vertical's explicit pass — pin the equality, then prove the
+  // forwarding with a value the seam default cannot produce.
+  test("forwards its own thinking budget, which equals the seam's default", async () => {
+    expect(SYNTHESIS_THINKING_MAX_TOKENS).toBe(FENCED_THINKING_MAX_TOKENS);
+
+    const { seenOpts } = await run(bot());
+    expect(seenOpts!.thinkingMaxTokens).toBe(SYNTHESIS_THINKING_MAX_TOKENS);
+
+    const injected = await run(bot(), "The Alpha-Gamma Story", { thinkingMaxTokens: 1234 });
+    expect(injected.seenOpts!.thinkingMaxTokens).toBe(1234);
   });
 });

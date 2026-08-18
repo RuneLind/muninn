@@ -19,8 +19,9 @@
  * Like the other drafters the model call is connector-agnostic and injection-free:
  * everything it needs (conventions, member excerpts) is inlined into the prompt,
  * member bodies are delimited as untrusted source material, and the one-shot runs
- * through the traced seam (never bare `executeOneShot`) so the draft is visible on
- * `/traces` + `/agents`.
+ * through the shared FENCED seam (`runFencedOneShot` — traced AND stripped of the
+ * file-writing tools, never bare `executeOneShot`) so the draft is visible on
+ * `/traces` + `/agents` and cannot be written to disk instead of returned.
  */
 
 import path from "node:path";
@@ -51,17 +52,18 @@ import {
   type WikiProposalSourceDoc,
   type WikiProposalRelatedPage,
 } from "../db/wiki-proposals.ts";
-import { executeOneShot } from "../ai/one-shot.ts";
+import type { executeOneShot } from "../ai/one-shot.ts";
 import { runFencedOneShot } from "../core/fenced-one-shot.ts";
-import { Tracer } from "../tracing/tracer.ts";
+import type { Tracer } from "../tracing/tracer.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("gardener", "synthesis-drafter");
 
 /** Thinking budget for a synthesis draft — same 8k knee the capture summarizers +
  *  source drafter use (mechanical synthesis, not chat: a bot's chat-tuned budget
- *  is spent as silent first-token dead-air). Equals `FENCED_THINKING_MAX_TOKENS`;
- *  passed explicitly so a change to either is visible here. */
+ *  is spent as silent first-token dead-air). Equals `FENCED_THINKING_MAX_TOKENS`
+ *  (a test pins that equality); passed explicitly so a change to either is
+ *  visible here rather than inherited silently from the seam. */
 export const SYNTHESIS_THINKING_MAX_TOKENS = 8000;
 
 /** Per-member excerpt char cap — enough for title + lead + headings + outcome. */
@@ -313,6 +315,10 @@ export interface SynthesisOneShotOptions {
   config: Config;
   botConfig: BotConfig;
   timeoutMs?: number;
+  /** Thinking budget override; defaults to {@link SYNTHESIS_THINKING_MAX_TOKENS}.
+   *  No production caller sets it — it exists so a test can prove the budget is
+   *  actually forwarded rather than inferred from the seam's identical default. */
+  thinkingMaxTokens?: number;
   /** Test seams — production callers pass neither. */
   oneShot?: typeof executeOneShot;
   tracer?: Tracer;
@@ -320,9 +326,9 @@ export interface SynthesisOneShotOptions {
 
 /**
  * The synthesis vertical's identity on the shared fenced seam. Exported because
- * these six strings are the contract `/traces` + `/agents` (and the Atlas gate's
+ * these seven strings are the contract `/traces` + `/agents` (and the Atlas gate's
  * deep-link) key off — a rename here silently orphans existing rows, so a test
- * pins them verbatim.
+ * pins them verbatim AND observes them on the wire.
  */
 export const SYNTHESIS_ONESHOT_IDENTITY = {
   traceName: "consolidation:draft",
@@ -363,7 +369,7 @@ export async function runSynthesisOneShot(
     config: opts.config,
     botConfig: opts.botConfig,
     ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
-    thinkingMaxTokens: SYNTHESIS_THINKING_MAX_TOKENS,
+    thinkingMaxTokens: opts.thinkingMaxTokens ?? SYNTHESIS_THINKING_MAX_TOKENS,
     startAttrs: { title: label },
     onError: (message) =>
       log.warn("Synthesis draft one-shot failed for {label}: {error}", { label, error: message }),
