@@ -202,12 +202,15 @@ export function __resetSyncStateForTest(): void {
 
 /**
  * `commitPathOk` is passed by the caller rather than derived from the state:
- * the SAME state can land on either side of the local section (a rebase failure
- * is `error` and reached the commit path; a failed fetch is `error` and never
- * did). Only the call site knows which, and `syncSubsumesSweeper` reads the
- * difference. It means "this tick exercised the commit path AND the commit path
- * did not fail" — not merely "we got as far as trying", which is what let a
- * repo whose every commit failed renew the sweeper stand-down forever.
+ * the SAME state can land on any of three sides of the local section (a rebase
+ * failure is `error` and failed INSIDE the commit path; a failed fetch is
+ * `error` and never reached it; a failed push is `error` AFTER it, with the
+ * commit already made). Only the call site knows which, and
+ * `syncSubsumesSweeper` reads the difference. It means "this tick exercised the
+ * commit path AND the commit path did not fail" — not merely "we got as far as
+ * trying", which is what let a repo whose every commit failed renew the sweeper
+ * stand-down forever, and not "the whole tick succeeded" either: a push failure
+ * stamps, because the sweeper could add nothing the loop did not already commit.
  */
 function recordLedger(
   name: string,
@@ -937,6 +940,12 @@ export async function syncRepo(
    * that never got there, and stamping it renewed the sweeper stand-down
    * forever — "the loop runs but never commits", one step later.
    *
+   * What happens AFTER the local section does not un-say it: the final return
+   * passes `true` unconditionally, so a push `error`/`transient` and the
+   * no-upstream `blocked` all stamp. Deliberate — the commit is on disk and a
+   * sweep could add nothing to it; a failed push is a push problem, and the card
+   * says so by pairing a red state with a fresh "last commit pass".
+   *
    * It defaults to FALSE so a new early return can only ever under-claim: the
    * failure mode being guarded against is a tick claiming coverage it never
    * provided.
@@ -1081,7 +1090,11 @@ export async function syncRepo(
       //     dirt). The design working, per "Why deferral is not failure". A soft
       //     hold (quiet period, deletion-hold) does not even land here — it sets
       //     `holdReason`, pushes, and exits through the final return, which
-      //     stamps for the same reason. EVIDENCE.
+      //     stamps for the same reason. EVIDENCE. Residual: when the only dirt is
+      //     OUTSIDE the subtree, nothing is staged and `git commit` is never
+      //     invoked, so a repeating hard `deferred` stamps evidence without ever
+      //     proving the commit works — a broken signing key stays undetected in
+      //     that state until in-subtree dirt appears. Accepted.
       //   - `blocked` — a rebase conflict, aborted. A human must clear it and
       //     the tick's work never leaves the machine. NOT evidence: `blocked`
       //     subsumes on its own explicit exception in `syncSubsumesSweeper`, so
@@ -1313,10 +1326,26 @@ export const SYNC_SUBSUME_MAX_AGE_MS = 26 * 60 * 60 * 1000;
  * commit → rebase) AND did not FAIL inside it. Reaching it is not enough: a
  * broken signing key, a refusing pre-commit hook or a bad `user.email` produces
  * a tick that gets all the way to `git commit`, dies there, and commits exactly
- * as little as one that never left the fetch — the same shape one step later. So
- * an `error` or `transient` outcome ANYWHERE in the tick stamps no evidence,
- * whichever side of the local section it came from; only a clean pass or a
- * deferral (the commit path ran; the loop chose to wait) does.
+ * as little as one that never left the fetch — the same shape one step later.
+ *
+ * The rule, exactly as implemented: an `error`, `transient` or `blocked` outcome
+ * from BEFORE or INSIDE the local section stamps no evidence — but one from
+ * AFTER it (a failed push, the no-upstream `blocked`) DOES stamp, because the
+ * local commit path genuinely worked and the sweeper could add nothing the loop
+ * did not already commit. A hard `deferred` stamps too (the commit path ran; the
+ * loop chose to wait), including the case where nothing was staged because only
+ * out-of-subtree dirt was dirty.
+ *
+ * Two residuals, accepted:
+ *
+ *  a) a loop whose PUSH has failed for days keeps subsuming and the daily warn
+ *     stays silent. Diagnosable, not silent overall: the `/models` Repo sync card
+ *     is red and its "last commit pass" is fresh — which says the problem is the
+ *     push, not the commit, and the local commits are safe on disk meanwhile.
+ *  b) a repeating hard `deferred` with nothing in-subtree dirty stamps evidence
+ *     without ever invoking `git commit`, so a broken signing key stays
+ *     undetected in that state until in-subtree dirt appears — at which point the
+ *     commit runs, fails, and the stamp stops.
  *
  * So EVIDENCE is the only thing that subsumes, with exactly one exception:
  *
@@ -1335,7 +1364,9 @@ export const SYNC_SUBSUME_MAX_AGE_MS = 26 * 60 * 60 * 1000;
  * cold ledger, and a rebase conflict that never converges — falls through to the
  * sweeper once the evidence goes stale (a rebase-conflict `blocked` still
  * subsumes on the exception above, but it stamps no evidence, so it keeps
- * warning). It used to be `fresh(lastRunMs) && state !== "error"`, which meant
+ * warning). No STATE subsumes on its own here, but a state reached after the
+ * local section carries a fresh stamp with it — residual (a) above.
+ * It used to be `fresh(lastRunMs) && state !== "error"`, which meant
  * ANY tick that stopped before the local section in a non-error state (a young
  * index.lock, a feature-branch checkout, a missing upstream) renewed it every 15
  * minutes forever — and, for a tick failing inside the local section, so did

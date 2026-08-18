@@ -1463,8 +1463,18 @@ losing them (the 2026-07-23 huginn-jarvis incident).
   hence the local-section clock above. **Nor is a tick that merely REACHED the
   commit path:** one that dies inside it every 15 minutes (a signing key that
   expired over a reboot, a refusing pre-commit hook, a bad `user.email`) commits
-  just as little, so an `error`/`transient` outcome stamps nothing wherever it
-  came from — only a clean pass or a deferral does. **One state subsumes without evidence:**
+  just as little. **The rule exactly as implemented:** an `error`, `transient` or
+  `blocked` outcome from BEFORE or INSIDE the local section stamps no evidence —
+  but one from AFTER it (a failed push, the no-upstream `blocked`) DOES stamp,
+  because the local commit path genuinely worked and this sweeper could add
+  nothing the loop did not already commit; a hard `deferred` stamps for the same
+  reason. Two residuals, accepted: (a) a loop whose PUSH has failed for days keeps
+  subsuming and this daily warn stays silent — the `/models` Repo sync card is red
+  with a FRESH "last commit pass", which says the diagnosis is the push, not the
+  commit; (b) a repeating hard `deferred` with nothing in-subtree dirty stamps
+  evidence without ever invoking `git commit`, so a broken signing key is
+  undetected in that state until in-subtree dirt appears.
+  **One state subsumes without evidence:**
   `blocked`, because the sweeper has no unmerged-paths pre-flight of its own
   (`listWikiSubtreeDirty` treats a `UU` entry as ordinary dirt) and would commit a
   human's half-finished merge; the conditions producing `blocked` persist across
@@ -1473,10 +1483,12 @@ losing them (the 2026-07-23 huginn-jarvis incident).
   once evidence is stale; `paused` harmlessly, since this sweeper no-ops off the
   default branch itself (the `onDefaultBranch` guard below). **The warn is decoupled
   from the stand-down**: `configuredButIdle` is simply "no commit pass in ~26h", so a
-  loop that has committed nothing gets a `log.warn` naming the three causes worth
+  loop that has committed nothing gets a `log.warn` naming the four causes worth
   checking — the 15-min tick not firing, origin unreachable / the loop pre-flight
-  blocked, or a muninn restart inside the last 15 min (the sync ledger is in-memory)
-  — even in the `blocked` case where it still stands down. With `SYNC_REPOS` unset
+  blocked, `git commit` itself failing (signing key, pre-commit hook, `user.email`),
+  or a muninn restart inside the last 15 min (the sync ledger is in-memory) — even in
+  the `blocked` case where it still stands down. It points at the `/models` Repo sync
+  card's "last commit pass" field, which is the clock the warn is reading. With `SYNC_REPOS` unset
   the sweeper behaves exactly as before.
 - Per tick, for the bot's `wikiDir`: resolve the git toplevel (reusing the
   exported `gitToplevel`/`onDefaultBranch` from `commit.ts`, not reimplemented);

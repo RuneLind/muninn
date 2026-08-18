@@ -1038,7 +1038,6 @@ describe("syncRepo", () => {
     expect(res.configuredButIdle).toBe(false);
   });
 
-
   test("a local pass keeps subsuming while the remote is down — for one sweeper period, not forever", async () => {
     const f = await makeFixture(base);
     const repos = [wikiRepo(f)];

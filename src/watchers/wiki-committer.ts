@@ -13,8 +13,8 @@
  * sweeper can be SUBSUMED for a repo the loop owns in `wiki` mode and stand down
  * — the loop does the same job with a quiet period and a rebase, and running both
  * would void both guarantees. But CONFIGURATION does not subsume anything:
- * `syncSubsumesSweeper` stands this sweeper down only on EVIDENCE the loop
- * reached its commit path inside ~26h, plus the one `blocked` case where the
+ * `syncSubsumesSweeper` stands this sweeper down only on EVIDENCE the loop got
+ * THROUGH its commit path inside ~26h, plus the one `blocked` case where the
  * sweeper is unsafe rather than redundant. The warn is decoupled from the
  * stand-down, so a loop that has not committed in ~26h says so once a day even
  * while it subsumes.
@@ -119,8 +119,10 @@ export async function checkWikiCommitter(
   // job was never installed had nobody committing the wiki at all — the 2026-07-23
   // page-loss shape this watcher exists for. Nor is "the loop ran" evidence: a
   // tick that errors at the fetch (origin unreachable) commits nothing, so
-  // `syncSubsumesSweeper` requires a tick that reached the LOCAL section inside
-  // ~26h. Genuine subsumption is marked `ok`, not `skipped`: the work IS being
+  // `syncSubsumesSweeper` requires a tick that got THROUGH the LOCAL section —
+  // reached it AND did not fail inside it — within ~26h. A failure AFTER that
+  // section (a failed push) still counts: the commit is made and this sweeper
+  // could add nothing to it. Genuine subsumption is marked `ok`, not `skipped`: the work IS being
   // done, by the loop, so a streak would escalate a health alert on a healthy
   // configuration.
   //
@@ -133,7 +135,7 @@ export async function checkWikiCommitter(
   const subsumption = await syncSubsumesSweeper(top);
   if (subsumption.configuredButIdle) {
     log.warn(
-      "Wiki-committer: {top} is configured for the SYNC_REPOS loop but it has not reached a commit pass in ~26h{tail}: check the 15-min tick is firing, that origin is reachable and the loop is not pre-flight blocked, or that muninn did not just restart (the sync ledger is in-memory and refills on the next tick)",
+      "Wiki-committer: {top} is configured for the SYNC_REPOS loop but it has not reached a commit pass in ~26h{tail}: check the 15-min tick is firing, that origin is reachable and the loop is not pre-flight blocked, that `git commit` itself is not failing (signing key, pre-commit hook, user.email), or that muninn did not just restart (the sync ledger is in-memory and refills on the next tick) — the /models Repo sync card's \"last commit pass\" field is this same clock",
       {
         botName: name,
         top,

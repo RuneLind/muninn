@@ -159,15 +159,27 @@ Two things the deferral REPORT must not conflate, both fixed after they shipped:
   key that expired over a reboot, a pre-commit hook that started refusing, a bad
   `user.email` — reproduced with `commit.gpgsign=true` + `gpg.program=/bin/false`)
   commits exactly as little as one that never left the fetch, and stamping it renewed
-  the stand-down forever: the same shape one step later. So an `error` or `transient`
-  outcome ANYWHERE stamps no evidence, whichever side of the local section it came
-  from; a hard `deferred` DOES (the commit path ran, the loop chose to wait), and so
-  does a soft hold, which never reaches that branch at all — it sets `holdReason`,
-  pushes, and exits through the final return. A rebase-conflict `blocked` does NOT: it
-  needs a human and its work never leaves the machine, and it subsumes on the explicit
-  exception below anyway, so withholding the stamp costs nothing and keeps the daily
-  warn. `finish`'s `commitPathOk` flag defaults to FALSE so a new early return can
-  only ever under-claim coverage.
+  the stand-down forever: the same shape one step later. **The rule, exactly as
+  implemented: an `error`, `transient` or `blocked` outcome from BEFORE or INSIDE the
+  local section stamps no evidence — but one from AFTER it (a failed push, the
+  no-upstream `blocked`) DOES stamp, because the local commit path genuinely worked
+  and the sweeper could add nothing the loop did not already commit.** A hard
+  `deferred` stamps (the commit path ran, the loop chose to wait), and so does a soft
+  hold, which never reaches that branch at all — it sets `holdReason`, pushes, and
+  exits through the final return, which passes `commitPathOk: true` unconditionally. A
+  rebase-conflict `blocked` does NOT: it fails INSIDE the section, needs a human and
+  its work never leaves the machine, and it subsumes on the explicit exception below
+  anyway, so withholding the stamp costs nothing and keeps the daily warn. `finish`'s
+  `commitPathOk` flag defaults to FALSE so a new early return can only ever under-claim
+  coverage.
+  **Two residuals, accepted.** (a) A loop whose PUSH has failed for days keeps
+  subsuming and the daily warn stays silent — diagnosable rather than silent overall,
+  because the `/models` Repo sync card is red while its "last commit pass" is fresh,
+  which says the diagnosis is the push and not the commit, and the commits themselves
+  are safe on disk. (b) A repeating hard `deferred` with nothing IN-SUBTREE dirty
+  stamps evidence without ever invoking `git commit`, so a broken signing key is
+  undetected in that state until in-subtree dirt appears — at which point the commit
+  runs, fails inside the section, and the stamping stops.
   **Evidence is the ONLY thing that subsumes, with one exception.** `subsumed =
   fresh(lastLocalSectionMs) || state === "blocked"`. `blocked` subsumes regardless of
   freshness because the sweeper is not a safe substitute there at all: it is the

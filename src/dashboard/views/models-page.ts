@@ -843,8 +843,12 @@ export async function renderModelsPage(): Promise<string> {
       // The clock the sweeper's stand-down actually reads. Shown NEXT TO last
       // sync because the two diverging is the whole diagnosis: a loop ticking
       // every 15 min that has not reached its commit path in a day is a loop
-      // committing nothing (unreachable origin, pre-flight blocked).
-      notes.push('last commit pass ' + agoLabel(r.lastLocalSectionMs));
+      // committing nothing (unreachable origin, pre-flight blocked, or git
+      // commit itself failing). Rendered for wiki mode ONLY — it is the only
+      // mode that commits: status-only returns before the local section so it
+      // would read "never" forever, and plain reaches the local section but
+      // never commits, so it would show a commit pass it never made.
+      if (r.mode === 'wiki') notes.push('last commit pass ' + agoLabel(r.lastLocalSectionMs));
       if (r.consecutiveDeferrals > 1) notes.push(r.consecutiveDeferrals + ' deferrals in a row');
       if (r.error) notes.push('last error: ' + esc(String(r.error).slice(0, 160)));
       var warns = (r.warnings || []).map(function (w) {

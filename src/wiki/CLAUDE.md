@@ -164,7 +164,17 @@ non-obvious git rules — lives in `src/sync/CLAUDE.md`, stated once.** Config s
   state falls through once the evidence is stale. Configuration alone used to stand it
   down forever; so did a tick that errored at the fetch having committed nothing; and
   so did one that reached `git commit` and failed there (a broken signing key, a
-  refusing hook) — all three the 2026-07-23 page-loss shape with a new cause. The warn is separate from the stand-down: no
+  refusing hook) — all three the 2026-07-23 page-loss shape with a new cause. The rule
+  exactly as implemented: an `error`, `transient` or `blocked` outcome from BEFORE or
+  INSIDE the local section stamps no evidence — but one from AFTER it (a failed push,
+  the no-upstream `blocked`) DOES stamp, because the local commit path genuinely
+  worked and the sweeper could add nothing the loop did not already commit. Two
+  residuals, accepted: (a) a loop whose PUSH has failed for days keeps subsuming and
+  the daily warn stays silent (the `/models` Repo sync card is red with a FRESH "last
+  commit pass" — the diagnosis is the push, not the commit); (b) a repeating hard
+  `deferred` with nothing in-subtree dirty stamps evidence without ever invoking `git
+  commit`, so a broken signing key is undetected in that state until in-subtree dirt
+  appears. The warn is separate from the stand-down: no
   commit pass in ~26h always warns, subsumed or not. Marked `ok`, not `skipped`.
 - **`log.md merge=union`:** mimir declares it and a fixture test asserts both
   machines' entries survive a rebase. A wiki that does NOT declare it gets a standing
