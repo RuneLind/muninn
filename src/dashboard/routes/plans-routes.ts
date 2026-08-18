@@ -45,19 +45,36 @@
  *     rule, so any file the board renders as a card is a file it can edit. It
  *     becomes reachable again the moment those two rules drift — which is
  *     exactly when a silent 200 would be worst.
- *   - **`/order`** answers `{order, hash, written, deleted}`, where `order` is
- *     the MERGED result on disk. A POST carries only the columns the reader
- *     touched: a posted column replaces that column, a posted `[]` un-ranks it,
- *     and an absent column is preserved — a wholesale replace silently un-ranked
- *     every omitted column. The merge runs INSIDE the CAS section. The file is
- *     deleted only when the MERGE comes out empty; a body posting no columns at
- *     all is a 400, because "delete every ordering" must be an instruction
+ *   - **`/order`** answers `{order, hash, written, deleted, warnings}`, where
+ *     `order` is the MERGED result on disk. A POST carries only the columns the
+ *     reader touched: a posted column replaces that column, a posted `[]`
+ *     un-ranks it, and an absent column is preserved — a wholesale replace
+ *     silently un-ranked every omitted column. The merge runs INSIDE the CAS
+ *     section, and it parses the current file with the SAME corpus slug set the
+ *     board reads with, so a preserved column is filtered exactly as the board
+ *     filters it (without that, a slug naming no plan on disk survived into the
+ *     file and into this response while the board payload omitted it). The file
+ *     is deleted only when the MERGE comes out empty; a body posting no columns
+ *     at all is a 400, because "delete every ordering" must be an instruction
  *     somebody wrote, not the residue of a body that parsed to nothing.
  *     `written` is "bytes were written", `deleted` is "the file is gone", and a
  *     state change is `written || deleted` — never both true.
+ *
+ *     **How a malformed current file is handled is a two-way split, decided
+ *     here.** A WHOLESALE parse failure (a YAML syntax error, a top level that
+ *     is not a mapping) is a **422** naming the problem, and nothing is written:
+ *     that parse degrades the entire document to "no column is ranked", which is
+ *     the right read for the board but destroys every hand-written line the
+ *     moment a merge writes it back. A PER-ENTRY drop (off-grammar slug, unknown
+ *     column, duplicate, a slug naming no plan) is the file's documented
+ *     read-time GC and stays MERGEABLE — refusing those would let one stale line
+ *     block every drag — but the merge makes each drop durable, so every drop
+ *     rides out on `warnings` rather than happening silently. `warnings` is
+ *     always present and usually empty.
  *   - Both: 403 readonly · 404 unregistered wiki / unknown slug · 409 stale ·
- *     413 over `PLAN_BODY_MAX_BYTES` · **503 when the source read failed**,
- *     naming the reason the GET path's banner would have named.
+ *     413 over `PLAN_BODY_MAX_BYTES` · **422 a refusal that names a file a human
+ *     must fix by hand** · **503 when the source read failed**, naming the
+ *     reason the GET path's banner would have named.
  *
  * **Both return the NEW sha256 in the 200 body, taken from the string that was
  * written** — never from a re-read after the write section released, which would
@@ -404,16 +421,46 @@ export function registerPlansRoutes(
       // `{ready:[…]}` over a file that also ranked `blocked` deleted `blocked`,
       // 200). Merging outside the section would read a file the write may not be
       // the next writer of.
+      //
+      // Two things ride out of the section on closure variables, the `refused`
+      // idiom the priority route above uses: `buildContent` must return bytes,
+      // so a refusal cannot be its return value.
       let mergedOrder: QueueOrder = parsed.order;
+      let refusal: string | null = null;
+      let warnings: string[] = [];
       const result = await writePlanQueue({
         wikiDir: root,
         baseHash,
         buildContent: (current) => {
-          const disk = current === null ? {} : parseQueueYaml(current).order;
-          mergedOrder = mergeQueueOrder(disk, parsed.order, parsed.columns);
+          // Parsed with the SAME corpus slug set the board reads with, so a
+          // preserved column is filtered exactly as `/api/plans/board` filters
+          // it. Without it a slug naming no plan survived the merge into both
+          // the file and the response's `order`, while the board payload omitted
+          // it — leaving PR 5's client holding a rank for a card it never draws.
+          const disk = current === null ? { order: {}, warnings: [] } : parseQueueYaml(current, known);
+          if (disk.unparseable) {
+            // REFUSE. The parse degraded the whole document to "nothing is
+            // ranked", which is right for a reader (the board still renders) and
+            // catastrophic for a read-modify-write: merging over it writes the
+            // degradation to disk. Proven live — one `- [ unclosed` line and the
+            // OTHER column's hand-written ranking was gone on a 200.
+            refusal = disk.unparseable;
+            throw new Error(refusal);
+          }
+          // Per-entry drops (off-grammar slug, unknown column, duplicate, a slug
+          // naming no plan) stay MERGEABLE — that is the file's documented
+          // read-time GC, and refusing them would make one stale line block
+          // every drag. But the merge makes each drop DURABLE, so they are
+          // announced on the response instead of vanishing quietly.
+          warnings = disk.warnings;
+          mergedOrder = mergeQueueOrder(disk.order, parsed.order, parsed.columns);
           return serializeQueue(mergedOrder);
         },
       });
+      if (refusal) {
+        log.warn("plan order: refused the write: {reason}", { reason: refusal });
+        return c.json({ error: refusal }, 422);
+      }
       if (result.outcome === "forbidden") {
         return c.json({ error: result.reason, readonly: true }, 403);
       }
@@ -431,6 +478,7 @@ export function registerPlansRoutes(
         hash: result.hash,
         written: result.outcome === "written",
         deleted: result.outcome === "deleted",
+        warnings,
       });
     } catch (err) {
       log.error("plan order: unexpected failure: {error}", { error: errText(err) });
@@ -443,9 +491,15 @@ export function registerPlansRoutes(
  * The largest body either write route will read. Both are machine-generated by
  * the board — one slug and a hash, or a few hundred ranked slugs — so this is
  * three orders of magnitude of headroom, and it exists because neither route
- * should buffer whatever a loopback client happens to send. Checked against the
- * declared `content-length` first (cheap, and refuses before the read) and again
- * on the bytes actually read, because a chunked body declares no length.
+ * should buffer whatever a loopback client happens to send.
+ *
+ * **It refuses a DECLARED oversize before the read, and an undeclared one
+ * after.** A body carrying a `content-length` over the cap never reaches
+ * `c.req.text()`; a chunked body declares no length, so it is fully buffered and
+ * then measured. That second case is a cap on what is ACCEPTED, not on what is
+ * held in memory — accepted deliberately, because both routes are loopback-only
+ * (`DASHBOARD_HOST` defaults to 127.0.0.1) and a stream-limited read would buy
+ * nothing an attacker on that surface could not already do.
  */
 const PLAN_BODY_MAX_BYTES = 256 * 1024;
 
@@ -521,10 +575,13 @@ function isPriorityInput(v: unknown): v is PlanPriority | "clear" {
  * writer needs the difference: a column that was posted empty is CLEARED, a
  * column that was not posted at all is preserved from disk.
  *
- * That gap is also why a body whose keys reduce to NOTHING is refused here.
+ * That gap is also why a body carrying NO column at all is refused here.
  * Reducing to `{}` meant "no columns ranked", which the writer implements by
- * DELETING the file — so a body carrying only keys this loop consumes nothing
- * from erased every column's ordering and answered 200.
+ * DELETING the file — so an empty body erased every column's ordering and
+ * answered 200. Every other off-shape key already returns above (a key that is
+ * not a column name is an unknown-column 400, which is also where a
+ * `{"__proto__": […]}` body lands), so `columns.length === 0` is the whole
+ * check: a key-set comparison against `Object.entries` could never fire.
  */
 function parseOrderBody(
   raw: unknown,
@@ -535,8 +592,7 @@ function parseOrderBody(
   const order: QueueOrder = {};
   const columns: QueueColumn[] = [];
   const placed = new Set<string>();
-  const entries = Object.entries(raw as Record<string, unknown>);
-  for (const [key, value] of entries) {
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
     if (!(QUEUE_COLUMNS as readonly string[]).includes(key)) {
       return { error: `unknown column "${key}" — expected one of ${QUEUE_COLUMNS.join(", ")}` };
     }
@@ -555,9 +611,7 @@ function parseOrderBody(
     // Rule 2 of the grammar: an emptied column leaves no key behind.
     if (slugs.length > 0) order[key as QueueColumn] = slugs;
   }
-  // Every key must have been CONSUMED as a column: a body the loop walked
-  // without taking a column from it is not an instruction, whatever it is.
-  if (columns.length !== entries.length || columns.length === 0) {
+  if (columns.length === 0) {
     return { error: "no columns posted — send the columns to rank, `[]` to un-rank one" };
   }
   return { order, columns };

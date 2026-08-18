@@ -384,9 +384,11 @@ describe("POST /api/plans/order", () => {
       baseHash: "",
     });
     const hash = (await created.json()).hash;
-    // The second one is a body whose only key is one `Object.entries` reports
-    // but the column loop consumes nothing from — the shape that used to reduce
-    // to `{}` and delete every column's ordering.
+    // `{}` is the shape that used to reduce to "no columns ranked" and delete
+    // every column's ordering. The second body is the prototype-pollution
+    // shape: `JSON.parse` makes `__proto__` an OWN property, so it reaches the
+    // loop and takes the UNKNOWN-COLUMN branch (a different 400 message, same
+    // refusal) rather than being silently walked past.
     for (const order of [{}, JSON.parse(String.raw`{"__proto__": ["alpha-plan"]}`)]) {
       const res = await post(a, "/api/plans/order", { order, baseHash: hash });
       expect(res.status).toBe(400);
@@ -482,6 +484,65 @@ describe("POST /api/plans/order", () => {
       baseHash: "",
     });
     expect(res.status).toBe(404);
+  });
+
+  test("an UNPARSEABLE queue.yaml is refused, and its bytes are untouched", async () => {
+    // A hand-edited file with a YAML syntax error parses to `{order:{}}` — so a
+    // merge that trusts that read treats every column as unranked and writes the
+    // human's lines away. Proven live: an `- [ unclosed` line in one column
+    // erased the OTHER column's ranking on a 200.
+    const root = await makeWiki(["alpha-plan", "beta-plan"]);
+    const broken = "ready:\n  - [ unclosed\nblocked:\n  - beta-plan\n";
+    await writeFile(path.join(root, QUEUE_REL_PATH), broken);
+    const res = await post(app(root), "/api/plans/order", {
+      order: { ready: ["alpha-plan"] },
+      baseHash: sha256(broken),
+    });
+    expect(res.status).toBe(422);
+    expect((await res.json()).error).toContain("unparseable");
+    expect(await queueText(root)).toBe(broken);
+  });
+
+  test("a per-entry drop still merges — and the response NAMES what it dropped", async () => {
+    // The read-time GC (off-grammar slug) stays mergeable, but a merge WRITE
+    // makes the drop durable, so it rides out on `warnings` rather than
+    // happening silently.
+    const root = await makeWiki(["alpha-plan", "beta-plan"]);
+    const current = "ready:\n  - alpha-plan\n  - 2026-plan\n";
+    await writeFile(path.join(root, QUEUE_REL_PATH), current);
+    const res = await post(app(root), "/api/plans/order", {
+      order: { blocked: ["beta-plan"] },
+      baseHash: sha256(current),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(await queueText(root)).toBe(
+      serializeQueue({ ready: ["alpha-plan"], blocked: ["beta-plan"] }),
+    );
+    expect(body.warnings).toEqual([
+      'queue.yaml: "2026-plan" is not a valid slug — dropped',
+    ]);
+  });
+
+  test("a retired slug in an OMITTED column is dropped exactly as the board reads it", async () => {
+    // The board parses with the corpus slug set and omits the retired entry; a
+    // merge parsing WITHOUT it preserved the entry into the file and into the
+    // response's `order`, so the client would hold a rank for a card it never
+    // renders.
+    const root = await makeWiki(["alpha-plan", "beta-plan"]);
+    const current = "ready:\n  - alpha-plan\n  - retired-plan\n";
+    await writeFile(path.join(root, QUEUE_REL_PATH), current);
+    const res = await post(app(root), "/api/plans/order", {
+      order: { blocked: ["beta-plan"] },
+      baseHash: sha256(current),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(await queueText(root)).not.toContain("retired-plan");
+    expect(body.order).toEqual({ ready: ["alpha-plan"], blocked: ["beta-plan"] });
+    expect(body.warnings).toEqual([
+      'queue.yaml: "retired-plan" names no plan on disk — dropped',
+    ]);
   });
 
   test("the bytes it writes are the ones serializeQueue emits", async () => {
