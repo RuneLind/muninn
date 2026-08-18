@@ -51,17 +51,17 @@ import {
   type WikiProposalSourceDoc,
   type WikiProposalRelatedPage,
 } from "../db/wiki-proposals.ts";
-import { executeOneShot, connectorCapabilities } from "../ai/one-shot.ts";
-import { tracedOneShot } from "../core/traced-one-shot.ts";
+import { executeOneShot } from "../ai/one-shot.ts";
+import { runFencedOneShot } from "../core/fenced-one-shot.ts";
 import { Tracer } from "../tracing/tracer.ts";
-import { agentStatus, getConnectorLabel } from "../observability/agent-status.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("gardener", "synthesis-drafter");
 
 /** Thinking budget for a synthesis draft — same 8k knee the capture summarizers +
  *  source drafter use (mechanical synthesis, not chat: a bot's chat-tuned budget
- *  is spent as silent first-token dead-air). */
+ *  is spent as silent first-token dead-air). Equals `FENCED_THINKING_MAX_TOKENS`;
+ *  passed explicitly so a change to either is visible here. */
 export const SYNTHESIS_THINKING_MAX_TOKENS = 8000;
 
 /** Per-member excerpt char cap — enough for title + lead + headings + outcome. */
@@ -319,72 +319,57 @@ export interface SynthesisOneShotOptions {
 }
 
 /**
+ * The synthesis vertical's identity on the shared fenced seam. Exported because
+ * these six strings are the contract `/traces` + `/agents` (and the Atlas gate's
+ * deep-link) key off — a rename here silently orphans existing rows, so a test
+ * pins them verbatim.
+ */
+export const SYNTHESIS_ONESHOT_IDENTITY = {
+  traceName: "consolidation:draft",
+  platform: "capture",
+  kind: "capture",
+  phase: "drafting",
+  runNamePrefix: "Synthesis page: ",
+  sourcePage: "/wiki/gardener",
+  source: "consolidation-draft",
+} as const;
+
+/**
  * Run the synthesis drafter's model call with a `consolidation:draft` trace root +
- * a `capture`-kind `/agents` run attached (the source-drafter pattern —
- * `runDrafterOneShot` — reused for the consolidation vertical). Fail-soft: the
- * trace is stamped `error`, the run completed, and the error re-thrown so the
- * caller's own failure handling is unchanged. Bare `executeOneShot` is never used.
+ * a `capture`-kind `/agents` run attached, through the shared fenced seam
+ * (`runFencedOneShot`) the source drafter and the fact-check integrate proposer
+ * use. Fail-soft: the trace is stamped `error`, the run completed, and the error
+ * re-thrown so the caller's own failure handling is unchanged.
+ *
+ * The FENCE is why the seam is shared and not hand-rolled: this draft is read from
+ * the call's RETURN TEXT, so an unexcluded `Write` lets the model satisfy "output
+ * the complete Markdown file" by putting it on disk and replying "File created
+ * successfully at: …" — which `synthesisShapeGate` rejects, losing the whole 8k
+ * call and leaving a stray `.mdx` under the bot folder.
  */
 export async function runSynthesisOneShot(
   opts: SynthesisOneShotOptions,
 ): Promise<ClaudeExecResult> {
-  const { label, config, botConfig } = opts;
-  const tracer =
-    opts.tracer ??
-    new Tracer("consolidation:draft", { botName: botConfig.name, platform: "capture" });
-
-  let reqId: string | undefined;
-  try {
-    reqId = agentStatus.startRequest(botConfig.name, "drafting", undefined, {
-      kind: "capture",
-      name: `Synthesis page: ${label}`,
-    });
-    agentStatus.setSourcePage(reqId, "/wiki/gardener");
-    agentStatus.setConnectorLabel(reqId, getConnectorLabel(botConfig.connector ?? "claude-cli"));
-    if (botConfig.model) agentStatus.setModel(reqId, botConfig.model);
-
-    // Only cap thinking where the field IS a thinking budget (claude-cli / claude-sdk);
-    // on openai-compat it is max_tokens, so overriding it would clamp the draft.
-    const thinking = connectorCapabilities(botConfig).supportsThinkingBudget
-      ? SYNTHESIS_THINKING_MAX_TOKENS
-      : null;
-
-    const result = await tracedOneShot(tracer, "claude", opts.prompt, config, botConfig, {
-      ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
-      ...(thinking !== null ? { thinkingMaxTokens: thinking } : {}),
-      ...(opts.oneShot ? { oneShot: opts.oneShot } : {}),
-      startAttrs: {
-        source: "consolidation-draft",
-        title: label,
-        ...(thinking !== null ? { thinkingMaxTokens: thinking } : {}),
-      },
-    });
-
-    const usage = {
-      model: result.model,
-      inputTokens: result.inputTokens,
-      outputTokens: result.outputTokens,
-      numTurns: result.numTurns,
-      toolCount: result.toolCalls?.length ?? 0,
-      costUsd: result.costUsd,
-    };
-    tracer.finish("ok", { source: "consolidation-draft", ...usage });
-    agentStatus.completeRequest(reqId, {
-      ...(config.tracingEnabled ? { traceId: tracer.traceId } : {}),
-      inputTokens: result.inputTokens,
-      outputTokens: result.outputTokens,
-      numTurns: result.numTurns,
-      toolCount: usage.toolCount,
-      costUsd: result.costUsd,
-    });
-    return result;
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    tracer.finish("error", { source: "consolidation-draft", error: message });
-    if (reqId) agentStatus.completeRequest(reqId, {});
-    log.warn("Synthesis draft one-shot failed for {label}: {error}", { label, error: message });
-    throw err;
-  }
+  const { label } = opts;
+  return runFencedOneShot({
+    traceName: SYNTHESIS_ONESHOT_IDENTITY.traceName,
+    platform: SYNTHESIS_ONESHOT_IDENTITY.platform,
+    kind: SYNTHESIS_ONESHOT_IDENTITY.kind,
+    phase: SYNTHESIS_ONESHOT_IDENTITY.phase,
+    runName: `${SYNTHESIS_ONESHOT_IDENTITY.runNamePrefix}${label}`,
+    sourcePage: SYNTHESIS_ONESHOT_IDENTITY.sourcePage,
+    source: SYNTHESIS_ONESHOT_IDENTITY.source,
+    prompt: opts.prompt,
+    config: opts.config,
+    botConfig: opts.botConfig,
+    ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+    thinkingMaxTokens: SYNTHESIS_THINKING_MAX_TOKENS,
+    startAttrs: { title: label },
+    onError: (message) =>
+      log.warn("Synthesis draft one-shot failed for {label}: {error}", { label, error: message }),
+    ...(opts.oneShot ? { oneShot: opts.oneShot } : {}),
+    ...(opts.tracer ? { tracer: opts.tracer } : {}),
+  });
 }
 
 // ── Orchestrator ─────────────────────────────────────────────────────────────

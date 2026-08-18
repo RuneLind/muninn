@@ -8,6 +8,8 @@ import {
   buildSynthesisPrompt,
   synthesisShapeGate,
   draftAndPersistSynthesis,
+  runSynthesisOneShot,
+  SYNTHESIS_ONESHOT_IDENTITY,
   MEMBER_EXCERPT_MAX,
   SYNTHESIS_EXCERPT_BUDGET,
   type SynthesisMember,
@@ -23,6 +25,8 @@ import type { WikiRegistryEntry } from "../wiki/registry.ts";
 import type { ClaudeExecResult } from "../ai/executor.ts";
 import type { Tracer } from "../tracing/tracer.ts";
 import type { InsertWikiProposalParams, WikiProposal } from "../db/wiki-proposals.ts";
+import { FENCED_EXCLUDED_TOOLS } from "../core/fenced-one-shot.ts";
+import { agentStatus } from "../observability/agent-status.ts";
 
 /** DB-free recording tracer (mirrors summarizer-shared.test's). */
 function fakeTracer(): Tracer {
@@ -300,5 +304,116 @@ Across [[Alpha Plan]], [[Beta Plan]] and [[Gamma Plan]] we learned a lot.
     expect(res.ok).toBe(false);
     expect(inserted).toBe(false);
     if (!res.ok) expect(res.reason).toContain("shape-gate");
+  });
+});
+
+/**
+ * The tool fence on the synthesis one-shot.
+ *
+ * The product is the call's RETURN TEXT, so a reachable `Write` is a way to LOSE
+ * the draft: the model writes the `.mdx`, replies "File created successfully at:
+ * …", `synthesisShapeGate` rejects it ("no frontmatter fence"), nothing persists,
+ * and the stray file lands under the bot folder. Same escape the source drafter
+ * measured (28 of 101 runs reached for Write/Edit) — this seam ran unfenced.
+ */
+describe("runSynthesisOneShot — tool fence + observability identity", () => {
+  afterEach(() => agentStatus.clearRequest());
+
+  const bot = (over: Record<string, unknown> = {}) =>
+    ({ name: "jarvis", connector: "claude-sdk", model: "sonnet", ...over }) as never;
+
+  /** Recording tracer — records every `start` attribute set. */
+  function recordingTracer(sink: Record<string, unknown>[]): Tracer {
+    return {
+      traceId: "trace-1",
+      start: (_label: string, attrs?: Record<string, unknown>) => {
+        sink.push(attrs ?? {});
+        return "span-1";
+      },
+      end: () => 1,
+      finish: () => {},
+      addChildSpan: () => "child",
+      addSubSpan: () => "sub",
+      spanStartedAt: () => new Date(),
+    } as unknown as Tracer;
+  }
+
+  /** Runs the seam; hands back the botConfig + options the connector actually saw. */
+  async function run(botConfig: never, label = "The Alpha-Gamma Story") {
+    const startAttrs: Record<string, unknown>[] = [];
+    let seenBot: Record<string, unknown> | undefined;
+    let seenOpts: Record<string, unknown> | undefined;
+    await runSynthesisOneShot({
+      label,
+      prompt: "draft it",
+      config: { tracingEnabled: false, tracingCaptureToolOutputs: false } as never,
+      botConfig,
+      tracer: recordingTracer(startAttrs),
+      oneShot: (async (_p: string, _c: unknown, b: unknown, o: unknown) => {
+        seenBot = b as Record<string, unknown>;
+        seenOpts = o as Record<string, unknown>;
+        return { result: "---\ntype: blog\n---\n", inputTokens: 1, outputTokens: 1, numTurns: 1 };
+      }) as never,
+    });
+    if (!seenBot) throw new Error("one-shot seam was never called");
+    return { seenBot, seenOpts, startAttrs };
+  }
+
+  test("excludes every file-writing tool on the model call", async () => {
+    const { seenBot } = await run(bot());
+    for (const tool of FENCED_EXCLUDED_TOOLS) {
+      expect(seenBot.excludedTools as string[]).toContain(tool);
+    }
+  });
+
+  test("keeps the bot's own exclusions and never duplicates an overlap", async () => {
+    const { seenBot } = await run(bot({ excludedTools: ["mcp__gmail", "Write"] }));
+    const excluded = seenBot.excludedTools as string[];
+    expect(excluded).toContain("mcp__gmail");
+    expect(excluded.filter((t) => t === "Write").length).toBe(1);
+  });
+
+  test("does not mutate the shared discovered botConfig", async () => {
+    // Every `discoverAllBots()` caller holds THIS object — an in-place union would
+    // fence the bot's chat turns too.
+    const botConfig = bot({ excludedTools: ["mcp__gmail"] });
+    const before = structuredClone(botConfig);
+    await run(botConfig);
+    expect(botConfig).toEqual(before);
+  });
+
+  test("leaves connector and model identity untouched", async () => {
+    const { seenBot } = await run(bot());
+    expect(seenBot.name).toBe("jarvis");
+    expect(seenBot.connector).toBe("claude-sdk");
+    expect(seenBot.model).toBe("sonnet");
+  });
+
+  // Moving onto the shared seam must not renumber the vertical: these strings are
+  // what `/traces`, `/agents` Recent and the gate deep-link key off, and existing
+  // rows carry them.
+  test("pins the six observability strings, wired end to end", async () => {
+    expect(SYNTHESIS_ONESHOT_IDENTITY).toEqual({
+      traceName: "consolidation:draft",
+      platform: "capture",
+      kind: "capture",
+      phase: "drafting",
+      runNamePrefix: "Synthesis page: ",
+      sourcePage: "/wiki/gardener",
+      source: "consolidation-draft",
+    });
+
+    const { startAttrs, seenOpts } = await run(bot(), "Alpha Saga");
+    const row = agentStatus
+      .getRecentCompleted()
+      .find((r) => r.name === "Synthesis page: Alpha Saga");
+    expect(row).toBeDefined();
+    expect(row!.kind).toBe("capture");
+    expect(row!.phase).toBe("drafting");
+    expect(row!.sourcePage).toBe("/wiki/gardener");
+    expect(startAttrs[0]!.source).toBe("consolidation-draft");
+    expect(startAttrs[0]!.title).toBe("Alpha Saga");
+    // The 8k cap survived the move (claude-sdk supports a thinking budget).
+    expect(seenOpts!.thinkingMaxTokens).toBe(8000);
   });
 });
