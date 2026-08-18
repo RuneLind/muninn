@@ -784,10 +784,12 @@ under **`source:health`**, so there is no migration.
     out of the 600-entry window — days on a busy row, at a rate set by that watcher's
     ordinary alert volume rather than by anything in the health code.
     **Whether the collision happens at all depends on the watcher's NAME**, which is the
-    reason not to reason about it case by case: the only proper nouns in the skeleton come
-    from the interpolated watcher name, and `extractProperNouns` drops the sentence-initial
-    capital, so a single-word name leaves sender AND nouns empty and `contentHash` returns
-    `null` outright (measured: `"X Daily Digest"` → `h:5324387307693335327` for every
+    reason not to reason about it case by case: `extractProperNouns` skips ONE sentence-initial
+    capital, and what survives is set by the interpolated name — a multi-word name's second
+    capitalised word absorbs that skip and un-shields the boilerplate `The` (from "The watcher
+    itself is running fine"), while a single-word name (in backticks, never matching the
+    capital regex) lets `The` absorb it, so sender AND nouns are empty and `contentHash`
+    returns `null` outright (measured: `"X Daily Digest"` → `h:5324387307693335327` for every
     source, `"Anthropic"`/`"News"`/`"email"` → `null`). Renaming a watcher would therefore
     silently arm or disarm the bug. The PER-ALERT exemption is what makes the fix
     independent of the name — it holds for every watcher, named anything.

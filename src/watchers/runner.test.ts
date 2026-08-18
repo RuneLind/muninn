@@ -580,13 +580,15 @@ describe("filterUnseenAlerts: watcher-health alerts", () => {
 // `tsc` clean and the whole suite green while anthropic starts false-dropping commits.
 
 describe("filterUnseenAlerts: the per-type skip list", () => {
-  // Real anthropic shape: the id is a canonical GitHub URL (already a complete dedup
-  // key), and two DISTINCT commits routinely carry the same subject — so they fingerprint
-  // identically, and content-hash dedup would silently swallow the second one.
+  // Real anthropic shape (`anthropic.ts` ~1484): the id is `an:<canonical GitHub URL>`
+  // (already a complete dedup key) and the summary is `**<sourceLabel>** — <label>\n<url>`
+  // — no `Fra:` sender, that is the email watcher's shape. Two DISTINCT commits routinely
+  // carry the same subject, and the sha does not survive proper-noun extraction, so they
+  // fingerprint identically and content-hash dedup would silently swallow the second one.
   const commit = (sha: string): WatcherAlert => ({
-    id: `https://github.com/anthropics/docs/commit/${sha}`,
+    id: `an:https://github.com/anthropics/docs/commit/${sha}`,
     source: "anthropic",
-    summary: "**Fra:** anthropics/docs — Update README",
+    summary: `**anthropics/docs** — Update README\nhttps://github.com/anthropics/docs/commit/${sha}`,
     urgency: "low",
   });
 
