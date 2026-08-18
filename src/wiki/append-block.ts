@@ -38,6 +38,20 @@ export interface AppendBlockOptions
   > {
   /** The full sentinel-wrapped block to splice in (see `buildFactcheckBlock`). */
   block: string;
+  /**
+   * Optional caller-owned pass over the FRESHLY-READ body, run inside the write
+   * section immediately before the splice. Absent ⇒ the body reaches
+   * `spliceSentinelBlock` untouched, i.e. every existing caller (and the
+   * byte-pinned `.md` blockquote path) is unchanged.
+   *
+   * It exists for ONE caller: the ➕ route's annotatable `.mdx` branch, which
+   * must run the fact-check strip here and nowhere else — the strip is a
+   * fact-check policy, not a property of splicing a sentinel block, so it stays
+   * in the route (which also needs to COUNT what it removed, off the same bytes,
+   * to report the supersede note). Doing it before the call is not an option:
+   * the body is read inside the section, after the CAS.
+   */
+  prepareBody?: (current: string) => string;
 }
 
 function escapeRegExp(s: string): string {
@@ -85,7 +99,7 @@ export function spliceSentinelBlock(content: string, block: string): string {
  * stale→409, error→400/500). Never throws for a recoverable condition.
  */
 export async function appendBlockToPage(opts: AppendBlockOptions): Promise<AppendOutcome> {
-  const { block, commit, ...rest } = opts;
+  const { block, commit, prepareBody, ...rest } = opts;
   const result = await writeWikiPage({
     ...rest,
     // Committer and subject travel together (`PageWriteCommitOptions`): this
@@ -93,7 +107,8 @@ export async function appendBlockToPage(opts: AppendBlockOptions): Promise<Appen
     ...(commit
       ? { commit, commitMessage: `[fact-check] annotate: ${opts.relPath}` }
       : { commit: undefined, commitMessage: undefined }),
-    transform: (current) => withTrailingNewline(spliceSentinelBlock(current, block)),
+    transform: (current) =>
+      withTrailingNewline(spliceSentinelBlock(prepareBody ? prepareBody(current) : current, block)),
     logKind: "factcheck",
     logLine: "fact-check block added via the wiki reader",
   });

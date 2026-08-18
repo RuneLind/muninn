@@ -30,6 +30,7 @@ import {
   type SemanticOverlay,
 } from "../views/components/wiki-atlas-semantic.ts";
 import { slugifyTopicKey } from "../../gardener/doc-page-map.ts";
+import { countFactWrappers } from "../../format/markdown-ast.ts";
 import type { WikiRegistryEntry } from "../../wiki/registry.ts";
 import type { BotConfig } from "../../bots/config.ts";
 import type { WikiIndex, WikiPageMeta } from "../../wiki/store.ts";
@@ -3215,5 +3216,118 @@ describe("GET /api/wiki/chat-target", () => {
     expect((await getBody("?wiki=jarviswiki")).error).toBe(
       (await postBody({ ...q, wiki: "jarviswiki" })).error,
     );
+  });
+});
+
+/**
+ * The ➕ "add to article" route on an ANNOTATABLE `.mdx` page.
+ *
+ * The append route only ever replaced the sentinel region, so a page that had
+ * been through ✎ Integrate kept its `<Fact n=…>` marks while the appendix under
+ * them was rebuilt from a NEW run — and claim numbering is per-run, so a stale
+ * `n="2"` chip then pointed at an unrelated `#fc-claim-2`. The annotatable branch
+ * therefore strips first and reports the count as `supersededNote`, exactly like
+ * the integrate routes. The `.md` blockquote branch is unchanged (it is read raw
+ * outside the reader and never carries marks).
+ */
+describe("POST /api/wiki/factcheck/append — supersedes stale marks on an .mdx page", () => {
+  let root: string;
+  let app: Hono;
+  let prevExtra: string | undefined;
+
+  const FENCE = "```";
+  // One page carrying: two live marks in prose, a THIRD `<Fact>` inside a code
+  // fence (documentation — must survive the strip), and a prior appendix whose
+  // per-run claim numbering this run replaces.
+  const pageMdx = [
+    "---",
+    "type: source",
+    "title: Widgets",
+    "---",
+    "",
+    "# Widgets",
+    "",
+    'The device <Fact n="1" v="bad">ships 4M units</Fact> a year.',
+    "",
+    'Its shell is <Fact n="2" v="bad">machined from a single billet</Fact>.',
+    "",
+    "How the markup is spelled:",
+    "",
+    `${FENCE}mdx`,
+    '<Fact n="9" v="ok">documented example</Fact>',
+    FENCE,
+    "",
+    FACTCHECK_SENTINEL_START,
+    '<FactCheck date="2026-08-01" bad="2">',
+    "",
+    "### ❌ Claim 1/2 — Units",
+    "",
+    "Old evidence.",
+    "",
+    "### ❌ Claim 2/2 — Shell",
+    "",
+    "Older evidence.",
+    "</FactCheck>",
+    FACTCHECK_SENTINEL_END,
+    "",
+  ].join("\n");
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-append-mdx-"));
+    await Bun.write(path.join(root, "Widgets.mdx"), pageMdx);
+    await Bun.write(path.join(root, "index.md"), "# Index\n\n- [[Widgets]]\n");
+    prevExtra = process.env.WIKI_EXTRA;
+    process.env.WIKI_EXTRA = `appendwiki=${root}`;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    app = new Hono();
+    registerWikiRoutes(app, {} as Parameters<typeof registerWikiRoutes>[1]);
+  });
+
+  afterEach(async () => {
+    if (prevExtra === undefined) delete process.env.WIKI_EXTRA;
+    else process.env.WIKI_EXTRA = prevExtra;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("strips prior marks, keeps a fenced <Fact> as documentation, reports the count", async () => {
+    const baseHash = createHash("sha256")
+      .update(await Bun.file(path.join(root, "Widgets.mdx")).text())
+      .digest("hex");
+    const res = await app.request("/api/wiki/factcheck/append?wiki=appendwiki", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        page: "Widgets",
+        baseHash,
+        answer: "### ✅ Claim 1/1 — Units\n\nThe figure is current.",
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      written: boolean;
+      page: string;
+      supersededNote?: string;
+    };
+    expect(body.written).toBe(true);
+
+    const written = await Bun.file(path.join(root, "Widgets.mdx")).text();
+    // Not one live wrapper survives — and the wrapped PROSE is byte-preserved.
+    expect(countFactWrappers(written)).toBe(0);
+    expect(written).not.toContain('<Fact n="1"');
+    expect(written).not.toContain('<Fact n="2"');
+    expect(written).toContain("The device ships 4M units a year.");
+    expect(written).toContain("Its shell is machined from a single billet.");
+    // The documented tag inside the fence is the ONLY `<Fact>` pair left.
+    expect(written).toContain('<Fact n="9" v="ok">documented example</Fact>');
+    expect(written.split("</Fact>").length - 1).toBe(1);
+    // The new appendix landed in the sentinel region.
+    expect(written).toContain("Claim 1/1 — Units");
+    expect(written).not.toContain("Old evidence.");
+    // …and the run says what it superseded, in the integrate routes' wording.
+    expect(body.supersededNote).toContain("2 inline marks");
+    expect(body.supersededNote).toContain("superseded");
   });
 });
