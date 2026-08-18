@@ -57,11 +57,13 @@ export const SAFE_FETCH_MAX_BYTES = 2 * 1024 * 1024;
 export const SAFE_FETCH_TIMEOUT_MS = 20_000;
 /**
  * Headroom over the chains the vertical's OWN `directFetchUrl` rewrite walks.
- * Measured 2026-08-18 on `docs.anthropic.com/**.md`: the ordinary page is 2 hops
- * (301 to platform.claude.com → 307 path rewrite → 200), but a page that has moved
- * off the docs site is 4 — `…/agents-and-tools/mcp.md` lands on
- * modelcontextprotocol.io, and at a cap of 3 it was refused where 4 and 5 return
- * 274 836 chars. So 3 was not headroom, it was already cutting real doc URLs.
+ * Measured 2026-08-18 on `docs.anthropic.com/**.md`: the ordinary page is 3 hops
+ * (`about-claude/models.md`: 301 to platform.claude.com → 307 path rewrite → 307
+ * `models.md` → `models/overview.md` → 200; refused at a cap of 2, 28 879 chars
+ * at 3+), and a page that has moved off the docs site is 4 —
+ * `…/agents-and-tools/mcp.md` lands on modelcontextprotocol.io, refused at a cap
+ * of 3 where 4 and 5 return 274 836 chars. So 3 was not headroom, it was already
+ * cutting real doc URLs, and 5 leaves ONE hop of headroom over the worst live shape.
  */
 export const SAFE_FETCH_MAX_REDIRECTS = 5;
 
