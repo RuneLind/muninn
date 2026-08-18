@@ -1927,8 +1927,8 @@ export function registerWikiGardenerRoutes(
     // Serialize under the same per-bot gardener mutex the drain routes use, so
     // concurrent source-draft clicks (or a click racing a backlog drain) can't
     // double-spend model calls. `runExclusive` is a try-lock: it returns null WITHOUT
-    // starting when a run is already in flight — respond 409 like the recover/dismiss
-    // routes rather than queue behind a potentially long drain.
+    // starting when a run is already in flight — respond 409 (same shape as the recover/dismiss
+    // routes, different message — theirs is the backlog-row lock) rather than queue behind a potentially long drain.
     // Bind the prune seam onto the real deps so a dismissed doc is skipped here too
     // (dismissal must stop model spend on EVERY selection seam, not just the drain).
     // No seeded watcher ⇒ no snapshot to read ⇒ ∅ (today's behaviour).
