@@ -1851,15 +1851,44 @@ export function registerWikiGardenerRoutes(
     // Prune seam — the fourth selection site (drain / source-drafter backlog / weekly
     // harvest are the other three). No seeded watcher ⇒ no snapshot ⇒ ∅.
     const rnWatcher = await backlogDeps.getWikiGardenerWatcher(bot.name);
-    const outcome = await runSourceDraftForNewest(bot, root, collection, KNOWLEDGE_API_URL, () =>
-      rnWatcher ? readDismissed(backlogDeps, rnWatcher.id) : Promise.resolve(new Set<string>()),
+
+    // Serialize under the same per-bot gardener mutex the drain routes use, so
+    // concurrent source-draft clicks (or a click racing a backlog drain) can't
+    // double-spend model calls. `runExclusive` is a try-lock: it returns null WITHOUT
+    // starting when a run is already in flight — respond 409 with the same message as
+    // `source-draft-backlog` (its batch sibling, whose guard this mirrors) rather than
+    // queue behind a potentially long drain. Holding the mutex also makes the WEEKLY
+    // `wiki-gardener` watcher skip its slot if it fires meanwhile (see
+    // `src/watchers/wiki-gardener.ts`) — accepted by precedent: both batch siblings
+    // have taken the same lock since they shipped, and a run-now is short.
+    const run = runExclusive(bot.name, () =>
+      runSourceDraftForNewest(bot, root, collection, KNOWLEDGE_API_URL, () =>
+        rnWatcher ? readDismissed(backlogDeps, rnWatcher.id) : Promise.resolve(new Set<string>()),
+      ),
     );
-    log.info("Source-draft run-now for {bot} ({collection}): {outcome}", {
-      bot: bot.name,
-      collection,
-      outcome: outcome.outcome,
-    });
-    return c.json(outcome, outcome.outcome === "error" ? 500 : 200);
+    if (run === null) return c.json({ error: "a gardener run is already in flight for this bot" }, 409);
+
+    // The drafter turns its own failures into an `error` OUTCOME, but the seams around
+    // it (`getDismissed`, the attempt ledger) do real DB I/O and can throw — same
+    // try/catch → JSON 500 as both mutex siblings, so a caller reading `res.json()`
+    // never lands on Hono's text/plain default handler.
+    try {
+      const outcome = await run;
+      log.info("Source-draft run-now for {bot} ({collection}): {outcome}", {
+        bot: bot.name,
+        collection,
+        outcome: outcome.outcome,
+      });
+      return c.json(outcome, outcome.outcome === "error" ? 500 : 200);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log.error("Source-draft run-now failed for {bot} ({collection}): {error}", {
+        bot: bot.name,
+        collection,
+        error: message,
+      });
+      return c.json({ error: message }, 500);
+    }
   });
 
   // Backlog source drafter — draft per-article `.mdx` source pages for up to
@@ -1898,8 +1927,8 @@ export function registerWikiGardenerRoutes(
     // Serialize under the same per-bot gardener mutex the drain routes use, so
     // concurrent source-draft clicks (or a click racing a backlog drain) can't
     // double-spend model calls. `runExclusive` is a try-lock: it returns null WITHOUT
-    // starting when a run is already in flight — respond 409 like the recover/dismiss
-    // routes rather than queue behind a potentially long drain.
+    // starting when a run is already in flight — respond 409 (same shape as the recover/dismiss
+    // routes, different message — theirs is the backlog-row lock) rather than queue behind a potentially long drain.
     // Bind the prune seam onto the real deps so a dismissed doc is skipped here too
     // (dismissal must stop model spend on EVERY selection seam, not just the drain).
     // No seeded watcher ⇒ no snapshot to read ⇒ ∅ (today's behaviour).
