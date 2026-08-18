@@ -114,6 +114,10 @@ export interface RepoSyncResult extends RepoCard {
   /** Ledger echo, so the card needs no second endpoint. */
   lastRunMs: number | null;
   lastSuccessMs: number | null;
+  /** Last tick that got THROUGH the local (commit) section without failing in
+   *  it — the clock `syncSubsumesSweeper` reads. Rendered beside "last sync"
+   *  because the two differing IS the diagnosis: ticking but never committing. */
+  lastLocalSectionMs: number | null;
   consecutiveDeferrals: number;
 }
 
@@ -185,6 +189,7 @@ export function getSyncLedgerEntry(name: string): SyncLedgerEntry {
       consecutiveDeferrals: 0,
       lastSuccessMs: null,
       lastRunMs: null,
+      lastLocalSectionMs: null,
     }
   );
 }
@@ -195,7 +200,24 @@ export function __resetSyncStateForTest(): void {
   inFlight.clear();
 }
 
-function recordLedger(name: string, result: RepoSyncResult, now: number): SyncLedgerEntry {
+/**
+ * `commitPathOk` is passed by the caller rather than derived from the state:
+ * the SAME state can land on any of three sides of the local section (a rebase
+ * failure is `error` and failed INSIDE the commit path; a failed fetch is
+ * `error` and never reached it; a failed push is `error` AFTER it, with the
+ * commit already made). Only the call site knows which, and
+ * `syncSubsumesSweeper` reads the difference. It means "this tick exercised the
+ * commit path AND the commit path did not fail" — not merely "we got as far as
+ * trying", which is what let a repo whose every commit failed renew the sweeper
+ * stand-down forever, and not "the whole tick succeeded" either: a push failure
+ * stamps, because the sweeper could add nothing the loop did not already commit.
+ */
+function recordLedger(
+  name: string,
+  result: RepoSyncResult,
+  now: number,
+  commitPathOk: boolean,
+): SyncLedgerEntry {
   const prev = getSyncLedgerEntry(name);
   const entry: SyncLedgerEntry = {
     state: result.state,
@@ -204,6 +226,7 @@ function recordLedger(name: string, result: RepoSyncResult, now: number): SyncLe
     lastSuccessMs:
       result.state === "ok" || result.state === "status-only" ? now : prev.lastSuccessMs,
     lastRunMs: now,
+    lastLocalSectionMs: commitPathOk ? now : prev.lastLocalSectionMs,
     lastError: result.error ?? (result.state === "blocked" ? result.reason : undefined),
   };
   ledger.set(name, entry);
@@ -466,6 +489,7 @@ export async function readRepoStatus(repo: SyncRepo, now: number): Promise<RepoS
     durationMs: 0,
     lastRunMs: led.lastRunMs,
     lastSuccessMs: led.lastSuccessMs,
+    lastLocalSectionMs: led.lastLocalSectionMs,
     consecutiveDeferrals: led.consecutiveDeferrals,
     ...(led.lastError ? { error: led.lastError } : {}),
   };
@@ -907,10 +931,39 @@ export async function syncRepo(
   dryRun = false,
 ): Promise<RepoSyncResult> {
   const startedAt = deps.now();
+  /**
+   * `commitPathOk` says whether this tick reached step 5 — the local (commit)
+   * section — AND came out of it without failing there. Reaching it is not
+   * enough: a tick that reaches the commit path and dies inside it every 15
+   * minutes (a signing key that expired over a reboot, a pre-commit hook that
+   * started refusing, a bad `user.email`) commits exactly as little as a tick
+   * that never got there, and stamping it renewed the sweeper stand-down
+   * forever — "the loop runs but never commits", one step later.
+   *
+   * What happens AFTER the local section does not un-say it: the final return
+   * passes `true` for a push `error`/`retrying` and the no-upstream `blocked`,
+   * so those all stamp. Deliberate — the commit is on disk and a sweep could add
+   * nothing to it; a failed push is a push problem, and the card says so by
+   * pairing a red/yellow state with a fresh "last commit pass". The ONE thing
+   * after step 5 that withholds the stamp is the push retry's own second local
+   * section failing (`git commit` refused there) — same shape, other door.
+   *
+   * It defaults to FALSE so a new early return can only ever under-claim: the
+   * failure mode being guarded against is a tick claiming coverage it never
+   * provided.
+   *
+   * Same direction for the outer catch: a throw AFTER the local section (the
+   * push, the cache refresh) records `commitPathOk: false` even though the loop
+   * did commit. Accepted — the cost is a sweeper that may run beside a
+   * committing loop, which is the same collision two machines already survive,
+   * and it is strictly safer than the alternative of claiming a commit pass that
+   * a `git rebase` explosion may have rolled back.
+   */
   const finish = (
     card: RepoCard,
     state: SyncState,
     extra: Partial<RepoSyncResult> = {},
+    commitPathOk = false,
   ): RepoSyncResult => {
     const now = deps.now();
     const result: RepoSyncResult = {
@@ -928,6 +981,7 @@ export async function syncRepo(
       durationMs: now - startedAt,
       lastRunMs: null,
       lastSuccessMs: null,
+      lastLocalSectionMs: null,
       consecutiveDeferrals: 0,
       ...extra,
     };
@@ -939,9 +993,12 @@ export async function syncRepo(
     //    of 6 became 1) and cleared `lastError`, so a card polled during a slow
     //    tick went green and the escalation restarted from scratch.
     const observeOnly = dryRun || state === "running";
-    const led = observeOnly ? getSyncLedgerEntry(repo.name) : recordLedger(repo.name, result, now);
+    const led = observeOnly
+      ? getSyncLedgerEntry(repo.name)
+      : recordLedger(repo.name, result, now, commitPathOk);
     result.lastRunMs = led.lastRunMs;
     result.lastSuccessMs = led.lastSuccessMs;
+    result.lastLocalSectionMs = led.lastLocalSectionMs;
     result.consecutiveDeferrals = led.consecutiveDeferrals;
     result.tone = syncTone({ ...led, state, reason: result.reason }, now);
     result.label = describeSyncState(state, result.reason);
@@ -1026,18 +1083,53 @@ export async function syncRepo(
     };
     if (local.state) {
       const after = await readCard(repo, top);
-      return finish(after, local.state, {
-        ...carry,
-        reason: local.reason,
-        ...(local.conflicts ? { conflicts: local.conflicts } : {}),
-        ...(local.error ? { error: local.error } : {}),
-      });
+      // Every state the local section can END on, decided explicitly — this is
+      // the branch where "reached the commit path" and "the commit path worked"
+      // part company, and conflating them is what let a repo whose every commit
+      // failed hold the sweeper down forever:
+      //   - `deferred` — a HARD deferral: status, add/commit and the rebase gate
+      //     all ran and the loop chose to wait (behind, with rebase-blocking
+      //     dirt). The design working, per "Why deferral is not failure". A soft
+      //     hold (quiet period, deletion-hold) does not even land here — it sets
+      //     `holdReason`, pushes, and exits through the final return, which
+      //     stamps for the same reason. EVIDENCE. Residual: when the only dirt is
+      //     OUTSIDE the subtree, nothing is staged and `git commit` is never
+      //     invoked, so a repeating hard `deferred` stamps evidence without ever
+      //     proving the commit works — a broken signing key stays undetected in
+      //     that state until in-subtree dirt appears. Accepted.
+      //   - `blocked` — a rebase conflict, aborted. A human must clear it and
+      //     the tick's work never leaves the machine. NOT evidence: `blocked`
+      //     subsumes on its own explicit exception in `syncSubsumesSweeper`, so
+      //     withholding the stamp costs nothing there and buys the daily warn
+      //     that a wiki nobody is converging must keep getting.
+      //   - `error` / `transient` — `git add` or `git commit` refused, or the
+      //     rebase never started. Nothing was committed. NOT evidence.
+      const commitPathOk = local.state === "deferred";
+      return finish(
+        after,
+        local.state,
+        {
+          ...carry,
+          reason: local.reason,
+          ...(local.conflicts ? { conflicts: local.conflicts } : {}),
+          ...(local.error ? { error: local.error } : {}),
+        },
+        commitPathOk,
+      );
     }
 
     // 6. Push — OUTSIDE both locks, on the commit queue only (pushInner's
     //    dispatch posture). `plain` mode never pushes, by definition.
     let pushed = false;
     let pushState: SyncState | null = null;
+    // Evidence for `syncSubsumesSweeper`: the first local section got through
+    // (we are past step 5 with no failure state), so this tick stamps — UNLESS
+    // the push retry's SECOND local section failed. That section can refuse at
+    // `git add`/`git commit`/rebase exactly like the first one, and a failure
+    // there is the same "loop runs but never commits" shape (a broken signing
+    // key reached through the remote-moved door), so it must not count. A hard
+    // `deferred` from the retry stamps, for the same reason the first pass's does.
+    let commitPathOk = true;
     let pushReason: string | undefined;
     let pushError: string | undefined;
     /** HEAD moved in EITHER local section — see the retry merge below. */
@@ -1079,6 +1171,7 @@ export async function syncRepo(
         // tick: a page it committed belongs in the report, and — load-bearing —
         // a page it PULLED must invalidate the reader's 5-minute index cache,
         // which the first pass's `headMoved` alone cannot know about.
+        if (res.local?.state && res.local.state !== "deferred") commitPathOk = false;
         if (res.local) {
           carry.committed = [...carry.committed, ...res.local.committed];
           carry.rebased = carry.rebased || res.local.rebased;
@@ -1108,13 +1201,18 @@ export async function syncRepo(
     // A soft hold outranks `ok` but never a push outcome: "the remote moved" is
     // the more urgent thing to say, and the held file is still in `deferredFiles`.
     const finalState = pushState ?? (local.holdReason ? "deferred" : "ok");
-    return finish(finalCard, finalState, {
-      ...carry,
-      actions: local.actions,
-      pushed,
-      ...(pushReason ?? local.holdReason ? { reason: pushReason ?? local.holdReason } : {}),
-      ...(pushError ? { error: pushError } : {}),
-    });
+    return finish(
+      finalCard,
+      finalState,
+      {
+        ...carry,
+        actions: local.actions,
+        pushed,
+        ...(pushReason ?? local.holdReason ? { reason: pushReason ?? local.holdReason } : {}),
+        ...(pushError ? { error: pushError } : {}),
+      },
+      commitPathOk,
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log.warn("Sync: unexpected failure for {name}: {error}", { name: repo.name, error: message });
@@ -1228,8 +1326,71 @@ export const SYNC_SUBSUME_MAX_AGE_MS = 26 * 60 * 60 * 1000;
  * exactly the 2026-07-23 huginn-jarvis page-loss shape the sweeper exists to
  * prevent. So the ledger must also show a run inside {@link SYNC_SUBSUME_MAX_AGE_MS}.
  *
- * `configuredButIdle` distinguishes "this repo is not ours" (sweep normally, say
- * nothing) from "ours but the loop looks dead" (sweep AND warn).
+ * And "the loop ran" is not the same claim as "the loop could commit". A tick
+ * that returns at a FAILED FETCH — origin unreachable for days: offline, VPN
+ * down, an expired deploy key — commits nothing, yet it used to refresh
+ * `lastRunMs` and hold the sweeper down anyway. That is the same page-loss shape
+ * again, reached through "the loop runs but never commits", so the freshness
+ * clock is `lastLocalSectionMs`.
+ *
+ * That clock is stamped on a tick that reached the local section (status →
+ * commit → rebase) AND did not FAIL inside it. Reaching it is not enough: a
+ * broken signing key, a refusing pre-commit hook or a bad `user.email` produces
+ * a tick that gets all the way to `git commit`, dies there, and commits exactly
+ * as little as one that never left the fetch — the same shape one step later.
+ *
+ * The rule, exactly as implemented: an `error`, `transient` or `blocked` outcome
+ * from BEFORE or INSIDE the local section stamps no evidence — but one from
+ * AFTER it (a failed push, the no-upstream `blocked`) DOES stamp, because the
+ * local commit path genuinely worked and the sweeper could add nothing the loop
+ * did not already commit — with one exception on that side: the push RETRY runs
+ * a second local section, and a failure INSIDE that one stamps nothing either. A hard `deferred` stamps too (the commit path ran; the
+ * loop chose to wait), including the case where nothing was staged because only
+ * out-of-subtree dirt was dirty.
+ *
+ * Two residuals, accepted:
+ *
+ *  a) a loop whose PUSH has failed for days keeps subsuming and the daily warn
+ *     stays silent. Diagnosable, not silent overall: the `/models` Repo sync card
+ *     is red and its "last commit pass" is fresh — which says the problem is the
+ *     push, not the commit, and the local commits are safe on disk meanwhile.
+ *  b) a repeating hard `deferred` with nothing in-subtree dirty stamps evidence
+ *     without ever invoking `git commit`, so a broken signing key stays
+ *     undetected in that state until in-subtree dirt appears — at which point the
+ *     commit runs, fails, and the stamp stops.
+ *
+ * So EVIDENCE is the only thing that subsumes, with exactly one exception:
+ *
+ *  - fresh `lastLocalSectionMs` — the loop demonstrably got through its commit
+ *    path inside the window; sweeping on top of it would fight it.
+ *  - `state === "blocked"` — subsumes REGARDLESS of freshness, because the
+ *    sweeper is not a safe substitute there at all: `blocked` is the
+ *    unmerged-paths / interrupted-operation refusal and the sweeper has no
+ *    pre-flight of its own (`listWikiSubtreeDirty` treats a `UU` entry as
+ *    ordinary dirt), so it would stage and commit a human's half-finished merge.
+ *    A one-tick sample is sound here only because the conditions that produce
+ *    `blocked` (a leftover MERGE_HEAD, a stale index.lock, conflict markers)
+ *    persist across ticks until a human clears them.
+ *
+ * Everything else — `error`, `transient`, `paused`, no-upstream, not-a-repo, a
+ * cold ledger, and a rebase conflict that never converges — falls through to the
+ * sweeper once the evidence goes stale (a rebase-conflict `blocked` still
+ * subsumes on the exception above, but it stamps no evidence, so it keeps
+ * warning). No STATE subsumes on its own here, but a state reached after the
+ * local section carries a fresh stamp with it — residual (a) above.
+ * It used to be `fresh(lastRunMs) && state !== "error"`, which meant
+ * ANY tick that stopped before the local section in a non-error state (a young
+ * index.lock, a feature-branch checkout, a missing upstream) renewed it every 15
+ * minutes forever — and, for a tick failing inside the local section, so did
+ * `fresh(lastLocalSectionMs)` before the stamp was narrowed to a commit path
+ * that WORKED. `state` is a one-tick SAMPLE, not a claim about the window.
+ * `paused` falling through is harmless: the sweeper applies the same
+ * off-default-branch rule to itself (`onDefaultBranch(top)` guard,
+ * `src/watchers/wiki-committer.ts:154`) and no-ops.
+ *
+ * `configuredButIdle` is DECOUPLED from `subsumed`: it is simply "no commit pass
+ * inside the window", so a repo that subsumes on `blocked` for a week still
+ * warns once a day. Only "this repo is not ours" is silent.
  */
 export async function syncSubsumesSweeper(
   top: string,
@@ -1239,8 +1400,11 @@ export async function syncSubsumesSweeper(
   if (!covering) return { subsumed: false, configuredButIdle: false };
   const now = opts.now ?? Date.now();
   const led = getSyncLedgerEntry(covering.name);
-  const fresh = led.lastRunMs !== null && now - led.lastRunMs <= SYNC_SUBSUME_MAX_AGE_MS;
-  return { subsumed: fresh, configuredButIdle: !fresh, name: covering.name };
+  const fresh = (at: number | null) => at !== null && now - at <= SYNC_SUBSUME_MAX_AGE_MS;
+  const committedRecently = fresh(led.lastLocalSectionMs);
+  const subsumed = committedRecently || led.state === "blocked";
+  // Not `!subsumed`: a blocked loop stands the sweeper down AND is idle.
+  return { subsumed, configuredButIdle: !committedRecently, name: covering.name };
 }
 
 /** Sync every configured repo, sequentially (they contend on disk and on the

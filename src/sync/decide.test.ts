@@ -390,6 +390,7 @@ describe("card state", () => {
     consecutiveDeferrals: 0,
     lastSuccessMs: NOW - 60_000,
     lastRunMs: NOW,
+    lastLocalSectionMs: NOW,
     ...over,
   });
 

@@ -1464,7 +1464,8 @@ losing them (the 2026-07-23 huginn-jarvis incident).
 
 - **Subsumed by the repo-sync loop — but only on EVIDENCE it runs.** On a machine
   running `SYNC_REPOS` (`src/sync/`), this sweeper stands down for every repo a
-  `wiki`-mode entry covers AND whose sync ledger shows a run within
+  `wiki`-mode entry covers AND whose sync ledger shows a tick that got THROUGH
+  its LOCAL (commit) section without failing in it, within
   `SYNC_SUBSUME_MAX_AGE_MS` (~26h, just over this sweeper's own daily cadence) —
   `syncSubsumesSweeper` in `src/sync/run.ts`, compared on git TOPLEVELS so
   huginn-jarvis's nested wiki root matches its repo. Standing down is not merely
@@ -1477,8 +1478,40 @@ losing them (the 2026-07-23 huginn-jarvis incident).
   `SYNC_REPOS` used to stand the sweeper down forever, so a machine whose launchd
   tick was never installed (or whose plist silently failed to load) had nobody
   committing the wiki at all — the 2026-07-23 page-loss shape reached through the
-  fix for it. A covered-but-idle repo therefore gets swept AND a `log.warn` naming
-  the idle loop. With `SYNC_REPOS` unset the sweeper behaves exactly as before.
+  fix for it. **Nor is a tick that RAN evidence:** a tick whose fetch fails
+  (unreachable origin) commits nothing and used to refresh the freshness clock
+  anyway, holding the sweeper down for as long as the machine stayed offline —
+  hence the local-section clock above. **Nor is a tick that merely REACHED the
+  commit path:** one that dies inside it every 15 minutes (a signing key that
+  expired over a reboot, a refusing pre-commit hook, a bad `user.email`) commits
+  just as little. **The rule exactly as implemented:** an `error`, `transient` or
+  `blocked` outcome from BEFORE or INSIDE the local section stamps no evidence —
+  but one from AFTER it (a failed push, the no-upstream `blocked`) DOES stamp,
+  because the local commit path genuinely worked and this sweeper could add
+  nothing the loop did not already commit (except a failure INSIDE the push retry's
+  second local section, which stamps nothing either); a hard `deferred` stamps for
+  the same reason. Two residuals, accepted: (a) a loop whose PUSH has failed for days keeps
+  subsuming and this daily warn stays silent — the `/models` Repo sync card is red
+  with a FRESH "last commit pass", which says the diagnosis is the push, not the
+  commit; (b) a repeating hard `deferred` with nothing in-subtree dirty stamps
+  evidence without ever invoking `git commit`, so a broken signing key is
+  undetected in that state until in-subtree dirt appears.
+  **One state subsumes without evidence:**
+  `blocked`, because the sweeper has no unmerged-paths pre-flight of its own
+  (`listWikiSubtreeDirty` treats a `UU` entry as ordinary dirt) and would commit a
+  human's half-finished merge; the conditions producing `blocked` persist across
+  ticks until a human clears them, so a one-tick sample is sound there. Everything
+  else — `error`, `transient`, `paused`, no-upstream, a cold ledger — falls through
+  once evidence is stale; `paused` harmlessly, since this sweeper no-ops off the
+  default branch itself (the `onDefaultBranch` guard below). **The warn is decoupled
+  from the stand-down**: `configuredButIdle` is simply "no commit pass in ~26h", so a
+  loop that has committed nothing gets a `log.warn` naming the four causes worth
+  checking — the 15-min tick not firing, origin unreachable / the loop pre-flight
+  blocked, `git commit` itself failing (signing key, pre-commit hook, `user.email`),
+  or a muninn restart inside the last 15 min (the sync ledger is in-memory) — even in
+  the `blocked` case where it still stands down. It points at the `/models` Repo sync
+  card's "last commit pass" field, which is the clock the warn is reading. With `SYNC_REPOS` unset
+  the sweeper behaves exactly as before.
 - Per tick, for the bot's `wikiDir`: resolve the git toplevel (reusing the
   exported `gitToplevel`/`onDefaultBranch` from `commit.ts`, not reimplemented);
   **not-a-repo / off-default-branch ⇒ no-op** (a feature checkout is left for a

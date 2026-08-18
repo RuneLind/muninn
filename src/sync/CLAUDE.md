@@ -146,8 +146,65 @@ Two things the deferral REPORT must not conflate, both fixed after they shipped:
 - **Sweeper subsumption requires EVIDENCE, not configuration.** `SYNC_REPOS` being
   parseable used to stand the daily `wiki-committer` down forever — including on a
   machine whose launchd job was never installed, which is the 2026-07-23 page-loss
-  shape. `syncSubsumesSweeper` also requires a ledger run inside
+  shape. `syncSubsumesSweeper` also requires evidence inside
   `SYNC_SUBSUME_MAX_AGE_MS` (~26h); short of that the sweeper runs AND warns.
+- **The evidence is `lastLocalSectionMs`, not `lastRunMs` — "the loop ran" and "the
+  loop could commit" are different claims.** `recordLedger` stamps `lastRunMs` on
+  EVERY tick, and a tick that returns at a FAILED FETCH (origin unreachable for days:
+  offline, VPN down, an expired deploy key) commits nothing yet used to refresh that
+  clock — the same page-loss shape again, reached through "the loop runs but never
+  commits". So the clock is stamped only once a tick reaches step 5, the local section,
+  **AND comes out of it without failing there** — reaching it is not enough. A tick
+  that gets all the way to `git commit` and dies inside it every 15 minutes (a signing
+  key that expired over a reboot, a pre-commit hook that started refusing, a bad
+  `user.email` — reproduced with `commit.gpgsign=true` + `gpg.program=/bin/false`)
+  commits exactly as little as one that never left the fetch, and stamping it renewed
+  the stand-down forever: the same shape one step later. **The rule, exactly as
+  implemented: an `error`, `transient` or `blocked` outcome from BEFORE or INSIDE the
+  local section stamps no evidence — but one from AFTER it (a failed push, the
+  no-upstream `blocked`) DOES stamp, because the local commit path genuinely worked
+  and the sweeper could add nothing the loop did not already commit — except that the
+  push RETRY runs a second local section, and a failure INSIDE that one (`git commit`
+  refused after a re-rebase) stamps nothing either.** A hard
+  `deferred` stamps (the commit path ran, the loop chose to wait), and so does a soft
+  hold, which never reaches that branch at all — it sets `holdReason`, pushes, and
+  exits through the final return, which passes `commitPathOk: true` unconditionally. A
+  rebase-conflict `blocked` does NOT: it fails INSIDE the section, needs a human and
+  its work never leaves the machine, and it subsumes on the explicit exception below
+  anyway, so withholding the stamp costs nothing and keeps the daily warn. `finish`'s
+  `commitPathOk` flag defaults to FALSE so a new early return can only ever under-claim
+  coverage.
+  **Two residuals, accepted.** (a) A loop whose PUSH has failed for days keeps
+  subsuming and the daily warn stays silent — diagnosable rather than silent overall,
+  because the `/models` Repo sync card is red while its "last commit pass" is fresh,
+  which says the diagnosis is the push and not the commit, and the commits themselves
+  are safe on disk. (b) A repeating hard `deferred` with nothing IN-SUBTREE dirty
+  stamps evidence without ever invoking `git commit`, so a broken signing key is
+  undetected in that state until in-subtree dirt appears — at which point the commit
+  runs, fails inside the section, and the stamping stops.
+  **Evidence is the ONLY thing that subsumes, with one exception.** `subsumed =
+  fresh(lastLocalSectionMs) || state === "blocked"`. `blocked` subsumes regardless of
+  freshness because the sweeper is not a safe substitute there at all: it is the
+  unmerged-paths / interrupted-operation refusal and the sweeper has NO pre-flight of
+  its own (`listWikiSubtreeDirty` treats a `UU` entry as ordinary dirt), so routing a
+  blocked tick to it would stage and commit a human's half-finished merge — and the
+  conditions that produce `blocked` (a leftover `MERGE_HEAD`, a stale `index.lock`,
+  conflict markers) persist across ticks until a human clears them, which is what
+  makes a one-tick sample sound there and nowhere else. Every OTHER state — `error`,
+  `transient`, `paused`, no-upstream, not-a-repo, a cold ledger, and a rebase conflict
+  that never converges — falls through once the evidence is stale; `paused` harmlessly, since the sweeper applies the same
+  off-default-branch rule to itself and no-ops (`onDefaultBranch` guard,
+  `src/watchers/wiki-committer.ts`). The rejected spelling was `fresh(lastRunMs) &&
+  state !== "error"`: `lastRunMs` is re-stamped every 15 minutes, so ANY tick stopping
+  before the local section in a non-error state renewed the stand-down forever — and a
+  single `transient` tick (a young `index.lock`) re-armed 26h of silence in the middle
+  of an offline week.
+  **The warn is DECOUPLED from the stand-down:** `configuredButIdle =
+  !fresh(lastLocalSectionMs)`, so a loop that has not committed in ~26h always warns,
+  including while `blocked` subsumes — the one thing that must never happen is a
+  silent stand-down over a wiki nothing is committing. Residual, accepted: a healthy
+  pass still buys ~26h of grace, so at most ONE daily sweep is skipped after the remote
+  goes away; and `blocked` subsumes for as long as it lasts, but never silently.
 - **A `plain`/`status-only` repo containing a registered wiki takes that wiki's
   write lock.** Its rebase rewrites the wiki's working tree, and the wiki-mode
   config error actively steers people into this shape ("… or use mode plain"). The
