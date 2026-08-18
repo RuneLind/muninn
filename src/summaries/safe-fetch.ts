@@ -15,6 +15,12 @@
  * `null` and log ONCE; this function never throws, so callers degrade exactly as
  * they already do when a fetch fails.
  *
+ * The size cap TRUNCATES, it does not refuse: it bounds the PROCESS, never the
+ * prompt — `capContent` still trims what comes back. A 3 MB Wikipedia article is a
+ * legitimate capture that used to be fetched whole and then trimmed to 100k chars;
+ * turning it into "no enrichment at all" would be a regression dressed as a guard.
+ * The only thing the cap has to prevent is muninn buffering the whole body.
+ *
  * ACCEPTED, deliberately: the check-then-fetch TOCTOU. We resolve the hostname,
  * judge the addresses, then fetch BY HOSTNAME — a resolver that answers differently
  * the second time (DNS rebinding) slips through. Pinning the connection to the
@@ -33,9 +39,17 @@ const log = getLog("summaries", "safe-fetch");
 
 /** Bounds the PROCESS (the prompt cap `capContent` is a separate, smaller clamp). */
 export const SAFE_FETCH_MAX_BYTES = 2 * 1024 * 1024;
-/** Covers the whole operation — every hop plus the body read, not just the headers. */
+/** Covers the whole operation — DNS, every hop, and the body read. */
 export const SAFE_FETCH_TIMEOUT_MS = 20_000;
-export const SAFE_FETCH_MAX_REDIRECTS = 3;
+/**
+ * Headroom over the chains the vertical's OWN `directFetchUrl` rewrite walks.
+ * Measured 2026-08-18 on `docs.anthropic.com/**.md`: the ordinary page is 2 hops
+ * (301 to platform.claude.com → 307 path rewrite → 200), but a page that has moved
+ * off the docs site is 4 — `…/agents-and-tools/mcp.md` lands on
+ * modelcontextprotocol.io, and at a cap of 3 it was refused where 4 and 5 return
+ * 274 836 chars. So 3 was not headroom, it was already cutting real doc URLs.
+ */
+export const SAFE_FETCH_MAX_REDIRECTS = 5;
 
 /** Resolve a hostname to its addresses. Test seam — production uses `node:dns`. */
 export type HostLookup = (hostname: string) => Promise<string[]>;
@@ -43,10 +57,16 @@ export type HostLookup = (hostname: string) => Promise<string[]>;
 export interface SafeFetchOptions {
   /** Whole-operation timeout (default {@link SAFE_FETCH_TIMEOUT_MS}). */
   timeoutMs?: number;
-  /** Body cap in bytes (default {@link SAFE_FETCH_MAX_BYTES}). */
+  /** Body cap in bytes (default {@link SAFE_FETCH_MAX_BYTES}). Over it ⇒ truncated. */
   maxBytes?: number;
   /** Redirect hops to follow (default {@link SAFE_FETCH_MAX_REDIRECTS}). */
   maxRedirects?: number;
+  /**
+   * Which call site this is (`"enrichment"`, `"direct"`, …). Logged with every
+   * refusal — both call sites follow third-party URLs and a bare "Refused fetch of
+   * …" line does not say which capture path just degraded.
+   */
+  caller?: string;
   /** Test seam: stubbed DNS. */
   lookup?: HostLookup;
   /**
@@ -126,35 +146,90 @@ function parseIpv6(addr: string): number[] | null {
 /**
  * Non-public IPv4 space. Loopback/private/link-local/CGNAT are the reachable-and-
  * interesting ones on this host (the tailnet lives in 100.64/10); 0/8 and
- * everything from 224 up (multicast, reserved, broadcast) are never a public
- * article and are refused for free.
+ * everything from 224 up (multicast, 240/4 reserved, broadcast) are never a public
+ * article and are refused for free. The documentation and benchmarking ranges are
+ * in here for the same reason — nothing legitimate is served from them, and
+ * 192.88.99/24 (the 6to4 relay anycast) is a router, not a web page.
  */
 function isBlockedIpv4(b: number[]): boolean {
-  const [a, c] = [b[0]!, b[1]!];
+  const [a, second, third] = [b[0]!, b[1]!, b[2]!];
   if (a === 0) return true; // 0.0.0.0/8 "this network"
   if (a === 10) return true; // 10/8 private
   if (a === 127) return true; // 127/8 loopback
-  if (a === 169 && c === 254) return true; // 169.254/16 link-local (cloud metadata)
-  if (a === 172 && (c & 0xf0) === 16) return true; // 172.16/12 private
-  if (a === 192 && c === 168) return true; // 192.168/16 private
-  if (a === 100 && c >= 64 && c <= 127) return true; // 100.64/10 CGNAT — the tailnet
-  if (a >= 224) return true; // multicast + reserved + broadcast
+  if (a === 169 && second === 254) return true; // 169.254/16 link-local (cloud metadata)
+  if (a === 172 && (second & 0xf0) === 16) return true; // 172.16/12 private
+  if (a === 192 && second === 168) return true; // 192.168/16 private
+  if (a === 100 && second >= 64 && second <= 127) return true; // 100.64/10 CGNAT — the tailnet
+  if (a === 192 && second === 0 && third === 0) return true; // 192.0.0/24 IETF protocol assignments
+  if (a === 192 && second === 0 && third === 2) return true; // 192.0.2/24 TEST-NET-1
+  if (a === 192 && second === 88 && third === 99) return true; // 192.88.99/24 6to4 relay anycast
+  if (a === 198 && (second & 0xfe) === 18) return true; // 198.18/15 benchmarking
+  if (a === 198 && second === 51 && third === 100) return true; // 198.51.100/24 TEST-NET-2
+  if (a === 203 && second === 0 && third === 113) return true; // 203.0.113/24 TEST-NET-3
+  if (a >= 224) return true; // multicast + 240/4 reserved + broadcast
   return false;
 }
 
+/**
+ * Where RFC 6052 puts the embedded IPv4 for each translation-prefix length. The
+ * `u` octet (byte 8) is reserved and skipped, which is why these are not four
+ * consecutive indices below /96.
+ */
+const RFC6052_V4_SLOTS: number[][] = [
+  [6, 7, 9, 10], // /48
+  [7, 9, 10, 11], // /56
+  [9, 10, 11, 12], // /64
+  [12, 13, 14, 15], // /96
+];
+
+function ipv4At(b: number[], slot: number[]): number[] {
+  return slot.map((i) => b[i]!);
+}
+
+/**
+ * Non-public IPv6 space, INCLUDING every form that carries an IPv4 address inside a
+ * v6 literal. That second half is the one that bites: `64:ff9b::7f00:1`,
+ * `2002:7f00:1::` and `::ffff:0:7f00:1` are all "IPv6 addresses" no v6 range test
+ * flags, and all three reach 127.0.0.1 through a translator. Unwrap them and judge
+ * the embedded v4 with the v4 rules — blanket-refusing the wrapper prefixes instead
+ * would refuse the legitimate public destinations reached through them.
+ */
 function isBlockedIpv6(b: number[]): boolean {
   const allZeroThrough = (n: number) => b.slice(0, n).every((x) => x === 0);
   if (allZeroThrough(15) && b[15] === 1) return true; // ::1 loopback
   if (b.every((x) => x === 0)) return true; // :: unspecified
-  // IPv4-mapped (::ffff:a.b.c.d) and IPv4-compatible (::a.b.c.d) both reach the v4
-  // internet through a v6 literal — judge the embedded address, not the wrapper.
+
+  // ── v4-in-v6 wrappers: judge what is INSIDE ──
   if (allZeroThrough(10) && b[10] === 0xff && b[11] === 0xff) {
-    return isBlockedIpv4(b.slice(12));
+    return isBlockedIpv4(b.slice(12)); // ::ffff:a.b.c.d — IPv4-mapped
   }
-  if (allZeroThrough(12)) return isBlockedIpv4(b.slice(12));
+  if (allZeroThrough(8) && b[8] === 0xff && b[9] === 0xff && b[10] === 0 && b[11] === 0) {
+    return isBlockedIpv4(b.slice(12)); // ::ffff:0:a.b.c.d — IPv4-translated (RFC 2765)
+  }
+  if (allZeroThrough(12)) return isBlockedIpv4(b.slice(12)); // ::a.b.c.d — IPv4-compatible
+  if (b[0] === 0x00 && b[1] === 0x64 && b[2] === 0xff && b[3] === 0x9b) {
+    if (b[4] === 0x00 && b[5] === 0x01) {
+      // 64:ff9b:1::/48 — RFC 8215 local-use NAT64. The operator picks the embedding
+      // length, so judge EVERY slot the prefix leaves room for and refuse if any of
+      // them reads as a blocked v4; guessing one slot is how a bypass gets in.
+      return RFC6052_V4_SLOTS.some((slot) => isBlockedIpv4(ipv4At(b, slot)));
+    }
+    return isBlockedIpv4(b.slice(12)); // 64:ff9b::/96 — the well-known NAT64 prefix
+  }
+  if (b[0] === 0x20 && b[1] === 0x02) return isBlockedIpv4(b.slice(2, 6)); // 2002::/16 — 6to4
+
+  // ── ranges that are non-public whatever they contain ──
   if ((b[0]! & 0xfe) === 0xfc) return true; // fc00::/7 unique-local
   if (b[0] === 0xfe && (b[1]! & 0xc0) === 0x80) return true; // fe80::/10 link-local
+  if (b[0] === 0xfe && (b[1]! & 0xc0) === 0xc0) return true; // fec0::/10 site-local (deprecated)
   if (b[0] === 0xff) return true; // ff00::/8 multicast
+  if (b[0] === 0x01 && b[1] === 0x00 && b.slice(2, 8).every((x) => x === 0)) {
+    return true; // 100::/64 discard-only
+  }
+  if (b[0] === 0x20 && b[1] === 0x01 && b[2] === 0x00 && b[3] === 0x00) return true; // 2001::/32 Teredo
+  if (b[0] === 0x20 && b[1] === 0x01 && b[2] === 0x00 && (b[3]! & 0xf0) === 0x20) {
+    return true; // 2001:20::/28 ORCHIDv2
+  }
   return false;
 }
 
@@ -182,9 +257,36 @@ function bareHost(hostname: string): string {
 const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
 
 /**
+ * A promise that rejects when `signal` aborts, plus the cleanup that removes the
+ * listener when it does not. Exists so the DNS phase is inside the timeout: `fetch`
+ * takes the signal, `lookup` cannot, and a resolver that hangs for 3 s under a
+ * 300 ms budget made the header's "covers the whole operation" a lie.
+ */
+function rejectOnAbort(signal: AbortSignal): { promise: Promise<never>; dispose: () => void } {
+  let dispose = () => {};
+  const promise = new Promise<never>((_resolve, reject) => {
+    const onAbort = () => reject(new Error("aborted"));
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+    dispose = () => signal.removeEventListener("abort", onAbort);
+  });
+  // The lookup usually wins the race, leaving this promise to reject with nobody
+  // awaiting it — swallow that rather than tripping an unhandled rejection.
+  promise.catch(() => {});
+  return { promise, dispose };
+}
+
+/**
  * Fetch `rawUrl` and return its body as text, or `null` if anything about it is
  * refused or fails. Never throws; every refusal logs exactly one warning naming
- * the reason and the URL, so a blocked capture is distinguishable from a dead link.
+ * the reason, the CURRENT hop and the caller, so a blocked capture is
+ * distinguishable from a dead link and from a timeout.
+ *
+ * A body over `maxBytes` comes back TRUNCATED to the cap (logged at info), not
+ * refused — see the header.
  */
 export async function safeFetchText(
   rawUrl: string,
@@ -192,18 +294,27 @@ export async function safeFetchText(
 ): Promise<string | null> {
   const maxBytes = options.maxBytes ?? SAFE_FETCH_MAX_BYTES;
   const maxRedirects = options.maxRedirects ?? SAFE_FETCH_MAX_REDIRECTS;
+  const timeoutMs = options.timeoutMs ?? SAFE_FETCH_TIMEOUT_MS;
   const lookup = options.lookup ?? defaultLookup;
   const doFetch = options.fetchImpl ?? fetch;
+  const caller = options.caller ?? "unspecified";
 
   const refuse = (reason: string, url: string, detail?: Record<string, unknown>): null => {
-    log.warn("Refused fetch of {url}: {reason}", { url, reason, ...detail });
+    log.warn("Refused fetch of {url} for {caller}: {reason}", { url, caller, reason, ...detail });
     return null;
   };
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? SAFE_FETCH_TIMEOUT_MS);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  // Declared outside the try so the catch-all can name the hop that actually failed
+  // rather than the URL we started from — after two redirects they are different
+  // hosts, and "fetch failed: <original>" sends the operator to the wrong one.
+  let current = rawUrl;
   try {
-    let current = rawUrl;
     for (let hop = 0; hop <= maxRedirects; hop++) {
       let url: URL;
       try {
@@ -222,12 +333,18 @@ export async function safeFetchText(
       if (isIP(host)) {
         addresses = [host];
       } else {
+        const abortRace = rejectOnAbort(controller.signal);
         try {
-          addresses = await lookup(host);
+          addresses = await Promise.race([lookup(host), abortRace.promise]);
         } catch (err) {
+          // A timeout during DNS is a timeout, not an NXDOMAIN — rethrow so the
+          // catch-all reports it as one.
+          if (timedOut) throw err;
           return refuse("host does not resolve", current, {
             error: err instanceof Error ? err.message : String(err),
           });
+        } finally {
+          abortRace.dispose();
         }
         if (addresses.length === 0) return refuse("host resolves to no address", current);
       }
@@ -266,6 +383,11 @@ export async function safeFetchText(
         return refuse(`refused content-type ${contentType ?? "(none)"}`, current);
       }
 
+      // Cheap early-out only. `content-length` is the WIRE length, and real hosts
+      // serve gzip, so it is compared against a cap that measures the DECOMPRESSED
+      // body — on a compressed response it under-reports and this practically never
+      // fires. The streaming cap below is the one that actually bounds the process;
+      // this just avoids opening a body that admits, uncompressed, to being oversized.
       const declared = Number(res.headers.get("content-length"));
       if (Number.isFinite(declared) && declared > maxBytes) {
         await res.body?.cancel().catch(() => {});
@@ -273,26 +395,41 @@ export async function safeFetchText(
       }
 
       // Stream with a hard cap — `await res.text()` on a 50 MB body would buffer all
-      // 50 MB before `capContent` ever sees it.
+      // 50 MB before `capContent` ever sees it. Over the cap we keep what we have and
+      // stop pulling: a truncated article still summarizes, a refused one does not.
       const body = res.body;
       if (!body) return "";
       const reader = body.getReader();
       const chunks: Uint8Array[] = [];
       let total = 0;
+      let truncated = false;
       try {
         for (;;) {
           const { done, value } = await reader.read();
           if (done) break;
           if (!value) continue;
-          total += value.byteLength;
-          if (total > maxBytes) {
+          // `>` not `>=`: a body that ends exactly ON the cap is complete, not
+          // truncated, and must not be logged (or reported) as cut short.
+          const room = maxBytes - total;
+          if (value.byteLength > room) {
+            chunks.push(value.subarray(0, room));
+            total += room;
+            truncated = true;
             await reader.cancel().catch(() => {});
-            return refuse(`body too large (over ${maxBytes} bytes)`, current);
+            break;
           }
           chunks.push(value);
+          total += value.byteLength;
         }
       } finally {
         reader.releaseLock?.();
+      }
+      if (truncated) {
+        log.info("Truncated {url} for {caller} at the {maxBytes}-byte cap", {
+          url: current,
+          caller,
+          maxBytes,
+        });
       }
       const buf = new Uint8Array(total);
       let offset = 0;
@@ -300,11 +437,13 @@ export async function safeFetchText(
         buf.set(c, offset);
         offset += c.byteLength;
       }
+      // Non-fatal decode: cutting at a byte boundary can split a multi-byte
+      // codepoint, and one U+FFFD at the tail is not worth losing the article over.
       return new TextDecoder("utf-8").decode(buf);
     }
-    return refuse(`more than ${maxRedirects} redirect hops`, rawUrl);
+    return refuse(`more than ${maxRedirects} redirect hops`, current);
   } catch (err) {
-    return refuse("fetch failed", rawUrl, {
+    return refuse(timedOut ? `timed out after ${timeoutMs}ms` : "fetch failed", current, {
       error: err instanceof Error ? err.message : String(err),
     });
   } finally {

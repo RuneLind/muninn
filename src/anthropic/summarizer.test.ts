@@ -151,7 +151,7 @@ function installFetchMock() {
  * so the loopback-refusal test below still exercises the real refusal.
  */
 mock.module("node:dns/promises", () => ({
-  lookup: async () => [{ address: "203.0.113.10", family: 4 }],
+  lookup: async () => [{ address: "93.184.216.34", family: 4 }],
 }));
 
 const { summarizeCandidate } = await import("./summarizer.ts");

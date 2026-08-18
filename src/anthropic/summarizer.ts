@@ -327,7 +327,7 @@ async function resolveContent(
  */
 async function directFetchContent(url: string): Promise<ResolvedContent | null> {
   const fetchUrl = directFetchUrl(url);
-  const text = await safeFetchText(fetchUrl);
+  const text = await safeFetchText(fetchUrl, { caller: "direct" });
   if (!text?.trim()) return null;
   log.info("Resolved {url} via direct fetch ({len} chars)", { url: fetchUrl, len: text.length });
   return { text: capContent(text) };
@@ -395,7 +395,7 @@ async function fetchEnrichmentContent(
   // article: GUARDED direct fetch (mirrors the anthropic direct-fetch fallback).
   // `picked.url` came out of the captured tweet's `**Links:**` footer — a third party
   // picked it — so it goes through the address/redirect/content-type/size guard.
-  const text = await safeFetchText(picked.url);
+  const text = await safeFetchText(picked.url, { caller: "enrichment" });
   return text?.trim() ? text : null;
 }
 
