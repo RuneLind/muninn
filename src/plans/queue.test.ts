@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { parseQueueYaml, serializeQueue, QUEUE_COLUMNS, type QueueOrder } from "./queue.ts";
+import path from "node:path";
+import {
+  mergeQueueOrder,
+  parseQueueYaml,
+  serializeQueue,
+  QUEUE_COLUMNS,
+  type QueueOrder,
+} from "./queue.ts";
 
 const KNOWN = new Set(["a-plan", "b-plan", "c-plan"]);
 
@@ -176,5 +183,64 @@ describe("serializeQueue", () => {
       order[col] = [`plan-${i}`];
     });
     expect(parseQueueYaml(serializeQueue(order)).order).toEqual(order);
+  });
+});
+
+describe("mergeQueueOrder", () => {
+  const disk: QueueOrder = { proposed: ["a-plan"], ready: ["b-plan"], blocked: ["c-plan"] };
+
+  test("a posted column replaces it; every absent one is preserved", () => {
+    expect(mergeQueueOrder(disk, { ready: ["b-plan"] }, ["ready"])).toEqual(disk);
+    expect(mergeQueueOrder(disk, { ready: [] }, ["ready"])).toEqual({
+      proposed: ["a-plan"],
+      blocked: ["c-plan"],
+    });
+  });
+
+  test("a slug the posted set claims is dropped from every preserved column", () => {
+    const merged = mergeQueueOrder(disk, { ready: ["b-plan", "a-plan"] }, ["ready"]);
+    expect(merged).toEqual({ ready: ["b-plan", "a-plan"], blocked: ["c-plan"] });
+    expect(merged.proposed).toBeUndefined();
+    // …and the result is a file that round-trips to itself, which a twice-ranked
+    // slug would not (`parseQueueYaml` drops the later copy).
+    expect(parseQueueYaml(serializeQueue(merged)).order).toEqual(merged);
+  });
+
+  test("a posted EMPTY array un-ranks exactly that column", () => {
+    expect(mergeQueueOrder(disk, {}, ["ready"])).toEqual({
+      proposed: ["a-plan"],
+      blocked: ["c-plan"],
+    });
+  });
+
+  test("posting every ranked column empty merges to nothing (⇒ the file is deleted)", () => {
+    const merged = mergeQueueOrder(disk, {}, ["proposed", "ready", "blocked"]);
+    expect(merged).toEqual({});
+    expect(serializeQueue(merged)).toBe("");
+  });
+
+  test("an empty disk is just the posted order, in QUEUE_COLUMNS order", () => {
+    const merged = mergeQueueOrder({}, { blocked: ["c-plan"], proposed: ["a-plan"] }, [
+      "blocked",
+      "proposed",
+    ]);
+    expect(Object.keys(merged)).toEqual(["proposed", "blocked"]);
+  });
+});
+
+describe("the queue fixture mirrors mimir's own", () => {
+  // muninn's copy is what makes the byte-shape assertions hermetic; mimir's is
+  // what its strict parser is pinned against. A drift between them is a green
+  // suite on both sides and a file neither writes the same way.
+  const MIMIR_FIXTURE =
+    "/Users/rune/source/private/mimir/scripts/plan-status/fixtures/queue.canonical.yaml";
+
+  test("byte-identical to the checked-in copy, when mimir is on this host", async () => {
+    const upstream = Bun.file(MIMIR_FIXTURE);
+    if (!(await upstream.exists())) return; // not this machine — nothing to compare
+    const ours = await Bun.file(
+      path.join(import.meta.dir, "fixtures", "queue.canonical.yaml"),
+    ).text();
+    expect(await upstream.text()).toBe(ours);
   });
 });

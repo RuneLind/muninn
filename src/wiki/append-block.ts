@@ -85,13 +85,17 @@ export function spliceSentinelBlock(content: string, block: string): string {
  * stale→409, error→400/500). Never throws for a recoverable condition.
  */
 export async function appendBlockToPage(opts: AppendBlockOptions): Promise<AppendOutcome> {
-  const { block, ...rest } = opts;
+  const { block, commit, ...rest } = opts;
   const result = await writeWikiPage({
     ...rest,
+    // Committer and subject travel together (`PageWriteCommitOptions`): this
+    // path owns the subject, the caller owns whether there is a committer.
+    ...(commit
+      ? { commit, commitMessage: `[fact-check] annotate: ${opts.relPath}` }
+      : { commit: undefined, commitMessage: undefined }),
     transform: (current) => withTrailingNewline(spliceSentinelBlock(current, block)),
     logKind: "factcheck",
     logLine: "fact-check block added via the wiki reader",
-    commitMessage: `[fact-check] annotate: ${opts.relPath}`,
   });
   // The append transform always returns content, so `noop` is unreachable here —
   // map it defensively rather than widening this path's outcome vocabulary.

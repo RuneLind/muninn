@@ -265,7 +265,6 @@ describe("MUNINN_WIKI_READONLY — write seams", () => {
       logKind: "factcheck",
       logTitle: "Page",
       logLine: "line",
-      commitMessage: "[fact-check] annotate: page.md",
       now: () => 0,
       readFile: async (p) => {
         touched.push(`read ${p}`);
@@ -333,7 +332,6 @@ describe("MUNINN_WIKI_READONLY — write seams", () => {
       logKind: "k",
       logTitle: "t",
       logLine: "l",
-      commitMessage: "m",
       now: () => 0,
       readFile: async () => "body\n",
       writeFile: async () => {

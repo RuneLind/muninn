@@ -59,6 +59,23 @@ export interface QueueParseResult {
    *  into one log line — a corpus-wide rename can invalidate many rows at once
    *  and one warn per row would bury the signal. */
   warnings: string[];
+  /**
+   * Set when the WHOLE document was rejected (a YAML syntax error, or a top
+   * level that is not a mapping) rather than an entry inside it — the two cases
+   * below that return an empty order without having read a single column.
+   *
+   * The distinction only matters to a WRITER. A reader is right to degrade "I
+   * cannot parse this" to "nothing is ranked": the board still renders, on
+   * priority-then-age. But a read-modify-write that merges over `{}` writes that
+   * degradation to disk, erasing every hand-written line — so `plans-routes.ts`
+   * refuses the write on this field rather than inferring it from the warning
+   * text. It is deliberately NOT set for per-entry drops, which the file's own
+   * grammar documents as read-time GC and which the write announces instead.
+   * Nor for a document that parses to `null` (`null\n`, `~\n`, comments-only):
+   * that is the hand-edited spelling of an empty file and holds no ranking a
+   * merge could erase, so it is merged over rather than refused.
+   */
+  unparseable?: string;
 }
 
 function isQueueColumn(key: string): key is QueueColumn {
@@ -83,7 +100,9 @@ export function isValidSlug(slug: string): boolean {
  * Anything off-grammar is DROPPED with a warning rather than throwing: this file
  * is hand-edited, and a typo in one column must not blank the board's ordering
  * wholesale. An empty/absent file is a legal state meaning "every column
- * unranked".
+ * unranked". A document that could not be read AT ALL degrades to the same empty
+ * order but also sets {@link QueueParseResult.unparseable}, because a writer
+ * must not merge over that degradation.
  *
  * @param knownSlugs When given, slugs naming no plan on disk are dropped — a
  *   plan can be renamed or retired out from under the queue, and a stale entry
@@ -104,16 +123,16 @@ export function parseQueueYaml(
   // duplicate is warned about instead.
   const parsed = parseDocument(text, { uniqueKeys: false });
   if (parsed.errors.length > 0) {
-    warnings.push(
-      `queue.yaml: unparseable YAML (${parsed.errors[0]!.message}) — every column treated as unranked`,
-    );
-    return { order, warnings };
+    const reason = `queue.yaml: unparseable YAML (${parsed.errors[0]!.message}) — every column treated as unranked`;
+    warnings.push(reason);
+    return { order, warnings, unparseable: reason };
   }
   const doc: unknown = parsed.toJS();
   if (doc == null) return { order, warnings };
   if (typeof doc !== "object" || Array.isArray(doc)) {
-    warnings.push("queue.yaml: top level is not a mapping — every column treated as unranked");
-    return { order, warnings };
+    const reason = "queue.yaml: top level is not a mapping — every column treated as unranked";
+    warnings.push(reason);
+    return { order, warnings, unparseable: reason };
   }
   if (isMap(parsed.contents)) {
     const seen = new Set<string>();
@@ -182,6 +201,40 @@ export function parseQueueYaml(
   }
 
   return { order, warnings };
+}
+
+/**
+ * Merge one POSTED ordering over the one on disk.
+ *
+ * A write carries the columns the reader touched, never the whole board: the
+ * `/plans` client ranks within one column at a time, and a wholesale replace
+ * silently un-ranks every column the request left out. So a posted column
+ * REPLACES that column, `postedColumns` (not the presence of a key in `posted` —
+ * rule 2 leaves an emptied column keyless) says which ones those are, and every
+ * other column is carried over from disk.
+ *
+ * The one thing a carried-over column loses is a slug the posted set has
+ * CLAIMED: the columns are mutually exclusive board states, `parseQueueYaml`
+ * drops the later copy of a twice-ranked slug, and a file that round-trips to a
+ * different file is exactly what rule 2 exists to prevent. The posted column
+ * wins, because it is the newer intent.
+ */
+export function mergeQueueOrder(
+  disk: QueueOrder,
+  posted: QueueOrder,
+  postedColumns: readonly QueueColumn[],
+): QueueOrder {
+  const claimed = new Set<string>();
+  for (const col of postedColumns) for (const slug of posted[col] ?? []) claimed.add(slug);
+
+  const merged: QueueOrder = {};
+  for (const col of QUEUE_COLUMNS) {
+    const slugs = postedColumns.includes(col)
+      ? [...(posted[col] ?? [])]
+      : (disk[col] ?? []).filter((slug) => !claimed.has(slug));
+    if (slugs.length > 0) merged[col] = slugs;
+  }
+  return merged;
 }
 
 /**
