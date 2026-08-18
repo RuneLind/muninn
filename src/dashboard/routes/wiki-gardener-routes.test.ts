@@ -1590,3 +1590,112 @@ describe("POST /api/wiki/gardener/source-draft-doc — pre-I/O guards", () => {
     await held;
   });
 });
+
+/**
+ * The run-now source drafter under the per-bot gardener mutex.
+ *
+ * Its sibling `source-draft-backlog` has carried this guard since it shipped; this
+ * route did not, so two clicks (or a click racing a drain) each started a real model
+ * one-shot. The proposal dedup only stops the duplicate ROW — the money is spent
+ * before the insert — which is why the guard has to be the mutex, not the insert.
+ *
+ * The listing fetch (`/api/collection/<name>/documents`) is the first thing the run
+ * body does and the model call is strictly downstream of it, so counting listings
+ * counts STARTED runs: 0 means the body never began, 1 means it began exactly once.
+ */
+describe("POST /api/wiki/gardener/source-draft-run — the per-bot mutex", () => {
+  let root: string;
+  let app: Hono;
+  let origFetch: typeof fetch;
+  let listings: number;
+  let releaseListing: () => void = () => {};
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-draft-run-route-"));
+    await Bun.write(path.join(root, "notes.md"), "# Notes\n");
+    __setBotsForTest([
+      {
+        name: "draftbot",
+        dir: root,
+        persona: "",
+        telegramAllowedUserIds: [],
+        slackAllowedUserIds: [],
+        wikiDir: root,
+        gardener: { enabled: true },
+      },
+    ] as unknown as Parameters<typeof __setBotsForTest>[0]);
+    __setWikiRegistryForTest([{ name: "draftbot", root, source: "bot" }]);
+    __resetWikiCacheForTest();
+    __resetIngestBacklogCacheForTest();
+    __resetGardenerMutexForTest();
+
+    listings = 0;
+    // The listing hangs until released, so the first run is still in flight (still
+    // holding the mutex) when the second request arrives — the real race, not a
+    // simulation of it.
+    const gate = new Promise<void>((r) => (releaseListing = r));
+    origFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/documents")) {
+        listings += 1;
+        await gate;
+        return new Response(JSON.stringify({ documents: [] }), {
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response("{}", { headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+
+    app = new Hono();
+    registerWikiGardenerRoutes(app, {
+      getConsumed: async () => new Set<string>(),
+      getPending: async () => new Set<string>(),
+      getWikiGardenerWatcher: async () => null,
+      getSnapshot: async () => null,
+      setSnapshot: async () => {},
+      listProposals: async () => [],
+    });
+  });
+
+  afterEach(async () => {
+    releaseListing();
+    globalThis.fetch = origFetch;
+    __setBotsForTest(null);
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    __resetIngestBacklogCacheForTest();
+    __resetGardenerMutexForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const post = async (): Promise<Response> =>
+    await app.request("/api/wiki/gardener/source-draft-run?wiki=draftbot&collection=x-articles", {
+      method: "POST",
+    });
+
+  test("409 while a gardener run holds the per-bot mutex — the run body never starts", async () => {
+    let release = (): void => {};
+    const held = runExclusive("draftbot", () => new Promise<void>((r) => (release = r)));
+    expect(held).not.toBeNull();
+    const res = await post();
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toContain("already in flight");
+    expect(listings).toBe(0);
+    release();
+    await held;
+  });
+
+  test("two back-to-back POSTs → exactly one model run, the second 409", async () => {
+    const first = post(); // deliberately not awaited: the race is the point
+    const second = post();
+
+    const secondRes = await second;
+    expect(secondRes.status).toBe(409);
+    expect((await secondRes.json()).error).toContain("already in flight");
+
+    releaseListing();
+    expect((await first).status).toBe(200);
+    expect(listings).toBe(1);
+  });
+});

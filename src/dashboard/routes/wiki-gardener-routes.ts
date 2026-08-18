@@ -1851,9 +1851,20 @@ export function registerWikiGardenerRoutes(
     // Prune seam — the fourth selection site (drain / source-drafter backlog / weekly
     // harvest are the other three). No seeded watcher ⇒ no snapshot ⇒ ∅.
     const rnWatcher = await backlogDeps.getWikiGardenerWatcher(bot.name);
-    const outcome = await runSourceDraftForNewest(bot, root, collection, KNOWLEDGE_API_URL, () =>
-      rnWatcher ? readDismissed(backlogDeps, rnWatcher.id) : Promise.resolve(new Set<string>()),
+
+    // Serialize under the same per-bot gardener mutex the drain routes use, so
+    // concurrent source-draft clicks (or a click racing a backlog drain) can't
+    // double-spend model calls. `runExclusive` is a try-lock: it returns null WITHOUT
+    // starting when a run is already in flight — respond 409 like the recover/dismiss
+    // routes rather than queue behind a potentially long drain.
+    const run = runExclusive(bot.name, () =>
+      runSourceDraftForNewest(bot, root, collection, KNOWLEDGE_API_URL, () =>
+        rnWatcher ? readDismissed(backlogDeps, rnWatcher.id) : Promise.resolve(new Set<string>()),
+      ),
     );
+    if (run === null) return c.json({ error: "a gardener run is already in flight for this bot" }, 409);
+
+    const outcome = await run;
     log.info("Source-draft run-now for {bot} ({collection}): {outcome}", {
       bot: bot.name,
       collection,
