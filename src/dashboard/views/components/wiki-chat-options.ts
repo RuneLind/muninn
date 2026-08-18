@@ -25,6 +25,15 @@
  * target (the fact-check integrate panel's Cancel) must still run BEFORE the
  * click-away decision, exactly as it did when both lived in one listener.
  *
+ * The split also costs an invariant that used to be free. There are now TWO
+ * document click listeners and BOTH run for every click — this module's (in
+ * `wireChatOptions` below) and the shell's follow-up / write-action delegate
+ * (the `document.addEventListener("click", …)` chain in `wiki-browser.ts`, just
+ * above the `initChatOptions` call) — so **their selector sets must stay
+ * disjoint**. While every branch lived in one `if / else if` chain that
+ * exclusivity was structural; now it is a convention, and a selector added to
+ * both files fires both handlers on one click with nothing to say so.
+ *
  * Everything this needs from the shell arrives through the `ChatOptionsDeps`
  * port passed to `initChatOptions` — the shown Ask turn, the Ask session, the
  * open article and its outgoing links, the shared `POST /api/wiki/ask/chat`, and
@@ -130,6 +139,24 @@ export interface ChatOptPostResult {
 /**
  * Everything the dialog needs from the reader shell. Declared with METHOD syntax
  * so a shell function typed on the richer `AskTurn` still satisfies it.
+ *
+ * Method syntax means those parameters are checked BIVARIANTLY, so the shell's
+ * `refreshChatEscalateBar(turn: AskTurn)` is accepted here even though this
+ * module only promises it a `ChatOptTurn` — the narrower shape. That is unsound
+ * in general, and it is safe here for one structural reason: **this module never
+ * CONSTRUCTS a turn.** Every turn it holds came out of `getShownTurn()` (via
+ * `state.turn`), i.e. it is a real `AskTurn` the shell handed over, narrowed on
+ * the way in and handed straight back — the `AskTurn`-only fields are still
+ * there at runtime, unread. The shell's own guard closes the remaining gap: its
+ * `refreshChatEscalateBar` starts with `if (turn !== askShownTurn) return;`, an
+ * IDENTITY test, so a turn that did not come from the shell repaints nothing at
+ * all rather than being read as an `AskTurn`.
+ *
+ * Both halves of that are load-bearing. Synthesizing a `ChatOptTurn` here — a
+ * stub for a decline, say — and passing it to `refreshChatEscalateBar` would
+ * hand the shell an object missing every field its `AskTurn` type promises, with
+ * no type error anywhere; it survives today only because the identity guard
+ * would drop it. Prefer `getShownTurn()` and keep it that way.
  */
 export interface ChatOptionsDeps {
   /** The Ask turn currently painted in the pane (`askShownTurn`) — escalate mode's
@@ -174,10 +201,17 @@ export function initChatOptions(d: ChatOptionsDeps): void {
   wireChatOptions();
 }
 
-/** The wiki this reader is browsing — read PER CALL by the same rule the shell
- *  uses (`wiki-param.ts`), never captured at module scope: this file is imported
- *  before the shell runs, and the value is what keeps every fetch, the remembered
- *  connector key and the POST body on the wiki actually on screen. */
+/** The wiki this reader is browsing — read by the same RULE the shell uses
+ *  (`wiki-param.ts`), though not at the same moment: the shell snapshots it once
+ *  at boot (`const WIKI = readActiveWikiName()` in `wiki-browser.ts`) while this
+ *  re-reads it on every call. Deliberate — this file is imported before the shell
+ *  runs, so a module-scope capture here would read the global too early — and the
+ *  two cannot disagree, because the value never changes after the bundle loads:
+ *  `window.__WIKI_NAME__` is injected server-side by `views/wiki-page.ts` before
+ *  the script tag and nothing mutates it, and switching wikis is a full page load
+ *  (`pageUrl` re-emits `WIKI` into every in-page link). The value is what keeps
+ *  every fetch, the remembered connector key and the POST body on the wiki
+ *  actually on screen. */
 function wikiName(): string {
   return readActiveWikiName();
 }

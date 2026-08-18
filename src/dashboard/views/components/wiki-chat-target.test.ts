@@ -1032,20 +1032,47 @@ describe("wiki reader chat-dialog wiring", () => {
   /** The dialog module — state, render, openers, its own document listeners. */
   const optionsSrc = () => srcOf("wiki-chat-options.ts");
 
-  /** One top-level `[async] function <name>(` body, up to the next top-level
-   *  function of either flavour. */
+  /** Every spelling a top-level function declaration takes in these two files.
+   *  ONE list, read by BOTH the start scan and the terminator scan below —
+   *  keeping two lists is exactly how this broke: the start list learned
+   *  `export function` (the module's exported seams) while the terminator scan
+   *  still stopped only at the two un-exported flavours, so a body ran straight
+   *  through every exported function after it. Measured on the file this test
+   *  reads: `fnBody(optionsSrc, "submitChatOptions")` returned 138 lines,
+   *  swallowing the exported `closeChatOptionsIfNavigatingAway` — i.e. a
+   *  `not.toContain` assertion about the submitter was silently being made
+   *  about a neighbour's body too. */
+  const FN_KEYWORDS = [
+    "\nfunction ",
+    "\nasync function ",
+    "\nexport function ",
+    "\nexport async function ",
+  ];
+  /** One top-level `[export] [async] function <name>(` body, up to the next
+   *  top-level function of any flavour. */
   function fnBody(src: string, name: string): string {
     let start = -1;
-    for (const kw of ["\nfunction ", "\nasync function ", "\nexport function "]) {
+    for (const kw of FN_KEYWORDS) {
       start = src.indexOf(kw + name + "(");
       if (start !== -1) break;
     }
     expect(start).toBeGreaterThan(-1);
-    let next = src.indexOf("\nfunction ", start + 1);
-    const nextAsync = src.indexOf("\nasync function ", start + 1);
-    if (nextAsync !== -1 && (next === -1 || nextAsync < next)) next = nextAsync;
+    let next = -1;
+    for (const kw of FN_KEYWORDS) {
+      const at = src.indexOf(kw, start + 1);
+      if (at !== -1 && (next === -1 || at < next)) next = at;
+    }
     return src.slice(start, next === -1 ? undefined : next);
   }
+
+  test("fnBody stops at an EXPORTED function too", async () => {
+    // The terminator scan used to look only for `\nfunction ` / `\nasync function `,
+    // so the submitter's body ran 138 lines on into the exported navigation seam.
+    const body = fnBody(await optionsSrc(), "submitChatOptions");
+    expect(body).not.toContain("closeChatOptionsIfNavigatingAway");
+    // …and it still contains its own tail, so the fix trimmed the neighbour, not the body.
+    expect(body).toContain("data.nameTaken");
+  });
 
   test("the decline opener pins the question and NEVER writes the Ask box", async () => {
     const body = fnBody(await optionsSrc(), "openDeclineChat");
@@ -1251,5 +1278,46 @@ describe("wiki reader chat-dialog wiring", () => {
     expect(branch).toContain("conflictStatusLine(typedName, state.mode, true)");
     // …and it is decided BEFORE the ordinary threadExists branch.
     expect(at).toBeLessThan(body.indexOf("data.threadExists"));
+  });
+
+  test("the shell calls initChatOptions AFTER registering its own click delegate", async () => {
+    // Load-bearing ordering, and the ONLY thing holding it is the position of one
+    // call in a file: the dialog registers its click delegate inside
+    // `initChatOptions`, and the click-away decision it runs at the end of that
+    // listener reads `document.contains(target)`. A shell branch that
+    // synchronously detaches its own target (`cancelFactcheckIntegrate`) must
+    // therefore run BEFORE the dialog's listener, i.e. be registered first —
+    // exactly as it was when both lived in one listener. Moving the call up would
+    // close the dialog on the integrate panel's Cancel, which neither tsc nor the
+    // module's own listener tests can see.
+    const src = await browserSrc();
+    const delegate = src.indexOf('document.addEventListener("click"');
+    const detaching = src.indexOf('t.closest("#wikiFcIntCancel")');
+    const init = src.indexOf("initChatOptions({");
+    expect(delegate).toBeGreaterThan(-1);
+    expect(detaching).toBeGreaterThan(-1);
+    expect(init).toBeGreaterThan(-1);
+    expect(delegate).toBeLessThan(init);
+    expect(detaching).toBeLessThan(init);
+  });
+
+  test("the shell wires every port member to its real binding", async () => {
+    // The port is six callbacks to module-scoped `let`s the dialog can no longer
+    // reach. Each one has an inert default (`() => null`, `() => []`, a rejected
+    // POST), so a member wired to the wrong `let` — or dropped from the literal —
+    // degrades SILENTLY: the suggestion chips lose the page's outgoing links, the
+    // "Continue …" chip loses the session, the escalate bar stops repainting. tsc
+    // sees a well-typed object either way.
+    const src = await browserSrc();
+    const at = src.indexOf("initChatOptions({");
+    expect(at).toBeGreaterThan(-1);
+    const literal = src.slice(at, src.indexOf("});", at));
+    expect(literal).toMatch(/getShownTurn:\s*\(\)\s*=>\s*askShownTurn\b/);
+    expect(literal).toMatch(/getAskTurns:\s*\(\)\s*=>\s*askTurns\b/);
+    expect(literal).toMatch(/getCurrentArticle:\s*\(\)\s*=>\s*currentArticle\b/);
+    expect(literal).toMatch(/getOutgoingTitles:\s*\(\)\s*=>\s*currentOutgoingTitles\b/);
+    // The last two are the shell's own functions, passed by shorthand.
+    expect(literal).toMatch(/postAskChat(,|:\s*postAskChat\b)/);
+    expect(literal).toMatch(/refreshChatEscalateBar(,|:\s*refreshChatEscalateBar\b)/);
   });
 });
