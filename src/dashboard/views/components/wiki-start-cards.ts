@@ -21,6 +21,7 @@
  */
 
 import { escHtml as esc } from "./escape.ts";
+import { readActiveWikiName, withWikiParam } from "./wiki-param.ts";
 
 export interface StartCardsDeps {
   /** The shell's `withWiki`: append the active `wiki` param to a URL so every
@@ -31,11 +32,20 @@ export interface StartCardsDeps {
   resolvePageName(relPath: string): string | null;
 }
 
-/** Injected at boot by `initStartCards`. The defaults are inert rather than
- *  throwing so a card rendered before wiring degrades to "no link", never a
- *  broken reader. */
+/** Injected at boot by `initStartCards`.
+ *
+ *  `resolvePageName`'s default is deliberately inert rather than throwing: a
+ *  card rendered before wiring degrades to "no link", never a broken reader.
+ *
+ *  `withWiki` gets no such default. An inert `(url) => url` drops `?wiki=`,
+ *  which is not a degrade — the request silently succeeds against the DEFAULT
+ *  wiki, so an un-wired card would report another wiki's coverage and its
+ *  "Reindex now" would rebuild another wiki's collections. So the default
+ *  re-derives the active wiki from the page itself, by the same rule the shell
+ *  uses (`wiki-param.ts`), and is read per call — the global the shell reads at
+ *  boot may not be there yet when a default runs. */
 let deps: StartCardsDeps = {
-  withWiki: (url) => url,
+  withWiki: (url) => withWikiParam(url, readActiveWikiName()),
   resolvePageName: () => null,
 };
 
@@ -390,7 +400,10 @@ let reindexAbandoned = false;
 let reindexSettledAt = 0;
 const REINDEX_POLL_MS = 3000;
 const REINDEX_MAX_POLL_FAILURES = 3;
-const REINDEX_SETTLED_TTL_MS = 60_000;
+/** How long a settled run's rows stay on the card before a later render clears
+ *  them. Exported so the test asserts the boundary against this value rather
+ *  than a copied literal (and so it can pin `Date.now` around it). */
+export const REINDEX_SETTLED_TTL_MS = 60_000;
 
 /** Set the persisted reindex-status markup and paint it into the live slot. */
 function setReindexStatus(html: string): void {

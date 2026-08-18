@@ -6,6 +6,7 @@ import {
   loadIndexCoverage,
   mountStartCards,
   startReindex,
+  REINDEX_SETTLED_TTL_MS,
 } from "./wiki-start-cards.ts";
 
 /**
@@ -29,10 +30,11 @@ import {
  * the reindex POST → poll → settle cycle still paints its rows and re-enables
  * the button.
  *
- * The module state is per-file and cached by design, so the tests run in order:
- * the mount test is the one that gets the virgin state, and every later test
- * asks for a refresh (which bypasses the once-only guards), exactly as the
- * card's ↻ buttons do.
+ * The module state is per-file and cached by design, so the mount test is the one
+ * that gets the virgin state and every later test asks for a refresh (which
+ * bypasses the once-only guards), exactly as the card's ↻ buttons do. No test
+ * READS state a previous one left behind, though — the reindex cases seed their
+ * own through the public cycle, so each passes run alone under `-t`.
  */
 
 // ── Minimal DOM ───────────────────────────────────────────────────────────────
@@ -288,13 +290,43 @@ describe("wiki-start-cards", () => {
     expect(pendingTimers.length).toBe(0); // poll cycle stopped
   });
 
-  test("applyReindexUi re-paints the persisted status after a card re-render", async () => {
-    // A settled run's rows are still in module state from the test above; a fresh
-    // shim DOM (new beforeEach) starts blank until the card re-render re-applies.
-    expect(el("wikiIndexReindexStatus").innerHTML).toBe("");
-    applyReindexUi();
-    expect(el("wikiIndexReindexStatus").innerHTML).toContain("rebuilt");
-    expect(el("wikiIndexReindex").disabled).toBe(false);
+  test("applyReindexUi re-paints the persisted status after a card re-render, and drops it once stale", async () => {
+    // Seed the module's reindex state through the SAME public cycle a user
+    // drives — no leaning on the previous test's leftovers, so this case passes
+    // run alone (`-t applyReindexUi`) as well as in file order. `Date.now` is
+    // pinned for the same reason: `REINDEX_SETTLED_TTL_MS` is measured against
+    // the settle stamp, and a wall clock would make the assertions below depend
+    // on how long the suite happened to take.
+    let now = 1_700_000_000_000;
+    const realNow = Date.now;
+    Date.now = () => now;
+    try {
+      routes = [
+        ["/api/wiki/reindex-status", { collections: [{ name: "wiki", status: "succeeded" }] }],
+        ["/api/wiki/reindex", { collections: [{ name: "wiki", state: "started" }] }],
+        ["/api/wiki/index-coverage", coverageOk],
+      ];
+      startReindex();
+      await settle();
+      flushTimers();
+      await settle();
+      expect(el("wikiIndexReindexStatus").innerHTML).toContain("rebuilt");
+
+      // A card re-render (tab switch) replaces the card body, blanking the slot;
+      // the status lives in module state and must come back.
+      el("wikiIndexReindexStatus").innerHTML = "";
+      applyReindexUi();
+      expect(el("wikiIndexReindexStatus").innerHTML).toContain("rebuilt");
+      expect(el("wikiIndexReindex").disabled).toBe(false);
+
+      // Past the TTL, a later render clears the settled rows instead of
+      // repainting an old "rebuilt" forever.
+      now += REINDEX_SETTLED_TTL_MS + 1;
+      applyReindexUi();
+      expect(el("wikiIndexReindexStatus").innerHTML).toBe("");
+    } finally {
+      Date.now = realNow;
+    }
   });
 
   test("a no-collections wiki hides the Index card entirely", async () => {

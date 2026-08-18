@@ -87,7 +87,6 @@ import { shareArticleBtnHtml, SHARE_BTN_ID } from "./wiki-share-dialog.ts";
 // The start-view cards (What's new · Index coverage · reindex poller): IMPORTED
 // for the same reason as the share dialog above — one bundle, one module state.
 import {
-  applyReindexUi,
   initStartCards,
   loadDigest,
   loadIndexCoverage,
@@ -95,6 +94,7 @@ import {
   startReindex,
   type IndexCoverage,
 } from "./wiki-start-cards.ts";
+import { readActiveWikiName, withWikiParam } from "./wiki-param.ts";
 import { enhanceMermaid } from "./wiki-mermaid.ts";
 import { atlasBodyHtml, initAtlas } from "./wiki-atlas.ts";
 import { enhanceCodeTabs } from "./code-tabs.ts";
@@ -209,19 +209,14 @@ interface WikiPageDetail {
 // refresh model stores whole payloads, so it needs the shape concretely.
 
 // ── Page state ────────────────────────────────────────────────────────
-/** Which wiki is being browsed — the server injects the *canonical* wiki name
- *  (case-corrected, or the resolved default) as `window.__WIKI_NAME__`, so our
- *  `?wiki=` fetches and the picker's selected option always agree. Falls back to
- *  the raw `?wiki=` (or legacy `?bot=`) query if the global is somehow absent.
- *  Empty = default/env. */
-const injectedName = (window as unknown as { __WIKI_NAME__?: unknown }).__WIKI_NAME__;
-const params0 = new URLSearchParams(location.search);
-const WIKI =
-  typeof injectedName === "string" ? injectedName : params0.get("wiki") || params0.get("bot") || "";
+/** Which wiki is being browsed — resolved once at boot from the injected
+ *  canonical name (else the raw query) by the shared rule in `wiki-param.ts`,
+ *  which `wiki-start-cards.ts` re-uses for its un-wired default. Empty =
+ *  default/env. */
+const WIKI = readActiveWikiName();
 /** Append the active `wiki` param to a URL so every /api/wiki/* fetch stays on-wiki. */
 function withWiki(url: string): string {
-  if (!WIKI) return url;
-  return url + (url.indexOf("?") === -1 ? "?" : "&") + "wiki=" + encodeURIComponent(WIKI);
+  return withWikiParam(url, WIKI);
 }
 /** Build a shareable in-page URL that preserves the active wiki. */
 function pageUrl(name: string): string {
