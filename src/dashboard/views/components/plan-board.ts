@@ -1373,6 +1373,9 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
       document.removeEventListener("keydown", escClose);
       setBackdropInert(false);
       view.openSlug = null;
+      // The one-line message loses the stack; keep it for whoever debugs this.
+      console.error("plan board: drawer render failed", err);
+      restoreTo?.focus?.();
       drawerOpener = null;
       // Reload-worthy: the only thing that can put a payload this board cannot
       // render right is a fresh one, and the message must not be a dead end.
