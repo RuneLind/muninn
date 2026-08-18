@@ -77,7 +77,7 @@ export async function checkWikiLinter(
   // Per-run-stable dated id: at most one lint alert per day (a same-day re-run
   // dedups by id), a new report each subsequent weekly fire. The runner skips
   // content-hash dedup for this type so an identical count next week still
-  // notifies (see runner.ts `skipContentHash`).
+  // notifies (this type is on `dedupContentHash`'s per-type skip list in runner.ts).
   return [
     {
       id: `wiki-lint-${todayOslo(Date.now())}`,

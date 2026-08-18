@@ -14,6 +14,7 @@ import { checkWikiCommitter } from "./wiki-committer.ts";
 import { checkConsolidationGardener } from "./consolidation-gardener.ts";
 import { shouldSkipWikiDraftingRun } from "./wiki-drafting.ts";
 import { markRunHealth, handleWatcherFailure } from "./run-health.ts";
+import { HEALTH_ALERT_SOURCE } from "./source-health.ts";
 // Moved to a leaf module so `run-health.ts` can format an escalation without
 // importing this file (and with it every checker). Re-exported: `runner.ts` has
 // been its import site since it was written.
@@ -279,12 +280,13 @@ export function contentHash(alert: WatcherAlert): string | null {
  * - **wiki-gardener / consolidation-gardener**: the id is already per-run-unique (it embeds
  *   the persisted proposal ids) while the summary names the same topic/cluster labels every
  *   run — content-hash would false-drop a legitimate weekly notification.
- * - **wiki-linter / wiki-committer**: the id is per-day-stable and the summary (identical
- *   counts, "Swept N …") repeats across runs, so content-hash would wrongly suppress a
- *   recurring report.
+ * - **wiki-linter / wiki-committer**: the id is per-day-stable and the summary repeats
+ *   verbatim across runs whenever the underlying counts are unchanged ("Wiki lint: 3
+ *   broken links, …" for the linter, "Swept N uncommitted wiki file(s) …" for the
+ *   committer), so content-hash would wrongly suppress a recurring report.
  *
  * The last clause is PER-ALERT, not per-type, and that distinction is load-bearing.
- * `watcher-health` alerts (`source-health.ts` / `run-health.ts`) all share one prose
+ * `HEALTH_ALERT_SOURCE` alerts (`source-health.ts` / `run-health.ts`) all share one prose
  * skeleton — "⚠️ **Watcher health** — `<watcher>` source `<key>` has been **error** … The
  * watcher itself is running fine" — which carries no `Fra|From … —` sender and yields the
  * same proper nouns for every source of a watcher. Measured over real `buildHealthAlerts`
@@ -292,7 +294,9 @@ export function contentHash(alert: WatcherAlert): string | null {
  * `x:author-scores`) → 4 distinct ids but **1 distinct hash**. So on any watcher not in the
  * type list above, the first health escalation stored a hash that silently swallowed every
  * later escalation from a different source — and the 24-run re-escalation nag — until it
- * aged out of the 600-entry window (≥ ~4.5 days on the X row). Their ids are already
+ * aged out of the 600-entry window: days, on a row like X, depending on how fast that
+ * watcher's ordinary alerts turn the window over (not measured — the eviction rate is a
+ * function of live alert volume, not of anything in this file). Their ids are already
  * episode+bucket-stable by construction (`healthAlertId`), so id-dedup is complete and the
  * hash adds nothing but the false drop. The type list is deliberately NOT extended with
  * `x`: `x-digest-${Date.now()}` is per-run unique, so content-hash is the only thing
@@ -308,7 +312,7 @@ export function dedupContentHash(
     watcherType === "wiki-linter" ||
     watcherType === "wiki-committer" ||
     watcherType === "consolidation-gardener";
-  if (skipForType || alert.source === "watcher-health") return null;
+  if (skipForType || alert.source === HEALTH_ALERT_SOURCE) return null;
   return contentHash(alert);
 }
 
@@ -335,6 +339,24 @@ export function filterUnseenAlerts(
     }
     log.debug("Dedup: NEW alert id=\"{id}\" hash={hash} — \"{summary}\"", { botName: tag, id: a.id, hash, summary: a.summary.slice(0, 60) });
     return true;
+  });
+}
+
+/**
+ * What ONE run appends to `lastNotifiedIds`: each alert's id, its content hash when
+ * `dedupContentHash` yields one, and any `trackingIds` the checker asked to persist.
+ *
+ * Extracted from `runWatchers` (which no unit test can reach — it needs the DB, the
+ * Telegram api and a full `BotConfig`) so the PERSISTENCE half of the health-alert
+ * exemption is testable too. Both halves must agree: `filterUnseenAlerts` not dropping a
+ * health alert is worth nothing if this one still writes the colliding hash, since the
+ * hash written by run 1 is what run 2's filter reads.
+ */
+export function notifiedEntriesFor(watcherType: WatcherType, alerts: WatcherAlert[]): string[] {
+  return alerts.flatMap((a) => {
+    const hash = dedupContentHash(watcherType, a);
+    const extras = a.trackingIds ?? [];
+    return hash ? [a.id, hash, ...extras] : [a.id, ...extras];
   });
 }
 
@@ -662,11 +684,7 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
       }
 
       // Update last_run_at and keep a rolling window of IDs + content hashes
-      const newEntries = newAlerts.flatMap((a) => {
-        const hash = dedupContentHash(watcher.type, a);
-        const extras = a.trackingIds ?? [];
-        return hash ? [a.id, hash, ...extras] : [a.id, ...extras];
-      });
+      const newEntries = notifiedEntriesFor(watcher.type, newAlerts);
       const updatedIds = [
         ...watcher.lastNotifiedIds,
         ...newEntries,

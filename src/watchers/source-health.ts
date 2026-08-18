@@ -29,6 +29,17 @@ const log = getLog("watchers", "source-health");
 export const SOURCE_HEALTH_KEY = "source:health";
 
 /**
+ * `WatcherAlert.source` carried by every health escalation — the per-source ones built
+ * here and the run-level ones in `run-health.ts`.
+ *
+ * A shared constant rather than three string literals because the runner's
+ * `dedupContentHash` matches on it to exempt health alerts from content-hash dedup
+ * (they all share one prose skeleton and collide to a single hash). A typo on either
+ * side is silent: the alert still sends, and the exemption just stops applying.
+ */
+export const HEALTH_ALERT_SOURCE = "watcher-health";
+
+/**
  * Consecutive non-`ok` runs of the SAME source before one alert is sent. 3 is low on
  * purpose — the cost of a false alarm is one Telegram line, the cost of a miss is what
  * this module exists to prevent.
@@ -191,7 +202,7 @@ export function buildHealthAlerts(
     });
     alerts.push({
       id: healthAlertId(watcherName, key, h),
-      source: "watcher-health",
+      source: HEALTH_ALERT_SOURCE,
       sender: "Watcher health",
       subject: `${watcherName}: ${key} ${h.outcome}`,
       summary:
