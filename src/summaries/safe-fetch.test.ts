@@ -5,11 +5,12 @@ import { safeFetchText, type SafeFetchOptions } from "./safe-fetch.ts";
 /**
  * The helper refuses by ADDRESS, so nothing local is reachable by its real name —
  * every test that needs a real server therefore injects the two documented test
- * seams: `lookup` (a stub making the public-looking `pub.test` resolve to a
- * TEST-NET-3 address, which the guard passes) and `fetchImpl` (rewriting the host
- * onto the loopback server that actually answers). The bytes, the redirect hops,
- * the content-type and the streaming cap are all REAL — only the socket's
- * destination is redirected.
+ * seams: `lookup` (a stub resolving the public-looking `pub.test` to `PUBLIC_ADDR`,
+ * a genuinely public address the guard passes — the documentation ranges are all
+ * blocked now, so a TEST-NET stand-in would be testing the refusal path) and
+ * `fetchImpl` (rewriting the host onto the loopback server that actually answers).
+ * The bytes, the redirect hops, the content-type and the streaming cap are all
+ * REAL — only the socket's destination is redirected.
  */
 
 let server: ReturnType<typeof Bun.serve>;
@@ -56,6 +57,13 @@ function countingFetch(counter: { bytes: number }): typeof fetch {
     return new Response(counted, { status: res.status, headers: res.headers });
   }) as unknown as typeof fetch;
 }
+
+/**
+ * What the SERVER saw on `/endless` — the only vantage point from which socket
+ * teardown is visible. The client-side counter is a wrapper around the response
+ * body and cannot see whether the socket is still being drained underneath it.
+ */
+const endless = { bytes: 0, aborted: false };
 
 function opts(extra: SafeFetchOptions = {}): SafeFetchOptions {
   return {
@@ -161,6 +169,42 @@ beforeAll(async () => {
         });
         return new Response(stream, { headers: { "content-type": "text/plain" } });
       }
+      if (p === "/endless") {
+        // Never ends on its own: only the client giving up stops it. Counts what it
+        // has enqueued and records whether the request was aborted, so the test can
+        // assert TEARDOWN rather than "the client stopped reading".
+        endless.bytes = 0;
+        endless.aborted = false;
+        req.signal.addEventListener("abort", () => {
+          endless.aborted = true;
+        });
+        const chunk = new TextEncoder().encode("z".repeat(256 * 1024));
+        // 128 MB is a TEST SAFETY VALVE, not the thing under test: without abort this
+        // stream is pulled forever (cross-process it reached 52 GB in 5 s) and the
+        // test file would never finish. The assertion is far below the valve.
+        const valve = 128 * 1024 * 1024;
+        const stream = new ReadableStream({
+          // The `await` is load-bearing: with a SYNCHRONOUS pull the server enqueues
+          // all 128 MB before the loop ever processes the client's abort, and the
+          // measurement says nothing. Yielding per chunk is what makes teardown
+          // observable — measured, abort stops it at 512 KB / ~320 ms, while
+          // cancel-only runs to the valve and never sees `req.signal` fire at all.
+          async pull(controller) {
+            if (req.signal.aborted || endless.bytes >= valve) return controller.close();
+            controller.enqueue(chunk);
+            endless.bytes += chunk.length;
+            await Bun.sleep(1);
+          },
+        });
+        return new Response(stream, { headers: { "content-type": "text/plain" } });
+      }
+      if (p.startsWith("/five")) {
+        // FOUR redirects then a 200 — the shape that a cap of 3 refuses. Pins the
+        // cap at ≥5 (hop 0 is the first request, so 4 redirects need 5 fetches).
+        const n = Number(p.slice(5));
+        const next = n >= 3 ? "http://pub.test/ok" : `http://pub.test/five${n + 1}`;
+        return new Response(null, { status: 302, headers: { location: next } });
+      }
       if (p === "/500") return new Response("nope", { status: 500 });
       return new Response("not found", { status: 404 });
     },
@@ -258,8 +302,13 @@ describe("safeFetchText — resolved-address refusals", () => {
     // through a v6 literal, and each was ALLOWED before this round.
     ["NAT64 well-known 64:ff9b::/96 → loopback", "64:ff9b::7f00:1"],
     ["NAT64 well-known 64:ff9b::/96 → cloud metadata", "64:ff9b::a9fe:a9fe"],
-    ["NAT64 local-use 64:ff9b:1::/48, /96 slot", "64:ff9b:1::7f00:1"],
-    ["NAT64 local-use 64:ff9b:1::/48, /48 slot", "64:ff9b:1:7f00:0:100::"],
+    // 64:ff9b:1::/48 is refused WHOLESALE — RFC 8215 calls it local-use, so whatever
+    // v4 an operator embedded in it is by definition not a public article. These three
+    // are only illustrative of the forms; the third would have READ as public under a
+    // per-slot unwrap and must still be refused.
+    ["NAT64 local-use 64:ff9b:1::/48, /96-slot form", "64:ff9b:1::7f00:1"],
+    ["NAT64 local-use 64:ff9b:1::/48, /48-slot form", "64:ff9b:1:7f00:0:100::"],
+    ["NAT64 local-use 64:ff9b:1::/48, public-looking suffix", "64:ff9b:1::5db8:d822"],
     ["6to4 2002::/16 → loopback", "2002:7f00:1::"],
     ["6to4 2002::/16 → cloud metadata", "2002:a9fe:a9fe::"],
     ["IPv4-translated ::ffff:0:0:0/96 (RFC 2765) → loopback", "::ffff:0:7f00:1"],
@@ -268,6 +317,13 @@ describe("safeFetchText — resolved-address refusals", () => {
     ["Teredo 2001::/32", "2001::1"],
     ["discard-only 100::/64", "100::1"],
     ["ORCHIDv2 2001:20::/28", "2001:20::1"],
+    // The v6 documentation/benchmarking ranges, for symmetry with the v4 list above:
+    // nothing legitimate is served from them either.
+    ["documentation 2001:db8::/32", "2001:db8::1"],
+    ["documentation 3fff::/20 (RFC 9637), low", "3fff::1"],
+    ["documentation 3fff::/20 (RFC 9637), high", "3fff:fff:ffff:ffff:ffff:ffff:ffff:ffff"],
+    ["benchmarking 2001:2::/48", "2001:2::1"],
+    ["ORCHID 2001:10::/28 (deprecated)", "2001:10::1"],
   ];
 
   /**
@@ -397,6 +453,22 @@ describe("safeFetchText — redirect refusals", () => {
     );
     expect(warnings.filter((w) => w.level === "warning")).toHaveLength(0);
   });
+
+  test("a FOUR-redirect chain still reaches its 200 at the default cap", async () => {
+    fresh();
+    // Pins SAFE_FETCH_MAX_REDIRECTS ≥ 5 against a revert to 3: the measured
+    // `agents-and-tools/mcp.md` shape is 4 redirects, and at a cap of 3 it was
+    // refused. Deliberately uses the DEFAULT cap — that is the constant at risk.
+    expect(await safeFetchText("http://pub.test/five0", opts())).toBe(
+      "<html>hello  world\n</html>",
+    );
+    expect(warnings.filter((w) => w.level === "warning")).toHaveLength(0);
+    // …and the same chain IS refused once the cap is the old 3, so the test above
+    // fails for the right reason if the constant moves back.
+    fresh();
+    expect(await safeFetchText("http://pub.test/five0", opts({ maxRedirects: 3 }))).toBeNull();
+    expect(refusals().join()).toContain("redirect");
+  });
 });
 
 describe("safeFetchText — content-type and size refusals", () => {
@@ -425,11 +497,18 @@ describe("safeFetchText — content-type and size refusals", () => {
     expect(warnings.filter((w) => w.level === "warning")).toHaveLength(0);
   });
 
-  test("a declared content-length over the cap is refused before the body is read", async () => {
+  test("a DECLARED content-length over the cap is truncated too, never refused", async () => {
     fresh();
-    expect(await safeFetchText("http://pub.test/big", opts({ maxBytes: 1024 }))).toBeNull();
-    expect(warnings).toHaveLength(1);
-    expect(refusals().join()).toContain("too large");
+    // The removed pre-check compared the WIRE length (usually gzip/brotli) against a
+    // cap that measures the DECOMPRESSED body, so it fired unpredictably: live,
+    // norvig.com/big.txt (6.5 MB of text/plain, brotli wire length 2 298 971) was
+    // REFUSED while an equally large gzipped page truncated. The streaming cap is
+    // the one that bounds the process.
+    const res = await safeFetchText("http://pub.test/big", opts({ maxBytes: 1024 }));
+    expect(res).not.toBeNull();
+    expect(res!.length).toBe(1024);
+    expect(warnings.filter((w) => w.level === "warning")).toHaveLength(0);
+    expect(refusals().join()).toContain("Truncated");
   });
 
   test("an undeclared (chunked) body over the cap is TRUNCATED, not refused", async () => {
@@ -451,6 +530,25 @@ describe("safeFetchText — content-type and size refusals", () => {
     // transport's read-ahead — `await res.text()` would have taken all 8 MB. (RSS is too
     // noisy to assert in-process; the 50 MB RSS check is the empirical script.)
     expect(counter.bytes).toBeLessThan(2 * 512 * 1024);
+  });
+
+  test("truncation TEARS DOWN the socket — the server stops being read from", async () => {
+    fresh();
+    const res = await safeFetchText("http://pub.test/endless", opts({ maxBytes: 256 * 1024 }));
+    expect(res).not.toBeNull();
+    expect(res!.length).toBe(256 * 1024);
+    // `reader.cancel()` does NOT close a Bun fetch socket — measured cross-process
+    // at this same 256 KB cap, the read returned in 8 ms and the server pushed 52 GB
+    // over the next 5 s, stopping only when the client PROCESS exited. Only aborting
+    // the request tears it down, and only the SERVER can see the difference: the
+    // client-side byte counter is a wrapper and cannot observe the socket.
+    const deadline = Date.now() + 2000;
+    while (!endless.aborted && Date.now() < deadline) await Bun.sleep(20);
+    expect(endless.aborted).toBe(true);
+    const settled = endless.bytes;
+    await Bun.sleep(200);
+    expect(endless.bytes).toBe(settled);
+    expect(settled).toBeLessThan(32 * 1024 * 1024);
   });
 
   test("a non-200 is refused", async () => {

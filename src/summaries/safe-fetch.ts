@@ -19,7 +19,21 @@
  * prompt — `capContent` still trims what comes back. A 3 MB Wikipedia article is a
  * legitimate capture that used to be fetched whole and then trimmed to 100k chars;
  * turning it into "no enrichment at all" would be a regression dressed as a guard.
- * The only thing the cap has to prevent is muninn buffering the whole body.
+ * The only thing the cap has to prevent is muninn buffering the whole body. There is
+ * deliberately NO `content-length` pre-check in front of it: that header is the WIRE
+ * length, so it was comparing a brotli/gzip number against a cap that measures the
+ * DECOMPRESSED body, and it fired unpredictably — live, `norvig.com/big.txt` (6.5 MB
+ * of `text/plain`, brotli wire length 2 298 971) was REFUSED while a same-size gzip
+ * page truncated normally.
+ *
+ * Stopping reading is NOT stopping the transfer. `reader.cancel()` and
+ * `res.body.cancel()` do not tear down a Bun fetch socket. Measured cross-process
+ * against an endless `text/plain` stream, cap 256 KB: the read returned in 8 ms and
+ * the server then pushed 52 GB over the next 5 s, stopping only when the client
+ * PROCESS exited. Aborting the request that opened the socket is what closes it —
+ * same server, same cap: torn down after 6 MB, ~150 ms in, with the client still
+ * running. So every hop gets its own `AbortController` (chained off the
+ * whole-operation timeout) and every early-out holding a response aborts it.
  *
  * ACCEPTED, deliberately: the check-then-fetch TOCTOU. We resolve the hostname,
  * judge the addresses, then fetch BY HOSTNAME — a resolver that answers differently
@@ -171,28 +185,14 @@ function isBlockedIpv4(b: number[]): boolean {
 }
 
 /**
- * Where RFC 6052 puts the embedded IPv4 for each translation-prefix length. The
- * `u` octet (byte 8) is reserved and skipped, which is why these are not four
- * consecutive indices below /96.
- */
-const RFC6052_V4_SLOTS: number[][] = [
-  [6, 7, 9, 10], // /48
-  [7, 9, 10, 11], // /56
-  [9, 10, 11, 12], // /64
-  [12, 13, 14, 15], // /96
-];
-
-function ipv4At(b: number[], slot: number[]): number[] {
-  return slot.map((i) => b[i]!);
-}
-
-/**
  * Non-public IPv6 space, INCLUDING every form that carries an IPv4 address inside a
  * v6 literal. That second half is the one that bites: `64:ff9b::7f00:1`,
  * `2002:7f00:1::` and `::ffff:0:7f00:1` are all "IPv6 addresses" no v6 range test
  * flags, and all three reach 127.0.0.1 through a translator. Unwrap them and judge
  * the embedded v4 with the v4 rules — blanket-refusing the wrapper prefixes instead
- * would refuse the legitimate public destinations reached through them.
+ * would refuse the legitimate public destinations reached through them. The one
+ * exception is the local-use NAT64 prefix, which by definition has no public
+ * destination behind it and is refused whole (see below).
  */
 function isBlockedIpv6(b: number[]): boolean {
   const allZeroThrough = (n: number) => b.slice(0, n).every((x) => x === 0);
@@ -208,12 +208,11 @@ function isBlockedIpv6(b: number[]): boolean {
   }
   if (allZeroThrough(12)) return isBlockedIpv4(b.slice(12)); // ::a.b.c.d — IPv4-compatible
   if (b[0] === 0x00 && b[1] === 0x64 && b[2] === 0xff && b[3] === 0x9b) {
-    if (b[4] === 0x00 && b[5] === 0x01) {
-      // 64:ff9b:1::/48 — RFC 8215 local-use NAT64. The operator picks the embedding
-      // length, so judge EVERY slot the prefix leaves room for and refuse if any of
-      // them reads as a blocked v4; guessing one slot is how a bypass gets in.
-      return RFC6052_V4_SLOTS.some((slot) => isBlockedIpv4(ipv4At(b, slot)));
-    }
+    // 64:ff9b:1::/48 — RFC 8215 reserves this for LOCAL USE: a network's own NAT64
+    // translator, never a destination the public internet routes to. Refused whole,
+    // no unwrapping: which slot the operator embedded the v4 in is unknowable here,
+    // and there is no "public article behind a local-use prefix" case to preserve.
+    if (b[4] === 0x00 && b[5] === 0x01) return true;
     return isBlockedIpv4(b.slice(12)); // 64:ff9b::/96 — the well-known NAT64 prefix
   }
   if (b[0] === 0x20 && b[1] === 0x02) return isBlockedIpv4(b.slice(2, 6)); // 2002::/16 — 6to4
@@ -229,6 +228,16 @@ function isBlockedIpv6(b: number[]): boolean {
   if (b[0] === 0x20 && b[1] === 0x01 && b[2] === 0x00 && b[3] === 0x00) return true; // 2001::/32 Teredo
   if (b[0] === 0x20 && b[1] === 0x01 && b[2] === 0x00 && (b[3]! & 0xf0) === 0x20) {
     return true; // 2001:20::/28 ORCHIDv2
+  }
+  if (b[0] === 0x20 && b[1] === 0x01 && b[2] === 0x00 && (b[3]! & 0xf0) === 0x10) {
+    return true; // 2001:10::/28 ORCHID (deprecated)
+  }
+  // The v6 documentation/benchmarking ranges, for the same reason as their v4
+  // counterparts above: nothing legitimate is served from them.
+  if (b[0] === 0x20 && b[1] === 0x01 && b[2] === 0x0d && b[3] === 0xb8) return true; // 2001:db8::/32 docs
+  if (b[0] === 0x3f && b[1] === 0xff && (b[2]! & 0xf0) === 0x00) return true; // 3fff::/20 docs (RFC 9637)
+  if (b[0] === 0x20 && b[1] === 0x01 && b[2] === 0x00 && b[3] === 0x02 && b[4] === 0 && b[5] === 0) {
+    return true; // 2001:2::/48 benchmarking (RFC 5180)
   }
   return false;
 }
@@ -277,6 +286,35 @@ function rejectOnAbort(signal: AbortSignal): { promise: Promise<never>; dispose:
   // awaiting it — swallow that rather than tripping an unhandled rejection.
   promise.catch(() => {});
   return { promise, dispose };
+}
+
+/**
+ * Make `child` abort whenever `parent` does, and hand back the listener removal.
+ * The loop needs a controller PER HOP — aborting is the only way to close a socket
+ * (see the header), and one controller shared across hops would mean aborting hop 1
+ * kills the request hop 2 has not made yet. The parent stays the whole-operation
+ * timeout; this is what keeps a timeout still reaching the hop in flight.
+ */
+function chainAbort(parent: AbortSignal, child: AbortController): { dispose: () => void } {
+  if (parent.aborted) {
+    child.abort(parent.reason);
+    return { dispose: () => {} };
+  }
+  const onAbort = () => child.abort(parent.reason);
+  parent.addEventListener("abort", onAbort, { once: true });
+  return { dispose: () => parent.removeEventListener("abort", onAbort) };
+}
+
+/**
+ * Give up on a response we are not going to read, and CLOSE ITS SOCKET. The cancel
+ * releases the body (and any wrapper stream in front of it); the abort is what
+ * actually tears the connection down — cancel alone leaves a Bun fetch draining the
+ * rest of the body into nothing (see the header's 52 GB). Neither is awaited:
+ * nothing downstream depends on the teardown.
+ */
+function abandon(body: ReadableStream<Uint8Array> | null, hop: AbortController): void {
+  void body?.cancel().catch(() => {});
+  hop.abort();
 }
 
 /**
@@ -355,91 +393,92 @@ export async function safeFetchText(
         return refuse(`non-public address ${blocked}`, current, { hop });
       }
 
-      const res = await doFetch(url.toString(), {
-        signal: controller.signal,
-        redirect: "manual",
-      });
-
-      if (REDIRECT_STATUS.has(res.status)) {
-        await res.body?.cancel().catch(() => {});
-        const location = res.headers.get("location");
-        if (!location) return refuse(`redirect ${res.status} without a location`, current);
-        try {
-          current = new URL(location, url).toString();
-        } catch {
-          return refuse("redirect to an unparseable location", current, { location });
-        }
-        continue;
-      }
-
-      if (!res.ok) {
-        await res.body?.cancel().catch(() => {});
-        return refuse(`status ${res.status}`, current);
-      }
-
-      const contentType = res.headers.get("content-type");
-      if (!isAllowedContentType(contentType)) {
-        await res.body?.cancel().catch(() => {});
-        return refuse(`refused content-type ${contentType ?? "(none)"}`, current);
-      }
-
-      // Cheap early-out only. `content-length` is the WIRE length, and real hosts
-      // serve gzip, so it is compared against a cap that measures the DECOMPRESSED
-      // body — on a compressed response it under-reports and this practically never
-      // fires. The streaming cap below is the one that actually bounds the process;
-      // this just avoids opening a body that admits, uncompressed, to being oversized.
-      const declared = Number(res.headers.get("content-length"));
-      if (Number.isFinite(declared) && declared > maxBytes) {
-        await res.body?.cancel().catch(() => {});
-        return refuse(`body too large (declared ${declared} > ${maxBytes})`, current);
-      }
-
-      // Stream with a hard cap — `await res.text()` on a 50 MB body would buffer all
-      // 50 MB before `capContent` ever sees it. Over the cap we keep what we have and
-      // stop pulling: a truncated article still summarizes, a refused one does not.
-      const body = res.body;
-      if (!body) return "";
-      const reader = body.getReader();
-      const chunks: Uint8Array[] = [];
-      let total = 0;
-      let truncated = false;
+      // This hop's own controller, so an early-out can close THIS socket without
+      // pre-aborting the request the next hop is about to make.
+      const hopAbort = new AbortController();
+      const hopChain = chainAbort(controller.signal, hopAbort);
       try {
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (!value) continue;
-          // `>` not `>=`: a body that ends exactly ON the cap is complete, not
-          // truncated, and must not be logged (or reported) as cut short.
-          const room = maxBytes - total;
-          if (value.byteLength > room) {
-            chunks.push(value.subarray(0, room));
-            total += room;
-            truncated = true;
-            await reader.cancel().catch(() => {});
-            break;
-          }
-          chunks.push(value);
-          total += value.byteLength;
-        }
-      } finally {
-        reader.releaseLock?.();
-      }
-      if (truncated) {
-        log.info("Truncated {url} for {caller} at the {maxBytes}-byte cap", {
-          url: current,
-          caller,
-          maxBytes,
+        const res = await doFetch(url.toString(), {
+          signal: hopAbort.signal,
+          redirect: "manual",
         });
+
+        if (REDIRECT_STATUS.has(res.status)) {
+          // Abort BEFORE following: the hop we are leaving may be streaming a body
+          // behind its 3xx, and nothing will ever read it.
+          abandon(res.body, hopAbort);
+          const location = res.headers.get("location");
+          if (!location) return refuse(`redirect ${res.status} without a location`, current);
+          try {
+            current = new URL(location, url).toString();
+          } catch {
+            return refuse("redirect to an unparseable location", current, { location });
+          }
+          continue;
+        }
+
+        if (!res.ok) {
+          abandon(res.body, hopAbort);
+          return refuse(`status ${res.status}`, current);
+        }
+
+        const contentType = res.headers.get("content-type");
+        if (!isAllowedContentType(contentType)) {
+          abandon(res.body, hopAbort);
+          return refuse(`refused content-type ${contentType ?? "(none)"}`, current);
+        }
+
+        // Stream with a hard cap — `await res.text()` on a 50 MB body would buffer all
+        // 50 MB before `capContent` ever sees it. Over the cap we keep what we have and
+        // stop pulling: a truncated article still summarizes, a refused one does not.
+        const body = res.body;
+        if (!body) return "";
+        const reader = body.getReader();
+        const chunks: Uint8Array[] = [];
+        let total = 0;
+        let truncated = false;
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (!value) continue;
+            // `>` not `>=`: a body that ends exactly ON the cap is complete, not
+            // truncated, and must not be logged (or reported) as cut short.
+            const room = maxBytes - total;
+            if (value.byteLength > room) {
+              chunks.push(value.subarray(0, room));
+              total += room;
+              truncated = true;
+              // Cancel releases the reader; the ABORT is what stops the transfer.
+              void reader.cancel().catch(() => {});
+              hopAbort.abort();
+              break;
+            }
+            chunks.push(value);
+            total += value.byteLength;
+          }
+        } finally {
+          reader.releaseLock?.();
+        }
+        if (truncated) {
+          log.info("Truncated {url} for {caller} at the {maxBytes}-byte cap", {
+            url: current,
+            caller,
+            maxBytes,
+          });
+        }
+        const buf = new Uint8Array(total);
+        let offset = 0;
+        for (const c of chunks) {
+          buf.set(c, offset);
+          offset += c.byteLength;
+        }
+        // Non-fatal decode: cutting at a byte boundary can split a multi-byte
+        // codepoint, and one U+FFFD at the tail is not worth losing the article over.
+        return new TextDecoder("utf-8").decode(buf);
+      } finally {
+        hopChain.dispose();
       }
-      const buf = new Uint8Array(total);
-      let offset = 0;
-      for (const c of chunks) {
-        buf.set(c, offset);
-        offset += c.byteLength;
-      }
-      // Non-fatal decode: cutting at a byte boundary can split a multi-byte
-      // codepoint, and one U+FFFD at the tail is not worth losing the article over.
-      return new TextDecoder("utf-8").decode(buf);
     }
     return refuse(`more than ${maxRedirects} redirect hops`, current);
   } catch (err) {
