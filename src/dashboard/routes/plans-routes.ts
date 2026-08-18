@@ -426,7 +426,7 @@ export function registerPlansRoutes(
       // idiom the priority route above uses: `buildContent` must return bytes,
       // so a refusal cannot be its return value.
       let mergedOrder: QueueOrder = parsed.order;
-      let refusal: string | null = null;
+      let refused: string | null = null;
       let warnings: string[] = [];
       const result = await writePlanQueue({
         wikiDir: root,
@@ -444,8 +444,8 @@ export function registerPlansRoutes(
             // catastrophic for a read-modify-write: merging over it writes the
             // degradation to disk. Proven live — one `- [ unclosed` line and the
             // OTHER column's hand-written ranking was gone on a 200.
-            refusal = disk.unparseable;
-            throw new Error(refusal);
+            refused = disk.unparseable;
+            throw new Error(refused);
           }
           // Per-entry drops (off-grammar slug, unknown column, duplicate, a slug
           // naming no plan) stay MERGEABLE — that is the file's documented
@@ -457,9 +457,9 @@ export function registerPlansRoutes(
           return serializeQueue(mergedOrder);
         },
       });
-      if (refusal) {
-        log.warn("plan order: refused the write: {reason}", { reason: refusal });
-        return c.json({ error: refusal }, 422);
+      if (refused) {
+        log.warn("plan order: refused the write: {reason}", { reason: refused });
+        return c.json({ error: refused }, 422);
       }
       if (result.outcome === "forbidden") {
         return c.json({ error: result.reason, readonly: true }, 403);

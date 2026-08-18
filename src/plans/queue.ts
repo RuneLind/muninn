@@ -71,6 +71,9 @@ export interface QueueParseResult {
    * refuses the write on this field rather than inferring it from the warning
    * text. It is deliberately NOT set for per-entry drops, which the file's own
    * grammar documents as read-time GC and which the write announces instead.
+   * Nor for a document that parses to `null` (`null\n`, `~\n`, comments-only):
+   * that is the hand-edited spelling of an empty file and holds no ranking a
+   * merge could erase, so it is merged over rather than refused.
    */
   unparseable?: string;
 }
