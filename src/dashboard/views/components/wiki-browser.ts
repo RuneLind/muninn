@@ -3587,11 +3587,13 @@ document.addEventListener("click", (e) => {
 // own target (`cancelFactcheckIntegrate`) must still run BEFORE that test, exactly
 // as it did when every branch lived in one listener.
 //
-// Note that BOTH listeners run for every click — the delegate above and the
-// dialog's own, registered inside this call — so their selector sets must stay
-// disjoint. The shell's set is the `if / else if` chain above; the dialog's is
-// the chain in `wireChatOptions` (`wiki-chat-options.ts`). One chain made that
-// exclusivity structural; two make it a convention nothing enforces.
+// Note that ALL the click delegates run for every click — the one above, the
+// dialog's own (registered inside this call) and the `document.body` navigation
+// delegate (`[data-wiki-page]`/`[data-page]`, registered first) — so their
+// selector sets must stay disjoint. The shell's sets are the `if / else if`
+// chain above and the body delegate; the dialog's is the chain in
+// `wireChatOptions` (`wiki-chat-options.ts`). One chain made that exclusivity
+// structural; three make it a convention nothing enforces.
 initChatOptions({
   getShownTurn: () => askShownTurn,
   getAskTurns: () => askTurns,

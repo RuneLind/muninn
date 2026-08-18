@@ -1304,10 +1304,11 @@ describe("wiki reader chat-dialog wiring", () => {
   test("the shell wires every port member to its real binding", async () => {
     // The port is six callbacks to module-scoped `let`s the dialog can no longer
     // reach. Each one has an inert default (`() => null`, `() => []`, a rejected
-    // POST), so a member wired to the wrong `let` — or dropped from the literal —
-    // degrades SILENTLY: the suggestion chips lose the page's outgoing links, the
-    // "Continue …" chip loses the session, the escalate bar stops repainting. tsc
-    // sees a well-typed object either way.
+    // POST), so a member wired to the WRONG `let` degrades SILENTLY: the
+    // suggestion chips lose the page's outgoing links, the "Continue …" chip loses
+    // the session, the escalate bar stops repainting — and tsc sees a well-typed
+    // object. (A member DROPPED from the literal is caught by tsc: all six are
+    // required on `ChatOptionsDeps`. The mis-wire is the silent half this pins.)
     const src = await browserSrc();
     const at = src.indexOf("initChatOptions({");
     expect(at).toBeGreaterThan(-1);
