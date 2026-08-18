@@ -3,6 +3,7 @@ import { escHtml, escJsonScript } from "./components/escape.ts";
 import { helpersClientScript } from "./components/helpers-client.ts";
 import { planBoardClientScript } from "./components/plan-board-client.ts";
 import { buildHashMetaTag, getDashboardBuildHash } from "../dashboard-build-hash.ts";
+import { PLAN_READONLY_NOTE } from "../../plans/board-writes.ts";
 import type { BoardPayload } from "../../plans/board.ts";
 
 /**
@@ -59,13 +60,19 @@ export async function renderPlansPage(payload: BoardPayload): Promise<string> {
         Every plan in <code>${escHtml(payload.wiki.name)}/plans/</code>, filed by its own <code>plan_status</code>,
         priced against what comparable work actually cost in the claude-usage ledger.
         Read ${escHtml(asOf)} UTC. Rank a column by hand with ▲▼ under <em>My order</em>; the ↗ opens the plan.
-        <strong>Nothing is written back</strong> — priorities and hand orders set here are a draft in this browser,
-        and the wiki wins on every load.
+        ${
+          payload.readonly
+            ? `<strong>Nothing is written back on this host</strong> — ${escHtml(PLAN_READONLY_NOTE)}`
+            : `Setting a priority writes <code>priority:</code> into the plan's frontmatter and ranking a column writes
+               <code>plans/queue.yaml</code> — both straight to the wiki, both refused if the file changed since this
+               board was read.`
+        }
       </p>
     </div>
 
     ${renderBanners(payload)}
 
+    <div class="pb-notice" id="pbNotice"></div>
     <div class="pb-meters" id="pbMeters"></div>
     <div class="pb-controls" id="pbControls"></div>
     <div class="pb-draft" id="pbDraft"></div>
@@ -267,6 +274,17 @@ const PLAN_BOARD_STYLES = `
       font: inherit; font-size: 12.5px; padding: 4px 9px; border-radius: var(--pb-r);
       border: 1px solid var(--pb-line); background: var(--pb-surface); color: var(--pb-ink); min-width: 200px;
     }
+
+    /* ---- write notices --------------------------------------------------- */
+    /* Client-rendered (a 403 raises the readonly banner mid-session), so the
+       banner classes above are reused rather than re-styled. */
+    .pb-notice:empty { display: none; }
+    .pb-wmsg { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+    .pb-reload {
+      border: 1px solid var(--pb-accent); background: var(--pb-accent-wash); color: var(--pb-accent-ink);
+      border-radius: 5px; padding: 2px 10px; font-size: 12px; font-weight: 600;
+    }
+    .pb-reload:disabled { opacity: .55; cursor: default; }
 
     /* ---- draft note ----------------------------------------------------- */
     .pb-draft { display: none; align-items: center; gap: 10px; margin-top: 10px; font-size: 12.5px; color: var(--pb-muted); }
