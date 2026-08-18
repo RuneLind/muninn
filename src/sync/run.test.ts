@@ -931,6 +931,106 @@ describe("syncRepo", () => {
     expect(stale.configuredButIdle).toBe(true);
   });
 
+  test("a tick that errors at FETCH is not evidence — the sweeper does not stand down", async () => {
+    // The freshness clock used to be `lastRunMs`, which `recordLedger` stamps on
+    // EVERY tick, including one that returned at the failed fetch — before any
+    // local or commit section ran. So an unreachable origin (offline, VPN down,
+    // an expired deploy key) left the loop erroring every 15 minutes while it
+    // held the sweeper down forever: the 2026-07-23 page-loss shape reached
+    // through "the loop runs but never commits".
+    const f = await makeFixture(base);
+    const repos = [wikiRepo(f)];
+    const top = (await git(f.A, ["rev-parse", "--show-toplevel"])).out;
+
+    await git(f.A, ["remote", "set-url", "origin", path.join(base, "gone.git")]);
+    const page = path.join(f.wikiA, "concepts", "Settled.md");
+    await writeFile(page, "# Settled\n");
+    await ageFile(page);
+
+    const r = await syncRepo(wikiRepo(f), deps());
+    expect(r.state).toBe("error");
+    expect(r.reason).toContain("git fetch failed");
+    expect(r.committed).toEqual([]);
+    // The RUN is still recorded — the card has to show the failing tick.
+    expect(getSyncLedgerEntry("fixture").lastRunMs).not.toBeNull();
+    // …and the page is still sitting there uncommitted, which is exactly what
+    // the sweeper exists to catch.
+    expect((await git(f.A, ["status", "--porcelain"])).out).toContain("Settled.md");
+
+    const res = await syncSubsumesSweeper(top, { repos });
+    expect(res.subsumed).toBe(false);
+    expect(res.configuredButIdle).toBe(true);
+  });
+
+  test("a local pass keeps subsuming while the remote is down — for one sweeper period, not forever", async () => {
+    const f = await makeFixture(base);
+    const repos = [wikiRepo(f)];
+    const top = (await git(f.A, ["rev-parse", "--show-toplevel"])).out;
+
+    const first = path.join(f.wikiA, "concepts", "Settled.md");
+    await writeFile(first, "# Settled\n");
+    await ageFile(first);
+    expect((await syncRepo(wikiRepo(f), deps())).state).toBe("ok");
+
+    // The remote goes away AFTER a healthy pass.
+    await git(f.A, ["remote", "set-url", "origin", path.join(base, "gone.git")]);
+    const second = path.join(f.wikiA, "concepts", "Later.md");
+    await writeFile(second, "# Later\n");
+    await ageFile(second);
+    expect((await syncRepo(wikiRepo(f), deps())).state).toBe("error");
+
+    // A local pass minutes ago is still evidence — sweeping on top of a loop
+    // that IS committing would fight it — so the grace window stays the same
+    // ~26h the evidence rule has always used…
+    const now = Date.now();
+    expect((await syncSubsumesSweeper(top, { repos, now })).subsumed).toBe(true);
+    // …and it EXPIRES, instead of being renewed by ticks that commit nothing.
+    const stale = await syncSubsumesSweeper(top, {
+      repos,
+      now: now + SYNC_SUBSUME_MAX_AGE_MS + 60_000,
+    });
+    expect(stale.subsumed).toBe(false);
+    expect(stale.configuredButIdle).toBe(true);
+  });
+
+  test("a BLOCKED tick still subsumes — the sweeper would commit the half-finished merge", async () => {
+    // `blocked` is the unmerged-paths refusal, and the sweeper has no pre-flight
+    // of its own (`listWikiSubtreeDirty` treats a `UU` entry as ordinary dirt),
+    // so routing a blocked tick to it would stage and commit a human's conflict
+    // markers. Only `error`-shaped ticks that never reached the local section
+    // may fall through.
+    const f = await makeFixture(base);
+    const repos = [wikiRepo(f)];
+    const top = (await git(f.A, ["rev-parse", "--show-toplevel"])).out;
+
+    await writeFile(path.join(f.wikiA, "concepts", "Seed.md"), "# Seed\nA line\n");
+    await git(f.A, ["commit", "-qam", "A edit"]);
+
+    await git(f.B, ["pull", "-q"]);
+    await writeFile(path.join(f.wikiB, "concepts", "Seed.md"), "# Seed\nB line\n");
+    await git(f.B, ["commit", "-qam", "B edit"]);
+    await git(f.B, ["push", "-q"]);
+
+    await git(f.A, ["fetch", "-q"]);
+    await git(f.A, ["merge", "origin/main"]);
+    // Drop the in-progress markers: what a CRASHED merge leaves behind is
+    // unmerged index entries with nothing for pre-flight to see, which is how a
+    // tick reaches the post-fetch unmerged check at all.
+    for (const marker of ["MERGE_HEAD", "MERGE_MSG", "AUTO_MERGE"]) {
+      await rm(path.join(f.A, ".git", marker), { force: true, recursive: true });
+    }
+    expect((await git(f.A, ["status", "--porcelain"])).out).toContain("UU ");
+
+    const r = await syncRepo(wikiRepo(f), deps());
+    expect(r.state).toBe("blocked");
+    expect(r.reason).toContain("unmerged paths");
+    expect(r.committed).toEqual([]);
+
+    const res = await syncSubsumesSweeper(top, { repos });
+    expect(res.subsumed).toBe(true);
+    expect(res.configuredButIdle).toBe(false);
+  });
+
   test("an uncovered repo is not 'configured but idle' — it is simply not ours", async () => {
     const f = await makeFixture(base);
     const top = (await git(f.A, ["rev-parse", "--show-toplevel"])).out;

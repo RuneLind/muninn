@@ -146,8 +146,24 @@ Two things the deferral REPORT must not conflate, both fixed after they shipped:
 - **Sweeper subsumption requires EVIDENCE, not configuration.** `SYNC_REPOS` being
   parseable used to stand the daily `wiki-committer` down forever — including on a
   machine whose launchd job was never installed, which is the 2026-07-23 page-loss
-  shape. `syncSubsumesSweeper` also requires a ledger run inside
+  shape. `syncSubsumesSweeper` also requires evidence inside
   `SYNC_SUBSUME_MAX_AGE_MS` (~26h); short of that the sweeper runs AND warns.
+- **The evidence is `lastLocalSectionMs`, not `lastRunMs` — "the loop ran" and "the
+  loop could commit" are different claims.** `recordLedger` stamps `lastRunMs` on
+  EVERY tick, and a tick that returns at a FAILED FETCH (origin unreachable for days:
+  offline, VPN down, an expired deploy key) commits nothing yet used to refresh that
+  clock — the same page-loss shape again, reached through "the loop runs but never
+  commits". So the clock is stamped only once a tick reaches step 5, the local section,
+  and `finish`'s `localSectionRan` flag defaults to FALSE so a new early return can
+  only ever under-claim coverage.
+  **The fall-through to the sweeper is narrow on purpose: `error`-shaped ticks only.**
+  Every other pre-local-section stop (`blocked`, `paused`, `transient`) still subsumes
+  on a fresh `lastRunMs`, because the sweeper is not a safe substitute there —
+  `blocked` is the unmerged-paths refusal and the sweeper has NO pre-flight of its own
+  (`listWikiSubtreeDirty` treats a `UU` entry as ordinary dirt), so routing a blocked
+  tick to it would stage and commit a human's half-finished merge. Residual, accepted:
+  a healthy pass still buys ~26h of grace, so at most one daily sweep is skipped after
+  the remote goes away.
 - **A `plain`/`status-only` repo containing a registered wiki takes that wiki's
   write lock.** Its rebase rewrites the wiki's working tree, and the wiki-mode
   config error actively steers people into this shape ("… or use mode plain"). The

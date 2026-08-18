@@ -1443,7 +1443,8 @@ losing them (the 2026-07-23 huginn-jarvis incident).
 
 - **Subsumed by the repo-sync loop — but only on EVIDENCE it runs.** On a machine
   running `SYNC_REPOS` (`src/sync/`), this sweeper stands down for every repo a
-  `wiki`-mode entry covers AND whose sync ledger shows a run within
+  `wiki`-mode entry covers AND whose sync ledger shows a tick that actually reached
+  its LOCAL (commit) section within
   `SYNC_SUBSUME_MAX_AGE_MS` (~26h, just over this sweeper's own daily cadence) —
   `syncSubsumesSweeper` in `src/sync/run.ts`, compared on git TOPLEVELS so
   huginn-jarvis's nested wiki root matches its repo. Standing down is not merely
@@ -1456,8 +1457,14 @@ losing them (the 2026-07-23 huginn-jarvis incident).
   `SYNC_REPOS` used to stand the sweeper down forever, so a machine whose launchd
   tick was never installed (or whose plist silently failed to load) had nobody
   committing the wiki at all — the 2026-07-23 page-loss shape reached through the
-  fix for it. A covered-but-idle repo therefore gets swept AND a `log.warn` naming
-  the idle loop. With `SYNC_REPOS` unset the sweeper behaves exactly as before.
+  fix for it. **Nor is a tick that RAN evidence:** a tick whose fetch fails
+  (unreachable origin) commits nothing and used to refresh the freshness clock
+  anyway, holding the sweeper down for as long as the machine stayed offline —
+  hence the local-section clock above, and hence only `error`-shaped ticks fall
+  through (a `blocked` tick must still subsume; the sweeper has no unmerged-paths
+  pre-flight of its own). A covered-but-idle repo therefore gets swept AND a
+  `log.warn` naming the idle loop. With `SYNC_REPOS` unset the sweeper behaves
+  exactly as before.
 - Per tick, for the bot's `wikiDir`: resolve the git toplevel (reusing the
   exported `gitToplevel`/`onDefaultBranch` from `commit.ts`, not reimplemented);
   **not-a-repo / off-default-branch ⇒ no-op** (a feature checkout is left for a

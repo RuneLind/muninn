@@ -365,6 +365,17 @@ export interface SyncLedgerEntry {
   /** Last tick that ended `ok` (epoch ms), or null if never in this process. */
   lastSuccessMs: number | null;
   lastRunMs: number | null;
+  /**
+   * Last tick that actually REACHED the local section (status → commit →
+   * rebase), epoch ms, or null if never in this process.
+   *
+   * Separate from `lastRunMs` because `lastRunMs` moves on every tick, including
+   * one that returned at a failed fetch having committed nothing — which is what
+   * made the sweeper stand down for an unreachable origin (`syncSubsumesSweeper`
+   * in `run.ts`). "The loop ran" and "the loop could still commit" are different
+   * claims, and only the second one may stand a committer down.
+   */
+  lastLocalSectionMs: number | null;
   lastError?: string;
 }
 

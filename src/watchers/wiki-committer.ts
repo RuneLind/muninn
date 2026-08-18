@@ -111,9 +111,11 @@ export async function checkWikiCommitter(
   // But CONFIGURATION alone is not evidence the loop runs: `SYNC_REPOS` being
   // parseable used to stand this sweeper down forever, so a machine whose launchd
   // job was never installed had nobody committing the wiki at all — the 2026-07-23
-  // page-loss shape this watcher exists for. `syncSubsumesSweeper` additionally
-  // requires a ledger run inside ~26h; short of that we sweep AND say the loop
-  // looks configured-but-idle. Genuine subsumption is marked `ok`, not `skipped`:
+  // page-loss shape this watcher exists for. Nor is "the loop ran" evidence: a
+  // tick that errors at the fetch (origin unreachable) commits nothing, so
+  // `syncSubsumesSweeper` requires a tick that reached the LOCAL section inside
+  // ~26h; short of that we sweep AND say the loop looks configured-but-idle.
+  // Genuine subsumption is marked `ok`, not `skipped`:
   // the work IS being done, by the loop, so a streak would escalate a health
   // alert on a healthy configuration.
   const subsumption = await syncSubsumesSweeper(top);
@@ -127,7 +129,7 @@ export async function checkWikiCommitter(
   }
   if (subsumption.configuredButIdle) {
     log.warn(
-      "Wiki-committer: {top} is configured for the SYNC_REPOS loop but it has not run in ~26h — sweeping anyway (is the launchd tick firing?)",
+      "Wiki-committer: {top} is configured for the SYNC_REPOS loop but it has not committed in ~26h — sweeping anyway (is the launchd tick firing? is origin reachable?)",
       { botName: name, top, repo: subsumption.name },
     );
   }

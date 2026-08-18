@@ -185,6 +185,7 @@ export function getSyncLedgerEntry(name: string): SyncLedgerEntry {
       consecutiveDeferrals: 0,
       lastSuccessMs: null,
       lastRunMs: null,
+      lastLocalSectionMs: null,
     }
   );
 }
@@ -195,7 +196,18 @@ export function __resetSyncStateForTest(): void {
   inFlight.clear();
 }
 
-function recordLedger(name: string, result: RepoSyncResult, now: number): SyncLedgerEntry {
+/**
+ * `localSectionRan` is passed by the caller rather than derived from the state:
+ * the SAME state can land on either side of the local section (a rebase failure
+ * is `error` and committed; a failed fetch is `error` and could not). Only the
+ * call site knows which, and `syncSubsumesSweeper` reads the difference.
+ */
+function recordLedger(
+  name: string,
+  result: RepoSyncResult,
+  now: number,
+  localSectionRan: boolean,
+): SyncLedgerEntry {
   const prev = getSyncLedgerEntry(name);
   const entry: SyncLedgerEntry = {
     state: result.state,
@@ -204,6 +216,7 @@ function recordLedger(name: string, result: RepoSyncResult, now: number): SyncLe
     lastSuccessMs:
       result.state === "ok" || result.state === "status-only" ? now : prev.lastSuccessMs,
     lastRunMs: now,
+    lastLocalSectionMs: localSectionRan ? now : prev.lastLocalSectionMs,
     lastError: result.error ?? (result.state === "blocked" ? result.reason : undefined),
   };
   ledger.set(name, entry);
@@ -907,10 +920,17 @@ export async function syncRepo(
   dryRun = false,
 ): Promise<RepoSyncResult> {
   const startedAt = deps.now();
+  /**
+   * `localSectionRan` says whether this tick got as far as step 5 — i.e. whether
+   * the loop was in a position to commit at all. It defaults to FALSE so a new
+   * early return can only ever under-claim: the failure mode being guarded
+   * against is a tick claiming coverage it never provided.
+   */
   const finish = (
     card: RepoCard,
     state: SyncState,
     extra: Partial<RepoSyncResult> = {},
+    localSectionRan = false,
   ): RepoSyncResult => {
     const now = deps.now();
     const result: RepoSyncResult = {
@@ -939,7 +959,9 @@ export async function syncRepo(
     //    of 6 became 1) and cleared `lastError`, so a card polled during a slow
     //    tick went green and the escalation restarted from scratch.
     const observeOnly = dryRun || state === "running";
-    const led = observeOnly ? getSyncLedgerEntry(repo.name) : recordLedger(repo.name, result, now);
+    const led = observeOnly
+      ? getSyncLedgerEntry(repo.name)
+      : recordLedger(repo.name, result, now, localSectionRan);
     result.lastRunMs = led.lastRunMs;
     result.lastSuccessMs = led.lastSuccessMs;
     result.consecutiveDeferrals = led.consecutiveDeferrals;
@@ -1026,12 +1048,17 @@ export async function syncRepo(
     };
     if (local.state) {
       const after = await readCard(repo, top);
-      return finish(after, local.state, {
-        ...carry,
-        reason: local.reason,
-        ...(local.conflicts ? { conflicts: local.conflicts } : {}),
-        ...(local.error ? { error: local.error } : {}),
-      });
+      return finish(
+        after,
+        local.state,
+        {
+          ...carry,
+          reason: local.reason,
+          ...(local.conflicts ? { conflicts: local.conflicts } : {}),
+          ...(local.error ? { error: local.error } : {}),
+        },
+        true,
+      );
     }
 
     // 6. Push — OUTSIDE both locks, on the commit queue only (pushInner's
@@ -1108,13 +1135,18 @@ export async function syncRepo(
     // A soft hold outranks `ok` but never a push outcome: "the remote moved" is
     // the more urgent thing to say, and the held file is still in `deferredFiles`.
     const finalState = pushState ?? (local.holdReason ? "deferred" : "ok");
-    return finish(finalCard, finalState, {
-      ...carry,
-      actions: local.actions,
-      pushed,
-      ...(pushReason ?? local.holdReason ? { reason: pushReason ?? local.holdReason } : {}),
-      ...(pushError ? { error: pushError } : {}),
-    });
+    return finish(
+      finalCard,
+      finalState,
+      {
+        ...carry,
+        actions: local.actions,
+        pushed,
+        ...(pushReason ?? local.holdReason ? { reason: pushReason ?? local.holdReason } : {}),
+        ...(pushError ? { error: pushError } : {}),
+      },
+      true,
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log.warn("Sync: unexpected failure for {name}: {error}", { name: repo.name, error: message });
@@ -1228,6 +1260,21 @@ export const SYNC_SUBSUME_MAX_AGE_MS = 26 * 60 * 60 * 1000;
  * exactly the 2026-07-23 huginn-jarvis page-loss shape the sweeper exists to
  * prevent. So the ledger must also show a run inside {@link SYNC_SUBSUME_MAX_AGE_MS}.
  *
+ * And "the loop ran" is not the same claim as "the loop could commit". A tick
+ * that returns at a FAILED FETCH — origin unreachable for days: offline, VPN
+ * down, an expired deploy key — commits nothing, yet it used to refresh
+ * `lastRunMs` and hold the sweeper down anyway. That is the same page-loss shape
+ * again, reached through "the loop runs but never commits", so the freshness
+ * clock is `lastLocalSectionMs`: stamped only once a tick reaches the local
+ * section (status → commit → rebase).
+ *
+ * The fall-through is narrow ON PURPOSE — only `error`-shaped ticks that never
+ * got there. Every other pre-local-section stop still subsumes, because the
+ * sweeper is not a safe substitute for the loop in those states: `blocked` is
+ * the unmerged-paths refusal, and the sweeper has no pre-flight of its own
+ * (`listWikiSubtreeDirty` treats a `UU` entry as ordinary dirt), so it would
+ * stage and commit a human's half-finished merge.
+ *
  * `configuredButIdle` distinguishes "this repo is not ours" (sweep normally, say
  * nothing) from "ours but the loop looks dead" (sweep AND warn).
  */
@@ -1239,8 +1286,12 @@ export async function syncSubsumesSweeper(
   if (!covering) return { subsumed: false, configuredButIdle: false };
   const now = opts.now ?? Date.now();
   const led = getSyncLedgerEntry(covering.name);
-  const fresh = led.lastRunMs !== null && now - led.lastRunMs <= SYNC_SUBSUME_MAX_AGE_MS;
-  return { subsumed: fresh, configuredButIdle: !fresh, name: covering.name };
+  const fresh = (at: number | null) => at !== null && now - at <= SYNC_SUBSUME_MAX_AGE_MS;
+  // A recent local pass is the evidence. Failing that, a recent tick that
+  // stopped for a reason the sweeper cannot help with either still subsumes —
+  // and `state: "unknown"` cannot reach here, since it implies `lastRunMs` null.
+  const subsumed = fresh(led.lastLocalSectionMs) || (fresh(led.lastRunMs) && led.state !== "error");
+  return { subsumed, configuredButIdle: !subsumed, name: covering.name };
 }
 
 /** Sync every configured repo, sequentially (they contend on disk and on the
