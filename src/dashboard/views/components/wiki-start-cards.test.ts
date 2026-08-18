@@ -32,9 +32,11 @@ import {
  *
  * The module state is per-file and cached by design, so the mount test is the one
  * that gets the virgin state and every later test asks for a refresh (which
- * bypasses the once-only guards), exactly as the card's ↻ buttons do. No test
- * READS state a previous one left behind, though — the reindex cases seed their
- * own through the public cycle, so each passes run alone under `-t`.
+ * bypasses the once-only guards), exactly as the card's ↻ buttons do. The reindex
+ * cases seed their own state through the public cycle, so each passes run alone
+ * under `-t`; the "failed digest refresh keeps the last good digest" case does NOT
+ * — it deliberately reads the digest the mount test cached (that inheritance IS
+ * the behaviour under test), so run it with the file, not alone.
  */
 
 // ── Minimal DOM ───────────────────────────────────────────────────────────────

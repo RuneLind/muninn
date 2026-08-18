@@ -2,16 +2,20 @@
  * /wiki start cards — the seam between the reader shell and `wiki-start-cards.ts`.
  *
  * This spec exists because of what the extraction's own checks could NOT see:
- * deleting `initStartCards(...)` and `mountStartCards()` from `wiki-browser.ts`
- * leaves `tsc --noEmit` clean and all ~819 component unit tests green, and the
- * only symptom is a start view with two silently empty cards. The unit tests
- * drive the module's exports directly, so they hold the cards' behaviour but
- * cannot hold the fact that the SHELL still calls them; only a real page can.
+ * deleting `mountStartCards()` from `wiki-browser.ts` leaves `tsc --noEmit`
+ * clean and all ~819 component unit tests green, and the only symptom is a
+ * start view with two silently empty cards. The unit tests drive the module's
+ * exports directly, so they hold the cards' behaviour but cannot hold the fact
+ * that the SHELL still calls them; only a real page can. NB: this pins
+ * `mountStartCards` only — `initStartCards(...)` is NOT pinned here (measured:
+ * deleting it keeps all three tests green), because the module's default
+ * `withWiki` now derives the same `?wiki=` from the page and the only observable
+ * loss is `resolvePageName` (missing-page entries stop being reader links).
  *
  * What is pinned here, in order:
  *   1. both cards mount with content on the start view (the shell calls
- *      `mountStartCards`), and every card fetch carries the active `?wiki=` (the
- *      shell's injected `withWiki` reaches them);
+ *      `mountStartCards`), and every card fetch carries the active `?wiki=` (true
+ *      whether or not the shell's `withWiki` is wired — see the NB above);
  *   2. clicking [Reindex now] POSTs `/api/wiki/reindex` exactly once, disables
  *      the button for the poll cycle and re-enables it on settle (the shell's
  *      click delegate reaches `startReindex`, and the poller inside the module
