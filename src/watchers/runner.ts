@@ -1,6 +1,6 @@
 import type { Api } from "grammy";
 import type { BotConfig } from "../bots/config.ts";
-import type { Watcher, WatcherAlert } from "../types.ts";
+import type { Watcher, WatcherAlert, WatcherType } from "../types.ts";
 import { getWatchersDueNow, updateWatcherLastRun, markWatcherSuccess } from "../db/watchers.ts";
 import { isQuietHours } from "./quiet-hours.ts";
 import { computeWatcherTimeoutMs } from "./timeout.ts";
@@ -150,7 +150,7 @@ const MAX_NOTIFIED_IDS = 600;
 // `wiki-committer` sweeps a git commit, not a Telegram ping. Quiet hours must not
 // suppress the RUN itself (an hour-9 sweeper would never fire under the common
 // overnight 22–08 window); only the user-facing ALERT send is suppressed during
-// quiet hours (see `runWatchers`). Mirrors the `skipContentHash` per-type pattern.
+// quiet hours (see `runWatchers`). Mirrors `dedupContentHash`'s per-type list.
 const QUIET_HOURS_RUN_EXEMPT: ReadonlySet<Watcher["type"]> = new Set(["wiki-committer"]);
 
 /** True when a watcher type still RUNS during the owner's quiet hours (its side
@@ -265,6 +265,77 @@ export function contentHash(alert: WatcherAlert): string | null {
   const fingerprint = `${sender}|${nouns.join(",")}`;
   if (!sender && nouns.length === 0) return null;
   return `h:${Bun.hash(fingerprint)}`;
+}
+
+/**
+ * The dedup hash for ONE alert, or null when content-hash dedup must not apply to it.
+ *
+ * Content-hash dedup exists to catch LLM-resummarized items (email/news/x) whose wording
+ * — and thus their alert id/text — drifts between runs. It is wrong wherever the id is
+ * already a complete dedup key, because then it only adds false drops and doubles slot
+ * use in the `MAX_NOTIFIED_IDS` window:
+ * - **anthropic**: ids are stable canonical GitHub URLs, and two distinct commits ("Update
+ *   README") fingerprint identically.
+ * - **wiki-gardener / consolidation-gardener**: the id is already per-run-unique (it embeds
+ *   the persisted proposal ids) while the summary names the same topic/cluster labels every
+ *   run — content-hash would false-drop a legitimate weekly notification.
+ * - **wiki-linter / wiki-committer**: the id is per-day-stable and the summary (identical
+ *   counts, "Swept N …") repeats across runs, so content-hash would wrongly suppress a
+ *   recurring report.
+ *
+ * The last clause is PER-ALERT, not per-type, and that distinction is load-bearing.
+ * `watcher-health` alerts (`source-health.ts` / `run-health.ts`) all share one prose
+ * skeleton — "⚠️ **Watcher health** — `<watcher>` source `<key>` has been **error** … The
+ * watcher itself is running fine" — which carries no `Fra|From … —` sender and yields the
+ * same proper nouns for every source of a watcher. Measured over real `buildHealthAlerts`
+ * output for the X row: four DISTINCT records (two `x:digest` episodes, `x:capture-gate`,
+ * `x:author-scores`) → 4 distinct ids but **1 distinct hash**. So on any watcher not in the
+ * type list above, the first health escalation stored a hash that silently swallowed every
+ * later escalation from a different source — and the 24-run re-escalation nag — until it
+ * aged out of the 600-entry window (≥ ~4.5 days on the X row). Their ids are already
+ * episode+bucket-stable by construction (`healthAlertId`), so id-dedup is complete and the
+ * hash adds nothing but the false drop. The type list is deliberately NOT extended with
+ * `x`: `x-digest-${Date.now()}` is per-run unique, so content-hash is the only thing
+ * catching a re-summarised identical digest there.
+ */
+export function dedupContentHash(
+  watcherType: WatcherType,
+  alert: WatcherAlert,
+): string | null {
+  const skipForType =
+    watcherType === "anthropic" ||
+    watcherType === "wiki-gardener" ||
+    watcherType === "wiki-linter" ||
+    watcherType === "wiki-committer" ||
+    watcherType === "consolidation-gardener";
+  if (skipForType || alert.source === "watcher-health") return null;
+  return contentHash(alert);
+}
+
+/**
+ * The runner's dedup filter: drop alerts already notified by id, then by content hash.
+ * Extracted so the real filter (not a re-implementation of it) is unit-testable — the
+ * per-alert `watcher-health` exemption above is invisible from `contentHash` alone.
+ */
+export function filterUnseenAlerts(
+  watcherType: WatcherType,
+  alerts: WatcherAlert[],
+  known: ReadonlySet<string>,
+  tag: string,
+): WatcherAlert[] {
+  return alerts.filter((a) => {
+    if (known.has(a.id)) {
+      log.debug("Dedup: skipped by ID \"{id}\"", { botName: tag, id: a.id });
+      return false;
+    }
+    const hash = dedupContentHash(watcherType, a);
+    if (hash && known.has(hash)) {
+      log.debug("Dedup: skipped by content hash {hash} — \"{summary}\"", { botName: tag, hash, summary: a.summary.slice(0, 60) });
+      return false;
+    }
+    log.debug("Dedup: NEW alert id=\"{id}\" hash={hash} — \"{summary}\"", { botName: tag, id: a.id, hash, summary: a.summary.slice(0, 60) });
+    return true;
+  });
 }
 
 /** Extract proper nouns: ALL-CAPS words, mid-sentence capitalized words, long numbers */
@@ -530,44 +601,7 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
 
       // Filter out already-notified: by message ID and by content hash
       const known = new Set(watcher.lastNotifiedIds);
-      // Content-hash dedup (below) exists to catch LLM-resummarized items
-      // (email/news/x) whose wording — and thus their alert id/text — drifts
-      // between runs. The anthropic watcher's ids are stable canonical GitHub
-      // URLs, so id-dedup is already complete; running content-hash on it only
-      // causes false drops (two distinct commits like "Update README" fingerprint
-      // identically) and doubles slot use in the 400-cap window. Skip it here.
-      // Anthropic ids are stable canonical URLs; the wiki-gardener alert id is
-      // already per-run-unique (embeds the persisted proposal ids) and its
-      // summary names the same topic labels across runs — content-hash dedup
-      // would false-drop a legitimate weekly notification. The wiki-linter's
-      // alert id is per-day-stable and its summary (identical counts) can repeat
-      // across weekly runs, so content-hash would wrongly suppress a recurring
-      // report — skip it for all three. The wiki-committer's alert id is likewise
-      // per-day-stable and its summary ("Swept N …") repeats across days, so
-      // content-hash would wrongly suppress a recurring daily sweep — skip it too.
-      // The consolidation-gardener alert id is already per-run-unique (embeds the
-      // persisted proposal ids) and its summary names the same cluster labels across
-      // runs, so content-hash would false-drop a legitimate weekly notification —
-      // skip it too (belt-and-suspenders with the per-run-unique id).
-      const skipContentHash =
-        watcher.type === "anthropic" ||
-        watcher.type === "wiki-gardener" ||
-        watcher.type === "wiki-linter" ||
-        watcher.type === "wiki-committer" ||
-        watcher.type === "consolidation-gardener";
-      const newAlerts = alerts.filter((a) => {
-        if (known.has(a.id)) {
-          log.debug("Dedup: skipped by ID \"{id}\"", { botName: tag, id: a.id });
-          return false;
-        }
-        const hash = skipContentHash ? null : contentHash(a);
-        if (hash && known.has(hash)) {
-          log.debug("Dedup: skipped by content hash {hash} — \"{summary}\"", { botName: tag, hash, summary: a.summary.slice(0, 60) });
-          return false;
-        }
-        log.debug("Dedup: NEW alert id=\"{id}\" hash={hash} — \"{summary}\"", { botName: tag, id: a.id, hash, summary: a.summary.slice(0, 60) });
-        return true;
-      });
+      const newAlerts = filterUnseenAlerts(watcher.type, alerts, known, tag);
 
       const visibleAlerts = newAlerts.filter((a) => !a.silent);
       const silentAlerts = newAlerts.filter((a) => a.silent);
@@ -629,7 +663,7 @@ export async function runWatchers(api: Api, botConfig: BotConfig, traceContext?:
 
       // Update last_run_at and keep a rolling window of IDs + content hashes
       const newEntries = newAlerts.flatMap((a) => {
-        const hash = skipContentHash ? null : contentHash(a);
+        const hash = dedupContentHash(watcher.type, a);
         const extras = a.trackingIds ?? [];
         return hash ? [a.id, hash, ...extras] : [a.id, ...extras];
       });

@@ -6,6 +6,8 @@ import {
   finishWatcherRun,
   coverageToRecord,
   contentHash,
+  dedupContentHash,
+  filterUnseenAlerts,
   extractProperNouns,
   formatAlerts,
   computeWatcherTimeoutMs,
@@ -32,6 +34,7 @@ import { checkWikiLinter } from "./wiki-linter.ts";
 import { checkWikiCommitter } from "./wiki-committer.ts";
 import { checkConsolidationGardener } from "./consolidation-gardener.ts";
 import type { Watcher, WatcherAlert } from "../types.ts";
+import { buildHealthAlerts, type SourceHealthMap } from "./source-health.ts";
 
 // ── extractProperNouns ───────────────────────────────────────────────
 
@@ -491,6 +494,77 @@ describe("dedup via contentHash", () => {
     // The exact match depends on proper noun extraction details
     expect(hash1).not.toBeNull();
     expect(hash2).not.toBeNull();
+  });
+});
+
+// ── health alerts must not content-hash-collide (real filter path) ────
+
+describe("filterUnseenAlerts: watcher-health alerts", () => {
+  // Real `buildHealthAlerts` output, not hand-written summaries: the collision is a
+  // property of that prose skeleton (no `Fra|From … —` sender, and the only proper
+  // noun surviving `extractProperNouns` comes from the shared boilerplate), so a
+  // fixture that paraphrased it would test nothing.
+  const NOW = Date.UTC(2026, 7, 18, 12, 0, 0);
+  const H = 3_600_000;
+  const WATCHER = "X Daily Digest";
+
+  const health = (map: SourceHealthMap) => buildHealthAlerts(WATCHER, map, NOW);
+
+  test("a second source's escalation survives the first source's stored hash", () => {
+    const [digest] = health({
+      "x:digest": { outcome: "error", at: NOW, consecutive: 3, lastOkAt: NOW - 30 * H, detail: "model call failed" },
+    });
+    const [authorScores] = health({
+      "x:author-scores": {
+        outcome: "error", at: NOW, consecutive: 3, lastOkAt: NOW - 70 * H,
+        detail: "author-scores unavailable — x-link capture disabled, x-post floors raised",
+      },
+    });
+    expect(digest!.id).not.toBe(authorScores!.id);
+    // The precondition this whole test exists for: distinct records, ONE hash.
+    expect(contentHash(digest!)).toBe(contentHash(authorScores!));
+
+    // Run 1 escalated x:digest, so the runner stored its id AND (pre-fix) its hash.
+    const known = new Set([digest!.id, contentHash(digest!)!]);
+    const kept = filterUnseenAlerts("x", [authorScores!], known, "jarvis");
+    expect(kept.map((a) => a.id)).toEqual([authorScores!.id]);
+  });
+
+  test("the same source's next nag bucket also survives", () => {
+    const [first] = health({
+      "x:capture-gate": { outcome: "error", at: NOW, consecutive: 3, lastOkAt: NOW - 30 * H },
+    });
+    const [nag] = health({
+      "x:capture-gate": { outcome: "error", at: NOW, consecutive: 27, lastOkAt: NOW - 30 * H },
+    });
+    expect(first!.id).not.toBe(nag!.id);
+    const known = new Set([first!.id, contentHash(first!)!]);
+    expect(filterUnseenAlerts("x", [nag!], known, "jarvis")).toHaveLength(1);
+  });
+
+  test("an id already notified is still deduped", () => {
+    const [alert] = health({
+      "x:digest": { outcome: "error", at: NOW, consecutive: 3, lastOkAt: NOW - 30 * H },
+    });
+    expect(filterUnseenAlerts("x", [alert!], new Set([alert!.id]), "jarvis")).toHaveLength(0);
+  });
+
+  test("GUARD: an ordinary x digest with a new id but identical content is still dropped", () => {
+    // The reason `x` must NOT be blanket-added to the skip list: its digest ids embed
+    // Date.now(), so content-hash is the only thing catching a re-summarised repeat.
+    const summary = "**Fra:** Ola Nordmann — Oppdatering fra Prosjekt Alpha";
+    const run1: WatcherAlert = { id: "x-digest-1000", source: "x", summary, urgency: "low" };
+    const run2: WatcherAlert = { id: "x-digest-2000", source: "x", summary, urgency: "low" };
+    const known = new Set([run1.id, contentHash(run1)!]);
+    expect(filterUnseenAlerts("x", [run2], known, "jarvis")).toHaveLength(0);
+  });
+
+  test("health alerts on a type that skips content-hash anyway are unaffected", () => {
+    const [alert] = health({
+      "tier2:llms": { outcome: "error", at: NOW, consecutive: 3, lastOkAt: NOW - 30 * H },
+    });
+    expect(dedupContentHash("anthropic", alert!)).toBeNull();
+    expect(dedupContentHash("x", alert!)).toBeNull();
   });
 });
 

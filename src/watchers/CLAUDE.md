@@ -774,6 +774,15 @@ under **`source:health`**, so there is no migration.
     window (already full on the live rows) dropped it, so the next chance to be heard was
     24 further failures: 48h on the 2h row, **~24 weeks** on the weekly one. The nag bucket
     (`HEALTH_RE_ESCALATE_EVERY`, 24) is what lets a long wedge speak up again.
+  - **Content-hash dedup is skipped PER ALERT for `source === "watcher-health"`**
+    (`dedupContentHash` in `runner.ts`), not by adding a type to the skip list. Every health
+    alert shares one prose skeleton — no `Fra|From … —` sender, and `extractProperNouns` sees
+    only boilerplate — so real `buildHealthAlerts` output for the X row fingerprints four
+    DISTINCT records (two `x:digest` episodes, `x:capture-gate`, `x:author-scores`) to **one**
+    hash: the first escalation stored it and silently swallowed every later one, and the nag,
+    for the ~4.5 days it took to age out of the 600-entry window. `x` itself must stay OUT of
+    the type list — `x-digest-${Date.now()}` is per-run unique, so content-hash is the only
+    thing catching a re-summarised identical digest.
 - **Staleness for the dashboard chip** — `max(3 × interval, 24h)`, ceilinged at
   `max(4 days, 2 × interval)`. A raw 3× multiplier is meaningless at both ends of our
   cadence range: 6h on the 2h Highlights row (twitchy) and 21 days on the 7d weekly row
