@@ -8,6 +8,7 @@ import { buildSummarySystemPrompt, runCaptureOneShot } from "../summaries/summar
 import { triggerSourceDraftFromCapture } from "../gardener/source-drafter-run.ts";
 import { setCandidateStatus, type SummaryCandidateKind } from "../db/summary-candidates.ts";
 import { extractDocLinks } from "../summaries/doc-links.ts";
+import { safeFetchText } from "../summaries/safe-fetch.ts";
 import { isDestinationUrl } from "../summaries/destination-url.ts";
 import {
   pickEnrichmentLink,
@@ -320,29 +321,16 @@ async function resolveContent(
  * Fetch a candidate URL directly. Clean `.md` for doc URLs; raw HTML otherwise (the
  * summarizer prompt copes with either, and the cap keeps a heavy HTML page from
  * overflowing the model context). Null on any failure — never throws.
+ *
+ * GUARDED (`safeFetchText`): the destination-keyed fallback reaches this with a URL
+ * a captured tweet chose, so a bare fetch here would reach loopback/tailnet services.
  */
 async function directFetchContent(url: string): Promise<ResolvedContent | null> {
-  try {
-    const fetchUrl = directFetchUrl(url);
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 20_000);
-    const res = await fetch(fetchUrl, { signal: controller.signal });
-    clearTimeout(timeout);
-    if (!res.ok) {
-      log.warn("Direct fetch of {url} returned {status}", { url: fetchUrl, status: res.status });
-      return null;
-    }
-    const text = await res.text();
-    if (!text.trim()) return null;
-    log.info("Resolved {url} via direct fetch ({len} chars)", { url: fetchUrl, len: text.length });
-    return { text: capContent(text) };
-  } catch (err) {
-    log.warn("Direct fetch of {url} failed: {error}", {
-      url,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return null;
-  }
+  const fetchUrl = directFetchUrl(url);
+  const text = await safeFetchText(fetchUrl);
+  if (!text?.trim()) return null;
+  log.info("Resolved {url} via direct fetch ({len} chars)", { url: fetchUrl, len: text.length });
+  return { text: capContent(text) };
 }
 
 /** Anthropic/Claude doc URLs serve clean markdown at `<path>.md`. */
@@ -377,6 +365,12 @@ async function fetchEnrichmentContent(
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 30_000);
     try {
+      // Deliberately NOT routed through `safeFetchText`: `baseUrl` is huginn's
+      // knowledge API from OUR OWN config (loopback in every real deployment), and
+      // the only attacker-chosen part — the video id — is already narrowed to 11
+      // id-safe chars by `youTubeVideoId`. Guarding it would refuse the loopback
+      // address the endpoint legitimately lives on. The ARTICLE branch below is the
+      // one that follows a third-party URL, and it IS guarded.
       const res = await fetch(`${baseUrl}/api/youtube/transcript/${id}`, {
         signal: controller.signal,
       });
@@ -398,26 +392,11 @@ async function fetchEnrichmentContent(
     }
   }
 
-  // article: direct fetch (mirrors the anthropic direct-fetch fallback).
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 20_000);
-  try {
-    const res = await fetch(picked.url, { signal: controller.signal });
-    clearTimeout(timeout);
-    if (!res.ok) {
-      log.warn("Article fetch of {url} returned {status}", { url: picked.url, status: res.status });
-      return null;
-    }
-    const text = await res.text();
-    return text.trim() ? text : null;
-  } catch (err) {
-    clearTimeout(timeout);
-    log.warn("Article fetch of {url} failed: {error}", {
-      url: picked.url,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return null;
-  }
+  // article: GUARDED direct fetch (mirrors the anthropic direct-fetch fallback).
+  // `picked.url` came out of the captured tweet's `**Links:**` footer — a third party
+  // picked it — so it goes through the address/redirect/content-type/size guard.
+  const text = await safeFetchText(picked.url);
+  return text?.trim() ? text : null;
 }
 
 /**

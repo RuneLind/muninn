@@ -92,12 +92,27 @@ let transcriptOk = true;
 let transcriptText = "TRANSCRIPT: the linked 28-minute video walks through agent loops.";
 let articleOk = true;
 let articleText = "ARTICLE BODY: the linked long-form write-up.";
+/** Every URL global fetch was asked for — a refused URL must never appear here. */
+let fetchedUrls: string[] = [];
 
 const originalFetch = globalThis.fetch;
+/**
+ * The two fetches that follow a third-party URL (article enrichment + the direct
+ * fallback) now go through `../summaries/safe-fetch.ts`, which reads `status`,
+ * `headers` and `body` — so these stand-ins are REAL `Response`s, not `{ok, text}`
+ * literals: a stub without a content-type header is refused by the guard, which is
+ * the guard doing its job, not a mock detail worth faking around.
+ */
 function installFetchMock() {
-  // @ts-expect-error — minimal Response stand-in is enough for the summarizer.
+  const body = (text: string, ok: boolean, type = "text/html; charset=utf-8") =>
+    new Response(ok ? text : "not found", {
+      status: ok ? 200 : 404,
+      headers: { "content-type": type },
+    });
+  // @ts-expect-error — the Response subset the summarizer uses.
   globalThis.fetch = async (input: string | URL) => {
     const url = typeof input === "string" ? input : input.toString();
+    fetchedUrls.push(url);
     if (url.includes("/api/anthropic-summaries/ingest")) {
       return {
         ok: ingestOk,
@@ -106,7 +121,7 @@ function installFetchMock() {
         text: async () => JSON.stringify(ingestBody),
       };
     }
-    // YouTube transcript enrichment (X path).
+    // YouTube transcript enrichment (X path) — NOT guarded (our own baseUrl).
     if (url.includes("/api/youtube/transcript/")) {
       return {
         ok: transcriptOk,
@@ -114,22 +129,30 @@ function installFetchMock() {
         json: async () => ({ transcript: transcriptText }),
       };
     }
-    // Article enrichment — a direct fetch of the external destination URL.
-    if (url.startsWith("https://article.test/")) {
-      return {
-        ok: articleOk,
-        status: articleOk ? 200 : 404,
-        text: async () => articleText,
-      };
+    // Article enrichment — a guarded direct fetch of the external destination URL.
+    if (url.startsWith("https://article.test/")) return body(articleText, articleOk);
+    // A public-looking host that bounces to a loopback service — the redirect hop
+    // is where the guard has to catch this one.
+    if (url.startsWith("https://redirector.test/")) {
+      return new Response(null, {
+        status: 302,
+        headers: { location: "http://127.0.0.1:3010/api/activity" },
+      });
     }
-    // Direct-fetch fallback.
-    return {
-      ok: directOk,
-      status: directOk ? 200 : 404,
-      text: async () => directText,
-    };
+    // Direct-fetch fallback (guarded).
+    return body(directText, directOk);
   };
 }
+
+/**
+ * The guard RESOLVES a hostname and judges the address, so the `.test` hosts these
+ * tests use would be refused as unresolvable — DNS is faked here exactly the way
+ * `fetch` is, mapping every NAME to a public address. IP literals skip DNS entirely,
+ * so the loopback-refusal test below still exercises the real refusal.
+ */
+mock.module("node:dns/promises", () => ({
+  lookup: async () => [{ address: "203.0.113.10", family: 4 }],
+}));
 
 const { summarizeCandidate } = await import("./summarizer.ts");
 const { createJob, getJob } = await import("./state.ts");
@@ -158,6 +181,7 @@ beforeEach(() => {
   articleOk = true;
   articleText = "ARTICLE BODY: the linked long-form write-up.";
   sourceDraftCalls = [];
+  fetchedUrls = [];
   installFetchMock();
 });
 
@@ -403,6 +427,41 @@ test("X candidate: a failed link fetch degrades to tweet-only content, job still
   // No enrichment framing when nothing was folded in.
   expect(lastSystemPrompt).not.toContain("SUPPORTING CONTEXT");
   expect(statusCalls[0]!.status).toBe("summarized");
+});
+
+test("X candidate: a link pointing at OUR OWN dashboard is refused and degrades to tweet-only", async () => {
+  // The contract: a tweet naming a loopback service gets the SAME outcome as a dead
+  // link — tweet-only text, job complete, candidate summarized — and the dashboard
+  // is never contacted, so nothing internal can reach the summary or the wiki.
+  docText = xDocWithLink("http://127.0.0.1:3010/api/activity");
+  const jobId = createJob("x-ssrf", "@someone: look at this", X_TWEET_URL);
+  await summarizeCandidate(jobId, "x-ssrf", "@someone: look at this", X_TWEET_URL, config, bot, X_DOC_ID, "x-post");
+
+  const job = getJob(jobId)!;
+  expect(job.status).toBe("complete");
+  expect(lastPrompt).toContain("just dropped a 28-minute video");
+  expect(lastPrompt).not.toContain("LINKED CONTENT");
+  expect(lastSystemPrompt).not.toContain("SUPPORTING CONTEXT");
+  expect(statusCalls[0]!.status).toBe("summarized");
+  // Refused BEFORE the socket: the guard never handed the URL to fetch.
+  expect(fetchedUrls.some((u) => u.includes("127.0.0.1:3010"))).toBe(false);
+});
+
+test("X candidate: a public link that REDIRECTS to our dashboard is refused at the hop", async () => {
+  // The interesting shape — the footer URL passes every check a link-filter can do
+  // and only the redirect target is internal. Same degrade as a dead link.
+  docText = xDocWithLink("https://redirector.test/go");
+  const jobId = createJob("x-redir", "@someone: look at this", X_TWEET_URL);
+  await summarizeCandidate(jobId, "x-redir", "@someone: look at this", X_TWEET_URL, config, bot, X_DOC_ID, "x-post");
+
+  const job = getJob(jobId)!;
+  expect(job.status).toBe("complete");
+  expect(lastPrompt).toContain("just dropped a 28-minute video");
+  expect(lastPrompt).not.toContain("LINKED CONTENT");
+  expect(statusCalls[0]!.status).toBe("summarized");
+  // Hop 1 was fetched (it looked fine); hop 2 never was.
+  expect(fetchedUrls.some((u) => u.startsWith("https://redirector.test/"))).toBe(true);
+  expect(fetchedUrls.some((u) => u.includes("127.0.0.1:3010"))).toBe(false);
 });
 
 // --- Destination-keyed pointer rows (x-link wave collapse) ---
