@@ -441,9 +441,19 @@ describe("runSynthesisOneShot — tool fence + observability identity", () => {
       const roots = save.mock.calls
         .map((c) => c[0] as { kind: string; name: string; platform?: string | null })
         .filter((s) => s.kind === "root");
-      expect(roots).toHaveLength(1);
-      expect(roots[0]!.name).toBe("consolidation:draft");
-      expect(roots[0]!.platform).toBe("capture");
+      // Filter by name so another root minted in the same window can't turn this
+      // into a flake; a zero-length result almost always means tracing is OFF in
+      // this environment (`TRACING_ENABLED=false`), so say so.
+      const ours = roots.filter((s) => s.name === "consolidation:draft");
+      if (ours.length === 0) {
+        throw new Error(
+          `no consolidation:draft root span was inserted — the seam did not construct a ` +
+            `Tracer with traceName "consolidation:draft" (or TRACING_ENABLED=false in this env, ` +
+            `which disables the insert). roots seen: ${JSON.stringify(roots.map((r) => r.name))}`,
+        );
+      }
+      expect(ours).toHaveLength(1);
+      expect(ours[0]!.platform).toBe("capture");
     } finally {
       save.mockRestore();
       update.mockRestore();

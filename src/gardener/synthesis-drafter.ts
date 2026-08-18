@@ -21,7 +21,9 @@
  * member bodies are delimited as untrusted source material, and the one-shot runs
  * through the shared FENCED seam (`runFencedOneShot` — traced AND stripped of the
  * file-writing tools, never bare `executeOneShot`) so the draft is visible on
- * `/traces` + `/agents` and cannot be written to disk instead of returned.
+ * `/traces` + `/agents` and — on the connectors where `excludedTools` binds — cannot
+ * be silently written to disk instead of returned (see the fence caveats in
+ * `src/gardener/CLAUDE.md`: openai-compat ignores the list, MCP tools are unfenced).
  */
 
 import path from "node:path";
