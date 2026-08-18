@@ -10,13 +10,19 @@
  * from losing them (the 2026-07-23 huginn-jarvis incident).
  *
  * On a machine running the repo-sync loop (`SYNC_REPOS`, `src/sync/`) this
- * sweeper is SUBSUMED for every repo the loop owns in `wiki` mode and stands
- * down — the loop does the same job with a quiet period and a rebase, and
- * running both would void both guarantees.
+ * sweeper can be SUBSUMED for a repo the loop owns in `wiki` mode and stand down
+ * — the loop does the same job with a quiet period and a rebase, and running both
+ * would void both guarantees. But CONFIGURATION does not subsume anything:
+ * `syncSubsumesSweeper` stands this sweeper down only on EVIDENCE the loop
+ * reached its commit path inside ~26h, plus the one `blocked` case where the
+ * sweeper is unsafe rather than redundant. The warn is decoupled from the
+ * stand-down, so a loop that has not committed in ~26h says so once a day even
+ * while it subsumes.
  *
  * Per tick, for the bot's `wikiDir`:
  *  - resolve the git toplevel; not-a-repo ⇒ no-op.
- *  - covered by a `wiki`-mode `SYNC_REPOS` entry ⇒ no-op (subsumed).
+ *  - covered by a `wiki`-mode `SYNC_REPOS` entry WITH evidence (or blocked) ⇒
+ *    no-op (subsumed) — but warn first if the loop has not committed in ~26h.
  *  - off the default branch ⇒ no-op (a feature checkout is left alone — the same
  *    rule the commit seam applies; committing onto a feature branch would be
  *    surprising).
@@ -114,11 +120,30 @@ export async function checkWikiCommitter(
   // page-loss shape this watcher exists for. Nor is "the loop ran" evidence: a
   // tick that errors at the fetch (origin unreachable) commits nothing, so
   // `syncSubsumesSweeper` requires a tick that reached the LOCAL section inside
-  // ~26h; short of that we sweep AND say the loop looks configured-but-idle.
-  // Genuine subsumption is marked `ok`, not `skipped`:
-  // the work IS being done, by the loop, so a streak would escalate a health
-  // alert on a healthy configuration.
+  // ~26h. Genuine subsumption is marked `ok`, not `skipped`: the work IS being
+  // done, by the loop, so a streak would escalate a health alert on a healthy
+  // configuration.
+  //
+  // The WARN is deliberately decoupled from the stand-down and emitted FIRST.
+  // `blocked` subsumes regardless of freshness (the loop refused an unmerged
+  // tree and this sweeper, having no pre-flight of its own, would commit the
+  // half-finished merge) — but "nobody has committed this wiki in ~26h" is still
+  // true, and the one thing that must never happen is a silent stand-down over a
+  // wiki nothing is committing.
   const subsumption = await syncSubsumesSweeper(top);
+  if (subsumption.configuredButIdle) {
+    log.warn(
+      "Wiki-committer: {top} is configured for the SYNC_REPOS loop but it has not reached a commit pass in ~26h{tail}: check the 15-min tick is firing, that origin is reachable and the loop is not pre-flight blocked, or that muninn did not just restart (the sync ledger is in-memory and refills on the next tick)",
+      {
+        botName: name,
+        top,
+        repo: subsumption.name,
+        tail: subsumption.subsumed
+          ? " (still standing down — the loop is blocked)"
+          : " (sweeping anyway)",
+      },
+    );
+  }
   if (subsumption.subsumed) {
     log.info(
       "Wiki-committer: {top} is covered by the SYNC_REPOS sync loop — sweep subsumed, standing down",
@@ -126,12 +151,6 @@ export async function checkWikiCommitter(
     );
     health.mark(SRC, "ok");
     return health.finish();
-  }
-  if (subsumption.configuredButIdle) {
-    log.warn(
-      "Wiki-committer: {top} is configured for the SYNC_REPOS loop but it has not committed in ~26h — sweeping anyway (is the launchd tick firing? is origin reachable?)",
-      { botName: name, top, repo: subsumption.name },
-    );
   }
 
   if (!(await onDefaultBranch(top))) {

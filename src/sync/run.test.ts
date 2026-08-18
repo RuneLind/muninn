@@ -951,8 +951,10 @@ describe("syncRepo", () => {
     expect(r.state).toBe("error");
     expect(r.reason).toContain("git fetch failed");
     expect(r.committed).toEqual([]);
-    // The RUN is still recorded — the card has to show the failing tick.
+    // The RUN is still recorded — the card has to show the failing tick — but
+    // the EVIDENCE clock stays null: nothing reached the commit path.
     expect(getSyncLedgerEntry("fixture").lastRunMs).not.toBeNull();
+    expect(getSyncLedgerEntry("fixture").lastLocalSectionMs).toBeNull();
     // …and the page is still sitting there uncommitted, which is exactly what
     // the sweeper exists to catch.
     expect((await git(f.A, ["status", "--porcelain"])).out).toContain("Settled.md");
@@ -1028,7 +1030,88 @@ describe("syncRepo", () => {
 
     const res = await syncSubsumesSweeper(top, { repos });
     expect(res.subsumed).toBe(true);
-    expect(res.configuredButIdle).toBe(false);
+    // Subsuming is NOT a clean bill of health: this loop has committed nothing,
+    // and the warn is decoupled from the stand-down precisely so a repo that
+    // stays blocked for a week still says so once a day.
+    expect(res.configuredButIdle).toBe(true);
+  });
+
+  test("a PRE-FLIGHT blocked tick subsumes too — and still reports the loop idle", async () => {
+    // The pre-flight stop happens BEFORE the fetch, so on a cold ledger it is the
+    // only thing the ledger knows: no local section has ever run. It must still
+    // subsume (the sweeper has no unmerged-paths pre-flight of its own —
+    // `listWikiSubtreeDirty` treats `UU` as ordinary dirt — so it would stage a
+    // human's half-finished merge), and must still WARN, because "nobody is
+    // committing this wiki" is true regardless of whose fault it is.
+    const f = await makeFixture(base);
+    const repos = [wikiRepo(f)];
+    const top = (await git(f.A, ["rev-parse", "--show-toplevel"])).out;
+
+    const page = path.join(f.wikiA, "concepts", "Settled.md");
+    await writeFile(page, "# Settled\n");
+    await ageFile(page);
+    // A real leftover from an interrupted merge — the file git itself checks for.
+    await writeFile(path.join(f.A, ".git", "MERGE_HEAD"), "deadbeef\n");
+
+    const r = await syncRepo(wikiRepo(f), deps());
+    expect(r.state).toBe("blocked");
+    expect(r.reason).toContain("MERGE_HEAD");
+    expect(r.committed).toEqual([]);
+    expect(getSyncLedgerEntry("fixture").lastLocalSectionMs).toBeNull();
+
+    const res = await syncSubsumesSweeper(top, { repos });
+    expect(res.subsumed).toBe(true);
+    expect(res.configuredButIdle).toBe(true);
+
+    await rm(path.join(f.A, ".git", "MERGE_HEAD"), { force: true });
+  });
+
+  test("a TRANSIENT tick does not re-arm subsumption after an error week", async () => {
+    // `state` is a one-tick sample, not evidence about the window. A single tick
+    // that happened to land while another git process held `.git/index.lock`
+    // would, if `state !== \"error\"` were the test, buy another 26h of silence in
+    // the middle of an outage during which nothing has been committed at all.
+    const f = await makeFixture(base);
+    const repos = [wikiRepo(f)];
+    const top = (await git(f.A, ["rev-parse", "--show-toplevel"])).out;
+
+    const page = path.join(f.wikiA, "concepts", "Settled.md");
+    await writeFile(page, "# Settled\n");
+    await ageFile(page);
+
+    await git(f.A, ["remote", "set-url", "origin", path.join(base, "gone.git")]);
+    expect((await syncRepo(wikiRepo(f), deps())).state).toBe("error");
+
+    // A YOUNG index.lock — the self-healing race, reported `transient`.
+    const lock = path.join(f.A, ".git", "index.lock");
+    await writeFile(lock, "");
+    const transient = await syncRepo(wikiRepo(f), deps());
+    expect(transient.state).toBe("transient");
+    await rm(lock, { force: true });
+
+    const res = await syncSubsumesSweeper(top, { repos });
+    expect(res.subsumed).toBe(false);
+    expect(res.configuredButIdle).toBe(true);
+  });
+
+  test("a PAUSED tick with no commit evidence hands the repo back to the sweeper", async () => {
+    // Harmless by construction: the sweeper applies the SAME off-default-branch
+    // rule to itself (`onDefaultBranch(top)` guard in
+    // `src/watchers/wiki-committer.ts`), so handing it a paused repo produces a
+    // `skipped` no-op — not a commit onto someone's feature branch. What it does
+    // buy is the warn: a repo left on a branch for a week is a repo nobody is
+    // committing, and that should be said out loud once a day.
+    const f = await makeFixture(base);
+    const repos = [wikiRepo(f)];
+    const top = (await git(f.A, ["rev-parse", "--show-toplevel"])).out;
+
+    await git(f.A, ["checkout", "-q", "-b", "feature"]);
+    const r = await syncRepo(wikiRepo(f), deps());
+    expect(r.state).toBe("paused");
+
+    const res = await syncSubsumesSweeper(top, { repos });
+    expect(res.subsumed).toBe(false);
+    expect(res.configuredButIdle).toBe(true);
   });
 
   test("an uncovered repo is not 'configured but idle' — it is simply not ours", async () => {

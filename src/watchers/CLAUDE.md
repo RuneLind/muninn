@@ -1460,11 +1460,20 @@ losing them (the 2026-07-23 huginn-jarvis incident).
   fix for it. **Nor is a tick that RAN evidence:** a tick whose fetch fails
   (unreachable origin) commits nothing and used to refresh the freshness clock
   anyway, holding the sweeper down for as long as the machine stayed offline —
-  hence the local-section clock above, and hence only `error`-shaped ticks fall
-  through (a `blocked` tick must still subsume; the sweeper has no unmerged-paths
-  pre-flight of its own). A covered-but-idle repo therefore gets swept AND a
-  `log.warn` naming the idle loop. With `SYNC_REPOS` unset the sweeper behaves
-  exactly as before.
+  hence the local-section clock above. **One state subsumes without evidence:**
+  `blocked`, because the sweeper has no unmerged-paths pre-flight of its own
+  (`listWikiSubtreeDirty` treats a `UU` entry as ordinary dirt) and would commit a
+  human's half-finished merge; the conditions producing `blocked` persist across
+  ticks until a human clears them, so a one-tick sample is sound there. Everything
+  else — `error`, `transient`, `paused`, no-upstream, a cold ledger — falls through
+  once evidence is stale; `paused` harmlessly, since this sweeper no-ops off the
+  default branch itself (the `onDefaultBranch` guard below). **The warn is decoupled
+  from the stand-down**: `configuredButIdle` is simply "no commit pass in ~26h", so a
+  loop that has committed nothing gets a `log.warn` naming the three causes worth
+  checking — the 15-min tick not firing, origin unreachable / the loop pre-flight
+  blocked, or a muninn restart inside the last 15 min (the sync ledger is in-memory)
+  — even in the `blocked` case where it still stands down. With `SYNC_REPOS` unset
+  the sweeper behaves exactly as before.
 - Per tick, for the bot's `wikiDir`: resolve the git toplevel (reusing the
   exported `gitToplevel`/`onDefaultBranch` from `commit.ts`, not reimplemented);
   **not-a-repo / off-default-branch ⇒ no-op** (a feature checkout is left for a

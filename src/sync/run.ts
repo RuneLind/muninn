@@ -114,6 +114,10 @@ export interface RepoSyncResult extends RepoCard {
   /** Ledger echo, so the card needs no second endpoint. */
   lastRunMs: number | null;
   lastSuccessMs: number | null;
+  /** Last tick that reached the local (commit) section — the clock
+   *  `syncSubsumesSweeper` reads. Rendered beside "last sync" because the two
+   *  differing IS the diagnosis: ticking but never committing. */
+  lastLocalSectionMs: number | null;
   consecutiveDeferrals: number;
 }
 
@@ -479,6 +483,7 @@ export async function readRepoStatus(repo: SyncRepo, now: number): Promise<RepoS
     durationMs: 0,
     lastRunMs: led.lastRunMs,
     lastSuccessMs: led.lastSuccessMs,
+    lastLocalSectionMs: led.lastLocalSectionMs,
     consecutiveDeferrals: led.consecutiveDeferrals,
     ...(led.lastError ? { error: led.lastError } : {}),
   };
@@ -925,6 +930,13 @@ export async function syncRepo(
    * the loop was in a position to commit at all. It defaults to FALSE so a new
    * early return can only ever under-claim: the failure mode being guarded
    * against is a tick claiming coverage it never provided.
+   *
+   * Same direction for the outer catch: a throw AFTER the local section (the
+   * push, the cache refresh) records `localSectionRan: false` even though the
+   * loop did commit. Accepted — the cost is a sweeper that may run beside a
+   * committing loop, which is the same collision two machines already survive,
+   * and it is strictly safer than the alternative of claiming a commit pass that
+   * a `git rebase` explosion may have rolled back.
    */
   const finish = (
     card: RepoCard,
@@ -948,6 +960,7 @@ export async function syncRepo(
       durationMs: now - startedAt,
       lastRunMs: null,
       lastSuccessMs: null,
+      lastLocalSectionMs: null,
       consecutiveDeferrals: 0,
       ...extra,
     };
@@ -964,6 +977,7 @@ export async function syncRepo(
       : recordLedger(repo.name, result, now, localSectionRan);
     result.lastRunMs = led.lastRunMs;
     result.lastSuccessMs = led.lastSuccessMs;
+    result.lastLocalSectionMs = led.lastLocalSectionMs;
     result.consecutiveDeferrals = led.consecutiveDeferrals;
     result.tone = syncTone({ ...led, state, reason: result.reason }, now);
     result.label = describeSyncState(state, result.reason);
@@ -1268,15 +1282,32 @@ export const SYNC_SUBSUME_MAX_AGE_MS = 26 * 60 * 60 * 1000;
  * clock is `lastLocalSectionMs`: stamped only once a tick reaches the local
  * section (status → commit → rebase).
  *
- * The fall-through is narrow ON PURPOSE — only `error`-shaped ticks that never
- * got there. Every other pre-local-section stop still subsumes, because the
- * sweeper is not a safe substitute for the loop in those states: `blocked` is
- * the unmerged-paths refusal, and the sweeper has no pre-flight of its own
- * (`listWikiSubtreeDirty` treats a `UU` entry as ordinary dirt), so it would
- * stage and commit a human's half-finished merge.
+ * So EVIDENCE is the only thing that subsumes, with exactly one exception:
  *
- * `configuredButIdle` distinguishes "this repo is not ours" (sweep normally, say
- * nothing) from "ours but the loop looks dead" (sweep AND warn).
+ *  - fresh `lastLocalSectionMs` — the loop demonstrably reached its commit path
+ *    inside the window; sweeping on top of it would fight it.
+ *  - `state === "blocked"` — subsumes REGARDLESS of freshness, because the
+ *    sweeper is not a safe substitute there at all: `blocked` is the
+ *    unmerged-paths / interrupted-operation refusal and the sweeper has no
+ *    pre-flight of its own (`listWikiSubtreeDirty` treats a `UU` entry as
+ *    ordinary dirt), so it would stage and commit a human's half-finished merge.
+ *    A one-tick sample is sound here only because the conditions that produce
+ *    `blocked` (a leftover MERGE_HEAD, a stale index.lock, conflict markers)
+ *    persist across ticks until a human clears them.
+ *
+ * Everything else — `error`, `transient`, `paused`, no-upstream, not-a-repo, a
+ * cold ledger — falls through to the sweeper once the evidence goes stale. It
+ * used to be `fresh(lastRunMs) && state !== "error"`, which meant ANY tick that
+ * stopped before the local section in a non-error state (a young index.lock, a
+ * feature-branch checkout, a missing upstream) renewed the stand-down every 15
+ * minutes forever. `state` is a one-tick SAMPLE, not a claim about the window.
+ * `paused` falling through is harmless: the sweeper applies the same
+ * off-default-branch rule to itself (`onDefaultBranch(top)` guard,
+ * `src/watchers/wiki-committer.ts:154`) and no-ops.
+ *
+ * `configuredButIdle` is DECOUPLED from `subsumed`: it is simply "no commit pass
+ * inside the window", so a repo that subsumes on `blocked` for a week still
+ * warns once a day. Only "this repo is not ours" is silent.
  */
 export async function syncSubsumesSweeper(
   top: string,
@@ -1287,11 +1318,10 @@ export async function syncSubsumesSweeper(
   const now = opts.now ?? Date.now();
   const led = getSyncLedgerEntry(covering.name);
   const fresh = (at: number | null) => at !== null && now - at <= SYNC_SUBSUME_MAX_AGE_MS;
-  // A recent local pass is the evidence. Failing that, a recent tick that
-  // stopped for a reason the sweeper cannot help with either still subsumes —
-  // and `state: "unknown"` cannot reach here, since it implies `lastRunMs` null.
-  const subsumed = fresh(led.lastLocalSectionMs) || (fresh(led.lastRunMs) && led.state !== "error");
-  return { subsumed, configuredButIdle: !subsumed, name: covering.name };
+  const committedRecently = fresh(led.lastLocalSectionMs);
+  const subsumed = committedRecently || led.state === "blocked";
+  // Not `!subsumed`: a blocked loop stands the sweeper down AND is idle.
+  return { subsumed, configuredButIdle: !committedRecently, name: covering.name };
 }
 
 /** Sync every configured repo, sequentially (they contend on disk and on the

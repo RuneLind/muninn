@@ -156,14 +156,29 @@ Two things the deferral REPORT must not conflate, both fixed after they shipped:
   commits". So the clock is stamped only once a tick reaches step 5, the local section,
   and `finish`'s `localSectionRan` flag defaults to FALSE so a new early return can
   only ever under-claim coverage.
-  **The fall-through to the sweeper is narrow on purpose: `error`-shaped ticks only.**
-  Every other pre-local-section stop (`blocked`, `paused`, `transient`) still subsumes
-  on a fresh `lastRunMs`, because the sweeper is not a safe substitute there —
-  `blocked` is the unmerged-paths refusal and the sweeper has NO pre-flight of its own
-  (`listWikiSubtreeDirty` treats a `UU` entry as ordinary dirt), so routing a blocked
-  tick to it would stage and commit a human's half-finished merge. Residual, accepted:
-  a healthy pass still buys ~26h of grace, so at most one daily sweep is skipped after
-  the remote goes away.
+  **Evidence is the ONLY thing that subsumes, with one exception.** `subsumed =
+  fresh(lastLocalSectionMs) || state === "blocked"`. `blocked` subsumes regardless of
+  freshness because the sweeper is not a safe substitute there at all: it is the
+  unmerged-paths / interrupted-operation refusal and the sweeper has NO pre-flight of
+  its own (`listWikiSubtreeDirty` treats a `UU` entry as ordinary dirt), so routing a
+  blocked tick to it would stage and commit a human's half-finished merge — and the
+  conditions that produce `blocked` (a leftover `MERGE_HEAD`, a stale `index.lock`,
+  conflict markers) persist across ticks until a human clears them, which is what
+  makes a one-tick sample sound there and nowhere else. Every OTHER state — `error`,
+  `transient`, `paused`, no-upstream, not-a-repo, a cold ledger — falls through once
+  the evidence is stale; `paused` harmlessly, since the sweeper applies the same
+  off-default-branch rule to itself and no-ops (`onDefaultBranch` guard,
+  `src/watchers/wiki-committer.ts`). The rejected spelling was `fresh(lastRunMs) &&
+  state !== "error"`: `lastRunMs` is re-stamped every 15 minutes, so ANY tick stopping
+  before the local section in a non-error state renewed the stand-down forever — and a
+  single `transient` tick (a young `index.lock`) re-armed 26h of silence in the middle
+  of an offline week.
+  **The warn is DECOUPLED from the stand-down:** `configuredButIdle =
+  !fresh(lastLocalSectionMs)`, so a loop that has not committed in ~26h always warns,
+  including while `blocked` subsumes — the one thing that must never happen is a
+  silent stand-down over a wiki nothing is committing. Residual, accepted: a healthy
+  pass still buys ~26h of grace, so at most ONE daily sweep is skipped after the remote
+  goes away; and `blocked` subsumes for as long as it lasts, but never silently.
 - **A `plain`/`status-only` repo containing a registered wiki takes that wiki's
   write lock.** Its rebase rewrites the wiki's working tree, and the wiki-mode
   config error actively steers people into this shape ("… or use mode plain"). The

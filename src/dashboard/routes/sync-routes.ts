@@ -81,6 +81,7 @@ function errorRow(repo: { name: string; mode: RepoSyncResult["mode"]; path: stri
     durationMs: 0,
     lastRunMs: null,
     lastSuccessMs: null,
+    lastLocalSectionMs: null,
     consecutiveDeferrals: 0,
   };
 }
