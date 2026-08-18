@@ -6,6 +6,9 @@ import {
   finishWatcherRun,
   coverageToRecord,
   contentHash,
+  dedupContentHash,
+  filterUnseenAlerts,
+  notifiedEntriesFor,
   extractProperNouns,
   formatAlerts,
   computeWatcherTimeoutMs,
@@ -32,6 +35,7 @@ import { checkWikiLinter } from "./wiki-linter.ts";
 import { checkWikiCommitter } from "./wiki-committer.ts";
 import { checkConsolidationGardener } from "./consolidation-gardener.ts";
 import type { Watcher, WatcherAlert } from "../types.ts";
+import { buildHealthAlerts, type SourceHealthMap } from "./source-health.ts";
 
 // ── extractProperNouns ───────────────────────────────────────────────
 
@@ -491,6 +495,165 @@ describe("dedup via contentHash", () => {
     // The exact match depends on proper noun extraction details
     expect(hash1).not.toBeNull();
     expect(hash2).not.toBeNull();
+  });
+});
+
+// ── health alerts must not content-hash-collide (real filter path) ────
+
+describe("filterUnseenAlerts: watcher-health alerts", () => {
+  // Real `buildHealthAlerts` output, not hand-written summaries: the collision is a
+  // property of that prose skeleton (no `Fra|From … —` sender, and the only proper
+  // noun surviving `extractProperNouns` comes from the shared boilerplate), so a
+  // fixture that paraphrased it would test nothing.
+  const NOW = Date.UTC(2026, 7, 18, 12, 0, 0);
+  const H = 3_600_000;
+  const WATCHER = "X Daily Digest";
+
+  const health = (map: SourceHealthMap) => buildHealthAlerts(WATCHER, map, NOW);
+
+  test("a second source's escalation survives the first source's stored hash", () => {
+    const [digest] = health({
+      "x:digest": { outcome: "error", at: NOW, consecutive: 3, lastOkAt: NOW - 30 * H, detail: "model call failed" },
+    });
+    const [authorScores] = health({
+      "x:author-scores": {
+        outcome: "error", at: NOW, consecutive: 3, lastOkAt: NOW - 70 * H,
+        detail: "author-scores unavailable — x-link capture disabled, x-post floors raised",
+      },
+    });
+    expect(digest!.id).not.toBe(authorScores!.id);
+    // The precondition this whole test exists for: distinct records, ONE hash.
+    expect(contentHash(digest!)).toBe(contentHash(authorScores!));
+
+    // Run 1 escalated x:digest, so the runner stored its id AND (pre-fix) its hash.
+    const known = new Set([digest!.id, contentHash(digest!)!]);
+    const kept = filterUnseenAlerts("x", [authorScores!], known, "jarvis");
+    expect(kept.map((a) => a.id)).toEqual([authorScores!.id]);
+  });
+
+  test("the same source's next nag bucket also survives", () => {
+    const [first] = health({
+      "x:capture-gate": { outcome: "error", at: NOW, consecutive: 3, lastOkAt: NOW - 30 * H },
+    });
+    const [nag] = health({
+      "x:capture-gate": { outcome: "error", at: NOW, consecutive: 27, lastOkAt: NOW - 30 * H },
+    });
+    expect(first!.id).not.toBe(nag!.id);
+    const known = new Set([first!.id, contentHash(first!)!]);
+    expect(filterUnseenAlerts("x", [nag!], known, "jarvis")).toHaveLength(1);
+  });
+
+  test("an id already notified is still deduped", () => {
+    const [alert] = health({
+      "x:digest": { outcome: "error", at: NOW, consecutive: 3, lastOkAt: NOW - 30 * H },
+    });
+    expect(filterUnseenAlerts("x", [alert!], new Set([alert!.id]), "jarvis")).toHaveLength(0);
+  });
+
+  test("GUARD: an ordinary x digest with a new id but identical content is still dropped", () => {
+    // The reason `x` must NOT be blanket-added to the skip list: its digest ids embed
+    // Date.now(), so content-hash is the only thing catching a re-summarised repeat.
+    const summary = "**Fra:** Ola Nordmann — Oppdatering fra Prosjekt Alpha";
+    const run1: WatcherAlert = { id: "x-digest-1000", source: "x", summary, urgency: "low" };
+    const run2: WatcherAlert = { id: "x-digest-2000", source: "x", summary, urgency: "low" };
+    const known = new Set([run1.id, contentHash(run1)!]);
+    expect(filterUnseenAlerts("x", [run2], known, "jarvis")).toHaveLength(0);
+  });
+
+  test("health alerts on a type that skips content-hash anyway are unaffected", () => {
+    // `x:digest`, not `tier2:llms`: this fixture's watcher is the X row, and a source key
+    // borrowed from the anthropic watcher would read as an anthropic record filed under an
+    // X watcher name.
+    const [alert] = health({
+      "x:digest": { outcome: "error", at: NOW, consecutive: 3, lastOkAt: NOW - 30 * H },
+    });
+    expect(dedupContentHash("anthropic", alert!)).toBeNull();
+    expect(dedupContentHash("x", alert!)).toBeNull();
+  });
+});
+
+// ── the TYPE-LIST half of dedupContentHash, through the real filter ────
+//
+// The per-alert `watcher-health` exemption above and this per-TYPE list are two
+// independent clauses of one predicate. Every other test in this file exercises the
+// first; without this one, deleting `watcherType === "anthropic"` from the list leaves
+// `tsc` clean and the whole suite green while anthropic starts false-dropping commits.
+
+describe("filterUnseenAlerts: the per-type skip list", () => {
+  // Real anthropic shape (`anthropic.ts` ~1484): the id is `an:<canonical GitHub URL>`
+  // (already a complete dedup key) and the summary is `**<sourceLabel>** — <label>\n<url>`
+  // — no `Fra:` sender, that is the email watcher's shape. Two DISTINCT commits routinely
+  // carry the same subject, and the sha does not survive proper-noun extraction, so they
+  // fingerprint identically and content-hash dedup would silently swallow the second one.
+  const commit = (sha: string): WatcherAlert => ({
+    id: `an:https://github.com/anthropics/docs/commit/${sha}`,
+    source: "anthropic",
+    summary: `**anthropics/docs** — Update README\nhttps://github.com/anthropics/docs/commit/${sha}`,
+    urgency: "low",
+  });
+
+  test("two distinct anthropic alerts with ONE fingerprint both survive", () => {
+    const commitA = commit("aaa1111");
+    const commitB = commit("bbb2222");
+    // The precondition: distinct ids, identical (and non-null) content hash.
+    expect(commitA.id).not.toBe(commitB.id);
+    expect(contentHash(commitA)).not.toBeNull();
+    expect(contentHash(commitA)).toBe(contentHash(commitB));
+
+    const known = new Set([commitA.id, contentHash(commitA)!]);
+    expect(filterUnseenAlerts("anthropic", [commitB], known, "jarvis")).toHaveLength(1);
+    // Same two alerts on a type that is NOT skip-listed: the hash does drop the second.
+    expect(filterUnseenAlerts("news", [{ ...commitB, source: "news" }], known, "jarvis")).toHaveLength(0);
+  });
+
+  test("id dedup still applies on a skip-listed type", () => {
+    const commitA = commit("aaa1111");
+    expect(filterUnseenAlerts("anthropic", [commitA], new Set([commitA.id]), "jarvis")).toHaveLength(0);
+  });
+});
+
+// ── the persistence half: what a run WRITES into lastNotifiedIds ──────
+//
+// `filterUnseenAlerts` not dropping a health alert is worth nothing if the run still
+// PERSISTS its colliding hash — run 1's write is what run 2's filter reads. Both halves
+// go through `dedupContentHash`, and this asserts the write end of that.
+
+describe("notifiedEntriesFor", () => {
+  const NOW = Date.UTC(2026, 7, 18, 12, 0, 0);
+  const H = 3_600_000;
+
+  test("a health alert persists its id ONLY; an ordinary x alert persists id + hash", () => {
+    const [healthAlert] = buildHealthAlerts("X Daily Digest", {
+      "x:digest": { outcome: "error", at: NOW, consecutive: 3, lastOkAt: NOW - 30 * H },
+    }, NOW);
+    // Precondition: this alert HAS a content hash — it is the exemption, not a null
+    // fingerprint, that keeps it out of the window.
+    expect(contentHash(healthAlert!)).not.toBeNull();
+
+    const digest: WatcherAlert = {
+      id: "x-digest-1000",
+      source: "x",
+      summary: "**Fra:** Ola Nordmann — Oppdatering fra Prosjekt Alpha",
+      urgency: "low",
+    };
+
+    const entries = notifiedEntriesFor("x", [healthAlert!, digest]);
+    expect(entries).toEqual([healthAlert!.id, digest.id, contentHash(digest)!]);
+    expect(entries).not.toContain(contentHash(healthAlert!));
+    expect(entries.filter((e) => e.startsWith("h:"))).toHaveLength(1);
+  });
+
+  test("trackingIds ride along on both shapes", () => {
+    const silent: WatcherAlert = {
+      id: "x-digest-2000",
+      source: "x",
+      summary: "**Fra:** Kari Nordmann — Nytt fra Prosjekt Beta",
+      urgency: "low",
+      trackingIds: ["tw:1", "tw:2"],
+    };
+    expect(notifiedEntriesFor("x", [silent])).toEqual([silent.id, contentHash(silent)!, "tw:1", "tw:2"]);
+    // Skip-listed type: no hash slot, tracking ids still persisted.
+    expect(notifiedEntriesFor("anthropic", [silent])).toEqual([silent.id, "tw:1", "tw:2"]);
   });
 });
 

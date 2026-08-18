@@ -44,6 +44,7 @@ import {
   recordOutcome,
   healthLevel,
   isSourceHealthMap,
+  HEALTH_ALERT_SOURCE,
   HEALTH_ESCALATE_AFTER,
   HEALTH_RE_ESCALATE_EVERY,
   type HealthLevel,
@@ -197,7 +198,7 @@ export function buildRunHealthAlert(
   return [
     {
       id: runHealthAlertId(watcherName, h, escalateAfter),
-      source: "watcher-health",
+      source: HEALTH_ALERT_SOURCE,
       sender: "Watcher health",
       subject: `${watcherName}: ${h.consecutive} run(s) failed`,
       summary:

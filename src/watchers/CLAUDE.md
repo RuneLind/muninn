@@ -774,6 +774,27 @@ under **`source:health`**, so there is no migration.
     window (already full on the live rows) dropped it, so the next chance to be heard was
     24 further failures: 48h on the 2h row, **~24 weeks** on the weekly one. The nag bucket
     (`HEALTH_RE_ESCALATE_EVERY`, 24) is what lets a long wedge speak up again.
+  - **Content-hash dedup is skipped PER ALERT for `source === HEALTH_ALERT_SOURCE`**
+    (`dedupContentHash` in `runner.ts`, constant exported from `source-health.ts`), not by
+    adding a type to the skip list. Every health alert shares one prose skeleton — no
+    `Fra|From … —` sender, and `extractProperNouns` sees only boilerplate — so real
+    `buildHealthAlerts` output for the X row fingerprints four DISTINCT records (two
+    `x:digest` episodes, `x:capture-gate`, `x:author-scores`) to **one** hash: the first
+    escalation stored it and silently swallowed every later one, and the nag, until it aged
+    out of the 600-entry window — days on a busy row, at a rate set by that watcher's
+    ordinary alert volume rather than by anything in the health code.
+    **Whether the collision happens at all depends on the watcher's NAME**, which is the
+    reason not to reason about it case by case: `extractProperNouns` skips ONE sentence-initial
+    capital, and what survives is set by the interpolated name — a multi-word name's second
+    capitalised word absorbs that skip and un-shields the boilerplate `The` (from "The watcher
+    itself is running fine"), while a single-word name (in backticks, never matching the
+    capital regex) lets `The` absorb it, so sender AND nouns are empty and `contentHash`
+    returns `null` outright (measured: `"X Daily Digest"` → `h:5324387307693335327` for every
+    source, `"Anthropic"`/`"News"`/`"email"` → `null`). Renaming a watcher would therefore
+    silently arm or disarm the bug. The PER-ALERT exemption is what makes the fix
+    independent of the name — it holds for every watcher, named anything.
+    `x` itself must stay OUT of the type list — `x-digest-${Date.now()}` is per-run unique,
+    so content-hash is the only thing catching a re-summarised identical digest.
 - **Staleness for the dashboard chip** — `max(3 × interval, 24h)`, ceilinged at
   `max(4 days, 2 × interval)`. A raw 3× multiplier is meaningless at both ends of our
   cadence range: 6h on the 2h Highlights row (twitchy) and 21 days on the 7d weekly row
@@ -1107,7 +1128,7 @@ target-resolve → **map (pass-1)** → draft → shape-gate → persist → not
   (a mid-run timeout can't strand undrafted proposals). One alert with a
   **per-run-unique id** (`wiki-gardener:<proposal ids>`) — the runner's
   `lastNotifiedIds` dedup runs unconditionally, so a static id would drop every
-  run after the first. `skipContentHash` is extended to cover `wiki-gardener`.
+  run after the first. `dedupContentHash`'s per-type skip list covers `wiki-gardener`.
 - **Weekly-run drop-tally snapshot (drain parity).** `checkWikiGardener` wires the
   runner's `onTally` hook (fires once after clustering, before the draft loop) and
   persists a `WeeklyGardenerRun` (`{finishedAt, clustersFound, kept, dropped,
@@ -1422,7 +1443,7 @@ wiki or DB. v1 is purely a report.
   the wiki is unreadable; otherwise summarizes the counts into one `WatcherAlert`
   (`Wiki lint: 3 broken links, 2 orphans, … — review at /wiki/gardener`) with a
   per-day-stable id `wiki-lint-<YYYY-MM-DD>` (`todayOslo`). The runner's
-  `skipContentHash` is extended to `wiki-linter` — the dated id dedups same-day
+  `dedupContentHash` skip list covers `wiki-linter` — the dated id dedups same-day
   re-runs, and skipping content-hash lets an identical count next week still
   notify (content-hash would false-drop a recurring report).
 - **Seed**: `bun scripts/setup-wiki-linter.ts [--apply]` — weekly interval,
@@ -1479,7 +1500,7 @@ losing them (the 2026-07-23 huginn-jarvis incident).
 - **Report-only otherwise**: emits a `WatcherAlert` (💾) ONLY when it swept
   (low urgency) or when a sweep it attempted FAILED (medium) — quiet when
   clean/off-branch/not-a-repo, matching the linter. Per-day-stable alert id
-  (`wiki-sweep-<YYYY-MM-DD>`); the runner's `skipContentHash` covers it so a
+  (`wiki-sweep-<YYYY-MM-DD>`); the runner's `dedupContentHash` skip list covers it so a
   recurring daily sweep with the same summary still notifies.
 - **Quiet-hours run-exempt**: the sweeper's side effect is a **git commit, not a
   user notification**, so the runner does NOT skip its run during the owner's
@@ -1540,7 +1561,7 @@ the wiki's OWN pages into saga-style `type: blog` narrative pages under `blogs/`
 - **Alert** (🧩): only when ≥1 proposal actually persisted, with a **per-run-unique
   id** (`consolidation-gardener:<proposal ids>`) naming `/wiki/gardener?wiki=<name>`.
   A **zero-draft run sends NO alert** (nothing to review). The runner's
-  `skipContentHash` covers `consolidation-gardener` (belt-and-suspenders with the
+  `dedupContentHash`'s per-type skip list covers `consolidation-gardener` (belt-and-suspenders with the
   unique id). **NOT quiet-hours run-exempt** — it alerts a human, so a run landing
   in quiet hours is skipped whole (unlike the `wiki-committer` git-commit sweeper).
 - **Telemetry**: the runner threads its `watcher:consolidation-gardener` span into
