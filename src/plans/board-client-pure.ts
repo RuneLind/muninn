@@ -33,7 +33,9 @@
  *      unranked card to the bottom of that prefix, swaps a ranked one with its
  *      ranked neighbour, and UN-ranks the last one on ▼ — so ranking six cards
  *      leaves the other 43 out of the order entirely. {@link dropIntoColumn}
- *      follows the same rule for the drag PR 4 will wire.
+ *      follows the same rule, and is still unwired: the board has no drag, since
+ *      dragging between columns means a `plan_status` change and no endpoint
+ *      writes one.
  */
 
 import type { PlanPriority, PlanStatus } from "./constants.ts";
@@ -207,9 +209,11 @@ export interface BoardCard {
 
 // ---------------------------------------------------------------- overlay
 
-/** The PR-2-only draft layer. Priorities and orders have nowhere to go yet
- *  (PR 4 owns the write path), so they live in `localStorage` — and they are a
- *  DRAFT, not a cache: disk wins on every load. */
+/** The draft layer, now reached only where the board cannot write — a
+ *  `MUNINN_WIKI_READONLY` instance, or an unreadable `queue.yaml`
+ *  (`board-writes.ts`, `writeCapability`). It lives in `localStorage` and it is
+ *  a DRAFT, not a cache: disk wins on every load, and a board whose server owns
+ *  both axes clears the key outright. */
 export interface BoardOverlay {
   priority: Partial<Record<string, PlanPriority>>;
   order: Partial<Record<BoardColumnKey, string[]>>;
@@ -271,9 +275,9 @@ export interface OverlayResult {
   order: BoardOrder;
   /** Per column: the order shown is the overlay's, not the wiki's. */
   orderIsDraft: Partial<Record<BoardColumnKey, boolean>>;
-  /** Columns `queue.yaml` ranks. Their ▲▼ are disabled — the board cannot
-   *  write the wiki yet, and a draft that silently loses on the next load is
-   *  worse than an honest refusal. */
+  /** Columns `queue.yaml` ranks. In DRAFT mode their ▲▼ are disabled — a draft
+   *  that silently loses on the next load is worse than an honest refusal. A
+   *  writing board nudges them like any other column. */
   diskRanked: BoardColumnKey[];
   /** Draft orders this merge threw away entirely — the disk took the column
    *  over, or not one of the draft's slugs is in it any more. The client
@@ -288,8 +292,9 @@ export interface OverlayResult {
  * A priority set in the browser applies only to a plan whose frontmatter
  * carries none; a hand order applies only to a column `queue.yaml` does not
  * rank. The alternative — overlay wins — is how a priority someone actually
- * committed to mimir silently disappears behind a months-old draft, and PR 5
- * clears the overlay once the server is authoritative.
+ * committed to mimir silently disappears behind a months-old draft — and where
+ * the server IS authoritative the client clears the overlay outright rather
+ * than merging it.
  *
  * **Both** orders are filtered to slugs that are actually in that column now.
  * The draft, because a card that moved or was deleted must not hold a rank —
