@@ -221,3 +221,41 @@ test("buildFactcheckBlock demotes ### claim headings to bold inside the callout"
   expect(block).toContain("> **✅ Claim 1/2 — First**");
   expect(block).toContain("> **❌ Claim 2/2 — Second**");
 });
+
+/**
+ * `prepareBody`'s honesty tail. The hook can DELETE content the caller never
+ * mentioned (the ➕ route strips stale `<Fact>` marks), so its `note` rides into
+ * both the log.md line and the commit subject — otherwise the only record of a
+ * page losing its marks says "fact-check block added via the wiki reader".
+ * Both strings are resolved AFTER the transform ran, which is the only moment the
+ * count is known: the body is read inside the write section.
+ */
+test("prepareBody's note rides into BOTH the log.md line and the commit subject", async () => {
+  const files: Record<string, string> = { "/wiki/analyses/page.md": "# Page\n\nBody.\n" };
+  const commits: { paths: string[]; message: string }[] = [];
+  const { opts } = makeDeps(files, {
+    prepareBody: (current) => ({ body: current.replace("Body.", "Trimmed."), note: "2 prior marks superseded" }),
+    commit: async (paths, message) => { commits.push({ paths, message }); },
+  });
+  const res = await appendBlockToPage(opts);
+  expect(res.outcome).toBe("written");
+  expect(files["/wiki/analyses/page.md"]).toContain("Trimmed.");
+  expect(files["/wiki/log.md"]).toContain(
+    "fact-check block added via the wiki reader; 2 prior marks superseded",
+  );
+  expect(commits[0]!.message).toBe("[fact-check] annotate: analyses/page.md (2 prior marks superseded)");
+});
+
+test("a prepareBody that reports no note leaves both strings exactly as the no-hook path", async () => {
+  const files: Record<string, string> = { "/wiki/analyses/page.md": "# Page\n\nBody.\n" };
+  const commits: { paths: string[]; message: string }[] = [];
+  const { opts } = makeDeps(files, {
+    prepareBody: (current) => ({ body: current }),
+    commit: async (paths, message) => { commits.push({ paths, message }); },
+  });
+  const res = await appendBlockToPage(opts);
+  expect(res.outcome).toBe("written");
+  expect(files["/wiki/log.md"]).toContain("- fact-check block added via the wiki reader");
+  expect(files["/wiki/log.md"]).not.toContain("superseded");
+  expect(commits[0]!.message).toBe("[fact-check] annotate: analyses/page.md");
+});

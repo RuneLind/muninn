@@ -2,6 +2,7 @@ import { test, expect, describe } from "bun:test";
 import {
   tallyClaimOutcomes,
   factcheckOutcomeSummary,
+  appendSuccessStatus,
   type OutcomeRow,
 } from "./wiki-factcheck-outcomes.ts";
 
@@ -60,5 +61,27 @@ describe("factcheckOutcomeSummary", () => {
 
   test("renders timeout/error with their display labels", () => {
     expect(factcheckOutcomeSummary({ timeout: 1, error: 2 })).toBe("1 timed out · 2 failed");
+  });
+});
+
+describe("appendSuccessStatus", () => {
+  // The ➕ write can DELETE marks an earlier ✎ Integrate put on the page. Before
+  // this, the only feedback was a fixed "✓ Added to article" and a reload showing
+  // a page whose underlines had vanished.
+  test("folds the route's supersededNote into the confirmation", () => {
+    expect(appendSuccessStatus("7 marks from a previous check superseded — this action rebuilds the fact-check block and adds no new marks"))
+      .toBe("✓ Added to article — 7 marks from a previous check superseded — this action rebuilds the fact-check block and adds no new marks");
+  });
+
+  test("no note ⇒ the plain confirmation (unchanged)", () => {
+    expect(appendSuccessStatus()).toBe("✓ Added to article");
+    expect(appendSuccessStatus(undefined)).toBe("✓ Added to article");
+  });
+
+  // A blank/whitespace note is a server that sent the field with nothing in it —
+  // an em-dash trailing into nowhere is worse than no note.
+  test("blank note ⇒ the plain confirmation, no dangling dash", () => {
+    expect(appendSuccessStatus("")).toBe("✓ Added to article");
+    expect(appendSuccessStatus("   ")).toBe("✓ Added to article");
   });
 });
