@@ -68,9 +68,11 @@ describe("appendSuccessStatus", () => {
   // The ➕ write can DELETE marks an earlier ✎ Integrate put on the page. Before
   // this, the only feedback was a fixed "✓ Added to article" and a reload showing
   // a page whose underlines had vanished.
+  // Joined with ": " — the note already carries its own em-dash, so " — " here made
+  // one line out of three peer clauses.
   test("folds the route's supersededNote into the confirmation", () => {
     expect(appendSuccessStatus("7 marks from a previous check superseded — this action rebuilds the fact-check block and adds no new marks"))
-      .toBe("✓ Added to article — 7 marks from a previous check superseded — this action rebuilds the fact-check block and adds no new marks");
+      .toBe("✓ Added to article: 7 marks from a previous check superseded — this action rebuilds the fact-check block and adds no new marks");
   });
 
   test("no note ⇒ the plain confirmation (unchanged)", () => {

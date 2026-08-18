@@ -30,7 +30,7 @@ import {
   type SemanticOverlay,
 } from "../views/components/wiki-atlas-semantic.ts";
 import { slugifyTopicKey } from "../../gardener/doc-page-map.ts";
-import { countFactWrappers } from "../../format/markdown-ast.ts";
+import { countFactWrappers, stripFactWrappers } from "../../format/markdown-ast.ts";
 import type { WikiRegistryEntry } from "../../wiki/registry.ts";
 import type { BotConfig } from "../../bots/config.ts";
 import type { WikiIndex, WikiPageMeta } from "../../wiki/store.ts";
@@ -569,6 +569,51 @@ describe("integrate routes — pre-model / pre-write rejections", () => {
     });
     expect(res.status).toBe(200);
     expect(((await res.json()) as { hasSentinelBlock: boolean }).hasSentinelBlock).toBe(true);
+  });
+
+  test("propose's supersede count is what apply's strip will remove — appendix-quoted marks included", async () => {
+    // All-✅ on an ANNOTATABLE `.mdx` page: the relaxed gate lets the request past
+    // the zero-claims early return WITHOUT resolving a synthesis bot or spending a
+    // one-shot (`claims.length > 0` gates both), so the full response — and with it
+    // `supersededNote` — is reachable model-free.
+    //
+    // The number must be what apply's `stripFactWrappers(raw)` removes from the
+    // WHOLE body, appendix included: 3, not the 2 a region-stripped count reports.
+    const body = [
+      "---",
+      "type: source",
+      "title: Marked",
+      "---",
+      "",
+      "# Marked",
+      "",
+      'It <Fact n="1" v="bad">ships 4M units</Fact> a year.',
+      "",
+      'Its shell is <Fact n="2" v="warn">one billet</Fact>.',
+      "",
+      FACTCHECK_SENTINEL_START,
+      '<FactCheck date="2026-08-01" bad="1">',
+      "",
+      "### ❌ Claim 1/1 — Mass",
+      "",
+      'Was: it <Fact n="3" v="bad">weighs 9 kg</Fact> dry.',
+      "</FactCheck>",
+      FACTCHECK_SENTINEL_END,
+      "",
+    ].join("\n");
+    await Bun.write(path.join(root, "Marked.mdx"), body);
+    __resetWikiCacheForTest();
+    const res = await post("/api/wiki/factcheck/integrate?wiki=intwiki", {
+      page: "Marked",
+      answer: "### ✅ Claim 1/1 — Units\n\nAll good.",
+      baseHash: createHash("sha256").update(body).digest("hex"),
+    });
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { supersededNote?: string; annotatable?: boolean };
+    expect(json.annotatable).toBe(true);
+    expect(json.supersededNote).toContain("3 marks from a previous check superseded");
+    // The claim the note makes, checked against the strip apply actually runs.
+    expect(countFactWrappers(body) - countFactWrappers(stripFactWrappers(body))).toBe(3);
   });
 
   // ── Claim quotes (PR 2) ────────────────────────────────────────────────────
@@ -3394,9 +3439,11 @@ describe("POST /api/wiki/factcheck/append — supersedes stale marks", () => {
     expect(await read("log.md")).not.toContain("superseded");
   });
 
-  test("a <Fact> that sits ONLY inside the old appendix is not counted (it is being replaced)", async () => {
-    // The sentinel region is rebuilt wholesale, so a mark quoted inside it (a
-    // `Was:` line carrying one, a hand-edit) is not a mark the reader is losing.
+  test("a <Fact> quoted inside the OLD appendix IS counted — the strip removes it too", async () => {
+    // The note reports what THIS WRITE REMOVED, and the strip runs over the whole
+    // body: a mark quoted on a `Was:` line inside the sentinel region comes off
+    // with the prose marks. Reporting 2 here (a region-stripped count) would name
+    // a number that matches neither the file nor the strip.
     const baseHash = await writePage(
       "Quoted.mdx",
       [
@@ -3407,14 +3454,16 @@ describe("POST /api/wiki/factcheck/append — supersedes stale marks", () => {
         "",
         "# Quoted",
         "",
-        "Plain prose, no marks.",
+        'It <Fact n="1" v="bad">ships 4M units</Fact> a year.',
+        "",
+        'Its shell is <Fact n="2" v="warn">one billet</Fact>.',
         "",
         FACTCHECK_SENTINEL_START,
         '<FactCheck date="2026-08-01" bad="1">',
         "",
         "### ❌ Claim 1/1 — Mass",
         "",
-        'Was: it <Fact n="1" v="bad">weighs 9 kg</Fact> dry.',
+        'Was: it <Fact n="3" v="bad">weighs 9 kg</Fact> dry.',
         "</FactCheck>",
         FACTCHECK_SENTINEL_END,
         "",
@@ -3422,8 +3471,59 @@ describe("POST /api/wiki/factcheck/append — supersedes stale marks", () => {
     );
     const { status, body } = await append("Quoted", baseHash);
     expect(status).toBe(200);
+    expect(body.supersededNote).toContain("3 marks from a previous check superseded");
+    // …and the written file really does carry none.
+    expect(countFactWrappers(await read("Quoted.mdx"))).toBe(0);
+    expect(await read("log.md")).toContain("; 3 prior marks superseded");
+  });
+
+  test("an unclosed fence in the OLD appendix: the note reports 0, because the strip removed 0", async () => {
+    // The defect this pins. `buildFactcheckAppendix` does not balance fences, so a
+    // `Was:` line can quote an unterminated ``` — which, per CommonMark, runs to
+    // EOF and makes every mark BELOW the sentinel region documentation. The strip
+    // therefore removes nothing. A count taken over the region-stripped body sees
+    // no fence at all and answers 2, and the note, the log.md line and the commit
+    // subject then all claim a deletion the file disproves.
+    const baseHash = await writePage(
+      "Fenced.mdx",
+      [
+        "---",
+        "type: source",
+        "title: Fenced",
+        "---",
+        "",
+        "# Fenced",
+        "",
+        "Intro prose, unmarked.",
+        "",
+        FACTCHECK_SENTINEL_START,
+        '<FactCheck date="2026-08-01" bad="1">',
+        "",
+        "### ❌ Claim 1/1 — Snippet",
+        "",
+        "Was:",
+        "",
+        `${FENCE}bash`,
+        "curl https://example.com",
+        "</FactCheck>",
+        FACTCHECK_SENTINEL_END,
+        "",
+        'Later prose <Fact n="1" v="bad">claims 4M units</Fact>.',
+        "",
+        'And <Fact n="2" v="warn">3 kg dry</Fact>.',
+        "",
+      ].join("\n"),
+    );
+    const { status, body } = await append("Fenced", baseHash);
+    expect(status).toBe(200);
+    expect(body.written).toBe(true);
     expect("supersededNote" in body).toBe(false);
     expect(await read("log.md")).not.toContain("superseded");
+    // The marks are still on the page — which is exactly why nothing may claim
+    // they were superseded.
+    const written = await read("Fenced.mdx");
+    expect(written).toContain('<Fact n="1" v="bad">claims 4M units</Fact>');
+    expect(written).toContain('<Fact n="2" v="warn">3 kg dry</Fact>');
   });
 
   test("frontmatter and inline-backtick <Fact tags survive the ROUTE and are not counted", async () => {

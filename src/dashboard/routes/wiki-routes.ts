@@ -743,19 +743,31 @@ export function isAnnotatablePage(relPath: string, type: string): boolean {
 }
 
 /**
- * How many marks a re-annotation is about to supersede — the ONE measurement
+ * The strip and its measurement in ONE pass: the stripped body, plus how many
+ * marks that strip ACTUALLY removed from these exact bytes. The ONE measurement
  * behind {@link supersededMarksNote}, so the ➕ append route and integrate PROPOSE
- * can never report different numbers for the same page.
+ * can never report different numbers for the same page — and, more importantly,
+ * so neither can report a number its own write disproves.
  *
- * The `stripFactcheckBlock` is the whole point: the persisted `<!-- factcheck -->`
- * region is about to be REPLACED wholesale, so a `<Fact>` sitting inside it (a
- * `Was:` line quoting prose that carried one, a hand-edit) is not a mark the
- * reader is losing — counting it inflates the note with marks nobody had. The
- * strip that follows may still run over the whole body; only the COUNT is a claim
- * to a human.
+ * `removed` means "marks removed by this write", nothing narrower. That INCLUDES
+ * a `<Fact>` quoted inside the previous `<!-- factcheck -->` region (a `Was:` line,
+ * a hand-edit): the strip runs over the whole body, so the tag really does come
+ * off — the fact that the region is then replaced wholesale doesn't unremove it.
+ *
+ * It is a delta rather than a bare `countFactWrappers(current)` because the count
+ * and the strip must be derived from ONE evaluation, not from two calls a reader
+ * has to prove equivalent. The old spelling took the count over a
+ * `stripFactcheckBlock`ped body while the strip ran on the full one, and the two
+ * disagree whenever removing the sentinel region changes FENCE PARITY:
+ * `buildFactcheckAppendix` does not balance fences, so an appendix quoting an
+ * unterminated ``` opens a CommonMark fence that runs to EOF and makes every mark
+ * below it documentation. The strip then removes 0 while the count answered 2, and
+ * the note, the log.md line and the commit subject all claimed a deletion the file
+ * disproved.
  */
-export function countSupersededMarks(current: string): number {
-  return countFactWrappers(stripFactcheckBlock(current));
+export function stripSupersededMarks(current: string): { body: string; removed: number } {
+  const body = stripFactWrappers(current);
+  return { body, removed: countFactWrappers(current) - countFactWrappers(body) };
 }
 
 /**
@@ -3058,10 +3070,9 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // The strip is zone-aware, so a `<Fact>` inside frontmatter, a fence or a
       // backtick span is documentation and survives. It runs on the freshly-read
       // body inside the write section (hence the `prepareBody` hook rather than a
-      // pre-read here), which is also where the count is taken — so what the note
-      // reports is exactly what was removed. The count excludes the sentinel region
-      // this write replaces wholesale (`countSupersededMarks`), which the strip
-      // itself needn't: those bytes are discarded either way.
+      // pre-read here), and `stripSupersededMarks` takes the count off that SAME
+      // pass — so the note reports the marks this write removed, byte-for-byte,
+      // including any quoted inside the appendix region it is about to replace.
       let supersededWrappers = 0;
       const result = await appendBlockToPage({
         wikiDir: entry.root,
@@ -3072,9 +3083,10 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         logTitle: meta.title,
         now: () => Date.now(),
         prepareBody: (current: string) => {
-          supersededWrappers = countSupersededMarks(current);
+          const stripped = stripSupersededMarks(current);
+          supersededWrappers = stripped.removed;
           return {
-            body: stripFactWrappers(current),
+            body: stripped.body,
             // The log.md line and the commit subject say what the page LOST, not
             // just what it gained — this write removes marks the reader never
             // asked about, and the repo history is where that has to be findable.
@@ -3186,12 +3198,17 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // model sees the page and before any offset is resolved, so (a) the anchors
       // the model quotes exist in the body we resolve against, and (b) a re-run
       // cannot nest a wrapper inside a wrapper. Prior wrappers not re-emitted by
-      // THIS run are reported as superseded, never silently vanished — counted
-      // over the PROSE only (`countSupersededMarks`), since the sentinel region is
-      // replaced wholesale and a `<Fact>` quoted inside it is not a mark the reader
-      // is losing.
-      const supersededWrappers = countSupersededMarks(current);
-      const editable = stripFactWrappers(current);
+      // THIS run are reported as superseded, never silently vanished — and the
+      // number is the one `stripSupersededMarks` takes off the strip ITSELF, i.e.
+      // exactly what apply's `stripFactWrappers(raw)` will remove from the same
+      // CAS-pinned bytes. That includes marks quoted inside the sentinel region:
+      // the strip is whole-body, so they come off whether or not the region is
+      // then replaced — and on apply's `!appendCallout && !wroteWrapper` branch the
+      // region is NOT replaced, so the block survives with its quoted tags already
+      // stripped out of it.
+      const superseded = stripSupersededMarks(current);
+      const supersededWrappers = superseded.removed;
+      const editable = superseded.body;
       const bodyLen = integrateBodyLen(editable, isMdx);
       if (bodyLen > INTEGRATE_BODY_MAX) {
         return c.json({ error: "page too long to integrate", bodyLen, max: INTEGRATE_BODY_MAX }, 400);

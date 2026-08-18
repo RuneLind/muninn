@@ -65,8 +65,13 @@ export function factcheckOutcomeSummary(counts: ClaimOutcomeCounts): string {
  *
  * Pure so it unit-tests; the caller does the DOM. An absent/blank note ⇒ the plain
  * confirmation, byte-identical to what shipped before.
+ *
+ * Joined with ": ", not " — ": the note is `supersededMarksNote`'s output, which
+ * already carries an em-dash between its lead and its per-route tail, and a second
+ * one made the line read as three peer clauses instead of a confirmation and its
+ * explanation.
  */
 export function appendSuccessStatus(supersededNote?: string): string {
   const note = (supersededNote || "").trim();
-  return note ? "✓ Added to article — " + note : "✓ Added to article";
+  return note ? "✓ Added to article: " + note : "✓ Added to article";
 }

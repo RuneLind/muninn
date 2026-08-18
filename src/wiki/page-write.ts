@@ -323,20 +323,24 @@ export async function writeWikiPage(
 
   // 7. Commit the page + log.md — OUTSIDE the critical section (see module doc).
   //    Non-fatal: a commit failure never undoes the applied write.
+  //    `commitPair` is INSIDE the try: it resolves the late-bound `commitMessage`
+  //    thunk, which reads what `transform` found — a throw there would propagate
+  //    out of an already-applied write and turn it into a 500, exactly the way a
+  //    throwing `logLine` thunk is degraded to a warn a few lines above.
   let commit: CommitWikiResult | undefined;
-  const committer = commitPair(opts);
-  if (committer) {
-    try {
+  try {
+    const committer = commitPair(opts);
+    if (committer) {
       const paths = logging ? [relPath, "log.md"] : [relPath];
       const res = await committer.run(paths, committer.message);
       if (res && typeof res === "object" && "committed" in res) commit = res;
-    } catch (err) {
-      log.warn("Wiki page write: commit failed for {path}: {error}", {
-        kind: opts.logKind,
-        path: relPath,
-        error: errMsg(err),
-      });
     }
+  } catch (err) {
+    log.warn("Wiki page write: commit failed for {path}: {error}", {
+      kind: opts.logKind,
+      path: relPath,
+      error: errMsg(err),
+    });
   }
 
   return { outcome: "written", writtenPath: relPath, ...(commit ? { commit } : {}) };
