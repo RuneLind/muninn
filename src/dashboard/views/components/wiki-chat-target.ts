@@ -676,6 +676,17 @@ export function captureChatOptFocus(
   };
 }
 
+/** Cap on the answer an escalation POSTs — mirrors the server's FACTCHECK_ANSWER_MAX
+ *  (32k), the cap the two fact-check write routes enforce. The seed builder bounds
+ *  the answer at 6k anyway, so a rehydrated 500 KB turn would only be uploading
+ *  bytes the server is about to discard.
+ *
+ *  Lives HERE rather than in either caller because BOTH escalation paths apply it
+ *  and they no longer share a file: the one-click bar is `wiki-browser.ts`'s
+ *  `submitChatEscalate`, the dialog is `wiki-chat-options.ts`. Two copies of a cap
+ *  that mirrors a server constant is exactly the pair that drifts. */
+export const CHAT_ESC_ANSWER_MAX = 32_000;
+
 /** Status copy for the first Escape on a typed question. */
 export const CHAT_OPT_ESC_CONFIRM = "Press Esc again to discard this question.";
 

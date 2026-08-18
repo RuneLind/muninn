@@ -1006,34 +1006,76 @@ describe("chatEscBarHtml", () => {
   });
 });
 
-// ── wiki-browser call sites ──────────────────────────────────────────
-// `wiki-browser.ts` runs DOM code at module load and cannot be imported here, so
-// the two wiring facts that no pure helper can hold are pinned at the SOURCE
-// level (the `research-page.test.ts` / `connector-selector.test.ts` precedent).
+// ── Client call sites ────────────────────────────────────────────────
+// Both client files run DOM code at module load and cannot be imported here, so
+// the wiring facts that no pure helper can hold are pinned at the SOURCE level
+// (the `research-page.test.ts` / `connector-selector.test.ts` precedent).
+//
+// The dialog's DOM half now lives in `wiki-chat-options.ts` (2026-08 cut 2), so
+// most of these read THAT file; the two that are genuinely about the reader shell
+// — the breadcrumb's Discuss button and the navigation seam — still read
+// `wiki-browser.ts`. Behaviour of the module's own listeners is additionally
+// driven end-to-end in `wiki-chat-options.test.ts`.
 
-describe("wiki-browser wiring", () => {
-  let cached: string | undefined;
-  async function browserSrc(): Promise<string> {
-    if (!cached) {
-      cached = await Bun.file(path.join(import.meta.dir, "wiki-browser.ts")).text();
+describe("wiki reader chat-dialog wiring", () => {
+  const cached = new Map<string, string>();
+  async function srcOf(file: string): Promise<string> {
+    let text = cached.get(file);
+    if (text === undefined) {
+      text = await Bun.file(path.join(import.meta.dir, file)).text();
+      cached.set(file, text);
     }
-    return cached;
+    return text;
   }
+  /** The reader shell. */
+  const browserSrc = () => srcOf("wiki-browser.ts");
+  /** The dialog module — state, render, openers, its own document listeners. */
+  const optionsSrc = () => srcOf("wiki-chat-options.ts");
 
-  /** One top-level `[async] function <name>(` body, up to the next top-level
-   *  function of either flavour. */
+  /** Every spelling a top-level function declaration takes in these two files.
+   *  ONE list, read by BOTH the start scan and the terminator scan below —
+   *  keeping two lists is exactly how this broke: the start list learned
+   *  `export function` (the module's exported seams) while the terminator scan
+   *  still stopped only at the two un-exported flavours, so a body ran straight
+   *  through every exported function after it. Measured on the file this test
+   *  reads: `fnBody(optionsSrc, "submitChatOptions")` returned 138 lines,
+   *  swallowing the exported `closeChatOptionsIfNavigatingAway` — i.e. a
+   *  `not.toContain` assertion about the submitter was silently being made
+   *  about a neighbour's body too. */
+  const FN_KEYWORDS = [
+    "\nfunction ",
+    "\nasync function ",
+    "\nexport function ",
+    "\nexport async function ",
+  ];
+  /** One top-level `[export] [async] function <name>(` body, up to the next
+   *  top-level function of any flavour. */
   function fnBody(src: string, name: string): string {
-    let start = src.indexOf("\nfunction " + name + "(");
-    if (start === -1) start = src.indexOf("\nasync function " + name + "(");
+    let start = -1;
+    for (const kw of FN_KEYWORDS) {
+      start = src.indexOf(kw + name + "(");
+      if (start !== -1) break;
+    }
     expect(start).toBeGreaterThan(-1);
-    let next = src.indexOf("\nfunction ", start + 1);
-    const nextAsync = src.indexOf("\nasync function ", start + 1);
-    if (nextAsync !== -1 && (next === -1 || nextAsync < next)) next = nextAsync;
+    let next = -1;
+    for (const kw of FN_KEYWORDS) {
+      const at = src.indexOf(kw, start + 1);
+      if (at !== -1 && (next === -1 || at < next)) next = at;
+    }
     return src.slice(start, next === -1 ? undefined : next);
   }
 
+  test("fnBody stops at an EXPORTED function too", async () => {
+    // The terminator scan used to look only for `\nfunction ` / `\nasync function `,
+    // so the submitter's body ran 138 lines on into the exported navigation seam.
+    const body = fnBody(await optionsSrc(), "submitChatOptions");
+    expect(body).not.toContain("closeChatOptionsIfNavigatingAway");
+    // …and it still contains its own tail, so the fix trimmed the neighbour, not the body.
+    expect(body).toContain("data.nameTaken");
+  });
+
   test("the decline opener pins the question and NEVER writes the Ask box", async () => {
-    const body = fnBody(await browserSrc(), "openDeclineChat");
+    const body = fnBody(await optionsSrc(), "openDeclineChat");
     // The bug this replaced: `input.value = turn.question` clobbered the reader's
     // draft, left the failed question armed in the box, and on the Connections tab
     // wrote into a hidden textarea.
@@ -1050,7 +1092,7 @@ describe("wiki-browser wiring", () => {
   test("the panel shows the pinned question — it is nowhere else on screen", async () => {
     // Not in the Ask box (deliberately) and not the label shown on the turn (it is
     // composed), so without this row the only echo is the ≤50-char name preview.
-    const body = fnBody(await browserSrc(), "chatOptBodyHtml");
+    const body = fnBody(await optionsSrc(), "chatOptBodyHtml");
     expect(body).toContain("chatOptQuestionReadOnly");
     expect(body).toContain("wiki-chatopt-pinned");
     // Read-only, and escaped — a composed decline question carries the page title
@@ -1065,7 +1107,7 @@ describe("wiki-browser wiring", () => {
   test("the click-away opener list includes the decline button", async () => {
     // Missing from `inOpener`, the button's own click reads as an outside click
     // and closes the panel it just opened.
-    const src = await browserSrc();
+    const src = await optionsSrc();
     const start = src.indexOf("inOpener:");
     expect(start).toBeGreaterThan(-1);
     // By identifier, not by literal — the id is shared with the render and the
@@ -1076,7 +1118,7 @@ describe("wiki-browser wiring", () => {
   test("the click-away opener list includes the Discuss button", async () => {
     // Same trap as the decline button: without it, the opening click reads as a
     // click-away and closes the panel it just opened.
-    const src = await browserSrc();
+    const src = await optionsSrc();
     const start = src.indexOf("inOpener:");
     expect(src.slice(start, src.indexOf("sending:", start))).toContain("DISCUSS_ARTICLE_BTN_ID");
   });
@@ -1084,12 +1126,12 @@ describe("wiki-browser wiring", () => {
   test("the article opener NEVER touches the Ask box", async () => {
     // Article mode has nothing to do with the Ask tab — its question is typed in
     // the panel. (The decline hook's own regression, restated for this mode.)
-    const body = fnBody(await browserSrc(), "openArticleChat");
+    const body = fnBody(await optionsSrc(), "openArticleChat");
     expect(body).not.toContain("wikiAskInput");
     expect(body).not.toMatch(/\.value\s*=/);
-    // It reads the page from `currentArticle` — the single-page payload — because
-    // that is the ONLY one carrying `desc` (the listing strips it).
-    expect(body).toContain("currentArticle");
+    // It reads the page through the shell port (`currentArticle`, the single-page
+    // payload) because that is the ONLY one carrying `desc` — the listing strips it.
+    expect(body).toContain("deps.getCurrentArticle()");
     expect(body).toContain("desc: m.desc");
     expect(body).toContain('openChatOptions("article"');
   });
@@ -1107,7 +1149,7 @@ describe("wiki-browser wiring", () => {
     // The seed's title/path/description are re-resolved server-side against the
     // index; a stale client copy must not be able to put an unresolvable path in
     // front of the bot.
-    const body = fnBody(await browserSrc(), "submitChatOptions");
+    const body = fnBody(await optionsSrc(), "submitChatOptions");
     expect(body).toContain('payload.mode = "article"');
     expect(body).toContain("payload.page = ");
     expect(body).toContain("payload.relPath = ");
@@ -1118,7 +1160,7 @@ describe("wiki-browser wiring", () => {
     // The prefill chain is gone from the opener: an authored `description` is a
     // declarative sentence, Send is enabled on it, and one click sent the page's
     // own subtitle as the reader's question.
-    const body = fnBody(await browserSrc(), "openChatOptions");
+    const body = fnBody(await optionsSrc(), "openChatOptions");
     expect(body).not.toContain("articleChatQuestion");
     expect(body).toContain('question = ""');
   });
@@ -1127,7 +1169,7 @@ describe("wiki-browser wiring", () => {
     // The article question box renders BEFORE the chat-target fetch settles (so
     // the reader can start typing), and that fetch's `finally` re-renders the
     // whole panel — replacing the textarea mid-word.
-    const body = fnBody(await browserSrc(), "renderChatOptions");
+    const body = fnBody(await optionsSrc(), "renderChatOptions");
     expect(body).toContain("captureChatOptFocus");
     expect(body).toContain("restoreChatOptFocus");
     // Captured BEFORE the swap, restored after it.
@@ -1138,7 +1180,7 @@ describe("wiki-browser wiring", () => {
   test("Escape asks before discarding a question the reader typed", async () => {
     // The question exists only inside the dialog now (in every mode), so a stray
     // Escape used to be the only copy of it gone.
-    const src = await browserSrc();
+    const src = await optionsSrc();
     const start = src.indexOf('if (e.key === "Escape")');
     expect(start).toBeGreaterThan(-1);
     const handler = src.slice(start, start + 900);
@@ -1154,7 +1196,7 @@ describe("wiki-browser wiring", () => {
     // shortcut has to open the tab synchronously inside the keydown exactly as the
     // Send click does — and it must be gated like the button's disabled state, or
     // it fires a blank tab that opens and closes with no feedback.
-    const src = await browserSrc();
+    const src = await optionsSrc();
     const at = src.indexOf('if (e.key !== "Enter" || !(e.metaKey || e.ctrlKey)) return;');
     expect(at).toBeGreaterThan(-1);
     const handler = src.slice(at, at + 900);
@@ -1170,7 +1212,7 @@ describe("wiki-browser wiring", () => {
   test("a suggestion chip FILLS the question box and never submits", async () => {
     // The `desc` prefill in #420 is the cautionary case: one click from "a
     // sentence the page wrote about itself" to "the reader's own question, sent".
-    const src = await browserSrc();
+    const src = await optionsSrc();
     const at = src.indexOf("CHAT_OPT_SUGGEST_ATTR + \"]\")) {");
     expect(at).toBeGreaterThan(-1);
     const branch = src.slice(at, at + 1600);
@@ -1187,7 +1229,7 @@ describe("wiki-browser wiring", () => {
   test("a thread-name chip clears the collision it was chosen against", async () => {
     // The 409 was against the OLD name; a foot still offering "Send there →" would
     // post a thread id the new name has nothing to do with.
-    const src = await browserSrc();
+    const src = await optionsSrc();
     const at = src.indexOf("CHAT_OPT_NAME_CHIP_ATTR + \"]\")) {");
     expect(at).toBeGreaterThan(-1);
     const branch = src.slice(at, at + 900);
@@ -1197,14 +1239,14 @@ describe("wiki-browser wiring", () => {
   });
 
   test("the dialog is centred with a scrim — no anchor maths left", async () => {
-    const body = fnBody(await browserSrc(), "renderChatOptions");
+    const body = fnBody(await optionsSrc(), "renderChatOptions");
     expect(body).toContain("wikiChatOptScrim");
     expect(body).toContain('setAttribute("aria-modal", "true")');
     // The anchored-popover positioning is gone, along with the clamping it needed.
     expect(body).not.toContain("getBoundingClientRect");
     expect(body).not.toContain("panel.style.top");
     // …and the scrim is removed with the panel, or it would swallow every click.
-    expect(fnBody(await browserSrc(), "closeChatOptions")).toContain("wikiChatOptScrim");
+    expect(fnBody(await optionsSrc(), "closeChatOptions")).toContain("wikiChatOptScrim");
   });
 
   test("navigating the pane closes an article popover, and clears the open page", async () => {
@@ -1212,16 +1254,21 @@ describe("wiki-browser wiring", () => {
     // It must run BEFORE `currentArticle` is re-stamped — the decision compares
     // the popover's page against the incoming one.
     const crumb = fnBody(src, "renderBreadcrumb");
-    expect(crumb).toContain("shouldCloseArticleChatOnNavigate");
-    expect(crumb.indexOf("shouldCloseArticleChatOnNavigate")).toBeLessThan(
+    expect(crumb).toContain("closeChatOptionsIfNavigatingAway(m.relPath)");
+    expect(crumb.indexOf("closeChatOptionsIfNavigatingAway")).toBeLessThan(
       crumb.indexOf("currentArticle = m"),
     );
     // …and with no page open there is nothing for Discuss to act on.
     expect(fnBody(src, "hideBreadcrumb")).toContain("currentArticle = null");
+    // The seam is a one-line wrapper over the pure decision, which reads the
+    // dialog state the shell no longer holds.
+    const seam = fnBody(await optionsSrc(), "closeChatOptionsIfNavigatingAway");
+    expect(seam).toContain("shouldCloseArticleChatOnNavigate(chatOpt, relPath)");
+    expect(seam).toContain("closeChatOptions()");
   });
 
   test("a nameTaken 409 offers no Send-there at all", async () => {
-    const body = fnBody(await browserSrc(), "submitChatOptions");
+    const body = fnBody(await optionsSrc(), "submitChatOptions");
     const at = body.indexOf("data.nameTaken");
     expect(at).toBeGreaterThan(-1);
     const branch = body.slice(at, at + 700);
@@ -1231,5 +1278,47 @@ describe("wiki-browser wiring", () => {
     expect(branch).toContain("conflictStatusLine(typedName, state.mode, true)");
     // …and it is decided BEFORE the ordinary threadExists branch.
     expect(at).toBeLessThan(body.indexOf("data.threadExists"));
+  });
+
+  test("the shell calls initChatOptions AFTER registering its own click delegate", async () => {
+    // Load-bearing ordering, and the ONLY thing holding it is the position of one
+    // call in a file: the dialog registers its click delegate inside
+    // `initChatOptions`, and the click-away decision it runs at the end of that
+    // listener reads `document.contains(target)`. A shell branch that
+    // synchronously detaches its own target (`cancelFactcheckIntegrate`) must
+    // therefore run BEFORE the dialog's listener, i.e. be registered first —
+    // exactly as it was when both lived in one listener. Moving the call up would
+    // close the dialog on the integrate panel's Cancel, which neither tsc nor the
+    // module's own listener tests can see.
+    const src = await browserSrc();
+    const delegate = src.indexOf('document.addEventListener("click"');
+    const detaching = src.indexOf('t.closest("#wikiFcIntCancel")');
+    const init = src.indexOf("initChatOptions({");
+    expect(delegate).toBeGreaterThan(-1);
+    expect(detaching).toBeGreaterThan(-1);
+    expect(init).toBeGreaterThan(-1);
+    expect(delegate).toBeLessThan(init);
+    expect(detaching).toBeLessThan(init);
+  });
+
+  test("the shell wires every port member to its real binding", async () => {
+    // The port is six callbacks to module-scoped `let`s the dialog can no longer
+    // reach. Each one has an inert default (`() => null`, `() => []`, a rejected
+    // POST), so a member wired to the WRONG `let` degrades SILENTLY: the
+    // suggestion chips lose the page's outgoing links, the "Continue …" chip loses
+    // the session, the escalate bar stops repainting — and tsc sees a well-typed
+    // object. (A member DROPPED from the literal is caught by tsc: all six are
+    // required on `ChatOptionsDeps`. The mis-wire is the silent half this pins.)
+    const src = await browserSrc();
+    const at = src.indexOf("initChatOptions({");
+    expect(at).toBeGreaterThan(-1);
+    const literal = src.slice(at, src.indexOf("});", at));
+    expect(literal).toMatch(/getShownTurn:\s*\(\)\s*=>\s*askShownTurn\b/);
+    expect(literal).toMatch(/getAskTurns:\s*\(\)\s*=>\s*askTurns\b/);
+    expect(literal).toMatch(/getCurrentArticle:\s*\(\)\s*=>\s*currentArticle\b/);
+    expect(literal).toMatch(/getOutgoingTitles:\s*\(\)\s*=>\s*currentOutgoingTitles\b/);
+    // The last two are the shell's own functions, passed by shorthand.
+    expect(literal).toMatch(/postAskChat(,|:\s*postAskChat\b)/);
+    expect(literal).toMatch(/refreshChatEscalateBar(,|:\s*refreshChatEscalateBar\b)/);
   });
 });
