@@ -366,6 +366,14 @@ test.describe("Plan board: writing back to mimir", () => {
     // could only 409 again.
     await expect(page.locator('.pb-drawer .pb-priset button[data-key="pri-p1"]')).toBeDisabled();
 
+    // The recovery has to be IN THE PANEL. The drawer is modal and everything
+    // behind it — the board-level notice with its own Reload included — is
+    // `inert`, so a reader who 409s here can neither click nor tab to it. This
+    // pair is the pin: delete the drawer-local Reload and the reader is left at
+    // a card whose every click can only 409 again.
+    await expect(page.locator("#pbNotice")).toHaveAttribute("inert", "");
+    await expect(msg.locator("button.pb-reload")).toHaveCount(1);
+
     await msg.locator("button.pb-reload").click();
     await expect(page.locator(".pb-drawer .pb-wmsg")).toHaveCount(0);
 
@@ -500,6 +508,201 @@ test.describe("Plan board: writing back to mimir", () => {
     await page.keyboard.press("Escape");
     await expect(page.locator('.pb-cardwrap[data-slug="gamma-plan"] .pb-pri')).toHaveText("p1");
     await expect(page.locator("#pbDraft")).toHaveClass(/pb-visible/);
+  });
+
+  test("a refresh whose ledger leaves are malformed costs a dash, not an un-openable card", async ({
+    page,
+  }) => {
+    // `parseBoardRefresh` waves `estimate` and `ledger` through as opaque
+    // records — they are display-only. The drawer then read them as the typed
+    // shape (`facts.activeHours.toFixed(1)`, `facts.prs.length`), so a leaf of
+    // the wrong type threw INSIDE `openDrawer`, after `view.openSlug` was set
+    // and the previous panel removed: the card became permanently un-openable.
+    await page.route("**/api/plans/board", async (route) => {
+      const body = await (await route.fetch()).json();
+      for (const card of body.cards) {
+        if (card.slug !== "alpha-plan") continue;
+        // Numbers absent where the type says `number | null`, and a `prs` that
+        // has a `length` but is not an array — exactly what a service on the
+        // other side of a version bump can send.
+        card.ledger = { costUSD: 12.5, prs: { length: 2 } };
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(body),
+      });
+    });
+
+    // The refresh has to come from the board's own Reload, which means raising a
+    // 409 first — the queue changes behind the page's back.
+    await writeFile(path.join(root, "plans", "queue.yaml"), "ready:\n  - delta-plan\n", "utf8");
+    await page.goto(`${BASE}/plans`);
+    await writeFile(path.join(root, "plans", "queue.yaml"), "proposed:\n  - alpha-plan\n", "utf8");
+    await nudgeBtn(page, "gamma-plan", "up").click();
+    const msg = page.locator("#pbNotice .pb-wmsg");
+    await expect(msg).toContainText("the queue changed on disk — reload");
+    await msg.locator("button.pb-reload").click();
+    await expect(page.locator("#pbNotice .pb-wmsg")).toBeHidden();
+
+    // The card still opens, and the leaves it cannot read are dashes.
+    await openCard(page, "alpha-plan");
+    const cell = (k: string) =>
+      page.locator(".pb-drawer .pb-kv > div", { hasText: k }).locator(".pb-v");
+    await expect(cell("Cost")).toHaveText("$13");
+    await expect(cell("Active hours")).toHaveText("—");
+    await expect(cell("Sessions")).toHaveText("—");
+  });
+
+  test("a 403 flip re-arms a card an earlier 409 had staled", async ({ page }) => {
+    await page.goto(`${BASE}/plans`);
+    await openCard(page, "beta-plan");
+    await writeFile(
+      path.join(root, "plans", "beta-plan.mdx"),
+      planFile("beta-plan", "status_note: touched by hand\n"),
+      "utf8",
+    );
+    await page.locator('.pb-drawer .pb-priset button[data-key="pri-p2"]').click();
+    await expect(page.locator(".pb-drawer .pb-wmsg")).toContainText("changed on disk");
+    await expect(page.locator('.pb-drawer .pb-priset button[data-key="pri-p3"]')).toBeDisabled();
+    await page.keyboard.press("Escape");
+
+    // Now the instance stops writing altogether (the flag flipped, or this tab
+    // outlived a restart).
+    await page.route("**/api/plans/priority", (route) =>
+      route.fulfill({
+        status: 403,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "wiki-readonly", readonly: true }),
+      }),
+    );
+    await openCard(page, "gamma-plan");
+    await page.locator('.pb-drawer .pb-priset button[data-key="pri-p1"]').click();
+    await expect(page.locator("#pbNotice")).toContainText(`${PLAN_READONLY_ENV}=1`);
+    await page.keyboard.press("Escape");
+
+    // beta's dead CAS base means nothing on a board that no longer writes: its
+    // buttons are the DRAFT's now, and there is no Reload anywhere on a readonly
+    // board to clear the stale mark. Left set, it disabled that card forever.
+    await openCard(page, "beta-plan");
+    const p3 = page.locator('.pb-drawer .pb-priset button[data-key="pri-p3"]');
+    await expect(p3).toBeEnabled();
+    await p3.click();
+    await expect(p3).toHaveAttribute("aria-pressed", "true");
+  });
+
+  test("a move queued behind a write that 409s says so instead of vanishing", async ({ page }) => {
+    // The queue write chain lets a second click arrive while the first is in
+    // flight — which means the guard that refuses a move over a dead CAS base
+    // fires on a click the reader really made. It must leave a trace.
+    await page.route("**/api/plans/order", async (route) => {
+      await new Promise((r) => setTimeout(r, 700));
+      await route.continue();
+    });
+    await writeFile(path.join(root, "plans", "queue.yaml"), "ready:\n  - delta-plan\n", "utf8");
+    await page.goto(`${BASE}/plans`);
+    await writeFile(path.join(root, "plans", "queue.yaml"), "proposed:\n  - alpha-plan\n", "utf8");
+
+    await nudgeBtn(page, "gamma-plan", "up").click();
+    await nudgeBtn(page, "beta-plan", "up").click();
+
+    const msg = page.locator("#pbNotice .pb-wmsg");
+    await expect(msg).toContainText("the queue changed on disk — reload");
+    await expect(msg).toContainText("a queued move was not sent");
+    await expect(msg.locator("button.pb-reload")).toHaveCount(1);
+    // …and the drop was real: neither move reached the file.
+    expect(await queueText(root)).toBe("proposed:\n  - alpha-plan\n");
+  });
+
+  test("a move queued behind a write the instance refuses lands in the draft", async ({ page }) => {
+    await page.route("**/api/plans/order", async (route) => {
+      await new Promise((r) => setTimeout(r, 700));
+      await route.fulfill({
+        status: 403,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "wiki-readonly", readonly: true }),
+      });
+    });
+    await page.goto(`${BASE}/plans`);
+
+    await nudgeBtn(page, "gamma-plan", "up").click();
+    await nudgeBtn(page, "beta-plan", "up").click();
+
+    await expect(page.locator("#pbNotice")).toContainText(`${PLAN_READONLY_ENV}=1`);
+    // BOTH clicks land in the draft — the one that discovered the refusal and
+    // the one already queued behind it. Dropping the second silently is the same
+    // "the first click does nothing" the 403 fold exists to prevent.
+    await expect(page.locator('.pb-cardwrap[data-slug="gamma-plan"] .pb-rank')).toHaveText("#1");
+    await expect(page.locator('.pb-cardwrap[data-slug="beta-plan"] .pb-rank')).toHaveText("#2");
+    await expect(page.locator("#pbDraft")).toContainText("hand order");
+    expect(await queueText(root)).toBeNull();
+  });
+
+  test("a refused click on a plan whose priority is on disk leaves no dead draft", async ({
+    page,
+  }) => {
+    await writeFile(
+      path.join(root, "plans", "alpha-plan.mdx"),
+      planFile("alpha-plan", "priority: p1\n"),
+      "utf8",
+    );
+    await page.route("**/api/plans/priority", (route) =>
+      route.fulfill({
+        status: 403,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "wiki-readonly", readonly: true }),
+      }),
+    );
+    await page.goto(`${BASE}/plans`);
+    await openCard(page, "alpha-plan");
+
+    // Clicking the level the plan already carries is the CLEAR gesture on a
+    // writing board — and a draft can never express it, because `applyOverlay`
+    // gives the frontmatter the win unconditionally.
+    await page.locator('.pb-drawer .pb-priset button[data-key="pri-p1"]').click();
+    await expect(page.locator("#pbNotice")).toContainText(`${PLAN_READONLY_ENV}=1`);
+    await expect(page.locator(".pb-drawer")).toContainText("stays until an instance that writes");
+
+    // The dead entry is invisible on screen (the pill renders the disk value
+    // either way), so the assertion is on the draft itself.
+    const draftPriorities = await page.evaluate(() => {
+      const raw = localStorage.getItem("muninn.planboard.draft.v1");
+      return raw ? (JSON.parse(raw).priority ?? {}) : {};
+    });
+    expect(draftPriorities).toEqual({});
+    await page.keyboard.press("Escape");
+    await expect(page.locator('.pb-cardwrap[data-slug="alpha-plan"] .pb-pri')).toHaveText("p1");
+    await expect(page.locator("#pbDraft")).not.toHaveClass(/pb-visible/);
+  });
+
+  test("a retracted failure banner goes when the next write LAUNCHES, not when it settles", async ({
+    page,
+  }) => {
+    let calls = 0;
+    await page.route("**/api/plans/order", async (route) => {
+      calls += 1;
+      if (calls === 1) {
+        await route.fulfill({
+          status: 422,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "plans/queue.yaml: unparseable YAML at line 3" }),
+        });
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 4000));
+      await route.continue();
+    });
+    await page.goto(`${BASE}/plans`);
+
+    await nudgeBtn(page, "beta-plan", "up").click();
+    await expect(page.locator("#pbNotice .pb-wmsg")).toContainText("unparseable YAML");
+
+    // A 422 leaves the controls live (a refetch answers with the same broken
+    // file), so the next nudge really launches — and the message it retracted at
+    // launch must go with it, not linger over a write that is already running.
+    await nudgeBtn(page, "gamma-plan", "up").click();
+    await expect(page.locator(".pb-col[data-col='proposed'] .pb-saving")).toBeVisible();
+    await expect(page.locator("#pbNotice .pb-wmsg")).toBeHidden({ timeout: 1500 });
   });
 
   test("the localStorage draft is retired per AXIS, not all-or-nothing", async ({ page }) => {

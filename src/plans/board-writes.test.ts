@@ -8,6 +8,7 @@ import {
   admitPriorityEdit,
   applyPriorityResult,
   classifyWriteFailure,
+  foldRefusedPriority,
   isRankableColumn,
   NUDGE_OFF_SORT,
   NUDGE_RELOADING,
@@ -27,6 +28,7 @@ import {
   prunedRankSlugs,
   prunedRankWarning,
   nudgeBlockedReason,
+  queuedMovesDroppedNote,
   QUEUE_UNREADABLE_REASON,
   retainDraft,
   transportFailure,
@@ -244,6 +246,36 @@ describe("admitPriorityEdit", () => {
     expect(admitPriorityEdit(new Set(), "a")).toBe(true);
     expect(admitPriorityEdit(new Set(["a"]), "a")).toBe(false);
     expect(admitPriorityEdit(new Set(["a"]), "b")).toBe(true);
+  });
+});
+
+describe("queuedMovesDroppedNote", () => {
+  test("names the drop, singular and plural, and points at the recovery", () => {
+    expect(queuedMovesDroppedNote(1)).toBe("a queued move was not sent — reload first");
+    expect(queuedMovesDroppedNote(3)).toContain("3 queued moves");
+    expect(queuedMovesDroppedNote(3)).toContain("reload first");
+  });
+
+  test("says nothing when nothing was dropped", () => {
+    expect(queuedMovesDroppedNote(0)).toBeNull();
+  });
+});
+
+describe("foldRefusedPriority", () => {
+  test("a plan with no frontmatter priority folds into the draft", () => {
+    expect(foldRefusedPriority(null)).toEqual({ kind: "draft" });
+  });
+
+  test("a plan whose priority is ON DISK folds into a note, never a draft entry", () => {
+    // `applyOverlay` gives the frontmatter the win unconditionally, so a draft
+    // entry for such a card is dead in EVERY direction — it can neither clear
+    // the disk value (which is what clicking the level already set means) nor
+    // replace it. Storing one would render a "1 priority draft" the reader
+    // cannot see the effect of.
+    const fold = foldRefusedPriority("p1");
+    expect(fold.kind).toBe("note");
+    expect(fold.kind === "note" && fold.message).toContain("p1");
+    expect(fold.kind === "note" && fold.message).toContain(PLAN_READONLY_ENV);
   });
 });
 

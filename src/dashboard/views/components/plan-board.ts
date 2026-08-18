@@ -35,7 +35,14 @@
  *     card's priority buttons, because every CAS base they hold is known dead.
  *     The standing message is cleared when a write LAUNCHES, never when one is
  *     queued — nulling it at queue time wiped the Reload button mid-flight and
- *     fired a request that could only 409.
+ *     fired a request that could only 409. A move ALREADY queued when that
+ *     failure lands cannot be sent either, so it is counted on the message
+ *     rather than dropped in silence; after a 403 flip it is folded into the
+ *     draft, like the click that discovered the refusal.
+ *   - **A display leaf costs a dash, never a throw.** `parseBoardRefresh` waves
+ *     `estimate`/`ledger` through unchecked by design, so every read of one goes
+ *     through `fin`/`numText` — and `openDrawer` keeps a backstop, because it
+ *     mutates state before it builds.
  *   - **A refresh is serialized against both write chains.** `reloadBoard`
  *     waits for everything in flight, then adopts a payload it has fully
  *     parsed — all of it or none of it — and clears only the messages that
@@ -80,6 +87,7 @@ import {
   admitPriorityEdit,
   applyPriorityResult,
   classifyWriteFailure,
+  foldRefusedPriority,
   nudgeBlockedReason,
   orderDraftReason,
   orderRequest,
@@ -91,6 +99,7 @@ import {
   priorityRequest,
   prunedRankSlugs,
   prunedRankWarning,
+  queuedMovesDroppedNote,
   retainDraft,
   transportFailure,
   unknownColumnWarning,
@@ -119,6 +128,10 @@ interface WriteMessage {
   text: string;
   reload: boolean;
   at: number;
+  /** Moves the chain refused to send while this message stood. Counted on the
+   *  message itself, so clearing the message (at launch, or on a refresh)
+   *  clears the count with it and the `at` rule above covers both. */
+  queuedDropped?: number;
 }
 
 /** The 200 body was not the contract — see `parse*Result`. Adopting a hash off
@@ -127,6 +140,32 @@ const BAD_BODY = "the write answered with a body this board does not understand 
 
 interface ViewState extends BoardViewState {
   openSlug: string | null;
+}
+
+/**
+ * The money half of a card, read defensively.
+ *
+ * `parseBoardRefresh` waves `estimate` and `ledger` through as opaque records
+ * ON PURPOSE — they are display-only, and rejecting a whole refresh over one
+ * cosmetic leaf would be worse than rendering a dash. That promise only holds
+ * if the render side actually keeps it: it did not, and a leaf of the wrong
+ * type (a `number | null` that arrived absent, a `prs` that is not an array)
+ * threw inside `openDrawer` AFTER the previous panel was removed and
+ * `view.openSlug` set — leaving the card permanently un-openable. So every read
+ * of one of those leaves goes through these three, and the cost of a leaf this
+ * board cannot use is a dash.
+ */
+function fin(raw: unknown): number | null {
+  return typeof raw === "number" && Number.isFinite(raw) ? raw : null;
+}
+
+function numText(raw: unknown, fmt: (n: number) => string = String): string {
+  const n = fin(raw);
+  return n === null ? "—" : fmt(n);
+}
+
+function strText(raw: unknown, fallback: string): string {
+  return typeof raw === "string" && raw ? raw : fallback;
 }
 
 function el(tag: string, cls?: string | null, text?: string | null): HTMLElement {
@@ -408,6 +447,12 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     capability = writeCapability({ readonly: true, queueHash: queue.hash });
     priorityMsg = null;
     orderMsg = null;
+    // A stale mark is a statement about a CAS BASE, and this board no longer
+    // sends one — the draft it falls back to has no hash. Left set, it disabled
+    // that card's buttons for the rest of the session, because the only thing
+    // that clears the mark is a Reload and a readonly board offers none (both
+    // messages carrying one were just dropped, two lines up).
+    staleCards.clear();
   }
 
   /** Write one plan's priority. Serialized per card; the response's priority and
@@ -447,8 +492,14 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     const fail = classifyWriteFailure(out.status, out.body, "priority");
     if (fail.kind === "readonly") {
       flipReadonly();
-      // The click that discovered the refusal is the one the reader made.
-      draftPriority(card.slug, clicked);
+      // The click that discovered the refusal is the one the reader made — so it
+      // folds into the draft, EXCEPT where a draft cannot express it: on a plan
+      // whose frontmatter carries a priority, disk wins on every load, so the
+      // click (which on a writing board meant "clear it") gets the sentence
+      // naming who can, and no dead entry. See `foldRefusedPriority`.
+      const fold = foldRefusedPriority(card.priority);
+      if (fold.kind === "draft") draftPriority(card.slug, clicked);
+      else priorityMsg = { slug: card.slug, ...stamp(fold.message, false) };
       return;
     }
     // A reload-worthy failure means THIS card's hash is dead, whatever else is
@@ -496,7 +547,22 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     // `reloading` is set, and the buttons are disabled), its base is still the
     // current one, and the refresh WAITS for the chain — so letting it run
     // costs nothing and dropping it would silently eat a click the reader made.
-    if (capability.orderMode !== "write" || orderMsg?.reload) return;
+    if (capability.orderMode !== "write") {
+      // A 403 landed while this move waited its turn. The click is the reader's
+      // and this board no longer writes, so it goes where the click that
+      // DISCOVERED the refusal goes: into the draft. Dropping it here made the
+      // first nudge after a flip land and the second vanish.
+      draftNudge(slug, column, delta);
+      return;
+    }
+    if (orderMsg?.reload) {
+      // An earlier write lost its CAS base, so the base this move holds is gone
+      // too. It cannot be sent, and it cannot be drafted either (this board
+      // still writes), so the only honest thing left is to say it was dropped —
+      // counted on the standing message, which is also what clears it.
+      orderMsg = { ...orderMsg, queuedDropped: (orderMsg.queuedDropped ?? 0) + 1 };
+      return;
+    }
     const { order } = merged();
     const shown = order[column] ?? [];
     const next = nudgeRanked(shown, slug, delta);
@@ -515,13 +581,16 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
 
     // The standing message is cleared HERE — at launch, by the write that is
     // replacing it — never at queue time, where it wiped a Reload the reader
-    // had not pressed yet.
+    // had not pressed yet. The repaint is UNCONDITIONAL: hanging it off the
+    // warnings meant a retracted failure banner stayed on screen for the whole
+    // round trip, so a slow queue write showed a failure that had already been
+    // withdrawn beside its own "saving…" marker.
     orderMsg = null;
     if (clientWarnings.length > 0) {
       orderWarnings = clientWarnings;
       orderWarningsAt = Date.now();
-      render();
     }
+    render();
 
     const out = await postJson("/api/plans/order", req);
     if (!out.ok) {
@@ -666,7 +735,12 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
       return;
     }
     orderMsgBanner.hidden = false;
-    if (orderMsgText.textContent !== orderMsg.text) orderMsgText.textContent = orderMsg.text;
+    // The dropped-move note rides the same sentence rather than a node of its
+    // own: it only ever exists under a standing failure, and one live region is
+    // one announcement.
+    const dropped = queuedMovesDroppedNote(orderMsg.queuedDropped ?? 0);
+    const text = dropped ? `${orderMsg.text} · ${dropped}` : orderMsg.text;
+    if (orderMsgText.textContent !== text) orderMsgText.textContent = text;
     const existing = orderMsgBox.querySelector<HTMLButtonElement>("button.pb-reload");
     if (!orderMsg.reload) {
       existing?.remove();
@@ -981,7 +1055,8 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
       head.append(el("span", "pb-swatch"), el("span", "pb-name", col.label));
       if (money.available) {
         const sum = inColumn.reduce(
-          (s, c) => s + (isTerminalColumn(c.column) ? c.ledger?.costUSD ?? 0 : c.estimate?.mid ?? 0),
+          (s, c) =>
+            s + (fin(isTerminalColumn(c.column) ? c.ledger?.costUSD : c.estimate?.mid) ?? 0),
           0,
         );
         head.append(el("span", "pb-money", inColumn.length ? formatUsd(sum) : ""));
@@ -1072,7 +1147,7 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     const r2 = el("div", "pb-r2");
     if (money.available) {
       if (isTerminalColumn(card.column) && card.ledger) {
-        const landed = card.ledger.landed ?? 0;
+        const landed = fin(card.ledger.landed) ?? 0;
         r2.append(el("span", "pb-est", `${formatUsd(card.ledger.costUSD)} · ${landed} PR${landed === 1 ? "" : "s"}`));
       } else if (isTerminalColumn(card.column)) {
         // A terminal card with no ledger row has no SPEND, and the column
@@ -1082,25 +1157,25 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
         const dash = el("span", "pb-est pb-est-guess", "—");
         dash.title = "no ledger row in claude-usage for this plan — nothing recorded to sum";
         r2.append(dash);
-        if (card.estimate?.mid != null) {
+        if (fin(card.estimate?.mid) !== null) {
           r2.append(
-            el("span", "pb-prs pb-prs-guess", `est ${formatUsd(card.estimate.mid)} · no ledger row`),
+            el("span", "pb-prs pb-prs-guess", `est ${formatUsd(card.estimate?.mid)} · no ledger row`),
           );
         }
-      } else if (card.estimate?.mid != null) {
-        const e = card.estimate;
+      } else if (fin(card.estimate?.mid) !== null) {
+        const e = card.estimate!;
         const est = el(
           "span",
           `pb-est${e.assumedCount ? " pb-est-guess" : ""}`,
           `${formatUsd(e.low)}–${formatUsd(e.high)} · ${formatUsd(e.mid)}`,
         );
-        est.title = `Band from ${e.sampleSize} shipped plans in ${e.poolKey}`;
+        est.title = `Band from ${numText(e.sampleSize)} shipped plans in ${strText(e.poolKey, "comparable plans")}`;
         r2.append(est);
         r2.append(
           el(
             "span",
             e.assumedCount ? "pb-prs pb-prs-guess" : "pb-prs",
-            `${e.prCount} PR${e.prCount === 1 ? "" : "s"}${e.assumedCount ? "?" : ""}`,
+            `${numText(e.prCount)} PR${e.prCount === 1 ? "" : "s"}${e.assumedCount ? "?" : ""}`,
           ),
         );
       }
@@ -1274,12 +1349,42 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     }
   }
 
+  /**
+   * Open the drawer, and never leave the board mid-open if that fails.
+   *
+   * The panel is torn down before the new one is built and `view.openSlug` is
+   * set before either — so a throw anywhere in the build left the reader with
+   * no drawer, a card marked selected, possibly an inert board, and a click
+   * handler that could only throw again: the card was dead until a page reload
+   * (measured on a refresh whose `ledger.activeHours` was absent). Every leaf
+   * that could throw is now read through {@link fin}/{@link numText}, so this is
+   * a backstop rather than the fix — but a backstop is exactly what the state
+   * mutation before the build calls for.
+   */
   function openDrawer(card: EffectiveCard, opener?: HTMLElement | null): void {
     const restoreTo = opener ?? drawerOpener;
     closeDrawer({ silent: true });
     drawerOpener = restoreTo ?? null;
     view.openSlug = card.slug;
+    try {
+      mountDrawer(card);
+    } catch (err) {
+      root.querySelectorAll(".pb-scrim,.pb-drawer").forEach((n) => n.remove());
+      document.removeEventListener("keydown", escClose);
+      setBackdropInert(false);
+      view.openSlug = null;
+      drawerOpener = null;
+      // Reload-worthy: the only thing that can put a payload this board cannot
+      // render right is a fresh one, and the message must not be a dead end.
+      orderMsg = stamp(
+        `could not open ${card.slug} (${err instanceof Error ? err.message : String(err)})`,
+        true,
+      );
+      render();
+    }
+  }
 
+  function mountDrawer(card: EffectiveCard): void {
     const scrim = el("div", "pb-scrim");
     scrim.onclick = () => closeDrawer();
     const drawer = el("aside", "pb-drawer");
@@ -1399,13 +1504,14 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     // actuals live under "What it actually cost" below it. Heading it "What it
     // cost" put an estimate under the one word that means money that left.
     sec.append(el("h3", null, terminal ? "What the model would have estimated" : "What it should cost"));
-    if (!money.available || !card.estimate || card.estimate.mid === null) {
+    if (!money.available || !card.estimate || fin(card.estimate.mid) === null) {
       sec.append(
         el("p", "pb-basis", money.reason ?? "No shipped plan in the ledger prices this one yet."),
       );
       return sec;
     }
     const e = card.estimate;
+    const perPrQ = e.dollarsPerPR && typeof e.dollarsPerPR === "object" ? e.dollarsPerPR : null;
     const kv = el("div", "pb-kv");
     const cell = (k: string, v: string) => {
       const c = el("div");
@@ -1415,18 +1521,19 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     kv.append(
       cell("Estimate", formatUsd(e.mid)),
       cell("Band", `${formatUsd(e.low)}–${formatUsd(e.high)}`),
-      cell("PRs", `${e.prCount}${e.assumedCount ? "?" : ""}`),
-      cell("$/PR", e.dollarsPerPR ? formatUsd(e.dollarsPerPR.p50) : "—"),
+      cell("PRs", `${numText(e.prCount)}${e.assumedCount ? "?" : ""}`),
+      cell("$/PR", perPrQ ? formatUsd(perPrQ.p50) : "—"),
     );
     sec.append(kv);
-    const perPr = e.dollarsPerPR
-      ? `$${Math.round(e.dollarsPerPR.p25)}/$${Math.round(e.dollarsPerPR.p50)}/$${Math.round(e.dollarsPerPR.p75)}`
+    const quartiles = [perPrQ?.p25, perPrQ?.p50, perPrQ?.p75].map(fin);
+    const perPr = quartiles.every((q) => q !== null)
+      ? quartiles.map((q) => `$${Math.round(q!)}`).join("/")
       : "—";
     sec.append(
       el(
         "p",
         "pb-basis",
-        `Priced off ${e.sampleSize} ${e.poolKey} plans at ${perPr} per PR × ${e.prCount} PRs.` +
+        `Priced off ${numText(e.sampleSize)} ${strText(e.poolKey, "comparable")} plans at ${perPr} per PR × ${numText(e.prCount)} PRs.` +
           (e.assumedCount
             ? " This plan declares no PR slate, so the count is the pool's median — treat the number as an order of magnitude."
             : ""),
@@ -1461,7 +1568,7 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     // actually cost" read as data that failed to load; one sentence says the
     // true thing.
     const recorded =
-      (facts.landed ?? 0) > 0 || (facts.costUSD ?? 0) > 0 || (facts.sessions ?? 0) > 0;
+      (fin(facts.landed) ?? 0) > 0 || (fin(facts.costUSD) ?? 0) > 0 || (fin(facts.sessions) ?? 0) > 0;
     if (!recorded) {
       sec.append(
         el("p", "pb-basis", "Nothing recorded yet — no session, no cost and no landed PR against this plan."),
@@ -1476,19 +1583,21 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     };
     kv.append(
       cell("Cost", formatUsd(facts.costUSD)),
-      cell("PRs landed", facts.landed !== null ? String(facts.landed) : "—"),
-      cell("Active hours", facts.activeHours !== null ? facts.activeHours.toFixed(1) : "—"),
-      cell("Findings", facts.findings !== null ? String(facts.findings) : "—"),
-      cell("Max rounds", facts.maxRounds !== null ? String(facts.maxRounds) : "—"),
-      cell("Sessions", facts.sessions !== null ? String(facts.sessions) : "—"),
+      cell("PRs landed", numText(facts.landed)),
+      cell("Active hours", numText(facts.activeHours, (n) => n.toFixed(1))),
+      cell("Findings", numText(facts.findings)),
+      cell("Max rounds", numText(facts.maxRounds)),
+      cell("Sessions", numText(facts.sessions)),
     );
     sec.append(kv);
-    if (facts.prs.length) {
+    const prs = Array.isArray(facts.prs) ? facts.prs : [];
+    if (prs.length) {
       const list = el("div", "pb-prlist");
-      for (const pr of facts.prs.slice(0, 40)) {
-        const label = `#${pr.number ?? "?"}`;
+      for (const pr of prs.slice(0, 40)) {
+        if (!pr || typeof pr !== "object") continue;
+        const label = `#${fin(pr.number) ?? "?"}`;
         let node: HTMLElement;
-        const href = httpUrl(pr.url);
+        const href = httpUrl(typeof pr.url === "string" ? pr.url : null);
         if (href) {
           const a = document.createElement("a");
           a.href = href;
@@ -1500,7 +1609,11 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
           node = el("span", null, label);
         }
         if (pr.reviewed === false) node.classList.add("pb-unrev");
-        node.title = [pr.repo, pr.mergedAt?.slice(0, 10), pr.reviewed === false ? "no review recorded" : null]
+        node.title = [
+          typeof pr.repo === "string" ? pr.repo : null,
+          typeof pr.mergedAt === "string" ? pr.mergedAt.slice(0, 10) : null,
+          pr.reviewed === false ? "no review recorded" : null,
+        ]
           .filter(Boolean)
           .join(" · ");
         list.append(node);

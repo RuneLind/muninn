@@ -302,6 +302,57 @@ export function admitPriorityEdit(pending: ReadonlySet<string>, slug: string): b
   return !pending.has(slug);
 }
 
+/**
+ * What a move the chain refused to send leaves on the notice.
+ *
+ * The ▲▼ stay live while a write runs (rule 5), so a click CAN arrive between a
+ * write going out and that write turning out to have lost its CAS base — and
+ * the guard that then refuses the queued move is refusing something the reader
+ * really did. Silently dropping it is the same failure as the disabled buttons:
+ * a click with no consequence and no explanation. Null ⇒ nothing was dropped
+ * and the message stands unchanged.
+ */
+export function queuedMovesDroppedNote(count: number): string | null {
+  if (count <= 0) return null;
+  return count === 1
+    ? "a queued move was not sent — reload first"
+    : `${count} queued moves were not sent — reload first`;
+}
+
+/** The sentence a refused click gets when the plan's priority is in mimir's
+ *  frontmatter and this board can no longer write it. */
+export function priorityOnDiskNote(diskPriority: PlanPriority): string {
+  return (
+    `${PLAN_READONLY_SHORT}, and a draft never overrides the frontmatter — ` +
+    `priority: ${diskPriority} stays until an instance that writes mimir changes it.`
+  );
+}
+
+export type RefusedPriorityFold = { kind: "draft" } | { kind: "note"; message: string };
+
+/**
+ * Where a 403-refused priority click goes.
+ *
+ * The click is not lost — on a board that has just discovered it cannot write,
+ * the draft is where an edit belongs. But the draft can only express the edit
+ * the reader made when the plan carries NO frontmatter priority: `applyOverlay`
+ * gives disk the win unconditionally, so for a plan that has one, a draft entry
+ * can neither clear it (which is exactly what clicking the level already set
+ * means) nor replace it. Storing the clicked value there produced a dead
+ * entry — invisible on the board, since the pill renders the disk value either
+ * way, and counted by nothing.
+ *
+ * So the fold toggles against the EFFECTIVE priority, and the honest fold for a
+ * disk-priority card is no draft entry plus the sentence that says who can
+ * change it. (When disk is null the effective value IS the draft value, which
+ * is what the draft toggle already compares against.)
+ */
+export function foldRefusedPriority(diskPriority: PlanPriority | null): RefusedPriorityFold {
+  return diskPriority === null
+    ? { kind: "draft" }
+    : { kind: "note", message: priorityOnDiskNote(diskPriority) };
+}
+
 // ---------------------------------------------------------------- requests
 
 export interface PriorityRequest {

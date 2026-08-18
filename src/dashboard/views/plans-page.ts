@@ -311,15 +311,26 @@ const PLAN_BOARD_STYLES = `
       position: sticky; top: 0; z-index: 2; background: var(--pb-surface-2);
       border-bottom: 1px solid var(--pb-line); border-radius: var(--pb-r) var(--pb-r) 0 0;
       padding: 9px 11px 8px; display: flex; align-items: center; gap: 8px;
+      /* Five labels can be on this row at once (name · money · draft order ·
+         saving… · count) and 292px does not always hold them. Wrapping is the
+         graceful end of that: nothing in here shrinks (below), so without it the
+         shortfall was taken out of whichever label could give. */
+      flex-wrap: wrap; row-gap: 4px;
     }
     .pb-swatch { width: 8px; height: 8px; border-radius: 2px; background: var(--pb-tone); flex: none; }
     .pb-name { font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--pb-tone); }
+    /* The count's is the ONE auto margin in this header — everything else sits
+       with the column's own labels, in DOM order. Two autos split the free
+       space between them, and the difference came out of the neighbours: on a
+       drafted AND priced column the "draft order" pill was crushed from 83px to
+       54px and broke over two lines the moment "saving…" appeared (measured in
+       the browser at the shipped 292px column width). */
     .pb-count { margin-left: auto; font-family: var(--pb-mono); font-size: 12px; color: var(--pb-muted); }
     /* The per-column write marker. It REPLACES disabling the nudges, so it must
        read as activity rather than as a refusal: same weight as the count, in
        the accent, sitting before it. */
-    .pb-saving { font-size: 10.5px; font-style: italic; color: var(--pb-accent-ink); margin-left: auto; }
-    .pb-saving + .pb-count { margin-left: 6px; }
+    .pb-saving { font-size: 10.5px; font-style: italic; color: var(--pb-accent-ink); }
+    .pb-money, .pb-draft-pill, .pb-saving, .pb-count { flex: none; white-space: nowrap; }
     .pb-money { font-family: var(--pb-mono); font-size: 11px; color: var(--pb-faint); }
     .pb-stack { overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 7px; scrollbar-width: thin; }
     .pb-empty { color: var(--pb-faint); font-size: 12px; padding: 10px 4px; font-style: italic; }
