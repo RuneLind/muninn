@@ -32,7 +32,11 @@
  * **Neither passes a `commit`.** mimir is in the repo-sync loop in `wiki` mode;
  * the sync loop is the committer, behind its 5-minute quiet period.
  *
- * ── The wire contract PR 5's client is written against ───────────────────────
+ * ── The wire contract the board's client is written against ─────────────────
+ *
+ * The client half lives in `src/plans/board-writes.ts` (the rules, parsed
+ * responses and failure classification) and `views/components/plan-board.ts`
+ * (the requests and their serialization).
  *
  *   - **`/priority`** answers `{slug, priority, hash, written, relPath}`.
  *     `priority` and `hash` are what is ON DISK, never what was asked for: a
@@ -436,7 +440,8 @@ export function registerPlansRoutes(
           // preserved column is filtered exactly as `/api/plans/board` filters
           // it. Without it a slug naming no plan survived the merge into both
           // the file and the response's `order`, while the board payload omitted
-          // it — leaving PR 5's client holding a rank for a card it never draws.
+          // it — leaving the board's client (`src/plans/board-writes.ts`)
+          // holding a rank for a card it never draws.
           const disk = current === null ? { order: {}, warnings: [] } : parseQueueYaml(current, known);
           if (disk.unparseable) {
             // REFUSE. The parse degraded the whole document to "nothing is

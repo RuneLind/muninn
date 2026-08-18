@@ -20,16 +20,31 @@
  * non-200 says live in `src/plans/board-writes.ts`, tested with no DOM; this
  * file owns the elements, the requests and the serialization:
  *
- *   - **One write per card, one write at a time for the queue.** A card whose
- *     priority is in flight has its buttons disabled and drops a racing click;
- *     order writes run through a promise chain, because two ▲ presses would
- *     otherwise send the same CAS base twice and the second could only 409.
+ *   - **One write per card; every queue write through ONE chain.** A card whose
+ *     priority is in flight has its buttons disabled and drops a racing click.
+ *     The ▲▼ stay ENABLED while a queue write runs and the click is appended to
+ *     the chain, which computes its move from the order the previous write
+ *     LANDED — that is what the chain is for, and disabling the buttons meant
+ *     no second click could ever reach it. Measured against the pre-fix build,
+ *     five ▲ dispatched in one tick: **1 of 5 reached a live button** and the
+ *     other four were eaten, and focus came back on `<body>` (a disabled button
+ *     cannot take it back, so `restoreNudgeFocus` fell through). What a write in
+ *     flight gets instead is a per-column "saving…" marker.
+ *   - **A stale board DOES stop the controls.** A standing reload-worthy
+ *     failure or a refresh in flight disables the nudges and the affected
+ *     card's priority buttons, because every CAS base they hold is known dead.
+ *     The standing message is cleared when a write LAUNCHES, never when one is
+ *     queued — nulling it at queue time wiped the Reload button mid-flight and
+ *     fired a request that could only 409.
+ *   - **A refresh is serialized against both write chains.** `reloadBoard`
+ *     waits for everything in flight, then adopts a payload it has fully
+ *     parsed — all of it or none of it — and clears only the messages that
+ *     predate the refresh, so a failure raised while it ran is not erased.
  *   - **Nothing is applied optimistically.** The board redraws from the
- *     response, so it can never show an order the wiki refused. On loopback the
- *     round trip is a few ms; the ▲▼ carry a "saving…" tooltip meanwhile.
- *   - **The `localStorage` draft is retired the moment the server owns both
- *     axes** — on a readonly instance it stays, because there it is the only
- *     ranking a reader has.
+ *     response, so it can never show an order the wiki refused.
+ *   - **The `localStorage` draft is retired PER AXIS**, the moment the server
+ *     owns that axis — on a readonly instance both halves stay, because there
+ *     they are the only priority and the only ranking a reader has.
  */
 
 import {
@@ -66,25 +81,44 @@ import {
   applyPriorityResult,
   classifyWriteFailure,
   nudgeBlockedReason,
+  orderDraftReason,
   orderRequest,
+  parseBoardRefresh,
   parseOrderResult,
   parsePriorityResult,
   priorityControlState,
+  priorityDraftReason,
   priorityRequest,
+  prunedRankSlugs,
+  prunedRankWarning,
+  retainDraft,
   transportFailure,
+  unknownColumnWarning,
   writeCapability,
+  writeModeSentence,
+  COLUMN_SAVING,
   PLAN_READONLY_NOTE,
+  type BoardRefresh,
   type WriteCapability,
 } from "../../../plans/board-writes.ts";
+import { getJson } from "./client-runtime.ts";
 import type { BoardPayload } from "../../../plans/board.ts";
 import type { PlanPriority } from "../../../plans/constants.ts";
 
 const OVERLAY_KEY = "muninn.planboard.draft.v1";
 
-/** A message a write left on a surface, with the reload the CAS loss needs. */
+/**
+ * A message a write left on a surface, with the reload the CAS loss needs.
+ *
+ * `at` is what a refresh compares against: a message raised while the refresh
+ * was in flight describes state NEWER than the payload being adopted, and
+ * clearing it is how a click's only feedback vanished (measured: a nudge during
+ * a reload 409'd and the adopt erased the message before it could be read).
+ */
 interface WriteMessage {
   text: string;
   reload: boolean;
+  at: number;
 }
 
 /** The 200 body was not the contract — see `parse*Result`. Adopting a hash off
@@ -155,46 +189,78 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
   const boardBox = root.querySelector<HTMLElement>("#pbBoard")!;
   const draftBox = root.querySelector<HTMLElement>("#pbDraft")!;
   const noticeBox = root.querySelector<HTMLElement>("#pbNotice")!;
+  const modeBox = root.querySelector<HTMLElement>("#pbMode");
 
   // Everything a write or a reload can change is state, not the frozen payload:
   // a 200 replaces a card's priority AND its hash, an order response replaces
   // the whole queue, and a 403 flips the board into the readonly rendering.
-  let board = payload;
   let cards: BoardCard[] = payload.cards;
   let queue: { order: BoardOrder; hash: string | null } = payload.queue;
+  /** What the LAST payload said. The client banner is rendered only when the
+   *  capability has since diverged from it (a 403 flip), because a payload that
+   *  already said readonly is stated once, in the masthead. */
+  let payloadReadonly = payload.readonly;
   let capability: WriteCapability = writeCapability({
     readonly: payload.readonly,
     queueHash: payload.queue.hash,
   });
   let columnMeta = new Map<string, BoardColumnMeta>(payload.columns.map((c) => [c.key, c]));
-  let money = payload.money.available;
+  let money: { available: boolean; reason: string | null } = payload.money;
 
-  let overlay = loadOverlay();
-  if (capability.retireDraft) {
-    overlay = { priority: {}, order: {} };
-    clearOverlay();
-  }
+  let overlay = retainDraft(loadOverlay(), capability);
+  saveOverlay();
 
   // ---- write state --------------------------------------------------------
   /** Slugs whose priority write is in flight — the per-card serialization. */
   const priorityPending = new Set<string>();
+  /** The same writes as promises: a refresh has to WAIT for them, and a Set of
+   *  slugs cannot be awaited. */
+  const priorityInFlight = new Map<string, Promise<void>>();
+  /** Cards whose hash a 4xx proved dead. Their priority buttons stay disabled
+   *  until a Reload replaces the hash — armed buttons over a known-dead base
+   *  can only 409 again. */
+  const staleCards = new Set<string>();
   /** The drawer's message, keyed to the card it was raised on: the drawer is a
    *  singleton node and a message left over from another plan reads as this
    *  one's failure. */
   let priorityMsg: (WriteMessage & { slug: string }) | null = null;
-  /** Order writes in flight. One chain, so two ▲ presses cannot send the same
-   *  CAS base twice. */
-  let orderPending = 0;
+  /** Order writes in flight, per column — the "saving…" marker's source. One
+   *  CHAIN for all of them, so two ▲ presses cannot send the same CAS base
+   *  twice; per-COLUMN counting only so the marker names the right column. */
+  const orderPendingByColumn = new Map<string, number>();
   let orderChain: Promise<void> = Promise.resolve();
   let orderMsg: WriteMessage | null = null;
   let orderWarnings: string[] = [];
+  /** When `orderWarnings` was raised — the `WriteMessage.at` rule, for the same
+   *  reason: a refresh must not erase the details of a write that outran it. */
+  let orderWarningsAt = 0;
   let reloading = false;
+  let reloadStartedAt = 0;
 
-  function saveOverlay(next: BoardOverlay): void {
-    // A retired draft is never written again — not even by the stale-column
-    // purge in `merged()`, which would otherwise re-create the key empty.
-    if (capability.retireDraft) return;
-    writeOverlay(next);
+  function stamp(text: string, reload: boolean): WriteMessage {
+    return { text, reload, at: Date.now() };
+  }
+
+  /** Persist the draft as the capability allows. Retirement is applied HERE as
+   *  well as on load, so no path — the stale-column purge in `merged()`, a
+   *  post-flip draft — can write back an axis the server owns. */
+  function saveOverlay(): void {
+    overlay = retainDraft(overlay, capability);
+    if (Object.keys(overlay.priority).length === 0 && Object.keys(overlay.order).length === 0) {
+      clearOverlay();
+      return;
+    }
+    writeOverlay(overlay);
+  }
+
+  function orderBusy(column: string): boolean {
+    return (orderPendingByColumn.get(column) ?? 0) > 0;
+  }
+
+  function bumpOrderPending(column: string, delta: 1 | -1): void {
+    const next = (orderPendingByColumn.get(column) ?? 0) + delta;
+    if (next > 0) orderPendingByColumn.set(column, next);
+    else orderPendingByColumn.delete(column);
   }
 
   interface Merged {
@@ -217,7 +283,7 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
       const order = { ...overlay.order };
       for (const key of res.staleDraftColumns) delete order[key];
       overlay = { priority: { ...overlay.priority }, order };
-      saveOverlay(overlay);
+      saveOverlay();
     }
     const draftCols = new Set(
       Object.entries(res.orderIsDraft)
@@ -256,6 +322,7 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
 
     const { cards: effective, order, draftCols, diskCols } = merged();
     const shown = filterCards(effective, view.filters);
+    renderMode();
     renderNotice();
     renderMeters(shown);
     renderControls(effective);
@@ -331,9 +398,13 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
    * wiki-readonly, so every other control would answer the same. Flipping the
    * board is the honest rendering — controls disabled and visible, one banner
    * naming the flag — rather than N identical refusals one click at a time.
+   *
+   * The refused edit is NOT lost: the caller folds it into the draft right
+   * after, because on a readonly board the draft is where that edit belongs and
+   * "the first click does nothing, the second one drafts" is indistinguishable
+   * from a broken control.
    */
   function flipReadonly(): void {
-    board = { ...board, readonly: true };
     capability = writeCapability({ readonly: true, queueHash: queue.hash });
     priorityMsg = null;
     orderMsg = null;
@@ -342,27 +413,49 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
   /** Write one plan's priority. Serialized per card; the response's priority and
    *  hash are adopted, never the requested ones (a `noop` echoes what is on
    *  disk, and the next edit's CAS base has to be that). */
-  async function writePriority(slug: string, clicked: PlanPriority): Promise<void> {
+  function writePriority(slug: string, clicked: PlanPriority): void {
+    if (reloading || staleCards.has(slug)) return;
     const card = cards.find((c) => c.slug === slug);
     if (!card || !admitPriorityEdit(priorityPending, slug)) return;
     priorityPending.add(slug);
     priorityMsg = null;
     refreshDrawer(slug);
 
-    const out = await postJson("/api/plans/priority", priorityRequest(card, clicked));
-    priorityPending.delete(slug);
+    const run = runPriorityWrite(card, clicked).finally(() => {
+      priorityPending.delete(slug);
+      priorityInFlight.delete(slug);
+      render();
+      refreshDrawer(slug, `pri-${clicked}`);
+    });
+    // Held as a promise as well as a slug: `reloadBoard` waits on these, so a
+    // refresh cannot issue its GET while a write is still deciding what disk
+    // says.
+    priorityInFlight.set(slug, run);
+  }
 
+  async function runPriorityWrite(
+    card: { slug: string; priority: PlanPriority | null; hash: string },
+    clicked: PlanPriority,
+  ): Promise<void> {
+    const out = await postJson("/api/plans/priority", priorityRequest(card, clicked));
     if (out.ok) {
       const result = parsePriorityResult(out.body);
       if (result) cards = applyPriorityResult(cards, result);
-      else priorityMsg = { slug, text: transportFailure(BAD_BODY).message, reload: true };
-    } else {
-      const fail = classifyWriteFailure(out.status, out.body, "priority");
-      if (fail.kind === "readonly") flipReadonly();
-      else priorityMsg = { slug, text: fail.message, reload: fail.reload };
+      else priorityMsg = { slug: card.slug, ...stamp(transportFailure(BAD_BODY).message, true) };
+      return;
     }
-    render();
-    refreshDrawer(slug, `pri-${clicked}`);
+    const fail = classifyWriteFailure(out.status, out.body, "priority");
+    if (fail.kind === "readonly") {
+      flipReadonly();
+      // The click that discovered the refusal is the one the reader made.
+      draftPriority(card.slug, clicked);
+      return;
+    }
+    // A reload-worthy failure means THIS card's hash is dead, whatever else is
+    // true: 409 says so outright, and a 404 naming the plan says the board is
+    // describing a file that is not there any more.
+    if (fail.reload) staleCards.add(card.slug);
+    priorityMsg = { slug: card.slug, ...stamp(fail.message, fail.reload) };
   }
 
   /**
@@ -372,19 +465,21 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
    * returned, so a queued move is computed only once the earlier one has landed
    * — from the ADOPTED order, not from the list the click saw. Sending both at
    * once would put the same base on two requests and the second could only 409.
+   * The ▲▼ therefore stay live while a write runs; what a queued click must not
+   * do is DISTURB the state the standing write left, which is why nothing is
+   * cleared here.
    */
   function queueOrderWrite(slug: string, column: BoardColumnKey, delta: -1 | 1): void {
-    orderPending += 1;
-    orderMsg = null;
+    bumpOrderPending(column, 1);
     render();
     orderChain = orderChain.then(async () => {
       try {
         await runOrderWrite(slug, column, delta);
       } catch (err) {
         const fail = transportFailure(err instanceof Error ? err.message : String(err));
-        orderMsg = { text: fail.message, reload: fail.reload };
+        orderMsg = stamp(fail.message, fail.reload);
       } finally {
-        orderPending -= 1;
+        bumpOrderPending(column, -1);
         render();
       }
     });
@@ -395,29 +490,75 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     // (the board is readonly now), or an earlier write lost its CAS — the base
     // every queued move holds is gone too, so they would 409 in a row and bury
     // the reload the first one raised.
+    //
+    // A refresh in flight is deliberately NOT one of them. Every move in this
+    // chain was clicked BEFORE the refresh started (`nudge` refuses once
+    // `reloading` is set, and the buttons are disabled), its base is still the
+    // current one, and the refresh WAITS for the chain — so letting it run
+    // costs nothing and dropping it would silently eat a click the reader made.
     if (capability.orderMode !== "write" || orderMsg?.reload) return;
     const { order } = merged();
-    const next = nudgeRanked(order[column] ?? [], slug, delta);
+    const shown = order[column] ?? [];
+    const next = nudgeRanked(shown, slug, delta);
     if (!next) return;
     const req = orderRequest(column, next, queue.hash);
     if (!req) return;
 
+    // What this write is about to make durable that nobody asked for: the board
+    // posts the column-filtered list, so a disk-ranked slug whose plan has moved
+    // column is dropped by the same write — and the server cannot warn, because
+    // every slug it received is a slug it knows.
+    const label = columnMeta.get(column)?.label ?? column;
+    const clientWarnings = prunedRankSlugs(queue.order[column] ?? [], shown).map((dropped) =>
+      prunedRankWarning(dropped, label),
+    );
+
+    // The standing message is cleared HERE — at launch, by the write that is
+    // replacing it — never at queue time, where it wiped a Reload the reader
+    // had not pressed yet.
+    orderMsg = null;
+    if (clientWarnings.length > 0) {
+      orderWarnings = clientWarnings;
+      orderWarningsAt = Date.now();
+      render();
+    }
+
     const out = await postJson("/api/plans/order", req);
     if (!out.ok) {
       const fail = classifyWriteFailure(out.status, out.body, "order");
-      if (fail.kind === "readonly") flipReadonly();
-      else orderMsg = { text: fail.message, reload: fail.reload };
+      // The details belonged to a write that did not happen; leaving them under
+      // an unrelated error reads as the failure's explanation.
+      orderWarnings = [];
+      if (fail.kind === "readonly") {
+        flipReadonly();
+        draftNudge(slug, column, delta);
+        return;
+      }
+      orderMsg = stamp(fail.message, fail.reload);
       return;
     }
     const result = parseOrderResult(out.body);
     if (!result) {
-      orderMsg = { text: BAD_BODY, reload: true };
+      orderWarnings = [];
+      orderMsg = stamp(BAD_BODY, true);
       return;
     }
     // The MERGED order, wholesale: it carries the columns this request did not
     // post, corpus-filtered exactly as the board filters them.
     queue = { order: result.order, hash: result.hash };
-    orderWarnings = result.warnings;
+    orderWarnings = [
+      ...clientWarnings,
+      ...result.unknownColumns.map(unknownColumnWarning),
+      ...result.warnings,
+    ];
+    orderWarningsAt = Date.now();
+  }
+
+  /** Everything currently writing. A refresh waits on this — that wait IS the
+   *  generation guard: nothing can land after the GET is issued, because every
+   *  control that could start one is disabled while `reloading`. */
+  async function settleWrites(): Promise<void> {
+    await Promise.allSettled([orderChain, ...priorityInFlight.values()]);
   }
 
   /** Refetch `GET /api/plans/board` and adopt it — the recovery a 409 offers.
@@ -426,21 +567,27 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
   async function reloadBoard(): Promise<void> {
     if (reloading) return;
     reloading = true;
+    reloadStartedAt = Date.now();
     render();
+    if (view.openSlug) refreshDrawer(view.openSlug);
     try {
-      const res = await fetch("/api/plans/board", { headers: { accept: "application/json" } });
-      const data: unknown = res.ok ? await res.json().catch(() => null) : null;
-      const fresh = data as BoardPayload | null;
-      if (!fresh || !Array.isArray(fresh.cards) || typeof fresh.queue !== "object" || !fresh.queue) {
-        orderMsg = { text: "could not refresh — GET /api/plans/board did not answer with a board", reload: true };
+      await settleWrites();
+      const fresh = parseBoardRefresh(
+        await getJson<unknown>("/api/plans/board", { headers: { accept: "application/json" } }),
+      );
+      if (!fresh) {
+        // Nothing was adopted: the parse either produced a whole board or none
+        // of one, so the board on screen is still the board the writes agree
+        // with.
+        orderMsg = stamp("could not refresh — GET /api/plans/board did not answer with a board", true);
         return;
       }
       adoptPayload(fresh);
     } catch (err) {
-      orderMsg = {
-        text: `could not refresh (${err instanceof Error ? err.message : String(err)})`,
-        reload: true,
-      };
+      orderMsg = stamp(
+        `could not refresh (${err instanceof Error ? err.message : String(err)})`,
+        true,
+      );
     } finally {
       reloading = false;
       render();
@@ -448,72 +595,135 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     }
   }
 
-  function adoptPayload(fresh: BoardPayload): void {
-    board = fresh;
+  /** Commit a parsed refresh. Every field comes off `parseBoardRefresh`, so
+   *  there is no half-adopted state to reason about — and the messages are
+   *  cleared only where they PREDATE the refresh. */
+  function adoptPayload(fresh: BoardRefresh): void {
     cards = fresh.cards;
     queue = fresh.queue;
+    payloadReadonly = fresh.readonly;
     capability = writeCapability({ readonly: fresh.readonly, queueHash: fresh.queue.hash });
     columnMeta = new Map(fresh.columns.map((c) => [c.key, c]));
-    money = fresh.money.available;
-    if (!money && view.sort === "cost") view.sort = "rank";
-    if (capability.retireDraft) {
-      overlay = { priority: {}, order: {} };
-      clearOverlay();
-    }
-    priorityMsg = null;
-    orderMsg = null;
-    orderWarnings = [];
+    money = fresh.money;
+    if (!money.available && view.sort === "cost") view.sort = "rank";
+    saveOverlay();
+    // Every card's hash was just replaced, so no card is known-stale any more.
+    staleCards.clear();
+    if (priorityMsg && priorityMsg.at < reloadStartedAt) priorityMsg = null;
+    if (orderMsg && orderMsg.at < reloadStartedAt) orderMsg = null;
+    if (orderWarningsAt < reloadStartedAt) orderWarnings = [];
   }
 
-  /** The message block a failed (or stale) write leaves on its surface. */
+  /** The message block a failed (or stale) write leaves on its surface. Used by
+   *  the DRAWER, which is rebuilt wholesale per open — the board-level one is
+   *  the persistent live region below, because that node survives every render
+   *  and re-announcing an unchanged sentence on each keystroke is noise. */
   function writeMessage(msg: WriteMessage): HTMLElement {
     const box = el("div", "pb-wmsg");
     box.setAttribute("role", "status");
     box.append(el("span", null, msg.text));
-    if (msg.reload) {
-      const b = el("button", "pb-reload", reloading ? "Reloading…" : "Reload") as HTMLButtonElement;
-      b.type = "button";
-      b.disabled = reloading;
-      b.onclick = () => void reloadBoard();
-      box.append(b);
-    }
+    if (msg.reload) box.append(reloadButton());
     return box;
+  }
+
+  function reloadButton(): HTMLButtonElement {
+    const b = el("button", "pb-reload", reloading ? "Reloading…" : "Reload") as HTMLButtonElement;
+    b.type = "button";
+    b.disabled = reloading;
+    b.onclick = () => void reloadBoard();
+    return b;
+  }
+
+  /**
+   * The board-level order message: ONE node, created at mount and updated in
+   * place.
+   *
+   * It carries `role="status"`, so rebuilding it per render re-announced the
+   * same sentence every time anything on the board changed — including every
+   * keystroke in the search box. Its text is written only when it differs, and
+   * the whole banner is hidden rather than removed, so the live region stays in
+   * the document and an unchanged message stays silent.
+   */
+  const orderMsgBanner = el("div", "pb-banner pb-banner-bad");
+  const orderMsgBox = el("div", "pb-wmsg");
+  orderMsgBox.setAttribute("role", "status");
+  const orderMsgText = el("span");
+  orderMsgBox.append(orderMsgText);
+  orderMsgBanner.append(orderMsgBox);
+  orderMsgBanner.hidden = true;
+  /** Ephemeral banners above it, dropped details below — the message node sits
+   *  between them and is never cleared with them. */
+  const noticeBanners = el("div", "pb-notice-part");
+  const noticeDetails = el("div", "pb-notice-part");
+  noticeBox.append(noticeBanners, orderMsgBanner, noticeDetails);
+
+  function renderOrderMsg(): void {
+    if (!orderMsg) {
+      orderMsgBanner.hidden = true;
+      if (orderMsgText.textContent !== "") orderMsgText.textContent = "";
+      const stale = orderMsgBox.querySelector("button.pb-reload");
+      if (stale) stale.remove();
+      return;
+    }
+    orderMsgBanner.hidden = false;
+    if (orderMsgText.textContent !== orderMsg.text) orderMsgText.textContent = orderMsg.text;
+    const existing = orderMsgBox.querySelector<HTMLButtonElement>("button.pb-reload");
+    if (!orderMsg.reload) {
+      existing?.remove();
+      return;
+    }
+    // The button's own state does change per render (a refresh in flight
+    // disables it), so it is updated rather than replaced — replacing it would
+    // take focus off the very control the reader just pressed.
+    if (existing) {
+      existing.disabled = reloading;
+      existing.textContent = reloading ? "Reloading…" : "Reload";
+      return;
+    }
+    orderMsgBox.append(reloadButton());
   }
 
   /**
    * The board-level notice strip: why this instance cannot write, why ranking
    * is off, what the last order write failed on, and anything the merge dropped.
    *
-   * The readonly banner is rendered HERE rather than server-side with the other
-   * degrade banners because a 403 can raise it mid-session, and two spellings of
-   * one sentence is how they drift — the page's masthead reads the same
-   * `PLAN_READONLY_NOTE` constant.
+   * The readonly banner is rendered here ONLY for a mid-session flip. A payload
+   * that already said readonly has the masthead state it (from the same
+   * capability, through the same `writeModeSentence`), and rendering both put
+   * the identical sentence on screen twice.
    */
   function renderNotice(): void {
-    noticeBox.textContent = "";
-    if (capability.readonly) {
-      noticeBox.append(el("div", "pb-banner pb-banner-warn", PLAN_READONLY_NOTE));
+    noticeBanners.textContent = "";
+    if (capability.readonly && !payloadReadonly) {
+      noticeBanners.append(el("div", "pb-banner pb-banner-warn", PLAN_READONLY_NOTE));
     }
     if (capability.orderMode === "off" && capability.orderOffReason) {
-      noticeBox.append(el("div", "pb-banner pb-banner-warn", capability.orderOffReason));
+      noticeBanners.append(el("div", "pb-banner pb-banner-warn", capability.orderOffReason));
     }
-    if (orderMsg) {
-      const box = el("div", "pb-banner pb-banner-bad");
-      box.append(writeMessage(orderMsg));
-      noticeBox.append(box);
-    }
+    renderOrderMsg();
+    noticeDetails.textContent = "";
     if (orderWarnings.length > 0) {
-      // Non-modal on purpose: every one of these is a DURABLE drop the merge
+      // Non-modal on purpose: every one of these is a DURABLE drop the write
       // just made (a retired slug, a hand-written comment serialization cannot
-      // keep) — worth reading, never worth blocking the next drag on.
+      // keep) — worth reading, never worth blocking the next nudge on.
       const box = el("details", "pb-banner pb-banner-note");
       const sum = el("summary", null, `${orderWarnings.length} queue entr${orderWarnings.length === 1 ? "y" : "ies"} the write dropped`);
       box.append(sum);
       const list = el("ul");
       for (const w of orderWarnings) list.append(el("li", null, w));
       box.append(list);
-      noticeBox.append(box);
+      noticeDetails.append(box);
     }
+  }
+
+  /** The masthead's write-mode sentence, re-stated from the CURRENT capability.
+   *  Server-rendered first (so a no-JavaScript reader gets it) and replaced on
+   *  every render, because a 403 flip and a queue that cannot be read both make
+   *  the sentence the server sent untrue. */
+  function renderMode(): void {
+    if (!modeBox) return;
+    const sentence = writeModeSentence(capability);
+    if (modeBox.textContent !== sentence) modeBox.textContent = sentence;
   }
 
   // ---------------------------------------------------------------- meters
@@ -539,8 +749,8 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
    */
   function renderMeters(shown: readonly EffectiveCard[]): void {
     const inScope = cardsInScope(shown, view.scope);
-    const m = computeMeters(inScope, money);
-    const corpus = computeMeters(shown, money);
+    const m = computeMeters(inScope, money.available);
+    const corpus = computeMeters(shown, money.available);
     const showsFollowups = visibleColumns(view.scope).some((c) => c.key === "followups");
     metersBox.textContent = "";
     const tiles: Array<{ k: string; v: string; sub?: string; note: string }> = [
@@ -562,7 +772,7 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
         v: m.backlog ? formatUsd(m.backlog.mid) : "—",
         note: m.backlog
           ? `${formatUsd(m.backlog.low)}–${formatUsd(m.backlog.high)} band over the ${m.backlog.count} active plan(s) that can be priced`
-          : board.money.reason ?? "no estimate available",
+          : money.reason ?? "no estimate available",
       },
       {
         k: "Spent to date",
@@ -673,10 +883,10 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     // With no money there is nothing to sort by: every card's cost is hidden,
     // so a live Cost button can only reshuffle the board into an order the
     // reader cannot see the reason for. Disabled, carrying the reason.
-    const disabledSorts = money
+    const disabledSorts = money.available
       ? undefined
       : new Map<BoardSort, string>([
-          ["cost", board.money.reason ?? "no cost on this board — the ledger is not answering"],
+          ["cost", money.reason ?? "no cost on this board — the ledger is not answering"],
         ]);
     controlsBox.append(
       segment(
@@ -745,6 +955,16 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     draftCols: Set<string>,
     diskCols: Set<string>,
   ): void {
+    // A nudge rebuilds every column, and a rebuilt `.pb-stack` starts at
+    // scrollTop 0 — measured twice per nudge, which throws a reader ranking the
+    // 30th card in a column back to the top of it. Captured by column key, the
+    // `renderList` precedent.
+    const scrollTops = new Map<string, number>();
+    boardBox.querySelectorAll<HTMLElement>(".pb-col").forEach((node) => {
+      const key = node.dataset.col;
+      const stack = node.querySelector<HTMLElement>(".pb-stack");
+      if (key && stack && stack.scrollTop > 0) scrollTops.set(key, stack.scrollTop);
+    });
     boardBox.textContent = "";
     for (const col of visibleColumns(view.scope)) {
       const inColumn = sortCards(
@@ -753,12 +973,13 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
         order[col.key] ?? [],
       );
       const box = el("div", "pb-col");
+      box.dataset.col = col.key;
       box.style.setProperty("--pb-tone", `var(${col.tone})`);
 
       const head = el("div", "pb-head");
       head.title = col.hint;
       head.append(el("span", "pb-swatch"), el("span", "pb-name", col.label));
-      if (money) {
+      if (money.available) {
         const sum = inColumn.reduce(
           (s, c) => s + (isTerminalColumn(c.column) ? c.ledger?.costUSD ?? 0 : c.estimate?.mid ?? 0),
           0,
@@ -767,6 +988,14 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
       }
       if (draftCols.has(col.key) && showRankUi(view.sort)) {
         head.append(el("span", "pb-draft-pill", "draft order"));
+      }
+      // Per column, and NOT a disabled control: the reader keeps clicking, the
+      // clicks queue on the write chain, and this says which column is still
+      // catching up.
+      if (orderBusy(col.key)) {
+        const saving = el("span", "pb-saving", COLUMN_SAVING);
+        saving.title = "the previous move is still being written to plans/queue.yaml";
+        head.append(saving);
       }
       head.append(el("span", "pb-count", String(inColumn.length)));
       box.append(head);
@@ -783,6 +1012,8 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
       }
       box.append(stack);
       boardBox.append(box);
+      const top = scrollTops.get(col.key);
+      if (top) stack.scrollTop = top;
     }
   }
 
@@ -839,7 +1070,7 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     if (card.title !== card.slug) button.append(el("div", "pb-slug", card.slug));
 
     const r2 = el("div", "pb-r2");
-    if (money) {
+    if (money.available) {
       if (isTerminalColumn(card.column) && card.ledger) {
         const landed = card.ledger.landed ?? 0;
         r2.append(el("span", "pb-est", `${formatUsd(card.ledger.costUSD)} · ${landed} PR${landed === 1 ? "" : "s"}`));
@@ -898,7 +1129,10 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
       column: col.key,
       capability,
       diskRanked,
-      busy: orderPending > 0,
+      // A write in flight is NOT a block (see the module doc): the click queues
+      // on the chain. A board known to be out of date is.
+      reloadPending: orderMsg?.reload === true,
+      reloading,
     });
     for (const [delta, glyph, word] of [
       [-1, "▲", "up"],
@@ -925,7 +1159,7 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
       b.setAttribute("aria-label", `${action}: ${card.title}`);
       b.onclick = (ev) => {
         ev.stopPropagation();
-        nudge(card.slug, col.key, ranked, delta);
+        nudge(card.slug, col.key, delta);
       };
       nudges.append(b);
     }
@@ -978,24 +1212,37 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
    * On a writing board this goes to `/api/plans/order`; on the readonly one it
    * writes the draft, which is the same move against a different destination.
    */
-  function nudge(
-    slug: string,
-    column: BoardColumnKey,
-    ranked: readonly string[],
-    delta: -1 | 1,
-  ): void {
+  function nudge(slug: string, column: BoardColumnKey, delta: -1 | 1): void {
+    if (reloading) return;
     if (capability.orderMode === "write") {
+      if (orderMsg?.reload) return;
       queueOrderWrite(slug, column, delta);
       return;
     }
+    draftNudge(slug, column, delta);
+  }
+
+  /**
+   * The draft half of a nudge — the readonly board's ranking, and where a
+   * refused (403) write's click lands so it is not simply lost.
+   *
+   * Recomputed from `merged()` rather than from the list the click was rendered
+   * with, because the 403 path has no such list: it is running inside the write
+   * that just failed.
+   */
+  function draftNudge(slug: string, column: BoardColumnKey, delta: -1 | 1): void {
     if (capability.orderMode !== "draft") return;
-    const next = nudgeRanked(ranked, slug, delta);
+    const { order, diskCols } = merged();
+    // The overlay never overwrites a column queue.yaml already ranks — that
+    // draft would lose silently on the next load.
+    if (diskCols.has(column)) return;
+    const next = nudgeRanked(order[column] ?? [], slug, delta);
     if (!next) return;
-    const order = { ...overlay.order };
-    if (next.length === 0) delete order[column];
-    else order[column] = next;
-    overlay = { priority: { ...overlay.priority }, order };
-    saveOverlay(overlay);
+    const nextOrder = { ...overlay.order };
+    if (next.length === 0) delete nextOrder[column];
+    else nextOrder[column] = next;
+    overlay = { priority: { ...overlay.priority }, order: nextOrder };
+    saveOverlay();
     render();
   }
 
@@ -1083,7 +1330,7 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     body.append(estimateSection(card));
     if (card.ledger) {
       body.append(ledgerSection(card));
-    } else if (money && isTerminalColumn(card.column)) {
+    } else if (money.available && isTerminalColumn(card.column)) {
       // Terminal and unrecorded: say so under the same heading the recorded
       // ones use, so the card, the drawer and the column total tell one story
       // (the header sums actuals, and this plan contributes none).
@@ -1152,9 +1399,9 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     // actuals live under "What it actually cost" below it. Heading it "What it
     // cost" put an estimate under the one word that means money that left.
     sec.append(el("h3", null, terminal ? "What the model would have estimated" : "What it should cost"));
-    if (!money || !card.estimate || card.estimate.mid === null) {
+    if (!money.available || !card.estimate || card.estimate.mid === null) {
       sec.append(
-        el("p", "pb-basis", board.money.reason ?? "No shipped plan in the ledger prices this one yet."),
+        el("p", "pb-basis", money.reason ?? "No shipped plan in the ledger prices this one yet."),
       );
       return sec;
     }
@@ -1280,7 +1527,13 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     const onDisk = card.priority !== null;
     const mode = capability.priorityMode;
     const busy = priorityPending.has(card.slug);
-    const state = priorityControlState({ mode, onDisk, busy });
+    const state = priorityControlState({
+      mode,
+      onDisk,
+      busy,
+      staleHash: staleCards.has(card.slug),
+      reloading,
+    });
     for (const p of BOARD_PRIORITIES) {
       const b = el("button", null, p) as HTMLButtonElement;
       b.type = "button";
@@ -1293,8 +1546,8 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
       b.title = title;
       b.setAttribute("aria-label", `${title} — ${card.title}`);
       b.onclick = () => {
-        if (mode === "write") void writePriority(card.slug, p);
-        else draftPriority(card, p);
+        if (mode === "write") writePriority(card.slug, p);
+        else draftPriority(card.slug, p);
       };
       set.append(b);
     }
@@ -1318,15 +1571,18 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
   }
 
   /** The readonly board's priority edit: the overlay, which `applyOverlay`
-   *  applies only where the frontmatter carries nothing. */
-  function draftPriority(card: EffectiveCard, p: PlanPriority): void {
+   *  applies only where the frontmatter carries nothing. Takes a SLUG, not a
+   *  card, because the 403 path calls it from inside the failed write, where
+   *  the only thing in hand is what the reader clicked. */
+  function draftPriority(slug: string, p: PlanPriority): void {
+    if (capability.priorityMode !== "draft") return;
     const next = { ...overlay.priority };
-    if (next[card.slug] === p) delete next[card.slug];
-    else next[card.slug] = p;
+    if (next[slug] === p) delete next[slug];
+    else next[slug] = p;
     overlay = { priority: next, order: { ...overlay.order } };
-    saveOverlay(overlay);
+    saveOverlay();
     render();
-    refreshDrawer(card.slug, `pri-${p}`);
+    refreshDrawer(slug, `pri-${p}`);
   }
 
   function escClose(ev: KeyboardEvent): void {
@@ -1431,25 +1687,30 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
       return;
     }
     draftBox.classList.add("pb-visible");
-    const parts = [
-      drafted ? `${drafted} priority draft${drafted === 1 ? "" : "s"}` : null,
-      ranked.length ? `hand order on ${ranked.join(" + ")}` : null,
-    ].filter(Boolean) as string[];
-    // The tail names WHY this is still a draft — the two states that leave one
-    // on a board whose priority edits go straight to mimir read very differently.
-    const why =
-      capability.orderMode === "off"
-        ? "plans/queue.yaml could not be read, so the order cannot be written"
-        : "this instance cannot write the wiki";
-    draftBox.append(
-      el("span", "pb-draft-pill", "draft"),
-      el("span", null, `${parts.join(" · ")} — kept in this browser only: ${why}. mimir wins on every load.`),
-    );
+    // Each half names the reason for ITS OWN axis. One shared reason blamed a
+    // priority draft on a `queue.yaml` nobody had touched; the two are folded
+    // back into one clause only when they really are the same sentence.
+    const parts: Array<{ text: string; why: string }> = [];
+    if (drafted) {
+      parts.push({
+        text: `${drafted} priority draft${drafted === 1 ? "" : "s"}`,
+        why: priorityDraftReason(capability),
+      });
+    }
+    if (ranked.length) {
+      parts.push({ text: `hand order on ${ranked.join(" + ")}`, why: orderDraftReason(capability) });
+    }
+    const reasons = [...new Set(parts.map((p) => p.why))];
+    const sentence =
+      reasons.length === 1
+        ? `${parts.map((p) => p.text).join(" · ")} — kept in this browser only: ${reasons[0]}. mimir wins on every load.`
+        : `${parts.map((p) => `${p.text} (${p.why})`).join(" · ")} — kept in this browser only. mimir wins on every load.`;
+    draftBox.append(el("span", "pb-draft-pill", "draft"), el("span", null, sentence));
     const discard = el("button", "pb-discard", "Discard drafts") as HTMLButtonElement;
     discard.type = "button";
     discard.onclick = () => {
       overlay = { priority: {}, order: {} };
-      saveOverlay(overlay);
+      saveOverlay();
       render();
     };
     draftBox.append(discard);

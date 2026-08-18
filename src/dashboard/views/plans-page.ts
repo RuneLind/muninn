@@ -3,7 +3,7 @@ import { escHtml, escJsonScript } from "./components/escape.ts";
 import { helpersClientScript } from "./components/helpers-client.ts";
 import { planBoardClientScript } from "./components/plan-board-client.ts";
 import { buildHashMetaTag, getDashboardBuildHash } from "../dashboard-build-hash.ts";
-import { PLAN_READONLY_NOTE } from "../../plans/board-writes.ts";
+import { writeCapability, writeModeSentence } from "../../plans/board-writes.ts";
 import type { BoardPayload } from "../../plans/board.ts";
 
 /**
@@ -23,6 +23,12 @@ import type { BoardPayload } from "../../plans/board.ts";
  * the calibration sentence — are rendered here as HTML rather than by the
  * bundle, because they are exactly the states someone reads when the page is
  * not behaving.
+ *
+ * The masthead's write-mode sentence (`#pbMode`) is the one hybrid: it is
+ * rendered here from `writeModeSentence` so a no-JavaScript reader is told what
+ * this board writes, and the bundle re-states it from the SAME function on
+ * every render, because a 403 mid-session makes the sentence the server sent
+ * untrue. One function, so the masthead and the banner under it cannot drift.
  *
  * Styling ports the design prototype (`docs/proto/plan-board.html`) onto
  * muninn's shared theme tokens: the prototype's own palette is replaced by
@@ -60,13 +66,11 @@ export async function renderPlansPage(payload: BoardPayload): Promise<string> {
         Every plan in <code>${escHtml(payload.wiki.name)}/plans/</code>, filed by its own <code>plan_status</code>,
         priced against what comparable work actually cost in the claude-usage ledger.
         Read ${escHtml(asOf)} UTC. Rank a column by hand with ▲▼ under <em>My order</em>; the ↗ opens the plan.
-        ${
-          payload.readonly
-            ? `<strong>Nothing is written back on this host</strong> — ${escHtml(PLAN_READONLY_NOTE)}`
-            : `Setting a priority writes <code>priority:</code> into the plan's frontmatter and ranking a column writes
-               <code>plans/queue.yaml</code> — both straight to the wiki, both refused if the file changed since this
-               board was read.`
-        }
+        <span id="pbMode">${escHtml(
+          writeModeSentence(
+            writeCapability({ readonly: payload.readonly, queueHash: payload.queue.hash }),
+          ),
+        )}</span>
       </p>
     </div>
 
@@ -277,8 +281,12 @@ const PLAN_BOARD_STYLES = `
 
     /* ---- write notices --------------------------------------------------- */
     /* Client-rendered (a 403 raises the readonly banner mid-session), so the
-       banner classes above are reused rather than re-styled. */
-    .pb-notice:empty { display: none; }
+       banner classes above are reused rather than re-styled. The strip holds
+       three permanent slots — banners, the live-region message, dropped-entry
+       details — so an :empty rule on the strip itself cannot be the hide rule;
+       each slot hides itself instead. */
+    .pb-notice-part:empty { display: none; }
+    .pb-banner[hidden] { display: none; }
     .pb-wmsg { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
     .pb-reload {
       border: 1px solid var(--pb-accent); background: var(--pb-accent-wash); color: var(--pb-accent-ink);
@@ -307,6 +315,11 @@ const PLAN_BOARD_STYLES = `
     .pb-swatch { width: 8px; height: 8px; border-radius: 2px; background: var(--pb-tone); flex: none; }
     .pb-name { font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--pb-tone); }
     .pb-count { margin-left: auto; font-family: var(--pb-mono); font-size: 12px; color: var(--pb-muted); }
+    /* The per-column write marker. It REPLACES disabling the nudges, so it must
+       read as activity rather than as a refusal: same weight as the count, in
+       the accent, sitting before it. */
+    .pb-saving { font-size: 10.5px; font-style: italic; color: var(--pb-accent-ink); margin-left: auto; }
+    .pb-saving + .pb-count { margin-left: 6px; }
     .pb-money { font-family: var(--pb-mono); font-size: 11px; color: var(--pb-faint); }
     .pb-stack { overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 7px; scrollbar-width: thin; }
     .pb-empty { color: var(--pb-faint); font-size: 12px; padding: 10px 4px; font-style: italic; }
