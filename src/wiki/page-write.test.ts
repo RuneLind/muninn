@@ -371,3 +371,60 @@ test("no deadlock when the wiki root IS the git toplevel and the commit is await
     await rm(base, { recursive: true, force: true });
   }
 }, 20_000);
+
+// ---- no-log mode (`logKind: null`) ----------------------------------------
+//
+// The `/plans` board's priority flips: a metadata write that must not put a line
+// in a 4,100-line curated log or spend a reindex, 60 times in a triage sitting.
+
+test("no-log mode writes the page but no log.md entry and no reindex", async () => {
+  __resetWikiWriteQueueForTest();
+  const fs = makeFs({ "/wiki/analyses/page.md": "# Page\n\nBody.\n" });
+  const reindexed: string[] = [];
+  let refreshed = 0;
+  const { logKind: _k, logTitle: _t, logLine: _l, ...common } = baseOpts(fs);
+  const res = await writeWikiPage({
+    ...common,
+    logKind: null,
+    collections: ["wiki", "wiki-life"],
+    reindex: async (c) => {
+      reindexed.push(c);
+    },
+    refreshIndex: async () => {
+      refreshed++;
+    },
+  });
+  expect(res.outcome).toBe("written");
+  expect(fs.files["/wiki/analyses/page.md"]).toContain("appended");
+  expect(fs.files["/wiki/log.md"]).toBeUndefined();
+  expect(reindexed).toEqual([]);
+  // The read cache IS still refreshed — the board must see its own write.
+  expect(refreshed).toBe(1);
+});
+
+test("no-log mode commits the page alone, never a log.md it did not write", async () => {
+  __resetWikiWriteQueueForTest();
+  const fs = makeFs({ "/wiki/analyses/page.md": "# Page\n" });
+  const committed: string[][] = [];
+  const { logKind: _k, logTitle: _t, logLine: _l, ...common } = baseOpts(fs);
+  await writeWikiPage({
+    ...common,
+    logKind: null,
+    commit: async (paths) => {
+      committed.push(paths);
+    },
+  });
+  expect(committed).toEqual([["analyses/page.md"]]);
+});
+
+test("the logged path is unchanged beside it", async () => {
+  __resetWikiWriteQueueForTest();
+  const fs = makeFs({ "/wiki/analyses/page.md": "# Page\n" });
+  const reindexed: string[] = [];
+  const res = await writeWikiPage(
+    baseOpts(fs, { collections: ["wiki"], reindex: async (c) => { reindexed.push(c); } }),
+  );
+  expect(res.outcome).toBe("written");
+  expect(fs.files["/wiki/log.md"]).toContain("factcheck-integrate | Page Title");
+  expect(reindexed).toEqual(["wiki"]);
+});

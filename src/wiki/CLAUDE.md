@@ -79,7 +79,9 @@ Turns one wiki page into a pasteable post — the reader's **📤 Share** breadc
 
 ## Write queue (`queue.ts`)
 
-Per-wiki write queue, realpath-keyed on the wiki ROOT. `log.md` is wiki-GLOBAL, so every read-modify-writer of it (gardener apply, fact-check append/integrate, `writeWikiPage`) must serialize on this one chain. Rules for joining: the queued section must span read→CAS→write→log.md, and the commit tail must run OUTSIDE the queue (push is dispatched un-awaited and bounded only by `GIT_NETWORK_TIMEOUT_MS` (60s) — an unreachable origin would otherwise park every writer for that minute). Full rationale: `src/gardener/CLAUDE.md`.
+Per-wiki write queue, realpath-keyed on the wiki ROOT. `log.md` is wiki-GLOBAL, so every read-modify-writer of it (gardener apply, fact-check append/integrate, `writeWikiPage`) must serialize on this one chain. `writePlanQueue` joins it too — it writes no `log.md`, but it shares mimir's working tree with the page writers and the sync loop's staging.
+
+**No-log mode (`logKind: null`, `PageWriteNoLogOptions`).** The write, the CAS, the queue and the wiki-store cache refresh all still happen; the `log.md` entry and the huginn reindex fan-out do not, and the commit tail stages the page alone. It exists for metadata writes — the `/plans` board's priority flips — where a triage sitting is a burst of 60 clicks: one curated log line each would bury the 4,100-line log those entries are FOR, and 60 reindex calls would re-embed a page whose prose never moved. A separate interface rather than three optional fields, so the ordinary path still cannot compile without its title and line. The CAS's `staleReason` is a caller option for the same reason: the default is the fact-check wording this helper was extracted from, and it is the whole explanation a reader gets for a refused click. Rules for joining: the queued section must span read→CAS→write→log.md, and the commit tail must run OUTSIDE the queue (push is dispatched un-awaited and bounded only by `GIT_NETWORK_TIMEOUT_MS` (60s) — an unreachable origin would otherwise park every writer for that minute). Full rationale: `src/gardener/CLAUDE.md`.
 
 ## Readonly instances (`readonly.ts`, `MUNINN_WIKI_READONLY`)
 
@@ -89,6 +91,7 @@ Per-wiki write queue, realpath-keyed on the wiki ROOT. `log.md` is wiki-GLOBAL, 
 
 - `writeWikiPage` → new `forbidden` outcome variant, returned BEFORE the read (nothing is opened, no `log.md` is created). `appendBlockToPage` propagates it.
 - `applyWikiProposal` → same variant, returned before the write queue is entered.
+- `writePlanQueue` (`src/plans/write.ts`) → same variant, before the file is opened. It is the third content seam because `writeWikiPage` cannot carry `plans/queue.yaml` (path confinement admits `.md`/`.mdx` only, correctly), so it repeats the guard, the per-wiki queue and the sha256 CAS rather than routing around them.
 
 Both map to **403** with the SAME body everywhere — `{error, readonly: true}` — deliberately not collapsed into the generic `error` (⇒ 500), since a refusal is not a failure.
 

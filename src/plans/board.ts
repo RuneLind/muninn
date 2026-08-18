@@ -48,6 +48,7 @@ import { joinPlans, type JoinedPlan } from "./join.ts";
 import type { PlanRecord, PlanSourceResult } from "./source.ts";
 import type { LedgerPlan, LedgerPr, PlanLedgerResult } from "./ledger.ts";
 import { PLANS_WIKI_NAME } from "./source.ts";
+import { isWikiReadonly } from "../wiki/readonly.ts";
 import {
   ageInDays,
   columnForStatus,
@@ -106,6 +107,10 @@ export interface BoardPayload {
   };
   /** Whether the board may show money at all, and why not when it may not. */
   money: { available: boolean; reason: string | null };
+  /** This instance refuses wiki writes (`MUNINN_WIKI_READONLY=1`), so the write
+   *  endpoints answer 403. The page renders a banner rather than letting a
+   *  reader on the mini discover it one refused click at a time. */
+  readonly: boolean;
   columns: BoardColumnMeta[];
   cards: BoardCard[];
   /** The hand order as it is ON DISK — the client's overlay never overwrites a
@@ -127,6 +132,9 @@ export interface BuildBoardInput {
   source: PlanSourceResult;
   ledger: PlanLedgerResult;
   now?: number;
+  /** Defaults to the live `isWikiReadonly()` — injectable so this stays a pure
+   *  function of its inputs in tests. */
+  readonly?: boolean;
 }
 
 // ---- Ledger extras --------------------------------------------------------
@@ -353,6 +361,7 @@ export function buildBoardPayload(input: BuildBoardInput): BoardPayload {
       errors: ledger.errors ?? [],
     },
     money: { available: moneyAvailable, reason },
+    readonly: input.readonly ?? isWikiReadonly(),
     columns: [...BOARD_COLUMNS],
     cards,
     queue: { order: source.queue.order, hash: source.queue.hash },

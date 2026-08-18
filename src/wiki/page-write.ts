@@ -11,7 +11,8 @@
  *   4. `transform` the body (splice a block / apply an edit list). Returning
  *      `null` short-circuits to `noop` — no write, no log, no reindex, no commit.
  *   5. Write the page → insert a `log.md` entry (best effort — a log hiccup must
- *      never undo the page write).
+ *      never undo the page write). `logKind: null` selects NO-LOG mode, which
+ *      also skips step 6's reindex fan-out (see `PageWriteNoLogOptions`).
  *   6. Refresh the wiki-store TTL cache; fire-and-forget huginn reindex over the
  *      wiki registry entry's collections (none ⇒ skip, still a successful write).
  *   7. Commit page + log.md (best effort, never fatal, awaited so the caller can
@@ -67,13 +68,18 @@ export type PageWriteOutcome =
   | { outcome: "forbidden"; reason: string }
   | { outcome: "error"; reason: string };
 
-export interface PageWriteOptions {
+export interface PageWriteCommonOptions {
   /** Absolute wiki root — the path-confinement anchor AND the queue key. */
   wikiDir: string;
   /** Wiki-relative path of the target page (from the resolved index entry). */
   relPath: string;
   /** sha256 of the page's raw on-disk content at check time. */
   baseHash: string;
+  /** The sentence a CAS mismatch is reported with. Defaults to the fact-check
+   *  wording this helper was extracted from — a caller whose reader never ran a
+   *  fact check (the `/plans` board) supplies its own, since the reason is
+   *  rendered to a human as the whole explanation of a refused click. */
+  staleReason?: string;
   /**
    * Produce the new page content from the current content. Runs INSIDE the
    * critical section, after the CAS passes, so it may re-resolve offsets against
@@ -82,14 +88,9 @@ export interface PageWriteOptions {
   transform: (current: string) => string | null;
   /** Huginn collections to reindex. Empty ⇒ reindex skipped; write + log still happen. */
   collections: string[];
-  /** Log entry kind, rendered as `## [date] <logKind> | <logTitle>`. */
-  logKind: string;
-  /** Title for the log.md entry. */
-  logTitle: string;
-  /** The log entry's single bullet line (without the leading `- `). */
-  logLine: string;
-  /** Commit subject, e.g. `[fact-check] annotate: <relPath>`. */
-  commitMessage: string;
+  /** Commit subject, e.g. `[fact-check] annotate: <relPath>`. Read only when
+   *  `commit` is set — a caller that passes no committer needs no subject. */
+  commitMessage?: string;
   now: () => number;
   /** Read a file's text, or null when it doesn't exist / is unreadable. */
   readFile: (absPath: string) => Promise<string | null>;
@@ -115,6 +116,32 @@ export interface PageWriteOptions {
   isReadonly?: () => boolean;
 }
 
+/** The ordinary write: it earns a `log.md` entry and a reindex. */
+export interface PageWriteOptions extends PageWriteCommonOptions {
+  /** Log entry kind, rendered as `## [date] <logKind> | <logTitle>`. */
+  logKind: string;
+  /** Title for the log.md entry. */
+  logTitle: string;
+  /** The log entry's single bullet line (without the leading `- `). */
+  logLine: string;
+}
+
+/**
+ * NO-LOG MODE. The write, the CAS, the queue and the wiki-store cache refresh
+ * all still happen; the `log.md` entry and the huginn reindex fan-out do not.
+ *
+ * It exists for metadata writes — the `/plans` board's priority flips — where a
+ * triage sitting is a burst of 60 clicks: one curated log line each would bury
+ * the 4,100-line log those entries are FOR, and 60 reindex calls would re-embed
+ * a page whose prose never moved.
+ *
+ * A separate interface rather than three optional fields, so the ordinary path
+ * still cannot compile without its title and line.
+ */
+export interface PageWriteNoLogOptions extends PageWriteCommonOptions {
+  logKind: null;
+}
+
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -124,8 +151,13 @@ function errMsg(err: unknown): string {
  * caller maps it to an HTTP status (written→200, noop→200-with-0-applied,
  * stale→409, error→400/500). Never throws for a recoverable condition.
  */
-export async function writeWikiPage(opts: PageWriteOptions): Promise<PageWriteOutcome> {
+export async function writeWikiPage(
+  opts: PageWriteOptions | PageWriteNoLogOptions,
+): Promise<PageWriteOutcome> {
   const { wikiDir, relPath, baseHash } = opts;
+  /** The log.md half, or null in no-log mode. Read once, so the branch lives
+   *  in one place rather than at each of the four sites that consult it. */
+  const logging: PageWriteOptions | null = opts.logKind === null ? null : opts;
 
   // 0. Readonly instance: refuse BEFORE the read, so nothing is even opened.
   //    A refusal, not an error — the route answers 403.
@@ -156,7 +188,7 @@ export async function writeWikiPage(opts: PageWriteOptions): Promise<PageWriteOu
       const current = await opts.readFile(absTarget);
       if (current === null) return { outcome: "stale", reason: "target file no longer exists" };
       if (!baseHash || sha256(current) !== baseHash) {
-        return { outcome: "stale", reason: "page changed since the fact check" };
+        return { outcome: "stale", reason: opts.staleReason ?? "page changed since the fact check" };
       }
 
       let updated: string | null;
@@ -174,11 +206,14 @@ export async function writeWikiPage(opts: PageWriteOptions): Promise<PageWriteOu
       }
 
       // log.md entry (reverse-chron). A log hiccup must not undo the page write.
+      // Skipped wholesale in no-log mode — see `PageWriteNoLogOptions`.
       try {
-        const logPath = path.join(wikiDir, "log.md");
-        const existingLog = await opts.readFile(logPath);
-        const entry = `## [${todayOslo(opts.now())}] ${opts.logKind} | ${opts.logTitle}\n- ${opts.logLine}`;
-        await opts.writeFile(logPath, insertLogEntry(existingLog, entry));
+        if (logging) {
+          const logPath = path.join(wikiDir, "log.md");
+          const existingLog = await opts.readFile(logPath);
+          const entry = `## [${todayOslo(opts.now())}] ${logging.logKind} | ${logging.logTitle}\n- ${logging.logLine}`;
+          await opts.writeFile(logPath, insertLogEntry(existingLog, entry));
+        }
       } catch (err) {
         log.warn("Wiki page write: log.md update failed for {path}: {error}", {
           kind: opts.logKind,
@@ -203,8 +238,9 @@ export async function writeWikiPage(opts: PageWriteOptions): Promise<PageWriteOu
     });
   }
 
-  // Fire-and-forget huginn reindex over the wiki's registry collections.
-  for (const collection of new Set(opts.collections)) {
+  // Fire-and-forget huginn reindex over the wiki's registry collections —
+  // skipped in no-log mode, which is for writes that move no prose.
+  for (const collection of logging ? new Set(opts.collections) : []) {
     opts.reindex(collection).catch((err) => {
       log.warn("Wiki page write: reindex failed for {collection}: {error}", {
         kind: opts.logKind,
@@ -219,7 +255,8 @@ export async function writeWikiPage(opts: PageWriteOptions): Promise<PageWriteOu
   let commit: CommitWikiResult | undefined;
   if (opts.commit) {
     try {
-      const res = await opts.commit([relPath, "log.md"], opts.commitMessage);
+      const paths = logging ? [relPath, "log.md"] : [relPath];
+      const res = await opts.commit(paths, opts.commitMessage ?? `[wiki] write: ${relPath}`);
       if (res && typeof res === "object" && "committed" in res) commit = res;
     } catch (err) {
       log.warn("Wiki page write: commit failed for {path}: {error}", {
