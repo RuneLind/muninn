@@ -16,6 +16,15 @@
  *   3. **Both openers land in the same dialog**, with the article context and
  *      starter questions that belong to each.
  *
+ * Since the 2026-08 cut-2 extraction it also carries a FOURTH job: the dialog's
+ * whole DOM half lives in `views/components/wiki-chat-options.ts` and registers
+ * its own document listeners, wired by the single `initChatOptions({…})` call in
+ * `wiki-browser.ts`. Deleting that call leaves `tsc --noEmit` clean and every unit
+ * test green (they drive the module's exports and its listeners directly), and the
+ * only symptom is a reader whose New chat / Discuss / ⚙ buttons do nothing at all.
+ * The first test below pins exactly that seam; every other test here would also go
+ * red, which is the point — nothing about this dialog survives an unwired shell.
+ *
  * NO MODEL CALLS and NO WRITES: the dialog's only fetch is the read-only
  * `GET /api/wiki/chat-target`, and "Start chat →" is deliberately never clicked
  * (that would create a real thread and seed it). Every assertion is about the
@@ -143,6 +152,31 @@ async function openDirect(page: import("@playwright/test").Page): Promise<void> 
 }
 
 test.describe("Wiki reader: chat dialog", () => {
+  test("the shell WIRES the dialog — both openers reach the module's listeners", async ({
+    page,
+  }) => {
+    // The seam is `initChatOptions({…})` in `wiki-browser.ts`: it injects the port
+    // AND registers the module's document listeners. Without it the buttons still
+    // render (their markup is the shell's) and nothing at all happens on click —
+    // invisible to tsc and to every unit test.
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}`);
+    await page.locator(String.raw`.wiki-conn-tab[data-conntab="ask"]`).click();
+    await page.locator("#wikiNewChatBtn").click();
+    await expect(page.locator("#wikiChatOpt")).toBeVisible();
+    // The panel is the module's, painted from its own state.
+    await expect(page.locator("#wikiChatOpt")).toContainText("New chat from this wiki");
+    // Its close button is delegated by the same listener set.
+    await page.locator("#wikiChatOptClose").click();
+    await expect(page.locator("#wikiChatOpt")).toHaveCount(0);
+
+    // The article opener goes through the same wiring — and through the port,
+    // which is the only way it can know which page is open.
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&page=${encodeURIComponent("Wiki gardener")}`);
+    await page.locator("#wikiDiscussBtn").click();
+    await expect(page.locator("#wikiChatOpt")).toBeVisible();
+    await expect(page.locator(".wiki-chatopt-ctx")).toContainText("Wiki gardener");
+  });
+
   test("the dialog paints an OPAQUE background over the page", async ({ page }) => {
     await openDirect(page);
     const bg = await page
