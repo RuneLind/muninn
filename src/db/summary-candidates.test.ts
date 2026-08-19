@@ -691,6 +691,44 @@ describe("summary-candidates", () => {
       expect(Date.parse(wide.since)).toBeLessThan(Date.parse(wide.repackaging.since));
     });
 
+    // The floored:TRUE half is pinned by the 90-day assertions above. This is its other
+    // half, and it needs the injected clamp time to exist at all: with
+    // REPACKAGING_CLAMP_SHIPPED_AT sitting in the recent past, EVERY organic window
+    // reaches back past it, so `floored:false` — and with it the rule that `since` is
+    // then the window start — is unreachable from a real clock.
+    test("an unfloored window reports the window start and counts a row inside it", async () => {
+      await upsertCandidate({
+        ...base,
+        source: "x",
+        url: "https://x/shaped-unfloored",
+        title: "@a: EVERYONE IS SLEEPING on this",
+        score: 0.9,
+        kind: "x-post",
+      });
+      const now = new Date();
+      // Window start (7 days back) lands AFTER the clamp ship time, so the WINDOW is the
+      // binding bound — the arrangement the organic clock cannot produce yet.
+      const recent = await candidateRecentStats(7, {
+        now,
+        clampShippedAt: new Date(now.getTime() - 30 * 86_400_000),
+      });
+      expect(recent.repackaging.floored).toBe(false);
+      expect(recent.since).toBe(new Date(now.getTime() - 7 * 86_400_000).toISOString());
+      expect(recent.repackaging.since).toBe(recent.since);
+      // And the metric still counts: an unfloored window is not a disabled one.
+      const x = recent.bySource.find((s) => s.source === "x")!;
+      expect(x.repackagingShapedAbove08).toBe(1);
+    });
+
+    test("an Infinity window falls back to the default instead of an Invalid Date", async () => {
+      // `Infinity >= 1` satisfies the range half of the guard on its own, so only the
+      // `Number.isFinite` half stops `new Date(-Infinity).toISOString()` from throwing
+      // RangeError — i.e. dropping it leaves the NaN test above green.
+      const recent = await candidateRecentStats(Infinity);
+      expect(recent.windowDays).toBe(RECENT_WINDOW_DEFAULT_DAYS);
+      expect(Number.isNaN(Date.parse(recent.since))).toBe(false);
+    });
+
     test("a NaN window falls back to the default instead of throwing on Invalid Date", async () => {
       // `Math.round(NaN)` is NaN and `new Date(NaN).toISOString()` is a RangeError, which
       // used to 500 the whole calibration route rather than degrade one block.

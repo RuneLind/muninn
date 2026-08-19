@@ -357,13 +357,20 @@ export function sumOutcomesScript(): string {
       }
       var targetPct = Math.round(recent.target * 100);
       var rep = recent.repackaging || {};
-      var cap = typeof rep.cap === 'number' ? rep.cap : 0.8;
-      var repackLabel = 'Repack &gt;' + cap;
+      // No cap in the payload ⇒ the WHOLE column is omitted, header and cells alike.
+      // Falling back to a literal 0.8 is the exact failure the comment above warns
+      // about: it labels every count ">0.8" on the one payload that never said so, and a
+      // cap moved in repackaging-shape.ts would be mislabelled with nothing failing.
+      var hasCap = typeof rep.cap === 'number';
+      var cap = rep.cap;
+      var repackLabel = hasCap ? 'Repack &gt;' + cap : '';
       var rows = recent.bySource.map(function(o) {
         // A source with no repackaging metric renders a dim EM DASH cell. The class goes
         // on the <td>, not on a <span>: this component styles td.dim and has no bare .dim
         // rule, so the span rendered at FULL strength and read as a real value.
-        var repack = typeof o.repackagingShapedAbove08 === 'number'
+        var repack = !hasCap
+          ? ''
+          : typeof o.repackagingShapedAbove08 === 'number'
           ? '<td><span class="outcomes-repack" data-band="' +
             (o.repackagingShapedAbove08 === 0 ? 'ok' : 'bad') + '">' +
             o.repackagingShapedAbove08 + '</span></td>'
@@ -392,10 +399,12 @@ export function sumOutcomesScript(): string {
         '<th title="Expired, bulk-swept or otherwise auto-dismissed — bookkeeping, not judgements; excluded from Accept rate">Auto-dismissed</th>' +
         '<th>Error</th>' +
         '<th title="Accepted ÷ (Accepted + Rejected); target ≥ ' + targetPct + '%">Accept rate</th>' +
-        '<th title="X x-post rows whose handle-stripped title is repackaging-shaped and whose score (rounded to 2 dp) is still above ' + cap + ' — rows the deterministic repackaging clamp (PR #454) did not reach. x-link pointers are exempt from the clamp and are not counted. Target: 0.">' +
-          repackLabel + '</th>' +
+        (hasCap
+          ? '<th title="X x-post rows whose handle-stripped title is repackaging-shaped and whose score (rounded to 2 dp) is still above ' + cap + ' — rows the deterministic repackaging clamp (PR #454) did not reach. x-link pointers are exempt from the clamp and are not counted. Target: 0.">' +
+            repackLabel + '</th>'
+          : '') +
         '</tr></thead>';
-      var repackNote = rep.floored && rep.since
+      var repackNote = hasCap && rep.floored && rep.since
         ? ' ' + repackLabel + ' is counted since ' +
           esc(new Date(rep.since).toLocaleString()) +
           ' (clamp ship) — rows captured before it keep pre-clamp scores.'
@@ -405,8 +414,8 @@ export function sumOutcomesScript(): string {
         head + '<tbody>' + rows + '</tbody></table></div>' +
         '<p class="outcomes-target-note">Accept rate target ≥ ' + targetPct + '%. ' +
         'Untriaged rows are not rejections — they were never looked at, so they stay out of ' +
-        'the rate entirely. Window starts ' + esc(new Date(recent.since).toLocaleString()) + '. ' +
-        repackLabel + ' target: 0.' + repackNote + '</p>';
+        'the rate entirely. Window starts ' + esc(new Date(recent.since).toLocaleString()) + '.' +
+        (hasCap ? ' ' + repackLabel + ' target: 0.' + repackNote : '') + '</p>';
     }
 
     function renderOutcomes(stats) {
@@ -459,6 +468,12 @@ export function sumOutcomesScript(): string {
       var body = document.getElementById('outcomesBody');
       if (!body) return;
       var seq = ++outcomesSeq;
+      // Did the windowed block reach its own verdict? The inner try below owns that
+      // decision for BOTH its outcomes (rendered, or hidden on a null/malformed block);
+      // once it has, the outer catch must not overrule it. renderOutcomes runs AFTER
+      // it, so an all-time render failure was hiding a windowed block that had just
+      // rendered correctly — the fetch succeeded and the block's own data was fine.
+      var recentHandled = false;
       try {
         var stats = await getJson('/api/anthropic/candidates/stats?days=' + outcomesWindowDays);
         if (seq !== outcomesSeq) return; // a newer window is in flight; this answer is stale
@@ -474,11 +489,12 @@ export function sumOutcomesScript(): string {
           console.error('renderRecent failed:', err);
           showRecentBlock(false);
         }
+        recentHandled = true;
         renderOutcomes(stats);
       } catch (err) {
         console.error('loadOutcomes failed:', err);
         if (seq !== outcomesSeq) return;
-        showRecentBlock(false);
+        if (!recentHandled) showRecentBlock(false);
         body.innerHTML = '<div class="outcomes-empty error">Couldn\\'t load calibration stats. ' +
           '<button class="outcomes-copy-btn" id="outcomesRetryBtn" type="button">Retry</button></div>';
         var rb = document.getElementById('outcomesRetryBtn');

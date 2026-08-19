@@ -671,10 +671,19 @@ export interface RecentSourceStats {
    *  - shape from the SHIPPED {@link isRepackagingShaped} on the handle-stripped title;
    *  - score rounded to 2 dp before comparing to {@link REPACKAGING_SCORE_CAP} —
    *    load-bearing, since float4 hands 0.8 back as 0.80000001 and a raw `> 0.8` counts it;
-   *  - and the EMPTY-FIRST-LINE exemption mirrored: `candidateTitle` falls back to
+   *  - and the EMPTY-FIRST-LINE exemption APPROXIMATED: `candidateTitle` falls back to
    *    `doc.text` (which carries its own `@handle:` prefix) when the first line is blank,
    *    and x.ts refuses to clamp that, so a title still starting with `@\S+:` after one
-   *    strip is skipped here too.
+   *    strip is skipped here too. **This is an approximation, not a clause-for-clause
+   *    mirror**: x.ts keys on the first line being EMPTY, this keys on the surviving
+   *    shape, and the two diverge for a genuine first line that opens `@someone: …` —
+   *    x.ts clamps it, this skips it. That direction is a possible FALSE NEGATIVE (a
+   *    real miss going uncounted), never a false alarm on a target-0 metric.
+   *
+   * One blind spot, stated because the metric reads as a census and is not one:
+   * `upsertCandidate` never touches `created_at`, so a URL first captured BEFORE the
+   * clamp stays outside the floor forever, however often it is re-captured. If the clamp
+   * ever regresses, every re-captured pre-clamp URL it lets through is invisible here.
    */
   repackagingShapedAbove08?: number;
 }
@@ -786,6 +795,22 @@ export function aggregateRecentRows(
 }
 
 /**
+ * Test-only injection of the two instants this aggregation reads from the environment.
+ * Not a production seam — every caller passes nothing.
+ *
+ * `clampShippedAt` is the load-bearing one: {@link REPACKAGING_CLAMP_SHIPPED_AT} sits in
+ * the recent past, so on a real clock EVERY window reaches back past it and `floored` is
+ * permanently true — the `floored:false` branch (where the WINDOW is the binding bound
+ * and `repackaging.since` is the window start) is unreachable from a test that can only
+ * choose `windowDays`. `now` pins the window start so `since` can be asserted exactly
+ * rather than as an inequality.
+ */
+export interface RecentStatsClock {
+  now?: Date;
+  clampShippedAt?: Date;
+}
+
+/**
  * Per-source capture + triage + acceptance over the last `windowDays` days of
  * `created_at`. Read-only. The whole window is pulled into TS (the corpus is ~1.5k rows
  * TOTAL, ~150/week) rather than aggregated in SQL, because the repackaging-shape count
@@ -795,6 +820,7 @@ export function aggregateRecentRows(
  */
 export async function candidateRecentStats(
   windowDays: number = RECENT_WINDOW_DEFAULT_DAYS,
+  clock: RecentStatsClock = {},
 ): Promise<CandidateRecentStats> {
   const sql = getDb();
   // The caller's `?days=` is already clamped at the route (`clampIntQuery`). This guard
@@ -808,10 +834,10 @@ export async function candidateRecentStats(
   // The cutoff is computed here and BOUND as a parameter rather than written as
   // `now() - interval` in SQL, so the `since` the payload reports is byte-for-byte the
   // instant the query filtered on — no app/DB clock skew between the two.
-  const since = new Date(Date.now() - days * 86_400_000);
+  const since = new Date((clock.now?.getTime() ?? Date.now()) - days * 86_400_000);
   // The repackaging metric additionally floors at the clamp's ship time; every other
   // bucket counts the whole window. `floored` says which of the two bounds is binding.
-  const shippedAt = REPACKAGING_CLAMP_SHIPPED_AT.getTime();
+  const shippedAt = (clock.clampShippedAt ?? REPACKAGING_CLAMP_SHIPPED_AT).getTime();
   const repackSinceMs = Math.max(since.getTime(), shippedAt);
   const rows = await sql`
     SELECT source, status, dismissed_reason, kind, title, score, created_at

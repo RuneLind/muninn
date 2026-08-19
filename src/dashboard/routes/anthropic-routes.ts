@@ -214,21 +214,27 @@ export function registerAnthropicRoutes(
         max: RECENT_WINDOW_MAX_DAYS,
         fallback: RECENT_WINDOW_DEFAULT_DAYS,
       });
-      const stats = await outcomeStats();
       // The windowed block is a FOURTH view that happens to ride the same fetch, not a
       // part of the other three. Under one `Promise.all` any failure in it 500'd the
       // whole Calibration tab — so it degrades on its own: `recent: null`, one warn, and
       // the all-time tables still render (the client hides the block on a null).
+      // `allSettled` is what buys BOTH: the two independent queries still run
+      // CONCURRENTLY (two sequential awaits made the tab as slow as their sum), while a
+      // rejection of either is delivered as a value rather than unwinding the other.
+      const [allTime, windowed] = await Promise.allSettled([outcomeStats(), recentStats(days)]);
+      // The all-time half is the route's contract: its failure is still a 500, so it is
+      // rethrown into the outer catch rather than reported as a partial payload.
+      if (allTime.status === "rejected") throw allTime.reason;
       let recent: CandidateRecentStats | null = null;
-      try {
-        recent = await recentStats(days);
-      } catch (err) {
+      if (windowed.status === "fulfilled") recent = windowed.value;
+      else {
+        const err = windowed.reason;
         log.warn("Windowed candidate stats failed (days={days}): {error}", {
           days,
           error: err instanceof Error ? err.message : String(err),
         });
       }
-      return c.json({ ...stats, recent });
+      return c.json({ ...allTime.value, recent });
     } catch (err) {
       log.error("Loading candidate outcome stats failed: {error}", {
         error: err instanceof Error ? err.message : String(err),
