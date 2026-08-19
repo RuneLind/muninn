@@ -112,3 +112,36 @@ export function withCaptureLimit(prompt: string, maxItems: number): string {
 
 BUDGET — a hard cap on this response: return AT MOST ${maxItems} items, the ${maxItems} most worth reading, ranked best-first. If more than ${maxItems} clear the bar above, keep only the best ${maxItems} and omit the rest entirely. Returning FEWER than ${maxItems} is correct and expected when the batch is weak — never pad the list to reach ${maxItems}.`;
 }
+
+/**
+ * Lower every entry the predicate selects to `cap`. Never raises, never mutates the input.
+ *
+ * Lives here beside {@link applyCaptureLimit} because it is generic over `{n, score}` for
+ * the same reason: the anthropic capture path has the same shape and should import this
+ * rather than grow a second copy. `cap` is therefore REQUIRED — an X-policy default on a
+ * shared helper is how the next caller silently inherits the wrong ceiling. `shouldClamp`
+ * takes the entry's `n` so the caller owns which items qualify — the X caller clamps only
+ * repackaging-shaped long-form `x-post` items, never `x-link` pointers (scored on their
+ * destination; capping them would suppress exactly the artifacts the campaign promotes).
+ *
+ * **Composition order binds: clamp FIRST, before floor and limit.** A clamped 0.8 note now
+ * loses the K-slot race in {@link applyCaptureLimit} to a 0.9 primary source — that
+ * displacement is the point, not a side effect.
+ *
+ * `clamped` counts DISTINCT `n`, not entries: an off-contract model can emit two objects
+ * for one item, and `indexScoresByN` collapses them — counting entries would print
+ * `clamped > scored` on the outcome line for a single clamped item.
+ */
+export function clampScores<T extends { n: number; score: number }>(
+  scores: T[],
+  shouldClamp: (n: number) => boolean,
+  cap: number,
+): { scores: T[]; clamped: number } {
+  const clamped = new Set<number>();
+  const out = scores.map((s) => {
+    if (s.score <= cap || !shouldClamp(s.n)) return s;
+    clamped.add(s.n);
+    return { ...s, score: cap };
+  });
+  return { scores: out, clamped: clamped.size };
+}
