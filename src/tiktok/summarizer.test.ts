@@ -21,6 +21,7 @@ let downloadCalls: Array<{
   opts?: { maxDurationSeconds?: number; timeoutMs?: number };
 }> = [];
 let extractCalls = 0;
+let summarizeTimeoutArgs: { frameCount: number; floorMs: number } | undefined;
 let extractOpts: { durationSeconds?: number; frameTimeoutMs?: number } | undefined;
 let transcribeCalls: Array<{ opts?: { whisperTimeoutMs?: number; audioTimeoutMs?: number } }> = [];
 // yt-dlp-reported duration, mutable so a long-form upload can be simulated.
@@ -72,6 +73,15 @@ mock.module("../video/media.ts", () => ({
     extractOpts = opts;
     if (extractShouldThrow) throw new Error("ffmpeg keyframe extraction failed");
     return framesResult.map((f) => ({ ...f, path: join(workDir, f.path) }));
+  },
+  // Spy, not a copy of the real formula: a duplicated formula here would let
+  // media.ts's rate change while both suites stayed green, and it is the
+  // ARGUMENTS (does the call site pass the real frame count?) that this file
+  // is in a position to prove. The sentinel is >600_000 so the floor
+  // assertions elsewhere still mean what they say.
+  summarizeTimeoutFor: (frameCount: number, floorMs: number) => {
+    summarizeTimeoutArgs = { frameCount, floorMs };
+    return 1_234_000;
   },
   extractTikTokVideoId: (url: string) => url.match(/\/video\/(\d+)/)?.[1] ?? null,
 }));
@@ -150,6 +160,7 @@ beforeEach(() => {
   extractShouldThrow = false;
   downloadCalls = [];
   extractCalls = 0;
+  summarizeTimeoutArgs = undefined;
   extractOpts = undefined;
   transcribeCalls = [];
   videoDuration = 45;
@@ -315,6 +326,9 @@ test("passes the work dir as extraDirs and raises the timeout to >=600s", async 
   expect(lastOpts!.extraDirs).toEqual([workDir]);
   expect(downloadCalls[0]!.workDir).toBe(workDir);
   expect(lastOpts!.timeoutMs).toBeGreaterThanOrEqual(600_000);
+  // The summarize budget is computed from the REAL frame count (2 here), not a
+  // constant — that pass-through is the whole behavioral content of the call.
+  expect(summarizeTimeoutArgs).toEqual({ frameCount: 2, floorMs: 120_000 });
   // The caller's bot config is passed through untouched — executeOneShot clones
   // internally, the summarizer no longer mutates or clones it itself.
   expect(lastBotConfig).toBe(bot);

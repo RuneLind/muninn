@@ -135,8 +135,10 @@ export function registerTikTokRoutes(app: Hono, config: Config): void {
       }
     }
 
-    const jobId = createJob(videoId ?? "", title || url, url);
-
+    // Resolve + pre-flight BEFORE createJob: a job created above an early
+    // return is never settled, and an unsettled job now lingers for the
+    // in-flight grace (hours) at the TOP of /summaries with a "running"
+    // /agents card. x-article-routes.ts has always ordered it this way.
     const summarizerBot = resolveSummarizerBot(discoverAllBots());
     if (!summarizerBot) {
       return c.json({ error: "No bots configured" }, 500);
@@ -154,6 +156,8 @@ export function registerTikTokRoutes(app: Hono, config: Config): void {
         503,
       );
     }
+
+    const jobId = createJob(videoId ?? "", title || url, url);
 
     // Fire and forget — background summarization
     summarizeTikTok(jobId, url, title || url, config, summarizerBot, { frames }).catch((err) => {

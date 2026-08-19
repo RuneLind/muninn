@@ -12,6 +12,7 @@ import {
   downloadVideo,
   transcribeVideo,
   extractKeyframes,
+  summarizeTimeoutFor,
   canonicalXStatusUrl,
   extractXStatusId,
   type Keyframe,
@@ -177,7 +178,7 @@ Author: ${dl.uploader}`;
       attachRun,
       onProgress,
       extraDirs: [workDir],
-      timeoutMs: Math.max(botConfig.timeoutMs ?? config.claudeTimeoutMs, 600_000),
+      timeoutMs: summarizeTimeoutFor(frames.length, botConfig.timeoutMs ?? config.claudeTimeoutMs),
       thinkingMaxTokens: null,
     });
 

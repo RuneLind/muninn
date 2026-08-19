@@ -12,6 +12,7 @@ import {
   downloadVideo,
   transcribeVideo,
   extractKeyframes,
+  summarizeTimeoutFor,
   type Keyframe,
 } from "../video/media.ts";
 import {
@@ -188,12 +189,11 @@ Author: ${dl.uploader}`;
       attachRun,
       onProgress,
       extraDirs: [workDir],
-      // 600s floor: a live 72s/25-frame run blew through 300s on a slow bot
-      // (opus + thinking) — this is a background job, nothing blocks on it.
-      timeoutMs: Math.max(botConfig.timeoutMs ?? config.claudeTimeoutMs, 600_000),
-      // Keep the bot's own thinking budget (the other verticals cap it): reading
-      // 25 keyframes IS the reasoning here, and as a background job with no
-      // reader waiting on the first token there's no dead-air to buy back.
+      timeoutMs: summarizeTimeoutFor(frames.length, botConfig.timeoutMs ?? config.claudeTimeoutMs),
+      // Keep the bot's own thinking budget (the other verticals cap it):
+      // reading the keyframes (up to FRAME_BUDGET_MAX of them) IS the reasoning
+      // here, and as a background job with no reader waiting on the first token
+      // there's no dead-air to buy back.
       thinkingMaxTokens: null,
     });
 

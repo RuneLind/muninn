@@ -4,6 +4,7 @@ import {
   extractXStatusId,
   canonicalXStatusUrl,
   frameBudgetFor,
+  summarizeTimeoutFor,
   parseYtDlpJson,
   parseShowinfoTimestamps,
   YTDLP_FORMAT_SELECTOR,
@@ -155,14 +156,39 @@ test("frameBudgetFor gives 25 frames from 1 to 3 minutes", () => {
   expect(frameBudgetFor(180)).toBe(25);
 });
 
-test("frameBudgetFor hard-caps at 30 for longer clips", () => {
+test("frameBudgetFor holds 30 frames from 3 to 10 minutes", () => {
   expect(frameBudgetFor(181)).toBe(30);
   expect(frameBudgetFor(600)).toBe(30);
+});
+
+test("frameBudgetFor grows past 10 minutes instead of collapsing the spacing", () => {
+  // ~40s spacing until the ceiling: a flat 30 sampled a 60-min tutorial once
+  // per 120s and a 3h X workshop once per 360s.
+  expect(frameBudgetFor(601)).toBe(30);
+  expect(frameBudgetFor(1200)).toBe(30);
+  expect(frameBudgetFor(1600)).toBe(40);
+  expect(frameBudgetFor(2400)).toBe(60);
+  // Hard ceiling — 60 portrait frames is already ~37k tokens of images.
+  expect(frameBudgetFor(3600)).toBe(60);
+  expect(frameBudgetFor(10800)).toBe(60);
 });
 
 test("frameBudgetFor is defensive against non-finite input", () => {
   expect(frameBudgetFor(NaN)).toBe(15);
   expect(frameBudgetFor(0)).toBe(15);
+});
+
+// -- summarizeTimeoutFor ----------------------------------------------------
+
+test("summarizeTimeoutFor holds the 600s floor up to 30 frames, then scales", () => {
+  expect(summarizeTimeoutFor(0, 120_000)).toBe(600_000);
+  expect(summarizeTimeoutFor(30, 120_000)).toBe(600_000);
+  // Past the old flat budget every extra frame is another read in the same
+  // multi-turn session, at the rate the floor itself implies (600s/25 frames):
+  // the 60-frame ceiling gets 22 min.
+  expect(summarizeTimeoutFor(60, 120_000)).toBe(1_320_000);
+  // A bot configured slower than the computed budget still wins.
+  expect(summarizeTimeoutFor(0, 900_000)).toBe(900_000);
 });
 
 // -- parseYtDlpJson ---------------------------------------------------------
