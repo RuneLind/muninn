@@ -10,6 +10,8 @@ import {
   setCandidateStatus,
   expireStaleCandidates,
   candidateOutcomeStats,
+  candidateRecentStats,
+  ACCEPTANCE_TARGET,
   HYPE_DEDUP_SWEEP_REASON,
 } from "./summary-candidates.ts";
 
@@ -601,6 +603,79 @@ describe("summary-candidates", () => {
       expect(bands["0.7"]!.total).toBe(2);
       expect(bands["0.5"]!.dismissedManual).toBe(5);
       expect(bands["0.6"]).toBeUndefined();
+    });
+  });
+
+  describe("candidateRecentStats", () => {
+    test("windowed block: untriaged separate from rejected, float4-safe repackaging count", async () => {
+      const sql = getDb();
+      // Four x rows, one per bucket, plus the three repackaging cases. Titles carry the
+      // `@handle: ` prefix exactly as the X capture writes them.
+      const seed = async (
+        slug: string,
+        title: string,
+        score: number,
+        status: "new" | "summarized" | "dismissed",
+        reason?: "manual" | "expired",
+      ) => {
+        const url = "https://x/" + slug;
+        await upsertCandidate({ ...base, source: "x", url, title, score, kind: "x-post" });
+        const row = (await getCandidateBySourceUrl("x", url))!;
+        if (status === "summarized") await setCandidateStatus(row.id, "summarized", "doc-" + slug);
+        else if (status === "dismissed")
+          await setCandidateStatus(row.id, "dismissed", null, reason ?? null);
+        return row;
+      };
+
+      // Shaped (ALL-CAPS) at 0.9 — the one row that must be counted.
+      await seed("shaped-hi", "@a: EVERYONE IS SLEEPING on this", 0.9, "new");
+      // Shaped but stored at exactly the 0.8 cap: float4 reads back as 0.80000001, so a
+      // raw `score > 0.8` counts it and the rounded comparison must not.
+      await seed("shaped-cap", "@b: 🚨 clamped by #454", 0.8, "new");
+      // Unshaped at 0.9.
+      await seed("plain-hi", "@c: a careful writeup of tool use", 0.9, "summarized");
+      await seed("rejected", "@d: hype thread", 0.6, "dismissed", "manual");
+      await seed("expired", "@e: stale pointer", 0.6, "dismissed", "expired");
+
+      // A row OUTSIDE the window must not appear anywhere in the block.
+      const old = await seed("ancient", "@f: OLDNEWSHERE from months ago", 0.95, "new");
+      await sql`UPDATE summary_candidates SET created_at = now() - interval '40 days' WHERE id = ${old.id}`;
+
+      const recent = await candidateRecentStats(7);
+      expect(recent.windowDays).toBe(7);
+      expect(recent.target).toBe(ACCEPTANCE_TARGET);
+      expect(Date.parse(recent.since)).toBeLessThan(Date.now());
+
+      const x = recent.bySource.find((s) => s.source === "x")!;
+      expect(x).toBeDefined();
+      expect(x.captured).toBe(5); // the 40-day-old row is excluded
+      expect(x.pending).toBe(2); // never looked at — NOT rejections
+      expect(x.triaged).toBe(3);
+      expect(x.summarized).toBe(1);
+      expect(x.dismissedManual).toBe(1);
+      expect(x.dismissedOther).toBe(1); // expired
+      expect(x.error).toBe(0);
+      expect(x.acceptanceRate).toBeCloseTo(0.5, 5);
+      // Only the 0.9 shaped row: the 0.8 one is AT the cap, the 0.9 one is unshaped,
+      // and the out-of-window shaped 0.95 row is out of the window.
+      expect(x.repackagingShapedAbove08).toBe(1);
+
+      // A wider window reaches the old row — and it is shaped above the cap.
+      const wide = await candidateRecentStats(90);
+      const wideX = wide.bySource.find((s) => s.source === "x")!;
+      expect(wideX.captured).toBe(6);
+      expect(wideX.repackagingShapedAbove08).toBe(2);
+    });
+
+    test("non-x sources omit the repackaging count entirely", async () => {
+      await upsertCandidate({ ...base, url: "https://o/anth1", score: 0.9, kind: "doc" });
+      const recent = await candidateRecentStats(7);
+      const anth = recent.bySource.find((s) => s.source === "anthropic")!;
+      expect(anth.captured).toBe(1);
+      expect(anth.pending).toBe(1);
+      expect(anth.acceptanceRate).toBeNull();
+      // Absent, not 0 — the metric is X-vertical policy and would be a lie elsewhere.
+      expect(anth.repackagingShapedAbove08).toBeUndefined();
     });
   });
 });

@@ -3,10 +3,18 @@
  * Renders the labeled capture-gate dataset that `summary_candidates` has become: every
  * row carries the gate `score`, its `kind`, and a terminal `status` (summarized = judged
  * worth a summary, dismissed = not). This tab turns that into three read-only views over
- * GET /api/anthropic/candidates/stats:
+ * GET /api/anthropic/candidates/stats?days=N:
+ *  - a windowed "last N days" block (7/14/30) at the TOP,
  *  - a per-(source, kind) acceptance table,
  *  - a 0.1-wide score-band histogram of outcomes,
  *  - suggested per-kind capture floors + a copyable `candidateMinScoreByKind` JSON snippet.
+ *
+ * The windowed block exists because the three all-time views cannot answer "is the change
+ * that shipped this week working?" and cannot show rows nobody ever TRIAGED (they count
+ * terminal statuses only). It puts Untriaged in its own amber column next to Rejected —
+ * "never looked at" and "a human said no" are different facts — states its acceptance
+ * target from the payload (`recent.target`, never hardcoded here), and for x carries the
+ * organic judging metric for the #454 repackaging clamp ("Repack >0.8", target 0).
  *
  * Acceptance rate = summarized / (summarized + manually-dismissed) — auto-expired,
  * bulk-swept (the one-shot X hype-dedup backlog sweep) and pre-migration ("unknown")
@@ -77,6 +85,43 @@ export function sumOutcomesStyles(): string {
     }
     .outcomes-acc[data-band="high"] { color: var(--status-success); }
     .outcomes-acc[data-band="low"] { color: var(--status-error); }
+
+    /* --- Windowed "last N days" block --- */
+    .outcomes-window-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 8px;
+    }
+    .outcomes-window-head h3 { margin: 0; }
+    .outcomes-window-label {
+      font-size: 12px;
+      color: var(--text-dim);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .outcomes-window-label select {
+      padding: 3px 8px;
+      border-radius: 6px;
+      font-size: 12px;
+      border: 1px solid var(--border-secondary);
+      background: var(--bg-surface);
+      color: var(--text-primary);
+    }
+    /* "Never looked at" must not read like "rejected" — it is amber and bold, while
+       the manual-rejection column stays plain. That separation is the whole point. */
+    .outcomes-untriaged { font-weight: 700; color: var(--status-warning); }
+    .outcomes-untriaged[data-zero="1"] { font-weight: 400; color: var(--text-dim); }
+    .outcomes-target-note {
+      font-size: 12px;
+      color: var(--text-dim);
+      margin: 8px 0 0;
+    }
+    .outcomes-repack[data-band="ok"] { color: var(--status-success); font-weight: 600; }
+    .outcomes-repack[data-band="bad"] { color: var(--status-error); font-weight: 700; }
     .outcomes-kind-tag {
       display: inline-block;
       padding: 1px 7px;
@@ -146,6 +191,19 @@ export function sumOutcomesHtml(): string {
         auto-expired, bulk-swept and pre-tracking dismissals are shown separately and excluded from that rate. Display only — copy the
         suggested floors into a bot's <code>candidateMinScoreByKind</code> yourself.
       </p>
+      <div class="outcomes-block" id="outcomesRecentBlock">
+        <div class="outcomes-window-head">
+          <h3 id="outcomesRecentTitle">Last 7 days</h3>
+          <label class="outcomes-window-label">Window
+            <select id="outcomesWindowSel">
+              <option value="7" selected>7 days</option>
+              <option value="14">14 days</option>
+              <option value="30">30 days</option>
+            </select>
+          </label>
+        </div>
+        <div id="outcomesRecentBody"></div>
+      </div>
       <div id="outcomesBody"></div>
     </div>`;
 }
@@ -160,10 +218,14 @@ export function sumOutcomesScript(): string {
     var OUTCOME_ANTHROPIC_KINDS = ['commit', 'release', 'doc', 'blog'];
     var OUTCOME_X_KINDS = ['x-post', 'x-link'];
 
-    function outcomeAcc(o) {
+    // The all-time tables band against the same 0.5 the floor heuristic targets. The
+    // windowed block below takes its target from the PAYLOAD (recent.target) instead of
+    // hardcoding a second copy — see outcomeAcc's optional target argument.
+    function outcomeAcc(o, target) {
+      var t = typeof target === 'number' ? target : 0.5;
       if (o.acceptanceRate == null) return '<span class="outcomes-acc" data-band="none">—</span>';
       var pct = Math.round(o.acceptanceRate * 100);
-      var band = o.acceptanceRate >= 0.5 ? 'high' : 'low';
+      var band = o.acceptanceRate >= t ? 'high' : 'low';
       return '<span class="outcomes-acc" data-band="' + band + '">' + pct + '%</span>';
     }
 
@@ -268,6 +330,62 @@ export function sumOutcomesScript(): string {
       return { hasSnippet: true, html: html };
     }
 
+    // --- Windowed "last N days" block ---------------------------------------
+    // Its point is the two columns the all-time tables cannot show: Untriaged
+    // ("never looked at" — status new/summarizing, NOT a rejection) and, for x,
+    // "Repack >0.8" — rows the #454 repackaging clamp did not reach. Target 0.
+    function renderRecent(recent) {
+      var body = document.getElementById('outcomesRecentBody');
+      if (!body) return;
+      var title = document.getElementById('outcomesRecentTitle');
+      if (title) title.textContent = 'Last ' + recent.windowDays + ' day' +
+        (recent.windowDays === 1 ? '' : 's');
+      if (!recent.bySource.length) {
+        body.innerHTML = '<div class="outcomes-empty">Nothing captured in this window.</div>';
+        return;
+      }
+      var targetPct = Math.round(recent.target * 100);
+      var rows = recent.bySource.map(function(o) {
+        var repack = typeof o.repackagingShapedAbove08 === 'number'
+          ? '<span class="outcomes-repack" data-band="' +
+            (o.repackagingShapedAbove08 === 0 ? 'ok' : 'bad') + '">' +
+            o.repackagingShapedAbove08 + '</span>'
+          : '<span class="dim">—</span>';
+        return '<tr>' +
+          '<td>' + esc(o.source) + '</td>' +
+          '<td>' + o.captured + '</td>' +
+          '<td><span class="outcomes-untriaged" data-zero="' + (o.pending === 0 ? '1' : '0') + '">' +
+            o.pending + '</span></td>' +
+          '<td>' + o.triaged + '</td>' +
+          '<td>' + o.summarized + '</td>' +
+          '<td>' + o.dismissedManual + '</td>' +
+          '<td class="dim">' + o.dismissedOther + '</td>' +
+          '<td class="dim">' + o.error + '</td>' +
+          '<td>' + outcomeAcc(o, recent.target) + '</td>' +
+          '<td>' + repack + '</td>' +
+        '</tr>';
+      }).join('');
+      var head = '<thead><tr>' +
+        '<th>Source</th>' +
+        '<th title="Every candidate row created in this window">Captured</th>' +
+        '<th title="Still new/summarizing — NEVER looked at. Not a rejection.">Untriaged</th>' +
+        '<th title="Captured minus untriaged">Triaged</th>' +
+        '<th>Accepted</th>' +
+        '<th title="Human clicked Dismiss — the only rejections counted against Accept rate">Rejected</th>' +
+        '<th title="Expired, bulk-swept or otherwise auto-dismissed — bookkeeping, not judgements; excluded from Accept rate">Other</th>' +
+        '<th>Error</th>' +
+        '<th title="Accepted ÷ (Accepted + Rejected); target ≥ ' + targetPct + '%">Accept rate</th>' +
+        '<th title="X rows whose handle-stripped title is repackaging-shaped and whose score (rounded to 2 dp) is still above 0.8 — rows the deterministic repackaging clamp (PR #454) did not reach. Target: 0.">Repack &gt;0.8</th>' +
+        '</tr></thead>';
+      body.innerHTML =
+        '<div class="outcomes-table-wrap"><table class="outcomes-table">' +
+        head + '<tbody>' + rows + '</tbody></table></div>' +
+        '<p class="outcomes-target-note">Accept rate target ≥ ' + targetPct + '%. ' +
+        'Untriaged rows are not rejections — they were never looked at, so they stay out of ' +
+        'the rate entirely. Window starts ' + esc(new Date(recent.since).toLocaleString()) + '. ' +
+        'Repack &gt;0.8 target: 0.</p>';
+    }
+
     function renderOutcomes(stats) {
       var body = document.getElementById('outcomesBody');
       if (!body) return;
@@ -303,19 +421,38 @@ export function sumOutcomesScript(): string {
       });
     }
 
+    // Window length for the "last N days" block. View state only — deliberately NOT in
+    // the URL (the tab already owns the hash) and not persisted; a reload is 7 days.
+    var outcomesWindowDays = 7;
+
     async function loadOutcomes() {
       var body = document.getElementById('outcomesBody');
       if (!body) return;
+      var recentBody = document.getElementById('outcomesRecentBody');
       try {
-        var stats = await getJson('/api/anthropic/candidates/stats');
+        var stats = await getJson('/api/anthropic/candidates/stats?days=' + outcomesWindowDays);
+        // The server clamps ?days and reports the window it actually used, so the block
+        // always labels itself from the payload, never from what we asked for.
+        if (stats.recent) renderRecent(stats.recent);
         renderOutcomes(stats);
       } catch (err) {
         console.error('loadOutcomes failed:', err);
+        if (recentBody) recentBody.innerHTML = '';
         body.innerHTML = '<div class="outcomes-empty error">Couldn\\'t load calibration stats. ' +
           '<button class="outcomes-copy-btn" id="outcomesRetryBtn" type="button">Retry</button></div>';
         var rb = document.getElementById('outcomesRetryBtn');
         if (rb) rb.addEventListener('click', loadOutcomes);
       }
     }
+
+    (function wireOutcomesWindow() {
+      var sel = document.getElementById('outcomesWindowSel');
+      if (!sel) return;
+      sel.addEventListener('change', function() {
+        var n = parseInt(sel.value, 10);
+        outcomesWindowDays = isNaN(n) ? 7 : n;
+        loadOutcomes();
+      });
+    })();
   `;
 }

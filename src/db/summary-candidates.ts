@@ -1,4 +1,5 @@
 import { getDb } from "./client.ts";
+import { isRepackagingShaped, REPACKAGING_SCORE_CAP } from "../watchers/repackaging-shape.ts";
 
 /**
  * The Candidates → Summaries inbox (Claude Learning Center, Phase B).
@@ -349,8 +350,13 @@ export async function setCandidateStatus(
 // the operator can hand-tune `candidateMinScoreByKind`. It NEVER writes watcher config.
 // ============================================================================
 
-/** Acceptance rate the suggested-floor heuristic targets. */
-const ACCEPTANCE_TARGET = 0.5;
+/**
+ * Acceptance rate the suggested-floor heuristic targets — and the SAME number the
+ * windowed "last N days" block states as its target. One constant, exported so the
+ * payload can carry it (`recent.target`) and no UI has to hardcode a second 0.5 that
+ * could drift away from the floor heuristic's.
+ */
+export const ACCEPTANCE_TARGET = 0.5;
 
 /**
  * `dismissed_reason` written by the one-shot `scripts/sweep-x-hype-backlog.ts` backlog
@@ -595,6 +601,180 @@ export async function candidateOutcomeStats(): Promise<CandidateOutcomeStats> {
   suggestedFloors.sort((a, b) => a.kind.localeCompare(b.kind));
 
   return { byKind, byBand, suggestedFloors };
+}
+
+// ============================================================================
+// Windowed acceptance ("last N days")
+//
+// `candidateOutcomeStats` above is ALL-TIME and counts only terminal rows, which
+// makes two things invisible that the operator actually steers on:
+//   1. rows nobody ever looked at (`new`/`summarizing`) — an all-time table showing
+//      "12 dismissed" says nothing about the 251 that were never triaged at all;
+//   2. whether a gate change that shipped THIS WEEK is working — an all-time rate
+//      is dominated by months of pre-change history.
+// `candidateRecentStats` answers both over a `created_at` window: every captured row
+// is placed in exactly one of pending / summarized / dismissedManual / dismissedOther
+// / error, so `captured` is the honest denominator and "never looked at" is its own
+// column, visibly distinct from "rejected".
+// ============================================================================
+
+export const RECENT_WINDOW_DEFAULT_DAYS = 7;
+export const RECENT_WINDOW_MIN_DAYS = 1;
+export const RECENT_WINDOW_MAX_DAYS = 90;
+
+/**
+ * `?days=` → a window length. Mirrors `clampDays` in `dashboard/claude-usage-overview.ts`
+ * (`Number()` → `Math.round` → clamp), deliberately not `parseInt`, which reads `1e2`
+ * as 1 and `12abc` as 12 — i.e. would silently answer a different window than asked for.
+ * Unparseable/absent ⇒ the default; out of range ⇒ clamped, never an error.
+ */
+export function clampRecentWindowDays(raw: string | undefined | null): number {
+  if (raw == null || raw.trim() === "") return RECENT_WINDOW_DEFAULT_DAYS;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return RECENT_WINDOW_DEFAULT_DAYS;
+  return Math.min(RECENT_WINDOW_MAX_DAYS, Math.max(RECENT_WINDOW_MIN_DAYS, Math.round(n)));
+}
+
+/** One candidate row as the windowed aggregation needs it (the SELECT's shape). */
+export interface RecentRawRow {
+  source: string;
+  status: SummaryCandidateStatus;
+  dismissedReason: string | null;
+  title: string;
+  score: number;
+}
+
+export interface RecentSourceStats {
+  source: string;
+  /** Every row captured in the window — the honest denominator. */
+  captured: number;
+  /** status new + summarizing: NEVER LOOKED AT. Not a rejection. */
+  pending: number;
+  /** captured − pending. */
+  triaged: number;
+  summarized: number;
+  /** Dismissed by a human clicking Dismiss — the only rejections. */
+  dismissedManual: number;
+  /** expired + swept + unknown + any other recorded reason — bookkeeping, not judgements. */
+  dismissedOther: number;
+  error: number;
+  /** summarized / (summarized + dismissedManual); null when nothing was judged. */
+  acceptanceRate: number | null;
+  /**
+   * X ONLY (absent on other sources): rows in the window whose handle-stripped title
+   * is repackaging-SHAPED and whose score, rounded to 2 dp, is still above the
+   * {@link REPACKAGING_SCORE_CAP}. The deterministic clamp shipped in #454 makes this
+   * the campaign's organic judging metric, and its target is **0** — any row here is
+   * one the clamp did not reach. Rounding is load-bearing: `score` is float4, so a row
+   * stored at exactly 0.8 reads back as 0.80000001 and a raw `> 0.8` counts it.
+   */
+  repackagingShapedAbove08?: number;
+}
+
+export interface CandidateRecentStats {
+  /** The clamped window actually used (1–90). */
+  windowDays: number;
+  /** ISO timestamp of the window start — what `created_at >=` was compared against. */
+  since: string;
+  /** The acceptance target the UI bands against, STATED here so no client hardcodes it. */
+  target: number;
+  bySource: RecentSourceStats[];
+}
+
+/** The `@handle: ` prefix the X capture writes onto candidate titles. */
+const X_HANDLE_PREFIX = /^@\S+:\s*/;
+
+/** float4 → the 2-dp value the UI shows, so a stored 0.8 compares as 0.8 (see above). */
+const round2 = (x: number): number => Math.round(x * 100) / 100;
+
+/**
+ * Pure windowed aggregation: rows already filtered to the window → one block per source.
+ * Every row lands in exactly one bucket, so pending + summarized + dismissedManual +
+ * dismissedOther + error === captured for each source. Sorted by source for a stable table.
+ */
+export function aggregateRecentRows(rows: RecentRawRow[]): RecentSourceStats[] {
+  const bySource = new Map<string, RecentSourceStats>();
+  for (const r of rows) {
+    let e = bySource.get(r.source);
+    if (!e) {
+      e = {
+        source: r.source,
+        captured: 0,
+        pending: 0,
+        triaged: 0,
+        summarized: 0,
+        dismissedManual: 0,
+        dismissedOther: 0,
+        error: 0,
+        acceptanceRate: null,
+      };
+      if (r.source === "x") e.repackagingShapedAbove08 = 0;
+      bySource.set(r.source, e);
+    }
+    e.captured++;
+    if (r.status === "new" || r.status === "summarizing") e.pending++;
+    else if (r.status === "summarized") e.summarized++;
+    else if (r.status === "error") e.error++;
+    else if (r.status === "dismissed") {
+      if (r.dismissedReason === "manual") e.dismissedManual++;
+      else e.dismissedOther++;
+    }
+    if (
+      e.repackagingShapedAbove08 !== undefined &&
+      round2(r.score) > REPACKAGING_SCORE_CAP &&
+      isRepackagingShaped(r.title.replace(X_HANDLE_PREFIX, ""))
+    ) {
+      e.repackagingShapedAbove08++;
+    }
+  }
+  const out = [...bySource.values()];
+  for (const e of out) {
+    e.triaged = e.captured - e.pending;
+    const denom = e.summarized + e.dismissedManual;
+    e.acceptanceRate = denom > 0 ? round3(e.summarized / denom) : null;
+  }
+  out.sort((a, b) => a.source.localeCompare(b.source));
+  return out;
+}
+
+/**
+ * Per-source capture + triage + acceptance over the last `windowDays` days of
+ * `created_at`. Read-only. The whole window is pulled into TS (the corpus is ~1.5k rows
+ * TOTAL, ~150/week) rather than aggregated in SQL, because the repackaging-shape count
+ * must run the SHIPPED `isRepackagingShaped` predicate — re-implementing those three
+ * clauses as a SQL regex would give the dashboard a second, drifting definition of the
+ * very thing the clamp is judged on.
+ */
+export async function candidateRecentStats(
+  windowDays: number = RECENT_WINDOW_DEFAULT_DAYS,
+): Promise<CandidateRecentStats> {
+  const sql = getDb();
+  const days = Math.min(
+    RECENT_WINDOW_MAX_DAYS,
+    Math.max(RECENT_WINDOW_MIN_DAYS, Math.round(windowDays)),
+  );
+  // The cutoff is computed here and BOUND as a parameter rather than written as
+  // `now() - interval` in SQL, so the `since` the payload reports is byte-for-byte the
+  // instant the query filtered on — no app/DB clock skew between the two.
+  const since = new Date(Date.now() - days * 86_400_000);
+  const rows = await sql`
+    SELECT source, status, dismissed_reason, title, score
+    FROM summary_candidates
+    WHERE created_at >= ${since}
+  `;
+  const raw: RecentRawRow[] = rows.map((r: Record<string, any>) => ({
+    source: r.source,
+    status: r.status,
+    dismissedReason: r.dismissed_reason ?? null,
+    title: r.title ?? "",
+    score: Number(r.score),
+  }));
+  return {
+    windowDays: days,
+    since: since.toISOString(),
+    target: ACCEPTANCE_TARGET,
+    bySource: aggregateRecentRows(raw),
+  };
 }
 
 function mapRow(r: Record<string, any>): SummaryCandidate {

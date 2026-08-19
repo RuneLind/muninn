@@ -7,6 +7,8 @@ import {
   setCandidateStatus,
   expireStaleCandidates,
   candidateOutcomeStats,
+  candidateRecentStats,
+  clampRecentWindowDays,
 } from "../../db/summary-candidates.ts";
 import { pruneXLinkAmplifiers } from "../../db/x-link-amplifiers.ts";
 import {
@@ -178,10 +180,22 @@ export function registerAnthropicRoutes(app: Hono, config: Config): void {
   // — acceptance rates per (source, kind) + per 0.1 score band, plus a suggested
   // per-kind capture floor — for the /summaries "Calibration" tab. Read-only: it
   // NEVER writes watcher config; the operator hand-copies the suggested floors.
+  //
+  // `?days=` (integer, clamped 1–90, default 7) adds a `recent` block: per-source
+  // capture/triage/acceptance over that `created_at` window, with untriaged rows
+  // counted SEPARATELY from rejections and the acceptance target stated in the payload.
+  // Extended in place rather than split into a second endpoint so the Calibration tab
+  // stays one fetch and the windowed block can never disagree with the all-time tables
+  // about the target (both read `recent.target`). The all-time fields are unchanged, so
+  // an old client that ignores `recent` is unaffected.
   app.get("/api/anthropic/candidates/stats", async (c) => {
     try {
-      const stats = await candidateOutcomeStats();
-      return c.json(stats);
+      const days = clampRecentWindowDays(c.req.query("days"));
+      const [stats, recent] = await Promise.all([
+        candidateOutcomeStats(),
+        candidateRecentStats(days),
+      ]);
+      return c.json({ ...stats, recent });
     } catch (err) {
       log.error("Loading candidate outcome stats failed: {error}", {
         error: err instanceof Error ? err.message : String(err),
