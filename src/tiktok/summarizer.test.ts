@@ -283,6 +283,28 @@ test("passes the 60-min duration cap and duration-scaled timeouts to the media p
   expect(extractOpts?.frameTimeoutMs).toBe(309_500);
 });
 
+test("short clips keep the short-clip timeout floors", async () => {
+  // The default 45s mock: every Math.max floor is the active branch here, which
+  // is the ordinary TikTok and the one the scaling must not shrink.
+  const jobId = createJob("7523456789", "My TikTok", CANONICAL_URL);
+  await summarizeTikTok(jobId, CANONICAL_URL, "My TikTok", config, bot);
+
+  expect(transcribeCalls[0]!.opts?.whisperTimeoutMs).toBe(120_000);
+  expect(transcribeCalls[0]!.opts?.audioTimeoutMs).toBe(60_000);
+  expect(extractOpts?.frameTimeoutMs).toBe(60_000);
+});
+
+test("a clip at the cap itself scales every budget off its duration", async () => {
+  videoDuration = 3600;
+  const jobId = createJob("7523456789", "My TikTok", CANONICAL_URL);
+  await summarizeTikTok(jobId, CANONICAL_URL, "My TikTok", config, bot);
+
+  expect(downloadCalls[0]!.opts?.maxDurationSeconds).toBe(3600);
+  expect(transcribeCalls[0]!.opts?.whisperTimeoutMs).toBe(3_600_000);
+  expect(transcribeCalls[0]!.opts?.audioTimeoutMs).toBe(720_000);
+  expect(extractOpts?.frameTimeoutMs).toBe(1_800_000);
+});
+
 test("passes the work dir as extraDirs and raises the timeout to >=600s", async () => {
   const jobId = createJob("7523456789", "My TikTok", CANONICAL_URL);
   await summarizeTikTok(jobId, CANONICAL_URL, "My TikTok", config, bot);

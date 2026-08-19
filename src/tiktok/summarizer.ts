@@ -105,8 +105,10 @@ export async function summarizeTikTok(
     });
 
     // 2. Transcribe (empty transcript is fine — music/visual-only TikToks).
-    //    Timeouts scale with the clip: whisper gets ~1x realtime (base.en runs
-    //    ~10x, so this is generous headroom), the wav extract ~0.2x realtime.
+    //    Timeouts scale with the clip: whisper gets 1x realtime, the wav extract
+    //    0.2x. Deliberate slack, not a fit — measured on this machine, base.en
+    //    transcribed the 619s clip in 12.6s and a 3716s one in 41.8s (~50-90x
+    //    realtime), so the budget is ~two orders of magnitude of headroom.
     updateStatus(jobId, "transcribing");
     const transcript = await transcribeVideo(dl.videoPath, config, {
       whisperTimeoutMs: Math.max(120_000, Math.round(dl.duration * 1000)),
