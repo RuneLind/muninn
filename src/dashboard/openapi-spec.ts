@@ -987,8 +987,18 @@ export const spec = {
         tags: ["Anthropic"],
         summary: "Candidate outcome calibration",
         description:
-          "Read-only aggregation of the labeled candidate dataset: acceptance rates per (source, kind) and per 0.1 score band, plus a suggested per-kind capture floor. Backs the /summaries Calibration tab. Never writes watcher config.",
+          "Read-only aggregation of the labeled candidate dataset: acceptance rates per (source, kind) and per 0.1 score band, plus a suggested per-kind capture floor. Backs the /summaries Calibration tab. Never writes watcher config. `?days=` adds the windowed `recent` block (captured / untriaged / triaged / accepted / rejected over a `created_at` window, plus the x-only repackaging-clamp miss count); a failure inside that block degrades to `recent: null` rather than failing the all-time views.",
         operationId: "getAnthropicCandidateStats",
+        parameters: [
+          {
+            name: "days",
+            in: "query",
+            required: false,
+            description:
+              "Window length in days for the `recent` block. Parsed as `Number()` + round, clamped 1–90; absent/unparseable ⇒ 7.",
+            schema: { type: "integer", minimum: 1, maximum: 90, default: 7 },
+          },
+        ],
         responses: {
           "200": {
             description: "OK",
@@ -1000,6 +1010,28 @@ export const spec = {
                     byKind: { type: "array", items: { type: "object" } },
                     byBand: { type: "array", items: { type: "object" } },
                     suggestedFloors: { type: "array", items: { type: "object" } },
+                    recent: {
+                      type: "object",
+                      nullable: true,
+                      description:
+                        "Windowed acceptance block, or null when the windowed aggregation failed (the all-time fields are still served).",
+                      properties: {
+                        windowDays: { type: "integer" },
+                        since: { type: "string", format: "date-time" },
+                        target: { type: "number" },
+                        repackaging: {
+                          type: "object",
+                          description:
+                            "Cap + effective floor for `repackagingShapedAbove08`. `since` = max(window start, clamp ship time); `floored` says the clamp ship time is the binding bound.",
+                          properties: {
+                            cap: { type: "number" },
+                            since: { type: "string", format: "date-time" },
+                            floored: { type: "boolean" },
+                          },
+                        },
+                        bySource: { type: "array", items: { type: "object" } },
+                      },
+                    },
                   },
                 },
               },

@@ -32,3 +32,12 @@ export function isRepackagingShaped(title: string): boolean {
  * deliberately holds no default.
  */
 export const REPACKAGING_SCORE_CAP = 0.8;
+
+/**
+ * When the deterministic clamp merged (#454, `1c6cc01`). Rows captured before this
+ * instant are OUT of the "shaped above the cap" metric: `upsertCandidate` keeps
+ * `GREATEST(stored, incoming)`, so a pre-clamp high is ratcheted in forever and no
+ * later capture can lower it — a target-0 count over those rows measures the ratchet,
+ * not the clamp.
+ */
+export const REPACKAGING_CLAMP_SHIPPED_AT = new Date("2026-08-19T12:04:10Z");

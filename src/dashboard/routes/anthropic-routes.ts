@@ -8,7 +8,11 @@ import {
   expireStaleCandidates,
   candidateOutcomeStats,
   candidateRecentStats,
-  clampRecentWindowDays,
+  RECENT_WINDOW_DEFAULT_DAYS,
+  RECENT_WINDOW_MIN_DAYS,
+  RECENT_WINDOW_MAX_DAYS,
+  type CandidateOutcomeStats,
+  type CandidateRecentStats,
 } from "../../db/summary-candidates.ts";
 import { pruneXLinkAmplifiers } from "../../db/x-link-amplifiers.ts";
 import {
@@ -20,7 +24,7 @@ import { kickCandidateSummarize } from "../../anthropic/summarizer.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { getSummarySource } from "../../summaries/sources.ts";
 import { registerSummaryVertical } from "./summary-vertical.ts";
-import { isValidUuid } from "./route-utils.ts";
+import { isValidUuid, clampIntQuery } from "./route-utils.ts";
 
 const log = getLog("dashboard");
 
@@ -40,7 +44,22 @@ const ANTHROPIC_COLLECTION = ANTHROPIC_SOURCE.collection;
  *    youtube-routes.ts (collection swapped to `anthropic-summaries`) so the
  *    unified /summaries page renders the source automatically.
  */
-export function registerAnthropicRoutes(app: Hono, config: Config): void {
+/**
+ * The two calibration aggregations, injectable so the route's own contract (the `?days=`
+ * clamp, and the degrade rule below) is testable without a Postgres container.
+ */
+export interface AnthropicStatsDeps {
+  outcomeStats?: () => Promise<CandidateOutcomeStats>;
+  recentStats?: (windowDays: number) => Promise<CandidateRecentStats>;
+}
+
+export function registerAnthropicRoutes(
+  app: Hono,
+  config: Config,
+  statsDeps: AnthropicStatsDeps = {},
+): void {
+  const outcomeStats = statsDeps.outcomeStats ?? candidateOutcomeStats;
+  const recentStats = statsDeps.recentStats ?? candidateRecentStats;
   // Shared summarizer-vertical plumbing (mirrors youtube-routes): SSE stream,
   // jobs, document/similar proxies against `anthropic-summaries`. No bare-path
   // redirect and no CORS preflight — anthropic has no standalone page and its
@@ -190,11 +209,25 @@ export function registerAnthropicRoutes(app: Hono, config: Config): void {
   // an old client that ignores `recent` is unaffected.
   app.get("/api/anthropic/candidates/stats", async (c) => {
     try {
-      const days = clampRecentWindowDays(c.req.query("days"));
-      const [stats, recent] = await Promise.all([
-        candidateOutcomeStats(),
-        candidateRecentStats(days),
-      ]);
+      const days = clampIntQuery(c.req.query("days"), {
+        min: RECENT_WINDOW_MIN_DAYS,
+        max: RECENT_WINDOW_MAX_DAYS,
+        fallback: RECENT_WINDOW_DEFAULT_DAYS,
+      });
+      const stats = await outcomeStats();
+      // The windowed block is a FOURTH view that happens to ride the same fetch, not a
+      // part of the other three. Under one `Promise.all` any failure in it 500'd the
+      // whole Calibration tab — so it degrades on its own: `recent: null`, one warn, and
+      // the all-time tables still render (the client hides the block on a null).
+      let recent: CandidateRecentStats | null = null;
+      try {
+        recent = await recentStats(days);
+      } catch (err) {
+        log.warn("Windowed candidate stats failed (days={days}): {error}", {
+          days,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
       return c.json({ ...stats, recent });
     } catch (err) {
       log.error("Loading candidate outcome stats failed: {error}", {

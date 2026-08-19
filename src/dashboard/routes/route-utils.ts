@@ -29,6 +29,33 @@ export function readonlyRefusal(c: Context, log: RouteLog) {
   return c.json({ error: WIKI_READONLY_REASON, readonly: true }, 403);
 }
 
+/**
+ * Parse an integer query param — `Number()` → `Math.round` → clamp to `[min, max]`.
+ *
+ * The ONE copy of this rule. It existed twice, byte-identically: `clampDays` in
+ * `dashboard/claude-usage-overview.ts` (itself mirroring claude-usage's upstream
+ * `clampInt`) and `clampRecentWindowDays` in `db/summary-candidates.ts` — the second
+ * of which was a query-string parser living in the DB layer. Callers keep their own
+ * bounds and default; only the parse semantics are shared.
+ *
+ * Deliberately NOT `parseInt`: it reads `1e2` as 1, `12abc` as 12 and truncates `7.9`
+ * to 7 — i.e. silently answers a different window than the query string asked for (and,
+ * for the claude-usage route, a different one than the upstream service would).
+ *
+ * Absent / blank / unparseable ⇒ `fallback`. Out of range ⇒ clamped, never an error.
+ * A non-finite literal (`Infinity`) takes the FALLBACK rather than `max` — it fails the
+ * finite check before the clamp is ever reached.
+ */
+export function clampIntQuery(
+  raw: string | undefined | null,
+  opts: { min: number; max: number; fallback: number },
+): number {
+  if (raw == null || raw.trim() === "") return opts.fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return opts.fallback;
+  return Math.min(opts.max, Math.max(opts.min, Math.round(n)));
+}
+
 /** Parse a numeric query param with fallback and bounds clamping. */
 export function parseIntParam(value: string | undefined, defaultVal: number, max: number): number {
   const parsed = parseInt(value ?? String(defaultVal), 10);

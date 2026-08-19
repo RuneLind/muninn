@@ -1,5 +1,9 @@
 import { getDb } from "./client.ts";
-import { isRepackagingShaped, REPACKAGING_SCORE_CAP } from "../watchers/repackaging-shape.ts";
+import {
+  isRepackagingShaped,
+  REPACKAGING_CLAMP_SHIPPED_AT,
+  REPACKAGING_SCORE_CAP,
+} from "../watchers/repackaging-shape.ts";
 
 /**
  * The Candidates → Summaries inbox (Claude Learning Center, Phase B).
@@ -622,26 +626,17 @@ export const RECENT_WINDOW_DEFAULT_DAYS = 7;
 export const RECENT_WINDOW_MIN_DAYS = 1;
 export const RECENT_WINDOW_MAX_DAYS = 90;
 
-/**
- * `?days=` → a window length. Mirrors `clampDays` in `dashboard/claude-usage-overview.ts`
- * (`Number()` → `Math.round` → clamp), deliberately not `parseInt`, which reads `1e2`
- * as 1 and `12abc` as 12 — i.e. would silently answer a different window than asked for.
- * Unparseable/absent ⇒ the default; out of range ⇒ clamped, never an error.
- */
-export function clampRecentWindowDays(raw: string | undefined | null): number {
-  if (raw == null || raw.trim() === "") return RECENT_WINDOW_DEFAULT_DAYS;
-  const n = Number(raw);
-  if (!Number.isFinite(n)) return RECENT_WINDOW_DEFAULT_DAYS;
-  return Math.min(RECENT_WINDOW_MAX_DAYS, Math.max(RECENT_WINDOW_MIN_DAYS, Math.round(n)));
-}
-
 /** One candidate row as the windowed aggregation needs it (the SELECT's shape). */
 export interface RecentRawRow {
   source: string;
   status: SummaryCandidateStatus;
   dismissedReason: string | null;
+  /** Capture-time kind — the repackaging metric counts `x-post` only (see below). */
+  kind: SummaryCandidateKind | null;
   title: string;
   score: number;
+  /** Epoch ms. Only the repackaging metric reads it — the window filter is the SQL's. */
+  createdAt: number;
 }
 
 export interface RecentSourceStats {
@@ -655,29 +650,63 @@ export interface RecentSourceStats {
   summarized: number;
   /** Dismissed by a human clicking Dismiss — the only rejections. */
   dismissedManual: number;
-  /** expired + swept + unknown + any other recorded reason — bookkeeping, not judgements. */
-  dismissedOther: number;
+  /**
+   * expired + swept + unknown + any other recorded reason — bookkeeping, not judgements.
+   * Deliberately NOT named `dismissedOther`: the all-time {@link OutcomeCounts} field of
+   * that name is only the catch-all bucket, while this one LUMPS every non-manual reason.
+   * One name for two different sets is how a reader mis-reads a column.
+   */
+  dismissedAuto: number;
   error: number;
   /** summarized / (summarized + dismissedManual); null when nothing was judged. */
   acceptanceRate: number | null;
   /**
-   * X ONLY (absent on other sources): rows in the window whose handle-stripped title
-   * is repackaging-SHAPED and whose score, rounded to 2 dp, is still above the
-   * {@link REPACKAGING_SCORE_CAP}. The deterministic clamp shipped in #454 makes this
-   * the campaign's organic judging metric, and its target is **0** — any row here is
-   * one the clamp did not reach. Rounding is load-bearing: `score` is float4, so a row
-   * stored at exactly 0.8 reads back as 0.80000001 and a raw `> 0.8` counts it.
+   * X ONLY (absent on other sources): rows the deterministic #454 clamp SHOULD have
+   * reached and did not. Target **0**. Scoped to exactly what `clampScores` can reach at
+   * its x.ts call site, so a non-zero here is always a real miss:
+   *  - `kind = 'x-post'` only — the clamp predicate returns false for `x-link` pointers
+   *    (a deliberate exemption) and for pre-migration NULL-kind rows;
+   *  - `created_at >= ` the effective floor ({@link CandidateRecentStats.repackaging}) —
+   *    see {@link REPACKAGING_CLAMP_SHIPPED_AT} for why pre-clamp rows measure nothing;
+   *  - shape from the SHIPPED {@link isRepackagingShaped} on the handle-stripped title;
+   *  - score rounded to 2 dp before comparing to {@link REPACKAGING_SCORE_CAP} —
+   *    load-bearing, since float4 hands 0.8 back as 0.80000001 and a raw `> 0.8` counts it;
+   *  - and the EMPTY-FIRST-LINE exemption mirrored: `candidateTitle` falls back to
+   *    `doc.text` (which carries its own `@handle:` prefix) when the first line is blank,
+   *    and x.ts refuses to clamp that, so a title still starting with `@\S+:` after one
+   *    strip is skipped here too.
    */
   repackagingShapedAbove08?: number;
 }
 
+/**
+ * Everything the UI needs to LABEL the repackaging column without hardcoding either the
+ * cap or the clamp's ship date — both of which live in `watchers/repackaging-shape.ts`
+ * and would otherwise be duplicated into a browser string that silently goes stale.
+ */
+export interface RecentRepackagingMeta {
+  /** {@link REPACKAGING_SCORE_CAP} — the ">" in the column header. */
+  cap: number;
+  /** ISO of the effective floor: `max(window start, clamp ship time)`. */
+  since: string;
+  /**
+   * True when the CLAMP SHIP TIME is what bounds the count, not the window — i.e. the
+   * window reaches back past #454 and the count is deliberately blind to that stretch.
+   * The UI says so; a silent floor reads as "the clamp is perfect" over a window that
+   * mostly predates it.
+   */
+  floored: boolean;
+}
+
 export interface CandidateRecentStats {
-  /** The clamped window actually used (1–90). */
+  /** The window actually used (the route clamps `?days=` to 1–90). */
   windowDays: number;
   /** ISO timestamp of the window start — what `created_at >=` was compared against. */
   since: string;
   /** The acceptance target the UI bands against, STATED here so no client hardcodes it. */
   target: number;
+  /** Cap + effective floor for `repackagingShapedAbove08` (see above). */
+  repackaging: RecentRepackagingMeta;
   bySource: RecentSourceStats[];
 }
 
@@ -688,11 +717,34 @@ const X_HANDLE_PREFIX = /^@\S+:\s*/;
 const round2 = (x: number): number => Math.round(x * 100) / 100;
 
 /**
+ * Is this row one the #454 clamp SHOULD have held at the cap and did not? Mirrors the
+ * `clampScores` predicate in `x.ts` clause for clause — see the field doc on
+ * {@link RecentSourceStats.repackagingShapedAbove08}. Any divergence here turns the
+ * target-0 metric into a number that can never reach 0 for reasons that are not misses.
+ */
+function isUnclampedRepackaging(r: RecentRawRow, repackSinceMs: number): boolean {
+  if (r.kind !== "x-post") return false;
+  if (r.createdAt < repackSinceMs) return false;
+  if (round2(r.score) <= REPACKAGING_SCORE_CAP) return false;
+  const stripped = r.title.replace(X_HANDLE_PREFIX, "");
+  // A second `@handle:` surviving the strip is the empty-first-line fallback, which
+  // x.ts refuses to judge. No title, no verdict — here as there.
+  if (X_HANDLE_PREFIX.test(stripped)) return false;
+  return isRepackagingShaped(stripped);
+}
+
+/**
  * Pure windowed aggregation: rows already filtered to the window → one block per source.
  * Every row lands in exactly one bucket, so pending + summarized + dismissedManual +
- * dismissedOther + error === captured for each source. Sorted by source for a stable table.
+ * dismissedAuto + error === captured for each source. Sorted by source for a stable table.
+ *
+ * `repackSinceMs` floors the repackaging metric ONLY (epoch ms) — every other bucket
+ * counts the whole window.
  */
-export function aggregateRecentRows(rows: RecentRawRow[]): RecentSourceStats[] {
+export function aggregateRecentRows(
+  rows: RecentRawRow[],
+  repackSinceMs: number,
+): RecentSourceStats[] {
   const bySource = new Map<string, RecentSourceStats>();
   for (const r of rows) {
     let e = bySource.get(r.source);
@@ -704,7 +756,7 @@ export function aggregateRecentRows(rows: RecentRawRow[]): RecentSourceStats[] {
         triaged: 0,
         summarized: 0,
         dismissedManual: 0,
-        dismissedOther: 0,
+        dismissedAuto: 0,
         error: 0,
         acceptanceRate: null,
       };
@@ -717,13 +769,9 @@ export function aggregateRecentRows(rows: RecentRawRow[]): RecentSourceStats[] {
     else if (r.status === "error") e.error++;
     else if (r.status === "dismissed") {
       if (r.dismissedReason === "manual") e.dismissedManual++;
-      else e.dismissedOther++;
+      else e.dismissedAuto++;
     }
-    if (
-      e.repackagingShapedAbove08 !== undefined &&
-      round2(r.score) > REPACKAGING_SCORE_CAP &&
-      isRepackagingShaped(r.title.replace(X_HANDLE_PREFIX, ""))
-    ) {
+    if (e.repackagingShapedAbove08 !== undefined && isUnclampedRepackaging(r, repackSinceMs)) {
       e.repackagingShapedAbove08++;
     }
   }
@@ -749,16 +797,24 @@ export async function candidateRecentStats(
   windowDays: number = RECENT_WINDOW_DEFAULT_DAYS,
 ): Promise<CandidateRecentStats> {
   const sql = getDb();
-  const days = Math.min(
-    RECENT_WINDOW_MAX_DAYS,
-    Math.max(RECENT_WINDOW_MIN_DAYS, Math.round(windowDays)),
-  );
+  // The caller's `?days=` is already clamped at the route (`clampIntQuery`). This guard
+  // is only about not building an Invalid Date out of a nonsense ARGUMENT: `Math.round`
+  // propagates NaN, and `new Date(NaN).toISOString()` throws RangeError — which used to
+  // 500 the whole stats route for a caller that passed a bad number.
+  const days =
+    Number.isFinite(windowDays) && windowDays >= 1
+      ? Math.round(windowDays)
+      : RECENT_WINDOW_DEFAULT_DAYS;
   // The cutoff is computed here and BOUND as a parameter rather than written as
   // `now() - interval` in SQL, so the `since` the payload reports is byte-for-byte the
   // instant the query filtered on — no app/DB clock skew between the two.
   const since = new Date(Date.now() - days * 86_400_000);
+  // The repackaging metric additionally floors at the clamp's ship time; every other
+  // bucket counts the whole window. `floored` says which of the two bounds is binding.
+  const shippedAt = REPACKAGING_CLAMP_SHIPPED_AT.getTime();
+  const repackSinceMs = Math.max(since.getTime(), shippedAt);
   const rows = await sql`
-    SELECT source, status, dismissed_reason, title, score
+    SELECT source, status, dismissed_reason, kind, title, score, created_at
     FROM summary_candidates
     WHERE created_at >= ${since}
   `;
@@ -766,14 +822,21 @@ export async function candidateRecentStats(
     source: r.source,
     status: r.status,
     dismissedReason: r.dismissed_reason ?? null,
+    kind: (r.kind ?? null) as SummaryCandidateKind | null,
     title: r.title ?? "",
     score: Number(r.score),
+    createdAt: new Date(r.created_at).getTime(),
   }));
   return {
     windowDays: days,
     since: since.toISOString(),
     target: ACCEPTANCE_TARGET,
-    bySource: aggregateRecentRows(raw),
+    repackaging: {
+      cap: REPACKAGING_SCORE_CAP,
+      since: new Date(repackSinceMs).toISOString(),
+      floored: shippedAt > since.getTime(),
+    },
+    bySource: aggregateRecentRows(raw, repackSinceMs),
   };
 }
 

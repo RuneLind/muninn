@@ -11,9 +11,14 @@ import {
   expireStaleCandidates,
   candidateOutcomeStats,
   candidateRecentStats,
+  RECENT_WINDOW_DEFAULT_DAYS,
   ACCEPTANCE_TARGET,
   HYPE_DEDUP_SWEEP_REASON,
 } from "./summary-candidates.ts";
+import {
+  REPACKAGING_CLAMP_SHIPPED_AT,
+  REPACKAGING_SCORE_CAP,
+} from "../watchers/repackaging-shape.ts";
 
 setupTestDb();
 
@@ -637,6 +642,17 @@ describe("summary-candidates", () => {
       await seed("rejected", "@d: hype thread", 0.6, "dismissed", "manual");
       await seed("expired", "@e: stale pointer", 0.6, "dismissed", "expired");
 
+      // An x-LINK pointer, shaped and well above the cap: `clampScores` never touches
+      // this kind, so counting it would make the target-0 metric permanently non-zero.
+      await upsertCandidate({
+        ...base,
+        source: "x",
+        url: "https://x/pointer",
+        title: "@g: 🚨 JUST DROPPED, look at this",
+        score: 0.95,
+        kind: "x-link",
+      });
+
       // A row OUTSIDE the window must not appear anywhere in the block.
       const old = await seed("ancient", "@f: OLDNEWSHERE from months ago", 0.95, "new");
       await sql`UPDATE summary_candidates SET created_at = now() - interval '40 days' WHERE id = ${old.id}`;
@@ -645,26 +661,42 @@ describe("summary-candidates", () => {
       expect(recent.windowDays).toBe(7);
       expect(recent.target).toBe(ACCEPTANCE_TARGET);
       expect(Date.parse(recent.since)).toBeLessThan(Date.now());
+      expect(recent.repackaging.cap).toBe(REPACKAGING_SCORE_CAP);
 
       const x = recent.bySource.find((s) => s.source === "x")!;
       expect(x).toBeDefined();
-      expect(x.captured).toBe(5); // the 40-day-old row is excluded
-      expect(x.pending).toBe(2); // never looked at — NOT rejections
+      expect(x.captured).toBe(6); // the 40-day-old row is excluded; the x-link row is in
+      expect(x.pending).toBe(3); // never looked at — NOT rejections
       expect(x.triaged).toBe(3);
       expect(x.summarized).toBe(1);
       expect(x.dismissedManual).toBe(1);
-      expect(x.dismissedOther).toBe(1); // expired
+      expect(x.dismissedAuto).toBe(1); // expired
       expect(x.error).toBe(0);
       expect(x.acceptanceRate).toBeCloseTo(0.5, 5);
-      // Only the 0.9 shaped row: the 0.8 one is AT the cap, the 0.9 one is unshaped,
-      // and the out-of-window shaped 0.95 row is out of the window.
+      // Only the 0.9 shaped x-post row: the 0.8 one is AT the cap, the other 0.9 one is
+      // unshaped, the shaped 0.95 x-LINK row is a deliberate clamp exemption, and the
+      // out-of-window shaped 0.95 row is out of the window.
       expect(x.repackagingShapedAbove08).toBe(1);
 
-      // A wider window reaches the old row — and it is shaped above the cap.
+      // A wider window reaches the 40-day-old row — but it was captured long BEFORE the
+      // clamp shipped, and the score ratchet means its high is permanent, so it is out
+      // of the metric. The window start is what moves; the repackaging floor does not.
       const wide = await candidateRecentStats(90);
       const wideX = wide.bySource.find((s) => s.source === "x")!;
-      expect(wideX.captured).toBe(6);
-      expect(wideX.repackagingShapedAbove08).toBe(2);
+      expect(wideX.captured).toBe(7);
+      expect(wideX.repackagingShapedAbove08).toBe(1);
+      // 90 days reaches back past #454, so the clamp ship time is the binding bound.
+      expect(wide.repackaging.floored).toBe(true);
+      expect(wide.repackaging.since).toBe(REPACKAGING_CLAMP_SHIPPED_AT.toISOString());
+      expect(Date.parse(wide.since)).toBeLessThan(Date.parse(wide.repackaging.since));
+    });
+
+    test("a NaN window falls back to the default instead of throwing on Invalid Date", async () => {
+      // `Math.round(NaN)` is NaN and `new Date(NaN).toISOString()` is a RangeError, which
+      // used to 500 the whole calibration route rather than degrade one block.
+      const recent = await candidateRecentStats(NaN);
+      expect(recent.windowDays).toBe(RECENT_WINDOW_DEFAULT_DAYS);
+      expect(Number.isNaN(Date.parse(recent.since))).toBe(false);
     });
 
     test("non-x sources omit the repackaging count entirely", async () => {

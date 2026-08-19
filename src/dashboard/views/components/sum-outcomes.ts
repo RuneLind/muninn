@@ -14,7 +14,9 @@
  * terminal statuses only). It puts Untriaged in its own amber column next to Rejected —
  * "never looked at" and "a human said no" are different facts — states its acceptance
  * target from the payload (`recent.target`, never hardcoded here), and for x carries the
- * organic judging metric for the #454 repackaging clamp ("Repack >0.8", target 0).
+ * organic judging metric for the #454 repackaging clamp — whose CAP and effective floor
+ * also come from the payload (`recent.repackaging`), target 0. A null `recent` hides the
+ * whole block rather than leaving a live select over an empty body.
  *
  * Acceptance rate = summarized / (summarized + manually-dismissed) — auto-expired,
  * bulk-swept (the one-shot X hype-dedup backlog sweep) and pre-migration ("unknown")
@@ -333,10 +335,19 @@ export function sumOutcomesScript(): string {
     // --- Windowed "last N days" block ---------------------------------------
     // Its point is the two columns the all-time tables cannot show: Untriaged
     // ("never looked at" — status new/summarizing, NOT a rejection) and, for x,
-    // "Repack >0.8" — rows the #454 repackaging clamp did not reach. Target 0.
+    // the repackaging-clamp miss count — rows the #454 clamp did not reach. Target 0.
+    // The cap and the count's effective floor come from the PAYLOAD (recent.repackaging),
+    // never hardcoded here: both live in src/watchers/repackaging-shape.ts, and a browser
+    // string repeating "0.8" or the ship date goes stale without anything failing.
+    function showRecentBlock(show) {
+      var block = document.getElementById('outcomesRecentBlock');
+      if (block) block.style.display = show ? '' : 'none';
+    }
+
     function renderRecent(recent) {
       var body = document.getElementById('outcomesRecentBody');
       if (!body) return;
+      showRecentBlock(true);
       var title = document.getElementById('outcomesRecentTitle');
       if (title) title.textContent = 'Last ' + recent.windowDays + ' day' +
         (recent.windowDays === 1 ? '' : 's');
@@ -345,12 +356,18 @@ export function sumOutcomesScript(): string {
         return;
       }
       var targetPct = Math.round(recent.target * 100);
+      var rep = recent.repackaging || {};
+      var cap = typeof rep.cap === 'number' ? rep.cap : 0.8;
+      var repackLabel = 'Repack &gt;' + cap;
       var rows = recent.bySource.map(function(o) {
+        // A source with no repackaging metric renders a dim EM DASH cell. The class goes
+        // on the <td>, not on a <span>: this component styles td.dim and has no bare .dim
+        // rule, so the span rendered at FULL strength and read as a real value.
         var repack = typeof o.repackagingShapedAbove08 === 'number'
-          ? '<span class="outcomes-repack" data-band="' +
+          ? '<td><span class="outcomes-repack" data-band="' +
             (o.repackagingShapedAbove08 === 0 ? 'ok' : 'bad') + '">' +
-            o.repackagingShapedAbove08 + '</span>'
-          : '<span class="dim">—</span>';
+            o.repackagingShapedAbove08 + '</span></td>'
+          : '<td class="dim">—</td>';
         return '<tr>' +
           '<td>' + esc(o.source) + '</td>' +
           '<td>' + o.captured + '</td>' +
@@ -359,10 +376,10 @@ export function sumOutcomesScript(): string {
           '<td>' + o.triaged + '</td>' +
           '<td>' + o.summarized + '</td>' +
           '<td>' + o.dismissedManual + '</td>' +
-          '<td class="dim">' + o.dismissedOther + '</td>' +
+          '<td class="dim">' + o.dismissedAuto + '</td>' +
           '<td class="dim">' + o.error + '</td>' +
           '<td>' + outcomeAcc(o, recent.target) + '</td>' +
-          '<td>' + repack + '</td>' +
+          repack +
         '</tr>';
       }).join('');
       var head = '<thead><tr>' +
@@ -372,18 +389,24 @@ export function sumOutcomesScript(): string {
         '<th title="Captured minus untriaged">Triaged</th>' +
         '<th>Accepted</th>' +
         '<th title="Human clicked Dismiss — the only rejections counted against Accept rate">Rejected</th>' +
-        '<th title="Expired, bulk-swept or otherwise auto-dismissed — bookkeeping, not judgements; excluded from Accept rate">Other</th>' +
+        '<th title="Expired, bulk-swept or otherwise auto-dismissed — bookkeeping, not judgements; excluded from Accept rate">Auto-dismissed</th>' +
         '<th>Error</th>' +
         '<th title="Accepted ÷ (Accepted + Rejected); target ≥ ' + targetPct + '%">Accept rate</th>' +
-        '<th title="X rows whose handle-stripped title is repackaging-shaped and whose score (rounded to 2 dp) is still above 0.8 — rows the deterministic repackaging clamp (PR #454) did not reach. Target: 0.">Repack &gt;0.8</th>' +
+        '<th title="X x-post rows whose handle-stripped title is repackaging-shaped and whose score (rounded to 2 dp) is still above ' + cap + ' — rows the deterministic repackaging clamp (PR #454) did not reach. x-link pointers are exempt from the clamp and are not counted. Target: 0.">' +
+          repackLabel + '</th>' +
         '</tr></thead>';
+      var repackNote = rep.floored && rep.since
+        ? ' ' + repackLabel + ' is counted since ' +
+          esc(new Date(rep.since).toLocaleString()) +
+          ' (clamp ship) — rows captured before it keep pre-clamp scores.'
+        : '';
       body.innerHTML =
         '<div class="outcomes-table-wrap"><table class="outcomes-table">' +
         head + '<tbody>' + rows + '</tbody></table></div>' +
         '<p class="outcomes-target-note">Accept rate target ≥ ' + targetPct + '%. ' +
         'Untriaged rows are not rejections — they were never looked at, so they stay out of ' +
         'the rate entirely. Window starts ' + esc(new Date(recent.since).toLocaleString()) + '. ' +
-        'Repack &gt;0.8 target: 0.</p>';
+        repackLabel + ' target: 0.' + repackNote + '</p>';
     }
 
     function renderOutcomes(stats) {
@@ -422,22 +445,40 @@ export function sumOutcomesScript(): string {
     }
 
     // Window length for the "last N days" block. View state only — deliberately NOT in
-    // the URL (the tab already owns the hash) and not persisted; a reload is 7 days.
+    // the URL (the tab already owns the hash) and not persisted. It is SEEDED FROM THE
+    // SELECT at wire time rather than from a literal 7: browsers restore a <select>'s
+    // value across a reload while this var resets, so the fetch and the control the user
+    // reads disagreed on every refresh of a non-default window.
     var outcomesWindowDays = 7;
+    // Monotonic request token. A fast 7→30→14 leaves three fetches in flight and they
+    // can settle in any order; without this the table could end up rendering the 30-day
+    // answer under a select reading 14.
+    var outcomesSeq = 0;
 
     async function loadOutcomes() {
       var body = document.getElementById('outcomesBody');
       if (!body) return;
-      var recentBody = document.getElementById('outcomesRecentBody');
+      var seq = ++outcomesSeq;
       try {
         var stats = await getJson('/api/anthropic/candidates/stats?days=' + outcomesWindowDays);
+        if (seq !== outcomesSeq) return; // a newer window is in flight; this answer is stale
         // The server clamps ?days and reports the window it actually used, so the block
-        // always labels itself from the payload, never from what we asked for.
-        if (stats.recent) renderRecent(stats.recent);
+        // always labels itself from the payload, never from what we asked for. A null
+        // recent block (its aggregation failed server-side) HIDES the block outright — a live
+        // select over an empty body reads as "nothing captured", which is a claim.
+        // Wrapped on its own so a malformed block cannot take the all-time tables down.
+        try {
+          if (stats.recent) renderRecent(stats.recent);
+          else showRecentBlock(false);
+        } catch (err) {
+          console.error('renderRecent failed:', err);
+          showRecentBlock(false);
+        }
         renderOutcomes(stats);
       } catch (err) {
         console.error('loadOutcomes failed:', err);
-        if (recentBody) recentBody.innerHTML = '';
+        if (seq !== outcomesSeq) return;
+        showRecentBlock(false);
         body.innerHTML = '<div class="outcomes-empty error">Couldn\\'t load calibration stats. ' +
           '<button class="outcomes-copy-btn" id="outcomesRetryBtn" type="button">Retry</button></div>';
         var rb = document.getElementById('outcomesRetryBtn');
@@ -448,6 +489,7 @@ export function sumOutcomesScript(): string {
     (function wireOutcomesWindow() {
       var sel = document.getElementById('outcomesWindowSel');
       if (!sel) return;
+      outcomesWindowDays = parseInt(sel.value, 10) || 7;
       sel.addEventListener('change', function() {
         var n = parseInt(sel.value, 10);
         outcomesWindowDays = isNaN(n) ? 7 : n;

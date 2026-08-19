@@ -22,7 +22,6 @@ import { test, expect, describe } from "bun:test";
 import {
   assembleClaudeUsageOverview,
   buildRows,
-  clampDays,
   defaultClaudeUsageDeps,
   lenOf,
   CLAUDE_USAGE_DEFAULT_DAYS,
@@ -109,33 +108,6 @@ function withTz<T>(tz: string, fn: () => T): T {
     process.env.TZ = prev;
   }
 }
-
-describe("clampDays", () => {
-  test("defaults, clamps and rejects garbage", () => {
-    expect(clampDays(undefined)).toBe(CLAUDE_USAGE_DEFAULT_DAYS);
-    expect(clampDays("")).toBe(CLAUDE_USAGE_DEFAULT_DAYS);
-    expect(clampDays("   ")).toBe(CLAUDE_USAGE_DEFAULT_DAYS);
-    expect(clampDays("abc")).toBe(CLAUDE_USAGE_DEFAULT_DAYS);
-    expect(clampDays("7")).toBe(7);
-    expect(clampDays("0")).toBe(1);
-    expect(clampDays("-5")).toBe(1);
-    expect(clampDays("900")).toBe(90);
-  });
-
-  test("matches upstream `clampInt` EXACTLY — Number() + Math.round, not parseInt", () => {
-    // claude-usage's own `clampInt` (src/http.ts) is `Number(raw)` then
-    // `Math.round`. A `parseInt` clamp answers a DIFFERENT window than the
-    // service would for the same query string, which is the one thing this
-    // mirror exists to prevent.
-    expect(clampDays("1e2")).toBe(90); // parseInt reads "1"
-    expect(clampDays("7.9")).toBe(8); // parseInt truncates to 7
-    expect(clampDays("12abc")).toBe(CLAUDE_USAGE_DEFAULT_DAYS); // parseInt reads 12
-    expect(clampDays("1e9")).toBe(90);
-    expect(clampDays("0x5a")).toBe(90); // Number("0x5a") === 90, upstream's own semantics
-    expect(clampDays(" 5 ")).toBe(5);
-    expect(clampDays("Infinity")).toBe(CLAUDE_USAGE_DEFAULT_DAYS);
-  });
-});
 
 describe("lenOf", () => {
   test("an absent array is null, not 0 — absent is not empty", () => {
