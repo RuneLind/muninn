@@ -990,6 +990,10 @@ describe("syncRepo", () => {
     const repos = [wikiRepo(f)];
     const top = (await git(f.A, ["rev-parse", "--show-toplevel"])).out;
     await git(f.A, ["config", "commit.gpgsign", "true"]);
+    // `gpg.format` is pinned too: a global `gpg.format ssh` (the 1Password signer on
+    // the laptop) makes git ignore `gpg.program` entirely and sign through
+    // `gpg.ssh.program` instead — the commit then SUCCEEDS and this test reads "ok".
+    await git(f.A, ["config", "gpg.format", "openpgp"]);
     await git(f.A, ["config", "gpg.program", "/bin/false"]);
 
     const page = path.join(f.wikiA, "concepts", "Settled.md");
@@ -1040,7 +1044,7 @@ describe("syncRepo", () => {
       `#!/bin/sh\nif [ ! -f "$(git rev-parse --git-dir)/nff-fired" ]; then\n` +
         `  touch "$(git rev-parse --git-dir)/nff-fired"\n` +
         `  git -C ${JSON.stringify(f.B)} push -q\n` +
-        `  git config commit.gpgsign true\n  git config gpg.program /bin/false\n` +
+        `  git config commit.gpgsign true\n  git config gpg.format openpgp\n  git config gpg.program /bin/false\n` +
         `  printf '# Late\\n' > ${JSON.stringify(late)}\n  touch -t ${touchArg} ${JSON.stringify(late)}\n` +
         `fi\nexit 0\n`,
       { mode: 0o755 },
