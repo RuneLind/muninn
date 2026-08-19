@@ -69,8 +69,8 @@ const JOB_TTL_MS = 60 * 60 * 1000; // 1 hour
 //
 // X video is the largest, at its 10800s cap (src/x-article/video.ts): 600s
 // download + 2160s wav extract + 10800s whisper + 2x5400s keyframes (two
-// ffmpeg passes) + 1320s summarize = 25 560s = 7.1h. TikTok's 3600s cap sums
-// the same way to 9 720s = 2.7h. 12h is that worst case plus ~70% headroom —
+// ffmpeg passes) + 1320s summarize = 25 680s = 7.13h. TikTok's 3600s cap sums
+// the same way to 9 840s = 2.73h. 12h is that worst case plus ~68% headroom —
 // picking 6h here left the very failure this guard exists to prevent reachable
 // on X video, which a review caught by driving the real store at 7.1h.
 const IN_FLIGHT_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours

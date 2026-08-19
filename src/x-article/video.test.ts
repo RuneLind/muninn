@@ -208,7 +208,10 @@ test("passes the work dir as extraDirs and raises the timeout to >=600s", async 
   expect(downloadCalls[0]!.workDir).toBe(workDir);
   expect(lastOpts!.timeoutMs).toBeGreaterThanOrEqual(600_000);
   // Computed from the real frame count, not a constant.
-  expect(summarizeTimeoutArgs?.frameCount).toBe(framesResult.length);
+  expect(summarizeTimeoutArgs).toEqual({
+    frameCount: framesResult.length,
+    floorMs: 120_000,
+  });
 });
 
 test("keyframe-extraction failure degrades to a transcript-only summary, not a failed job", async () => {

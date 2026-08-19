@@ -190,9 +190,10 @@ Author: ${dl.uploader}`;
       onProgress,
       extraDirs: [workDir],
       timeoutMs: summarizeTimeoutFor(frames.length, botConfig.timeoutMs ?? config.claudeTimeoutMs),
-      // Keep the bot's own thinking budget (the other verticals cap it): reading
-      // the keyframes (up to FRAME_BUDGET_MAX of them) IS the reasoning here, and as a background job with no
-      // reader waiting on the first token there's no dead-air to buy back.
+      // Keep the bot's own thinking budget (the other verticals cap it):
+      // reading the keyframes (up to FRAME_BUDGET_MAX of them) IS the reasoning
+      // here, and as a background job with no reader waiting on the first token
+      // there's no dead-air to buy back.
       thinkingMaxTokens: null,
     });
 
