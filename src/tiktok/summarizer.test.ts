@@ -73,6 +73,8 @@ mock.module("../video/media.ts", () => ({
     if (extractShouldThrow) throw new Error("ffmpeg keyframe extraction failed");
     return framesResult.map((f) => ({ ...f, path: join(workDir, f.path) }));
   },
+  summarizeTimeoutFor: (frameCount: number, floorMs: number) =>
+    Math.max(floorMs, 600_000 + Math.max(0, frameCount - 30) * 20_000),
   extractTikTokVideoId: (url: string) => url.match(/\/video\/(\d+)/)?.[1] ?? null,
 }));
 

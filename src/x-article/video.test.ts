@@ -53,6 +53,8 @@ mock.module("../video/media.ts", () => ({
     transcribeCalls.push({ opts });
     return transcript;
   },
+  summarizeTimeoutFor: (frameCount: number, floorMs: number) =>
+    Math.max(floorMs, 600_000 + Math.max(0, frameCount - 30) * 20_000),
   extractKeyframes: async (
     _videoPath: string,
     workDir: string,

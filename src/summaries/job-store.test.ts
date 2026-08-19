@@ -178,6 +178,7 @@ test("TTL cleanup timer evicts expired jobs and keeps fresh ones", async () => {
     label: "Test",
     initialStatus: "pending",
     ttlMs: 20,
+    inFlightTtlMs: 20,
     cleanupIntervalMs: 10,
   });
 
@@ -201,6 +202,49 @@ test("TTL cleanup timer evicts expired jobs and keeps fresh ones", async () => {
   const freshId = survivorStore.createJob({ videoId: "fresh", title: "T", url: "u" });
   await new Promise((r) => setTimeout(r, 30));
   expect(survivorStore.getJob(freshId)).toBeDefined();
+});
+
+test("an IN-FLIGHT job outlives the terminal TTL; a settled one does not", async () => {
+  // The reason the two ages are separate: a long video capture's own budgets
+  // sum past an hour, and reaping it mid-run silently no-ops every later
+  // updateStatus/appendText/completeJob against a deleted row.
+  const store = createJobStore<Status, { videoId: string }>({
+    subsystem: "test",
+    label: "Test",
+    initialStatus: "pending",
+    ttlMs: 20,
+    inFlightTtlMs: 10_000,
+    cleanupIntervalMs: 10,
+  });
+
+  const running = store.createJob({ videoId: "running", title: "T", url: "u" });
+  const settled = store.createJob({ videoId: "settled", title: "T", url: "u" });
+  store.completeJob(settled, "summary", "ai/claude-code");
+  store.getJob(running)!.createdAt -= 1000; // past ttlMs, well inside inFlightTtlMs
+  store.getJob(settled)!.createdAt -= 1000;
+
+  await new Promise((r) => setTimeout(r, 60));
+
+  expect(store.getJob(running)).toBeDefined();
+  expect(store.getJob(running)!.status).toBe("pending");
+  expect(store.getJob(settled)).toBeUndefined();
+});
+
+test("an in-flight job IS reaped once it outruns the in-flight grace", async () => {
+  const store = createJobStore<Status, { videoId: string }>({
+    subsystem: "test",
+    label: "Test",
+    initialStatus: "pending",
+    ttlMs: 20,
+    inFlightTtlMs: 20,
+    cleanupIntervalMs: 10,
+  });
+
+  const stuck = store.createJob({ videoId: "stuck", title: "T", url: "u" });
+  store.getJob(stuck)!.createdAt -= 1000;
+  await new Promise((r) => setTimeout(r, 60));
+
+  expect(store.getJob(stuck)).toBeUndefined();
 });
 
 // ── AgentRun registry mirror (/agents dashboard) ─────────────────────────────
@@ -276,6 +320,7 @@ describe("createJobStore — AgentRun registry mirror", () => {
       label: "YouTube",
       initialStatus: "pending",
       ttlMs: 5,
+      inFlightTtlMs: 5,
       cleanupIntervalMs: 5,
     });
     store.createJob({ videoId: "v1", title: "T", url: "u" }); // never completed

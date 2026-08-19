@@ -79,7 +79,8 @@ export interface KeyframeOptions {
   /** Video duration in seconds — drives the frame budget and the uniform
    * sampling fallback. Pass the value from downloadVideo. */
   durationSeconds?: number;
-  /** Override the computed frame budget (still hard-capped at 30). */
+  /** Override the computed frame budget (still hard-capped at
+   *  {@link FRAME_BUDGET_MAX}). */
   maxFrames?: number;
   /** Override the per-pass ffmpeg timeout — longer videos need more than the
    * 60s default to decode for scene detection. */
@@ -137,14 +138,44 @@ export function canonicalXStatusUrl(url: string): string | null {
 
 /**
  * Frame budget for a given video length: ~15 frames for clips up to a minute,
- * ~25 up to three minutes, hard-capped at 30 for anything longer. Portrait
- * 512px JPEGs cost ~600+ tokens each plus a Read round-trip, so the cap bounds
- * both token spend and wall-clock time.
+ * ~25 up to three minutes, 30 up to ten. Past that the budget grows with the
+ * clip instead of staying flat, because a flat 30 is not a budget on long
+ * video, it is a spacing collapse: the old ceiling sampled a 60-min tutorial
+ * once per 120s and a 3h X workshop once per 360s, so every on-screen code or
+ * slide transition fell between frames while the capture still reported
+ * success. Above ten minutes we hold ~40s spacing up to a hard 60.
+ *
+ * FRAME_BUDGET_MAX is where token spend stops being free: a 512px-wide portrait frame is
+ * ~620 tokens (a 512x910 JPEG at w*h/750), so 60 of them is ~37k tokens of
+ * images before the transcript — and each one also costs a Read round-trip in
+ * a multi-turn session. Landscape frames are ~3x cheaper, so the ceiling is
+ * sized against the expensive orientation, which is the TikTok one.
  */
+/**
+ * Summarize-call timeout for a frame-reading capture: a 600s floor, plus ~20s
+ * per frame past 30. The floor came from a live 72s/25-frame run that blew
+ * through 300s on a slow bot (opus + thinking); the per-frame term exists
+ * because {@link frameBudgetFor} now hands long videos up to
+ * {@link FRAME_BUDGET_MAX} frames, and every extra frame is another image read
+ * in the same multi-turn session. Nothing blocks on these jobs.
+ */
+export function summarizeTimeoutFor(frameCount: number, floorMs: number): number {
+  const extra = Math.max(0, frameCount - 30) * 20_000;
+  return Math.max(floorMs, 600_000 + extra);
+}
+
+/** Hard ceiling on frames per capture, shared by {@link frameBudgetFor} and the
+ *  maxFrames override in {@link extractKeyframes} — one constant, because two
+ *  literals is how the budget silently stopped growing. */
+export const FRAME_BUDGET_MAX = 60;
+/** Budget used when the caller passes neither a duration nor maxFrames. */
+export const FRAME_BUDGET_DEFAULT = 30;
+
 export function frameBudgetFor(durationSeconds: number): number {
   if (!Number.isFinite(durationSeconds) || durationSeconds <= 60) return 15;
   if (durationSeconds <= 180) return 25;
-  return 30;
+  if (durationSeconds <= 600) return 30;
+  return Math.min(FRAME_BUDGET_MAX, Math.max(30, Math.ceil(durationSeconds / 40)));
 }
 
 /**
@@ -566,17 +597,20 @@ export async function extractKeyframes(
   workDir: string,
   opts: KeyframeOptions = {},
 ): Promise<Keyframe[]> {
-  // Clamp to [1, 30]: the hard cap the doc promises for maxFrames overrides,
-  // and a floor so a 0/negative override can't produce fps=0 (ffmpeg error)
-  // or an empty thinEvenly result.
+  // Clamp to [1, FRAME_BUDGET_MAX]: the hard cap the doc promises for maxFrames
+  // overrides, and a floor so a 0/negative override can't produce fps=0 (ffmpeg
+  // error) or an empty thinEvenly result. The ceiling is the SAME constant
+  // frameBudgetFor tops out at — when it was a separate literal 30 here, raising
+  // the budget function was inert: measured on a 62-min video, budget 60 in and
+  // 30 frames out at 124s spacing, exactly the collapse the raise was fixing.
   const budget = Math.min(
-    30,
+    FRAME_BUDGET_MAX,
     Math.max(
       1,
       opts.maxFrames ??
         (opts.durationSeconds !== undefined
           ? frameBudgetFor(opts.durationSeconds)
-          : 30),
+          : FRAME_BUDGET_DEFAULT),
     ),
   );
 

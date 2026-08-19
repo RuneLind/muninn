@@ -59,6 +59,15 @@ export function isTerminalStatus(value: string): boolean {
 }
 
 const JOB_TTL_MS = 60 * 60 * 1000; // 1 hour
+// An IN-FLIGHT job gets a longer grace than a settled one, because the TTL is
+// measured from createdAt and the video verticals' own worst case now exceeds
+// an hour: TikTok's budgets sum to ~2.5h (600s download + 720s audio + 3600s
+// whisper + 2x1800s keyframes + 600s one-shot) and X video's are larger still.
+// Reaped mid-capture, a job vanishes from /summaries and every later
+// updateStatus/appendText/completeJob silently no-ops against a deleted row
+// while the huginn ingest still lands — a capture that looks abandoned and
+// isn't. This is a leak bound, not a deadline: nothing should ever reach it.
+const IN_FLIGHT_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
 const CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
 export interface JobStoreOptions<S extends string> {
@@ -81,6 +90,9 @@ export interface JobStoreOptions<S extends string> {
   completeReplacesText?: boolean;
   /** Overridable only for tests — production always uses the module defaults. */
   ttlMs?: number;
+  /** Grace for jobs that have NOT reached a terminal state. Overridable only
+   *  for tests — production always uses the module defaults. */
+  inFlightTtlMs?: number;
   /** Overridable only for tests — production always uses the module defaults. */
   cleanupIntervalMs?: number;
 }
@@ -302,12 +314,20 @@ export function createJobStore<S extends string, F>(
   // --- TTL cleanup ---
 
   const ttlMs = opts.ttlMs ?? JOB_TTL_MS;
+  const inFlightTtlMs = Math.max(ttlMs, opts.inFlightTtlMs ?? IN_FLIGHT_TTL_MS);
   const cleanupTimer = setInterval(() => {
     const now = Date.now();
     for (const [id, job] of jobs) {
-      if (now - job.createdAt > ttlMs) {
+      const maxAge = isTerminalStatus(job.status) ? ttlMs : inFlightTtlMs;
+      if (now - job.createdAt > maxAge) {
         jobs.delete(id);
         subscribers.delete(id);
+        if (!isTerminalStatus(job.status)) {
+          log.warn(
+            `${opts.label} job {jobId} reaped after {ageMs}ms still in status {status} — it outran the in-flight grace`,
+            { jobId: id, ageMs: now - job.createdAt, status: job.status },
+          );
+        }
         // Safety net: a job that never reached a terminal state would otherwise
         // leak its registry run (auto-clear only fires on completeRequest).
         completeRun(id);
