@@ -1286,8 +1286,9 @@ interface GateOutcome {
    *  there is nothing scored, and emitting `0` there is indistinguishable from "ran and
    *  scored nothing", which would poison any mining of the acceptance rate. */
   scored?: number;
-  /** Entries the repackaging clamp LOWERED to `REPACKAGING_SCORE_CAP`. `ok` only, same
-   *  rule as `scored` — the log-side companion to the organic acceptance query. */
+  /** DISTINCT items (by `n` — duplicate entries collapse, like `scored`) the repackaging
+   *  clamp LOWERED to `REPACKAGING_SCORE_CAP`. `ok` only, same rule as `scored` — the
+   *  log-side companion to the organic acceptance query. */
   clamped?: number;
   /** Items clearing `passesCaptureFloor`. `ok` only, same reason.
    *

@@ -3170,6 +3170,24 @@ describe("checkX: repackaging clamp (end-to-end through the capture path)", () =
     expect(gateLine?.props.clamped).toBe(2);
   });
 
+  test("an ALL-CAPS handle never clamps a clean first line — the predicate sees the title WITHOUT its `@handle: ` prefix", async () => {
+    install({
+      [`${today}_OPENAIDEVS_9.md`]: noteDoc("OPENAIDEVS", "A measured look at how retrieval degrades under load"),
+    });
+    gateResult = JSON.stringify([{ n: 1, score: 0.92, why: "x" }]);
+    await checkX(watcher(), "jarvis");
+    expect(upsertCalls[0]!.score).toBe(0.92);
+  });
+
+  test("a leading 🚨 first line IS clamped end-to-end — the clause is live only because the handle is stripped first", async () => {
+    install({
+      [`${today}_calmguy_9.md`]: noteDoc("calmguy", "🚨 a quiet note about the sweep"),
+    });
+    gateResult = JSON.stringify([{ n: 1, score: 0.92, why: "x" }]);
+    await checkX(watcher(), "jarvis");
+    expect(upsertCalls[0]!.score).toBe(0.8);
+  });
+
   test("an empty first line is never clamped — the `|| doc.text` fallback is not the census slice", async () => {
     // With no body the title falls back to the 500-char compact digest, which carries a
     // SECOND `@handle:` prefix and the URL — so an ALL-CAPS handle would clamp itself.
