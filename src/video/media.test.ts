@@ -184,8 +184,9 @@ test("summarizeTimeoutFor holds the 600s floor up to 30 frames, then scales", ()
   expect(summarizeTimeoutFor(0, 120_000)).toBe(600_000);
   expect(summarizeTimeoutFor(30, 120_000)).toBe(600_000);
   // Past the old flat budget every extra frame is another read in the same
-  // multi-turn session: the 60-frame ceiling gets 20 min.
-  expect(summarizeTimeoutFor(60, 120_000)).toBe(1_200_000);
+  // multi-turn session, at the rate the floor itself implies (600s/25 frames):
+  // the 60-frame ceiling gets 22 min.
+  expect(summarizeTimeoutFor(60, 120_000)).toBe(1_320_000);
   // A bot configured slower than the computed budget still wins.
   expect(summarizeTimeoutFor(0, 900_000)).toBe(900_000);
 });

@@ -84,12 +84,15 @@ export function registerYouTubeRoutes(app: Hono, config: Config): void {
       });
     }
 
-    const jobId = createJob(video_id, title || url, url);
-
+    // Resolve BEFORE createJob — a job created above this early return is
+    // never settled and lingers for the whole in-flight grace (see the same
+    // ordering in tiktok-routes.ts / x-article-routes.ts).
     const summarizerBot = resolveSummarizerBot(discoverAllBots());
     if (!summarizerBot) {
       return c.json({ error: "No bots configured" }, 500);
     }
+
+    const jobId = createJob(video_id, title || url, url);
 
     // Fire and forget — background summarization
     summarizeVideo(jobId, video_id, title || url, url, config, summarizerBot).catch((err) => {

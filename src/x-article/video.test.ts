@@ -17,6 +17,7 @@ let extractShouldThrow = false;
 let downloadCalls: Array<{ url: string; workDir: string; opts?: { maxDurationSeconds?: number; timeoutMs?: number } }> = [];
 let transcribeCalls: Array<{ opts?: { whisperTimeoutMs?: number; audioTimeoutMs?: number } }> = [];
 let extractOpts: { durationSeconds?: number; frameTimeoutMs?: number } | undefined;
+let summarizeTimeoutArgs: { frameCount: number; floorMs: number } | undefined;
 
 let claudeResult =
   "CATEGORY: ai/claude-code\n\nSUMMARY:\n### Timeline\n- point about the on-screen chart";
@@ -53,8 +54,15 @@ mock.module("../video/media.ts", () => ({
     transcribeCalls.push({ opts });
     return transcript;
   },
-  summarizeTimeoutFor: (frameCount: number, floorMs: number) =>
-    Math.max(floorMs, 600_000 + Math.max(0, frameCount - 30) * 20_000),
+  // Spy, not a copy of the real formula: a duplicated formula here would let
+  // media.ts's rate change while both suites stayed green, and it is the
+  // ARGUMENTS (does the call site pass the real frame count?) that this file
+  // is in a position to prove. The sentinel is >600_000 so the floor
+  // assertions elsewhere still mean what they say.
+  summarizeTimeoutFor: (frameCount: number, floorMs: number) => {
+    summarizeTimeoutArgs = { frameCount, floorMs };
+    return 1_234_000;
+  },
   extractKeyframes: async (
     _videoPath: string,
     workDir: string,
@@ -127,6 +135,7 @@ const config = {
 const bot = { name: "jarvis", dir: "/tmp/bot", model: "sonnet" } as unknown as BotConfig;
 
 beforeEach(() => {
+  summarizeTimeoutArgs = undefined;
   transcript = "Elon lays out the AI timeline.";
   framesResult = [
     { path: "frame_001.jpg", tSeconds: 4 },
@@ -198,6 +207,8 @@ test("passes the work dir as extraDirs and raises the timeout to >=600s", async 
   expect(lastOpts!.extraDirs).toEqual([workDir]);
   expect(downloadCalls[0]!.workDir).toBe(workDir);
   expect(lastOpts!.timeoutMs).toBeGreaterThanOrEqual(600_000);
+  // Computed from the real frame count, not a constant.
+  expect(summarizeTimeoutArgs?.frameCount).toBe(framesResult.length);
 });
 
 test("keyframe-extraction failure degrades to a transcript-only summary, not a failed job", async () => {

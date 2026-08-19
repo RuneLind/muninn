@@ -230,21 +230,28 @@ test("an IN-FLIGHT job outlives the terminal TTL; a settled one does not", async
   expect(store.getJob(settled)).toBeUndefined();
 });
 
-test("an in-flight job IS reaped once it outruns the in-flight grace", async () => {
+test("an in-flight job IS reaped once it outruns the in-flight grace, and its stream is told", async () => {
+  // The two ages differ so the assertion can only pass via the in-flight
+  // branch: with ttlMs === inFlightTtlMs it would hold under a bug that
+  // ignored the grace entirely.
   const store = createJobStore<Status, { videoId: string }>({
     subsystem: "test",
     label: "Test",
     initialStatus: "pending",
     ttlMs: 20,
-    inFlightTtlMs: 20,
+    inFlightTtlMs: 40,
     cleanupIntervalMs: 10,
   });
 
   const stuck = store.createJob({ videoId: "stuck", title: "T", url: "u" });
-  store.getJob(stuck)!.createdAt -= 1000;
+  const events: Array<{ type: string }> = [];
+  store.subscribe(stuck, (e) => events.push(e));
+  store.getJob(stuck)!.createdAt -= 1000; // past BOTH ages
   await new Promise((r) => setTimeout(r, 60));
 
   expect(store.getJob(stuck)).toBeUndefined();
+  // A browser holding the SSE stream must learn the job is gone, or it spins.
+  expect(events.map((e) => e.type)).toContain("error");
 });
 
 // ── AgentRun registry mirror (/agents dashboard) ─────────────────────────────

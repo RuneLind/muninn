@@ -60,14 +60,20 @@ export function isTerminalStatus(value: string): boolean {
 
 const JOB_TTL_MS = 60 * 60 * 1000; // 1 hour
 // An IN-FLIGHT job gets a longer grace than a settled one, because the TTL is
-// measured from createdAt and the video verticals' own worst case now exceeds
-// an hour: TikTok's budgets sum to ~2.5h (600s download + 720s audio + 3600s
-// whisper + 2x1800s keyframes + 600s one-shot) and X video's are larger still.
-// Reaped mid-capture, a job vanishes from /summaries and every later
+// measured from createdAt and the video verticals' own budgets now sum past an
+// hour. Reaped mid-capture, a job vanishes from /summaries and every later
 // updateStatus/appendText/completeJob silently no-ops against a deleted row
 // while the huginn ingest still lands — a capture that looks abandoned and
-// isn't. This is a leak bound, not a deadline: nothing should ever reach it.
-const IN_FLIGHT_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
+// isn't. This is a leak bound, not a deadline: nothing should ever reach it,
+// so it is sized off the LARGEST vertical rather than the typical one.
+//
+// X video is the largest, at its 10800s cap (src/x-article/video.ts): 600s
+// download + 2160s wav extract + 10800s whisper + 2x5400s keyframes (two
+// ffmpeg passes) + 1320s summarize = 25 560s = 7.1h. TikTok's 3600s cap sums
+// the same way to 9 720s = 2.7h. 12h is that worst case plus ~70% headroom —
+// picking 6h here left the very failure this guard exists to prevent reachable
+// on X video, which a review caught by driving the real store at 7.1h.
+const IN_FLIGHT_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours
 const CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
 export interface JobStoreOptions<S extends string> {
@@ -320,14 +326,21 @@ export function createJobStore<S extends string, F>(
     for (const [id, job] of jobs) {
       const maxAge = isTerminalStatus(job.status) ? ttlMs : inFlightTtlMs;
       if (now - job.createdAt > maxAge) {
-        jobs.delete(id);
-        subscribers.delete(id);
         if (!isTerminalStatus(job.status)) {
           log.warn(
             `${opts.label} job {jobId} reaped after {ageMs}ms still in status {status} — it outran the in-flight grace`,
             { jobId: id, ageMs: now - job.createdAt, status: job.status },
           );
+          // Publish BEFORE dropping the subscribers, or a browser still holding
+          // the SSE stream never learns the job is gone and its card spins for
+          // good. The warn alone is diagnosable server-side only.
+          publish(id, {
+            type: "error",
+            message: "Capture abandoned — the job outran its time budget and was cleaned up.",
+          });
         }
+        jobs.delete(id);
+        subscribers.delete(id);
         // Safety net: a job that never reached a terminal state would otherwise
         // leak its registry run (auto-clear only fires on completeRequest).
         completeRun(id);

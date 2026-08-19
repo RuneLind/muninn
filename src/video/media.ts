@@ -136,34 +136,6 @@ export function canonicalXStatusUrl(url: string): string | null {
   return match ? match[1]! : null;
 }
 
-/**
- * Frame budget for a given video length: ~15 frames for clips up to a minute,
- * ~25 up to three minutes, 30 up to ten. Past that the budget grows with the
- * clip instead of staying flat, because a flat 30 is not a budget on long
- * video, it is a spacing collapse: the old ceiling sampled a 60-min tutorial
- * once per 120s and a 3h X workshop once per 360s, so every on-screen code or
- * slide transition fell between frames while the capture still reported
- * success. Above ten minutes we hold ~40s spacing up to a hard 60.
- *
- * FRAME_BUDGET_MAX is where token spend stops being free: a 512px-wide portrait frame is
- * ~620 tokens (a 512x910 JPEG at w*h/750), so 60 of them is ~37k tokens of
- * images before the transcript — and each one also costs a Read round-trip in
- * a multi-turn session. Landscape frames are ~3x cheaper, so the ceiling is
- * sized against the expensive orientation, which is the TikTok one.
- */
-/**
- * Summarize-call timeout for a frame-reading capture: a 600s floor, plus ~20s
- * per frame past 30. The floor came from a live 72s/25-frame run that blew
- * through 300s on a slow bot (opus + thinking); the per-frame term exists
- * because {@link frameBudgetFor} now hands long videos up to
- * {@link FRAME_BUDGET_MAX} frames, and every extra frame is another image read
- * in the same multi-turn session. Nothing blocks on these jobs.
- */
-export function summarizeTimeoutFor(frameCount: number, floorMs: number): number {
-  const extra = Math.max(0, frameCount - 30) * 20_000;
-  return Math.max(floorMs, 600_000 + extra);
-}
-
 /** Hard ceiling on frames per capture, shared by {@link frameBudgetFor} and the
  *  maxFrames override in {@link extractKeyframes} — one constant, because two
  *  literals is how the budget silently stopped growing. */
@@ -171,11 +143,49 @@ export const FRAME_BUDGET_MAX = 60;
 /** Budget used when the caller passes neither a duration nor maxFrames. */
 export const FRAME_BUDGET_DEFAULT = 30;
 
+/**
+ * Frame budget for a given video length: ~15 frames for clips up to a minute,
+ * ~25 up to three minutes, 30 up to ten. Past that the budget grows with the
+ * clip instead of staying flat, because a flat 30 is not a budget on long
+ * video, it is a spacing collapse: the old ceiling sampled a 62-min tutorial
+ * once per 124s (measured) and a 3h X workshop once per 360s, so every
+ * on-screen code or slide transition fell between frames while the capture
+ * still reported success.
+ *
+ * Above ten minutes the budget holds ~40s spacing UNTIL it hits
+ * FRAME_BUDGET_MAX at 40 min; past that the ceiling binds and spacing grows
+ * again — measured 62s/frame on a 62-min video, and 180s/frame at the X-video
+ * 3h cap. So this bounds the collapse rather than eliminating it.
+ *
+ * FRAME_BUDGET_MAX is where token spend stops being free: a 512px-wide portrait
+ * frame is ~620 tokens (measured 512x910 by ffprobe on a real capture, at
+ * w*h/750), so 60 of them is ~37k tokens of images — and that is a PER-TURN
+ * floor, not a per-capture total, since the multi-turn frame-reading session
+ * re-sends the image blocks. Each frame also costs a Read round-trip. Landscape
+ * frames are ~3x cheaper (512x288 → ~197 tokens), so the ceiling is sized
+ * against the expensive orientation, which is the TikTok one.
+ */
 export function frameBudgetFor(durationSeconds: number): number {
   if (!Number.isFinite(durationSeconds) || durationSeconds <= 60) return 15;
   if (durationSeconds <= 180) return 25;
   if (durationSeconds <= 600) return 30;
   return Math.min(FRAME_BUDGET_MAX, Math.max(30, Math.ceil(durationSeconds / 40)));
+}
+
+/**
+ * Summarize-call timeout for a frame-reading capture: a 600s floor, plus 24s
+ * per frame past 30. The floor came from a live 72s/25-frame run that blew
+ * through 300s on a slow bot (opus + thinking); the marginal rate is that same
+ * floor read per frame (600s / 25 = 24s), NOT a separate measurement — it is
+ * deliberately the rate the floor already implies, so a 60-frame session gets
+ * 1320s rather than being held to a floor sized for a 25-frame one. The
+ * per-frame term exists because {@link frameBudgetFor} now hands long videos up
+ * to {@link FRAME_BUDGET_MAX} frames, and every extra frame is another image
+ * read in the same multi-turn session. Nothing blocks on these jobs.
+ */
+export function summarizeTimeoutFor(frameCount: number, floorMs: number): number {
+  const extra = Math.max(0, frameCount - 30) * 24_000;
+  return Math.max(floorMs, 600_000 + extra);
 }
 
 /**
