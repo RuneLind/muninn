@@ -7,6 +7,12 @@ import {
   setCandidateStatus,
   expireStaleCandidates,
   candidateOutcomeStats,
+  candidateRecentStats,
+  RECENT_WINDOW_DEFAULT_DAYS,
+  RECENT_WINDOW_MIN_DAYS,
+  RECENT_WINDOW_MAX_DAYS,
+  type CandidateOutcomeStats,
+  type CandidateRecentStats,
 } from "../../db/summary-candidates.ts";
 import { pruneXLinkAmplifiers } from "../../db/x-link-amplifiers.ts";
 import {
@@ -18,7 +24,7 @@ import { kickCandidateSummarize } from "../../anthropic/summarizer.ts";
 import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { getSummarySource } from "../../summaries/sources.ts";
 import { registerSummaryVertical } from "./summary-vertical.ts";
-import { isValidUuid } from "./route-utils.ts";
+import { isValidUuid, clampIntQuery } from "./route-utils.ts";
 
 const log = getLog("dashboard");
 
@@ -38,7 +44,22 @@ const ANTHROPIC_COLLECTION = ANTHROPIC_SOURCE.collection;
  *    youtube-routes.ts (collection swapped to `anthropic-summaries`) so the
  *    unified /summaries page renders the source automatically.
  */
-export function registerAnthropicRoutes(app: Hono, config: Config): void {
+/**
+ * The two calibration aggregations, injectable so the route's own contract (the `?days=`
+ * clamp, and the degrade rule below) is testable without a Postgres container.
+ */
+export interface AnthropicStatsDeps {
+  outcomeStats?: () => Promise<CandidateOutcomeStats>;
+  recentStats?: (windowDays: number) => Promise<CandidateRecentStats>;
+}
+
+export function registerAnthropicRoutes(
+  app: Hono,
+  config: Config,
+  statsDeps: AnthropicStatsDeps = {},
+): void {
+  const outcomeStats = statsDeps.outcomeStats ?? candidateOutcomeStats;
+  const recentStats = statsDeps.recentStats ?? candidateRecentStats;
   // Shared summarizer-vertical plumbing (mirrors youtube-routes): SSE stream,
   // jobs, document/similar proxies against `anthropic-summaries`. No bare-path
   // redirect and no CORS preflight — anthropic has no standalone page and its
@@ -178,10 +199,44 @@ export function registerAnthropicRoutes(app: Hono, config: Config): void {
   // — acceptance rates per (source, kind) + per 0.1 score band, plus a suggested
   // per-kind capture floor — for the /summaries "Calibration" tab. Read-only: it
   // NEVER writes watcher config; the operator hand-copies the suggested floors.
+  //
+  // `?days=` (integer, clamped 1–90, default 7) adds a `recent` block: per-source
+  // capture/triage/acceptance over that `created_at` window, with untriaged rows
+  // counted SEPARATELY from rejections and the acceptance target stated in the payload.
+  // Extended in place rather than split into a second endpoint so the Calibration tab
+  // stays one fetch and the windowed block can never disagree with the all-time tables
+  // about the target (both read `recent.target`). The all-time fields are unchanged, so
+  // an old client that ignores `recent` is unaffected.
   app.get("/api/anthropic/candidates/stats", async (c) => {
     try {
-      const stats = await candidateOutcomeStats();
-      return c.json(stats);
+      const days = clampIntQuery(c.req.query("days"), {
+        min: RECENT_WINDOW_MIN_DAYS,
+        max: RECENT_WINDOW_MAX_DAYS,
+        fallback: RECENT_WINDOW_DEFAULT_DAYS,
+      });
+      // The windowed block is a FOURTH view that happens to ride the same fetch, not a
+      // part of the other three. Under one `Promise.all` any failure in it 500'd the
+      // whole Calibration tab — so it degrades on its own: `recent: null`, one warn, and
+      // the all-time tables still render (the client hides the block on a null).
+      // `allSettled` is what buys BOTH: the two independent queries still run
+      // CONCURRENTLY (two sequential awaits made the tab as slow as their sum), while a
+      // rejection of either is delivered as a value rather than unwinding the other.
+      const [allTime, windowed] = await Promise.allSettled([outcomeStats(), recentStats(days)]);
+      // The all-time half is the route's contract: its failure is still a 500, so it is
+      // rethrown into the outer catch rather than reported as a partial payload.
+      // The windowed warn is logged BEFORE the all-time rethrow, so a shared-cause outage
+      // (both reject) still records the `days=` context instead of only the 500's line.
+      let recent: CandidateRecentStats | null = null;
+      if (windowed.status === "fulfilled") recent = windowed.value;
+      else {
+        const err = windowed.reason;
+        log.warn("Windowed candidate stats failed (days={days}): {error}", {
+          days,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      if (allTime.status === "rejected") throw allTime.reason;
+      return c.json({ ...allTime.value, recent });
     } catch (err) {
       log.error("Loading candidate outcome stats failed: {error}", {
         error: err instanceof Error ? err.message : String(err),

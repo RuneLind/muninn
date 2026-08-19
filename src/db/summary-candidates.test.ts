@@ -10,8 +10,15 @@ import {
   setCandidateStatus,
   expireStaleCandidates,
   candidateOutcomeStats,
+  candidateRecentStats,
+  RECENT_WINDOW_DEFAULT_DAYS,
+  ACCEPTANCE_TARGET,
   HYPE_DEDUP_SWEEP_REASON,
 } from "./summary-candidates.ts";
+import {
+  REPACKAGING_CLAMP_SHIPPED_AT,
+  REPACKAGING_SCORE_CAP,
+} from "../watchers/repackaging-shape.ts";
 
 setupTestDb();
 
@@ -601,6 +608,144 @@ describe("summary-candidates", () => {
       expect(bands["0.7"]!.total).toBe(2);
       expect(bands["0.5"]!.dismissedManual).toBe(5);
       expect(bands["0.6"]).toBeUndefined();
+    });
+  });
+
+  describe("candidateRecentStats", () => {
+    test("windowed block: untriaged separate from rejected, float4-safe repackaging count", async () => {
+      const sql = getDb();
+      // Four x rows, one per bucket, plus the three repackaging cases. Titles carry the
+      // `@handle: ` prefix exactly as the X capture writes them.
+      const seed = async (
+        slug: string,
+        title: string,
+        score: number,
+        status: "new" | "summarized" | "dismissed",
+        reason?: "manual" | "expired",
+      ) => {
+        const url = "https://x/" + slug;
+        await upsertCandidate({ ...base, source: "x", url, title, score, kind: "x-post" });
+        const row = (await getCandidateBySourceUrl("x", url))!;
+        if (status === "summarized") await setCandidateStatus(row.id, "summarized", "doc-" + slug);
+        else if (status === "dismissed")
+          await setCandidateStatus(row.id, "dismissed", null, reason ?? null);
+        return row;
+      };
+
+      // Shaped (ALL-CAPS) at 0.9 — the one row that must be counted.
+      await seed("shaped-hi", "@a: EVERYONE IS SLEEPING on this", 0.9, "new");
+      // Shaped but stored at exactly the 0.8 cap: float4 reads back as 0.80000001, so a
+      // raw `score > 0.8` counts it and the rounded comparison must not.
+      await seed("shaped-cap", "@b: 🚨 clamped by #454", 0.8, "new");
+      // Unshaped at 0.9.
+      await seed("plain-hi", "@c: a careful writeup of tool use", 0.9, "summarized");
+      await seed("rejected", "@d: hype thread", 0.6, "dismissed", "manual");
+      await seed("expired", "@e: stale pointer", 0.6, "dismissed", "expired");
+
+      // An x-LINK pointer, shaped and well above the cap: `clampScores` never touches
+      // this kind, so counting it would make the target-0 metric permanently non-zero.
+      await upsertCandidate({
+        ...base,
+        source: "x",
+        url: "https://x/pointer",
+        title: "@g: 🚨 JUST DROPPED, look at this",
+        score: 0.95,
+        kind: "x-link",
+      });
+
+      // A row OUTSIDE the window must not appear anywhere in the block.
+      const old = await seed("ancient", "@f: OLDNEWSHERE from months ago", 0.95, "new");
+      await sql`UPDATE summary_candidates SET created_at = now() - interval '40 days' WHERE id = ${old.id}`;
+
+      const recent = await candidateRecentStats(7);
+      expect(recent.windowDays).toBe(7);
+      expect(recent.target).toBe(ACCEPTANCE_TARGET);
+      expect(Date.parse(recent.since)).toBeLessThan(Date.now());
+      expect(recent.repackaging.cap).toBe(REPACKAGING_SCORE_CAP);
+
+      const x = recent.bySource.find((s) => s.source === "x")!;
+      expect(x).toBeDefined();
+      expect(x.captured).toBe(6); // the 40-day-old row is excluded; the x-link row is in
+      expect(x.pending).toBe(3); // never looked at — NOT rejections
+      expect(x.triaged).toBe(3);
+      expect(x.summarized).toBe(1);
+      expect(x.dismissedManual).toBe(1);
+      expect(x.dismissedAuto).toBe(1); // expired
+      expect(x.error).toBe(0);
+      expect(x.acceptanceRate).toBeCloseTo(0.5, 5);
+      // Only the 0.9 shaped x-post row: the 0.8 one is AT the cap, the other 0.9 one is
+      // unshaped, the shaped 0.95 x-LINK row is a deliberate clamp exemption, and the
+      // out-of-window shaped 0.95 row is out of the window.
+      expect(x.repackagingShapedAbove08).toBe(1);
+
+      // A wider window reaches the 40-day-old row — but it was captured long BEFORE the
+      // clamp shipped, and the score ratchet means its high is permanent, so it is out
+      // of the metric. The window start is what moves; the repackaging floor does not.
+      const wide = await candidateRecentStats(90);
+      const wideX = wide.bySource.find((s) => s.source === "x")!;
+      expect(wideX.captured).toBe(7);
+      expect(wideX.repackagingShapedAbove08).toBe(1);
+      // 90 days reaches back past #454, so the clamp ship time is the binding bound.
+      expect(wide.repackaging.floored).toBe(true);
+      expect(wide.repackaging.since).toBe(REPACKAGING_CLAMP_SHIPPED_AT.toISOString());
+      expect(Date.parse(wide.since)).toBeLessThan(Date.parse(wide.repackaging.since));
+    });
+
+    // The floored:TRUE half is pinned by the 90-day assertions above. This is its other
+    // half, and it needs the injected clamp time to exist at all: with
+    // REPACKAGING_CLAMP_SHIPPED_AT sitting in the recent past, EVERY organic window
+    // reaches back past it, so `floored:false` — and with it the rule that `since` is
+    // then the window start — is unreachable from a real clock.
+    test("an unfloored window reports the window start and counts a row inside it", async () => {
+      await upsertCandidate({
+        ...base,
+        source: "x",
+        url: "https://x/shaped-unfloored",
+        title: "@a: EVERYONE IS SLEEPING on this",
+        score: 0.9,
+        kind: "x-post",
+      });
+      const now = new Date();
+      // Window start (7 days back) lands AFTER the clamp ship time, so the WINDOW is the
+      // binding bound — the arrangement the organic clock cannot produce yet.
+      const recent = await candidateRecentStats(7, {
+        now,
+        clampShippedAt: new Date(now.getTime() - 30 * 86_400_000),
+      });
+      expect(recent.repackaging.floored).toBe(false);
+      expect(recent.since).toBe(new Date(now.getTime() - 7 * 86_400_000).toISOString());
+      expect(recent.repackaging.since).toBe(recent.since);
+      // And the metric still counts: an unfloored window is not a disabled one.
+      const x = recent.bySource.find((s) => s.source === "x")!;
+      expect(x.repackagingShapedAbove08).toBe(1);
+    });
+
+    test("an Infinity window falls back to the default instead of an Invalid Date", async () => {
+      // `Infinity >= 1` satisfies the range half of the guard on its own, so only the
+      // `Number.isFinite` half stops `new Date(-Infinity).toISOString()` from throwing
+      // RangeError — i.e. dropping it leaves the NaN test above green.
+      const recent = await candidateRecentStats(Infinity);
+      expect(recent.windowDays).toBe(RECENT_WINDOW_DEFAULT_DAYS);
+      expect(Number.isNaN(Date.parse(recent.since))).toBe(false);
+    });
+
+    test("a NaN window falls back to the default instead of throwing on Invalid Date", async () => {
+      // `Math.round(NaN)` is NaN and `new Date(NaN).toISOString()` is a RangeError, which
+      // used to 500 the whole calibration route rather than degrade one block.
+      const recent = await candidateRecentStats(NaN);
+      expect(recent.windowDays).toBe(RECENT_WINDOW_DEFAULT_DAYS);
+      expect(Number.isNaN(Date.parse(recent.since))).toBe(false);
+    });
+
+    test("non-x sources omit the repackaging count entirely", async () => {
+      await upsertCandidate({ ...base, url: "https://o/anth1", score: 0.9, kind: "doc" });
+      const recent = await candidateRecentStats(7);
+      const anth = recent.bySource.find((s) => s.source === "anthropic")!;
+      expect(anth.captured).toBe(1);
+      expect(anth.pending).toBe(1);
+      expect(anth.acceptanceRate).toBeNull();
+      // Absent, not 0 — the metric is X-vertical policy and would be a lie elsewhere.
+      expect(anth.repackagingShapedAbove08).toBeUndefined();
     });
   });
 });

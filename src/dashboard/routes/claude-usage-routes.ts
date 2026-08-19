@@ -14,7 +14,7 @@
  * the bare route and renders whatever window the default names. It is kept
  * because widening the window by hand is how the ledger's own numbers get
  * cross-checked against `:8787` directly, and it is safe to keep because
- * `clampDays` mirrors upstream `clampInt` exactly (same `Number()`/`Math.round`
+ * the shared `clampIntQuery` mirrors upstream `clampInt` exactly (`Number()`/`Math.round`
  * semantics, same 1–90 clamp), so the two services cannot answer one query
  * string with two different windows.
  *
@@ -27,11 +27,14 @@ import type { Hono } from "hono";
 import type { Config } from "../../config.ts";
 import {
   assembleClaudeUsageOverview,
-  clampDays,
   defaultClaudeUsageDeps,
   CLAUDE_USAGE_DEFAULT_URL,
+  CLAUDE_USAGE_DEFAULT_DAYS,
+  CLAUDE_USAGE_MIN_DAYS,
+  CLAUDE_USAGE_MAX_DAYS,
   type ClaudeUsageDeps,
 } from "../claude-usage-overview.ts";
+import { clampIntQuery } from "./route-utils.ts";
 
 export function registerClaudeUsageRoutes(
   app: Hono,
@@ -42,7 +45,11 @@ export function registerClaudeUsageRoutes(
   ),
 ): void {
   app.get("/api/claude-usage/overview", async (c) => {
-    const days = clampDays(c.req.query("days"));
+    const days = clampIntQuery(c.req.query("days"), {
+      min: CLAUDE_USAGE_MIN_DAYS,
+      max: CLAUDE_USAGE_MAX_DAYS,
+      fallback: CLAUDE_USAGE_DEFAULT_DAYS,
+    });
     return c.json(await assembleClaudeUsageOverview(deps, days));
   });
 }

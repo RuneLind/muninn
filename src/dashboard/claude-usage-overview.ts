@@ -49,8 +49,8 @@ export const CLAUDE_USAGE_DEFAULT_URL = "http://127.0.0.1:8787";
 export const CLAUDE_USAGE_DEFAULT_DAYS = 14;
 /** claude-usage clamps `?days` to this range; muninn clamps identically so a
  *  bad query is answered here rather than silently re-interpreted upstream. */
-const CLAUDE_USAGE_MIN_DAYS = 1;
-const CLAUDE_USAGE_MAX_DAYS = 90;
+export const CLAUDE_USAGE_MIN_DAYS = 1;
+export const CLAUDE_USAGE_MAX_DAYS = 90;
 // The fetch budget and the byte cap are NOT defined here: they live in
 // `src/utils/bounded-fetch.ts` together with the bounded read, because the
 // SECOND claude-usage proxy (`src/plans/ledger.ts`) reads under the same two
@@ -205,20 +205,6 @@ export function defaultClaudeUsageDeps(
 }
 
 // ---- Pure helpers (exported for unit tests) --------------------------------
-
-/**
- * Clamp a `?days` query to claude-usage's own accepted range, by claude-usage's
- * own rules. This is a MIRROR of upstream `clampInt` (claude-usage
- * `src/http.ts`): `Number(raw)`, then `Math.round`, then clamp — deliberately not
- * `parseInt`, which reads `1e2` as 1, `12abc` as 12 and truncates `7.9` to 7, i.e.
- * answers a different window than the service would for the same query string.
- */
-export function clampDays(raw: string | undefined | null): number {
-  if (raw == null || raw.trim() === "") return CLAUDE_USAGE_DEFAULT_DAYS;
-  const n = Number(raw);
-  if (!Number.isFinite(n)) return CLAUDE_USAGE_DEFAULT_DAYS;
-  return Math.min(CLAUDE_USAGE_MAX_DAYS, Math.max(CLAUDE_USAGE_MIN_DAYS, Math.round(n)));
-}
 
 /** A count that may be absent. Renders "—" rather than "0" for missing data —
  *  "0 unreviewed" and "we don't know" are different operational statements. */
