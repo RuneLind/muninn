@@ -286,8 +286,11 @@ async function globAbsolute(dir: string, pattern: string): Promise<string[]> {
 // ---------------------------------------------------------------------------
 
 export interface DownloadOptions {
-  /** Pre-download duration cap in seconds (yt-dlp match-filter). Default 600. */
-  maxDurationSeconds?: number;
+  /** Pre-download duration cap in seconds (yt-dlp match-filter). Required, with
+   * no default: every vertical's cap is a per-host judgement (TikTok 60 min, X
+   * 3 h) and a shared default is only ever wrong for the next caller — the
+   * TikTok vertical silently inherited the old 600s one for a year. */
+  maxDurationSeconds: number;
   /** Override the yt-dlp process timeout — hour-plus videos (X workshops) are
    * gigabyte-scale downloads that outrun the 120s short-clip default. */
   timeoutMs?: number;
@@ -301,9 +304,9 @@ export interface DownloadOptions {
 export async function downloadVideo(
   url: string,
   workDir: string,
-  opts: DownloadOptions = {},
+  opts: DownloadOptions,
 ): Promise<DownloadResult> {
-  const maxDuration = opts.maxDurationSeconds ?? 600;
+  const maxDuration = opts.maxDurationSeconds;
   const outputTemplate = join(workDir, "video.%(ext)s");
   const args = [
     "yt-dlp",
@@ -390,7 +393,7 @@ export async function downloadVideo(
  */
 export interface TranscribeOptions {
   /** Override the whisper-cli timeout — longer videos (X allows hours vs
-   * TikTok's 10 min) need more than the 120s default. */
+   * TikTok's 60 min) need more than the 120s default. */
   whisperTimeoutMs?: number;
   /** Override the ffmpeg audio-extraction timeout — decoding an hour-plus
    * video's audio track outruns the 60s short-clip default. */

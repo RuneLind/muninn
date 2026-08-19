@@ -15,8 +15,16 @@ const SHORT_URL = "https://vm.tiktok.com/ZMabcdef/";
 let transcript = "We ship a new CLI feature today.";
 let framesResult: Array<{ path: string; tSeconds: number }> = [];
 let extractShouldThrow = false;
-let downloadCalls: Array<{ url: string; workDir: string }> = [];
+let downloadCalls: Array<{
+  url: string;
+  workDir: string;
+  opts?: { maxDurationSeconds?: number; timeoutMs?: number };
+}> = [];
 let extractCalls = 0;
+let extractOpts: { durationSeconds?: number; frameTimeoutMs?: number } | undefined;
+let transcribeCalls: Array<{ opts?: { whisperTimeoutMs?: number; audioTimeoutMs?: number } }> = [];
+// yt-dlp-reported duration, mutable so a long-form upload can be simulated.
+let videoDuration = 45;
 
 // Claude response (CATEGORY/SUMMARY envelope) + captured call.
 let claudeResult =
@@ -32,20 +40,36 @@ let ingestOk = true;
 let ingestPayload: Record<string, unknown> | undefined;
 
 mock.module("../video/media.ts", () => ({
-  downloadVideo: async (url: string, workDir: string) => {
-    downloadCalls.push({ url, workDir });
+  downloadVideo: async (
+    url: string,
+    workDir: string,
+    opts?: { maxDurationSeconds?: number; timeoutMs?: number },
+  ) => {
+    downloadCalls.push({ url, workDir, opts });
     return {
       videoPath: join(workDir, "video.mp4"),
       id: "7523456789",
       title: "yt-dlp title",
-      duration: 45,
+      duration: videoDuration,
       uploader: "coolcoder",
       canonicalUrl: CANONICAL_URL,
     };
   },
-  transcribeVideo: async () => transcript,
-  extractKeyframes: async (_videoPath: string, workDir: string) => {
+  transcribeVideo: async (
+    _videoPath: string,
+    _c: unknown,
+    opts?: { whisperTimeoutMs?: number; audioTimeoutMs?: number },
+  ) => {
+    transcribeCalls.push({ opts });
+    return transcript;
+  },
+  extractKeyframes: async (
+    _videoPath: string,
+    workDir: string,
+    opts?: { durationSeconds?: number; frameTimeoutMs?: number },
+  ) => {
     extractCalls++;
+    extractOpts = opts;
     if (extractShouldThrow) throw new Error("ffmpeg keyframe extraction failed");
     return framesResult.map((f) => ({ ...f, path: join(workDir, f.path) }));
   },
@@ -126,6 +150,9 @@ beforeEach(() => {
   extractShouldThrow = false;
   downloadCalls = [];
   extractCalls = 0;
+  extractOpts = undefined;
+  transcribeCalls = [];
+  videoDuration = 45;
   claudeResult =
     "CATEGORY: ai/claude-code\n\nSUMMARY:\n### Heading\n- point about the on-screen diagram";
   executorCalls = 0;
@@ -239,6 +266,43 @@ test("empty transcript with frames present summarizes from the frames", async ()
   expect(job.status).toBe("complete");
   expect(lastPrompt).toContain("No speech detected");
   expect(lastPrompt).toContain("frame_001.jpg");
+});
+
+test("passes the 60-min duration cap and duration-scaled timeouts to the media pipeline", async () => {
+  // 10:19 — the length that used to fail the whole capture on the 10-min default.
+  videoDuration = 619;
+  const jobId = createJob("7523456789", "My TikTok", CANONICAL_URL);
+  await summarizeTikTok(jobId, CANONICAL_URL, "My TikTok", config, bot);
+
+  expect(downloadCalls[0]!.opts?.maxDurationSeconds).toBe(3600);
+  expect(downloadCalls[0]!.opts?.timeoutMs).toBe(600_000);
+  // Raising the cap alone just moves the failure to whisper/ffmpeg.
+  expect(transcribeCalls[0]!.opts?.whisperTimeoutMs).toBe(619_000);
+  expect(transcribeCalls[0]!.opts?.audioTimeoutMs).toBe(123_800);
+  expect(extractOpts?.durationSeconds).toBe(619);
+  expect(extractOpts?.frameTimeoutMs).toBe(309_500);
+});
+
+test("short clips keep the short-clip timeout floors", async () => {
+  // The default 45s mock: every Math.max floor is the active branch here, which
+  // is the ordinary TikTok and the one the scaling must not shrink.
+  const jobId = createJob("7523456789", "My TikTok", CANONICAL_URL);
+  await summarizeTikTok(jobId, CANONICAL_URL, "My TikTok", config, bot);
+
+  expect(transcribeCalls[0]!.opts?.whisperTimeoutMs).toBe(120_000);
+  expect(transcribeCalls[0]!.opts?.audioTimeoutMs).toBe(60_000);
+  expect(extractOpts?.frameTimeoutMs).toBe(60_000);
+});
+
+test("a clip at the cap itself scales every budget off its duration", async () => {
+  videoDuration = 3600;
+  const jobId = createJob("7523456789", "My TikTok", CANONICAL_URL);
+  await summarizeTikTok(jobId, CANONICAL_URL, "My TikTok", config, bot);
+
+  expect(downloadCalls[0]!.opts?.maxDurationSeconds).toBe(3600);
+  expect(transcribeCalls[0]!.opts?.whisperTimeoutMs).toBe(3_600_000);
+  expect(transcribeCalls[0]!.opts?.audioTimeoutMs).toBe(720_000);
+  expect(extractOpts?.frameTimeoutMs).toBe(1_800_000);
 });
 
 test("passes the work dir as extraDirs and raises the timeout to >=600s", async () => {

@@ -19,7 +19,8 @@ video?" override, for when the feed advanced past the one you wanted.
 
 The server downloads the video, transcribes the audio (whisper), extracts key
 frames, summarizes it with Claude, categorizes it, and indexes it in the
-knowledge base for later search.
+knowledge base for later search. Max video length 60 min (TikTok's own platform
+maximum); requires `yt-dlp` on the server's PATH.
 
 ## Install
 

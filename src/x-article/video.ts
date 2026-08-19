@@ -30,7 +30,7 @@ const log = getLog("x-article", "video");
 
 // X carries genuinely long recordings (2h+ workshop uploads, talks, interviews)
 // and those are exactly the high-value captures, so the cap is 3 hours rather
-// than TikTok's 10 min. Every subprocess timeout scales with duration below
+// than TikTok's 60 min. Every subprocess timeout scales with duration below
 // instead of riding the media module's short-clip defaults; the first real
 // capture (a 2:21h Anthropic workshop) tripped the original 20-min cap.
 const MAX_DURATION_SECONDS = 10800;
