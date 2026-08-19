@@ -257,8 +257,15 @@ const {
   resolveCaptureMaxItems,
   decideAdmissions,
 } = await import("./x.ts");
-const { applyCaptureLimit, withCaptureLimit, DEFAULT_CAPTURE_MAX_ITEMS, MAX_CAPTURE_MAX_ITEMS } =
-  await import("./gate-scores.ts");
+const {
+  applyCaptureLimit,
+  clampScores,
+  REPACKAGING_SCORE_CAP,
+  withCaptureLimit,
+  DEFAULT_CAPTURE_MAX_ITEMS,
+  MAX_CAPTURE_MAX_ITEMS,
+} = await import("./gate-scores.ts");
+const { isRepackagingShaped } = await import("./repackaging-shape.ts");
 
 // The REAL trq212 X Article doc, copied verbatim from huginn's x-feed corpus
 // (`2026-07-24_trq212_2080710971228918066.md`, combined_score 0.7493). Its body is only
@@ -2855,5 +2862,235 @@ describe("fetchFromCollection amplification wiring", () => {
     expect(lastGatePrompt).toContain("@amp1:");
     expect(lastGatePrompt).toContain("@amp2:");
     expect(lastGatePrompt).toContain("@owner:");
+  });
+});
+
+// ── Repackaging shape + the deterministic post-gate clamp ───────────
+
+describe("isRepackagingShaped", () => {
+  test("the three clauses, on real shelf titles", () => {
+    // ALL-CAPS run ≥8 (@vicky_grok, gate-scored 0.92)
+    expect(isRepackagingShaped("EXO JUST SHOWED HOW SELF-IMPROVING AI AGENTS ACTUALLY WORK.")).toBe(true);
+    // 🚨 opener, after leading whitespace
+    expect(isRepackagingShaped("  🚨 Anthropic ships a new agent SDK")).toBe(true);
+    // "just <verb>" (@Dipanshu_AI, gate-scored 0.88)
+    expect(isRepackagingShaped("Anthropic just released a 4-hour course on building agents")).toBe(true);
+    expect(isRepackagingShaped("They Just Dropped the weights")).toBe(true);
+  });
+
+  test("ordinary long-form is left alone", () => {
+    expect(isRepackagingShaped("A measured look at how retrieval degrades under load")).toBe(false);
+    // 7 consecutive capitals — one short of the bar the census measured.
+    expect(isRepackagingShaped("MISTRAL ships a smaller model")).toBe(false);
+    // Acronym-heavy but no run reaches 8.
+    expect(isRepackagingShaped("MCP + RAG with LLM: what actually broke")).toBe(false);
+    // "just" without one of the four verbs.
+    expect(isRepackagingShaped("I just spent a week benchmarking agent loops")).toBe(false);
+    expect(isRepackagingShaped("")).toBe(false);
+    // 🚨 mid-line is not the opener shape.
+    expect(isRepackagingShaped("my alerting setup 🚨 finally works")).toBe(false);
+  });
+});
+
+describe("clampScores", () => {
+  const all = () => true;
+
+  test("lowers only what is over the cap, and reports how many", () => {
+    const scores = [
+      { n: 1, score: 0.92, why: "a" },
+      { n: 2, score: 0.8, why: "b" },
+      { n: 3, score: 0.5, why: "c" },
+    ];
+    const out = clampScores(scores, all);
+    expect(out.scores.map((s) => s.score)).toEqual([0.8, 0.8, 0.5]);
+    expect(out.clamped).toBe(1);
+    expect(REPACKAGING_SCORE_CAP).toBe(0.8);
+  });
+
+  test("never raises, and never touches an entry the predicate rejects", () => {
+    const scores = [{ n: 1, score: 0.3, why: "" }, { n: 2, score: 0.95, why: "" }];
+    expect(clampScores(scores, (n) => n === 1)).toEqual({ scores, clamped: 0 });
+  });
+
+  test("returns a NEW array and leaves the input untouched", () => {
+    const scores = [{ n: 1, score: 0.95, why: "keep me" }];
+    const out = clampScores(scores, all);
+    expect(out.scores).not.toBe(scores);
+    expect(scores[0]!.score).toBe(0.95);
+    expect(out.scores[0]).toEqual({ n: 1, score: 0.8, why: "keep me" });
+  });
+});
+
+describe("checkX: repackaging clamp (end-to-end through the capture path)", () => {
+  const realFetch = globalThis.fetch;
+  const today = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Oslo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+
+  const noteDoc = (handle: string, firstLine: string) =>
+    [
+      `# @${handle} — note`,
+      "",
+      firstLine,
+      "",
+      "Then several more paragraphs of body text that the gate would read in full.",
+      "",
+      "---",
+      "",
+      "- **Engagement:** 900 likes · 120,000 views",
+      "- **Type:** note",
+      `- **Link:** https://x.com/${handle}/status/1`,
+    ].join("\n");
+
+  const pointerDoc = (handle: string, firstLine: string) =>
+    [
+      `# @${handle} — tweet`,
+      "",
+      firstLine,
+      "",
+      "---",
+      "",
+      "- **Engagement:** 900 likes · 120,000 views",
+      `- **Link:** https://x.com/${handle}/status/2`,
+      "- **Links:** https://example.com/deep-dive",
+    ].join("\n");
+
+  /** docId → body, served by the mocked huginn; set per test. */
+  let served: Record<string, string> = {};
+
+  const install = (docs: Record<string, string>) => {
+    served = docs;
+    globalThis.fetch = (async (input: unknown) => {
+      const url = String(input);
+      if (url.includes("/api/collection/")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            documents: Object.keys(served).map((id, i) => ({
+              id,
+              url: `https://x.com/h/status/${i}`,
+              combined_score: String(0.75 - i * 0.01),
+            })),
+          }),
+        } as unknown as Response;
+      }
+      const id = decodeURIComponent(url.split("/").pop() ?? "");
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ text: served[id] ?? "", metadata: { combined_score: "0.7" } }),
+      } as unknown as Response;
+    }) as typeof fetch;
+  };
+
+  beforeEach(() => {
+    gateResult = "[]";
+    gateThrow = false;
+    gateCalls.length = 0;
+    gateThrowFirstN = 0;
+    lastGatePrompt = "";
+    upsertCalls.length = 0;
+    candidateRows.clear();
+    upsertThrow = false;
+    logLines.length = 0;
+    for (const k of Object.keys(authorScoreByHandle)) delete authorScoreByHandle[k];
+    authorThresholds = null;
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  const watcher = (captureMaxItems?: number): Watcher => ({
+    id: "xw-clamp",
+    userId: "u1",
+    botName: "jarvis",
+    name: "X Highlights",
+    type: "x",
+    config: {
+      collection: "x-feed",
+      windowDays: 2,
+      maxDocs: 80,
+      topN: 10,
+      quietMode: true,
+      dedupByTweetId: true,
+      captureCandidates: true,
+      candidateMinScore: 0.6,
+      ...(captureMaxItems === undefined ? {} : { captureMaxItems }),
+    },
+    intervalMs: 7_200_000,
+    enabled: true,
+    lastRunAt: null,
+    lastSuccessAt: null,
+    lastNotifiedIds: [],
+    forceNextRun: false,
+    createdAt: 0,
+    updatedAt: 0,
+  });
+
+  test("a shaped long-form post scored 0.92 persists at the 0.8 cap, and the gate line says so", async () => {
+    install({
+      [`${today}_hypeguy_1.md`]: noteDoc(
+        "hypeguy",
+        "EXO JUST SHOWED HOW SELF-IMPROVING AI AGENTS ACTUALLY WORK.",
+      ),
+    });
+    gateResult = JSON.stringify([{ n: 1, score: 0.92, why: "recap of someone else's release" }]);
+
+    await checkX(watcher(), "jarvis");
+
+    expect(upsertCalls.length).toBe(1);
+    expect(upsertCalls[0]!.kind).toBe("x-post");
+    expect(upsertCalls[0]!.score).toBe(0.8);
+    // `why` rides through untouched — the clamp only moves the number.
+    expect(upsertCalls[0]!.why).toBe("recap of someone else's release");
+    const gateLine = logLines.find((l) => l.message.startsWith("x-capture-gate {outcome}"));
+    expect(gateLine?.message).toContain("clamped={clamped}");
+    expect(gateLine?.props.clamped).toBe(1);
+  });
+
+  test("with K=1 the clamped 0.92 hype note LOSES the slot to a plain 0.85 post", async () => {
+    // The mechanism behind the acceptance line: the clamp runs before the limit, so the
+    // shaped note drops to 0.8 and no longer out-ranks an ordinary post at 0.85.
+    install({
+      [`${today}_hypeguy_1.md`]: noteDoc(
+        "hypeguy",
+        "EXO JUST SHOWED HOW SELF-IMPROVING AI AGENTS ACTUALLY WORK.",
+      ),
+      [`${today}_analyst_2.md`]: noteDoc(
+        "analyst",
+        "A measured look at how retrieval degrades under load",
+      ),
+    });
+    gateResult = JSON.stringify([
+      { n: 1, score: 0.92, why: "hype recap" },
+      { n: 2, score: 0.85, why: "original benchmarks" },
+    ]);
+
+    await checkX(watcher(1), "jarvis");
+
+    expect(upsertCalls.length).toBe(1);
+    expect(upsertCalls[0]!.author).toBe("analyst");
+    expect(upsertCalls[0]!.score).toBe(0.85);
+  });
+
+  test("a shaped POINTER tweet is NEVER clamped — pointers are scored on their destination", async () => {
+    authorThresholds = { top1: 0.9, top5: 0.5 }; // make the pointer author top-tier
+    authorScoreByHandle["scout"] = 0.8;
+    install({
+      [`${today}_scout_1.md`]: pointerDoc("scout", "🚨 ANTHROPIC JUST RELEASED the new agent SDK"),
+    });
+    gateResult = JSON.stringify([{ n: 1, score: 0.92, why: "primary-source release notes" }]);
+
+    await checkX(watcher(), "jarvis");
+
+    expect(upsertCalls.length).toBe(1);
+    expect(upsertCalls[0]!.kind).toBe("x-link");
+    expect(upsertCalls[0]!.score).toBe(0.92);
+    const gateLine = logLines.find((l) => l.message.startsWith("x-capture-gate {outcome}"));
+    expect(gateLine?.props.clamped).toBe(0);
   });
 });

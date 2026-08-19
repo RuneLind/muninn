@@ -4,12 +4,14 @@ import {
   parseGateScores,
   indexScoresByN,
   applyCaptureLimit,
+  clampScores,
   withCaptureLimit,
   DEFAULT_CAPTURE_MAX_ITEMS,
   MAX_CAPTURE_MAX_ITEMS,
   type GateScore,
 } from "./gate-scores.ts";
 import { readIntKnob } from "./config-knobs.ts";
+import { isRepackagingShaped } from "./repackaging-shape.ts";
 import { upsertCandidate, upsertDestinationCandidate } from "../db/summary-candidates.ts";
 import { recordAmplifierVote, getAmplifierGroup } from "../db/x-link-amplifiers.ts";
 import { normalizeHandle, getAuthorScore, getAuthorTierThresholds, type AuthorTierThresholds } from "../summaries/author-scores.ts";
@@ -991,17 +993,26 @@ export function captureAttemptTimeoutMs(deadline: number, now: number): number |
  * "can RAISE relevance" block LAST — after this ladder — and that shared block
  * (`src/profile/inject.ts`, used by other watchers) must not be edited for an x-only fix.
  *
- * No code-side clamp is applied to the returned scores: compliance is best-effort (an
- * identical item scored 0.85 then 0.9 on a straight re-run). A deterministic post-gate clamp
- * is the plan's stated fallback if the first week of `x-capture-gate ok` lines shows poor
- * cap compliance.
+ * **The repackaging cap is now ALSO enforced in code** (2026-08-19). Prompt compliance was
+ * measured over the 21 days after #399 and is poor: 93 of 95 repackaging-shaped `x-post`
+ * rows sit above 0.8. `runCaptureGate` therefore runs `clampScores` on the parsed scores —
+ * long-form `x-post` items only, shape from {@link isRepackagingShaped}, ceiling
+ * `REPACKAGING_SCORE_CAP` (0.8), never raising. Three things about it:
+ *   - It judges the candidate's FIRST LINE ({@link candidateFirstLine}), not `gateExcerpt`:
+ *     the census predicate that vouches for the shape was measured on titles, and a
+ *     1200-char excerpt would over-match on any acronym run buried in the body.
+ *   - It runs BEFORE the floor and the limit, so a clamped 0.8 note also loses the K-slot
+ *     race to a 0.9 primary source — the mechanism behind "at least one row names the
+ *     artifact rather than a tweet about it".
+ *   - `GREATEST(stored, incoming)` in the upsert means it shapes NEW writes only; the rows
+ *     already on the shelf keep their pre-clamp highs.
  *
- * The cap's **pointer carve-out is load-bearing, not politeness**: pointer items are scored
- * on their DESTINATION and stay uncapped. A blanket ≤0.8 cap would suppress exactly the
- * artifacts the later destination-URL keying promotes — destination rows inherit the
- * representative pointer's gate score, so capping every pointer would pin every promoted
- * artifact below the 0.85 the inbox's `LIMIT 200` currently cuts at, while uncapped hype
- * threads sat above them.
+ * The cap's **pointer carve-out is load-bearing, not politeness**, in the prompt and in the
+ * clamp alike: pointer items are scored on their DESTINATION and stay uncapped. A blanket
+ * ≤0.8 cap would suppress exactly the artifacts the destination-URL keying promotes —
+ * destination rows inherit the representative pointer's gate score, so capping every
+ * pointer would pin every promoted artifact below the 0.85 the inbox's `LIMIT 200`
+ * currently cuts at, while uncapped hype threads sat above them.
  */
 export const DEFAULT_X_CAPTURE_PROMPT = `You are curating a personal learning shelf for a senior AI engineer who builds agents, tools, and retrieval systems. Below is a numbered list of X posts. For EACH one, decide whether a written summary is worth saving to read later.
 
@@ -1149,6 +1160,15 @@ function truncateTitle(s: string, max = 140): string {
   return `${clean.slice(0, cut > 0 ? cut : max)}…`;
 }
 
+/**
+ * The text a candidate's title is built from, WITHOUT the `@handle: ` prefix — and the
+ * exact text the repackaging clamp judges. One helper so the two cannot drift: a clamp
+ * reading a different slice than the census predicate measured would be uncalibrated.
+ */
+function candidateFirstLine(doc: Pick<TweetDoc, "firstLine" | "text">): string {
+  return doc.firstLine.trim() || doc.text;
+}
+
 /** The two X capture classes. `x-post` = long-form tweet; `x-link` = pointer tweet. */
 type CaptureKind = "x-post" | "x-link";
 
@@ -1272,6 +1292,9 @@ interface GateOutcome {
    *  there is nothing scored, and emitting `0` there is indistinguishable from "ran and
    *  scored nothing", which would poison any mining of the acceptance rate. */
   scored?: number;
+  /** Entries the repackaging clamp LOWERED to `REPACKAGING_SCORE_CAP`. `ok` only, same
+   *  rule as `scored` — the log-side companion to the organic acceptance query. */
+  clamped?: number;
   /** Items clearing `passesCaptureFloor`. `ok` only, same reason.
    *
    *  ⚠️ **NOT comparable across the capture-limit ship date.** The limit is also a PROMPT
@@ -1313,7 +1336,7 @@ function logGateOutcome(o: GateOutcome, botName: string | undefined): void {
   // `scored`/`aboveFloor` are omitted entirely on non-ok outcomes (see GateOutcome).
   const counts =
     o.outcome === "ok"
-      ? " scored={scored} aboveFloor={aboveFloor} maxItems={maxItems} admitted={admitted}"
+      ? " scored={scored} clamped={clamped} aboveFloor={aboveFloor} maxItems={maxItems} admitted={admitted}"
       : "";
   const msg =
     `x-capture-gate {outcome}: n={n}${counts} durationMs={durationMs} attempt={attempt}/{maxAttempts} attemptTimeoutMs={attemptTimeoutMs} promptChars={promptChars}`;
@@ -1424,7 +1447,12 @@ async function runCaptureGate(
       // latency (the number the chunking decision correlates against n), not model +
       // parse + floor loop.
       const durationMs = Date.now() - startedAt;
-      const scores = parseGateScores(result);
+      // Deterministic repackaging clamp, applied BEFORE indexing/floors/limit so it shapes
+      // both the persisted score and the K-slot race. See {@link isRepackagingShaped}.
+      const { scores, clamped } = clampScores(parseGateScores(result), (n) => {
+        const item = eligible[n - 1];
+        return item?.kind === "x-post" && isRepackagingShaped(candidateFirstLine(item.doc));
+      });
       const byN = indexScoresByN(scores, eligible.length);
       const decision = decideAdmissions(eligible, byN, config, maxItems);
       logGateOutcome(
@@ -1436,6 +1464,7 @@ async function runCaptureGate(
           ...base,
           outcome: "ok",
           scored: byN.size,
+          clamped,
           aboveFloor: decision.passedFloor.size,
           maxItems,
           admitted: decision.admitted.size,
@@ -1708,8 +1737,7 @@ async function captureXCandidates(
     // decoupled — a pointer the gate omitted is still evidence that its author pointed
     // here), so the score lookup can no longer `continue` before the vote is recorded.
     const score = byN.get(i + 1) ?? null;
-    const firstLine = doc.firstLine.trim() || doc.text;
-    const title = truncateTitle(`${doc.handle}: ${firstLine}`);
+    const title = truncateTitle(`${doc.handle}: ${candidateFirstLine(doc)}`);
     // The destination group key is computed for EVERY kind here, but only a POINTER ever
     // uses it as its candidate `url`. Long-form computes it purely to record its
     // observability-only vote (see below).

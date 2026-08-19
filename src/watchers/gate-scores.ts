@@ -112,3 +112,37 @@ export function withCaptureLimit(prompt: string, maxItems: number): string {
 
 BUDGET — a hard cap on this response: return AT MOST ${maxItems} items, the ${maxItems} most worth reading, ranked best-first. If more than ${maxItems} clear the bar above, keep only the best ${maxItems} and omit the rest entirely. Returning FEWER than ${maxItems} is correct and expected when the batch is weak — never pad the list to reach ${maxItems}.`;
 }
+
+/**
+ * The ceiling the X capture-gate prompt asks for on secondhand repackaging, enforced
+ * deterministically by {@link clampScores}.
+ */
+export const REPACKAGING_SCORE_CAP = 0.8;
+
+/**
+ * Lower every entry the predicate selects to `cap`. Never raises, never mutates the input.
+ *
+ * Lives here beside {@link applyCaptureLimit} because it is generic over `{n, score}` for
+ * the same reason: the anthropic capture path has the same shape and should import this
+ * rather than grow a second copy. `shouldClamp` takes the entry's `n` so the caller owns
+ * which items qualify — the X caller clamps only repackaging-shaped long-form `x-post`
+ * items, never `x-link` pointers (scored on their destination; capping them would suppress
+ * exactly the artifacts the campaign promotes).
+ *
+ * **Composition order binds: clamp FIRST, before floor and limit.** A clamped 0.8 note now
+ * loses the K-slot race in {@link applyCaptureLimit} to a 0.9 primary source — that
+ * displacement is the point, not a side effect.
+ */
+export function clampScores<T extends { n: number; score: number }>(
+  scores: T[],
+  shouldClamp: (n: number) => boolean,
+  cap: number = REPACKAGING_SCORE_CAP,
+): { scores: T[]; clamped: number } {
+  let clamped = 0;
+  const out = scores.map((s) => {
+    if (s.score <= cap || !shouldClamp(s.n)) return s;
+    clamped++;
+    return { ...s, score: cap };
+  });
+  return { scores: out, clamped };
+}
