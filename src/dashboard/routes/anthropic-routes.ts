@@ -224,7 +224,8 @@ export function registerAnthropicRoutes(
       const [allTime, windowed] = await Promise.allSettled([outcomeStats(), recentStats(days)]);
       // The all-time half is the route's contract: its failure is still a 500, so it is
       // rethrown into the outer catch rather than reported as a partial payload.
-      if (allTime.status === "rejected") throw allTime.reason;
+      // The windowed warn is logged BEFORE the all-time rethrow, so a shared-cause outage
+      // (both reject) still records the `days=` context instead of only the 500's line.
       let recent: CandidateRecentStats | null = null;
       if (windowed.status === "fulfilled") recent = windowed.value;
       else {
@@ -234,6 +235,7 @@ export function registerAnthropicRoutes(
           error: err instanceof Error ? err.message : String(err),
         });
       }
+      if (allTime.status === "rejected") throw allTime.reason;
       return c.json({ ...allTime.value, recent });
     } catch (err) {
       log.error("Loading candidate outcome stats failed: {error}", {

@@ -134,6 +134,10 @@ describe("aggregateRecentRows", () => {
     const out = aggregateRecentRows(
       [
         row({ title: "@OPENAIDEVS: @OPENAIDEVS: https://x.com/i/1 SOMETHINGLOUD", score: 0.95 }),
+        // The long-form digest carries the `[ARTICLE/NOTE] ` marker BEFORE its own
+        // handle (`compactTweetText`), so the fallback shape is `@h: [ARTICLE/NOTE] @h: …`
+        // on exactly the x-post population this metric counts — exempt as well.
+        row({ title: "@alice: [ARTICLE/NOTE] @alice: Anthropic just released a 4-hour course", score: 0.9 }),
         row({ title: "@a: SOMETHINGLOUD in a real first line", score: 0.95 }),
       ],
       NO_FLOOR,

@@ -721,15 +721,18 @@ export interface CandidateRecentStats {
 
 /** The `@handle: ` prefix the X capture writes onto candidate titles. */
 const X_HANDLE_PREFIX = /^@\S+:\s*/;
+/** The long-form marker `compactTweetText` puts in front of the digest's handle. */
+const LONGFORM_MARKER_PREFIX = /^\[ARTICLE\/NOTE\]\s*/;
 
 /** float4 → the 2-dp value the UI shows, so a stored 0.8 compares as 0.8 (see above). */
 const round2 = (x: number): number => Math.round(x * 100) / 100;
 
 /**
- * Is this row one the #454 clamp SHOULD have held at the cap and did not? Mirrors the
- * `clampScores` predicate in `x.ts` clause for clause — see the field doc on
- * {@link RecentSourceStats.repackagingShapedAbove08}. Any divergence here turns the
- * target-0 metric into a number that can never reach 0 for reasons that are not misses.
+ * Is this row one the #454 clamp SHOULD have held at the cap and did not? APPROXIMATES
+ * the `clampScores` predicate in `x.ts` from what the stored row carries — see the field
+ * doc on {@link RecentSourceStats.repackagingShapedAbove08} for the one known divergence.
+ * A divergence in the false-ALARM direction turns the target-0 metric into a number that
+ * can never reach 0 for reasons that are not misses, so the exemptions below err that way.
  */
 function isUnclampedRepackaging(r: RecentRawRow, repackSinceMs: number): boolean {
   if (r.kind !== "x-post") return false;
@@ -737,8 +740,10 @@ function isUnclampedRepackaging(r: RecentRawRow, repackSinceMs: number): boolean
   if (round2(r.score) <= REPACKAGING_SCORE_CAP) return false;
   const stripped = r.title.replace(X_HANDLE_PREFIX, "");
   // A second `@handle:` surviving the strip is the empty-first-line fallback, which
-  // x.ts refuses to judge. No title, no verdict — here as there.
-  if (X_HANDLE_PREFIX.test(stripped)) return false;
+  // x.ts refuses to judge. No title, no verdict — here as there. The fallback is the
+  // compact digest, which on long-form docs (this metric's whole population) carries the
+  // `[ARTICLE/NOTE] ` marker BEFORE its own handle, so that marker is skipped first.
+  if (X_HANDLE_PREFIX.test(stripped.replace(LONGFORM_MARKER_PREFIX, ""))) return false;
   return isRepackagingShaped(stripped);
 }
 
