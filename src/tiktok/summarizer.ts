@@ -26,6 +26,17 @@ import {
 
 const log = getLog("tiktok", "summarizer");
 
+// TikTok's own platform maximum is 60 min, and long-form uploads (tutorials,
+// walkthroughs) are exactly the captures worth keeping — the media module's
+// 10-min short-clip default rejected a 10:19 Claude Code tutorial. Every
+// subprocess timeout below scales with duration for the same reason X video
+// does (src/x-article/video.ts): raising the cap alone just moves the failure
+// from yt-dlp to whisper.
+const MAX_DURATION_SECONDS = 3600;
+
+// A 60-min download outruns the 120s short-clip default.
+const DOWNLOAD_TIMEOUT_MS = 600_000;
+
 // The summarizer reads each frame image before it writes the CATEGORY/SUMMARY —
 // a multi-turn agentic session. The "no commentary" line is load-bearing: without
 // it the model narrates ("let me look at frame 3…") between Read calls and that
@@ -88,11 +99,19 @@ export async function summarizeTikTok(
     // 1. Download the video (yt-dlp). Gives the canonical /video/<id> URL,
     //    uploader, duration and title.
     updateStatus(jobId, "downloading");
-    const dl = await downloadVideo(url, workDir);
+    const dl = await downloadVideo(url, workDir, {
+      maxDurationSeconds: MAX_DURATION_SECONDS,
+      timeoutMs: DOWNLOAD_TIMEOUT_MS,
+    });
 
     // 2. Transcribe (empty transcript is fine — music/visual-only TikToks).
+    //    Timeouts scale with the clip: whisper gets ~1x realtime (base.en runs
+    //    ~10x, so this is generous headroom), the wav extract ~0.2x realtime.
     updateStatus(jobId, "transcribing");
-    const transcript = await transcribeVideo(dl.videoPath, config);
+    const transcript = await transcribeVideo(dl.videoPath, config, {
+      whisperTimeoutMs: Math.max(120_000, Math.round(dl.duration * 1000)),
+      audioTimeoutMs: Math.max(60_000, Math.round(dl.duration * 200)),
+    });
 
     // 3. Extract keyframes (unless disabled). A failure here degrades to a
     //    transcript-only summary rather than killing a job whose speech is good.
@@ -102,6 +121,7 @@ export async function summarizeTikTok(
       try {
         frames = await extractKeyframes(dl.videoPath, workDir, {
           durationSeconds: dl.duration,
+          frameTimeoutMs: Math.max(60_000, Math.round(dl.duration * 500)),
         });
       } catch (err) {
         log.warn("Keyframe extraction failed for job {jobId} — falling back to transcript-only: {error}", {
