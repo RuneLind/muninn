@@ -260,12 +260,11 @@ const {
 const {
   applyCaptureLimit,
   clampScores,
-  REPACKAGING_SCORE_CAP,
   withCaptureLimit,
   DEFAULT_CAPTURE_MAX_ITEMS,
   MAX_CAPTURE_MAX_ITEMS,
 } = await import("./gate-scores.ts");
-const { isRepackagingShaped } = await import("./repackaging-shape.ts");
+const { isRepackagingShaped, REPACKAGING_SCORE_CAP } = await import("./repackaging-shape.ts");
 
 // The REAL trq212 X Article doc, copied verbatim from huginn's x-feed corpus
 // (`2026-07-24_trq212_2080710971228918066.md`, combined_score 0.7493). Its body is only
@@ -2901,7 +2900,7 @@ describe("clampScores", () => {
       { n: 2, score: 0.8, why: "b" },
       { n: 3, score: 0.5, why: "c" },
     ];
-    const out = clampScores(scores, all);
+    const out = clampScores(scores, all, REPACKAGING_SCORE_CAP);
     expect(out.scores.map((s) => s.score)).toEqual([0.8, 0.8, 0.5]);
     expect(out.clamped).toBe(1);
     expect(REPACKAGING_SCORE_CAP).toBe(0.8);
@@ -2909,12 +2908,25 @@ describe("clampScores", () => {
 
   test("never raises, and never touches an entry the predicate rejects", () => {
     const scores = [{ n: 1, score: 0.3, why: "" }, { n: 2, score: 0.95, why: "" }];
-    expect(clampScores(scores, (n) => n === 1)).toEqual({ scores, clamped: 0 });
+    expect(clampScores(scores, (n) => n === 1, REPACKAGING_SCORE_CAP)).toEqual({ scores, clamped: 0 });
+  });
+
+  test("counts DISTINCT n, so an off-contract duplicate can't push clamped past scored", () => {
+    // `parseGateScores` keeps every entry the model emitted; `indexScoresByN` collapses
+    // duplicates by `n`. Counting raw entries here would let `clamped > scored` appear on
+    // the outcome line for one shaped item the model happened to score twice.
+    const scores = [
+      { n: 1, score: 0.92, why: "a" },
+      { n: 1, score: 0.95, why: "a again" },
+    ];
+    const out = clampScores(scores, all, REPACKAGING_SCORE_CAP);
+    expect(out.scores.map((s) => s.score)).toEqual([0.8, 0.8]);
+    expect(out.clamped).toBe(1);
   });
 
   test("returns a NEW array and leaves the input untouched", () => {
     const scores = [{ n: 1, score: 0.95, why: "keep me" }];
-    const out = clampScores(scores, all);
+    const out = clampScores(scores, all, REPACKAGING_SCORE_CAP);
     expect(out.scores).not.toBe(scores);
     expect(scores[0]!.score).toBe(0.95);
     expect(out.scores[0]).toEqual({ n: 1, score: 0.8, why: "keep me" });
@@ -3089,6 +3101,94 @@ describe("checkX: repackaging clamp (end-to-end through the capture path)", () =
 
     expect(upsertCalls.length).toBe(1);
     expect(upsertCalls[0]!.kind).toBe("x-link");
+    expect(upsertCalls[0]!.score).toBe(0.92);
+    const gateLine = logLines.find((l) => l.message.startsWith("x-capture-gate {outcome}"));
+    expect(gateLine?.props.clamped).toBe(0);
+  });
+
+  test("the shape is judged on the FIRST LINE only — a clean opener keeps its score", async () => {
+    // The mutation this pins: judging `gateExcerpt` (or any body slice) instead. The body
+    // below carries the exact `just released` phrase the predicate matches; the first line
+    // — the only text the census measured — does not.
+    install({
+      [`${today}_analyst_1.md`]: [
+        "# @analyst — note",
+        "",
+        "A measured look at how retrieval degrades under load",
+        "",
+        "Context for the benchmark: they just released the weights last week, and I re-ran",
+        "the whole sweep against them.",
+        "",
+        "---",
+        "",
+        "- **Engagement:** 900 likes · 120,000 views",
+        "- **Type:** note",
+        "- **Link:** https://x.com/analyst/status/1",
+      ].join("\n"),
+    });
+    gateResult = JSON.stringify([{ n: 1, score: 0.92, why: "original benchmarks" }]);
+
+    await checkX(watcher(), "jarvis");
+
+    expect(upsertCalls.length).toBe(1);
+    expect(upsertCalls[0]!.score).toBe(0.92);
+    const gateLine = logLines.find((l) => l.message.startsWith("x-capture-gate {outcome}"));
+    expect(gateLine?.props.clamped).toBe(0);
+  });
+
+  test("shape past the title's 140-char truncation is NOT clamped", async () => {
+    // The clamp judges the same slice the census measured: the TRUNCATED title. A first
+    // line whose only shaped phrase sits past the cut was never in that population.
+    const filler = "a measured walkthrough of the retrieval sweep and what it cost us ".repeat(3);
+    install({
+      [`${today}_analyst_1.md`]: noteDoc("analyst", `${filler}and they just released the weights`),
+    });
+    gateResult = JSON.stringify([{ n: 1, score: 0.92, why: "original benchmarks" }]);
+
+    await checkX(watcher(), "jarvis");
+
+    expect(upsertCalls.length).toBe(1);
+    expect(upsertCalls[0]!.title.length).toBeLessThanOrEqual(141); // 140 + the ellipsis
+    expect(upsertCalls[0]!.score).toBe(0.92);
+  });
+
+  test("the title path's whitespace collapse is what the predicate sees (double space)", async () => {
+    install({
+      [`${today}_hypeguy_1.md`]: noteDoc("hypeguy", "Anthropic just  released a 4-hour course"),
+      [`${today}_hypeguy2_2.md`]: noteDoc("hypeguy2", "Anthropic just released a 4-hour course"),
+    });
+    gateResult = JSON.stringify([
+      { n: 1, score: 0.92, why: "recap" },
+      { n: 2, score: 0.92, why: "recap" },
+    ]);
+
+    await checkX(watcher(2), "jarvis");
+
+    expect(upsertCalls.length).toBe(2);
+    expect(upsertCalls.map((c) => c.score)).toEqual([0.8, 0.8]);
+    const gateLine = logLines.find((l) => l.message.startsWith("x-capture-gate {outcome}"));
+    expect(gateLine?.props.clamped).toBe(2);
+  });
+
+  test("an empty first line is never clamped — the `|| doc.text` fallback is not the census slice", async () => {
+    // With no body the title falls back to the 500-char compact digest, which carries a
+    // SECOND `@handle:` prefix and the URL — so an ALL-CAPS handle would clamp itself.
+    install({
+      [`${today}_OPENAIDEVS_1.md`]: [
+        "# @OPENAIDEVS — note",
+        "",
+        "---",
+        "",
+        "- **Engagement:** 900 likes · 120,000 views",
+        "- **Type:** note",
+        "- **Link:** https://x.com/OPENAIDEVS/status/1",
+      ].join("\n"),
+    });
+    gateResult = JSON.stringify([{ n: 1, score: 0.92, why: "release notes" }]);
+
+    await checkX(watcher(), "jarvis");
+
+    expect(upsertCalls.length).toBe(1);
     expect(upsertCalls[0]!.score).toBe(0.92);
     const gateLine = logLines.find((l) => l.message.startsWith("x-capture-gate {outcome}"));
     expect(gateLine?.props.clamped).toBe(0);
