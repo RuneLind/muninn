@@ -514,6 +514,10 @@ export function claimRefFromHeadingText(text: string): ClaimRef | null {
 /** Params the ↻ echoes back to `GET /api/wiki/factcheck/claim`. */
 export interface ClaimRetryUrlOptions {
   page: string;
+  /** Exact wiki-relative path of the checked page — sent BESIDE the name so the
+   *  route resolves the page that was checked, not whichever registered first on
+   *  its stem. Absent ⇒ byte-identical to the pre-relPath URL. */
+  relPath?: string;
   wiki?: string;
   mode?: string;
   sel?: string;
@@ -537,6 +541,7 @@ const RETRY_SEL_MAX = 1500;
 export function buildClaimRetryUrl(opts: ClaimRetryUrlOptions): string {
   const mode = opts.mode === "sel" && opts.sel ? "sel" : "article";
   let url = "/api/wiki/factcheck/claim?page=" + encodeURIComponent(opts.page);
+  if (opts.relPath) url += "&relPath=" + encodeURIComponent(opts.relPath);
   url += "&mode=" + mode;
   if (mode === "sel" && opts.sel) {
     const sel =
@@ -555,6 +560,11 @@ export function buildClaimRetryUrl(opts: ClaimRetryUrlOptions): string {
  *  structural subset of `AskTurn` this module needs (it stays DOM-free). */
 export interface ClaimRetryTurnContext {
   page?: string;
+  /** The checked page's exact wiki-relative path, stamped on the turn when the
+   *  check started. It has to ride the TURN and not `currentArticle`: a persisted
+   *  turn outlives the open article, and a retry re-verifies the page that was
+   *  CHECKED, not whatever is on screen. */
+  pageRelPath?: string;
   fcMode?: string;
   fcSel?: string;
   fcCtx?: string;
@@ -579,6 +589,7 @@ export function claimRetryUrlFor(
 ): string {
   return buildClaimRetryUrl({
     page: turn.page || "",
+    ...(turn.pageRelPath ? { relPath: turn.pageRelPath } : {}),
     ...(wiki ? { wiki } : {}),
     ...(turn.fcMode ? { mode: turn.fcMode } : {}),
     ...(turn.fcSel ? { sel: turn.fcSel } : {}),

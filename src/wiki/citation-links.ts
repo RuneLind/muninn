@@ -69,7 +69,7 @@ export function matchCitationToPage(
 }
 
 /**
- * Attach `wikiName` + `pageName` to each citation whose collection belongs to a
+ * Attach `wikiName` + `pageName` (+ `pageRelPath`) to each citation whose collection belongs to a
  * registered wiki AND whose doc resolves to a page in that wiki. Citations for
  * off-wiki collections (or unmatched docs) pass through unchanged. Loads each
  * referenced wiki's index at most once.
@@ -96,7 +96,14 @@ export async function enrichCitationsWithPages(
       indexCache.set(wikiName, index);
     }
     const pageName = index ? matchCitationToPage(c, index.resolve) : null;
-    result.push(pageName ? { ...c, wikiName, pageName } : c);
+    // The matched page's exact path rides along with its name: the name alone is
+    // a stem, and every consumer of it (the cite marker, the Sources row) resolves
+    // that stem first-registration-wins. Read off the SAME resolve the match was
+    // made with, so the two can never name different pages.
+    const relPath = pageName && index ? index.resolve(pageName)?.relPath : undefined;
+    result.push(
+      pageName ? { ...c, wikiName, pageName, ...(relPath ? { pageRelPath: relPath } : {}) } : c,
+    );
   }
   return result;
 }

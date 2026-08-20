@@ -29,10 +29,11 @@
  * now run for every click — this module's (in `wireChatOptions` below), the
  * shell's follow-up / write-action delegate (the `document.addEventListener(
  * "click", …)` chain in `wiki-browser.ts`, just above the `initChatOptions`
- * call) and the shell's navigation delegate on `document.body` (`[data-wiki-page]`
- * / `[data-page]` links, registered first) — so **their selector sets must stay
- * disjoint**; a `data-page` chip rendered INSIDE this dialog would navigate the
- * article pane out from under it. While every branch lived in one `if / else if` chain that
+ * call) and the shell's navigation delegate on `document.body` (the
+ * `NAV_LINK_SELECTOR` set — `[data-wiki-page]` / `[data-page]` / `[data-relpath]`,
+ * registered first) — so **their selector sets must stay
+ * disjoint**; a `data-page` OR `data-relpath` chip rendered INSIDE this dialog
+ * would navigate the article pane out from under it. While every branch lived in one `if / else if` chain that
  * exclusivity was structural; now it is a convention, and a selector added to
  * both files fires both handlers on one click with nothing to say so.
  *

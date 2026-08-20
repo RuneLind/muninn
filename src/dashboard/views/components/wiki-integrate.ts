@@ -1173,6 +1173,8 @@ export function integratePreviewHtml(
 export interface IntegrateApplyBody {
   wiki?: string;
   page: string;
+  /** Exact wiki-relative path — see {@link buildIntegrateApplyBody}. */
+  relPath?: string;
   baseHash: string;
   edits: ProposedEdit[];
   appendCallout?: boolean;
@@ -1200,6 +1202,11 @@ export interface IntegrateApplyBody {
 export function buildIntegrateApplyBody(input: {
   wiki?: string;
   page: string;
+  /** The page's exact wiki-relative path — sent beside the name so the apply
+   *  edits the page that was CHECKED, not whichever shares its stem and
+   *  registered first. Omitted when the turn carries none (a pre-relPath turn),
+   *  where the route falls back to the name exactly as before. */
+  relPath?: string;
   baseHash: string;
   edits: ProposedEdit[];
   selected: boolean[];
@@ -1212,6 +1219,7 @@ export function buildIntegrateApplyBody(input: {
   return {
     ...(input.wiki ? { wiki: input.wiki } : {}),
     page: input.page,
+    ...(input.relPath ? { relPath: input.relPath } : {}),
     baseHash: input.baseHash,
     edits,
     ...(withCallout ? { appendCallout: true, answer: input.answer } : {}),

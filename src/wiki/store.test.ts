@@ -1177,6 +1177,109 @@ describe("buildWikiIndex", () => {
     }
   });
 
+  test("a defaultType of `explainer` is refused: it would serve markdown as raw HTML", async () => {
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
+      reset: true,
+    });
+    try {
+      await mkdir(path.join(root, "misc"), { recursive: true });
+      await Bun.write(
+        path.join(root, ".wiki-reader.json"),
+        JSON.stringify({ defaultType: "explainer" }),
+      );
+      await Bun.write(path.join(root, "misc/loose.md"), "# Loose\n\nBody.");
+      const index = await buildWikiIndex(root);
+      // `explainer` is the ONE type that changes how a page is SERVED — the reader
+      // puts it in a sandboxed iframe off `/api/wiki/html`, which streams the file
+      // raw. Typing every untyped `.md` that way would ship markdown as text/html.
+      expect(index.readerConfig?.defaultType).toBe("");
+      expect(index.resolve("loose")!.type).toBe("note");
+      expect(
+        records.some(
+          (r) => r.level === "warning" && r.rawMessage.includes("defaultType"),
+        ),
+      ).toBe(true);
+    } finally {
+      await reset();
+    }
+  });
+
+  test("a defaultType of `note` is a no-op and says so", async () => {
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
+      reset: true,
+    });
+    try {
+      await mkdir(path.join(root, "misc"), { recursive: true });
+      await Bun.write(path.join(root, ".wiki-reader.json"), JSON.stringify({ defaultType: "note" }));
+      await Bun.write(path.join(root, "misc/loose.md"), "# Loose\n\nBody.");
+      const index = await buildWikiIndex(root);
+      expect(index.resolve("loose")!.type).toBe("note");
+      expect(
+        records.some((r) => r.level === "warning" && r.rawMessage.includes("defaultType")),
+      ).toBe(true);
+    } finally {
+      await reset();
+    }
+  });
+
+  test("an authored `type:` equal to the wiki's own defaultType is honoured", async () => {
+    await mkdir(path.join(root, "projects"), { recursive: true });
+    await mkdir(path.join(root, "misc"), { recursive: true });
+    await Bun.write(
+      path.join(root, ".wiki-reader.json"),
+      JSON.stringify({ defaultType: "memory-index", typeMap: { projects: "subsystem" } }),
+    );
+    // Outside any typeMap folder the value is indistinguishable from the fallback…
+    await Bun.write(path.join(root, "misc/a.md"), "---\ntype: memory-index\n---\n\nBody.");
+    // …but INSIDE one, the typeMap would win over an unaccepted authored value, so
+    // the page the author explicitly typed would render as `subsystem`.
+    await Bun.write(path.join(root, "projects/b.md"), "---\ntype: memory-index\n---\n\nBody.");
+    const index = await buildWikiIndex(root);
+    expect(index.resolve("a")!.type).toBe("memory-index");
+    expect(index.resolve("b")!.type).toBe("memory-index");
+  });
+
+  test("displayTitle is widened until it is UNIQUE", async () => {
+    // mimir's real shape: two `huginn/` folders under different top-level dirs.
+    // The depth-1 rule gives both `huginn/wiki-collection-pattern`, i.e. 30 rows
+    // reading `MEMORY` traded for 2 rows reading the same thing.
+    await mkdir(path.join(root, "archive/huginn"), { recursive: true });
+    await mkdir(path.join(root, "projects/huginn"), { recursive: true });
+    await Bun.write(path.join(root, "archive/huginn/wiki-collection-pattern.md"), "# x\n\nB.");
+    await Bun.write(path.join(root, "projects/huginn/wiki-collection-pattern.md"), "# x\n\nB.");
+    const index = await buildWikiIndex(root);
+    const byRel = (rel: string) => index.resolveRelPath(rel)!;
+    expect(byRel("archive/huginn/wiki-collection-pattern.md").displayTitle).toBe(
+      "archive/huginn/wiki-collection-pattern",
+    );
+    expect(byRel("projects/huginn/wiki-collection-pattern.md").displayTitle).toBe(
+      "projects/huginn/wiki-collection-pattern",
+    );
+  });
+
+  test("widening a LABELED prefix grows forward from the label", async () => {
+    // Two same-stem pages under ONE labeled project dir: the label alone can't
+    // separate them, so the intermediate dirs are appended to it.
+    await mkdir(path.join(root, "-Users-me-muninn/memory"), { recursive: true });
+    await mkdir(path.join(root, "-Users-me-muninn/notes"), { recursive: true });
+    await Bun.write(
+      path.join(root, ".wiki-reader.json"),
+      JSON.stringify({ folderLabels: { "-Users-me-muninn": "muninn" } }),
+    );
+    await Bun.write(path.join(root, "-Users-me-muninn/memory/MEMORY.md"), "# M\n\nB.");
+    await Bun.write(path.join(root, "-Users-me-muninn/notes/MEMORY.md"), "# M\n\nB.");
+    const index = await buildWikiIndex(root);
+    const byRel = (rel: string) => index.resolveRelPath(rel)!;
+    expect(byRel("-Users-me-muninn/memory/MEMORY.md").displayTitle).toBe("muninn/memory/MEMORY");
+    expect(byRel("-Users-me-muninn/notes/MEMORY.md").displayTitle).toBe("muninn/notes/MEMORY");
+  });
+
   test("native .mdx pilot: discovered, frontmatter tags/type, outgoing links AND backlinks", async () => {
     await mkdir(path.join(root, "blogs/src"), { recursive: true });
     // A native .mdx page with frontmatter (title/tags), a component (Callout), a
@@ -1374,7 +1477,7 @@ describe("deriveFolderLabels", () => {
     });
   });
 
-  test("a configured entry wins and is excluded from the shared prefix", () => {
+  test("a configured entry wins; the shared prefix is still computed over it", () => {
     const labels = deriveFolderLabels(projectDirs, {
       "-Users-rune-source-private-muninn": "muninn",
     });
@@ -1386,6 +1489,60 @@ describe("deriveFolderLabels", () => {
     // mimir / jarvis / melosys-kode-wiki — measured, all of them.
     expect(deriveFolderLabels(["plans", "projects", "archive", "blogs"])).toEqual({});
     expect(deriveFolderLabels(["concepts", "entities", "sources"])).toEqual({});
+  });
+
+  test("the prefix is computed over ALL folders, so ONE unlabeled newcomer still gets a label", () => {
+    // The memory wiki's real shape: 31 project dirs, every one of them labeled by
+    // hand, and then a new project is opened. Computed over the UNLABELED subset
+    // alone that is n=1 and the `< 2` guard returned nothing, so the newcomer's
+    // rows read `memory/MEMORY` — the one folder the label exists to name.
+    const labels = deriveFolderLabels(
+      [
+        "-Users-rune-source-private-muninn",
+        "-Users-rune-source-private-mimir",
+        "-Users-rune-source-private-brandnew",
+      ],
+      {
+        "-Users-rune-source-private-muninn": "muninn",
+        "-Users-rune-source-private-mimir": "mimir",
+      },
+    );
+    expect(labels["-Users-rune-source-private-brandnew"]).toBe("brandnew");
+    expect(labels["-Users-rune-source-private-muninn"]).toBe("muninn");
+  });
+
+  test("a folder that IS the shared prefix keeps its own name instead of an empty label", () => {
+    // `p-q-` splits to a trailing EMPTY token, so the in-loop "leave one token"
+    // bound leaves a remainder of "" — a blank facet option and a `"/MEMORY"`
+    // display title. That folder keeps its own name; its siblings still strip.
+    const labels = deriveFolderLabels(["p-q-", "p-q-r", "p-q-s"]);
+    expect(labels["p-q-"]).toBeUndefined();
+    expect(labels["p-q-r"]).toBe("r");
+    expect(labels["p-q-s"]).toBe("s");
+  });
+
+  test("two folders mapping to one label are warned about", async () => {
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
+      reset: true,
+    });
+    try {
+      const labels = deriveFolderLabels(["-a-x-muninn", "-b-y-muninn"], {
+        "-a-x-muninn": "muninn",
+        "-b-y-muninn": "muninn",
+      });
+      // Both keep the label they were given — the collision is reported, not
+      // silently "fixed" by dropping one folder's configured name.
+      expect(labels["-a-x-muninn"]).toBe("muninn");
+      expect(labels["-b-y-muninn"]).toBe("muninn");
+      expect(
+        records.some((r) => r.level === "warning" && r.rawMessage.includes("same label")),
+      ).toBe(true);
+    } finally {
+      await reset();
+    }
   });
 
   test("the three guards: one folder, one shared token, a folder that IS the prefix", () => {

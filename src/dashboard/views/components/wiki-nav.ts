@@ -62,6 +62,27 @@ function normalizeRel(rel: string): string {
 }
 
 /**
+ * Find the listing for an exact relPath, compared the way {@link isActivePage}
+ * compares — normalized on BOTH sides.
+ *
+ * It exists because `loadPageByRelPath`'s explainer branch was a raw `===` over
+ * `allPages`. Case reaches that comparison from two directions the index does not
+ * control: an Atlas node key (lowercased before it becomes a graph id) and a
+ * `?relPath=` typed or copied by hand. A near-miss there does not degrade to "page
+ * not found" — it falls THROUGH to `/api/wiki/page`, which happily returns an
+ * explainer's raw `.html` as if it were markdown, and the reader paints escaped
+ * HTML source into the article pane.
+ */
+export function findPageByRelPath<T extends { relPath: string }>(
+  pages: readonly T[],
+  relPath: string,
+): T | undefined {
+  const want = normalizeRel((relPath || "").trim());
+  if (!want) return undefined;
+  return pages.find((p) => normalizeRel(p.relPath) === want);
+}
+
+/**
  * Is this list row / card the page currently open?
  *
  * relPath decides whenever BOTH sides have one — that is the only test that

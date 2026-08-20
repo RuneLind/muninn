@@ -1,5 +1,10 @@
 import { test, expect, describe } from "bun:test";
-import { isActivePage, navTargetFrom, NAV_LINK_SELECTOR } from "./wiki-nav.ts";
+import {
+  findPageByRelPath,
+  isActivePage,
+  navTargetFrom,
+  NAV_LINK_SELECTOR,
+} from "./wiki-nav.ts";
 
 /** Minimal stand-in for the one Element method the resolver uses — the point of
  *  the extraction is that the decision needs no DOM. */
@@ -82,5 +87,30 @@ describe("isActivePage", () => {
 
   test("nothing open ⇒ nothing active", () => {
     expect(isActivePage(hubA, { name: null, relPath: null })).toBe(false);
+  });
+});
+
+describe("findPageByRelPath", () => {
+  const pages = [
+    { name: "MEMORY", relPath: "-Users-x-muninn/memory/MEMORY.md", type: "note" },
+    { name: "internals", relPath: "blogs/Muninn-Internals.html", type: "explainer" },
+  ];
+
+  test("matches case-insensitively — an Atlas key or a hand-typed URL is not byte-exact", () => {
+    // The regression: `loadPageByRelPath`'s explainer branch compared raw strings,
+    // so a `?relPath=` differing only in case skipped the iframe branch entirely
+    // and `/api/wiki/page` painted the ESCAPED HTML source into the article pane.
+    expect(findPageByRelPath(pages, "blogs/muninn-internals.html")?.type).toBe("explainer");
+    expect(findPageByRelPath(pages, "BLOGS/MUNINN-INTERNALS.HTML")?.type).toBe("explainer");
+  });
+
+  test("normalizes separators on both sides", () => {
+    expect(findPageByRelPath(pages, "blogs\\Muninn-Internals.html")?.name).toBe("internals");
+  });
+
+  test("an exact match still matches, and a miss is undefined", () => {
+    expect(findPageByRelPath(pages, "-Users-x-muninn/memory/MEMORY.md")?.name).toBe("MEMORY");
+    expect(findPageByRelPath(pages, "nope/nope.md")).toBeUndefined();
+    expect(findPageByRelPath(pages, "")).toBeUndefined();
   });
 });

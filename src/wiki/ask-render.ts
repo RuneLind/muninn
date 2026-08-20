@@ -38,8 +38,14 @@ export function renderAskAnswerHtml(answer: string, citations: Citation[]): stri
     // stray "[3]" in prose never becomes a dead link).
     if (n < 1 || n > maxN || !c || !c.pageName) return whole;
     const idx = tokens.length;
+    // `data-relpath` beside `data-page`: the reader's click delegate prefers it
+    // (`navTargetFrom`), and it is the only key that names ONE page where stems
+    // collide. Omitted when the enrichment produced none, which keeps the marker
+    // byte-identical for every citation that had no path to give.
     tokens.push(
-      `<sup class="wiki-ask-cite" data-page="${escapeHtml(c.pageName)}" title="${escapeHtml(c.title || "")}">[${n}]</sup>`,
+      `<sup class="wiki-ask-cite" data-page="${escapeHtml(c.pageName)}"` +
+        (c.pageRelPath ? ` data-relpath="${escapeHtml(c.pageRelPath)}"` : "") +
+        ` title="${escapeHtml(c.title || "")}">[${n}]</sup>`,
     );
     return `\x00ASKCITE${idx}\x00`;
   });

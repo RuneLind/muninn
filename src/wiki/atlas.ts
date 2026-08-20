@@ -68,6 +68,11 @@ export interface AtlasType {
 
 export interface AtlasNode {
   name: string;
+  /** The store's collision-scoped disambiguated title (`muninn/architecture`),
+   *  where it set one. The Atlas is keyed on relPath and so already SEPARATES
+   *  same-stem nodes correctly — this is only what they are LABELLED with, and
+   *  without it three `architecture` cards sit in one column saying nothing. */
+  displayTitle?: string;
   /** Page type — an open `WikiPageType` string (custom ontologies pass through). */
   t: string;
   hub: boolean;
@@ -245,6 +250,7 @@ export function projectAtlas(index: WikiIndex): AtlasPayload {
     );
     const node: AtlasNode = {
       name: p.name,
+      displayTitle: p.displayTitle,
       t: p.type,
       hub: p.type === "source" && inbound >= HUB_MIN_INBOUND,
       in: inbound,

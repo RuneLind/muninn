@@ -128,6 +128,7 @@ import {
   type IntegrateProposal,
 } from "./wiki-integrate.ts";
 import {
+  findPageByRelPath,
   isActivePage,
   navTargetFrom,
   NAV_LINK_SELECTOR,
@@ -136,6 +137,7 @@ import {
 import {
   anchorNow,
   connectionTypeOrder,
+  breadcrumbLeaf,
   displayTitleOf,
   facetKeys,
   filterPages,
@@ -182,6 +184,12 @@ function typeLabel(t: string): string {
  *  /api/wiki/pages response. `{}` — every folder under its own name — for every
  *  wiki that declares none and needs none, which is the default. */
 let folderLabels: Record<string, string> = {};
+
+/** The wiki's `defaultType` (its `.wiki-reader.json` leftovers bucket), "" when it
+ *  declares none. Stored at boot from the /api/wiki/pages response and read by
+ *  exactly one call — `hubTypeList`, which keeps that bucket out of the start
+ *  view's "Top … by connections" sections. */
+let defaultType = "";
 
 // ── Data shapes (mirror src/dashboard/routes/wiki-routes.ts) ──────────
 interface WikiPageDetail {
@@ -573,7 +581,9 @@ function renderBreadcrumb(m: WikiListing): void {
   // pointer click on a list row (so that path dismisses it for free), but Back /
   // popstate involves no click at all and left it open over the new article,
   // still targeting — and about to summarize — the page the reader had left.
-  closeShareDialogOnNavigate(m.name);
+  // Keyed on relPath (`shareNavigationKey`): under the NAME, moving between two
+  // same-stem pages left the dialog open and still aimed at the page just left.
+  closeShareDialogOnNavigate(m.relPath || m.name);
   // Stamped even when there is no breadcrumb node: it is the "which page is open"
   // answer for the Discuss popover, and every render path funnels through here.
   currentArticle = m;
@@ -584,12 +594,19 @@ function renderBreadcrumb(m: WikiListing): void {
   const crumbs: string[] = [];
   if (WIKI) crumbs.push('<span class="wiki-bc-wiki">' + esc(WIKI) + "</span>");
   const folder = pageFolder(m);
+  const folderCrumb = folder && folder !== ROOT_FOLDER ? folderLabelOf(folder, folderLabels) : "";
   if (folder && folder !== ROOT_FOLDER) {
     // The folder's LABEL, matching the facet — the raw segment is the mangled
     // project dir on the `memory` wiki and unreadable in a breadcrumb.
-    crumbs.push('<span class="wiki-bc-folder">' + esc(folderLabelOf(folder, folderLabels)) + "</span>");
+    crumbs.push('<span class="wiki-bc-folder">' + esc(folderCrumb) + "</span>");
   }
-  crumbs.push('<span class="wiki-bc-cur">' + esc(m.title) + "</span>");
+  // The DISPLAYED title: the crumb before this one is the folder LABEL, which on
+  // the memory wiki is the project and on mimir is `projects` — so a bare `MEMORY`
+  // here leaves the trail reading `memory / muninn / MEMORY` on 30 pages and
+  // `mimir / projects / architecture` on three. `displayTitleOf` repeats the
+  // discriminator where the store computed one, which is exactly where it is
+  // needed.
+  crumbs.push('<span class="wiki-bc-cur">' + esc(breadcrumbLeaf(m, folderCrumb)) + "</span>");
   // BOTH dates, each labelled — unlike a list row, which shows the one date it sorted
   // on. `pageHeaderDates` owns which slots appear; the "no known edit" case yields a
   // creation date only, so the header never asserts an edit the history doesn't record.
@@ -666,7 +683,7 @@ function hubsHtml(): string {
   // hub. `esc` the heading — custom labels come from a wiki's `.wiki-reader.json`.
   if (hasTypedHubs(allPages)) {
     let html = "";
-    hubTypeList(allPages, typeOrder).forEach((t) => {
+    hubTypeList(allPages, typeOrder, defaultType).forEach((t) => {
       const top = topPages(allPages, (p) => p.type === t, 12);
       if (!top.length) return;
       html += hubGridHtml(`Top ${esc(typeLabel(t).toLowerCase())} by connections`, top);
@@ -863,7 +880,10 @@ function miniGraphHtml(data: WikiPageDetail): string {
       `<g class="mini-node" data-page="${esc(n.p.name)}" data-relpath="${esc(n.p.relPath)}"><title>${esc(displayTitleOf(n.p))}</title>` +
       `<circle class="mini-hit" cx="${n.x!.toFixed(1)}" cy="${n.y!.toFixed(1)}" r="14" fill="transparent"></circle>` +
       `<circle class="mini-dot t-${esc(n.p.type)}" cx="${n.x!.toFixed(1)}" cy="${n.y!.toFixed(1)}" r="5"></circle>` +
-      `<text x="${n.x!.toFixed(1)}" y="${ly.toFixed(1)}" text-anchor="middle">${esc(short(n.p.title))}</text></g>`;
+      // The VISIBLE label, like the `<title>` tooltip two lines up — they were
+      // reading from two different fields, so a colliding node's hover text said
+      // `muninn/MEMORY` while the dot under it said `MEMORY`.
+      `<text x="${n.x!.toFixed(1)}" y="${ly.toFixed(1)}" text-anchor="middle">${esc(short(displayTitleOf(n.p)))}</text></g>`;
   });
   nodes +=
     `<g class="mini-center"><circle class="mini-dot t-${esc(data.meta.type)}" cx="${cx}" cy="${cy}" r="7"></circle>` +
@@ -956,7 +976,7 @@ function similarSectionHtml(items: SimilarPage[]): string {
   items.forEach((p) => {
     html +=
       `<div class="wiki-conn-item" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}" title="${esc(p.snippet || "")}">` +
-      `<div class="wiki-type-dot type-${esc(p.type)}"></div><span>${esc(p.title)}</span></div>`;
+      `<div class="wiki-type-dot type-${esc(p.type)}"></div><span>${esc(displayTitleOf(p))}</span></div>`;
   });
   return html + "</div>";
 }
@@ -976,8 +996,15 @@ function renderSimilarInto(relPath: string, items: SimilarPage[]): void {
  *  Keyed on relPath end to end — memo, in-flight guard, query param and the
  *  still-on-this-page test. Under the name key, two same-stem pages shared one
  *  memo entry and the route resolved both to whichever registered first, so the
- *  rail showed another page's cousins under this one. */
+ *  rail showed another page's cousins under this one.
+ *
+ *  Skipped entirely on a read-only WIKI: the route ships the page's prose to
+ *  huginn's embedder, so it now carries the per-wiki egress prologue and can only
+ *  answer 403. The section is absent either way — this just stops one pointless
+ *  request per page open. Deliberately NOT in the readonly click guard: nothing
+ *  here is a click. */
 function loadSimilar(page: { relPath: string }): void {
+  if (wikiReadonlyWikiFlag()) return;
   const relPath = page.relPath;
   const memo = similarMemo.get(relPath);
   if (memo) {
@@ -1144,8 +1171,11 @@ function loadPageByRelPath(relPath: string, push = true): void {
   // The explainer branch is `loadPage`'s, and it has to exist here too now that
   // ordinary clicks come through this path: an explainer renders in a sandboxed
   // iframe off `/api/wiki/html`, and asking `/api/wiki/page` for one returns the
-  // raw HTML file as if it were markdown.
-  const listing = allPages.find((p) => p.relPath === relPath);
+  // raw HTML file as if it were markdown. The lookup is `findPageByRelPath`, not
+  // a raw `===`: an Atlas node key is lowercased and a `?relPath=` can be typed by
+  // hand, and a case-differing miss here does not degrade to "not found" — it
+  // paints escaped HTML source into the article pane.
+  const listing = findPageByRelPath(allPages, relPath);
   if (listing && listing.type === "explainer") {
     loadExplainer(listing, push);
     return;
@@ -1396,6 +1426,9 @@ interface AskCitation {
   relevance: number;
   wikiName?: string;
   pageName?: string;
+  /** The matched page's exact wiki-relative path — the collision-proof click
+   *  target beside `pageName` (see `Citation.pageRelPath`). */
+  pageRelPath?: string;
 }
 interface AskTurn {
   question: string;
@@ -1407,6 +1440,12 @@ interface AskTurn {
   kind?: string; // "factcheck" for a fact-check turn (status line; PR B ➕ gate). Absent ⇒ Ask/Explain.
   baseHash?: string; // sha256 of the checked page at fact-check time (factcheck turns only; PR B round-trips it)
   page?: string; // the checked page's name — the ➕ append target (factcheck turns only)
+  // The checked page's exact wiki-relative path — the COLLISION-PROOF half of that
+  // target, sent beside the name by every action this turn can launch (➕ append,
+  // ✎ integrate, ↻ claim retry, the post-write reload). It rides the TURN, not
+  // `currentArticle`, because a persisted turn outlives the open article. See
+  // `StoredAskTurn.pageRelPath`.
+  pageRelPath?: string;
   pageType?: string; // the checked page's type — ➕ gates markdown-only (hides on "explainer")
   toolSources?: string[]; // hostnames consulted during a fact check (WebFetch targets, deduped)
   toolSourceUrls?: Record<string, string>; // host → first full URL seen (feeds the Consulting chip hrefs). Persisted intentionally; a pre-PR / malformed-dropped turn lacks it ⇒ chips fall back to https://<host>/.
@@ -1574,7 +1613,12 @@ function askSourcesHtml(citations: AskCitation[], cited: number[]): string {
     .map((c) => {
       const uncited = anyCited && !citedSet[c.n] ? " uncited" : "";
       const linked = c.pageName ? " linked" : "";
-      const pageAttr = c.pageName ? ' data-page="' + esc(c.pageName) + '"' : "";
+      // Both keys, as on every other row emitter: `data-relpath` names ONE page
+      // and `navTargetFrom` prefers it; the name stays for a citation the
+      // enrichment could not give a path.
+      const pageAttr =
+        (c.pageName ? ' data-page="' + esc(c.pageName) + '"' : "") +
+        (c.pageRelPath ? ' data-relpath="' + esc(c.pageRelPath) + '"' : "");
       const pageTag = c.pageName ? '<span class="wiki-ask-src-page">page ↗</span>' : "";
       return (
         '<div class="wiki-ask-src' + uncited + linked + '"' + pageAttr + ">" +
@@ -3177,9 +3221,10 @@ async function submitChatEscalate(forceNew: boolean): Promise<void> {
 /**
  * 📤 Share on the open article.
  *
- * `page` is the page NAME (`m.name`) — the route resolves it with
- * `index.resolve`, exactly as Explain / fact-check / Similar do. A relPath would
- * fail to resolve on most pages.
+ * Sends `relPath` BESIDE the name: the route prefers the path and falls back to
+ * the stem, because `index.resolve(name)` is first-registration-wins — sharing
+ * one of two same-stem pages generated a post from the OTHER one under this
+ * page's title. (This comment used to assert the opposite; see `resolvePageRef`.)
  *
  * `SHARE_BTN_ID` is declared as the opener so the click that opens the dialog is
  * not also read as a click-away by its own document listener.
@@ -3195,9 +3240,26 @@ function openArticleShare(): void {
   openShareDialog({
     wiki: WIKI || "",
     page: m.name,
-    title: m.title,
+    relPath: m.relPath,
+    title: displayTitleOf(m),
     openerIds: [SHARE_BTN_ID],
   });
+}
+
+/**
+ * Re-open the page a fact-check turn was checked on, after a write to it.
+ *
+ * By relPath when the turn carries one — a name reload after a write lands on
+ * whichever same-stem page registered first, i.e. shows the reader an UNCHANGED
+ * page and makes a successful write look like it did nothing. Falls back to the
+ * name for a turn persisted before `pageRelPath` existed.
+ *
+ * `push=false` in both spellings: the reader is already on this page, and a write
+ * must not add a history entry.
+ */
+function reloadCheckedPage(turn: AskTurn): void {
+  if (turn.pageRelPath) loadPageByRelPath(turn.pageRelPath, false);
+  else if (turn.page) loadPage(turn.page, false);
 }
 
 /** Persist the shown fact-check answer onto the page as a `> [!factcheck]` callout
@@ -3228,6 +3290,11 @@ async function submitFactcheckAppend(): Promise<void> {
       body: JSON.stringify({
         wiki: WIKI || undefined,
         page: turn.page,
+        // The collision-proof half of the target. Without it the callout was
+        // written into whichever same-stem page registered first — measured on
+        // mimir, a check on `projects/yggdrasil/architecture.md` landed in
+        // `projects/claude-hivemind/architecture.md`.
+        ...(turn.pageRelPath ? { relPath: turn.pageRelPath } : {}),
         answer: turn.answer,
         baseHash: turn.baseHash,
       }),
@@ -3268,8 +3335,10 @@ async function submitFactcheckAppend(): Promise<void> {
     // follows shows a page whose marks are simply gone, and a fixed "✓ Added to
     // article" leaves that looking like a rendering fault rather than this click.
     setAskStatus(appendSuccessStatus(data.supersededNote), "done");
-    // Reload the page content so the freshly-written callout is visible.
-    loadPage(turn.page, false);
+    // Reload the page content so the freshly-written callout is visible — by
+    // relPath where the turn has one, so the reader lands on the page that was
+    // just WRITTEN rather than on the stem's first registration.
+    reloadCheckedPage(turn);
   } catch (err) {
     btn.disabled = false;
     btn.textContent = prevLabel;
@@ -3404,6 +3473,7 @@ async function submitFactcheckIntegrate(): Promise<void> {
       body: JSON.stringify({
         wiki: WIKI || undefined,
         page: turn.page,
+        ...(turn.pageRelPath ? { relPath: turn.pageRelPath } : {}),
         answer: turn.answer,
         baseHash: turn.baseHash,
         // Claim quotes ride along for instrumentation (PR 2) — the server
@@ -3479,6 +3549,7 @@ async function acceptFactcheckIntegrate(): Promise<void> {
   const body = buildIntegrateApplyBody({
     wiki: WIKI || undefined,
     page: turn.page,
+    ...(turn.pageRelPath ? { relPath: turn.pageRelPath } : {}),
     baseHash: turn.baseHash,
     edits: state.proposal.edits,
     selected: state.selected,
@@ -3559,8 +3630,9 @@ async function acceptFactcheckIntegrate(): Promise<void> {
     // fire-and-forget; there is no post-render hook to re-attach to). The bar copy
     // stays for the re-opened turn; the status line is what the user sees NOW.
     setAskStatus(copy, "done");
-    // Reload the page in the reader so the corrected prose is visible.
-    loadPage(turn.page, false);
+    // Reload the page in the reader so the corrected prose is visible — by
+    // relPath where the turn has one (see `reloadCheckedPage`).
+    reloadCheckedPage(turn);
   } catch (err) {
     state.applying = false;
     showErr("Couldn't apply — " + (err instanceof Error ? err.message : String(err)));
@@ -3687,7 +3759,8 @@ document.addEventListener("click", (e) => {
 //
 // Note that ALL the click delegates run for every click — the one above, the
 // dialog's own (registered inside this call) and the `document.body` navigation
-// delegate (`[data-wiki-page]`/`[data-page]`, registered first) — so their
+// delegate (`NAV_LINK_SELECTOR` — `[data-wiki-page]`/`[data-page]`/`[data-relpath]`,
+// registered first) — so their
 // selector sets must stay disjoint. The shell's sets are the `if / else if`
 // chain above and the body delegate; the dialog's is the chain in
 // `wireChatOptions` (`wiki-chat-options.ts`). One chain made that exclusivity
@@ -3834,7 +3907,11 @@ function maybeShowExplainPill(): void {
   // currentName null), not an HTML explainer (iframe selections are unreachable,
   // but loadExplainer sets currentName, so exclude by type).
   if (!currentName) return hideExplainPill();
-  const meta = allPages.find((p) => p.name === currentName);
+  // `currentArticle` — the listing the OPEN page was rendered from — never an
+  // `allPages` lookup by name: that lookup is first-match-on-stem, so on a wiki
+  // with same-stem pages it answered about a DIFFERENT page (wrong type, wrong
+  // title, wrong everything the caller then acted on).
+  const meta = currentArticle;
   if (meta && meta.type === "explainer") return hideExplainPill();
   const sel = window.getSelection();
   if (!sel || sel.isCollapsed || sel.rangeCount === 0) return hideExplainPill();
@@ -3852,7 +3929,7 @@ function maybeShowExplainPill(): void {
 function activateExplain(): void {
   hideExplainPill();
   if (!pillSel || !currentName) return;
-  const explainMeta = allPages.find((p) => p.name === currentName);
+  const explainMeta = currentArticle;
   const turn: AskTurn = {
     question: explainLabel(pillSel),
     // The page the passage was read on. The question is only a display LABEL, so
@@ -3865,6 +3942,9 @@ function activateExplain(): void {
   const url = buildExplainUrl({
     sel: pillSel,
     page: currentName,
+    // relPath beside the name — the route resolves it first. Without it, Explain
+    // read the passage's context out of whichever same-stem page registered first.
+    ...(currentRelPath ? { relPath: currentRelPath } : {}),
     wiki: WIKI,
     ctx: pillHeading,
     history: askHistoryParam(),
@@ -3877,7 +3957,7 @@ function activateExplain(): void {
 function activateFactcheckSel(): void {
   hideExplainPill();
   if (!pillSel || !currentName) return;
-  const selMeta = allPages.find((p) => p.name === currentName);
+  const selMeta = currentArticle;
   const turn: AskTurn = {
     question: factcheckLabel(pillSel),
     answer: "", citations: [], cited: [], html: null, askedAt: Date.now(), kind: "factcheck",
@@ -3886,8 +3966,18 @@ function activateFactcheckSel(): void {
     // re-locates the excerpt from `sel`, and retrying a sel-mode claim in article
     // mode would verify it against a passage nobody selected.
     fcMode: "sel", fcSel: pillSel, fcCtx: pillHeading || undefined,
+    // The exact page this check ran on, stamped at START — every write/retry the
+    // turn can launch later resolves against it.
+    ...(currentRelPath ? { pageRelPath: currentRelPath } : {}),
   };
-  const url = buildFactcheckUrl({ mode: "sel", page: currentName, wiki: WIKI, sel: pillSel, ctx: pillHeading });
+  const url = buildFactcheckUrl({
+    mode: "sel",
+    page: currentName,
+    ...(currentRelPath ? { relPath: currentRelPath } : {}),
+    wiki: WIKI,
+    sel: pillSel,
+    ctx: pillHeading,
+  });
   runAskStream(url, turn);
 }
 
@@ -3897,14 +3987,20 @@ function activateFactcheckSel(): void {
 function activateFactcheckArticle(): void {
   hideExplainPill();
   if (!currentName) return;
-  const meta = allPages.find((p) => p.name === currentName);
+  const meta = currentArticle;
   const turn: AskTurn = {
-    question: factcheckLabel("", meta ? meta.title : currentName),
+    question: factcheckLabel("", meta ? displayTitleOf(meta) : currentName),
     answer: "", citations: [], cited: [], html: null, askedAt: Date.now(), kind: "factcheck",
     page: currentName, pageType: meta ? meta.type : undefined,
     fcMode: "article", // the ↻ retry re-issues the same mode (see activateFactcheckSel)
+    ...(currentRelPath ? { pageRelPath: currentRelPath } : {}),
   };
-  const url = buildFactcheckUrl({ mode: "article", page: currentName, wiki: WIKI });
+  const url = buildFactcheckUrl({
+    mode: "article",
+    page: currentName,
+    ...(currentRelPath ? { relPath: currentRelPath } : {}),
+    wiki: WIKI,
+  });
   runAskStream(url, turn);
 }
 
@@ -3957,7 +4053,7 @@ document.addEventListener("mousedown", (e) => {
 // ignored silently (other pages/extensions post messages constantly).
 window.addEventListener("message", (e: MessageEvent) => {
   if (!currentName) return;
-  const meta = allPages.find((p) => p.name === currentName);
+  const meta = currentArticle;
   if (!meta || meta.type !== "explainer") return;
   const frame = document.querySelector(".wiki-explainer-frame") as HTMLIFrameElement | null;
   if (!frame || e.source !== frame.contentWindow) return;
@@ -4016,6 +4112,11 @@ function setPagesData(data: WikiPagesResponse): void {
   // last known map rather than blanking readable labels mid-session.
   if (data.folderLabels && typeof data.folderLabels === "object") {
     folderLabels = data.folderLabels;
+  }
+  // Same degrade rule again: an older server / an absent field keeps the last
+  // known value rather than re-admitting the leftovers bucket mid-session.
+  if (typeof data.defaultType === "string") {
+    defaultType = data.defaultType;
   }
 }
 

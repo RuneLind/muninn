@@ -1,6 +1,7 @@
 import { test, expect } from "bun:test";
 import {
   anchorNow,
+  breadcrumbLeaf,
   connectionTypeOrder,
   facetKeys,
   filterPages,
@@ -874,10 +875,83 @@ test("mergeWikiTypes: a declared defaultType joins the ordered list", () => {
   expect(bare.labels.memo).toBe("Memo");
 });
 
+test("filterPages: the query matches the displayTitle and the relPath", () => {
+  // Both are what the reader can SEE on a colliding row (`muninn/MEMORY`) and in
+  // its URL — typing either and getting nothing back reads as a broken search.
+  const pages = [
+    page({ name: "MEMORY", title: "MEMORY", displayTitle: "muninn/MEMORY", relPath: "-Users-x-muninn/memory/MEMORY.md" }),
+    page({ name: "MEMORY", title: "MEMORY", displayTitle: "mimir/MEMORY", relPath: "-Users-x-mimir/memory/MEMORY.md" }),
+  ];
+  const byDisplay = filterPages(pages, { ...NO_FILTER, q: "muninn/mem" });
+  expect(byDisplay.map((p) => p.displayTitle)).toEqual(["muninn/MEMORY"]);
+  const byRel = filterPages(pages, { ...NO_FILTER, q: "-users-x-mimir" });
+  expect(byRel.map((p) => p.displayTitle)).toEqual(["mimir/MEMORY"]);
+  // The plain title still matches both, as before.
+  expect(filterPages(pages, { ...NO_FILTER, q: "memory" })).toHaveLength(2);
+});
+
+test("sortPages: title sort and every tiebreaker use the DISPLAYED title", () => {
+  // Sorting 30 rows all reading `MEMORY` by `title` is an arbitrary order the
+  // reader cannot predict; sorting them by what is on screen is alphabetical.
+  const pages = [
+    page({ name: "MEMORY", title: "MEMORY", displayTitle: "muninn/MEMORY", relPath: "a/MEMORY.md" }),
+    page({ name: "MEMORY", title: "MEMORY", displayTitle: "aksje/MEMORY", relPath: "b/MEMORY.md" }),
+    page({ name: "MEMORY", title: "MEMORY", displayTitle: "mimir/MEMORY", relPath: "c/MEMORY.md" }),
+  ];
+  expect(sortPages(pages, "title").map((p) => p.displayTitle)).toEqual([
+    "aksje/MEMORY",
+    "mimir/MEMORY",
+    "muninn/MEMORY",
+  ]);
+  // The recency tiebreaker too — same day, so the title comparator decides.
+  const dated = pages.map((p) => ({ ...p, updated: "2026-08-01" }));
+  expect(sortPages(dated, "updated", Date.parse("2026-08-05")).map((p) => p.displayTitle)).toEqual([
+    "aksje/MEMORY",
+    "mimir/MEMORY",
+    "muninn/MEMORY",
+  ]);
+});
+
+test("hubTypeList excludes the wiki's defaultType bucket", () => {
+  // MEASURED on the memory wiki (2026-08-20): `memory-index` is 32 pages of which
+  // exactly ONE carries a backlink (max 1). A "Top Memory index by connections"
+  // section is therefore 31 zero-backlink cards — degenerate for the same reason
+  // explainers are excluded. `defaultType` names the pages NOTHING typed, so it is
+  // a leftovers bucket by construction; the type facet and the Atlas column it was
+  // added for are untouched.
+  const pages = [
+    page({ type: "project" }),
+    page({ type: "reference" }),
+    page({ type: "memory-index" }),
+  ];
+  const order = ["project", "reference", "memory-index"];
+  expect(hubTypeList(pages, order, "memory-index")).toEqual(["project", "reference"]);
+  // No defaultType declared ⇒ byte-identical to before, on every other wiki.
+  expect(hubTypeList(pages, order)).toEqual(["project", "reference", "memory-index"]);
+});
+
 test("displayTitleOf: the store's disambiguated title wins, else the plain one", () => {
   expect(displayTitleOf({ title: "MEMORY", displayTitle: "muninn/MEMORY" })).toBe("muninn/MEMORY");
   expect(displayTitleOf({ title: "Creatine" })).toBe("Creatine");
   expect(displayTitleOf({ title: "Creatine", displayTitle: "" })).toBe("Creatine");
+});
+
+test("breadcrumbLeaf drops a prefix the folder crumb above it already says", () => {
+  // MEASURED live on the memory wiki: the folder crumb renders the folder LABEL
+  // (`muninn`) and the disambiguated title's prefix IS that label, so the trail
+  // read `memory / muninn / muninn/MEMORY`.
+  expect(breadcrumbLeaf({ title: "MEMORY", displayTitle: "muninn/MEMORY" }, "muninn")).toBe("MEMORY");
+  // mimir's shape is NOT redundant — the folder crumb is `projects`, the prefix is
+  // the subsystem — so nothing is dropped.
+  expect(
+    breadcrumbLeaf({ title: "architecture", displayTitle: "yggdrasil/architecture" }, "projects"),
+  ).toBe("yggdrasil/architecture");
+  // Only a WHOLE leading segment counts, and only the first one.
+  expect(breadcrumbLeaf({ title: "x", displayTitle: "muninnish/x" }, "muninn")).toBe("muninnish/x");
+  expect(breadcrumbLeaf({ title: "x", displayTitle: "a/b/x" }, "a")).toBe("b/x");
+  // No displayTitle / no folder ⇒ the plain title, exactly as before.
+  expect(breadcrumbLeaf({ title: "Creatine" }, "sources")).toBe("Creatine");
+  expect(breadcrumbLeaf({ title: "x", displayTitle: "a/x" }, "")).toBe("a/x");
 });
 
 test("folderLabelOf: configured label, else the folder's own name", () => {

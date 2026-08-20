@@ -37,6 +37,20 @@ export interface StoredAskTurn {
   /** The checked page's name — the ➕ "Add to article" append target (fact-check
    *  turns only). Absent on Ask/Explain turns. */
   page?: string;
+  /**
+   * The checked page's exact wiki-relative path (fact-check turns only).
+   *
+   * `page` alone is the filename STEM, and `index.resolve(stem)` is
+   * first-registration-wins — so on a wiki with same-stem pages the ➕ append, the
+   * ✎ integrate and the ↻ claim retry all resolved to a page nobody had checked.
+   * It rides the TURN rather than being read off `currentArticle` at click time
+   * because a persisted turn outlives the open article: the reader can rehydrate a
+   * session, scroll to an old check and press ➕ from a different page entirely.
+   *
+   * Absent on Ask/Explain turns and on any turn persisted before this field, where
+   * the routes fall back to the name exactly as they always did.
+   */
+  pageRelPath?: string;
   /** The checked page's type — the ➕ button gates markdown-only (hidden for
    *  `"explainer"`). Absent on Ask/Explain turns. */
   pageType?: string;
@@ -165,6 +179,13 @@ function isValidTurn(v: unknown): v is StoredAskTurn {
   if (typeof t.baseHash !== "undefined" && typeof t.baseHash !== "string") return false;
   if (typeof t.page !== "undefined" && typeof t.page !== "string") return false;
   if (typeof t.pageType !== "undefined" && typeof t.pageType !== "string") return false;
+  // DROPPED, not fatal — the `claimQuotes`/`declined` treatment. This field does
+  // not gate a destructive write on its own (every route it feeds falls back to
+  // `page`), so a malformed value degrades the turn to pre-relPath behaviour,
+  // where throwing the turn away would lose a whole fact-check answer.
+  if (typeof t.pageRelPath !== "undefined" && typeof t.pageRelPath !== "string") {
+    delete t.pageRelPath;
+  }
   if (
     typeof t.toolSources !== "undefined" &&
     !(Array.isArray(t.toolSources) && t.toolSources.every((s) => typeof s === "string"))

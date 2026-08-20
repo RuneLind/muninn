@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { test, expect, describe } from "bun:test";
 import {
   buildExplainUrl,
   explainLabel,
@@ -170,4 +170,48 @@ test("toolLogRowLabel joins label + detail, or bare label when no detail", () =>
     .toBe("Reading: example.com");
   expect(toolLogRowLabel({ claimIndex: 1, name: "WebSearch", label: "Searching the web", done: false }))
     .toBe("Searching the web");
+});
+
+describe("relPath rides every page-scoped URL", () => {
+  // The measured bug: on mimir, open `projects/yggdrasil/architecture.md`, press
+  // fact-check → ➕, and the callout is WRITTEN into
+  // `projects/claude-hivemind/architecture.md` — `index.resolve("architecture")`
+  // is first-registration-wins on the stem. Every one of these URLs feeds a route
+  // that resolves a page; the relPath is the only key that names one.
+  test("buildExplainUrl carries relPath beside the name", () => {
+    const url = buildExplainUrl({
+      sel: "some passage",
+      page: "architecture",
+      relPath: "projects/yggdrasil/architecture.md",
+      wiki: "mimir",
+    });
+    expect(url).toContain("relPath=projects%2Fyggdrasil%2Farchitecture.md");
+    expect(url).toContain("page=architecture"); // the name stays, as the fallback
+  });
+
+  test("buildFactcheckUrl carries it in BOTH modes", () => {
+    const article = buildFactcheckUrl({
+      mode: "article",
+      page: "architecture",
+      relPath: "projects/yggdrasil/architecture.md",
+      wiki: "mimir",
+    });
+    expect(article).toContain("relPath=projects%2Fyggdrasil%2Farchitecture.md");
+    const sel = buildFactcheckUrl({
+      mode: "sel",
+      page: "architecture",
+      relPath: "projects/yggdrasil/architecture.md",
+      sel: "ships 4M",
+    });
+    expect(sel).toContain("relPath=projects%2Fyggdrasil%2Farchitecture.md");
+  });
+
+  test("an absent relPath leaves the URL byte-identical to before", () => {
+    expect(buildExplainUrl({ sel: "s", page: "Creatine", wiki: "jarvis" })).toBe(
+      "/api/wiki/explain?sel=s&page=Creatine&wiki=jarvis",
+    );
+    expect(buildFactcheckUrl({ mode: "article", page: "Creatine", wiki: "jarvis" })).toBe(
+      "/api/wiki/factcheck?page=Creatine&mode=article&wiki=jarvis",
+    );
+  });
 });

@@ -204,6 +204,39 @@ describe("resolveSimilarHits", () => {
     expect(out[0]!.name).toBe("cousin-a");
   });
 
+  test("a same-STEM sibling is not excluded as self — only the same relPath is", () => {
+    // The self-exclusion matched on `name` too, so on a wiki with same-stem pages
+    // (the memory wiki's 30 `MEMORY.md` hubs, mimir's `projects/*/architecture.md`)
+    // every genuine cousin sharing the open page's stem was dropped from the rail.
+    const sibling = meta({ name: "architecture", title: "architecture", relPath: "projects/huginn/architecture.md" });
+    const open = meta({ name: "architecture", title: "architecture", relPath: "projects/yggdrasil/architecture.md" });
+    const idx = fakeIndex([open, sibling]);
+    const hits: SimilarSearchHit[] = [
+      { collection: "wiki", id: "projects/huginn/architecture.md", relevance: 0.9 },
+      { collection: "wiki", id: "projects/yggdrasil/architecture.md", relevance: 0.8 },
+    ];
+    const out = resolveSimilarHits(hits, idx, open);
+    expect(out.map((p) => p.relPath)).toEqual(["projects/huginn/architecture.md"]);
+  });
+
+  test("carries the store's displayTitle so the rail can disambiguate", () => {
+    const cousin = meta({
+      name: "MEMORY",
+      title: "MEMORY",
+      relPath: "-Users-x-mimir/memory/MEMORY.md",
+      displayTitle: "mimir/MEMORY",
+    });
+    const open = meta({ name: "MEMORY", title: "MEMORY", relPath: "-Users-x-muninn/memory/MEMORY.md" });
+    const idx = fakeIndex([open, cousin]);
+    const out = resolveSimilarHits(
+      [{ collection: "wiki", id: "-Users-x-mimir/memory/MEMORY.md", relevance: 0.7 }],
+      idx,
+      open,
+    );
+    expect(out[0]!.displayTitle).toBe("mimir/MEMORY");
+    expect(out[0]!.title).toBe("MEMORY"); // the plain title still rides along
+  });
+
   test("carries a snippet from the first matched chunk", () => {
     const hits: SimilarSearchHit[] = [
       {

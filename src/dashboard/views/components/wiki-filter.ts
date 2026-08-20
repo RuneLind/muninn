@@ -248,13 +248,29 @@ function contentTypes(pages: WikiListing[]): Set<string> {
   return s;
 }
 
-/** The per-type hub sections to render on the start view: non-note, non-explainer
- *  types present in `pages`, ordered by `order` (extras alpha-sorted after). Explainers
- *  never join the link graph, so a "by connections" hub of them is always degenerate. */
-export function hubTypeList(pages: WikiListing[], order: string[]): string[] {
+/**
+ * The per-type hub sections to render on the start view: non-note, non-explainer
+ * types present in `pages`, ordered by `order` (extras alpha-sorted after).
+ * Explainers never join the link graph, so a "by connections" hub of them is
+ * always degenerate.
+ *
+ * **`defaultType` is excluded for the same reason.** It names the pages NOTHING
+ * typed — an authored `type:`, a `typeMap` folder and the standard folder names
+ * all win ahead of it — so it is a leftovers bucket by construction, not a
+ * curated section. Measured on the memory wiki (2026-08-20): its `memory-index`
+ * bucket is 32 pages of which exactly ONE carries a backlink, i.e. a "Top Memory
+ * index by connections" hub is 31 zero-backlink cards. The two surfaces
+ * `defaultType` was actually added for — the type facet and the Atlas column,
+ * which `note` was refused — are untouched by this.
+ *
+ * Absent ⇒ byte-identical to what shipped, which is every wiki but `memory`.
+ */
+export function hubTypeList(pages: WikiListing[], order: string[], defaultType?: string): string[] {
   const present = contentTypes(pages);
   present.delete("explainer");
-  const known = order.filter((t) => t !== "note" && t !== "explainer" && present.has(t));
+  if (defaultType) present.delete(defaultType);
+  const skip = (t: string) => t === "note" || t === "explainer" || t === defaultType;
+  const known = order.filter((t) => !skip(t) && present.has(t));
   const extras = [...present].filter((t) => !order.includes(t)).sort();
   return [...known, ...extras];
 }
@@ -284,6 +300,27 @@ export function pageFolder(p: WikiListing): string {
  *  spelling, so a row and the card for the same page can't read differently. */
 export function displayTitleOf(p: { title: string; displayTitle?: string }): string {
   return p.displayTitle || p.title;
+}
+
+/**
+ * The breadcrumb's LAST crumb: the displayed title, minus a leading segment the
+ * folder crumb immediately above it already says.
+ *
+ * The disambiguator's prefix is the folder LABEL when the wiki has one, and the
+ * breadcrumb renders that same label as its own folder crumb — so on the memory
+ * wiki the trail read `memory / muninn / muninn/MEMORY` (measured live). mimir is
+ * not redundant (`mimir / projects / yggdrasil/architecture`: the folder crumb is
+ * `projects`, the prefix is the subsystem), so the strip is conditional on the two
+ * actually matching, and only ever removes ONE whole leading segment.
+ */
+export function breadcrumbLeaf(
+  p: { title: string; displayTitle?: string },
+  folderLabel: string,
+): string {
+  const shown = displayTitleOf(p);
+  if (!folderLabel) return shown;
+  const prefix = folderLabel + "/";
+  return shown.startsWith(prefix) ? shown.slice(prefix.length) : shown;
 }
 
 /** Display label for a folder facet key — the wiki's effective `folderLabels`
@@ -643,8 +680,12 @@ export function pageFollowups(p: WikiListing): string {
 }
 
 /** Filter pages by the current domain/folder/type/tag/status/follow-ups facets and
- *  the free-text query. Query matches title, canonical name, any alias, or any tag
- *  (all case-insensitive). */
+ *  the free-text query. Query matches title, the DISPLAYED title, canonical name,
+ *  the relPath, any alias, or any tag (all case-insensitive).
+ *
+ *  The last two are what a colliding row actually shows: `muninn/MEMORY` on the
+ *  row and `-Users-rune-source-private-muninn/…` in the URL bar. Typing either and
+ *  getting an empty list back reads as a broken search, not as a narrow one. */
 export function filterPages(pages: WikiListing[], filters: WikiFilters): WikiListing[] {
   const q = filters.q.toLowerCase();
   return pages.filter((p) => {
@@ -656,7 +697,9 @@ export function filterPages(pages: WikiListing[], filters: WikiFilters): WikiLis
     if (filters.followups && pageFollowups(p) !== filters.followups) return false;
     if (!q) return true;
     if (p.title.toLowerCase().indexOf(q) !== -1) return true;
+    if (displayTitleOf(p).toLowerCase().indexOf(q) !== -1) return true;
     if (p.name.toLowerCase().indexOf(q) !== -1) return true;
+    if (p.relPath.toLowerCase().indexOf(q) !== -1) return true;
     for (const a of p.aliases) {
       if (a.toLowerCase().indexOf(q) !== -1) return true;
     }
@@ -687,21 +730,25 @@ export function sortPages(
 ): WikiListing[] {
   const copy = pages.slice();
   const now = nowMs ?? Date.now();
+  // Title sort AND every tiebreaker compare `displayTitleOf`, not `title`: on a
+  // wiki with same-stem pages the two disagree for exactly the rows the reader is
+  // trying to tell apart, and sorting 30 identical `MEMORY` strings produces an
+  // order nothing on screen explains.
+  const byTitle = (a: WikiListing, b: WikiListing) =>
+    displayTitleOf(a).localeCompare(displayTitleOf(b));
   if (mode === "title") {
-    copy.sort((a, b) => a.title.localeCompare(b.title));
+    copy.sort(byTitle);
   } else if (mode === "backlinks") {
-    copy.sort((a, b) => b.backlinkCount - a.backlinkCount);
+    copy.sort((a, b) => b.backlinkCount - a.backlinkCount || byTitle(a, b));
   } else if (mode === "created") {
     copy.sort(
       (a, b) =>
         Number(isMetaPage(a)) - Number(isMetaPage(b)) ||
         pageAddedMs(b, now) - pageAddedMs(a, now) ||
-        a.title.localeCompare(b.title),
+        byTitle(a, b),
     );
   } else {
-    copy.sort(
-      (a, b) => pageTimeMs(b, now) - pageTimeMs(a, now) || a.title.localeCompare(b.title),
-    );
+    copy.sort((a, b) => pageTimeMs(b, now) - pageTimeMs(a, now) || byTitle(a, b));
   }
   return copy;
 }

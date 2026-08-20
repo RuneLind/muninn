@@ -7,6 +7,7 @@ import {
   shareCapError,
   shareConflictCopy,
   shareCopyOf,
+  shareNavigationKey,
   shareDialogHtml,
   sharePromptError,
   shareRequestBody,
@@ -468,5 +469,34 @@ describe("summaryShareTargetScript", () => {
     expect(js).not.toContain("<");
     expect(js).toContain("\\u003c/script>");
     expect(new Function("return " + js)()).toEqual(target);
+  });
+});
+
+describe("share identity is the relPath where there is one", () => {
+  test("wikiShareTarget puts relPath in the POST body beside the name", () => {
+    // `POST /api/wiki/share` resolves relPath first: without it, sharing
+    // `projects/yggdrasil/architecture.md` generated a post FROM
+    // `projects/claude-hivemind/architecture.md` and labelled it with the open
+    // page's title.
+    const t = wikiShareTarget("mimir", "architecture", "projects/yggdrasil/architecture.md");
+    expect(t.fields).toEqual({
+      wiki: "mimir",
+      page: "architecture",
+      relPath: "projects/yggdrasil/architecture.md",
+    });
+    // No relPath ⇒ byte-identical to what shipped before (the /summaries and
+    // pre-relPath call sites).
+    expect(wikiShareTarget("mimir", "architecture").fields).toEqual({
+      wiki: "mimir",
+      page: "architecture",
+    });
+  });
+
+  test("shareNavigationKey prefers relPath, so two same-stem pages are DIFFERENT", () => {
+    const a = { page: "architecture", relPath: "projects/yggdrasil/architecture.md" };
+    const b = { page: "architecture", relPath: "projects/claude-hivemind/architecture.md" };
+    expect(shareNavigationKey(a)).not.toBe(shareNavigationKey(b));
+    // A surface with no relPath (the /summaries doc panel) keys on its own id.
+    expect(shareNavigationKey({ page: "doc-123" })).toBe("doc-123");
   });
 });

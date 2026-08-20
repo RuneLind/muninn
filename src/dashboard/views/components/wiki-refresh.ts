@@ -33,6 +33,10 @@ export interface WikiPagesResponse {
   /** Effective display label per first-path-segment folder (see the store's
    *  `deriveFolderLabels`). Absent on an older server ⇒ raw folder names. */
   folderLabels?: Record<string, string>;
+  /** The wiki's `.wiki-reader.json` `defaultType`, "" / absent when it declares
+   *  none. Read only by `hubTypeList`, which excludes that bucket from the start
+   *  view's hub sections (see its doc comment). */
+  defaultType?: string;
   error?: string;
 }
 

@@ -129,3 +129,32 @@ test("platform fallback: component answer stays legible on Slack", () => {
   expect(out).not.toContain("<Callout");
   expect(out).not.toContain("<Verdict");
 });
+
+test("a cite marker carries the matched page's relPath beside its name", () => {
+  // `data-page` alone is the filename STEM, and the reader's click delegate
+  // resolves it first-registration-wins: on a wiki with same-stem pages, clicking
+  // a citation opened a DIFFERENT page than the one that was cited.
+  const html = renderAskAnswerHtml("A claim [1].", [
+    {
+      n: 1,
+      collection: "mimir",
+      docId: "projects/yggdrasil/architecture.md",
+      title: "architecture",
+      badge: "Wiki",
+      relevance: 1,
+      wikiName: "mimir",
+      pageName: "architecture",
+      pageRelPath: "projects/yggdrasil/architecture.md",
+    },
+  ]);
+  expect(html).toContain('data-relpath="projects/yggdrasil/architecture.md"');
+  expect(html).toContain('data-page="architecture"');
+});
+
+test("a citation with no relPath emits the marker byte-identically to before", () => {
+  const html = renderAskAnswerHtml("A claim [1].", [
+    { n: 1, collection: "wiki", docId: "d", title: "T", badge: "Wiki", relevance: 1, pageName: "Creatine" },
+  ]);
+  expect(html).toContain('data-page="Creatine"');
+  expect(html).not.toContain("data-relpath");
+});

@@ -168,6 +168,11 @@ describe("WIKI_READONLY_ROOTS — routes", () => {
     const baseHash = await hashOf(ro, "Widgets.md");
     const cases: [string, unknown?][] = [
       ["GET /api/wiki/digest?wiki=rowiki"],
+      // Similar ships the page's TITLE + TAGS + first body paragraph to huginn's
+      // embedder — the same "content leaves the machine" shape as /reindex, which
+      // is on this list. `/api/wiki/html` is deliberately NOT: it serves a local
+      // file to a local iframe and reaches nothing.
+      ["GET /api/wiki/similar?wiki=rowiki&relPath=Widgets.md"],
       ["GET /api/wiki/ask?wiki=rowiki&q=what%20is%20this"],
       ["GET /api/wiki/explain?wiki=rowiki&page=Widgets&sel=ships%204M"],
       ["GET /api/wiki/factcheck?wiki=rowiki&page=Widgets&mode=article"],

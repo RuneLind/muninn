@@ -30,6 +30,7 @@ import {
   shareConflictCopy,
   shareCopyOf,
   shareDialogHtml,
+  shareNavigationKey,
   shareRequestBody,
   shareTargetOf,
   shouldCloseShareDialog,
@@ -62,6 +63,9 @@ export interface OpenShareOptions {
    *  surface, that surface's document identity (used for the header default and
    *  {@link closeShareDialogOnNavigate}); the POST identity is `target.fields`. */
   page: string;
+  /** The page's exact wiki-relative path, where the surface has one — the POST's
+   *  collision-proof key and the navigate-away key. Omit on /summaries. */
+  relPath?: string;
   /** Header title; defaults to the page name. */
   title?: string;
   /** Ids of the elements that OPEN this dialog, so their click isn't a
@@ -132,6 +136,7 @@ export function openShareDialog(opts: OpenShareOptions): void {
   state = {
     wiki: opts.wiki,
     page: opts.page,
+    ...(opts.relPath ? { relPath: opts.relPath } : {}),
     title: opts.title || opts.page,
     presets: null,
     presetId: "",
@@ -163,8 +168,11 @@ export function openShareDialog(opts: OpenShareOptions): void {
  * Comparing the page NAME (not relPath) because that is what the dialog holds and
  * posts; a same-page re-render must not close a dialog the reader has open.
  */
-export function closeShareDialogOnNavigate(page: string): void {
-  if (state && state.page !== page) closeShareDialog();
+export function closeShareDialogOnNavigate(key: string): void {
+  // Compared on `shareNavigationKey`, i.e. relPath where the surface has one:
+  // under the page NAME, moving between two same-stem pages left the dialog open
+  // and still pointed at the page the reader had left.
+  if (state && shareNavigationKey(state) !== key) closeShareDialog();
 }
 
 /** Close it, cancelling any run, and hand focus back to whatever opened it. */

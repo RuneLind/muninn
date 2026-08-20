@@ -51,6 +51,12 @@ export function explainSelectionFromLabel(label: string): string | null {
 export function buildExplainUrl(opts: {
   sel: string;
   page: string;
+  /** The page's exact wiki-relative path. Sent BESIDE the name, never instead of
+   *  it: the route prefers it (`index.resolve(name)` is first-registration-wins on
+   *  the stem, so on a wiki with same-stem pages the name resolves to a DIFFERENT
+   *  page) and falls back to the name when a rename has staled the client's copy.
+   *  Absent ⇒ the URL is byte-identical to what shipped before. */
+  relPath?: string;
   wiki?: string;
   ctx?: string;
   history?: string;
@@ -61,6 +67,7 @@ export function buildExplainUrl(opts: {
     opts.sel.length > EXPLAIN_SEL_MAX ? [...opts.sel].slice(0, EXPLAIN_SEL_MAX).join("") : opts.sel;
   let url = "/api/wiki/explain?sel=" + encodeURIComponent(sel);
   url += "&page=" + encodeURIComponent(opts.page);
+  if (opts.relPath) url += "&relPath=" + encodeURIComponent(opts.relPath);
   if (opts.wiki) url += "&wiki=" + encodeURIComponent(opts.wiki);
   if (opts.ctx) url += "&ctx=" + encodeURIComponent(opts.ctx);
   if (opts.history) url += "&history=" + encodeURIComponent(opts.history);
@@ -131,11 +138,16 @@ export function toolLogRowLabel(row: ToolLogRow): string {
 export function buildFactcheckUrl(opts: {
   mode: "sel" | "article";
   page: string;
+  /** Exact wiki-relative path — see `buildExplainUrl`. It matters MOST here: a
+   *  fact-check turn stores this page reference and the ➕/✎ write routes resolve
+   *  it, so a stem that resolves elsewhere writes into the wrong file. */
+  relPath?: string;
   wiki?: string;
   sel?: string;
   ctx?: string;
 }): string {
   let url = "/api/wiki/factcheck?page=" + encodeURIComponent(opts.page);
+  if (opts.relPath) url += "&relPath=" + encodeURIComponent(opts.relPath);
   url += "&mode=" + opts.mode;
   if (opts.mode === "sel" && opts.sel) {
     const sel =
