@@ -54,6 +54,92 @@ describe("parseFrontmatter", () => {
     );
     expect(fm.sources).toEqual(["[[A, with comma]]", "[[B]]"]);
   });
+
+  test("emits one nested level as parent.child, leaving the parent key dropped", () => {
+    // The memory wiki's exact shape — note the trailing space after `metadata:`,
+    // which is what the real generator writes.
+    const fm = parseFrontmatter(
+      [
+        "---",
+        "name: netgate-2100-bridge-project",
+        'description: "Ongoing migration"',
+        "metadata: ",
+        "  node_type: memory",
+        "  type: project",
+        "  originSessionId: 59823514-1b43-4268-879b-e1adc39808ad",
+        "---",
+        "",
+        "Body.",
+      ].join("\n"),
+    );
+    expect(fm["metadata.type"]).toBe("project");
+    expect(fm["metadata.node_type"]).toBe("memory");
+    expect(fm["metadata.originSessionId"]).toBe("59823514-1b43-4268-879b-e1adc39808ad");
+    // The parent key's own emission is unchanged: a value-less key is still dropped.
+    expect(fm.metadata).toBeUndefined();
+    // Top-level keys are unaffected.
+    expect(fm.name).toBe("netgate-2100-bridge-project");
+    expect(fm.description).toBe("Ongoing migration");
+  });
+
+  test("a sources: block list stays invisible — no fm.sources, no sources.* key", () => {
+    // huginn-nav's 117 concept pages carry this shape, and `lint.ts`'s
+    // missing-sources check reads `fm.sources`. If the parent became truthy (or
+    // the list items became children) that finding would silently retire.
+    const fm = parseFrontmatter(
+      [
+        "---",
+        "type: concept",
+        "title: Kafka",
+        "sources:",
+        '  - "[[Kafka docs]]"',
+        '  - "[[Confluent blog]]"',
+        "updated: 2026-06-01",
+        "---",
+        "",
+        "Body.",
+      ].join("\n"),
+    );
+    expect(fm.sources).toBeUndefined();
+    expect(Object.keys(fm).some((k) => k.startsWith("sources."))).toBe(false);
+    // The keys after the block still parse — the list did not swallow the fence.
+    expect(fm.updated).toBe("2026-06-01");
+    expect(fm.type).toBe("concept");
+  });
+
+  test("nesting is one level and scalar-only: depth 2 and inline arrays are ignored", () => {
+    const fm = parseFrontmatter(
+      [
+        "---",
+        "metadata:",
+        "  type: project",
+        "  tags: [a, b]", // inline array — not a scalar
+        "  nested:", // opens depth 2
+        "    deep: value", // depth 2 — ignored
+        "    deeper: [x]",
+        "top: kept",
+        "---",
+        "",
+      ].join("\n"),
+    );
+    expect(fm["metadata.type"]).toBe("project");
+    expect(fm["metadata.tags"]).toBeUndefined();
+    expect(fm["metadata.nested"]).toBeUndefined();
+    expect(fm["metadata.nested.deep"]).toBeUndefined();
+    expect(fm["nested.deep"]).toBeUndefined();
+    expect(Object.keys(fm).some((k) => k.includes("deep"))).toBe(false);
+    expect(fm.top).toBe("kept");
+  });
+
+  test("a nested block under a VALUED key is not collected", () => {
+    // `metadata: inline` carries its own value, so the indented lines below it
+    // are not children of an open block — they belong to a shape we don't parse.
+    const fm = parseFrontmatter(
+      ["---", "metadata: inline", "  type: project", "---", ""].join("\n"),
+    );
+    expect(fm.metadata).toBe("inline");
+    expect(fm["metadata.type"]).toBeUndefined();
+  });
 });
 
 describe("splitInlineArray", () => {
@@ -714,6 +800,94 @@ describe("buildWikiIndex", () => {
     expect(index.readerConfig).toBeNull();
     expect(index.resolve("harness engineering")!.type).toBe("concept");
     expect(index.resolve("index")!.type).toBe("note");
+  });
+
+  test("nested metadata.type resolves the page type; a top-level type: still wins", async () => {
+    await mkdir(path.join(root, "notes"), { recursive: true });
+    await Bun.write(
+      path.join(root, "notes/nested-type.md"),
+      ["---", "metadata: ", "  type: concept", "---", "", "Body."].join("\n"),
+    );
+    await Bun.write(
+      path.join(root, "notes/both-types.md"),
+      ["---", "type: entity", "metadata:", "  type: concept", "---", "", "Body."].join("\n"),
+    );
+    const index = await buildWikiIndex(root);
+    // Without the nested read this page would be `note` (notes/ is not a standard folder).
+    expect(index.resolve("nested-type")!.type).toBe("concept");
+    // Fallback, not merge: the authored top-level value is the page's type.
+    expect(index.resolve("both-types")!.type).toBe("entity");
+  });
+
+  test("titleFrom is inert when unset — a name: page is still titled by its stem", async () => {
+    await mkdir(path.join(root, "notes"), { recursive: true });
+    await Bun.write(
+      path.join(root, "notes/feedback_depth.md"),
+      ["---", "name: Depth over brevity", "---", "", "Body."].join("\n"),
+    );
+    const index = await buildWikiIndex(root);
+    expect(index.readerConfig).toBeNull();
+    expect(index.resolve("feedback_depth")!.title).toBe("feedback_depth");
+  });
+
+  test('titleFrom: ["name"] titles from name:, and title: still wins', async () => {
+    await mkdir(path.join(root, "notes"), { recursive: true });
+    await Bun.write(
+      path.join(root, ".wiki-reader.json"),
+      JSON.stringify({ titleFrom: ["name", "metadata.name"] }),
+    );
+    await Bun.write(
+      path.join(root, "notes/feedback_depth.md"),
+      ["---", "name: Depth over brevity", "---", "", "Body."].join("\n"),
+    );
+    await Bun.write(
+      path.join(root, "notes/titled.md"),
+      ["---", "name: The name key", "title: The title key", "---", "", "Body."].join("\n"),
+    );
+    // A dotted key works too — it is just a key in the parsed map.
+    await Bun.write(
+      path.join(root, "notes/nested-name.md"),
+      ["---", "metadata:", "  name: Nested name", "---", "", "Body."].join("\n"),
+    );
+    // No key from the list present ⇒ the stem, unchanged.
+    await Bun.write(path.join(root, "notes/bare.md"), "# Bare\n\nBody.");
+    const index = await buildWikiIndex(root);
+    expect(index.resolve("feedback_depth")!.title).toBe("Depth over brevity");
+    expect(index.resolve("titled")!.title).toBe("The title key");
+    expect(index.resolve("nested-name")!.title).toBe("Nested name");
+    expect(index.resolve("bare")!.title).toBe("bare");
+    // The derived title joins byKey like any other title.
+    expect(index.resolve("Depth over brevity")!.relPath).toBe("notes/feedback_depth.md");
+  });
+
+  test("titleFrom of the wrong type warns and degrades to stem titles", async () => {
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
+      reset: true,
+    });
+    try {
+      await mkdir(path.join(root, "notes"), { recursive: true });
+      await Bun.write(
+        path.join(root, ".wiki-reader.json"),
+        JSON.stringify({ titleFrom: "name", typeLabels: { plan: "Plans" } }),
+      );
+      await Bun.write(
+        path.join(root, "notes/feedback_depth.md"),
+        ["---", "name: Depth over brevity", "---", "", "Body."].join("\n"),
+      );
+      const index = await buildWikiIndex(root);
+      expect(index.readerConfig?.titleFrom).toEqual([]);
+      // The valid half of the config survives, as with typeMap/typeLabels.
+      expect(index.readerConfig?.typeLabels.plan).toBe("Plans");
+      expect(index.resolve("feedback_depth")!.title).toBe("feedback_depth");
+      expect(
+        records.some((r) => r.level === "warning" && r.rawMessage.includes("titleFrom")),
+      ).toBe(true);
+    } finally {
+      await reset();
+    }
   });
 
   test("native .mdx pilot: discovered, frontmatter tags/type, outgoing links AND backlinks", async () => {

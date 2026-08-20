@@ -65,6 +65,22 @@ export interface WikiReaderConfig {
    * writable. See `WIKI_READONLY_ROOTS` in `readonly.ts`.
    */
   include: string[];
+  /**
+   * Frontmatter keys tried, in order, as the page title when the page carries no
+   * `title:`. Absent/empty ⇒ today's behaviour byte-for-byte (a title-less page
+   * is titled by its filename stem). Dotted keys work, since they are just keys
+   * in the parsed map (`"metadata.name"`).
+   *
+   * Opt-in per wiki rather than a global `name:` fallback for a measured reason:
+   * `~/.claude/projects` files carry `name:` and no `title:` (156 of 288 differ
+   * from the stem), but so do 6 pages spread across the other four registered
+   * roots — two of them melosys-kode-wiki archive plans whose `name:` drops the
+   * date prefix the filename carries. A global fallback would retitle those and,
+   * because `buildWikiIndex` registers `meta.title` into `byKey`, quietly change
+   * what a `[[wikilink]]` in someone else's wiki resolves to. Opt-in makes the
+   * blast radius on a wiki that does not ask for it exactly zero.
+   */
+  titleFrom: string[];
 }
 
 /**
@@ -477,9 +493,37 @@ export function resolveWikiRoot(explicit?: string): string {
 
 /**
  * Parse the flat YAML-subset frontmatter used by the wiki (scalars, quoted
- * strings, and single-line inline arrays). Returns {} when the file has no
- * leading `---` fence. Not a general YAML parser — the wiki's generator only
- * ever emits this shape.
+ * strings, and single-line inline arrays), plus ONE level of nesting emitted
+ * with dotted keys (`metadata: ` + `  type: project` ⇒ `fm["metadata.type"]`).
+ * Returns {} when the file has no leading `---` fence. Not a general YAML parser
+ * — the wiki's generator only ever emits this shape.
+ *
+ * The nested level exists for `~/.claude/projects` (the `memory` wiki), whose
+ * generator files `type`/`node_type` under a `metadata:` block: 212 of its 288
+ * pages keep their type there and reached the reader as `note` because the key
+ * regex is anchored at column 0.
+ *
+ * **The rule, exactly — every clause is load-bearing:**
+ *
+ *   - **One level only.** A child of a child is depth ≥ 2 and is ignored, along
+ *     with the depth-1 block-opener that would have parented it.
+ *   - **`parent.child`**, so a dotted key can never collide with a top-level one
+ *     (the key regex admits no `.`, so `metadata.type:` at column 0 matches
+ *     nothing and reaches no caller).
+ *   - **Scalar values only.** A block list (`  - x`) and a nested INLINE array
+ *     (`  tags: [a, b]`) are both dropped: no consumer reads a nested key today,
+ *     so the minimum additive emission is the one that cannot surprise one.
+ *   - **The parent key's own emission is UNCHANGED.** A value-less `sources:` /
+ *     `metadata:` line stays dropped exactly as before (`if (!raw) continue`),
+ *     and only its scalar children are ADDED. This is the clause that keeps the
+ *     change additive: `lint.ts`'s `checkMissingSources` reads `fm.sources` to
+ *     decide whether a concept page cites anything, and `huginn-nav/wiki` has
+ *     117 pages carrying an indented `sources:` list block. Making the parent
+ *     truthy would silently retire a live finding on every one of them.
+ *
+ * Callers read named keys only (`type`/`title`/`sources`/`updated`/`tags`/the
+ * plan fields), so nothing enumerates the map and the new keys are inert
+ * everywhere they are not asked for by name.
  */
 export function parseFrontmatter(content: string): Record<string, string | string[]> {
   if (!content.startsWith("---")) return {};
@@ -488,17 +532,46 @@ export function parseFrontmatter(content: string): Record<string, string | strin
   const body = content.slice(content.indexOf("\n") + 1, end);
 
   const out: Record<string, string | string[]> = {};
+  // The value-less top-level key whose children we are collecting, and the
+  // indent that defines depth 1 for that block (set by its first child line —
+  // the file picks its own indent width, and anything deeper than the first
+  // child is depth ≥ 2).
+  let parent: string | null = null;
+  let childIndent: number | null = null;
   for (const line of body.split("\n")) {
     const m = line.match(/^([A-Za-z_][\w-]*):\s*(.*)$/);
-    if (!m) continue;
-    const key = m[1]!;
-    const raw = m[2]!.trim();
-    if (!raw) continue;
-    if (raw.startsWith("[") && raw.endsWith("]")) {
-      out[key] = splitInlineArray(raw.slice(1, -1));
-    } else {
-      out[key] = unquote(raw);
+    if (m) {
+      const key = m[1]!;
+      const raw = m[2]!.trim();
+      // A value-less top-level key opens a nested block; a valued one closes any
+      // block that was open. Either way its OWN emission is what it always was.
+      parent = raw ? null : key;
+      childIndent = null;
+      if (!raw) continue;
+      if (raw.startsWith("[") && raw.endsWith("]")) {
+        out[key] = splitInlineArray(raw.slice(1, -1));
+      } else {
+        out[key] = unquote(raw);
+      }
+      continue;
     }
+    if (!line.trim()) continue; // blank line — neither closes a block nor parses
+    const nested = parent === null ? null : line.match(/^([ \t]+)([A-Za-z_][\w-]*):\s*(.*)$/);
+    if (!nested) {
+      // Anything else — a `- item`, a bare continuation, an unindented non-key
+      // line — ends the block. A list item is a non-scalar value by the rule
+      // above, and its siblings are not children we may read either.
+      if (!line.startsWith(" ") && !line.startsWith("\t")) parent = null;
+      continue;
+    }
+    const indent = nested[1]!.length;
+    if (childIndent === null) childIndent = indent;
+    if (indent !== childIndent) continue; // depth ≥ 2 (or a dedent we won't guess at)
+    const raw = nested[3]!.trim();
+    // Scalar only: a value-less child opens a depth-2 block (ignored by the
+    // indent rule above) and an inline array is not a scalar.
+    if (!raw || (raw.startsWith("[") && raw.endsWith("]"))) continue;
+    out[`${parent}.${nested[2]!}`] = unquote(raw);
   }
   return out;
 }
@@ -848,10 +921,21 @@ async function readWikiReaderConfig(root: string): Promise<WikiReaderConfig | nu
       root,
     });
   }
+  // Same shape again: a bad `titleFrom` degrades to "no fallback keys" ⇒ stem
+  // titles, which is what every wiki without the key already gets.
+  if (obj.titleFrom !== undefined && !isStringArray(obj.titleFrom)) {
+    log.warn("{file} at {root}: titleFrom is not an array of frontmatter keys — ignoring it", {
+      file: WIKI_READER_CONFIG_FILE,
+      root,
+    });
+  }
   return {
     typeMap: isStringRecord(obj.typeMap) ? obj.typeMap : {},
     typeLabels: isStringRecord(obj.typeLabels) ? obj.typeLabels : {},
     include: isStringArray(obj.include) ? normalizeIncludeGlobs(obj.include) : [],
+    titleFrom: isStringArray(obj.titleFrom)
+      ? obj.titleFrom.map((k) => k.trim()).filter((k) => k.length > 0)
+      : [],
   };
 }
 
@@ -921,13 +1005,19 @@ async function readWikiTrails(root: string): Promise<WikiTrail[]> {
  * its `.wiki-reader.json` typeMap/typeLabels) → a typeMap lookup on the first path
  * segment (after stripping `life/`) → the built-in standard-folder fallback → `note`.
  * `.html` explainers are hardcoded `explainer` in `buildExplainerMeta`, never here.
+ *
+ * A top-level `type:` is read first and `metadata.type` (the nested level
+ * `parseFrontmatter` now emits) only when there is no top-level key at all — the
+ * memory wiki writes the second shape on 212 of its 288 pages. It is a fallback,
+ * not a merge: a page carrying both means the top-level one is the authored value.
  */
 function typeFromFrontmatter(
   fm: Record<string, string | string[]>,
   relPath: string,
   config: WikiReaderConfig | null,
 ): WikiPageType {
-  const raw = typeof fm.type === "string" ? fm.type : "";
+  const declared = fm.type ?? fm["metadata.type"];
+  const raw = typeof declared === "string" ? declared : "";
   if (VALID_TYPES.includes(raw)) return raw;
   if (raw === "analyses") return "analysis";
   // An explicit frontmatter type the wiki itself declares (a typeMap target or a
@@ -952,6 +1042,32 @@ function typeFromFrontmatter(
   if (folder === "entities") return "entity";
   if (folder === "analyses") return "analysis";
   return "note";
+}
+
+/**
+ * Resolve a page's title: frontmatter `title:` → the wiki's own `titleFrom` keys,
+ * in the order it declares them → the filename stem (today's fallback).
+ *
+ * `title:` still wins outright — `titleFrom` is a fallback for pages that have no
+ * title, not an override — and with no `titleFrom` declared this is the exact
+ * expression it replaced. `.html` explainers sniff their own `<title>` in
+ * `buildExplainerMeta` and never reach here.
+ */
+function titleFromFrontmatter(
+  fm: Record<string, string | string[]>,
+  name: string,
+  config: WikiReaderConfig | null,
+): string {
+  if (typeof fm.title === "string" && fm.title) return fm.title;
+  for (const key of config?.titleFrom ?? []) {
+    // Own-key guard: a declared key of `constructor` must not read the prototype.
+    if (!Object.prototype.hasOwnProperty.call(fm, key)) continue;
+    const v = fm[key];
+    // Scalar only — an inline-array `name:` is not a title, and joining one would
+    // invent a string the page does not carry.
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  return name;
 }
 
 function asStringArray(v: string | string[] | undefined): string[] {
@@ -1254,7 +1370,7 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
       const name = path.basename(relPath).replace(/\.mdx?$/i, "");
       const meta: WikiPageMeta = {
         name,
-        title: typeof fm.title === "string" && fm.title ? fm.title : name,
+        title: titleFromFrontmatter(fm, name, readerConfig),
         type: typeFromFrontmatter(fm, relPath, readerConfig),
         domain: relPath.startsWith("life/") ? "life" : "ai",
         tags: asStringArray(fm.tags),
