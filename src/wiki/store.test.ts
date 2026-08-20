@@ -54,6 +54,198 @@ describe("parseFrontmatter", () => {
     );
     expect(fm.sources).toEqual(["[[A, with comma]]", "[[B]]"]);
   });
+
+  test("emits one nested level as parent.child, leaving the parent key dropped", () => {
+    // The memory wiki's exact shape — note the trailing space after `metadata:`,
+    // which is what the real generator writes.
+    const fm = parseFrontmatter(
+      [
+        "---",
+        "name: netgate-2100-bridge-project",
+        'description: "Ongoing migration"',
+        "metadata: ",
+        "  node_type: memory",
+        "  type: project",
+        "  originSessionId: 59823514-1b43-4268-879b-e1adc39808ad",
+        "---",
+        "",
+        "Body.",
+      ].join("\n"),
+    );
+    expect(fm["metadata.type"]).toBe("project");
+    expect(fm["metadata.node_type"]).toBe("memory");
+    expect(fm["metadata.originSessionId"]).toBe("59823514-1b43-4268-879b-e1adc39808ad");
+    // The parent key's own emission is unchanged: a value-less key is still dropped.
+    expect(fm.metadata).toBeUndefined();
+    // Top-level keys are unaffected.
+    expect(fm.name).toBe("netgate-2100-bridge-project");
+    expect(fm.description).toBe("Ongoing migration");
+  });
+
+  test("a sources: block list stays invisible — no fm.sources, no sources.* key", () => {
+    // The indented scalar-list spelling of a `sources:` block. `lint.ts`'s
+    // missing-sources check reads `fm.sources`, so if the parent became truthy
+    // (or the list items became children) that finding would silently retire.
+    // huginn-nav's 117 pages carry the MAPPING spelling — see the test below.
+    const fm = parseFrontmatter(
+      [
+        "---",
+        "type: concept",
+        "title: Kafka",
+        "sources:",
+        '  - "[[Kafka docs]]"',
+        '  - "[[Confluent blog]]"',
+        "updated: 2026-06-01",
+        "---",
+        "",
+        "Body.",
+      ].join("\n"),
+    );
+    expect(fm.sources).toBeUndefined();
+    expect(Object.keys(fm).some((k) => k.startsWith("sources."))).toBe(false);
+    // The keys after the block still parse — the list did not swallow the fence.
+    expect(fm.updated).toBe("2026-06-01");
+    expect(fm.type).toBe("concept");
+  });
+
+  test("nesting is one level and scalar-only: depth 2 and inline arrays are ignored", () => {
+    const fm = parseFrontmatter(
+      [
+        "---",
+        "metadata:",
+        "  type: project",
+        "  tags: [a, b]", // inline array — not a scalar
+        "  nested:", // opens depth 2
+        "    deep: value", // depth 2 — ignored
+        "    deeper: [x]",
+        "top: kept",
+        "---",
+        "",
+      ].join("\n"),
+    );
+    expect(fm["metadata.type"]).toBe("project");
+    expect(fm["metadata.tags"]).toBeUndefined();
+    expect(fm["metadata.nested"]).toBeUndefined();
+    expect(fm["metadata.nested.deep"]).toBeUndefined();
+    expect(fm["nested.deep"]).toBeUndefined();
+    expect(Object.keys(fm).some((k) => k.includes("deep"))).toBe(false);
+    expect(fm.top).toBe("kept");
+  });
+
+  test("an indented list item turns the block into a list — no sibling scalar leaks out", () => {
+    // Measured before the rule: `{"sources.extra": "leaked"}`. A `- item` did NOT
+    // end the block (only an unindented non-key line did), so the scalar sibling
+    // after it was emitted as a child of a key whose value is a list.
+    const fm = parseFrontmatter(
+      ["---", "sources:", "  - a", "  extra: leaked", "---", ""].join("\n"),
+    );
+    expect(fm["sources.extra"]).toBeUndefined();
+    expect(Object.keys(fm).some((k) => k.startsWith("sources."))).toBe(false);
+  });
+
+  test("a list OF MAPPINGS leaks no last-wins child", () => {
+    // Measured before the rule: `{"sources.url": "w"}` — the LAST mapping's url,
+    // silently standing in for a list of them.
+    const fm = parseFrontmatter(
+      [
+        "---",
+        "sources:",
+        "  - name: X",
+        "    url: u",
+        "  - name: Z",
+        "    url: w",
+        "---",
+        "",
+      ].join("\n"),
+    );
+    expect(Object.keys(fm).some((k) => k.startsWith("sources."))).toBe(false);
+  });
+
+  test("a metadata: list of mappings does not become metadata.type", () => {
+    // Measured before the rule: `metadata.type: concept` — which CHANGES the
+    // rendered page type, off a key the page does not carry.
+    const fm = parseFrontmatter(
+      ["---", "metadata:", "  - node: x", "    type: concept", "---", ""].join("\n"),
+    );
+    expect(fm["metadata.type"]).toBeUndefined();
+    expect(Object.keys(fm).some((k) => k.startsWith("metadata."))).toBe(false);
+  });
+
+  test("huginn-nav's nested sources MAPPING stays invisible, and the fence survives it", () => {
+    // The real shape on those 117 pages: a MAPPING (inline arrays + lists of flow
+    // mappings), not the indented scalar list. `lint.ts`'s missing-sources check
+    // reads `fm.sources`, so nothing here may become truthy.
+    const fm = parseFrontmatter(
+      [
+        "---",
+        "type: concept",
+        "title: Prosessinstanser",
+        "sources:",
+        '  umbrella: ["[[Kilder — Confluence]]"]',
+        "  confluence: []",
+        "  jira:",
+        '    - {key: "MELOSYS-4025", summary: "MDC for saksflyt"}',
+        "  legal: []",
+        "updated: 2026-05-11",
+        "---",
+        "",
+      ].join("\n"),
+    );
+    expect(fm.sources).toBeUndefined();
+    expect(Object.keys(fm).some((k) => k.startsWith("sources."))).toBe(false);
+    expect(fm.updated).toBe("2026-05-11");
+  });
+
+  test("a comment line does not end the block, at column 0 or indented", () => {
+    // Measured before the rule: `{}` — a column-0 `#` line read as an unindented
+    // non-key and closed the block, dropping every child after it.
+    const fm = parseFrontmatter(
+      [
+        "---",
+        "metadata:",
+        "# a column-0 comment",
+        "  # an indented comment",
+        "  type: project",
+        "---",
+        "",
+      ].join("\n"),
+    );
+    expect(fm["metadata.type"]).toBe("project");
+  });
+
+  test("tabs are not indentation — a tab-led line is neither a child nor mis-measured", () => {
+    const tabbed = parseFrontmatter(
+      ["---", "metadata:", "\ttype: project", "---", ""].join("\n"),
+    );
+    expect(tabbed["metadata.type"]).toBeUndefined();
+    // Mixed tab/space: the tab-led line used to set a 1-CHAR childIndent, which
+    // then dropped every 2-space sibling under it as "depth ≥ 2".
+    const mixed = parseFrontmatter(
+      ["---", "metadata:", "\tnode_type: memory", "  type: project", "---", ""].join("\n"),
+    );
+    expect(mixed["metadata.node_type"]).toBeUndefined();
+    expect(mixed["metadata.type"]).toBeUndefined();
+  });
+
+  test("scalars emitted BEFORE the list marker stay — the block is dropped forward", () => {
+    // Landed-as-is: the rule is "emit nothing MORE for this block", not a
+    // retroactive delete. 0 occurrences measured across the six roots.
+    const fm = parseFrontmatter(
+      ["---", "metadata:", "  type: project", "  - x", "  extra: leaked", "---", ""].join("\n"),
+    );
+    expect(fm["metadata.type"]).toBe("project");
+    expect(fm["metadata.extra"]).toBeUndefined();
+  });
+
+  test("a nested block under a VALUED key is not collected", () => {
+    // `metadata: inline` carries its own value, so the indented lines below it
+    // are not children of an open block — they belong to a shape we don't parse.
+    const fm = parseFrontmatter(
+      ["---", "metadata: inline", "  type: project", "---", ""].join("\n"),
+    );
+    expect(fm.metadata).toBe("inline");
+    expect(fm["metadata.type"]).toBeUndefined();
+  });
 });
 
 describe("splitInlineArray", () => {
@@ -714,6 +906,140 @@ describe("buildWikiIndex", () => {
     expect(index.readerConfig).toBeNull();
     expect(index.resolve("harness engineering")!.type).toBe("concept");
     expect(index.resolve("index")!.type).toBe("note");
+  });
+
+  test("nested metadata.type resolves the page type; a top-level type: still wins", async () => {
+    await mkdir(path.join(root, "notes"), { recursive: true });
+    await Bun.write(
+      path.join(root, "notes/nested-type.md"),
+      ["---", "metadata: ", "  type: concept", "---", "", "Body."].join("\n"),
+    );
+    await Bun.write(
+      path.join(root, "notes/both-types.md"),
+      ["---", "type: entity", "metadata:", "  type: concept", "---", "", "Body."].join("\n"),
+    );
+    const index = await buildWikiIndex(root);
+    // Without the nested read this page would be `note` (notes/ is not a standard folder).
+    expect(index.resolve("nested-type")!.type).toBe("concept");
+    // Fallback, not merge: the authored top-level value is the page's type.
+    expect(index.resolve("both-types")!.type).toBe("entity");
+  });
+
+  test("an UNUSABLE top-level type: falls through to metadata.type", async () => {
+    // Presence-based (`fm.type ?? fm["metadata.type"]`) reads a top-level key
+    // that resolves to nothing as an answer and never looks at the nested one,
+    // so all three of these rendered as `note` with the real type one key away.
+    await mkdir(path.join(root, "notes"), { recursive: true });
+    await Bun.write(
+      path.join(root, "notes/empty-type.md"),
+      ["---", 'type: ""', "metadata:", "  type: concept", "---", "", "Body."].join("\n"),
+    );
+    await Bun.write(
+      path.join(root, "notes/bogus-type.md"),
+      ["---", "type: bogus", "metadata:", "  type: concept", "---", "", "Body."].join("\n"),
+    );
+    await Bun.write(
+      path.join(root, "notes/array-type.md"),
+      ["---", "type: [a, b]", "metadata:", "  type: concept", "---", "", "Body."].join("\n"),
+    );
+    // Neither level usable ⇒ the folder fallback, exactly as before.
+    await Bun.write(
+      path.join(root, "notes/both-bogus.md"),
+      ["---", "type: bogus", "metadata:", "  type: alsobogus", "---", "", "Body."].join("\n"),
+    );
+    const index = await buildWikiIndex(root);
+    expect(index.resolve("empty-type")!.type).toBe("concept");
+    expect(index.resolve("bogus-type")!.type).toBe("concept");
+    expect(index.resolve("array-type")!.type).toBe("concept");
+    expect(index.resolve("both-bogus")!.type).toBe("note");
+  });
+
+  test("a wiki-DECLARED top-level type is usable, so it still beats metadata.type", async () => {
+    // The acceptance check is the whole one, not just the five standard types:
+    // a value the wiki declares in typeMap/typeLabels is authored, and must not
+    // be treated as unusable and overridden by the nested key.
+    await mkdir(path.join(root, "notes"), { recursive: true });
+    await Bun.write(
+      path.join(root, ".wiki-reader.json"),
+      JSON.stringify({ typeLabels: { plan: "Plans" } }),
+    );
+    await Bun.write(
+      path.join(root, "notes/declared.md"),
+      ["---", "type: plan", "metadata:", "  type: concept", "---", "", "Body."].join("\n"),
+    );
+    const index = await buildWikiIndex(root);
+    expect(index.resolve("declared")!.type).toBe("plan");
+  });
+
+  test("titleFrom is inert when unset — a name: page is still titled by its stem", async () => {
+    await mkdir(path.join(root, "notes"), { recursive: true });
+    await Bun.write(
+      path.join(root, "notes/feedback_depth.md"),
+      ["---", "name: Depth over brevity", "---", "", "Body."].join("\n"),
+    );
+    const index = await buildWikiIndex(root);
+    expect(index.readerConfig).toBeNull();
+    expect(index.resolve("feedback_depth")!.title).toBe("feedback_depth");
+  });
+
+  test('titleFrom: ["name"] titles from name:, and title: still wins', async () => {
+    await mkdir(path.join(root, "notes"), { recursive: true });
+    await Bun.write(
+      path.join(root, ".wiki-reader.json"),
+      JSON.stringify({ titleFrom: ["name", "metadata.name"] }),
+    );
+    await Bun.write(
+      path.join(root, "notes/feedback_depth.md"),
+      ["---", "name: Depth over brevity", "---", "", "Body."].join("\n"),
+    );
+    await Bun.write(
+      path.join(root, "notes/titled.md"),
+      ["---", "name: The name key", "title: The title key", "---", "", "Body."].join("\n"),
+    );
+    // A dotted key works too — it is just a key in the parsed map.
+    await Bun.write(
+      path.join(root, "notes/nested-name.md"),
+      ["---", "metadata:", "  name: Nested name", "---", "", "Body."].join("\n"),
+    );
+    // No key from the list present ⇒ the stem, unchanged.
+    await Bun.write(path.join(root, "notes/bare.md"), "# Bare\n\nBody.");
+    const index = await buildWikiIndex(root);
+    expect(index.resolve("feedback_depth")!.title).toBe("Depth over brevity");
+    expect(index.resolve("titled")!.title).toBe("The title key");
+    expect(index.resolve("nested-name")!.title).toBe("Nested name");
+    expect(index.resolve("bare")!.title).toBe("bare");
+    // The derived title joins byKey like any other title.
+    expect(index.resolve("Depth over brevity")!.relPath).toBe("notes/feedback_depth.md");
+  });
+
+  test("titleFrom of the wrong type warns and degrades to stem titles", async () => {
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
+      reset: true,
+    });
+    try {
+      await mkdir(path.join(root, "notes"), { recursive: true });
+      await Bun.write(
+        path.join(root, ".wiki-reader.json"),
+        JSON.stringify({ titleFrom: "name", typeLabels: { plan: "Plans" } }),
+      );
+      await Bun.write(
+        path.join(root, "notes/feedback_depth.md"),
+        ["---", "name: Depth over brevity", "---", "", "Body."].join("\n"),
+      );
+      const index = await buildWikiIndex(root);
+      expect(index.readerConfig?.titleFrom).toEqual([]);
+      // The valid half of the config survives, as with typeMap/typeLabels.
+      expect(index.readerConfig?.typeLabels.plan).toBe("Plans");
+      expect(index.resolve("feedback_depth")!.title).toBe("feedback_depth");
+      expect(
+        records.some((r) => r.level === "warning" && r.rawMessage.includes("titleFrom")),
+      ).toBe(true);
+    } finally {
+      await reset();
+    }
   });
 
   test("native .mdx pilot: discovered, frontmatter tags/type, outgoing links AND backlinks", async () => {
