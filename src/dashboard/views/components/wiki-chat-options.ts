@@ -90,6 +90,7 @@ import {
   type ChatTarget,
 } from "./wiki-chat-target.ts";
 import { readActiveWikiName, withWikiParam } from "./wiki-param.ts";
+import { wikiReadonlyWikiFlag } from "./wiki-readonly-client.ts";
 
 // ── The shell port ────────────────────────────────────────────────────
 
@@ -394,6 +395,13 @@ function openChatOptions(
     links?: string[];
   } = {},
 ): void {
+  // A read-only wiki (`WIKI_READONLY_ROOTS`) seeds no chat thread — the route
+  // 403s all three modes before it resolves a bot. The capture-phase guard
+  // cancels the clicks that reach the four openers; this is the gate on the
+  // FUNCTION, so a caller that never dispatched a click (a keyboard shortcut, a
+  // future programmatic opener) cannot walk past it into a dialog whose only
+  // outcome is a refusal.
+  if (wikiReadonlyWikiFlag()) return;
   let question = "";
   let turn: ChatOptTurn | null = null;
   const pinned = typeof opts.pinnedQuestion === "string";
@@ -982,6 +990,11 @@ async function submitChatOptions(
   opts: { existingThreadId?: string; forceNew?: boolean } = {},
 ): Promise<void> {
   const state = chatOpt;
+  // Belt to the opener's braces: the dialog cannot be opened on a read-only wiki,
+  // so this can only fire if the flag flipped under an open panel — but it is the
+  // statement that actually spends the thread + the seeded model turn, so it
+  // carries its own check rather than trusting how it was reached.
+  if (wikiReadonlyWikiFlag()) { if (win) win.close(); return; }
   if (!state || state.sending || !state.target?.botName) { if (win) win.close(); return; }
   // Read the question from state — the dialog's own field in every mode, kept
   // current by the `input` delegation (and fixed at open when pinned).

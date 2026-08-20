@@ -32,13 +32,50 @@ import { getUserSettings } from "../../db/user-settings.ts";
 import { listConnectors, createConnector, updateConnector, deleteConnector } from "../../db/connectors.ts";
 import type { ConnectorType } from "../../bots/config.ts";
 import { parseIntParam, isValidUuid } from "./route-utils.ts";
-import { isWikiReadonly, WIKI_READONLY_REASON } from "../../wiki/readonly.ts";
+import {
+  isReadonlyWikiRoot,
+  isWikiReadonly,
+  wikiReadonlyRootReason,
+  WIKI_READONLY_REASON,
+} from "../../wiki/readonly.ts";
+import { findWiki } from "../../wiki/registry.ts";
+import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 // Shared with the SCHEDULED path (`runChecker` in src/watchers/runner.ts) so the
 // manual trigger and the weekly run can never disagree about which watcher types
 // draft into a wiki.
 import { shouldSkipWikiDraftingRun } from "../../watchers/wiki-drafting.ts";
 
 const log = getLog("dashboard");
+
+/**
+ * The read-only root a wiki-drafting watcher would draft INTO, or null.
+ *
+ * The two drafting types name their wiki differently and there is no shared
+ * accessor: `wiki-gardener` drafts into the OWNING BOT's `wikiDir`, while
+ * `consolidation-gardener` drafts into the registry wiki named by
+ * `config.wiki` (which need not be a bot wiki at all — mimir is the live case).
+ * Both checkers skip a read-only root on the scheduled path; this is the same
+ * question asked one layer up, so the manual trigger can answer honestly.
+ *
+ * Every other watcher type returns null — the type gate is
+ * `shouldSkipWikiDraftingRun`'s set, and nothing here re-decides it.
+ */
+function readonlyWikiRootForWatcher(watcher: {
+  type: string;
+  botName: string;
+  config?: Record<string, unknown> | null;
+}): string | null {
+  let root: string | undefined;
+  if (watcher.type === "wiki-gardener") {
+    root = discoverAllBots().find((b) => b.name === watcher.botName)?.wikiDir;
+  } else if (watcher.type === "consolidation-gardener") {
+    const name = watcher.config?.wiki;
+    if (typeof name === "string" && name.trim()) {
+      root = findWiki(getWikiRegistry(), name)?.root;
+    }
+  }
+  return root && isReadonlyWikiRoot(root) ? root : null;
+}
 
 export function registerDataRoutes(app: Hono): void {
   app.get("/api/openapi.json", (c) => c.json(spec));
@@ -405,6 +442,18 @@ export function registerDataRoutes(app: Hono): void {
           type: watcher.type,
         });
         return c.json({ error: WIKI_READONLY_REASON, readonly: true }, 403);
+      }
+      // …and the per-wiki mechanism. Both drafting checkers already skip a
+      // read-only root on the SCHEDULED path, so without this the click would
+      // "succeed", queue a forced run, and the run would quietly do nothing —
+      // an honest 403 says why at the moment of the click instead.
+      const readonlyRoot = readonlyWikiRootForWatcher(watcher);
+      if (readonlyRoot) {
+        log.info("Watcher trigger refused for {id} ({type}) — wiki root is registered read-only", {
+          id,
+          type: watcher.type,
+        });
+        return c.json({ error: wikiReadonlyRootReason(readonlyRoot), readonly: true }, 403);
       }
       await forceRunWatcher(id);
       return c.json({ ok: true, queued: true });

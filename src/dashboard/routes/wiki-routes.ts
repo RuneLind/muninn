@@ -2,7 +2,7 @@ import path from "node:path";
 import type { Context, Hono } from "hono";
 import type { Config } from "../../config.ts";
 import { renderWikiPage } from "../views/wiki-page.ts";
-import { getWikiIndex, normalizeRelPath, readWikiPage, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
+import { getWikiIndex, normalizeRelPath, readWikiPage, resolveWikiRoot, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
 import { projectAtlas } from "../../wiki/atlas.ts";
 import { getSemanticOverlay } from "../../wiki/atlas-semantic.ts";
 import {
@@ -204,15 +204,36 @@ const readonlyRefusal = (c: Context) => sharedReadonlyRefusal(c, log);
  *
  * Enforcement reads the ROOT, never `entry.readonly` — the registry flag is
  * presentation, and a stale memo must not be able to open the guard.
+ *
+ * **And it reads the root even when there is no ENTRY.** `resolveWikiRequest`
+ * returns `entry: undefined` for the `WIKI_DIR` env-override shape (a bare
+ * `/wiki` on an instance that sets the var), and those routes go on to serve
+ * `resolveWikiRoot(undefined)` — so keying the refusal on the entry made the
+ * guard fail OPEN on exactly the root an operator pointed the env var at. The
+ * fallback resolves the same root the store would, through the same function.
+ *
+ * `optionalResponder` exists for `/api/wiki/digest`, whose refusal body is not
+ * the shared `{error}` shape (the What's-new card reads `error` as "generation
+ * FAILED — keep the old digest and offer a retry", and a policy refusal is not a
+ * failure). It gets the resolved wiki label so its own body can name it, rather
+ * than re-spelling the resolution and drifting from this one.
  */
-function egressRefusal(c: Context, entry: WikiRegistryEntry | undefined) {
-  if (!entry || !isReadonlyWikiRoot(entry.root)) return null;
+function egressRefusal(
+  c: Context,
+  entry: WikiRegistryEntry | undefined,
+  optionalResponder?: (wikiLabel: string, reason: string) => Response,
+) {
+  const root = entry?.root ?? resolveWikiRoot(undefined);
+  if (!isReadonlyWikiRoot(root)) return null;
+  const wiki = entry?.name ?? "";
   log.info("Read-only wiki {wiki} refused {method} {path} (no model calls)", {
-    wiki: entry.name,
+    wiki: wiki || "(WIKI_DIR override)",
     method: c.req.method,
     path: new URL(c.req.url).pathname,
   });
-  return c.json({ error: wikiNoEgressReason(entry.name), readonly: true }, 403);
+  const reason = wikiNoEgressReason(wiki);
+  if (optionalResponder) return optionalResponder(wiki, reason);
+  return c.json({ error: reason, readonly: true }, 403);
 }
 
 /**
@@ -1010,11 +1031,18 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         });
       }
     }
+    // Is the wiki being rendered registered read-only? Keyed on the ROOT that
+    // will actually be served — including the `WIKI_DIR` env-override shape,
+    // where there is no entry at all and an `entry`-keyed read would render a
+    // page whose client half thinks the wiki is writable while every route 403s.
+    const readonlyWiki = isReadonlyWikiRoot(entry?.root ?? resolveWikiRoot(undefined));
     // Resolved synthesis bot for the Ask tab's "Answered by …" line — same
     // owner-routing the ask/digest handlers use, computed at render time so
-    // the tab can say who will answer before a question is asked.
+    // the tab can say who will answer before a question is asked. Skipped on a
+    // read-only wiki: nothing there will ever answer, so naming a bot (and a
+    // "research-bot fallback" origin) describes a call that cannot happen.
     let askBot: { bot: string; connector: string; model: string; origin: "pinned" | "owner" | "fallback" } | null = null;
-    if (entry) {
+    if (entry && !readonlyWiki) {
       const { bot, origin } = resolveWikiSynthesisBot(entry, discoverAllBots());
       if (bot) {
         askBot = {
@@ -1047,7 +1075,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         askBot,
         // Read from the ROOT, not `entry.readonly`: the render and the seams then
         // answer the same question the same way even if the memo were stale.
-        readonlyWiki: !!entry && isReadonlyWikiRoot(entry.root),
+        readonlyWiki,
       }),
     );
   });
@@ -1324,13 +1352,16 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     // What's-new card branches on `data.error` to mean "generation failed — keep
     // the old digest and offer a retry", and a policy refusal is not a failure.
     // `digest: null` with no `error` is the card's own "this wiki has none" state,
-    // so it hides — while the 403 status still makes the refusal observable.
-    if (isReadonlyWikiRoot(entry.root)) {
-      log.info("Read-only wiki {wiki} refused GET /api/wiki/digest (no model calls)", {
-        wiki: entry.name,
-      });
-      return c.json({ digest: null, readonly: true, reason: wikiNoEgressReason(entry.name) }, 403);
-    }
+    // so it hides — while the 403 STATUS still makes the refusal observable, and
+    // is what `wiki-start-cards.ts` keys its own suppression on.
+    //
+    // It goes through the shared `egressRefusal` with a body responder rather
+    // than re-spelling the check: the decision, the root fallback and the log
+    // line are the same on every route, only the body differs.
+    const digestEgress = egressRefusal(c, entry, (_wiki, reason) =>
+      c.json({ digest: null, readonly: true, reason }, 403),
+    );
+    if (digestEgress) return digestEgress;
 
     const logMtimeMs = await readLogMtimeMs(entry.root);
     if (logMtimeMs === null) return c.json({ digest: null });
@@ -1476,6 +1507,14 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     if (unknownWiki || !entry) {
       return c.json({ collections: [], error: "no wiki configured for that name" });
     }
+    // Per-wiki egress guard. Reindexing ships every page BODY to huginn's
+    // embedder — the one non-model way this wiki's content leaves the machine.
+    // It is collection-gated today (a read-only root with no `wikiCollections`
+    // returns the clean error below anyway), which is exactly why the guard is
+    // worth stating: the gate is one `WIKI_EXTRA` third segment away from being
+    // open, and that segment is a cosmetic-looking edit.
+    const reindexEgress = egressRefusal(c, entry);
+    if (reindexEgress) return reindexEgress;
     const collections = entry.collections ?? [];
     if (collections.length === 0) {
       return c.json({ collections: [], error: "no search collection connected for this wiki" });

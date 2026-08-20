@@ -88,7 +88,69 @@ export const WIKI_READONLY_EGRESS_SELECTOR = [
   // Fact-check claim retry (row ↻ + the batch bar).
   "[data-claim-retry-btn]",
   "#wikiClaimRetryAll",
+  // The two text inputs whose Enter key is itself an egress trigger. They are in
+  // the SELECTOR (not only in the disable list below) because `disabled` is a
+  // per-render property and the follow-up bar is re-rendered on every turn
+  // switch, SSE terminal event and repaint — a body-class selector is the only
+  // half that survives all of them.
+  "#wikiAskInput",
+  "#wikiFollowupInput",
 ].join(",");
+
+/**
+ * The event types the guard cancels on.
+ *
+ * `click` ALONE is not enough, and that is the whole reason this list exists.
+ * Three of the egress controls are activated from a **`mousedown`** delegate
+ * (`#wikiExplainBtn`, `#wikiFactcheckBtn`, `#wikiFactcheckArticleBtn` — mousedown
+ * so `preventDefault` can keep the text selection alive), which fires BEFORE
+ * `click` and had already spent the call by the time the click listener ran. And
+ * two are reachable from the **keyboard** with no pointer event at all (Enter in
+ * the Ask box and in the follow-up bar). A capture-phase listener per type,
+ * sharing one selector, is what makes the guard match the handlers.
+ */
+export const WIKI_READONLY_GUARDED_EVENTS = ["mousedown", "click", "keydown"] as const;
+
+/**
+ * Does this key ACTIVATE a control? Enter and Space are the two the platform
+ * gives a button for free, and Enter is what the Ask/follow-up inputs bind. `" "`
+ * is the modern spelling, `"Spacebar"` the legacy one some IMEs still emit.
+ *
+ * Every other key is let through deliberately: cancelling Tab would trap focus,
+ * and cancelling character keys on an input the reader may still want to select
+ * text in buys nothing — the activation is what spends the model call.
+ */
+export function wikiReadonlyKeyActivates(key: string): boolean {
+  return key === "Enter" || key === " " || key === "Spacebar";
+}
+
+/**
+ * Inputs that get `disabled` + a read-only placeholder under
+ * `body.wiki-readonly-wiki`. The cancelled keydown above already stops the
+ * submit; this is what makes the box LOOK like what it is instead of accepting
+ * a question it will silently refuse to send.
+ *
+ * Kept as exported data (not a literal inside the installer) so the render-side
+ * copies — the server-rendered `#wikiAskInput` and the client-rendered follow-up
+ * bar, both of which set the same attributes at paint time — can be checked
+ * against one list.
+ */
+export const WIKI_READONLY_DISABLED_INPUTS = ["#wikiAskInput", "#wikiFollowupInput"];
+
+/** The placeholder those inputs carry on a read-only wiki. */
+export const WIKI_READONLY_INPUT_PLACEHOLDER = "This wiki is read-only — no questions are sent";
+
+/** The one-line banner under the breadcrumb. States BOTH halves of the guarantee
+ *  — never written, never sent to a model — because "read-only" on its own reads
+ *  as "you can still ask questions about it", which is the half that matters
+ *  most on the root this exists for. */
+export const WIKI_READONLY_BANNER_TEXT =
+  "This wiki is registered read-only — never written, never sent to a model";
+
+/** The Ask-rail hint on a read-only wiki, replacing "Ask a question and this wiki
+ *  answers…" — a sentence describing a feature every route here 403s. */
+export const WIKI_READONLY_ASK_HINT =
+  "Asking is disabled on this wiki — its pages are never sent to a model or to the web.";
 
 /** The one sentence shown when a blocked control is clicked. Mirrors the server's
  *  `WIKI_READONLY_REASON` in substance; kept here so the browser bundle imports
@@ -175,19 +237,43 @@ export function installWikiReadonlyGuard(): void {
   if (perWiki) body.classList.add("wiki-readonly-wiki");
   const message = wikiBlockedMessageFor(instance, perWiki);
 
-  document.addEventListener(
-    "click",
-    (e) => {
-      if (!isBlockedByReadonly(e.target as Element | null, selector)) return;
-      e.preventDefault();
-      e.stopPropagation();
-      // The handlers are delegated on `document` too, so stopping propagation is
-      // not enough on its own — the other listener on the SAME node still runs.
-      e.stopImmediatePropagation();
-      showReadonlyNote(message);
-    },
-    true,
-  );
+  for (const type of WIKI_READONLY_GUARDED_EVENTS) {
+    document.addEventListener(
+      type,
+      (e) => {
+        // A keydown that does not activate anything (Tab, arrows, typing) is
+        // none of the guard's business — see `wikiReadonlyKeyActivates`.
+        if (type === "keydown" && !wikiReadonlyKeyActivates((e as KeyboardEvent).key)) return;
+        if (!isBlockedByReadonly(e.target as Element | null, selector)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        // The handlers are delegated on `document` too, so stopping propagation is
+        // not enough on its own — the other listener on the SAME node still runs.
+        e.stopImmediatePropagation();
+        showReadonlyNote(message);
+      },
+      true,
+    );
+  }
+  if (perWiki) applyWikiReadonlyInputLocks();
+}
+
+/**
+ * Disable the Ask / follow-up inputs and restate why in their placeholder.
+ * Idempotent, and safe to call when the page has neither.
+ *
+ * Exported because the follow-up bar is re-rendered from `askFollowupHtml` on
+ * every repaint, which would resurrect an enabled input — that render sets the
+ * same two attributes itself, and this call is the boot-time and belt-and-braces
+ * half for anything painted before (or outside) it.
+ */
+export function applyWikiReadonlyInputLocks(): void {
+  for (const sel of WIKI_READONLY_DISABLED_INPUTS) {
+    const el = document.querySelector(sel) as (HTMLInputElement | HTMLTextAreaElement) | null;
+    if (!el) continue;
+    el.disabled = true;
+    el.placeholder = WIKI_READONLY_INPUT_PLACEHOLDER;
+  }
 }
 
 /** A single transient toast — one node, reused, so repeated clicks don't stack. */
@@ -217,6 +303,16 @@ export function wikiReadonlyStyles(): string {
     }
     body.wiki-readonly-wiki ${WIKI_READONLY_EGRESS_SELECTOR.split(",").join(", body.wiki-readonly-wiki ")} {
       opacity: 0.45; cursor: not-allowed; filter: grayscale(0.6);
+    }
+    /* Rendered always, shown only under the per-wiki class — see the markup
+       comment in wiki-page.ts for why this is CSS rather than a server branch. */
+    .wiki-readonly-banner { display: none; }
+    body.wiki-readonly-wiki .wiki-readonly-banner {
+      display: block;
+      margin: 0 0 10px; padding: 6px 10px; border-radius: 6px;
+      font-size: 12px; line-height: 1.4;
+      color: var(--text-secondary); background: var(--bg-surface);
+      border: 1px solid var(--status-warning);
     }
     .wiki-readonly-note {
       position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);

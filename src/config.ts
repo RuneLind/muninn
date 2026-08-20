@@ -92,6 +92,22 @@ export function wikiReadonlyFromEnv(): boolean {
   return optionalEnvFlag("MUNINN_WIKI_READONLY");
 }
 
+/**
+ * `WIKI_READONLY_ROOTS` — the raw, comma-separated list of wiki ROOTS this
+ * instance may only read (the per-wiki sibling of the instance flag above).
+ *
+ * A getter for the same reason `wikiReadonlyFromEnv` is one: the enforcement
+ * seams sit below the config layer and must not need `DATABASE_URL`. Kept as the
+ * RAW string — parsing (`~`-expansion, repo-root resolution, dedup) belongs to
+ * `src/wiki/readonly.ts`, which owns the path dialect; this function's whole job
+ * is to be the one place the variable is named, so a rename is a compile error
+ * rather than a silently-unguarded root. Blank/whitespace-only ⇒ undefined, so
+ * "configured" cannot be true while pointing nowhere.
+ */
+export function wikiReadonlyRootsFromEnv(): string | undefined {
+  return process.env.WIKI_READONLY_ROOTS?.trim() || undefined;
+}
+
 /** The scheduler switch, as its own function so the `/models` machine card can
  *  report it without constructing a full `Config`. */
 export function schedulerEnabledFromEnv(): boolean {

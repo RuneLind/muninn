@@ -47,8 +47,14 @@ export interface WikiReaderConfig {
    * entry (union, not intersection — an all-must-match rule has no useful
    * spelling for "these two subtrees").
    *
+   * Entries are normalized: surrounding whitespace trimmed, a leading `./`
+   * stripped (a `./`-prefixed glob is the same intent as the bare one, and
+   * `Bun.Glob` matches the scan's relative paths, which carry no `./`, so the
+   * prefixed spelling would match nothing while looking correct), and blank
+   * entries dropped rather than invalidating the whole list.
+   *
    * It exists for a root muninn does not own the layout of: `~/.claude/projects`
-   * holds 288 markdown files under per-project `memory/` dirs worth reading, plus
+   * holds 289 markdown files under per-project `memory/` dirs worth reading, plus
    * a growing pile of `<uuid>/session-memory/summary.md` and
    * `tool-results/artifact-*.html` strays that would otherwise arrive as ten
    * identically-named `summary` pages.
@@ -455,8 +461,12 @@ const DEFAULT_REL_PATH = "../huginn/huginn-jarvis/data/wiki";
  * Resolve the wiki root to scan. An explicit `root` (a bot's configured
  * `wikiDir`) wins; otherwise fall back to today's behavior — the `WIKI_DIR` env
  * override, then the jarvis default. So a bare `/wiki` (no `?bot=`) is unchanged.
+ *
+ * Exported because the per-wiki read-only guards must key on the root that will
+ * ACTUALLY be served, and `resolveWikiRequest` returns no registry entry for the
+ * `WIKI_DIR` env-override shape — a guard keyed on the entry fails open there.
  */
-function resolveWikiRoot(explicit?: string): string {
+export function resolveWikiRoot(explicit?: string): string {
   if (explicit && explicit.trim()) return explicit.trim();
   const override = process.env.WIKI_DIR;
   if (override && override.trim()) return override.trim();
@@ -761,9 +771,30 @@ function isStringRecord(v: unknown): v is Record<string, string> {
   return Object.values(v as Record<string, unknown>).every((x) => typeof x === "string");
 }
 
-/** True when `v` is an array of non-blank strings — the `include` shape. */
+/**
+ * True when `v` is an array of strings — the `include` shape.
+ *
+ * Blank entries are deliberately ACCEPTED here and dropped by
+ * {@link normalizeIncludeGlobs} instead. A single stray `""` (a trailing comma in
+ * a hand-edited file, an editor's empty row) used to invalidate the entire list
+ * and silently un-scope the scan — the loudest possible consequence for the
+ * quietest possible typo, and exactly backwards on the root the key exists for.
+ */
 function isStringArray(v: unknown): v is string[] {
-  return Array.isArray(v) && v.every((x) => typeof x === "string" && x.trim() !== "");
+  return Array.isArray(v) && v.every((x) => typeof x === "string");
+}
+
+/** Trim, strip one leading `./`, drop blanks. The scan matches wiki-relative
+ *  paths carrying no `./` prefix, so `./x/**` would otherwise match nothing while
+ *  looking correct. */
+function normalizeIncludeGlobs(entries: string[]): string[] {
+  const out: string[] = [];
+  for (const raw of entries) {
+    const trimmed = raw.trim();
+    const rel = trimmed.startsWith("./") ? trimmed.slice(2).trim() : trimmed;
+    if (rel) out.push(rel);
+  }
+  return out;
 }
 
 /**
@@ -809,9 +840,10 @@ async function readWikiReaderConfig(root: string): Promise<WikiReaderConfig | nu
     });
   }
   // Same validate-warn-degrade shape as the two above: a bad `include` is
-  // dropped (⇒ scan everything) rather than taking the wiki offline.
+  // dropped (⇒ scan everything) rather than taking the wiki offline. A blank
+  // ENTRY is not "bad" — it is normalized away (see `isStringArray`).
   if (obj.include !== undefined && !isStringArray(obj.include)) {
-    log.warn("{file} at {root}: include is not an array of non-empty glob strings — ignoring it", {
+    log.warn("{file} at {root}: include is not an array of glob strings — ignoring it", {
       file: WIKI_READER_CONFIG_FILE,
       root,
     });
@@ -819,7 +851,7 @@ async function readWikiReaderConfig(root: string): Promise<WikiReaderConfig | nu
   return {
     typeMap: isStringRecord(obj.typeMap) ? obj.typeMap : {},
     typeLabels: isStringRecord(obj.typeLabels) ? obj.typeLabels : {},
-    include: isStringArray(obj.include) ? obj.include.map((p) => p.trim()) : [],
+    include: isStringArray(obj.include) ? normalizeIncludeGlobs(obj.include) : [],
   };
 }
 
@@ -1080,17 +1112,29 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
   // read BEFORE the scan, not after, because `include` scopes the scan itself;
   // the move is safe because the read depends on nothing but `root`.
   const readerConfig = await readWikiReaderConfig(root);
+  const includePatterns = readerConfig?.include ?? [];
   // The one place the STORE needs to know a root is read-only: `include` is
   // cosmetic and degrades to absent, so on a root whose whole point is that it
-  // is scoped and never written, a missing/unreadable config is worth saying out
-  // loud rather than silently re-admitting the strays it filters.
-  if (!readerConfig && isReadonlyWikiRoot(root)) {
+  // is scoped and never written, an unscoped scan is worth saying out loud
+  // rather than silently re-admitting the strays it filters.
+  //
+  // The test is the EFFECTIVE pattern list, not the presence of the file. A
+  // missing file was the only case the first cut caught — but `{}`, `[]`, a
+  // top-level `"include": "x"` (wrong type ⇒ degraded to none) and a list of
+  // nothing but blanks all leave the scan just as unscoped, and measured, a
+  // `{}` config silently re-admitted all eleven strays with no warn at all.
+  if (includePatterns.length === 0 && isReadonlyWikiRoot(root)) {
     log.warn(
-      "{file} missing or unreadable at read-only wiki root {root} — the scan is unscoped (the read-only guard is unaffected; it lives in {env})",
-      { file: WIKI_READER_CONFIG_FILE, root, env: WIKI_READONLY_ROOTS_ENV },
+      "{file} at read-only wiki root {root} names no `include` globs ({reason}) — the scan is unscoped (the read-only guard is unaffected; it lives in {env})",
+      {
+        file: WIKI_READER_CONFIG_FILE,
+        root,
+        reason: readerConfig ? "present but empty/invalid" : "missing or unreadable",
+        env: WIKI_READONLY_ROOTS_ENV,
+      },
     );
   }
-  const includeGlobs = (readerConfig?.include ?? []).map((p) => new Bun.Glob(p));
+  const includeGlobs = includePatterns.map((p) => new Bun.Glob(p));
 
   const glob = new Bun.Glob("**/*.{md,mdx,html}");
   let relPaths: string[] = [];
@@ -1106,6 +1150,17 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
     relPaths.push(p);
   }
   relPaths.sort();
+  // A configured `include` that matches NOTHING yields a wiki with zero pages —
+  // which renders as an empty reader and is indistinguishable from a missing
+  // directory. The globs are hand-written against a layout muninn does not own,
+  // so a leading-slash or an off-by-one-segment pattern is the likely cause and
+  // the file that produced it is what a reader needs named.
+  if (includeGlobs.length > 0 && relPaths.length === 0) {
+    log.warn(
+      "{file} at {root}: `include` matched no files ({patterns}) — this wiki will render as empty",
+      { file: WIKI_READER_CONFIG_FILE, root, patterns: includePatterns.join(", ") },
+    );
+  }
 
   // Exclude MDX compile-pipeline SOURCES before discovery. A source at
   // `blogs/src/<slug>.mdx` shares its bare stem with the compiled explainer at

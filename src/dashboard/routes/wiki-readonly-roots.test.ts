@@ -7,7 +7,12 @@ import { Hono } from "hono";
 import { configure, reset, type LogRecord } from "@logtape/logtape";
 import { registerWikiRoutes } from "./wiki-routes.ts";
 import { registerWikiGardenerRoutes } from "./wiki-gardener-routes.ts";
-import { __resetWikiRegistryForTest, getWikiRegistry } from "../../wiki/registry-memo.ts";
+import {
+  __resetWikiRegistryForTest,
+  __setWikiRegistryForTest,
+  getWikiRegistry,
+} from "../../wiki/registry-memo.ts";
+import type { WikiProposal } from "../../db/wiki-proposals.ts";
 import { __resetWikiCacheForTest } from "../../wiki/store.ts";
 import { __resetWikiWriteQueueForTest } from "../../wiki/queue.ts";
 import {
@@ -21,9 +26,15 @@ import {
   wikiBlockedMessageFor,
   wikiBlockedSelectorFor,
   wikiReadonlyWikiFlag,
+  wikiReadonlyKeyActivates,
+  WIKI_READONLY_ASK_HINT,
+  WIKI_READONLY_BANNER_TEXT,
   WIKI_READONLY_BLOCKED_SELECTOR,
   WIKI_READONLY_CLIENT_MESSAGE,
+  WIKI_READONLY_DISABLED_INPUTS,
   WIKI_READONLY_EGRESS_SELECTOR,
+  WIKI_READONLY_GUARDED_EVENTS,
+  WIKI_READONLY_INPUT_PLACEHOLDER,
   WIKI_READONLY_WIKI_MESSAGE,
 } from "../views/components/wiki-readonly-client.ts";
 
@@ -244,6 +255,35 @@ describe("WIKI_READONLY_ROOTS — routes", () => {
     }
   });
 
+  test("all THREE ask/chat modes 403 — not only the one the plan named", async () => {
+    // `escalate` quotes an answer built over these pages; `direct` seeds a bot
+    // told to search this wiki first; `article` quotes the page outright. The
+    // route's body-shape checks differ per mode, so each is posted well-formed
+    // for ITS mode — a shared payload would 400 two of them before the guard.
+    const cases: [string, unknown][] = [
+      ["escalate", { question: "q", answer: "a" }],
+      ["direct", { question: "q", mode: "direct" }],
+      ["article", { question: "q", mode: "article", page: "Widgets" }],
+    ];
+    for (const [mode, body] of cases) {
+      const res = await post("/api/wiki/ask/chat?wiki=rowiki", body);
+      expect(`${mode} → ${res.status}`).toBe(`${mode} → 403`);
+      expect(`${mode} → ${((await res.json()) as { readonly?: boolean }).readonly}`).toBe(
+        `${mode} → true`,
+      );
+    }
+  });
+
+  test("reindex 403s — it ships page BODIES to huginn's embedder", async () => {
+    const res = await post("/api/wiki/reindex?wiki=rowiki");
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { readonly?: boolean }).readonly).toBe(true);
+    // CONTROL: the writable wiki reaches its own collection-less answer (200).
+    const ok = await post("/api/wiki/reindex?wiki=rwwiki");
+    expect(ok.status).toBe(200);
+    expect(await ok.text()).toContain("collection");
+  });
+
   test("the reader page injects the per-wiki flag for that wiki only", async () => {
     const roHtml = await (await app.request("/wiki?wiki=rowiki")).text();
     expect(roHtml).toContain("window.__WIKI_READONLY_WIKI__ = true");
@@ -251,6 +291,195 @@ describe("WIKI_READONLY_ROOTS — routes", () => {
     expect(roHtml).toContain("window.__WIKI_READONLY__ = false");
     const rwHtml = await (await app.request("/wiki?wiki=rwwiki")).text();
     expect(rwHtml).toContain("window.__WIKI_READONLY_WIKI__ = false");
+  });
+
+  test("the read-only page disables the Ask box and shows the banner", async () => {
+    // The placeholder string is ALSO inside the bundled client script (the
+    // follow-up bar renders it), so a whole-document `toContain` proves nothing
+    // about the Ask box — assert on the rendered element.
+    const askBox = (html: string) => html.match(/<textarea[^>]*id="wikiAskInput"[^>]*>/)![0];
+
+    const roHtml = await (await app.request("/wiki?wiki=rowiki")).text();
+    expect(roHtml).toContain(WIKI_READONLY_BANNER_TEXT);
+    expect(askBox(roHtml)).toContain(" disabled");
+    expect(askBox(roHtml)).toContain(WIKI_READONLY_INPUT_PLACEHOLDER);
+    expect(roHtml).toContain(WIKI_READONLY_ASK_HINT);
+    expect(roHtml).not.toContain("Ask a question and this wiki answers");
+    // The "Answered by <bot> … research-bot fallback" line describes a call this
+    // wiki can never make.
+    expect(roHtml).not.toContain("Answered by");
+
+    const rwHtml = await (await app.request("/wiki?wiki=rwwiki")).text();
+    expect(rwHtml).toContain("Ask a question and this wiki answers");
+    expect(askBox(rwHtml)).not.toContain(" disabled");
+    expect(askBox(rwHtml)).toContain("Ask this wiki");
+  });
+});
+
+describe("WIKI_READONLY_ROOTS — the WIKI_DIR env-override shape", () => {
+  // `resolveWikiRequest` returns NO entry for a bare `/wiki` on an instance that
+  // sets `WIKI_DIR`, and the routes then serve `resolveWikiRoot(undefined)`. A
+  // guard keyed on the ENTRY therefore failed OPEN on exactly the root an
+  // operator pointed the env var at.
+  let ro: string;
+  let prevWikiDir: string | undefined;
+  let prevExtra: string | undefined;
+  let app: Hono;
+
+  beforeEach(async () => {
+    ro = await mkdtemp(path.join(tmpdir(), "wiki-envoverride-"));
+    await Bun.write(path.join(ro, "Widgets.md"), "# Widgets\n\nBody.\n");
+    prevWikiDir = process.env.WIKI_DIR;
+    prevExtra = process.env.WIKI_EXTRA;
+    process.env.WIKI_DIR = ro;
+    delete process.env.WIKI_EXTRA;
+    __setWikiReadonlyForTest(false);
+    __setReadonlyWikiRootsForTest([ro]);
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    app = new Hono();
+    app.onError((err, c) => c.json({ error: String(err) }, 500));
+    registerWikiRoutes(app, {} as Parameters<typeof registerWikiRoutes>[1]);
+  });
+
+  afterEach(async () => {
+    __setReadonlyWikiRootsForTest();
+    __setWikiReadonlyForTest();
+    if (prevWikiDir === undefined) delete process.env.WIKI_DIR;
+    else process.env.WIKI_DIR = prevWikiDir;
+    if (prevExtra === undefined) delete process.env.WIKI_EXTRA;
+    else process.env.WIKI_EXTRA = prevExtra;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    await rm(ro, { recursive: true, force: true });
+  });
+
+  test("an egress route with NO ?wiki= still refuses on the resolved root", async () => {
+    const res = await app.request("/api/wiki/ask?q=what%20is%20this");
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string; readonly?: boolean };
+    expect(body.readonly).toBe(true);
+    // No entry ⇒ no name to quote; the sentence must not read `the "" wiki`.
+    expect(body.error).not.toContain('""');
+    expect(body.error).toContain("WIKI_READONLY_ROOTS");
+  });
+
+  test("the reader page injects the per-wiki flag from the same resolved root", async () => {
+    const html = await (await app.request("/wiki")).text();
+    expect(html).toContain("window.__WIKI_READONLY_WIKI__ = true");
+  });
+
+  test("CONTROL: an unlisted WIKI_DIR root is untouched", async () => {
+    __setReadonlyWikiRootsForTest([]);
+    const res = await app.request("/api/wiki/ask?q=what%20is%20this");
+    expect(res.status).not.toBe(403);
+    await res.text();
+  });
+});
+
+describe("WIKI_READONLY_ROOTS — gardener approve + backlog", () => {
+  let ro: string;
+  let prevExtra: string | undefined;
+  let app: Hono;
+  /** Set by the fake CAS when the route claims the row — the whole point. */
+  let approved: string[];
+
+  const fakeProposal = (over: Partial<WikiProposal> = {}): WikiProposal =>
+    ({
+      id: "p1",
+      botName: "jarvis",
+      wikiName: "rowiki",
+      topicKey: "widgets",
+      kind: "synthesis",
+      mode: "create",
+      targetPath: "blogs/Widgets.md",
+      draft: "---\ntitle: Widgets\ntype: blog\n---\n\nBody.\n",
+      status: "draft",
+      ...over,
+    }) as unknown as WikiProposal;
+
+  const deps = (proposal: WikiProposal | null) =>
+    ({
+      getConsumed: async () => new Set<string>(),
+      getPending: async () => new Set<string>(),
+      getWikiGardenerWatcher: async () => null,
+      getSnapshot: async () => null,
+      setSnapshot: async () => {},
+      listProposals: async () => [],
+      getProposalById: async () => proposal,
+      approveProposal: async (id: string) => {
+        approved.push(id);
+        return proposal ? ({ ...proposal, status: "approved" } as WikiProposal) : null;
+      },
+    }) as unknown as Parameters<typeof registerWikiGardenerRoutes>[1];
+
+  beforeEach(async () => {
+    approved = [];
+    ro = await mkdtemp(path.join(tmpdir(), "wiki-ro-approve-"));
+    prevExtra = process.env.WIKI_EXTRA;
+    process.env.WIKI_EXTRA = `rowiki=${ro}`;
+    __setWikiReadonlyForTest(false);
+    __setReadonlyWikiRootsForTest([ro]);
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    app = new Hono();
+    app.onError((err, c) => c.json({ error: String(err) }, 500));
+  });
+
+  afterEach(async () => {
+    __setReadonlyWikiRootsForTest();
+    __setWikiReadonlyForTest();
+    if (prevExtra === undefined) delete process.env.WIKI_EXTRA;
+    else process.env.WIKI_EXTRA = prevExtra;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    await rm(ro, { recursive: true, force: true });
+  });
+
+  test("approve 403s BEFORE the draft→approved CAS — the row stays reviewable", async () => {
+    // Measured before the fix: the CAS ran, `applyWikiProposal`'s root guard then
+    // answered 403, and the row was left in `approved` — where the gate offers no
+    // verb at all (reject 409s "not reviewable"). Stuck forever on a refusal that
+    // changed nothing.
+    registerWikiGardenerRoutes(app, deps(fakeProposal()));
+    const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string; readonly?: boolean };
+    expect(body.readonly).toBe(true);
+    expect(body.error).toContain("WIKI_READONLY_ROOTS");
+    // The observable that separates this fix from the pre-existing seam guard.
+    expect(approved).toEqual([]);
+  });
+
+  test("CONTROL: the same approve on a WRITABLE wiki reaches the CAS", async () => {
+    __setReadonlyWikiRootsForTest([]);
+    registerWikiGardenerRoutes(app, deps(fakeProposal()));
+    const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    // It fails later (no such wiki root content / apply error) — what matters is
+    // that the row WAS claimed, i.e. the guard is per-wiki and not global.
+    expect(res.status).not.toBe(403);
+    expect(approved).toEqual(["p1"]);
+    await res.text();
+  });
+
+  test("resolveBacklogBot refuses a read-only BOT wiki", async () => {
+    // The `source !== "bot"` check covers a standalone read-only wiki; it does
+    // NOT cover a bot whose own `wikiDir` is listed. Every drafting POST in that
+    // file funnels through this one prologue.
+    __setWikiRegistryForTest([{ name: "robot", root: ro, source: "bot", readonly: true }]);
+    registerWikiGardenerRoutes(app, deps(null));
+    const res = await app.request("/api/wiki/gardener/backlog-run?wiki=robot", { method: "POST" });
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("WIKI_READONLY_ROOTS");
+  });
+
+  test("CONTROL: a writable BOT wiki gets its own 404, not the refusal", async () => {
+    __setReadonlyWikiRootsForTest([]);
+    __setWikiRegistryForTest([{ name: "robot", root: ro, source: "bot" }]);
+    registerWikiGardenerRoutes(app, deps(null));
+    const res = await app.request("/api/wiki/gardener/backlog-run?wiki=robot", { method: "POST" });
+    expect(res.status).toBe(404);
+    expect(await res.text()).toContain("no wiki bot resolved");
   });
 });
 
@@ -305,5 +534,47 @@ describe("WIKI_READONLY_ROOTS — client guard", () => {
     expect(wikiReadonlyWikiFlag({})).toBe(false);
     expect(wikiReadonlyWikiFlag({ __WIKI_READONLY_WIKI__: "true" })).toBe(false);
     expect(wikiReadonlyWikiFlag({ __WIKI_READONLY_WIKI__: true })).toBe(true);
+  });
+
+  test("the guard listens on mousedown and keydown, not click alone", () => {
+    // Three egress buttons are activated from a `mousedown` delegate (Explain +
+    // both fact-check buttons — mousedown so `preventDefault` keeps the text
+    // selection alive), which fires BEFORE click and had already spent the call
+    // by the time a click-only listener ran. Two more are reachable by keyboard
+    // with no pointer event at all.
+    expect(WIKI_READONLY_GUARDED_EVENTS).toContain("mousedown");
+    expect(WIKI_READONLY_GUARDED_EVENTS).toContain("keydown");
+    expect(WIKI_READONLY_GUARDED_EVENTS).toContain("click");
+  });
+
+  test("only ACTIVATING keys are cancelled — Tab and typing are not", () => {
+    expect(wikiReadonlyKeyActivates("Enter")).toBe(true);
+    expect(wikiReadonlyKeyActivates(" ")).toBe(true);
+    expect(wikiReadonlyKeyActivates("Spacebar")).toBe(true);
+    // Cancelling Tab would trap focus; cancelling characters buys nothing —
+    // the activation is what spends the model call.
+    expect(wikiReadonlyKeyActivates("Tab")).toBe(false);
+    expect(wikiReadonlyKeyActivates("a")).toBe(false);
+    expect(wikiReadonlyKeyActivates("Escape")).toBe(false);
+  });
+
+  test("the two Enter-submitting inputs are in the selector AND the disable list", () => {
+    // The selector is what survives the follow-up bar's re-render; `disabled` is
+    // what makes the box look like what it is. Both halves, both inputs.
+    for (const id of WIKI_READONLY_DISABLED_INPUTS) {
+      expect(WIKI_READONLY_EGRESS_SELECTOR).toContain(id);
+    }
+    expect(WIKI_READONLY_DISABLED_INPUTS).toEqual(["#wikiAskInput", "#wikiFollowupInput"]);
+    // And they are NOT on the instance list — the mini serves Ask happily.
+    expect(WIKI_READONLY_BLOCKED_SELECTOR).not.toContain("#wikiAskInput");
+  });
+
+  test("the banner and the ask-hint state BOTH halves of the guarantee", () => {
+    expect(WIKI_READONLY_BANNER_TEXT).toMatch(/never written/i);
+    expect(WIKI_READONLY_BANNER_TEXT).toMatch(/never sent to a model/i);
+    expect(WIKI_READONLY_ASK_HINT).toMatch(/model|web/);
+    // Neither may claim the INSTANCE flag on a write-owning host.
+    expect(WIKI_READONLY_BANNER_TEXT).not.toContain("MUNINN_WIKI_READONLY");
+    expect(WIKI_READONLY_ASK_HINT).not.toContain("MUNINN_WIKI_READONLY");
   });
 });

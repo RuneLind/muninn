@@ -87,16 +87,17 @@ export interface BuildWikiRegistryOptions {
   /** Base for relative paths. Defaults to the muninn repo root; tests pin it. */
   repoRoot?: string;
   /**
-   * Roots `WIKI_READONLY_ROOTS` marks read-only, already resolved (the caller
-   * passes `readonlyWikiRoots()`; the predicate is `isReadonlyWikiRoot`).
-   * Stamps the presentational `readonly` flag and drives the no-match WARN.
-   * Absent ⇒ no entry is flagged, which is safe precisely because enforcement
-   * never reads this flag.
+   * Is this root marked read-only by `WIKI_READONLY_ROOTS`? The caller passes
+   * `isReadonlyWikiRoot`. Stamps the presentational `readonly` flag and nothing
+   * else — absent ⇒ no entry is flagged, which is safe precisely because
+   * enforcement never reads this flag.
+   *
+   * The "matches no registered wiki" WARN deliberately does NOT live here: it
+   * needs the realpath-aware root comparison, and re-spelling that in this pure
+   * builder is what made it fire falsely on every symlinked root. It runs in
+   * `registry-memo.ts`, where both the roots and the predicate are in scope.
    */
   isReadonlyRoot?: (root: string) => boolean;
-  /** The configured read-only roots, for the "matches no registered wiki" warn.
-   *  Absent ⇒ no warn (nothing to compare against). */
-  readonlyRoots?: string[];
 }
 
 /**
@@ -111,7 +112,7 @@ export interface BuildWikiRegistryOptions {
  * made a fourth and fifth positional whose order nothing reads back.
  */
 export function buildWikiRegistry(opts: BuildWikiRegistryOptions): WikiRegistryEntry[] {
-  const { bots, extra: extraRaw, isReadonlyRoot, readonlyRoots } = opts;
+  const { bots, extra: extraRaw, isReadonlyRoot } = opts;
   const repoRoot = opts.repoRoot ?? REPO_ROOT;
   const entries: WikiRegistryEntry[] = [];
   const seen = new Set<string>();
@@ -206,31 +207,7 @@ export function buildWikiRegistry(opts: BuildWikiRegistryOptions): WikiRegistryE
     }
   }
 
-  // A `WIKI_READONLY_ROOTS` entry matching no registered wiki means someone
-  // edited one var and not the other. It fails CLOSED for that entry (it names a
-  // root nothing writes) and leaves every matching entry enforced, so this is a
-  // diagnostic — but a LOUD one, because the silent reading is "the guard is on"
-  // when nothing is guarded.
-  if (readonlyRoots && readonlyRoots.length > 0 && isReadonlyRoot) {
-    for (const root of readonlyRoots) {
-      if (!entries.some((e) => e.readonly && sameRoot(e.root, root))) {
-        log.warn(
-          "WIKI_READONLY_ROOTS: {root} matches no registered wiki root — nothing is guarded by that entry (check WIKI_EXTRA / a bot's wikiDir)",
-          { root },
-        );
-      }
-    }
-  }
-
   return entries;
-}
-
-/** Do these two already-resolved roots name the same wiki? Both sides have been
- *  through `resolveConfiguredPath`, so this is the residual trailing-separator
- *  difference only — the symlink/case forms are `isReadonlyWikiRoot`'s job. */
-function sameRoot(a: string, b: string): boolean {
-  const trim = (p: string) => (p.length > 1 && p.endsWith(path.sep) ? p.slice(0, -1) : p);
-  return trim(path.normalize(a)) === trim(path.normalize(b));
 }
 
 /**

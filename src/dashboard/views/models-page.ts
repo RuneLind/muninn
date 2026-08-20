@@ -687,10 +687,25 @@ export async function renderModelsPage(): Promise<string> {
       // without issuing a POST: a root that matches no wiki above guards nothing.
       var roRoots = m.readonlyRoots || [];
       if (roRoots.length) {
+        // Matched and unmatched are opposite facts and must not share a count: a
+        // matched root guards a wiki, an unmatched one guards nothing at all, and
+        // the collapsed "Read-only wikis: 1" read as protection for a typo.
+        var roUnmatched = m.readonlyRootsUnmatched || [];
+        var roMatched = roRoots.filter(function (r) { return roUnmatched.indexOf(r) === -1; });
+        var codes = function (list) {
+          return list.map(function (r) { return '<code>' + esc(r) + '</code>'; }).join(' · ');
+        };
         h += machineRow('Read-only wikis',
-          val(String(roRoots.length)),
-          'WIKI_READONLY_ROOTS — never written, never sent to a model or the web: ' +
-            roRoots.map(function (r) { return '<code>' + esc(r) + '</code>'; }).join(' · '));
+          roMatched.length ? val(String(roMatched.length)) : val('none matched', 'none'),
+          roMatched.length
+            ? 'WIKI_READONLY_ROOTS — never written, never sent to a model or the web: ' + codes(roMatched)
+            : 'WIKI_READONLY_ROOTS is set but no configured root matches a registered wiki');
+        if (roUnmatched.length) {
+          h += machineRow('Read-only roots unmatched',
+            val(String(roUnmatched.length), 'none'),
+            'matches no registered wiki — guards nothing (check WIKI_EXTRA / a bot\'s wikiDir): ' +
+              codes(roUnmatched));
+        }
       }
       // Discovered ≠ running: a bot folder with no platform token is skipped at
       // startup ("Skipping bot X — no platform tokens"), which on the readonly

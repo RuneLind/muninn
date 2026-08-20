@@ -48,7 +48,7 @@ import { joinPlans, type JoinedPlan } from "./join.ts";
 import type { PlanRecord, PlanSourceResult } from "./source.ts";
 import type { LedgerPlan, LedgerPr, PlanLedgerResult } from "./ledger.ts";
 import { PLANS_WIKI_NAME } from "./source.ts";
-import { isWikiReadonly } from "../wiki/readonly.ts";
+import { isReadonlyWikiRoot, isWikiReadonly } from "../wiki/readonly.ts";
 import {
   ageInDays,
   columnForStatus,
@@ -107,10 +107,17 @@ export interface BoardPayload {
   };
   /** Whether the board may show money at all, and why not when it may not. */
   money: { available: boolean; reason: string | null };
-  /** This instance refuses wiki writes (`MUNINN_WIKI_READONLY=1`), so the write
-   *  endpoints answer 403. The client renders it as one banner with the controls
-   *  disabled rather than letting a reader on the mini discover the refusal one
-   *  click at a time (`board-writes.ts`, `writeCapability`). */
+  /** The write endpoints answer 403, so the client renders one banner with the
+   *  controls disabled rather than letting a reader discover the refusal one
+   *  click at a time (`board-writes.ts`, `writeCapability`).
+   *
+   *  TWO independent mechanisms set it, and either is sufficient: the INSTANCE
+   *  flag (`MUNINN_WIKI_READONLY=1` — the mini), and mimir's own ROOT appearing
+   *  in `WIKI_READONLY_ROOTS`. Both write endpoints go through seams keyed on the
+   *  root (`writeWikiPage`'s no-log mode, `writePlanQueue`), so a root-level
+   *  read-only really does 403 them on a write-owning instance — and without
+   *  this the board would render live ▲▼ and priority buttons whose every click
+   *  is a refusal. */
   readonly: boolean;
   columns: BoardColumnMeta[];
   cards: BoardCard[];
@@ -362,7 +369,8 @@ export function buildBoardPayload(input: BuildBoardInput): BoardPayload {
       errors: ledger.errors ?? [],
     },
     money: { available: moneyAvailable, reason },
-    readonly: input.readonly ?? isWikiReadonly(),
+    // Either mechanism disables the board's writes — see the field's doc.
+    readonly: input.readonly ?? (isWikiReadonly() || isReadonlyWikiRoot(source.root)),
     columns: [...BOARD_COLUMNS],
     cards,
     queue: { order: source.queue.order, hash: source.queue.hash },

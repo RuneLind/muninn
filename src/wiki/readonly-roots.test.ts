@@ -9,10 +9,12 @@ import {
   parseReadonlyWikiRoots,
   readonlyWikiRoots,
   wikiNoEgressReason,
+  sameWikiRoot,
   wikiReadonlyRootReason,
   WIKI_READONLY_ROOTS_ENV,
 } from "./readonly.ts";
 import { buildWikiRegistry } from "./registry.ts";
+import { unmatchedReadonlyWikiRoots } from "./registry-memo.ts";
 import { writeWikiPage } from "./page-write.ts";
 import { __resetWikiWriteQueueForTest } from "./queue.ts";
 import { buildWikiIndex, __resetWikiCacheForTest } from "./store.ts";
@@ -107,12 +109,46 @@ describe("WIKI_READONLY_ROOTS — parse + predicate", () => {
     // claim about the whole instance on a write-owning host.
     expect(wikiReadonlyRootReason("/ro")).toContain(WIKI_READONLY_ROOTS_ENV);
     expect(wikiReadonlyRootReason("/ro")).not.toContain("MUNINN_WIKI_READONLY");
-    expect(wikiReadonlyRootReason("/ro")).toContain("/ro");
     // The egress sentence names the WIKI and says what it refuses, since
     // "read-only" reads as "you can still ask it questions".
     expect(wikiNoEgressReason("memory")).toContain("memory");
     expect(wikiNoEgressReason("memory")).toMatch(/model|web/);
     expect(wikiNoEgressReason("memory")).not.toContain("MUNINN_WIKI_READONLY");
+  });
+
+  test("the seam refusal names NO filesystem path — it lands in an HTTP body", () => {
+    // This string is the seam outcome's `reason` AND the 403 body's `error`, so
+    // interpolating the root published an absolute home-directory path on a
+    // reader-facing API (the `wikis[].root` / `base_url` rule).
+    const reason = wikiReadonlyRootReason("/Users/rune/.claude/projects");
+    expect(reason).not.toContain("/Users/rune");
+    expect(reason).not.toContain(".claude");
+    expect(reason).not.toContain("/");
+    expect(reason).toContain(WIKI_READONLY_ROOTS_ENV);
+  });
+
+  test("the egress sentence drops the quoted name when there is none (WIKI_DIR override)", () => {
+    // A bare `/wiki` served from `WIKI_DIR` resolves NO registry entry, so the
+    // route has no name to pass — `the "" wiki is …` would be the alternative.
+    expect(wikiNoEgressReason("")).not.toContain('""');
+    expect(wikiNoEgressReason("")).toContain("this wiki is");
+    expect(wikiNoEgressReason("   ")).toContain("this wiki is");
+  });
+
+  test("sameWikiRoot matches through a symlink, both directions", async () => {
+    const base = await mkdtemp(path.join(tmpdir(), "wiki-sameroot-"));
+    try {
+      const real = path.join(base, "real");
+      const link = path.join(base, "link");
+      await mkdir(real, { recursive: true });
+      await symlink(real, link);
+      expect(sameWikiRoot(real, link)).toBe(true);
+      expect(sameWikiRoot(link, real)).toBe(true);
+      expect(sameWikiRoot(link + "/", real)).toBe(true);
+      expect(sameWikiRoot(real, path.join(base, "other"))).toBe(false);
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
   });
 });
 
@@ -256,14 +292,13 @@ describe("WIKI_READONLY_ROOTS — write seams", () => {
   });
 });
 
-describe("WIKI_READONLY_ROOTS — registry flag + drift warn", () => {
+describe("WIKI_READONLY_ROOTS — registry flag + drift detection", () => {
   test("the options-object signature stamps `readonly` on the matching entry only", () => {
     const reg = buildWikiRegistry({
       bots: [bot("jarvis", "/w")],
       extra: "memory=/ro,mimir=../mimir",
       repoRoot: REPO,
       isReadonlyRoot: (root) => root === "/ro",
-      readonlyRoots: ["/ro"],
     });
     expect(reg).toEqual([
       { name: "jarvis", root: "/w", source: "bot" },
@@ -272,59 +307,61 @@ describe("WIKI_READONLY_ROOTS — registry flag + drift warn", () => {
     ]);
   });
 
-  test("without the readonly inputs the registry is byte-identical to before", () => {
-    // Enforcement never reads the flag, so a registry built without them (or a
+  test("without the readonly predicate the registry is byte-identical to before", () => {
+    // Enforcement never reads the flag, so a registry built without it (or a
     // stale memo) is safe — and must not gain a field.
     const reg = buildWikiRegistry({ bots: [], extra: "memory=/ro", repoRoot: REPO });
     expect(reg).toEqual([{ name: "memory", root: "/ro", source: "extra" }]);
   });
 
-  test("a root matching no registered wiki warns LOUDLY — and guards nothing", async () => {
-    const records: LogRecord[] = [];
-    await configure({
-      sinks: { capture: (r: LogRecord) => records.push(r) },
-      loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
-      reset: true,
+  test("a root matching no registered wiki is reported — and guards nothing", () => {
+    const reg = buildWikiRegistry({
+      bots: [],
+      extra: "mimir=../mimir",
+      repoRoot: REPO,
+      isReadonlyRoot: (root) => root === "/typo",
     });
-    try {
-      const reg = buildWikiRegistry({
-        bots: [],
-        extra: "mimir=../mimir",
-        repoRoot: REPO,
-        isReadonlyRoot: (root) => root === "/typo",
-        readonlyRoots: ["/typo"],
-      });
-      // Fails CLOSED for itself: it names a root nothing writes.
-      expect(reg.some((e) => e.readonly)).toBe(false);
-      const warns = records.filter((r) => r.level === "warning");
-      const hit = warns.find((r) => r.message.join("").includes("WIKI_READONLY_ROOTS"));
-      expect(hit).toBeDefined();
-      expect(JSON.stringify(hit!.properties)).toContain("/typo");
-    } finally {
-      await reset();
-    }
+    // Fails CLOSED for itself: it names a root nothing writes.
+    expect(reg.some((e) => e.readonly)).toBe(false);
+    expect(unmatchedReadonlyWikiRoots(reg, ["/typo"])).toEqual(["/typo"]);
   });
 
-  test("a matching root does NOT warn", async () => {
-    const records: LogRecord[] = [];
-    await configure({
-      sinks: { capture: (r: LogRecord) => records.push(r) },
-      loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
-      reset: true,
+  test("a matching root is NOT reported", () => {
+    const reg = buildWikiRegistry({
+      bots: [],
+      extra: "memory=/ro",
+      repoRoot: REPO,
+      isReadonlyRoot: (root) => root === "/ro",
     });
+    expect(unmatchedReadonlyWikiRoots(reg, ["/ro"])).toEqual([]);
+  });
+
+  test("a SYMLINKED root is not reported as unmatched — the measured false warn", async () => {
+    // The builder's own normalize-only `sameRoot` compared the two spellings as
+    // strings, so on macOS (`/tmp` → `/private/tmp`) a wiki registered through
+    // the symlink warned "matches no registered wiki root" while its entry
+    // carried `readonly: true` — the diagnostic contradicting the guard.
+    const base = await mkdtemp(path.join(tmpdir(), "wiki-rodrift-"));
     try {
-      buildWikiRegistry({
+      const real = path.join(base, "real");
+      const link = path.join(base, "link");
+      await mkdir(real, { recursive: true });
+      await symlink(real, link);
+      __setReadonlyWikiRootsForTest([real]);
+      const reg = buildWikiRegistry({
         bots: [],
-        extra: "memory=/ro",
+        // Registered through the SYMLINK; configured read-only by the REAL path.
+        extra: `memory=${link}`,
         repoRoot: REPO,
-        isReadonlyRoot: (root) => root === "/ro",
-        readonlyRoots: ["/ro"],
+        isReadonlyRoot: isReadonlyWikiRoot,
       });
-      expect(
-        records.filter((r) => r.message.join("").includes("WIKI_READONLY_ROOTS")),
-      ).toEqual([]);
+      // The guard itself already agreed the two are one root…
+      expect(reg[0]!.readonly).toBe(true);
+      // …and now the drift report agrees with the guard.
+      expect(unmatchedReadonlyWikiRoots(reg, [real])).toEqual([]);
     } finally {
-      await reset();
+      __setReadonlyWikiRootsForTest();
+      await rm(base, { recursive: true, force: true });
     }
   });
 });
@@ -413,10 +450,96 @@ describe(".wiki-reader.json `include` — scan scope", () => {
     }
   });
 
-  test("an empty-string entry is a bad include (it would match nothing)", async () => {
-    await Bun.write(path.join(root, ".wiki-reader.json"), JSON.stringify({ include: ["  "] }));
+  test("a blank entry is DROPPED, not fatal — the surviving globs still scope", async () => {
+    // A stray "" (a trailing comma, an editor's empty row) used to invalidate
+    // the WHOLE list and silently un-scope the scan: the loudest consequence for
+    // the quietest typo, on the one root where un-scoping is the failure.
+    await Bun.write(
+      path.join(root, ".wiki-reader.json"),
+      JSON.stringify({ include: ["  ", "*/memory/**", ""] }),
+    );
+    __resetWikiCacheForTest();
+    expect(await rels()).toEqual([
+      "proj-a/memory/MEMORY.md",
+      "proj-a/memory/note.md",
+      "proj-b/memory/MEMORY.md",
+    ]);
+  });
+
+  test("a list of nothing BUT blanks degrades to unscoped (no globs to apply)", async () => {
+    await Bun.write(path.join(root, ".wiki-reader.json"), JSON.stringify({ include: ["  ", ""] }));
     __resetWikiCacheForTest();
     expect((await buildWikiIndex(root)).pages.length).toBe(5);
+  });
+
+  test("a leading `./` is stripped — the scan's paths carry none", async () => {
+    // `Bun.Glob` matches the wiki-RELATIVE path, which never starts with `./`,
+    // so `./*/memory/**` matched nothing while looking exactly right.
+    await Bun.write(
+      path.join(root, ".wiki-reader.json"),
+      JSON.stringify({ include: ["./*/memory/**"] }),
+    );
+    __resetWikiCacheForTest();
+    expect(await rels()).toEqual([
+      "proj-a/memory/MEMORY.md",
+      "proj-a/memory/note.md",
+      "proj-b/memory/MEMORY.md",
+    ]);
+  });
+
+  test("an `include` that matches NOTHING warns — an empty wiki looks like a broken one", async () => {
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
+      reset: true,
+    });
+    try {
+      await Bun.write(
+        path.join(root, ".wiki-reader.json"),
+        JSON.stringify({ include: ["no-such-dir/**"] }),
+      );
+      __resetWikiCacheForTest();
+      const index = await buildWikiIndex(root);
+      expect(index.pages.length).toBe(0);
+      const warns = records.filter((r) => r.level === "warning");
+      expect(warns.some((r) => r.message.join("").includes("matched no files"))).toBe(true);
+    } finally {
+      await reset();
+    }
+  });
+
+  test("a read-only root whose config names no `include` warns — file PRESENT", async () => {
+    // The first cut keyed the warn on a missing FILE. Measured: a `{}` config
+    // re-admitted all eleven strays with no warn at all — and so do `[]`, a
+    // wrong-typed `"include": "x"` (degraded to none) and a list of blanks.
+    // The test is the EFFECTIVE glob list.
+    for (const cfg of [{}, { include: [] }, { include: "*/memory/**" }, { include: ["  "] }]) {
+      const records: LogRecord[] = [];
+      await configure({
+        sinks: { capture: (r: LogRecord) => records.push(r) },
+        loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
+        reset: true,
+      });
+      try {
+        await Bun.write(path.join(root, ".wiki-reader.json"), JSON.stringify(cfg));
+        __setReadonlyWikiRootsForTest([root]);
+        __resetWikiCacheForTest();
+        const index = await buildWikiIndex(root);
+        expect(`${JSON.stringify(cfg)} → ${index.pages.length}`).toBe(
+          `${JSON.stringify(cfg)} → 5`,
+        );
+        const warned = records
+          .filter((r) => r.level === "warning")
+          .some((r) => r.message.join("").includes("no `include` globs"));
+        expect(`${JSON.stringify(cfg)} → warned ${warned}`).toBe(
+          `${JSON.stringify(cfg)} → warned true`,
+        );
+      } finally {
+        await reset();
+        __setReadonlyWikiRootsForTest();
+      }
+    }
   });
 
   test("a read-only root with no readable config warns — the scan is unscoped", async () => {

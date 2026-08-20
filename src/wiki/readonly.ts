@@ -9,11 +9,13 @@
  *
  * **Precise semantics: it forbids programmatic page CONTENT writes, not git.**
  * `commitWikiChange` is deliberately NOT guarded — the repo-sync loop on the
- * readonly instance commits and pushes through it, and the two content seams
+ * readonly instance commits and pushes through it, and the THREE content seams
  * below plus the route guards already cover every content-write funnel:
  *
  *   - `writeWikiPage` (fact-check append + integrate/apply)
  *   - `applyWikiProposal` (gardener approve)
+ *   - `writePlanQueue` (`src/plans/write.ts` — `plans/queue.yaml`, which
+ *     `writeWikiPage`'s `.md`/`.mdx` path confinement correctly cannot carry)
  *
  * The `wiki-committer` watcher also calls `commitWikiChange` (it commits stray
  * dirty files and writes no page content) and stays unguarded too.
@@ -86,6 +88,7 @@ export function __setWikiReadonlyForTest(value?: boolean): void {
 
 import path from "node:path";
 import { realpathSync } from "node:fs";
+import { wikiReadonlyRootsFromEnv } from "../config.ts";
 import { resolveConfiguredPath } from "./registry.ts";
 
 /** The env var name, so error copy, docs and the `/models` machine card agree. */
@@ -124,10 +127,33 @@ function rootForms(resolved: string): string[] {
 }
 
 /**
+ * Do these two paths name the same wiki root? Normalized on both sides (trailing
+ * separator, `.`/`..`) and, only when that fails, realpath-resolved on both — so
+ * `/tmp/w` and `/private/tmp/w` are one root, exactly as `isReadonlyWikiRoot`
+ * already treats them.
+ *
+ * It exists because a SECOND, normalize-only comparison shipped in the registry
+ * builder and produced a false "matches no registered wiki root" warn for every
+ * symlinked root — i.e. the diagnostic contradicted the guard it describes on
+ * macOS, where `/tmp` is a symlink. One implementation, used by both.
+ */
+export function sameWikiRoot(a: string, b: string): boolean {
+  const na = normalizeRoot(a);
+  const nb = normalizeRoot(b);
+  if (na === nb) return true;
+  return (realRoot(na) ?? na) === (realRoot(nb) ?? nb);
+}
+
+/**
  * Parse a raw `WIKI_READONLY_ROOTS` value into resolved absolute roots, in
  * order, deduped. Pure apart from `resolveConfiguredPath`'s `path.resolve`;
  * blank entries are skipped silently (a trailing comma is not a mistake worth a
- * warn). Exported for the `/models` card and for tests.
+ * warn).
+ *
+ * Exported so the parse can be driven from an explicit string — which is what
+ * both non-production callers need: the tests, and any future surface that wants
+ * to show what a value WOULD resolve to. Production always goes through
+ * {@link readonlyWikiRoots}, which memoizes this over the env.
  */
 export function parseReadonlyWikiRoots(raw: string | undefined, repoRoot?: string): string[] {
   const out: string[] = [];
@@ -152,7 +178,7 @@ function currentRoots(): { list: string[]; forms: Set<string> } {
     return { list, forms: new Set(list.flatMap(rootForms)) };
   }
   if (!cachedRoots) {
-    const list = parseReadonlyWikiRoots(process.env[WIKI_READONLY_ROOTS_ENV]);
+    const list = parseReadonlyWikiRoots(wikiReadonlyRootsFromEnv());
     cachedRoots = { list, forms: new Set(list.flatMap(rootForms)) };
   }
   return cachedRoots;
@@ -184,9 +210,18 @@ export function isReadonlyWikiRoot(root: string | undefined | null): boolean {
  * The per-wiki refusal sentence. Deliberately NOT `WIKI_READONLY_REASON`, which
  * hard-codes `MUNINN_WIKI_READONLY=1` and would tell a reader on a write-owning
  * instance something false about the whole instance.
+ *
+ * **It names no filesystem path.** This string is returned as the seam outcome's
+ * `reason` and lands verbatim in an HTTP 403 body, so interpolating the root
+ * published `/Users/<user>/.claude/projects` on a reader-facing API — the same
+ * mistake `models-overview.ts` documents for `wikis[].root` and `base_url`. The
+ * `root` argument is kept because every seam has it in hand and a future
+ * log-only variant will want it; the ROUTE knows the wiki's NAME and is free to
+ * add it.
  */
-export function wikiReadonlyRootReason(rootOrName: string): string {
-  return `this wiki is registered read-only (${WIKI_READONLY_ROOTS_ENV}) — muninn only reads "${rootOrName}"`;
+export function wikiReadonlyRootReason(root: string): string {
+  void root;
+  return `this wiki is registered read-only (${WIKI_READONLY_ROOTS_ENV}) — muninn only reads it, it is never written from here`;
 }
 
 /**
@@ -194,13 +229,26 @@ export function wikiReadonlyRootReason(rootOrName: string): string {
  * or seeds a chat thread) on the wiki's content rather than writing it. Separate
  * copy because "read-only" reads as "you can still ask questions about it", and
  * on this root that is exactly what must not happen.
+ *
+ * A blank name is the `WIKI_DIR` env-override shape — a bare `/wiki` served from
+ * a root that belongs to no registry entry — so the sentence drops the quoted
+ * name rather than rendering `the "" wiki`.
  */
 export function wikiNoEgressReason(wikiName: string): string {
-  return `the "${wikiName}" wiki is registered read-only (${WIKI_READONLY_ROOTS_ENV}) — its pages are never sent to a model or to the web`;
+  const subject = wikiName.trim() ? `the "${wikiName.trim()}" wiki is` : "this wiki is";
+  return `${subject} registered read-only (${WIKI_READONLY_ROOTS_ENV}) — its pages are never sent to a model or to the web`;
 }
 
 /** Force the read-only root set for a test; no argument restores env resolution
- *  (and drops the memo, so a test that set the env var is honoured). */
+ *  (and drops the memo, so a test that set the env var is honoured).
+ *
+ *  It deliberately does NOT drop `registry-memo.ts`'s cached registry: this
+ *  module is imported BY that one (and by the store and the page writer), and the
+ *  whole reason the guard is keyed on the root rather than the registry name is
+ *  to keep `bots/config.ts` → `db/` out of those import graphs. A test that needs
+ *  a re-derived registry calls `__resetWikiRegistryForTest()` beside this — which
+ *  is what every such test already does, since `WIKI_EXTRA` has the same
+ *  requirement. */
 export function __setReadonlyWikiRootsForTest(roots?: string[]): void {
   rootsTestOverride = roots;
   cachedRoots = null;

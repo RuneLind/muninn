@@ -139,13 +139,28 @@ export function loadDigest(refresh: boolean): void {
   let url = "/api/wiki/digest";
   if (refresh) url += "?refresh=1";
   fetch(withWiki(url))
-    .then((r) => r.json())
-    .then((data: { digest: WikiDigest | null; error?: string }) => {
+    // The per-wiki read-only refusal is a 403 carrying `{digest: null, readonly:
+    // true, reason}` — deliberately NOT the shared `error` key, since `error`
+    // means "generation FAILED, keep the old digest and offer a retry" and a
+    // policy refusal is neither. The STATUS is checked here explicitly rather
+    // than inferred from the absent `error`, so the two sides are coupled by
+    // something a reader can see from either file (route: `egressRefusal`'s
+    // digest responder in `wiki-routes.ts`).
+    .then((r) => r.json().then((body) => ({ status: r.status, body })))
+    .then(({ status, body: data }: { status: number; body: { digest: WikiDigest | null; error?: string; readonly?: boolean } }) => {
       if (myId !== whatsNewFetchId) return; // superseded by a newer fetch
       whatsNewLoading = false;
       whatsNewRefreshInFlight = false;
       const cur = document.getElementById("wikiWhatsNew");
       if (!cur) return;
+      if (status === 403 && data.readonly) {
+        // Read-only wiki: there is no digest to be had, ever. Hide the card and
+        // do NOT clear `digestAttempted` — a retry can only 403 again.
+        whatsNewHtml = null;
+        cur.innerHTML = "";
+        cur.style.display = "none";
+        return;
+      }
       if (!data.digest) {
         if (data.error) {
           // Generation failed (busy connector / timeout) — keep any prior digest

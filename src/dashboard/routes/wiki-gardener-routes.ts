@@ -10,7 +10,11 @@ import type { BacklogWatcherInfo } from "../views/components/wiki-gardener-strip
 import { computeWatcherNextRun } from "../agents-overview.ts";
 import { lintWiki } from "../../wiki/lint.ts";
 import { findWiki, listWikis, resolveWikiRequest, type WikiRegistryEntry } from "../../wiki/registry.ts";
-import { isReadonlyWikiRoot } from "../../wiki/readonly.ts";
+import {
+  isReadonlyWikiRoot,
+  wikiNoEgressReason,
+  wikiReadonlyRootReason,
+} from "../../wiki/readonly.ts";
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { discoverAllBots, type BotConfig } from "../../bots/config.ts";
 import { fetchKnowledgeApi, KnowledgeApiError } from "../../ai/knowledge-api-client.ts";
@@ -303,6 +307,19 @@ export interface BacklogRouteDeps extends CoverageDeps {
   getSnapshot: (watcherId: string, key: string) => Promise<unknown>;
   setSnapshot: (watcherId: string, key: string, value: unknown) => Promise<void>;
   listProposals: (botName: string) => Promise<DraftedScanProposal[]>;
+  /**
+   * The two DB seams the APPROVE route needs before it commits to anything —
+   * the read, and the draft→approved CAS.
+   *
+   * They are injectable for one specific reason: the read-only refusal has to
+   * happen BETWEEN them (after the proposal's wiki is known, before the row is
+   * claimed), and a test that cannot drive that gap can only assert the guard
+   * exists, not that it fires in the one position where it matters. The
+   * regression it pins — approve 403s, row stuck in `approved` forever — is
+   * invisible to any test that stubs the whole route.
+   */
+  getProposalById: (id: string) => Promise<WikiProposal | null>;
+  approveProposal: (id: string) => Promise<WikiProposal | null>;
 }
 
 export const DEFAULT_BACKLOG_ROUTE_DEPS: BacklogRouteDeps = {
@@ -323,6 +340,8 @@ export const DEFAULT_BACKLOG_ROUTE_DEPS: BacklogRouteDeps = {
   getSnapshot: (watcherId, key) => getWatcherSnapshot(watcherId, key),
   setSnapshot: (watcherId, key, value) => setWatcherSnapshot(watcherId, key, value),
   listProposals: (botName) => listAllWikiProposals(botName),
+  getProposalById: (id) => getWikiProposalById(id),
+  approveProposal: (id) => approveWikiProposal(id),
 };
 
 /** Read the offered-key snapshot as a Set (JSONB array → Set; anything else ⇒ ∅). */
@@ -988,6 +1007,15 @@ function resolveBacklogBot(
   if (unknownWiki) return { error: "no wiki configured for that name", status: 404 };
   if (entry && entry.source !== "bot") {
     return { error: "the ingest backlog is only available for bot wikis", status: 400 };
+  }
+  // Per-wiki read-only guard, on the ONE prologue every drafting POST in this
+  // file already funnels through (backlog-run, source-draft-{run,backlog,doc},
+  // backlog-doc-delete). The `source !== "bot"` check above covers a standalone
+  // read-only wiki; it does NOT cover a BOT whose own `wikiDir` is listed in
+  // `WIKI_READONLY_ROOTS`, and every one of these verbs spends a model call on
+  // that wiki's content or reaches huginn with it.
+  if (entry && isReadonlyWikiRoot(entry.root)) {
+    return { error: wikiNoEgressReason(entry.name), status: 400 };
   }
   const root = entry?.root;
   const bot = entry
@@ -2055,12 +2083,34 @@ export function registerWikiGardenerRoutes(
     const refused = readonlyRefusal(c);
     if (refused) return refused;
     const id = c.req.param("id");
-    const existing = await getWikiProposalById(id);
+    const existing = await backlogDeps.getProposalById(id);
     if (!existing) return c.json({ error: "proposal not found" }, 404);
+
+    // …and the same refusal for the PER-WIKI guard, for the same reason and in
+    // the same place. `applyWikiProposal` re-checks the root, but it is reached
+    // only AFTER the draft→approved CAS below: measured, an approve on a
+    // read-only wiki returned 403 with the row left in `approved`, where the
+    // gate offers no verb at all (reject 409s "not reviewable"). The row was
+    // stuck forever on a refusal that changed nothing.
+    //
+    // So the root lookup is hoisted out of the apply-target resolution further
+    // down — the CHEAP half of it: a missing wiki/bot still falls through to
+    // that block's own error handling (which flips the row to `error`, and must
+    // therefore keep running after the claim).
+    const targetRoot = existing.wikiName
+      ? findWiki(getWikiRegistry(), existing.wikiName)?.root
+      : getBots().find((b) => b.name === existing.botName)?.wikiDir;
+    if (targetRoot && isReadonlyWikiRoot(targetRoot)) {
+      log.info("Read-only wiki refused approve of proposal {id} (wiki={wiki})", {
+        id,
+        wiki: existing.wikiName ?? existing.botName,
+      });
+      return c.json({ error: wikiReadonlyRootReason(targetRoot), readonly: true }, 403);
+    }
 
     let claimed: WikiProposal | null = null;
     if (existing.status === "draft") {
-      claimed = await approveWikiProposal(id);
+      claimed = await backlogDeps.approveProposal(id);
       if (!claimed) {
         return c.json({ error: "proposal is no longer a draft", status: existing.status }, 409);
       }
@@ -2124,7 +2174,11 @@ export function registerWikiGardenerRoutes(
     // re-runnable by design — so the write-owning instance can apply it later.
     // Flipping it to `error` would burn a perfectly good draft on a policy answer.
     if (result.outcome === "forbidden") {
-      log.warn("Wiki-gardener approve refused for {id} — instance is wiki-readonly", { id });
+      // The seam does not say WHICH mechanism refused (instance flag or
+      // read-only root) and neither should this line — it used to assert
+      // "instance is wiki-readonly", which is false on the per-wiki path that
+      // reaches here. `result.reason` is the seam's own sentence.
+      log.warn("Wiki-gardener approve refused for {id}: {reason}", { id, reason: result.reason });
       // Same body as every other readonly refusal (`{error, readonly}`): a client
       // must be able to recognize the refusal by one shape, and the extra
       // `outcome: "forbidden"` here was a third spelling nothing read.

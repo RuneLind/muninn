@@ -16,7 +16,11 @@
  */
 
 import { escHtml as esc } from "./escape.ts";
-import { installWikiReadonlyGuard } from "./wiki-readonly-client.ts";
+import {
+  installWikiReadonlyGuard,
+  wikiReadonlyWikiFlag,
+  WIKI_READONLY_INPUT_PLACEHOLDER,
+} from "./wiki-readonly-client.ts";
 import { makeSseFrameParser, sseClient, type SseFrame, type SseHandle } from "./client-runtime.ts";
 import { askAnswerBodyHtml, renderStreamingBody, enhanceConfidenceHtml } from "./wiki-ask-render.ts";
 import {
@@ -1531,11 +1535,19 @@ function askMetaText(turn: AskTurn): string {
  *  (`turn.answer` is assigned only in the `done` handler) — the `done`/`answer_html`
  *  handlers re-enable it by id, since they replace only `#askAnswerBody`. */
 function askFollowupHtml(turn: AskTurn): string {
-  const disabled = turn.answer ? "" : " disabled";
+  // A read-only wiki disables the bar at RENDER time, not only through the body
+  // class: `disabled` is a per-render property and this bar is repainted on
+  // every turn switch / SSE terminal event / splice, so a one-shot DOM sweep at
+  // boot would be undone by the next paint. (The body-class guard still cancels
+  // the mousedown/Enter, and the placeholder is the same shared string the
+  // server renders into `#wikiAskInput`.)
+  const ro = wikiReadonlyWikiFlag();
+  const disabled = turn.answer && !ro ? "" : " disabled";
+  const placeholder = ro ? WIKI_READONLY_INPUT_PLACEHOLDER : "Ask a follow-up…";
   return (
     '<div class="wiki-followup" id="wikiFollowupBar">' +
     '<input id="wikiFollowupInput" class="wiki-followup-input" type="text" ' +
-    'placeholder="Ask a follow-up…" autocomplete="off"' + disabled + " />" +
+    'placeholder="' + esc(placeholder) + '" autocomplete="off"' + disabled + " />" +
     '<button id="wikiFollowupBtn" class="wiki-followup-btn"' + disabled + ">Ask</button>" +
     "</div>"
   );
@@ -3092,6 +3104,11 @@ async function submitChatEscalate(forceNew: boolean): Promise<void> {
  * not also read as a click-away by its own document listener.
  */
 function openArticleShare(): void {
+  // A read-only wiki never opens the dialog. The capture-phase guard already
+  // cancels the click on `#wikiShareBtn`, but this opener is also reachable from
+  // code paths that never dispatch one, and the dialog's own Generate would spend
+  // the one-shot the route then 403s.
+  if (wikiReadonlyWikiFlag()) return;
   const m = currentArticle;
   if (!m) return;
   openShareDialog({
@@ -4082,9 +4099,15 @@ document.addEventListener("visibilitychange", () => {
 setInterval(() => maybeRefetchPages(false), WIKI_REFETCH_TICK_MS);
 
 // ── Boot ──────────────────────────────────────────────────────────────
-// A wiki-readonly instance dims + blocks the write actions (➕ / ✎ / Apply /
-// Draft synthesis) so the refusal is visible before the click, not after a 403.
-// No-op when this instance owns writes.
+// Two independent flags, one installer (`wikiBlockedSelectorFor`):
+//   - a wiki-readonly INSTANCE dims + blocks the write actions (➕ / ✎ / Apply /
+//     Draft synthesis);
+//   - a read-only WIKI (`WIKI_READONLY_ROOTS`) adds the egress family — Share,
+//     both fact-check buttons, Explain, Discuss, Ask / New chat / follow-up /
+//     Remember, the escalate bar and the claim-retry ↻ — and disables the two
+//     question inputs.
+// Either way the refusal is visible before the click rather than after a 403.
+// No-op when neither flag is set (no listeners installed at all).
 installWikiReadonlyGuard();
 // Rehydrate any persisted Ask session into the "This session" list (does not
 // auto-show an answer). Safe at module load — the history element is static.

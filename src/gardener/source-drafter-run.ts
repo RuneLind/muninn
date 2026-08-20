@@ -34,7 +34,7 @@ import {
   type SourceDraftTrigger,
 } from "../db/source-draft-attempts.ts";
 import { loadConfig } from "../config.ts";
-import { isWikiReadonly } from "../wiki/readonly.ts";
+import { isReadonlyWikiRoot, isWikiReadonly } from "../wiki/readonly.ts";
 import { docDateMs } from "./harvest.ts";
 import { todayOslo } from "./util.ts";
 import { DRAFT_TIMEOUT_MS } from "./backlog.ts";
@@ -594,6 +594,16 @@ export function triggerSourceDraftFromCapture(
   if ((opts.isReadonly ?? isWikiReadonly)()) {
     log.info(
       "Source drafter auto-trigger skipped for {collection}/{id} — instance is wiki-readonly",
+      { collection: input.collection, id: input.docId },
+    );
+    return;
+  }
+  // …and the per-wiki mechanism, at the same seam and for the same reason: a bot
+  // whose OWN `wikiDir` is listed in `WIKI_READONLY_ROOTS` must not have a model
+  // call spent drafting a page for a wiki nothing can ever write.
+  if (isReadonlyWikiRoot(botConfig.wikiDir)) {
+    log.info(
+      "Source drafter auto-trigger skipped for {collection}/{id} — wiki root is registered read-only",
       { collection: input.collection, id: input.docId },
     );
     return;
