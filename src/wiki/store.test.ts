@@ -14,6 +14,8 @@ import {
   extractPubDate,
   extractDesc,
   flattenWikiLinks,
+  deriveFolderLabels,
+  stemDisplayTitle,
   PLAN_STATUS_VALUES,
   __resetWikiCacheForTest,
 } from "./store.ts";
@@ -1042,6 +1044,139 @@ describe("buildWikiIndex", () => {
     }
   });
 
+  test("defaultType replaces the note fallback and ONLY that fallback", async () => {
+    await mkdir(path.join(root, "projects"), { recursive: true });
+    await mkdir(path.join(root, "misc"), { recursive: true });
+    await Bun.write(
+      path.join(root, ".wiki-reader.json"),
+      JSON.stringify({
+        defaultType: "memory-index",
+        typeMap: { projects: "subsystem" },
+        typeLabels: { "memory-index": "Memory index", subsystem: "Subsystems" },
+      }),
+    );
+    // Nothing types this page: no frontmatter, no typeMap entry, not a standard
+    // folder name ⇒ the wiki's own default instead of `note`.
+    await Bun.write(path.join(root, "misc/loose.md"), "# Loose\n\nBody.");
+    // Each of the three rules that DO type a page still wins ahead of it.
+    await Bun.write(path.join(root, "projects/mapped.md"), "# Mapped\n\nBody."); // typeMap
+    await Bun.write(path.join(root, "misc/authored.md"), "---\ntype: concept\n---\n\nBody."); // frontmatter
+    const index = await buildWikiIndex(root);
+    expect(index.readerConfig?.defaultType).toBe("memory-index");
+    expect(index.resolve("loose")!.type).toBe("memory-index");
+    expect(index.resolve("mapped")!.type).toBe("subsystem");
+    expect(index.resolve("authored")!.type).toBe("concept");
+    // …including the built-in standard-folder fallback (beforeEach's pages).
+    expect(index.resolve("harness engineering")!.type).toBe("concept");
+    expect(index.resolve("Creatine")!.type).toBe("source");
+  });
+
+  test("a defaultType the wiki declares needs no typeLabels entry to apply", async () => {
+    await mkdir(path.join(root, "misc"), { recursive: true });
+    await Bun.write(path.join(root, ".wiki-reader.json"), JSON.stringify({ defaultType: "memo" }));
+    await Bun.write(path.join(root, "misc/loose.md"), "# Loose\n\nBody.");
+    const index = await buildWikiIndex(root);
+    expect(index.resolve("loose")!.type).toBe("memo");
+  });
+
+  test("a defaultType of the wrong type warns and degrades to note", async () => {
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
+      reset: true,
+    });
+    try {
+      await mkdir(path.join(root, "misc"), { recursive: true });
+      await Bun.write(
+        path.join(root, ".wiki-reader.json"),
+        JSON.stringify({ defaultType: ["memory-index"], typeLabels: { plan: "Plans" } }),
+      );
+      await Bun.write(path.join(root, "misc/loose.md"), "# Loose\n\nBody.");
+      const index = await buildWikiIndex(root);
+      expect(index.readerConfig?.defaultType).toBe("");
+      // The valid half survives, as with typeMap/typeLabels/titleFrom.
+      expect(index.readerConfig?.typeLabels.plan).toBe("Plans");
+      expect(index.resolve("loose")!.type).toBe("note");
+      expect(
+        records.some((r) => r.level === "warning" && r.rawMessage.includes("defaultType")),
+      ).toBe(true);
+    } finally {
+      await reset();
+    }
+  });
+
+  test("colliding stems get a disambiguated displayTitle; a unique stem does not", async () => {
+    await mkdir(path.join(root, "projects/muninn"), { recursive: true });
+    await mkdir(path.join(root, "projects/huginn"), { recursive: true });
+    await Bun.write(path.join(root, "projects/muninn/tracing.md"), "# Tracing\n\nBody.");
+    await Bun.write(path.join(root, "projects/huginn/tracing.md"), "# Tracing\n\nBody.");
+    // Same stem, but this one AUTHORS a title — already distinguishable, left alone.
+    await mkdir(path.join(root, "projects/nav"), { recursive: true });
+    await Bun.write(
+      path.join(root, "projects/nav/tracing.md"),
+      "---\ntitle: Tracing in nav\n---\n\nBody.",
+    );
+    const index = await buildWikiIndex(root);
+    const byRel = (rel: string) => index.resolveRelPath(rel)!;
+    // Prefix is the immediately-containing folder — the discriminator — and the
+    // stem is KEPT, so the row still says what the page is about.
+    expect(byRel("projects/muninn/tracing.md").displayTitle).toBe("muninn/tracing");
+    expect(byRel("projects/huginn/tracing.md").displayTitle).toBe("huginn/tracing");
+    expect(byRel("projects/nav/tracing.md").displayTitle).toBeUndefined();
+    // `title` is untouched on all three — it is what `byKey`/`stripTitle` read.
+    expect(byRel("projects/muninn/tracing.md").title).toBe("tracing");
+    // Scoped to the collision: beforeEach's lone `index.md` still reads `index`.
+    expect(index.resolve("index")!.displayTitle).toBeUndefined();
+  });
+
+  test("folderLabels: configured entries beat the derived strip and drive the display title", async () => {
+    await mkdir(path.join(root, "-Users-me-source-muninn/memory"), { recursive: true });
+    await mkdir(path.join(root, "-Users-me-source-mimir/memory"), { recursive: true });
+    await Bun.write(
+      path.join(root, ".wiki-reader.json"),
+      JSON.stringify({ folderLabels: { "-Users-me-source-muninn": "muninn" } }),
+    );
+    await Bun.write(path.join(root, "-Users-me-source-muninn/memory/MEMORY.md"), "# M\n\nBody.");
+    await Bun.write(path.join(root, "-Users-me-source-mimir/memory/MEMORY.md"), "# M\n\nBody.");
+    const index = await buildWikiIndex(root);
+    const byRel = (rel: string) => index.resolveRelPath(rel)!;
+    // The configured label replaces the FIRST segment — not the parent dir
+    // (`memory`), which every one of these pages shares and so disambiguates
+    // nothing.
+    expect(byRel("-Users-me-source-muninn/memory/MEMORY.md").displayTitle).toBe("muninn/MEMORY");
+    expect(index.folderLabels!["-Users-me-source-muninn"]).toBe("muninn");
+    // An unlabeled folder gets no derived label HERE (this fixture's other
+    // folders — concepts/, sources/, life/ — share no dash prefix with it, so
+    // there is nothing to strip) and falls back to its parent dir. The
+    // derivation itself is covered in `deriveFolderLabels` below.
+    expect(index.folderLabels!["-Users-me-source-mimir"]).toBeUndefined();
+    expect(byRel("-Users-me-source-mimir/memory/MEMORY.md").displayTitle).toBe("memory/MEMORY");
+  });
+
+  test("folderLabels of the wrong type warns and degrades to the derived labels", async () => {
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
+      reset: true,
+    });
+    try {
+      await Bun.write(
+        path.join(root, ".wiki-reader.json"),
+        JSON.stringify({ folderLabels: ["nope"], typeLabels: { plan: "Plans" } }),
+      );
+      const index = await buildWikiIndex(root);
+      expect(index.readerConfig?.folderLabels).toEqual({});
+      expect(index.readerConfig?.typeLabels.plan).toBe("Plans");
+      expect(
+        records.some((r) => r.level === "warning" && r.rawMessage.includes("folderLabels")),
+      ).toBe(true);
+    } finally {
+      await reset();
+    }
+  });
+
   test("native .mdx pilot: discovered, frontmatter tags/type, outgoing links AND backlinks", async () => {
     await mkdir(path.join(root, "blogs/src"), { recursive: true });
     // A native .mdx page with frontmatter (title/tags), a component (Callout), a
@@ -1221,6 +1356,70 @@ describe("buildWikiIndex", () => {
       else process.env.WIKI_DIR = prev;
       __resetWikiCacheForTest();
     }
+  });
+});
+
+describe("deriveFolderLabels", () => {
+  const projectDirs = [
+    "-Users-rune-source-private-muninn",
+    "-Users-rune-source-nav-melosys-api",
+    "-Users-rune-private-AI-2027",
+  ];
+
+  test("strips the dash-token prefix every folder shares", () => {
+    expect(deriveFolderLabels(projectDirs)).toEqual({
+      "-Users-rune-source-private-muninn": "source-private-muninn",
+      "-Users-rune-source-nav-melosys-api": "source-nav-melosys-api",
+      "-Users-rune-private-AI-2027": "private-AI-2027",
+    });
+  });
+
+  test("a configured entry wins and is excluded from the shared prefix", () => {
+    const labels = deriveFolderLabels(projectDirs, {
+      "-Users-rune-source-private-muninn": "muninn",
+    });
+    expect(labels["-Users-rune-source-private-muninn"]).toBe("muninn");
+    expect(labels["-Users-rune-private-AI-2027"]).toBe("private-AI-2027");
+  });
+
+  test("inert on every wiki whose folders share no dash prefix", () => {
+    // mimir / jarvis / melosys-kode-wiki — measured, all of them.
+    expect(deriveFolderLabels(["plans", "projects", "archive", "blogs"])).toEqual({});
+    expect(deriveFolderLabels(["concepts", "entities", "sources"])).toEqual({});
+  });
+
+  test("the three guards: one folder, one shared token, a folder that IS the prefix", () => {
+    // A single folder is its own prefix — stripping it leaves nothing.
+    expect(deriveFolderLabels(["-Users-rune-source-private-muninn"])).toEqual({});
+    // One shared token is as likely meaningful as noise.
+    expect(deriveFolderLabels(["nav-a", "nav-b"])).toEqual({});
+    // `a-b` is the whole shared prefix of `a-b`/`a-b-c`; it keeps its own name
+    // rather than being labeled "".
+    expect(deriveFolderLabels(["a-b", "a-b-c", "a-b-d"])).toEqual({});
+  });
+});
+
+describe("stemDisplayTitle", () => {
+  test("prefers the wiki's folder label for the FIRST segment", () => {
+    expect(
+      stemDisplayTitle("-Users-x-muninn/memory/MEMORY.md", "MEMORY", {
+        "-Users-x-muninn": "muninn",
+      }),
+    ).toBe("muninn/MEMORY");
+  });
+
+  test("falls back to the immediately-containing folder", () => {
+    expect(stemDisplayTitle("projects/yggdrasil/architecture.md", "architecture", {})).toBe(
+      "yggdrasil/architecture",
+    );
+  });
+
+  test("a wiki-root page has no disambiguator", () => {
+    expect(stemDisplayTitle("index.md", "index", {})).toBeNull();
+  });
+
+  test("a prefix identical to the stem adds nothing", () => {
+    expect(stemDisplayTitle("memory/memory.md", "memory", {})).toBeNull();
   });
 });
 

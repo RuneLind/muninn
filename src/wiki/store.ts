@@ -82,6 +82,34 @@ export interface WikiReaderConfig {
    * blast radius on a wiki that does not ask for it exactly zero.
    */
   titleFrom: string[];
+  /**
+   * Type given to a page no other rule typed — it replaces the final `note`
+   * fallback in {@link typeFromFrontmatter}, and ONLY that fallback: an authored
+   * `type:`/`metadata.type:`, a `typeMap` folder hit and the four standard folder
+   * names all still win ahead of it. Absent/blank ⇒ `note`, i.e. today's
+   * behaviour byte for byte.
+   *
+   * It exists because `note` is one of two types `atlas.ts` refuses a column
+   * (`EXCLUDED_TYPES`), so an untyped page is invisible on the Atlas tab and
+   * indistinguishable from every other untyped page on the type facet. On the
+   * `memory` wiki that is 32 pages: the 30 per-project `MEMORY.md` hubs (no
+   * frontmatter at all) plus two strays. Naming them something the wiki chooses
+   * — `memory-index` — buys them a facet bucket and an Atlas column; naming them
+   * `note` buys nothing.
+   */
+  defaultType: string;
+  /**
+   * Display labels for the wiki's first-path-segment folders — the folder facet's
+   * option text and the disambiguator {@link stemDisplayTitle} prefixes a
+   * colliding stem with. `{}` ⇒ folders render under their own names.
+   *
+   * For a wiki muninn does not own the layout of: `~/.claude/projects`' folders
+   * are Claude Code's mangled project dirs
+   * (`-Users-rune-source-private-muninn`), which are unreadable as facet options
+   * and useless as a disambiguator. Entries here are exact folder names; folders
+   * with no entry fall back to {@link deriveFolderLabels}' common-prefix strip.
+   */
+  folderLabels: Record<string, string>;
 }
 
 /**
@@ -274,6 +302,19 @@ export interface WikiPageMeta {
   /** Canonical page name — the filename stem; what [[wikilinks]] resolve against. */
   name: string;
   title: string;
+  /**
+   * Disambiguated title for the READER's row/card/rail surfaces, set only on a
+   * page whose stem is shared with another page in this wiki AND whose `title` is
+   * just that stem (see `stemDisplayTitle`). Absent everywhere else.
+   *
+   * Deliberately a SECOND field rather than a rewrite of `title`: `title` is
+   * registered into `byKey` (so it decides what a `[[wikilink]]` resolves to),
+   * is what `renderWikiHtml`'s `stripTitle` compares the page's leading `# H1`
+   * against, and is what the Similar query is built from. Rewriting it would
+   * move all three for a purely cosmetic gain — measured on mimir, the twelve
+   * colliding pages' H1s would have stopped being stripped and rendered twice.
+   */
+  displayTitle?: string;
   type: WikiPageType;
   /** Which wiki subtree the page lives in: the root AI wiki or the life/ split. */
   domain: "ai" | "life";
@@ -443,6 +484,13 @@ export interface WikiIndex {
    * older callers stay valid; `buildWikiIndex` always sets it.
    */
   readerConfig?: WikiReaderConfig | null;
+  /**
+   * Effective display label per first-path-segment folder (`deriveFolderLabels`:
+   * the wiki's own `folderLabels` entries, then the common-prefix strip for the
+   * rest). Empty for every wiki whose folders need neither. Optional so hand-built
+   * test indexes stay valid; `buildWikiIndex` always sets it.
+   */
+  folderLabels?: Record<string, string>;
   /**
    * Curated Atlas trails parsed from the wiki root's optional `trails.json`, read
    * once per index build (inherits the 5-min TTL). Empty array when the wiki has
@@ -979,6 +1027,22 @@ async function readWikiReaderConfig(root: string): Promise<WikiReaderConfig | nu
       root,
     });
   }
+  // And again for the two keys added for the `memory` wiki. A bad `defaultType`
+  // degrades to "" ⇒ the `note` fallback; a bad `folderLabels` to `{}` ⇒ folders
+  // render under their own names. Neither can take the wiki offline.
+  const defaultTypeOk = typeof obj.defaultType === "string" && obj.defaultType.trim().length > 0;
+  if (obj.defaultType !== undefined && !defaultTypeOk) {
+    log.warn("{file} at {root}: defaultType is not a non-empty string — ignoring it", {
+      file: WIKI_READER_CONFIG_FILE,
+      root,
+    });
+  }
+  if (obj.folderLabels !== undefined && !isStringRecord(obj.folderLabels)) {
+    log.warn("{file} at {root}: folderLabels is not a string→string map — ignoring it", {
+      file: WIKI_READER_CONFIG_FILE,
+      root,
+    });
+  }
   return {
     typeMap: isStringRecord(obj.typeMap) ? obj.typeMap : {},
     typeLabels: isStringRecord(obj.typeLabels) ? obj.typeLabels : {},
@@ -986,6 +1050,8 @@ async function readWikiReaderConfig(root: string): Promise<WikiReaderConfig | nu
     titleFrom: isStringArray(obj.titleFrom)
       ? obj.titleFrom.map((k) => k.trim()).filter((k) => k.length > 0)
       : [],
+    defaultType: defaultTypeOk ? (obj.defaultType as string).trim() : "",
+    folderLabels: isStringRecord(obj.folderLabels) ? obj.folderLabels : {},
   };
 }
 
@@ -1115,7 +1181,96 @@ function typeFromFrontmatter(
   if (folder === "concepts") return "concept";
   if (folder === "entities") return "entity";
   if (folder === "analyses") return "analysis";
-  return "note";
+  // Last: the wiki's own `defaultType`, if it declares one. Deliberately the very
+  // last link — it is the "nothing typed this page" answer, so anything that DOES
+  // type a page (authored key, typeMap, standard folder) still wins — and absent,
+  // it is `note` exactly as before.
+  return config?.defaultType || "note";
+}
+
+/**
+ * Display labels for a wiki's first-path-segment folders: the wiki's own
+ * `folderLabels` entries first, then — for the rest — the folder name with the
+ * longest dash-token prefix EVERY folder shares stripped off.
+ *
+ * The derived half exists for `~/.claude/projects`, whose folders are Claude
+ * Code's mangled project dirs: 31 of them today, all prefixed
+ * `-Users-rune-`, growing whenever a new project is opened. Hand entries alone
+ * would leave every new project unlabeled; the strip keeps them readable
+ * (`-Users-rune-source-private-muninn` ⇒ `source-private-muninn`) with no
+ * maintenance at all, and an entry here overrides it where a shorter name is
+ * wanted (`muninn`).
+ *
+ * Three guards keep it inert on every wiki that isn't shaped like that — and
+ * measured, that is all five other registered roots (mimir's `plans`/`projects`/
+ * `archive`, jarvis's `concepts`/`entities`/`sources`, … share no dash token, so
+ * the common prefix is empty and nothing is stripped):
+ *   - **≥2 folders.** One folder is its own common prefix; stripping it leaves
+ *     the empty string.
+ *   - **≥2 shared tokens.** A single shared token is as likely to be meaningful
+ *     (`nav-a`/`nav-b`) as it is to be noise.
+ *   - **Every remainder non-empty.** A folder that IS the shared prefix (a wiki
+ *     holding both `a-b` and `a-b-c`) keeps its own name rather than losing it.
+ */
+export function deriveFolderLabels(
+  folders: string[],
+  configured: Record<string, string> = {},
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  const unlabeled: string[] = [];
+  for (const f of folders) {
+    // Own-key guard: a folder named `constructor` must not read the prototype.
+    const explicit = Object.prototype.hasOwnProperty.call(configured, f) ? configured[f] : undefined;
+    if (explicit && explicit.trim()) out[f] = explicit.trim();
+    else unlabeled.push(f);
+  }
+  if (unlabeled.length < 2) return out;
+  const split = unlabeled.map((f) => f.split("-"));
+  let shared = 0;
+  const first = split[0]!;
+  outer: while (shared < first.length - 1) {
+    const tok = first[shared];
+    for (const parts of split) {
+      if (shared >= parts.length - 1 || parts[shared] !== tok) break outer;
+    }
+    shared++;
+  }
+  if (shared < 2) return out;
+  for (const f of unlabeled) out[f] = f.split("-").slice(shared).join("-");
+  return out;
+}
+
+/**
+ * The disambiguated display title for a page whose filename stem is shared with
+ * another page in the same wiki — or `null` when nothing useful can be built.
+ *
+ * The reader navigates and highlights by relPath now, so a collision is no longer
+ * a correctness bug; it is a LEGIBILITY one — 30 rows reading `MEMORY`, one per
+ * project, with nothing on screen saying which project. The prefix is:
+ *   - the wiki's label for the page's FIRST path segment when it has one (the
+ *     `memory` wiki: `-Users-…-muninn/memory/MEMORY.md` ⇒ `muninn/MEMORY`; the
+ *     intermediate `memory/` dir is what every one of them has in common and so
+ *     disambiguates nothing);
+ *   - else the immediately-containing directory (mimir:
+ *     `projects/yggdrasil/architecture.md` ⇒ `yggdrasil/architecture`, which is
+ *     why the prefix is a PREFIX and not a replacement — a bare `yggdrasil` row
+ *     would lose what the page is about).
+ * A page at the wiki root has neither, and keeps its stem.
+ */
+export function stemDisplayTitle(
+  relPath: string,
+  name: string,
+  folderLabels: Record<string, string>,
+): string | null {
+  const dirs = relPath.split("/").slice(0, -1);
+  if (!dirs.length) return null;
+  const firstSeg = dirs[0]!;
+  const labeled = Object.prototype.hasOwnProperty.call(folderLabels, firstSeg)
+    ? folderLabels[firstSeg]
+    : undefined;
+  const prefix = labeled && labeled.trim() ? labeled.trim() : dirs[dirs.length - 1]!;
+  if (!prefix || prefix === name) return null;
+  return `${prefix}/${name}`;
 }
 
 /**
@@ -1616,6 +1771,33 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
   }
 
   pages.sort((a, b) => a.relPath.localeCompare(b.relPath));
+
+  // Same-EXTENSION same-stem pages in different folders are NOT dropped above —
+  // they are two real pages that simply share a filename, and on the `memory`
+  // wiki they are the 30 per-project `MEMORY.md` hubs. Give each one a
+  // disambiguated DISPLAY title (never a new `title`, see `WikiPageMeta`), so the
+  // reader's list stops rendering 30 identical rows. Scoped to the collision:
+  // a wiki with one `index.md` keeps reading `index`.
+  const folderLabels = deriveFolderLabels(
+    // First path SEGMENT of every non-root page — the same key the folder facet
+    // (`pageFolder`) and `typeMap` use, so one label map serves all three.
+    [...new Set(pages.filter((p) => p.relPath.includes("/")).map((p) => p.relPath.split("/")[0]!))],
+    readerConfig?.folderLabels ?? {},
+  );
+  const stemCounts = new Map<string, number>();
+  for (const p of pages) {
+    const k = p.name.toLowerCase();
+    stemCounts.set(k, (stemCounts.get(k) ?? 0) + 1);
+  }
+  for (const p of pages) {
+    if ((stemCounts.get(p.name.toLowerCase()) ?? 0) < 2) continue;
+    // An AUTHORED title already distinguishes the page; only a title that is the
+    // bare stem (no `title:`, no `titleFrom` hit) needs the prefix.
+    if (p.title !== p.name) continue;
+    const display = stemDisplayTitle(p.relPath, p.name, folderLabels);
+    if (display) p.displayTitle = display;
+  }
+
   // Registration order decides stem-collision winners: root AI pages sort before
   // life/ and register first, matching Obsidian's ambiguous-link behavior closely
   // enough for a read-only viewer.
@@ -1686,7 +1868,18 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
   }
   for (const arr of backlinks.values()) arr.sort();
 
-  return { pages, outgoing, backlinks, resolve, resolveRelPath, scannedAt: Date.now(), root, readerConfig, trails };
+  return {
+    pages,
+    outgoing,
+    backlinks,
+    resolve,
+    resolveRelPath,
+    scannedAt: Date.now(),
+    root,
+    readerConfig,
+    folderLabels,
+    trails,
+  };
 }
 
 /** Per-root TTL cache — bots point at different wikis, so caches can't be shared. */

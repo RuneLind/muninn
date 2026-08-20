@@ -128,11 +128,19 @@ import {
   type IntegrateProposal,
 } from "./wiki-integrate.ts";
 import {
+  isActivePage,
+  navTargetFrom,
+  NAV_LINK_SELECTOR,
+  type NavTarget,
+} from "./wiki-nav.ts";
+import {
   anchorNow,
   connectionTypeOrder,
+  displayTitleOf,
   facetKeys,
   filterPages,
   folderCounts,
+  folderLabelOf,
   followupCount,
   hasTypedHubs,
   hubTypeList,
@@ -168,6 +176,12 @@ let typeLabels: Record<string, string> = { ...TYPE_LABEL };
 function typeLabel(t: string): string {
   return typeLabels[t] || t;
 }
+
+/** The wiki's effective folder labels (its `.wiki-reader.json` `folderLabels`
+ *  plus the store's common-prefix strip), stored at boot from the
+ *  /api/wiki/pages response. `{}` — every folder under its own name — for every
+ *  wiki that declares none and needs none, which is the default. */
+let folderLabels: Record<string, string> = {};
 
 // ── Data shapes (mirror src/dashboard/routes/wiki-routes.ts) ──────────
 interface WikiPageDetail {
@@ -225,6 +239,17 @@ function recencyNow(): number {
   return anchorNow(Date.now(), scannedAtMs);
 }
 let currentName: string | null = null;
+/**
+ * The relPath of the page currently rendered in the article pane — the identity
+ * the active-row test prefers (`isActivePage`).
+ *
+ * `currentName` cannot answer "is this row the open page?" on a wiki with
+ * same-stem pages: the memory wiki's 30 `MEMORY.md` hubs all have the name
+ * `MEMORY`, so opening one drew every one of them active. Assigned from the page
+ * RESPONSE (like `currentName`), and cleared with it, so it can never describe a
+ * page other than the one on screen.
+ */
+let currentRelPath: string | null = null;
 /**
  * The listing of the page currently rendered in the article pane — stamped by
  * `renderBreadcrumb`, which every article render path calls.
@@ -298,10 +323,14 @@ function renderFolderSelect(): void {
   const row = document.getElementById("wikiFolderRow");
   if (!sel || !row) return;
   const counts = folderCounts(allPages, filters.domain);
+  // Sorted (and shown) by LABEL: on a wiki whose folder names are opaque — the
+  // `memory` wiki's mangled `-Users-rune-source-private-muninn` project dirs — the
+  // raw name is neither readable nor a useful sort key. The option VALUE stays the
+  // raw folder, so every filter path is untouched.
   const folders = facetKeys(counts, filters.folder).sort((a, b) => {
     if (a === ROOT_FOLDER) return 1; // root pages last — they're the odd ones out
     if (b === ROOT_FOLDER) return -1;
-    return a.localeCompare(b);
+    return folderLabelOf(a, folderLabels).localeCompare(folderLabelOf(b, folderLabels));
   });
   const real = folders.filter((f) => f !== ROOT_FOLDER);
   if (!real.length) {
@@ -312,7 +341,7 @@ function renderFolderSelect(): void {
   row.style.display = "";
   let html = `<option value="">All folders</option>`;
   folders.forEach((f) => {
-    const label = f === ROOT_FOLDER ? "(root)" : f;
+    const label = f === ROOT_FOLDER ? "(root)" : folderLabelOf(f, folderLabels);
     html += `<option value="${esc(f)}"${filters.folder === f ? " selected" : ""}>${esc(label)} ${counts[f] || 0}</option>`;
   });
   sel.innerHTML = html;
@@ -459,10 +488,15 @@ function renderList(): void {
         : mode === "created"
           ? pageAddedLabel(p, now)
           : pageDateLabel(p, now);
+    // Both keys on every row: `data-relpath` is what the click delegate and the
+    // active test use (it names ONE page), `data-page` stays for anything still
+    // reading the name. `isActivePage` falls back to the name comparison only
+    // while no relPath is known — see `wiki-nav.ts`.
+    const active = isActivePage(p, { name: currentName, relPath: currentRelPath });
     html +=
-      `<div class="wiki-list-item${p.name === currentName ? " active" : ""}" data-page="${esc(p.name)}">` +
+      `<div class="wiki-list-item${active ? " active" : ""}" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}">` +
       `<div class="wiki-type-dot type-${esc(p.type)}"></div>` +
-      `<div class="wiki-list-title">${esc(p.title)}</div>` +
+      `<div class="wiki-list-title">${esc(displayTitleOf(p))}</div>` +
       // Pill THEN flag, the same order as the article header's `badgeHtml` — the
       // two surfaces show the same two facts and must not read differently.
       statusPillHtml(p) +
@@ -551,7 +585,9 @@ function renderBreadcrumb(m: WikiListing): void {
   if (WIKI) crumbs.push('<span class="wiki-bc-wiki">' + esc(WIKI) + "</span>");
   const folder = pageFolder(m);
   if (folder && folder !== ROOT_FOLDER) {
-    crumbs.push('<span class="wiki-bc-folder">' + esc(folder) + "</span>");
+    // The folder's LABEL, matching the facet — the raw segment is the mangled
+    // project dir on the `memory` wiki and unreadable in a breadcrumb.
+    crumbs.push('<span class="wiki-bc-folder">' + esc(folderLabelOf(folder, folderLabels)) + "</span>");
   }
   crumbs.push('<span class="wiki-bc-cur">' + esc(m.title) + "</span>");
   // BOTH dates, each labelled — unlike a list row, which shows the one date it sorted
@@ -614,8 +650,8 @@ function hubGridHtml(heading: string, pages: WikiListing[]): string {
   let html = `<h2>${heading}</h2><div class="wiki-hub-grid">`;
   pages.forEach((p) => {
     html +=
-      `<div class="wiki-hub-card" data-page="${esc(p.name)}">` +
-      `<div class="wiki-hub-title">${esc(p.title)}</div>` +
+      `<div class="wiki-hub-card" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}">` +
+      `<div class="wiki-hub-title">${esc(displayTitleOf(p))}</div>` +
       `<div class="wiki-hub-sub">${p.backlinkCount} pages link here</div>` +
       `</div>`;
   });
@@ -684,10 +720,10 @@ function timelineHtml(): string {
       `</span></div>`;
     items.forEach((it) => {
       html +=
-        `<div class="wiki-tl-item" data-page="${esc(it.p.name)}">` +
+        `<div class="wiki-tl-item" data-page="${esc(it.p.name)}" data-relpath="${esc(it.p.relPath)}">` +
         `<div class="wiki-tl-kind ${it.kind}">${it.kind === "new" ? "+" : "~"}</div>` +
         `<div class="wiki-type-dot type-${esc(it.p.type)}"></div>` +
-        `<div class="wiki-tl-title">${esc(it.p.title)}</div>` +
+        `<div class="wiki-tl-title">${esc(displayTitleOf(it.p))}</div>` +
         `</div>`;
     });
   });
@@ -744,6 +780,7 @@ function renderStart(): void {
   // becomes safe to apply — before anything below reads `allPages`.
   applyPendingPages();
   currentName = null;
+  currentRelPath = null; // the two identities are cleared together, always
   hideBreadcrumb(); // no page open — the breadcrumb has nothing to show
   let html =
     '<div class="wiki-start"><div class="wiki-article-head"><h1>Knowledge Wiki</h1>' +
@@ -823,7 +860,7 @@ function miniGraphHtml(data: WikiPageDetail): string {
   shown.forEach((n) => {
     const ly = n.y! + (n.y! >= cy ? 15 : -9);
     nodes +=
-      `<g class="mini-node" data-page="${esc(n.p.name)}"><title>${esc(n.p.title)}</title>` +
+      `<g class="mini-node" data-page="${esc(n.p.name)}" data-relpath="${esc(n.p.relPath)}"><title>${esc(displayTitleOf(n.p))}</title>` +
       `<circle class="mini-hit" cx="${n.x!.toFixed(1)}" cy="${n.y!.toFixed(1)}" r="14" fill="transparent"></circle>` +
       `<circle class="mini-dot t-${esc(n.p.type)}" cx="${n.x!.toFixed(1)}" cy="${n.y!.toFixed(1)}" r="5"></circle>` +
       `<text x="${n.x!.toFixed(1)}" y="${ly.toFixed(1)}" text-anchor="middle">${esc(short(n.p.title))}</text></g>`;
@@ -859,8 +896,8 @@ function renderConnections(data: WikiPageDetail): void {
         .sort((a, b) => b.backlinkCount - a.backlinkCount)
         .forEach((p) => {
           html +=
-            `<div class="wiki-conn-item" data-page="${esc(p.name)}">` +
-            `<div class="wiki-type-dot type-${esc(p.type)}"></div><span>${esc(p.title)}</span></div>`;
+            `<div class="wiki-conn-item" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}">` +
+            `<div class="wiki-type-dot type-${esc(p.type)}"></div><span>${esc(displayTitleOf(p))}</span></div>`;
         });
     });
     return html + "</div>";
@@ -918,43 +955,49 @@ function similarSectionHtml(items: SimilarPage[]): string {
   let html = `<div class="wiki-conn-section"><div class="wiki-conn-title">Similar (${items.length})</div>`;
   items.forEach((p) => {
     html +=
-      `<div class="wiki-conn-item" data-page="${esc(p.name)}" title="${esc(p.snippet || "")}">` +
+      `<div class="wiki-conn-item" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}" title="${esc(p.snippet || "")}">` +
       `<div class="wiki-type-dot type-${esc(p.type)}"></div><span>${esc(p.title)}</span></div>`;
   });
   return html + "</div>";
 }
 
 /** Fill the placeholder — but only if the reader is still on the page we fetched
- *  for (a fast tab flip may have moved on). */
-function renderSimilarInto(pageName: string, items: SimilarPage[]): void {
-  if (currentName !== pageName) return;
+ *  for (a fast tab flip may have moved on). Keyed on relPath, like the fetch. */
+function renderSimilarInto(relPath: string, items: SimilarPage[]): void {
+  if (currentRelPath !== relPath) return;
   const el = document.getElementById("wikiSimilar");
   if (el) el.innerHTML = similarSectionHtml(items);
 }
 
 /** Lazily fetch + render the Similar section for a page. Memoized per page and
  *  guarded against concurrent duplicate fetches; a failed/empty fetch leaves the
- *  section absent. */
-function loadSimilar(pageName: string): void {
-  const memo = similarMemo.get(pageName);
+ *  section absent.
+ *
+ *  Keyed on relPath end to end — memo, in-flight guard, query param and the
+ *  still-on-this-page test. Under the name key, two same-stem pages shared one
+ *  memo entry and the route resolved both to whichever registered first, so the
+ *  rail showed another page's cousins under this one. */
+function loadSimilar(page: { relPath: string }): void {
+  const relPath = page.relPath;
+  const memo = similarMemo.get(relPath);
   if (memo) {
-    renderSimilarInto(pageName, memo);
+    renderSimilarInto(relPath, memo);
     return;
   }
-  if (similarInFlight.has(pageName)) return;
-  similarInFlight.add(pageName);
-  fetch(withWiki("/api/wiki/similar?page=" + encodeURIComponent(pageName)))
+  if (similarInFlight.has(relPath)) return;
+  similarInFlight.add(relPath);
+  fetch(withWiki("/api/wiki/similar?relPath=" + encodeURIComponent(relPath)))
     .then((r) => r.json())
     .then((data: { similar?: SimilarPage[] }) => {
       const items = Array.isArray(data.similar) ? data.similar : [];
-      similarMemo.set(pageName, items);
-      renderSimilarInto(pageName, items);
+      similarMemo.set(relPath, items);
+      renderSimilarInto(relPath, items);
     })
     .catch(() => {
       /* huginn down or route error — hide the section silently */
     })
     .finally(() => {
-      similarInFlight.delete(pageName);
+      similarInFlight.delete(relPath);
     });
 }
 
@@ -968,7 +1011,11 @@ function articleHeadHtml(m: WikiListing): string {
       ? `<p class="wiki-subtitle">${esc(m.description)}</p>`
       : "";
   let head =
-    `<div class="wiki-article-head"><h1>${esc(m.title)}</h1>${subtitle}<div class="wiki-meta-row">` +
+    // The disambiguated title where the store set one: a shared/reloaded link to
+    // one of 30 same-stem pages must say WHICH one it landed on, and the
+    // breadcrumb above shows the FIRST path segment, which on the memory wiki is
+    // the folder label and on mimir is `projects` — neither is the discriminator.
+    `<div class="wiki-article-head"><h1>${esc(displayTitleOf(m))}</h1>${subtitle}<div class="wiki-meta-row">` +
     badgeHtml(m);
   m.tags.forEach((t) => {
     head += `<span class="wiki-tag">${esc(t)}</span>`;
@@ -993,31 +1040,36 @@ function loadExplainer(m: WikiListing, push: boolean): void {
   hideExplainPill(); // a page switch drops any stale pill from the prior page
   setAtlasFull(false);
   currentName = m.name;
+  // The listing IS the identity here (no page response to wait for), so the
+  // active-row test gets its relPath immediately.
+  currentRelPath = m.relPath;
   navInFlight = false; // `currentName` now carries the "article" signal on its own
   if (push) {
-    history.pushState({ page: currentName }, "", pageUrl(currentName));
+    history.pushState({ relPath: m.relPath }, "", pageUrlByRelPath(m.relPath));
   }
   renderBreadcrumb(m);
-  const src = withWiki("/api/wiki/html?name=" + encodeURIComponent(m.name));
+  // relPath on all three fetches: two explainers in different folders can share a
+  // stem, and `?name=` would serve/describe whichever registered first.
+  const src = withWiki("/api/wiki/html?relPath=" + encodeURIComponent(m.relPath));
   document.getElementById("articleWrap")!.innerHTML =
     articleHeadHtml(m) +
     `<iframe class="wiki-explainer-frame" src="${esc(src)}" sandbox="allow-scripts allow-popups" title="${esc(m.title)}"></iframe>`;
   document.getElementById("articleWrap")!.scrollTop = 0;
   document.getElementById("connBody")!.innerHTML = '<div class="wiki-conn-empty">Loading…</div>';
-  fetch(withWiki("/api/wiki/page?name=" + encodeURIComponent(m.name)))
+  fetch(withWiki("/api/wiki/page?relPath=" + encodeURIComponent(m.relPath)))
     .then((r) => r.json())
     .then((data: WikiPageDetail) => {
       // A fast page flip may have moved on — don't clobber the new page's panel.
-      if (data.error || currentName !== m.name) return;
+      if (data.error || currentRelPath !== m.relPath) return;
       // Re-stamp from the SINGLE-PAGE payload: the listing this render started
       // from came out of `/api/wiki/pages`, which strips `desc` (and an
       // explainer's `description` is sniffed, not always in the listing).
       if (data.meta) currentArticle = data.meta;
       renderConnections(data);
-      loadSimilar(m.name);
+      loadSimilar(m);
     })
     .catch(() => {
-      if (currentName !== m.name) return;
+      if (currentRelPath !== m.relPath) return;
       document.getElementById("connBody")!.innerHTML =
         '<div class="wiki-conn-empty">Connections unavailable.</div>';
     });
@@ -1054,6 +1106,14 @@ function blogAccentStyleBlock(m: WikiListing): string {
   return `<style>${css}</style>`;
 }
 
+/** Open whatever a click (or a URL) resolved to — the ONE entry point both
+ *  navigation keys funnel through, so the explainer branch, the in-flight flag and
+ *  the pending-listing apply can't drift between them. */
+function openNavTarget(target: NavTarget, push: boolean): void {
+  if (target.kind === "relPath") loadPageByRelPath(target.relPath, push);
+  else loadPage(target.name, push);
+}
+
 function loadPage(name: string, push: boolean): void {
   hideExplainPill(); // a page switch drops any stale pill from the prior page
   // Raised BEFORE anything else: `currentName` is only set from the response, so
@@ -1071,24 +1131,33 @@ function loadPage(name: string, push: boolean): void {
   fetchAndRenderPage(withWiki("/api/wiki/page?name=" + encodeURIComponent(name)), push);
 }
 
-/** Open a page by its exact normalized relPath — collision-proof navigation used
- *  by the Atlas tab, where a same-stem page in another folder must not shadow the
- *  intended one (the by-`name` route resolves first-stem-match). Atlas never maps
- *  explainers, so this render path (no explainer branch) always applies. The
- *  relPath rides into the pushed history entry so Back/reload/share re-resolve the
- *  SAME page; `push=false` on popstate/boot replays without re-pushing. */
+/** Open a page by its exact relPath — the collision-proof route, and now the
+ *  DEFAULT for every in-reader click (every row/card/rail/wikilink emits a
+ *  `data-relpath`). The by-`name` route resolves first-stem-match, which on a wiki
+ *  with same-stem pages opens the wrong page entirely. The relPath rides into the
+ *  pushed history entry so Back/reload/share re-resolve the SAME page;
+ *  `push=false` on popstate/boot replays without re-pushing. */
 function loadPageByRelPath(relPath: string, push = true): void {
   hideExplainPill();
   navInFlight = true; // same in-flight window as loadPage
   applyPendingPages(); // same "navigating anyway" moment as loadPage
-  fetchAndRenderPage(withWiki("/api/wiki/page?relPath=" + encodeURIComponent(relPath)), push, relPath);
+  // The explainer branch is `loadPage`'s, and it has to exist here too now that
+  // ordinary clicks come through this path: an explainer renders in a sandboxed
+  // iframe off `/api/wiki/html`, and asking `/api/wiki/page` for one returns the
+  // raw HTML file as if it were markdown.
+  const listing = allPages.find((p) => p.relPath === relPath);
+  if (listing && listing.type === "explainer") {
+    loadExplainer(listing, push);
+    return;
+  }
+  fetchAndRenderPage(withWiki("/api/wiki/page?relPath=" + encodeURIComponent(relPath)), push);
 }
 
 /** Shared fetch + article render for both by-name and by-relPath navigation.
- *  When `relPath` is given (a collision-proof Atlas open), history is pushed as
- *  `?relPath=<relPath>` so the round-trip survives Back/reload/share; otherwise
- *  the name-based `?page=<name>` URL is used (existing links unchanged). */
-function fetchAndRenderPage(url: string, push: boolean, relPath?: string): void {
+ *  History is pushed as `?relPath=<relPath>` off the RESOLVED page (see below), so
+ *  the round-trip survives Back/reload/share even where stems collide; a response
+ *  carrying no relPath at all falls back to the name-based `?page=<name>` URL. */
+function fetchAndRenderPage(url: string, push: boolean): void {
   fetch(url)
     .then((r) => r.json())
     .then((data: WikiPageDetail) => {
@@ -1108,10 +1177,17 @@ function fetchAndRenderPage(url: string, push: boolean, relPath?: string): void 
         return;
       }
       currentName = data.meta.name;
+      // The RESPONSE's relPath, not the requested one: a by-name navigation
+      // resolves server-side, and the active row must key on the page that
+      // actually came back.
+      currentRelPath = data.meta.relPath || null;
       renderBreadcrumb(data.meta);
       if (push) {
-        if (relPath) {
-          history.pushState({ relPath }, "", pageUrlByRelPath(relPath));
+        // Push the resolved relPath whenever we have one, even for a by-name
+        // navigation — that is what makes reload/Back/share land on the SAME page
+        // instead of re-resolving the stem to the first registration.
+        if (currentRelPath) {
+          history.pushState({ relPath: currentRelPath }, "", pageUrlByRelPath(currentRelPath));
         } else {
           history.pushState({ page: currentName }, "", pageUrl(currentName));
         }
@@ -1138,7 +1214,7 @@ function fetchAndRenderPage(url: string, push: boolean, relPath?: string): void 
       renderConnections(data);
       // Lazy: fetch semantic cousins after the page + connections are on screen,
       // so it never blocks the article render.
-      loadSimilar(data.meta.name);
+      loadSimilar(data.meta);
       renderList();
     })
     .catch((err: Error) => {
@@ -1187,12 +1263,15 @@ document.body.addEventListener("click", (e) => {
     switchConnTab(connTab.getAttribute("data-conntab") || "conn", true);
     return;
   }
-  const link = target.closest ? target.closest("[data-wiki-page], [data-page]") : null;
+  const link = target.closest ? target.closest(NAV_LINK_SELECTOR) : null;
   if (!link) return;
-  const name = link.getAttribute("data-wiki-page") || link.getAttribute("data-page");
-  if (!name) return;
+  // `navTargetFrom` prefers `data-relpath` — the only key that names ONE page on a
+  // wiki with same-stem pages. The decision is pure + unit-tested (`wiki-nav.ts`);
+  // this listener only does the DOM half.
+  const targetPage = navTargetFrom(link);
+  if (!targetPage) return;
   e.preventDefault();
-  loadPage(name, true);
+  openNavTarget(targetPage, true);
 });
 
 (document.getElementById("wikiSearch") as HTMLInputElement).addEventListener("input", (e) => {
@@ -1287,7 +1366,8 @@ if (wikiSel) {
 
 window.addEventListener("popstate", () => {
   const params = new URLSearchParams(location.search);
-  // A relPath URL (Atlas-opened page) round-trips collision-proof; check it first.
+  // A relPath URL round-trips collision-proof (and is what every in-reader
+  // navigation now pushes); check it first, `?page=` stays for older links.
   const relPath = params.get("relPath");
   if (relPath) {
     loadPageByRelPath(relPath, false);
@@ -2573,6 +2653,7 @@ function setFollowupDisabled(disabled: boolean): void {
 /** Paint an Ask turn into the main article pane (replaces the page/start view). */
 function showAskAnswer(turn: AskTurn, buffer: string): void {
   currentName = null;
+  currentRelPath = null;
   hideBreadcrumb(); // an Ask answer replaces the page — no breadcrumb
   askShownTurn = turn; // the turn the in-pane Remember button acts on
   document.getElementById("articleWrap")!.innerHTML = askArticleHtml(turn, buffer);
@@ -3931,6 +4012,11 @@ function setPagesData(data: WikiPagesResponse): void {
     typeOrder = data.types.order;
     typeLabels = data.types.labels || { ...TYPE_LABEL };
   }
+  // Same degrade rule: an older server / a payload without the field keeps the
+  // last known map rather than blanking readable labels mid-session.
+  if (data.folderLabels && typeof data.folderLabels === "object") {
+    folderLabels = data.folderLabels;
+  }
 }
 
 /** Adopt a fresh page set and repaint everything derived from it. Filters, the
@@ -3975,7 +4061,8 @@ function bootRender(applied: PendingPages): void {
     return;
   }
   const params = new URLSearchParams(location.search);
-  // A shared/reloaded relPath URL re-resolves collision-proof; check it first.
+  // A shared/reloaded relPath URL re-resolves collision-proof; check it first
+  // (`?page=` remains for links written before relPath URLs were pushed).
   const relPath = params.get("relPath");
   if (relPath) {
     loadPageByRelPath(relPath, false);

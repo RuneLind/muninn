@@ -258,9 +258,14 @@ function indexCovList(cssClass: string, label: string, items: string[], linkable
     '<details class="wiki-ix-details ' + cssClass + '"><summary>' + items.length +
     " " + label + "</summary><ul class=\"wiki-ix-list\">";
   items.forEach((rp) => {
+    // `resolvePageName` is the "can the reader open this?" test; the link itself
+    // is keyed on the relPath we already hold, which names ONE page even where
+    // stems collide (`resolvePageName` matches on that same relPath, so a name
+    // coming back means this relPath resolves).
     const name = linkable ? deps.resolvePageName(rp) : null;
     html += name
-      ? '<li><span class="wiki-ix-link" data-page="' + esc(name) + '">' + esc(rp) + "</span></li>"
+      ? '<li><span class="wiki-ix-link" data-page="' + esc(name) + '" data-relpath="' + esc(rp) +
+        '">' + esc(rp) + "</span></li>"
       : "<li><code>" + esc(rp) + "</code></li>";
   });
   return html + "</ul></details>";

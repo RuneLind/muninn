@@ -30,6 +30,9 @@ export interface WikiPagesResponse {
   pages: WikiListing[];
   scannedAt: number | null;
   types?: { order: string[]; labels: Record<string, string> };
+  /** Effective display label per first-path-segment folder (see the store's
+   *  `deriveFolderLabels`). Absent on an older server ⇒ raw folder names. */
+  folderLabels?: Record<string, string>;
   error?: string;
 }
 

@@ -9,6 +9,8 @@ import {
   followupCount,
   hasPlanStatus,
   hasTypedHubs,
+  displayTitleOf,
+  folderLabelOf,
   hubTypeList,
   mergeWikiTypes,
   pageAddedLabel,
@@ -856,6 +858,35 @@ test("mergeWikiTypes: custom types append after standards, only when present, wi
   expect(merged.labels.report).toBe("Reports");
   expect(merged.labels).not.toHaveProperty("repo"); // absent type → no label added
   expect(merged.labels.concept).toBe("Concepts"); // standard labels untouched
+});
+
+test("mergeWikiTypes: a declared defaultType joins the ordered list", () => {
+  // The `memory` wiki's shape: the type every untyped page falls back to is
+  // introduced by `defaultType`, and without it in `candidates` the type facet
+  // would carry 32 pages the ordered list never mentions.
+  const config = { typeMap: {}, typeLabels: { "memory-index": "Memory index" }, defaultType: "memory-index" };
+  const merged = mergeWikiTypes(config, ["project", "memory-index"]);
+  expect(merged.order).toEqual([...TYPE_ORDER, "memory-index"]);
+  expect(merged.labels["memory-index"]).toBe("Memory index");
+  // Declared with no label of its own → title-cased slug, like a typeMap value.
+  const bare = mergeWikiTypes({ typeMap: {}, typeLabels: {}, defaultType: "memo" }, ["memo"]);
+  expect(bare.order).toEqual([...TYPE_ORDER, "memo"]);
+  expect(bare.labels.memo).toBe("Memo");
+});
+
+test("displayTitleOf: the store's disambiguated title wins, else the plain one", () => {
+  expect(displayTitleOf({ title: "MEMORY", displayTitle: "muninn/MEMORY" })).toBe("muninn/MEMORY");
+  expect(displayTitleOf({ title: "Creatine" })).toBe("Creatine");
+  expect(displayTitleOf({ title: "Creatine", displayTitle: "" })).toBe("Creatine");
+});
+
+test("folderLabelOf: configured label, else the folder's own name", () => {
+  const labels = { "-Users-x-muninn": "muninn" };
+  expect(folderLabelOf("-Users-x-muninn", labels)).toBe("muninn");
+  expect(folderLabelOf("plans", labels)).toBe("plans");
+  expect(folderLabelOf("plans", {})).toBe("plans");
+  // Own-key guard — a folder named `constructor` must not read the prototype.
+  expect(folderLabelOf("constructor", {})).toBe("constructor");
 });
 
 test("mergeWikiTypes: a typeMap-only custom type falls back to a title-cased label", () => {

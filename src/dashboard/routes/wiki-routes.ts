@@ -1147,6 +1147,11 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         index.readerConfig,
         index.pages.map((p) => p.type),
       ),
+      // Effective folder labels (the wiki's own `folderLabels` + the derived
+      // common-prefix strip). The folder facet is built client-side from the
+      // pages themselves, so the labels have to travel with them; `{}` for every
+      // wiki that needs neither, which is all five besides `memory`.
+      folderLabels: index.folderLabels ?? {},
     });
   });
 
@@ -1631,8 +1636,13 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
   // an unreachable Huginn degrades to `{ similar: [] }` + a warn (never errors
   // the page). Explainers query on title only (no markdown body to read).
   app.get("/api/wiki/similar", async (c) => {
+    // `relPath` is the collision-proof key (`/api/wiki/page`'s pattern): on a wiki
+    // with same-stem pages the `page` name resolves first-stem-match, so the rail
+    // would show ANOTHER page's cousins under this one. `page` stays for callers
+    // that only hold a name (rendered wikilinks, older clients).
+    const relPathQ = c.req.query("relPath");
     const pageName = c.req.query("page");
-    if (!pageName) return c.json({ error: "page query param required" }, 400);
+    if (!relPathQ && !pageName) return c.json({ error: "page query param required" }, 400);
     const { entry, unknownWiki } = resolveWikiRequest(
       getWikiRegistry(),
       c.req.query("wiki"),
@@ -1646,8 +1656,11 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     }
     const index = await getWikiIndex({ root: entry.root });
     if (!index) return c.json({ error: "wiki directory not found" }, 404);
-    const meta = index.resolve(pageName);
-    if (!meta) return c.json({ error: `no wiki page named "${pageName}"` }, 404);
+    const meta = relPathQ ? index.resolveRelPath(relPathQ) : index.resolve(pageName!);
+    if (!meta) {
+      const which = relPathQ ? `relPath "${relPathQ}"` : `name "${pageName}"`;
+      return c.json({ error: `no wiki page for ${which}` }, 404);
+    }
 
     // Build query + search + resolve is shared with the Explain route. Best-effort:
     // a Huginn failure resolves to [] (section hides), never errors the page.
@@ -1661,8 +1674,12 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
   // query is only ever a lookup key, never joined into a filesystem path — and
   // the resolved path is verified to stay under the wiki root before serving.
   app.get("/api/wiki/html", async (c) => {
+    // Same two keys as `/api/wiki/page` and for the same reason: two explainers in
+    // different folders can share a stem (the precedence drop only fires ACROSS
+    // extensions), and `name` would serve whichever registered first.
+    const relPathQ = c.req.query("relPath");
     const name = c.req.query("name");
-    if (!name) return c.text("name query param required", 400);
+    if (!relPathQ && !name) return c.text("name query param required", 400);
     const { entry, unknownWiki } = resolveWikiRequest(
       getWikiRegistry(),
       c.req.query("wiki"),
@@ -1672,9 +1689,9 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     if (unknownWiki) return c.text("no wiki configured for that name", 404);
     const index = await getWikiIndex({ root: entry?.root });
     if (!index) return c.text("wiki directory not found", 503);
-    const meta = index.resolve(name);
+    const meta = relPathQ ? index.resolveRelPath(relPathQ) : index.resolve(name!);
     if (!meta || meta.type !== "explainer") {
-      return c.text(`no explainer named "${name}"`, 404);
+      return c.text(`no explainer named "${relPathQ ?? name}"`, 404);
     }
     // meta.relPath is the index's own stored path (never user input); still,
     // defend in depth — confirm the resolved file stays under the wiki root.

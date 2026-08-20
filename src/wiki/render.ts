@@ -84,7 +84,12 @@ export function renderWikiHtml(
     const text = (label ?? target).trim() || target.trim();
     const meta = resolve(target);
     const html = meta
-      ? `<a href="/wiki?page=${encodeURIComponent(meta.name)}" class="wiki-link" data-wiki-page="${escapeHtml(meta.name)}">${escapeHtml(text)}</a>`
+      ? // `data-relpath` names the page the link RESOLVED to, so the reader opens
+        // that exact page instead of re-resolving the stem (first-registration-wins)
+        // client-side. The `href` keeps the name form: it is only ever used by a
+        // middle-click, and it already drops the `?wiki=` param, so it is a
+        // best-effort fallback either way.
+        `<a href="/wiki?page=${encodeURIComponent(meta.name)}" class="wiki-link" data-wiki-page="${escapeHtml(meta.name)}" data-relpath="${escapeHtml(meta.relPath)}">${escapeHtml(text)}</a>`
       : `<span class="wiki-link-missing" title="No page named ${escapeHtml(target.trim())}">${escapeHtml(text)}</span>`;
     const idx = rendered.length;
     rendered.push(html);

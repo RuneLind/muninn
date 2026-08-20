@@ -16,6 +16,12 @@ export type WikiPageType = string;
 export interface WikiListing {
   name: string;
   title: string;
+  /** Disambiguated title for row/card/rail surfaces — set by the store ONLY on a
+   *  page whose filename stem is shared with another page in the same wiki and
+   *  whose title is that bare stem (`stemDisplayTitle`). Every render that shows a
+   *  page in a LIST goes through `displayTitleOf`; the article body's own title
+   *  stays `title` (see `WikiPageMeta.displayTitle`). */
+  displayTitle?: string;
   type: WikiPageType;
   domain: "ai" | "life";
   tags: string[];
@@ -202,10 +208,17 @@ function titleCaseType(t: string): string {
  * introduces (its `typeLabels` keys + `typeMap` values that aren't already
  * standard) are appended, but only when at least one page actually carries them
  * (`presentTypes`); a custom type's label is its `typeLabels` entry, else a
- * title-cased slug. Declaration order is preserved (typeLabels first, then typeMap).
+ * title-cased slug. Declaration order is preserved (typeLabels first, then typeMap,
+ * then `defaultType` — which is a type the wiki introduces exactly like the other
+ * two, and without it a wiki that declares one but gives it no `typeLabels` entry
+ * would leave it out of the ordered list and rely on each renderer's
+ * belt-and-suspenders union instead).
  */
 export function mergeWikiTypes(
-  config: { typeMap: Record<string, string>; typeLabels: Record<string, string> } | null | undefined,
+  config:
+    | { typeMap: Record<string, string>; typeLabels: Record<string, string>; defaultType?: string }
+    | null
+    | undefined,
   presentTypes: Iterable<string>,
 ): WikiTypeList {
   const order = [...TYPE_ORDER];
@@ -213,7 +226,11 @@ export function mergeWikiTypes(
   if (!config) return { order, labels };
   const present = new Set(presentTypes);
   const seen = new Set(order);
-  const candidates = [...Object.keys(config.typeLabels), ...Object.values(config.typeMap)];
+  const candidates = [
+    ...Object.keys(config.typeLabels),
+    ...Object.values(config.typeMap),
+    ...(config.defaultType ? [config.defaultType] : []),
+  ];
   for (const t of candidates) {
     if (seen.has(t)) continue;
     seen.add(t);
@@ -260,6 +277,21 @@ export function pageFolder(p: WikiListing): string {
   const rel = (p.relPath || "").replace(/\\/g, "/");
   const slash = rel.indexOf("/");
   return slash === -1 ? ROOT_FOLDER : rel.slice(0, slash);
+}
+
+/** The title to SHOW for a page in a list, card, rail or breadcrumb: the store's
+ *  collision-scoped `displayTitle` when it set one, else the plain title. One
+ *  spelling, so a row and the card for the same page can't read differently. */
+export function displayTitleOf(p: { title: string; displayTitle?: string }): string {
+  return p.displayTitle || p.title;
+}
+
+/** Display label for a folder facet key — the wiki's effective `folderLabels`
+ *  entry (configured or common-prefix-derived), else the folder's own name.
+ *  `ROOT_FOLDER` is the caller's business; it never has a label. */
+export function folderLabelOf(folder: string, labels: Record<string, string>): string {
+  const l = Object.prototype.hasOwnProperty.call(labels, folder) ? labels[folder] : undefined;
+  return l && l.trim() ? l.trim() : folder;
 }
 
 /**
