@@ -111,6 +111,11 @@ export interface Citation {
   /** The matched wiki page name (see `wikiName`) — the `?page=` target in the
    *  `/wiki` reader. Present only alongside `wikiName`. */
   pageName?: string;
+  /** The matched wiki page's exact wiki-relative path (same enrichment pass as
+   *  `pageName`). The page NAME is a filename stem and `index.resolve` is
+   *  first-registration-wins, so on a wiki with same-stem pages a name-keyed
+   *  citation link opened a different page than the one that was cited. */
+  pageRelPath?: string;
 }
 
 /** Pull the best chunk's text off a hit (mirrors research-knowledge's private extractor). */

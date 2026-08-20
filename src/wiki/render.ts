@@ -58,7 +58,14 @@ function stripSentinelLines(body: string): string {
 export function renderWikiHtml(
   markdown: string,
   resolve: (target: string) => WikiPageMeta | undefined,
-  opts?: { stripTitle?: string },
+  opts?: {
+    stripTitle?: string;
+    /** Registered wiki name, for the wikilink `href`. Omit for the default wiki.
+     *  Only the href reads it — the data attributes the in-page click delegate
+     *  uses carry no wiki, because a wikilink can only ever resolve inside the
+     *  wiki it was rendered from. */
+    wiki?: string;
+  },
 ): string {
   let body = stripFrontmatter(markdown);
   // The fact-check sentinels are internal write markers, never content — but
@@ -79,12 +86,20 @@ export function renderWikiHtml(
     }
   }
 
+  const wikiQuery = opts?.wiki ? `wiki=${encodeURIComponent(opts.wiki)}&` : "";
   const rendered: string[] = [];
   const withTokens = body.replace(WIKILINK_WITH_LABEL_RE, (_m, target: string, label?: string) => {
     const text = (label ?? target).trim() || target.trim();
     const meta = resolve(target);
     const html = meta
-      ? `<a href="/wiki?page=${encodeURIComponent(meta.name)}" class="wiki-link" data-wiki-page="${escapeHtml(meta.name)}">${escapeHtml(text)}</a>`
+      ? // `data-relpath` names the page the link RESOLVED to, so the in-page click
+        // delegate opens that exact page instead of re-resolving the stem
+        // (first-registration-wins) client-side — and the `href` now says the same
+        // thing. It is used by exactly one path, a middle-click / "open in new
+        // tab", and in the `?page=` form that path lost BOTH facts: the wiki (so a
+        // link on mimir opened jarvis) and the page (the stem re-resolved to
+        // whichever registered first).
+        `<a href="/wiki?${wikiQuery}relPath=${encodeURIComponent(meta.relPath)}" class="wiki-link" data-wiki-page="${escapeHtml(meta.name)}" data-relpath="${escapeHtml(meta.relPath)}">${escapeHtml(text)}</a>`
       : `<span class="wiki-link-missing" title="No page named ${escapeHtml(target.trim())}">${escapeHtml(text)}</span>`;
     const idx = rendered.length;
     rendered.push(html);

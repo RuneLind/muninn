@@ -16,6 +16,12 @@ export type WikiPageType = string;
 export interface WikiListing {
   name: string;
   title: string;
+  /** Disambiguated title for row/card/rail surfaces — set by the store ONLY on a
+   *  page whose filename stem is shared with another page in the same wiki and
+   *  whose title is that bare stem (`stemDisplayTitle`). Every render that shows a
+   *  page in a LIST goes through `displayTitleOf`; the article body's own title
+   *  stays `title` (see `WikiPageMeta.displayTitle`). */
+  displayTitle?: string;
   type: WikiPageType;
   domain: "ai" | "life";
   tags: string[];
@@ -202,10 +208,17 @@ function titleCaseType(t: string): string {
  * introduces (its `typeLabels` keys + `typeMap` values that aren't already
  * standard) are appended, but only when at least one page actually carries them
  * (`presentTypes`); a custom type's label is its `typeLabels` entry, else a
- * title-cased slug. Declaration order is preserved (typeLabels first, then typeMap).
+ * title-cased slug. Declaration order is preserved (typeLabels first, then typeMap,
+ * then `defaultType` — which is a type the wiki introduces exactly like the other
+ * two, and without it a wiki that declares one but gives it no `typeLabels` entry
+ * would leave it out of the ordered list and rely on each renderer's
+ * belt-and-suspenders union instead).
  */
 export function mergeWikiTypes(
-  config: { typeMap: Record<string, string>; typeLabels: Record<string, string> } | null | undefined,
+  config:
+    | { typeMap: Record<string, string>; typeLabels: Record<string, string>; defaultType?: string }
+    | null
+    | undefined,
   presentTypes: Iterable<string>,
 ): WikiTypeList {
   const order = [...TYPE_ORDER];
@@ -213,7 +226,11 @@ export function mergeWikiTypes(
   if (!config) return { order, labels };
   const present = new Set(presentTypes);
   const seen = new Set(order);
-  const candidates = [...Object.keys(config.typeLabels), ...Object.values(config.typeMap)];
+  const candidates = [
+    ...Object.keys(config.typeLabels),
+    ...Object.values(config.typeMap),
+    ...(config.defaultType ? [config.defaultType] : []),
+  ];
   for (const t of candidates) {
     if (seen.has(t)) continue;
     seen.add(t);
@@ -231,13 +248,29 @@ function contentTypes(pages: WikiListing[]): Set<string> {
   return s;
 }
 
-/** The per-type hub sections to render on the start view: non-note, non-explainer
- *  types present in `pages`, ordered by `order` (extras alpha-sorted after). Explainers
- *  never join the link graph, so a "by connections" hub of them is always degenerate. */
-export function hubTypeList(pages: WikiListing[], order: string[]): string[] {
+/**
+ * The per-type hub sections to render on the start view: non-note, non-explainer
+ * types present in `pages`, ordered by `order` (extras alpha-sorted after).
+ * Explainers never join the link graph, so a "by connections" hub of them is
+ * always degenerate.
+ *
+ * **`defaultType` is excluded for the same reason.** It names the pages NOTHING
+ * typed — an authored `type:`, a `typeMap` folder and the standard folder names
+ * all win ahead of it — so it is a leftovers bucket by construction, not a
+ * curated section. Measured on the memory wiki (2026-08-20): its `memory-index`
+ * bucket is 32 pages of which exactly ONE carries a backlink, i.e. a "Top Memory
+ * index by connections" hub is 31 zero-backlink cards. The two surfaces
+ * `defaultType` was actually added for — the type facet and the Atlas column,
+ * which `note` was refused — are untouched by this.
+ *
+ * Absent ⇒ byte-identical to what shipped, which is every wiki but `memory`.
+ */
+export function hubTypeList(pages: WikiListing[], order: string[], defaultType?: string): string[] {
   const present = contentTypes(pages);
   present.delete("explainer");
-  const known = order.filter((t) => t !== "note" && t !== "explainer" && present.has(t));
+  if (defaultType) present.delete(defaultType);
+  const skip = (t: string) => t === "note" || t === "explainer" || t === defaultType;
+  const known = order.filter((t) => !skip(t) && present.has(t));
   const extras = [...present].filter((t) => !order.includes(t)).sort();
   return [...known, ...extras];
 }
@@ -260,6 +293,77 @@ export function pageFolder(p: WikiListing): string {
   const rel = (p.relPath || "").replace(/\\/g, "/");
   const slash = rel.indexOf("/");
   return slash === -1 ? ROOT_FOLDER : rel.slice(0, slash);
+}
+
+/** The title to SHOW for a page in a list, card, rail or breadcrumb: the store's
+ *  collision-scoped `displayTitle` when it set one, else the plain title. One
+ *  spelling, so a row and the card for the same page can't read differently. */
+export function displayTitleOf(p: { title: string; displayTitle?: string }): string {
+  return p.displayTitle || p.title;
+}
+
+/**
+ * Clip a `displayTitleOf` value to `max` characters for the mini-graph's `<text>`
+ * node label, WITHOUT truncating inside the prefix.
+ *
+ * A colliding page's displayed title is `<prefix>/<stem>`, and a widened prefix is
+ * long — a plain head-slice turned every one of the memory wiki's project hubs
+ * into `-Users-rune-so…`, i.e. the same label on every node, which is exactly what
+ * the disambiguation exists to prevent. So the STEM is kept whole and the PREFIX
+ * is the part that gets clipped (`-Users-…/MEMORY`). When the stem alone cannot
+ * fit, the prefix is dropped entirely rather than spending two of the remaining
+ * characters on an ellipsis that identifies nothing — the node's `<title>` tooltip
+ * carries the full label either way — and a prefix that would survive as fewer
+ * than `MIN_PREFIX_CHARS` characters is dropped for the same reason (`p…/` is
+ * three characters of punctuation, not a folder name).
+ *
+ * It does NOT promise the clipped labels stay unique: 15 characters cannot hold
+ * two 33-character folder names that differ in their last token. The tooltip and
+ * the Connections rail are where a reader tells those apart; this only stops the
+ * node from losing the one part that says what the page IS.
+ */
+const MIN_PREFIX_CHARS = 3;
+export function shortGraphLabel(label: string, max = 15): string {
+  if (label.length <= max) return label;
+  const head = (t: string) => t.slice(0, max - 1) + "…";
+  const cut = label.lastIndexOf("/");
+  if (cut === -1) return head(label);
+  const stem = label.slice(cut + 1);
+  // "…/" is the two characters a clipped prefix costs.
+  const prefixBudget = max - stem.length - 2;
+  // Below `MIN_PREFIX_CHARS` the prefix says nothing anyone can read (`p…/`), so
+  // spend the whole budget on the stem instead of on punctuation.
+  if (prefixBudget < MIN_PREFIX_CHARS) return stem.length <= max ? stem : head(stem);
+  return label.slice(0, prefixBudget) + "…/" + stem;
+}
+
+/**
+ * The breadcrumb's LAST crumb: the displayed title, minus a leading segment the
+ * folder crumb immediately above it already says.
+ *
+ * The disambiguator's prefix is the folder LABEL when the wiki has one, and the
+ * breadcrumb renders that same label as its own folder crumb — so on the memory
+ * wiki the trail read `memory / muninn / muninn/MEMORY` (measured live). mimir is
+ * not redundant (`mimir / projects / yggdrasil/architecture`: the folder crumb is
+ * `projects`, the prefix is the subsystem), so the strip is conditional on the two
+ * actually matching, and only ever removes ONE whole leading segment.
+ */
+export function breadcrumbLeaf(
+  p: { title: string; displayTitle?: string },
+  folderLabel: string,
+): string {
+  const shown = displayTitleOf(p);
+  if (!folderLabel) return shown;
+  const prefix = folderLabel + "/";
+  return shown.startsWith(prefix) ? shown.slice(prefix.length) : shown;
+}
+
+/** Display label for a folder facet key — the wiki's effective `folderLabels`
+ *  entry (configured or common-prefix-derived), else the folder's own name.
+ *  `ROOT_FOLDER` is the caller's business; it never has a label. */
+export function folderLabelOf(folder: string, labels: Record<string, string>): string {
+  const l = Object.prototype.hasOwnProperty.call(labels, folder) ? labels[folder] : undefined;
+  return l && l.trim() ? l.trim() : folder;
 }
 
 /**
@@ -610,9 +714,36 @@ export function pageFollowups(p: WikiListing): string {
   return p.followups || "none";
 }
 
+/**
+ * Does `q` (already lowercased, and known to contain a `/`) name a PATH inside
+ * `relPath`? True when it is a prefix of the whole relPath or of any of its
+ * `/`-boundary suffixes — `memory/MEM` matches `…/memory/MEMORY.md`, `x-muninn/`
+ * does not match `-Users-x-muninn/…` because it starts mid-segment.
+ */
+function relPathMatchesQuery(relPath: string, q: string): boolean {
+  const rel = relPath.toLowerCase();
+  if (rel.startsWith(q)) return true;
+  for (let i = rel.indexOf("/"); i !== -1; i = rel.indexOf("/", i + 1)) {
+    if (rel.startsWith(q, i + 1)) return true;
+  }
+  return false;
+}
+
 /** Filter pages by the current domain/folder/type/tag/status/follow-ups facets and
- *  the free-text query. Query matches title, canonical name, any alias, or any tag
- *  (all case-insensitive). */
+ *  the free-text query. Query matches title, the DISPLAYED title, canonical name,
+ *  any alias, any tag (all case-insensitive) — and the relPath, but ONLY as a path
+ *  query.
+ *
+ *  The displayTitle and the relPath are what a colliding row actually shows:
+ *  `muninn/MEMORY` on the row and `-Users-rune-source-private-muninn/…` in the URL
+ *  bar. Typing either and getting an empty list back reads as a broken search.
+ *
+ *  **The relPath clause is gated on the query containing a `/`, and anchored at
+ *  segment boundaries.** As a plain substring it was worse than useless on the one
+ *  wiki it was written for: measured on the memory wiki, `MEM` returned 290 of 290
+ *  rows (every relPath contains `memory/`) and `muninn/MEM` returned 104. A query
+ *  with no separator in it is not a path query, and a path query only means
+ *  something anchored where a segment starts. */
 export function filterPages(pages: WikiListing[], filters: WikiFilters): WikiListing[] {
   const q = filters.q.toLowerCase();
   return pages.filter((p) => {
@@ -624,7 +755,9 @@ export function filterPages(pages: WikiListing[], filters: WikiFilters): WikiLis
     if (filters.followups && pageFollowups(p) !== filters.followups) return false;
     if (!q) return true;
     if (p.title.toLowerCase().indexOf(q) !== -1) return true;
+    if (displayTitleOf(p).toLowerCase().indexOf(q) !== -1) return true;
     if (p.name.toLowerCase().indexOf(q) !== -1) return true;
+    if (q.indexOf("/") !== -1 && relPathMatchesQuery(p.relPath, q)) return true;
     for (const a of p.aliases) {
       if (a.toLowerCase().indexOf(q) !== -1) return true;
     }
@@ -655,21 +788,25 @@ export function sortPages(
 ): WikiListing[] {
   const copy = pages.slice();
   const now = nowMs ?? Date.now();
+  // Title sort AND every tiebreaker compare `displayTitleOf`, not `title`: on a
+  // wiki with same-stem pages the two disagree for exactly the rows the reader is
+  // trying to tell apart, and sorting 30 identical `MEMORY` strings produces an
+  // order nothing on screen explains.
+  const byTitle = (a: WikiListing, b: WikiListing) =>
+    displayTitleOf(a).localeCompare(displayTitleOf(b));
   if (mode === "title") {
-    copy.sort((a, b) => a.title.localeCompare(b.title));
+    copy.sort(byTitle);
   } else if (mode === "backlinks") {
-    copy.sort((a, b) => b.backlinkCount - a.backlinkCount);
+    copy.sort((a, b) => b.backlinkCount - a.backlinkCount || byTitle(a, b));
   } else if (mode === "created") {
     copy.sort(
       (a, b) =>
         Number(isMetaPage(a)) - Number(isMetaPage(b)) ||
         pageAddedMs(b, now) - pageAddedMs(a, now) ||
-        a.title.localeCompare(b.title),
+        byTitle(a, b),
     );
   } else {
-    copy.sort(
-      (a, b) => pageTimeMs(b, now) - pageTimeMs(a, now) || a.title.localeCompare(b.title),
-    );
+    copy.sort((a, b) => pageTimeMs(b, now) - pageTimeMs(a, now) || byTitle(a, b));
   }
   return copy;
 }

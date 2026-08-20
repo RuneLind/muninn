@@ -208,6 +208,12 @@ describe("projectAtlas", () => {
     expect(atlas.nodes["projects/huginn/architecture.md"]!.desc).toBe("Huginn architecture.");
     expect(atlas.nodes["projects/muninn/architecture.md"]!.name).toBe("architecture");
     expect(atlas.nodes["projects/huginn/architecture.md"]!.name).toBe("architecture");
+    // …and the store's disambiguated title rides along, so the Atlas card, the
+    // step panel and the cluster rail can show WHICH `architecture` a node is.
+    expect(atlas.nodes["projects/muninn/architecture.md"]!.displayTitle).toBe("muninn/architecture");
+    expect(atlas.nodes["projects/huginn/architecture.md"]!.displayTitle).toBe("huginn/architecture");
+    // A unique stem carries none — the field is collision-scoped, like the store's.
+    expect(atlas.nodes["plans/roadmap.md"]!.displayTitle).toBeUndefined();
   });
 
   test("unresolved trail steps are kept and flagged resolved:false", async () => {

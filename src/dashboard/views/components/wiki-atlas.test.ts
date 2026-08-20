@@ -53,4 +53,24 @@ describe("wiki-atlas no-overlay byte-identity", () => {
     expect(html).toContain('data-key="a.md"');
     expect(html).toContain("wiki-atlas-badge");
   });
+
+  test("nodeHtml labels a colliding node with its displayTitle", () => {
+    // Three `architecture` cards in one Atlas column say nothing about which
+    // subsystem each is; the store already computed the discriminator.
+    const n = {
+      name: "architecture",
+      displayTitle: "muninn/architecture",
+      t: "subsystem",
+      hub: false,
+      in: 2,
+      tags: [],
+      links: [],
+    };
+    const html = nodeHtml("projects/muninn/architecture.md", n, "subsystem");
+    expect(html).toContain("<b>muninn/architecture</b>");
+    // The hover title says it too — it is the only place the full label fits.
+    expect(html).toContain('title="muninn/architecture"');
+    // A node with no displayTitle is byte-identical to before.
+    expect(nodeHtml("a.md", baseData.nodes["a.md"]!, "source")).toContain("<b>A</b>");
+  });
 });

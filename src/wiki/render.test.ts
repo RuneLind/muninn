@@ -25,7 +25,7 @@ describe("stripFrontmatter", () => {
 describe("renderWikiHtml", () => {
   test("resolved wikilinks become internal anchors", () => {
     const html = renderWikiHtml("See [[Claude Code]] for details.", resolve);
-    expect(html).toContain('href="/wiki?page=Claude%20Code"');
+    expect(html).toContain('href="/wiki?relPath=concepts%2FClaude%20Code.md"');
     expect(html).toContain('data-wiki-page="Claude Code"');
     expect(html).toContain(">Claude Code</a>");
   });
@@ -108,7 +108,7 @@ describe("renderWikiHtml", () => {
     const mdx = ['<Callout tone="info">', "Nested link to [[Claude Code]].", "</Callout>"].join("\n");
     const html = renderWikiHtml(mdx, resolve);
     expect(html).toContain('class="callout callout-info"');
-    expect(html).toContain('href="/wiki?page=Claude%20Code"');
+    expect(html).toContain('href="/wiki?relPath=concepts%2FClaude%20Code.md"');
   });
 
   test("a Meter inside a native page body renders as a meter component (not escaped text)", () => {
@@ -144,7 +144,7 @@ describe("renderWikiHtml", () => {
     const md = "> [!danger] Broken\n> See [[Claude Code]] and **this**.";
     const html = renderWikiHtml(md, resolve);
     expect(html).toContain('class="callout callout-bad"');
-    expect(html).toContain('href="/wiki?page=Claude%20Code"');
+    expect(html).toContain('href="/wiki?relPath=concepts%2FClaude%20Code.md"');
     expect(html).toContain("<strong>this</strong>");
   });
 
@@ -208,5 +208,35 @@ describe("renderWikiHtml", () => {
     // v1: no diagram rendering — the fence degrades to a labeled code block.
     expect(html).toContain('<pre><code class="language-mermaid">');
     expect(html).toContain("graph TD; A--&gt;B;");
+  });
+});
+
+describe("wikilink href", () => {
+  const meta = (name: string, relPath: string) =>
+    ({ name, title: name, relPath, type: "concept", domain: "ai", tags: [], aliases: [] }) as never;
+
+  test("with a wiki name, the href is the collision-proof relPath URL", () => {
+    // A middle-click / "open in new tab" is the ONE path that uses the href, and
+    // it used to drop the `?wiki=` param entirely AND re-resolve the stem — so on
+    // a non-default wiki it opened jarvis, and on a wiki with same-stem pages it
+    // opened the wrong page there.
+    const html = renderWikiHtml(
+      "See [[architecture]].",
+      () => meta("architecture", "projects/yggdrasil/architecture.md"),
+      { wiki: "mimir" },
+    );
+    expect(html).toContain(
+      'href="/wiki?wiki=mimir&relPath=projects%2Fyggdrasil%2Farchitecture.md"',
+    );
+    // The data attrs the in-page delegate reads are untouched.
+    expect(html).toContain('data-wiki-page="architecture"');
+    expect(html).toContain('data-relpath="projects/yggdrasil/architecture.md"');
+  });
+
+  test("with no wiki name, the href still carries the relPath (default wiki)", () => {
+    const html = renderWikiHtml("See [[architecture]].", () =>
+      meta("architecture", "projects/yggdrasil/architecture.md"),
+    );
+    expect(html).toContain('href="/wiki?relPath=projects%2Fyggdrasil%2Farchitecture.md"');
   });
 });

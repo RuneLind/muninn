@@ -648,7 +648,7 @@ function buildAtlas(root: HTMLElement, data: AtlasPayload, deps: AtlasDeps): voi
     const cmember = t.closest?.(".wiki-atlas-cmember") as HTMLElement | null;
     if (cmember) {
       const key = cmember.getAttribute("data-key");
-      if (key) deps.openPage(key, stemOf(key));
+      if (key) deps.openPage(key, atlasLabel(payload?.nodes[key] ?? { name: stemOf(key) }));
       return;
     }
     // A cluster row — toggle its highlight (dims non-members in the active view).
@@ -871,7 +871,12 @@ function clusterRailHtml(
       const members = c.members
         .map((m) => {
           const muted = renderedSet.has(m) ? "" : " muted";
-          return `<button class="wiki-atlas-cmember${muted}" data-key="${esc(m)}" title="${esc(m)}">${esc(stemOf(m))}</button>`;
+          // The node's own label where the payload carries it (a rendered node and
+          // a capped-out one alike), else the relPath stem — the rail can hold
+          // members the type columns never rendered.
+          const cn = payload?.nodes[m];
+          const clabel = cn ? atlasLabel(cn) : stemOf(m);
+          return `<button class="wiki-atlas-cmember${muted}" data-key="${esc(m)}" title="${esc(m)}">${esc(clabel)}</button>`;
         })
         .join("");
       return (
@@ -880,6 +885,14 @@ function clusterRailHtml(
       );
     })
     .join("");
+}
+
+/** The label an Atlas surface shows for a node: the store's collision-scoped
+ *  `displayTitle` where it set one, else the bare stem. The Atlas twin of the
+ *  reader's `displayTitleOf` — one spelling, so a card, the step panel and the
+ *  cluster rail cannot read differently for the same node. */
+export function atlasLabel(n: { name: string; displayTitle?: string }): string {
+  return n.displayTitle || n.name;
 }
 
 export function nodeHtml(key: string, n: AtlasNode, dataT: string): string {
@@ -896,11 +909,16 @@ export function nodeHtml(key: string, n: AtlasNode, dataT: string): string {
     dot = `<i class="wiki-atlas-dot ${scls}" title="${esc(label)}"></i>`;
     slotCls = ` data-slot="${scls}"`;
   }
+  // The DISPLAYED label, not the bare stem: same-stem nodes are already distinct
+  // (the Atlas keys on relPath) but three cards reading `architecture` in one
+  // column tell the reader nothing. `atlasLabel` is the one spelling, shared with
+  // the step panel and the cluster rail.
+  const label = atlasLabel(n);
   return (
-    `<div class="wiki-atlas-node" data-t="${esc(dataT)}"${slotCls} data-key="${esc(key)}" title="${esc(n.name)}">` +
+    `<div class="wiki-atlas-node" data-t="${esc(dataT)}"${slotCls} data-key="${esc(key)}" title="${esc(label)}">` +
     '<span class="wiki-atlas-badge"></span>' +
     dot +
-    `<b>${esc(n.name)}</b>` +
+    `<b>${esc(label)}</b>` +
     `<small>${esc(sub)}</small>` +
     "</div>"
   );
@@ -1211,7 +1229,7 @@ function renderNode(
 
   steps.innerHTML =
     '<div class="wiki-atlas-step"><div class="wiki-atlas-num">★</div><div>' +
-    `<b>${esc(n.name)}</b>` +
+    `<b>${esc(atlasLabel(n))}</b>` +
     `<div class="wiki-atlas-meta">${esc(n.t)}${n.hub ? " · hub" : ""} · ${n.in} inbound${n.date ? " · " + esc(n.date) : ""}</div>` +
     (n.desc ? `<div class="wiki-atlas-desc">${esc(n.desc)}</div>` : "") +
     `<button class="wiki-atlas-open" data-key="${esc(key)}">Open in reader →</button>` +

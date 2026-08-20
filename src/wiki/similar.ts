@@ -52,6 +52,10 @@ export interface SimilarSearchHit {
 export interface SimilarPage {
   name: string;
   title: string;
+  /** The store's collision-scoped disambiguated title, where it set one — the
+   *  rail is a LIST surface, so it renders through `displayTitleOf` like every
+   *  other one. Absent on a page whose stem is unique (the common case). */
+  displayTitle?: string;
   relPath: string;
   type: string;
   snippet?: string;
@@ -137,22 +141,26 @@ function hitSnippet(hit: SimilarSearchHit, cap = 240): string | undefined {
   return undefined;
 }
 
-/** Resolve a single hit to a page in this wiki, or `undefined`. Prefers the
- *  relPath lookup (Huginn doc `id` IS the wiki-relative path) and falls back to
- *  the citation-links name/title matcher. */
+/** Resolve a single hit to a page in this wiki, or `undefined`. The matcher runs
+ *  the relPath lookup itself (Huginn doc `id` IS the wiki-relative path) before
+ *  falling back to the name/title candidates, and hands back the page it matched
+ *  — so a same-stem hit is no longer re-resolved through the first-wins stem. */
 function resolveHitMeta(index: WikiIndex, hit: SimilarSearchHit): WikiPageMeta | undefined {
-  if (hit.id) {
-    const byRel = index.resolveRelPath(hit.id);
-    if (byRel) return byRel;
-  }
-  const name = matchCitationToPage({ docId: hit.id, title: hit.title }, index.resolve);
-  return name ? index.resolve(name) : undefined;
+  return (
+    matchCitationToPage({ docId: hit.id, title: hit.title }, index.resolve, index.resolveRelPath) ??
+    undefined
+  );
 }
 
 /**
- * Resolve raw Huginn hits to wiki pages, drop the current page (matched on
- * relPath or name), drop hits that don't resolve to a page, dedupe by relPath,
- * and return the top `limit` ordered by relevance (descending).
+ * Resolve raw Huginn hits to wiki pages, drop the current page, drop hits that
+ * don't resolve to a page, dedupe by relPath, and return the top `limit` ordered
+ * by relevance (descending).
+ *
+ * **Self is relPath, and only relPath.** The name half of that test used to run
+ * too, which on a wiki with same-stem pages threw away exactly the cousins worth
+ * showing: every one of mimir's `projects/*​/architecture.md` siblings, and every
+ * other project's `MEMORY.md` on the memory wiki, read as "self".
  */
 export function resolveSimilarHits(
   hits: SimilarSearchHit[],
@@ -166,12 +174,13 @@ export function resolveSimilarHits(
   for (const hit of sorted) {
     const meta = resolveHitMeta(index, hit);
     if (!meta) continue; // unresolved external — drop
-    if (meta.relPath === current.relPath || meta.name === current.name) continue; // self
+    if (meta.relPath === current.relPath) continue; // self
     if (seen.has(meta.relPath)) continue;
     seen.add(meta.relPath);
     out.push({
       name: meta.name,
       title: meta.title,
+      displayTitle: meta.displayTitle,
       relPath: meta.relPath,
       type: meta.type,
       snippet: hitSnippet(hit),

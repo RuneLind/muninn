@@ -1,6 +1,7 @@
 import { test, expect } from "bun:test";
 import {
   anchorNow,
+  breadcrumbLeaf,
   connectionTypeOrder,
   facetKeys,
   filterPages,
@@ -9,6 +10,9 @@ import {
   followupCount,
   hasPlanStatus,
   hasTypedHubs,
+  displayTitleOf,
+  shortGraphLabel,
+  folderLabelOf,
   hubTypeList,
   mergeWikiTypes,
   pageAddedLabel,
@@ -856,6 +860,157 @@ test("mergeWikiTypes: custom types append after standards, only when present, wi
   expect(merged.labels.report).toBe("Reports");
   expect(merged.labels).not.toHaveProperty("repo"); // absent type → no label added
   expect(merged.labels.concept).toBe("Concepts"); // standard labels untouched
+});
+
+test("mergeWikiTypes: a declared defaultType joins the ordered list", () => {
+  // The `memory` wiki's shape: the type every untyped page falls back to is
+  // introduced by `defaultType`, and without it in `candidates` the type facet
+  // would carry 32 pages the ordered list never mentions.
+  const config = { typeMap: {}, typeLabels: { "memory-index": "Memory index" }, defaultType: "memory-index" };
+  const merged = mergeWikiTypes(config, ["project", "memory-index"]);
+  expect(merged.order).toEqual([...TYPE_ORDER, "memory-index"]);
+  expect(merged.labels["memory-index"]).toBe("Memory index");
+  // Declared with no label of its own → title-cased slug, like a typeMap value.
+  const bare = mergeWikiTypes({ typeMap: {}, typeLabels: {}, defaultType: "memo" }, ["memo"]);
+  expect(bare.order).toEqual([...TYPE_ORDER, "memo"]);
+  expect(bare.labels.memo).toBe("Memo");
+});
+
+test("filterPages: the query matches the displayTitle and the relPath", () => {
+  // Both are what the reader can SEE on a colliding row (`muninn/MEMORY`) and in
+  // its URL — typing either and getting nothing back reads as a broken search.
+  const pages = [
+    page({ name: "MEMORY", title: "MEMORY", displayTitle: "muninn/MEMORY", relPath: "-Users-x-muninn/memory/MEMORY.md" }),
+    page({ name: "MEMORY", title: "MEMORY", displayTitle: "mimir/MEMORY", relPath: "-Users-x-mimir/memory/MEMORY.md" }),
+  ];
+  const byDisplay = filterPages(pages, { ...NO_FILTER, q: "muninn/mem" });
+  expect(byDisplay.map((p) => p.displayTitle)).toEqual(["muninn/MEMORY"]);
+  // A relPath match needs a `/` in the query (see the segment-prefix test below).
+  const byRel = filterPages(pages, { ...NO_FILTER, q: "-users-x-mimir/" });
+  expect(byRel.map((p) => p.displayTitle)).toEqual(["mimir/MEMORY"]);
+  // The plain title still matches both, as before.
+  expect(filterPages(pages, { ...NO_FILTER, q: "memory" })).toHaveLength(2);
+});
+
+test("filterPages: the relPath clause is a PATH query only, matched at segment boundaries", () => {
+  // Measured on the memory wiki before this rule: `MEM` returned 290 of 290 rows,
+  // because every relPath contains `memory/` — the free-text search was useless on
+  // the one wiki the relPath clause was added for. A query with no `/` in it is not
+  // a path query, and a path query only means anything anchored at a segment.
+  const pages = [
+    page({ name: "MEMORY", title: "MEMORY", displayTitle: "muninn/MEMORY", relPath: "-Users-x-muninn/memory/MEMORY.md" }),
+    page({ name: "notes", title: "notes", relPath: "-Users-x-huginn/memory/notes.md" }),
+    page({ name: "plan", title: "plan", relPath: "archive/muninn/plan.md" }),
+  ];
+  const q = (s: string) => filterPages(pages, { ...NO_FILTER, q: s }).map((p) => p.name);
+
+  // No `/` ⇒ the relPath is not consulted at all. `mem` still finds the page whose
+  // NAME says MEMORY, and nothing else — not the two whose path merely contains it.
+  expect(q("mem")).toEqual(["MEMORY"]);
+  // A path query anchored at a `/` boundary (or at the start of the relPath).
+  expect(q("memory/")).toEqual(["MEMORY", "notes"]);
+  expect(q("muninn/plan")).toEqual(["plan"]);
+  expect(q("-users-x-muninn/mem")).toEqual(["MEMORY"]);
+  // …and MID-SEGMENT is not a match: `x-muninn/` starts inside a segment.
+  expect(q("x-muninn/")).toEqual([]);
+  // A `/` query still falls through to the other fields — the displayTitle here.
+  expect(q("muninn/MEMORY")).toEqual(["MEMORY"]);
+});
+
+test("shortGraphLabel truncates the STEM, never the middle of a prefix", () => {
+  // The mini-graph's node labels are `displayTitleOf`, which on a colliding page
+  // is `<prefix>/<stem>` — and a widened prefix is long. A plain head-slice cut
+  // `-Users-rune-source-private-muninn/memory/MEMORY` to `-Users-rune-so…`, i.e.
+  // every colliding node on the page rendered the SAME label.
+  expect(shortGraphLabel("MEMORY", 15)).toBe("MEMORY");
+  expect(shortGraphLabel("muninn/MEMORY", 15)).toBe("muninn/MEMORY");
+  const wide = shortGraphLabel("-Users-rune-source-private-muninn/memory/MEMORY", 15);
+  expect(wide).toBe("-Users-…/MEMORY");
+  expect(wide.length).toBeLessThanOrEqual(15);
+  // The STEM survives whole — that is the part a plain head-slice destroyed.
+  expect(wide.endsWith("/MEMORY")).toBe(true);
+  // A stem that cannot fit on its own drops the prefix rather than spending the
+  // budget on an ellipsis that says nothing.
+  expect(shortGraphLabel("archive/huginn/wiki-collection-pattern", 15)).toBe("wiki-collectio…");
+  // …and so does a prefix that would survive as a single character: mimir's
+  // `projects/yggdrasil/architecture` reads better whole-stemmed than as
+  // `p…/architecture`.
+  expect(shortGraphLabel("projects/yggdrasil/architecture", 15)).toBe("architecture");
+  // No prefix at all: unchanged head-slice behaviour.
+  expect(shortGraphLabel("a-very-long-page-name", 15)).toBe("a-very-long-pa…");
+});
+
+test("sortPages: title sort and every tiebreaker use the DISPLAYED title", () => {
+  // Sorting 30 rows all reading `MEMORY` by `title` is an arbitrary order the
+  // reader cannot predict; sorting them by what is on screen is alphabetical.
+  const pages = [
+    page({ name: "MEMORY", title: "MEMORY", displayTitle: "muninn/MEMORY", relPath: "a/MEMORY.md" }),
+    page({ name: "MEMORY", title: "MEMORY", displayTitle: "aksje/MEMORY", relPath: "b/MEMORY.md" }),
+    page({ name: "MEMORY", title: "MEMORY", displayTitle: "mimir/MEMORY", relPath: "c/MEMORY.md" }),
+  ];
+  expect(sortPages(pages, "title").map((p) => p.displayTitle)).toEqual([
+    "aksje/MEMORY",
+    "mimir/MEMORY",
+    "muninn/MEMORY",
+  ]);
+  // The recency tiebreaker too — same day, so the title comparator decides.
+  const dated = pages.map((p) => ({ ...p, updated: "2026-08-01" }));
+  expect(sortPages(dated, "updated", Date.parse("2026-08-05")).map((p) => p.displayTitle)).toEqual([
+    "aksje/MEMORY",
+    "mimir/MEMORY",
+    "muninn/MEMORY",
+  ]);
+});
+
+test("hubTypeList excludes the wiki's defaultType bucket", () => {
+  // MEASURED on the memory wiki (2026-08-20): `memory-index` is 32 pages of which
+  // exactly ONE carries a backlink (max 1). A "Top Memory index by connections"
+  // section is therefore 31 zero-backlink cards — degenerate for the same reason
+  // explainers are excluded. `defaultType` names the pages NOTHING typed, so it is
+  // a leftovers bucket by construction; the type facet and the Atlas column it was
+  // added for are untouched.
+  const pages = [
+    page({ type: "project" }),
+    page({ type: "reference" }),
+    page({ type: "memory-index" }),
+  ];
+  const order = ["project", "reference", "memory-index"];
+  expect(hubTypeList(pages, order, "memory-index")).toEqual(["project", "reference"]);
+  // No defaultType declared ⇒ byte-identical to before, on every other wiki.
+  expect(hubTypeList(pages, order)).toEqual(["project", "reference", "memory-index"]);
+});
+
+test("displayTitleOf: the store's disambiguated title wins, else the plain one", () => {
+  expect(displayTitleOf({ title: "MEMORY", displayTitle: "muninn/MEMORY" })).toBe("muninn/MEMORY");
+  expect(displayTitleOf({ title: "Creatine" })).toBe("Creatine");
+  expect(displayTitleOf({ title: "Creatine", displayTitle: "" })).toBe("Creatine");
+});
+
+test("breadcrumbLeaf drops a prefix the folder crumb above it already says", () => {
+  // MEASURED live on the memory wiki: the folder crumb renders the folder LABEL
+  // (`muninn`) and the disambiguated title's prefix IS that label, so the trail
+  // read `memory / muninn / muninn/MEMORY`.
+  expect(breadcrumbLeaf({ title: "MEMORY", displayTitle: "muninn/MEMORY" }, "muninn")).toBe("MEMORY");
+  // mimir's shape is NOT redundant — the folder crumb is `projects`, the prefix is
+  // the subsystem — so nothing is dropped.
+  expect(
+    breadcrumbLeaf({ title: "architecture", displayTitle: "yggdrasil/architecture" }, "projects"),
+  ).toBe("yggdrasil/architecture");
+  // Only a WHOLE leading segment counts, and only the first one.
+  expect(breadcrumbLeaf({ title: "x", displayTitle: "muninnish/x" }, "muninn")).toBe("muninnish/x");
+  expect(breadcrumbLeaf({ title: "x", displayTitle: "a/b/x" }, "a")).toBe("b/x");
+  // No displayTitle / no folder ⇒ the plain title, exactly as before.
+  expect(breadcrumbLeaf({ title: "Creatine" }, "sources")).toBe("Creatine");
+  expect(breadcrumbLeaf({ title: "x", displayTitle: "a/x" }, "")).toBe("a/x");
+});
+
+test("folderLabelOf: configured label, else the folder's own name", () => {
+  const labels = { "-Users-x-muninn": "muninn" };
+  expect(folderLabelOf("-Users-x-muninn", labels)).toBe("muninn");
+  expect(folderLabelOf("plans", labels)).toBe("plans");
+  expect(folderLabelOf("plans", {})).toBe("plans");
+  // Own-key guard — a folder named `constructor` must not read the prototype.
+  expect(folderLabelOf("constructor", {})).toBe("constructor");
 });
 
 test("mergeWikiTypes: a typeMap-only custom type falls back to a title-cased label", () => {

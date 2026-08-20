@@ -218,8 +218,11 @@ describe("wiki-start-cards", () => {
     await settle();
 
     const ix = el("wikiIndexCard").innerHTML;
-    // Resolvable relPath → in-reader link carrying the page NAME.
-    expect(ix).toContain('<span class="wiki-ix-link" data-page="Embeddings">concepts/embeddings.md</span>');
+    // Resolvable relPath → in-reader link carrying the page NAME *and* the
+    // relPath the shell's delegate prefers (collision-proof — `wiki-nav.ts`).
+    expect(ix).toContain(
+      '<span class="wiki-ix-link" data-page="Embeddings" data-relpath="concepts/embeddings.md">concepts/embeddings.md</span>',
+    );
     // Unresolvable → plain code, no link.
     expect(ix).toContain("<code>notes/untracked.md</code>");
     // Ghosts are never linkable (there is no file to open).

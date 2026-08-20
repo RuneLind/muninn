@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { test, expect, describe } from "bun:test";
 import {
   appendLedeAmendment,
   claimOutcomeMapFromRows,
@@ -553,4 +553,39 @@ test("a STOPPED batch does not report itself as a completed one", () => {
   for (const reason of ["switched", "navigated", "wrote"] as const) {
     expect(claimRetryStoppedCopy(reason, 1, 4)).not.toBe(claimRetryDoneCopy(1, 4));
   }
+});
+
+describe("claim-retry URL carries relPath", () => {
+  test("buildClaimRetryUrl passes it through, and omits it when absent", () => {
+    const url = buildClaimRetryUrl({
+      page: "architecture",
+      relPath: "projects/yggdrasil/architecture.md",
+      wiki: "mimir",
+      mode: "article",
+      index: 2,
+      total: 4,
+      title: "A claim",
+    });
+    expect(url).toContain("relPath=projects%2Fyggdrasil%2Farchitecture.md");
+    const bare = buildClaimRetryUrl({
+      page: "Creatine",
+      wiki: "jarvis",
+      mode: "article",
+      index: 1,
+      total: 1,
+      title: "A claim",
+    });
+    expect(bare).not.toContain("relPath");
+  });
+
+  test("claimRetryUrlFor reads the relPath off the TURN", () => {
+    // The turn is what a retry re-issues against, and a persisted turn outlives
+    // the open article — so the path has to ride the turn, not `currentArticle`.
+    const url = claimRetryUrlFor(
+      { page: "architecture", pageRelPath: "projects/yggdrasil/architecture.md", fcMode: "article" },
+      { index: 3, title: "T", total: 5, verdict: "❓", outcome: "timeout" },
+      "mimir",
+    );
+    expect(url).toContain("relPath=projects%2Fyggdrasil%2Farchitecture.md");
+  });
 });

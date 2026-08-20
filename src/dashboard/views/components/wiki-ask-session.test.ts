@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { test, expect, describe } from "bun:test";
 import {
   askDeclineReason,
   serializeAskSession,
@@ -402,4 +402,38 @@ test("a malformed fcMode/fcSel/fcCtx drops the FIELD, keeping the turn", () => {
   expect(restored[1]!.fcCtx).toBeUndefined();
   expect(restored[1]!.fcMode).toBe("sel");
   expect(restored[2]!.fcMode).toBe("article");
+});
+
+describe("pageRelPath round-trips and is dropped-not-fatal when malformed", () => {
+  const base = {
+    question: "q",
+    answer: "a",
+    citations: [],
+    cited: [],
+    html: null,
+    askedAt: 1,
+    kind: "factcheck",
+    page: "architecture",
+    pageRelPath: "projects/yggdrasil/architecture.md",
+  };
+
+  test("survives a serialize → parse round trip", () => {
+    // Without it a rehydrated fact-check turn's ➕/✎/↻ resolve the STEM, and on a
+    // wiki with same-stem pages that write lands in a file nobody checked.
+    const [turn] = deserializeAskSession(serializeAskSession([base as never], 10));
+    expect((turn as { pageRelPath?: string }).pageRelPath).toBe(
+      "projects/yggdrasil/architecture.md",
+    );
+  });
+
+  test("a non-string pageRelPath drops the FIELD and keeps the turn", () => {
+    // The `claimQuotes`/`annotatable` treatment, not `wrote`'s reject-the-turn:
+    // this field gates no destructive write on its own — the routes fall back to
+    // the name — so losing a whole session over it would be the worse failure.
+    const bad = JSON.stringify([{ ...base, pageRelPath: 42 }]);
+    const parsed = deserializeAskSession(bad);
+    expect(parsed).toHaveLength(1);
+    expect((parsed![0] as { pageRelPath?: unknown }).pageRelPath).toBeUndefined();
+    expect(parsed![0]!.page).toBe("architecture");
+  });
 });

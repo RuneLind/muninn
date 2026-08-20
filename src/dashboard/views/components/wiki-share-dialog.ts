@@ -166,14 +166,36 @@ export const SUMMARY_SHARE_COPY: ShareSurfaceCopy = {
   stopped: "Stopped. The document stays reserved until the run on the server finishes.",
 };
 
-/** The /wiki surface's target. Byte-identical to what PR B hard-coded. */
-export function wikiShareTarget(wiki: string, page: string): ShareTarget {
+/**
+ * The /wiki surface's target.
+ *
+ * `relPath` rides the body BESIDE the name (the route prefers it, falling back to
+ * the name after a rename): `index.resolve(name)` is first-registration-wins on
+ * the stem, so sharing one of two same-stem pages generated a post FROM the other
+ * one — and labelled it with the open page's title, which is the hard failure to
+ * notice. Omitted when the caller has none, which keeps the body byte-identical
+ * to what PR B hard-coded.
+ */
+export function wikiShareTarget(wiki: string, page: string, relPath?: string): ShareTarget {
   return {
     endpoint: "/api/wiki/share",
     presetsUrl: "/api/wiki/share/presets" + (wiki ? "?wiki=" + encodeURIComponent(wiki) : ""),
-    fields: { wiki, page },
+    fields: { wiki, page, ...(relPath ? { relPath } : {}) },
     copy: WIKI_SHARE_COPY,
   };
+}
+
+/**
+ * The identity a NAVIGATION compares against to decide whether the open dialog is
+ * still about the page on screen (`closeShareDialogOnNavigate`).
+ *
+ * relPath where the surface has one — under the page NAME, navigating between two
+ * same-stem pages left the dialog open and pointed at the page the reader had
+ * left. A surface with no relPath (the /summaries doc panel) keys on its own id,
+ * exactly as before.
+ */
+export function shareNavigationKey(state: { page: string; relPath?: string }): string {
+  return state.relPath || state.page;
 }
 
 /** The /summaries surface's target. `source` + `docId`, never a collection —
@@ -241,6 +263,10 @@ export interface ShareDialogState {
    *  non-wiki surface it is that surface's document identity (the doc id), used
    *  for the header default and the navigate-away comparison. */
   page: string;
+  /** The page's exact wiki-relative path, when the surface has one. The POST's
+   *  collision-proof key and the navigate-away comparison key
+   *  ({@link shareNavigationKey}). Absent on /summaries. */
+  relPath?: string;
   /** Display title for the header. */
   title: string;
   /** Which surface this share posts to. Absent ⇒ the /wiki surface, i.e.
@@ -300,7 +326,7 @@ export function promptIsEdited(state: ShareDialogState): boolean {
 
 /** The target this state posts to — its own, or the /wiki default. */
 export function shareTargetOf(state: ShareDialogState): ShareTarget {
-  return state.target ?? wikiShareTarget(state.wiki, state.page);
+  return state.target ?? wikiShareTarget(state.wiki, state.page, state.relPath);
 }
 
 /** The surface nouns this state renders with — its target's, or /wiki's. */
