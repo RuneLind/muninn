@@ -141,16 +141,15 @@ function hitSnippet(hit: SimilarSearchHit, cap = 240): string | undefined {
   return undefined;
 }
 
-/** Resolve a single hit to a page in this wiki, or `undefined`. Prefers the
- *  relPath lookup (Huginn doc `id` IS the wiki-relative path) and falls back to
- *  the citation-links name/title matcher. */
+/** Resolve a single hit to a page in this wiki, or `undefined`. The matcher runs
+ *  the relPath lookup itself (Huginn doc `id` IS the wiki-relative path) before
+ *  falling back to the name/title candidates, and hands back the page it matched
+ *  — so a same-stem hit is no longer re-resolved through the first-wins stem. */
 function resolveHitMeta(index: WikiIndex, hit: SimilarSearchHit): WikiPageMeta | undefined {
-  if (hit.id) {
-    const byRel = index.resolveRelPath(hit.id);
-    if (byRel) return byRel;
-  }
-  const name = matchCitationToPage({ docId: hit.id, title: hit.title }, index.resolve);
-  return name ? index.resolve(name) : undefined;
+  return (
+    matchCitationToPage({ docId: hit.id, title: hit.title }, index.resolve, index.resolveRelPath) ??
+    undefined
+  );
 }
 
 /**

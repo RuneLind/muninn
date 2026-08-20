@@ -139,6 +139,7 @@ import {
   connectionTypeOrder,
   breadcrumbLeaf,
   displayTitleOf,
+  shortGraphLabel,
   facetKeys,
   filterPages,
   folderCounts,
@@ -862,7 +863,9 @@ function miniGraphHtml(data: WikiPageDetail): string {
   const cx = W / 2;
   const cy = H / 2 - 4;
   const r = 86;
-  const short = (t: string) => (t.length > 15 ? t.slice(0, 14) + "…" : t);
+  // `shortGraphLabel`, not a head-slice: a colliding node's label is
+  // `<prefix>/<stem>`, and cutting from the front threw the stem away entirely.
+  const short = (t: string) => shortGraphLabel(t, 15);
   let edges = "";
   let nodes = "";
   shown.forEach((n, i) => {

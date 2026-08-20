@@ -35,6 +35,9 @@ describe("wiki routes resolve by relPath, name as fallback", () => {
   let prevExtra: string | undefined;
   const FIRST = "# Dup A\n\nThe A page.\n";
   const SECOND = "# Dup B\n\nThe B page.\n";
+  // A page whose stem is UNIQUE — the only shape a stale relPath may fall back to
+  // by name (see the two stale-relPath tests below).
+  const SOLO = "# Solo\n\nThe only page with this stem.\n";
 
   const post = (path_: string, body?: unknown) =>
     app.request(path_, {
@@ -52,6 +55,7 @@ describe("wiki routes resolve by relPath, name as fallback", () => {
     await mkdir(path.join(root, "b"), { recursive: true });
     await Bun.write(path.join(root, "a/dup.md"), FIRST);
     await Bun.write(path.join(root, "b/dup.md"), SECOND);
+    await Bun.write(path.join(root, "solo.md"), SOLO);
     prevExtra = process.env.WIKI_EXTRA;
     // A collection is declared so the Explain/Similar preflights reach their PAGE
     // check — both stop at "no collection connected" before it otherwise, and a
@@ -102,14 +106,33 @@ describe("wiki routes resolve by relPath, name as fallback", () => {
   });
 
   test("factcheck/append still accepts a bare name (a stale relPath must not 404)", async () => {
+    // The name must resolve UNAMBIGUOUSLY for the fallback to run — `solo` does.
+    const res = await post("/api/wiki/factcheck/append?wiki=dupwiki", {
+      page: "solo",
+      relPath: "renamed-away.md", // what an open tab holds after a rename
+      answer: "### ✅ Claim 1/1 — Right\n\nAll good.",
+      baseHash: await hashOf("solo.md"),
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json() as { page: string }).page).toBe("solo.md");
+  });
+
+  test("a stale relPath does NOT fall back onto a COLLIDING stem — it 404s", async () => {
+    // The whole point of the relPath is that `dup` cannot say which page is meant.
+    // `explain`/`share`/`claim` have no CAS, so falling back here reads (and, for a
+    // reader acting on the answer, eventually WRITES to) a page nobody opened.
     const res = await post("/api/wiki/factcheck/append?wiki=dupwiki", {
       page: "dup",
-      relPath: "b/renamed-away.md", // what an open tab holds after a rename
+      relPath: "b/renamed-away.md",
       answer: "### ✅ Claim 1/1 — Right\n\nAll good.",
       baseHash: await hashOf("a/dup.md"),
     });
-    expect(res.status).toBe(200);
-    expect((await res.json() as { page: string }).page).toBe("a/dup.md");
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("b/renamed-away.md");
+    // Neither same-stem page was touched.
+    expect(await onDisk("a/dup.md")).toBe(FIRST);
+    expect(await onDisk("b/dup.md")).toBe(SECOND);
   });
 
   test("factcheck/append CAS is measured against the relPath page", async () => {
@@ -146,6 +169,47 @@ describe("wiki routes resolve by relPath, name as fallback", () => {
       baseHash: await hashOf("a/dup.md"),
     });
     expect(stale.status).toBe(409);
+  });
+
+  test("factcheck/integrate/apply edits the relPath page with NO name beside it", async () => {
+    // relPath ONLY — the reader holds a path for the open page and the name is
+    // just a stem; a route that still demanded `page` refused the one reference
+    // that is collision-proof.
+    const res = await post("/api/wiki/factcheck/integrate/apply?wiki=dupwiki", {
+      relPath: "b/dup.md",
+      baseHash: await hashOf("b/dup.md"),
+      edits: [{ old: "The B page.", new: "The B page, corrected." }],
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { applied: number; page: string };
+    expect(body.applied).toBe(1);
+    expect(body.page).toBe("b/dup.md");
+    expect(await onDisk("b/dup.md")).toContain("The B page, corrected.");
+    expect(await onDisk("a/dup.md")).toBe(FIRST);
+  });
+
+  test("factcheck/integrate accepts a relPath with no name", async () => {
+    const res = await post("/api/wiki/factcheck/integrate?wiki=dupwiki", {
+      relPath: "b/dup.md",
+      answer: "No claim headings here at all.",
+      baseHash: await hashOf("b/dup.md"),
+    });
+    expect(res.status).toBe(200);
+  });
+
+  test("every unresolvable-page 404 uses the ONE shared sentence", async () => {
+    // Three spellings used to exist: `noPageMessage`, a lowercase period-less
+    // variant on the integrate routes, and a hand-rolled copy in ask/chat.
+    const res = await post("/api/wiki/factcheck/integrate/apply?wiki=dupwiki", {
+      page: "dup", // ambiguous stem ⇒ no rename fallback, so this really 404s
+      relPath: "b/nope.md",
+      baseHash: "0".repeat(64),
+      edits: [{ old: "x", new: "y" }],
+    });
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as { error: string }).error).toBe(
+      'No wiki page for relPath "b/nope.md" or name "dup".',
+    );
   });
 
   test("similar resolves the relPath page (404 quotes the reference actually sent)", async () => {

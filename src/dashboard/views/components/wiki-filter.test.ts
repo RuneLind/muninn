@@ -11,6 +11,7 @@ import {
   hasPlanStatus,
   hasTypedHubs,
   displayTitleOf,
+  shortGraphLabel,
   folderLabelOf,
   hubTypeList,
   mergeWikiTypes,
@@ -884,10 +885,59 @@ test("filterPages: the query matches the displayTitle and the relPath", () => {
   ];
   const byDisplay = filterPages(pages, { ...NO_FILTER, q: "muninn/mem" });
   expect(byDisplay.map((p) => p.displayTitle)).toEqual(["muninn/MEMORY"]);
-  const byRel = filterPages(pages, { ...NO_FILTER, q: "-users-x-mimir" });
+  // A relPath match needs a `/` in the query (see the segment-prefix test below).
+  const byRel = filterPages(pages, { ...NO_FILTER, q: "-users-x-mimir/" });
   expect(byRel.map((p) => p.displayTitle)).toEqual(["mimir/MEMORY"]);
   // The plain title still matches both, as before.
   expect(filterPages(pages, { ...NO_FILTER, q: "memory" })).toHaveLength(2);
+});
+
+test("filterPages: the relPath clause is a PATH query only, matched at segment boundaries", () => {
+  // Measured on the memory wiki before this rule: `MEM` returned 290 of 290 rows,
+  // because every relPath contains `memory/` — the free-text search was useless on
+  // the one wiki the relPath clause was added for. A query with no `/` in it is not
+  // a path query, and a path query only means anything anchored at a segment.
+  const pages = [
+    page({ name: "MEMORY", title: "MEMORY", displayTitle: "muninn/MEMORY", relPath: "-Users-x-muninn/memory/MEMORY.md" }),
+    page({ name: "notes", title: "notes", relPath: "-Users-x-huginn/memory/notes.md" }),
+    page({ name: "plan", title: "plan", relPath: "archive/muninn/plan.md" }),
+  ];
+  const q = (s: string) => filterPages(pages, { ...NO_FILTER, q: s }).map((p) => p.name);
+
+  // No `/` ⇒ the relPath is not consulted at all. `mem` still finds the page whose
+  // NAME says MEMORY, and nothing else — not the two whose path merely contains it.
+  expect(q("mem")).toEqual(["MEMORY"]);
+  // A path query anchored at a `/` boundary (or at the start of the relPath).
+  expect(q("memory/")).toEqual(["MEMORY", "notes"]);
+  expect(q("muninn/plan")).toEqual(["plan"]);
+  expect(q("-users-x-muninn/mem")).toEqual(["MEMORY"]);
+  // …and MID-SEGMENT is not a match: `x-muninn/` starts inside a segment.
+  expect(q("x-muninn/")).toEqual([]);
+  // A `/` query still falls through to the other fields — the displayTitle here.
+  expect(q("muninn/MEMORY")).toEqual(["MEMORY"]);
+});
+
+test("shortGraphLabel truncates the STEM, never the middle of a prefix", () => {
+  // The mini-graph's node labels are `displayTitleOf`, which on a colliding page
+  // is `<prefix>/<stem>` — and a widened prefix is long. A plain head-slice cut
+  // `-Users-rune-source-private-muninn/memory/MEMORY` to `-Users-rune-so…`, i.e.
+  // every colliding node on the page rendered the SAME label.
+  expect(shortGraphLabel("MEMORY", 15)).toBe("MEMORY");
+  expect(shortGraphLabel("muninn/MEMORY", 15)).toBe("muninn/MEMORY");
+  const wide = shortGraphLabel("-Users-rune-source-private-muninn/memory/MEMORY", 15);
+  expect(wide).toBe("-Users-…/MEMORY");
+  expect(wide.length).toBeLessThanOrEqual(15);
+  // The STEM survives whole — that is the part a plain head-slice destroyed.
+  expect(wide.endsWith("/MEMORY")).toBe(true);
+  // A stem that cannot fit on its own drops the prefix rather than spending the
+  // budget on an ellipsis that says nothing.
+  expect(shortGraphLabel("archive/huginn/wiki-collection-pattern", 15)).toBe("wiki-collectio…");
+  // …and so does a prefix that would survive as a single character: mimir's
+  // `projects/yggdrasil/architecture` reads better whole-stemmed than as
+  // `p…/architecture`.
+  expect(shortGraphLabel("projects/yggdrasil/architecture", 15)).toBe("architecture");
+  // No prefix at all: unchanged head-slice behaviour.
+  expect(shortGraphLabel("a-very-long-page-name", 15)).toBe("a-very-long-pa…");
 });
 
 test("sortPages: title sort and every tiebreaker use the DISPLAYED title", () => {

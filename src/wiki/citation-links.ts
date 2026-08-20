@@ -4,8 +4,8 @@
  *
  * Two layers:
  *  - `matchCitationToPage` (pure, testable): given a citation's doc id/title and
- *    a wiki index's `resolve` fn (names/titles/aliases, case-insensitive), return
- *    the matched canonical page name or `null`.
+ *    a wiki index's `resolve` (names/titles/aliases, case-insensitive) plus its
+ *    optional `resolveRelPath`, return the matched page's meta or `null`.
  *  - `enrichCitationsWithPages` (async): for a list of citations, resolve each
  *    against the wiki that owns its collection (via `buildCollectionWikiMap`) and
  *    attach `wikiName` + `pageName` when a page matches. Each wiki's index is
@@ -43,27 +43,46 @@ export interface CitationDocRef {
 }
 
 /**
- * Resolve a citation to a wiki page name via the index's `resolve`, or `null`.
- * Tries, in order: the doc id's basename (sans `.md`), the full doc id (sans
- * `.md`), then the title — `resolve` handles names/titles/aliases case-
- * insensitively, so the first that lands wins.
+ * Resolve a citation to a wiki PAGE (its `WikiPageMeta`), or `null`.
+ *
+ * Tries, in order: the doc id as a wiki-relative PATH (a huginn doc id for a wiki
+ * collection IS the relPath), the full doc id sans `.md` through `resolve` (whose
+ * own path branch handles the extension-less form), the doc id's basename, then
+ * the title — `resolve` handles names/titles/aliases case-insensitively, so the
+ * first that lands wins.
+ *
+ * **The path forms are tried BEFORE the bare stem, and the META is returned
+ * rather than its name.** Both halves are the same bug: `resolve` is
+ * first-registration-wins on the lowercased stem, so on a wiki holding two
+ * same-stem pages a cite of `projects/yggdrasil/architecture.md` matched
+ * `projects/claude-hivemind/architecture.md` — and a caller that took the NAME
+ * back and re-resolved it landed there even when the match had been correct.
+ * Returning the matched meta is what lets the caller stamp ITS relPath, so the
+ * cite marker and the reader open the page that was actually cited.
  */
 export function matchCitationToPage(
   citation: CitationDocRef,
   resolve: (target: string) => WikiPageMeta | undefined,
-): string | null {
+  resolveRelPath?: (relPath: string) => WikiPageMeta | undefined,
+): WikiPageMeta | null {
+  const docId = citation.docId?.trim();
+  if (docId && resolveRelPath) {
+    const byRel = resolveRelPath(docId);
+    if (byRel) return byRel;
+  }
   const candidates: string[] = [];
-  if (citation.docId) {
-    const base = citation.docId.split("/").pop() ?? citation.docId;
-    candidates.push(base.replace(/\.md$/i, ""));
-    candidates.push(citation.docId.replace(/\.md$/i, ""));
+  if (docId) {
+    const stripped = docId.replace(/\.md$/i, "");
+    candidates.push(docId, stripped);
+    const base = stripped.split("/").pop() ?? stripped;
+    candidates.push(base);
   }
   if (citation.title) candidates.push(citation.title);
   for (const cand of candidates) {
     const name = cand.trim();
     if (!name) continue;
     const meta = resolve(name);
-    if (meta) return meta.name;
+    if (meta) return meta;
   }
   return null;
 }
@@ -95,14 +114,16 @@ export async function enrichCitationsWithPages(
       index = await getWikiIndex({ root: entry?.root });
       indexCache.set(wikiName, index);
     }
-    const pageName = index ? matchCitationToPage(c, index.resolve) : null;
-    // The matched page's exact path rides along with its name: the name alone is
-    // a stem, and every consumer of it (the cite marker, the Sources row) resolves
-    // that stem first-registration-wins. Read off the SAME resolve the match was
-    // made with, so the two can never name different pages.
-    const relPath = pageName && index ? index.resolve(pageName)?.relPath : undefined;
+    // The MATCHED page rides along whole: `pageName` is a stem, and every consumer
+    // of it (the cite marker, the Sources row) resolves that stem
+    // first-registration-wins. Re-resolving the name here to recover a path put a
+    // yggdrasil cite's `pageRelPath` on claude-hivemind's page; the matcher hands
+    // back the meta it matched, so the two can never name different pages.
+    const meta = index ? matchCitationToPage(c, index.resolve, index.resolveRelPath) : null;
     result.push(
-      pageName ? { ...c, wikiName, pageName, ...(relPath ? { pageRelPath: relPath } : {}) } : c,
+      meta
+        ? { ...c, wikiName, pageName: meta.name, ...(meta.relPath ? { pageRelPath: meta.relPath } : {}) }
+        : c,
     );
   }
   return result;

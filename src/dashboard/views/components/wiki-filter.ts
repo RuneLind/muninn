@@ -303,6 +303,41 @@ export function displayTitleOf(p: { title: string; displayTitle?: string }): str
 }
 
 /**
+ * Clip a `displayTitleOf` value to `max` characters for the mini-graph's `<text>`
+ * node label, WITHOUT truncating inside the prefix.
+ *
+ * A colliding page's displayed title is `<prefix>/<stem>`, and a widened prefix is
+ * long — a plain head-slice turned every one of the memory wiki's project hubs
+ * into `-Users-rune-so…`, i.e. the same label on every node, which is exactly what
+ * the disambiguation exists to prevent. So the STEM is kept whole and the PREFIX
+ * is the part that gets clipped (`-Users-…/MEMORY`). When the stem alone cannot
+ * fit, the prefix is dropped entirely rather than spending two of the remaining
+ * characters on an ellipsis that identifies nothing — the node's `<title>` tooltip
+ * carries the full label either way — and a prefix that would survive as fewer
+ * than `MIN_PREFIX_CHARS` characters is dropped for the same reason (`p…/` is
+ * three characters of punctuation, not a folder name).
+ *
+ * It does NOT promise the clipped labels stay unique: 15 characters cannot hold
+ * two 33-character folder names that differ in their last token. The tooltip and
+ * the Connections rail are where a reader tells those apart; this only stops the
+ * node from losing the one part that says what the page IS.
+ */
+const MIN_PREFIX_CHARS = 3;
+export function shortGraphLabel(label: string, max = 15): string {
+  if (label.length <= max) return label;
+  const head = (t: string) => t.slice(0, max - 1) + "…";
+  const cut = label.lastIndexOf("/");
+  if (cut === -1) return head(label);
+  const stem = label.slice(cut + 1);
+  // "…/" is the two characters a clipped prefix costs.
+  const prefixBudget = max - stem.length - 2;
+  // Below `MIN_PREFIX_CHARS` the prefix says nothing anyone can read (`p…/`), so
+  // spend the whole budget on the stem instead of on punctuation.
+  if (prefixBudget < MIN_PREFIX_CHARS) return stem.length <= max ? stem : head(stem);
+  return label.slice(0, prefixBudget) + "…/" + stem;
+}
+
+/**
  * The breadcrumb's LAST crumb: the displayed title, minus a leading segment the
  * folder crumb immediately above it already says.
  *
@@ -679,13 +714,36 @@ export function pageFollowups(p: WikiListing): string {
   return p.followups || "none";
 }
 
+/**
+ * Does `q` (already lowercased, and known to contain a `/`) name a PATH inside
+ * `relPath`? True when it is a prefix of the whole relPath or of any of its
+ * `/`-boundary suffixes — `memory/MEM` matches `…/memory/MEMORY.md`, `x-muninn/`
+ * does not match `-Users-x-muninn/…` because it starts mid-segment.
+ */
+function relPathMatchesQuery(relPath: string, q: string): boolean {
+  const rel = relPath.toLowerCase();
+  if (rel.startsWith(q)) return true;
+  for (let i = rel.indexOf("/"); i !== -1; i = rel.indexOf("/", i + 1)) {
+    if (rel.startsWith(q, i + 1)) return true;
+  }
+  return false;
+}
+
 /** Filter pages by the current domain/folder/type/tag/status/follow-ups facets and
  *  the free-text query. Query matches title, the DISPLAYED title, canonical name,
- *  the relPath, any alias, or any tag (all case-insensitive).
+ *  any alias, any tag (all case-insensitive) — and the relPath, but ONLY as a path
+ *  query.
  *
- *  The last two are what a colliding row actually shows: `muninn/MEMORY` on the
- *  row and `-Users-rune-source-private-muninn/…` in the URL bar. Typing either and
- *  getting an empty list back reads as a broken search, not as a narrow one. */
+ *  The displayTitle and the relPath are what a colliding row actually shows:
+ *  `muninn/MEMORY` on the row and `-Users-rune-source-private-muninn/…` in the URL
+ *  bar. Typing either and getting an empty list back reads as a broken search.
+ *
+ *  **The relPath clause is gated on the query containing a `/`, and anchored at
+ *  segment boundaries.** As a plain substring it was worse than useless on the one
+ *  wiki it was written for: measured on the memory wiki, `MEM` returned 290 of 290
+ *  rows (every relPath contains `memory/`) and `muninn/MEM` returned 104. A query
+ *  with no separator in it is not a path query, and a path query only means
+ *  something anchored where a segment starts. */
 export function filterPages(pages: WikiListing[], filters: WikiFilters): WikiListing[] {
   const q = filters.q.toLowerCase();
   return pages.filter((p) => {
@@ -699,7 +757,7 @@ export function filterPages(pages: WikiListing[], filters: WikiFilters): WikiLis
     if (p.title.toLowerCase().indexOf(q) !== -1) return true;
     if (displayTitleOf(p).toLowerCase().indexOf(q) !== -1) return true;
     if (p.name.toLowerCase().indexOf(q) !== -1) return true;
-    if (p.relPath.toLowerCase().indexOf(q) !== -1) return true;
+    if (q.indexOf("/") !== -1 && relPathMatchesQuery(p.relPath, q)) return true;
     for (const a of p.aliases) {
       if (a.toLowerCase().indexOf(q) !== -1) return true;
     }

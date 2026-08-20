@@ -1240,7 +1240,7 @@ export async function renderWikiPage(opts?: {
             : ""
         }
         <div class="wiki-sort-row">${agentPresenceHtml("wikiPresence")}</div>
-        <input type="text" id="wikiSearch" class="wiki-search" placeholder="Search titles, aliases, tags…">
+        <input type="text" id="wikiSearch" class="wiki-search" placeholder="Search titles, aliases, tags, paths…">
         <div class="wiki-chip-row wiki-segmented" id="domainChips">
           <button class="wiki-chip active" data-domain="">All</button>
           <button class="wiki-chip" data-domain="ai">AI</button>

@@ -1290,8 +1290,10 @@ export function deriveFolderLabels(
   // Two folders under one label is a legibility bug that looks exactly like the
   // one this whole mechanism fixes — two rows reading `muninn/MEMORY` — and it is
   // invisible from the config file alone. Reported, never "fixed" by dropping one
-  // side: which folder loses its configured name is not ours to decide, and the
-  // displayTitle widening pass below separates the ROWS regardless.
+  // side: which folder loses its configured name is not ours to decide. The
+  // displayTitle widening pass separates the ROWS (its last step swaps a colliding
+  // label for the raw folder name — see `displayPrefixAt`), but the FOLDER FACET
+  // still shows two identical options, which only the config file can fix.
   const byLabel = new Map<string, string[]>();
   for (const [folder, label] of Object.entries(out)) {
     const arr = byLabel.get(label);
@@ -1362,16 +1364,31 @@ function displayPrefixAt(
   if (labeled && labeled.trim()) {
     // The label names the FIRST segment, so specificity grows rightwards from it.
     const parts = [labeled.trim(), ...dirs.slice(1)];
-    return parts.slice(0, Math.min(n, parts.length)).join("/");
+    if (n <= parts.length) return parts.slice(0, n).join("/");
+    // ONE step past the label chain: drop the LABEL for the raw folder name.
+    // Two folders can carry the same label (`deriveFolderLabels` warns about it,
+    // and cannot fix it — which folder loses its configured name is not ours to
+    // decide), and every step inside the chain then returns the same string, so
+    // the widening loop stopped with the rows still reading `same/p`. Folder names
+    // are unique by construction, so this step always separates them.
+    return [firstSeg, ...dirs.slice(1)].slice(0, Math.min(n - 1, dirs.length)).join("/");
   }
   // No label: the containing dir is the discriminator, so grow leftwards.
   return dirs.slice(Math.max(0, dirs.length - n)).join("/");
 }
 
 /** How far {@link stemDisplayTitle} can widen a page's prefix before the answer
- *  stops changing — the whole directory chain, however it is being grown. */
-function maxDisplayDepth(relPath: string): number {
-  return Math.max(1, relPath.split("/").length - 1);
+ *  stops changing — the whole directory chain, however it is being grown, PLUS
+ *  one step for a LABELED first segment, which spends its last step swapping the
+ *  label out for the raw folder name (see {@link displayPrefixAt}). */
+function maxDisplayDepth(relPath: string, folderLabels: Record<string, string>): number {
+  const dirs = relPath.split("/").slice(0, -1);
+  if (dirs.length === 0) return 1;
+  const firstSeg = dirs[0]!;
+  const labeled = Object.prototype.hasOwnProperty.call(folderLabels, firstSeg)
+    ? folderLabels[firstSeg]
+    : undefined;
+  return labeled && labeled.trim() ? dirs.length + 1 : dirs.length;
 }
 
 /** Belt-and-braces bound on the widening loop in `buildWikiIndex`. It already
@@ -1931,7 +1948,7 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
         // Per-PAGE depth, not the pass number: a group can mix a page already
         // widened by an earlier pass with one still at depth 1.
         const next = (depthOf.get(p) ?? 1) + 1;
-        if (next > maxDisplayDepth(p.relPath)) continue; // already fully specific
+        if (next > maxDisplayDepth(p.relPath, folderLabels)) continue; // already fully specific
         const wider = stemDisplayTitle(p.relPath, p.name, folderLabels, next);
         depthOf.set(p, next);
         if (wider && wider !== p.displayTitle) {

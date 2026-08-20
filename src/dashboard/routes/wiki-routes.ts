@@ -277,6 +277,14 @@ function egressRefusal(
  * the moment a page is renamed or moved: the reader's open tab then posts a path
  * nothing resolves while the name beside it resolves fine, and the action 404s on
  * a page that is plainly there. Same rule, same reason, as `POST /api/wiki/ask/chat`.
+ *
+ * **But a stale relPath may only fall back onto an UNAMBIGUOUS stem.** If the
+ * name it resolves to is shared with another page, the fallback is guessing at
+ * exactly the question the relPath was sent to answer — and `explain`, `share`
+ * and `factcheck/claim` have no CAS to catch it, so the reader silently gets an
+ * answer about a page they never opened and can then act on it. A 404 naming the
+ * path they sent is the honest answer; the rename case keeps its fallback because
+ * a unique stem still says which page is meant.
  */
 function resolvePageRef(
   index: WikiIndex,
@@ -285,17 +293,29 @@ function resolvePageRef(
 ): WikiPageMeta | undefined {
   const rel = (relPath ?? "").trim();
   const nm = (name ?? "").trim();
-  return (rel ? index.resolveRelPath(rel) : undefined) ?? (nm ? index.resolve(nm) : undefined);
+  const byRel = rel ? index.resolveRelPath(rel) : undefined;
+  if (byRel) return byRel;
+  if (!nm) return undefined;
+  const byName = index.resolve(nm);
+  if (!byName) return undefined;
+  // No relPath was sent ⇒ the name is the only reference there is, first-wins as
+  // it has always been. A relPath WAS sent and did not resolve ⇒ only a
+  // collision-free stem is a safe answer.
+  if (!rel) return byName;
+  return stemIsUnique(index, byName.name) ? byName : undefined;
 }
 
-/** How a 404/preflight should QUOTE an unresolvable page reference: whichever
- *  reference the caller actually sent. `relPath` is what the reader's UI always
- *  sends now, so naming `page` alone described a lookup that hadn't happened. */
-function pageRefLabel(relPath: string | undefined, name: string | undefined): string {
-  const rel = (relPath ?? "").trim();
-  const nm = (name ?? "").trim();
-  if (rel) return `relPath "${rel}"` + (nm ? ` or name "${nm}"` : "");
-  return `name "${nm}"`;
+/** Is `name` the filename stem of exactly ONE page in this wiki? `index.resolve`
+ *  is first-registration-wins on the lowercased stem, so this is the test for
+ *  "the stem actually identifies a page". Compared against the RESOLVED page's
+ *  own `name`, since the caller's reference may have matched a title or alias. */
+function stemIsUnique(index: WikiIndex, name: string): boolean {
+  const key = name.toLowerCase();
+  let seen = 0;
+  for (const p of index.pages) {
+    if (p.name.toLowerCase() === key && ++seen > 1) return false;
+  }
+  return true;
 }
 
 /**
@@ -744,13 +764,17 @@ export function digestCacheDecision(
  * error either — it degrades via `readWikiPage ?? ""` exactly like the md branch.
  */
 /**
- * The "this reference resolves to no page" preflight sentence, quoting whichever
- * reference(s) the caller actually sent.
+ * The "this reference resolves to no page" sentence, quoting whichever
+ * reference(s) the caller actually sent. **The ONE spelling** — every 404 body
+ * and every SSE preflight `app_error` in this file goes through it, so the
+ * reader cannot get two different sentences for one condition (it used to be
+ * three: this, a lowercase period-less `pageRefLabel` variant on the integrate
+ * routes, and a hand-spelled copy inside `/api/wiki/ask/chat`).
  *
  * Kept byte-identical for a name-only call — that is what every pre-relPath
  * client, and every existing test, still sends — and only widened when a
  * `relPath` rode along, where naming the stem alone described a lookup the route
- * did not make. Shared by all three preflight chains so they cannot drift.
+ * did not make.
  */
 export function noPageMessage(relPath: string | undefined, page: string): string {
   const rel = (relPath ?? "").trim();
@@ -2988,18 +3012,13 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         // the moment a page is renamed or moved: the reader's open tab then posts
         // a path nothing resolves while the name beside it resolves fine, and the
         // Discuss button 404s on a page that is plainly there.
-        articlePage =
-          (relPathRef ? index.resolveRelPath(relPathRef) : undefined) ??
-          (pageRef ? index.resolve(pageRef) : undefined);
-        if (!articlePage) {
-          // Quote whichever reference the caller actually sent — `relPath` is what
-          // the reader's UI always sends, so naming `page` here described a
-          // lookup that hadn't happened.
-          const which = relPathRef
-            ? `relPath "${relPathRef}"` + (pageRef ? ` or name "${pageRef}"` : "")
-            : `name "${pageRef}"`;
-          return c.json({ error: `no wiki page for ${which}` }, 404);
-        }
+        // The SHARED `resolvePageRef` — relPath first, an UNAMBIGUOUS stem as the
+        // rename fallback. This route had its own copy of the rule and its own
+        // spelling of the 404; a Discuss seeded from a same-stem sibling quotes
+        // the wrong page's path to the bot, which is the same class of bug the
+        // other page actions were fixed for.
+        articlePage = resolvePageRef(index, relPathRef, pageRef);
+        if (!articlePage) return c.json({ error: noPageMessage(relPathRef, pageRef) }, 404);
       }
 
       const buildSeed = (canWebSearch: boolean): string => {
@@ -3348,7 +3367,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       const index = await getWikiIndex({ root: entry.root });
       if (!index) return c.json({ error: "wiki directory not found" }, 404);
       const meta = resolvePageRef(index, relPathRef, page);
-      if (!meta) return c.json({ error: `no wiki page for ${pageRefLabel(relPathRef, page)}` }, 404);
+      if (!meta) return c.json({ error: noPageMessage(relPathRef, page) }, 404);
       // Markdown-only: appending a callout to a standalone .html explainer would
       // corrupt it. Reject before any write.
       if (meta.type === "explainer") {
@@ -3491,6 +3510,11 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         wiki?: string;
         bot?: string;
         page?: string;
+        /** The open page's wiki-relative path — preferred over the stem `page`,
+         *  which `index.resolve` answers first-registration-wins. Declared here
+         *  because `resolveIntegrateTarget` has always read it; the type did not,
+         *  so the reader's collision-proof reference was invisible from this end. */
+        relPath?: string;
         answer?: string;
         baseHash?: string;
         /** Per-claim verbatim supporting passages `{index, quote}` from Phase-1
@@ -3500,9 +3524,13 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       };
       const reqBody = await c.req.json<IntegrateBody>().catch(() => ({}) as IntegrateBody);
       const page = typeof reqBody.page === "string" ? reqBody.page.trim() : "";
+      const relPathRef = typeof reqBody.relPath === "string" ? reqBody.relPath.trim() : "";
       const answer = typeof reqBody.answer === "string" ? reqBody.answer.trim() : "";
       const baseHash = typeof reqBody.baseHash === "string" ? reqBody.baseHash.trim() : "";
-      if (!page) return c.json({ error: "page is required" }, 400);
+      // EITHER reference is enough — the same rule the append and share routes
+      // already use. A relPath alone is the reader's most precise reference, and
+      // demanding the stem beside it refused exactly the collision-proof call.
+      if (!page && !relPathRef) return c.json({ error: "page is required" }, 400);
       if (!answer) return c.json({ error: "answer is required" }, 400);
       if (!baseHash) return c.json({ error: "baseHash is required" }, 400);
 
@@ -3759,6 +3787,8 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         wiki?: string;
         bot?: string;
         page?: string;
+        /** See `IntegrateBody.relPath` — same reference, same reason. */
+        relPath?: string;
         baseHash?: string;
         edits?: unknown;
         /** Also refresh the `> [!factcheck]` summary callout in this SAME write. */
@@ -3770,8 +3800,10 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       };
       const reqBody = await c.req.json<ApplyBody>().catch(() => ({}) as ApplyBody);
       const page = typeof reqBody.page === "string" ? reqBody.page.trim() : "";
+      const relPathRef = typeof reqBody.relPath === "string" ? reqBody.relPath.trim() : "";
       const baseHash = typeof reqBody.baseHash === "string" ? reqBody.baseHash.trim() : "";
-      if (!page) return c.json({ error: "page is required" }, 400);
+      // Either reference — see the propose route above.
+      if (!page && !relPathRef) return c.json({ error: "page is required" }, 400);
       if (!baseHash) return c.json({ error: "baseHash is required" }, 400);
 
       // The callout must ride the SAME write as the edits — a second POST to the
@@ -4032,7 +4064,7 @@ async function resolveIntegrateTarget(
   if (!index) return { response: c.json({ error: "wiki directory not found" }, 404) };
   const meta = resolvePageRef(index, relPathRef, page);
   if (!meta) {
-    return { response: c.json({ error: `no wiki page for ${pageRefLabel(relPathRef, page)}` }, 404) };
+    return { response: c.json({ error: noPageMessage(relPathRef, page) }, 404) };
   }
   if (meta.type === "explainer") {
     return {

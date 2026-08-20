@@ -1280,6 +1280,27 @@ describe("buildWikiIndex", () => {
     expect(byRel("-Users-me-muninn/notes/MEMORY.md").displayTitle).toBe("muninn/notes/MEMORY");
   });
 
+  test("two folders under ONE label still separate — the widening drops to the raw folder", async () => {
+    // `deriveFolderLabels` warns when two folders resolve to the same label and
+    // leaves the rows to the widening pass. At depth 1 the labeled chain is the
+    // label ALONE, so every widening step returned the same string, the loop
+    // stopped, and both rows read `same/p` — the very duplicate this mechanism
+    // exists to remove. One step past the label chain is the RAW folder name,
+    // which is unique by construction.
+    await mkdir(path.join(root, "x"), { recursive: true });
+    await mkdir(path.join(root, "y"), { recursive: true });
+    await Bun.write(
+      path.join(root, ".wiki-reader.json"),
+      JSON.stringify({ folderLabels: { x: "same", y: "same" } }),
+    );
+    await Bun.write(path.join(root, "x/p.md"), "# p\n\nB.");
+    await Bun.write(path.join(root, "y/p.md"), "# p\n\nB.");
+    const index = await buildWikiIndex(root);
+    const byRel = (rel: string) => index.resolveRelPath(rel)!;
+    expect(byRel("x/p.md").displayTitle).toBe("x/p");
+    expect(byRel("y/p.md").displayTitle).toBe("y/p");
+  });
+
   test("native .mdx pilot: discovered, frontmatter tags/type, outgoing links AND backlinks", async () => {
     await mkdir(path.join(root, "blogs/src"), { recursive: true });
     // A native .mdx page with frontmatter (title/tags), a component (Callout), a
