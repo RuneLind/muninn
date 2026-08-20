@@ -18,11 +18,11 @@
 
 import os from "node:os";
 import { schedulerEnabledFromEnv } from "../config.ts";
-import { isWikiReadonly } from "../wiki/readonly.ts";
+import { isWikiReadonly, readonlyWikiRoots } from "../wiki/readonly.ts";
 import type { BotConfig } from "../bots/config.ts";
 import { discoverAllBots, resolveResearchBot, resolveSummarizerBot, resolveWikiSynthesisBot } from "../bots/config.ts";
 import type { WikiRegistryEntry } from "../wiki/registry.ts";
-import { getWikiRegistry } from "../wiki/registry-memo.ts";
+import { getWikiRegistry, unmatchedReadonlyWikiRoots } from "../wiki/registry-memo.ts";
 import { resolveBackendWithReason, resolveBackendChain } from "../ai/haiku-direct.ts";
 import type { BackendChainSource, HaikuBackend } from "../ai/haiku-direct.ts";
 import type { ConnectorType } from "../bots/config.ts";
@@ -205,7 +205,30 @@ export interface MachineInfo {
    * Deliberately NO `root`: it was never rendered, and publishing absolute
    * filesystem paths on a reader-facing API is the `base_url` mistake again.
    */
-  wikis: { name: string; source: WikiRegistryEntry["source"] }[];
+  wikis: { name: string; source: WikiRegistryEntry["source"]; readonly?: boolean }[];
+  /**
+   * Resolved `WIKI_READONLY_ROOTS` entries — the per-wiki mechanism beside the
+   * instance flag. Rendered so the drift between this var and `WIKI_EXTRA` is
+   * readable without issuing a POST: an entry matching no wiki above guards
+   * nothing (it fails closed for itself, which is safe and invisible).
+   *
+   * Roots ARE published here, unlike `wikis[].root`. The difference is that this
+   * list is not derivable from anything else on the page — its whole value is
+   * showing which absolute path is protected — and it is what makes a typo
+   * diagnosable at a glance.
+   */
+  readonlyRoots: string[];
+  /**
+   * The subset of `readonlyRoots` matching NO registered wiki above — the drift
+   * between `WIKI_READONLY_ROOTS` and `WIKI_EXTRA`/a bot's `wikiDir`. Rendered
+   * DISTINCTLY from the matched ones, because they are opposite facts: a matched
+   * root guards a wiki, an unmatched one guards nothing at all. Collapsed into a
+   * single count, "Read-only wikis: 1" was true of a typo that protected nothing.
+   *
+   * Same realpath-aware comparison the registry's no-match warn uses
+   * (`unmatchedReadonlyWikiRoots`), so the card and the log line agree.
+   */
+  readonlyRootsUnmatched: string[];
   /**
    * Did the registry actually load? `wikis: []` is ambiguous — an install with no
    * wikis and a registry that THREW look identical, and the second reading makes
@@ -767,7 +790,18 @@ export async function assembleModelsOverview(
       name: b.name,
       polling: !!b.telegramBotToken || (!!b.slackBotToken && !!b.slackAppToken),
     })),
-    wikis: wikiRegistry.map((e) => ({ name: e.name, source: e.source })),
+    wikis: wikiRegistry.map((e) => ({
+      name: e.name,
+      source: e.source,
+      ...(e.readonly ? { readonly: true } : {}),
+    })),
+    readonlyRoots: readonlyWikiRoots(),
+    // A registry that THREW gives an empty list, which would report EVERY
+    // configured root as unmatched — a loud false alarm on a degraded read. The
+    // honest answer there is "unknown", and `wikisKnown` already says so.
+    readonlyRootsUnmatched: wikiRegistryKnown
+      ? unmatchedReadonlyWikiRoots(wikiRegistry, readonlyWikiRoots())
+      : [],
     wikisKnown: wikiRegistryKnown,
   };
 

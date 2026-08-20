@@ -773,6 +773,10 @@ describe("GET /api/wiki/ingest-backlog — docs=1 through the route", () => {
       getSnapshot: async () => null,
       setSnapshot: async () => {},
       listProposals: async () => [],
+      // Approve-path seams — unused by these backlog cases, present so the deps
+      // object satisfies `BacklogRouteDeps` (see the approve read-only test).
+      getProposalById: async () => null,
+      approveProposal: async () => null,
     });
   });
 
@@ -1178,6 +1182,10 @@ describe("prune routes — dismiss / un-dismiss / reset guards (PR 2)", () => {
         snapshots.set(key, value);
       },
       listProposals: async () => [],
+      // Approve-path seams — unused by these backlog cases, present so the deps
+      // object satisfies `BacklogRouteDeps` (see the approve read-only test).
+      getProposalById: async () => null,
+      approveProposal: async () => null,
     });
   });
 
@@ -1380,6 +1388,10 @@ describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
         snapshots.set(key, value);
       },
       listProposals: async () => [],
+      // Approve-path seams — unused by these backlog cases, present so the deps
+      // object satisfies `BacklogRouteDeps` (see the approve read-only test).
+      getProposalById: async () => null,
+      approveProposal: async () => null,
     });
   });
 
@@ -1531,6 +1543,10 @@ describe("POST /api/wiki/gardener/source-draft-doc — pre-I/O guards", () => {
       getSnapshot: async () => null,
       setSnapshot: async () => {},
       listProposals: async () => [],
+      // Approve-path seams — unused by these backlog cases, present so the deps
+      // object satisfies `BacklogRouteDeps` (see the approve read-only test).
+      getProposalById: async () => null,
+      approveProposal: async () => null,
     });
   });
 
@@ -1655,6 +1671,10 @@ describe("POST /api/wiki/gardener/source-draft-run — the per-bot mutex", () =>
       getSnapshot: async () => null,
       setSnapshot: async () => {},
       listProposals: async () => [],
+      // Approve-path seams — unused by these backlog cases, present so the deps
+      // object satisfies `BacklogRouteDeps` (see the approve read-only test).
+      getProposalById: async () => null,
+      approveProposal: async () => null,
     });
   });
 
@@ -1770,6 +1790,10 @@ describe("POST /api/wiki/gardener/source-draft-run — an unexpected throw is a 
       },
       setSnapshot: async () => {},
       listProposals: async () => [],
+      // Approve-path seams — unused by these backlog cases, present so the deps
+      // object satisfies `BacklogRouteDeps` (see the approve read-only test).
+      getProposalById: async () => null,
+      approveProposal: async () => null,
     });
   });
 

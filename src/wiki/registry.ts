@@ -39,6 +39,16 @@ export interface WikiRegistryEntry {
    *  `name=path==botname` for a pin with no collections). Unset ⇒ owner/fallback
    *  routing. A pin naming no discovered bot is warned + ignored at resolve time. */
   synthesisBot?: string;
+  /**
+   * Is this wiki's root listed in `WIKI_READONLY_ROOTS` (see `readonly.ts`)?
+   *
+   * **Presentation only.** The client half (dimmed write + egress affordances)
+   * and the `/models` Machine card read it; ENFORCEMENT never does — the three
+   * write seams and the egress-route prologues call `isReadonlyWikiRoot(root)`
+   * against the root they already hold, so a registry built without the roots
+   * (or a stale memo) cannot un-protect a wiki.
+   */
+  readonly?: boolean;
 }
 
 /** Repo root: import.meta.dir = <root>/src/wiki → two levels up. Relative
@@ -69,18 +79,41 @@ export function resolveConfiguredPath(raw: string, repoRoot: string = REPO_ROOT)
   return path.isAbsolute(expanded) ? expanded : path.resolve(repoRoot, expanded);
 }
 
+export interface BuildWikiRegistryOptions {
+  /** Discovered bots — every one with a `wikiDir` becomes a bot wiki. */
+  bots: BotConfig[];
+  /** The raw `WIKI_EXTRA` env string (comma-separated `name=path[…]` pairs). */
+  extra?: string;
+  /** Base for relative paths. Defaults to the muninn repo root; tests pin it. */
+  repoRoot?: string;
+  /**
+   * Is this root marked read-only by `WIKI_READONLY_ROOTS`? The caller passes
+   * `isReadonlyWikiRoot`. Stamps the presentational `readonly` flag and nothing
+   * else — absent ⇒ no entry is flagged, which is safe precisely because
+   * enforcement never reads this flag.
+   *
+   * The "matches no registered wiki" WARN deliberately does NOT live here: it
+   * needs the realpath-aware root comparison, and re-spelling that in this pure
+   * builder is what made it fire falsely on every symlinked root. It runs in
+   * `registry-memo.ts`, where both the roots and the predicate are in scope.
+   */
+  isReadonlyRoot?: (root: string) => boolean;
+}
+
 /**
  * Build the wiki registry from discovered bots + the raw `WIKI_EXTRA` env string.
  * Bot wikis come first (names stay `jarvis`/`melosys`/…); then standalone wikis
  * from comma-separated `name=path` pairs. Malformed pairs and names colliding
  * with an already-registered wiki are warned about and skipped. Relative paths
  * resolve against the muninn repo root; absolute paths pass through unchanged.
+ *
+ * Takes ONE options object rather than positionals: the third slot was already
+ * `repoRoot` in the test-facing signature, and the read-only inputs would have
+ * made a fourth and fifth positional whose order nothing reads back.
  */
-export function buildWikiRegistry(
-  bots: BotConfig[],
-  extraRaw: string | undefined,
-  repoRoot: string = REPO_ROOT,
-): WikiRegistryEntry[] {
+export function buildWikiRegistry(opts: BuildWikiRegistryOptions): WikiRegistryEntry[] {
+  const { bots, extra: extraRaw, isReadonlyRoot } = opts;
+  const repoRoot = opts.repoRoot ?? REPO_ROOT;
   const entries: WikiRegistryEntry[] = [];
   const seen = new Set<string>();
 
@@ -97,6 +130,7 @@ export function buildWikiRegistry(
     const entry: WikiRegistryEntry = { name, root, source };
     if (collections && collections.length > 0) entry.collections = collections;
     if (synthesisBot) entry.synthesisBot = synthesisBot;
+    if (isReadonlyRoot?.(root)) entry.readonly = true;
     entries.push(entry);
     return true;
   };

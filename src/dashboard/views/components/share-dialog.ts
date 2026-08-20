@@ -21,6 +21,7 @@
 
 import { renderSlackMrkdwn } from "../../../chat/views/components/slack-mrkdwn.ts";
 import { makeSseFrameParser, type SseFrame } from "./client-runtime.ts";
+import { wikiReadonlyWikiFlag } from "./wiki-readonly-client.ts";
 import { isShareLang, type ShareDonePayload, type ShareLang } from "../../../share/wire.ts";
 import {
   canGenerate,
@@ -675,6 +676,11 @@ function onKeydown(e: KeyboardEvent): void {
 // ── Generate ─────────────────────────────────────────────────────────────────
 
 async function generate(): Promise<void> {
+  // The one statement that spends the fenced one-shot. `wikiReadonlyWikiFlag`
+  // reads `window.__WIKI_READONLY_WIKI__`, which only the /wiki reader injects —
+  // the /summaries mount of this same dialog never sets it, so this is inert
+  // there and the two surfaces keep one implementation.
+  if (wikiReadonlyWikiFlag()) return;
   if (!state || !canGenerate(state)) return;
   const target = state;
   const ctrl = new AbortController();

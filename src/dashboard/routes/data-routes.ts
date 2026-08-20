@@ -32,13 +32,44 @@ import { getUserSettings } from "../../db/user-settings.ts";
 import { listConnectors, createConnector, updateConnector, deleteConnector } from "../../db/connectors.ts";
 import type { ConnectorType } from "../../bots/config.ts";
 import { parseIntParam, isValidUuid } from "./route-utils.ts";
-import { isWikiReadonly, WIKI_READONLY_REASON } from "../../wiki/readonly.ts";
+import {
+  isReadonlyWikiRoot,
+  isWikiReadonly,
+  wikiReadonlyRootReason,
+  WIKI_READONLY_REASON,
+} from "../../wiki/readonly.ts";
+import { findWiki } from "../../wiki/registry.ts";
+import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 // Shared with the SCHEDULED path (`runChecker` in src/watchers/runner.ts) so the
 // manual trigger and the weekly run can never disagree about which watcher types
 // draft into a wiki.
-import { shouldSkipWikiDraftingRun } from "../../watchers/wiki-drafting.ts";
+import {
+  shouldSkipWikiDraftingRun,
+  wikiDraftingTarget,
+  type WikiDraftingTarget,
+} from "../../watchers/wiki-drafting.ts";
+import type { WatcherType } from "../../types.ts";
 
 const log = getLog("dashboard");
+
+/**
+ * The per-wiki read-only decision for a watcher, bound to the real seams. The
+ * rules (which types draft, which root each one drafts into, and why an
+ * unresolvable drafting type fails CLOSED) live beside the shared type set in
+ * `src/watchers/wiki-drafting.ts`, so this entry point cannot disagree with the
+ * scheduled one about any of them.
+ */
+function watcherWikiDecision(watcher: {
+  type: WatcherType;
+  botName: string;
+  config?: Record<string, unknown> | null;
+}): WikiDraftingTarget {
+  return wikiDraftingTarget(watcher, {
+    botWikiDir: (bot) => discoverAllBots().find((b) => b.name === bot)?.wikiDir,
+    wikiRootByName: (name) => findWiki(getWikiRegistry(), name)?.root,
+    isReadonlyRoot: isReadonlyWikiRoot,
+  });
+}
 
 export function registerDataRoutes(app: Hono): void {
   app.get("/api/openapi.json", (c) => c.json(spec));
@@ -405,6 +436,35 @@ export function registerDataRoutes(app: Hono): void {
           type: watcher.type,
         });
         return c.json({ error: WIKI_READONLY_REASON, readonly: true }, 403);
+      }
+      // …and the per-wiki mechanism. Both drafting checkers already skip a
+      // read-only root on the SCHEDULED path, so without this the click would
+      // "succeed", queue a forced run, and the run would quietly do nothing —
+      // an honest 403 says why at the moment of the click instead.
+      const decision = watcherWikiDecision(watcher);
+      if (decision.kind === "readonly-root") {
+        log.info("Watcher trigger refused for {id} ({type}) — wiki root is registered read-only", {
+          id,
+          type: watcher.type,
+        });
+        return c.json({ error: wikiReadonlyRootReason(decision.root), readonly: true }, 403);
+      }
+      if (decision.kind === "unhandled") {
+        // A drafting type the per-wiki resolver has no branch for. Refusing is
+        // the only safe answer — allowing it force-runs a drafting watcher whose
+        // target root nothing checked — and the warn is what turns a silent gap
+        // into a one-line fix when a third drafting type is added.
+        log.warn(
+          "Watcher trigger refused for {id}: {type} is a wiki-drafting type with no read-only resolver",
+          { id, type: watcher.type },
+        );
+        return c.json(
+          {
+            error: `"${watcher.type}" drafts into a wiki but muninn cannot tell which one — refusing the manual trigger`,
+            readonly: true,
+          },
+          403,
+        );
       }
       await forceRunWatcher(id);
       return c.json({ ok: true, queued: true });

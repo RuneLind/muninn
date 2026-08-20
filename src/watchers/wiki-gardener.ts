@@ -20,6 +20,7 @@ import { trackUsage, type HaikuTelemetry } from "../scheduler/executor.ts";
 import type { ClaudeExecResult } from "../ai/executor.ts";
 import { loadInterestProfile, loadInterestProfileForBot } from "../profile/generator.ts";
 import { getWikiIndex } from "../wiki/store.ts";
+import { isReadonlyWikiRoot } from "../wiki/readonly.ts";
 import { SUMMARY_SOURCES } from "../summaries/sources.ts";
 import type { Tracer } from "../tracing/index.ts";
 import {
@@ -361,6 +362,20 @@ export async function checkWikiGardener(
   }
   if (botConfig.gardener?.enabled === false) {
     log.info("Wiki-gardener: disabled via config for \"{name}\" — skipping", { botName: name, name });
+    return [];
+  }
+  // Per-wiki read-only root (`WIKI_READONLY_ROOTS`). The instance-wide flag is
+  // handled one level up in `runChecker`; this is the root-keyed sibling, and it
+  // has to live here because that guard is keyed on the watcher TYPE while this
+  // one is keyed on the bot's own `wikiDir`. Skipped explicitly rather than
+  // relying on a downstream failure: the weekly run clusters, spends a Haiku call
+  // per cluster and a drafting one-shot per kept cluster, all to mint proposals
+  // whose apply the root-keyed seam refuses forever.
+  if (isReadonlyWikiRoot(botConfig.wikiDir)) {
+    log.info(
+      "Wiki-gardener: wiki root for \"{name}\" is registered read-only — skipping (no model calls)",
+      { botName: name, name },
+    );
     return [];
   }
 

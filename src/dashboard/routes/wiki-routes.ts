@@ -2,7 +2,7 @@ import path from "node:path";
 import type { Context, Hono } from "hono";
 import type { Config } from "../../config.ts";
 import { renderWikiPage } from "../views/wiki-page.ts";
-import { getWikiIndex, normalizeRelPath, readWikiPage, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
+import { getWikiIndex, normalizeRelPath, readWikiPage, resolveWikiRoot, type WikiIndex, type WikiPageMeta } from "../../wiki/store.ts";
 import { projectAtlas } from "../../wiki/atlas.ts";
 import { getSemanticOverlay } from "../../wiki/atlas-semantic.ts";
 import {
@@ -24,6 +24,7 @@ import {
   type WikiRegistryEntry,
 } from "../../wiki/registry.ts";
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
+import { isReadonlyWikiRoot, wikiNoEgressReason } from "../../wiki/readonly.ts";
 import { enrichCitationsWithPages } from "../../wiki/citation-links.ts";
 import {
   fetchSimilarPages,
@@ -178,6 +179,88 @@ const log = getLog("dashboard", "wiki");
 /** The shared `readonlyRefusal` (`route-utils.ts`) bound to this file's logger,
  *  as the FIRST statement of this file's model-spending write routes. */
 const readonlyRefusal = (c: Context) => sharedReadonlyRefusal(c, log);
+
+/**
+ * The root a request would actually be SERVED from, for the read-only question —
+ * or `null` when the request names no servable wiki at all.
+ *
+ * The distinction is the whole point. `resolveWikiRequest` answers
+ * `entry: undefined` for TWO unrelated requests: the `WIKI_DIR` env-override
+ * shape (no `?wiki=`/`?bot=` given), which the routes really do serve from
+ * `resolveWikiRoot(undefined)` and which therefore MUST be guarded — and an
+ * unknown name, which they serve not at all. Folding them together made a typo
+ * inherit the env root's policy: `?wiki=typo` answered 403 "this wiki is
+ * read-only" about a wiki nobody asked for, and `/wiki?wiki=typo` rendered the
+ * banner and the disabled inputs to match. An unknown name keeps its own
+ * preflight error, which every one of these routes already has.
+ */
+function readonlyCandidateRoot(
+  entry: WikiRegistryEntry | undefined,
+  unknownWiki: boolean,
+): string | null {
+  if (entry) return entry.root;
+  return unknownWiki ? null : resolveWikiRoot(undefined);
+}
+
+/**
+ * The PER-WIKI egress prologue: refuse, with a 403, every route that would spend
+ * a model call (or reach the live web, or seed a chat thread) on a wiki whose
+ * root is listed in `WIKI_READONLY_ROOTS`.
+ *
+ * **Why this is a separate guard from `readonlyRefusal`.** That one is
+ * instance-wide and runs as a route's FIRST statement, before any wiki is
+ * resolved — deliberately, so the refusal costs nothing. A per-wiki rule inverts
+ * that ordering by construction: it cannot answer until the entry is known. So
+ * it is a prologue placed immediately after `resolveWikiRequest` (or after the
+ * shared target resolver, where one exists) and BEFORE bot resolution, the index
+ * read, the DB thread, the `/agents` run registration and the one-shot.
+ *
+ * **Why registration alone is not safe.** Registering a root as a browsable wiki
+ * buys three surfaces, not two: file writes (the three seams), local reads
+ * (bounded by `DASHBOARD_HOST=127.0.0.1`) — and this set of `?wiki=`-steerable
+ * routes, two of which reach the live web through the fact-check prompt's
+ * WebFetch/search instructions. `DASHBOARD_HOST` does not bound that, and a
+ * bot-less standalone wiki does NOT fail bot resolution: `resolveWikiSynthesisBot`
+ * falls through to `resolveResearchBot` for any entry with no pin and
+ * `source !== "bot"`, so every one of these routes resolves a bot and runs.
+ *
+ * Enforcement reads the ROOT, never `entry.readonly` — the registry flag is
+ * presentation, and a stale memo must not be able to open the guard.
+ *
+ * **And it reads the root even when there is no ENTRY.** `resolveWikiRequest`
+ * returns `entry: undefined` for the `WIKI_DIR` env-override shape (a bare
+ * `/wiki` on an instance that sets the var), and those routes go on to serve
+ * `resolveWikiRoot(undefined)` — so keying the refusal on the entry made the
+ * guard fail OPEN on exactly the root an operator pointed the env var at. The
+ * fallback resolves the same root the store would, through the same function.
+ *
+ * `optionalResponder` exists for `/api/wiki/digest`, whose refusal body is not
+ * the shared `{error}` shape (the What's-new card reads `error` as "generation
+ * FAILED — keep the old digest and offer a retry", and a policy refusal is not a
+ * failure). It gets the resolved wiki label so its own body can name it, rather
+ * than re-spelling the resolution and drifting from this one.
+ */
+function egressRefusal(
+  c: Context,
+  entry: WikiRegistryEntry | undefined,
+  unknownWiki: boolean,
+  optionalResponder?: (wikiLabel: string, reason: string) => Response,
+) {
+  const root = readonlyCandidateRoot(entry, unknownWiki);
+  if (root === null || !isReadonlyWikiRoot(root)) return null;
+  const wiki = entry?.name ?? "";
+  log.info("Read-only wiki {wiki} refused {method} {path} (no model calls)", {
+    // Only the no-name shapes reach this label (a NAMED wiki either resolved to
+    // an entry or was refused nothing at all), and there are two of them: the
+    // env override, and an install with no registered wiki at all.
+    wiki: wiki || (process.env.WIKI_DIR?.trim() ? "(WIKI_DIR override)" : "(default root)"),
+    method: c.req.method,
+    path: new URL(c.req.url).pathname,
+  });
+  const reason = wikiNoEgressReason(wiki);
+  if (optionalResponder) return optionalResponder(wiki, reason);
+  return c.json({ error: reason, readonly: true }, 403);
+}
 
 /**
  * In-memory "what's new" digest cache, keyed by canonical wiki name. A digest is
@@ -974,11 +1057,21 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         });
       }
     }
+    // Is the wiki being rendered registered read-only? Keyed on the ROOT that
+    // will actually be served — including the `WIKI_DIR` env-override shape,
+    // where there is no entry at all and an `entry`-keyed read would render a
+    // page whose client half thinks the wiki is writable while every route 403s.
+    // An UNKNOWN name is served from no root at all, so it inherits nothing (see
+    // `readonlyCandidateRoot`) — it renders the ordinary unknown-wiki page.
+    const readonlyRoot = readonlyCandidateRoot(entry, unknownWiki);
+    const readonlyWiki = readonlyRoot !== null && isReadonlyWikiRoot(readonlyRoot);
     // Resolved synthesis bot for the Ask tab's "Answered by …" line — same
     // owner-routing the ask/digest handlers use, computed at render time so
-    // the tab can say who will answer before a question is asked.
+    // the tab can say who will answer before a question is asked. Skipped on a
+    // read-only wiki: nothing there will ever answer, so naming a bot (and a
+    // "research-bot fallback" origin) describes a call that cannot happen.
     let askBot: { bot: string; connector: string; model: string; origin: "pinned" | "owner" | "fallback" } | null = null;
-    if (entry) {
+    if (entry && !readonlyWiki) {
       const { bot, origin } = resolveWikiSynthesisBot(entry, discoverAllBots());
       if (bot) {
         askBot = {
@@ -1009,6 +1102,9 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         gardenerPending,
         gardener: isBotWiki,
         askBot,
+        // Read from the ROOT, not `entry.readonly`: the render and the seams then
+        // answer the same question the same way even if the memo were stale.
+        readonlyWiki,
       }),
     );
   });
@@ -1161,6 +1257,12 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       if (unknownWiki || !entry) {
         return c.json({ error: "no wiki configured for that name" }, 404);
       }
+      // Per-wiki egress guard, BEFORE the overlay fetch and the drafting one-shot.
+      // Collection-less today, so this route is unreachable for the memory wiki —
+      // but it is the route a `collections` segment would light up, and the draft
+      // it would persist is one the seam guard then refuses forever.
+      const egress = egressRefusal(c, entry, unknownWiki);
+      if (egress) return egress;
       const collections = entry.collections ?? [];
       if (collections.length === 0) {
         return c.json({ error: "No search collection connected for this wiki" }, 400);
@@ -1270,6 +1372,25 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       process.env.WIKI_DIR,
     );
     if (unknownWiki || !entry) return c.json({ digest: null });
+    // Per-wiki egress guard: the digest is a `log.md` summarization one-shot on
+    // the wiki's synthesis bot and is gated by NOTHING else (no collections
+    // needed). A read-only root with a `log.md` would spend a model call on its
+    // contents on the reader's first start-view load.
+    //
+    // The one refusal in this file that does NOT use the shared `error` key: the
+    // What's-new card branches on `data.error` to mean "generation failed — keep
+    // the old digest and offer a retry", and a policy refusal is not a failure.
+    // `digest: null` with no `error` is the card's own "this wiki has none" state,
+    // so it hides — while the 403 STATUS still makes the refusal observable, and
+    // is what `wiki-start-cards.ts` keys its own suppression on.
+    //
+    // It goes through the shared `egressRefusal` with a body responder rather
+    // than re-spelling the check: the decision, the root fallback and the log
+    // line are the same on every route, only the body differs.
+    const digestEgress = egressRefusal(c, entry, unknownWiki, (_wiki, reason) =>
+      c.json({ digest: null, readonly: true, reason }, 403),
+    );
+    if (digestEgress) return digestEgress;
 
     const logMtimeMs = await readLogMtimeMs(entry.root);
     if (logMtimeMs === null) return c.json({ digest: null });
@@ -1415,6 +1536,14 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     if (unknownWiki || !entry) {
       return c.json({ collections: [], error: "no wiki configured for that name" });
     }
+    // Per-wiki egress guard. Reindexing ships every page BODY to huginn's
+    // embedder — the one non-model way this wiki's content leaves the machine.
+    // It is collection-gated today (a read-only root with no `wikiCollections`
+    // returns the clean error below anyway), which is exactly why the guard is
+    // worth stating: the gate is one `WIKI_EXTRA` third segment away from being
+    // open, and that segment is a cosmetic-looking edit.
+    const reindexEgress = egressRefusal(c, entry, unknownWiki);
+    if (reindexEgress) return reindexEgress;
     const collections = entry.collections ?? [];
     if (collections.length === 0) {
       return c.json({ collections: [], error: "no search collection connected for this wiki" });
@@ -1583,6 +1712,12 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       process.env.WIKI_DIR,
     );
     const history = parseResearchHistory(c.req.query("history"));
+    // Per-wiki egress guard, before bot resolution and the saved-notes lookup.
+    // Collection-less today ⇒ this route already declines — but the decline is a
+    // preflight message on a committed 200 stream, not a refusal, and a
+    // `collections` segment would turn it into a real retrieval + synthesis run.
+    const askEgress = egressRefusal(c, entry, unknownWiki);
+    if (askEgress) return askEgress;
     // Owner-routing: the owning bot answers its own wiki's Ask (jarvis wiki →
     // jarvis, nav → melosys); standalone / opus-owned wikis fall back to the
     // research bot. `entry` may be undefined here (resolved before the unknown-
@@ -1681,6 +1816,10 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       c.req.query("bot"),
       process.env.WIKI_DIR,
     );
+    // Per-wiki egress guard — same reasoning as Ask, and Explain additionally
+    // ships the reader's SELECTED passage into the prompt.
+    const explainEgress = egressRefusal(c, entry, unknownWiki);
+    if (explainEgress) return explainEgress;
     // Owner-routing, identical to the Ask route (jarvis wiki → jarvis, nav →
     // melosys; standalone / opus-owned wikis fall back to the research bot).
     const { bot: botConfig } = resolveWikiSynthesisBot(entry, discoverAllBots());
@@ -1794,6 +1933,12 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       c.req.query("bot"),
       process.env.WIKI_DIR,
     );
+    // Per-wiki egress guard. THE critical one: fact-check is corpus-independent
+    // (no collections gate) and its verify prompt instructs WebFetch + web search
+    // per claim, so a claim extracted from a private memory page would leave the
+    // machine as a search query. `DASHBOARD_HOST=127.0.0.1` does not bound that.
+    const fcEgress = egressRefusal(c, entry, unknownWiki);
+    if (fcEgress) return fcEgress;
     // Owner-routing, identical to Ask/Explain.
     const { bot: botConfig } = resolveWikiSynthesisBot(entry, discoverAllBots());
 
@@ -1943,6 +2088,9 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       c.req.query("bot"),
       process.env.WIKI_DIR,
     );
+    // Per-wiki egress guard — same family, same web reach, one claim at a time.
+    const claimEgress = egressRefusal(c, entry, unknownWiki);
+    if (claimEgress) return claimEgress;
     // Owner-routing, identical to the article fact-check route.
     const { bot: botConfig } = resolveWikiSynthesisBot(entry, discoverAllBots());
 
@@ -2133,6 +2281,11 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         c.req.query("bot") ?? body.bot,
         process.env.WIKI_DIR,
       );
+      // Per-wiki egress guard, before bot/preset resolution and well before the
+      // single-flight slot. Share needs no collections either — one click turns a
+      // whole page into distribution-ready text.
+      const shareEgress = egressRefusal(c, entry, unknownWiki);
+      if (shareEgress) return shareEgress;
       // Owner-routing, identical to Ask / fact-check / integrate.
       const { bot: botConfig } = resolveWikiSynthesisBot(entry, discoverAllBots());
 
@@ -2286,6 +2439,13 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       if (unknownWiki || !entry) {
         return c.json({ error: "no wiki configured for that name" }, 404);
       }
+
+      // Per-wiki egress guard. `/remember` writes a Postgres row, not a file —
+      // which is why the INSTANCE flag deliberately leaves it alone — but it
+      // still spends a Haiku distill + an embedding on wiki-scoped text, so it is
+      // on the egress list rather than the write list.
+      const rememberEgress = egressRefusal(c, entry, unknownWiki);
+      if (rememberEgress) return rememberEgress;
 
       // Attribution bot — may be undefined (no fast bot, or the research-bot
       // fallback resolves to nothing). Guard BEFORE touching bot.name.
@@ -2587,6 +2747,12 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       if (unknownWiki || !entry) {
         return c.json({ error: "no wiki configured for that name" }, 404);
       }
+      // Per-wiki egress guard, before the DB thread, the conversation shell and
+      // the pending-message seed. ALL THREE modes, not just `article`: escalate
+      // quotes an Ask answer over this wiki's pages, article carries the page's
+      // relPath + summary, and direct seeds a bot told to search this wiki first.
+      const chatEgress = egressRefusal(c, entry, unknownWiki);
+      if (chatEgress) return chatEgress;
 
       // Owning bot (or the explicit override), its users, and its default-user
       // mapping — the shared `resolveAskChatTarget`, so `GET /api/wiki/chat-target`
@@ -3185,6 +3351,15 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       const resolved = await resolveIntegrateTarget(c, reqBody);
       if ("response" in resolved) return resolved.response;
       const { entry, meta } = resolved;
+
+      // Per-wiki egress guard, before the page read and the ~90s editor one-shot.
+      // The sibling `/apply` is covered by the `writeWikiPage` seam; this half
+      // writes nothing but would ship the whole page into a model call whose only
+      // possible commit target is a root that refuses forever.
+      // `unknownWiki: false` — `resolveIntegrateTarget` already 404'd an unknown
+      // name, so `entry` is present and the entry-less fallback is unreachable.
+      const integrateEgress = egressRefusal(c, entry, false);
+      if (integrateEgress) return integrateEgress;
 
       const current = (await readWikiPage(resolved.index, meta)) ?? "";
       // CAS FIRST — a drifted page invalidates the whole turn before we spend a

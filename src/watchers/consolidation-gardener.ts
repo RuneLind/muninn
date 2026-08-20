@@ -37,6 +37,7 @@ import type { HaikuTelemetry } from "../scheduler/executor.ts";
 import type { WikiRegistryEntry } from "../wiki/registry.ts";
 import { findWiki } from "../wiki/registry.ts";
 import { getWikiRegistry } from "../wiki/registry-memo.ts";
+import { isReadonlyWikiRoot } from "../wiki/readonly.ts";
 import { discoverAllBots, resolveWikiSynthesisBot } from "../bots/config.ts";
 import { getWikiIndex } from "../wiki/store.ts";
 import { getSemanticOverlay } from "../wiki/atlas-semantic.ts";
@@ -184,6 +185,20 @@ export async function checkConsolidationGardener(
       wiki: wikiName,
     });
     health.mark(SRC, "error", `no wiki registry entry for "${wikiName}" (renamed or removed?)`);
+    return health.finish();
+  }
+  // 1b. Per-wiki read-only root. Stated EXPLICITLY rather than left to the
+  // collection check below: a read-only root happens to have no collections
+  // today, so the "no backing collections" branch already stops this run — but
+  // that is a coincidence of configuration (one `WIKI_EXTRA` third segment away
+  // from being untrue), and it would report a CONFIGURATION error for a POLICY
+  // decision, marking the source unhealthy for something that is working
+  // exactly as designed. This is a clean, healthy skip.
+  if (isReadonlyWikiRoot(entry.root)) {
+    log.info(
+      "consolidation-gardener: wiki {wiki} is registered read-only — skipping (no model calls)",
+      { botName: botConfig.name, wiki: wikiName },
+    );
     return health.finish();
   }
   const collections = entry.collections ?? [];

@@ -16,6 +16,10 @@ import { fetchPlanLedger, type PlanLedgerResult } from "./ledger.ts";
 import { buildPricing } from "./estimate.ts";
 import type { PlanRecord, PlanSourceResult } from "./source.ts";
 import type { LedgerPlan } from "./ledger.ts";
+import {
+  __setReadonlyWikiRootsForTest,
+  __setWikiReadonlyForTest,
+} from "../wiki/readonly.ts";
 
 const LEDGER_ROWS: LedgerPlan[] = JSON.parse(
   await Bun.file(path.join(import.meta.dir, "fixtures", "ledger-plans.json")).text(),
@@ -87,6 +91,40 @@ describe("the readonly flag", () => {
     for (const readonly of [true, false]) {
       const p = buildBoardPayload({ source: source(), ledger: ledger(), now: NOW, readonly });
       expect(p.readonly).toBe(readonly);
+    }
+  });
+
+  test("mimir's ROOT in WIKI_READONLY_ROOTS disables the board on a write-owning host", () => {
+    // Both write endpoints go through root-keyed seams (`writeWikiPage`'s no-log
+    // mode, `writePlanQueue`), so a root-level read-only really does 403 them
+    // here — and the board would otherwise render live ▲▼ and priority buttons
+    // whose every click is a refusal. The instance flag stays OFF throughout,
+    // which is what makes this the second, independent mechanism.
+    __setWikiReadonlyForTest(false);
+    __setReadonlyWikiRootsForTest(["/tmp/mimir"]);
+    try {
+      const p = buildBoardPayload({ source: source(), ledger: ledger(), now: NOW });
+      expect(p.readonly).toBe(true);
+    } finally {
+      __setReadonlyWikiRootsForTest();
+      __setWikiReadonlyForTest();
+    }
+  });
+
+  test("an UNLISTED mimir root leaves the board writable", () => {
+    __setWikiReadonlyForTest(false);
+    __setReadonlyWikiRootsForTest(["/tmp/some-other-wiki"]);
+    try {
+      expect(buildBoardPayload({ source: source(), ledger: ledger(), now: NOW }).readonly).toBe(
+        false,
+      );
+      // …and a source with no root at all (mimir not registered) must not throw.
+      expect(
+        buildBoardPayload({ source: source({ root: null }), ledger: ledger(), now: NOW }).readonly,
+      ).toBe(false);
+    } finally {
+      __setReadonlyWikiRootsForTest();
+      __setWikiReadonlyForTest();
     }
   });
 });

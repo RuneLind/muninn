@@ -6,7 +6,12 @@ import { agentPresenceStyles, agentPresenceHtml, agentPresenceScript } from "./c
 // The share dialog's CSS lives WITH the dialog (exported from its pure half) so
 // the /summaries mount in PR C cannot end up with a hand-copied second copy.
 import { shareDialogStyles } from "./components/wiki-share-dialog.ts";
-import { wikiReadonlyStyles } from "./components/wiki-readonly-client.ts";
+import {
+  wikiReadonlyStyles,
+  WIKI_READONLY_ASK_HINT,
+  WIKI_READONLY_BANNER_TEXT,
+  WIKI_READONLY_INPUT_PLACEHOLDER,
+} from "./components/wiki-readonly-client.ts";
 import { isWikiReadonly } from "../../wiki/readonly.ts";
 
 /**
@@ -47,6 +52,11 @@ export async function renderWikiPage(opts?: {
     model: string;
     origin: "pinned" | "owner" | "fallback";
   } | null;
+  /** Is the SELECTED wiki registered read-only (`WIKI_READONLY_ROOTS`)? Passed
+   *  from the resolved registry entry by the route; drives the client's dim +
+   *  click-block of both the write and the egress affordances. Presentation only
+   *  — every server seam re-checks the root. */
+  readonlyWiki?: boolean;
 }): Promise<string> {
   const clientScript = await wikiClientScript();
   const wikis = opts?.wikis ?? [];
@@ -57,6 +67,7 @@ export async function renderWikiPage(opts?: {
   const gardenerPending = opts?.gardenerPending ?? 0;
   const gardener = opts?.gardener ?? true;
   const askBot = opts?.askBot ?? null;
+  const readonlyWiki = opts?.readonlyWiki ?? false;
   // "Answered by …" line under the Ask hint — who synthesizes this wiki's
   // answers and why (wiki owner vs the shared research-bot fallback).
   const askBotLine = askBot
@@ -1264,6 +1275,12 @@ export async function renderWikiPage(opts?: {
 
     <div class="wiki-pane">
       <div class="wiki-breadcrumb" id="wikiBreadcrumb" style="display:none"></div>
+      <!-- Read-only banner. Rendered UNCONDITIONALLY and shown by CSS keyed on
+           \`body.wiki-readonly-wiki\` — the same body class the click guard
+           stamps — rather than by a server branch, so the banner and the dimmed
+           controls cannot end up in different states, and so it survives the
+           re-renders that replace the breadcrumb's own innerHTML. -->
+      <div class="wiki-readonly-banner" id="wikiReadonlyBanner">${escHtml(WIKI_READONLY_BANNER_TEXT)}</div>
       <div class="wiki-article-wrap" id="articleWrap">
         <div class="wiki-empty-state">Loading wiki…</div>
       </div>
@@ -1279,7 +1296,7 @@ export async function renderWikiPage(opts?: {
       </div>
       <div class="wiki-conn-body wiki-ask-body" id="askBody" style="display:none">
         <div class="wiki-ask-compose">
-          <textarea class="wiki-ask-input" id="wikiAskInput" rows="2" placeholder="Ask this wiki…"></textarea>
+          <textarea class="wiki-ask-input" id="wikiAskInput" rows="2" placeholder="${readonlyWiki ? escHtml(WIKI_READONLY_INPUT_PLACEHOLDER) : "Ask this wiki…"}"${readonlyWiki ? " disabled" : ""}></textarea>
           <div class="wiki-ask-actions">
             <button class="wiki-ask-btn" id="wikiAskBtn">Ask</button>
             <button class="wiki-ask-newchat" id="wikiNewChatBtn"
@@ -1287,7 +1304,7 @@ export async function renderWikiPage(opts?: {
           </div>
         </div>
         <div class="wiki-ask-status" id="wikiAskStatus" style="display:none"><span class="spinner"></span><span class="st"></span></div>
-        <div class="wiki-ask-hint" id="wikiAskHint">Ask a question and this wiki answers in the main pane, with citations you can open as pages.</div>
+        <div class="wiki-ask-hint" id="wikiAskHint">${readonlyWiki ? escHtml(WIKI_READONLY_ASK_HINT) : "Ask a question and this wiki answers in the main pane, with citations you can open as pages."}</div>
         ${askBotLine}
         <div class="wiki-ask-history" id="wikiAskHistory"></div>
       </div>
@@ -1299,6 +1316,12 @@ export async function renderWikiPage(opts?: {
     // Wiki-readonly instance: the client dims + blocks the write actions so the
     // 403 is visible before the click (the server is still the authority).
     window.__WIKI_READONLY__ = ${isWikiReadonly() ? "true" : "false"};
+    // …and the PER-WIKI flag (WIKI_READONLY_ROOTS), which additionally dims the
+    // egress affordances (Share, fact check, Explain, Discuss, Ask, Remember).
+    // Independent of the one above — this laptop owns writes and still reads one
+    // wiki it must never write or send to a model. The picker navigates with a
+    // full page load, so the flag is always the open wiki's.
+    window.__WIKI_READONLY_WIKI__ = ${readonlyWiki ? "true" : "false"};
   </script>
   <script>
     ${clientScript}

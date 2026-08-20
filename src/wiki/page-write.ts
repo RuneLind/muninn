@@ -50,7 +50,12 @@ import { insertLogEntry } from "../gardener/apply.ts";
 import { sha256, todayOslo } from "../gardener/util.ts";
 import { runWikiWriteExclusive } from "./queue.ts";
 import { getWikiIndex } from "./store.ts";
-import { isWikiReadonly, WIKI_READONLY_REASON } from "./readonly.ts";
+import {
+  isReadonlyWikiRoot,
+  isWikiReadonly,
+  WIKI_READONLY_REASON,
+  wikiReadonlyRootReason,
+} from "./readonly.ts";
 import type { CommitWikiResult } from "./commit.ts";
 import { getLog } from "../logging.ts";
 
@@ -105,6 +110,13 @@ export interface PageWriteCommonOptions {
    * including ones added later.
    */
   isReadonly?: () => boolean;
+  /**
+   * Is THIS WIKI ROOT registered read-only (`WIKI_READONLY_ROOTS`)? The second,
+   * per-wiki mechanism — a write-owning instance still refuses the roots it only
+   * reads. Same injection rule as `isReadonly`: callers do not pass it, so a
+   * call site added later is guarded by default.
+   */
+  isReadonlyRoot?: (root: string) => boolean;
 }
 
 /**
@@ -238,6 +250,18 @@ export async function writeWikiPage(
       path: relPath,
     });
     return { outcome: "forbidden", reason: WIKI_READONLY_REASON };
+  }
+
+  // 0b. Per-WIKI read-only root (`WIKI_READONLY_ROOTS`): same refusal, one step
+  //     narrower — this instance owns writes, just not to THIS root. Before the
+  //     read for the same reason step 0 is.
+  if ((opts.isReadonlyRoot ?? isReadonlyWikiRoot)(wikiDir)) {
+    log.warn("Wiki page write refused — wiki root is registered read-only: {path}", {
+      kind: opts.logKind,
+      path: relPath,
+      root: wikiDir,
+    });
+    return { outcome: "forbidden", reason: wikiReadonlyRootReason(wikiDir) };
   }
 
   // 1. Path confinement — pure and cheap, so it runs BEFORE the queue.

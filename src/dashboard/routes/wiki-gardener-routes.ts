@@ -10,6 +10,11 @@ import type { BacklogWatcherInfo } from "../views/components/wiki-gardener-strip
 import { computeWatcherNextRun } from "../agents-overview.ts";
 import { lintWiki } from "../../wiki/lint.ts";
 import { findWiki, listWikis, resolveWikiRequest, type WikiRegistryEntry } from "../../wiki/registry.ts";
+import {
+  isReadonlyWikiRoot,
+  wikiNoEgressReason,
+  wikiReadonlyRootReason,
+} from "../../wiki/readonly.ts";
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { discoverAllBots, type BotConfig } from "../../bots/config.ts";
 import { fetchKnowledgeApi, KnowledgeApiError } from "../../ai/knowledge-api-client.ts";
@@ -147,6 +152,14 @@ export function __setBotsForTest(bots: BotConfig[] | null): void {
  * Shares the reader's memoized registry (one bot discovery + `WIKI_EXTRA` parse).
  */
 function isGardenerWiki(e: WikiRegistryEntry): boolean {
+  // A `WIKI_READONLY_ROOTS` wiki is excluded — but this is COSMETIC, and saying
+  // so matters: the predicate's three consumers are all read-side (the picker
+  // listing, a render flag, the proposals-listing gate), every gardener drafting
+  // POST in this file already refuses a non-bot wiki through `resolveBacklogBot`,
+  // and `proposals/:id/approve` resolves against the FULL registry. What actually
+  // stops an apply is the root-keyed guard inside `applyWikiProposal`. This just
+  // keeps a wiki that can never be written out of a gate picker.
+  if (isReadonlyWikiRoot(e.root)) return false;
   return e.source === "bot" || !!(e.collections && e.collections.length > 0);
 }
 
@@ -294,6 +307,19 @@ export interface BacklogRouteDeps extends CoverageDeps {
   getSnapshot: (watcherId: string, key: string) => Promise<unknown>;
   setSnapshot: (watcherId: string, key: string, value: unknown) => Promise<void>;
   listProposals: (botName: string) => Promise<DraftedScanProposal[]>;
+  /**
+   * The two DB seams the APPROVE route needs before it commits to anything —
+   * the read, and the draft→approved CAS.
+   *
+   * They are injectable for one specific reason: the read-only refusal has to
+   * happen BETWEEN them (after the proposal's wiki is known, before the row is
+   * claimed), and a test that cannot drive that gap can only assert the guard
+   * exists, not that it fires in the one position where it matters. The
+   * regression it pins — approve 403s, row stuck in `approved` forever — is
+   * invisible to any test that stubs the whole route.
+   */
+  getProposalById: (id: string) => Promise<WikiProposal | null>;
+  approveProposal: (id: string) => Promise<WikiProposal | null>;
 }
 
 export const DEFAULT_BACKLOG_ROUTE_DEPS: BacklogRouteDeps = {
@@ -314,6 +340,8 @@ export const DEFAULT_BACKLOG_ROUTE_DEPS: BacklogRouteDeps = {
   getSnapshot: (watcherId, key) => getWatcherSnapshot(watcherId, key),
   setSnapshot: (watcherId, key, value) => setWatcherSnapshot(watcherId, key, value),
   listProposals: (botName) => listAllWikiProposals(botName),
+  getProposalById: (id) => getWikiProposalById(id),
+  approveProposal: (id) => approveWikiProposal(id),
 };
 
 /** Read the offered-key snapshot as a Set (JSONB array → Set; anything else ⇒ ∅). */
@@ -966,10 +994,23 @@ function buildBacklogGardenerDeps(
  * the matching wikiDir-bearing bot. Returns the resolved bot + root or a
  * `{ error, status }` the handler returns verbatim.
  */
+type BacklogRefusal = { error: string; status: 400 | 403 | 404; readonly?: true };
+
+/**
+ * Render a `resolveBacklogBot` refusal. One helper, because a per-wiki refusal
+ * carries `readonly: true` beside its 403 — the ONE shape the whole read-only
+ * family answers with (`src/wiki/CLAUDE.md`) and the flag the client branches
+ * on. Spelling the body at each of the nine call sites is how one of them ends
+ * up dropping it.
+ */
+function backlogRefusal(c: Context, r: BacklogRefusal): Response {
+  return c.json(r.readonly ? { error: r.error, readonly: true } : { error: r.error }, r.status);
+}
+
 function resolveBacklogBot(
   wikiQuery: string | undefined,
   botQuery: string | undefined,
-): { bot: BotConfig; root: string } | { error: string; status: 400 | 404 } {
+): { bot: BotConfig; root: string } | BacklogRefusal {
   const { entry, unknownWiki } = resolveWikiRequest(
     getWikiRegistry(),
     wikiQuery,
@@ -979,6 +1020,18 @@ function resolveBacklogBot(
   if (unknownWiki) return { error: "no wiki configured for that name", status: 404 };
   if (entry && entry.source !== "bot") {
     return { error: "the ingest backlog is only available for bot wikis", status: 400 };
+  }
+  // Per-wiki read-only guard, on the ONE prologue every drafting POST in this
+  // file already funnels through (backlog-run, source-draft-{run,backlog,doc},
+  // backlog-doc-delete). The `source !== "bot"` check above covers a standalone
+  // read-only wiki; it does NOT cover a BOT whose own `wikiDir` is listed in
+  // `WIKI_READONLY_ROOTS`, and every one of these verbs spends a model call on
+  // that wiki's content or reaches huginn with it.
+  if (entry && isReadonlyWikiRoot(entry.root)) {
+    // 403 + `readonly: true`, not a 400: this is a POLICY refusal about the wiki,
+    // not a complaint about the request, and it is the shape every other per-wiki
+    // guard in the family answers with.
+    return { error: wikiNoEgressReason(entry.name), status: 403, readonly: true };
   }
   const root = entry?.root;
   const bot = entry
@@ -1365,7 +1418,7 @@ export function registerWikiGardenerRoutes(
     const refused = readonlyRefusal(c);
     if (refused) return refused;
     const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
-    if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status);
+    if ("error" in resolved) return backlogRefusal(c, resolved);
     const { bot, root } = resolved;
 
     const watcher = await backlogDeps.getWikiGardenerWatcher(bot.name);
@@ -1477,7 +1530,7 @@ export function registerWikiGardenerRoutes(
     const refused = readonlyRefusal(c);
     if (refused) return refused;
     const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
-    if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status);
+    if ("error" in resolved) return backlogRefusal(c, resolved);
     const { bot } = resolved;
 
     const watcher = await backlogDeps.getWikiGardenerWatcher(bot.name);
@@ -1499,7 +1552,7 @@ export function registerWikiGardenerRoutes(
     const refused = readonlyRefusal(c);
     if (refused) return refused;
     const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
-    if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status);
+    if ("error" in resolved) return backlogRefusal(c, resolved);
     const { bot } = resolved;
 
     const watcher = await backlogDeps.getWikiGardenerWatcher(bot.name);
@@ -1520,7 +1573,7 @@ export function registerWikiGardenerRoutes(
     const refused = readonlyRefusal(c);
     if (refused) return refused;
     const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
-    if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status);
+    if ("error" in resolved) return backlogRefusal(c, resolved);
     const { bot } = resolved;
 
     const watcher = await backlogDeps.getWikiGardenerWatcher(bot.name);
@@ -1551,7 +1604,7 @@ export function registerWikiGardenerRoutes(
     const refused = readonlyRefusal(c);
     if (refused) return refused;
     const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
-    if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status);
+    if ("error" in resolved) return backlogRefusal(c, resolved);
     const { bot } = resolved;
 
     const watcher = await backlogDeps.getWikiGardenerWatcher(bot.name);
@@ -1611,7 +1664,7 @@ export function registerWikiGardenerRoutes(
     if (refused) return { refusal: refused };
     const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
     if ("error" in resolved) {
-      return { refusal: c.json({ error: resolved.error }, resolved.status) };
+      return { refusal: backlogRefusal(c, resolved) };
     }
     const watcher = await backlogDeps.getWikiGardenerWatcher(resolved.bot.name);
     if (!watcher) {
@@ -1800,7 +1853,7 @@ export function registerWikiGardenerRoutes(
    */
   app.get("/api/wiki/gardener/backlog-doc-delete-status", async (c) => {
     const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
-    if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status);
+    if ("error" in resolved) return backlogRefusal(c, resolved);
 
     const collection = c.req.query("collection") ?? "";
     if (!SUMMARY_SOURCES.some((s) => s.collection === collection)) {
@@ -1836,7 +1889,7 @@ export function registerWikiGardenerRoutes(
     const refused = readonlyRefusal(c);
     if (refused) return refused;
     const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
-    if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status);
+    if ("error" in resolved) return backlogRefusal(c, resolved);
     const { bot, root } = resolved;
 
     if (bot.gardener?.enabled === false) {
@@ -1903,7 +1956,7 @@ export function registerWikiGardenerRoutes(
     const refused = readonlyRefusal(c);
     if (refused) return refused;
     const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
-    if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status);
+    if ("error" in resolved) return backlogRefusal(c, resolved);
     const { bot, root } = resolved;
 
     if (bot.gardener?.enabled === false) {
@@ -1976,7 +2029,7 @@ export function registerWikiGardenerRoutes(
     const refused = readonlyRefusal(c);
     if (refused) return refused;
     const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
-    if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status);
+    if ("error" in resolved) return backlogRefusal(c, resolved);
     const { bot, root } = resolved;
 
     if (bot.gardener?.enabled === false) {
@@ -2046,12 +2099,34 @@ export function registerWikiGardenerRoutes(
     const refused = readonlyRefusal(c);
     if (refused) return refused;
     const id = c.req.param("id");
-    const existing = await getWikiProposalById(id);
+    const existing = await backlogDeps.getProposalById(id);
     if (!existing) return c.json({ error: "proposal not found" }, 404);
+
+    // …and the same refusal for the PER-WIKI guard, for the same reason and in
+    // the same place. `applyWikiProposal` re-checks the root, but it is reached
+    // only AFTER the draft→approved CAS below: measured, an approve on a
+    // read-only wiki returned 403 with the row left in `approved`, where the
+    // gate offers no verb at all (reject 409s "not reviewable"). The row was
+    // stuck forever on a refusal that changed nothing.
+    //
+    // So the root lookup is hoisted out of the apply-target resolution further
+    // down — the CHEAP half of it: a missing wiki/bot still falls through to
+    // that block's own error handling (which flips the row to `error`, and must
+    // therefore keep running after the claim).
+    const targetRoot = existing.wikiName
+      ? findWiki(getWikiRegistry(), existing.wikiName)?.root
+      : getBots().find((b) => b.name === existing.botName)?.wikiDir;
+    if (targetRoot && isReadonlyWikiRoot(targetRoot)) {
+      log.info("Read-only wiki refused approve of proposal {id} (wiki={wiki})", {
+        id,
+        wiki: existing.wikiName ?? existing.botName,
+      });
+      return c.json({ error: wikiReadonlyRootReason(targetRoot), readonly: true }, 403);
+    }
 
     let claimed: WikiProposal | null = null;
     if (existing.status === "draft") {
-      claimed = await approveWikiProposal(id);
+      claimed = await backlogDeps.approveProposal(id);
       if (!claimed) {
         return c.json({ error: "proposal is no longer a draft", status: existing.status }, 409);
       }
@@ -2115,7 +2190,11 @@ export function registerWikiGardenerRoutes(
     // re-runnable by design — so the write-owning instance can apply it later.
     // Flipping it to `error` would burn a perfectly good draft on a policy answer.
     if (result.outcome === "forbidden") {
-      log.warn("Wiki-gardener approve refused for {id} — instance is wiki-readonly", { id });
+      // The seam does not say WHICH mechanism refused (instance flag or
+      // read-only root) and neither should this line — it used to assert
+      // "instance is wiki-readonly", which is false on the per-wiki path that
+      // reaches here. `result.reason` is the seam's own sentence.
+      log.warn("Wiki-gardener approve refused for {id}: {reason}", { id, reason: result.reason });
       // Same body as every other readonly refusal (`{error, readonly}`): a client
       // must be able to recognize the refusal by one shape, and the extra
       // `outcome: "forbidden"` here was a third spelling nothing read.

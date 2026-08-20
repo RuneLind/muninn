@@ -38,7 +38,12 @@ import path from "node:path";
 import { unlink } from "node:fs/promises";
 import { sha256 } from "../gardener/util.ts";
 import { runWikiWriteExclusive } from "../wiki/queue.ts";
-import { isWikiReadonly, WIKI_READONLY_REASON } from "../wiki/readonly.ts";
+import {
+  isReadonlyWikiRoot,
+  isWikiReadonly,
+  WIKI_READONLY_REASON,
+  wikiReadonlyRootReason,
+} from "../wiki/readonly.ts";
 import { QUEUE_REL_PATH } from "./constants.ts";
 
 /** What is at `plans/queue.yaml` right now. `absent` and `unreadable` are
@@ -84,6 +89,9 @@ export interface QueueWriteOptions {
   /** Injectable so a test drives the refusal without touching the process env;
    *  defaults to the shared `isWikiReadonly` so a later caller is guarded too. */
   isReadonly?: () => boolean;
+  /** Is THIS WIKI ROOT registered read-only (`WIKI_READONLY_ROOTS`)? The
+   *  per-wiki mechanism beside the instance flag; same fail-closed default. */
+  isReadonlyRoot?: (root: string) => boolean;
 }
 
 async function defaultReadQueue(absPath: string): Promise<QueueReadState> {
@@ -105,6 +113,10 @@ function errMsg(err: unknown): string {
 export async function writePlanQueue(opts: QueueWriteOptions): Promise<QueueWriteOutcome> {
   if ((opts.isReadonly ?? isWikiReadonly)()) {
     return { outcome: "forbidden", reason: WIKI_READONLY_REASON };
+  }
+  // Per-WIKI read-only root — before the file is opened, like the flag above.
+  if ((opts.isReadonlyRoot ?? isReadonlyWikiRoot)(opts.wikiDir)) {
+    return { outcome: "forbidden", reason: wikiReadonlyRootReason(opts.wikiDir) };
   }
   const read = opts.readQueue ?? defaultReadQueue;
   const absPath = path.join(opts.wikiDir, QUEUE_REL_PATH);
