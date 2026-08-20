@@ -33,7 +33,7 @@ import {
   WIKI_READONLY_CLIENT_MESSAGE,
   WIKI_READONLY_DISABLED_INPUTS,
   WIKI_READONLY_EGRESS_SELECTOR,
-  WIKI_READONLY_GUARDED_EVENTS,
+  wikiReadonlyGuardPlan,
   WIKI_READONLY_INPUT_PLACEHOLDER,
   WIKI_READONLY_WIKI_MESSAGE,
 } from "../views/components/wiki-readonly-client.ts";
@@ -462,15 +462,41 @@ describe("WIKI_READONLY_ROOTS — gardener approve + backlog", () => {
     await res.text();
   });
 
-  test("resolveBacklogBot refuses a read-only BOT wiki", async () => {
+  test("resolveBacklogBot refuses a read-only BOT wiki with the family's ONE shape", async () => {
     // The `source !== "bot"` check covers a standalone read-only wiki; it does
     // NOT cover a bot whose own `wikiDir` is listed. Every drafting POST in that
     // file funnels through this one prologue.
+    //
+    // 403 + `readonly: true` is the shape every other per-wiki refusal answers
+    // with (see `src/wiki/CLAUDE.md`), and the client branches on it: a 400 reads
+    // as "your request was malformed — fix it and retry", which is the one thing
+    // the caller cannot do here.
     __setWikiRegistryForTest([{ name: "robot", root: ro, source: "bot", readonly: true }]);
     registerWikiGardenerRoutes(app, deps(null));
     const res = await app.request("/api/wiki/gardener/backlog-run?wiki=robot", { method: "POST" });
-    expect(res.status).toBe(400);
-    expect(await res.text()).toContain("WIKI_READONLY_ROOTS");
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string; readonly?: boolean };
+    expect(body.readonly).toBe(true);
+    expect(body.error).toContain("WIKI_READONLY_ROOTS");
+  });
+
+  test("…and every drafting POST behind that prologue answers the same shape", async () => {
+    // The prologue is shared by nine routes; a refusal that only ONE of them
+    // returns verbatim is a refusal the others can silently reshape.
+    __setWikiRegistryForTest([{ name: "robot", root: ro, source: "bot", readonly: true }]);
+    registerWikiGardenerRoutes(app, deps(null));
+    for (const url of [
+      "/api/wiki/gardener/source-draft-run?wiki=robot",
+      "/api/wiki/gardener/source-draft-backlog?wiki=robot",
+      "/api/wiki/gardener/backlog-reset?wiki=robot",
+      "/api/wiki/gardener/backlog-cancel?wiki=robot",
+    ]) {
+      const res = await app.request(url, { method: "POST" });
+      expect(`${url} → ${res.status}`).toBe(`${url} → 403`);
+      expect(`${url} → ${((await res.json()) as { readonly?: boolean }).readonly}`).toBe(
+        `${url} → true`,
+      );
+    }
   });
 
   test("CONTROL: a writable BOT wiki gets its own 404, not the refusal", async () => {
@@ -480,6 +506,108 @@ describe("WIKI_READONLY_ROOTS — gardener approve + backlog", () => {
     const res = await app.request("/api/wiki/gardener/backlog-run?wiki=robot", { method: "POST" });
     expect(res.status).toBe(404);
     expect(await res.text()).toContain("no wiki bot resolved");
+  });
+});
+
+/**
+ * `WIKI_DIR` + an UNKNOWN `?wiki=` — the fallback's blast radius.
+ *
+ * `resolveWikiRequest` returns `entry: undefined` for TWO different requests:
+ * the env-override shape (no `?wiki=`/`?bot=` at all, `WIKI_DIR` set), which the
+ * routes really do serve from `resolveWikiRoot(undefined)`, and a name that
+ * matches no wiki, which they serve not at all. Keying the guard's fallback on
+ * `entry === undefined` conflated them, so with `WIKI_DIR` naming a read-only
+ * root a TYPO answered 403 "this wiki is read-only" — a sentence about a wiki
+ * the reader never asked for — and `/wiki?wiki=typo` rendered the banner and the
+ * disabled inputs to match.
+ */
+describe("WIKI_READONLY_ROOTS — the WIKI_DIR fallback is not inherited by an unknown name", () => {
+  let ro: string;
+  let app: Hono;
+  let prevExtra: string | undefined;
+  let prevWikiDir: string | undefined;
+
+  beforeEach(async () => {
+    ro = await mkdtemp(path.join(tmpdir(), "wiki-ro-envdir-"));
+    await Bun.write(path.join(ro, "Widgets.md"), "# Widgets\n\nThe device ships 4M units.\n");
+    prevExtra = process.env.WIKI_EXTRA;
+    prevWikiDir = process.env.WIKI_DIR;
+    // No WIKI_EXTRA: the ONLY wiki this instance serves is the env override,
+    // and that root is the read-only one.
+    delete process.env.WIKI_EXTRA;
+    process.env.WIKI_DIR = ro;
+    __setWikiReadonlyForTest(false);
+    __setReadonlyWikiRootsForTest([ro]);
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    __resetWikiWriteQueueForTest();
+    app = new Hono();
+    app.onError((err, c) => c.json({ error: String(err) }, 500));
+    registerWikiRoutes(app, {} as Parameters<typeof registerWikiRoutes>[1]);
+  });
+
+  afterEach(async () => {
+    __setReadonlyWikiRootsForTest();
+    __setWikiReadonlyForTest();
+    if (prevExtra === undefined) delete process.env.WIKI_EXTRA;
+    else process.env.WIKI_EXTRA = prevExtra;
+    if (prevWikiDir === undefined) delete process.env.WIKI_DIR;
+    else process.env.WIKI_DIR = prevWikiDir;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    await rm(ro, { recursive: true, force: true });
+  });
+
+  test("an unknown ?wiki= keeps its OWN preflight error, not the read-only refusal", async () => {
+    const res = await app.request("/api/wiki/ask?wiki=typo&q=hi");
+    expect(res.status).not.toBe(403);
+    const body = await res.text();
+    // The SSE app_error carries the route's own preflight message, JSON-escaped.
+    expect(body).toContain("No wiki configured for");
+    expect(body).toContain("typo");
+    expect(body).not.toContain("WIKI_READONLY_ROOTS");
+  });
+
+  test("CONTROL: the bare env-override request IS refused — the fallback still guards it", async () => {
+    const res = await app.request("/api/wiki/ask?q=hi");
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { readonly?: boolean }).readonly).toBe(true);
+  });
+
+  test("the reader page flags the env override read-only and a typo NOT", async () => {
+    // The banner MARKUP is always rendered (it is CSS-gated on the body class —
+    // see `wikiReadonlyStyles`), so the injected flag + the Ask box's disabled
+    // state are what actually say which page the reader got.
+    // (The placeholder STRING is in the bundled client either way — it is the
+    // rendered `<textarea>` attributes that differ.)
+    const askBox = /<textarea[^>]*id="wikiAskInput"[^>]*>/;
+    const typo = await (await app.request("/wiki?wiki=typo")).text();
+    expect(typo).toContain("window.__WIKI_READONLY_WIKI__ = false;");
+    expect(typo.match(askBox)![0]).not.toContain("disabled");
+
+    const bare = await (await app.request("/wiki")).text();
+    expect(bare).toContain("window.__WIKI_READONLY_WIKI__ = true;");
+    expect(bare.match(askBox)![0]).toContain("disabled");
+    expect(bare.match(askBox)![0]).toContain(WIKI_READONLY_INPUT_PLACEHOLDER);
+  });
+
+  test("the refusal log never labels a NAMED wiki as the WIKI_DIR override", async () => {
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
+      reset: true,
+    });
+    try {
+      await (await app.request("/api/wiki/ask?wiki=typo&q=hi")).text();
+      const hits = records.filter((r) => r.message.join("").includes("Read-only wiki"));
+      expect(hits).toHaveLength(0);
+      await (await app.request("/api/wiki/ask?q=hi")).text();
+      const bare = records.find((r) => r.message.join("").includes("Read-only wiki"));
+      expect(JSON.stringify(bare!.properties)).toContain("WIKI_DIR override");
+    } finally {
+      await reset();
+    }
   });
 });
 
@@ -536,15 +664,22 @@ describe("WIKI_READONLY_ROOTS — client guard", () => {
     expect(wikiReadonlyWikiFlag({ __WIKI_READONLY_WIKI__: true })).toBe(true);
   });
 
-  test("the guard listens on mousedown and keydown, not click alone", () => {
+  test("the guard listens on mousedown and keydown too — on a read-only WIKI only", () => {
     // Three egress buttons are activated from a `mousedown` delegate (Explain +
     // both fact-check buttons — mousedown so `preventDefault` keeps the text
     // selection alive), which fires BEFORE click and had already spent the call
     // by the time a click-only listener ran. Two more are reachable by keyboard
-    // with no pointer event at all.
-    expect(WIKI_READONLY_GUARDED_EVENTS).toContain("mousedown");
-    expect(WIKI_READONLY_GUARDED_EVENTS).toContain("keydown");
-    expect(WIKI_READONLY_GUARDED_EVENTS).toContain("click");
+    // with no pointer event at all. None of that is true of the INSTANCE flag's
+    // write controls, which are click-activated — and every extra capture-phase
+    // cancel steals the event from the page's own delegate on the same node
+    // (`wiki-browser.ts`'s mousedown → hideExplainPill). Behavior in
+    // `views/components/wiki-readonly-client.test.ts`.
+    expect(wikiReadonlyGuardPlan(false, true).map((p) => p.type)).toEqual([
+      "mousedown",
+      "click",
+      "keydown",
+    ]);
+    expect(wikiReadonlyGuardPlan(true, false).map((p) => p.type)).toEqual(["click"]);
   });
 
   test("only ACTIVATING keys are cancelled — Tab and typing are not", () => {

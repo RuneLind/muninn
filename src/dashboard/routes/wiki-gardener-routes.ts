@@ -994,10 +994,23 @@ function buildBacklogGardenerDeps(
  * the matching wikiDir-bearing bot. Returns the resolved bot + root or a
  * `{ error, status }` the handler returns verbatim.
  */
+type BacklogRefusal = { error: string; status: 400 | 403 | 404; readonly?: true };
+
+/**
+ * Render a `resolveBacklogBot` refusal. One helper, because a per-wiki refusal
+ * carries `readonly: true` beside its 403 — the ONE shape the whole read-only
+ * family answers with (`src/wiki/CLAUDE.md`) and the flag the client branches
+ * on. Spelling the body at each of the nine call sites is how one of them ends
+ * up dropping it.
+ */
+function backlogRefusal(c: Context, r: BacklogRefusal): Response {
+  return c.json(r.readonly ? { error: r.error, readonly: true } : { error: r.error }, r.status);
+}
+
 function resolveBacklogBot(
   wikiQuery: string | undefined,
   botQuery: string | undefined,
-): { bot: BotConfig; root: string } | { error: string; status: 400 | 404 } {
+): { bot: BotConfig; root: string } | BacklogRefusal {
   const { entry, unknownWiki } = resolveWikiRequest(
     getWikiRegistry(),
     wikiQuery,
@@ -1015,7 +1028,10 @@ function resolveBacklogBot(
   // `WIKI_READONLY_ROOTS`, and every one of these verbs spends a model call on
   // that wiki's content or reaches huginn with it.
   if (entry && isReadonlyWikiRoot(entry.root)) {
-    return { error: wikiNoEgressReason(entry.name), status: 400 };
+    // 403 + `readonly: true`, not a 400: this is a POLICY refusal about the wiki,
+    // not a complaint about the request, and it is the shape every other per-wiki
+    // guard in the family answers with.
+    return { error: wikiNoEgressReason(entry.name), status: 403, readonly: true };
   }
   const root = entry?.root;
   const bot = entry
@@ -1402,7 +1418,7 @@ export function registerWikiGardenerRoutes(
     const refused = readonlyRefusal(c);
     if (refused) return refused;
     const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
-    if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status);
+    if ("error" in resolved) return backlogRefusal(c, resolved);
     const { bot, root } = resolved;
 
     const watcher = await backlogDeps.getWikiGardenerWatcher(bot.name);
@@ -1514,7 +1530,7 @@ export function registerWikiGardenerRoutes(
     const refused = readonlyRefusal(c);
     if (refused) return refused;
     const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
-    if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status);
+    if ("error" in resolved) return backlogRefusal(c, resolved);
     const { bot } = resolved;
 
     const watcher = await backlogDeps.getWikiGardenerWatcher(bot.name);
@@ -1536,7 +1552,7 @@ export function registerWikiGardenerRoutes(
     const refused = readonlyRefusal(c);
     if (refused) return refused;
     const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
-    if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status);
+    if ("error" in resolved) return backlogRefusal(c, resolved);
     const { bot } = resolved;
 
     const watcher = await backlogDeps.getWikiGardenerWatcher(bot.name);
@@ -1557,7 +1573,7 @@ export function registerWikiGardenerRoutes(
     const refused = readonlyRefusal(c);
     if (refused) return refused;
     const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
-    if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status);
+    if ("error" in resolved) return backlogRefusal(c, resolved);
     const { bot } = resolved;
 
     const watcher = await backlogDeps.getWikiGardenerWatcher(bot.name);
@@ -1588,7 +1604,7 @@ export function registerWikiGardenerRoutes(
     const refused = readonlyRefusal(c);
     if (refused) return refused;
     const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
-    if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status);
+    if ("error" in resolved) return backlogRefusal(c, resolved);
     const { bot } = resolved;
 
     const watcher = await backlogDeps.getWikiGardenerWatcher(bot.name);
@@ -1648,7 +1664,7 @@ export function registerWikiGardenerRoutes(
     if (refused) return { refusal: refused };
     const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
     if ("error" in resolved) {
-      return { refusal: c.json({ error: resolved.error }, resolved.status) };
+      return { refusal: backlogRefusal(c, resolved) };
     }
     const watcher = await backlogDeps.getWikiGardenerWatcher(resolved.bot.name);
     if (!watcher) {
@@ -1837,7 +1853,7 @@ export function registerWikiGardenerRoutes(
    */
   app.get("/api/wiki/gardener/backlog-doc-delete-status", async (c) => {
     const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
-    if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status);
+    if ("error" in resolved) return backlogRefusal(c, resolved);
 
     const collection = c.req.query("collection") ?? "";
     if (!SUMMARY_SOURCES.some((s) => s.collection === collection)) {
@@ -1873,7 +1889,7 @@ export function registerWikiGardenerRoutes(
     const refused = readonlyRefusal(c);
     if (refused) return refused;
     const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
-    if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status);
+    if ("error" in resolved) return backlogRefusal(c, resolved);
     const { bot, root } = resolved;
 
     if (bot.gardener?.enabled === false) {
@@ -1940,7 +1956,7 @@ export function registerWikiGardenerRoutes(
     const refused = readonlyRefusal(c);
     if (refused) return refused;
     const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
-    if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status);
+    if ("error" in resolved) return backlogRefusal(c, resolved);
     const { bot, root } = resolved;
 
     if (bot.gardener?.enabled === false) {
@@ -2013,7 +2029,7 @@ export function registerWikiGardenerRoutes(
     const refused = readonlyRefusal(c);
     if (refused) return refused;
     const resolved = resolveBacklogBot(c.req.query("wiki"), c.req.query("bot"));
-    if ("error" in resolved) return c.json({ error: resolved.error }, resolved.status);
+    if ("error" in resolved) return backlogRefusal(c, resolved);
     const { bot, root } = resolved;
 
     if (bot.gardener?.enabled === false) {

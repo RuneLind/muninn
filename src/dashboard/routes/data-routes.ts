@@ -43,38 +43,32 @@ import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 // Shared with the SCHEDULED path (`runChecker` in src/watchers/runner.ts) so the
 // manual trigger and the weekly run can never disagree about which watcher types
 // draft into a wiki.
-import { shouldSkipWikiDraftingRun } from "../../watchers/wiki-drafting.ts";
+import {
+  shouldSkipWikiDraftingRun,
+  wikiDraftingTarget,
+  type WikiDraftingTarget,
+} from "../../watchers/wiki-drafting.ts";
+import type { WatcherType } from "../../types.ts";
 
 const log = getLog("dashboard");
 
 /**
- * The read-only root a wiki-drafting watcher would draft INTO, or null.
- *
- * The two drafting types name their wiki differently and there is no shared
- * accessor: `wiki-gardener` drafts into the OWNING BOT's `wikiDir`, while
- * `consolidation-gardener` drafts into the registry wiki named by
- * `config.wiki` (which need not be a bot wiki at all — mimir is the live case).
- * Both checkers skip a read-only root on the scheduled path; this is the same
- * question asked one layer up, so the manual trigger can answer honestly.
- *
- * Every other watcher type returns null — the type gate is
- * `shouldSkipWikiDraftingRun`'s set, and nothing here re-decides it.
+ * The per-wiki read-only decision for a watcher, bound to the real seams. The
+ * rules (which types draft, which root each one drafts into, and why an
+ * unresolvable drafting type fails CLOSED) live beside the shared type set in
+ * `src/watchers/wiki-drafting.ts`, so this entry point cannot disagree with the
+ * scheduled one about any of them.
  */
-function readonlyWikiRootForWatcher(watcher: {
-  type: string;
+function watcherWikiDecision(watcher: {
+  type: WatcherType;
   botName: string;
   config?: Record<string, unknown> | null;
-}): string | null {
-  let root: string | undefined;
-  if (watcher.type === "wiki-gardener") {
-    root = discoverAllBots().find((b) => b.name === watcher.botName)?.wikiDir;
-  } else if (watcher.type === "consolidation-gardener") {
-    const name = watcher.config?.wiki;
-    if (typeof name === "string" && name.trim()) {
-      root = findWiki(getWikiRegistry(), name)?.root;
-    }
-  }
-  return root && isReadonlyWikiRoot(root) ? root : null;
+}): WikiDraftingTarget {
+  return wikiDraftingTarget(watcher, {
+    botWikiDir: (bot) => discoverAllBots().find((b) => b.name === bot)?.wikiDir,
+    wikiRootByName: (name) => findWiki(getWikiRegistry(), name)?.root,
+    isReadonlyRoot: isReadonlyWikiRoot,
+  });
 }
 
 export function registerDataRoutes(app: Hono): void {
@@ -447,13 +441,30 @@ export function registerDataRoutes(app: Hono): void {
       // read-only root on the SCHEDULED path, so without this the click would
       // "succeed", queue a forced run, and the run would quietly do nothing —
       // an honest 403 says why at the moment of the click instead.
-      const readonlyRoot = readonlyWikiRootForWatcher(watcher);
-      if (readonlyRoot) {
+      const decision = watcherWikiDecision(watcher);
+      if (decision.kind === "readonly-root") {
         log.info("Watcher trigger refused for {id} ({type}) — wiki root is registered read-only", {
           id,
           type: watcher.type,
         });
-        return c.json({ error: wikiReadonlyRootReason(readonlyRoot), readonly: true }, 403);
+        return c.json({ error: wikiReadonlyRootReason(decision.root), readonly: true }, 403);
+      }
+      if (decision.kind === "unhandled") {
+        // A drafting type the per-wiki resolver has no branch for. Refusing is
+        // the only safe answer — allowing it force-runs a drafting watcher whose
+        // target root nothing checked — and the warn is what turns a silent gap
+        // into a one-line fix when a third drafting type is added.
+        log.warn(
+          "Watcher trigger refused for {id}: {type} is a wiki-drafting type with no read-only resolver",
+          { id, type: watcher.type },
+        );
+        return c.json(
+          {
+            error: `"${watcher.type}" drafts into a wiki but muninn cannot tell which one — refusing the manual trigger`,
+            readonly: true,
+          },
+          403,
+        );
       }
       await forceRunWatcher(id);
       return c.json({ ok: true, queued: true });

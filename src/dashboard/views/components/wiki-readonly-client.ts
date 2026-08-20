@@ -98,18 +98,47 @@ export const WIKI_READONLY_EGRESS_SELECTOR = [
 ].join(",");
 
 /**
- * The event types the guard cancels on.
+ * The three egress buttons that are activated from a **`mousedown`** delegate
+ * (`wiki-browser.ts` — mousedown so `preventDefault` can keep the text selection
+ * alive), i.e. the ones that had already spent the call by the time a click
+ * listener ran. They are the ONLY controls whose mousedown the guard cancels.
  *
- * `click` ALONE is not enough, and that is the whole reason this list exists.
- * Three of the egress controls are activated from a **`mousedown`** delegate
- * (`#wikiExplainBtn`, `#wikiFactcheckBtn`, `#wikiFactcheckArticleBtn` — mousedown
- * so `preventDefault` can keep the text selection alive), which fires BEFORE
- * `click` and had already spent the call by the time the click listener ran. And
- * two are reachable from the **keyboard** with no pointer event at all (Enter in
- * the Ask box and in the follow-up bar). A capture-phase listener per type,
- * sharing one selector, is what makes the guard match the handlers.
+ * **Why this is not just `WIKI_READONLY_BLOCKED_SELECTOR`.** The cancel ends in
+ * `stopImmediatePropagation()`, and `wiki-browser.ts` owns a bubble-phase
+ * `mousedown` delegate on `document` whose fall-through dismisses the Explain
+ * button. Cancelling the mousedown of a control that is activated on CLICK
+ * therefore buys nothing (the click cancel already refuses it) and costs that
+ * delegate its event — the Explain button then stays on screen for the rest of
+ * the session.
  */
-export const WIKI_READONLY_GUARDED_EVENTS = ["mousedown", "click", "keydown"] as const;
+export const WIKI_READONLY_MOUSEDOWN_SELECTOR = [
+  "#wikiExplainBtn",
+  "#wikiFactcheckBtn",
+  "#wikiFactcheckArticleBtn",
+].join(",");
+
+/**
+ * The listeners actually installed, given the two independent flags. Pure, so
+ * the whole set is unit-testable without a DOM.
+ *
+ * `click` ALONE is not enough for a read-only WIKI — three egress controls fire
+ * from `mousedown` and two from `keydown` — but it is EXACTLY enough for a
+ * read-only INSTANCE, whose blocked set is click-activated write controls only.
+ * That asymmetry is the point: the instance plan must stay byte-identical to
+ * what shipped before `WIKI_READONLY_ROOTS` existed, because every extra
+ * capture-phase cancel steals an event from a delegate on the same node.
+ */
+export function wikiReadonlyGuardPlan(
+  instance: boolean,
+  wiki: boolean,
+): { type: "mousedown" | "click" | "keydown"; selector: string }[] {
+  const plan: { type: "mousedown" | "click" | "keydown"; selector: string }[] = [];
+  if (wiki) plan.push({ type: "mousedown", selector: WIKI_READONLY_MOUSEDOWN_SELECTOR });
+  const click = wikiBlockedSelectorFor(instance, wiki);
+  if (click) plan.push({ type: "click", selector: click });
+  if (wiki) plan.push({ type: "keydown", selector: WIKI_READONLY_KEYDOWN_SELECTOR });
+  return plan;
+}
 
 /**
  * Does this key ACTIVATE a control? Enter and Space are the two the platform
@@ -136,6 +165,14 @@ export function wikiReadonlyKeyActivates(key: string): boolean {
  * against one list.
  */
 export const WIKI_READONLY_DISABLED_INPUTS = ["#wikiAskInput", "#wikiFollowupInput"];
+
+/**
+ * The controls reachable from the **keyboard with no pointer event at all**: the
+ * two text inputs whose Enter key is itself an egress trigger. A button needs no
+ * entry here — Enter/Space on a focused button dispatches a `click`, which the
+ * click cancel already refuses.
+ */
+export const WIKI_READONLY_KEYDOWN_SELECTOR = WIKI_READONLY_DISABLED_INPUTS.join(",");
 
 /** The placeholder those inputs carry on a read-only wiki. */
 export const WIKI_READONLY_INPUT_PLACEHOLDER = "This wiki is read-only — no questions are sent";
@@ -223,12 +260,17 @@ export function isBlockedByReadonly(
  * Install the guard. No-op (and no listener) when neither flag is set, so a
  * normal install pays nothing. Idempotent — a second call is ignored, since both
  * bundles on a page would otherwise cancel the same click twice.
+ *
+ * WHICH listeners is `wikiReadonlyGuardPlan`'s answer, not this function's: a
+ * capture-phase cancel ends in `stopImmediatePropagation()`, so every listener
+ * installed here is an event taken away from the page's own delegates on the
+ * same node. A read-only INSTANCE therefore gets the click cancel alone.
  */
 export function installWikiReadonlyGuard(): void {
   const instance = wikiReadonlyFlag();
   const perWiki = wikiReadonlyWikiFlag();
-  const selector = wikiBlockedSelectorFor(instance, perWiki);
-  if (!selector) return;
+  const plan = wikiReadonlyGuardPlan(instance, perWiki);
+  if (plan.length === 0) return;
   const body = document.body;
   if (!body || body.classList.contains("wiki-readonly")) return;
   // Two classes, not one: the dim CSS is selector-scoped per flag, so a
@@ -237,7 +279,7 @@ export function installWikiReadonlyGuard(): void {
   if (perWiki) body.classList.add("wiki-readonly-wiki");
   const message = wikiBlockedMessageFor(instance, perWiki);
 
-  for (const type of WIKI_READONLY_GUARDED_EVENTS) {
+  for (const { type, selector } of plan) {
     document.addEventListener(
       type,
       (e) => {

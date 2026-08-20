@@ -652,10 +652,10 @@ export async function renderModelsPage(): Promise<string> {
     // ---- Machine card -----------------------------------------------------
     // Read-only. The write-owner row is the one that matters operationally: two
     // instances against one wiki working tree is the failure this makes visible.
-    function machineRow(label, valueHtml, noteHtml) {
+    function machineRow(label, valueHtml, noteHtml, noteKind) {
       return '<div class="lc-row hover-wash">' +
         '<div class="lc-main"><div class="lc-title">' + esc(label) + '</div>' +
-        (noteHtml ? '<div class="lc-note">' + noteHtml + '</div>' : '') + '</div>' +
+        (noteHtml ? '<div class="lc-note' + (noteKind ? ' ' + noteKind : '') + '">' + noteHtml + '</div>' : '') + '</div>' +
         valueHtml +
       '</div>';
     }
@@ -665,8 +665,11 @@ export async function renderModelsPage(): Promise<string> {
       if (!body) return;
       var m = data.machine;
       if (!m) { body.innerHTML = '<div class="empty-msg">No machine info</div>'; return; }
+      // kind is the lc-val modifier class: 'none' (muted — an absent value),
+      // 'warn'/'bad'/'ok' (loud). Passing it through rather than special-casing
+      // 'none' is what lets a row say "this is wrong" instead of "this is empty".
       var val = function (text, kind) {
-        return '<span class="lc-val' + (kind === 'none' ? ' none' : '') + '">' + esc(text) + '</span>';
+        return '<span class="lc-val' + (kind ? ' ' + kind : '') + '">' + esc(text) + '</span>';
       };
       var h = '';
       h += machineRow('Hostname', val(m.hostname || '—'));
@@ -701,10 +704,18 @@ export async function renderModelsPage(): Promise<string> {
             ? 'WIKI_READONLY_ROOTS — never written, never sent to a model or the web: ' + codes(roMatched)
             : 'WIKI_READONLY_ROOTS is set but no configured root matches a registered wiki');
         if (roUnmatched.length) {
+          // Loud, not muted: 'none' is the style for an ABSENT value, and this row
+          // exists precisely because a configured root that guards nothing reads
+          // as protection. It is the one drift the card is here to show.
           h += machineRow('Read-only roots unmatched',
-            val(String(roUnmatched.length), 'none'),
-            'matches no registered wiki — guards nothing (check WIKI_EXTRA / a bot\'s wikiDir): ' +
-              codes(roUnmatched));
+            val(String(roUnmatched.length), 'warn'),
+            // NB the DOUBLE backslash: this whole block is a TS template literal,
+            // where a single \\' is an escape FOR the apostrophe — the emitted JS then
+            // carried a bare ' that terminated the string and broke the entire script
+            // block, invisibly to tsc (see models-page.test.ts).
+            'matches no registered wiki — guards nothing (check WIKI_EXTRA / a bot\\'s wikiDir): ' +
+              codes(roUnmatched),
+            'warn');
         }
       }
       // Discovered ≠ running: a bot folder with no platform token is skipped at
