@@ -49,3 +49,159 @@ export function isWikiReadonly(): boolean {
 export function __setWikiReadonlyForTest(value?: boolean): void {
   testOverride = value;
 }
+
+// ---------------------------------------------------------------------------
+// Per-WIKI read-only roots (`WIKI_READONLY_ROOTS`)
+// ---------------------------------------------------------------------------
+//
+// `MUNINN_WIKI_READONLY` above is an INSTANCE switch. This is the second
+// mechanism: a comma-separated list of wiki ROOTS this instance must never write
+// or spend a model call on, however many other wikis it owns. It exists for
+// roots muninn only ever READS — the `~/.claude/projects` Claude Code memory
+// corpus, whose files are loaded into a session's context at start, so an HTTP
+// write there edits the developer's own instructions.
+//
+// Three decisions are load-bearing:
+//
+//   1. **It is keyed on the resolved ROOT, not the registry NAME.** Every seam
+//      already holds the root at its refusal point (`writeWikiPage`'s `wikiDir`,
+//      `applyWikiProposal`'s `deps.wikiDir`, `writePlanQueue`'s `opts.wikiDir`),
+//      so the predicate is a string comparison against a value in hand — no
+//      registry lookup, and therefore no `registry-memo.ts` → `bots/config.ts` →
+//      `db/` import pull into the wiki store and the page writer. A name key
+//      would also need a name→root translation whose typo path fails OPEN.
+//   2. **It lives in the environment, not in `.wiki-reader.json`.**
+//      `readWikiReaderConfig` degrades a missing/malformed file to `null`, which
+//      for an ontology is right and for a write guard means "degrade to
+//      writable" — silently. The file carries cosmetics (`include`); the
+//      environment carries safety.
+//   3. **An entry matching no registered wiki fails CLOSED for that entry** — it
+//      simply names a root nothing writes, leaving every real entry enforced.
+//      The mismatch is still worth a warn (someone edited one var and not the
+//      other), but the warn is a diagnostic, never the guard.
+//
+// Paths go through `resolveConfiguredPath` — the SAME `~`-expansion +
+// repo-root resolution `WIKI_EXTRA` and `SYNC_REPOS` use — because re-spelling
+// that in a second module is precisely how two path dialects drift apart.
+
+import path from "node:path";
+import { realpathSync } from "node:fs";
+import { resolveConfiguredPath } from "./registry.ts";
+
+/** The env var name, so error copy, docs and the `/models` machine card agree. */
+export const WIKI_READONLY_ROOTS_ENV = "WIKI_READONLY_ROOTS";
+
+/** Trailing-separator-free, `.`/`..`-free form of an absolute path. The registry
+ *  and this list are both written by hand, so `~/.claude/projects/` and
+ *  `~/.claude/projects` must not be two different roots. */
+function normalizeRoot(p: string): string {
+  const n = path.normalize(p);
+  return n.length > 1 && n.endsWith(path.sep) ? n.slice(0, -1) : n;
+}
+
+/**
+ * The symlink-resolved form, or null when the path does not exist / is
+ * unreadable. Carried ALONGSIDE the normalized form (never instead of it) for
+ * two reasons: a root configured through a symlink must still match the registry
+ * entry that named the real path (`wikiWriteQueueKey` takes the same precaution
+ * for the same reason), and on a case-insensitive filesystem `realpathSync`
+ * returns the canonical on-disk casing — which is what makes a case-only
+ * difference match there and correctly NOT match on a case-sensitive one.
+ */
+function realRoot(p: string): string | null {
+  try {
+    return normalizeRoot(realpathSync(p));
+  } catch {
+    return null;
+  }
+}
+
+/** Every spelling of one configured root we are willing to match on. */
+function rootForms(resolved: string): string[] {
+  const norm = normalizeRoot(resolved);
+  const real = realRoot(norm);
+  return real && real !== norm ? [norm, real] : [norm];
+}
+
+/**
+ * Parse a raw `WIKI_READONLY_ROOTS` value into resolved absolute roots, in
+ * order, deduped. Pure apart from `resolveConfiguredPath`'s `path.resolve`;
+ * blank entries are skipped silently (a trailing comma is not a mistake worth a
+ * warn). Exported for the `/models` card and for tests.
+ */
+export function parseReadonlyWikiRoots(raw: string | undefined, repoRoot?: string): string[] {
+  const out: string[] = [];
+  for (const rawEntry of (raw ?? "").split(",")) {
+    const entry = rawEntry.trim();
+    if (!entry) continue;
+    const resolved = normalizeRoot(resolveConfiguredPath(entry, repoRoot));
+    if (!out.includes(resolved)) out.push(resolved);
+  }
+  return out;
+}
+
+/** Test override for the whole set. `undefined` ⇒ read the env. */
+let rootsTestOverride: string[] | undefined;
+/** Memoized env parse — the value is process-static, and the realpath probes are
+ *  filesystem calls we do not want on every write. Dropped by the test setter. */
+let cachedRoots: { list: string[]; forms: Set<string> } | null = null;
+
+function currentRoots(): { list: string[]; forms: Set<string> } {
+  if (rootsTestOverride) {
+    const list = rootsTestOverride.map(normalizeRoot);
+    return { list, forms: new Set(list.flatMap(rootForms)) };
+  }
+  if (!cachedRoots) {
+    const list = parseReadonlyWikiRoots(process.env[WIKI_READONLY_ROOTS_ENV]);
+    cachedRoots = { list, forms: new Set(list.flatMap(rootForms)) };
+  }
+  return cachedRoots;
+}
+
+/** The configured read-only roots, resolved. Surfaced on the `/models` Machine
+ *  card so the drift between this var and `WIKI_EXTRA` is readable without
+ *  issuing a POST. */
+export function readonlyWikiRoots(): string[] {
+  return [...currentRoots().list];
+}
+
+/**
+ * Is this wiki root registered read-only? The seam predicate — `(root) => bool`.
+ * An UNKNOWN root is writable (the default), so adding the mechanism changes
+ * nothing until a root is named.
+ */
+export function isReadonlyWikiRoot(root: string | undefined | null): boolean {
+  if (!root) return false;
+  const { forms } = currentRoots();
+  if (forms.size === 0) return false;
+  const norm = normalizeRoot(root);
+  if (forms.has(norm)) return true;
+  const real = realRoot(norm);
+  return !!real && forms.has(real);
+}
+
+/**
+ * The per-wiki refusal sentence. Deliberately NOT `WIKI_READONLY_REASON`, which
+ * hard-codes `MUNINN_WIKI_READONLY=1` and would tell a reader on a write-owning
+ * instance something false about the whole instance.
+ */
+export function wikiReadonlyRootReason(rootOrName: string): string {
+  return `this wiki is registered read-only (${WIKI_READONLY_ROOTS_ENV}) — muninn only reads "${rootOrName}"`;
+}
+
+/**
+ * The per-wiki refusal for a route that spends a MODEL CALL (or reaches the web,
+ * or seeds a chat thread) on the wiki's content rather than writing it. Separate
+ * copy because "read-only" reads as "you can still ask questions about it", and
+ * on this root that is exactly what must not happen.
+ */
+export function wikiNoEgressReason(wikiName: string): string {
+  return `the "${wikiName}" wiki is registered read-only (${WIKI_READONLY_ROOTS_ENV}) — its pages are never sent to a model or to the web`;
+}
+
+/** Force the read-only root set for a test; no argument restores env resolution
+ *  (and drops the memo, so a test that set the env var is honoured). */
+export function __setReadonlyWikiRootsForTest(roots?: string[]): void {
+  rootsTestOverride = roots;
+  cachedRoots = null;
+}

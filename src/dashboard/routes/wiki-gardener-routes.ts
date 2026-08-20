@@ -10,6 +10,7 @@ import type { BacklogWatcherInfo } from "../views/components/wiki-gardener-strip
 import { computeWatcherNextRun } from "../agents-overview.ts";
 import { lintWiki } from "../../wiki/lint.ts";
 import { findWiki, listWikis, resolveWikiRequest, type WikiRegistryEntry } from "../../wiki/registry.ts";
+import { isReadonlyWikiRoot } from "../../wiki/readonly.ts";
 import { getWikiRegistry } from "../../wiki/registry-memo.ts";
 import { discoverAllBots, type BotConfig } from "../../bots/config.ts";
 import { fetchKnowledgeApi, KnowledgeApiError } from "../../ai/knowledge-api-client.ts";
@@ -147,6 +148,14 @@ export function __setBotsForTest(bots: BotConfig[] | null): void {
  * Shares the reader's memoized registry (one bot discovery + `WIKI_EXTRA` parse).
  */
 function isGardenerWiki(e: WikiRegistryEntry): boolean {
+  // A `WIKI_READONLY_ROOTS` wiki is excluded — but this is COSMETIC, and saying
+  // so matters: the predicate's three consumers are all read-side (the picker
+  // listing, a render flag, the proposals-listing gate), every gardener drafting
+  // POST in this file already refuses a non-bot wiki through `resolveBacklogBot`,
+  // and `proposals/:id/approve` resolves against the FULL registry. What actually
+  // stops an apply is the root-keyed guard inside `applyWikiProposal`. This just
+  // keeps a wiki that can never be written out of a gate picker.
+  if (isReadonlyWikiRoot(e.root)) return false;
   return e.source === "bot" || !!(e.collections && e.collections.length > 0);
 }
 

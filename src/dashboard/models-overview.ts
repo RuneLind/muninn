@@ -18,7 +18,7 @@
 
 import os from "node:os";
 import { schedulerEnabledFromEnv } from "../config.ts";
-import { isWikiReadonly } from "../wiki/readonly.ts";
+import { isWikiReadonly, readonlyWikiRoots } from "../wiki/readonly.ts";
 import type { BotConfig } from "../bots/config.ts";
 import { discoverAllBots, resolveResearchBot, resolveSummarizerBot, resolveWikiSynthesisBot } from "../bots/config.ts";
 import type { WikiRegistryEntry } from "../wiki/registry.ts";
@@ -205,7 +205,19 @@ export interface MachineInfo {
    * Deliberately NO `root`: it was never rendered, and publishing absolute
    * filesystem paths on a reader-facing API is the `base_url` mistake again.
    */
-  wikis: { name: string; source: WikiRegistryEntry["source"] }[];
+  wikis: { name: string; source: WikiRegistryEntry["source"]; readonly?: boolean }[];
+  /**
+   * Resolved `WIKI_READONLY_ROOTS` entries — the per-wiki mechanism beside the
+   * instance flag. Rendered so the drift between this var and `WIKI_EXTRA` is
+   * readable without issuing a POST: an entry matching no wiki above guards
+   * nothing (it fails closed for itself, which is safe and invisible).
+   *
+   * Roots ARE published here, unlike `wikis[].root`. The difference is that this
+   * list is not derivable from anything else on the page — its whole value is
+   * showing which absolute path is protected — and it is what makes a typo
+   * diagnosable at a glance.
+   */
+  readonlyRoots: string[];
   /**
    * Did the registry actually load? `wikis: []` is ambiguous — an install with no
    * wikis and a registry that THREW look identical, and the second reading makes
@@ -767,7 +779,12 @@ export async function assembleModelsOverview(
       name: b.name,
       polling: !!b.telegramBotToken || (!!b.slackBotToken && !!b.slackAppToken),
     })),
-    wikis: wikiRegistry.map((e) => ({ name: e.name, source: e.source })),
+    wikis: wikiRegistry.map((e) => ({
+      name: e.name,
+      source: e.source,
+      ...(e.readonly ? { readonly: true } : {}),
+    })),
+    readonlyRoots: readonlyWikiRoots(),
     wikisKnown: wikiRegistryKnown,
   };
 

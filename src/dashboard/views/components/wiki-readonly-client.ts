@@ -57,16 +57,82 @@ export const WIKI_READONLY_BLOCKED_SELECTOR = [
   ".wiki-atlas-cdraft",
 ].join(",");
 
+/**
+ * Controls that reach a route the PER-WIKI guard 403s but the instance flag does
+ * not: the egress family — anything that spends a model call, reaches the live
+ * web, or seeds a chat thread from this wiki's pages. They are NOT write
+ * controls, which is exactly why they are a separate list: adding them to the
+ * set above would dim 📤 Share and 🔎 Fact check on the read-only INSTANCE too,
+ * where the server happily serves both.
+ *
+ * The ids are the ones the real delegated handlers key on (`wiki-browser.ts`'s
+ * breadcrumb + answer-pane wiring, `SHARE_BTN_ID`, `DISCUSS_ARTICLE_BTN_ID`,
+ * `DECLINE_CHAT_BTN_ID`), so the two cannot drift by naming something else.
+ */
+export const WIKI_READONLY_EGRESS_SELECTOR = [
+  // Breadcrumb article actions.
+  "#wikiExplainBtn",
+  "#wikiFactcheckBtn",
+  "#wikiFactcheckArticleBtn",
+  "#wikiDiscussBtn",
+  "#wikiShareBtn",
+  // Ask rail + in-pane answer actions.
+  "#wikiAskBtn",
+  "#wikiNewChatBtn",
+  "#wikiFollowupBtn",
+  "#wikiRememberBtn",
+  "#wikiChatEscBtn",
+  "#wikiChatEscNewBtn",
+  "#wikiChatEscOptBtn",
+  "#wikiChatDeclineBtn",
+  // Fact-check claim retry (row ↻ + the batch bar).
+  "[data-claim-retry-btn]",
+  "#wikiClaimRetryAll",
+].join(",");
+
 /** The one sentence shown when a blocked control is clicked. Mirrors the server's
  *  `WIKI_READONLY_REASON` in substance; kept here so the browser bundle imports
  *  nothing server-side. */
 export const WIKI_READONLY_CLIENT_MESSAGE =
   "This muninn instance is wiki-readonly (MUNINN_WIKI_READONLY=1) — wiki page writes happen on the write-owning instance.";
 
+/** The per-wiki counterpart, shown on a wiki listed in `WIKI_READONLY_ROOTS`.
+ *  Deliberately a different sentence: the instance one would tell a reader on the
+ *  write-OWNING laptop something false about every other wiki on it. */
+export const WIKI_READONLY_WIKI_MESSAGE =
+  "This wiki is registered read-only (WIKI_READONLY_ROOTS) — muninn only reads it: no writes, no model calls, nothing sent to the web.";
+
 /** Is the page running against a wiki-readonly instance? The flag is injected by
  *  the server render as `window.__WIKI_READONLY__`. */
 export function wikiReadonlyFlag(win: unknown = globalThis): boolean {
   return (win as { __WIKI_READONLY__?: unknown })?.__WIKI_READONLY__ === true;
+}
+
+/** Is the wiki this page is rendering itself registered read-only? Injected as
+ *  `window.__WIKI_READONLY_WIKI__` from the resolved registry entry. Independent
+ *  of the instance flag — either, both, or neither can be true. */
+export function wikiReadonlyWikiFlag(win: unknown = globalThis): boolean {
+  return (win as { __WIKI_READONLY_WIKI__?: unknown })?.__WIKI_READONLY_WIKI__ === true;
+}
+
+/**
+ * The selector actually installed, given the two independent flags — pure, so
+ * the union rule is unit-testable without a DOM.
+ *
+ * A read-only WIKI blocks the write controls too: every one of them ends in a
+ * seam the root-keyed guard refuses. The instance flag alone keeps exactly the
+ * set it always had.
+ */
+export function wikiBlockedSelectorFor(instance: boolean, wiki: boolean): string {
+  if (wiki) return WIKI_READONLY_BLOCKED_SELECTOR + "," + WIKI_READONLY_EGRESS_SELECTOR;
+  return instance ? WIKI_READONLY_BLOCKED_SELECTOR : "";
+}
+
+/** Which sentence explains a blocked click. The per-wiki one wins where both
+ *  apply: it is the more specific true statement about the page on screen. */
+export function wikiBlockedMessageFor(instance: boolean, wiki: boolean): string {
+  if (wiki) return WIKI_READONLY_WIKI_MESSAGE;
+  return instance ? WIKI_READONLY_CLIENT_MESSAGE : "";
 }
 
 /**
@@ -82,39 +148,50 @@ export function wikiReadonlyFlag(win: unknown = globalThis): boolean {
  * to the Element), so the only clicks let through are ones the THROW would have
  * let through anyway.
  */
-export function isBlockedByReadonly(target: Element | null): boolean {
+export function isBlockedByReadonly(
+  target: Element | null,
+  selector: string = WIKI_READONLY_BLOCKED_SELECTOR,
+): boolean {
+  if (!selector) return false;
   if (typeof (target as Element | null)?.closest !== "function") return false;
-  return !!target?.closest(WIKI_READONLY_BLOCKED_SELECTOR);
+  return !!target?.closest(selector);
 }
 
 /**
- * Install the guard. No-op (and no listener) when the instance owns writes, so a
+ * Install the guard. No-op (and no listener) when neither flag is set, so a
  * normal install pays nothing. Idempotent — a second call is ignored, since both
  * bundles on a page would otherwise cancel the same click twice.
  */
 export function installWikiReadonlyGuard(): void {
-  if (!wikiReadonlyFlag()) return;
+  const instance = wikiReadonlyFlag();
+  const perWiki = wikiReadonlyWikiFlag();
+  const selector = wikiBlockedSelectorFor(instance, perWiki);
+  if (!selector) return;
   const body = document.body;
   if (!body || body.classList.contains("wiki-readonly")) return;
+  // Two classes, not one: the dim CSS is selector-scoped per flag, so a
+  // read-only INSTANCE does not dim Share / fact check (which it still serves).
   body.classList.add("wiki-readonly");
+  if (perWiki) body.classList.add("wiki-readonly-wiki");
+  const message = wikiBlockedMessageFor(instance, perWiki);
 
   document.addEventListener(
     "click",
     (e) => {
-      if (!isBlockedByReadonly(e.target as Element | null)) return;
+      if (!isBlockedByReadonly(e.target as Element | null, selector)) return;
       e.preventDefault();
       e.stopPropagation();
       // The handlers are delegated on `document` too, so stopping propagation is
       // not enough on its own — the other listener on the SAME node still runs.
       e.stopImmediatePropagation();
-      showReadonlyNote();
+      showReadonlyNote(message);
     },
     true,
   );
 }
 
 /** A single transient toast — one node, reused, so repeated clicks don't stack. */
-function showReadonlyNote(): void {
+function showReadonlyNote(message: string = WIKI_READONLY_CLIENT_MESSAGE): void {
   let el = document.getElementById("wikiReadonlyNote");
   if (!el) {
     el = document.createElement("div");
@@ -122,7 +199,7 @@ function showReadonlyNote(): void {
     el.className = "wiki-readonly-note";
     document.body.appendChild(el);
   }
-  el.textContent = WIKI_READONLY_CLIENT_MESSAGE;
+  el.textContent = message;
   el.classList.add("show");
   window.clearTimeout((el as HTMLElement & { _t?: number })._t);
   (el as HTMLElement & { _t?: number })._t = window.setTimeout(
@@ -136,6 +213,9 @@ function showReadonlyNote(): void {
 export function wikiReadonlyStyles(): string {
   return `
     body.wiki-readonly ${WIKI_READONLY_BLOCKED_SELECTOR.split(",").join(", body.wiki-readonly ")} {
+      opacity: 0.45; cursor: not-allowed; filter: grayscale(0.6);
+    }
+    body.wiki-readonly-wiki ${WIKI_READONLY_EGRESS_SELECTOR.split(",").join(", body.wiki-readonly-wiki ")} {
       opacity: 0.45; cursor: not-allowed; filter: grayscale(0.6);
     }
     .wiki-readonly-note {

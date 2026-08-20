@@ -39,6 +39,16 @@ export interface WikiRegistryEntry {
    *  `name=path==botname` for a pin with no collections). Unset ⇒ owner/fallback
    *  routing. A pin naming no discovered bot is warned + ignored at resolve time. */
   synthesisBot?: string;
+  /**
+   * Is this wiki's root listed in `WIKI_READONLY_ROOTS` (see `readonly.ts`)?
+   *
+   * **Presentation only.** The client half (dimmed write + egress affordances)
+   * and the `/models` Machine card read it; ENFORCEMENT never does — the three
+   * write seams and the egress-route prologues call `isReadonlyWikiRoot(root)`
+   * against the root they already hold, so a registry built without the roots
+   * (or a stale memo) cannot un-protect a wiki.
+   */
+  readonly?: boolean;
 }
 
 /** Repo root: import.meta.dir = <root>/src/wiki → two levels up. Relative
@@ -69,18 +79,40 @@ export function resolveConfiguredPath(raw: string, repoRoot: string = REPO_ROOT)
   return path.isAbsolute(expanded) ? expanded : path.resolve(repoRoot, expanded);
 }
 
+export interface BuildWikiRegistryOptions {
+  /** Discovered bots — every one with a `wikiDir` becomes a bot wiki. */
+  bots: BotConfig[];
+  /** The raw `WIKI_EXTRA` env string (comma-separated `name=path[…]` pairs). */
+  extra?: string;
+  /** Base for relative paths. Defaults to the muninn repo root; tests pin it. */
+  repoRoot?: string;
+  /**
+   * Roots `WIKI_READONLY_ROOTS` marks read-only, already resolved (the caller
+   * passes `readonlyWikiRoots()`; the predicate is `isReadonlyWikiRoot`).
+   * Stamps the presentational `readonly` flag and drives the no-match WARN.
+   * Absent ⇒ no entry is flagged, which is safe precisely because enforcement
+   * never reads this flag.
+   */
+  isReadonlyRoot?: (root: string) => boolean;
+  /** The configured read-only roots, for the "matches no registered wiki" warn.
+   *  Absent ⇒ no warn (nothing to compare against). */
+  readonlyRoots?: string[];
+}
+
 /**
  * Build the wiki registry from discovered bots + the raw `WIKI_EXTRA` env string.
  * Bot wikis come first (names stay `jarvis`/`melosys`/…); then standalone wikis
  * from comma-separated `name=path` pairs. Malformed pairs and names colliding
  * with an already-registered wiki are warned about and skipped. Relative paths
  * resolve against the muninn repo root; absolute paths pass through unchanged.
+ *
+ * Takes ONE options object rather than positionals: the third slot was already
+ * `repoRoot` in the test-facing signature, and the read-only inputs would have
+ * made a fourth and fifth positional whose order nothing reads back.
  */
-export function buildWikiRegistry(
-  bots: BotConfig[],
-  extraRaw: string | undefined,
-  repoRoot: string = REPO_ROOT,
-): WikiRegistryEntry[] {
+export function buildWikiRegistry(opts: BuildWikiRegistryOptions): WikiRegistryEntry[] {
+  const { bots, extra: extraRaw, isReadonlyRoot, readonlyRoots } = opts;
+  const repoRoot = opts.repoRoot ?? REPO_ROOT;
   const entries: WikiRegistryEntry[] = [];
   const seen = new Set<string>();
 
@@ -97,6 +129,7 @@ export function buildWikiRegistry(
     const entry: WikiRegistryEntry = { name, root, source };
     if (collections && collections.length > 0) entry.collections = collections;
     if (synthesisBot) entry.synthesisBot = synthesisBot;
+    if (isReadonlyRoot?.(root)) entry.readonly = true;
     entries.push(entry);
     return true;
   };
@@ -173,7 +206,31 @@ export function buildWikiRegistry(
     }
   }
 
+  // A `WIKI_READONLY_ROOTS` entry matching no registered wiki means someone
+  // edited one var and not the other. It fails CLOSED for that entry (it names a
+  // root nothing writes) and leaves every matching entry enforced, so this is a
+  // diagnostic — but a LOUD one, because the silent reading is "the guard is on"
+  // when nothing is guarded.
+  if (readonlyRoots && readonlyRoots.length > 0 && isReadonlyRoot) {
+    for (const root of readonlyRoots) {
+      if (!entries.some((e) => e.readonly && sameRoot(e.root, root))) {
+        log.warn(
+          "WIKI_READONLY_ROOTS: {root} matches no registered wiki root — nothing is guarded by that entry (check WIKI_EXTRA / a bot's wikiDir)",
+          { root },
+        );
+      }
+    }
+  }
+
   return entries;
+}
+
+/** Do these two already-resolved roots name the same wiki? Both sides have been
+ *  through `resolveConfiguredPath`, so this is the residual trailing-separator
+ *  difference only — the symlink/case forms are `isReadonlyWikiRoot`'s job. */
+function sameRoot(a: string, b: string): boolean {
+  const trim = (p: string) => (p.length > 1 && p.endsWith(path.sep) ? p.slice(0, -1) : p);
+  return trim(path.normalize(a)) === trim(path.normalize(b));
 }
 
 /**

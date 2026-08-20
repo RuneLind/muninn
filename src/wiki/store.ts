@@ -17,6 +17,7 @@ import { getLog } from "../logging.ts";
 import { sanitizeColorToken } from "../dashboard/views/components/wiki-filter.ts";
 import { COMPONENT_TAG_SOURCE } from "../format/markdown-ast.ts";
 import { buildWikiGitDates } from "./git-dates.ts";
+import { isReadonlyWikiRoot, WIKI_READONLY_ROOTS_ENV } from "./readonly.ts";
 
 const log = getLog("wiki", "store");
 
@@ -39,6 +40,25 @@ export type WikiPageType = string;
 export interface WikiReaderConfig {
   typeMap: Record<string, string>;
   typeLabels: Record<string, string>;
+  /**
+   * Optional glob allow-list scoping the SCAN, relative to the wiki root.
+   * Absent/empty ⇒ scan everything the standard filters leave (today's
+   * behaviour, byte-identical). Present ⇒ a page is kept when it matches ANY
+   * entry (union, not intersection — an all-must-match rule has no useful
+   * spelling for "these two subtrees").
+   *
+   * It exists for a root muninn does not own the layout of: `~/.claude/projects`
+   * holds 288 markdown files under per-project `memory/` dirs worth reading, plus
+   * a growing pile of `<uuid>/session-memory/summary.md` and
+   * `tool-results/artifact-*.html` strays that would otherwise arrive as ten
+   * identically-named `summary` pages.
+   *
+   * **This is cosmetics, and that is why it may live in this file** while the
+   * read-only guard may not: losing the config re-admits the strays, which is
+   * visible and harmless, whereas a guard that degrades to absent degrades to
+   * writable. See `WIKI_READONLY_ROOTS` in `readonly.ts`.
+   */
+  include: string[];
 }
 
 /**
@@ -741,6 +761,11 @@ function isStringRecord(v: unknown): v is Record<string, string> {
   return Object.values(v as Record<string, unknown>).every((x) => typeof x === "string");
 }
 
+/** True when `v` is an array of non-blank strings — the `include` shape. */
+function isStringArray(v: unknown): v is string[] {
+  return Array.isArray(v) && v.every((x) => typeof x === "string" && x.trim() !== "");
+}
+
 /**
  * Read the optional `<root>/.wiki-reader.json` per-wiki type ontology. Absent ⇒
  * null (the common case — the wiki uses the built-in five types). Malformed JSON,
@@ -783,9 +808,18 @@ async function readWikiReaderConfig(root: string): Promise<WikiReaderConfig | nu
       root,
     });
   }
+  // Same validate-warn-degrade shape as the two above: a bad `include` is
+  // dropped (⇒ scan everything) rather than taking the wiki offline.
+  if (obj.include !== undefined && !isStringArray(obj.include)) {
+    log.warn("{file} at {root}: include is not an array of non-empty glob strings — ignoring it", {
+      file: WIKI_READER_CONFIG_FILE,
+      root,
+    });
+  }
   return {
     typeMap: isStringRecord(obj.typeMap) ? obj.typeMap : {},
     typeLabels: isStringRecord(obj.typeLabels) ? obj.typeLabels : {},
+    include: isStringArray(obj.include) ? obj.include.map((p) => p.trim()) : [],
   };
 }
 
@@ -1042,6 +1076,22 @@ async function buildExplainerMeta(root: string, relPath: string): Promise<WikiPa
  * no backlinks).
  */
 export async function buildWikiIndex(root: string): Promise<WikiIndex> {
+  // Per-wiki reader config — read once per build (inherits the index TTL). It is
+  // read BEFORE the scan, not after, because `include` scopes the scan itself;
+  // the move is safe because the read depends on nothing but `root`.
+  const readerConfig = await readWikiReaderConfig(root);
+  // The one place the STORE needs to know a root is read-only: `include` is
+  // cosmetic and degrades to absent, so on a root whose whole point is that it
+  // is scoped and never written, a missing/unreadable config is worth saying out
+  // loud rather than silently re-admitting the strays it filters.
+  if (!readerConfig && isReadonlyWikiRoot(root)) {
+    log.warn(
+      "{file} missing or unreadable at read-only wiki root {root} — the scan is unscoped (the read-only guard is unaffected; it lives in {env})",
+      { file: WIKI_READER_CONFIG_FILE, root, env: WIKI_READONLY_ROOTS_ENV },
+    );
+  }
+  const includeGlobs = (readerConfig?.include ?? []).map((p) => new Bun.Glob(p));
+
   const glob = new Bun.Glob("**/*.{md,mdx,html}");
   let relPaths: string[] = [];
   for await (const p of glob.scan({ cwd: root, dot: false })) {
@@ -1050,6 +1100,9 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
     // a wiki root (e.g. mimir's scripts/mdx-explainer/) and would flood the index
     // with dependency READMEs/CHANGELOGs.
     if (p.split("/").some((seg) => seg.startsWith(".") || seg === "node_modules")) continue;
+    // Optional per-wiki allow-list: ANY-match, so several subtrees can be named.
+    // Empty ⇒ no filtering at all, which is every wiki that ships no `include`.
+    if (includeGlobs.length > 0 && !includeGlobs.some((g) => g.match(p))) continue;
     relPaths.push(p);
   }
   relPaths.sort();
@@ -1084,10 +1137,8 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
   );
   relPaths = relPaths.filter((_, i) => !isPipelineSource[i]);
 
-  // Per-wiki type ontology — read once per build (inherits the index TTL). Absent
-  // or malformed ⇒ null (built-in five-type behavior). `.wiki-reader.json` is not
-  // an .md/.html page, so it's already outside the page glob above.
-  const readerConfig = await readWikiReaderConfig(root);
+  // (`readerConfig` — the per-wiki type ontology + `include` scope — was read at
+  // the top of this function, before the scan it now scopes.)
   // Curated Atlas trails — a sibling read next to `.wiki-reader.json`, same TTL.
   const trails = await readWikiTrails(root);
 

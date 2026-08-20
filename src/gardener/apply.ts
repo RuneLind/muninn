@@ -33,7 +33,12 @@ import { buildIndexEntry, buildSeeAlsoEdit, insertIndexLine, selectWirablePages 
 import { parseFrontmatter } from "../wiki/store.ts";
 import { stripFrontmatter } from "../wiki/render.ts";
 import { runWikiWriteExclusive } from "../wiki/queue.ts";
-import { isWikiReadonly, WIKI_READONLY_REASON } from "../wiki/readonly.ts";
+import {
+  isReadonlyWikiRoot,
+  isWikiReadonly,
+  WIKI_READONLY_REASON,
+  wikiReadonlyRootReason,
+} from "../wiki/readonly.ts";
 import { sha256, todayOslo } from "./util.ts";
 import { getLog } from "../logging.ts";
 
@@ -91,6 +96,13 @@ export interface ApplyDeps {
    * the guard is fail-closed for every caller including ones added later.
    */
   isReadonly?: () => boolean;
+  /**
+   * Is THIS WIKI ROOT registered read-only (`WIKI_READONLY_ROOTS`)? The
+   * per-wiki mechanism beside the instance flag; same fail-closed injection
+   * rule. Reached via `POST /api/wiki/proposals/:id/approve`, which resolves its
+   * target against the FULL registry, so the picker exclusion is not a guard.
+   */
+  isReadonlyRoot?: (root: string) => boolean;
 }
 
 /**
@@ -223,6 +235,15 @@ export async function applyWikiProposal(
       path: proposal.targetPath,
     });
     return { outcome: "forbidden", reason: WIKI_READONLY_REASON };
+  }
+
+  // Per-WIKI read-only root: this instance owns writes, just not to THIS root.
+  if ((deps.isReadonlyRoot ?? isReadonlyWikiRoot)(deps.wikiDir)) {
+    log.warn("Wiki-gardener apply refused — wiki root is registered read-only: {path}", {
+      path: proposal.targetPath,
+      root: deps.wikiDir,
+    });
+    return { outcome: "forbidden", reason: wikiReadonlyRootReason(deps.wikiDir) };
   }
 
   // A holder, not a `let` — TS narrows a closure-assigned local to `null`.

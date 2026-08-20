@@ -11,6 +11,8 @@ Bare `/wiki` defaults to jarvis, or the `WIKI_DIR` env override (which shows a d
 
 An optional **`.wiki-reader.json`** at the wiki root (`typeMap` folder→type + `typeLabels`) gives the wiki its own page-type ontology — e.g. mimir's `projects/`→subsystem, `plans/`→plan. Resolution: frontmatter `type:` → typeMap on first path segment → standard folder fallback → `note`. Read once per index build (5-min TTL); malformed ⇒ warn + ignore. No-config wikis keep the standard five types byte-identically.
 
+A third key, **`include`** (string[] of globs, relative to the root), scopes the SCAN itself: a page is kept when it matches ANY entry (union — an all-must-match rule has no useful spelling for "these two subtrees"). It exists for a root muninn does not own the layout of — `~/.claude/projects` holds 289 markdown files under per-project `memory/` dirs plus a *growing* pile of `<uuid>/session-memory/summary.md` and `tool-results/artifact-*.html` strays that would arrive as ten identically-named `summary` pages. Two mechanics matter: the config read was **moved AHEAD of the glob** (`buildWikiIndex`) — it depends on nothing but `root`, and after the glob it could not scope the glob — and the key follows the same validate-warn-**degrade** shape as `typeMap`/`typeLabels`, so a bad value ⇒ unscoped scan, never an offline wiki. That degrade is exactly why `include` may live in this file while the read-only guard may **not**: losing the config re-admits eleven cosmetic strays; losing a guard that lived here would silently make the root writable. When a `WIKI_READONLY_ROOTS` root has no readable `.wiki-reader.json` the store warns — the one place the store needs to know a root is read-only.
+
 ## Ask tab, Similar articles (`wikiCollections`)
 
 `wikiCollections` (string[], per-bot config.json) names the Huginn search collections backing the wiki's **Ask** tab (research-style cited Q&A via `GET /api/wiki/ask`, reusing the `/research` pipeline). Citations whose doc resolves to a wiki page open in-reader. Unset/empty ⇒ Ask returns a clean "No search collection connected for this wiki" error.
@@ -83,17 +85,29 @@ Per-wiki write queue, realpath-keyed on the wiki ROOT. `log.md` is wiki-GLOBAL, 
 
 **No-log mode (`logKind: null`, `PageWriteNoLogOptions`).** The write, the CAS, the queue and the wiki-store cache refresh all still happen; the `log.md` entry and the huginn reindex fan-out do not, and the commit tail stages the page alone. It exists for metadata writes — the `/plans` board's priority flips — where a triage sitting is a burst of 60 clicks: one curated log line each would bury the 4,100-line log those entries are FOR, and 60 reindex calls would re-embed a page whose prose never moved. A separate interface rather than three optional fields, so the ordinary path still cannot compile without its title and line. The CAS's `staleReason` is a caller option for the same reason: the default is the fact-check wording this helper was extracted from, and it is the whole explanation a reader gets for a refused click. Rules for joining: the queued section must span read→CAS→write→log.md, and the commit tail must run OUTSIDE the queue (push is dispatched un-awaited and bounded only by `GIT_NETWORK_TIMEOUT_MS` (60s) — an unreachable origin would otherwise park every writer for that minute). Full rationale: `src/gardener/CLAUDE.md`.
 
-## Readonly instances (`readonly.ts`, `MUNINN_WIKI_READONLY`)
+## Readonly — two independent mechanisms (`readonly.ts`)
+
+There are **two** read-only switches, and they answer different questions. Neither implies the other; both, either or neither can be on.
+
+| | `MUNINN_WIKI_READONLY` | `WIKI_READONLY_ROOTS` |
+|---|---|---|
+| Scope | the whole INSTANCE | one wiki ROOT (comma-separated list) |
+| Question | "does this machine own wiki writes?" | "may muninn do anything but read THIS root?" |
+| Forbids | page content writes | page content writes **+ every model call / web reach / chat seed** on that wiki |
+| Predicate | `isWikiReadonly()` | `isReadonlyWikiRoot(root)` |
+| Refusal copy | `WIKI_READONLY_REASON` | `wikiReadonlyRootReason(root)` / `wikiNoEgressReason(wiki)` |
+
+### The instance switch (`MUNINN_WIKI_READONLY`)
 
 `MUNINN_WIKI_READONLY=1` marks an instance as NOT the wiki write owner. Muninn runs on two machines against the same wiki working trees, and `SCHEDULER_ENABLED=false` closes only the scheduler — `createDashboardRoutes` registers every route unconditionally, so the whole HTTP write surface stays live on the non-owner.
 
-**It forbids page CONTENT writes, not git.** Enforced at exactly two seams, both taking an injectable `isReadonly` that defaults to `isWikiReadonly()` (so a call site added later is guarded by default, and a test drives one seam without touching the process env):
+**It forbids page CONTENT writes, not git.** Enforced at exactly three seams, each taking an injectable `isReadonly` that defaults to `isWikiReadonly()` (so a call site added later is guarded by default, and a test drives one seam without touching the process env):
 
 - `writeWikiPage` → new `forbidden` outcome variant, returned BEFORE the read (nothing is opened, no `log.md` is created). `appendBlockToPage` propagates it.
 - `applyWikiProposal` → same variant, returned before the write queue is entered.
 - `writePlanQueue` (`src/plans/write.ts`) → same variant, before the file is opened. It is the third content seam because `writeWikiPage` cannot carry `plans/queue.yaml` (path confinement admits `.md`/`.mdx` only, correctly), so it repeats the guard, the per-wiki queue and the sha256 CAS rather than routing around them.
 
-Both map to **403** with the SAME body everywhere — `{error, readonly: true}` — deliberately not collapsed into the generic `error` (⇒ 500), since a refusal is not a failure.
+All three map to **403** with the SAME body everywhere — `{error, readonly: true}` — deliberately not collapsed into the generic `error` (⇒ 500), since a refusal is not a failure.
 
 The mutation routes additionally refuse as their FIRST statement (`readonlyRefusal`, one per route file), so the answer costs no DB round-trip, no model call and no status CAS — and each refusal is `log.info`d with its route path, because a route guard answers *before* the seams (which warn on their own), so a refused POST otherwise left no trace at all:
 
@@ -103,15 +117,51 @@ The mutation routes additionally refuse as their FIRST statement (`readonlyRefus
 - **The SCHEDULED run of those same two types** — `runChecker` (`src/watchers/runner.ts`) returns `[]` with one `log.info` before dispatching either gardener. Guarding only the route was a hole, not a design: a readonly instance left with `SCHEDULER_ENABLED=true` kept minting weekly proposals (and spending model calls) that only the write owner can apply. Both call sites read the SAME `WIKI_DRAFTING_WATCHER_TYPES`, which lives in `src/watchers/wiki-drafting.ts` for exactly that reason. The run still advances `last_run_at` (the skip is not an error), and `wiki-linter`/`wiki-committer` stay unguarded on this path too.
 - **`triggerSourceDraftFromCapture`** (`src/gardener/source-drafter-run.ts`) — not a route but the widest entry point: fire-and-forget from six capture summarizers, all reachable over the tokenless HTTP surface. The check lives in the trigger function, NOT at the six call sites, so a seventh caller is guarded by default. Its `isReadonly`/`run` seams are injectable for the same reason the write seams' are.
 
-**Not guarded, on purpose:** `commitWikiChange` (the repo-sync loop on the readonly instance commits and pushes through it), the `wiki-committer` watcher (it commits stray dirty files, writes no page content), `proposals/:id/reject` (a DB status flip that mutates no wiki), `/api/wiki/remember` (a DB memory) and `/api/wiki/reindex` (huginn indexing). Offline scripts writing via a bare `Bun.write` are out of scope — this guards the HTTP surface.
+**Not guarded, on purpose:** `commitWikiChange` (the repo-sync loop on the readonly instance commits and pushes through it), the `wiki-committer` watcher (it commits stray dirty files, writes no page content), `proposals/:id/reject` (a DB status flip that mutates no wiki), `/api/wiki/remember` (a DB memory — but it IS on the per-wiki egress list below, since it spends a Haiku distill + an embedding) and `/api/wiki/reindex` (huginn indexing). Offline scripts writing via a bare `Bun.write` are out of scope — this guards the HTTP surface.
 
-Client half: the pages inject `window.__WIKI_READONLY__` and `wiki-readonly-client.ts` stamps `body.wiki-readonly` + installs ONE capture-phase click blocker. Deliberately not a per-render `disabled` sweep — the gardener strip and the answer pane replace their innerHTML on every poll/SSE event, so any state written into a button is gone by the next paint; a body class is a selector and survives. The blocked list uses the SAME attributes the real delegated handlers key on, so the two cannot drift.
+### The per-wiki switch (`WIKI_READONLY_ROOTS`)
+
+`WIKI_READONLY_ROOTS` is a comma-separated list of wiki **ROOTS** a write-owning instance may only READ. It exists for `~/.claude/projects` — Claude Code's own auto-memory, browsable as the `memory` wiki — whose files are loaded into a session's context at start, so an HTTP write there edits the developer's own instructions.
+
+**Three design decisions carry it.**
+
+1. **Keyed on the resolved ROOT, not the registry name.** Every enforcement point already holds the root at its refusal (`writeWikiPage`'s `wikiDir`, `applyWikiProposal`'s `deps.wikiDir`, `writePlanQueue`'s `opts.wikiDir`, an egress route's `entry.root`), so the predicate is a string comparison against a value in hand — no registry lookup, and therefore no `registry-memo.ts` → `bots/config.ts` → `db/` import pull into the store and the page writer. A NAME key would need a name→root translation whose typo path fails **open**; the root key's typo path names a root nothing writes, i.e. fails closed for itself. Paths resolve through the shared `resolveConfiguredPath`, and matching additionally tries the realpath form so a symlinked (or, on a case-insensitive filesystem, differently-cased) spelling of the same directory still matches.
+2. **In the environment, not in `.wiki-reader.json`.** `readWikiReaderConfig` degrades a missing/unreadable/malformed file to `null`; for an ontology that is right, for a write guard it means "degrade to writable", silently and invisibly to any test run against a well-formed config. The file carries cosmetics (`include`), the environment carries safety.
+3. **Enforcement never reads `WikiRegistryEntry.readonly`.** That flag exists for the client half and the `/models` card only; a stale memo or a registry built without the roots must not be able to open the guard.
+
+**Registration buys THREE surfaces, not two,** which is why this switch forbids more than writes: file writes (the three seams), local reads (bounded by `DASHBOARD_HOST=127.0.0.1`) — and a set of `?wiki=`-steerable routes that spend a **model call** on page content, two of which reach the **live web** through the fact-check prompt's WebFetch/search instructions. Loopback does not bound that. Nor does bot-lessness: `resolveWikiSynthesisBot` falls through to `resolveResearchBot` for any entry with no pin and `source !== "bot"` (`bots/config.ts`), so every one of these routes resolves a bot and runs.
+
+So each of them carries a **per-wiki prologue** (`egressRefusal` in `wiki-routes.ts`) placed immediately after the entry resolves and BEFORE bot resolution / the index read / the DB thread / the `/agents` run registration / the one-shot — the mirror image of `readonlyRefusal`, which is a route's FIRST statement precisely because it needs no wiki:
+
+| Route | What it would spend |
+|---|---|
+| `GET /api/wiki/factcheck` | claim extraction + per-claim verification — **live web** |
+| `GET /api/wiki/factcheck/claim` | one re-verification — **live web** |
+| `POST /api/wiki/share` | one fenced one-shot turning the page into a pasteable post |
+| `POST /api/wiki/ask/chat` | a DB thread + conversation shell seeded with page content (**all three modes**) |
+| `POST /api/wiki/factcheck/integrate` | the ~90 s editor one-shot over the whole page |
+| `GET /api/wiki/digest` | a `log.md` summarization one-shot — gated by nothing else, so it fires on the reader's first start-view load |
+| `GET /api/wiki/ask` / `GET /api/wiki/explain` | retrieval + cited synthesis (collection-gated today; a `WIKI_EXTRA` 3rd segment lights them up) |
+| `POST /api/wiki/remember` | a Haiku distill + an embedding (it writes a Postgres row, not a file — hence egress list, not write list) |
+| `POST /api/wiki/atlas/draft-synthesis` | the drafting one-shot + a proposal the seam guard then refuses forever |
+
+`/api/wiki/digest` is the one refusal that does not use the shared `error` key: the What's-new card reads `data.error` as "generation FAILED — keep the old digest, offer a retry", and a policy refusal is not a failure, so it answers 403 with `{digest: null, readonly: true, reason}` and the card simply hides.
+
+The **14 `readonlyRefusal` route guards are deliberately untouched** — inverting their ordering at every site to make them per-wiki is a much larger change than the surface warrants. What covers the gardener/backlog family instead: `resolveBacklogBot` already 400s a non-bot wiki, `proposals/:id/approve` is covered by the root-keyed `applyWikiProposal` guard, and `isGardenerWiki` now excludes read-only wikis — **cosmetically**, a picker filter and nothing more (its three consumers are all read-side).
+
+Diagnostics: a `WIKI_READONLY_ROOTS` entry matching no registered wiki root is warned about loudly at registry build (someone edited one var and not the other), and the resolved list renders on the `/models` **Machine** card beside `MUNINN_WIKI_READONLY`, with each registered wiki tagged `read-only`.
+
+### Client half
+
+The pages inject `window.__WIKI_READONLY__` (instance) and `window.__WIKI_READONLY_WIKI__` (the OPEN wiki's per-wiki flag, from the resolved entry) and `wiki-readonly-client.ts` stamps `body.wiki-readonly` (+ `body.wiki-readonly-wiki`) + installs ONE capture-phase click blocker.
+
+**Two selector lists, not one.** `WIKI_READONLY_BLOCKED_SELECTOR` is the write controls (unchanged); `WIKI_READONLY_EGRESS_SELECTOR` adds 📤 Share, both 🔎/✓ Fact check buttons, ✨ Explain, 💬 Discuss, Ask/New chat/follow-up/Remember, the chat-escalate bar and the claim-retry ↻. A read-only WIKI installs the union; a read-only INSTANCE installs only the first — folding the egress ids into the shared list would dim Share and Fact check on the mini, where the server serves both happily. The sentence differs for the same reason: `WIKI_READONLY_WIKI_MESSAGE` must not claim `MUNINN_WIKI_READONLY=1` on a host that writes every other wiki. `wikiBlockedSelectorFor`/`wikiBlockedMessageFor` are pure and unit-tested; neither flag ⇒ empty selector ⇒ no listener installed at all. Deliberately not a per-render `disabled` sweep — the gardener strip and the answer pane replace their innerHTML on every poll/SSE event, so any state written into a button is gone by the next paint; a body class is a selector and survives. The blocked list uses the SAME attributes the real delegated handlers key on, so the two cannot drift.
 
 `isBlockedByReadonly` capability-tests `target.closest` before calling it, and **fails SOFT** — it never throws. `e.target` is only *usually* an Element (a click dispatched at `document`, a synthetic event, a text node), and a capture-phase listener that THROWS never reaches its `preventDefault`, so a TypeError there let clicks through on *every* blocked control on the page. Returning `false` for a non-Element loses nothing blockable: a non-Element cannot match a selector, so it was never a mutation control.
 
 **`WIKI_READONLY_BLOCKED_SELECTOR`'s deliberate absences,** each for its own reason: `[data-action="reject"]` (a DB status flip that mutates no wiki — the server leaves it unguarded too); the inspector's `data-inspect-bucket` filters and its `close`/`more` controls (reads and pagination — only its `bulk-dismiss` verb writes); and `[data-backlog-action="cancel"]`, which is the confirm PANEL's close button (not the drain's `cancel-run`) — blocking it would strand the panel open with no way to dismiss it. Everything else behind a guarded route is listed, including `confirm` (the panel opener: every action inside it is refused, so it is a dead end here).
 
-Which instance is which is readable on `/models` (the **Machine** card: hostname, `SCHEDULER_ENABLED`, `MUNINN_WIKI_READONLY`, bots, registered wikis, and whether this instance owns writes) — the profile is env-only, so it is shown rather than implied. It is also stated once at boot (`src/index.ts`) when the flag is ON.
+Which instance is which is readable on `/models` (the **Machine** card: hostname, `SCHEDULER_ENABLED`, `MUNINN_WIKI_READONLY`, the resolved `WIKI_READONLY_ROOTS`, bots, registered wikis — each tagged `read-only` where it applies — and whether this instance owns writes) — the profile is env-only, so it is shown rather than implied. The write-owner row's copy is conditional for the same reason: "this instance writes wiki pages" stops being true the moment `WIKI_READONLY_ROOTS` names one, so it becomes "…except the read-only roots below". It is also stated once at boot (`src/index.ts`) when the flag is ON.
 
 Three accuracy rules the card follows, each closing a way it could lie: the readonly row reads `isWikiReadonly()` — the SAME function the seams enforce with, never the env one level below it; a registry that THREW renders as **unknown**, not `none` (`machine.wikisKnown`, detail in `errors[]`), since "no wikis" makes a readonly instance look harmless; and `machine.bots` carries `{name, polling}` rather than bare names, because `discoverAllBots` lists every folder while the process only starts the token-carrying ones — typically none of them on the mini. The payload publishes no wiki `root` (absolute on-disk paths on a reader-facing API, rendered nowhere).
 

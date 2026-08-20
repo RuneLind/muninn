@@ -677,7 +677,21 @@ export async function renderModelsPage(): Promise<string> {
         m.wikiWriteOwner ? val('this instance owns them') : val('read-only', 'none'),
         m.wikiReadonly
           ? 'MUNINN_WIKI_READONLY=1 — gardener applies and fact-check writes 403 here; git commits are still allowed'
-          : 'no MUNINN_WIKI_READONLY — this instance writes wiki pages');
+          // The old copy said "this instance writes wiki pages" full stop, which
+          // stops being true the moment WIKI_READONLY_ROOTS names one.
+          : ((m.readonlyRoots || []).length
+              ? 'no MUNINN_WIKI_READONLY — this instance writes wiki pages, except the read-only roots below'
+              : 'no MUNINN_WIKI_READONLY — this instance writes wiki pages'));
+      // The per-wiki mechanism, rendered whenever it is configured (on either
+      // kind of instance) so a WIKI_READONLY_ROOTS / WIKI_EXTRA typo is visible
+      // without issuing a POST: a root that matches no wiki above guards nothing.
+      var roRoots = m.readonlyRoots || [];
+      if (roRoots.length) {
+        h += machineRow('Read-only wikis',
+          val(String(roRoots.length)),
+          'WIKI_READONLY_ROOTS — never written, never sent to a model or the web: ' +
+            roRoots.map(function (r) { return '<code>' + esc(r) + '</code>'; }).join(' · '));
+      }
       // Discovered ≠ running: a bot folder with no platform token is skipped at
       // startup ("Skipping bot X — no platform tokens"), which on the readonly
       // mini is typically every one of them. Lead with what actually polls.
@@ -701,7 +715,10 @@ export async function renderModelsPage(): Promise<string> {
           : wikis.length ? val(String(wikis.length)) : val('none', 'none'),
         m.wikisKnown === false
           ? 'see the errors banner above'
-          : wikis.map(function (w) { return esc(w.name) + ' <span class="lc-via">(' + esc(w.source) + ')</span>'; }).join(' · '));
+          : wikis.map(function (w) {
+              return esc(w.name) + ' <span class="lc-via">(' + esc(w.source) +
+                (w.readonly ? ', read-only' : '') + ')</span>';
+            }).join(' · '));
       body.innerHTML = h;
     }
 

@@ -47,6 +47,11 @@ export async function renderWikiPage(opts?: {
     model: string;
     origin: "pinned" | "owner" | "fallback";
   } | null;
+  /** Is the SELECTED wiki registered read-only (`WIKI_READONLY_ROOTS`)? Passed
+   *  from the resolved registry entry by the route; drives the client's dim +
+   *  click-block of both the write and the egress affordances. Presentation only
+   *  — every server seam re-checks the root. */
+  readonlyWiki?: boolean;
 }): Promise<string> {
   const clientScript = await wikiClientScript();
   const wikis = opts?.wikis ?? [];
@@ -57,6 +62,7 @@ export async function renderWikiPage(opts?: {
   const gardenerPending = opts?.gardenerPending ?? 0;
   const gardener = opts?.gardener ?? true;
   const askBot = opts?.askBot ?? null;
+  const readonlyWiki = opts?.readonlyWiki ?? false;
   // "Answered by …" line under the Ask hint — who synthesizes this wiki's
   // answers and why (wiki owner vs the shared research-bot fallback).
   const askBotLine = askBot
@@ -1299,6 +1305,12 @@ export async function renderWikiPage(opts?: {
     // Wiki-readonly instance: the client dims + blocks the write actions so the
     // 403 is visible before the click (the server is still the authority).
     window.__WIKI_READONLY__ = ${isWikiReadonly() ? "true" : "false"};
+    // …and the PER-WIKI flag (WIKI_READONLY_ROOTS), which additionally dims the
+    // egress affordances (Share, fact check, Explain, Discuss, Ask, Remember).
+    // Independent of the one above — this laptop owns writes and still reads one
+    // wiki it must never write or send to a model. The picker navigates with a
+    // full page load, so the flag is always the open wiki's.
+    window.__WIKI_READONLY_WIKI__ = ${readonlyWiki ? "true" : "false"};
   </script>
   <script>
     ${clientScript}

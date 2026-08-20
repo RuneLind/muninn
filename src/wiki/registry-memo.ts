@@ -11,12 +11,22 @@
 
 import { discoverAllBots } from "../bots/config.ts";
 import { buildWikiRegistry, type WikiRegistryEntry } from "./registry.ts";
+import { isReadonlyWikiRoot, readonlyWikiRoots } from "./readonly.ts";
 
 let cachedRegistry: WikiRegistryEntry[] | null = null;
 
-/** The full wiki registry (bot wikis + `WIKI_EXTRA` standalone wikis), memoized. */
+/** The full wiki registry (bot wikis + `WIKI_EXTRA` standalone wikis), memoized.
+ *  The `WIKI_READONLY_ROOTS` inputs are threaded in for the presentational
+ *  `readonly` flag + the no-match warn ONLY — every enforcement point calls
+ *  `isReadonlyWikiRoot` on the root it already holds, so this memo is never the
+ *  guard. */
 export function getWikiRegistry(): WikiRegistryEntry[] {
-  return (cachedRegistry ??= buildWikiRegistry(discoverAllBots(), process.env.WIKI_EXTRA));
+  return (cachedRegistry ??= buildWikiRegistry({
+    bots: discoverAllBots(),
+    extra: process.env.WIKI_EXTRA,
+    isReadonlyRoot: isReadonlyWikiRoot,
+    readonlyRoots: readonlyWikiRoots(),
+  }));
 }
 
 /** Test-only: drop the memoized registry so a test can re-derive it from a
