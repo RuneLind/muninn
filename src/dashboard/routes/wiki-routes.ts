@@ -2424,7 +2424,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       if (!parsed.ok) return c.json({ error: parsed.error }, 400);
       const page = parsed.body.values.page ?? "";
       const relPathRef = parsed.body.values.relPath ?? "";
-      if (!page && !relPathRef) return c.json({ error: "page is required" }, 400);
+      if (!page && !relPathRef) return c.json({ error: "page or relPath is required" }, 400);
       const presetId = parsed.body.preset;
       const { lang, promptOverride, extra } = parsed.body;
 
@@ -3007,11 +3007,6 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       if (article) {
         const index = await getWikiIndex({ root: entry.root });
         if (!index) return c.json({ error: "wiki directory not found" }, 404);
-        // `relPath` wins (collision-proof, as on `GET /api/wiki/page`) — but it
-        // FALLS BACK to the name, because the client's copy of the path goes stale
-        // the moment a page is renamed or moved: the reader's open tab then posts
-        // a path nothing resolves while the name beside it resolves fine, and the
-        // Discuss button 404s on a page that is plainly there.
         // The SHARED `resolvePageRef` — relPath first, an UNAMBIGUOUS stem as the
         // rename fallback. This route had its own copy of the rule and its own
         // spelling of the 404; a Discuss seeded from a same-stem sibling quotes
@@ -3342,7 +3337,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       const relPathRef = typeof body.relPath === "string" ? body.relPath.trim() : "";
       const answer = typeof body.answer === "string" ? body.answer.trim() : "";
       const baseHash = typeof body.baseHash === "string" ? body.baseHash.trim() : "";
-      if (!page && !relPathRef) return c.json({ error: "page is required" }, 400);
+      if (!page && !relPathRef) return c.json({ error: "page or relPath is required" }, 400);
       if (!answer) return c.json({ error: "answer is required" }, 400);
       // The answer is client-posted and gets spliced into the page — bound it like
       // every other input on this write path.
@@ -3530,7 +3525,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // EITHER reference is enough — the same rule the append and share routes
       // already use. A relPath alone is the reader's most precise reference, and
       // demanding the stem beside it refused exactly the collision-proof call.
-      if (!page && !relPathRef) return c.json({ error: "page is required" }, 400);
+      if (!page && !relPathRef) return c.json({ error: "page or relPath is required" }, 400);
       if (!answer) return c.json({ error: "answer is required" }, 400);
       if (!baseHash) return c.json({ error: "baseHash is required" }, 400);
 
@@ -3803,7 +3798,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       const relPathRef = typeof reqBody.relPath === "string" ? reqBody.relPath.trim() : "";
       const baseHash = typeof reqBody.baseHash === "string" ? reqBody.baseHash.trim() : "";
       // Either reference — see the propose route above.
-      if (!page && !relPathRef) return c.json({ error: "page is required" }, 400);
+      if (!page && !relPathRef) return c.json({ error: "page or relPath is required" }, 400);
       if (!baseHash) return c.json({ error: "baseHash is required" }, 400);
 
       // The callout must ride the SAME write as the edits — a second POST to the
