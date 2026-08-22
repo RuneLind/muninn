@@ -149,12 +149,28 @@ export type JiraDraftStatus = "generating" | "ready" | "failed";
 export interface JiraDraftView {
   draftId: string;
   status: JiraDraftStatus;
-  template: JiraTemplateId;
+  /**
+   * The template id as stored — a plain string, NOT {@link JiraTemplateId}.
+   *
+   * The shipped four are not the closed set: a bot's `jiraTemplate.<id>.md` adds
+   * ids the union cannot know, so typing this as the union bought a cast at the
+   * db boundary and a type that lies about the rows it describes.
+   */
+  template: string;
   depth: JiraDepth;
   notes: string;
   extra: string;
   markdown: string | null;
+  /** The WIDE stored hit set — every row PR 2's toggle column renders. */
   citations: JiraCitation[];
+  /**
+   * The doc ids the reader toggled OFF, as the last generation used them.
+   *
+   * Stored so the view is self-consistent: without it a poll answered with 24
+   * citations beside markdown that cites 23, and `PUT` re-verified against the
+   * wide set — flipping an excluded key back to `verified` on save.
+   */
+  excludeDocIds: string[];
   keyVerdicts: JiraKeyVerdict[];
   markdownFlags: JiraMarkdownFlag[];
   coverage: JiraCoverage | null;
@@ -216,6 +232,17 @@ export function parseJiraDraftBody(body: Record<string, unknown>): JiraBodyResul
   // only there. Requiring them on both paths would force the extension/page to
   // echo a 10 KB Slack thread back on every toggle click.
   if (!draftId && !notes.trim()) return { ok: false, error: "notes is required" };
+  // ...and NEW notes on a regenerate are refused rather than silently honoured.
+  // The stored hit set was retrieved for the OLD raw material and is deliberately
+  // not re-retrieved (design call 1), so drafting different notes against it
+  // answers a question nobody asked and leaves `retrieval_question` describing a
+  // search that no longer matches the row. Changing the notes means a new draft.
+  if (draftId && notes.trim()) {
+    return {
+      ok: false,
+      error: "notes cannot be changed on a regenerate — the stored hit set was retrieved for the original raw material; start a new draft instead",
+    };
+  }
   if (notes.length > JIRA_NOTES_MAX) {
     return { ok: false, error: `notes is longer than ${JIRA_NOTES_MAX} characters` };
   }

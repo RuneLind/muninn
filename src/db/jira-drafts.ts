@@ -48,6 +48,44 @@ export async function createJiraDraft(input: CreateJiraDraftInput): Promise<stri
 }
 
 /**
+ * Put an EXISTING row back into flight — the first write a regenerate makes.
+ *
+ * Without it a regenerate wrote nothing until {@link finishJiraDraft}, so
+ * `POST /draft` answered `generating` while the row still said `ready` with the
+ * OLD markdown, and the page's poller stopped on its very first tick and rendered
+ * the previous draft as the new one. It also lands the exclusion set, so a poll
+ * mid-flight already describes the generation that is running.
+ *
+ * `markdown` is deliberately LEFT ALONE: the previous task is the best thing to
+ * show until the new one exists, and a regenerate that fails should not have
+ * destroyed it.
+ */
+export async function startJiraDraftRun(id: string, excludeDocIds: string[]): Promise<void> {
+  const sql = getDb();
+  await sql`
+    UPDATE jira_drafts
+       SET status = 'generating',
+           error = NULL,
+           exclude_doc_ids = ${sql.json(excludeDocIds as never)},
+           updated_at = now()
+     WHERE id = ${id}`;
+}
+
+/**
+ * Persist a coverage verdict RECOMPUTED without a retrieval.
+ *
+ * A regenerate never calls {@link saveJiraDraftRetrieval} (that is the whole
+ * point of storing the hit set), so the verdict it derives — notably the flip to
+ * `no_hits` when the reader excludes every source — had nowhere to land and the
+ * row went on claiming the first draft's `answer`.
+ */
+export async function saveJiraDraftCoverage(id: string, coverage: JiraCoverage): Promise<void> {
+  const sql = getDb();
+  await sql`
+    UPDATE jira_drafts SET coverage = ${coverage}, updated_at = now() WHERE id = ${id}`;
+}
+
+/**
  * Store the retrieved hit set as soon as it exists — BEFORE the model call.
  *
  * Separate from {@link finishJiraDraft} because the two have different failure
@@ -141,6 +179,7 @@ interface JiraDraftRow {
   status: string;
   markdown: string | null;
   citations: unknown;
+  exclude_doc_ids: unknown;
   key_verdicts: unknown;
   markdown_flags: unknown;
   coverage: string | null;
@@ -162,19 +201,24 @@ function toView(row: JiraDraftRow): JiraDraftView {
   return {
     draftId: String(row.id),
     status: row.status as JiraDraftStatus,
-    template: row.template as JiraDraftView["template"],
+    template: row.template,
     depth: row.depth as JiraDepth,
     notes: row.notes,
     extra: row.extra,
     markdown: row.markdown,
     citations: Array.isArray(row.citations) ? (row.citations as JiraCitation[]) : [],
+    excludeDocIds: Array.isArray(row.exclude_doc_ids)
+      ? (row.exclude_doc_ids as unknown[]).filter((v): v is string => typeof v === "string")
+      : [],
     keyVerdicts: Array.isArray(row.key_verdicts) ? (row.key_verdicts as JiraKeyVerdict[]) : [],
     markdownFlags: Array.isArray(row.markdown_flags) ? (row.markdown_flags as JiraMarkdownFlag[]) : [],
     coverage: (row.coverage as JiraCoverage | null) ?? null,
     retrievalQuestion: row.retrieval_question ?? "",
     error: row.error,
-    createdAt: row.created_at.getTime(),
-    updatedAt: row.updated_at.getTime(),
+    // `new Date(...)` like every other db module: the driver hands back a string
+    // for these columns in some configurations, and `.getTime()` on one throws.
+    createdAt: new Date(row.created_at).getTime(),
+    updatedAt: new Date(row.updated_at).getTime(),
   };
 }
 

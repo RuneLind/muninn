@@ -59,7 +59,9 @@ import {
   createJiraDraft,
   failJiraDraft,
   finishJiraDraft,
+  saveJiraDraftCoverage,
   saveJiraDraftRetrieval,
+  startJiraDraftRun,
 } from "../../db/jira-drafts.ts";
 import { getLog } from "../../logging.ts";
 
@@ -107,14 +109,25 @@ export const JIRA_TIMEOUT_MS_BY_DEPTH: Record<JiraDepth, number> = {
 /**
  * Slack added to the single-flight slot's expiry on top of the budget.
  *
- * Same reason as share's `SHARE_SLOT_SLACK_MS`: the one-shot's budget starts
- * AFTER the slot is taken (the route still has retrieval and the condense call to
- * do), and both post-passes plus the final SSE writes plus the scaffold's
- * `finally` run after it expires. Sized to exactly the budget, a slot frees
- * itself while its holder is still tearing down and a click on that boundary
- * starts a concurrent run.
+ * Same reason as share's `SHARE_SLOT_SLACK_MS` — the one-shot's budget starts
+ * AFTER the slot is taken — but this route has far more work outside that budget
+ * than share does, and the first cut inherited share's 60 s without doing the
+ * arithmetic. Every step below is bounded by a constant, and the sum is what the
+ * slack has to cover:
+ *
+ *   · the Haiku condense (`query.ts`)          ≤ **60 s** (`HAIKU_TIMEOUT_MS`)
+ *   · the `Full` full-document pull            ≤ **8 s** (`JIRA_FULL_DOC_TIMEOUT_MS`)
+ *   · the `jira-issues` key-index listing      ≤ **15 s** (`verify-keys.ts`)
+ *   = **83 s** of bounded non-model work, plus the retrieval fan-out (up to four
+ *   huginn searches, each with huginn's own timeout) and the row writes.
+ *
+ * At 60 s the slot could expire while its holder was still condensing, and a
+ * second click then started a duplicate generation — the exact failure the slot
+ * exists to prevent. 180 s covers the 83 s of constants with room for the
+ * retrieval fan-out; it is a ceiling on a WEDGE, so over-sizing costs only a
+ * later retry after a crash, while under-sizing costs a double spend.
  */
-export const JIRA_SLOT_SLACK_MS = 60_000;
+export const JIRA_SLOT_SLACK_MS = 180_000;
 
 interface JiraFlight {
   startedAt: number;
@@ -135,17 +148,26 @@ interface JiraFlight {
  */
 const jiraFlights = new Map<string, JiraFlight>();
 
-/** The content hash. Sync, since `Bun.CryptoHasher` needs no await. */
+/**
+ * The content hash.
+ *
+ * **`draftId` is part of it, and the notes handed in are the RESOLVED ones.** The
+ * first cut hashed the request BODY's notes, which on a regenerate are empty — so
+ * every regenerate of every draft at the same template/depth/exclusion set hashed
+ * IDENTICALLY, and a regenerate of draft B got a 409 about a draft the reader had
+ * never opened. Sync, since `Bun.CryptoHasher` needs no await.
+ */
 export function jiraFlightKey(
   notes: string,
   template: string,
   depth: JiraDepth,
   excludeDocIds: string[],
+  draftId: string,
 ): string {
   const h = new Bun.CryptoHasher("sha256");
   // NUL-separated and with the exclusion set SORTED, so the same toggle state
   // reached by clicking rows in a different order is the same slot.
-  h.update([notes, template, depth, [...excludeDocIds].sort().join(",")].join("\u0000"));
+  h.update([draftId, notes, template, depth, [...excludeDocIds].sort().join(",")].join("\u0000"));
   return h.digest("hex");
 }
 
@@ -254,7 +276,22 @@ async function runJiraDraft(
   clientState: ClientState,
 ): Promise<void> {
   const safeWrite = makeSafeWrite(stream, clientState);
-  const regenerate = !!opts.existingDraftId && !!opts.storedCitations;
+  /**
+   * Is there a STORED HIT SET to reuse?
+   *
+   * The test is "did retrieval land", not "is there a draft row". `citations`
+   * defaults to `'[]'` in the column, so `!!opts.storedCitations` was TRUE for a
+   * draft that died before `saveJiraDraftRetrieval` ever ran — and that draft was
+   * then condemned to regenerate from an empty hit set, forced to `no_hits`,
+   * forever, with no way back short of retyping the notes. `storedCoverage` is
+   * the marker that distinguishes them: it is written in the same statement as
+   * the citations, so it is non-null exactly when retrieval finished — including
+   * the legitimate case of a retrieval that finished with zero hits, which must
+   * NOT be re-run.
+   */
+  const retrievalLanded = !!opts.storedCitations
+    && (opts.storedCoverage != null || opts.storedCitations.length > 0);
+  const regenerate = !!opts.existingDraftId && retrievalLanded;
   let draftId = opts.existingDraftId ?? "";
 
   try {
@@ -268,6 +305,13 @@ async function runJiraDraft(
         notes: opts.notes,
         extra: opts.extra,
       });
+    } else {
+      // An EXISTING row goes back into flight before anything expensive starts.
+      // Without this the row stayed `ready` with the previous markdown for the
+      // whole run, so the page's poller — which starts the moment `/draft/start`
+      // returns `generating` — read `ready` on its first tick and rendered the
+      // OLD task as the new one. Also lands this run's exclusion set.
+      await startJiraDraftRun(draftId, opts.excludeDocIds);
     }
     // Emitted FIRST so a client that aborts a second later still knows which row
     // to poll. PR 3's popup reads the plain-JSON `/draft/start` instead, but the
@@ -293,6 +337,10 @@ async function runJiraDraft(
       // A regenerate that excluded everything has no grounding left, whatever the
       // stored verdict said — the payload must not keep claiming `answer`.
       if (citations.length === 0) coverage = "no_hits";
+      // …and neither must the ROW. Nothing else on this path writes the verdict
+      // (`saveJiraDraftRetrieval` is exactly what a regenerate skips), so without
+      // this the poll and the stream disagreed about the same generation.
+      await saveJiraDraftCoverage(draftId, coverage);
       safeWrite("phase", { phase: "regenerating", citations: citations.length });
     } else {
       safeWrite("phase", { phase: "condensing" });
@@ -401,22 +449,24 @@ async function runJiraDraft(
     // acceptance sentence "every Jira key it cites resolves to a real issue"
     // mechanically true for this section.
     //
-    // It lists `promptCitations`, the DEPTH SLICE, not the whole retained set.
-    // Measured on a real `Ingen` draft over 24 stored hits: appending the
-    // retained set put 24 links under a task the model had been shown 6 of, so 18
-    // were references to material the text never uses. PR 2's toggle column still
-    // renders the full stored set — that answers a different question.
-    const markdown = appendReferences(body, promptCitations);
+    // It lists the citations the model was ACTUALLY GIVEN: the depth slice, minus
+    // whatever the `JIRA_BODY_MAX` trim dropped from its tail. Measured on a real
+    // `Ingen` draft over 24 stored hits, appending the retained set put 24 links
+    // under a task the model had been shown 6 of; the `citationsUsed` half is the
+    // same bug one layer in — a trimmed prompt still listed the trimmed-away
+    // sources, i.e. references to material the model never saw. PR 2's toggle
+    // column still renders the full stored set — a different question.
+    const markdown = appendReferences(body, promptCitations.slice(0, built.citationsUsed));
 
-    const [keyVerdicts, markdownFlags] = await Promise.all([
-      verifyJiraKeys({
-        markdown,
-        citations,
-        notes: opts.notes,
-        knowledgeApiUrl: opts.config.knowledgeApiUrl,
-      }),
-      Promise.resolve(checkJiraMarkdown(markdown)),
-    ]);
+    // `checkJiraMarkdown` is SYNC — no `Promise.resolve` wrap. It ran inside a
+    // `Promise.all` that read as two concurrent awaits and was one.
+    const markdownFlags = checkJiraMarkdown(markdown);
+    const keyVerdicts = await verifyJiraKeys({
+      markdown,
+      citations,
+      notes: opts.notes,
+      knowledgeApiUrl: opts.config.knowledgeApiUrl,
+    });
 
     await finishJiraDraft(draftId, { markdown, keyVerdicts, markdownFlags });
 
@@ -446,8 +496,19 @@ async function runJiraDraft(
       draft: draftId,
       error: message,
     });
-    // The row is the record even on failure — PR 2 polls it and PR 3 opens it.
-    if (draftId) await failJiraDraft(draftId, message).catch(() => {});
+    // The row is the record even on failure — PR 2 polls it and PR 3 opens it —
+    // and it is read back through a CORS-OPEN `GET /api/jira/draft/:id`, so what
+    // lands on it is a GENERIC sentence and the raw exception goes to the log
+    // above. A connector timeout carries a stack-shaped string with local paths
+    // and internal host:port pairs; the person who can act on that is reading the
+    // logs, not the draft. The STREAM still carries the detail: it is the answer
+    // to this caller's own POST, on a route with no CORS headers at all.
+    if (draftId) {
+      await failJiraDraft(
+        draftId,
+        "Utkastet kunne ikke skrives ferdig. Se muninn-loggen for detaljer, og prøv igjen.",
+      ).catch(() => {});
+    }
     safeWrite("app_error", { type: "error", message: `Kunne ikke skrive saken: ${message}` });
   }
 }

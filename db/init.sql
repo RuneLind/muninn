@@ -814,6 +814,7 @@ CREATE TABLE jira_drafts (
   status             TEXT NOT NULL DEFAULT 'generating',  -- generating | ready | failed
   markdown           TEXT,
   citations          JSONB NOT NULL DEFAULT '[]'::jsonb,  -- JiraCitation[] @ maxSources 24
+  exclude_doc_ids    JSONB NOT NULL DEFAULT '[]'::jsonb,  -- doc ids toggled OFF
   key_verdicts       JSONB NOT NULL DEFAULT '[]'::jsonb,  -- JiraKeyVerdict[]
   markdown_flags     JSONB NOT NULL DEFAULT '[]'::jsonb,  -- JiraMarkdownFlag[]
   coverage           TEXT,                   -- answer | no_hits | low_confidence

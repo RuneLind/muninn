@@ -49,6 +49,11 @@ CREATE TABLE IF NOT EXISTS jira_drafts (
   markdown           TEXT,
   -- JiraCitation[] at maxSources 24 — see the note above.
   citations          JSONB NOT NULL DEFAULT '[]'::jsonb,
+  -- The doc ids the reader toggled OFF, as the last generation used them. Stored
+  -- because `citations` is deliberately the WIDE set: without this a poll answers
+  -- with 24 sources beside markdown that cites 23, and the PUT re-verification
+  -- ran against the wide set — flipping an excluded key back to `verified`.
+  exclude_doc_ids    JSONB NOT NULL DEFAULT '[]'::jsonb,
   -- JiraKeyVerdict[] from the verify-keys post-pass.
   key_verdicts       JSONB NOT NULL DEFAULT '[]'::jsonb,
   -- JiraMarkdownFlag[] from the paste-subset post-pass.

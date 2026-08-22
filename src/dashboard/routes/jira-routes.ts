@@ -41,7 +41,9 @@ import { jiraBotMissingMessage, resolveJiraBot } from "../../jira/bot.ts";
 import { findJiraTemplate, resolveJiraTemplates } from "../../jira/templates.ts";
 import { JIRA_FULL_MCP_SERVERS } from "../../jira/tool-fence.ts";
 import { checkJiraMarkdown } from "../../jira/markdown-check.ts";
+import { applyExclusions } from "../../jira/retrieval.ts";
 import { verifyJiraKeys } from "../../jira/verify-keys.ts";
+import { isValidUuid } from "./route-utils.ts";
 import {
   JIRA_MARKDOWN_MAX,
   parseJiraDraftBody,
@@ -77,11 +79,56 @@ export function __setJiraRetrievalForTest(
   questionOverride = buildQuestion;
 }
 
-const CORS_HEADERS = {
+/**
+ * CORS, advertised per route and ONLY for the method that actually carries it.
+ *
+ * One shared `GET, POST, PUT` header block advertised a cross-origin PUT that
+ * emits no CORS headers at all — so the preflight invited a mutation the actual
+ * request would then fail, and, worse, invited it in the first place: the
+ * accepted-risk note in migration 070 covers a page READING a draft id it can
+ * guess, not a page REWRITING one. The extension needs exactly two things: POST
+ * the fire-and-forget start, and GET the result.
+ */
+const CORS_GET = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, PUT",
+  "Access-Control-Allow-Methods": "GET",
   "Access-Control-Allow-Headers": "Content-Type",
 } as const;
+
+const CORS_START = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST",
+  "Access-Control-Allow-Headers": "Content-Type",
+} as const;
+
+/**
+ * What a 500 says to the caller.
+ *
+ * Never the exception's own text: an unexpected throw here is a postgres error
+ * carrying a table name, a column type and a character offset, and one of these
+ * routes is reachable cross-origin. The detail goes to the log.
+ */
+const GENERIC_500 = "Noe gikk galt på serveren. Se muninn-loggen for detaljer.";
+
+function serverError(c: Context, where: string, err: unknown): Response {
+  const message = err instanceof Error ? err.message : String(err);
+  log.error("Jira {where} failed: {error}", { where, error: message });
+  return c.json({ error: GENERIC_500 }, 500);
+}
+
+/**
+ * A draft id that cannot be a row.
+ *
+ * Checked BEFORE any DB call in all four handlers. `id` is a `UUID` column, so a
+ * non-uuid reaches postgres as a CAST ERROR rather than an empty result — which
+ * used to surface as a 500 carrying postgres's own message, and (on the two POST
+ * paths) as a THROW past the single-flight release, wedging that key for the full
+ * slot lifetime with nothing running. Two of the four handlers "handled" it by
+ * regex-matching the pg message, which is the same check three layers too late.
+ */
+function unknownDraft(c: Context): Response {
+  return c.json({ error: "ukjent utkast" }, 404);
+}
 
 /**
  * Everything both POST paths must agree on, resolved once.
@@ -176,7 +223,6 @@ async function buildSseOptions(
   body: ParsedJiraDraftBody,
   instruction: string,
   mcpServers: McpServerStatus[],
-  release: (() => void) | undefined,
 ): Promise<{ opts: JiraSseOptions; error?: string }> {
   const base: JiraSseOptions = {
     config,
@@ -188,7 +234,6 @@ async function buildSseOptions(
     extra: body.extra,
     excludeDocIds: body.excludeDocIds,
     mcpServers,
-    ...(release ? { onSettled: release } : {}),
     ...(oneShotOverride ? { oneShot: oneShotOverride } : {}),
     ...(retrieveOverride ? { retrieve: retrieveOverride } : {}),
     ...(questionOverride ? { buildQuestion: questionOverride } : {}),
@@ -196,20 +241,72 @@ async function buildSseOptions(
 
   if (!body.draftId) return { opts: base };
 
-  // Regenerate: load the stored hit set. The notes come from the row too — the
-  // page does not echo a 10 KB Slack thread back on every toggle click.
+  // Regenerate: load the stored hit set. The notes come from the ROW, always —
+  // the page does not echo a 10 KB Slack thread back on every toggle click, and
+  // `parseJiraDraftBody` refuses a regenerate that tries to supply new ones (the
+  // stored hit set was retrieved for the originals).
   const stored = await getJiraDraft(body.draftId);
   if (!stored) return { opts: base, error: `ukjent utkast "${body.draftId}"` };
   return {
     opts: {
       ...base,
-      notes: body.notes.trim() ? body.notes : stored.notes,
+      notes: stored.notes,
       storedCitations: stored.citations,
       existingDraftId: stored.draftId,
       storedRetrievalQuestion: stored.retrievalQuestion,
       ...(stored.coverage ? { storedCoverage: stored.coverage } : {}),
     },
   };
+}
+
+type Claimed =
+  | { ok: true; opts: JiraSseOptions; release: () => void }
+  | { ok: false; response: Response };
+
+/**
+ * Resolve the stored draft, then claim the single-flight slot — ONE sequence,
+ * used by both POST paths.
+ *
+ * The two handlers had a copy each, and the copies were where three defects
+ * lived: the key was computed from the REQUEST BODY's notes (empty on every
+ * regenerate, so unrelated drafts collided in one slot), the id was handed
+ * straight to postgres (a non-uuid threw a cast error out past the release,
+ * wedging that key), and the release ordering existed twice.
+ *
+ * The order below is the fix, and it is deliberate: validate the id shape → read
+ * the row → THEN key the slot on what actually resolved. It costs one DB read
+ * before a 409 is detectable, which is the same read the run itself needs and is
+ * bounded by a primary-key lookup.
+ */
+async function claimDraft(
+  c: Context,
+  config: Config,
+  resolved: Extract<Resolved, { ok: true }>,
+  conflictMessage: string,
+): Promise<Claimed> {
+  const { bot, body, instruction, mcpServers } = resolved;
+
+  if (body.draftId && !isValidUuid(body.draftId)) {
+    return { ok: false, response: unknownDraft(c) };
+  }
+
+  const { opts, error } = await buildSseOptions(config, bot, body, instruction, mcpServers);
+  if (error) return { ok: false, response: c.json({ error }, 404) };
+
+  // Keyed on the RESOLVED notes plus the draft id — see `jiraFlightKey`.
+  const key = jiraFlightKey(opts.notes, body.template, body.depth, body.excludeDocIds, body.draftId);
+  const acquired = acquireJiraFlight(key, body.depth);
+  if (!acquired.ok) {
+    return {
+      ok: false,
+      response: c.json(
+        { state: "running", expiresAtMs: acquired.expiresAtMs, error: conflictMessage },
+        409,
+      ),
+    };
+  }
+
+  return { ok: true, opts: { ...opts, onSettled: acquired.release }, release: acquired.release };
 }
 
 export function registerJiraRoutes(app: Hono, config: Config): void {
@@ -232,37 +329,21 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
     try {
       const resolved = await resolveDraftRequest(c);
       if (!resolved.ok) return resolved.response;
-      const { bot, body, instruction, mcpServers } = resolved;
+      const { bot, body } = resolved;
 
-      // Single-flight on the CONTENT hash — see `jiraFlightKey`. Claimed only
-      // once every pre-commit refusal is behind us, so a bad template id cannot
-      // reserve a note for two minutes.
-      const key = jiraFlightKey(body.notes, body.template, body.depth, body.excludeDocIds);
-      const acquired = acquireJiraFlight(key, body.depth);
-      if (!acquired.ok) {
-        return c.json(
-          {
-            state: "running",
-            expiresAtMs: acquired.expiresAtMs,
-            error: "Det skrives allerede et utkast for dette råmaterialet — vent til det er ferdig.",
-          },
-          409,
-        );
-      }
-
-      const { opts, error } = await buildSseOptions(
-        config, bot, body, instruction, mcpServers, acquired.release,
+      // Claimed only once every pre-commit refusal is behind us, so a bad
+      // template id cannot reserve a note for three minutes.
+      const claim = await claimDraft(
+        c, config, resolved,
+        "Det skrives allerede et utkast for dette råmaterialet — vent til det er ferdig.",
       );
-      if (error) {
-        acquired.release();
-        return c.json({ error }, 404);
-      }
+      if (!claim.ok) return claim.response;
 
       log.info("Jira draft: bot={bot} template={template} depth={depth} notes={notes} regen={regen}", {
         bot: bot.name,
         template: body.template,
         depth: body.depth,
-        notes: body.notes.length,
+        notes: claim.opts.notes.length,
         regen: !!body.draftId,
       });
 
@@ -273,100 +354,86 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
       // unreachable once the stream owns the slot (release is identity-checked
       // anyway). The share/claim-retry handover, verbatim.
       try {
-        return streamJiraSSE(c, opts);
+        return streamJiraSSE(c, claim.opts);
       } catch (err) {
-        acquired.release();
+        claim.release();
         throw err;
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      log.error("Jira draft route failed: {error}", { error: message });
-      return c.json({ error: message }, 500);
+      return serverError(c, "draft route", err);
     }
   });
 
   // ── The extension's fire-and-forget start ──────────────────────────────────
-  app.options("/api/jira/draft/start", (c) => new Response(null, { status: 204, headers: CORS_HEADERS }));
+  app.options("/api/jira/draft/start", (c) => new Response(null, { status: 204, headers: CORS_START }));
 
   app.post("/api/jira/draft/start", async (c) => {
-    for (const [k, v] of Object.entries(CORS_HEADERS)) c.header(k, v);
+    for (const [k, v] of Object.entries(CORS_START)) c.header(k, v);
     try {
       const resolved = await resolveDraftRequest(c);
       if (!resolved.ok) return resolved.response;
-      const { bot, body, instruction, mcpServers } = resolved;
+      const { bot, body } = resolved;
 
-      const key = jiraFlightKey(body.notes, body.template, body.depth, body.excludeDocIds);
-      const acquired = acquireJiraFlight(key, body.depth);
-      if (!acquired.ok) {
-        return c.json(
-          { state: "running", expiresAtMs: acquired.expiresAtMs, error: "Et likt utkast skrives allerede." },
-          409,
-        );
-      }
+      const claim = await claimDraft(c, config, resolved, "Et likt utkast skrives allerede.");
+      if (!claim.ok) return claim.response;
 
-      const { opts, error } = await buildSseOptions(
-        config, bot, body, instruction, mcpServers, acquired.release,
-      );
-      if (error) {
-        acquired.release();
-        return c.json({ error }, 404);
-      }
+      // Everything from here to the detached hand-off runs under a claimed slot,
+      // so every throw releases it: `createJiraDraft` can fail (a dead pool, a
+      // migration not yet applied) and the key would otherwise stay held for its
+      // full lifetime with nothing running behind it.
+      try {
+        // The row is created HERE, not inside the runner, so the id can be
+        // returned before any expensive work starts — the popup gets it and closes.
+        const draftId =
+          claim.opts.existingDraftId ??
+          (await createJiraDraft({
+            botName: bot.name,
+            template: body.template,
+            depth: body.depth,
+            notes: claim.opts.notes,
+            extra: body.extra,
+          }));
 
-      // The row is created HERE, not inside the runner, so the id can be
-      // returned before any expensive work starts — the popup gets it and closes.
-      const draftId =
-        opts.existingDraftId ??
-        (await createJiraDraft({
-          botName: bot.name,
-          template: body.template,
-          depth: body.depth,
-          notes: opts.notes,
-          extra: body.extra,
-        }));
-
-      // Detached on purpose: the caller is a popup that is about to die. Errors
-      // land on the row (the runner owns that), so a rejection here would be
-      // both impossible and unactionable — but it is caught anyway, because an
-      // unhandled rejection from a detached promise takes the process with it.
-      void runJiraDraftDetached({ ...opts, existingDraftId: draftId }, bot).catch((err) => {
-        log.error("Detached Jira draft threw draft={draft}: {error}", {
-          draft: draftId,
-          error: err instanceof Error ? err.message : String(err),
+        // Detached on purpose: the caller is a popup that is about to die. Errors
+        // land on the row (the runner owns that), so a rejection here would be
+        // both impossible and unactionable — but it is caught anyway, because an
+        // unhandled rejection from a detached promise takes the process with it.
+        void runJiraDraftDetached({ ...claim.opts, existingDraftId: draftId }, bot).catch((err) => {
+          log.error("Detached Jira draft threw draft={draft}: {error}", {
+            draft: draftId,
+            error: err instanceof Error ? err.message : String(err),
+          });
         });
-      });
 
-      log.info("Jira draft started detached: bot={bot} draft={draft} depth={depth}", {
-        bot: bot.name, draft: draftId, depth: body.depth,
-      });
-      return c.json({ draftId, status: "generating" satisfies "generating" });
+        log.info("Jira draft started detached: bot={bot} draft={draft} depth={depth}", {
+          bot: bot.name, draft: draftId, depth: body.depth,
+        });
+        return c.json({ draftId, status: "generating" satisfies "generating" });
+      } catch (err) {
+        claim.release();
+        throw err;
+      }
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      log.error("Jira draft/start failed: {error}", { error: message });
-      return c.json({ error: message }, 500);
+      return serverError(c, "draft/start", err);
     }
   });
 
   // ── Read one draft (the page's poll, and PR 3's `?draft=<id>` landing) ─────
-  app.options("/api/jira/draft/:id", (c) => new Response(null, { status: 204, headers: CORS_HEADERS }));
+  app.options("/api/jira/draft/:id", (c) => new Response(null, { status: 204, headers: CORS_GET }));
 
   app.get("/api/jira/draft/:id", async (c) => {
-    for (const [k, v] of Object.entries(CORS_HEADERS)) c.header(k, v);
+    for (const [k, v] of Object.entries(CORS_GET)) c.header(k, v);
     try {
-      const draft = await getJiraDraft(c.req.param("id"));
-      if (!draft) return c.json({ error: "ukjent utkast" }, 404);
+      const id = c.req.param("id");
+      if (!isValidUuid(id)) return unknownDraft(c);
+      const draft = await getJiraDraft(id);
+      if (!draft) return unknownDraft(c);
       // A poll target must never be cached — the whole point is that `generating`
       // becomes `ready`.
       c.header("Cache-Control", "no-store");
       return c.json(draft);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      // An invalid uuid reaches postgres as a cast error; report it as a 404
-      // rather than a 500 — the client asked for an id that names nothing.
-      if (/invalid input syntax for type uuid/i.test(message)) {
-        return c.json({ error: "ukjent utkast" }, 404);
-      }
-      log.error("Jira draft read failed: {error}", { error: message });
-      return c.json({ error: message }, 500);
+      return serverError(c, "draft read", err);
     }
   });
 
@@ -374,6 +441,7 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
   app.put("/api/jira/draft/:id", async (c) => {
     try {
       const id = c.req.param("id");
+      if (!isValidUuid(id)) return unknownDraft(c);
       const raw = await c.req.json<{ markdown?: unknown }>().catch(() => ({}) as { markdown?: unknown });
       if (typeof raw.markdown !== "string") return c.json({ error: "markdown must be a string" }, 400);
       const markdown = raw.markdown;
@@ -383,32 +451,31 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
       }
 
       const existing = await getJiraDraft(id);
-      if (!existing) return c.json({ error: "ukjent utkast" }, 404);
+      if (!existing) return unknownDraft(c);
 
       // BOTH post-passes are re-run against the edited text and stored with it.
       // Leaving the old verdicts behind would leave the page asserting things
       // about text that no longer exists — a red row for a key the reader just
       // deleted, or no flag for the `- [ ]` they just typed.
-      const [keyVerdicts, markdownFlags] = await Promise.all([
-        verifyJiraKeys({
-          markdown,
-          citations: existing.citations,
-          notes: existing.notes,
-          knowledgeApiUrl: config.knowledgeApiUrl,
-        }),
-        Promise.resolve(checkJiraMarkdown(markdown)),
-      ]);
+      //
+      // Verified against the RETAINED set, not the stored one: the stored
+      // citations are deliberately the wide 24, and verifying against those made
+      // a key the reader had toggled OFF read `verified` again the moment they
+      // saved — the grounding claim silently reinstated by an edit that never
+      // touched it. `checkJiraMarkdown` is sync and is simply called.
+      const markdownFlags = checkJiraMarkdown(markdown);
+      const keyVerdicts = await verifyJiraKeys({
+        markdown,
+        citations: applyExclusions(existing.citations, existing.excludeDocIds),
+        notes: existing.notes,
+        knowledgeApiUrl: config.knowledgeApiUrl,
+      });
 
       const written = await updateJiraDraftMarkdown(id, markdown, keyVerdicts, markdownFlags);
-      if (!written) return c.json({ error: "ukjent utkast" }, 404);
+      if (!written) return unknownDraft(c);
       return c.json({ draftId: id, keyVerdicts, markdownFlags });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      if (/invalid input syntax for type uuid/i.test(message)) {
-        return c.json({ error: "ukjent utkast" }, 404);
-      }
-      log.error("Jira draft update failed: {error}", { error: message });
-      return c.json({ error: message }, 500);
+      return serverError(c, "draft update", err);
     }
   });
 }

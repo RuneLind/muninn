@@ -79,7 +79,14 @@ mock.module("../../ai/mcp-status.ts", () => ({
   getMcpStatus: async () => mcpServers,
 }));
 
-/** In-memory `jira_drafts`. */
+/**
+ * In-memory `jira_drafts`.
+ *
+ * Ids are real UUIDs and `getJiraDraft` THROWS postgres's own cast error on
+ * anything else — faithful to the column type, and the reason is not decoration:
+ * the route used to reach that throw with a single-flight slot already taken, so
+ * a mock that answered `null` for a non-uuid hid both the 500 and the wedged slot.
+ */
 interface Row {
   draftId: string;
   status: string;
@@ -89,6 +96,7 @@ interface Row {
   extra: string;
   markdown: string | null;
   citations: unknown[];
+  excludeDocIds: string[];
   keyVerdicts: unknown[];
   markdownFlags: unknown[];
   coverage: string | null;
@@ -98,16 +106,26 @@ interface Row {
   updatedAt: number;
 }
 const rows = new Map<string, Row>();
-let nextId = 1;
+/** Reads that must FAIL, keyed by draft id — the "huginn is fine, postgres is not" case. */
+const readThrows = new Map<string, string>();
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 mock.module("../../db/jira-drafts.ts", () => ({
   createJiraDraft: async (i: { botName: string; template: string; depth: string; notes: string; extra: string }) => {
-    const id = `draft-${nextId++}`;
+    const id = crypto.randomUUID();
     rows.set(id, {
       draftId: id, status: "generating", template: i.template, depth: i.depth, notes: i.notes,
-      extra: i.extra, markdown: null, citations: [], keyVerdicts: [], markdownFlags: [],
+      extra: i.extra, markdown: null, citations: [], excludeDocIds: [], keyVerdicts: [], markdownFlags: [],
       coverage: null, retrievalQuestion: "", error: null, createdAt: Date.now(), updatedAt: Date.now(),
     });
     return id;
+  },
+  startJiraDraftRun: async (id: string, excludeDocIds: string[]) => {
+    const r = rows.get(id);
+    if (r) Object.assign(r, { status: "generating", error: null, excludeDocIds });
+  },
+  saveJiraDraftCoverage: async (id: string, coverage: string) => {
+    const r = rows.get(id);
+    if (r) Object.assign(r, { coverage });
   },
   saveJiraDraftRetrieval: async (id: string, citations: unknown[], coverage: string, q: string) => {
     const r = rows.get(id);
@@ -127,7 +145,14 @@ mock.module("../../db/jira-drafts.ts", () => ({
     Object.assign(r, { markdown, keyVerdicts: kv, markdownFlags: mf, status: "ready", error: null });
     return true;
   },
-  getJiraDraft: async (id: string) => rows.get(id) ?? null,
+  getJiraDraft: async (id: string) => {
+    if (!UUID_RE.test(id)) {
+      throw new Error(`invalid input syntax for type uuid: "${id}"`);
+    }
+    const forced = readThrows.get(id);
+    if (forced) throw new Error(forced);
+    return rows.get(id) ?? null;
+  },
 }));
 
 const {
@@ -136,7 +161,13 @@ const {
   __setJiraRetrievalForTest,
   missingFullServers,
 } = await import("./jira-routes.ts");
-const { __resetJiraFlightsForTest, JIRA_TIMEOUT_MS_BY_DEPTH } = await import("./jira-sse.ts");
+const {
+  __resetJiraFlightsForTest,
+  acquireJiraFlight,
+  jiraFlightKey,
+  JIRA_SLOT_SLACK_MS,
+  JIRA_TIMEOUT_MS_BY_DEPTH,
+} = await import("./jira-sse.ts");
 const { __resetJiraKeyIndexForTest } = await import("../../jira/verify-keys.ts");
 const { buildDepthFence } = await import("../../jira/tool-fence.ts");
 
@@ -231,7 +262,7 @@ beforeEach(() => {
   __resetJiraFlightsForTest();
   __resetJiraKeyIndexForTest();
   rows.clear();
-  nextId = 1;
+  readThrows.clear();
   discovered = [FAKE_BOT];
   mcpServers = ALL_UP;
   retrievals = { n: 0 };
@@ -507,10 +538,24 @@ describe("single-flight is keyed on the CONTENT hash, exclusions included", () =
     expect(res.status).toBe(200);
   });
 
-  test("the slot outlives the run's teardown", () => {
+  test("the slot outlives the run's teardown by exactly the slack", () => {
     // Sized to exactly the budget, a slot frees itself while its holder is still
-    // tearing down and a click on that boundary starts a concurrent run.
-    expect(JIRA_TIMEOUT_MS_BY_DEPTH.full).toBeGreaterThan(JIRA_TIMEOUT_MS_BY_DEPTH.skisse);
+    // tearing down and a click on that boundary starts a concurrent run. The
+    // previous spelling compared two BUDGETS and said nothing about the slack.
+    const key = jiraFlightKey("n", "bug", "skisse", [], "");
+    const t0 = 1_000;
+    expect(acquireJiraFlight(key, "skisse", t0).ok).toBe(true);
+    const budget = JIRA_TIMEOUT_MS_BY_DEPTH.skisse;
+    expect(acquireJiraFlight(key, "skisse", t0 + budget).ok).toBe(false);
+    expect(acquireJiraFlight(key, "skisse", t0 + budget + JIRA_SLOT_SLACK_MS - 1).ok).toBe(false);
+    expect(acquireJiraFlight(key, "skisse", t0 + budget + JIRA_SLOT_SLACK_MS).ok).toBe(true);
+  });
+
+  test("the slack covers every bounded step that runs OUTSIDE the model budget", () => {
+    // Haiku condense (60 s router cap) + the Full document pull (8 s) + the
+    // key-index listing (15 s) = 83 s of work the one-shot's own timeout does not
+    // cover. A 60 s slack expired mid-run and a second click started a duplicate.
+    expect(JIRA_SLOT_SLACK_MS).toBeGreaterThanOrEqual(83_000);
   });
 });
 
@@ -667,5 +712,251 @@ describe("the fence BINDS on the real connector, not just on an options object",
     expect(excluded).toContain("mcp:*");
     expect(excluded).toContain("builtin:*");
     expect(excluded.some((t) => t.startsWith("mcp__"))).toBe(false);
+  });
+});
+
+// ── The regenerate contract, in full ─────────────────────────────────────────
+
+describe("regenerate — a draft whose RETRIEVAL never landed", () => {
+  test("re-retrieves instead of being forced to no_hits forever", async () => {
+    const app = makeApp();
+    let calls = 0;
+    __setJiraRetrievalForTest(
+      (async () => {
+        calls++;
+        if (calls === 1) throw new Error("huginn refused the connection");
+        return (await (scriptedRetrieval({ n: 0 }) as unknown as () => Promise<unknown>)()) as never;
+      }) as never,
+      scriptedQuestion,
+    );
+
+    const first = parseSse(await (await post(app, "/api/jira/draft", {
+      notes: NOTES, template: "bug", depth: "skisse",
+    })).text());
+    await new Promise((r) => setTimeout(r, 20));
+    const draftId = String(first[0]!.data.draftId);
+    // Retrieval died, so the row carries the DEFAULT empty citation set — which is
+    // truthy, and used to read as "the hit set is stored, reuse it".
+    expect(rows.get(draftId)!.citations).toHaveLength(0);
+    expect(rows.get(draftId)!.coverage).toBeNull();
+
+    const events = parseSse(await (await post(app, "/api/jira/draft", {
+      template: "bug", depth: "skisse", draftId,
+    })).text());
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(calls).toBe(2);
+    const done = events.find((e) => e.event === "done")!.data as { citations: unknown[]; coverage: string };
+    expect(done.citations).toHaveLength(3);
+    expect(done.coverage).toBe("answer");
+    expect(rows.get(draftId)!.citations).toHaveLength(3);
+  });
+});
+
+describe("regenerate — the row is `generating` again, and the new coverage is persisted", () => {
+  async function seed(app: Hono): Promise<string> {
+    const events = parseSse(await (await post(app, "/api/jira/draft", {
+      notes: NOTES, template: "bug", depth: "skisse",
+    })).text());
+    await new Promise((r) => setTimeout(r, 20));
+    return String(events[0]!.data.draftId);
+  }
+
+  test("a poll DURING a regenerate says `generating`, not `ready` with the old markdown", async () => {
+    const app = makeApp();
+    const draftId = await seed(app);
+    expect(rows.get(draftId)!.status).toBe("ready");
+
+    let release: ((v: unknown) => void) | undefined;
+    __setJiraOneShotForTest((() => new Promise((r) => { release = r; })) as never);
+    void post(app, "/api/jira/draft", {
+      template: "bug", depth: "skisse", draftId, excludeDocIds: ["faktura.md"],
+    });
+    await new Promise((r) => setTimeout(r, 30));
+
+    const mid = await (await app.request(`/api/jira/draft/${draftId}`)).json();
+    expect(mid.status).toBe("generating");
+
+    release!({ result: DRAFT_BODY, inputTokens: 1, outputTokens: 1, numTurns: 1, durationMs: 1 });
+    await new Promise((r) => setTimeout(r, 40));
+    expect((await (await app.request(`/api/jira/draft/${draftId}`)).json()).status).toBe("ready");
+  });
+
+  test("the RECOMPUTED coverage lands on the row, not just on the done payload", async () => {
+    const app = makeApp();
+    const draftId = await seed(app);
+    expect(rows.get(draftId)!.coverage).toBe("answer");
+
+    const events = parseSse(await (await post(app, "/api/jira/draft", {
+      template: "bug", depth: "skisse", draftId,
+      excludeDocIds: ["MELOSYS-5677_Ny_flyt.md", "MELOSYS-8028_Manglende.md", "faktura.md"],
+    })).text());
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(events.find((e) => e.event === "done")!.data.coverage).toBe("no_hits");
+    expect(rows.get(draftId)!.coverage).toBe("no_hits");
+  });
+
+  test("the exclusion set is PERSISTED and rides the view", async () => {
+    const app = makeApp();
+    const draftId = await seed(app);
+    await (await post(app, "/api/jira/draft", {
+      template: "bug", depth: "skisse", draftId, excludeDocIds: ["faktura.md"],
+    })).text();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const view = await (await app.request(`/api/jira/draft/${draftId}`)).json();
+    expect(view.excludeDocIds).toEqual(["faktura.md"]);
+    // The stored set stays WIDE — PR 2's toggle column renders every row and uses
+    // `excludeDocIds` to say which are off.
+    expect(view.citations).toHaveLength(3);
+  });
+
+  test("PUT re-verifies against the RETAINED set — an excluded key cannot flip back to verified", async () => {
+    const app = makeApp();
+    const draftId = await seed(app);
+    await (await post(app, "/api/jira/draft", {
+      template: "bug", depth: "skisse", draftId, excludeDocIds: ["MELOSYS-8028_Manglende.md"],
+    })).text();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const res = await app.request(`/api/jira/draft/${draftId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ markdown: "## Symptom\nSe MELOSYS-5677 og MELOSYS-8028." }),
+    });
+    const body = await res.json();
+    const by = new Map(body.keyVerdicts.map((v: { key: string; state: string }) => [v.key, v.state]));
+    expect(by.get("MELOSYS-5677")).toBe("verified");
+    // The reader toggled this source OFF; the draft is no longer grounded in it.
+    expect(by.get("MELOSYS-8028")).not.toBe("verified");
+  });
+});
+
+// ── The single-flight claim: one helper, no wedged slots, no leaked pg text ───
+
+describe("the single-flight claim", () => {
+  test("a non-uuid draftId is a 404 BEFORE any DB call, and does not wedge the slot", async () => {
+    const app = makeApp();
+    const res = await post(app, "/api/jira/draft", { template: "bug", depth: "skisse", draftId: "not-a-uuid" });
+    expect(res.status).toBe(404);
+    expect(String((await res.json()).error)).toContain("ukjent utkast");
+
+    const again = await post(app, "/api/jira/draft", { template: "bug", depth: "skisse", draftId: "not-a-uuid" });
+    expect(again.status).toBe(404);
+  });
+
+  test("the /start path answers the same way and leaks no slot either", async () => {
+    const app = makeApp();
+    expect((await post(app, "/api/jira/draft/start", { template: "bug", depth: "skisse", draftId: "nope" })).status).toBe(404);
+    expect((await post(app, "/api/jira/draft/start", { template: "bug", depth: "skisse", draftId: "nope" })).status).toBe(404);
+  });
+
+  test("two DIFFERENT drafts with the same template/depth and no notes are different slots", async () => {
+    const app = makeApp();
+    const a = parseSse(await (await post(app, "/api/jira/draft", { notes: NOTES, template: "bug", depth: "skisse" })).text());
+    await new Promise((r) => setTimeout(r, 20));
+    const b = parseSse(await (await post(app, "/api/jira/draft", { notes: `${NOTES} (annen sak)`, template: "bug", depth: "skisse" })).text());
+    await new Promise((r) => setTimeout(r, 20));
+    const idA = String(a[0]!.data.draftId);
+    const idB = String(b[0]!.data.draftId);
+
+    __setJiraOneShotForTest((() => new Promise(() => {})) as never);
+    void post(app, "/api/jira/draft", { template: "bug", depth: "skisse", draftId: idA });
+    await new Promise((r) => setTimeout(r, 30));
+    // A regenerate of an UNRELATED draft must not collide with the one in flight.
+    const res = await post(app, "/api/jira/draft", { template: "bug", depth: "skisse", draftId: idB });
+    expect(res.status).toBe(200);
+  });
+
+  test("a DB failure is a 500 that does not hand the caller postgres's own message", async () => {
+    const app = makeApp();
+    const events = parseSse(await (await post(app, "/api/jira/draft", {
+      notes: NOTES, template: "bug", depth: "skisse",
+    })).text());
+    await new Promise((r) => setTimeout(r, 20));
+    const draftId = String(events[0]!.data.draftId);
+    readThrows.set(draftId, 'relation "jira_drafts" does not exist at character 42');
+
+    const res = await post(app, "/api/jira/draft", { template: "bug", depth: "skisse", draftId });
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(String(body.error)).not.toContain("jira_drafts");
+    expect(String(body.error)).not.toContain("character 42");
+  });
+});
+
+// ── CORS is advertised only where it is served ───────────────────────────────
+
+describe("the preflight advertises exactly the methods that carry CORS headers", () => {
+  test("`/draft/:id` advertises GET only — PUT is a mutation nothing cross-origin needs", async () => {
+    const app = makeApp();
+    const pre = await app.request("/api/jira/draft/8a1f4c2e-0000-4000-8000-000000000000", { method: "OPTIONS" });
+    expect(pre.status).toBe(204);
+    const allow = String(pre.headers.get("access-control-allow-methods"));
+    expect(allow).toContain("GET");
+    expect(allow).not.toContain("PUT");
+    expect(allow).not.toContain("POST");
+  });
+
+  test("`/draft/start` still advertises POST — that IS the extension's call", async () => {
+    const pre = await makeApp().request("/api/jira/draft/start", { method: "OPTIONS" });
+    expect(String(pre.headers.get("access-control-allow-methods"))).toContain("POST");
+  });
+});
+
+// ── `## Referanser` lists what the model was GIVEN ───────────────────────────
+
+describe("the reference list never names a source the model never saw", () => {
+  test("a JIRA_BODY_MAX trim drops the tail from `## Referanser` too", async () => {
+    const app = makeApp();
+    const wide = Array.from({ length: 24 }, (_, i) => ({
+      collection: "jira-issues",
+      id: `MELOSYS-${9000 + i}_sak.md`,
+      title: `MELOSYS-${9000 + i}_sak`,
+      url: `https://jira.adeo.no/browse/MELOSYS-${9000 + i}`,
+      relevance: 0.9 - i / 1000,
+      viaSubQuestion: ["q"],
+      matchedChunks: [{ content: "S".repeat(1_200) }],
+    }));
+    __setJiraRetrievalForTest(
+      (async () => ({
+        results: wide,
+        decomposition: { subQuestions: ["q"], rationale: "", passthrough: false, haikuMs: 1 },
+        subSearches: [{ subQuestion: "q", durationMs: 1, resultCount: wide.length, lowConfidence: false }],
+        traceId: "t",
+      })) as never,
+      scriptedQuestion,
+    );
+
+    const events = parseSse(await (await post(app, "/api/jira/draft", {
+      notes: "N".repeat(24_000), template: "bug", depth: "full",
+    })).text());
+    await new Promise((r) => setTimeout(r, 20));
+    const md = String(events.find((e) => e.event === "done")!.data.markdown);
+    const refs = md.slice(md.indexOf("## Referanser")).split("\n").filter((l) => l.startsWith("- "));
+    // The prompt could not hold all 24, so the reference list must not claim them.
+    expect(refs.length).toBeGreaterThan(0);
+    expect(refs.length).toBeLessThan(24);
+  });
+});
+
+// ── A failed row says something a stranger may read ──────────────────────────
+
+describe("the failure written to the row is generic", () => {
+  test("a connector exception does not land on a CORS-readable row verbatim", async () => {
+    const app = makeApp();
+    __setJiraOneShotForTest((async () => {
+      throw new Error("connect ECONNREFUSED 127.0.0.1:9130 (/Users/rune/source/private/muninn)");
+    }) as never);
+    const events = parseSse(await (await post(app, "/api/jira/draft", {
+      notes: NOTES, template: "bug", depth: "skisse",
+    })).text());
+    await new Promise((r) => setTimeout(r, 20));
+    const row = rows.get(String(events[0]!.data.draftId))!;
+    expect(row.status).toBe("failed");
+    expect(row.error).not.toContain("ECONNREFUSED");
+    expect(row.error).not.toContain("/Users/rune");
+    expect(String(row.error).length).toBeGreaterThan(10);
   });
 });
