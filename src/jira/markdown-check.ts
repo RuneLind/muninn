@@ -28,7 +28,7 @@
  */
 
 import type { JiraMarkdownFlag, JiraMarkdownFlagKind } from "./wire.ts";
-import { maskFencedCode, lineOfOffset } from "./markdown-scan.ts";
+import { maskFencedCode, maskInlineCode, lineOfOffset } from "./markdown-scan.ts";
 
 /** Max chars of the offending fragment carried on a flag. */
 const SAMPLE_MAX = 80;
@@ -57,14 +57,23 @@ const HTML_TAGS = [
   "details", "summary", "font", "center",
   "Callout", "Verdict", "Pill", "Figure", "FileRef", "ComparisonTable",
 ];
-const HTML_RE = new RegExp(`</?(?:${HTML_TAGS.join("|")})(?:\\s[^<>]*)?/?>`, "g");
+// Case-INSENSITIVE: HTML tag names are, and `<DIV>` escapes to visible literal
+// text in exactly the same way `<div>` does. (The component names are matched
+// case-insensitively too — a `<callout>` is the same mistake in lower case.)
+const HTML_RE = new RegExp(`</?(?:${HTML_TAGS.join("|")})(?:\\s[^<>]*)?/?>`, "gi");
 
 /** Jira wiki markup. `h1.`–`h6.` must be line-anchored — "no. 2" is not a heading. */
 const WIKI_BLOCK_RE = /\{(?:code|panel|quote|noformat|color|anchor|section|column)(?::[^}]*)?\}/gi;
 const WIKI_HEADING_RE = /^ {0,3}h[1-6]\.\s/gm;
 
-/** `- [ ]` / `* [x]` at the start of a list item, any indent. */
-const TASK_LIST_RE = /^[ \t]*[-*+][ \t]+\[[ xX]\]/gm;
+/**
+ * `- [ ]` / `* [x]` at the start of a list item, any indent.
+ *
+ * The trailing lookahead is load-bearing: `- [x](https://…)` is an ordinary
+ * markdown LINK whose text happens to be `x`, and Jira converts it perfectly.
+ * Without the lookahead every bulleted link list flagged as a task list.
+ */
+const TASK_LIST_RE = /^[ \t]*[-*+][ \t]+\[[ xX]\](?=[ \t]|$)/gm;
 
 /**
  * `:name:` emoji shortcodes.
@@ -75,16 +84,29 @@ const TASK_LIST_RE = /^[ \t]*[-*+][ \t]+\[[ xX]\]/gm;
  */
 const EMOJI_RE = /(^|[^\w:])(:[a-z0-9][a-z0-9_+-]{1,30}:)(?![\w:])/gim;
 
+/**
+ * Record one flag, at most ONE per line per kind.
+ *
+ * A paragraph carrying `<div><span>x</span></div>` is one thing to fix, and four
+ * rows saying so is a flag column the reader stops reading — the same failure the
+ * HTML tag list and the key denylist are both bounded against. The FIRST sample
+ * on the line is kept, since that is where the reader's eye goes.
+ */
 function push(
   flags: JiraMarkdownFlag[],
+  seen: Set<string>,
   kind: JiraMarkdownFlagKind,
   masked: string,
   offset: number,
   sample: string,
 ): void {
+  const line = lineOfOffset(masked, offset);
+  const slot = `${kind}:${line}`;
+  if (seen.has(slot)) return;
+  seen.add(slot);
   flags.push({
     kind,
-    line: lineOfOffset(masked, offset),
+    line,
     sample: sample.length > SAMPLE_MAX ? `${sample.slice(0, SAMPLE_MAX - 1)}…` : sample,
   });
 }
@@ -92,19 +114,24 @@ function push(
 /**
  * Scan the generated markdown for constructs the Jira paste does not convert.
  *
- * Flags are returned in document order per kind, then by kind — the ordering is
- * not a contract; the presence of a flag is.
+ * Fenced code AND inline code spans are masked first — a `<div>` inside a
+ * ```html block is the point of the block, and a `` `h2.` `` in prose is the
+ * reader naming the construct rather than emitting it.
+ *
+ * Flags are returned in LINE order (one per line per kind); the order within a
+ * line is not a contract, the presence of a flag is.
  */
 export function checkJiraMarkdown(markdown: string): JiraMarkdownFlag[] {
-  const masked = maskFencedCode(markdown);
+  const masked = maskInlineCode(maskFencedCode(markdown));
   const flags: JiraMarkdownFlag[] = [];
+  const seen = new Set<string>();
 
-  for (const m of masked.matchAll(HTML_RE)) push(flags, "html", masked, m.index, m[0]);
-  for (const m of masked.matchAll(WIKI_BLOCK_RE)) push(flags, "wiki-markup", masked, m.index, m[0]);
-  for (const m of masked.matchAll(WIKI_HEADING_RE)) push(flags, "wiki-markup", masked, m.index, m[0].trim());
-  for (const m of masked.matchAll(TASK_LIST_RE)) push(flags, "task-list", masked, m.index, m[0].trim());
+  for (const m of masked.matchAll(HTML_RE)) push(flags, seen, "html", masked, m.index, m[0]);
+  for (const m of masked.matchAll(WIKI_BLOCK_RE)) push(flags, seen, "wiki-markup", masked, m.index, m[0]);
+  for (const m of masked.matchAll(WIKI_HEADING_RE)) push(flags, seen, "wiki-markup", masked, m.index, m[0].trim());
+  for (const m of masked.matchAll(TASK_LIST_RE)) push(flags, seen, "task-list", masked, m.index, m[0].trim());
   for (const m of masked.matchAll(EMOJI_RE)) {
-    push(flags, "emoji-shortcode", masked, m.index + (m[1]?.length ?? 0), m[2]!);
+    push(flags, seen, "emoji-shortcode", masked, m.index + (m[1]?.length ?? 0), m[2]!);
   }
 
   return flags.sort((a, b) => a.line - b.line);

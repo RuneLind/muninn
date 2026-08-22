@@ -13,6 +13,7 @@
  * is the intended and only producer of `body`.
  */
 
+import { neutralizePromptFence } from "../utils/prompt-fence.ts";
 import type { ShareLang } from "./wire.ts";
 import type { ShareBodyKind } from "./body-prep.ts";
 
@@ -35,16 +36,11 @@ export const SHARE_EXCLUDED_TOOLS = ["WebSearch", "WebFetch"];
  *
  * The source body and the reader's own fields are written INTO a `"""`-fenced
  * block below, so a field carrying its own fence can close the block early and
- * have whatever follows read as instructions. Same treatment (and same rationale)
- * as `neutralizePromptFence` in the claim-retry route and
- * `neutralizeFactcheckSentinels` on the integrate path — keep the readable
- * content, destroy the structural marker; idempotent, since the result no longer
- * matches. Spelled locally rather than imported: those live in modules that drag
- * the whole fact-check/route graph behind them, and this file is pure by contract.
+ * have whatever follows read as instructions. The implementation is the shared
+ * `neutralizePromptFence` (`src/utils/prompt-fence.ts`) — kept under this name
+ * because the whole share surface, its tests and its docs call it that.
  */
-export function neutralizeShareFence(text: string): string {
-  return text.replace(/"{3,}/g, '"');
-}
+export const neutralizeShareFence = neutralizePromptFence;
 
 /** The rider that pins the output language. English is stated as explicitly as
  *  Norwegian — an unstated default is what a strongly-worded source page overrides. */
@@ -112,49 +108,11 @@ export function buildShareUserPrompt(input: ShareTaskInput): string {
 /**
  * Drop a fence that wraps the WHOLE post.
  *
- * Every shipped preset says "no wrapping code fence" — and a model that ignores it
- * doesn't produce a slightly-off post, it produces garbage in all three tabs at
- * once: `formatSlackMrkdwn` and `formatEmailHtml` both see one code block, so the
- * reader gets a monospaced blob with the markdown syntax showing. Cheaper to undo
- * here than to explain.
- *
- * Deliberately narrow: the fence must open on the FIRST line and close on the LAST
- * one, and the info string must not name a language (a post that legitimately IS
- * one ```ts block — rare, but possible from a code-heavy page — opens with
- * ```` ```ts ````, and unwrapping that would destroy real formatting). Anything
- * else is returned untouched.
- *
- * **The interior check is what makes "first line + last line" mean "ONE fence".**
- * The outer match is greedy by construction (`$` pins the closer to the last
- * line), so a post that merely BEGINS and ENDS with a code block — `` ``` npm
- * install ``` `` , prose, `` ``` foo --run ``` `` — matched first-opener to
- * last-closer and had BOTH of its real fences stripped, splicing the prose into
- * the code. So a run of the same marker at the start of an interior line, at
- * least as long as the opener, disqualifies the match: by CommonMark's rule that
- * run IS a closer, which means the two lines we matched are two separate blocks
- * and not a wrapper. The length test keeps the legitimate case working — a
- * ````-wrapped post whose interior holds ordinary ``` blocks still unwraps,
- * because a shorter run cannot close a longer opener.
- *
- * **The tradeoff is deliberate and one-directional:** a GENUINE whole-post wrapper
- * whose interior happens to hold a same-marker run (a ```-wrapped post containing
- * its own ``` block) is left unstripped, so the reader sees the wrapper instead of
- * a mangled post. Under-stripping costs one visible fence the reader can delete;
- * over-stripping silently splices prose into code in all three tabs at once.
+ * Re-exported from the shared `src/utils/prompt-fence.ts`. It lived here as a
+ * byte copy of the Jira composer's spelling; the ```` ```markdown ```` gap both
+ * copies carried is fixed once, there.
  */
-export function stripWrappingFence(text: string): string {
-  const trimmed = text.trim();
-  const m = /^(`{3,}|~{3,})[ \t]*\r?\n([\s\S]*)\r?\n\1[ \t]*$/.exec(trimmed);
-  if (!m) return trimmed;
-  const marker = m[1]!;
-  const interior = m[2]!;
-  // `[<char>]` rather than an escape: `\`` is an identity escape that a future
-  // `u`-flagged rewrite would reject, and a char class needs no escaping for
-  // either marker.
-  const innerCloser = new RegExp(`(?:^|\\n)[ \\t]{0,3}[${marker[0]}]{${marker.length},}`);
-  if (innerCloser.test(interior)) return trimmed;
-  return interior.trim();
-}
+export { stripWrappingFence } from "../utils/prompt-fence.ts";
 
 /**
  * Which body preparer a page's `type` calls for.

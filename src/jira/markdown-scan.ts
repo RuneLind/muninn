@@ -74,6 +74,32 @@ export function maskFencedCode(markdown: string): string {
   return out.join("\n");
 }
 
+/**
+ * Replace every INLINE code span with same-length blanks.
+ *
+ * Same contract as {@link maskFencedCode} and the same reason: a reader who
+ * writes `` `<div>` `` or `` `h2.` `` in prose is NAMING the construct, not
+ * emitting it, and flagging that is the denylist-noise failure — a reader who
+ * learns to ignore the flags is a reader the pass no longer protects.
+ *
+ * Deliberately LINE-SCOPED (`[^`\n]*`) where CommonMark allows a code span to
+ * cross lines: an unbalanced backtick in prose would otherwise pair with one
+ * paragraphs away and blank out everything between them. Under-masking costs one
+ * spurious flag the reader dismisses; over-masking hides real breakage.
+ *
+ * Runs on the ALREADY fence-masked text in both callers, so a fence's own
+ * backticks are gone by the time this sees them.
+ */
+export function maskInlineCode(text: string): string {
+  const out = text.split("");
+  for (const m of text.matchAll(/(`+)([^`\n]*)\1(?!`)/g)) {
+    for (let i = m.index; i < m.index + m[0].length; i++) {
+      if (out[i] !== "\n") out[i] = " ";
+    }
+  }
+  return out.join("");
+}
+
 /** 1-based line number of a character offset. */
 export function lineOfOffset(text: string, offset: number): number {
   let line = 1;

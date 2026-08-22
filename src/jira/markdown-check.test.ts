@@ -14,8 +14,9 @@ const kinds = (md: string) => checkJiraMarkdown(md).map((f) => f.kind);
 
 describe("flags what the Jira paste does not convert", () => {
   test("raw HTML", () => {
+    // One row per LINE per kind — an open/close pair is one thing to fix.
     const flags = checkJiraMarkdown("Se <div class=\"x\">her</div> for detaljer.");
-    expect(flags.map((f) => f.kind)).toEqual(["html", "html"]);
+    expect(flags.map((f) => f.kind)).toEqual(["html"]);
     expect(flags[0]!.line).toBe(1);
   });
 
@@ -81,5 +82,38 @@ describe("does NOT flag what converts", () => {
 
   test("`no. 2` is not an h-heading", () => {
     expect(checkJiraMarkdown("Se punkt h2 og no. 2 i listen.")).toEqual([]);
+  });
+});
+
+// ── False positives and false negatives the first cut shipped ────────────────
+
+describe("the scan is neither noisy nor blind", () => {
+  test("INLINE CODE is masked — a tag the reader deliberately quoted is not raw HTML", () => {
+    expect(kinds("Bruk `<div>` som eksempel.")).toEqual([]);
+    expect(kinds("Skriv `h2.` i stedet for `## `.")).toEqual([]);
+    // The same tag OUTSIDE the code span is still flagged.
+    expect(kinds("Bruk `<div>` men ikke <span>her</span>.")).toEqual(["html"]);
+  });
+
+  test("HTML matching is case-insensitive — `<DIV>` mangles exactly like `<div>`", () => {
+    expect(kinds("Se <DIV>her</DIV> for detaljer.")).toEqual(["html"]);
+    expect(kinds("<BR/>")).toEqual(["html"]);
+  });
+
+  test("a markdown link whose text is `[x]` is NOT a task list", () => {
+    expect(kinds("- [x](https://jira.adeo.no/browse/MELOSYS-1) er fikset")).toEqual([]);
+    expect(kinds("- [ ] Krav")).toEqual(["task-list"]);
+    // A checkbox followed by end-of-line still counts.
+    expect(kinds("- [x]")).toEqual(["task-list"]);
+  });
+
+  test("one flag per LINE per KIND — four tags on a line is one row to read, not four", () => {
+    const flags = checkJiraMarkdown("<div><span>a</span></div>");
+    expect(flags).toHaveLength(1);
+    expect(flags[0]!.kind).toBe("html");
+    // Two DIFFERENT kinds on one line still report separately.
+    expect(kinds("<div>x</div> {code}")).toEqual(["html", "wiki-markup"]);
+    // And the same kind on two lines is two rows.
+    expect(checkJiraMarkdown("<div>a</div>\n<div>b</div>").map((f) => f.line)).toEqual([1, 2]);
   });
 });
