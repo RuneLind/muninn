@@ -869,9 +869,10 @@ async function saveDraft(): Promise<void> {
     } else {
       // BOTH post-passes are re-run server-side against the edited text and come
       // back with the 200 — so the chips and the flag list describe the text that
-      // is now stored, not the text the model wrote. `markdown` rides the
-      // response because the server also repairs `[n]` markers out of it: adopting
-      // it is what keeps "Lagret." true of what is actually on the row.
+      // is now stored, not the text the model wrote. The server stores the text
+      // VERBATIM (PUT never repairs `[n]` markers — reader-authored text is never
+      // silently edited), so `stored` normally equals `sent`; adopting it anyway
+      // keeps "Lagret." true of what is actually on the row.
       const stored = typeof body.markdown === "string" ? body.markdown : sent;
       if (state.markdown === sent) state.markdown = stored;
       state.savedMarkdown = stored;

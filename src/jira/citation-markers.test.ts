@@ -110,3 +110,11 @@ describe("stripCitationMarkers — the measured corruption set", () => {
     expect(stripCitationMarkers("a  [1]b", 6)).toBe("a b");
   });
 });
+
+test("a marker glued to an emphasis closer or an opening bracket is left alone", () => {
+  expect(stripCitationMarkers("**viktig**[1] og mer", 3)).toBe("**viktig**[1] og mer");
+  expect(stripCitationMarkers("Se ([1]) her", 3)).toBe("Se ([1]) her");
+  expect(stripCitationMarkers("Se «[1]» her", 3)).toBe("Se «[1]» her");
+  expect(stripCitationMarkers("Lovvalg [1] gjelder", 3)).toBe("Lovvalg gjelder");
+});
+

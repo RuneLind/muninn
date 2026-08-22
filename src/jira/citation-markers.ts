@@ -62,10 +62,13 @@ const HSPACE = /[ \t]/;
 
 /**
  * A character that, sitting immediately before a `[`, proves the bracket is part
- * of something else: a word (`liste[2]`), the second half of a reference link
- * (`[lenke][1]`), an image (`![1](…)`) or a footnote (`[^1]`).
+ * of something else — ANY non-whitespace: a word (`liste[2]`), the second half
+ * of a reference link (`[lenke][1]`), an image (`![1](…)`), a footnote (`[^1]`),
+ * an emphasis closer (`**viktig**[1]`) or an opening bracket (`([1])`, `«[1]»`).
+ * A citation marker the model writes in prose is always preceded by a space or
+ * a line start; an allow-list of letters left `**viktig**[1] og` → `**viktig**og`.
  */
-const GLUED_LEFT = /[\p{L}\p{N}_[\]!^]/u;
+const GLUED_LEFT = /[^ \t\r\n]/u;
 
 interface Marker {
   start: number;
