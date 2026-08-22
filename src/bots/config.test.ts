@@ -954,3 +954,23 @@ describe("resolveWikiSynthesisBot", () => {
     expect(res.bot?.name).toBe("jarvis");
   });
 });
+
+// ── The reserved-variant-id warning must name a fix that actually works ──────
+
+import { reservedVariantIdHint } from "./config.ts";
+
+describe("reservedVariantIdHint", () => {
+  test("a key that HAS a bare file is told to use it", () => {
+    expect(reservedVariantIdHint("share")).toContain("share.md");
+    expect(reservedVariantIdHint("jiraAnalysis")).toContain("jiraAnalysis.md");
+  });
+
+  test("a VARIANT-ONLY key is not sent to a filename that warns just as loudly", () => {
+    // `jiraTemplate.default.md` is reserved, but `jiraTemplate.md` is NOT the
+    // default — it is an unknown file. Telling the author to rename to it walked
+    // them from one warning straight into another.
+    const hint = reservedVariantIdHint("jiraTemplate");
+    expect(hint).not.toContain("bare jiraTemplate.md");
+    expect(hint).toContain("jiraTemplate.<id>.md");
+  });
+});

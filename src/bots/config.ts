@@ -280,6 +280,22 @@ const VARIANT_PROMPT_FIELDS = {
 
 const VARIANT_PROMPT_KEYS = Object.keys(VARIANT_PROMPT_FIELDS) as (keyof typeof VARIANT_PROMPT_FIELDS)[];
 
+/**
+ * How to fix a `<key>.default.md`, per key.
+ *
+ * The single message this replaced said *"rename it (the bare `<key>.md` is
+ * already the default)"* — true for `share`/`jiraAnalysis`, and a dead end for a
+ * VARIANT-ONLY key: `jiraTemplate` is deliberately out of `SINGLE_PROMPT_KEYS`,
+ * so the file the author was sent to rename to hits the unknown-file warn on the
+ * very next discovery. One warning walking an author into another warning is
+ * worse than no warning: it reads as a bug in the loader.
+ */
+export function reservedVariantIdHint(baseKey: string): string {
+  return (SINGLE_PROMPT_KEYS as readonly string[]).includes(baseKey)
+    ? `rename it (the bare ${baseKey}.md is already the default)`
+    : `${baseKey} is a variant-only key with no bare default — give the file a real id, e.g. ${baseKey}.bug.md (${baseKey}.<id>.md)`;
+}
+
 /** Re-exported from the dependency-free `prompt-defaults.ts`, where they live so
  *  the IO-free share preset layer can have them without pulling this module's
  *  `node:fs`/db graph. Shared by the `/api/research/variants` endpoint, the
@@ -352,11 +368,11 @@ function loadPromptsFromDir(botDir: string, botName: string): BotPrompts | undef
       const variantId = stem.slice(dotIdx + 1);
       if (variantKeys.has(baseKey) && variantId.length > 0) {
         if (variantId === DEFAULT_VARIANT_ID) {
-          log.warn("Bot \"{name}\" prompt file prompts/{file} uses the reserved \"{id}\" variant id — rename it (the bare {base}.md is already the default)", {
+          log.warn("Bot \"{name}\" prompt file prompts/{file} uses the reserved \"{id}\" variant id — {hint}", {
             name: botName,
             file: entry.name,
             id: DEFAULT_VARIANT_ID,
-            base: baseKey,
+            hint: reservedVariantIdHint(baseKey),
           });
           continue;
         }
