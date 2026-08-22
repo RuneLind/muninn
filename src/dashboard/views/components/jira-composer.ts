@@ -24,6 +24,7 @@
 
 import { makeSseFrameParser, type SseFrame } from "./client-runtime.ts";
 import {
+  JIRA_EXTRA_MAX,
   JIRA_MARKDOWN_MAX,
   JIRA_NOTES_MAX,
   isJiraDepth,
@@ -34,11 +35,16 @@ import {
   type JiraMarkdownFlag,
 } from "../../../jira/wire.ts";
 import {
+  JC_BLOCKED_ID,
   JC_COPY_ID,
   JC_DEPTH_ATTR,
   JC_DIRTY_ID,
   JC_DOC_ATTR,
+  JC_EXTRA_COUNT_ID,
   JC_EXTRA_ID,
+  JC_GATE_CANCEL_ID,
+  JC_GATE_DISCARD_ID,
+  JC_GATE_SAVE_ID,
   JC_LEFT_ID,
   JC_MARKDOWN_ID,
   JC_MID_ID,
@@ -49,21 +55,31 @@ import {
   JC_POLL_MAX_MS,
   JC_PREVIEW_ID,
   JC_REGEN_ID,
+  JC_RIGHT_ERROR_ID,
   JC_RIGHT_ID,
   JC_SAVE_ID,
   JC_STATUS_ID,
   JC_SUBMIT_ID,
+  JC_TEMPLATE_ID,
   JC_VIEW_ATTR,
+  beginActionPatch,
   canSubmit,
+  charCountHtml,
   initialJiraState,
+  isDirty,
   jiraCitationsHtml,
   jiraConflictCopy,
   jiraDraftBody,
   jiraDraftHtml,
   jiraLeftHtml,
+  needsDirtyGate,
+  pollTickAction,
   shouldStopPolling,
   statusLineHtml,
+  streamDropMessage,
+  submitBlockedReason,
   toggleExclusion,
+  withTemplateOption,
   type JiraComposerState,
   type JiraTemplateOption,
 } from "./jira-composer-pure.ts";
@@ -74,6 +90,25 @@ let inFlight: AbortController | null = null;
 let pollTimer: ReturnType<typeof setTimeout> | null = null;
 let pollStartedAt = 0;
 let deltaFrame = 0;
+let copiedTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * The GENERATION token — monotonic, bumped by everything that supersedes work
+ * already in flight (a run, an adopt, a stopped poll).
+ *
+ * Aborting is not enough on its own. `stopPolling()` cleared the TIMER but could
+ * not cancel a `fetch` already on the wire, and that response then called
+ * `applyDraftView` unconditionally — resetting the toggles, the template, the
+ * depth and the markdown underneath a regenerate the reader had just started. A
+ * `PUT` had the same shape: its 200 carries verdicts and flags for the text that
+ * was saved, which a settled regenerate has already replaced.
+ *
+ * So every async continuation captures the token it started under and compares
+ * before it touches `state`. One counter, checked at the seam — not one
+ * AbortController per call site, which is what the first cut had and is exactly
+ * what missed the poll.
+ */
+let generation = 0;
 
 // ── Mount ────────────────────────────────────────────────────────────────────
 
@@ -186,10 +221,29 @@ function paintPreview(): void {
 function syncLeftControls(): void {
   const btn = el(JC_SUBMIT_ID) as HTMLButtonElement | null;
   if (btn) btn.disabled = !canSubmit(state);
-  const count = el(JC_NOTES_COUNT_ID);
-  if (count) count.textContent = `${state.notes.length} / ${JIRA_NOTES_MAX}`;
+  const notes = el(JC_NOTES_COUNT_ID);
+  if (notes) notes.innerHTML = charCountHtml(state.notes.length, JIRA_NOTES_MAX);
+  const extra = el(JC_EXTRA_COUNT_ID);
+  if (extra) extra.innerHTML = charCountHtml(state.extra.length, JIRA_EXTRA_MAX);
+  // The blocked-reason line is repainted HERE too. It was rendered once per full
+  // column render, so a note typed past the cap disabled the button while the
+  // line under it still said nothing — the button was off for no stated reason.
+  const blocked = el(JC_BLOCKED_ID);
+  if (blocked) {
+    const reason = submitBlockedReason(state);
+    blocked.textContent = reason ?? "";
+    blocked.hidden = !reason;
+  }
   const status = el(JC_STATUS_ID);
   if (status) status.innerHTML = statusLineHtml(state);
+}
+
+/** The right column's own error line, patched without a re-render. */
+function syncRightError(): void {
+  const node = el(JC_RIGHT_ERROR_ID);
+  if (!node) return;
+  node.textContent = state.rightError ?? "";
+  node.hidden = !state.rightError;
 }
 
 function syncStatus(): void {
@@ -212,6 +266,26 @@ function wire(): void {
     if (target.closest(`#${JC_SUBMIT_ID}`) || target.closest(`#${JC_REGEN_ID}`)) {
       ev.preventDefault();
       void runDraft();
+      return;
+    }
+    // ── The unsaved-edits gate's three answers ──────────────────────────────
+    if (target.closest(`#${JC_GATE_SAVE_ID}`)) {
+      ev.preventDefault();
+      void saveThenRun();
+      return;
+    }
+    if (target.closest(`#${JC_GATE_DISCARD_ID}`)) {
+      ev.preventDefault();
+      state.dirtyGate = false;
+      // Discarding means exactly that: the run replaces the text, and the edit
+      // the reader chose to lose is not written anywhere first.
+      void runDraft({ answeredGate: true });
+      return;
+    }
+    if (target.closest(`#${JC_GATE_CANCEL_ID}`)) {
+      ev.preventDefault();
+      state.dirtyGate = false;
+      renderRight();
       return;
     }
     if (target.closest(`#${JC_COPY_ID}`)) {
@@ -250,8 +324,12 @@ function wire(): void {
     const target = ev.target as HTMLElement | null;
     if (!target) return;
 
-    if (target.id === "jcTemplate") {
+    if (target.id === JC_TEMPLATE_ID) {
       state.template = (target as HTMLSelectElement).value;
+      // The picker can be emptied ("(ingen maler)"), which turns the button off —
+      // and nothing repainted it, so the reader was left with a live button that
+      // could not fire.
+      syncLeftControls();
       return;
     }
     const depth = target.getAttribute?.(JC_DEPTH_ATTR);
@@ -272,13 +350,14 @@ function wire(): void {
   document.addEventListener("input", (ev) => {
     const target = ev.target as HTMLElement | null;
     if (!target) return;
-    if (target.id === JC_NOTES_ID) {
-      state.notes = (target as HTMLTextAreaElement).value;
+    if (target.id === JC_NOTES_ID || target.id === JC_EXTRA_ID) {
+      if (target.id === JC_NOTES_ID) state.notes = (target as HTMLTextAreaElement).value;
+      else state.extra = (target as HTMLTextAreaElement).value;
+      // Typing is the start of the next attempt, so a standing 409 countdown or
+      // an "ukjent utkast" is cleared here too — it described the previous one and
+      // otherwise stayed on screen until something unrelated re-rendered.
+      if (state.error) Object.assign(state, beginActionPatch());
       syncLeftControls();
-      return;
-    }
-    if (target.id === JC_EXTRA_ID) {
-      state.extra = (target as HTMLTextAreaElement).value;
       return;
     }
     if (target.id === JC_MARKDOWN_ID) {
@@ -286,12 +365,15 @@ function wire(): void {
       // node. The unsaved marker is patched in place instead.
       state.markdown = (target as HTMLTextAreaElement).value;
       state.copied = false;
+      state.rightError = undefined;
+      syncRightError();
       const save = el(JC_SAVE_ID) as HTMLButtonElement | null;
-      if (save) save.disabled = !state.draftId || !state.markdown || state.saving;
-      const dirty = el(JC_DIRTY_ID);
-      if (dirty) {
-        dirty.hidden = state.savedMarkdown === undefined || state.markdown === state.savedMarkdown;
+      if (save) {
+        save.disabled =
+          !state.draftId || !state.markdown || state.saving || state.running || state.polling;
       }
+      const dirty = el(JC_DIRTY_ID);
+      if (dirty) dirty.hidden = !isDirty(state);
     }
   });
 }
@@ -324,19 +406,32 @@ async function loadTemplates(): Promise<void> {
 
 // ── A generation ─────────────────────────────────────────────────────────────
 
-async function runDraft(): Promise<void> {
+async function runDraft(opts: { answeredGate?: boolean } = {}): Promise<void> {
   if (!canSubmit(state)) return;
+  // **The unsaved draft is asked about BEFORE anything starts.** A successful
+  // regenerate replaces the textarea wholesale, and until it is saved that
+  // textarea is the only copy. The gate is inline markup, not `window.confirm`.
+  // `answeredGate` is the discard path saying it has already been asked —
+  // discarding writes nothing, so the state is still dirty here.
+  if (needsDirtyGate(state, { answered: opts.answeredGate === true })) {
+    state.dirtyGate = true;
+    renderRight();
+    return;
+  }
+  state.dirtyGate = false;
+
   const ctrl = new AbortController();
   inFlight?.abort();
   inFlight = ctrl;
   stopPolling();
+  // Supersedes every response still on the wire — the poll tick `stopPolling`
+  // cannot cancel, and any PUT whose 200 has not landed yet.
+  generation++;
 
   state.running = true;
   state.streamed = "";
   state.phase = undefined;
-  state.error = undefined;
-  state.conflictExpiresAtMs = undefined;
-  state.savedNote = undefined;
+  Object.assign(state, beginActionPatch());
   state.copied = false;
   renderAll();
 
@@ -413,9 +508,12 @@ async function runDraft(): Promise<void> {
     if (!ctrl.signal.aborted) {
       // The row is the record — the server finishes the draft even with no
       // client attached — so a dropped stream is a reason to POLL, not to lose
-      // the work.
-      settle({ error: "Forbindelsen falt — henter utkastet fra serveren." });
-      if (state.draftId) void adoptDraft(state.draftId, { thenPoll: true });
+      // the work. **Unless no `draft` frame ever arrived**: then no row exists,
+      // there is nothing to fetch, and the old copy promised the reader a draft
+      // that was never coming. `streamDropMessage` says which case this is.
+      const hasDraft = !!state.draftId;
+      settle({ error: streamDropMessage(hasDraft) });
+      if (hasDraft) void adoptDraft(state.draftId!, { thenPoll: true });
     }
     return;
   }
@@ -492,7 +590,15 @@ function dispatchJiraFrame(
     case "citations": {
       // The WIDE stored set, before this run's depth slice — the toggle column
       // renders exactly this, unchanged when the depth dial moves.
-      if (Array.isArray(data.citations)) state.citations = data.citations as JiraCitation[];
+      //
+      // **Never overwrite a non-empty set with a narrower one**, the same guard
+      // the `done` handler carries: on a regenerate this frame is not emitted at
+      // all, and on the exclude-everything path an empty array would delete the
+      // very rows the reader needs in order to switch one back on.
+      const incoming = Array.isArray(data.citations) ? (data.citations as JiraCitation[]) : null;
+      if (incoming && (incoming.length > 0 || state.citations.length === 0)) {
+        state.citations = incoming;
+      }
       if (typeof data.coverage === "string") state.coverage = data.coverage as JiraDonePayload["coverage"];
       renderMid();
       return {};
@@ -527,11 +633,22 @@ function scheduleDeltaPaint(): void {
 
 /** Fold a stored draft into the state. Never throws. */
 async function adoptDraft(id: string, opts: { thenPoll?: boolean } = {}): Promise<void> {
+  const gen = ++generation;
+  // **The busy state goes up BEFORE the GET, not after it.** Without it the
+  // seconds between the click and the response left **Skriv utkast** and
+  // **Generer på nytt** live, so a reader could start a run that then raced the
+  // adopt — and the adopt's `applyDraftView` would reset the toggles under it.
+  // `polling` is the state both buttons and `canSubmit` already read.
+  if (opts.thenPoll) {
+    state.polling = true;
+    renderAll();
+  }
   try {
     const res = await fetch(`/api/jira/draft/${encodeURIComponent(id)}`, {
       headers: { Accept: "application/json" },
     });
     const body = (await res.json()) as JiraDraftView & { error?: string };
+    if (gen !== generation) return; // superseded — a run started while this was in flight
     if (!res.ok) {
       state.polling = false;
       state.error = body?.error || `Fant ikke utkastet (HTTP ${res.status}).`;
@@ -539,10 +656,11 @@ async function adoptDraft(id: string, opts: { thenPoll?: boolean } = {}): Promis
       return;
     }
     applyDraftView(body);
-    if (opts.thenPoll && !shouldStopPolling(body.status)) startPolling(id);
+    if (opts.thenPoll && !shouldStopPolling(body.status)) startPolling(id, gen);
     else state.polling = false;
     renderAll();
   } catch (err) {
+    if (gen !== generation) return;
     state.polling = false;
     state.error = `Kunne ikke hente utkastet: ${errText(err)}`;
     renderAll();
@@ -553,6 +671,10 @@ function applyDraftView(v: JiraDraftView): void {
   state.draftId = v.draftId;
   state.status = v.status;
   state.template = v.template || state.template;
+  // A stored template the route did not serve (a renamed or removed
+  // `jiraTemplate.<id>.md`) is added as an option, so the picker shows the id the
+  // POST will actually carry instead of silently displaying the first one.
+  state.templates = withTemplateOption(state.templates, state.template);
   if (isJiraDepth(v.depth)) state.depth = v.depth;
   state.notes = typeof v.notes === "string" ? v.notes : state.notes;
   state.extra = typeof v.extra === "string" ? v.extra : state.extra;
@@ -572,13 +694,23 @@ function applyDraftView(v: JiraDraftView): void {
   state.copied = false;
 }
 
-function startPolling(id: string): void {
-  stopPolling();
+/**
+ * Poll one draft until it settles.
+ *
+ * `gen` is the generation this loop belongs to. Every tick — and every tick's
+ * RESPONSE — checks it, because `stopPolling` can clear the timer but not a
+ * `fetch` already on the wire: that response used to call `applyDraftView`
+ * unconditionally and reset the toggles, the depth and the markdown under a
+ * regenerate the reader had just started.
+ */
+function startPolling(id: string, gen: number): void {
+  if (pollTimer) clearTimeout(pollTimer);
+  pollTimer = null;
   state.polling = true;
   pollStartedAt = Date.now();
   const tick = async (): Promise<void> => {
     pollTimer = null;
-    if (!state.polling) return;
+    if (gen !== generation || !state.polling) return;
     if (Date.now() - pollStartedAt > JC_POLL_MAX_MS) {
       state.polling = false;
       state.error =
@@ -590,8 +722,10 @@ function startPolling(id: string): void {
       const res = await fetch(`/api/jira/draft/${encodeURIComponent(id)}`, {
         headers: { Accept: "application/json" },
       });
+      if (gen !== generation) return;
       if (res.ok) {
         const body = (await res.json()) as JiraDraftView;
+        if (gen !== generation) return;
         applyDraftView(body);
         if (shouldStopPolling(body.status)) {
           state.polling = false;
@@ -599,15 +733,30 @@ function startPolling(id: string): void {
           return;
         }
         renderAll();
+      } else {
+        // A 4xx is an ANSWER — the row is not there and will not appear — and
+        // was swallowed until the 13-minute cap, ~300 pointless ticks later.
+        const action = pollTickAction(res.status);
+        if (action.stop) {
+          const body = (await res.json().catch(() => ({}))) as { error?: string };
+          state.polling = false;
+          state.error = (typeof body.error === "string" && body.error) || action.error;
+          renderAll();
+          return;
+        }
       }
     } catch {
-      // A failed tick is not a failed draft — keep polling; the row is the record.
+      // A transport failure is not a failed draft — keep polling; the row is the
+      // record (`pollTickAction(0)` states the same rule).
     }
-    if (state.polling) pollTimer = setTimeout(() => void tick(), JC_POLL_INTERVAL_MS);
+    if (gen === generation && state.polling) {
+      pollTimer = setTimeout(() => void tick(), JC_POLL_INTERVAL_MS);
+    }
   };
   pollTimer = setTimeout(() => void tick(), JC_POLL_INTERVAL_MS);
 }
 
+/** Stop the loop AND invalidate any tick already on the wire. */
 function stopPolling(): void {
   if (pollTimer) clearTimeout(pollTimer);
   pollTimer = null;
@@ -626,57 +775,109 @@ function stampDraftInUrl(id: string): void {
 
 async function copyMarkdown(): Promise<void> {
   if (!state.markdown) return;
+  Object.assign(state, beginActionPatch());
   try {
     await navigator.clipboard.writeText(state.markdown);
     state.copied = true;
-    state.error = undefined;
+    // The tick is a confirmation, not a state: left standing it read as "this
+    // text is on the clipboard" long after an edit had made that false.
+    if (copiedTimer) clearTimeout(copiedTimer);
+    copiedTimer = setTimeout(() => {
+      copiedTimer = null;
+      state.copied = false;
+      renderRight();
+    }, COPIED_REVERT_MS);
   } catch {
     // A denied clipboard permission is the common case on a non-focused tab;
-    // saying so beats a button that silently does nothing.
-    state.error = "Utklippstavlen ble avvist av nettleseren — marker teksten og kopier manuelt.";
+    // saying so beats a button that silently does nothing. It goes in the RIGHT
+    // column's own error line — the button that raised it is here.
+    state.rightError = "Utklippstavlen ble avvist av nettleseren — marker teksten og kopier manuelt.";
   }
   renderRight();
 }
 
+/** How long "✓ Kopiert" stands before the button says what it does again. */
+const COPIED_REVERT_MS = 2_500;
+
+/**
+ * Save the reader's edit.
+ *
+ * Two guards, each of which cost a defect. **Not while a run is in flight**: the
+ * button was live throughout a regenerate, so a PUT of the OLD text could land
+ * after the new draft had settled — and its 200 carries verdicts and flags
+ * describing the text that was saved, which then sat under the new draft as if
+ * they described it. And **the response is dropped if its generation is stale**,
+ * for the same reason one step later: a save started before a regenerate answers
+ * during it.
+ */
 async function saveDraft(): Promise<void> {
   if (!state.draftId || !state.markdown || state.saving) return;
+  if (state.running || state.polling) return;
   if (state.markdown.length > JIRA_MARKDOWN_MAX) {
-    state.error = `Utkastet er ${state.markdown.length} tegn — grensen er ${JIRA_MARKDOWN_MAX}.`;
+    state.rightError = `Utkastet er ${state.markdown.length} tegn — grensen er ${JIRA_MARKDOWN_MAX}.`;
     renderRight();
     return;
   }
+  const gen = generation;
+  const sent = state.markdown;
   state.saving = true;
-  state.savedNote = undefined;
-  state.error = undefined;
+  Object.assign(state, beginActionPatch());
   renderRight();
 
   try {
     const res = await fetch(`/api/jira/draft/${encodeURIComponent(state.draftId)}`, {
       method: "PUT",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ markdown: state.markdown }),
+      body: JSON.stringify({ markdown: sent }),
     });
     const body = (await res.json()) as {
       error?: string;
+      markdown?: string;
       keyVerdicts?: JiraKeyVerdict[];
       markdownFlags?: JiraMarkdownFlag[];
     };
+    if (gen !== generation) {
+      state.saving = false; // a regenerate superseded this save; the flag is not its business
+      return;
+    }
     if (!res.ok) {
-      state.error = body?.error || `Lagring feilet (HTTP ${res.status}).`;
+      state.rightError = body?.error || `Lagring feilet (HTTP ${res.status}).`;
     } else {
       // BOTH post-passes are re-run server-side against the edited text and come
       // back with the 200 — so the chips and the flag list describe the text that
-      // is now stored, not the text the model wrote.
-      state.savedMarkdown = state.markdown;
+      // is now stored, not the text the model wrote. `markdown` rides the
+      // response because the server also repairs `[n]` markers out of it: adopting
+      // it is what keeps "Lagret." true of what is actually on the row.
+      const stored = typeof body.markdown === "string" ? body.markdown : sent;
+      if (state.markdown === sent) state.markdown = stored;
+      state.savedMarkdown = stored;
       state.keyVerdicts = body.keyVerdicts ?? state.keyVerdicts;
       state.markdownFlags = body.markdownFlags ?? state.markdownFlags;
       state.savedNote = "Lagret.";
     }
   } catch (err) {
-    state.error = `Lagring feilet: ${errText(err)}`;
+    // The flag is cleared either way (below): a superseded save that left
+    // `saving` set would disable the button for the rest of the session.
+    if (gen === generation) state.rightError = `Lagring feilet: ${errText(err)}`;
   }
   state.saving = false;
+  if (gen !== generation) return;
   renderRight();
+}
+
+/**
+ * The gate's **Lagre og generer**: the PUT lands first, and the run only starts
+ * if it succeeded — otherwise a save the reader asked for would be dropped on the
+ * floor by the very regenerate they were warned about.
+ */
+async function saveThenRun(): Promise<void> {
+  state.dirtyGate = false;
+  await saveDraft();
+  if (state.rightError) return;
+  // `answeredGate` regardless: a save that landed leaves the state clean, but a
+  // save the server repaired (`[n]` markers) can come back a byte off, and the
+  // reader has already answered this question.
+  await runDraft({ answeredGate: true });
 }
 
 function errText(err: unknown): string {

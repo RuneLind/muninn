@@ -1,10 +1,22 @@
 import { describe, expect, test } from "bun:test";
 import {
+  JC_BLOCKED_ID,
   JC_DEFAULT_DEPTH,
   JC_DIRTY_ID,
+  JC_EXTRA_COUNT_ID,
+  JC_GATE_CANCEL_ID,
+  JC_GATE_DISCARD_ID,
+  JC_GATE_SAVE_ID,
+  JC_NOTES_COUNT_ID,
+  JC_REGEN_ID,
+  JC_RIGHT_ERROR_ID,
+  JC_SAVE_ID,
+  beginActionPatch,
   canSubmit,
+  charCountHtml,
   citationRows,
   initialJiraState,
+  isDirty,
   isRegenerate,
   jiraCitationsHtml,
   jiraConflictCopy,
@@ -15,14 +27,20 @@ import {
   keyVerdictChip,
   keyVerdictCounts,
   markdownFlagLine,
+  needsDirtyGate,
+  pollTickAction,
   retainedCount,
+  safeExternalHref,
   shouldStopPolling,
+  streamDropMessage,
   submitBlockedReason,
   toggleExclusion,
+  withTemplateOption,
   type JiraComposerState,
 } from "./jira-composer-pure.ts";
 import {
   JIRA_ALL_EXCLUDED_MESSAGE,
+  JIRA_EXTRA_MAX,
   JIRA_LOW_CONFIDENCE_MESSAGE,
   JIRA_NO_HITS_MESSAGE,
   JIRA_NOTES_MAX,
@@ -332,5 +350,215 @@ describe("markup", () => {
     );
     expect(html).not.toContain("<img");
     expect(html).toContain("&lt;img");
+  });
+});
+
+// ── The action row's position ────────────────────────────────────────────────
+
+describe("layout", () => {
+  test("the action row is ABOVE the raw material — it was below the fold with 1.4 KB pasted", () => {
+    const html = jiraLeftHtml(stateWith({ templates: [{ id: "bug", label: "Bug" }], notes: "n" }));
+    expect(html.indexOf("jc-actions")).toBeLessThan(html.indexOf("jc-notes"));
+    // The status line travels with the buttons, not with the bottom of the column.
+    expect(html.indexOf('id="jcStatus"')).toBeLessThan(html.indexOf("jc-notes"));
+  });
+});
+
+// ── The caps, both of them ───────────────────────────────────────────────────
+
+describe("the `extra` cap gates the button on BOTH paths", () => {
+  test("an over-cap extra blocks a first draft and NAMES the cap", () => {
+    const state = stateWith({ notes: "n", extra: "x".repeat(JIRA_EXTRA_MAX + 1) });
+    expect(canSubmit(state)).toBe(false);
+    expect(submitBlockedReason(state)).toContain(String(JIRA_EXTRA_MAX));
+  });
+
+  test("a REGENERATE is gated too — it short-circuited past both caps", () => {
+    // `isRegenerate` returned true before either length check ran, so the only
+    // thing between an over-cap steer and a 400 was the server.
+    const regen = stateWith({
+      draftId: "d",
+      citations: [cite(1, "a.md")],
+      extra: "x".repeat(JIRA_EXTRA_MAX + 1),
+    });
+    expect(canSubmit(regen)).toBe(false);
+    expect(submitBlockedReason(regen)).toContain(String(JIRA_EXTRA_MAX));
+  });
+
+  test("both counters render, and only the over-cap one is red", () => {
+    const html = jiraLeftHtml(stateWith({ notes: "abc", extra: "x".repeat(JIRA_EXTRA_MAX + 1) }));
+    expect(html).toContain(`id="${JC_NOTES_COUNT_ID}"`);
+    expect(html).toContain(`id="${JC_EXTRA_COUNT_ID}"`);
+    expect(charCountHtml(3, JIRA_NOTES_MAX)).not.toContain("jc-over");
+    expect(charCountHtml(JIRA_EXTRA_MAX + 1, JIRA_EXTRA_MAX)).toContain("jc-over");
+  });
+
+  test("the blocked-reason line is a NODE, so a partial repaint can rewrite it", () => {
+    // `syncLeftControls` repaints without re-rendering the column (the caret is
+    // in the textarea); a conditionally-rendered line has nothing to write into.
+    expect(jiraLeftHtml(stateWith({ notes: "n" }))).toContain(`id="${JC_BLOCKED_ID}"`);
+  });
+});
+
+// ── Unsaved edits ────────────────────────────────────────────────────────────
+
+describe("the unsaved-edits gate", () => {
+  const dirty = stateWith({ draftId: "d", markdown: "ny tekst", savedMarkdown: "gammel" });
+
+  test("dirty is edited-since-save, and only that", () => {
+    expect(isDirty(dirty)).toBe(true);
+    expect(isDirty(stateWith({ markdown: "a", savedMarkdown: "a" }))).toBe(false);
+    // Never saved at all ⇒ nothing to lose that the server does not have.
+    expect(isDirty(stateWith({ markdown: "a" }))).toBe(false);
+  });
+
+  test("a regenerate over a dirty draft asks first", () => {
+    expect(needsDirtyGate(dirty)).toBe(true);
+    expect(needsDirtyGate(stateWith({ markdown: "a", savedMarkdown: "a" }))).toBe(false);
+  });
+
+  test("the answer to the gate is not asked again — Forkast ran straight back into it", () => {
+    // Measured in the browser: **Forkast og generer** cleared the flag and called
+    // the run, which re-read `dirty` — still true, because discarding writes
+    // nothing — and re-opened the gate. The click did nothing, forever.
+    expect(needsDirtyGate(dirty, { answered: true })).toBe(false);
+  });
+
+  test("the gate renders three explicit choices — never a window.confirm", () => {
+    const html = jiraDraftHtml({ ...dirty, dirtyGate: true });
+    expect(html).toContain("Du har ulagrede endringer.");
+    expect(html).toContain(`id="${JC_GATE_SAVE_ID}"`);
+    expect(html).toContain(`id="${JC_GATE_DISCARD_ID}"`);
+    expect(html).toContain(`id="${JC_GATE_CANCEL_ID}"`);
+    expect(html).toContain("Lagre og generer");
+    expect(html).toContain("Forkast og generer");
+    expect(jiraDraftHtml(dirty)).not.toContain(`id="${JC_GATE_SAVE_ID}"`);
+  });
+});
+
+// ── Errors the right column raises ───────────────────────────────────────────
+
+describe("copy/save errors are shown where the button is", () => {
+  test("a right-column error renders beside the buttons, not in the left column", () => {
+    const html = jiraDraftHtml(stateWith({ draftId: "d", markdown: "x", rightError: "Lagring feilet." }));
+    expect(html).toContain(`id="${JC_RIGHT_ERROR_ID}"`);
+    expect(html).toContain("Lagring feilet.");
+    expect(jiraLeftHtml(stateWith({ rightError: "Lagring feilet." }))).not.toContain("Lagring feilet.");
+  });
+
+  test("the error node is always present so a partial repaint can fill it", () => {
+    expect(jiraDraftHtml(stateWith({ draftId: "d", markdown: "x" }))).toContain(
+      `id="${JC_RIGHT_ERROR_ID}"`,
+    );
+  });
+
+  test("every action clears BOTH errors and the conflict deadline", () => {
+    expect(beginActionPatch()).toEqual({
+      error: undefined,
+      rightError: undefined,
+      conflictExpiresAtMs: undefined,
+      savedNote: undefined,
+    });
+  });
+});
+
+// ── Buttons while something is in flight ─────────────────────────────────────
+
+describe("what is disabled while something is in flight", () => {
+  const base = { draftId: "d", markdown: "x", savedMarkdown: "x", citations: [cite(1, "a.md")] };
+
+  test("Save is disabled during a run — a late PUT of OLD text would land after it", () => {
+    expect(jiraDraftHtml(stateWith({ ...base, running: true }))).toMatch(
+      new RegExp(`id="${JC_SAVE_ID}"[^>]* disabled`),
+    );
+    expect(jiraDraftHtml(stateWith({ ...base, polling: true }))).toMatch(
+      new RegExp(`id="${JC_SAVE_ID}"[^>]* disabled`),
+    );
+    expect(jiraDraftHtml(stateWith(base))).not.toMatch(new RegExp(`id="${JC_SAVE_ID}"[^>]* disabled`));
+  });
+
+  test("the regenerate button is off while saving, adopting or running", () => {
+    const off = (over: Partial<JiraComposerState>) =>
+      new RegExp(`id="${JC_REGEN_ID}"[^>]* disabled`).test(
+        jiraCitationsHtml(stateWith({ ...base, ...over })),
+      );
+    expect(off({ running: true })).toBe(true);
+    expect(off({ polling: true })).toBe(true);
+    expect(off({ saving: true })).toBe(true);
+    expect(off({})).toBe(false);
+  });
+
+  test("the retain checkboxes are DISABLED during a run — a mid-run toggle was discarded", () => {
+    expect(jiraCitationsHtml(stateWith({ ...base, running: true }))).toMatch(
+      /data-jc-doc="0"[^>]* disabled/,
+    );
+    expect(jiraCitationsHtml(stateWith(base))).not.toMatch(/data-jc-doc="0"[^>]* disabled/);
+  });
+});
+
+// ── Poll ↔ stream ────────────────────────────────────────────────────────────
+
+describe("a poll tick that does not answer 200", () => {
+  test("a 4xx stops the loop — it polled a dead id until the 13-minute cap", () => {
+    expect(pollTickAction(404)).toEqual({ stop: true, error: "ukjent utkast" });
+    expect(pollTickAction(400).stop).toBe(true);
+  });
+
+  test("a 5xx or a transport failure keeps retrying — the row is the record", () => {
+    expect(pollTickAction(500).stop).toBe(false);
+    expect(pollTickAction(0).stop).toBe(false);
+  });
+});
+
+describe("the dropped-stream copy is honest about what exists", () => {
+  test("with a draft id it says the draft is being fetched", () => {
+    expect(streamDropMessage(true)).toContain("henter utkastet");
+  });
+
+  test("with NO draft id it says nothing was started — there is nothing to fetch", () => {
+    const msg = streamDropMessage(false);
+    expect(msg).not.toContain("henter utkastet");
+    expect(msg).toContain("før utkastet ble startet");
+  });
+});
+
+// ── Small ones ───────────────────────────────────────────────────────────────
+
+describe("a restored template id the route never served", () => {
+  test("is added as an option so the picker shows what will be posted", () => {
+    const opts = withTemplateOption([{ id: "bug", label: "Bug" }], "avvik");
+    expect(opts.map((t) => t.id)).toEqual(["bug", "avvik"]);
+    expect(opts[1]!.label).toBe("avvik");
+    expect(withTemplateOption(opts, "bug")).toHaveLength(2);
+    expect(withTemplateOption(opts, "")).toHaveLength(2);
+  });
+});
+
+describe("only http(s) reaches an href", () => {
+  test("a javascript: or data: url is dropped, http(s) passes", () => {
+    expect(safeExternalHref("https://jira.adeo.no/browse/MELOSYS-1")).toBe(
+      "https://jira.adeo.no/browse/MELOSYS-1",
+    );
+    expect(safeExternalHref("http://x.test/a")).toBe("http://x.test/a");
+    expect(safeExternalHref("javascript:alert(1)")).toBeUndefined();
+    expect(safeExternalHref("  JavaScript:alert(1)")).toBeUndefined();
+    expect(safeExternalHref("data:text/html,x")).toBeUndefined();
+    expect(safeExternalHref(undefined)).toBeUndefined();
+  });
+
+  test("a citation and a key chip with a javascript: url render NO link", () => {
+    const cites = jiraCitationsHtml(
+      stateWith({ citations: [cite(1, "a.md", { url: "javascript:alert(1)" })] }),
+    );
+    expect(cites).not.toContain("href=");
+    const chips = jiraDraftHtml(
+      stateWith({
+        draftId: "d",
+        markdown: "x",
+        keyVerdicts: [{ key: "MELOSYS-1", state: "verified", url: "javascript:alert(1)" }],
+      }),
+    );
+    expect(chips).not.toContain("href=");
+    expect(chips).toContain("MELOSYS-1");
   });
 });

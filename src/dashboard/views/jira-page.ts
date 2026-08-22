@@ -6,6 +6,7 @@ import {
   docPanelStyles,
   markdownContentStyles,
 } from "./components/doc-panel.ts";
+import { escHtml } from "./components/escape.ts";
 import { helpersClientScript } from "./components/helpers-client.ts";
 import { jiraComposerClientScript } from "./components/jira-composer-client.ts";
 import { webFormatClientScript } from "../../chat/views/components/web-format-client.ts";
@@ -104,7 +105,7 @@ export function renderJiraFallback(error: string): string {
 <html lang="no"><head><meta charset="UTF-8"><title>Muninn - Jira</title></head>
 <body style="font-family:system-ui;padding:40px;max-width:70ch">
 <h1>Jira-siden kunne ikke bygges</h1>
-<p>${error.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c] ?? c)}</p>
+<p>${escHtml(error)}</p>
 <p>API-et er upåvirket: <code>POST /api/jira/draft</code>, <code>GET /api/jira/draft/:id</code>.</p>
 </body></html>`;
 }
@@ -150,7 +151,11 @@ const JIRA_PAGE_STYLES = `
     }
     .jc-h { font-size: 12px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--jc-faint); }
     .jc-count { font-weight: 500; letter-spacing: 0; text-transform: none; color: var(--jc-muted); font-size: 11.5px; }
-    .jc-lab { font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase; color: var(--jc-faint); font-weight: 600; margin-top: 4px; }
+    /* 11.5px on --text-muted, not 10.5px on --text-dim: the field labels are the
+       page's only name for each control, and measured in the browser the old pair
+       was 3.2:1 in dark and 3.7:1 in light — under WCAG AA's 4.5:1 for text this
+       small. --jc-muted measures 5.9:1 dark / 5.4:1 light. */
+    .jc-lab { font-size: 11.5px; letter-spacing: .07em; text-transform: uppercase; color: var(--jc-muted); font-weight: 600; margin-top: 4px; }
     .jc-opt { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--jc-muted); }
     .jc-note { font-size: 11.5px; color: var(--jc-muted); line-height: 1.5; }
     .jc-err { font-size: 12px; color: var(--status-error); line-height: 1.5; }
@@ -158,6 +163,26 @@ const JIRA_PAGE_STYLES = `
     .jc-dim { color: var(--jc-faint); }
     .jc-empty { color: var(--jc-faint); font-size: 12.5px; font-style: italic; padding: 8px 0; }
     .jc-status { min-height: 18px; display: flex; flex-direction: column; gap: 4px; }
+
+    /* The action row STICKS to the top of its own scrolling column. Measured at
+       1440×950 with a 1.4 KB note pasted, the button and the status line it
+       writes into were both below the fold — the reader clicked, nothing visibly
+       moved, and the phase copy was two scrolls away. */
+    .jc-actions {
+      position: sticky; top: -14px; z-index: 2; margin: -14px -15px 0; padding: 12px 15px 8px;
+      background: var(--jc-surface); border-bottom: 1px solid var(--jc-line-soft);
+      display: flex; flex-direction: column; gap: 6px;
+    }
+    .jc-actions .jc-primary { margin-top: 0; align-self: flex-start; }
+
+    /* The unsaved-edits gate — inline, above the draft, never a window.confirm. */
+    .jc-gate {
+      border: 1px solid color-mix(in srgb, var(--status-warning) 55%, transparent);
+      background: color-mix(in srgb, var(--status-warning) 10%, transparent);
+      border-radius: 6px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px;
+    }
+    .jc-gate-lead { font-size: 12.5px; font-weight: 600; color: var(--jc-ink); }
+    .jc-gate-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
 
     .jc-notes, .jc-extra, .jc-md {
       font: inherit; font-size: 13px; line-height: 1.5; width: 100%; resize: vertical;
@@ -172,6 +197,8 @@ const JIRA_PAGE_STYLES = `
     .jc-extra { flex: none; }
     .jc-md { min-height: 46vh; flex: 1; }
     .jc-charcount { font-family: var(--jc-mono); font-size: 10.5px; color: var(--jc-faint); text-align: right; }
+    /* Over the cap the button is off for THIS reason — the counter says which. */
+    .jc-charcount .jc-over { color: var(--status-error); font-weight: 700; }
     .jc-select {
       font: inherit; font-size: 13px; padding: 5px 9px; border-radius: 6px;
       border: 1px solid var(--jc-line); background: var(--jc-surface-2); color: var(--jc-ink);

@@ -286,6 +286,23 @@ export type JiraBodyResult =
   | { ok: false; error: string };
 
 /**
+ * The wire fields, named the way the `/jira` page names them.
+ *
+ * **These messages are reader-facing.** The route returns the validator's string
+ * verbatim in its 400 body and the page renders it verbatim in its status line,
+ * so an English `extra is longer than 2000 characters` landed under a Norwegian
+ * form whose own field is labelled «Ekstra instruks». The whole surface is
+ * Norwegian; so is this.
+ */
+const FIELD_LABELS: Record<string, string> = {
+  notes: "Råmaterialet",
+  template: "Malen",
+  depth: "Teknisk dybde",
+  extra: "Ekstra instruks",
+  draftId: "Utkast-id-en",
+};
+
+/**
  * Validate one draft POST body.
  *
  * Lives in the dependency-free wire module for the `parseShareRequestBody`
@@ -309,7 +326,7 @@ export function parseJiraDraftBody(body: Record<string, unknown>): JiraBodyResul
   for (const field of ["notes", "template", "depth", "extra", "draftId"]) {
     const v = body[field];
     if (v !== undefined && typeof v !== "string") {
-      return { ok: false, error: `${field} must be a string` };
+      return { ok: false, error: `${FIELD_LABELS[field] ?? field} må være en tekststreng.` };
     }
   }
 
@@ -318,7 +335,7 @@ export function parseJiraDraftBody(body: Record<string, unknown>): JiraBodyResul
   // A regenerate reuses the stored notes, so an absent `notes` is legal there and
   // only there. Requiring them on both paths would force the extension/page to
   // echo a 10 KB Slack thread back on every toggle click.
-  if (!draftId && !notes.trim()) return { ok: false, error: "notes is required" };
+  if (!draftId && !notes.trim()) return { ok: false, error: "Råmaterialet mangler." };
   // ...and NEW notes on a regenerate are refused rather than silently honoured.
   // The stored hit set was retrieved for the OLD raw material and is deliberately
   // not re-retrieved (design call 1), so drafting different notes against it
@@ -327,29 +344,34 @@ export function parseJiraDraftBody(body: Record<string, unknown>): JiraBodyResul
   if (draftId && notes.trim()) {
     return {
       ok: false,
-      error: "notes cannot be changed on a regenerate — the stored hit set was retrieved for the original raw material; start a new draft instead",
+      error:
+        "Råmaterialet kan ikke endres når du genererer på nytt — treffene ble hentet for den " +
+        "opprinnelige teksten. Start et nytt utkast i stedet.",
     };
   }
   if (notes.length > JIRA_NOTES_MAX) {
-    return { ok: false, error: `notes is longer than ${JIRA_NOTES_MAX} characters` };
+    return { ok: false, error: `Råmaterialet er ${notes.length} tegn — grensen er ${JIRA_NOTES_MAX}.` };
   }
 
   const template = typeof body.template === "string" ? body.template.trim() : "";
-  if (!template) return { ok: false, error: "template is required" };
+  if (!template) return { ok: false, error: "Ingen mal er valgt." };
 
   if (!isJiraDepth(body.depth)) {
-    return { ok: false, error: `depth must be one of: ${JIRA_DEPTHS.map((d) => d.id).join(", ")}` };
+    return {
+      ok: false,
+      error: `Teknisk dybde må være en av: ${JIRA_DEPTHS.map((d) => d.id).join(", ")}.`,
+    };
   }
 
   const extra = typeof body.extra === "string" ? body.extra : "";
   if (extra.length > JIRA_EXTRA_MAX) {
-    return { ok: false, error: `extra is longer than ${JIRA_EXTRA_MAX} characters` };
+    return { ok: false, error: `Ekstra instruks er ${extra.length} tegn — grensen er ${JIRA_EXTRA_MAX}.` };
   }
 
   const rawExclude = body.excludeDocIds;
   if (rawExclude !== undefined) {
     if (!Array.isArray(rawExclude) || rawExclude.some((v) => typeof v !== "string")) {
-      return { ok: false, error: "excludeDocIds must be an array of strings" };
+      return { ok: false, error: "Avslåtte kilder må være en liste med dokument-id-er." };
     }
   }
   const excludeDocIds = Array.isArray(rawExclude) ? (rawExclude as string[]).map((s) => s.trim()).filter(Boolean) : [];
@@ -357,7 +379,10 @@ export function parseJiraDraftBody(body: Record<string, unknown>): JiraBodyResul
   // no-op: the reader toggled rows off against a hit set the server is about to
   // discard, and the draft would silently come back citing every one of them.
   if (!draftId && excludeDocIds.length > 0) {
-    return { ok: false, error: "excludeDocIds requires draftId — there is no stored hit set to exclude from" };
+    return {
+      ok: false,
+      error: "Kilder kan ikke slås av uten et utkast — det finnes ingen lagret trefliste å utelate fra.",
+    };
   }
 
   return { ok: true, body: { notes, template, depth: body.depth, extra, draftId, excludeDocIds } };

@@ -11,9 +11,10 @@
  */
 
 import { mountJiraComposer } from "./jira-composer.ts";
+import { JC_ROOT_ID } from "./jira-composer-pure.ts";
 
 function start(): void {
-  if (!document.getElementById("jcRoot")) return;
+  if (!document.getElementById(JC_ROOT_ID)) return;
   mountJiraComposer();
 }
 

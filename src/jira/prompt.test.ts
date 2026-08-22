@@ -80,7 +80,21 @@ describe("buildJiraUserPrompt", () => {
   test("no citations ⇒ an explicit no-sources instruction, not a silent gap", () => {
     const { prompt } = buildJiraUserPrompt({ ...base, citations: [] });
     expect(prompt).toContain("KILDER: ingen");
-    expect(prompt).toContain("ikke vis til [n]");
+    expect(prompt).toContain("ikke vis til kildene");
+  });
+
+  test("the sources block asks for the KEY in prose and forbids bracket numbers", () => {
+    // `appendReferences` emits an UNNUMBERED, key-deduped list over the depth
+    // slice, so a `[n]` marker in the body resolves to nothing in the paste —
+    // measured on a real draft carrying [4] [5] [6] [7].
+    const { prompt } = buildJiraUserPrompt({ ...base, citations: [cite(1), cite(2)] });
+    expect(prompt).toContain("KILDER (hentet fra");
+    expect(prompt).toMatch(/MELOSYS-1234|nøkkel|tittel/i);
+    expect(prompt).toContain("Ikke skriv en referanseliste selv");
+    // The instruction that produced the dangling markers is gone from both
+    // branches — a prompt telling the model to write `[n]` is the defect.
+    expect(prompt).not.toContain("med [n]");
+    expect(prompt).not.toMatch(/\[n\]/);
   });
 
   test("JIRA_BODY_MAX trims citations from the TAIL and keeps the notes whole", () => {
@@ -120,8 +134,16 @@ describe("renderJiraSources", () => {
       cite(1),
       cite(2, { collection: "nav-wiki", docId: "lovvalg.md", title: "Lovvalg", badge: "NAV-wiki", key: undefined }),
     ]);
-    expect(rendered).toContain("[1] (Jira) MELOSYS-1 — Sak 1");
-    expect(rendered).toContain("[2] (NAV-wiki) Lovvalg");
+    expect(rendered).toContain("(Jira) MELOSYS-1 — Sak 1");
+    expect(rendered).toContain("(NAV-wiki) Lovvalg");
+  });
+
+  test("no source is NUMBERED — a numbered list is an invitation to write [n]", () => {
+    // `## Referanser` is unnumbered and key-deduped, so a `[3]` in the body has
+    // nothing to resolve against. Handing the model `[3] (Jira) …` in the source
+    // block is what made it write them.
+    const rendered = renderJiraSources([cite(1), cite(2)]);
+    expect(rendered).not.toMatch(/\[\d+\]/);
   });
 });
 
@@ -187,13 +209,14 @@ describe("parseJiraDraftBody", () => {
 
   test("type-checks every string field before using it", () => {
     const r = parseJiraDraftBody({ ...ok, notes: 42 });
-    expect(r).toEqual({ ok: false, error: "notes must be a string" });
+    // Norwegian: these strings are rendered VERBATIM in the `/jira` status line.
+    expect(r).toEqual({ ok: false, error: "Råmaterialet må være en tekststreng." });
   });
 
   test("notes required on a FIRST draft, optional on a regenerate", () => {
     expect(parseJiraDraftBody({ template: "bug", depth: "skisse" })).toEqual({
       ok: false,
-      error: "notes is required",
+      error: "Råmaterialet mangler.",
     });
     const regen = parseJiraDraftBody({ template: "bug", depth: "skisse", draftId: "abc" });
     expect(regen.ok).toBe(true);
@@ -201,12 +224,12 @@ describe("parseJiraDraftBody", () => {
 
   test("over-cap notes is a 400, never a truncation", () => {
     const r = parseJiraDraftBody({ ...ok, notes: "x".repeat(JIRA_NOTES_MAX + 1) });
-    expect(r).toEqual({ ok: false, error: `notes is longer than ${JIRA_NOTES_MAX} characters` });
+    expect(r).toEqual({ ok: false, error: `Råmaterialet er ${JIRA_NOTES_MAX + 1} tegn — grensen er ${JIRA_NOTES_MAX}.` });
   });
 
   test("over-cap extra is a 400 too", () => {
     const r = parseJiraDraftBody({ ...ok, extra: "x".repeat(JIRA_EXTRA_MAX + 1) });
-    expect(r).toEqual({ ok: false, error: `extra is longer than ${JIRA_EXTRA_MAX} characters` });
+    expect(r).toEqual({ ok: false, error: `Ekstra instruks er ${JIRA_EXTRA_MAX + 1} tegn — grensen er ${JIRA_EXTRA_MAX}.` });
   });
 
   test("an unknown depth names the valid set", () => {
@@ -220,7 +243,7 @@ describe("parseJiraDraftBody", () => {
     // discard; the draft would come back citing every one of them.
     const r = parseJiraDraftBody({ ...ok, excludeDocIds: ["a"] });
     expect(r.ok).toBe(false);
-    expect((r as { error: string }).error).toContain("excludeDocIds requires draftId");
+    expect((r as { error: string }).error).toContain("uten et utkast");
   });
 
   test("excludeDocIds must be an array of strings", () => {
@@ -284,7 +307,7 @@ describe("parseJiraDraftBody — notes on a regenerate", () => {
       notes: "helt andre notater",
     });
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.error).toContain("notes");
+    if (!r.ok) expect(r.error).toContain("Råmaterialet kan ikke endres");
   });
 
   test("a regenerate with BLANK notes is still fine — the page does not echo the thread back", () => {

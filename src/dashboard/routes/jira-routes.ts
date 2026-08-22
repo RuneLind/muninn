@@ -47,6 +47,7 @@ import { jiraBotMissingMessage, resolveJiraBot } from "../../jira/bot.ts";
 import { findJiraTemplate, resolveJiraTemplates } from "../../jira/templates.ts";
 import { JIRA_FULL_MCP_SERVERS } from "../../jira/tool-fence.ts";
 import { checkJiraMarkdown } from "../../jira/markdown-check.ts";
+import { stripCitationMarkers } from "../../jira/citation-markers.ts";
 import { applyExclusions } from "../../jira/retrieval.ts";
 import { verifyJiraKeys } from "../../jira/verify-keys.ts";
 import { isValidUuid } from "./route-utils.ts";
@@ -309,7 +310,14 @@ async function claimDraft(
   if (unknown) return { ok: false, response: unknownDraft(c) };
 
   // Keyed on the RESOLVED notes plus the draft id — see `jiraFlightKey`.
-  const key = jiraFlightKey(opts.notes, body.template, body.depth, body.excludeDocIds, body.draftId);
+  const key = jiraFlightKey({
+    notes: opts.notes,
+    template: body.template,
+    depth: body.depth,
+    extra: body.extra,
+    excludeDocIds: body.excludeDocIds,
+    draftId: body.draftId,
+  });
   const acquired = acquireJiraFlight(key, body.depth);
   if (!acquired.ok) {
     return {
@@ -477,15 +485,30 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
       const id = c.req.param("id");
       if (!isValidUuid(id)) return unknownDraft(c);
       const raw = await c.req.json<{ markdown?: unknown }>().catch(() => ({}) as { markdown?: unknown });
-      if (typeof raw.markdown !== "string") return c.json({ error: "markdown must be a string" }, 400);
-      const markdown = raw.markdown;
-      if (!markdown.trim()) return c.json({ error: "markdown is required" }, 400);
-      if (markdown.length > JIRA_MARKDOWN_MAX) {
-        return c.json({ error: `markdown is longer than ${JIRA_MARKDOWN_MAX} characters` }, 400);
+      // Norwegian, like the wire validator's: these land in the page's own
+      // status line under a form whose fields are all Norwegian.
+      if (typeof raw.markdown !== "string") return c.json({ error: "Utkastet må være en tekststreng." }, 400);
+      if (!raw.markdown.trim()) return c.json({ error: "Utkastet er tomt." }, 400);
+      if (raw.markdown.length > JIRA_MARKDOWN_MAX) {
+        return c.json(
+          { error: `Utkastet er ${raw.markdown.length} tegn — grensen er ${JIRA_MARKDOWN_MAX}.` },
+          400,
+        );
       }
 
       const existing = await getJiraDraft(id);
       if (!existing) return unknownDraft(c);
+
+      const retained = applyExclusions(existing.citations, existing.excludeDocIds);
+      // The SAME `[n]` repair the runner applies, over the edited text: an edit
+      // that reintroduces a marker (a paste from an older draft, a hand-typed
+      // `[2]`) would otherwise store a footnote number the unnumbered
+      // `## Referanser` cannot resolve. Bounded by the RETAINED count — the
+      // widest a marker could legitimately have referred to — so a literal
+      // `[2024]` survives. The repaired text is what is stored AND what the
+      // response returns, or the page would report "saved" over text that
+      // differs from the row it just wrote.
+      const markdown = stripCitationMarkers(raw.markdown, retained.length);
 
       // BOTH post-passes are re-run against the edited text and stored with it.
       // Leaving the old verdicts behind would leave the page asserting things
@@ -500,14 +523,14 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
       const markdownFlags = checkJiraMarkdown(markdown);
       const keyVerdicts = await verifyJiraKeys({
         markdown,
-        citations: applyExclusions(existing.citations, existing.excludeDocIds),
+        citations: retained,
         notes: existing.notes,
         knowledgeApiUrl: config.knowledgeApiUrl,
       });
 
       const written = await updateJiraDraftMarkdown(id, markdown, keyVerdicts, markdownFlags);
       if (!written) return unknownDraft(c);
-      return c.json({ draftId: id, keyVerdicts, markdownFlags });
+      return c.json({ draftId: id, markdown, keyVerdicts, markdownFlags });
     } catch (err) {
       return serverError(c, "draft update", err);
     }

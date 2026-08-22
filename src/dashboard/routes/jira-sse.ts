@@ -51,6 +51,7 @@ import {
   buildJiraUserPrompt,
   stripJiraWrappingFence,
 } from "../../jira/prompt.ts";
+import { stripCitationMarkers } from "../../jira/citation-markers.ts";
 import { buildDepthFence } from "../../jira/tool-fence.ts";
 import { checkJiraMarkdown } from "../../jira/markdown-check.ts";
 import { verifyJiraKeys } from "../../jira/verify-keys.ts";
@@ -156,17 +157,37 @@ const jiraFlights = new Map<string, JiraFlight>();
  * IDENTICALLY, and a regenerate of draft B got a 409 about a draft the reader had
  * never opened. Sync, since `Bun.CryptoHasher` needs no await.
  */
-export function jiraFlightKey(
-  notes: string,
-  template: string,
-  depth: JiraDepth,
-  excludeDocIds: string[],
-  draftId: string,
-): string {
+export interface JiraFlightKeyInput {
+  /** The RESOLVED notes (the row’s on a regenerate), never the request body’s. */
+  notes: string;
+  template: string;
+  depth: JiraDepth;
+  /**
+   * The reader’s free-text steer. **In the key**, because it reaches the prompt:
+   * without it a reader who typed «fokuser på migreringsrisikoen» and clicked
+   * Generer på nytt was told «et likt utkast» about a draft that is not alike at
+   * all — and `extra` is one of the two things a regenerate exists to let them
+   * change.
+   */
+  extra: string;
+  excludeDocIds: string[];
+  draftId: string;
+}
+
+export function jiraFlightKey(input: JiraFlightKeyInput): string {
   const h = new Bun.CryptoHasher("sha256");
   // NUL-separated and with the exclusion set SORTED, so the same toggle state
   // reached by clicking rows in a different order is the same slot.
-  h.update([draftId, notes, template, depth, [...excludeDocIds].sort().join(",")].join("\u0000"));
+  h.update(
+    [
+      input.draftId,
+      input.notes,
+      input.template,
+      input.depth,
+      input.extra,
+      [...input.excludeDocIds].sort().join(","),
+    ].join("\u0000"),
+  );
   return h.digest("hex");
 }
 
@@ -442,7 +463,16 @@ async function runJiraDraft(
       ...(opts.oneShot ? { oneShot: opts.oneShot } : {}),
     });
 
-    const body = stripJiraWrappingFence(result.result ?? "");
+    // The `[n]` REPAIR, before `## Referanser` is appended. The prompt no longer
+    // asks for bracket markers and no longer numbers the source block, but a
+    // model that writes them anyway would ship a Jira description full of
+    // footnote numbers that resolve to nothing — the reference list is unnumbered
+    // and key-deduped. Bounded by what the model was actually GIVEN, so a literal
+    // `[2024]` survives. See `src/jira/citation-markers.ts`.
+    const body = stripCitationMarkers(
+      stripJiraWrappingFence(result.result ?? ""),
+      built.citationsUsed,
+    );
     if (!body) {
       // An empty result is a FAILED generation, not an empty task.
       log.warn("Jira draft returned nothing bot={bot} draft={draft}", { bot: botConfig.name, draft: draftId });
