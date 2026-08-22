@@ -105,13 +105,24 @@ export interface JiraTaskInput {
   notes: string;
 }
 
-/** Render the numbered sources block. Our own, not `renderSourcesBlock` — the
- *  badge/key framing and the "cite with [n]" contract are this feature's. */
+/**
+ * Render the sources block. Our own, not `renderSourcesBlock` — the badge/key
+ * framing is this feature's.
+ *
+ * **Deliberately UNNUMBERED.** It led each source with `[n]` while
+ * `appendReferences` emits an unnumbered, key-deduped list over the depth slice,
+ * so the two never met: measured on a real `Skisse` draft the body carried `[4]`,
+ * `[5]`, `[6]`, `[7]` and the paste had nothing to resolve them against. A
+ * numbered source block is an invitation to write footnote numbers, so the
+ * numbering is gone and the instruction below asks for the key or title in prose.
+ * `c.n` still exists on the citation — it orders the stored set and the toggle
+ * column — it just no longer reaches the model.
+ */
 export function renderJiraSources(citations: JiraCitation[]): string {
   return citations
     .map((c) => {
       const label = c.key ? `${c.key} — ${c.title}` : c.title;
-      const head = `[${c.n}] (${c.badge}) ${label}${c.url ? ` — ${c.url}` : ""}`;
+      const head = `- (${c.badge}) ${label}${c.url ? ` — ${c.url}` : ""}`;
       return c.snippet ? `${head}\n${neutralizeJiraFence(c.snippet)}` : head;
     })
     .join("\n\n");
@@ -162,15 +173,23 @@ export function buildJiraUserPrompt(input: JiraTaskInput): BuiltJiraPrompt {
     const parts = [...head];
     if (cites.length > 0) {
       parts.push(
+        // NO `[n]` markers: `appendReferences` builds an UNNUMBERED, key-deduped
+        // `## Referanser` over the depth slice, so a bracket number in the body
+        // resolves to nothing in the Jira paste. The model names the source the
+        // way a person would — "se MELOSYS-1234" — which the reference list then
+        // backs with a real link.
         "KILDER (hentet fra jira-issues, melosys-confluence-v3 og nav-wiki). " +
-          "Vis hvilken kilde en påstand kommer fra med [n] i teksten. Ikke skriv en referanseliste selv:\n" +
+          "Når en påstand kommer fra en kilde, nevn kilden ved navn i teksten — Jira-nøkkelen der den " +
+          "finnes («se MELOSYS-1234»), ellers sidetittelen. Bruk ALDRI fotnotemarkører i klammer " +
+          "(«[1]», «[2]») — de peker ikke på noe i den ferdige saken. Ikke skriv en referanseliste selv:\n" +
           `"""\n${renderJiraSources(cites)}\n"""`,
       );
       if (fullDocsBlock) parts.push(fullDocsBlock);
     } else {
       parts.push(
         "KILDER: ingen. Retrieval fant ingenting som dekker dette, så skriv saken utelukkende fra " +
-          "råmaterialet under, og ikke vis til [n] eller til Jira-saker som ikke står i råmaterialet.",
+          "råmaterialet under, og ikke vis til kildene eller til Jira-saker som ikke står i råmaterialet. " +
+          "Ingen fotnotemarkører i klammer.",
       );
     }
     parts.push(notesBlock);

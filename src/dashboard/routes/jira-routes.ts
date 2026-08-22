@@ -3,8 +3,14 @@
  * (`jira-sse.ts` owns the stream function, the way `share-sse.ts` /
  * `factcheck-sse.ts` are stream functions registered from `wiki-routes.ts`).
  *
- * Five endpoints:
+ * The page and five endpoints — registered from ONE module the way
+ * `plans-routes.ts` registers `/plans` beside `/api/plans/*`, because the page
+ * and the endpoints it drives are one feature and one file to keep in step:
  *
+ *   · `GET  /jira`                 — the composer page (`views/jira-page.ts`): a
+ *     three-column shell the client bundle mounts into. Its one throwing surface
+ *     is the bundle build, which falls back to a page that names the failure
+ *     rather than an unexplained Hono 500.
  *   · `GET  /api/jira/templates`   — the picker's source. `/api/research/variants`
  *     is hardcoded to `jiraAnalysisVariants` and does not generalise.
  *   · `POST /api/jira/draft`       — SSE. The page's own path.
@@ -44,6 +50,7 @@ import { checkJiraMarkdown } from "../../jira/markdown-check.ts";
 import { applyExclusions } from "../../jira/retrieval.ts";
 import { verifyJiraKeys } from "../../jira/verify-keys.ts";
 import { isValidUuid } from "./route-utils.ts";
+import { renderJiraFallback, renderJiraPage } from "../views/jira-page.ts";
 import {
   JIRA_MARKDOWN_MAX,
   parseJiraDraftBody,
@@ -302,7 +309,14 @@ async function claimDraft(
   if (unknown) return { ok: false, response: unknownDraft(c) };
 
   // Keyed on the RESOLVED notes plus the draft id — see `jiraFlightKey`.
-  const key = jiraFlightKey(opts.notes, body.template, body.depth, body.excludeDocIds, body.draftId);
+  const key = jiraFlightKey({
+    notes: opts.notes,
+    template: body.template,
+    depth: body.depth,
+    extra: body.extra,
+    excludeDocIds: body.excludeDocIds,
+    draftId: body.draftId,
+  });
   const acquired = acquireJiraFlight(key, body.depth);
   if (!acquired.ok) {
     return {
@@ -318,6 +332,25 @@ async function claimDraft(
 }
 
 export function registerJiraRoutes(app: Hono, config: Config): void {
+  // ── The page ───────────────────────────────────────────────────────────────
+  // Registered from the API's own module, the way `plans-routes.ts` registers
+  // `/plans` beside `/api/plans/*` — the page and the endpoints it drives are one
+  // feature and one file to keep in step.
+  app.get("/jira", async (c) => {
+    try {
+      return c.html(await renderJiraPage());
+    } catch (err) {
+      // The one throwing surface is the RENDER, and a client-bundle build
+      // failure is exactly the state where an unexplained Hono 500 is the least
+      // useful thing this page could do — it has no server-rendered content to
+      // fall back to.
+      log.error("Jira page render failed: {error}", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return c.html(renderJiraFallback(err instanceof Error ? err.message : String(err)), 200);
+    }
+  });
+
   // ── The picker's source ────────────────────────────────────────────────────
   app.get("/api/jira/templates", (c) => {
     const bot = resolveJiraBot(discoverAllBots());
@@ -451,15 +484,32 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
       const id = c.req.param("id");
       if (!isValidUuid(id)) return unknownDraft(c);
       const raw = await c.req.json<{ markdown?: unknown }>().catch(() => ({}) as { markdown?: unknown });
-      if (typeof raw.markdown !== "string") return c.json({ error: "markdown must be a string" }, 400);
-      const markdown = raw.markdown;
-      if (!markdown.trim()) return c.json({ error: "markdown is required" }, 400);
-      if (markdown.length > JIRA_MARKDOWN_MAX) {
-        return c.json({ error: `markdown is longer than ${JIRA_MARKDOWN_MAX} characters` }, 400);
+      // Norwegian, like the wire validator's: these land in the page's own
+      // status line under a form whose fields are all Norwegian.
+      if (typeof raw.markdown !== "string") return c.json({ error: "Utkastet må være en tekststreng." }, 400);
+      if (!raw.markdown.trim()) return c.json({ error: "Utkastet er tomt." }, 400);
+      if (raw.markdown.length > JIRA_MARKDOWN_MAX) {
+        return c.json(
+          { error: `Utkastet er ${raw.markdown.length} tegn — grensen er ${JIRA_MARKDOWN_MAX}.` },
+          400,
+        );
       }
 
       const existing = await getJiraDraft(id);
       if (!existing) return unknownDraft(c);
+
+      const retained = applyExclusions(existing.citations, existing.excludeDocIds);
+      // **The reader's text is stored VERBATIM.** The `[n]` repair is a safety net
+      // over MODEL output and runs only in the SSE runner; running it here edited
+      // what a human had typed, which is a bug however careful the pass is. It was
+      // also bounded differently on this path — by the STORED hit set (up to 24)
+      // where generation bounds by `citationsUsed` (6–8 on this corpus) — so
+      // saving silently deleted every `[9]`–`[23]` the reader had been reading.
+      // Measured on real drafts, it also ate `artikkel [13] i forordning
+      // 883/2004`, `liste[2]` and the `[1]` of `[1](https://x.no)`.
+      // The response still returns the markdown, so the page adopts exactly what
+      // the row now holds.
+      const markdown = raw.markdown;
 
       // BOTH post-passes are re-run against the edited text and stored with it.
       // Leaving the old verdicts behind would leave the page asserting things
@@ -474,14 +524,14 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
       const markdownFlags = checkJiraMarkdown(markdown);
       const keyVerdicts = await verifyJiraKeys({
         markdown,
-        citations: applyExclusions(existing.citations, existing.excludeDocIds),
+        citations: retained,
         notes: existing.notes,
         knowledgeApiUrl: config.knowledgeApiUrl,
       });
 
       const written = await updateJiraDraftMarkdown(id, markdown, keyVerdicts, markdownFlags);
       if (!written) return unknownDraft(c);
-      return c.json({ draftId: id, keyVerdicts, markdownFlags });
+      return c.json({ draftId: id, markdown, keyVerdicts, markdownFlags });
     } catch (err) {
       return serverError(c, "draft update", err);
     }

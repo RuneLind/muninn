@@ -312,7 +312,7 @@ describe("POST /api/jira/draft — every refusal is a plain JSON status, pre-com
   test("a malformed body 400s before the stream", async () => {
     const res = await post(makeApp(), "/api/jira/draft", { notes: 42, template: "bug", depth: "skisse" });
     expect(res.status).toBe(400);
-    expect((await res.json()).error).toBe("notes must be a string");
+    expect((await res.json()).error).toBe("Råmaterialet må være en tekststreng.");
   });
 
   test("an unknown template 400s NAMING the id — never a silent fallback to bug", async () => {
@@ -408,6 +408,17 @@ describe("POST /api/jira/draft — the draft", () => {
     expect(md).toContain("- [MELOSYS-5677](https://jira.adeo.no/browse/MELOSYS-5677)");
     expect(md).toContain("- [Fakturering](https://confluence.test/faktura)");
     expect(md).not.toMatch(/^- MELOSYS-5677$/m);
+  });
+
+  test("dangling [n] markers are REPAIRED out of the body — nothing resolves them", async () => {
+    // The model was given 3 sources and wrote `[1]`/`[2]` (see DRAFT_BODY).
+    // `## Referanser` is unnumbered and key-deduped, so those markers point at
+    // nothing in the Jira paste. Measured on a real draft: [4] [5] [6] [7].
+    const md = String((await draft()).find((e) => e.event === "done")!.data.markdown);
+    expect(md).not.toMatch(/\[\d+\]/);
+    // The keys the markers sat behind are untouched.
+    expect(md).toContain("Se MELOSYS-5677 og MELOSYS-8028.");
+    expect(rows.get(String((await draft())[0]!.data.draftId))!.markdown).not.toMatch(/\[\d+\]/);
   });
 
   test("the key verdicts distinguish retrieved from notes-only from fabricated", async () => {
@@ -547,11 +558,31 @@ describe("single-flight is keyed on the CONTENT hash, exclusions included", () =
     expect(res.status).toBe(200);
   });
 
+  test("a changed `extra` on the same draft is a DIFFERENT slot", async () => {
+    // `extra` reaches the prompt, so two runs with different steers are two
+    // different generations. Keyed without it, the second one 409'd on "et likt
+    // utkast" — about a draft that is not alike at all.
+    const app = makeApp();
+    const first = parseSse(await (await post(app, "/api/jira/draft", {
+      notes: NOTES, template: "bug", depth: "skisse",
+    })).text());
+    await new Promise((r) => setTimeout(r, 20));
+    const draftId = String(first[0]!.data.draftId);
+
+    __setJiraOneShotForTest((() => new Promise(() => {})) as never);
+    void post(app, "/api/jira/draft", { template: "bug", depth: "skisse", draftId, extra: "fokuser på migrering" });
+    await new Promise((r) => setTimeout(r, 30));
+    const res = await post(app, "/api/jira/draft", {
+      template: "bug", depth: "skisse", draftId, extra: "fokuser på ytelse",
+    });
+    expect(res.status).toBe(200);
+  });
+
   test("the slot outlives the run's teardown by exactly the slack", () => {
     // Sized to exactly the budget, a slot frees itself while its holder is still
     // tearing down and a click on that boundary starts a concurrent run. The
     // previous spelling compared two BUDGETS and said nothing about the slack.
-    const key = jiraFlightKey("n", "bug", "skisse", [], "");
+    const key = jiraFlightKey({ notes: "n", template: "bug", depth: "skisse", extra: "", excludeDocIds: [], draftId: "" });
     const t0 = 1_000;
     expect(acquireJiraFlight(key, "skisse", t0).ok).toBe(true);
     const budget = JIRA_TIMEOUT_MS_BY_DEPTH.skisse;
@@ -659,6 +690,29 @@ describe("PUT /api/jira/draft/:id", () => {
     expect(body.keyVerdicts.map((v: { key: string }) => v.key)).toEqual(["MELOSYS-5677"]);
     expect(body.markdownFlags.map((f: { kind: string }) => f.kind)).toEqual(["task-list"]);
     expect(rows.get(id)!.markdown).toContain("- [ ] Krav");
+  });
+
+  test("the reader's text is stored BYTE-IDENTICAL — the [n] repair never runs here", async () => {
+    const app = makeApp();
+    const id = await seeded(app);
+    // Every one of these was destroyed by the repair when it ran on this path:
+    // `[2]` is a real citation marker the reader may have kept on purpose, `[13]`
+    // is an article of a regulation the stored-set bound (24) reached, `liste[2]`
+    // is an index expression and `[1](…)` is a link.
+    const edited =
+      "## Symptom\nSe MELOSYS-5677 [2]. Artikkel [13] i forordning 883/2004.\n" +
+      "liste[2] og `args[1]`, se [1](https://x.no).";
+    const res = await app.request(`/api/jira/draft/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ markdown: edited }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    // The client adopts what was STORED — otherwise the page shows "saved" over
+    // text that differs from the row it just wrote. Here they are the same text.
+    expect(body.markdown).toBe(edited);
+    expect(rows.get(id)!.markdown).toBe(edited);
   });
 
   test("a non-string / blank / over-cap markdown is a 400", async () => {
@@ -1046,5 +1100,38 @@ describe("the failure written to the row is generic", () => {
     expect(row.error).not.toContain("ECONNREFUSED");
     expect(row.error).not.toContain("/Users/rune");
     expect(String(row.error).length).toBeGreaterThan(10);
+  });
+});
+
+// ── The page ─────────────────────────────────────────────────────────────────
+
+/**
+ * `GET /jira` is registered from THIS module, the way `plans-routes.ts`
+ * registers `/plans` beside `/api/plans/*`. The assertion that matters is that
+ * the route exists and serves the shell the bundle mounts into — a page whose
+ * three column ids drifted would render blank with no error anywhere.
+ */
+describe("GET /jira", () => {
+  test("serves the composer shell, the nav and the client bundle", async () => {
+    const res = await makeApp().request("/jira");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/html");
+    const html = await res.text();
+    for (const id of ["jcRoot", "jcLeft", "jcMid", "jcRight"]) {
+      expect(html).toContain(`id="${id}"`);
+    }
+    // The nav entry lives in the Tools dropdown, not the top-level row.
+    expect(html).toContain('<a href="/jira" class="nav-dropdown-item active">Jira</a>');
+    // The bundle is inlined, not linked — there is no static asset route.
+    expect(html).toContain("/api/jira/templates");
+  });
+
+  test("the page does not depend on a bot being configured", async () => {
+    // The picker resolves client-side against `/api/jira/templates`, which
+    // answers the 503. A no-bot install must still render a page that SAYS so
+    // rather than 500ing on the way in.
+    discovered = [];
+    const res = await makeApp().request("/jira");
+    expect(res.status).toBe(200);
   });
 });
