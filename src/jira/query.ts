@@ -123,6 +123,33 @@ export function normalizeRetrievalQuestion(raw: string): string {
   return q.length <= JIRA_QUERY_MAX ? q : `${q.slice(0, JIRA_QUERY_MAX - 1)}…`;
 }
 
+/**
+ * How many characters of the raw material a question has to reproduce before it
+ * counts as an echo rather than a condensation.
+ *
+ * The failure being detected is the decomposer's own documented one, one layer
+ * up: a model handed a wall of text and asked for a question hands the wall back.
+ * 80 characters is well past any legitimate overlap (a real question quotes a
+ * service name, not the opening two sentences of a meeting note) and short enough
+ * that a note shorter than that is simply not judged — hence the floor below.
+ */
+export const JIRA_QUERY_ECHO_CHARS = 80;
+
+/**
+ * Does this "question" just hand the raw material back?
+ *
+ * Compared with whitespace collapsed and case folded, because a model that echoes
+ * usually re-wraps as it goes. Below the floor there is nothing to judge: a
+ * 30-character note and a good question about it can legitimately be the same
+ * words.
+ */
+export function echoesNotes(question: string, notes: string): boolean {
+  const flatNotes = notes.replace(/\s+/g, " ").trim().toLowerCase();
+  const q = question.replace(/\s+/g, " ").trim().toLowerCase();
+  if (!q || flatNotes.length < JIRA_QUERY_ECHO_CHARS) return false;
+  return q.startsWith(flatNotes.slice(0, JIRA_QUERY_ECHO_CHARS));
+}
+
 /** Condense the notes into one bounded retrieval question. Never throws. */
 export async function buildJiraRetrievalQuestion(
   opts: BuildJiraQueryOptions,
@@ -156,9 +183,15 @@ export async function buildJiraRetrievalQuestion(
   const haikuMs = performance.now() - t0;
   const question = normalizeRetrievalQuestion(raw);
   // An empty answer, or one that is just the notes echoed back (the decomposer's
-  // own passthrough failure, one layer up), is not a condensation.
-  if (!question || question.length > JIRA_QUERY_MAX) {
-    log.warn("jira_query_unusable bot={bot} len={len} — falling back", { bot: opts.botName, len: question.length });
+  // own passthrough failure, one layer up), is not a condensation. The length is
+  // NOT re-checked here — `normalizeRetrievalQuestion` has already clamped it, so
+  // the test that used to stand here could never fire and read as a guarantee.
+  if (!question || echoesNotes(question, opts.notes)) {
+    log.warn("jira_query_unusable bot={bot} len={len} echo={echo} — falling back", {
+      bot: opts.botName,
+      len: question.length,
+      echo: !!question,
+    });
     return { question: fallback, degraded: true, haikuMs };
   }
   return { question, degraded: false, haikuMs };

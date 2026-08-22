@@ -1,6 +1,16 @@
 /**
  * The per-depth tool fence, written in the CONNECTOR'S OWN DIALECT.
  *
+ * ⚠️ **Known limitation, accepted in v1 because `JIRA_BOT` is copilot.** On the
+ * `claude-cli` / `claude-sdk` dialects there is no `mcp:*` wildcard, so a
+ * tool-less depth's MCP fence is ENUMERATED from the live probe — and an empty or
+ * failed probe therefore leaves `Ingen`/`Skisse` with no MCP exclusions at all.
+ * The built-in half still binds (`WebSearch`/`WebFetch` here, plus
+ * `FENCED_EXCLUDED_TOOLS` from the runner), but the read-side built-ins the CLI
+ * ships with stay available. Fixing it properly means a dialect-native wildcard
+ * muninn does not have; a bot on those connectors must not be pinned as
+ * `JIRA_BOT` without revisiting this.
+ *
  * ── Why this file is not three string constants ──────────────────────────────
  *
  * `FENCED_EXCLUDED_TOOLS` covers built-ins only (`Write`, `Bash`, `Agent`,
@@ -37,7 +47,7 @@
  * inert-fix class this plan is written against, one layer up.
  *
  * Instead the list is built from the SAME `getMcpStatus` probe the `Full`
- * pre-flight already runs (`buildFullFence` takes its result), keeping every tool
+ * pre-flight already runs (`buildDepthFence` takes its result), keeping every tool
  * of every server that is not `code`/`yggdrasil`. The measurement that made this
  * decision, recorded verbatim because it is the thing a future reader will want
  * and cannot cheaply re-take:

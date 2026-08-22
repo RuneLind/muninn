@@ -121,17 +121,33 @@ export function jiraCoverageMessage(coverage: Exclude<JiraCoverage, "answer">): 
 }
 
 /**
+ * THE Jira key shape — one source, two consumers.
+ *
+ * `verify-keys.ts` scans the generated markdown with it and this module reads it
+ * off a doc id; they shipped as two regexes that DISAGREED (prefix ≥1 vs ≥2
+ * characters, ≤∞ vs ≤7 digits), which means a key could be extracted from the
+ * draft and never found in the index, or the other way round — a red row for a
+ * real issue. Digits go to 8: MELOSYS is at 5 figures and a corpus that reaches
+ * 7 would otherwise start failing silently.
+ */
+export const JIRA_KEY_SOURCE = "[A-Z][A-Z0-9]{1,15}-\\d{1,8}";
+
+/**
  * Pull the Jira key out of a `jira-issues` doc id (`<KEY>_<slug>.md`).
  *
  * Measured against the live listing on 2026-08-22: 2107 documents, every id of
  * that shape, prefixes MELOSYS (2102) / TESTLOOP (4) / SMOKE (1). Returns
  * undefined for any other collection — a Confluence page has no key, and
  * inventing one would put a broken `[KEY](url)` in `## Referanser`.
+ *
+ * `verify-keys.ts`'s index builder calls THIS function rather than re-deriving
+ * the shape, so the two sides of the verdict are matched by construction.
  */
+const DOC_ID_KEY_RE = new RegExp(`^(${JIRA_KEY_SOURCE})(?:[_.]|$)`);
+
 export function jiraKeyFromDocId(collection: string, docId: string): string | undefined {
   if (collection !== JIRA_ISSUES_COLLECTION) return undefined;
-  const m = /^([A-Z][A-Z0-9]*-\d+)(?:[_.]|$)/.exec(docId);
-  return m?.[1];
+  return DOC_ID_KEY_RE.exec(docId)?.[1];
 }
 
 /**
@@ -166,30 +182,52 @@ export function isLinkableUrl(url: string | undefined): url is string {
 }
 
 /**
+ * Unescape, then judge, one corpus url — the ONE place a citation's link is made.
+ *
+ * Measured on the live listing: **5 real `jira-issues` documents carry
+ * `https\://jira.adeo.no/browse/…`** — a markdown-escaped colon, from whatever
+ * wrote the source file. Judged raw it fails {@link isLinkableUrl}, the key
+ * renders BARE in `## Referanser`, and because two doc ids can share one key the
+ * same issue then appeared TWICE, once linked and once bare. Unescaping first is
+ * what makes those five ordinary links again.
+ *
+ * Everything not http(s) after that still returns undefined: `nav-wiki` documents
+ * carry `file://./huginn-nav/wiki/…`, the indexer's own on-disk path, which PR 0
+ * measured renders as a visibly broken Jira smart-link card.
+ */
+export function normalizeJiraUrl(url: string | undefined): string | undefined {
+  if (!url) return undefined;
+  const unescaped = url.trim().replace(/^(https?)\\+:/i, "$1:");
+  return isLinkableUrl(unescaped) ? unescaped : undefined;
+}
+
+/**
  * Turn ranked hits into this feature's citation rows.
  *
- * **The badge overwrite is load-bearing and is one of three things that must all
+ * **The badge overwrite is load-bearing and is one of two things that must BOTH
  * happen or the fix is inert** (the plan's badge note): `RESEARCH_CORPUS` is
  * derived from `RESEARCH_PROFILES`, not from `COLLECTION_META`, and
  * `badgeForCollection` reads `RESEARCH_CORPUS` — so the three entries added to
  * `COLLECTION_META` are dead to *that* function, and `buildCitations` has already
- * populated `badge` with the raw collection name via it. The three things:
- * (1) the entries exist in `COLLECTION_META`, (2) it is exported, and (3) the
- * badge is OVERWRITTEN here through `badgeFromCollectionMeta`, which reads the
- * array rather than the profile derivation. Doing any two of the three ships a
- * citation row badged `jira-issues`.
+ * populated `badge` with the raw collection name via it. The two things:
+ * (1) the entries exist in `COLLECTION_META`, and (2) the badge is OVERWRITTEN
+ * here through `badgeFromCollectionMeta`, which reads that array rather than the
+ * profile derivation. Doing one without the other ships a citation row badged
+ * `jira-issues`. (`COLLECTION_META` itself stays module-private in `corpus.ts` —
+ * `badgeFromCollectionMeta` is the whole public surface this needs.)
  */
 export function toJiraCitations(hits: ResearchHit[]): JiraCitation[] {
   return buildCitations(hits, JIRA_STORED_MAX_SOURCES).map((c) => {
     const key = jiraKeyFromDocId(c.collection, c.docId);
+    const url = normalizeJiraUrl(c.url);
     return {
       n: c.n,
       collection: c.collection,
       docId: c.docId,
       title: humanizeJiraTitle(c.collection, c.title, key),
-      // A non-http url is dropped at the SOURCE rather than filtered at each
-      // render site, so nothing downstream can accidentally emit a `file://`.
-      ...(isLinkableUrl(c.url) ? { url: c.url } : {}),
+      // Unescaped and judged at the SOURCE rather than at each render site, so
+      // nothing downstream can emit a `file://` or a `https\://`.
+      ...(url ? { url } : {}),
       badge: badgeFromCollectionMeta(c.collection),
       relevance: c.relevance,
       ...(c.snippet ? { snippet: clip(c.snippet, JIRA_SNIPPET_CHARS) } : {}),
@@ -319,8 +357,13 @@ export async function fetchFullDocuments(
       continue;
     }
     // The TOTAL budget is checked after the per-document clip, so one long page
-    // cannot eat the whole allowance and starve the next two silently.
-    if (total + r.value.text.length > JIRA_FULL_DOC_TOTAL_CHARS) break;
+    // cannot eat the whole allowance and starve the next two silently. `continue`,
+    // not `break`: a later, shorter document that still fits should ride along.
+    // (With today's constants — {@link JIRA_FULL_DOC_COUNT} 3 documents clipped at
+    // {@link JIRA_FULL_DOC_CHARS} 6 000 against a 15 000 total — the budget can
+    // only ever bind on the LAST document, so the two behave identically; this is
+    // the intent made correct ahead of any widening, not an observed fix.)
+    if (total + r.value.text.length > JIRA_FULL_DOC_TOTAL_CHARS) continue;
     total += r.value.text.length;
     out.push(r.value);
   }

@@ -64,10 +64,12 @@ export interface ResearchProfile {
  * entry no profile references is INVISIBLE to those two and `badgeForCollection`
  * still falls back to the raw collection name (the behaviour `answer.test.ts`
  * pins today, using `jira-issues` as its example). A consumer that wants these
- * badges must read THIS array (see `badgeFromCollectionMeta`), which is why it is
- * exported.
+ * badges must read THIS array — through `badgeFromCollectionMeta`, which is the
+ * whole public surface it needs. The array itself stays module-private: exporting
+ * it invites a second consumer to re-derive badges (or worse, to widen
+ * `RESEARCH_CORPUS`) instead.
  */
-export const COLLECTION_META: ResearchCollection[] = [
+const COLLECTION_META: ResearchCollection[] = [
   { collection: "anthropic-summaries", label: "Claude summaries", badge: "Claude", sourceId: "anthropic" },
   { collection: "anthropic-knowledge", label: "Anthropic firehose", badge: "Anthropic" },
   { collection: "youtube-summaries", label: "YouTube", badge: "YouTube", sourceId: "youtube" },

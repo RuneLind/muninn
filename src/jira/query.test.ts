@@ -159,3 +159,61 @@ describe("what the live corpus actually returns", () => {
     expect(isLinkableUrl("https://jira.adeo.no/browse/MELOSYS-1")).toBe(true);
   });
 });
+
+// ── The echo check, the url normalization and the full-document budget ───────
+
+import { normalizeJiraUrl } from "./retrieval.ts";
+
+describe("an echoed question is a degrade, not a condensation", () => {
+  test("the notes handed back verbatim fall back to the bounded question", async () => {
+    const long = `${NOTES} `.repeat(20);
+    const r = await buildJiraRetrievalQuestion({
+      notes: long,
+      botName: "melosys",
+      haiku: haikuOk(long),
+    });
+    expect(r.degraded).toBe(true);
+    expect(r.question.length).toBeLessThanOrEqual(JIRA_QUERY_MAX);
+  });
+
+  test("a question that merely STARTS with the raw material is an echo too", async () => {
+    const r = await buildJiraRetrievalQuestion({
+      notes: NOTES,
+      botName: "melosys",
+      haiku: haikuOk(`${NOTES} Hva er årsaken?`),
+    });
+    expect(r.degraded).toBe(true);
+  });
+
+  test("a real condensation is not mistaken for an echo", async () => {
+    const r = await buildJiraRetrievalQuestion({
+      notes: NOTES,
+      botName: "melosys",
+      haiku: haikuOk("Hvordan beregnes årsavregning av trygdeavgift, og hva gjør faktureringskomponenten?"),
+    });
+    expect(r.degraded).toBe(false);
+  });
+});
+
+describe("normalizeJiraUrl", () => {
+  test("unescapes the `https\\://` five real jira-issues docs carry", () => {
+    expect(normalizeJiraUrl("https\\://jira.adeo.no/browse/MELOSYS-1")).toBe(
+      "https://jira.adeo.no/browse/MELOSYS-1",
+    );
+  });
+  test("still drops a non-http url", () => {
+    expect(normalizeJiraUrl("file://./huginn-nav/wiki/entities/MEDL.md")).toBeUndefined();
+    expect(normalizeJiraUrl(undefined)).toBeUndefined();
+  });
+  test("an escaped url survives all the way onto the citation row", () => {
+    const hits = [{
+      collection: "jira-issues",
+      id: "MELOSYS-1_x.md",
+      title: "MELOSYS-1_x",
+      url: "https\\://jira.adeo.no/browse/MELOSYS-1",
+      relevance: 0.9,
+      viaSubQuestion: ["q"],
+    }] as unknown as ResearchHit[];
+    expect(toJiraCitations(hits)[0]!.url).toBe("https://jira.adeo.no/browse/MELOSYS-1");
+  });
+});

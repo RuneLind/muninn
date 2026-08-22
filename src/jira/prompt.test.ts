@@ -228,3 +228,57 @@ describe("parseJiraDraftBody", () => {
     expect(parseJiraDraftBody({ ...ok, draftId: "d", excludeDocIds: "a" }).ok).toBe(false);
   });
 });
+
+// ── `## Referanser` correctness ──────────────────────────────────────────────
+
+describe("appendReferences — one resolvable line per source", () => {
+  test("DE-DUPES by key — two doc ids for one issue rendered it twice, once bare", () => {
+    const linked = cite(5);
+    const bare: JiraCitation = { ...cite(6), docId: "MELOSYS-5_kopi.md", key: "MELOSYS-5", title: "Sak 5" };
+    delete (bare as { url?: string }).url;
+    const md = appendReferences("# Sak", [linked, bare]);
+    expect(md.split("\n").filter((l) => l.startsWith("- "))).toHaveLength(1);
+    expect(md).toContain("- [MELOSYS-5](https://jira.adeo.no/browse/MELOSYS-5)");
+  });
+
+  test("prefers the LINKED spelling whichever order the two arrive in", () => {
+    const bare: JiraCitation = { ...cite(7), docId: "MELOSYS-7_kopi.md", key: "MELOSYS-7" };
+    delete (bare as { url?: string }).url;
+    const md = appendReferences("# Sak", [bare, cite(7)]);
+    expect(md).toContain("- [MELOSYS-7](https://jira.adeo.no/browse/MELOSYS-7)");
+  });
+
+  test("a keyed source with NO linkable url keeps its title — a bare key alone is unreadable", () => {
+    const bare: JiraCitation = { ...cite(8), title: "Feil i årsavregning" };
+    delete (bare as { url?: string }).url;
+    expect(appendReferences("# Sak", [bare])).toContain("- MELOSYS-8 — Feil i årsavregning");
+  });
+});
+
+describe("stripWrappingFence — the info-string case", () => {
+  test("a ```markdown wrapper is dropped", () => {
+    expect(stripWrappingFence("```markdown\n## Symptom\n```")).toBe("## Symptom");
+  });
+});
+
+describe("parseJiraDraftBody — notes on a regenerate", () => {
+  test("NEW notes with a draftId are a 400 — the stored hit set was retrieved for the OLD ones", () => {
+    const r = parseJiraDraftBody({
+      draftId: "8a1f4c2e-0000-4000-8000-000000000000",
+      template: "bug",
+      depth: "skisse",
+      notes: "helt andre notater",
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain("notes");
+  });
+
+  test("a regenerate with BLANK notes is still fine — the page does not echo the thread back", () => {
+    const r = parseJiraDraftBody({
+      draftId: "8a1f4c2e-0000-4000-8000-000000000000",
+      template: "bug",
+      depth: "skisse",
+    });
+    expect(r.ok).toBe(true);
+  });
+});

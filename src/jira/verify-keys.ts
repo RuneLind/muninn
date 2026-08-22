@@ -40,7 +40,12 @@
 
 import { fetchKnowledgeApi } from "../ai/knowledge-api-client.ts";
 import type { JiraCitation, JiraKeyVerdict } from "./wire.ts";
-import { JIRA_ISSUES_COLLECTION } from "./retrieval.ts";
+import {
+  JIRA_ISSUES_COLLECTION,
+  JIRA_KEY_SOURCE,
+  jiraKeyFromDocId,
+  normalizeJiraUrl,
+} from "./retrieval.ts";
 import { maskFencedCode } from "./markdown-scan.ts";
 import { getLog } from "../logging.ts";
 
@@ -65,8 +70,16 @@ export const JIRA_KEY_DENYLIST = new Set([
   "BUC", "SED", "EU", "EF", "EØS", "ISO8601", "UTF8", "SHA256", "MD", "CVE",
 ]);
 
-/** The key shape. Anchored on a word boundary so `xMELOSYS-1` does not match. */
-const KEY_RE = /\b([A-Z][A-Z0-9]{1,15})-(\d{1,7})\b/g;
+/**
+ * The key shape, built from the SHARED {@link JIRA_KEY_SOURCE}.
+ *
+ * It used to be a second, hand-written regex that disagreed with
+ * `jiraKeyFromDocId` on both ends (prefix length and digit count), so a key the
+ * scanner accepted could be absent from an index built by the other — a red
+ * "fabricated" row for a real issue. Anchored on a word boundary so `xMELOSYS-1`
+ * does not match.
+ */
+const KEY_RE = new RegExp(`\\b(${JIRA_KEY_SOURCE})\\b`, "g");
 
 /** Every candidate key in the markdown, fenced code excluded, in first-seen order. */
 export function extractJiraKeys(markdown: string): string[] {
@@ -74,9 +87,9 @@ export function extractJiraKeys(markdown: string): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
   for (const m of masked.matchAll(KEY_RE)) {
-    const prefix = m[1]!;
-    if (JIRA_KEY_DENYLIST.has(prefix)) continue;
-    const key = `${prefix}-${m[2]}`;
+    const key = m[1]!;
+    // The prefix can hold no `-` by construction, so this is the whole of it.
+    if (JIRA_KEY_DENYLIST.has(key.slice(0, key.indexOf("-")))) continue;
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(key);
@@ -96,27 +109,47 @@ interface KeyIndex {
   fetchedAtMs: number;
 }
 
-let cached: KeyIndex | null = null;
-let inFlight: Promise<KeyIndex | null> | null = null;
+/**
+ * Cached per huginn BASE URL, not process-wide.
+ *
+ * One muninn can be pointed at more than one knowledge API (a second instance, a
+ * test fixture, `?knowledgeApiUrl` in a benchmark), and a single slot served the
+ * first caller's corpus to the second — i.e. every key of a different instance
+ * marked fabricated, which is the one verdict this file exists to get right.
+ */
+const cached = new Map<string, KeyIndex>();
+const inFlight = new Map<string, Promise<KeyIndex | null>>();
 
-/** Test-only: drop the cached listing. */
+/** Test-only: drop every cached listing. */
 export function __resetJiraKeyIndexForTest(): void {
-  cached = null;
-  inFlight = null;
+  cached.clear();
+  inFlight.clear();
 }
 
 interface ListedDoc { id?: unknown; url?: unknown }
 
-/** Build the key → url map from one listing response. Exported for the unit test. */
+/**
+ * Build the key → url map from one listing response. Exported for the unit test.
+ *
+ * Two rules, both learned from the live corpus:
+ *
+ *  · the key is read with the SHARED `jiraKeyFromDocId`, so the index and the
+ *    markdown scanner cannot disagree about what a key looks like;
+ *  · the url goes through `normalizeJiraUrl` (5 real docs carry an escaped
+ *    `https\://`) and a LINKABLE url beats a missing one. First-wins let a
+ *    url-less duplicate id — routine, since two ids can share a key — shadow the
+ *    good link and render the verdict row unclickable.
+ */
 export function indexFromListing(docs: ListedDoc[]): Map<string, string | undefined> {
   const byKey = new Map<string, string | undefined>();
   for (const d of docs) {
     if (typeof d?.id !== "string") continue;
     // PREFIX match on the id: `<KEY>_<slug>.md`. The separator is part of the
     // match so `MELOSYS-1` cannot claim `MELOSYS-1234_…`.
-    const m = /^([A-Z][A-Z0-9]*-\d+)(?:[_.]|$)/.exec(d.id);
-    if (!m) continue;
-    if (!byKey.has(m[1]!)) byKey.set(m[1]!, typeof d.url === "string" ? d.url : undefined);
+    const key = jiraKeyFromDocId(JIRA_ISSUES_COLLECTION, d.id);
+    if (!key) continue;
+    const url = typeof d.url === "string" ? normalizeJiraUrl(d.url) : undefined;
+    if (!byKey.has(key) || (url && !byKey.get(key))) byKey.set(key, url);
   }
   return byKey;
 }
@@ -134,10 +167,12 @@ export async function loadJiraKeyIndex(
   fetchApi: typeof fetchKnowledgeApi = fetchKnowledgeApi,
   now: number = Date.now(),
 ): Promise<KeyIndex | null> {
-  if (cached && now - cached.fetchedAtMs < JIRA_KEY_INDEX_TTL_MS) return cached;
-  if (inFlight) return inFlight;
+  const held = cached.get(knowledgeApiUrl);
+  if (held && now - held.fetchedAtMs < JIRA_KEY_INDEX_TTL_MS) return held;
+  const running = inFlight.get(knowledgeApiUrl);
+  if (running) return running;
 
-  inFlight = (async () => {
+  const pending = (async () => {
     try {
       const raw = (await fetchApi(
         knowledgeApiUrl,
@@ -153,7 +188,7 @@ export async function loadJiraKeyIndex(
         return null;
       }
       const index: KeyIndex = { byKey: indexFromListing(docs), fetchedAtMs: now };
-      cached = index;
+      cached.set(knowledgeApiUrl, index);
       return index;
     } catch (err) {
       log.warn("jira key index fetch failed error={error}", {
@@ -161,10 +196,11 @@ export async function loadJiraKeyIndex(
       });
       return null;
     } finally {
-      inFlight = null;
+      inFlight.delete(knowledgeApiUrl);
     }
   })();
-  return inFlight;
+  inFlight.set(knowledgeApiUrl, pending);
+  return pending;
 }
 
 // ── The pass ─────────────────────────────────────────────────────────────────
@@ -192,9 +228,12 @@ export async function verifyJiraKeys(input: VerifyKeysInput): Promise<JiraKeyVer
   const keys = extractJiraKeys(input.markdown);
   if (keys.length === 0) return [];
 
+  // Same preference rule as the corpus index: two citations can carry one key,
+  // and last-wins let a url-less duplicate erase the good link on the verdict.
   const retrieved = new Map<string, string | undefined>();
   for (const c of input.citations) {
-    if (c.key) retrieved.set(c.key, c.url);
+    if (!c.key) continue;
+    if (!retrieved.has(c.key) || (c.url && !retrieved.get(c.key))) retrieved.set(c.key, c.url);
   }
   // The notes are scanned with the SAME extractor, denylist included: a
   // `UTF-8` in the raw material must not turn a `UTF-8` in the draft amber.

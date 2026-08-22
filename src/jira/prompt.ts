@@ -18,6 +18,7 @@
  * Pure + IO-free, like its siblings: no filesystem, no model, no huginn.
  */
 
+import { neutralizePromptFence } from "../utils/prompt-fence.ts";
 import type { JiraCitation, JiraDepth } from "./wire.ts";
 import { JIRA_BODY_MAX } from "./wire.ts";
 import type { JiraFullDoc } from "./retrieval.ts";
@@ -30,15 +31,11 @@ import type { JiraFullDoc } from "./retrieval.ts";
  * have whatever follows read as instructions. **A pasted Slack thread is the
  * highest-risk input in this feature** — it is the one field that routinely
  * contains code, quotes and other people's text — so this is not theoretical.
- * Same treatment and same rationale as `neutralizeShareFence`: keep the readable
- * content, destroy the structural marker; idempotent, since the result no longer
- * matches. Spelled locally rather than imported for the same reason it is spelled
- * locally there — those live in modules that drag whole route graphs behind them,
- * and this file is pure by contract.
+ * The implementation is the shared `neutralizePromptFence`
+ * (`src/utils/prompt-fence.ts`, dependency-free like this file); the local name
+ * stays because the module's prose and tests call it that.
  */
-export function neutralizeJiraFence(text: string): string {
-  return text.replace(/"{3,}/g, '"');
-}
+export const neutralizeJiraFence = neutralizePromptFence;
 
 /** The rider that pins how much technical solution the task carries. */
 export function depthRider(depth: JiraDepth): string {
@@ -221,12 +218,29 @@ export function buildJiraUserPrompt(input: JiraTaskInput): BuiltJiraPrompt {
  */
 export function appendReferences(markdown: string, citations: JiraCitation[]): string {
   if (citations.length === 0) return markdown.trimEnd();
-  const lines = citations.map((c) => {
+
+  // ONE line per ISSUE, not per document. Two doc ids can carry the same key (a
+  // re-indexed issue, a `_kopi` slug), and both being in the retained set put the
+  // same issue in the list twice — once linked and, when the duplicate's url was
+  // unusable, once BARE, which reads as two different sources.
+  const byRef = new Map<string, JiraCitation>();
+  for (const c of citations) {
+    const ref = c.key ?? c.docId;
+    const held = byRef.get(ref);
+    // A linked spelling beats an unlinked one whichever order they arrive in —
+    // the link is the whole reason the section is built server-side.
+    if (!held || (!held.url && c.url)) byRef.set(ref, c);
+  }
+
+  const lines = [...byRef.values()].map((c) => {
     const label = c.key ?? c.title;
     // A Jira source shows `[KEY](url) — title`; everything else `[title](url)`,
     // so the title is never printed twice.
     const tail = c.key && c.title && c.title !== c.key ? ` — ${c.title}` : "";
-    return c.url ? `- [${label}](${c.url})${tail}` : `- ${label}`;
+    // The title rides the UNLINKED line too: a bare `MELOSYS-8028` tells the
+    // reader nothing, and this line exists precisely because there is no link to
+    // click through to.
+    return c.url ? `- [${label}](${c.url})${tail}` : `- ${label}${tail}`;
   });
   return `${markdown.trimEnd()}\n\n## Referanser\n\n${lines.join("\n")}\n`;
 }
@@ -237,24 +251,8 @@ export function appendReferences(markdown: string, citations: JiraCitation[]): s
  * Every shipped template says "markdown only, no wrapping code fence", and a
  * model that ignores it does not produce a slightly-off task — it produces a task
  * that pastes into Jira as one syntax-highlighted code block with the markdown
- * showing. Cheaper to undo here than to explain.
- *
- * Deliberately narrow, and the interior check is what makes "first line + last
- * line" mean "ONE fence": the outer match is greedy by construction, so a draft
- * that merely BEGINS and ENDS with a code block would otherwise have both of its
- * real fences stripped and its prose spliced into code. A run of the same marker
- * at the start of an interior line, at least as long as the opener, disqualifies
- * the match. Same shape and same tradeoff as `stripWrappingFence` in
- * `src/share/prompt.ts` — under-stripping costs one visible fence the reader can
- * delete, over-stripping silently corrupts the task.
+ * showing. Re-exported from the shared `src/utils/prompt-fence.ts`: this was a
+ * byte copy of the share module's spelling, and the ```` ```markdown ```` gap
+ * both carried had to be found twice.
  */
-export function stripWrappingFence(text: string): string {
-  const trimmed = text.trim();
-  const m = /^(`{3,}|~{3,})[ \t]*\r?\n([\s\S]*)\r?\n\1[ \t]*$/.exec(trimmed);
-  if (!m) return trimmed;
-  const marker = m[1]!;
-  const interior = m[2]!;
-  const innerCloser = new RegExp(`(?:^|\\n)[ \\t]{0,3}[${marker[0]}]{${marker.length},}`);
-  if (innerCloser.test(interior)) return trimmed;
-  return interior.trim();
-}
+export { stripWrappingFence } from "../utils/prompt-fence.ts";

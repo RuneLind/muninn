@@ -194,3 +194,65 @@ describe("verifyJiraKeys — the three states", () => {
     expect(verdicts[0]!.url).toBe("https://jira.adeo.no/browse/MELOSYS-8028");
   });
 });
+
+// ── The key index: url quality and one shared key shape ──────────────────────
+
+import { loadJiraKeyIndex } from "./verify-keys.ts";
+import { jiraKeyFromDocId } from "./retrieval.ts";
+
+describe("indexFromListing — the url on a verdict must be usable", () => {
+  test("normalizes the escaped `https\\://` real docs carry", () => {
+    const idx = indexFromListing([
+      { id: "MELOSYS-5677_Ny_flyt.md", url: "https\\://jira.adeo.no/browse/MELOSYS-5677" },
+    ]);
+    expect(idx.get("MELOSYS-5677")).toBe("https://jira.adeo.no/browse/MELOSYS-5677");
+  });
+
+  test("prefers a LINKABLE url over none — first-wins dropped good links on a duplicate", () => {
+    const idx = indexFromListing([
+      { id: "MELOSYS-1_a.md" },
+      { id: "MELOSYS-1_b.md", url: "https://jira.adeo.no/browse/MELOSYS-1" },
+    ]);
+    expect(idx.get("MELOSYS-1")).toBe("https://jira.adeo.no/browse/MELOSYS-1");
+  });
+
+  test("a `file://` url is dropped rather than rendered as a link", () => {
+    const idx = indexFromListing([{ id: "MELOSYS-2_a.md", url: "file://./huginn-nav/MELOSYS-2.md" }]);
+    expect(idx.has("MELOSYS-2")).toBe(true);
+    expect(idx.get("MELOSYS-2")).toBeUndefined();
+  });
+
+  test("the index reads keys through the SAME `jiraKeyFromDocId` the citations do", () => {
+    // 8 digits, and a one-character project prefix is not a key on either side.
+    expect(jiraKeyFromDocId("jira-issues", "MELOSYS-12345678_x.md")).toBe("MELOSYS-12345678");
+    expect(extractJiraKeys("MELOSYS-12345678")).toEqual(["MELOSYS-12345678"]);
+    expect(jiraKeyFromDocId("jira-issues", "M-1_x.md")).toBeUndefined();
+    expect(extractJiraKeys("M-1")).toEqual([]);
+    expect(indexFromListing([{ id: "MELOSYS-12345678_x.md" }]).has("MELOSYS-12345678")).toBe(true);
+  });
+});
+
+describe("the retrieved-citation map keeps the BEST url", () => {
+  test("a url-less duplicate citation cannot overwrite a linked one", async () => {
+    const linked: JiraCitation = { ...cite(1, "MELOSYS-1_a.md", "MELOSYS-1"), url: "https://jira.adeo.no/browse/MELOSYS-1" };
+    const bare = cite(2, "MELOSYS-1_b.md", "MELOSYS-1");
+    const verdicts = await verifyJiraKeys({
+      markdown: "Se MELOSYS-1.",
+      citations: [linked, bare],
+      notes: "",
+      knowledgeApiUrl: "http://huginn.test",
+      fetchApi: deadHuginn,
+    });
+    expect(verdicts[0]!.url).toBe("https://jira.adeo.no/browse/MELOSYS-1");
+  });
+});
+
+describe("the listing cache is keyed on the huginn base url", () => {
+  test("a second instance is not served the first one's index", async () => {
+    const a = await loadJiraKeyIndex("http://a.test", listing(["MELOSYS-1_a.md"]));
+    const b = await loadJiraKeyIndex("http://b.test", listing(["MELOSYS-2_b.md"]));
+    expect(a!.byKey.has("MELOSYS-1")).toBe(true);
+    expect(b!.byKey.has("MELOSYS-2")).toBe(true);
+    expect(b!.byKey.has("MELOSYS-1")).toBe(false);
+  });
+});
