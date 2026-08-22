@@ -21,6 +21,10 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .env.test.local
 .env.production.local
 .env.local
+# Hand-made .env snapshots (e.g. .env.bak-presync) — same secrets, not ignored
+# by the lines above, so one `git add -A` would stage them.
+.env.bak*
+.env.*.bak
 
 # caches
 .eslintcache
