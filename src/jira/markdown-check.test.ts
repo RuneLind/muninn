@@ -76,6 +76,14 @@ describe("does NOT flag what converts", () => {
     expect(checkJiraMarkdown("Feltet er en List<String> og a < b < c.")).toEqual([]);
   });
 
+  test("a SINGLE-LETTER type parameter is prose too — the case the tag list's own docstring exempts", () => {
+    // `a b i p s u` are all real HTML tags; case-insensitively they also match
+    // every one-letter Kotlin generic, which is ordinary prose in this corpus.
+    expect(kinds("Returtypen er Flow<S> og repoet er List<P>.")).toEqual([]);
+    expect(kinds("Vi mapper til Either<A, B> i tjenesten.")).toEqual([]);
+    expect(kinds("Signaturen er Result<T, E> — se koden.")).toEqual([]);
+  });
+
   test("a ratio, a timestamp and a URL are not emoji shortcodes", () => {
     expect(checkJiraMarkdown("Forholdet 3:2:1 kl. 09:00:00, se https://example.test:8080/x")).toEqual([]);
   });
@@ -93,6 +101,21 @@ describe("the scan is neither noisy nor blind", () => {
     expect(kinds("Skriv `h2.` i stedet for `## `.")).toEqual([]);
     // The same tag OUTSIDE the code span is still flagged.
     expect(kinds("Bruk `<div>` men ikke <span>her</span>.")).toEqual(["html"]);
+  });
+
+  test("an UNPAIRED backtick does not blank the prose after it", () => {
+    // The over-masking case. With an odd number of backticks the left-to-right
+    // pairing is a guess, and here it guesses wrong: the stray backtick after
+    // "Bruk" pairs with the one opening `raw`, and everything between them — a
+    // real `<div>` the paste will mangle — is masked out of the scan entirely.
+    // The module's own rule is that under-masking costs a dismissible flag while
+    // over-masking hides real breakage, so an ambiguous line is left unmasked.
+    expect(kinds("Bruk ` som skille og <div>x</div> er `raw`")).toEqual(["html"]);
+    // Still flagged where the pairing was already right…
+    expect(kinds("Bruk `foo og `bar` <div>x</div>")).toEqual(["html"]);
+    // …and a line whose spans DO pair up still masks every one of them.
+    expect(kinds("`a` og `b`")).toEqual([]);
+    expect(kinds("Bruk `<div>` og `<span>` som eksempler.")).toEqual([]);
   });
 
   test("HTML matching is case-insensitive — `<DIV>` mangles exactly like `<div>`", () => {

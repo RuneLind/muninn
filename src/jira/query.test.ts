@@ -18,12 +18,14 @@ import {
   applyExclusions,
   humanizeJiraTitle,
   isLinkableUrl,
+  jiraKeyFor,
   jiraKeyFromDocId,
   sliceForDepth,
   toJiraCitations,
   JIRA_MAX_SOURCES_BY_DEPTH,
   JIRA_STORED_MAX_SOURCES,
 } from "./retrieval.ts";
+import { appendReferences } from "./prompt.ts";
 import type { ResearchHit } from "../ai/research-knowledge.ts";
 import type { JiraCitation } from "./wire.ts";
 
@@ -92,6 +94,38 @@ describe("citation helpers", () => {
     // `## Referanser`.
     expect(jiraKeyFromDocId("melosys-confluence-v3", "MELOSYS-8028_x.md")).toBeUndefined();
     expect(jiraKeyFromDocId("jira-issues", "readme.md")).toBeUndefined();
+  });
+
+  test("jiraKeyFor reads the key off a /browse/ url in ANY collection", () => {
+    // The real nav-wiki shape, measured on the live corpus: the wiki carries a
+    // page PER ISSUE under `sources/jira/`, whose url is the issue itself. The
+    // doc id gives nothing away outside `jira-issues`, so retrieval surfaced the
+    // issue while the verdict stayed amber `notes` — "the reader wrote it, we
+    // never retrieved it" — about an issue that had just been retrieved.
+    expect(jiraKeyFor("nav-wiki", "sources/jira/MELOSYS-5677.md", "https://jira.adeo.no/browse/MELOSYS-5677"))
+      .toBe("MELOSYS-5677");
+    // The doc-id rule still wins where it applies, and still only there.
+    expect(jiraKeyFor("jira-issues", "MELOSYS-8028_Manglende.md")).toBe("MELOSYS-8028");
+    expect(jiraKeyFor("nav-wiki", "entities/MEDL.md", "file://./huginn-nav/wiki/entities/MEDL.md"))
+      .toBeUndefined();
+    // A Confluence page that merely LINKS to an issue is not that issue.
+    expect(jiraKeyFor("melosys-confluence-v3", "arkitektur.md", "https://confluence.test/x")).toBeUndefined();
+  });
+
+  test("a nav-wiki issue page and its jira-issues twin are ONE Referanser line", () => {
+    const cites = toJiraCitations([
+      {
+        collection: "jira-issues", id: "MELOSYS-5677_Ny_flyt.md", title: "MELOSYS-5677_Ny_flyt",
+        url: "https://jira.adeo.no/browse/MELOSYS-5677", relevance: 0.9, viaSubQuestion: ["q"],
+      },
+      {
+        collection: "nav-wiki", id: "sources/jira/MELOSYS-5677.md", title: "MELOSYS-5677",
+        url: "https://jira.adeo.no/browse/MELOSYS-5677", relevance: 0.8, viaSubQuestion: ["q"],
+      },
+    ] as unknown as ResearchHit[]);
+    expect(cites.map((c) => c.key)).toEqual(["MELOSYS-5677", "MELOSYS-5677"]);
+    const refs = appendReferences("# Sak\n", cites);
+    expect(refs.split("\n").filter((l) => l.startsWith("- "))).toHaveLength(1);
   });
 
   test("toJiraCitations OVERWRITES the badge — the inert-fix trap", () => {
@@ -183,6 +217,28 @@ describe("an echoed question is a degrade, not a condensation", () => {
       haiku: haikuOk(`${NOTES} Hva er årsaken?`),
     });
     expect(r.degraded).toBe(true);
+  });
+
+  test("a condensation that QUOTES the note's opening sentence is not an echo", async () => {
+    // The reported false positive: a good question that opens by quoting the
+    // refinement's first sentence verbatim (well past the 80-char floor) and then
+    // asks its own thing. The old prefix test flagged it, and the fallback it
+    // degraded to — the first 400 chars of the note — is MORE passthrough-shaped
+    // than the question it threw away.
+    const notes = [
+      "Årsavregning av trygdeavgift feiler når saken allerede er fakturert i faktureringskomponenten.",
+      "Vi gikk gjennom loggene og fant at avstemmingen kjører to ganger.",
+      "Ligner MELOSYS-5677, men der var det manuell fakturering.",
+      "Neste steg: sjekke om trygdeavgiftberegningen kalles på nytt ved reberegning.",
+    ].join(" ");
+    // 93 shared leading characters — past the 80-char floor — but only 31% of the
+    // notes and 53% of the question. It reproduces neither side.
+    const q =
+      "Årsavregning av trygdeavgift feiler når saken allerede er fakturert i faktureringskomponenten — " +
+      "hvordan henger avstemmingen sammen med reberegning, og hva gjorde MELOSYS-5677?";
+    const r = await buildJiraRetrievalQuestion({ notes, botName: "melosys", haiku: haikuOk(q) });
+    expect(r.degraded).toBe(false);
+    expect(r.question).toBe(q);
   });
 
   test("a real condensation is not mistaken for an echo", async () => {

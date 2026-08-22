@@ -124,30 +124,60 @@ export function normalizeRetrievalQuestion(raw: string): string {
 }
 
 /**
- * How many characters of the raw material a question has to reproduce before it
- * counts as an echo rather than a condensation.
- *
- * The failure being detected is the decomposer's own documented one, one layer
- * up: a model handed a wall of text and asked for a question hands the wall back.
- * 80 characters is well past any legitimate overlap (a real question quotes a
- * service name, not the opening two sentences of a meeting note) and short enough
- * that a note shorter than that is simply not judged — hence the floor below.
+ * Floor on the verbatim overlap. Below this there is nothing to judge — a
+ * 30-character note and a good question about it can legitimately be the same
+ * words — and it also bounds the cost of a stray coincidence.
  */
 export const JIRA_QUERY_ECHO_CHARS = 80;
+
+/** Share of the NOTES a question has to reproduce to count as handing them back. */
+export const JIRA_ECHO_NOTES_SHARE = 0.6;
+/** Share of the QUESTION that has to be a verbatim copy of the notes' opening. */
+export const JIRA_ECHO_QUESTION_SHARE = 0.9;
+
+/** Length of the shared leading run of two already-flattened strings. */
+function sharedPrefixLength(a: string, b: string): number {
+  const max = Math.min(a.length, b.length);
+  let i = 0;
+  while (i < max && a.charCodeAt(i) === b.charCodeAt(i)) i++;
+  return i;
+}
 
 /**
  * Does this "question" just hand the raw material back?
  *
- * Compared with whitespace collapsed and case folded, because a model that echoes
- * usually re-wraps as it goes. Below the floor there is nothing to judge: a
- * 30-character note and a good question about it can legitimately be the same
- * words.
+ * **The rule, stated:** measure the verbatim leading run the question shares with
+ * the notes (whitespace collapsed, case folded — a model that echoes usually
+ * re-wraps as it goes). It is an echo when that run is at least
+ * {@link JIRA_QUERY_ECHO_CHARS} long AND it either covers most of the NOTES
+ * ({@link JIRA_ECHO_NOTES_SHARE}) or is nearly the whole QUESTION
+ * ({@link JIRA_ECHO_QUESTION_SHARE}). Both disjuncts describe passthrough from
+ * one end: the first is "the question contains the raw material", the second is
+ * "the question is nothing but the raw material's opening" — which is the shape a
+ * long note produces, since `normalizeRetrievalQuestion` has already clamped the
+ * echo to `JIRA_QUERY_MAX` and it is then a small fraction of the notes.
+ *
+ * A bare prefix test — what shipped first — is neither. A perfectly good question
+ * that OPENS by quoting the refinement's first sentence (routinely past 80
+ * characters: "Årsavregning av trygdeavgift feiler når saken allerede er
+ * fakturert i faktureringskomponenten…") and then asks its own thing reproduces
+ * 31% of the notes and 53% of itself, and was thrown away for the fallback — the
+ * notes' first 400 characters, i.e. something strictly MORE passthrough-shaped
+ * than the question it replaced. The degrade has to be an improvement or it is
+ * just a worse query with a warning attached.
+ *
+ * The one accepted false positive is a SHORT note: quote 85% of a 100-character
+ * note and this calls it an echo. On a note that short the fallback IS the note,
+ * so the two answers are the same string and only the log line differs.
  */
 export function echoesNotes(question: string, notes: string): boolean {
   const flatNotes = notes.replace(/\s+/g, " ").trim().toLowerCase();
   const q = question.replace(/\s+/g, " ").trim().toLowerCase();
   if (!q || flatNotes.length < JIRA_QUERY_ECHO_CHARS) return false;
-  return q.startsWith(flatNotes.slice(0, JIRA_QUERY_ECHO_CHARS));
+  const shared = sharedPrefixLength(q, flatNotes);
+  if (shared < JIRA_QUERY_ECHO_CHARS) return false;
+  return shared >= flatNotes.length * JIRA_ECHO_NOTES_SHARE
+    || shared >= q.length * JIRA_ECHO_QUESTION_SHARE;
 }
 
 /** Condense the notes into one bounded retrieval question. Never throws. */
@@ -186,11 +216,17 @@ export async function buildJiraRetrievalQuestion(
   // own passthrough failure, one layer up), is not a condensation. The length is
   // NOT re-checked here — `normalizeRetrievalQuestion` has already clamped it, so
   // the test that used to stand here could never fire and read as a guarantee.
-  if (!question || echoesNotes(question, opts.notes)) {
+  // Computed ONCE and both branched on and logged: the log used to report
+  // `!!question`, i.e. "was there a question at all" under the name `echo`, so the
+  // one line that says WHY the fallback fired said the opposite of the truth on
+  // both paths (`echo=true` on an echo AND on a perfectly good empty-string case
+  // it was not describing).
+  const echo = !!question && echoesNotes(question, opts.notes);
+  if (!question || echo) {
     log.warn("jira_query_unusable bot={bot} len={len} echo={echo} — falling back", {
       bot: opts.botName,
       len: question.length,
-      echo: !!question,
+      echo,
     });
     return { question: fallback, degraded: true, haikuMs };
   }

@@ -49,17 +49,16 @@ import {
   appendReferences,
   buildJiraSystemPrompt,
   buildJiraUserPrompt,
-  stripWrappingFence,
+  stripJiraWrappingFence,
 } from "../../jira/prompt.ts";
 import { buildDepthFence } from "../../jira/tool-fence.ts";
 import { checkJiraMarkdown } from "../../jira/markdown-check.ts";
 import { verifyJiraKeys } from "../../jira/verify-keys.ts";
-import type { JiraCitation, JiraDepth, JiraDonePayload } from "../../jira/wire.ts";
+import { effectiveCoverage, type JiraCitation, type JiraDepth, type JiraDonePayload } from "../../jira/wire.ts";
 import {
   createJiraDraft,
   failJiraDraft,
   finishJiraDraft,
-  saveJiraDraftCoverage,
   saveJiraDraftRetrieval,
   startJiraDraftRun,
 } from "../../db/jira-drafts.ts";
@@ -223,6 +222,8 @@ export interface JiraSseOptions {
   /** Regenerate: the draft row to write into, and its stored retrieval question. */
   existingDraftId?: string;
   storedRetrievalQuestion?: string;
+  /** Regenerate: the row's IMMUTABLE retrieval verdict — what retrieval found,
+   *  never the last run's derived one. Also the marker that retrieval landed. */
   storedCoverage?: JiraDonePayload["coverage"];
   excludeDocIds: string[];
   /** Live MCP probe result — the same one the `Full` pre-flight ran. */
@@ -332,15 +333,14 @@ async function runJiraDraft(
       // reader was toggling. Renumber AFTER the exclusion so the `[n]` markers
       // and `## Referanser` do not cite gaps.
       citations = applyExclusions(opts.storedCitations!, opts.excludeDocIds);
-      coverage = opts.storedCoverage ?? "answer";
       retrievalQuestion = opts.storedRetrievalQuestion ?? "";
-      // A regenerate that excluded everything has no grounding left, whatever the
-      // stored verdict said — the payload must not keep claiming `answer`.
-      if (citations.length === 0) coverage = "no_hits";
-      // …and neither must the ROW. Nothing else on this path writes the verdict
-      // (`saveJiraDraftRetrieval` is exactly what a regenerate skips), so without
-      // this the poll and the stream disagreed about the same generation.
-      await saveJiraDraftCoverage(draftId, coverage);
+      // A regenerate that excluded everything has no grounding left, whatever
+      // retrieval found — but that is a fact about THIS RUN, and it is NOT written
+      // back to the row. `startJiraDraftRun` has already landed this run's
+      // exclusion set, so the poll derives the same verdict from the same two
+      // inputs. Storing it instead is what latched a draft to `no_hits` forever:
+      // the next regenerate read the derived value back as the retrieval verdict.
+      coverage = effectiveCoverage(opts.storedCoverage ?? null, citations.length);
       safeWrite("phase", { phase: "regenerating", citations: citations.length });
     } else {
       safeWrite("phase", { phase: "condensing" });
@@ -364,12 +364,14 @@ async function runJiraDraft(
         traceContext: tracer.context,
         ...(opts.retrieve ? { retrieve: opts.retrieve } : {}),
       });
-      coverage = retrieved.coverage;
-      // Persist the WIDE set, then apply the exclusion for this generation. A
-      // first draft normally excludes nothing, but the field is honoured either
-      // way so `/draft/start` + an immediate toggle behaves like a regenerate.
-      await saveJiraDraftRetrieval(draftId, retrieved.citations, coverage, q.question);
+      // Persist the WIDE set and the RETRIEVAL verdict, then apply the exclusion
+      // for this generation. A first draft normally excludes nothing, but the
+      // field is honoured either way so `/draft/start` + an immediate toggle
+      // behaves like a regenerate — including in the verdict, which is why the
+      // payload carries the derived one and the row carries what retrieval found.
+      await saveJiraDraftRetrieval(draftId, retrieved.citations, retrieved.coverage, q.question);
       citations = applyExclusions(retrieved.citations, opts.excludeDocIds);
+      coverage = effectiveCoverage(retrieved.coverage, citations.length);
       safeWrite("citations", { citations, coverage });
     }
 
@@ -435,7 +437,7 @@ async function runJiraDraft(
       ...(opts.oneShot ? { oneShot: opts.oneShot } : {}),
     });
 
-    const body = stripWrappingFence(result.result ?? "");
+    const body = stripJiraWrappingFence(result.result ?? "");
     if (!body) {
       // An empty result is a FAILED generation, not an empty task.
       log.warn("Jira draft returned nothing bot={bot} draft={draft}", { bot: botConfig.name, draft: draftId });

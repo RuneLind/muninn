@@ -61,7 +61,15 @@ CREATE TABLE IF NOT EXISTS jira_drafts (
   -- answer | no_hits | low_confidence. The VERDICT, not a weakCoverage boolean:
   -- at low_confidence the draft is grounded-but-weak, at no_hits there is no
   -- `## Referanser` section at all, and the two render differently.
-  coverage           TEXT,
+  --
+  -- ⚠️ This is what RETRIEVAL found, written ONCE (`saveJiraDraftRetrieval`) and
+  -- never overwritten — hence the name. The verdict for a given GENERATION is a
+  -- function of it and the exclusion set that run used, derived at read time by
+  -- `effectiveCoverage` (src/jira/wire.ts). Storing the derived value here is
+  -- what made the composer latch: one regenerate with every source toggled off
+  -- wrote `no_hits`, the next read it back as the retrieval verdict, and the
+  -- draft stayed `no_hits` with a full `## Referanser` underneath it.
+  retrieval_coverage TEXT,
   -- The condensed retrieval question (query.ts), shown so the reader can see
   -- what was actually searched.
   retrieval_question TEXT NOT NULL DEFAULT '',

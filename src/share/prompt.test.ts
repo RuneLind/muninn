@@ -89,6 +89,15 @@ describe("stripWrappingFence", () => {
     expect(stripWrappingFence("```ts\nconst a = 1;\n```")).toBe("```ts\nconst a = 1;\n```");
   });
 
+  test("a ```markdown wrapper is dropped, a ```text one is NOT", () => {
+    // The markdown tag is the argued fix (both byte copies missed it). The
+    // plaintext family is the JIRA composer's addition and share never asked for
+    // it — sharing one helper must not silently widen this surface.
+    expect(stripWrappingFence("```markdown\n# Post\n```")).toBe("# Post");
+    expect(stripWrappingFence("```text\n# Post\n```")).toBe("```text\n# Post\n```");
+    expect(stripWrappingFence("```plaintext\n# Post\n```")).toBe("```plaintext\n# Post\n```");
+  });
+
   test("an inner code block is untouched, and so is ordinary prose", () => {
     const post = "Intro.\n\n```bash\nls\n```\n\nOutro.";
     expect(stripWrappingFence(post)).toBe(post);

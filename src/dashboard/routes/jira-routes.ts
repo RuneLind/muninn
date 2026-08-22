@@ -223,7 +223,7 @@ async function buildSseOptions(
   body: ParsedJiraDraftBody,
   instruction: string,
   mcpServers: McpServerStatus[],
-): Promise<{ opts: JiraSseOptions; error?: string }> {
+): Promise<{ opts: JiraSseOptions; unknown?: true }> {
   const base: JiraSseOptions = {
     config,
     botConfig: bot,
@@ -246,7 +246,11 @@ async function buildSseOptions(
   // `parseJiraDraftBody` refuses a regenerate that tries to supply new ones (the
   // stored hit set was retrieved for the originals).
   const stored = await getJiraDraft(body.draftId);
-  if (!stored) return { opts: base, error: `ukjent utkast "${body.draftId}"` };
+  // `unknownDraft` spells this 404, here as everywhere else. The id is NOT echoed:
+  // `/draft/start` and the GET are CORS-open, so a page the browser visits can
+  // drive them, and a second spelling that reflects the caller's own string back
+  // is both a needless echo and a second sentence to keep in step with the first.
+  if (!stored) return { opts: base, unknown: true };
   return {
     opts: {
       ...base,
@@ -254,7 +258,10 @@ async function buildSseOptions(
       storedCitations: stored.citations,
       existingDraftId: stored.draftId,
       storedRetrievalQuestion: stored.retrievalQuestion,
-      ...(stored.coverage ? { storedCoverage: stored.coverage } : {}),
+      // The RETRIEVAL verdict, never the view's derived `coverage` — that one is a
+      // function of the last run's exclusion set, and feeding it back in is what
+      // latched a draft to `no_hits` after one exclude-everything regenerate.
+      ...(stored.retrievalCoverage ? { storedCoverage: stored.retrievalCoverage } : {}),
     },
   };
 }
@@ -290,8 +297,8 @@ async function claimDraft(
     return { ok: false, response: unknownDraft(c) };
   }
 
-  const { opts, error } = await buildSseOptions(config, bot, body, instruction, mcpServers);
-  if (error) return { ok: false, response: c.json({ error }, 404) };
+  const { opts, unknown } = await buildSseOptions(config, bot, body, instruction, mcpServers);
+  if (unknown) return { ok: false, response: unknownDraft(c) };
 
   // Keyed on the RESOLVED notes plus the draft id — see `jiraFlightKey`.
   const key = jiraFlightKey(opts.notes, body.template, body.depth, body.excludeDocIds, body.draftId);

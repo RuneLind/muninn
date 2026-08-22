@@ -1,4 +1,5 @@
 import { getDb } from "./client.ts";
+import { effectiveCoverage } from "../jira/wire.ts";
 import type {
   JiraCitation,
   JiraCoverage,
@@ -72,20 +73,6 @@ export async function startJiraDraftRun(id: string, excludeDocIds: string[]): Pr
 }
 
 /**
- * Persist a coverage verdict RECOMPUTED without a retrieval.
- *
- * A regenerate never calls {@link saveJiraDraftRetrieval} (that is the whole
- * point of storing the hit set), so the verdict it derives — notably the flip to
- * `no_hits` when the reader excludes every source — had nowhere to land and the
- * row went on claiming the first draft's `answer`.
- */
-export async function saveJiraDraftCoverage(id: string, coverage: JiraCoverage): Promise<void> {
-  const sql = getDb();
-  await sql`
-    UPDATE jira_drafts SET coverage = ${coverage}, updated_at = now() WHERE id = ${id}`;
-}
-
-/**
  * Store the retrieved hit set as soon as it exists — BEFORE the model call.
  *
  * Separate from {@link finishJiraDraft} because the two have different failure
@@ -93,18 +80,24 @@ export async function saveJiraDraftCoverage(id: string, coverage: JiraCoverage):
  * the expensive half to re-acquire (a Haiku decomposition plus up to four
  * searches). Persisting it early means a failed draft can be regenerated without
  * re-retrieving, and PR 2's toggle column has rows to render on a `failed` row.
+ *
+ * **This is the ONLY writer of `retrieval_coverage`, by design.** The column holds
+ * what RETRIEVAL found; the verdict for one generation is derived from it and that
+ * run's exclusion set (`effectiveCoverage`). A second writer is precisely what
+ * made a draft latch to `no_hits`: an exclude-everything regenerate stored the
+ * derived value, and every later run read it back as the retrieval verdict.
  */
 export async function saveJiraDraftRetrieval(
   id: string,
   citations: JiraCitation[],
-  coverage: JiraCoverage,
+  retrievalCoverage: JiraCoverage,
   retrievalQuestion: string,
 ): Promise<void> {
   const sql = getDb();
   await sql`
     UPDATE jira_drafts
        SET citations = ${sql.json(citations as never)},
-           coverage = ${coverage},
+           retrieval_coverage = ${retrievalCoverage},
            retrieval_question = ${retrievalQuestion},
            updated_at = now()
      WHERE id = ${id}`;
@@ -182,7 +175,7 @@ interface JiraDraftRow {
   exclude_doc_ids: unknown;
   key_verdicts: unknown;
   markdown_flags: unknown;
-  coverage: string | null;
+  retrieval_coverage: string | null;
   retrieval_question: string;
   error: string | null;
   created_at: Date;
@@ -198,6 +191,13 @@ interface JiraDraftRow {
  * `null`.
  */
 function toView(row: JiraDraftRow): JiraDraftView {
+  const citations = Array.isArray(row.citations) ? (row.citations as JiraCitation[]) : [];
+  const excludeDocIds = Array.isArray(row.exclude_doc_ids)
+    ? (row.exclude_doc_ids as unknown[]).filter((v): v is string => typeof v === "string")
+    : [];
+  const retrieval = (row.retrieval_coverage as JiraCoverage | null) ?? null;
+  const excluded = new Set(excludeDocIds);
+  const retained = citations.filter((c) => !excluded.has(c.docId)).length;
   return {
     draftId: String(row.id),
     status: row.status as JiraDraftStatus,
@@ -206,13 +206,18 @@ function toView(row: JiraDraftRow): JiraDraftView {
     notes: row.notes,
     extra: row.extra,
     markdown: row.markdown,
-    citations: Array.isArray(row.citations) ? (row.citations as JiraCitation[]) : [],
-    excludeDocIds: Array.isArray(row.exclude_doc_ids)
-      ? (row.exclude_doc_ids as unknown[]).filter((v): v is string => typeof v === "string")
-      : [],
+    citations,
+    excludeDocIds,
     keyVerdicts: Array.isArray(row.key_verdicts) ? (row.key_verdicts as JiraKeyVerdict[]) : [],
     markdownFlags: Array.isArray(row.markdown_flags) ? (row.markdown_flags as JiraMarkdownFlag[]) : [],
-    coverage: (row.coverage as JiraCoverage | null) ?? null,
+    retrievalCoverage: retrieval,
+    // Derived, never stored: the row says what retrieval found, the exclusion set
+    // says what THIS draft kept. A draft whose retrieval has not landed yet (no
+    // verdict AND no citations) reports `null` rather than `no_hits` — claiming
+    // retrieval came back empty before it has come back at all is a different lie.
+    coverage: retrieval === null && citations.length === 0
+      ? null
+      : effectiveCoverage(retrieval, retained),
     retrievalQuestion: row.retrieval_question ?? "",
     error: row.error,
     // `new Date(...)` like every other db module: the driver hands back a string

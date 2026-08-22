@@ -15,7 +15,11 @@
  */
 
 import { test, expect, describe } from "bun:test";
-import { neutralizePromptFence, stripWrappingFence } from "./prompt-fence.ts";
+import {
+  MARKDOWN_WRAPPER_INFO_STRINGS,
+  neutralizePromptFence,
+  stripWrappingFence,
+} from "./prompt-fence.ts";
 
 describe("stripWrappingFence", () => {
   test("a bare fence around the whole text is dropped", () => {
@@ -26,7 +30,26 @@ describe("stripWrappingFence", () => {
   test("a ```markdown wrapper is dropped — the case both byte copies missed", () => {
     expect(stripWrappingFence("```markdown\n## Symptom\n\nFeiler.\n```")).toBe("## Symptom\n\nFeiler.");
     expect(stripWrappingFence("```md\n## Symptom\n```")).toBe("## Symptom");
-    expect(stripWrappingFence("~~~ text \nBody.\n~~~")).toBe("Body.");
+  });
+
+  test("the DEFAULT set is markdown only — a ```text wrapper is left alone", () => {
+    // The default is what share gets, and share's own contract before the two
+    // copies were merged was "empty info string only". Widening it to plaintext
+    // tags was never argued for that surface, so the default carries exactly the
+    // ```markdown fix the merge existed for and nothing else. A caller that
+    // wants more says so (see JIRA_WRAPPER_INFO_STRINGS).
+    expect(stripWrappingFence("```text\nBody.\n```")).toBe("```text\nBody.\n```");
+    expect(stripWrappingFence("~~~ text \nBody.\n~~~")).toBe("~~~ text \nBody.\n~~~");
+    expect([...MARKDOWN_WRAPPER_INFO_STRINGS].sort()).toEqual(["", "markdown", "md", "mdx"]);
+  });
+
+  test("a caller may widen the allow-list, and only that caller's set applies", () => {
+    const wide = new Set([...MARKDOWN_WRAPPER_INFO_STRINGS, "text", "jira"]);
+    expect(stripWrappingFence("```text\nBody.\n```", wide)).toBe("Body.");
+    expect(stripWrappingFence("~~~ TEXT \nBody.\n~~~", wide)).toBe("Body.");
+    expect(stripWrappingFence("```jira\nh2. Sak\n```", wide)).toBe("h2. Sak");
+    // Widening does not turn off the language rule.
+    expect(stripWrappingFence("```ts\nconst a = 1;\n```", wide)).toBe("```ts\nconst a = 1;\n```");
   });
 
   test("a LANGUAGE-tagged fence is left alone — the text may really be code", () => {

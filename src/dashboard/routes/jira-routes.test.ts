@@ -99,7 +99,7 @@ interface Row {
   excludeDocIds: string[];
   keyVerdicts: unknown[];
   markdownFlags: unknown[];
-  coverage: string | null;
+  retrievalCoverage: string | null;
   retrievalQuestion: string;
   error: string | null;
   createdAt: number;
@@ -115,7 +115,7 @@ mock.module("../../db/jira-drafts.ts", () => ({
     rows.set(id, {
       draftId: id, status: "generating", template: i.template, depth: i.depth, notes: i.notes,
       extra: i.extra, markdown: null, citations: [], excludeDocIds: [], keyVerdicts: [], markdownFlags: [],
-      coverage: null, retrievalQuestion: "", error: null, createdAt: Date.now(), updatedAt: Date.now(),
+      retrievalCoverage: null, retrievalQuestion: "", error: null, createdAt: Date.now(), updatedAt: Date.now(),
     });
     return id;
   },
@@ -123,13 +123,9 @@ mock.module("../../db/jira-drafts.ts", () => ({
     const r = rows.get(id);
     if (r) Object.assign(r, { status: "generating", error: null, excludeDocIds });
   },
-  saveJiraDraftCoverage: async (id: string, coverage: string) => {
+  saveJiraDraftRetrieval: async (id: string, citations: unknown[], retrievalCoverage: string, q: string) => {
     const r = rows.get(id);
-    if (r) Object.assign(r, { coverage });
-  },
-  saveJiraDraftRetrieval: async (id: string, citations: unknown[], coverage: string, q: string) => {
-    const r = rows.get(id);
-    if (r) Object.assign(r, { citations, coverage, retrievalQuestion: q });
+    if (r) Object.assign(r, { citations, retrievalCoverage, retrievalQuestion: q });
   },
   finishJiraDraft: async (id: string, i: { markdown: string; keyVerdicts: unknown[]; markdownFlags: unknown[] }) => {
     const r = rows.get(id);
@@ -151,7 +147,19 @@ mock.module("../../db/jira-drafts.ts", () => ({
     }
     const forced = readThrows.get(id);
     if (forced) throw new Error(forced);
-    return rows.get(id) ?? null;
+    const r = rows.get(id);
+    if (!r) return null;
+    // The view's `coverage` is DERIVED (see `effectiveCoverage`); only the SQL is
+    // faked here, so the mock runs the real helper rather than a second rule that
+    // could quietly disagree with the column the route actually reads.
+    const excluded = new Set(r.excludeDocIds);
+    const retained = (r.citations as { docId: string }[]).filter((c) => !excluded.has(c.docId)).length;
+    return {
+      ...r,
+      coverage: r.retrievalCoverage === null && r.citations.length === 0
+        ? null
+        : effectiveCoverage(r.retrievalCoverage as never, retained),
+    };
   },
 }));
 
@@ -169,6 +177,7 @@ const {
   JIRA_TIMEOUT_MS_BY_DEPTH,
 } = await import("./jira-sse.ts");
 const { __resetJiraKeyIndexForTest } = await import("../../jira/verify-keys.ts");
+const { effectiveCoverage } = await import("../../jira/wire.ts");
 const { buildDepthFence } = await import("../../jira/tool-fence.ts");
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -738,7 +747,7 @@ describe("regenerate — a draft whose RETRIEVAL never landed", () => {
     // Retrieval died, so the row carries the DEFAULT empty citation set — which is
     // truthy, and used to read as "the hit set is stored, reuse it".
     expect(rows.get(draftId)!.citations).toHaveLength(0);
-    expect(rows.get(draftId)!.coverage).toBeNull();
+    expect(rows.get(draftId)!.retrievalCoverage).toBeNull();
 
     const events = parseSse(await (await post(app, "/api/jira/draft", {
       template: "bug", depth: "skisse", draftId,
@@ -785,7 +794,7 @@ describe("regenerate — the row is `generating` again, and the new coverage is 
   test("the RECOMPUTED coverage lands on the row, not just on the done payload", async () => {
     const app = makeApp();
     const draftId = await seed(app);
-    expect(rows.get(draftId)!.coverage).toBe("answer");
+    expect(rows.get(draftId)!.retrievalCoverage).toBe("answer");
 
     const events = parseSse(await (await post(app, "/api/jira/draft", {
       template: "bug", depth: "skisse", draftId,
@@ -794,7 +803,38 @@ describe("regenerate — the row is `generating` again, and the new coverage is 
     await new Promise((r) => setTimeout(r, 20));
 
     expect(events.find((e) => e.event === "done")!.data.coverage).toBe("no_hits");
-    expect(rows.get(draftId)!.coverage).toBe("no_hits");
+    expect((await (await app.request(`/api/jira/draft/${draftId}`)).json()).coverage).toBe("no_hits");
+    // …while the RETRIEVAL verdict — what retrieval actually found — is untouched.
+    expect(rows.get(draftId)!.retrievalCoverage).toBe("answer");
+  });
+
+  test("an exclude-all regenerate does NOT latch the draft to no_hits forever", async () => {
+    const app = makeApp();
+    const draftId = await seed(app);
+
+    // 1. Exclude every source: this run really is ungrounded.
+    const off = parseSse(await (await post(app, "/api/jira/draft", {
+      template: "bug", depth: "skisse", draftId,
+      excludeDocIds: ["MELOSYS-5677_Ny_flyt.md", "MELOSYS-8028_Manglende.md", "faktura.md"],
+    })).text());
+    await new Promise((r) => setTimeout(r, 20));
+    expect(off.find((e) => e.event === "done")!.data.coverage).toBe("no_hits");
+
+    // 2. Put them all back. The verdict must come back with them — the row stores
+    //    what RETRIEVAL found, and `no_hits` was only ever true of the last run.
+    const back = parseSse(await (await post(app, "/api/jira/draft", {
+      template: "bug", depth: "skisse", draftId, excludeDocIds: [],
+    })).text());
+    await new Promise((r) => setTimeout(r, 20));
+
+    const done = back.find((e) => e.event === "done")!.data as { citations: unknown[]; coverage: string };
+    expect(done.citations).toHaveLength(3);
+    expect(done.coverage).toBe("answer");
+    const view = await (await app.request(`/api/jira/draft/${draftId}`)).json();
+    expect(view.coverage).toBe("answer");
+    expect(view.retrievalCoverage).toBe("answer");
+    // And no second retrieval was spent getting back there.
+    expect(retrievals.n).toBe(1);
   });
 
   test("the exclusion set is PERSISTED and rides the view", async () => {
@@ -844,6 +884,22 @@ describe("the single-flight claim", () => {
 
     const again = await post(app, "/api/jira/draft", { template: "bug", depth: "skisse", draftId: "not-a-uuid" });
     expect(again.status).toBe(404);
+  });
+
+  test("a well-formed but UNKNOWN draftId 404s without echoing the id back", async () => {
+    // `GET /api/jira/draft/:id` and `/draft/start` are CORS-open, so a page the
+    // browser visits can drive this route; the reply must not reflect the
+    // caller's own string back through it. Two spellings of the same 404 is one
+    // spelling too many — every path answers with the non-echoing one.
+    const app = makeApp();
+    const unknown = "8a1f4c2e-0000-4000-8000-0000000000ff";
+    for (const path of ["/api/jira/draft", "/api/jira/draft/start"]) {
+      const res = await post(app, path, { template: "bug", depth: "skisse", draftId: unknown });
+      expect(res.status).toBe(404);
+      const body = String((await res.json()).error);
+      expect(body).toBe("ukjent utkast");
+      expect(body).not.toContain(unknown);
+    }
   });
 
   test("the /start path answers the same way and leaks no slot either", async () => {

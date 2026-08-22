@@ -87,15 +87,33 @@ export function maskFencedCode(markdown: string): string {
  * paragraphs away and blank out everything between them. Under-masking costs one
  * spurious flag the reader dismisses; over-masking hides real breakage.
  *
+ * **A line with an ODD number of backtick runs is left ALONE, whole.** Line
+ * scoping bounds the damage but does not remove it: within one line, an unpaired
+ * backtick still pairs left-to-right with the NEXT one, and the guess can be
+ * wrong in the direction that hides things. Measured on
+ * `` Bruk ` som skille og <div>x</div> er `raw` ``, the stray backtick after
+ * "Bruk" pairs with the opener of `` `raw` `` and blanks the `<div>` between
+ * them — a construct the Jira paste really does mangle, gone from the scan with
+ * nothing to see. Nothing in the text says which backtick is the stray one, so
+ * the ambiguity is resolved the way this module resolves every other one: mask
+ * nothing on that line and accept a flag the reader can dismiss. The cost is
+ * stated rather than hidden — `` Se `<div>` her ` `` now flags its quoted tag.
+ *
  * Runs on the ALREADY fence-masked text in both callers, so a fence's own
  * backticks are gone by the time this sees them.
  */
 export function maskInlineCode(text: string): string {
-  const out = text.split("");
-  for (const m of text.matchAll(/(`+)([^`\n]*)\1(?!`)/g)) {
-    for (let i = m.index; i < m.index + m[0].length; i++) {
-      if (out[i] !== "\n") out[i] = " ";
-    }
+  return text
+    .split("\n")
+    .map((line) => ((line.match(/`+/g)?.length ?? 0) % 2 === 1 ? line : maskLineSpans(line)))
+    .join("\n");
+}
+
+/** Blank every closed code span on ONE line. Callers hold the odd-run guard. */
+function maskLineSpans(line: string): string {
+  const out = line.split("");
+  for (const m of line.matchAll(/(`+)([^`\n]*)\1(?!`)/g)) {
+    for (let i = m.index; i < m.index + m[0].length; i++) out[i] = " ";
   }
   return out.join("");
 }

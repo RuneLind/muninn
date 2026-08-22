@@ -151,6 +151,44 @@ export function jiraKeyFromDocId(collection: string, docId: string): string | un
 }
 
 /**
+ * Pull the key out of a Jira issue URL — `…/browse/<KEY>`, any host, any collection.
+ *
+ * The url is unescaped first (5 real docs carry `https\://`), and the key must be
+ * the LAST path segment: `/browse/MELOSYS-1/comments` names a sub-page, and a
+ * query string or fragment is allowed since a copied Jira link routinely carries
+ * one.
+ */
+const BROWSE_KEY_RE = new RegExp(`/browse/(${JIRA_KEY_SOURCE})(?:[/?#]|$)`, "i");
+
+export function jiraKeyFromBrowseUrl(url: string | undefined): string | undefined {
+  const normalized = normalizeJiraUrl(url);
+  if (!normalized) return undefined;
+  const key = BROWSE_KEY_RE.exec(normalized)?.[1];
+  // The shape is case-insensitive in the URL but the KEY is upper-case, and it is
+  // compared against keys scanned out of the markdown with an upper-case regex.
+  return key ? key.toUpperCase() : undefined;
+}
+
+/**
+ * THE key resolver for a retrieved document — doc id first, then the URL.
+ *
+ * **Why the URL half exists.** `nav-wiki` carries a page PER ISSUE under
+ * `sources/jira/<KEY>.md`, whose `url` IS `https://jira.adeo.no/browse/<KEY>`.
+ * Keyed off the doc id alone those rows had no key at all, with two consequences
+ * measured on a live draft: the key-verification pass called a retrieved issue
+ * amber `notes` ("the reader wrote it, retrieval never saw it") about an issue
+ * retrieval had just returned, and `## Referanser` — which dedupes on
+ * `key ?? docId` — listed the same issue twice under two different doc ids.
+ *
+ * A `/browse/<KEY>` url is as authoritative as a doc id: it is not a page that
+ * MENTIONS the issue, it is a page whose canonical address IS the issue. A
+ * Confluence page linking to Jira has a Confluence url and is unaffected.
+ */
+export function jiraKeyFor(collection: string, docId: string, url?: string): string | undefined {
+  return jiraKeyFromDocId(collection, docId) ?? jiraKeyFromBrowseUrl(url);
+}
+
+/**
  * Make a `jira-issues` title readable.
  *
  * Measured on the live corpus: huginn's `title` for these documents IS the
@@ -218,8 +256,11 @@ export function normalizeJiraUrl(url: string | undefined): string | undefined {
  */
 export function toJiraCitations(hits: ResearchHit[]): JiraCitation[] {
   return buildCitations(hits, JIRA_STORED_MAX_SOURCES).map((c) => {
-    const key = jiraKeyFromDocId(c.collection, c.docId);
     const url = normalizeJiraUrl(c.url);
+    // Doc id OR `/browse/<KEY>` url — a `nav-wiki` page whose address IS the
+    // issue carries the key too, or the verdict goes amber for a retrieved issue
+    // and `## Referanser` lists it twice. See `jiraKeyFor`.
+    const key = jiraKeyFor(c.collection, c.docId, c.url);
     return {
       n: c.n,
       collection: c.collection,

@@ -64,6 +64,35 @@ export const JIRA_MARKDOWN_MAX = 100_000;
  *  `Coverage` so the browser half never imports the research layer. */
 export type JiraCoverage = "answer" | "no_hits" | "low_confidence";
 
+/**
+ * The verdict for ONE generation, from the immutable retrieval verdict plus how
+ * many sources that run actually kept.
+ *
+ * **The two are different questions and only one of them is storable.** What
+ * retrieval found is a fact about the draft session — it is written once, by
+ * `saveJiraDraftRetrieval`, and never again. What a given RUN was grounded in is
+ * a function of the reader's exclusion set at that moment, which changes on every
+ * regenerate. Writing the second back over the first is what made the composer
+ * latch: one regenerate with every source toggled off stored `no_hits`, the next
+ * regenerate read that back as "what retrieval found", and the draft stayed
+ * `no_hits` with 21 live citations and a full `## Referanser` underneath it.
+ *
+ * So: the row keeps the retrieval verdict, and both the `done` payload and
+ * `GET /api/jira/draft/:id` report THIS. Deriving costs nothing — the row already
+ * stores the wide citation set and the run's exclusion set — and it cannot drift,
+ * which two columns could.
+ *
+ * `null` (a legacy row, or one whose retrieval never landed) reads as `answer`,
+ * the same default the regenerate path has always applied.
+ */
+export function effectiveCoverage(
+  retrievalCoverage: JiraCoverage | null | undefined,
+  retainedCount: number,
+): JiraCoverage {
+  if (retainedCount === 0) return "no_hits";
+  return retrievalCoverage ?? "answer";
+}
+
 /** One retrieved source, as the toggle column renders it and the prompt cites it. */
 export interface JiraCitation {
   /** 1-based, renumbered after `excludeDocIds` (see the regenerate contract). */
@@ -173,6 +202,16 @@ export interface JiraDraftView {
   excludeDocIds: string[];
   keyVerdicts: JiraKeyVerdict[];
   markdownFlags: JiraMarkdownFlag[];
+  /**
+   * What RETRIEVAL found — the stored column, written once and never overwritten.
+   * `null` while a draft is still generating (or on a draft whose retrieval died).
+   */
+  retrievalCoverage: JiraCoverage | null;
+  /**
+   * The verdict for the draft as it currently stands: {@link effectiveCoverage}
+   * of the retrieval verdict and the citations left after `excludeDocIds`. This
+   * is the one the page renders; the row does not store it (see the function).
+   */
   coverage: JiraCoverage | null;
   retrievalQuestion: string;
   error: string | null;

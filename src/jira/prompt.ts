@@ -18,7 +18,11 @@
  * Pure + IO-free, like its siblings: no filesystem, no model, no huginn.
  */
 
-import { neutralizePromptFence } from "../utils/prompt-fence.ts";
+import {
+  MARKDOWN_WRAPPER_INFO_STRINGS,
+  neutralizePromptFence,
+  stripWrappingFence,
+} from "../utils/prompt-fence.ts";
 import type { JiraCitation, JiraDepth } from "./wire.ts";
 import { JIRA_BODY_MAX } from "./wire.ts";
 import type { JiraFullDoc } from "./retrieval.ts";
@@ -246,13 +250,38 @@ export function appendReferences(markdown: string, citations: JiraCitation[]): s
 }
 
 /**
+ * The info strings a JIRA draft may be wrapped in.
+ *
+ * The shared default is markdown-only (see `MARKDOWN_WRAPPER_INFO_STRINGS` — the
+ * plaintext family was never argued for share, and a shared helper must not move
+ * another surface's behaviour). This surface widens it deliberately, and every
+ * addition is a tag a model reaches for when told "markdown only" and handed a
+ * Jira task: the plaintext family, plus `jira`/`wiki`/`markup` — the three this
+ * feature's own instruction wording makes likely. None of them can mean "the
+ * output IS a code block", which is the one thing the allow-list protects: a
+ * `Full` draft's ```` ```kotlin ```` excerpt is still left alone.
+ */
+export const JIRA_WRAPPER_INFO_STRINGS: ReadonlySet<string> = new Set([
+  ...MARKDOWN_WRAPPER_INFO_STRINGS,
+  "text", "txt", "plaintext", "plain",
+  "jira", "wiki", "markup",
+]);
+
+/**
  * Drop a fence that wraps the WHOLE draft.
  *
  * Every shipped template says "markdown only, no wrapping code fence", and a
  * model that ignores it does not produce a slightly-off task — it produces a task
  * that pastes into Jira as one syntax-highlighted code block with the markdown
- * showing. Re-exported from the shared `src/utils/prompt-fence.ts`: this was a
+ * showing. The mechanics are the shared `src/utils/prompt-fence.ts` (this was a
  * byte copy of the share module's spelling, and the ```` ```markdown ```` gap
- * both carried had to be found twice.
+ * both carried had to be found twice); only the allow-list is this feature's.
  */
-export { stripWrappingFence } from "../utils/prompt-fence.ts";
+export function stripJiraWrappingFence(text: string): string {
+  return stripWrappingFence(text, JIRA_WRAPPER_INFO_STRINGS);
+}
+
+// Deliberately NOT re-exported: a second door onto the shared helper is a door
+// onto the NARROW default set, and a caller here that took it would leave a
+// ```jira wrapper in the reader's clipboard with nothing to see in the diff.
+

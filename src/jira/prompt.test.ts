@@ -20,7 +20,7 @@ import {
   depthRider,
   neutralizeJiraFence,
   renderJiraSources,
-  stripWrappingFence,
+  stripJiraWrappingFence,
 } from "./prompt.ts";
 import { JIRA_BODY_MAX, parseJiraDraftBody, JIRA_NOTES_MAX, JIRA_EXTRA_MAX } from "./wire.ts";
 import type { JiraCitation } from "./wire.ts";
@@ -157,16 +157,16 @@ describe("appendReferences", () => {
   });
 });
 
-describe("stripWrappingFence", () => {
+describe("stripJiraWrappingFence", () => {
   test("unwraps a whole-draft fence", () => {
-    expect(stripWrappingFence("```\n# Sak\n```")).toBe("# Sak");
+    expect(stripJiraWrappingFence("```\n# Sak\n```")).toBe("# Sak");
   });
   test("leaves a draft that merely BEGINS and ENDS with code blocks alone", () => {
     const md = "```\nnpm i\n```\n\nprose\n\n```\nnpm run\n```";
-    expect(stripWrappingFence(md)).toBe(md);
+    expect(stripJiraWrappingFence(md)).toBe(md);
   });
   test("leaves a language-tagged fence alone", () => {
-    expect(stripWrappingFence("```kotlin\nval x = 1\n```")).toBe("```kotlin\nval x = 1\n```");
+    expect(stripJiraWrappingFence("```kotlin\nval x = 1\n```")).toBe("```kotlin\nval x = 1\n```");
   });
 });
 
@@ -255,9 +255,23 @@ describe("appendReferences — one resolvable line per source", () => {
   });
 });
 
-describe("stripWrappingFence — the info-string case", () => {
+describe("stripJiraWrappingFence — the info-string case", () => {
   test("a ```markdown wrapper is dropped", () => {
-    expect(stripWrappingFence("```markdown\n## Symptom\n```")).toBe("## Symptom");
+    expect(stripJiraWrappingFence("```markdown\n## Symptom\n```")).toBe("## Symptom");
+  });
+
+  test("the JIRA set also covers the plaintext family and this feature's own wrappers", () => {
+    // A model told "markdown only, no wrapping fence" and handed a JIRA task
+    // reaches for these; `jira`/`wiki`/`markup` are this surface's likeliest
+    // hallucinated tags, and none of them can mean "the output IS a code block".
+    for (const info of ["text", "txt", "plaintext", "plain", "jira", "wiki", "markup"]) {
+      expect(stripJiraWrappingFence("```" + info + "\n## Symptom\n```")).toBe("## Symptom");
+    }
+    expect(stripJiraWrappingFence("~~~ Jira \n## Symptom\n~~~")).toBe("## Symptom");
+  });
+
+  test("a `Full` draft whose body really is one code excerpt is still left alone", () => {
+    expect(stripJiraWrappingFence("```kotlin\nval x = 1\n```")).toBe("```kotlin\nval x = 1\n```");
   });
 });
 

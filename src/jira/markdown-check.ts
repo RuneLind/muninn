@@ -57,10 +57,26 @@ const HTML_TAGS = [
   "details", "summary", "font", "center",
   "Callout", "Verdict", "Pill", "Figure", "FileRef", "ComparisonTable",
 ];
-// Case-INSENSITIVE: HTML tag names are, and `<DIV>` escapes to visible literal
-// text in exactly the same way `<div>` does. (The component names are matched
-// case-insensitively too — a `<callout>` is the same mistake in lower case.)
-const HTML_RE = new RegExp(`</?(?:${HTML_TAGS.join("|")})(?:\\s[^<>]*)?/?>`, "gi");
+/**
+ * Case-insensitive — but only for names of TWO characters or more.
+ *
+ * `<DIV>` escapes to visible literal text in exactly the same way `<div>` does,
+ * so the multi-letter names (component names included — a `<callout>` is the same
+ * mistake in lower case) are matched in any case. The one-letter tags cannot be:
+ * `a b i p s u` case-folded match every single-letter type parameter, so a `gi`
+ * regex flagged `Flow<S>`, `List<P>` and `Either<A, B>` — the exact generic-type
+ * case the tag list above exists to exempt, re-introduced by the flag.
+ *
+ * JS has no per-group flags, so the case-insensitivity is spelled out per letter
+ * and the regex itself is case-SENSITIVE. The cost is one directional blind spot,
+ * taken deliberately: an uppercase `<A>`/`<B>` anchor is not flagged. Between a
+ * missed one-letter tag (visible garbage in the preview) and a flag on every
+ * generic in a Kotlin shop's refinement notes, the flag column is what breaks.
+ */
+const anyCase = (tag: string): string =>
+  tag.split("").map((ch) => (/[a-zA-Z]/.test(ch) ? `[${ch.toLowerCase()}${ch.toUpperCase()}]` : ch)).join("");
+const HTML_TAG_ALTERNATION = HTML_TAGS.map((t) => (t.length > 1 ? anyCase(t) : t)).join("|");
+const HTML_RE = new RegExp(`</?(?:${HTML_TAG_ALTERNATION})(?:\\s[^<>]*)?/?>`, "g");
 
 /** Jira wiki markup. `h1.`–`h6.` must be line-anchored — "no. 2" is not a heading. */
 const WIKI_BLOCK_RE = /\{(?:code|panel|quote|noformat|color|anchor|section|column)(?::[^}]*)?\}/gi;

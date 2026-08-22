@@ -25,17 +25,28 @@ export function neutralizePromptFence(text: string): string {
 }
 
 /**
- * Info strings that make a fence a WRAPPER rather than content.
+ * Info strings that make a fence a WRAPPER rather than content — the DEFAULT set,
+ * and the one every caller gets unless it says otherwise.
  *
  * The distinction is the whole reason this is an allow-list and not "any info
  * string": a ```` ```ts ```` or ```` ```kotlin ```` block may genuinely BE the
  * output (share posts a code snippet; a Jira task at `Full` depth carries one
  * excerpt), and unwrapping it splices the prose out of the block — the same
- * corruption the interior check below exists to prevent. A markdown/plaintext tag
- * cannot mean that: the content it announces is markdown, which is what the
- * caller asked for in the first place.
+ * corruption the interior check below exists to prevent. A markdown tag cannot
+ * mean that: the content it announces is markdown, which is what the caller asked
+ * for in the first place.
+ *
+ * **Why the default is markdown-only and the set is a parameter.** Both byte
+ * copies this file replaced required an EMPTY info string; merging them fixed the
+ * ```` ```markdown ```` gap, which is the argued change and belongs to every
+ * caller. The plaintext family (`text`/`txt`/`plaintext`/`plain`) arrived in the
+ * same merge and was argued for NEITHER — it silently widened what share unwraps.
+ * A shared helper must not move a surface's behaviour as a side effect of being
+ * shared, so the wide set is now the JIRA composer's own
+ * (`JIRA_WRAPPER_INFO_STRINGS` in `src/jira/prompt.ts`), passed in.
  */
-const WRAPPER_INFO_STRINGS = new Set(["", "markdown", "md", "mdx", "text", "txt", "plaintext", "plain"]);
+export const MARKDOWN_WRAPPER_INFO_STRINGS: ReadonlySet<string> =
+  new Set(["", "markdown", "md", "mdx"]);
 
 /**
  * Drop a fence that wraps the WHOLE text.
@@ -47,10 +58,11 @@ const WRAPPER_INFO_STRINGS = new Set(["", "markdown", "md", "mdx", "text", "txt"
  *
  * Three rules, each of which was a bug in the copies this replaces:
  *
- *  1. **The info string is read, and allow-listed** (see {@link WRAPPER_INFO_STRINGS}).
- *     Both copies required it to be EMPTY, so ```` ```markdown ```` — the single
- *     most likely wrapper a model emits when told "markdown only" — sailed
- *     straight through into the reader's clipboard.
+ *  1. **The info string is read, and allow-listed** (`wrapperInfo`, defaulting to
+ *     {@link MARKDOWN_WRAPPER_INFO_STRINGS}). Both copies required it to be
+ *     EMPTY, so ```` ```markdown ```` — the single most likely wrapper a model
+ *     emits when told "markdown only" — sailed straight through into the reader's
+ *     clipboard.
  *  2. **The closer only has to be at least as long as the opener**, CommonMark's
  *     own rule. Both copies used a backreference, so a ``` opener closed by a
  *     ````` line did not match and the wrapper survived.
@@ -67,7 +79,10 @@ const WRAPPER_INFO_STRINGS = new Set(["", "markdown", "md", "mdx", "text", "txt"
  * costs one visible fence the reader can delete; over-stripping silently splices
  * prose into code.
  */
-export function stripWrappingFence(text: string): string {
+export function stripWrappingFence(
+  text: string,
+  wrapperInfo: ReadonlySet<string> = MARKDOWN_WRAPPER_INFO_STRINGS,
+): string {
   const trimmed = text.trim();
   const m = /^(`{3,}|~{3,})([^\n]*)\r?\n([\s\S]*)\r?\n([`~]{3,})[ \t]*$/.exec(trimmed);
   if (!m) return trimmed;
@@ -80,7 +95,7 @@ export function stripWrappingFence(text: string): string {
   // CommonMark: a backtick fence's info string may not contain a backtick. Without
   // this a prose line of inline code reads as an opener that never closes.
   if (marker === "`" && rawInfo.includes("`")) return trimmed;
-  if (!WRAPPER_INFO_STRINGS.has(rawInfo.trim().toLowerCase())) return trimmed;
+  if (!wrapperInfo.has(rawInfo.trim().toLowerCase())) return trimmed;
   if (closer[0] !== marker || closer.length < opener.length) return trimmed;
 
   // `[<char>]` rather than an escape: `\`` is an identity escape a future
