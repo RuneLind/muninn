@@ -28,6 +28,7 @@ import { registerAgentsRoutes } from "./routes/agents-routes.ts";
 import { registerSyncRoutes } from "./routes/sync-routes.ts";
 import { registerClaudeUsageRoutes } from "./routes/claude-usage-routes.ts";
 import { registerPlansRoutes } from "./routes/plans-routes.ts";
+import { registerJiraRoutes } from "./routes/jira-routes.ts";
 
 export function createDashboardRoutes(config: Config): Hono {
   const app = new Hono();
@@ -83,6 +84,7 @@ export function createDashboardRoutes(config: Config): Hono {
   registerSyncRoutes(app, config);
   registerClaudeUsageRoutes(app, config);
   registerPlansRoutes(app, config);
+  registerJiraRoutes(app, config);
 
   return app;
 }

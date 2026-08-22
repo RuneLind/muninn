@@ -50,8 +50,24 @@ export interface ResearchProfile {
  * Metadata for every collection any profile references. `RESEARCH_CORPUS` (the
  * deduped union of all profiles) is derived from this, so citations render for
  * any collection regardless of which profile surfaced them.
+ *
+ * **Exported, and NOT every entry is in a profile.** The last three are the
+ * melosys collections the Jira composer (`src/jira/`) retrieves over. They are
+ * deliberately absent from `RESEARCH_PROFILES`: `RESEARCH_PROFILES` is rendered
+ * wholesale as a chip row on `/research`, so a `melosys` profile would appear for
+ * every user of that personal page and would synthesize on `RESEARCH_BOT` rather
+ * than melosys — a wrong-corpus trap wearing a helpful label.
+ *
+ * The consequence is precise and worth stating, because getting it wrong makes
+ * the whole entry inert: `RESEARCH_CORPUS` is derived from `RESEARCH_PROFILES`,
+ * and `getResearchCollection`/`badgeForCollection` read `RESEARCH_CORPUS` — so an
+ * entry no profile references is INVISIBLE to those two and `badgeForCollection`
+ * still falls back to the raw collection name (the behaviour `answer.test.ts`
+ * pins today, using `jira-issues` as its example). A consumer that wants these
+ * badges must read THIS array (see `badgeFromCollectionMeta`), which is why it is
+ * exported.
  */
-const COLLECTION_META: ResearchCollection[] = [
+export const COLLECTION_META: ResearchCollection[] = [
   { collection: "anthropic-summaries", label: "Claude summaries", badge: "Claude", sourceId: "anthropic" },
   { collection: "anthropic-knowledge", label: "Anthropic firehose", badge: "Anthropic" },
   { collection: "youtube-summaries", label: "YouTube", badge: "YouTube", sourceId: "youtube" },
@@ -59,6 +75,10 @@ const COLLECTION_META: ResearchCollection[] = [
   { collection: "tiktok-summaries", label: "TikTok", badge: "TikTok", sourceId: "tiktok" },
   { collection: "wiki", label: "Knowledge wiki", badge: "Wiki" },
   { collection: "wiki-life", label: "Life wiki", badge: "Life" },
+  // ── melosys (Jira composer only — not in any /research profile, see above) ──
+  { collection: "jira-issues", label: "Jira-saker", badge: "Jira" },
+  { collection: "melosys-confluence-v3", label: "Confluence", badge: "Confluence" },
+  { collection: "nav-wiki", label: "NAV-wiki", badge: "NAV-wiki" },
 ];
 
 /**
@@ -118,6 +138,21 @@ export function getResearchCollection(collection: string): ResearchCollection | 
 /** Badge for a collection, falling back to the collection name for anything off-corpus. */
 export function badgeForCollection(collection: string): string {
   return getResearchCollection(collection)?.badge ?? collection;
+}
+
+/**
+ * Badge from {@link COLLECTION_META} directly, ignoring the profile derivation.
+ *
+ * The one lookup that resolves a collection which is registered but belongs to no
+ * `/research` profile — today the three melosys ones. `badgeForCollection` cannot
+ * answer for those (it reads `RESEARCH_CORPUS`, derived from the profiles), and
+ * quietly widening `RESEARCH_CORPUS` to the whole of `COLLECTION_META` would put
+ * three melosys entries into `clientCorpusJson()` and the `/research` "searched
+ * across" line, which is exactly the wrong-corpus surface the profile decision
+ * exists to avoid. Same fallback contract: unknown ⇒ the raw name.
+ */
+export function badgeFromCollectionMeta(collection: string): string {
+  return META_BY_NAME.get(collection)?.badge ?? collection;
 }
 
 /** Minimal corpus projection for the browser (badge/label per collection). */
