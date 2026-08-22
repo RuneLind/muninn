@@ -325,6 +325,41 @@ describe("bot discovery", () => {
       ]);
     });
 
+    // Jira COMPOSER templates (`src/jira/`), distinct from the jiraAnalysis
+    // reader flow above. Before this key existed, `jiraTemplate.bug.md` hit the
+    // unknown-file branch and was warned about and DROPPED.
+    test("discovers jiraTemplate.<id>.md variants, sorted, with label + fallback", () => {
+      setupTestBot("_test_jiratemplates", {
+        prompts: {
+          "jiraTemplate.bug": "<!-- label: Bug (NAV) -->\nNAV bug body",
+          "jiraTemplate.avvik": "Avvik body without label",
+        },
+      });
+
+      const found = discoverAllBots().find((b) => b.name === "_test_jiratemplates");
+      expect(found!.prompts?.jiraTemplateVariants).toEqual([
+        { id: "avvik", label: "Avvik", content: "Avvik body without label" },
+        { id: "bug", label: "Bug (NAV)", content: "NAV bug body" },
+      ]);
+    });
+
+    // `jiraTemplate` is deliberately NOT in SINGLE_PROMPT_KEYS — there is no bare
+    // "the Jira template" concept, so a stray file must keep hitting the
+    // unknown-file warn rather than loading into a field nothing reads. The
+    // declared-but-never-assigned `jiraTemplate` field exists only as the
+    // type-level anchor for the VARIANT_PROMPT_FIELDS key constraint.
+    test("a bare jiraTemplate.md is NOT loaded — variant-only key", () => {
+      setupTestBot("_test_jiratemplatebare", {
+        prompts: { jiraTemplate: "Should be ignored", "share.slack": "Body" },
+      });
+
+      const found = discoverAllBots().find((b) => b.name === "_test_jiratemplatebare");
+      expect(found!.prompts?.jiraTemplate).toBeUndefined();
+      expect(found!.prompts?.jiraTemplateVariants).toBeUndefined();
+      // The rest of the dir still loads — an unknown file warns, it never aborts.
+      expect(found!.prompts?.shareVariants).toEqual([{ id: "slack", label: "Slack", content: "Body" }]);
+    });
+
     // Adversarial review: an empty file is ABSENT, not an empty prompt. Kept, an
     // empty share.md replaced the shipped default with "" (`?? DEFAULT` keeps a
     // present-but-empty string) and the share flow ran instruction-free.
@@ -917,5 +952,25 @@ describe("resolveWikiSynthesisBot", () => {
     const res = resolveWikiSynthesisBot(wikiEntry("mimir", "extra", "ghost"), bots());
     expect(res.origin).toBe("fallback");
     expect(res.bot?.name).toBe("jarvis");
+  });
+});
+
+// ── The reserved-variant-id warning must name a fix that actually works ──────
+
+import { reservedVariantIdHint } from "./config.ts";
+
+describe("reservedVariantIdHint", () => {
+  test("a key that HAS a bare file is told to use it", () => {
+    expect(reservedVariantIdHint("share")).toContain("share.md");
+    expect(reservedVariantIdHint("jiraAnalysis")).toContain("jiraAnalysis.md");
+  });
+
+  test("a VARIANT-ONLY key is not sent to a filename that warns just as loudly", () => {
+    // `jiraTemplate.default.md` is reserved, but `jiraTemplate.md` is NOT the
+    // default — it is an unknown file. Telling the author to rename to it walked
+    // them from one warning straight into another.
+    const hint = reservedVariantIdHint("jiraTemplate");
+    expect(hint).not.toContain("bare jiraTemplate.md");
+    expect(hint).toContain("jiraTemplate.<id>.md");
   });
 });

@@ -797,6 +797,37 @@ CREATE INDEX idx_source_draft_attempts_attempted_at
   ON source_draft_attempts (attempted_at DESC);
 
 -- ============================================================================
+-- Jira composer drafts: raw material, the retrieved hit set, and the task.
+-- The hit set is stored so a regenerate (`excludeDocIds`) reuses it instead of
+-- re-retrieving nondeterministically; the markdown is stored because after the
+-- Jira paste it exists nowhere else. Mirrors
+-- db/migrations/070-jira-drafts.sql: identical columns + constraints + index,
+-- or schema-drift.test.ts reds.
+-- ============================================================================
+CREATE TABLE jira_drafts (
+  id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  bot_name           TEXT NOT NULL,
+  template           TEXT NOT NULL,          -- bug | story | task | spike | per-bot id
+  depth              TEXT NOT NULL,          -- ingen | skisse | full
+  notes              TEXT NOT NULL,
+  extra              TEXT NOT NULL DEFAULT '',
+  status             TEXT NOT NULL DEFAULT 'generating',  -- generating | ready | failed
+  markdown           TEXT,
+  citations          JSONB NOT NULL DEFAULT '[]'::jsonb,  -- JiraCitation[] @ maxSources 24
+  exclude_doc_ids    JSONB NOT NULL DEFAULT '[]'::jsonb,  -- doc ids toggled OFF
+  key_verdicts       JSONB NOT NULL DEFAULT '[]'::jsonb,  -- JiraKeyVerdict[]
+  markdown_flags     JSONB NOT NULL DEFAULT '[]'::jsonb,  -- JiraMarkdownFlag[]
+  retrieval_coverage TEXT,                   -- answer | no_hits | low_confidence, as RETRIEVAL found it (written once)
+  retrieval_question TEXT NOT NULL DEFAULT '',
+  error              TEXT,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_jira_drafts_created_at
+  ON jira_drafts (created_at DESC);
+
+-- ============================================================================
 -- Schema migrations: tracks which migrations have been applied
 -- ============================================================================
 CREATE TABLE schema_migrations (

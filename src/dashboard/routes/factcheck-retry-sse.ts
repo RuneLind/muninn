@@ -120,10 +120,13 @@ export function retryTimeoutReason(failure: ClaimFailure): string {
  * injected-sentinel fix): keep the readable content, destroy the structural
  * marker. A run of three or more `"` collapses to one — idempotent, since the
  * result no longer matches.
+ *
+ * The implementation now lives in the dependency-free `src/utils/prompt-fence.ts`
+ * (share and the Jira composer carried their own copies of it); this stays a
+ * re-export because `wiki-routes.ts` imports the name from here.
  */
-export function neutralizePromptFence(text: string): string {
-  return text.replace(/"{3,}/g, '"');
-}
+import { neutralizePromptFence } from "../../utils/prompt-fence.ts";
+export { neutralizePromptFence };
 
 /**
  * Flatten a client-echoed claim `title` to ONE line.
