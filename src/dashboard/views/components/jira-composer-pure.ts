@@ -22,10 +22,12 @@ import {
   JIRA_LOW_CONFIDENCE_MESSAGE,
   JIRA_NO_HITS_MESSAGE,
   JIRA_NOTES_MAX,
+  isJiraDepth,
   type JiraCitation,
   type JiraCoverage,
   type JiraDepth,
   type JiraDraftStatus,
+  type JiraDraftView,
   type JiraKeyVerdict,
   type JiraMarkdownFlag,
 } from "../../../jira/wire.ts";
@@ -55,6 +57,11 @@ export const JC_EXTRA_COUNT_ID = "jcExtraCount";
  *  it without re-rendering the column the caret is in, and a conditionally
  *  rendered line leaves it with nothing to write into. */
 export const JC_BLOCKED_ID = "jcBlocked";
+/** The MIDDLE column's own "why the regenerate is off" line. The middle and left
+ *  columns are separate scroll regions, so `#jcBlocked` can be off screen while
+ *  the reader is looking at this button — which is how it shipped as a live
+ *  button whose click did nothing and said nothing. */
+export const JC_REGEN_BLOCKED_ID = "jcRegenBlocked";
 /** The RIGHT column's own error line, beside the copy/save buttons. `state.error`
  *  renders only in the left column's status line, so a failed **Lagre** was
  *  invisible: the reader saw the button return to rest and believed it saved. */
@@ -174,6 +181,15 @@ export interface JiraComposerState {
   saving: boolean;
   /** Transient confirmation under the draft ("Lagret."). */
   savedNote?: string;
+  /**
+   * "The server holds a newer draft than your unsaved edit."
+   *
+   * Set by {@link mergeDraftView} instead of overwriting `markdown`: until it is
+   * saved, the reader's edit exists in exactly one place — the textarea — so a
+   * poll tick that adopted the server's text destroyed work with no warning and
+   * no way back. Announcing it is the whole remedy; the reader decides.
+   */
+  serverNewerNote?: string;
 }
 
 export function initialJiraState(): JiraComposerState {
@@ -275,13 +291,17 @@ export function isRegenerate(state: JiraComposerState): boolean {
 export function canSubmit(state: JiraComposerState): boolean {
   if (state.running || state.polling || state.saving) return false;
   if (!state.template) return false;
-  // BOTH caps first, on BOTH paths. The regenerate branch used to return `true`
-  // before either length check ran, so an over-cap `extra` (or a note left over
-  // from a first draft) reached the server and came back as a 400 the reader had
-  // no way to predict from the button.
-  if (state.notes.length > JIRA_NOTES_MAX) return false;
+  // `extra` is gated on BOTH paths — the regenerate branch used to return `true`
+  // before either length check ran, so an over-cap steer reached the server and
+  // came back as a 400 the reader had no way to predict from the button.
   if (state.extra.length > JIRA_EXTRA_MAX) return false;
+  // The NOTES cap is a first-draft cap, because `notes` is a first-draft FIELD:
+  // `jiraDraftBody` omits it on a regenerate (the route refuses new notes there —
+  // the stored hit set was retrieved for the original raw material). Gating the
+  // regenerate on it disabled the button over a value the request cannot carry,
+  // on the one path where the page itself tells the reader the notes are locked.
   if (isRegenerate(state)) return true;
+  if (state.notes.length > JIRA_NOTES_MAX) return false;
   return state.notes.trim().length > 0;
 }
 
@@ -308,6 +328,99 @@ export function needsDirtyGate(
 ): boolean {
   if (opts.answered) return false;
   return isDirty(state);
+}
+
+/** What answering the gate does, whichever of the three buttons was clicked. */
+export function gateAnswerPatch(): Partial<JiraComposerState> {
+  return { dirtyGate: false };
+}
+
+/**
+ * After the gate's **Lagre og generer**: may the run start?
+ *
+ * Only when the PUT landed — otherwise the save the reader explicitly asked for
+ * would be dropped on the floor by the very regenerate they were warned about.
+ * The caller repaints on BOTH answers: `false` used to be a bare `return` that
+ * left the gate panel standing over a page no longer waiting for an answer.
+ */
+export function saveThenRunProceeds(state: JiraComposerState): boolean {
+  return !state.rightError;
+}
+
+/**
+ * Is the draft textarea read-only right now?
+ *
+ * A `?draft=` landing on a row that is still `generating` has nothing to edit —
+ * the text arrives when the row settles, and the poll tick that brings it would
+ * either overwrite what was typed or (with the guard in {@link mergeDraftView})
+ * strand it as a permanent unsaved edit against a draft the reader never wrote.
+ */
+export function markdownEditDisabled(state: JiraComposerState): boolean {
+  return state.polling && state.status === "generating";
+}
+
+/** Said in the right column when the server has moved on and the edit was kept. */
+export const JC_SERVER_NEWER_NOTE =
+  "Serveren har en nyere versjon av utkastet. Endringen din er beholdt — lagre for å overskrive den, eller last siden på nytt for å hente serverens.";
+
+/**
+ * Fold a stored row into the page state — the POLL/adopt merge rule.
+ *
+ * A poll tick is a background event, so this is the same class of rule as the
+ * `done`/`citations` stream handlers and carries the same two guards:
+ *
+ *   · **an EMPTY citation set never replaces a non-empty one** (with its
+ *     exclusion set), or a degraded row deletes the very rows the reader needs
+ *     in order to switch one back on;
+ *   · **`markdown` is never overwritten while the draft is dirty** — that text
+ *     exists in exactly one place until it is saved. `savedMarkdown` still moves
+ *     to the server's text, so `dirty` keeps telling the truth about what the row
+ *     holds, and {@link JC_SERVER_NEWER_NOTE} says so out loud.
+ *
+ * Returns a PATCH rather than mutating, so the merge is testable without a DOM.
+ */
+export function mergeDraftView(
+  state: JiraComposerState,
+  v: JiraDraftView,
+): Partial<JiraComposerState> {
+  const template = v.template || state.template;
+  const incoming = Array.isArray(v.citations) ? v.citations : [];
+  const keepCitations = incoming.length === 0 && state.citations.length > 0;
+  const serverMarkdown = v.markdown ?? "";
+  const keepEdit = isDirty(state) && serverMarkdown !== state.markdown;
+
+  return {
+    draftId: v.draftId,
+    status: v.status,
+    template,
+    // A stored template the route did not serve (a renamed or removed
+    // `jiraTemplate.<id>.md`) is added as an option, so the picker shows the id
+    // the POST will actually carry instead of silently displaying the first one.
+    templates: withTemplateOption(state.templates, template),
+    depth: isJiraDepth(v.depth) ? v.depth : state.depth,
+    notes: typeof v.notes === "string" ? v.notes : state.notes,
+    extra: typeof v.extra === "string" ? v.extra : state.extra,
+    ...(keepEdit ? {} : { markdown: serverMarkdown }),
+    savedMarkdown: v.markdown ?? undefined,
+    serverNewerNote: keepEdit ? JC_SERVER_NEWER_NOTE : undefined,
+    citations: keepCitations ? state.citations : incoming,
+    // The toggles reflect the exclusion set the LAST generation ran under —
+    // stored on the row for exactly this reason — but they travel WITH the
+    // citation set, or a preserved wide set would be paired with the exclusions
+    // of the empty one that was refused.
+    excludeDocIds: keepCitations
+      ? [...state.excludeDocIds]
+      : Array.isArray(v.excludeDocIds)
+        ? [...v.excludeDocIds]
+        : [],
+    keyVerdicts: (v.keyVerdicts ?? []) as JiraKeyVerdict[],
+    markdownFlags: (v.markdownFlags ?? []) as JiraMarkdownFlag[],
+    coverage: v.coverage ?? null,
+    retrievalCoverage: v.retrievalCoverage ?? null,
+    retrievalQuestion: v.retrievalQuestion ?? "",
+    error: v.status === "failed" ? (v.error ?? "Utkastet feilet.") : undefined,
+    copied: false,
+  };
 }
 
 /**
@@ -404,13 +517,16 @@ export function charCountHtml(length: number, max: number): string {
 
 /** Why the button is off, when it is off for a reason the reader can fix. */
 export function submitBlockedReason(state: JiraComposerState): string | undefined {
-  if (state.notes.length > JIRA_NOTES_MAX) {
-    return `Råmaterialet er ${state.notes.length} tegn — grensen er ${JIRA_NOTES_MAX}.`;
-  }
   if (state.extra.length > JIRA_EXTRA_MAX) {
     return `Ekstra instruks er ${state.extra.length} tegn — grensen er ${JIRA_EXTRA_MAX}.`;
   }
-  if (!isRegenerate(state) && !state.notes.trim()) return "Lim inn råmateriale først.";
+  // Mirrors `canSubmit`: on a regenerate the notes are locked and unsent, so the
+  // cap cannot be the reason for anything.
+  if (isRegenerate(state)) return undefined;
+  if (state.notes.length > JIRA_NOTES_MAX) {
+    return `Råmaterialet er ${state.notes.length} tegn — grensen er ${JIRA_NOTES_MAX}.`;
+  }
+  if (!state.notes.trim()) return "Lim inn råmateriale først.";
   return undefined;
 }
 
@@ -702,17 +818,26 @@ export function jiraCitationsHtml(state: JiraComposerState): string {
     })
     .join("");
 
-  // `saving` too: a PUT in flight is about to answer with verdicts and flags for
-  // the text a regenerate would already have replaced.
+  // **The same gate as the left column's button**, `canSubmit` — which already
+  // covers running/polling/saving (a PUT in flight is about to answer with
+  // verdicts and flags for text a regenerate would have replaced). Gating this
+  // one on busy ALONE left it live whenever `canSubmit` was false for any other
+  // reason — an over-cap `extra`, no resolved template — and the click was a
+  // silent no-op: `runDraft` returns immediately and nothing repaints.
+  const canRun = canSubmit(state);
+  const regenBlocked = submitBlockedReason(state);
   const regenBtn = `<button id="${JC_REGEN_ID}" class="jc-secondary" type="button"${
-    busy || state.saving ? " disabled" : ""
+    canRun ? "" : " disabled"
   }>Generer på nytt</button>`;
 
   return `${head}${question}${noticeHtml}
     <div class="jc-citelist">${list}</div>
     <div class="jc-citefoot">${regenBtn}
       <span class="jc-note">Slå av kilder du ikke vil ha med, og generer på nytt — ingen nye søk kjøres.</span>
-    </div>`;
+    </div>
+    <p class="jc-note jc-err" id="${JC_REGEN_BLOCKED_ID}"${regenBlocked ? "" : " hidden"}>${
+      regenBlocked ? esc(regenBlocked) : ""
+    }</p>`;
 }
 
 /** RIGHT: the draft itself. */
@@ -753,7 +878,9 @@ export function jiraDraftHtml(state: JiraComposerState): string {
     ? `<pre class="jc-stream">${esc(state.streamed)}</pre>`
     : state.view === "preview"
       ? `<div class="jc-preview markdown-body" id="${JC_PREVIEW_ID}"></div>`
-      : `<textarea id="${JC_MARKDOWN_ID}" class="jc-md" spellcheck="false"
+      : `<textarea id="${JC_MARKDOWN_ID}" class="jc-md" spellcheck="false"${
+          markdownEditDisabled(state) ? " disabled" : ""
+        }
            placeholder="Utkastet vises her.">${esc(state.markdown)}</textarea>`;
 
   const dirty = isDirty(state);
@@ -799,6 +926,7 @@ export function jiraDraftHtml(state: JiraComposerState): string {
       }>${state.saving ? "Lagrer…" : "Lagre utkast"}</button>
     </div>
     <p class="jc-note jc-dirty" id="${JC_DIRTY_ID}"${dirty ? "" : " hidden"}>Ulagrede endringer.</p>
+    ${state.serverNewerNote ? `<p class="jc-note jc-server-newer">${esc(state.serverNewerNote)}</p>` : ""}
     <p class="jc-err" id="${JC_RIGHT_ERROR_ID}"${state.rightError ? "" : " hidden"}>${
       state.rightError ? esc(state.rightError) : ""
     }</p>

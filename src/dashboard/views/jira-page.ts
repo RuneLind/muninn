@@ -295,6 +295,12 @@ const JIRA_PAGE_STYLES = `
     }
     .jc-tab-on { background: var(--jc-accent-wash); border-color: var(--jc-accent); color: var(--jc-accent-ink); font-weight: 600; }
     .jc-dirty { color: var(--status-warning); }
+    /* "the server has moved on and your edit was kept" — a warning, not an error:
+       nothing failed and nothing was lost, the reader just has a decision. */
+    .jc-server-newer { color: var(--status-warning); }
+    /* A disabled draft textarea (a ?draft= landing on a row still being
+       written) must LOOK inert, or it reads as a broken editor. */
+    .jc-md:disabled { opacity: 0.6; cursor: not-allowed; }
     .jc-saved { color: var(--status-success); }
 
     .jc-stream, .jc-preview {

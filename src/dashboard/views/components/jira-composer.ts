@@ -54,6 +54,7 @@ import {
   JC_POLL_INTERVAL_MS,
   JC_POLL_MAX_MS,
   JC_PREVIEW_ID,
+  JC_REGEN_BLOCKED_ID,
   JC_REGEN_ID,
   JC_RIGHT_ERROR_ID,
   JC_RIGHT_ID,
@@ -65,6 +66,7 @@ import {
   beginActionPatch,
   canSubmit,
   charCountHtml,
+  gateAnswerPatch,
   initialJiraState,
   isDirty,
   jiraCitationsHtml,
@@ -72,14 +74,15 @@ import {
   jiraDraftBody,
   jiraDraftHtml,
   jiraLeftHtml,
+  mergeDraftView,
   needsDirtyGate,
   pollTickAction,
+  saveThenRunProceeds,
   shouldStopPolling,
   statusLineHtml,
   streamDropMessage,
   submitBlockedReason,
   toggleExclusion,
-  withTemplateOption,
   type JiraComposerState,
   type JiraTemplateOption,
 } from "./jira-composer-pure.ts";
@@ -236,6 +239,28 @@ function syncLeftControls(): void {
   }
   const status = el(JC_STATUS_ID);
   if (status) status.innerHTML = statusLineHtml(state);
+  // The MIDDLE column's regenerate reads the same predicate, so it is repainted
+  // in the same breath. Measured in the browser: typing an over-cap `extra` only
+  // ever ran this function, so **Skriv utkast** went off and named the cap while
+  // **Generer på nytt** two columns over stayed live and silently did nothing.
+  syncMidControls();
+}
+
+/**
+ * The middle column's regenerate button and its own blocked line.
+ *
+ * Patched rather than re-rendered: `renderMid` replaces the citation list, which
+ * throws away the reader's scroll position in a 24-row column on every keystroke.
+ */
+function syncMidControls(): void {
+  const btn = el(JC_REGEN_ID) as HTMLButtonElement | null;
+  if (btn) btn.disabled = !canSubmit(state);
+  const blocked = el(JC_REGEN_BLOCKED_ID);
+  if (blocked) {
+    const reason = submitBlockedReason(state);
+    blocked.textContent = reason ?? "";
+    blocked.hidden = !reason;
+  }
 }
 
 /** The right column's own error line, patched without a re-render. */
@@ -276,7 +301,12 @@ function wire(): void {
     }
     if (target.closest(`#${JC_GATE_DISCARD_ID}`)) {
       ev.preventDefault();
-      state.dirtyGate = false;
+      // **The gate is repainted before anything async starts.** `runDraft` can
+      // return immediately (a `canSubmit` that has since gone false), and without
+      // this the panel stayed on screen over a page that was no longer waiting
+      // for an answer — three buttons whose clicks did nothing.
+      Object.assign(state, gateAnswerPatch());
+      renderRight();
       // Discarding means exactly that: the run replaces the text, and the edit
       // the reader chose to lose is not written anywhere first.
       void runDraft({ answeredGate: true });
@@ -284,7 +314,7 @@ function wire(): void {
     }
     if (target.closest(`#${JC_GATE_CANCEL_ID}`)) {
       ev.preventDefault();
-      state.dirtyGate = false;
+      Object.assign(state, gateAnswerPatch());
       renderRight();
       return;
     }
@@ -423,10 +453,10 @@ async function runDraft(opts: { answeredGate?: boolean } = {}): Promise<void> {
   const ctrl = new AbortController();
   inFlight?.abort();
   inFlight = ctrl;
+  // Supersedes every response still on the wire — the poll tick a cleared timer
+  // cannot cancel, and any PUT whose 200 has not landed yet. The bump lives
+  // INSIDE `stopPolling`, so stopping the loop always invalidates it.
   stopPolling();
-  // Supersedes every response still on the wire — the poll tick `stopPolling`
-  // cannot cancel, and any PUT whose 200 has not landed yet.
-  generation++;
 
   state.running = true;
   state.streamed = "";
@@ -667,31 +697,17 @@ async function adoptDraft(id: string, opts: { thenPoll?: boolean } = {}): Promis
   }
 }
 
+/**
+ * Fold a stored row in.
+ *
+ * The merge RULE lives in `mergeDraftView` — it is a background event's rule (a
+ * poll tick, an adopt) and had to be testable, because both of its guards were
+ * missing here and both destroyed reader state: an empty citation set emptied the
+ * toggle column mid-poll, and an unsaved edit was silently overwritten by the
+ * server's text.
+ */
 function applyDraftView(v: JiraDraftView): void {
-  state.draftId = v.draftId;
-  state.status = v.status;
-  state.template = v.template || state.template;
-  // A stored template the route did not serve (a renamed or removed
-  // `jiraTemplate.<id>.md`) is added as an option, so the picker shows the id the
-  // POST will actually carry instead of silently displaying the first one.
-  state.templates = withTemplateOption(state.templates, state.template);
-  if (isJiraDepth(v.depth)) state.depth = v.depth;
-  state.notes = typeof v.notes === "string" ? v.notes : state.notes;
-  state.extra = typeof v.extra === "string" ? v.extra : state.extra;
-  state.markdown = v.markdown ?? "";
-  state.savedMarkdown = v.markdown ?? undefined;
-  state.citations = Array.isArray(v.citations) ? v.citations : [];
-  // The toggles reflect the exclusion set the LAST generation ran under — stored
-  // on the row for exactly this reason, so a reload cannot show 24 live rows
-  // beside markdown that cites 23.
-  state.excludeDocIds = Array.isArray(v.excludeDocIds) ? [...v.excludeDocIds] : [];
-  state.keyVerdicts = (v.keyVerdicts ?? []) as JiraKeyVerdict[];
-  state.markdownFlags = (v.markdownFlags ?? []) as JiraMarkdownFlag[];
-  state.coverage = v.coverage ?? null;
-  state.retrievalCoverage = v.retrievalCoverage ?? null;
-  state.retrievalQuestion = v.retrievalQuestion ?? "";
-  state.error = v.status === "failed" ? (v.error ?? "Utkastet feilet.") : undefined;
-  state.copied = false;
+  Object.assign(state, mergeDraftView(state, v));
 }
 
 /**
@@ -756,11 +772,19 @@ function startPolling(id: string, gen: number): void {
   pollTimer = setTimeout(() => void tick(), JC_POLL_INTERVAL_MS);
 }
 
-/** Stop the loop AND invalidate any tick already on the wire. */
+/**
+ * Stop the loop AND invalidate any tick already on the wire.
+ *
+ * The generation bump is what makes the second half of that sentence true:
+ * clearing the timer cannot cancel a `fetch` already out, and that response used
+ * to call `applyDraftView` unconditionally. It lived at the one call site before,
+ * which meant the comment here described a guarantee the function did not carry.
+ */
 function stopPolling(): void {
   if (pollTimer) clearTimeout(pollTimer);
   pollTimer = null;
   state.polling = false;
+  generation++;
 }
 
 /** Keep `?draft=` on the URL so a reload lands on the same draft. */
@@ -869,14 +893,22 @@ async function saveDraft(): Promise<void> {
  * The gate's **Lagre og generer**: the PUT lands first, and the run only starts
  * if it succeeded — otherwise a save the reader asked for would be dropped on the
  * floor by the very regenerate they were warned about.
+ *
+ * **Every exit repaints.** The failure exit was a bare `return`, and `saveDraft`
+ * itself returns without rendering when its generation went stale — so a failed
+ * or superseded save left the gate panel painted over a page that had already
+ * moved on, with `state.dirtyGate` false and nothing on screen agreeing.
  */
 async function saveThenRun(): Promise<void> {
-  state.dirtyGate = false;
+  Object.assign(state, gateAnswerPatch());
+  renderRight();
   await saveDraft();
-  if (state.rightError) return;
-  // `answeredGate` regardless: a save that landed leaves the state clean, but a
-  // save the server repaired (`[n]` markers) can come back a byte off, and the
-  // reader has already answered this question.
+  if (!saveThenRunProceeds(state)) {
+    renderRight();
+    return;
+  }
+  // `answeredGate` regardless: a save that landed leaves the state clean, but the
+  // reader has already answered this question and must not be asked twice.
   await runDraft({ answeredGate: true });
 }
 

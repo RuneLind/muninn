@@ -47,7 +47,6 @@ import { jiraBotMissingMessage, resolveJiraBot } from "../../jira/bot.ts";
 import { findJiraTemplate, resolveJiraTemplates } from "../../jira/templates.ts";
 import { JIRA_FULL_MCP_SERVERS } from "../../jira/tool-fence.ts";
 import { checkJiraMarkdown } from "../../jira/markdown-check.ts";
-import { stripCitationMarkers } from "../../jira/citation-markers.ts";
 import { applyExclusions } from "../../jira/retrieval.ts";
 import { verifyJiraKeys } from "../../jira/verify-keys.ts";
 import { isValidUuid } from "./route-utils.ts";
@@ -500,15 +499,17 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
       if (!existing) return unknownDraft(c);
 
       const retained = applyExclusions(existing.citations, existing.excludeDocIds);
-      // The SAME `[n]` repair the runner applies, over the edited text: an edit
-      // that reintroduces a marker (a paste from an older draft, a hand-typed
-      // `[2]`) would otherwise store a footnote number the unnumbered
-      // `## Referanser` cannot resolve. Bounded by the RETAINED count — the
-      // widest a marker could legitimately have referred to — so a literal
-      // `[2024]` survives. The repaired text is what is stored AND what the
-      // response returns, or the page would report "saved" over text that
-      // differs from the row it just wrote.
-      const markdown = stripCitationMarkers(raw.markdown, retained.length);
+      // **The reader's text is stored VERBATIM.** The `[n]` repair is a safety net
+      // over MODEL output and runs only in the SSE runner; running it here edited
+      // what a human had typed, which is a bug however careful the pass is. It was
+      // also bounded differently on this path — by the STORED hit set (up to 24)
+      // where generation bounds by `citationsUsed` (6–8 on this corpus) — so
+      // saving silently deleted every `[9]`–`[23]` the reader had been reading.
+      // Measured on real drafts, it also ate `artikkel [13] i forordning
+      // 883/2004`, `liste[2]` and the `[1]` of `[1](https://x.no)`.
+      // The response still returns the markdown, so the page adopts exactly what
+      // the row now holds.
+      const markdown = raw.markdown;
 
       // BOTH post-passes are re-run against the edited text and stored with it.
       // Leaving the old verdicts behind would leave the page asserting things

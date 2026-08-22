@@ -41,3 +41,72 @@ describe("stripCitationMarkers", () => {
     expect(stripCitationMarkers(body, 3)).toBe("- punkt\n    - underpunkt\n\n```kotlin\nval x =  1\n```");
   });
 });
+
+/**
+ * The MEASURED corruption set.
+ *
+ * Every input below was destroyed by the first cut of this repair, on real
+ * Norwegian Jira drafts. They are the reason the pass now masks code, refuses a
+ * marker it cannot prove is one, and repairs whitespace by removing at most one
+ * space. All of them must come back BYTE-IDENTICAL — the only thing this repair
+ * is allowed to touch is a bare `[n]` marker standing in prose.
+ */
+describe("stripCitationMarkers — the measured corruption set", () => {
+  const unchanged = (body: string, used: number): void => {
+    expect(stripCitationMarkers(body, used)).toBe(body);
+  };
+
+  test("a legal-article reference above the citation count survives", () => {
+    // The generation path binds by `citationsUsed` (6–8 on this corpus), so a
+    // `[13]` naming article 13 of a regulation is out of range and untouchable.
+    unchanged("artikkel [13] i forordning 883/2004", 8);
+  });
+
+  test("an index expression glued to a word is not a marker", () => {
+    unchanged("liste[2]", 6);
+    unchanged("lovvalg[1] og videre", 6);
+    unchanged("Se deler[1] her.", 6);
+  });
+
+  test("code survives — fenced and inline", () => {
+    unchanged("```kotlin\nval navn = deler[1]\n```", 6);
+    unchanged("Bruk `args[1]` som første argument.", 6);
+    unchanged("~~~\nliste[2]\n~~~", 6);
+  });
+
+  test("a markdown link and a reference definition survive", () => {
+    unchanged("[1](https://x.no)", 6);
+    unchanged("Se [1](https://x.no) her.", 6);
+    unchanged("[1]: https://x.no", 6);
+    unchanged("![1](https://x.no/bilde.png)", 6);
+    unchanged("En [lenke][1] i teksten.", 6);
+  });
+
+  test("a footnote reference survives", () => {
+    unchanged("Påstanden[^1] er omstridt.", 6);
+    unchanged("[^1]: fotnoten", 6);
+  });
+
+  test("a marker alone on its line is left alone — removing it splits the paragraph", () => {
+    // `tekst\n\nmer` is two paragraphs where the source had one, and the only way
+    // to avoid that is to collapse a newline, which this pass never does.
+    unchanged("tekst\n[1]\nmer", 6);
+    unchanged("tekst\n  [1]  \nmer", 6);
+  });
+
+  test("a bare marker in prose IS removed — the one thing the repair is for", () => {
+    expect(stripCitationMarkers("Se her [5] og videre", 6)).toBe("Se her og videre");
+    expect(stripCitationMarkers("Se her [5].", 6)).toBe("Se her.");
+  });
+
+  test("two words are never joined and a newline is never collapsed", () => {
+    expect(stripCitationMarkers("lovvalg [1] og", 6)).toBe("lovvalg og");
+    expect(stripCitationMarkers("linje\nen [1] to\nlinje", 6)).toBe("linje\nen to\nlinje");
+  });
+
+  test("only ONE adjacent space goes, on the side that had one", () => {
+    expect(stripCitationMarkers("a  [1]  b", 6)).toBe("a   b");
+    expect(stripCitationMarkers("a[1]  b", 6)).toBe("a[1]  b"); // glued left ⇒ not a marker
+    expect(stripCitationMarkers("a  [1]b", 6)).toBe("a b");
+  });
+});

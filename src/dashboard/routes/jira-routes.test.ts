@@ -692,20 +692,27 @@ describe("PUT /api/jira/draft/:id", () => {
     expect(rows.get(id)!.markdown).toContain("- [ ] Krav");
   });
 
-  test("the same [n] repair runs on the SAVED text, and the response says what was stored", async () => {
+  test("the reader's text is stored BYTE-IDENTICAL — the [n] repair never runs here", async () => {
     const app = makeApp();
     const id = await seeded(app);
+    // Every one of these was destroyed by the repair when it ran on this path:
+    // `[2]` is a real citation marker the reader may have kept on purpose, `[13]`
+    // is an article of a regulation the stored-set bound (24) reached, `liste[2]`
+    // is an index expression and `[1](…)` is a link.
+    const edited =
+      "## Symptom\nSe MELOSYS-5677 [2]. Artikkel [13] i forordning 883/2004.\n" +
+      "liste[2] og `args[1]`, se [1](https://x.no).";
     const res = await app.request(`/api/jira/draft/${id}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ markdown: "## Symptom\nSe MELOSYS-5677 [2]. Rapportert i [2024]." }),
+      body: JSON.stringify({ markdown: edited }),
     });
     expect(res.status).toBe(200);
     const body = await res.json();
     // The client adopts what was STORED — otherwise the page shows "saved" over
-    // text that differs from the row it just wrote.
-    expect(body.markdown).toBe("## Symptom\nSe MELOSYS-5677. Rapportert i [2024].");
-    expect(rows.get(id)!.markdown).toBe(body.markdown);
+    // text that differs from the row it just wrote. Here they are the same text.
+    expect(body.markdown).toBe(edited);
+    expect(rows.get(id)!.markdown).toBe(edited);
   });
 
   test("a non-string / blank / over-cap markdown is a 400", async () => {

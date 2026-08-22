@@ -7,7 +7,9 @@ import {
   JC_GATE_CANCEL_ID,
   JC_GATE_DISCARD_ID,
   JC_GATE_SAVE_ID,
+  JC_MARKDOWN_ID,
   JC_NOTES_COUNT_ID,
+  JC_REGEN_BLOCKED_ID,
   JC_REGEN_ID,
   JC_RIGHT_ERROR_ID,
   JC_SAVE_ID,
@@ -15,9 +17,13 @@ import {
   canSubmit,
   charCountHtml,
   citationRows,
+  gateAnswerPatch,
   initialJiraState,
   isDirty,
   isRegenerate,
+  markdownEditDisabled,
+  mergeDraftView,
+  saveThenRunProceeds,
   jiraCitationsHtml,
   jiraConflictCopy,
   jiraCoverageNotice,
@@ -45,6 +51,7 @@ import {
   JIRA_NO_HITS_MESSAGE,
   JIRA_NOTES_MAX,
   type JiraCitation,
+  type JiraDraftView,
 } from "../../../jira/wire.ts";
 
 function cite(n: number, docId: string, over: Partial<JiraCitation> = {}): JiraCitation {
@@ -560,5 +567,180 @@ describe("only http(s) reaches an href", () => {
     );
     expect(chips).not.toContain("href=");
     expect(chips).toContain("MELOSYS-1");
+  });
+});
+
+// ── The notes cap does not apply to a path that sends no notes ───────────────
+
+describe("the notes cap is a FIRST-DRAFT cap", () => {
+  const lockedNotes = {
+    draftId: "d",
+    citations: [cite(1, "a.md")],
+    notes: "x".repeat(JIRA_NOTES_MAX + 1),
+  };
+
+  test("a regenerate over over-cap LOCKED notes is allowed — it sends no notes", () => {
+    // `jiraDraftBody` omits `notes` on a regenerate (the route REFUSES new notes
+    // there: the stored hit set was retrieved for the original raw material), so
+    // gating on the field's length disabled the button over a value the request
+    // could not carry — and the page tells the reader the notes are locked.
+    const regen = stateWith(lockedNotes);
+    expect(jiraDraftBody(regen).notes).toBeUndefined();
+    expect(canSubmit(regen)).toBe(true);
+    expect(submitBlockedReason(regen)).toBeUndefined();
+  });
+
+  test("the `extra` cap still gates the regenerate — that field IS sent", () => {
+    const regen = stateWith({ ...lockedNotes, extra: "x".repeat(JIRA_EXTRA_MAX + 1) });
+    expect(canSubmit(regen)).toBe(false);
+    expect(submitBlockedReason(regen)).toContain(String(JIRA_EXTRA_MAX));
+  });
+
+  test("a FIRST draft is still gated on the notes cap", () => {
+    const first = stateWith({ notes: "x".repeat(JIRA_NOTES_MAX + 1) });
+    expect(canSubmit(first)).toBe(false);
+    expect(submitBlockedReason(first)).toContain(String(JIRA_NOTES_MAX));
+  });
+});
+
+// ── The middle column's own regenerate button ────────────────────────────────
+
+describe("the middle-column Generer på nytt says why it is off", () => {
+  const base = {
+    draftId: "d",
+    markdown: "x",
+    savedMarkdown: "x",
+    citations: [cite(1, "a.md")],
+  };
+  const disabled = (over: Partial<JiraComposerState>): boolean =>
+    new RegExp(`id="${JC_REGEN_ID}"[^>]* disabled`).test(
+      jiraCitationsHtml(stateWith({ ...base, ...over })),
+    );
+
+  test("it is gated on canSubmit, not just on busy — it was a live silent no-op", () => {
+    // The left column's button reads `canSubmit`; this one read only
+    // running/polling/saving, so an over-cap `extra` (or a template the picker
+    // could not resolve) left it clickable and the click did nothing at all.
+    expect(disabled({ extra: "x".repeat(JIRA_EXTRA_MAX + 1) })).toBe(true);
+    expect(disabled({ template: "" })).toBe(true);
+    expect(disabled({})).toBe(false);
+  });
+
+  test("the reason renders NEXT TO IT — #jcBlocked is in a different scroll region", () => {
+    const html = jiraCitationsHtml(
+      stateWith({ ...base, extra: "x".repeat(JIRA_EXTRA_MAX + 1) }),
+    );
+    expect(html).toContain(`id="${JC_REGEN_BLOCKED_ID}"`);
+    expect(html).toContain(String(JIRA_EXTRA_MAX));
+    // Present-but-hidden when there is nothing to say, like its left-column twin.
+    expect(jiraCitationsHtml(stateWith(base))).toMatch(
+      new RegExp(`id="${JC_REGEN_BLOCKED_ID}"[^>]* hidden`),
+    );
+  });
+});
+
+// ── Folding a stored row back into the page ──────────────────────────────────
+
+describe("mergeDraftView — a poll tick must not clobber the reader", () => {
+  const view = (over: Partial<JiraDraftView> = {}): JiraDraftView =>
+    ({
+      draftId: "d",
+      status: "ready",
+      template: "bug",
+      depth: "skisse",
+      notes: "n",
+      extra: "",
+      markdown: "fra serveren",
+      citations: [cite(1, "a.md"), cite(2, "b.md")],
+      excludeDocIds: ["b.md"],
+      keyVerdicts: [],
+      markdownFlags: [],
+      coverage: "answer",
+      retrievalCoverage: "answer",
+      retrievalQuestion: "spm",
+      ...over,
+    }) as JiraDraftView;
+
+  test("an EMPTY citation set never replaces a non-empty one", () => {
+    // The same guard the `done` and `citations` handlers carry: a degraded row (or
+    // a regenerate mid-flight) answering with `[]` would delete the very rows the
+    // reader needs in order to switch one back on — and the exclusion set with it.
+    const state = stateWith({ citations: [cite(1, "a.md")], excludeDocIds: ["a.md"] });
+    const patch = mergeDraftView(state, view({ citations: [], excludeDocIds: [] }));
+    expect(patch.citations).toHaveLength(1);
+    expect(patch.excludeDocIds).toEqual(["a.md"]);
+  });
+
+  test("a non-empty set IS adopted, exclusions and all", () => {
+    const patch = mergeDraftView(stateWith({ citations: [cite(1, "a.md")] }), view());
+    expect(patch.citations).toHaveLength(2);
+    expect(patch.excludeDocIds).toEqual(["b.md"]);
+  });
+
+  test("an unsaved edit is KEPT and the newer server version is only announced", () => {
+    const dirty = stateWith({ draftId: "d", markdown: "min endring", savedMarkdown: "gammel" });
+    const patch = mergeDraftView(dirty, view({ markdown: "fra serveren" }));
+    expect(patch.markdown).toBeUndefined(); // untouched — the edit exists nowhere else
+    expect(patch.savedMarkdown).toBe("fra serveren");
+    expect(patch.serverNewerNote).toBeTruthy();
+    // Still dirty afterwards, against the text the server actually holds.
+    expect(isDirty({ ...dirty, ...patch })).toBe(true);
+  });
+
+  test("a clean draft adopts the server text and clears the note", () => {
+    const clean = stateWith({ draftId: "d", markdown: "gammel", savedMarkdown: "gammel" });
+    const patch = mergeDraftView(clean, view({ markdown: "fra serveren" }));
+    expect(patch.markdown).toBe("fra serveren");
+    expect(patch.serverNewerNote).toBeUndefined();
+  });
+
+  test("an edit the server already has is not announced as newer", () => {
+    const same = stateWith({ draftId: "d", markdown: "fra serveren", savedMarkdown: "gammel" });
+    const patch = mergeDraftView(same, view({ markdown: "fra serveren" }));
+    expect(patch.serverNewerNote).toBeUndefined();
+    expect(isDirty({ ...same, ...patch })).toBe(false);
+  });
+
+  test("the note renders in the right column, once", () => {
+    const html = jiraDraftHtml(
+      stateWith({ draftId: "d", markdown: "min", savedMarkdown: "gammel", serverNewerNote: "Nyere versjon." }),
+    );
+    expect(html).toContain("Nyere versjon.");
+  });
+});
+
+describe("nothing to edit yet while a generating row is polled", () => {
+  test("the draft textarea is DISABLED — the row is still being written", () => {
+    const generating = stateWith({ draftId: "d", status: "generating", polling: true });
+    expect(markdownEditDisabled(generating)).toBe(true);
+    expect(jiraDraftHtml(generating)).toMatch(
+      new RegExp(`id="${JC_MARKDOWN_ID}"[\\s\\S]*?disabled`),
+    );
+  });
+
+  test("a settled row is editable again", () => {
+    const ready = stateWith({ draftId: "d", status: "ready", markdown: "x" });
+    expect(markdownEditDisabled(ready)).toBe(false);
+    expect(jiraDraftHtml(ready)).not.toMatch(
+      new RegExp(`id="${JC_MARKDOWN_ID}"[^>]*disabled`),
+    );
+  });
+});
+
+// ── The gate's own exits ─────────────────────────────────────────────────────
+
+describe("answering the gate always closes it", () => {
+  test("the answer patch closes the gate — every exit path renders it", () => {
+    expect(gateAnswerPatch()).toEqual({ dirtyGate: false });
+  });
+
+  test("Lagre og generer runs ONLY when the save landed", () => {
+    // A failed save must not be dropped on the floor by the very regenerate the
+    // reader was warned about — and the gate has to be repainted either way, or
+    // the panel stands over a page that is no longer waiting for an answer.
+    expect(saveThenRunProceeds(stateWith({ draftId: "d" }))).toBe(true);
+    expect(saveThenRunProceeds(stateWith({ draftId: "d", rightError: "Lagring feilet." }))).toBe(
+      false,
+    );
   });
 });
