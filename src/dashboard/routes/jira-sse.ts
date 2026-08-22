@@ -225,6 +225,8 @@ export interface JiraSseOptions {
   /** Regenerate: the row's IMMUTABLE retrieval verdict — what retrieval found,
    *  never the last run's derived one. Also the marker that retrieval landed. */
   storedCoverage?: JiraDonePayload["coverage"];
+  /** The exclusion set the stored markdown was generated under — restored if this run fails. */
+  storedExcludeDocIds?: string[];
   excludeDocIds: string[];
   /** Live MCP probe result — the same one the `Full` pre-flight ran. */
   mcpServers: McpServerStatus[];
@@ -325,6 +327,7 @@ async function runJiraDraft(
 
     let citations: JiraCitation[];
     let coverage: JiraDonePayload["coverage"];
+    let retrievalCoverage: JiraDonePayload["retrievalCoverage"];
     let retrievalQuestion: string;
 
     if (regenerate) {
@@ -340,7 +343,8 @@ async function runJiraDraft(
       // exclusion set, so the poll derives the same verdict from the same two
       // inputs. Storing it instead is what latched a draft to `no_hits` forever:
       // the next regenerate read the derived value back as the retrieval verdict.
-      coverage = effectiveCoverage(opts.storedCoverage ?? null, citations.length);
+      retrievalCoverage = opts.storedCoverage ?? null;
+      coverage = effectiveCoverage(retrievalCoverage, citations.length);
       safeWrite("phase", { phase: "regenerating", citations: citations.length });
     } else {
       safeWrite("phase", { phase: "condensing" });
@@ -371,7 +375,8 @@ async function runJiraDraft(
       // payload carries the derived one and the row carries what retrieval found.
       await saveJiraDraftRetrieval(draftId, retrieved.citations, retrieved.coverage, q.question);
       citations = applyExclusions(retrieved.citations, opts.excludeDocIds);
-      coverage = effectiveCoverage(retrieved.coverage, citations.length);
+      retrievalCoverage = retrieved.coverage;
+      coverage = effectiveCoverage(retrievalCoverage, citations.length);
       safeWrite("citations", { citations, coverage });
     }
 
@@ -488,6 +493,7 @@ async function runJiraDraft(
       keyVerdicts,
       markdownFlags,
       coverage,
+      retrievalCoverage,
       retrievalQuestion,
     };
     safeWrite("done", payload);
@@ -506,9 +512,15 @@ async function runJiraDraft(
     // logs, not the draft. The STREAM still carries the detail: it is the answer
     // to this caller's own POST, on a route with no CORS headers at all.
     if (draftId) {
+      // A regenerate that fails must not leave THIS run's exclusion set beside the
+      // PREVIOUS run's markdown: the view derives `coverage` from the exclusions,
+      // so an all-excluded run that timed out read as `no_hits` over a task with
+      // a full `## Referanser`. Restoring the set the stored markdown was written
+      // under keeps the row self-consistent; a first draft has nothing to restore.
       await failJiraDraft(
         draftId,
         "Utkastet kunne ikke skrives ferdig. Se muninn-loggen for detaljer, og prøv igjen.",
+        regenerate ? opts.storedExcludeDocIds : undefined,
       ).catch(() => {});
     }
     safeWrite("app_error", { type: "error", message: `Kunne ikke skrive saken: ${message}` });

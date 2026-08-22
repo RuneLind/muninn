@@ -131,9 +131,9 @@ mock.module("../../db/jira-drafts.ts", () => ({
     const r = rows.get(id);
     if (r) Object.assign(r, { ...i, status: "ready", error: null });
   },
-  failJiraDraft: async (id: string, error: string) => {
+  failJiraDraft: async (id: string, error: string, restoreExcludeDocIds?: string[]) => {
     const r = rows.get(id);
-    if (r) Object.assign(r, { status: "failed", error });
+    if (r) Object.assign(r, { status: "failed", error, ...(restoreExcludeDocIds ? { excludeDocIds: restoreExcludeDocIds } : {}) });
   },
   updateJiraDraftMarkdown: async (id: string, markdown: string, kv: unknown[], mf: unknown[]) => {
     const r = rows.get(id);
@@ -386,7 +386,7 @@ describe("POST /api/jira/draft — the draft", () => {
     const done = (await draft()).find((e) => e.event === "done")!.data;
     expect(done.coverage).toBe("answer");
     expect(Object.keys(done).sort()).toEqual([
-      "citations", "coverage", "draftId", "keyVerdicts", "markdown", "markdownFlags", "retrievalQuestion",
+      "citations", "coverage", "draftId", "keyVerdicts", "markdown", "markdownFlags", "retrievalCoverage", "retrievalQuestion",
     ]);
   });
 
@@ -835,6 +835,38 @@ describe("regenerate — the row is `generating` again, and the new coverage is 
     expect(view.retrievalCoverage).toBe("answer");
     // And no second retrieval was spent getting back there.
     expect(retrievals.n).toBe(1);
+  });
+
+  test("a FAILED regenerate restores the exclusion set the surviving markdown was written under", async () => {
+    const app = makeApp();
+    const draftId = await seed(app);
+    // The stored markdown cites everything (exclusions []). Now an exclude-all
+    // regenerate dies in the model call: the OLD text survives on the row, so the
+    // row must not describe it with the NEW run's exclusion set — that pairing
+    // read as `no_hits` over a task with a full `## Referanser`.
+    __setJiraOneShotForTest((async () => { throw new Error("timed out after 120000ms"); }) as never);
+    const events = parseSse(await (await post(app, "/api/jira/draft", {
+      template: "bug", depth: "skisse", draftId,
+      excludeDocIds: ["MELOSYS-5677_Ny_flyt.md", "MELOSYS-8028_Manglende.md", "faktura.md"],
+    })).text());
+    await new Promise((r) => setTimeout(r, 20));
+    expect(events[events.length - 1]!.event).toBe("end");
+    const view = await (await app.request(`/api/jira/draft/${draftId}`)).json();
+    expect(view.status).toBe("failed");
+    expect(view.excludeDocIds).toEqual([]);
+    expect(view.coverage).toBe("answer");
+  });
+
+  test("the done payload carries the RETRIEVAL verdict beside the derived one", async () => {
+    const app = makeApp();
+    const draftId = await seed(app);
+    const off = parseSse(await (await post(app, "/api/jira/draft", {
+      template: "bug", depth: "skisse", draftId,
+      excludeDocIds: ["MELOSYS-5677_Ny_flyt.md", "MELOSYS-8028_Manglende.md", "faktura.md"],
+    })).text());
+    const done = off.find((e) => e.event === "done")!.data as { coverage: string; retrievalCoverage: string };
+    expect(done.coverage).toBe("no_hits");
+    expect(done.retrievalCoverage).toBe("answer");
   });
 
   test("the exclusion set is PERSISTED and rides the view", async () => {

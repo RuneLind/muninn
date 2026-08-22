@@ -123,9 +123,23 @@ export async function finishJiraDraft(id: string, input: FinishJiraDraftInput): 
      WHERE id = ${id}`;
 }
 
-/** Mark a draft `failed` with a reader-facing reason. */
-export async function failJiraDraft(id: string, error: string): Promise<void> {
+/**
+ * Mark a draft `failed` with a reader-facing reason. `restoreExcludeDocIds`, when
+ * given, puts back the exclusion set the surviving markdown was written under —
+ * `startJiraDraftRun` lands the NEW set before any work, and a failed regenerate
+ * would otherwise leave it beside the OLD text.
+ */
+export async function failJiraDraft(id: string, error: string, restoreExcludeDocIds?: string[]): Promise<void> {
   const sql = getDb();
+  if (restoreExcludeDocIds) {
+    await sql`
+      UPDATE jira_drafts
+         SET status = 'failed', error = ${error},
+             exclude_doc_ids = ${sql.json(restoreExcludeDocIds as never)},
+             updated_at = now()
+       WHERE id = ${id}`;
+    return;
+  }
   await sql`
     UPDATE jira_drafts
        SET status = 'failed', error = ${error}, updated_at = now()

@@ -167,6 +167,13 @@ export interface JiraDonePayload {
    * them differently.
    */
   coverage: JiraCoverage;
+  /**
+   * What RETRIEVAL found, before this run's exclusions — the same field the view
+   * carries, so a stream-driven client can tell "the corpus had nothing" from
+   * "the reader toggled everything off" without a second GET. `null` only when
+   * retrieval never landed.
+   */
+  retrievalCoverage: JiraCoverage | null;
   /** The condensed retrieval question — shown so the reader can see what was searched. */
   retrievalQuestion: string;
 }

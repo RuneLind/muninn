@@ -108,6 +108,12 @@ describe("citation helpers", () => {
     expect(jiraKeyFor("jira-issues", "MELOSYS-8028_Manglende.md")).toBe("MELOSYS-8028");
     expect(jiraKeyFor("nav-wiki", "entities/MEDL.md", "file://./huginn-nav/wiki/entities/MEDL.md"))
       .toBeUndefined();
+    // Only a JIRA host mints a key: Bitbucket/Stash spell `/browse/<repo>-<n>` too,
+    // and an ungated match produced a fabricated `BUILD-12` Jira key from a repo path.
+    expect(jiraKeyFor("nav-wiki", "x.md", "https://bitbucket.nav.no/projects/X/repos/y/browse/build-12")).toBeUndefined();
+    expect(jiraKeyFor("nav-wiki", "x.md", "https://example.com/browse/MELOSYS-99")).toBeUndefined();
+    expect(jiraKeyFor("nav-wiki", "x.md", "https://nav.atlassian.net/browse/MELOSYS-8170?focusedCommentId=1")).toBe("MELOSYS-8170");
+    expect(jiraKeyFor("nav-wiki", "x.md", "https://jira.adeo.no/browse/melosys-1")).toBeUndefined();
     // A Confluence page that merely LINKS to an issue is not that issue.
     expect(jiraKeyFor("melosys-confluence-v3", "arkitektur.md", "https://confluence.test/x")).toBeUndefined();
   });

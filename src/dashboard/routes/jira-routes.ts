@@ -256,6 +256,7 @@ async function buildSseOptions(
       ...base,
       notes: stored.notes,
       storedCitations: stored.citations,
+      storedExcludeDocIds: stored.excludeDocIds,
       existingDraftId: stored.draftId,
       storedRetrievalQuestion: stored.retrievalQuestion,
       // The RETRIEVAL verdict, never the view's derived `coverage` — that one is a

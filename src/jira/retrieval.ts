@@ -151,22 +151,25 @@ export function jiraKeyFromDocId(collection: string, docId: string): string | un
 }
 
 /**
- * Pull the key out of a Jira issue URL — `…/browse/<KEY>`, any host, any collection.
+ * Pull the key out of a Jira issue URL — `…/browse/<KEY>` on a JIRA host only.
  *
- * The url is unescaped first (5 real docs carry `https\://`), and the key must be
- * the LAST path segment: `/browse/MELOSYS-1/comments` names a sub-page, and a
- * query string or fragment is allowed since a copied Jira link routinely carries
- * one.
+ * The url is unescaped first (5 real docs carry `https\://`). The host is gated
+ * to the two Jira instances the corpus actually links (`jira.adeo.no`, the
+ * legacy Server, and `nav.atlassian.net`, Cloud — both measured live), because
+ * Bitbucket/Stash also spell `/browse/<repo>-<n>` and an ungated match minted a
+ * fabricated Jira key from a `build-12` repo path. The key itself is matched
+ * case-sensitively, same as `jiraKeyFromDocId`. A sub-page or a query/fragment
+ * tail (`/browse/MELOSYS-1/comments`, `?focusedCommentId=`) still names the
+ * issue and is accepted.
  */
-const BROWSE_KEY_RE = new RegExp(`/browse/(${JIRA_KEY_SOURCE})(?:[/?#]|$)`, "i");
+const BROWSE_KEY_RE = new RegExp(
+  `^https?://(?:[^/]*\\.)?(?:jira\\.adeo\\.no|nav\\.atlassian\\.net)/browse/(${JIRA_KEY_SOURCE})(?:[/?#]|$)`,
+);
 
 export function jiraKeyFromBrowseUrl(url: string | undefined): string | undefined {
   const normalized = normalizeJiraUrl(url);
   if (!normalized) return undefined;
-  const key = BROWSE_KEY_RE.exec(normalized)?.[1];
-  // The shape is case-insensitive in the URL but the KEY is upper-case, and it is
-  // compared against keys scanned out of the markdown with an upper-case regex.
-  return key ? key.toUpperCase() : undefined;
+  return BROWSE_KEY_RE.exec(normalized)?.[1];
 }
 
 /**
