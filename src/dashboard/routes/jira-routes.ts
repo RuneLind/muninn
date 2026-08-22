@@ -3,8 +3,14 @@
  * (`jira-sse.ts` owns the stream function, the way `share-sse.ts` /
  * `factcheck-sse.ts` are stream functions registered from `wiki-routes.ts`).
  *
- * Five endpoints:
+ * The page and five endpoints — registered from ONE module the way
+ * `plans-routes.ts` registers `/plans` beside `/api/plans/*`, because the page
+ * and the endpoints it drives are one feature and one file to keep in step:
  *
+ *   · `GET  /jira`                 — the composer page (`views/jira-page.ts`): a
+ *     three-column shell the client bundle mounts into. Its one throwing surface
+ *     is the bundle build, which falls back to a page that names the failure
+ *     rather than an unexplained Hono 500.
  *   · `GET  /api/jira/templates`   — the picker's source. `/api/research/variants`
  *     is hardcoded to `jiraAnalysisVariants` and does not generalise.
  *   · `POST /api/jira/draft`       — SSE. The page's own path.
@@ -44,6 +50,7 @@ import { checkJiraMarkdown } from "../../jira/markdown-check.ts";
 import { applyExclusions } from "../../jira/retrieval.ts";
 import { verifyJiraKeys } from "../../jira/verify-keys.ts";
 import { isValidUuid } from "./route-utils.ts";
+import { renderJiraFallback, renderJiraPage } from "../views/jira-page.ts";
 import {
   JIRA_MARKDOWN_MAX,
   parseJiraDraftBody,
@@ -318,6 +325,25 @@ async function claimDraft(
 }
 
 export function registerJiraRoutes(app: Hono, config: Config): void {
+  // ── The page ───────────────────────────────────────────────────────────────
+  // Registered from the API's own module, the way `plans-routes.ts` registers
+  // `/plans` beside `/api/plans/*` — the page and the endpoints it drives are one
+  // feature and one file to keep in step.
+  app.get("/jira", async (c) => {
+    try {
+      return c.html(await renderJiraPage());
+    } catch (err) {
+      // The one throwing surface is the RENDER, and a client-bundle build
+      // failure is exactly the state where an unexplained Hono 500 is the least
+      // useful thing this page could do — it has no server-rendered content to
+      // fall back to.
+      log.error("Jira page render failed: {error}", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return c.html(renderJiraFallback(err instanceof Error ? err.message : String(err)), 200);
+    }
+  });
+
   // ── The picker's source ────────────────────────────────────────────────────
   app.get("/api/jira/templates", (c) => {
     const bot = resolveJiraBot(discoverAllBots());

@@ -379,13 +379,17 @@ export const SHARED_STYLES = `
 
 /** Shared header HTML with nav links */
 export function renderNav(
-  activePage: "dashboard" | "traces" | "search" | "research" | "logs" | "mcp-debug" | "chat" | "summaries" | "serena" | "wiki" | "graph" | "plans" | "benchmark" | "models" | "indexing" | "agents",
+  activePage: "dashboard" | "traces" | "search" | "research" | "logs" | "mcp-debug" | "chat" | "summaries" | "serena" | "wiki" | "graph" | "plans" | "benchmark" | "models" | "indexing" | "agents" | "jira",
   options?: { headerLeftExtra?: string; headerRight?: string },
 ): string {
   // Pages collapsed under the "Tools ▾" dropdown. The trigger reads as active
   // whenever the current page is one of these (and the matching entry inside is
   // highlighted too).
-  const toolsPages = ["logs", "mcp-debug", "serena", "benchmark", "models", "indexing"] as const;
+  // `/jira` goes HERE rather than beside Plans: the top-level row already
+  // carries ten links, and an eleventh would be the one that pushed it into a
+  // second line on a laptop. The composer is a tool you go to on purpose, from
+  // a refinement, not a surface you watch.
+  const toolsPages = ["logs", "mcp-debug", "serena", "benchmark", "models", "indexing", "jira"] as const;
   const toolsActive = (toolsPages as readonly string[]).includes(activePage);
   return `
   <script>${themeInitScript()}</script>
@@ -453,6 +457,7 @@ export function renderNav(
         <details class="nav-dropdown">
           <summary class="nav-link${toolsActive ? " active" : ""}">Tools <span class="nav-caret" aria-hidden="true">▾</span></summary>
           <div class="nav-dropdown-panel">
+            <a href="/jira" class="nav-dropdown-item${activePage === "jira" ? " active" : ""}">Jira</a>
             <a href="/logs" class="nav-dropdown-item${activePage === "logs" ? " active" : ""}">Logs</a>
             <a href="/mcp-debug" class="nav-dropdown-item${activePage === "mcp-debug" ? " active" : ""}">MCP Debug</a>
             <a href="/serena" class="nav-dropdown-item${activePage === "serena" ? " active" : ""}">Serena</a>

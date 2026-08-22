@@ -1048,3 +1048,36 @@ describe("the failure written to the row is generic", () => {
     expect(String(row.error).length).toBeGreaterThan(10);
   });
 });
+
+// ── The page ─────────────────────────────────────────────────────────────────
+
+/**
+ * `GET /jira` is registered from THIS module, the way `plans-routes.ts`
+ * registers `/plans` beside `/api/plans/*`. The assertion that matters is that
+ * the route exists and serves the shell the bundle mounts into — a page whose
+ * three column ids drifted would render blank with no error anywhere.
+ */
+describe("GET /jira", () => {
+  test("serves the composer shell, the nav and the client bundle", async () => {
+    const res = await makeApp().request("/jira");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/html");
+    const html = await res.text();
+    for (const id of ["jcRoot", "jcLeft", "jcMid", "jcRight"]) {
+      expect(html).toContain(`id="${id}"`);
+    }
+    // The nav entry lives in the Tools dropdown, not the top-level row.
+    expect(html).toContain('<a href="/jira" class="nav-dropdown-item active">Jira</a>');
+    // The bundle is inlined, not linked — there is no static asset route.
+    expect(html).toContain("/api/jira/templates");
+  });
+
+  test("the page does not depend on a bot being configured", async () => {
+    // The picker resolves client-side against `/api/jira/templates`, which
+    // answers the 503. A no-bot install must still render a page that SAYS so
+    // rather than 500ing on the way in.
+    discovered = [];
+    const res = await makeApp().request("/jira");
+    expect(res.status).toBe(200);
+  });
+});

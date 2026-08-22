@@ -34,6 +34,7 @@ import { buildCitations, assessCoverage, type Coverage } from "../research/answe
 import { badgeFromCollectionMeta } from "../research/corpus.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { TraceContext } from "../tracing/index.ts";
+import { JIRA_LOW_CONFIDENCE_MESSAGE, JIRA_NO_HITS_MESSAGE } from "./wire.ts";
 import type { JiraCitation, JiraCoverage, JiraDepth } from "./wire.ts";
 import { getLog } from "../logging.ts";
 
@@ -98,23 +99,16 @@ export const JIRA_FULL_DOC_TOTAL_CHARS = 15_000;
 export const JIRA_FULL_DOC_TIMEOUT_MS = 8_000;
 
 /**
- * The two coverage strings this feature owns.
+ * The two coverage strings this feature owns — DECLARED in the dependency-free
+ * `wire.ts` and re-exported here.
  *
- * Deliberately NOT `coverageMessage` from `answer.ts`: `NO_HITS_MESSAGE` names
- * the Anthropic firehose and the Claude/YouTube/X shelves (none of which this
- * feature searches) and `LOW_CONFIDENCE_MESSAGE` says *"I'd rather not synthesize
- * an answer that isn't well-grounded"* — the opposite of what this does. An
- * ungrounded draft is still useful raw material, so it still drafts; it just
- * never presents the result as grounded.
+ * They moved when `/jira` shipped: the page renders them too, and this module
+ * imports `researchKnowledge`/`fetchKnowledgeApi`/the logger, so the browser half
+ * cannot reach them from here without dragging the research layer into the page
+ * bundle. Re-exported rather than relocated wholesale so every existing importer
+ * (and this file's own `jiraCoverageMessage`) keeps one name for one string.
  */
-export const JIRA_NO_HITS_MESSAGE =
-  "Ingenting i jira-issues, melosys-confluence-v3 eller nav-wiki dekket dette søket, " +
-  "så utkastet er skrevet utelukkende fra råmaterialet ditt. Det er ingen referanser å kontrollere — " +
-  "les nøye før du oppretter saken.";
-
-export const JIRA_LOW_CONFIDENCE_MESSAGE =
-  "De nærmeste treffene dekket ikke dette temaet med sikkerhet, så utkastet er svakt forankret. " +
-  "Kildene er listet opp likevel — vurder dem selv, eller skriv om råmaterialet mot det som faktisk er indeksert.";
+export { JIRA_LOW_CONFIDENCE_MESSAGE, JIRA_NO_HITS_MESSAGE } from "./wire.ts";
 
 export function jiraCoverageMessage(coverage: Exclude<JiraCoverage, "answer">): string {
   return coverage === "low_confidence" ? JIRA_LOW_CONFIDENCE_MESSAGE : JIRA_NO_HITS_MESSAGE;

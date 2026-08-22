@@ -65,6 +65,47 @@ export const JIRA_MARKDOWN_MAX = 100_000;
 export type JiraCoverage = "answer" | "no_hits" | "low_confidence";
 
 /**
+ * The three reader-facing coverage sentences.
+ *
+ * They live in the WIRE module rather than beside `assessCoverage` in
+ * `retrieval.ts` for exactly the reason this module exists: `/jira`'s page
+ * bundle renders them, and `retrieval.ts` reaches for `researchKnowledge` /
+ * `fetchKnowledgeApi` / the logger, so importing them from the browser half
+ * would drag the whole research layer into the bundle. `retrieval.ts` imports
+ * these two, so there is still ONE spelling of each.
+ *
+ * Deliberately NOT `coverageMessage` from `answer.ts`: its `NO_HITS_MESSAGE`
+ * names the Anthropic firehose and the Claude/YouTube/X shelves (none of which
+ * this feature searches) and its `LOW_CONFIDENCE_MESSAGE` says *"I'd rather not
+ * synthesize an answer that isn't well-grounded"* — the opposite of what this
+ * does. An ungrounded draft is still useful raw material, so it still drafts; it
+ * just never presents the result as grounded.
+ */
+export const JIRA_NO_HITS_MESSAGE =
+  "Ingenting i jira-issues, melosys-confluence-v3 eller nav-wiki dekket dette søket, " +
+  "så utkastet er skrevet utelukkende fra råmaterialet ditt. Det er ingen referanser å kontrollere — " +
+  "les nøye før du oppretter saken.";
+
+export const JIRA_LOW_CONFIDENCE_MESSAGE =
+  "De nærmeste treffene dekket ikke dette temaet med sikkerhet, så utkastet er svakt forankret. " +
+  "Kildene er listet opp likevel — vurder dem selv, eller skriv om råmaterialet mot det som faktisk er indeksert.";
+
+/**
+ * The third state, which the SERVER cannot spell.
+ *
+ * `jiraCoverageMessage` takes only the derived verdict, and a derived `no_hits`
+ * has two completely different causes: the corpus covered nothing, or the reader
+ * switched every retrieved source off. Telling someone who just unticked 24 rows
+ * that "nothing in jira-issues covered this search" is a lie about the corpus.
+ * The page distinguishes them by comparing the derived `coverage` against the
+ * stored `retrievalCoverage`, which is why both ride the payload.
+ */
+export const JIRA_ALL_EXCLUDED_MESSAGE =
+  "Alle kilder er slått av — utkastet er uten grunnlag. Retrieval fant treff, " +
+  "men ingen av dem er med i denne genereringen. Slå på minst én kilde og generer på nytt " +
+  "hvis saken skal være forankret.";
+
+/**
  * The verdict for ONE generation, from the immutable retrieval verdict plus how
  * many sources that run actually kept.
  *
