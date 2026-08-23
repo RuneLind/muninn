@@ -514,7 +514,7 @@ export function jiraDraftViewHtml(
           ? "Teksten fra det forrige forsøket ligger fortsatt på raden, men vises ikke her — dette forsøket ble ikke ferdig. Kjør utkastet på nytt i samtalen."
           : "Dette utkastet har ingen tekst."
       }</p>`
-    : draft.markdown
+    : jiraDraftHasControls(draft)
     ? `<div class="ja-switch">
         <button type="button" ${JA_VIEW_ATTR}="preview" class="ja-tab ja-tab-on" aria-pressed="true">Forhåndsvisning</button>
         <button type="button" ${JA_VIEW_ATTR}="markdown" class="ja-tab" aria-pressed="false">Markdown</button>
@@ -541,15 +541,43 @@ export function jiraDraftViewHtml(
     ${notes}${extra}`;
 }
 
+/** The heading a FAILED draft goes by — see {@link deriveDraftHeading}. */
+export const JA_FAILED_HEADING = "Mislykket utkast";
+
 /**
- * The `<h1>` on a draft page.
+ * The `<h1>` on a draft page (and, through it, the `<title>`).
  *
  * `jiraDraftTitle` is the LISTING's derivation and is deliberately not
  * re-implemented here: the row a reader clicked and the page it opened must
  * agree about what the draft is called.
+ *
+ * **Except on a `failed` draft, which is named after nothing.** `failJiraDraft`
+ * leaves `markdown` alone, so a failed regenerate still carries the PREVIOUS
+ * turn's text — and deriving the heading from it printed that turn's first
+ * sentence as the page's title, directly above the line explaining that the text
+ * «vises ikke her». The body branch refuses the text; the heading has to refuse
+ * it too, or the refusal is contradicted by the largest words on the page. The
+ * row's own template · depth is in the meta line below it, so the neutral
+ * heading loses nothing.
  */
-export function deriveDraftHeading(draft: Pick<JiraDraftView, "markdown">): string {
+export function deriveDraftHeading(draft: Pick<JiraDraftView, "markdown" | "status">): string {
+  if (draft.status === "failed") return JA_FAILED_HEADING;
   return jiraDraftTitle(draft.markdown) ?? JA_UNTITLED;
+}
+
+/**
+ * Does this draft render the view switch and the copy button?
+ *
+ * ONE predicate with two consumers — the body branch in
+ * {@link jiraDraftViewHtml} and `renderJiraPage`, which builds and inlines the
+ * ~3 KB client bundle. Split, they drifted: the page shipped the bundle to
+ * every draft view, including the `failed` and `generating` ones the body
+ * branch renders as a single sentence with nothing to switch or copy.
+ */
+export function jiraDraftHasControls(
+  draft: Pick<JiraDraftView, "markdown" | "status">,
+): boolean {
+  return draft.status !== "failed" && Boolean(draft.markdown);
 }
 
 // ── Missing ──────────────────────────────────────────────────────────────────

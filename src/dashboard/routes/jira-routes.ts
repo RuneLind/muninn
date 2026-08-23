@@ -517,9 +517,17 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
     // toggle, each row and the draft page's back link — so a hand-typed
     // `?limit=200` survives one click. `limitParam` is null when the reader named
     // none: echoing the default into the url would pin a value they never chose.
+    // A value that does not PARSE is not a limit the reader named either:
+    // `clampJiraArchiveLimit("abc")` answers with the default, and adopting that
+    // wrote `limit=50` into every link on the page — the pinning this null
+    // exists to prevent. The listing still reads at the default; only the echo
+    // is dropped.
     const all = parseArchiveAll(c.req.query("all"));
     const limitQuery = (c.req.query("limit") ?? "").trim();
-    const limitParam = limitQuery ? clampJiraArchiveLimit(limitQuery) : null;
+    const limitParam =
+      limitQuery && Number.isFinite(Number(limitQuery))
+        ? clampJiraArchiveLimit(limitQuery)
+        : null;
     const list = { all, limit: limitParam };
     try {
       const draftId = (c.req.query("draft") ?? "").trim();

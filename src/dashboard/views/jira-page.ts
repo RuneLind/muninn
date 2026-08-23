@@ -9,6 +9,7 @@ import {
   deriveDraftHeading,
   jiraArchiveListHtml,
   jiraArchiveMissingHtml,
+  jiraDraftHasControls,
   jiraDraftViewHtml,
 } from "./components/jira-archive-pure.ts";
 import type { JiraArchiveListState, JiraDraftListRow, JiraDraftView } from "../../jira/wire.ts";
@@ -53,12 +54,16 @@ export type JiraPageView =
   | { kind: "missing"; draftId: string; list?: JiraArchiveListState };
 
 export async function renderJiraPage(view: JiraPageView): Promise<string> {
-  // **The bundle rides the DRAFT view only.** The list is rows of links: nothing
-  // on it can be switched or copied, so building and inlining ~3 KB of clipboard
-  // code there is a `Bun.build` and a parse for no affordance.
+  // **The bundle rides a draft that actually RENDERS the switch and the copy
+  // button.** The list is rows of links, and a `failed` or `generating` draft is
+  // one sentence — nothing on any of them can be switched or copied, so building
+  // and inlining ~3 KB of clipboard code there is a `Bun.build` and a parse for
+  // no affordance. The test is the pure module's own `jiraDraftHasControls`, the
+  // same predicate its body branch reads, so the two cannot drift.
   const isDraft = view.kind === "draft";
+  const needsClient = isDraft && jiraDraftHasControls(view.draft);
   const [client, buildHash] = await Promise.all([
-    isDraft ? jiraArchiveClientScript() : Promise.resolve(""),
+    needsClient ? jiraArchiveClientScript() : Promise.resolve(""),
     getDashboardBuildHash(),
   ]);
 

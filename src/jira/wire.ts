@@ -213,7 +213,13 @@ export function jiraDraftTitle(markdownHead: string | null | undefined): string 
       continue;
     }
     if (fenced || !line) continue;
-    const heading = /^(#{1,6})\s+(.*)$/.exec(line);
+    // The quote marker comes OFF before the heading test, not only inside
+    // `cleanJiraTitle` afterwards: a quoted section heading otherwise failed the
+    // heading regex, fell through to the prose branch and titled the row
+    // «## Sitert tittel» — markdown syntax rendered as a name.
+    const content = stripQuoteMarkers(line);
+    if (!content) continue;
+    const heading = /^(#{1,6})\s+(.*)$/.exec(content);
     if (heading) {
       const text = cleanJiraTitle(heading[2] ?? "");
       // A `# ` on the very first line of content is an authored title.
@@ -223,7 +229,7 @@ export function jiraDraftTitle(markdownHead: string | null | undefined): string 
       continue;
     }
     seenAnything = true;
-    const text = cleanJiraTitle(line);
+    const text = cleanJiraTitle(content);
     if (text) return text;
   }
   return firstHeading;
@@ -255,8 +261,33 @@ function titleScanHead(text: string): string {
  * titled the archive «- [ ] oppgave». Applied repeatedly (`> - [x] …` is two
  * markers), bounded so a line of nothing but markers terminates, and a line that
  * strips to nothing simply names nothing — the caller moves to the next line.
+ *
+ * **Every alternative demands whitespace (or the end of the line) behind the
+ * marker**, the `-*+`/ordered ones included. Without it on `>` and `|` the strip
+ * ate the first character of ordinary prose: `">=100 saker feiler"` was titled
+ * `"=100 saker feiler"` and `"|x| er absoluttverdi"` lost its opening bar. The
+ * cost is that a space-less `>quoted` line keeps its `>`; a quote written
+ * without the space is rarer than a comparison, and the failure is legible
+ * rather than a silently mutilated name.
  */
-const BLOCK_MARKER_RE = /^(?:[-*+](?:\s+|$)(?:\[[ xX]\](?:\s+|$))?|\d+[.)](?:\s+|$)|>\s*|\|\s*)/;
+const BLOCK_MARKER_RE =
+  /^(?:[-*+](?:\s+|$)(?:\[[ xX]\](?:\s+|$))?|\d+[.)](?:\s+|$)|>(?:\s+|$)|\|(?:\s+|$))/;
+
+/** The quote half of {@link BLOCK_MARKER_RE}, applied BEFORE a line is tested
+ *  for a heading — see {@link jiraDraftTitle}. Same shape, so the two passes
+ *  cannot disagree about what a quote marker is. */
+const QUOTE_MARKER_RE = /^>(?:\s+|$)/;
+
+/** Leading `> ` runs only — bounded exactly like {@link stripBlockMarkers}. */
+function stripQuoteMarkers(text: string): string {
+  let out = text.trimStart();
+  for (let i = 0; i < 4; i++) {
+    const next = out.replace(QUOTE_MARKER_RE, "");
+    if (next === out) break;
+    out = next.trimStart();
+  }
+  return out;
+}
 
 function stripBlockMarkers(text: string): string {
   let out = text.trimStart();

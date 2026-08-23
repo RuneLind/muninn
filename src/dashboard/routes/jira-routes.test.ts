@@ -1466,6 +1466,21 @@ describe("GET /jira — list state and truncation", () => {
     expect(plain).not.toContain("all=1");
   });
 
+  test("a `?limit=` the reader cannot have meant pins nothing into the links", async () => {
+    // `clampJiraArchiveLimit("abc")` answers with the DEFAULT, so adopting its
+    // return unconditionally wrote `limit=50` into the toggle, every row and the
+    // back link — the exact value `limitParam: null` exists to keep out of the
+    // url. The rows are still read at the default; only the echo is dropped.
+    seedRow({ markdown: "# En", savedAt: Date.now() });
+    const html = await (await makeApp().request("/jira?limit=abc")).text();
+    expect(html).not.toContain("limit=");
+    expect(html).toContain(`href="/jira?all=1"`);
+    // A limit that DID parse is still echoed.
+    expect(await (await makeApp().request("/jira?limit=3")).text()).toContain(
+      `href="/jira?all=1&amp;limit=3"`,
+    );
+  });
+
   test("`de nyeste N` is claimed only when a row was actually cut", async () => {
     seedRow({ markdown: "# En", savedAt: Date.now() });
     seedRow({ markdown: "# To", savedAt: Date.now() });

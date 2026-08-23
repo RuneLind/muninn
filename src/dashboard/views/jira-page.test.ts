@@ -78,6 +78,17 @@ const generatingPage = await renderJiraPage({
   kind: "draft",
   draft: { ...draftView, status: "generating", markdown: null },
 });
+/** A failed REGENERATE — the row keeps the previous turn's text, and the page
+ *  refuses to show it. Neither the heading nor the bundle may forget that. */
+const failedPage = await renderJiraPage({
+  kind: "draft",
+  draft: {
+    ...draftView,
+    status: "failed",
+    markdown: "## Symptom\nSyntetisk forrige tekst",
+    error: "modellen svarte ikke",
+  },
+});
 
 describe("the shell", () => {
   test("marks Jira active inside the Tools dropdown, not the top-level row", () => {
@@ -90,6 +101,16 @@ describe("the shell", () => {
     expect(draftPage).toContain("addEventListener");
     expect(draftPage).toContain("clipboard");
     expect(draftPage).toContain(JA_RAW_ID);
+  });
+
+  test("a draft with no interactive target ships no bundle either", () => {
+    // The bundle owns exactly the view switch and the copy button. A failed or
+    // still-generating draft renders neither, so building and inlining ~3 KB
+    // there is a `Bun.build` and a parse for nothing.
+    for (const page of [failedPage, generatingPage]) {
+      expect(page).not.toContain("clipboard");
+      expect(page).not.toContain(JA_RAW_ID);
+    }
   });
 
   test("the LIST page ships no bundle — it has no interactive target", () => {
@@ -147,6 +168,12 @@ describe("one draft", () => {
 
   test("the title names the draft", () => {
     expect(draftPage).toContain("<title>Muninn - Feil i beregning</title>");
+  });
+
+  test("a FAILED draft is not named after the text the page refuses to show", () => {
+    expect(failedPage).not.toContain("Syntetisk forrige tekst");
+    expect(failedPage).toContain("<title>Muninn - Mislykket utkast</title>");
+    expect(failedPage).toContain("Genereringen feilet");
   });
 
   test("an unknown draft is a named page, not a blank one", async () => {

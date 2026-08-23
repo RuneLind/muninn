@@ -119,6 +119,26 @@ describe("jiraDraftTitle — hygiene", () => {
     expect(jiraDraftTitle("- \n\nProsa etterpå")).toBe("Prosa etterpå");
   });
 
+  test("a marker only strips when a marker is what it is", () => {
+    // `>` and `|` used to strip with no whitespace behind them, so a draft
+    // opening on a comparison ate its own first character: ">=100 saker feiler"
+    // was titled "=100 saker feiler" and "|x| er absoluttverdi" lost the bar.
+    expect(jiraDraftTitle(">=100 saker feiler")).toBe(">=100 saker feiler");
+    expect(jiraDraftTitle("|x| er absoluttverdi")).toBe("|x| er absoluttverdi");
+    // …and a real quote still is one.
+    expect(jiraDraftTitle("> Sitat som åpner utkastet")).toBe("Sitat som åpner utkastet");
+  });
+
+  test("a QUOTED heading is read as a heading, not as prose", () => {
+    // The strip used to run only inside `cleanJiraTitle`, i.e. AFTER the heading
+    // test, so a quoted section heading fell through to the prose branch and
+    // titled the row "## Sitert tittel" — markdown syntax rendered as a name.
+    expect(jiraDraftTitle("> ## Sitert tittel\n\nprosa")).toBe("prosa");
+    expect(jiraDraftTitle("> ## Sitert tittel")).toBe("Sitert tittel");
+    // A quoted level-1 heading on the first line is still an authored title.
+    expect(jiraDraftTitle("> # Sitert tittel\n\nprosa")).toBe("Sitert tittel");
+  });
+
   test("the clip never cuts through a surrogate pair", () => {
     // `.slice(0, 119)` on a title whose 119th unit is the high half of an astral
     // pair stores a lone surrogate — a replacement character in the list row.

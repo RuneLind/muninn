@@ -22,8 +22,10 @@ import {
   JA_COPY_LABEL,
   JA_PREVIEW_ID,
   JA_RAW_ID,
+  JA_FAILED_HEADING,
   JA_UNTITLED,
   deriveDraftHeading,
+  jiraDraftHasControls,
   depthLabel,
   formatArchiveTime,
   jiraArchiveListHtml,
@@ -360,8 +362,10 @@ describe("one draft, read-only", () => {
   });
 
   test("the heading is the draft's own, and the same derivation the row used", () => {
-    expect(deriveDraftHeading({ markdown: "# Feil i beregning\n\ntekst" })).toBe("Feil i beregning");
-    expect(deriveDraftHeading({ markdown: null })).toBe(JA_UNTITLED);
+    expect(
+      deriveDraftHeading({ status: "ready", markdown: "# Feil i beregning\n\ntekst" }),
+    ).toBe("Feil i beregning");
+    expect(deriveDraftHeading({ status: "ready", markdown: null })).toBe(JA_UNTITLED);
   });
 });
 
@@ -429,6 +433,29 @@ describe("a failed draft never offers text it will not show", () => {
     expect(html).not.toContain(`id="${JA_RAW_ID}"`);
     expect(html).not.toContain("<h2>Forrige forsøk</h2>");
     expect(html).not.toContain("Forhåndsvisning");
+  });
+
+  test("nor does it NAME the draft after the text it refuses to show", () => {
+    // The heading is derived from the same retained markdown the body branch
+    // just refused, so the page printed the previous turn's first sentence as an
+    // `<h1>` directly above the line saying that text "vises ikke her".
+    const failed = draft({
+      status: "failed",
+      markdown: "## Symptom\nSyntetisk forrige tekst",
+      error: "modellen svarte ikke",
+    });
+    expect(deriveDraftHeading(failed)).toBe(JA_FAILED_HEADING);
+    const html = jiraDraftViewHtml(failed, "");
+    expect(html).not.toContain("Syntetisk forrige tekst");
+    expect(html).toContain(`<h1 class="ja-title">${JA_FAILED_HEADING}</h1>`);
+  });
+
+  test("a failed draft carries no interactive target, so the page needs no bundle", () => {
+    // One predicate, two consumers: the body branch below and the page that
+    // decides whether to build and inline the switch/copy bundle at all.
+    expect(jiraDraftHasControls(draft({ status: "failed", markdown: "# noe" }))).toBe(false);
+    expect(jiraDraftHasControls(draft({ status: "generating", markdown: null }))).toBe(false);
+    expect(jiraDraftHasControls(draft())).toBe(true);
   });
 });
 
