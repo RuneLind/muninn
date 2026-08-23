@@ -249,6 +249,7 @@ export async function executePrompt(
           startMs: pending.startMs,
           endMs: performance.now(),
           wallStart,
+          botName: botConfig.name,
         });
 
         toolCalls.push(toolCall);

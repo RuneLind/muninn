@@ -643,6 +643,7 @@ export interface JiraCoverageNotice {
 export function jiraCoverageNotice(
   retrievalCoverage: JiraCoverage | null | undefined,
   coverage: JiraCoverage | null | undefined,
+  source?: JiraDraftSource,
 ): JiraCoverageNotice | null {
   if (!coverage || coverage === "answer") return null;
   if (coverage === "unreachable" || retrievalCoverage === "unreachable") {
@@ -653,6 +654,14 @@ export function jiraCoverageNotice(
   if (retrievalCoverage && retrievalCoverage !== "no_hits") {
     return { tone: "bad", text: JIRA_ALL_EXCLUDED_MESSAGE };
   }
+  // **The corpus sentence is a NOTES-path statement**, and only that path can
+  // make it: it names the three collections a `?q=` search covered and concludes
+  // the draft came from the raw material alone. A thread draft runs no such
+  // search — its hit set is whatever the conversation retrieved — so the line was
+  // both wrong and redundant, stacked above the empty column's own thread-shaped
+  // sentence. Every OTHER reading survives here: an all-excluded set, an
+  // unreachable corpus and a weak one are the same facts on either path.
+  if (source === "thread") return null;
   return { tone: "bad", text: JIRA_NO_HITS_MESSAGE };
 }
 
@@ -951,7 +960,7 @@ export function phaseLabel(phase: string | undefined): string {
 export function jiraCitationsHtml(state: JiraComposerState): string {
   const rows = citationRows(state.citations, state.excludeDocIds);
   const kept = rows.filter((r) => r.retained).length;
-  const notice = jiraCoverageNotice(state.retrievalCoverage, state.coverage);
+  const notice = jiraCoverageNotice(state.retrievalCoverage, state.coverage, state.source);
 
   const head = `<h2 class="jc-h">Hentede kilder ${
     state.citations.length ? `<span class="jc-count">${kept} av ${state.citations.length} på</span>` : ""

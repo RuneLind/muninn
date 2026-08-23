@@ -2,6 +2,7 @@ import type { ClaudeResult, ToolCall } from "../types.ts";
 import { truncateOutput } from "./truncate-output.ts";
 import { recoverOversizedClaudeCliToolResult } from "./huginn-trace.ts";
 import { processMcpToolResult, fetchHuginnTrace } from "./huginn-trace-pointer.ts";
+import { captureKnowledgeToolCitations } from "../research/thread-citations.ts";
 
 /**
  * Parses NDJSON lines from Claude CLI `--output-format stream-json`.
@@ -85,14 +86,26 @@ export class StreamParser {
   /** Reference timestamp (performance.now()) for computing tool startOffsetMs */
   private refTimestamp: number;
   private onProgress?: StreamProgressCallback;
+  private botName?: string;
 
   /**
    * @param referenceTimestamp - performance.now() at CLI spawn time, used to compute tool startOffsetMs
    * @param onProgress - optional callback fired when tool events or text are detected
    */
-  constructor(referenceTimestamp: number = performance.now(), onProgress?: StreamProgressCallback) {
+  /**
+   * `botName` is optional and used for one thing only: filing huginn `knowledge`
+   * search results into `research_citations` against the chat turn in flight, so
+   * the claude-cli connector is not the one path a thread's retrieval is
+   * invisible from. A parser constructed without it parses identically.
+   */
+  constructor(
+    referenceTimestamp: number = performance.now(),
+    onProgress?: StreamProgressCallback,
+    botName?: string,
+  ) {
     this.refTimestamp = referenceTimestamp;
     this.onProgress = onProgress;
+    this.botName = botName;
   }
 
   /**
@@ -210,6 +223,10 @@ export class StreamParser {
       const raw = extractToolResultContent(block);
       if (typeof raw === "string") {
         const processed = processMcpToolResult(raw);
+        // Before `truncateOutput`, which cuts a large result set mid-block —
+        // fire-and-forget, and total by construction (see
+        // `research/thread-citations.ts`).
+        captureKnowledgeToolCitations(this.botName, pending.name, processed.cleanedText);
         if (processed.searchTrace !== undefined || processed.searchTracePointer !== undefined) {
           pending.output = truncateOutput(processed.cleanedText);
           pending.searchTrace = processed.searchTrace;
