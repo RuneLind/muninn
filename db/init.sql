@@ -821,7 +821,7 @@ CREATE TABLE jira_drafts (
   exclude_doc_ids    JSONB NOT NULL DEFAULT '[]'::jsonb,  -- doc ids toggled OFF
   key_verdicts       JSONB NOT NULL DEFAULT '[]'::jsonb,  -- JiraKeyVerdict[]
   markdown_flags     JSONB NOT NULL DEFAULT '[]'::jsonb,  -- JiraMarkdownFlag[]
-  retrieval_coverage TEXT,                   -- answer | no_hits | low_confidence, as RETRIEVAL found it (written once)
+  retrieval_coverage TEXT,                   -- answer | no_hits | low_confidence | unreachable, as RETRIEVAL found it (written once)
   retrieval_question TEXT NOT NULL DEFAULT '',
   error              TEXT,
   -- Where the draft came from: 'notes' (pasted raw material) | 'thread' (a turn

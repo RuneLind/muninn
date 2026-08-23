@@ -12,8 +12,12 @@ const JIRA_ANALYSIS_EXCLUDED_TOOLS = [
   "Explore Agent", "General Purpose Agent",
 ];
 
-/** Non-positional extras. A ninth positional argument on a function that already
- *  takes eight is a call site nobody can read. */
+/**
+ * The trailing options bag — one NAMED slot for every extra a caller needs,
+ * instead of a tenth, eleventh, twelfth positional argument on a signature that
+ * already takes eight of them. It is itself the ninth parameter, and the last
+ * one that should ever be positional: anything new goes in here.
+ */
 export interface ChatTurnOptions {
   /**
    * System-prompt block for THIS TURN ONLY (see `ProcessMessageParams`).

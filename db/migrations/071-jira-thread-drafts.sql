@@ -32,7 +32,11 @@
 
 ALTER TABLE research_citations ADD COLUMN IF NOT EXISTS thread_id UUID;
 
--- The read pattern is "every citation this thread ever retrieved, oldest first".
+-- The read pattern is "every citation this thread ever retrieved, oldest first"
+-- (`getCitationsForThread` orders ASCENDING, so the dedup keeps the turn that
+-- introduced a doc). The DESC in the index is not a mismatch: a btree is
+-- walkable in both directions, and the declared order matches every other index
+-- on this table. Retention (`cleanupThreadCitations`) reads it the other way.
 CREATE INDEX IF NOT EXISTS idx_research_citations_thread
   ON research_citations (thread_id, created_at DESC);
 

@@ -58,9 +58,12 @@ CREATE TABLE IF NOT EXISTS jira_drafts (
   key_verdicts       JSONB NOT NULL DEFAULT '[]'::jsonb,
   -- JiraMarkdownFlag[] from the paste-subset post-pass.
   markdown_flags     JSONB NOT NULL DEFAULT '[]'::jsonb,
-  -- answer | no_hits | low_confidence. The VERDICT, not a weakCoverage boolean:
-  -- at low_confidence the draft is grounded-but-weak, at no_hits there is no
-  -- `## Referanser` section at all, and the two render differently.
+  -- answer | no_hits | low_confidence | unreachable. The VERDICT, not a
+  -- weakCoverage boolean: at low_confidence the draft is grounded-but-weak, at
+  -- no_hits there is no `## Referanser` section at all, and the two render
+  -- differently. `unreachable` (added in the thread-draft work) is the ABSENCE
+  -- of a verdict — huginn was down, nothing was asked of the corpus — and it is
+  -- the one non-null value that does NOT mean retrieval landed.
   --
   -- ⚠️ This is what RETRIEVAL found, written ONCE (`saveJiraDraftRetrieval`) and
   -- never overwritten — hence the name. The verdict for a given GENERATION is a

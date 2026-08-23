@@ -102,16 +102,6 @@ export const JIRA_LOW_CONFIDENCE_MESSAGE =
   "Kildene er listet opp likevel — vurder dem selv, eller skriv om råmaterialet mot det som faktisk er indeksert.";
 
 /**
- * The third state, which the SERVER cannot spell.
- *
- * `jiraCoverageMessage` takes only the derived verdict, and a derived `no_hits`
- * has two completely different causes: the corpus covered nothing, or the reader
- * switched every retrieved source off. Telling someone who just unticked 24 rows
- * that "nothing in jira-issues covered this search" is a lie about the corpus.
- * The page distinguishes them by comparing the derived `coverage` against the
- * stored `retrievalCoverage`, which is why both ride the payload.
- */
-/**
  * The retrieval that never happened.
  *
  * Deliberately says the API was unavailable and NOT that the corpus is empty —
@@ -123,6 +113,16 @@ export const JIRA_UNREACHABLE_MESSAGE =
   "Kunnskaps-API-et var utilgjengelig — ingen kilder ble hentet. Utkastet er skrevet utelukkende " +
   "fra råmaterialet ditt. Prøv igjen senere.";
 
+/**
+ * The fourth state, which the SERVER cannot spell.
+ *
+ * `jiraCoverageMessage` takes only the derived verdict, and a derived `no_hits`
+ * has two completely different causes: the corpus covered nothing, or the reader
+ * switched every retrieved source off. Telling someone who just unticked 24 rows
+ * that "nothing in jira-issues covered this search" is a lie about the corpus.
+ * The page distinguishes them by comparing the derived `coverage` against the
+ * stored `retrievalCoverage`, which is why both ride the payload.
+ */
 export const JIRA_ALL_EXCLUDED_MESSAGE =
   "Alle kilder er slått av — utkastet er uten grunnlag. Retrieval fant treff, " +
   "men ingen av dem er med i denne genereringen. Slå på minst én kilde og generer på nytt " +
