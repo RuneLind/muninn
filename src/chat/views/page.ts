@@ -515,6 +515,7 @@ const CHAT_SCRIPT = `
     // switch comes through HERE and not through loadThreadMessages, and without
     // this the records outlived their DOM and their timers kept polling.
     resetJiraCards();
+    closeJiraEntry(); // same seam as loadThreadMessages: the picker's thread is gone too
   }
 
   // WebSocket connection

@@ -137,7 +137,9 @@ export function jiraCardScript(): string {
     // window (or still arriving). The listing is telling us what we already
     // hold, so the READ buys nothing — but a re-render does, because the bubble
     // may have landed since. This is the hot path: every response_meta re-asks.
-    if (settled && rec.orphan === 'offscreen') { renderJiraCardRecord(row.draftId); return; }
+    // Both orphan kinds: \`unmapped\` is a terminal failed row, which the listing
+    // would otherwise re-read on every response_meta for the life of the tab.
+    if (settled && !rec.attached) { renderJiraCardRecord(row.draftId); return; }
     if (!rec) {
       rec = jiraCards[row.draftId] = { pollStartedAt: Date.now() };
     }
@@ -174,6 +176,8 @@ export function jiraCardScript(): string {
         if (res.status === 404) {
           stopJiraCardPoll(draftId);
           delete jiraCards[draftId];
+          removeJiraDraftingNote(draftId); // the note must not outlive the row
+          renderJiraCardNotice();
           return;
         }
         // Anything else is the server blinking, not an answer about the draft:

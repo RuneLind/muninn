@@ -430,6 +430,33 @@ describe("every listed row is read once on adopt", () => {
     expect(h.fetchUrls().filter((u) => u === "/api/jira/draft/d-1")).toHaveLength(1);
   });
 
+  test("a failed UNMAPPED row is read once, not on every listing pass", async () => {
+    // Terminal and never attachable: `unmapped` is the other orphan kind, and
+    // the listing re-asks on every response_meta for the life of the tab.
+    const h = harness({
+      listings: [[{ draftId: "d-1", messageId: null, status: "failed" }]],
+      drafts: { "d-1": [{ status: 200, body: { ...readyView(), status: "failed", messageId: null, markdown: null, error: "Noe gikk galt." } }] },
+    });
+    await h.refresh();
+    await h.refresh();
+    await h.refresh();
+    expect(h.fetchUrls().filter((u) => u === "/api/jira/draft/d-1")).toHaveLength(1);
+    expect(h.notice()).toContain("d-1");
+    expect(h.pendingTimers()).toBe(0);
+  });
+
+  test("a 404 on the read clears the drafting note and the notice row", async () => {
+    const h = harness({
+      drafting: ["d-1"],
+      listings: [[{ draftId: "d-1", messageId: null, status: "generating" }]],
+      drafts: { "d-1": [{ status: 404, body: { error: "ukjent utkast" } }] },
+    });
+    await h.refresh();
+    expect(h.draftingNotes()).not.toContain("d-1");
+    expect(h.notice() ?? "").not.toContain("d-1");
+    expect(h.pendingTimers()).toBe(0);
+  });
+
   test("a row re-pointed at a NEW bubble is re-read — the skip is keyed on the messageId too", async () => {
     // A regenerate is another turn: `finishJiraDraft` re-points `message_id` at
     // the new reply while the status stays `ready`. Keyed on the status alone,

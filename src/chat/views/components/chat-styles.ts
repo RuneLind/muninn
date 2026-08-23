@@ -444,6 +444,9 @@ export function chatStyles(): string {
       max-height: 420px;
       overflow-y: auto;
       overflow-x: auto;
+      /* macOS hides the scrollbar until it moves, so a bottom fade is the one
+         cue that the box continues (measured: 418px box over a 747px draft). */
+      mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent);
       font-size: 13px;
       line-height: 1.55;
       border-top: 1px solid var(--border-primary);
