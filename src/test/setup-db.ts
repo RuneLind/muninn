@@ -29,6 +29,11 @@ const ALL_TABLES = [
   "dev_run_handoffs",
   "dev_runs",
   "source_draft_attempts",
+  // Left out until 2026-08-23, so archive rows accumulated across every run
+  // (225 by then) — invisible to the id-scoped assertions, but it makes any
+  // whole-listing property (does a limit of N cut anything?) depend on how often
+  // the suite has been run.
+  "jira_drafts",
 ];
 
 let dbInitialized = false;

@@ -7,10 +7,11 @@
  * `plans-routes.ts` registers `/plans` beside `/api/plans/*`, because the page
  * and the endpoints it drives are one feature and one file to keep in step:
  *
- *   · `GET  /jira`                 — the composer page (`views/jira-page.ts`): a
- *     three-column shell the client bundle mounts into. Its one throwing surface
- *     is the bundle build, which falls back to a page that names the failure
- *     rather than an unexplained Hono 500.
+ *   · `GET  /jira`                 — the read-only ARCHIVE (`views/jira-page.ts`):
+ *     the saved drafts, `?all=1` for every attempt, `?draft=<id>` for one
+ *     read-only render. Server-rendered; the DB read and the bundle build both
+ *     fall back to a page that names the failure rather than a Hono 500.
+ *   · `GET  /api/jira/archive`     — the same listing as JSON.
  *   · `GET  /api/jira/templates`   — the picker's source. `/api/research/variants`
  *     is hardcoded to `jiraAnalysisVariants` and does not generalise.
  *   · `POST /api/jira/draft`       — SSE. The page's own path.
@@ -35,13 +36,20 @@
  * accepted: any page the browser visits could read a draft id it can guess,
  * bounded by `DASHBOARD_HOST` defaulting to loopback.
  *
- * **The three newer endpoints deliberately carry NONE of that** — `from-thread`,
- * the thread listing and `save`. Two of them WRITE (a conversation, a row), and
- * the listing hands over every draft id on a thread at once, which is a strictly
- * bigger lever than guessing one. The two POSTs additionally require
- * `application/json` and 415 anything else: Hono parses any body whatever the
- * header says, and a `text/plain` POST is a CORS *simple* request that executes
- * regardless of what the response headers say.
+ * **The four newer endpoints deliberately carry NONE of that** — `from-thread`,
+ * the thread listing, `save` and the archive listing. Two of them WRITE (a
+ * conversation, a row), and the two listings hand over every draft id on a
+ * thread — or in the whole table — at once, which is a strictly bigger lever
+ * than guessing one. The two POSTs additionally require `application/json` and
+ * 415 anything else: Hono parses any body whatever the header says, and a
+ * `text/plain` POST is a CORS *simple* request that executes regardless of what
+ * the response headers say.
+ *
+ * **`POST /api/jira/draft`, `/draft/start` and `PUT /api/jira/draft/:id` have no
+ * UI driver as of the archive PR** — the composer's Regenerate and Lagre utkast
+ * were the last ones. They are left standing here deliberately: the campaign's
+ * next PRs refuse and then delete them, and the extension's `/draft/start` is
+ * the one entry point nothing in this repo can see.
  *
  * Deliberately **not** added to `openapi-spec.ts`: neither `POST /api/wiki/share`
  * nor `POST /api/research/ask` is there, so documenting these would be new scope,
@@ -61,10 +69,13 @@ import { applyExclusions } from "../../jira/retrieval.ts";
 import { verifyJiraKeys } from "../../jira/verify-keys.ts";
 import { isValidUuid } from "./route-utils.ts";
 import { renderJiraFallback, renderJiraPage } from "../views/jira-page.ts";
+import { parseArchiveAll } from "../views/components/jira-archive-pure.ts";
 import {
   JIRA_DEPTHS,
   JIRA_EXTRA_MAX,
   JIRA_MARKDOWN_MAX,
+  JIRA_ARCHIVE_LIMIT_DEFAULT,
+  clampJiraArchiveLimit,
   isJiraDepth,
   parseJiraDraftBody,
   type JiraDepth,
@@ -73,6 +84,7 @@ import {
 import {
   createJiraDraft,
   getJiraDraft,
+  listJiraDrafts,
   listJiraDraftsForThread,
   saveJiraDraft,
   updateJiraDraftMarkdown,
@@ -501,17 +513,83 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
   // `/plans` beside `/api/plans/*` — the page and the endpoints it drives are one
   // feature and one file to keep in step.
   app.get("/jira", async (c) => {
+    // The list state, read once and carried by every link the page renders — the
+    // toggle, each row and the draft page's back link — so a hand-typed
+    // `?limit=200` survives one click. `limitParam` is null when the reader named
+    // none: echoing the default into the url would pin a value they never chose.
+    // A value that does not PARSE is not a limit the reader named either:
+    // `clampJiraArchiveLimit("abc")` answers with the default, and adopting that
+    // wrote `limit=50` into every link on the page — the pinning this null
+    // exists to prevent. The listing still reads at the default; only the echo
+    // is dropped.
+    const all = parseArchiveAll(c.req.query("all"));
+    const limitQuery = (c.req.query("limit") ?? "").trim();
+    const limitParam =
+      limitQuery && Number.isFinite(Number(limitQuery))
+        ? clampJiraArchiveLimit(limitQuery)
+        : null;
+    const list = { all, limit: limitParam };
     try {
-      return c.html(await renderJiraPage());
+      const draftId = (c.req.query("draft") ?? "").trim();
+      if (draftId) {
+        // The `unknownDraft` rule, in HTML: a non-uuid reaches postgres as a cast
+        // error, not an empty result — and a stale link in someone's notes must
+        // land on a page that says so, never on a 500.
+        const draft = isValidUuid(draftId) ? await getJiraDraft(draftId) : null;
+        if (!draft) {
+          return c.html(await renderJiraPage({ kind: "missing", draftId, list }), 404);
+        }
+        return c.html(await renderJiraPage({ kind: "draft", draft, list }));
+      }
+
+      const savedOnly = !all;
+      const limit = limitParam ?? JIRA_ARCHIVE_LIMIT_DEFAULT;
+      const { drafts, capped } = await listJiraDrafts({ savedOnly, limit });
+      return c.html(
+        await renderJiraPage({ kind: "list", drafts, savedOnly, limit, limitParam, capped }),
+      );
     } catch (err) {
-      // The one throwing surface is the RENDER, and a client-bundle build
-      // failure is exactly the state where an unexplained Hono 500 is the least
-      // useful thing this page could do — it has no server-rendered content to
-      // fall back to.
+      // Two throwing surfaces — the DB read and the client-bundle build — and an
+      // unexplained Hono 500 is the least useful thing either could produce on a
+      // page whose whole job is to be readable. **The STATUS is still 500**: the
+      // page reads the database now, so the commonest reason this renders is one
+      // that is down, and answering 200 tells every caller (a monitor included)
+      // that the archive is fine. The HTML renders either way.
       log.error("Jira page render failed: {error}", {
         error: err instanceof Error ? err.message : String(err),
       });
-      return c.html(renderJiraFallback(err instanceof Error ? err.message : String(err)), 200);
+      return c.html(renderJiraFallback(err instanceof Error ? err.message : String(err)), 500);
+    }
+  });
+
+  // ── The archive listing ────────────────────────────────────────────────────
+  // Corpus-wide, newest first, saved-only unless `?all=1` — the JSON behind the
+  // page above, and the same rows.
+  //
+  // **Deliberately NO CORS headers**, like the thread listing beside it: a
+  // corpus-wide listing hands over every draft id this install holds at once,
+  // which is a strictly bigger lever than the migration-070 accepted risk of
+  // GUESSING one. It carries no markdown either — a title, the verdict pair and
+  // the binding — so the wide read stays `GET /api/jira/draft/:id`.
+  //
+  // **Who reads it:** nothing in this repo — the page renders its rows
+  // server-side and issues no fetch. It exists for the scripted/external reader
+  // (a `curl` over the archive, a one-off sweep) and for symmetry with the page,
+  // the way `GET /api/jira/draft/:id` serves the card and the sweep alike.
+  app.get("/api/jira/archive", async (c) => {
+    try {
+      const savedOnly = !parseArchiveAll(c.req.query("all"));
+      const limit = clampJiraArchiveLimit(c.req.query("limit"));
+      const { drafts, capped } = await listJiraDrafts({ savedOnly, limit });
+      // `no-store` for the same reason the thread listing is: a draft saved
+      // seconds ago must appear, and a heuristically cached listing would hide
+      // it for reasons the reader cannot see.
+      c.header("Cache-Control", "no-store");
+      // `capped` is a row the read found PAST the limit, not `drafts.length ===
+      // limit` — an exact fit is not a truncated page.
+      return c.json({ savedOnly, limit, capped, drafts });
+    } catch (err) {
+      return serverError(c, "archive listing", err);
     }
   });
 
