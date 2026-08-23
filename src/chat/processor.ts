@@ -1,7 +1,7 @@
 import type { Config } from "../config.ts";
 import type { BotConfig, ConnectorType } from "../bots/config.ts";
 import type { Platform } from "../types.ts";
-import { processMessage } from "../core/message-processor.ts";
+import { processMessage, type ProcessMessageResult } from "../core/message-processor.ts";
 import type { Connector } from "../db/connectors.ts";
 
 import { chatState, type ChatMessage } from "./state.ts";
@@ -13,10 +13,32 @@ const JIRA_ANALYSIS_EXCLUDED_TOOLS = [
 ];
 
 /**
+ * The trailing options bag — one NAMED slot for every extra a caller needs,
+ * instead of a tenth, eleventh, twelfth positional argument on a signature that
+ * already takes eight of them. It is itself the ninth parameter, and the last
+ * one that should ever be positional: anything new goes in here.
+ */
+export interface ChatTurnOptions {
+  /**
+   * System-prompt block for THIS TURN ONLY (see `ProcessMessageParams`).
+   *
+   * The Jira composer's draft turn uses it to hand over the task template +
+   * depth/language riders, so the draft is written by the bot the person has
+   * been talking to, with the whole conversation as its context.
+   */
+  turnInstruction?: string;
+}
+
+/**
  * Bridges the chat state to the core message processor.
  *
  * Creates platform-appropriate say/setStatus/postToChannel callbacks
  * that write to chat state and broadcast via WebSocket.
+ *
+ * **Returns the turn's result** (`undefined` when `processMessage` handled a
+ * failure internally). The web send path ignores it; a code-triggered turn needs
+ * the `messageId`, which is the anchor a Jira draft row keeps so it can point at
+ * the message it was taken from.
  */
 export async function processChatMessage(
   conversationId: string,
@@ -27,7 +49,8 @@ export async function processChatMessage(
   connectorOverride?: "copilot-sdk" | "claude-cli",
   threadConnector?: Connector,
   skipExtractions?: boolean,
-): Promise<void> {
+  opts?: ChatTurnOptions,
+): Promise<ProcessMessageResult | undefined> {
   const conversation = chatState.getConversation(conversationId);
   if (!conversation) {
     throw new Error(`Conversation ${conversationId} not found`);
@@ -162,6 +185,7 @@ export async function processChatMessage(
       onToolEnd,
       onUsageProgress,
       skipExtractions,
+      ...(opts?.turnInstruction ? { turnInstruction: opts.turnInstruction } : {}),
     });
 
     // Publish response metadata to web clients (token usage, timing)
@@ -182,6 +206,7 @@ export async function processChatMessage(
         toolCalls: result.toolCalls,
       });
     }
+    return result;
   } finally {
     chatState.setStatus(conversationId, "");
   }

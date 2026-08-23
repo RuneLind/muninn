@@ -11,6 +11,7 @@ import { TICK_TIMEOUT_MS } from "../watchers/timeout.ts";
 import { Tracer } from "../tracing/index.ts";
 import { cleanupOldTraces } from "../db/traces.ts";
 import { cleanupOldSnapshots } from "../db/prompt-snapshots.ts";
+import { cleanupThreadCitations } from "../db/research-citations.ts";
 import { harvestSearchSignals } from "../db/search-signals.ts";
 import { runScheduledTasksFromList } from "./task-executor.ts";
 import { runGoalRemindersFromList, runGoalCheckinsFromList } from "./goal-runner.ts";
@@ -174,6 +175,15 @@ async function runSchedulerTick(api: Api, config: Config, botConfig: BotConfig):
       const deletedSnapshots = await cleanupOldSnapshots(config.promptSnapshotsRetentionDays);
       if (deletedSnapshots > 0) {
         log.info("Cleaned up {count} old prompt snapshots", { botName, count: deletedSnapshots });
+      }
+      // The CHAT half of `research_citations` — every `research_knowledge` call
+      // in every thread writes a row per hit and nothing deleted them. Same
+      // window as the traces beside them; `/research` rows and cited rows are
+      // untouched (see `cleanupThreadCitations`). AFTER the trace delete, since
+      // it competes with nothing and the trace pass is the one on a deadline.
+      const deletedCitations = await cleanupThreadCitations(config.tracingRetentionDays);
+      if (deletedCitations > 0) {
+        log.info("Cleaned up {count} old thread citations", { botName, count: deletedCitations });
       }
     } catch (err) {
       log.error("Trace cleanup failed: {error}", { botName, error: err instanceof Error ? err.message : String(err) });

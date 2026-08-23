@@ -21,6 +21,8 @@ export interface AssemblePromptParams {
   slackEnabled: boolean;
   channelContext?: string;
   recentChannelMessages?: string[];
+  /** System-prompt block for THIS TURN ONLY — see `BuildPromptOptions`. */
+  turnInstruction?: string;
   tracer: Tracer;
   logProps: LogProps;
 }
@@ -39,7 +41,7 @@ export interface AssembledPrompt {
 export async function assemblePrompt(params: AssemblePromptParams): Promise<AssembledPrompt> {
   const {
     text, userId, username, userIdentity, threadId, botConfig,
-    slackEnabled, channelContext, recentChannelMessages,
+    slackEnabled, channelContext, recentChannelMessages, turnInstruction,
     tracer, logProps,
   } = params;
 
@@ -54,6 +56,7 @@ export async function assemblePrompt(params: AssemblePromptParams): Promise<Asse
     threadId,
     researchKnowledgeAvailable: !!botConfig.hasResearchKnowledge,
     componentAnswersEnabled: !!botConfig.componentAnswers,
+    ...(turnInstruction ? { turnInstruction } : {}),
   });
   tracer.end("prompt_build", meta);
 

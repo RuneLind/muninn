@@ -80,6 +80,16 @@ export interface ProcessMessageParams {
    *  the web chat "Skip extractions" testing toggle to avoid polluting personal
    *  memory/goals/schedules during dev iteration. */
   skipExtractions?: boolean;
+  /**
+   * A system-prompt block that applies to THIS TURN ONLY, appended after the
+   * persona and every context block (see `BuildPromptOptions.turnInstruction`).
+   *
+   * The lever for a code-triggered turn that must produce a specific artifact —
+   * the Jira composer's draft turn hands the task template + depth rider through
+   * here. Deliberately NOT a cloned `botConfig` with a rewritten persona: the
+   * bot's identity, memories and history are exactly what the turn is for.
+   */
+  turnInstruction?: string;
 }
 
 export interface ProcessMessageResult {
@@ -161,6 +171,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     const { fullSystemPrompt, userPrompt, meta: promptMeta } = await assemblePrompt({
       text, userId, username, userIdentity, threadId, botConfig,
       slackEnabled: !!postToChannel, channelContext, recentChannelMessages,
+      ...(params.turnInstruction ? { turnInstruction: params.turnInstruction } : {}),
       tracer: t, logProps: props,
     });
 

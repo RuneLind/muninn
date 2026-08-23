@@ -34,7 +34,11 @@ import { buildCitations, assessCoverage, type Coverage } from "../research/answe
 import { badgeFromCollectionMeta } from "../research/corpus.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { TraceContext } from "../tracing/index.ts";
-import { JIRA_LOW_CONFIDENCE_MESSAGE, JIRA_NO_HITS_MESSAGE } from "./wire.ts";
+import {
+  JIRA_LOW_CONFIDENCE_MESSAGE,
+  JIRA_NO_HITS_MESSAGE,
+  JIRA_UNREACHABLE_MESSAGE,
+} from "./wire.ts";
 import type { JiraCitation, JiraCoverage, JiraDepth } from "./wire.ts";
 import { getLog } from "../logging.ts";
 
@@ -98,10 +102,26 @@ export const JIRA_FULL_DOC_TOTAL_CHARS = 15_000;
 /** Whole-operation budget for the full-document pull. Degrades to snippets-only. */
 export const JIRA_FULL_DOC_TIMEOUT_MS = 8_000;
 
-/** The two coverage strings live in the dependency-free `./wire.ts` — the page
- *  renders them and cannot import this module. Import them from there. */
+/** The coverage strings live in the dependency-free `./wire.ts` — the page
+ *  renders them and cannot import this module. Import them from there.
+ *
+ *  A `switch` with an exhaustive `never` tail rather than a ternary chain: adding
+ *  a fourth verdict must be a COMPILE error here, not a silent fall-through into
+ *  the `no_hits` sentence — which is exactly how `unreachable` would have been
+ *  reported as "the corpus covered nothing" a second time. */
 export function jiraCoverageMessage(coverage: Exclude<JiraCoverage, "answer">): string {
-  return coverage === "low_confidence" ? JIRA_LOW_CONFIDENCE_MESSAGE : JIRA_NO_HITS_MESSAGE;
+  switch (coverage) {
+    case "low_confidence":
+      return JIRA_LOW_CONFIDENCE_MESSAGE;
+    case "unreachable":
+      return JIRA_UNREACHABLE_MESSAGE;
+    case "no_hits":
+      return JIRA_NO_HITS_MESSAGE;
+    default: {
+      const exhaustive: never = coverage;
+      return exhaustive;
+    }
+  }
 }
 
 /**
@@ -182,13 +202,17 @@ export function jiraKeyFor(collection: string, docId: string, url?: string): str
  * filename, so `titleFor` in `answer.ts` hands back
  * `MELOSYS-6528_Ny_flyt_steg1_Foreløpig_fakturert_trygdeavgift_…`. Rendered into
  * `## Referanser` that is a wall of underscores beside a link that already says
- * the key — so the key prefix comes off and the underscores become spaces. Left
- * alone for every other collection, whose titles are real prose.
+ * the key — so the key prefix comes off, the `.md` tail comes off, and the
+ * underscores become spaces. Left alone for every other collection, whose titles
+ * are real prose.
+ *
+ * The `.md` matters on the thread path in particular: a `research_citations` row
+ * with a null title falls back to the bare doc id, which always carries it.
  */
 export function humanizeJiraTitle(collection: string, title: string, key?: string): string {
   if (collection !== JIRA_ISSUES_COLLECTION) return title;
   const withoutKey = key && title.startsWith(`${key}_`) ? title.slice(key.length + 1) : title;
-  const spaced = withoutKey.replace(/_/g, " ").trim();
+  const spaced = withoutKey.replace(/\.md$/i, "").replace(/_/g, " ").trim();
   return spaced || title;
 }
 
@@ -242,26 +266,51 @@ export function normalizeJiraUrl(url: string | undefined): string | undefined {
  * `badgeFromCollectionMeta` is the whole public surface this needs.)
  */
 export function toJiraCitations(hits: ResearchHit[]): JiraCitation[] {
-  return buildCitations(hits, JIRA_STORED_MAX_SOURCES).map((c) => {
-    const url = normalizeJiraUrl(c.url);
-    // Doc id OR `/browse/<KEY>` url — a `nav-wiki` page whose address IS the
-    // issue carries the key too, or the verdict goes amber for a retrieved issue
-    // and `## Referanser` lists it twice. See `jiraKeyFor`.
-    const key = jiraKeyFor(c.collection, c.docId, c.url);
-    return {
-      n: c.n,
-      collection: c.collection,
-      docId: c.docId,
-      title: humanizeJiraTitle(c.collection, c.title, key),
-      // Unescaped and judged at the SOURCE rather than at each render site, so
-      // nothing downstream can emit a `file://` or a `https\://`.
-      ...(url ? { url } : {}),
-      badge: badgeFromCollectionMeta(c.collection),
-      relevance: c.relevance,
-      ...(c.snippet ? { snippet: clip(c.snippet, JIRA_SNIPPET_CHARS) } : {}),
-      ...(key ? { key } : {}),
-    };
-  });
+  return buildCitations(hits, JIRA_STORED_MAX_SOURCES).map((c) => toJiraCitation(c, c.n));
+}
+
+/**
+ * The fields a citation row can be built FROM, whatever produced it.
+ *
+ * Two producers exist: `buildCitations` over live retrieval hits (the notes
+ * path), and a `research_citations` row the chat's own `research_knowledge` call
+ * wrote (the thread path). They agree on exactly this much.
+ */
+export interface JiraCitationSource {
+  collection: string;
+  docId: string;
+  title: string;
+  url?: string | null;
+  relevance: number;
+  snippet?: string | null;
+}
+
+/**
+ * Build ONE citation row. Extracted so the thread-sourced seeding cannot drift
+ * from live retrieval on any of the four things this does — the url unescape +
+ * http(s) gate, the doc-id-or-`/browse/` key resolution, the title humanization
+ * and the badge overwrite. Copying it was the alternative, and every one of those
+ * four is a defect this feature has already shipped once.
+ */
+export function toJiraCitation(c: JiraCitationSource, n: number): JiraCitation {
+  const url = normalizeJiraUrl(c.url ?? undefined);
+  // Doc id OR `/browse/<KEY>` url — a `nav-wiki` page whose address IS the
+  // issue carries the key too, or the verdict goes amber for a retrieved issue
+  // and `## Referanser` lists it twice. See `jiraKeyFor`.
+  const key = jiraKeyFor(c.collection, c.docId, c.url ?? undefined);
+  return {
+    n,
+    collection: c.collection,
+    docId: c.docId,
+    title: humanizeJiraTitle(c.collection, c.title, key),
+    // Unescaped and judged at the SOURCE rather than at each render site, so
+    // nothing downstream can emit a `file://` or a `https\://`.
+    ...(url ? { url } : {}),
+    badge: badgeFromCollectionMeta(c.collection),
+    relevance: c.relevance,
+    ...(c.snippet ? { snippet: clip(c.snippet, JIRA_SNIPPET_CHARS) } : {}),
+    ...(key ? { key } : {}),
+  };
 }
 
 function clip(text: string, max: number): string {
@@ -312,9 +361,40 @@ export interface JiraRetrievalOptions {
 
 export interface JiraRetrievalResult {
   citations: JiraCitation[];
-  coverage: Coverage;
+  /** Widened past `Coverage` by `unreachable` — see {@link classifyJiraCoverage}. */
+  coverage: JiraCoverage;
   /** Unique documents retrieved before the 24-wide citation slice. */
   hitCount: number;
+}
+
+/**
+ * The retrieval verdict, with the ONE case `assessCoverage` structurally cannot
+ * see: every sub-search FAILED.
+ *
+ * `researchKnowledge` records a thrown sub-search as `{resultCount: 0, error}`
+ * and swallows it, so a dead huginn reaches `assessCoverage` looking exactly like
+ * a corpus that had nothing to say — and the reader was told the corpus had
+ * nothing to say. Measured on the first real run of the composer.
+ *
+ * The test is **every** sub-search, not any: a partial failure genuinely did ask
+ * the corpus, and whatever came back is a real (if narrower) answer to grade the
+ * ordinary way. `subSearches.length > 0` guards the vacuous-truth case — an empty
+ * fan-out is not an outage.
+ */
+export function classifyJiraCoverage(input: {
+  hitCount: number;
+  subSearches: { resultCount: number; lowConfidence?: boolean; error?: string }[];
+}): JiraCoverage {
+  if (input.subSearches.length > 0 && input.subSearches.every((s) => !!s.error)) {
+    return "unreachable";
+  }
+  return assessCoverage({
+    hitCount: input.hitCount,
+    subSearches: input.subSearches.map((s) => ({
+      resultCount: s.resultCount,
+      ...(s.lowConfidence !== undefined ? { lowConfidence: s.lowConfidence } : {}),
+    })),
+  }) satisfies Coverage;
 }
 
 /** Retrieve over the three melosys collections and build the stored citation set. */
@@ -331,13 +411,20 @@ export async function retrieveForJira(opts: JiraRetrievalOptions): Promise<JiraR
     ...(opts.botConfig.haikuBackend ? { haikuBackend: opts.botConfig.haikuBackend } : {}),
   });
 
-  const coverage = assessCoverage({
+  const coverage = classifyJiraCoverage({
     hitCount: res.results.length,
     subSearches: res.subSearches.map((s) => ({
       resultCount: s.resultCount,
       ...(s.lowConfidence !== undefined ? { lowConfidence: s.lowConfidence } : {}),
+      ...(s.error !== undefined ? { error: s.error } : {}),
     })),
   });
+  if (coverage === "unreachable") {
+    log.warn("jira retrieval unreachable bot={bot} subSearches={count}", {
+      bot: opts.botConfig.name,
+      count: res.subSearches.length,
+    });
+  }
 
   return { citations: toJiraCitations(res.results), coverage, hitCount: res.results.length };
 }

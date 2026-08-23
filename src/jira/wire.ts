@@ -60,9 +60,20 @@ export const JIRA_EXTRA_MAX = 2_000;
  */
 export const JIRA_MARKDOWN_MAX = 100_000;
 
-/** Retrieval coverage verdict, re-exported shape of `research/answer.ts`'s
- *  `Coverage` so the browser half never imports the research layer. */
-export type JiraCoverage = "answer" | "no_hits" | "low_confidence";
+/**
+ * Retrieval coverage verdict — `research/answer.ts`'s `Coverage` plus one value
+ * of this feature's own, so the browser half never imports the research layer.
+ *
+ * **`unreachable` is not a coverage verdict about the corpus; it is the absence
+ * of one.** Measured on the first real run: huginn was down, every sub-search
+ * threw (`research-knowledge.ts` records `resultCount: 0` + `error` for each),
+ * `assessCoverage` saw zero hits and returned `no_hits` — and the page told the
+ * reader that *"nothing in jira-issues, melosys-confluence-v3 or nav-wiki covered
+ * this search"*. The corpus was never asked. The two states lead to opposite
+ * actions (rewrite the raw material vs. try again in a minute), so they get
+ * different values rather than one sentence hedging both.
+ */
+export type JiraCoverage = "answer" | "no_hits" | "low_confidence" | "unreachable";
 
 /**
  * The three reader-facing coverage sentences.
@@ -91,7 +102,19 @@ export const JIRA_LOW_CONFIDENCE_MESSAGE =
   "Kildene er listet opp likevel — vurder dem selv, eller skriv om råmaterialet mot det som faktisk er indeksert.";
 
 /**
- * The third state, which the SERVER cannot spell.
+ * The retrieval that never happened.
+ *
+ * Deliberately says the API was unavailable and NOT that the corpus is empty —
+ * see {@link JiraCoverage}. It also tells the reader what to do, because unlike
+ * the other three states this one is transient: the same notes, retried later,
+ * produce a grounded draft.
+ */
+export const JIRA_UNREACHABLE_MESSAGE =
+  "Kunnskaps-API-et var utilgjengelig — ingen kilder ble hentet. Utkastet er skrevet utelukkende " +
+  "fra råmaterialet ditt. Prøv igjen senere.";
+
+/**
+ * The fourth state, which the SERVER cannot spell.
  *
  * `jiraCoverageMessage` takes only the derived verdict, and a derived `no_hits`
  * has two completely different causes: the corpus covered nothing, or the reader
@@ -130,6 +153,11 @@ export function effectiveCoverage(
   retrievalCoverage: JiraCoverage | null | undefined,
   retainedCount: number,
 ): JiraCoverage {
+  // `unreachable` PASSES THROUGH the zero-retained branch. An unreachable
+  // retrieval has nothing to retain by construction, so the branch below would
+  // otherwise convert every one of them back into the `no_hits` claim about the
+  // corpus that this value exists to stop being made.
+  if (retrievalCoverage === "unreachable") return "unreachable";
   if (retainedCount === 0) return "no_hits";
   return retrievalCoverage ?? "answer";
 }
@@ -222,6 +250,23 @@ export interface JiraDonePayload {
 /** Status of a stored draft, as `GET /api/jira/draft/:id` reports it. */
 export type JiraDraftStatus = "generating" | "ready" | "failed";
 
+/**
+ * Where a draft came from.
+ *
+ * `notes` — the reader pasted raw material and the server retrieved for it.
+ * `thread` — the draft is a TURN in a chat thread: the conversation already
+ * retrieved (through the `research_knowledge` MCP tool), already argued with the
+ * answer, and the draft turn inherits all of it as ordinary history. The two
+ * differ in every later operation, which is why it is stored rather than inferred
+ * from `thread_id` being set: a regenerate on a `thread` draft is another thread
+ * turn, and its hit set comes from `research_citations`, not from a retrieval.
+ */
+export type JiraDraftSource = "notes" | "thread";
+
+export function isJiraDraftSource(value: unknown): value is JiraDraftSource {
+  return value === "notes" || value === "thread";
+}
+
 /** `GET /api/jira/draft/:id`. `markdown` is null while `generating`. */
 export interface JiraDraftView {
   draftId: string;
@@ -263,6 +308,24 @@ export interface JiraDraftView {
   coverage: JiraCoverage | null;
   retrievalQuestion: string;
   error: string | null;
+  /** `notes` (pasted raw material) | `thread` (a turn in a chat thread). */
+  source: JiraDraftSource;
+  /** The chat thread the draft turn runs in. Null on a notes-sourced draft. */
+  threadId: string | null;
+  /**
+   * That thread's name, resolved at READ time rather than stored — a thread can
+   * be renamed, and a copy on this row would then name a thread that no longer
+   * exists under that title. Null when there is no thread, or when the thread row
+   * is gone (there is deliberately no FK).
+   */
+  threadName: string | null;
+  /**
+   * The assistant message whose text this draft's `markdown` was taken from.
+   *
+   * Re-pointed by every regenerate, since a regenerate is another turn in the
+   * same thread. Null on a notes-sourced draft.
+   */
+  messageId: string | null;
   createdAt: number;
   updatedAt: number;
 }

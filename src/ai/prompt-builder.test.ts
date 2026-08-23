@@ -132,6 +132,42 @@ describe("buildPrompt", () => {
     expect(result.userPrompt).toContain("new question");
   });
 
+  // ── turnInstruction: the per-turn lever ─────────────────────────────────
+  // Its consumer is the Jira composer's draft turn, which needs an output shape
+  // the bot's persona knows nothing about. The alternative — cloning botConfig
+  // with a rewritten persona — would replace who the bot is for the whole turn,
+  // including the framing around its memories and goals.
+  test("turnInstruction reaches the assembled system prompt", async () => {
+    const result = await bp({ turnInstruction: "SVARFORMAT: bare saketeksten." });
+    expect(result.systemPrompt).toContain("SVARFORMAT: bare saketeksten.");
+  });
+
+  test("turnInstruction is LAST — closest to the user turn, after persona and every context block", async () => {
+    const result = await bp({
+      persona: "You are Jarvis.",
+      turnInstruction: "SVARFORMAT: bare saketeksten.",
+    });
+    const at = result.systemPrompt.indexOf("SVARFORMAT: bare saketeksten.");
+    expect(at).toBeGreaterThan(result.systemPrompt.indexOf("You are Jarvis."));
+    // A rider buried above the memories/goals blocks reads as background rather
+    // than as the instruction for this turn.
+    expect(at).toBeGreaterThan(result.systemPrompt.indexOf("Prefers TypeScript over JavaScript"));
+    expect(at).toBeGreaterThan(result.systemPrompt.indexOf("Learn Rust"));
+  });
+
+  test("the persona SURVIVES a turn instruction — this is an append, not a swap", async () => {
+    const result = await bp({ persona: "You are Jarvis.", turnInstruction: "x" });
+    expect(result.systemPrompt).toContain("You are Jarvis.");
+  });
+
+  test("absent or blank turnInstruction leaves the prompt byte-identical", async () => {
+    const base = await bp({ persona: "You are Jarvis." });
+    expect((await bp({ persona: "You are Jarvis.", turnInstruction: "" })).systemPrompt)
+      .toBe(base.systemPrompt);
+    expect((await bp({ persona: "You are Jarvis.", turnInstruction: "   \n " })).systemPrompt)
+      .toBe(base.systemPrompt);
+  });
+
   test("returns metadata", async () => {
     const result = await bp();
     expect(result.meta.messagesCount).toBeGreaterThan(0);

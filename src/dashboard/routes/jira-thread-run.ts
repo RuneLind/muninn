@@ -1,0 +1,393 @@
+/**
+ * Running a Jira draft AS A TURN in a chat thread.
+ *
+ * The counterpart to `jira-sse.ts`'s notes path, and structurally the mirror
+ * image of it: there, everything the model sees is assembled server-side into one
+ * fenced prompt; here, the model sees the conversation, because the conversation
+ * is where the task was actually worked out. The two paths converge again the
+ * moment the text exists — both run `finalizeJiraDraft`.
+ *
+ * **One runner, two transports.** A first draft comes in over the plain-JSON
+ * `POST /api/jira/draft/from-thread` (fire-and-forget, the page polls), and a
+ * regenerate comes in over the existing SSE `POST /api/jira/draft` so the page's
+ * stream contract does not fork. Both call `runJiraThreadDraft`; only the `emit`
+ * differs, and a detached run passes one that does nothing — the same shape
+ * `runJiraDraftDetached` uses.
+ *
+ * **The row is the record on every terminal path**, exactly as on the notes path,
+ * which is what makes the page's poller the single source of truth for both.
+ */
+
+import type { Config } from "../../config.ts";
+import type { BotConfig } from "../../bots/config.ts";
+import { getThreadById } from "../../db/threads.ts";
+import { getConnector } from "../../db/connectors.ts";
+import { getRecentMessages } from "../../db/messages.ts";
+import { getCitationsForThread } from "../../db/research-citations.ts";
+import {
+  failJiraDraft,
+  saveJiraDraftRetrieval,
+  startJiraDraftRun,
+} from "../../db/jira-drafts.ts";
+import { chatState } from "../../chat/state.ts";
+import { processChatMessage } from "../../chat/processor.ts";
+import { applyExclusions, sliceForDepth } from "../../jira/retrieval.ts";
+import {
+  buildThreadTurnInstruction,
+  citationsNamedInDraft,
+  isJiraTurnLine,
+  seedThreadCitations,
+  threadDraftTurnText,
+  threadRegenTurnText,
+  threadSeedCoverage,
+  threadSeedLine,
+} from "../../jira/thread-draft.ts";
+import {
+  finalizeJiraDraft,
+  JIRA_EMPTY_RESULT_MESSAGE,
+  JIRA_UNFINISHED_MESSAGE,
+} from "../../jira/finalize.ts";
+import {
+  effectiveCoverage,
+  JIRA_NOTES_MAX,
+  type JiraCitation,
+  type JiraDepth,
+  type JiraDonePayload,
+} from "../../jira/wire.ts";
+import { getLog } from "../../logging.ts";
+
+const log = getLog("dashboard", "jira-thread-run");
+
+/**
+ * How much thread history the seeding reads.
+ *
+ * It bounds two things at once: which assistant replies are scanned for the
+ * `cited` signal, and which user messages stand in for "the raw material" when
+ * key verification decides between amber (the person claimed it) and red (nobody
+ * ever mentioned it). 40 covers a long refinement discussion; the prompt itself
+ * is bounded separately by the connector's own history window.
+ */
+const JIRA_THREAD_HISTORY_LIMIT = 40;
+
+/** The turn seam — injectable so the route tests never spend a model call. */
+export type JiraThreadTurnRunner = (input: {
+  threadId: string;
+  text: string;
+  turnInstruction: string;
+  botConfig: BotConfig;
+  config: Config;
+}) => Promise<{ messageId?: string; text: string } | null>;
+
+export interface JiraThreadRunOptions {
+  config: Config;
+  botConfig: BotConfig;
+  draftId: string;
+  threadId: string;
+  /** The thread's name, for the stored `retrieval_question` line. */
+  threadName: string;
+  /** The resolved template's instruction body. */
+  instruction: string;
+  template: string;
+  depth: JiraDepth;
+  extra: string;
+  excludeDocIds: string[];
+  /** Regenerate only: the hit set the reader was toggling, to name exclusions. */
+  storedCitations?: JiraCitation[];
+  /** Regenerate only: the exclusion set the surviving markdown was written under. */
+  storedExcludeDocIds?: string[];
+  regenerate?: boolean;
+  /** Test seam — production callers omit it. */
+  runTurn?: JiraThreadTurnRunner;
+}
+
+/** What a caller writes to its client. A detached run passes a no-op. */
+export type JiraEmit = (event: string, data: unknown) => void;
+
+const NO_EMIT: JiraEmit = () => {};
+
+/**
+ * Run one draft turn and land the result on the row. Never rejects: every failure
+ * is reported onto the row (and to the client, when one is attached).
+ */
+export async function runJiraThreadDraft(
+  opts: JiraThreadRunOptions,
+  emit: JiraEmit = NO_EMIT,
+): Promise<void> {
+  const { draftId, threadId, botConfig } = opts;
+  try {
+    if (opts.regenerate) {
+      // The row goes back into flight BEFORE any work, with THIS run's exclusion
+      // set. The page polls, and a row left `ready` stops the poller on its first
+      // tick and renders the previous task as the new one — the same defect the
+      // notes path fixed, and it would have been re-introduced here for free.
+      await startJiraDraftRun(draftId, opts.excludeDocIds);
+    }
+    emit("draft", { draftId });
+
+    const excluded = (opts.storedCitations ?? []).filter((c) =>
+      opts.excludeDocIds.includes(c.docId),
+    );
+    const text = opts.regenerate
+      ? threadRegenTurnText({
+          template: opts.template,
+          depth: opts.depth,
+          excluded,
+          extra: opts.extra,
+        })
+      : threadDraftTurnText(opts.template, opts.depth);
+
+    const turnInstruction = buildThreadTurnInstruction({
+      instruction: opts.instruction,
+      depth: opts.depth,
+      extra: opts.extra,
+    });
+
+    emit("phase", { phase: "writing" });
+    const startedAt = Date.now();
+    const turn = await (opts.runTurn ?? defaultThreadTurnRunner)({
+      threadId,
+      text,
+      turnInstruction,
+      botConfig,
+      config: opts.config,
+    });
+    const turnMs = Date.now() - startedAt;
+
+    // A FAILED TURN and an EMPTY ONE are different failures and get different
+    // sentences. `processChatMessage` reports a connector error internally (the
+    // `say` callback, the trace, the log) and hands back `undefined` — which
+    // reaches here as `null`. Calling that «modellen returnerte ingen tekst»
+    // told the reader the model had nothing to say about a request that never
+    // reached a model; the actionable answer is the generic «try again».
+    if (!turn) {
+      log.warn("Jira thread draft turn failed bot={bot} draft={draft} thread={thread}", {
+        bot: botConfig.name, draft: draftId, thread: threadId,
+      });
+      await failJiraDraft(
+        draftId,
+        JIRA_UNFINISHED_MESSAGE,
+        opts.regenerate ? opts.storedExcludeDocIds : undefined,
+      ).catch(() => {});
+      emit("app_error", { type: "error", message: JIRA_UNFINISHED_MESSAGE });
+      return;
+    }
+    if (!turn.text.trim()) {
+      log.warn("Jira thread draft returned nothing bot={bot} draft={draft} thread={thread}", {
+        bot: botConfig.name, draft: draftId, thread: threadId,
+      });
+      await failJiraDraft(draftId, JIRA_EMPTY_RESULT_MESSAGE);
+      emit("app_error", { type: "error", message: JIRA_EMPTY_RESULT_MESSAGE });
+      return;
+    }
+
+    // ── Seed the hit set FROM THE THREAD ───────────────────────────────────
+    // After the turn, deliberately: the draft turn may itself have called
+    // `research_knowledge` (the instruction allows it when the conversation is
+    // missing something), and its own reply is the strongest `cited` evidence
+    // there is — it is the text that will be pasted into Jira.
+    const [citationRows, history] = await Promise.all([
+      getCitationsForThread(threadId),
+      readThreadHistory(threadId),
+    ]);
+    const seeded = seedThreadCitations(citationRows, history.assistantTexts);
+    const seedQuestion = threadSeedLine(opts.threadName);
+
+    // `saveJiraDraftRetrieval` stays the ONLY writer of `retrieval_coverage`, and
+    // what it writes here is still "what retrieval found" — the thread's own
+    // citations — never a value derived from this run's exclusion set. That is
+    // the whole latch rule, and it holds: re-deriving on a regenerate is CORRECT
+    // on this path, because the conversation keeps retrieving and the hit set
+    // legitimately grows between turns.
+    const retrievalCoverage = threadSeedCoverage(seeded);
+    await saveJiraDraftRetrieval(draftId, seeded, retrievalCoverage, seedQuestion);
+
+    const citations = applyExclusions(seeded, opts.excludeDocIds);
+    const coverage = effectiveCoverage(retrievalCoverage, citations.length);
+    // **A REGENERATE emits no `citations` frame** — the notes path's rule (rule 1
+    // in `src/dashboard/CLAUDE.md`), and for its reason: the client overwrites
+    // `state.citations` with any non-empty array, and what is in hand here is the
+    // RETAINED, renumbered set. Emitting it deleted the very rows the reader had
+    // just switched off and left nothing to switch back on. The wide set is on
+    // the row already; the GET and the poll carry it. A FIRST run has no stored
+    // set for the client to lose, so it emits the wide seeded one.
+    if (!opts.regenerate) emit("citations", { citations: seeded, coverage });
+
+    // `## Referanser` is depth-sliced here for the same reason it is on the notes
+    // path: measured there, a shallow draft over 24 stored hits got 24 links under
+    // a task that used a handful. The slice is meaningful because `seedThreadCitations`
+    // orders conversation-USED sources first — so the shallow slice is exactly the
+    // set the discussion actually leaned on.
+    //
+    // …and then narrowed AGAIN, to what the draft actually NAMED. Unlike the
+    // notes path this prompt carries no citation block at all — the conversation
+    // is the context — so "the citations the model was given" is not a set this
+    // path has, and appending the slice wholesale put links under the task for
+    // sources the turn never mentioned. The same count bounds the `[n]` repair,
+    // which stays correct: a marker may only resolve to a line the list holds.
+    const promptCitations = citationsNamedInDraft(
+      sliceForDepth(citations, opts.depth),
+      turn.text,
+    );
+
+    const finalized = await finalizeJiraDraft({
+      draftId,
+      raw: turn.text,
+      promptCitations,
+      citationsUsed: promptCitations.length,
+      citations,
+      // The conversation's USER messages stand in for the raw material, so a key
+      // the person typed in chat reads amber ("you wrote it, retrieval never saw
+      // it") rather than red ("fabricated"). Passing the `fra samtale: …`
+      // placeholder instead would call every human-mentioned key a fabrication.
+      notes: history.userText,
+      knowledgeApiUrl: opts.config.knowledgeApiUrl,
+      ...(turn.messageId ? { messageId: turn.messageId } : {}),
+    });
+    if (!finalized) {
+      emit("app_error", { type: "error", message: JIRA_EMPTY_RESULT_MESSAGE });
+      return;
+    }
+
+    log.info(
+      "Jira thread draft done bot={bot} draft={draft} thread={thread} depth={depth} turnMs={turnMs} chars={chars} cites={cites} regen={regen}",
+      {
+        bot: botConfig.name,
+        draft: draftId,
+        thread: threadId,
+        depth: opts.depth,
+        turnMs,
+        chars: finalized.markdown.length,
+        cites: citations.length,
+        regen: !!opts.regenerate,
+      },
+    );
+
+    const payload: JiraDonePayload = {
+      draftId,
+      markdown: finalized.markdown,
+      citations,
+      keyVerdicts: finalized.keyVerdicts,
+      markdownFlags: finalized.markdownFlags,
+      coverage,
+      retrievalCoverage,
+      retrievalQuestion: seedQuestion,
+    };
+    emit("done", payload);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log.warn("Jira thread draft failed bot={bot} draft={draft} error={error}", {
+      bot: botConfig.name, draft: draftId, error: message,
+    });
+    // Same rule as the notes path: the row carries a GENERIC sentence (it is read
+    // back through a CORS-open GET) and the detail goes to the log. A failed
+    // regenerate restores the exclusion set its surviving markdown was written
+    // under, so the row stays self-consistent.
+    await failJiraDraft(
+      draftId,
+      JIRA_UNFINISHED_MESSAGE,
+      opts.regenerate ? opts.storedExcludeDocIds : undefined,
+    ).catch(() => {});
+    emit("app_error", { type: "error", message: `Kunne ikke skrive saken: ${message}` });
+  }
+}
+
+export interface ThreadHistory {
+  assistantTexts: string[];
+  /** The thread's user messages, joined and bounded — the raw material analogue. */
+  userText: string;
+}
+
+/**
+ * The thread's history, as this feature reads it.
+ *
+ * Exported because `PUT /api/jira/draft/:id` needs the SAME read: it re-runs key
+ * verification against the reader's edited text, and handing it the stored
+ * `fra samtale: …` placeholder as the raw material flipped every amber row red
+ * the moment the reader saved — an edit that never touched the key.
+ *
+ * The bot comes off the thread rather than from a parameter: the two are the same
+ * by construction (the route refuses a thread belonging to another bot) and a
+ * second source for it is a second thing that can disagree.
+ *
+ * **`userText` is the PERSON's messages only, minus this feature's own turn
+ * lines.** Two exclusions, each answering a way the amber verdict lied:
+ *
+ *  · `role === "peer"` is another agent talking in the thread (the hivemind
+ *    autorespond path), not the person's claim about anything;
+ *  · a `Lag Jira-sak …` line is OURS. The regenerate's own line NAMES the
+ *    excluded sources («Ikke bruk disse kildene denne gangen: MELOSYS-7264»), so
+ *    leaving it in made a key the model re-used anyway read amber — "you wrote
+ *    it" — when the person had asked for exactly the opposite.
+ */
+export async function readThreadHistory(threadId: string): Promise<ThreadHistory> {
+  const thread = await getThreadById(threadId);
+  if (!thread) return { assistantTexts: [], userText: "" };
+  const messages = await getRecentMessages(
+    thread.userId,
+    JIRA_THREAD_HISTORY_LIMIT,
+    thread.botName,
+    threadId,
+    { excludeProactive: true },
+  );
+  const assistantTexts = messages.filter((m) => m.role === "assistant").map((m) => m.text);
+  const userText = clipTail(
+    messages
+      .filter((m) => m.role === "user" && !isJiraTurnLine(m.text))
+      .map((m) => m.text)
+      .join("\n\n"),
+    JIRA_NOTES_MAX,
+  );
+  return { assistantTexts, userText };
+}
+
+/** Keep the TAIL: the most recent turns are the ones that named the issue keys a
+ *  draft is about to be checked against. */
+function clipTail(text: string, max: number): string {
+  return text.length <= max ? text : text.slice(text.length - max);
+}
+
+/**
+ * The production turn: a real message in the user's own web-chat conversation.
+ *
+ * `processChatMessage` rather than a bare `processMessage`, so the draft turn
+ * appears LIVE in whatever tab the person has open — the point of the feature is
+ * that the draft is part of the discussion, and a turn that only shows up on
+ * refresh is not. The conversation shell is the DETERMINISTIC
+ * `findOrCreateBotConversation` id (the `ask/chat` rule): a random shell is
+ * invisible to every other broadcaster addressing this user+bot.
+ *
+ * **Extractions are skipped.** «Lag Jira-sak (bug, skisse).» plus a Jira task is
+ * not a personal conversation, and the memory/goal/schedule extractors would file
+ * the task's contents as facts about the user.
+ */
+const defaultThreadTurnRunner: JiraThreadTurnRunner = async (input) => {
+  const thread = await getThreadById(input.threadId);
+  if (!thread) throw new Error(`thread ${input.threadId} not found`);
+
+  const conversation = await chatState.findOrCreateBotConversation({
+    botName: thread.botName,
+    userId: thread.userId,
+  });
+
+  // The thread's pinned connector wins at processing time, exactly as it does for
+  // a message the person types — a copilot-pinned thread must not have its draft
+  // turn silently answered by a different model.
+  const threadConnector = thread.connectorId ? await getConnector(thread.connectorId) : null;
+
+  const result = await processChatMessage(
+    conversation.id,
+    input.text,
+    input.botConfig,
+    input.config,
+    input.threadId,
+    undefined,
+    threadConnector ?? undefined,
+    true,
+    { turnInstruction: input.turnInstruction },
+  );
+  if (!result) return null;
+  return {
+    ...(result.messageId ? { messageId: result.messageId } : {}),
+    text: result.responseText,
+  };
+};

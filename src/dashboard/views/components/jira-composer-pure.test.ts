@@ -50,6 +50,7 @@ import {
   JIRA_LOW_CONFIDENCE_MESSAGE,
   JIRA_NO_HITS_MESSAGE,
   JIRA_NOTES_MAX,
+  JIRA_UNREACHABLE_MESSAGE,
   type JiraCitation,
   type JiraDraftView,
 } from "../../../jira/wire.ts";
@@ -154,6 +155,18 @@ describe("coverage copy selection", () => {
       text: JIRA_NO_HITS_MESSAGE,
     });
     expect(jiraCoverageNotice(null, "no_hits")?.text).toBe(JIRA_NO_HITS_MESSAGE);
+  });
+
+  test("unreachable outranks every other reading — the corpus was never asked", () => {
+    expect(jiraCoverageNotice("unreachable", "unreachable")).toEqual({
+      tone: "bad",
+      text: JIRA_UNREACHABLE_MESSAGE,
+    });
+    // Both halves of the pair carry it, so neither a stream-driven client nor a
+    // poll-driven one can fall through to the corpus sentence. The `no_hits`
+    // spelling is what a client running the pre-`effectiveCoverage`-passthrough
+    // derivation would produce; it must still say "API unavailable".
+    expect(jiraCoverageNotice("unreachable", "no_hits")?.text).toBe(JIRA_UNREACHABLE_MESSAGE);
   });
 });
 

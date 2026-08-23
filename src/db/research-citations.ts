@@ -18,6 +18,15 @@ export interface ResearchCitationInsert {
   botName?: string | null;
   userId?: string | null;
   traceId?: string | null;
+  /**
+   * The chat thread whose `research_knowledge` tool call retrieved this source.
+   *
+   * Absent on the `/research` ask path (it has no thread). Set by the chat MCP
+   * handler, which is what makes a thread's retrieval reconstructable afterwards
+   * — the trace's tool-span outputs are truncated to a `_truncated` head, so
+   * without this row the hits a conversation actually saw are unrecoverable.
+   */
+  threadId?: string | null;
   question?: string | null;
   docId: string;
   collection: string;
@@ -39,6 +48,7 @@ export async function insertResearchCitations(rows: ResearchCitationInsert[]): P
     bot_name: r.botName ?? null,
     user_id: r.userId ?? null,
     trace_id: r.traceId ?? null,
+    thread_id: r.threadId ?? null,
     question: r.question ?? null,
     doc_id: r.docId,
     collection: r.collection,
@@ -53,6 +63,7 @@ export async function insertResearchCitations(rows: ResearchCitationInsert[]): P
       "bot_name",
       "user_id",
       "trace_id",
+      "thread_id",
       "question",
       "doc_id",
       "collection",
@@ -116,6 +127,7 @@ export interface CitationRow {
   botName: string | null;
   userId: string | null;
   traceId: string | null;
+  threadId: string | null;
   question: string | null;
   docId: string;
   collection: string;
@@ -130,7 +142,7 @@ export interface CitationRow {
 export async function getCitationsForTrace(traceId: string): Promise<CitationRow[]> {
   const sql = getDb();
   const rows = await sql`
-    SELECT id, bot_name, user_id, trace_id, question, doc_id, collection,
+    SELECT id, bot_name, user_id, trace_id, thread_id, question, doc_id, collection,
            url, title, relevance, cited, created_at
     FROM research_citations
     WHERE trace_id = ${traceId}
@@ -139,12 +151,67 @@ export async function getCitationsForTrace(traceId: string): Promise<CitationRow
   return rows.map(mapCitationRow);
 }
 
+/**
+ * Every source a THREAD's `research_knowledge` calls retrieved, oldest first.
+ *
+ * This is the whole reason `thread_id` exists: it is the Jira composer's stored
+ * hit set when the draft is a turn in a conversation rather than a product of
+ * pasted notes. Ordered ascending so the caller's dedup keeps the FIRST
+ * appearance of a doc — the turn that actually introduced it into the discussion.
+ */
+export async function getCitationsForThread(threadId: string): Promise<CitationRow[]> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT id, bot_name, user_id, trace_id, thread_id, question, doc_id, collection,
+           url, title, relevance, cited, created_at
+    FROM research_citations
+    WHERE thread_id = ${threadId}
+    ORDER BY created_at ASC, doc_id ASC
+  `;
+  return rows.map(mapCitationRow);
+}
+
+/**
+ * Retention for the CHAT half of the table, run from the hourly trace cleanup on
+ * the SAME `TRACING_RETENTION_DAYS` window.
+ *
+ * The chat's `research_knowledge` handler writes a row per hit on every tool
+ * call in every thread — an unbounded growth path on the hot path of ordinary
+ * conversation, where the `/research` half is bounded by how often a person
+ * opens that page. It shares the trace window because it is the same kind of
+ * value: a diagnostic record of one request, useful while the trace beside it
+ * still exists.
+ *
+ * The predicate is deliberately narrow, and both halves of it are load-bearing:
+ *
+ *  · **`thread_id IS NOT NULL`** — the `/research` ask rows are the durable
+ *    retrieval ledger `search_signals` and the citation analyses read, and were
+ *    never meant to expire.
+ *  · **`cited = false`** — a cited row is the evidence that a conversation
+ *    actually USED the source, which is the signal the Jira composer's thread
+ *    seeding is built on. Only the retrieved-and-ignored tail is dropped.
+ *
+ * Never throws for the caller's benefit: it is called inside the scheduler's own
+ * try-block beside `cleanupOldTraces`.
+ */
+export async function cleanupThreadCitations(retentionDays: number): Promise<number> {
+  const sql = getDb();
+  const result = await sql`
+    DELETE FROM research_citations
+    WHERE thread_id IS NOT NULL
+      AND cited = false
+      AND created_at < NOW() - make_interval(days => ${retentionDays})
+  `;
+  return result.count;
+}
+
 function mapCitationRow(r: Record<string, any>): CitationRow {
   return {
     id: r.id,
     botName: r.bot_name ?? null,
     userId: r.user_id ?? null,
     traceId: r.trace_id ?? null,
+    threadId: r.thread_id ?? null,
     question: r.question ?? null,
     docId: r.doc_id,
     collection: r.collection,

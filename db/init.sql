@@ -684,11 +684,15 @@ CREATE TABLE research_citations (
   title       TEXT,
   relevance   REAL,
   cited       BOOLEAN NOT NULL,
+  -- The chat thread whose `research_knowledge` tool call retrieved this source.
+  -- NULL on every /research-ask row (that flow has no thread) — see migration 071.
+  thread_id   UUID,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX idx_research_citations_created ON research_citations (created_at DESC);
 CREATE INDEX idx_research_citations_cited ON research_citations (cited, created_at DESC);
+CREATE INDEX idx_research_citations_thread ON research_citations (thread_id, created_at DESC);
 
 -- Harvested per-sub-question search quality. `span_id` is the source `traces.id`
 -- and the idempotency key for the hourly harvest.
@@ -817,9 +821,14 @@ CREATE TABLE jira_drafts (
   exclude_doc_ids    JSONB NOT NULL DEFAULT '[]'::jsonb,  -- doc ids toggled OFF
   key_verdicts       JSONB NOT NULL DEFAULT '[]'::jsonb,  -- JiraKeyVerdict[]
   markdown_flags     JSONB NOT NULL DEFAULT '[]'::jsonb,  -- JiraMarkdownFlag[]
-  retrieval_coverage TEXT,                   -- answer | no_hits | low_confidence, as RETRIEVAL found it (written once)
+  retrieval_coverage TEXT,                   -- answer | no_hits | low_confidence | unreachable, as RETRIEVAL found it (written once)
   retrieval_question TEXT NOT NULL DEFAULT '',
   error              TEXT,
+  -- Where the draft came from: 'notes' (pasted raw material) | 'thread' (a turn
+  -- in a chat thread). See migration 071.
+  source             TEXT NOT NULL DEFAULT 'notes',
+  thread_id          UUID,        -- the chat thread, on source = 'thread'
+  message_id         UUID,        -- the assistant message that IS the draft
   created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
