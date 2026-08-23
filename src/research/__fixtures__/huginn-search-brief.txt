@@ -1,0 +1,25 @@
+*Low confidence results — query may not match indexed content well.*
+
+
+1. **MELOSYS-101 Eksempelsak om innlogging** > Description (100.0% relevant · high) | 2026-01-15
+   https://jira.example.invalid/browse/MELOSYS-101
+   Melosys > Saker > Innlogging
+   Ved innlogging i eksempelmiljøet feiler oppslaget mot Eksempelregisteret når brukeren mangler rolle.
+   *status: Ferdig | type: Bug*
+   collection: `jira-issues` doc_id: `MELOSYS-101_Eksempelsak_om_innlogging.md`
+
+2. **Eksempel** (61.0% relevant · low) | 2026-02-20
+   file://./huginn-nav/wiki/entities/Eksempel.md
+   Eksempel er en oppdiktet enhet brukt i denne fixturen.
+
+## Integrasjoner
+Eksempeltjenesten kaller Eksempelregisteret hver natt.
+   collection: `nav-wiki` doc_id: `entities/Eksempel.md`
+
+3. **Eksempelside om testdata** > Testdata **[UNDER ARBEID]** (82.3% relevant · medium) | 2025-11-02
+   https://confluence.example.invalid/display/EKS/Eksempelside+om+testdata
+   Eksempelrom > Testdata
+   Testdataene i eksempelmiljøet nullstilles hver natt klokka 03:00.
+   collection: `melosys-confluence-v3` doc_id: `Eksempelside om testdata.md`
+
+huginn-trace-url: http://127.0.0.1:8080/api/trace/00000000-0000-4000-8000-000000000002

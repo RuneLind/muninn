@@ -14,13 +14,13 @@ import { parseHuginnHits } from "./huginn-hits.ts";
 describe("threadCitationRows", () => {
   const hits = [
     {
-      docId: "MELOSYS-8150_x.md",
+      docId: "MELOSYS-101_x.md",
       collection: "jira-issues",
       title: "T",
-      url: "https://jira.adeo.no/browse/MELOSYS-8150",
+      url: "https://jira.example.invalid/browse/MELOSYS-101",
       relevance: 0.8,
     },
-    { docId: "concepts/MEDL.md", collection: "nav-wiki", relevance: 0.4 },
+    { docId: "concepts/Eksempelregister.md", collection: "nav-wiki", relevance: 0.4 },
   ];
 
   test("one row per hit, stamped with the thread and OUR trace id", () => {
@@ -37,9 +37,9 @@ describe("threadCitationRows", () => {
       threadId: "t-1",
       traceId: "9f1d8a0e-0000-4000-8000-000000000000",
       question: "hvordan?",
-      docId: "MELOSYS-8150_x.md",
+      docId: "MELOSYS-101_x.md",
       collection: "jira-issues",
-      url: "https://jira.adeo.no/browse/MELOSYS-8150",
+      url: "https://jira.example.invalid/browse/MELOSYS-101",
       title: "T",
       relevance: 0.8,
       // Always false here: the assistant's reply does not exist yet, and unlike
@@ -65,7 +65,9 @@ describe("threadCitationRows", () => {
 });
 
 describe("parsed huginn hits are row-shapeable end to end", () => {
-  test("a real rendered `search_knowledge` result becomes storable rows", () => {
+  // The fixture is synthetic — hand-written to huginn's render grammar, never
+  // captured from the corpus. See the header of `huginn-hits.test.ts`.
+  test("a rendered `search_knowledge` result becomes storable rows", () => {
     const text = readFileSync(
       join(import.meta.dir, "__fixtures__", "huginn-search-full.txt"),
       "utf-8",
@@ -75,13 +77,13 @@ describe("parsed huginn hits are row-shapeable end to end", () => {
       hits: parseHuginnHits(text),
       threadId: "t-3",
     });
-    expect(rows).toHaveLength(3);
+    expect(rows).toHaveLength(4);
     expect(rows[0]).toMatchObject({
       botName: "melosys",
       threadId: "t-3",
       collection: "jira-issues",
-      docId: "MELOSYS-8150_Lage_endepunkt_for_uttrekk_av_Telework_Framework_Agreement_(TWA).md",
-      url: "https://nav.atlassian.net/browse/MELOSYS-8150",
+      docId: "MELOSYS-101_Eksempelsak_om_innlogging.md",
+      url: "https://jira.example.invalid/browse/MELOSYS-101",
       relevance: 1,
       cited: false,
     });

@@ -11,9 +11,10 @@
  * that retrieved nothing at all.
  *
  * The grammar below is huginn's `mcp_adapter/formatting.render_results`, both
- * modes. The fixtures under `__fixtures__/` were captured through that very
- * function against the live corpus rather than hand-written, because the two
- * failure modes here are both invisible to a made-up sample.
+ * modes. The fixtures under `__fixtures__/` are hand-written to that grammar
+ * with invented keys, titles and hosts — this repo is public and the corpus is
+ * not — and each one carries the decoy of its mode explicitly, because that is
+ * what a made-up sample otherwise leaves out.
  *
  * **The anchor is the `collection: … doc_id: …` line, and the header is chosen
  * by its relevance parenthetical.** Two structural traps, one per mode, and they
