@@ -1,7 +1,13 @@
 import { test, expect, describe } from "bun:test";
 import { setupTestDb } from "../test/setup-db.ts";
 import { ensureDefaultThread } from "./threads.ts";
-import { createJiraDraft, getJiraDraft } from "./jira-drafts.ts";
+import {
+  createJiraDraft,
+  failJiraDraft,
+  finishJiraDraft,
+  getJiraDraft,
+  saveJiraDraft,
+} from "./jira-drafts.ts";
 
 /**
  * The `threads` LEFT JOIN, which is the only thing about this row the route
@@ -52,5 +58,53 @@ describe("getJiraDraft — the thread join", () => {
     expect(view!.source).toBe("notes");
     expect(view!.threadId).toBeNull();
     expect(view!.threadUserId).toBeNull();
+  });
+});
+
+/**
+ * «Lagre» is for a FINISHED draft.
+ *
+ * The card only ever renders the control on a `ready` row, but the route is
+ * reachable directly — and stamping `saved_at` on a `generating` row would mark
+ * a draft "kept" while the runner is still writing over it, and on a `failed`
+ * one would keep a draft that has no text at all. The gate is in the UPDATE
+ * itself rather than a read-then-write, so a run finishing mid-request cannot
+ * slip between the check and the write.
+ */
+describe("saveJiraDraft — only a ready row can be kept", () => {
+  test("a generating row is refused, and the same row saves once it is ready", async () => {
+    const id = await createJiraDraft({
+      botName: "melosys",
+      template: "bug",
+      depth: "skisse",
+      notes: "råmateriale",
+      extra: "",
+    });
+
+    // Fresh rows are `generating` — nothing to keep yet.
+    expect(await saveJiraDraft(id)).toBeNull();
+    expect((await getJiraDraft(id))!.savedAt).toBeNull();
+
+    await finishJiraDraft(id, { markdown: "## Problem\nNoe er galt.", keyVerdicts: [], markdownFlags: [] });
+    const saved = await saveJiraDraft(id);
+    expect(saved).not.toBeNull();
+    expect(typeof saved!.savedAt).toBe("number");
+  });
+
+  test("a failed row is refused — there is no text to keep", async () => {
+    const id = await createJiraDraft({
+      botName: "melosys",
+      template: "task",
+      depth: "ingen",
+      notes: "råmateriale",
+      extra: "",
+    });
+    await failJiraDraft(id, "Utkastet ble ikke skrevet ferdig.");
+    expect(await saveJiraDraft(id)).toBeNull();
+    expect((await getJiraDraft(id))!.savedAt).toBeNull();
+  });
+
+  test("an unknown id is null too — the route tells the two apart by re-reading", async () => {
+    expect(await saveJiraDraft("99999999-8888-4777-8666-555555555555")).toBeNull();
   });
 });

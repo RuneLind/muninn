@@ -840,8 +840,10 @@ CREATE TABLE jira_drafts (
 CREATE INDEX idx_jira_drafts_created_at
   ON jira_drafts (created_at DESC);
 
--- The chat card's listing: every draft on one thread, newest first
--- (`GET /api/jira/drafts?thread=<id>`, hit on every thread load + response_meta).
+-- The chat card's listing: every draft on one thread, served OLDEST first —
+-- `listJiraDraftsForThread` is `ORDER BY created_at ASC`, which this index serves
+-- by a backward scan (`GET /api/jira/drafts?thread=<id>`, hit on every thread
+-- load + response_meta).
 CREATE INDEX idx_jira_drafts_thread
   ON jira_drafts (thread_id, created_at DESC);
 

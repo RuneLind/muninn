@@ -35,6 +35,7 @@ const READY: JiraCardView = {
   markdownFlags: [],
   savedAt: null,
   error: null,
+  messageId: "m-1",
 };
 
 describe("jiraCardShouldPoll — the LOOP is gated, the read is not", () => {
@@ -47,9 +48,15 @@ describe("jiraCardShouldPoll — the LOOP is gated, the read is not", () => {
     expect(jiraCardShouldPoll({ status: "failed", messageId: "m-1" })).toBe(false);
   });
 
-  test("a row with no message keeps polling even when settled — the stamp lands after the turn", () => {
+  test("a READY row with no message keeps polling — the stamp lands just after the turn", () => {
     expect(jiraCardShouldPoll({ status: "ready", messageId: null })).toBe(true);
-    expect(jiraCardShouldPoll({ status: "failed", messageId: null })).toBe(true);
+  });
+
+  test("a FAILED row is done even with no message — nothing is running to stamp one", () => {
+    // The row is terminal, so the loop had nothing to wait for: it re-read the
+    // same answer every 2.5 s for thirteen minutes, and started over on every
+    // thread load. The thread-level notice reports it on the first read.
+    expect(jiraCardShouldPoll({ status: "failed", messageId: null })).toBe(false);
   });
 });
 
@@ -238,6 +245,13 @@ describe("jiraCardSignature", () => {
 
   test("giving up changes it", () => {
     expect(jiraCardSignature(READY)).not.toBe(jiraCardSignature(READY, true));
+  });
+
+  test("a re-pointed messageId changes it — WHERE the card stands is visible too", () => {
+    // A regenerate is another turn: the row keeps `ready` and moves its
+    // `message_id`. Without the id in the signature the redraw was skipped and
+    // the card stayed under the previous reply.
+    expect(jiraCardSignature(READY)).not.toBe(jiraCardSignature({ ...READY, messageId: "m-2" }));
   });
 
   test("the same view twice is the same signature — a redraw throws away a standing note", () => {

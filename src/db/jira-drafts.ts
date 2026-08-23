@@ -342,7 +342,8 @@ export async function getJiraDraft(id: string): Promise<JiraDraftView | null> {
  *
  * Returns the full view so the card can adopt exactly what the row now holds
  * (the `PUT` precedent), rather than optimistically drawing a state the server
- * might not have reached.
+ * might not have reached — or **null when nothing was kept**, which is both
+ * "no such draft" and "not finished".
  */
 export async function saveJiraDraft(id: string): Promise<JiraDraftView | null> {
   const sql = getDb();
@@ -350,7 +351,12 @@ export async function saveJiraDraft(id: string): Promise<JiraDraftView | null> {
     UPDATE jira_drafts
        SET saved_at = now(), updated_at = now()
      WHERE id = ${id}
+       AND status = 'ready'
     RETURNING id`;
+  // No row updated: either the id is unknown or the draft is not FINISHED. The
+  // status gate rides in the UPDATE rather than a read-then-write, so a run that
+  // finishes mid-request cannot slip between the check and the stamp — and the
+  // route tells the two cases apart by re-reading (404 vs 409).
   if (rows.length === 0) return null;
   // Re-read rather than `RETURNING *`: the view needs the `threads` join, and one
   // extra primary-key lookup is cheaper than a second, drifting row→view mapping.

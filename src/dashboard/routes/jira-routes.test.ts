@@ -178,7 +178,10 @@ mock.module("../../db/jira-drafts.ts", () => ({
   saveJiraDraft: async (id: string) => {
     if (!UUID_RE.test(id)) throw new Error(`invalid input syntax for type uuid: "${id}"`);
     const r = rows.get(id);
-    if (!r) return null;
+    // Faithful to the real statement's `AND status = 'ready'`: an unfinished row
+    // is not updated, and the route tells that apart from a missing one by
+    // re-reading.
+    if (!r || r.status !== "ready") return null;
     r.savedAt = Date.now();
     return jiraDraftView(r);
   },
@@ -1964,6 +1967,34 @@ describe("POST /api/jira/draft/:id/save", () => {
     // …and nothing was written.
     const view = await (await makeApp().request(`/api/jira/draft/${draftId}`)).json();
     expect(view.savedAt).toBeNull();
+  });
+
+  test("an UNFINISHED draft is a 409, not a 404 — the row exists, its state refuses", async () => {
+    // «Lagre» renders only on a ready card, but the route is reachable directly.
+    // Stamping `saved_at` on a `generating` row marks a draft kept while the
+    // runner is still writing over it; on a `failed` one it keeps nothing at all.
+    const draftId = await startOne();
+    const row = rows.get(draftId)!;
+
+    row.status = "generating";
+    const running = await makeApp().request(`/api/jira/draft/${draftId}/save`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    expect(running.status).toBe(409);
+    expect((await running.json()).error).toContain("ferdig");
+
+    row.status = "failed";
+    const failed = await makeApp().request(`/api/jira/draft/${draftId}/save`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    expect(failed.status).toBe(409);
+
+    // …and nothing was written on either attempt.
+    expect(row.savedAt).toBeNull();
   });
 
   test("a non-uuid is a 404 before postgres sees it; an unknown uuid is a 404 too", async () => {

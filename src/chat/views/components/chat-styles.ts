@@ -461,9 +461,11 @@ export function chatStyles(): string {
       border-color: color-mix(in srgb, var(--status-success) 45%, transparent);
       color: var(--status-success);
     }
+    /* --status-warning, from shared-styles.ts. There is no --status-warn: with
+       that name the fallback did all the work and the badge ignored the theme. */
     .jira-card-badge-warn {
-      border-color: color-mix(in srgb, var(--status-warn, #d79b3a) 45%, transparent);
-      color: var(--status-warn, #d79b3a);
+      border-color: color-mix(in srgb, var(--status-warning) 45%, transparent);
+      color: var(--status-warning);
     }
     .jira-card-badge-err {
       border-color: color-mix(in srgb, var(--status-error) 45%, transparent);

@@ -207,7 +207,10 @@ export function jiraEntryScript(): string {
     // it is disabled while sending — and none of that matters here, because the
     // draft's destination is the conversation, not this panel.
     if (outcome.ok) {
-      seedJiraCard(outcome.draftId);
+      // The thread this draft was submitted FROM, not the page's live one: the
+      // reader may have switched away during the 60–600 s the POST was on the
+      // wire, and the seed must not touch the cards of where they are now.
+      seedJiraCard(outcome.draftId, threadId);
       if (jiraEntryState && jiraEntryThreadId === threadId) closeJiraEntry();
       // The note goes in the feedback row the control was clicked in, which
       // \`has-jira\` already un-hides. \`attachJiraCard\` removes it by draft id when

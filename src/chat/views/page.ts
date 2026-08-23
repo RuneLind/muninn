@@ -511,6 +511,10 @@ const CHAT_SCRIPT = `
     // Reset streaming state so stale text doesn't leak into next thread
     streamingRawText = '';
     streamingRafPending = false;
+    // The message list is gone, so every draft card went with it. A bot or user
+    // switch comes through HERE and not through loadThreadMessages, and without
+    // this the records outlived their DOM and their timers kept polling.
+    resetJiraCards();
   }
 
   // WebSocket connection
@@ -816,8 +820,9 @@ const CHAT_SCRIPT = `
     // The «Lag Jira-sak» picker belongs to ONE message in the thread being left,
     // and the message list below is about to be replaced wholesale — leaving the
     // panel's state standing pointed it at a thread the reader can no longer see.
-    // (An in-flight POST is unaffected: its 200 navigates the pre-opened tab
-    // before it looks at this state at all.)
+    // (An in-flight POST is unaffected: its 200 hands the draft id to the card
+    // poller and drops its note in a row captured as a local at submit time,
+    // neither of which reads this state.)
     closeJiraEntry();
     // Every draft card and every poll timer belongs to the thread being left.
     // The nodes are about to be replaced wholesale, and a timer that outlived

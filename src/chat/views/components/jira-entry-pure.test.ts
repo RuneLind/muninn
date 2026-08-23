@@ -243,4 +243,11 @@ describe("jiraEntryDraftingHtml", () => {
   test("escapes the id — it is echoed into an attribute", () => {
     expect(jiraEntryDraftingHtml('"><img onerror=x>')).not.toContain("<img");
   });
+
+  test("carries the archive link the docstring promises — a 200 means work is RUNNING", () => {
+    // The note is the only pointer between the click and the card, and the card
+    // may never come (a failed run, a bubble outside the replayed window). The
+    // link is what the reader is left with when it does not.
+    expect(jiraEntryDraftingHtml("d-9")).toContain('href="/jira?draft=d-9"');
+  });
 });

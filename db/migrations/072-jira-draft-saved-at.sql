@@ -1,30 +1,16 @@
 -- The draft card in the chat: a «Lagret» mark, and a thread-keyed listing.
 --
--- The draft now lives as a CARD under the assistant bubble it came from, in the
--- web chat itself — the finalized text (fence stripped, `[n]` repaired,
--- `## Referanser` appended) delivered where the conversation is, instead of
--- behind a hand-off to `/jira`. Two schema consequences:
+--  1. `saved_at` — the reader's «Lagre» on the card. Nothing else on the row can
+--     carry it: `updated_at` moves on every write the runner makes, and `status`
+--     is about the generation, not about whether a human decided to keep the
+--     result. Backfilled from `created_at` on `ready` rows — those predate the
+--     card and were reached through `/jira`, where reaching them WAS the save;
+--     `failed`/`generating` stay null, there is nothing there to have kept.
+--  2. `idx_jira_drafts_thread` — the card's listing (`GET /api/jira/drafts?
+--     thread=<id>`, served OLDEST first), hit on every thread load, thread
+--     switch and `response_meta`. Without it that is a seq scan on a hot path.
 --
---  1. `saved_at` — the reader's «Lagre». The card's own state has to SURVIVE a
---     reload, and nothing on the row could carry it: `updated_at` moves on every
---     write the runner makes, and `status` is about the generation, not about
---     whether a human decided to keep the result. A nullable timestamp is the
---     whole feature: null ⇒ not saved, set ⇒ saved, and the moment is worth
---     keeping over a boolean because it dates the decision.
---
---     Backfilled from `created_at` for every `ready` row: those drafts predate the
---     card and were all reached through `/jira`, where reaching them at all WAS
---     the save. Marking them saved is the honest reading; marking them unsaved
---     would invite a reader to "save" a draft nobody is going to look at again.
---     `failed` and `generating` rows are deliberately left null — there is
---     nothing there to have kept.
---
---  2. `idx_jira_drafts_thread` — the card's listing. On every thread load, thread
---     switch and `response_meta`, the chat asks `GET /api/jira/drafts?thread=<id>`
---     for every draft on the thread, so the poller is keyed on the DRAFT rather
---     than on "this tab is the one that clicked". Without the index that is a seq
---     scan over the whole table on a hot client path.
---
+-- Rationale for the card itself: src/chat/CLAUDE.md + src/jira/wire.ts.
 -- ⚠️ Mirrored in db/init.sql — identical columns + index, or
 -- src/db/schema-drift.test.ts reds.
 

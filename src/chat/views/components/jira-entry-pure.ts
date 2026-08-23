@@ -17,6 +17,10 @@
  */
 
 import { escHtml as esc } from "../../../dashboard/views/components/escape.ts";
+// The card's own archive URL — one spelling of `/jira?draft=<id>`, not two.
+// `jira-card-pure.ts` is a leaf like this module, so the browser bundle stays
+// dependency-free either way.
+import { jiraCardArchiveUrl } from "./jira-card-pure.ts";
 import { JIRA_DEPTHS, JIRA_EXTRA_MAX, type JiraDepth } from "../../../jira/wire.ts";
 
 // ── Ids and hooks ────────────────────────────────────────────────────────────
@@ -202,12 +206,22 @@ export const JE_DRAFTING_MESSAGE = "Utkastet skrives i samtalen …";
  * archive link rides along regardless, because a 200 means the turn is RUNNING —
  * a row exists, a message is coming and the thread's flight slot is held — and
  * the reader must never be left without a pointer to work that is happening.
+ *
+ * That link is the note's whole reason to outlive the click: the card layer
+ * clears the note the moment it can say something better (the card lands, or the
+ * draft failed / gave up / has no reachable bubble and the thread-level notice
+ * takes over). Until then this is the only pointer there is.
  */
 export function jiraEntryDraftingHtml(draftId: string): string {
   return (
-    `<span class="je-msg je-msg-ok" ${JE_DRAFTING_ATTR}="${esc(draftId)}">${esc(JE_DRAFTING_MESSAGE)}</span>`
+    `<span class="je-msg je-msg-ok" ${JE_DRAFTING_ATTR}="${esc(draftId)}">${esc(JE_DRAFTING_MESSAGE)} ` +
+    `<a href="${esc(jiraCardArchiveUrl(draftId))}" target="_blank" rel="noopener">${esc(JE_DRAFTING_LINK_LABEL)}</a>` +
+    `</span>`
   );
 }
+
+/** The archive pointer inside {@link jiraEntryDraftingHtml}. */
+export const JE_DRAFTING_LINK_LABEL = "Åpne i /jira";
 
 /**
  * Why **Avbryt** is dead while a POST is on the wire.

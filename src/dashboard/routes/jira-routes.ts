@@ -834,7 +834,19 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
       const id = c.req.param("id");
       if (!isValidUuid(id)) return unknownDraft(c);
       const saved = await saveJiraDraft(id);
-      if (!saved) return unknownDraft(c);
+      if (!saved) {
+        // The write is gated on `status = 'ready'`, so "nothing kept" is two
+        // different answers: the draft does not exist (404, as everywhere on
+        // this router), or it exists and is not FINISHED — a row still being
+        // written, or one that failed and has no text to keep. That is a
+        // conflict with the row's state, not a missing row, and the card renders
+        // the served sentence as it stands.
+        const existing = await getJiraDraft(id);
+        if (existing) {
+          return c.json({ error: "Utkastet er ikke ferdig ennå — bare et ferdig utkast kan lagres." }, 409);
+        }
+        return unknownDraft(c);
+      }
       // The whole view, so the card adopts exactly what the row now holds rather
       // than drawing a state the server might not have reached — the `PUT` rule.
       c.header("Cache-Control", "no-store");

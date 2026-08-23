@@ -225,10 +225,9 @@ export function streamingUiScript(): string {
   // whichever reply happened to be last, landing the draft's binding on an
   // unrelated message.
   //
-  // The positional fallback stays for the one case the id cannot cover: a meta
-  // from a turn whose bubble this tab never rendered (it arrived before the
-  // thread was opened), where "the last one" is still the best guess and was the
-  // whole behaviour before.
+  // The positional fallback stays for the one case NO id can cover: a meta from
+  // a turn whose bubble this tab never rendered at all, where "the last one" is
+  // still the best guess and was the whole behaviour before.
   function botMessageForMeta(meta) {
     if (meta.clientMessageId) {
       var byId = chatMessages.querySelector(
@@ -236,8 +235,25 @@ export function streamingUiScript(): string {
       );
       if (byId) return byId;
     }
+    // REPLAYED history stamps the DB row id into data-client-id (appendMessage),
+    // and a meta for such a turn names a throwaway client id this tab never
+    // rendered — the second-tab and reconnect case. The row id still addresses
+    // the bubble, so this is an id lookup, not a guess.
+    if (meta.messageId) {
+      var byRowId = chatMessages.querySelector(
+        '.msg-bot:not(.msg-intermediate)[data-client-id="' + cssAttrValue(meta.messageId) + '"]'
+      );
+      if (byRowId) return byRowId;
+    }
     var msgs = chatMessages.querySelectorAll('.msg-bot:not(.msg-intermediate)');
-    return msgs.length > 0 ? msgs[msgs.length - 1] : null;
+    var last = msgs.length > 0 ? msgs[msgs.length - 1] : null;
+    // …and the guess is REFUSED when it would steal a bubble another meta has
+    // already bound. data-message-id is what attachJiraCard resolves its host
+    // through, so re-pointing it lands a draft's card under an unrelated reply —
+    // exactly the failure two turns in flight in one thread produced.
+    if (last && last.dataset && last.dataset.messageId && meta.messageId
+        && last.dataset.messageId !== meta.messageId) return null;
+    return last;
   }
 
   // Ids are server-minted UUIDs, so this never has anything to escape in
@@ -281,7 +297,7 @@ export function streamingUiScript(): string {
     }
 
     // A finished turn may BE a Jira draft, or may have run beside one. Either
-    // way the listing is the authority — see adoptJiraCardsForThread.
+    // way the listing is the authority — see refreshJiraCards/adoptJiraCardRow.
     refreshJiraCards();
   }
 
@@ -297,7 +313,15 @@ export function streamingUiScript(): string {
     // that work from in here: this function early-returns the moment a feedback
     // row exists, so a card arriving after the row (the ordinary case — the
     // draft finishes minutes later) would never be reached.
-    if (botDiv.dataset) botDiv.dataset.messageId = messageId;
+    //
+    // **An existing DIFFERENT id is never overwritten.** The stamp used to run
+    // ahead of the idempotency return below, so a caller that resolved the wrong
+    // bubble re-pointed a binding that was already correct — and the draft card
+    // then attached under someone else's reply.
+    if (botDiv.dataset) {
+      if (botDiv.dataset.messageId && botDiv.dataset.messageId !== messageId) return;
+      botDiv.dataset.messageId = messageId;
+    }
     if (botDiv.querySelector('.msg-feedback')) return; // idempotent
     var wrap = document.createElement('div');
     wrap.className = 'msg-feedback';

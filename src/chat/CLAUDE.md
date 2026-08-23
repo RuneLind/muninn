@@ -84,12 +84,19 @@ Three rules underneath it, each of which cost a defect:
 
 1. **Every listed row is read ONCE via `GET /api/jira/draft/:id` on adopt.** The
    listing carries the binding and nothing else; `markdown`, `keyVerdicts`,
-   `markdownFlags` and `savedAt` live on the view. Only the POLL LOOP is gated on
-   `status === 'generating' || !messageId` — gating the READ on in-flight-ness is
-   what left a FINISHED draft with nothing to render after a reload. The skip on
-   a later listing is keyed on `attached && status unchanged`, not on the status
-   alone: a row can go `ready` while its bubble is still arriving over the
-   WebSocket, and a status-only skip stranded it forever.
+   `markdownFlags` and `savedAt` live on the view. Only the POLL LOOP is gated,
+   on `generating`, or a null `messageId` on a row that is not `failed` (a failed
+   run stamps no message and never will, so polling it was 13 minutes of reads
+   answering the same thing) — gating the READ on in-flight-ness is what left a
+   FINISHED draft with nothing to render after a reload. The skip on a later
+   listing is keyed on `attached && status && messageId all unchanged`, not on
+   the status alone: a row can go `ready` while its bubble is still arriving over
+   the WebSocket, and a REGENERATE re-points `message_id` at the new turn while
+   the status stays `ready` — a status-only skip stranded the first forever and
+   left the second's card standing under the old bubble (the card left behind
+   under the previous bubble is removed by draft id at attach time). A settled
+   record whose bubble is simply offscreen is re-RENDERED rather than re-read,
+   since every `response_meta` re-asks the listing.
 2. **`attachJiraCard(messageId, draftId, view)` is its own idempotent function.**
    It cannot live inside `attachFeedbackControls`, which early-returns the moment
    a feedback row exists (`streaming-ui.ts`) — and the card arrives minutes after
@@ -103,8 +110,12 @@ Three rules underneath it, each of which cost a defect:
    `sendMessage` has no in-flight guard and a reloaded tab cannot know a turn is
    running, so an ordinary message sent during a draft turn produced two metas
    that both resolved to whichever reply happened to be last, landing the draft's
-   binding on an unrelated message. The positional fallback survives only for a
-   meta whose bubble this tab never rendered.
+   binding on an unrelated message. Replayed history stamps the DB ROW id into
+   `data-client-id`, so a meta for such a turn is resolved by id too (a second
+   lookup) — the positional fallback survives only for a meta whose bubble this
+   tab never rendered, and it is refused outright when the last bubble already
+   carries a DIFFERENT `data-message-id`. `attachFeedbackControls` likewise never
+   overwrites one: the stamp used to run ahead of its own idempotency return.
 
 The card renders the markdown with `sanitizeHtml(formatWebHtml(md), true)` — the
 same pair every bot bubble and the `/jira` preview use, already in the page
@@ -113,7 +124,9 @@ second argument is not optional: the one-argument form selects the TELEGRAM tag
 list and silently flattens every heading, list and table. **Kopier markdown
 copies the RAW markdown**, byte for byte, because that is what the Jira editor
 converts on paste. **Lagre** POSTs `{}` to `POST /api/jira/draft/:id/save`, which
-stamps `saved_at` (migration 072) — that column is the only reason «Lagret»
+stamps `saved_at` on a READY row (migration 072; an unfinished or failed row is a
+409 — the gate rides the UPDATE, and the route re-reads to tell that apart from
+an unknown id's 404) — that column is the only reason «Lagret»
 survives a reload, and the card adopts the row the 200 returns rather than
 drawing the state optimistically.
 

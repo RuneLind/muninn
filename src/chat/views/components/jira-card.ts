@@ -54,22 +54,28 @@ export function jiraCardScript(): string {
   // against it before touching the DOM: a listing or a draft read that lands
   // after a thread switch describes a conversation the reader is no longer in.
   var jiraCardThread = null;
-  var jiraCardListing = false;
+  // The thread whose listing is on the wire, or null. A THREAD rather than a
+  // boolean: a plain flag was cleared only in the listing's own \`finally\`, so a
+  // switch mid-flight left it standing and every refresh for the NEW thread —
+  // its load, its switches, its every response_meta — returned early. The cards
+  // of the conversation the reader had just opened never appeared.
+  var jiraCardListing = null;
   var jiraCardWired = false;
 
-  function jiraCardAttrValue(value) {
-    return String(value).replace(/["\\\\]/g, '\\\\$&');
-  }
-
-  // Tear everything down. Called from loadThreadMessages beside closeJiraEntry:
-  // the message list is about to be replaced wholesale, so every card node is
-  // going away and every timer would be polling for a thread nobody is reading.
+  // Tear everything down. Called from loadThreadMessages beside closeJiraEntry
+  // and from clearChat (a bot or user switch replaces the message list too):
+  // every card node is going away and every timer would be polling for a thread
+  // nobody is reading.
   function resetJiraCards() {
     for (var id in jiraCards) {
       if (jiraCards[id] && jiraCards[id].timer) clearTimeout(jiraCards[id].timer);
     }
     jiraCards = {};
     jiraCardThread = null;
+    // A listing still on the wire describes the thread being left; it already
+    // checks \`jiraCardThread\` before touching anything, so dropping the claim
+    // here only means the next thread is free to ask immediately.
+    jiraCardListing = null;
     var notice = document.getElementById('${JCARD_NOTICE_ID}');
     if (notice) notice.remove();
   }
@@ -85,10 +91,12 @@ export function jiraCardScript(): string {
   // response_meta for the active thread.
   async function refreshJiraCards() {
     if (!jiraCardsPossible()) return;
-    if (jiraCardListing) return; // one in flight is enough; the next event re-asks
     var threadId = activeThreadId;
+    // One listing per THREAD is enough; the next event re-asks. A listing for a
+    // DIFFERENT thread must go through — see the declaration.
+    if (jiraCardListing === threadId) return;
     if (jiraCardThread !== threadId) { resetJiraCards(); jiraCardThread = threadId; }
-    jiraCardListing = true;
+    jiraCardListing = threadId;
     try {
       var res = await fetch('/api/jira/drafts?thread=' + encodeURIComponent(threadId));
       if (!res.ok) return;
@@ -101,7 +109,9 @@ export function jiraCardScript(): string {
       // A dropped listing is not worth a message: the next response_meta or the
       // next thread load asks again, and nothing here is the reader's action.
     } finally {
-      jiraCardListing = false;
+      // Only if this listing is still the claimed one: a switch mid-flight
+      // handed the claim to the new thread, whose own listing owns it now.
+      if (jiraCardListing === threadId) jiraCardListing = null;
     }
   }
 
@@ -111,12 +121,23 @@ export function jiraCardScript(): string {
   function adoptJiraCardRow(row, threadId) {
     if (!row || !row.draftId) return;
     var rec = jiraCards[row.draftId];
+    // Is the listing describing exactly the row we already hold? The STATUS is
+    // not the whole binding: a regenerate is another turn, so \`message_id\` moves
+    // to the new reply while the status stays \`ready\`, and a status-only test
+    // left the card standing under the OLD bubble holding the OLD text.
+    var settled = rec && rec.view && rec.view.status === row.status
+      && (rec.view.messageId || null) === (row.messageId || null) && !jiraCardShouldPoll(row);
     // Skip only a row that is settled AND already on screen. Keying the skip on
     // the STATUS alone stranded the ordinary case: a draft can go \`ready\` while
     // its bubble is still arriving over the WebSocket, so the first render found
     // no host and marked it an orphan — and every later listing then agreed with
     // itself that there was nothing to do.
-    if (rec && rec.attached && rec.view && rec.view.status === row.status && !jiraCardShouldPoll(row)) return;
+    if (settled && rec.attached) return;
+    // Settled, read, and waiting for a bubble that is outside the replayed
+    // window (or still arriving). The listing is telling us what we already
+    // hold, so the READ buys nothing — but a re-render does, because the bubble
+    // may have landed since. This is the hot path: every response_meta re-asks.
+    if (settled && rec.orphan === 'offscreen') { renderJiraCardRecord(row.draftId); return; }
     if (!rec) {
       rec = jiraCards[row.draftId] = { pollStartedAt: Date.now() };
     }
@@ -128,9 +149,14 @@ export function jiraCardScript(): string {
   // The clicking tab's own seed. \`from-thread\` returns before the turn starts, so
   // this is the earliest the id exists anywhere in the browser — and the listing
   // would find it on the next response_meta anyway, minutes later.
-  function seedJiraCard(draftId) {
-    if (!draftId || !activeThreadId) return;
-    var threadId = activeThreadId;
+  //
+  // \`threadId\` is the thread the 🧾 click was SUBMITTED from, handed over by
+  // \`submitJiraEntry\`, never the page's live \`activeThreadId\`: the POST answers
+  // while the reader may have moved on, and seeding off the live value then reset
+  // the records of whatever conversation they had switched to.
+  function seedJiraCard(draftId, threadId) {
+    if (!draftId || !threadId) return;
+    if (activeThreadId !== threadId) return;
     if (jiraCardThread !== threadId) { resetJiraCards(); jiraCardThread = threadId; }
     if (!jiraCards[draftId]) jiraCards[draftId] = { pollStartedAt: Date.now() };
     readJiraCardDraft(draftId, threadId);
@@ -144,10 +170,17 @@ export function jiraCardScript(): string {
       var res = await fetch('/api/jira/draft/' + encodeURIComponent(draftId));
       if (jiraCardThread !== threadId || activeThreadId !== threadId) return;
       if (!res.ok) {
-        // A 404 is terminal (the row is gone); anything else is left to the next
-        // listing. Either way this loop stops rather than retrying to the cap.
-        stopJiraCardPoll(draftId);
-        if (res.status === 404) delete jiraCards[draftId];
+        // A 404 is TERMINAL — the row is gone, and nothing will bring it back.
+        if (res.status === 404) {
+          stopJiraCardPoll(draftId);
+          delete jiraCards[draftId];
+          return;
+        }
+        // Anything else is the server blinking, not an answer about the draft:
+        // treated exactly like a transport throw, so the loop stays alive to the
+        // cap and the give-up line eventually renders. Stopping here was silent
+        // — the card said «Skriver utkastet …» for the life of the page.
+        scheduleJiraCardPoll(draftId, threadId);
         return;
       }
       var view = await res.json();
@@ -223,7 +256,7 @@ export function jiraCardScript(): string {
    */
   function attachJiraCard(messageId, draftId, view) {
     if (!messageId || !draftId || !view) return false;
-    var host = chatMessages.querySelector('.msg-bot[data-message-id="' + jiraCardAttrValue(messageId) + '"]');
+    var host = chatMessages.querySelector('.msg-bot[data-message-id="' + cssAttrValue(messageId) + '"]');
     if (!host) return false;
     var rec = jiraCards[draftId] || {};
     var html = jiraCardHtml(view, {
@@ -232,15 +265,32 @@ export function jiraCardScript(): string {
       messageTone: rec.messageTone,
       gaveUp: rec.gaveUp,
     });
-    var existing = host.querySelector('[${JCARD_ATTR}="' + jiraCardAttrValue(draftId) + '"]');
+    var existing = host.querySelector('[${JCARD_ATTR}="' + cssAttrValue(draftId) + '"]');
+    // A card for this draft standing under ANOTHER bubble: a regenerate is a new
+    // turn, so the row is re-pointed and the old card is left behind. Scoped to
+    // the document rather than the host, because the stale one is by definition
+    // not in it — otherwise the reader gets two cards, and the older one holds
+    // the older text.
+    var strays = document.querySelectorAll('[${JCARD_ATTR}="' + cssAttrValue(draftId) + '"]');
+    for (var i = 0; i < strays.length; i++) {
+      if (host.contains && host.contains(strays[i])) continue;
+      strays[i].remove();
+    }
     if (existing) existing.outerHTML = html;
     else host.insertAdjacentHTML('beforeend', html);
-    // The «Utkastet skrives i samtalen …» placeholder the 🧾 click left in ITS
-    // feedback row — a different bubble from this one, which is why it is keyed
-    // on the draft id rather than removed relative to the card.
-    var note = document.querySelector('[${JE_DRAFTING_ATTR}="' + jiraCardAttrValue(draftId) + '"]');
-    if (note) note.remove();
+    removeJiraDraftingNote(draftId);
     return true;
+  }
+
+  // The «Utkastet skrives i samtalen …» placeholder the 🧾 click left in ITS
+  // feedback row — a DIFFERENT bubble from the card's, which is why it is keyed
+  // on the draft id rather than removed relative to the card. It is cleared both
+  // when the card lands and when nothing can ever land (see
+  // renderJiraCardRecord): the note claims a draft is being written, and left
+  // standing on a dead one it says so for the life of the page.
+  function removeJiraDraftingNote(draftId) {
+    var note = document.querySelector('[${JE_DRAFTING_ATTR}="' + cssAttrValue(draftId) + '"]');
+    if (note) note.remove();
   }
 
   // Render one record wherever it belongs: under its bubble, or — when there is
@@ -268,6 +318,11 @@ export function jiraCardScript(): string {
     rec.orphan = !rec.view.messageId
       ? (rec.view.status === 'failed' || rec.gaveUp ? 'unmapped' : null)
       : 'offscreen';
+    // Nothing will replace the «skrives i samtalen …» note here: the run failed,
+    // the poller gave up, or the bubble is unreachable. Clear it rather than
+    // leave it claiming the draft is still being written — the thread-level
+    // notice this record now feeds carries the archive link instead.
+    if (rec.orphan || rec.view.status === 'failed' || rec.gaveUp) removeJiraDraftingNote(draftId);
   }
 
   function renderJiraCardNotice() {

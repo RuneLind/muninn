@@ -43,6 +43,8 @@ interface Harness {
   rowClasses: () => string[];
   /** Draft ids handed to `seedJiraCard` — the card poller's seed. */
   seeded: () => string[];
+  /** The thread id handed over WITH each seed — the submit-time one, not the live one. */
+  seededThreads: () => (string | null | undefined)[];
   /** How many times an already-open panel was re-focused rather than rebuilt. */
   scrolledIntoView: () => number;
   attach: () => void;
@@ -70,6 +72,7 @@ async function harness(opts: {
 }): Promise<Harness> {
   const fetchCalls: FetchCall[] = [];
   const seeded: string[] = [];
+  const seededThreads: (string | null | undefined)[] = [];
   let templatesCalls = 0;
   let settlePostResolve: ((status: number, body: unknown) => void) | null = null;
   let panelHtml: string | null = null;
@@ -124,7 +127,10 @@ async function harness(opts: {
   const ctx = {
     document: doc,
     // The card poller's seed — the ONLY thing a 200 does with the id now.
-    seedJiraCard: (draftId: string) => seeded.push(draftId),
+    seedJiraCard: (draftId: string, threadId?: string | null) => {
+      seeded.push(draftId);
+      seededThreads.push(threadId);
+    },
     fetch: async (url: string, init?: { method?: string; body?: string; headers?: Record<string, string> }) => {
       fetchCalls.push({
         url,
@@ -213,6 +219,7 @@ async function harness(opts: {
   return {
     fetchCalls,
     seeded: () => seeded,
+    seededThreads: () => seededThreads,
     panelHtml: () => panelHtml,
     rowHtml: () => rowHtml,
     rowClasses: () => rowClasses,
@@ -297,6 +304,10 @@ describe("the POST", () => {
     await h.clickSubmit();
     // The draft's destination is the conversation. Nothing is opened.
     expect(h.seeded()).toEqual(["d-9"]);
+    // The thread the click was SUBMITTED from rides along: the seed must not
+    // read the page's live `activeThreadId`, which a switch during the POST has
+    // already moved on.
+    expect(h.seededThreads()).toEqual(["t-1"]);
     expect(h.panelHtml()).toBeNull();
     expect(h.rowHtml()).toContain('data-je-drafting="d-9"');
     expect(h.rowHtml()).toContain("skrives i samtalen");

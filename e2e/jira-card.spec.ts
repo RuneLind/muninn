@@ -28,7 +28,9 @@ async function openThread(page: Page): Promise<void> {
   await expect(page.locator(`[data-jira-card="${DRAFT}"]`)).toBeVisible({ timeout: 20_000 });
 }
 
-test.describe("the draft card", () => {
+// SERIAL: the Lagre test POSTs a save, and `saved_at` has no un-save — every
+// later test in this file then sees an already-saved draft.
+test.describe.serial("the draft card", () => {
   test("attaches under the bubble the draft came from, with its badges", async ({ page }) => {
     await openThread(page);
     const card = page.locator(`[data-jira-card="${DRAFT}"]`);
@@ -80,7 +82,9 @@ test.describe("the draft card", () => {
   });
 
   test("Lagre survives a reload — that is the whole reason saved_at exists", async ({ page }) => {
-    // Start from a KNOWN-unsaved state, whatever earlier runs did.
+    // Save it OUT OF BAND first, so the assertion is about what a reload
+    // RESTORES rather than about the click. There is no un-save, so this test
+    // leaves the draft saved for good — hence the serial describe.
     await page.request.fetch(`/api/jira/draft/${DRAFT}/save`, {
       method: "POST",
       headers: { "content-type": "application/json" },

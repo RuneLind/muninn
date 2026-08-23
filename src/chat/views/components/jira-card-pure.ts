@@ -113,10 +113,15 @@ export interface JiraCardListRow {
  *
  * A null `messageId` keeps the loop alive even on a settled row: the stamp lands
  * just after the turn, so a row can be seen `generating` with no message and
- * `ready` with one a tick later. The `failed` case with no message never gets a
- * bubble at all — the loop runs to the cap and the thread-level notice says so.
+ * `ready` with one a tick later.
+ *
+ * **`failed` is terminal whatever the `messageId` says.** A failed run stamps no
+ * message and never will — nothing is running to stamp one — so polling it was
+ * 2.5 s × 13 minutes of reads answering the same thing, restarted on every
+ * thread load. The thread-level notice reports it on the FIRST read instead.
  */
 export function jiraCardShouldPoll(row: { status: JiraDraftStatus; messageId: string | null }): boolean {
+  if (row.status === "failed") return false;
   return row.status === "generating" || !row.messageId;
 }
 
@@ -210,7 +215,17 @@ export function jiraCardBadges(view: {
 /** What the card needs from the view. `JiraDraftView` satisfies it. */
 export type JiraCardView = Pick<
   JiraDraftView,
-  "draftId" | "status" | "template" | "depth" | "markdown" | "keyVerdicts" | "markdownFlags" | "savedAt" | "error"
+  | "draftId"
+  | "status"
+  | "template"
+  | "depth"
+  | "markdown"
+  | "keyVerdicts"
+  | "markdownFlags"
+  | "savedAt"
+  | "error"
+  /** Not rendered — it is part of {@link jiraCardSignature}, see there. */
+  | "messageId"
 >;
 
 export interface JiraCardRenderOptions {
@@ -347,10 +362,16 @@ export function jiraCardNoticeHtml(orphans: JiraCardOrphan[]): string {
  * «Markdown kopiert.» and any focus inside the card. So a card is only redrawn
  * when something a reader can SEE has changed. `updatedAt` is deliberately not
  * part of it — the runner moves it on writes that change nothing visible.
+ *
+ * `messageId` IS part of it, though nothing renders it: a regenerate re-points
+ * the row at the new turn's bubble, and WHERE the card stands is as visible as
+ * what it says. Without it the redraw was skipped and the card stayed under the
+ * old reply.
  */
 export function jiraCardSignature(view: JiraCardView, gaveUp?: boolean): string {
   return [
     view.status,
+    view.messageId ?? "",
     view.savedAt ? "saved" : "unsaved",
     view.markdown ? String(view.markdown.length) : "0",
     view.keyVerdicts?.length ?? 0,
