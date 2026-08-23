@@ -1,9 +1,10 @@
 import { getDb } from "./client.ts";
-import { effectiveCoverage } from "../jira/wire.ts";
+import { effectiveCoverage, isJiraDraftSource } from "../jira/wire.ts";
 import type {
   JiraCitation,
   JiraCoverage,
   JiraDepth,
+  JiraDraftSource,
   JiraDraftStatus,
   JiraDraftView,
   JiraKeyVerdict,
@@ -36,14 +37,19 @@ export interface CreateJiraDraftInput {
   depth: JiraDepth;
   notes: string;
   extra: string;
+  /** Defaults to `notes` — the pasted-raw-material path, and every legacy row. */
+  source?: JiraDraftSource;
+  /** Set with `source: 'thread'`: the chat thread the draft turn runs in. */
+  threadId?: string;
 }
 
 /** Insert a `generating` row and return its id. */
 export async function createJiraDraft(input: CreateJiraDraftInput): Promise<string> {
   const sql = getDb();
   const rows = await sql`
-    INSERT INTO jira_drafts (bot_name, template, depth, notes, extra, status)
-    VALUES (${input.botName}, ${input.template}, ${input.depth}, ${input.notes}, ${input.extra}, 'generating')
+    INSERT INTO jira_drafts (bot_name, template, depth, notes, extra, status, source, thread_id)
+    VALUES (${input.botName}, ${input.template}, ${input.depth}, ${input.notes}, ${input.extra}, 'generating',
+            ${input.source ?? "notes"}, ${input.threadId ?? null})
     RETURNING id`;
   return String(rows[0]!.id);
 }
@@ -107,6 +113,17 @@ export interface FinishJiraDraftInput {
   markdown: string;
   keyVerdicts: JiraKeyVerdict[];
   markdownFlags: JiraMarkdownFlag[];
+  /**
+   * The assistant message this draft's markdown came from — thread path only.
+   *
+   * Written in the SAME statement as the markdown, deliberately: a regenerate is
+   * another thread turn, so a separate write could leave the row pointing at the
+   * previous turn while carrying this one's text — a «Juster i samtalen» link to
+   * the wrong message. Absent on the notes path, and an absent value LEAVES the
+   * column alone rather than nulling it (a `PUT` edit does not un-anchor a draft
+   * from the turn that produced it).
+   */
+  messageId?: string;
 }
 
 /** Mark a draft `ready` with its generated task and both post-pass results. */
@@ -118,6 +135,9 @@ export async function finishJiraDraft(id: string, input: FinishJiraDraftInput): 
            markdown = ${input.markdown},
            key_verdicts = ${sql.json(input.keyVerdicts as never)},
            markdown_flags = ${sql.json(input.markdownFlags as never)},
+           -- The ::uuid cast is not decoration: a bare NULL parameter leaves
+           -- postgres unable to infer the type of the COALESCE and it errors.
+           message_id = COALESCE(${input.messageId ?? null}::uuid, message_id),
            error = NULL,
            updated_at = now()
      WHERE id = ${id}`;
@@ -192,6 +212,11 @@ interface JiraDraftRow {
   retrieval_coverage: string | null;
   retrieval_question: string;
   error: string | null;
+  source: string | null;
+  thread_id: string | null;
+  message_id: string | null;
+  /** Joined from `threads`, never stored — see `JiraDraftView.threadName`. */
+  thread_name?: string | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -234,6 +259,12 @@ function toView(row: JiraDraftRow): JiraDraftView {
       : effectiveCoverage(retrieval, retained),
     retrievalQuestion: row.retrieval_question ?? "",
     error: row.error,
+    // A hand-edited or partially-migrated row degrades to `notes`, which is the
+    // column default AND the only truthful answer for a row with no thread.
+    source: isJiraDraftSource(row.source) ? row.source : "notes",
+    threadId: row.thread_id ?? null,
+    threadName: row.thread_name ?? null,
+    messageId: row.message_id ?? null,
     // `new Date(...)` like every other db module: the driver hands back a string
     // for these columns in some configurations, and `.getTime()` on one throws.
     createdAt: new Date(row.created_at).getTime(),
@@ -241,9 +272,21 @@ function toView(row: JiraDraftRow): JiraDraftView {
   };
 }
 
-/** Read one draft. `null` when the id names nothing. */
+/**
+ * Read one draft. `null` when the id names nothing.
+ *
+ * The thread name is LEFT-joined rather than stored: threads get renamed, and a
+ * copy on this row would then label the «Juster i samtalen» link with a title
+ * that no longer exists. A LEFT join is also what keeps a draft readable after
+ * its thread is deleted (there is deliberately no FK) — `thread_name` comes back
+ * null and the view reports the draft without a name, rather than not at all.
+ */
 export async function getJiraDraft(id: string): Promise<JiraDraftView | null> {
   const sql = getDb();
-  const rows = await sql<JiraDraftRow[]>`SELECT * FROM jira_drafts WHERE id = ${id}`;
+  const rows = await sql<JiraDraftRow[]>`
+    SELECT d.*, t.name AS thread_name
+    FROM jira_drafts d
+    LEFT JOIN threads t ON t.id = d.thread_id
+    WHERE d.id = ${id}`;
   return rows[0] ? toView(rows[0]) : null;
 }

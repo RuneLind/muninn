@@ -22,6 +22,7 @@ import {
   JIRA_LOW_CONFIDENCE_MESSAGE,
   JIRA_NO_HITS_MESSAGE,
   JIRA_NOTES_MAX,
+  JIRA_UNREACHABLE_MESSAGE,
   isJiraDepth,
   type JiraCitation,
   type JiraCoverage,
@@ -552,12 +553,20 @@ export interface JiraCoverageNotice {
  *     is a false statement about the corpus.
  *
  * `answer` shows nothing at all: a grounded draft needs no banner.
+ *
+ * `unreachable` is a FOURTH line and is checked before everything else: it is the
+ * one state where nothing can be said about the corpus at all, and it is the one
+ * state that is worth retrying unchanged. `effectiveCoverage` already passes it
+ * through the derived verdict, so both halves of the pair carry it.
  */
 export function jiraCoverageNotice(
   retrievalCoverage: JiraCoverage | null | undefined,
   coverage: JiraCoverage | null | undefined,
 ): JiraCoverageNotice | null {
   if (!coverage || coverage === "answer") return null;
+  if (coverage === "unreachable" || retrievalCoverage === "unreachable") {
+    return { tone: "bad", text: JIRA_UNREACHABLE_MESSAGE };
+  }
   if (coverage === "low_confidence") return { tone: "warn", text: JIRA_LOW_CONFIDENCE_MESSAGE };
   // coverage === "no_hits"
   if (retrievalCoverage && retrievalCoverage !== "no_hits") {

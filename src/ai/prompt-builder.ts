@@ -44,13 +44,24 @@ export interface BuildPromptOptions {
    *  block so the bot may emit Callout/Verdict/etc. in chat. Caller sets this
    *  from `botConfig.componentAnswers`. */
   componentAnswersEnabled?: boolean;
+  /**
+   * A system-prompt block that applies to THIS TURN ONLY.
+   *
+   * The lever a code-triggered turn needs to ask a bot for a specific artifact
+   * (the Jira composer's draft turn: a task template + depth rider + language
+   * rider) without touching the bot's identity. Deliberately not a cloned
+   * `botConfig` with a rewritten persona — that would replace who the bot is for
+   * the whole turn, including the memories/goals framing, and nothing would say
+   * so afterwards. The persona stays; this is appended.
+   */
+  turnInstruction?: string;
 }
 
 export const RESEARCH_KNOWLEDGE_NUDGE =
   "For multi-part or comparison questions (e.g. \"how does X differ from Y\", \"what triggers Z and W\"), prefer `research_knowledge` — it decomposes the question and searches each part. For simple single-topic lookups, use `search_knowledge`.";
 
 export async function buildPrompt(opts: BuildPromptOptions): Promise<PromptBuildResult> {
-  const { userId, currentMessage, persona, botName, restrictedTools, userIdentity, threadId, researchKnowledgeAvailable, componentAnswersEnabled } = opts;
+  const { userId, currentMessage, persona, botName, restrictedTools, userIdentity, threadId, researchKnowledgeAvailable, componentAnswersEnabled, turnInstruction } = opts;
   const t0 = performance.now();
   let dbHistoryMs = 0;
   let embeddingMs = 0;
@@ -128,6 +139,15 @@ export async function buildPrompt(opts: BuildPromptOptions): Promise<PromptBuild
   }
   if (componentAnswersEnabled) {
     systemParts.push(COMPONENT_VOCABULARY_RULES);
+  }
+  // LAST, for the same reason the research nudge is placed where it is: it sits
+  // closest to the user turn, where instruction-following is best. It is also
+  // where a per-turn instruction has to be to beat the standing persona — a Jira
+  // draft turn asks for an output shape the persona knows nothing about, and
+  // burying it above the memories/goals blocks is what makes such a rider read as
+  // background rather than as the instruction for this turn.
+  if (turnInstruction?.trim()) {
+    systemParts.push(turnInstruction.trim());
   }
 
   // The last message is dropped when it matches `currentMessage` because the

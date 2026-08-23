@@ -52,12 +52,16 @@ import { verifyJiraKeys } from "../../jira/verify-keys.ts";
 import { isValidUuid } from "./route-utils.ts";
 import { renderJiraFallback, renderJiraPage } from "../views/jira-page.ts";
 import {
+  JIRA_DEPTHS,
+  JIRA_EXTRA_MAX,
   JIRA_MARKDOWN_MAX,
+  isJiraDepth,
   parseJiraDraftBody,
   type JiraDepth,
   type ParsedJiraDraftBody,
 } from "../../jira/wire.ts";
 import { createJiraDraft, getJiraDraft, updateJiraDraftMarkdown } from "../../db/jira-drafts.ts";
+import { getThreadById } from "../../db/threads.ts";
 import {
   acquireJiraFlight,
   jiraFlightKey,
@@ -65,6 +69,7 @@ import {
   streamJiraSSE,
   type JiraSseOptions,
 } from "./jira-sse.ts";
+import { runJiraThreadDraft, type JiraThreadTurnRunner } from "./jira-thread-run.ts";
 import { getLog } from "../../logging.ts";
 
 const log = getLog("dashboard", "jira-routes");
@@ -84,6 +89,13 @@ export function __setJiraRetrievalForTest(
 ): void {
   retrieveOverride = retrieve;
   questionOverride = buildQuestion;
+}
+/** Test seam for the THREAD turn — the same reason the one-shot has one: a chat
+ *  turn is a real model call, and both from-thread paths are otherwise
+ *  unreachable in a test. */
+let threadTurnOverride: JiraThreadTurnRunner | undefined;
+export function __setJiraThreadTurnForTest(fn: JiraThreadTurnRunner | undefined): void {
+  threadTurnOverride = fn;
 }
 
 /**
@@ -135,6 +147,66 @@ function serverError(c: Context, where: string, err: unknown): Response {
  */
 function unknownDraft(c: Context): Response {
   return c.json({ error: "ukjent utkast" }, 404);
+}
+
+/** The same rule for a thread id: shape-checked before postgres sees it. */
+function unknownThread(c: Context): Response {
+  return c.json({ error: "ukjent samtale" }, 404);
+}
+
+/** The validated `POST /api/jira/draft/from-thread` body. */
+interface ParsedJiraThreadBody {
+  threadId: string;
+  template: string;
+  depth: JiraDepth;
+  extra: string;
+}
+
+/**
+ * Validate the from-thread body.
+ *
+ * Kept HERE rather than in `src/jira/wire.ts` alongside `parseJiraDraftBody`,
+ * because this shape has no browser consumer: the page's own regenerate goes
+ * through the ordinary draft POST, and this endpoint is driven by the chat/reader
+ * surface PR 5 builds. The wire module exists to keep the BUNDLED half dependency
+ * -free; adding a validator only the server calls would grow it for nothing.
+ *
+ * Norwegian, and the same field labels the other validator uses — the messages
+ * land verbatim in the page's status line.
+ */
+function parseJiraThreadDraftBody(
+  body: Record<string, unknown>,
+): { ok: true; body: ParsedJiraThreadBody } | { ok: false; error: string } {
+  for (const [field, label] of [
+    ["threadId", "Samtale-id-en"],
+    ["template", "Malen"],
+    ["extra", "Ekstra instruks"],
+  ] as const) {
+    const v = body[field];
+    if (v !== undefined && typeof v !== "string") {
+      return { ok: false, error: `${label} må være en tekststreng.` };
+    }
+  }
+
+  const threadId = typeof body.threadId === "string" ? body.threadId.trim() : "";
+  if (!threadId) return { ok: false, error: "Ingen samtale er valgt." };
+
+  const template = typeof body.template === "string" ? body.template.trim() : "";
+  if (!template) return { ok: false, error: "Ingen mal er valgt." };
+
+  if (!isJiraDepth(body.depth)) {
+    return {
+      ok: false,
+      error: `Teknisk dybde må være en av: ${JIRA_DEPTHS.map((d) => d.id).join(", ")}.`,
+    };
+  }
+
+  const extra = typeof body.extra === "string" ? body.extra : "";
+  if (extra.length > JIRA_EXTRA_MAX) {
+    return { ok: false, error: `Ekstra instruks er ${extra.length} tegn — grensen er ${JIRA_EXTRA_MAX}.` };
+  }
+
+  return { ok: true, body: { threadId, template, depth: body.depth, extra } };
 }
 
 /**
@@ -258,6 +330,38 @@ async function buildSseOptions(
   // drive them, and a second spelling that reflects the caller's own string back
   // is both a needless echo and a second sentence to keep in step with the first.
   if (!stored) return { opts: base, unknown: true };
+
+  // THREAD-SOURCED: a regenerate is another turn in the same thread, not a
+  // re-run of the one-shot over stored hits. Everything below (stored citations,
+  // the retrieval verdict, the retrieval question) belongs to the notes path;
+  // this row's hit set is re-derived from the conversation on every run, because
+  // the conversation keeps retrieving between turns.
+  if (stored.source === "thread" && stored.threadId) {
+    return {
+      opts: {
+        ...base,
+        notes: stored.notes,
+        existingDraftId: stored.draftId,
+        threadRun: {
+          config,
+          botConfig: bot,
+          draftId: stored.draftId,
+          threadId: stored.threadId,
+          threadName: stored.threadName ?? stored.threadId,
+          instruction,
+          template: body.template,
+          depth: body.depth,
+          extra: body.extra,
+          excludeDocIds: body.excludeDocIds,
+          storedCitations: stored.citations,
+          storedExcludeDocIds: stored.excludeDocIds,
+          regenerate: true,
+          ...(threadTurnOverride ? { runTurn: threadTurnOverride } : {}),
+        },
+      },
+    };
+  }
+
   return {
     opts: {
       ...base,
@@ -456,6 +560,125 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
       }
     } catch (err) {
       return serverError(c, "draft/start", err);
+    }
+  });
+
+  // ── The draft as a turn in the thread ──────────────────────────────────────
+  // Fire-and-forget like `/draft/start`, and for a stronger reason: this run
+  // spends a full chat turn on a thread whose history can be large. The page
+  // polls `GET /api/jira/draft/:id` exactly as it does for a notes draft.
+  //
+  // Deliberately NO CORS headers: unlike `/draft/start` this endpoint WRITES into
+  // a conversation — it appends two messages to a real thread. The extension's
+  // accepted-risk note covers reading a draft id, not posting into someone's chat.
+  app.post("/api/jira/draft/from-thread", async (c) => {
+    try {
+      const raw = await c.req.json<Record<string, unknown>>().catch(() => ({}) as Record<string, unknown>);
+      const parsed = parseJiraThreadDraftBody(raw);
+      if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+      const { body } = parsed;
+
+      // The id shape is checked BEFORE the DB call, the `unknownDraft` rule: a
+      // non-uuid reaches postgres as a cast error, not an empty result.
+      if (!isValidUuid(body.threadId)) return unknownThread(c);
+
+      const bot = resolveJiraBot(discoverAllBots());
+      if (!bot) return c.json({ error: jiraBotMissingMessage() }, 503);
+
+      const template = findJiraTemplate(resolveJiraTemplates(bot.prompts), body.template);
+      if (!template) return c.json({ error: `ukjent mal "${body.template}"` }, 400);
+
+      const thread = await getThreadById(body.threadId);
+      if (!thread) return unknownThread(c);
+      // The bot is IMPLIED by the thread, and it must be the composer's bot. A
+      // draft turn in a jarvis thread would be written by a bot whose collections
+      // are the AI/tech shelf — the same wrong-corpus failure `resolveJiraBot`
+      // has no fallback for, arrived at from the other direction.
+      if (thread.botName.toLowerCase() !== bot.name.toLowerCase()) {
+        return c.json(
+          {
+            error:
+              `Samtalen tilhører boten "${thread.botName}", men Jira-komponisten kjører på "${bot.name}". ` +
+              `Start samtalen i ${bot.name} for å lage en sak fra den.`,
+          },
+          400,
+        );
+      }
+
+      // Keyed on the THREAD (there is no draft id yet) plus everything that
+      // changes the turn, so a double-click cannot run two turns in one thread —
+      // which on this path means two visible messages, not just a double spend.
+      const key = jiraFlightKey({
+        notes: `thread:${body.threadId}`,
+        template: body.template,
+        depth: body.depth,
+        extra: body.extra,
+        excludeDocIds: [],
+        draftId: "",
+      });
+      const acquired = acquireJiraFlight(key, body.depth);
+      if (!acquired.ok) {
+        return c.json(
+          {
+            state: "running",
+            expiresAtMs: acquired.expiresAtMs,
+            error: "Det skrives allerede en sak fra denne samtalen — vent til den er ferdig.",
+          },
+          409,
+        );
+      }
+
+      try {
+        // `notes` is NOT NULL and is what the page's «fra samtale» banner reads.
+        // `retrieval_question` gets the same string: on this path nothing was
+        // condensed into a search — the conversation IS the question.
+        const seedLine = `fra samtale: ${thread.name}`;
+        const draftId = await createJiraDraft({
+          botName: bot.name,
+          template: body.template,
+          depth: body.depth,
+          notes: seedLine,
+          extra: body.extra,
+          source: "thread",
+          threadId: body.threadId,
+        });
+
+        void runJiraThreadDraft(
+          {
+            config,
+            botConfig: bot,
+            draftId,
+            threadId: body.threadId,
+            threadName: thread.name,
+            instruction: template.content,
+            template: body.template,
+            depth: body.depth,
+            extra: body.extra,
+            excludeDocIds: [],
+            ...(threadTurnOverride ? { runTurn: threadTurnOverride } : {}),
+          },
+        )
+          .catch((err) => {
+            // `runJiraThreadDraft` reports its own failures onto the row, so this
+            // is unreachable — but an unhandled rejection from a detached promise
+            // takes the process with it.
+            log.error("Detached Jira thread draft threw draft={draft}: {error}", {
+              draft: draftId,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          })
+          .finally(acquired.release);
+
+        log.info("Jira thread draft started: bot={bot} draft={draft} thread={thread} depth={depth}", {
+          bot: bot.name, draft: draftId, thread: body.threadId, depth: body.depth,
+        });
+        return c.json({ draftId, status: "generating" satisfies "generating" });
+      } catch (err) {
+        acquired.release();
+        throw err;
+      }
+    } catch (err) {
+      return serverError(c, "draft/from-thread", err);
     }
   });
 

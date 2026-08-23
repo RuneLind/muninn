@@ -45,21 +45,14 @@ import {
   sliceForDepth,
   type JiraFullDoc,
 } from "../../jira/retrieval.ts";
-import {
-  appendReferences,
-  buildJiraSystemPrompt,
-  buildJiraUserPrompt,
-  stripJiraWrappingFence,
-} from "../../jira/prompt.ts";
-import { stripCitationMarkers } from "../../jira/citation-markers.ts";
+import { buildJiraSystemPrompt, buildJiraUserPrompt } from "../../jira/prompt.ts";
 import { buildDepthFence } from "../../jira/tool-fence.ts";
-import { checkJiraMarkdown } from "../../jira/markdown-check.ts";
-import { verifyJiraKeys } from "../../jira/verify-keys.ts";
+import { finalizeJiraDraft, JIRA_EMPTY_RESULT_MESSAGE } from "../../jira/finalize.ts";
+import { runJiraThreadDraft, type JiraThreadRunOptions } from "./jira-thread-run.ts";
 import { effectiveCoverage, type JiraCitation, type JiraDepth, type JiraDonePayload } from "../../jira/wire.ts";
 import {
   createJiraDraft,
   failJiraDraft,
-  finishJiraDraft,
   saveJiraDraftRetrieval,
   startJiraDraftRun,
 } from "../../db/jira-drafts.ts";
@@ -251,6 +244,16 @@ export interface JiraSseOptions {
   excludeDocIds: string[];
   /** Live MCP probe result — the same one the `Full` pre-flight ran. */
   mcpServers: McpServerStatus[];
+  /**
+   * REGENERATE ON A THREAD-SOURCED DRAFT: run another turn in the thread instead
+   * of a one-shot over stored hits.
+   *
+   * It rides `JiraSseOptions` rather than getting its own route so the page's
+   * stream contract does not fork — a regenerate is a regenerate, and the client
+   * sends the same POST whichever way the draft was born. `runJiraDraft` diverts
+   * on this field before it touches retrieval.
+   */
+  threadRun?: JiraThreadRunOptions;
   /** Fired on every terminal path — the route releases its single-flight slot. */
   onSettled?: () => void;
   /** Test seams — production callers pass none. */
@@ -300,6 +303,15 @@ async function runJiraDraft(
   clientState: ClientState,
 ): Promise<void> {
   const safeWrite = makeSafeWrite(stream, clientState);
+
+  // A thread-sourced draft regenerates by running ANOTHER TURN in the thread —
+  // never by re-running the one-shot over the stored hits. Diverted here, before
+  // any retrieval decision, because none of the retrieval machinery below applies:
+  // that draft's hit set comes from the conversation's own `research_knowledge`
+  // calls, and its context is the conversation.
+  if (opts.threadRun) {
+    return runJiraThreadDraft(opts.threadRun, safeWrite);
+  }
   /**
    * Is there a STORED HIT SET to reuse?
    *
@@ -463,49 +475,26 @@ async function runJiraDraft(
       ...(opts.oneShot ? { oneShot: opts.oneShot } : {}),
     });
 
-    // The `[n]` REPAIR, before `## Referanser` is appended. The prompt no longer
-    // asks for bracket markers and no longer numbers the source block, but a
-    // model that writes them anyway would ship a Jira description full of
-    // footnote numbers that resolve to nothing — the reference list is unnumbered
-    // and key-deduped. Bounded by what the model was actually GIVEN, so a literal
-    // `[2024]` survives. See `src/jira/citation-markers.ts`.
-    const body = stripCitationMarkers(
-      stripJiraWrappingFence(result.result ?? ""),
-      built.citationsUsed,
-    );
-    if (!body) {
-      // An empty result is a FAILED generation, not an empty task.
-      log.warn("Jira draft returned nothing bot={bot} draft={draft}", { bot: botConfig.name, draft: draftId });
-      await failJiraDraft(draftId, "Modellen returnerte ingen tekst — ingenting ble generert.");
-      safeWrite("app_error", { type: "error", message: "Modellen returnerte ingen tekst — ingenting ble generert." });
-      return;
-    }
-
-    // `## Referanser` is appended HERE, deterministically — never written by the
-    // model. Every line then resolves by construction, which is what makes the
-    // acceptance sentence "every Jira key it cites resolves to a real issue"
-    // mechanically true for this section.
-    //
-    // It lists the citations the model was ACTUALLY GIVEN: the depth slice, minus
-    // whatever the `JIRA_BODY_MAX` trim dropped from its tail. Measured on a real
-    // `Ingen` draft over 24 stored hits, appending the retained set put 24 links
-    // under a task the model had been shown 6 of; the `citationsUsed` half is the
-    // same bug one layer in — a trimmed prompt still listed the trimmed-away
-    // sources, i.e. references to material the model never saw. PR 2's toggle
-    // column still renders the full stored set — a different question.
-    const markdown = appendReferences(body, promptCitations.slice(0, built.citationsUsed));
-
-    // `checkJiraMarkdown` is SYNC — no `Promise.resolve` wrap. It ran inside a
-    // `Promise.all` that read as two concurrent awaits and was one.
-    const markdownFlags = checkJiraMarkdown(markdown);
-    const keyVerdicts = await verifyJiraKeys({
-      markdown,
+    // Strip → `[n]` repair → `## Referanser` → both post-passes → land the row,
+    // all in `src/jira/finalize.ts`: the thread-sourced draft runs the identical
+    // tail, and every step in it is a defect this feature has shipped once.
+    const finalized = await finalizeJiraDraft({
+      draftId,
+      raw: result.result ?? "",
+      promptCitations,
+      citationsUsed: built.citationsUsed,
       citations,
       notes: opts.notes,
       knowledgeApiUrl: opts.config.knowledgeApiUrl,
     });
-
-    await finishJiraDraft(draftId, { markdown, keyVerdicts, markdownFlags });
+    if (!finalized) {
+      // An empty result is a FAILED generation, not an empty task. The row is
+      // already marked failed; this path owns telling the attached client.
+      log.warn("Jira draft returned nothing bot={bot} draft={draft}", { bot: botConfig.name, draft: draftId });
+      safeWrite("app_error", { type: "error", message: JIRA_EMPTY_RESULT_MESSAGE });
+      return;
+    }
+    const { markdown, keyVerdicts, markdownFlags } = finalized;
 
     log.info("Jira draft done bot={bot} draft={draft} depth={depth} chars={chars} cites={cites} unknownKeys={unknown}", {
       bot: botConfig.name,

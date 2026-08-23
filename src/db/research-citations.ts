@@ -18,6 +18,15 @@ export interface ResearchCitationInsert {
   botName?: string | null;
   userId?: string | null;
   traceId?: string | null;
+  /**
+   * The chat thread whose `research_knowledge` tool call retrieved this source.
+   *
+   * Absent on the `/research` ask path (it has no thread). Set by the chat MCP
+   * handler, which is what makes a thread's retrieval reconstructable afterwards
+   * — the trace's tool-span outputs are truncated to a `_truncated` head, so
+   * without this row the hits a conversation actually saw are unrecoverable.
+   */
+  threadId?: string | null;
   question?: string | null;
   docId: string;
   collection: string;
@@ -39,6 +48,7 @@ export async function insertResearchCitations(rows: ResearchCitationInsert[]): P
     bot_name: r.botName ?? null,
     user_id: r.userId ?? null,
     trace_id: r.traceId ?? null,
+    thread_id: r.threadId ?? null,
     question: r.question ?? null,
     doc_id: r.docId,
     collection: r.collection,
@@ -53,6 +63,7 @@ export async function insertResearchCitations(rows: ResearchCitationInsert[]): P
       "bot_name",
       "user_id",
       "trace_id",
+      "thread_id",
       "question",
       "doc_id",
       "collection",
@@ -116,6 +127,7 @@ export interface CitationRow {
   botName: string | null;
   userId: string | null;
   traceId: string | null;
+  threadId: string | null;
   question: string | null;
   docId: string;
   collection: string;
@@ -130,10 +142,30 @@ export interface CitationRow {
 export async function getCitationsForTrace(traceId: string): Promise<CitationRow[]> {
   const sql = getDb();
   const rows = await sql`
-    SELECT id, bot_name, user_id, trace_id, question, doc_id, collection,
+    SELECT id, bot_name, user_id, trace_id, thread_id, question, doc_id, collection,
            url, title, relevance, cited, created_at
     FROM research_citations
     WHERE trace_id = ${traceId}
+    ORDER BY created_at ASC, doc_id ASC
+  `;
+  return rows.map(mapCitationRow);
+}
+
+/**
+ * Every source a THREAD's `research_knowledge` calls retrieved, oldest first.
+ *
+ * This is the whole reason `thread_id` exists: it is the Jira composer's stored
+ * hit set when the draft is a turn in a conversation rather than a product of
+ * pasted notes. Ordered ascending so the caller's dedup keeps the FIRST
+ * appearance of a doc — the turn that actually introduced it into the discussion.
+ */
+export async function getCitationsForThread(threadId: string): Promise<CitationRow[]> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT id, bot_name, user_id, trace_id, thread_id, question, doc_id, collection,
+           url, title, relevance, cited, created_at
+    FROM research_citations
+    WHERE thread_id = ${threadId}
     ORDER BY created_at ASC, doc_id ASC
   `;
   return rows.map(mapCitationRow);
@@ -145,6 +177,7 @@ function mapCitationRow(r: Record<string, any>): CitationRow {
     botName: r.bot_name ?? null,
     userId: r.user_id ?? null,
     traceId: r.trace_id ?? null,
+    threadId: r.thread_id ?? null,
     question: r.question ?? null,
     docId: r.doc_id,
     collection: r.collection,
