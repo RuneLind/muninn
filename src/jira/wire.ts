@@ -86,6 +86,99 @@ export const JIRA_POLL_INTERVAL_MS = 2_500;
 export const JIRA_POLL_MAX_MS = 13 * 60_000;
 
 /**
+ * How many rows one archive listing may carry (`GET /api/jira/archive`, and the
+ * `/jira` page built on it).
+ *
+ * `jira_drafts` has no retention by design (migration 070) and every 🧾 click
+ * mints a row, so the table only grows. The default is a screenful of recent
+ * work; the ceiling is what stops a hand-written `?limit=100000` turning a page
+ * render into a full-table read plus a per-row `jsonb_array_elements` pass.
+ */
+export const JIRA_ARCHIVE_LIMIT_DEFAULT = 50;
+export const JIRA_ARCHIVE_LIMIT_MAX = 200;
+
+/**
+ * Clamp a caller-supplied `limit` into `[1, JIRA_ARCHIVE_LIMIT_MAX]`.
+ *
+ * `Number()` rather than `parseInt`, the `clampIntQuery` rule: `parseInt("1e3")`
+ * is 1, which answers a request for a thousand rows with one and says nothing.
+ * Anything unparseable falls back to the default rather than 400ing — this is a
+ * read-only listing, and the page reaches it from a URL a human typed.
+ */
+export function clampJiraArchiveLimit(raw: unknown): number {
+  if (raw === undefined || raw === null || raw === "") return JIRA_ARCHIVE_LIMIT_DEFAULT;
+  const n = Math.round(Number(raw));
+  if (!Number.isFinite(n)) return JIRA_ARCHIVE_LIMIT_DEFAULT;
+  return Math.min(JIRA_ARCHIVE_LIMIT_MAX, Math.max(1, n));
+}
+
+/**
+ * The one-line name an archived draft goes by.
+ *
+ * Derived, never stored: a stored copy would let a `PUT` edit leave the listing
+ * naming a task the row no longer holds.
+ *
+ * **The first SENTENCE identifies a Jira draft; the first heading usually does
+ * not.** A Jira description carries no title — the title is the issue's summary
+ * field, which lives in Jira, not in this markdown — so every shipped template
+ * opens on a section name. Measured over the 43 rows on this laptop
+ * (2026-08-23): 38 of them start `## Symptom`, `## Problem` or `## Verdi`, i.e.
+ * heading-first would have labelled the entire archive with four repeated words.
+ * The first line of prose under that heading is what tells them apart.
+ *
+ * A leading level-1 `# ` heading is the one exception and wins outright: a draft
+ * that opens with one has been given a real title, and that beats its own first
+ * sentence. A headings-only draft falls back to the first heading of any level
+ * rather than to nothing.
+ *
+ * Fenced code is skipped, for the same reason a `#` inside a fence is not a
+ * heading, and the scan is bounded — the caller passes the HEAD of the markdown
+ * (see `listJiraDrafts`), so a 100 KB Full-depth task never crosses the wire to
+ * produce forty characters.
+ */
+export function jiraDraftTitle(markdownHead: string | null | undefined): string | null {
+  if (!markdownHead) return null;
+  let fenced = false;
+  let seenAnything = false;
+  let firstHeading: string | null = null;
+  for (const raw of markdownHead.split("\n")) {
+    const line = raw.trim();
+    if (/^(```|~~~)/.test(line)) {
+      fenced = !fenced;
+      seenAnything = true;
+      continue;
+    }
+    if (fenced || !line) continue;
+    const heading = /^(#{1,6})\s+(.*)$/.exec(line);
+    if (heading) {
+      const text = cleanJiraTitle(heading[2] ?? "");
+      // A `# ` on the very first line of content is an authored title.
+      if (text && heading[1]!.length === 1 && !seenAnything) return text;
+      if (text && firstHeading === null) firstHeading = text;
+      seenAnything = true;
+      continue;
+    }
+    seenAnything = true;
+    const text = cleanJiraTitle(line);
+    if (text) return text;
+  }
+  return firstHeading;
+}
+
+/** Light markdown strip + clip. Emphasis and inline code only — the title is a
+ *  label in a list, not a rendering surface. */
+function cleanJiraTitle(text: string): string {
+  const flat = text
+    .replace(/`([^`]*)`/g, "$1")
+    .replace(/\*\*(.+?)\*\*/g, "$1")
+    .replace(/(?<!\w)[*_]([^*_]+?)[*_](?!\w)/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+  return flat.length > 120 ? `${flat.slice(0, 119)}…` : flat;
+}
+
+/**
  * Retrieval coverage verdict — `research/answer.ts`'s `Coverage` plus one value
  * of this feature's own, so the browser half never imports the research layer.
  *
@@ -381,6 +474,39 @@ export interface JiraDraftView {
   savedAt: number | null;
   createdAt: number;
   updatedAt: number;
+}
+
+/**
+ * One row of the corpus-wide archive listing (`GET /api/jira/archive`, and the
+ * `/jira` list the page renders from the same call).
+ *
+ * **Deliberately not a {@link JiraDraftView}.** The view carries the wide
+ * citation set (24 rows, each with a snippet up to 900 chars) and the whole
+ * markdown; a 200-row listing of those is megabytes of payload to render forty
+ * characters of each. The listing carries what a ROW shows plus the id that
+ * opens the full read, and nothing else.
+ */
+export interface JiraDraftListRow {
+  draftId: string;
+  bot: string;
+  source: JiraDraftSource;
+  template: string;
+  depth: JiraDepth;
+  status: JiraDraftStatus;
+  /** {@link jiraDraftTitle} over the head of the markdown. Null on a row with
+   *  no text yet — a `failed` draft, or one still `generating`. */
+  title: string | null;
+  /** The stored retrieval verdict, unchanged — see {@link JiraDraftView}. */
+  retrievalCoverage: JiraCoverage | null;
+  /** {@link effectiveCoverage} of that verdict and the citations this draft
+   *  retained. The PAIR is what the row's notice reads; neither half alone. */
+  coverage: JiraCoverage | null;
+  /** Null on a notes-sourced draft. */
+  threadId: string | null;
+  threadName: string | null;
+  /** Null when «Lagre» was never pressed — the default listing hides those. */
+  savedAt: number | null;
+  createdAt: number;
 }
 
 // ── Request-body validation ──────────────────────────────────────────────────

@@ -185,6 +185,23 @@ mock.module("../../db/jira-drafts.ts", () => ({
     r.savedAt = Date.now();
     return jiraDraftView(r);
   },
+  /** The archive listing. Faithful to the real reader in the three things the
+   *  route depends on: the saved-only filter, newest-first, and the clamp. */
+  listJiraDrafts: async (o: { savedOnly?: boolean; limit?: number } = {}) =>
+    Array.from(rows.values())
+      .filter((r) => (o.savedOnly ? r.savedAt !== null : true))
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .slice(0, clampJiraArchiveLimit(o.limit))
+      .map((r) => {
+        const view = jiraDraftView(r);
+        return {
+          draftId: r.draftId, bot: r.botName, source: r.source, template: r.template,
+          depth: r.depth, status: r.status, title: jiraDraftTitle(r.markdown),
+          retrievalCoverage: r.retrievalCoverage, coverage: view.coverage,
+          threadId: r.threadId, threadName: r.threadName,
+          savedAt: r.savedAt, createdAt: r.createdAt,
+        };
+      }),
   listJiraDraftsForThread: async (threadId: string) => {
     if (!UUID_RE.test(threadId)) throw new Error(`invalid input syntax for type uuid: "${threadId}"`);
     return Array.from(rows.values())
@@ -265,7 +282,9 @@ const {
   JIRA_TIMEOUT_MS_BY_DEPTH,
 } = await import("./jira-sse.ts");
 const { __resetJiraKeyIndexForTest } = await import("../../jira/verify-keys.ts");
-const { effectiveCoverage } = await import("../../jira/wire.ts");
+const { clampJiraArchiveLimit, effectiveCoverage, jiraDraftTitle } = await import(
+  "../../jira/wire.ts"
+);
 const { buildDepthFence } = await import("../../jira/tool-fence.ts");
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -1336,32 +1355,117 @@ describe("the failure written to the row is generic", () => {
 
 /**
  * `GET /jira` is registered from THIS module, the way `plans-routes.ts`
- * registers `/plans` beside `/api/plans/*`. The assertion that matters is that
- * the route exists and serves the shell the bundle mounts into — a page whose
- * three column ids drifted would render blank with no error anywhere.
+ * registers `/plans` beside `/api/plans/*`. It is the read-only ARCHIVE now, and
+ * what only a route test can see is the WIRING: the page reads the DB itself
+ * (the composer read nothing), so its query params, its 404 and its
+ * never-500 contract are route-level facts.
  */
-describe("GET /jira", () => {
-  test("serves the composer shell, the nav and the client bundle", async () => {
+/** A settled row straight into the fake table — the archive reads rows, and
+ *  driving a whole generation to produce one would test the runner instead. */
+function seedRow(over: Partial<Row> & { draftId?: string } = {}): string {
+  const id = over.draftId ?? crypto.randomUUID();
+  rows.set(id, {
+    draftId: id, botName: "melosys", status: "ready", template: "bug", depth: "skisse",
+    notes: "råmateriale", extra: "", markdown: "# Arkivsak\n\ntekst", citations: [],
+    excludeDocIds: [], keyVerdicts: [], markdownFlags: [], retrievalCoverage: "answer",
+    retrievalQuestion: "q", error: null, source: "notes", threadId: null, threadName: null,
+    messageId: null, savedAt: null, createdAt: Date.now(), updatedAt: Date.now(),
+    ...over,
+  } as Row);
+  return id;
+}
+
+/** One saved row and one unsaved one — the whole point of the default list. */
+function seedTwo(): { saved: string; unsaved: string } {
+  return {
+    saved: seedRow({ markdown: "# Lagret sak\n\ntekst", savedAt: Date.now() }),
+    unsaved: seedRow({ markdown: "# Ulagret sak\n\ntekst", savedAt: null }),
+  };
+}
+
+describe("GET /jira — the archive page", () => {
+  test("serves the saved list, the nav and the client bundle", async () => {
+    const { saved, unsaved } = seedTwo();
     const res = await makeApp().request("/jira");
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/html");
     const html = await res.text();
-    for (const id of ["jcRoot", "jcLeft", "jcMid", "jcRight"]) {
-      expect(html).toContain(`id="${id}"`);
-    }
+    expect(html).toContain("Jira-arkiv");
+    expect(html).toContain(`/jira?draft=${saved}`);
+    // The default list is SAVED ONLY — an attempt nobody kept is not archive.
+    expect(html).not.toContain(`/jira?draft=${unsaved}`);
     // The nav entry lives in the Tools dropdown, not the top-level row.
     expect(html).toContain('<a href="/jira" class="nav-dropdown-item active">Jira</a>');
     // The bundle is inlined, not linked — there is no static asset route.
-    expect(html).toContain("/api/jira/templates");
+    expect(html).toContain("jaRaw");
+  });
+
+  test("`?all=1` shows the attempts the saved list hides", async () => {
+    const { saved, unsaved } = seedTwo();
+    const html = await (await makeApp().request("/jira?all=1")).text();
+    expect(html).toContain(`/jira?draft=${saved}`);
+    expect(html).toContain(`/jira?draft=${unsaved}`);
+  });
+
+  test("`?draft=` renders that draft's markdown, server-side", async () => {
+    const { saved } = seedTwo();
+    const res = await makeApp().request(`/jira?draft=${saved}`);
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    // `formatWebHtml` emits `h${level+1}`, so a `# ` heading is an h2.
+    expect(html).toContain("<h2>Lagret sak</h2>");
+    expect(html).toContain("Kopier markdown");
+  });
+
+  test("a non-uuid and an unknown uuid are both a named 404, never a 500", async () => {
+    for (const id of ["not-a-uuid", "99999999-8888-4777-8666-555555555555"]) {
+      const res = await makeApp().request(`/jira?draft=${id}`);
+      expect(res.status).toBe(404);
+      expect(await res.text()).toContain("Utkastet finnes ikke");
+    }
   });
 
   test("the page does not depend on a bot being configured", async () => {
-    // The picker resolves client-side against `/api/jira/templates`, which
-    // answers the 503. A no-bot install must still render a page that SAYS so
-    // rather than 500ing on the way in.
+    // The archive reads rows, not bots. A no-bot install must still render.
     discovered = [];
-    const res = await makeApp().request("/jira");
-    expect(res.status).toBe(200);
+    expect((await makeApp().request("/jira")).status).toBe(200);
+  });
+});
+
+describe("GET /api/jira/archive", () => {
+  test("saved-only by default, everything with `?all=1`", async () => {
+    const app = makeApp();
+    const id = seedRow({ savedAt: null });
+
+    const before = await (await app.request("/api/jira/archive")).json();
+    expect(before.savedOnly).toBe(true);
+    expect(before.drafts.map((d: { draftId: string }) => d.draftId)).not.toContain(id);
+
+    const all = await (await app.request("/api/jira/archive?all=1")).json();
+    expect(all.savedOnly).toBe(false);
+    const row = all.drafts.find((d: { draftId: string }) => d.draftId === id);
+    expect(row).toBeDefined();
+    expect(row.title).toBe("Arkivsak");
+    // The listing is the binding + the labels, never the payload the wide read
+    // serves: no markdown, no citations.
+    expect(row.markdown).toBeUndefined();
+    expect(row.citations).toBeUndefined();
+  });
+
+  test("the limit is clamped, and the response echoes what it used", async () => {
+    const res = await makeApp().request("/api/jira/archive?all=1&limit=100000");
+    const body = await res.json();
+    expect(body.limit).toBe(200);
+    expect(body.drafts.length).toBeLessThanOrEqual(200);
+    expect((await (await makeApp().request("/api/jira/archive?limit=3")).json()).limit).toBe(3);
+  });
+
+  test("no CORS headers, and never cached", async () => {
+    // A corpus-wide listing hands over every draft id at once — a strictly
+    // bigger lever than the migration-070 accepted risk of guessing one.
+    const res = await makeApp().request("/api/jira/archive");
+    expect(res.headers.get("access-control-allow-origin")).toBeNull();
+    expect(res.headers.get("cache-control")).toBe("no-store");
   });
 });
 

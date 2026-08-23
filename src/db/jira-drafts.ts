@@ -1,9 +1,16 @@
 import { getDb } from "./client.ts";
-import { effectiveCoverage, isJiraDraftSource } from "../jira/wire.ts";
+import {
+  JIRA_ARCHIVE_LIMIT_DEFAULT,
+  clampJiraArchiveLimit,
+  effectiveCoverage,
+  isJiraDraftSource,
+  jiraDraftTitle,
+} from "../jira/wire.ts";
 import type {
   JiraCitation,
   JiraCoverage,
   JiraDepth,
+  JiraDraftListRow,
   JiraDraftSource,
   JiraDraftStatus,
   JiraDraftView,
@@ -387,6 +394,115 @@ export interface JiraDraftThreadRow {
  * know it exists to say so (and to keep polling a `generating` one that has not
  * reached its turn yet).
  */
+/**
+ * How much of each row's markdown the archive listing reads.
+ *
+ * {@link jiraDraftTitle} needs a heading, and a Full-depth draft's is on line 1
+ * — but a `failed` regenerate keeps the PREVIOUS text, and a draft can open with
+ * a fenced block, so the scan needs slack. 400 chars × 200 rows is 80 KB read to
+ * produce 200 labels; the whole markdown would be tens of megabytes.
+ */
+const TITLE_SCAN_CHARS = 400;
+
+export interface ListJiraDraftsOptions {
+  /** Default true is deliberately NOT the default here — the caller says. */
+  savedOnly?: boolean;
+  /** Clamped through `clampJiraArchiveLimit`; absent ⇒ the shared default. */
+  limit?: number;
+}
+
+/**
+ * The corpus-wide archive listing — every draft, newest first.
+ *
+ * Distinct from {@link listJiraDraftsForThread}, which is the chat card's
+ * binding: that one is keyed on one thread, ordered OLDEST first, and carries
+ * three fields. This one is `/jira`'s list — every bot, both sources, ordered by
+ * `created_at DESC` on `idx_jira_drafts_created_at` (070), which the thread
+ * index cannot serve.
+ *
+ * **`savedOnly` is the whole reason `saved_at` exists.** Every 🧾 click mints a
+ * row and nothing prunes them, so the unfiltered list is mostly attempts nobody
+ * kept; the page defaults to the kept ones and the all-attempts toggle asks for
+ * the rest.
+ *
+ * Three things are computed in SQL rather than in TypeScript, all for the same
+ * reason — the alternative is shipping the wide payload to throw it away:
+ * the title scan reads only the HEAD of the markdown, and the citation/retained
+ * counts are aggregated server-side so `coverage` can be derived (the same
+ * `effectiveCoverage` pair `toView` derives, with the same "retrieval never
+ * landed ⇒ null" rule) without the 24-row hit set crossing the wire. The two
+ * JSONB reads are `jsonb_typeof`-guarded because `jsonb_array_elements` ERRORS
+ * on a non-array, which would take the whole listing down over one hand-edited
+ * row — the `Array.isArray` discipline in {@link toView}, in SQL.
+ */
+export async function listJiraDrafts(options: ListJiraDraftsOptions = {}): Promise<JiraDraftListRow[]> {
+  const sql = getDb();
+  const limit = clampJiraArchiveLimit(options.limit ?? JIRA_ARCHIVE_LIMIT_DEFAULT);
+  const savedOnly = options.savedOnly === true;
+  const rows = await sql<
+    {
+      id: string;
+      bot_name: string;
+      source: string | null;
+      template: string;
+      depth: string;
+      status: string;
+      retrieval_coverage: string | null;
+      thread_id: string | null;
+      thread_name: string | null;
+      saved_at: Date | string | null;
+      created_at: Date;
+      markdown_head: string | null;
+      citation_count: string | number;
+      retained_count: string | number;
+    }[]
+  >`
+    SELECT d.id, d.bot_name, d.source, d.template, d.depth, d.status,
+           d.retrieval_coverage, d.thread_id, t.name AS thread_name,
+           d.saved_at, d.created_at,
+           substring(d.markdown from 1 for ${TITLE_SCAN_CHARS}) AS markdown_head,
+           CASE WHEN jsonb_typeof(d.citations) = 'array'
+                THEN jsonb_array_length(d.citations) ELSE 0 END AS citation_count,
+           (SELECT count(*)
+              FROM jsonb_array_elements(
+                     CASE WHEN jsonb_typeof(d.citations) = 'array'
+                          THEN d.citations ELSE '[]'::jsonb END) AS c
+             WHERE NOT jsonb_exists(
+                     CASE WHEN jsonb_typeof(d.exclude_doc_ids) = 'array'
+                          THEN d.exclude_doc_ids ELSE '[]'::jsonb END,
+                     COALESCE(c->>'docId', ''))) AS retained_count
+      FROM jira_drafts d
+      LEFT JOIN threads t ON t.id = d.thread_id
+     WHERE ${savedOnly ? sql`d.saved_at IS NOT NULL` : sql`TRUE`}
+     ORDER BY d.created_at DESC
+     LIMIT ${limit}`;
+
+  return rows.map((r) => {
+    const retrieval = (r.retrieval_coverage as JiraCoverage | null) ?? null;
+    const citationCount = Number(r.citation_count) || 0;
+    const retained = Number(r.retained_count) || 0;
+    return {
+      draftId: String(r.id),
+      bot: r.bot_name,
+      source: isJiraDraftSource(r.source) ? r.source : "notes",
+      template: r.template,
+      depth: r.depth as JiraDepth,
+      status: r.status as JiraDraftStatus,
+      title: jiraDraftTitle(r.markdown_head),
+      retrievalCoverage: retrieval,
+      // The `toView` rule, verbatim: a draft whose retrieval has not landed yet
+      // (no verdict AND no citations) reports `null`, never `no_hits` — claiming
+      // the corpus came back empty before it was asked is a different lie.
+      coverage:
+        retrieval === null && citationCount === 0 ? null : effectiveCoverage(retrieval, retained),
+      threadId: r.thread_id ?? null,
+      threadName: r.thread_name ?? null,
+      savedAt: r.saved_at == null ? null : new Date(r.saved_at).getTime(),
+      createdAt: new Date(r.created_at).getTime(),
+    } satisfies JiraDraftListRow;
+  });
+}
+
 export async function listJiraDraftsForThread(threadId: string): Promise<JiraDraftThreadRow[]> {
   const sql = getDb();
   const rows = await sql<{ id: string; message_id: string | null; status: string }[]>`
