@@ -13,7 +13,7 @@
  * Synthetic markdown only — muninn is a public repo.
  */
 
-import { beforeAll, expect, test } from "bun:test";
+import { beforeAll, beforeEach, expect, test } from "bun:test";
 import vm from "node:vm";
 import { jiraArchiveClientScript } from "./jira-archive-client.ts";
 import {
@@ -61,13 +61,35 @@ function el(id: string, over: Partial<Stub> = {}): Stub {
   return stub;
 }
 
-beforeAll(async () => {
-  const raw = el(JA_RAW_ID, { hidden: true, value: "## Syntetisk\n\nutkast" });
-  els = {
+/** A fresh page's worth of stubs — the copy test hides panes and the fallback
+ *  test monkeypatches `focus`/`select`, so the set is rebuilt, not patched. */
+function freshEls(): Record<string, Stub> {
+  return {
     [JA_PREVIEW_ID]: el(JA_PREVIEW_ID),
-    [JA_RAW_ID]: raw,
+    [JA_RAW_ID]: el(JA_RAW_ID, { hidden: true, value: "## Syntetisk\n\nutkast" }),
     [JA_COPY_ID]: el(JA_COPY_ID, { textContent: JA_COPY_LABEL }),
   };
+}
+
+/**
+ * Every test starts on a fresh page.
+ *
+ * The bundle is evaluated ONCE (its `restoreTimer` closure is the thing under
+ * test), but the DOM stubs and the three module-level spies are not shared
+ * state to inherit: the supersede test used to read
+ * `[...timers.keys()][0]` out of whatever the copy test above it had left
+ * pending, so running it alone threw. A stale id still held by the closure is
+ * harmless — `clearTimeout` on an id no longer in the map is a no-op.
+ */
+beforeEach(() => {
+  timers.clear();
+  copied = [];
+  clipboardFails = false;
+  els = freshEls();
+});
+
+beforeAll(async () => {
+  els = freshEls();
   const root = {
     id: JA_ROOT_ID,
     addEventListener(evt: string, fn: (ev: { target: Stub }) => void) {
@@ -120,7 +142,14 @@ test("copying puts the RAW markdown on the clipboard and confirms on the button"
 });
 
 test("a second copy SUPERSEDES the first restore timer instead of racing it", async () => {
+  // Both copies are this test's own — reading the first timer out of the test
+  // above made the whole thing depend on file order (`-t "supersedes"` threw).
+  clickRoot({ target: els[JA_COPY_ID]! });
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(timers.size).toBe(1);
   const firstTimer = [...timers.keys()][0]!;
+
   clickRoot({ target: els[JA_COPY_ID]! });
   await Promise.resolve();
   await Promise.resolve();
@@ -139,7 +168,6 @@ test("a second copy SUPERSEDES the first restore timer instead of racing it", as
 
 test("no clipboard permission falls back to the raw pane, selected", async () => {
   clipboardFails = true;
-  copied = [];
   const raw = els[JA_RAW_ID]!;
   let focused = false;
   let selected = false;
@@ -155,5 +183,4 @@ test("no clipboard permission falls back to the raw pane, selected", async () =>
   expect(focused).toBe(true);
   expect(selected).toBe(true);
   expect(els[JA_COPY_ID]!.textContent).toBe("Kopier selv (merket)");
-  clipboardFails = false;
 });

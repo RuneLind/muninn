@@ -139,6 +139,23 @@ describe("jiraDraftTitle — hygiene", () => {
     expect(jiraDraftTitle("> # Sitert tittel\n\nprosa")).toBe("Sitert tittel");
   });
 
+  test("a NESTED quote strips as one marker, and a space-less one still doesn't", () => {
+    // `^>(?:\s+|$)` never matched a run: the char after the first `>` is another
+    // `>`, so ">> dobbeltsitert" kept its markers and became the row's name.
+    expect(jiraDraftTitle(">> dobbeltsitert")).toBe("dobbeltsitert");
+    expect(jiraDraftTitle(">>> tre nivåer")).toBe("tre nivåer");
+    // The F2 policy is unchanged: no whitespace behind the run, no strip.
+    expect(jiraDraftTitle(">>x")).toBe(">>x");
+    expect(jiraDraftTitle(">>=100 saker feiler")).toBe(">>=100 saker feiler");
+  });
+
+  test("a deeply SPACED nesting unwinds instead of stopping at the cap", () => {
+    // One pass per level, so the old 4-iteration bound left the fifth `>` on the
+    // line — it then failed the heading test and titled the row "## Dypt".
+    expect(jiraDraftTitle("> > > > > ## Dypt")).toBe("Dypt");
+    expect(jiraDraftTitle("> > > > > > > > > > sitert prosa")).toBe("sitert prosa");
+  });
+
   test("the clip never cuts through a surrogate pair", () => {
     // `.slice(0, 119)` on a title whose 119th unit is the high half of an astral
     // pair stores a lone surrogate — a replacement character in the list row.

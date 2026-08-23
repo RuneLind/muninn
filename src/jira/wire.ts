@@ -273,15 +273,31 @@ function titleScanHead(text: string): string {
 const BLOCK_MARKER_RE =
   /^(?:[-*+](?:\s+|$)(?:\[[ xX]\](?:\s+|$))?|\d+[.)](?:\s+|$)|>(?:\s+|$)|\|(?:\s+|$))/;
 
-/** The quote half of {@link BLOCK_MARKER_RE}, applied BEFORE a line is tested
- *  for a heading — see {@link jiraDraftTitle}. Same shape, so the two passes
- *  cannot disagree about what a quote marker is. */
-const QUOTE_MARKER_RE = /^>(?:\s+|$)/;
+/**
+ * The quote half of {@link BLOCK_MARKER_RE}, applied BEFORE a line is tested for
+ * a heading — see {@link jiraDraftTitle}.
+ *
+ * It keeps that regex's **whitespace-or-EOL** requirement, which is the whole of
+ * the F2 policy: a space-less `">=100 saker feiler"` must not lose its `>`. What
+ * it adds is a RUN — `">> dobbeltsitert"` is one nested quote, and `^>(?:\s+|$)`
+ * never matches it (the char after the first `>` is another `>`), so a nested
+ * quote stopped stripping and titled the row `">> dobbeltsitert"`. `">>x"` still
+ * matches nothing, since no prefix of the run is followed by whitespace.
+ */
+const QUOTE_MARKER_RE = /^>{1,8}(?:\s+|$)/;
 
-/** Leading `> ` runs only — bounded exactly like {@link stripBlockMarkers}. */
+/**
+ * Leading quote-marker runs only.
+ *
+ * Loops while the line keeps shrinking rather than for a fixed few passes: a
+ * SPACED nesting (`"> > > > > ## Dypt"`) costs one pass per level, and the old
+ * 4-iteration cap left the fifth `>` on the line, which then failed the heading
+ * test and titled the row `"## Dypt"`. The cap is a termination guard, not a
+ * nesting limit — each pass either removes a marker or breaks.
+ */
 function stripQuoteMarkers(text: string): string {
   let out = text.trimStart();
-  for (let i = 0; i < 4; i++) {
+  for (let i = 0; i < 32; i++) {
     const next = out.replace(QUOTE_MARKER_RE, "");
     if (next === out) break;
     out = next.trimStart();

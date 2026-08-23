@@ -509,6 +509,11 @@ export async function listJiraDrafts(
       template: r.template,
       depth: r.depth as JiraDepth,
       status: r.status as JiraDraftStatus,
+      // A `failed` row is still named after the text it kept — deliberately NOT
+      // `deriveDraftHeading`, whose «Mislykket utkast» exists because the DRAFT
+      // PAGE refuses to show that text (see its docstring's heading-end
+      // exception). A list of identical failure labels is unreadable, and the
+      // row's own status chip already says it failed.
       title: jiraDraftTitle(r.markdown_head),
       retrievalCoverage: retrieval,
       // The `toView` rule, verbatim: a draft whose retrieval has not landed yet

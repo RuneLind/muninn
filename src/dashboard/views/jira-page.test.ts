@@ -78,6 +78,13 @@ const generatingPage = await renderJiraPage({
   kind: "draft",
   draft: { ...draftView, status: "generating", markdown: null },
 });
+/** A REGENERATE in flight — `startJiraDraftRun` leaves `markdown` alone, so the
+ *  row is `generating` and still carries the previous turn's task. This is the
+ *  one page that renders the full draft AND refreshes itself. */
+const regeneratingPage = await renderJiraPage({
+  kind: "draft",
+  draft: { ...draftView, status: "generating" },
+});
 /** A failed REGENERATE — the row keeps the previous turn's text, and the page
  *  refuses to show it. Neither the heading nor the bundle may forget that. */
 const failedPage = await renderJiraPage({
@@ -111,6 +118,18 @@ describe("the shell", () => {
       expect(page).not.toContain("clipboard");
       expect(page).not.toContain(JA_RAW_ID);
     }
+  });
+
+  test("a REGENERATE in flight keeps its text, its controls AND the refresh", () => {
+    // The predicate reads markdown, not status: a `generating` row that kept the
+    // previous turn's task is fully readable and fully copyable while the next
+    // one is written. Gating any of it on the status would strip the switch and
+    // the copy button off exactly the page that still has something to copy.
+    expect(regeneratingPage).toContain("clipboard");
+    expect(regeneratingPage).toContain(JA_RAW_ID);
+    expect(regeneratingPage).toContain(`id="${JA_COPY_ID}"`);
+    expect(regeneratingPage).toContain("<h2>Feil i beregning</h2>");
+    expect(regeneratingPage).toContain('<meta http-equiv="refresh" content="5">');
   });
 
   test("the LIST page ships no bundle — it has no interactive target", () => {

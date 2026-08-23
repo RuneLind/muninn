@@ -571,8 +571,15 @@ export function deriveDraftHeading(draft: Pick<JiraDraftView, "markdown" | "stat
  * ONE predicate with two consumers — the body branch in
  * {@link jiraDraftViewHtml} and `renderJiraPage`, which builds and inlines the
  * ~3 KB client bundle. Split, they drifted: the page shipped the bundle to
- * every draft view, including the `failed` and `generating` ones the body
- * branch renders as a single sentence with nothing to switch or copy.
+ * every draft view, including the ones the body branch renders as a single
+ * sentence with nothing to switch or copy.
+ *
+ * **It reads the TEXT, not the status.** A `failed` row is refused however much
+ * markdown it kept (see {@link deriveDraftHeading}), and so is any row with none
+ * — but a `generating` row is not: `startJiraDraftRun` leaves `markdown` alone,
+ * so a regenerate in flight still carries the previous turn's task, and that
+ * page renders it in full with the switch and the copy button, under the
+ * 5-second meta-refresh that will replace it.
  */
 export function jiraDraftHasControls(
   draft: Pick<JiraDraftView, "markdown" | "status">,
