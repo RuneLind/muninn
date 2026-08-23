@@ -109,6 +109,32 @@ export async function saveJiraDraftRetrieval(
      WHERE id = ${id}`;
 }
 
+/**
+ * Point a FIRST-DRAFT row at the assistant message its turn just produced —
+ * before the seeding, the finalize and both post-passes.
+ *
+ * The chat card is bound to a bubble by `message_id`, and everything between the
+ * turn and {@link finishJiraDraft} can fail: an empty reply, a huginn timeout in
+ * key verification, a throw. Stamped only at finish time, all of those left a row
+ * the card could never reach — a failure the reader could see nowhere. Stamped
+ * here, the only unmapped rows left are "the turn itself failed" (there is no
+ * message) and a throw before the turn ran.
+ *
+ * **Never on a REGENERATE.** There, `finishJiraDraft` writes `message_id`
+ * together with `markdown` deliberately — the row already carries the PREVIOUS
+ * turn's text, and an early stamp on a run that then failed would leave it
+ * pointing at the new message while holding the old task. `failJiraDraft`
+ * restores `exclude_doc_ids` and nothing else, so nothing would put it back.
+ */
+export async function setJiraDraftMessageId(id: string, messageId: string): Promise<void> {
+  const sql = getDb();
+  await sql`
+    UPDATE jira_drafts
+       SET message_id = ${messageId}::uuid,
+           updated_at = now()
+     WHERE id = ${id}`;
+}
+
 export interface FinishJiraDraftInput {
   markdown: string;
   keyVerdicts: JiraKeyVerdict[];
@@ -116,12 +142,14 @@ export interface FinishJiraDraftInput {
   /**
    * The assistant message this draft's markdown came from — thread path only.
    *
-   * Written in the SAME statement as the markdown, deliberately: a regenerate is
-   * another thread turn, so a separate write could leave the row pointing at the
-   * previous turn while carrying this one's text — a «Juster i samtalen» link to
-   * the wrong message. Absent on the notes path, and an absent value LEAVES the
-   * column alone rather than nulling it (a `PUT` edit does not un-anchor a draft
-   * from the turn that produced it).
+   * Written in the SAME statement as the markdown on a REGENERATE, deliberately:
+   * a regenerate is another thread turn, so a separate write could leave the row
+   * pointing at the previous turn while carrying this one's text — a «Juster i
+   * samtalen» link to the wrong message. A FIRST draft stamps it earlier through
+   * {@link setJiraDraftMessageId} (the card has to be reachable on a run that
+   * fails after the turn); writing it again here is idempotent. Absent on the
+   * notes path, and an absent value LEAVES the column alone rather than nulling
+   * it (a `PUT` edit does not un-anchor a draft from the turn that produced it).
    */
   messageId?: string;
 }
@@ -215,6 +243,7 @@ interface JiraDraftRow {
   source: string | null;
   thread_id: string | null;
   message_id: string | null;
+  saved_at: Date | string | null;
   /** Joined from `threads`, never stored — see `JiraDraftView.threadName`. */
   thread_name?: string | null;
   /** Joined from `threads` too — see `JiraDraftView.threadUserId`. */
@@ -269,6 +298,10 @@ function toView(row: JiraDraftRow): JiraDraftView {
     threadName: row.thread_name ?? null,
     threadUserId: row.thread_user_id ?? null,
     messageId: row.message_id ?? null,
+    // Nullable, so it cannot go through `new Date(...)` unconditionally: `new
+    // Date(null)` is the epoch, which would report every unsaved draft as saved
+    // on 1970-01-01 — a truthy timestamp the card would render as «Lagret».
+    savedAt: row.saved_at == null ? null : new Date(row.saved_at).getTime(),
     // `new Date(...)` like every other db module: the driver hands back a string
     // for these columns in some configurations, and `.getTime()` on one throws.
     createdAt: new Date(row.created_at).getTime(),
@@ -297,4 +330,73 @@ export async function getJiraDraft(id: string): Promise<JiraDraftView | null> {
     LEFT JOIN threads t ON t.id = d.thread_id
     WHERE d.id = ${id}`;
   return rows[0] ? toView(rows[0]) : null;
+}
+
+/**
+ * Mark a draft as KEPT — the chat card's «Lagre».
+ *
+ * Idempotent by construction: the timestamp is overwritten, so a second press
+ * simply re-dates the decision rather than erroring or toggling it off. There is
+ * no un-save, deliberately — the card offers no affordance for one, and a draft
+ * the reader kept once is not made less kept by a stray click.
+ *
+ * Returns the full view so the card can adopt exactly what the row now holds
+ * (the `PUT` precedent), rather than optimistically drawing a state the server
+ * might not have reached — or **null when nothing was kept**, which is both
+ * "no such draft" and "not finished".
+ */
+export async function saveJiraDraft(id: string): Promise<JiraDraftView | null> {
+  const sql = getDb();
+  const rows = await sql`
+    UPDATE jira_drafts
+       SET saved_at = now(), updated_at = now()
+     WHERE id = ${id}
+       AND status = 'ready'
+    RETURNING id`;
+  // No row updated: either the id is unknown or the draft is not FINISHED. The
+  // status gate rides in the UPDATE rather than a read-then-write, so a run that
+  // finishes mid-request cannot slip between the check and the stamp — and the
+  // route tells the two cases apart by re-reading (404 vs 409).
+  if (rows.length === 0) return null;
+  // Re-read rather than `RETURNING *`: the view needs the `threads` join, and one
+  // extra primary-key lookup is cheaper than a second, drifting row→view mapping.
+  return getJiraDraft(id);
+}
+
+/** One row of `GET /api/jira/drafts?thread=<id>` — the card's binding listing. */
+export interface JiraDraftThreadRow {
+  draftId: string;
+  /** The assistant message the card hangs under. Null until the turn produced one. */
+  messageId: string | null;
+  status: JiraDraftStatus;
+}
+
+/**
+ * Every draft on one thread, oldest first.
+ *
+ * **Deliberately three fields and no content.** The chat asks for this on every
+ * thread load, every thread switch and every `response_meta`, and it is served
+ * with no CORS headers precisely because it hands over every draft id on a
+ * thread — a listing is a much better lever for a guessing attacker than the
+ * single CORS-open `GET /api/jira/draft/:id` it feeds. Keeping the payload to
+ * the binding means the wide read stays the per-card one, which the client makes
+ * ONCE per draft on adopt.
+ *
+ * Rows with no `message_id` ride along rather than being filtered out: an
+ * unmapped row is exactly what the card cannot render, and the client needs to
+ * know it exists to say so (and to keep polling a `generating` one that has not
+ * reached its turn yet).
+ */
+export async function listJiraDraftsForThread(threadId: string): Promise<JiraDraftThreadRow[]> {
+  const sql = getDb();
+  const rows = await sql<{ id: string; message_id: string | null; status: string }[]>`
+    SELECT id, message_id, status
+    FROM jira_drafts
+    WHERE thread_id = ${threadId}
+    ORDER BY created_at ASC`;
+  return rows.map((r) => ({
+    draftId: String(r.id),
+    messageId: r.message_id ?? null,
+    status: r.status as JiraDraftStatus,
+  }));
 }

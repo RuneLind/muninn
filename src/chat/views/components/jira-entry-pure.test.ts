@@ -3,12 +3,13 @@ import {
   JE_BTN_ATTR,
   JE_CANCEL_BUSY_TITLE,
   JE_DEFAULT_DEPTH,
-  JE_POPUP_BLOCKED_MESSAGE,
+  JE_DRAFTING_ATTR,
+  JE_DRAFTING_MESSAGE,
   initialJiraEntryState,
-  jiraDraftUrl,
   jiraEntryButtonHtml,
   jiraEntryCanSubmit,
   jiraEntryDraftBody,
+  jiraEntryDraftingHtml,
   jiraEntryFallbackMessage,
   jiraEntryOutcome,
   jiraEntryPanelHtml,
@@ -91,11 +92,12 @@ describe("jiraEntryCanSubmit", () => {
 });
 
 describe("jiraEntryOutcome", () => {
-  test("200 with a draft id opens the composer", () => {
+  // No `url` any more: the draft's destination is the conversation, and the id
+  // goes to the card poller rather than into a tab's location.
+  test("200 with a draft id hands the id back and nothing else", () => {
     expect(jiraEntryOutcome(200, { draftId: "abc", status: "generating" })).toEqual({
       ok: true,
       draftId: "abc",
-      url: "/jira?draft=abc",
     });
   });
 
@@ -129,12 +131,6 @@ describe("jiraEntryOutcome", () => {
     const msgs = [0, 400, 404, 409, 415, 503, 500].map(jiraEntryFallbackMessage);
     expect(new Set(msgs).size).toBe(msgs.length);
     for (const m of msgs) expect(m.length).toBeGreaterThan(10);
-  });
-});
-
-describe("jiraDraftUrl", () => {
-  test("encodes the id", () => {
-    expect(jiraDraftUrl("a b/c")).toBe("/jira?draft=a%20b%2Fc");
   });
 });
 
@@ -195,21 +191,28 @@ describe("markup", () => {
     expect(jiraEntryPanelHtml({ ...initialJiraEntryState(), loading: false })).toContain("ingen maler");
   });
 
-  test("a blocked popup renders a real link to the started draft", () => {
-    const html = jiraEntryPanelHtml({
-      ...initialJiraEntryState(),
-      loading: false,
-      template: "bug",
-      draftUrl: "/jira?draft=abc",
-      message: JE_POPUP_BLOCKED_MESSAGE,
-    });
-    expect(html).toContain('href="/jira?draft=abc"');
-    expect(html).toContain("Åpne utkastet");
+  test("the note names the card, not a second page", () => {
+    const html = jiraEntryPanelHtml({ ...initialJiraEntryState(), loading: false, template: "bug" });
+    expect(html).toContain("kort under svaret");
+    // Nothing opens a tab any more, so nothing may promise one.
+    expect(html).not.toContain("Åpne utkastet");
   });
 
   test("the message line is always a node so a refusal has somewhere to land", () => {
     const html = jiraEntryPanelHtml({ ...initialJiraEntryState(), loading: false, template: "bug" });
     expect(html).toContain('class="je-msg" hidden');
+  });
+
+  test("no draft-url branch survives — the panel has ONE message line", () => {
+    const html = jiraEntryPanelHtml({
+      ...initialJiraEntryState(),
+      loading: false,
+      template: "bug",
+      message: "noe gikk galt",
+      messageTone: "err",
+    });
+    expect(html).toContain("je-msg-err");
+    expect(html).not.toContain("<a ");
   });
 
   test("the reader's steer is escaped back into the field", () => {
@@ -221,5 +224,30 @@ describe("markup", () => {
     });
     expect(html).not.toContain("<img");
     expect(html).toContain("&quot;&gt;&lt;img");
+  });
+});
+
+/**
+ * The placeholder that stands between the 200 and the card.
+ *
+ * Keyed on the DRAFT id because the card lands under a different bubble — the
+ * new turn's — so `attachJiraCard` cannot remove it by position.
+ */
+describe("jiraEntryDraftingHtml", () => {
+  test("carries the draft id so the card can clear it by key", () => {
+    const html = jiraEntryDraftingHtml("d-9");
+    expect(html).toContain(`${JE_DRAFTING_ATTR}="d-9"`);
+    expect(html).toContain(JE_DRAFTING_MESSAGE);
+  });
+
+  test("escapes the id — it is echoed into an attribute", () => {
+    expect(jiraEntryDraftingHtml('"><img onerror=x>')).not.toContain("<img");
+  });
+
+  test("carries the archive link the docstring promises — a 200 means work is RUNNING", () => {
+    // The note is the only pointer between the click and the card, and the card
+    // may never come (a failed run, a bubble outside the replayed window). The
+    // link is what the reader is left with when it does not.
+    expect(jiraEntryDraftingHtml("d-9")).toContain('href="/jira?draft=d-9"');
   });
 });

@@ -829,12 +829,23 @@ CREATE TABLE jira_drafts (
   source             TEXT NOT NULL DEFAULT 'notes',
   thread_id          UUID,        -- the chat thread, on source = 'thread'
   message_id         UUID,        -- the assistant message that IS the draft
+  -- When the reader pressed «Lagre» on the chat card. Null ⇒ never saved. Not
+  -- `updated_at` (the runner moves that on every write) and not `status` (that
+  -- is about the generation). See migration 072.
+  saved_at           TIMESTAMPTZ,
   created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX idx_jira_drafts_created_at
   ON jira_drafts (created_at DESC);
+
+-- The chat card's listing: every draft on one thread, served OLDEST first —
+-- `listJiraDraftsForThread` is `ORDER BY created_at ASC`, which this index serves
+-- by a backward scan (`GET /api/jira/drafts?thread=<id>`, hit on every thread
+-- load + response_meta).
+CREATE INDEX idx_jira_drafts_thread
+  ON jira_drafts (thread_id, created_at DESC);
 
 -- ============================================================================
 -- Schema migrations: tracks which migrations have been applied

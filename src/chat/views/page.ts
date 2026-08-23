@@ -11,18 +11,22 @@ import { inspectorPanelClientScript } from "./components/inspector-panel-client.
 import { streamingUiScript } from "./components/streaming-ui.ts";
 import { jiraEntryScript } from "./components/jira-entry.ts";
 import { jiraEntryClientScript } from "./components/jira-entry-client.ts";
+import { jiraCardScript } from "./components/jira-card.ts";
+import { jiraCardClientScript } from "./components/jira-card-client.ts";
 import { connectorSelectorScript } from "./components/connector-selector.ts";
 import { researchCardScript } from "./components/research-card.ts";
 import { threadManagerScript } from "./components/thread-manager.ts";
 import { knowledgeLinksScript } from "./components/knowledge-links.ts";
 
 export async function renderChatPage(): Promise<string> {
-  const [webFormatScript, helpersScript, inspectorScript, jiraEntryBundle] = await Promise.all([
-    webFormatClientScript(),
-    helpersClientScript(),
-    inspectorPanelClientScript(),
-    jiraEntryClientScript(),
-  ]);
+  const [webFormatScript, helpersScript, inspectorScript, jiraEntryBundle, jiraCardBundle] =
+    await Promise.all([
+      webFormatClientScript(),
+      helpersClientScript(),
+      inspectorPanelClientScript(),
+      jiraEntryClientScript(),
+      jiraCardClientScript(),
+    ]);
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -142,6 +146,7 @@ export async function renderChatPage(): Promise<string> {
     ${webFormatScript}
     ${inspectorScript}
     ${jiraEntryBundle}
+    ${jiraCardBundle}
     ${CHAT_SSE_SCRIPT}
     ${CHAT_SCRIPT}
   </script>
@@ -314,6 +319,9 @@ const CHAT_SCRIPT = `
 
   // ── «Lag Jira-sak» entry (from jira-entry.ts) ──
   ${jiraEntryScript()}
+
+  // ── The Jira draft card (from jira-card.ts) ──
+  ${jiraCardScript()}
 
   // ── Connector selector functions (from connector-selector.ts) ──
   ${connectorSelectorScript()}
@@ -503,6 +511,11 @@ const CHAT_SCRIPT = `
     // Reset streaming state so stale text doesn't leak into next thread
     streamingRawText = '';
     streamingRafPending = false;
+    // The message list is gone, so every draft card went with it. A bot or user
+    // switch comes through HERE and not through loadThreadMessages, and without
+    // this the records outlived their DOM and their timers kept polling.
+    resetJiraCards();
+    closeJiraEntry(); // same seam as loadThreadMessages: the picker's thread is gone too
   }
 
   // WebSocket connection
@@ -808,9 +821,14 @@ const CHAT_SCRIPT = `
     // The «Lag Jira-sak» picker belongs to ONE message in the thread being left,
     // and the message list below is about to be replaced wholesale — leaving the
     // panel's state standing pointed it at a thread the reader can no longer see.
-    // (An in-flight POST is unaffected: its 200 navigates the pre-opened tab
-    // before it looks at this state at all.)
+    // (An in-flight POST is unaffected: its 200 hands the draft id to the card
+    // poller and drops its note in a row captured as a local at submit time,
+    // neither of which reads this state.)
     closeJiraEntry();
+    // Every draft card and every poll timer belongs to the thread being left.
+    // The nodes are about to be replaced wholesale, and a timer that outlived
+    // the switch would be polling a conversation nobody is reading.
+    resetJiraCards();
     // Reset streaming, research, and tool activity state when switching threads
     streamingRawText = '';
     streamingRafPending = false;
@@ -859,6 +877,11 @@ const CHAT_SCRIPT = `
       if (isResearchThread) {
         fetchDevRun(function() { renderRunAffordance(); });
       }
+      // Jira draft cards, AFTER the replay: every bubble now carries the
+      // data-message-id attachFeedbackControls stamps, which is what the card
+      // binds to. This is the reload / second-tab / switch-back path — the
+      // listing is the authority, not "this tab clicked".
+      refreshJiraCards();
       scrollToBottom();
     } catch {
       chatMessages.innerHTML = '<div class="empty-state">Failed to load messages</div>';
@@ -985,6 +1008,12 @@ const CHAT_SCRIPT = `
 
     if (msg.sender === 'bot') {
       div.className = 'msg msg-bot';
+      // The id the bubble was rendered with, stamped so response_meta can
+      // resolve THIS node instead of "the last .msg-bot". On a live turn that is
+      // the server's throwaway client id (the DB row does not exist yet and
+      // arrives on the meta event); on replay it is the row id itself, which no
+      // meta ever names — harmless, and it keeps one rule for both paths.
+      if (msg.id) div.dataset.clientId = msg.id;
       body.className = 'msg-body' + platformClass;
       if (isWeb || isTg) {
         body.innerHTML = sanitizeHtml(msg.text, isWeb);

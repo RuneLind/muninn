@@ -2,10 +2,12 @@
  * «🧾 Lag Jira-sak» — the web chat's entry point into the Jira composer, PURE half.
  *
  * The task is discussed in the melosys thread first; the draft is a TURN in that
- * conversation (`POST /api/jira/draft/from-thread`), and `/jira` is only the
- * finisher. This module holds every decision that half of the feature makes —
- * whether the control renders at all, what body the POST carries, and what a
- * non-200 means — so all of it is unit-testable without a browser.
+ * conversation (`POST /api/jira/draft/from-thread`), and the finalized text comes
+ * back as a CARD under the reply — `jira-card-pure.ts`. This module holds every
+ * decision the ENTRY half makes — whether the control renders at all, what body
+ * the POST carries, and what a non-200 means — so all of it is unit-testable
+ * without a browser. It no longer opens anything: there is no tab, no second page
+ * and no popup to be blocked, because the draft never leaves the conversation.
  *
  * **Everything it imports must be dependency-free.** It is bundled into the chat
  * page (`jira-entry-browser.ts` → `jira-entry-client.ts`), the
@@ -15,6 +17,10 @@
  */
 
 import { escHtml as esc } from "../../../dashboard/views/components/escape.ts";
+// The card's own archive URL — one spelling of `/jira?draft=<id>`, not two.
+// `jira-card-pure.ts` is a leaf like this module, so the browser bundle stays
+// dependency-free either way.
+import { jiraCardArchiveUrl } from "./jira-card-pure.ts";
 import { JIRA_DEPTHS, JIRA_EXTRA_MAX, type JiraDepth } from "../../../jira/wire.ts";
 
 // ── Ids and hooks ────────────────────────────────────────────────────────────
@@ -72,9 +78,6 @@ export interface JiraEntryState {
   /** The one status line under the buttons. */
   message?: string;
   messageTone?: "err" | "ok";
-  /** Set when the draft started but the browser refused the new tab, so the
-   *  reader still has a way to reach it. */
-  draftUrl?: string;
 }
 
 export function initialJiraEntryState(): JiraEntryState {
@@ -141,13 +144,8 @@ export function jiraEntryCanSubmit(state: JiraEntryState): boolean {
   return state.extra.length <= JIRA_EXTRA_MAX;
 }
 
-/** Where a started draft is finished. */
-export function jiraDraftUrl(draftId: string): string {
-  return `/jira?draft=${encodeURIComponent(draftId)}`;
-}
-
 export type JiraEntryOutcome =
-  | { ok: true; draftId: string; url: string }
+  | { ok: true; draftId: string }
   | { ok: false; message: string };
 
 /**
@@ -168,7 +166,7 @@ export function jiraEntryOutcome(status: number, body: unknown): JiraEntryOutcom
   const rec = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
   if (status === 200) {
     const draftId = typeof rec.draftId === "string" ? rec.draftId.trim() : "";
-    if (draftId) return { ok: true, draftId, url: jiraDraftUrl(draftId) };
+    if (draftId) return { ok: true, draftId };
     return { ok: false, message: "Serveren svarte uten utkast-id — ingenting ble startet." };
   }
   const served = typeof rec.error === "string" ? rec.error.trim() : "";
@@ -186,25 +184,44 @@ export function jiraEntryFallbackMessage(status: number): string {
   return `Utkastet kunne ikke startes (HTTP ${status}).`;
 }
 
-/** Said when the draft started but the browser blocked the new tab. */
-export const JE_POPUP_BLOCKED_MESSAGE = "Utkastet er startet — nettleseren blokkerte den nye fanen.";
+/**
+ * `data-je-drafting="<draftId>"` on the placeholder note.
+ *
+ * The draft turn takes 60–600 s, and until it lands there is nothing to show but
+ * the conversation's own streaming reply — so the row the control was clicked in
+ * says what is happening. Keyed on the DRAFT id because the card that replaces it
+ * lands under a DIFFERENT bubble (the new turn's), so "remove the note next to
+ * me" is not a rule the card can follow; `attachJiraCard` clears it by id.
+ */
+export const JE_DRAFTING_ATTR = "data-je-drafting";
+
+/** Said between the 200 and the card appearing. */
+export const JE_DRAFTING_MESSAGE = "Utkastet skrives i samtalen …";
 
 /**
- * The «… Åpne utkastet →» link for a draft that STARTED but has no tab.
+ * The placeholder note for a draft that STARTED.
  *
- * ONE spelling, because it is rendered into two different containers: the panel's
- * own message line, and — when the panel is already gone — the feedback row the
- * control was clicked in. That second case is the one where both fallbacks had
- * failed at once: no tab to navigate (the popup was blocked) and no panel to
- * render into (a thread switch tore it down), leaving the only pointer to a real
- * draft on the floor and the reader's next attempt 409ing about work never shown.
+ * There is no tab and no second page any more: the draft is a turn in this
+ * conversation and its finalized text arrives as a card under the reply. The
+ * archive link rides along regardless, because a 200 means the turn is RUNNING —
+ * a row exists, a message is coming and the thread's flight slot is held — and
+ * the reader must never be left without a pointer to work that is happening.
+ *
+ * That link is the note's whole reason to outlive the click: the card layer
+ * clears the note the moment it can say something better (the card lands, or the
+ * draft failed / gave up / has no reachable bubble and the thread-level notice
+ * takes over). Until then this is the only pointer there is.
  */
-export function jiraEntryDraftLinkHtml(url: string, message: string = JE_POPUP_BLOCKED_MESSAGE): string {
+export function jiraEntryDraftingHtml(draftId: string): string {
   return (
-    `<a class="je-msg je-msg-ok" href="${esc(url)}" target="_blank" rel="noopener">` +
-    `${esc(message)} Åpne utkastet →</a>`
+    `<span class="je-msg je-msg-ok" ${JE_DRAFTING_ATTR}="${esc(draftId)}">${esc(JE_DRAFTING_MESSAGE)} ` +
+    `<a href="${esc(jiraCardArchiveUrl(draftId))}" target="_blank" rel="noopener">${esc(JE_DRAFTING_LINK_LABEL)}</a>` +
+    `</span>`
   );
 }
+
+/** The archive pointer inside {@link jiraEntryDraftingHtml}. */
+export const JE_DRAFTING_LINK_LABEL = "Åpne i /jira";
 
 /**
  * Why **Avbryt** is dead while a POST is on the wire.
@@ -252,10 +269,9 @@ export function jiraEntryPanelHtml(state: JiraEntryState): string {
   // The message line is ALWAYS a node: a refusal is written into it without a
   // re-render (the reader may be mid-word in the steer field), and a
   // conditionally rendered line leaves that write with nothing to land in.
-  const msg = state.draftUrl
-    ? jiraEntryDraftLinkHtml(state.draftUrl, state.message ?? JE_POPUP_BLOCKED_MESSAGE)
-    : `<span class="je-msg${state.messageTone === "err" ? " je-msg-err" : state.messageTone === "ok" ? " je-msg-ok" : ""}"` +
-      `${state.message ? "" : " hidden"}>${esc(state.message ?? "")}</span>`;
+  const msg =
+    `<span class="je-msg${state.messageTone === "err" ? " je-msg-err" : state.messageTone === "ok" ? " je-msg-ok" : ""}"` +
+    `${state.message ? "" : " hidden"}>${esc(state.message ?? "")}</span>`;
 
   return `<div class="je-panel" id="${JE_PANEL_ID}">
     <div class="je-row">
@@ -273,7 +289,7 @@ export function jiraEntryPanelHtml(state: JiraEntryState): string {
       <button type="button" id="${JE_CANCEL_ID}" class="je-secondary"${
         state.sending ? ` disabled title="${esc(JE_CANCEL_BUSY_TITLE)}"` : ""
       }>Avbryt</button>
-      <span class="je-note">Utkastet skrives som en tur i denne samtalen, og åpnes i <code>/jira</code>.</span>
+      <span class="je-note">Utkastet skrives som en tur i denne samtalen, og vises som et kort under svaret.</span>
     </div>
     <div id="${JE_MSG_ID}" class="je-msgwrap">${msg}</div>
     ${state.templatesError ? `<span class="je-msg je-msg-err">${esc(state.templatesError)}</span>` : ""}

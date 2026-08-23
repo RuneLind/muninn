@@ -61,6 +61,31 @@ export const JIRA_EXTRA_MAX = 2_000;
 export const JIRA_MARKDOWN_MAX = 100_000;
 
 /**
+ * How often a client polls `GET /api/jira/draft/:id`.
+ *
+ * Polling, NOT a stream re-attach: there is nothing to attach to (the only SSE
+ * endpoint STARTS a generation) and a re-POST of identical content would hit the
+ * single-flight 409 — which is exactly this case. It is also the only mechanism
+ * that survives the ordinary events: a reload, a second tab, switching away and
+ * back while a 60–600 s turn runs.
+ *
+ * Lives HERE rather than beside `/jira`'s own page bundle because BOTH readers
+ * poll the same endpoint on the same contract — the composer page and the chat's
+ * draft card — and two copies of a cadence is two things to keep in step.
+ */
+export const JIRA_POLL_INTERVAL_MS = 2_500;
+
+/**
+ * When a poller gives up.
+ *
+ * Sized off the server's own ceiling: `Full` is budgeted 600 s and the
+ * single-flight slot outlives it by `JIRA_SLOT_SLACK_MS` (180 s), so a draft that
+ * is still `generating` at 13 min is a draft nothing is working on. Giving up
+ * says so rather than polling a dead row forever.
+ */
+export const JIRA_POLL_MAX_MS = 13 * 60_000;
+
+/**
  * Retrieval coverage verdict — `research/answer.ts`'s `Coverage` plus one value
  * of this feature's own, so the browser half never imports the research layer.
  *
@@ -344,6 +369,16 @@ export interface JiraDraftView {
    * same thread. Null on a notes-sourced draft.
    */
   messageId: string | null;
+  /**
+   * When the reader pressed «Lagre» on the chat card — null when they never did.
+   *
+   * A timestamp rather than a boolean because it dates the decision, and a
+   * column of its own rather than a reading of `updated_at` (which the runner
+   * moves on every write) or of `status` (which is about the generation, not
+   * about whether a human decided to keep the result). It is what makes the
+   * card's «Lagret» survive a reload.
+   */
+  savedAt: number | null;
   createdAt: number;
   updatedAt: number;
 }

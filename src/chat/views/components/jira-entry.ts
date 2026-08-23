@@ -8,9 +8,11 @@
  * The shape of the feature: a Jira task is DISCUSSED in the melosys thread first
  * (the conversation retrieves, argues, corrects), and the draft is a TURN in that
  * same thread — `POST /api/jira/draft/from-thread`, fire-and-forget, exactly like
- * `/draft/start`. This surface therefore starts the turn and hands the reader to
- * `/jira?draft=<id>`, which polls the row and is where the draft is finished. The
- * turn itself appears in the chat like any other, so nothing here renders it.
+ * `/draft/start`. **The draft never leaves the conversation:** the turn appears in
+ * the chat like any other, and its FINALIZED text (fence stripped, `[n]` repaired,
+ * `## Referanser` appended) arrives as a card under the reply — `jira-card.ts`.
+ * There is no tab to open and no second page to hand the reader to; `/jira` stays
+ * reachable by URL as the archive.
  *
  * Three rules are load-bearing:
  *
@@ -18,29 +20,19 @@
  *     else, deliberately: it WRITES into a conversation, carries no CORS headers,
  *     and `text/plain` is a CORS *simple* request that would have landed two
  *     messages in someone's chat cross-origin.
- *   · **the new tab is opened SYNCHRONOUSLY in the click**, before any await.
- *     Safari blocks a `window.open` issued after one unconditionally; the
- *     wiki-chat-options precedent. A blocked popup renders an honest link rather
- *     than claiming a tab was opened.
  *   · **the thread id is stamped on the button at render time**, not read from
  *     the page's live `activeThreadId` at click time — the control belongs to the
  *     message it was rendered under.
- *
- * And three rules about the response, all of them one rule: **a started draft's
- * id is never dropped.** The POST is fire-and-forget, so by the time it answers
- * the turn has run — a row exists, a message is in the conversation, and the
- * thread's single-flight slot is held. That id is the only pointer to it, and the
- * next attempt 409s about work never shown if it is lost. So:
- *
- *   · **a 200 navigates the pre-opened tab before any state check**, whatever the
- *     panel is doing by then (a thread switch tears it down; Avbryt cannot — it
- *     is disabled while sending);
- *   · **with no tab AND no panel, the link goes into the feedback row** the
- *     control was clicked in, captured at submit time. Blocked popup and torn-down
- *     panel are each survivable alone; together they left nothing;
  *   · **a second open while a POST is in flight RE-FOCUSES the panel** instead of
  *     rebuilding it. A rebuild resets \`sending\`, and the in-flight 200 then
  *     closed the panel the reader had just opened.
+ *
+ * And one rule about the response: **a started draft's id is never dropped.** The
+ * POST is fire-and-forget, so by the time it answers the turn is running — a row
+ * exists and the thread's single-flight slot is held — and the next attempt 409s
+ * about work never shown if the id is lost. It goes straight to `seedJiraCard`,
+ * which starts the card's poller on it; the card layer's own listing would find
+ * it on the next `response_meta` anyway, but that is minutes later.
  */
 
 import {
@@ -172,20 +164,17 @@ export function jiraEntryScript(): string {
     });
   }
 
-  // \`tab\` is the window opened SYNCHRONOUSLY by the click handler — see the
-  // module header. It is closed on every failure path, so a refusal never leaves
-  // a blank tab behind.
-  async function submitJiraEntry(tab) {
-    if (!jiraEntryState || !jiraEntryThreadId) { if (tab) tab.close(); return; }
-    if (!jiraEntryCanSubmit(jiraEntryState)) { if (tab) tab.close(); return; }
+  async function submitJiraEntry() {
+    if (!jiraEntryState || !jiraEntryThreadId) return;
+    if (!jiraEntryCanSubmit(jiraEntryState)) return;
     var threadId = jiraEntryThreadId;
     // Captured NOW, as a local: \`closeJiraEntry\` clears the shared one, and this
-    // is the only container left to render into if the panel goes away.
+    // is the container the «skrives i samtalen …» note goes into once the panel
+    // is closed — including when a thread switch closed it first.
     var row = jiraEntryRow;
     jiraEntryState.sending = true;
     jiraEntryState.message = undefined;
     jiraEntryState.messageTone = undefined;
-    jiraEntryState.draftUrl = undefined;
     renderJiraEntryPanel();
 
     var status = 0;
@@ -210,46 +199,31 @@ export function jiraEntryScript(): string {
 
     var outcome = jiraEntryOutcome(status, body);
 
-    // **The tab is navigated BEFORE any state check.** The panel may be gone by
-    // now — a thread switch wipes the message list (Avbryt cannot: it is disabled
-    // while sending) — but a 200 means the turn RAN: a row exists, a message is
-    // in the conversation, and the thread's single-flight slot is held. Checking
-    // the panel first closed the pre-opened tab and rendered nothing, so the only
-    // pointer to that draft was lost and the reader's next attempt 409'd about
-    // work they had never been shown.
-    if (outcome.ok && tab && !tab.closed) {
-      tab.location.href = outcome.url;
-      if (jiraEntryState && jiraEntryThreadId === threadId) closeJiraEntry();
-      return;
-    }
-
-    var live = !!(jiraEntryState && jiraEntryThreadId === threadId);
-
+    // **ONE success branch.** The three the tab-and-fallback design needed
+    // (navigate the pre-opened tab / render a link in the panel / render one in
+    // the row) collapse to this: hand the id to the card poller, close the picker,
+    // and leave a note where the reader clicked until the card lands. The panel
+    // may already be gone — a thread switch wipes the message list; Avbryt cannot,
+    // it is disabled while sending — and none of that matters here, because the
+    // draft's destination is the conversation, not this panel.
     if (outcome.ok) {
-      // No tab (the popup was blocked, or it was closed by hand) but the draft is
-      // REAL. The link is the only pointer left to it, so it is rendered wherever
-      // there is still something to render into: the panel if it stands, and
-      // otherwise the feedback row the control was clicked in — which \`has-jira\`
-      // already un-hides, so it is visible without a hover. Dropping it here left
-      // BOTH fallbacks failed at once and the next attempt 409'd about work the
-      // reader had never been shown.
-      if (live) {
-        jiraEntryState.sending = false;
-        jiraEntryState.draftUrl = outcome.url;
-        jiraEntryState.message = JE_POPUP_BLOCKED_MESSAGE;
-        jiraEntryState.messageTone = 'ok';
-        renderJiraEntryPanel();
-      } else if (row) {
-        row.insertAdjacentHTML('beforeend', jiraEntryDraftLinkHtml(outcome.url));
-      }
+      // The thread this draft was submitted FROM, not the page's live one: the
+      // reader may have switched away during the 60–600 s the POST was on the
+      // wire, and the seed must not touch the cards of where they are now.
+      seedJiraCard(outcome.draftId, threadId);
+      if (jiraEntryState && jiraEntryThreadId === threadId) closeJiraEntry();
+      // The note goes in the feedback row the control was clicked in, which
+      // \`has-jira\` already un-hides. \`attachJiraCard\` removes it by draft id when
+      // the card lands — under a DIFFERENT bubble (the new turn's), which is why
+      // the note is keyed rather than "the one next to me".
+      if (row) row.insertAdjacentHTML('beforeend', jiraEntryDraftingHtml(outcome.draftId));
       return;
     }
 
-    // A refusal needs somewhere to render and nothing else survives it — there is
-    // no draft to point at. If the panel is gone (or has been re-opened on another
-    // message) it is dropped silently and the blank tab is closed.
-    if (tab) tab.close();
-    if (!live) return;
+    // A refusal needs somewhere to render and nothing survives it — there is no
+    // draft to point at. If the panel is gone (or has been re-opened on another
+    // message) it is dropped silently.
+    if (!(jiraEntryState && jiraEntryThreadId === threadId)) return;
     jiraEntryState.sending = false;
     jiraEntryState.message = outcome.message;
     jiraEntryState.messageTone = 'err';
@@ -278,11 +252,9 @@ export function jiraEntryScript(): string {
       }
       if (target.closest('#${JE_SUBMIT_ID}')) {
         ev.preventDefault();
-        // Opened here, before any await — Safari blocks a post-await open
-        // unconditionally. A refusal closes it again.
-        var tab = null;
-        try { tab = window.open('', '_blank'); } catch (e) { tab = null; }
-        submitJiraEntry(tab);
+        // Nothing is pre-opened any more: the draft lands in this conversation,
+        // so there is no tab whose synchronous creation Safari could block.
+        submitJiraEntry();
       }
     });
 

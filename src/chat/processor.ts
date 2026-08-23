@@ -105,10 +105,18 @@ export async function processChatMessage(
   };
   chatState.addMessage(conversationId, userMessage);
 
+  // The throwaway client id of the LAST bubble this turn rendered. It is what
+  // `response_meta` echoes so the client can resolve the node it actually
+  // created — see `ChatState.appendBotMessage`. The last one, because a
+  // multi-chunk reply renders several bubbles and the meta describes the turn
+  // that ends with the final one, which is also the one the 👍/👎 row and the
+  // Jira card hang under.
+  let lastClientMessageId: string | undefined;
+
   // Status is cleared after processMessage completes (not in say) to avoid
   // flickering during multi-chunk Telegram responses.
   const say = async (message: string): Promise<void> => {
-    chatState.appendBotMessage(conversationId, message, threadId);
+    lastClientMessageId = chatState.appendBotMessage(conversationId, message, threadId);
   };
 
   // Create setStatus callback — updates conversation status
@@ -193,6 +201,7 @@ export async function processChatMessage(
       chatState.publishResponseMeta(conversationId, {
         threadId: threadId ?? null,
         messageId: result.messageId,
+        clientMessageId: lastClientMessageId,
         inputTokens: result.inputTokens,
         outputTokens: result.outputTokens,
         contextTokens: result.contextTokens,

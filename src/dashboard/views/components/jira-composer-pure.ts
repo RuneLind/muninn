@@ -22,6 +22,8 @@ import {
   JIRA_LOW_CONFIDENCE_MESSAGE,
   JIRA_NO_HITS_MESSAGE,
   JIRA_NOTES_MAX,
+  JIRA_POLL_INTERVAL_MS,
+  JIRA_POLL_MAX_MS,
   JIRA_UNREACHABLE_MESSAGE,
   isJiraDepth,
   isJiraDraftSource,
@@ -93,22 +95,16 @@ export const JC_VIEW_ATTR = "data-jc-view";
  *  locking the design. */
 export const JC_DEFAULT_DEPTH: JiraDepth = "skisse";
 
-/** How often the `?draft=` landing polls `GET /api/jira/draft/:id`.
- *
- *  Polling, NOT a stream re-attach: there is nothing to attach to (the only SSE
- *  endpoint STARTS a generation) and a re-POST of identical content would hit the
- *  single-flight 409 — which is exactly this case. */
-export const JC_POLL_INTERVAL_MS = 2_500;
-
 /**
- * When the poller gives up.
+ * The poll cadence and the give-up point.
  *
- * Sized off the server's own ceiling: `Full` is budgeted 600 s and the
- * single-flight slot outlives it by `JIRA_SLOT_SLACK_MS` (180 s), so a draft that
- * is still `generating` at 13 min is a draft nothing is working on. Giving up
- * says so rather than polling a dead row forever.
+ * **Both live in `src/jira/wire.ts` now**, because the chat's draft card polls
+ * the same endpoint on the same contract and two copies of a cadence are two
+ * things to keep in step. Re-exported under the page's own `JC_` names so
+ * nothing that reads them here had to move.
  */
-export const JC_POLL_MAX_MS = 13 * 60_000;
+export const JC_POLL_INTERVAL_MS = JIRA_POLL_INTERVAL_MS;
+export const JC_POLL_MAX_MS = JIRA_POLL_MAX_MS;
 
 // ── The page's state ─────────────────────────────────────────────────────────
 
