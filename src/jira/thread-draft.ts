@@ -76,8 +76,8 @@ export function seedThreadCitations(
   rows: ThreadCitationRow[],
   assistantTexts: string[],
 ): JiraCitation[] {
-  const mentionedKeys = new Set(extractJiraKeys(assistantTexts.join("\n\n")));
   const joined = assistantTexts.join("\n\n");
+  const mentionedKeys = new Set(extractJiraKeys(joined));
 
   const byDoc = new Map<string, { row: ThreadCitationRow; relevance: number }>();
   for (const row of rows) {
@@ -108,9 +108,7 @@ export function seedThreadCitations(
       },
       0,
     );
-    const cited =
-      (!!citation.key && mentionedKeys.has(citation.key)) ||
-      (!!citation.url && joined.includes(citation.url));
+    const cited = namedIn(citation, mentionedKeys, joined);
     return { citation, cited };
   });
 
@@ -122,6 +120,56 @@ export function seedThreadCitations(
   return scored
     .slice(0, JIRA_STORED_MAX_SOURCES)
     .map((s, i) => ({ ...s.citation, n: i + 1 }));
+}
+
+/**
+ * Did this text NAME this source — by Jira key, or by its url?
+ *
+ * The key half goes through {@link extractJiraKeys}, which is already
+ * word-bounded. The URL half is the one that needed a rule: a bare `includes`
+ * matched `…/browse/MELOSYS-81` inside `…/browse/MELOSYS-8150`, so the short
+ * issue was called "used by the conversation" on the strength of a mention of a
+ * completely different one — and `cited` drives the order, which drives the
+ * depth slice and the reference list. A match therefore has to end the string or
+ * be followed by something that cannot continue an identifier.
+ */
+function namedIn(citation: JiraCitation, mentionedKeys: Set<string>, text: string): boolean {
+  if (citation.key && mentionedKeys.has(citation.key)) return true;
+  return !!citation.url && mentionsUrl(text, citation.url);
+}
+
+/** The url boundary rule. Exported only through {@link namedIn}'s two callers. */
+function mentionsUrl(text: string, url: string): boolean {
+  for (let from = 0; ; ) {
+    const at = text.indexOf(url, from);
+    if (at < 0) return false;
+    const next = text[at + url.length];
+    if (next === undefined || !/[A-Za-z0-9_-]/.test(next)) return true;
+    from = at + 1;
+  }
+}
+
+/**
+ * Which of the sources the draft was allowed to use it ACTUALLY named.
+ *
+ * **Why the thread path needs this and the notes path does not.** There, the
+ * prompt carries a fenced `KILDER:` block, so `citationsUsed` is a true statement
+ * about what the model was shown and `## Referanser` lists exactly that. Here the
+ * prompt has no citation block at all — the conversation is the context — so
+ * appending the whole depth slice put links under the task for sources the turn
+ * never mentioned, and the reference list stopped being a claim about the text.
+ *
+ * The signal is the same one `seedThreadCitations` uses for `cited`: the Jira key
+ * (or the url) appearing in the prose, which is exactly how the turn instruction
+ * asks the model to cite. Order is the slice's, so the list still reads
+ * conversation-used first.
+ */
+export function citationsNamedInDraft(
+  citations: JiraCitation[],
+  markdown: string,
+): JiraCitation[] {
+  const mentionedKeys = new Set(extractJiraKeys(markdown));
+  return citations.filter((c) => namedIn(c, mentionedKeys, markdown));
 }
 
 /**
@@ -190,10 +238,47 @@ export function buildThreadTurnInstruction(input: {
   return parts.join("\n\n");
 }
 
+/**
+ * The one spelling of the `notes` placeholder / `retrieval_question` line.
+ *
+ * `notes` is NOT NULL, the page reads it as the «fra samtale» banner, and nothing
+ * was condensed into a search on this path — so the same sentence answers both.
+ * It lived as a template literal in the route AND in the runner, which is one
+ * copy too many for a string the page string-matches on.
+ */
+export function threadSeedLine(threadName: string): string {
+  return `fra samtale: ${threadName}`;
+}
+
+/**
+ * The prefix both draft-turn user lines start with.
+ *
+ * It is load-bearing in ONE place: the history read that stands in for "the raw
+ * material" when key verification decides amber-vs-red. A regenerate's own user
+ * line NAMES the excluded sources («Ikke bruk disse kildene denne gangen:
+ * MELOSYS-7264»), so leaving it in the raw material made every excluded key the
+ * model re-used read amber — "the person wrote it" — when the truth is the
+ * opposite: the person asked for it to be left out. The strip needs an exact
+ * test, and this constant is it.
+ *
+ * Deliberately a VISIBLE prefix rather than an invisible marker (`<!-- … -->`,
+ * the research flow's device): these lines are ordinary chat messages a person
+ * scrolls past, and a marker only stays invisible where a renderer knows about
+ * it. The residual is that a human line beginning «Lag Jira-sak …» is stripped
+ * too — which costs an amber row at worst, on a sentence that is a request for a
+ * draft rather than raw material about the problem.
+ */
+export const JIRA_TURN_TEXT_PREFIX = "Lag Jira-sak";
+
+/** Is this message one of the composer's own turn lines? */
+export function isJiraTurnLine(text: string): boolean {
+  return text.trimStart().startsWith(JIRA_TURN_TEXT_PREFIX);
+}
+
 /** The visible user line for a first draft turn. It IS a normal user message —
  *  this is a conversation, and «lag en sak av dette» is a thing a person says. */
 export function threadDraftTurnText(template: string, depth: JiraDepth): string {
-  return `Lag Jira-sak (${template}, ${depth}).`;
+  return `${JIRA_TURN_TEXT_PREFIX} (${template}, ${depth}).`;
 }
 
 /**
@@ -212,7 +297,7 @@ export function threadRegenTurnText(input: {
   excluded: JiraCitation[];
   extra?: string;
 }): string {
-  const parts = [`Lag Jira-sak på nytt (${input.template}, ${input.depth}).`];
+  const parts = [`${JIRA_TURN_TEXT_PREFIX} på nytt (${input.template}, ${input.depth}).`];
   const labels = input.excluded.map((c) => c.key ?? c.title).filter(Boolean);
   if (labels.length > 0) {
     parts.push(`Ikke bruk disse kildene denne gangen: ${labels.join(", ")}.`);

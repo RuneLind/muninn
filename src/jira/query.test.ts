@@ -182,6 +182,18 @@ describe("what the live corpus actually returns", () => {
     ).toBe("Ny flyt steg1 Foreløpig fakturert trygdeavgift");
   });
 
+  test("humanizeJiraTitle drops the doc id's `.md` tail", () => {
+    // The title IS the filename, extension included — and it is rendered beside
+    // the key in `## Referanser`, where a trailing `.md` is noise. Also the
+    // fallback title when huginn's `title` is null is the bare doc id.
+    expect(
+      humanizeJiraTitle("jira-issues", "MELOSYS-8150_Uttrekk_av_medlemskap.md", "MELOSYS-8150"),
+    ).toBe("Uttrekk av medlemskap");
+    expect(humanizeJiraTitle("jira-issues", "MELOSYS-8150_Uttrekk.md")).toBe(
+      "MELOSYS-8150 Uttrekk",
+    );
+  });
+
   test("humanizeJiraTitle leaves other collections' real prose alone", () => {
     expect(humanizeJiraTitle("nav-wiki", "Pensjonister og trygdeavgift")).toBe(
       "Pensjonister og trygdeavgift",

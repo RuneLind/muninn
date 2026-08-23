@@ -171,6 +171,40 @@ export async function getCitationsForThread(threadId: string): Promise<CitationR
   return rows.map(mapCitationRow);
 }
 
+/**
+ * Retention for the CHAT half of the table, run from the hourly trace cleanup on
+ * the SAME `TRACING_RETENTION_DAYS` window.
+ *
+ * The chat's `research_knowledge` handler writes a row per hit on every tool
+ * call in every thread — an unbounded growth path on the hot path of ordinary
+ * conversation, where the `/research` half is bounded by how often a person
+ * opens that page. It shares the trace window because it is the same kind of
+ * value: a diagnostic record of one request, useful while the trace beside it
+ * still exists.
+ *
+ * The predicate is deliberately narrow, and both halves of it are load-bearing:
+ *
+ *  · **`thread_id IS NOT NULL`** — the `/research` ask rows are the durable
+ *    retrieval ledger `search_signals` and the citation analyses read, and were
+ *    never meant to expire.
+ *  · **`cited = false`** — a cited row is the evidence that a conversation
+ *    actually USED the source, which is the signal the Jira composer's thread
+ *    seeding is built on. Only the retrieved-and-ignored tail is dropped.
+ *
+ * Never throws for the caller's benefit: it is called inside the scheduler's own
+ * try-block beside `cleanupOldTraces`.
+ */
+export async function cleanupThreadCitations(retentionDays: number): Promise<number> {
+  const sql = getDb();
+  const result = await sql`
+    DELETE FROM research_citations
+    WHERE thread_id IS NOT NULL
+      AND cited = false
+      AND created_at < NOW() - make_interval(days => ${retentionDays})
+  `;
+  return result.count;
+}
+
 function mapCitationRow(r: Record<string, any>): CitationRow {
   return {
     id: r.id,

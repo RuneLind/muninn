@@ -202,13 +202,17 @@ export function jiraKeyFor(collection: string, docId: string, url?: string): str
  * filename, so `titleFor` in `answer.ts` hands back
  * `MELOSYS-6528_Ny_flyt_steg1_Foreløpig_fakturert_trygdeavgift_…`. Rendered into
  * `## Referanser` that is a wall of underscores beside a link that already says
- * the key — so the key prefix comes off and the underscores become spaces. Left
- * alone for every other collection, whose titles are real prose.
+ * the key — so the key prefix comes off, the `.md` tail comes off, and the
+ * underscores become spaces. Left alone for every other collection, whose titles
+ * are real prose.
+ *
+ * The `.md` matters on the thread path in particular: a `research_citations` row
+ * with a null title falls back to the bare doc id, which always carries it.
  */
 export function humanizeJiraTitle(collection: string, title: string, key?: string): string {
   if (collection !== JIRA_ISSUES_COLLECTION) return title;
   const withoutKey = key && title.startsWith(`${key}_`) ? title.slice(key.length + 1) : title;
-  const spaced = withoutKey.replace(/_/g, " ").trim();
+  const spaced = withoutKey.replace(/\.md$/i, "").replace(/_/g, " ").trim();
   return spaced || title;
 }
 

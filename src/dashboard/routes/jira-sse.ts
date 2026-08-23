@@ -167,6 +167,26 @@ export interface JiraFlightKeyInput {
   draftId: string;
 }
 
+/**
+ * The single-flight key for BOTH thread paths: the thread, and nothing else.
+ *
+ * `jiraFlightKey` hashes everything that changes the OUTPUT, which is the right
+ * rule for a one-shot over stored hits — two different drafts are two different
+ * pieces of work and may run at once. A thread turn is not that: it is a message
+ * in a conversation, and two of them in one thread interleave (measured: two
+ * `Lag Jira-sak` user lines 17 ms apart, then two replies) whatever template or
+ * depth each asked for. Keying on the thread makes the second caller wait, which
+ * is what the 409 already tells them.
+ *
+ * Domain-separated from `jiraFlightKey`'s input, so a thread id can never collide
+ * with a content hash.
+ */
+export function threadFlightKey(threadId: string): string {
+  const h = new Bun.CryptoHasher("sha256");
+  h.update(["jira-thread", threadId].join(" "));
+  return h.digest("hex");
+}
+
 export function jiraFlightKey(input: JiraFlightKeyInput): string {
   const h = new Bun.CryptoHasher("sha256");
   // NUL-separated and with the exclusion set SORTED, so the same toggle state
@@ -324,8 +344,16 @@ async function runJiraDraft(
    * the citations, so it is non-null exactly when retrieval finished — including
    * the legitimate case of a retrieval that finished with zero hits, which must
    * NOT be re-run.
+   *
+   * **`unreachable` is the one non-null verdict that means retrieval did NOT
+   * land** — it is, by its own definition, the absence of a verdict about the
+   * corpus (`src/jira/wire.ts`). Counting it as landed reused the empty hit set
+   * on every later regenerate, so the page said *«Prøv igjen senere»* and the one
+   * button that could try again never re-retrieved. It is the same latch the
+   * `'[]'`-is-truthy bug above created, arrived at from the other side.
    */
   const retrievalLanded = !!opts.storedCitations
+    && opts.storedCoverage !== "unreachable"
     && (opts.storedCoverage != null || opts.storedCitations.length > 0);
   const regenerate = !!opts.existingDraftId && retrievalLanded;
   let draftId = opts.existingDraftId ?? "";

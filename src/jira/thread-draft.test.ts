@@ -18,10 +18,14 @@
 import { test, expect, describe } from "bun:test";
 import {
   buildThreadTurnInstruction,
+  citationsNamedInDraft,
+  isJiraTurnLine,
+  JIRA_TURN_TEXT_PREFIX,
   seedThreadCitations,
   threadDraftTurnText,
   threadRegenTurnText,
   threadSeedCoverage,
+  threadSeedLine,
   type ThreadCitationRow,
 } from "./thread-draft.ts";
 import { JIRA_STORED_MAX_SOURCES } from "./retrieval.ts";
@@ -102,6 +106,43 @@ describe("seedThreadCitations", () => {
     );
     // Relevance order survives: nothing was cited.
     expect(seeded.map((c) => c.key)).toEqual(["MELOSYS-4", "MELOSYS-8150"]);
+  });
+
+  test("a url that is only a PREFIX of the one in the text is NOT cited", () => {
+    // `…/browse/MELOSYS-81` is a substring of `…/browse/MELOSYS-8150`, so a bare
+    // `includes` marked the short issue as one the conversation had used — and
+    // `cited` drives the order, which drives the depth slice and `## Referanser`.
+    const seeded = seedThreadCitations(
+      [
+        row({
+          docId: "MELOSYS-81_Kort.md",
+          title: "MELOSYS-81_Kort",
+          url: "https://jira.adeo.no/browse/MELOSYS-81",
+          relevance: 0.1,
+        }),
+        row({ docId: "MELOSYS-4_B.md", title: "MELOSYS-4_B", url: undefined, relevance: 0.9 }),
+      ],
+      ["Se https://jira.adeo.no/browse/MELOSYS-8150 for detaljene."],
+    );
+    // Nothing was cited, so plain relevance order survives.
+    expect(seeded.map((c) => c.key)).toEqual(["MELOSYS-4", "MELOSYS-81"]);
+  });
+
+  test("a url followed by punctuation still counts as cited", () => {
+    const seeded = seedThreadCitations(
+      [
+        row({
+          collection: "melosys-confluence-v3",
+          docId: "Team MELOSYS/rammeavtale.md",
+          title: "Rammeavtalen",
+          url: "https://confluence.test/rammeavtale",
+          relevance: 0.1,
+        }),
+        row({ docId: "MELOSYS-4_B.md", title: "MELOSYS-4_B", url: undefined, relevance: 0.9 }),
+      ],
+      ["Se https://confluence.test/rammeavtale, den beskriver flyten."],
+    );
+    expect(seeded[0]!.docId).toBe("Team MELOSYS/rammeavtale.md");
   });
 
   test("caps at the same 24 the notes path stores, and renumbers 1..n", () => {
@@ -201,5 +242,82 @@ describe("turn text", () => {
     expect(threadRegenTurnText({ template: "task", depth: "ingen", excluded: [] })).toBe(
       "Lag Jira-sak på nytt (task, ingen).",
     );
+  });
+
+  test("both turn lines carry the shared prefix the history strip recognises", () => {
+    // The strip is what keeps an EXCLUDED key the regenerate line names out of
+    // the "raw material" — otherwise the model re-using it reads amber ("the
+    // person wrote it") rather than red.
+    expect(threadDraftTurnText("bug", "ingen").startsWith(JIRA_TURN_TEXT_PREFIX)).toBe(true);
+    expect(
+      threadRegenTurnText({ template: "bug", depth: "ingen", excluded: [] }).startsWith(
+        JIRA_TURN_TEXT_PREFIX,
+      ),
+    ).toBe(true);
+    expect(isJiraTurnLine(threadDraftTurnText("bug", "ingen"))).toBe(true);
+    expect(
+      isJiraTurnLine(
+        threadRegenTurnText({
+          template: "bug",
+          depth: "ingen",
+          excluded: [{ key: "MELOSYS-7264", title: "Noe" } as JiraCitation],
+        }),
+      ),
+    ).toBe(true);
+    expect(isJiraTurnLine("Vi må se på uttrekket for MELOSYS-7264.")).toBe(false);
+  });
+});
+
+describe("threadSeedLine", () => {
+  test("is the one spelling both the route and the runner write", () => {
+    expect(threadSeedLine("medlemskap-uttrekk")).toBe("fra samtale: medlemskap-uttrekk");
+  });
+});
+
+describe("citationsNamedInDraft", () => {
+  const jira = (key: string, n: number): JiraCitation => ({
+    n,
+    collection: "jira-issues",
+    docId: `${key}_x.md`,
+    title: "x",
+    badge: "Jira",
+    relevance: 0.5,
+    url: `https://jira.adeo.no/browse/${key}`,
+    key,
+  });
+
+  test("keeps only the sources the DRAFT actually names, in slice order", () => {
+    // The thread prompt carries no citation block, so listing the whole depth
+    // slice under `## Referanser` names sources the model never saw.
+    const kept = citationsNamedInDraft(
+      [jira("MELOSYS-8150", 1), jira("MELOSYS-9999", 2), jira("MELOSYS-4", 3)],
+      "## Symptom\nUttrekket feiler. Se MELOSYS-4 og MELOSYS-8150.",
+    );
+    expect(kept.map((c) => c.key)).toEqual(["MELOSYS-8150", "MELOSYS-4"]);
+  });
+
+  test("a url mention carries a source with no Jira key", () => {
+    const conf: JiraCitation = {
+      n: 1,
+      collection: "melosys-confluence-v3",
+      docId: "Team MELOSYS/rammeavtale.md",
+      title: "Rammeavtalen",
+      badge: "Confluence",
+      relevance: 0.9,
+      url: "https://confluence.test/rammeavtale",
+    };
+    expect(citationsNamedInDraft([conf], "Se https://confluence.test/rammeavtale.")).toHaveLength(1);
+    expect(citationsNamedInDraft([conf], "Ingen kilder nevnt.")).toHaveLength(0);
+  });
+
+  test("a PREFIX url match does not count", () => {
+    const short = jira("MELOSYS-81", 1);
+    expect(
+      citationsNamedInDraft([short], "Se https://jira.adeo.no/browse/MELOSYS-8150."),
+    ).toHaveLength(0);
+  });
+
+  test("a draft that names nothing gets no reference list at all", () => {
+    expect(citationsNamedInDraft([jira("MELOSYS-8150", 1)], "## Symptom\nNoe feiler.")).toEqual([]);
   });
 });

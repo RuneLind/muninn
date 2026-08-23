@@ -922,6 +922,52 @@ describe("regenerate — a draft whose RETRIEVAL never landed", () => {
   });
 });
 
+describe("regenerate — a draft whose retrieval was UNREACHABLE", () => {
+  test("re-retrieves; `unreachable` is not a landed hit set", async () => {
+    const app = makeApp();
+    let calls = 0;
+    __setJiraRetrievalForTest(
+      (async () => {
+        calls++;
+        if (calls === 1) {
+          // huginn down: every sub-search errored, so `classifyJiraCoverage`
+          // returns `unreachable` — a NON-NULL verdict over zero citations.
+          return {
+            results: [],
+            decomposition: { subQuestions: ["q"], rationale: "", passthrough: true, haikuMs: 1 },
+            subSearches: [{ subQuestion: "q", durationMs: 1, resultCount: 0, error: "ECONNREFUSED" }],
+            traceId: "t",
+          };
+        }
+        return (await (scriptedRetrieval({ n: 0 }) as unknown as () => Promise<unknown>)()) as never;
+      }) as never,
+      scriptedQuestion,
+    );
+
+    const first = parseSse(await (await post(app, "/api/jira/draft", {
+      notes: NOTES, template: "bug", depth: "skisse",
+    })).text());
+    await new Promise((r) => setTimeout(r, 20));
+    const draftId = String(first[0]!.data.draftId);
+    expect(rows.get(draftId)!.retrievalCoverage).toBe("unreachable");
+    expect(rows.get(draftId)!.citations).toHaveLength(0);
+
+    // The page's only button. A stored `unreachable` used to count as "retrieval
+    // landed" (the verdict is non-null), so this reused the empty hit set forever
+    // — the reader was told «Prøv igjen senere» by the one control that could.
+    const events = parseSse(await (await post(app, "/api/jira/draft", {
+      template: "bug", depth: "skisse", draftId,
+    })).text());
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(calls).toBe(2);
+    const done = events.find((e) => e.event === "done")!.data as { citations: unknown[]; coverage: string };
+    expect(done.citations).toHaveLength(3);
+    expect(done.coverage).toBe("answer");
+    expect(rows.get(draftId)!.retrievalCoverage).toBe("answer");
+  });
+});
+
 describe("regenerate — the row is `generating` again, and the new coverage is persisted", () => {
   async function seed(app: Hono): Promise<string> {
     const events = parseSse(await (await post(app, "/api/jira/draft", {
@@ -1332,6 +1378,10 @@ describe("POST /api/jira/draft/from-thread", () => {
     // own verdicts are asserted through the turn text below.)
     const view = await (await makeApp().request(`/api/jira/draft/${body.draftId}`)).json();
     expect(view.keyVerdicts.find((v: { key: string }) => v.key === "MELOSYS-8150").state).toBe("verified");
+    // …and the PUT reads the SAME raw material the generation did. Handing it the
+    // stored `fra samtale: …` placeholder instead flipped every amber row red the
+    // moment the reader saved — an edit that never touched the key.
+    expect(view.keyVerdicts.find((v: { key: string }) => v.key === "MELOSYS-7264").state).toBe("notes");
   });
 
   test("an unknown or malformed thread id is a 404, never a 500", async () => {
@@ -1386,6 +1436,22 @@ describe("POST /api/jira/draft/from-thread", () => {
     await first;
   });
 
+  test("a SECOND from-thread run at a different template/depth is still a 409", async () => {
+    threads.set(THREAD_ID, THREAD);
+    // Two turns in ONE thread is not a double spend, it is two interleaved
+    // conversations: two user lines and two replies, in an order neither the
+    // reader nor the next prompt can untangle. The slot is therefore the THREAD.
+    __setJiraThreadTurnForTest((async () => {
+      await new Promise((r) => setTimeout(r, 40));
+      return { messageId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", text: THREAD_DRAFT_BODY };
+    }) as never);
+    const first = post({ threadId: THREAD_ID, template: "bug", depth: "ingen" });
+    const second = await post({ threadId: THREAD_ID, template: "story", depth: "skisse", extra: "kortere" });
+    expect(second.status).toBe(409);
+    expect((await second.json()).state).toBe("running");
+    await first;
+  });
+
   test("a turn that produces nothing marks the row failed rather than storing an empty task", async () => {
     threads.set(THREAD_ID, THREAD);
     __setJiraThreadTurnForTest((async () => ({ text: "   " })) as never);
@@ -1394,6 +1460,69 @@ describe("POST /api/jira/draft/from-thread", () => {
     const view = await (await makeApp().request(`/api/jira/draft/${draftId}`)).json();
     expect(view.status).toBe("failed");
     expect(view.markdown).toBeNull();
+    expect(view.error).toContain("Modellen returnerte ingen tekst");
+  });
+
+  test("a turn that FAILED reports the transport failure, not «ingen tekst»", async () => {
+    threads.set(THREAD_ID, THREAD);
+    // `processChatMessage` reports a connector error internally and hands back
+    // `undefined`, which the runner sees as `null`. That is a failed request, not
+    // a model that answered with nothing, and the two need different sentences:
+    // one says «try again», the other says «the model had nothing to say».
+    __setJiraThreadTurnForTest((async () => null) as never);
+    const res = await post({ threadId: THREAD_ID, template: "bug", depth: "ingen" });
+    const { draftId } = await res.json();
+    await new Promise((r) => setTimeout(r, 20));
+    const view = await (await makeApp().request(`/api/jira/draft/${draftId}`)).json();
+    expect(view.status).toBe("failed");
+    expect(view.error).toContain("kunne ikke skrives ferdig");
+    expect(view.error).not.toContain("Modellen returnerte ingen tekst");
+  });
+
+  test("`## Referanser` lists only the sources the DRAFT named", async () => {
+    const { body } = await started();
+    const view = await (await makeApp().request(`/api/jira/draft/${body.draftId}`)).json();
+    // The turn body names MELOSYS-8150 and nothing else. The thread prompt has no
+    // citation block at all, so appending the whole depth slice put a link under
+    // the task for a Confluence page the model never saw.
+    expect(view.markdown).toContain("[MELOSYS-8150](https://jira.adeo.no/browse/MELOSYS-8150)");
+    expect(view.markdown).not.toContain("confluence.test/rammeavtale");
+    // …while the toggle column still carries the wide stored set.
+    expect(view.citations).toHaveLength(2);
+  });
+
+  test("a simple-request content type is a 415 — this route writes into a conversation", async () => {
+    threads.set(THREAD_ID, THREAD);
+    // `text/plain` is a CORS *simple* request: no preflight, so the deliberate
+    // absence of CORS headers here stops the browser reading the RESPONSE but not
+    // the request from landing two messages in someone's chat.
+    const res = await makeApp().request("/api/jira/draft/from-thread", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=UTF-8" },
+      body: JSON.stringify({ threadId: THREAD_ID, template: "bug", depth: "ingen" }),
+    });
+    expect(res.status).toBe(415);
+    expect(rows.size).toBe(0);
+    // A charset parameter on the real content type is still fine.
+    const ok = await makeApp().request("/api/jira/draft/from-thread", {
+      method: "POST",
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+      body: JSON.stringify({ threadId: THREAD_ID, template: "bug", depth: "ingen" }),
+    });
+    expect(ok.status).toBe(200);
+  });
+
+  test("Full with the code servers down is a 503 here too, not a tool-less draft", async () => {
+    threads.set(THREAD_ID, THREAD);
+    mcpServers = [okServer("code", [], "down"), ...ALL_UP.slice(1)];
+    const res = await post({ threadId: THREAD_ID, template: "bug", depth: "full" });
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.unreachableServers).toEqual(["code"]);
+    expect(body.error).toContain("Full teknisk dybde");
+    expect(rows.size).toBe(0);
+    // Skisse is unaffected.
+    expect((await post({ threadId: THREAD_ID, template: "bug", depth: "skisse" })).status).toBe(200);
   });
 });
 
@@ -1448,6 +1577,91 @@ describe("regenerate on a thread-sourced draft", () => {
     expect(view.excludeDocIds).toEqual(["Team MELOSYS/rammeavtale.md"]);
     expect(view.citations.map((c: { docId: string }) => c.docId)).toContain("Team MELOSYS/rammeavtale.md");
     expect(view.markdown).not.toContain("confluence.test/rammeavtale");
+  });
+
+  test("emits NO `citations` frame — the client would adopt the narrow set", async () => {
+    const draftId = await startThreadDraft();
+    __setJiraThreadTurnForTest(scriptedThreadTurn("## Symptom\nKortere. Se MELOSYS-8150."));
+
+    const events = parseSse(await (await makeApp().request("/api/jira/draft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        draftId, template: "bug", depth: "skisse",
+        excludeDocIds: ["Team MELOSYS/rammeavtale.md"],
+      }),
+    })).text());
+
+    // Rule 1 of the page (src/dashboard/CLAUDE.md): the middle column renders the
+    // WIDE stored set. The notes path emits no `citations` on a regenerate for
+    // exactly this reason; this path emitted the RETAINED, renumbered set, and
+    // the client overwrites `state.citations` with any non-empty array — so the
+    // row the reader had just switched off vanished from the toggle column and
+    // could never be switched back on.
+    expect(events.map((e) => e.event)).not.toContain("citations");
+    // The wide set is still on the row, which is what the poll and the GET carry.
+    const view = await (await makeApp().request(`/api/jira/draft/${draftId}`)).json();
+    expect(view.citations).toHaveLength(2);
+  });
+
+  test("a from-thread POST during a regenerate of the same thread is a 409", async () => {
+    const draftId = await startThreadDraft();
+    let release: ((v: unknown) => void) | undefined;
+    __setJiraThreadTurnForTest((() => new Promise((r) => { release = r; })) as never);
+
+    // The regenerate claims the slot…
+    const regen = makeApp().request("/api/jira/draft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ draftId, template: "bug", depth: "skisse" }),
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    // …and a fresh from-thread run in the SAME thread must not start a second,
+    // interleaved turn. Measured before the fix: two user lines 17 ms apart.
+    const clash = await makeApp().request("/api/jira/draft/from-thread", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ threadId: THREAD_ID, template: "story", depth: "ingen" }),
+    });
+    expect(clash.status).toBe(409);
+
+    release!({ messageId: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff", text: "## Symptom\nx" });
+    await (await regen).text();
+  });
+
+  test("the regenerate's own user line is not raw material, and a peer's message never was", async () => {
+    const draftId = await startThreadDraft();
+    // The regenerate ran and excluded MELOSYS-8150, so its visible user line NAMES
+    // the key — and a `peer` turn named another. Neither is the person's raw
+    // material: one is this feature's own instruction to leave the source out, the
+    // other is a different agent talking.
+    await (await makeApp().request("/api/jira/draft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        draftId, template: "bug", depth: "skisse",
+        excludeDocIds: ["MELOSYS-8150_Uttrekk.md"],
+      }),
+    })).text();
+    threadHistory = [
+      { role: "user", text: "Uttrekket feiler for EØS-saker." },
+      { role: "user", text: "Lag Jira-sak på nytt (bug, skisse). Ikke bruk disse kildene denne gangen: MELOSYS-8150." },
+      { role: "peer", text: "Se også MELOSYS-9001." },
+      { role: "assistant", text: "Ok." },
+    ];
+
+    const res = await makeApp().request(`/api/jira/draft/${draftId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ markdown: "## Symptom\nSe MELOSYS-8150 og MELOSYS-9001." }),
+    });
+    expect(res.status).toBe(200);
+    const { keyVerdicts } = await res.json();
+    const state = (k: string) => keyVerdicts.find((v: { key: string }) => v.key === k).state;
+    // Both are RED: excluded and never claimed by the person.
+    expect(state("MELOSYS-8150")).toBe("unknown");
+    expect(state("MELOSYS-9001")).toBe("unknown");
   });
 
   test("the row goes back to `generating` before the turn — a row left `ready` stops the poller", async () => {

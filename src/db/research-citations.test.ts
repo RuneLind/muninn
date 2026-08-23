@@ -1,9 +1,12 @@
 import { test, expect, describe } from "bun:test";
 import { setupTestDb } from "../test/setup-db.ts";
+import { getDb } from "./client.ts";
 import {
+  cleanupThreadCitations,
   insertResearchCitations,
   persistResearchCitations,
   getCitationsForTrace,
+  getCitationsForThread,
 } from "./research-citations.ts";
 
 setupTestDb();
@@ -87,5 +90,55 @@ describe("research-citations", () => {
     expect(rows[0]!.relevance).toBeNull();
     expect(rows[0]!.question).toBeNull();
     expect(rows[0]!.cited).toBe(true);
+  });
+});
+
+/**
+ * Retention for the CHAT half of the table.
+ *
+ * Every `research_knowledge` call in every thread now writes a row per hit, and
+ * nothing deleted them — a table that only grows, on the hot path of ordinary
+ * chat. The predicate is deliberately narrow: `/research` ask rows (`thread_id
+ * IS NULL`) are the durable retrieval ledger the search-signal work rests on and
+ * are never touched, and a `cited` row is the evidence that a conversation
+ * actually used the source, which is the whole point of keeping any of them.
+ */
+describe("cleanupThreadCitations", () => {
+  const THREAD = "11111111-2222-4333-8444-555555555555";
+
+  async function seed(): Promise<void> {
+    const sql = getDb();
+    await insertResearchCitations([
+      { threadId: THREAD, docId: "old-uncited.md", collection: "jira-issues", cited: false },
+      { threadId: THREAD, docId: "old-cited.md", collection: "jira-issues", cited: true },
+      { threadId: THREAD, docId: "fresh-uncited.md", collection: "jira-issues", cited: false },
+      { traceId: crypto.randomUUID(), docId: "research-ask.md", collection: "wiki", cited: false },
+    ]);
+    // Backdate everything but the fresh row — `created_at` defaults to now().
+    await sql`
+      UPDATE research_citations
+      SET created_at = now() - interval '30 days'
+      WHERE doc_id IN ('old-uncited.md', 'old-cited.md', 'research-ask.md')
+    `;
+  }
+
+  test("deletes only OLD, UNCITED, thread-scoped rows", async () => {
+    await seed();
+    expect(await cleanupThreadCitations(7)).toBe(1);
+
+    const kept = await getCitationsForThread(THREAD);
+    expect(kept.map((r) => r.docId).sort()).toEqual(["fresh-uncited.md", "old-cited.md"]);
+
+    // The `/research` ask row is untouched whatever its age.
+    const sql = getDb();
+    const askRows = await sql`
+      SELECT doc_id FROM research_citations WHERE thread_id IS NULL
+    `;
+    expect(askRows.map((r) => r.doc_id)).toEqual(["research-ask.md"]);
+  });
+
+  test("a wide retention window deletes nothing", async () => {
+    await seed();
+    expect(await cleanupThreadCitations(90)).toBe(0);
   });
 });
