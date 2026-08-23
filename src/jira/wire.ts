@@ -282,9 +282,18 @@ const BLOCK_MARKER_RE =
  * it adds is a RUN — `">> dobbeltsitert"` is one nested quote, and `^>(?:\s+|$)`
  * never matches it (the char after the first `>` is another `>`), so a nested
  * quote stopped stripping and titled the row `">> dobbeltsitert"`. `">>x"` still
- * matches nothing, since no prefix of the run is followed by whitespace.
+ * matches nothing, since no prefix of the run is followed by whitespace: `>+`
+ * backtracks all the way to one `>` and still sees a non-space. An unbounded
+ * `>+` (rather than a counted `>{1,8}`) is deliberate — a counted bound refuses
+ * a deeper run ENTIRELY (backtracking finds no match at depth 9+), so the 8/9
+ * boundary became a cliff where stripping silently stopped. `>+` is linear on
+ * an anchored run, and {@link titleScanHead} caps the line anyway.
+ *
+ * NB: {@link BLOCK_MARKER_RE}'s quote alternative is still single-`>` — not dead
+ * code (it strips a few extra levels past the loop cap below via
+ * `cleanJiraTitle`), and "harmonizing" it to a run would move that bound.
  */
-const QUOTE_MARKER_RE = /^>{1,8}(?:\s+|$)/;
+const QUOTE_MARKER_RE = /^>+(?:\s+|$)/;
 
 /**
  * Leading quote-marker runs only.
@@ -292,8 +301,9 @@ const QUOTE_MARKER_RE = /^>{1,8}(?:\s+|$)/;
  * Loops while the line keeps shrinking rather than for a fixed few passes: a
  * SPACED nesting (`"> > > > > ## Dypt"`) costs one pass per level, and the old
  * 4-iteration cap left the fifth `>` on the line, which then failed the heading
- * test and titled the row `"## Dypt"`. The cap is a termination guard, not a
- * nesting limit — each pass either removes a marker or breaks.
+ * test and titled the row `"## Dypt"`. The 32-pass cap is a termination guard
+ * that in practice bounds SPACED nesting (one pass per `"> "` level; contiguous
+ * runs strip in one pass) — beyond ~36 spaced levels residue survives, accepted.
  */
 function stripQuoteMarkers(text: string): string {
   let out = text.trimStart();

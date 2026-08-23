@@ -82,6 +82,10 @@ function freshEls(): Record<string, Stub> {
  * harmless — `clearTimeout` on an id no longer in the map is a no-op.
  */
 beforeEach(() => {
+  // `nextTimerId` is deliberately NOT reset: a closure in the bundle may hold a
+  // stale id across tests, and monotonic ids make its `clearTimeout` a no-op.
+  // Resetting to 1 would let that stale clear delete a fresh test's timer and
+  // reintroduce the vacuous pass this file's beforeEach was added to remove.
   timers.clear();
   copied = [];
   clipboardFails = false;

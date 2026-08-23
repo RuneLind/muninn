@@ -144,6 +144,10 @@ describe("jiraDraftTitle — hygiene", () => {
     // `>`, so ">> dobbeltsitert" kept its markers and became the row's name.
     expect(jiraDraftTitle(">> dobbeltsitert")).toBe("dobbeltsitert");
     expect(jiraDraftTitle(">>> tre nivåer")).toBe("tre nivåer");
+    // A counted `>{1,8}` refused a deeper run ENTIRELY (backtracking finds no
+    // match at depth 9+), so stripping fell off a cliff at the 8/9 boundary.
+    expect(jiraDraftTitle(">>>>>>>>> dyp tekst")).toBe("dyp tekst");
+    expect(jiraDraftTitle(">>>>>>>>>> # Tittel\n\nprosa")).toBe("Tittel");
     // The F2 policy is unchanged: no whitespace behind the run, no strip.
     expect(jiraDraftTitle(">>x")).toBe(">>x");
     expect(jiraDraftTitle(">>=100 saker feiler")).toBe(">>=100 saker feiler");
