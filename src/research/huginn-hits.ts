@@ -35,6 +35,13 @@
  * `collection` are what the composer's hit set is keyed on, and they come off the
  * anchor line itself.
  *
+ * **The parenthetical is not always there.** `_format_relevance_band` renders the
+ * empty string for a result whose `relevance` is null, leaving the date tail
+ * (`| updated: <date>` / `| <date>`) as the header's only evidence — so that is
+ * accepted as the fallback, filing `relevance: null`. It costs more than a title
+ * when it is missed: a rejected header leaves the row with no line to anchor its
+ * url against, and the bare url out of the PREVIOUS hit's body then lands on it.
+ *
  * Everything here is pure and total. Unknown lines are skipped, a block without a
  * `doc_id` is skipped, and nothing throws — this runs on the tool-result hot path
  * of every chat turn, where a parse failure must cost nothing but a missing row.
@@ -74,12 +81,27 @@ const URL_ONLY = /^\s*((?:https?|file):\/\/\S+)\s*$/;
 const RELEVANCE_SUFFIX =
   /\s*\((\d+(?:\.\d+)?)%\s+relevant(?:\s*·[^)]*)?\)(?:\s*\|\s*(?:updated:\s*)?\d{4}-\d{2}-\d{2})?\s*$/;
 
+/**
+ * The date tail ALONE — the header huginn renders when a result's relevance is
+ * null. `_format_relevance_band` returns `""` for that case, so the parenthetical
+ * this module otherwise identifies a header by simply is not emitted, leaving
+ * `## <title> | updated: <date>` (full) and `N. **<title>** > <s> | <date>`
+ * (brief).
+ *
+ * Weaker evidence than the parenthetical, and deliberately the fallback rather
+ * than a second first-class rule: a decoy `##` line inside a body would have to
+ * end in ` | <ISO date>` to pass it. The cost of getting it wrong is bounded the
+ * same way as before — a title and a relevance, never a row.
+ */
+const DATE_SUFFIX = /\s*\|\s*(?:updated:\s*)?\d{4}-\d{2}-\d{2}\s*$/;
+
 /** ` **[UNDER ARBEID]**` sits between the title and the relevance in full mode. */
 const WIP_SUFFIX = /\s*\*\*\[UNDER ARBEID\]\*\*\s*$/;
 
 interface HeaderCandidate {
   title: string;
-  relevance: number;
+  /** `null` when the renderer emitted no relevance parenthetical at all. */
+  relevance: number | null;
   /** Line index, so a URL line is only adopted if it follows its own header. */
   line: number;
 }
@@ -115,8 +137,12 @@ export function parseHuginnHits(text: string): HuginnHit[] {
           docId,
           collection,
           title: header?.title ?? null,
-          // A URL from before this hit's header belongs to the previous hit.
-          url: url !== null && (header === null || urlLine > header.line) ? url : null,
+          // A URL from before this hit's header belongs to the previous hit —
+          // and with no header of our own there is nothing to compare against,
+          // so an unattributable url is dropped rather than guessed at. Getting
+          // this wrong stamps the PREVIOUS hit's url on this row, which reads as
+          // a real citation pointing at the wrong document.
+          url: url !== null && header !== null && urlLine > header.line ? url : null,
           relevance: header?.relevance ?? null,
         });
       }
@@ -145,27 +171,45 @@ export function parseHuginnHits(text: string): HuginnHit[] {
   return hits;
 }
 
-/** A header line, or `null` if the line is not one (the relevance suffix decides). */
-function parseHeader(line: string): { title: string; relevance: number } | null {
+/**
+ * A header line, or `null` if the line is not one.
+ *
+ * The relevance parenthetical decides; failing that, the date tail does, and the
+ * hit is filed with `relevance: null` rather than a made-up zero — a hit huginn
+ * scored 0.0 and a hit huginn did not score are different facts, and the
+ * composer's hit list sorts on this column.
+ */
+function parseHeader(line: string): { title: string; relevance: number | null } | null {
   const brief = BRIEF_HEADER.exec(line);
   if (brief) {
     // Brief mode bolds the title, so the heading/wip/relevance tail is already
-    // outside the capture — only the tail has to carry a relevance suffix.
-    const rel = RELEVANCE_SUFFIX.exec(brief[2]!);
-    if (!rel) return null;
+    // outside the capture — only the tail has to carry a suffix we recognize.
+    const tail = matchHeaderTail(brief[2]!);
+    if (!tail) return null;
     const title = brief[1]!.trim();
-    return title ? { title, relevance: toRelevance(rel[1]!) } : null;
+    return title ? { title, relevance: tail.relevance } : null;
   }
 
   const full = FULL_HEADER.exec(line);
   if (full) {
     const rest = full[1]!;
-    const rel = RELEVANCE_SUFFIX.exec(rest);
-    if (!rel) return null;
-    const title = rest.slice(0, rel.index).replace(WIP_SUFFIX, "").trim();
-    return title ? { title, relevance: toRelevance(rel[1]!) } : null;
+    const tail = matchHeaderTail(rest);
+    if (!tail) return null;
+    const title = rest.slice(0, tail.index).replace(WIP_SUFFIX, "").trim();
+    return title ? { title, relevance: tail.relevance } : null;
   }
 
+  return null;
+}
+
+/** The header's trailing evidence: the relevance parenthetical, else the date. */
+function matchHeaderTail(
+  rest: string,
+): { index: number; relevance: number | null } | null {
+  const rel = RELEVANCE_SUFFIX.exec(rest);
+  if (rel) return { index: rel.index, relevance: toRelevance(rel[1]!) };
+  const date = DATE_SUFFIX.exec(rest);
+  if (date) return { index: date.index, relevance: null };
   return null;
 }
 
@@ -175,14 +219,20 @@ function toRelevance(percent: string): number {
 }
 
 /**
- * Tools whose result is one of huginn's rendered document listings.
+ * Tools whose result is one of huginn's rendered SEARCH results.
  *
- * Deliberately narrow. `research_knowledge` is muninn's OWN tool and persists
- * from its handler where it holds the decoded hits — claiming it here too would
- * write every row twice (its rendered text has no anchor line, so it would in
- * fact parse to nothing, but the name gate says so explicitly rather than relying
- * on that). `get_document` is included because the family is the adapter's, and
- * costs nothing: its render carries no anchor line either.
+ * Deliberately narrow — the search family and nothing else. `research_knowledge`
+ * is muninn's OWN tool and persists from its handler where it holds the decoded
+ * hits; claiming it here too would write every row twice (its rendered text has
+ * no anchor line, so it would in fact parse to nothing, but the name gate says so
+ * explicitly rather than relying on that).
+ *
+ * `get_document` USED to be admitted on the reasoning that `render_document`
+ * carries no anchor line, so it cost nothing. It is not free: the anchor is a
+ * grammar, and a page whose BODY quotes it — a wiki page documenting huginn's own
+ * search output, which is exactly the kind of page a retrieval discussion pulls
+ * up — parses to a hit for a document nobody retrieved. A tool that returns page
+ * CONTENT can say anything; only the search family's output is huginn speaking.
  *
  * The four spellings are the four connectors: `mcp__knowledge__search_knowledge`
  * (claude-cli / claude-sdk), `knowledge-search_knowledge` (copilot-sdk), the bare
@@ -193,7 +243,7 @@ function toRelevance(percent: string): number {
 export function isHuginnSearchTool(name: string): boolean {
   if (!name) return false;
   const base = baseToolName(name);
-  return base === "search_knowledge" || base === "get_document";
+  return base === "search_knowledge";
 }
 
 function baseToolName(name: string): string {

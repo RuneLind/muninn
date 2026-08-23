@@ -223,10 +223,12 @@ export class StreamParser {
       const raw = extractToolResultContent(block);
       if (typeof raw === "string") {
         const processed = processMcpToolResult(raw);
-        // Before `truncateOutput`, which cuts a large result set mid-block —
-        // fire-and-forget, and total by construction (see
-        // `research/thread-citations.ts`).
-        captureKnowledgeToolCitations(this.botName, pending.name, processed.cleanedText);
+        // Which text the citation capture reads. Normally the cleaned result —
+        // but on the divert branch below that is the CLI's pointer stub, whose
+        // hits are all on disk, so the recovered body replaces it. ONE call
+        // either way: capturing twice for one tool result would file every hit
+        // in it twice.
+        let citationText = processed.cleanedText;
         if (processed.searchTrace !== undefined || processed.searchTracePointer !== undefined) {
           pending.output = truncateOutput(processed.cleanedText);
           pending.searchTrace = processed.searchTrace;
@@ -238,6 +240,7 @@ export class StreamParser {
           const recovery = recoverOversizedClaudeCliToolResult(raw);
           if (recovery !== null) {
             pending.output = truncateOutput(raw);
+            if (recovery.text !== null) citationText = recovery.text;
             if (recovery.trace !== null) pending.searchTrace = recovery.trace;
             if (recovery.tracePointer !== null) {
               pending.searchTracePointer = recovery.tracePointer;
@@ -247,6 +250,11 @@ export class StreamParser {
             pending.output = truncateOutput(processed.cleanedText);
           }
         }
+        // After the branch, before `truncateOutput`'s result is all we keep:
+        // the capture always sees the FULL text, which `truncateOutput` cuts
+        // mid-block. Fire-and-forget and total by construction — see
+        // `research/thread-citations.ts`.
+        captureKnowledgeToolCitations(this.botName, pending.name, citationText);
       } else {
         pending.output = truncateOutput(raw);
       }

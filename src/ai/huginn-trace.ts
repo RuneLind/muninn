@@ -195,6 +195,17 @@ export interface OversizedRecovery {
    *  only happens when `stripTraceFromFile` is set and a trace marker was
    *  actually found. */
   rewritten: boolean;
+  /**
+   * The recovered tool-result body, trace fence / pointer line already peeled —
+   * i.e. what the tool result WOULD have been had the CLI not diverted it.
+   *
+   * `null` whenever the file could not be turned back into text (unreadable,
+   * not JSON, no string `result`). Exists because the caller's copy of the
+   * result is the pointer stub: anything that reads tool output for content
+   * rather than for the trace — `research/thread-citations.ts` files the hits —
+   * sees nothing at all unless it re-reads from here.
+   */
+  text: string | null;
 }
 
 /**
@@ -227,21 +238,21 @@ export function recoverOversizedClaudeCliToolResult(
       path: filePath,
       error: e instanceof Error ? e.message : String(e),
     });
-    return { filePath, trace: null, tracePointer: null, rewritten: false };
+    return { filePath, trace: null, tracePointer: null, rewritten: false, text: null };
   }
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return { filePath, trace: null, tracePointer: null, rewritten: false };
+    return { filePath, trace: null, tracePointer: null, rewritten: false, text: null };
   }
   if (typeof parsed !== "object" || parsed === null) {
-    return { filePath, trace: null, tracePointer: null, rewritten: false };
+    return { filePath, trace: null, tracePointer: null, rewritten: false, text: null };
   }
   const obj = parsed as { result?: unknown };
   if (typeof obj.result !== "string") {
-    return { filePath, trace: null, tracePointer: null, rewritten: false };
+    return { filePath, trace: null, tracePointer: null, rewritten: false, text: null };
   }
 
   // Try Phase 2 pointer first — Huginn in pointer-mode appends a single
@@ -261,7 +272,7 @@ export function recoverOversizedClaudeCliToolResult(
         });
       }
     }
-    return { filePath, trace: null, tracePointer: pointer.fetchUrl, rewritten };
+    return { filePath, trace: null, tracePointer: pointer.fetchUrl, rewritten, text: pointer.text };
   }
 
   const { text: cleanedText, trace } = parseHuginnTrace(obj.result);
@@ -279,7 +290,7 @@ export function recoverOversizedClaudeCliToolResult(
     }
   }
 
-  return { filePath, trace, tracePointer: null, rewritten };
+  return { filePath, trace, tracePointer: null, rewritten, text: cleanedText };
 }
 
 function extractTextBlocks(blocks: unknown[]): string | null {

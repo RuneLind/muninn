@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { threadCitationRows } from "./thread-citations.ts";
-import { parseHuginnHits } from "./huginn-hits.ts";
+import { isHuginnSearchTool, parseHuginnHits } from "./huginn-hits.ts";
 
 /**
  * Row shaping for the thread half of `research_citations`.
@@ -77,7 +77,7 @@ describe("parsed huginn hits are row-shapeable end to end", () => {
       hits: parseHuginnHits(text),
       threadId: "t-3",
     });
-    expect(rows).toHaveLength(4);
+    expect(rows).toHaveLength(5);
     expect(rows[0]).toMatchObject({
       botName: "melosys",
       threadId: "t-3",
@@ -87,5 +87,29 @@ describe("parsed huginn hits are row-shapeable end to end", () => {
       relevance: 1,
       cited: false,
     });
+  });
+
+  test("a `get_document` page that quotes the anchor grammar files NOTHING", () => {
+    // The whole capture, composed as `captureKnowledgeToolCitations` composes
+    // it: name gate → parse → shape. The page is a `render_document` render of
+    // a wiki page ABOUT huginn's search output, so its body carries the anchor
+    // line verbatim — which the parser, correctly, reads as a hit. The gate is
+    // what has to refuse it, and it is refused before the parser ever runs.
+    const page = [
+      "# Slik ser et søkeresultat ut",
+      "file://./huginn-nav/wiki/concepts/Søkeresultat.md",
+      "",
+      "Hvert treff avsluttes med en ankerlinje:",
+      "",
+      "## Eksempelside om testdata (82.3% relevant · medium) | updated: 2025-11-02",
+      "collection: `melosys-confluence-v3` doc_id: `Eksempelside om testdata.md`",
+    ].join("\n");
+
+    // The trap, stated: fed to the parser this page DOES produce a hit.
+    expect(parseHuginnHits(page)).toHaveLength(1);
+
+    const toolName = "mcp__knowledge__get_document";
+    const hits = isHuginnSearchTool(toolName) ? parseHuginnHits(page) : [];
+    expect(threadCitationRows({ botName: "melosys", hits, threadId: "t-4" })).toEqual([]);
   });
 });

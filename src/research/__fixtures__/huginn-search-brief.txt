@@ -22,4 +22,9 @@ Eksempeltjenesten kaller Eksempelregisteret hver natt.
    Testdataene i eksempelmiljøet nullstilles hver natt klokka 03:00.
    collection: `melosys-confluence-v3` doc_id: `Eksempelside om testdata.md`
 
+4. **Eksempelnotat uten relevans** > Om | 2026-03-05
+   file://./huginn-nav/wiki/entities/Eksempelnotat.md
+   Eksempelnotat er en oppdiktet side som huginn rendret uten relevans-score.
+   collection: `nav-wiki` doc_id: `entities/Eksempelnotat.md`
+
 huginn-trace-url: http://127.0.0.1:8080/api/trace/00000000-0000-4000-8000-000000000002

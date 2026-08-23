@@ -24,6 +24,12 @@ import { isHuginnSearchTool, parseHuginnHits } from "./huginn-hits.ts";
  * corpus and no search involved. Re-run that check by hand if huginn's renderer
  * moves; it cannot live here, since it needs huginn's checkout.
  *
+ * The relevance-`null` entry added to each fixture afterwards was transcribed
+ * from the same renderer by READING it, not by running it: `_format_relevance_band`
+ * returns `""` for a result whose `relevance` is None, which leaves full mode's
+ * `## <title> | updated: <date>` and brief mode's `N. **<title>** > <s> | <date>`
+ * — the date tail with no parenthetical in front of it.
+ *
  * Both fixtures carry the decoy the parser exists for — a `##` line inside a
  * body or snippet that is not a header — and the mutation each decoy actually
  * catches is named on the test. They were measured, not assumed: see the two
@@ -37,12 +43,13 @@ describe("parseHuginnHits — full mode", () => {
   const hits = parseHuginnHits(fixture("huginn-search-full.txt"));
 
   test("one hit per anchor line, in render order", () => {
-    expect(hits).toHaveLength(4);
+    expect(hits).toHaveLength(5);
     expect(hits.map((h) => h.docId)).toEqual([
       "MELOSYS-101_Eksempelsak_om_innlogging.md",
       "Eksempelside om testdata.md",
       "entities/Eksempel.md",
       "entities/Eksempeltjeneste.md",
+      "entities/Eksempelnotat.md",
     ]);
   });
 
@@ -77,6 +84,20 @@ describe("parseHuginnHits — full mode", () => {
     expect(hits[3]!.title).toBe("Eksempeltjeneste");
   });
 
+  test("a header with NO relevance parenthetical is still a header", () => {
+    // `_format_relevance_band` returns "" when the API sends relevance: null,
+    // so the header degrades to `## <title> | updated: <date>`. Rejecting it
+    // costs the title AND — the reason this is not cosmetic — lets the url line
+    // out of the PREVIOUS hit's body slide forward onto this row.
+    expect(hits[4]).toEqual({
+      docId: "entities/Eksempelnotat.md",
+      collection: "nav-wiki",
+      title: "Eksempelnotat uten relevans",
+      url: null,
+      relevance: null,
+    });
+  });
+
   test("DECOY: a `## Description` line in a Jira body never titles the next hit", () => {
     // Hit 1's body contains `## Description` and `## Løsning` at column 0,
     // between hit 1's anchor and hit 2's real header. Measured against two
@@ -96,12 +117,26 @@ describe("parseHuginnHits — brief mode", () => {
   const hits = parseHuginnHits(fixture("huginn-search-brief.txt"));
 
   test("one hit per numbered entry, in render order", () => {
-    expect(hits).toHaveLength(3);
+    expect(hits).toHaveLength(4);
     expect(hits.map((h) => h.collection)).toEqual([
       "jira-issues",
       "nav-wiki",
       "melosys-confluence-v3",
+      "nav-wiki",
     ]);
+  });
+
+  test("an entry with NO relevance parenthetical keeps its title and its url", () => {
+    // Brief mode's tail is ` > <section> | <date>` when relevance is null —
+    // no `updated:` prefix, unlike full mode. The url line belongs to this
+    // entry (it FOLLOWS the header), so unlike full mode's case it is adopted.
+    expect(hits[3]).toEqual({
+      docId: "entities/Eksempelnotat.md",
+      collection: "nav-wiki",
+      title: "Eksempelnotat uten relevans",
+      url: "file://./huginn-nav/wiki/entities/Eksempelnotat.md",
+      relevance: null,
+    });
   });
 
   test("the bolded title is taken without the ` > <section>` tail", () => {
@@ -155,6 +190,22 @@ describe("parseHuginnHits — what it refuses to invent", () => {
     expect(hits[0]!.url).toBe("https://eksempel.invalid/med-doc-id");
   });
 
+  test("a url with no identifiable header before it is left off the row", () => {
+    // Unattributable: with no header to compare against we cannot tell whether
+    // the line belongs to this entry or trails the previous one, and inventing
+    // the previous hit's url onto this row is the worse of the two errors.
+    const text = [
+      "prose from the previous hit's body",
+      "https://eksempel.invalid/forrige-treff",
+      "collection: `nav-wiki` doc_id: `entities/Uten.md`",
+    ].join("\n");
+    const hits = parseHuginnHits(text);
+    expect(hits).toHaveLength(1);
+    expect(hits[0]!.url).toBeNull();
+    expect(hits[0]!.title).toBeNull();
+    expect(hits[0]!.relevance).toBeNull();
+  });
+
   test("a repeated doc_id is filed once", () => {
     const anchor = "collection: `nav-wiki` doc_id: `entities/Eksempel.md`";
     expect(parseHuginnHits([anchor, "", anchor].join("\n"))).toHaveLength(1);
@@ -192,7 +243,6 @@ describe("isHuginnSearchTool", () => {
       "knowledge-search_knowledge",
       "search_knowledge",
       "search_knowledge (knowledge)",
-      "mcp__knowledge__get_document",
     ]) {
       expect(isHuginnSearchTool(name)).toBe(true);
     }
@@ -202,6 +252,21 @@ describe("isHuginnSearchTool", () => {
     // `research_knowledge` persists from its own handler; claiming it here too
     // would file every row twice.
     for (const name of ["", "research_knowledge", "mcp__muninn__research_knowledge", "Read"]) {
+      expect(isHuginnSearchTool(name)).toBe(false);
+    }
+  });
+
+  test("rejects get_document — a page that QUOTES the grammar is not a hit", () => {
+    // `render_document` has no anchor line of its own, so admitting it looked
+    // free. It is not: a wiki page documenting huginn's own render format
+    // carries the `` collection: `x` doc_id: `y` `` line in its BODY, and that
+    // parses to a hit for a document nobody retrieved.
+    for (const name of [
+      "mcp__knowledge__get_document",
+      "knowledge-get_document",
+      "get_document",
+      "get_document (knowledge)",
+    ]) {
       expect(isHuginnSearchTool(name)).toBe(false);
     }
   });
