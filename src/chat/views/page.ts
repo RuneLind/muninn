@@ -9,16 +9,19 @@ import { webFormatClientScript } from "./components/web-format-client.ts";
 import { inspectorPanelScript } from "./components/inspector-panel.ts";
 import { inspectorPanelClientScript } from "./components/inspector-panel-client.ts";
 import { streamingUiScript } from "./components/streaming-ui.ts";
+import { jiraEntryScript } from "./components/jira-entry.ts";
+import { jiraEntryClientScript } from "./components/jira-entry-client.ts";
 import { connectorSelectorScript } from "./components/connector-selector.ts";
 import { researchCardScript } from "./components/research-card.ts";
 import { threadManagerScript } from "./components/thread-manager.ts";
 import { knowledgeLinksScript } from "./components/knowledge-links.ts";
 
 export async function renderChatPage(): Promise<string> {
-  const [webFormatScript, helpersScript, inspectorScript] = await Promise.all([
+  const [webFormatScript, helpersScript, inspectorScript, jiraEntryBundle] = await Promise.all([
     webFormatClientScript(),
     helpersClientScript(),
     inspectorPanelClientScript(),
+    jiraEntryClientScript(),
   ]);
   return `<!DOCTYPE html>
 <html lang="en">
@@ -138,6 +141,7 @@ export async function renderChatPage(): Promise<string> {
     ${requestProgressScript()}
     ${webFormatScript}
     ${inspectorScript}
+    ${jiraEntryBundle}
     ${CHAT_SSE_SCRIPT}
     ${CHAT_SCRIPT}
   </script>
@@ -308,6 +312,9 @@ const CHAT_SCRIPT = `
   // ── Streaming UI functions (from streaming-ui.ts) ──
   ${streamingUiScript()}
 
+  // ── «Lag Jira-sak» entry (from jira-entry.ts) ──
+  ${jiraEntryScript()}
+
   // ── Connector selector functions (from connector-selector.ts) ──
   ${connectorSelectorScript()}
 
@@ -319,6 +326,9 @@ const CHAT_SCRIPT = `
       var res = await fetch('/chat/bots').then(function(r) { return r.json(); });
       bots = res.bots || [];
       connectors = res.connectors || [];
+      // The Jira composer's bot, resolved server-side. Null on an install where
+      // JIRA_BOT names no discovered bot — the control then never renders.
+      jiraBotName = typeof res.jiraBot === 'string' ? res.jiraBot : null;
 
       var container = document.getElementById('botSelector');
       var botNames = bots.map(function(b) { return b.name; });

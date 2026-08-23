@@ -24,9 +24,11 @@ import {
   JIRA_NOTES_MAX,
   JIRA_UNREACHABLE_MESSAGE,
   isJiraDepth,
+  isJiraDraftSource,
   type JiraCitation,
   type JiraCoverage,
   type JiraDepth,
+  type JiraDraftSource,
   type JiraDraftStatus,
   type JiraDraftView,
   type JiraKeyVerdict,
@@ -141,6 +143,22 @@ export interface JiraComposerState {
 
   draftId?: string;
   status?: JiraDraftStatus;
+  /**
+   * Where this draft came from. `notes` until a row says otherwise.
+   *
+   * A `thread` draft is a TURN in a chat conversation: the raw material is the
+   * conversation, `notes` is only the `fra samtale: <name>` placeholder the
+   * server stores because the column is NOT NULL, and every later operation
+   * differs (the regenerate is another turn, the hit set is re-seeded from
+   * `research_citations`). The page must therefore never render that placeholder
+   * as editable raw material or as a search query.
+   */
+  source: JiraDraftSource;
+  /** The chat thread a `thread` draft runs in. */
+  threadId?: string;
+  /** That thread's name, resolved server-side at READ time (a thread can be
+   *  renamed, so the row deliberately stores no copy). */
+  threadName?: string;
   /** The draft as it stands, INCLUDING the reader's unsaved edits. */
   markdown: string;
   /** The last text the server confirmed — what `dirty` compares against. */
@@ -203,6 +221,7 @@ export function initialJiraState(): JiraComposerState {
     running: false,
     polling: false,
     streamed: "",
+    source: "notes",
     markdown: "",
     citations: [],
     excludeDocIds: [],
@@ -266,7 +285,7 @@ export function retainedCount(citations: JiraCitation[], excludeDocIds: string[]
  * paths and it is the one steer a reader can usefully change between runs.
  */
 export function jiraDraftBody(state: JiraComposerState): Record<string, unknown> {
-  if (state.draftId && state.citations.length > 0) {
+  if (isRegenerate(state)) {
     return {
       draftId: state.draftId,
       template: state.template,
@@ -283,9 +302,25 @@ export function jiraDraftBody(state: JiraComposerState): Record<string, unknown>
   };
 }
 
-/** Is this POST a regenerate (reusing a stored hit set) rather than a first draft? */
+/** Is this draft a turn in a chat thread rather than a paste of raw material? */
+export function isThreadDraft(state: JiraComposerState): boolean {
+  return state.source === "thread" && !!state.draftId;
+}
+
+/**
+ * Is this POST a regenerate (an existing draft) rather than a first draft?
+ *
+ * **The citation count is a `notes`-path test only.** A thread draft's hit set is
+ * re-seeded from `research_citations` on every run, so a conversation that has
+ * not retrieved yet legitimately has ZERO stored citations — and with the count
+ * as the only test, `jiraDraftBody` fell through to the FIRST-DRAFT shape and
+ * posted `notes: "fra samtale: <name>"` as raw material. That is a brand-new,
+ * notes-sourced draft over a nine-word placeholder: the thread is never asked,
+ * the reader's draft id is orphaned, and the result looks like a real task.
+ */
 export function isRegenerate(state: JiraComposerState): boolean {
-  return !!state.draftId && state.citations.length > 0;
+  if (!state.draftId) return false;
+  return isThreadDraft(state) || state.citations.length > 0;
 }
 
 /** Can the **Skriv utkast** button fire? */
@@ -393,6 +428,11 @@ export function mergeDraftView(
   return {
     draftId: v.draftId,
     status: v.status,
+    // A row that predates the column (or a degraded payload) reads as `notes` —
+    // the shape every rule here already defaults to.
+    source: isJiraDraftSource(v.source) ? v.source : "notes",
+    threadId: typeof v.threadId === "string" && v.threadId ? v.threadId : undefined,
+    threadName: typeof v.threadName === "string" && v.threadName ? v.threadName : undefined,
     template,
     // A stored template the route did not serve (a renamed or removed
     // `jiraTemplate.<id>.md`) is added as an option, so the picker shows the id
@@ -707,16 +747,15 @@ export function jiraLeftHtml(state: JiraComposerState): string {
 
   const regen = isRegenerate(state);
   const blocked = submitBlockedReason(state);
+  const fromThread = isThreadDraft(state);
 
-  return `
-    <div class="jc-actions">
-      <button id="${JC_SUBMIT_ID}" class="jc-primary" type="button"${canSubmit(state) ? "" : " disabled"}>
-        ${state.running ? "Skriver…" : regen ? "Generer på nytt" : "Skriv utkast"}
-      </button>
-      <div class="jc-status" id="${JC_STATUS_ID}">${statusLineHtml(state)}</div>
-      <p class="jc-note" id="${JC_BLOCKED_ID}"${blocked ? "" : " hidden"}>${blocked ? esc(blocked) : ""}</p>
-    </div>
-
+  // **A thread draft has no raw material to show.** `state.notes` is the
+  // `fra samtale: <name>` placeholder the server stores because the column is NOT
+  // NULL — rendering it in the textarea offered nine words of server bookkeeping
+  // as if it were the reader's own pasted note, editable and about to be sent.
+  const rawMaterial = fromThread
+    ? jiraThreadSourceHtml(state)
+    : `
     <h2 class="jc-h">Råmateriale</h2>
     <p class="jc-sub">Møtenotat, Slack-tråd, «det vi ble enige om i går». Hentes over
       <code>jira-issues</code>, <code>melosys-confluence-v3</code> og <code>nav-wiki</code>${
@@ -724,7 +763,18 @@ export function jiraLeftHtml(state: JiraComposerState): string {
       }.</p>
     <textarea id="${JC_NOTES_ID}" class="jc-notes" rows="16" spellcheck="false"
       placeholder="Lim inn notatene her…">${esc(state.notes)}</textarea>
-    <div class="jc-charcount" id="${JC_NOTES_COUNT_ID}">${charCountHtml(state.notes.length, JIRA_NOTES_MAX)}</div>
+    <div class="jc-charcount" id="${JC_NOTES_COUNT_ID}">${charCountHtml(state.notes.length, JIRA_NOTES_MAX)}</div>`;
+
+  return `
+    ${fromThread ? jiraThreadBannerHtml(state) : ""}
+    <div class="jc-actions">
+      <button id="${JC_SUBMIT_ID}" class="jc-primary" type="button"${canSubmit(state) ? "" : " disabled"}>
+        ${state.running ? "Skriver…" : regen ? "Generer på nytt" : "Skriv utkast"}
+      </button>
+      <div class="jc-status" id="${JC_STATUS_ID}">${statusLineHtml(state)}</div>
+      <p class="jc-note" id="${JC_BLOCKED_ID}"${blocked ? "" : " hidden"}>${blocked ? esc(blocked) : ""}</p>
+    </div>
+${rawMaterial}
 
     <label class="jc-lab" for="${JC_TEMPLATE_ID}">Mal</label>
     <select id="${JC_TEMPLATE_ID}" class="jc-select">${templates}</select>
@@ -738,11 +788,82 @@ export function jiraLeftHtml(state: JiraComposerState): string {
       placeholder="f.eks. «fokuser på migreringsrisikoen»">${esc(state.extra)}</textarea>
     <div class="jc-charcount" id="${JC_EXTRA_COUNT_ID}">${charCountHtml(state.extra.length, JIRA_EXTRA_MAX)}</div>
     ${
-      regen
-        ? `<p class="jc-note">Råmaterialet er låst til dette utkastet — treffene ble hentet for akkurat denne teksten.
+      fromThread
+        ? `<p class="jc-note">Mal, dybde og ekstra instruks gjelder fra og med neste generering — de sendes med
+             som en ny tur i samtalen.</p>`
+        : regen
+          ? `<p class="jc-note">Råmaterialet er låst til dette utkastet — treffene ble hentet for akkurat denne teksten.
              Endre notatene ved å starte et nytt utkast (åpne <code>/jira</code> uten <code>?draft=</code>).</p>`
-        : ""
+          : ""
     }`;
+}
+
+/**
+ * The chat deep link for a thread — `handleDeepLink`'s own shape.
+ *
+ * `user` is deliberately omitted: this page never knows which user owns the
+ * thread, and the chat page resolves one anyway (URL preference → the bot's
+ * `bot_default_user` → the sole user). `bot` and `thread` are all the deep link
+ * actually needs — `selectBot(bot, thread)` auto-selects it.
+ *
+ * `undefined` when the bot has not resolved yet (the templates fetch is what
+ * carries it) or there is no thread: a link that cannot be built is not rendered,
+ * rather than rendered pointing at `/chat?bot=&thread=`.
+ */
+export function jiraChatUrl(bot: string | undefined, threadId: string | undefined): string | undefined {
+  if (!bot || !threadId) return undefined;
+  return `/chat?bot=${encodeURIComponent(bot)}&thread=${encodeURIComponent(threadId)}`;
+}
+
+/** The name to call the conversation. Falls back to the thread id — a deleted
+ *  thread row leaves `threadName` null, and "samtalen «»" says nothing. */
+export function threadDraftLabel(state: JiraComposerState): string {
+  return state.threadName || state.threadId || "samtalen";
+}
+
+/**
+ * The banner that tells the reader where this draft came from.
+ *
+ * It leads the LEFT column, above the action row, because everything below it
+ * behaves differently: the raw material is a conversation, the hit set is what
+ * that conversation found, and «Generer på nytt» writes another turn into it.
+ */
+export function jiraThreadBannerHtml(state: JiraComposerState): string {
+  const href = jiraChatUrl(state.bot, state.threadId);
+  const link = href
+    ? ` <a class="jc-threadlink" href="${esc(href)}" target="_blank" rel="noopener">Juster i samtalen →</a>`
+    : "";
+  return `<div class="jc-banner jc-banner-thread">Utkast fra samtalen «${esc(
+    threadDraftLabel(state),
+  )}» — kildene er det samtalen fant.${link}</div>`;
+}
+
+/** What stands where the raw-material textarea stands on a notes draft. */
+export function jiraThreadSourceHtml(state: JiraComposerState): string {
+  const href = jiraChatUrl(state.bot, state.threadId);
+  const name = esc(threadDraftLabel(state));
+  return `
+    <h2 class="jc-h">Kilde</h2>
+    <p class="jc-threadname">${href ? `<a href="${esc(href)}" target="_blank" rel="noopener">${name}</a>` : name}</p>
+    <p class="jc-sub">Råmaterialet er selve samtalen — den har allerede hentet, diskutert og rettet.
+      Legg til det som mangler i chatten, og generer på nytt herfra.</p>`;
+}
+
+/**
+ * The middle column's provenance line.
+ *
+ * On a notes draft it says what was SEARCHED (a condensed question). A thread
+ * draft condenses nothing — `retrieval_question` holds the same
+ * `fra samtale: <name>` placeholder as `notes`, and printing that after
+ * «Søkte etter:» claimed a search that never ran.
+ */
+export function jiraSearchedLineHtml(state: JiraComposerState): string {
+  if (isThreadDraft(state)) {
+    return `<p class="jc-searched">Kilder fra samtalen «${esc(threadDraftLabel(state))}».</p>`;
+  }
+  return state.retrievalQuestion
+    ? `<p class="jc-searched">Søkte etter: ${esc(state.retrievalQuestion)}</p>`
+    : "";
 }
 
 /** The one line that says what the page is doing right now. */
@@ -780,9 +901,7 @@ export function jiraCitationsHtml(state: JiraComposerState): string {
     state.citations.length ? `<span class="jc-count">${kept} av ${state.citations.length} på</span>` : ""
   }</h2>`;
 
-  const question = state.retrievalQuestion
-    ? `<p class="jc-searched">Søkte etter: ${esc(state.retrievalQuestion)}</p>`
-    : "";
+  const question = jiraSearchedLineHtml(state);
 
   const noticeHtml = notice
     ? `<div class="jc-banner jc-banner-${notice.tone}">${esc(notice.text)}</div>`
@@ -793,7 +912,9 @@ export function jiraCitationsHtml(state: JiraComposerState): string {
       <p class="jc-empty">${
         state.running || state.polling
           ? "Henter…"
-          : "Ingen kilder ennå. Skriv et utkast, så vises hele det lagrede trefflista her."
+          : isThreadDraft(state)
+            ? "Samtalen hentet ingen kilder — utkastet er skrevet fra det som ble sagt i chatten."
+            : "Ingen kilder ennå. Skriv et utkast, så vises hele det lagrede trefflista her."
       }</p>`;
   }
 
