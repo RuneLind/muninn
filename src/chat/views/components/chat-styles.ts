@@ -354,6 +354,64 @@ export function chatStyles(): string {
       border-color: var(--accent);
       background: color-mix(in srgb, var(--accent) 14%, transparent);
     }
+
+    /* ── «🧾 Lag Jira-sak» — the from-thread draft entry ───────────────────── */
+    /* The row it rides in is hover-revealed; a message carrying this control is
+       not (see appendJiraEntryControl) — an action the reader must find cannot
+       live behind a hover. */
+    .msg-feedback.has-jira { opacity: 1; }
+    .msg-jira-btn {
+      background: transparent;
+      border: 1px solid var(--border-primary);
+      border-radius: 6px;
+      padding: 1px 9px;
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--text-secondary);
+      cursor: pointer;
+      transition: border-color .12s ease, color .12s ease;
+    }
+    .msg-jira-btn:hover { border-color: var(--accent); color: var(--accent-light, var(--accent)); }
+    .je-panel {
+      margin-top: 8px;
+      border: 1px solid var(--border-primary);
+      border-left: 3px solid var(--accent);
+      border-radius: 8px;
+      background: var(--bg-surface);
+      padding: 9px 11px;
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+      white-space: normal;
+    }
+    .je-row { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+    .je-foot { margin-top: 1px; }
+    .je-lab {
+      font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase;
+      color: var(--text-muted); font-weight: 600;
+    }
+    .je-select, .je-extra {
+      font: inherit; font-size: 12.5px; padding: 4px 8px; border-radius: 6px;
+      border: 1px solid var(--border-primary); background: var(--bg-panel); color: var(--text-primary);
+    }
+    .je-extra { width: 100%; }
+    .je-primary {
+      border: 1px solid var(--accent); border-radius: 6px; font: inherit; font-size: 12.5px;
+      font-weight: 600; padding: 4px 12px; cursor: pointer;
+      background: color-mix(in srgb, var(--accent) 14%, transparent);
+      color: var(--accent-light, var(--accent));
+    }
+    .je-secondary {
+      border: 1px solid var(--border-primary); border-radius: 6px; font: inherit; font-size: 12.5px;
+      padding: 4px 11px; cursor: pointer; background: var(--bg-panel); color: var(--text-secondary);
+    }
+    .je-primary:disabled, .je-secondary:disabled { opacity: .5; cursor: default; }
+    .je-note { font-size: 11px; color: var(--text-muted); line-height: 1.45; }
+    .je-msgwrap { min-height: 0; }
+    .je-msg { font-size: 12px; line-height: 1.45; color: var(--text-secondary); }
+    .je-msg-err { color: var(--status-error); }
+    a.je-msg-ok, .je-msg-ok { color: var(--status-success); }
+
     .msg-user {
       color: var(--text-secondary);
     }

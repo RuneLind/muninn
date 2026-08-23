@@ -234,6 +234,14 @@ const JIRA_PAGE_STYLES = `
     .jc-banner li { margin-bottom: 3px; }
     .jc-banner-warn { border-color: color-mix(in srgb, var(--status-warning) 45%, transparent); background: color-mix(in srgb, var(--status-warning) 9%, transparent); }
     .jc-banner-bad { border-color: color-mix(in srgb, var(--status-error) 45%, transparent); background: color-mix(in srgb, var(--status-error) 9%, transparent); }
+    /* "this draft came out of a conversation" — provenance, not a problem, so it
+       borrows the accent rather than a status colour. */
+    .jc-banner-thread { border-color: var(--jc-accent); background: var(--jc-accent-wash); color: var(--jc-ink-2); }
+    a.jc-threadlink { color: var(--jc-accent-ink); text-decoration: none; white-space: nowrap; }
+    a.jc-threadlink:hover { text-decoration: underline; }
+    .jc-threadname { font-size: 13px; font-weight: 600; color: var(--jc-ink); overflow-wrap: anywhere; }
+    .jc-threadname a { color: var(--jc-ink); text-decoration: none; }
+    .jc-threadname a:hover { color: var(--jc-accent-ink); text-decoration: underline; }
 
     /* ---- citations ------------------------------------------------------ */
     .jc-searched { font-size: 11.5px; color: var(--jc-muted); font-style: italic; line-height: 1.45; }

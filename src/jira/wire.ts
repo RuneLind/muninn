@@ -270,6 +270,15 @@ export function isJiraDraftSource(value: unknown): value is JiraDraftSource {
 /** `GET /api/jira/draft/:id`. `markdown` is null while `generating`. */
 export interface JiraDraftView {
   draftId: string;
+  /**
+   * The bot the draft was written on (`bot_name` on the row).
+   *
+   * Served because the page's «Juster i samtalen» deep link is built from it and
+   * `GET /api/jira/templates` was the only thing that set it — so a templates
+   * 503, exactly the state in which the reader most wants to get back to the
+   * conversation, took the link away with it.
+   */
+  bot: string;
   status: JiraDraftStatus;
   /**
    * The template id as stored — a plain string, NOT {@link JiraTemplateId}.
@@ -319,6 +328,15 @@ export interface JiraDraftView {
    * is gone (there is deliberately no FK).
    */
   threadName: string | null;
+  /**
+   * That thread's OWNER (`threads.user_id`), joined at READ time like the name.
+   *
+   * The chat's `handleDeepLink` honours a `user=` param, and the deep link needs
+   * it: without one the chat resolves whichever user that browser last used on
+   * this bot, and `selectThread(<id>)` then looks for the thread in someone
+   * else's list. Null when there is no thread, or when the thread row is gone.
+   */
+  threadUserId: string | null;
   /**
    * The assistant message whose text this draft's `markdown` was taken from.
    *

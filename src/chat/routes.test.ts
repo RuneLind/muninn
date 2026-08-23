@@ -1,4 +1,4 @@
-import { test, expect, afterAll } from "bun:test";
+import { test, expect, describe, afterAll } from "bun:test";
 import { mkdtemp, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -116,4 +116,38 @@ test("spec POST rejects an unknown status before writing the file", async () => 
   expect(post.status).toBe(400);
   // file must NOT have been written
   await expect(readFile(join(dir, "specs", "user_1", "MELOSYS-201.md"), "utf8")).rejects.toBeDefined();
+});
+
+// ── `GET /bots`'s `jiraBot` ──────────────────────────────────────────────────
+//
+// The chat page renders «Lag Jira-sak» only on the bot this field names, so the
+// field has to agree with the resolver `/api/jira/*` actually 503s on. That is
+// the LIVE discovery (`discoverAllBots`), not the token-gated list captured at
+// process start and handed to `createChatRoutes` — a bot folder with no Telegram
+// token resolved for the routes and not for this payload.
+//
+// `bots/jarvis/` is the one bot folder checked into the repo, so it is present in
+// any checkout; `testbot` (the caller's list) is present in NEITHER discovery.
+describe("GET /bots — jiraBot", () => {
+  const prev = process.env.JIRA_BOT;
+  afterAll(() => {
+    if (prev === undefined) delete process.env.JIRA_BOT;
+    else process.env.JIRA_BOT = prev;
+  });
+
+  test("names the LIVE-discovered bot, not one from the caller's startup list", async () => {
+    process.env.JIRA_BOT = "jarvis";
+    const { app } = await appWithBot();
+    const body = (await (await app.request("/bots")).json()) as { jiraBot: string | null };
+    expect(body.jiraBot).toBe("jarvis");
+  });
+
+  test("is null when JIRA_BOT names nothing discovered — the control then never renders", async () => {
+    process.env.JIRA_BOT = "testbot";
+    const { app } = await appWithBot();
+    const body = (await (await app.request("/bots")).json()) as { jiraBot: string | null };
+    // `testbot` IS in the list this router was constructed with. Resolving from
+    // that list answered "testbot" for a name every /api/jira/* route 503s on.
+    expect(body.jiraBot).toBeNull();
+  });
 });

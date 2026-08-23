@@ -125,6 +125,7 @@ mock.module("../../db/research-citations.ts", () => ({
  */
 interface Row {
   draftId: string;
+  botName: string;
   status: string;
   template: string;
   depth: string;
@@ -156,7 +157,7 @@ mock.module("../../db/jira-drafts.ts", () => ({
   }) => {
     const id = crypto.randomUUID();
     rows.set(id, {
-      draftId: id, status: "generating", template: i.template, depth: i.depth, notes: i.notes,
+      draftId: id, botName: i.botName, status: "generating", template: i.template, depth: i.depth, notes: i.notes,
       extra: i.extra, markdown: null, citations: [], excludeDocIds: [], keyVerdicts: [], markdownFlags: [],
       retrievalCoverage: null, retrievalQuestion: "", error: null,
       source: i.source ?? "notes", threadId: i.threadId ?? null,
@@ -209,6 +210,10 @@ mock.module("../../db/jira-drafts.ts", () => ({
     const retained = (r.citations as { docId: string }[]).filter((c) => !excluded.has(c.docId)).length;
     return {
       ...r,
+      // The real read LEFT-JOINs `threads` for both of these; the mock resolves
+      // them the same way, and a deleted thread row leaves `threadUserId` null.
+      bot: r.botName,
+      threadUserId: r.threadId ? (threads.get(r.threadId)?.userId ?? null) : null,
       coverage: r.retrievalCoverage === null && r.citations.length === 0
         ? null
         : effectiveCoverage(r.retrievalCoverage as never, retained),
@@ -768,6 +773,49 @@ describe("GET /api/jira/draft/:id — the polling contract", () => {
   test("an unknown id is a 404, including a non-uuid one", async () => {
     const res = await makeApp().request("/api/jira/draft/not-a-uuid");
     expect(res.status).toBe(404);
+  });
+
+  /**
+   * Two fields the page cannot get anywhere else.
+   *
+   * `bot` — the «Juster i samtalen» deep link is built from it, and it used to be
+   * set ONLY by the templates fetch, so a templates 503 (exactly the moment the
+   * reader most wants to go back to the conversation) took the link with it. The
+   * row has always known its own bot.
+   *
+   * `threadUserId` — `threads.user_id`, joined the same way `threadName` is. The
+   * chat's `handleDeepLink` honours `user=`, and without it the link resolved to
+   * whichever user that browser last used on this bot, where `selectThread` then
+   * cannot find the thread.
+   */
+  test("the view carries the draft's bot and the thread's OWNER", async () => {
+    threads.set(THREAD_ID, THREAD);
+    threadCitations = THREAD_CITATIONS;
+    threadHistory = [{ role: "assistant", text: "Se MELOSYS-8150." }];
+    __setJiraThreadTurnForTest(scriptedThreadTurn());
+    const app = makeApp();
+    const started = await (await app.request("/api/jira/draft/from-thread", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ threadId: THREAD_ID, template: "bug", depth: "skisse" }),
+    })).json();
+    await new Promise((r) => setTimeout(r, 40));
+
+    const view = await (await app.request(`/api/jira/draft/${started.draftId}`)).json();
+    expect(view.bot).toBe("melosys");
+    expect(view.threadUserId).toBe("u1");
+    expect(view.threadName).toBe("medlemskap-uttrekk");
+  });
+
+  test("a notes-sourced draft has no thread owner, but still names its bot", async () => {
+    const app = makeApp();
+    const started = await (await post(app, "/api/jira/draft/start", {
+      notes: NOTES, template: "bug", depth: "skisse",
+    })).json();
+    await new Promise((r) => setTimeout(r, 40));
+    const view = await (await app.request(`/api/jira/draft/${started.draftId}`)).json();
+    expect(view.bot).toBe("melosys");
+    expect(view.threadUserId).toBeNull();
   });
 });
 
@@ -1606,7 +1654,7 @@ describe("regenerate on a thread-sourced draft", () => {
     expect(threadTurns).toHaveLength(1);
   });
 
-  test("emits NO `citations` frame — the client would adopt the narrow set", async () => {
+  test("emits the WIDE re-seeded set as its `citations` frame, never the retained one", async () => {
     const draftId = await startThreadDraft();
     __setJiraThreadTurnForTest(scriptedThreadTurn("## Symptom\nKortere. Se MELOSYS-8150."));
 
@@ -1619,16 +1667,21 @@ describe("regenerate on a thread-sourced draft", () => {
       }),
     })).text());
 
-    // Rule 1 of the page (src/dashboard/CLAUDE.md): the middle column renders the
-    // WIDE stored set. The notes path emits no `citations` on a regenerate for
-    // exactly this reason; this path emitted the RETAINED, renumbered set, and
-    // the client overwrites `state.citations` with any non-empty array — so the
-    // row the reader had just switched off vanished from the toggle column and
-    // could never be switched back on.
-    expect(events.map((e) => e.event)).not.toContain("citations");
-    // The wide set is still on the row, which is what the poll and the GET carry.
+    // Rule 1 of the page (src/dashboard/CLAUDE.md) is that the middle column
+    // renders the WIDE set — NOT that this path stays silent. On the THREAD path
+    // the hit set is re-seeded from `research_citations` on every run, so it
+    // legitimately changes between turns; emitting nothing left the toggle column
+    // showing the previous turn's sources until the reader reloaded. What it must
+    // never emit is the RETAINED, renumbered set, which would delete the row the
+    // reader just switched off and leave nothing to switch back on.
+    const frame = events.find((e) => e.event === "citations");
+    expect(frame).toBeDefined();
+    const emitted = (frame!.data.citations as { docId: string }[]).map((c) => c.docId);
+    expect(emitted).toContain("Team MELOSYS/rammeavtale.md");
+    expect(emitted).toHaveLength(2);
+    // …and it matches what the row holds, which is what the poll and the GET carry.
     const view = await (await makeApp().request(`/api/jira/draft/${draftId}`)).json();
-    expect(view.citations).toHaveLength(2);
+    expect(view.citations.map((c: { docId: string }) => c.docId)).toEqual(emitted);
   });
 
   test("a from-thread POST during a regenerate of the same thread is a 409", async () => {
@@ -1725,5 +1778,53 @@ describe("regenerate on a thread-sourced draft", () => {
     // The generic sentence, never the connector's own text — this is read back
     // through a CORS-open GET.
     expect(view.error).not.toContain("120000ms");
+  });
+
+  /**
+   * The row never carries an exclusion the wide set cannot SHOW.
+   *
+   * This path re-seeds its hit set from `research_citations` on every run, so an
+   * exclusion the reader made against the previous seeding can name a doc the new
+   * one does not have. Stored as-is it is a ghost: the toggle column cannot render
+   * it, so nobody can switch it back on, and it silently narrows every later run.
+   *
+   * The intersection is the SERVER's, done once at seed time, because the client
+   * pruning it instead made the two ends disagree — the row kept the unpruned set
+   * and the next poll re-adopted exactly what the client had just dropped.
+   */
+  test("an exclusion the re-seeded set cannot show is intersected away; one it can show is kept", async () => {
+    const draftId = await startThreadDraft();
+
+    // The conversation's rammeavtale citation is gone from the re-seeded set.
+    threadCitations = [THREAD_CITATIONS[0]!];
+    __setJiraThreadTurnForTest(scriptedThreadTurn("## Symptom\nKortere."));
+    await (await makeApp().request("/api/jira/draft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        draftId, template: "bug", depth: "skisse",
+        excludeDocIds: ["Team MELOSYS/rammeavtale.md"],
+      }),
+    })).text();
+
+    let view = await (await makeApp().request(`/api/jira/draft/${draftId}`)).json();
+    expect(view.status).toBe("ready");
+    expect(view.citations.map((c: { docId: string }) => c.docId)).toEqual(["MELOSYS-8150_Uttrekk.md"]);
+    expect(view.excludeDocIds).toEqual([]);
+
+    // …and the other direction: an exclusion the seeded set DOES carry stays,
+    // or the reader's toggle would be silently undone on every run.
+    threadCitations = THREAD_CITATIONS;
+    await (await makeApp().request("/api/jira/draft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        draftId, template: "bug", depth: "skisse",
+        excludeDocIds: ["Team MELOSYS/rammeavtale.md"],
+      }),
+    })).text();
+    view = await (await makeApp().request(`/api/jira/draft/${draftId}`)).json();
+    expect(view.excludeDocIds).toEqual(["Team MELOSYS/rammeavtale.md"]);
+    expect(view.citations.map((c: { docId: string }) => c.docId)).toContain("Team MELOSYS/rammeavtale.md");
   });
 });

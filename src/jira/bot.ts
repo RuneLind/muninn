@@ -20,7 +20,7 @@
  * configuration table, like every other env knob.
  */
 
-import type { BotConfig } from "../bots/config.ts";
+import { discoverAllBots, type BotConfig } from "../bots/config.ts";
 
 /** The bot the composer runs on when `JIRA_BOT` is unset. */
 export const DEFAULT_JIRA_BOT = "melosys";
@@ -34,6 +34,23 @@ export function jiraBotName(): string {
 export function resolveJiraBot(bots: BotConfig[]): BotConfig | undefined {
   const wanted = jiraBotName();
   return bots.find((b) => b.name.toLowerCase() === wanted);
+}
+
+/**
+ * The composer's bot over the LIVE discovery — the ONE resolver every surface
+ * calls.
+ *
+ * The chat page used to answer `GET /chat/bots`'s `jiraBot` from the bot list
+ * captured at process start, while every `/api/jira/*` route resolved over
+ * `discoverAllBots()`. Two sources for one answer, and the chat's whole reason
+ * for asking the server is that a second copy of the name is what makes the
+ * «Lag Jira-sak» control appear on a thread the route then refuses — a second
+ * copy of the *lookup* is the same defect one layer down. The startup list is
+ * token-gated (`discoverBots`), so a `JIRA_BOT` whose folder carries no Telegram
+ * token resolved for the routes and not for the page.
+ */
+export function resolveJiraBotLive(): BotConfig | undefined {
+  return resolveJiraBot(discoverAllBots());
 }
 
 /** The 503 body's message — one spelling, so the SSE and the JSON routes agree. */

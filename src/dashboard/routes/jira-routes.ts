@@ -41,9 +41,8 @@ import type { Hono } from "hono";
 import type { Context } from "hono";
 import type { Config } from "../../config.ts";
 import type { BotConfig } from "../../bots/config.ts";
-import { discoverAllBots } from "../../bots/config.ts";
 import { getMcpStatus, findCriticalDown, type McpServerStatus } from "../../ai/mcp-status.ts";
-import { jiraBotMissingMessage, resolveJiraBot } from "../../jira/bot.ts";
+import { jiraBotMissingMessage, resolveJiraBotLive } from "../../jira/bot.ts";
 import { findJiraTemplate, resolveJiraTemplates } from "../../jira/templates.ts";
 import { JIRA_FULL_MCP_SERVERS } from "../../jira/tool-fence.ts";
 import { checkJiraMarkdown } from "../../jira/markdown-check.ts";
@@ -261,7 +260,7 @@ async function resolveDraftRequest(c: Context): Promise<Resolved> {
   const parsed = parseJiraDraftBody(raw);
   if (!parsed.ok) return { ok: false, response: c.json({ error: parsed.error }, 400) };
 
-  const bot = resolveJiraBot(discoverAllBots());
+  const bot = resolveJiraBotLive();
   if (!bot) return { ok: false, response: c.json({ error: jiraBotMissingMessage() }, 503) };
 
   const template = findJiraTemplate(resolveJiraTemplates(bot.prompts), parsed.body.template);
@@ -501,7 +500,7 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
 
   // ── The picker's source ────────────────────────────────────────────────────
   app.get("/api/jira/templates", (c) => {
-    const bot = resolveJiraBot(discoverAllBots());
+    const bot = resolveJiraBotLive();
     if (!bot) return c.json({ error: jiraBotMissingMessage() }, 503);
     const templates = resolveJiraTemplates(bot.prompts).map((t) => ({ id: t.id, label: t.label }));
     // `no-store` for the same reason `GET /api/wiki/share/presets` is: a
@@ -639,7 +638,7 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
       // non-uuid reaches postgres as a cast error, not an empty result.
       if (!isValidUuid(body.threadId)) return unknownThread(c);
 
-      const bot = resolveJiraBot(discoverAllBots());
+      const bot = resolveJiraBotLive();
       if (!bot) return c.json({ error: jiraBotMissingMessage() }, 503);
 
       const template = findJiraTemplate(resolveJiraTemplates(bot.prompts), body.template);

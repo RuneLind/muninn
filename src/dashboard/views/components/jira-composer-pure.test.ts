@@ -8,11 +8,13 @@ import {
   JC_GATE_DISCARD_ID,
   JC_GATE_SAVE_ID,
   JC_MARKDOWN_ID,
+  JC_NOTES_ID,
   JC_NOTES_COUNT_ID,
   JC_REGEN_BLOCKED_ID,
   JC_REGEN_ID,
   JC_RIGHT_ERROR_ID,
   JC_SAVE_ID,
+  adoptCitationsPatch,
   beginActionPatch,
   canSubmit,
   charCountHtml,
@@ -21,15 +23,18 @@ import {
   initialJiraState,
   isDirty,
   isRegenerate,
+  isThreadDraft,
   markdownEditDisabled,
   mergeDraftView,
   saveThenRunProceeds,
   jiraCitationsHtml,
   jiraConflictCopy,
   jiraCoverageNotice,
+  jiraChatUrl,
   jiraDraftBody,
   jiraDraftHtml,
   jiraLeftHtml,
+  jiraThreadSourceHtml,
   keyVerdictChip,
   keyVerdictCounts,
   markdownFlagLine,
@@ -40,6 +45,7 @@ import {
   shouldStopPolling,
   streamDropMessage,
   submitBlockedReason,
+  threadDraftLabel,
   toggleExclusion,
   withTemplateOption,
   type JiraComposerState,
@@ -755,5 +761,261 @@ describe("answering the gate always closes it", () => {
     expect(saveThenRunProceeds(stateWith({ draftId: "d", rightError: "Lagring feilet." }))).toBe(
       false,
     );
+  });
+});
+
+// ── The thread-sourced draft (/jira as the finisher) ─────────────────────────
+
+describe("thread-sourced drafts", () => {
+  const threadState = (over: Partial<JiraComposerState> = {}): JiraComposerState =>
+    stateWith({
+      draftId: "d1",
+      source: "thread",
+      threadId: "t-1",
+      threadName: "refinement torsdag",
+      bot: "melosys",
+      notes: "fra samtale: refinement torsdag",
+      retrievalQuestion: "fra samtale: refinement torsdag",
+      ...over,
+    });
+
+  /** A stored thread row as `GET /api/jira/draft/:id` serves it. */
+  const THREAD_VIEW = {
+    draftId: "d1",
+    status: "ready",
+    template: "bug",
+    depth: "skisse",
+    notes: "fra samtale: X",
+    extra: "",
+    markdown: "m",
+    citations: [],
+    excludeDocIds: [],
+    keyVerdicts: [],
+    markdownFlags: [],
+    coverage: "answer",
+    retrievalCoverage: "answer",
+    retrievalQuestion: "fra samtale: X",
+    source: "thread",
+    threadId: "t-9",
+    threadName: "X",
+  };
+
+  test("mergeDraftView folds the three fields in", () => {
+    const patch = mergeDraftView(stateWith(), {
+      draftId: "d1",
+      status: "ready",
+      template: "bug",
+      depth: "skisse",
+      notes: "fra samtale: X",
+      extra: "",
+      markdown: "m",
+      citations: [],
+      excludeDocIds: [],
+      keyVerdicts: [],
+      markdownFlags: [],
+      coverage: "answer",
+      retrievalCoverage: "answer",
+      retrievalQuestion: "fra samtale: X",
+      source: "thread",
+      threadId: "t-9",
+      threadName: "X",
+    } as unknown as JiraDraftView);
+    expect(patch.source).toBe("thread");
+    expect(patch.threadId).toBe("t-9");
+    expect(patch.threadName).toBe("X");
+  });
+
+  test("a row with no source (legacy / degraded) reads as notes", () => {
+    const patch = mergeDraftView(stateWith(), {
+      draftId: "d1",
+      status: "ready",
+      template: "bug",
+      depth: "skisse",
+      notes: "n",
+      extra: "",
+      markdown: "m",
+      citations: [],
+      excludeDocIds: [],
+      keyVerdicts: [],
+      markdownFlags: [],
+      coverage: "answer",
+      retrievalCoverage: "answer",
+      retrievalQuestion: "q",
+    } as unknown as JiraDraftView);
+    expect(patch.source).toBe("notes");
+    expect(patch.threadId).toBeUndefined();
+  });
+
+  test("a citation-less thread draft still POSTs a REGENERATE, never new notes", () => {
+    // The defect this pins: with `citations.length > 0` as the only regenerate
+    // test, a conversation that had not retrieved anything fell through to the
+    // first-draft shape and posted `notes: "fra samtale: …"` as raw material — a
+    // brand-new notes draft over a nine-word placeholder.
+    const state = threadState({ citations: [] });
+    expect(isThreadDraft(state)).toBe(true);
+    expect(isRegenerate(state)).toBe(true);
+    const body = jiraDraftBody(state);
+    expect(body.draftId).toBe("d1");
+    expect(body).not.toHaveProperty("notes");
+  });
+
+  test("a notes draft with no citations is still a FIRST draft", () => {
+    const state = stateWith({ draftId: "d1", citations: [], notes: "ekte råmateriale" });
+    expect(isRegenerate(state)).toBe(false);
+    expect(jiraDraftBody(state).notes).toBe("ekte råmateriale");
+  });
+
+  test("and the button stays live — the notes cap is a notes-path cap", () => {
+    expect(canSubmit(threadState({ citations: [] }))).toBe(true);
+    expect(submitBlockedReason(threadState({ citations: [] }))).toBeUndefined();
+  });
+
+  test("the left column leads with the provenance banner and a chat link", () => {
+    const html = jiraLeftHtml(threadState());
+    expect(html).toContain("Utkast fra samtalen «refinement torsdag»");
+    expect(html).toContain("Juster i samtalen");
+    expect(html).toContain('href="/chat?bot=melosys&amp;thread=t-1"');
+  });
+
+  test("the raw-material textarea is GONE — the placeholder is never editable", () => {
+    const html = jiraLeftHtml(threadState());
+    expect(html).not.toContain(`id="${JC_NOTES_ID}"`);
+    expect(html).not.toContain(`id="${JC_NOTES_COUNT_ID}"`);
+    // …and the `fra samtale:` bookkeeping line is not shown as raw material.
+    expect(html).not.toContain("fra samtale:");
+    expect(html).toContain("refinement torsdag");
+  });
+
+  test("a notes draft keeps its textarea", () => {
+    const html = jiraLeftHtml(stateWith({ notes: "hei" }));
+    expect(html).toContain(`id="${JC_NOTES_ID}"`);
+    expect(html).not.toContain("Utkast fra samtalen");
+  });
+
+  test("the middle column renders a SOURCE line, not a search that never ran", () => {
+    const html = jiraCitationsHtml(threadState({ citations: [cite(1, "a.md")] }));
+    expect(html).toContain("Kilder fra samtalen «refinement torsdag»");
+    expect(html).not.toContain("Søkte etter:");
+    expect(html).not.toContain("fra samtale:");
+  });
+
+  test("a notes draft still says what it searched for", () => {
+    const html = jiraCitationsHtml(stateWith({ retrievalQuestion: "hvordan beregnes trygdeavgift" }));
+    expect(html).toContain("Søkte etter: hvordan beregnes trygdeavgift");
+  });
+
+  test("an empty hit set on a thread draft blames nothing on the corpus", () => {
+    const html = jiraCitationsHtml(threadState({ citations: [] }));
+    expect(html).toContain("Samtalen hentet ingen kilder");
+  });
+
+  test("jiraChatUrl refuses to build a link it cannot point anywhere", () => {
+    expect(jiraChatUrl("melosys", "t-1")).toBe("/chat?bot=melosys&thread=t-1");
+    expect(jiraChatUrl(undefined, "t-1")).toBeUndefined();
+    expect(jiraChatUrl("melosys", undefined)).toBeUndefined();
+    expect(jiraChatUrl("me los", "t/1")).toBe("/chat?bot=me%20los&thread=t%2F1");
+  });
+
+  /**
+   * The OWNER rides the link.
+   *
+   * `handleDeepLink` honours `user=` (it pre-seeds the bot's remembered user
+   * before `selectBot` loads the list), and the page DOES know who owns the
+   * thread: `threads.user_id` is on the row and the GET view now serves it. Left
+   * off, the link resolved to whichever user the chat happened to remember — and
+   * `selectThread(<id>)` then looked for the thread in someone else's list.
+   */
+  test("jiraChatUrl carries the thread's OWNER when the view served one", () => {
+    expect(jiraChatUrl("melosys", "t-1", "u1")).toBe("/chat?bot=melosys&user=u1&thread=t-1");
+    expect(jiraChatUrl("melosys", "t-1", "  ")).toBe("/chat?bot=melosys&thread=t-1");
+    expect(jiraChatUrl("melosys", "t-1", undefined)).toBe("/chat?bot=melosys&thread=t-1");
+    expect(jiraChatUrl("melosys", "t 1", "u/1")).toBe("/chat?bot=melosys&user=u%2F1&thread=t%201");
+  });
+
+  test("both «Juster i samtalen» links carry bot + user + thread", () => {
+    const s = threadState({ threadUserId: "u1" });
+    expect(jiraLeftHtml(s)).toContain("/chat?bot=melosys&amp;user=u1&amp;thread=t-1");
+    expect(jiraThreadSourceHtml(s)).toContain("/chat?bot=melosys&amp;user=u1&amp;thread=t-1");
+  });
+
+  /**
+   * `state.bot` used to be set by `loadTemplates` alone, so a templates 503 —
+   * exactly the state in which the reader most wants to go back to the chat —
+   * took the «Juster i samtalen» link with it. The row knows its own bot.
+   */
+  test("the deep link survives a templates failure, because the ROW carries the bot", () => {
+    const patch = mergeDraftView(stateWith(), {
+      ...THREAD_VIEW,
+      bot: "melosys",
+      threadUserId: "u1",
+    } as unknown as JiraDraftView);
+    expect(patch.bot).toBe("melosys");
+    expect(patch.threadUserId).toBe("u1");
+    // …and an absent one never un-sets what the templates fetch did resolve.
+    expect(mergeDraftView(stateWith({ bot: "melosys" }), THREAD_VIEW as unknown as JiraDraftView).bot)
+      .toBe("melosys");
+  });
+
+  test("a deleted thread row (no name) falls back to the id, never «samtalen «»»", () => {
+    expect(threadDraftLabel(threadState({ threadName: undefined }))).toBe("t-1");
+    expect(jiraLeftHtml(threadState({ threadName: undefined }))).toContain("«t-1»");
+  });
+
+  test("a thread name is escaped everywhere it renders", () => {
+    const evil = threadState({ threadName: '<img src=x onerror=1>' });
+    expect(jiraLeftHtml(evil)).not.toContain("<img");
+    expect(jiraCitationsHtml(evil)).not.toContain("<img");
+  });
+});
+
+/**
+ * Adopting an incoming `citations` frame.
+ *
+ * The THREAD path re-seeds its hit set from `research_citations` on EVERY run —
+ * the conversation keeps retrieving between turns, so unlike the notes path's
+ * immutable set it legitimately CHANGES. A regenerate therefore emits the WIDE
+ * seeded set and the client adopts it — and ONLY it: the exclusion set is the
+ * SERVER's to own (it stores `excludeDocIds ∩ seeded` at seed time), so a
+ * second, client-side pruning rule could only disagree with the row.
+ */
+describe("adoptCitationsPatch", () => {
+  const s = (over: Partial<JiraComposerState> = {}) => stateWith(over);
+
+  test("a non-empty incoming set replaces the old one", () => {
+    const patch = adoptCitationsPatch(s({ citations: [cite(1, "a.md")] }), [cite(1, "b.md"), cite(2, "c.md")]);
+    expect(patch.citations?.map((c) => c.docId)).toEqual(["b.md", "c.md"]);
+  });
+
+  test("exclusions are LEFT ALONE — the row owns them, and the next poll reconciles", () => {
+    // Pruning here made the two ends disagree: the server stored the UNPRUNED
+    // request exclusions, so a poll a second later re-adopted the id the client
+    // had just dropped, and with no poll in between the next regenerate POSTed a
+    // body missing it. One owner, and it is the row.
+    const patch = adoptCitationsPatch(
+      s({ citations: [cite(1, "a.md"), cite(2, "b.md")], excludeDocIds: ["a.md", "b.md"] }),
+      [cite(1, "b.md"), cite(2, "c.md")],
+    );
+    expect(patch.excludeDocIds).toBeUndefined();
+  });
+
+  test("the NOTES first-draft frame cannot wipe the toggles", () => {
+    // The notes path emits its `citations` frame AFTER `applyExclusions`, so the
+    // incoming set is the RETAINED one. `/draft/start` plus an immediate toggle
+    // is exactly that shape — and pruning against it deleted the toggle the
+    // reader had just made, mid-generation.
+    const patch = adoptCitationsPatch(
+      s({ source: "notes", citations: [cite(1, "a.md"), cite(2, "b.md")], excludeDocIds: ["a.md"] }),
+      [cite(1, "b.md")],
+    );
+    expect(patch.excludeDocIds).toBeUndefined();
+  });
+
+  test("an EMPTY set never replaces a non-empty one — nothing would be left to switch back on", () => {
+    expect(adoptCitationsPatch(s({ citations: [cite(1, "a.md")], excludeDocIds: ["a.md"] }), [])).toEqual({});
+    expect(adoptCitationsPatch(s(), null)).toEqual({});
+  });
+
+  test("an empty set on an empty state IS adopted (nothing to lose)", () => {
+    expect(adoptCitationsPatch(s(), [])).toEqual({ citations: [] });
   });
 });

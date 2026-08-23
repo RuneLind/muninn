@@ -295,6 +295,13 @@ export function streamingUiScript(): string {
     wrap.appendChild(up);
     wrap.appendChild(down);
     botDiv.appendChild(wrap);
+    // «🧾 Lag Jira-sak» rides the SAME row, and deliberately the same attach
+    // point rather than a second hook: this function is the one place both paths
+    // that finalize a web bot message meet (replayed history by row id, and the
+    // live turn, which only learns its message id at response_meta time). It
+    // renders itself only on the Jira bot with a known thread — see
+    // jiraEntryVisible.
+    appendJiraEntryControl(wrap);
   }
 
   // ── Load tool calls from trace ───────────────────────────────────────

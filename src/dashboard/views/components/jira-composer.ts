@@ -63,6 +63,7 @@ import {
   JC_SUBMIT_ID,
   JC_TEMPLATE_ID,
   JC_VIEW_ATTR,
+  adoptCitationsPatch,
   beginActionPatch,
   canSubmit,
   charCountHtml,
@@ -619,16 +620,14 @@ function dispatchJiraFrame(
     }
     case "citations": {
       // The WIDE stored set, before this run's depth slice — the toggle column
-      // renders exactly this, unchanged when the depth dial moves.
-      //
-      // **Never overwrite a non-empty set with a narrower one**, the same guard
-      // the `done` handler carries: on a regenerate this frame is not emitted at
-      // all, and on the exclude-everything path an empty array would delete the
-      // very rows the reader needs in order to switch one back on.
+      // renders exactly this, unchanged when the depth dial moves. The empty-set
+      // guard is `adoptCitationsPatch`, which adopts the set and NOTHING else; a
+      // thread regenerate re-seeds it from the conversation, so it can
+      // legitimately arrive with rows the previous one did not have (and without
+      // rows it did), and the row's own exclusion set — intersected server-side —
+      // reconciles on the next poll or `done`.
       const incoming = Array.isArray(data.citations) ? (data.citations as JiraCitation[]) : null;
-      if (incoming && (incoming.length > 0 || state.citations.length === 0)) {
-        state.citations = incoming;
-      }
+      Object.assign(state, adoptCitationsPatch(state, incoming));
       if (typeof data.coverage === "string") state.coverage = data.coverage as JiraDonePayload["coverage"];
       renderMid();
       return {};

@@ -21,6 +21,7 @@ import { getMcpStatus, invalidateMcpStatus, getCachedMcpStatus, onMcpStatusChang
 import { formatWebHtml } from "../web/web-format.ts";
 import { consumePendingMessage } from "./pending-messages.ts";
 import { isValidUuid } from "../dashboard/routes/route-utils.ts";
+import { resolveJiraBotLive } from "../jira/bot.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("chat");
@@ -102,7 +103,20 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     try { connectors = await listConnectors(); } catch (err) {
       log.warn("Failed to load connectors: {error}", { error: err instanceof Error ? err.message : String(err) });
     }
-    return c.json({ bots, connectors });
+    // Which of these bots the Jira composer drafts on — the ONE thing the page
+    // needs in order to decide whether a bot message gets a «Lag Jira-sak»
+    // control. Resolved SERVER-side (`JIRA_BOT`, no fallback) rather than
+    // hardcoded in the client: a second copy of that name is exactly the drift
+    // that makes the button appear on a bot whose thread the route then 400s.
+    // `null` when the pinned name matches no discovered bot — the same install
+    // state in which every `/api/jira/*` route 503s, so the control stays away.
+    //
+    // **`resolveJiraBotLive`, not `resolveJiraBot(botConfigs)`.** `botConfigs` is
+    // the TOKEN-GATED list captured at process start; every `/api/jira/*` route
+    // resolves over the live `discoverAllBots()`. Two lookups for one answer is
+    // the same class of drift this field exists to remove one layer up.
+    const jiraBot = resolveJiraBotLive()?.name ?? null;
+    return c.json({ bots, connectors, jiraBot });
   });
 
   // Get chat preferences for a user+bot (connector, persisted in DB)

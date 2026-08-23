@@ -194,7 +194,7 @@ export const JIRA_THREAD_FLIGHT_MESSAGE =
 
 export function threadFlightKey(threadId: string): string {
   const h = new Bun.CryptoHasher("sha256");
-  h.update(["jira-thread", threadId].join(" "));
+  h.update(["jira-thread", threadId].join("\0"));
   return h.digest("hex");
 }
 
