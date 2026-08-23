@@ -113,6 +113,67 @@ export function clampJiraArchiveLimit(raw: unknown): number {
 }
 
 /**
+ * The archive list's own state, as the reader reached it.
+ *
+ * Carried on every link the page renders — the saved/all toggle, each row, and
+ * the back link — so a hand-typed `?limit=200` survives one click. `limit` is
+ * `null` when the reader named none: echoing the default back into the URL
+ * would pin a value they never chose, and the next default change would not
+ * reach them.
+ */
+export interface JiraArchiveListState {
+  all: boolean;
+  limit: number | null;
+}
+
+function archiveStateParams(state: JiraArchiveListState | undefined): string[] {
+  if (!state) return [];
+  const params: string[] = [];
+  if (state.all) params.push("all=1");
+  if (state.limit !== null && state.limit !== undefined) params.push(`limit=${state.limit}`);
+  return params;
+}
+
+/** The list, with or without the toggle, keeping the rest of the list state. */
+export function jiraArchiveUrl(state: JiraArchiveListState): string {
+  const params = archiveStateParams(state);
+  return params.length ? `/jira?${params.join("&")}` : "/jira";
+}
+
+/**
+ * One draft's read-only page — the ONE builder both pure modules use.
+ *
+ * Plain (`/jira?draft=<id>`) for the chat card, which knows nothing about a
+ * list; the archive passes its own `state` so a row opened from
+ * `?all=1&limit=200` comes back to the page it was opened from. Two hand-written
+ * copies of this path is how the back link ended up returning to a different
+ * list than the one the reader left.
+ */
+export function jiraDraftUrl(draftId: string, state?: JiraArchiveListState): string {
+  const tail = archiveStateParams(state)
+    .map((p) => `&${p}`)
+    .join("");
+  return `/jira?draft=${encodeURIComponent(draftId)}${tail}`;
+}
+
+/** The depth's reader-facing name, from the one ordered list. Shared by the
+ *  archive row and the chat card, which had a copy each. */
+export function depthLabel(depth: JiraDepth | string): string {
+  return JIRA_DEPTHS.find((d) => d.id === depth)?.label ?? String(depth);
+}
+
+/**
+ * How much of a draft's markdown {@link jiraDraftTitle} reads.
+ *
+ * Bounding lives in the DERIVATION, not only in the SQL that feeds it: the
+ * listing reads this many characters out of the row while the draft page holds
+ * the whole markdown, so an unbounded scan gave a draft opening with a long
+ * fenced block "(uten tittel)" in the list and a real title on its own page.
+ * 400 chars × 200 rows is 80 KB to produce 200 labels.
+ */
+export const JIRA_TITLE_SCAN_CHARS = 400;
+
+/**
  * The one-line name an archived draft goes by.
  *
  * Derived, never stored: a stored copy would let a `PUT` edit leave the listing
@@ -132,16 +193,19 @@ export function clampJiraArchiveLimit(raw: unknown): number {
  * rather than to nothing.
  *
  * Fenced code is skipped, for the same reason a `#` inside a fence is not a
- * heading, and the scan is bounded — the caller passes the HEAD of the markdown
- * (see `listJiraDrafts`), so a 100 KB Full-depth task never crosses the wire to
- * produce forty characters.
+ * heading, and the scan is bounded HERE, at {@link JIRA_TITLE_SCAN_CHARS} — the
+ * listing hands in the head of the markdown (`listJiraDrafts` reads no more than
+ * that out of the row, so a 100 KB Full-depth task never crosses the wire) and
+ * the draft page hands in all of it. Bounding inside the function is what makes
+ * those two answer the same.
  */
 export function jiraDraftTitle(markdownHead: string | null | undefined): string | null {
   if (!markdownHead) return null;
+  const head = titleScanHead(markdownHead);
   let fenced = false;
   let seenAnything = false;
   let firstHeading: string | null = null;
-  for (const raw of markdownHead.split("\n")) {
+  for (const raw of head.split("\n")) {
     const line = raw.trim();
     if (/^(```|~~~)/.test(line)) {
       fenced = !fenced;
@@ -165,17 +229,75 @@ export function jiraDraftTitle(markdownHead: string | null | undefined): string 
   return firstHeading;
 }
 
+/**
+ * The first {@link JIRA_TITLE_SCAN_CHARS} code points — Postgres `substring`
+ * counts characters, so a code-POINT bound is what keeps the page's scan and the
+ * listing's SQL slice looking at the same text. The iterator is lazy, so this
+ * costs 400 steps on a 100 KB draft, not a copy of it.
+ */
+function titleScanHead(text: string): string {
+  if (text.length <= JIRA_TITLE_SCAN_CHARS) return text;
+  let out = "";
+  let n = 0;
+  for (const ch of text) {
+    if (n >= JIRA_TITLE_SCAN_CHARS) break;
+    out += ch;
+    n++;
+  }
+  return out;
+}
+
+/**
+ * Leading BLOCK markers, stripped before the line is read as a name.
+ *
+ * A draft that opens on a list item, a quote or a table row is naming its task
+ * in the text AFTER the marker: measured on real rows, the un-stripped form
+ * titled the archive «- [ ] oppgave». Applied repeatedly (`> - [x] …` is two
+ * markers), bounded so a line of nothing but markers terminates, and a line that
+ * strips to nothing simply names nothing — the caller moves to the next line.
+ */
+const BLOCK_MARKER_RE = /^(?:[-*+](?:\s+|$)(?:\[[ xX]\](?:\s+|$))?|\d+[.)](?:\s+|$)|>\s*|\|\s*)/;
+
+function stripBlockMarkers(text: string): string {
+  let out = text.trimStart();
+  for (let i = 0; i < 4; i++) {
+    const next = out.replace(BLOCK_MARKER_RE, "");
+    if (next === out) break;
+    out = next.trimStart();
+  }
+  return out;
+}
+
 /** Light markdown strip + clip. Emphasis and inline code only — the title is a
  *  label in a list, not a rendering surface. */
 function cleanJiraTitle(text: string): string {
-  const flat = text
+  const flat = stripBlockMarkers(text)
     .replace(/`([^`]*)`/g, "$1")
     .replace(/\*\*(.+?)\*\*/g, "$1")
     .replace(/(?<!\w)[*_]([^*_]+?)[*_](?!\w)/g, "$1")
     .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
     .replace(/\s+/g, " ")
     .trim();
-  return flat.length > 120 ? `${flat.slice(0, 119)}…` : flat;
+  // Clip by CODE POINT, never by unit: `.slice(0, 119)` through an astral pair
+  // stores a lone surrogate, which the row renders as a replacement character.
+  return flat.length > 120 ? `${clipUnits(flat, 119)}…` : flat;
+}
+
+/**
+ * Clip to `max` UTF-16 units without splitting a surrogate pair — the
+ * `truncateUnits` rule from `src/wiki/ask-chat.ts`, mirrored rather than
+ * imported because this module is bundled for the browser and must stay
+ * dependency-free.
+ */
+function clipUnits(text: string, max: number): string {
+  if (max <= 0) return "";
+  if (text.length <= max) return text;
+  let out = "";
+  for (const ch of text) {
+    if (out.length + ch.length > max) break;
+    out += ch;
+  }
+  return out;
 }
 
 /**
@@ -493,8 +615,15 @@ export interface JiraDraftListRow {
   template: string;
   depth: JiraDepth;
   status: JiraDraftStatus;
-  /** {@link jiraDraftTitle} over the head of the markdown. Null on a row with
-   *  no text yet — a `failed` draft, or one still `generating`. */
+  /**
+   * {@link jiraDraftTitle} over the head of the markdown. Null only when the row
+   * holds no text: one still `generating`, or one that failed before ever
+   * writing any. A FAILED row can perfectly well carry a title — `failJiraDraft`
+   * leaves `markdown` alone, so a failed regenerate keeps the previous turn's
+   * text (the statement on `failJiraDraft` in `db/jira-drafts.ts` is the
+   * authority). The archive's DRAFT view refuses to render that text; the row
+   * still names it.
+   */
   title: string | null;
   /** The stored retrieval verdict, unchanged — see {@link JiraDraftView}. */
   retrievalCoverage: JiraCoverage | null;

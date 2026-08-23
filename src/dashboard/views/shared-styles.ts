@@ -387,8 +387,10 @@ export function renderNav(
   // highlighted too).
   // `/jira` goes HERE rather than beside Plans: the top-level row already
   // carries ten links, and an eleventh would be the one that pushed it into a
-  // second line on a laptop. The composer is a tool you go to on purpose, from
-  // a refinement, not a surface you watch.
+  // second line on a laptop. The page is the read-only ARCHIVE of Jira drafts —
+  // a place you look one up afterwards, reached from a chat card or a link in
+  // someone's notes, not a surface you watch. (The composer it replaced was in
+  // the dropdown for the same reason.)
   const toolsPages = ["logs", "mcp-debug", "serena", "benchmark", "models", "indexing", "jira"] as const;
   const toolsActive = (toolsPages as readonly string[]).includes(activePage);
   return `

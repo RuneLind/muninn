@@ -14,8 +14,12 @@ import { describe, expect, test } from "bun:test";
 import {
   JIRA_ARCHIVE_LIMIT_DEFAULT,
   JIRA_ARCHIVE_LIMIT_MAX,
+  JIRA_TITLE_SCAN_CHARS,
   clampJiraArchiveLimit,
+  depthLabel,
+  jiraArchiveUrl,
   jiraDraftTitle,
+  jiraDraftUrl,
 } from "./wire.ts";
 
 describe("clampJiraArchiveLimit", () => {
@@ -95,5 +99,65 @@ describe("jiraDraftTitle", () => {
     const title = jiraDraftTitle(`# ${"a".repeat(300)}`);
     expect(title).toHaveLength(120);
     expect(title!.endsWith("…")).toBe(true);
+  });
+});
+
+describe("jiraDraftTitle — hygiene", () => {
+  test("a leading block marker is not part of the name", () => {
+    // Measured on real rows: a draft opening on a task-list item titled the
+    // whole archive "- [ ] oppgave". The marker is markdown syntax, not text.
+    expect(jiraDraftTitle("- [ ] Rydd opp i avgiftsberegningen")).toBe(
+      "Rydd opp i avgiftsberegningen",
+    );
+    expect(jiraDraftTitle("- Punkt uten avkryssing")).toBe("Punkt uten avkryssing");
+    expect(jiraDraftTitle("* Stjernepunkt")).toBe("Stjernepunkt");
+    expect(jiraDraftTitle("1. Første steg")).toBe("Første steg");
+    expect(jiraDraftTitle("> Sitat som åpner utkastet")).toBe("Sitat som åpner utkastet");
+    expect(jiraDraftTitle("| Kolonne | Verdi |")).toBe("Kolonne | Verdi |");
+    // Stacked markers unwind, and a line that is ONLY markers names nothing.
+    expect(jiraDraftTitle("> - [x] Gjort\n")).toBe("Gjort");
+    expect(jiraDraftTitle("- \n\nProsa etterpå")).toBe("Prosa etterpå");
+  });
+
+  test("the clip never cuts through a surrogate pair", () => {
+    // `.slice(0, 119)` on a title whose 119th unit is the high half of an astral
+    // pair stores a lone surrogate — a replacement character in the list row.
+    const title = jiraDraftTitle(`# ${"a".repeat(118)}${"\u{1F600}".repeat(10)}`)!;
+    expect(title.endsWith("…")).toBe(true);
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(title)).toBe(false);
+    expect([...title].every((ch) => ch !== "\uFFFD")).toBe(true);
+  });
+
+  test("the scan is bounded by the function, so page and row agree", () => {
+    // The listing reads only the head of the markdown out of the DB; the page
+    // holds all of it. One derivation, one bound — or a draft opening with a
+    // long fenced block is "(uten tittel)" in the list and titled on the page.
+    const fence = ["```", "x".repeat(JIRA_TITLE_SCAN_CHARS + 200), "```", "", "Prosa"].join("\n");
+    expect(jiraDraftTitle(fence)).toBeNull();
+    expect(jiraDraftTitle(fence.slice(0, JIRA_TITLE_SCAN_CHARS))).toBeNull();
+  });
+});
+
+describe("archive urls — one builder, list state preserved", () => {
+  test("a draft link is plain by default and carries list state when given one", () => {
+    expect(jiraDraftUrl("a b")).toBe("/jira?draft=a%20b");
+    expect(jiraDraftUrl("d-1", { all: true, limit: 200 })).toBe("/jira?draft=d-1&all=1&limit=200");
+    expect(jiraDraftUrl("d-1", { all: false, limit: null })).toBe("/jira?draft=d-1");
+    expect(jiraDraftUrl("d-1", { all: false, limit: 3 })).toBe("/jira?draft=d-1&limit=3");
+  });
+
+  test("the toggle keeps every other param it was reached with", () => {
+    expect(jiraArchiveUrl({ all: true, limit: null })).toBe("/jira?all=1");
+    expect(jiraArchiveUrl({ all: false, limit: null })).toBe("/jira");
+    expect(jiraArchiveUrl({ all: true, limit: 200 })).toBe("/jira?all=1&limit=200");
+    expect(jiraArchiveUrl({ all: false, limit: 200 })).toBe("/jira?limit=200");
+  });
+});
+
+describe("depthLabel", () => {
+  test("one spelling for the archive row and the chat card", () => {
+    expect(depthLabel("skisse")).toBe("Skisse");
+    expect(depthLabel("full")).toBe("Full");
+    expect(depthLabel("dyp")).toBe("dyp");
   });
 });

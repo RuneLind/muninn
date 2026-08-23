@@ -70,8 +70,14 @@ const listPage = await renderJiraPage({
   drafts: [listRow],
   savedOnly: true,
   limit: 50,
+  limitParam: null,
+  capped: false,
 });
 const draftPage = await renderJiraPage({ kind: "draft", draft: draftView });
+const generatingPage = await renderJiraPage({
+  kind: "draft",
+  draft: { ...draftView, status: "generating", markdown: null },
+});
 
 describe("the shell", () => {
   test("marks Jira active inside the Tools dropdown, not the top-level row", () => {
@@ -84,6 +90,22 @@ describe("the shell", () => {
     expect(draftPage).toContain("addEventListener");
     expect(draftPage).toContain("clipboard");
     expect(draftPage).toContain(JA_RAW_ID);
+  });
+
+  test("the LIST page ships no bundle — it has no interactive target", () => {
+    // Every row is a link. Shipping ~3 KB of view-switch and clipboard code to a
+    // page with neither is a build and a parse for nothing.
+    expect(listPage).not.toContain("clipboard");
+    expect(listPage).not.toContain(JA_RAW_ID);
+  });
+
+  test("only a GENERATING draft refreshes itself", () => {
+    // The chat's thread-level notice links here for a draft no bubble can carry;
+    // a static "skrives fortsatt" page never became the finished draft.
+    expect(generatingPage).toContain('<meta http-equiv="refresh" content="5">');
+    expect(generatingPage).toContain("skrives fortsatt");
+    expect(draftPage).not.toContain("http-equiv=\"refresh\"");
+    expect(listPage).not.toContain("http-equiv=\"refresh\"");
   });
 
   test("no-JavaScript readers still reach the raw markdown", () => {
@@ -136,9 +158,12 @@ describe("one draft", () => {
 });
 
 describe("the fallback", () => {
-  test("names the failure and points at the API that still works", () => {
+  test("names the failure and the API that reads the same rows", () => {
     const html = renderJiraFallback("bundle failed: <boom>");
     expect(html).toContain("bundle failed: &lt;boom&gt;");
     expect(html).toContain("GET /api/jira/archive");
+    // It must NOT promise the API is unaffected: the page reads the DB now, so
+    // the commonest reason this renders is a database the API shares.
+    expect(html).not.toContain("upåvirket");
   });
 });

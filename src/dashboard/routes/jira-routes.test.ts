@@ -150,6 +150,8 @@ interface Row {
 const rows = new Map<string, Row>();
 /** Reads that must FAIL, keyed by draft id — the "huginn is fine, postgres is not" case. */
 const readThrows = new Map<string, string>();
+/** The LISTING read failing — a dead database under the page, not under one row. */
+let archiveThrows: string | null = null;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 mock.module("../../db/jira-drafts.ts", () => ({
   createJiraDraft: async (i: {
@@ -185,14 +187,20 @@ mock.module("../../db/jira-drafts.ts", () => ({
     r.savedAt = Date.now();
     return jiraDraftView(r);
   },
-  /** The archive listing. Faithful to the real reader in the three things the
-   *  route depends on: the saved-only filter, newest-first, and the clamp. */
-  listJiraDrafts: async (o: { savedOnly?: boolean; limit?: number } = {}) =>
-    Array.from(rows.values())
+  /** The archive listing. Faithful to the real reader in the four things the
+   *  route depends on: the saved-only filter, newest-first, the clamp — and
+   *  `capped`, which is a row PAST the limit rather than a full page. The title
+   *  goes through the SHARED derivation (which bounds its own scan), or the mock
+   *  labels rows the real reader would not. */
+  listJiraDrafts: async (o: { savedOnly?: boolean; limit?: number } = {}) => {
+    if (archiveThrows) throw new Error(archiveThrows);
+    const limit = clampJiraArchiveLimit(o.limit);
+    const matching = Array.from(rows.values())
       .filter((r) => (o.savedOnly ? r.savedAt !== null : true))
-      .sort((a, b) => b.createdAt - a.createdAt)
-      .slice(0, clampJiraArchiveLimit(o.limit))
-      .map((r) => {
+      .sort((a, b) => b.createdAt - a.createdAt);
+    return {
+      capped: matching.length > limit,
+      drafts: matching.slice(0, limit).map((r) => {
         const view = jiraDraftView(r);
         return {
           draftId: r.draftId, bot: r.botName, source: r.source, template: r.template,
@@ -202,6 +210,8 @@ mock.module("../../db/jira-drafts.ts", () => ({
           savedAt: r.savedAt, createdAt: r.createdAt,
         };
       }),
+    };
+  },
   listJiraDraftsForThread: async (threadId: string) => {
     if (!UUID_RE.test(threadId)) throw new Error(`invalid input syntax for type uuid: "${threadId}"`);
     return Array.from(rows.values())
@@ -426,6 +436,7 @@ beforeEach(() => {
   __resetJiraKeyIndexForTest();
   rows.clear();
   readThrows.clear();
+  archiveThrows = null;
   threads.clear();
   threadHistory = [];
   threadCitations = [];
@@ -1396,8 +1407,10 @@ describe("GET /jira — the archive page", () => {
     expect(html).not.toContain(`/jira?draft=${unsaved}`);
     // The nav entry lives in the Tools dropdown, not the top-level row.
     expect(html).toContain('<a href="/jira" class="nav-dropdown-item active">Jira</a>');
-    // The bundle is inlined, not linked — there is no static asset route.
-    expect(html).toContain("jaRaw");
+    // The LIST ships no bundle — it has no view switch and no copy button. The
+    // draft page does, inlined rather than linked (there is no asset route).
+    expect(html).not.toContain("jaRaw");
+    expect(await (await makeApp().request(`/jira?draft=${saved}`)).text()).toContain("jaRaw");
   });
 
   test("`?all=1` shows the attempts the saved list hides", async () => {
@@ -1432,6 +1445,48 @@ describe("GET /jira — the archive page", () => {
   });
 });
 
+describe("GET /jira — list state and truncation", () => {
+  test("every link keeps the `?limit=` the reader typed", async () => {
+    const { saved } = seedTwo();
+    const html = await (await makeApp().request("/jira?all=1&limit=3")).text();
+    // The toggle switches `all` and keeps the rest.
+    expect(html).toContain(`href="/jira?limit=3"`);
+    expect(html).toContain(`href="/jira?all=1&amp;limit=3"`);
+    // The row carries the list it was opened from…
+    expect(html).toContain(`href="/jira?draft=${saved}&amp;all=1&amp;limit=3"`);
+  });
+
+  test("…and the draft page gets back to exactly that list", async () => {
+    const { saved } = seedTwo();
+    const html = await (await makeApp().request(`/jira?draft=${saved}&all=1&limit=3`)).text();
+    expect(html).toContain(`href="/jira?all=1&amp;limit=3"`);
+    // A draft url typed by hand keeps the plain back link.
+    const plain = await (await makeApp().request(`/jira?draft=${saved}`)).text();
+    expect(plain).toContain(`href="/jira"`);
+    expect(plain).not.toContain("all=1");
+  });
+
+  test("`de nyeste N` is claimed only when a row was actually cut", async () => {
+    seedRow({ markdown: "# En", savedAt: Date.now() });
+    seedRow({ markdown: "# To", savedAt: Date.now() });
+    // Exactly two saved rows under a limit of two: nothing was cut.
+    expect(await (await makeApp().request("/jira?limit=2")).text()).not.toContain("de nyeste");
+    expect(await (await makeApp().request("/jira?limit=1")).text()).toContain("de nyeste 1");
+  });
+
+  test("a dead database is a 500 with the fallback page, not a 200", async () => {
+    // The page reads the DB itself now. Answering 200 to a listing that could not
+    // be read tells every caller — a monitor included — that the page is fine.
+    archiveThrows = "connection terminated";
+    const res = await makeApp().request("/jira");
+    expect(res.status).toBe(500);
+    const html = await res.text();
+    expect(html).toContain("Jira-arkivet kunne ikke bygges");
+    expect(html).toContain("connection terminated");
+    expect(html).not.toContain("upåvirket");
+  });
+});
+
 describe("GET /api/jira/archive", () => {
   test("saved-only by default, everything with `?all=1`", async () => {
     const app = makeApp();
@@ -1458,6 +1513,13 @@ describe("GET /api/jira/archive", () => {
     expect(body.limit).toBe(200);
     expect(body.drafts.length).toBeLessThanOrEqual(200);
     expect((await (await makeApp().request("/api/jira/archive?limit=3")).json()).limit).toBe(3);
+  });
+
+  test("`capped` rides the payload, and is a row past the limit", async () => {
+    seedRow({ savedAt: Date.now() });
+    seedRow({ savedAt: Date.now() });
+    expect((await (await makeApp().request("/api/jira/archive?limit=1")).json()).capped).toBe(true);
+    expect((await (await makeApp().request("/api/jira/archive?limit=2")).json()).capped).toBe(false);
   });
 
   test("no CORS headers, and never cached", async () => {

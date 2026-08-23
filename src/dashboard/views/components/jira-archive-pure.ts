@@ -25,13 +25,15 @@
 import { escHtml as esc } from "./escape.ts";
 import {
   JIRA_ALL_EXCLUDED_MESSAGE,
-  JIRA_DEPTHS,
   JIRA_LOW_CONFIDENCE_MESSAGE,
   JIRA_NO_HITS_MESSAGE,
   JIRA_UNREACHABLE_MESSAGE,
+  depthLabel,
+  jiraArchiveUrl,
   jiraDraftTitle,
+  jiraDraftUrl,
+  type JiraArchiveListState,
   type JiraCoverage,
-  type JiraDepth,
   type JiraDraftListRow,
   type JiraDraftSource,
   type JiraDraftStatus,
@@ -47,6 +49,9 @@ import {
 
 export const JA_ROOT_ID = "jaRoot";
 export const JA_COPY_ID = "jaCopy";
+/** The copy button's resting label. Exported because the bundle RESTORES it
+ *  after «✓ Kopiert», and a second hand-written copy is one edit from drifting. */
+export const JA_COPY_LABEL = "Kopier markdown";
 /** The raw-markdown pane — a read-only `<textarea>`, which is also where the
  *  copy button reads the bytes it puts on the clipboard. */
 export const JA_RAW_ID = "jaRaw";
@@ -72,15 +77,16 @@ export function parseArchiveAll(raw: string | undefined | null): boolean {
   return v === "" || v === "1" || v === "true";
 }
 
-/** The list, with or without the toggle. `?all=1`, so the state is linkable. */
-export function jiraArchiveUrl(all: boolean): string {
-  return all ? "/jira?all=1" : "/jira";
-}
-
-/** One draft's read-only page. */
-export function jiraDraftUrl(draftId: string): string {
-  return `/jira?draft=${encodeURIComponent(draftId)}`;
-}
+/**
+ * The list state every link on this page carries.
+ *
+ * `jiraArchiveUrl`/`jiraDraftUrl` live in `src/jira/wire.ts` — ONE builder, since
+ * the chat card builds the same `/jira?draft=` path and the archive only appends
+ * the list state to it. Re-exported here so the page and its tests keep reading
+ * their urls from the module that renders them.
+ */
+export { jiraArchiveUrl, jiraDraftUrl } from "../../../jira/wire.ts";
+export type { JiraArchiveListState } from "../../../jira/wire.ts";
 
 /**
  * The chat deep link for a thread — `handleDeepLink`'s own shape.
@@ -138,10 +144,8 @@ export function draftStatusLabel(status: JiraDraftStatus | string): string {
   }
 }
 
-/** The depth's reader-facing name, from the one ordered list. */
-export function depthLabel(depth: JiraDepth | string): string {
-  return JIRA_DEPTHS.find((d) => d.id === depth)?.label ?? String(depth);
-}
+/** The depth's reader-facing name — wire's, shared with the chat card. */
+export { depthLabel } from "../../../jira/wire.ts";
 
 /** The name to call the conversation. Falls back to the thread id — a deleted
  *  thread row leaves `threadName` null, and "samtalen «»" says nothing. */
@@ -161,6 +165,21 @@ export function formatArchiveTime(ms: number): string {
   if (!Number.isFinite(d.getTime())) return "";
   const p = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/**
+ * `datetime=`/`title=` for one timestamp — or NOTHING when it is not a date.
+ *
+ * The same guard `formatArchiveTime` has, for the same value: `new Date(NaN)
+ * .toISOString()` throws a RangeError, and these calls sit inside a row render
+ * that runs inside the page's try — so one unparseable `created_at` took the
+ * whole archive to the fallback page rather than dropping one stamp.
+ */
+function timeAttrs(ms: number): string {
+  const d = new Date(ms);
+  if (!Number.isFinite(d.getTime())) return "";
+  const iso = esc(d.toISOString());
+  return ` datetime="${iso}" title="${iso}"`;
 }
 
 // ── Coverage ─────────────────────────────────────────────────────────────────
@@ -295,7 +314,7 @@ export const JA_UNTITLED = "(uten tittel)";
 
 /** One row of the archive list. The whole row is the link — a draft's only
  *  action here is "open it". */
-export function jiraArchiveRowHtml(row: JiraDraftListRow): string {
+export function jiraArchiveRowHtml(row: JiraDraftListRow, state?: JiraArchiveListState): string {
   const title = row.title || JA_UNTITLED;
   const chips: string[] = [];
   if (row.status !== "ready") {
@@ -317,15 +336,14 @@ export function jiraArchiveRowHtml(row: JiraDraftListRow): string {
       )}</span>`
     : "";
 
-  return `<a class="ja-row" href="${esc(jiraDraftUrl(row.draftId))}">
+  return `<a class="ja-row" href="${esc(jiraDraftUrl(row.draftId, state))}">
     <span class="ja-row-title">${esc(title)}</span>
     <span class="ja-row-meta">
       ${chips.join("")}${coverageChip}
       <span class="ja-meta-bit">${esc(origin)}</span>
       <span class="ja-meta-bit">${esc(row.template)} · ${esc(depthLabel(row.depth))}</span>
       <span class="ja-meta-bit">${esc(row.bot)}</span>
-      <time class="ja-row-when" datetime="${esc(new Date(row.createdAt).toISOString())}"
-        title="${esc(new Date(row.createdAt).toISOString())}">${esc(formatArchiveTime(row.createdAt))}</time>
+      <time class="ja-row-when"${timeAttrs(row.createdAt)}>${esc(formatArchiveTime(row.createdAt))}</time>
     </span>
   </a>`;
 }
@@ -347,7 +365,17 @@ function coverageWord(coverage: JiraCoverage | null | undefined): string {
 
 export interface JiraArchiveListOptions {
   savedOnly: boolean;
+  /** The limit actually used, for the count's «de nyeste N». */
   limit: number;
+  /** `?limit=` as the reader typed it (clamped), else null — see
+   *  {@link JiraArchiveListState}. Echoing the default back would pin it. */
+  limitParam: number | null;
+  /**
+   * Was the list CUT? Told by the caller, from a row the DB read past the
+   * limit — `rows.length >= limit` claims truncation on an exact fit, which is
+   * the one page where the reader can count the rows and see it is wrong.
+   */
+  capped: boolean;
 }
 
 /** The list body: the saved/all switch, the rows, and the empty state. */
@@ -355,12 +383,15 @@ export function jiraArchiveListHtml(
   rows: JiraDraftListRow[],
   options: JiraArchiveListOptions,
 ): string {
-  const { savedOnly } = options;
+  const { savedOnly, limitParam } = options;
+  const state: JiraArchiveListState = { all: !savedOnly, limit: limitParam };
   const tab = (all: boolean, label: string) =>
-    `<a class="ja-tab${all === !savedOnly ? " ja-tab-on" : ""}" href="${esc(jiraArchiveUrl(all))}">${esc(label)}</a>`;
+    `<a class="ja-tab${all === !savedOnly ? " ja-tab-on" : ""}" href="${esc(
+      jiraArchiveUrl({ all, limit: limitParam }),
+    )}">${esc(label)}</a>`;
 
   const list = rows.length
-    ? `<div class="ja-rows">${rows.map(jiraArchiveRowHtml).join("")}</div>`
+    ? `<div class="ja-rows">${rows.map((r) => jiraArchiveRowHtml(r, state)).join("")}</div>`
     : `<p class="ja-empty">${
         savedOnly
           ? "Ingen lagrede utkast ennå. Trykk «Lagre» på et utkastkort i samtalen, så havner det her."
@@ -369,11 +400,11 @@ export function jiraArchiveListHtml(
 
   // The count is over the rows the page actually rendered, and it says so when
   // the clamp bound it: "50 utkast" beside a table that was truncated is a
-  // number the reader cannot check.
-  const capped = rows.length >= options.limit;
+  // number the reader cannot check. Truncation is the CALLER's fact (it read one
+  // row past the limit); a full page is not necessarily a cut one.
   const count = rows.length
-    ? `<span class="ja-count">${rows.length} ${rows.length === 1 ? "utkast" : "utkast"}${
-        capped ? ` (de nyeste ${options.limit})` : ""
+    ? `<span class="ja-count">${rows.length} utkast${
+        options.capped ? ` (de nyeste ${options.limit})` : ""
       }</span>`
     : "";
 
@@ -386,9 +417,10 @@ export function jiraArchiveListHtml(
 
 // ── One draft, read-only ─────────────────────────────────────────────────────
 
-/** The back link every draft page carries. */
-export function jiraBackLinkHtml(): string {
-  return `<a class="ja-back" href="/jira">← Arkivet</a>`;
+/** The back link every draft page carries — back to the list the reader came
+ *  from, `?all=1&limit=` included, not to a default list they never chose. */
+export function jiraBackLinkHtml(state?: JiraArchiveListState): string {
+  return `<a class="ja-back" href="${esc(jiraArchiveUrl(state ?? { all: false, limit: null }))}">← Arkivet</a>`;
 }
 
 /**
@@ -399,11 +431,15 @@ export function jiraBackLinkHtml(): string {
  * chat card takes the same parameter: this module is bundled for the browser and
  * must stay dependency-free, and the renderer is the shared one either way.
  *
- * A `failed` draft renders its stored error and NO copy button: there is nothing
- * to copy, and the retry is another 🧾 in the conversation — this page starts
- * nothing.
+ * A `failed` draft renders its stored error and NO preview, view switch or copy
+ * button — even when the row still carries the previous turn's markdown: the
+ * retry is another 🧾 in the conversation, and this page starts nothing.
  */
-export function jiraDraftViewHtml(draft: JiraDraftView, bodyHtml: string): string {
+export function jiraDraftViewHtml(
+  draft: JiraDraftView,
+  bodyHtml: string,
+  state?: JiraArchiveListState,
+): string {
   const title = deriveDraftHeading(draft);
   const chatHref = jiraChatUrl(draft.bot, draft.threadId, draft.threadUserId);
 
@@ -421,14 +457,13 @@ export function jiraDraftViewHtml(draft: JiraDraftView, bodyHtml: string): strin
   const meta = [
     `<span class="ja-chip ja-chip-${esc(draft.status)}">${esc(draftStatusLabel(draft.status))}</span>`,
     draft.savedAt !== null
-      ? `<span class="ja-chip ja-chip-saved" title="${esc(
-          new Date(draft.savedAt).toISOString(),
-        )}">lagret ${esc(formatArchiveTime(draft.savedAt))}</span>`
+      ? `<span class="ja-chip ja-chip-saved"${timeAttrs(draft.savedAt)}>lagret ${esc(
+          formatArchiveTime(draft.savedAt),
+        )}</span>`
       : `<span class="ja-chip ja-chip-unsaved">ikke lagret</span>`,
     `<span class="ja-meta-bit">${esc(draft.bot)}</span>`,
     `<span class="ja-meta-bit">${esc(draft.template)} · ${esc(depthLabel(draft.depth))}</span>`,
-    `<time class="ja-meta-bit" datetime="${esc(new Date(draft.createdAt).toISOString())}"
-       title="${esc(new Date(draft.createdAt).toISOString())}">${esc(formatArchiveTime(draft.createdAt))}</time>`,
+    `<time class="ja-meta-bit"${timeAttrs(draft.createdAt)}>${esc(formatArchiveTime(draft.createdAt))}</time>`,
     `<span class="ja-draftid" title="Utkastets id">${esc(draft.draftId)}</span>`,
   ].join("");
 
@@ -467,12 +502,24 @@ export function jiraDraftViewHtml(draft: JiraDraftView, bodyHtml: string): strin
     ? `<details class="ja-notes"><summary>Ekstra instruks</summary><pre>${esc(draft.extra)}</pre></details>`
     : "";
 
-  const body = draft.markdown
+  // **A `failed` draft shows no text, whatever the row still holds.**
+  // `failJiraDraft` leaves `markdown` alone, so a failed REGENERATE keeps the
+  // PREVIOUS turn's task — rendering it under «Genereringen feilet» offers a
+  // draft this run did not produce, and Kopier would put it on the clipboard as
+  // if it had. Same contract as the chat card's failed card: the error, and the
+  // way back to the conversation.
+  const body = draft.status === "failed"
+    ? `<p class="ja-empty">${
+        draft.markdown
+          ? "Teksten fra det forrige forsøket ligger fortsatt på raden, men vises ikke her — dette forsøket ble ikke ferdig. Kjør utkastet på nytt i samtalen."
+          : "Dette utkastet har ingen tekst."
+      }</p>`
+    : draft.markdown
     ? `<div class="ja-switch">
         <button type="button" ${JA_VIEW_ATTR}="preview" class="ja-tab ja-tab-on" aria-pressed="true">Forhåndsvisning</button>
         <button type="button" ${JA_VIEW_ATTR}="markdown" class="ja-tab" aria-pressed="false">Markdown</button>
         <span class="ja-spacer"></span>
-        <button type="button" id="${JA_COPY_ID}" class="ja-secondary">Kopier markdown</button>
+        <button type="button" id="${JA_COPY_ID}" class="ja-secondary">${JA_COPY_LABEL}</button>
       </div>
       <div class="ja-preview markdown-body" id="${JA_PREVIEW_ID}">${bodyHtml}</div>
       <textarea class="ja-raw" id="${JA_RAW_ID}" readonly spellcheck="false" hidden>${esc(draft.markdown)}</textarea>`
@@ -482,7 +529,7 @@ export function jiraDraftViewHtml(draft: JiraDraftView, bodyHtml: string): strin
           : "Dette utkastet har ingen tekst."
       }</p>`;
 
-  return `${jiraBackLinkHtml()}
+  return `${jiraBackLinkHtml(state)}
     <h1 class="ja-title">${esc(title)}</h1>
     <div class="ja-meta">${meta}</div>
     ${provenance}
@@ -509,8 +556,8 @@ export function deriveDraftHeading(draft: Pick<JiraDraftView, "markdown">): stri
 
 /** A `?draft=` that names nothing — a non-uuid, a deleted row, a stale link in
  *  someone's notes. Named, with the way back, never a bare 500. */
-export function jiraArchiveMissingHtml(draftId: string): string {
-  return `${jiraBackLinkHtml()}
+export function jiraArchiveMissingHtml(draftId: string, state?: JiraArchiveListState): string {
+  return `${jiraBackLinkHtml(state)}
     <h1 class="ja-title">Utkastet finnes ikke</h1>
     <p class="ja-empty">Ingen lagret Jira-utkast har id-en <code>${esc(draftId)}</code>.
       Det kan være slettet, eller lenken kan være feil.</p>`;

@@ -11,7 +11,7 @@ import {
   jiraArchiveMissingHtml,
   jiraDraftViewHtml,
 } from "./components/jira-archive-pure.ts";
-import type { JiraDraftListRow, JiraDraftView } from "../../jira/wire.ts";
+import type { JiraArchiveListState, JiraDraftListRow, JiraDraftView } from "../../jira/wire.ts";
 
 /**
  * `/jira` — the read-only ARCHIVE of Jira drafts.
@@ -36,24 +36,49 @@ import type { JiraDraftListRow, JiraDraftView } from "../../jira/wire.ts";
  * selectable.
  */
 export type JiraPageView =
-  | { kind: "list"; drafts: JiraDraftListRow[]; savedOnly: boolean; limit: number }
-  | { kind: "draft"; draft: JiraDraftView }
-  | { kind: "missing"; draftId: string };
+  | {
+      kind: "list";
+      drafts: JiraDraftListRow[];
+      savedOnly: boolean;
+      /** The limit the read used. */
+      limit: number;
+      /** `?limit=` as the reader typed it, else null — the links echo only that. */
+      limitParam: number | null;
+      /** The DB had a row past the limit. Told, never inferred from `drafts.length`. */
+      capped: boolean;
+    }
+  /** `list` is the state the reader arrived from, so the back link returns
+   *  there — absent when they typed the `?draft=` url themselves. */
+  | { kind: "draft"; draft: JiraDraftView; list?: JiraArchiveListState }
+  | { kind: "missing"; draftId: string; list?: JiraArchiveListState };
 
 export async function renderJiraPage(view: JiraPageView): Promise<string> {
+  // **The bundle rides the DRAFT view only.** The list is rows of links: nothing
+  // on it can be switched or copied, so building and inlining ~3 KB of clipboard
+  // code there is a `Bun.build` and a parse for no affordance.
+  const isDraft = view.kind === "draft";
   const [client, buildHash] = await Promise.all([
-    jiraArchiveClientScript(),
+    isDraft ? jiraArchiveClientScript() : Promise.resolve(""),
     getDashboardBuildHash(),
   ]);
 
   const { title, body } = renderBody(view);
+  // A `generating` draft is the one page whose content is not final: the chat's
+  // thread-level notice links here for a draft no bubble can carry, and a static
+  // «skrives fortsatt» never became the finished task. Five seconds of
+  // server-rendered refresh rather than a poller — there is no other client
+  // state on this page to lose.
+  const refresh =
+    isDraft && view.draft.status === "generating"
+      ? `\n  <meta http-equiv="refresh" content="5">`
+      : "";
 
   return `<!DOCTYPE html>
 <html lang="no">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">${refresh}
   ${buildHashMetaTag(buildHash)}
   <title>${escHtml(title)}</title>
   <style>
@@ -76,16 +101,17 @@ export async function renderJiraPage(view: JiraPageView): Promise<string> {
     ${body}
   </div>
 
-  <script>
-    ${client}
-  </script>
+  ${client ? `<script>\n    ${client}\n  </script>` : ""}
 </body>
 </html>`;
 }
 
 function renderBody(view: JiraPageView): { title: string; body: string } {
   if (view.kind === "missing") {
-    return { title: "Muninn - Jira-arkiv", body: jiraArchiveMissingHtml(view.draftId) };
+    return {
+      title: "Muninn - Jira-arkiv",
+      body: jiraArchiveMissingHtml(view.draftId, view.list),
+    };
   }
   if (view.kind === "draft") {
     // The stored markdown is model output, so it is rendered exactly the way the
@@ -95,7 +121,7 @@ function renderBody(view: JiraPageView): { title: string; body: string } {
     const bodyHtml = view.draft.markdown ? formatWebHtml(view.draft.markdown) : "";
     return {
       title: `Muninn - ${deriveDraftHeading(view.draft)}`,
-      body: jiraDraftViewHtml(view.draft, bodyHtml),
+      body: jiraDraftViewHtml(view.draft, bodyHtml, view.list),
     };
   }
   return {
@@ -106,7 +132,12 @@ function renderBody(view: JiraPageView): { title: string; body: string } {
         som en tur i samtalen og leverer det som et kort der. Her ligger de etterpå: lagrede først,
         hele historikken bak «Alle forsøk». Lesevisning — teksten redigeres i samtalen den kom fra.</p>
     </div>
-    ${jiraArchiveListHtml(view.drafts, { savedOnly: view.savedOnly, limit: view.limit })}`,
+    ${jiraArchiveListHtml(view.drafts, {
+      savedOnly: view.savedOnly,
+      limit: view.limit,
+      limitParam: view.limitParam,
+      capped: view.capped,
+    })}`,
   };
 }
 
@@ -118,7 +149,9 @@ export function renderJiraFallback(error: string): string {
 <body style="font-family:system-ui;padding:40px;max-width:70ch">
 <h1>Jira-arkivet kunne ikke bygges</h1>
 <p>${escHtml(error)}</p>
-<p>API-et er upåvirket: <code>GET /api/jira/archive</code>, <code>GET /api/jira/draft/:id</code>.</p>
+<p>Samme rader kan leses over API-et — <code>GET /api/jira/archive</code>,
+<code>GET /api/jira/draft/:id</code> — men de treffer den samme databasen, så er det den som er nede,
+svarer de ikke heller.</p>
 </body></html>`;
 }
 
@@ -159,7 +192,11 @@ const JIRA_ARCHIVE_STYLES = `
       border-radius: 6px; padding: 4px 11px; font-size: 12px; text-decoration: none;
     }
     a.ja-tab:hover { border-color: var(--ja-accent); color: var(--ja-accent-ink); }
-    .ja-tab-on { background: var(--ja-accent-wash); border-color: var(--ja-accent); color: var(--ja-accent-ink); font-weight: 600; }
+    /* Two-class selector on purpose (0,2,0). A bare \`.ja-tab-on\` (0,1,0) loses
+       to \`a.ja-tab\` (0,1,1) on the list's link tabs and to \`.ja button\` (0,1,1)
+       on the draft page's switch buttons — the selected tab rendered identically
+       to the unselected one on both. */
+    .ja-tab.ja-tab-on { background: var(--ja-accent-wash); border-color: var(--ja-accent); color: var(--ja-accent-ink); font-weight: 600; }
 
     .ja-rows { display: flex; flex-direction: column; gap: 6px; }
     a.ja-row {

@@ -4,6 +4,7 @@ import {
   clampJiraArchiveLimit,
   effectiveCoverage,
   isJiraDraftSource,
+  JIRA_TITLE_SCAN_CHARS,
   jiraDraftTitle,
 } from "../jira/wire.ts";
 import type {
@@ -397,12 +398,28 @@ export interface JiraDraftThreadRow {
 /**
  * How much of each row's markdown the archive listing reads.
  *
- * {@link jiraDraftTitle} needs a heading, and a Full-depth draft's is on line 1
- * — but a `failed` regenerate keeps the PREVIOUS text, and a draft can open with
- * a fenced block, so the scan needs slack. 400 chars × 200 rows is 80 KB read to
- * produce 200 labels; the whole markdown would be tens of megabytes.
+ * The bound itself lives in `src/jira/wire.ts` beside {@link jiraDraftTitle},
+ * which applies it to whatever it is handed: the draft PAGE holds the whole
+ * markdown, and two different bounds meant a draft opening with a long fenced
+ * block was "(uten tittel)" in the list and titled on its own page. Slack is
+ * needed either way — a `failed` regenerate keeps the PREVIOUS text and a draft
+ * can open with a fence — and 400 chars × 200 rows is 80 KB read to produce 200
+ * labels, where the whole markdown would be tens of megabytes.
  */
-const TITLE_SCAN_CHARS = 400;
+const TITLE_SCAN_CHARS = JIRA_TITLE_SCAN_CHARS;
+
+export interface JiraDraftListing {
+  drafts: JiraDraftListRow[];
+  /**
+   * The table held at least one row past the limit.
+   *
+   * A FACT from the read (one extra row is fetched and dropped), never
+   * `drafts.length >= limit` — an exact-fit page is not a truncated one, and
+   * this is the one page whose reader can count the rows and see the claim
+   * is wrong.
+   */
+  capped: boolean;
+}
 
 export interface ListJiraDraftsOptions {
   /** Default true is deliberately NOT the default here — the caller says. */
@@ -435,7 +452,9 @@ export interface ListJiraDraftsOptions {
  * on a non-array, which would take the whole listing down over one hand-edited
  * row — the `Array.isArray` discipline in {@link toView}, in SQL.
  */
-export async function listJiraDrafts(options: ListJiraDraftsOptions = {}): Promise<JiraDraftListRow[]> {
+export async function listJiraDrafts(
+  options: ListJiraDraftsOptions = {},
+): Promise<JiraDraftListing> {
   const sql = getDb();
   const limit = clampJiraArchiveLimit(options.limit ?? JIRA_ARCHIVE_LIMIT_DEFAULT);
   const savedOnly = options.savedOnly === true;
@@ -475,9 +494,11 @@ export async function listJiraDrafts(options: ListJiraDraftsOptions = {}): Promi
       LEFT JOIN threads t ON t.id = d.thread_id
      WHERE ${savedOnly ? sql`d.saved_at IS NOT NULL` : sql`TRUE`}
      ORDER BY d.created_at DESC
-     LIMIT ${limit}`;
+     LIMIT ${limit + 1}`;
 
-  return rows.map((r) => {
+  // One row past the limit is the truncation probe; it is never rendered.
+  const capped = rows.length > limit;
+  const drafts = rows.slice(0, limit).map((r) => {
     const retrieval = (r.retrieval_coverage as JiraCoverage | null) ?? null;
     const citationCount = Number(r.citation_count) || 0;
     const retained = Number(r.retained_count) || 0;
@@ -501,6 +522,7 @@ export async function listJiraDrafts(options: ListJiraDraftsOptions = {}): Promi
       createdAt: new Date(r.created_at).getTime(),
     } satisfies JiraDraftListRow;
   });
+  return { drafts, capped };
 }
 
 export async function listJiraDraftsForThread(threadId: string): Promise<JiraDraftThreadRow[]> {

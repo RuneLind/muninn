@@ -35,7 +35,8 @@
 
 import { escHtml as esc } from "../../../dashboard/views/components/escape.ts";
 import {
-  JIRA_DEPTHS,
+  depthLabel,
+  jiraDraftUrl,
   type JiraDraftStatus,
   type JiraDraftView,
   type JiraKeyVerdict,
@@ -87,9 +88,17 @@ export function jiraCardSaveFailedMessage(status: number): string {
   return `Kunne ikke lagre utkastet (HTTP ${status}).`;
 }
 
-/** Where a draft is read outside the conversation. */
+/**
+ * Where a draft is read outside the conversation.
+ *
+ * The PLAIN form of the shared builder: the card knows nothing about an archive
+ * list, so it carries no list state — `/jira` decides what to show a reader who
+ * arrives with none. One builder (`src/jira/wire.ts`), because two hand-written
+ * copies of this path is how the archive's own back link ended up pointing at a
+ * different list than the one it was opened from.
+ */
 export function jiraCardArchiveUrl(draftId: string): string {
-  return `/jira?draft=${encodeURIComponent(draftId)}`;
+  return jiraDraftUrl(draftId);
 }
 
 // ── The listing → what the client does with each row ─────────────────────────
@@ -239,10 +248,6 @@ export interface JiraCardRenderOptions {
   messageTone?: "ok" | "err";
   /** True once the poll loop hit `JIRA_POLL_MAX_MS` on a still-generating row. */
   gaveUp?: boolean;
-}
-
-function depthLabel(depth: string): string {
-  return JIRA_DEPTHS.find((d) => d.id === depth)?.label ?? depth;
 }
 
 /**

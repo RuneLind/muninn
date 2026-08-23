@@ -14,7 +14,23 @@
  * page, so what is copied is provably what is shown.
  */
 
-import { JA_COPY_ID, JA_PREVIEW_ID, JA_RAW_ID, JA_ROOT_ID, JA_VIEW_ATTR } from "./jira-archive-pure.ts";
+import {
+  JA_COPY_ID,
+  JA_COPY_LABEL,
+  JA_PREVIEW_ID,
+  JA_RAW_ID,
+  JA_ROOT_ID,
+  JA_VIEW_ATTR,
+} from "./jira-archive-pure.ts";
+
+/**
+ * The pending «restore the label» timer.
+ *
+ * One per page, cancelled and replaced on every click: two copies two seconds
+ * apart left the FIRST timer to fire under the second's «✓ Kopiert» and reset
+ * the label while the second copy was still the freshest thing that happened.
+ */
+let restoreTimer: number | undefined;
 
 function setView(view: string): void {
   const preview = document.getElementById(JA_PREVIEW_ID);
@@ -34,8 +50,10 @@ async function copyMarkdown(btn: HTMLElement): Promise<void> {
   const raw = document.getElementById(JA_RAW_ID) as HTMLTextAreaElement | null;
   if (!raw) return;
   const restore = () => {
-    window.setTimeout(() => {
-      btn.textContent = "Kopier markdown";
+    if (restoreTimer !== undefined) window.clearTimeout(restoreTimer);
+    restoreTimer = window.setTimeout(() => {
+      restoreTimer = undefined;
+      btn.textContent = JA_COPY_LABEL;
     }, 2000);
   };
   try {

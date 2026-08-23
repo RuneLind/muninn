@@ -19,6 +19,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   JA_COPY_ID,
+  JA_COPY_LABEL,
   JA_PREVIEW_ID,
   JA_RAW_ID,
   JA_UNTITLED,
@@ -28,10 +29,9 @@ import {
   jiraArchiveListHtml,
   jiraArchiveMissingHtml,
   jiraArchiveRowHtml,
-  jiraArchiveUrl,
+  jiraBackLinkHtml,
   jiraChatUrl,
   jiraCoverageNotice,
-  jiraDraftUrl,
   jiraDraftViewHtml,
   keyVerdictChip,
   markdownFlagLine,
@@ -44,6 +44,8 @@ import {
   JIRA_LOW_CONFIDENCE_MESSAGE,
   JIRA_NO_HITS_MESSAGE,
   JIRA_UNREACHABLE_MESSAGE,
+  jiraArchiveUrl,
+  jiraDraftUrl,
   type JiraDraftListRow,
   type JiraDraftView,
 } from "../../../jira/wire.ts";
@@ -183,12 +185,6 @@ describe("urls", () => {
     expect(parseArchiveAll(undefined)).toBe(false);
     expect(parseArchiveAll("0")).toBe(false);
     expect(parseArchiveAll("nei")).toBe(false);
-    expect(jiraArchiveUrl(true)).toBe("/jira?all=1");
-    expect(jiraArchiveUrl(false)).toBe("/jira");
-  });
-
-  test("a draft link encodes its id", () => {
-    expect(jiraDraftUrl("a b")).toBe("/jira?draft=a%20b");
   });
 
   test("the chat deep link carries the thread OWNER when the view served one", () => {
@@ -242,24 +238,30 @@ describe("the list", () => {
   });
 
   test("the toggle marks the active tab and links to the other state", () => {
-    const saved = jiraArchiveListHtml([row()], { savedOnly: true, limit: 50 });
+    const saved = jiraArchiveListHtml([row()], { savedOnly: true, limit: 50, limitParam: null, capped: false });
     expect(saved).toContain(`<a class="ja-tab ja-tab-on" href="/jira">Lagrede</a>`);
     expect(saved).toContain(`<a class="ja-tab" href="/jira?all=1">Alle forsøk</a>`);
 
-    const all = jiraArchiveListHtml([row()], { savedOnly: false, limit: 50 });
+    const all = jiraArchiveListHtml([row()], { savedOnly: false, limit: 50, limitParam: null, capped: false });
     expect(all).toContain(`<a class="ja-tab" href="/jira">Lagrede</a>`);
     expect(all).toContain(`<a class="ja-tab ja-tab-on" href="/jira?all=1">Alle forsøk</a>`);
   });
 
   test("the empty state differs by which list is empty", () => {
-    expect(jiraArchiveListHtml([], { savedOnly: true, limit: 50 })).toContain("«Lagre»");
-    expect(jiraArchiveListHtml([], { savedOnly: false, limit: 50 })).toContain("🧾 Lag Jira-sak");
+    expect(jiraArchiveListHtml([], { savedOnly: true, limit: 50, limitParam: null, capped: false })).toContain("«Lagre»");
+    expect(jiraArchiveListHtml([], { savedOnly: false, limit: 50, limitParam: null, capped: false })).toContain("🧾 Lag Jira-sak");
   });
 
   test("a listing that filled its clamp says the count is the newest N", () => {
     const rows = [row(), row(), row()];
-    expect(jiraArchiveListHtml(rows, { savedOnly: true, limit: 3 })).toContain("(de nyeste 3)");
-    expect(jiraArchiveListHtml(rows, { savedOnly: true, limit: 50 })).not.toContain("de nyeste");
+    expect(
+      jiraArchiveListHtml(rows, { savedOnly: true, limit: 3, limitParam: 3, capped: true }),
+    ).toContain("(de nyeste 3)");
+    // An EXACT-fit page is not a truncated one: three rows under a limit of
+    // three claimed truncation while nothing was cut.
+    expect(
+      jiraArchiveListHtml(rows, { savedOnly: true, limit: 3, limitParam: 3, capped: false }),
+    ).not.toContain("de nyeste");
   });
 });
 
@@ -380,5 +382,92 @@ describe("labels", () => {
     expect(threadDraftLabel("avgift", "t-1")).toBe("avgift");
     expect(threadDraftLabel(null, "t-1")).toBe("t-1");
     expect(threadDraftLabel(null, null)).toBe("samtalen");
+  });
+});
+
+describe("list state survives every link", () => {
+  const state = { all: true, limit: 200 };
+
+  test("the toggle keeps the limit the reader typed", () => {
+    const html = jiraArchiveListHtml([row()], {
+      savedOnly: false, limit: 200, limitParam: 200, capped: false,
+    });
+    expect(html).toContain(`href="/jira?limit=200"`);
+    expect(html).toContain(`href="/jira?all=1&amp;limit=200"`);
+  });
+
+  test("a row carries the list state it was opened from", () => {
+    expect(jiraArchiveRowHtml(row(), state)).toContain(
+      `href="/jira?draft=11111111-1111-4111-8111-111111111111&amp;all=1&amp;limit=200"`,
+    );
+    // No state ⇒ the plain link, unchanged.
+    expect(jiraArchiveRowHtml(row())).toContain(
+      `href="/jira?draft=11111111-1111-4111-8111-111111111111"`,
+    );
+  });
+
+  test("the back link returns to the list, not to a different one", () => {
+    expect(jiraBackLinkHtml(state)).toContain(`href="/jira?all=1&amp;limit=200"`);
+    expect(jiraDraftViewHtml(draft(), "", state)).toContain(`href="/jira?all=1&amp;limit=200"`);
+    expect(jiraArchiveMissingHtml("nope", state)).toContain(`href="/jira?all=1&amp;limit=200"`);
+    expect(jiraBackLinkHtml()).toContain(`href="/jira"`);
+  });
+});
+
+describe("a failed draft never offers text it will not show", () => {
+  test("stored markdown does not resurrect the preview, the switch or the copy", () => {
+    // `failJiraDraft` leaves `markdown` alone, so a failed REGENERATE carries the
+    // previous turn's text. Rendering it under a "Genereringen feilet" banner
+    // offers a draft the run did not produce — and Kopier would copy it.
+    const html = jiraDraftViewHtml(
+      draft({ status: "failed", markdown: "# Forrige forsøk\n\ntekst", error: "modellen svarte ikke" }),
+      "<h2>Forrige forsøk</h2>",
+    );
+    expect(html).toContain("Genereringen feilet");
+    expect(html).not.toContain(`id="${JA_COPY_ID}"`);
+    expect(html).not.toContain(`id="${JA_PREVIEW_ID}"`);
+    expect(html).not.toContain(`id="${JA_RAW_ID}"`);
+    expect(html).not.toContain("<h2>Forrige forsøk</h2>");
+    expect(html).not.toContain("Forhåndsvisning");
+  });
+});
+
+describe("a generating draft", () => {
+  test("says it is still being written, and offers no copy", () => {
+    const html = jiraDraftViewHtml(draft({ status: "generating", markdown: null }), "");
+    expect(html).toContain("skrives fortsatt");
+    expect(html).toContain("ja-chip-generating");
+    expect(html).not.toContain(`id="${JA_COPY_ID}"`);
+  });
+});
+
+describe("an unparseable timestamp", () => {
+  test("empties the stamp instead of taking the whole list down", () => {
+    // `new Date(NaN).toISOString()` throws a RangeError, and the row is rendered
+    // inside the page's try — one bad `created_at` took the archive to the
+    // fallback.
+    expect(() => jiraArchiveRowHtml(row({ createdAt: Number.NaN }))).not.toThrow();
+    expect(jiraArchiveRowHtml(row({ createdAt: Number.NaN }))).not.toContain("datetime=");
+    expect(() =>
+      jiraDraftViewHtml(draft({ createdAt: Number.NaN, savedAt: Number.NaN }), ""),
+    ).not.toThrow();
+  });
+});
+
+describe("coverage words", () => {
+  test("every reading that renders a notice renders its own chip word", () => {
+    const word = (retrieval: "no_hits" | "low_confidence" | "answer", coverage: "no_hits" | "low_confidence") =>
+      jiraArchiveRowHtml(row({ retrievalCoverage: retrieval, coverage }));
+    expect(word("no_hits", "no_hits")).toContain("ingen kilder");
+    expect(word("low_confidence", "low_confidence")).toContain("svak forankring");
+    // The all-excluded reading keeps the `no_hits` word but the other sentence.
+    expect(word("answer", "no_hits")).toContain("ingen kilder");
+    expect(word("answer", "no_hits")).toContain(JIRA_ALL_EXCLUDED_MESSAGE);
+  });
+});
+
+describe("the copy button's label", () => {
+  test("is one constant, so the bundle's restore cannot drift from the render", () => {
+    expect(jiraDraftViewHtml(draft(), "")).toContain(`>${JA_COPY_LABEL}<`);
   });
 });

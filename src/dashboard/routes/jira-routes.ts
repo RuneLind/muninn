@@ -74,6 +74,7 @@ import {
   JIRA_DEPTHS,
   JIRA_EXTRA_MAX,
   JIRA_MARKDOWN_MAX,
+  JIRA_ARCHIVE_LIMIT_DEFAULT,
   clampJiraArchiveLimit,
   isJiraDepth,
   parseJiraDraftBody,
@@ -512,6 +513,14 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
   // `/plans` beside `/api/plans/*` — the page and the endpoints it drives are one
   // feature and one file to keep in step.
   app.get("/jira", async (c) => {
+    // The list state, read once and carried by every link the page renders — the
+    // toggle, each row and the draft page's back link — so a hand-typed
+    // `?limit=200` survives one click. `limitParam` is null when the reader named
+    // none: echoing the default into the url would pin a value they never chose.
+    const all = parseArchiveAll(c.req.query("all"));
+    const limitQuery = (c.req.query("limit") ?? "").trim();
+    const limitParam = limitQuery ? clampJiraArchiveLimit(limitQuery) : null;
+    const list = { all, limit: limitParam };
     try {
       const draftId = (c.req.query("draft") ?? "").trim();
       if (draftId) {
@@ -520,23 +529,28 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
         // land on a page that says so, never on a 500.
         const draft = isValidUuid(draftId) ? await getJiraDraft(draftId) : null;
         if (!draft) {
-          return c.html(await renderJiraPage({ kind: "missing", draftId }), 404);
+          return c.html(await renderJiraPage({ kind: "missing", draftId, list }), 404);
         }
-        return c.html(await renderJiraPage({ kind: "draft", draft }));
+        return c.html(await renderJiraPage({ kind: "draft", draft, list }));
       }
 
-      const savedOnly = !parseArchiveAll(c.req.query("all"));
-      const limit = clampJiraArchiveLimit(c.req.query("limit"));
-      const drafts = await listJiraDrafts({ savedOnly, limit });
-      return c.html(await renderJiraPage({ kind: "list", drafts, savedOnly, limit }));
+      const savedOnly = !all;
+      const limit = limitParam ?? JIRA_ARCHIVE_LIMIT_DEFAULT;
+      const { drafts, capped } = await listJiraDrafts({ savedOnly, limit });
+      return c.html(
+        await renderJiraPage({ kind: "list", drafts, savedOnly, limit, limitParam, capped }),
+      );
     } catch (err) {
-      // Two throwing surfaces now — the DB read and the client-bundle build —
-      // and an unexplained Hono 500 is the least useful thing either could
-      // produce on a page whose whole job is to be readable.
+      // Two throwing surfaces — the DB read and the client-bundle build — and an
+      // unexplained Hono 500 is the least useful thing either could produce on a
+      // page whose whole job is to be readable. **The STATUS is still 500**: the
+      // page reads the database now, so the commonest reason this renders is one
+      // that is down, and answering 200 tells every caller (a monitor included)
+      // that the archive is fine. The HTML renders either way.
       log.error("Jira page render failed: {error}", {
         error: err instanceof Error ? err.message : String(err),
       });
-      return c.html(renderJiraFallback(err instanceof Error ? err.message : String(err)), 200);
+      return c.html(renderJiraFallback(err instanceof Error ? err.message : String(err)), 500);
     }
   });
 
@@ -549,16 +563,23 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
   // which is a strictly bigger lever than the migration-070 accepted risk of
   // GUESSING one. It carries no markdown either — a title, the verdict pair and
   // the binding — so the wide read stays `GET /api/jira/draft/:id`.
+  //
+  // **Who reads it:** nothing in this repo — the page renders its rows
+  // server-side and issues no fetch. It exists for the scripted/external reader
+  // (a `curl` over the archive, a one-off sweep) and for symmetry with the page,
+  // the way `GET /api/jira/draft/:id` serves the card and the sweep alike.
   app.get("/api/jira/archive", async (c) => {
     try {
       const savedOnly = !parseArchiveAll(c.req.query("all"));
       const limit = clampJiraArchiveLimit(c.req.query("limit"));
-      const drafts = await listJiraDrafts({ savedOnly, limit });
+      const { drafts, capped } = await listJiraDrafts({ savedOnly, limit });
       // `no-store` for the same reason the thread listing is: a draft saved
       // seconds ago must appear, and a heuristically cached listing would hide
       // it for reasons the reader cannot see.
       c.header("Cache-Control", "no-store");
-      return c.json({ savedOnly, limit, drafts });
+      // `capped` is a row the read found PAST the limit, not `drafts.length ===
+      // limit` — an exact fit is not a truncated page.
+      return c.json({ savedOnly, limit, capped, drafts });
     } catch (err) {
       return serverError(c, "archive listing", err);
     }
