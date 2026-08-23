@@ -444,14 +444,14 @@ export function chatStyles(): string {
       max-height: 420px;
       overflow-y: auto;
       overflow-x: auto;
-      /* macOS hides the scrollbar until it moves, so a bottom fade is the one
+      /* macOS hides the scrollbar until it moves, so a bottom shadow is the one
          cue that the box continues (measured: 418px box over a 747px draft).
          Scroll-shadow technique: the cover layer is content-attached and hides
-         the box-attached fade when there is nothing below — a short draft and
+         the box-attached shadow when there is nothing below — a short draft and
          a scrolled-to-end one both show their last line unfaded. */
       background:
         linear-gradient(to top, var(--bg-surface), var(--bg-surface)) bottom / 100% 28px no-repeat local,
-        linear-gradient(to top, var(--bg-surface), transparent) bottom / 100% 28px no-repeat scroll;
+        linear-gradient(to top, rgba(0, 0, 0, 0.14), transparent) bottom / 100% 20px no-repeat scroll;
       font-size: 13px;
       line-height: 1.55;
       border-top: 1px solid var(--border-primary);
