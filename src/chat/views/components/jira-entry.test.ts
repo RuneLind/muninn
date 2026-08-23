@@ -5,6 +5,7 @@ import {
   jiraEntryButtonHtml,
   jiraEntryCanSubmit,
   jiraEntryDraftBody,
+  jiraEntryDraftLinkHtml,
   jiraEntryOutcome,
   jiraEntryPanelHtml,
   jiraEntryVisible,
@@ -48,6 +49,8 @@ interface Harness {
   rowClasses: () => string[];
   /** Every tab `window.open` handed out, newest last. */
   tabs: FakeTab[];
+  /** How many times an already-open panel was re-focused rather than rebuilt. */
+  scrolledIntoView: () => number;
   attach: () => void;
   clickOpen: () => Promise<void>;
   clickSubmit: () => Promise<void>;
@@ -81,8 +84,12 @@ async function harness(opts: {
   const rowClasses: string[] = [];
   const listeners: Record<string, ((ev: unknown) => void)[]> = {};
 
+  let scrolledIntoView = 0;
   const panelNode = {
     contains: () => false,
+    scrollIntoView() {
+      scrolledIntoView += 1;
+    },
     remove() {
       panelHtml = null;
     },
@@ -169,6 +176,7 @@ async function harness(opts: {
       jiraEntryButtonHtml,
       jiraEntryCanSubmit,
       jiraEntryDraftBody,
+      jiraEntryDraftLinkHtml,
       jiraEntryOutcome,
       jiraEntryPanelHtml,
       jiraEntryVisible,
@@ -184,6 +192,7 @@ async function harness(opts: {
     "var jiraEntryButtonHtml = ctx.pure.jiraEntryButtonHtml;" +
     "var jiraEntryCanSubmit = ctx.pure.jiraEntryCanSubmit;" +
     "var jiraEntryDraftBody = ctx.pure.jiraEntryDraftBody;" +
+    "var jiraEntryDraftLinkHtml = ctx.pure.jiraEntryDraftLinkHtml;" +
     "var jiraEntryOutcome = ctx.pure.jiraEntryOutcome;" +
     "var jiraEntryPanelHtml = ctx.pure.jiraEntryPanelHtml;" +
     "var jiraEntryVisible = ctx.pure.jiraEntryVisible;" +
@@ -213,9 +222,13 @@ async function harness(opts: {
     await flush();
   };
 
-  const btnTarget = (sel: string) => ({
-    closest: (q: string) => (q === sel ? btnTarget(sel) : q === ".msg" ? msgNode : null),
-    getAttribute: (n: string) => (n === "data-je-thread" ? (opts.activeThreadId ?? "t-1") : null),
+  // `.msg-feedback` resolves to the SAME row node `appendJiraEntryControl` wrote
+  // the control into — that is the container the popup-blocked link falls back to.
+  const btnTarget = (sel: string, threadId?: string) => ({
+    closest: (q: string): unknown =>
+      q === sel ? btnTarget(sel, threadId) : q === ".msg" ? msgNode : q === ".msg-feedback" ? wrapNode : null,
+    getAttribute: (n: string) =>
+      n === "data-je-thread" ? (threadId ?? opts.activeThreadId ?? "t-1") : null,
   });
 
   return {
@@ -224,6 +237,7 @@ async function harness(opts: {
     panelHtml: () => panelHtml,
     rowHtml: () => rowHtml,
     rowClasses: () => rowClasses,
+    scrolledIntoView: () => scrolledIntoView,
     attach: () => made.appendJiraEntryControl(wrapNode),
     clickOpen: () => fire("click", btnTarget("[data-je-btn]")),
     clickSubmit: () => fire("click", btnTarget("#jeSubmit")),
@@ -419,6 +433,89 @@ describe("the panel disappearing mid-POST", () => {
 
     await h.settlePost(200, { draftId: "d-9" });
     expect(h.tabs[0]!.location.href).toBe("/jira?draft=d-9");
+  });
+});
+
+/**
+ * The draft id must survive BOTH losses at once.
+ *
+ * A blocked popup and a torn-down panel are each handled — the first renders a
+ * link, the second lets the tab carry the reader. Together they left nothing: the
+ * 200 could not navigate a tab (there is none) and could not render into a panel
+ * (it is gone), so the only pointer to a draft that EXISTS — a row, a visible
+ * chat turn, a held flight slot — was dropped on the floor.
+ */
+describe("a blocked popup with the panel already gone", () => {
+  test("renders the link into the originating message's feedback row", async () => {
+    const h = await harness({ popupBlocked: true, deferPost: true });
+    h.attach();
+    await h.clickOpen();
+    await h.clickSubmit();
+    await h.closePanel();
+    expect(h.panelHtml()).toBeNull();
+
+    await h.settlePost(200, { draftId: "d-9" });
+    // The control's own container — un-hidden by `has-jira` already, so the link
+    // is visible without a hover.
+    expect(h.rowHtml()).toContain('href="/jira?draft=d-9"');
+    expect(h.rowHtml()).toContain("Åpne utkastet");
+    expect(h.panelHtml()).toBeNull();
+  });
+
+  test("a REFUSAL after the panel is gone still renders nothing — there is no draft", async () => {
+    const h = await harness({ popupBlocked: true, deferPost: true });
+    h.attach();
+    const before = h.rowHtml();
+    await h.clickOpen();
+    await h.clickSubmit();
+    await h.closePanel();
+    await h.settlePost(409, { error: "Det skrives allerede en sak fra denne samtalen." });
+    expect(h.rowHtml()).toBe(before);
+  });
+});
+
+/**
+ * A second «Lag Jira-sak» while the POST is on the wire.
+ *
+ * Rebuilding the panel resets `sending` (so Avbryt and the submit button come
+ * back to life on a turn that is already running) and, worse, the in-flight 200
+ * then matched `jiraEntryThreadId === threadId` and CLOSED the panel the reader
+ * had just opened. The existing panel is the one that will receive the answer, so
+ * a second open in the same thread re-focuses it instead.
+ */
+describe("a second open while a POST is in flight", () => {
+  test("re-focuses the existing panel instead of rebuilding it", async () => {
+    const h = await harness({ deferPost: true });
+    h.attach();
+    await h.clickOpen();
+    await h.clickSubmit();
+    const sending = h.panelHtml()!;
+    expect(sending).toContain("Starter…");
+
+    await h.clickOpen();
+    // Not rebuilt: still the sending panel, and no second templates fetch.
+    expect(h.panelHtml()).toBe(sending);
+    expect(h.scrolledIntoView()).toBe(1);
+    expect(h.fetchCalls.filter((f) => f.url === "/api/jira/templates")).toHaveLength(1);
+
+    // …and the answer still lands on that one panel.
+    await h.settlePost(200, { draftId: "d-9" });
+    expect(h.tabs).toHaveLength(1);
+    expect(h.tabs[0]!.location.href).toBe("/jira?draft=d-9");
+    expect(h.panelHtml()).toBeNull();
+  });
+
+  test("a finished POST releases the guard — the next open rebuilds normally", async () => {
+    const h = await harness({ deferPost: true });
+    h.attach();
+    await h.clickOpen();
+    await h.clickSubmit();
+    await h.settlePost(409, { error: "Det skrives allerede en sak fra denne samtalen." });
+    expect(h.panelHtml()).toContain("Lag utkast");
+
+    await h.clickOpen();
+    expect(h.scrolledIntoView()).toBe(0);
+    expect(h.panelHtml()).not.toContain("Det skrives allerede en sak");
   });
 });
 

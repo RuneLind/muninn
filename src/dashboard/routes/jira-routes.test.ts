@@ -1779,4 +1779,52 @@ describe("regenerate on a thread-sourced draft", () => {
     // through a CORS-open GET.
     expect(view.error).not.toContain("120000ms");
   });
+
+  /**
+   * The row never carries an exclusion the wide set cannot SHOW.
+   *
+   * This path re-seeds its hit set from `research_citations` on every run, so an
+   * exclusion the reader made against the previous seeding can name a doc the new
+   * one does not have. Stored as-is it is a ghost: the toggle column cannot render
+   * it, so nobody can switch it back on, and it silently narrows every later run.
+   *
+   * The intersection is the SERVER's, done once at seed time, because the client
+   * pruning it instead made the two ends disagree — the row kept the unpruned set
+   * and the next poll re-adopted exactly what the client had just dropped.
+   */
+  test("an exclusion the re-seeded set cannot show is intersected away; one it can show is kept", async () => {
+    const draftId = await startThreadDraft();
+
+    // The conversation's rammeavtale citation is gone from the re-seeded set.
+    threadCitations = [THREAD_CITATIONS[0]!];
+    __setJiraThreadTurnForTest(scriptedThreadTurn("## Symptom\nKortere."));
+    await (await makeApp().request("/api/jira/draft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        draftId, template: "bug", depth: "skisse",
+        excludeDocIds: ["Team MELOSYS/rammeavtale.md"],
+      }),
+    })).text();
+
+    let view = await (await makeApp().request(`/api/jira/draft/${draftId}`)).json();
+    expect(view.status).toBe("ready");
+    expect(view.citations.map((c: { docId: string }) => c.docId)).toEqual(["MELOSYS-8150_Uttrekk.md"]);
+    expect(view.excludeDocIds).toEqual([]);
+
+    // …and the other direction: an exclusion the seeded set DOES carry stays,
+    // or the reader's toggle would be silently undone on every run.
+    threadCitations = THREAD_CITATIONS;
+    await (await makeApp().request("/api/jira/draft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        draftId, template: "bug", depth: "skisse",
+        excludeDocIds: ["Team MELOSYS/rammeavtale.md"],
+      }),
+    })).text();
+    view = await (await makeApp().request(`/api/jira/draft/${draftId}`)).json();
+    expect(view.excludeDocIds).toEqual(["Team MELOSYS/rammeavtale.md"]);
+    expect(view.citations.map((c: { docId: string }) => c.docId)).toContain("Team MELOSYS/rammeavtale.md");
+  });
 });

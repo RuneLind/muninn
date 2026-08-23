@@ -201,7 +201,27 @@ export async function runJiraThreadDraft(
     const retrievalCoverage = threadSeedCoverage(seeded);
     await saveJiraDraftRetrieval(draftId, seeded, retrievalCoverage, seedQuestion);
 
-    const citations = applyExclusions(seeded, opts.excludeDocIds);
+    // ── The row's exclusion set, INTERSECTED with what was just seeded ──────
+    // The hit set is re-seeded on every run here, so a request can carry an
+    // exclusion the NEW set does not contain — the reader toggled it off against
+    // the previous seeding, or a stale tab posted it. Stored as-is it is a ghost:
+    // the toggle column renders the wide set, so nothing can show it and nobody
+    // can switch it back on, while it keeps narrowing every later run.
+    //
+    // **The server owns this, once, here** — the client used to prune the same
+    // ids out of its own state when it adopted the `citations` frame, which made
+    // the two ends disagree: the row still held the unpruned set, so the next poll
+    // re-adopted exactly what the client had just dropped, and with no poll in
+    // between the next regenerate POSTed a body missing it. Same writer as the
+    // regenerate's own first write, so there is one statement that sets this
+    // column in flight.
+    const seededIds = new Set(seeded.map((c) => c.docId));
+    const rowExcludeDocIds = opts.excludeDocIds.filter((id) => seededIds.has(id));
+    if (rowExcludeDocIds.length !== opts.excludeDocIds.length) {
+      await startJiraDraftRun(draftId, rowExcludeDocIds);
+    }
+
+    const citations = applyExclusions(seeded, rowExcludeDocIds);
     const coverage = effectiveCoverage(retrievalCoverage, citations.length);
     // **Every run emits the WIDE `seeded` set** — never `citations`, which is the
     // RETAINED, renumbered one. That distinction is the whole of rule 1 in
@@ -214,9 +234,9 @@ export async function runJiraThreadDraft(
     // retrieving between turns, so the set legitimately grows and shrinks — and
     // staying silent left the column showing the PREVIOUS turn's sources until
     // the reader reloaded the page. The client adopts a non-empty incoming set
-    // and prunes exclusions that no longer name anything in it
-    // (`adoptCitationsPatch`), which is exactly the notes path's guard plus the
-    // one rule only a mutable set needs.
+    // and NOTHING ELSE (`adoptCitationsPatch`): the exclusion set is this row's,
+    // intersected just above, and the page reconciles it from the row on its next
+    // poll or `done`.
     emit("citations", { citations: seeded, coverage });
 
     // `## Referanser` is depth-sliced here for the same reason it is on the notes

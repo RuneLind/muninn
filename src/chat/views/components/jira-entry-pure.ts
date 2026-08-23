@@ -190,6 +190,23 @@ export function jiraEntryFallbackMessage(status: number): string {
 export const JE_POPUP_BLOCKED_MESSAGE = "Utkastet er startet — nettleseren blokkerte den nye fanen.";
 
 /**
+ * The «… Åpne utkastet →» link for a draft that STARTED but has no tab.
+ *
+ * ONE spelling, because it is rendered into two different containers: the panel's
+ * own message line, and — when the panel is already gone — the feedback row the
+ * control was clicked in. That second case is the one where both fallbacks had
+ * failed at once: no tab to navigate (the popup was blocked) and no panel to
+ * render into (a thread switch tore it down), leaving the only pointer to a real
+ * draft on the floor and the reader's next attempt 409ing about work never shown.
+ */
+export function jiraEntryDraftLinkHtml(url: string, message: string = JE_POPUP_BLOCKED_MESSAGE): string {
+  return (
+    `<a class="je-msg je-msg-ok" href="${esc(url)}" target="_blank" rel="noopener">` +
+    `${esc(message)} Åpne utkastet →</a>`
+  );
+}
+
+/**
  * Why **Avbryt** is dead while a POST is on the wire.
  *
  * There is nothing to cancel: the route is fire-and-forget, so by the time the
@@ -236,9 +253,7 @@ export function jiraEntryPanelHtml(state: JiraEntryState): string {
   // re-render (the reader may be mid-word in the steer field), and a
   // conditionally rendered line leaves that write with nothing to land in.
   const msg = state.draftUrl
-    ? `<a class="je-msg je-msg-ok" href="${esc(state.draftUrl)}" target="_blank" rel="noopener">${esc(
-        state.message ?? JE_POPUP_BLOCKED_MESSAGE,
-      )} Åpne utkastet →</a>`
+    ? jiraEntryDraftLinkHtml(state.draftUrl, state.message ?? JE_POPUP_BLOCKED_MESSAGE)
     : `<span class="je-msg${state.messageTone === "err" ? " je-msg-err" : state.messageTone === "ok" ? " je-msg-ok" : ""}"` +
       `${state.message ? "" : " hidden"}>${esc(state.message ?? "")}</span>`;
 

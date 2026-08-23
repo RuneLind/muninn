@@ -974,9 +974,9 @@ describe("thread-sourced drafts", () => {
  * The THREAD path re-seeds its hit set from `research_citations` on EVERY run —
  * the conversation keeps retrieving between turns, so unlike the notes path's
  * immutable set it legitimately CHANGES. A regenerate therefore emits the WIDE
- * seeded set and the client adopts it; the exclusions that no longer name
- * anything in it are dropped, or the toggle column carries ghost ids that
- * silently narrow the next run against rows nobody can see.
+ * seeded set and the client adopts it — and ONLY it: the exclusion set is the
+ * SERVER's to own (it stores `excludeDocIds ∩ seeded` at seed time), so a
+ * second, client-side pruning rule could only disagree with the row.
  */
 describe("adoptCitationsPatch", () => {
   const s = (over: Partial<JiraComposerState> = {}) => stateWith(over);
@@ -986,12 +986,28 @@ describe("adoptCitationsPatch", () => {
     expect(patch.citations?.map((c) => c.docId)).toEqual(["b.md", "c.md"]);
   });
 
-  test("exclusions that are no longer in the set are DROPPED", () => {
+  test("exclusions are LEFT ALONE — the row owns them, and the next poll reconciles", () => {
+    // Pruning here made the two ends disagree: the server stored the UNPRUNED
+    // request exclusions, so a poll a second later re-adopted the id the client
+    // had just dropped, and with no poll in between the next regenerate POSTed a
+    // body missing it. One owner, and it is the row.
     const patch = adoptCitationsPatch(
       s({ citations: [cite(1, "a.md"), cite(2, "b.md")], excludeDocIds: ["a.md", "b.md"] }),
       [cite(1, "b.md"), cite(2, "c.md")],
     );
-    expect(patch.excludeDocIds).toEqual(["b.md"]);
+    expect(patch.excludeDocIds).toBeUndefined();
+  });
+
+  test("the NOTES first-draft frame cannot wipe the toggles", () => {
+    // The notes path emits its `citations` frame AFTER `applyExclusions`, so the
+    // incoming set is the RETAINED one. `/draft/start` plus an immediate toggle
+    // is exactly that shape — and pruning against it deleted the toggle the
+    // reader had just made, mid-generation.
+    const patch = adoptCitationsPatch(
+      s({ source: "notes", citations: [cite(1, "a.md"), cite(2, "b.md")], excludeDocIds: ["a.md"] }),
+      [cite(1, "b.md")],
+    );
+    expect(patch.excludeDocIds).toBeUndefined();
   });
 
   test("an EMPTY set never replaces a non-empty one — nothing would be left to switch back on", () => {
@@ -1000,6 +1016,6 @@ describe("adoptCitationsPatch", () => {
   });
 
   test("an empty set on an empty state IS adopted (nothing to lose)", () => {
-    expect(adoptCitationsPatch(s(), [])).toEqual({ citations: [], excludeDocIds: [] });
+    expect(adoptCitationsPatch(s(), [])).toEqual({ citations: [] });
   });
 });

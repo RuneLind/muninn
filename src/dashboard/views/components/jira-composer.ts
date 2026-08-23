@@ -620,10 +620,12 @@ function dispatchJiraFrame(
     }
     case "citations": {
       // The WIDE stored set, before this run's depth slice — the toggle column
-      // renders exactly this, unchanged when the depth dial moves. The guard and
-      // the exclusion pruning are `adoptCitationsPatch`; a thread regenerate
-      // re-seeds this set from the conversation, so it can legitimately arrive
-      // with rows the previous one did not have (and without rows it did).
+      // renders exactly this, unchanged when the depth dial moves. The empty-set
+      // guard is `adoptCitationsPatch`, which adopts the set and NOTHING else; a
+      // thread regenerate re-seeds it from the conversation, so it can
+      // legitimately arrive with rows the previous one did not have (and without
+      // rows it did), and the row's own exclusion set — intersected server-side —
+      // reconciles on the next poll or `done`.
       const incoming = Array.isArray(data.citations) ? (data.citations as JiraCitation[]) : null;
       Object.assign(state, adoptCitationsPatch(state, incoming));
       if (typeof data.coverage === "string") state.coverage = data.coverage as JiraDonePayload["coverage"];

@@ -26,13 +26,21 @@
  *     the page's live `activeThreadId` at click time — the control belongs to the
  *     message it was rendered under.
  *
- * And one rule about the response: **a 200 navigates the pre-opened tab before
- * any state check.** The POST is fire-and-forget, so by the time it answers the
- * turn has run — a row exists, a message is in the conversation, and the thread's
- * single-flight slot is held. The draft id in that response is the only pointer
- * to it, so a panel that vanished meanwhile (a thread switch) must not be allowed
- * to throw the pointer away; the next attempt would 409 about work never shown.
- * Avbryt cannot cause that state at all — it is disabled while sending.
+ * And three rules about the response, all of them one rule: **a started draft's
+ * id is never dropped.** The POST is fire-and-forget, so by the time it answers
+ * the turn has run — a row exists, a message is in the conversation, and the
+ * thread's single-flight slot is held. That id is the only pointer to it, and the
+ * next attempt 409s about work never shown if it is lost. So:
+ *
+ *   · **a 200 navigates the pre-opened tab before any state check**, whatever the
+ *     panel is doing by then (a thread switch tears it down; Avbryt cannot — it
+ *     is disabled while sending);
+ *   · **with no tab AND no panel, the link goes into the feedback row** the
+ *     control was clicked in, captured at submit time. Blocked popup and torn-down
+ *     panel are each survivable alone; together they left nothing;
+ *   · **a second open while a POST is in flight RE-FOCUSES the panel** instead of
+ *     rebuilding it. A rebuild resets \`sending\`, and the in-flight 200 then
+ *     closed the panel the reader had just opened.
  */
 
 import {
@@ -56,6 +64,10 @@ export function jiraEntryScript(): string {
   var jiraBotName = null;
   var jiraEntryState = null;      // the OPEN panel's state, or null
   var jiraEntryThreadId = null;   // the thread that panel drafts from
+  // The feedback row the OPEN panel's control was clicked in. Captured at open
+  // time and again as a LOCAL at submit time, so the response has somewhere to
+  // put a started draft's link even after the panel is torn down.
+  var jiraEntryRow = null;
   var jiraEntryTemplates = null;  // cached across opens — the list is per-bot
   var jiraEntryTemplatesErr = null;
   var jiraEntryWired = false;
@@ -80,6 +92,7 @@ export function jiraEntryScript(): string {
     if (panel) panel.remove();
     jiraEntryState = null;
     jiraEntryThreadId = null;
+    jiraEntryRow = null;
   }
 
   // Repaint the panel in place. The extra field is the only control that can
@@ -128,8 +141,22 @@ export function jiraEntryScript(): string {
     if (!threadId) return;
     var msg = btn.closest('.msg');
     if (!msg) return;
+    // A POST is already on the wire for THIS thread: the panel standing there is
+    // the one that will receive its answer, so it is RE-FOCUSED, never rebuilt.
+    // Rebuilding reset \`sending\` (bringing Avbryt and Lag utkast back to life on
+    // a turn that is already running) and, worse, the in-flight 200 then matched
+    // \`jiraEntryThreadId === threadId\` and CLOSED the panel the reader had just
+    // opened. No state is touched here — a second open is not a second attempt.
+    if (jiraEntryState && jiraEntryState.sending && jiraEntryThreadId === threadId) {
+      var open = document.getElementById('${JE_PANEL_ID}');
+      if (open && typeof open.scrollIntoView === 'function') open.scrollIntoView({ block: 'nearest' });
+      return;
+    }
     closeJiraEntry();
     jiraEntryThreadId = threadId;
+    // The control's own container. \`.msg\` is the fallback for a control rendered
+    // outside a feedback row; either is a node that outlives the panel.
+    jiraEntryRow = btn.closest('.msg-feedback') || msg;
     jiraEntryState = initialJiraEntryState();
     msg.insertAdjacentHTML('beforeend', jiraEntryPanelHtml(jiraEntryState));
     scrollToBottom();
@@ -152,6 +179,9 @@ export function jiraEntryScript(): string {
     if (!jiraEntryState || !jiraEntryThreadId) { if (tab) tab.close(); return; }
     if (!jiraEntryCanSubmit(jiraEntryState)) { if (tab) tab.close(); return; }
     var threadId = jiraEntryThreadId;
+    // Captured NOW, as a local: \`closeJiraEntry\` clears the shared one, and this
+    // is the only container left to render into if the panel goes away.
+    var row = jiraEntryRow;
     jiraEntryState.sending = true;
     jiraEntryState.message = undefined;
     jiraEntryState.messageTone = undefined;
@@ -193,22 +223,34 @@ export function jiraEntryScript(): string {
       return;
     }
 
-    // Everything below needs somewhere to render. If the panel is gone (or has
-    // been re-opened on another message), a refusal is dropped silently and the
-    // blank tab is closed — the reader asked for something else.
-    if (!jiraEntryState || jiraEntryThreadId !== threadId) { if (tab) tab.close(); return; }
+    var live = !!(jiraEntryState && jiraEntryThreadId === threadId);
 
-    jiraEntryState.sending = false;
     if (outcome.ok) {
-      // The popup was blocked (or the tab was closed by hand): the draft is real,
-      // so it gets an honest link rather than a claim that a tab opened.
-      jiraEntryState.draftUrl = outcome.url;
-      jiraEntryState.message = JE_POPUP_BLOCKED_MESSAGE;
-      jiraEntryState.messageTone = 'ok';
-      renderJiraEntryPanel();
+      // No tab (the popup was blocked, or it was closed by hand) but the draft is
+      // REAL. The link is the only pointer left to it, so it is rendered wherever
+      // there is still something to render into: the panel if it stands, and
+      // otherwise the feedback row the control was clicked in — which \`has-jira\`
+      // already un-hides, so it is visible without a hover. Dropping it here left
+      // BOTH fallbacks failed at once and the next attempt 409'd about work the
+      // reader had never been shown.
+      if (live) {
+        jiraEntryState.sending = false;
+        jiraEntryState.draftUrl = outcome.url;
+        jiraEntryState.message = JE_POPUP_BLOCKED_MESSAGE;
+        jiraEntryState.messageTone = 'ok';
+        renderJiraEntryPanel();
+      } else if (row) {
+        row.insertAdjacentHTML('beforeend', jiraEntryDraftLinkHtml(outcome.url));
+      }
       return;
     }
+
+    // A refusal needs somewhere to render and nothing else survives it — there is
+    // no draft to point at. If the panel is gone (or has been re-opened on another
+    // message) it is dropped silently and the blank tab is closed.
     if (tab) tab.close();
+    if (!live) return;
+    jiraEntryState.sending = false;
     jiraEntryState.message = outcome.message;
     jiraEntryState.messageTone = 'err';
     renderJiraEntryPanel();

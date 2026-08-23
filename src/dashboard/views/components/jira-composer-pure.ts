@@ -477,17 +477,22 @@ export function mergeDraftView(
  * Adopt an incoming `citations` frame — the STREAM's counterpart to the citation
  * half of {@link mergeDraftView}, and its one rule in one place.
  *
- * Two things it does:
+ * Two things it does — and, deliberately, only those:
  *
  *   · **an EMPTY set never replaces a non-empty one.** The middle column is the
  *     only way back for a source the reader switched off, so a degraded or
  *     exclude-everything payload must not be allowed to delete the rows.
- *   · **exclusions are pruned to the incoming set.** On the THREAD path the hit
- *     set is re-seeded from `research_citations` on every run — the conversation
- *     keeps retrieving between turns, so unlike the notes path's immutable set
- *     it legitimately changes — and a doc id that is no longer in it would sit in
- *     `excludeDocIds` as a ghost, narrowing the next regenerate against a row
- *     nobody can see or switch back on.
+ *   · **`excludeDocIds` is LEFT ALONE.** The ghost-exclusion problem is real —
+ *     the THREAD path re-seeds its hit set from `research_citations` on every
+ *     run, so an id the reader toggled off can vanish from the wide set — but it
+ *     is the SERVER's to solve, and it does, once, at seed time
+ *     (`jira-thread-run.ts` stores `excludeDocIds ∩ seeded`). Pruning here as
+ *     well made the two ends disagree: the row still held the unpruned request
+ *     set, so the next poll re-adopted exactly what this had just dropped, and
+ *     with no poll in between the next regenerate POSTed a body missing it. It
+ *     also fired on the NOTES first-draft frame, which carries the
+ *     post-`applyExclusions` set — so `/draft/start` plus an immediate toggle
+ *     deleted the toggle the reader had just made.
  *
  * Returns a PATCH (empty ⇒ adopt nothing), so the merge is testable without a DOM.
  */
@@ -497,11 +502,7 @@ export function adoptCitationsPatch(
 ): Partial<JiraComposerState> {
   if (!incoming) return {};
   if (incoming.length === 0 && state.citations.length > 0) return {};
-  const ids = new Set(incoming.map((c) => c.docId));
-  return {
-    citations: incoming,
-    excludeDocIds: state.excludeDocIds.filter((id) => ids.has(id)),
-  };
+  return { citations: incoming };
 }
 
 /**
