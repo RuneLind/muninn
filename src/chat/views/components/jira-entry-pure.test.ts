@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
+  JE_BTN_ATTR,
+  JE_CANCEL_BUSY_TITLE,
   JE_DEFAULT_DEPTH,
   JE_POPUP_BLOCKED_MESSAGE,
   initialJiraEntryState,
@@ -144,12 +146,48 @@ describe("markup", () => {
     expect(html).toContain("&quot;");
   });
 
+  /**
+   * The control is rendered once per finalized bot message, so it CANNOT carry an
+   * id: a thread with 30 replies rendered 30 elements sharing one, which is
+   * invalid HTML and makes `getElementById` and `#id` selectors name whichever
+   * one the parser saw first. The hook is an attribute; the PANEL keeps its id,
+   * which is legitimate because opening one closes any other.
+   */
+  test("carries NO id — it is rendered once per message", () => {
+    const html = jiraEntryButtonHtml(THREAD);
+    expect(html).toContain(`${JE_BTN_ATTR}`);
+    expect(html).toContain("msg-jira-btn");
+    expect(html).not.toMatch(/\sid=/);
+  });
+
   test("the panel opens on skisse and offers all three depths", () => {
     const html = jiraEntryPanelHtml({ ...initialJiraEntryState(), loading: false, template: "bug" });
     expect(html).toContain('value="ingen"');
     expect(html).toContain('value="skisse" selected');
     expect(html).toContain('value="full"');
     expect(JE_DEFAULT_DEPTH).toBe("skisse");
+  });
+
+  /**
+   * Avbryt while a POST is on the wire tore the panel down under the response
+   * handler, and the handler then had nowhere to put a started draft — so the
+   * turn ran, the row existed, the thread's flight slot was held, and the next
+   * click 409'd about work the reader had never been shown. The button says so
+   * instead of pretending the run can be called off.
+   */
+  test("Avbryt is disabled with a reason while a POST is in flight", () => {
+    const sending = jiraEntryPanelHtml({
+      ...initialJiraEntryState(),
+      loading: false,
+      template: "bug",
+      sending: true,
+    });
+    expect(sending).toMatch(/id="jeCancel"[^>]*disabled/);
+    expect(sending).toContain(JE_CANCEL_BUSY_TITLE);
+
+    const idle = jiraEntryPanelHtml({ ...initialJiraEntryState(), loading: false, template: "bug" });
+    expect(idle).not.toMatch(/id="jeCancel"[^>]*disabled/);
+    expect(idle).not.toContain(JE_CANCEL_BUSY_TITLE);
   });
 
   test("no templates yet says so instead of rendering an empty picker", () => {

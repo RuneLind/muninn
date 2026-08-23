@@ -14,6 +14,7 @@ import {
   JC_REGEN_ID,
   JC_RIGHT_ERROR_ID,
   JC_SAVE_ID,
+  adoptCitationsPatch,
   beginActionPatch,
   canSubmit,
   charCountHtml,
@@ -33,6 +34,7 @@ import {
   jiraDraftBody,
   jiraDraftHtml,
   jiraLeftHtml,
+  jiraThreadSourceHtml,
   keyVerdictChip,
   keyVerdictCounts,
   markdownFlagLine,
@@ -777,6 +779,27 @@ describe("thread-sourced drafts", () => {
       ...over,
     });
 
+  /** A stored thread row as `GET /api/jira/draft/:id` serves it. */
+  const THREAD_VIEW = {
+    draftId: "d1",
+    status: "ready",
+    template: "bug",
+    depth: "skisse",
+    notes: "fra samtale: X",
+    extra: "",
+    markdown: "m",
+    citations: [],
+    excludeDocIds: [],
+    keyVerdicts: [],
+    markdownFlags: [],
+    coverage: "answer",
+    retrievalCoverage: "answer",
+    retrievalQuestion: "fra samtale: X",
+    source: "thread",
+    threadId: "t-9",
+    threadName: "X",
+  };
+
   test("mergeDraftView folds the three fields in", () => {
     const patch = mergeDraftView(stateWith(), {
       draftId: "d1",
@@ -893,6 +916,46 @@ describe("thread-sourced drafts", () => {
     expect(jiraChatUrl("me los", "t/1")).toBe("/chat?bot=me%20los&thread=t%2F1");
   });
 
+  /**
+   * The OWNER rides the link.
+   *
+   * `handleDeepLink` honours `user=` (it pre-seeds the bot's remembered user
+   * before `selectBot` loads the list), and the page DOES know who owns the
+   * thread: `threads.user_id` is on the row and the GET view now serves it. Left
+   * off, the link resolved to whichever user the chat happened to remember — and
+   * `selectThread(<id>)` then looked for the thread in someone else's list.
+   */
+  test("jiraChatUrl carries the thread's OWNER when the view served one", () => {
+    expect(jiraChatUrl("melosys", "t-1", "u1")).toBe("/chat?bot=melosys&user=u1&thread=t-1");
+    expect(jiraChatUrl("melosys", "t-1", "  ")).toBe("/chat?bot=melosys&thread=t-1");
+    expect(jiraChatUrl("melosys", "t-1", undefined)).toBe("/chat?bot=melosys&thread=t-1");
+    expect(jiraChatUrl("melosys", "t 1", "u/1")).toBe("/chat?bot=melosys&user=u%2F1&thread=t%201");
+  });
+
+  test("both «Juster i samtalen» links carry bot + user + thread", () => {
+    const s = threadState({ threadUserId: "u1" });
+    expect(jiraLeftHtml(s)).toContain("/chat?bot=melosys&amp;user=u1&amp;thread=t-1");
+    expect(jiraThreadSourceHtml(s)).toContain("/chat?bot=melosys&amp;user=u1&amp;thread=t-1");
+  });
+
+  /**
+   * `state.bot` used to be set by `loadTemplates` alone, so a templates 503 —
+   * exactly the state in which the reader most wants to go back to the chat —
+   * took the «Juster i samtalen» link with it. The row knows its own bot.
+   */
+  test("the deep link survives a templates failure, because the ROW carries the bot", () => {
+    const patch = mergeDraftView(stateWith(), {
+      ...THREAD_VIEW,
+      bot: "melosys",
+      threadUserId: "u1",
+    } as unknown as JiraDraftView);
+    expect(patch.bot).toBe("melosys");
+    expect(patch.threadUserId).toBe("u1");
+    // …and an absent one never un-sets what the templates fetch did resolve.
+    expect(mergeDraftView(stateWith({ bot: "melosys" }), THREAD_VIEW as unknown as JiraDraftView).bot)
+      .toBe("melosys");
+  });
+
   test("a deleted thread row (no name) falls back to the id, never «samtalen «»»", () => {
     expect(threadDraftLabel(threadState({ threadName: undefined }))).toBe("t-1");
     expect(jiraLeftHtml(threadState({ threadName: undefined }))).toContain("«t-1»");
@@ -902,5 +965,41 @@ describe("thread-sourced drafts", () => {
     const evil = threadState({ threadName: '<img src=x onerror=1>' });
     expect(jiraLeftHtml(evil)).not.toContain("<img");
     expect(jiraCitationsHtml(evil)).not.toContain("<img");
+  });
+});
+
+/**
+ * Adopting an incoming `citations` frame.
+ *
+ * The THREAD path re-seeds its hit set from `research_citations` on EVERY run —
+ * the conversation keeps retrieving between turns, so unlike the notes path's
+ * immutable set it legitimately CHANGES. A regenerate therefore emits the WIDE
+ * seeded set and the client adopts it; the exclusions that no longer name
+ * anything in it are dropped, or the toggle column carries ghost ids that
+ * silently narrow the next run against rows nobody can see.
+ */
+describe("adoptCitationsPatch", () => {
+  const s = (over: Partial<JiraComposerState> = {}) => stateWith(over);
+
+  test("a non-empty incoming set replaces the old one", () => {
+    const patch = adoptCitationsPatch(s({ citations: [cite(1, "a.md")] }), [cite(1, "b.md"), cite(2, "c.md")]);
+    expect(patch.citations?.map((c) => c.docId)).toEqual(["b.md", "c.md"]);
+  });
+
+  test("exclusions that are no longer in the set are DROPPED", () => {
+    const patch = adoptCitationsPatch(
+      s({ citations: [cite(1, "a.md"), cite(2, "b.md")], excludeDocIds: ["a.md", "b.md"] }),
+      [cite(1, "b.md"), cite(2, "c.md")],
+    );
+    expect(patch.excludeDocIds).toEqual(["b.md"]);
+  });
+
+  test("an EMPTY set never replaces a non-empty one — nothing would be left to switch back on", () => {
+    expect(adoptCitationsPatch(s({ citations: [cite(1, "a.md")], excludeDocIds: ["a.md"] }), [])).toEqual({});
+    expect(adoptCitationsPatch(s(), null)).toEqual({});
+  });
+
+  test("an empty set on an empty state IS adopted (nothing to lose)", () => {
+    expect(adoptCitationsPatch(s(), [])).toEqual({ citations: [], excludeDocIds: [] });
   });
 });

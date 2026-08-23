@@ -25,10 +25,18 @@
  *   · **the thread id is stamped on the button at render time**, not read from
  *     the page's live `activeThreadId` at click time — the control belongs to the
  *     message it was rendered under.
+ *
+ * And one rule about the response: **a 200 navigates the pre-opened tab before
+ * any state check.** The POST is fire-and-forget, so by the time it answers the
+ * turn has run — a row exists, a message is in the conversation, and the thread's
+ * single-flight slot is held. The draft id in that response is the only pointer
+ * to it, so a panel that vanished meanwhile (a thread switch) must not be allowed
+ * to throw the pointer away; the next attempt would 409 about work never shown.
+ * Avbryt cannot cause that state at all — it is disabled while sending.
  */
 
 import {
-  JE_BTN_ID,
+  JE_BTN_ATTR,
   JE_CANCEL_ID,
   JE_DEPTH_ID,
   JE_EXTRA_ID,
@@ -93,12 +101,15 @@ export function jiraEntryScript(): string {
     }
   }
 
-  // The template list. Fetched once per page and reused: it is a function of the
-  // resolved bot, which cannot change without a reload. A failed fetch is
-  // remembered too — retrying it on every open would spend a round-trip per
-  // click on an install where the route 503s.
+  // The template list. **Only SUCCESS is cached.** The list is a function of the
+  // resolved bot, which cannot change without a reload — but a FAILURE is a
+  // function of the server's state at one instant, and caching it latched the
+  // picker dead for the life of the page: a 503 from a restarting muninn, or one
+  // dropped fetch, and «Lag Jira-sak» never worked again in that tab. A retry
+  // costs one round-trip on the reader's own next click.
   async function loadJiraEntryTemplates() {
-    if (jiraEntryTemplates || jiraEntryTemplatesErr) return;
+    if (jiraEntryTemplates) { jiraEntryTemplatesErr = null; return; }
+    jiraEntryTemplatesErr = null;
     try {
       var res = await fetch('/api/jira/templates');
       var body = await res.json();
@@ -167,19 +178,30 @@ export function jiraEntryScript(): string {
       status = 0;
     }
 
-    // The panel may have been closed (or re-opened on another message) while the
-    // POST was in flight; the turn still ran, so a blocked-tab link would be the
-    // only way back — but there is nothing left to render it into.
+    var outcome = jiraEntryOutcome(status, body);
+
+    // **The tab is navigated BEFORE any state check.** The panel may be gone by
+    // now — a thread switch wipes the message list (Avbryt cannot: it is disabled
+    // while sending) — but a 200 means the turn RAN: a row exists, a message is
+    // in the conversation, and the thread's single-flight slot is held. Checking
+    // the panel first closed the pre-opened tab and rendered nothing, so the only
+    // pointer to that draft was lost and the reader's next attempt 409'd about
+    // work they had never been shown.
+    if (outcome.ok && tab && !tab.closed) {
+      tab.location.href = outcome.url;
+      if (jiraEntryState && jiraEntryThreadId === threadId) closeJiraEntry();
+      return;
+    }
+
+    // Everything below needs somewhere to render. If the panel is gone (or has
+    // been re-opened on another message), a refusal is dropped silently and the
+    // blank tab is closed — the reader asked for something else.
     if (!jiraEntryState || jiraEntryThreadId !== threadId) { if (tab) tab.close(); return; }
 
-    var outcome = jiraEntryOutcome(status, body);
     jiraEntryState.sending = false;
     if (outcome.ok) {
-      if (tab && !tab.closed) {
-        tab.location.href = outcome.url;
-        closeJiraEntry();
-        return;
-      }
+      // The popup was blocked (or the tab was closed by hand): the draft is real,
+      // so it gets an honest link rather than a claim that a tab opened.
       jiraEntryState.draftUrl = outcome.url;
       jiraEntryState.message = JE_POPUP_BLOCKED_MESSAGE;
       jiraEntryState.messageTone = 'ok';
@@ -199,9 +221,19 @@ export function jiraEntryScript(): string {
     document.addEventListener('click', function(ev) {
       var target = ev.target;
       if (!target || !target.closest) return;
-      var open = target.closest('#${JE_BTN_ID}');
+      // An ATTRIBUTE selector: one control is rendered per finalized bot message,
+      // so there are N of them in a replayed thread and an id would name only one.
+      var open = target.closest('[${JE_BTN_ATTR}]');
       if (open) { ev.preventDefault(); openJiraEntry(open); return; }
-      if (target.closest('#${JE_CANCEL_ID}')) { ev.preventDefault(); closeJiraEntry(); return; }
+      if (target.closest('#${JE_CANCEL_ID}')) {
+        ev.preventDefault();
+        // Dead while a POST is on the wire — there is nothing to cancel, and
+        // closing the panel only threw away the draft id the response carries.
+        // The button renders \`disabled\`; this is the belt to that suspenders.
+        if (jiraEntryState && jiraEntryState.sending) return;
+        closeJiraEntry();
+        return;
+      }
       if (target.closest('#${JE_SUBMIT_ID}')) {
         ev.preventDefault();
         // Opened here, before any await — Safari blocks a post-await open

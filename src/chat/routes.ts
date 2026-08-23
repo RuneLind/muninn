@@ -21,7 +21,7 @@ import { getMcpStatus, invalidateMcpStatus, getCachedMcpStatus, onMcpStatusChang
 import { formatWebHtml } from "../web/web-format.ts";
 import { consumePendingMessage } from "./pending-messages.ts";
 import { isValidUuid } from "../dashboard/routes/route-utils.ts";
-import { resolveJiraBot } from "../jira/bot.ts";
+import { resolveJiraBotLive } from "../jira/bot.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("chat");
@@ -110,7 +110,12 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     // that makes the button appear on a bot whose thread the route then 400s.
     // `null` when the pinned name matches no discovered bot — the same install
     // state in which every `/api/jira/*` route 503s, so the control stays away.
-    const jiraBot = resolveJiraBot(botConfigs)?.name ?? null;
+    //
+    // **`resolveJiraBotLive`, not `resolveJiraBot(botConfigs)`.** `botConfigs` is
+    // the TOKEN-GATED list captured at process start; every `/api/jira/*` route
+    // resolves over the live `discoverAllBots()`. Two lookups for one answer is
+    // the same class of drift this field exists to remove one layer up.
+    const jiraBot = resolveJiraBotLive()?.name ?? null;
     return c.json({ bots, connectors, jiraBot });
   });
 

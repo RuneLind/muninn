@@ -217,6 +217,8 @@ interface JiraDraftRow {
   message_id: string | null;
   /** Joined from `threads`, never stored — see `JiraDraftView.threadName`. */
   thread_name?: string | null;
+  /** Joined from `threads` too — see `JiraDraftView.threadUserId`. */
+  thread_user_id?: string | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -239,6 +241,7 @@ function toView(row: JiraDraftRow): JiraDraftView {
   const retained = citations.filter((c) => !excluded.has(c.docId)).length;
   return {
     draftId: String(row.id),
+    bot: row.bot_name,
     status: row.status as JiraDraftStatus,
     template: row.template,
     depth: row.depth as JiraDepth,
@@ -264,6 +267,7 @@ function toView(row: JiraDraftRow): JiraDraftView {
     source: isJiraDraftSource(row.source) ? row.source : "notes",
     threadId: row.thread_id ?? null,
     threadName: row.thread_name ?? null,
+    threadUserId: row.thread_user_id ?? null,
     messageId: row.message_id ?? null,
     // `new Date(...)` like every other db module: the driver hands back a string
     // for these columns in some configurations, and `.getTime()` on one throws.
@@ -280,11 +284,15 @@ function toView(row: JiraDraftRow): JiraDraftView {
  * that no longer exists. A LEFT join is also what keeps a draft readable after
  * its thread is deleted (there is deliberately no FK) — `thread_name` comes back
  * null and the view reports the draft without a name, rather than not at all.
+ *
+ * The thread's OWNER rides the same join, for the same reason it is not stored:
+ * one row, one source of truth. It is what puts `user=` on the deep link — see
+ * `JiraDraftView.threadUserId`.
  */
 export async function getJiraDraft(id: string): Promise<JiraDraftView | null> {
   const sql = getDb();
   const rows = await sql<JiraDraftRow[]>`
-    SELECT d.*, t.name AS thread_name
+    SELECT d.*, t.name AS thread_name, t.user_id AS thread_user_id
     FROM jira_drafts d
     LEFT JOIN threads t ON t.id = d.thread_id
     WHERE d.id = ${id}`;

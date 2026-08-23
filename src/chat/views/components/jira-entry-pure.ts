@@ -21,8 +21,16 @@ import { JIRA_DEPTHS, JIRA_EXTRA_MAX, type JiraDepth } from "../../../jira/wire.
 // Shared by the render, the delegated listeners and the tests, so the three
 // cannot drift the way three string literals would.
 
-/** The control that sits beside the 👍/👎 on a finalized bot message. */
-export const JE_BTN_ID = "jeOpen";
+/**
+ * The control that sits beside the 👍/👎 on a finalized bot message.
+ *
+ * An ATTRIBUTE, not an id. One of these is rendered per finalized bot message,
+ * so an id would be duplicated across every reply in the thread — invalid HTML,
+ * and `getElementById`/`#id` then resolve to whichever one the parser saw first.
+ * The delegated listener matches `closest('[data-je-btn]')` instead, which is
+ * correct for N of them by construction.
+ */
+export const JE_BTN_ATTR = "data-je-btn";
 /** The picker panel. A SINGLETON: opening one closes any other, so the id is
  *  unique in the document and the listeners can address it by id. */
 export const JE_PANEL_ID = "jePanel";
@@ -181,12 +189,23 @@ export function jiraEntryFallbackMessage(status: number): string {
 /** Said when the draft started but the browser blocked the new tab. */
 export const JE_POPUP_BLOCKED_MESSAGE = "Utkastet er startet — nettleseren blokkerte den nye fanen.";
 
+/**
+ * Why **Avbryt** is dead while a POST is on the wire.
+ *
+ * There is nothing to cancel: the route is fire-and-forget, so by the time the
+ * reader can click, a turn is either about to run or already running in their
+ * conversation. Closing the panel only threw away the ANSWER — the draft id —
+ * while the row, the visible chat turn and the thread's single-flight slot all
+ * stayed, and the next click came back as a 409 about work never shown.
+ */
+export const JE_CANCEL_BUSY_TITLE = "Utkastet skrives — vent";
+
 // ── Markup ───────────────────────────────────────────────────────────────────
 
 /** The control itself. Rendered beside the 👍/👎 on a finalized bot message. */
 export function jiraEntryButtonHtml(threadId: string): string {
   return (
-    `<button type="button" id="${JE_BTN_ID}" class="msg-jira-btn" ${JE_THREAD_ATTR}="${esc(threadId)}"` +
+    `<button type="button" class="msg-jira-btn" ${JE_BTN_ATTR} ${JE_THREAD_ATTR}="${esc(threadId)}"` +
     ` title="Lag et Jira-utkast av denne samtalen">🧾 Lag Jira-sak</button>`
   );
 }
@@ -236,7 +255,9 @@ export function jiraEntryPanelHtml(state: JiraEntryState): string {
       <button type="button" id="${JE_SUBMIT_ID}" class="je-primary"${jiraEntryCanSubmit(state) ? "" : " disabled"}>${
         state.sending ? "Starter…" : "Lag utkast"
       }</button>
-      <button type="button" id="${JE_CANCEL_ID}" class="je-secondary">Avbryt</button>
+      <button type="button" id="${JE_CANCEL_ID}" class="je-secondary"${
+        state.sending ? ` disabled title="${esc(JE_CANCEL_BUSY_TITLE)}"` : ""
+      }>Avbryt</button>
       <span class="je-note">Utkastet skrives som en tur i denne samtalen, og åpnes i <code>/jira</code>.</span>
     </div>
     <div id="${JE_MSG_ID}" class="je-msgwrap">${msg}</div>

@@ -805,6 +805,12 @@ const CHAT_SCRIPT = `
   async function loadThreadMessages(threadId) {
     if (!activeConvId) return;
     activeThreadId = threadId || null;
+    // The «Lag Jira-sak» picker belongs to ONE message in the thread being left,
+    // and the message list below is about to be replaced wholesale — leaving the
+    // panel's state standing pointed it at a thread the reader can no longer see.
+    // (An in-flight POST is unaffected: its 200 navigates the pre-opened tab
+    // before it looks at this state at all.)
+    closeJiraEntry();
     // Reset streaming, research, and tool activity state when switching threads
     streamingRawText = '';
     streamingRafPending = false;

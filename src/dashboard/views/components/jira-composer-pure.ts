@@ -159,6 +159,9 @@ export interface JiraComposerState {
   /** That thread's name, resolved server-side at READ time (a thread can be
    *  renamed, so the row deliberately stores no copy). */
   threadName?: string;
+  /** That thread's OWNER, joined at READ time beside the name. It is what the
+   *  chat deep link's `user=` carries — see {@link jiraChatUrl}. */
+  threadUserId?: string;
   /** The draft as it stands, INCLUDING the reader's unsaved edits. */
   markdown: string;
   /** The last text the server confirmed — what `dirty` compares against. */
@@ -433,6 +436,12 @@ export function mergeDraftView(
     source: isJiraDraftSource(v.source) ? v.source : "notes",
     threadId: typeof v.threadId === "string" && v.threadId ? v.threadId : undefined,
     threadName: typeof v.threadName === "string" && v.threadName ? v.threadName : undefined,
+    threadUserId: typeof v.threadUserId === "string" && v.threadUserId ? v.threadUserId : undefined,
+    // The ROW's bot, so the chat deep link survives a templates 503 — that fetch
+    // was the only thing that set `bot`, and it is the fetch most likely to be
+    // down exactly when the reader wants to go back to the conversation. An
+    // absent one (a legacy payload) never un-sets what templates did resolve.
+    bot: (typeof v.bot === "string" && v.bot ? v.bot : undefined) ?? state.bot,
     template,
     // A stored template the route did not serve (a renamed or removed
     // `jiraTemplate.<id>.md`) is added as an option, so the picker shows the id
@@ -461,6 +470,37 @@ export function mergeDraftView(
     retrievalQuestion: v.retrievalQuestion ?? "",
     error: v.status === "failed" ? (v.error ?? "Utkastet feilet.") : undefined,
     copied: false,
+  };
+}
+
+/**
+ * Adopt an incoming `citations` frame — the STREAM's counterpart to the citation
+ * half of {@link mergeDraftView}, and its one rule in one place.
+ *
+ * Two things it does:
+ *
+ *   · **an EMPTY set never replaces a non-empty one.** The middle column is the
+ *     only way back for a source the reader switched off, so a degraded or
+ *     exclude-everything payload must not be allowed to delete the rows.
+ *   · **exclusions are pruned to the incoming set.** On the THREAD path the hit
+ *     set is re-seeded from `research_citations` on every run — the conversation
+ *     keeps retrieving between turns, so unlike the notes path's immutable set
+ *     it legitimately changes — and a doc id that is no longer in it would sit in
+ *     `excludeDocIds` as a ghost, narrowing the next regenerate against a row
+ *     nobody can see or switch back on.
+ *
+ * Returns a PATCH (empty ⇒ adopt nothing), so the merge is testable without a DOM.
+ */
+export function adoptCitationsPatch(
+  state: JiraComposerState,
+  incoming: JiraCitation[] | null,
+): Partial<JiraComposerState> {
+  if (!incoming) return {};
+  if (incoming.length === 0 && state.citations.length > 0) return {};
+  const ids = new Set(incoming.map((c) => c.docId));
+  return {
+    citations: incoming,
+    excludeDocIds: state.excludeDocIds.filter((id) => ids.has(id)),
   };
 }
 
@@ -801,18 +841,33 @@ ${rawMaterial}
 /**
  * The chat deep link for a thread — `handleDeepLink`'s own shape.
  *
- * `user` is deliberately omitted: this page never knows which user owns the
- * thread, and the chat page resolves one anyway (URL preference → the bot's
- * `bot_default_user` → the sole user). `bot` and `thread` are all the deep link
- * actually needs — `selectBot(bot, thread)` auto-selects it.
+ * **`user` rides along whenever the view served one.** This page DOES know who
+ * owns the thread: `threads.user_id` is joined onto `GET /api/jira/draft/:id`
+ * beside the name. Leaving it off meant the chat fell back to whichever user
+ * that browser last used on this bot (`muninn-chat-user-<bot>` in
+ * `localStorage`, then `bot_default_user`, then the sole user) — and on a
+ * multi-user install `selectThread(<id>)` then looked for the thread in the
+ * wrong user's list and found nothing. `handleDeepLink` already honours the
+ * param: it pre-seeds that same localStorage key before `selectBot` loads the
+ * user list, so no chat-side change is needed.
  *
- * `undefined` when the bot has not resolved yet (the templates fetch is what
- * carries it) or there is no thread: a link that cannot be built is not rendered,
- * rather than rendered pointing at `/chat?bot=&thread=`.
+ * `undefined` when the bot or the thread is missing: a link that cannot be built
+ * is not rendered, rather than rendered pointing at `/chat?bot=&thread=`. A
+ * missing USER is not that case — the chat's own resolution is a reasonable
+ * fallback for a single-user install and for a deleted thread row.
  */
-export function jiraChatUrl(bot: string | undefined, threadId: string | undefined): string | undefined {
+export function jiraChatUrl(
+  bot: string | undefined,
+  threadId: string | undefined,
+  userId?: string | undefined,
+): string | undefined {
   if (!bot || !threadId) return undefined;
-  return `/chat?bot=${encodeURIComponent(bot)}&thread=${encodeURIComponent(threadId)}`;
+  const user = (userId ?? "").trim();
+  return (
+    `/chat?bot=${encodeURIComponent(bot)}` +
+    (user ? `&user=${encodeURIComponent(user)}` : "") +
+    `&thread=${encodeURIComponent(threadId)}`
+  );
 }
 
 /** The name to call the conversation. Falls back to the thread id — a deleted
@@ -829,7 +884,7 @@ export function threadDraftLabel(state: JiraComposerState): string {
  * that conversation found, and «Generer på nytt» writes another turn into it.
  */
 export function jiraThreadBannerHtml(state: JiraComposerState): string {
-  const href = jiraChatUrl(state.bot, state.threadId);
+  const href = jiraChatUrl(state.bot, state.threadId, state.threadUserId);
   const link = href
     ? ` <a class="jc-threadlink" href="${esc(href)}" target="_blank" rel="noopener">Juster i samtalen →</a>`
     : "";
@@ -840,7 +895,7 @@ export function jiraThreadBannerHtml(state: JiraComposerState): string {
 
 /** What stands where the raw-material textarea stands on a notes draft. */
 export function jiraThreadSourceHtml(state: JiraComposerState): string {
-  const href = jiraChatUrl(state.bot, state.threadId);
+  const href = jiraChatUrl(state.bot, state.threadId, state.threadUserId);
   const name = esc(threadDraftLabel(state));
   return `
     <h2 class="jc-h">Kilde</h2>

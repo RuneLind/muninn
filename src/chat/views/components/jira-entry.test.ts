@@ -52,6 +52,10 @@ interface Harness {
   clickOpen: () => Promise<void>;
   clickSubmit: () => Promise<void>;
   clickCancel: () => Promise<void>;
+  /** What a thread switch does to the panel — `loadThreadMessages`'s reset. */
+  closePanel: () => Promise<void>;
+  /** Answer a POST held open by `deferPost`. */
+  settlePost: (status: number, body: unknown) => Promise<void>;
 }
 
 async function harness(opts: {
@@ -59,13 +63,19 @@ async function harness(opts: {
   jiraBot?: string | null;
   activeThreadId?: string | null;
   templatesResponse?: { ok: boolean; body: unknown };
+  /** One entry per `/api/jira/templates` call; the last one repeats. */
+  templatesResponses?: { ok: boolean; body: unknown }[];
   postStatus?: number;
   postBody?: unknown;
   postThrows?: boolean;
   popupBlocked?: boolean;
+  /** Hold the POST open until `settlePost` — the in-flight window. */
+  deferPost?: boolean;
 }): Promise<Harness> {
   const fetchCalls: FetchCall[] = [];
   const tabs: FakeTab[] = [];
+  let templatesCalls = 0;
+  let settlePostResolve: ((status: number, body: unknown) => void) | null = null;
   let panelHtml: string | null = null;
   let rowHtml = "";
   const rowClasses: string[] = [];
@@ -135,13 +145,22 @@ async function harness(opts: {
         body: init?.body ? JSON.parse(init.body) : undefined,
       });
       if (url === "/api/jira/templates") {
-        const t = opts.templatesResponse ?? {
-          ok: true,
-          body: { bot: "melosys", templates: [{ id: "bug", label: "Bug" }, { id: "task", label: "Oppgave" }] },
-        };
+        const queued = opts.templatesResponses;
+        const t = queued
+          ? (queued[Math.min(templatesCalls++, queued.length - 1)] as { ok: boolean; body: unknown })
+          : (opts.templatesResponse ?? {
+              ok: true,
+              body: { bot: "melosys", templates: [{ id: "bug", label: "Bug" }, { id: "task", label: "Oppgave" }] },
+            });
         return { ok: t.ok, status: t.ok ? 200 : 503, json: async () => t.body };
       }
       if (opts.postThrows) throw new Error("nettverket falt");
+      if (opts.deferPost) {
+        return await new Promise((resolve) => {
+          settlePostResolve = (status: number, body: unknown) =>
+            resolve({ ok: status === 200, status, json: async () => body });
+        });
+      }
       return { ok: (opts.postStatus ?? 200) === 200, status: opts.postStatus ?? 200, json: async () => opts.postBody };
     },
     // The pure half, exactly as the page's bundle puts it on globalThis.
@@ -178,16 +197,20 @@ async function harness(opts: {
     prelude +
       jiraEntryScript() +
       `jiraBotName = ${JSON.stringify(opts.jiraBot === undefined ? "melosys" : opts.jiraBot)};` +
-      "return { appendJiraEntryControl: appendJiraEntryControl };",
-  )(ctx) as { appendJiraEntryControl: (wrap: unknown) => void };
+      "return { appendJiraEntryControl: appendJiraEntryControl, closeJiraEntry: closeJiraEntry };",
+  )(ctx) as { appendJiraEntryControl: (wrap: unknown) => void; closeJiraEntry: () => void };
 
-  const fire = async (type: string, target: unknown): Promise<void> => {
-    for (const fn of listeners[type] ?? []) fn({ target, preventDefault() {} });
+  const flush = async (): Promise<void> => {
     // Let the handler's own async work settle — the click handler kicks
     // `submitJiraEntry` without awaiting it (it must not block the event).
     await new Promise((r) => setTimeout(r, 0));
     await new Promise((r) => setTimeout(r, 0));
     await new Promise((r) => setTimeout(r, 0));
+  };
+
+  const fire = async (type: string, target: unknown): Promise<void> => {
+    for (const fn of listeners[type] ?? []) fn({ target, preventDefault() {} });
+    await flush();
   };
 
   const btnTarget = (sel: string) => ({
@@ -202,9 +225,17 @@ async function harness(opts: {
     rowHtml: () => rowHtml,
     rowClasses: () => rowClasses,
     attach: () => made.appendJiraEntryControl(wrapNode),
-    clickOpen: () => fire("click", btnTarget("#jeOpen")),
+    clickOpen: () => fire("click", btnTarget("[data-je-btn]")),
     clickSubmit: () => fire("click", btnTarget("#jeSubmit")),
     clickCancel: () => fire("click", btnTarget("#jeCancel")),
+    closePanel: async () => {
+      made.closeJiraEntry();
+      await flush();
+    },
+    settlePost: async (status: number, body: unknown) => {
+      settlePostResolve?.(status, body);
+      await flush();
+    },
   };
 }
 
@@ -329,5 +360,95 @@ describe("the POST", () => {
     await h.clickSubmit();
     expect(h.panelHtml()).toContain('href="/jira?draft=d-9"');
     expect(h.panelHtml()).toContain("Åpne utkastet");
+  });
+});
+
+/**
+ * The POST is in flight and the panel goes away underneath it.
+ *
+ * Two ways that happens — the reader clicks Avbryt, or switches thread (which
+ * wipes the whole message list). The turn RAN either way: a row exists, the
+ * thread's single-flight slot is held, and the next attempt is a 409 about work
+ * the reader was never shown. So a 200 must reach the pre-opened tab BEFORE any
+ * state check, and Avbryt must not be clickable while a POST is on the wire.
+ */
+describe("the panel disappearing mid-POST", () => {
+  test("a 200 that lands after Avbryt still sends the pre-opened tab to the draft", async () => {
+    const h = await harness({ deferPost: true });
+    h.attach();
+    await h.clickOpen();
+    await h.clickSubmit();
+    // Avbryt is refused while sending (below) — this is the thread-switch shape:
+    // the panel is torn down by the page, not by the reader.
+    await h.closePanel();
+    expect(h.panelHtml()).toBeNull();
+
+    await h.settlePost(200, { draftId: "d-9" });
+    expect(h.tabs).toHaveLength(1);
+    expect(h.tabs[0]!.location.href).toBe("/jira?draft=d-9");
+    expect(h.tabs[0]!.closed).toBe(false);
+  });
+
+  test("a refusal that lands after the panel is gone is dropped — the tab still closes", async () => {
+    const h = await harness({ deferPost: true });
+    h.attach();
+    await h.clickOpen();
+    await h.clickSubmit();
+    await h.closePanel();
+    await h.settlePost(409, { error: "Det skrives allerede en sak fra denne samtalen." });
+    expect(h.tabs[0]!.closed).toBe(true);
+    // Nothing was resurrected to render the refusal into.
+    expect(h.panelHtml()).toBeNull();
+  });
+
+  test("Avbryt is DISABLED while sending, and a click on it is a no-op", async () => {
+    const h = await harness({ deferPost: true });
+    h.attach();
+    await h.clickOpen();
+    await h.clickSubmit();
+    const html = h.panelHtml()!;
+    expect(html).toContain("Starter…");
+    // The disabled attribute and the reason, on the Avbryt button itself.
+    expect(html).toMatch(/id="jeCancel"[^>]*disabled/);
+    expect(html).toContain("Utkastet skrives — vent");
+
+    // A delegated listener still sees the click in a stubbed DOM (and in a real
+    // one, a `pointer-events` style could too) — the handler refuses it.
+    await h.clickCancel();
+    expect(h.panelHtml()).not.toBeNull();
+
+    await h.settlePost(200, { draftId: "d-9" });
+    expect(h.tabs[0]!.location.href).toBe("/jira?draft=d-9");
+  });
+});
+
+describe("the templates fetch", () => {
+  test("a FAILURE is retried on the next open — only success is cached", async () => {
+    const h = await harness({
+      templatesResponses: [
+        { ok: false, body: { error: "Jira-komponisten er ikke tilgjengelig." } },
+        { ok: true, body: { bot: "melosys", templates: [{ id: "bug", label: "Bug" }] } },
+      ],
+    });
+    h.attach();
+    await h.clickOpen();
+    expect(h.panelHtml()).toContain("Jira-komponisten er ikke tilgjengelig.");
+
+    await h.clickCancel();
+    await h.clickOpen();
+    // Two fetches: the cached error used to make the picker permanently dead for
+    // the life of the page, so a restarted server never came back.
+    expect(h.fetchCalls.filter((f) => f.url === "/api/jira/templates")).toHaveLength(2);
+    expect(h.panelHtml()).toContain('value="bug" selected');
+    expect(h.panelHtml()).not.toContain("Jira-komponisten er ikke tilgjengelig.");
+  });
+
+  test("a SUCCESS is fetched once and reused across opens", async () => {
+    const h = await harness({});
+    h.attach();
+    await h.clickOpen();
+    await h.clickCancel();
+    await h.clickOpen();
+    expect(h.fetchCalls.filter((f) => f.url === "/api/jira/templates")).toHaveLength(1);
   });
 });

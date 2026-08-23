@@ -203,14 +203,21 @@ export async function runJiraThreadDraft(
 
     const citations = applyExclusions(seeded, opts.excludeDocIds);
     const coverage = effectiveCoverage(retrievalCoverage, citations.length);
-    // **A REGENERATE emits no `citations` frame** — the notes path's rule (rule 1
-    // in `src/dashboard/CLAUDE.md`), and for its reason: the client overwrites
-    // `state.citations` with any non-empty array, and what is in hand here is the
-    // RETAINED, renumbered set. Emitting it deleted the very rows the reader had
-    // just switched off and left nothing to switch back on. The wide set is on
-    // the row already; the GET and the poll carry it. A FIRST run has no stored
-    // set for the client to lose, so it emits the wide seeded one.
-    if (!opts.regenerate) emit("citations", { citations: seeded, coverage });
+    // **Every run emits the WIDE `seeded` set** — never `citations`, which is the
+    // RETAINED, renumbered one. That distinction is the whole of rule 1 in
+    // `src/dashboard/CLAUDE.md`: the toggle column renders the wide set, so
+    // emitting the retained one deletes the rows the reader just switched off and
+    // leaves nothing to switch back on.
+    //
+    // A regenerate emitting NOTHING was the over-correction. This path re-seeds
+    // its hit set from `research_citations` on every run — the conversation keeps
+    // retrieving between turns, so the set legitimately grows and shrinks — and
+    // staying silent left the column showing the PREVIOUS turn's sources until
+    // the reader reloaded the page. The client adopts a non-empty incoming set
+    // and prunes exclusions that no longer name anything in it
+    // (`adoptCitationsPatch`), which is exactly the notes path's guard plus the
+    // one rule only a mutable set needs.
+    emit("citations", { citations: seeded, coverage });
 
     // `## Referanser` is depth-sliced here for the same reason it is on the notes
     // path: measured there, a shallow draft over 24 stored hits got 24 links under
