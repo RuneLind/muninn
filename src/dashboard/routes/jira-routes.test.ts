@@ -143,6 +143,7 @@ interface Row {
   threadId: string | null;
   threadName: string | null;
   messageId: string | null;
+  savedAt: number | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -164,9 +165,29 @@ mock.module("../../db/jira-drafts.ts", () => ({
       // The real read LEFT-JOINs `threads`; the mock resolves the same way.
       threadName: i.threadId ? (threads.get(i.threadId)?.name ?? null) : null,
       messageId: null,
+      savedAt: null,
       createdAt: Date.now(), updatedAt: Date.now(),
     });
     return id;
+  },
+  /** The FIRST-DRAFT stamp, landed right after the turn — before finalize. */
+  setJiraDraftMessageId: async (id: string, messageId: string) => {
+    const r = rows.get(id);
+    if (r) r.messageId = messageId;
+  },
+  saveJiraDraft: async (id: string) => {
+    if (!UUID_RE.test(id)) throw new Error(`invalid input syntax for type uuid: "${id}"`);
+    const r = rows.get(id);
+    if (!r) return null;
+    r.savedAt = Date.now();
+    return jiraDraftView(r);
+  },
+  listJiraDraftsForThread: async (threadId: string) => {
+    if (!UUID_RE.test(threadId)) throw new Error(`invalid input syntax for type uuid: "${threadId}"`);
+    return Array.from(rows.values())
+      .filter((r) => r.threadId === threadId)
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .map((r) => ({ draftId: r.draftId, messageId: r.messageId, status: r.status }));
   },
   startJiraDraftRun: async (id: string, excludeDocIds: string[]) => {
     const r = rows.get(id);
@@ -203,23 +224,28 @@ mock.module("../../db/jira-drafts.ts", () => ({
     if (forced) throw new Error(forced);
     const r = rows.get(id);
     if (!r) return null;
-    // The view's `coverage` is DERIVED (see `effectiveCoverage`); only the SQL is
-    // faked here, so the mock runs the real helper rather than a second rule that
-    // could quietly disagree with the column the route actually reads.
-    const excluded = new Set(r.excludeDocIds);
-    const retained = (r.citations as { docId: string }[]).filter((c) => !excluded.has(c.docId)).length;
-    return {
-      ...r,
-      // The real read LEFT-JOINs `threads` for both of these; the mock resolves
-      // them the same way, and a deleted thread row leaves `threadUserId` null.
-      bot: r.botName,
-      threadUserId: r.threadId ? (threads.get(r.threadId)?.userId ?? null) : null,
-      coverage: r.retrievalCoverage === null && r.citations.length === 0
-        ? null
-        : effectiveCoverage(r.retrievalCoverage as never, retained),
-    };
+    return jiraDraftView(r);
   },
 }));
+
+/** Row → view, shared by the read and the save (which re-reads in the real one). */
+function jiraDraftView(r: Row) {
+  // The view's `coverage` is DERIVED (see `effectiveCoverage`); only the SQL is
+  // faked here, so the mock runs the real helper rather than a second rule that
+  // could quietly disagree with the column the route actually reads.
+  const excluded = new Set(r.excludeDocIds);
+  const retained = (r.citations as { docId: string }[]).filter((c) => !excluded.has(c.docId)).length;
+  return {
+    ...r,
+    // The real read LEFT-JOINs `threads` for both of these; the mock resolves
+    // them the same way, and a deleted thread row leaves `threadUserId` null.
+    bot: r.botName,
+    threadUserId: r.threadId ? (threads.get(r.threadId)?.userId ?? null) : null,
+    coverage: r.retrievalCoverage === null && r.citations.length === 0
+      ? null
+      : effectiveCoverage(r.retrievalCoverage as never, retained),
+  };
+}
 
 const {
   registerJiraRoutes,
@@ -1826,5 +1852,200 @@ describe("regenerate on a thread-sourced draft", () => {
     view = await (await makeApp().request(`/api/jira/draft/${draftId}`)).json();
     expect(view.excludeDocIds).toEqual(["Team MELOSYS/rammeavtale.md"]);
     expect(view.citations.map((c: { docId: string }) => c.docId)).toContain("Team MELOSYS/rammeavtale.md");
+  });
+});
+
+// ── The chat card's two endpoints ────────────────────────────────────────────
+
+/**
+ * `GET /api/jira/drafts?thread=` and `POST /api/jira/draft/:id/save`.
+ *
+ * The properties only this file can see: the CORS posture (a thread-keyed listing
+ * hands over every draft id at once, so it carries none of the migration-070
+ * accepted risk), the 415 on the save (a body-less POST is a CORS *simple*
+ * request that executes whatever the response headers say), and the early
+ * `message_id` stamp — which is what makes a run that FAILS after its turn still
+ * reachable as a card.
+ */
+describe("GET /api/jira/drafts?thread=", () => {
+  const startOne = async () => {
+    threads.set(THREAD_ID, THREAD);
+    threadCitations = THREAD_CITATIONS;
+    threadHistory = [{ role: "user", text: "Vi må se på uttrekket." }];
+    const res = await makeApp().request("/api/jira/draft/from-thread", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ threadId: THREAD_ID, template: "bug", depth: "skisse" }),
+    });
+    const body = await res.json();
+    await new Promise((r) => setTimeout(r, 40));
+    return body.draftId as string;
+  };
+
+  test("serves the binding and NOTHING else — no markdown, no citations", async () => {
+    const draftId = await startOne();
+    const res = await makeApp().request(`/api/jira/drafts?thread=${THREAD_ID}`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.drafts).toHaveLength(1);
+    expect(Object.keys(body.drafts[0]).sort()).toEqual(["draftId", "messageId", "status"]);
+    expect(body.drafts[0].draftId).toBe(draftId);
+    expect(body.drafts[0].status).toBe("ready");
+    expect(body.drafts[0].messageId).toBe("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+  });
+
+  test("is no-store and carries NO CORS headers, unlike the single-draft GET", async () => {
+    await startOne();
+    const res = await makeApp().request(`/api/jira/drafts?thread=${THREAD_ID}`);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    // The listing is a strictly bigger lever than guessing one id.
+    expect(res.headers.get("access-control-allow-origin")).toBeNull();
+  });
+
+  test("a missing thread is a 400 and a non-uuid a 404 — postgres never sees it", async () => {
+    expect((await makeApp().request("/api/jira/drafts")).status).toBe(400);
+    expect((await makeApp().request("/api/jira/drafts?thread=%20")).status).toBe(400);
+    expect((await makeApp().request("/api/jira/drafts?thread=not-a-uuid")).status).toBe(404);
+  });
+
+  test("a thread with no drafts is an empty list, not a 404", async () => {
+    const res = await makeApp().request("/api/jira/drafts?thread=99999999-8888-4777-8666-555555555555");
+    expect(res.status).toBe(200);
+    expect((await res.json()).drafts).toEqual([]);
+  });
+});
+
+describe("POST /api/jira/draft/:id/save", () => {
+  const startOne = async () => {
+    threads.set(THREAD_ID, THREAD);
+    threadCitations = THREAD_CITATIONS;
+    threadHistory = [{ role: "user", text: "Vi må se på uttrekket." }];
+    const res = await makeApp().request("/api/jira/draft/from-thread", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ threadId: THREAD_ID, template: "bug", depth: "skisse" }),
+    });
+    const body = await res.json();
+    await new Promise((r) => setTimeout(r, 40));
+    return body.draftId as string;
+  };
+
+  test("stamps savedAt and returns the whole view", async () => {
+    const draftId = await startOne();
+    const before = await (await makeApp().request(`/api/jira/draft/${draftId}`)).json();
+    expect(before.savedAt).toBeNull();
+
+    const res = await makeApp().request(`/api/jira/draft/${draftId}/save`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    expect(res.status).toBe(200);
+    const saved = await res.json();
+    expect(typeof saved.savedAt).toBe("number");
+    expect(saved.markdown).toContain("## Referanser");
+    expect(res.headers.get("access-control-allow-origin")).toBeNull();
+
+    // It SURVIVES — that is the only reason the column exists.
+    const reread = await (await makeApp().request(`/api/jira/draft/${draftId}`)).json();
+    expect(reread.savedAt).toBe(saved.savedAt);
+  });
+
+  test("415s anything that is not application/json — a text/plain POST is a CORS simple request", async () => {
+    const draftId = await startOne();
+    const bare = await makeApp().request(`/api/jira/draft/${draftId}/save`, { method: "POST" });
+    expect(bare.status).toBe(415);
+    const plain = await makeApp().request(`/api/jira/draft/${draftId}/save`, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: "{}",
+    });
+    expect(plain.status).toBe(415);
+    // …and nothing was written.
+    const view = await (await makeApp().request(`/api/jira/draft/${draftId}`)).json();
+    expect(view.savedAt).toBeNull();
+  });
+
+  test("a non-uuid is a 404 before postgres sees it; an unknown uuid is a 404 too", async () => {
+    const bad = await makeApp().request("/api/jira/draft/not-a-uuid/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    expect(bad.status).toBe(404);
+    const missing = await makeApp().request("/api/jira/draft/99999999-8888-4777-8666-555555555555/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    expect(missing.status).toBe(404);
+  });
+});
+
+/**
+ * The early `message_id` stamp.
+ *
+ * A first draft binds its row to the bubble RIGHT AFTER the turn, before the
+ * seeding, the finalize and both post-passes — all of which can fail. Stamped only
+ * at finish time, a run that died in key verification left a row no card could
+ * ever reach, so the reader saw the failure nowhere at all.
+ */
+describe("the first draft's message_id is stamped before finalize", () => {
+  test("a run that FAILS after its turn still names its message — the card renders the failure", async () => {
+    threads.set(THREAD_ID, THREAD);
+    threadCitations = THREAD_CITATIONS;
+    threadHistory = [{ role: "user", text: "Vi må se på uttrekket." }];
+    // An EMPTY reply: the turn produced a message, and everything after it fails.
+    __setJiraThreadTurnForTest(scriptedThreadTurn("   ", "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"));
+    const res = await makeApp().request("/api/jira/draft/from-thread", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ threadId: THREAD_ID, template: "bug", depth: "skisse" }),
+    });
+    const { draftId } = await res.json();
+    await new Promise((r) => setTimeout(r, 40));
+
+    const view = await (await makeApp().request(`/api/jira/draft/${draftId}`)).json();
+    expect(view.status).toBe("failed");
+    expect(view.markdown).toBeNull();
+    // The binding survives the failure — this is the whole point.
+    expect(view.messageId).toBe("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+
+    // …and the listing hands the card exactly that pair.
+    const listing = await (await makeApp().request(`/api/jira/drafts?thread=${THREAD_ID}`)).json();
+    expect(listing.drafts.at(-1)).toEqual({
+      draftId,
+      messageId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+      status: "failed",
+    });
+  });
+
+  test("a REGENERATE does not stamp early — the row would name the new turn while holding the old text", async () => {
+    threads.set(THREAD_ID, THREAD);
+    threadCitations = THREAD_CITATIONS;
+    threadHistory = [{ role: "user", text: "Vi må se på uttrekket." }];
+    __setJiraThreadTurnForTest(scriptedThreadTurn());
+    const first = await makeApp().request("/api/jira/draft/from-thread", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ threadId: THREAD_ID, template: "bug", depth: "skisse" }),
+    });
+    const { draftId } = await first.json();
+    await new Promise((r) => setTimeout(r, 40));
+    const before = await (await makeApp().request(`/api/jira/draft/${draftId}`)).json();
+    expect(before.messageId).toBe("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+
+    // The regenerate's turn produces a NEW message and then fails on an empty body.
+    __setJiraThreadTurnForTest(scriptedThreadTurn("   ", "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"));
+    await (await makeApp().request("/api/jira/draft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ draftId, template: "bug", depth: "skisse" }),
+    })).text();
+
+    const after = await (await makeApp().request(`/api/jira/draft/${draftId}`)).json();
+    // Still the FIRST message: the surviving markdown came from that turn, and a
+    // re-point here would have left the row describing text it does not hold.
+    expect(after.messageId).toBe("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
   });
 });

@@ -5,11 +5,10 @@ import {
   jiraEntryButtonHtml,
   jiraEntryCanSubmit,
   jiraEntryDraftBody,
-  jiraEntryDraftLinkHtml,
+  jiraEntryDraftingHtml,
   jiraEntryOutcome,
   jiraEntryPanelHtml,
   jiraEntryVisible,
-  JE_POPUP_BLOCKED_MESSAGE,
 } from "./jira-entry-pure.ts";
 
 /**
@@ -17,10 +16,11 @@ import {
  *
  * The pure module's tests cover the decisions; what only reproduces in the
  * script are the seams between them: the button appears on the feedback row the
- * page hands it, the click pre-opens a tab BEFORE the await, a refusal closes
- * that tab and writes the SERVER's sentence into the panel, and a success sends
- * the tab to `/jira?draft=<id>`. None of that is reachable from a pure test, and
- * all of it is where a browser-only bug would live.
+ * page hands it, a refusal writes the SERVER's sentence into the panel, and a
+ * success hands the draft id to the card poller, closes the picker and leaves the
+ * «skrives i samtalen …» note in the row the control was clicked in. None of that
+ * is reachable from a pure test, and all of it is where a browser-only bug would
+ * live.
  *
  * The DOM is stubbed rather than emulated: this file drives the real
  * `jiraEntryScript()` source, so a change to it that breaks the sequence fails
@@ -34,12 +34,6 @@ interface FetchCall {
   body: unknown;
 }
 
-interface FakeTab {
-  closed: boolean;
-  location: { href: string };
-  close: () => void;
-}
-
 interface Harness {
   fetchCalls: FetchCall[];
   /** The markup currently standing where the picker panel is. */
@@ -47,8 +41,8 @@ interface Harness {
   /** The markup appended to the feedback row (the control itself). */
   rowHtml: () => string;
   rowClasses: () => string[];
-  /** Every tab `window.open` handed out, newest last. */
-  tabs: FakeTab[];
+  /** Draft ids handed to `seedJiraCard` — the card poller's seed. */
+  seeded: () => string[];
   /** How many times an already-open panel was re-focused rather than rebuilt. */
   scrolledIntoView: () => number;
   attach: () => void;
@@ -71,12 +65,11 @@ async function harness(opts: {
   postStatus?: number;
   postBody?: unknown;
   postThrows?: boolean;
-  popupBlocked?: boolean;
   /** Hold the POST open until `settlePost` — the in-flight window. */
   deferPost?: boolean;
 }): Promise<Harness> {
   const fetchCalls: FetchCall[] = [];
-  const tabs: FakeTab[] = [];
+  const seeded: string[] = [];
   let templatesCalls = 0;
   let settlePostResolve: ((status: number, body: unknown) => void) | null = null;
   let panelHtml: string | null = null;
@@ -130,20 +123,8 @@ async function harness(opts: {
 
   const ctx = {
     document: doc,
-    window: {
-      open: () => {
-        if (opts.popupBlocked) return null;
-        const tab: FakeTab = {
-          closed: false,
-          location: { href: "" },
-          close() {
-            tab.closed = true;
-          },
-        };
-        tabs.push(tab);
-        return tab;
-      },
-    },
+    // The card poller's seed — the ONLY thing a 200 does with the id now.
+    seedJiraCard: (draftId: string) => seeded.push(draftId),
     fetch: async (url: string, init?: { method?: string; body?: string; headers?: Record<string, string> }) => {
       fetchCalls.push({
         url,
@@ -176,27 +157,25 @@ async function harness(opts: {
       jiraEntryButtonHtml,
       jiraEntryCanSubmit,
       jiraEntryDraftBody,
-      jiraEntryDraftLinkHtml,
+      jiraEntryDraftingHtml,
       jiraEntryOutcome,
       jiraEntryPanelHtml,
       jiraEntryVisible,
-      JE_POPUP_BLOCKED_MESSAGE,
     },
     wrapNode,
     msgNode,
   };
 
   const prelude =
-    "var document = ctx.document; var window = ctx.window; var fetch = ctx.fetch;" +
+    "var document = ctx.document; var fetch = ctx.fetch; var seedJiraCard = ctx.seedJiraCard;" +
     "var initialJiraEntryState = ctx.pure.initialJiraEntryState;" +
     "var jiraEntryButtonHtml = ctx.pure.jiraEntryButtonHtml;" +
     "var jiraEntryCanSubmit = ctx.pure.jiraEntryCanSubmit;" +
     "var jiraEntryDraftBody = ctx.pure.jiraEntryDraftBody;" +
-    "var jiraEntryDraftLinkHtml = ctx.pure.jiraEntryDraftLinkHtml;" +
+    "var jiraEntryDraftingHtml = ctx.pure.jiraEntryDraftingHtml;" +
     "var jiraEntryOutcome = ctx.pure.jiraEntryOutcome;" +
     "var jiraEntryPanelHtml = ctx.pure.jiraEntryPanelHtml;" +
     "var jiraEntryVisible = ctx.pure.jiraEntryVisible;" +
-    "var JE_POPUP_BLOCKED_MESSAGE = ctx.pure.JE_POPUP_BLOCKED_MESSAGE;" +
     `var selectedBot = ${JSON.stringify(opts.selectedBot ?? "melosys")};` +
     `var activeThreadId = ${JSON.stringify(opts.activeThreadId === undefined ? "t-1" : opts.activeThreadId)};` +
     "function scrollToBottom(){}";
@@ -233,7 +212,7 @@ async function harness(opts: {
 
   return {
     fetchCalls,
-    tabs,
+    seeded: () => seeded,
     panelHtml: () => panelHtml,
     rowHtml: () => rowHtml,
     rowClasses: () => rowClasses,
@@ -311,18 +290,19 @@ describe("the POST", () => {
     expect(post.body).toEqual({ threadId: "t-1", template: "bug", depth: "skisse" });
   });
 
-  test("a success sends the PRE-OPENED tab to the composer and closes the picker", async () => {
+  test("a success seeds the card poller, closes the picker and leaves the note", async () => {
     const h = await harness({ postStatus: 200, postBody: { draftId: "d-9" } });
     h.attach();
     await h.clickOpen();
     await h.clickSubmit();
-    expect(h.tabs).toHaveLength(1);
-    expect(h.tabs[0]!.location.href).toBe("/jira?draft=d-9");
-    expect(h.tabs[0]!.closed).toBe(false);
+    // The draft's destination is the conversation. Nothing is opened.
+    expect(h.seeded()).toEqual(["d-9"]);
     expect(h.panelHtml()).toBeNull();
+    expect(h.rowHtml()).toContain('data-je-drafting="d-9"');
+    expect(h.rowHtml()).toContain("skrives i samtalen");
   });
 
-  test("a 409 renders the SERVER's own sentence inline and closes the blank tab", async () => {
+  test("a 409 renders the SERVER's own sentence inline and seeds nothing", async () => {
     const h = await harness({
       postStatus: 409,
       postBody: {
@@ -336,7 +316,7 @@ describe("the POST", () => {
     await h.clickSubmit();
     expect(h.panelHtml()).toContain("Det skrives allerede en sak fra denne samtalen");
     expect(h.panelHtml()).toContain("je-msg-err");
-    expect(h.tabs[0]!.closed).toBe(true);
+    expect(h.seeded()).toEqual([]);
     // The panel stays open so the reader can retry once the turn finishes.
     expect(h.panelHtml()).toContain("Lag utkast");
   });
@@ -364,16 +344,16 @@ describe("the POST", () => {
     await h.clickOpen();
     await h.clickSubmit();
     expect(h.panelHtml()).toContain("Fikk ikke kontakt med serveren");
-    expect(h.tabs[0]!.closed).toBe(true);
+    expect(h.seeded()).toEqual([]);
   });
 
-  test("a blocked popup keeps the started draft reachable as a link", async () => {
-    const h = await harness({ popupBlocked: true, postStatus: 200, postBody: { draftId: "d-9" } });
+  test("a 200 without an id is a refusal — nothing is seeded", async () => {
+    const h = await harness({ postStatus: 200, postBody: {} });
     h.attach();
     await h.clickOpen();
     await h.clickSubmit();
-    expect(h.panelHtml()).toContain('href="/jira?draft=d-9"');
-    expect(h.panelHtml()).toContain("Åpne utkastet");
+    expect(h.seeded()).toEqual([]);
+    expect(h.panelHtml()).toContain("uten utkast-id");
   });
 });
 
@@ -383,11 +363,11 @@ describe("the POST", () => {
  * Two ways that happens — the reader clicks Avbryt, or switches thread (which
  * wipes the whole message list). The turn RAN either way: a row exists, the
  * thread's single-flight slot is held, and the next attempt is a 409 about work
- * the reader was never shown. So a 200 must reach the pre-opened tab BEFORE any
- * state check, and Avbryt must not be clickable while a POST is on the wire.
+ * the reader was never shown. So a 200 must seed the card poller whatever the
+ * panel is doing, and Avbryt must not be clickable while a POST is on the wire.
  */
 describe("the panel disappearing mid-POST", () => {
-  test("a 200 that lands after Avbryt still sends the pre-opened tab to the draft", async () => {
+  test("a 200 that lands after the panel is gone still seeds the card poller", async () => {
     const h = await harness({ deferPost: true });
     h.attach();
     await h.clickOpen();
@@ -398,21 +378,25 @@ describe("the panel disappearing mid-POST", () => {
     expect(h.panelHtml()).toBeNull();
 
     await h.settlePost(200, { draftId: "d-9" });
-    expect(h.tabs).toHaveLength(1);
-    expect(h.tabs[0]!.location.href).toBe("/jira?draft=d-9");
-    expect(h.tabs[0]!.closed).toBe(false);
+    expect(h.seeded()).toEqual(["d-9"]);
+    // The note still lands in the row the control was clicked in — captured as a
+    // local at submit time, because closeJiraEntry cleared the shared one.
+    expect(h.rowHtml()).toContain('data-je-drafting="d-9"');
   });
 
-  test("a refusal that lands after the panel is gone is dropped — the tab still closes", async () => {
+  test("a refusal that lands after the panel is gone is dropped", async () => {
     const h = await harness({ deferPost: true });
     h.attach();
+    const before = h.rowHtml();
     await h.clickOpen();
     await h.clickSubmit();
     await h.closePanel();
     await h.settlePost(409, { error: "Det skrives allerede en sak fra denne samtalen." });
-    expect(h.tabs[0]!.closed).toBe(true);
-    // Nothing was resurrected to render the refusal into.
+    expect(h.seeded()).toEqual([]);
+    // Nothing was resurrected to render the refusal into, and no note was left
+    // for a draft that does not exist.
     expect(h.panelHtml()).toBeNull();
+    expect(h.rowHtml()).toBe(before);
   });
 
   test("Avbryt is DISABLED while sending, and a click on it is a no-op", async () => {
@@ -432,45 +416,7 @@ describe("the panel disappearing mid-POST", () => {
     expect(h.panelHtml()).not.toBeNull();
 
     await h.settlePost(200, { draftId: "d-9" });
-    expect(h.tabs[0]!.location.href).toBe("/jira?draft=d-9");
-  });
-});
-
-/**
- * The draft id must survive BOTH losses at once.
- *
- * A blocked popup and a torn-down panel are each handled — the first renders a
- * link, the second lets the tab carry the reader. Together they left nothing: the
- * 200 could not navigate a tab (there is none) and could not render into a panel
- * (it is gone), so the only pointer to a draft that EXISTS — a row, a visible
- * chat turn, a held flight slot — was dropped on the floor.
- */
-describe("a blocked popup with the panel already gone", () => {
-  test("renders the link into the originating message's feedback row", async () => {
-    const h = await harness({ popupBlocked: true, deferPost: true });
-    h.attach();
-    await h.clickOpen();
-    await h.clickSubmit();
-    await h.closePanel();
-    expect(h.panelHtml()).toBeNull();
-
-    await h.settlePost(200, { draftId: "d-9" });
-    // The control's own container — un-hidden by `has-jira` already, so the link
-    // is visible without a hover.
-    expect(h.rowHtml()).toContain('href="/jira?draft=d-9"');
-    expect(h.rowHtml()).toContain("Åpne utkastet");
-    expect(h.panelHtml()).toBeNull();
-  });
-
-  test("a REFUSAL after the panel is gone still renders nothing — there is no draft", async () => {
-    const h = await harness({ popupBlocked: true, deferPost: true });
-    h.attach();
-    const before = h.rowHtml();
-    await h.clickOpen();
-    await h.clickSubmit();
-    await h.closePanel();
-    await h.settlePost(409, { error: "Det skrives allerede en sak fra denne samtalen." });
-    expect(h.rowHtml()).toBe(before);
+    expect(h.seeded()).toEqual(["d-9"]);
   });
 });
 
@@ -500,8 +446,7 @@ describe("a second open while a POST is in flight", () => {
 
     // …and the answer still lands on that one panel.
     await h.settlePost(200, { draftId: "d-9" });
-    expect(h.tabs).toHaveLength(1);
-    expect(h.tabs[0]!.location.href).toBe("/jira?draft=d-9");
+    expect(h.seeded()).toEqual(["d-9"]);
     expect(h.panelHtml()).toBeNull();
   });
 

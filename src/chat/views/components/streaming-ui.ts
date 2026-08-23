@@ -213,6 +213,41 @@ export function streamingUiScript(): string {
   // Apply response metadata: update the inspector and stamp the model into the
   // last bot message's header. Per-turn token/duration now live in the inspector
   // ("Last response") and the header pill, so no per-message meta bar is rendered.
+  // The bubble a response_meta describes.
+  //
+  // **By the id the server echoes, never by position.** The server mints a
+  // throwaway client id for every bubble it renders (ChatState.appendBotMessage)
+  // and hands the last one back on the meta event; appendMessage stamps it as
+  // data-client-id. Picking "the last .msg-bot" instead is wrong whenever two
+  // turns are in flight in one thread — sendMessage has no in-flight guard, and
+  // a reloaded tab cannot know a turn is running, so an ordinary message sent
+  // during a 60–600 s Jira draft turn produced two metas that both resolved to
+  // whichever reply happened to be last, landing the draft's binding on an
+  // unrelated message.
+  //
+  // The positional fallback stays for the one case the id cannot cover: a meta
+  // from a turn whose bubble this tab never rendered (it arrived before the
+  // thread was opened), where "the last one" is still the best guess and was the
+  // whole behaviour before.
+  function botMessageForMeta(meta) {
+    if (meta.clientMessageId) {
+      var byId = chatMessages.querySelector(
+        '.msg-bot:not(.msg-intermediate)[data-client-id="' + cssAttrValue(meta.clientMessageId) + '"]'
+      );
+      if (byId) return byId;
+    }
+    var msgs = chatMessages.querySelectorAll('.msg-bot:not(.msg-intermediate)');
+    return msgs.length > 0 ? msgs[msgs.length - 1] : null;
+  }
+
+  // Ids are server-minted UUIDs, so this never has anything to escape in
+  // practice — it exists so a malformed one throws nothing and matches nothing
+  // rather than making the whole selector invalid (which would throw and skip
+  // the model stamp AND the feedback row).
+  function cssAttrValue(value) {
+    return String(value).replace(/["\\\\]/g, '\\\\$&');
+  }
+
   function showResponseMeta(meta) {
     // Store for inspector panel
     if (meta.conversationId) {
@@ -223,18 +258,16 @@ export function streamingUiScript(): string {
       loadToolUsageStats(); // Refresh aggregate stats
     }
 
-    // Stamp the model into the last bot message's header. Live turns learn their
+    var target = botMessageForMeta(meta);
+
+    // Stamp the model into that bot message's header. Live turns learn their
     // model here because the say() callback fires before result.model is known.
-    if (meta.model) {
-      var msgs = chatMessages.querySelectorAll('.msg-bot:not(.msg-intermediate)');
-      var lastBot = msgs.length > 0 ? msgs[msgs.length - 1] : null;
-      if (lastBot) {
-        var modelEl = lastBot.querySelector('.msg-head-model');
-        if (modelEl && !modelEl.textContent) {
-          modelEl.textContent = meta.model;
-          var sepEl = lastBot.querySelector('.msg-head-sep');
-          if (sepEl) sepEl.style.display = '';
-        }
+    if (meta.model && target) {
+      var modelEl = target.querySelector('.msg-head-model');
+      if (modelEl && !modelEl.textContent) {
+        modelEl.textContent = meta.model;
+        var sepEl = target.querySelector('.msg-head-sep');
+        if (sepEl) sepEl.style.display = '';
       }
     }
 
@@ -242,14 +275,14 @@ export function streamingUiScript(): string {
     // turn only learns its DB message id here (the say() callback rendered the
     // bubble with a throwaway client id), so this is where web feedback becomes
     // possible for live replies. Web conversations only.
-    if (meta.messageId) {
+    if (meta.messageId && target) {
       var conv = conversations[meta.conversationId];
-      if (conv && conv.type === 'web') {
-        var fbMsgs = chatMessages.querySelectorAll('.msg-bot:not(.msg-intermediate)');
-        var lastFb = fbMsgs.length > 0 ? fbMsgs[fbMsgs.length - 1] : null;
-        if (lastFb) attachFeedbackControls(lastFb, meta.messageId);
-      }
+      if (conv && conv.type === 'web') attachFeedbackControls(target, meta.messageId);
     }
+
+    // A finished turn may BE a Jira draft, or may have run beside one. Either
+    // way the listing is the authority — see adoptJiraCardsForThread.
+    refreshJiraCards();
   }
 
   // ── Response feedback (👍/👎) ─────────────────────────────────────────
@@ -259,6 +292,12 @@ export function streamingUiScript(): string {
   // again clears it. Capture-only — no analytics UI consumes it yet.
   function attachFeedbackControls(botDiv, messageId) {
     if (!botDiv || !messageId) return;
+    // The DB message id, stamped on the NODE — the only messageId → DOM lookup
+    // in the page. attachJiraCard resolves its bubble through it, and cannot do
+    // that work from in here: this function early-returns the moment a feedback
+    // row exists, so a card arriving after the row (the ordinary case — the
+    // draft finishes minutes later) would never be reached.
+    if (botDiv.dataset) botDiv.dataset.messageId = messageId;
     if (botDiv.querySelector('.msg-feedback')) return; // idempotent
     var wrap = document.createElement('div');
     wrap.className = 'msg-feedback';

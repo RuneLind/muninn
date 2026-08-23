@@ -27,6 +27,7 @@ import { getCitationsForThread } from "../../db/research-citations.ts";
 import {
   failJiraDraft,
   saveJiraDraftRetrieval,
+  setJiraDraftMessageId,
   startJiraDraftRun,
 } from "../../db/jira-drafts.ts";
 import { chatState } from "../../chat/state.ts";
@@ -171,6 +172,30 @@ export async function runJiraThreadDraft(
       emit("app_error", { type: "error", message: JIRA_UNFINISHED_MESSAGE });
       return;
     }
+
+    // ── Bind the row to the bubble, NOW ────────────────────────────────────
+    // The chat's draft card hangs under the assistant message named here, and
+    // everything below can still fail: an empty reply, a huginn timeout inside
+    // key verification, a throw. Stamped only in `finishJiraDraft`, all of those
+    // left a row no card could ever reach — a failure the reader could see
+    // nowhere at all. After this line the only unmapped rows are the `!turn`
+    // branch above (there IS no message) and a throw before the turn ran.
+    //
+    // **First drafts only.** On a regenerate the row still holds the PREVIOUS
+    // turn's markdown, and `finishJiraDraft` re-points `message_id` in the same
+    // statement that replaces it — deliberately, because an early stamp on a run
+    // that then failed would leave the row naming the new message while carrying
+    // the old text, and `failJiraDraft` restores `exclude_doc_ids` and nothing
+    // else. Best-effort: a draft that generated fine must not be failed by a
+    // bookkeeping write, and `finishJiraDraft` writes the same value anyway.
+    if (!opts.regenerate && turn.messageId) {
+      await setJiraDraftMessageId(draftId, turn.messageId).catch((err) => {
+        log.warn("Jira thread draft message stamp failed draft={draft} error={error}", {
+          draft: draftId, error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }
+
     if (!turn.text.trim()) {
       log.warn("Jira thread draft returned nothing bot={bot} draft={draft} thread={thread}", {
         bot: botConfig.name, draft: draftId, thread: threadId,

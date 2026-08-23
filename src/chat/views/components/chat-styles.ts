@@ -412,6 +412,89 @@ export function chatStyles(): string {
     .je-msg-err { color: var(--status-error); }
     a.je-msg-ok, .je-msg-ok { color: var(--status-success); }
 
+    /* ── The Jira draft card ───────────────────────────────────────────────── */
+    /* Appended UNDER the bot bubble whose turn produced it — the message itself
+       is never rewritten (see jira-card-pure.ts). It sits inside .msg-bot, which
+       is pre-wrap, so the card re-establishes normal wrapping for its own markup. */
+    .jira-card {
+      margin-top: 10px;
+      border: 1px solid var(--border-primary);
+      border-left: 3px solid var(--accent);
+      border-radius: 8px;
+      background: var(--bg-surface);
+      padding: 9px 11px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      white-space: normal;
+    }
+    .jira-card-failed { border-left-color: var(--status-error); }
+    .jira-card-pending { border-left-color: var(--text-muted); }
+    .jira-card-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+    .jira-card-title { font-size: 12.5px; font-weight: 650; color: var(--text-primary); }
+    .jira-card-kind {
+      font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase;
+      color: var(--text-muted); font-weight: 600;
+    }
+    .jira-card-archive { margin-left: auto; font-size: 11.5px; color: var(--text-secondary); }
+    .jira-card-archive:hover { color: var(--accent-light, var(--accent)); }
+    /* The rendered task. Bounded so a Full-depth draft cannot push the rest of
+       the conversation off screen — it scrolls inside its own box instead. */
+    .jira-card-body {
+      max-height: 420px;
+      overflow-y: auto;
+      overflow-x: auto;
+      font-size: 13px;
+      line-height: 1.55;
+      border-top: 1px solid var(--border-primary);
+      border-bottom: 1px solid var(--border-primary);
+      padding: 8px 0;
+    }
+    .jira-card-error { font-size: 12.5px; line-height: 1.5; color: var(--status-error); }
+    .jira-card-hint { font-size: 11.5px; color: var(--text-muted); line-height: 1.45; }
+    .jira-card-badges { display: flex; flex-wrap: wrap; gap: 6px; }
+    .jira-card-badge {
+      font-size: 11px; line-height: 1.5; padding: 1px 7px; border-radius: 999px;
+      border: 1px solid var(--border-primary); color: var(--text-secondary); cursor: help;
+    }
+    .jira-card-badge-ok {
+      border-color: color-mix(in srgb, var(--status-success) 45%, transparent);
+      color: var(--status-success);
+    }
+    .jira-card-badge-warn {
+      border-color: color-mix(in srgb, var(--status-warn, #d79b3a) 45%, transparent);
+      color: var(--status-warn, #d79b3a);
+    }
+    .jira-card-badge-err {
+      border-color: color-mix(in srgb, var(--status-error) 45%, transparent);
+      color: var(--status-error);
+    }
+    .jira-card-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+    .jira-card-btn {
+      border: 1px solid var(--border-primary); border-radius: 6px; font: inherit; font-size: 12px;
+      padding: 3px 10px; cursor: pointer; background: var(--bg-panel); color: var(--text-secondary);
+    }
+    .jira-card-btn:hover { border-color: var(--accent); color: var(--accent-light, var(--accent)); }
+    .jira-card-saved { font-size: 12px; color: var(--status-success); font-weight: 600; }
+    .jira-card-msg { font-size: 11.5px; color: var(--text-secondary); line-height: 1.45; }
+    .jira-card-msg-err { color: var(--status-error); }
+    .jira-card-msg-ok { color: var(--status-success); }
+
+    /* The one thread-level notice for drafts no bubble can carry. */
+    .jira-card-notice {
+      align-self: stretch;
+      margin: 6px 0;
+      border: 1px dashed var(--border-primary);
+      border-radius: 8px;
+      padding: 8px 11px;
+      font-size: 11.5px;
+      color: var(--text-secondary);
+      white-space: normal;
+    }
+    .jira-card-notice-head { display: block; margin-bottom: 4px; color: var(--text-muted); }
+    .jira-card-notice-list { margin: 0; padding-left: 18px; }
+    .jira-card-notice-list a { color: var(--accent-light, var(--accent)); }
+
     .msg-user {
       color: var(--text-secondary);
     }

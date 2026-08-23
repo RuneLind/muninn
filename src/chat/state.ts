@@ -44,7 +44,7 @@ export type ChatEvent =
   | { type: "tool_status"; conversationId: string; text: string; threadId?: string | null; name?: string; displayName?: string }
   | { type: "tool_end"; conversationId: string; threadId?: string | null; name: string; displayName: string; tokensEstimate?: number }
   | { type: "usage_progress"; conversationId: string; threadId?: string | null; inputTokens: number; outputTokens: number; model?: string }
-  | { type: "response_meta"; conversationId: string; threadId?: string | null; messageId?: string; inputTokens: number; outputTokens: number; contextTokens?: number; contextWindow?: number; cacheReadTokens?: number; cacheCreationTokens?: number; durationMs: number; costUsd: number; model: string; numTurns: number; toolCalls?: { name: string; displayName: string; durationMs: number; tokensEstimate?: number }[] }
+  | { type: "response_meta"; conversationId: string; threadId?: string | null; messageId?: string; clientMessageId?: string; inputTokens: number; outputTokens: number; contextTokens?: number; contextWindow?: number; cacheReadTokens?: number; cacheCreationTokens?: number; durationMs: number; costUsd: number; model: string; numTurns: number; toolCalls?: { name: string; displayName: string; durationMs: number; tokensEstimate?: number }[] }
   | { type: "mcp_status"; botName: string; servers: McpServerStatus[] }
   | { type: "dev_run"; conversationId: string; run: DevRun; handoffs: DevRunHandoff[] }
   | { type: "dev_run_event"; conversationId: string; runId: string; threadId?: string; event: DevRunEvent };
@@ -156,17 +156,29 @@ export class ChatState {
     this.publish({ type: "message", conversationId, message });
   }
 
-  /** Append a bot-authored message to a conversation. Wraps `addMessage` to keep
-   *  the ChatMessage shape co-located so callers (chat processor, hivemind autorespond)
-   *  don't drift if the shape changes. */
-  appendBotMessage(conversationId: string, text: string, threadId?: string | null): void {
+  /**
+   * Append a bot-authored message to a conversation. Wraps `addMessage` to keep
+   * the ChatMessage shape co-located so callers (chat processor, hivemind
+   * autorespond) don't drift if the shape changes.
+   *
+   * **Returns the throwaway client id it minted.** The DB row id does not exist
+   * yet when a live turn's bubble is rendered — it arrives later, on
+   * `response_meta` — so this id is the only thing that names THAT bubble.
+   * Handing it back is what lets `processChatMessage` echo it on the meta event,
+   * so the client can resolve the node it actually created instead of guessing
+   * "the last `.msg-bot`" (which is a different message the moment two turns
+   * finish out of order — see `showResponseMeta`).
+   */
+  appendBotMessage(conversationId: string, text: string, threadId?: string | null): string {
+    const id = crypto.randomUUID();
     this.addMessage(conversationId, {
-      id: crypto.randomUUID(),
+      id,
       timestamp: Date.now(),
       sender: "bot",
       text,
       threadId: threadId ?? null,
     });
+    return id;
   }
 
   setStatus(conversationId: string, status: string): void {
@@ -259,6 +271,17 @@ export class ChatState {
     threadId?: string | null;
     /** DB id of the persisted assistant message — anchors the web 👍/👎 control. */
     messageId?: string;
+    /**
+     * The THROWAWAY id of the bubble this turn rendered (`appendBotMessage`).
+     *
+     * The client stamps it on the node it creates, so `response_meta` can
+     * resolve that exact node rather than "the last `.msg-bot` in the list".
+     * Positional resolution is wrong whenever two turns are in flight in one
+     * thread — an ordinary message sent while a 60–600 s Jira draft turn runs
+     * produces two metas, and the later one stamped the earlier turn's draft id
+     * onto an unrelated reply.
+     */
+    clientMessageId?: string;
     inputTokens: number;
     outputTokens: number;
     contextTokens?: number;
@@ -276,6 +299,7 @@ export class ChatState {
       conversationId,
       threadId: meta.threadId,
       messageId: meta.messageId,
+      clientMessageId: meta.clientMessageId,
       inputTokens: meta.inputTokens,
       outputTokens: meta.outputTokens,
       contextTokens: meta.contextTokens,

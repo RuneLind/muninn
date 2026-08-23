@@ -10,11 +10,10 @@ import {
   jiraEntryButtonHtml,
   jiraEntryCanSubmit,
   jiraEntryDraftBody,
-  jiraEntryDraftLinkHtml,
+  jiraEntryDraftingHtml,
   jiraEntryOutcome,
   jiraEntryPanelHtml,
   jiraEntryVisible,
-  JE_POPUP_BLOCKED_MESSAGE,
 } from "./jira-entry-pure.ts";
 
 Object.assign(globalThis, {
@@ -22,9 +21,8 @@ Object.assign(globalThis, {
   jiraEntryButtonHtml,
   jiraEntryCanSubmit,
   jiraEntryDraftBody,
-  jiraEntryDraftLinkHtml,
+  jiraEntryDraftingHtml,
   jiraEntryOutcome,
   jiraEntryPanelHtml,
   jiraEntryVisible,
-  JE_POPUP_BLOCKED_MESSAGE,
 });

@@ -25,12 +25,23 @@
  *     would hit the single-flight 409, which is exactly this case.
  *   · `PUT  /api/jira/draft/:id`   — the reader's edit. Design call 3 makes save
  *     load-bearing: after the Jira paste the markdown exists nowhere else.
+ *   · `GET  /api/jira/drafts?thread=` — the chat card's binding listing:
+ *     `{messageId, draftId, status}` per draft on one thread, no content.
+ *   · `POST /api/jira/draft/:id/save` — the card's «Lagre», stamping `saved_at`.
  *
- * `GET`/`start` carry `Access-Control-Allow-Origin: *` with an `app.options`
- * preflight, matching `POST /api/research/chat`, which the extension already
- * calls. The consequence is stated in the migration and accepted: any page the
- * browser visits could read a draft id it can guess, bounded by `DASHBOARD_HOST`
- * defaulting to loopback.
+ * `GET /api/jira/draft/:id` and `start` carry `Access-Control-Allow-Origin: *`
+ * with an `app.options` preflight, matching `POST /api/research/chat`, which the
+ * extension already calls. The consequence is stated in the migration and
+ * accepted: any page the browser visits could read a draft id it can guess,
+ * bounded by `DASHBOARD_HOST` defaulting to loopback.
+ *
+ * **The three newer endpoints deliberately carry NONE of that** — `from-thread`,
+ * the thread listing and `save`. Two of them WRITE (a conversation, a row), and
+ * the listing hands over every draft id on a thread at once, which is a strictly
+ * bigger lever than guessing one. The two POSTs additionally require
+ * `application/json` and 415 anything else: Hono parses any body whatever the
+ * header says, and a `text/plain` POST is a CORS *simple* request that executes
+ * regardless of what the response headers say.
  *
  * Deliberately **not** added to `openapi-spec.ts`: neither `POST /api/wiki/share`
  * nor `POST /api/research/ask` is there, so documenting these would be new scope,
@@ -59,7 +70,13 @@ import {
   type JiraDepth,
   type ParsedJiraDraftBody,
 } from "../../jira/wire.ts";
-import { createJiraDraft, getJiraDraft, updateJiraDraftMarkdown } from "../../db/jira-drafts.ts";
+import {
+  createJiraDraft,
+  getJiraDraft,
+  listJiraDraftsForThread,
+  saveJiraDraft,
+  updateJiraDraftMarkdown,
+} from "../../db/jira-drafts.ts";
 import { getThreadById } from "../../db/threads.ts";
 import {
   acquireJiraFlight,
@@ -768,6 +785,62 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
       return c.json(draft);
     } catch (err) {
       return serverError(c, "draft read", err);
+    }
+  });
+
+  // ── The chat card's binding listing ────────────────────────────────────────
+  // Every draft on one thread, so the card's poller is keyed on the DRAFT rather
+  // than on "this tab is the one that clicked". A from-thread turn runs 60–600 s
+  // and broadcasts to every open tab, so reload, second tab and switch-away-and-
+  // back are all ordinary — and none of them can be served by remembering a
+  // click.
+  //
+  // **Deliberately NO CORS headers**, unlike the single `GET /api/jira/draft/:id`
+  // beside it. Migration 070 accepts that a page the browser visits could read a
+  // draft id it can GUESS; a thread-keyed listing hands over every id on the
+  // thread at once, which is a different thing entirely. It carries no draft
+  // content either — three fields, the binding — so the wide read stays the
+  // per-card one the client makes once.
+  app.get("/api/jira/drafts", async (c) => {
+    try {
+      const threadId = (c.req.query("thread") ?? "").trim();
+      if (!threadId) return c.json({ error: "Mangler samtale-id." }, 400);
+      // The `unknownDraft` rule, one column over: a non-uuid reaches postgres as
+      // a cast error, not an empty result.
+      if (!isValidUuid(threadId)) return unknownThread(c);
+      const drafts = await listJiraDraftsForThread(threadId);
+      // A poll target must never be cached — the whole point is that a row's
+      // `message_id` fills in and its `generating` becomes `ready`.
+      c.header("Cache-Control", "no-store");
+      return c.json({ drafts });
+    } catch (err) {
+      return serverError(c, "draft listing", err);
+    }
+  });
+
+  // ── «Lagre» ────────────────────────────────────────────────────────────────
+  // Stamps `saved_at` so the card's «Lagret» survives a reload.
+  //
+  // Two refusals, and both are the from-thread route's rather than the GET's:
+  // no CORS headers, and `application/json` REQUIRED (415 otherwise). This is a
+  // WRITE, and a body-less or `text/plain` POST is a CORS *simple* request — it
+  // executes whatever the response headers say, so the missing CORS headers
+  // would only have stopped the attacker reading the answer. The card sends `{}`.
+  app.post("/api/jira/draft/:id/save", async (c) => {
+    try {
+      if (!isJsonRequest(c)) {
+        return c.json({ error: "Forespørselen må sendes som application/json." }, 415);
+      }
+      const id = c.req.param("id");
+      if (!isValidUuid(id)) return unknownDraft(c);
+      const saved = await saveJiraDraft(id);
+      if (!saved) return unknownDraft(c);
+      // The whole view, so the card adopts exactly what the row now holds rather
+      // than drawing a state the server might not have reached — the `PUT` rule.
+      c.header("Cache-Control", "no-store");
+      return c.json(saved);
+    } catch (err) {
+      return serverError(c, "draft save", err);
     }
   });
 
