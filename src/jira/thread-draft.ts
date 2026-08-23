@@ -138,13 +138,22 @@ function namedIn(citation: JiraCitation, mentionedKeys: Set<string>, text: strin
   return !!citation.url && mentionsUrl(text, citation.url);
 }
 
-/** The url boundary rule. Exported only through {@link namedIn}'s two callers. */
+/**
+ * The url boundary rule. Exported only through {@link namedIn}'s two callers.
+ *
+ * The class is "characters that can CONTINUE AN ADDRESS", not "characters that
+ * can continue an identifier": `/`, `?` and `#` each start a different page, so
+ * `…/rammeavtale` counted as named by a mention of `…/rammeavtale/vedlegg` or
+ * `…?v=2` — the same defect the identifier characters were added for, one
+ * separator over. A match must therefore end the string or be followed by
+ * something outside `[A-Za-z0-9_-/?#]`.
+ */
 function mentionsUrl(text: string, url: string): boolean {
   for (let from = 0; ; ) {
     const at = text.indexOf(url, from);
     if (at < 0) return false;
     const next = text[at + url.length];
-    if (next === undefined || !/[A-Za-z0-9_-]/.test(next)) return true;
+    if (next === undefined || !/[A-Za-z0-9_\-/?#]/.test(next)) return true;
     from = at + 1;
   }
 }
@@ -264,15 +273,38 @@ export function threadSeedLine(threadName: string): string {
  * Deliberately a VISIBLE prefix rather than an invisible marker (`<!-- … -->`,
  * the research flow's device): these lines are ordinary chat messages a person
  * scrolls past, and a marker only stays invisible where a renderer knows about
- * it. The residual is that a human line beginning «Lag Jira-sak …» is stripped
- * too — which costs an amber row at worst, on a sentence that is a request for a
- * draft rather than raw material about the problem.
+ * it. Recognising them therefore takes more than this prefix — see
+ * {@link isJiraTurnLine}, which matches the whole single-line shape, because a
+ * person's «Lag Jira-sak av dette:» above a pasted refinement thread starts with
+ * this string too.
  */
 export const JIRA_TURN_TEXT_PREFIX = "Lag Jira-sak";
 
-/** Is this message one of the composer's own turn lines? */
+/**
+ * The exact shape of a composer turn line: the prefix, optionally `på nytt`, and
+ * the `(<template>, <depth>)` parenthesis both builders below always emit.
+ */
+const JIRA_TURN_LINE_RE = /^Lag Jira-sak(?: på nytt)? \([^()\n]+, [^()\n]+\)\./;
+
+/**
+ * Is this message one of the composer's own turn lines?
+ *
+ * **Shape-matched and SINGLE-LINE**, not a prefix test on the whole message. A
+ * bare `startsWith` dropped a person's «Lag Jira-sak av dette:» followed by the
+ * pasted refinement notes — the entire paste left the raw material, so every key
+ * in it flipped from amber ("you wrote it") to red ("fabricated") the moment the
+ * reader saved. The composer's own lines are always one line of a fixed shape,
+ * so requiring that shape costs nothing and refuses every free-form request.
+ *
+ * The residual runs in the SAFE direction — stripping less: a reader's `extra`
+ * steer is appended to the regenerate line verbatim, so a MULTI-LINE steer makes
+ * that line raw material again, which costs one amber row on an excluded key the
+ * model re-used. Losing a person's paste costs every key in it.
+ */
 export function isJiraTurnLine(text: string): boolean {
-  return text.trimStart().startsWith(JIRA_TURN_TEXT_PREFIX);
+  const line = text.trim();
+  if (line.includes("\n")) return false;
+  return JIRA_TURN_LINE_RE.test(line);
 }
 
 /** The visible user line for a first draft turn. It IS a normal user message —

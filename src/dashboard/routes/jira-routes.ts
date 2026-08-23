@@ -68,6 +68,7 @@ import {
   runJiraDraftDetached,
   streamJiraSSE,
   threadFlightKey,
+  JIRA_THREAD_FLIGHT_MESSAGE,
   type JiraSseOptions,
 } from "./jira-sse.ts";
 import {
@@ -358,13 +359,21 @@ async function buildSseOptions(
   // this row's hit set is re-derived from the conversation on every run, because
   // the conversation keeps retrieving between turns.
   if (stored.source === "thread" && stored.threadId) {
-    // Deliberately NO `notes` / `existingDraftId` here: `runJiraDraft` diverts on
-    // `threadRun` before it reads either, and the flight key for this path is the
-    // thread (`threadFlightKey`), not the content hash. Carrying them read as if
-    // the one-shot could still run over them.
+    // Deliberately NO `notes` here: `runJiraDraft` diverts on `threadRun` before
+    // it reads them, and the flight key for this path is the thread
+    // (`threadFlightKey`), not the content hash. Carrying them read as if the
+    // one-shot could still run over them.
+    //
+    // **`existingDraftId` is NOT optional, though**, even though the RUNNER never
+    // reads it on this path: `POST /api/jira/draft/start` — which is how the page
+    // regenerates — creates a row when it is absent. Dropped, it minted a SECOND,
+    // `notes`-sourced row with empty notes and handed the caller ITS id, while
+    // the turn ran against `threadRun.draftId`; the page then polled a row
+    // nothing would ever finish, to the 13-minute cap.
     return {
       opts: {
         ...base,
+        existingDraftId: stored.draftId,
         threadRun: {
           config,
           botConfig: bot,
@@ -454,7 +463,14 @@ async function claimDraft(
     return {
       ok: false,
       response: c.json(
-        { state: "running", expiresAtMs: acquired.expiresAtMs, error: conflictMessage },
+        {
+          state: "running",
+          expiresAtMs: acquired.expiresAtMs,
+          // A THREAD-sourced draft shares its slot with `POST …/from-thread`, so
+          // it must share that route's sentence too: what is in flight is a turn
+          // in a conversation, not a draft over this reader's raw material.
+          error: opts.threadRun ? JIRA_THREAD_FLIGHT_MESSAGE : conflictMessage,
+        },
         409,
       ),
     };
@@ -677,7 +693,7 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
           {
             state: "running",
             expiresAtMs: acquired.expiresAtMs,
-            error: "Det skrives allerede en sak fra denne samtalen — vent til den er ferdig.",
+            error: JIRA_THREAD_FLIGHT_MESSAGE,
           },
           409,
         );

@@ -1579,6 +1579,33 @@ describe("regenerate on a thread-sourced draft", () => {
     expect(view.markdown).not.toContain("confluence.test/rammeavtale");
   });
 
+  test("a regenerate through /draft/start reuses THAT row — it never orphans a second one", async () => {
+    const draftId = await startThreadDraft();
+    const before = rows.size;
+    threadTurns = [];
+    __setJiraThreadTurnForTest(scriptedThreadTurn("## Symptom\nKortere.", "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"));
+
+    // The page's own regenerate goes over `/draft/start` (fire-and-forget, then
+    // poll). Without `existingDraftId` on the thread branch the route created a
+    // SECOND, `notes`-sourced row with empty notes and handed the caller ITS id,
+    // while the turn ran against the thread row — so the poller sat on a row
+    // nothing would ever finish, to the 13-minute cap.
+    const res = await makeApp().request("/api/jira/draft/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ draftId, template: "bug", depth: "skisse" }),
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()).draftId).toBe(draftId);
+    expect(rows.size).toBe(before);
+
+    await new Promise((r) => setTimeout(r, 60));
+    const view = await (await makeApp().request(`/api/jira/draft/${draftId}`)).json();
+    expect(view.status).toBe("ready");
+    expect(view.markdown).toContain("Kortere.");
+    expect(threadTurns).toHaveLength(1);
+  });
+
   test("emits NO `citations` frame — the client would adopt the narrow set", async () => {
     const draftId = await startThreadDraft();
     __setJiraThreadTurnForTest(scriptedThreadTurn("## Symptom\nKortere. Se MELOSYS-8150."));

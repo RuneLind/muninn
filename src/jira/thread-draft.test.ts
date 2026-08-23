@@ -128,6 +128,58 @@ describe("seedThreadCitations", () => {
     expect(seeded.map((c) => c.key)).toEqual(["MELOSYS-4", "MELOSYS-81"]);
   });
 
+  test("a url that is only a PATH prefix of the one in the text is NOT cited", () => {
+    // The same class as the `MELOSYS-81`/`MELOSYS-8150` case above, one separator
+    // over: `…/rammeavtale` is a prefix of `…/rammeavtale/vedlegg`, and `/` was
+    // not in the boundary class — so a mention of the ATTACHMENT marked the
+    // parent page as one the conversation had used.
+    const seeded = seedThreadCitations(
+      [
+        row({
+          collection: "melosys-confluence-v3",
+          docId: "Team MELOSYS/rammeavtale.md",
+          title: "Rammeavtalen",
+          url: "https://confluence.test/rammeavtale",
+          relevance: 0.1,
+        }),
+        row({ docId: "MELOSYS-4_B.md", title: "MELOSYS-4_B", url: undefined, relevance: 0.9 }),
+      ],
+      ["Se https://confluence.test/rammeavtale/vedlegg for detaljene."],
+    );
+    expect(seeded.map((c) => c.docId)).toEqual(["MELOSYS-4_B.md", "Team MELOSYS/rammeavtale.md"]);
+  });
+
+  test("a url that is only a prefix up to a QUERY or FRAGMENT is NOT cited", () => {
+    const cite = (text: string) =>
+      seedThreadCitations(
+        [
+          row({
+            collection: "melosys-confluence-v3",
+            docId: "Team MELOSYS/rammeavtale.md",
+            title: "Rammeavtalen",
+            url: "https://confluence.test/rammeavtale",
+            relevance: 0.1,
+          }),
+          row({ docId: "MELOSYS-4_B.md", title: "MELOSYS-4_B", url: undefined, relevance: 0.9 }),
+        ],
+        [text],
+      ).map((c) => c.docId);
+    // `?` and `#` are the other two characters that continue an ADDRESS without
+    // continuing an identifier — a different page every time.
+    expect(cite("Se https://confluence.test/rammeavtale?v=2 for detaljene.")).toEqual([
+      "MELOSYS-4_B.md",
+      "Team MELOSYS/rammeavtale.md",
+    ]);
+    expect(cite("Se https://confluence.test/rammeavtale#vedlegg for detaljene.")).toEqual([
+      "MELOSYS-4_B.md",
+      "Team MELOSYS/rammeavtale.md",
+    ]);
+    // …and the exact url still counts, which is the whole point of the rule.
+    expect(cite("Se https://confluence.test/rammeavtale for detaljene.")[0]).toBe(
+      "Team MELOSYS/rammeavtale.md",
+    );
+  });
+
   test("a url followed by punctuation still counts as cited", () => {
     const seeded = seedThreadCitations(
       [
@@ -265,6 +317,27 @@ describe("turn text", () => {
       ),
     ).toBe(true);
     expect(isJiraTurnLine("Vi må se på uttrekket for MELOSYS-7264.")).toBe(false);
+  });
+
+  test("a multi-line human «Lag Jira-sak av dette:» message is RAW MATERIAL, not our line", () => {
+    // The strip used to be `startsWith(JIRA_TURN_TEXT_PREFIX)` on the whole
+    // message, so a person pasting «Lag Jira-sak av dette:» above the refinement
+    // notes lost the ENTIRE paste from the raw material — and every key in it
+    // flipped amber ("you wrote it") to red ("fabricated") on the next PUT.
+    expect(
+      isJiraTurnLine(
+        "Lag Jira-sak av dette:\nUttrekket feiler for EØS-saker, se MELOSYS-8150.\nVi må se på flyten.",
+      ),
+    ).toBe(false);
+    // Free-form on ONE line is raw material too — the composer's lines always
+    // carry the `(<template>, <depth>)` parenthesis.
+    expect(isJiraTurnLine("Lag Jira-sak av dette, se MELOSYS-8150.")).toBe(false);
+    // …and the composer's own regenerate line, exclusions and all, still matches.
+    expect(
+      isJiraTurnLine(
+        "Lag Jira-sak på nytt (bug, skisse). Ikke bruk disse kildene denne gangen: MELOSYS-7264.",
+      ),
+    ).toBe(true);
   });
 });
 
