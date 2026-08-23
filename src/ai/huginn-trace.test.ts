@@ -296,6 +296,42 @@ describe("recoverOversizedClaudeCliToolResult", () => {
     }
   });
 
+  test("hands back the recovered BODY, not just the trace", () => {
+    // The caller's own copy of the result is the pointer stub, so anything that
+    // reads tool output for content — the thread-citation capture files the
+    // hits out of it — has nowhere else to read from.
+    const dir = mkdtempSync(join(tmpdir(), "cli-divert-"));
+    const filePath = join(dir, "result.txt");
+    const body = "## Search results\n\nlots of content here";
+    writeFileSync(
+      filePath,
+      JSON.stringify({ result: body + '\n\n```huginn-trace\n{"schemaVersion":1}\n```' }),
+      "utf8",
+    );
+    try {
+      const recovered = recoverOversizedClaudeCliToolResult(makePlaceholder(filePath));
+      expect(recovered!.text).toBe(body);
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
+
+  test("text is null when the file cannot be turned back into text", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cli-divert-"));
+    const filePath = join(dir, "result.txt");
+    writeFileSync(filePath, "not json at all", "utf8");
+    try {
+      expect(recoverOversizedClaudeCliToolResult(makePlaceholder(filePath))!.text).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+    expect(
+      recoverOversizedClaudeCliToolResult(
+        makePlaceholder(join(tmpdir(), "does-not-exist-4f1a", "result.txt")),
+      )!.text,
+    ).toBeNull();
+  });
+
   test("degrades gracefully when file is missing", () => {
     const recovered = recoverOversizedClaudeCliToolResult(
       makePlaceholder("/nonexistent/path/to/result.txt"),

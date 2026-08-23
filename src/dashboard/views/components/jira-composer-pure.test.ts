@@ -163,6 +163,33 @@ describe("coverage copy selection", () => {
     expect(jiraCoverageNotice(null, "no_hits")?.text).toBe(JIRA_NO_HITS_MESSAGE);
   });
 
+  test("a THREAD draft that retrieved nothing gets ONE sentence, not the notes one", () => {
+    // The `no_hits` corpus line («Ingenting i jira-issues … dekket dette søket,
+    // så utkastet er skrevet utelukkende fra råmaterialet ditt») describes the
+    // NOTES path: a `?q=` search that came back empty. A thread draft runs no
+    // such search — its hit set is whatever the conversation retrieved — and the
+    // empty column already says so in its own words, so the banner rendered a
+    // second, wrong explanation above the right one.
+    expect(jiraCoverageNotice("no_hits", "no_hits", "thread")).toBeNull();
+    expect(jiraCoverageNotice(null, "no_hits", "thread")).toBeNull();
+
+    // Everything else still speaks on a thread draft: switching every retrieved
+    // source off is the reader's own doing wherever the draft came from.
+    expect(jiraCoverageNotice("answer", "no_hits", "thread")?.text).toBe(JIRA_ALL_EXCLUDED_MESSAGE);
+    expect(jiraCoverageNotice("unreachable", "no_hits", "thread")?.text).toBe(JIRA_UNREACHABLE_MESSAGE);
+    expect(jiraCoverageNotice("low_confidence", "low_confidence", "thread")?.text).toBe(
+      JIRA_LOW_CONFIDENCE_MESSAGE,
+    );
+  });
+
+  test("the rendered column carries the thread sentence alone", () => {
+    const html = jiraCitationsHtml(
+      stateWith({ source: "thread", draftId: "d1", citations: [], retrievalCoverage: "no_hits", coverage: "no_hits" }),
+    );
+    expect(html).toContain("Samtalen hentet ingen kilder");
+    expect(html).not.toContain("jc-banner");
+  });
+
   test("unreachable outranks every other reading — the corpus was never asked", () => {
     expect(jiraCoverageNotice("unreachable", "unreachable")).toEqual({
       tone: "bad",

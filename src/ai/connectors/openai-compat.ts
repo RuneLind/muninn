@@ -231,6 +231,7 @@ export async function executePrompt(
         startMs: toolStart,
         endMs: performance.now(),
         wallStart,
+        botName: botConfig.name,
       });
       const toolDurationMs = toolCall.durationMs;
 

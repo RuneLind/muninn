@@ -158,7 +158,7 @@ async function readAndParseIncrementally(
   onProgress: StreamProgressCallback | undefined,
   botName: string,
 ): Promise<IncrementalResult> {
-  const parser = new StreamParser(referenceTimestamp, onProgress);
+  const parser = new StreamParser(referenceTimestamp, onProgress, botName);
   const rawLines: string[] = [];
   const reader = stdout.getReader();
   const decoder = new TextDecoder();

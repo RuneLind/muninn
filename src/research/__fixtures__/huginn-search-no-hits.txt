@@ -1,0 +1,5 @@
+No results found for 'eksempel som ikke finnes' (low confidence).
+
+*No confident match — try: related terms: eksempel, testdata · broader query: "eksempel"*
+
+huginn-trace-url: http://127.0.0.1:8080/api/trace/00000000-0000-4000-8000-000000000003

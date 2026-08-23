@@ -1,0 +1,56 @@
+**Graph:**
+Eksempeltjenesten leser fra Eksempelregisteret.
+
+
+## MELOSYS-101 Eksempelsak om innlogging (100.0% relevant · high) | updated: 2026-01-15
+https://jira.example.invalid/browse/MELOSYS-101
+Melosys > Saker > Innlogging
+collection: `jira-issues` doc_id: `MELOSYS-101_Eksempelsak_om_innlogging.md`
+
+**Felter**
+
+status: Ferdig | type: Bug | prioritet: Normal
+
+## Description
+Ved innlogging i eksempelmiljøet feiler oppslaget mot Eksempelregisteret når
+brukeren mangler rolle. Se feilkode EKS-42 i loggen.
+
+## Løsning
+Bytt til v2 av eksempelklienten.
+
+## Eksempelside om testdata **[UNDER ARBEID]** (82.3% relevant · medium) | updated: 2025-11-02
+https://confluence.example.invalid/display/EKS/Eksempelside+om+testdata
+Eksempelrom > Testdata
+collection: `melosys-confluence-v3` doc_id: `Eksempelside om testdata.md`
+
+**Testdata**
+
+Testdataene i eksempelmiljøet nullstilles hver natt klokka 03:00.
+
+## Eksempel (61.0% relevant · low) | updated: 2026-02-20
+file://./huginn-nav/wiki/entities/Eksempel.md
+collection: `nav-wiki` doc_id: `entities/Eksempel.md`
+
+**Om**
+
+Eksempel er en oppdiktet enhet brukt i denne fixturen. Statusendepunktet ligger på
+https://eksempel.invalid/api/status
+
+## Eksempeltjeneste (55.5% relevant · low) | updated: 2026-02-21
+collection: `nav-wiki` doc_id: `entities/Eksempeltjeneste.md`
+
+**Om**
+
+Eksempeltjeneste er en oppdiktet tjeneste uten egen url i denne fixturen. Se
+https://eksempel.invalid/api/eksempeltjeneste
+
+## Eksempelnotat uten relevans | updated: 2026-03-05
+collection: `nav-wiki` doc_id: `entities/Eksempelnotat.md`
+
+**Om**
+
+Eksempelnotat er en oppdiktet side som huginn rendret uten relevans-score.
+
+*Weak match — try: related terms: eksempel, testdata · broader query: "eksempel"*
+
+huginn-trace-url: http://127.0.0.1:8080/api/trace/00000000-0000-4000-8000-000000000001

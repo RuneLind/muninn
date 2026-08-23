@@ -9,11 +9,7 @@ import {
 } from "../ai/research-knowledge.ts";
 import type { ConnectorType } from "../bots/config.ts";
 import type { HaikuBackend } from "../ai/haiku-direct.ts";
-import { peekActiveTurn } from "../hivemind/active-turn.ts";
-import {
-  insertResearchCitations,
-  type ResearchCitationInsert,
-} from "../db/research-citations.ts";
+import { persistThreadCitations } from "./thread-citations.ts";
 
 const log = getLog("research", "mcp-server");
 
@@ -153,62 +149,31 @@ export class ResearchMcpServer {
 /**
  * Persist what THIS tool call retrieved, against the thread it was called from.
  *
- * **Why here and not in a trace.** `research_citations` is written today only by
- * `/research` ask; the chat's tool call writes nothing, and the trace's tool-span
- * outputs are truncated to a `_truncated` head — so after a refinement discussion
- * the hits the conversation actually saw are unrecoverable. That is precisely the
- * signal the Jira composer's thread-sourced draft is built on, which is why the
- * write lives on the tool's own success path rather than in a consumer.
- *
- * `cited` is written FALSE for every row and derived later (the assistant's reply
- * does not exist yet at this point, and there are no `[n]` markers on this path
- * anyway — a chat turn names its sources in prose).
- *
- * **`peekActiveTurn` is per-BOT, not per-user.** Two people chatting the same bot
- * concurrently can have one turn's hits attributed to the other's thread (the
- * LIFO stack's documented race). Accepted for v1: the consequence is a Jira draft
- * seeded with a neighbouring conversation's sources, all of which are visible and
- * toggleable on the page. A per-MCP-session thread binding (`?turn=<token>`) is
- * the fix if this bot ever carries real concurrent traffic.
- *
- * Fire-and-forget in every direction: a DB failure must never turn a successful
- * retrieval into a failed tool result.
+ * The write lives on the tool's own success path rather than in a consumer
+ * because this is the only place the DECODED hits exist. Everything about the
+ * shaping, the per-bot turn race and the failure policy is in
+ * `thread-citations.ts`, which the huginn-`knowledge` tool-result path shares.
  */
-function persistThreadCitations(botName: string, question: string, result: ResearchKnowledgeResult): void {
-  const rows = threadCitationRows(botName, question, result, peekActiveTurn(botName));
-  if (rows.length === 0) return;
-  void insertResearchCitations(rows).catch((err) => {
-    log.warn("Failed to persist thread citations botName={botName} error={error}", {
-      botName,
-      error: err instanceof Error ? err.message : String(err),
-    });
-  });
-}
-
-/** The row shaping, split out so it is testable without a DB or a live turn. */
-export function threadCitationRows(
+function persistToolCallCitations(
   botName: string,
   question: string,
   result: ResearchKnowledgeResult,
-  threadId: string | null,
-): ResearchCitationInsert[] {
-  if (!threadId) return [];
-  return result.results.map((hit) => ({
+): void {
+  persistThreadCitations({
     botName,
-    threadId,
-    // `result.traceId` is the MUNINN-side `research_knowledge` root span (it
-    // adopts the caller's trace id when there is a parent context), NOT huginn's
-    // — the huginn ids live on `subSearches[].traceId`. The column is a UUID and
-    // this one is ours, so it is safe to store.
-    traceId: result.traceId,
     question,
-    docId: hit.id,
-    collection: hit.collection,
-    url: hit.url ?? null,
-    title: hit.title ?? null,
-    relevance: hit.relevance,
-    cited: false,
-  }));
+    // MUNINN's `research_knowledge` root span (it adopts the caller's trace id
+    // when there is a parent context), NOT huginn's — those live on
+    // `subSearches[].traceId`. The column is a UUID and this one is ours.
+    traceId: result.traceId,
+    hits: result.results.map((hit) => ({
+      docId: hit.id,
+      collection: hit.collection,
+      url: hit.url ?? null,
+      title: hit.title ?? null,
+      relevance: hit.relevance,
+    })),
+  });
 }
 
 function createMcpServerForBot(entry: BotEntry): McpServer {
@@ -250,7 +215,7 @@ function createMcpServerForBot(entry: BotEntry): McpServer {
           haikuBackend: entry.haikuBackend,
         });
 
-        persistThreadCitations(entry.botName, question, result);
+        persistToolCallCitations(entry.botName, question, result);
 
         return {
           content: [{ type: "text" as const, text: formatResearchResultText(result) }],

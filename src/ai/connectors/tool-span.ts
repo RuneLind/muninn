@@ -3,6 +3,7 @@ import type { StreamProgressEvent } from "../stream-parser.ts";
 import { formatToolDisplayName } from "../stream-parser.ts";
 import { truncateOutput } from "../truncate-output.ts";
 import { processMcpToolResult } from "../huginn-trace-pointer.ts";
+import { captureKnowledgeToolCitations } from "../../research/thread-citations.ts";
 
 /**
  * Inputs for {@link recordToolSpan} — the completion tail shared by the three
@@ -36,6 +37,15 @@ export interface RecordToolSpanArgs {
   endMs: number;
   /** `performance.now()` at request start — for waterfall `startOffsetMs`. */
   wallStart: number;
+  /**
+   * The bot whose turn this tool call belongs to.
+   *
+   * Only used to file huginn `knowledge` search results into
+   * `research_citations` against the thread in flight — a connector that omits
+   * it still records a perfectly good span, it just leaves the Jira composer's
+   * thread-sourced hit set blind to that connector.
+   */
+  botName?: string;
 }
 
 export interface RecordedToolSpan {
@@ -65,6 +75,12 @@ export function recordToolSpan(args: RecordToolSpanArgs): RecordedToolSpan {
   const displayName = formatToolDisplayName(args.name);
   const processed = processMcpToolResult(args.rawResult);
   const truncated = truncateOutput(processed.cleanedText);
+
+  // Fire-and-forget, and deliberately BEFORE truncation: a large result set is
+  // cut mid-block by `truncateOutput`, and the tail of it is exactly the hits a
+  // refinement discussion tends to lean on. Total by construction — see
+  // `research/thread-citations.ts`; it can neither throw nor delay the span.
+  captureKnowledgeToolCitations(args.botName, args.name, processed.cleanedText);
 
   const toolCall: ToolCall = {
     id: args.id,
