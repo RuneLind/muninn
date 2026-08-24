@@ -168,6 +168,18 @@ export interface JiraFlightKeyInput {
 }
 
 /**
+ * The 409 sentence for the thread slot — ONE spelling.
+ *
+ * There is now exactly ONE holder of a {@link threadFlightKey} slot, `POST
+ * …/from-thread` — a re-run is another click on that same route. The sentence is
+ * still declared apart from the notes path's («…et utkast for dette
+ * råmaterialet»), which names raw material this draft does not have and a piece
+ * of work this path never runs.
+ */
+export const JIRA_THREAD_FLIGHT_MESSAGE =
+  "Det skrives allerede en sak fra denne samtalen — vent til den er ferdig.";
+
+/**
  * The single-flight key for the thread path: the thread, and nothing else.
  *
  * `jiraFlightKey` hashes everything that changes the OUTPUT, which is the right
@@ -181,18 +193,6 @@ export interface JiraFlightKeyInput {
  * Domain-separated from `jiraFlightKey`'s input, so a thread id can never collide
  * with a content hash.
  */
-/**
- * The 409 sentence for that slot — ONE spelling.
- *
- * There is now exactly ONE holder of a `threadFlightKey` slot, `POST
- * …/from-thread` — a re-run is another click on that same route. The sentence is
- * still declared apart from the notes path's («…et utkast for dette
- * råmaterialet»), which names raw material this draft does not have and a piece
- * of work this path never runs.
- */
-export const JIRA_THREAD_FLIGHT_MESSAGE =
-  "Det skrives allerede en sak fra denne samtalen — vent til den er ferdig.";
-
 export function threadFlightKey(threadId: string): string {
   const h = new Bun.CryptoHasher("sha256");
   h.update(["jira-thread", threadId].join("\0"));
