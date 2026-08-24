@@ -230,16 +230,15 @@ DB tests require the local Postgres container (`bun run db:up`) and a test datab
 
 **`mock.module` needs its own process, not just its own file.** It invalidates the target module for the whole `bun test` process graph, so any OTHER file already loaded in that chunk which transitively imports the mocked module fails export resolution — e.g. mocking `db/goals.ts` inside `test:unit`'s first chunk breaks `src/profile/generator.ts` with `SyntaxError: Export named 'refreshInterestProfile' not found`. Spreading the real module into the mock (`{...real, override}`) fixes only the mocking file's OWN imports and does not prevent this. A mock.module test therefore gets its own `&& bun test <file>` link in the chain (see `src/profile/`, `task-executor.test.ts`, `data-routes-bot-scope.test.ts`), and says so in its header — the placement is load-bearing and invisible from the file alone.
 
-### Browser checks — Playwright first, Chrome last
+### Browser checks
 
-Anything that has to be verified **in a browser** goes through Playwright, not the claude-in-chrome extension. Three tiers, in order of preference:
+Anything that has to be verified **in a browser** goes through Playwright.
 
-1. **A spec in `e2e/`** — the default for acceptance. `bun run test:e2e` (15 specs today: `chat`, `inspector`, `jira-card`, `plans-write`, `summaries-share`, `traces-waterfall`, `wiki-*`). `playwright.config.ts` starts the server itself on **3011** with `reuseExistingServer`, so a dev server already on that port is reused as-is — otherwise it spawns one with `blankBotTokens()`, because a second long-poller on the real token knocks prod jarvis off Telegram (409 getUpdates). A spec is the only tier that outlives the session: it re-runs in CI and is what the review floor's empirical pass can point at.
-2. **`playwright-cli`** (skill: `.claude/skills/playwright-cli/`, global `@playwright/cli`) — for exploratory driving: does this button actually do the thing, reading `console`/`network`, a one-off screenshot. Isolated browser, none of your real cookies, snapshot refs instead of pixel coordinates, and no per-step vision tokens. Promote whatever it proves into an `e2e/` spec — evidence left in a transcript is not a test. Its scratch (`.playwright-cli/`) is gitignored; the skill itself is tracked.
-3. **claude-in-chrome** — only when the check genuinely needs *your* logged-in browser (Gmail, a tailnet-served page, the GitHub UI) or is a visual/design judgement. It drives real Chrome with real production sessions, so it is never the tool for routine testing.
+- **A spec in `e2e/`** is the default for acceptance. `bun run test:e2e` (15 specs today: `chat`, `inspector`, `jira-card`, `plans-write`, `summaries-share`, `traces-waterfall`, `wiki-*`). `playwright.config.ts` owns its own server on **3011** with `reuseExistingServer`, so a dev server already on that port is reused as-is — otherwise it spawns one with `blankBotTokens()`, because a second long-poller on the real token knocks the production bot off Telegram (409 getUpdates). Don't start a server by hand for the suite; let the config decide.
+- **`playwright-cli`** (skill: `.claude/skills/playwright-cli/`, global `@playwright/cli`) drives a page interactively for exploration — snapshot refs, `console`/`network` readout, headless by default. Promote whatever it proves into an `e2e/` spec; evidence left in a transcript is not a test. Its scratch (`.playwright-cli/`) is gitignored.
 
-Traps that bite every tier:
-- **`bun --watch` never rebuilds the `/wiki` client bundle.** Restart the dev server before any client-side acceptance run, or you are testing the previous build.
+Two traps regardless of how the page is driven:
+- **`bun --watch` never rebuilds the `/wiki` client bundle.** Restart the dev server before any client-side acceptance run, or the previous build is what gets tested.
 - Driving `bun run dev` (port **3010**) by hand runs against the developer's real `.env` — live bots, live wikis. Read-only checks only; anything that writes belongs on the 3011 spec server.
 
 ## Conventions
