@@ -279,15 +279,30 @@ describe("turn text", () => {
     expect(threadDraftTurnText("bug", "skisse")).toBe("Lag Jira-sak (bug, skisse).");
   });
 
-  test("a re-run carries the reader's steer VERBATIM — that is the whole lever", () => {
-    // There is no exclusion list any more: narrowing a thread draft means saying
-    // so in the steer, because the conversation is the context.
-    const text = threadRegenTurnText({
-      template: "story",
-      depth: "full",
-      extra: "kortere, og uten MELOSYS-1234",
-    });
-    expect(text).toBe("Lag Jira-sak på nytt (story, full). kortere, og uten MELOSYS-1234");
+  test("the draft line carries the reader's steer VERBATIM — that is the whole lever", () => {
+    // Asserted on the REACHABLE builder: every 🧾 click is a first draft on its
+    // own row (the re-run builder below is dead code PR 4 deletes), so this is
+    // the line the steer actually rides. There is no exclusion list any more —
+    // narrowing a thread draft means SAYING so, because the conversation is the
+    // context, and a steer that reached only the system prompt was a lever with
+    // no visible record and no cumulative effect across clicks.
+    expect(threadDraftTurnText("story", "full", "kortere, og uten MELOSYS-1234")).toBe(
+      "Lag Jira-sak (story, full). kortere, og uten MELOSYS-1234",
+    );
+  });
+
+  test("a multi-line steer is FLATTENED, so the line stays strippable", () => {
+    // The picker's field is single-line, but the route takes any 2 000-char
+    // string. A newline would make the turn line multi-line, `isJiraTurnLine`
+    // would stop recognising it, and the NEXT run would read «uten MELOSYS-1234»
+    // as the person's raw material — amber on a key they asked to drop.
+    const text = threadDraftTurnText("bug", "ingen", "  kortere\n\nuten MELOSYS-1234  ");
+    expect(text).toBe("Lag Jira-sak (bug, ingen). kortere uten MELOSYS-1234");
+    expect(isJiraTurnLine(text)).toBe(true);
+  });
+
+  test("no steer, no trailing sentence on the draft line either", () => {
+    expect(threadDraftTurnText("bug", "skisse", "   ")).toBe("Lag Jira-sak (bug, skisse).");
   });
 
   test("no steer, no trailing sentence", () => {

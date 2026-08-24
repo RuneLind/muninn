@@ -296,6 +296,7 @@ const { clampJiraArchiveLimit, effectiveCoverage, jiraDraftTitle } = await impor
   "../../jira/wire.ts"
 );
 const { buildDepthFence } = await import("../../jira/tool-fence.ts");
+const { isJiraTurnLine } = await import("../../jira/thread-draft.ts");
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -1635,6 +1636,35 @@ describe("POST /api/jira/draft/from-thread", () => {
     expect(view.keyVerdicts.find((v: { key: string }) => v.key === "MELOSYS-7264").state).toBe("notes");
   });
 
+  test("the reader's steer rides the VISIBLE user line, not only the system prompt", async () => {
+    await started({ extra: "kortere, og uten MELOSYS-1234" });
+    // The steer is the whole lever on this path, and a lever nobody can see in
+    // the thread is not one: the line is what the reader scrolls past, what makes
+    // two clicks cumulative, and what every doc here claims it is.
+    expect(threadTurns[0]!.text).toBe(
+      "Lag Jira-sak (bug, skisse). kortere, og uten MELOSYS-1234",
+    );
+    // …and it is still the shape the history strip recognises, so the NEXT run
+    // does not read this line back as the person's raw material.
+    expect(isJiraTurnLine(threadTurns[0]!.text)).toBe(true);
+  });
+
+  test("a key the reader NAMES IN THE STEER reads amber, not red", async () => {
+    // MELOSYS-4242 is in neither the retrieved set nor the conversation — only in
+    // the steer the reader just typed. Handing key verification `history.userText`
+    // alone called that a fabrication: the person had just written the key down.
+    __setJiraThreadTurnForTest(
+      scriptedThreadTurn("## Symptom\nSe MELOSYS-4242 og MELOSYS-8150."),
+    );
+    const { body } = await started({ extra: "ta med MELOSYS-4242" });
+
+    const view = await (await makeApp().request(`/api/jira/draft/${body.draftId}`)).json();
+    const state = (k: string) =>
+      view.keyVerdicts.find((v: { key: string }) => v.key === k).state;
+    expect(state("MELOSYS-8150")).toBe("verified");
+    expect(state("MELOSYS-4242")).toBe("notes");
+  });
+
   /**
    * `readThreadHistory`'s two filters, seen from the outside.
    *
@@ -1990,9 +2020,14 @@ describe("a thread-sourced draft is refused by the composer routes", () => {
     const secondId = await startThreadDraft({ extra: "kortere, og uten MELOSYS-1234" });
 
     expect(secondId).not.toBe(firstId);
-    // The steer rides the TURN INSTRUCTION — the lever that replaced the toggles.
+    // The steer rides BOTH halves of the lever that replaced the toggles: the
+    // turn instruction the model follows, and the visible user line the thread
+    // (and therefore the next turn, and the reader) keeps as its record.
     expect(threadTurns).toHaveLength(2);
     expect(threadTurns[1]!.turnInstruction).toContain("kortere, og uten MELOSYS-1234");
+    expect(threadTurns[1]!.text).toBe(
+      "Lag Jira-sak (bug, skisse). kortere, og uten MELOSYS-1234",
+    );
 
     const second = await (await makeApp().request(`/api/jira/draft/${secondId}`)).json();
     expect(second.status).toBe("ready");

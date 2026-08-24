@@ -295,10 +295,11 @@ const JIRA_TURN_LINE_RE = /^Lag Jira-sak(?: på nytt)? \([^()\n]+, [^()\n]+\)\./
  * reader saved. The composer's own lines are always one line of a fixed shape,
  * so requiring that shape costs nothing and refuses every free-form request.
  *
- * The residual runs in the SAFE direction — stripping less: a reader's `extra`
- * steer is appended to the turn line verbatim, so a MULTI-LINE steer makes that
- * line raw material again, which costs one amber row on a key the steer named.
- * Losing a person's paste costs every key in it.
+ * The reader's `extra` steer is appended to the turn line, so the builders
+ * FLATTEN it (`flattenSteer`) and the line stays single. If one ever arrived
+ * multi-line anyway the residual runs in the SAFE direction — stripping less:
+ * the line becomes raw material again, which costs one amber row on a key the
+ * steer named. Losing a person's paste costs every key in it.
  */
 export function isJiraTurnLine(text: string): boolean {
   const line = text.trim();
@@ -306,10 +307,41 @@ export function isJiraTurnLine(text: string): boolean {
   return JIRA_TURN_LINE_RE.test(line);
 }
 
-/** The visible user line for a first draft turn. It IS a normal user message —
- *  this is a conversation, and «lag en sak av dette» is a thing a person says. */
-export function threadDraftTurnText(template: string, depth: JiraDepth): string {
-  return `${JIRA_TURN_TEXT_PREFIX} (${template}, ${depth}).`;
+/**
+ * The reader's steer, flattened onto one line.
+ *
+ * The picker's field is a single-line `<input type="text">`, so in practice this
+ * is a trim — but the route accepts an arbitrary 2 000-char string, and a
+ * multi-line steer would make the turn line multi-line, which {@link
+ * isJiraTurnLine} refuses by construction (it is line-anchored, deliberately, so
+ * a person's pasted «Lag Jira-sak av dette:» + notes survives as raw material).
+ * An unrecognised line is raw material on the NEXT run, i.e. a key the reader
+ * asked to leave OUT would read amber. Collapsing here costs nothing and keeps
+ * the line recognisable whatever arrives.
+ */
+function flattenSteer(extra: string | undefined): string {
+  return (extra ?? "").replace(/\s*\n+\s*/g, " ").trim();
+}
+
+/**
+ * The visible user line for a first draft turn. It IS a normal user message —
+ * this is a conversation, and «lag en sak av dette» is a thing a person says.
+ *
+ * **The steer rides this line**, appended after the period. It has to: the line
+ * is the record a person scrolling the thread reads, it is what makes a second
+ * 🧾 click cumulative with the first (the next turn reads it as history), and
+ * without it the only trace of «kortere, og uten MELOSYS-1234» was a system-prompt
+ * block nobody can see. The system prompt still carries it too — that is the
+ * instruction the model must follow; this is the conversation's own record of it.
+ */
+export function threadDraftTurnText(
+  template: string,
+  depth: JiraDepth,
+  extra?: string,
+): string {
+  const line = `${JIRA_TURN_TEXT_PREFIX} (${template}, ${depth}).`;
+  const steer = flattenSteer(extra);
+  return steer ? `${line} ${steer}` : line;
 }
 
 /**
@@ -327,8 +359,7 @@ export function threadRegenTurnText(input: {
   depth: JiraDepth;
   extra?: string;
 }): string {
-  const parts = [`${JIRA_TURN_TEXT_PREFIX} på nytt (${input.template}, ${input.depth}).`];
-  const extra = (input.extra ?? "").trim();
-  if (extra) parts.push(extra);
-  return parts.join(" ");
+  const line = `${JIRA_TURN_TEXT_PREFIX} på nytt (${input.template}, ${input.depth}).`;
+  const steer = flattenSteer(input.extra);
+  return steer ? `${line} ${steer}` : line;
 }

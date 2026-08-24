@@ -121,6 +121,12 @@ export async function runJiraThreadDraft(
   const { draftId, threadId, botConfig } = opts;
   try {
     if (opts.regenerate) {
+      // UNREACHABLE since PR 3 — and wrong-on-reactivation, deliberately left for
+      // PR 4 to delete rather than repaired: on a legacy row carrying exclusions
+      // `startJiraDraftRun(draftId, [])` would CLEAR them and the `failJiraDraft`
+      // below restores nothing, so a failed run would leave the surviving
+      // markdown under an exclusion set it was never written with.
+      //
       // The row goes back into flight BEFORE any work. The page polls, and a row
       // left `ready` stops the poller on its first tick and renders the previous
       // task as the new one — the same defect the notes path fixed, and it would
@@ -137,7 +143,7 @@ export async function runJiraThreadDraft(
           depth: opts.depth,
           extra: opts.extra,
         })
-      : threadDraftTurnText(opts.template, opts.depth);
+      : threadDraftTurnText(opts.template, opts.depth, opts.extra);
 
     const turnInstruction = buildThreadTurnInstruction({
       instruction: opts.instruction,
@@ -260,7 +266,17 @@ export async function runJiraThreadDraft(
       // the person typed in chat reads amber ("you wrote it, retrieval never saw
       // it") rather than red ("fabricated"). Passing the `fra samtale: …`
       // placeholder instead would call every human-mentioned key a fabrication.
-      notes: history.userText,
+      //
+      // **THIS run's steer is joined on explicitly.** `readThreadHistory` strips
+      // the turn lines the steer rides (`isJiraTurnLine`) — correct, and it must
+      // stay: on a LATER run «uten MELOSYS-1234» left in would make a key the
+      // reader asked to drop read amber ("you wrote it"), the exact opposite of
+      // what they said. But the strip also means the steer for the run happening
+      // NOW is nowhere in `userText`, and a key the reader NAMED there («ta med
+      // MELOSYS-4242») then verified red — a fabrication charge against a key the
+      // person had just typed. The current steer is raw material; the previous
+      // ones are instructions.
+      notes: [history.userText, opts.extra.trim()].filter(Boolean).join("\n\n"),
       knowledgeApiUrl: opts.config.knowledgeApiUrl,
       ...(turn.messageId ? { messageId: turn.messageId } : {}),
     });
@@ -334,6 +350,10 @@ export interface ThreadHistory {
  *    it can name a source or a key («uten MELOSYS-1234») — left in, a key the
  *    model re-used anyway read amber ("you wrote it") when the person had asked
  *    for exactly the opposite.
+ *
+ * The strip is about PREVIOUS runs' steers, which are instructions. THIS run's
+ * steer is raw material and is joined onto `notes` at the call site — see the
+ * comment there.
  */
 export async function readThreadHistory(threadId: string): Promise<ThreadHistory> {
   const thread = await getThreadById(threadId);
