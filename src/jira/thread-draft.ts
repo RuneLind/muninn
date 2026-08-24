@@ -332,10 +332,14 @@ const STEER_LIST_GLUE = new Set(["og", "eller"]);
 /**
  * One token of a steer: a Jira key, a word, or a single other character.
  *
- * The key alternative comes first and is the SHARED {@link JIRA_KEY_SOURCE}, so
- * this scanner and `extractJiraKeys` can never disagree about what a key is.
+ * The key alternative comes first, is the SHARED {@link JIRA_KEY_SOURCE}, and is
+ * wrapped in the SAME `\b…\b` `extractJiraKeys` wraps it in (`verify-keys.ts`) —
+ * so the two sides agree about what a key is. Unwrapped they did not, measured
+ * both directions: «ABC-12abc» matched here as `ABC-12` (a negated one was
+ * deleted mid-word, leaving `abc` behind) while `extractJiraKeys` saw no key
+ * there at all.
  */
-const STEER_TOKEN_RE = new RegExp(`${JIRA_KEY_SOURCE}|\\p{L}+|\\S`, "gu");
+const STEER_TOKEN_RE = new RegExp(`\\b(?:${JIRA_KEY_SOURCE})\\b|\\p{L}+|\\S`, "gu");
 const STEER_KEY_RE = new RegExp(`^${JIRA_KEY_SOURCE}$`);
 
 /**
@@ -351,21 +355,39 @@ const STEER_KEY_RE = new RegExp(`^${JIRA_KEY_SOURCE}$`);
  * strip exists to prevent — one run earlier. A negated key is an instruction,
  * not the person's claim, so it never becomes raw material.
  *
+ * **The guarantee, and it is the only one: this filter errs AMBER, never RED.**
+ * A mistake in one direction leaves a key in the raw material that the person
+ * asked to drop — the model citing it anyway reads "notes", which is soft and
+ * literally true, they did type it. A mistake in the other direction removes a
+ * key the person WROTE POSITIVELY, and the same citation then reads
+ * "unknown" — a fabrication charge against something they put in the steer
+ * themselves. Human language cannot be parsed reliably from one input field, so
+ * the filter's CLAIM is kept small rather than its parser grown.
+ *
  * **The heuristic**, deliberately small — this is one line of steer typed into a
  * single-line input, not prose to parse: a key is dropped when a negation token
  * ({@link STEER_NEGATIONS}, case-insensitive and word-bounded) appears earlier in
- * the steer with only key-list glue in between — whitespace, commas,
- * `og`/`eller`, and further keys. Any other word or punctuation spends the
- * negation, so «uten MELOSYS-1, men ta med MELOSYS-2» keeps the second key.
+ * the steer with only key-list glue in between — whitespace, `og`/`eller`, and
+ * further keys. Every other token, punctuation included, ENDS the negation's
+ * scope, so «uten MELOSYS-1, men ta med MELOSYS-2» keeps the second key.
  *
- * **Its boundary, stated rather than fixed.** It reads left to right, so a
- * negation AFTER the key («MELOSYS-1 skal ikke med») is not seen and that key
- * still reads amber — the same lie, in a spelling the picker's field rarely
- * produces. And «ikke bare MELOSYS-1, den er viktig» keeps its key, because
- * `bare` spends the negation: right for that sentence, luck rather than
- * grammar. The residual runs in the amber direction, which is the survivable
- * one: the worst case is a soft badge on a key nobody retrieved, never a
- * fabrication charge against a key the person wrote down.
+ * **A comma is not glue, and that is a deliberate trade.** It used to be, so
+ * «uten MELOSYS-1 og MELOSYS-2, MELOSYS-3» dropped all three — but a comma is
+ * also how a sentence CHANGES polarity, and «uten MELOSYS-1, MELOSYS-2 er
+ * viktig» / «uten MELOSYS-1, og MELOSYS-2 skal med» then stripped a key the
+ * person had just asked for: red, the direction that must never happen. So a
+ * comma-separated exclusion tail is now only partially filtered — «uten A, B, C»
+ * drops A and leaves B and C amber. That is the accepted cost: the same
+ * sentence written «uten A og B og C» still drops all of it.
+ *
+ * **The known amber residuals, all accepted.** A negation AFTER the key
+ * («MELOSYS-1 skal ikke med») is not seen — it reads left to right. A multi-word
+ * negation («ikke ta med MELOSYS-1») is spent by `ta`. A quoted or parenthesised
+ * key («uten "MELOSYS-1"») is spent by the quote. A key reached through
+ * punctuation the scanner cannot read as glue («uten x-MELOSYS-1») survives, and
+ * `extractJiraKeys` agrees it is a key, so it is one amber row and nothing
+ * worse. Each of these leaves a soft badge on a key nobody retrieved; none of
+ * them can produce a fabrication charge against a key the person wrote down.
  */
 export function steerWithoutExcludedKeys(steer: string): string {
   let out = "";
@@ -377,7 +399,7 @@ export function steerWithoutExcludedKeys(steer: string): string {
     const token = m[0];
     const at = m.index ?? 0;
     if (STEER_KEY_RE.test(token)) {
-      // A key is itself list glue — «uten A og B, C» is ONE exclusion.
+      // A key is itself list glue — «uten A og B» is ONE exclusion.
       if (!negated) continue;
       out += steer.slice(copied, at);
       copied = at + token.length;
@@ -389,7 +411,10 @@ export function steerWithoutExcludedKeys(steer: string): string {
       else if (!STEER_LIST_GLUE.has(word)) negated = false;
       continue;
     }
-    if (token !== ",") negated = false;
+    // Punctuation — comma included — ends the negation's scope. Dropping this
+    // line is what let «uten MELOSYS-1 (MELOSYS-2 er viktig)» delete the second
+    // key; it is pinned by a test for exactly that input.
+    negated = false;
   }
   // Nothing dropped ⇒ the steer comes back BYTE-IDENTICAL: the tidy below is for
   // the hole a removed key leaves, not a normalizer to run over every steer.

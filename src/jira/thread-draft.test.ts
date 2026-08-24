@@ -30,6 +30,7 @@ import {
   type ThreadCitationRow,
 } from "./thread-draft.ts";
 import { JIRA_STORED_MAX_SOURCES } from "./retrieval.ts";
+import { extractJiraKeys } from "./verify-keys.ts";
 import type { JiraCitation } from "./wire.ts";
 
 const row = (over: Partial<ThreadCitationRow> = {}): ThreadCitationRow => ({
@@ -367,14 +368,20 @@ describe("steerWithoutExcludedKeys", () => {
     expect(steerWithoutExcludedKeys("utenfor MELOSYS-7")).toContain("MELOSYS-7");
   });
 
-  test("a whole key LIST after one negation goes", () => {
-    // «uten A og B, C» is one exclusion, not one exclusion and two mentions —
-    // whitespace, commas, `og`/`eller` and further keys are all list glue.
+  test("a whole key LIST after one negation goes — until a comma ends it", () => {
+    // «uten A og B» is one exclusion, not one exclusion and one mention:
+    // whitespace, `og`/`eller` and further keys are list glue.
+    //
+    // The comma is NOT, and this assertion changed with that rule: it used to
+    // require all four keys gone. A comma is also how a sentence turns
+    // positive, so treating it as glue stripped keys the person had just asked
+    // FOR (see the comma test below) — red, the one direction the filter must
+    // never take. The tail is amber instead, which is the accepted trade.
     const out = steerWithoutExcludedKeys("uten MELOSYS-1 og MELOSYS-2, MELOSYS-3 eller MELOSYS-4");
     expect(out).not.toContain("MELOSYS-1");
     expect(out).not.toContain("MELOSYS-2");
-    expect(out).not.toContain("MELOSYS-3");
-    expect(out).not.toContain("MELOSYS-4");
+    expect(out).toContain("MELOSYS-3");
+    expect(out).toContain("MELOSYS-4");
   });
 
   test("a key that is not in an exclusion context stays", () => {
@@ -394,11 +401,52 @@ describe("steerWithoutExcludedKeys", () => {
     expect(steerWithoutExcludedKeys("kortere  enn forrige")).toBe("kortere  enn forrige");
   });
 
-  test("the documented boundary: a negation AFTER the key is not seen", () => {
+  test("a comma ENDS the negation — a key after it is never deleted", () => {
+    // The red direction, and the whole reason the comma stopped being glue: a
+    // steer that names a key POSITIVELY after a comma had it stripped, so the
+    // model re-using it read red ("fabricated") against a key the person wrote
+    // one clause earlier. Both spellings measured on the comma-as-glue rule.
+    const both = steerWithoutExcludedKeys("uten MELOSYS-1, MELOSYS-2 er viktig");
+    expect(both).not.toContain("MELOSYS-1");
+    expect(both).toContain("MELOSYS-2");
+    const andThen = steerWithoutExcludedKeys("uten MELOSYS-1, og MELOSYS-2 skal med");
+    expect(andThen).not.toContain("MELOSYS-1");
+    expect(andThen).toContain("MELOSYS-2");
+  });
+
+  test("punctuation ends the negation's scope — the reset is load-bearing", () => {
+    // Pins the `negated = false` line at the bottom of the token loop: delete
+    // it and the parenthesis stops spending the negation, so MELOSYS-2 is
+    // deleted from a clause that argues FOR it.
+    const out = steerWithoutExcludedKeys("uten MELOSYS-1 (MELOSYS-2 er viktig)");
+    expect(out).not.toContain("MELOSYS-1");
+    expect(out).toContain("MELOSYS-2");
+  });
+
+  test("this scanner and extractJiraKeys agree about what a key is", () => {
+    // Both inputs are word-boundary edge cases, and the `\b` wrapping is what
+    // keeps the two sides matched.
+    //
+    // «uten x-MELOSYS-1»: both sides read MELOSYS-1 as a key, and the steer
+    // KEEPS it — the negation was already spent by `x` and by the hyphen. A
+    // missed exclusion, i.e. amber, which is the safe direction.
+    expect(steerWithoutExcludedKeys("uten x-MELOSYS-1")).toContain("MELOSYS-1");
+    // «uten ABC-12abc»: `extractJiraKeys` sees no key there, so neither may
+    // this one. Unwrapped it matched `ABC-12` and deleted it mid-word, leaving
+    // «uten abc» — a mangled steer built out of something that was never a key.
+    expect(steerWithoutExcludedKeys("uten ABC-12abc")).toBe("uten ABC-12abc");
+    expect(extractJiraKeys("uten ABC-12abc")).toEqual([]);
+  });
+
+  test("the documented amber residuals: the filter errs soft, never red", () => {
     // The heuristic reads left to right, so «MELOSYS-1 skal ikke med» keeps the
     // key (amber). Stated, not fixed: this is a one-line steer from a
     // single-line input, and the common spelling is the leading token.
     expect(steerWithoutExcludedKeys("MELOSYS-1 skal ikke med")).toContain("MELOSYS-1");
+    // A multi-word negation: `ta` spends it.
+    expect(steerWithoutExcludedKeys("ikke ta med MELOSYS-1")).toContain("MELOSYS-1");
+    // A quoted key: the quote spends it.
+    expect(steerWithoutExcludedKeys('uten "MELOSYS-1"')).toContain("MELOSYS-1");
   });
 });
 
