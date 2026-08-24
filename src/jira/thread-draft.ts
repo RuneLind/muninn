@@ -20,7 +20,7 @@
  */
 
 import { depthRider, languageRider, neutralizeJiraFence } from "./prompt.ts";
-import { JIRA_KEY_SOURCE, JIRA_STORED_MAX_SOURCES, toJiraCitation } from "./retrieval.ts";
+import { JIRA_STORED_MAX_SOURCES, toJiraCitation } from "./retrieval.ts";
 import { extractJiraKeys } from "./verify-keys.ts";
 import type { JiraCitation, JiraCoverage, JiraDepth } from "./wire.ts";
 
@@ -263,11 +263,12 @@ export function threadSeedLine(threadName: string): string {
  * The prefix both draft-turn user lines start with.
  *
  * It is load-bearing in ONE place: the history read that stands in for "the raw
- * material" when key verification decides amber-vs-red. The reader's own steer
- * rides this line, so it can NAME a source or a key («uten MELOSYS-1234») — and
- * leaving it in the raw material made a key the model re-used read amber ("the
- * person wrote it") when the truth is the opposite: the person asked for it to be
- * left out. The strip needs an exact test, and this constant is it.
+ * material" when key verification decides amber-vs-red. A PREVIOUS run's turn
+ * line is an instruction to that run, not the person's claim in this one, so it
+ * is stripped from the history — and the strip needs an exact test, which is what
+ * this constant is for. (THIS run's steer is a different question, joined onto
+ * the raw material wholesale at the call site; see the accepted asymmetry stated
+ * there.)
  *
  * Deliberately a VISIBLE prefix rather than an invisible marker (`<!-- … -->`,
  * the research flow's device): these lines are ordinary chat messages a person
@@ -321,108 +322,6 @@ export function isJiraTurnLine(text: string): boolean {
  */
 export function flattenSteer(extra: string | undefined): string {
   return (extra ?? "").replace(/\s*\n+\s*/g, " ").trim();
-}
-
-/** The Norwegian words that turn what follows into an exclusion. */
-const STEER_NEGATIONS = new Set(["uten", "ikke", "dropp", "fjern", "utenom", "unntatt"]);
-
-/** Words that keep a key LIST going: «uten A og B eller C». */
-const STEER_LIST_GLUE = new Set(["og", "eller"]);
-
-/**
- * One token of a steer: a Jira key, a word, or a single other character.
- *
- * The key alternative comes first, is the SHARED {@link JIRA_KEY_SOURCE}, and is
- * wrapped in the SAME `\b…\b` `extractJiraKeys` wraps it in (`verify-keys.ts`) —
- * so the two sides agree about what a key is. Unwrapped they did not, measured
- * both directions: «ABC-12abc» matched here as `ABC-12` (a negated one was
- * deleted mid-word, leaving `abc` behind) while `extractJiraKeys` saw no key
- * there at all.
- */
-const STEER_TOKEN_RE = new RegExp(`\\b(?:${JIRA_KEY_SOURCE})\\b|\\p{L}+|\\S`, "gu");
-const STEER_KEY_RE = new RegExp(`^${JIRA_KEY_SOURCE}$`);
-
-/**
- * The steer, minus every Jira key it asks to LEAVE OUT.
- *
- * **Why the raw material has to be polarity-aware.** The steer is joined onto
- * the thread's user messages before key verification, so a key the reader NAMES
- * («ta med MELOSYS-4242») reads amber ("you wrote it") instead of red
- * ("fabricated") — they had just typed it. But the documented primary use of the
- * field is the opposite claim («uten MELOSYS-1234»), and joined wholesale THAT
- * key also read amber: a model which ignored the exclusion and cited it anyway
- * got the softer badge, which is precisely the amber-lie the `isJiraTurnLine`
- * strip exists to prevent — one run earlier. A negated key is an instruction,
- * not the person's claim, so it never becomes raw material.
- *
- * **The guarantee, and it is the only one: this filter errs AMBER, never RED.**
- * A mistake in one direction leaves a key in the raw material that the person
- * asked to drop — the model citing it anyway reads "notes", which is soft and
- * literally true, they did type it. A mistake in the other direction removes a
- * key the person WROTE POSITIVELY, and the same citation then reads
- * "unknown" — a fabrication charge against something they put in the steer
- * themselves. Human language cannot be parsed reliably from one input field, so
- * the filter's CLAIM is kept small rather than its parser grown.
- *
- * **The heuristic**, deliberately small — this is one line of steer typed into a
- * single-line input, not prose to parse: a key is dropped when a negation token
- * ({@link STEER_NEGATIONS}, case-insensitive and word-bounded) appears earlier in
- * the steer with only key-list glue in between — whitespace, `og`/`eller`, and
- * further keys. Every other token, punctuation included, ENDS the negation's
- * scope, so «uten MELOSYS-1, men ta med MELOSYS-2» keeps the second key.
- *
- * **A comma is not glue, and that is a deliberate trade.** It used to be, so
- * «uten MELOSYS-1 og MELOSYS-2, MELOSYS-3» dropped all three — but a comma is
- * also how a sentence CHANGES polarity, and «uten MELOSYS-1, MELOSYS-2 er
- * viktig» / «uten MELOSYS-1, og MELOSYS-2 skal med» then stripped a key the
- * person had just asked for: red, the direction that must never happen. So a
- * comma-separated exclusion tail is now only partially filtered — «uten A, B, C»
- * drops A and leaves B and C amber. That is the accepted cost: the same
- * sentence written «uten A og B og C» still drops all of it.
- *
- * **The known amber residuals, all accepted.** A negation AFTER the key
- * («MELOSYS-1 skal ikke med») is not seen — it reads left to right. A multi-word
- * negation («ikke ta med MELOSYS-1») is spent by `ta`. A quoted or parenthesised
- * key («uten "MELOSYS-1"») is spent by the quote. A key reached through
- * punctuation the scanner cannot read as glue («uten x-MELOSYS-1») survives, and
- * `extractJiraKeys` agrees it is a key, so it is one amber row and nothing
- * worse. Each of these leaves a soft badge on a key nobody retrieved; none of
- * them can produce a fabrication charge against a key the person wrote down.
- */
-export function steerWithoutExcludedKeys(steer: string): string {
-  let out = "";
-  let copied = 0;
-  let negated = false;
-  // `matchAll` rather than a shared `exec` loop: it clones the regex, so the
-  // module-level `lastIndex` is never carried between calls.
-  for (const m of steer.matchAll(STEER_TOKEN_RE)) {
-    const token = m[0];
-    const at = m.index ?? 0;
-    if (STEER_KEY_RE.test(token)) {
-      // A key is itself list glue — «uten A og B» is ONE exclusion.
-      if (!negated) continue;
-      out += steer.slice(copied, at);
-      copied = at + token.length;
-      continue;
-    }
-    if (/^\p{L}+$/u.test(token)) {
-      const word = token.toLowerCase();
-      if (STEER_NEGATIONS.has(word)) negated = true;
-      else if (!STEER_LIST_GLUE.has(word)) negated = false;
-      continue;
-    }
-    // Punctuation — comma included — ends the negation's scope. Dropping this
-    // line is what let «uten MELOSYS-1 (MELOSYS-2 er viktig)» delete the second
-    // key; it is pinned by a test for exactly that input.
-    negated = false;
-  }
-  // Nothing dropped ⇒ the steer comes back BYTE-IDENTICAL: the tidy below is for
-  // the hole a removed key leaves, not a normalizer to run over every steer.
-  if (copied === 0) return steer;
-  out += steer.slice(copied);
-  // Tidy only. What is left is read by `extractJiraKeys` and by nothing else, so
-  // the residue of «uten A og B» reading «uten og» costs nothing.
-  return out.replace(/[ \t]+/g, " ").replace(/ +([,.;:])/g, "$1").trim();
 }
 
 /**

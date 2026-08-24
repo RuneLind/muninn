@@ -1665,13 +1665,14 @@ describe("POST /api/jira/draft/from-thread", () => {
     expect(state("MELOSYS-4242")).toBe("notes");
   });
 
-  test("a key the reader asked to LEAVE OUT reads red, not amber", async () => {
-    // The mirror of the test above, and the whole reason the join is
-    // polarity-aware. A NEGATIVE steer is an instruction, not a claim: joined
-    // wholesale into the raw material, a model that ignored «uten MELOSYS-1234»
-    // and cited the key anyway got the SOFTER amber badge ("you wrote it") —
-    // exactly the amber-lie the `isJiraTurnLine` strip exists to prevent, one run
-    // earlier. MELOSYS-8150 is retrieved, so it stays verified either way.
+  test("a key the reader asked to LEAVE OUT reads amber too — the accepted asymmetry", async () => {
+    // The steer joins the raw material WHOLESALE, so a key it names reads amber
+    // whichever polarity it had — «uten MELOSYS-1234» included, when the model
+    // cites it anyway. Amber's sentence stays literally true (the person wrote
+    // the key down); the lexical polarity filter that used to make this red was
+    // deleted because every version of it also stripped keys named POSITIVELY,
+    // charging a person-typed key as fabricated. MELOSYS-8150 is retrieved, so it
+    // stays verified either way.
     __setJiraThreadTurnForTest(
       scriptedThreadTurn("## Symptom\nSe MELOSYS-1234 og MELOSYS-8150."),
     );
@@ -1681,7 +1682,7 @@ describe("POST /api/jira/draft/from-thread", () => {
     const state = (k: string) =>
       view.keyVerdicts.find((v: { key: string }) => v.key === k).state;
     expect(state("MELOSYS-8150")).toBe("verified");
-    expect(state("MELOSYS-1234")).toBe("unknown");
+    expect(state("MELOSYS-1234")).toBe("notes");
   });
 
   /**

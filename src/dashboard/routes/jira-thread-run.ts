@@ -39,7 +39,6 @@ import {
   flattenSteer,
   isJiraTurnLine,
   seedThreadCitations,
-  steerWithoutExcludedKeys,
   threadDraftTurnText,
   threadRegenTurnText,
   threadSeedCoverage,
@@ -269,30 +268,30 @@ export async function runJiraThreadDraft(
       // it") rather than red ("fabricated"). Passing the `fra samtale: …`
       // placeholder instead would call every human-mentioned key a fabrication.
       //
-      // **THIS run's steer is joined on explicitly, and POLARITY-AWARE.**
-      // `readThreadHistory` strips the turn lines the steer rides
+      // **THIS run's steer is joined on WHOLESALE, and the asymmetry is
+      // accepted.** `readThreadHistory` strips the turn lines the steer rides
       // (`isJiraTurnLine`) — correct, and it must stay: on a LATER run the steer
-      // is an instruction, not a claim. But the strip also means the steer for
-      // the run happening NOW is nowhere in `userText`, and the two polarities
-      // want opposite things from that:
+      // is an instruction, not a claim — so the steer for the run happening NOW
+      // is nowhere in `userText` and has to be added back here. The consequence:
+      // a key named in the steer reads AMBER whatever its polarity, «uten
+      // MELOSYS-1234» included when the model cites it anyway.
       //
-      //  · a key the reader NAMES («ta med MELOSYS-4242») must be raw material,
-      //    or it verifies red — a fabrication charge against a key the person
-      //    had just typed;
-      //  · a key the reader EXCLUDES («uten MELOSYS-1234» — the documented
-      //    primary use) must NOT be, or a model that ignored the exclusion and
-      //    cited it anyway gets the softer amber badge: the same amber-lie the
-      //    turn-line strip exists to prevent, one run earlier.
+      // Amber's sentence is literally true in both directions — the person did
+      // write the key down. A lexical polarity parse was tried and deleted: every
+      // version of it produced RED-direction failures («uten M-1 og M-2 skal
+      // med», a denylist pseudo-key keeping a negation alive, a two-line steer
+      // flattened into glue), i.e. a fabrication charge against a key the person
+      // typed. That is strictly worse than amber softness, so the filter is gone.
       //
-      // So the negated keys come off first (`steerWithoutExcludedKeys`), and the
-      // steer is flattened by the SAME `flattenSteer` the visible turn line uses,
-      // so the two spellings of it cannot diverge.
+      // Flattened by the SAME `flattenSteer` the visible turn line uses, so the
+      // two spellings of it cannot diverge (an empty/whitespace steer flattens to
+      // "" and `filter(Boolean)` drops it).
       //
       // NB this `notes` may exceed `JIRA_NOTES_MAX` by up to `JIRA_EXTRA_MAX`:
       // `readThreadHistory` clips `userText` to the cap and the steer is added
       // after. That is by design — the value is key-extraction input only, never
       // prompted and never stored.
-      notes: [history.userText, steerWithoutExcludedKeys(flattenSteer(opts.extra))]
+      notes: [history.userText, flattenSteer(opts.extra)]
         .filter(Boolean)
         .join("\n\n"),
       knowledgeApiUrl: opts.config.knowledgeApiUrl,
@@ -371,9 +370,9 @@ export interface ThreadHistory {
  *    for exactly the opposite.
  *
  * The strip is about PREVIOUS runs' steers, which are instructions whichever
- * polarity they had. THIS run's steer is joined onto `notes` at the call site,
- * and only its POSITIVE half: a key it names is the person's claim, a key it
- * excludes is not. See the comment there.
+ * polarity they had. THIS run's steer is joined onto `notes` WHOLESALE at the
+ * call site, so a key it names reads amber whichever polarity it had. See the
+ * accepted asymmetry stated there.
  */
 async function readThreadHistory(threadId: string): Promise<ThreadHistory> {
   const thread = await getThreadById(threadId);
