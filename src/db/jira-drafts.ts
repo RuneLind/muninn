@@ -63,30 +63,6 @@ export async function createJiraDraft(input: CreateJiraDraftInput): Promise<stri
 }
 
 /**
- * Put an EXISTING row back into flight — the first write a regenerate makes.
- *
- * Without it a regenerate wrote nothing until {@link finishJiraDraft}, so
- * `POST /draft` answered `generating` while the row still said `ready` with the
- * OLD markdown, and the page's poller stopped on its very first tick and rendered
- * the previous draft as the new one. It also lands the exclusion set, so a poll
- * mid-flight already describes the generation that is running.
- *
- * `markdown` is deliberately LEFT ALONE: the previous task is the best thing to
- * show until the new one exists, and a regenerate that fails should not have
- * destroyed it.
- */
-export async function startJiraDraftRun(id: string, excludeDocIds: string[]): Promise<void> {
-  const sql = getDb();
-  await sql`
-    UPDATE jira_drafts
-       SET status = 'generating',
-           error = NULL,
-           exclude_doc_ids = ${sql.json(excludeDocIds as never)},
-           updated_at = now()
-     WHERE id = ${id}`;
-}
-
-/**
  * Store the retrieved hit set as soon as it exists — BEFORE the model call.
  *
  * Separate from {@link finishJiraDraft} because the two have different failure
@@ -200,36 +176,6 @@ export async function failJiraDraft(id: string, error: string, restoreExcludeDoc
     UPDATE jira_drafts
        SET status = 'failed', error = ${error}, updated_at = now()
      WHERE id = ${id}`;
-}
-
-/**
- * Replace the draft's markdown with the reader's edit (`PUT /api/jira/draft/:id`).
- *
- * The post-pass results are RE-RUN by the route and written here in the same
- * statement rather than left stale: an edit that removes the fabricated key must
- * clear its red row, and one that introduces `- [ ]` must grow a flag. Leaving
- * them behind would leave the page asserting things about text that no longer
- * exists. `status` is forced to `ready` — a reader editing a `failed` draft into
- * something usable has, by doing so, made it ready.
- */
-export async function updateJiraDraftMarkdown(
-  id: string,
-  markdown: string,
-  keyVerdicts: JiraKeyVerdict[],
-  markdownFlags: JiraMarkdownFlag[],
-): Promise<boolean> {
-  const sql = getDb();
-  const rows = await sql`
-    UPDATE jira_drafts
-       SET markdown = ${markdown},
-           key_verdicts = ${sql.json(keyVerdicts as never)},
-           markdown_flags = ${sql.json(markdownFlags as never)},
-           status = 'ready',
-           error = NULL,
-           updated_at = now()
-     WHERE id = ${id}
-    RETURNING id`;
-  return rows.length > 0;
 }
 
 interface JiraDraftRow {

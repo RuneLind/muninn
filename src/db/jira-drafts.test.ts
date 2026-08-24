@@ -1,5 +1,6 @@
 import { test, expect, describe } from "bun:test";
 import { setupTestDb } from "../test/setup-db.ts";
+import { getDb } from "./client.ts";
 import { ensureDefaultThread } from "./threads.ts";
 import {
   createJiraDraft,
@@ -9,7 +10,6 @@ import {
   listJiraDrafts,
   saveJiraDraft,
   saveJiraDraftRetrieval,
-  startJiraDraftRun,
 } from "./jira-drafts.ts";
 
 /**
@@ -185,7 +185,13 @@ describe("listJiraDrafts — the archive listing", () => {
       botName: "arkiv-d", template: "bug", depth: "skisse", notes: "n", extra: "",
     });
     await saveJiraDraftRetrieval(excluded, CITES as never, "answer", "spørsmål");
-    await startJiraDraftRun(excluded, ["d-keep", "d-drop"]);
+    // A HISTORICAL exclusion set, written straight into the column: the notes
+    // path that used to toggle sources off is gone, and nothing in the code
+    // writes `exclude_doc_ids` any more — but archived rows carry one and the
+    // listing's derived `coverage` still has to read it.
+    await getDb()`
+      UPDATE jira_drafts SET exclude_doc_ids = ${getDb().json(["d-keep", "d-drop"] as never)}
+       WHERE id = ${excluded}`;
     await finishJiraDraft(excluded, { markdown: "# Uten kilder", keyVerdicts: [], markdownFlags: [] });
 
     const unreachable = await createJiraDraft({

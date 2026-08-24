@@ -1,7 +1,14 @@
 /**
- * The Jira composer's HTTP surface — the registrar half of the house split
- * (`jira-sse.ts` owns the stream function, the way `share-sse.ts` /
- * `factcheck-sse.ts` are stream functions registered from `wiki-routes.ts`).
+ * The Jira composer's HTTP surface.
+ *
+ * **A Jira task is written as a TURN IN A CHAT THREAD.** The notes path — a
+ * pasted block of raw material condensed into one retrieval question, drafted by
+ * a fenced one-shot over stored hits, then regenerated behind an exclusion
+ * column — is gone, and with it its SSE runner, its retrieval half and its three
+ * write routes (`POST /api/jira/draft`, `POST …/draft/start`, `PUT …/draft/:id`).
+ * A task is discussed in the melosys web chat first, which retrieves over the
+ * same three collections, and condensing that conversation back into notes threw
+ * away both the retrieval and every adjustment the person made.
  *
  * The page and five endpoints — registered from ONE module the way
  * `plans-routes.ts` registers `/plans` beside `/api/plans/*`, because the page
@@ -14,27 +21,18 @@
  *   · `GET  /api/jira/archive`     — the same listing as JSON.
  *   · `GET  /api/jira/templates`   — the picker's source. `/api/research/variants`
  *     is hardcoded to `jiraAnalysisVariants` and does not generalise.
- *   · `POST /api/jira/draft`       — SSE. The page's own path.
- *   · `POST /api/jira/draft/start` — plain JSON: creates the row, returns
- *     `{draftId}` immediately, generation continues server-side. This exists for
- *     the Chrome extension: an MV3 action popup is destroyed the moment it loses
- *     focus, taking an in-flight `fetch` and any SSE stream with it, and this
- *     feature's budget is 120–600 s. Waiting inside the popup cannot work.
- *   · `GET  /api/jira/draft/:id`   — status + the whole draft. **The page POLLS
- *     this**; it does not attach to the stream. There is nothing to attach to —
- *     the only SSE endpoint STARTS a generation, and re-POSTing identical content
- *     would hit the single-flight 409, which is exactly this case.
- *   · `PUT  /api/jira/draft/:id`   — the reader's edit. Design call 3 makes save
- *     load-bearing: after the Jira paste the markdown exists nowhere else.
+ *   · `POST /api/jira/draft/from-thread` — the ONE write: run a draft turn in a
+ *     thread. Fire-and-forget; the chat's card polls the row.
+ *   · `GET  /api/jira/draft/:id`   — status + the whole draft. **Every reader
+ *     POLLS this** — the card, the archive page's `?draft=` landing, a sweep.
  *   · `GET  /api/jira/drafts?thread=` — the chat card's binding listing:
  *     `{messageId, draftId, status}` per draft on one thread, no content.
  *   · `POST /api/jira/draft/:id/save` — the card's «Lagre», stamping `saved_at`.
  *
- * `GET /api/jira/draft/:id` and `start` carry `Access-Control-Allow-Origin: *`
- * with an `app.options` preflight, matching `POST /api/research/chat`, which the
- * extension already calls. The consequence is stated in the migration and
- * accepted: any page the browser visits could read a draft id it can guess,
- * bounded by `DASHBOARD_HOST` defaulting to loopback.
+ * `GET /api/jira/draft/:id` carries `Access-Control-Allow-Origin: *` with an
+ * `app.options` preflight, matching `POST /api/research/chat`. The consequence is
+ * stated in migration 070 and accepted: any page the browser visits could read a
+ * draft id it can guess, bounded by `DASHBOARD_HOST` defaulting to loopback.
  *
  * **The four newer endpoints deliberately carry NONE of that** — `from-thread`,
  * the thread listing, `save` and the archive listing. Two of them WRITE (a
@@ -45,12 +43,6 @@
  * `text/plain` POST is a CORS *simple* request that executes regardless of what
  * the response headers say.
  *
- * **`POST /api/jira/draft`, `/draft/start` and `PUT /api/jira/draft/:id` have no
- * UI driver as of the archive PR** — the composer's Regenerate and Lagre utkast
- * were the last ones. They are left standing here deliberately: the campaign's
- * next PRs refuse and then delete them, and the extension's `/draft/start` is
- * the one entry point nothing in this repo can see.
- *
  * Deliberately **not** added to `openapi-spec.ts`: neither `POST /api/wiki/share`
  * nor `POST /api/research/ask` is there, so documenting these would be new scope,
  * not a convention being followed.
@@ -59,27 +51,20 @@
 import type { Hono } from "hono";
 import type { Context } from "hono";
 import type { Config } from "../../config.ts";
-import type { BotConfig } from "../../bots/config.ts";
 import { getMcpStatus, findCriticalDown, type McpServerStatus } from "../../ai/mcp-status.ts";
 import { jiraBotMissingMessage, resolveJiraBotLive } from "../../jira/bot.ts";
 import { findJiraTemplate, resolveJiraTemplates } from "../../jira/templates.ts";
 import { JIRA_FULL_MCP_SERVERS } from "../../jira/tool-fence.ts";
-import { checkJiraMarkdown } from "../../jira/markdown-check.ts";
-import { applyExclusions } from "../../jira/retrieval.ts";
-import { verifyJiraKeys } from "../../jira/verify-keys.ts";
 import { isValidUuid } from "./route-utils.ts";
 import { renderJiraFallback, renderJiraPage } from "../views/jira-page.ts";
 import { parseArchiveAll } from "../views/components/jira-archive-pure.ts";
 import {
   JIRA_DEPTHS,
   JIRA_EXTRA_MAX,
-  JIRA_MARKDOWN_MAX,
   JIRA_ARCHIVE_LIMIT_DEFAULT,
   clampJiraArchiveLimit,
   isJiraDepth,
-  parseJiraDraftBody,
   type JiraDepth,
-  type ParsedJiraDraftBody,
 } from "../../jira/wire.ts";
 import {
   createJiraDraft,
@@ -87,67 +72,39 @@ import {
   listJiraDrafts,
   listJiraDraftsForThread,
   saveJiraDraft,
-  updateJiraDraftMarkdown,
 } from "../../db/jira-drafts.ts";
 import { getThreadById } from "../../db/threads.ts";
 import {
   acquireJiraFlight,
-  jiraFlightKey,
-  runJiraDraftDetached,
-  streamJiraSSE,
   threadFlightKey,
   JIRA_THREAD_FLIGHT_MESSAGE,
-  type JiraSseOptions,
-} from "./jira-sse.ts";
+} from "./jira-flight.ts";
 import { runJiraThreadDraft, type JiraThreadTurnRunner } from "./jira-thread-run.ts";
 import { threadSeedLine } from "../../jira/thread-draft.ts";
 import { getLog } from "../../logging.ts";
 
 const log = getLog("dashboard", "jira-routes");
 
-/** Test seam for the model call — the `__setShareOneShotForTest` precedent, which
- *  exists specifically so a route's happy path is reachable without spending one. */
-let oneShotOverride: JiraSseOptions["oneShot"] | undefined;
-export function __setJiraOneShotForTest(fn: JiraSseOptions["oneShot"] | undefined): void {
-  oneShotOverride = fn;
-}
-/** Test seams for the two huginn-backed steps. */
-let retrieveOverride: JiraSseOptions["retrieve"] | undefined;
-let questionOverride: JiraSseOptions["buildQuestion"] | undefined;
-export function __setJiraRetrievalForTest(
-  retrieve: JiraSseOptions["retrieve"] | undefined,
-  buildQuestion?: JiraSseOptions["buildQuestion"],
-): void {
-  retrieveOverride = retrieve;
-  questionOverride = buildQuestion;
-}
-/** Test seam for the THREAD turn — the same reason the one-shot has one: a chat
- *  turn is a real model call, and both from-thread paths are otherwise
- *  unreachable in a test. */
+/** Test seam for the THREAD turn — the `__setShareOneShotForTest` precedent,
+ *  which exists specifically so a route's happy path is reachable without
+ *  spending a real model call. */
 let threadTurnOverride: JiraThreadTurnRunner | undefined;
 export function __setJiraThreadTurnForTest(fn: JiraThreadTurnRunner | undefined): void {
   threadTurnOverride = fn;
 }
 
 /**
- * CORS, advertised per route and ONLY for the method that actually carries it.
+ * CORS, advertised for the ONE method that actually carries it.
  *
- * One shared `GET, POST, PUT` header block advertised a cross-origin PUT that
- * emits no CORS headers at all — so the preflight invited a mutation the actual
+ * A shared `GET, POST, PUT` header block advertised cross-origin mutations that
+ * emit no CORS headers at all — so the preflight invited a write the actual
  * request would then fail, and, worse, invited it in the first place: the
  * accepted-risk note in migration 070 covers a page READING a draft id it can
- * guess, not a page REWRITING one. The extension needs exactly two things: POST
- * the fire-and-forget start, and GET the result.
+ * guess, not a page WRITING one. Reading a finished draft is the whole of it.
  */
 const CORS_GET = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET",
-  "Access-Control-Allow-Headers": "Content-Type",
-} as const;
-
-const CORS_START = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST",
   "Access-Control-Allow-Headers": "Content-Type",
 } as const;
 
@@ -169,12 +126,12 @@ function serverError(c: Context, where: string, err: unknown): Response {
 /**
  * A draft id that cannot be a row.
  *
- * Checked BEFORE any DB call in all four handlers. `id` is a `UUID` column, so a
- * non-uuid reaches postgres as a CAST ERROR rather than an empty result — which
- * used to surface as a 500 carrying postgres's own message, and (on the two POST
- * paths) as a THROW past the single-flight release, wedging that key for the full
- * slot lifetime with nothing running. Two of the four handlers "handled" it by
- * regex-matching the pg message, which is the same check three layers too late.
+ * Checked BEFORE any DB call, on every handler that takes an id. `id` is a `UUID`
+ * column, so a non-uuid reaches postgres as a CAST ERROR rather than an empty
+ * result — which used to surface as a 500 carrying postgres's own message, and on
+ * a POST path as a THROW past the single-flight release, wedging that key for the
+ * full slot lifetime with nothing running. Handlers that "handled" it by
+ * regex-matching the pg message were doing the same check three layers too late.
  */
 function unknownDraft(c: Context): Response {
   return c.json({ error: "ukjent utkast" }, 404);
@@ -186,30 +143,12 @@ function unknownThread(c: Context): Response {
 }
 
 /**
- * A draft that was written as a turn in a chat thread cannot be re-run — or
- * overwritten — from here.
- *
- * ONE spelling for all three routes (`POST /api/jira/draft`, `POST …/draft/start`
- * and `PUT …/draft/:id`), because they refuse the same state for the same reason:
- * the row's text belongs to a live conversation, the card in that chat renders it,
- * and the way to change it is another 🧾 click with a steer line.
- *
- * TRANSITIONAL — PR 4 deletes all three routes; until then a stale composer tab
- * can still POST here.
- */
-function threadDraftRefused(c: Context): Response {
-  return c.json(
-    { error: "Utkastet kommer fra en samtale — lag et nytt med 🧾 i chatten." },
-    400,
-  );
-}
-
-/**
  * Is this a JSON POST?
  *
- * Only the from-thread route enforces it, and only because that route WRITES
- * into a conversation — see the comment at its handler. A `charset` parameter is
- * fine; anything else is not parsed at all.
+ * Both POSTs enforce it, because both WRITE — one into a conversation, one onto
+ * a row — and a `text/plain` POST is a CORS *simple* request that executes
+ * whatever the response headers say. A `charset` parameter is fine; anything else
+ * is not parsed at all.
  */
 function isJsonRequest(c: Context): boolean {
   const ct = c.req.header("content-type") ?? "";
@@ -217,9 +156,9 @@ function isJsonRequest(c: Context): boolean {
 }
 
 /**
- * The `Full` pre-flight's 503 body. ONE spelling, because both POST paths refuse
- * the same state and a reader who hit it on the first draft must not read a
- * different sentence when they retry through the regenerate.
+ * The `Full` pre-flight's 503 body. Its own function because the sentence names
+ * the two servers and the remedy, and it is the one refusal a reader is expected
+ * to act on rather than report.
  */
 function fullDepthUnavailable(down: string[]): { error: string; unreachableServers: string[] } {
   return {
@@ -241,14 +180,13 @@ interface ParsedJiraThreadBody {
 /**
  * Validate the from-thread body.
  *
- * Kept HERE rather than in `src/jira/wire.ts` alongside `parseJiraDraftBody`,
- * because this shape has no browser consumer: the page's own regenerate goes
- * through the ordinary draft POST, and this endpoint is driven by the chat/reader
- * surface PR 5 builds. The wire module exists to keep the BUNDLED half dependency
- * -free; adding a validator only the server calls would grow it for nothing.
+ * Kept HERE rather than in `src/jira/wire.ts`, because this shape has no browser
+ * consumer worth a shared module: the chat's picker is its only caller. The wire
+ * module exists to keep the BUNDLED half dependency-free; adding a validator only
+ * the server calls would grow it for nothing.
  *
- * Norwegian, and the same field labels the other validator uses — the messages
- * land verbatim in the page's status line.
+ * Norwegian, and the same field labels the rest of the surface uses — the
+ * messages land verbatim in the picker's refusal line.
  */
 function parseJiraThreadDraftBody(
   body: Record<string, unknown>,
@@ -286,64 +224,6 @@ function parseJiraThreadDraftBody(
 }
 
 /**
- * Everything both POST paths must agree on, resolved once.
- *
- * Returns a `Response` on any refusal so the SSE route can return it BEFORE
- * `streamSSE` commits a 200 — the ordering contract this route family lives by.
- */
-type Resolved =
-  | { ok: true; bot: BotConfig; body: ParsedJiraDraftBody; instruction: string; mcpServers: McpServerStatus[] }
-  | { ok: false; response: Response };
-
-async function resolveDraftRequest(c: Context): Promise<Resolved> {
-  const raw = await c.req.json<Record<string, unknown>>().catch(() => ({}) as Record<string, unknown>);
-
-  // BODY-SHAPE checks first: they need nothing but the body and are wrong under
-  // every bot. Resolution-dependent checks (the template id, the Full pre-flight)
-  // wait, because their valid answers are a function of what resolved.
-  const parsed = parseJiraDraftBody(raw);
-  if (!parsed.ok) return { ok: false, response: c.json({ error: parsed.error }, 400) };
-
-  const bot = resolveJiraBotLive();
-  if (!bot) return { ok: false, response: c.json({ error: jiraBotMissingMessage() }, 503) };
-
-  const template = findJiraTemplate(resolveJiraTemplates(bot.prompts), parsed.body.template);
-  if (!template) {
-    return { ok: false, response: c.json({ error: `ukjent mal "${parsed.body.template}"` }, 400) };
-  }
-
-  // The MCP probe. Run at EVERY depth, not just `Full`, because its result is
-  // also what `buildDepthFence` enumerates for a connector with no `mcp:*`
-  // wildcard — and it is cached (60 s TTL) so the tool-less depths pay nothing
-  // in the common case. It never throws: `getMcpStatus` reports a dead server as
-  // a `down` row.
-  let mcpServers: McpServerStatus[] = [];
-  try {
-    mcpServers = await getMcpStatus(bot);
-  } catch (err) {
-    log.warn("jira MCP probe failed bot={bot} error={error}", {
-      bot: bot.name,
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
-
-  if (parsed.body.depth === "full") {
-    // `Full`'s pre-flight is REACHABILITY, not capability. TikTok's
-    // `supportsExtraDirs` check is the shape precedent but not the mechanism —
-    // that is a static connector test. `code` (serena proxy) and `yggdrasil` are
-    // the ONLY path to NAV source on a copilot bot, where the fenced runner
-    // excludes Bash/Agent/Task, so a Full draft with them down is not a degraded
-    // draft: it is a confident task about code nobody opened.
-    const down = missingFullServers(mcpServers);
-    if (down.length > 0) {
-      return { ok: false, response: c.json(fullDepthUnavailable(down), 503) };
-    }
-  }
-
-  return { ok: true, bot, body: parsed.body, instruction: template.content, mcpServers };
-}
-
-/**
  * Which of `code`/`yggdrasil` are not usable right now.
  *
  * A server ABSENT from the probe counts as missing, not as fine: the probe lists
@@ -358,147 +238,6 @@ export function missingFullServers(servers: McpServerStatus[]): string[] {
     const s = servers.find((x) => x.name === name);
     return !s || s.status === "down" || criticalDown.has(name);
   });
-}
-
-/** Build the SSE options shared by the streaming and the detached paths. */
-async function buildSseOptions(
-  config: Config,
-  bot: BotConfig,
-  body: ParsedJiraDraftBody,
-  instruction: string,
-  mcpServers: McpServerStatus[],
-): Promise<{ opts: JiraSseOptions; unknown?: true; threadRefused?: true }> {
-  const base: JiraSseOptions = {
-    config,
-    botConfig: bot,
-    instruction,
-    template: body.template,
-    depth: body.depth,
-    notes: body.notes,
-    extra: body.extra,
-    excludeDocIds: body.excludeDocIds,
-    mcpServers,
-    ...(oneShotOverride ? { oneShot: oneShotOverride } : {}),
-    ...(retrieveOverride ? { retrieve: retrieveOverride } : {}),
-    ...(questionOverride ? { buildQuestion: questionOverride } : {}),
-  };
-
-  if (!body.draftId) return { opts: base };
-
-  // Regenerate: load the stored hit set. The notes come from the ROW, always —
-  // the page does not echo a 10 KB Slack thread back on every toggle click, and
-  // `parseJiraDraftBody` refuses a regenerate that tries to supply new ones (the
-  // stored hit set was retrieved for the originals).
-  const stored = await getJiraDraft(body.draftId);
-  // `unknownDraft` spells this 404, here as everywhere else. The id is NOT echoed:
-  // `/draft/start` and the GET are CORS-open, so a page the browser visits can
-  // drive them, and a second spelling that reflects the caller's own string back
-  // is both a needless echo and a second sentence to keep in step with the first.
-  if (!stored) return { opts: base, unknown: true };
-
-  // THREAD-SOURCED: REFUSED. A thread draft is re-run by clicking 🧾 again in the
-  // chat with a steer line — that is another turn in the conversation, on its own
-  // row, which is the only mechanism there is. The divert that used to run one
-  // from here is gone with it.
-  //
-  // The refusal rides the RETURN VALUE rather than being answered here, exactly as
-  // `unknown` does: this function takes no `Context` and structurally cannot emit
-  // a status. `claimDraft` translates it, so BOTH POST paths inherit it — a
-  // handler-local guard would have left `/draft/start`, the CORS-open one, able to
-  // write two messages into someone's chat thread.
-  //
-  // Without the refusal a thread row falls through to `notes: stored.notes`, which
-  // is the `fra samtale: <navn>` placeholder the NOT NULL column needed — a
-  // one-line seed posted as if it were the reader's raw material.
-  //
-  // **The predicate is the SOURCE alone**, exactly as the `PUT`'s is. Adding
-  // `&& stored.threadId` looked like a safety check and was a hole: nothing
-  // enforces the pair, and a `source = 'thread'` row with a null `thread_id` is
-  // precisely the shape that then fell through to that placeholder — the one
-  // outcome this guard exists to prevent. Two spellings of one refusal is also
-  // two things to keep in step.
-  //
-  // TRANSITIONAL: PR 4 deletes this route family outright.
-  if (stored.source === "thread") {
-    return { opts: base, threadRefused: true };
-  }
-
-  return {
-    opts: {
-      ...base,
-      notes: stored.notes,
-      storedCitations: stored.citations,
-      storedExcludeDocIds: stored.excludeDocIds,
-      existingDraftId: stored.draftId,
-      storedRetrievalQuestion: stored.retrievalQuestion,
-      // The RETRIEVAL verdict, never the view's derived `coverage` — that one is a
-      // function of the last run's exclusion set, and feeding it back in is what
-      // latched a draft to `no_hits` after one exclude-everything regenerate.
-      ...(stored.retrievalCoverage ? { storedCoverage: stored.retrievalCoverage } : {}),
-    },
-  };
-}
-
-type Claimed =
-  | { ok: true; opts: JiraSseOptions; release: () => void }
-  | { ok: false; response: Response };
-
-/**
- * Resolve the stored draft, then claim the single-flight slot — ONE sequence,
- * used by both POST paths.
- *
- * The two handlers had a copy each, and the copies were where three defects
- * lived: the key was computed from the REQUEST BODY's notes (empty on every
- * regenerate, so unrelated drafts collided in one slot), the id was handed
- * straight to postgres (a non-uuid threw a cast error out past the release,
- * wedging that key), and the release ordering existed twice.
- *
- * The order below is the fix, and it is deliberate: validate the id shape → read
- * the row → THEN key the slot on what actually resolved. It costs one DB read
- * before a 409 is detectable, which is the same read the run itself needs and is
- * bounded by a primary-key lookup.
- */
-async function claimDraft(
-  c: Context,
-  config: Config,
-  resolved: Extract<Resolved, { ok: true }>,
-  conflictMessage: string,
-): Promise<Claimed> {
-  const { bot, body, instruction, mcpServers } = resolved;
-
-  if (body.draftId && !isValidUuid(body.draftId)) {
-    return { ok: false, response: unknownDraft(c) };
-  }
-
-  const { opts, unknown, threadRefused } = await buildSseOptions(
-    config, bot, body, instruction, mcpServers,
-  );
-  if (unknown) return { ok: false, response: unknownDraft(c) };
-  // Translated HERE, so both POST paths refuse identically — see the comment on
-  // the branch in `buildSseOptions`. TRANSITIONAL: PR 4 deletes both routes.
-  if (threadRefused) return { ok: false, response: threadDraftRefused(c) };
-
-  // Keyed on the RESOLVED notes plus the draft id — see `jiraFlightKey`.
-  const key = jiraFlightKey({
-    notes: opts.notes,
-    template: body.template,
-    depth: body.depth,
-    extra: body.extra,
-    excludeDocIds: body.excludeDocIds,
-    draftId: body.draftId,
-  });
-  const acquired = acquireJiraFlight(key, body.depth);
-  if (!acquired.ok) {
-    return {
-      ok: false,
-      response: c.json(
-        { state: "running", expiresAtMs: acquired.expiresAtMs, error: conflictMessage },
-        409,
-      ),
-    };
-  }
-
-  return { ok: true, opts: { ...opts, onSettled: acquired.release }, release: acquired.release };
 }
 
 export function registerJiraRoutes(app: Hono, config: Config): void {
@@ -597,102 +336,6 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
     // see (the picker offers an id the server no longer has).
     c.header("Cache-Control", "no-store");
     return c.json({ bot: bot.name, templates });
-  });
-
-  // ── The streaming draft ────────────────────────────────────────────────────
-  app.post("/api/jira/draft", async (c) => {
-    // Wrapped like `share` / `remember` / `factcheck/append`: an unexpected throw
-    // anywhere below returns 500 JSON rather than an unhandled rejection.
-    try {
-      const resolved = await resolveDraftRequest(c);
-      if (!resolved.ok) return resolved.response;
-      const { bot, body } = resolved;
-
-      // Claimed only once every pre-commit refusal is behind us, so a bad
-      // template id cannot reserve a note for three minutes.
-      const claim = await claimDraft(
-        c, config, resolved,
-        "Det skrives allerede et utkast for dette råmaterialet — vent til det er ferdig.",
-      );
-      if (!claim.ok) return claim.response;
-
-      log.info("Jira draft: bot={bot} template={template} depth={depth} notes={notes} regen={regen}", {
-        bot: bot.name,
-        template: body.template,
-        depth: body.depth,
-        notes: claim.opts.notes.length,
-        regen: !!body.draftId,
-      });
-
-      // The slot is handed to the stream via `onSettled` — but only once
-      // `streamJiraSSE` has RETURNED a Response. A synchronous throw before that
-      // would leave the callback unwired and wedge the note for the full expiry
-      // with nothing running; releasing here is safe precisely because it is
-      // unreachable once the stream owns the slot (release is identity-checked
-      // anyway). The share/claim-retry handover, verbatim.
-      try {
-        return streamJiraSSE(c, claim.opts);
-      } catch (err) {
-        claim.release();
-        throw err;
-      }
-    } catch (err) {
-      return serverError(c, "draft route", err);
-    }
-  });
-
-  // ── The extension's fire-and-forget start ──────────────────────────────────
-  app.options("/api/jira/draft/start", (c) => new Response(null, { status: 204, headers: CORS_START }));
-
-  app.post("/api/jira/draft/start", async (c) => {
-    for (const [k, v] of Object.entries(CORS_START)) c.header(k, v);
-    try {
-      const resolved = await resolveDraftRequest(c);
-      if (!resolved.ok) return resolved.response;
-      const { bot, body } = resolved;
-
-      const claim = await claimDraft(c, config, resolved, "Et likt utkast skrives allerede.");
-      if (!claim.ok) return claim.response;
-
-      // Everything from here to the detached hand-off runs under a claimed slot,
-      // so every throw releases it: `createJiraDraft` can fail (a dead pool, a
-      // migration not yet applied) and the key would otherwise stay held for its
-      // full lifetime with nothing running behind it.
-      try {
-        // The row is created HERE, not inside the runner, so the id can be
-        // returned before any expensive work starts — the popup gets it and closes.
-        const draftId =
-          claim.opts.existingDraftId ??
-          (await createJiraDraft({
-            botName: bot.name,
-            template: body.template,
-            depth: body.depth,
-            notes: claim.opts.notes,
-            extra: body.extra,
-          }));
-
-        // Detached on purpose: the caller is a popup that is about to die. Errors
-        // land on the row (the runner owns that), so a rejection here would be
-        // both impossible and unactionable — but it is caught anyway, because an
-        // unhandled rejection from a detached promise takes the process with it.
-        void runJiraDraftDetached({ ...claim.opts, existingDraftId: draftId }, bot).catch((err) => {
-          log.error("Detached Jira draft threw draft={draft}: {error}", {
-            draft: draftId,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        });
-
-        log.info("Jira draft started detached: bot={bot} draft={draft} depth={depth}", {
-          bot: bot.name, draft: draftId, depth: body.depth,
-        });
-        return c.json({ draftId, status: "generating" satisfies "generating" });
-      } catch (err) {
-        claim.release();
-        throw err;
-      }
-    } catch (err) {
-      return serverError(c, "draft/start", err);
-    }
   });
 
   // ── The draft as a turn in the thread ──────────────────────────────────────
@@ -924,78 +567,6 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
       return c.json(saved);
     } catch (err) {
       return serverError(c, "draft save", err);
-    }
-  });
-
-  // ── The reader's edit ──────────────────────────────────────────────────────
-  app.put("/api/jira/draft/:id", async (c) => {
-    try {
-      const id = c.req.param("id");
-      if (!isValidUuid(id)) return unknownDraft(c);
-      const raw = await c.req.json<{ markdown?: unknown }>().catch(() => ({}) as { markdown?: unknown });
-      // Norwegian, like the wire validator's: these land in the page's own
-      // status line under a form whose fields are all Norwegian.
-      if (typeof raw.markdown !== "string") return c.json({ error: "Utkastet må være en tekststreng." }, 400);
-      if (!raw.markdown.trim()) return c.json({ error: "Utkastet er tomt." }, 400);
-      if (raw.markdown.length > JIRA_MARKDOWN_MAX) {
-        return c.json(
-          { error: `Utkastet er ${raw.markdown.length} tegn — grensen er ${JIRA_MARKDOWN_MAX}.` },
-          400,
-        );
-      }
-
-      const existing = await getJiraDraft(id);
-      if (!existing) return unknownDraft(c);
-      // A thread-sourced row is REFUSED, same sentence as both POSTs. The chat's
-      // draft card renders this row's markdown, so a stale composer tab's "Lagre
-      // utkast" would silently overwrite the text under a live card in someone's
-      // conversation. TRANSITIONAL: PR 4 deletes this route.
-      if (existing.source === "thread") return threadDraftRefused(c);
-
-      const retained = applyExclusions(existing.citations, existing.excludeDocIds);
-      // **The reader's text is stored VERBATIM.** The `[n]` repair is a safety net
-      // over MODEL output and runs only in the SSE runner; running it here edited
-      // what a human had typed, which is a bug however careful the pass is. It was
-      // also bounded differently on this path — by the STORED hit set (up to 24)
-      // where generation bounds by `citationsUsed` (6–8 on this corpus) — so
-      // saving silently deleted every `[9]`–`[23]` the reader had been reading.
-      // Measured on real drafts, it also ate `artikkel [13] i forordning
-      // 883/2004`, `liste[2]` and the `[1]` of `[1](https://x.no)`.
-      // The response still returns the markdown, so the page adopts exactly what
-      // the row now holds.
-      const markdown = raw.markdown;
-
-      // BOTH post-passes are re-run against the edited text and stored with it.
-      // Leaving the old verdicts behind would leave the page asserting things
-      // about text that no longer exists — a red row for a key the reader just
-      // deleted, or no flag for the `- [ ]` they just typed.
-      //
-      // Verified against the RETAINED set, not the stored one: the stored
-      // citations are deliberately the wide 24, and verifying against those made
-      // a key the reader had toggled OFF read `verified` again the moment they
-      // saved — the grounding claim silently reinstated by an edit that never
-      // touched it. `checkJiraMarkdown` is sync and is simply called.
-      // The RAW MATERIAL is whatever the generation used, or the amber/red axis
-      // moves under an edit that never touched a key. On a NOTES draft that is the
-      // stored notes, and after the refusal above there is no other kind here —
-      // the thread branch (which read the conversation's own user messages,
-      // because `notes` there is only the `fra samtale: <name>` placeholder) is
-      // unreachable and gone with it.
-      const notes = existing.notes;
-
-      const markdownFlags = checkJiraMarkdown(markdown);
-      const keyVerdicts = await verifyJiraKeys({
-        markdown,
-        citations: retained,
-        notes,
-        knowledgeApiUrl: config.knowledgeApiUrl,
-      });
-
-      const written = await updateJiraDraftMarkdown(id, markdown, keyVerdicts, markdownFlags);
-      if (!written) return unknownDraft(c);
-      return c.json({ draftId: id, markdown, keyVerdicts, markdownFlags });
-    } catch (err) {
-      return serverError(c, "draft update", err);
     }
   });
 }

@@ -2,18 +2,17 @@
  * The tail every generated Jira draft runs through — one implementation, two
  * producers.
  *
- * The notes path (`jira-sse.ts`, one fenced one-shot over a fenced prompt) and
- * the thread path (`jira-routes.ts`, one turn in a chat thread) differ entirely
- * in how they get their text and not at all in what has to happen to it
- * afterwards: strip a wrapping fence, repair `[n]` markers, append the
- * server-built `## Referanser`, run both post-passes, land the row.
+ * There is ONE producer today — a draft turn in a chat thread
+ * (`jira-thread-run.ts`) — and this tail is what happens to its text: strip a
+ * wrapping fence, repair `[n]` markers, append the server-built `## Referanser`,
+ * run both post-passes, land the row.
  *
- * It was extracted rather than copied because every step here is a defect this
- * feature has already shipped once — the `[n]` markers that resolved to nothing,
- * a `## Referanser` built from the stored set instead of what the model was
- * given, key verification against the wide set instead of the retained one. A
- * second copy would re-open all three on the new path only, where nothing tests
- * them together.
+ * It was extracted from the (now deleted) notes path rather than copied, because
+ * every step here is a defect this feature has already shipped once — the `[n]`
+ * markers that resolved to nothing, a `## Referanser` built from the stored set
+ * instead of what the model was given, key verification against the wide set
+ * instead of the retained one. It stays a separate module for the same reason:
+ * it is the one place all three are tested together.
  */
 
 import { stripCitationMarkers } from "./citation-markers.ts";
@@ -28,10 +27,10 @@ export interface FinalizeJiraDraftInput {
   /** The model's RAW output. The fence strip happens here, on both paths. */
   raw: string;
   /**
-   * The citations the model was actually GIVEN (the depth slice), and how many of
-   * them survived the `JIRA_BODY_MAX` trim. `## Referanser` is built from
-   * `promptCitations.slice(0, citationsUsed)` — appending anything wider lists
-   * sources the text never saw.
+   * The citations the model was actually GIVEN (the depth slice, narrowed to the
+   * sources the draft NAMED), and how many of them count. `## Referanser` is
+   * built from `promptCitations.slice(0, citationsUsed)` — appending anything
+   * wider lists sources the text never saw.
    */
   promptCitations: JiraCitation[];
   citationsUsed: number;
@@ -102,13 +101,11 @@ export async function finalizeJiraDraft(
   // acceptance sentence "every Jira key it cites resolves to a real issue"
   // mechanically true for this section.
   //
-  // It lists the citations the model was ACTUALLY GIVEN: the depth slice, minus
-  // whatever the `JIRA_BODY_MAX` trim dropped from its tail. Measured on a real
-  // `Ingen` draft over 24 stored hits, appending the retained set put 24 links
-  // under a task the model had been shown 6 of; the `citationsUsed` half is the
-  // same bug one layer in — a trimmed prompt still listed the trimmed-away
-  // sources, i.e. references to material the model never saw. The toggle column
-  // still renders the full stored set — a different question.
+  // It lists the citations the draft ACTUALLY LEANED ON: the depth slice, bounded
+  // by `citationsUsed`. Measured on a real `Ingen` draft over 24 stored hits,
+  // appending the retained set put 24 links under a task the model had been shown
+  // 6 of — references to material the text does not use. The stored row still
+  // carries the full seeded set: a different question.
   const markdown = appendReferences(body, input.promptCitations.slice(0, input.citationsUsed));
 
   // `checkJiraMarkdown` is SYNC — no `Promise.resolve` wrap. It ran inside a

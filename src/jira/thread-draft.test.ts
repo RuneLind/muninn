@@ -23,7 +23,6 @@ import {
   JIRA_TURN_TEXT_PREFIX,
   seedThreadCitations,
   threadDraftTurnText,
-  threadRegenTurnText,
   threadSeedCoverage,
   threadSeedLine,
   type ThreadCitationRow,
@@ -280,9 +279,8 @@ describe("turn text", () => {
   });
 
   test("the draft line carries the reader's steer VERBATIM — that is the whole lever", () => {
-    // Asserted on the REACHABLE builder: every 🧾 click is a first draft on its
-    // own row (the re-run builder below is dead code PR 4 deletes), so this is
-    // the line the steer actually rides. There is no exclusion list any more —
+    // Every 🧾 click is a first draft on its own row, so this is the ONE line the
+    // steer rides. There is no exclusion list any more —
     // narrowing a thread draft means SAYING so, because the conversation is the
     // context, and a steer that reached only the system prompt was a lever with
     // no visible record and no cumulative effect across clicks.
@@ -305,26 +303,13 @@ describe("turn text", () => {
     expect(threadDraftTurnText("bug", "skisse", "   ")).toBe("Lag Jira-sak (bug, skisse).");
   });
 
-  test("no steer, no trailing sentence", () => {
-    expect(threadRegenTurnText({ template: "task", depth: "ingen" })).toBe(
-      "Lag Jira-sak på nytt (task, ingen).",
-    );
-  });
-
-  test("both turn lines carry the shared prefix the history strip recognises", () => {
+  test("the turn line carries the shared prefix the history strip recognises", () => {
     // The strip is what keeps a key the reader's own steer names out of the "raw
     // material" — otherwise the model re-using it reads amber ("the person wrote
     // it") rather than red.
     expect(threadDraftTurnText("bug", "ingen").startsWith(JIRA_TURN_TEXT_PREFIX)).toBe(true);
-    expect(
-      threadRegenTurnText({ template: "bug", depth: "ingen" }).startsWith(JIRA_TURN_TEXT_PREFIX),
-    ).toBe(true);
     expect(isJiraTurnLine(threadDraftTurnText("bug", "ingen"))).toBe(true);
-    expect(
-      isJiraTurnLine(
-        threadRegenTurnText({ template: "bug", depth: "ingen", extra: "uten MELOSYS-1234" }),
-      ),
-    ).toBe(true);
+    expect(isJiraTurnLine(threadDraftTurnText("bug", "ingen", "uten MELOSYS-1234"))).toBe(true);
     expect(isJiraTurnLine("Vi må se på uttrekket for MELOSYS-7264.")).toBe(false);
   });
 
@@ -341,7 +326,9 @@ describe("turn text", () => {
     // Free-form on ONE line is raw material too — the composer's lines always
     // carry the `(<template>, <depth>)` parenthesis.
     expect(isJiraTurnLine("Lag Jira-sak av dette, se MELOSYS-8150.")).toBe(false);
-    // …and the composer's own regenerate line, exclusions and all, still matches.
+    // …and a HISTORICAL «på nytt» line — written before a re-run became an
+    // ordinary second 🧾 click — still matches, so an archived thread's own
+    // control lines stay out of the raw material.
     expect(
       isJiraTurnLine(
         "Lag Jira-sak på nytt (bug, skisse). Ikke bruk disse kildene denne gangen: MELOSYS-7264.",

@@ -345,23 +345,3 @@ export function threadDraftTurnText(
   const steer = flattenSteer(extra);
   return steer ? `${line} ${steer}` : line;
 }
-
-/**
- * The visible user line for a re-run of the draft turn.
- *
- * Everything that narrows the next draft rides the reader's own steer — «uten
- * MELOSYS-1234», «kortere» — because on this path it is part of the conversation
- * the next turn will read: a sentence the model can act on, and one a person
- * scrolling the thread can understand. There is no machine exclusion list any
- * more; PR 3 deleted the alternative mechanism, and the picker's steer field is
- * the whole lever.
- */
-export function threadRegenTurnText(input: {
-  template: string;
-  depth: JiraDepth;
-  extra?: string;
-}): string {
-  const line = `${JIRA_TURN_TEXT_PREFIX} på nytt (${input.template}, ${input.depth}).`;
-  const steer = flattenSteer(input.extra);
-  return steer ? `${line} ${steer}` : line;
-}

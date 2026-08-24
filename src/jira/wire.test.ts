@@ -4,8 +4,8 @@
  * title and clamps the caller's limit, the route clamps the query param, and the
  * page renders the result — three callers, one spelling.
  *
- * `parseJiraDraftBody`'s own contract is pinned by the route tests, which assert
- * its sentences verbatim; this file covers only what PR 2 added.
+ * Plus `effectiveCoverage`, which is the OTHER thing this module owns: the
+ * derivation the `done` payload and the archive row both read.
  *
  * Synthetic text only — muninn is a public repo.
  */
@@ -18,6 +18,7 @@ import {
   clampJiraArchiveLimit,
   depthLabel,
   jiraArchiveUrl,
+  effectiveCoverage,
   jiraDraftTitle,
   jiraDraftUrl,
 } from "./wire.ts";
@@ -200,5 +201,32 @@ describe("depthLabel", () => {
     expect(depthLabel("skisse")).toBe("Skisse");
     expect(depthLabel("full")).toBe("Full");
     expect(depthLabel("dyp")).toBe("dyp");
+  });
+});
+
+/**
+ * `effectiveCoverage` — what retrieval found, narrowed by what this draft kept.
+ *
+ * The bug it is written against, measured on the composer's first real run:
+ * huginn was down, every sub-search threw and was swallowed as `{resultCount: 0}`,
+ * and the reader was told *"nothing in jira-issues, melosys-confluence-v3 or
+ * nav-wiki covered this search"* about a corpus that was never asked. The
+ * `unreachable` verdict says so instead — and it must survive the zero-retained
+ * branch, which would otherwise re-create the exact lie.
+ *
+ * The FOUR-value union stays live even though only the thread path writes today:
+ * `retrieval_coverage` is historical data on rows the archive still renders.
+ */
+describe("effectiveCoverage", () => {
+  test("zero retained does NOT convert `unreachable` into a claim about the corpus", () => {
+    // An unreachable retrieval has nothing to retain BY CONSTRUCTION.
+    expect(effectiveCoverage("unreachable", 0)).toBe("unreachable");
+  });
+
+  test("the other verdicts are untouched", () => {
+    expect(effectiveCoverage("answer", 0)).toBe("no_hits");
+    expect(effectiveCoverage("answer", 3)).toBe("answer");
+    expect(effectiveCoverage("low_confidence", 3)).toBe("low_confidence");
+    expect(effectiveCoverage(null, 3)).toBe("answer");
   });
 });
