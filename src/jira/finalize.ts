@@ -67,8 +67,9 @@ export const JIRA_EMPTY_RESULT_MESSAGE =
  * Deliberately generic and deliberately not {@link JIRA_EMPTY_RESULT_MESSAGE}:
  * this is what lands on the row, which is read back through a CORS-open GET, so
  * it must never carry the exception's own text (stack-shaped strings with local
- * paths and internal host:port pairs). The detail goes to the log. Both runners
- * write it, which is why it lives here rather than as a literal in each.
+ * paths and internal host:port pairs). The detail goes to the log. It lives here
+ * beside the tail that writes it rather than as a literal in the one remaining
+ * runner.
  */
 export const JIRA_UNFINISHED_MESSAGE =
   "Utkastet kunne ikke skrives ferdig. Se muninn-loggen for detaljer, og prøv igjen.";
@@ -78,8 +79,9 @@ export const JIRA_UNFINISHED_MESSAGE =
  *
  * Returns `null` when the model produced nothing — an empty result is a FAILED
  * generation, not an empty task, and the row is marked `failed` before returning
- * so the poller has something terminal to read. The caller owns telling its own
- * client (an SSE `app_error` on one path, nothing at all on the other).
+ * so the poller has something terminal to read. That IS the whole channel: the
+ * one caller is detached, so it just returns (`jira-thread-run.ts` — "has already
+ * written the failure onto the row") and the card reads it off the row.
  */
 export async function finalizeJiraDraft(
   input: FinalizeJiraDraftInput,

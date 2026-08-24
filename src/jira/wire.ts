@@ -62,10 +62,20 @@ export const JIRA_POLL_INTERVAL_MS = 2_500;
 /**
  * When a poller gives up.
  *
- * Sized off the server's own ceiling: `Full` is budgeted 600 s and the
- * single-flight slot outlives it by `JIRA_SLOT_SLACK_MS` (180 s), so a draft that
- * is still `generating` at 13 min is a draft nothing is working on. Giving up
- * says so rather than polling a dead row forever.
+ * **A PATIENCE heuristic, not a server ceiling.** Nothing bounds a thread turn at
+ * 13 min: the draft runs through `processChatMessage` on the Jira bot's own
+ * connector, whose `timeoutMs` is the bot's (melosys ships 10^7 ms), and
+ * `JIRA_TIMEOUT_MS_BY_DEPTH` + `JIRA_SLOT_SLACK_MS` size only how long the
+ * single-flight SLOT is held against a second 🧾 click. So this number says how
+ * long a card keeps reading a row, and nothing more.
+ *
+ * The consequence, stated plainly: a legitimate turn running past 13 min makes
+ * the card give up EARLY — «Utkastet ble ikke ferdig — se arkivet.» — while the
+ * draft may still land on the row afterwards. Nothing is lost; the next thread
+ * load, thread switch or `response_meta` re-asks the listing and renders it. The
+ * card is the only surface that reports a premature end, and retuning the number
+ * against real turn durations is filed as a plan follow-up rather than guessed
+ * at here.
  */
 export const JIRA_POLL_MAX_MS = 13 * 60_000;
 
@@ -518,31 +528,6 @@ export interface JiraMarkdownFlag {
   sample: string;
 }
 
-/** The SSE `done` payload. */
-export interface JiraDonePayload {
-  draftId: string;
-  markdown: string;
-  citations: JiraCitation[];
-  keyVerdicts: JiraKeyVerdict[];
-  markdownFlags: JiraMarkdownFlag[];
-  /**
-   * The coverage VERDICT, deliberately not a `weakCoverage` boolean: at
-   * `low_confidence` the draft is grounded-but-weak, at `no_hits` there is no
-   * `## Referanser` section at all. The two states differ and the page renders
-   * them differently.
-   */
-  coverage: JiraCoverage;
-  /**
-   * What RETRIEVAL found, before this run's exclusions — the same field the view
-   * carries, so a stream-driven client can tell "the corpus had nothing" from
-   * "the reader toggled everything off" without a second GET. `null` only when
-   * retrieval never landed.
-   */
-  retrievalCoverage: JiraCoverage | null;
-  /** The condensed retrieval question — shown so the reader can see what was searched. */
-  retrievalQuestion: string;
-}
-
 /** Status of a stored draft, as `GET /api/jira/draft/:id` reports it. */
 export type JiraDraftStatus = "generating" | "ready" | "failed";
 
@@ -684,11 +669,11 @@ export interface JiraDraftListRow {
   /**
    * {@link jiraDraftTitle} over the head of the markdown. Null only when the row
    * holds no text: one still `generating`, or one that failed before ever
-   * writing any. A FAILED row can perfectly well carry a title — `failJiraDraft`
-   * leaves `markdown` alone, so an ARCHIVED failed regenerate still holds the
-   * previous turn's text (the statement on `failJiraDraft` in
-   * `db/jira-drafts.ts` is the authority). The archive's DRAFT view refuses to
-   * render that text; the row still names it.
+   * writing any. A FAILED row can nonetheless carry a title — `failJiraDraft`
+   * leaves `markdown` alone, so a failed regenerate could be archived still
+   * holding the previous turn's text (the statement on `failJiraDraft` in
+   * `db/jira-drafts.ts` is the authority for why no such row exists today). The
+   * archive's DRAFT view refuses to render that text; the row still names it.
    */
   title: string | null;
   /** The stored retrieval verdict, unchanged — see {@link JiraDraftView}. */

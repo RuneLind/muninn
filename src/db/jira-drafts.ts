@@ -152,9 +152,11 @@ export interface FinishJiraDraftInput {
    * turn (the card has to be reachable on a run that fails after it); writing it
    * again here is idempotent.
    *
-   * Optional because an ARCHIVED `source = 'notes'` row has no message, and
-   * absent LEAVES the column alone rather than nulling it — the `COALESCE` below
-   * is what makes the double write safe.
+   * Optional because the runner may not know it: {@link JiraThreadTurnRunner}
+   * returns `messageId?` (a turn the chat pipeline completed without reporting
+   * which row it wrote), and `runJiraThreadDraft` spreads the field in only when
+   * it is present. Absent LEAVES the column alone rather than nulling it — the
+   * `COALESCE` below is what makes the double write safe.
    */
   messageId?: string;
 }
@@ -182,9 +184,11 @@ export async function finishJiraDraft(id: string, input: FinishJiraDraftInput): 
  * **`markdown` is deliberately left alone**, and it is the archive's job to
  * remember that: a `source = 'notes'` row could fail a REGENERATE while still
  * holding the previous run's task, which is why `/jira` refuses to render the
- * text of a `failed` draft and names it «Mislykket utkast» instead. Nothing
- * writes such a row any more — every 🧾 click mints its own — but they are in
- * the table and the page still opens them.
+ * text of a `failed` draft and names it «Mislykket utkast» instead. Only the
+ * deleted notes path could produce that shape — every 🧾 click mints its own row
+ * — and none is in the table today (measured 2026-08-24: both `failed` rows carry
+ * no markdown). The refusal stands anyway: it is the row shape the page has to be
+ * safe against, not a population it has to find.
  */
 export async function failJiraDraft(id: string, error: string): Promise<void> {
   const sql = getDb();

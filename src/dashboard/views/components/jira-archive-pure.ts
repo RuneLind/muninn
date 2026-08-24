@@ -503,11 +503,14 @@ export function jiraDraftViewHtml(
     : "";
 
   // **A `failed` draft shows no text, whatever the row still holds.**
-  // `failJiraDraft` leaves `markdown` alone, so an ARCHIVED failed regenerate
-  // still holds the PREVIOUS turn's task — rendering it under «Genereringen
-  // feilet» offers a draft that run did not produce, and Kopier would put it on
-  // the clipboard as if it had. Same contract as the chat card's failed card:
-  // the error, and the way back to the conversation.
+  // `failJiraDraft` leaves `markdown` alone, so a failed REGENERATE could be
+  // archived still holding the PREVIOUS turn's task. Only the deleted notes path
+  // regenerated a row in place, and the archive holds no such row today (measured
+  // 2026-08-24: both `failed` rows carry no markdown at all) — but the row shape
+  // allows it, and rendering that text under «Genereringen feilet» would offer a
+  // draft this run did not produce, with Kopier putting it on the clipboard as if
+  // it had. Same contract as the chat card's failed card: the error, and the way
+  // back to the conversation.
   const body = draft.status === "failed"
     ? `<p class="ja-empty">${
         draft.markdown
@@ -552,13 +555,15 @@ export const JA_FAILED_HEADING = "Mislykket utkast";
  * agree about what the draft is called.
  *
  * **Except on a `failed` draft, which is named after nothing.** `failJiraDraft`
- * leaves `markdown` alone, so an archived failed regenerate still carries the
- * PREVIOUS turn's text — and deriving the heading from it printed that turn's first
- * sentence as the page's title, directly above the line explaining that the text
- * «vises ikke her». The body branch refuses the text; the heading has to refuse
- * it too, or the refusal is contradicted by the largest words on the page. The
- * row's own template · depth is in the meta line below it, so the neutral
- * heading loses nothing.
+ * leaves `markdown` alone, so a failed regenerate could be archived still
+ * carrying the PREVIOUS turn's text — a shape only the deleted notes path ever
+ * produced and one the table does not hold today (measured 2026-08-24: both
+ * `failed` rows are text-less). Deriving the heading from that text would print
+ * the earlier turn's first sentence as the page's title, directly above the line
+ * explaining that the text «vises ikke her». The body branch refuses the text;
+ * the heading has to refuse it too, or the refusal is contradicted by the largest
+ * words on the page. The row's own template · depth is in the meta line below it,
+ * so the neutral heading loses nothing.
  */
 export function deriveDraftHeading(draft: Pick<JiraDraftView, "markdown" | "status">): string {
   if (draft.status === "failed") return JA_FAILED_HEADING;
@@ -576,10 +581,12 @@ export function deriveDraftHeading(draft: Pick<JiraDraftView, "markdown" | "stat
  *
  * **It reads the TEXT, not the status.** A `failed` row is refused however much
  * markdown it kept (see {@link deriveDraftHeading}), and so is any row with none
- * — but a `generating` row is not, and the archive is full of ones that carry
- * text: a notes-path regenerate flipped the row back to `generating` before its
- * run and left `markdown` alone, so every one that never finished is archived
- * over the previous turn's task. That page renders it in full with the switch
+ * — but a `generating` row is not, and one CAN carry text: the deleted
+ * notes-path regenerate flipped the row back to `generating` before its run and
+ * left `markdown` alone, so a run that never finished would be archived over the
+ * previous turn's task. No such row is in the table today (measured 2026-08-24:
+ * 53 rows, none `generating`) and nothing writes one any more; the predicate
+ * answers for the SHAPE, and that page renders the text in full with the switch
  * and the copy button, under the 5-second meta-refresh.
  */
 export function jiraDraftHasControls(

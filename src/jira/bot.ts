@@ -53,7 +53,7 @@ export function resolveJiraBotLive(): BotConfig | undefined {
   return resolveJiraBot(discoverAllBots());
 }
 
-/** The 503 body's message — one spelling, so the SSE and the JSON routes agree. */
+/** The 503 body's message — one spelling, shared by every `/api/jira/*` route. */
 export function jiraBotMissingMessage(): string {
   return (
     `Jira-komponisten er festet til boten "${jiraBotName()}", som ikke er oppdaget i denne instansen. ` +
