@@ -263,12 +263,11 @@ export function threadSeedLine(threadName: string): string {
  * The prefix both draft-turn user lines start with.
  *
  * It is load-bearing in ONE place: the history read that stands in for "the raw
- * material" when key verification decides amber-vs-red. A regenerate's own user
- * line NAMES the excluded sources («Ikke bruk disse kildene denne gangen:
- * MELOSYS-7264»), so leaving it in the raw material made every excluded key the
- * model re-used read amber — "the person wrote it" — when the truth is the
- * opposite: the person asked for it to be left out. The strip needs an exact
- * test, and this constant is it.
+ * material" when key verification decides amber-vs-red. The reader's own steer
+ * rides this line, so it can NAME a source or a key («uten MELOSYS-1234») — and
+ * leaving it in the raw material made a key the model re-used read amber ("the
+ * person wrote it") when the truth is the opposite: the person asked for it to be
+ * left out. The strip needs an exact test, and this constant is it.
  *
  * Deliberately a VISIBLE prefix rather than an invisible marker (`<!-- … -->`,
  * the research flow's device): these lines are ordinary chat messages a person
@@ -297,9 +296,9 @@ const JIRA_TURN_LINE_RE = /^Lag Jira-sak(?: på nytt)? \([^()\n]+, [^()\n]+\)\./
  * so requiring that shape costs nothing and refuses every free-form request.
  *
  * The residual runs in the SAFE direction — stripping less: a reader's `extra`
- * steer is appended to the regenerate line verbatim, so a MULTI-LINE steer makes
- * that line raw material again, which costs one amber row on an excluded key the
- * model re-used. Losing a person's paste costs every key in it.
+ * steer is appended to the turn line verbatim, so a MULTI-LINE steer makes that
+ * line raw material again, which costs one amber row on a key the steer named.
+ * Losing a person's paste costs every key in it.
  */
 export function isJiraTurnLine(text: string): boolean {
   const line = text.trim();
@@ -314,26 +313,21 @@ export function threadDraftTurnText(template: string, depth: JiraDepth): string 
 }
 
 /**
- * The visible user line for a regenerate.
+ * The visible user line for a re-run of the draft turn.
  *
- * The exclusions ride as PROSE rather than as a machine list, because on this
- * path they are part of the conversation the next turn will read: "uten
- * MELOSYS-7264" is a sentence the model can act on, and one a person scrolling
- * the thread can understand. Doc ids with no Jira key are named by title, since
- * an opaque id tells a reader nothing.
+ * Everything that narrows the next draft rides the reader's own steer — «uten
+ * MELOSYS-1234», «kortere» — because on this path it is part of the conversation
+ * the next turn will read: a sentence the model can act on, and one a person
+ * scrolling the thread can understand. There is no machine exclusion list any
+ * more; PR 3 deleted the alternative mechanism, and the picker's steer field is
+ * the whole lever.
  */
 export function threadRegenTurnText(input: {
   template: string;
   depth: JiraDepth;
-  /** The rows this run is excluding, resolved from the stored hit set. */
-  excluded: JiraCitation[];
   extra?: string;
 }): string {
   const parts = [`${JIRA_TURN_TEXT_PREFIX} på nytt (${input.template}, ${input.depth}).`];
-  const labels = input.excluded.map((c) => c.key ?? c.title).filter(Boolean);
-  if (labels.length > 0) {
-    parts.push(`Ikke bruk disse kildene denne gangen: ${labels.join(", ")}.`);
-  }
   const extra = (input.extra ?? "").trim();
   if (extra) parts.push(extra);
   return parts.join(" ");

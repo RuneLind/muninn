@@ -279,41 +279,35 @@ describe("turn text", () => {
     expect(threadDraftTurnText("bug", "skisse")).toBe("Lag Jira-sak (bug, skisse).");
   });
 
-  test("a regenerate names its exclusions as prose, by key where there is one", () => {
-    const excluded = [
-      { key: "MELOSYS-7264", title: "Noe" } as JiraCitation,
-      { title: "Rammeavtalen" } as JiraCitation,
-    ];
-    const text = threadRegenTurnText({ template: "story", depth: "full", excluded, extra: "kortere" });
-    expect(text).toBe(
-      "Lag Jira-sak på nytt (story, full). Ikke bruk disse kildene denne gangen: MELOSYS-7264, Rammeavtalen. kortere",
-    );
+  test("a re-run carries the reader's steer VERBATIM — that is the whole lever", () => {
+    // There is no exclusion list any more: narrowing a thread draft means saying
+    // so in the steer, because the conversation is the context.
+    const text = threadRegenTurnText({
+      template: "story",
+      depth: "full",
+      extra: "kortere, og uten MELOSYS-1234",
+    });
+    expect(text).toBe("Lag Jira-sak på nytt (story, full). kortere, og uten MELOSYS-1234");
   });
 
-  test("no exclusions, no exclusion sentence", () => {
-    expect(threadRegenTurnText({ template: "task", depth: "ingen", excluded: [] })).toBe(
+  test("no steer, no trailing sentence", () => {
+    expect(threadRegenTurnText({ template: "task", depth: "ingen" })).toBe(
       "Lag Jira-sak på nytt (task, ingen).",
     );
   });
 
   test("both turn lines carry the shared prefix the history strip recognises", () => {
-    // The strip is what keeps an EXCLUDED key the regenerate line names out of
-    // the "raw material" — otherwise the model re-using it reads amber ("the
-    // person wrote it") rather than red.
+    // The strip is what keeps a key the reader's own steer names out of the "raw
+    // material" — otherwise the model re-using it reads amber ("the person wrote
+    // it") rather than red.
     expect(threadDraftTurnText("bug", "ingen").startsWith(JIRA_TURN_TEXT_PREFIX)).toBe(true);
     expect(
-      threadRegenTurnText({ template: "bug", depth: "ingen", excluded: [] }).startsWith(
-        JIRA_TURN_TEXT_PREFIX,
-      ),
+      threadRegenTurnText({ template: "bug", depth: "ingen" }).startsWith(JIRA_TURN_TEXT_PREFIX),
     ).toBe(true);
     expect(isJiraTurnLine(threadDraftTurnText("bug", "ingen"))).toBe(true);
     expect(
       isJiraTurnLine(
-        threadRegenTurnText({
-          template: "bug",
-          depth: "ingen",
-          excluded: [{ key: "MELOSYS-7264", title: "Noe" } as JiraCitation],
-        }),
+        threadRegenTurnText({ template: "bug", depth: "ingen", extra: "uten MELOSYS-1234" }),
       ),
     ).toBe(true);
     expect(isJiraTurnLine("Vi må se på uttrekket for MELOSYS-7264.")).toBe(false);

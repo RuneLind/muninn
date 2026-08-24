@@ -414,16 +414,23 @@ export const JIRA_UNREACHABLE_MESSAGE =
  * The fourth state, which the SERVER cannot spell.
  *
  * `jiraCoverageMessage` takes only the derived verdict, and a derived `no_hits`
- * has two completely different causes: the corpus covered nothing, or the reader
- * switched every retrieved source off. Telling someone who just unticked 24 rows
- * that "nothing in jira-issues covered this search" is a lie about the corpus.
- * The page distinguishes them by comparing the derived `coverage` against the
- * stored `retrievalCoverage`, which is why both ride the payload.
+ * has two completely different causes: the corpus covered nothing, or every
+ * retrieved source was switched off. Telling someone reading a draft written over
+ * 24 unticked rows that "nothing in jira-issues covered this search" is a lie
+ * about the corpus. The page distinguishes them by comparing the derived
+ * `coverage` against the stored `retrievalCoverage`, which is why both ride the
+ * payload.
+ *
+ * **The reading survives the toggles.** Exclusions were the deleted composer's,
+ * and only the notes path can still carry them, so on `/jira` this is now almost
+ * always HISTORICAL data — hence a sentence that reports what happened to the
+ * draft rather than offering a control the archive does not have. A grounded task
+ * is written the way every task is written now: in the chat.
  */
 export const JIRA_ALL_EXCLUDED_MESSAGE =
   "Alle kilder er slått av — utkastet er uten grunnlag. Retrieval fant treff, " +
-  "men ingen av dem er med i denne genereringen. Slå på minst én kilde og generer på nytt " +
-  "hvis saken skal være forankret.";
+  "men ingen av dem var med da dette utkastet ble skrevet. Lag en ny sak fra chatten " +
+  "hvis den skal være forankret.";
 
 /**
  * The verdict for ONE generation, from the immutable retrieval verdict plus how
