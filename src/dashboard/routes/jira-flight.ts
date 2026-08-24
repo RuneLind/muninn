@@ -11,20 +11,31 @@
 import type { JiraDepth } from "../../jira/wire.ts";
 
 /**
- * How long a slot may be HELD, per depth — the budget half of its expiry.
+ * How long a slot may be HELD, per depth — the budget half of its EXPIRY.
  *
- * Measured 2026-08-22 on melosys (copilot-sdk) end to end, curl to curl: two
- * cold `Ingen` runs at **21.5 s** and **18.2 s**, a `Skisse` run at **55.3 s**,
- * and a `Full` run at **118.4 s** (of which the model call was 89.7 s across 10
- * real `yggdrasil-*` tool calls). `Ingen` and `Skisse` share a budget because
- * they differ only by a rider and two more citations, which is exactly the
- * spread those numbers show; `Full` opens files through the code/yggdrasil MCP
- * servers — a tool loop, not a bounded completion — so it gets 5× its measured
- * figure, a ceiling rather than a target.
+ * **These bound nothing but the slot.** Nothing here cancels a run, and nothing
+ * downstream reads them as a timeout: the work is one turn in a chat thread, and
+ * the connector owns its own budget — melosys sets `timeoutMs` to 10 000 000, so
+ * on the surviving path a turn is effectively unbounded. What this decides is
+ * how long a crashed or wedged run may keep a thread's slot before the next 🧾
+ * click is allowed through.
  *
- * These are **expiry** numbers, not timeouts: nothing here cancels a run. The
- * work is one turn in a chat thread and the connector owns its own budget; what
- * this bounds is how long a crashed or wedged run can keep a thread's slot.
+ * The numbers are a HEURISTIC, and their provenance says why they are only that.
+ * They were measured 2026-08-22 on melosys (copilot-sdk) curl to curl — two cold
+ * `Ingen` runs at 21.5 s and 18.2 s, a `Skisse` run at 55.3 s, a `Full` run at
+ * 118.4 s — but through the notes POST, which really did pass
+ * `JIRA_TIMEOUT_MS_BY_DEPTH[depth]` down as the one-shot's `timeoutMs`. That
+ * route is deleted; the figures now describe work that no longer runs, and the
+ * feature's own docs put a thread turn at 60–600 s.
+ *
+ * **The consequence, stated plainly:** a legitimate turn that outruns its expiry
+ * FREES ITS OWN SLOT, and a second 🧾 click on that thread then starts a turn
+ * that interleaves with the first — the exact failure the slot exists to
+ * prevent, arrived at by waiting instead of by clicking twice. Accepted for now;
+ * retuning these against measured thread-turn durations is filed as a plan
+ * follow-up. The ordering is deliberate in the meantime: `full` gets 5× its old
+ * figure because it is a tool loop rather than a bounded completion, and `ingen`
+ * and `skisse` share a budget because they differ only by a rider.
  */
 export const JIRA_TIMEOUT_MS_BY_DEPTH: Record<JiraDepth, number> = {
   ingen: 120_000,
@@ -35,14 +46,19 @@ export const JIRA_TIMEOUT_MS_BY_DEPTH: Record<JiraDepth, number> = {
 /**
  * Slack added to the slot's expiry on top of the budget above.
  *
- * The run's own budget starts AFTER the slot is taken, and the work outside it
- * is real: the thread history + `research_citations` read, the citation
- * seeding, and the `jira-issues` key-index listing key verification runs
- * (≤ **15 s**, `verify-keys.ts`). The first cut inherited share's 60 s without
- * doing that arithmetic, and a slot that expires while its holder is still
- * working lets a second click start a duplicate run — the exact failure the
- * slot exists to prevent. It is a ceiling on a WEDGE, so over-sizing costs only
- * a later retry after a crash, while under-sizing costs a double spend.
+ * The budget is meant to cover the TURN; this covers everything the run does
+ * around it, which is real work: the thread history + `research_citations` read,
+ * the citation seeding, and — the only externally bounded item left — the
+ * `jira-issues` key-index listing key verification fetches (≤ **15 s**,
+ * `verify-keys.ts`). The notes path's own two items are gone with it: the 60 s
+ * Haiku question condense and the 8 s per-document pull no longer happen on any
+ * path, so 15 s is what the arithmetic actually rests on and
+ * `JIRA_SLOT_SLACK_MS >= 15_000` is pinned as a floor in
+ * `jira-routes.test.ts`.
+ *
+ * It is a ceiling on a WEDGE, so over-sizing costs only a later retry after a
+ * crash while under-sizing costs two interleaved turns in one conversation —
+ * which is why the value sits far above that floor rather than at it.
  */
 export const JIRA_SLOT_SLACK_MS = 180_000;
 

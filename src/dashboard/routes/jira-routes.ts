@@ -339,13 +339,14 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
   });
 
   // ── The draft as a turn in the thread ──────────────────────────────────────
-  // Fire-and-forget like `/draft/start`, and for a stronger reason: this run
-  // spends a full chat turn on a thread whose history can be large. The page
-  // polls `GET /api/jira/draft/:id` exactly as it does for a notes draft.
+  // The ONE write, and it is fire-and-forget: the run spends a full chat turn on
+  // a thread whose history can be large, so the POST hands back the id and
+  // leaves. Every reader — the chat card, the archive's `?draft=` landing —
+  // polls `GET /api/jira/draft/:id`, and the row is the only record.
   //
-  // Deliberately NO CORS headers: unlike `/draft/start` this endpoint WRITES into
-  // a conversation — it appends two messages to a real thread. The extension's
-  // accepted-risk note covers reading a draft id, not posting into someone's chat.
+  // Deliberately NO CORS headers: this endpoint WRITES into a conversation — it
+  // appends two messages to a real thread. Migration 070's accepted-risk note
+  // covers reading a draft id, not posting into someone's chat.
   app.post("/api/jira/draft/from-thread", async (c) => {
     try {
       // **`application/json` is REQUIRED.** Hono's `c.req.json()` parses any body
@@ -393,10 +394,10 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
         );
       }
 
-      // The `Full` pre-flight, exactly as the notes path runs it. Every 🧾 click
-      // — first draft and re-run alike — arrives here, so this is the ONE place
-      // it can be checked: without it a `Full` draft was written with the code
-      // servers down, i.e. a confident task about code nobody opened.
+      // The `Full` pre-flight. Every 🧾 click — first draft and re-run alike —
+      // arrives here, so this is the ONE place it can be checked: without it a
+      // `Full` draft was written with the code servers down, i.e. a confident
+      // task about code nobody opened.
       let mcpServers: McpServerStatus[] = [];
       try {
         mcpServers = await getMcpStatus(bot);
@@ -484,7 +485,17 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
   });
 
   // ── Read one draft (the page's poll, and PR 3's `?draft=<id>` landing) ─────
-  app.options("/api/jira/draft/:id", (c) => new Response(null, { status: 204, headers: CORS_GET }));
+  //
+  // The preflight runs the SAME `isValidUuid` gate the GET does, and falls
+  // through when it fails. Unguarded, `:id` matched every sibling path segment —
+  // so `OPTIONS /api/jira/draft/start` answered a cheerful 204 advertising a
+  // live cross-origin endpoint at an address PR 4 deleted. A preflight is a
+  // promise about a request that follows; there is nothing here to promise
+  // about a parameter that cannot be a draft id.
+  app.options("/api/jira/draft/:id", (c, next) => {
+    if (!isValidUuid(c.req.param("id"))) return next();
+    return new Response(null, { status: 204, headers: CORS_GET });
+  });
 
   app.get("/api/jira/draft/:id", async (c) => {
     for (const [k, v] of Object.entries(CORS_GET)) c.header(k, v);
@@ -562,7 +573,7 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
         return unknownDraft(c);
       }
       // The whole view, so the card adopts exactly what the row now holds rather
-      // than drawing a state the server might not have reached — the `PUT` rule.
+      // than drawing a state the server might not have reached.
       c.header("Cache-Control", "no-store");
       return c.json(saved);
     } catch (err) {

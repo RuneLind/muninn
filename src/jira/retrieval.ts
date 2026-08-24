@@ -16,15 +16,14 @@
  *  · the badge is OVERWRITTEN, because `buildCitations` cannot name these three
  *    collections (see {@link toJiraCitation}).
  *
- * The three collections are still named here: `verify-keys.ts` resolves against
- * `jira-issues`, and the reader-facing coverage copy names all three.
+ * ONE collection name survives here, {@link JIRA_ISSUES_COLLECTION}, because
+ * `verify-keys.ts` resolves keys against it. The reader-facing coverage copy
+ * that names all three is literal prose in `src/jira/wire.ts` — the browser half
+ * must not import this module — so nothing here needs the list.
  */
 
 import { badgeFromCollectionMeta } from "../research/corpus.ts";
 import type { JiraCitation, JiraDepth } from "./wire.ts";
-
-/** The three melosys collections, in the order `.mcp.json` names them. */
-export const JIRA_COLLECTIONS = ["jira-issues", "melosys-confluence-v3", "nav-wiki"] as const;
 
 /** The collection whose docs ARE Jira issues — the one `verify-keys` resolves against. */
 export const JIRA_ISSUES_COLLECTION = "jira-issues";

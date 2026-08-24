@@ -148,7 +148,15 @@ const readThrows = new Map<string, string>();
 /** The LISTING read failing — a dead database under the page, not under one row. */
 let archiveThrows: string | null = null;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-mock.module("../../db/jira-drafts.ts", () => ({
+/**
+ * The REAL module, captured before the mock replaces it — the only way this file
+ * can check that the fake it installs still describes the module it stands in for.
+ * See the surface test at the foot of the file.
+ */
+const realJiraDrafts = await import("../../db/jira-drafts.ts");
+/** Held as a value rather than built inside the factory, so the surface test can
+ *  read its key list. */
+const jiraDraftsMock = {
   createJiraDraft: async (i: {
     botName: string; template: string; depth: string; notes: string; extra: string;
     source?: string; threadId?: string;
@@ -214,10 +222,6 @@ mock.module("../../db/jira-drafts.ts", () => ({
       .sort((a, b) => a.createdAt - b.createdAt)
       .map((r) => ({ draftId: r.draftId, messageId: r.messageId, status: r.status }));
   },
-  startJiraDraftRun: async (id: string, excludeDocIds: string[]) => {
-    const r = rows.get(id);
-    if (r) Object.assign(r, { status: "generating", error: null, excludeDocIds });
-  },
   saveJiraDraftRetrieval: async (id: string, citations: unknown[], retrievalCoverage: string, q: string) => {
     const r = rows.get(id);
     if (r) Object.assign(r, { citations, retrievalCoverage, retrievalQuestion: q });
@@ -231,15 +235,9 @@ mock.module("../../db/jira-drafts.ts", () => ({
     // messageId leaves the column alone rather than nulling it.
     if (r) Object.assign(r, { ...i, messageId: i.messageId ?? r.messageId, status: "ready", error: null });
   },
-  failJiraDraft: async (id: string, error: string, restoreExcludeDocIds?: string[]) => {
+  failJiraDraft: async (id: string, error: string) => {
     const r = rows.get(id);
-    if (r) Object.assign(r, { status: "failed", error, ...(restoreExcludeDocIds ? { excludeDocIds: restoreExcludeDocIds } : {}) });
-  },
-  updateJiraDraftMarkdown: async (id: string, markdown: string, kv: unknown[], mf: unknown[]) => {
-    const r = rows.get(id);
-    if (!r) return false;
-    Object.assign(r, { markdown, keyVerdicts: kv, markdownFlags: mf, status: "ready", error: null });
-    return true;
+    if (r) Object.assign(r, { status: "failed", error });
   },
   getJiraDraft: async (id: string) => {
     if (!UUID_RE.test(id)) {
@@ -251,7 +249,8 @@ mock.module("../../db/jira-drafts.ts", () => ({
     if (!r) return null;
     return jiraDraftView(r);
   },
-}));
+};
+mock.module("../../db/jira-drafts.ts", () => jiraDraftsMock);
 
 /** Row → view, shared by the read and the save (which re-reads in the real one). */
 function jiraDraftView(r: Row) {
@@ -431,6 +430,16 @@ describe("the thread's single-flight slot", () => {
     expect(acquireJiraFlight(key, "skisse", t0 + budget + JIRA_SLOT_SLACK_MS).ok).toBe(true);
   });
 
+  test("the slack still covers the longest work OUTSIDE the budget", () => {
+    // The slack is what the run does before and after the model turn, and the
+    // only bounded item left on this path is the `jira-issues` key-index listing
+    // key verification runs (≤ 15 s, `verify-keys.ts` — the notes path's 60 s
+    // Haiku condense and its 8 s doc pull died with it). Under that floor the
+    // slot can free itself while its holder is still verifying keys, and the
+    // next click starts a second interleaved turn in the same conversation.
+    expect(JIRA_SLOT_SLACK_MS).toBeGreaterThanOrEqual(15_000);
+  });
+
   test("two threads are two slots — the key is the thread and nothing else", () => {
     const a = threadFlightKey(THREAD_ID);
     const b = threadFlightKey("22222222-3333-4444-8555-666666666666");
@@ -557,13 +566,41 @@ describe("the preflight advertises exactly the methods that carry CORS headers",
   });
 
   test("the WRITE route is never preflight-approved for POST", async () => {
-    // There is no `app.options` for it, so the preflight falls through to the
-    // `/draft/:id` one with `id = "from-thread"` — which advertises GET and only
-    // GET, so a browser refuses the cross-origin POST before sending it.
-    // Migration 070's accepted risk covers reading a draft id, never writing a
-    // message into someone's conversation.
+    // There is no `app.options` for it, and the `/draft/:id` preflight refuses a
+    // parameter that cannot be a draft id, so a browser gets no approval at all
+    // before sending the cross-origin POST. Migration 070's accepted risk covers
+    // reading a draft id, never writing a message into someone's conversation.
     const pre = await makeApp().request("/api/jira/draft/from-thread", { method: "OPTIONS" });
     expect(String(pre.headers.get("access-control-allow-methods"))).not.toContain("POST");
+  });
+
+  test("a preflight for a path that is not a draft id is not approved at all", async () => {
+    // `/api/jira/draft/start` was a real route until PR 4 deleted it, and the
+    // `:id` preflight answered a cheerful 204 for it — advertising a live
+    // cross-origin endpoint at an address that no longer exists. The id shape is
+    // the same `isValidUuid` gate every handler here runs, one layer earlier.
+    const gone = await makeApp().request("/api/jira/draft/start", { method: "OPTIONS" });
+    expect(gone.status).not.toBe(204);
+    // …while a real draft id still gets its preflight.
+    const real = await makeApp().request("/api/jira/draft/8a1f4c2e-0000-4000-8000-000000000000", {
+      method: "OPTIONS",
+    });
+    expect(real.status).toBe(204);
+  });
+});
+
+// ── The fake stands in for a module that still exists ────────────────────────
+
+describe("the jira-drafts mock mirrors the real module", () => {
+  test("it fakes nothing the real module does not export", () => {
+    // A mock key with no counterpart is a route contract asserted against a
+    // function nobody can call: PR 4 deleted `startJiraDraftRun` and
+    // `updateJiraDraftMarkdown` with the notes path, and the fakes for both
+    // outlived them here, silently claiming the regenerate and save-edit writers
+    // were still reachable.
+    const real = new Set(Object.keys(realJiraDrafts));
+    const extra = Object.keys(jiraDraftsMock).filter((k) => !real.has(k));
+    expect(extra).toEqual([]);
   });
 });
 

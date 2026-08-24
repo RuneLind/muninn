@@ -57,8 +57,10 @@ export interface ThreadCitationRow {
  *     appearance is kept — the turn that actually introduced the document into the
  *     conversation — while the relevance is the MAX seen, since the later search
  *     that scored it higher was a better-aimed question about the same document.
- *     (The bare `docId` is the key here for the same measured reason
- *     `applyExclusions` uses it: the three collections' id spaces are disjoint.)
+ *     (The bare `docId` is the key, not `<collection>/<docId>`: the three
+ *     melosys collections' id spaces are disjoint — measured — so a bare id
+ *     identifies a document, and a compound key would let the same document in
+ *     twice under two collection labels.)
  *
  *  2. **`cited` is derived NOW, from the assistant's own replies.** The chat's
  *     tool handler writes every row `cited: false` — it cannot know, the reply
@@ -282,7 +284,10 @@ export const JIRA_TURN_TEXT_PREFIX = "Lag Jira-sak";
 
 /**
  * The exact shape of a composer turn line: the prefix, optionally `på nytt`, and
- * the `(<template>, <depth>)` parenthesis both builders below always emit.
+ * the `(<template>, <depth>)` parenthesis {@link threadDraftTurnText} always
+ * emits. The optional `på nytt` is kept because the thread's HISTORY holds lines
+ * a second builder wrote before PR 4 deleted it, and this regex is what strips
+ * them out of the raw material on every later run.
  */
 const JIRA_TURN_LINE_RE = /^Lag Jira-sak(?: på nytt)? \([^()\n]+, [^()\n]+\)\./;
 

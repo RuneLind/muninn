@@ -503,11 +503,11 @@ export function jiraDraftViewHtml(
     : "";
 
   // **A `failed` draft shows no text, whatever the row still holds.**
-  // `failJiraDraft` leaves `markdown` alone, so a failed REGENERATE keeps the
-  // PREVIOUS turn's task — rendering it under «Genereringen feilet» offers a
-  // draft this run did not produce, and Kopier would put it on the clipboard as
-  // if it had. Same contract as the chat card's failed card: the error, and the
-  // way back to the conversation.
+  // `failJiraDraft` leaves `markdown` alone, so an ARCHIVED failed regenerate
+  // still holds the PREVIOUS turn's task — rendering it under «Genereringen
+  // feilet» offers a draft that run did not produce, and Kopier would put it on
+  // the clipboard as if it had. Same contract as the chat card's failed card:
+  // the error, and the way back to the conversation.
   const body = draft.status === "failed"
     ? `<p class="ja-empty">${
         draft.markdown
@@ -552,8 +552,8 @@ export const JA_FAILED_HEADING = "Mislykket utkast";
  * agree about what the draft is called.
  *
  * **Except on a `failed` draft, which is named after nothing.** `failJiraDraft`
- * leaves `markdown` alone, so a failed regenerate still carries the PREVIOUS
- * turn's text — and deriving the heading from it printed that turn's first
+ * leaves `markdown` alone, so an archived failed regenerate still carries the
+ * PREVIOUS turn's text — and deriving the heading from it printed that turn's first
  * sentence as the page's title, directly above the line explaining that the text
  * «vises ikke her». The body branch refuses the text; the heading has to refuse
  * it too, or the refusal is contradicted by the largest words on the page. The
@@ -576,10 +576,11 @@ export function deriveDraftHeading(draft: Pick<JiraDraftView, "markdown" | "stat
  *
  * **It reads the TEXT, not the status.** A `failed` row is refused however much
  * markdown it kept (see {@link deriveDraftHeading}), and so is any row with none
- * — but a `generating` row is not: `startJiraDraftRun` leaves `markdown` alone,
- * so a regenerate in flight still carries the previous turn's task, and that
- * page renders it in full with the switch and the copy button, under the
- * 5-second meta-refresh that will replace it.
+ * — but a `generating` row is not, and the archive is full of ones that carry
+ * text: a notes-path regenerate flipped the row back to `generating` before its
+ * run and left `markdown` alone, so every one that never finished is archived
+ * over the previous turn's task. That page renders it in full with the switch
+ * and the copy button, under the 5-second meta-refresh.
  */
 export function jiraDraftHasControls(
   draft: Pick<JiraDraftView, "markdown" | "status">,

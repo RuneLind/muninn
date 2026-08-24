@@ -457,7 +457,10 @@ export function effectiveCoverage(
 
 /** One retrieved source, as the toggle column renders it and the prompt cites it. */
 export interface JiraCitation {
-  /** 1-based, renumbered after `excludeDocIds` (see the regenerate contract). */
+  /** 1-based, in the order the row stores them. Nothing renumbers: a thread
+   *  draft cites what the conversation retrieved, and the exclusion set that
+   *  used to renumber against went with the notes path. An ARCHIVED row's `n`
+   *  is whatever its own run assigned. */
   n: number;
   collection: string;
   docId: string;
@@ -590,14 +593,18 @@ export interface JiraDraftView {
   notes: string;
   extra: string;
   markdown: string | null;
-  /** The WIDE stored hit set — every row PR 2's toggle column renders. */
+  /** The WIDE stored hit set — on a thread draft, everything the conversation
+   *  retrieved; on an archived notes row, everything its search found. */
   citations: JiraCitation[];
   /**
-   * The doc ids the reader toggled OFF, as the last generation used them.
+   * The doc ids the reader toggled OFF on an ARCHIVED notes draft.
    *
-   * Stored so the view is self-consistent: without it a poll answered with 24
-   * citations beside markdown that cites 23, and `PUT` re-verified against the
-   * wide set — flipping an excluded key back to `verified` on save.
+   * **Nothing writes this any more** — the toggle column and the regenerate it
+   * fed went with the notes path, and a thread draft is narrowed by saying so in
+   * the next 🧾 click's steer. It stays on the view because archived rows carry
+   * one, and it is what makes their `coverage` derivation honest: a row whose
+   * every source was switched off must still read `no_hits` beside a stored
+   * `retrieval_coverage` that says the corpus had hits.
    */
   excludeDocIds: string[];
   keyVerdicts: JiraKeyVerdict[];
@@ -678,10 +685,10 @@ export interface JiraDraftListRow {
    * {@link jiraDraftTitle} over the head of the markdown. Null only when the row
    * holds no text: one still `generating`, or one that failed before ever
    * writing any. A FAILED row can perfectly well carry a title — `failJiraDraft`
-   * leaves `markdown` alone, so a failed regenerate keeps the previous turn's
-   * text (the statement on `failJiraDraft` in `db/jira-drafts.ts` is the
-   * authority). The archive's DRAFT view refuses to render that text; the row
-   * still names it.
+   * leaves `markdown` alone, so an ARCHIVED failed regenerate still holds the
+   * previous turn's text (the statement on `failJiraDraft` in
+   * `db/jira-drafts.ts` is the authority). The archive's DRAFT view refuses to
+   * render that text; the row still names it.
    */
   title: string | null;
   /** The stored retrieval verdict, unchanged — see {@link JiraDraftView}. */

@@ -48,12 +48,7 @@ import {
   JIRA_EMPTY_RESULT_MESSAGE,
   JIRA_UNFINISHED_MESSAGE,
 } from "../../jira/finalize.ts";
-import {
-  effectiveCoverage,
-  JIRA_NOTES_MAX,
-  type JiraDepth,
-  type JiraDonePayload,
-} from "../../jira/wire.ts";
+import { JIRA_NOTES_MAX, type JiraDepth } from "../../jira/wire.ts";
 import { getLog } from "../../logging.ts";
 
 const log = getLog("dashboard", "jira-thread-run");
@@ -94,23 +89,15 @@ export interface JiraThreadRunOptions {
   runTurn?: JiraThreadTurnRunner;
 }
 
-/** What a caller writes to its client. A detached run passes a no-op. */
-export type JiraEmit = (event: string, data: unknown) => void;
-
-const NO_EMIT: JiraEmit = () => {};
-
 /**
  * Run one draft turn and land the result on the row. Never rejects: every failure
- * is reported onto the row (and to the client, when one is attached).
+ * is reported onto the row, which is the ONLY channel — the caller is detached
+ * (`POST …/from-thread` returns the id and leaves) and the chat card polls the
+ * row. There is no stream to write to and no client to write it to.
  */
-export async function runJiraThreadDraft(
-  opts: JiraThreadRunOptions,
-  emit: JiraEmit = NO_EMIT,
-): Promise<void> {
+export async function runJiraThreadDraft(opts: JiraThreadRunOptions): Promise<void> {
   const { draftId, threadId, botConfig } = opts;
   try {
-    emit("draft", { draftId });
-
     const text = threadDraftTurnText(opts.template, opts.depth, opts.extra);
 
     const turnInstruction = buildThreadTurnInstruction({
@@ -119,7 +106,6 @@ export async function runJiraThreadDraft(
       extra: opts.extra,
     });
 
-    emit("phase", { phase: "writing" });
     const startedAt = Date.now();
     const turn = await (opts.runTurn ?? defaultThreadTurnRunner)({
       threadId,
@@ -141,7 +127,6 @@ export async function runJiraThreadDraft(
         bot: botConfig.name, draft: draftId, thread: threadId,
       });
       await failJiraDraft(draftId, JIRA_UNFINISHED_MESSAGE).catch(() => {});
-      emit("app_error", { type: "error", message: JIRA_UNFINISHED_MESSAGE });
       return;
     }
 
@@ -168,7 +153,6 @@ export async function runJiraThreadDraft(
         bot: botConfig.name, draft: draftId, thread: threadId,
       });
       await failJiraDraft(draftId, JIRA_EMPTY_RESULT_MESSAGE);
-      emit("app_error", { type: "error", message: JIRA_EMPTY_RESULT_MESSAGE });
       return;
     }
 
@@ -195,12 +179,9 @@ export async function runJiraThreadDraft(
     // **There is no exclusion set on this path.** A thread draft is narrowed by
     // SAYING SO in the next 🧾 click's steer line — the conversation is the
     // context, so «uten MELOSYS-1234» is a sentence the model acts on, not a
-    // machine list the server subtracts. What was seeded is what the draft uses.
+    // machine list the server subtracts. What was seeded is what the draft uses,
+    // so the wide seeded set and the draft's own citation list are one thing.
     const citations = seeded;
-    const coverage = effectiveCoverage(retrievalCoverage, citations.length);
-    // The WIDE seeded set, which here IS `citations`. No client consumes this
-    // frame since `/jira` became a read-only archive — the row is the record.
-    emit("citations", { citations: seeded, coverage });
 
     // `## Referanser` is DEPTH-SLICED: measured on the retired notes path, a
     // shallow draft over 24 stored hits got 24 links under a task that used a
@@ -259,10 +240,8 @@ export async function runJiraThreadDraft(
       knowledgeApiUrl: opts.config.knowledgeApiUrl,
       ...(turn.messageId ? { messageId: turn.messageId } : {}),
     });
-    if (!finalized) {
-      emit("app_error", { type: "error", message: JIRA_EMPTY_RESULT_MESSAGE });
-      return;
-    }
+    // `finalizeJiraDraft` has already written the failure onto the row.
+    if (!finalized) return;
 
     log.info(
       "Jira thread draft done bot={bot} draft={draft} thread={thread} depth={depth} turnMs={turnMs} chars={chars} cites={cites}",
@@ -276,18 +255,6 @@ export async function runJiraThreadDraft(
         cites: citations.length,
       },
     );
-
-    const payload: JiraDonePayload = {
-      draftId,
-      markdown: finalized.markdown,
-      citations,
-      keyVerdicts: finalized.keyVerdicts,
-      markdownFlags: finalized.markdownFlags,
-      coverage,
-      retrievalCoverage,
-      retrievalQuestion: seedQuestion,
-    };
-    emit("done", payload);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log.warn("Jira thread draft failed bot={bot} draft={draft} error={error}", {
@@ -296,7 +263,6 @@ export async function runJiraThreadDraft(
     // The row carries a GENERIC sentence (it is read back through a CORS-open
     // GET) and the detail goes to the log.
     await failJiraDraft(draftId, JIRA_UNFINISHED_MESSAGE).catch(() => {});
-    emit("app_error", { type: "error", message: `Kunne ikke skrive saken: ${message}` });
   }
 }
 
