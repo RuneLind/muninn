@@ -411,8 +411,15 @@ async function buildSseOptions(
   // is the `fra samtale: <navn>` placeholder the NOT NULL column needed — a
   // one-line seed posted as if it were the reader's raw material.
   //
+  // **The predicate is the SOURCE alone**, exactly as the `PUT`'s is. Adding
+  // `&& stored.threadId` looked like a safety check and was a hole: nothing
+  // enforces the pair, and a `source = 'thread'` row with a null `thread_id` is
+  // precisely the shape that then fell through to that placeholder — the one
+  // outcome this guard exists to prevent. Two spellings of one refusal is also
+  // two things to keep in step.
+  //
   // TRANSITIONAL: PR 4 deletes this route family outright.
-  if (stored.source === "thread" && stored.threadId) {
+  if (stored.source === "thread") {
     return { opts: base, threadRefused: true };
   }
 
@@ -743,11 +750,10 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
         );
       }
 
-      // The `Full` pre-flight, exactly as the notes path runs it — and as the
-      // REGENERATE of this very draft runs it. Without it a first from-thread
-      // draft at `Full` was written with the code servers down, i.e. a confident
-      // task about code nobody opened, and the reader's first regenerate then
-      // 503'd on the draft they were already holding.
+      // The `Full` pre-flight, exactly as the notes path runs it. Every 🧾 click
+      // — first draft and re-run alike — arrives here, so this is the ONE place
+      // it can be checked: without it a `Full` draft was written with the code
+      // servers down, i.e. a confident task about code nobody opened.
       let mcpServers: McpServerStatus[] = [];
       try {
         mcpServers = await getMcpStatus(bot);
@@ -767,7 +773,8 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
       // from-thread POSTs at different settings then ran two interleaved
       // `processChatMessage` turns in one conversation (measured: two user lines
       // 17 ms apart, then two replies). A turn is a message in a thread, not a
-      // piece of work over stored hits; the regenerate path keys the same way.
+      // piece of work over stored hits — and since a re-run is another POST to
+      // this same route, this key covers first drafts and re-runs alike.
       const acquired = acquireJiraFlight(threadFlightKey(body.threadId), body.depth);
       if (!acquired.ok) {
         return c.json(

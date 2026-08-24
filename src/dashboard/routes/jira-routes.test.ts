@@ -1635,6 +1635,53 @@ describe("POST /api/jira/draft/from-thread", () => {
     expect(view.keyVerdicts.find((v: { key: string }) => v.key === "MELOSYS-7264").state).toBe("notes");
   });
 
+  /**
+   * `readThreadHistory`'s two filters, seen from the outside.
+   *
+   * They decide what "the raw material" IS on this path, i.e. the amber/red axis
+   * of every key verdict, and nothing else in the suite can see them: the
+   * function is internal, and its result reaches the reader only as
+   * `keyVerdicts`. Two things are excluded, each for its own reason — a message
+   * that is not the PERSON's (a peer agent, the bot itself) is not the person's
+   * claim about anything, and this feature's OWN turn lines are ours, not
+   * theirs: the steer rides them, so a key one names («uten MELOSYS-1234») would
+   * otherwise read amber ("you wrote it") when the person asked for the
+   * opposite.
+   */
+  test("only the PERSON's own messages are raw material, and our turn lines are not", async () => {
+    threads.set(THREAD_ID, THREAD);
+    threadCitations = THREAD_CITATIONS;
+    threadHistory = [
+      { role: "user", text: "Uttrekket feiler for EØS-saker, se MELOSYS-3001." },
+      // Ours: a previous 🧾 click's visible line, steer and all.
+      { role: "user", text: "Lag Jira-sak (bug, skisse). uten MELOSYS-3002" },
+      // Another agent talking in the thread (the hivemind autorespond path).
+      { role: "peer", text: "Se også MELOSYS-3003." },
+      // The bot's own reply — grounding evidence, never the person's claim.
+      { role: "assistant", text: "Det ligner MELOSYS-3004 og MELOSYS-8150." },
+    ];
+    __setJiraThreadTurnForTest(
+      scriptedThreadTurn(
+        "## Symptom\nSe MELOSYS-3001, MELOSYS-3002, MELOSYS-3003, MELOSYS-3004 og MELOSYS-8150.",
+      ),
+    );
+    const res = await post({ threadId: THREAD_ID, template: "bug", depth: "skisse" });
+    const { draftId } = await res.json();
+    await new Promise((r) => setTimeout(r, 40));
+
+    const view = await (await makeApp().request(`/api/jira/draft/${draftId}`)).json();
+    const state = (k: string) =>
+      view.keyVerdicts.find((v: { key: string }) => v.key === k).state;
+    // Retrieved by the conversation ⇒ grounded.
+    expect(state("MELOSYS-8150")).toBe("verified");
+    // The person typed it ⇒ amber, not a fabrication charge.
+    expect(state("MELOSYS-3001")).toBe("notes");
+    // Ours, a peer's, the bot's ⇒ red. Nobody claimed any of them.
+    expect(state("MELOSYS-3002")).toBe("unknown");
+    expect(state("MELOSYS-3003")).toBe("unknown");
+    expect(state("MELOSYS-3004")).toBe("unknown");
+  });
+
   test("an unknown or malformed thread id is a 404, never a 500", async () => {
     expect((await post({ threadId: "not-a-uuid", template: "bug", depth: "ingen" })).status).toBe(404);
     expect((await post({ threadId: THREAD_ID, template: "bug", depth: "ingen" })).status).toBe(404);
@@ -1857,6 +1904,42 @@ describe("a thread-sourced draft is refused by the composer routes", () => {
 
     const after = await (await makeApp().request(`/api/jira/draft/${draftId}`)).json();
     expect(after.markdown).toBe(before.markdown);
+  });
+
+  test("a thread row whose thread_id is NULL is refused too — the guard is the SOURCE", async () => {
+    // The POST's guard used to be `source === "thread" && threadId`, the PUT's
+    // `source === "thread"` alone. A row can carry the source without the id —
+    // nothing enforces the pair, and a deleted/nulled `thread_id` is exactly the
+    // shape that slipped past BOTH POSTs into the notes branch, where the
+    // `fra samtale: <navn>` placeholder is posted as the reader's raw material.
+    // That is the whole thing the refusal exists to prevent, so both guards ask
+    // the same question.
+    const draftId = await startThreadDraft();
+    const before = await (await makeApp().request(`/api/jira/draft/${draftId}`)).json();
+    rows.get(draftId)!.threadId = null;
+    threadTurns = [];
+
+    const res = await makeApp().request("/api/jira/draft", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ draftId, template: "bug", depth: "skisse" }),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe(REFUSAL);
+    expect(threadTurns).toHaveLength(0);
+
+    const start = await makeApp().request("/api/jira/draft/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ draftId, template: "bug", depth: "skisse" }),
+    });
+    expect(start.status).toBe(400);
+
+    // …and the markdown a live card is rendering is untouched by either.
+    await new Promise((r) => setTimeout(r, 40));
+    const after = await (await makeApp().request(`/api/jira/draft/${draftId}`)).json();
+    expect(after.markdown).toBe(before.markdown);
+    expect(after.status).toBe("ready");
   });
 
   test("the refusal leaks no single-flight slot — the thread is immediately usable", async () => {
