@@ -414,16 +414,28 @@ export const JIRA_UNREACHABLE_MESSAGE =
  * The fourth state, which the SERVER cannot spell.
  *
  * `jiraCoverageMessage` takes only the derived verdict, and a derived `no_hits`
- * has two completely different causes: the corpus covered nothing, or the reader
- * switched every retrieved source off. Telling someone who just unticked 24 rows
- * that "nothing in jira-issues covered this search" is a lie about the corpus.
- * The page distinguishes them by comparing the derived `coverage` against the
- * stored `retrievalCoverage`, which is why both ride the payload.
+ * has two completely different causes: the corpus covered nothing, or every
+ * retrieved source was switched off. Telling someone reading a draft written over
+ * 24 unticked rows that "nothing in jira-issues covered this search" is a lie
+ * about the corpus. The page distinguishes them by comparing the derived
+ * `coverage` against the stored `retrievalCoverage`, which is why both ride the
+ * payload.
+ *
+ * **The reading survives the toggles.** Exclusions were the deleted composer's,
+ * and only the notes path can still carry them, so on `/jira` this is now almost
+ * always HISTORICAL data — hence a sentence that reports what happened to the
+ * draft rather than offering a control the archive does not have.
+ *
+ * **And it prescribes NOTHING**, because it renders source-blind. A tail telling
+ * the reader to write the task in the chat instead fires almost exclusively on
+ * historical NOTES rows (measured on a real one), where there is no conversation
+ * to go back to and the advice is un-actionable — while a thread row, the only
+ * kind that advice fits, can barely reach this state at all. So it states the
+ * fact and stops; the remedy differs per source and the reader knows their own.
  */
 export const JIRA_ALL_EXCLUDED_MESSAGE =
   "Alle kilder er slått av — utkastet er uten grunnlag. Retrieval fant treff, " +
-  "men ingen av dem er med i denne genereringen. Slå på minst én kilde og generer på nytt " +
-  "hvis saken skal være forankret.";
+  "men ingen av dem var med da dette utkastet ble skrevet.";
 
 /**
  * The verdict for ONE generation, from the immutable retrieval verdict plus how
@@ -555,8 +567,11 @@ export type JiraDraftStatus = "generating" | "ready" | "failed";
  * retrieved (through the `research_knowledge` MCP tool), already argued with the
  * answer, and the draft turn inherits all of it as ordinary history. The two
  * differ in every later operation, which is why it is stored rather than inferred
- * from `thread_id` being set: a regenerate on a `thread` draft is another thread
- * turn, and its hit set comes from `research_citations`, not from a retrieval.
+ * from `thread_id` being set: a `thread` row's hit set comes from
+ * `research_citations` rather than from a retrieval, and re-running it mints a
+ * NEW row via `from-thread` (another turn, another draft) instead of re-writing
+ * this one — so `source` alone is what the composer routes refuse on, without
+ * consulting `thread_id` at all.
  */
 export type JiraDraftSource = "notes" | "thread";
 
@@ -637,8 +652,9 @@ export interface JiraDraftView {
   /**
    * The assistant message whose text this draft's `markdown` was taken from.
    *
-   * Re-pointed by every regenerate, since a regenerate is another turn in the
-   * same thread. Null on a notes-sourced draft.
+   * Stamped once, right after the turn, and never moved: a re-run is another turn
+   * on its OWN row, so a second draft names a second message and this one keeps
+   * naming the reply it was actually written from. Null on a notes-sourced draft.
    */
   messageId: string | null;
   /**

@@ -122,9 +122,10 @@ export function jiraCardScript(): string {
     if (!row || !row.draftId) return;
     var rec = jiraCards[row.draftId];
     // Is the listing describing exactly the row we already hold? The STATUS is
-    // not the whole binding: a regenerate is another turn, so \`message_id\` moves
-    // to the new reply while the status stays \`ready\`, and a status-only test
-    // left the card standing under the OLD bubble holding the OLD text.
+    // not the whole binding: \`message_id\` is stamped after the turn, so a row
+    // can be listed \`generating\` with no bubble and then \`ready\` with one, and a
+    // status-only test strands the card. The id is compared as well as the
+    // status — cheap, and it also holds if a row's message ever moves under us.
     var settled = rec && rec.view && rec.view.status === row.status
       && (rec.view.messageId || null) === (row.messageId || null) && !jiraCardShouldPoll(row);
     // Skip only a row that is settled AND already on screen. Keying the skip on
@@ -270,11 +271,11 @@ export function jiraCardScript(): string {
       gaveUp: rec.gaveUp,
     });
     var existing = host.querySelector('[${JCARD_ATTR}="' + cssAttrValue(draftId) + '"]');
-    // A card for this draft standing under ANOTHER bubble: a regenerate is a new
-    // turn, so the row is re-pointed and the old card is left behind. Scoped to
-    // the document rather than the host, because the stale one is by definition
-    // not in it — otherwise the reader gets two cards, and the older one holds
-    // the older text.
+    // A card for this draft standing under ANOTHER bubble. Defensive now that a
+    // re-run mints its own row (this draft's \`message_id\` is stamped once and
+    // never moves), but the cost is one query and the failure it prevents is two
+    // cards for one draft, the older holding the older text. Scoped to the
+    // document rather than the host, because a stray is by definition not in it.
     var strays = document.querySelectorAll('[${JCARD_ATTR}="' + cssAttrValue(draftId) + '"]');
     for (var i = 0; i < strays.length; i++) {
       if (host.contains && host.contains(strays[i])) continue;

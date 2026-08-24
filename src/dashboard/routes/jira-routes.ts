@@ -99,11 +99,7 @@ import {
   JIRA_THREAD_FLIGHT_MESSAGE,
   type JiraSseOptions,
 } from "./jira-sse.ts";
-import {
-  readThreadHistory,
-  runJiraThreadDraft,
-  type JiraThreadTurnRunner,
-} from "./jira-thread-run.ts";
+import { runJiraThreadDraft, type JiraThreadTurnRunner } from "./jira-thread-run.ts";
 import { threadSeedLine } from "../../jira/thread-draft.ts";
 import { getLog } from "../../logging.ts";
 
@@ -187,6 +183,25 @@ function unknownDraft(c: Context): Response {
 /** The same rule for a thread id: shape-checked before postgres sees it. */
 function unknownThread(c: Context): Response {
   return c.json({ error: "ukjent samtale" }, 404);
+}
+
+/**
+ * A draft that was written as a turn in a chat thread cannot be re-run — or
+ * overwritten — from here.
+ *
+ * ONE spelling for all three routes (`POST /api/jira/draft`, `POST …/draft/start`
+ * and `PUT …/draft/:id`), because they refuse the same state for the same reason:
+ * the row's text belongs to a live conversation, the card in that chat renders it,
+ * and the way to change it is another 🧾 click with a steer line.
+ *
+ * TRANSITIONAL — PR 4 deletes all three routes; until then a stale composer tab
+ * can still POST here.
+ */
+function threadDraftRefused(c: Context): Response {
+  return c.json(
+    { error: "Utkastet kommer fra en samtale — lag et nytt med 🧾 i chatten." },
+    400,
+  );
 }
 
 /**
@@ -352,7 +367,7 @@ async function buildSseOptions(
   body: ParsedJiraDraftBody,
   instruction: string,
   mcpServers: McpServerStatus[],
-): Promise<{ opts: JiraSseOptions; unknown?: true }> {
+): Promise<{ opts: JiraSseOptions; unknown?: true; threadRefused?: true }> {
   const base: JiraSseOptions = {
     config,
     botConfig: bot,
@@ -381,45 +396,31 @@ async function buildSseOptions(
   // is both a needless echo and a second sentence to keep in step with the first.
   if (!stored) return { opts: base, unknown: true };
 
-  // THREAD-SOURCED: a regenerate is another turn in the same thread, not a
-  // re-run of the one-shot over stored hits. Everything below (stored citations,
-  // the retrieval verdict, the retrieval question) belongs to the notes path;
-  // this row's hit set is re-derived from the conversation on every run, because
-  // the conversation keeps retrieving between turns.
-  if (stored.source === "thread" && stored.threadId) {
-    // Deliberately NO `notes` here: `runJiraDraft` diverts on `threadRun` before
-    // it reads them, and the flight key for this path is the thread
-    // (`threadFlightKey`), not the content hash. Carrying them read as if the
-    // one-shot could still run over them.
-    //
-    // **`existingDraftId` is NOT optional, though**, even though the RUNNER never
-    // reads it on this path: `POST /api/jira/draft/start` — which is how the page
-    // regenerates — creates a row when it is absent. Dropped, it minted a SECOND,
-    // `notes`-sourced row with empty notes and handed the caller ITS id, while
-    // the turn ran against `threadRun.draftId`; the page then polled a row
-    // nothing would ever finish, to the 13-minute cap.
-    return {
-      opts: {
-        ...base,
-        existingDraftId: stored.draftId,
-        threadRun: {
-          config,
-          botConfig: bot,
-          draftId: stored.draftId,
-          threadId: stored.threadId,
-          threadName: stored.threadName ?? stored.threadId,
-          instruction,
-          template: body.template,
-          depth: body.depth,
-          extra: body.extra,
-          excludeDocIds: body.excludeDocIds,
-          storedCitations: stored.citations,
-          storedExcludeDocIds: stored.excludeDocIds,
-          regenerate: true,
-          ...(threadTurnOverride ? { runTurn: threadTurnOverride } : {}),
-        },
-      },
-    };
+  // THREAD-SOURCED: REFUSED. A thread draft is re-run by clicking 🧾 again in the
+  // chat with a steer line — that is another turn in the conversation, on its own
+  // row, which is the only mechanism there is. The divert that used to run one
+  // from here is gone with it.
+  //
+  // The refusal rides the RETURN VALUE rather than being answered here, exactly as
+  // `unknown` does: this function takes no `Context` and structurally cannot emit
+  // a status. `claimDraft` translates it, so BOTH POST paths inherit it — a
+  // handler-local guard would have left `/draft/start`, the CORS-open one, able to
+  // write two messages into someone's chat thread.
+  //
+  // Without the refusal a thread row falls through to `notes: stored.notes`, which
+  // is the `fra samtale: <navn>` placeholder the NOT NULL column needed — a
+  // one-line seed posted as if it were the reader's raw material.
+  //
+  // **The predicate is the SOURCE alone**, exactly as the `PUT`'s is. Adding
+  // `&& stored.threadId` looked like a safety check and was a hole: nothing
+  // enforces the pair, and a `source = 'thread'` row with a null `thread_id` is
+  // precisely the shape that then fell through to that placeholder — the one
+  // outcome this guard exists to prevent. Two spellings of one refusal is also
+  // two things to keep in step.
+  //
+  // TRANSITIONAL: PR 4 deletes this route family outright.
+  if (stored.source === "thread") {
+    return { opts: base, threadRefused: true };
   }
 
   return {
@@ -469,36 +470,29 @@ async function claimDraft(
     return { ok: false, response: unknownDraft(c) };
   }
 
-  const { opts, unknown } = await buildSseOptions(config, bot, body, instruction, mcpServers);
+  const { opts, unknown, threadRefused } = await buildSseOptions(
+    config, bot, body, instruction, mcpServers,
+  );
   if (unknown) return { ok: false, response: unknownDraft(c) };
+  // Translated HERE, so both POST paths refuse identically — see the comment on
+  // the branch in `buildSseOptions`. TRANSITIONAL: PR 4 deletes both routes.
+  if (threadRefused) return { ok: false, response: threadDraftRefused(c) };
 
-  // Keyed on the RESOLVED notes plus the draft id — see `jiraFlightKey`. A
-  // THREAD-sourced regenerate is keyed on the thread alone instead, sharing the
-  // slot with `POST …/from-thread`: both write a turn into one conversation, and
-  // two of those interleave whatever else about them differs.
-  const key = opts.threadRun
-    ? threadFlightKey(opts.threadRun.threadId)
-    : jiraFlightKey({
-        notes: opts.notes,
-        template: body.template,
-        depth: body.depth,
-        extra: body.extra,
-        excludeDocIds: body.excludeDocIds,
-        draftId: body.draftId,
-      });
+  // Keyed on the RESOLVED notes plus the draft id — see `jiraFlightKey`.
+  const key = jiraFlightKey({
+    notes: opts.notes,
+    template: body.template,
+    depth: body.depth,
+    extra: body.extra,
+    excludeDocIds: body.excludeDocIds,
+    draftId: body.draftId,
+  });
   const acquired = acquireJiraFlight(key, body.depth);
   if (!acquired.ok) {
     return {
       ok: false,
       response: c.json(
-        {
-          state: "running",
-          expiresAtMs: acquired.expiresAtMs,
-          // A THREAD-sourced draft shares its slot with `POST …/from-thread`, so
-          // it must share that route's sentence too: what is in flight is a turn
-          // in a conversation, not a draft over this reader's raw material.
-          error: opts.threadRun ? JIRA_THREAD_FLIGHT_MESSAGE : conflictMessage,
-        },
+        { state: "running", expiresAtMs: acquired.expiresAtMs, error: conflictMessage },
         409,
       ),
     };
@@ -756,11 +750,10 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
         );
       }
 
-      // The `Full` pre-flight, exactly as the notes path runs it — and as the
-      // REGENERATE of this very draft runs it. Without it a first from-thread
-      // draft at `Full` was written with the code servers down, i.e. a confident
-      // task about code nobody opened, and the reader's first regenerate then
-      // 503'd on the draft they were already holding.
+      // The `Full` pre-flight, exactly as the notes path runs it. Every 🧾 click
+      // — first draft and re-run alike — arrives here, so this is the ONE place
+      // it can be checked: without it a `Full` draft was written with the code
+      // servers down, i.e. a confident task about code nobody opened.
       let mcpServers: McpServerStatus[] = [];
       try {
         mcpServers = await getMcpStatus(bot);
@@ -780,7 +773,8 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
       // from-thread POSTs at different settings then ran two interleaved
       // `processChatMessage` turns in one conversation (measured: two user lines
       // 17 ms apart, then two replies). A turn is a message in a thread, not a
-      // piece of work over stored hits; the regenerate path keys the same way.
+      // piece of work over stored hits — and since a re-run is another POST to
+      // this same route, this key covers first drafts and re-runs alike.
       const acquired = acquireJiraFlight(threadFlightKey(body.threadId), body.depth);
       if (!acquired.ok) {
         return c.json(
@@ -819,7 +813,6 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
             template: body.template,
             depth: body.depth,
             extra: body.extra,
-            excludeDocIds: [],
             ...(threadTurnOverride ? { runTurn: threadTurnOverride } : {}),
           },
         )
@@ -953,6 +946,11 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
 
       const existing = await getJiraDraft(id);
       if (!existing) return unknownDraft(c);
+      // A thread-sourced row is REFUSED, same sentence as both POSTs. The chat's
+      // draft card renders this row's markdown, so a stale composer tab's "Lagre
+      // utkast" would silently overwrite the text under a live card in someone's
+      // conversation. TRANSITIONAL: PR 4 deletes this route.
+      if (existing.source === "thread") return threadDraftRefused(c);
 
       const retained = applyExclusions(existing.citations, existing.excludeDocIds);
       // **The reader's text is stored VERBATIM.** The `[n]` repair is a safety net
@@ -978,14 +976,12 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
       // saved — the grounding claim silently reinstated by an edit that never
       // touched it. `checkJiraMarkdown` is sync and is simply called.
       // The RAW MATERIAL is whatever the generation used, or the amber/red axis
-      // moves under an edit that never touched a key. On a thread-sourced draft
-      // that is the conversation's own user messages — `existing.notes` is the
-      // `fra samtale: <name>` placeholder, and verifying against it called every
-      // key the person had typed in chat a fabrication the moment they saved.
-      const notes =
-        existing.source === "thread" && existing.threadId
-          ? (await readThreadHistory(existing.threadId)).userText
-          : existing.notes;
+      // moves under an edit that never touched a key. On a NOTES draft that is the
+      // stored notes, and after the refusal above there is no other kind here —
+      // the thread branch (which read the conversation's own user messages,
+      // because `notes` there is only the `fra samtale: <name>` placeholder) is
+      // unreachable and gone with it.
+      const notes = existing.notes;
 
       const markdownFlags = checkJiraMarkdown(markdown);
       const keyVerdicts = await verifyJiraKeys({

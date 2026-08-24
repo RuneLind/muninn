@@ -368,10 +368,11 @@ export function jiraCardNoticeHtml(orphans: JiraCardOrphan[]): string {
  * when something a reader can SEE has changed. `updatedAt` is deliberately not
  * part of it — the runner moves it on writes that change nothing visible.
  *
- * `messageId` IS part of it, though nothing renders it: a regenerate re-points
- * the row at the new turn's bubble, and WHERE the card stands is as visible as
- * what it says. Without it the redraw was skipped and the card stayed under the
- * old reply.
+ * `messageId` IS part of it, though nothing renders it: WHERE the card stands is
+ * as visible as what it says. It is stamped after the turn, so it goes null →
+ * present on the run that matters most; a re-run mints its own row rather than
+ * moving this one, so that transition is the reachable case and the signature
+ * covers any later move for free.
  */
 export function jiraCardSignature(view: JiraCardView, gaveUp?: boolean): string {
   return [
