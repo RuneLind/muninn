@@ -81,3 +81,8 @@ CLAUDE.local.md
 # Same role as runs/ inside the private benchmarks repo — local-only data.
 test-results/
 .claude/worktrees/
+
+# playwright-cli scratch: per-session page snapshots (.yml), screenshots, traces.
+# The SKILL lives in .claude/skills/playwright-cli/ and IS tracked; this is its output.
+.playwright-cli/
+playwright-report/
