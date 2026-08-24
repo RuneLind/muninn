@@ -20,23 +20,30 @@ import type {
 } from "../jira/wire.ts";
 
 /**
- * CRUD for `jira_drafts` — the composer's one persistent surface.
+ * CRUD for `jira_drafts` — the Jira composer's one persistent surface, and since
+ * PR 4 deleted the notes path, the ONLY channel a run has: `POST
+ * /api/jira/draft/from-thread` is fire-and-forget, so the row is what the chat
+ * card and the `/jira` archive both read.
  *
- * The row is written in TWO steps by design, and the split is what makes three
- * separate behaviours possible at once:
+ * The row is written in TWO steps by design, and the split is what makes the
+ * fire-and-forget contract work:
  *
- *   · {@link createJiraDraft} inserts `status: 'generating'` BEFORE retrieval, so
- *     `GET /api/jira/draft/:id` can honestly answer `generating` mid-flight and
- *     the extension's `POST /draft/start` has an id to hand back immediately.
- *   · {@link finishJiraDraft} writes the result. It runs on EVERY terminal path,
- *     including a client abort — the scaffold family's `clientState.gone` stops
- *     the WRITES, not the work, so an aborted draft is still generated and still
- *     costs its 120–600 s. Landing it on the row is the only thing that stops
- *     that spend being thrown away.
+ *   · {@link createJiraDraft} inserts `status: 'generating'` BEFORE the turn, so
+ *     the POST has an id to hand back immediately and `GET /api/jira/draft/:id`
+ *     can honestly answer `generating` mid-flight.
+ *   · {@link finishJiraDraft} writes the result. It runs on EVERY terminal path:
+ *     the reader closing the tab stops nobody watching, not the work, so a draft
+ *     nobody is looking at is still generated and still costs its 60–600 s.
+ *     Landing it on the row is the only thing that stops that spend being thrown
+ *     away — and the row outlives the tab, which is the whole point.
  *
- * `citations` is stored as built (`maxSources` 24) and is the input to a
- * regenerate; nothing here renumbers, because renumbering is a function of the
- * exclusion set the caller holds.
+ * `citations` is stored as seeded (capped at 24). Nothing here renumbers: a
+ * thread draft cites what the conversation retrieved, and there is no exclusion
+ * set on this path to renumber against.
+ *
+ * READ-side note: `source = 'notes'` rows are still in the table and the archive
+ * still renders them, so every reader here stays four-value/both-source honest —
+ * only the WRITE path narrowed.
  */
 
 export interface CreateJiraDraftInput {
@@ -45,8 +52,15 @@ export interface CreateJiraDraftInput {
   depth: JiraDepth;
   notes: string;
   extra: string;
-  /** Defaults to `notes` — the pasted-raw-material path, and every legacy row. */
-  source?: JiraDraftSource;
+  /**
+   * Stated by the caller, never defaulted.
+   *
+   * The one writer left passes `'thread'`. A default of `'notes'` would silently
+   * mint rows on the deleted path's label — a row the archive would then render
+   * with a raw-material block over the `fra samtale: …` placeholder, and no
+   * provenance banner.
+   */
+  source: JiraDraftSource;
   /** Set with `source: 'thread'`: the chat thread the draft turn runs in. */
   threadId?: string;
 }
@@ -57,49 +71,32 @@ export async function createJiraDraft(input: CreateJiraDraftInput): Promise<stri
   const rows = await sql`
     INSERT INTO jira_drafts (bot_name, template, depth, notes, extra, status, source, thread_id)
     VALUES (${input.botName}, ${input.template}, ${input.depth}, ${input.notes}, ${input.extra}, 'generating',
-            ${input.source ?? "notes"}, ${input.threadId ?? null})
+            ${input.source}, ${input.threadId ?? null})
     RETURNING id`;
   return String(rows[0]!.id);
 }
 
 /**
- * Put an EXISTING row back into flight — the first write a regenerate makes.
+ * Store the hit set the thread retrieved.
  *
- * Without it a regenerate wrote nothing until {@link finishJiraDraft}, so
- * `POST /draft` answered `generating` while the row still said `ready` with the
- * OLD markdown, and the page's poller stopped on its very first tick and rendered
- * the previous draft as the new one. It also lands the exclusion set, so a poll
- * mid-flight already describes the generation that is running.
- *
- * `markdown` is deliberately LEFT ALONE: the previous task is the best thing to
- * show until the new one exists, and a regenerate that fails should not have
- * destroyed it.
- */
-export async function startJiraDraftRun(id: string, excludeDocIds: string[]): Promise<void> {
-  const sql = getDb();
-  await sql`
-    UPDATE jira_drafts
-       SET status = 'generating',
-           error = NULL,
-           exclude_doc_ids = ${sql.json(excludeDocIds as never)},
-           updated_at = now()
-     WHERE id = ${id}`;
-}
-
-/**
- * Store the retrieved hit set as soon as it exists — BEFORE the model call.
+ * **It runs AFTER the turn, deliberately** — the one caller
+ * (`runJiraThreadDraft`) seeds from `research_citations` once the draft turn has
+ * finished, because the turn may itself have searched and because its own reply
+ * is the strongest `cited` evidence there is: it is the text about to be pasted
+ * into Jira. Naming it a pre-generation write would describe the deleted notes
+ * path, where the hit set WAS the prompt.
  *
  * Separate from {@link finishJiraDraft} because the two have different failure
- * modes: retrieval can succeed and generation still time out, and the hit set is
- * the expensive half to re-acquire (a Haiku decomposition plus up to four
- * searches). Persisting it early means a failed draft can be regenerated without
- * re-retrieving, and PR 2's toggle column has rows to render on a `failed` row.
+ * modes: the seeding can succeed and the finalize still fail (a huginn timeout in
+ * key verification, a throw), and the row should still say what the conversation
+ * had found.
  *
- * **This is the ONLY writer of `retrieval_coverage`, by design.** The column holds
- * what RETRIEVAL found; the verdict for one generation is derived from it and that
- * run's exclusion set (`effectiveCoverage`). A second writer is precisely what
- * made a draft latch to `no_hits`: an exclude-everything regenerate stored the
- * derived value, and every later run read it back as the retrieval verdict.
+ * **This is the ONLY writer of `retrieval_coverage`, by design.** The column
+ * holds what RETRIEVAL found; the verdict a reader sees is derived from it and
+ * the citations the draft retained (`effectiveCoverage`). A second writer storing
+ * the DERIVED value is precisely what latched a draft to `no_hits` — every later
+ * read took it back as the retrieval verdict — and the rows that happened to are
+ * still in the archive.
  */
 export async function saveJiraDraftRetrieval(
   id: string,
@@ -118,8 +115,8 @@ export async function saveJiraDraftRetrieval(
 }
 
 /**
- * Point a FIRST-DRAFT row at the assistant message its turn just produced —
- * before the seeding, the finalize and both post-passes.
+ * Point a draft row at the assistant message its turn just produced — before the
+ * seeding, the finalize and both post-passes.
  *
  * The chat card is bound to a bubble by `message_id`, and everything between the
  * turn and {@link finishJiraDraft} can fail: an empty reply, a huginn timeout in
@@ -128,11 +125,10 @@ export async function saveJiraDraftRetrieval(
  * here, the only unmapped rows left are "the turn itself failed" (there is no
  * message) and a throw before the turn ran.
  *
- * **Never on a REGENERATE.** There, `finishJiraDraft` writes `message_id`
- * together with `markdown` deliberately — the row already carries the PREVIOUS
- * turn's text, and an early stamp on a run that then failed would leave it
- * pointing at the new message while holding the old task. `failJiraDraft`
- * restores `exclude_doc_ids` and nothing else, so nothing would put it back.
+ * **Every run stamps its OWN row and no other.** Re-running a draft is another
+ * 🧾 click, i.e. another turn on a NEW row, so the early stamp can never
+ * re-point a row that already holds a finished task — the failure mode this
+ * ordering had to reason about while a regenerate could overwrite one in place.
  */
 export async function setJiraDraftMessageId(id: string, messageId: string): Promise<void> {
   const sql = getDb();
@@ -148,16 +144,20 @@ export interface FinishJiraDraftInput {
   keyVerdicts: JiraKeyVerdict[];
   markdownFlags: JiraMarkdownFlag[];
   /**
-   * The assistant message this draft's markdown came from — thread path only.
+   * The assistant message this draft's markdown came from.
    *
-   * Written in the SAME statement as the markdown on a REGENERATE, deliberately:
-   * a regenerate is another thread turn, so a separate write could leave the row
-   * pointing at the previous turn while carrying this one's text — a «Juster i
-   * samtalen» link to the wrong message. A FIRST draft stamps it earlier through
-   * {@link setJiraDraftMessageId} (the card has to be reachable on a run that
-   * fails after the turn); writing it again here is idempotent. Absent on the
-   * notes path, and an absent value LEAVES the column alone rather than nulling
-   * it (a `PUT` edit does not un-anchor a draft from the turn that produced it).
+   * Written in the SAME statement as the markdown, so the two can never disagree
+   * about which turn produced the text — a «Juster i samtalen» link to the wrong
+   * message. {@link setJiraDraftMessageId} has already stamped it right after the
+   * turn (the card has to be reachable on a run that fails after it); writing it
+   * again here is idempotent.
+   *
+   * Optional because the runner may not know it: `JiraThreadTurnRunner`
+   * (`dashboard/routes/jira-thread-run.ts`)
+   * returns `messageId?` (a turn the chat pipeline completed without reporting
+   * which row it wrote), and `runJiraThreadDraft` spreads the field in only when
+   * it is present. Absent LEAVES the column alone rather than nulling it — the
+   * `COALESCE` below is what makes the double write safe.
    */
   messageId?: string;
 }
@@ -180,56 +180,23 @@ export async function finishJiraDraft(id: string, input: FinishJiraDraftInput): 
 }
 
 /**
- * Mark a draft `failed` with a reader-facing reason. `restoreExcludeDocIds`, when
- * given, puts back the exclusion set the surviving markdown was written under —
- * `startJiraDraftRun` lands the NEW set before any work, and a failed regenerate
- * would otherwise leave it beside the OLD text.
+ * Mark a draft `failed` with a reader-facing reason.
+ *
+ * **`markdown` is deliberately left alone**, and it is the archive's job to
+ * remember that: a `source = 'notes'` row could fail a REGENERATE while still
+ * holding the previous run's task, which is why `/jira` refuses to render the
+ * text of a `failed` draft and names it «Mislykket utkast» instead. Only the
+ * deleted notes path could produce that shape — every 🧾 click mints its own row
+ * — and none is in the table today (measured 2026-08-24: both `failed` rows carry
+ * no markdown). The refusal stands anyway: it is the row shape the page has to be
+ * safe against, not a population it has to find.
  */
-export async function failJiraDraft(id: string, error: string, restoreExcludeDocIds?: string[]): Promise<void> {
+export async function failJiraDraft(id: string, error: string): Promise<void> {
   const sql = getDb();
-  if (restoreExcludeDocIds) {
-    await sql`
-      UPDATE jira_drafts
-         SET status = 'failed', error = ${error},
-             exclude_doc_ids = ${sql.json(restoreExcludeDocIds as never)},
-             updated_at = now()
-       WHERE id = ${id}`;
-    return;
-  }
   await sql`
     UPDATE jira_drafts
        SET status = 'failed', error = ${error}, updated_at = now()
      WHERE id = ${id}`;
-}
-
-/**
- * Replace the draft's markdown with the reader's edit (`PUT /api/jira/draft/:id`).
- *
- * The post-pass results are RE-RUN by the route and written here in the same
- * statement rather than left stale: an edit that removes the fabricated key must
- * clear its red row, and one that introduces `- [ ]` must grow a flag. Leaving
- * them behind would leave the page asserting things about text that no longer
- * exists. `status` is forced to `ready` — a reader editing a `failed` draft into
- * something usable has, by doing so, made it ready.
- */
-export async function updateJiraDraftMarkdown(
-  id: string,
-  markdown: string,
-  keyVerdicts: JiraKeyVerdict[],
-  markdownFlags: JiraMarkdownFlag[],
-): Promise<boolean> {
-  const sql = getDb();
-  const rows = await sql`
-    UPDATE jira_drafts
-       SET markdown = ${markdown},
-           key_verdicts = ${sql.json(keyVerdicts as never)},
-           markdown_flags = ${sql.json(markdownFlags as never)},
-           status = 'ready',
-           error = NULL,
-           updated_at = now()
-     WHERE id = ${id}
-    RETURNING id`;
-  return rows.length > 0;
 }
 
 interface JiraDraftRow {

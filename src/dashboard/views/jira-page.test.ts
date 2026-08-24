@@ -78,9 +78,9 @@ const generatingPage = await renderJiraPage({
   kind: "draft",
   draft: { ...draftView, status: "generating", markdown: null },
 });
-/** A REGENERATE in flight — `startJiraDraftRun` leaves `markdown` alone, so the
- *  row is `generating` and still carries the previous turn's task. This is the
- *  one page that renders the full draft AND refreshes itself. */
+/** An archived row that is `generating` and still carries text — a notes-path
+ *  regenerate that never finished, of which the archive holds several. This is
+ *  the one page that renders the full draft AND refreshes itself. */
 const regeneratingPage = await renderJiraPage({
   kind: "draft",
   draft: { ...draftView, status: "generating" },

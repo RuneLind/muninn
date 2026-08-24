@@ -57,11 +57,15 @@ export async function renderJiraPage(view: JiraPageView): Promise<string> {
   // **The bundle rides a draft that actually RENDERS the switch and the copy
   // button**, and the test for that is TEXT, not status: `jiraDraftHasControls`
   // asks for markdown on a non-`failed` row. So the list (rows of links) and a
-  // draft with nothing to show get no bundle — but a REGENERATE in flight does,
-  // because `startJiraDraftRun` leaves `markdown` alone, so a `generating` row
-  // still carries the previous turn's task and renders it with the switch and
-  // the copy button over it (plus the meta-refresh below). Status alone would
-  // have taken the affordances off exactly that page. The predicate is the pure
+  // draft with nothing to show get no bundle — but a `generating` row CARRYING
+  // TEXT does, which is a shape the archive can hold: the deleted notes-path
+  // regenerate wrote the new status before the run and left `markdown` alone, so
+  // a run that never finished would be archived as `generating` over the previous
+  // turn's task, and this page renders that with the switch and the copy button
+  // over it (plus the meta-refresh below). No such row is in the table today
+  // (measured 2026-08-24: 53 rows, none `generating`) and nothing writes one any
+  // more, but the shape is what the predicate answers for — status alone would
+  // have taken the affordances off exactly those pages. The predicate is the pure
   // module's own, the same one its body branch reads, so the two cannot drift.
   const isDraft = view.kind === "draft";
   const needsClient = isDraft && jiraDraftHasControls(view.draft);

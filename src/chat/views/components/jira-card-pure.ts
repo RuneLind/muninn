@@ -75,9 +75,12 @@ export const JCARD_RETRY_HINT = "Prøv igjen med «🧾 Lag Jira-sak» på en me
 /**
  * The poller gave up.
  *
- * `JIRA_POLL_MAX_MS` is the server's own `Full` budget plus its slot slack, so a
- * row still `generating` then is a row nothing is working on. Saying so beats
- * polling a dead row forever, and the archive still has whatever landed.
+ * `JIRA_POLL_MAX_MS` is the card's PATIENCE, not a server ceiling — nothing
+ * bounds a thread turn at 13 min (see the constant's own statement). So this
+ * sentence can be said EARLY, about a run that is still going and will still
+ * write its row. It points at the archive because that is where such a draft
+ * turns up, and because the card itself re-adopts it on the next thread load,
+ * thread switch or `response_meta`.
  */
 export const JCARD_GAVE_UP_MESSAGE = "Utkastet ble ikke ferdig — se arkivet.";
 

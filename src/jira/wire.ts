@@ -1,12 +1,13 @@
 /**
- * The Jira-composer WIRE CONTRACT — the values the routes, PR 2's `/jira` page and
- * the tests must all agree on.
+ * The Jira WIRE CONTRACT — the values the routes, the `/jira` archive page, the
+ * chat's draft card and the tests must all agree on.
  *
- * Dependency-free on purpose, the `src/share/wire.ts` precedent: PR 2 bundles its
- * dialog/page client for the browser, so anything this module imports is pulled
- * into that bundle. `templates.ts` reaches for `bots/config.ts` types, `prompt.ts`
- * for the citation shape, `verify-keys.ts` for huginn. None of that is needed to
- * state a cap, name a depth or type a payload.
+ * Dependency-free on purpose, the `src/share/wire.ts` precedent: both the archive
+ * page and the chat card bundle a client for the browser, so anything this module
+ * imports is pulled into those bundles. `templates.ts` reaches for
+ * `bots/config.ts` types, `prompt.ts` for the citation shape, `verify-keys.ts`
+ * for huginn. None of that is needed to state a cap, name a depth or type a
+ * payload.
  */
 
 /** Which template shapes the task. Ordered ids — see `templates.ts`. */
@@ -42,46 +43,40 @@ export function isJiraDepth(value: unknown): value is JiraDepth {
  */
 export const JIRA_NOTES_MAX = 24_000;
 
-/**
- * Cap on the whole assembled generation prompt (chars) — the backstop behind
- * `JIRA_NOTES_MAX`, since the citations block is server-grown and the notes cap
- * alone does not bound it. Enforced in `prompt.ts` by trimming the CITATIONS
- * (the recoverable half), never the notes.
- */
-export const JIRA_BODY_MAX = 48_000;
-
 /** Cap on the free-text `extra` steer ("fokuser på migreringsrisikoen"). */
 export const JIRA_EXTRA_MAX = 2_000;
 
 /**
- * Cap on the reader's edit of the draft at `PUT /api/jira/draft/:id`. Generous —
- * a Full-depth task with a code excerpt is genuinely long — and a hard 400, not a
- * truncation: the stored markdown is the only copy after the paste (design call 3).
- */
-export const JIRA_MARKDOWN_MAX = 100_000;
-
-/**
  * How often a client polls `GET /api/jira/draft/:id`.
  *
- * Polling, NOT a stream re-attach: there is nothing to attach to (the only SSE
- * endpoint STARTS a generation) and a re-POST of identical content would hit the
- * single-flight 409 — which is exactly this case. It is also the only mechanism
- * that survives the ordinary events: a reload, a second tab, switching away and
- * back while a 60–600 s turn runs.
+ * Polling, NOT a stream: the write route is fire-and-forget and the run
+ * broadcasts to every open tab, so polling the ROW is the only mechanism that
+ * survives the ordinary events — a reload, a second tab, switching away and back
+ * while a 60–600 s turn runs.
  *
- * Lives HERE rather than beside `/jira`'s own page bundle because BOTH readers
- * poll the same endpoint on the same contract — the composer page and the chat's
- * draft card — and two copies of a cadence is two things to keep in step.
+ * Lives HERE rather than beside a page bundle because the cadence is a contract
+ * with the endpoint, and two copies of it is two things to keep in step.
  */
 export const JIRA_POLL_INTERVAL_MS = 2_500;
 
 /**
  * When a poller gives up.
  *
- * Sized off the server's own ceiling: `Full` is budgeted 600 s and the
- * single-flight slot outlives it by `JIRA_SLOT_SLACK_MS` (180 s), so a draft that
- * is still `generating` at 13 min is a draft nothing is working on. Giving up
- * says so rather than polling a dead row forever.
+ * **A PATIENCE heuristic, not a server ceiling.** Nothing bounds a thread turn at
+ * 13 min: the draft runs through `processChatMessage`, whose `timeoutMs` is the
+ * thread's pinned connector's, falling back to the bot's (melosys ships 10^7 ms
+ * — a thread pinned to a small-`timeout_ms` connector row IS bounded), and
+ * `JIRA_TIMEOUT_MS_BY_DEPTH` + `JIRA_SLOT_SLACK_MS` size only how long the
+ * single-flight SLOT is held against a second 🧾 click. So this number says how
+ * long a card keeps reading a row, and nothing more.
+ *
+ * The consequence, stated plainly: a legitimate turn running past 13 min makes
+ * the card give up EARLY — «Utkastet ble ikke ferdig — se arkivet.» — while the
+ * draft may still land on the row afterwards. Nothing is lost; the next thread
+ * load, thread switch or `response_meta` re-asks the listing and renders it. The
+ * card is the only surface that reports a premature end, and retuning the number
+ * against real turn durations is filed as a plan follow-up rather than guessed
+ * at here.
  */
 export const JIRA_POLL_MAX_MS = 13 * 60_000;
 
@@ -176,8 +171,8 @@ export const JIRA_TITLE_SCAN_CHARS = 400;
 /**
  * The one-line name an archived draft goes by.
  *
- * Derived, never stored: a stored copy would let a `PUT` edit leave the listing
- * naming a task the row no longer holds.
+ * Derived, never stored: a stored copy is one more thing that can drift from the
+ * markdown it claims to name.
  *
  * **The first SENTENCE identifies a Jira draft; the first heading usually does
  * not.** A Jira description carries no title — the title is the issue's summary
@@ -413,18 +408,18 @@ export const JIRA_UNREACHABLE_MESSAGE =
 /**
  * The fourth state, which the SERVER cannot spell.
  *
- * `jiraCoverageMessage` takes only the derived verdict, and a derived `no_hits`
- * has two completely different causes: the corpus covered nothing, or every
+ * The rendered coverage sentence takes only the derived verdict, and a derived
+ * `no_hits` has two completely different causes: the corpus covered nothing, or every
  * retrieved source was switched off. Telling someone reading a draft written over
  * 24 unticked rows that "nothing in jira-issues covered this search" is a lie
  * about the corpus. The page distinguishes them by comparing the derived
  * `coverage` against the stored `retrievalCoverage`, which is why both ride the
  * payload.
  *
- * **The reading survives the toggles.** Exclusions were the deleted composer's,
- * and only the notes path can still carry them, so on `/jira` this is now almost
- * always HISTORICAL data — hence a sentence that reports what happened to the
- * draft rather than offering a control the archive does not have.
+ * **The reading survives the toggles.** Exclusions were the deleted notes path's
+ * — nothing writes an exclusion set any more — so on `/jira` this state is purely
+ * HISTORICAL data, hence a sentence that reports what happened to the draft
+ * rather than offering a control nothing has.
  *
  * **And it prescribes NOTHING**, because it renders source-blind. A tail telling
  * the reader to write the task in the chat instead fires almost exclusively on
@@ -444,19 +439,19 @@ export const JIRA_ALL_EXCLUDED_MESSAGE =
  * **The two are different questions and only one of them is storable.** What
  * retrieval found is a fact about the draft session — it is written once, by
  * `saveJiraDraftRetrieval`, and never again. What a given RUN was grounded in is
- * a function of the reader's exclusion set at that moment, which changes on every
- * regenerate. Writing the second back over the first is what made the composer
- * latch: one regenerate with every source toggled off stored `no_hits`, the next
- * regenerate read that back as "what retrieval found", and the draft stayed
- * `no_hits` with 21 live citations and a full `## Referanser` underneath it.
+ * a function of the exclusion set at that moment. Writing the second back over
+ * the first is what made the deleted composer latch: one regenerate with every
+ * source toggled off stored `no_hits`, the next regenerate read that back as
+ * "what retrieval found", and the draft stayed `no_hits` with 21 live citations
+ * and a full `## Referanser` underneath it. Nothing writes an exclusion set now,
+ * but the derivation stays — it is what an ARCHIVED row carrying one still reads
+ * through.
  *
- * So: the row keeps the retrieval verdict, and both the `done` payload and
- * `GET /api/jira/draft/:id` report THIS. Deriving costs nothing — the row already
- * stores the wide citation set and the run's exclusion set — and it cannot drift,
- * which two columns could.
+ * So: the row keeps the retrieval verdict, and `GET /api/jira/draft/:id` reports
+ * THIS. Deriving costs nothing — the row already stores the wide citation set and
+ * the run's exclusion set — and it cannot drift, which two columns could.
  *
- * `null` (a legacy row, or one whose retrieval never landed) reads as `answer`,
- * the same default the regenerate path has always applied.
+ * `null` (a legacy row, or one whose retrieval never landed) reads as `answer`.
  */
 export function effectiveCoverage(
   retrievalCoverage: JiraCoverage | null | undefined,
@@ -473,7 +468,10 @@ export function effectiveCoverage(
 
 /** One retrieved source, as the toggle column renders it and the prompt cites it. */
 export interface JiraCitation {
-  /** 1-based, renumbered after `excludeDocIds` (see the regenerate contract). */
+  /** 1-based, in the order the row stores them. Nothing renumbers: a thread
+   *  draft cites what the conversation retrieved, and the exclusion set that
+   *  used to renumber against went with the notes path. An ARCHIVED row's `n`
+   *  is whatever its own run assigned. */
   n: number;
   collection: string;
   docId: string;
@@ -531,38 +529,14 @@ export interface JiraMarkdownFlag {
   sample: string;
 }
 
-/** The SSE `done` payload. */
-export interface JiraDonePayload {
-  draftId: string;
-  markdown: string;
-  citations: JiraCitation[];
-  keyVerdicts: JiraKeyVerdict[];
-  markdownFlags: JiraMarkdownFlag[];
-  /**
-   * The coverage VERDICT, deliberately not a `weakCoverage` boolean: at
-   * `low_confidence` the draft is grounded-but-weak, at `no_hits` there is no
-   * `## Referanser` section at all. The two states differ and the page renders
-   * them differently.
-   */
-  coverage: JiraCoverage;
-  /**
-   * What RETRIEVAL found, before this run's exclusions — the same field the view
-   * carries, so a stream-driven client can tell "the corpus had nothing" from
-   * "the reader toggled everything off" without a second GET. `null` only when
-   * retrieval never landed.
-   */
-  retrievalCoverage: JiraCoverage | null;
-  /** The condensed retrieval question — shown so the reader can see what was searched. */
-  retrievalQuestion: string;
-}
-
 /** Status of a stored draft, as `GET /api/jira/draft/:id` reports it. */
 export type JiraDraftStatus = "generating" | "ready" | "failed";
 
 /**
  * Where a draft came from.
  *
- * `notes` — the reader pasted raw material and the server retrieved for it.
+ * `notes` — the reader pasted raw material and the server retrieved for it. That
+ * path is DELETED; the value survives because the archive is full of such rows.
  * `thread` — the draft is a TURN in a chat thread: the conversation already
  * retrieved (through the `research_knowledge` MCP tool), already argued with the
  * answer, and the draft turn inherits all of it as ordinary history. The two
@@ -570,8 +544,9 @@ export type JiraDraftStatus = "generating" | "ready" | "failed";
  * from `thread_id` being set: a `thread` row's hit set comes from
  * `research_citations` rather than from a retrieval, and re-running it mints a
  * NEW row via `from-thread` (another turn, another draft) instead of re-writing
- * this one — so `source` alone is what the composer routes refuse on, without
- * consulting `thread_id` at all.
+ * this one. It is deliberately NOT inferred from `thread_id` being set: nothing
+ * enforces the pair, and a `thread` row with a null `thread_id` is a shape the
+ * archive really does hold.
  */
 export type JiraDraftSource = "notes" | "thread";
 
@@ -604,14 +579,19 @@ export interface JiraDraftView {
   notes: string;
   extra: string;
   markdown: string | null;
-  /** The WIDE stored hit set — every row PR 2's toggle column renders. */
+  /** The WIDE stored hit set — on a thread draft, everything the conversation
+   *  retrieved; on an archived notes row, everything its search found. */
   citations: JiraCitation[];
   /**
-   * The doc ids the reader toggled OFF, as the last generation used them.
+   * The doc ids the reader toggled OFF on an ARCHIVED draft (the toggle lived on
+   * the notes composer, but thread rows carry sets too — 2026-08-23 rows exist).
    *
-   * Stored so the view is self-consistent: without it a poll answered with 24
-   * citations beside markdown that cites 23, and `PUT` re-verified against the
-   * wide set — flipping an excluded key back to `verified` on save.
+   * **Nothing writes this any more** — the toggle column and the regenerate it
+   * fed went with the notes path, and a thread draft is narrowed by saying so in
+   * the next 🧾 click's steer. It stays on the view because archived rows carry
+   * one, and it is what makes their `coverage` derivation honest: a row whose
+   * every source was switched off must still read `no_hits` beside a stored
+   * `retrieval_coverage` that says the corpus had hits.
    */
   excludeDocIds: string[];
   keyVerdicts: JiraKeyVerdict[];
@@ -691,11 +671,11 @@ export interface JiraDraftListRow {
   /**
    * {@link jiraDraftTitle} over the head of the markdown. Null only when the row
    * holds no text: one still `generating`, or one that failed before ever
-   * writing any. A FAILED row can perfectly well carry a title — `failJiraDraft`
-   * leaves `markdown` alone, so a failed regenerate keeps the previous turn's
-   * text (the statement on `failJiraDraft` in `db/jira-drafts.ts` is the
-   * authority). The archive's DRAFT view refuses to render that text; the row
-   * still names it.
+   * writing any. A FAILED row can nonetheless carry a title — `failJiraDraft`
+   * leaves `markdown` alone, so a failed regenerate could be archived still
+   * holding the previous turn's text (the statement on `failJiraDraft` in
+   * `db/jira-drafts.ts` is the authority for why no such row exists today). The
+   * archive's DRAFT view refuses to render that text; the row still names it.
    */
   title: string | null;
   /** The stored retrieval verdict, unchanged — see {@link JiraDraftView}. */
@@ -709,125 +689,4 @@ export interface JiraDraftListRow {
   /** Null when «Lagre» was never pressed — the default listing hides those. */
   savedAt: number | null;
   createdAt: number;
-}
-
-// ── Request-body validation ──────────────────────────────────────────────────
-
-/** The validated draft-request body. */
-export interface ParsedJiraDraftBody {
-  notes: string;
-  template: string;
-  depth: JiraDepth;
-  extra: string;
-  /** Regenerate: reuse this draft's stored hit set. Empty ⇒ a fresh retrieval. */
-  draftId: string;
-  /** Doc ids the reader toggled OFF. Only meaningful with `draftId`. */
-  excludeDocIds: string[];
-}
-
-export type JiraBodyResult =
-  | { ok: true; body: ParsedJiraDraftBody }
-  | { ok: false; error: string };
-
-/**
- * The wire fields, named the way the `/jira` page names them.
- *
- * **These messages are reader-facing.** The route returns the validator's string
- * verbatim in its 400 body and the page renders it verbatim in its status line,
- * so an English `extra is longer than 2000 characters` landed under a Norwegian
- * form whose own field is labelled «Ekstra instruks». The whole surface is
- * Norwegian; so is this.
- */
-const FIELD_LABELS: Record<string, string> = {
-  notes: "Råmaterialet",
-  template: "Malen",
-  depth: "Teknisk dybde",
-  extra: "Ekstra instruks",
-  draftId: "Utkast-id-en",
-};
-
-/**
- * Validate one draft POST body.
- *
- * Lives in the dependency-free wire module for the `parseShareRequestBody`
- * reason: BOTH entry points run it — the SSE `POST /api/jira/draft` and the
- * plain-JSON `POST /api/jira/draft/start` the extension calls — and two copies of
- * a validation contract is two copies to drift. The error copy IS the contract
- * (the route tests pin these strings), so a caller hitting one endpoint must not
- * be told something different from a caller hitting the other.
- *
- * Returns an error rather than a `Response` so it stays dependency-free and each
- * route keeps ownership of its status code. The ORDERING rule both routes hold:
- * this runs BEFORE anything resolution-dependent, and long before `streamSSE`
- * commits a 200 — after that a validation failure can only be an `app_error` no
- * client can tell from a model failure.
- *
- * The TEMPLATE id is deliberately not validated here: the valid set is a function
- * of the resolved bot's `jiraTemplate.<id>.md` overrides, which this module
- * cannot see. It is checked in the route, still pre-commit.
- */
-export function parseJiraDraftBody(body: Record<string, unknown>): JiraBodyResult {
-  for (const field of ["notes", "template", "depth", "extra", "draftId"]) {
-    const v = body[field];
-    if (v !== undefined && typeof v !== "string") {
-      return { ok: false, error: `${FIELD_LABELS[field] ?? field} må være en tekststreng.` };
-    }
-  }
-
-  const draftId = typeof body.draftId === "string" ? body.draftId.trim() : "";
-  const notes = typeof body.notes === "string" ? body.notes : "";
-  // A regenerate reuses the stored notes, so an absent `notes` is legal there and
-  // only there. Requiring them on both paths would force the extension/page to
-  // echo a 10 KB Slack thread back on every toggle click.
-  if (!draftId && !notes.trim()) return { ok: false, error: "Råmaterialet mangler." };
-  // ...and NEW notes on a regenerate are refused rather than silently honoured.
-  // The stored hit set was retrieved for the OLD raw material and is deliberately
-  // not re-retrieved (design call 1), so drafting different notes against it
-  // answers a question nobody asked and leaves `retrieval_question` describing a
-  // search that no longer matches the row. Changing the notes means a new draft.
-  if (draftId && notes.trim()) {
-    return {
-      ok: false,
-      error:
-        "Råmaterialet kan ikke endres når du genererer på nytt — treffene ble hentet for den " +
-        "opprinnelige teksten. Start et nytt utkast i stedet.",
-    };
-  }
-  if (notes.length > JIRA_NOTES_MAX) {
-    return { ok: false, error: `Råmaterialet er ${notes.length} tegn — grensen er ${JIRA_NOTES_MAX}.` };
-  }
-
-  const template = typeof body.template === "string" ? body.template.trim() : "";
-  if (!template) return { ok: false, error: "Ingen mal er valgt." };
-
-  if (!isJiraDepth(body.depth)) {
-    return {
-      ok: false,
-      error: `Teknisk dybde må være en av: ${JIRA_DEPTHS.map((d) => d.id).join(", ")}.`,
-    };
-  }
-
-  const extra = typeof body.extra === "string" ? body.extra : "";
-  if (extra.length > JIRA_EXTRA_MAX) {
-    return { ok: false, error: `Ekstra instruks er ${extra.length} tegn — grensen er ${JIRA_EXTRA_MAX}.` };
-  }
-
-  const rawExclude = body.excludeDocIds;
-  if (rawExclude !== undefined) {
-    if (!Array.isArray(rawExclude) || rawExclude.some((v) => typeof v !== "string")) {
-      return { ok: false, error: "Avslåtte kilder må være en liste med dokument-id-er." };
-    }
-  }
-  const excludeDocIds = Array.isArray(rawExclude) ? (rawExclude as string[]).map((s) => s.trim()).filter(Boolean) : [];
-  // An exclusion set with no draft to apply it to is a client bug, not a
-  // no-op: the reader toggled rows off against a hit set the server is about to
-  // discard, and the draft would silently come back citing every one of them.
-  if (!draftId && excludeDocIds.length > 0) {
-    return {
-      ok: false,
-      error: "Kilder kan ikke slås av uten et utkast — det finnes ingen lagret trefliste å utelate fra.",
-    };
-  }
-
-  return { ok: true, body: { notes, template, depth: body.depth, extra, draftId, excludeDocIds } };
 }

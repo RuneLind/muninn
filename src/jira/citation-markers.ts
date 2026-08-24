@@ -11,12 +11,13 @@
  * anyway.
  *
  * **A safety net over MODEL output, and nothing else.** It runs on exactly one
- * path — the SSE runner, over the text the model just produced. It deliberately
- * does NOT run on `PUT /api/jira/draft/:id`: that text is the READER's, and a
- * pass that silently edits what a human typed is a bug however careful it is.
- * (It was also wrong there in a second way: PUT bounded the strip by the STORED
- * hit set — up to 24 — while generation bounds it by `citationsUsed`, 6–8 on this
- * corpus, so saving deleted `[9]`–`[23]` the reader had been reading all along.)
+ * path — `finalizeJiraDraft`, over the text the draft turn just produced — and
+ * nothing else in the feature may adopt it: a pass that silently edits text a
+ * HUMAN wrote is a bug however careful it is. (The reader-edit route that once
+ * ran it, `PUT /api/jira/draft/:id`, was wrong in a second way too: it bounded
+ * the strip by the STORED hit set — up to 24 — while generation bounds it by
+ * `citationsUsed`, 6–8 on this corpus, so saving deleted `[9]`–`[23]` the reader
+ * had been reading all along. The route is gone; the rule outlives it.)
  *
  * **A repair, not a lint.** It flags nothing and reports nothing: unlike
  * `markdown-check.ts`, whose whole point is that a construct Jira will not

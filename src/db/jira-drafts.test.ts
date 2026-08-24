@@ -1,5 +1,6 @@
 import { test, expect, describe } from "bun:test";
 import { setupTestDb } from "../test/setup-db.ts";
+import { getDb } from "./client.ts";
 import { ensureDefaultThread } from "./threads.ts";
 import {
   createJiraDraft,
@@ -9,7 +10,6 @@ import {
   listJiraDrafts,
   saveJiraDraft,
   saveJiraDraftRetrieval,
-  startJiraDraftRun,
 } from "./jira-drafts.ts";
 
 /**
@@ -54,6 +54,7 @@ describe("getJiraDraft — the thread join", () => {
       depth: "ingen",
       notes: "råmateriale",
       extra: "",
+      source: "notes",
     });
 
     const view = await getJiraDraft(id);
@@ -82,6 +83,7 @@ describe("saveJiraDraft — only a ready row can be kept", () => {
       depth: "skisse",
       notes: "råmateriale",
       extra: "",
+      source: "notes",
     });
 
     // Fresh rows are `generating` — nothing to keep yet.
@@ -101,6 +103,7 @@ describe("saveJiraDraft — only a ready row can be kept", () => {
       depth: "ingen",
       notes: "råmateriale",
       extra: "",
+      source: "notes",
     });
     await failJiraDraft(id, "Utkastet ble ikke skrevet ferdig.");
     expect(await saveJiraDraft(id)).toBeNull();
@@ -132,10 +135,10 @@ describe("listJiraDrafts — the archive listing", () => {
 
   test("saved-only hides an unsaved row that all-attempts shows", async () => {
     const kept = await createJiraDraft({
-      botName: "arkiv-a", template: "bug", depth: "skisse", notes: "n", extra: "",
+      botName: "arkiv-a", template: "bug", depth: "skisse", notes: "n", extra: "", source: "notes",
     });
     const loose = await createJiraDraft({
-      botName: "arkiv-a", template: "bug", depth: "skisse", notes: "n", extra: "",
+      botName: "arkiv-a", template: "bug", depth: "skisse", notes: "n", extra: "", source: "notes",
     });
     await finishJiraDraft(kept, { markdown: "# Lagret sak\n\ntekst", keyVerdicts: [], markdownFlags: [] });
     await finishJiraDraft(loose, { markdown: "# Ulagret sak\n\ntekst", keyVerdicts: [], markdownFlags: [] });
@@ -152,7 +155,7 @@ describe("listJiraDrafts — the archive listing", () => {
 
   test("a failed row appears under all attempts, marked failed and titleless", async () => {
     const id = await createJiraDraft({
-      botName: "arkiv-b", template: "task", depth: "ingen", notes: "n", extra: "",
+      botName: "arkiv-b", template: "task", depth: "ingen", notes: "n", extra: "", source: "notes",
     });
     await failJiraDraft(id, "Utkastet ble ikke skrevet ferdig.");
     const row = ((await listJiraDrafts({ savedOnly: false, limit: 200 })).drafts).find((r) => r.draftId === id);
@@ -163,7 +166,7 @@ describe("listJiraDrafts — the archive listing", () => {
 
   test("the title comes off the markdown's own heading", async () => {
     const id = await createJiraDraft({
-      botName: "arkiv-c", template: "story", depth: "full", notes: "n", extra: "",
+      botName: "arkiv-c", template: "story", depth: "full", notes: "n", extra: "", source: "notes",
     });
     await finishJiraDraft(id, {
       markdown: "# Avgift beregnes feil\n\n## Bakgrunn\n\ntekst",
@@ -176,20 +179,26 @@ describe("listJiraDrafts — the archive listing", () => {
 
   test("coverage is DERIVED per row: the stored verdict plus what this run retained", async () => {
     const grounded = await createJiraDraft({
-      botName: "arkiv-d", template: "bug", depth: "skisse", notes: "n", extra: "",
+      botName: "arkiv-d", template: "bug", depth: "skisse", notes: "n", extra: "", source: "notes",
     });
     await saveJiraDraftRetrieval(grounded, CITES as never, "answer", "spørsmål");
     await finishJiraDraft(grounded, { markdown: "# Med kilder", keyVerdicts: [], markdownFlags: [] });
 
     const excluded = await createJiraDraft({
-      botName: "arkiv-d", template: "bug", depth: "skisse", notes: "n", extra: "",
+      botName: "arkiv-d", template: "bug", depth: "skisse", notes: "n", extra: "", source: "notes",
     });
     await saveJiraDraftRetrieval(excluded, CITES as never, "answer", "spørsmål");
-    await startJiraDraftRun(excluded, ["d-keep", "d-drop"]);
+    // A HISTORICAL exclusion set, written straight into the column: the notes
+    // path that used to toggle sources off is gone, and nothing in the code
+    // writes `exclude_doc_ids` any more — but archived rows carry one and the
+    // listing's derived `coverage` still has to read it.
+    await getDb()`
+      UPDATE jira_drafts SET exclude_doc_ids = ${getDb().json(["d-keep", "d-drop"] as never)}
+       WHERE id = ${excluded}`;
     await finishJiraDraft(excluded, { markdown: "# Uten kilder", keyVerdicts: [], markdownFlags: [] });
 
     const unreachable = await createJiraDraft({
-      botName: "arkiv-d", template: "bug", depth: "skisse", notes: "n", extra: "",
+      botName: "arkiv-d", template: "bug", depth: "skisse", notes: "n", extra: "", source: "notes",
     });
     await saveJiraDraftRetrieval(unreachable, [], "unreachable", "spørsmål");
     await finishJiraDraft(unreachable, { markdown: "# Uten API", keyVerdicts: [], markdownFlags: [] });
@@ -207,7 +216,7 @@ describe("listJiraDrafts — the archive listing", () => {
     expect(byId(unreachable).coverage).toBe("unreachable");
     // Retrieval that never landed reports null, not `no_hits`.
     const fresh = await createJiraDraft({
-      botName: "arkiv-d", template: "bug", depth: "skisse", notes: "n", extra: "",
+      botName: "arkiv-d", template: "bug", depth: "skisse", notes: "n", extra: "", source: "notes",
     });
     const freshRow = ((await listJiraDrafts({ savedOnly: false, limit: 200 })).drafts).find(
       (r) => r.draftId === fresh,
@@ -234,7 +243,7 @@ describe("listJiraDrafts — the archive listing", () => {
     // one page where the reader can count the rows and see the claim is wrong.
     for (let i = 0; i < 3; i++) {
       const id = await createJiraDraft({
-        botName: "arkiv-cap", template: "bug", depth: "skisse", notes: "n", extra: "",
+        botName: "arkiv-cap", template: "bug", depth: "skisse", notes: "n", extra: "", source: "notes",
       });
       await finishJiraDraft(id, { markdown: `# Cap ${i}`, keyVerdicts: [], markdownFlags: [] });
       await saveJiraDraft(id);

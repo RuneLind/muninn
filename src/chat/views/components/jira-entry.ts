@@ -7,8 +7,8 @@
  *
  * The shape of the feature: a Jira task is DISCUSSED in the melosys thread first
  * (the conversation retrieves, argues, corrects), and the draft is a TURN in that
- * same thread — `POST /api/jira/draft/from-thread`, fire-and-forget, exactly like
- * `/draft/start`. **The draft never leaves the conversation:** the turn appears in
+ * same thread — `POST /api/jira/draft/from-thread`, fire-and-forget (the card
+ * polls the row). **The draft never leaves the conversation:** the turn appears in
  * the chat like any other, and its FINALIZED text (fence stripped, `[n]` repaired,
  * `## Referanser` appended) arrives as a card under the reply — `jira-card.ts`.
  * There is no tab to open and no second page to hand the reader to; `/jira` stays
