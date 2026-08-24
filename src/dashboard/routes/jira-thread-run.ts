@@ -364,15 +364,15 @@ export interface ThreadHistory {
  *
  *  · `role === "peer"` is another agent talking in the thread (the hivemind
  *    autorespond path), not the person's claim about anything;
- *  · a `Lag Jira-sak …` line is OURS. The reader's own steer rides that line, so
- *    it can name a source or a key («uten MELOSYS-1234») — left in, a key the
- *    model re-used anyway read amber ("you wrote it") when the person had asked
- *    for exactly the opposite.
+ *  · a `Lag Jira-sak …` line is OUR text — a control line this feature wrote
+ *    into the thread, not the person's own message about anything.
  *
- * The strip is about PREVIOUS runs' steers, which are instructions whichever
- * polarity they had. THIS run's steer is joined onto `notes` WHOLESALE at the
- * call site, so a key it names reads amber whichever polarity it had. See the
- * accepted asymmetry stated there.
+ * The strip is about PREVIOUS runs' turn lines; THIS run's steer is joined onto
+ * `notes` WHOLESALE at the call site, so a key it names reads amber whichever
+ * polarity it had (see the accepted asymmetry stated there). The CROSS-RUN
+ * asymmetry that follows is also accepted: a key named only in a PREVIOUS run's
+ * steer is stripped with its line and reads red on this run — re-name it in
+ * this click's steer to keep it amber.
  */
 async function readThreadHistory(threadId: string): Promise<ThreadHistory> {
   const thread = await getThreadById(threadId);

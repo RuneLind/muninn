@@ -1726,7 +1726,10 @@ describe("POST /api/jira/draft/from-thread", () => {
     expect(state("MELOSYS-8150")).toBe("verified");
     // The person typed it ⇒ amber, not a fabrication charge.
     expect(state("MELOSYS-3001")).toBe("notes");
-    // Ours, a peer's, the bot's ⇒ red. Nobody claimed any of them.
+    // Ours, a peer's, the bot's ⇒ red. MELOSYS-3002 rode a PREVIOUS run's
+    // steer and is stripped with our turn line — the accepted cross-run
+    // asymmetry (this run's steer stays amber via the wholesale notes join;
+    // a previous run's must be re-named in the new steer to stay amber).
     expect(state("MELOSYS-3002")).toBe("unknown");
     expect(state("MELOSYS-3003")).toBe("unknown");
     expect(state("MELOSYS-3004")).toBe("unknown");

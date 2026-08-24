@@ -316,9 +316,10 @@ export function isJiraTurnLine(text: string): boolean {
  * multi-line steer would make the turn line multi-line, which {@link
  * isJiraTurnLine} refuses by construction (it is line-anchored, deliberately, so
  * a person's pasted «Lag Jira-sak av dette:» + notes survives as raw material).
- * An unrecognised line is raw material on the NEXT run, i.e. a key the reader
- * asked to leave OUT would read amber. Collapsing here costs nothing and keeps
- * the line recognisable whatever arrives.
+ * An unrecognised line simply stays raw material on the NEXT run — the same
+ * amber reading the current run's steer gets on purpose (the accepted
+ * asymmetry). Collapsing here costs nothing and keeps the line recognisable
+ * whatever arrives.
  */
 export function flattenSteer(extra: string | undefined): string {
   return (extra ?? "").replace(/\s*\n+\s*/g, " ").trim();
