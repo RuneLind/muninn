@@ -168,7 +168,7 @@ export interface JiraFlightKeyInput {
 }
 
 /**
- * The single-flight key for BOTH thread paths: the thread, and nothing else.
+ * The single-flight key for the thread path: the thread, and nothing else.
  *
  * `jiraFlightKey` hashes everything that changes the OUTPUT, which is the right
  * rule for a one-shot over stored hits — two different drafts are two different
@@ -182,12 +182,13 @@ export interface JiraFlightKeyInput {
  * with a content hash.
  */
 /**
- * The 409 sentence for that shared slot — ONE spelling.
+ * The 409 sentence for that slot — ONE spelling.
  *
- * Both holders of a `threadFlightKey` slot say it: `POST …/from-thread` and a
- * regenerate of a thread-sourced draft. The regenerate used to answer with the
- * NOTES path's sentence («…et utkast for dette råmaterialet»), which names raw
- * material this draft does not have and a piece of work this path never runs.
+ * There is now exactly ONE holder of a `threadFlightKey` slot, `POST
+ * …/from-thread` — a re-run is another click on that same route. The sentence is
+ * still declared apart from the notes path's («…et utkast for dette
+ * råmaterialet»), which names raw material this draft does not have and a piece
+ * of work this path never runs.
  */
 export const JIRA_THREAD_FLIGHT_MESSAGE =
   "Det skrives allerede en sak fra denne samtalen — vent til den er ferdig.";

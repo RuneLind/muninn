@@ -91,10 +91,10 @@ Three rules underneath it, each of which cost a defect:
    FINISHED draft with nothing to render after a reload. The skip on a later
    listing is keyed on `attached && status && messageId all unchanged`, not on
    the status alone: a row can go `ready` while its bubble is still arriving over
-   the WebSocket, and a REGENERATE re-points `message_id` at the new turn while
-   the status stays `ready` — a status-only skip stranded the first forever and
-   left the second's card standing under the old bubble (the card left behind
-   under the previous bubble is removed by draft id at attach time). A settled
+   the WebSocket, so a status-only skip stranded it forever. A re-run mints its OWN
+   row (this draft's `message_id` is stamped once and never moves), so the
+   remaining message-id comparison — and the stray-card removal by draft id at
+   attach time — are cheap defence rather than a live case. A settled
    record whose bubble is simply offscreen is re-RENDERED rather than re-read,
    since every `response_meta` re-asks the listing.
 2. **`attachJiraCard(messageId, draftId, view)` is its own idempotent function.**
