@@ -63,8 +63,9 @@ export const JIRA_POLL_INTERVAL_MS = 2_500;
  * When a poller gives up.
  *
  * **A PATIENCE heuristic, not a server ceiling.** Nothing bounds a thread turn at
- * 13 min: the draft runs through `processChatMessage` on the Jira bot's own
- * connector, whose `timeoutMs` is the bot's (melosys ships 10^7 ms), and
+ * 13 min: the draft runs through `processChatMessage`, whose `timeoutMs` is the
+ * thread's pinned connector's, falling back to the bot's (melosys ships 10^7 ms
+ * — a thread pinned to a small-`timeout_ms` connector row IS bounded), and
  * `JIRA_TIMEOUT_MS_BY_DEPTH` + `JIRA_SLOT_SLACK_MS` size only how long the
  * single-flight SLOT is held against a second 🧾 click. So this number says how
  * long a card keeps reading a row, and nothing more.
@@ -582,7 +583,8 @@ export interface JiraDraftView {
    *  retrieved; on an archived notes row, everything its search found. */
   citations: JiraCitation[];
   /**
-   * The doc ids the reader toggled OFF on an ARCHIVED notes draft.
+   * The doc ids the reader toggled OFF on an ARCHIVED draft (the toggle lived on
+   * the notes composer, but thread rows carry sets too — 2026-08-23 rows exist).
    *
    * **Nothing writes this any more** — the toggle column and the regenerate it
    * fed went with the notes path, and a thread draft is narrowed by saying so in

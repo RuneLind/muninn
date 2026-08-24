@@ -53,7 +53,8 @@ export function resolveJiraBotLive(): BotConfig | undefined {
   return resolveJiraBot(discoverAllBots());
 }
 
-/** The 503 body's message — one spelling, shared by every `/api/jira/*` route. */
+/** The 503 body's message — one spelling, shared by the two routes that need the
+ *  pinned bot (templates and from-thread); the archive reads render botless. */
 export function jiraBotMissingMessage(): string {
   return (
     `Jira-komponisten er festet til boten "${jiraBotName()}", som ikke er oppdaget i denne instansen. ` +

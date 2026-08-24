@@ -68,8 +68,8 @@ export const JIRA_EMPTY_RESULT_MESSAGE =
  * this is what lands on the row, which is read back through a CORS-open GET, so
  * it must never carry the exception's own text (stack-shaped strings with local
  * paths and internal host:port pairs). The detail goes to the log. It lives here
- * beside the tail that writes it rather than as a literal in the one remaining
- * runner.
+ * beside its sibling constant so the failure vocabulary has one home; the writer
+ * is the runner (`jira-thread-run.ts`).
  */
 export const JIRA_UNFINISHED_MESSAGE =
   "Utkastet kunne ikke skrives ferdig. Se muninn-loggen for detaljer, og prøv igjen.";

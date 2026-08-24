@@ -152,7 +152,8 @@ export interface FinishJiraDraftInput {
    * turn (the card has to be reachable on a run that fails after it); writing it
    * again here is idempotent.
    *
-   * Optional because the runner may not know it: {@link JiraThreadTurnRunner}
+   * Optional because the runner may not know it: `JiraThreadTurnRunner`
+   * (`dashboard/routes/jira-thread-run.ts`)
    * returns `messageId?` (a turn the chat pipeline completed without reporting
    * which row it wrote), and `runJiraThreadDraft` spreads the field in only when
    * it is present. Absent LEAVES the column alone rather than nulling it — the
