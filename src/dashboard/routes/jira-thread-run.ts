@@ -36,8 +36,10 @@ import { sliceForDepth } from "../../jira/retrieval.ts";
 import {
   buildThreadTurnInstruction,
   citationsNamedInDraft,
+  flattenSteer,
   isJiraTurnLine,
   seedThreadCitations,
+  steerWithoutExcludedKeys,
   threadDraftTurnText,
   threadRegenTurnText,
   threadSeedCoverage,
@@ -267,16 +269,32 @@ export async function runJiraThreadDraft(
       // it") rather than red ("fabricated"). Passing the `fra samtale: …`
       // placeholder instead would call every human-mentioned key a fabrication.
       //
-      // **THIS run's steer is joined on explicitly.** `readThreadHistory` strips
-      // the turn lines the steer rides (`isJiraTurnLine`) — correct, and it must
-      // stay: on a LATER run «uten MELOSYS-1234» left in would make a key the
-      // reader asked to drop read amber ("you wrote it"), the exact opposite of
-      // what they said. But the strip also means the steer for the run happening
-      // NOW is nowhere in `userText`, and a key the reader NAMED there («ta med
-      // MELOSYS-4242») then verified red — a fabrication charge against a key the
-      // person had just typed. The current steer is raw material; the previous
-      // ones are instructions.
-      notes: [history.userText, opts.extra.trim()].filter(Boolean).join("\n\n"),
+      // **THIS run's steer is joined on explicitly, and POLARITY-AWARE.**
+      // `readThreadHistory` strips the turn lines the steer rides
+      // (`isJiraTurnLine`) — correct, and it must stay: on a LATER run the steer
+      // is an instruction, not a claim. But the strip also means the steer for
+      // the run happening NOW is nowhere in `userText`, and the two polarities
+      // want opposite things from that:
+      //
+      //  · a key the reader NAMES («ta med MELOSYS-4242») must be raw material,
+      //    or it verifies red — a fabrication charge against a key the person
+      //    had just typed;
+      //  · a key the reader EXCLUDES («uten MELOSYS-1234» — the documented
+      //    primary use) must NOT be, or a model that ignored the exclusion and
+      //    cited it anyway gets the softer amber badge: the same amber-lie the
+      //    turn-line strip exists to prevent, one run earlier.
+      //
+      // So the negated keys come off first (`steerWithoutExcludedKeys`), and the
+      // steer is flattened by the SAME `flattenSteer` the visible turn line uses,
+      // so the two spellings of it cannot diverge.
+      //
+      // NB this `notes` may exceed `JIRA_NOTES_MAX` by up to `JIRA_EXTRA_MAX`:
+      // `readThreadHistory` clips `userText` to the cap and the steer is added
+      // after. That is by design — the value is key-extraction input only, never
+      // prompted and never stored.
+      notes: [history.userText, steerWithoutExcludedKeys(flattenSteer(opts.extra))]
+        .filter(Boolean)
+        .join("\n\n"),
       knowledgeApiUrl: opts.config.knowledgeApiUrl,
       ...(turn.messageId ? { messageId: turn.messageId } : {}),
     });
@@ -331,11 +349,12 @@ export interface ThreadHistory {
 /**
  * The thread's history, as this feature reads it.
  *
- * Still exported for `PUT /api/jira/draft/:id`, which now REFUSES a thread-sourced
- * row (PR 3) and so no longer reaches it: the read was there because handing key
+ * Module-private, and it has exactly ONE caller — the run above. It used to be
+ * exported for `PUT /api/jira/draft/:id`, which needed it because handing key
  * verification the stored `fra samtale: …` placeholder as the raw material flipped
  * every amber row red the moment the reader saved — an edit that never touched the
- * key. PR 4 deletes that route.
+ * key. That route REFUSES a thread-sourced row since PR 3, so nothing imports this
+ * any more.
  *
  * The bot comes off the thread rather than from a parameter: the two are the same
  * by construction (the route refuses a thread belonging to another bot) and a
@@ -351,11 +370,12 @@ export interface ThreadHistory {
  *    model re-used anyway read amber ("you wrote it") when the person had asked
  *    for exactly the opposite.
  *
- * The strip is about PREVIOUS runs' steers, which are instructions. THIS run's
- * steer is raw material and is joined onto `notes` at the call site — see the
- * comment there.
+ * The strip is about PREVIOUS runs' steers, which are instructions whichever
+ * polarity they had. THIS run's steer is joined onto `notes` at the call site,
+ * and only its POSITIVE half: a key it names is the person's claim, a key it
+ * excludes is not. See the comment there.
  */
-export async function readThreadHistory(threadId: string): Promise<ThreadHistory> {
+async function readThreadHistory(threadId: string): Promise<ThreadHistory> {
   const thread = await getThreadById(threadId);
   if (!thread) return { assistantTexts: [], userText: "" };
   const messages = await getRecentMessages(

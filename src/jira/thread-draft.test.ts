@@ -22,6 +22,7 @@ import {
   isJiraTurnLine,
   JIRA_TURN_TEXT_PREFIX,
   seedThreadCitations,
+  steerWithoutExcludedKeys,
   threadDraftTurnText,
   threadRegenTurnText,
   threadSeedCoverage,
@@ -347,6 +348,57 @@ describe("turn text", () => {
         "Lag Jira-sak på nytt (bug, skisse). Ikke bruk disse kildene denne gangen: MELOSYS-7264.",
       ),
     ).toBe(true);
+  });
+});
+
+describe("steerWithoutExcludedKeys", () => {
+  test("a key the steer asks to DROP is removed — it is an instruction, not a claim", () => {
+    // The steer is joined onto the raw material so a key the reader NAMES stays
+    // amber. A negated key is the opposite claim: leaving it in handed a model
+    // that ignored the exclusion the softer amber badge.
+    expect(steerWithoutExcludedKeys("kortere, og uten MELOSYS-1234")).not.toContain("MELOSYS-1234");
+    expect(steerWithoutExcludedKeys("ikke MELOSYS-1")).not.toContain("MELOSYS-1");
+    expect(steerWithoutExcludedKeys("dropp MELOSYS-2")).not.toContain("MELOSYS-2");
+    expect(steerWithoutExcludedKeys("fjern MELOSYS-3")).not.toContain("MELOSYS-3");
+    expect(steerWithoutExcludedKeys("alt utenom MELOSYS-4")).not.toContain("MELOSYS-4");
+    expect(steerWithoutExcludedKeys("unntatt MELOSYS-5")).not.toContain("MELOSYS-5");
+    // …case-insensitive and word-bounded: `utenfor` is not `uten`.
+    expect(steerWithoutExcludedKeys("Uten MELOSYS-6")).not.toContain("MELOSYS-6");
+    expect(steerWithoutExcludedKeys("utenfor MELOSYS-7")).toContain("MELOSYS-7");
+  });
+
+  test("a whole key LIST after one negation goes", () => {
+    // «uten A og B, C» is one exclusion, not one exclusion and two mentions —
+    // whitespace, commas, `og`/`eller` and further keys are all list glue.
+    const out = steerWithoutExcludedKeys("uten MELOSYS-1 og MELOSYS-2, MELOSYS-3 eller MELOSYS-4");
+    expect(out).not.toContain("MELOSYS-1");
+    expect(out).not.toContain("MELOSYS-2");
+    expect(out).not.toContain("MELOSYS-3");
+    expect(out).not.toContain("MELOSYS-4");
+  });
+
+  test("a key that is not in an exclusion context stays", () => {
+    expect(steerWithoutExcludedKeys("ta med MELOSYS-4242")).toContain("MELOSYS-4242");
+    // The negation is spent by the first ordinary word, so the second half of a
+    // two-sided steer keeps its key.
+    const out = steerWithoutExcludedKeys("uten MELOSYS-1, men ta med MELOSYS-2");
+    expect(out).not.toContain("MELOSYS-1");
+    expect(out).toContain("MELOSYS-2");
+  });
+
+  test("the surrounding prose survives, and a steer that lost no key is untouched", () => {
+    expect(steerWithoutExcludedKeys("kortere, og uten MELOSYS-1234")).toContain("kortere");
+    expect(steerWithoutExcludedKeys("")).toBe("");
+    // Byte-identical when nothing is dropped — this is a filter, not a
+    // normalizer; the call site does the trimming (`flattenSteer`).
+    expect(steerWithoutExcludedKeys("kortere  enn forrige")).toBe("kortere  enn forrige");
+  });
+
+  test("the documented boundary: a negation AFTER the key is not seen", () => {
+    // The heuristic reads left to right, so «MELOSYS-1 skal ikke med» keeps the
+    // key (amber). Stated, not fixed: this is a one-line steer from a
+    // single-line input, and the common spelling is the leading token.
+    expect(steerWithoutExcludedKeys("MELOSYS-1 skal ikke med")).toContain("MELOSYS-1");
   });
 });
 

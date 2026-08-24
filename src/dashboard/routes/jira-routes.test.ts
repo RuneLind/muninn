@@ -1665,6 +1665,25 @@ describe("POST /api/jira/draft/from-thread", () => {
     expect(state("MELOSYS-4242")).toBe("notes");
   });
 
+  test("a key the reader asked to LEAVE OUT reads red, not amber", async () => {
+    // The mirror of the test above, and the whole reason the join is
+    // polarity-aware. A NEGATIVE steer is an instruction, not a claim: joined
+    // wholesale into the raw material, a model that ignored «uten MELOSYS-1234»
+    // and cited the key anyway got the SOFTER amber badge ("you wrote it") —
+    // exactly the amber-lie the `isJiraTurnLine` strip exists to prevent, one run
+    // earlier. MELOSYS-8150 is retrieved, so it stays verified either way.
+    __setJiraThreadTurnForTest(
+      scriptedThreadTurn("## Symptom\nSe MELOSYS-1234 og MELOSYS-8150."),
+    );
+    const { body } = await started({ extra: "kortere, og uten MELOSYS-1234" });
+
+    const view = await (await makeApp().request(`/api/jira/draft/${body.draftId}`)).json();
+    const state = (k: string) =>
+      view.keyVerdicts.find((v: { key: string }) => v.key === k).state;
+    expect(state("MELOSYS-8150")).toBe("verified");
+    expect(state("MELOSYS-1234")).toBe("unknown");
+  });
+
   /**
    * `readThreadHistory`'s two filters, seen from the outside.
    *

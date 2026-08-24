@@ -20,7 +20,7 @@
  */
 
 import { depthRider, languageRider, neutralizeJiraFence } from "./prompt.ts";
-import { JIRA_STORED_MAX_SOURCES, toJiraCitation } from "./retrieval.ts";
+import { JIRA_KEY_SOURCE, JIRA_STORED_MAX_SOURCES, toJiraCitation } from "./retrieval.ts";
 import { extractJiraKeys } from "./verify-keys.ts";
 import type { JiraCitation, JiraCoverage, JiraDepth } from "./wire.ts";
 
@@ -319,8 +319,85 @@ export function isJiraTurnLine(text: string): boolean {
  * asked to leave OUT would read amber. Collapsing here costs nothing and keeps
  * the line recognisable whatever arrives.
  */
-function flattenSteer(extra: string | undefined): string {
+export function flattenSteer(extra: string | undefined): string {
   return (extra ?? "").replace(/\s*\n+\s*/g, " ").trim();
+}
+
+/** The Norwegian words that turn what follows into an exclusion. */
+const STEER_NEGATIONS = new Set(["uten", "ikke", "dropp", "fjern", "utenom", "unntatt"]);
+
+/** Words that keep a key LIST going: «uten A og B eller C». */
+const STEER_LIST_GLUE = new Set(["og", "eller"]);
+
+/**
+ * One token of a steer: a Jira key, a word, or a single other character.
+ *
+ * The key alternative comes first and is the SHARED {@link JIRA_KEY_SOURCE}, so
+ * this scanner and `extractJiraKeys` can never disagree about what a key is.
+ */
+const STEER_TOKEN_RE = new RegExp(`${JIRA_KEY_SOURCE}|\\p{L}+|\\S`, "gu");
+const STEER_KEY_RE = new RegExp(`^${JIRA_KEY_SOURCE}$`);
+
+/**
+ * The steer, minus every Jira key it asks to LEAVE OUT.
+ *
+ * **Why the raw material has to be polarity-aware.** The steer is joined onto
+ * the thread's user messages before key verification, so a key the reader NAMES
+ * («ta med MELOSYS-4242») reads amber ("you wrote it") instead of red
+ * ("fabricated") — they had just typed it. But the documented primary use of the
+ * field is the opposite claim («uten MELOSYS-1234»), and joined wholesale THAT
+ * key also read amber: a model which ignored the exclusion and cited it anyway
+ * got the softer badge, which is precisely the amber-lie the `isJiraTurnLine`
+ * strip exists to prevent — one run earlier. A negated key is an instruction,
+ * not the person's claim, so it never becomes raw material.
+ *
+ * **The heuristic**, deliberately small — this is one line of steer typed into a
+ * single-line input, not prose to parse: a key is dropped when a negation token
+ * ({@link STEER_NEGATIONS}, case-insensitive and word-bounded) appears earlier in
+ * the steer with only key-list glue in between — whitespace, commas,
+ * `og`/`eller`, and further keys. Any other word or punctuation spends the
+ * negation, so «uten MELOSYS-1, men ta med MELOSYS-2» keeps the second key.
+ *
+ * **Its boundary, stated rather than fixed.** It reads left to right, so a
+ * negation AFTER the key («MELOSYS-1 skal ikke med») is not seen and that key
+ * still reads amber — the same lie, in a spelling the picker's field rarely
+ * produces. And «ikke bare MELOSYS-1, den er viktig» keeps its key, because
+ * `bare` spends the negation: right for that sentence, luck rather than
+ * grammar. The residual runs in the amber direction, which is the survivable
+ * one: the worst case is a soft badge on a key nobody retrieved, never a
+ * fabrication charge against a key the person wrote down.
+ */
+export function steerWithoutExcludedKeys(steer: string): string {
+  let out = "";
+  let copied = 0;
+  let negated = false;
+  // `matchAll` rather than a shared `exec` loop: it clones the regex, so the
+  // module-level `lastIndex` is never carried between calls.
+  for (const m of steer.matchAll(STEER_TOKEN_RE)) {
+    const token = m[0];
+    const at = m.index ?? 0;
+    if (STEER_KEY_RE.test(token)) {
+      // A key is itself list glue — «uten A og B, C» is ONE exclusion.
+      if (!negated) continue;
+      out += steer.slice(copied, at);
+      copied = at + token.length;
+      continue;
+    }
+    if (/^\p{L}+$/u.test(token)) {
+      const word = token.toLowerCase();
+      if (STEER_NEGATIONS.has(word)) negated = true;
+      else if (!STEER_LIST_GLUE.has(word)) negated = false;
+      continue;
+    }
+    if (token !== ",") negated = false;
+  }
+  // Nothing dropped ⇒ the steer comes back BYTE-IDENTICAL: the tidy below is for
+  // the hole a removed key leaves, not a normalizer to run over every steer.
+  if (copied === 0) return steer;
+  out += steer.slice(copied);
+  // Tidy only. What is left is read by `extractJiraKeys` and by nothing else, so
+  // the residue of «uten A og B» reading «uten og» costs nothing.
+  return out.replace(/[ \t]+/g, " ").replace(/ +([,.;:])/g, "$1").trim();
 }
 
 /**
