@@ -2,6 +2,7 @@ import type { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { activityLog } from "../../observability/activity-log.ts";
 import { agentStatus } from "../../observability/agent-status.ts";
+import { requireOwnUser } from "../../auth/guard.ts";
 
 export function registerSSERoutes(app: Hono): void {
   app.get("/api/events", (c) => {
@@ -16,11 +17,20 @@ export function registerSSERoutes(app: Hono): void {
      * Deliberately NOT applied to `agent_runs` or `activity`: `agent_runs` IS
      * the operator's `/agents` feed and filtering it globally would empty that
      * page, and the activity replay is a separate cross-user channel with its
-     * own answer (it needs owner scoping, not a viewer parameter). Client-
-     * supplied for now — PR C is where the identity stops coming from the
-     * client; scoping the render is what this one is for.
+     * own answer (it needs owner scoping, not a viewer parameter).
+     *
+     * `viewer` is a CLAIMED IDENTITY under a name the `:userId` greps do not
+     * match, which is how it survived PR C's first cut: `?viewer=<colleague>`
+     * yielded that person's live run metadata including its `traceId`, and
+     * `GET /api/prompts/:traceId` expands a traceId into their whole assembled
+     * prompt. It goes through the same guard as every other claimed id — the
+     * param verbatim with auth off, the session id otherwise, 403 on a
+     * present-and-differing claim — so the operator's unfiltered stream is
+     * unchanged in the mode the dashboard actually runs in.
      */
-    const viewer = c.req.query("viewer") || undefined;
+    const own = requireOwnUser(c, c.req.query("viewer"));
+    if (!own.ok) return own.response;
+    const viewer = own.userId || undefined;
     return streamSSE(c, async (stream) => {
       // Send recent history
       const recent = activityLog.getRecent(50);

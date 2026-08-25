@@ -25,20 +25,23 @@ import { test, expect, type Page } from "@playwright/test";
 
 const BOT = { name: "e2e-bot", showWaterfall: false, hasTelegram: false, hasSlack: false };
 const PICKER_USER = { userId: "picked-from-dropdown", username: "Dropdown User", platform: "web" };
-const SESSION = { mode: "session", userId: "session-user", displayName: "Session User", navIdent: null, role: "user" };
+const SESSION = { mode: "session", userId: "session-user", displayName: "Session User", navIdent: null, provider: "local", role: "user" };
 const LOCAL_ME = { mode: "local", userId: null, displayName: null, role: null };
 
-interface Calls { admin: string[]; conversations: Record<string, unknown>[] }
+interface Calls { admin: string[]; conversations: Record<string, unknown>[]; defaultUserWrites: string[] }
 
-async function stub(page: Page, me: Record<string, unknown>): Promise<Calls> {
-  const calls: Calls = { admin: [], conversations: [] };
+/** `me: null` means /chat/me is UNREACHABLE — distinct from "auth is off". */
+async function stub(page: Page, me: Record<string, unknown> | null): Promise<Calls> {
+  const calls: Calls = { admin: [], conversations: [], defaultUserWrites: [] };
   page.on("request", (req) => {
     const url = req.url();
     // The two admin-zone routes `loadUsersForBot` issues, and nothing else.
     if (url.includes("/api/users") || url.includes("/default-user")) calls.admin.push(url);
+    if (url.includes("/default-user") && req.method() === "PUT") calls.defaultUserWrites.push(url);
   });
 
-  await page.route("**/chat/me", (route) => route.fulfill({ json: me }));
+  await page.route("**/chat/me", (route) =>
+    me === null ? route.fulfill({ status: 503, json: { error: "down" } }) : route.fulfill({ json: me }));
   await page.route("**/chat/bots", (route) => route.fulfill({ json: { bots: [BOT], connectors: [] } }));
   await page.route("**/api/users*", (route) => route.fulfill({ json: { users: [PICKER_USER] } }));
   await page.route("**/chat/bot-preferences/**", (route) => route.fulfill({ json: { userId: null } }));
@@ -93,6 +96,35 @@ test.describe("Chat page: a server-derived identity", () => {
     // dropdown's id would 403 on every turn.
     expect(calls.conversations[0]!.userId).toBe(SESSION.userId);
     expect(calls.conversations[0]!.username).toBe(SESSION.displayName);
+  });
+
+  test("an UNREACHABLE /chat/me fails CLOSED — no picker, no admin fetches, no user", async ({ page }) => {
+    // The failure this replaces: a non-2xx or a network error landed in the
+    // same branch as a valid mode:"local", so ONE flaky request made the page
+    // show the picker and issue both admin-zone fetches on an authenticating
+    // instance. Guessing a user is the one outcome that is wrong in both modes.
+    const calls = await stub(page, null);
+    await page.goto("/chat");
+    await selectBot(page);
+
+    await expect(page.locator("#userSelectorContainer")).toBeHidden();
+    await page.waitForTimeout(2000); // longer than the one retry (300ms) needs
+    expect(calls.admin, "the page fell back to the picker on an unreachable /chat/me").toEqual([]);
+    expect(
+      await page.evaluate(() => (window as unknown as { __muninnViewerId: string | null }).__muninnViewerId),
+    ).toBeNull();
+  });
+
+  test("the authenticated page NEVER writes bot_default_user", async ({ page }) => {
+    // That field's only writer was the dropdown, and six server-side readers
+    // degrade silently without it — but the route that writes it is admin-zone
+    // under §4, so the answer is `pinnedLocalUserId()` on the READ side, not a
+    // client write. This asserts the client half of that split.
+    const calls = await stub(page, SESSION);
+    await page.goto("/chat");
+    await selectBot(page);
+    await page.waitForTimeout(1500);
+    expect(calls.defaultUserWrites).toEqual([]);
   });
 
   test('with auth off — mode "local" — the picker and both routes come back', async ({ page }) => {

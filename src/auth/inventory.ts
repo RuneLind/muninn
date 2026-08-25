@@ -20,8 +20,26 @@ import { $ } from "bun";
 
 export const CLAIMED_ID_PARAM_GREP =
   String.raw`app\.[a-z]+\(\s*("[A-Z]+"\s*,\s*)?"[^"]*:userId`;
-export const CLAIMED_ID_BODY_GREP = String.raw`body\.userId|query\("userId"\)`;
+/**
+ * NB `viewer`. A claimed identity does not have to be CALLED `userId`, and the
+ * first cut of this grep proved the point: `GET /api/events?viewer=<colleague>`
+ * scoped the waterfall and phase pill to that person — yielding their live run
+ * metadata and its `traceId`, which `GET /api/prompts/:traceId` expands into
+ * their whole assembled prompt — and the route's own comment already said "PR C
+ * is where the identity stops coming from the client". It matched no pattern
+ * here, so the fixture advertised as fail-closed could not surface it.
+ *
+ * Any NEW query parameter that names a user has to be added here by hand. That
+ * is a real limit of a grep-based inventory and is stated rather than papered
+ * over: this catches what it knows about, and knowing about a name is a human
+ * step.
+ */
+export const CLAIMED_ID_BODY_GREP = String.raw`body\.userId|query\("userId"\)|query\("viewer"\)`;
 export const CORS_GREP = "Access-Control-Allow-Origin";
+
+/** Every route registration, both forms, used to attribute a body/query read to
+ *  the route it lives in. */
+export const ROUTE_REGISTRATION_GREP = String.raw`app\.[a-z]+\(\s*("[A-Z]+"\s*,\s*)?"`;
 
 /**
  * The files §2 names. The DIRECTORY, not a `*.ts` glob: `Bun.$` escapes its
@@ -42,11 +60,14 @@ const ROUTE_PATHS = ["src/chat/routes.ts", "src/dashboard/routes/"];
  *   version is meaningless (`POST /api/users` mints a row; `/api/messages/:userId`
  *   is an operator read). The zone model is deferred, so nothing denies it
  *   today. Listed rather than forgotten.
- * - `cors-helper` - the site answers through `src/auth/cors.ts`, so its
- *   `Access-Control-Allow-Origin` is `*` only with `MUNINN_AUTH` off.
  * - `doc-only` - a comment or a type, not a live read.
+ *
+ * There is deliberately no `cors-helper` value: `corsRows` counts LITERAL
+ * occurrences of the header name, and a site that answers through
+ * `src/auth/cors.ts` contains none, so such a row cannot exist. A disposition
+ * no row can carry is a disposition that reads as coverage without being any.
  */
-export const DISPOSITIONS = ["own-user-guard", "admin-zone-deferred", "cors-helper", "doc-only"] as const;
+export const DISPOSITIONS = ["own-user-guard", "admin-zone-deferred", "doc-only"] as const;
 export type Disposition = (typeof DISPOSITIONS)[number];
 
 export interface InventoryRow {
@@ -70,6 +91,12 @@ function splitLine(line: string): { file: string; text: string } {
   return { file: m[1]!, text: m[2]! };
 }
 
+/** `//`, `*` or `/*` — a mention in PROSE rather than a live line of code. */
+function isCommentLine(text: string): boolean {
+  const t = text.trim();
+  return t.startsWith("//") || t.startsWith("*") || t.startsWith("/*");
+}
+
 /** One row per ROUTE - the method and the path, which is what a reader checks
  *  a disposition against. Line numbers are deliberately dropped: they churn on
  *  every edit and a fixture nobody can keep green stops being read. */
@@ -90,29 +117,61 @@ export async function claimedIdParamRows(): Promise<InventoryRow[]> {
   return rows;
 }
 
+const CLAIMED_TOKENS = ["body.userId", 'query("userId")', 'query("viewer")'] as const;
+
 /**
- * One row per (file, token) with a COUNT.
+ * One row per (route, token) — NOT per file, and NOT a count of matching lines.
  *
- * A body/query read is not a route registration, so there is no path to key on
- * and no stable per-site identity. The count is what makes the fixture
- * fail-closed anyway: a NEW `body.userId` read inside a file already on the
- * list moves the number, and moving the number is what forces someone to look.
+ * Two defects in the first cut of this function are why:
+ *
+ *  1. **A per-FILE row cannot carry an honest disposition.** `src/chat/routes.ts`
+ *     holds four `body.userId` reads: two guarded (`POST /conversations`,
+ *     `POST /threads`) and two not (`PUT /bot-preferences/…/default-user`, which
+ *     §4 sends to the admin zone). One row covering all four was labelled with
+ *     the safer half — exactly the "a row with no disposition fails" rule,
+ *     defeated by a row whose disposition was true of only some of its reads.
+ *  2. **A count of matching LINES is a checksum over prose.** Comments naming
+ *     `body.userId` matched, so a new unguarded read could land while a comment
+ *     mentioning one was deleted and the number would not move.
+ *
+ * So: comment lines are excluded, and each read is attributed to the nearest
+ * route registration ABOVE it. A read that is not inside any route registration
+ * is attributed to `(module scope)`, which is itself worth seeing.
  */
 export async function claimedIdBodyRows(): Promise<InventoryRow[]> {
-  const counts = new Map<string, number>();
+  const rows = new Set<string>();
+  const enclosing = new Map<string, string>();
+  for (const line of await grepLines(ROUTE_REGISTRATION_GREP, ROUTE_PATHS)) {
+    const { file, text } = splitLine(line);
+    const n = Number(line.match(/^[^:]+:(\d+):/)![1]);
+    const leading = text.match(/app\.on\(\s*"([A-Z]+)"\s*,\s*"([^"]+)"/);
+    const verb = text.match(/app\.([a-z]+)\(\s*"([^"]+)"/);
+    const label = leading
+      ? `${leading[1]} ${leading[2]}`
+      : verb
+        ? `${verb[1]!.toUpperCase()} ${verb[2]}`
+        : null;
+    if (label) enclosing.set(`${file}:${n}`, label);
+  }
+
   for (const line of await grepLines(CLAIMED_ID_BODY_GREP, ROUTE_PATHS)) {
     const { file, text } = splitLine(line);
-    if (file.includes(".test.")) continue;
-    for (const token of ["body.userId", 'query("userId")']) {
-      if (text.includes(token)) {
-        const key = `${file} ${token}`;
-        counts.set(key, (counts.get(key) ?? 0) + 1);
-      }
+    if (isCommentLine(text)) continue;
+    const n = Number(line.match(/^[^:]+:(\d+):/)![1]);
+    // The nearest registration at or above this line, in the same file.
+    let route = "(module scope)";
+    let best = -1;
+    for (const [key, label] of enclosing) {
+      const [f, ln] = [key.slice(0, key.lastIndexOf(":")), Number(key.slice(key.lastIndexOf(":") + 1))];
+      if (f === file && ln <= n && ln > best) { best = ln; route = label; }
+    }
+    for (const token of CLAIMED_TOKENS) {
+      if (text.includes(token)) rows.add(`${file}\u0000${token} in ${route}`);
     }
   }
-  return [...counts.entries()].map(([key, n]) => {
-    const [file, token] = key.split(" ");
-    return { file: file!, signature: `${token} x${n}` };
+  return [...rows].map((r) => {
+    const [file, signature] = r.split("\u0000");
+    return { file: file!, signature: signature! };
   });
 }
 
@@ -122,16 +181,23 @@ export async function claimedIdBodyRows(): Promise<InventoryRow[]> {
  * of this row set is that nothing anywhere sets the header by hand any more.
  *
  * `src/auth/` is excluded because it is the MECHANISM — `cors.ts` sets the
- * header, and this file and `policy.ts` name it in prose. Including them would
- * make the fixture churn on a comment edit, which is how a fixture stops being
- * read.
+ * header, and this file and `policy.ts` name it in prose.
+ *
+ * COMMENT lines are excluded for the same reason they are in
+ * `claimedIdBodyRows`: a row set that counts prose is a checksum over prose. It
+ * churned immediately — documenting this change added two mentions and turned
+ * the fixture red for no behavioural reason — and the useful fact is "which
+ * files SET this header", which after PR C should be none outside
+ * `src/auth/cors.ts`. The raw grep is still asserted, separately and more
+ * strictly, by the "no route file sets it by hand" case in `inventory.test.ts`.
  */
 export async function corsRows(): Promise<InventoryRow[]> {
   const counts = new Map<string, number>();
   const out = await $`grep -rn ${CORS_GREP} src/`.nothrow().text();
   for (const line of out.split("\n").filter((l) => l.trim() !== "")) {
-    const { file } = splitLine(line);
+    const { file, text } = splitLine(line);
     if (file.includes(".test.") || file.startsWith("src/auth/")) continue;
+    if (isCommentLine(text)) continue;
     counts.set(file, (counts.get(file) ?? 0) + 1);
   }
   return [...counts.entries()].map(([file, n]) => ({ file, signature: `Access-Control-Allow-Origin x${n}` }));

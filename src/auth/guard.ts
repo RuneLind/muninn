@@ -12,7 +12,7 @@
  *
  * ## Why this returns a result instead of throwing
  *
- * Most of the 20-odd call sites are inside a `try { … } catch { return
+ * Most call sites are inside a `try { … } catch { return
  * c.json(…, 500) }`. A thrown `HTTPException` would be swallowed by those
  * catches and answered as a 500 — a guard that denies with the wrong status is
  * a guard nobody notices is misfiring. So the caller writes three visible

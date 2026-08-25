@@ -45,7 +45,7 @@ Each file exports functions for one table. Functions accept typed parameters and
 - pgvector extension with 384-dimensional embeddings (MiniLM-L6-v2)
 - Hybrid search: Reciprocal Rank Fusion (RRF) combining FTS (`tsvector`) and vector similarity (`<=>` operator)
 - Embeddings stored as `vector` type, inserted via `sql.unsafe()` with `$N::vector` cast
-- Memory scope: `personal` (per-user) or `shared` (visible to all users of a bot)
+- Memory scope: `personal` (per-user) or `shared` (visible to all users of a bot). ⚠️ The `shared` READ is mode-dependent: `searchMemories` and `searchMemoriesHybrid` both narrow to `user_id = $1` when `sharedMemoryReadsAllowed()` is false (any authenticating `MUNINN_AUTH`). Both, because the hybrid one delegates to the other with no embedding — a fix to one is inert on whichever path is taken
 
 ## Thread Management (threads.ts)
 

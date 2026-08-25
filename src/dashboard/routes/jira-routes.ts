@@ -110,10 +110,11 @@ const CORS_GET_METHODS = {
   "Access-Control-Allow-Headers": "Content-Type",
 } as const;
 
-/** The wildcard above is now a per-request answer: `*` with `MUNINN_AUTH` off,
- *  the request's own origin when it is on `MUNINN_ALLOWED_ORIGINS`, and no
- *  header at all otherwise. See `src/auth/cors.ts` for why the disposition is
- *  mode-gated rather than dropped outright. */
+/** `Access-Control-Allow-Origin` is a per-request answer now, so only the
+ *  method/header half is a constant: `*` with `MUNINN_AUTH` off, the request's
+ *  own origin when it is on `MUNINN_ALLOWED_ORIGINS`, and no header at all
+ *  otherwise. See `src/auth/cors.ts` for why the disposition is mode-gated
+ *  rather than dropped outright. */
 const corsGet = (c: Context) => corsHeaders(c, CORS_GET_METHODS);
 
 /**

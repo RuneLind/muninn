@@ -11,6 +11,9 @@
  * once, before anything else is initialised, and lets the throw kill the boot.
  */
 import { adminIdentsFromEnv, allowedOriginsFromEnv } from "../config.ts";
+import { getLog } from "../logging.ts";
+
+const log = getLog("auth", "mode");
 
 export const AUTH_ENV = "MUNINN_AUTH";
 export const AUTH_MODES = ["off", "local", "entra"] as const;
@@ -194,6 +197,25 @@ export function resolveAuthConfig(env: Record<string, string | undefined> = proc
       `MUNINN_LOCAL_TOKEN is ${token.length} characters; at least ${LOCAL_TOKEN_MIN_LENGTH} are required. ` +
       `Refusing to start: this mode exists to close a tailnet/LAN exposure, which a guessable secret ` +
       `does not close.`,
+    );
+  }
+
+  // WARN, not a refusal. `MUNINN_LOCAL_USER` is a legitimate `users.id` for
+  // everything in the DB, but PR C substitutes it into a FILE path on
+  // `/chat/reports/*` and `/chat/specs/*`, where the pre-existing
+  // `VALID_USER_ID` (`/^[a-zA-Z0-9_-]+$/`) then rejects it — so a pinned id
+  // containing `.`, `@` or `:` (an email, a Slack- or Telegram-derived id)
+  // makes every report/spec route 400 while the boot and the rest of the app
+  // look perfectly healthy. The chat client reads that 400 as "no saved
+  // report" and quietly disables the downstream buttons, so nothing surfaces
+  // it. Refusing the boot would be wrong — the id is valid everywhere else —
+  // but the operator should hear it once, at the only moment anyone is looking.
+  if (!/^[a-zA-Z0-9_-]+$/.test(userId)) {
+    log.warn(
+      "MUNINN_LOCAL_USER {userId} contains characters the report/spec routes reject " +
+      "(they allow only letters, digits, _ and -, because the id becomes a path segment). " +
+      "Saved research reports and domain specs will 400 for this identity; everything else works.",
+      { userId },
     );
   }
 

@@ -37,9 +37,10 @@
  * 1. Not a side-effecting request ⇒ allow. (`OPTIONS` included: a CORS
  *    preflight has no side effect, and refusing it would break the very
  *    preflight the disposition in `cors.ts` answers.)
- * 2. An `Origin` header ⇒ it must be this instance's own origin or an entry in
- *    `MUNINN_ALLOWED_ORIGINS`. Anything else, including the literal `null` a
- *    sandboxed iframe sends, is refused.
+ * 2. An `Origin` header ⇒ it must be an entry in `MUNINN_ALLOWED_ORIGINS` or a
+ *    loopback literal at the CONFIGURED port. Anything else, including the
+ *    literal `null` a sandboxed iframe sends, is refused. It is never compared
+ *    against the request's own `Host` header — see `loopbackOrigins`.
  * 3. No `Origin`, but a `Sec-Fetch-Site` ⇒ `same-origin` and `none` pass;
  *    `cross-site` and `same-site` are refused. This is the `<img>` case.
  * 4. Neither header ⇒ allow. A non-browser client (curl, the launchd health
@@ -66,14 +67,42 @@ const log = getLog("auth", "origin");
  * established that an admin is a real person browsing the real web.
  */
 export const SIDE_EFFECTING_GETS: readonly string[] = [
+  // A one-time CONSUME: reading it destroys it.
   "/chat/pending/",
+  "/simulator/pending/", // the legacy alias `src/index.ts` 301s from
+  // Spends a retrieval + synthesis turn.
   "/api/research/ask",
+  // Spend a model call on page content, and the fact-check pair reaches the
+  // LIVE WEB through its prompt's WebFetch/search instructions — the same
+  // routes `WIKI_READONLY_ROOTS` guards for exactly that reason. `sel` on the
+  // fact-check routes is attacker-controllable, so an `<img>` on any page the
+  // host browser visits is unbounded model spend plus outbound egress carrying
+  // wiki content.
+  "/api/wiki/ask",
+  "/api/wiki/digest",
+  "/api/wiki/explain",
+  "/api/wiki/factcheck",
+  "/api/wiki/factcheck/claim",
 ];
 
+/**
+ * ⚠️ **HEAD is NOT safe, and treating it as safe is a hole rather than an
+ * optimisation.** Hono dispatches `HEAD /x` to the handler registered with
+ * `app.get("/x")` and RUNS ITS BODY — so exempting HEAD does not skip a
+ * bodyless read, it skips the same side effect with the response discarded.
+ * Measured against a live server: `GET /chat/pending/x` cross-site answered
+ * 403 and consumed nothing, while `HEAD` on the identical path answered 200
+ * and consumed the message. `fetch(…, {method:"HEAD", mode:"no-cors"})` needs
+ * no preflight, so it is reachable from any page. HEAD therefore falls through
+ * to the GET rule; the two read-only `app.on("HEAD", …)` report/spec routes are
+ * not on the list and are unaffected.
+ */
 export function isSideEffectingRequest(method: string, path: string): boolean {
   const m = method.toUpperCase();
-  if (m === "OPTIONS" || m === "HEAD") return false;
-  if (m !== "GET") return true;
+  // OPTIONS only: a CORS preflight has no side effect, and refusing it would
+  // break the very preflight `src/auth/cors.ts` answers.
+  if (m === "OPTIONS") return false;
+  if (m !== "GET" && m !== "HEAD") return true;
   return SIDE_EFFECTING_GETS.some((p) => (p.endsWith("/") ? path.startsWith(p) : path === p));
 }
 
@@ -84,9 +113,19 @@ export interface OriginDecisionInput {
   readonly origin: string | undefined;
   /** The `Sec-Fetch-Site` request header, verbatim. */
   readonly secFetchSite: string | undefined;
-  /** The `Host` request header — what "this instance's own origin" means for a
-   *  request that actually arrived, including through a proxy that rewrote it. */
-  readonly host: string | undefined;
+  /**
+   * Every origin this instance accepts a side effect from: `MUNINN_ALLOWED_ORIGINS`
+   * plus the loopback literals at the configured `DASHBOARD_PORT`.
+   *
+   * There is deliberately NO `host` field. An earlier cut compared the `Origin`
+   * against the request's own `Host` header, which asks "does this request agree
+   * with itself" rather than "is this my origin" — and review demonstrated the
+   * consequence on a live server: `Host: evil.example:3013` with
+   * `Origin: http://evil.example:3013` created a real conversation. That is the
+   * DNS-rebinding shape an origin check exists to stop: a name the attacker
+   * controls, rebound to 127.0.0.1, makes the browser send a matching
+   * Host/Origin pair while the loopback bypass supplies the pinned identity.
+   */
   readonly allowedOrigins: readonly string[];
 }
 
@@ -98,22 +137,25 @@ export interface OriginDecision {
 }
 
 /**
- * Same-origin by HOST, not by full origin.
+ * The loopback origins this instance answers on, derived from the CONFIGURED
+ * port rather than from anything in the request.
  *
- * The scheme is deliberately not compared: `tailscale serve` terminates TLS, so
- * a browser on `https://rune-mini-m4.tail…` sends that as `Origin` while muninn
- * itself is plain HTTP behind it. Comparing schemes would refuse every write
- * from the one deployment this campaign exists for. The host+port pair is what
- * distinguishes an attacker page, and it is what a browser will not let a page
- * forge.
+ * These are safe to accept without configuration because a browser will not
+ * send `Origin: http://127.0.0.1:<port>` for a page served from anywhere else —
+ * unlike a `Host` comparison, there is no name here an attacker can own.
+ *
+ * A proxied origin (the tailnet name `tailscale serve` publishes) is NOT
+ * derivable this way and must be listed in `MUNINN_ALLOWED_ORIGINS`, which is
+ * already a boot requirement in an authenticating mode. Note the scheme matters
+ * again as a result: `https://<tailnet-name>` is what the browser sends, and
+ * that exact string is what belongs in the allowlist.
  */
-function isSelfOrigin(origin: string, host: string | undefined): boolean {
-  if (!host) return false;
-  try {
-    return new URL(origin).host.toLowerCase() === host.trim().toLowerCase();
-  } catch {
-    return false;
-  }
+export function loopbackOrigins(port: number): string[] {
+  return [
+    `http://127.0.0.1:${port}`,
+    `http://localhost:${port}`,
+    `http://[::1]:${port}`,
+  ];
 }
 
 export function decideOrigin(input: OriginDecisionInput): OriginDecision {
@@ -123,7 +165,6 @@ export function decideOrigin(input: OriginDecisionInput): OriginDecision {
 
   const origin = input.origin?.trim();
   if (origin) {
-    if (isSelfOrigin(origin, input.host)) return { allowed: true, reason: "same origin" };
     const normalized = normalizeOrigin(origin);
     if (normalized && input.allowedOrigins.includes(normalized)) {
       return { allowed: true, reason: "allowlisted origin" };
@@ -157,15 +198,25 @@ export function __resetOriginWarningsForTest(): void {
  * is a no-op, and adding a refusal there would change today's muninn for no
  * gain — the "off is off" rule this whole campaign is written to.
  */
-export function createOriginMiddleware(allowedOrigins: readonly string[]): MiddlewareHandler {
+export function createOriginMiddleware(
+  allowedOrigins: readonly string[],
+  dashboardPort: number,
+): MiddlewareHandler {
+  // Computed once: the set is a property of the configuration, never of a
+  // request. Normalised through the same `normalizeOrigin` the allowlist parser
+  // uses, so a configured origin and an incoming header can never be compared
+  // in two different shapes.
+  const accepted = [
+    ...allowedOrigins,
+    ...loopbackOrigins(dashboardPort).map((o) => normalizeOrigin(o)).filter((o): o is string => o !== null),
+  ];
   return async (c: Context, next) => {
     const decision = decideOrigin({
       method: c.req.method,
       path: c.req.path,
       origin: c.req.header("origin"),
       secFetchSite: c.req.header("sec-fetch-site"),
-      host: c.req.header("host"),
-      allowedOrigins,
+      allowedOrigins: accepted,
     });
     if (decision.allowed) return next();
 

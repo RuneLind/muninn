@@ -131,10 +131,17 @@ export function adminIdentsFromEnv(env: Record<string, string | undefined> = pro
 }
 
 /**
- * `MUNINN_ALLOWED_ORIGINS` — the origin allowlist PR C's origin/CSRF check and
- * PR D's WebSocket upgrade check will read. Parsed and boot-asserted in this
- * PR; **nothing enforces it yet**, and that is stated here rather than left for
- * a reader to infer from its presence that requests are being checked.
+ * `MUNINN_ALLOWED_ORIGINS` — the origin allowlist. **Enforced** by
+ * `src/auth/origin.ts` (every side-effecting request in an authenticating mode)
+ * and by `src/auth/cors.ts` (which origin, if any, an
+ * `Access-Control-Allow-Origin` names). NOT yet enforced on the `/chat/ws`
+ * upgrade, which runs before `app.fetch` and is PR D's.
+ *
+ * The loopback origins at the configured `DASHBOARD_PORT` are accepted without
+ * being listed; every other origin muninn is REACHED at — the tailnet name
+ * `tailscale serve` publishes, a LAN address under `DASHBOARD_HOST=0.0.0.0`,
+ * an extension — must be an entry here, spelled exactly as the browser sends
+ * it (scheme included).
  *
  * Normalised through `normalizeOrigin` so `https://Host:443/` and `https://host`
  * compare equal, and an unparseable entry is dropped with a warning instead of

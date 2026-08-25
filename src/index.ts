@@ -49,7 +49,8 @@ try {
 }
 // Published to the two readers that live outside the request path and so cannot
 // read the identity off a Hono context: `src/db/memories.ts`'s `scope='shared'`
-// branch, and the ~12 CORS sites spread over eight route files. Immediately
+// branch, the CORS sites across seven route files, and `getBotDefaultUser`'s
+// pinned-identity fallback. Immediately
 // after `resolveAuthConfig()` and before anything is started, because the
 // default is `off` and a later call would leave a window in which a wildcard
 // CORS header and a cross-user shared-memory read are both still live.
@@ -191,7 +192,7 @@ if (isAuthenticatingMode(auth.mode)) {
   // tell "you are not logged in" from "your origin is refused". Not mounted
   // with auth off: there is no ambient session to ride there, so the refusal
   // would change today's muninn to close nothing.
-  app.use("*", createOriginMiddleware(auth.allowedOrigins));
+  app.use("*", createOriginMiddleware(auth.allowedOrigins, config.dashboardPort));
 }
 app.route("/", dashboard);
 

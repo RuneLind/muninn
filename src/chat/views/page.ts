@@ -336,11 +336,30 @@ const CHAT_SCRIPT = `
    * selectedUserId/selectedUsername that every later fetch depends on.
    */
   var sessionUser = null;
+  // Set when /chat/me could not be reached at all. Distinct from "auth is off":
+  // a failed fetch used to land in the same null branch as a valid
+  // mode:"local", so ONE flaky request made the page fall back to the picker
+  // and issue both admin-zone fetches on an authenticating instance - failing
+  // OPEN on the client. Unknown identity now fails closed: no picker, no admin
+  // fetches, and a visible reason rather than a silently wrong user.
+  var identityUnknown = false;
   async function loadSessionUser() {
-    try {
-      var me = await fetch('/chat/me').then(function(r) { return r.ok ? r.json() : null; });
-      sessionUser = me && me.mode === 'session' ? me : null;
-    } catch { sessionUser = null; }
+    for (var attempt = 0; attempt < 2; attempt++) {
+      try {
+        var res = await fetch('/chat/me');
+        if (res.ok) {
+          var me = await res.json();
+          sessionUser = me && me.mode === 'session' ? me : null;
+          identityUnknown = false;
+          return;
+        }
+      } catch {}
+      // One retry: /chat/me is the same server that served this page, so a
+      // failure is either a restart mid-load or a real outage.
+      if (attempt === 0) await new Promise(function(r) { setTimeout(r, 300); });
+    }
+    sessionUser = null;
+    identityUnknown = true;
   }
 
   /** Publish the selected user to the SSE script and re-scope its stream. The
@@ -461,6 +480,18 @@ const CHAT_SCRIPT = `
       return;
     }
 
+    // Identity unknown: fail CLOSED. Guessing a user from the dropdown here is
+    // the one outcome that is wrong in both modes - on an authenticating
+    // instance every later /chat/* call 403s, and either way the page would be
+    // acting as somebody nobody chose.
+    if (identityUnknown) {
+      container.style.display = 'none';
+      selectedUserId = null;
+      selectedUsername = null;
+      setViewer(null);
+      return;
+    }
+
     // Fetch users and default user from DB in parallel (allSettled so one failure doesn't kill both)
     var merged = [];
     var dbDefaultUserId = null;
@@ -514,9 +545,18 @@ const CHAT_SCRIPT = `
 
   function syncDefaultUser(botName, userId) {
     // bot_default_user answers "which persona is the web-chat UI acting as",
-    // which is meaningless once the server derives the id — and the route is
-    // admin-zone under §4. Authenticated traffic stops writing it, so the field
-    // keeps meaning what it was decided to mean.
+    // which is meaningless once the server derives the id - and the route that
+    // writes it is admin-zone under §4, so an authenticated client must not
+    // call it at all.
+    //
+    // Hiding the picker retires this function's ONLY caller, and six
+    // server-side readers degrade silently when the field is unset
+    // (fetchSavedNotes returns [] with no log line, so the wiki reader's
+    // saved-notes injection just vanishes; POST /api/wiki/remember refuses;
+    // loadInterestProfileForBot loses the gardener drain's fallback). That is
+    // answered SERVER-side instead - getBotDefaultUser falls back to the
+    // pinned local identity - precisely so the client never touches an
+    // admin-zone route to keep those readers working.
     if (sessionUser) return;
     if (!botName || !userId) return;
     fetch('/chat/bot-preferences/' + encodeURIComponent(botName) + '/default-user', {
@@ -830,8 +870,11 @@ const CHAT_SCRIPT = `
     var userParam = params.get('user');
     if (!botName) return;
 
-    // If a user is specified in the URL, pre-set it before selectBot loads users
-    if (userParam) {
+    // If a user is specified in the URL, pre-set it before selectBot loads users.
+    // Not when the server owns the id: loadUsersForBot never reads the pin then,
+    // so the write is dead state that OUTLIVES the mode - flip MUNINN_AUTH back
+    // to off and a stale pin silently becomes the preferred user.
+    if (userParam && !sessionUser) {
       try { localStorage.setItem('muninn-chat-user-' + botName, userParam); } catch {}
     }
 

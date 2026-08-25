@@ -37,7 +37,7 @@ describe("src/index.ts wiring", () => {
     // "you are not logged in" from "your origin is refused".
     const text = await readFile(INDEX, "utf8");
     const auth = text.indexOf("createAuthMiddleware(auth)");
-    const origin = text.indexOf("createOriginMiddleware(auth.allowedOrigins)");
+    const origin = text.indexOf("createOriginMiddleware(auth.allowedOrigins, config.dashboardPort)");
     expect(auth).toBeGreaterThan(-1);
     expect(origin, "src/index.ts must mount createOriginMiddleware").toBeGreaterThan(-1);
     expect(origin).toBeGreaterThan(auth);
@@ -50,6 +50,6 @@ describe("src/index.ts wiring", () => {
     const branch = text.match(/if \(isAuthenticatingMode\(auth\.mode\)\) \{[\s\S]*?\n\}/);
     expect(branch, "the isAuthenticatingMode branch was not found").not.toBeNull();
     expect(branch![0]).toContain("createAuthMiddleware(auth)");
-    expect(branch![0]).toContain("createOriginMiddleware(auth.allowedOrigins)");
+    expect(branch![0]).toContain("createOriginMiddleware(auth.allowedOrigins, config.dashboardPort)");
   });
 });

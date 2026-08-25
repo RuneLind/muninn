@@ -1,6 +1,7 @@
 /**
  * The per-site CORS disposition — `Access-Control-Allow-Origin`, once, instead
- * of twelve hand-written `"*"` literals across eight files.
+ * of the wildcard literals it replaced (13 of them across 7 files, counted on
+ * `main`; an eighth file only names the header in a comment).
  *
  * ## Why a wildcard is not merely untidy
  *
@@ -61,22 +62,23 @@ export function corsAllowOrigin(requestOrigin: string | undefined | null): strin
 /** `c.header("Access-Control-Allow-Origin", …)`, mode-aware. A no-op when the
  *  origin is not allowed, which is the same wire result as never having set it. */
 export function applyCors(c: Context): void {
+  // `Vary` on BOTH outcomes, not only when a header is emitted. In an
+  // authenticating mode the response is origin-dependent in both directions —
+  // an allowlisted origin gets `ACAO: <origin>`, an unlisted one gets no header
+  // at all — so declaring it only on the permissive branch lets a shared cache
+  // store the header-LESS variant and replay it to an allowed origin, silently
+  // breaking the extension. With auth off the answer is `*` for everyone and
+  // nothing varies, which is what keeps today's wire bytes unchanged.
+  if (isAuthenticatingInstance()) c.header("Vary", "Origin", { append: true });
   const value = corsAllowOrigin(c.req.header("origin"));
-  if (!value) return;
-  c.header("Access-Control-Allow-Origin", value);
-  // Only once the answer stops being constant: an echoed origin makes the
-  // response origin-dependent, and without `Vary` a shared cache could serve
-  // one origin's allowed response to another. With auth off the answer is `*`
-  // for everyone, and adding `Vary` there would change today's wire bytes for
-  // nothing.
-  if (value !== "*") c.header("Vary", "Origin");
+  if (value) c.header("Access-Control-Allow-Origin", value);
 }
 
 /** The `Headers`-object form, for the sites that construct a bare `Response`. */
 export function corsHeaders(c: Context, extra: Record<string, string> = {}): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (isAuthenticatingInstance()) headers["Vary"] = "Origin";
   const value = corsAllowOrigin(c.req.header("origin"));
-  if (!value) return { ...extra };
-  const headers: Record<string, string> = { "Access-Control-Allow-Origin": value };
-  if (value !== "*") headers["Vary"] = "Origin";
+  if (value) headers["Access-Control-Allow-Origin"] = value;
   return { ...headers, ...extra };
 }

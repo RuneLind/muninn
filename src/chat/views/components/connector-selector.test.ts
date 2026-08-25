@@ -93,6 +93,11 @@ async function harness(opts: {
     "var threads = ctx.threads; var connectors = ctx.connectors;" +
     "var chatInput = ctx.chatInput; var chatMessages = ctx.chatMessages;" +
     "var selectedBot = 'jarvis'; var selectedUserId = 'u1';" +
+    // PR C: handleDeepLink skips the localStorage user pin when the server owns
+    // the id. This harness evaluates that function in isolation, so the variable
+    // it branches on has to exist here too — null is the auth-off case these
+    // cases are written against.
+    "var sessionUser = null;" +
     "var activeThreadId = null; var activeConvId = null;" +
     "function renderThreadList(){} function updateInspector(){}" +
     "function escapeHtml(s){return s;} function getBotInfo(){return null;}" +

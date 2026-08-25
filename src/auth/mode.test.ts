@@ -149,3 +149,25 @@ test("the excluded-path list is empty in this PR", () => {
   // decides — which is why the list is a constant rather than an env var.
   expect(AUTH_EXCLUDED_PATHS).toHaveLength(0);
 });
+
+describe("MUNINN_LOCAL_USER and the report/spec path segment", () => {
+  const base = {
+    MUNINN_AUTH: "local",
+    MUNINN_LOCAL_TOKEN: "a-sufficiently-long-secret",
+    MUNINN_ADMIN_IDENTS: "A123456",
+    MUNINN_ALLOWED_ORIGINS: "https://host.example",
+  };
+
+  test("a filesystem-hostile pinned id still BOOTS — it is valid everywhere else", () => {
+    // A refusal would be wrong: `rune@example.com` is a perfectly good
+    // `users.id`. Only `/chat/reports/*` and `/chat/specs/*` reject it, because
+    // PR C substitutes the session id into a file path where the pre-existing
+    // VALID_USER_ID then runs. The operator gets a warning, not a dead instance.
+    const config = resolveAuthConfig({ ...base, MUNINN_LOCAL_USER: "rune@example.com" });
+    expect(config.local?.userId).toBe("rune@example.com");
+  });
+
+  test("an ordinary pinned id is unaffected", () => {
+    expect(resolveAuthConfig({ ...base, MUNINN_LOCAL_USER: "rune_lind-1" }).local?.userId).toBe("rune_lind-1");
+  });
+});

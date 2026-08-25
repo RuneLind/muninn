@@ -9,9 +9,9 @@
  *    called from four places (the prompt builder, the briefing prompt, the wiki
  *    reader's saved-notes block and the retrieval benchmark), none of which
  *    carry a Hono context.
- *  - the ~12 route sites that answer `Access-Control-Allow-Origin: *`, which are
- *    spread over eight files and have no access to the `AuthConfig`
- *    `src/index.ts` resolved at boot.
+ *  - the route sites that answer `Access-Control-Allow-Origin`, which are spread
+ *    over seven files and have no access to the `AuthConfig` `src/index.ts`
+ *    resolved at boot.
  *
  * So the mode is published once, at boot, and read as a plain value. The
  * DEFAULT is `off` — a standalone `createDashboardRoutes(config)` in a unit test
@@ -27,9 +27,11 @@ import { isAuthenticatingMode } from "./mode.ts";
 interface Policy {
   readonly authenticating: boolean;
   readonly allowedOrigins: readonly string[];
+  /** The single `users.id` a `local` instance acts as, else null. */
+  readonly pinnedUserId: string | null;
 }
 
-const OFF: Policy = { authenticating: false, allowedOrigins: [] };
+const OFF: Policy = { authenticating: false, allowedOrigins: [], pinnedUserId: null };
 
 let current: Policy = OFF;
 
@@ -38,6 +40,7 @@ export function setAuthPolicy(config: AuthConfig): void {
   current = {
     authenticating: isAuthenticatingMode(config.mode),
     allowedOrigins: config.allowedOrigins,
+    pinnedUserId: config.local?.userId ?? null,
   };
 }
 
@@ -53,6 +56,32 @@ export function isAuthenticatingInstance(): boolean {
 
 export function policyAllowedOrigins(): readonly string[] {
   return current.allowedOrigins;
+}
+
+/**
+ * The single identity a `local` instance acts as, for the readers that ask
+ * "which user is this bot's web chat" and have no request context.
+ *
+ * `bot_default_user` is written by exactly one thing: the chat page's user
+ * dropdown. PR C hides that dropdown when the server owns the id, which retires
+ * the field's only writer — and six readers degrade SILENTLY when it is unset:
+ * `fetchSavedNotes` returns `[]` with no log line (the wiki reader's saved-notes
+ * injection into Ask/Explain simply vanishes), `POST /api/wiki/remember`
+ * refuses, `loadInterestProfileForBot` loses the gardener drain's fallback, and
+ * three user-resolution chains fall through.
+ *
+ * The alternative was to keep the client writing it, which would mean an
+ * authenticated page calling a route §4 puts in the ADMIN zone — the one thing
+ * PR C's client change exists to stop. So the fallback is server-side.
+ *
+ * It is NOT a repurposing of the field (see the decision page about the last
+ * time `bot_default_user` was asked a question it does not answer): on a
+ * single-identity instance the pinned user IS the answer to "which persona is
+ * the web chat acting as". Null in every other mode, where the stored value —
+ * or its absence — still rules.
+ */
+export function pinnedLocalUserId(): string | null {
+  return current.pinnedUserId;
 }
 
 /**

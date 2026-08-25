@@ -153,7 +153,9 @@ exclusion because the *middleware itself* is what accepts the secret.
 
 ## PR C — the session id wins over a claimed one
 
-Three files, and one rule each.
+Five new modules (`guard`, `origin`, `cors`, `policy`, `inventory`), plus the
+`scope = 'shared'` narrowing in `src/db/memories.ts` and the client half in
+`src/chat/views/page.ts`.
 
 ### `guard.ts` — `requireOwnUser(c, claimedUserId, claimedUsername?)`
 
@@ -206,10 +208,24 @@ in both directions:
 - Neither header ⇒ **allowed**. A non-browser client sends neither; refusing
   there would break every script to close nothing.
 
-Same-origin is compared **by host, not by full origin**: `tailscale serve`
-terminates TLS, so the browser sends `https://<tailnet-name>` while muninn is
-plain HTTP behind it. Comparing schemes would refuse every write from the one
-deployment this campaign exists for.
+**The accepted set is CONFIGURED, never derived from the request.** An earlier
+cut compared `Origin` against the request's own `Host` header — which asks "does
+this request agree with itself", not "is this my origin" — and review
+demonstrated the consequence on a live server: `Host: evil.example:3013` with
+`Origin: http://evil.example:3013` created a real conversation. That is exactly
+the DNS-rebinding shape an origin check exists to stop, since the loopback
+bypass then supplies the pinned identity. So: `MUNINN_ALLOWED_ORIGINS` plus the
+loopback literals at the configured `DASHBOARD_PORT`, and nothing else. A
+consequence worth stating — every origin muninn is REACHED at (the tailnet name
+`tailscale serve` publishes, a LAN address, an extension) must be listed,
+spelled as the browser sends it, **scheme included**: the proxy terminates TLS,
+so the browser sends `https://<tailnet-name>` while muninn itself is plain HTTP.
+
+⚠️ **HEAD is not safe.** Hono routes `HEAD /x` to the `app.get("/x")` handler and
+RUNS its body, so exempting HEAD skips the same side effect with the response
+discarded — measured: `GET /chat/pending/x` cross-site answered 403 and consumed
+nothing, `HEAD` on the same path answered 200 and consumed the message. HEAD
+falls through to the GET rule; only `OPTIONS` is exempt.
 
 **Why the tests are where they are.** `SameSite=Lax` already blocks the
 cross-site POST half *for requests arriving through the proxy*, so a
@@ -219,10 +235,19 @@ the "browser on the muninn host" case — plus the side-effecting GETs. `fetch` 
 not used: it normalises the target and will not let a caller set `Origin`
 freely.
 
+### `GET /chat/me` — and a name collision worth knowing about
+
+⚠️ **`mode: "local"` from `/chat/me` means "auth is OFF", which is the OPPOSITE
+of `MUNINN_AUTH=local`.** The wire value is the plan's, and the deferred Entra
+half expects it, so it is kept — but read it as "this page picks its own user",
+never as "the local auth mode". An authenticating instance, `local` included,
+answers `mode: "session"`.
+
 ### `cors.ts` + `policy.ts` — the per-site CORS disposition
 
-Twelve hand-written `Access-Control-Allow-Origin: *` literals across eight files
-became one helper. With auth **off** the header stays `*`, byte for byte — the
+The wildcard `Access-Control-Allow-Origin` literals — **13 of them across 7
+files**, counted on `main` — became one helper. (`article-routes.ts` is an
+eighth file that only NAMES the header in a comment; it never set one.) With auth **off** the header stays `*`, byte for byte — the
 four Chrome extensions in `extensions/` call these routes against
 `http://localhost:3010` and a blanket drop is the change most likely to break
 them. In an authenticating mode the request's own `Origin` is **echoed** when it
@@ -265,10 +290,41 @@ Two dispositions are deliberately *not* guards. `GET /api/messages/:userId`,
 is meaningless (minting a user row has none, and a guard there would only make
 the route un-callable). Nothing denies them until the zone model lands, and the
 fixture says so rather than letting the absence read as an oversight. The same
-is true of `GET|PUT /chat/bot-preferences/:botName/default-user`.
+is true of **`PUT /chat/bot-preferences/:botName/default-user`** — the GET
+beside it reads no claimed id, it *returns* one.
+
+## Operator notes for a `local` instance (config traps PR C created)
+
+None of these refuse the boot, and all three are silent until someone uses the
+feature — which is why they are written down here rather than left to be found.
+
+- **`MUNINN_LOCAL_USER` should be one of the bot's chat-config users.** With auth
+  off, `POST /api/research/chat` and `POST /api/wiki/ask/chat` fall through to
+  `botUsers[0]` when no id is named. Under a session the id is ALWAYS supplied,
+  so if the pinned identity is not a member of `bots/<name>/`'s users, every one
+  of those requests is a permanent `needsUser` 400. Nothing cross-checks this at
+  boot.
+- **`MUNINN_LOCAL_USER` should match `/^[a-zA-Z0-9_-]+$/`.** It becomes a path
+  segment on `/chat/reports/*` and `/chat/specs/*`. An id with `.`, `@` or `:`
+  makes those six routes 400, and the chat client reads that as "no saved
+  report" and disables the buttons. `resolveAuthConfig` warns once at boot.
+- **The four Chrome extensions in `extensions/` need their
+  `chrome-extension://<id>` origin in `MUNINN_ALLOWED_ORIGINS`,** or every
+  capture and research POST is refused as cross-origin. Allowlisting fixes the
+  CORS header AND the origin check — but not `requireOwnUser`: the Jira
+  extension's own user picker sends a claimed `userId`, and any value other than
+  the pinned identity is a 403 no allowlist can lift.
 
 ## What this does not close
 
+- **Four routes still accept a claimed `userId`, and nothing denies them.**
+  `GET /api/messages/:userId`, `GET /api/users/:userId/overview`,
+  `POST /api/users` and `PUT /chat/bot-preferences/:botName/default-user` are
+  `admin-zone-deferred` in `claimed-id-inventory.txt`: §4 assigns them to the
+  admin zone, where an "own" version is meaningless. The zone model is
+  deferred, so in `local` mode — where `resolveRole` answers `user` for
+  everyone — they are open to any authenticated caller. Verified live:
+  `GET /api/messages/<anyone>` answers 200.
 - **The `/chat/ws` and `/simulator/ws` upgrade.** It runs inside `Bun.serve`'s
   `fetch`, before `app.fetch`, so no Hono middleware can see it. **PR D.**
 - **Resource ownership.** Any authenticated caller still reaches any

@@ -143,6 +143,10 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
       userId: identity.userId,
       displayName: identity.displayName,
       navIdent: identity.navIdent,
+      // The client branches on this for `bot_default_user`: a SINGLE pinned
+      // local identity may keep writing that bot-global field (six readers
+      // degrade silently without it), a multi-user provider may not.
+      provider: identity.provider,
       role: sessionRole(c),
     });
   });
@@ -643,6 +647,19 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
 
   // Validate issueKey to prevent path traversal (Jira keys or research-<uuid> fallback)
   const VALID_ISSUE_KEY = /^[A-Z]+-\d+$|^research-[a-f0-9]{8}$/;
+  /**
+   * The charset a `userId` may have when it becomes a PATH SEGMENT.
+   *
+   * `/chat/reports/*` and `/chat/specs/*` address a file
+   * (`resolve(bot.dir, "reports", userId, …)`), so under PR C this is checked
+   * AFTER `requireOwnUser` has substituted the session id — never before.
+   * Guarding the claim and then writing an unchecked session id would move the
+   * traversal surface from the request onto `MUNINN_LOCAL_USER`.
+   *
+   * The converse is a config trap, so `resolveAuthConfig` warns at boot: a
+   * pinned id containing `.`, `@` or `:` is a perfectly good `users.id`
+   * everywhere else and makes only these six routes 400.
+   */
   const VALID_USER_ID = /^[a-zA-Z0-9_-]+$/;
   // dev_run statuses a spec save may set: draft on Save Spec, approved at the fagperson gate.
   const VALID_SPEC_STATUS = new Set(["spec_draft", "spec_approved"]);
@@ -682,11 +699,7 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     const botName = c.req.param("botName");
     const own = requireOwnUser(c, c.req.param("userId"));
     if (!own.ok) return own.response;
-    // Validated AFTER the substitution, never before: these routes address a
-    // FILE (`resolve(bot.dir, "reports", userId, …)`), so the value that lands
-    // in the path is the one that has to be checked. Guarding the claim and
-    // then writing the session id would move the traversal surface onto
-    // `MUNINN_LOCAL_USER`.
+    // See VALID_USER_ID: checked AFTER the substitution, deliberately.
     const userId = own.userId!;
     const issueKey = c.req.param("issueKey");
     if (!VALID_USER_ID.test(userId)) return c.json({ error: "Invalid user ID" }, 400);
@@ -730,11 +743,7 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     const botName = c.req.param("botName");
     const own = requireOwnUser(c, c.req.param("userId"));
     if (!own.ok) return own.response;
-    // Validated AFTER the substitution, never before: these routes address a
-    // FILE (`resolve(bot.dir, "reports", userId, …)`), so the value that lands
-    // in the path is the one that has to be checked. Guarding the claim and
-    // then writing the session id would move the traversal surface onto
-    // `MUNINN_LOCAL_USER`.
+    // See VALID_USER_ID: checked AFTER the substitution, deliberately.
     const userId = own.userId!;
     const issueKey = c.req.param("issueKey");
     if (!VALID_USER_ID.test(userId)) return c.json({ error: "Invalid user ID" }, 400);
@@ -780,11 +789,7 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     const botName = c.req.param("botName");
     const own = requireOwnUser(c, c.req.param("userId"));
     if (!own.ok) return own.response;
-    // Validated AFTER the substitution, never before: these routes address a
-    // FILE (`resolve(bot.dir, "reports", userId, …)`), so the value that lands
-    // in the path is the one that has to be checked. Guarding the claim and
-    // then writing the session id would move the traversal surface onto
-    // `MUNINN_LOCAL_USER`.
+    // See VALID_USER_ID: checked AFTER the substitution, deliberately.
     const userId = own.userId!;
     const issueKey = c.req.param("issueKey");
     if (!VALID_USER_ID.test(userId)) return c.json({ error: "Invalid user ID" }, 400);
@@ -801,9 +806,7 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
   // Check if a domain spec exists (lightweight — gates downstream buttons)
   app.on("HEAD", "/specs/:botName/:userId/:issueKey", async (c) => {
     const botName = c.req.param("botName");
-    // Bodyless 403: an unguarded HEAD here is a 200/404 ORACLE over whether a
-    // colleague has a saved report or spec for a given Jira key, and the chat
-    // client probes exactly this endpoint.
+    // Bodyless 403 — the 200/404 oracle; see the first HEAD route above.
     const own = requireOwnUser(c, c.req.param("userId"));
     if (!own.ok) return forbiddenHead(c);
     const userId = own.userId!;

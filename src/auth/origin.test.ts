@@ -1,7 +1,7 @@
 import { describe, test, expect, afterAll } from "bun:test";
 import { Hono } from "hono";
 import { createAuthMiddleware } from "./middleware.ts";
-import { createOriginMiddleware, decideOrigin, isSideEffectingRequest, SIDE_EFFECTING_GETS } from "./origin.ts";
+import { createOriginMiddleware, decideOrigin, isSideEffectingRequest, loopbackOrigins, SIDE_EFFECTING_GETS } from "./origin.ts";
 import { resolveAuthConfig } from "./mode.ts";
 
 const SECRET = "a-sufficiently-long-secret";
@@ -15,8 +15,17 @@ const CONFIG = resolveAuthConfig({
 });
 const ALLOWED = CONFIG.allowedOrigins;
 
+const SELF = "http://127.0.0.1:9999";
+
 describe("decideOrigin — the pure rule", () => {
-  const base = { host: "127.0.0.1:9999", allowedOrigins: ALLOWED, origin: undefined, secFetchSite: undefined };
+  // `allowedOrigins` is the CONFIGURED set — the allowlist plus the loopback
+  // literals the middleware derives from `DASHBOARD_PORT`. There is no `host`
+  // field by design; see `loopbackOrigins`.
+  const base = {
+    allowedOrigins: [...ALLOWED, ...loopbackOrigins(9999)],
+    origin: undefined as string | undefined,
+    secFetchSite: undefined as string | undefined,
+  };
 
   test("a safe GET is never checked, whatever the origin says", () => {
     expect(decideOrigin({ ...base, method: "GET", path: "/chat", origin: "https://evil.example" }).allowed).toBe(true);
@@ -29,25 +38,40 @@ describe("decideOrigin — the pure rule", () => {
     expect(decideOrigin({ ...base, method: "OPTIONS", path: "/api/research/chat", origin: "https://evil.example" }).allowed).toBe(true);
   });
 
-  test("a cross-site POST is refused; a same-HOST one is allowed", () => {
+  test("a cross-site POST is refused; the page's own loopback origin is allowed", () => {
     expect(decideOrigin({ ...base, method: "POST", path: "/chat/conversations", origin: "https://evil.example" }).allowed).toBe(false);
-    expect(decideOrigin({ ...base, method: "POST", path: "/chat/conversations", origin: "http://127.0.0.1:9999" }).allowed).toBe(true);
+    expect(decideOrigin({ ...base, method: "POST", path: "/chat/conversations", origin: SELF }).allowed).toBe(true);
   });
 
-  test("the scheme is deliberately NOT compared — the proxy terminates TLS", () => {
-    // tailscale serve publishes https and forwards plain HTTP, so a browser
+  test("the PROXIED origin is allowed by being LISTED, not by matching Host", () => {
+    // tailscale serve publishes https and forwards plain HTTP, so the browser
     // sends `Origin: https://<tailnet-name>` while muninn's own URL is http.
-    // Comparing schemes would refuse every write from the one deployment this
-    // campaign exists for.
+    // That origin is accepted because it is in MUNINN_ALLOWED_ORIGINS — which
+    // is also why the scheme in the allowlist entry has to be the one the
+    // BROWSER sends.
     expect(decideOrigin({
       ...base, method: "POST", path: "/chat/conversations",
-      host: "muninn-host.example-tailnet.ts.net",
       origin: "https://muninn-host.example-tailnet.ts.net",
     }).allowed).toBe(true);
+    // ...and the http spelling of the same name is NOT, because nothing sends it.
+    expect(decideOrigin({
+      ...base, method: "POST", path: "/chat/conversations",
+      origin: "http://muninn-host.example-tailnet.ts.net",
+    }).allowed).toBe(false);
   });
 
   test("a DIFFERENT port on the same hostname is cross-origin", () => {
     expect(decideOrigin({ ...base, method: "POST", path: "/x", origin: "http://127.0.0.1:9998" }).allowed).toBe(false);
+  });
+
+  test("an attacker-controlled name is refused however the request describes itself", () => {
+    // The DNS-rebinding shape. An earlier cut compared Origin against the
+    // request's own `Host`, so a page on `evil.example` rebound to 127.0.0.1
+    // sent a matching pair and was answered 201 by a live server. There is no
+    // `host` input any more; this asserts the refusal survives every spelling.
+    for (const origin of ["http://evil.example:9999", "https://evil.example", "http://evil.example"]) {
+      expect(decideOrigin({ ...base, method: "POST", path: "/chat/conversations", origin }).allowed).toBe(false);
+    }
   });
 
   test("an allowlisted extension origin is allowed even when Sec-Fetch-Site says cross-site", () => {
@@ -85,8 +109,27 @@ describe("decideOrigin — the pure rule", () => {
     expect(decideOrigin({ ...base, method: "GET", path: "/chat/pending/x" }).allowed).toBe(true);
   });
 
-  test("a missing Host header cannot make an origin same-origin", () => {
-    expect(decideOrigin({ ...base, host: undefined, method: "POST", path: "/x", origin: "http://127.0.0.1:9999" }).allowed).toBe(false);
+  test("HEAD is treated as GET, not as safe", () => {
+    // Hono routes HEAD to the `app.get` handler and RUNS it, so exempting HEAD
+    // skips the same side effect rather than a bodyless read.
+    expect(isSideEffectingRequest("HEAD", "/chat/pending/t1")).toBe(true);
+    expect(isSideEffectingRequest("HEAD", "/api/research/ask")).toBe(true);
+    // ...while an ordinary HEAD stays safe — the two read-only app.on("HEAD")
+    // report/spec routes must not start 403ing.
+    expect(isSideEffectingRequest("HEAD", "/chat/reports/bot/user/AB-1")).toBe(false);
+    expect(decideOrigin({ ...base, method: "HEAD", path: "/chat/pending/t1", secFetchSite: "cross-site" }).allowed).toBe(false);
+  });
+
+  test("the wiki egress GETs are on the list — model spend, and two reach the live web", () => {
+    for (const path of [
+      "/api/wiki/ask", "/api/wiki/digest", "/api/wiki/explain",
+      "/api/wiki/factcheck", "/api/wiki/factcheck/claim",
+    ]) {
+      expect(isSideEffectingRequest("GET", path), path).toBe(true);
+      expect(decideOrigin({ ...base, method: "GET", path, secFetchSite: "cross-site" }).allowed, path).toBe(false);
+    }
+    // The pending alias `src/index.ts` 301s from is listed too.
+    expect(isSideEffectingRequest("GET", "/simulator/pending/t1")).toBe(true);
   });
 
   test("isSideEffectingRequest matches the enumerated GET list by PATH", () => {
@@ -113,16 +156,23 @@ describe("decideOrigin — the pure rule", () => {
  * bypass authenticates before any cookie is read. A test driven through a proxy
  * would be green whether or not this middleware exists.
  */
-const app = new Hono();
-app.use("*", createAuthMiddleware(CONFIG));
-app.use("*", createOriginMiddleware(CONFIG.allowedOrigins));
-app.post("/chat/conversations", (c) => c.json({ ok: true }));
-app.get("/chat/pending/:threadId", (c) => c.json({ consumed: c.req.param("threadId") }));
-app.get("/chat/bots", (c) => c.json({ ok: true }));
-
-const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req, srv) => app.fetch(req, srv) });
+// The server is bound FIRST, because the middleware needs the real port: the
+// accepted set is derived from configuration, never from the request's own
+// `Host` header. A late `handler` binding is what lets both happen in order.
+let handler: (req: Request, srv: unknown) => Response | Promise<Response>;
+const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req, srv) => handler(req, srv) });
 const PORT = Number(server.port);
 afterAll(() => server.stop(true));
+
+const app = new Hono();
+app.use("*", createAuthMiddleware(CONFIG));
+app.use("*", createOriginMiddleware(CONFIG.allowedOrigins, PORT));
+app.post("/chat/conversations", (c) => c.json({ ok: true }));
+let consumed = 0;
+app.get("/chat/pending/:threadId", (c) => { consumed++; return c.json({ consumed, id: c.req.param("threadId") }); });
+app.get("/api/wiki/digest", (c) => c.json({ spent: true }));
+app.get("/chat/bots", (c) => c.json({ ok: true }));
+handler = (req, srv) => app.fetch(req, srv as never);
 
 function rawRequest(
   target: string,
@@ -211,5 +261,34 @@ describe("the origin middleware, over a real socket, inside the loopback bypass"
 
   test("an ORDINARY cross-site GET is untouched — the check is on side effects, not methods", async () => {
     expect(status(await rawRequest("/chat/bots", { "Sec-Fetch-Site": "cross-site" }))).toBe(200);
+  });
+
+  test("HEAD on the one-time consume is refused, and the handler does NOT run", async () => {
+    // The defect this replaces: HEAD was exempt, Hono ran the GET handler
+    // anyway, and a cross-site `fetch(…, {method:"HEAD", mode:"no-cors"})`
+    // destroyed the victim's pending message while answering 200.
+    const before = consumed;
+    const raw = await rawRequest("/chat/pending/victim", { "Sec-Fetch-Site": "cross-site" }, "HEAD");
+    expect(status(raw)).toBe(403);
+    expect(consumed, "the GET handler ran for a refused HEAD").toBe(before);
+  });
+
+  test("a cross-site GET on a wiki egress route is refused before any model spend", async () => {
+    expect(status(await rawRequest("/api/wiki/digest", { "Sec-Fetch-Site": "cross-site" }))).toBe(403);
+  });
+
+  test("a forged Host cannot make an attacker origin look like ours", async () => {
+    // Measured on a live server before the fix: `Host: evil.example:<port>`
+    // with a matching Origin created a real conversation, because the check
+    // compared the request against ITSELF. Both spellings must be refused.
+    for (const host of [`evil.example:${PORT}`, "evil.example"]) {
+      const raw = await rawRequest(
+        "/chat/conversations",
+        { Host: host, Origin: `http://${host}`, "Content-Type": "application/json" },
+        "POST",
+        "{}",
+      );
+      expect(status(raw), host).toBe(403);
+    }
   });
 });
