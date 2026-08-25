@@ -62,6 +62,14 @@ jobs:
       LOG_DIR: none
     steps:
       - uses: actions/checkout@v4
+        with:
+          # `src/wiki/git-dates.test.ts` asserts against THIS REPO'S OWN history —
+          # that `store.ts` carries a non-sweep touch date. `checkout`'s default
+          # depth-1 clone has exactly one commit, which is large enough to be
+          # classified as a SWEEP, so `touched` came back empty and the assertion
+          # failed on the runner and nowhere else. Full history is the input that
+          # test needs; loosening the assertion instead would delete its point.
+          fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ env.BUN_VERSION }}
@@ -93,7 +101,12 @@ jobs:
     env:
       # The e2e servers boot the real `src/index.ts`, which requires this and
       # nothing else (`requireEnv` in `src/config.ts` names exactly one variable).
-      DATABASE_URL: postgresql://muninn:muninn@127.0.0.1:5435/muninn
+      # `muninn_test`, not `muninn`: the schema comes from `db:setup:test`, which
+      # is the ONLY thing that applies `db/init.sql`. `db:migrate` alone fails on
+      # a bare service container (`relation "messages" does not exist`) — locally
+      # docker-compose mounts `init.sql` as the entrypoint, and a GitHub service
+      # container has no such hook.
+      DATABASE_URL: postgresql://muninn:muninn@127.0.0.1:5435/muninn_test
       LOG_DIR: none
       # No `TELEGRAM_BOT_TOKEN_*` here, deliberately: `e2eEnv()` blanks them on a
       # developer's machine, and a runner should have nothing to blank. If a token
@@ -110,8 +123,10 @@ jobs:
       # runner image. Only chromium: `playwright.config.ts` defines one project.
       - run: bunx playwright install --with-deps chromium
       # The schema has to exist before the first server boots — the dashboard and
-      # /chat routes query it on the very first request.
-      - run: bun run db:migrate
+      # /chat routes query it on the very first request. `db:setup:test` reaches
+      # the server through its own hardcoded admin URL, so it needs no env of its
+      # own; it creates `muninn_test`, applies `init.sql` and baselines.
+      - run: bun run db:setup:test
       # A fresh database makes `chat.spec.ts`/`inspector.spec.ts` FAIL (no user to
       # select) and makes the traces + inspector cases SKIP THEMSELVES, which is
       # the worse half — a green run with the coverage silently gone. The seed is
