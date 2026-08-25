@@ -1,6 +1,6 @@
 import { test, expect, describe, afterEach } from "bun:test";
 import { configure, reset, type LogRecord } from "@logtape/logtape";
-import { loadConfig, optionalEnvFlag, __resetEnvFlagWarningsForTest } from "./config.ts";
+import { loadConfig, optionalEnvFlag, __resetEnvFlagWarningsForTest, adminIdentsFromEnv, allowedOriginsFromEnv } from "./config.ts";
 
 /**
  * `optionalEnvFlag` is how the instance-profile switches (`MUNINN_WIKI_READONLY`)
@@ -139,5 +139,51 @@ describe("claudeUsageUrl", () => {
     prev = process.env[VAR];
     process.env[VAR] = "   ";
     expect(config().claudeUsageUrl).toBeNull();
+  });
+});
+
+/**
+ * The two auth env lists. Both are read by `src/auth/mode.ts`'s boot refusals
+ * before `DATABASE_URL` exists, which is why they are getters rather than
+ * `loadConfig()` fields.
+ */
+describe("adminIdentsFromEnv", () => {
+  test("splits, trims, lowercases and de-duplicates", () => {
+    // Lowercasing both sides is what makes `A123456` and `nav-a123456` the same
+    // person to `resolveRole`; a case mismatch would resolve NOBODY to admin.
+    expect(adminIdentsFromEnv({ MUNINN_ADMIN_IDENTS: " A123456 , a123456 ,B999999 " }))
+      .toEqual(["a123456", "b999999"]);
+  });
+
+  test("unset, blank and separator-only all mean an empty allowlist", () => {
+    expect(adminIdentsFromEnv({})).toEqual([]);
+    expect(adminIdentsFromEnv({ MUNINN_ADMIN_IDENTS: "" })).toEqual([]);
+    expect(adminIdentsFromEnv({ MUNINN_ADMIN_IDENTS: " , , " })).toEqual([]);
+  });
+});
+
+describe("allowedOriginsFromEnv", () => {
+  test("normalises through URL so spellings of one origin compare equal", () => {
+    expect(allowedOriginsFromEnv({ MUNINN_ALLOWED_ORIGINS: "https://Host.example/,https://host.example" }))
+      .toEqual(["https://host.example"]);
+    expect(allowedOriginsFromEnv({ MUNINN_ALLOWED_ORIGINS: "http://127.0.0.1:3010/chat" }))
+      .toEqual(["http://127.0.0.1:3010"]);
+  });
+
+  test("a wildcard is refused, not honoured", () => {
+    // The fail-OPEN direction for a list whose only job is to fail closed.
+    // Dropped here, it reaches the boot assert as "empty" and refuses loudly.
+    expect(allowedOriginsFromEnv({ MUNINN_ALLOWED_ORIGINS: "*" })).toEqual([]);
+    expect(allowedOriginsFromEnv({ MUNINN_ALLOWED_ORIGINS: "*,https://ok.example" }))
+      .toEqual(["https://ok.example"]);
+  });
+
+  test("an unparseable entry is dropped rather than silently matching nothing", () => {
+    expect(allowedOriginsFromEnv({ MUNINN_ALLOWED_ORIGINS: "not a url,https://ok.example" }))
+      .toEqual(["https://ok.example"]);
+  });
+
+  test("unset means empty", () => {
+    expect(allowedOriginsFromEnv({})).toEqual([]);
   });
 });

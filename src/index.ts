@@ -18,12 +18,33 @@ import { researchMcpServer } from "./research/mcp-server.ts";
 import { startStaleHandoffSweep, stopStaleHandoffSweep } from "./chat/stale-sweep.ts";
 import { auditMcpAdapters } from "./startup/adapter-audit.ts";
 import { isWikiReadonly, WIKI_READONLY_ENV } from "./wiki/readonly.ts";
+import { AuthConfigError, resolveAuthConfig, isAuthenticatingMode, type AuthConfig } from "./auth/mode.ts";
+import { createAuthMiddleware } from "./auth/middleware.ts";
 import { Hono } from "hono";
 import type { Bot } from "grammy";
 
 const config = loadConfig();
 await setupLogging(config.logDir);
 const log = getLog("core");
+
+// The auth contract, resolved before anything is STARTED — no DB pool, no bot
+// processes, no MCP children — so a fail-closed refusal costs nothing. (Not
+// before `loadConfig()` above, which is what demands `DATABASE_URL`: an instance
+// missing that reports it first. Logging is already configured, so the refusal
+// is never lost.) `resolveAuthConfig` throws on every fail-closed condition
+// (nais without an authenticating mode, `entra` before the zone model lands, an
+// authenticating mode missing its own config); the message is the whole
+// diagnosis, so it is printed without a stack.
+let auth: AuthConfig;
+try {
+  auth = resolveAuthConfig();
+} catch (err) {
+  if (err instanceof AuthConfigError) {
+    log.error("Refusing to start: {message}", { message: err.message });
+    process.exit(1);
+  }
+  throw err;
+}
 
 // Backstop for promise rejections that escape a fire-and-forget path (e.g. a
 // throw inside an extraction `onResult` callback). Bun would otherwise log and
@@ -150,6 +171,12 @@ try {
 // Build the combined Hono app
 const dashboard = createDashboardRoutes(config);
 const app = new Hono();
+// Registered BEFORE any route: Hono matches handlers in registration order, so
+// a `use` added after `route` would never run for those routes. Mounted only in
+// an authenticating mode — with auth off there is no middleware to run.
+if (isAuthenticatingMode(auth.mode)) {
+  app.use("*", createAuthMiddleware(auth));
+}
 app.route("/", dashboard);
 
 // Always mount chat routes — uses ALL bots (not just those with platform tokens)
@@ -163,8 +190,9 @@ app.all("/simulator", (c) => c.redirect("/chat", 301));
 // Start server — with WebSocket support for chat
 const server = Bun.serve<import("./chat/index.ts").ChatWsData>({
   port: config.dashboardPort,
-  // Bind loopback-only by default — the dashboard + chat expose MCP tools, logs,
-  // traces and full CRUD with no auth, so they must not be reachable from the LAN.
+  // Bind loopback-only by default — with MUNINN_AUTH=off (the default) the
+  // dashboard + chat expose MCP tools, logs, traces and full CRUD with no auth,
+  // so they must not be reachable from the LAN.
   // Set DASHBOARD_HOST=0.0.0.0 to deliberately expose it (e.g. trusted home net).
   // `||` (not `??`) so a blank `DASHBOARD_HOST=` in .env or docker-compose
   // shorthand also falls through to the safe loopback default — empty-string
@@ -181,13 +209,38 @@ const server = Bun.serve<import("./chat/index.ts").ChatWsData>({
       if (upgraded) return undefined;
       return new Response("WebSocket upgrade failed", { status: 500 });
     }
-    return app.fetch(req);
+    // `server` is passed as Hono's env so `hono/bun`'s getConnInfo can read the
+    // peer address — which is what the auth middleware's loopback bypass turns
+    // on. Without it that bypass is inert and a wrong secret is a lockout.
+    return app.fetch(req, server);
   },
   websocket: chat.chatWebSocket,
 });
 
 log.info("Dashboard: http://localhost:{port}", { port: server.port });
 activityLog.push("system", `Dashboard running on http://localhost:${server.port}`);
+
+// An authenticating mode is invisible from the outside until a request is
+// refused, and its two LIMITS are invisible entirely — so both are said once, at
+// boot, rather than left for the mode's presence to imply a boundary it does not
+// have yet.
+if (isAuthenticatingMode(auth.mode)) {
+  log.info(
+    "MUNINN_AUTH={mode} — HTTP requests require a session; direct-loopback requests bypass it by design. " +
+    "NB the /chat/ws upgrade is NOT yet authenticated (it runs before Hono) and per-route guards are not " +
+    "in place: this mode is the switch, not yet a closed boundary.",
+    { mode: auth.mode },
+  );
+  log.info(
+    "MUNINN_AUTH={mode} — the loopback bypass trusts the PEER ADDRESS, so it is only sound behind an HTTP " +
+    "proxy that stamps forwarding headers (e.g. `tailscale serve` in HTTP mode). An L4 forward — " +
+    "`tailscale serve --tcp`, an nginx `stream` block, `ssh -L`, `socat`, `kubectl port-forward` — or a bare " +
+    "`proxy_pass` with no `proxy_set_header` adds no headers, and every client through one is granted the " +
+    "pinned identity with NO credential. See src/auth/CLAUDE.md.",
+    { mode: auth.mode },
+  );
+  activityLog.push("system", `Auth mode: ${auth.mode}`);
+}
 
 // The instance profile is env-only and otherwise invisible until two instances
 // write one wiki, so the non-owner says so at boot. Announced only when ON: a
