@@ -37,9 +37,14 @@
  * these tests write real files, and an ordering dependency between them is a
  * failure that only reproduces in the order Playwright happened to pick.
  *
- * ENV PREREQUISITE / PLATFORM TOKENS: as `wiki-refresh.spec.ts` — a working
- * `.env` at the repo root plus `blankBotTokens()`, so no instance opens a
- * second Telegram long-poller against the production bot's token.
+ * ENV PREREQUISITE / SPAWN ENV: as `wiki-refresh.spec.ts` — a working `.env` at
+ * the repo root plus `e2eEnv()`, which blanks both the platform tokens (so no
+ * instance opens a second Telegram long-poller against the production bot's
+ * token) and the instance-profile flags. The second half matters most HERE: the
+ * writable instance on `PORT` is only writable if the host's own
+ * `MUNINN_WIKI_READONLY` does not reach it, and this file's whole point is that
+ * `PORT` and `RO_PORT` are in DIFFERENT write modes. The read-only instance sets
+ * the flag itself, after the blank.
  */
 
 import { test, expect, type Page } from "@playwright/test";
@@ -47,16 +52,19 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { blankBotTokens } from "./blank-bot-tokens.ts";
+import { e2eEnv } from "./e2e-env.ts";
+import { e2ePort } from "./ports.ts";
 import { PLAN_READONLY_ENV } from "../src/plans/board-writes.ts";
 
 // Ports are a shared resource across e2e FILES (Playwright runs them in
-// parallel): 3021–3029 are claimed by the wiki/summaries specs, and this file
-// booting on 3027/3028 raced `wiki-share`/`summaries-share` into a bind failure
-// that surfaced as a 40s "muninn did not start" timeout.
-const PORT = 3041;
-const RO_PORT = 3042;
-const NOQ_PORT = 3043;
+// parallel), so they come from the registry in `ports.ts` rather than from
+// literals here — this file booting on a port another spec had already taken
+// raced it into a bind failure that surfaced as a 40s "muninn did not start"
+// timeout, or worse, as this file's requests being answered by the OTHER
+// spec's server.
+const PORT = e2ePort("plans-write");
+const RO_PORT = e2ePort("plans-write/readonly");
+const NOQ_PORT = e2ePort("plans-write/no-queue");
 const BASE = `http://127.0.0.1:${PORT}`;
 const RO_BASE = `http://127.0.0.1:${RO_PORT}`;
 const NOQ_BASE = `http://127.0.0.1:${NOQ_PORT}`;
@@ -98,18 +106,16 @@ function boot(port: number, root: string, env: Record<string, string> = {}): Chi
     cwd: REPO_ROOT,
     env: {
       ...process.env,
-      ...blankBotTokens(),
+      ...e2eEnv(),
       DASHBOARD_PORT: String(port),
       DASHBOARD_HOST: "127.0.0.1",
       SCHEDULER_ENABLED: "false",
       WIKI_EXTRA: `${WIKI}=${root}`,
       // A dead ledger: the board renders every column and no money, which is the
-      // state these assertions are written against.
-      CLAUDE_USAGE_URL: "http://127.0.0.1:8799",
-      // `SYNC_REPOS` from the developer's own .env names the REAL mimir; its
-      // `wiki` entry is dropped (it matches no registered root here) and the loop
-      // only ever runs on an explicit POST, but the empty value says so outright.
-      SYNC_REPOS: "",
+      // state these assertions are written against. The port comes from the
+      // registry like every other one — it is reserved precisely so no future
+      // spec binds it and makes this a live-ledger run.
+      CLAUDE_USAGE_URL: `http://127.0.0.1:${e2ePort("plans-write/dead-ledger")}`,
       ...env,
     },
     stdio: "ignore",

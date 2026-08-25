@@ -44,7 +44,9 @@
  * (`DATABASE_URL` at minimum) at the repo root, since `src/index.ts` boots the
  * full process.
  *
- * PLATFORM TOKENS: `blankBotTokens()` keeps this muninn off Telegram/Slack — a
+ * SPAWN ENV: `e2eEnv()` keeps this muninn off Telegram/Slack, and blanks the
+ * instance-profile flags (`MUNINN_WIKI_READONLY`, `SYNC_REPOS`, `MUNINN_AUTH`…)
+ * so a spawned server behaves the same on every host — a
  * second long-poller on a live token 409-fights the running production bot.
  */
 
@@ -53,9 +55,10 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { blankBotTokens } from "./blank-bot-tokens.ts";
+import { e2eEnv } from "./e2e-env.ts";
+import { e2ePort } from "./ports.ts";
 
-const PORT = 3025;
+const PORT = e2ePort("wiki-chat-dialog");
 const BASE = `http://127.0.0.1:${PORT}`;
 const WIKI = "e2e-chat";
 const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
@@ -116,7 +119,7 @@ test.beforeAll(async () => {
     cwd: REPO_ROOT,
     env: {
       ...process.env,
-      ...blankBotTokens(),
+      ...e2eEnv(),
       DASHBOARD_PORT: String(PORT),
       DASHBOARD_HOST: "127.0.0.1",
       SCHEDULER_ENABLED: "false",
@@ -149,6 +152,32 @@ async function openDirect(page: import("@playwright/test").Page): Promise<void> 
   await page.locator(String.raw`.wiki-conn-tab[data-conntab="ask"]`).click();
   await page.locator("#wikiNewChatBtn").click();
   await expect(page.locator("#wikiChatOpt")).toBeVisible();
+  await settled(page);
+}
+
+/**
+ * Wait out the dialog's SECOND render.
+ *
+ * Opening paints `loading: true` immediately and then fires
+ * `/api/wiki/chat-target`; when that resolves, `renderChatOptions()` swaps the
+ * panel's `innerHTML`. Anything asserted between the two renders is racing that
+ * swap, and the dialog's focusable-control count is observably different on each
+ * side of it (5 vs 6 within one test).
+ *
+ * NB the focus escape this used to hide is FIXED IN THE PRODUCT, not waited out:
+ * `captureChatOptFocus` returns null for any element without an id — every
+ * suggestion chip — so the swap genuinely dropped `document.activeElement` to
+ * `<body>` and broke the panel's own `aria-modal` claim for one keystroke.
+ * `restoreChatOptFocus` now falls back to the panel's first focusable whenever
+ * focus WAS inside and could not be restored precisely. Measured with this wait
+ * removed: fallback in → 10/10 Tab-walks stay inside; fallback out → 8/10 fail.
+ * The wait stays because the OTHER assertions in this file should not race a
+ * re-render either.
+ */
+async function settled(page: import("@playwright/test").Page): Promise<void> {
+  await expect(page.locator("#wikiChatOpt")).not.toContainText(
+    "Working out where this chat lands…",
+  );
 }
 
 test.describe("Wiki reader: chat dialog", () => {
@@ -368,6 +397,50 @@ test.describe("Wiki reader: chat dialog", () => {
       );
       expect(inside).toBe(true);
     }
+  });
+
+  test("a re-render never drops focus out of the dialog — and never onto ×", async ({ page }) => {
+    // THE regression test for `restoreChatOptFocus`'s fallback. Deleting that
+    // fallback used to leave every one of this file's 13 cases green (measured),
+    // because `settled()` waits the race out — so the escape it closes had no
+    // guard at all. This drives the swap deliberately instead of racing it: the
+    // `chat-target` response is held until focus is parked on a suggestion chip,
+    // which is an element with NO id, which is exactly what
+    // `captureChatOptFocus` cannot restore.
+    let release: (() => void) | undefined;
+    await page.route("**/api/wiki/chat-target*", async (route) => {
+      await new Promise<void>((r) => { release = r; });
+      await route.continue();
+    });
+
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}`);
+    await page.locator(String.raw`.wiki-conn-tab[data-conntab="ask"]`).click();
+    await page.locator("#wikiNewChatBtn").click();
+    await expect(page.locator("#wikiChatOpt")).toBeVisible();
+
+    // Focus an id-less control while the dialog is still in its loading render.
+    const chip = page.locator(".wiki-chatopt-chip").first();
+    await expect(chip).toBeVisible();
+    await chip.focus();
+    expect(await page.evaluate(() => document.activeElement?.className ?? "")).toContain(
+      "wiki-chatopt-chip",
+    );
+
+    // Let the target land: `renderChatOptions` swaps the panel's innerHTML and
+    // the chip that had focus ceases to exist.
+    release?.();
+    await settled(page);
+
+    const after = await page.evaluate(() => ({
+      inside: !!document.getElementById("wikiChatOpt")?.contains(document.activeElement),
+      id: document.activeElement?.id ?? "",
+    }));
+    // Inside the dialog — otherwise `aria-modal="true"` is a lie and the next Tab
+    // walks the page behind.
+    expect(after.inside).toBe(true);
+    // And NOT on the × button, whose handler closes with no confirmation: the
+    // reader's next Enter, aimed at the chip, would discard their question.
+    expect(after.id).not.toBe("wikiChatOptClose");
   });
 
   test("Escape confirms before discarding a typed question, and the scrim dismisses", async ({

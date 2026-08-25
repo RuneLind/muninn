@@ -18,7 +18,7 @@
  *
  * ENV PREREQUISITE + PLATFORM TOKENS: identical to `wiki-integrate.spec.ts` — a
  * working `.env` at the repo root, and every Telegram/Slack token blanked via the
- * shared `blankBotTokens()` so this server can't 409-fight the running production
+ * shared `e2eEnv()` so this server can't 409-fight the running production
  * jarvis's long-poller.
  */
 
@@ -28,9 +28,10 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { blankBotTokens } from "./blank-bot-tokens.ts";
+import { e2eEnv } from "./e2e-env.ts";
+import { e2ePort } from "./ports.ts";
 
-const PORT = 3022;
+const PORT = e2ePort("wiki-factcheck-reader");
 const BASE = `http://127.0.0.1:${PORT}`;
 const WIKI_NAME = "e2e-factcheck";
 const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
@@ -90,7 +91,7 @@ test.beforeAll(async () => {
     cwd: REPO_ROOT,
     env: {
       ...process.env,
-      ...blankBotTokens(),
+      ...e2eEnv(),
       DASHBOARD_PORT: String(PORT),
       DASHBOARD_HOST: "127.0.0.1",
       SCHEDULER_ENABLED: "false",

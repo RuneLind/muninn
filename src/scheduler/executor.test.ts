@@ -86,22 +86,52 @@ async function withScratchAgentCwd(body: () => Promise<void>): Promise<void> {
   }
 }
 
+/**
+ * Put a HANGING `claude` on PATH for the duration of `body`.
+ *
+ * `spawnHaiku` shells out to the real `claude` binary, and the timeout test used
+ * to rely on "it won't be found or it will hang — either way it exceeds 100ms".
+ * Those two are not the same outcome: a missing binary makes `Bun.spawn` throw
+ * `Executable not found in $PATH` immediately, which is neither of the messages
+ * the assertion accepts. CI has no `claude`, so it failed there and nowhere else.
+ *
+ * Installing a stub is better than widening the assertion to accept "not found":
+ * a widened assertion would pass on CI while exercising NONE of the timeout path
+ * it exists for. With the stub, the same real kill runs on every host.
+ */
+async function withStubClaude(body: () => Promise<void>): Promise<void> {
+  const bin = mkdtempSync(join(tmpdir(), "muninn-stub-bin-"));
+  // Longer than any timeout a test here passes, so the kill is always ours.
+  writeFileSync(join(bin, "claude"), "#!/bin/sh\nsleep 30\n", { mode: 0o755 });
+  const previous = process.env.PATH;
+  process.env.PATH = `${bin}:${previous ?? ""}`;
+  try {
+    await body();
+  } finally {
+    if (previous === undefined) delete process.env.PATH;
+    else process.env.PATH = previous;
+    rmSync(bin, { recursive: true, force: true });
+  }
+}
+
 describe("spawnHaiku timeout", () => {
   test("HAIKU_TIMEOUT_MS defaults to 60s", () => {
     expect(HAIKU_TIMEOUT_MS).toBe(60_000);
   });
 
   test("kills hanging process after timeout", async () => {
-    // Call spawnHaiku directly with a very short timeout.
-    // "claude" won't be found or will hang — either way it exceeds 100ms.
-    await withScratchAgentCwd(async () => {
-      // The message reports ELAPSED, then the budget in parens — elapsed is a real
-      // measurement (103ms here) and must not be asserted exactly. The budget is the
-      // deterministic half. Elapsed is what distinguishes a genuine timeout from a
-      // laptop-sleep artifact, where a 60s timer fires ~17 min after arming.
-      await expect(
-        spawnHaiku("test", { source: "timeout-test", entrypoint: "test", botName: "test-bot", timeoutMs: 100 }),
-      ).rejects.toThrow(/timed out after \d+ms \(budget 100ms\)|exited with code/);
+    // A stub `claude` that sleeps 30s, so the 100ms budget is what ends this and
+    // the outcome does not depend on whether the host has the CLI installed.
+    await withStubClaude(async () => {
+      await withScratchAgentCwd(async () => {
+        // The message reports ELAPSED, then the budget in parens — elapsed is a real
+        // measurement (103ms here) and must not be asserted exactly. The budget is
+        // the deterministic half. Elapsed is what distinguishes a genuine timeout
+        // from a laptop-sleep artifact, where a 60s timer fires ~17 min after arming.
+        await expect(
+          spawnHaiku("test", { source: "timeout-test", entrypoint: "test", botName: "test-bot", timeoutMs: 100 }),
+        ).rejects.toThrow(/timed out after \d+ms \(budget 100ms\)/);
+      });
     });
   });
 

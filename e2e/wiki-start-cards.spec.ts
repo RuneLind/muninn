@@ -30,7 +30,7 @@
  * nothing below it is what this spec claims. No model calls anywhere.
  *
  * ENV PREREQUISITE / PLATFORM TOKENS: identical to `wiki-refresh.spec.ts` — a
- * working `.env` at the repo root, and `blankBotTokens()` so this muninn never
+ * working `.env` at the repo root, and `e2eEnv()` so this muninn never
  * opens a second Telegram long-poller against the production bot's token.
  *
  * HARNESS CAVEAT: on the machine this was written on, `bunx playwright test`
@@ -49,9 +49,10 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { blankBotTokens } from "./blank-bot-tokens.ts";
+import { e2eEnv } from "./e2e-env.ts";
+import { e2ePort } from "./ports.ts";
 
-const PORT = 3042;
+const PORT = e2ePort("wiki-start-cards");
 const BASE = `http://127.0.0.1:${PORT}`;
 const WIKI = "e2e-startcards";
 const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
@@ -147,7 +148,7 @@ test.beforeAll(async () => {
     cwd: REPO_ROOT,
     env: {
       ...process.env,
-      ...blankBotTokens(),
+      ...e2eEnv(),
       DASHBOARD_PORT: String(PORT),
       DASHBOARD_HOST: "127.0.0.1",
       SCHEDULER_ENABLED: "false",

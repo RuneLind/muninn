@@ -860,13 +860,69 @@ function repaintChatOptFoot(): void {
   if (foot) foot.innerHTML = chatOptFootHtml(state, question);
 }
 
-/** Re-focus the field the innerHTML swap just destroyed, caret included. */
-function restoreChatOptFocus(snap: ChatOptFocus | null): void {
-  if (!snap) return;
+/**
+ * Where focus lands when a re-render destroyed the element that had it.
+ *
+ * The QUESTION BOX first, not the first focusable control. The first control in
+ * DOM order is `#wikiChatOptClose`, whose handler closes the dialog
+ * unconditionally — no "Press Esc again" confirmation, unlike Escape and
+ * click-away. Parking focus there means a reader who Tabs to a suggestion chip
+ * during the ~100 ms `chat-target` fetch has their next Enter, aimed at the chip,
+ * silently discard the question they just composed. The question box is where the
+ * `created` first-paint path already puts the caret, and Enter there is a
+ * newline.
+ *
+ * The visibility filter mirrors `trapChatOptTab`'s (`offsetParent !== null`):
+ * `.focus()` on a hidden element is a no-op, which would leave focus on `<body>`
+ * — the exact escape this exists to close, with every test still green.
+ */
+function focusFirstInChatOptPanel(): void {
+  const panel = chatOptPanel();
+  if (!panel) return;
+  const visible = (el: HTMLElement): boolean => el.offsetParent !== null;
+  const question = document.getElementById(CHAT_OPT_QUESTION_ID) as HTMLElement | null;
+  if (question && panel.contains(question) && visible(question)) {
+    question.focus({ preventScroll: true });
+    return;
+  }
+  const first = (Array.prototype.slice.call(
+    panel.querySelectorAll(
+      'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled])',
+    ),
+  ) as HTMLElement[]).find(visible);
+  // The panel itself is the last resort, and it is focusable only because it
+  // carries `tabindex="-1"` (set at creation) — without that, `.focus()` on a
+  // `<div role="dialog">` does nothing and focus stays on `<body>`.
+  (first ?? panel).focus({ preventScroll: true });
+}
+
+/**
+ * Re-focus the field the innerHTML swap just destroyed, caret included.
+ *
+ * `wasInsidePanel` is the second half, and it is what keeps the dialog's
+ * `aria-modal="true"` claim true across a re-render. `captureChatOptFocus`
+ * returns null for any focused element WITHOUT an id — which is every suggestion
+ * chip and the × — so when `/api/wiki/chat-target` resolved while focus sat on
+ * one of those, the swap dropped `document.activeElement` to `<body>` and Tab
+ * walked straight out into the page behind. (The trap recovers on the NEXT Tab,
+ * so the window is one keystroke wide; a reader who Tabs during the ~100 ms load
+ * hits it, and a spec caught it 3 times in 8.) Focus therefore falls back to the
+ * panel's first focusable control whenever it WAS inside and we could not
+ * restore it precisely — never when it was outside, which would steal focus from
+ * the page.
+ */
+function restoreChatOptFocus(snap: ChatOptFocus | null, wasInsidePanel = false): void {
+  if (!snap) {
+    if (wasInsidePanel) focusFirstInChatOptPanel();
+    return;
+  }
   const el = document.getElementById(snap.id) as
     | (HTMLElement & { setSelectionRange?: (s: number, e: number) => void })
     | null;
-  if (!el) return;
+  if (!el) {
+    if (wasInsidePanel) focusFirstInChatOptPanel();
+    return;
+  }
   el.focus();
   if (snap.start === null || snap.end === null || typeof el.setSelectionRange !== "function") {
     return;
@@ -893,10 +949,11 @@ function renderChatOptions(): void {
   // and the connector picker all re-render the whole panel. Without this the reader
   // loses focus and caret mid-word, and the rest of the sentence goes nowhere.
   const active = document.activeElement as HTMLElement | null;
-  const focus = captureChatOptFocus(
-    active as { id?: string } | null,
-    !!panel && !!active && panel.contains(active),
-  );
+  // Computed BEFORE the innerHTML swap: afterwards `active` is detached and
+  // `panel.contains(active)` is false for everything, which would disable the
+  // fallback exactly when it is needed.
+  const wasInsidePanel = !!panel && !!active && panel.contains(active);
+  const focus = captureChatOptFocus(active as { id?: string } | null, wasInsidePanel);
   const created = !panel;
   if (!panel) {
     // The scrim goes in first so it sits UNDER the panel in paint order, and it
@@ -911,6 +968,10 @@ function renderChatOptions(): void {
     panel.className = "wiki-chatopt";
     panel.setAttribute("role", "dialog");
     panel.setAttribute("aria-modal", "true");
+    // Programmatically focusable, not tab-reachable: the last resort in
+    // `focusFirstInChatOptPanel` is a `.focus()` on the panel, and a bare
+    // `<div role="dialog">` silently ignores it.
+    panel.setAttribute("tabindex", "-1");
     panel.setAttribute("aria-label", "Start a chat from this wiki");
     document.body.appendChild(panel);
   }
@@ -922,7 +983,7 @@ function renderChatOptions(): void {
   const scrollTop = panel.scrollTop;
   panel.innerHTML = chatOptionsHtml(state);
   if (scrollTop) panel.scrollTop = scrollTop;
-  restoreChatOptFocus(focus);
+  restoreChatOptFocus(focus, wasInsidePanel);
   // FIRST PAINT ONLY: put the caret in the question box. It is the field the reader
   // came here to fill, and a dialog that opens with nothing focused makes the
   // suggestion chips look like the only way in.

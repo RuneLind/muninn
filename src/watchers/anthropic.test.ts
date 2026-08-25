@@ -1,4 +1,5 @@
 import { test, expect, describe, afterEach, beforeEach, mock } from "bun:test";
+import * as realExecutor from "../scheduler/executor.ts";
 import type { Watcher } from "../types.ts";
 
 // --- Module mocks (registered before the dynamic import below) ---
@@ -9,7 +10,39 @@ import type { Watcher } from "../types.ts";
 let gateResult = "[]";
 let gateThrow = false;
 let lastGatePrompt = ""; // captured so the body-excerpt threading can be asserted
+/**
+ * The executor mock is SPREAD OVER THE REAL MODULE, not hand-listed.
+ *
+ * `mock.module` invalidates the target for the WHOLE `bun test` process, so any
+ * module evaluated afterwards that names an export the mock omits dies with
+ * `SyntaxError: Export named 'X' not found` — and it is `haiku-direct.ts`'s
+ * `trackUsage` import that gets hit here, through modules these tests never
+ * mention. Whether that happens at all depends on which file in the chunk loaded
+ * `haiku-direct.ts` FIRST, which is why it stayed invisible on macOS and took
+ * out five files in `src/watchers/` on the CI runner.
+ *
+ * Hand-listing the surface (what `email.test.ts` did) works until the next export
+ * is added to `executor.ts`, and then it fails the same way somewhere else. The
+ * spread cannot drift.
+ */
 mock.module("../scheduler/executor.ts", () => ({
+  ...realExecutor,
+  // ⚠️ The spread above installs the REAL implementations of everything these
+  // tests do not override, and two of them have side effects that must never run
+  // from a test: `trackUsage` calls `getDb()` and INSERTs into `haiku_usage`
+  // (`src/watchers/wiki-gardener.ts` calls it, in this same `bun test` process),
+  // and `callHaiku` calls the module-internal real `spawnHaiku`, which spawns the
+  // `claude` CLI. Nothing reaches them today — but the whole reason the hand-listed
+  // surface was deleted is that the next change is not supposed to have to notice.
+  // (`buildHaikuArgs` also writes temp files, via `buildInlineSettings`, and is
+  // NOT stubbed: its only caller is the real `spawnHaiku`, which every file here
+  // overrides. Everything else executor.ts exports is pure or stream-local.)
+  trackUsage: () => {},
+  // `Promise<string>`, not a `HaikuResult` — the real `callHaiku` returns the
+  // text. A stub with the `spawnHaiku` shape would reach the next caller as
+  // "[object Object]" in a prompt, or as `.trim is not a function`, and
+  // `mock.module`'s factory is untyped so tsc cannot see the mismatch.
+  callHaiku: async () => "",
   DEFAULT_MODEL: "claude-haiku-4-5-20251001",
   spawnHaiku: async (prompt: string) => {
     lastGatePrompt = prompt;
