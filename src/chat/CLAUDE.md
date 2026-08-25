@@ -4,7 +4,7 @@
 
 | File | Role |
 |---|---|
-| `routes.ts` | Hono sub-router mounted at `/chat` — REST endpoints for conversations, threads, messages, reports, preferences |
+| `routes.ts` | Hono sub-router mounted at `/chat` — REST endpoints for conversations, threads, messages, reports, preferences. `POST /conversations` branches on the type: a **`web`** conversation goes through `findOrCreateBotConversation` for the DETERMINISTIC id (`sha256("<userId>:<botName>:web")[0:16]`) — the id `hydrateFromDb` rebuilds it under and every off-band broadcaster computes — so a repeat POST returns the existing one; every other type still gets a random shell from `createConversation` |
 | `state.ts` | `ChatState` singleton — in-memory conversation store with pub/sub event broadcasting |
 | `processor.ts` | Bridges chat state to `message-processor` — builds callbacks (say, setStatus, onTextDelta) that write to state |
 | `ws.ts` | Bun WebSocket handler — subscribes to ChatState events, sends JSON to connected clients |
@@ -26,7 +26,7 @@
 - `ChatEvent` union type: `message`, `status`, `text_delta`, `stream_clear`, `intent`, `tool_status`, `response_meta`, `conversation_created`.
 - Ephemeral events (`text_delta`, `intent`, `tool_status`) are broadcast-only — no state mutation.
 - `hydrateFromDb()` loads persisted conversations on startup with deterministic IDs from (userId, botName, platform).
-- Max 50 conversations in memory (`MAX_CONVERSATIONS`), auto-prunes oldest.
+- `MAX_CONVERSATIONS` (50) caps how many conversations keep their MESSAGE HISTORY in memory — **shells are never evicted**. The cap used to delete the LRU shell, which was a permanent 404 for its owner and a silent write loss (`addMessage` returns early on a missing shell, and nothing can reconstruct a `crypto.randomUUID()` id). `trimHydratedMessages` now empties the LRU `messages` arrays instead; a trimmed conversation still resolves, still accepts writes, and reads its history from the DB.
 
 ### Message Processing (processor.ts)
 
@@ -48,7 +48,7 @@ Five types: `telegram_dm`, `slack_dm`, `slack_channel`, `slack_assistant`, `web`
 
 | File | Type | What it tests |
 |---|---|---|
-| `state.test.ts` | Unit | ChatState pub/sub, conversation CRUD, max limit pruning |
+| `state.test.ts` | Unit | ChatState pub/sub, conversation CRUD, LRU message trimming (shells survive the cap) |
 | `chat-config.test.ts` | Unit | User loading, config file migration |
 | `pending-messages.test.ts` | Unit | Set/consume/expire pending messages |
 | `integration.test.ts` | Integration | Full round-trip with real Claude (slow, requires API key) |

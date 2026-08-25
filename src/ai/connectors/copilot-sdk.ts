@@ -11,6 +11,7 @@ import { preflightMcpForRequest } from "../mcp-status.ts";
 import { getLog } from "../../logging.ts";
 import { resolve } from "node:path";
 import { discoverSerenaConfigs } from "../../serena/config.ts";
+import { currentActiveTurn } from "../../hivemind/active-turn.ts";
 
 const log = getLog("ai", "copilot-sdk");
 
@@ -130,6 +131,11 @@ export async function executePrompt(
   systemPrompt?: string,
   onProgress?: StreamProgressCallback,
 ): Promise<ClaudeExecResult> {
+  // The turn this call belongs to, CAPTURED HERE rather than read at the point
+  // of use. This line runs inside the turn's own async chain, so it is exact;
+  // a read from inside a tool-result handler is not, on any connector with a
+  // shared long-lived transport (see `research/thread-citations.ts`).
+  const activeTurn = currentActiveTurn();
   const wallStart = performance.now();
   const cl = await getCopilotClient();
 
@@ -226,6 +232,7 @@ export async function executePrompt(
             endMs: performance.now(),
             wallStart,
             botName: botConfig.name,
+            turn: activeTurn,
           });
 
           toolCalls.push(toolCall);

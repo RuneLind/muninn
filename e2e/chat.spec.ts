@@ -121,16 +121,30 @@ test.describe("Chat page", () => {
 });
 
 test.describe("Chat SSE connection", () => {
-  test("connects to SSE endpoint", async ({ page }) => {
-    // Intercept SSE request
-    const ssePromise = page.waitForRequest(
-      (req) => req.url().includes("/api/events"),
-      { timeout: 5000 }
-    );
+  /**
+   * The chat page never opens an UNSCOPED `/api/events`.
+   *
+   * This replaced a "connects to the SSE endpoint" assertion, which encoded the
+   * old contract: connect immediately, unfiltered. The page now waits for a
+   * viewer and opens `?viewer=<id>` — and opens nothing at all without one,
+   * because an unscoped stream is the operator's and would render every user's
+   * phase and waterfall here. That makes "did it connect?" depend on whether
+   * this instance has any chat users, so the assertion that survives on every
+   * host is the negative one. The positive half — that it DOES connect, scoped,
+   * once a user resolves — is `chat-viewer-scope.spec.ts`, which stubs the bot
+   * and user lists so it holds regardless of the DB.
+   */
+  test("never opens an unscoped event stream", async ({ page }) => {
+    const eventUrls: string[] = [];
+    page.on("request", (req) => {
+      if (req.url().includes("/api/events")) eventUrls.push(req.url());
+    });
 
     await page.goto("/chat");
+    const pills = page.locator(".bot-pill");
+    if (await pills.count()) await pills.first().click();
+    await page.waitForTimeout(1500);
 
-    const sseReq = await ssePromise;
-    expect(sseReq.url()).toContain("/api/events");
+    expect(eventUrls.filter((u) => !u.includes("viewer="))).toEqual([]);
   });
 });

@@ -18,24 +18,34 @@
  * closes it from the tool-RESULT seam, which every connector already funnels
  * through, so the coverage is per-connector rather than per-tool.
  *
- * **Which turn a hit belongs to is resolved, not guessed.** It used to be
- * `peekActiveTurn(botName)` — a per-BOT LIFO — on both paths, so two people
- * chatting one bot concurrently had one turn's hits written DURABLY into the
- * other's thread, later seeding the wrong Jira draft. That was accepted for a
- * single-user instance and does not survive two. {@link resolveTurnThread} now
- * takes them in order of certainty:
+ * **Which turn a hit belongs to is resolved, not guessed**, and the two paths
+ * resolve it differently because only one of them can be exact. It used to be
+ * `peekActiveTurn(botName)` — a per-BOT LIFO — on both, so two people chatting
+ * one bot concurrently had one turn's hits written DURABLY into the other's
+ * thread, later seeding the wrong Jira draft. That was accepted for a
+ * single-user instance and does not survive two.
  *
- *  1. **The async binding** (`currentActiveTurn`) — exact. The tool-result seam
- *     runs inside the turn's own async chain, and that is the common path.
- *  2. **The per-bot stack, only when unambiguous** — for the out-of-band caller:
- *     muninn's `research_knowledge` MCP tool is served by a separate
- *     `Bun.serve` listener answering the model subprocess, so it inherits no
- *     context. With exactly one turn in flight for the bot there is nothing to
- *     be wrong about.
- *  3. **Nothing.** Two turns in flight and no binding ⇒ the row is DROPPED and
- *     logged. A missing citation costs the composer a source it can be told
- *     about; a mis-attributed one puts a colleague's search into someone else's
- *     conversation. Not writing is the cheaper error.
+ * **In-band (the common path): the turn is CAPTURED, not looked up.** The
+ * connector reads `currentActiveTurn()` once at entry — which is inside the
+ * turn's own async chain, so it is right by construction — and hands the binding
+ * down to {@link captureKnowledgeToolCitations}. Reading the async store at the
+ * point of USE instead would be a trap on any connector with a shared,
+ * long-lived transport: `copilot-sdk` keeps ONE client for the process, and a
+ * handler dispatched from a read loop created inside the FIRST turn's scope
+ * reads that turn's store, not its own. Measured in Bun — a listener registered
+ * in turn B, invoked from a loop created in turn A, sees A — so every later
+ * turn's hits would have been filed against the first turn's thread, with full
+ * confidence and past the ambiguity guard below. That is worse than the LIFO it
+ * replaced.
+ *
+ * **Out-of-band: `resolveActiveTurn`, best effort.** muninn's own
+ * `research_knowledge` MCP tool is served by a separate `Bun.serve` listener
+ * answering the model's subprocess, so there is no context to capture and no
+ * binding to inherit. It falls back to the per-bot stack while that is
+ * unambiguous, and otherwise writes **nothing** — a missing citation costs the
+ * composer a source it can be told about; a mis-attributed one puts a
+ * colleague's search into someone else's conversation. Not writing is the
+ * cheaper error.
  *
  * Fire-and-forget in every direction. A DB failure, a parse failure or a missing
  * turn must never turn a successful retrieval into a failed tool result, and must
@@ -43,7 +53,7 @@
  */
 
 import { getLog } from "../logging.ts";
-import { activeTurnCount, currentActiveTurn, peekActiveTurn } from "../hivemind/active-turn.ts";
+import { resolveActiveTurn, type ActiveTurnBinding } from "../hivemind/active-turn.ts";
 import {
   insertResearchCitations,
   type ResearchCitationInsert,
@@ -102,32 +112,31 @@ export function threadCitationRows(
 }
 
 /**
- * Which thread these hits belong to — see the header for the ordering.
+ * Which thread an OUT-OF-BAND caller's hits belong to — see the header.
  *
  * Exported for the regression suite: the whole point is that concurrency
  * produces *no* row rather than a wrong one, and that is not observable from
  * `persistThreadCitations`, which is fire-and-forget by design.
  */
 export function resolveTurnThread(botName: string): string | null {
-  const bound = currentActiveTurn();
-  // The bot guard is not paranoia: a bound context from a DIFFERENT bot's turn
-  // would be exactly as wrong as the stack race this replaces.
-  if (bound && bound.botName === botName) return bound.threadId;
-
-  const inFlight = activeTurnCount(botName);
-  if (inFlight > 1) {
-    log.info(
-      "Dropping thread citations: {count} turns in flight for {botName} and no bound turn",
-      { botName, count: inFlight },
+  const { threadId, ambiguous } = resolveActiveTurn(botName);
+  if (ambiguous) {
+    log.warn(
+      "Dropping thread citations: more than one thread in flight for {botName} and no captured turn",
+      { botName },
     );
-    return null;
   }
-  return peekActiveTurn(botName);
+  return threadId;
 }
 
-/** Shape + write, against the turn these hits were actually retrieved in. */
-export function persistThreadCitations(input: ThreadCitationInput): void {
-  const rows = threadCitationRows({ ...input, threadId: resolveTurnThread(input.botName) });
+/**
+ * Shape + write against a thread the caller already KNOWS — the in-band path.
+ *
+ * A `null` thread is an answer, not a miss: a turn with no thread of its own
+ * files nothing, rather than falling through to a neighbour's.
+ */
+export function persistThreadCitationsFor(threadId: string | null, input: ThreadCitationInput): void {
+  const rows = threadCitationRows({ ...input, threadId });
   if (rows.length === 0) return;
   void insertResearchCitations(rows).catch((err) => {
     log.warn("Failed to persist thread citations botName={botName} error={error}", {
@@ -135,6 +144,14 @@ export function persistThreadCitations(input: ThreadCitationInput): void {
       error: err instanceof Error ? err.message : String(err),
     });
   });
+}
+
+/**
+ * Shape + write for a caller with no way to know its turn — the out-of-band
+ * path, which resolves best-effort and drops the row when it cannot be sure.
+ */
+export function persistThreadCitations(input: ThreadCitationInput): void {
+  persistThreadCitationsFor(resolveTurnThread(input.botName), input);
 }
 
 /**
@@ -159,13 +176,18 @@ export function captureKnowledgeToolCitations(
   botName: string | undefined,
   toolName: string | undefined,
   text: string | undefined,
+  turn: ActiveTurnBinding | null,
 ): void {
   try {
     if (!botName || !toolName || !text) return;
     if (!isHuginnSearchTool(toolName)) return;
     const hits = parseHuginnHits(text);
     if (hits.length === 0) return;
-    persistThreadCitations({ botName, hits });
+    // The captured binding decides, and a binding for a DIFFERENT bot decides
+    // "no thread" rather than deferring to the stack — that would be exactly as
+    // wrong as the race this replaces.
+    const threadId = turn && turn.botName === botName ? turn.threadId : null;
+    persistThreadCitationsFor(threadId, { botName, hits });
   } catch (err) {
     // Never let this reach the connector — it runs inside the span-assembly tail
     // of every tool call in every chat turn.

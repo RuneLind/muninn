@@ -11,6 +11,7 @@ import { getLog } from "../../logging.ts";
 import { doStreamRequest, type StreamResult } from "./openai-compat-stream.ts";
 import { loadToolsForBot, type OpenAITool } from "./openai-compat-tools.ts";
 import { optionalEnvInt } from "../../config.ts";
+import { currentActiveTurn } from "../../hivemind/active-turn.ts";
 
 const log = getLog("ai", "openai-compat");
 
@@ -33,6 +34,11 @@ export async function executePrompt(
   systemPrompt?: string,
   onProgress?: StreamProgressCallback,
 ): Promise<ClaudeExecResult> {
+  // The turn this call belongs to, CAPTURED HERE rather than read at the point
+  // of use. This line runs inside the turn's own async chain, so it is exact;
+  // a read from inside a tool-result handler is not, on any connector with a
+  // shared long-lived transport (see `research/thread-citations.ts`).
+  const activeTurn = currentActiveTurn();
   const wallStart = performance.now();
   const model = botConfig.model ?? config.claudeModel;
   const timeoutMs = botConfig.timeoutMs ?? config.claudeTimeoutMs;
@@ -232,6 +238,7 @@ export async function executePrompt(
         endMs: performance.now(),
         wallStart,
         botName: botConfig.name,
+        turn: activeTurn,
       });
       const toolDurationMs = toolCall.durationMs;
 

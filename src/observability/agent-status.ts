@@ -192,10 +192,13 @@ class AgentStatusTracker {
   /** Per-user phase, for viewer-scoped subscribers. An entry is DELETED when
    *  that user goes idle, so the map is bounded by concurrently-active users. */
   private userStatus = new Map<string, AgentStatus>();
-  /** Subscriber → the viewer it is scoped to (`undefined` = unscoped/operator). */
-  private subscribers = new Map<StatusSubscriber, string | undefined>();
+  /** Each entry pairs a subscriber with the viewer it is scoped to (`undefined`
+   *  = unscoped/operator). A Set of entries rather than a Map keyed on the
+   *  FUNCTION: two subscribers sharing one function reference would otherwise
+   *  re-scope the first one's viewer and make either unsubscribe kill both. */
+  private subscribers = new Set<{ fn: StatusSubscriber; viewer?: string }>();
   private requests = new Map<string, AgentRun>();
-  private progressSubscribers = new Map<ProgressSubscriber, string | undefined>();
+  private progressSubscribers = new Set<{ fn: ProgressSubscriber; viewer?: string }>();
   private completionTimers = new Map<string, ReturnType<typeof setTimeout>>();
   // Registry read side (/agents dashboard).
   private allSubscribers = new Set<AllSubscriber>();
@@ -224,12 +227,12 @@ class AgentStatusTracker {
       if (phase === "idle") this.userStatus.delete(userId);
       else this.userStatus.set(userId, status);
     }
-    for (const [sub, viewer] of this.subscribers) {
+    for (const { fn, viewer } of this.subscribers) {
       // Unscoped subscribers see everything (the operator dashboard). A scoped
       // one hears only about its own user — not even an idle frame for someone
       // else's turn, which would be pure noise on the wire.
-      if (viewer === undefined) sub(status);
-      else if (viewer === userId) sub(this.statusFor(viewer));
+      if (viewer === undefined) fn(status);
+      else if (viewer === userId) fn(this.statusFor(viewer));
     }
   }
 
@@ -242,8 +245,9 @@ class AgentStatusTracker {
   }
 
   subscribe(fn: StatusSubscriber, viewer?: string): () => void {
-    this.subscribers.set(fn, viewer);
-    return () => this.subscribers.delete(fn);
+    const entry = { fn, viewer };
+    this.subscribers.add(entry);
+    return () => this.subscribers.delete(entry);
   }
 
   private statusFor(viewer?: string): AgentStatus {
@@ -452,8 +456,9 @@ class AgentStatusTracker {
   }
 
   subscribeProgress(fn: ProgressSubscriber, viewer?: string): () => void {
-    this.progressSubscribers.set(fn, viewer);
-    return () => this.progressSubscribers.delete(fn);
+    const entry = { fn, viewer };
+    this.progressSubscribers.add(entry);
+    return () => this.progressSubscribers.delete(entry);
   }
 
   /** Set the phase for the OWNER of a run, resolved from the run itself. Lets
@@ -549,8 +554,8 @@ class AgentStatusTracker {
   }
 
   private notifyProgress() {
-    for (const [sub, viewer] of this.progressSubscribers) {
-      sub(this.primaryRequest(viewer));
+    for (const { fn, viewer } of this.progressSubscribers) {
+      fn(this.primaryRequest(viewer));
     }
     // Registry read side rides the same mutation points (throttled internally).
     this.notifyAll();

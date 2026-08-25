@@ -171,11 +171,18 @@ const CHAT_SSE_SCRIPT = `
 
   function connectSSE() {
     // The waterfall + phase pill are scoped SERVER-side to this viewer
-    // (sse-routes.ts). The id is only known once the user selector resolves —
-    // an async fetch — so the first connect is unscoped and CHAT_SCRIPT calls
-    // reconnectChatSse() as soon as it has one, and again on every user switch.
+    // (sse-routes.ts), and this page NEVER opens the stream without one.
+    //
+    // Fail closed, deliberately: an unscoped /api/events is the operator stream,
+    // so falling back to it would render every user's phase and waterfall — the
+    // exact defect this scoping exists to remove — and it would do so in the
+    // states least likely to be noticed: the moment before the user selector
+    // resolves, a bot with no users, or a single failed /api/users fetch. An
+    // empty panel is the honest answer there. CHAT_SCRIPT calls
+    // reconnectChatSse() as soon as a user resolves, and on every switch.
     var viewer = window.__muninnViewerId;
-    var url = viewer ? '/api/events?viewer=' + encodeURIComponent(viewer) : '/api/events';
+    if (!viewer) return;
+    var url = '/api/events?viewer=' + encodeURIComponent(viewer);
     // "mine" is per-connection on purpose: "conn" is shared so reconnectChatSse
     // can close the live one, and a STALE stream's onerror must not close (or
     // resurrect itself over) the stream that replaced it.
@@ -210,7 +217,11 @@ const CHAT_SSE_SCRIPT = `
       onerror: function() {
         mine.close();
         if (conn !== mine) return;   // superseded by a viewer switch — stay dead
-        setTimeout(function() { if (conn === mine) connectSSE(); }, 3000);
+        setTimeout(function() {
+          if (conn !== mine) return;
+          conn = null;
+          connectSSE();
+        }, 3000);
       },
     });
     conn = mine;
@@ -219,14 +230,17 @@ const CHAT_SSE_SCRIPT = `
   /** Re-open the stream against the currently selected viewer. Called by
    *  CHAT_SCRIPT whenever the selected user changes; a no-op if it has not. */
   var lastViewer;
+  var viewerResolved = false;
   window.reconnectChatSse = function() {
-    if (window.__muninnViewerId === lastViewer) return;
+    if (viewerResolved && window.__muninnViewerId === lastViewer) return;
+    viewerResolved = true;
     lastViewer = window.__muninnViewerId;
     // A stale stream would keep pushing the previous viewer's frames.
     updateRequestProgress(null);
     updateAgentStatus({ phase: 'idle' });
     if (conn) { try { conn.close(); } catch {} }
-    connectSSE();
+    conn = null;
+    connectSSE();   // a no-op while no viewer is known — see connectSSE
   };
 
   // Wrap dismissRequestProgress to also clear auto-dismiss timers
@@ -236,7 +250,8 @@ const CHAT_SSE_SCRIPT = `
     _origDismiss();
   };
 
-  connectSSE();
+  // No initial connect: there is no viewer at load, and this page does not open
+  // an unscoped stream. The first connect is CHAT_SCRIPT's setViewer().
 })();
 `;
 

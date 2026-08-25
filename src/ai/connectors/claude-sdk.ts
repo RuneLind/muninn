@@ -21,6 +21,7 @@ import { recordToolSpan } from "./tool-span.ts";
 import { parseMcpConfig } from "./claude-sdk-mcp.ts";
 import { preflightMcpForRequest } from "../mcp-status.ts";
 import { getLog } from "../../logging.ts";
+import { currentActiveTurn } from "../../hivemind/active-turn.ts";
 
 const log = getLog("ai", "claude-sdk");
 
@@ -63,6 +64,11 @@ export async function executePrompt(
   systemPrompt?: string,
   onProgress?: StreamProgressCallback,
 ): Promise<ClaudeExecResult> {
+  // The turn this call belongs to, CAPTURED HERE rather than read at the point
+  // of use. This line runs inside the turn's own async chain, so it is exact;
+  // a read from inside a tool-result handler is not, on any connector with a
+  // shared long-lived transport (see `research/thread-citations.ts`).
+  const activeTurn = currentActiveTurn();
   assertHaveAuth();
   const wallStart = performance.now();
 
@@ -250,6 +256,7 @@ export async function executePrompt(
           endMs: performance.now(),
           wallStart,
           botName: botConfig.name,
+          turn: activeTurn,
         });
 
         toolCalls.push(toolCall);

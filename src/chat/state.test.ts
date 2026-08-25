@@ -82,11 +82,21 @@ describe("ChatState", () => {
       return ids;
     }
 
+    /** One more conversation carrying a message — the event that breaches the
+     *  cap. Creating an EMPTY shell does not, which is the whole point. */
+    function hydrateOneMore(): string {
+      const id = state.createConversation({
+        type: "telegram_dm", botName: "jarvis", userId: "new", username: "new",
+      }).id;
+      state.addMessage(id, { id: "m-new", timestamp: Date.now(), sender: "user", text: "hi" });
+      return id;
+    }
+
     test("an over-cap conversation still resolves and still accepts messages", () => {
       const ids = fillToCapacityWithMessages();
       const victim = ids[0]!; // least-recently-used, so first to be trimmed
 
-      state.createConversation({ type: "telegram_dm", botName: "jarvis", userId: "new", username: "new" });
+      hydrateOneMore();
 
       const conv = state.getConversation(victim);
       expect(conv).toBeDefined();               // no permanent 404
@@ -114,7 +124,7 @@ describe("ChatState", () => {
       // Touch `first` so it becomes most-recently-used; `second` stays idle.
       expect(state.getConversation(first)).toBeDefined();
 
-      state.createConversation({ type: "telegram_dm", botName: "jarvis", userId: "new", username: "new" });
+      hydrateOneMore();
 
       expect(state.getConversation(first)!.messages).toHaveLength(1);
       expect(state.getConversation(second)!.messages).toHaveLength(0);
@@ -122,10 +132,31 @@ describe("ChatState", () => {
 
     test("trims only down to the cap, not the whole map", () => {
       fillToCapacityWithMessages();
-      state.createConversation({ type: "telegram_dm", botName: "jarvis", userId: "new", username: "new" });
+      const extra = state.createConversation({ type: "telegram_dm", botName: "jarvis", userId: "new", username: "new" }).id;
+      state.addMessage(extra, { id: "m-new", timestamp: Date.now(), sender: "user", text: "hi" });
 
       const hydrated = state.getConversations().filter((c) => c.messages.length > 0);
-      expect(hydrated).toHaveLength(MAX_CONVERSATIONS - 1);
+      expect(hydrated).toHaveLength(MAX_CONVERSATIONS);
+    });
+
+    test("the cap holds when conversations are created FIRST and hydrated later", () => {
+      // The shape of a long-running instance: web conversations are per user+bot
+      // and stop being created after the first turn, so every later hydration is
+      // an `addMessage` on an existing shell. Trimming only on creation left the
+      // count growing unbounded here — measured at 70 hydrated under a cap of 50.
+      const ids: string[] = [];
+      for (let i = 0; i < MAX_CONVERSATIONS + 20; i++) {
+        ids.push(state.createConversation({
+          type: "telegram_dm", botName: "jarvis", userId: String(i), username: `user${i}`,
+        }).id);
+      }
+      for (const id of ids) {
+        state.addMessage(id, { id: `m-${id}`, timestamp: Date.now(), sender: "user", text: "hi" });
+      }
+
+      expect(state.getConversations().filter((c) => c.messages.length > 0)).toHaveLength(MAX_CONVERSATIONS);
+      // ...and not one shell was lost along the way.
+      expect(state.getConversations()).toHaveLength(MAX_CONVERSATIONS + 20);
     });
 
     test("a conversation with no messages costs nothing and trims nothing", () => {

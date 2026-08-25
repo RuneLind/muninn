@@ -4,9 +4,11 @@ import { getDb } from "./client.ts";
 import { recordToolSpan } from "../ai/connectors/tool-span.ts";
 import {
   _resetActiveTurnsForTests,
+  currentActiveTurn,
   popActiveTurn,
   pushActiveTurn,
   runInActiveTurn,
+  type ActiveTurnBinding,
 } from "../hivemind/active-turn.ts";
 import {
   cleanupThreadCitations,
@@ -179,8 +181,9 @@ describe("thread citations under two concurrent turns on one bot", () => {
     ].join("\n");
   }
 
-  /** The tool-result tail, exactly as a connector calls it. */
-  function runToolCall(marker: string): void {
+  /** The tool-result tail, exactly as a connector calls it: with the binding the
+   *  connector CAPTURED at entry, not one read here. */
+  function runToolCall(marker: string, turn: ActiveTurnBinding | null): void {
     recordToolSpan({
       id: `tool-${marker}`,
       name: "mcp__knowledge__search_knowledge",
@@ -190,6 +193,7 @@ describe("thread citations under two concurrent turns on one bot", () => {
       endMs: 1,
       wallStart: 0,
       botName: BOT,
+      turn,
     });
   }
 
@@ -213,18 +217,25 @@ describe("thread citations under two concurrent turns on one bot", () => {
     pushActiveTurn(BOT, threadA);
     pushActiveTurn(BOT, threadB);
 
-    // Interleaved, with real awaits between the bind and the tool result, which
-    // is the only shape the async binding has to survive.
-    await Promise.all([
+    // Each "connector" captures its own turn at entry, with real awaits in
+    // between...
+    const [capturedA, capturedB] = await Promise.all([
       runInActiveTurn(BOT, threadA, async () => {
         await Bun.sleep(15);
-        runToolCall("AAA");
+        return currentActiveTurn();
       }),
       runInActiveTurn(BOT, threadB, async () => {
         await Bun.sleep(1);
-        runToolCall("BBB");
+        return currentActiveTurn();
       }),
     ]);
+
+    // ...and both tool results are then dispatched from a context belonging to
+    // NEITHER turn. That is the copilot-sdk shape — one long-lived client whose
+    // event loop was created inside whichever turn started it — and it is why
+    // the binding is captured and passed rather than read at the point of use.
+    runToolCall("AAA", capturedA);
+    runToolCall("BBB", capturedB);
 
     const rowsA = await waitForRows(threadA, 1);
     const rowsB = await waitForRows(threadB, 1);
@@ -245,10 +256,11 @@ describe("thread citations under two concurrent turns on one bot", () => {
     const thread = crypto.randomUUID();
     pushActiveTurn(BOT, thread);
 
-    await runInActiveTurn(BOT, thread, async () => {
+    const captured = await runInActiveTurn(BOT, thread, async () => {
       await Bun.sleep(1);
-      runToolCall("CCC");
+      return currentActiveTurn();
     });
+    runToolCall("CCC", captured);
 
     expect((await waitForRows(thread, 1)).map((r) => r.docId)).toEqual(["CCC-1_sak.md"]);
 
@@ -256,22 +268,43 @@ describe("thread citations under two concurrent turns on one bot", () => {
     _resetActiveTurnsForTests();
   });
 
-  test("an UNBOUND tool result with two turns in flight writes nothing at all", async () => {
-    // muninn's own research MCP server has no async link to the turn (a separate
-    // Bun.serve request). With two turns up there is no honest answer, so the
-    // row is dropped — a missing source beats one filed into a colleague's thread.
+  test("a tool result with NO captured turn writes nothing, whatever the stack says", async () => {
+    // The in-band seam does not fall back to the stack: a connector that could
+    // not capture a turn has nothing to attribute to, and guessing from the
+    // stack is what put a colleague's search in someone else's conversation.
     _resetActiveTurnsForTests();
     const threadA = crypto.randomUUID();
     const threadB = crypto.randomUUID();
     pushActiveTurn(BOT, threadA);
     pushActiveTurn(BOT, threadB);
 
-    runToolCall("DDD");
+    runToolCall("DDD", null);
     await Bun.sleep(200);
 
     expect(await getCitationsForThread(threadA)).toEqual([]);
     expect(await getCitationsForThread(threadB)).toEqual([]);
 
+    _resetActiveTurnsForTests();
+  });
+
+  test("a THREADLESS turn files nothing rather than borrowing a neighbour's thread", async () => {
+    // A turn whose `threadId` is null still binds — see ActiveTurnBinding. Left
+    // unbound it would fall through to the stack, where one other turn in flight
+    // reads as "unambiguous" and its thread gets the hits.
+    _resetActiveTurnsForTests();
+    const other = crypto.randomUUID();
+    pushActiveTurn(BOT, other);
+
+    const captured = await runInActiveTurn(BOT, null, async () => {
+      await Bun.sleep(1);
+      return currentActiveTurn();
+    });
+    runToolCall("EEE", captured);
+    await Bun.sleep(200);
+
+    expect(await getCitationsForThread(other)).toEqual([]);
+
+    popActiveTurn(BOT, other);
     _resetActiveTurnsForTests();
   });
 });

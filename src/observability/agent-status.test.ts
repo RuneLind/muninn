@@ -606,20 +606,17 @@ describe("viewer-scoped reads", () => {
   });
 
   describe("the operator registry is NOT filterable", () => {
-    test("getAll / snapshotAll / subscribeAll carry every run regardless of owner", async () => {
+    test("getAll / snapshotAll carry every run regardless of owner", () => {
+      // Synchronous on purpose: the throttled `subscribeAll` fan-out has its own
+      // test above, and asserting it here as well would only buy a `Bun.sleep`
+      // racing the 1 s throttle.
       resetTracker();
-      const snaps: AgentRun[][] = [];
-      const unsub = agentStatus.subscribeAll((runs) => snaps.push(runs));
-
       agentStatus.startRequest("jarvis", "calling_claude", "alice", { userId: A });
       agentStatus.startRequest("jarvis", "calling_claude", "bob", { userId: B });
       agentStatus.startRequest("jarvis", "running_watcher", "email", { kind: "watcher" });
-      await Bun.sleep(1100);
-      unsub();
 
       expect(agentStatus.getAll()).toHaveLength(3);
       expect(agentStatus.snapshotAll()).toHaveLength(3);
-      expect(snaps[snaps.length - 1]).toHaveLength(3);
     });
   });
 });
