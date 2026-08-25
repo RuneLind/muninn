@@ -1,10 +1,11 @@
 # `src/auth/` — the `MUNINN_AUTH` switch
 
-This module answers **who is calling**. It answers nothing about **what they may
-do**: no route is denied by role, no resource is owned, no id is derived from the
-session. Those are PRs C and D of the NAV-login plan. Reading a closed boundary
-into the presence of this directory is the mistake to avoid — see *What this does
-not close* below.
+This module answers **who is calling**, and — since PR C — **which user id a
+route is allowed to act on**. It still answers nothing about *which routes a
+role may call* or *who owns a given row*: no route is denied by role, and no
+resource is owned. Those are the deferred zone model and PR D. Reading a closed
+boundary into the presence of this directory is the mistake to avoid — see
+*What this does not close* below.
 
 ## The three modes
 
@@ -150,17 +151,143 @@ reachable with no token whatever the deferred zone model later decides. It is a
 constant rather than an env list for the same reason. The login flow needs no
 exclusion because the *middleware itself* is what accepts the secret.
 
+## PR C — the session id wins over a claimed one
+
+Three files, and one rule each.
+
+### `guard.ts` — `requireOwnUser(c, claimedUserId, claimedUsername?)`
+
+A *claimed* id is one the client names: `:userId` in a path, `body.userId`,
+`?userId=`. The guard answers the **claim verbatim** with auth off, the
+**session id** in any authenticating mode (403 when a claim is present and
+differs), and the **claim plus an audit line** for role `admin`. The branch is
+on *authenticating vs off*, never on `entra` — keying it to `entra` is what made
+the first cut of this plan deliver nothing.
+
+It returns a **result object rather than throwing**. Most call sites sit inside
+a `try { … } catch { return c.json(…, 500) }`, and a thrown `HTTPException`
+would be swallowed by those catches and answered as a 500 — a guard that denies
+with the wrong status is one nobody notices is misfiring.
+
+`userId` is `string | undefined`: absent stays absent with auth off, so
+`own.userId ?? "sim-user-1"` still works there, and is *never* undefined in an
+authenticating mode, which is exactly what makes `sim-user-1` unreachable.
+
+`username` is the **second claimed identity** and the `:userId` greps miss it.
+It never clobbers `users.username` (the web path passes `lockUsername`), but it
+does reach the prompt's speaker label, `traces.username`, the `activity_log` row
+and `AgentRun.username`. It is forced from the session at the same seam.
+
+⚠️ On `/chat/reports/*` and `/chat/specs/*` the id becomes a **path segment**
+(`resolve(bot.dir, "reports", userId, …)`). `VALID_USER_ID` is therefore tested
+**after** the substitution — guarding the claim and then writing an unchecked
+session id would move the traversal surface onto `MUNINN_LOCAL_USER`.
+
+### `origin.ts` — the CSRF check
+
+Global, mounted **after** the auth middleware in an authenticating mode only, so
+a request with no credential is answered 401 by identity rather than 403 by
+origin.
+
+Scoped to **side effects, not to methods**. `SIDE_EFFECTING_GETS` is the
+enumerated exception list: `GET /chat/pending/:threadId` is a one-time *consume*
+(a cross-site `<img>` destroys the victim's pending message without reading a
+response) and `GET /api/research/ask` spends a retrieval + synthesis turn.
+
+The decision order is **Origin, then `Sec-Fetch-Site`**, and it is load-bearing
+in both directions:
+
+- An `<img>` cross-site GET sends **no `Origin` at all**, so an Origin-only
+  check is structurally blind to the case the list exists for. `Sec-Fetch-Site`
+  is what catches it.
+- An allowlisted `chrome-extension://…` fetch can arrive with
+  `Sec-Fetch-Site: cross-site`, so the allowlist has to be consulted first or
+  the Chrome extensions break.
+- Neither header ⇒ **allowed**. A non-browser client sends neither; refusing
+  there would break every script to close nothing.
+
+Same-origin is compared **by host, not by full origin**: `tailscale serve`
+terminates TLS, so the browser sends `https://<tailnet-name>` while muninn is
+plain HTTP behind it. Comparing schemes would refuse every write from the one
+deployment this campaign exists for.
+
+**Why the tests are where they are.** `SameSite=Lax` already blocks the
+cross-site POST half *for requests arriving through the proxy*, so a
+proxied-POST test is green whether or not this middleware exists. The suite
+therefore drives **raw sockets from loopback** — i.e. from inside the bypass,
+the "browser on the muninn host" case — plus the side-effecting GETs. `fetch` is
+not used: it normalises the target and will not let a caller set `Origin`
+freely.
+
+### `cors.ts` + `policy.ts` — the per-site CORS disposition
+
+Twelve hand-written `Access-Control-Allow-Origin: *` literals across eight files
+became one helper. With auth **off** the header stays `*`, byte for byte — the
+four Chrome extensions in `extensions/` call these routes against
+`http://localhost:3010` and a blanket drop is the change most likely to break
+them. In an authenticating mode the request's own `Origin` is **echoed** when it
+is on `MUNINN_ALLOWED_ORIGINS`, and otherwise no header is sent. An extension
+keeps working by being named:
+`MUNINN_ALLOWED_ORIGINS=…,chrome-extension://<id>`.
+
+`normalizeOrigin` (in `src/config.ts`) exists because `new URL(…).origin`
+answers the opaque string `"null"` for those schemes, so an extension origin
+could not be allowlisted at all. Both the allowlist parser and the request-time
+check go through it, so a configured origin can never be normalised two
+different ways.
+
+`policy.ts` publishes the mode once at boot, because the two readers that need
+it — `src/db/memories.ts` and the CORS sites — have no Hono context. The default
+is `off`, and `wiring.test.ts` pins the single `setAuthPolicy(auth)` call site,
+since a missed call would fail **open**.
+
+### `scope = 'shared'` memory reads
+
+`sharedMemoryReadsAllowed()` narrows the memory filter to `user_id = $1` on an
+authenticating instance — the reader keeps their own `shared` rows and stops
+seeing anyone else's. Applied at **both** call sites (`searchMemoriesHybrid`
+*and* the `searchMemories` fallback it delegates to when there is no embedding),
+because a fix applied to one is inert on exactly the path that happens to be
+taken.
+
+### The inventory is a command, not a number
+
+`inventory.ts` re-derives §2's two claimed-id greps (in their widened form,
+which is what catches the two `app.on("HEAD", …)` routes) plus the CORS grep,
+and `inventory.test.ts` compares the result against
+`claimed-id-inventory.txt`. Every row carries a **disposition**; a row with none
+fails. A route added next month therefore lands as unassigned work rather than
+as a silently unguarded surface.
+
+Two dispositions are deliberately *not* guards. `GET /api/messages/:userId`,
+`GET /api/users/:userId/overview` and `POST /api/users` are
+`admin-zone-deferred`: §4 assigns them to the admin zone, where an "own" version
+is meaningless (minting a user row has none, and a guard there would only make
+the route un-callable). Nothing denies them until the zone model lands, and the
+fixture says so rather than letting the absence read as an oversight. The same
+is true of `GET|PUT /chat/bot-preferences/:botName/default-user`.
+
 ## What this does not close
 
 - **The `/chat/ws` and `/simulator/ws` upgrade.** It runs inside `Bun.serve`'s
   `fetch`, before `app.fetch`, so no Hono middleware can see it. **PR D.**
-- **Claimed ids.** Every route still trusts a `userId` from a param, body or
-  query. **PR C.**
 - **Resource ownership.** Any authenticated caller still reaches any
-  conversation, thread or draft by id. **PR D.**
-- **`MUNINN_ALLOWED_ORIGINS` is parsed and boot-asserted here but enforced
-  nowhere.** PR C's origin check and PR D's upgrade check read it. Do not read
-  its presence as "origins are being checked".
+  conversation, thread or draft by **id** — `GET|POST /chat/conversations/:id/messages`,
+  `PATCH|DELETE /chat/threads/:id`, `GET /chat/pending/:threadId`, the
+  `/api/jira/draft*` routes. Those carry no claimed `:userId`, so PR C's guard
+  structurally cannot reach them. **PR D.**
+- **Collection routes still return everyone's rows.** `GET /chat/conversations`
+  publishes `id`, `userId` and `username` for every conversation in memory.
+  They need a FILTER, not a gate. **PR D.**
+- **Which routes a role may call.** Nothing is denied by role. `resolveRole`
+  answers, and `requireOwnUser`'s admin passthrough uses it, but there is no
+  zone middleware — so an authenticated `user` still reaches `/traces`,
+  `/api/prompts/:traceId` and `/api/events`. **Deferred zone model**, and the
+  reason `MUNINN_AUTH=entra` refuses to boot.
+- **`MUNINN_ALLOWED_ORIGINS` is now enforced** by the origin middleware and the
+  CORS disposition — but **not** on the `/chat/ws` upgrade, which no Hono
+  middleware can see. A cross-origin `wss://` handshake is still accepted.
+  **PR D.**
 - **`MUNINN_ADMIN_IDENTS` is inert in `local` mode.** The pinned identity always
   resolves to `user`, so the allowlist grants nobody anything today. It is a
   boot requirement so the deferred Entra mode — where it IS the role source —

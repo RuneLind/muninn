@@ -325,6 +325,24 @@ const CHAT_SCRIPT = `
   var selectedUserId = null;    // Resolved from config for selected bot
   var selectedUsername = null;   // Display name
 
+  /**
+   * The server-derived identity, or null when MUNINN_AUTH is off.
+   *
+   * Non-null means the server decides who this page is, and the page must NOT
+   * run loadUsersForBot() at all — not merely skip its /api/users fetch. That
+   * function issues GET /api/users?bot= AND
+   * GET /chat/bot-preferences/:botName/default-user in one allSettled, both of
+   * which §4 puts in the admin zone, and it is also what assigns
+   * selectedUserId/selectedUsername that every later fetch depends on.
+   */
+  var sessionUser = null;
+  async function loadSessionUser() {
+    try {
+      var me = await fetch('/chat/me').then(function(r) { return r.ok ? r.json() : null; });
+      sessionUser = me && me.mode === 'session' ? me : null;
+    } catch { sessionUser = null; }
+  }
+
   /** Publish the selected user to the SSE script and re-scope its stream. The
    *  waterfall and phase pill are filtered server-side on this id, so a page
    *  that never calls this renders every user's run — the bug PR A closes. */
@@ -433,6 +451,16 @@ const CHAT_SCRIPT = `
     var container = document.getElementById('userSelectorContainer');
     var selector = document.getElementById('userSelector');
 
+    // Authenticated: the server owns the id, there is nothing to pick, and the
+    // two admin-zone fetches below must not be issued at all.
+    if (sessionUser) {
+      container.style.display = 'none';
+      selectedUserId = sessionUser.userId;
+      selectedUsername = sessionUser.displayName || sessionUser.userId;
+      setViewer(selectedUserId);
+      return;
+    }
+
     // Fetch users and default user from DB in parallel (allSettled so one failure doesn't kill both)
     var merged = [];
     var dbDefaultUserId = null;
@@ -485,6 +513,11 @@ const CHAT_SCRIPT = `
   }
 
   function syncDefaultUser(botName, userId) {
+    // bot_default_user answers "which persona is the web-chat UI acting as",
+    // which is meaningless once the server derives the id — and the route is
+    // admin-zone under §4. Authenticated traffic stops writing it, so the field
+    // keeps meaning what it was decided to mean.
+    if (sessionUser) return;
     if (!botName || !userId) return;
     fetch('/chat/bot-preferences/' + encodeURIComponent(botName) + '/default-user', {
       method: 'PUT',
@@ -1179,6 +1212,10 @@ const CHAT_SCRIPT = `
 
   // Init
   async function init() {
+    // Before anything that could issue a user-scoped fetch: loadUsersForBot()
+    // branches on this, and a late answer would let the admin-zone fetches fire
+    // once on load.
+    await loadSessionUser();
     var botNames = await loadBotList();
     connectWs();
     loadKnowledgeUrlMaps();

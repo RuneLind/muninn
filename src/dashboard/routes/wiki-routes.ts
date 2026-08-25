@@ -173,6 +173,7 @@ import { saveMemory, searchMemoriesHybrid } from "../../db/memories.ts";
 import { getBotDefaultUser, getChatPreferences } from "../../db/chat-preferences.ts";
 import { activityLog } from "../../observability/activity-log.ts";
 import { getLog } from "../../logging.ts";
+import { requireOwnUser } from "../../auth/guard.ts";
 
 const log = getLog("dashboard", "wiki");
 
@@ -2945,10 +2946,16 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
 
       // User resolution — explicit `userId` when the bot has more than one, so the
       // thread can never land on an arbitrary user (mirrors /api/research/chat).
+      // The claim is replaced by the session identity first, for the same reason
+      // it is there: this route creates a conversation and a real thread owned
+      // by the named user.
+      const own = requireOwnUser(c, body.userId);
+      if (!own.ok) return own.response;
+      const claimedUserId = own.userId;
       const botUsers = target.users;
-      if (body.userId && !botUsers.find((u) => u.id === body.userId)) {
+      if (claimedUserId && !botUsers.find((u) => u.id === claimedUserId)) {
         return c.json({
-          error: `User "${body.userId}" not found for bot "${botConfig.name}"`,
+          error: `User "${claimedUserId}" not found for bot "${botConfig.name}"`,
           needsUser: true,
           users: botUsers.map((u) => ({ id: u.id, name: u.name })),
         }, 400);
@@ -2961,7 +2968,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // button would be a permanent `needsUser` 400. No mapping ⇒ still a clean
       // `needsUser`, never an arbitrary pick.
       let defaultUserId: string | null = null;
-      if (!body.userId && botUsers.length > 1) {
+      if (!claimedUserId && botUsers.length > 1) {
         defaultUserId = target.defaultUserId;
         if (!defaultUserId) {
           return c.json({
@@ -2971,7 +2978,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
           }, 400);
         }
       }
-      const pickedId = body.userId ?? defaultUserId;
+      const pickedId = claimedUserId ?? defaultUserId;
       const chatUser = pickedId ? botUsers.find((u) => u.id === pickedId)! : botUsers[0];
       if (!chatUser) {
         return c.json({ error: `No user found for bot "${botConfig.name}"` }, 400);

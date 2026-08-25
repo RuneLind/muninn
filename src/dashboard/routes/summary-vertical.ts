@@ -3,6 +3,7 @@ import { streamSSE } from "hono/streaming";
 import type { Config } from "../../config.ts";
 import { knowledgeApiHandler } from "../../ai/knowledge-api-client.ts";
 import { isTerminalStatus, type Job, type JobEvent } from "../../summaries/job-store.ts";
+import { corsHeaders } from "../../auth/cors.ts";
 
 /**
  * The in-memory job-store accessors a capture vertical exposes from its
@@ -72,14 +73,13 @@ export function registerSummaryVertical<S extends string, F>(
 
   // CORS preflight for Chrome extension
   if (opts.corsPreflight) {
-    app.options(`${apiBase}/summarize`, () => {
+    app.options(`${apiBase}/summarize`, (c) => {
       return new Response(null, {
         status: 204,
-        headers: {
-          "Access-Control-Allow-Origin": "*",
+        headers: corsHeaders(c, {
           "Access-Control-Allow-Methods": "POST",
           "Access-Control-Allow-Headers": "Content-Type",
-        },
+        }),
       });
     });
   }

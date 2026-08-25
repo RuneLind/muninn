@@ -9,6 +9,7 @@ import { connectorCapabilities } from "../../ai/one-shot.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 import { getSummarySource } from "../../summaries/sources.ts";
 import { registerSummaryVertical } from "./summary-vertical.ts";
+import { applyCors } from "../../auth/cors.ts";
 
 const log = getLog("dashboard");
 
@@ -100,7 +101,7 @@ export function registerTikTokRoutes(app: Hono, config: Config): void {
   });
 
   app.post("/api/tiktok/summarize", async (c) => {
-    c.header("Access-Control-Allow-Origin", "*");
+    applyCors(c);
 
     const body = await c.req.json<{ title?: string; url?: string; frames?: boolean }>();
     const { title, url, frames } = body;

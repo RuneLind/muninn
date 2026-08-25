@@ -7,6 +7,7 @@ import { discoverAllBots, resolveSummarizerBot } from "../../bots/config.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 import { getSummarySource } from "../../summaries/sources.ts";
 import { registerSummaryVertical } from "./summary-vertical.ts";
+import { applyCors } from "../../auth/cors.ts";
 
 const log = getLog("dashboard");
 
@@ -61,7 +62,7 @@ export function registerYouTubeRoutes(app: Hono, config: Config): void {
   });
 
   app.post("/api/youtube/summarize", async (c) => {
-    c.header("Access-Control-Allow-Origin", "*");
+    applyCors(c);
 
     const body = await c.req.json<{ title?: string; url?: string; video_id?: string }>();
     const { title, url, video_id } = body;

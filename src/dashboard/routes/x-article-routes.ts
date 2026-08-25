@@ -10,6 +10,7 @@ import { connectorCapabilities } from "../../ai/one-shot.ts";
 import { fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 import { getSummarySource } from "../../summaries/sources.ts";
 import { registerSummaryVertical } from "./summary-vertical.ts";
+import { applyCors, corsHeaders } from "../../auth/cors.ts";
 
 const log = getLog("dashboard");
 
@@ -81,7 +82,7 @@ export function registerXArticleRoutes(app: Hono, config: Config): void {
   });
 
   app.post("/api/x-articles/summarize", async (c) => {
-    c.header("Access-Control-Allow-Origin", "*");
+    applyCors(c);
 
     const body = await c.req.json<{
       title?: string;
@@ -127,19 +128,18 @@ export function registerXArticleRoutes(app: Hono, config: Config): void {
 
   // The shared vertical only preflights `<apiBase>/summarize` — the video
   // endpoint needs its own OPTIONS for cross-origin (Chrome extension) POSTs.
-  app.options("/api/x-articles/summarize-video", () => {
+  app.options("/api/x-articles/summarize-video", (c) => {
     return new Response(null, {
       status: 204,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
+      headers: corsHeaders(c, {
         "Access-Control-Allow-Methods": "POST",
         "Access-Control-Allow-Headers": "Content-Type",
-      },
+      }),
     });
   });
 
   app.post("/api/x-articles/summarize-video", async (c) => {
-    c.header("Access-Control-Allow-Origin", "*");
+    applyCors(c);
 
     const body = await c.req.json<{ title?: string; url?: string; frames?: boolean }>();
     const { title, url, frames } = body;

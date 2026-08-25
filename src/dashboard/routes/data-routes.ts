@@ -49,6 +49,7 @@ import {
   type WikiDraftingTarget,
 } from "../../watchers/wiki-drafting.ts";
 import type { WatcherType } from "../../types.ts";
+import { requireOwnUser } from "../../auth/guard.ts";
 
 const log = getLog("dashboard");
 
@@ -140,8 +141,10 @@ export function registerDataRoutes(app: Hono): void {
   });
 
   app.get("/api/memories/user/:userId", async (c) => {
+    const own = requireOwnUser(c, c.req.param("userId"));
+    if (!own.ok) return own.response;
     try {
-      const userId = c.req.param("userId");
+      const userId = own.userId;
       if (!userId) {
         return c.json({ error: "Invalid userId" }, 400);
       }
@@ -167,8 +170,10 @@ export function registerDataRoutes(app: Hono): void {
   });
 
   app.get("/api/goals/:userId", async (c) => {
+    const own = requireOwnUser(c, c.req.param("userId"));
+    if (!own.ok) return own.response;
     try {
-      const userId = c.req.param("userId");
+      const userId = own.userId;
       if (!userId) {
         return c.json({ error: "Invalid userId" }, 400);
       }
@@ -197,8 +202,10 @@ export function registerDataRoutes(app: Hono): void {
   });
 
   app.get("/api/scheduled-tasks/:userId", async (c) => {
+    const own = requireOwnUser(c, c.req.param("userId"));
+    if (!own.ok) return own.response;
     try {
-      const userId = c.req.param("userId");
+      const userId = own.userId;
       if (!userId) {
         return c.json({ error: "Invalid userId" }, 400);
       }
@@ -287,8 +294,10 @@ export function registerDataRoutes(app: Hono): void {
   });
 
   app.get("/api/user-settings/:userId", async (c) => {
+    const own = requireOwnUser(c, c.req.param("userId"));
+    if (!own.ok) return own.response;
     try {
-      const userId = c.req.param("userId");
+      const userId = own.userId;
       if (!userId) {
         return c.json({ error: "Invalid userId" }, 400);
       }
