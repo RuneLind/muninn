@@ -1,4 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach, mock } from "bun:test";
+import * as realExecutor from "../scheduler/executor.ts";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -33,11 +34,24 @@ let spawnScript: SpawnScript[] = [];
 // it has to be observable rather than inferred from the return value.
 let spawnOpts: { timeoutMs?: number }[] = [];
 // NB: mock.module leaks across the watcher test files in a shared process (see the
-// same note in x.test.ts). runner.test.ts — co-located in the test:unit group and
-// evaluated after this file — transitively imports `trackUsage`, so export the full
-// runtime surface of executor.ts here; a partial mock would break its module load.
-// Only DEFAULT_MODEL + spawnHaiku are exercised; the rest are inert stand-ins.
+// same note in x.test.ts).
+/**
+ * The executor mock is SPREAD OVER THE REAL MODULE, not hand-listed.
+ *
+ * `mock.module` invalidates the target for the WHOLE `bun test` process, so any
+ * module evaluated afterwards that names an export the mock omits dies with
+ * `SyntaxError: Export named 'X' not found` — and it is `haiku-direct.ts`'s
+ * `trackUsage` import that gets hit here, through modules these tests never
+ * mention. Whether that happens at all depends on which file in the chunk loaded
+ * `haiku-direct.ts` FIRST, which is why it stayed invisible on macOS and took
+ * out five files in `src/watchers/` on the CI runner.
+ *
+ * Hand-listing the surface (what `email.test.ts` did) works until the next export
+ * is added to `executor.ts`, and then it fails the same way somewhere else. The
+ * spread cannot drift.
+ */
 mock.module("../scheduler/executor.ts", () => ({
+  ...realExecutor,
   DEFAULT_MODEL: "claude-haiku-4-5-20251001",
   HAIKU_TIMEOUT_MS: 60_000,
   spawnHaiku: async (prompt: string, opts: { timeoutMs?: number }) => {
@@ -54,11 +68,6 @@ mock.module("../scheduler/executor.ts", () => ({
       toolCalls: step ? step.toolCalls : nextToolCalls,
     };
   },
-  parseHaikuJson: () => ({}),
-  parseLegacyHaikuOutput: () => ({ result: "", inputTokens: 0, outputTokens: 0, model: "" }),
-  readAndParseHaikuStream: async () => ({ result: "", inputTokens: 0, outputTokens: 0, model: "" }),
-  callHaiku: async () => ({ result: "", inputTokens: 0, outputTokens: 0, model: "" }),
-  trackUsage: async () => {},
 }));
 
 // Interest profile keyed by the EXPLICIT userId (loadInterestProfile) — mirrors

@@ -1,4 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach, mock } from "bun:test";
+import * as realExecutor from "../scheduler/executor.ts";
 import type { Watcher } from "../types.ts";
 import { withInterestProfile } from "../profile/inject.ts";
 // Captured from huginn's `GET /api/collection/x-feed/documents?include_scores=1` over the
@@ -41,7 +42,23 @@ async function withInjectedClock(advanceMs: number, fn: () => Promise<void>): Pr
     clockOffsetMs = 0;
   }
 }
+/**
+ * The executor mock is SPREAD OVER THE REAL MODULE, not hand-listed.
+ *
+ * `mock.module` invalidates the target for the WHOLE `bun test` process, so any
+ * module evaluated afterwards that names an export the mock omits dies with
+ * `SyntaxError: Export named 'X' not found` — and it is `haiku-direct.ts`'s
+ * `trackUsage` import that gets hit here, through modules these tests never
+ * mention. Whether that happens at all depends on which file in the chunk loaded
+ * `haiku-direct.ts` FIRST, which is why it stayed invisible on macOS and took
+ * out five files in `src/watchers/` on the CI runner.
+ *
+ * Hand-listing the surface (what `email.test.ts` did) works until the next export
+ * is added to `executor.ts`, and then it fails the same way somewhere else. The
+ * spread cannot drift.
+ */
 mock.module("../scheduler/executor.ts", () => ({
+  ...realExecutor,
   DEFAULT_MODEL: "claude-haiku-4-5-20251001",
   spawnHaiku: async (prompt: string, opts?: { timeoutMs?: number; source?: string }) => {
     lastGatePrompt = prompt;
