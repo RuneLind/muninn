@@ -108,6 +108,61 @@ export function wikiReadonlyRootsFromEnv(): string | undefined {
   return process.env.WIKI_READONLY_ROOTS?.trim() || undefined;
 }
 
+/**
+ * `MUNINN_ADMIN_IDENTS` — the comma-split allowlist `resolveRole` compares a
+ * claim against. Trimmed, lowercased and de-duplicated once, here, because the
+ * comparison is case-insensitive on BOTH sides: §4's `A123456` and §3's
+ * lowercased `nav-a123456` are the same person, and a silent case mismatch
+ * would resolve *nobody* to admin.
+ *
+ * A getter rather than a `loadConfig()` field for the same reason
+ * `wikiReadonlyFromEnv` is one: `src/auth/mode.ts` runs its boot refusals before
+ * anything else is initialised and must not require `DATABASE_URL`.
+ */
+export function adminIdentsFromEnv(env: Record<string, string | undefined> = process.env): string[] {
+  const seen = new Set<string>();
+  for (const part of (env.MUNINN_ADMIN_IDENTS ?? "").split(",")) {
+    const value = part.trim().toLowerCase();
+    if (value !== "") seen.add(value);
+  }
+  return [...seen];
+}
+
+/**
+ * `MUNINN_ALLOWED_ORIGINS` — the origin allowlist PR C's origin/CSRF check and
+ * PR D's WebSocket upgrade check will read. Parsed and boot-asserted in this
+ * PR; **nothing enforces it yet**, and that is stated here rather than left for
+ * a reader to infer from its presence that requests are being checked.
+ *
+ * Normalised through `URL` so `https://Host:443/` and `https://host` compare
+ * equal, and an unparseable entry is dropped with a warning instead of silently
+ * matching nothing.
+ *
+ * `*` is REFUSED rather than honoured. A wildcard here would be the fail-OPEN
+ * direction for a list whose only job is to fail closed; dropping it leaves the
+ * list empty, which is a boot refusal in any authenticating mode — loud, at the
+ * one moment somebody is watching.
+ */
+export function allowedOriginsFromEnv(env: Record<string, string | undefined> = process.env): string[] {
+  const seen = new Set<string>();
+  for (const part of (env.MUNINN_ALLOWED_ORIGINS ?? "").split(",")) {
+    const raw = part.trim();
+    if (raw === "") continue;
+    if (raw === "*") {
+      log.warn("MUNINN_ALLOWED_ORIGINS contains \"*\" — refused. A wildcard origin allowlist allows every site; the entry is dropped.");
+      continue;
+    }
+    try {
+      const origin = new URL(raw).origin;
+      if (origin === "null") throw new Error("opaque origin");
+      seen.add(origin.toLowerCase());
+    } catch {
+      log.warn("MUNINN_ALLOWED_ORIGINS entry {entry} is not a parseable origin — dropped", { entry: raw });
+    }
+  }
+  return [...seen];
+}
+
 /** The scheduler switch, as its own function so the `/models` machine card can
  *  report it without constructing a full `Config`. */
 export function schedulerEnabledFromEnv(): boolean {

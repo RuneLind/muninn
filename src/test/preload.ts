@@ -29,3 +29,28 @@ delete process.env.MUNINN_WIKI_READONLY;
  * repos and set the variable explicitly.
  */
 delete process.env.SYNC_REPOS;
+
+/**
+ * The `MUNINN_AUTH` family is the same class again, and it is the one a
+ * developer's `.env` is MOST likely to carry once local mode is turned on: the
+ * mini publishes `127.0.0.1:3010` to a tailnet and is exactly the instance that
+ * wants it. `resolveAuthConfig()` reads `process.env` by default, so an ambient
+ * `MUNINN_AUTH=local` would silently change what a bare call resolves to — the
+ * "green on the laptop, red on the mini" shape this file exists to prevent.
+ *
+ * The auth tests pass explicit env records rather than mutating `process.env`
+ * (`resolveAuthConfig(env)`), so clearing these costs no coverage.
+ */
+for (const name of [
+  "MUNINN_AUTH",
+  "MUNINN_LOCAL_TOKEN",
+  "MUNINN_LOCAL_USER",
+  "MUNINN_LOCAL_NAME",
+  "MUNINN_ADMIN_IDENTS",
+  "MUNINN_ALLOWED_ORIGINS",
+  // Not ours, but it is what turns refusal (1) on, and a developer running
+  // against a nais-shaped env would otherwise fail every bare-config test.
+  "NAIS_CLUSTER_NAME",
+]) {
+  delete process.env[name];
+}

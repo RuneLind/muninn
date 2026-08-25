@@ -18,12 +18,30 @@ import { researchMcpServer } from "./research/mcp-server.ts";
 import { startStaleHandoffSweep, stopStaleHandoffSweep } from "./chat/stale-sweep.ts";
 import { auditMcpAdapters } from "./startup/adapter-audit.ts";
 import { isWikiReadonly, WIKI_READONLY_ENV } from "./wiki/readonly.ts";
+import { AuthConfigError, resolveAuthConfig, isAuthenticatingMode } from "./auth/mode.ts";
+import { createAuthMiddleware } from "./auth/middleware.ts";
 import { Hono } from "hono";
 import type { Bot } from "grammy";
 
 const config = loadConfig();
 await setupLogging(config.logDir);
 const log = getLog("core");
+
+// The auth contract, resolved BEFORE anything else is initialised so a refusal
+// costs no DB pool, no bot processes and no MCP children. `resolveAuthConfig`
+// throws on every fail-closed condition (nais without an authenticating mode,
+// `entra` before the zone model lands, an authenticating mode missing its own
+// config); the message is the whole diagnosis, so it is printed without a stack.
+let auth;
+try {
+  auth = resolveAuthConfig();
+} catch (err) {
+  if (err instanceof AuthConfigError) {
+    log.error("Refusing to start: {message}", { message: err.message });
+    process.exit(1);
+  }
+  throw err;
+}
 
 // Backstop for promise rejections that escape a fire-and-forget path (e.g. a
 // throw inside an extraction `onResult` callback). Bun would otherwise log and
@@ -150,6 +168,12 @@ try {
 // Build the combined Hono app
 const dashboard = createDashboardRoutes(config);
 const app = new Hono();
+// Registered BEFORE any route: Hono matches handlers in registration order, so
+// a `use` added after `route` would never run for those routes. Mounted only in
+// an authenticating mode — with auth off there is no middleware to run.
+if (isAuthenticatingMode(auth.mode)) {
+  app.use("*", createAuthMiddleware(auth));
+}
 app.route("/", dashboard);
 
 // Always mount chat routes — uses ALL bots (not just those with platform tokens)
@@ -181,7 +205,10 @@ const server = Bun.serve<import("./chat/index.ts").ChatWsData>({
       if (upgraded) return undefined;
       return new Response("WebSocket upgrade failed", { status: 500 });
     }
-    return app.fetch(req);
+    // `server` is passed as Hono's env so `hono/bun`'s getConnInfo can read the
+    // peer address — which is what the auth middleware's loopback bypass turns
+    // on. Without it that bypass is inert and a wrong secret is a lockout.
+    return app.fetch(req, server);
   },
   websocket: chat.chatWebSocket,
 });
@@ -193,6 +220,16 @@ activityLog.push("system", `Dashboard running on http://localhost:${server.port}
 // write one wiki, so the non-owner says so at boot. Announced only when ON: a
 // line on every start of the write owner is noise, and the whole question here is
 // "which machine am I looking at?".
+if (isAuthenticatingMode(auth.mode)) {
+  log.info(
+    "MUNINN_AUTH={mode} — HTTP requests require a session; direct-loopback requests bypass it by design. " +
+    "NB the /chat/ws upgrade is NOT yet authenticated (it runs before Hono) and per-route guards are not " +
+    "in place: this mode is the switch, not yet a closed boundary.",
+    { mode: auth.mode },
+  );
+  activityLog.push("system", `Auth mode: ${auth.mode}`);
+}
+
 if (isWikiReadonly()) {
   log.info(
     "{env}=1 — this instance is NOT the wiki write owner: programmatic wiki page writes are refused (git commits are still allowed). Profile is visible on /models.",
