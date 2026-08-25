@@ -287,6 +287,39 @@ describe("thread citations under two concurrent turns on one bot", () => {
     _resetActiveTurnsForTests();
   });
 
+  test("a result dispatched from ANOTHER turn's context still lands on its own thread", async () => {
+    // The precise copilot-sdk failure, reproduced against the real transport by
+    // review: one long-lived client for the process, so every session's events
+    // are dispatched from the scope of whichever turn started it — measured as
+    // turns 2 and 3 both reading turn 1's binding. Reading the async store at
+    // the point of use would file B's hits into A's thread with full confidence,
+    // past the ambiguity guard. The captured binding is immune to it.
+    _resetActiveTurnsForTests();
+    const threadA = crypto.randomUUID();
+    const threadB = crypto.randomUUID();
+    pushActiveTurn(BOT, threadA);
+    pushActiveTurn(BOT, threadB);
+
+    const capturedB = await runInActiveTurn(BOT, threadB, async () => {
+      await Bun.sleep(1);
+      return currentActiveTurn();
+    });
+
+    // ...and B's tool result arrives inside A's scope, which is what the shared
+    // client's read loop makes of every later turn.
+    await runInActiveTurn(BOT, threadA, async () => {
+      await Bun.sleep(1);
+      runToolCall("FFF", capturedB);
+    });
+
+    expect((await waitForRows(threadB, 1)).map((r) => r.docId)).toEqual(["FFF-1_sak.md"]);
+    expect(await getCitationsForThread(threadA)).toEqual([]);
+
+    popActiveTurn(BOT, threadA);
+    popActiveTurn(BOT, threadB);
+    _resetActiveTurnsForTests();
+  });
+
   test("a THREADLESS turn files nothing rather than borrowing a neighbour's thread", async () => {
     // A turn whose `threadId` is null still binds — see ActiveTurnBinding. Left
     // unbound it would fall through to the stack, where one other turn in flight
