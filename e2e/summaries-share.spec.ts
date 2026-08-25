@@ -31,17 +31,20 @@
  * listing + document proxies are exercised as real HTTP.
  *
  * ENV PREREQUISITE: a working `.env` (`DATABASE_URL` at minimum) at the repo root.
- * PLATFORM TOKENS: `blankBotTokens()` keeps this muninn off Telegram/Slack.
+ * SPAWN ENV: `e2eEnv()` keeps this muninn off Telegram/Slack, and blanks the
+ * instance-profile flags (`MUNINN_WIKI_READONLY`, `SYNC_REPOS`, `MUNINN_AUTH`…)
+ * so a spawned server behaves the same on every host.
  */
 
 import { test, expect } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import path from "node:path";
-import { blankBotTokens } from "./blank-bot-tokens.ts";
+import { e2eEnv } from "./e2e-env.ts";
+import { e2ePort } from "./ports.ts";
 
-const PORT = 3028;
-const HUGINN_PORT = 3029;
+const PORT = e2ePort("summaries-share");
+const HUGINN_PORT = e2ePort("summaries-share/huginn");
 const BASE = `http://127.0.0.1:${PORT}`;
 const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
 
@@ -121,7 +124,7 @@ test.beforeAll(async () => {
     cwd: REPO_ROOT,
     env: {
       ...process.env,
-      ...blankBotTokens(),
+      ...e2eEnv(),
       DASHBOARD_PORT: String(PORT),
       DASHBOARD_HOST: "127.0.0.1",
       SCHEDULER_ENABLED: "false",

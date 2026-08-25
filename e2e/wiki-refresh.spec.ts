@@ -25,7 +25,7 @@
  * `/api/wiki/pages` payload.
  *
  * ENV PREREQUISITE / PLATFORM TOKENS: identical to `wiki-status-facet.spec.ts` —
- * a working `.env` at the repo root, and `blankBotTokens()` so this muninn never
+ * a working `.env` at the repo root, and `e2eEnv()` so this muninn never
  * opens a second Telegram long-poller against the production bot's token.
  */
 
@@ -34,10 +34,11 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { blankBotTokens } from "./blank-bot-tokens.ts";
+import { e2eEnv } from "./e2e-env.ts";
+import { e2ePort } from "./ports.ts";
 import { WIKI_REFETCH_MIN_INTERVAL_MS } from "../src/dashboard/views/components/wiki-refresh.ts";
 
-const PORT = 3024;
+const PORT = e2ePort("wiki-refresh");
 const BASE = `http://127.0.0.1:${PORT}`;
 const WIKI = "e2e-refresh";
 const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
@@ -79,7 +80,7 @@ test.beforeAll(async () => {
     cwd: REPO_ROOT,
     env: {
       ...process.env,
-      ...blankBotTokens(),
+      ...e2eEnv(),
       DASHBOARD_PORT: String(PORT),
       DASHBOARD_HOST: "127.0.0.1",
       SCHEDULER_ENABLED: "false",

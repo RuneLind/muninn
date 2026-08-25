@@ -44,7 +44,9 @@
  * (`DATABASE_URL` at minimum) at the repo root, since `src/index.ts` boots the
  * full process.
  *
- * PLATFORM TOKENS: `blankBotTokens()` keeps this muninn off Telegram/Slack — a
+ * SPAWN ENV: `e2eEnv()` keeps this muninn off Telegram/Slack, and blanks the
+ * instance-profile flags (`MUNINN_WIKI_READONLY`, `SYNC_REPOS`, `MUNINN_AUTH`…)
+ * so a spawned server behaves the same on every host — a
  * second long-poller on a live token 409-fights the running production bot.
  */
 
@@ -53,9 +55,10 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { blankBotTokens } from "./blank-bot-tokens.ts";
+import { e2eEnv } from "./e2e-env.ts";
+import { e2ePort } from "./ports.ts";
 
-const PORT = 3025;
+const PORT = e2ePort("wiki-chat-dialog");
 const BASE = `http://127.0.0.1:${PORT}`;
 const WIKI = "e2e-chat";
 const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
@@ -116,7 +119,7 @@ test.beforeAll(async () => {
     cwd: REPO_ROOT,
     env: {
       ...process.env,
-      ...blankBotTokens(),
+      ...e2eEnv(),
       DASHBOARD_PORT: String(PORT),
       DASHBOARD_HOST: "127.0.0.1",
       SCHEDULER_ENABLED: "false",

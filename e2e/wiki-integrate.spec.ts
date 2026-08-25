@@ -29,7 +29,7 @@
  *
  * PLATFORM TOKENS: this spec's muninn must NOT start any Telegram/Slack bot — a second
  * long-poller on the same token 409-fights the running production jarvis
- * (reproduced). `blankBotTokens()` handles it; the reasoning lives in that module.
+ * (reproduced). `e2eEnv()` handles it; the reasoning lives in that module.
  * The SHARED `webServer` in `playwright.config.ts` (port 3011) now uses the same
  * helper — it was left leaking by the PR that introduced this spec, and closing
  * that gap is what promoted the helper to `e2e/blank-bot-tokens.ts`.
@@ -42,9 +42,10 @@ import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { blankBotTokens } from "./blank-bot-tokens.ts";
+import { e2eEnv } from "./e2e-env.ts";
+import { e2ePort } from "./ports.ts";
 
-const PORT = 3021;
+const PORT = e2ePort("wiki-integrate");
 const BASE = `http://127.0.0.1:${PORT}`;
 const WIKI_NAME = "e2e-scratch";
 const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
@@ -292,7 +293,7 @@ test.beforeAll(async () => {
     cwd: REPO_ROOT,
     env: {
       ...process.env,
-      ...blankBotTokens(),
+      ...e2eEnv(),
       DASHBOARD_PORT: String(PORT),
       DASHBOARD_HOST: "127.0.0.1",
       SCHEDULER_ENABLED: "false",

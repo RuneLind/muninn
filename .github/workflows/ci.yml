@@ -1,0 +1,132 @@
+# CI exists because this repo's two suites were host-dependent and nobody noticed.
+#
+# `bun test` and the Playwright suite both boot code that reads the developer's
+# `.env`, which on a real machine carries instance-profile flags — the Mac mini
+# runs with `MUNINN_WIKI_READONLY=1`, the laptop does not. The same tree was green
+# on one and red on the other, twice (45 `bun test` failures, then 23 e2e ones),
+# and each time it was diagnosed by hand months apart. A runner has NO `.env` at
+# all, so it is the only place the suites are pinned to what the repo actually
+# says rather than to whoever ran them last.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A new push supersedes the old run on the same ref. `main` is excluded from the
+# cancel so a merge always gets a complete result.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  # Pinned rather than `latest`: a Bun release changing `bun test`'s behaviour
+  # should turn up as a deliberate bump in this file, not as an unexplained red
+  # on an unrelated PR. Keep in step with the version developers run.
+  BUN_VERSION: "1.3.10"
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+
+  test:
+    runs-on: ubuntu-latest
+    services:
+      # `src/test/setup-db.ts` hardcodes `…@127.0.0.1:5435/muninn_test`, so the
+      # host port has to be 5435 — it is not configurable from here. pgvector,
+      # not plain postgres: `db/init.sql` creates the `vector` extension for the
+      # memory embeddings.
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: muninn
+          POSTGRES_PASSWORD: muninn
+          POSTGRES_DB: muninn
+        ports:
+          - 5435:5432
+        options: >-
+          --health-cmd "pg_isready -U muninn"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://muninn:muninn@127.0.0.1:5435/muninn
+      LOG_DIR: none
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      # Creates `muninn_test`, applies `db/init.sql` and baselines the migrations.
+      # The `src/db/` links of the test chain connect to it directly.
+      - run: bun run db:setup:test
+      # The full chain, exactly as a developer runs it — including the `&&`-linked
+      # single-file links, which exist because `mock.module` leaks across a whole
+      # `bun test` process (see CLAUDE.md, Testing).
+      - run: bun run test
+
+  e2e:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: muninn
+          POSTGRES_PASSWORD: muninn
+          POSTGRES_DB: muninn
+        ports:
+          - 5435:5432
+        options: >-
+          --health-cmd "pg_isready -U muninn"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # The e2e servers boot the real `src/index.ts`, which requires this and
+      # nothing else (`requireEnv` in `src/config.ts` names exactly one variable).
+      DATABASE_URL: postgresql://muninn:muninn@127.0.0.1:5435/muninn
+      LOG_DIR: none
+      # No `TELEGRAM_BOT_TOKEN_*` here, deliberately: `e2eEnv()` blanks them on a
+      # developer's machine, and a runner should have nothing to blank. If a token
+      # is ever needed for a spec, it does NOT belong in this env — an e2e server
+      # holding a live token fights the production bot for Telegram.
+      CI: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      # `--with-deps` pulls the system libraries headless chromium needs on the
+      # runner image. Only chromium: `playwright.config.ts` defines one project.
+      - run: bunx playwright install --with-deps chromium
+      # The schema has to exist before the first server boots — the dashboard and
+      # /chat routes query it on the very first request.
+      - run: bun run db:migrate
+      # A fresh database makes `chat.spec.ts`/`inspector.spec.ts` FAIL (no user to
+      # select) and makes the traces + inspector cases SKIP THEMSELVES, which is
+      # the worse half — a green run with the coverage silently gone. The seed is
+      # idempotent and lives in `scripts/seed-e2e-db.ts`, which says why.
+      - run: bun run db:seed:e2e
+      - run: bun run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          # `test-results/` is where the list reporter drops each failure's
+          # error-context.md; without it a red CI run says a locator timed out and
+          # nothing about what the page actually contained.
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
+          if-no-files-found: ignore
