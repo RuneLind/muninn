@@ -10,7 +10,7 @@ import {
 } from "./middleware.ts";
 import { createIntrospector } from "./introspect.ts";
 import { resolveAuthConfig } from "./mode.ts";
-import { SESSION_COOKIE } from "./session.ts";
+import { mintSession, SESSION_COOKIE } from "./session.ts";
 
 const SECRET = "a-sufficiently-long-secret";
 const CONFIG = resolveAuthConfig({
@@ -29,16 +29,53 @@ const CONFIG = resolveAuthConfig({
  */
 const app = new Hono();
 app.use("*", createAuthMiddleware(CONFIG));
-app.get("/who", (c) => c.json({ userId: c.get("identity").userId, role: c.get("role") }));
-app.post("/who", (c) => c.json({ userId: c.get("identity").userId }));
+// `?.` because `ContextVariableMap` types these as OPTIONAL — with auth off no
+// middleware is mounted and they are genuinely absent. That the compiler forces
+// the `?.` here is the point of the optional declaration.
+app.get("/who", (c) => c.json({ userId: c.get("identity")?.userId, role: c.get("role") }));
+app.post("/who", (c) => c.json({ userId: c.get("identity")?.userId }));
 
 const server = Bun.serve({
   port: 0,
   hostname: "127.0.0.1",
   fetch: (req, srv) => app.fetch(req, srv),
 });
-const BASE = `http://127.0.0.1:${server.port}`;
-afterAll(() => server.stop(true));
+const PORT = Number(server.port);
+const BASE = `http://127.0.0.1:${PORT}`;
+afterAll(() => {
+  server.stop(true);
+  // Restore the module-global: `beforeEach` only resets it for THIS file, so a
+  // `false` left standing would follow the module into the rest of the `bun
+  // test` chunk — the same cross-file leakage class the repo's mock.module rule
+  // exists for.
+  __setLoopbackBypassForTest(null);
+});
+
+
+/**
+ * A raw HTTP request, because `fetch` NORMALISES the request target: it collapses
+ * `//evil.example/x` to `/evil.example/x` before the bytes leave, so the
+ * open-redirect case below is unreachable through it and a test written with
+ * `fetch` passes against the vulnerable code. `curl` does not normalise, and
+ * neither does an attacker. Returns the raw response text.
+ */
+function rawRequest(target: string, headers: Record<string, string> = {}, method = "GET"): Promise<string> {
+  const lines = Object.entries(headers).map(([k, v]) => `${k}: ${v}`).join("\r\n");
+  return new Promise((resolve) => {
+    let buf = "";
+    Bun.connect({
+      hostname: "127.0.0.1",
+      port: PORT,
+      socket: {
+        open(sock) {
+          sock.write(`${method} ${target} HTTP/1.1\r\nHost: 127.0.0.1\r\n${lines}${lines ? "\r\n" : ""}Connection: close\r\n\r\n`);
+        },
+        data(_s, d) { buf += new TextDecoder().decode(d); },
+        close() { resolve(buf); },
+      },
+    });
+  });
+}
 
 beforeEach(() => __setLoopbackBypassForTest(null));
 
@@ -184,6 +221,79 @@ describe("presenting the secret, and the cookie it buys", () => {
       headers: { ...TAILSCALE_SERVE_HEADERS, [TOKEN_HEADER]: SECRET },
     });
     expect(res.headers.get("set-cookie")).toContain("Secure");
+  });
+});
+
+describe("regressions found in review", () => {
+  beforeEach(() => __setLoopbackBypassForTest(false));
+
+  test("a cookie that is not valid percent-encoding is a 401, not a 500", async () => {
+    // `decodeURIComponent` threw, uncaught, BEFORE the presented-token branch —
+    // so a browser holding a corrupted 7-day cookie got 500 on every request and
+    // could not clear it by re-presenting the secret. Four reviewers hit it.
+    for (const bad of ["%", "%zz", "%E0%A4%A"]) {
+      const res = await fetch(`${BASE}/who`, { headers: { cookie: `${SESSION_COOKIE}=${bad}` } });
+      expect({ bad, status: res.status }).toEqual({ bad, status: 401 });
+    }
+  });
+
+  test("a malformed cookie still lets the shared secret authenticate", async () => {
+    // The recovery path the 500 killed.
+    const res = await fetch(`${BASE}/who`, {
+      headers: { cookie: `${SESSION_COOKIE}=%`, [TOKEN_HEADER]: SECRET },
+    });
+    expect(res.status).toBe(200);
+  });
+
+  test("the raw shared secret is NOT honoured as a cookie value", async () => {
+    // Otherwise a hand-set cookie puts the long-lived secret in every request's
+    // jar with no expiry — the property session.ts exists to prevent.
+    const res = await fetch(`${BASE}/who`, { headers: { cookie: `${SESSION_COOKIE}=${SECRET}` } });
+    expect(res.status).toBe(401);
+  });
+
+  test("a session minted for a different pinned user is refused", async () => {
+    const stale = mintSession(SECRET, "someone-else");
+    const res = await fetch(`${BASE}/who`, { headers: { cookie: `${SESSION_COOKIE}=${stale}` } });
+    expect(res.status).toBe(401);
+  });
+
+  test("the token-stripping redirect cannot be turned into an open redirect", async () => {
+    // `URL.pathname` keeps a leading `//`, which a browser resolves as an
+    // absolute HOST: `//evil.example/x` sent the operator off-site WITH a fresh
+    // session cookie, reached through the very login link this branch exists to
+    // clean up. Sent raw — `fetch` would collapse the `//` and never reach it.
+    const res = await rawRequest(`//evil.example/x?${TOKEN_QUERY_PARAM}=${SECRET}`);
+    expect(res).toContain("302");
+    const location = res.match(/^location:\s*(.*)$/im)?.[1]?.trim();
+    expect(location).toBe("/evil.example/x");
+  });
+
+  test("the secret is stripped even when a cookie already authenticated", async () => {
+    // Gating the strip on "the cookie check failed" left a bookmarked login URL
+    // carrying the secret in the address bar on every later visit.
+    const cookie = `${SESSION_COOKIE}=${mintSession(SECRET, "rune")}`;
+    const res = await fetch(`${BASE}/who?${TOKEN_QUERY_PARAM}=${SECRET}`, {
+      headers: { cookie }, redirect: "manual",
+    });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("/who");
+  });
+
+  test("HEAD with the secret on the query string is stripped too", async () => {
+    const res = await fetch(`${BASE}/who?${TOKEN_QUERY_PARAM}=${SECRET}`, {
+      method: "HEAD", redirect: "manual",
+    });
+    expect(res.status).toBe(302);
+  });
+
+  test("an unlisted forwarding header still removes the bypass", async () => {
+    // The literal nine-name list admitted every one of these.
+    __setLoopbackBypassForTest(null);
+    for (const header of ["cf-connecting-ip", "x-envoy-external-address", "fly-client-ip", "via", "true-client-ip", "x-forwarded-port"]) {
+      const res = await fetch(`${BASE}/who`, { headers: { [header]: "1.2.3.4" } });
+      expect({ header, status: res.status }).toEqual({ header, status: 401 });
+    }
   });
 });
 

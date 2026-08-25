@@ -31,8 +31,8 @@ interface SessionPayload {
   e: number;
 }
 
-function b64url(input: Buffer | string): string {
-  return Buffer.from(input as never).toString("base64url");
+function b64url(input: string): string {
+  return Buffer.from(input, "utf8").toString("base64url");
 }
 
 function sign(secret: string, signed: string): string {

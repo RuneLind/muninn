@@ -29,7 +29,11 @@ export type AuthMode = (typeof AUTH_MODES)[number];
  * This is a CONSTANT on purpose. An env override would let the deploy that must
  * not happen happen anyway, which is the whole failure this guards.
  */
-export const AUTH_ZONES_IMPLEMENTED = false;
+// Annotated `: boolean`, not left as the literal type `false` — otherwise the
+// day this flips to `true` every `!AUTH_ZONES_IMPLEMENTED` site changes
+// TYPE-meaning rather than value-meaning, and the test pinning it becomes a
+// tautology the compiler quietly rewrites.
+export const AUTH_ZONES_IMPLEMENTED: boolean = false;
 
 /**
  * Paths the middleware lets through with no credential.
@@ -137,19 +141,24 @@ export function resolveAuthConfig(env: Record<string, string | undefined> = proc
     );
   }
 
+  if (!isAuthenticatingMode(mode)) {
+    // Parsed only when a mode reads them. Running the parsers unconditionally
+    // made an auth-OFF instance log `MUNINN_ALLOWED_ORIGINS contains "*"` at
+    // every boot from a stale `.env` line — a warning about a variable nothing
+    // in that mode consults, i.e. exactly the "nothing changes" claim breaking.
+    return { mode, adminIdents: [], allowedOrigins: [], local: null };
+  }
+
   const adminIdents = adminIdentsFromEnv(env);
   const allowedOrigins = allowedOriginsFromEnv(env);
-
-  if (!isAuthenticatingMode(mode)) {
-    return { mode, adminIdents, allowedOrigins, local: null };
-  }
 
   // (3) An authenticating mode missing its own required config.
   if (adminIdents.length === 0) {
     throw new AuthConfigError(
-      `${AUTH_ENV}="${mode}" requires a non-empty MUNINN_ADMIN_IDENTS while the env allowlist is the ` +
-      `role source — otherwise nobody resolves to admin and the operator surface is unreachable. ` +
-      `Refusing to start.`,
+      `${AUTH_ENV}="${mode}" requires a non-empty MUNINN_ADMIN_IDENTS. Refusing to start. ` +
+      `NB in "local" mode this variable is currently INERT: the pinned identity always resolves to ` +
+      `role "user" by design (src/auth/role.ts), so setting it does not grant anyone admin. It is ` +
+      `required now so the deferred Entra mode — where it IS the role source — cannot ship without it.`,
     );
   }
   if (allowedOrigins.length === 0) {

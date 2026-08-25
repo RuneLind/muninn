@@ -1,4 +1,5 @@
 import { describe, test, expect } from "bun:test";
+import { createHmac } from "node:crypto";
 import { mintSession, verifySession, secretMatches, SESSION_TTL_MS } from "./session.ts";
 
 const SECRET = "a-sufficiently-long-secret";
@@ -43,13 +44,20 @@ describe("the signed local session", () => {
 
   test("a valid signature over a non-session payload is still refused", () => {
     // Guards the shape check: a signed `{}` must not authenticate as anyone.
+    //
+    // This test reconstructs the module-private DOMAIN string, so it needs a
+    // CANARY: if DOMAIN is ever rotated (a `v2`), the local signer stops
+    // matching, every value below becomes merely mis-signed, and this test would
+    // keep passing as a silent duplicate of "signed with a different secret is
+    // refused" — leaving the shape check untested and nobody the wiser.
+    const sign = (signed: string) =>
+      createHmac("sha256", `muninn.auth.local.session.v1:${SECRET}`).update(signed).digest("base64url");
+
+    const wellFormed = Buffer.from(JSON.stringify({ u: "rune", e: Date.now() + 60_000 })).toString("base64url");
+    expect(verifySession(SECRET, `v1.${wellFormed}.${sign(`v1.${wellFormed}`)}`)).not.toBeNull();
+
     const encoded = Buffer.from(JSON.stringify({ hello: "world" })).toString("base64url");
-    const signed = `v1.${encoded}`;
-    const mac = require("node:crypto")
-      .createHmac("sha256", `muninn.auth.local.session.v1:${SECRET}`)
-      .update(signed)
-      .digest("base64url");
-    expect(verifySession(SECRET, `${signed}.${mac}`)).toBeNull();
+    expect(verifySession(SECRET, `v1.${encoded}.${sign(`v1.${encoded}`)}`)).toBeNull();
   });
 });
 

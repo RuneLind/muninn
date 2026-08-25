@@ -10,7 +10,7 @@ not close* below.
 
 | `MUNINN_AUTH` | What happens |
 |---|---|
-| unset / `off` | **No middleware is mounted at all.** Today's muninn, byte for byte: the user dropdown, `sim-user-1`, no tokens. |
+| unset / `off` | **No middleware is mounted at all**: the user dropdown, `sim-user-1`, no tokens. One deliberate exception to "unchanged" — refusal (2) below means an instance with `NAIS_CLUSTER_NAME` set now refuses to boot where it previously started. |
 | `local` | One **pinned identity** behind a **shared secret**. The shape for a single human's instance that is reachable beyond loopback. |
 | `entra` | **Refuses to boot.** See `AUTH_ZONES_IMPLEMENTED`. |
 
@@ -36,12 +36,11 @@ which is wide open.
 `AUTH_ZONES_IMPLEMENTED` is a **constant, not an env var**. An override would let
 exactly the deploy that must not happen happen anyway.
 
-## ⚠️ The loopback bypass, and the trap under it
+## ⚠️ The loopback bypass — read this before changing it
 
 A **direct** loopback request is granted the pinned identity with no credential,
 and **no auth config can revoke it** — a wrong secret on an always-on instance
-would otherwise be a lockout with no console. `ssh` + `curl 127.0.0.1:3010`
-always works.
+would otherwise be a lockout with no console.
 
 The trap: **a reverse proxy on the same host makes every remote request look
 loopback.** Measured 2026-08-25 against a live `tailscale serve` publishing
@@ -50,15 +49,44 @@ with peer address `127.0.0.1`, identical to a local `curl`. A loopback check on
 the peer address alone therefore hands the bypass to every device on the tailnet,
 which is the exact exposure this campaign exists to close.
 
-What separates them is `PROXY_HEADERS`: the proxy stamps `x-forwarded-*` and the
-`tailscale-*` family, and a direct `curl` sends none of them. Also measured: a
-tailnet client that tries to strip or blank those headers **does not succeed** —
-the proxy overwrites them.
+What separates them is `PROXY_HEADER_PREFIXES` / `PROXY_HEADER_NAMES`: an HTTP
+proxy stamps `x-forwarded-*`, `forwarded`, `via`, `tailscale-*`, `cf-*` and the
+rest, and a direct `curl` sends none of them. Also measured: a tailnet client
+that tries to strip or blank those headers **does not succeed** — the proxy
+overwrites them.
 
 **The direction is what makes this safe.** Header presence can only *remove* the
 bypass, never grant it, so a forged header yields a request that must
 authenticate normally rather than one that gets in. Any future edit here must
-preserve that direction.
+preserve that direction — which is also why the list is prefix-based rather than
+nine literal names, and why it must never become env-configurable.
+
+### 🚨 What the bypass CANNOT see, and what that voids
+
+The test is on the socket's peer address, so **an L4 forward is invisible to
+it**. Demonstrated in review with a byte-forwarding proxy: a request from a
+non-loopback address returned `200` with the full pinned identity and no
+credential. These configurations **void the mode's protection entirely**:
+
+- `tailscale serve --tcp …` (as opposed to HTTP mode)
+- an nginx `stream` block, or a bare `proxy_pass` with **no** `proxy_set_header`
+- `ssh -L`, `socat`, `kubectl port-forward`
+
+No header list can close this: at the socket layer a relayed connection and a
+local one are identical. `src/index.ts` warns about it at boot. **If muninn is
+fronted that way, `MUNINN_AUTH=local` is not protection** — the durable fix is to
+stop deriving the escape hatch from the peer address (e.g. a token file only a
+host user can read), which is a re-plan decision, not a patch.
+
+Conversely, the bypass **does not exist** where the peer is never loopback —
+notably this repo's own `docker-compose.yml`, which sets
+`DASHBOARD_HOST=0.0.0.0`, so every request arrives from the docker gateway. A
+forgotten `MUNINN_LOCAL_TOKEN` there IS a lockout.
+
+A browser running **on the muninn host** is also inside the bypass: it reaches
+`127.0.0.1` with no proxy headers and is authenticated before any cookie is
+consulted. A malicious page in that browser can therefore issue authenticated
+requests, and `SameSite` is irrelevant to it.
 
 The bypass resolves to role **`user`**, not `admin` — see below.
 
@@ -71,20 +99,27 @@ seam (the `src/wiki/readonly.ts` idiom), not an env var, and is therefore not
 
 `local` accepts the shared secret on `X-Muninn-Token`, `Authorization: Bearer`,
 or `?muninn_token=`, and exchanges it for a **signed session cookie**
-(`muninn_session`, `HttpOnly`, `SameSite=Lax`, 7 days). A GET presenting the
-secret on the query string is **redirected** to the same URL without it, so the
-secret does not linger in history, the address bar or a `Referer`.
+(`muninn_session`, `HttpOnly`, `SameSite=Lax`, 7 days). A GET or HEAD carrying
+the secret on the query string is **redirected** to the same URL without it —
+whenever the parameter is present, not only on the request that authenticated
+with it, or a bookmarked login URL keeps the secret in the address bar forever.
+Note the redirect does **not** remove the secret from the fronting proxy's own
+access log, which records the original request line.
 
-The cookie is a signed `{userId, expiry}`, not the secret itself — a leaked
-cookie must not be a leaked credential-for-everything. Rotating
+The cookie channel accepts **sessions only**. The introspector also recognises
+the raw shared secret, but honouring that on the cookie would let a hand-set
+`muninn_session=<MUNINN_LOCAL_TOKEN>` put the long-lived secret into every
+request's jar with no expiry — precisely what `session.ts` exists to prevent.
+The cookie is a signed `{userId, expiry}`, not the secret. Rotating
 `MUNINN_LOCAL_TOKEN` invalidates every session.
 
-**A note for PR C:** `SameSite=Lax` already blocks the cross-site *POST* half of
-the CSRF surface. A CSRF test written against a POST will therefore be green
-whether or not PR C's origin check exists. The half Lax does **not** cover is the
-side-effecting top-level **GET** (`GET /chat/pending/:threadId`,
-`GET /api/research/ask`) — that is where the origin check earns its keep and
-where its test belongs.
+**A note for PR C, with its scope stated honestly:** `SameSite=Lax` blocks the
+cross-site *POST* half of the CSRF surface **for requests arriving through the
+proxy** — so a CSRF test written against a proxied POST is green whether or not
+PR C's origin check exists. Two halves it does not cover: the side-effecting
+top-level **GET** (`GET /chat/pending/:threadId`, `GET /api/research/ask`), and
+**anything at all from a browser on the muninn host**, which the loopback bypass
+authenticates before the cookie is read. PR C's tests belong on those.
 
 ## Roles
 
@@ -92,7 +127,10 @@ where its test belongs.
 from the env allowlist to an Entra `groups` claim without touching a call site.
 Two answers skip the list entirely:
 
-- **auth off ⇒ `admin`** — today's local muninn is untouched.
+- **a `null` identity ⇒ `admin`** — "auth off". Nothing passes `null` today:
+  with auth off no middleware is mounted, so `c.get("identity")` is `undefined`
+  and `resolveRole` is never called. The branch is for PRs C–D's guards, which
+  run in both modes. Do not read it as something enforced now.
 - **a `local` identity ⇒ `user`, always.** Load-bearing, not a default:
   `requireOwnUser`'s admin passthrough (PRs C–D) makes every claimed-id guard a
   no-op for an admin, so a pinned identity resolving to `admin` would make the
@@ -123,6 +161,14 @@ exclusion because the *middleware itself* is what accepts the secret.
 - **`MUNINN_ALLOWED_ORIGINS` is parsed and boot-asserted here but enforced
   nowhere.** PR C's origin check and PR D's upgrade check read it. Do not read
   its presence as "origins are being checked".
+- **`MUNINN_ADMIN_IDENTS` is inert in `local` mode.** The pinned identity always
+  resolves to `user`, so the allowlist grants nobody anything today. It is a
+  boot requirement so the deferred Entra mode — where it IS the role source —
+  cannot ship without it.
+- **Credential guessing is not rate-limited**, and `LOCAL_TOKEN_MIN_LENGTH` is a
+  length check only: a 16-character passphrase boots. Use `openssl rand -hex 24`.
+- **An unauthenticated browser gets raw 401 JSON, not a login page.** There is no
+  login route (`AUTH_EXCLUDED_PATHS` is empty), by design.
 
 `src/index.ts` logs all of this at boot in an authenticating mode rather than
 letting the mode's presence imply a boundary it does not yet have.

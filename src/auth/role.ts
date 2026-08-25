@@ -16,8 +16,12 @@ export type AuthRole = "user" | "admin";
  *
  * Two answers are given without consulting the list at all:
  *
- *  - **Auth off ⇒ `admin`.** Today's local muninn is untouched; there is no
- *    identity to compare and every operator surface must keep working.
+ *  - **A `null` identity ⇒ `admin`**, i.e. "auth off". NB nothing calls this
+ *    with `null` today: with auth off no middleware is mounted, so `c.get(
+ *    "identity")` is `undefined` rather than null and `resolveRole` is never
+ *    reached at all. The branch is here for PRs C–D's guards, which run in both
+ *    modes and must keep today's operator surface working — they are what will
+ *    pass the `null`. Do not read this line as something enforced now.
  *  - **A `local` provider identity ⇒ `user`, always.** This is load-bearing,
  *    not a default. `requireOwnUser`'s admin passthrough (PRs C–D) makes every
  *    claimed-id guard a no-op for an admin, so a pinned identity that resolved

@@ -7,7 +7,7 @@
  * keeps the deferred NAV half to a claim-name mapping and a URL rather than a
  * second code path through the request pipeline.
  */
-import type { AuthConfig } from "./mode.ts";
+import type { AuthConfig, LocalAuthConfig } from "./mode.ts";
 import { secretMatches, verifySession } from "./session.ts";
 
 export type IdentityProvider = "local" | "entra";
@@ -26,28 +26,34 @@ export interface Identity {
   readonly expiresAt: number | null;
 }
 
+/**
+ * Where the token arrived, which is a SECURITY input, not bookkeeping.
+ *
+ * `"session"` is the ambient cookie: only a value muninn itself minted may be
+ * honoured there. `"credential"` is a token the client attached deliberately
+ * (header or query), where the raw shared secret is the whole point.
+ *
+ * Without this distinction a hand-set `muninn_session=<MUNINN_LOCAL_TOKEN>`
+ * cookie authenticates — putting the long-lived secret in every request's
+ * cookie jar with no expiry, which is the property `session.ts` exists to
+ * prevent. The seam carries it so the deferred Entra introspector inherits the
+ * same discipline rather than rediscovering it.
+ */
+export type TokenChannel = "session" | "credential";
+
 export interface Introspector {
-  readonly provider: IdentityProvider;
-  introspect(token: string): Promise<Identity | null>;
+  introspect(token: string, channel: TokenChannel): Promise<Identity | null>;
 }
 
 /**
- * The local introspector accepts EITHER credential form:
- *
- *  - a signed session value (the cookie), or
- *  - the raw `MUNINN_LOCAL_TOKEN` (how a client logs in the first time).
- *
- * Both are "a token" as far as the seam is concerned. The middleware decides
- * whether to mint a cookie based on WHERE the token arrived, not on which form
- * matched — so this function stays single-purpose and the two never have to
- * agree about anything.
+ * The local introspector accepts a signed session value on either channel, and
+ * the raw `MUNINN_LOCAL_TOKEN` on the `credential` channel only.
  */
 function createLocalIntrospector(config: AuthConfig): Introspector {
   const local = config.local;
   if (!local) throw new Error("createLocalIntrospector called without a local config");
   return {
-    provider: "local",
-    async introspect(token: string): Promise<Identity | null> {
+    async introspect(token: string, channel: TokenChannel): Promise<Identity | null> {
       if (token === "") return null;
 
       const session = verifySession(local.token, token);
@@ -59,12 +65,18 @@ function createLocalIntrospector(config: AuthConfig): Introspector {
         return identityFor(local.userId, local.displayName, session.expiresAt);
       }
 
-      if (secretMatches(local.token, token)) {
+      if (channel === "credential" && secretMatches(local.token, token)) {
         return identityFor(local.userId, local.displayName, null);
       }
       return null;
     },
   };
+}
+
+/** The pinned identity as a plain value, so the middleware can hoist it out of
+ *  the per-request path instead of re-deriving it through `introspect`. */
+export function localIdentity(local: LocalAuthConfig): Identity {
+  return identityFor(local.userId, local.displayName, null);
 }
 
 function identityFor(userId: string, displayName: string, expiresAt: number | null): Identity {
@@ -73,6 +85,11 @@ function identityFor(userId: string, displayName: string, expiresAt: number | nu
     displayName,
     // Both null, and that is what makes the pinned identity resolve to role
     // `user` through `resolveRole`'s ordinary path rather than a special case.
+    // Both null because a local session has no such claims. NB this is NOT what
+    // makes the identity resolve to role `user`: `resolveRole` short-circuits on
+    // `provider === "local"` before it looks at any claim. That short-circuit is
+    // load-bearing (see `role.ts`) — do not delete it believing these nulls
+    // would still deliver `user`.
     navIdent: null,
     oid: null,
     provider: "local",

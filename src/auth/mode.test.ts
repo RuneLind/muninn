@@ -142,7 +142,10 @@ describe("the resolved local config", () => {
 });
 
 test("the excluded-path list is empty in this PR", () => {
-  // Exclusion and zone are the same axis; an entry here would keep a route
-  // reachable with no token whatever the deferred zone model decides.
-  expect(AUTH_EXCLUDED_PATHS).toEqual([]);
+  // `expect([]).toEqual([])` would restate the constant and pin nothing, so the
+  // assertion that carries weight is the HTTP one: no path is reachable without
+  // a credential. Exclusion and zone are the same axis, and an entry here would
+  // keep a route reachable with no token whatever the deferred zone model
+  // decides — which is why the list is a constant rather than an env var.
+  expect(AUTH_EXCLUDED_PATHS).toHaveLength(0);
 });

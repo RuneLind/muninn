@@ -14,11 +14,12 @@
  * authenticating mode is NOT a closed boundary, and `src/index.ts` says so at
  * boot rather than letting the mode's presence imply otherwise.
  */
+import { getCookie, setCookie } from "hono/cookie";
 import { getConnInfo } from "hono/bun";
 import type { Context, MiddlewareHandler, Next } from "hono";
 import { getLog } from "../logging.ts";
 import { AUTH_EXCLUDED_PATHS, type AuthConfig } from "./mode.ts";
-import { createIntrospector, type Identity } from "./introspect.ts";
+import { createIntrospector, localIdentity, type Identity } from "./introspect.ts";
 import { resolveRole, type AuthRole } from "./role.ts";
 import { mintSession, SESSION_COOKIE, SESSION_TTL_MS } from "./session.ts";
 
@@ -33,40 +34,57 @@ export const TOKEN_HEADER = "x-muninn-token";
 export const LOGIN_TOKEN_PLACEHOLDER = "YOUR_MUNINN_LOCAL_TOKEN";
 
 /**
- * Headers whose PRESENCE proves the request came through a reverse proxy, and
- * therefore did NOT originate on this machine.
+ * Header names and prefixes whose PRESENCE proves the request came through an
+ * HTTP reverse proxy, and therefore did NOT originate on this machine.
  *
  * Measured 2026-08-25 against a live `tailscale serve` publishing
- * `127.0.0.1:3010` to a tailnet (hostnames below are illustrative):
- * a request from another tailnet device arrives with peer address
- * **`127.0.0.1`** — identical to a local `curl`. A loopback check on the peer
- * address ALONE therefore hands the bypass below to every device on the
- * tailnet, which is precisely the exposure this whole campaign exists to close.
+ * `127.0.0.1:3010` to a tailnet: a request from another tailnet device arrives
+ * with peer address **`127.0.0.1`**, identical to a local `curl`. A loopback
+ * check on the peer address ALONE therefore hands the bypass below to every
+ * device on the tailnet. What separates them is that the proxy stamps
+ * `x-forwarded-*` and `tailscale-*` while a direct `curl` sends only `host`,
+ * `accept` and `user-agent`; a tailnet client that tries to strip or blank them
+ * does not succeed, because the proxy overwrites.
  *
- * What separates them is that the proxy stamps `x-forwarded-for`,
- * `x-forwarded-host`, `x-forwarded-proto`, `tailscale-headers-info` and the
- * `tailscale-user-*` set, while a direct `curl 127.0.0.1:3010` sends only
- * `host`, `accept` and `user-agent`. Also measured: a tailnet client that tries
- * to strip or blank those headers does not succeed — the proxy overwrites them.
+ * Prefixes rather than a fixed list of names, because review demonstrated the
+ * literal-list version admitting `cf-connecting-ip`, `x-envoy-external-address`,
+ * `fly-client-ip` and friends. Every name added can only make the bypass HARDER
+ * to reach, which is the direction that keeps this safe: header presence only
+ * ever REMOVES the bypass, so a forged header yields a request that must
+ * authenticate normally rather than one that gets in.
  *
- * The direction is what makes this safe. Header presence can only REMOVE the
- * bypass, never grant it, so a forged header is a request that authenticates
- * normally rather than one that gets in.
+ * ⚠️ **This test cannot see an L4 forward.** A byte-forwarding proxy —
+ * `tailscale serve --tcp`, an nginx `stream` block, `ssh -L`, `socat`,
+ * `kubectl port-forward` — adds no headers at all, so a request through one is
+ * indistinguishable from a local `curl` at the socket layer and DOES reach the
+ * bypass. A bare `nginx proxy_pass` with no `proxy_set_header` is the same
+ * class. That is a limit of any peer-address-based escape hatch, not something
+ * a longer list can close; `src/auth/CLAUDE.md` names the voiding
+ * configurations and `src/index.ts` warns about them at boot.
  */
-const PROXY_HEADERS = [
-  "x-forwarded-for",
-  "x-forwarded-host",
-  "x-forwarded-proto",
-  "x-real-ip",
+const PROXY_HEADER_PREFIXES = ["x-forwarded-", "tailscale-", "cf-", "x-envoy-"] as const;
+const PROXY_HEADER_NAMES = [
   "forwarded",
-  "tailscale-headers-info",
-  // The whole `tailscale-user-*` family, not just the one the identity check
-  // would read: which subset the proxy sends is tailscale's choice, not ours,
-  // and every added name can only make the bypass HARDER to reach.
-  "tailscale-user-login",
-  "tailscale-user-name",
-  "tailscale-user-profile-pic",
+  "via",
+  "x-real-ip",
+  "x-client-ip",
+  "true-client-ip",
+  "fly-client-ip",
+  "x-original-forwarded-for",
 ] as const;
+
+function hasProxyHeader(headers: Headers): boolean {
+  let found = false;
+  // `forEach` rather than `for…of`: Headers' iterator is not in this project's
+  // TS lib set, and a cast to get one would hide a real portability question.
+  headers.forEach((_value, name) => {
+    if (found) return;
+    const lower = name.toLowerCase();
+    if (PROXY_HEADER_PREFIXES.some((p) => lower.startsWith(p))) found = true;
+    else if ((PROXY_HEADER_NAMES as readonly string[]).includes(lower)) found = true;
+  });
+  return found;
+}
 
 /**
  * Test-only override for the loopback bypass.
@@ -76,7 +94,7 @@ const PROXY_HEADERS = [
  * from the road with no console. An in-process seam is not auth config and is
  * unreachable over HTTP — the same shape `src/wiki/readonly.ts` uses. It exists
  * because every automated test runs over loopback, so without it the 401 path
- * could not be exercised at all.
+ * could not be exercised at all. Pass `null` to restore the default.
  */
 let loopbackBypassOverride: boolean | null = null;
 export function __setLoopbackBypassForTest(enabled: boolean | null): void {
@@ -97,15 +115,26 @@ function isLoopbackAddress(address: string | undefined): boolean {
   return nums[0] === 127;
 }
 
-/** True when the request came from this machine directly — no proxy in front. */
+/** True when the request came from this machine with no HTTP proxy in front.
+ *  See `PROXY_HEADER_PREFIXES` for what this deliberately cannot detect. */
 export function isDirectLoopback(address: string | undefined, headers: Headers): boolean {
   if (!isLoopbackAddress(address)) return false;
-  return !PROXY_HEADERS.some((h) => headers.has(h));
+  return !hasProxyHeader(headers);
 }
 
 /** Warn-once: losing the peer address means losing the escape hatch, and a
  *  per-request warn on a page that polls would bury it. */
 let warnedNoPeer = false;
+/** Warn-once, keyed by path: an exposed instance being probed would otherwise
+ *  write one log line per attempt, which is the house discipline `warnedNoPeer`
+ *  above and `src/config.ts`'s `warnedEnvFlagValues` both follow. */
+const warnedRejectedPaths = new Set<string>();
+
+/** Test-only: forget the warn-once memories so a test can re-observe a warning. */
+export function __resetAuthWarningsForTest(): void {
+  warnedNoPeer = false;
+  warnedRejectedPaths.clear();
+}
 
 function peerAddress(c: Context): string | undefined {
   try {
@@ -124,17 +153,6 @@ function peerAddress(c: Context): string | undefined {
   }
 }
 
-function readCookie(header: string | undefined, name: string): string | null {
-  if (!header) return null;
-  for (const part of header.split(";")) {
-    const eq = part.indexOf("=");
-    if (eq === -1) continue;
-    if (part.slice(0, eq).trim() !== name) continue;
-    return decodeURIComponent(part.slice(eq + 1).trim());
-  }
-  return null;
-}
-
 /** The credential a client presented explicitly, as opposed to the ambient
  *  cookie. Checked in a fixed order; the query form is last because it is the
  *  one that ends up in browser history. */
@@ -142,11 +160,8 @@ function presentedToken(c: Context): string | null {
   const header = c.req.header(TOKEN_HEADER);
   if (header && header.trim() !== "") return header.trim();
 
-  const authorization = c.req.header("authorization");
-  if (authorization && /^bearer\s+/i.test(authorization)) {
-    const value = authorization.replace(/^bearer\s+/i, "").trim();
-    if (value !== "") return value;
-  }
+  const bearer = c.req.header("authorization")?.match(/^bearer\s+(.+)$/i)?.[1]?.trim();
+  if (bearer) return bearer;
 
   const query = c.req.query(TOKEN_QUERY_PARAM);
   if (query && query.trim() !== "") return query.trim();
@@ -163,22 +178,22 @@ function isSecureRequest(c: Context): boolean {
   }
 }
 
-function sessionCookie(value: string, secure: boolean): string {
-  const attrs = [
-    `${SESSION_COOKIE}=${encodeURIComponent(value)}`,
-    "Path=/",
-    "HttpOnly",
+function writeSessionCookie(c: Context, config: AuthConfig, userId: string): void {
+  if (!config.local) return;
+  setCookie(c, SESSION_COOKIE, mintSession(config.local.token, userId), {
+    path: "/",
+    httpOnly: true,
     // Lax, not None. Lax is the secure default and blocks the cross-site POST
-    // half of the CSRF surface on its own — which PR C should know about, since
-    // a CSRF test written against a POST will be green here whether or not its
-    // origin check exists. The half Lax does NOT cover is the side-effecting
-    // top-level GET (`GET /chat/pending/:threadId`, `GET /api/research/ask`),
-    // which is where PR C's check earns its keep and where its test belongs.
-    "SameSite=Lax",
-    `Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`,
-  ];
-  if (secure) attrs.push("Secure");
-  return attrs.join("; ");
+    // half of the CSRF surface for requests that arrive THROUGH THE PROXY —
+    // which PR C must not over-read: a browser running ON this host reaches
+    // 127.0.0.1 with no proxy headers and is granted by the loopback bypass
+    // before the cookie is ever consulted, so Lax protects nothing there. The
+    // half Lax does not cover even remotely is the side-effecting top-level GET
+    // (`GET /chat/pending/:threadId`, `GET /api/research/ask`).
+    sameSite: "Lax",
+    maxAge: Math.floor(SESSION_TTL_MS / 1000),
+    secure: isSecureRequest(c),
+  });
 }
 
 function unauthenticated(c: Context, config: AuthConfig): Response {
@@ -197,72 +212,111 @@ function unauthenticated(c: Context, config: AuthConfig): Response {
   );
 }
 
+/** The same-URL-without-the-secret target. `URL.pathname` keeps a leading `//`,
+ *  which a browser resolves as an absolute HOST — review demonstrated
+ *  `GET //evil.example/x?muninn_token=…` answering `302 Location: //evil.example/x`
+ *  with a fresh session cookie, i.e. an open redirect reached by the very
+ *  "login link" this branch exists to clean up. Collapse the leading slashes. */
+function tokenStrippedTarget(c: Context): string {
+  const url = new URL(c.req.url);
+  url.searchParams.delete(TOKEN_QUERY_PARAM);
+  const path = `/${url.pathname.replace(/^\/+/, "")}`;
+  return `${path}${url.search}${url.hash}`;
+}
+
 export function createAuthMiddleware(config: AuthConfig): MiddlewareHandler {
   const introspector = createIntrospector(config);
   if (!introspector) {
     throw new Error(`createAuthMiddleware called for MUNINN_AUTH="${config.mode}" — nothing to mount.`);
   }
+  // Hoisted: the pinned identity is a constant of the config, so re-deriving it
+  // per bypassed request (two sha256 digests and an allocation) bought nothing.
+  const pinned = config.local ? localIdentity(config.local) : null;
+  const hasExclusions = AUTH_EXCLUDED_PATHS.length > 0;
 
-  const grant = async (c: Context, next: Next, identity: Identity, setCookie: string | null) => {
+  const grant = async (c: Context, next: Next, identity: Identity, mint: boolean) => {
     const role: AuthRole = resolveRole(identity, config.adminIdents);
     c.set("identity", identity);
     c.set("role", role);
     await next();
-    if (setCookie) c.res.headers.append("set-cookie", setCookie);
+    // AFTER next(), not before: `setCookie` prepares a header on the context,
+    // and a downstream handler returning a bare `new Response(...)` discards
+    // those — only c.json/c.text/c.redirect merge them. Verified in review that
+    // the post-next() write lands on a bare Response and on a streamSSE
+    // response alike, without corrupting the stream.
+    if (mint) writeSessionCookie(c, config, identity.userId);
   };
 
   return async (c, next) => {
-    if (AUTH_EXCLUDED_PATHS.includes(c.req.path)) return next();
+    if (hasExclusions && AUTH_EXCLUDED_PATHS.includes(c.req.path)) return next();
+
+    const presented = presentedToken(c);
+    let identity: Identity | null = null;
+    let mint = false;
 
     const bypassAllowed = loopbackBypassOverride ?? true;
-    if (bypassAllowed && isDirectLoopback(peerAddress(c), c.req.raw.headers)) {
+    if (bypassAllowed && pinned && isDirectLoopback(peerAddress(c), c.req.raw.headers)) {
       // The escape hatch. `ssh` + `curl 127.0.0.1:3010` must work whatever the
       // auth config says, and it resolves to the SAME pinned identity at the
       // same role `user` — not to admin, or every guard PRs C–D add would be a
       // no-op for the loopback tests that are supposed to prove them.
-      const identity = await introspector.introspect(config.local?.token ?? "");
-      if (identity) return grant(c, next, identity, null);
+      identity = pinned;
+      // A login link followed on the host itself should still leave a session
+      // behind, so the same URL behaves the same way everywhere.
+      if (presented && (await introspector.introspect(presented, "credential"))) mint = true;
     }
 
-    const cookie = readCookie(c.req.header("cookie"), SESSION_COOKIE);
-    if (cookie) {
-      const identity = await introspector.introspect(cookie);
-      if (identity) return grant(c, next, identity, null);
+    if (!identity) {
+      // Cookie: sessions ONLY. The local introspector also accepts the raw
+      // shared secret, and honouring that here would mean a hand-set
+      // `muninn_session=<MUNINN_LOCAL_TOKEN>` cookie puts the long-lived secret
+      // into every request's cookie jar with no expiry — which is exactly the
+      // property `src/auth/session.ts` exists to prevent.
+      const cookie = getCookie(c, SESSION_COOKIE);
+      if (cookie) identity = await introspector.introspect(cookie, "session");
     }
 
-    const presented = presentedToken(c);
-    if (presented) {
-      const identity = await introspector.introspect(presented);
-      if (identity) {
-        const setCookie =
-          config.local ? sessionCookie(mintSession(config.local.token, identity.userId), isSecureRequest(c)) : null;
-
-        // A secret on the query string lands in history, in the address bar and
-        // in any Referer the page later sends. Exchange it for the cookie and
-        // redirect to the same URL without it — only for a GET, since a
-        // redirected POST would lose its body.
-        if (setCookie && c.req.method === "GET" && c.req.query(TOKEN_QUERY_PARAM)) {
-          const url = new URL(c.req.url);
-          url.searchParams.delete(TOKEN_QUERY_PARAM);
-          return new Response(null, {
-            status: 302,
-            headers: { location: `${url.pathname}${url.search}${url.hash}`, "set-cookie": setCookie },
-          });
-        }
-        return grant(c, next, identity, setCookie);
+    if (!identity && presented) {
+      identity = await introspector.introspect(presented, "credential");
+      if (identity) mint = true;
+      if (!identity && !warnedRejectedPaths.has(c.req.path)) {
+        warnedRejectedPaths.add(c.req.path);
+        log.warn("Rejected a request presenting an invalid credential for {path}", { path: c.req.path });
       }
-      log.warn("Rejected a request presenting an invalid credential for {path}", { path: c.req.path });
     }
 
-    return unauthenticated(c, config);
+    if (!identity) return unauthenticated(c, config);
+
+    // A secret on the query string lands in history, in the address bar and in
+    // any Referer the page later sends — so strip it whenever it is there on a
+    // safe method, NOT only on the request that happened to authenticate with
+    // it. Gating on "the cookie check failed" left a bookmarked login URL
+    // carrying the secret on every later visit, and left the loopback operator
+    // never stripped at all. POST is excluded because a redirected POST loses
+    // its body. (The proxy's own access log still records the original request
+    // line; `src/auth/CLAUDE.md` says so.)
+    const safeMethod = c.req.method === "GET" || c.req.method === "HEAD";
+    if (safeMethod && c.req.query(TOKEN_QUERY_PARAM)) {
+      if (mint) writeSessionCookie(c, config, identity.userId);
+      return c.redirect(tokenStrippedTarget(c), 302);
+    }
+
+    return grant(c, next, identity, mint);
   };
 }
 
 declare module "hono" {
   interface ContextVariableMap {
-    /** Set by `createAuthMiddleware` in any authenticating mode. Absent with
-     *  auth off, where no middleware is mounted at all. */
-    identity: Identity;
-    role: AuthRole;
+    /**
+     * Set by `createAuthMiddleware` in any authenticating mode — and ABSENT
+     * with auth off, where no middleware is mounted at all.
+     *
+     * Optional deliberately. Declared as `Identity` these read as always-present
+     * to every route file in `src/` (the augmentation is repo-global), so a PR
+     * C/D guard written as `c.get("identity").userId` would compile green and
+     * throw on every request under today's DEFAULT configuration.
+     */
+    identity?: Identity;
+    role?: AuthRole;
   }
 }

@@ -116,8 +116,10 @@ export function wikiReadonlyRootsFromEnv(): string | undefined {
  * would resolve *nobody* to admin.
  *
  * A getter rather than a `loadConfig()` field for the same reason
- * `wikiReadonlyFromEnv` is one: `src/auth/mode.ts` runs its boot refusals before
- * anything else is initialised and must not require `DATABASE_URL`.
+ * `wikiReadonlyFromEnv` is one: the layer that enforces it sits below `Config`,
+ * and a snapshot field that can disagree with what the seam reads is the failure
+ * this file already documents above. (It is NOT that `mode.ts` must avoid
+ * `DATABASE_URL` — `loadConfig()` runs first in `src/index.ts` and demands it.)
  */
 export function adminIdentsFromEnv(env: Record<string, string | undefined> = process.env): string[] {
   const seen = new Set<string>();
