@@ -22,7 +22,7 @@
  * shared chunk breaks export resolution in unrelated files.
  */
 
-import { test, expect, describe, mock, beforeEach } from "bun:test";
+import { test, expect, describe, mock, beforeEach, beforeAll, afterAll } from "bun:test";
 import { Hono } from "hono";
 import type { Config } from "../../config.ts";
 
@@ -95,6 +95,35 @@ const post = (app: Hono, path: string, body: unknown) =>
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+
+/**
+ * Make the `yt-dlp` pre-flight succeed, for the whole file.
+ *
+ * The TikTok handler's FIRST pre-flight is `Bun.which("yt-dlp")` and it 500s when
+ * the binary is absent — before the bot resolution and the extra-dirs check these
+ * tests are actually about. So all three TikTok cases silently asserted "the
+ * developer has yt-dlp installed", and on a CI runner, which does not, they failed
+ * with a 500 that had nothing to do with job ordering.
+ *
+ * Patching `Bun.which` rather than putting a stub on PATH: **`Bun.which` does not
+ * see `process.env.PATH` mutations** — it resolves against the PATH snapshot taken
+ * at process start, so the usual temp-dir-on-PATH trick is INERT here (measured;
+ * `Bun.spawn` does honour a mutated env, which is why the same trick works in
+ * `src/scheduler/executor.test.ts`). Only `yt-dlp` is answered; every other lookup
+ * falls through to the real implementation, and the file already runs in its own
+ * `bun test` process, so the patch cannot reach another file.
+ *
+ * A stub, not `apt install yt-dlp` in the workflow: this is a unit test of route
+ * ORDERING and should not need a video downloader. Nothing here runs the binary.
+ */
+const realWhich = Bun.which;
+beforeAll(() => {
+  (Bun as { which: typeof Bun.which }).which = ((cmd: string, opts?: { PATH?: string; cwd?: string }) =>
+    cmd === "yt-dlp" ? "/stub/bin/yt-dlp" : realWhich(cmd, opts)) as typeof Bun.which;
+});
+afterAll(() => {
+  (Bun as { which: typeof Bun.which }).which = realWhich;
+});
 
 beforeEach(() => {
   botsResult = [cliBot];
