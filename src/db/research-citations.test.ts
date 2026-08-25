@@ -1,6 +1,13 @@
 import { test, expect, describe } from "bun:test";
 import { setupTestDb } from "../test/setup-db.ts";
 import { getDb } from "./client.ts";
+import { recordToolSpan } from "../ai/connectors/tool-span.ts";
+import {
+  _resetActiveTurnsForTests,
+  popActiveTurn,
+  pushActiveTurn,
+  runInActiveTurn,
+} from "../hivemind/active-turn.ts";
 import {
   cleanupThreadCitations,
   insertResearchCitations,
@@ -140,5 +147,131 @@ describe("cleanupThreadCitations", () => {
   test("a wide retention window deletes nothing", async () => {
     await seed();
     expect(await cleanupThreadCitations(90)).toBe(0);
+  });
+});
+
+/**
+ * PR A acceptance 1, the DB-write half — "**zero** `research_citations` rows
+ * carry a `thread_id` belonging to the other".
+ *
+ * This is the empirical pass on the fifth cross-user channel. It drives the REAL
+ * seam — `recordToolSpan`, the completion tail every streaming connector funnels
+ * its tool results through — with two turns interleaved on one bot, and then
+ * reads the rows back out of Postgres. Before PR A the correlation input was
+ * `peekActiveTurn(botName)`, a per-bot LIFO, so BOTH turns' hits landed on
+ * whichever thread pushed last.
+ *
+ * The fixtures are the same synthetic huginn renderings the parser tests use —
+ * never captured from the corpus (this repo is public).
+ */
+describe("thread citations under two concurrent turns on one bot", () => {
+  const BOT = "melosys-concurrency-test";
+
+  /** One rendered `search_knowledge` result, with a doc id we can trace back. */
+  function huginnResult(marker: string): string {
+    return [
+      `Found 1 result:`,
+      ``,
+      `## ${marker} sak (91.4% relevant · high) | updated: 2026-01-01`,
+      `https://jira.example.invalid/browse/${marker}-1`,
+      "collection: `jira-issues` doc_id: `" + marker + "-1_sak.md`",
+      ``,
+    ].join("\n");
+  }
+
+  /** The tool-result tail, exactly as a connector calls it. */
+  function runToolCall(marker: string): void {
+    recordToolSpan({
+      id: `tool-${marker}`,
+      name: "mcp__knowledge__search_knowledge",
+      input: "innlogging",
+      rawResult: huginnResult(marker),
+      startMs: 0,
+      endMs: 1,
+      wallStart: 0,
+      botName: BOT,
+    });
+  }
+
+  /** The write is fire-and-forget; wait for it rather than racing it. */
+  async function waitForRows(threadId: string, n: number) {
+    for (let i = 0; i < 50; i++) {
+      const rows = await getCitationsForThread(threadId);
+      if (rows.length >= n) return rows;
+      await Bun.sleep(20);
+    }
+    return getCitationsForThread(threadId);
+  }
+
+  test("each turn's hits land on ITS OWN thread, not the one that pushed last", async () => {
+    _resetActiveTurnsForTests();
+    const threadA = crypto.randomUUID();
+    const threadB = crypto.randomUUID();
+
+    // Both turns are in flight — this is the steady state the plan describes,
+    // not an edge case, once one bot serves more than one person.
+    pushActiveTurn(BOT, threadA);
+    pushActiveTurn(BOT, threadB);
+
+    // Interleaved, with real awaits between the bind and the tool result, which
+    // is the only shape the async binding has to survive.
+    await Promise.all([
+      runInActiveTurn(BOT, threadA, async () => {
+        await Bun.sleep(15);
+        runToolCall("AAA");
+      }),
+      runInActiveTurn(BOT, threadB, async () => {
+        await Bun.sleep(1);
+        runToolCall("BBB");
+      }),
+    ]);
+
+    const rowsA = await waitForRows(threadA, 1);
+    const rowsB = await waitForRows(threadB, 1);
+
+    expect(rowsA.map((r) => r.docId)).toEqual(["AAA-1_sak.md"]);
+    expect(rowsB.map((r) => r.docId)).toEqual(["BBB-1_sak.md"]);
+    // Stated as the acceptance states it: nothing of the other's, either way.
+    expect(rowsA.some((r) => r.docId.startsWith("BBB"))).toBe(false);
+    expect(rowsB.some((r) => r.docId.startsWith("AAA"))).toBe(false);
+
+    popActiveTurn(BOT, threadA);
+    popActiveTurn(BOT, threadB);
+    _resetActiveTurnsForTests();
+  });
+
+  test("a single turn still files its hits — the fix is not a mute button", async () => {
+    _resetActiveTurnsForTests();
+    const thread = crypto.randomUUID();
+    pushActiveTurn(BOT, thread);
+
+    await runInActiveTurn(BOT, thread, async () => {
+      await Bun.sleep(1);
+      runToolCall("CCC");
+    });
+
+    expect((await waitForRows(thread, 1)).map((r) => r.docId)).toEqual(["CCC-1_sak.md"]);
+
+    popActiveTurn(BOT, thread);
+    _resetActiveTurnsForTests();
+  });
+
+  test("an UNBOUND tool result with two turns in flight writes nothing at all", async () => {
+    // muninn's own research MCP server has no async link to the turn (a separate
+    // Bun.serve request). With two turns up there is no honest answer, so the
+    // row is dropped — a missing source beats one filed into a colleague's thread.
+    _resetActiveTurnsForTests();
+    const threadA = crypto.randomUUID();
+    const threadB = crypto.randomUUID();
+    pushActiveTurn(BOT, threadA);
+    pushActiveTurn(BOT, threadB);
+
+    runToolCall("DDD");
+    await Bun.sleep(200);
+
+    expect(await getCitationsForThread(threadA)).toEqual([]);
+    expect(await getCitationsForThread(threadB)).toEqual([]);
+
+    _resetActiveTurnsForTests();
   });
 });

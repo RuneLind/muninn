@@ -18,11 +18,24 @@
  * closes it from the tool-RESULT seam, which every connector already funnels
  * through, so the coverage is per-connector rather than per-tool.
  *
- * **`peekActiveTurn` is per-BOT, not per-user** — two people chatting the same
- * bot concurrently can have one turn's hits attributed to the other's thread (the
- * LIFO stack's documented race). Accepted for v1 on both paths: the consequence
- * is a Jira draft seeded with a neighbouring conversation's sources, all of which
- * are visible and toggleable on the page.
+ * **Which turn a hit belongs to is resolved, not guessed.** It used to be
+ * `peekActiveTurn(botName)` — a per-BOT LIFO — on both paths, so two people
+ * chatting one bot concurrently had one turn's hits written DURABLY into the
+ * other's thread, later seeding the wrong Jira draft. That was accepted for a
+ * single-user instance and does not survive two. {@link resolveTurnThread} now
+ * takes them in order of certainty:
+ *
+ *  1. **The async binding** (`currentActiveTurn`) — exact. The tool-result seam
+ *     runs inside the turn's own async chain, and that is the common path.
+ *  2. **The per-bot stack, only when unambiguous** — for the out-of-band caller:
+ *     muninn's `research_knowledge` MCP tool is served by a separate
+ *     `Bun.serve` listener answering the model subprocess, so it inherits no
+ *     context. With exactly one turn in flight for the bot there is nothing to
+ *     be wrong about.
+ *  3. **Nothing.** Two turns in flight and no binding ⇒ the row is DROPPED and
+ *     logged. A missing citation costs the composer a source it can be told
+ *     about; a mis-attributed one puts a colleague's search into someone else's
+ *     conversation. Not writing is the cheaper error.
  *
  * Fire-and-forget in every direction. A DB failure, a parse failure or a missing
  * turn must never turn a successful retrieval into a failed tool result, and must
@@ -30,7 +43,7 @@
  */
 
 import { getLog } from "../logging.ts";
-import { peekActiveTurn } from "../hivemind/active-turn.ts";
+import { activeTurnCount, currentActiveTurn, peekActiveTurn } from "../hivemind/active-turn.ts";
 import {
   insertResearchCitations,
   type ResearchCitationInsert,
@@ -88,9 +101,33 @@ export function threadCitationRows(
   }));
 }
 
-/** Shape + write, against whichever turn is in flight for this bot. */
+/**
+ * Which thread these hits belong to — see the header for the ordering.
+ *
+ * Exported for the regression suite: the whole point is that concurrency
+ * produces *no* row rather than a wrong one, and that is not observable from
+ * `persistThreadCitations`, which is fire-and-forget by design.
+ */
+export function resolveTurnThread(botName: string): string | null {
+  const bound = currentActiveTurn();
+  // The bot guard is not paranoia: a bound context from a DIFFERENT bot's turn
+  // would be exactly as wrong as the stack race this replaces.
+  if (bound && bound.botName === botName) return bound.threadId;
+
+  const inFlight = activeTurnCount(botName);
+  if (inFlight > 1) {
+    log.info(
+      "Dropping thread citations: {count} turns in flight for {botName} and no bound turn",
+      { botName, count: inFlight },
+    );
+    return null;
+  }
+  return peekActiveTurn(botName);
+}
+
+/** Shape + write, against the turn these hits were actually retrieved in. */
 export function persistThreadCitations(input: ThreadCitationInput): void {
-  const rows = threadCitationRows({ ...input, threadId: peekActiveTurn(input.botName) });
+  const rows = threadCitationRows({ ...input, threadId: resolveTurnThread(input.botName) });
   if (rows.length === 0) return;
   void insertResearchCitations(rows).catch((err) => {
     log.warn("Failed to persist thread citations botName={botName} error={error}", {

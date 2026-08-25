@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { BotConfig } from "../bots/config.ts";
 import type { Config } from "../config.ts";
 import { createChatRoutes, researchStageForPrompt } from "./routes.ts";
+import { chatState } from "./state.ts";
 
 // The /specs endpoints persist the domain layer of a spec as a first-class
 // artifact (Phase 0). They mirror /reports and share the path-traversal guards.
@@ -149,5 +150,58 @@ describe("GET /bots — jiraBot", () => {
     // `testbot` IS in the list this router was constructed with. Resolving from
     // that list answered "testbot" for a name every /api/jira/* route 503s on.
     expect(body.jiraBot).toBeNull();
+  });
+});
+
+/**
+ * PR A acceptance 3, id half — a web conversation is addressable forever.
+ *
+ * `POST /chat/conversations` used to mint `crypto.randomUUID()` for every type,
+ * and the chat page takes this route on a user's first turn with a bot. That
+ * shell was unreachable after a restart (`hydrateFromDb` rebuilds conversations
+ * under the deterministic id and can never produce a UUID) and unreachable
+ * in-process from any off-band broadcaster, all of which address
+ * `botConversationId(userId, botName)`.
+ */
+describe("POST /conversations — web conversations get the deterministic id", () => {
+  test("the created id is the one hydrateFromDb and every broadcaster compute", async () => {
+    const { app } = await appWithBot();
+    const res = await app.request("/conversations", jsonPostWith({
+      type: "web", botName: "testbot", userId: "u-det-1", username: "alice",
+    }));
+
+    expect(res.status).toBe(201);
+    const { conversation } = await res.json();
+    expect(conversation.id).toBe(await chatState.botConversationId("u-det-1", "testbot"));
+    expect(conversation.type).toBe("web");
+    expect(conversation.userId).toBe("u-det-1");
+    expect(conversation.username).toBe("alice");
+  });
+
+  test("a second POST returns the same conversation rather than a second shell", async () => {
+    const { app } = await appWithBot();
+    const first = await (await app.request("/conversations", jsonPostWith({
+      type: "web", botName: "testbot", userId: "u-det-2", username: "alice",
+    }))).json();
+    const second = await (await app.request("/conversations", jsonPostWith({
+      type: "web", botName: "testbot", userId: "u-det-2", username: "alice",
+    }))).json();
+
+    expect(second.conversation.id).toBe(first.conversation.id);
+    expect(chatState.getConversations().filter((c) => c.userId === "u-det-2")).toHaveLength(1);
+  });
+
+  test("non-web types keep their random shells", async () => {
+    // Telegram/Slack conversations are addressed only by the live object — there
+    // is no `<user>:<bot>:<platform>` id anyone computes for them here.
+    const { app } = await appWithBot();
+    const a = await (await app.request("/conversations", jsonPostWith({
+      type: "telegram_dm", botName: "testbot", userId: "u-det-3", username: "alice",
+    }))).json();
+    const b = await (await app.request("/conversations", jsonPostWith({
+      type: "telegram_dm", botName: "testbot", userId: "u-det-3", username: "alice",
+    }))).json();
+
+    expect(a.conversation.id).not.toBe(b.conversation.id);
   });
 });

@@ -61,11 +61,26 @@ async function deterministicId(key: string): Promise<string> {
 }
 
 /**
- * In-memory state for chat conversations.
- * Publishes events to WebSocket subscribers.
+ * How many conversations keep their message history in memory.
+ *
+ * This used to be a cap on the conversation MAP, and eviction deleted the whole
+ * shell. That was a permanent 404 for the owner and, worse, a silent write loss:
+ * `addMessage` returns early on a missing shell, so a reply to an evicted
+ * conversation vanished without an error anywhere. Nothing could rebuild it
+ * either — `hydrateFromDb` runs once at boot and addresses conversations by a
+ * deterministic id, which a `crypto.randomUUID()` shell can never match.
+ *
+ * So the cap now bounds the thing that actually costs memory — the message
+ * arrays — and the shells stay. A shell is five strings; the map is bounded in
+ * practice by users × bots × platforms, and `hydrateFromDb` has always inserted
+ * that many at boot without consulting any cap, so this is not a new property.
  */
 export const MAX_CONVERSATIONS = 50;
 
+/**
+ * In-memory state for chat conversations.
+ * Publishes events to WebSocket subscribers.
+ */
 export class ChatState {
   private conversations = new Map<string, ChatConversation>();
   private subscribers = new Set<EventSubscriber>();
@@ -85,15 +100,26 @@ export class ChatState {
     }
   }
 
-  /** Evict the least-recently-used conversations until under MAX_CONVERSATIONS.
-   *  Map preserves insertion order and `touch()` re-inserts on access, so the
-   *  first key is always the LRU entry. */
-  private pruneOldest(): void {
-    while (this.conversations.size >= MAX_CONVERSATIONS) {
-      const oldest = this.conversations.keys().next().value;
-      if (!oldest) break;
-      this.conversations.delete(oldest);
+  /**
+   * Reclaim memory from the least-recently-used conversations, keeping at most
+   * {@link MAX_CONVERSATIONS} of them hydrated with messages.
+   *
+   * Map preserves insertion order and `touch()` re-inserts on access, so the
+   * conversations still holding messages are in LRU order and the front of that
+   * list is what gets trimmed. **The shell is never dropped** — see
+   * {@link MAX_CONVERSATIONS} for why deleting it was the bug. A trimmed
+   * conversation still resolves, still accepts messages, and its history is
+   * still readable: `GET /chat/conversations/:id/messages` reads the DB, not
+   * this array.
+   */
+  private trimHydratedMessages(): void {
+    const hydrated: ChatConversation[] = [];
+    for (const conv of this.conversations.values()) {
+      if (conv.messages.length > 0) hydrated.push(conv);
     }
+    // Room for the one about to be created/hydrated, hence the -1.
+    const excess = hydrated.length - (MAX_CONVERSATIONS - 1);
+    for (let i = 0; i < excess; i++) hydrated[i]!.messages = [];
   }
 
   /** Mark a conversation as most-recently-used by re-inserting it at the tail
@@ -105,6 +131,17 @@ export class ChatState {
     this.conversations.set(id, conv);
   }
 
+  /**
+   * Create a conversation with a random id.
+   *
+   * **Not for `web`.** A web conversation must be addressable by
+   * `deterministicId("<userId>:<botName>:web")` — that is the id `hydrateFromDb`
+   * rebuilds it under after a restart and the id every off-band broadcaster
+   * computes via {@link botConversationId}. Use
+   * {@link findOrCreateBotConversation} for those; this stays for the platform
+   * shells (telegram/slack DMs and channels), which are addressed only by the
+   * live object.
+   */
   createConversation(params: {
     type: ConversationType;
     botName: string;
@@ -112,7 +149,7 @@ export class ChatState {
     username: string;
     channelName?: string;
   }): ChatConversation {
-    this.pruneOldest();
+    this.trimHydratedMessages();
 
     const id = crypto.randomUUID();
     const conversation: ChatConversation = {
@@ -359,6 +396,12 @@ export class ChatState {
       count++;
     }
 
+    // Once, at the end rather than per row (which would be quadratic): boot is
+    // the one path that can load far more history than the cap allows, and
+    // without this the class invariant — at most MAX_CONVERSATIONS conversations
+    // holding messages — would be false from the moment the process starts.
+    this.trimHydratedMessages();
+
     return count;
   }
 
@@ -408,7 +451,7 @@ export class ChatState {
       return existing;
     }
 
-    this.pruneOldest();
+    this.trimHydratedMessages();
     const conversation: ChatConversation = {
       id,
       type: "web",

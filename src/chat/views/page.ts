@@ -167,8 +167,19 @@ const CHAT_SSE_SCRIPT = `
     autoDismissInner = null;
   }
 
+  var conn = null;
+
   function connectSSE() {
-    var conn = sseClient('/api/events', {
+    // The waterfall + phase pill are scoped SERVER-side to this viewer
+    // (sse-routes.ts). The id is only known once the user selector resolves —
+    // an async fetch — so the first connect is unscoped and CHAT_SCRIPT calls
+    // reconnectChatSse() as soon as it has one, and again on every user switch.
+    var viewer = window.__muninnViewerId;
+    var url = viewer ? '/api/events?viewer=' + encodeURIComponent(viewer) : '/api/events';
+    // "mine" is per-connection on purpose: "conn" is shared so reconnectChatSse
+    // can close the live one, and a STALE stream's onerror must not close (or
+    // resurrect itself over) the stream that replaced it.
+    var mine = sseClient(url, {
       agent_status: function(e) {
         updateAgentStatus(JSON.parse(e.data));
       },
@@ -197,11 +208,26 @@ const CHAT_SSE_SCRIPT = `
       },
 
       onerror: function() {
-        conn.close();
-        setTimeout(connectSSE, 3000);
+        mine.close();
+        if (conn !== mine) return;   // superseded by a viewer switch — stay dead
+        setTimeout(function() { if (conn === mine) connectSSE(); }, 3000);
       },
     });
+    conn = mine;
   }
+
+  /** Re-open the stream against the currently selected viewer. Called by
+   *  CHAT_SCRIPT whenever the selected user changes; a no-op if it has not. */
+  var lastViewer;
+  window.reconnectChatSse = function() {
+    if (window.__muninnViewerId === lastViewer) return;
+    lastViewer = window.__muninnViewerId;
+    // A stale stream would keep pushing the previous viewer's frames.
+    updateRequestProgress(null);
+    updateAgentStatus({ phase: 'idle' });
+    if (conn) { try { conn.close(); } catch {} }
+    connectSSE();
+  };
 
   // Wrap dismissRequestProgress to also clear auto-dismiss timers
   var _origDismiss = dismissRequestProgress;
@@ -283,6 +309,14 @@ const CHAT_SCRIPT = `
   var selectedBot = '';         // From bot pills (localStorage-synced)
   var selectedUserId = null;    // Resolved from config for selected bot
   var selectedUsername = null;   // Display name
+
+  /** Publish the selected user to the SSE script and re-scope its stream. The
+   *  waterfall and phase pill are filtered server-side on this id, so a page
+   *  that never calls this renders every user's run — the bug PR A closes. */
+  function setViewer(userId) {
+    window.__muninnViewerId = userId || null;
+    if (window.reconnectChatSse) window.reconnectChatSse();
+  }
 
   // Bot selector init (synced with dashboard/traces/logs via localStorage)
   try { selectedBot = localStorage.getItem('muninn-selected-bot') || ''; } catch {}
@@ -406,6 +440,7 @@ const CHAT_SCRIPT = `
       container.style.display = 'none';
       selectedUserId = null;
       selectedUsername = null;
+      setViewer(null);
       return;
     }
 
@@ -428,6 +463,7 @@ const CHAT_SCRIPT = `
     selector.value = active.id;
     selectedUserId = active.id;
     selectedUsername = active.name;
+    setViewer(active.id);
 
     // Cache in localStorage for deep-link handoff within same page load
     try { localStorage.setItem('muninn-chat-user-' + botName, active.id); } catch {}
@@ -485,6 +521,7 @@ const CHAT_SCRIPT = `
     var opt = e.target.selectedOptions[0];
     selectedUserId = userId;
     selectedUsername = opt ? opt.textContent : userId;
+    setViewer(userId);
     try { localStorage.setItem('muninn-chat-user-' + selectedBot, userId); } catch {}
     syncDefaultUser(selectedBot, userId);
     // Re-resolve conversation, threads, and connector preference for new user

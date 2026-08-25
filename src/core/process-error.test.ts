@@ -63,7 +63,10 @@ describe("handleProcessError", () => {
   test("clears the active request and resets agent status to idle", async () => {
     await handleProcessError(callParams());
     expect(clearSpy).toHaveBeenCalledTimes(1);
-    expect(setSpy).toHaveBeenCalledWith("idle");
+    // The owner is on the idle call, not just the global slot: the phase pill is
+    // per-user, so a failed turn that cleared only the global one would leave
+    // the owner's pill lit on whatever phase threw.
+    expect(setSpy).toHaveBeenCalledWith("idle", undefined, undefined, { userId: "U1" });
   });
 
   test("clears only the failed request when a requestId is given", async () => {

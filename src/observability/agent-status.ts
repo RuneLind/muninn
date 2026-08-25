@@ -31,9 +31,21 @@ export type AgentPhase =
 
 export interface AgentStatus {
   phase: AgentPhase;
+  /** Display label — a person's name on a chat turn, but a goal/task/watcher
+   *  TITLE on the background paths. Never an identity; see `userId`. */
   username?: string;
   detail?: string;
   startedAt?: number;
+  /**
+   * Owner of the turn this phase describes, when there is one.
+   *
+   * The phase indicator used to be one process-wide slot and the source said so
+   * ("intentionally left global") — with two people on one instance, A's chat
+   * page rendered B's phase. `userId` is what a viewer-scoped subscriber filters
+   * on; a background run (watcher, scheduled task, goal) legitimately has none
+   * and is therefore visible only to the unscoped operator subscribers.
+   */
+  userId?: string;
 }
 
 export interface ToolProgress {
@@ -86,7 +98,16 @@ export interface RunProgress {
 export interface AgentRun {
   requestId: string;
   botName: string;
+  /** Display label only — see {@link AgentStatus.username}. */
   username?: string;
+  /**
+   * Owner of this run. Additive and optional: background kinds (watcher,
+   * scheduled task, gardener drain, capture, …) have no user, and the operator
+   * surfaces (`getAll`/`snapshotAll`/`subscribeAll` → `/agents`) never filter on
+   * it. It exists so the single-pane waterfall can be scoped to ONE viewer —
+   * `getProgress(viewer)` / `subscribeProgress(fn, viewer)`.
+   */
+  userId?: string;
   phase: AgentPhase;
   connectorLabel?: string;
   model?: string;
@@ -141,9 +162,22 @@ let nextRequestId = 1;
  * keeps the SSE contract and UI untouched while the data layer stays correct
  * under concurrency.
  *
- * The phase-only singleton (`set`/`get`/`subscribe`) is intentionally left
- * global: it's a coarse "what is the bot doing right now" indicator, not
- * per-request waterfall data.
+ * **The filter is a parameter of the SUBSCRIBER, never a global.** Both read
+ * sides take an optional viewer id: `getProgress(viewer)`/`subscribeProgress(fn,
+ * viewer)` and `get(viewer)`/`subscribe(fn, viewer)` return only runs owned by
+ * that user, while omitting it keeps the unfiltered operator view the dashboard
+ * and `/agents` are built on. Filtering globally instead would leave every shape
+ * test green while emptying the operator's page — the registry read side
+ * (`getAll`/`snapshotAll`/`subscribeAll`) is deliberately not filterable at all.
+ *
+ * The phase-only surface (`set`/`get`/`subscribe`) used to be a genuine
+ * singleton, and the comment here said it was intentional. It is not defensible
+ * with two people on one instance: the shared pipeline sets it with whoever is
+ * being processed, and every chat page rendered it. It is now a per-user map
+ * (`userId` on the set call) with the global slot kept for the operator and for
+ * the background paths that legitimately have no user. A `set` carrying a
+ * `userId` notifies only the unscoped subscribers and that user's own;
+ * a `set` without one notifies only the unscoped subscribers.
  */
 /** Cap on tools serialized per run in the `agent_runs` SSE snapshot (keeps the
  *  fan-out payload bounded — a long chat turn can accumulate dozens). */
@@ -155,9 +189,13 @@ const ALL_THROTTLE_MS = 1000;
 
 class AgentStatusTracker {
   private current: AgentStatus = { phase: "idle" };
-  private subscribers = new Set<StatusSubscriber>();
+  /** Per-user phase, for viewer-scoped subscribers. An entry is DELETED when
+   *  that user goes idle, so the map is bounded by concurrently-active users. */
+  private userStatus = new Map<string, AgentStatus>();
+  /** Subscriber → the viewer it is scoped to (`undefined` = unscoped/operator). */
+  private subscribers = new Map<StatusSubscriber, string | undefined>();
   private requests = new Map<string, AgentRun>();
-  private progressSubscribers = new Set<ProgressSubscriber>();
+  private progressSubscribers = new Map<ProgressSubscriber, string | undefined>();
   private completionTimers = new Map<string, ReturnType<typeof setTimeout>>();
   // Registry read side (/agents dashboard).
   private allSubscribers = new Set<AllSubscriber>();
@@ -165,25 +203,52 @@ class AgentStatusTracker {
   private allNotifyTimer: ReturnType<typeof setTimeout> | undefined;
   private lastAllNotifyAt = 0;
 
-  set(phase: AgentPhase, username?: string, detail?: string) {
-    this.current = {
+  /**
+   * Set the coarse phase indicator.
+   *
+   * `opts.userId` is what makes this per-user rather than global — every chat
+   * path passes it, INCLUDING the terminal `set("idle", …)`, because without
+   * that clear the owner's pill would stay lit on their last phase forever.
+   */
+  set(phase: AgentPhase, username?: string, detail?: string, opts?: { userId?: string }) {
+    const status: AgentStatus = {
       phase,
       username,
       detail,
       startedAt: phase === "idle" ? undefined : Date.now(),
+      ...(opts?.userId ? { userId: opts.userId } : {}),
     };
-    for (const sub of this.subscribers) {
-      sub(this.current);
+    this.current = status;
+    const userId = opts?.userId;
+    if (userId) {
+      if (phase === "idle") this.userStatus.delete(userId);
+      else this.userStatus.set(userId, status);
+    }
+    for (const [sub, viewer] of this.subscribers) {
+      // Unscoped subscribers see everything (the operator dashboard). A scoped
+      // one hears only about its own user — not even an idle frame for someone
+      // else's turn, which would be pure noise on the wire.
+      if (viewer === undefined) sub(status);
+      else if (viewer === userId) sub(this.statusFor(viewer));
     }
   }
 
-  get(): AgentStatus {
-    return this.current;
+  /**
+   * The phase to show a viewer. With no viewer this is the process-wide slot
+   * (operator view); with one it is that user's own phase, or idle.
+   */
+  get(viewer?: string): AgentStatus {
+    return this.statusFor(viewer);
   }
 
-  subscribe(fn: StatusSubscriber): () => void {
-    this.subscribers.add(fn);
+  subscribe(fn: StatusSubscriber, viewer?: string): () => void {
+    this.subscribers.set(fn, viewer);
     return () => this.subscribers.delete(fn);
+  }
+
+  private statusFor(viewer?: string): AgentStatus {
+    if (viewer === undefined) return this.current;
+    return this.userStatus.get(viewer) ?? { phase: "idle" };
   }
 
   // --- Request Progress ---
@@ -192,7 +257,7 @@ class AgentStatusTracker {
     botName: string,
     phase: AgentPhase,
     username?: string,
-    opts?: { kind?: AgentKind; name?: string },
+    opts?: { kind?: AgentKind; name?: string; userId?: string },
   ): string {
     const requestId = `req_${nextRequestId++}`;
     this.requests.set(requestId, {
@@ -204,6 +269,7 @@ class AgentStatusTracker {
       tools: [],
       kind: opts?.kind ?? "chat",
       ...(opts?.name ? { name: opts.name } : {}),
+      ...(opts?.userId ? { userId: opts.userId } : {}),
     });
     this.notifyProgress();
     return requestId;
@@ -361,6 +427,7 @@ class AgentStatusTracker {
       // Full reset also drops the completed-runs ring + throttle state so tests
       // (and the reset path) start clean. No production caller passes no id.
       this.completedRing = [];
+      this.userStatus.clear();
       if (this.allNotifyTimer) {
         clearTimeout(this.allNotifyTimer);
         this.allNotifyTimer = undefined;
@@ -378,13 +445,24 @@ class AgentStatusTracker {
     this.notifyProgress();
   }
 
-  getProgress(): AgentRun | null {
-    return this.primaryRequest();
+  /** The waterfall a viewer should see. Omit `viewer` for the unfiltered
+   *  operator view; pass one to get only that user's runs. */
+  getProgress(viewer?: string): AgentRun | null {
+    return this.primaryRequest(viewer);
   }
 
-  subscribeProgress(fn: ProgressSubscriber): () => void {
-    this.progressSubscribers.add(fn);
+  subscribeProgress(fn: ProgressSubscriber, viewer?: string): () => void {
+    this.progressSubscribers.set(fn, viewer);
     return () => this.progressSubscribers.delete(fn);
+  }
+
+  /** Set the phase for the OWNER of a run, resolved from the run itself. Lets
+   *  the streaming progress callback stay per-user without threading a userId
+   *  through every connector callback signature. */
+  setForRequest(requestId: string, phase: AgentPhase, detail?: string): void {
+    const req = this.requests.get(requestId);
+    if (!req) return;
+    this.set(phase, req.username, detail, req.userId ? { userId: req.userId } : undefined);
   }
 
   // --- Registry read side (/agents dashboard) -------------------------------
@@ -456,18 +534,23 @@ class AgentStatusTracker {
    *  capture/profile) live only in getAll()/subscribeAll(). Without this filter
    *  the post-turn extractors would hijack the primary slot on every chat turn,
    *  masking the completed chat card and cancelling its auto-dismiss. */
-  private primaryRequest(): RequestProgress | null {
+  private primaryRequest(viewer?: string): RequestProgress | null {
     let primary: RequestProgress | null = null;
     for (const req of this.requests.values()) {
-      if (WATERFALL_KINDS.has(req.kind)) primary = req;
+      if (!WATERFALL_KINDS.has(req.kind)) continue;
+      // A viewer sees only their own runs. Note this also drops the watcher and
+      // scheduled-task runs a chat page used to render as its own waterfall —
+      // those have no owner, and showing someone else's background job as
+      // "your request" was the same defect in a quieter form.
+      if (viewer !== undefined && req.userId !== viewer) continue;
+      primary = req;
     }
     return primary;
   }
 
   private notifyProgress() {
-    const snapshot = this.primaryRequest();
-    for (const sub of this.progressSubscribers) {
-      sub(snapshot);
+    for (const [sub, viewer] of this.progressSubscribers) {
+      sub(this.primaryRequest(viewer));
     }
     // Registry read side rides the same mutation points (throttled internally).
     this.notifyAll();
@@ -494,14 +577,23 @@ export function setConnectorInfo(requestId: string, botConfig: { connector?: str
   if (model) agentStatus.setModel(requestId, model);
 }
 
-/** Create a progress callback that updates the given request with tool details */
-export function createProgressCallback(requestId: string, phase: AgentPhase, username?: string): StreamProgressCallback {
+/**
+ * Create a progress callback that updates the given request with tool details.
+ *
+ * The display name comes off the run (`setForRequest`) rather than a `username`
+ * argument, so there is nothing left for callers to pass — the third parameter
+ * was removed rather than left inert.
+ */
+export function createProgressCallback(requestId: string, phase: AgentPhase): StreamProgressCallback {
   return (event) => {
     if (event.type === "tool_start") {
-      agentStatus.set(phase, username, event.displayName);
+      // setForRequest, not set: the phase indicator is per-user now and the run
+      // is the only thing here that knows whose turn this is (`username` is a
+      // display label, not an id).
+      agentStatus.setForRequest(requestId, phase, event.displayName);
       agentStatus.toolStart(requestId, event.name, event.displayName, event.input);
     } else if (event.type === "tool_end") {
-      agentStatus.set(phase, username);
+      agentStatus.setForRequest(requestId, phase);
       agentStatus.toolEnd(requestId, event.name, event.displayName);
     } else if (event.type === "usage_progress") {
       // Live in/out tokens for the Running card. Per-call cumulative (a new

@@ -38,7 +38,7 @@ describe("ChatState", () => {
       expect(conv.channelName).toBe("#general");
     });
 
-    test("prunes oldest when MAX_CONVERSATIONS exceeded", () => {
+    test("keeps every shell resolvable past MAX_CONVERSATIONS", () => {
       const ids: string[] = [];
       for (let i = 0; i < MAX_CONVERSATIONS + 5; i++) {
         const conv = state.createConversation({
@@ -50,53 +50,93 @@ describe("ChatState", () => {
         ids.push(conv.id);
       }
 
-      expect(state.getConversations().length).toBe(MAX_CONVERSATIONS);
-      // First 5 should have been pruned
-      expect(state.getConversation(ids[0]!)).toBeUndefined();
-      expect(state.getConversation(ids[4]!)).toBeUndefined();
-      // Last ones should exist
+      // Shells are no longer evicted: dropping one was a permanent 404 for its
+      // owner (and a silent write loss, below), because nothing can reconstruct
+      // it. What the cap bounds now is message payloads.
+      expect(state.getConversations().length).toBe(MAX_CONVERSATIONS + 5);
+      expect(state.getConversation(ids[0]!)).toBeDefined();
+      expect(state.getConversation(ids[4]!)).toBeDefined();
       expect(state.getConversation(ids[ids.length - 1]!)).toBeDefined();
     });
   });
 
-  describe("LRU eviction", () => {
-    test("a recently-accessed conversation survives eviction over an idle one", () => {
-      // Fill exactly to capacity.
+  /**
+   * PR A acceptance 3 — "an evicted conversation is not lost".
+   *
+   * The old cap deleted the least-recently-used SHELL. For its owner that was a
+   * permanent 404 on `GET /chat/conversations/:id` and, worse, a silent write
+   * loss: `addMessage` returns early on a missing shell, so a reply to the
+   * evicted conversation disappeared with no error on any surface. The cap now
+   * reclaims the message ARRAYS instead, which is where the memory actually is.
+   */
+  describe("LRU message trimming", () => {
+    function fillToCapacityWithMessages(): string[] {
       const ids: string[] = [];
       for (let i = 0; i < MAX_CONVERSATIONS; i++) {
-        ids.push(state.createConversation({
+        const id = state.createConversation({
           type: "telegram_dm", botName: "jarvis", userId: String(i), username: `user${i}`,
-        }).id);
+        }).id;
+        state.addMessage(id, { id: `m-${i}`, timestamp: Date.now(), sender: "user", text: "hi" });
+        ids.push(id);
       }
+      return ids;
+    }
+
+    test("an over-cap conversation still resolves and still accepts messages", () => {
+      const ids = fillToCapacityWithMessages();
+      const victim = ids[0]!; // least-recently-used, so first to be trimmed
+
+      state.createConversation({ type: "telegram_dm", botName: "jarvis", userId: "new", username: "new" });
+
+      const conv = state.getConversation(victim);
+      expect(conv).toBeDefined();               // no permanent 404
+      expect(conv!.messages).toHaveLength(0);   // its payload was what got reclaimed
+
+      // ...and the write path still lands, rather than returning early into
+      // nothing. This is the silent-write-loss half.
+      const events: ChatEvent[] = [];
+      const unsub = state.subscribe((e) => events.push(e));
+      state.addMessage(victim, { id: "later", timestamp: Date.now(), sender: "bot", text: "still here" });
+      unsub();
+
+      expect(state.getConversation(victim)!.messages.map((m) => m.id)).toEqual(["later"]);
+      // ...and it reached subscribers, which is what a socket renders.
+      expect(events).toEqual([
+        { type: "message", conversationId: victim, message: expect.objectContaining({ id: "later" }) },
+      ]);
+    });
+
+    test("a recently-accessed conversation keeps its messages over an idle one", () => {
+      const ids = fillToCapacityWithMessages();
       const first = ids[0]!;
       const second = ids[1]!;
 
       // Touch `first` so it becomes most-recently-used; `second` stays idle.
       expect(state.getConversation(first)).toBeDefined();
 
-      // One more creation forces a single eviction of the LRU entry.
       state.createConversation({ type: "telegram_dm", botName: "jarvis", userId: "new", username: "new" });
 
-      // `first` was touched → survives; `second` (now LRU) → evicted.
-      expect(state.getConversation(first)).toBeDefined();
-      expect(state.getConversation(second)).toBeUndefined();
+      expect(state.getConversation(first)!.messages).toHaveLength(1);
+      expect(state.getConversation(second)!.messages).toHaveLength(0);
     });
 
-    test("addMessage touches the conversation so it is not evicted", () => {
+    test("trims only down to the cap, not the whole map", () => {
+      fillToCapacityWithMessages();
+      state.createConversation({ type: "telegram_dm", botName: "jarvis", userId: "new", username: "new" });
+
+      const hydrated = state.getConversations().filter((c) => c.messages.length > 0);
+      expect(hydrated).toHaveLength(MAX_CONVERSATIONS - 1);
+    });
+
+    test("a conversation with no messages costs nothing and trims nothing", () => {
       const ids: string[] = [];
-      for (let i = 0; i < MAX_CONVERSATIONS; i++) {
+      for (let i = 0; i < MAX_CONVERSATIONS + 10; i++) {
         ids.push(state.createConversation({
           type: "telegram_dm", botName: "jarvis", userId: String(i), username: `user${i}`,
         }).id);
       }
-      const oldest = ids[0]!;
-      state.addMessage(oldest, { id: "m1", timestamp: Date.now(), sender: "user", text: "hi" });
-
-      state.createConversation({ type: "telegram_dm", botName: "jarvis", userId: "new", username: "new" });
-
-      // oldest was touched by addMessage → survives; ids[1] (now LRU) → evicted.
-      expect(state.getConversation(oldest)).toBeDefined();
-      expect(state.getConversation(ids[1]!)).toBeUndefined();
+      // Nothing was hydrated, so nothing was reclaimed — and every shell stands.
+      expect(ids.every((id) => state.getConversation(id) !== undefined)).toBe(true);
     });
   });
 
