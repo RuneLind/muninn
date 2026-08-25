@@ -9,8 +9,8 @@
  *      module: an e2e server that inherits a live `TELEGRAM_BOT_TOKEN_*` opens a
  *      second long-poller and Telegram terminates the production bot.
  *
- *   2. INSTANCE-PROFILE FLAGS — `MUNINN_WIKI_READONLY`, `WIKI_READONLY_ROOTS`,
- *      `SYNC_REPOS` and the `MUNINN_AUTH` family. These say WHICH INSTANCE this
+ *   2. INSTANCE-PROFILE FLAGS — `MUNINN_WIKI_READONLY`, `SYNC_REPOS` and the
+ *      `MUNINN_AUTH` family. These say WHICH INSTANCE this
  *      is, so inheriting them makes the suite host-dependent: on the Mac mini,
  *      whose `.env` carries `MUNINN_WIKI_READONLY=1`, spawned servers came up
  *      read-only and a large part of the suite went red while the laptop stayed

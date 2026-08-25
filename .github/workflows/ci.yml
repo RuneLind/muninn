@@ -58,7 +58,14 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
-      DATABASE_URL: postgresql://muninn:muninn@127.0.0.1:5435/muninn
+      # `muninn_test`, matching the `e2e` job. `db:setup:test` applies `db/init.sql`
+      # to `muninn_test` ONLY, so the service's `muninn` database is created empty
+      # and never initialised — pointing `DATABASE_URL` there gave any test that
+      # goes through `loadConfig()` + `getDb()` (rather than `src/test/setup-db.ts`)
+      # a SCHEMA-LESS database on CI and a fully migrated one on a developer's
+      # machine. That is the host-dependence this workflow exists to catch,
+      # reintroduced in the workflow itself.
+      DATABASE_URL: postgresql://muninn:muninn@127.0.0.1:5435/muninn_test
       LOG_DIR: none
     steps:
       - uses: actions/checkout@v4

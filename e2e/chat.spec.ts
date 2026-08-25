@@ -1,24 +1,33 @@
 import { test, expect, type Page } from "@playwright/test";
 
 /**
- * Keep the page in its PRE-SELECTION state for the assertions that describe it.
+ * Put the page in its PRE-SELECTION state WITHOUT stopping the client.
  *
- * `init()` auto-selects the first bot on load, which resolves a user, loads that
- * user's threads and selects the most recent one — enabling the composer. So
- * "initially" is a race against that chain, and on a database with content the
- * chain wins: `input is disabled initially` failed on CI and reproduced locally
- * 1-in-4 against a seeded DB. It passes on a developer's machine only because the
- * first bot's first user happens to have nothing to select.
+ * `init()` auto-selects the first bot, which resolves a user, loads that user's
+ * threads and selects the most recent one — enabling the composer. So "initially"
+ * was a race against that chain, and on a database with content the chain wins:
+ * `input is disabled initially` failed on CI and reproduced locally 1-in-4
+ * against a seeded DB. It passes on a developer's machine only because the first
+ * bot's first user happens to have nothing to select.
  *
- * Holding `/chat/bots` open (a route handler that never fulfils) blocks `init()`
- * at its first await, so these three assert the server-rendered initial DOM —
- * which is what they were always describing. Only the tests that mean "before
- * anything is selected" use it; the ones that select a bot must not.
+ * The fix is NOT to block the chain. An earlier version held `/chat/bots` open so
+ * `init()` stalled at its first await — which made all three assertions read
+ * strings that are literally in the server template (`src/chat/views/page.ts`),
+ * with no client code running at all. A regression that enabled the composer
+ * before a thread was selected — the exact defect `input is disabled initially`
+ * exists to catch — would then have passed.
+ *
+ * So the bot list is served REAL and only the USER lookup is emptied. `selectBot`
+ * runs end to end, `loadUsersForBot` finds nobody, `loadThreads` takes its
+ * `!selectedUserId` branch and paints "Select a bot", and the composer stays
+ * disabled because `selectThread` never runs. Same observable state, reached by
+ * executing the code that is under test.
  */
-async function holdBotList(page: Page): Promise<void> {
-  await page.route("**/chat/bots", () => {
-    /* deliberately never fulfilled — released when the context closes */
-  });
+async function withNoResolvableUser(page: Page): Promise<void> {
+  await page.route("**/api/users*", (route) => route.fulfill({ json: { users: [] } }));
+  await page.route("**/chat/bot-preferences/*/default-user", (route) =>
+    route.fulfill({ json: { userId: null } }),
+  );
 }
 
 test.describe("Chat page", () => {
@@ -43,7 +52,7 @@ test.describe("Chat page", () => {
   });
 
   test("sidebar shows 'Select a bot' initially", async ({ page }) => {
-    await holdBotList(page);
+    await withNoResolvableUser(page);
     await page.goto("/chat");
 
     const threadList = page.locator("#threadList");
@@ -51,7 +60,7 @@ test.describe("Chat page", () => {
   });
 
   test("chat area shows 'Select a thread' initially", async ({ page }) => {
-    await holdBotList(page);
+    await withNoResolvableUser(page);
     await page.goto("/chat");
 
     const chatMessages = page.locator("#chatMessages");
@@ -59,7 +68,7 @@ test.describe("Chat page", () => {
   });
 
   test("input is disabled initially", async ({ page }) => {
-    await holdBotList(page);
+    await withNoResolvableUser(page);
     await page.goto("/chat");
 
     const input = page.locator("#chatInput");

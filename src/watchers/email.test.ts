@@ -52,6 +52,15 @@ let spawnOpts: { timeoutMs?: number }[] = [];
  */
 mock.module("../scheduler/executor.ts", () => ({
   ...realExecutor,
+  // ⚠️ The spread above installs the REAL implementations of everything these
+  // tests do not override, and two of them have side effects that must never run
+  // from a test: `trackUsage` calls `getDb()` and INSERTs into `haiku_usage`
+  // (`src/watchers/wiki-gardener.ts` calls it, in this same `bun test` process),
+  // and `callHaiku` calls the module-internal real `spawnHaiku`, which spawns the
+  // `claude` CLI. Nothing reaches them today — but the whole reason the hand-listed
+  // surface was deleted is that the next change is not supposed to have to notice.
+  trackUsage: () => {},
+  callHaiku: async () => ({ result: "", inputTokens: 0, outputTokens: 0, model: "" }),
   DEFAULT_MODEL: "claude-haiku-4-5-20251001",
   HAIKU_TIMEOUT_MS: 60_000,
   spawnHaiku: async (prompt: string, opts: { timeoutMs?: number }) => {

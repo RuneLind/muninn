@@ -22,7 +22,7 @@
  *  - 3011 is the shared server in `playwright.config.ts` (`reuseExistingServer`);
  *  - 9180/9190 are the hivemind + research MCP servers a spawned muninn tries to
  *    open and warns about when they are taken. */
-export const RESERVED_PORTS = [3010, 3011] as const;
+export const RESERVED_PORTS = [3010, 3011, 9180, 9190] as const;
 
 /**
  * One entry per port a spec binds. Names are `<spec-file>`, plus a suffix when a

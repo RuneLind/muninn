@@ -25,12 +25,24 @@
  * `SYNC_REPOS` per case.
  */
 
-/** `MUNINN_WIKI_READONLY` / `WIKI_READONLY_ROOTS` — the two write-permission
- *  flags. The first is the INSTANCE switch (the mini is the non-write-owner and
- *  carries it), the second the per-wiki sibling. Both are read through the wiki
- *  seams' defaults, so an ambient value flips `written` to `forbidden` under a
- *  test that never mentioned either. */
-const WIKI_WRITE_FLAGS = ["MUNINN_WIKI_READONLY", "WIKI_READONLY_ROOTS"];
+/** `MUNINN_WIKI_READONLY` — the INSTANCE write switch (the mini is the
+ *  non-write-owner and carries it). It is read through the wiki seams' default
+ *  `isWikiReadonly()`, so an ambient value flips `written` to `forbidden` under a
+ *  test that never mentioned it: 45 red cases on the mini, 23 e2e specs later.
+ *
+ *  ⚠️ Its per-wiki sibling `WIKI_READONLY_ROOTS` is deliberately NOT here, and
+ *  must not be added. It is not an instance-profile flag — it is a per-root
+ *  PERMISSION GUARD, and the thing it guards (`WIKI_EXTRA`) is not blanked
+ *  either. Blanking only the guard leaves the wiki REGISTERED with its
+ *  protection removed: this laptop registers `memory=~/.claude/projects` — Claude
+ *  Code's own auto-memory, loaded into every session's context — and root
+ *  `CLAUDE.md` states the rule outright, that "registration alone makes it
+ *  writable and model-reachable over HTTP". Measured on a booted server: with the
+ *  root blanked, `/wiki?wiki=memory` renders `__WIKI_READONLY_WIKI__ = false`,
+ *  the three content seams stop refusing and the `?wiki=`-steerable egress routes
+ *  stop 403-ing before their model call. Nothing needs it blank: every failure
+ *  this file exists for was `MUNINN_WIKI_READONLY`. */
+const WIKI_WRITE_FLAGS = ["MUNINN_WIKI_READONLY"];
 
 /** `SYNC_REPOS` reaches further than it looks: it stands the daily
  *  `wiki-committer` sweeper DOWN for any repo it covers (`syncCoversToplevel`),

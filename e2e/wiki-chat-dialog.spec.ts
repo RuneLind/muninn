@@ -161,11 +161,18 @@ async function openDirect(page: import("@playwright/test").Page): Promise<void> 
  * Opening paints `loading: true` immediately and then fires
  * `/api/wiki/chat-target`; when that resolves, `renderChatOptions()` swaps the
  * panel's `innerHTML`. Anything asserted between the two renders is racing that
- * swap — and the swap moves `document.activeElement` to `<body>` for a frame,
- * which is exactly the escape the focus-trap test kept catching (measured: 3 of 8
- * repeats, and the dialog's focusable-control count observed as both 5 and 6
- * within the same test). The trap itself recovers on the next Tab; it is the
- * WALK that must not start mid-swap.
+ * swap, and the dialog's focusable-control count is observably different on each
+ * side of it (5 vs 6 within one test).
+ *
+ * NB the focus escape this used to hide is FIXED IN THE PRODUCT, not waited out:
+ * `captureChatOptFocus` returns null for any element without an id — every
+ * suggestion chip — so the swap genuinely dropped `document.activeElement` to
+ * `<body>` and broke the panel's own `aria-modal` claim for one keystroke.
+ * `restoreChatOptFocus` now falls back to the panel's first focusable whenever
+ * focus WAS inside and could not be restored precisely. Measured with this wait
+ * removed: fallback in → 10/10 Tab-walks stay inside; fallback out → 8/10 fail.
+ * The wait stays because the OTHER assertions in this file should not race a
+ * re-render either.
  */
 async function settled(page: import("@playwright/test").Page): Promise<void> {
   await expect(page.locator("#wikiChatOpt")).not.toContainText(

@@ -16,8 +16,10 @@
  *
  * So CI seeds, rather than lowering what the specs assert. Everything written
  * here is addressed by a fixed `e2e-` id and the script is idempotent, so a
- * re-run is a no-op and a developer who runs it against their own database gets
- * one extra user rather than a mangled one.
+ * re-run is a no-op. It also REFUSES a database whose name does not end in
+ * `_test` (override with `--force`): the rows are permanent, and `e2e-seed-user`
+ * plus its threads would otherwise sit in a developer's /chat user picker and
+ * inspector lists forever.
  *
  *   bun run scripts/seed-e2e-db.ts
  *
@@ -40,8 +42,30 @@ import { discoverAllBots } from "../src/bots/config.ts";
 const USER_ID = "e2e-seed-user";
 const THREADS = ["main", "e2e-second"];
 
+/** Postgres' unique_violation. Matched on the CODE, not on a substring of the
+ *  message: `String(err).includes("duplicate key")` swallows a duplicate on ANY
+ *  constraint, including one that means something has genuinely gone wrong. */
+function isDuplicateKey(err: unknown): boolean {
+  return typeof err === "object" && err !== null && (err as { code?: string }).code === "23505";
+}
+
 async function seed(): Promise<void> {
-  initDb(loadConfig());
+  const config = loadConfig();
+
+  // The rows below are permanent: `e2e-seed-user` and its threads show up in
+  // /chat's user picker, the inspector's thread lists and `/api/users` forever,
+  // and `main` is a name the real threads use too. That is fine in CI and a
+  // footgun on a developer's machine, so the database has to SAY it is a test
+  // database. `--force` is the deliberate override.
+  const dbName = config.databaseUrl.split("/").pop()?.split("?")[0] ?? "";
+  if (!dbName.endsWith("_test") && !process.argv.includes("--force")) {
+    throw new Error(
+      `Refusing to seed "${dbName}": this writes permanent rows and the database name does not end in "_test". ` +
+        `Point DATABASE_URL at a test database, or pass --force if you really mean this one.`,
+    );
+  }
+
+  initDb(config);
 
   const bots = discoverAllBots();
   if (bots.length === 0) {
@@ -80,6 +104,11 @@ async function seed(): Promise<void> {
   const rootSpanId = "e2e5eed0-0000-4000-8000-000000000001";
   const childSpanId = "e2e5eed0-0000-4000-8000-000000000002";
   const started = new Date(Date.now() - 60_000);
+  // One try/catch PER insert, not one around both: with a shared catch, a run
+  // interrupted between the two `await`s leaves the root behind, and every later
+  // run duplicate-keys on the root and skips the child forever — the
+  // traces-waterfall spec then finds a trace with no child bar to click and no
+  // error anywhere.
   try {
     await saveSpan({
       id: rootSpanId,
@@ -93,6 +122,10 @@ async function seed(): Promise<void> {
       startedAt: started,
       durationMs: 1200,
     });
+  } catch (err) {
+    if (!isDuplicateKey(err)) throw err;
+  }
+  try {
     await saveSpan({
       id: childSpanId,
       traceId,
@@ -105,7 +138,7 @@ async function seed(): Promise<void> {
     });
   } catch (err) {
     // A duplicate key is the idempotent path. Anything else is a real failure.
-    if (!String(err).includes("duplicate key")) throw err;
+    if (!isDuplicateKey(err)) throw err;
   }
 
   console.log(

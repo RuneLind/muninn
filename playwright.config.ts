@@ -10,9 +10,10 @@ export default defineConfig({
   testMatch: "**/*.spec.ts",
   timeout: 30_000,
   retries: 0,
-  // Spec FILES run in parallel, and ~13 of them boot a muninn of their own — each
-  // one a Bun process that bundles the client with `Bun.build` and tries to start
-  // its MCP adapters. On a developer's machine that fits; on a 2-core runner it
+  // Spec FILES run in parallel, and ten of them boot a muninn of their own — 13
+  // processes, since `plans-write` boots 3 and `summaries-share` 2. Each is a Bun
+  // process that bundles the client with `Bun.build` and tries to start its MCP
+  // adapters. On a developer's machine that fits; on a 2-core runner it
   // does not, and the way it fails is not a bind error but a CLICK LANDING BEFORE
   // THE PAGE'S INLINE SCRIPT ATTACHED ITS LISTENER — a different spec each run.
   // Measured on a deliberately loaded host: 1–2 such failures per full parallel
