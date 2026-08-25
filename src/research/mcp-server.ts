@@ -151,8 +151,20 @@ export class ResearchMcpServer {
  *
  * The write lives on the tool's own success path rather than in a consumer
  * because this is the only place the DECODED hits exist. Everything about the
- * shaping, the per-bot turn race and the failure policy is in
- * `thread-citations.ts`, which the huginn-`knowledge` tool-result path shares.
+ * shaping and the failure policy is in `thread-citations.ts`, which the
+ * huginn-`knowledge` tool-result path shares.
+ *
+ * **This is the OUT-OF-BAND caller, and that is why the resolution has a
+ * fallback at all.** A tool call arrives here as an HTTP request to this
+ * server's own `Bun.serve` listener, made by the model's subprocess — a fresh
+ * async context with no link to the turn that provoked it, so
+ * `currentActiveTurn()` is null here by construction and the per-bot stack is
+ * all there is. `resolveTurnThread` therefore uses it only while it is
+ * unambiguous and drops the row otherwise. Closing that last gap means giving
+ * each turn its own MCP endpoint (a per-turn URL the session resolves at
+ * `handleHttp`, before the bot is consulted) and rewriting the bot's `.mcp.json`
+ * per turn — a real change to how every connector is launched, not a fix that
+ * belongs beside the write.
  */
 function persistToolCallCitations(
   botName: string,

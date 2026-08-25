@@ -5,6 +5,22 @@ import { agentStatus } from "../../observability/agent-status.ts";
 
 export function registerSSERoutes(app: Hono): void {
   app.get("/api/events", (c) => {
+    /**
+     * Who is watching this stream.
+     *
+     * Scopes exactly two of the four channels — `request_progress` (the
+     * single-pane waterfall) and `agent_status` (the phase pill) — because those
+     * two are the ones every chat page renders as ITS OWN. Omitting it keeps the
+     * unfiltered operator stream the dashboard is built on.
+     *
+     * Deliberately NOT applied to `agent_runs` or `activity`: `agent_runs` IS
+     * the operator's `/agents` feed and filtering it globally would empty that
+     * page, and the activity replay is a separate cross-user channel with its
+     * own answer (it needs owner scoping, not a viewer parameter). Client-
+     * supplied for now — PR C is where the identity stops coming from the
+     * client; scoping the render is what this one is for.
+     */
+    const viewer = c.req.query("viewer") || undefined;
     return streamSSE(c, async (stream) => {
       // Send recent history
       const recent = activityLog.getRecent(50);
@@ -14,8 +30,8 @@ export function registerSSERoutes(app: Hono): void {
 
       // Send current stats and agent status
       await stream.writeSSE({ event: "stats", data: JSON.stringify(activityLog.stats) });
-      await stream.writeSSE({ event: "agent_status", data: JSON.stringify(agentStatus.get()) });
-      await stream.writeSSE({ event: "request_progress", data: JSON.stringify(agentStatus.getProgress()) });
+      await stream.writeSSE({ event: "agent_status", data: JSON.stringify(agentStatus.get(viewer)) });
+      await stream.writeSSE({ event: "request_progress", data: JSON.stringify(agentStatus.getProgress(viewer)) });
       // Initial full snapshot of all runs for the /agents dashboard. Uses the
       // same tools-capped snapshot as the live fan-out (subscribeAll below,
       // throttled ~1/s in the tracker) so the initial write isn't uncapped.
@@ -30,7 +46,7 @@ export function registerSSERoutes(app: Hono): void {
         } catch {
           alive = false;
         }
-      });
+      }, viewer);
       const unsubscribeAllRuns = agentStatus.subscribeAll(async (runs) => {
         if (!alive) return;
         try {
@@ -46,7 +62,7 @@ export function registerSSERoutes(app: Hono): void {
         } catch {
           alive = false;
         }
-      });
+      }, viewer);
       const unsubscribe = activityLog.subscribe(async (event) => {
         if (!alive) return;
         try {

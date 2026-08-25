@@ -4,6 +4,7 @@ import { formatToolDisplayName } from "../stream-parser.ts";
 import { truncateOutput } from "../truncate-output.ts";
 import { processMcpToolResult } from "../huginn-trace-pointer.ts";
 import { captureKnowledgeToolCitations } from "../../research/thread-citations.ts";
+import type { ActiveTurnBinding } from "../../hivemind/active-turn.ts";
 
 /**
  * Inputs for {@link recordToolSpan} — the completion tail shared by the three
@@ -46,6 +47,11 @@ export interface RecordToolSpanArgs {
    * thread-sourced hit set blind to that connector.
    */
   botName?: string;
+  /**
+   * The turn this tool call belongs to, **captured at connector entry** — see
+   * {@link captureKnowledgeToolCitations} for why it is passed rather than read.
+   */
+  turn: ActiveTurnBinding | null;
 }
 
 export interface RecordedToolSpan {
@@ -80,7 +86,7 @@ export function recordToolSpan(args: RecordToolSpanArgs): RecordedToolSpan {
   // cut mid-block by `truncateOutput`, and the tail of it is exactly the hits a
   // refinement discussion tends to lean on. Total by construction — see
   // `research/thread-citations.ts`; it can neither throw nor delay the span.
-  captureKnowledgeToolCitations(args.botName, args.name, processed.cleanedText);
+  captureKnowledgeToolCitations(args.botName, args.name, processed.cleanedText, args.turn);
 
   const toolCall: ToolCall = {
     id: args.id,

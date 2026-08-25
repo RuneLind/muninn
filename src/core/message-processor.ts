@@ -17,7 +17,7 @@ import { assemblePrompt } from "./prompt-assembly.ts";
 import { attachToolSpans } from "./tool-spans.ts";
 import { logRequestTiming } from "./timing-log.ts";
 import { handleProcessError } from "./process-error.ts";
-import { pushActiveTurn, popActiveTurn } from "../hivemind/active-turn.ts";
+import { pushActiveTurn, popActiveTurn, runInActiveTurn } from "../hivemind/active-turn.ts";
 
 // Re-export extractChannelPosts so existing consumers don't break
 export { extractChannelPosts } from "./response-handler.ts";
@@ -149,8 +149,10 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
   }
 
   activityLog.push("message_in", text, { userId, username, botName: botConfig.name });
-  agentStatus.set("receiving", username);
-  const requestId = agentStatus.startRequest(botConfig.name, "receiving", username);
+  agentStatus.set("receiving", username, undefined, { userId });
+  // `userId` is what scopes both the waterfall and the phase indicator to this
+  // turn's owner — a run without it is visible only on the operator surfaces.
+  const requestId = agentStatus.startRequest(botConfig.name, "receiving", username, { userId });
   log.info("Message from {username}: \"{preview}\"", { ...props, preview: text.slice(0, 80) + (text.length > 80 ? "..." : "") });
 
   // The request is now tracked in agent-status. Everything from here — DB save,
@@ -166,7 +168,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
       t.end("db_save_user");
     }
 
-    agentStatus.set("building_prompt", username);
+    agentStatus.set("building_prompt", username, undefined, { userId });
     agentStatus.updatePhase(requestId, "building_prompt");
     const { fullSystemPrompt, userPrompt, meta: promptMeta } = await assemblePrompt({
       text, userId, username, userIdentity, threadId, botConfig,
@@ -180,7 +182,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     // `peer:<ns>/<name>`. See src/hivemind/active-turn.ts + correlation.ts.
     if (threadId) pushActiveTurn(botConfig.name, threadId);
     if (setStatus) await setStatus("Thinking...").catch(() => {});
-    agentStatus.set("calling_claude", username);
+    agentStatus.set("calling_claude", username, undefined, { userId });
     agentStatus.updatePhase(requestId, "calling_claude");
     setConnectorInfo(requestId, botConfig, config.claudeModel);
     const connectorType = botConfig.connector ?? "claude-cli";
@@ -191,10 +193,15 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     t.start("claude", { connector: connectorType, requestedModel: effectiveModel });
     const progressCallback = buildProgressCallback(
       { onTextDelta, onIntent, onToolStatus, onToolEnd, onUsageProgress, setStatus },
-      username,
       requestId,
     );
-    const result = await resolveConnector(botConfig)(userPrompt, config, botConfig, fullSystemPrompt, progressCallback);
+    // The connector call runs BOUND to this turn. Everything downstream of it —
+    // the shared tool-result tail, the claude-cli stream parser — inherits the
+    // async context, which is how a knowledge search gets filed against the
+    // thread that actually made it instead of whichever turn happens to be on
+    // top of the per-bot stack. See `hivemind/active-turn.ts`.
+    const result = await runInActiveTurn(botConfig.name, threadId, () =>
+      resolveConnector(botConfig)(userPrompt, config, botConfig, fullSystemPrompt, progressCallback));
     const toolCount = result.toolCalls?.length ?? 0;
     t.end("claude", {
       model: result.model,
@@ -213,7 +220,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
     log.info("Claude responded in {ms}ms ({numTurns} turns{toolInfo})", { ...props, ms: Math.round(t.summary().claude ?? 0), numTurns: result.numTurns, toolInfo });
 
     // Save assistant response to DB
-    agentStatus.set("saving_response", username);
+    agentStatus.set("saving_response", username, undefined, { userId });
     agentStatus.updatePhase(requestId, "saving_response");
     t.start("db_save_response");
     const messageId = await saveMessage({
@@ -266,7 +273,7 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
 
     // Format and send based on platform
     const sendPhase = isTelegram ? "sending_telegram" : "sending_slack";
-    agentStatus.set(sendPhase, username);
+    agentStatus.set(sendPhase, username, undefined, { userId });
     agentStatus.updatePhase(requestId, sendPhase);
     t.start("send");
 
@@ -314,7 +321,8 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
       numTurns: result.numTurns,
       toolCount,
     });
-    agentStatus.set("idle");
+    // Clearing per-user too: without the owner here the pill stays lit forever.
+    agentStatus.set("idle", undefined, undefined, { userId });
     if (!externalTracer) {
       t.finish("ok", { inputTokens: result.inputTokens, outputTokens: result.outputTokens });
     }

@@ -1,7 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { threadCitationRows } from "./thread-citations.ts";
+import { resolveTurnThread, threadCitationRows } from "./thread-citations.ts";
+import {
+  _resetActiveTurnsForTests,
+  popActiveTurn,
+  pushActiveTurn,
+  runInActiveTurn,
+} from "../hivemind/active-turn.ts";
 import { isHuginnSearchTool, parseHuginnHits } from "./huginn-hits.ts";
 
 /**
@@ -111,5 +117,124 @@ describe("parsed huginn hits are row-shapeable end to end", () => {
     const toolName = "mcp__knowledge__get_document";
     const hits = isHuginnSearchTool(toolName) ? parseHuginnHits(page) : [];
     expect(threadCitationRows({ botName: "melosys", hits, threadId: "t-4" })).toEqual([]);
+  });
+});
+
+/**
+ * PR A acceptance 1, DB-write half — "zero `research_citations` rows carry a
+ * `thread_id` belonging to the other".
+ *
+ * This is the assertion no frame test can make: the defect is a row written
+ * during two SIMULTANEOUS turns, not anything visible on a socket. It is tested
+ * on `resolveTurnThread` rather than through a mocked DB because
+ * `persistThreadCitations` is fire-and-forget by design, and because mocking
+ * `db/research-citations.ts` here would leak across the whole `test:unit` chunk
+ * (the `mock.module` note in CLAUDE.md).
+ */
+describe("resolveTurnThread — which turn a retrieval belongs to", () => {
+  test("the async binding wins, even with another turn on top of the stack", () => {
+    _resetActiveTurnsForTests();
+    // Both people are mid-turn on the same bot. B pushed last, so the LIFO peek
+    // — what this used to do, unconditionally — answers B for BOTH of them.
+    pushActiveTurn("melosys", "thread-a");
+    pushActiveTurn("melosys", "thread-b");
+
+    const inA = runInActiveTurn("melosys", "thread-a", () => resolveTurnThread("melosys"));
+    const inB = runInActiveTurn("melosys", "thread-b", () => resolveTurnThread("melosys"));
+
+    expect(inA).toBe("thread-a");
+    expect(inB).toBe("thread-b");
+    _resetActiveTurnsForTests();
+  });
+
+  test("the binding survives the awaits a real tool call is made of", async () => {
+    _resetActiveTurnsForTests();
+    pushActiveTurn("melosys", "thread-a");
+    pushActiveTurn("melosys", "thread-b");
+
+    // The tool-result seam runs deep inside the connector's promise chain, not
+    // synchronously under the call. If the store did not propagate across
+    // awaits, the whole mechanism would be inert on the only path that uses it.
+    const resolved = await runInActiveTurn("melosys", "thread-a", async () => {
+      await Bun.sleep(5);
+      await Promise.resolve();
+      return resolveTurnThread("melosys");
+    });
+
+    expect(resolved).toBe("thread-a");
+    _resetActiveTurnsForTests();
+  });
+
+  test("two interleaved bound turns never see each other", async () => {
+    _resetActiveTurnsForTests();
+    pushActiveTurn("melosys", "thread-a");
+    pushActiveTurn("melosys", "thread-b");
+
+    const [a, b] = await Promise.all([
+      runInActiveTurn("melosys", "thread-a", async () => {
+        await Bun.sleep(10);
+        return resolveTurnThread("melosys");
+      }),
+      runInActiveTurn("melosys", "thread-b", async () => {
+        await Bun.sleep(1);
+        return resolveTurnThread("melosys");
+      }),
+    ]);
+
+    expect([a, b]).toEqual(["thread-a", "thread-b"]);
+    _resetActiveTurnsForTests();
+  });
+
+  test("out-of-band and unambiguous ⇒ the single turn in flight", () => {
+    // muninn's own `research_knowledge` MCP tool: a separate Bun.serve request
+    // answering the model's subprocess, so there is no store to inherit. With
+    // one turn in flight there is nothing to be wrong about.
+    _resetActiveTurnsForTests();
+    pushActiveTurn("melosys", "thread-a");
+    expect(resolveTurnThread("melosys")).toBe("thread-a");
+    _resetActiveTurnsForTests();
+  });
+
+  test("out-of-band and ambiguous ⇒ null, so the row is dropped rather than misfiled", () => {
+    _resetActiveTurnsForTests();
+    pushActiveTurn("melosys", "thread-a");
+    pushActiveTurn("melosys", "thread-b");
+
+    expect(resolveTurnThread("melosys")).toBeNull();
+    // ...and nothing is written, which is the property that matters.
+    expect(threadCitationRows({
+      botName: "melosys",
+      hits: [{ docId: "d.md", collection: "nav-wiki" }],
+      threadId: resolveTurnThread("melosys"),
+    })).toEqual([]);
+
+    // Once the other turn finishes, the remaining one is unambiguous again.
+    popActiveTurn("melosys", "thread-b");
+    expect(resolveTurnThread("melosys")).toBe("thread-a");
+    _resetActiveTurnsForTests();
+  });
+
+  test("a binding from a DIFFERENT bot is not trusted", () => {
+    _resetActiveTurnsForTests();
+    pushActiveTurn("jarvis", "thread-j");
+    const resolved = runInActiveTurn("melosys", "thread-m", () => resolveTurnThread("jarvis"));
+    // jarvis has exactly one turn in flight, so the fallback answers correctly —
+    // the point is that melosys's bound thread did not leak into jarvis's rows.
+    expect(resolved).toBe("thread-j");
+    _resetActiveTurnsForTests();
+  });
+
+  test("nothing in flight ⇒ null", () => {
+    _resetActiveTurnsForTests();
+    expect(resolveTurnThread("melosys")).toBeNull();
+  });
+
+  test("concurrency on OTHER bots does not make this bot ambiguous", () => {
+    _resetActiveTurnsForTests();
+    pushActiveTurn("jarvis", "j-1");
+    pushActiveTurn("jarvis", "j-2");
+    pushActiveTurn("melosys", "m-1");
+    expect(resolveTurnThread("melosys")).toBe("m-1");
+    _resetActiveTurnsForTests();
   });
 });

@@ -484,3 +484,139 @@ describe("AgentStatusTracker", () => {
     });
   });
 });
+
+/**
+ * PR A acceptance 1 + 2 — the single-pane waterfall and the phase pill are
+ * per-viewer, and the operator surfaces are NOT.
+ *
+ * The two halves are one test suite on purpose. A filter applied globally —
+ * inside `primaryRequest`, or on the tracker rather than the subscriber — passes
+ * every "A does not see B" assertion below while emptying `/agents`, which is
+ * exactly the shape this file has to be able to fail on.
+ */
+describe("viewer-scoped reads", () => {
+  const A = "user-a";
+  const B = "user-b";
+
+  describe("getProgress(viewer)", () => {
+    test("returns only the viewer's own run", () => {
+      resetTracker();
+      const aRun = agentStatus.startRequest("jarvis", "calling_claude", "alice", { userId: A });
+      const bRun = agentStatus.startRequest("jarvis", "calling_claude", "bob", { userId: B });
+      agentStatus.setModel(bRun, "claude-opus-5");
+
+      expect(agentStatus.getProgress(A)!.requestId).toBe(aRun);
+      expect(agentStatus.getProgress(B)!.requestId).toBe(bRun);
+      // The concrete leak the plan names: B's model on A's waterfall.
+      expect(agentStatus.getProgress(A)!.model).toBeUndefined();
+      expect(agentStatus.getProgress(A)!.username).toBe("alice");
+    });
+
+    test("is null for a viewer with nothing in flight, even while others run", () => {
+      resetTracker();
+      agentStatus.startRequest("jarvis", "calling_claude", "bob", { userId: B });
+      expect(agentStatus.getProgress(A)).toBeNull();
+    });
+
+    test("an ownerless background run is invisible to every viewer", () => {
+      resetTracker();
+      // `watcher` is a WATERFALL_KIND, so before the filter this was the primary
+      // slot on every chat page — someone else's cron job rendered as your turn.
+      agentStatus.startRequest("jarvis", "running_watcher", "email", { kind: "watcher" });
+      expect(agentStatus.getProgress(A)).toBeNull();
+      expect(agentStatus.getProgress()).not.toBeNull();
+    });
+
+    test("no viewer ⇒ the unfiltered operator view is unchanged", () => {
+      resetTracker();
+      agentStatus.startRequest("jarvis", "calling_claude", "alice", { userId: A });
+      const bRun = agentStatus.startRequest("jarvis", "calling_claude", "bob", { userId: B });
+      // Most-recently-started wins, exactly as before.
+      expect(agentStatus.getProgress()!.requestId).toBe(bRun);
+    });
+  });
+
+  describe("subscribeProgress(fn, viewer)", () => {
+    test("each subscriber is notified with its own view of the same mutation", () => {
+      resetTracker();
+      const seenA: (AgentRun | null)[] = [];
+      const seenB: (AgentRun | null)[] = [];
+      const seenAll: (AgentRun | null)[] = [];
+      const unsubA = agentStatus.subscribeProgress((p) => seenA.push(p), A);
+      const unsubB = agentStatus.subscribeProgress((p) => seenB.push(p), B);
+      const unsubAll = agentStatus.subscribeProgress((p) => seenAll.push(p));
+
+      const bRun = agentStatus.startRequest("jarvis", "calling_claude", "bob", { userId: B });
+      unsubA(); unsubB(); unsubAll();
+
+      expect(seenA).toEqual([null]);
+      expect(seenB[0]!.requestId).toBe(bRun);
+      expect(seenAll[0]!.requestId).toBe(bRun);
+    });
+  });
+
+  describe("the phase indicator", () => {
+    test("a viewer sees only their own phase", () => {
+      resetTracker();
+      agentStatus.set("calling_claude", "bob", "searching", { userId: B });
+
+      expect(agentStatus.get(B).phase).toBe("calling_claude");
+      expect(agentStatus.get(B).detail).toBe("searching");
+      expect(agentStatus.get(A).phase).toBe("idle");
+      // The operator's global slot still reflects whatever is happening.
+      expect(agentStatus.get().phase).toBe("calling_claude");
+    });
+
+    test("idle for a user clears that user, not everyone", () => {
+      resetTracker();
+      agentStatus.set("calling_claude", "alice", undefined, { userId: A });
+      agentStatus.set("calling_claude", "bob", undefined, { userId: B });
+      agentStatus.set("idle", undefined, undefined, { userId: A });
+
+      expect(agentStatus.get(A).phase).toBe("idle");
+      expect(agentStatus.get(B).phase).toBe("calling_claude");
+    });
+
+    test("a scoped subscriber hears its own turns and no one else's", () => {
+      resetTracker();
+      const seenA: AgentStatus[] = [];
+      const seenAll: AgentStatus[] = [];
+      const unsubA = agentStatus.subscribe((s) => seenA.push(s), A);
+      const unsubAll = agentStatus.subscribe((s) => seenAll.push(s));
+
+      agentStatus.set("calling_claude", "bob", undefined, { userId: B });
+      agentStatus.set("running_watcher", "email");            // no owner at all
+      agentStatus.set("saving_response", "alice", undefined, { userId: A });
+      unsubA(); unsubAll();
+
+      expect(seenA.map((s) => s.phase)).toEqual(["saving_response"]);
+      expect(seenAll.map((s) => s.phase)).toEqual([
+        "calling_claude", "running_watcher", "saving_response",
+      ]);
+    });
+
+    test("setForRequest resolves the owner from the run", () => {
+      resetTracker();
+      const id = agentStatus.startRequest("jarvis", "calling_claude", "bob", { userId: B });
+      agentStatus.setForRequest(id, "calling_claude", "Searching knowledge");
+
+      expect(agentStatus.get(B).detail).toBe("Searching knowledge");
+      expect(agentStatus.get(A).phase).toBe("idle");
+    });
+  });
+
+  describe("the operator registry is NOT filterable", () => {
+    test("getAll / snapshotAll carry every run regardless of owner", () => {
+      // Synchronous on purpose: the throttled `subscribeAll` fan-out has its own
+      // test above, and asserting it here as well would only buy a `Bun.sleep`
+      // racing the 1 s throttle.
+      resetTracker();
+      agentStatus.startRequest("jarvis", "calling_claude", "alice", { userId: A });
+      agentStatus.startRequest("jarvis", "calling_claude", "bob", { userId: B });
+      agentStatus.startRequest("jarvis", "running_watcher", "email", { kind: "watcher" });
+
+      expect(agentStatus.getAll()).toHaveLength(3);
+      expect(agentStatus.snapshotAll()).toHaveLength(3);
+    });
+  });
+});

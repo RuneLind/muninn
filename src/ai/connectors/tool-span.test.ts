@@ -12,6 +12,7 @@ test("recordToolSpan builds the ToolCall shape from a plain string result", () =
     startMs: 1000,
     endMs: 1250,
     wallStart: 900,
+    turn: null,
   });
 
   expect(toolCall).toEqual({
@@ -38,6 +39,7 @@ test("tool_end event carries the post-truncation output size", () => {
     startMs: 0,
     endMs: 10,
     wallStart: 0,
+    turn: null,
   });
 
   expect(toolEndEvent).toEqual({
@@ -61,6 +63,7 @@ test("outputSize reflects the truncation envelope, not the raw payload length", 
     startMs: 0,
     endMs: 5,
     wallStart: 0,
+    turn: null,
   });
 
   // The stored output is the truncation envelope, far smaller than the raw 32KB.
@@ -79,6 +82,7 @@ test("rounds fractional timings and clamps via Math.round", () => {
     startMs: 100.6,
     endMs: 150.2,
     wallStart: 50.1,
+    turn: null,
   });
   expect(toolCall.durationMs).toBe(Math.round(150.2 - 100.6));
   expect(toolCall.startOffsetMs).toBe(Math.round(100.6 - 50.1));
@@ -99,6 +103,7 @@ test("pointer-mode trace fields are forwarded onto the span", async () => {
     startMs: 0,
     endMs: 1,
     wallStart: 0,
+    turn: null,
   });
 
   expect(toolCall.searchTracePointer).toBe(pointer);
@@ -117,6 +122,7 @@ test("error payloads are serialized into the output snapshot", () => {
     startMs: 0,
     endMs: 1,
     wallStart: 0,
+    turn: null,
   });
   expect(toolCall.output).toContain("tool execution failed");
 });

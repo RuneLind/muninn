@@ -3,6 +3,7 @@ import { truncateOutput } from "./truncate-output.ts";
 import { recoverOversizedClaudeCliToolResult } from "./huginn-trace.ts";
 import { processMcpToolResult, fetchHuginnTrace } from "./huginn-trace-pointer.ts";
 import { captureKnowledgeToolCitations } from "../research/thread-citations.ts";
+import { currentActiveTurn, type ActiveTurnBinding } from "../hivemind/active-turn.ts";
 
 /**
  * Parses NDJSON lines from Claude CLI `--output-format stream-json`.
@@ -87,6 +88,8 @@ export class StreamParser {
   private refTimestamp: number;
   private onProgress?: StreamProgressCallback;
   private botName?: string;
+  /** The turn this parser's stream belongs to, captured at construction. */
+  private turn: ActiveTurnBinding | null;
 
   /**
    * @param referenceTimestamp - performance.now() at CLI spawn time, used to compute tool startOffsetMs
@@ -106,6 +109,10 @@ export class StreamParser {
     this.refTimestamp = referenceTimestamp;
     this.onProgress = onProgress;
     this.botName = botName;
+    // Captured at construction — the parser is built inside the turn's own
+    // async chain, while its `feed` calls are driven by a stdout read loop.
+    // Same rule as the SDK connectors; see `research/thread-citations.ts`.
+    this.turn = currentActiveTurn();
   }
 
   /**
@@ -254,7 +261,7 @@ export class StreamParser {
         // the capture always sees the FULL text, which `truncateOutput` cuts
         // mid-block. Fire-and-forget and total by construction — see
         // `research/thread-citations.ts`.
-        captureKnowledgeToolCitations(this.botName, pending.name, citationText);
+        captureKnowledgeToolCitations(this.botName, pending.name, citationText, this.turn);
       } else {
         pending.output = truncateOutput(raw);
       }

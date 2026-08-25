@@ -220,13 +220,24 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
       return c.json({ error: "channelName is required for slack_channel type" }, 400);
     }
 
-    const conversation = chatState.createConversation({
-      type: body.type,
-      botName: body.botName,
-      userId: body.userId ?? "sim-user-1",
-      username: body.username ?? "chat-user",
-      channelName: body.channelName,
-    });
+    const userId = body.userId ?? "sim-user-1";
+    const username = body.username ?? "chat-user";
+
+    // A web conversation gets the DETERMINISTIC id — the one hydrateFromDb
+    // rebuilds it under and every off-band broadcaster computes. Minting a
+    // random UUID here (what this route used to do, and the path the chat page
+    // takes on a user's very first turn with a bot) produced a shell nothing
+    // could ever address again: unreachable after a restart, and unreachable
+    // from a dev_run or Jira roll-up in the same process.
+    const conversation = body.type === "web"
+      ? await chatState.findOrCreateBotConversation({ botName: body.botName, userId, username })
+      : chatState.createConversation({
+        type: body.type,
+        botName: body.botName,
+        userId,
+        username,
+        channelName: body.channelName,
+      });
 
     return c.json({ conversation }, 201);
   });

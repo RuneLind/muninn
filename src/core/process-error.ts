@@ -34,7 +34,9 @@ export async function handleProcessError(params: ProcessErrorParams): Promise<vo
   const { error, tracer, externalTracer, platform, say, userId, username, botName, logProps, requestId } = params;
 
   agentStatus.clearRequest(requestId);
-  agentStatus.set("idle");
+  // Per-user as well as global: a failed turn must clear the OWNER's phase pill,
+  // not just the operator's, or it stays lit on whatever phase threw.
+  agentStatus.set("idle", undefined, undefined, { userId });
   if (!externalTracer) {
     tracer.error(error instanceof Error ? error : String(error));
   }

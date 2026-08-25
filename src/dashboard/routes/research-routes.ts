@@ -265,18 +265,15 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
         : title + suffix;
     }
 
-    // Find or create conversation in chat state
-    let conversation = chatState.getConversations().find(
-      (conv) => conv.userId === chatUser.id && conv.botName === botConfig.name && conv.type === "web",
-    );
-    if (!conversation) {
-      conversation = chatState.createConversation({
-        type: "web",
-        botName: botConfig.name,
-        userId: chatUser.id,
-        username: chatUser.name,
-      });
-    }
+    // Find or create conversation in chat state. Deterministic id (the
+    // `findOrCreateBotConversation` seam), never `createConversation`: a random
+    // shell is invisible to hydrateFromDb and to every off-band broadcaster that
+    // addresses `botConversationId(userId, botName)`.
+    const conversation = await chatState.findOrCreateBotConversation({
+      botName: botConfig.name,
+      userId: chatUser.id,
+      username: chatUser.name,
+    });
 
     // Validate connectorId if provided (chat page stamps connector on thread select)
     const connectorId = body.connectorId && isValidUuid(body.connectorId) ? body.connectorId : undefined;
