@@ -1,4 +1,25 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
+
+/**
+ * Keep the page in its PRE-SELECTION state for the assertions that describe it.
+ *
+ * `init()` auto-selects the first bot on load, which resolves a user, loads that
+ * user's threads and selects the most recent one — enabling the composer. So
+ * "initially" is a race against that chain, and on a database with content the
+ * chain wins: `input is disabled initially` failed on CI and reproduced locally
+ * 1-in-4 against a seeded DB. It passes on a developer's machine only because the
+ * first bot's first user happens to have nothing to select.
+ *
+ * Holding `/chat/bots` open (a route handler that never fulfils) blocks `init()`
+ * at its first await, so these three assert the server-rendered initial DOM —
+ * which is what they were always describing. Only the tests that mean "before
+ * anything is selected" use it; the ones that select a bot must not.
+ */
+async function holdBotList(page: Page): Promise<void> {
+  await page.route("**/chat/bots", () => {
+    /* deliberately never fulfilled — released when the context closes */
+  });
+}
 
 test.describe("Chat page", () => {
   test("loads and shows bot selector", async ({ page }) => {
@@ -22,6 +43,7 @@ test.describe("Chat page", () => {
   });
 
   test("sidebar shows 'Select a bot' initially", async ({ page }) => {
+    await holdBotList(page);
     await page.goto("/chat");
 
     const threadList = page.locator("#threadList");
@@ -29,6 +51,7 @@ test.describe("Chat page", () => {
   });
 
   test("chat area shows 'Select a thread' initially", async ({ page }) => {
+    await holdBotList(page);
     await page.goto("/chat");
 
     const chatMessages = page.locator("#chatMessages");
@@ -36,6 +59,7 @@ test.describe("Chat page", () => {
   });
 
   test("input is disabled initially", async ({ page }) => {
+    await holdBotList(page);
     await page.goto("/chat");
 
     const input = page.locator("#chatInput");

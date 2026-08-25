@@ -152,6 +152,25 @@ async function openDirect(page: import("@playwright/test").Page): Promise<void> 
   await page.locator(String.raw`.wiki-conn-tab[data-conntab="ask"]`).click();
   await page.locator("#wikiNewChatBtn").click();
   await expect(page.locator("#wikiChatOpt")).toBeVisible();
+  await settled(page);
+}
+
+/**
+ * Wait out the dialog's SECOND render.
+ *
+ * Opening paints `loading: true` immediately and then fires
+ * `/api/wiki/chat-target`; when that resolves, `renderChatOptions()` swaps the
+ * panel's `innerHTML`. Anything asserted between the two renders is racing that
+ * swap — and the swap moves `document.activeElement` to `<body>` for a frame,
+ * which is exactly the escape the focus-trap test kept catching (measured: 3 of 8
+ * repeats, and the dialog's focusable-control count observed as both 5 and 6
+ * within the same test). The trap itself recovers on the next Tab; it is the
+ * WALK that must not start mid-swap.
+ */
+async function settled(page: import("@playwright/test").Page): Promise<void> {
+  await expect(page.locator("#wikiChatOpt")).not.toContainText(
+    "Working out where this chat lands…",
+  );
 }
 
 test.describe("Wiki reader: chat dialog", () => {

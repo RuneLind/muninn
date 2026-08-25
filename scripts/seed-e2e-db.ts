@@ -22,9 +22,12 @@
  *   bun run scripts/seed-e2e-db.ts
  *
  * TWO THREADS, not one: `inspector.spec.ts` has a case that switches between
- * threads and skips itself below two. Only ONE bot is seeded against, because
- * `bots/jarvis/` is the only bot folder this repo tracks — the bot-switch case
- * skips on CI and says so.
+ * threads and skips itself below two. And EVERY discovered bot is seeded, not
+ * just the first: the inspector's bot-switch case selects a second bot and then
+ * expects a thread there, so seeding only `bots[0]` turns that case from a skip
+ * into a failure on any machine that has more than one bot folder. CI has
+ * exactly one (`bots/jarvis/` is all this repo tracks), so the bot-switch case
+ * skips there and says so.
  */
 
 import { loadConfig } from "../src/config.ts";
@@ -41,8 +44,7 @@ async function seed(): Promise<void> {
   initDb(loadConfig());
 
   const bots = discoverAllBots();
-  const bot = bots[0];
-  if (!bot) {
+  if (bots.length === 0) {
     // Loud, and a non-zero exit: a suite seeded against no bot looks seeded and
     // then skips half of itself.
     throw new Error(
@@ -58,11 +60,13 @@ async function seed(): Promise<void> {
     platform: "web",
   });
 
-  for (const name of THREADS) {
-    // `createThread` is not idempotent (it inserts unconditionally), so the
-    // existence check is ours to do.
-    if (!(await findThreadByName(USER_ID, bot.name, name))) {
-      await createThread(USER_ID, bot.name, name, "seeded for the e2e suite");
+  for (const bot of bots) {
+    for (const name of THREADS) {
+      // `createThread` is not idempotent (it inserts unconditionally), so the
+      // existence check is ours to do.
+      if (!(await findThreadByName(USER_ID, bot.name, name))) {
+        await createThread(USER_ID, bot.name, name, "seeded for the e2e suite");
+      }
     }
   }
 
@@ -82,7 +86,7 @@ async function seed(): Promise<void> {
       traceId,
       name: "e2e seed request",
       kind: "root",
-      botName: bot.name,
+      botName: bots[0]!.name,
       userId: USER_ID,
       username: "e2e",
       platform: "web",
@@ -95,7 +99,7 @@ async function seed(): Promise<void> {
       parentId: rootSpanId,
       name: "e2e seed child span",
       kind: "span",
-      botName: bot.name,
+      botName: bots[0]!.name,
       startedAt: new Date(started.getTime() + 100),
       durationMs: 400,
     });
@@ -104,7 +108,10 @@ async function seed(): Promise<void> {
     if (!String(err).includes("duplicate key")) throw err;
   }
 
-  console.log(`Seeded e2e fixtures for bot "${bot.name}": user ${USER_ID}, threads ${THREADS.join(", ")}, trace ${traceId}`);
+  console.log(
+    `Seeded e2e fixtures for bot(s) "${bots.map((b) => b.name).join(", ")}": ` +
+      `user ${USER_ID}, threads ${THREADS.join(", ")}, trace ${traceId}`,
+  );
 }
 
 await seed()
