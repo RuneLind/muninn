@@ -255,7 +255,7 @@ Two traps regardless of how the page is driven:
 `.github/workflows/ci.yml` runs three jobs on every push to `main` and every PR: `typecheck`, `test` (`bun run db:setup:test` then the full `bun run test` chain) and `e2e` (`db:setup:test` → `db:seed:e2e` → `bun run test:e2e`), each against a `pgvector/pgvector:pg17` service published on **5435** — the port `src/test/setup-db.ts` hardcodes.
 
 A runner has **no `.env` at all**, which is the point: it is the only place the suites are pinned to what the repo says rather than to whichever machine last ran them. Two things follow from that and are deliberate:
-- **`workers: 1` on CI, `retries: 0` everywhere.** ten spec files boot a muninn of their own (13 processes — `plans-write` boots 3, `summaries-share` 2); on a 2-core runner the contention shows up as a click landing before the page's inline script attached its listener — a different spec each run. Serial removes it; a retry would have turned it into a silent pass.
+- **`workers: 1` on CI, `retries: 0` everywhere.** ten spec files boot a muninn of their own — 12 muninn processes (`plans-write` boots 3; `summaries-share`'s second server is an in-process `node:http` stub, not a process), plus the config's own shared server on 3011; on a 2-core runner the contention shows up as a click landing before the page's inline script attached its listener — a different spec each run. Serial removes it; a retry would have turned it into a silent pass.
 - **Only `bots/jarvis/` is tracked**, so CI has one bot and the inspector's bot-switch case skips itself and says so. Six `jira-card` cases skip too — they are opt-in behind `JIRA_CARD_THREAD`/`_USER`/`_DRAFT`.
 
 ## Conventions

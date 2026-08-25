@@ -59,8 +59,15 @@ mock.module("../scheduler/executor.ts", () => ({
   // and `callHaiku` calls the module-internal real `spawnHaiku`, which spawns the
   // `claude` CLI. Nothing reaches them today — but the whole reason the hand-listed
   // surface was deleted is that the next change is not supposed to have to notice.
+  // (`buildHaikuArgs` also writes temp files, via `buildInlineSettings`, and is
+  // NOT stubbed: its only caller is the real `spawnHaiku`, which every file here
+  // overrides. Everything else executor.ts exports is pure or stream-local.)
   trackUsage: () => {},
-  callHaiku: async () => ({ result: "", inputTokens: 0, outputTokens: 0, model: "" }),
+  // `Promise<string>`, not a `HaikuResult` — the real `callHaiku` returns the
+  // text. A stub with the `spawnHaiku` shape would reach the next caller as
+  // "[object Object]" in a prompt, or as `.trim is not a function`, and
+  // `mock.module`'s factory is untyped so tsc cannot see the mismatch.
+  callHaiku: async () => "",
   DEFAULT_MODEL: "claude-haiku-4-5-20251001",
   HAIKU_TIMEOUT_MS: 60_000,
   spawnHaiku: async (prompt: string, opts: { timeoutMs?: number }) => {

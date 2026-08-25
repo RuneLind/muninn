@@ -11,7 +11,7 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { E2E_PORTS, RESERVED_PORTS, e2ePort } from "./ports.ts";
@@ -24,7 +24,13 @@ const E2E_DIR = path.resolve(fileURLToPath(new URL(".", import.meta.url)));
 function e2eSources(dir = E2E_DIR, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {
     const full = path.join(dir, entry);
-    if (statSync(full).isDirectory()) {
+    // `lstatSync`, not `statSync`: a broken symlink under `e2e/` made `statSync`
+    // throw at module scope, which took all five checks down rather than one
+    // (measured). A symlink is skipped outright — whatever it points at is
+    // either already in the walk or outside `e2e/`.
+    const st = lstatSync(full);
+    if (st.isSymbolicLink()) continue;
+    if (st.isDirectory()) {
       if (entry !== "node_modules") e2eSources(full, out);
     } else if (entry.endsWith(".ts")) {
       out.push(full);
@@ -84,31 +90,56 @@ describe("e2e port registry", () => {
   });
 
   it("leaves no bare port literal anywhere under e2e/ — the registry is the only source", () => {
-    // Any four-digit number in muninn's port space, in any position: a `const`
-    // initialiser, a lowercase name, an object value, or interpolated into a URL
-    // string. The first version matched only `const <NAME>PORT = NNNN` and let
-    // `const port = 3025`, `const HUGINN = 3029` and
-    // `"http://127.0.0.1:3021"` straight through (verified by mutation).
-    // Two things in this range are NOT ports and must not be flagged, or the
-    // guard gets muted the first time someone hits a false positive: a port
-    // named in PROSE (`playwright.config.ts` (port 3011) — a comment is not a
-    // binding) and a DURATION that happens to look like one
-    // (`firstDelayMs: 3000`). Both are excluded structurally, by what precedes
-    // the number, never by an allowlist of specific values.
-    const PORTISH = /\b(?:30\d\d|31\d\d|91\d\d)\b/g;
-    const DURATION_BINDING = /(?:ms|delay|timeout|duration|interval|budget|width|height)\w*\s*[:=]\s*$/i;
+    // Detect by CONTEXT, not by numeric range. The range heuristic this replaced
+    // was wrong in both directions: it missed every port outside 30xx/31xx/91xx
+    // (`8080`, `8799`, `3200`) and it would have flagged ordinary durations passed
+    // as call arguments (`waitForTimeout(3000)`, `setTimeout(fn, 3100)`,
+    // `slice(0, 3000)`) the first time one appeared — and a guard that cries wolf
+    // is a guard someone deletes.
+    const DETECTORS: Array<{ why: string; re: RegExp }> = [
+      // `const PORT = 3025`, `const port = 3025`, `DASHBOARD_PORT: "3030"`.
+      { why: "port-named binding", re: /\b\w*port\w*\s*[:=]\s*["'`]?(\d{2,5})\b/gi },
+      // `"http://127.0.0.1:3021"`, `localhost:3011`, `[::1]:9190`.
+      {
+        why: "host:port literal",
+        re: /(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]):(\d{2,5})\b/g,
+      },
+      // A bare literal in muninn's own port space with no port-ish name to give
+      // it away — `const HUGINN = 3029`, the shape that started this.
+      { why: "bare port-space literal", re: /(?:^|[^\w.])(30\d\d|31\d\d|91\d\d)\b/g },
+    ];
+    // Two things in that space are NOT ports: a DURATION or a length, whether
+    // bound to a name (`firstDelayMs: 3000`) or passed as an argument
+    // (`waitForTimeout(3000)`). Excluded structurally by what precedes them,
+    // never by an allowlist of values.
+    const NOT_A_PORT = [
+      /(?:ms|delay|timeout|duration|interval|budget|width|height|len|length|size|max|min)\w*\s*[:=]\s*$/i,
+      // Deliberately NOT anchored with `[^)]*$`: `setTimeout(() => {}, 3100)`
+      // has a `()` of its own between the call name and the number, so an
+      // anchored form missed it (measured). Presence of the call in the window
+      // is enough.
+      /(?:waitForTimeout|setTimeout|setInterval|sleep|slice|substring|substr|repeat|padStart|padEnd)\s*\(/i,
+    ];
+
     const offenders: string[] = [];
     for (const { rel, text } of SOURCES) {
       text.split("\n").forEach((line, i) => {
         const trimmed = line.trim();
-        // A block-comment continuation or a line comment: prose, not code.
+        // A block-comment continuation or a line comment: prose, not a binding.
         if (trimmed.startsWith("*") || trimmed.startsWith("/*")) return;
-        const code = line.replace(/\/\/.*$/, "");
-        for (const m of code.matchAll(PORTISH)) {
-          const before = code.slice(Math.max(0, m.index - 32), m.index);
-          if (DURATION_BINDING.test(before)) continue;
-          offenders.push(`${rel}:${i + 1} ${trimmed}`);
-          break;
+        // Strip a line comment WITHOUT eating the `//` of a URL scheme — the
+        // previous version truncated at `http://`, so every port inside a URL
+        // was invisible while the comment above claimed it was covered.
+        const code = line.replace(/(^|[^:])\/\/.*$/, "$1");
+        for (const { why, re } of DETECTORS) {
+          re.lastIndex = 0;
+          for (const m of code.matchAll(re)) {
+            const at = m.index + m[0].indexOf(m[1]!);
+            const before = code.slice(Math.max(0, at - 40), at);
+            if (NOT_A_PORT.some((x) => x.test(before))) continue;
+            offenders.push(`${rel}:${i + 1} [${why}] ${trimmed}`);
+            return;
+          }
         }
       });
     }

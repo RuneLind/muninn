@@ -860,14 +860,39 @@ function repaintChatOptFoot(): void {
   if (foot) foot.innerHTML = chatOptFootHtml(state, question);
 }
 
-/** The panel's first focusable control — the same query `trapChatOptTab` uses, so
- *  "where Tab would put you" and "where a lost focus lands" cannot drift apart. */
+/**
+ * Where focus lands when a re-render destroyed the element that had it.
+ *
+ * The QUESTION BOX first, not the first focusable control. The first control in
+ * DOM order is `#wikiChatOptClose`, whose handler closes the dialog
+ * unconditionally — no "Press Esc again" confirmation, unlike Escape and
+ * click-away. Parking focus there means a reader who Tabs to a suggestion chip
+ * during the ~100 ms `chat-target` fetch has their next Enter, aimed at the chip,
+ * silently discard the question they just composed. The question box is where the
+ * `created` first-paint path already puts the caret, and Enter there is a
+ * newline.
+ *
+ * The visibility filter mirrors `trapChatOptTab`'s (`offsetParent !== null`):
+ * `.focus()` on a hidden element is a no-op, which would leave focus on `<body>`
+ * — the exact escape this exists to close, with every test still green.
+ */
 function focusFirstInChatOptPanel(): void {
   const panel = chatOptPanel();
   if (!panel) return;
-  const first = panel.querySelector(
-    'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled])',
-  ) as HTMLElement | null;
+  const visible = (el: HTMLElement): boolean => el.offsetParent !== null;
+  const question = document.getElementById(CHAT_OPT_QUESTION_ID) as HTMLElement | null;
+  if (question && panel.contains(question) && visible(question)) {
+    question.focus({ preventScroll: true });
+    return;
+  }
+  const first = (Array.prototype.slice.call(
+    panel.querySelectorAll(
+      'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled])',
+    ),
+  ) as HTMLElement[]).find(visible);
+  // The panel itself is the last resort, and it is focusable only because it
+  // carries `tabindex="-1"` (set at creation) — without that, `.focus()` on a
+  // `<div role="dialog">` does nothing and focus stays on `<body>`.
   (first ?? panel).focus({ preventScroll: true });
 }
 
@@ -943,6 +968,10 @@ function renderChatOptions(): void {
     panel.className = "wiki-chatopt";
     panel.setAttribute("role", "dialog");
     panel.setAttribute("aria-modal", "true");
+    // Programmatically focusable, not tab-reachable: the last resort in
+    // `focusFirstInChatOptPanel` is a `.focus()` on the panel, and a bare
+    // `<div role="dialog">` silently ignores it.
+    panel.setAttribute("tabindex", "-1");
     panel.setAttribute("aria-label", "Start a chat from this wiki");
     document.body.appendChild(panel);
   }

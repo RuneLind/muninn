@@ -42,6 +42,12 @@ export const E2E_PORTS = {
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,
+  // Not bound by anything — the opposite. `plans-write` points `CLAUDE_USAGE_URL`
+  // here BECAUSE nothing answers: a dead ledger is the state its assertions are
+  // written against. It is registered so the number is reserved against a future
+  // spec binding it, which would quietly turn those assertions into a live-ledger
+  // run.
+  "plans-write/dead-ledger": 8799,
 } as const;
 
 export type E2ePortName = keyof typeof E2E_PORTS;

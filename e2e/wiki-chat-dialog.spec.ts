@@ -399,6 +399,50 @@ test.describe("Wiki reader: chat dialog", () => {
     }
   });
 
+  test("a re-render never drops focus out of the dialog — and never onto ×", async ({ page }) => {
+    // THE regression test for `restoreChatOptFocus`'s fallback. Deleting that
+    // fallback used to leave every one of this file's 13 cases green (measured),
+    // because `settled()` waits the race out — so the escape it closes had no
+    // guard at all. This drives the swap deliberately instead of racing it: the
+    // `chat-target` response is held until focus is parked on a suggestion chip,
+    // which is an element with NO id, which is exactly what
+    // `captureChatOptFocus` cannot restore.
+    let release: (() => void) | undefined;
+    await page.route("**/api/wiki/chat-target*", async (route) => {
+      await new Promise<void>((r) => { release = r; });
+      await route.continue();
+    });
+
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}`);
+    await page.locator(String.raw`.wiki-conn-tab[data-conntab="ask"]`).click();
+    await page.locator("#wikiNewChatBtn").click();
+    await expect(page.locator("#wikiChatOpt")).toBeVisible();
+
+    // Focus an id-less control while the dialog is still in its loading render.
+    const chip = page.locator(".wiki-chatopt-chip").first();
+    await expect(chip).toBeVisible();
+    await chip.focus();
+    expect(await page.evaluate(() => document.activeElement?.className ?? "")).toContain(
+      "wiki-chatopt-chip",
+    );
+
+    // Let the target land: `renderChatOptions` swaps the panel's innerHTML and
+    // the chip that had focus ceases to exist.
+    release?.();
+    await settled(page);
+
+    const after = await page.evaluate(() => ({
+      inside: !!document.getElementById("wikiChatOpt")?.contains(document.activeElement),
+      id: document.activeElement?.id ?? "",
+    }));
+    // Inside the dialog — otherwise `aria-modal="true"` is a lie and the next Tab
+    // walks the page behind.
+    expect(after.inside).toBe(true);
+    // And NOT on the × button, whose handler closes with no confirmation: the
+    // reader's next Enter, aimed at the chip, would discard their question.
+    expect(after.id).not.toBe("wikiChatOptClose");
+  });
+
   test("Escape confirms before discarding a typed question, and the scrim dismisses", async ({
     page,
   }) => {

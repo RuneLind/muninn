@@ -112,8 +112,10 @@ function boot(port: number, root: string, env: Record<string, string> = {}): Chi
       SCHEDULER_ENABLED: "false",
       WIKI_EXTRA: `${WIKI}=${root}`,
       // A dead ledger: the board renders every column and no money, which is the
-      // state these assertions are written against.
-      CLAUDE_USAGE_URL: "http://127.0.0.1:8799",
+      // state these assertions are written against. The port comes from the
+      // registry like every other one — it is reserved precisely so no future
+      // spec binds it and makes this a live-ledger run.
+      CLAUDE_USAGE_URL: `http://127.0.0.1:${e2ePort("plans-write/dead-ledger")}`,
       ...env,
     },
     stdio: "ignore",
