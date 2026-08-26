@@ -1,4 +1,4 @@
-import { test, expect, describe } from "bun:test";
+import { test, expect, describe, afterEach } from "bun:test";
 import { setupTestDb } from "../test/setup-db.ts";
 import { makeMemory } from "../test/fixtures.ts";
 import {
@@ -13,6 +13,7 @@ import {
   dashboardSearchMemories,
 } from "./memories.ts";
 import { ensureUser } from "./users.ts";
+import { __setAuthPolicyForTest } from "../auth/policy.ts";
 import { saveMessage } from "./messages.ts";
 import { makeMessage } from "../test/fixtures.ts";
 
@@ -99,6 +100,74 @@ describe("memories", () => {
     // u1 should see u2's shared memory
     const results = await searchMemories("u1", "Bun projects", 10, "testbot");
     expect(results.length).toBeGreaterThanOrEqual(1);
+  });
+
+  /**
+   * Acceptance item 11 - a `scope = 'shared'` memory must not enter another
+   * identity's prompt on an instance that authenticates.
+   *
+   * `shared` rows go verbatim into the system prompt under "Shared team
+   * knowledge:", with the scope assigned per turn by a fire-and-forget Haiku
+   * classifier - i.e. by a model, not by the person who typed the sentence.
+   * Neither a route guard nor a cross-user frame test can see this: it is a
+   * WHERE clause.
+   *
+   * BOTH call sites, and both arms, because `searchMemoriesHybrid` DELEGATES to
+   * `searchMemories` when there is no embedding. A fix applied to one of them
+   * is inert on exactly the path that happens to be taken - this repo's
+   * documented recurring failure class.
+   */
+  describe("acceptance 11 - shared memories do not cross identities", () => {
+    afterEach(() => __setAuthPolicyForTest(null));
+
+    async function seed(query: string) {
+      await saveMemory(makeMemory({
+        userId: "owner-b", botName: "sharedbot", scope: "shared",
+        summary: `Company standard: ${query}`,
+        content: `Everyone should know about ${query}`,
+        embedding: Array.from({ length: 384 }, (_, i) => (i % 7) / 7),
+      }));
+    }
+
+    test("auth off: reader-a DOES see owner-b's shared row - today's feature", async () => {
+      await seed("kubernetes rollout");
+      expect((await searchMemories("reader-a", "kubernetes rollout", 10, "sharedbot")).length)
+        .toBeGreaterThanOrEqual(1);
+      expect((await searchMemoriesHybrid("reader-a", "kubernetes rollout", null, 10, "sharedbot")).length)
+        .toBeGreaterThanOrEqual(1);
+    });
+
+    test("authenticating, NO embedding: the FTS fallback is narrowed", async () => {
+      await seed("terraform drift");
+      __setAuthPolicyForTest({ authenticating: true });
+      // The direct call...
+      expect(await searchMemories("reader-a", "terraform drift", 10, "sharedbot")).toEqual([]);
+      // ...and the delegation, which is the arm a hybrid-only fix would miss.
+      expect(await searchMemoriesHybrid("reader-a", "terraform drift", null, 10, "sharedbot")).toEqual([]);
+    });
+
+    test("authenticating, embedding PRESENT: the RRF query is narrowed too", async () => {
+      await seed("grafana dashboards");
+      __setAuthPolicyForTest({ authenticating: true });
+      const embedding = Array.from({ length: 384 }, (_, i) => (i % 7) / 7);
+      const hits = await searchMemoriesHybrid("reader-a", "grafana dashboards", embedding, 10, "sharedbot");
+      // The vector arm ranks EVERY row, so an unnarrowed query returns owner-b's
+      // even on a query that shares no words with it. That is what makes this
+      // the arm worth asserting separately.
+      expect(hits.map((h) => h.userId)).not.toContain("owner-b");
+    });
+
+    test("the reader keeps their OWN shared rows - a single operator loses nothing", async () => {
+      await saveMemory(makeMemory({
+        userId: "reader-a", botName: "sharedbot", scope: "shared",
+        summary: "My own note about pgbouncer tuning",
+        content: "pgbouncer tuning notes",
+      }));
+      __setAuthPolicyForTest({ authenticating: true });
+      const hits = await searchMemories("reader-a", "pgbouncer tuning", 10, "sharedbot");
+      expect(hits.length).toBeGreaterThanOrEqual(1);
+      expect(hits.every((h) => h.userId === "reader-a")).toBe(true);
+    });
   });
 
   test("getRecentMemories returns in reverse chronological order", async () => {

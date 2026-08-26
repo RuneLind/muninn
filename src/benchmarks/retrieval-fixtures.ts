@@ -33,6 +33,18 @@ import { generateEmbedding } from "../ai/embeddings.ts";
 
 const log = getLog("benchmarks", "retrieval-fixtures");
 
+/**
+ * ⚠️ **Every memory fixture must stay `scope: "personal"`.**
+ *
+ * `searchMemoriesHybrid`'s `shared` branch is narrowed by
+ * `sharedMemoryReadsAllowed()`, which reads a policy `src/index.ts` publishes at
+ * boot — and this benchmark is its own entry point, so the policy stays at its
+ * `off` default and the CLI always measures the WIDE filter whatever
+ * `MUNINN_AUTH` says. With personal-scope fixtures under one user id both
+ * branches return the same rows, so the divergence is inert. Add a `shared`
+ * fixture and the benchmark silently stops measuring what production does, with
+ * nothing in `benchmark_retrieval_runs` recording which filter was in effect.
+ */
 export const MEMORY_FIXTURE_USER_ID = "retrieval-eval-fixture-user";
 export const MEMORY_FIXTURE_BOT_NAME = "retrieval-eval-bot";
 

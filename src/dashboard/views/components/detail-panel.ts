@@ -658,11 +658,33 @@ export function detailPanelScript(): string {
       return days + 'd';
     }
 
+    /**
+     * A 403 from an own-data route is NOT "this user has no data".
+     *
+     * The four per-user sections below carry requireOwnUser, and on an
+     * authenticating instance resolveRole answers "user" for every local
+     * identity - so drilling into ANY user other than MUNINN_LOCAL_USER
+     * refuses. The refusal body is valid JSON, so a "data.memories || []" read
+     * parsed it happily and the panel rendered "No memories"; the settings
+     * section was worse, rendering an affirmative "Default settings / quiet
+     * hours: Not configured" about a colleague whose settings it had never
+     * seen. Beside an /api/users/:userId/overview panel that is deliberately
+     * unguarded and DOES show that user's real traffic, the reading was
+     * "extraction is broken", not "you may not see this".
+     *
+     * NB this comment lives inside a template literal - no backticks.
+     */
+    function forbiddenNotice(what) {
+      return '<div class="detail-empty-hint">Not visible to this session &mdash; '
+        + escapeHtml(what) + ' belong to another user.</div>';
+    }
+
     async function loadUserMemories(u) {
       const sec = document.querySelector('[data-utab-section="memories"]');
       try {
         const url = appendBot('/api/memories/user/' + encodeURIComponent(u.userId) + '?limit=20');
         const res = await fetch(url);
+        if (res.status === 403) { sec.innerHTML = forbiddenNotice('memories'); return; }
         const data = await res.json();
         const memories = data.memories || [];
         if (!memories.length) { sec.innerHTML = '<div class="detail-empty-hint">No memories</div>'; return; }
@@ -682,6 +704,7 @@ export function detailPanelScript(): string {
       try {
         const url = appendBot('/api/goals/' + encodeURIComponent(u.userId));
         const res = await fetch(url);
+        if (res.status === 403) { sec.innerHTML = forbiddenNotice('goals'); return; }
         const data = await res.json();
         const goals = data.goals || [];
         if (!goals.length) { sec.innerHTML = '<div class="detail-empty-hint">No goals</div>'; return; }
@@ -719,6 +742,7 @@ export function detailPanelScript(): string {
       try {
         const url = appendBot('/api/scheduled-tasks/' + encodeURIComponent(u.userId));
         const res = await fetch(url);
+        if (res.status === 403) { sec.innerHTML = forbiddenNotice('scheduled tasks'); return; }
         const data = await res.json();
         const tasks = data.tasks || [];
         if (!tasks.length) { sec.innerHTML = '<div class="detail-empty-hint">No scheduled tasks</div>'; return; }
@@ -733,6 +757,7 @@ export function detailPanelScript(): string {
       const sec = document.querySelector('[data-utab-section="settings"]');
       try {
         const res = await fetch('/api/user-settings/' + encodeURIComponent(u.userId));
+        if (res.status === 403) { sec.innerHTML = forbiddenNotice('settings'); return; }
         const data = await res.json();
         const s = data.settings;
         if (!s) { sec.innerHTML = '<div class="detail-empty-hint">Default settings</div>'; return; }

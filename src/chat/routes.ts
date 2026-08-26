@@ -23,6 +23,8 @@ import { consumePendingMessage } from "./pending-messages.ts";
 import { isValidUuid } from "../dashboard/routes/route-utils.ts";
 import { resolveJiraBotLive } from "../jira/bot.ts";
 import { getLog } from "../logging.ts";
+import { requireOwnUser, forbiddenHead, sessionIdentity, sessionRole, extractionsForcedOff } from "../auth/guard.ts";
+import { applyCors, corsHeaders } from "../auth/cors.ts";
 
 const log = getLog("chat");
 
@@ -119,10 +121,42 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     return c.json({ bots, connectors, jiraBot });
   });
 
+  /**
+   * Who the caller is, and whether the page may still offer a user PICKER.
+   *
+   * `mode: "local"` means "no server-side identity — pick a user", which is
+   * today's muninn and what keeps the dropdown, `sim-user-1` and
+   * `bot_default_user` working unchanged. `mode: "session"` means the server
+   * decides, and the client must then NOT call `loadUsersForBot` at all: that
+   * function issues `GET /api/users?bot=` AND
+   * `GET /chat/bot-preferences/:botName/default-user` in one `allSettled` —
+   * both admin-zone under §4 — and it is also what assigns `selectedUserId`
+   * and `selectedUsername`, which every downstream fetch depends on. Skipping
+   * only the first fetch would leave the authenticated client calling an admin
+   * route with no id of its own.
+   */
+  app.get("/me", (c) => {
+    const identity = sessionIdentity(c);
+    if (!identity) return c.json({ mode: "local", userId: null, displayName: null, role: null });
+    return c.json({
+      mode: "session",
+      userId: identity.userId,
+      displayName: identity.displayName,
+      navIdent: identity.navIdent,
+      // The client branches on this for `bot_default_user`: a SINGLE pinned
+      // local identity may keep writing that bot-global field (six readers
+      // degrade silently without it), a multi-user provider may not.
+      provider: identity.provider,
+      role: sessionRole(c),
+    });
+  });
+
   // Get chat preferences for a user+bot (connector, persisted in DB)
   app.get("/preferences/:userId/:botName", async (c) => {
+    const own = requireOwnUser(c, c.req.param("userId"));
+    if (!own.ok) return own.response;
     try {
-      const userId = c.req.param("userId");
+      const userId = own.userId!;
       const botName = c.req.param("botName");
       const prefs = await getChatPreferences(userId, botName);
       return c.json({ connectorId: prefs.preferredConnectorId });
@@ -134,8 +168,10 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
 
   // Set preferred connector for a user+bot (persisted in DB)
   app.put("/preferences/:userId/:botName/connector", async (c) => {
+    const own = requireOwnUser(c, c.req.param("userId"));
+    if (!own.ok) return own.response;
     try {
-      const userId = c.req.param("userId");
+      const userId = own.userId!;
       const botName = c.req.param("botName");
       const body = await c.req.json<{ connectorId: string | null }>();
       const connectorId = body.connectorId || null;
@@ -152,7 +188,7 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
 
   // Get default user for a bot (single source of truth for plugin + chat page)
   app.get("/bot-preferences/:botName/default-user", async (c) => {
-    c.header("Access-Control-Allow-Origin", "*");
+    applyCors(c);
     try {
       const botName = c.req.param("botName");
       const userId = await getBotDefaultUser(botName);
@@ -165,7 +201,7 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
 
   // Set default user for a bot
   app.put("/bot-preferences/:botName/default-user", async (c) => {
-    c.header("Access-Control-Allow-Origin", "*");
+    applyCors(c);
     try {
       const botName = c.req.param("botName");
       const body = await c.req.json<{ userId: string }>();
@@ -184,11 +220,10 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
   app.options("/bot-preferences/:botName/default-user", (c) => {
     return new Response(null, {
       status: 204,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
+      headers: corsHeaders(c, {
         "Access-Control-Allow-Methods": "GET, PUT",
         "Access-Control-Allow-Headers": "Content-Type",
-      },
+      }),
     });
   });
 
@@ -201,6 +236,9 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
       username?: string;
       channelName?: string;
     }>();
+
+    const own = requireOwnUser(c, body.userId, body.username);
+    if (!own.ok) return own.response;
 
     if (!body.type || !body.botName) {
       return c.json({ error: "type and botName are required" }, 400);
@@ -220,8 +258,14 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
       return c.json({ error: "channelName is required for slack_channel type" }, 400);
     }
 
-    const userId = body.userId ?? "sim-user-1";
-    const username = body.username ?? "chat-user";
+    // The claimed pair. In an authenticating mode BOTH come from the session:
+    // `username` is a second client-supplied identity, and while it never
+    // clobbers `users.username` (the web path passes `lockUsername`), it does
+    // reach the prompt's speaker label, `traces.username`, the `activity_log`
+    // row and `AgentRun.username`. `"sim-user-1"` is unreachable there for the
+    // same reason — `own.userId` is always a string once an identity exists.
+    const userId = own.userId ?? "sim-user-1";
+    const username = own.username ?? body.username ?? "chat-user";
 
     // A web conversation gets the DETERMINISTIC id — the one hydrateFromDb
     // rebuilds it under and every off-band broadcaster computes. Minting a
@@ -280,7 +324,9 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
   // Create a new thread for a user+bot
   app.post("/threads", async (c) => {
     const body = await c.req.json<{ userId: string; botName: string; name: string; description?: string; connectorId?: string }>();
-    if (!body.userId || !body.botName || !body.name) {
+    const own = requireOwnUser(c, body.userId);
+    if (!own.ok) return own.response;
+    if (!own.userId || !body.botName || !body.name) {
       return c.json({ error: "userId, botName, and name are required" }, 400);
     }
     const bot = botConfigs.find((b) => b.name === body.botName);
@@ -291,7 +337,7 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
       return c.json({ error: "Invalid connectorId" }, 400);
     }
     try {
-      const thread = await createThread(body.userId, body.botName, body.name, body.description, body.connectorId);
+      const thread = await createThread(own.userId, body.botName, body.name, body.description, body.connectorId);
       return c.json({ thread }, 201);
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
@@ -300,7 +346,9 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
 
   // List threads for a user+bot (excludes slack: threads)
   app.get("/threads/:userId/:botName", async (c) => {
-    const userId = c.req.param("userId");
+    const own = requireOwnUser(c, c.req.param("userId"));
+    if (!own.ok) return own.response;
+    const userId = own.userId!;
     const botName = c.req.param("botName");
     const allThreads = await listThreads(userId, botName);
     const threads = allThreads.filter((t) => !t.name.startsWith("slack:"));
@@ -501,7 +549,14 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     }
 
     // Process asynchronously — response comes via WebSocket
-    processChatMessage(id, body.text, bot, config, body.threadId, connectorOverride, threadConnector ?? undefined, body.skipExtractions).catch((err) => {
+    // Server-side FORCE, not a default: `skipExtractions` is a checkbox in the
+    // inspector panel, so a rule that only read the body could be cleared by
+    // the client. §8's ROS decision is that memory/goal/schedule extraction is
+    // off for `platform = 'entra'` accounts — a turn a colleague types must not
+    // write distilled facts about them as a side effect of ordinary use. Inert
+    // for a `local` identity and with auth off.
+    const skipExtractions = body.skipExtractions || extractionsForcedOff(c);
+    processChatMessage(id, body.text, bot, config, body.threadId, connectorOverride, threadConnector ?? undefined, skipExtractions).catch((err) => {
       log.error("Error processing message: {error}", { error: err instanceof Error ? err.message : String(err) });
       // Add error message to conversation
       chatState.addMessage(id, {
@@ -518,7 +573,9 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
 
   // Last response context usage for a user+bot (survives page refresh)
   app.get("/context-usage/:userId/:botName", async (c) => {
-    const userId = c.req.param("userId");
+    const own = requireOwnUser(c, c.req.param("userId"));
+    if (!own.ok) return own.response;
+    const userId = own.userId!;
     const botName = c.req.param("botName");
     const threadId = c.req.query("thread");
     const bot = botConfigs.find((b) => b.name === botName);
@@ -534,7 +591,9 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
 
   // Aggregate tool usage stats from traces for a user+bot
   app.get("/tool-usage/:userId/:botName", async (c) => {
-    const userId = c.req.param("userId");
+    const own = requireOwnUser(c, c.req.param("userId"));
+    if (!own.ok) return own.response;
+    const userId = own.userId!;
     const botName = c.req.param("botName");
     const threadId = c.req.query("thread");
     try {
@@ -588,6 +647,19 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
 
   // Validate issueKey to prevent path traversal (Jira keys or research-<uuid> fallback)
   const VALID_ISSUE_KEY = /^[A-Z]+-\d+$|^research-[a-f0-9]{8}$/;
+  /**
+   * The charset a `userId` may have when it becomes a PATH SEGMENT.
+   *
+   * `/chat/reports/*` and `/chat/specs/*` address a file
+   * (`resolve(bot.dir, "reports", userId, …)`), so under PR C this is checked
+   * AFTER `requireOwnUser` has substituted the session id — never before.
+   * Guarding the claim and then writing an unchecked session id would move the
+   * traversal surface from the request onto `MUNINN_LOCAL_USER`.
+   *
+   * The converse is a config trap, so `resolveAuthConfig` warns at boot: a
+   * pinned id containing `.`, `@` or `:` is a perfectly good `users.id`
+   * everywhere else and makes only these six routes 400.
+   */
   const VALID_USER_ID = /^[a-zA-Z0-9_-]+$/;
   // dev_run statuses a spec save may set: draft on Save Spec, approved at the fagperson gate.
   const VALID_SPEC_STATUS = new Set(["spec_draft", "spec_approved"]);
@@ -595,7 +667,14 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
   // Save a research report file to bots/<botName>/reports/<userId>/<issueKey>.md
   app.post("/reports/:botName/:userId/:issueKey", async (c) => {
     const botName = c.req.param("botName");
-    const userId = c.req.param("userId");
+    const own = requireOwnUser(c, c.req.param("userId"));
+    if (!own.ok) return own.response;
+    // Validated AFTER the substitution, never before: these routes address a
+    // FILE (`resolve(bot.dir, "reports", userId, …)`), so the value that lands
+    // in the path is the one that has to be checked. Guarding the claim and
+    // then writing the session id would move the traversal surface onto
+    // `MUNINN_LOCAL_USER`.
+    const userId = own.userId!;
     const issueKey = c.req.param("issueKey");
     if (!VALID_USER_ID.test(userId)) return c.json({ error: "Invalid user ID" }, 400);
     if (!VALID_ISSUE_KEY.test(issueKey)) return c.json({ error: "Invalid issue key" }, 400);
@@ -618,7 +697,10 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
   // Get a research report
   app.get("/reports/:botName/:userId/:issueKey", async (c) => {
     const botName = c.req.param("botName");
-    const userId = c.req.param("userId");
+    const own = requireOwnUser(c, c.req.param("userId"));
+    if (!own.ok) return own.response;
+    // See VALID_USER_ID: checked AFTER the substitution, deliberately.
+    const userId = own.userId!;
     const issueKey = c.req.param("issueKey");
     if (!VALID_USER_ID.test(userId)) return c.json({ error: "Invalid user ID" }, 400);
     if (!VALID_ISSUE_KEY.test(issueKey)) return c.json({ error: "Invalid issue key" }, 400);
@@ -634,7 +716,12 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
   // Check if a research report exists (lightweight)
   app.on("HEAD", "/reports/:botName/:userId/:issueKey", async (c) => {
     const botName = c.req.param("botName");
-    const userId = c.req.param("userId");
+    // Bodyless 403: an unguarded HEAD here is a 200/404 ORACLE over whether a
+    // colleague has a saved report or spec for a given Jira key, and the chat
+    // client probes exactly this endpoint.
+    const own = requireOwnUser(c, c.req.param("userId"));
+    if (!own.ok) return forbiddenHead(c);
+    const userId = own.userId!;
     const issueKey = c.req.param("issueKey");
     if (!VALID_USER_ID.test(userId)) return c.body(null, 400);
     if (!VALID_ISSUE_KEY.test(issueKey)) return c.body(null, 400);
@@ -654,7 +741,10 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
   // Save a domain spec to bots/<botName>/specs/<userId>/<issueKey>.md
   app.post("/specs/:botName/:userId/:issueKey", async (c) => {
     const botName = c.req.param("botName");
-    const userId = c.req.param("userId");
+    const own = requireOwnUser(c, c.req.param("userId"));
+    if (!own.ok) return own.response;
+    // See VALID_USER_ID: checked AFTER the substitution, deliberately.
+    const userId = own.userId!;
     const issueKey = c.req.param("issueKey");
     if (!VALID_USER_ID.test(userId)) return c.json({ error: "Invalid user ID" }, 400);
     if (!VALID_ISSUE_KEY.test(issueKey)) return c.json({ error: "Invalid issue key" }, 400);
@@ -697,7 +787,10 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
   // Get a domain spec
   app.get("/specs/:botName/:userId/:issueKey", async (c) => {
     const botName = c.req.param("botName");
-    const userId = c.req.param("userId");
+    const own = requireOwnUser(c, c.req.param("userId"));
+    if (!own.ok) return own.response;
+    // See VALID_USER_ID: checked AFTER the substitution, deliberately.
+    const userId = own.userId!;
     const issueKey = c.req.param("issueKey");
     if (!VALID_USER_ID.test(userId)) return c.json({ error: "Invalid user ID" }, 400);
     if (!VALID_ISSUE_KEY.test(issueKey)) return c.json({ error: "Invalid issue key" }, 400);
@@ -713,7 +806,10 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
   // Check if a domain spec exists (lightweight — gates downstream buttons)
   app.on("HEAD", "/specs/:botName/:userId/:issueKey", async (c) => {
     const botName = c.req.param("botName");
-    const userId = c.req.param("userId");
+    // Bodyless 403 — the 200/404 oracle; see the first HEAD route above.
+    const own = requireOwnUser(c, c.req.param("userId"));
+    if (!own.ok) return forbiddenHead(c);
+    const userId = own.userId!;
     const issueKey = c.req.param("issueKey");
     if (!VALID_USER_ID.test(userId)) return c.body(null, 400);
     if (!VALID_ISSUE_KEY.test(issueKey)) return c.body(null, 400);

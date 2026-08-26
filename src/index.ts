@@ -20,6 +20,8 @@ import { auditMcpAdapters } from "./startup/adapter-audit.ts";
 import { isWikiReadonly, WIKI_READONLY_ENV } from "./wiki/readonly.ts";
 import { AuthConfigError, resolveAuthConfig, isAuthenticatingMode, type AuthConfig } from "./auth/mode.ts";
 import { createAuthMiddleware } from "./auth/middleware.ts";
+import { createOriginMiddleware } from "./auth/origin.ts";
+import { setAuthPolicy } from "./auth/policy.ts";
 import { Hono } from "hono";
 import type { Bot } from "grammy";
 
@@ -45,6 +47,15 @@ try {
   }
   throw err;
 }
+// Published to the two readers that live outside the request path and so cannot
+// read the identity off a Hono context: `src/db/memories.ts`'s `scope='shared'`
+// branch, the CORS sites across seven route files, and `getBotDefaultUser`'s
+// pinned-identity fallback. Immediately
+// after `resolveAuthConfig()` and before anything is started, because the
+// default is `off` and a later call would leave a window in which a wildcard
+// CORS header and a cross-user shared-memory read are both still live.
+// `src/auth/wiring.test.ts` pins this call site.
+setAuthPolicy(auth);
 
 // Backstop for promise rejections that escape a fire-and-forget path (e.g. a
 // throw inside an extraction `onResult` callback). Bun would otherwise log and
@@ -176,6 +187,12 @@ const app = new Hono();
 // an authenticating mode — with auth off there is no middleware to run.
 if (isAuthenticatingMode(auth.mode)) {
   app.use("*", createAuthMiddleware(auth));
+  // AFTER the auth middleware, so a request with no credential is answered 401
+  // by identity rather than 403 by origin — a scripted client must be able to
+  // tell "you are not logged in" from "your origin is refused". Not mounted
+  // with auth off: there is no ambient session to ride there, so the refusal
+  // would change today's muninn to close nothing.
+  app.use("*", createOriginMiddleware(auth.allowedOrigins, config.dashboardPort));
 }
 app.route("/", dashboard);
 

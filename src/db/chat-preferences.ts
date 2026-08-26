@@ -1,4 +1,5 @@
 import { getDb } from "./client.ts";
+import { pinnedLocalUserId } from "../auth/policy.ts";
 
 export interface ChatPreferences {
   userId: string;
@@ -35,7 +36,15 @@ export async function getBotDefaultUser(botName: string): Promise<string | null>
   const [row] = await sql`
     SELECT user_id FROM bot_default_user WHERE bot_name = ${botName}
   `;
-  return (row?.user_id as string) ?? null;
+  const stored = (row?.user_id as string) ?? null;
+  if (stored) return stored;
+  // A stored value always wins. The fallback only covers the case PR C
+  // created: on a `local` instance the chat page hides its user dropdown, and
+  // that dropdown was this field's ONLY writer — so a fresh authenticating
+  // instance has nothing here and six readers degrade with no log line. See
+  // `pinnedLocalUserId` for why the answer is server-side rather than a client
+  // write. Null in every other mode.
+  return pinnedLocalUserId();
 }
 
 export async function setBotDefaultUser(botName: string, userId: string): Promise<void> {

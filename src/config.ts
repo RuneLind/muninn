@@ -131,20 +131,68 @@ export function adminIdentsFromEnv(env: Record<string, string | undefined> = pro
 }
 
 /**
- * `MUNINN_ALLOWED_ORIGINS` — the origin allowlist PR C's origin/CSRF check and
- * PR D's WebSocket upgrade check will read. Parsed and boot-asserted in this
- * PR; **nothing enforces it yet**, and that is stated here rather than left for
- * a reader to infer from its presence that requests are being checked.
+ * `MUNINN_ALLOWED_ORIGINS` — the origin allowlist. **Enforced** by
+ * `src/auth/origin.ts` (every side-effecting request in an authenticating mode)
+ * and by `src/auth/cors.ts` (which origin, if any, an
+ * `Access-Control-Allow-Origin` names). NOT yet enforced on the `/chat/ws`
+ * upgrade, which runs before `app.fetch` and is PR D's.
  *
- * Normalised through `URL` so `https://Host:443/` and `https://host` compare
- * equal, and an unparseable entry is dropped with a warning instead of silently
- * matching nothing.
+ * The loopback origins at the configured `DASHBOARD_PORT` are accepted without
+ * being listed; every other origin muninn is REACHED at — the tailnet name
+ * `tailscale serve` publishes, a LAN address under `DASHBOARD_HOST=0.0.0.0`,
+ * an extension — must be an entry here, spelled exactly as the browser sends
+ * it (scheme included).
+ *
+ * Normalised through `normalizeOrigin` so `https://Host:443/` and `https://host`
+ * compare equal, and an unparseable entry is dropped with a warning instead of
+ * silently matching nothing.
+ *
+ * Browser-extension origins (`chrome-extension://<id>`, `moz-extension://<id>`)
+ * are accepted, and they are the reason `normalizeOrigin` exists rather than a
+ * bare `new URL(raw).origin`: `URL` answers the OPAQUE string `"null"` for
+ * those schemes, so the four Chrome extensions in `extensions/` — which call the
+ * capture verticals and the Jira research routes — could not be allowlisted at
+ * all, and PR C's origin check would refuse every one of them on an
+ * authenticating instance. See `src/auth/cors.ts` for the per-site disposition.
  *
  * `*` is REFUSED rather than honoured. A wildcard here would be the fail-OPEN
  * direction for a list whose only job is to fail closed; dropping it leaves the
  * list empty, which is a boot refusal in any authenticating mode — loud, at the
  * one moment somebody is watching.
  */
+export const EXTENSION_ORIGIN_SCHEMES = ["chrome-extension:", "moz-extension:"] as const;
+
+/**
+ * One origin string → its canonical comparable form, or `null` when the value is
+ * not an origin at all.
+ *
+ * Shared by the env parser below and by the request-time check in
+ * `src/auth/origin.ts`, so an allowlist entry and an incoming `Origin` header
+ * can never be normalised two different ways — the class of bug where a
+ * configured origin silently matches nothing.
+ */
+export function normalizeOrigin(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (trimmed === "" || trimmed === "*") return null;
+  let url: URL;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    return null;
+  }
+  // `URL.origin` is the opaque string "null" for a non-special scheme, which
+  // would collapse every extension id onto one another. Rebuild it from the
+  // parts instead — for the two extension schemes ONLY, so no other opaque
+  // scheme (`file:`, `data:`) sneaks in through the same door.
+  if ((EXTENSION_ORIGIN_SCHEMES as readonly string[]).includes(url.protocol)) {
+    if (url.host === "") return null;
+    return `${url.protocol}//${url.host}`.toLowerCase();
+  }
+  const origin = url.origin;
+  if (origin === "null") return null;
+  return origin.toLowerCase();
+}
+
 export function allowedOriginsFromEnv(env: Record<string, string | undefined> = process.env): string[] {
   const seen = new Set<string>();
   for (const part of (env.MUNINN_ALLOWED_ORIGINS ?? "").split(",")) {
@@ -154,13 +202,9 @@ export function allowedOriginsFromEnv(env: Record<string, string | undefined> = 
       log.warn("MUNINN_ALLOWED_ORIGINS contains \"*\" — refused. A wildcard origin allowlist allows every site; the entry is dropped.");
       continue;
     }
-    try {
-      const origin = new URL(raw).origin;
-      if (origin === "null") throw new Error("opaque origin");
-      seen.add(origin.toLowerCase());
-    } catch {
-      log.warn("MUNINN_ALLOWED_ORIGINS entry {entry} is not a parseable origin — dropped", { entry: raw });
-    }
+    const origin = normalizeOrigin(raw);
+    if (origin) seen.add(origin);
+    else log.warn("MUNINN_ALLOWED_ORIGINS entry {entry} is not a parseable origin — dropped", { entry: raw });
   }
   return [...seen];
 }

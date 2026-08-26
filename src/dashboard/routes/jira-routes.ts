@@ -29,8 +29,10 @@
  *     `{messageId, draftId, status}` per draft on one thread, no content.
  *   · `POST /api/jira/draft/:id/save` — the card's «Lagre», stamping `saved_at`.
  *
- * `GET /api/jira/draft/:id` carries `Access-Control-Allow-Origin: *` with an
- * `app.options` preflight, matching `POST /api/research/chat`. The consequence is
+ * `GET /api/jira/draft/:id` carries an `Access-Control-Allow-Origin` header with
+ * an `app.options` preflight, matching `POST /api/research/chat` — `*` with
+ * `MUNINN_AUTH` off, and the allowlisted request origin (or nothing) in an
+ * authenticating mode, per `src/auth/cors.ts`. The consequence is
  * stated in migration 070 and accepted: any page the browser visits could read a
  * draft id it can guess, bounded by `DASHBOARD_HOST` defaulting to loopback.
  *
@@ -51,6 +53,7 @@
 import type { Hono } from "hono";
 import type { Context } from "hono";
 import type { Config } from "../../config.ts";
+import { corsHeaders } from "../../auth/cors.ts";
 import { getMcpStatus, findCriticalDown, type McpServerStatus } from "../../ai/mcp-status.ts";
 import { jiraBotMissingMessage, resolveJiraBotLive } from "../../jira/bot.ts";
 import { findJiraTemplate, resolveJiraTemplates } from "../../jira/templates.ts";
@@ -102,11 +105,17 @@ export function __setJiraThreadTurnForTest(fn: JiraThreadTurnRunner | undefined)
  * accepted-risk note in migration 070 covers a page READING a draft id it can
  * guess, not a page WRITING one. Reading a finished draft is the whole of it.
  */
-const CORS_GET = {
-  "Access-Control-Allow-Origin": "*",
+const CORS_GET_METHODS = {
   "Access-Control-Allow-Methods": "GET",
   "Access-Control-Allow-Headers": "Content-Type",
 } as const;
+
+/** `Access-Control-Allow-Origin` is a per-request answer now, so only the
+ *  method/header half is a constant: `*` with `MUNINN_AUTH` off, the request's
+ *  own origin when it is on `MUNINN_ALLOWED_ORIGINS`, and no header at all
+ *  otherwise. See `src/auth/cors.ts` for why the disposition is mode-gated
+ *  rather than dropped outright. */
+const corsGet = (c: Context) => corsHeaders(c, CORS_GET_METHODS);
 
 /**
  * What a 500 says to the caller.
@@ -494,11 +503,11 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
   // about a parameter that cannot be a draft id.
   app.options("/api/jira/draft/:id", (c, next) => {
     if (!isValidUuid(c.req.param("id"))) return next();
-    return new Response(null, { status: 204, headers: CORS_GET });
+    return new Response(null, { status: 204, headers: corsGet(c) });
   });
 
   app.get("/api/jira/draft/:id", async (c) => {
-    for (const [k, v] of Object.entries(CORS_GET)) c.header(k, v);
+    for (const [k, v] of Object.entries(corsGet(c)) as [string, string][]) c.header(k, v);
     try {
       const id = c.req.param("id");
       if (!isValidUuid(id)) return unknownDraft(c);

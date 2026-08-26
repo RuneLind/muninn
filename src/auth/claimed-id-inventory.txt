@@ -1,0 +1,56 @@
+# The claimed-id and CORS inventory - PR C's acceptance item 12.
+#
+# Re-derived from the source by src/auth/inventory.ts on every test run and
+# compared against this file. It exists because §2 of the NAV-login plan makes
+# the inventory a COMMAND rather than a number: two successive drafts of that
+# document cited a route count that had already gone stale, and the narrow form
+# of the first grep missed the two app.on("HEAD", ...) routes entirely.
+#
+# Format:  <file> | <signature> | <disposition>   # optional note
+# Dispositions are the vocabulary in src/auth/inventory.ts. A row with none, or
+# with one not on that list, FAILS - which is the point: a route added later
+# lands here as unassigned work rather than as a silently unguarded surface.
+#
+# Line numbers are deliberately absent, and a body/query read is attributed to
+# the ROUTE it lives in rather than counted per file: a per-file count was a
+# checksum over prose (comments naming `body.userId` matched it) and a per-file
+# row could not carry an honest disposition when a file held both guarded and
+# unguarded reads.
+
+## claimed :userId path parameters
+
+src/chat/routes.ts | GET /context-usage/:userId/:botName | own-user-guard
+src/chat/routes.ts | GET /preferences/:userId/:botName | own-user-guard
+src/chat/routes.ts | GET /reports/:botName/:userId/:issueKey | own-user-guard
+src/chat/routes.ts | GET /specs/:botName/:userId/:issueKey | own-user-guard
+src/chat/routes.ts | GET /threads/:userId/:botName | own-user-guard
+src/chat/routes.ts | GET /tool-usage/:userId/:botName | own-user-guard
+src/chat/routes.ts | HEAD /reports/:botName/:userId/:issueKey | own-user-guard   # the 200/404 oracle; bodyless 403
+src/chat/routes.ts | HEAD /specs/:botName/:userId/:issueKey | own-user-guard   # ditto
+src/chat/routes.ts | POST /reports/:botName/:userId/:issueKey | own-user-guard
+src/chat/routes.ts | POST /specs/:botName/:userId/:issueKey | own-user-guard
+src/chat/routes.ts | PUT /preferences/:userId/:botName/connector | own-user-guard
+src/dashboard/routes/data-routes.ts | GET /api/goals/:userId | own-user-guard
+src/dashboard/routes/data-routes.ts | GET /api/memories/user/:userId | own-user-guard
+src/dashboard/routes/data-routes.ts | GET /api/scheduled-tasks/:userId | own-user-guard
+src/dashboard/routes/data-routes.ts | GET /api/user-settings/:userId | own-user-guard
+src/dashboard/routes/data-routes.ts | GET /api/messages/:userId | admin-zone-deferred   # §4: reading a colleague's whole message history is an operator act with no "own" version
+src/dashboard/routes/data-routes.ts | GET /api/users/:userId/overview | admin-zone-deferred   # §4, same reason
+
+## claimed userId in a body or query, per route
+
+src/chat/routes.ts | body.userId in POST /conversations | own-user-guard
+src/chat/routes.ts | body.userId in POST /threads | own-user-guard
+src/chat/routes.ts | body.userId in PUT /bot-preferences/:botName/default-user | admin-zone-deferred   # §4 moves this route to the admin zone; it sets BOT-GLOBAL state, so there is no "own" version
+src/dashboard/routes/data-routes.ts | body.userId in POST /api/users | admin-zone-deferred   # minting a row has no "own" version, and a guard here would only make it un-callable
+src/dashboard/routes/research-routes.ts | body.userId in POST /api/research/chat | own-user-guard   # creates a conversation AND a real thread
+src/dashboard/routes/sse-routes.ts | query("viewer") in GET /api/events | own-user-guard   # a claimed identity under another name: it scopes the waterfall + phase pill, and the run metadata carries a traceId that /api/prompts/:traceId expands into a whole prompt
+src/dashboard/routes/wiki-routes.ts | body.userId in POST /api/wiki/ask/chat | own-user-guard   # same shape as research/chat
+
+## Access-Control-Allow-Origin
+
+# Deliberately EMPTY. After PR C nothing outside src/auth/cors.ts sets this
+# header, and comment lines are excluded from the derivation - a row set that
+# counted prose was a checksum over prose, and churned the moment this change
+# was documented. The stricter assertion lives in inventory.test.ts: the raw
+# grep must contain no wildcard literal anywhere in src/ outside src/auth/.

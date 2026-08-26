@@ -1,5 +1,6 @@
 import { getDb } from "./client.ts";
 import type { Memory, MemoryScope } from "../types.ts";
+import { sharedMemoryReadsAllowed } from "../auth/policy.ts";
 
 interface SaveMemoryParams {
   userId: string;
@@ -52,13 +53,29 @@ export async function searchMemories(
   botName?: string,
 ): Promise<Memory[]> {
   const sql = getDb();
+  // The `shared` branch is a CROSS-USER read — see `sharedMemoryReadsAllowed`.
+  // It is narrowed here AND in `searchMemoriesHybrid` below: this function is
+  // the no-embedding fallback the hybrid one delegates to, so a fix applied to
+  // only one of them is inert on exactly the path that happens to be taken.
+  // That split is this repo's documented recurring failure class.
   const rows = botName
-    ? await sql`
+    ? sharedMemoryReadsAllowed()
+      ? await sql`
       SELECT id, user_id, content, summary, tags, scope, created_at,
              ts_rank(search_vector, plainto_tsquery('english', ${query})) AS rank
       FROM memories
       WHERE bot_name = ${botName}
         AND ((scope = 'personal' AND user_id = ${userId}) OR scope = 'shared')
+        AND search_vector @@ plainto_tsquery('english', ${query})
+      ORDER BY rank DESC
+      LIMIT ${limit}
+    `
+      : await sql`
+      SELECT id, user_id, content, summary, tags, scope, created_at,
+             ts_rank(search_vector, plainto_tsquery('english', ${query})) AS rank
+      FROM memories
+      WHERE bot_name = ${botName}
+        AND user_id = ${userId}
         AND search_vector @@ plainto_tsquery('english', ${query})
       ORDER BY rank DESC
       LIMIT ${limit}
@@ -100,9 +117,13 @@ export async function searchMemoriesHybrid(
   const embeddingStr = `[${embedding.join(",")}]`;
 
   // Reciprocal Rank Fusion: combine FTS + vector rankings
-  // When botName is provided, include both personal (for this user) and shared memories
+  // When botName is provided, include both personal (for this user) and shared
+  // memories — unless this instance authenticates, where `shared` is narrowed to
+  // the reader's own rows (`sharedMemoryReadsAllowed`).
   const scopeFilter = botName
-    ? `bot_name = $5 AND ((scope = 'personal' AND user_id = $1) OR scope = 'shared')`
+    ? sharedMemoryReadsAllowed()
+      ? `bot_name = $5 AND ((scope = 'personal' AND user_id = $1) OR scope = 'shared')`
+      : `bot_name = $5 AND user_id = $1`
     : `user_id = $1`;
   const params: any[] = botName
     ? [userId, query, embeddingStr, limit, botName]

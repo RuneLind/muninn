@@ -19,6 +19,8 @@ import { isValidUuid } from "../routes/route-utils.ts";
 import { knowledgeApiHandler, fetchKnowledgeApi } from "../../ai/knowledge-api-client.ts";
 import { parseMcpConfig } from "../../ai/connectors/copilot-mcp.ts";
 import { checkMcpServerHealth } from "../../ai/connectors/mcp-health.ts";
+import { applyCors, corsHeaders } from "../../auth/cors.ts";
+import { requireOwnUser } from "../../auth/guard.ts";
 
 const log = getLog("dashboard");
 
@@ -99,7 +101,7 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
 
   // Research: list jiraAnalysis prompt variants for a bot (Chrome extension dropdown)
   app.get("/api/research/variants", (c) => {
-    c.header("Access-Control-Allow-Origin", "*");
+    applyCors(c);
     const botName = c.req.query("bot");
     if (!botName) return c.json({ error: "Missing bot parameter" }, 400);
     const bot = discoverAllBots().find((b) => b.name === botName);
@@ -172,17 +174,16 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
     log.info("CORS preflight for /api/research/chat from {origin}", { origin: c.req.header("origin") || "unknown" });
     return new Response(null, {
       status: 204,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
+      headers: corsHeaders(c, {
         "Access-Control-Allow-Methods": "POST",
         "Access-Control-Allow-Headers": "Content-Type",
-      },
+      }),
     });
   });
 
   // Research chat: create thread + send first message via bot chat
   app.post("/api/research/chat", async (c) => {
-    c.header("Access-Control-Allow-Origin", "*");
+    applyCors(c);
     const origin = c.req.header("origin") || c.req.header("referer") || "unknown";
     log.info("POST /api/research/chat from {origin}", { origin });
 
@@ -218,25 +219,34 @@ export function registerResearchRoutes(app: Hono, config: Config): void {
       }, 503);
     }
 
-    // Resolve userId — require explicit userId when multiple users exist
+    // Resolve userId — require explicit userId when multiple users exist.
+    // The claim is replaced by the session identity first: this route creates a
+    // conversation AND a real thread owned by the named user, so an unguarded
+    // `body.userId` writes rows into a colleague's account. On an authenticating
+    // instance the pinned/session id must itself be one of the bot's chat users,
+    // or the existing `needsUser` 400 below answers — the honest failure, not a
+    // silent fall-through to `botUsers[0]`.
+    const own = requireOwnUser(c, body.userId);
+    if (!own.ok) return own.response;
+    const claimedUserId = own.userId;
     const chatConfig = await loadChatConfig(botConfig.name);
     const botUsers = chatConfig?.users ?? [];
-    if (body.userId && !botUsers.find((u) => u.id === body.userId)) {
+    if (claimedUserId && !botUsers.find((u) => u.id === claimedUserId)) {
       return c.json({
-        error: `User "${body.userId}" not found for bot "${botConfig.name}"`,
+        error: `User "${claimedUserId}" not found for bot "${botConfig.name}"`,
         needsUser: true,
         users: botUsers.map((u) => ({ id: u.id, name: u.name })),
       }, 400);
     }
-    if (!body.userId && botUsers.length > 1) {
+    if (!claimedUserId && botUsers.length > 1) {
       return c.json({
         error: "Multiple users available — please specify userId",
         needsUser: true,
         users: botUsers.map((u) => ({ id: u.id, name: u.name })),
       }, 400);
     }
-    const chatUser = body.userId
-      ? botUsers.find((u) => u.id === body.userId)!
+    const chatUser = claimedUserId
+      ? botUsers.find((u) => u.id === claimedUserId)!
       : botUsers[0];
     if (!chatUser) {
       return c.json({ error: `No user found for bot "${botConfig.name}"` }, 400);
