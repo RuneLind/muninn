@@ -114,6 +114,26 @@ describe("acceptance 5 — fail closed, both directions", () => {
     expect(resolveAuthConfig(entraEnv()).entra?.introspectionEndpoint).toBe("http://texas.test/introspect");
   });
 
+  test("…and one that PARSES but is not http(s) is refused too", () => {
+    // `new URL` accepts any scheme, so parse-only left the check one typo to
+    // the left of the failure it was written for: the introspection call is a
+    // `fetch` POST, which speaks http(s) and nothing else, so each of these
+    // booted a pod that looked healthy and 401'd every single request.
+    // `texas.nais/introspect` is the sharpest one — it PARSES, as scheme
+    // `texas.nais:` with path `/introspect`, which is exactly the shape an
+    // operator types when they mean a host.
+    for (const bad of ["mailto:x", "file:///etc/passwd", "texas.nais/introspect", "ftp://texas.test/x", "data:,x"]) {
+      expect(() => resolveAuthConfig(entraEnv({ NAIS_TOKEN_INTROSPECTION_ENDPOINT: bad })), bad)
+        .toThrow(/NAIS_TOKEN_INTROSPECTION_ENDPOINT/);
+    }
+    // Both accepted schemes still boot — the sidecar's Texas is plain HTTP
+    // inside the pod, and an out-of-cluster one would be HTTPS.
+    for (const good of ["http://texas.test/introspect", "https://texas.test/introspect"]) {
+      expect(resolveAuthConfig(entraEnv({ NAIS_TOKEN_INTROSPECTION_ENDPOINT: good })).entra?.introspectionEndpoint)
+        .toBe(good);
+    }
+  });
+
   test("the MUNINN_ADMIN_IDENTS refusal says something TRUE about the mode it fired in", () => {
     // One message carried the `local`-mode note ("this variable is currently
     // INERT … it does not grant anyone admin") in BOTH modes. In `entra` that

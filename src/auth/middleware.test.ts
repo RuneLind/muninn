@@ -4,6 +4,7 @@ import {
   createAuthMiddleware,
   isDirectLoopback,
   LOGIN_TOKEN_PLACEHOLDER,
+  presentedToken,
   TOKEN_HEADER,
   TOKEN_QUERY_PARAM,
   __setLoopbackBypassForTest,
@@ -96,6 +97,67 @@ const TAILSCALE_SERVE_HEADERS = {
   "tailscale-user-login": "someone@example.com",
   "tailscale-user-name": "Example Operator",
 };
+
+describe("credential-channel priority — X-Muninn-Token wins in local mode", () => {
+  /**
+   * Only ONE channel is read, and whatever it yields is the credential the
+   * request is judged on — there is no "try the next one". So the ORDER is the
+   * whole behaviour, and putting `Authorization: Bearer` first meant any proxy
+   * that injects an `Authorization` header of its own (an upstream SSO, a
+   * tailnet identity header) turned a request carrying a CORRECT
+   * `X-Muninn-Token` into a 401. The operator's explicit credential has to beat
+   * an ambient one.
+   */
+  test("a correct X-Muninn-Token authenticates even under a foreign Authorization header", async () => {
+    // Through a proxy, so the loopback bypass is off and the credential is the
+    // only thing that can grant this request.
+    const res = await fetch(`${BASE}/who`, {
+      headers: {
+        ...TAILSCALE_SERVE_HEADERS,
+        [TOKEN_HEADER]: SECRET,
+        authorization: "Bearer some-upstream-sso-token",
+      },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ userId: "rune", role: "user" });
+  });
+
+  test("Bearer still carries the secret when there is no X-Muninn-Token", async () => {
+    // The channel is not demoted, only ordered: wonderwall forwards Bearer, and
+    // it stays a first-class way to present the local secret.
+    const res = await fetch(`${BASE}/who`, {
+      headers: { ...TAILSCALE_SERVE_HEADERS, authorization: `Bearer ${SECRET}` },
+    });
+    expect(res.status).toBe(200);
+  });
+
+  test("presentedToken: the local order is header → bearer → query", () => {
+    const url = `http://x/y?${TOKEN_QUERY_PARAM}=from-query`;
+    const all = new Headers({ [TOKEN_HEADER]: "from-header", authorization: "Bearer from-bearer" });
+    expect(presentedToken(all, url, true)).toBe("from-header");
+
+    const noHeader = new Headers({ authorization: "Bearer from-bearer" });
+    expect(presentedToken(noHeader, url, true)).toBe("from-bearer");
+    expect(presentedToken(new Headers(), url, true)).toBe("from-query");
+    expect(presentedToken(new Headers(), "http://x/y", true)).toBeNull();
+
+    // A blank header must not shadow a real Bearer — an empty value is not a
+    // presented credential.
+    const blank = new Headers({ [TOKEN_HEADER]: "   ", authorization: "Bearer from-bearer" });
+    expect(presentedToken(blank, url, true)).toBe("from-bearer");
+  });
+
+  test("…and in entra, Bearer is the WHOLE list — the reorder does not reach it", () => {
+    // The `local`-only gate is not cosmetic: in `entra` either of the other two
+    // can only carry something Texas will refuse, so reading them is a Texas
+    // round-trip per forged value.
+    const url = `http://x/y?${TOKEN_QUERY_PARAM}=from-query`;
+    const all = new Headers({ [TOKEN_HEADER]: "from-header", authorization: "Bearer from-bearer" });
+    expect(presentedToken(all, url, false)).toBe("from-bearer");
+    expect(presentedToken(new Headers({ [TOKEN_HEADER]: "from-header" }), url, false)).toBeNull();
+    expect(presentedToken(new Headers(), url, false)).toBeNull();
+  });
+});
 
 describe("the loopback bypass — §8's escape hatch", () => {
   test("a direct loopback request is granted with no credential at all", async () => {

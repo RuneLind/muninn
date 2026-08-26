@@ -18,6 +18,7 @@ import { researchCardScript } from "./components/research-card.ts";
 import { threadManagerScript } from "./components/thread-manager.ts";
 import { knowledgeLinksScript } from "./components/knowledge-links.ts";
 import { authedFetchScript } from "./components/authed-fetch.ts";
+import { WS_PREOPEN_BACKOFF_MS, WS_STALLED_NOTICE_ID, WS_STALLED_NOTICE_TEXT } from "./components/ws-retry.ts";
 
 export async function renderChatPage(): Promise<string> {
   const [webFormatScript, helpersScript, inspectorScript, jiraEntryBundle, jiraCardBundle] =
@@ -204,6 +205,18 @@ const CHAT_SSE_SCRIPT = `
     // can close the live one, and a STALE stream's onerror must not close (or
     // resurrect itself over) the stream that replaced it.
     var mine = sseClient(url, {
+      onopen: function() {
+        // The stream is OPEN, which is the only evidence that a previous
+        // refusal is over. Without this the latch below was released by
+        // __muninnClearAuthReloadStamp alone — whose one caller is init — so a
+        // single transient failure killed the stream for the life of the tab
+        // and left a "session expired" banner over a session that was fine.
+        // Measured on a local instance: permanent, where the pre-latch page
+        // recovered in 3 s.
+        if (conn !== mine) return;   // a superseded stream must speak for nothing
+        window.__muninnAuthChannelRecovered('sse');
+      },
+
       agent_status: function(e) {
         updateAgentStatus(JSON.parse(e.data));
       },
@@ -268,8 +281,11 @@ const CHAT_SSE_SCRIPT = `
         // retry re-entered the rule every 3 s and re-armed the breaker every
         // 60 s: measured on a permanent 403 for /chat/events, that is a reload
         // a minute forever plus a banner about a session that never expired.
-        // Released by a successful /chat/me (which clears the latches) or by an
-        // explicit reconnectChatSse().
+        //
+        // Released three ways, and the last two exist because the first is not
+        // enough: a successful /chat/me (init only), an explicit
+        // reconnectChatSse() below, and the onopen handler above — a stream that
+        // opens is the evidence that whatever refused it has stopped.
         if (window.__muninnAuthLatched('sse')) return;
         setTimeout(function() {
           if (conn !== mine) return;
@@ -294,6 +310,12 @@ const CHAT_SSE_SCRIPT = `
     updateAgentStatus({ phase: 'idle' });
     if (conn) { try { conn.close(); } catch {} }
     conn = null;
+    // An explicit reconnect releases the latch — otherwise the new stream is
+    // opened with the old one's verdict still spent, and its FIRST transient
+    // error takes the terminal branch above instead of the 3 s retry. The
+    // banner is deliberately left alone: asking for a reconnect is not evidence
+    // that one succeeded, and onopen is what removes it.
+    window.__muninnAuthReleaseLatch('sse');
     connectSSE();   // a no-op while no viewer is known — see connectSSE
   };
 
@@ -720,6 +742,34 @@ const CHAT_SCRIPT = `
     }, function() { return true; });
   }
 
+  // ── The pre-open retry ladder (src/chat/views/components/ws-retry.ts) ──
+  //
+  // A socket that never opened but whose SESSION is alive is the origin-refused
+  // handshake: src/auth/ws-upgrade.ts answers 403 while /chat/me answers 200.
+  // That does not self-heal, so retrying it every 2 s forever is a silent
+  // permanent loop. Back off, give up, and SAY so — with a notice that is
+  // deliberately not the session-expiry banner, because nothing has expired.
+  var WS_PREOPEN_BACKOFF_MS = ${JSON.stringify(WS_PREOPEN_BACKOFF_MS)};
+  var wsPreOpenFailures = 0;
+
+  function showWsStalledNotice() {
+    if (document.getElementById(${JSON.stringify(WS_STALLED_NOTICE_ID)}) || !document.body) return;
+    var bar = document.createElement('div');
+    bar.id = ${JSON.stringify(WS_STALLED_NOTICE_ID)};
+    bar.setAttribute('role', 'status');
+    bar.style.cssText =
+      'position:fixed;top:0;left:0;right:0;z-index:99998;padding:8px 14px;' +
+      'background:#f59e0b;color:#1f2937;font:600 13px/1.4 ui-sans-serif,system-ui,sans-serif;' +
+      'text-align:center;box-shadow:0 2px 8px rgba(0,0,0,0.3);';
+    bar.textContent = ${JSON.stringify(WS_STALLED_NOTICE_TEXT)};
+    document.body.appendChild(bar);
+  }
+
+  function hideWsStalledNotice() {
+    var bar = document.getElementById(${JSON.stringify(WS_STALLED_NOTICE_ID)});
+    if (bar && bar.parentNode) bar.parentNode.removeChild(bar);
+  }
+
   // WebSocket connection
   function connectWs() {
     var protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -732,7 +782,15 @@ const CHAT_SCRIPT = `
     // that distinguishes "the connection dropped" from "the server would not
     // let us in".
     var everOpened = false;
-    ws.onopen = function() { everOpened = true; };
+    ws.onopen = function() {
+      everOpened = true;
+      // The handshake was accepted, so the ladder starts over and anything it
+      // put on screen comes off. Same "an open IS the evidence" rule the SSE
+      // stream follows.
+      wsPreOpenFailures = 0;
+      hideWsStalledNotice();
+      window.__muninnAuthChannelRecovered('ws');
+    };
     ws.onmessage = function(e) {
       try { handleWsEvent(JSON.parse(e.data)); }
       catch (err) { console.warn('Failed to parse WS message:', err); }
@@ -760,17 +818,27 @@ const CHAT_SCRIPT = `
         return;
       }
       if (everOpened) {
+        // A connection that demonstrably WORKED once and then dropped is an
+        // ordinary blip: unchanged, 2 s, forever.
         setTimeout(connectWs, 2000);
         return;
       }
       // Never opened: ASK, instead of assuming a dropped connection. Only a
-      // session the server still answers for earns the 2 s retry; a refusal
+      // session the server still answers for earns a retry; a refusal
       // goes through the same mode-conditional rule as the 4401 close (which
       // is idempotent — authedFetch's own 401 handling may already have acted
       // on it, and a second banner is the same banner).
       chatSessionAlive().then(function(alive) {
-        if (alive) { setTimeout(connectWs, 2000); return; }
-        window.__muninnAuthRefusal('ws');
+        if (!alive) { window.__muninnAuthRefusal('ws'); return; }
+        // Alive, and still refused. /chat/me answering 200 while the upgrade
+        // answers 403 is exactly the origin-refused handshake — a config fact,
+        // not a transient — so the retry is BOUNDED and the giving-up is
+        // visible. Only a 401 is an expiry, so this is deliberately NOT the
+        // expiry banner.
+        wsPreOpenFailures++;
+        var delay = WS_PREOPEN_BACKOFF_MS[wsPreOpenFailures - 1];
+        if (delay === undefined) { showWsStalledNotice(); return; }
+        setTimeout(connectWs, delay);
       });
     };
   }

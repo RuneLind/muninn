@@ -1,7 +1,14 @@
 import { test, expect, describe } from "bun:test";
 import { setupTestDb } from "../test/setup-db.ts";
 import { getDb } from "./client.ts";
-import { ENTRA_PROVIDER, mintNavUserId, resolveNavUser, slugifyIdPart, VALID_USER_ID } from "./user-identities.ts";
+import {
+  ENTRA_PROVIDER,
+  mintNavUserId,
+  resolveNavUser,
+  slugifyIdPart,
+  UnmintableClaimsError,
+  VALID_USER_ID,
+} from "./user-identities.ts";
 
 /**
  * Provisioning, against a real Postgres.
@@ -74,6 +81,23 @@ describe("mintNavUserId", () => {
     expect(() => mintNavUserId(claims({ navIdent: null, oid: "   " }))).toThrow(/oid/i);
     // A usable oid still saves an unusable NAVident — that is the fallback.
     expect(mintNavUserId(claims({ navIdent: "///" }))).toBe(`nav-${OID_A}`);
+  });
+
+  test("that refusal carries the STRUCTURAL marker the introspector classifies on", () => {
+    // It is a permanent property of the token's claims, so
+    // `createEntraIntrospector` must answer `denied` (30 s negative cache) and
+    // not `unavailable` (503, retryable, cached for nothing). It reads
+    // `unmintableClaims === true` off the thrown value rather than importing
+    // this class — the auth module's only edge to `src/db/` is a lazy
+    // `import()` — so the PROPERTY is the contract, not the class identity, and
+    // renaming it silently turns every such login back into a retry storm.
+    let thrown: unknown;
+    try { mintNavUserId(claims({ navIdent: "---", oid: "!!!" })); } catch (err) { thrown = err; }
+    expect(thrown).toBeInstanceOf(UnmintableClaimsError);
+    expect((thrown as { unmintableClaims?: unknown }).unmintableClaims).toBe(true);
+    // A DB failure must not wear it — that is the half that stays `unavailable`.
+    expect((new Error("the database is unreachable") as { unmintableClaims?: unknown }).unmintableClaims)
+      .toBeUndefined();
   });
 
   test("the minted id is validated against the SHARED VALID_USER_ID", () => {

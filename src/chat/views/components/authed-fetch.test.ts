@@ -137,6 +137,18 @@ describe("acceptance 20 — no bare fetch survives under src/chat/views/", () =>
     expect(html).toContain("__muninnAuthRefusal('ws')");
     expect(html).toContain("__muninnAuthRefusal('sse')");
   });
+
+  test("both latch RELEASES are wired — the page has an onopen and a reconnect clear", async () => {
+    // A latch with no release is a permanent outage. These two call sites are
+    // the whole recovery path and both are template-string code no type checker
+    // looks at: deleting either restores the "one transient failure kills the
+    // stream for the life of the tab" regression, silently.
+    const html = await renderChatPage();
+    expect(html).toContain("__muninnAuthChannelRecovered('sse')");
+    expect(html).toContain("__muninnAuthReleaseLatch('sse')");
+    // And the socket's open is the ws-side half of the same rule.
+    expect(html).toContain("__muninnAuthChannelRecovered('ws')");
+  });
 });
 
 // ── The behaviour half ────────────────────────────────────────────────────
@@ -156,6 +168,14 @@ interface Stub {
   authedFetch: (url: string) => Promise<{ status: number }>;
   setProvider: (p: string | null) => void;
   clearStamp: () => void;
+  /** The channel OPENED — releases its latch and, when nothing is left latched,
+   *  takes the banner down. */
+  recovered: (channel: string) => void;
+  /** An explicit reconnect — releases the latch and leaves the banner alone. */
+  releaseLatch: (channel: string) => void;
+  /** How many banner nodes were ever APPENDED, which a removal does not reduce.
+   *  The idempotency assertion needs this and the presence one needs `banner()`. */
+  bannerAppends: () => number;
   fetches: number;
 }
 
@@ -163,13 +183,27 @@ interface Stub {
 function evalScript(
   opts: { status?: number; body?: unknown; raw?: string; storageThrows?: boolean } = {},
 ): Stub {
-  const state = { reloads: 0, now: 1_700_000_000_000, fetches: 0 };
+  const state = { reloads: 0, now: 1_700_000_000_000, fetches: 0, bannerAppends: 0 };
   const store: Record<string, string> = {};
   /** Everything appended to <body>, in order. */
-  const bodyChildren: { id?: string }[] = [];
+  const bodyChildren: Node[] = [];
   /** Everything appended to #chatMessages — must stay EMPTY for the banner. */
-  const chatChildren: { id?: string }[] = [];
+  const chatChildren: Node[] = [];
   const all = () => [...bodyChildren, ...chatChildren];
+
+  /** Enough of a Node for `appendChild` + `parentNode.removeChild`, which is
+   *  what the recovery path uses to take the banner back down. */
+  interface Node { id?: string; parentNode?: { removeChild: (child: Node) => void } }
+  const appender = (into: Node[]) => (el: Node) => {
+    into.push(el);
+    if (el.id === EXPIRED_BANNER_ID) state.bannerAppends++;
+    el.parentNode = {
+      removeChild: (child: Node) => {
+        const i = into.indexOf(child);
+        if (i >= 0) into.splice(i, 1);
+      },
+    };
+  };
 
   const win: Record<string, unknown> = {
     location: { reload: () => { state.reloads++; } },
@@ -188,10 +222,10 @@ function evalScript(
         removeItem: (k: string) => { delete store[k]; },
       },
     document: {
-      body: { appendChild: (el: { id?: string }) => bodyChildren.push(el) },
+      body: { appendChild: appender(bodyChildren) },
       getElementById: (id: string) =>
         id === "chatMessages"
-          ? { appendChild: (el: { id?: string }) => chatChildren.push(el) }
+          ? { appendChild: appender(chatChildren) }
           : all().find((c) => c.id === id) ?? null,
       createElement: () => ({ id: "", className: "", textContent: "", style: { cssText: "" }, setAttribute: () => {} }),
     },
@@ -219,6 +253,9 @@ function evalScript(
     set now(v: number) { state.now = v; },
     banner: () => all().some((c) => c.id === EXPIRED_BANNER_ID),
     banners: () => all().filter((c) => c.id === EXPIRED_BANNER_ID).length,
+    bannerAppends: () => state.bannerAppends,
+    recovered: (channel) => (win.__muninnAuthChannelRecovered as (c: string) => void)(channel),
+    releaseLatch: (channel) => (win.__muninnAuthReleaseLatch as (c: string) => void)(channel),
     bannerIsPageLevel: () =>
       bodyChildren.some((c) => c.id === EXPIRED_BANNER_ID) &&
       !chatChildren.some((c) => c.id === EXPIRED_BANNER_ID),
@@ -398,6 +435,79 @@ describe("the SSE/WS channel latch — a terminal refusal is TERMINAL", () => {
     off.setProvider(null);
     expect(off.refusal("sse")).toBe("ignore");
     expect(off.latched("sse")).toBe(false);
+  });
+
+  test("a channel that OPENS releases its own latch and takes the banner down", () => {
+    // ⚠️ The regression this closes. The latch's ONLY release was
+    // `__muninnClearAuthReloadStamp`, whose only caller is init — so a latch set
+    // after init lived for the whole tab. On a `local` instance one transient
+    // /chat/events failure therefore banner'd the channel and killed the stream
+    // PERMANENTLY, where the pre-latch page recovered in 3 s. An open stream is
+    // the evidence the refusal is over.
+    const s = evalScript();
+    s.setProvider("local");
+    expect(s.refusal("sse")).toBe("banner");
+    expect(s.latched("sse")).toBe(true);
+    expect(s.banner()).toBe(true);
+
+    s.recovered("sse");
+    expect(s.latched("sse")).toBe(false);
+    expect(s.banner()).toBe(false);
+  });
+
+  test("…but NOT while another channel is still latched", () => {
+    // The banner is one page-level bar shared by three channels. An SSE recovery
+    // clearing it while a 4401'd socket is still refused would hide a live
+    // expiry behind a stream that happens to work.
+    const s = evalScript();
+    s.setProvider("local");
+    s.refusal("ws");
+    s.refusal("sse");
+    s.recovered("sse");
+    expect(s.latched("sse")).toBe(false);
+    expect(s.latched("ws")).toBe(true);
+    expect(s.banner()).toBe(true);
+
+    // Once the socket comes back too, it goes.
+    s.recovered("ws");
+    expect(s.banner()).toBe(false);
+  });
+
+  test("a recovery on an UNLATCHED channel is a no-op, not a banner eraser", () => {
+    // The ordinary case: every successful stream open calls this, on a page
+    // where nothing has been refused. It must not become a second, decision-free
+    // door onto removing a banner some other channel put up.
+    const s = evalScript();
+    s.setProvider("local");
+    s.refusal("ws");
+    expect(s.banner()).toBe(true);
+    s.recovered("sse");        // sse was never latched
+    expect(s.banner()).toBe(true);
+  });
+
+  test("an explicit reconnect releases the latch and LEAVES the banner", () => {
+    // `reconnectChatSse()` is a request, not an outcome. Releasing the latch is
+    // what makes the new stream's first transient error take the 3 s retry
+    // instead of the terminal branch; removing the banner would claim a recovery
+    // nothing has demonstrated yet. `onopen` is what removes it.
+    const s = evalScript();
+    s.setProvider("local");
+    s.refusal("sse");
+    s.releaseLatch("sse");
+    expect(s.latched("sse")).toBe(false);
+    expect(s.banner()).toBe(true);
+  });
+
+  test("after a recovery the channel can banner AGAIN — the release is not a mute", () => {
+    const s = evalScript();
+    s.setProvider("local");
+    s.refusal("sse");
+    s.recovered("sse");
+    expect(s.banner()).toBe(false);
+    expect(s.refusal("sse")).toBe("banner");
+    expect(s.banner()).toBe(true);
+    // Two separate appends, because the first node really was removed.
+    expect(s.bannerAppends()).toBe(2);
   });
 
   test("a successful /chat/me RELEASES the latches", () => {

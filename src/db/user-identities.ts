@@ -103,6 +103,41 @@ export function slugifyIdPart(value: string): string {
 }
 
 /**
+ * A claim set no `users.id` can be minted from.
+ *
+ * ## Why this is a TYPE and not just an Error
+ *
+ * `createEntraIntrospector` wraps `resolveUser` in one catch that answers
+ * `unavailable` — "the database is the provisioning path, so a DB outage
+ * refuses the login rather than inventing an identity". `unavailable` is
+ * **503, retryable, and cached for nothing**, which is exactly right for an
+ * outage and exactly wrong here: this condition is a property of the token's
+ * own claims and is permanent for that token, so every retry from every open
+ * tab spent another Texas round-trip, another transaction and another log line,
+ * forever. Classified `denied` it takes the 30 s negative cache like any other
+ * refusal about immutable bytes.
+ *
+ * ## The marker is a PROPERTY, checked structurally
+ *
+ * `src/auth/introspect.ts` recognises this by `unmintableClaims === true`
+ * rather than by `instanceof`, so it needs no import: the introspector's only
+ * edge to `src/db/` is the lazy `import()` inside `defaultResolveUser`, which is
+ * what keeps `src/auth/` loadable (and unit-testable) with no database. A
+ * top-level import of this class would turn that into a hard edge, and an
+ * `instanceof` across two module instances is a false negative anyway. The
+ * property name is the contract; `introspect.test.ts` pins it by constructing a
+ * real one of these and asserting the verdict.
+ */
+export class UnmintableClaimsError extends Error {
+  /** The structural marker `src/auth/introspect.ts` reads. */
+  readonly unmintableClaims = true as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "UnmintableClaimsError";
+  }
+}
+
+/**
  * The id a first login mints: `nav-<navident>`, or `nav-<oid>` when the token
  * carries no NAVident.
  *
@@ -120,7 +155,7 @@ export function mintNavUserId(claims: NavClaims): string {
     // the provisioning transaction with a message about two ids being taken.
     // Refusing at the one place that knows which claim was unusable is the
     // whole difference between a five-second and a five-hour diagnosis.
-    throw new Error(
+    throw new UnmintableClaimsError(
       `Cannot mint a users.id from these claims: neither the NAVident (${JSON.stringify(claims.navIdent)}) ` +
       `nor the oid (${JSON.stringify(claims.oid)}) contains a character a users.id may use ` +
       `(${VALID_USER_ID.source}). Refusing the login rather than minting a shared placeholder id.`,

@@ -251,8 +251,11 @@ function str(value: unknown): string | null {
 }
 
 /** `exp` is seconds since epoch per RFC 7662. A non-numeric or absent value
- *  yields null, which the socket reads as "no cap" — acceptable because the
- *  next introspection is at most `INTROSPECTION_CACHE_MAX_MS` away. */
+ *  yields null — which is a claim about the BODY, not a cap: the entra path
+ *  never lets that null reach `Identity.expiresAt` (it defaults it to
+ *  `settledAt + INTROSPECTION_CACHE_MAX_MS`, see the identity return below),
+ *  precisely because `src/chat/ws.ts` reads a null there as "no cap" and the
+ *  socket then outlived its own credential. */
 function expiryMs(value: unknown): number | null {
   const seconds = typeof value === "number" ? value : Number(value);
   return Number.isFinite(seconds) && seconds > 0 ? Math.floor(seconds * 1000) : null;
@@ -284,6 +287,21 @@ export function claimsFromIntrospection(body: unknown, tenant: string): NavToken
 }
 
 /**
+ * The KINDS of shape mismatch {@link denialReason} can report.
+ *
+ * A closed set on purpose: it is the warn-once KEY, and the key must not carry
+ * anything a caller controls — see the note on `warnedReasons` below.
+ */
+export type DenialReasonKind = "idtyp-not-user" | "no-oid";
+
+/** One reported refusal: a bounded `kind` to key a warn-once on, and the prose
+ *  an operator reads. */
+export interface DenialReasonReport {
+  readonly kind: DenialReasonKind;
+  readonly message: string;
+}
+
+/**
  * WHY a body that claimed `active: true` was nonetheless refused, or null when
  * there is nothing to report (an ordinary `active: false`, or a body that
  * parsed fine).
@@ -293,31 +311,62 @@ export function claimsFromIntrospection(body: unknown, tenant: string): NavToken
  * line, so every colleague 401s while the sidecar, the pod and Texas all look
  * healthy. One line naming the claim turns that into a five-minute diagnosis.
  * Pure, so the shapes are testable without a network.
+ *
+ * ⚠️ It returns a `kind` BESIDE the message because the message interpolates
+ * `idtyp` — a value that arrives in a response body — and the message was what
+ * keyed the warn-once set. That made the set's size an input a caller could
+ * grow: a distinct `idtyp` per token is a distinct key, a distinct entry and a
+ * distinct log line, so the "one line per distinct reason" discipline was
+ * unbounded in exactly the state it exists to bound. The `kind` is one of two
+ * literals.
  */
-export function denialReason(body: unknown): string | null {
+export function denialReason(body: unknown): DenialReasonReport | null {
   if (typeof body !== "object" || body === null) return null;
   const res = body as IntrospectionResponse;
   if (res.active !== true) return null;   // Texas answering the question, not a shape mismatch.
   const idtyp = str(res.idtyp);
   if (idtyp && idtyp.toLowerCase() !== "user") {
-    return `the token's idtyp is "${idtyp}", not "user" — a client-credentials (app) token is not a person`;
+    return {
+      kind: "idtyp-not-user",
+      message: `the token's idtyp is "${idtyp}", not "user" — a client-credentials (app) token is not a person`,
+    };
   }
   if (!str(res.oid)) {
-    return "the body carries no usable `oid` claim, which is the match key for a users row";
+    return {
+      kind: "no-oid",
+      message: "the body carries no usable `oid` claim, which is the match key for a users row",
+    };
   }
   return null;
 }
 
 /**
- * One line per distinct reason, not per request. A body-shape mismatch is the
- * same for every token in flight, and a probed instance would otherwise write
- * one line per attempt — the `middleware.ts` / `ws-upgrade.ts` discipline.
+ * One line per distinct reason KIND, not per request and not per message. A
+ * body-shape mismatch is the same for every token in flight, and a probed
+ * instance would otherwise write one line per attempt — the `middleware.ts` /
+ * `ws-upgrade.ts` discipline.
+ *
+ * ⚠️ Every key here must come from a CLOSED set (`DenialReasonKind`, or a
+ * literal at the call site). This is an unbounded `Set` that never sweeps, so a
+ * key carrying a response-body value is a memory growth path an unauthenticated
+ * caller drives.
  */
 const warnedReasons = new Set<string>();
 function warnOnce(key: string, message: string): void {
   if (warnedReasons.has(key)) return;
   warnedReasons.add(key);
   log.warn(message);
+}
+
+/**
+ * Is this the permanent "no `users.id` can be minted from these claims"
+ * refusal? See `UnmintableClaimsError` in `src/db/user-identities.ts` for why
+ * the check is STRUCTURAL rather than an `instanceof` — this module's only edge
+ * to `src/db/` is a lazy `import()`, and it stays that way.
+ */
+function isUnmintableClaims(err: unknown): boolean {
+  return typeof err === "object" && err !== null &&
+    (err as { unmintableClaims?: unknown }).unmintableClaims === true;
 }
 
 /** The cache key. A HASH, not the token: the map is process-memory a heap dump
@@ -419,7 +468,9 @@ export function createEntraIntrospector(config: AuthConfig, deps: EntraIntrospec
       // (a missing `oid`, an app token) is otherwise a silent 401 for every
       // colleague with three healthy-looking services behind it.
       const reason = denialReason(body);
-      if (reason) warnOnce(reason, `Token introspection answered active but was refused: ${reason}`);
+      if (reason) {
+        warnOnce(reason.kind, `Token introspection answered active but was refused: ${reason.message}`);
+      }
       return DENIED;
     }
 
@@ -433,16 +484,25 @@ export function createEntraIntrospector(config: AuthConfig, deps: EntraIntrospec
     try {
       userId = await resolveUser(claims);
     } catch (err) {
-      // The database is the provisioning path, so a DB outage refuses the login
-      // rather than inventing an identity — and, like a transport failure, says
-      // nothing about the token, so it is not cached.
+      const message = err instanceof Error ? err.message : String(err);
+      // A claim set no id can be minted from is a PERMANENT property of this
+      // token, not an outage — so it is a denial, and takes the 30 s negative
+      // cache. Answered `unavailable` it was 503 + retryable + uncached, i.e.
+      // every retry from every open tab spent another Texas round-trip, another
+      // provisioning transaction and another log line, forever.
+      if (isUnmintableClaims(err)) {
+        warnOnce("unmintable-claims", `Refusing an Entra login: ${message}`);
+        return DENIED;
+      }
+      // Everything else here IS an outage: the database is the provisioning
+      // path, so a DB failure refuses the login rather than inventing an
+      // identity — and, like a transport failure, says nothing about the token,
+      // so it is not cached.
       // No `oid` property: these lines land in a JSONL file sink, and an oid
       // is a directory-wide personal identifier that adds nothing an operator
       // acting on this line can use. The message says WHAT failed; the DB says
       // who. Same rule in `src/db/user-identities.ts`.
-      log.error("Could not resolve an Entra identity to a users.id: {error}", {
-        error: err instanceof Error ? err.message : String(err),
-      });
+      log.error("Could not resolve an Entra identity to a users.id: {error}", { error: message });
       return UNAVAILABLE;
     }
 

@@ -23,8 +23,11 @@ export async function saveActivity(params: SaveActivityParams): Promise<void> {
       // the codebase therefore matched nothing — `getActivityForJob`'s
       // `watcherId` lookup below, and `metadata->>'audit'`, which
       // `src/auth/audit.ts` documents as the way to find an admin-audit row.
-      // ⚠️ Rows written BEFORE this fix are still string scalars; there is no
-      // backfill here, so a query over historical rows still needs to parse.
+      // Rows written BEFORE this fix were string scalars; migration
+      // 074-activity-metadata-unmangle repairs them in place (the migration-033
+      // shape, row by row so one unparseable payload cannot abort it). A row
+      // whose inner text is not valid JSON is left as a string scalar — rare,
+      // and the only case where a historical query still needs to parse.
       params.metadata ? sql.json(params.metadata as never) : null
     })
   `;

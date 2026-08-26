@@ -83,6 +83,23 @@
  * and an unconditional clear would re-arm the budget before the stream failed
  * again — one reload per page load, forever. The hourly case is unaffected: an
  * hour-old stamp is outside the window and drops on its own.
+ *
+ * ## …and a latch has to be RELEASABLE, or it is a permanent outage
+ *
+ * `__muninnClearAuthReloadStamp` runs at init and nowhere else, so a latch set
+ * after init survived for the life of the tab. Measured on a `local` instance:
+ * one transient `/chat/events` failure banner'd the channel and killed the
+ * stream permanently, where before the latch existed it recovered in 3 s. So
+ * there are two more releases, both driven by evidence rather than by a timer:
+ *
+ *  - **`__muninnAuthChannelRecovered(channel)`** — the channel actually OPENED.
+ *    That is proof the refusal is over, so the latch is dropped AND the banner
+ *    is removed — but only once NO channel is still latched, or an SSE recovery
+ *    would hide a WebSocket expiry that is still live.
+ *  - **`__muninnAuthReleaseLatch(channel)`** — an explicit, user-driven
+ *    reconnect (`reconnectChatSse`). It clears the latch so the retry ladder
+ *    works again and deliberately leaves the banner alone: asking for a
+ *    reconnect is not evidence that one succeeded.
  */
 
 import { LOGIN_URL_HINT } from "../../../auth/zones.ts";
@@ -174,6 +191,29 @@ export function authedFetchScript(): string {
    * while the session it reports on is still expired. Same shape as the
    * build-hash banner in src/dashboard/views/components/helpers-browser.ts.
    */
+  function hideExpiredBanner() {
+    var existing = document.getElementById(BANNER_ID);
+    if (existing && existing.parentNode) existing.parentNode.removeChild(existing);
+  }
+
+  // Release a channel's latch without touching the banner. The caller is an
+  // EXPLICIT reconnect: it makes the retry ladder work again, and it is not
+  // evidence that anything reconnected.
+  window.__muninnAuthReleaseLatch = function(channel) {
+    delete latched[channel];
+  };
+
+  // The channel OPENED. That IS the evidence, so the banner goes too — but only
+  // when nothing else is still latched: an SSE recovery must not clear a banner
+  // a live WebSocket expiry is still asking for.
+  window.__muninnAuthChannelRecovered = function(channel) {
+    delete latched[channel];
+    for (var other in latched) {
+      if (latched[other] === true) return;
+    }
+    hideExpiredBanner();
+  };
+
   function showExpiredBanner() {
     if (document.getElementById(BANNER_ID) || !document.body) return;
     var banner = document.createElement('div');

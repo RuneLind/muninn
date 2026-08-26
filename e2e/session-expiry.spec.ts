@@ -1,4 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
+import { WS_PREOPEN_BACKOFF_MS, WS_STALLED_NOTICE_ID } from "../src/chat/views/components/ws-retry.ts";
 
 /**
  * Acceptance 19 + 20, in a real browser: the chat page's expiry rules, driven
@@ -56,6 +57,11 @@ interface Opts {
  *  by a reload — which is the point for the SSE case. */
 const hits = { events: 0, me: 0, sockets: 0 };
 
+/** The status `/chat/events` answers RIGHT NOW. Seeded from `opts.eventsStatus`
+ *  by `open()` and mutable mid-test, which is what lets the recovery case take
+ *  the stream from a permanent refusal back to a working one. */
+let eventsStatusNow: number | undefined;
+
 /** The intercepted socket, closable from the test AFTER the page has settled. */
 let wsRoute: { close: (o: { code: number }) => void } | null = null;
 
@@ -63,6 +69,7 @@ async function open(page: Page, opts: Opts): Promise<void> {
   hits.events = 0;
   hits.me = 0;
   hits.sockets = 0;
+  eventsStatusNow = opts.eventsStatus;
 
   if (opts.refuseUpgrade) {
     await page.addInitScript(() => {
@@ -97,7 +104,7 @@ async function open(page: Page, opts: Opts): Promise<void> {
   await page.route("**/chat/conversations*", (route) => route.fulfill({ json: { conversations: [] } }));
   await page.route("**/chat/events*", (route) => {
     hits.events += 1;
-    if (opts.eventsStatus) return route.fulfill({ status: opts.eventsStatus, body: "denied" });
+    if (eventsStatusNow) return route.fulfill({ status: eventsStatusNow, body: "denied" });
     return route.fulfill({ status: 200, headers: { "content-type": "text/event-stream" }, body: "\n\n" });
   });
   await page.route("**/chat/threads/**", (route) =>
@@ -240,6 +247,97 @@ test.describe("acceptance 19 — a PERMANENTLY refused EventSource is terminal",
     await page.waitForTimeout(7000);
     expect(hits.events).toBe(afterReload);
     expect(navigations).toBe(2);
+  });
+});
+
+test.describe("acceptance 19 — and a latched channel RECOVERS", () => {
+  test("a stream that comes back clears the latch and takes the banner down", async ({ page }) => {
+    // ⚠️ The regression the latch introduced. Its only release was
+    // `__muninnClearAuthReloadStamp`, whose sole caller is init — so on a
+    // `local` instance (no reload; the verdict is a banner) ONE transient
+    // /chat/events failure killed the stream for the life of the tab and left a
+    // "session expired" bar over a session that was fine. Before the latch
+    // existed the page recovered in 3 s.
+    await open(page, { provider: "local", eventsStatus: 403 });
+    await expect(banner(page)).toBeVisible();
+    await markPage(page);
+
+    // The stream stays dead while the refusal stands — that half must not
+    // regress either, and it is what the latch is FOR.
+    const whileRefused = hits.events;
+    await page.waitForTimeout(3500);
+    expect(hits.events).toBe(whileRefused);
+
+    // The server comes back.
+    eventsStatusNow = undefined;
+    // …and the page re-opens the stream the way it really does: a viewer change.
+    // `reconnectChatSse` is a no-op when the viewer has not moved, so the id is
+    // changed first — this drives the actual wiring, not the decision function.
+    await page.evaluate(() => {
+      const w = window as unknown as { __muninnViewerId: string | null; reconnectChatSse: () => void };
+      w.__muninnViewerId = "recovered-viewer";
+      w.reconnectChatSse();
+    });
+
+    // The stream is opened (the latch released), it OPENS, and the banner goes.
+    await expect.poll(() => hits.events, { timeout: 10_000 }).toBeGreaterThan(whileRefused);
+    await expect(banner(page)).toHaveCount(0);
+    // Recovery is not a reload — nothing here reloaded, in either direction.
+    expect(await reloaded(page)).toBe(false);
+  });
+
+  test("…and the recovered stream retries again on a LATER transient failure", async ({ page }) => {
+    // A released latch has to actually restore the 3 s ladder. Left spent, the
+    // fresh stream's first ordinary error takes the terminal branch and the
+    // channel is dead again with nothing on screen.
+    await open(page, { provider: "local", eventsStatus: 403 });
+    await expect(banner(page)).toBeVisible();
+
+    eventsStatusNow = undefined;
+    await page.evaluate(() => {
+      const w = window as unknown as { __muninnViewerId: string | null; reconnectChatSse: () => void };
+      w.__muninnViewerId = "recovered-viewer";
+      w.reconnectChatSse();
+    });
+    await expect(banner(page)).toHaveCount(0);
+    const afterRecovery = hits.events;
+
+    // The stub answers 200 and closes immediately, so the stream ends and the
+    // 3 s reconnect ladder is what produces the next hit.
+    await expect.poll(() => hits.events, { timeout: 12_000 }).toBeGreaterThan(afterRecovery);
+  });
+});
+
+test.describe("acceptance 19 — a refused UPGRADE whose session is ALIVE is bounded", () => {
+  // `src/auth/ws-upgrade.ts` answers 403 to an origin-refused handshake while
+  // /chat/me answers 200, and `chatSessionAlive()` counts only a 401 as dead. So
+  // "alive, and still refused" retried every 2 s for as long as the tab stayed
+  // open, silently — a refusal that is not an expiry gets no banner.
+  test("it backs off, gives up, and SAYS so — without claiming an expiry", async ({ page }) => {
+    // The ladder is ~12 s of wall clock by construction, plus a /chat/me probe
+    // per rung; the default 30 s budget is too tight to be honest about.
+    test.setTimeout(60_000);
+
+    // NB no `expireAfterFirstMe`: /chat/me keeps answering 200, which is exactly
+    // the state that made this unbounded.
+    await open(page, { provider: "local", refuseUpgrade: true });
+    await markPage(page);
+
+    const attempts = () => page.evaluate(() => (window as unknown as { __wsAttempts: number }).__wsAttempts);
+    const expected = 1 + WS_PREOPEN_BACKOFF_MS.length;
+
+    // It stops at the cap and stays there — two more full rungs of quiet.
+    await expect.poll(attempts, { timeout: 45_000 }).toBe(expected);
+    await page.waitForTimeout(8000);
+    expect(await attempts()).toBe(expected);
+
+    // …and the giving-up is VISIBLE, in its own bar.
+    await expect(page.locator(`#${WS_STALLED_NOTICE_ID}`)).toBeVisible();
+    await expect(page.locator(`#${WS_STALLED_NOTICE_ID}`)).toHaveText(/reload the page/i);
+    // Not the expiry banner: /chat/me said 200, so nothing has expired, and
+    // telling the reader otherwise is a lie the page must not tell.
+    await expect(banner(page)).toHaveCount(0);
+    expect(await reloaded(page)).toBe(false);
   });
 });
 

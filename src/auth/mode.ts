@@ -249,11 +249,22 @@ export function resolveAuthConfig(env: Record<string, string | undefined> = proc
     // nothing anywhere says the string was never a URL. This is the only moment
     // anyone is looking.
     const endpoint = trimmed(env, "NAIS_TOKEN_INTROSPECTION_ENDPOINT");
+    let parsedEndpoint: URL | null = null;
     try {
-      new URL(endpoint);
+      parsedEndpoint = new URL(endpoint);
     } catch {
+      parsedEndpoint = null;
+    }
+    // Parsing is not enough, and the gap is not theoretical: `new URL` accepts
+    // any scheme, so `mailto:texas`, `file:///etc/passwd` and a bare
+    // `texas.nais/introspect` (parsed as scheme `texas.nais:`) all BOOTED. The
+    // introspection call is a `fetch` POST, which supports http(s) and nothing
+    // else, so every one of those is a pod that looks healthy and 401s every
+    // single request — the exact failure the parse check was written for, one
+    // typo to its left.
+    if (!parsedEndpoint || (parsedEndpoint.protocol !== "http:" && parsedEndpoint.protocol !== "https:")) {
       throw new AuthConfigError(
-        `NAIS_TOKEN_INTROSPECTION_ENDPOINT="${endpoint}" is not a URL (expected e.g. ` +
+        `NAIS_TOKEN_INTROSPECTION_ENDPOINT="${endpoint}" is not an http(s) URL (expected e.g. ` +
         `"http://texas.nais/api/v1/introspect"). Refusing to start: every request would 401 ` +
         `against an endpoint that cannot be reached, with nothing to say why.`,
       );

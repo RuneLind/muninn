@@ -165,24 +165,32 @@ function peerAddress(c: Context): string | undefined {
  *  growing a second one beside it (PR C's first cut of the origin check was a
  *  second implementation, and it was the bypassable one). */
 export function presentedToken(headers: Headers, url: string, localChannels: boolean): string | null {
-  // `Authorization: Bearer` is the ONLY channel every mode reads. It is what
-  // wonderwall forwards, and it is the one a shared secret and an Entra access
-  // token can share without either widening the other.
-  const bearer = headers.get("authorization")?.match(/^bearer\s+(.+)$/i)?.[1]?.trim();
-  if (bearer) return bearer;
+  const bearer = () => headers.get("authorization")?.match(/^bearer\s+(.+)$/i)?.[1]?.trim() || null;
 
-  // ⚠️ The other two are `local`-mode ONLY, and the gate is not cosmetic. In
-  // `entra` an `X-Muninn-Token` header or a `?muninn_token=` query value can
-  // only ever carry something Texas will refuse, so reading them spends a Texas
-  // round-trip per forged value — a request amplifier against the platform's
-  // auth service, from any browser. The query channel was worse than useless
-  // there for a second reason: the strip-redirect below fires on the parameter,
-  // and `entra` mints no cookie, so a credential accepted on it was DISCARDED
-  // and the redirect target 401'd (measured).
-  if (!localChannels) return null;
+  // ⚠️ `X-Muninn-Token` and `?muninn_token=` are `local`-mode ONLY, and the gate
+  // is not cosmetic. In `entra` either can only ever carry something Texas will
+  // refuse, so reading them spends a Texas round-trip per forged value — a
+  // request amplifier against the platform's auth service, from any browser.
+  // The query channel was worse than useless there for a second reason: the
+  // strip-redirect below fires on the parameter, and `entra` mints no cookie,
+  // so a credential accepted on it was DISCARDED and the redirect target 401'd
+  // (measured). In `entra`, Bearer is therefore the whole list — it is what
+  // wonderwall forwards.
+  if (!localChannels) return bearer();
 
+  // ⚠️ In `local` mode `X-Muninn-Token` comes FIRST, and the order is a
+  // contract, not a preference. Only ONE channel is read, and whatever it
+  // returns is the credential the request is judged on — there is no "try the
+  // next one" — so putting Bearer ahead of the dedicated header meant a proxy
+  // that injects an `Authorization` header of its own (a tailnet identity
+  // header, an upstream SSO) turned a request carrying a CORRECT
+  // `X-Muninn-Token` into a 401. The operator's explicit credential must win
+  // over an ambient one. `entra` is unaffected: it never reaches this line.
   const header = headers.get(TOKEN_HEADER);
   if (header && header.trim() !== "") return header.trim();
+
+  const fromBearer = bearer();
+  if (fromBearer) return fromBearer;
 
   const query = safeUrl(url)?.searchParams.get(TOKEN_QUERY_PARAM);
   if (query && query.trim() !== "") return query.trim();

@@ -34,7 +34,13 @@ which is wide open.
    variable set.
 4. **`entra` without `NAIS_TOKEN_INTROSPECTION_ENDPOINT` or `MUNINN_TENANT`.**
    Written behind (3) while the mode was unreachable, LIVE since PR 2: without
-   either, the mode comes up able to authenticate nobody.
+   either, the mode comes up able to authenticate nobody. The endpoint must also
+   be an **http(s)** URL, not merely parseable: `new URL` accepts any scheme, so
+   `mailto:x`, `file:///…` and a bare `texas.nais/introspect` (parsed as scheme
+   `texas.nais:`) all booted a pod that looked healthy and 401'd every request —
+   the introspection call is a `fetch` POST, which speaks http(s) and nothing
+   else. That is the same failure the parse check was written for, one typo to
+   its left.
 5. An authenticating mode with an empty `MUNINN_ADMIN_IDENTS` or
    `MUNINN_ALLOWED_ORIGINS`.
 6. `local` without `MUNINN_LOCAL_TOKEN` / `MUNINN_LOCAL_USER`, or with a secret
@@ -558,6 +564,22 @@ after it clears, and is answered **503 with no `loginUrl`** on HTTP and on the
 chat page's reload predicate: a Texas blip sent every open tab through the
 sidecar and back into the service that was already failing (measured).
 
+⚠️ **"the DATABASE down" is the outage half of that catch, not all of it.**
+`resolveUser` also throws when NO `users.id` can be minted from the claims —
+neither the NAVident nor the `oid` carries a legal character
+(`UnmintableClaimsError`, `src/db/user-identities.ts`). That is a permanent
+property of the token, and answered `unavailable` it became 503 + retryable +
+cached-for-nothing: every retry from every open tab spent a fresh Texas
+round-trip, a fresh provisioning attempt and a fresh log line, indefinitely. It
+is classified **`denied`**, so it takes the 30 s negative cache like any other
+refusal about immutable bytes. The check is STRUCTURAL
+(`unmintableClaims === true` on the thrown value), not an `instanceof`: this
+module's only edge to `src/db/` is the lazy `import()` inside
+`defaultResolveUser`, which is what keeps it loadable with no database, and an
+`instanceof` across two module instances is a false negative anyway. The
+PROPERTY is the contract — renaming it silently restores the retry storm — and
+`user-identities.test.ts` pins it from the throwing side.
+
 **The cache has a HARD CAP** (`INTROSPECTION_CACHE_MAX_ENTRIES`, 4096). The
 sweep only ever evicted EXPIRED rows and a denial is live for its whole 30 s
 window, so the map's size was an input an unauthenticated client controlled —
@@ -588,6 +610,12 @@ not send the claim, and refusing on its absence refuses every human.
 **A refusal that looked active is LOGGED** (`denialReason`, warn-once per shape).
 An `active: true` body with no usable `oid` was cached as a denial in silence:
 every colleague 401s while the sidecar, the pod and Texas all look healthy.
+⚠️ "Per shape" means per **`kind`** (`DenialReasonKind`, two literals), never per
+message: the message interpolates `idtyp`, a value that arrives in a response
+body, and keying the never-sweeping `warnedReasons` set on it made the set's size
+an input a caller grows — one distinct `idtyp` per token being one entry and one
+log line each, i.e. unbounded in exactly the state the discipline exists to
+bound. Every key put in that set must come from a closed set.
 
 **The credential channels are per mode.** `Authorization: Bearer` is the only one
 `entra` reads. `X-Muninn-Token` and `?muninn_token=` are `local`-mode channels:
@@ -596,6 +624,15 @@ spends a round-trip per forged value — and the query one also fired the
 strip-redirect, which DISCARDED the credential (entra mints no cookie, so the
 redirect target 401'd). The `local`-only gate travels as `IdentityDeps.localChannels`,
 so the WebSocket upgrade reads the same set.
+
+⚠️ **In `local` the ORDER is `X-Muninn-Token` → Bearer → query, and it is a
+contract.** `presentedToken` reads exactly ONE channel and whatever it returns is
+the credential the request is judged on — there is no "try the next one" — so
+putting Bearer first (which the entra work briefly did, since Bearer is the only
+channel that mode reads) meant any proxy injecting an `Authorization` header of
+its own turned a request carrying a CORRECT `X-Muninn-Token` into a 401. The
+operator's explicit credential beats an ambient one. `entra` is unaffected: it
+returns the Bearer and never reaches the rest of the list.
 
 **The `session` channel is refused outright**, with no Texas call. `entra` mints
 no muninn cookie (`writeSessionCookie` returns early on `!config.local`), so a
@@ -661,14 +698,50 @@ an ordinary 1006 close, so the 4401 rule was structurally blind to it and the
 2 s retry ran forever in silence (measured: five refused handshakes, zero
 reloads, no banner). `connectWs` tracks whether the socket ever fired `open` and
 PROBES `/chat/me` before retrying one that did not. Only a **401** on that probe
-is a refusal — a 503 (introspection unavailable) or a transport error earns the
-ordinary retry.
+is a refusal — a 503 (introspection unavailable) or a transport error earns a
+retry.
+
+⚠️ **"Earns a retry" is BOUNDED on that path, and only on that path**
+(`src/chat/views/components/ws-retry.ts`). `src/auth/ws-upgrade.ts` answers
+**403** to an origin-refused handshake while `/chat/me` answers **200**, so
+"alive, and still refused" is a real state — a configuration fact (an origin
+missing from `MUNINN_ALLOWED_ORIGINS`, a proxy that drops `Origin`) that never
+self-heals — and the page retried it every 2 s for as long as the tab stayed
+open, silently, since a refusal that is not an expiry gets no banner. The
+pre-open ladder therefore backs off over `WS_PREOPEN_BACKOFF_MS`
+(2 s / 4 s / 6 s), gives up, and renders its OWN amber bar
+(`WS_STALLED_NOTICE_ID`) saying live updates are unavailable, the session is
+still valid, and to reload. Deliberately not the expiry banner: nothing has
+expired, and saying so would be the same lie the `provider === null` rule exists
+to prevent. A socket that OPENED and then dropped is untouched — still 2 s,
+still unbounded — because that one self-heals, and a `ws.onopen` resets the
+ladder and clears the bar.
 
 **A spent verdict LATCHES the channel** (`__muninnAuthLatched`). The SSE error
 path used to fall through to its 3-second reconnect after a banner, re-entering
 the rule every cycle and re-arming the breaker every 60 s: measured on a
-permanent 403 for `/chat/events`, one reload a minute forever. The latch is
-released by a successful `/chat/me`. NB the SSE handler reads `readyState`
+permanent 403 for `/chat/events`, one reload a minute forever.
+
+⚠️ **A latch has to be RELEASABLE, and for one round it was not.** Its only
+release was the successful-`/chat/me` clear, whose sole caller is init — so a
+latch set *after* init lived for the life of the tab. Measured on a `local`
+instance, where the verdict is a banner and there is no reload to re-run init:
+ONE transient `/chat/events` failure killed the stream permanently and left
+"your session expired" over a session that was fine, where the pre-latch page
+recovered in 3 s. There are three releases now, and the two added are driven by
+evidence rather than by a timer:
+
+| release | latch | banner |
+|---|---|---|
+| a successful `/chat/me` (`__muninnClearAuthReloadStamp`, init) | cleared | left |
+| `reconnectChatSse()` → `__muninnAuthReleaseLatch('sse')` | cleared | left — a request is not an outcome |
+| the stream/socket OPENS → `__muninnAuthChannelRecovered(channel)` | cleared | removed, **but only once NO channel is still latched** |
+
+That last condition is the non-obvious half: the banner is one page-level bar
+shared by three channels, so an SSE recovery clearing it while a 4401'd socket
+is still refused would hide a live expiry behind a stream that happens to work.
+
+NB the SSE handler reads `readyState`
 BEFORE closing the stream — `close()` sets it to 2, so a state read afterwards
 reports every transient reconnect as permanent (that reorder shipped, briefly,
 and the e2e suite caught it).

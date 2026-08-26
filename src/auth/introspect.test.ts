@@ -134,9 +134,9 @@ describe("denialReason — a Texas body-shape mismatch is a 5-minute diagnosis",
     // healthy, and nothing anywhere says the claim is missing.
     expect(denialReason({ active: true, oid: OID })).toBeNull();
     expect(denialReason({ active: true, oid: OID, idtyp: "user" })).toBeNull();
-    expect(denialReason({ active: true })).toContain("oid");
-    expect(denialReason({ active: true, oid: "  " })).toContain("oid");
-    expect(denialReason({ active: true, oid: OID, idtyp: "app" })).toContain("idtyp");
+    expect(denialReason({ active: true })?.message).toContain("oid");
+    expect(denialReason({ active: true, oid: "  " })?.message).toContain("oid");
+    expect(denialReason({ active: true, oid: OID, idtyp: "app" })?.message).toContain("idtyp");
   });
 
   test("an ordinary `active: false` has no reason to report", () => {
@@ -144,6 +144,20 @@ describe("denialReason — a Texas body-shape mismatch is a 5-minute diagnosis",
     // would put a line on every expired background tab's retry.
     expect(denialReason({ active: false })).toBeNull();
     expect(denialReason("nonsense")).toBeNull();
+  });
+
+  test("the KIND is a closed set, and does NOT carry the body's own idtyp", () => {
+    // The warn-once set is keyed on this value and never sweeps, so a key that
+    // interpolates a response-body string is memory an unauthenticated caller
+    // grows: one distinct `idtyp` per token is one entry and one log line each,
+    // which is the opposite of "one line per distinct reason". The MESSAGE still
+    // names the value — that is what an operator reads — but it is not the key.
+    expect(denialReason({ active: true })?.kind).toBe("no-oid");
+    for (const idtyp of ["app", "App", `probe-${crypto.randomUUID()}`, "x".repeat(500)]) {
+      const reason = denialReason({ active: true, oid: OID, idtyp });
+      expect(reason?.kind).toBe("idtyp-not-user");
+      expect(reason?.kind).not.toContain(idtyp);
+    }
   });
 });
 
@@ -380,6 +394,83 @@ describe("the single flight", () => {
       introspector.introspect("tok", "credential"),
     ]);
     expect((await introspector.introspect("tok", "credential")).kind).toBe("unavailable");
+  });
+});
+
+describe("a claim set no users.id can be minted from is DENIED, not unavailable", () => {
+  /** Drive `resolveUser` with a specific throw and count the Texas calls. */
+  function withResolveError(err: unknown) {
+    const h = { posts: 0, resolves: 0, now: 1_700_000_000_000 };
+    const introspector = createEntraIntrospector(CONFIG, {
+      now: () => h.now,
+      async post() {
+        h.posts++;
+        return new Response(JSON.stringify({ active: true, oid: OID, exp: 4102444800 }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+      async resolveUser() {
+        h.resolves++;
+        throw err;
+      },
+    });
+    return { h, introspector };
+  }
+
+  test("the real UnmintableClaimsError is classified `denied`", async () => {
+    // `mintNavUserId` throws this when NEITHER the NAVident nor the oid carries
+    // a character a `users.id` may use. That is a permanent property of the
+    // token's own claims — it cannot resolve on a retry — but it landed in the
+    // SAME catch as a database outage and was answered `unavailable`: 503,
+    // retryable, and deliberately cached for nothing. Every retry from every
+    // open tab therefore spent a fresh Texas round-trip, a fresh provisioning
+    // attempt and a fresh log line, indefinitely.
+    const { UnmintableClaimsError } = await import("../db/user-identities.ts");
+    const { introspector } = withResolveError(
+      new UnmintableClaimsError("Cannot mint a users.id from these claims: …"),
+    );
+    expect((await introspector.introspect("tok", "credential")).kind).toBe("denied");
+  });
+
+  test("…and it takes the 30 s negative cache, so a retry storm costs ONE Texas call", async () => {
+    const { UnmintableClaimsError } = await import("../db/user-identities.ts");
+    const { introspector, h } = withResolveError(new UnmintableClaimsError("unmintable"));
+    for (let i = 0; i < 5; i++) {
+      expect((await introspector.introspect("tok", "credential")).kind).toBe("denied");
+    }
+    expect(h.posts).toBe(1);
+    expect(h.resolves).toBe(1);
+
+    // Past the negative TTL it asks again — a denial is remembered briefly, not
+    // permanently.
+    h.now += INTROSPECTION_NEGATIVE_TTL_MS + 1;
+    expect((await introspector.introspect("tok", "credential")).kind).toBe("denied");
+    expect(h.posts).toBe(2);
+  });
+
+  test("a GENUINE database outage is still `unavailable`, and still cached for nothing", async () => {
+    // The half that must not move: an outage says nothing about the token, so
+    // remembering it would keep refusing logins after the database recovered.
+    const { introspector, h } = withResolveError(new Error("the database is unreachable"));
+    expect((await introspector.introspect("tok", "credential")).kind).toBe("unavailable");
+    expect((await introspector.introspect("tok", "credential")).kind).toBe("unavailable");
+    expect(h.posts).toBe(2);
+  });
+
+  test("the marker is STRUCTURAL, so it survives two module instances", async () => {
+    // `src/auth/introspect.ts` deliberately does not import the class — its only
+    // edge to `src/db/` is a lazy `import()`, which is what keeps this module
+    // loadable with no database — so the check is on the property, and an
+    // `instanceof` across two copies of the module would have been a false
+    // negative anyway. A bare Error must NOT be classified denied.
+    const { introspector } = withResolveError(
+      Object.assign(new Error("hand-rolled"), { unmintableClaims: true }),
+    );
+    expect((await introspector.introspect("tok", "credential")).kind).toBe("denied");
+
+    const plain = withResolveError(Object.assign(new Error("nope"), { unmintableClaims: "yes" }));
+    expect((await plain.introspector.introspect("tok", "credential")).kind).toBe("unavailable");
   });
 });
 

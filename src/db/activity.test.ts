@@ -61,6 +61,64 @@ describe("activity", () => {
     expect(event.metadata).toMatchObject({ watcherId: "w-1" });
   });
 
+  test("migration 074 repairs the historical double-encoded rows", async () => {
+    // The write side is fixed, but every row written BEFORE it is still a JSON
+    // *string* scalar, so `metadata->>'watcherId'` and `metadata->>'audit'` are
+    // NULL for the whole of history — including every admin-audit row the PR
+    // that added them documents that key as the way to find.
+    //
+    // `to_jsonb(<text>)` reproduces the pre-fix column value exactly: a jsonb
+    // string, not the object. The test then applies the REAL migration file (a
+    // fresh test database is baselined, so it has never run here) and asserts
+    // the read works afterwards.
+    const sql = getDb();
+    const watcherId = `w-${crypto.randomUUID()}`;
+    const good = `mangled-${crypto.randomUUID()}`;
+    const junk = `junk-${crypto.randomUUID()}`;
+
+    await sql`
+      INSERT INTO activity_log (type, text, metadata)
+      VALUES (${"system"}, ${good}, to_jsonb(${JSON.stringify({ watcherId, audit: "admin-passthrough" })}::text))
+    `;
+    // ⚠️ The guard case. `metadata` is written from arbitrary call-site objects,
+    // and a single row whose inner text does not re-parse would abort a bulk
+    // `UPDATE … WHERE jsonb_typeof(metadata) = 'string'` — and with it the whole
+    // migration, permanently, on every instance carrying such a row.
+    await sql`
+      INSERT INTO activity_log (type, text, metadata)
+      VALUES (${"system"}, ${junk}, to_jsonb(${"not json at all {"}::text))
+    `;
+
+    const before = await sql`SELECT jsonb_typeof(metadata) AS kind FROM activity_log WHERE text = ${good}`;
+    expect(before[0]!.kind).toBe("string");
+
+    const migration = await Bun.file(
+      new URL("../../db/migrations/074-activity-metadata-unmangle.sql", import.meta.url).pathname,
+    ).text();
+    await sql.unsafe(migration);
+
+    const [repaired] = await sql`
+      SELECT jsonb_typeof(metadata) AS kind,
+             metadata->>'watcherId' AS watcher_id,
+             metadata->>'audit'     AS audit
+        FROM activity_log WHERE text = ${good}
+    `;
+    expect(repaired!.kind).toBe("object");
+    expect(repaired!.watcher_id).toBe(watcherId);
+    expect(repaired!.audit).toBe("admin-passthrough");
+
+    // The unparseable row survived the migration untouched, rather than taking
+    // the migration down with it.
+    const [left] = await sql`SELECT jsonb_typeof(metadata) AS kind, metadata #>> '{}' AS raw FROM activity_log WHERE text = ${junk}`;
+    expect(left!.kind).toBe("string");
+    expect(left!.raw).toBe("not json at all {");
+
+    // …and the repaired row is now reachable through the query that was
+    // silently matching nothing.
+    const rows = await getActivityForJob(watcherId, "no-such-job-name");
+    expect(rows.some((r) => r.text === good)).toBe(true);
+  });
+
   test("getActivityForJob finds a row by its metadata watcherId", async () => {
     // The query that was silently matching nothing.
     const watcherId = `w-${crypto.randomUUID()}`;
