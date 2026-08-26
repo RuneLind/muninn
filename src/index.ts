@@ -275,11 +275,14 @@ if (isAuthenticatingMode(auth.mode)) {
     { mode: auth.mode },
   );
   log.info(
-    "MUNINN_AUTH={mode}, MUNINN_LOCAL_ROLE={localRole} — a `local` identity resolves to that role, but ONLY " +
-    "when the request presented a credential (a token, or a session cookie). A DIRECT-LOOPBACK request with " +
-    "no credential is always role `user`, so a browser running on this host stays `user` even with " +
-    "MUNINN_LOCAL_ROLE=admin: the bypass fills the identity before the cookie is read. Reach the operator " +
-    "surface through the proxy (which stamps x-forwarded-*), or from the host with the token on the request.",
+    "MUNINN_AUTH={mode}, MUNINN_LOCAL_ROLE={localRole} — a `local` identity resolves to that role ONLY " +
+    "when its identity came from a credential channel. A DIRECT-LOOPBACK request with no credential is " +
+    "always role `user`, and a BROWSER running on this host stays `user` even with MUNINN_LOCAL_ROLE=admin: " +
+    "the login redirect strips the token, so the browser's cookie-only request takes the loopback bypass " +
+    "(the identity is filled before the cookie is read) and never reaches the cookie branch. So a browser " +
+    "on the host cannot reach the operator surface at all. Two ways in: front muninn with an HTTP proxy that " +
+    "stamps x-forwarded-* (removing the bypass, so the session cookie is honoured and the browser gets " +
+    "admin), or use `curl -H \"x-muninn-token: <secret>\"` from the host.",
     { mode: auth.mode, localRole: auth.localRole },
   );
   log.info(

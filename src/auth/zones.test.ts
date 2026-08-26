@@ -1,4 +1,6 @@
 import { describe, test, expect } from "bun:test";
+import { readFile } from "node:fs/promises";
+import { $ } from "bun";
 import {
   ADMIN_DENY_LIST,
   AUDITED_COLLECTION_PATHS,
@@ -147,6 +149,81 @@ describe("isAuditedCollectionRead", () => {
   test("a WRITE is not a collection read", () => {
     expect(isAuditedCollectionRead("POST", "/api/users")).toBe(false);
     expect(isAuditedCollectionRead("DELETE", "/api/threads")).toBe(false);
+  });
+});
+
+describe("every `admin-zone` inventory row is CHECKED against decideZone", () => {
+  // `inventory.test.ts` only checks that the disposition STRING is in the
+  // vocabulary — it never probes that an `admin-zone` row is actually denied to
+  // role `user`. Mutation proof: adding `/api/messages/` + `/api/users/` to
+  // USER_ZONE_PATHS opens a colleague's message history and passes that suite
+  // green. This is the probe-column idiom `zone-inventory.test.ts` uses, over
+  // the claimed-id fixture.
+  const FIXTURE = "src/auth/claimed-id-inventory.txt";
+
+  interface Probe { file: string; method: string; path: string; raw: string; }
+
+  async function adminZoneProbes(): Promise<Probe[]> {
+    const text = await readFile(FIXTURE, "utf8");
+    const probes: Probe[] = [];
+    for (const raw of text.split("\n")) {
+      const line = raw.trim();
+      if (line === "" || line.startsWith("#")) continue;
+      const [body] = line.split("   #");
+      const parts = body!.split("|").map((p) => p.trim());
+      if (parts.length !== 3 || parts[2] !== "admin-zone") continue;
+      const file = parts[0]!;
+      // signature is `<METHOD> <PATH>` or `<token> in <METHOD> <PATH>`.
+      const m = parts[1]!.match(/(?:.* in )?([A-Z]+)\s+(\/\S+)/);
+      if (!m) throw new Error(`admin-zone row has no METHOD PATH: ${line}`);
+      let path = m[2]!.replace(/:[^/]+/g, "x");
+      // Chat routes are mounted under `/chat`; the fixture path is relative.
+      if (file === "src/chat/routes.ts" && !path.startsWith("/chat")) path = `/chat${path}`;
+      probes.push({ file, method: m[1]!, path, raw: parts[1]! });
+    }
+    return probes;
+  }
+
+  test("there is at least one admin-zone row to probe", async () => {
+    expect((await adminZoneProbes()).length).toBeGreaterThan(0);
+  });
+
+  test("each derived path is denied to role `user`", async () => {
+    const wrong: string[] = [];
+    for (const p of await adminZoneProbes()) {
+      const got = decideZone({ method: p.method, path: p.path, role: "user" });
+      if (got.allowed) wrong.push(`${p.raw} (probe ${p.method} ${p.path}): says admin-zone but decideZone ALLOWS it`);
+    }
+    expect(wrong).toEqual([]);
+  });
+});
+
+describe("AUDITED_COLLECTION_PATHS name REAL registered routes", () => {
+  // The list drives the admin-collection audit hook, but nothing ties it to the
+  // route table. Mutation proof: renaming `/api/watchers` → `/api/watcherz`
+  // leaves the suite green (`toHaveLength(8)` cannot see a substitution), so a
+  // typo'd or renamed route silently drops out of the audit forever. Cross-check
+  // each entry against a real `app.get("<path>", …)` registration.
+  async function registeredGetPaths(): Promise<Set<string>> {
+    // Both `app.get("/p"` and `app.on("GET"|"HEAD", "/p"` forms, over the same
+    // files the claimed-id inventory walks.
+    const out = await $`grep -rnE ${String.raw`app\.(get|on)\(`} src/chat/routes.ts src/dashboard/routes/`
+      .nothrow().text();
+    const paths = new Set<string>();
+    for (const line of out.split("\n")) {
+      if (line.trim() === "" || line.split(":")[0]!.includes(".test.")) continue;
+      const on = line.match(/app\.on\(\s*"[A-Z]+"\s*,\s*"([^"]+)"/);
+      const get = line.match(/app\.get\(\s*"([^"]+)"/);
+      if (on) paths.add(on[1]!);
+      else if (get) paths.add(get[1]!);
+    }
+    return paths;
+  }
+
+  test("every audited path has a GET registration in the route table", async () => {
+    const registered = await registeredGetPaths();
+    const orphans = [...AUDITED_COLLECTION_PATHS].filter((p) => !registered.has(p));
+    expect(orphans, "audited paths with no app.get registration").toEqual([]);
   });
 });
 

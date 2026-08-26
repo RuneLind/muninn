@@ -164,10 +164,11 @@ export function resolveAuthConfig(env: Record<string, string | undefined> = proc
   // (2) The boundary this pass depends on.
   if (mode === "entra" && !AUTH_ZONES_IMPLEMENTED) {
     throw new AuthConfigError(
-      `${AUTH_ENV}="entra" is not supported yet: the zone model that decides which routes a ` +
-      `non-admin role may call has not landed (AUTH_ZONES_IMPLEMENTED is false in src/auth/mode.ts). ` +
-      `Authenticating colleagues without it would admit every one of them to the full operator ` +
-      `surface — traces, prompt snapshots, every CRUD route. Refusing to start.`,
+      `${AUTH_ENV}="entra" is not supported yet. The zone model that decides which routes a ` +
+      `non-admin role may call HAS landed (src/auth/zones.ts), but the Entra half of the deploy — ` +
+      `the token introspector, the profile, the wonderwall sidecar — has not, and flipping ` +
+      `AUTH_ZONES_IMPLEMENTED is that PR's job. Booting now would authenticate colleagues against a ` +
+      `deploy that cannot yet introspect their tokens. Refusing to start.`,
     );
   }
 
@@ -283,8 +284,12 @@ function parseLocalRole(env: Record<string, string | undefined>): AuthRole {
       `${AUTH_ENV}="local" without ${LOCAL_ROLE_ENV}: the pinned identity resolves to role "user", ` +
       `so the zone model closes the whole operator surface to it — /traces, /models, /plans, /agents, ` +
       `/logs and the unfiltered collection reads all answer 403, and GET / redirects to /chat. ` +
-      `Set ${LOCAL_ROLE_ENV}=admin to reach them (it applies only to a request that presented a ` +
-      `credential — a bare loopback request stays "user" whatever this says).`,
+      `${LOCAL_ROLE_ENV}=admin grants admin ONLY to a request whose identity came from a credential ` +
+      `channel. A BROWSER on this host cannot reach the operator surface even with it set: the ` +
+      `login redirect strips the token, so the browser's cookie-only request takes the loopback ` +
+      `bypass (identity filled before the cookie is read) and stays "user". Reach it by fronting ` +
+      `muninn with an HTTP proxy that stamps x-forwarded-* (so the bypass is removed and the cookie ` +
+      `is honoured), or with curl -H "x-muninn-token: <secret>" from the host.`,
     );
     return "user";
   }

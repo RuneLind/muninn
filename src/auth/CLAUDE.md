@@ -385,19 +385,22 @@ class. HEAD needs no special handling on the body: measured on Bun 1.3.14, a
 `c.json(…, 404)` returned from a HEAD is emitted with `content-length: 0`.
 
 **A NULL owner is admin-only, relaxed in `local` mode.** A watcher or gardener
-trace has no user. §4 makes those admin-only — but `resolveRole` answers `user`
-for a local identity unconditionally (deliberately: see *Roles* above), so the
-rule as written would lock the operator out of their own instance. The cost is
-paid the other way instead: `pinnedLocalUserId() !== null` allows it.
+trace has no user. §4 makes those admin-only — but a `local` identity resolves
+to `MUNINN_LOCAL_ROLE`, default `user` (the default is deliberate: see *Roles*
+above), so at the default the rule would lock the operator out of their own
+instance. The cost is paid the other way instead: `pinnedLocalUserId() !== null`
+allows it.
 
 ⚠️ **The operator consequence, stated because it will be met:** on
-`MUNINN_AUTH=local` the session is ONE `users.id`, so a trace, thread or
-conversation belonging to a DIFFERENT `users.id` — a Telegram bot's user row,
-say — answers 404/empty to the operator's own `/traces` page. That is the
-resource model working as specified, and it is NOT lifted by
-`MUNINN_LOCAL_ROLE=admin`: `requireOwnedResource` keys on the row's owner id for
-a row that HAS one, and role only decides the passthrough for a DIFFERENT
-identity — which on a single-pinned-identity instance there is not.
+`MUNINN_AUTH=local` at the DEFAULT `MUNINN_LOCAL_ROLE=user`, the session is ONE
+`users.id`, so a trace, thread or conversation belonging to a DIFFERENT
+`users.id` — a Telegram bot's user row, say — answers 404/empty to the
+operator's own `/traces` page. That is the resource model working as specified.
+**It IS lifted by `MUNINN_LOCAL_ROLE=admin`** (on a credential-channel request):
+`decideResourceAccess` returns ALLOWED for role `admin` BEFORE any owner
+comparison, so a `MUNINN_LOCAL_ROLE=admin` operator reads every row whatever its
+owner — measured, the full span tree at admin versus `{spans:[]}` at `user`.
+The 404 is the DEFAULT-role experience, not one `MUNINN_LOCAL_ROLE=admin` shares.
 
 **No `jira_drafts.user_id` migration**, though §4 assigns PR D one. Re-grepped at
 PR D time, as §4 itself instructs: the Jira composer's PR 4 deleted every
@@ -522,12 +525,16 @@ feature — which is why they are written down here rather than left to be found
   segment on `/chat/reports/*` and `/chat/specs/*`. An id with `.`, `@` or `:`
   makes those six routes 400, and the chat client reads that as "no saved
   report" and disables the buttons. `resolveAuthConfig` warns once at boot.
-- **The four Chrome extensions in `extensions/` need their
-  `chrome-extension://<id>` origin in `MUNINN_ALLOWED_ORIGINS`,** or every
-  capture and research POST is refused as cross-origin. Allowlisting fixes the
-  CORS header AND the origin check — but not `requireOwnUser`: the Jira
-  extension's own user picker sends a claimed `userId`, and any value other than
-  the pinned identity is a 403 no allowlist can lift.
+- **The four Chrome extensions in `extensions/` do NOT work on an authenticating
+  instance, and allowlisting their origin does not change that.** Allowlisting
+  `chrome-extension://<id>` in `MUNINN_ALLOWED_ORIGINS` fixes the CORS header and
+  the origin check, but the extensions' capture and research routes are NOT in
+  the user zone — measured, they answer 403 by ZONE for role `user` however the
+  origin is configured — and `requireOwnUser` refuses the Jira extension's
+  claimed `userId` on top of that. This is a documented residual (see *What this
+  does not close*): the user zone is derived from the composed chat page, and the
+  extension routes are deliberately NOT re-zoned into it, because they carry no
+  token and `entra` could not authenticate them regardless.
 
 ## The zone model — which routes a role may call
 
@@ -541,8 +548,10 @@ is the one surface the user zone is written around.
 
 1. **The deny list** — routes that sit UNDER a user-zone prefix and must not be
    admitted by it. Today exactly the `/chat/bot-preferences/:botName/default-user`
-   trio (GET, PUT, and its OPTIONS preflight, which is annotated unreachable —
-   a credential-less preflight is 401'd by the auth middleware first). They set
+   trio (GET, PUT, and its OPTIONS preflight — reachable from a loopback request,
+   where the bypass supplies an identity and zones run: measured, OPTIONS from
+   loopback answers 403 here, not 401; through a proxy a credential-less preflight
+   is 401'd by auth first). They set
    BOT-GLOBAL state, so there is no "own" version. `GET` implies `HEAD`, because
    Hono dispatches `HEAD /x` to the `app.get("/x")` handler and RUNS its body.
 2. **The open zone** — `/api/live`, `/api/ready`, `/favicon.svg`, `/favicon.ico`.
@@ -592,10 +601,15 @@ somebody else's data, alongside the LogTape lines that already existed:
 
 - **Passthrough** — an id-addressed guard let an admin through
   (`requireOwnUser`, `requireOwnedResource`). The row names reader AND owner.
-  Not deduped: every cross-user read of a row is its own fact.
-- **Collection read** — one of the seven unfiltered lists. The row names reader
-  and ROUTE, and is deduped per (reader, route) per 5 minutes, because
-  `/api/traces` is polled every 15 s by every open `/traces` tab. Hooked in ONE
+  Deduped per (reader, kind, resource) per 5 minutes: it hooks
+  `requireOwnedResource`, which sits on polled routes (`GET
+  /api/jira/drafts?thread=`, `GET /api/traces/:id`), so an operator watching a
+  colleague's thread would otherwise write one row per poll tick.
+- **Collection read** — one of the eight unfiltered collection paths (seven
+  collections; `memories` has two, `/api/memories` and `/api/memories/by-user`).
+  The row names reader and ROUTE, and is deduped per (reader, route) per 5
+  minutes, because `/api/traces` is polled every 15 s by every open `/traces`
+  tab. Hooked in ONE
   place — a path list in the zone middleware, the `SIDE_EFFECTING_GETS` idiom —
   and written BEFORE the handler runs, so an attempted read that 404s still rows.
 
@@ -631,10 +645,13 @@ operator auditing themselves on their own feed.
   page and is deliberately out of this pass — a 403 is honest, an invisible link
   is a second place for the boundary to be spelled.
 - **A resource guard's owner is a `users.id`, and `local` mode pins ONE.** So on
-  an authenticating instance the operator's own Telegram-owned traces and
-  threads answer 404 to their own web session, even at role `admin` — the guard
-  keys on the id, not the role, for a row that HAS an owner. See the PR D
-  section above.
+  an authenticating instance at the DEFAULT `MUNINN_LOCAL_ROLE=user`, the
+  operator's own Telegram-owned traces and threads answer 404 to their own web
+  session — the guard keys on the id, and the pinned `user`-role session does not
+  own those rows. This IS lifted by `MUNINN_LOCAL_ROLE=admin`:
+  `decideResourceAccess` returns ALLOWED for role `admin` before any owner
+  comparison, so an admin operator reads every row whatever its owner. See the
+  PR D section above.
 - **`MUNINN_ADMIN_IDENTS` is still inert in `local` mode.** The pinned identity's
   role comes from `MUNINN_LOCAL_ROLE`, never from the allowlist. It is a boot
   requirement so the deferred Entra mode — where it IS the role source — cannot
@@ -648,6 +665,31 @@ operator auditing themselves on their own feed.
 - **An unauthenticated browser gets raw 401 JSON, not a login page.** There is
   still no login route — `AUTH_EXCLUDED_PATHS` carries only the two health
   endpoints, and the middleware itself is what accepts the secret.
+- **The user-zone search reads are NOT bot-scoped.** `GET
+  /api/search/collection/:col/documents` and `GET /api/search/document/:col/:id`
+  are in the user zone (the chat page fetches them) but take ANY collection name,
+  so role `user` reads every huginn collection's document bodies — internal
+  Confluence included — not just the selected bot's `wikiCollections`. The user
+  zone is wider than the chat-page fetch it was derived from. This is a
+  pre-existing exposure, not a regression vs `main`, and v1 is dev-only /
+  chat-only; scoping these two routes to the caller's bot is a follow-up.
+- **`GET /chat/bots` (user zone) discloses filesystem layout and the prompt
+  corpus.** It returns each bot's absolute server `dir` path and full prompt
+  bodies, so any colleague on `entra` reads muninn's directory layout and every
+  persona/system prompt. A follow-up should trim the payload; not re-zoned,
+  because the chat page needs the bot list.
+- **`POST /chat/mcp-status/:botName/refresh` (user zone via the `/chat/` prefix)
+  is a bot-global side effect at role `user`.** It re-probes / re-spawns every
+  MCP server for the bot — a process-spawn amplifier, the same class as the
+  `default-user` deny-list entries — but the inspector panel fetches it, so
+  denying it degrades a user-zone feature. Needs a product decision, not a
+  reflexive deny.
+- **The four `extensions/` Chrome extensions have no config remedy on an
+  authenticating instance.** Their capture/research routes are denied by the zone
+  model (not in the user zone), allowlisting the origin does not lift it (F5
+  above), and they carry no token so `entra` could not authenticate them
+  regardless. Deliberately NOT re-zoned — the user zone is the composed chat
+  page's surface.
 
 `src/index.ts` logs all of this at boot in an authenticating mode rather than
 letting the mode's presence imply a boundary it does not have.

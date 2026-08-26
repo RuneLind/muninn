@@ -4,8 +4,11 @@
  * Until this file existed, `src/auth/CLAUDE.md`'s "what this does not close"
  * opened with the sentence "There is no zone middleware, so an authenticated
  * `user` still reaches /traces, /agents, /logs, /models and the rest of the
- * operator surface." That is what this closes, and it is the reason
- * `MUNINN_AUTH=entra` refuses to boot (`AUTH_ZONES_IMPLEMENTED`).
+ * operator surface." That is what this file closes. It was the last thing
+ * `MUNINN_AUTH=entra` waited on inside muninn; `entra` still refuses to boot
+ * (`AUTH_ZONES_IMPLEMENTED` is `false`), but the reason is now the Entra half of
+ * the DEPLOY — the token introspector, the profile, the wonderwall sidecar —
+ * not a missing zone model, which is exactly the code shipping in this file.
  *
  * ## Shape: a short deny list, two allowlists, and default-deny
  *
@@ -13,9 +16,9 @@
  *
  *  1. **The deny list.** A handful of routes that sit UNDER a user-zone prefix
  *     and must not be admitted by it. Today it is exactly the
- *     `/chat/bot-preferences/:botName/default-user` pair, which lives inside
- *     `/chat/*` but sets BOT-GLOBAL state (`claimed-id-inventory.txt` already
- *     called it `admin-zone-deferred` for that reason).
+ *     `/chat/bot-preferences/:botName/default-user` trio (GET, PUT and its
+ *     OPTIONS preflight), which lives inside `/chat/*` but sets BOT-GLOBAL state
+ *     (`claimed-id-inventory.txt` calls it `admin-zone` for that reason).
  *  2. **The open zone.** Reachable with no credential at all — the two health
  *     endpoints — plus the two favicon paths, which need an identity but no
  *     role. Kept tiny on purpose: an entry here is a route nothing protects.
@@ -72,9 +75,11 @@ export const ADMIN_DENY_LIST: readonly ZoneDenyEntry[] = [
     methods: ["OPTIONS"],
     pattern: "/chat/bot-preferences/:botName/default-user",
     note:
-      "unreachable today: a CORS preflight carries no credential, so the auth " +
-      "middleware answers 401 before zones run. Listed so the row cannot be the " +
-      "one method left open if that ever changes.",
+      "reachable from a LOOPBACK request (the bypass supplies the pinned " +
+      "identity with no credential, so auth does not 401 and zones DO run — " +
+      "measured: OPTIONS from loopback answers 403 here, not 401). Through a " +
+      "proxy a credential-less preflight is 401'd by auth first. Listed so the " +
+      "row cannot be the one method left open either way.",
   },
 ];
 

@@ -9,6 +9,9 @@ import {
   type ResourceOwner,
 } from "./resource-guard.ts";
 import { __setAuthPolicyForTest } from "./policy.ts";
+import { __resetAuditDedupForTest } from "./audit.ts";
+import { activityLog } from "../observability/activity-log.ts";
+import type { ActivityEvent } from "../types.ts";
 import type { Identity } from "./introspect.ts";
 import type { AuthRole } from "./role.ts";
 
@@ -29,7 +32,20 @@ const MISSING: ResourceOwner = { found: false };
 afterEach(() => {
   __setOwnerLookupForTest(null);
   __setAuthPolicyForTest(null);
+  __resetAuditDedupForTest();
 });
+
+/** Rows the given fn wrote, read off the in-memory feed. */
+async function captureRows(fn: () => Promise<void>): Promise<ActivityEvent[]> {
+  const rows: ActivityEvent[] = [];
+  const stop = activityLog.subscribe((e) => rows.push(e));
+  try {
+    await fn();
+  } finally {
+    stop();
+  }
+  return rows;
+}
 
 describe("decideResourceAccess — the whole decision, over primitives", () => {
   // Every combination, not the two a route happens to reach. The pure function
@@ -182,6 +198,39 @@ describe("requireOwnedResource", () => {
 
     __setAuthPolicyForTest({ authenticating: true, pinnedUserId: "user-a" });
     expect((await app.request("/res/trace/watcher-trace")).status).toBe(200);
+  });
+
+  test("the admin passthrough WRITES an audit row (the call site, not just the fn)", async () => {
+    // Mutation proof: replacing the `auditAdminPassthrough(...)` call in
+    // requireOwnedResource with a no-op leaves the suite green — the audit-a-
+    // cross-user-read trail vanishes silently. This proves the guard CALLS it.
+    // `authMode()` is injected because the preload clears it to `off`.
+    __setOwnerLookupForTest(async () => FOUND_B);
+    __setAuthPolicyForTest({ authenticating: true, pinnedUserId: null, mode: "entra" });
+    const rows = await captureRows(async () => {
+      const res = await appWith({ ...A, userId: "op" }, "admin").request("/res/trace/colleague-trace");
+      expect(res.status).toBe(200);
+    });
+    const passthrough = rows.filter((r) => r.metadata?.audit === "admin-passthrough");
+    expect(passthrough).toHaveLength(1);
+    expect(passthrough[0]!.metadata).toMatchObject({ reader: "op", owner: "user-b", kind: "trace" });
+  });
+
+  test("an admin reading a NULL-owner row writes NO 'owned by null' audit row", async () => {
+    // A NULL-owner row (an orphaned jira_draft off a deleted thread, a watcher
+    // trace) satisfies the admin passthrough, but its whole purpose is naming
+    // WHO was read — and "owned by null" names nobody. The guard must not fire
+    // the passthrough audit for an owner-less row.
+    __setOwnerLookupForTest(async () => FOUND_NOBODY);
+    __setAuthPolicyForTest({ authenticating: true, pinnedUserId: null, mode: "entra" });
+    const rows = await captureRows(async () => {
+      const res = await appWith({ ...A, userId: "op" }, "admin").request("/res/trace/watcher-trace");
+      // Admin still READS it (nullOwnerAllowed is false here, but admin passes) —
+      // the point is only that no passthrough row is written naming a null owner.
+      expect(res.status).toBe(200);
+    });
+    const passthrough = rows.filter((r) => r.metadata?.audit === "admin-passthrough");
+    expect(passthrough).toEqual([]);
   });
 
   test("HEAD is guarded like its GET sibling, and Bun emits no body", async () => {

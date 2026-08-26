@@ -50,13 +50,23 @@ describe("the passthrough shape", () => {
     });
   });
 
-  test("is NOT deduped — every cross-user read of a row is its own fact", () => {
+  test("one row per (reader, kind, resource) per window — a poller writes ONE", () => {
+    // The passthrough hooks `requireOwnedResource`, which sits on POLLED routes
+    // (GET /api/jira/drafts?thread= is polled for 60–600s by the draft card, GET
+    // /api/traces/:id likewise). An operator watching a colleague's thread would
+    // otherwise write one row per tick and bury the feed — the same failure the
+    // collection shape is deduped for.
+    const t0 = 1_700_000_000_000;
     const rows = capture(() => {
-      for (let i = 0; i < 3; i++) {
-        auditAdminPassthrough({ mode: "entra", reader: "A123456", owner: "B999999", path: "/api/traces/abc", kind: "trace" });
-      }
+      expect(auditAdminPassthrough({ mode: "entra", reader: "A123456", owner: "B999999", path: "/api/traces/abc", kind: "trace", now: t0 })).toBe(true);
+      expect(auditAdminPassthrough({ mode: "entra", reader: "A123456", owner: "B999999", path: "/api/traces/abc", kind: "trace", now: t0 + 1_000 })).toBe(false);
+      // A DIFFERENT resource, reader or kind is a different key.
+      expect(auditAdminPassthrough({ mode: "entra", reader: "A123456", owner: "B999999", path: "/api/traces/xyz", kind: "trace", now: t0 + 1_000 })).toBe(true);
+      expect(auditAdminPassthrough({ mode: "entra", reader: "OTHER", owner: "B999999", path: "/api/traces/abc", kind: "trace", now: t0 + 1_000 })).toBe(true);
+      // …and the window is a window, not a latch.
+      expect(auditAdminPassthrough({ mode: "entra", reader: "A123456", owner: "B999999", path: "/api/traces/abc", kind: "trace", now: t0 + AUDIT_DEDUP_WINDOW_MS })).toBe(true);
     });
-    expect(rows).toHaveLength(3);
+    expect(rows).toHaveLength(4);
   });
 });
 

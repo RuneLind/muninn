@@ -1,6 +1,11 @@
 import { describe, test, expect, beforeEach } from "bun:test";
 import { Hono } from "hono";
-import { createZoneMiddleware, __resetZoneWarningsForTest } from "./zone-middleware.ts";
+import {
+  createZoneMiddleware,
+  __resetZoneWarningsForTest,
+  __zoneWarningsSizeForTest,
+  WARNED_REFUSALS_MAX,
+} from "./zone-middleware.ts";
 import { resolveAuthConfig, type AuthConfig } from "./mode.ts";
 import { AUDITED_COLLECTION_PATHS } from "./zones.ts";
 import { __resetAuditDedupForTest, AUDIT_DEDUP_WINDOW_MS } from "./audit.ts";
@@ -21,6 +26,12 @@ const LOCAL = resolveAuthConfig({
  *  `AUTH_ZONES_IMPLEMENTED` flips), so the audit gate is exercised over a
  *  literal — the mode is the only field it reads. */
 const ENTRA: AuthConfig = { ...LOCAL, mode: "entra", local: null };
+
+/** The genuine auth-off config. The zone middleware is not mounted in this mode
+ *  in production, but the decision must still be "allow" for a null role — that
+ *  is what "auth off" means, and it is distinct from the fail-CLOSED case where
+ *  an AUTHENTICATING mode somehow reaches the middleware with no role. */
+const OFF = resolveAuthConfig({});
 
 const identity = (userId: string): Identity => ({
   userId, displayName: userId, navIdent: null, oid: null, provider: "local", expiresAt: null,
@@ -82,6 +93,18 @@ describe("the zone middleware", () => {
     }
   });
 
+  test("the warn-once set is BOUNDED — a scan of many distinct paths can't grow it forever", async () => {
+    // Default-deny means every unknown path is a refusal, so a role-`user` scan
+    // of thousands of distinct paths would otherwise grow this module-level set
+    // without limit — the first such set reachable after successful auth.
+    const app = appAs("user");
+    const n = WARNED_REFUSALS_MAX * 3;
+    for (let i = 0; i < n; i++) {
+      expect((await get(app, `/api/never-${i}`)).status).toBe(403);
+    }
+    expect(__zoneWarningsSizeForTest()).toBeLessThanOrEqual(WARNED_REFUSALS_MAX);
+  });
+
   test("the two health paths answer without a role at all", async () => {
     // They are in `AUTH_EXCLUDED_PATHS`, so no identity was resolved and the
     // zone middleware must skip rather than default-deny them.
@@ -90,9 +113,24 @@ describe("the zone middleware", () => {
     expect((await get(app, "/api/ready")).status).toBe(200);
   });
 
-  test("with no role at all (auth off) nothing is denied", async () => {
-    const app = appAs(null);
+  test("with an OFF config and no role, nothing is denied (the genuine auth-off path)", async () => {
+    const app = appAs(null, OFF);
     expect((await get(app, "/traces")).status).toBe(200);
+  });
+
+  test("an AUTHENTICATING mode with no role on the context fails CLOSED, not open", async () => {
+    // The middleware is mounted only in an authenticating mode, so a null role
+    // there is a bug (the auth middleware should have 401'd, redirected or
+    // granted first). Defence in depth: it must deny rather than delegate to
+    // decideZone's auth-off branch, which would allow everything AND skip the
+    // deny list.
+    const app = appAs(null, LOCAL);
+    for (const path of ["/traces", "/api/users", "/chat/bot-preferences/jarvis/default-user"]) {
+      expect((await get(app, path)).status, path).toBe(403);
+    }
+    // The open zone is still reachable — those paths skip the role check
+    // entirely (AUTH_EXCLUDED_PATHS), which is what a probe needs.
+    expect((await get(app, "/api/live")).status).toBe(200);
   });
 });
 

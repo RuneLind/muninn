@@ -126,9 +126,9 @@ async function loadWaterfall(traceId: string): Promise<void> {
       // guard: `GET /api/traces` is unfiltered while `/api/traces/:id` answers
       // `{spans: []}` for a trace the session does not own, so on an
       // authenticating instance the row is listed, the click does literally
-      // nothing, and nothing anywhere says why. Say it instead. (Filtering the
-      // LIST is the deferred zone model's job — §4 puts `/traces` and its index
-      // in the admin zone.)
+      // nothing, and nothing anywhere says why. Say it instead. (The zone model
+      // puts `/api/traces` and its index in the admin zone; FILTERING that list
+      // to the caller's own rows is still a separate, unshipped change.)
       document.getElementById("waterfallTitle")!.textContent = "No spans for this trace";
       document.getElementById("waterfall")!.innerHTML =
         '<div class="empty-state">This trace has no spans, or it belongs to another user.</div>';

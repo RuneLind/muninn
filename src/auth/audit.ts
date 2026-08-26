@@ -11,11 +11,16 @@
  *
  *  - **Passthrough** — an id-addressed route where the row HAS an owner. The
  *    line names the reader AND the owner, because "who was read" is the whole
- *    fact.
+ *    fact. Deduped per (reader, kind, resource) — it hooks
+ *    `requireOwnedResource`, which sits on POLLED routes (`GET
+ *    /api/jira/drafts?thread=` at 60–600s, `GET /api/traces/:id`), so an
+ *    operator watching a colleague's thread would otherwise write one row per
+ *    tick.
  *  - **Collection read** — one of the unfiltered lists in
  *    `AUDITED_COLLECTION_PATHS`. There is no single owner, so the line names
  *    the reader and the ROUTE. This half is hooked in exactly one place, the
  *    zone middleware, from one path list — the `SIDE_EFFECTING_GETS` idiom.
+ *    Deduped per (reader, route).
  *
  * ## Three properties that are not obvious
  *
@@ -52,10 +57,12 @@ const log = getLog("auth", "audit");
 export const AUDIT_DEDUP_WINDOW_MS = 5 * 60_000;
 
 const lastCollectionRow = new Map<string, number>();
+const lastPassthroughRow = new Map<string, number>();
 
 /** Test-only: forget the dedup memory (the `__resetAuthWarningsForTest` idiom). */
 export function __resetAuditDedupForTest(): void {
   lastCollectionRow.clear();
+  lastPassthroughRow.clear();
 }
 
 function auditingEnabled(mode: AuthMode): boolean {
@@ -69,14 +76,29 @@ export interface PassthroughAudit {
   readonly path: string;
   /** `"claimed-id"` for `requireOwnUser`, else the resource kind. */
   readonly kind: string;
+  /** Injected so the dedup window is testable without a clock. */
+  readonly now?: number;
 }
 
 /**
  * An admin read a row belonging to someone else, through a guard that let them.
- * Returns whether a row was written, so a test can assert the gate.
+ * Deduped per (reader, kind, resource) — the `path` carries the resource id for
+ * an id-addressed route, so the key collapses a poller's repeated reads of the
+ * SAME row while keeping a read of a DIFFERENT row (or by a different reader) its
+ * own fact. Returns whether a row was written, so a test can assert the gate.
  */
 export function auditAdminPassthrough(a: PassthroughAudit): boolean {
   if (!auditingEnabled(a.mode)) return false;
+  const now = a.now ?? Date.now();
+  // \u0000 separators, spelled as escapes for the same reason
+  // `auditAdminCollectionRead` gives: a raw NUL makes git treat the file as
+  // binary. `kind` and `path` both ride the key: `path` is the concrete request
+  // path (it carries the resource id), and `kind` keeps two kinds that could
+  // share a path distinct.
+  const key = `${a.reader}\u0000${a.kind}\u0000${a.path}`;
+  const last = lastPassthroughRow.get(key);
+  if (last !== undefined && now - last < AUDIT_DEDUP_WINDOW_MS) return false;
+  lastPassthroughRow.set(key, now);
   activityLog.push(
     "system",
     `admin ${a.reader} read ${a.kind} owned by ${a.owner} on ${a.path}`,

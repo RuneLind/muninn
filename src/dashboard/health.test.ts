@@ -19,13 +19,37 @@ describe("readiness", () => {
     expect(await readiness(0)).toEqual({ ready: true });
   });
 
-  test("an unreachable database is NOT ready, and says why", async () => {
+  test("an unreachable database is NOT ready, and leaks NOTHING on the wire", async () => {
     // The whole point of the endpoint: a process that is up but cannot serve
-    // must fail its readiness probe rather than report a cheerful 200.
-    __setReadinessProbeForTest(async () => { throw new Error("ECONNREFUSED 127.0.0.1:5435"); });
+    // must fail its readiness probe rather than report a cheerful 200 — but the
+    // route is in AUTH_EXCLUDED_PATHS, reachable with no credential at all, so
+    // the verdict may not carry the driver's raw message (host, port, username).
+    __setReadinessProbeForTest(async () => {
+      throw new Error('connect ECONNREFUSED 127.0.0.1:5435 password authentication failed for user "muninn"');
+    });
     const result = await readiness(0);
     expect(result.ready).toBe(false);
-    expect(result.error).toContain("ECONNREFUSED");
+    // A constant, not the driver's message. None of the connection-string
+    // substrings the error carried may appear.
+    expect(result.error).toBe("database");
+    for (const leak of ["ECONNREFUSED", "127.0.0.1", "5435", "muninn", "password"]) {
+      expect(result.error, leak).not.toContain(leak);
+    }
+  });
+
+  test("N concurrent misses run the probe exactly ONCE (single-flight)", async () => {
+    // The route is unauthenticated and instance-wide; without single-flight,
+    // N concurrent requests are N DB queries against a max:5 pool — a DoS.
+    let calls = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    __setReadinessProbeForTest(async () => { calls++; await gate; });
+    // Fire 200 concurrent readiness() calls while the probe is still blocked.
+    const inflight = Array.from({ length: 200 }, () => readiness());
+    release();
+    const results = await Promise.all(inflight);
+    expect(calls).toBe(1);
+    for (const r of results) expect(r).toEqual({ ready: true });
   });
 
   test("the verdict is cached briefly — the route is unauthenticated", async () => {
