@@ -17,8 +17,8 @@ import { connectorSelectorScript } from "./components/connector-selector.ts";
 import { researchCardScript } from "./components/research-card.ts";
 import { threadManagerScript } from "./components/thread-manager.ts";
 import { knowledgeLinksScript } from "./components/knowledge-links.ts";
-import { authedFetchScript } from "./components/authed-fetch.ts";
-import { WS_PREOPEN_BACKOFF_MS, WS_STALLED_NOTICE_ID, WS_STALLED_NOTICE_TEXT } from "./components/ws-retry.ts";
+import { authedFetchScript, EXPIRED_BANNER_ID } from "./components/authed-fetch.ts";
+import { wsRetryScript, WS_STALLED_NOTICE_ID, WS_STALLED_NOTICE_TEXT } from "./components/ws-retry.ts";
 
 export async function renderChatPage(): Promise<string> {
   const [webFormatScript, helpersScript, inspectorScript, jiraEntryBundle, jiraCardBundle] =
@@ -726,31 +726,45 @@ const CHAT_SCRIPT = `
     closeJiraEntry(); // same seam as loadThreadMessages: the picker's thread is gone too
   }
 
+  // ── The pre-open retry rules (src/chat/views/components/ws-retry.ts) ──
+  //
+  // Emitted from that module's own functions, not hand-ported: the page used to
+  // index the backoff array itself while the tested helper sat unused.
+  ${wsRetryScript()}
+
   /**
-   * Is the session still alive? Asked before a socket that NEVER OPENED is
-   * retried.
+   * What does the server say about the session behind a socket that NEVER
+   * OPENED? THREE answers, not two — see ws-retry.ts.
    *
-   * Only a 401 counts as "no". A 503 is what an authenticating instance answers
-   * when token introspection is UNAVAILABLE (a Texas outage) and a transport
-   * failure is the network — both are outages, and reloading into one is the
-   * storm the breaker exists to prevent. The 401 case additionally runs
-   * authedFetch's own HTTP rule, which is the mode-conditional decision.
+   *   401  → dead. The mode-conditional expiry rule (reload, or banner).
+   *   2xx  → alive, and the upgrade is still refused: a config fact. Ladder.
+   *   else → unknown, and a transport failure lands here too. A restart, a
+   *          laptop waking with no network, a 503 from an introspection outage:
+   *          none of them says anything about this session and all of them
+   *          self-heal, so the page keeps retrying and says nothing.
    */
-  function chatSessionAlive() {
-    return authedFetch('/chat/me').then(function(res) {
-      return !res || res.status !== 401;
-    }, function() { return true; });
+  function chatSessionProbe() {
+    return authedFetch('/chat/me').then(classifyChatSessionProbe, function() { return 'unknown'; });
   }
 
-  // ── The pre-open retry ladder (src/chat/views/components/ws-retry.ts) ──
-  //
-  // A socket that never opened but whose SESSION is alive is the origin-refused
-  // handshake: src/auth/ws-upgrade.ts answers 403 while /chat/me answers 200.
-  // That does not self-heal, so retrying it every 2 s forever is a silent
-  // permanent loop. Back off, give up, and SAY so — with a notice that is
-  // deliberately not the session-expiry banner, because nothing has expired.
-  var WS_PREOPEN_BACKOFF_MS = ${JSON.stringify(WS_PREOPEN_BACKOFF_MS)};
-  var wsPreOpenFailures = 0;
+  // Both bars are fixed to the top of the viewport, and the expiry banner has
+  // the higher z-index — so at top:0 the amber one was simply INVISIBLE whenever
+  // both were up. The expiry banner still wins the top slot (it reports the more
+  // serious fact); the amber bar stacks UNDER it rather than behind it.
+  // authed-fetch.ts calls window.__muninnRestackNotices whenever the banner
+  // appears or is removed, since the offset only exists while the banner does.
+  function stalledNoticeTopPx() {
+    var banner = document.getElementById(${JSON.stringify(EXPIRED_BANNER_ID)});
+    if (!banner) return '0';
+    // offsetHeight is 0 in a layout-less context (a stubbed DOM, a hidden tab);
+    // one line of the banner's 13px/1.4 type plus its padding is ~34px.
+    return (banner.offsetHeight || 34) + 'px';
+  }
+
+  window.__muninnRestackNotices = function() {
+    var bar = document.getElementById(${JSON.stringify(WS_STALLED_NOTICE_ID)});
+    if (bar) bar.style.top = stalledNoticeTopPx();
+  };
 
   function showWsStalledNotice() {
     if (document.getElementById(${JSON.stringify(WS_STALLED_NOTICE_ID)}) || !document.body) return;
@@ -763,12 +777,25 @@ const CHAT_SCRIPT = `
       'text-align:center;box-shadow:0 2px 8px rgba(0,0,0,0.3);';
     bar.textContent = ${JSON.stringify(WS_STALLED_NOTICE_TEXT)};
     document.body.appendChild(bar);
+    window.__muninnRestackNotices();
   }
 
   function hideWsStalledNotice() {
     var bar = document.getElementById(${JSON.stringify(WS_STALLED_NOTICE_ID)});
     if (bar && bar.parentNode) bar.parentNode.removeChild(bar);
   }
+
+  // The ladder itself, with the page's real effects bound to it.
+  var wsPreOpenRetry = makePreOpenRetry({
+    probe: chatSessionProbe,
+    retry: function() { connectWs(); },
+    // Idempotent with authedFetch's own 401 handling, which may already have
+    // acted on the same probe response: a second banner is the same banner.
+    expired: function() { window.__muninnAuthRefusal('ws'); },
+    stall: showWsStalledNotice,
+    clearStall: hideWsStalledNotice,
+    schedule: function(fn, ms) { setTimeout(fn, ms); },
+  });
 
   // WebSocket connection
   function connectWs() {
@@ -787,8 +814,7 @@ const CHAT_SCRIPT = `
       // The handshake was accepted, so the ladder starts over and anything it
       // put on screen comes off. Same "an open IS the evidence" rule the SSE
       // stream follows.
-      wsPreOpenFailures = 0;
-      hideWsStalledNotice();
+      wsPreOpenRetry.reset();
       window.__muninnAuthChannelRecovered('ws');
     };
     ws.onmessage = function(e) {
@@ -823,23 +849,10 @@ const CHAT_SCRIPT = `
         setTimeout(connectWs, 2000);
         return;
       }
-      // Never opened: ASK, instead of assuming a dropped connection. Only a
-      // session the server still answers for earns a retry; a refusal
-      // goes through the same mode-conditional rule as the 4401 close (which
-      // is idempotent — authedFetch's own 401 handling may already have acted
-      // on it, and a second banner is the same banner).
-      chatSessionAlive().then(function(alive) {
-        if (!alive) { window.__muninnAuthRefusal('ws'); return; }
-        // Alive, and still refused. /chat/me answering 200 while the upgrade
-        // answers 403 is exactly the origin-refused handshake — a config fact,
-        // not a transient — so the retry is BOUNDED and the giving-up is
-        // visible. Only a 401 is an expiry, so this is deliberately NOT the
-        // expiry banner.
-        wsPreOpenFailures++;
-        var delay = WS_PREOPEN_BACKOFF_MS[wsPreOpenFailures - 1];
-        if (delay === undefined) { showWsStalledNotice(); return; }
-        setTimeout(connectWs, delay);
-      });
+      // Never opened: ASK, instead of assuming a dropped connection — and act
+      // on WHICH of the three answers came back (ws-retry.ts). Only a 2xx is a
+      // refusal worth counting; an outage keeps retrying and says nothing.
+      wsPreOpenRetry.onClose();
     };
   }
 

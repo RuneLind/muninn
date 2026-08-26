@@ -36,11 +36,12 @@ which is wide open.
    Written behind (3) while the mode was unreachable, LIVE since PR 2: without
    either, the mode comes up able to authenticate nobody. The endpoint must also
    be an **http(s)** URL, not merely parseable: `new URL` accepts any scheme, so
-   `mailto:x`, `file:///…` and a bare `texas.nais/introspect` (parsed as scheme
-   `texas.nais:`) all booted a pod that looked healthy and 401'd every request —
-   the introspection call is a `fetch` POST, which speaks http(s) and nothing
-   else. That is the same failure the parse check was written for, one typo to
-   its left.
+   `mailto:x`, `file:///…` and `texas.nais:8080` — a host with the scheme left
+   off, parsed as scheme `texas.nais:` — all booted a pod that looked healthy and
+   401'd every request; the introspection call is a `fetch` POST, which speaks
+   http(s) and nothing else. That is the same failure the parse check was written
+   for, one typo to its left. (The SLASH spelling `texas.nais/introspect` is the
+   *parse* check's case, not this one — measured, `new URL` refuses it outright.)
 5. An authenticating mode with an empty `MUNINN_ADMIN_IDENTS` or
    `MUNINN_ALLOWED_ORIGINS`.
 6. `local` without `MUNINN_LOCAL_TOKEN` / `MUNINN_LOCAL_USER`, or with a secret
@@ -697,25 +698,51 @@ is cached ONCE, at init: a tab whose `/chat/me` failed both attempts keeps
 an ordinary 1006 close, so the 4401 rule was structurally blind to it and the
 2 s retry ran forever in silence (measured: five refused handshakes, zero
 reloads, no banner). `connectWs` tracks whether the socket ever fired `open` and
-PROBES `/chat/me` before retrying one that did not. Only a **401** on that probe
-is a refusal — a 503 (introspection unavailable) or a transport error earns a
-retry.
+PROBES `/chat/me` before retrying one that did not.
 
-⚠️ **"Earns a retry" is BOUNDED on that path, and only on that path**
-(`src/chat/views/components/ws-retry.ts`). `src/auth/ws-upgrade.ts` answers
+⚠️ **That probe has THREE answers, and the middle one is the only bounded path**
+(`src/chat/views/components/ws-retry.ts`, `classifyChatSessionProbe`):
+
+| probe | meaning | what the page does |
+|---|---|---|
+| **401** | the session is gone | the mode-conditional expiry rule — reload, or banner. Terminal |
+| **2xx** | alive, and the upgrade is STILL refused | one rung of the bounded ladder below |
+| anything else — **5xx**, a transport failure | an outage that says nothing about the session | retry every 2 s, **unbounded**, no rung, no notice |
+
+The first cut asked a yes/no question ("is it alive?") and answered **yes** to
+everything that was not a 401. Measured on the composed page, that spent the
+whole ladder in ~12 s and then stopped permanently — under an amber "the chat
+connection was refused" bar — on **muninn restarting**, on a **laptop waking
+with the network still down** (every 2 s retry builds a new `connectWs` closure
+whose `everOpened` is false, so post-open drops degrade into pre-open attempts),
+and on the **503 an authenticating instance answers while introspection is
+unavailable**. All three self-heal; none of them is a refusal.
+
+The bounded path is the 2xx one, and only it. `src/auth/ws-upgrade.ts` answers
 **403** to an origin-refused handshake while `/chat/me` answers **200**, so
 "alive, and still refused" is a real state — a configuration fact (an origin
 missing from `MUNINN_ALLOWED_ORIGINS`, a proxy that drops `Origin`) that never
 self-heals — and the page retried it every 2 s for as long as the tab stayed
-open, silently, since a refusal that is not an expiry gets no banner. The
-pre-open ladder therefore backs off over `WS_PREOPEN_BACKOFF_MS`
-(2 s / 4 s / 6 s), gives up, and renders its OWN amber bar
-(`WS_STALLED_NOTICE_ID`) saying live updates are unavailable, the session is
-still valid, and to reload. Deliberately not the expiry banner: nothing has
-expired, and saying so would be the same lie the `provider === null` rule exists
-to prevent. A socket that OPENED and then dropped is untouched — still 2 s,
-still unbounded — because that one self-heals, and a `ws.onopen` resets the
-ladder and clears the bar.
+open, silently, since a refusal that is not an expiry gets no banner. That
+ladder backs off over `WS_PREOPEN_BACKOFF_MS` (2 s / 4 s / 6 s), gives up, and
+renders its OWN amber bar (`WS_STALLED_NOTICE_ID`) saying live updates are
+unavailable, the session is still valid, and to reload. Deliberately not the
+expiry banner: nothing has expired, and saying so would be the same lie the
+`provider === null` rule exists to prevent. A socket that OPENED and then dropped
+is untouched — still 2 s, still unbounded — because that one self-heals, and a
+`ws.onopen` resets the ladder and clears the bar.
+
+Both bars are `position:fixed; top:0`, and the expiry banner outranks the amber
+one in z-index — so when both are up the amber bar is **stacked under** it
+(`window.__muninnRestackNotices`, which `authed-fetch.ts` calls whenever the
+banner appears or is removed) rather than hidden behind it.
+
+The page runs `ws-retry.ts`'s own functions rather than a hand-port: `connectWs`
+is a template string `tsc` cannot see, and the first cut left it indexing
+`WS_PREOPEN_BACKOFF_MS` by hand beside a `nextPreOpenRetryDelayMs` only the unit
+test called. `wsRetryScript()` emits the functions themselves, and the unit test
+drives the emitted script through a simulated retry loop — a transport-failing
+probe must grow past the ladder's length, a 2xx one must cap at it.
 
 **A spent verdict LATCHES the channel** (`__muninnAuthLatched`). The SSE error
 path used to fall through to its 3-second reconnect after a banner, re-entering
@@ -736,10 +763,28 @@ evidence rather than by a timer:
 | a successful `/chat/me` (`__muninnClearAuthReloadStamp`, init) | cleared | left |
 | `reconnectChatSse()` → `__muninnAuthReleaseLatch('sse')` | cleared | left — a request is not an outcome |
 | the stream/socket OPENS → `__muninnAuthChannelRecovered(channel)` | cleared | removed, **but only once NO channel is still latched** |
+| a **2xx through `authedFetch`** → `__muninnAuthChannelRecovered('http')`, only while `http` is latched | cleared | same rule |
 
-That last condition is the non-obvious half: the banner is one page-level bar
+That third condition is the non-obvious half: the banner is one page-level bar
 shared by three channels, so an SSE recovery clearing it while a 4401'd socket
 is still refused would hide a live expiry behind a stream that happens to work.
+
+⚠️ The fourth row exists because **`http` has no `open` event**, so for one round
+it had no release at all: the other two are a stream opening and an explicit SSE
+reconnect, neither of which a `fetch` can produce. A latched `http` therefore
+pinned the shared banner up for the life of the tab — and blocked every OTHER
+channel's recovery from taking it down, since that clear requires nothing to be
+latched. A 2xx is the http channel's own open evidence, and it is consulted only
+while `http` is latched: on an ordinary page every response would otherwise be a
+second, decision-free door onto removing someone else's banner.
+
+**Accepted, not fixed: a FLAPPING stream on an `entra` instance.** The releases
+are evidence-driven, so open → error → open → error re-enters the rule every
+cycle, each error being a fresh unlatched refusal whose `entra` verdict is a
+reload. The breaker is the bound: **at most one reload per 60 s window per tab**
+while the flapping lasts, with a banner in between. The alternative is a failure
+COUNTER that outlives a genuine recovery — which is precisely the un-releasable
+latch above — and this shape converges the moment the stream settles either way.
 
 NB the SSE handler reads `readyState`
 BEFORE closing the stream — `close()` sets it to 2, so a state read afterwards

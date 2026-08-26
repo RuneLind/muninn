@@ -44,6 +44,13 @@ interface Opts {
   /** When set, every `/chat/me` AFTER the first answers 401 with this body —
    *  the shape a session that expires while the tab is open really has. */
   expireAfterFirstMe?: Record<string, unknown>;
+  /** When set, every `/chat/me` AFTER the first FAILS the way an unreachable
+   *  server does: `route.abort()`, i.e. the fetch rejects. muninn restarting, a
+   *  laptop waking with the network still down. */
+  abortAfterFirstMe?: boolean;
+  /** When set, every `/chat/me` AFTER the first answers this status — 503 is
+   *  what an authenticating instance answers while introspection is down. */
+  meStatusAfterFirst?: number;
   /** Replace `WebSocket` with one that never OPENS and closes 1006 — a
    *  handshake the server refused. Playwright's `routeWebSocket` cannot produce
    *  it: its mock accepts the connection, so the page always sees `open` first. */
@@ -97,6 +104,10 @@ async function open(page: Page, opts: Opts): Promise<void> {
     hits.me += 1;
     if (opts.expireAfterFirstMe && hits.me > 1) {
       return route.fulfill({ status: 401, json: opts.expireAfterFirstMe });
+    }
+    if (opts.abortAfterFirstMe && hits.me > 1) return route.abort();
+    if (opts.meStatusAfterFirst && hits.me > 1) {
+      return route.fulfill({ status: opts.meStatusAfterFirst, body: "introspection unavailable" });
     }
     return route.fulfill({ json: meFor(opts.provider) });
   });
@@ -310,7 +321,7 @@ test.describe("acceptance 19 — and a latched channel RECOVERS", () => {
 
 test.describe("acceptance 19 — a refused UPGRADE whose session is ALIVE is bounded", () => {
   // `src/auth/ws-upgrade.ts` answers 403 to an origin-refused handshake while
-  // /chat/me answers 200, and `chatSessionAlive()` counts only a 401 as dead. So
+  // /chat/me answers 200 — the one probe result (`refused`) that spends a rung.
   // "alive, and still refused" retried every 2 s for as long as the tab stayed
   // open, silently — a refusal that is not an expiry gets no banner.
   test("it backs off, gives up, and SAYS so — without claiming an expiry", async ({ page }) => {
@@ -337,6 +348,60 @@ test.describe("acceptance 19 — a refused UPGRADE whose session is ALIVE is bou
     // Not the expiry banner: /chat/me said 200, so nothing has expired, and
     // telling the reader otherwise is a lie the page must not tell.
     await expect(banner(page)).toHaveCount(0);
+    expect(await reloaded(page)).toBe(false);
+
+    // …and when the expiry banner DOES arrive on top of it, the amber bar is
+    // stacked under it rather than hidden behind it: both are position:fixed at
+    // top:0 and the banner wins the z-index, so at top:0 the amber one is
+    // invisible while a reader is being told two different things.
+    const amberTop = async () =>
+      (await page.locator(`#${WS_STALLED_NOTICE_ID}`).boundingBox())?.y ?? -1;
+    expect(await amberTop()).toBe(0);
+    await page.evaluate(() =>
+      (window as unknown as { __muninnAuthRefusal: (c: string) => string }).__muninnAuthRefusal("ws"));
+    await expect(banner(page)).toBeVisible();
+    await expect(page.locator(`#${WS_STALLED_NOTICE_ID}`)).toBeVisible();
+    const bannerBox = await banner(page).boundingBox();
+    expect(await amberTop()).toBeGreaterThanOrEqual((bannerBox?.height ?? 0) - 1);
+  });
+});
+
+test.describe("acceptance 19 — an OUTAGE is not a refusal, and is not bounded", () => {
+  // ⚠️ The measured regression: the probe answered "alive" to everything that
+  // was not a 401 — a transport failure included — so a socket that never
+  // opened while the server was simply DOWN was treated as the origin-refused
+  // handshake. Four attempts in ~12 s and then a permanent stop, under an amber
+  // "the chat connection was refused" bar, while muninn was coming back up.
+
+  test("a /chat/me that cannot be reached keeps retrying past the ladder's length", async ({ page }) => {
+    test.setTimeout(90_000);
+    await open(page, { provider: "local", refuseUpgrade: true, abortAfterFirstMe: true });
+    await markPage(page);
+
+    const attempts = () => page.evaluate(() => (window as unknown as { __wsAttempts: number }).__wsAttempts);
+    // The ladder would have stopped at 4. Unbounded 2 s retries pass that within
+    // seconds and keep going.
+    await expect.poll(attempts, { timeout: 60_000 }).toBeGreaterThan(1 + WS_PREOPEN_BACKOFF_MS.length + 3);
+
+    // And it says NOTHING while it does: nothing has expired, and nothing has
+    // been refused. Both bars would be a lie about an outage.
+    await expect(page.locator(`#${WS_STALLED_NOTICE_ID}`)).toHaveCount(0);
+    await expect(banner(page)).toHaveCount(0);
+    expect(await reloaded(page)).toBe(false);
+  });
+
+  test("…and a 503 from an introspection outage is the same condition", async ({ page }) => {
+    // An authenticating instance answers 503 while token introspection is
+    // unavailable. That is Texas being down, not this reader's session.
+    test.setTimeout(90_000);
+    await open(page, { provider: "entra", refuseUpgrade: true, meStatusAfterFirst: 503 });
+    await markPage(page);
+
+    const attempts = () => page.evaluate(() => (window as unknown as { __wsAttempts: number }).__wsAttempts);
+    await expect.poll(attempts, { timeout: 60_000 }).toBeGreaterThan(1 + WS_PREOPEN_BACKOFF_MS.length + 3);
+    await expect(page.locator(`#${WS_STALLED_NOTICE_ID}`)).toHaveCount(0);
+    await expect(banner(page)).toHaveCount(0);
+    // A 503 must not reload either — that is the storm the breaker exists for.
     expect(await reloaded(page)).toBe(false);
   });
 });

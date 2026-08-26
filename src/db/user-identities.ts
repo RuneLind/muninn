@@ -103,7 +103,11 @@ export function slugifyIdPart(value: string): string {
 }
 
 /**
- * A claim set no `users.id` can be minted from.
+ * A claim set no `users.id` can be minted from — or, in `provision`'s sibling
+ * branch, one whose minted id AND its collision form are both already taken by
+ * other people. Two throw sites, one class, because they are the same fact: the
+ * claims are immutable, so this token can never be provisioned, however many
+ * times it comes back.
  *
  * ## Why this is a TYPE and not just an Error
  *
@@ -274,7 +278,15 @@ async function provision(claims: NavClaims): Promise<string> {
       );
       const alsoTaken = await tx`SELECT 1 FROM users WHERE id = ${userId}`;
       if (alsoTaken.length > 0) {
-        throw new Error(
+        // `UnmintableClaimsError`, not a plain one, and for the same reason the
+        // empty-slug refusal wears it: both ids are derived from claims that do
+        // not change, so this token can NEVER be provisioned. A plain Error is
+        // classified `unavailable` by `src/auth/introspect.ts` — 503, retryable,
+        // cached for nothing — i.e. every retry from every open tab spends
+        // another Texas round-trip and another transaction, forever. That is
+        // exactly the loop the `mintNavUserId` half of this closed, one branch
+        // to its right.
+        throw new UnmintableClaimsError(
           `Cannot provision an Entra identity: both "${base}" and the collision form "${userId}" are ` +
           `taken by other users.id rows. Resolve by hand — refusing to adopt an existing account.`,
         );

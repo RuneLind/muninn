@@ -176,6 +176,8 @@ interface Stub {
   /** How many banner nodes were ever APPENDED, which a removal does not reduce.
    *  The idempotency assertion needs this and the presence one needs `banner()`. */
   bannerAppends: () => number;
+  /** Install the page's notice-restacking hook, so the calls can be counted. */
+  setRestack: (fn: () => void) => void;
   fetches: number;
 }
 
@@ -263,6 +265,7 @@ function evalScript(
     latched: (channel) => (win.__muninnAuthLatched as (c: string) => boolean)(channel),
     authedFetch: (url) => (win.authedFetch as (u: string) => Promise<{ status: number }>)(url),
     setProvider: (p) => (win.__muninnSetAuthProvider as (p: string | null) => void)(p),
+    setRestack: (fn) => { win.__muninnRestackNotices = fn; },
     clearStamp: () => (win.__muninnClearAuthReloadStamp as () => void)(),
   };
 }
@@ -510,6 +513,59 @@ describe("the SSE/WS channel latch — a terminal refusal is TERMINAL", () => {
     expect(s.bannerAppends()).toBe(2);
   });
 
+  test("⚠️ the http channel's latch is released by a later 2xx — its only 'open'", async () => {
+    // The regression this closes: `banner('http')` latches like every other
+    // channel, but the two releases that existed are a STREAM opening and an
+    // explicit SSE reconnect — neither of which a `fetch` can ever produce. A
+    // latched `http` therefore pinned the shared banner up for the life of the
+    // tab AND blocked every other channel's recovery from taking it down, since
+    // that clear requires nothing to be latched.
+    const s = evalScript({ status: 200, body: { ok: true } });
+    s.setProvider("entra");
+    // A 401 whose body is unreadable: refused, with no evidence of a login page.
+    expect(s.refusal("http", undefined)).toBe("banner");
+    expect(s.latched("http")).toBe(true);
+    // …and the socket expires too, so the banner is asked for by two channels.
+    expect(s.refusal("ws")).toBe("reload");
+    expect(s.latched("ws")).toBe(true);
+
+    // HTTP comes back. That is this channel's open event, and nothing else is.
+    await s.authedFetch("/chat/threads");
+    await settle();
+    expect(s.latched("http")).toBe(false);
+    // The socket is still refused, so the banner stays — the shared-bar rule.
+    expect(s.banner()).toBe(true);
+
+    // Once the socket comes back too, it goes. Before the fix this was
+    // unreachable: `http` stayed latched forever and held the bar up.
+    s.recovered("ws");
+    expect(s.banner()).toBe(false);
+  });
+
+  test("…and with http the ONLY latched channel, a 2xx takes the banner down", async () => {
+    const s = evalScript({ status: 200, body: { ok: true } });
+    s.setProvider("entra");
+    s.refusal("http", undefined);
+    expect(s.banner()).toBe(true);
+    await s.authedFetch("/chat/bots");
+    await settle();
+    expect(s.latched("http")).toBe(false);
+    expect(s.banner()).toBe(false);
+  });
+
+  test("a 2xx on a page where http was never latched removes NOTHING", async () => {
+    // The guard: an ordinary successful request must not become a second,
+    // decision-free door onto clearing a banner another channel put up.
+    const s = evalScript({ status: 200, body: { ok: true } });
+    s.setProvider("local");
+    s.refusal("ws");
+    expect(s.banner()).toBe(true);
+    await s.authedFetch("/chat/bots");
+    await settle();
+    expect(s.latched("ws")).toBe(true);
+    expect(s.banner()).toBe(true);
+  });
+
   test("a successful /chat/me RELEASES the latches", () => {
     // The release condition: a working identity answer is the evidence the
     // stream is worth re-opening. The reload STAMP is deliberately not dropped
@@ -533,6 +589,30 @@ describe("the banner is page-level and idempotent", () => {
     s.setProvider("local");
     s.refusal("ws");
     expect(s.bannerIsPageLevel()).toBe(true);
+  });
+
+  test("it tells the page to RESTACK its other notices, both up and down", () => {
+    // The amber ws-retry bar is fixed at the same top:0 and loses the z-index
+    // race, so it is invisible while this banner is up unless the page moves it.
+    // The page owns that offset; this is the notification that it changed.
+    const s = evalScript();
+    let restacks = 0;
+    s.setRestack(() => { restacks++; });
+    s.setProvider("local");
+    s.refusal("ws");
+    expect(restacks).toBe(1);
+    s.recovered("ws");
+    expect(s.banner()).toBe(false);
+    expect(restacks).toBe(2);
+  });
+
+  test("…and survives a page that has no such hook — it is interpolated FIRST", () => {
+    // authedFetchScript() runs ahead of every other script constant, so it must
+    // not depend on anything the rest of the page defines later.
+    const s = evalScript();
+    s.setProvider("local");
+    expect(() => s.refusal("ws")).not.toThrow();
+    expect(s.banner()).toBe(true);
   });
 
   test("three refusals render ONE banner", () => {

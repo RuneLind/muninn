@@ -256,12 +256,16 @@ export function resolveAuthConfig(env: Record<string, string | undefined> = proc
       parsedEndpoint = null;
     }
     // Parsing is not enough, and the gap is not theoretical: `new URL` accepts
-    // any scheme, so `mailto:texas`, `file:///etc/passwd` and a bare
-    // `texas.nais/introspect` (parsed as scheme `texas.nais:`) all BOOTED. The
-    // introspection call is a `fetch` POST, which supports http(s) and nothing
-    // else, so every one of those is a pod that looks healthy and 401s every
-    // single request — the exact failure the parse check was written for, one
-    // typo to its left.
+    // any scheme, so `mailto:texas`, `file:///etc/passwd` and `texas.nais:8080`
+    // — a host:port spelling with the scheme left off, which parses as scheme
+    // `texas.nais:` — all BOOTED. The introspection call is a `fetch` POST,
+    // which supports http(s) and nothing else, so every one of those is a pod
+    // that looks healthy and 401s every single request: the exact failure the
+    // parse check was written for, one typo to its left.
+    //
+    // NB a SLASH after the host (`texas.nais/introspect`) is NOT this case —
+    // measured: `new URL` refuses it outright, so the parse check above already
+    // had it. It is the COLON form that gets through.
     if (!parsedEndpoint || (parsedEndpoint.protocol !== "http:" && parsedEndpoint.protocol !== "https:")) {
       throw new AuthConfigError(
         `NAIS_TOKEN_INTROSPECTION_ENDPOINT="${endpoint}" is not an http(s) URL (expected e.g. ` +

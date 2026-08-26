@@ -119,10 +119,13 @@ describe("acceptance 5 — fail closed, both directions", () => {
     // the left of the failure it was written for: the introspection call is a
     // `fetch` POST, which speaks http(s) and nothing else, so each of these
     // booted a pod that looked healthy and 401'd every single request.
-    // `texas.nais/introspect` is the sharpest one — it PARSES, as scheme
-    // `texas.nais:` with path `/introspect`, which is exactly the shape an
-    // operator types when they mean a host.
-    for (const bad of ["mailto:x", "file:///etc/passwd", "texas.nais/introspect", "ftp://texas.test/x", "data:,x"]) {
+    // `texas.nais:introspect` is the sharpest one — a host with the scheme left
+    // off and a colon where the operator meant a slash or a port. It PARSES, as
+    // scheme `texas.nais:` with path `introspect`, and this gate is the only
+    // thing that stops it. (The SLASH spelling, `texas.nais/introspect`, is in
+    // the parse test above instead: measured, `new URL` refuses that one
+    // outright, so it never reaches here.)
+    for (const bad of ["mailto:x", "file:///etc/passwd", "texas.nais:introspect", "ftp://texas.test/x", "data:,x"]) {
       expect(() => resolveAuthConfig(entraEnv({ NAIS_TOKEN_INTROSPECTION_ENDPOINT: bad })), bad)
         .toThrow(/NAIS_TOKEN_INTROSPECTION_ENDPOINT/);
     }

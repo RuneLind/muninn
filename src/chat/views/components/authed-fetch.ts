@@ -100,6 +100,29 @@
  *    reconnect (`reconnectChatSse`). It clears the latch so the retry ladder
  *    works again and deliberately leaves the banner alone: asking for a
  *    reconnect is not evidence that one succeeded.
+ *
+ * ⚠️ **The `http` channel has no `open` event, so a 2xx IS its recovery.**
+ * `banner('http')` latches like any other channel, and for one round nothing
+ * could ever release it: the two releases above are a stream opening and an
+ * explicit SSE reconnect, and neither exists for `fetch`. A latched `http` then
+ * pinned the shared banner up for the life of the tab — no later WebSocket or
+ * SSE recovery could take it down, because `__muninnAuthChannelRecovered` only
+ * clears it once NOTHING is latched. So `authedFetch` routes a 2xx response
+ * through the same recovery, and only while `http` is latched: an ordinary
+ * successful request on a page where nothing was refused must not become a
+ * second, decision-free door onto removing someone else's banner.
+ *
+ * ## Accepted: a FLAPPING stream on an `entra` instance
+ *
+ * The releases are evidence-driven, so a stream that alternates open → error →
+ * open → error re-enters the rule on every cycle: each error is a fresh
+ * unlatched refusal, and on `entra` that verdict is a reload. The breaker is
+ * what bounds it — at most one reload per `RELOAD_WINDOW_MS` per tab — so the
+ * worst case is **one reload per 60 s window while the flapping lasts**, with a
+ * banner in between. That is accepted rather than fixed: the alternative is a
+ * failure COUNTER that outlives a genuine recovery, which is exactly the latch
+ * that could not be released, and this shape at least converges the moment the
+ * stream settles either way.
  */
 
 import { LOGIN_URL_HINT } from "../../../auth/zones.ts";
@@ -194,6 +217,20 @@ export function authedFetchScript(): string {
   function hideExpiredBanner() {
     var existing = document.getElementById(BANNER_ID);
     if (existing && existing.parentNode) existing.parentNode.removeChild(existing);
+    restackNotices();
+  }
+
+  // The chat page's amber "live updates are unavailable" bar (ws-retry.ts) is
+  // fixed to the same top:0 as this banner and sits BELOW it in z-index, so
+  // without this it is invisible whenever both are up. The page owns the
+  // offset — it is the module that knows where its own bar is — and this is
+  // the notification that the offset just changed. Optional by construction:
+  // authedFetchScript() is interpolated FIRST, so it must not depend on
+  // anything the rest of the page defines later.
+  function restackNotices() {
+    try {
+      if (typeof window.__muninnRestackNotices === 'function') window.__muninnRestackNotices();
+    } catch (e) {}
   }
 
   // Release a channel's latch without touching the banner. The caller is an
@@ -225,6 +262,7 @@ export function authedFetchScript(): string {
       'text-align:center;box-shadow:0 2px 8px rgba(0,0,0,0.3);';
     banner.textContent = 'Your session expired — reload the page to sign in again.';
     document.body.appendChild(banner);
+    restackNotices();
   }
 
   function banner(channel) {
@@ -277,11 +315,21 @@ export function authedFetchScript(): string {
    * when the token introspection endpoint is UNAVAILABLE (src/auth/middleware.ts):
    * an outage, not an expiry, and reloading into it would be the reload storm
    * the breaker exists to prevent. It falls through untouched.
+   *
+   * A 2xx is the one thing this channel has instead of an open event, so it
+   * releases a latched 'http' — see the module doc. Only while it IS latched:
+   * on an ordinary page every response would otherwise be a decision-free door
+   * onto removing another channel's banner.
    */
   window.authedFetch = function(input, init) {
     var p = fetch(input, init);
     p.then(function(res) {
-      if (!res || res.status !== 401) return;
+      if (!res) return;
+      if (res.status >= 200 && res.status < 300) {
+        if (latched['http'] === true) window.__muninnAuthChannelRecovered('http');
+        return;
+      }
+      if (res.status !== 401) return;
       var probe;
       try { probe = res.clone(); } catch (e) { return; }
       probe.json().then(function(body) {

@@ -212,6 +212,33 @@ describe("acceptance 14 — a re-issued NAVident does NOT adopt the existing acc
     expect(identities[0]!.user_id).toBe(result.userId);
   });
 
+  test("⚠️ both ids taken is a DENIAL, not an outage — it carries the marker too", async () => {
+    // The sibling of the empty-slug refusal, and it was a plain Error: classified
+    // `unavailable` by src/auth/introspect.ts, which is 503 + retryable + cached
+    // for NOTHING, so every retry from every open tab spends another Texas
+    // round-trip and another provisioning transaction, forever. Both ids are
+    // derived from claims that never change, so this token can never be
+    // provisioned and the answer must be the 30 s negative cache.
+    await getDb()`INSERT INTO users (id, username, platform) VALUES ('nav-x999999', 'X999999', 'web')`;
+    await getDb()`
+      INSERT INTO users (id, username, platform)
+      VALUES (${`nav-x999999-${OID_B.slice(0, 8)}`}, 'X999999', 'web')
+    `;
+
+    let thrown: unknown;
+    try { await resolveNavUser(claims({ oid: OID_B })); } catch (err) { thrown = err; }
+    expect(thrown).toBeInstanceOf(UnmintableClaimsError);
+    // The PROPERTY is the contract — introspect.ts reads it structurally rather
+    // than importing this class, so an `instanceof`-only assertion would pass a
+    // rename that silently restores the retry storm.
+    expect((thrown as { unmintableClaims?: unknown }).unmintableClaims).toBe(true);
+    expect((thrown as Error).message).toMatch(/refusing to adopt an existing account/i);
+
+    // …and the refusal really rolled back: no third users row, no link.
+    expect((await getDb()`SELECT count(*)::int AS n FROM users`)[0]!.n).toBe(2);
+    expect((await identityRows()).length).toBe(0);
+  });
+
   test("the two humans stay separate across later logins", async () => {
     await getDb()`INSERT INTO users (id, username, platform) VALUES ('nav-x999999', 'X999999', 'web')`;
     const newcomer = await resolveNavUser(claims({ oid: OID_B }));
