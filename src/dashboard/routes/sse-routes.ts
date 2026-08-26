@@ -3,6 +3,16 @@ import { streamSSE } from "hono/streaming";
 import { activityLog } from "../../observability/activity-log.ts";
 import { agentStatus } from "../../observability/agent-status.ts";
 import { requireOwnUser, sessionRole } from "../../auth/guard.ts";
+import { getLog } from "../../logging.ts";
+
+const log = getLog("dashboard", "sse");
+
+/** Warn-once: the client retries this every ~3s per tab, and a per-request line
+ *  would bury the log it is meant to make legible. */
+let warnedRoleDenial = false;
+export function __resetSseWarningsForTest(): void {
+  warnedRoleDenial = false;
+}
 
 export function registerSSERoutes(app: Hono): void {
   app.get("/api/events", (c) => {
@@ -53,12 +63,36 @@ export function registerSSERoutes(app: Hono): void {
      * operator will meet it: `resolveRole` answers `user` for a `local` identity
      * unconditionally, so on `MUNINN_AUTH=local` this route is denied to
      * EVERYONE, and the dashboard's own activity feed, `/agents` live zone and
-     * connection indicator go dead. That is the deferred zone model's shape
-     * arriving early, not a bug — the durable fix is the admin role, which
+     * connection indicator stop updating. That is the deferred zone model's
+     * shape arriving early, not a bug — the durable fix is the admin role, which
      * cannot exist in `local` mode without making this campaign's central
      * acceptance pass without the diff (see `role.ts`).
+     *
+     * **What the two consumers actually do, measured rather than reasoned about**
+     * (`views/components/connection.ts` and `views/agents-page.ts`, the only two
+     * `EventSource`/`sseClient` sites in `src/`): a 403 fails an `EventSource`
+     * PERMANENTLY. Measured in Chromium against a canned 403 — `readyState` is
+     * `2` (CLOSED) and exactly ONE request is made in nine seconds — because the
+     * spec reconnects on a transport error but not on a non-200. So those pages
+     * settle into "Disconnected" with every live element frozen; they do not
+     * hammer, and `loadOverview()` still fills the static half.
+     *
+     * That is also why the WARN below matters: the operator gets a stalled page
+     * and, without it, no log line at all. Warn-once anyway, the `middleware.ts`
+     * / `origin.ts` discipline — one line per tab-open is still one line too
+     * many across a working day.
      */
     if (sessionRole(c) === "user") {
+      if (!warnedRoleDenial) {
+        warnedRoleDenial = true;
+        log.warn(
+          "Refused GET /api/events for role `user` — the operator stream carries every user's message " +
+          "text and a process-wide agent_runs snapshot. On MUNINN_AUTH=local EVERY identity is role " +
+          "`user` (the loopback bypass included), so the dashboard's activity feed and /agents live " +
+          "zone will show Disconnected and stop updating until the deferred zone model lands. The " +
+          "chat page is unaffected: it uses /chat/events.",
+        );
+      }
       return c.json(
         { error: "forbidden", reason: "operator stream; use /chat/events for your own runs" },
         403,

@@ -393,6 +393,18 @@ export interface ListJiraDraftsOptions {
   savedOnly?: boolean;
   /** Clamped through `clampJiraArchiveLimit`; absent ⇒ the shared default. */
   limit?: number;
+  /**
+   * Restrict to the drafts one session may read (`ownerScope` in
+   * `src/auth/resource-guard.ts`). Absent ⇒ every row, which is auth off and
+   * role `admin`.
+   *
+   * **It has to reach the SQL, not a `.filter()` after the read.** `capped` is a
+   * FACT from the query — one row past the limit, fetched and dropped — so
+   * filtering afterwards would make it a claim about a set the caller never
+   * sees, and would hand back short pages. A draft's owner is
+   * `threads.user_id` through the join this query already makes.
+   */
+  owner?: { userId: string; allowNullOwner: boolean };
 }
 
 /**
@@ -425,6 +437,7 @@ export async function listJiraDrafts(
   const sql = getDb();
   const limit = clampJiraArchiveLimit(options.limit ?? JIRA_ARCHIVE_LIMIT_DEFAULT);
   const savedOnly = options.savedOnly === true;
+  const owner = options.owner;
   const rows = await sql<
     {
       id: string;
@@ -460,6 +473,13 @@ export async function listJiraDrafts(
       FROM jira_drafts d
       LEFT JOIN threads t ON t.id = d.thread_id
      WHERE ${savedOnly ? sql`d.saved_at IS NOT NULL` : sql`TRUE`}
+       AND ${
+         owner
+           ? (owner.allowNullOwner
+             ? sql`(t.user_id = ${owner.userId} OR t.user_id IS NULL)`
+             : sql`t.user_id = ${owner.userId}`)
+           : sql`TRUE`
+       }
      ORDER BY d.created_at DESC
      LIMIT ${limit + 1}`;
 

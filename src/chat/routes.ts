@@ -485,11 +485,15 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
   // Delete a thread by ID (including messages and associated memories)
   app.delete("/threads/:id", async (c) => {
     const id = c.req.param("id");
-    const owned = await requireOwnedResource(c, "thread", id);
-    // Same wording as the route's own miss below: "not yours" and "not there"
-    // must be one answer.
-    if (!owned.ok) return c.json({ error: "Thread not found or is the main thread" }, 404);
     try {
+      // INSIDE the try, and behind the uuid check: `threads.id` is a uuid column,
+      // so a non-uuid is a postgres cast error, and a guard placed above the
+      // existing `try` put that error outside the catch that used to absorb it.
+      if (!isValidUuid(id)) return c.json({ error: "Thread not found or is the main thread" }, 404);
+      const owned = await requireOwnedResource(c, "thread", id);
+      // Same wording as the route's own miss below: "not yours" and "not there"
+      // must be one answer.
+      if (!owned.ok) return c.json({ error: "Thread not found or is the main thread" }, 404);
       const deleted = await deleteThreadById(id);
       if (!deleted) {
         return c.json({ error: "Thread not found or is the main thread" }, 404);
@@ -593,6 +597,13 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     // having already thrown away the owner's pending message. The denial is the
     // route's own "nothing pending" answer — `{ text: null }` — because that is
     // what it says for a threadId it does not know.
+    //
+    // The uuid pre-check is the guard's, not the route's: `threads.id` is a uuid
+    // COLUMN, so an unparseable value reaches postgres as a cast ERROR rather
+    // than an empty result, and this handler has no `try`. Without it the guard
+    // turned `GET /chat/pending/garbage` from `{text:null}` into a 500 — the
+    // `unknownDraft` rule the Jira routes already live by.
+    if (!isValidUuid(threadId)) return c.json({ text: null });
     const owned = await requireOwnedResource(c, "thread", threadId);
     if (!owned.ok) return c.json({ text: null });
     const pending = consumePendingMessage(threadId);
@@ -615,6 +626,22 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     const body = await c.req.json<{ text: string; threadId?: string; connector?: string; skipExtractions?: boolean }>();
     if (!body.text) {
       return c.json({ error: "text is required" }, 400);
+    }
+
+    // ⚠️ This route addresses TWO resources, and guarding only `:id` was the
+    // review round's highest finding. `body.threadId` reaches, below and
+    // downstream: `handlePeerOutbound` (which `saveMessage`s under the THREAD
+    // owner's `user_id` and sends out on their hivemind peer),
+    // `setResearchStageByThread` (an unconditional cross-user UPDATE), the
+    // thread's connector, and `processChatMessage`, which persists the turn
+    // against that thread — the same key `seedThreadCitations` and
+    // `GET /api/jira/drafts?thread=` read. Owning the conversation says nothing
+    // about owning the thread. Same 404 as the conversation's, so a thread id
+    // cannot be probed through this route either.
+    if (body.threadId) {
+      if (!isValidUuid(body.threadId)) return c.json({ error: "Conversation not found" }, 404);
+      const ownsThread = await requireOwnedResource(c, "thread", body.threadId);
+      if (!ownsThread.ok) return c.json({ error: "Conversation not found" }, 404);
     }
 
     const bot = botConfigs.find((b) => b.name === conversation.botName);

@@ -100,6 +100,17 @@ export const chatWebSocket = {
     const viewer = ws.data.userId;
     const role = ws.data.role;
 
+    // The expiry test comes FIRST, before the snapshot and before subscribing —
+    // the same "guard before the effect" rule the rest of PR D is built on. It
+    // is a narrow race (introspection at the handshake already rejects an
+    // expired session), but sending the snapshot and then closing is the wrong
+    // order and costs nothing to fix.
+    const expiresAt = ws.data.expiresAt;
+    if (expiresAt !== null && expiresAt - Date.now() <= 0) {
+      ws.close(WS_CLOSE_EXPIRED, "session expired");
+      return;
+    }
+
     // Snapshot FIRST (before subscribe, so no events can slip in before it).
     //
     // The snapshot is the largest single disclosure on this socket: it publishes
@@ -130,14 +141,10 @@ export const chatWebSocket = {
     // Capping at the introspected expiry is the cheaper half of §6's "re-
     // introspect on a timer OR cap at exp" — one timer per socket, no polling,
     // and nothing to get wrong on the happy path. `expiresAt` is null for the
-    // raw shared secret and with auth off, where there is nothing to cap.
-    const expiresAt = ws.data.expiresAt;
+    // raw shared secret and with auth off, where there is nothing to cap. The
+    // already-expired case was handled at the top of this function.
     if (expiresAt !== null) {
       const remaining = expiresAt - Date.now();
-      if (remaining <= 0) {
-        ws.close(WS_CLOSE_EXPIRED, "session expired");
-        return;
-      }
       const timer = setTimeout(() => {
         log.info("Closing a WebSocket whose session expired");
         try {

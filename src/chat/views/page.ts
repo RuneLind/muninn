@@ -660,7 +660,26 @@ const CHAT_SCRIPT = `
       try { handleWsEvent(JSON.parse(e.data)); }
       catch (err) { console.warn('Failed to parse WS message:', err); }
     };
-    ws.onclose = function() { setTimeout(connectWs, 2000); };
+    ws.onclose = function(e) {
+      // 4401 = the server closed this socket because the credential behind it
+      // expired (WS_CLOSE_EXPIRED, src/chat/ws.ts). The upgrade authenticates
+      // ONCE, so reconnecting can only 401 — and the ordinary 2 s retry would
+      // then spin against it forever with nothing on screen to say why.
+      //
+      // It deliberately does NOT reload: in "local" mode there is no login
+      // page (AUTH_EXCLUDED_PATHS is empty by design), so an automatic reload
+      // replaces the chat with raw 401 JSON — strictly worse than a stalled
+      // page that explains itself. The operator re-presents the credential and
+      // reloads by hand.
+      if (e && e.code === 4401) {
+        var banner = document.createElement('div');
+        banner.className = 'empty-state';
+        banner.textContent = 'Your session expired — reload the page to sign in again.';
+        chatMessages.appendChild(banner);
+        return;
+      }
+      setTimeout(connectWs, 2000);
+    };
   }
 
   async function handleWsEvent(event) {

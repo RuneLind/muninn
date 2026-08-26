@@ -301,8 +301,16 @@ Two new modules (`resource-guard`, `ws-upgrade`), plus the socket's own filter i
 ### `resource-guard.ts` — `requireOwnedResource(c, kind, id)`
 
 The shape `requireOwnUser` structurally cannot reach: a route addressed by the
-RESOURCE's id, carrying no claimed user at all. Five kinds — `conversation`
-(resolved from `chatState`), `thread`, `message`, `trace`, `jiraDraft`.
+RESOURCE's id, carrying no claimed user at all. Seven kinds — `conversation`
+(resolved from `chatState`), `thread`, `message`, `trace`, `jiraDraft`,
+`scheduledTask` and `watcher`.
+
+The last two are **not** in §4's list, and the review round is why they are
+here: the empirical pass demonstrated an authenticated non-admin renaming and
+DISABLING another user's email watcher and morning-briefing task, and
+force-queueing their Gmail-MCP watcher to run now. They are exactly this
+guard's shape, so leaving them to the deferred zone model would have shipped a
+cross-user WRITE behind a PR whose subject is resource ownership.
 
 **It answers 404, never 403**, because a web conversation id is
 `sha256("<userId>:<botName>:web")[0:16]` and therefore derivable: a 403 would
@@ -341,11 +349,20 @@ only justification has been deleted is one more thing to keep in step with the
 join. Residual, stated rather than hidden: `jira_drafts.thread_id` has no FK, so
 a DELETED thread orphans its drafts into the NULL-owner class.
 
+**A route that already read the row uses the verdict, not the guard.**
+`decideResourceAccess` over an owner in hand (`ownsJiraDraft`, `ownsResourceRow`)
+is the same decision without a second query — `POST /api/tasks/:id/trigger`,
+`POST /chat/feedback` and the Jira draft routes all take that shape.
+
 `filterToOwner(c, rows, ownerOf)` is the third shape, for a COLLECTION route
 that cannot be gated at all. `GET /chat/conversations` is the one that matters:
 it publishes `id`, `userId` and `username` for every conversation in memory —
 the derivable id set every guard above is protecting. Gating the per-id routes
-behind an ungated index protects nothing.
+behind an ungated index protects nothing — which is also why `GET
+/api/jira/archive` and the `/jira` page's list are scoped. That one cannot be a
+`.filter()` on the result: it is paginated and its `capped` flag is a fact from
+the read, so the constraint reaches the SQL through `ownerScope(c)`, the same
+decision in a second shape.
 
 ### `ws-upgrade.ts` — the one surface no middleware can see
 
@@ -410,7 +427,10 @@ The chat page consumes **`GET /chat/events`** instead: the same `?viewer=` guard
 
 ⚠️ **The operator consequence:** a `local` identity is role `user`, so on an
 authenticating instance this route is denied to EVERYONE, and the dashboard's
-activity feed, the `/agents` live zone and the connection indicator go dead.
+activity feed, the `/agents` live zone and the connection indicator stop
+updating and show Disconnected — measured: a 403 fails an `EventSource`
+permanently (`readyState` 2, one request in nine seconds), so those pages
+freeze rather than retry.
 That is the deferred zone model's shape arriving early. With auth off —
 today's default and the only mode the operator dashboard runs in — nothing
 changes.
@@ -461,26 +481,35 @@ feature — which is why they are written down here rather than left to be found
   everyone — they are open to any authenticated caller. Verified live:
   `GET /api/messages/<anyone>` answers 200.
 - **Which routes a role may call.** There is no zone middleware, so an
-  authenticated `user` still reaches `/traces`, `/api/prompts/:traceId`,
-  `/agents`, `/logs`, `/models` and the rest of the operator surface.
-  `/api/events` is the ONE per-route exception, and it is a denial rather than a
-  zone. **Deferred zone model**, and the reason `MUNINN_AUTH=entra` refuses to
-  boot.
-- **`GET /api/prompts/:traceId` is unguarded**, and it is the sharpest one left:
-  it expands a traceId into a whole assembled prompt — conversation history and
-  extracted memories verbatim. `GET /api/traces/:traceId` beside it IS guarded,
-  so the id it hands out is now the reader's own; the prompt route is admin-zone
-  under §4 and nothing denies it until the zone model lands.
-- **Collection routes other than `GET /chat/conversations` still return
-  everyone's rows** — `GET /api/threads`, `GET /api/users`, `GET /api/traces`
-  (the list). §4 leaves them in the admin zone rather than filtering them.
+  authenticated `user` still reaches `/traces`, `/agents`, `/logs`, `/models`
+  and the rest of the operator surface. `/api/events` is the ONE per-route
+  exception, and it is a denial rather than a zone. **Deferred zone model**, and
+  the reason `MUNINN_AUTH=entra` refuses to boot.
+- **The READ collections still return everyone's rows**, and they are what hands
+  out the ids the guards then refuse: `GET /api/traces` (the list),
+  `GET /api/tasks`, `GET /api/watchers`, `GET /api/goals`, `GET /api/memories`,
+  `GET /api/threads`, `GET /api/users`. §4 leaves them in the admin zone rather
+  than filtering them. Measured consequence worth knowing: `GET /api/tasks`
+  returns another user's task `prompt` verbatim, and `GET /api/goals` their
+  goals. Guarded WRITES with unguarded LISTS is a deliberate half-measure, not
+  an oversight — but it is a half-measure.
+- **`GET /api/messages/:userId` and `GET /api/users/:userId/overview`** are
+  `admin-zone-deferred` from PR C and read the same content
+  `GET /chat/conversations/:id/messages` is now guarded to protect. The zone
+  model is what closes them.
+- **The `/traces` page lists traces it can no longer open.** `GET /api/traces`
+  is unfiltered while `/api/traces/:traceId` is guarded, so on an
+  authenticating instance a row for another user's trace is listed and answers
+  with no spans. The waterfall SAYS so rather than silently doing nothing —
+  filtering the list is the zone model's job.
 - **A resource guard's owner is a `users.id`, and `local` mode pins ONE.** So on
   an authenticating instance the operator's own Telegram-owned traces and
   threads answer 404 to their own web session. See the PR D section above.
-- **`MUNINN_ALLOWED_ORIGINS` is now enforced** by the origin middleware and the
-  CORS disposition — but **not** on the `/chat/ws` upgrade, which no Hono
-  middleware can see. A cross-origin `wss://` handshake is still accepted.
-  **PR D.**
+- **`MUNINN_ALLOWED_ORIGINS` is enforced everywhere**, the `/chat/ws` upgrade
+  included since PR D — measured in review, a cross-origin handshake with a
+  valid credential answers **403**. (This bullet said the opposite until PR D
+  landed; a residuals list that has gone stale is worse than no list, since it
+  is what a reader checks the boundary against.)
 - **`MUNINN_ADMIN_IDENTS` is inert in `local` mode.** The pinned identity always
   resolves to `user`, so the allowlist grants nobody anything today. It is a
   boot requirement so the deferred Entra mode — where it IS the role source —

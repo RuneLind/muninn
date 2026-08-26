@@ -55,6 +55,17 @@ export function registerTracesRoutes(app: Hono): void {
   app.get("/api/prompts/:traceId", async (c) => {
     try {
       const traceId = c.req.param("traceId");
+      // Guarded on the SAME kind and the same id as `/api/traces/:traceId`
+      // above. §4 assigns this route to the deferred admin zone rather than to
+      // PR D's resource list, and the review round is what changed the reading:
+      // guarding the spans while leaving the PROMPT open closes the smaller
+      // disclosure and leaves the larger one — the fully assembled prompt, with
+      // that user's conversation history and extracted memories verbatim —
+      // reachable with the identical id. Its only in-repo consumer is the
+      // operator's own /traces modal, so the guard costs the chat page nothing.
+      const owned = await requireOwnedResource(c, "trace", traceId);
+      // The route's own miss, so a denial cannot be told from an absent snapshot.
+      if (!owned.ok) return c.json({ error: "Prompt snapshot not found" }, 404);
       const snapshot = await getPromptSnapshot(traceId);
       if (!snapshot) {
         return c.json({ error: "Prompt snapshot not found" }, 404);

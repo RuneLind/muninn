@@ -8,6 +8,35 @@ describe("ChatState", () => {
     state = new ChatState();
   });
 
+  describe("conversationOwner", () => {
+    test("answers the owner, and undefined for an unknown id", () => {
+      const conv = state.createConversation({ type: "web", botName: "b", userId: "u1", username: "n" });
+      expect(state.conversationOwner(conv.id)).toBe("u1");
+      expect(state.conversationOwner("no-such-id")).toBeUndefined();
+    });
+
+    test("does NOT touch the LRU — which is the whole reason it exists", () => {
+      // `getConversation` re-inserts at the tail. Its two PR D callers are the
+      // WebSocket fan-out (once per EVENT per open socket) and the resource
+      // guard (on a request that may be DENIED), so using it here would let a
+      // caller reorder the trim queue for conversations it never legitimately
+      // reaches. The mutation `conversationOwner = getConversation(id)?.userId`
+      // is otherwise indistinguishable.
+      const first = state.createConversation({ type: "web", botName: "b", userId: "u1", username: "n" });
+      const second = state.createConversation({ type: "web", botName: "b", userId: "u2", username: "n" });
+      const before = state.getConversations().map((c) => c.id);
+      expect(before).toEqual([first.id, second.id]);
+
+      state.conversationOwner(first.id);
+      expect(state.getConversations().map((c) => c.id), "conversationOwner reordered the LRU")
+        .toEqual([first.id, second.id]);
+
+      // The contrast: the touching reader DOES move it.
+      state.getConversation(first.id);
+      expect(state.getConversations().map((c) => c.id)).toEqual([second.id, first.id]);
+    });
+  });
+
   describe("createConversation", () => {
     test("creates conversation with correct fields", () => {
       const conv = state.createConversation({

@@ -55,7 +55,20 @@ import type { AuthRole } from "./role.ts";
 
 const log = getLog("auth", "resource");
 
-export type ResourceKind = "conversation" | "thread" | "message" | "trace" | "jiraDraft";
+export type ResourceKind =
+  | "conversation"
+  | "thread"
+  | "message"
+  | "trace"
+  | "jiraDraft"
+  /** `scheduled_tasks.user_id` and `watchers.user_id`. Not in §4's list — the
+   *  review round's empirical pass DEMONSTRATED the hole: an authenticated
+   *  non-admin renamed and disabled another user's email watcher and morning
+   *  briefing, and force-queued their Gmail-MCP watcher to run now. They are
+   *  exactly this guard's shape (id-addressed, owner on the row), so they are
+   *  closed here rather than left to the deferred zone model. */
+  | "scheduledTask"
+  | "watcher";
 
 /**
  * What the lookup found. The three-way distinction is load-bearing: "no row" and
@@ -160,6 +173,16 @@ async function lookupOwner(kind: ResourceKind, id: string): Promise<ResourceOwne
       const draft = await getJiraDraft(id);
       return draft ? { found: true, userId: draft.threadUserId } : { found: false };
     }
+    case "scheduledTask": {
+      const { getScheduledTaskById } = await import("../db/scheduled-tasks.ts");
+      const task = await getScheduledTaskById(id);
+      return task ? { found: true, userId: task.userId } : { found: false };
+    }
+    case "watcher": {
+      const { getWatcherById } = await import("../db/watchers.ts");
+      const watcher = await getWatcherById(id);
+      return watcher ? { found: true, userId: watcher.userId } : { found: false };
+    }
   }
 }
 
@@ -224,13 +247,38 @@ export function filterToOwner<T>(
   rows: readonly T[],
   ownerOf: (row: T) => string | null | undefined,
 ): T[] {
-  const identity = sessionIdentity(c);
-  if (!identity) return [...rows];
-  if (sessionRole(c) === "admin") return [...rows];
-  const nullOwnerAllowed = pinnedLocalUserId() !== null;
+  const scope = ownerScope(c);
+  if (scope.all) return [...rows];
   return rows.filter((row) => {
     const owner = ownerOf(row);
-    if (owner === null || owner === undefined) return nullOwnerAllowed;
-    return owner === identity.userId;
+    if (owner === null || owner === undefined) return scope.allowNullOwner;
+    return owner === scope.userId;
   });
+}
+
+/**
+ * The same decision as {@link filterToOwner}, as a VALUE, for a collection that
+ * cannot be filtered in TypeScript.
+ *
+ * `GET /api/jira/archive` is the case: it is paginated, and its `capped` flag is
+ * a fact from the read (one row past the limit, fetched and dropped). Filtering
+ * after the `LIMIT` would make `capped` a claim about a set the caller never
+ * sees, and would return short pages — so the constraint has to reach the SQL.
+ * One decision, two shapes; a route that re-derives "am I scoped?" from
+ * `sessionIdentity` by hand is how the two drift.
+ */
+export interface OwnerScope {
+  /** Every row is visible — auth off, or role `admin`. */
+  readonly all: boolean;
+  /** The session's id. `null` only when `all` is true. */
+  readonly userId: string | null;
+  /** Whether an owner-less row rides along (see `nullOwnerAllowed` above). */
+  readonly allowNullOwner: boolean;
+}
+
+export function ownerScope(c: Context): OwnerScope {
+  const identity = sessionIdentity(c);
+  if (!identity) return { all: true, userId: null, allowNullOwner: true };
+  if (sessionRole(c) === "admin") return { all: true, userId: identity.userId, allowNullOwner: true };
+  return { all: false, userId: identity.userId, allowNullOwner: pinnedLocalUserId() !== null };
 }
