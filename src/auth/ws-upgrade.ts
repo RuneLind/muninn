@@ -55,7 +55,7 @@ import { getLog } from "../logging.ts";
 import type { AuthConfig } from "./mode.ts";
 import { isAuthenticatingMode } from "./mode.ts";
 import { localIdentity, type Identity, type Introspector } from "./introspect.ts";
-import { resolveGrantedRole, resolveRequestIdentity, unauthenticatedBody } from "./middleware.ts";
+import { authUnavailableBody, resolveGrantedRole, resolveRequestIdentity, unauthenticatedBody } from "./middleware.ts";
 import { decideOrigin, loopbackOrigins } from "./origin.ts";
 import { normalizeOrigin } from "../config.ts";
 import type { AuthRole } from "./role.ts";
@@ -74,7 +74,7 @@ export type WsUpgradeDecision =
 
 /** Refusals are JSON for the same reason the middleware's are: a client must be
  *  able to tell an expired session from a broken server without a browser. */
-function refuse(body: unknown, status: 401 | 403): Response {
+function refuse(body: unknown, status: 401 | 403 | 503): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "content-type": "application/json" },
@@ -130,7 +130,21 @@ export function createWsUpgradeAuthorizer(
     // HTTP grants for the same credential, and `MUNINN_LOCAL_ROLE` is applied
     // from the channel that established the identity. Destructuring only
     // `{ identity }` here is what would leave HTTP admin and the socket `user`.
-    const { identity, via } = await resolveRequestIdentity(req.headers, req.url, peer, { introspector, pinned });
+    const { identity, via, unavailable } = await resolveRequestIdentity(
+      req.headers,
+      req.url,
+      peer,
+      { introspector, pinned, localChannels: auth.local !== null },
+    );
+    // 503, and the distinction matters as much here as on HTTP: a 401 on the
+    // handshake is what the client turns into "your session expired", and on
+    // entra into a reload through the sidecar — i.e. every open tab hammering
+    // the auth service that is already down. A 503 is a failed handshake the
+    // page retries in two seconds, which is what an outage deserves.
+    if (!identity && unavailable) {
+      warnOnce("unavailable", "Refused a WebSocket upgrade because token introspection is unavailable");
+      return { ok: false, response: refuse(authUnavailableBody(), 503) };
+    }
     if (!identity) {
       warnOnce("unauthenticated", "Refused an unauthenticated WebSocket upgrade");
       return { ok: false, response: refuse(unauthenticatedBody(auth), 401) };

@@ -16,7 +16,17 @@ export async function saveActivity(params: SaveActivityParams): Promise<void> {
   const sql = getDb();
   await sql`
     INSERT INTO activity_log (type, user_id, bot_name, username, text, duration_ms, cost_usd, metadata)
-    VALUES (${params.type}, ${params.userId ?? null}, ${params.botName ?? null}, ${params.username ?? null}, ${params.text}, ${params.durationMs ?? null}, ${params.costUsd ?? null}, ${params.metadata ? JSON.stringify(params.metadata) : null})
+    VALUES (${params.type}, ${params.userId ?? null}, ${params.botName ?? null}, ${params.username ?? null}, ${params.text}, ${params.durationMs ?? null}, ${params.costUsd ?? null}, ${
+      // `sql.json(...)`, NOT `JSON.stringify(...)`: the string form is encoded a
+      // SECOND time on its way into the jsonb column, so every row held a JSON
+      // *string* scalar. Every `metadata->>'key'` query in
+      // the codebase therefore matched nothing — `getActivityForJob`'s
+      // `watcherId` lookup below, and `metadata->>'audit'`, which
+      // `src/auth/audit.ts` documents as the way to find an admin-audit row.
+      // ⚠️ Rows written BEFORE this fix are still string scalars; there is no
+      // backfill here, so a query over historical rows still needs to parse.
+      params.metadata ? sql.json(params.metadata as never) : null
+    })
   `;
 }
 

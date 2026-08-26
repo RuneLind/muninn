@@ -144,7 +144,18 @@ export const chatWebSocket = {
     // raw shared secret and with auth off, where there is nothing to cap. The
     // already-expired case was handled at the top of this function.
     if (expiresAt !== null) {
-      const remaining = expiresAt - Date.now();
+      // ⚠️ CLAMPED to the 32-bit timer range. `setTimeout` silently treats a
+      // delay over 2**31-1 ms as 1 (with a TimeoutOverflowWarning), so a
+      // far-future expiry — a token whose `exp` is years out, a clock skew, a
+      // seconds-vs-milliseconds slip — fired the timer AT ONCE and closed the
+      // socket with 4401. The client reads 4401 as "your session expired": on
+      // entra that is a reload, and the reloaded page opens another socket that
+      // closes immediately too. The overflow turns the longest possible
+      // lifetime into the shortest. At the clamp the socket simply outlives its
+      // 24-day cap, which is the safe direction and is bounded anyway by the
+      // introspection cap every entra identity now carries.
+      const MAX_TIMEOUT_MS = 2 ** 31 - 1;
+      const remaining = Math.min(expiresAt - Date.now(), MAX_TIMEOUT_MS);
       const timer = setTimeout(() => {
         log.info("Closing a WebSocket whose session expired");
         try {

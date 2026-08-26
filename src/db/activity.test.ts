@@ -1,7 +1,8 @@
 import { test, expect, describe } from "bun:test";
 import { setupTestDb } from "../test/setup-db.ts";
 import { makeActivity } from "../test/fixtures.ts";
-import { saveActivity, getRecentActivity } from "./activity.ts";
+import { saveActivity, getRecentActivity, getActivityForJob } from "./activity.ts";
+import { getDb } from "./client.ts";
 
 setupTestDb();
 
@@ -32,6 +33,40 @@ describe("activity", () => {
     expect(event.botName).toBe("bot1");
     expect(event.durationMs).toBe(1500);
     expect(event.costUsd).toBe(0.01);
+  });
+
+  test("metadata is stored as a jsonb OBJECT, so `->>` can read it", async () => {
+    // It was `JSON.stringify`d into a jsonb parameter, so postgres.js encoded
+    // the already-serialised string a second time and every row held a JSON
+    // *string* scalar. Three consequences, all live: `metadata->>'audit'` is
+    // NULL for every admin-audit row (the PR that added them documents that key
+    // as how you find one), `getActivityForJob`'s `metadata->>'watcherId'`
+    // matches nothing at all, and `mapActivityRow` hands callers a string it
+    // has cast to `Record<string, unknown>`.
+    const marker = `jsonb-${crypto.randomUUID()}`;
+    await saveActivity({
+      type: "system",
+      text: marker,
+      metadata: { audit: "admin-passthrough", watcherId: "w-1" } as never,
+    });
+    const [row] = await getDb()`
+      SELECT metadata->>'audit' AS audit, jsonb_typeof(metadata) AS kind
+        FROM activity_log WHERE text = ${marker}
+    `;
+    expect(row!.kind).toBe("object");
+    expect(row!.audit).toBe("admin-passthrough");
+
+    // …and the read side hands back an object, not a string.
+    const event = (await getRecentActivity(50)).find((e) => e.text === marker)!;
+    expect(event.metadata).toMatchObject({ watcherId: "w-1" });
+  });
+
+  test("getActivityForJob finds a row by its metadata watcherId", async () => {
+    // The query that was silently matching nothing.
+    const watcherId = `w-${crypto.randomUUID()}`;
+    await saveActivity({ type: "system", text: "watcher ran", metadata: { watcherId } as never });
+    const rows = await getActivityForJob(watcherId, "no-such-job-name");
+    expect(rows.some((r) => r.text === "watcher ran")).toBe(true);
   });
 
   test("getRecentActivity returns in chronological order", async () => {

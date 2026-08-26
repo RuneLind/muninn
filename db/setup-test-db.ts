@@ -13,10 +13,15 @@
 import postgres from "postgres";
 import { join } from "node:path";
 import { runMigrations } from "./migrate.ts";
+import { TEST_DATABASE_URL } from "../src/test/test-db-url.ts";
 
-const ADMIN_URL = "postgresql://muninn:muninn@127.0.0.1:5435/muninn";
-const TEST_DB = "muninn_test";
-const TEST_URL = `postgresql://muninn:muninn@127.0.0.1:5435/${TEST_DB}`;
+// The ONE spelling of the test database, shared with `src/test/setup-db.ts` and
+// with the e2e specs that read rows back out of it. This file composed its own,
+// which is exactly what that constant exists to prevent: a divergence here
+// points `DROP SCHEMA public CASCADE` at whichever database the string names.
+const TEST_URL = TEST_DATABASE_URL;
+const TEST_DB = new URL(TEST_URL).pathname.replace(/^\//, "");
+const ADMIN_URL = new URL(TEST_URL).toString().replace(/\/[^/]*$/, "/muninn");
 
 async function setupTestDb() {
   // Connect to default DB to create the test DB

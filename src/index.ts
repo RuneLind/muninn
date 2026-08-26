@@ -276,34 +276,58 @@ activityLog.push("system", `Dashboard running on http://localhost:${server.port}
 // have yet.
 if (isAuthenticatingMode(auth.mode)) {
   log.info(
-    "MUNINN_AUTH={mode} — HTTP requests and the /chat/ws upgrade require a session; direct-loopback " +
-    "requests bypass it by design. Resource guards, the socket's owner filter and the ZONE model are all " +
-    "in place: role `user` reaches /chat and the routes that page calls, and every other route — /traces, " +
-    "/models, /plans, /agents, /logs, /api/prompts/:traceId, the unfiltered collection reads — answers 403. " +
-    "GET / redirects a `user` to /chat. Only /api/live and /api/ready are reachable with no credential.",
+    "MUNINN_AUTH={mode} — HTTP requests and the /chat/ws upgrade require a credential. Resource guards, " +
+    "the socket's owner filter and the ZONE model are all in place: role `user` reaches /chat and the " +
+    "routes that page calls, and every other route — /traces, /models, /plans, /agents, /logs, " +
+    "/api/prompts/:traceId, the unfiltered collection reads — answers 403. GET / redirects a `user` to " +
+    "/chat. Only /api/live and /api/ready are reachable with no credential.",
     { mode: auth.mode },
   );
-  log.info(
-    "MUNINN_AUTH={mode}, MUNINN_LOCAL_ROLE={localRole} — a `local` identity resolves to that role ONLY " +
-    "when its identity came from a credential channel. A DIRECT-LOOPBACK request with no credential is " +
-    "always role `user`, and a BROWSER running on this host stays `user` even with MUNINN_LOCAL_ROLE=admin: " +
-    "the login redirect strips the token, so the browser's cookie-only request takes the loopback bypass " +
-    "(the identity is filled before the cookie is read) and never reaches the cookie branch. So a browser " +
-    "on the host cannot reach the operator surface at all. Two ways in: front muninn with an HTTP proxy that " +
-    "stamps x-forwarded-* (removing the bypass, so the session cookie is honoured and the browser gets " +
-    "admin), or use `curl -H \"x-muninn-token: <secret>\"` from the host.",
-    { mode: auth.mode, localRole: auth.localRole },
+  // ⚠️ The next two lines are about the PINNED identity and the LOOPBACK
+  // BYPASS, and both are `local`-mode mechanisms. In `entra` there is no pinned
+  // identity for the bypass to hand out (`config.local` is null, so
+  // `resolveRequestIdentity` cannot take that branch at all) and
+  // MUNINN_LOCAL_ROLE is not even parsed — so printing them there described a
+  // mechanism the running process does not have, at the one moment an operator
+  // reads the log to learn what it does.
+  if (auth.local) {
+    log.info(
+      "MUNINN_AUTH={mode}, MUNINN_LOCAL_ROLE={localRole} — a `local` identity resolves to that role ONLY " +
+      "when its identity came from a credential channel. A DIRECT-LOOPBACK request with no credential is " +
+      "always role `user`, and a BROWSER running on this host stays `user` even with MUNINN_LOCAL_ROLE=admin: " +
+      "the login redirect strips the token, so the browser's cookie-only request takes the loopback bypass " +
+      "(the identity is filled before the cookie is read) and never reaches the cookie branch. So a browser " +
+      "on the host cannot reach the operator surface at all. Two ways in: front muninn with an HTTP proxy that " +
+      "stamps x-forwarded-* (removing the bypass, so the session cookie is honoured and the browser gets " +
+      "admin), or use `curl -H \"x-muninn-token: <secret>\"` from the host.",
+      { mode: auth.mode, localRole: auth.localRole },
+    );
+    log.info(
+      "MUNINN_AUTH={mode} — the loopback bypass trusts the PEER ADDRESS, so it is only sound behind an HTTP " +
+      "proxy that stamps forwarding headers (e.g. `tailscale serve` in HTTP mode). An L4 forward — " +
+      "`tailscale serve --tcp`, an nginx `stream` block, `ssh -L`, `socat`, `kubectl port-forward` — or a bare " +
+      "`proxy_pass` with no `proxy_set_header` adds no headers, and every client through one is granted the " +
+      "pinned identity with NO credential — at role `user`, which is why the bypass is not promotable. " +
+      "See src/auth/CLAUDE.md.",
+      { mode: auth.mode },
+    );
+  }
+  if (auth.entra) {
+    log.info(
+      "MUNINN_AUTH=entra — every credential is an Entra access token on `Authorization: Bearer`, " +
+      "introspected against {endpoint} (tenant {tenant}). There is NO loopback bypass and no pinned " +
+      "identity: a request without a valid Bearer token is 401 wherever it comes from, this host " +
+      "included. muninn mints no session cookie — wonderwall owns the session — and MUNINN_LOCAL_ROLE is " +
+      "not read: role comes from MUNINN_ADMIN_IDENTS, matched against each token's own NAVident/oid. " +
+      "A credential muninn cannot INTROSPECT (Texas unreachable, non-200, unparseable body) is answered " +
+      "503, not 401, so clients retry instead of reloading through the sidecar.",
+      { endpoint: auth.entra.introspectionEndpoint, tenant: auth.entra.tenant },
+    );
+  }
+  activityLog.push(
+    "system",
+    auth.local ? `Auth mode: ${auth.mode} (local role: ${auth.localRole})` : `Auth mode: ${auth.mode}`,
   );
-  log.info(
-    "MUNINN_AUTH={mode} — the loopback bypass trusts the PEER ADDRESS, so it is only sound behind an HTTP " +
-    "proxy that stamps forwarding headers (e.g. `tailscale serve` in HTTP mode). An L4 forward — " +
-    "`tailscale serve --tcp`, an nginx `stream` block, `ssh -L`, `socat`, `kubectl port-forward` — or a bare " +
-    "`proxy_pass` with no `proxy_set_header` adds no headers, and every client through one is granted the " +
-    "pinned identity with NO credential — at role `user`, which is why the bypass is not promotable. " +
-    "See src/auth/CLAUDE.md.",
-    { mode: auth.mode },
-  );
-  activityLog.push("system", `Auth mode: ${auth.mode} (local role: ${auth.localRole})`);
 }
 
 // The instance profile is env-only and otherwise invisible until two instances

@@ -45,6 +45,7 @@
 import type { Sql } from "postgres";
 import { getDb } from "./client.ts";
 import { getLog } from "../logging.ts";
+import type { NavClaims } from "../auth/introspect.ts";
 
 const log = getLog("db", "user-identities");
 
@@ -52,18 +53,31 @@ const log = getLog("db", "user-identities");
  *  second IdP does not need a migration to coexist. */
 export const ENTRA_PROVIDER = "entra";
 
-export interface NavIdentityClaims {
-  /** The Entra object id — the match key. Required: a claim set without one
-   *  cannot be linked to a stable row and is refused upstream. */
-  readonly oid: string;
-  /** `NAVident`, when the token carries it. The manifest's `claims.extra`
-   *  lives in another repo, so this half must work without it. */
-  readonly navIdent: string | null;
-  /** The `name` claim — cosmetic, refreshed on every login. */
-  readonly displayName: string | null;
-  /** `MUNINN_TENANT`. Provenance; see the header. */
-  readonly tenant: string;
-}
+/**
+ * The claims this table is keyed and refreshed from.
+ *
+ * A `type` re-export, not a second declaration: the introspector produced
+ * `NavClaims` and this file declared an identical `NavClaims` beside
+ * it, so the two doc comments had already drifted apart while the fields still
+ * matched. `import type` erases at compile time, so this adds no runtime edge
+ * from `src/db/` to `src/auth/` (the reverse edge is the lazy import in
+ * `defaultResolveUser`, which exists so `src/auth/` stays loadable with no
+ * database).
+ */
+export type { NavClaims };
+
+/**
+ * The charset a `users.id` may use, as ONE exported regex.
+ *
+ * It is the pre-existing `VALID_USER_ID` from `src/chat/routes.ts`, which
+ * rejects anything else on `/chat/reports/*` and `/chat/specs/*` where the id
+ * becomes a PATH SEGMENT. `slugifyIdPart` below hard-codes exactly this
+ * charset; they lived as a local const in the route file and a hand-written
+ * character class here, so a change to either would have shipped as a whole
+ * class of colleague whose report routes 400. Exported from the module that
+ * MINTS ids, and validated against in `mintNavUserId`'s own test.
+ */
+export const VALID_USER_ID = /^[a-zA-Z0-9_-]+$/;
 
 /** Postgres unique-violation SQLSTATE. */
 const UNIQUE_VIOLATION = "23505";
@@ -97,8 +111,21 @@ export function slugifyIdPart(value: string): string {
  * PR 2 defends itself: a claim set without one still mints a usable id, and
  * `resolveRole` already matches `MUNINN_ADMIN_IDENTS` against the oid too.
  */
-export function mintNavUserId(claims: NavIdentityClaims): string {
+export function mintNavUserId(claims: NavClaims): string {
   const part = slugifyIdPart(claims.navIdent ?? "") || slugifyIdPart(claims.oid);
+  if (part === "") {
+    // Both parts slugified to nothing. Minting `nav-` here is not a cosmetic
+    // slip: the id is legal, so the FIRST such login takes it, the second takes
+    // the collision form `nav--`, and every later one throws from deep inside
+    // the provisioning transaction with a message about two ids being taken.
+    // Refusing at the one place that knows which claim was unusable is the
+    // whole difference between a five-second and a five-hour diagnosis.
+    throw new Error(
+      `Cannot mint a users.id from these claims: neither the NAVident (${JSON.stringify(claims.navIdent)}) ` +
+      `nor the oid (${JSON.stringify(claims.oid)}) contains a character a users.id may use ` +
+      `(${VALID_USER_ID.source}). Refusing the login rather than minting a shared placeholder id.`,
+    );
+  }
   return `nav-${part}`;
 }
 
@@ -126,7 +153,7 @@ export interface NavUserRow {
  * oid both miss, one wins the insert and the other takes a unique violation.
  * The loser re-reads and returns the winner's id rather than failing a login.
  */
-export async function resolveNavUser(claims: NavIdentityClaims): Promise<NavUserRow> {
+export async function resolveNavUser(claims: NavClaims): Promise<NavUserRow> {
   for (let attempt = 0; attempt < 2; attempt++) {
     const hit = await refreshExisting(claims);
     if (hit) return { userId: hit, provisioned: false };
@@ -142,24 +169,47 @@ export async function resolveNavUser(claims: NavIdentityClaims): Promise<NavUser
   throw new Error(`resolveNavUser: could not resolve oid ${claims.oid} after a provisioning race`);
 }
 
-/** The hit path: one indexed read, then a refresh of the mutable claims. */
-async function refreshExisting(claims: NavIdentityClaims): Promise<string | null> {
+/**
+ * The hit path: ONE `UPDATE … RETURNING` against the (provider, tenant, oid)
+ * key — the read and the refresh are the same statement — plus a second
+ * statement refreshing the `users` row's own display name.
+ *
+ * ⚠️ **Every refreshed column is COALESCEd.** A claim the token stopped
+ * carrying must not ERASE the stored one: one broken deploy of the manifest's
+ * `claims.extra` drops `NAVident` from every token, and writing that NULL over
+ * the column for every active user destroys the only readable link between a
+ * `nav-…` id and a colleague — irrecoverably, since the claim is gone. A NEW
+ * value still overwrites, which is what makes this a refresh rather than a
+ * freeze. The `::text` casts are needed because a bare NULL parameter inside
+ * `COALESCE` gives Postgres no type to infer from.
+ */
+async function refreshExisting(claims: NavClaims): Promise<string | null> {
   const sql = getDb();
   const rows = await sql`
     UPDATE user_identities
-       SET nav_ident     = ${claims.navIdent},
-           display_name  = ${claims.displayName},
+       SET nav_ident     = COALESCE(${claims.navIdent}::text, nav_ident),
+           display_name  = COALESCE(${claims.displayName}::text, display_name),
            last_login_at = now()
      WHERE provider = ${ENTRA_PROVIDER}
        AND tenant   = ${claims.tenant}
        AND oid      = ${claims.oid}
     RETURNING user_id
   `;
-  return rows.length > 0 ? (rows[0]!.user_id as string) : null;
+  if (rows.length === 0) return null;
+  const userId = rows[0]!.user_id as string;
+  // `users.display_name` was written once, at provisioning, and then frozen —
+  // so a colleague who changed their name in Entra kept the old one in every
+  // dashboard listing for as long as the row lived. Same COALESCE rule.
+  await sql`
+    UPDATE users
+       SET display_name = COALESCE(${claims.displayName}::text, display_name)
+     WHERE id = ${userId}
+  `;
+  return userId;
 }
 
 /** The miss path. `users` + `user_identities`, one transaction, no thread. */
-async function provision(claims: NavIdentityClaims): Promise<string> {
+async function provision(claims: NavClaims): Promise<string> {
   const sql = getDb();
   const base = mintNavUserId(claims);
   const username = claims.navIdent ?? claims.oid;
@@ -176,11 +226,16 @@ async function provision(claims: NavIdentityClaims): Promise<string> {
     let userId = base;
     if (taken.length > 0) {
       userId = collisionUserId(base, claims.oid);
+      // No `oid` property: the log lines land in a JSONL file sink, and the oid
+      // is a directory-wide personal identifier that adds nothing an operator
+      // acting on this line can use — the two minted ids are what identifies
+      // the rows, and the database holds the link. (A NAVident still rides
+      // INSIDE `userId`, which is the id an operator has to be able to grep.)
       log.warn(
         "Minted user id {base} is already taken — provisioning {userId} instead. A NAVident that has " +
         "been re-issued is the expected cause; the existing account belongs to whoever held it before " +
         "and is deliberately NOT adopted.",
-        { base, userId, oid: claims.oid },
+        { base, userId },
       );
       const alsoTaken = await tx`SELECT 1 FROM users WHERE id = ${userId}`;
       if (alsoTaken.length > 0) {
@@ -191,6 +246,9 @@ async function provision(claims: NavIdentityClaims): Promise<string> {
       }
     }
 
+    // The column list mirrors `ensureUser` in `src/db/users.ts` — the other
+    // writer of this table — minus the platform-specific ids it fills. A column
+    // added there with a NOT NULL default has to be considered here too.
     await tx`
       INSERT INTO users (id, username, display_name, platform, last_seen_at)
       VALUES (${userId}, ${username}, ${claims.displayName}, ${ENTRA_PROVIDER}, now())
@@ -199,7 +257,9 @@ async function provision(claims: NavIdentityClaims): Promise<string> {
       INSERT INTO user_identities (provider, tenant, oid, user_id, nav_ident, display_name)
       VALUES (${ENTRA_PROVIDER}, ${claims.tenant}, ${claims.oid}, ${userId}, ${claims.navIdent}, ${claims.displayName})
     `;
-    log.info("Provisioned an Entra identity as {userId}", { userId, oid: claims.oid });
+    // NB the announcement lives in `defaultResolveUser` (`src/auth/introspect.ts`),
+    // which reads the `provisioned` flag — logging from in here fired BEFORE
+    // the transaction committed.
     return userId;
   }) as string;
 }

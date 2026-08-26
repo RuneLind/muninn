@@ -102,6 +102,32 @@ describe("acceptance 5 — fail closed, both directions", () => {
       .toThrow(/NAIS_TOKEN_INTROSPECTION_ENDPOINT/);
   });
 
+  test("entra refuses an introspection endpoint that is not a URL", () => {
+    // A typo'd endpoint boots a healthy-looking pod in which EVERY request
+    // 401s: the POST throws at `fetch`, which is `unavailable`, which is a
+    // refusal — and nothing at boot says the string was never a URL.
+    for (const bad of ["texas.test/introspect", "http//texas.test", "/introspect", "   x"]) {
+      expect(() => resolveAuthConfig(entraEnv({ NAIS_TOKEN_INTROSPECTION_ENDPOINT: bad })), bad)
+        .toThrow(/NAIS_TOKEN_INTROSPECTION_ENDPOINT/);
+    }
+    // …and a well-formed one still boots.
+    expect(resolveAuthConfig(entraEnv()).entra?.introspectionEndpoint).toBe("http://texas.test/introspect");
+  });
+
+  test("the MUNINN_ADMIN_IDENTS refusal says something TRUE about the mode it fired in", () => {
+    // One message carried the `local`-mode note ("this variable is currently
+    // INERT … it does not grant anyone admin") in BOTH modes. In `entra` that
+    // is precisely backwards — the allowlist IS the role source there — and the
+    // operator reading it would set it to satisfy the boot and expect nothing
+    // from it.
+    expect(() => resolveAuthConfig(entraEnv({ MUNINN_ADMIN_IDENTS: undefined })))
+      .toThrow(/role source/i);
+    expect(() => resolveAuthConfig(entraEnv({ MUNINN_ADMIN_IDENTS: undefined })))
+      .not.toThrow(/INERT/);
+    expect(() => resolveAuthConfig(localEnv({ MUNINN_ADMIN_IDENTS: undefined })))
+      .toThrow(/INERT/);
+  });
+
   test("entra shares the two authenticating-mode refusals", () => {
     expect(() => resolveAuthConfig(entraEnv({ MUNINN_ADMIN_IDENTS: undefined })))
       .toThrow(/MUNINN_ADMIN_IDENTS/);

@@ -46,8 +46,34 @@ export interface Identity {
  */
 export type TokenChannel = "session" | "credential";
 
+/**
+ * One introspection's answer, THREE-way rather than `Identity | null`.
+ *
+ * `denied` means the authority answered and the answer was no — a fact about
+ * immutable bytes, safe to remember for a short window and correct to refuse
+ * with a login url. `unavailable` means we could not decide (Texas unreachable,
+ * non-200, unparseable body, database down): nothing is cached, and the EDGE
+ * must answer differently. Collapsing the two into `null` sent every client in
+ * the building to /oauth2/login during a Texas outage — a reload storm into the
+ * service that was already struggling — and it is why this type reaches the
+ * middleware rather than stopping inside the entra introspector.
+ */
+export type IntrospectionOutcome =
+  | { readonly kind: "identity"; readonly identity: Identity }
+  | { readonly kind: "denied" }
+  | { readonly kind: "unavailable" };
+
+export const DENIED: IntrospectionOutcome = { kind: "denied" };
+export const UNAVAILABLE: IntrospectionOutcome = { kind: "unavailable" };
+
+/** The identity an outcome carries, or null. For call sites that genuinely do
+ *  not care WHY — and for tests. */
+export function identityOf(outcome: IntrospectionOutcome): Identity | null {
+  return outcome.kind === "identity" ? outcome.identity : null;
+}
+
 export interface Introspector {
-  introspect(token: string, channel: TokenChannel): Promise<Identity | null>;
+  introspect(token: string, channel: TokenChannel): Promise<IntrospectionOutcome>;
 }
 
 /**
@@ -58,22 +84,24 @@ function createLocalIntrospector(config: AuthConfig): Introspector {
   const local = config.local;
   if (!local) throw new Error("createLocalIntrospector called without a local config");
   return {
-    async introspect(token: string, channel: TokenChannel): Promise<Identity | null> {
-      if (token === "") return null;
+    async introspect(token: string, channel: TokenChannel): Promise<IntrospectionOutcome> {
+      // Never `unavailable`: this mode compares a string against a config
+      // value, so there is no third party that can be down.
+      if (token === "") return DENIED;
 
       const session = verifySession(local.token, token);
       if (session) {
         // The session names a userId, but the pinned identity is the only one
         // this mode has. A session minted before MUNINN_LOCAL_USER changed must
         // NOT keep acting as the old id, so the config wins over the cookie.
-        if (session.userId !== local.userId) return null;
-        return identityFor(local.userId, local.displayName, session.expiresAt);
+        if (session.userId !== local.userId) return DENIED;
+        return { kind: "identity", identity: identityFor(local.userId, local.displayName, session.expiresAt) };
       }
 
       if (channel === "credential" && secretMatches(local.token, token)) {
-        return identityFor(local.userId, local.displayName, null);
+        return { kind: "identity", identity: identityFor(local.userId, local.displayName, null) };
       }
-      return null;
+      return DENIED;
     },
   };
 }
@@ -131,31 +159,34 @@ export const INTROSPECTION_CACHE_MAX_MS = 5 * 60_000;
  */
 export const INTROSPECTION_NEGATIVE_TTL_MS = 30_000;
 
-/** Beyond this many live entries the map is swept of expired ones before the
- *  next insert. A bound, not a policy: one entry per (user × token rotation). */
+/**
+ * The HARD ceiling on live cache entries.
+ *
+ * The sweep below only ever evicts EXPIRED rows, and a denial is live for its
+ * whole 30-second window — so before this cap the map's size was an input an
+ * unauthenticated client controlled: measured, 5000 distinct forged tokens ⇒
+ * 5000 live entries, growing for as long as the flood lasts. The tokens need
+ * not be valid, only distinct.
+ *
+ * 4096 is roughly two orders of magnitude above the real population (one entry
+ * per user × token rotation, and a token rotates hourly), so a legitimate
+ * instance never reaches it.
+ */
+export const INTROSPECTION_CACHE_MAX_ENTRIES = 4096;
+
+/** After an eviction the map is left this size, so the next `makeRoom` is ~400
+ *  inserts away rather than one — the sort must not run per insert. */
+const CACHE_EVICT_TO = Math.floor(INTROSPECTION_CACHE_MAX_ENTRIES * 0.9);
+
+/** Above this many entries the map is swept of expired rows, at most once per
+ *  `CACHE_SWEEP_INTERVAL_MS`. Cheap housekeeping; the cap above is the bound. */
 const CACHE_SWEEP_AT = 512;
+const CACHE_SWEEP_INTERVAL_MS = 30_000;
 
 interface CacheEntry {
   readonly identity: Identity | null;
   readonly expiresAt: number;
 }
-
-/**
- * One introspection attempt's answer, THREE-way rather than `Identity | null`.
- *
- * `denied` means Texas answered and the answer was no — a fact about immutable
- * bytes, safe to remember for a short window. `unavailable` means we could not
- * decide (Texas unreachable, non-200, unparseable body, database down): the
- * request is refused, but nothing is written to the cache, because remembering
- * an outage keeps refusing logins for a window after it has cleared.
- */
-type FreshResult =
-  | { readonly kind: "identity"; readonly identity: Identity }
-  | { readonly kind: "denied" }
-  | { readonly kind: "unavailable" };
-
-const DENIED: FreshResult = { kind: "denied" };
-const UNAVAILABLE: FreshResult = { kind: "unavailable" };
 
 /** Texas's introspection response, as much of it as we read. Everything is
  *  `unknown`-guarded: this is a network payload, not a typed contract. */
@@ -165,16 +196,43 @@ interface IntrospectionResponse {
   NAVident?: unknown;
   name?: unknown;
   exp?: unknown;
+  /** Entra's identity type. `"app"` for a client-credentials token — a MACHINE,
+   *  not a colleague. Absent on plenty of ordinary tokens, so only a present
+   *  non-`user` value is a refusal. */
+  idtyp?: unknown;
 }
 
 /** The claims a token yielded, before they become a `users.id`. */
 export interface NavClaims {
+  /** The Entra object id — the match key. It is the only claim immutable for a
+   *  person within a tenant. */
   readonly oid: string;
+  /** `NAVident`, when the token carries it. The manifest's `claims.extra` lives
+   *  in another repo, so every consumer must work without it. */
   readonly navIdent: string | null;
+  /** The `name` claim — cosmetic, refreshed on every login. */
   readonly displayName: string | null;
+  /** `MUNINN_TENANT`. Provenance, never a check — see `db/user-identities.ts`. */
   readonly tenant: string;
-  /** Epoch ms, or null when the token declared no `exp`. */
+}
+
+/** The claims PLUS the token's own expiry. Only the introspector needs the
+ *  second half; the linking table takes {@link NavClaims}, which is why the two
+ *  are one type with an extension rather than two hand-kept copies (they were,
+ *  and `NavIdentityClaims` drifted a doc comment apart from this one). */
+export interface NavTokenClaims extends NavClaims {
+  /** Epoch ms, or null when the token declared no usable `exp`. */
   readonly expiresAt: number | null;
+}
+
+/**
+ * The entra introspector, plus the ONE thing a test needs that the interface
+ * does not carry: how many entries the cache holds. The size cap is invisible
+ * from the outside — an unbounded map answers every request correctly and just
+ * grows — so without an observable it could only be asserted by reasoning.
+ */
+export interface EntraIntrospector extends Introspector {
+  readonly cacheSize: () => number;
 }
 
 export interface EntraIntrospectorDeps {
@@ -184,7 +242,7 @@ export interface EntraIntrospectorDeps {
   readonly post?: (endpoint: string, token: string) => Promise<Response>;
   /** Claims → `users.id`. Defaults to the DB linking table, imported lazily so
    *  this module stays loadable (and unit-testable) with no database. */
-  readonly resolveUser?: (claims: NavClaims) => Promise<string>;
+  readonly resolveUser?: (claims: NavTokenClaims) => Promise<string>;
   readonly now?: () => number;
 }
 
@@ -204,10 +262,16 @@ function expiryMs(value: unknown): number | null {
  *  `active` anything but `true`, or no `oid` (the match key: without it there is
  *  no stable row to link, and minting per-login would give one person a new
  *  account every hour). */
-export function claimsFromIntrospection(body: unknown, tenant: string): NavClaims | null {
+export function claimsFromIntrospection(body: unknown, tenant: string): NavTokenClaims | null {
   if (typeof body !== "object" || body === null) return null;
   const res = body as IntrospectionResponse;
   if (res.active !== true) return null;
+  // An APP token introspects as active WITH an oid, so without this gate a
+  // client-credentials caller was provisioned a `users` row and held a role,
+  // memories and threads like a person. Absent ⇒ allowed: Texas need not send
+  // the claim, and refusing on its absence would refuse every human token.
+  const idtyp = str(res.idtyp);
+  if (idtyp && idtyp.toLowerCase() !== "user") return null;
   const oid = str(res.oid);
   if (!oid) return null;
   return {
@@ -217,6 +281,43 @@ export function claimsFromIntrospection(body: unknown, tenant: string): NavClaim
     tenant,
     expiresAt: expiryMs(res.exp),
   };
+}
+
+/**
+ * WHY a body that claimed `active: true` was nonetheless refused, or null when
+ * there is nothing to report (an ordinary `active: false`, or a body that
+ * parsed fine).
+ *
+ * It exists because the refusal is otherwise SILENT: an `active: true` body
+ * whose `oid` claim is missing or misspelled is cached as a denial with no log
+ * line, so every colleague 401s while the sidecar, the pod and Texas all look
+ * healthy. One line naming the claim turns that into a five-minute diagnosis.
+ * Pure, so the shapes are testable without a network.
+ */
+export function denialReason(body: unknown): string | null {
+  if (typeof body !== "object" || body === null) return null;
+  const res = body as IntrospectionResponse;
+  if (res.active !== true) return null;   // Texas answering the question, not a shape mismatch.
+  const idtyp = str(res.idtyp);
+  if (idtyp && idtyp.toLowerCase() !== "user") {
+    return `the token's idtyp is "${idtyp}", not "user" — a client-credentials (app) token is not a person`;
+  }
+  if (!str(res.oid)) {
+    return "the body carries no usable `oid` claim, which is the match key for a users row";
+  }
+  return null;
+}
+
+/**
+ * One line per distinct reason, not per request. A body-shape mismatch is the
+ * same for every token in flight, and a probed instance would otherwise write
+ * one line per attempt — the `middleware.ts` / `ws-upgrade.ts` discipline.
+ */
+const warnedReasons = new Set<string>();
+function warnOnce(key: string, message: string): void {
+  if (warnedReasons.has(key)) return;
+  warnedReasons.add(key);
+  log.warn(message);
 }
 
 /** The cache key. A HASH, not the token: the map is process-memory a heap dump
@@ -237,7 +338,7 @@ function cacheKey(token: string): string {
  * first login. `src/index.ts` builds it and hands it to both
  * `createAuthMiddleware` and `createWsUpgradeAuthorizer`.
  */
-export function createEntraIntrospector(config: AuthConfig, deps: EntraIntrospectorDeps = {}): Introspector {
+export function createEntraIntrospector(config: AuthConfig, deps: EntraIntrospectorDeps = {}): EntraIntrospector {
   const entra = config.entra;
   if (!entra) throw new Error("createEntraIntrospector called without an entra config");
 
@@ -246,10 +347,32 @@ export function createEntraIntrospector(config: AuthConfig, deps: EntraIntrospec
   const resolveUser = deps.resolveUser ?? defaultResolveUser;
 
   const cache = new Map<string, CacheEntry>();
-  const inFlight = new Map<string, Promise<Identity | null>>();
+  const inFlight = new Map<string, Promise<IntrospectionOutcome>>();
+  let lastSweepAt = 0;
 
   const sweep = (at: number): void => {
+    lastSweepAt = at;
     for (const [key, entry] of cache) if (entry.expiresAt <= at) cache.delete(key);
+  };
+
+  /**
+   * Make room for one insert. Two stages, and the second is the actual bound.
+   *
+   * Sweeping only removes EXPIRED rows, which a flood of live denials has none
+   * of — so when the map is still at the ceiling afterwards, the SOONEST-to-
+   * expire entries are evicted. Soonest-first is what keeps the working
+   * sessions: a denial lives 30 s, a real identity up to five minutes, so a
+   * flood evicts itself before it evicts a colleague. Eviction leaves the map
+   * at 90% of the cap so the sort runs about once per 400 inserts rather than
+   * once per insert.
+   */
+  const makeRoom = (at: number): void => {
+    if (cache.size >= CACHE_SWEEP_AT && at - lastSweepAt >= CACHE_SWEEP_INTERVAL_MS) sweep(at);
+    if (cache.size < INTROSPECTION_CACHE_MAX_ENTRIES) return;
+    sweep(at);
+    if (cache.size < INTROSPECTION_CACHE_MAX_ENTRIES) return;
+    const byExpiry = [...cache.entries()].sort((a, b) => a[1].expiresAt - b[1].expiresAt);
+    for (let i = 0; i < byExpiry.length - CACHE_EVICT_TO; i++) cache.delete(byExpiry[i]![0]);
   };
 
   /**
@@ -261,7 +384,7 @@ export function createEntraIntrospector(config: AuthConfig, deps: EntraIntrospec
    * would keep refusing logins for a window after Texas recovered. Collapsing
    * the two into `null` is exactly the bug the cache test caught.
    */
-  const introspectFresh = async (token: string): Promise<FreshResult> => {
+  const introspectFresh = async (token: string): Promise<IntrospectionOutcome> => {
     let res: Response;
     try {
       res = await post(entra.introspectionEndpoint, token);
@@ -291,7 +414,20 @@ export function createEntraIntrospector(config: AuthConfig, deps: EntraIntrospec
 
     const claims = claimsFromIntrospection(body, entra.tenant);
     // The DEFINITIVE refusal: Texas answered, and the answer was no.
-    if (!claims) return DENIED;
+    if (!claims) {
+      // …but say WHY when the body claimed to be active. A shape mismatch
+      // (a missing `oid`, an app token) is otherwise a silent 401 for every
+      // colleague with three healthy-looking services behind it.
+      const reason = denialReason(body);
+      if (reason) warnOnce(reason, `Token introspection answered active but was refused: ${reason}`);
+      return DENIED;
+    }
+
+    // Texas can answer `active: true` for a token whose own `exp` has passed —
+    // measured against the stub, such a token got a 200 AND provisioned a user.
+    // The cache clamped its TTL to `exp` so it was never REUSED, which is why
+    // it looked handled: every request simply asked again and was let in again.
+    if (claims.expiresAt !== null && claims.expiresAt <= now()) return DENIED;
 
     let userId: string;
     try {
@@ -300,9 +436,12 @@ export function createEntraIntrospector(config: AuthConfig, deps: EntraIntrospec
       // The database is the provisioning path, so a DB outage refuses the login
       // rather than inventing an identity — and, like a transport failure, says
       // nothing about the token, so it is not cached.
+      // No `oid` property: these lines land in a JSONL file sink, and an oid
+      // is a directory-wide personal identifier that adds nothing an operator
+      // acting on this line can use. The message says WHAT failed; the DB says
+      // who. Same rule in `src/db/user-identities.ts`.
       log.error("Could not resolve an Entra identity to a users.id: {error}", {
         error: err instanceof Error ? err.message : String(err),
-        oid: claims.oid,
       });
       return UNAVAILABLE;
     }
@@ -315,24 +454,34 @@ export function createEntraIntrospector(config: AuthConfig, deps: EntraIntrospec
         navIdent: claims.navIdent,
         oid: claims.oid,
         provider: "entra",
-        expiresAt: claims.expiresAt,
+        // NEVER null on this path. `expiresAt: null` reads as "no cap" at the
+        // WebSocket (`src/chat/ws.ts`), so a token with a missing, zero or
+        // garbage `exp` produced a socket that outlived its own credential —
+        // measured, still streaming eight seconds past it. The introspection
+        // cap is the honest bound: it is the longest this process goes without
+        // re-asking Texas anyway, so nothing is claimed that is not checked.
+        expiresAt: claims.expiresAt ?? now() + INTROSPECTION_CACHE_MAX_MS,
       },
     };
   };
 
   return {
-    async introspect(token: string, channel: TokenChannel): Promise<Identity | null> {
-      if (token === "") return null;
+    cacheSize: () => cache.size,
+
+    async introspect(token: string, channel: TokenChannel): Promise<IntrospectionOutcome> {
+      if (token === "") return DENIED;
       // The cookie channel is refused OUTRIGHT. `writeSessionCookie` no-ops in
       // `entra` mode, so muninn mints no cookie there and a `muninn_session`
       // value can only be something a client made up — introspecting it would
       // spend a Texas round-trip per forged cookie, i.e. hand any browser a
       // request amplifier against the platform's auth service.
-      if (channel === "session") return null;
+      if (channel === "session") return DENIED;
 
       const key = cacheKey(token);
       const hit = cache.get(key);
-      if (hit && hit.expiresAt > now()) return hit.identity;
+      if (hit && hit.expiresAt > now()) {
+        return hit.identity ? { kind: "identity", identity: hit.identity } : DENIED;
+      }
 
       const pending = inFlight.get(key);
       // Single-flight: the chat page's first paint issues an HTTP request and a
@@ -352,11 +501,11 @@ export function createEntraIntrospector(config: AuthConfig, deps: EntraIntrospec
             // A token already past its own `exp` is not cached at all: the entry
             // would be born expired and every request would re-ask Texas anyway.
             if (ttl > settledAt) {
-              if (cache.size >= CACHE_SWEEP_AT) sweep(settledAt);
+              makeRoom(settledAt);
               cache.set(key, { identity, expiresAt: ttl });
             }
           }
-          return result.kind === "identity" ? result.identity : null;
+          return result;
         })
         .finally(() => {
           inFlight.delete(key);
@@ -382,9 +531,13 @@ async function defaultPost(endpoint: string, token: string): Promise<Response> {
 
 /** Lazily imported so `src/auth/` stays loadable without a database — the unit
  *  tests for the cache and the single flight inject their own. */
-async function defaultResolveUser(claims: NavClaims): Promise<string> {
+async function defaultResolveUser(claims: NavTokenClaims): Promise<string> {
   const { resolveNavUser } = await import("../db/user-identities.ts");
   const row = await resolveNavUser(claims);
+  // The one place a first login is announced. It used to be logged from inside
+  // `provision()`'s TRANSACTION — i.e. before the commit — and the returned
+  // `provisioned` flag was read by nothing but a test.
+  if (row.provisioned) log.info("Provisioned a new Entra identity as {userId}", { userId: row.userId });
   return row.userId;
 }
 

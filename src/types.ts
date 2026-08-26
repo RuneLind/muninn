@@ -1,4 +1,8 @@
-export type Platform = "telegram" | "slack_dm" | "slack_channel" | "slack_assistant" | "slack_unknown" | "web";
+/** ⚠️ `"entra"` is written by raw SQL in `src/db/user-identities.ts` (the value
+ *  of `ENTRA_PROVIDER`, used as `users.platform` for a provisioned NAV
+ *  identity), so leaving it out of the union did not stop the rows existing —
+ *  it only made `mapRow` hand callers a `Platform` that is not one. */
+export type Platform = "telegram" | "slack_dm" | "slack_channel" | "slack_assistant" | "slack_unknown" | "web" | "entra";
 
 export interface UserIdentity {
   name: string;

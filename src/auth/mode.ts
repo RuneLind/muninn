@@ -207,11 +207,20 @@ export function resolveAuthConfig(env: Record<string, string | undefined> = proc
 
   // (3) An authenticating mode missing its own required config.
   if (adminIdents.length === 0) {
+    // The NB is per MODE. One message carrying the `local` note in both said
+    // the opposite of the truth in `entra`, where this list IS the role source:
+    // an operator would set it to get past the boot and expect it to grant
+    // nothing.
     throw new AuthConfigError(
       `${AUTH_ENV}="${mode}" requires a non-empty MUNINN_ADMIN_IDENTS. Refusing to start. ` +
-      `NB in "local" mode this variable is currently INERT: the pinned identity always resolves to ` +
-      `role "user" by design (src/auth/role.ts), so setting it does not grant anyone admin. It is ` +
-      `required in every authenticating mode because in "entra" it IS the role source, matched against the token's own NAVident/oid.`,
+      (mode === "entra"
+        ? `In "entra" it is the ROLE SOURCE: it is matched case-insensitively against each token's own ` +
+          `NAVident and oid, so an empty list means no colleague can ever resolve to admin. ` +
+          `Prefer oid entries over NAVidents — a NAVident is re-issued when someone leaves, and the ` +
+          `newcomer would inherit admin from the list.`
+        : `NB in "local" mode this variable is INERT: the pinned identity's role comes from ` +
+          `MUNINN_LOCAL_ROLE (src/auth/role.ts), so setting this does not grant anyone admin. It is ` +
+          `required in every authenticating mode because in "entra" it IS the role source.`),
     );
   }
   if (allowedOrigins.length === 0) {
@@ -232,6 +241,22 @@ export function resolveAuthConfig(env: Record<string, string | undefined> = proc
       if (trimmed(env, name) === "") {
         throw new AuthConfigError(`${AUTH_ENV}="entra" requires ${name}. Refusing to start.`);
       }
+    }
+    // The endpoint has to PARSE, not merely be non-empty. A typo'd value
+    // (`texas.test/introspect`, a bare path) boots a pod that looks perfectly
+    // healthy and in which every single request 401s: the introspection POST
+    // throws at `fetch`, which is "unavailable", which is a refusal — and
+    // nothing anywhere says the string was never a URL. This is the only moment
+    // anyone is looking.
+    const endpoint = trimmed(env, "NAIS_TOKEN_INTROSPECTION_ENDPOINT");
+    try {
+      new URL(endpoint);
+    } catch {
+      throw new AuthConfigError(
+        `NAIS_TOKEN_INTROSPECTION_ENDPOINT="${endpoint}" is not a URL (expected e.g. ` +
+        `"http://texas.nais/api/v1/introspect"). Refusing to start: every request would 401 ` +
+        `against an endpoint that cannot be reached, with nothing to say why.`,
+      );
     }
     return {
       mode,

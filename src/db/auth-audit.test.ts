@@ -28,12 +28,13 @@ beforeAll(async () => {
 /**
  * The write is fire-and-forget, so poll rather than sleep a fixed amount.
  *
- * Selected on `user_id`, NOT on `metadata->>'reader'`: `saveActivity` passes
- * `JSON.stringify(metadata)` to a `jsonb` parameter, so postgres.js encodes the
- * already-serialised string a second time and the column holds a JSON *string*
- * scalar rather than an object. Pre-existing (`getActivityForJob`'s
- * `metadata->>'watcherId'` has the same shape) and out of this PR's scope —
- * but it is why `metadata` is parsed below rather than indexed into.
+ * Selected on `user_id` rather than on `metadata->>'reader'` — which is now a
+ * choice rather than a necessity. `saveActivity` used to pass
+ * `JSON.stringify(metadata)` to a `jsonb` parameter, so the column held a JSON
+ * *string* scalar and no `->>` could read it; that is fixed (`sql.json`), and
+ * `metadata->>'audit'` works on rows written from here on. `meta()` below still
+ * tolerates the string form, because rows written BEFORE the fix are still
+ * scalars and nothing backfills them.
  */
 async function waitForRows(marker: string, want: number): Promise<Array<Record<string, unknown>>> {
   const sql = getDb();

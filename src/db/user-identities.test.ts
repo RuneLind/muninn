@@ -1,7 +1,7 @@
 import { test, expect, describe } from "bun:test";
 import { setupTestDb } from "../test/setup-db.ts";
 import { getDb } from "./client.ts";
-import { ENTRA_PROVIDER, mintNavUserId, resolveNavUser, slugifyIdPart } from "./user-identities.ts";
+import { ENTRA_PROVIDER, mintNavUserId, resolveNavUser, slugifyIdPart, VALID_USER_ID } from "./user-identities.ts";
 
 /**
  * Provisioning, against a real Postgres.
@@ -63,6 +63,28 @@ describe("mintNavUserId", () => {
     expect(slugifyIdPart("  A..B  ")).toBe("a-b");
     expect(slugifyIdPart("---")).toBe("");
   });
+
+  test("a claim set that slugifies to NOTHING is refused, not minted", () => {
+    // Both parts empty means the id would be the bare prefix `nav-`, which
+    // `VALID_USER_ID` happens to accept — so the SECOND such login mints
+    // `nav--` (also legal), and once both are taken every later one throws from
+    // deep inside the provisioning transaction. Refusing here says which claim
+    // was unusable, at the one place that knows.
+    expect(() => mintNavUserId(claims({ navIdent: "---", oid: "!!!" }))).toThrow(/oid/i);
+    expect(() => mintNavUserId(claims({ navIdent: null, oid: "   " }))).toThrow(/oid/i);
+    // A usable oid still saves an unusable NAVident — that is the fallback.
+    expect(mintNavUserId(claims({ navIdent: "///" }))).toBe(`nav-${OID_A}`);
+  });
+
+  test("the minted id is validated against the SHARED VALID_USER_ID", () => {
+    // `slugifyIdPart` hard-codes that regex's charset. They were a local const
+    // in `src/chat/routes.ts` and a hand-written character class here; one
+    // export means a change to either is a compile-or-test failure rather than
+    // a route that 400s for a whole class of colleague.
+    expect(VALID_USER_ID.test(mintNavUserId(claims()))).toBe(true);
+    expect(VALID_USER_ID.test("nav-")).toBe(true);
+    expect(VALID_USER_ID.test("")).toBe(false);
+  });
 });
 
 describe("acceptance 13 — one row pair on first login, nothing on the second", () => {
@@ -107,6 +129,40 @@ describe("acceptance 13 — one row pair on first login, nothing on the second",
     // ident and deliberately does not move, but the column tracks the token.
     expect(identity!.nav_ident).toBe("X888888");
     expect((await identityRows()).length).toBe(1);
+  });
+});
+
+describe("a claim the token stopped carrying must not ERASE the stored one", () => {
+  test("an absent NAVident or display name leaves the columns as they were", async () => {
+    // One broken deploy of the manifest's `claims.extra` drops NAVident from
+    // every token — and the hit path wrote that NULL over the column for every
+    // active user, so the operator loses the only readable link between a
+    // `nav-…` id and a colleague. COALESCE keeps the last value we saw.
+    await resolveNavUser(claims());
+    await resolveNavUser(claims({ navIdent: null, displayName: null }));
+
+    const [identity] = await identityRows();
+    expect(identity!.nav_ident).toBe("X999999");
+    expect(identity!.display_name).toBe("Test Person");
+  });
+
+  test("a NEW value still overwrites — the columns are refreshed, not frozen", async () => {
+    await resolveNavUser(claims());
+    await resolveNavUser(claims({ navIdent: "X888888", displayName: "Renamed Person" }));
+    const [identity] = await identityRows();
+    expect(identity!.nav_ident).toBe("X888888");
+    expect(identity!.display_name).toBe("Renamed Person");
+  });
+
+  test("users.display_name is refreshed on login too, and never nulled", async () => {
+    // It was written ONCE, at provisioning, and then frozen: a colleague who
+    // changed their name in Entra showed the old one in every dashboard
+    // listing for as long as the row lived.
+    const { userId } = await resolveNavUser(claims());
+    await resolveNavUser(claims({ displayName: "Renamed Person" }));
+    expect((await usersRow(userId))!.display_name).toBe("Renamed Person");
+    await resolveNavUser(claims({ displayName: null }));
+    expect((await usersRow(userId))!.display_name).toBe("Renamed Person");
   });
 });
 

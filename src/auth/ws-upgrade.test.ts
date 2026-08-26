@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterAll } from "bun:test";
 import { createWsUpgradeAuthorizer, __resetWsWarningsForTest } from "./ws-upgrade.ts";
 import { __setLoopbackBypassForTest } from "./middleware.ts";
 import { resolveAuthConfig } from "./mode.ts";
-import { createIntrospector } from "./introspect.ts";
+import { createIntrospector, type Introspector } from "./introspect.ts";
 import { mintSession, SESSION_COOKIE } from "./session.ts";
 
 const SECRET = "a-sufficiently-long-secret";
@@ -340,5 +340,45 @@ describe("MUNINN_LOCAL_ROLE reaches the upgrade, on the same terms as HTTP", () 
     );
     expect(d.ok).toBe(true);
     expect(d.ok && d.role).toBe("user");
+  });
+});
+
+/**
+ * The upgrade's answer when introspection is UNAVAILABLE.
+ *
+ * No server needed: the authorizer returns the Response it would have sent, and
+ * what matters is the STATUS. A 401 here becomes a client-side "your session
+ * expired" and — on entra — a reload into the very service that is down.
+ */
+describe("an introspection outage on the handshake", () => {
+  const ENTRA = resolveAuthConfig({
+    MUNINN_AUTH: "entra",
+    NAIS_TOKEN_INTROSPECTION_ENDPOINT: "http://texas.test/introspect",
+    MUNINN_TENANT: "example-tenant",
+    MUNINN_ADMIN_IDENTS: "A123456",
+    MUNINN_ALLOWED_ORIGINS: "https://muninn.example.test",
+  });
+  const stub: Introspector = {
+    async introspect(token) {
+      return token === "outage" ? { kind: "unavailable" } : { kind: "denied" };
+    },
+  };
+  const authorize = createWsUpgradeAuthorizer(ENTRA, 3010, stub);
+  const upgradeReq = (token: string) =>
+    new Request("http://127.0.0.1:3010/chat/ws", { headers: { authorization: `Bearer ${token}` } });
+
+  test("answers 503, distinguishable from a refusal", async () => {
+    const decision = await authorize(upgradeReq("outage"), "10.0.0.9");
+    expect(decision.ok).toBe(false);
+    if (decision.ok) return;
+    expect(decision.response.status).toBe(503);
+    expect(await decision.response.json()).not.toHaveProperty("loginUrl");
+  });
+
+  test("a real denial is still 401 — the two must not collapse", async () => {
+    const decision = await authorize(upgradeReq("nope"), "10.0.0.9");
+    expect(decision.ok).toBe(false);
+    if (decision.ok) return;
+    expect(decision.response.status).toBe(401);
   });
 });

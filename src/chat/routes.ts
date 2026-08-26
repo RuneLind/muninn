@@ -23,6 +23,7 @@ import { consumePendingMessage } from "./pending-messages.ts";
 import { isValidUuid } from "../dashboard/routes/route-utils.ts";
 import { resolveJiraBotLive } from "../jira/bot.ts";
 import { getLog } from "../logging.ts";
+import { VALID_USER_ID as VALID_USER_ID_PATTERN } from "../db/user-identities.ts";
 import { requireOwnUser, forbiddenHead, sessionIdentity, sessionRole, skipExtractionsFor } from "../auth/guard.ts";
 import { requireOwnedResource, filterToOwner, decideResourceAccess } from "../auth/resource-guard.ts";
 import { pinnedLocalUserId } from "../auth/policy.ts";
@@ -805,7 +806,11 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
    * pinned id containing `.`, `@` or `:` is a perfectly good `users.id`
    * everywhere else and makes only these six routes 400.
    */
-  const VALID_USER_ID = /^[a-zA-Z0-9_-]+$/;
+  // Imported, not re-declared: `slugifyIdPart` (src/db/user-identities.ts)
+  // mints ids against exactly this charset, and the two spellings had to agree
+  // or an entra colleague's report routes 400 for reasons neither file states.
+  // (Kept as a local alias so the call sites below are unchanged.)
+  const VALID_USER_ID = VALID_USER_ID_PATTERN;
   // dev_run statuses a spec save may set: draft on Save Spec, approved at the fagperson gate.
   const VALID_SPEC_STATUS = new Set(["spec_draft", "spec_approved"]);
 
