@@ -28,14 +28,29 @@ interface FakeNode {
   children: FakeNode[];
   querySelector: (q: string) => FakeNode | null;
   appendChild: (n: FakeNode) => void;
+  classList: { add: (c: string) => void; remove: (c: string) => void; contains: (c: string) => boolean };
+  onclick?: () => void;
+  textContent?: string;
 }
 
 function harness(specs: BubbleSpec[]) {
   const jiraControls: FakeNode[] = [];
+  /** Every request the script made, so the FEEDBACK path can be asserted. */
+  const requests: { url: string; init?: { method?: string; body?: string } }[] = [];
 
   function makeEl(className = ""): FakeNode {
+    const classes = new Set(className.split(" ").filter(Boolean));
     const node: FakeNode = {
-      className,
+      get className() { return [...classes].join(" "); },
+      set className(v: string) {
+        classes.clear();
+        for (const c of v.split(" ").filter(Boolean)) classes.add(c);
+      },
+      classList: {
+        add: (c: string) => { classes.add(c); },
+        remove: (c: string) => { classes.delete(c); },
+        contains: (c: string) => classes.has(c),
+      },
       dataset: {},
       children: [],
       querySelector: (q: string) => {
@@ -45,7 +60,7 @@ function harness(specs: BubbleSpec[]) {
       appendChild: (c: FakeNode) => {
         node.children.push(c);
       },
-    };
+    } as FakeNode;
     return node;
   }
 
@@ -72,13 +87,20 @@ function harness(specs: BubbleSpec[]) {
   const ctx = {
     chatMessages,
     document: { createElement: (_tag: string) => makeEl() },
-    fetch: async () => ({ ok: true }),
+    // The page installs `window.authedFetch` and every call site here goes
+    // through it. Binding `fetch` instead — which this harness did — left the
+    // first test that reaches the 👍/👎 or trace path throwing a bare
+    // ReferenceError, i.e. the harness could not see its own script's calls.
+    authedFetch: async (url: string, init?: { method?: string; body?: string }) => {
+      requests.push({ url, init });
+      return { ok: true, json: async () => ({ spans: [] }) };
+    },
     appendJiraEntryControl: (wrap: FakeNode) => jiraControls.push(wrap),
   };
 
   const made = new Function(
     "ctx",
-    "var chatMessages = ctx.chatMessages; var document = ctx.document; var fetch = ctx.fetch;" +
+    "var chatMessages = ctx.chatMessages; var document = ctx.document; var authedFetch = ctx.authedFetch;" +
       "var appendJiraEntryControl = ctx.appendJiraEntryControl;" +
       streamingUiScript() +
       "return { botMessageForMeta: botMessageForMeta, attachFeedbackControls: attachFeedbackControls };",
@@ -87,7 +109,7 @@ function harness(specs: BubbleSpec[]) {
     attachFeedbackControls: (node: FakeNode, messageId: string) => void;
   };
 
-  return { ...made, bubbles, jiraControls };
+  return { ...made, bubbles, jiraControls, requests };
 }
 
 describe("botMessageForMeta", () => {
@@ -137,6 +159,22 @@ describe("attachFeedbackControls", () => {
     expect(bubble.dataset.messageId).toBe("m-1");
     expect(bubble.children.filter((c) => c.className === "msg-feedback")).toHaveLength(1);
     expect(h.jiraControls).toHaveLength(1);
+  });
+
+  test("a 👍 click POSTs through authedFetch, not a bare fetch", () => {
+    // The path that had no test at all: `streaming-ui.ts` was converted to
+    // `authedFetch` while this harness still bound `fetch`, so the first case
+    // to click a feedback button would have thrown a ReferenceError. It is also
+    // the assertion that the vote goes through the wrapper — a feedback POST
+    // that 401s in silence is exactly what the wrapper exists to surface.
+    const h = harness([{ clientId: "c-1" }]);
+    const bubble = h.bubbles[0]!;
+    h.attachFeedbackControls(bubble, "m-1");
+    const row = bubble.querySelector(".msg-feedback")!;
+    row.children[0]!.onclick!();
+    expect(h.requests).toHaveLength(1);
+    expect(h.requests[0]!.url).toBe("/chat/feedback");
+    expect(JSON.parse(h.requests[0]!.init!.body!)).toEqual({ messageId: "m-1", value: 1 });
   });
 
   test("never re-points a bubble already bound to a DIFFERENT message", () => {

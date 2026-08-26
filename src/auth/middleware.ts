@@ -23,6 +23,7 @@ import { AUTH_EXCLUDED_PATHS, type AuthConfig } from "./mode.ts";
 import { localIdentity, type Identity, type Introspector } from "./introspect.ts";
 import { resolveRole, type AuthRole } from "./role.ts";
 import { mintSession, SESSION_COOKIE, SESSION_TTL_MS } from "./session.ts";
+import { LOGIN_URL_HINT } from "./zones.ts";
 
 const log = getLog("auth", "middleware");
 
@@ -371,7 +372,10 @@ export function unauthenticatedBody(config: AuthConfig): { error: string; mode: 
     loginUrl:
       config.mode === "local"
         ? `/?${TOKEN_QUERY_PARAM}=${LOGIN_TOKEN_PLACEHOLDER}`
-        : "/oauth2/login",
+        // The chat page's HTTP expiry predicate compares against this exact
+        // string (`src/chat/views/components/authed-fetch.ts`), so it is ONE
+        // exported constant rather than a literal at each end.
+        : LOGIN_URL_HINT,
   };
 }
 

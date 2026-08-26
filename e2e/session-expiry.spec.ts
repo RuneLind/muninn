@@ -40,17 +40,66 @@ interface Opts {
   refuse?: Record<string, unknown>;
   /** Take over the chat socket so the test can close it on demand. */
   interceptWs?: boolean;
+  /** When set, every `/chat/me` AFTER the first answers 401 with this body —
+   *  the shape a session that expires while the tab is open really has. */
+  expireAfterFirstMe?: Record<string, unknown>;
+  /** Replace `WebSocket` with one that never OPENS and closes 1006 — a
+   *  handshake the server refused. Playwright's `routeWebSocket` cannot produce
+   *  it: its mock accepts the connection, so the page always sees `open` first. */
+  refuseUpgrade?: boolean;
+  /** `GET /chat/events` answers this status permanently. 403 is the measured
+   *  case: role `user` on `/api/events`, or a zone denial after a role change. */
+  eventsStatus?: number;
 }
+
+/** Requests the page made, per stubbed route. Reset by `open()`, and NOT reset
+ *  by a reload — which is the point for the SSE case. */
+const hits = { events: 0, me: 0, sockets: 0 };
 
 /** The intercepted socket, closable from the test AFTER the page has settled. */
 let wsRoute: { close: (o: { code: number }) => void } | null = null;
 
 async function open(page: Page, opts: Opts): Promise<void> {
-  await page.route("**/chat/me", (route) => route.fulfill({ json: meFor(opts.provider) }));
+  hits.events = 0;
+  hits.me = 0;
+  hits.sockets = 0;
+
+  if (opts.refuseUpgrade) {
+    await page.addInitScript(() => {
+      const w = window as unknown as { WebSocket: unknown; __wsAttempts?: number };
+      w.__wsAttempts = 0;
+      class RefusedSocket {
+        onopen: (() => void) | null = null;
+        onclose: ((e: { code: number }) => void) | null = null;
+        onmessage: (() => void) | null = null;
+        onerror: (() => void) | null = null;
+        constructor() {
+          w.__wsAttempts = (w.__wsAttempts ?? 0) + 1;
+          // No `open`, ever — exactly what a 401'd handshake looks like from a
+          // browser: an immediate close carrying the useless 1006.
+          setTimeout(() => this.onclose?.({ code: 1006 }), 10);
+        }
+        send(): void {}
+        close(): void {}
+      }
+      w.WebSocket = RefusedSocket;
+    });
+  }
+
+  await page.route("**/chat/me", (route) => {
+    hits.me += 1;
+    if (opts.expireAfterFirstMe && hits.me > 1) {
+      return route.fulfill({ status: 401, json: opts.expireAfterFirstMe });
+    }
+    return route.fulfill({ json: meFor(opts.provider) });
+  });
   await page.route("**/chat/bots", (route) => route.fulfill({ json: { bots: [BOT], connectors: [] } }));
   await page.route("**/chat/conversations*", (route) => route.fulfill({ json: { conversations: [] } }));
-  await page.route("**/chat/events*", (route) =>
-    route.fulfill({ status: 200, headers: { "content-type": "text/event-stream" }, body: "\n\n" }));
+  await page.route("**/chat/events*", (route) => {
+    hits.events += 1;
+    if (opts.eventsStatus) return route.fulfill({ status: opts.eventsStatus, body: "denied" });
+    return route.fulfill({ status: 200, headers: { "content-type": "text/event-stream" }, body: "\n\n" });
+  });
   await page.route("**/chat/threads/**", (route) =>
     opts.refuse
       ? route.fulfill({ status: 401, json: opts.refuse })
@@ -78,10 +127,12 @@ async function open(page: Page, opts: Opts): Promise<void> {
 /**
  * Close the page's socket with `code`, after init has finished painting.
  *
- * Timing is load-bearing in two ways, and both were real failures: a close
- * during init is judged before `/chat/me` has published the provider, and the
- * banner it appends to `#chatMessages` is then wiped by `clearChat()`'s
- * `innerHTML =` a moment later.
+ * Timing is load-bearing: a close during init is judged before `/chat/me` has
+ * published the provider, which is how the first cut of this spec failed. (It
+ * used to matter for a second reason — the banner was a child of
+ * `#chatMessages` and `clearChat()`'s `innerHTML =` wiped it — which the
+ * page-level banner has removed; "it survives the innerHTML wipe" below is the
+ * assertion that keeps it removed.)
  */
 async function closeWs(page: Page, code: number): Promise<void> {
   await page.waitForFunction(() => !!document.querySelector("#chatMessages .empty-state"));
@@ -136,6 +187,68 @@ test.describe("acceptance 19 — the WebSocket half", () => {
     await page.waitForTimeout(400);
     expect(await reloaded(page)).toBe(false);
     await expect(banner(page)).toHaveCount(0);
+  });
+});
+
+test.describe("acceptance 19 — a REFUSED HANDSHAKE, which carries no code at all", () => {
+  // The blind spot this closes: a 401'd upgrade is reported to the page as an
+  // ordinary 1006 close, so the 4401 rule never saw it and the 2 s retry ran
+  // forever in silence — measured, five refused handshakes, zero reloads, no
+  // banner. The page now probes /chat/me before it believes such a close.
+
+  test("entra: a socket that never opened reloads once the session is really gone", async ({ page }) => {
+    await open(page, { provider: "entra", refuseUpgrade: true, expireAfterFirstMe: ENTRA_401 });
+    await markPage(page);
+    expect(await reloaded(page)).toBe(true);
+  });
+
+  test("local: it banners, and STOPS retrying", async ({ page }) => {
+    await open(page, { provider: "local", refuseUpgrade: true, expireAfterFirstMe: LOCAL_401 });
+    await markPage(page);
+    await expect(banner(page)).toBeVisible();
+    // One construction, not one every two seconds. Two full retry windows.
+    await page.waitForTimeout(4200);
+    expect(await page.evaluate(() => (window as unknown as { __wsAttempts: number }).__wsAttempts)).toBe(1);
+    expect(await reloaded(page)).toBe(false);
+  });
+
+  // The ordinary drop — a socket that DID open, then closed 1006 — is unchanged
+  // and is covered by "an ORDINARY close is neither" above.
+});
+
+test.describe("acceptance 19 — a PERMANENTLY refused EventSource is terminal", () => {
+  test("a 403 on /chat/events spends ONE reload, then banners and stops", async ({ page }) => {
+    // Measured before the fix: the banner verdict fell through to the 3 s
+    // reconnect, which re-entered the rule every cycle and re-armed the breaker
+    // every 60 s — a reload a minute, forever, plus "your session expired"
+    // about a session that had not expired.
+    await open(page, { provider: "entra", eventsStatus: 403 });
+    await markPage(page);
+    expect(await reloaded(page)).toBe(true);
+
+    await page.waitForFunction(() => typeof (window as { authedFetch?: unknown }).authedFetch === "function");
+    await expect(banner(page)).toBeVisible();
+    await markPage(page);
+    const afterReload = hits.events;
+    // Two full 3 s poll cycles and then some: neither a reconnect nor a reload.
+    await page.waitForTimeout(7000);
+    expect(hits.events).toBe(afterReload);
+    expect(await reloaded(page)).toBe(false);
+  });
+});
+
+test.describe("the banner is page-level", () => {
+  test("it survives the innerHTML wipe every thread switch performs", async ({ page }) => {
+    // `clearChat()` and `loadThreadMessages()` both assign #chatMessages'
+    // innerHTML. A banner rendered inside that container disappeared on the
+    // next bot or thread switch, while the session was still expired.
+    await open(page, { provider: "local", interceptWs: true });
+    await closeWs(page, 4401);
+    await expect(banner(page)).toBeVisible();
+    await expect(page.locator("#chatMessages #authExpiredBanner")).toHaveCount(0);
+
+    await page.evaluate(() => { document.getElementById("chatMessages")!.innerHTML = ""; });
+    await expect(banner(page)).toBeVisible();
   });
 });
 

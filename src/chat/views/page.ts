@@ -142,9 +142,11 @@ export async function renderChatPage(): Promise<string> {
   ${MARKED_CDN_SCRIPT}
   <script>
     ${/* FIRST, ahead of every other script constant: it installs
-          window.authedFetch, and every fetch on this page goes through that.
-          A call site evaluated before the definition would be a ReferenceError
-          on the one path whose job is to degrade gracefully. */ ""}
+          window.authedFetch, which every CHAT-VIEW fetch goes through (three
+          call sites reach this page from shared src/dashboard/views/ modules
+          and are dispositioned in authed-fetch.test.ts instead). A call site
+          evaluated before the definition would be a ReferenceError on the one
+          path whose job is to degrade gracefully. */ ""}
     ${authedFetchScript()}
     ${helpersScript}
     ${agentStatusScript()}
@@ -230,6 +232,23 @@ const CHAT_SSE_SCRIPT = `
       },
 
       onerror: function() {
+        // ORDER, and every step is load-bearing:
+        //
+        //   1. READ readyState first. close() SETS it to 2, so a state read
+        //      after the close reports every transient reconnect as a permanent
+        //      failure — measured, that alone turned an ordinary stub stream
+        //      ending into a reload at page load.
+        //   2. CLOSE this stream. It used to be possible to return from the
+        //      refusal branch with the EventSource still open — a page that then
+        //      reloaded left the old stream retrying underneath it.
+        //   3. The STALENESS guard, before any verdict is acted on. A stream
+        //      superseded by a viewer switch must not spend the page's one
+        //      reload, and must not resurrect itself over its replacement.
+        //   4. Only then, the refusal decision.
+        var permanent = !!(mine.source && mine.source.readyState === 2);
+        mine.close();
+        if (conn !== mine) return;   // superseded by a viewer switch — stay dead
+
         // EventSource gets its OWN rule and cannot go through authedFetch: it
         // takes a URL and exposes neither status nor body on a non-200, so the
         // loginUrl predicate is structurally unreadable here. readyState 2
@@ -241,13 +260,17 @@ const CHAT_SSE_SCRIPT = `
         // Same mode-conditional decision as the socket, same cached provider,
         // and the SAME breaker: a persistent refusal must not have three
         // independent reload budgets. A permanent 403 lands here identically
-        // and is indistinguishable from this side; the breaker is what bounds
-        // that case to one reload per window.
-        if (mine.source && mine.source.readyState === 2) {
+        // and is indistinguishable from this side.
+        if (permanent) {
           if (window.__muninnAuthRefusal('sse') === 'reload') return;
         }
-        mine.close();
-        if (conn !== mine) return;   // superseded by a viewer switch — stay dead
+        // A spent verdict is TERMINAL for this stream. Falling through to the
+        // retry re-entered the rule every 3 s and re-armed the breaker every
+        // 60 s: measured on a permanent 403 for /chat/events, that is a reload
+        // a minute forever plus a banner about a session that never expired.
+        // Released by a successful /chat/me (which clears the latches) or by an
+        // explicit reconnectChatSse().
+        if (window.__muninnAuthLatched('sse')) return;
         setTimeout(function() {
           if (conn !== mine) return;
           conn = null;
@@ -681,10 +704,35 @@ const CHAT_SCRIPT = `
     closeJiraEntry(); // same seam as loadThreadMessages: the picker's thread is gone too
   }
 
+  /**
+   * Is the session still alive? Asked before a socket that NEVER OPENED is
+   * retried.
+   *
+   * Only a 401 counts as "no". A 503 is what an authenticating instance answers
+   * when token introspection is UNAVAILABLE (a Texas outage) and a transport
+   * failure is the network — both are outages, and reloading into one is the
+   * storm the breaker exists to prevent. The 401 case additionally runs
+   * authedFetch's own HTTP rule, which is the mode-conditional decision.
+   */
+  function chatSessionAlive() {
+    return authedFetch('/chat/me').then(function(res) {
+      return !res || res.status !== 401;
+    }, function() { return true; });
+  }
+
   // WebSocket connection
   function connectWs() {
     var protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(protocol + '//' + location.host + '/chat/ws');
+    // A REFUSED UPGRADE never fires an open event. The browser reports a 401/403 on a
+    // handshake as an ordinary close — code 1006, no reason — so the code
+    // carries no evidence at all and the old rule (act on 4401, else retry in
+    // 2 s) reconnected forever in silence: measured on an entra instance, five
+    // refused handshakes, zero reloads, no banner. This flag is the only thing
+    // that distinguishes "the connection dropped" from "the server would not
+    // let us in".
+    var everOpened = false;
+    ws.onopen = function() { everOpened = true; };
     ws.onmessage = function(e) {
       try { handleWsEvent(JSON.parse(e.data)); }
       catch (err) { console.warn('Failed to parse WS message:', err); }
@@ -711,7 +759,19 @@ const CHAT_SCRIPT = `
         window.__muninnAuthRefusal('ws');
         return;
       }
-      setTimeout(connectWs, 2000);
+      if (everOpened) {
+        setTimeout(connectWs, 2000);
+        return;
+      }
+      // Never opened: ASK, instead of assuming a dropped connection. Only a
+      // session the server still answers for earns the 2 s retry; a refusal
+      // goes through the same mode-conditional rule as the 4401 close (which
+      // is idempotent — authedFetch's own 401 handling may already have acted
+      // on it, and a second banner is the same banner).
+      chatSessionAlive().then(function(alive) {
+        if (alive) { setTimeout(connectWs, 2000); return; }
+        window.__muninnAuthRefusal('ws');
+      });
     };
   }
 

@@ -45,6 +45,21 @@ export const HEALTH_LIVE_PATH = "/api/live";
 /** Readiness: pings the database, so it answers whether the process can serve. */
 export const HEALTH_READY_PATH = "/api/ready";
 
+/**
+ * The wonderwall sidecar's login path, as ONE constant.
+ *
+ * It is written by `unauthenticatedBody` (`middleware.ts`) into every `entra`
+ * 401 and READ by the chat page's HTTP expiry predicate
+ * (`src/chat/views/components/authed-fetch.ts`): a 401 whose `loginUrl` is this
+ * exact string is the evidence that reloading lands on a login page. Producer
+ * and consumer sat in different files as hand-copied literals, plus a third and
+ * fourth copy in their tests — four places for one string that a sidecar
+ * upgrade could move. It lives here because this module is a leaf (one type
+ * import), so the browser-script builder and a Playwright spec can both import
+ * it without dragging the Hono middleware in.
+ */
+export const LOGIN_URL_HINT = "/oauth2/login";
+
 export interface ZoneDenyEntry {
   /** Methods this row denies. `GET` implies `HEAD`: Hono dispatches `HEAD /x`
    *  to the `app.get("/x")` handler and RUNS its body (the measured rule in

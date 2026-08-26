@@ -2,6 +2,7 @@ import { describe, test, expect } from "bun:test";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { authedFetchScript, EXPIRED_BANNER_ID, RELOAD_STAMP_KEY, RELOAD_WINDOW_MS } from "./authed-fetch.ts";
+import { LOGIN_URL_HINT } from "../../../auth/zones.ts";
 import { renderChatPage } from "../page.ts";
 
 /**
@@ -26,8 +27,14 @@ import { renderChatPage } from "../page.ts";
 const VIEWS_DIR = path.resolve(new URL(".", import.meta.url).pathname, "..");
 /** The one legal bare `fetch(`: `authedFetch`'s own definition wraps it. */
 const DEFINITION_FILE = "authed-fetch.ts";
-/** Matches a bare call, not `.fetch(` (a method) and not `authedFetch(`. */
-const BARE_FETCH = /(?<![\w.])fetch\(/;
+/**
+ * Matches a bare call, not `res.fetch(` (a method) and not `authedFetch(` —
+ * but INCLUDING the three GLOBAL spellings of the same call. `window.fetch(`,
+ * `globalThis.fetch(` and `self.fetch(` issue the identical unwrapped request
+ * and produce the identical silent 401, and the first cut of this pin
+ * (`(?<![\w.])fetch\(`) let all three through.
+ */
+const BARE_FETCH = /(?<![\w.])(?:(?:window|globalThis|self)\.)?fetch\(/;
 
 async function sourceFiles(dir: string): Promise<string[]> {
   const out: string[] = [];
@@ -104,6 +111,26 @@ describe("acceptance 20 — no bare fetch survives under src/chat/views/", () =>
     expect(html.indexOf("window.authedFetch = function")).toBeLessThan(html.indexOf("authedFetch("));
   });
 
+  test("the pin catches the GLOBAL spellings of the same bare call", () => {
+    // `window.fetch(` is the identical unwrapped request and the identical
+    // silent 401 — and the first cut of this regex (`(?<![\w.])fetch\(`) let it
+    // through, so a call site written that way would have passed acceptance 20
+    // with nothing on screen at expiry. `.fetch(` on a real object still must
+    // NOT match, or the pin fires on every `res.fetch`-shaped method call.
+    for (const spelling of ["fetch(", "window.fetch(", "globalThis.fetch(", "self.fetch("]) {
+      expect(BARE_FETCH.test(`await ${spelling}'/x')`), spelling).toBe(true);
+    }
+    expect(BARE_FETCH.test("authedFetch('/x')")).toBe(false);
+    expect(BARE_FETCH.test("client.fetch('/x')")).toBe(false);
+  });
+
+  test("the sidecar login url is the ONE exported constant, not a hand-copied literal", () => {
+    // Producer: `unauthenticatedBody` (src/auth/middleware.ts). Consumer: the
+    // HTTP predicate below. Four copies of one string is four places a sidecar
+    // upgrade can silently stop the page reloading.
+    expect(authedFetchScript()).toContain(JSON.stringify(LOGIN_URL_HINT));
+  });
+
   test("new WebSocket is covered by the 4401 predicate, and EventSource by its own", async () => {
     const html = await renderChatPage();
     expect(html).toContain("e.code === 4401");
@@ -119,7 +146,13 @@ interface Stub {
   store: Record<string, string>;
   now: number;
   banner: () => boolean;
+  /** How many nodes the banner ever appended — the idempotency assertion. */
+  banners: () => number;
+  /** True when the banner was appended OUTSIDE `#chatMessages` (acceptance F5:
+   *  `clearChat()` wipes that container's innerHTML on every thread switch). */
+  bannerIsPageLevel: () => boolean;
   refusal: (channel: string, hint?: string) => string;
+  latched: (channel: string) => boolean;
   authedFetch: (url: string) => Promise<{ status: number }>;
   setProvider: (p: string | null) => void;
   clearStamp: () => void;
@@ -127,33 +160,45 @@ interface Stub {
 }
 
 /** Evaluate the real emitted script against a stubbed browser. */
-function evalScript(opts: { status?: number; body?: unknown; raw?: string } = {}): Stub {
+function evalScript(
+  opts: { status?: number; body?: unknown; raw?: string; storageThrows?: boolean } = {},
+): Stub {
   const state = { reloads: 0, now: 1_700_000_000_000, fetches: 0 };
   const store: Record<string, string> = {};
-  const children: { id?: string }[] = [];
+  /** Everything appended to <body>, in order. */
+  const bodyChildren: { id?: string }[] = [];
+  /** Everything appended to #chatMessages — must stay EMPTY for the banner. */
+  const chatChildren: { id?: string }[] = [];
+  const all = () => [...bodyChildren, ...chatChildren];
 
   const win: Record<string, unknown> = {
     location: { reload: () => { state.reloads++; } },
   };
+  /** A storage that throws on EVERY operation — a browser configured to block
+   *  site data, or a sandboxed frame. Measured: the breaker was inert there. */
+  const throwing = () => { throw new Error("storage blocked"); };
   const sandbox = {
     window: win,
     Date: { now: () => state.now },
-    sessionStorage: {
-      getItem: (k: string) => (k in store ? store[k]! : null),
-      setItem: (k: string, v: string) => { store[k] = v; },
-      removeItem: (k: string) => { delete store[k]; },
-    },
+    sessionStorage: opts.storageThrows
+      ? { getItem: throwing, setItem: throwing, removeItem: throwing }
+      : {
+        getItem: (k: string) => (k in store ? store[k]! : null),
+        setItem: (k: string, v: string) => { store[k] = v; },
+        removeItem: (k: string) => { delete store[k]; },
+      },
     document: {
+      body: { appendChild: (el: { id?: string }) => bodyChildren.push(el) },
       getElementById: (id: string) =>
         id === "chatMessages"
-          ? { appendChild: (el: { id?: string }) => children.push(el) }
-          : children.find((c) => c.id === id) ?? null,
-      createElement: () => ({ id: "", className: "", textContent: "" }),
+          ? { appendChild: (el: { id?: string }) => chatChildren.push(el) }
+          : all().find((c) => c.id === id) ?? null,
+      createElement: () => ({ id: "", className: "", textContent: "", style: { cssText: "" }, setAttribute: () => {} }),
     },
     fetch: async () => {
       state.fetches++;
       if (opts.raw !== undefined) return new Response(opts.raw, { status: opts.status ?? 401 });
-      const body = opts.body ?? { error: "unauthenticated", mode: "entra", loginUrl: "/oauth2/login" };
+      const body = opts.body ?? { error: "unauthenticated", mode: "entra", loginUrl: LOGIN_URL_HINT };
       return new Response(JSON.stringify(body), { status: opts.status ?? 401 });
     },
   };
@@ -172,8 +217,13 @@ function evalScript(opts: { status?: number; body?: unknown; raw?: string } = {}
     store,
     get now() { return state.now; },
     set now(v: number) { state.now = v; },
-    banner: () => children.some((c) => c.id === EXPIRED_BANNER_ID),
+    banner: () => all().some((c) => c.id === EXPIRED_BANNER_ID),
+    banners: () => all().filter((c) => c.id === EXPIRED_BANNER_ID).length,
+    bannerIsPageLevel: () =>
+      bodyChildren.some((c) => c.id === EXPIRED_BANNER_ID) &&
+      !chatChildren.some((c) => c.id === EXPIRED_BANNER_ID),
     refusal: (channel, hint) => (win.__muninnAuthRefusal as (c: string, h?: string) => string)(channel, hint),
+    latched: (channel) => (win.__muninnAuthLatched as (c: string) => boolean)(channel),
     authedFetch: (url) => (win.authedFetch as (u: string) => Promise<{ status: number }>)(url),
     setProvider: (p) => (win.__muninnSetAuthProvider as (p: string | null) => void)(p),
     clearStamp: () => (win.__muninnClearAuthReloadStamp as () => void)(),
@@ -192,14 +242,49 @@ describe("acceptance 19 — expiry, per channel", () => {
     expect(s.banner()).toBe(false);
   });
 
-  test("…and shows the banner otherwise", () => {
-    for (const provider of ["local", null]) {
+  test("…and shows the banner in an authenticating mode that has no login page", () => {
+    const s = evalScript();
+    s.setProvider("local");
+    expect(s.refusal("ws")).toBe("banner");
+    expect(s.reloads).toBe(0);
+    expect(s.banner()).toBe(true);
+  });
+
+  test("with auth OFF a ws/sse failure is IGNORED — there is no session to expire", () => {
+    // The regression this closes: `authProvider === null` is BOTH "auth is off"
+    // and "before /chat/me answered", and the first cut banner'd for both. On
+    // an auth-off instance — today's default — any permanent SSE failure (a
+    // 500, a 403, a dev-server restart) then reads "Your session expired" to a
+    // reader who has no session at all. Silent reconnect is what those
+    // instances did before this module existed, and it stays their behaviour.
+    for (const provider of [null, undefined]) {
       const s = evalScript();
-      s.setProvider(provider);
-      expect(s.refusal("ws")).toBe("banner");
+      s.setProvider(provider as string | null);
+      expect(s.refusal("sse")).toBe("ignore");
+      expect(s.refusal("ws")).toBe("ignore");
+      expect(s.banner()).toBe(false);
       expect(s.reloads).toBe(0);
-      expect(s.banner()).toBe(true);
     }
+  });
+
+  test("an entra 401 whose body is UNREADABLE banners rather than saying nothing", () => {
+    // A proxy's own HTML 401, or a body whose loginUrl is something else: the
+    // reload predicate cannot fire (no evidence a reload lands on a login page)
+    // but the request WAS refused, and silence there is exactly the state this
+    // module exists to end. Provider `entra` is what makes it a session
+    // expiry rather than an ordinary 401 a call site owns.
+    const s = evalScript({ status: 401, raw: "<html>401</html>" });
+    s.setProvider("entra");
+    expect(s.refusal("http", undefined)).toBe("banner");
+    expect(s.reloads).toBe(0);
+    expect(s.banner()).toBe(true);
+  });
+
+  test("…and the same body on a non-entra instance is still IGNORED", () => {
+    const s = evalScript();
+    s.setProvider("local");
+    expect(s.refusal("http", undefined)).toBe("ignore");
+    expect(s.banner()).toBe(false);
   });
 
   test("an HTTP 401 reloads when the body's loginUrl is the sidecar's", async () => {
@@ -259,6 +344,97 @@ describe("acceptance 19 — expiry, per channel", () => {
   });
 });
 
+describe("the breaker survives a storage that throws", () => {
+  test("a blocked sessionStorage still bounds the page to one reload per window", async () => {
+    // Measured before the fix: `armReload()` returned true on a `setItem`
+    // throw, so the breaker was INERT and a permanent refusal reloaded as fast
+    // as the page could load — 11.5 reloads per second. A context that blocks
+    // site data cannot carry the bound ACROSS reloads (nothing there can), but
+    // within one page it must still be one.
+    const s = evalScript({ storageThrows: true });
+    s.setProvider("entra");
+    expect(s.refusal("ws")).toBe("reload");
+    expect(s.refusal("ws")).toBe("banner");
+    expect(s.refusal("sse")).toBe("banner");
+    await s.authedFetch("/chat/threads");
+    await settle();
+    expect(s.reloads).toBe(1);
+  });
+
+  test("…and the window still expires there — the hourly case is not lost", () => {
+    const s = evalScript({ storageThrows: true });
+    s.setProvider("entra");
+    expect(s.refusal("ws")).toBe("reload");
+    s.now += RELOAD_WINDOW_MS + 1;
+    expect(s.refusal("ws")).toBe("reload");
+    expect(s.reloads).toBe(2);
+  });
+});
+
+describe("the SSE/WS channel latch — a terminal refusal is TERMINAL", () => {
+  test("a channel that has spent a verdict is latched, and stays latched", () => {
+    // Without this the SSE loop re-enters the rule every 3 s and re-arms the
+    // breaker every 60 s: measured, a permanent 403 on /chat/events reloaded
+    // the page once a minute forever and banner'd in between. The page reads
+    // this flag to stop reconnecting that stream.
+    const s = evalScript();
+    s.setProvider("entra");
+    expect(s.latched("sse")).toBe(false);
+    expect(s.refusal("sse")).toBe("reload");
+    expect(s.latched("sse")).toBe(true);
+    expect(s.refusal("sse")).toBe("banner");
+    expect(s.latched("sse")).toBe(true);
+    // Per channel, not global: the socket's own retry is a separate decision.
+    expect(s.latched("ws")).toBe(false);
+  });
+
+  test("a banner verdict latches too — including the auth-off IGNORE case, which does NOT", () => {
+    const s = evalScript();
+    s.setProvider("local");
+    expect(s.refusal("sse")).toBe("banner");
+    expect(s.latched("sse")).toBe(true);
+
+    const off = evalScript();
+    off.setProvider(null);
+    expect(off.refusal("sse")).toBe("ignore");
+    expect(off.latched("sse")).toBe(false);
+  });
+
+  test("a successful /chat/me RELEASES the latches", () => {
+    // The release condition: a working identity answer is the evidence the
+    // stream is worth re-opening. The reload STAMP is deliberately not dropped
+    // with it — see the window-guard case below.
+    const s = evalScript();
+    s.setProvider("entra");
+    s.refusal("sse");
+    expect(s.latched("sse")).toBe(true);
+    s.clearStamp();
+    expect(s.latched("sse")).toBe(false);
+  });
+});
+
+describe("the banner is page-level and idempotent", () => {
+  test("it is appended OUTSIDE #chatMessages", () => {
+    // `clearChat()` and `loadThreadMessages()` both assign `innerHTML` on
+    // #chatMessages, so a banner rendered inside it disappears on the next
+    // thread or bot switch — while the session it is reporting on is still
+    // expired.
+    const s = evalScript();
+    s.setProvider("local");
+    s.refusal("ws");
+    expect(s.bannerIsPageLevel()).toBe(true);
+  });
+
+  test("three refusals render ONE banner", () => {
+    const s = evalScript();
+    s.setProvider("local");
+    s.refusal("ws");
+    s.refusal("sse");
+    s.refusal("ws");
+    expect(s.banners()).toBe(1);
+  });
+});
+
 describe("the stamp and its window-guarded clear", () => {
   test("a reload stamps the window", () => {
     const s = evalScript();
@@ -268,14 +444,29 @@ describe("the stamp and its window-guarded clear", () => {
   });
 
   test("a successful /chat/me does NOT clear a stamp inside the window", () => {
-    // The loop this closes: reload → /chat/me succeeds against a half-recovered
-    // sidecar → stamp cleared → next call 401s → reload again, forever.
+    // ⚠️ This is the ONE property that keeps a permanent partial refusal from
+    // being an unbounded reload loop, and it is not a no-op dressed up as a
+    // rule. The concrete case is the measured one: /chat/events answers a
+    // permanent 403 while /chat/me answers 200. Every reload then re-runs
+    // init → /chat/me succeeds → and if the clear were unconditional the
+    // breaker would be re-armed BEFORE the SSE failed again, i.e. one reload
+    // per page load, forever, against a service that is already refusing.
+    // The clear releases the channel LATCHES (tested above) and leaves the
+    // reload budget alone.
     const s = evalScript();
     s.setProvider("entra");
     s.refusal("ws");
     s.clearStamp();
     expect(s.store[RELOAD_STAMP_KEY]).toBeDefined();
     expect(s.refusal("ws")).toBe("banner");
+  });
+
+  test("the dead banner global is gone", () => {
+    // `window.__muninnShowExpiredBanner` had zero callers: every path goes
+    // through `__muninnAuthRefusal`, which is where the mode decision lives. A
+    // second, decision-free door onto the banner is how one gets shown in a
+    // mode that has no session to expire.
+    expect(authedFetchScript()).not.toContain("__muninnShowExpiredBanner");
   });
 
   test("…and does clear one that is already outside it", () => {

@@ -9,7 +9,7 @@
  * does, on the next navigation — so an open tab reliably reaches the moment
  * every request it makes is refused. Before this module the page's answer was a
  * static "reload to sign in again" banner on the WebSocket close and nothing at
- * all on the HTTP side: 40 bare `fetch(` call sites across 9 files, several of
+ * all on the HTTP side: 41 bare `fetch(` call sites across 9 files, several of
  * which (the Jira card's poller most sharply) swallow a non-OK and keep
  * retrying to their cap — so a 401 there was silent for the whole window.
  *
@@ -17,19 +17,34 @@
  *
  * They cannot share a predicate, because they do not carry the same evidence:
  *
- *  - **HTTP** has a body. The 401 payload's `loginUrl` is `/oauth2/login`
+ *  - **HTTP** has a body. The 401 payload's `loginUrl` is `LOGIN_URL_HINT`
  *    exactly when the sidecar is what would sign the reader back in
  *    (`unauthenticatedBody`, `src/auth/middleware.ts`); in `local` mode it is
  *    the `?muninn_token=` form, where there IS no login page and a reload would
- *    replace the chat with raw 401 JSON.
+ *    replace the chat with raw 401 JSON. A 401 whose body cannot be read at all
+ *    (a proxy's own HTML page) is not evidence a login page exists, so it never
+ *    reloads — but on an `entra` instance it is still a refusal, and it banners
+ *    rather than saying nothing. NB a **HEAD** request carries no body either,
+ *    so it lands in that same "refused, unexplained" branch by construction.
  *  - **The WebSocket** has neither status nor body — a `close` event carries a
  *    CODE. So it keys on the provider `/chat/me` already returns, cached here
- *    at load.
+ *    at load. Two closes reach the rule: the server's own 4401 cap, and a
+ *    handshake REFUSED by the middleware, which the browser reports as an
+ *    ordinary 1006 — see `page.ts`'s `connectWs`, which probes the session
+ *    before it believes a socket that never opened.
  *  - **`EventSource`** has neither, and cannot be routed through a fetch
  *    wrapper at all: it takes a URL and exposes no status, so the `loginUrl`
  *    predicate is structurally unreadable there. It keys on the same cached
  *    provider as the socket. (A permanent 403 also lands as `readyState === 2`
- *    and is indistinguishable here — the breaker below is what bounds that.)
+ *    and is indistinguishable here — the breaker and the LATCH below are what
+ *    bound that.)
+ *
+ * ## `provider === null` is TWO states, and neither reloads
+ *
+ * It is "auth is off" and "`/chat/me` has not answered yet". For `ws`/`sse` the
+ * verdict there is **`ignore`** — today's silent reconnect. Banner'ing instead
+ * put "Your session expired" in front of readers of an auth-OFF instance, which
+ * has no sessions at all, on any permanent stream failure (a 500, a restart).
  *
  * ## The breaker, and why it is a TIMESTAMP
  *
@@ -43,21 +58,42 @@
  * gives a transparent re-login every hour and a banner only when refusals
  * arrive back-to-back.
  *
- * ⚠️ The successful-`/chat/me` clear is deliberately WINDOW-GUARDED: it drops
- * the stamp only when it is already outside the window, so the clear can never
- * SHORTEN the breaker. Unguarded it re-opens the loop the breaker exists to
- * close — reload, `/chat/me` succeeds from cache or from a half-recovered
- * sidecar, stamp cleared, next call 401s, reload again. The window alone
- * already delivers the hourly case (an hour-old stamp is outside it), so the
- * guard costs nothing.
+ * The stamp is kept in `sessionStorage` AND in a module-scope variable, because
+ * `sessionStorage` can THROW — a browser configured to block site data, a
+ * sandboxed frame. `armReload` used to return `true` on that throw, i.e. the
+ * breaker was inert exactly where it could not be observed: measured, 11.5
+ * reloads per second. The in-memory half cannot survive a reload (nothing
+ * there can), but it bounds the page it lives on.
+ *
+ * ## The LATCH: a terminal refusal has to be terminal
+ *
+ * A `banner` verdict is the end of the road for that channel, but the SSE
+ * client's own error path used to fall through to a 3-second reconnect — which
+ * re-entered the rule every 3 s and re-armed the breaker every 60 s. Measured
+ * on a permanent 403 for `/chat/events`: a reload every minute, forever, plus a
+ * "session expired" banner about a session that had not expired. So a channel
+ * that has spent a verdict is LATCHED (`__muninnAuthLatched`), and the page
+ * reads that flag instead of rescheduling.
+ *
+ * ⚠️ The `/chat/me` clear releases the LATCHES but is **window-guarded for the
+ * stamp**: it drops the stamp only when it is already outside the window, so it
+ * can never SHORTEN the breaker. That guard is not ceremony — it is what keeps
+ * a PARTIAL refusal bounded. In the measured case `/chat/me` answers 200 while
+ * `/chat/events` answers 403: every reload re-runs init, `/chat/me` succeeds,
+ * and an unconditional clear would re-arm the budget before the stream failed
+ * again — one reload per page load, forever. The hourly case is unaffected: an
+ * hour-old stamp is outside the window and drops on its own.
  */
+
+import { LOGIN_URL_HINT } from "../../../auth/zones.ts";
 
 /** At most one automatic reload per this window, across all three channels. */
 export const RELOAD_WINDOW_MS = 60_000;
 
-/** `sessionStorage` — per TAB, which is the right scope: two tabs expiring
+/** `sessionStorage` — per TAB. That is the scope on purpose: two tabs expiring
  *  together should each get their own one reload, and nothing here should
- *  survive the browser session. */
+ *  survive the browser session. The bound this delivers is therefore per-tab,
+ *  not per-browser: ten open tabs can spend ten reloads in one window. */
 export const RELOAD_STAMP_KEY = "muninn.authReload.v1";
 
 /** The id of the one-per-page expiry banner, so the append is idempotent. */
@@ -79,69 +115,112 @@ export function authedFetchScript(): string {
   var RELOAD_WINDOW_MS = ${RELOAD_WINDOW_MS};
   var STAMP_KEY = ${JSON.stringify(RELOAD_STAMP_KEY)};
   var BANNER_ID = ${JSON.stringify(EXPIRED_BANNER_ID)};
+  // The producer is unauthenticatedBody() in src/auth/middleware.ts; this is
+  // the same exported constant, not a second copy of the string.
+  var LOGIN_URL_HINT = ${JSON.stringify(LOGIN_URL_HINT)};
 
-  // The provider from GET /chat/me — "entra", "local", or null with auth off.
-  // loadSessionUser() publishes it; until it has, nothing reloads, which is the
-  // safe default (a refusal before the identity is known is not evidence that a
-  // login page exists).
+  // The provider from GET /chat/me — "entra", "local", or null. NB null is BOTH
+  // "auth is off" and "/chat/me has not answered yet", and neither of those is
+  // a session that can expire: ws/sse refusals are IGNORED while it is null.
   var authProvider = null;
   window.__muninnSetAuthProvider = function(provider) {
     authProvider = provider || null;
   };
 
+  // The in-memory half of the breaker. sessionStorage throws outright in a
+  // context that blocks site data, and a breaker that is inert exactly there is
+  // no breaker: measured 11.5 reloads/second before this existed.
+  var memoryStamp = 0;
+  // Channels that have spent a verdict. The page reads this to stop a reconnect
+  // loop that would otherwise re-enter the rule (and re-arm the breaker) for as
+  // long as the refusal lasts.
+  var latched = {};
+  window.__muninnAuthLatched = function(channel) { return latched[channel] === true; };
+
   function readStamp() {
-    try { return parseInt(sessionStorage.getItem(STAMP_KEY) || '0', 10) || 0; } catch (e) { return 0; }
+    var stored = 0;
+    try { stored = parseInt(sessionStorage.getItem(STAMP_KEY) || '0', 10) || 0; } catch (e) {}
+    return stored > memoryStamp ? stored : memoryStamp;
   }
 
   /** True when a reload is allowed now; stamps the window as a side effect. */
   function armReload() {
     var now = Date.now();
     if (now - readStamp() < RELOAD_WINDOW_MS) return false;
+    // In memory FIRST and unconditionally — the storage write is the half that
+    // can throw, and the stamp must land whether or not it does.
+    memoryStamp = now;
     try { sessionStorage.setItem(STAMP_KEY, String(now)); } catch (e) {}
     return true;
   }
 
-  // Called from loadSessionUser's success path. Window-guarded on purpose: see
-  // the module doc — an unguarded clear re-opens the reload loop.
+  // Called from loadSessionUser's success path. The LATCHES are released
+  // unconditionally (a working identity answer is the evidence a stream is
+  // worth re-opening); the STAMP is window-guarded, because an unconditional
+  // clear turns a partial refusal — /chat/me 200, /chat/events 403 — into one
+  // reload per page load forever. See the module doc.
   window.__muninnClearAuthReloadStamp = function() {
+    latched = {};
     if (Date.now() - readStamp() < RELOAD_WINDOW_MS) return;
+    memoryStamp = 0;
     try { sessionStorage.removeItem(STAMP_KEY); } catch (e) {}
   };
 
+  /**
+   * A FIXED page-level bar, deliberately not a child of #chatMessages.
+   *
+   * clearChat() and loadThreadMessages() both assign innerHTML on that
+   * container, so a banner inside it vanishes on the next thread or bot switch
+   * while the session it reports on is still expired. Same shape as the
+   * build-hash banner in src/dashboard/views/components/helpers-browser.ts.
+   */
   function showExpiredBanner() {
-    var host = document.getElementById('chatMessages');
-    if (!host || document.getElementById(BANNER_ID)) return;
+    if (document.getElementById(BANNER_ID) || !document.body) return;
     var banner = document.createElement('div');
     banner.id = BANNER_ID;
-    banner.className = 'empty-state';
+    banner.setAttribute('role', 'alert');
+    banner.style.cssText =
+      'position:fixed;top:0;left:0;right:0;z-index:99999;padding:8px 14px;' +
+      'background:#ef4444;color:#fff;font:600 13px/1.4 ui-sans-serif,system-ui,sans-serif;' +
+      'text-align:center;box-shadow:0 2px 8px rgba(0,0,0,0.3);';
     banner.textContent = 'Your session expired — reload the page to sign in again.';
-    host.appendChild(banner);
+    document.body.appendChild(banner);
   }
-  window.__muninnShowExpiredBanner = showExpiredBanner;
+
+  function banner(channel) {
+    latched[channel] = true;
+    showExpiredBanner();
+    return 'banner';
+  }
 
   /**
    * The shared decision. Returns 'reload' (and reloads), 'banner' (and shows
    * one) or 'ignore'.
    *
-   *   channel 'http' — hint is the 401 body's loginUrl.
+   *   channel 'http' — hint is the 401 body's loginUrl, or undefined when the
+   *                    body was unreadable (a proxy's HTML 401, a HEAD).
    *   channel 'ws' / 'sse' — hint is unused; the cached provider decides.
    *
-   * 'ignore' is the HTTP non-sidecar case ONLY: in local mode a 401 is handled
-   * by whichever call site made it, exactly as before this module existed, and
-   * a page-level banner over every such response would be new noise. A ws/sse
-   * refusal has always shown the banner, so it keeps doing so.
+   * 'ignore' means "nothing page-level happens": the call site's own handling
+   * is unchanged, exactly as before this module existed. It is the answer for
+   * an HTTP 401 on a non-entra instance (in local mode a reload would replace
+   * the chat with raw 401 JSON) and for a ws/sse failure while the provider is
+   * null — auth off, or /chat/me not yet answered, neither of which is an
+   * expired session.
    */
   window.__muninnAuthRefusal = function(channel, hint) {
-    var isLoginable = channel === 'http' ? hint === '/oauth2/login' : authProvider === 'entra';
-    if (!isLoginable) {
-      if (channel === 'http') return 'ignore';
-      showExpiredBanner();
-      return 'banner';
+    if (channel === 'http') {
+      if (hint !== LOGIN_URL_HINT) {
+        // Refused, but with no evidence that reloading lands on a login page.
+        // On entra that is still an expiry the reader must be told about; on
+        // anything else it is an ordinary 401 its own call site owns.
+        return authProvider === 'entra' ? banner(channel) : 'ignore';
+      }
+    } else if (authProvider !== 'entra') {
+      return authProvider === null ? 'ignore' : banner(channel);
     }
-    if (!armReload()) {
-      showExpiredBanner();
-      return 'banner';
-    }
+    if (!armReload()) return banner(channel);
+    latched[channel] = true;
     window.location.reload();
     return 'reload';
   };
@@ -153,6 +232,11 @@ export function authedFetchScript(): string {
    * object. It only ever OBSERVES — a caller that reads res.status === 401 and
    * renders its own message keeps working byte for byte. The 401 body is read
    * off a CLONE so the caller's own .json() is untouched.
+   *
+   * Only 401 is a refusal. A 503 is what an authenticating instance answers
+   * when the token introspection endpoint is UNAVAILABLE (src/auth/middleware.ts):
+   * an outage, not an expiry, and reloading into it would be the reload storm
+   * the breaker exists to prevent. It falls through untouched.
    */
   window.authedFetch = function(input, init) {
     var p = fetch(input, init);
@@ -163,7 +247,8 @@ export function authedFetchScript(): string {
       probe.json().then(function(body) {
         window.__muninnAuthRefusal('http', body && body.loginUrl);
       }, function() {
-        // A 401 with no JSON body is not evidence of a login page.
+        // No JSON body: not evidence of a login page, but still a refusal.
+        window.__muninnAuthRefusal('http', undefined);
       });
     }, function() {
       // A transport failure is not a refusal; the caller's own catch owns it.
