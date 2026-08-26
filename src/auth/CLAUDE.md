@@ -13,7 +13,7 @@ below, and it is now a shorter list about different things.
 |---|---|
 | unset / `off` | **No middleware is mounted at all**: the user dropdown, `sim-user-1`, no tokens. One deliberate exception to "unchanged" — refusal (2) below means an instance with `NAIS_CLUSTER_NAME` set now refuses to boot where it previously started. |
 | `local` | One **pinned identity** behind a **shared secret**. The shape for a single human's instance that is reachable beyond loopback. |
-| `entra` | **Refuses to boot.** See `AUTH_ZONES_IMPLEMENTED` — the zone model has landed, but the Entra half of the deploy has not, and flipping that constant is its PR's job. |
+| `entra` | **The NAV path, and it BOOTS.** Every credential is a Bearer access token introspected against Texas (`NAIS_TOKEN_INTROSPECTION_ENDPOINT`); the claims are linked to a `users` row through `user_identities` (migration 073); role comes from `MUNINN_ADMIN_IDENTS` matched against the token's own `NAVident`/`oid`. No muninn cookie is minted — the sidecar owns the session. |
 
 An unrecognised value **throws** rather than degrading to `off`. That inverts
 `optionalEnvFlag`'s "a typo must not brick an instance" rule on purpose: a typo'd
@@ -25,21 +25,28 @@ which is wide open.
 
 1. `MUNINN_AUTH` is not a known mode.
 2. `NAIS_CLUSTER_NAME` is set and the mode is not authenticating.
-3. **`entra` while `AUTH_ZONES_IMPLEMENTED` is `false`.** The order matters: this
-   fires *before* the per-mode config checks, so a fully-configured deployment is
-   still told the zone model is the reason rather than being waved through by
-   having every other variable set.
-4. An authenticating mode with an empty `MUNINN_ADMIN_IDENTS` or
+3. **`entra` while `AUTH_ZONES_IMPLEMENTED` is `false`.** INERT today — the
+   constant is `true`. It is kept, not deleted: it is the one line a future
+   change to the identity half can flip back to close the mode without touching
+   a route. The order still matters if it is ever flipped: it fires *before* the
+   per-mode config checks, so a fully-configured deployment is told the zone
+   model is the reason rather than being waved through by having every other
+   variable set.
+4. **`entra` without `NAIS_TOKEN_INTROSPECTION_ENDPOINT` or `MUNINN_TENANT`.**
+   Written behind (3) while the mode was unreachable, LIVE since PR 2: without
+   either, the mode comes up able to authenticate nobody.
+5. An authenticating mode with an empty `MUNINN_ADMIN_IDENTS` or
    `MUNINN_ALLOWED_ORIGINS`.
-5. `local` without `MUNINN_LOCAL_TOKEN` / `MUNINN_LOCAL_USER`, or with a secret
+6. `local` without `MUNINN_LOCAL_TOKEN` / `MUNINN_LOCAL_USER`, or with a secret
    shorter than `LOCAL_TOKEN_MIN_LENGTH`.
-6. `MUNINN_LOCAL_ROLE` set to anything other than `user` / `admin`. The same
+7. `MUNINN_LOCAL_ROLE` set to anything other than `user` / `admin`. The same
    inverted direction as `MUNINN_AUTH` itself: this variable only ever GRANTS,
    so a typo degrading to `user` would be a silent lockout while `…=admin` sits
    in the `.env` looking correct.
 
-`AUTH_ZONES_IMPLEMENTED` is a **constant, not an env var**. An override would let
-exactly the deploy that must not happen happen anyway.
+`AUTH_ZONES_IMPLEMENTED` is a **constant, not an env var**, and it is `true`
+since PR 2. An override would let exactly the deploy that must not happen happen
+anyway — which is why it stays a constant even now that it is on.
 
 ## ⚠️ The loopback bypass — read this before changing it
 
@@ -147,8 +154,9 @@ Two answers skip the list entirely:
 ### `MUNINN_LOCAL_ROLE` — the operator escape hatch the zone model needed
 
 Default-deny plus three shipped facts — `resolveRole` answers `user` for a local
-identity, `MUNINN_ADMIN_IDENTS` is inert in `local` mode, and `entra` cannot boot
-— means **no admin identity is reachable on any bootable instance**. The zone
+identity, `MUNINN_ADMIN_IDENTS` is inert in `local` mode, and (until PR 2)
+`entra` could not boot — means **no admin identity is reachable on a `local`
+instance**. The zone
 model as first drafted therefore made the operator's own dashboard permanently
 403 on every `MUNINN_AUTH=local` instance. `MUNINN_LOCAL_ROLE=admin` is the
 explicit opt-in, and it is deliberately NOT a promotion of `MUNINN_ADMIN_IDENTS`.
@@ -507,8 +515,111 @@ and the 101 is proxied back; the session cookie is sent as **`SameSite=Lax`**
 (read off the real `Set-Cookie`, not the config dump — which is what the CSRF
 reasoning above leans on); and with `--auto-login` an unauthenticated upgrade is
 refused 401 by the sidecar and never reaches the app. None of it is exercised
-today — `MUNINN_AUTH=entra` cannot boot — but the deferred half now inherits a
-measurement instead of a guess.
+today by an automated test, but `MUNINN_AUTH=entra` BOOTS since PR 2 and the
+Bearer-on-upgrade measurement is what `src/auth/ws-upgrade.ts` now relies on in
+production: there is no muninn cookie in `entra` mode, so the socket
+authenticates from the Bearer channel wonderwall forwards.
+
+## PR 2 — the Entra identity: one introspector, one linking table
+
+### `createEntraIntrospector` (`introspect.ts`)
+
+`token → identity | null`, behind the SAME `Introspector` interface the local
+shared-secret one implements. It POSTs `{identity_provider: "azuread", token}` to
+`NAIS_TOKEN_INTROSPECTION_ENDPOINT`, accepts **`active === true` and nothing
+else**, and maps `oid`/`NAVident` verbatim, `name` → `displayName` and
+`exp * 1000` → `expiresAt` (the field PR D added to cap a socket's lifetime).
+
+⚠️ **It is built ONCE, in `src/index.ts`, and injected into BOTH consumers.**
+`createAuthMiddleware(auth, introspector)` and
+`createWsUpgradeAuthorizer(auth, port, introspector)` take it as a parameter for
+one reason: the introspector holds the cache AND is the DB-provisioning path. A
+cache built inside it would be per-INSTANCE, so the chat page's socket upgrade
+would miss the HTTP cache its own first request filled milliseconds earlier —
+precisely the pair the cache exists for — and two instances mean two provisioning
+transactions racing on a colleague's first login. `wiring.test.ts` pins both
+halves: exactly one `createIntrospector(` in `src/index.ts`, and NONE in either
+consumer.
+
+**Cache and single flight.** Keyed on a **sha256 of the token**, never the token
+(the map is process memory a heap dump reaches). A positive entry expires at
+`min(exp, now + INTROSPECTION_CACHE_MAX_MS)` — the `exp` half is correctness, the
+5-minute cap is the revocation bound. Concurrent misses collapse onto one
+in-flight promise.
+
+**Three-way, not `Identity | null`.** `denied` (Texas answered, and the answer was
+no) is cached for `INTROSPECTION_NEGATIVE_TTL_MS` (30 s) because a token string is
+immutable and a retrying background tab would otherwise be a round-trip per
+retry. `unavailable` — Texas unreachable, non-200, unparseable body, or the
+DATABASE down — refuses the request and caches **nothing**, because remembering an
+outage keeps refusing logins for a window after it clears. Collapsing the two into
+`null` is a real defect the unit test caught before it shipped.
+
+**The `session` channel is refused outright**, with no Texas call. `entra` mints
+no muninn cookie (`writeSessionCookie` returns early on `!config.local`), so a
+`muninn_session` value can only be something a client made up — introspecting it
+would hand any browser a request amplifier against the platform's auth service.
+
+### `user_identities` (migration 073, mirrored in `db/init.sql`)
+
+`(provider, tenant, oid) → user_id`, plus `nav_ident` / `display_name` refreshed
+on every login. Three rules:
+
+- **The match key is `oid`.** It is the only claim immutable for a person within
+  a tenant; a NAVident is RE-ISSUED when someone leaves, so keying on it would
+  eventually resolve two humans to one account.
+- **`tenant` is provenance, never a check.** It comes from `MUNINN_TENANT` and is
+  written verbatim, deliberately NOT compared against the token's own `tid`:
+  Texas is the authority on which directory it introspected, and a config value
+  overruling that would be a second, weaker check in front of the real one. It is
+  in the key because an `oid` is unique per tenant, not globally.
+- **A first login mints `nav-<navident>` lowercased, or `nav-<oid>` when the
+  token carries no NAVident.** The oid fallback is not a degraded mode: the
+  `claims.extra: ["NAVident"]` entry lives in another repository, so this half
+  defends itself — and `resolveRole` already matches `MUNINN_ADMIN_IDENTS`
+  against the oid too.
+
+⚠️ **NOT `ON CONFLICT (id) DO NOTHING` on the `users` insert.** A taken minted id
+belongs to somebody else (this oid has no identity row, or we would be on the hit
+path), so swallowing the conflict provisions a newcomer *onto the previous
+holder's account* — their memories, goals, threads and traces. `resolveNavUser`
+detects the taken id, mints `nav-<navident>-<oid-prefix>`, logs a warning and
+continues. A concurrent first login for one oid is caught as a unique violation
+and retried once, which re-reads the winner's row.
+
+**The default thread is NOT created in that transaction.** `ensureDefaultThread`
+opens its own connection and takes no `sql` handle, and at first-login time no bot
+has been chosen anyway. Provisioning is `users` + `user_identities` and nothing
+else; the thread is created on the first turn, where the existing upsert is
+already idempotent.
+
+### Session expiry, client side (`src/chat/views/components/authed-fetch.ts`)
+
+An Entra access token expires in about an hour and nothing on the page renews it,
+so every open tab reaches the moment its requests are refused. Three channels,
+three predicates, **one breaker**:
+
+| channel | predicate | why it differs |
+|---|---|---|
+| HTTP | the 401 body's `loginUrl === "/oauth2/login"` | it HAS a body, and that is the more direct evidence a login page exists |
+| `/chat/ws` | cached `provider === "entra"` | a `close` event carries a CODE and nothing else |
+| `EventSource` | cached `provider === "entra"` | it exposes neither status nor body, so it cannot go through a fetch wrapper at all |
+
+`authedFetch` is a `window.`-installed global — every client script on the chat
+page is an inline `<script>` template string, so there is no module graph to
+import through (the `window.__muninnViewerId` precedent) — and it is interpolated
+FIRST, ahead of every other script constant. It is transparent: same arguments,
+same promise, same response object, and the 401 body is read off a CLONE. A unit
+test refuses any bare `fetch(` under `src/chat/views/`; three call sites reach the
+page from SHARED `src/dashboard/views/` modules and are dispositioned in that
+test rather than converted (they serve five other pages with no `authedFetch`).
+
+**The breaker is a `sessionStorage` TIMESTAMP, not a boolean** — a boolean gives
+one transparent re-login and then a static banner for every later hourly expiry.
+At most one reload per 60 s across all three channels. ⚠️ The successful-`/chat/me`
+clear is **window-guarded**: it drops the stamp only when it is already outside
+the window, so the clear can never SHORTEN the breaker and re-open the
+reload → init → 401 → reload loop it exists to close.
 
 ## Operator notes for a `local` instance (config traps PR C created)
 
@@ -653,9 +764,15 @@ operator auditing themselves on their own feed.
   comparison, so an admin operator reads every row whatever its owner. See the
   PR D section above.
 - **`MUNINN_ADMIN_IDENTS` is still inert in `local` mode.** The pinned identity's
-  role comes from `MUNINN_LOCAL_ROLE`, never from the allowlist. It is a boot
-  requirement so the deferred Entra mode — where it IS the role source — cannot
-  ship without it.
+  role comes from `MUNINN_LOCAL_ROLE`, never from the allowlist. In `entra` it IS
+  the role source, matched against the token's own `NAVident`/`oid`.
+- **Role in `entra` is the env allowlist, not a group claim.** `MUNINN_ADMIN_IDENTS`
+  is a redeploy to change and carries no group membership; sourcing the role from
+  an Entra `groups` claim is a later change, and `resolveRole` is the single seam
+  it moves through.
+- **A revoked token keeps working for up to `INTROSPECTION_CACHE_MAX_MS`** (5
+  minutes). That is the price of not asking Texas once per request; the socket's
+  own cap is the token's `exp`, which the cache never extends past.
 - **The loopback bypass is unchanged, and so are its limits.** It grants role
   `user` and nothing promotes it; an L4 forward still makes every client look
   local, which now means every client gets a `user`-role session rather than an

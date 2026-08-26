@@ -28,7 +28,7 @@ const CONFIG = resolveAuthConfig({
  * wrong fails silently, in the fail-CLOSED direction, as a lockout.
  */
 const app = new Hono();
-app.use("*", createAuthMiddleware(CONFIG));
+app.use("*", createAuthMiddleware(CONFIG, createIntrospector(CONFIG)));
 // `?.` because `ContextVariableMap` types these as OPTIONAL — with auth off no
 // middleware is mounted and they are genuinely absent. That the compiler forces
 // the `?.` here is the point of the optional declaration.
@@ -303,7 +303,8 @@ describe("off is off", () => {
   });
 
   test("and therefore no middleware can be constructed", () => {
-    expect(() => createAuthMiddleware(resolveAuthConfig({}))).toThrow(/nothing to mount/);
+    const off = resolveAuthConfig({});
+    expect(() => createAuthMiddleware(off, createIntrospector(off))).toThrow(/nothing to mount/);
   });
 });
 
@@ -328,7 +329,7 @@ describe("MUNINN_LOCAL_ROLE — which channel may be promoted", () => {
     MUNINN_ALLOWED_ORIGINS: "https://muninn-host.example-tailnet.ts.net",
   });
   const adminApp = new Hono();
-  adminApp.use("*", createAuthMiddleware(ADMIN_CONFIG));
+  adminApp.use("*", createAuthMiddleware(ADMIN_CONFIG, createIntrospector(ADMIN_CONFIG)));
   adminApp.get("/who", (c) => c.json({ userId: c.get("identity")?.userId, role: c.get("role") }));
   const adminServer = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req, srv) => adminApp.fetch(req, srv) });
   const ADMIN_BASE = `http://127.0.0.1:${adminServer.port}`;

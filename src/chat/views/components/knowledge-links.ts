@@ -44,12 +44,12 @@ export function knowledgeLinksScript(): string {
 
   async function loadKnowledgeUrlMaps() {
     try {
-      var res = await fetch('/chat/knowledge-config');
+      var res = await authedFetch('/chat/knowledge-config');
       if (!res.ok) return;
       var cfg = await res.json();
       var cols = cfg.viewableCollections || [];
       await Promise.all(cols.map(function(col) {
-        return fetch('/api/search/collection/' + encodeURIComponent(col) + '/documents')
+        return authedFetch('/api/search/collection/' + encodeURIComponent(col) + '/documents')
           .then(function(r) { return r.ok ? r.json() : null; })
           .then(function(data) {
             if (!data) return;

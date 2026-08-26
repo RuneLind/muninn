@@ -89,7 +89,7 @@ async function harness(opts: {
 
   const body =
     "var document = ctx.document; var window = ctx.window;" +
-    "var localStorage = ctx.localStorage; var fetch = ctx.fetch;" +
+    "var localStorage = ctx.localStorage; var authedFetch = ctx.fetch;" +
     "var threads = ctx.threads; var connectors = ctx.connectors;" +
     "var chatInput = ctx.chatInput; var chatMessages = ctx.chatMessages;" +
     "var selectedBot = 'jarvis'; var selectedUserId = 'u1';" +

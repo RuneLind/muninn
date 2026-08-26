@@ -3,8 +3,8 @@
  *
  * Three modes: `off` (today's muninn, byte for byte — no middleware is even
  * mounted), `local` (one pinned identity behind a shared secret) and `entra`
- * (the deferred NAV path, which currently REFUSES to boot — see
- * `AUTH_ZONES_IMPLEMENTED`).
+ * (the NAV path: a Texas token introspection per credential, a `users` row
+ * provisioned from the claims — see `AUTH_ZONES_IMPLEMENTED`, now `true`).
  *
  * Everything here is a pure function of an env-like record so the refusals are
  * unit-testable without a process. `src/index.ts` calls `resolveAuthConfig()`
@@ -22,28 +22,29 @@ export const AUTH_MODES = ["off", "local", "entra"] as const;
 export type AuthMode = (typeof AUTH_MODES)[number];
 
 /**
- * Flipped to `true` by the PR that turns `entra` on, and by nothing else.
+ * The `entra` gate. **Flipped to `true` here** — the zone model
+ * (`src/auth/zones.ts`) landed first, and this PR is the one that makes `entra`
+ * answerable: `createEntraIntrospector` (`introspect.ts`) and the
+ * `user_identities` linking table (migration 073) are what it was waiting for.
  *
- * `entra` authenticates a NAV colleague but the zone model is what decides
- * which routes their `user` role may call — without it every authenticated
- * colleague reaches the whole operator surface (traces, prompt snapshots,
- * `/api/users`, every CRUD route). "Entra is unsupported until zones land" is
- * therefore enforced here rather than left as a README note: a half-built auth
- * mode in a public repo invites someone to enable it and trust it.
+ * Why it existed at all: `entra` authenticates a NAV colleague but the zone
+ * model is what decides which routes their `user` role may call — without it
+ * every authenticated colleague reached the whole operator surface (traces,
+ * prompt snapshots, `/api/users`, every CRUD route). "Entra is unsupported
+ * until zones land" was enforced here rather than left as a README note,
+ * because a half-built auth mode in a public repo invites someone to enable it
+ * and trust it.
  *
- * ⚠️ **The zone model itself has landed** (`src/auth/zones.ts`) — this flag is
- * still `false` because the Entra half of the deploy (the introspector, the
- * profile, the sidecar) has not, and flipping it is that PR's job. Do not read
- * a `false` here as "there are no zones".
- *
- * This is a CONSTANT on purpose. An env override would let the deploy that must
- * not happen happen anyway, which is the whole failure this guards.
+ * It is KEPT rather than deleted, and kept as a CONSTANT: it is the one line a
+ * future change to the identity half can flip back to close the mode without
+ * touching a route, and an env override would let exactly the deploy that must
+ * not happen happen anyway.
  */
-// Annotated `: boolean`, not left as the literal type `false` — otherwise the
-// day this flips to `true` every `!AUTH_ZONES_IMPLEMENTED` site changes
-// TYPE-meaning rather than value-meaning, and the test pinning it becomes a
-// tautology the compiler quietly rewrites.
-export const AUTH_ZONES_IMPLEMENTED: boolean = false;
+// Annotated `: boolean`, not left as the literal type `true` — otherwise every
+// `!AUTH_ZONES_IMPLEMENTED` site changes TYPE-meaning rather than value-meaning
+// on the next flip, and the test pinning it becomes a tautology the compiler
+// quietly rewrites.
+export const AUTH_ZONES_IMPLEMENTED: boolean = true;
 
 /**
  * Paths the middleware lets through with no credential — and which the ZONE
@@ -73,6 +74,23 @@ export interface LocalAuthConfig {
   readonly displayName: string;
 }
 
+export interface EntraAuthConfig {
+  /** `NAIS_TOKEN_INTROSPECTION_ENDPOINT` — the Texas sidecar's introspection
+   *  URL. Every credential on an `entra` instance is validated by POSTing to it;
+   *  muninn never verifies a JWT signature itself. */
+  readonly introspectionEndpoint: string;
+  /**
+   * `MUNINN_TENANT`, and it is **provenance bookkeeping, not a check**.
+   *
+   * It is written into `user_identities.tenant` so a row says which directory
+   * an `oid` came from — an `oid` is unique only within a tenant, so the linking
+   * table's key needs it. It is deliberately NEVER compared against the token's
+   * own `tid`: Texas is the authority on which tenant it introspects against,
+   * and a second comparison here would be a config value silently overruling it.
+   */
+  readonly tenant: string;
+}
+
 export interface AuthConfig {
   readonly mode: AuthMode;
   /** Trimmed, lowercased, de-duplicated. Empty is a boot refusal in any
@@ -84,6 +102,8 @@ export interface AuthConfig {
   readonly allowedOrigins: readonly string[];
   /** Present exactly when `mode === "local"`. */
   readonly local: LocalAuthConfig | null;
+  /** Present exactly when `mode === "entra"`. */
+  readonly entra: EntraAuthConfig | null;
   /**
    * The role the pinned `local` identity resolves to (`MUNINN_LOCAL_ROLE`),
    * default `user`. Honoured ONLY in `local` mode and only for an identity
@@ -177,7 +197,7 @@ export function resolveAuthConfig(env: Record<string, string | undefined> = proc
     // made an auth-OFF instance log `MUNINN_ALLOWED_ORIGINS contains "*"` at
     // every boot from a stale `.env` line — a warning about a variable nothing
     // in that mode consults, i.e. exactly the "nothing changes" claim breaking.
-    return { mode, adminIdents: [], allowedOrigins: [], local: null, localRole: "user" };
+    return { mode, adminIdents: [], allowedOrigins: [], local: null, entra: null, localRole: "user" };
   }
 
   const adminIdents = adminIdentsFromEnv(env);
@@ -201,15 +221,30 @@ export function resolveAuthConfig(env: Record<string, string | undefined> = proc
   }
 
   if (mode === "entra") {
-    // Unreachable while (2) stands. Kept because the seam is real and the
-    // deferred PR that flips AUTH_ZONES_IMPLEMENTED must not also have to
-    // rediscover which variables the Texas path needs.
+    // LIVE since AUTH_ZONES_IMPLEMENTED flipped: these two are what the Texas
+    // path needs, and an instance missing either would boot into a mode that
+    // can authenticate nobody. They were written (and asserted) behind refusal
+    // (2) before the mode was reachable, which is why they are unchanged here —
+    // turning `entra` on must not also be the moment its config contract moves.
     for (const name of ["NAIS_TOKEN_INTROSPECTION_ENDPOINT", "MUNINN_TENANT"]) {
       if (trimmed(env, name) === "") {
         throw new AuthConfigError(`${AUTH_ENV}="entra" requires ${name}. Refusing to start.`);
       }
     }
-    return { mode, adminIdents, allowedOrigins, local: null, localRole: "user" };
+    return {
+      mode,
+      adminIdents,
+      allowedOrigins,
+      local: null,
+      entra: {
+        introspectionEndpoint: trimmed(env, "NAIS_TOKEN_INTROSPECTION_ENDPOINT"),
+        tenant: trimmed(env, "MUNINN_TENANT"),
+      },
+      // `MUNINN_LOCAL_ROLE` is a `local`-mode escape hatch and is not parsed
+      // here at all: in `entra` the role source is `MUNINN_ADMIN_IDENTS`, matched
+      // against the token's own claims by `resolveRole`.
+      localRole: "user",
+    };
   }
 
   const token = trimmed(env, "MUNINN_LOCAL_TOKEN");
@@ -256,6 +291,7 @@ export function resolveAuthConfig(env: Record<string, string | undefined> = proc
       userId,
       displayName: trimmed(env, "MUNINN_LOCAL_NAME") || userId,
     },
+    entra: null,
     localRole: parseLocalRole(env),
   };
 }

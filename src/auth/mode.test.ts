@@ -20,6 +20,20 @@ function localEnv(over: Record<string, string | undefined> = {}) {
   };
 }
 
+/** The `entra` twin. No NAV values: the tenant and the ident are placeholders —
+ *  muninn is a public repo (see the repo's brief), and the introspection
+ *  endpoint here answers nothing. */
+function entraEnv(over: Record<string, string | undefined> = {}) {
+  return {
+    MUNINN_AUTH: "entra",
+    NAIS_TOKEN_INTROSPECTION_ENDPOINT: "http://texas.test/introspect",
+    MUNINN_TENANT: "example-tenant",
+    MUNINN_ADMIN_IDENTS: "A123456",
+    MUNINN_ALLOWED_ORIGINS: "https://muninn.example.test",
+    ...over,
+  };
+}
+
 describe("parseAuthMode", () => {
   test("unset, blank and whitespace all mean off", () => {
     expect(parseAuthMode({})).toBe("off");
@@ -57,25 +71,42 @@ describe("acceptance 5 — fail closed, both directions", () => {
     expect(resolveAuthConfig(localEnv({ NAIS_CLUSTER_NAME: "dev-gcp" })).mode).toBe("local");
   });
 
-  // The boundary this whole pass depends on.
-  test("entra refuses to boot while AUTH_ZONES_IMPLEMENTED is false", () => {
-    expect(AUTH_ZONES_IMPLEMENTED).toBe(false);
-    expect(() => resolveAuthConfig({ MUNINN_AUTH: "entra" })).toThrow(/zone model/);
+  // The boundary the previous pass depended on, now crossed. This PR is the one
+  // that made `entra` answerable (the Texas introspector + migration 073), so
+  // the constant is `true` and the refusal it drove is inert.
+  test("AUTH_ZONES_IMPLEMENTED is true, and entra no longer refuses on it", () => {
+    expect(AUTH_ZONES_IMPLEMENTED).toBe(true);
+    expect(() => resolveAuthConfig(entraEnv())).not.toThrow();
   });
 
-  test("the entra refusal fires even when every other variable is set", () => {
-    // The ordering assertion. A fully-configured deployment must still be told
-    // the zone model is the reason — not be waved through by completeness.
-    expect(() =>
-      resolveAuthConfig({
-        MUNINN_AUTH: "entra",
-        NAIS_CLUSTER_NAME: "prod-gcp",
-        NAIS_TOKEN_INTROSPECTION_ENDPOINT: "http://texas/introspect",
-        MUNINN_TENANT: "nav.no",
-        MUNINN_ADMIN_IDENTS: "A123456",
-        MUNINN_ALLOWED_ORIGINS: "https://muninn.intern.nav.no",
-      }),
-    ).toThrow(/zone model/);
+  test("entra boots with its full config, on nais included", () => {
+    const config = resolveAuthConfig(entraEnv({ NAIS_CLUSTER_NAME: "prod-gcp" }));
+    expect(config.mode).toBe("entra");
+    expect(config.local).toBeNull();
+    expect(config.entra).toEqual({
+      introspectionEndpoint: "http://texas.test/introspect",
+      tenant: "example-tenant",
+    });
+    // The role source in `entra` is MUNINN_ADMIN_IDENTS matched against the
+    // token's claims; MUNINN_LOCAL_ROLE is a `local`-mode hatch and is not read.
+    expect(config.localRole).toBe("user");
+  });
+
+  test("entra still refuses without MUNINN_TENANT or the introspection endpoint", () => {
+    // These asserts were written behind the previously-unreachable branch. They
+    // are LIVE now, and this is the regression pin: an instance missing either
+    // would boot into a mode that can authenticate nobody.
+    expect(() => resolveAuthConfig(entraEnv({ MUNINN_TENANT: undefined })))
+      .toThrow(/MUNINN_TENANT/);
+    expect(() => resolveAuthConfig(entraEnv({ NAIS_TOKEN_INTROSPECTION_ENDPOINT: undefined })))
+      .toThrow(/NAIS_TOKEN_INTROSPECTION_ENDPOINT/);
+  });
+
+  test("entra shares the two authenticating-mode refusals", () => {
+    expect(() => resolveAuthConfig(entraEnv({ MUNINN_ADMIN_IDENTS: undefined })))
+      .toThrow(/MUNINN_ADMIN_IDENTS/);
+    expect(() => resolveAuthConfig(entraEnv({ MUNINN_ALLOWED_ORIGINS: undefined })))
+      .toThrow(/MUNINN_ALLOWED_ORIGINS/);
   });
 
   test("an authenticating mode with no MUNINN_ADMIN_IDENTS refuses", () => {

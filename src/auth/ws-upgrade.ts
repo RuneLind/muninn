@@ -54,7 +54,7 @@
 import { getLog } from "../logging.ts";
 import type { AuthConfig } from "./mode.ts";
 import { isAuthenticatingMode } from "./mode.ts";
-import { createIntrospector, localIdentity, type Identity } from "./introspect.ts";
+import { localIdentity, type Identity, type Introspector } from "./introspect.ts";
 import { resolveGrantedRole, resolveRequestIdentity, unauthenticatedBody } from "./middleware.ts";
 import { decideOrigin, loopbackOrigins } from "./origin.ts";
 import { normalizeOrigin } from "../config.ts";
@@ -95,17 +95,25 @@ export function __resetWsWarningsForTest(): void {
  * side either, and "off is off" is the rule this whole campaign is written to.
  * The returned function is still called, so the wiring is exercised on every
  * instance rather than only on the one that authenticates.
+ *
+ * ⚠️ `introspector` is the SAME INSTANCE the HTTP middleware holds, built once
+ * in `src/index.ts`. Building a second one here is not a duplicate object, it is
+ * a duplicate CACHE: the chat page opens an HTTP request and this upgrade on one
+ * token within milliseconds, so a per-instance cache misses on exactly the pair
+ * it exists for — and in `entra` mode the introspector is also the
+ * DB-provisioning path, so two instances mean two first-login transactions
+ * racing. `e2e/entra-identity.spec.ts` asserts ONE Texas call for the pair.
  */
 export function createWsUpgradeAuthorizer(
   auth: AuthConfig,
   dashboardPort: number,
+  introspector: Introspector | null,
 ): (req: Request, peer: string | undefined) => Promise<WsUpgradeDecision> {
   if (!isAuthenticatingMode(auth.mode)) {
     const open: WsUpgradeDecision = { ok: true, identity: null, role: null };
     return async () => open;
   }
 
-  const introspector = createIntrospector(auth);
   if (!introspector) {
     throw new Error(`createWsUpgradeAuthorizer called for MUNINN_AUTH="${auth.mode}" — nothing to mount.`);
   }

@@ -185,12 +185,28 @@ export function forbiddenHead(c: Context): Response {
  * panel), so the rule has to be a server-side force a client value cannot
  * clear: `body.skipExtractions || extractionsForcedOff(c)`.
  *
- * Answers `false` for a `local` identity and with auth off, so this is inert
- * today and stays inert until the deferred Entra half lands. It is here rather
- * than there because it is one line in a route file PR C is already rewriting,
- * and because "turn it on later" is then a decision with a named owner rather
- * than a default nobody chose.
+ * Answers `false` for a `local` identity and with auth off, so it is inert on
+ * every non-`entra` instance. It was written before an `entra` identity could
+ * exist; PR 2 is what makes it reachable, and nothing about it changed.
  */
 export function extractionsForcedOff(c: Context): boolean {
   return sessionIdentity(c)?.provider === "entra";
+}
+
+/**
+ * The whole decision, so the OR itself is testable rather than only its right
+ * operand.
+ *
+ * `POST /chat/conversations/:id/messages` used to spell `body.skipExtractions ||
+ * extractionsForcedOff(c)` inline, where the load-bearing part — that a client
+ * sending `false` cannot CLEAR the force — could only be pinned by reading the
+ * source. It is one expression either way; as a named function a real request
+ * with a real identity can assert it.
+ *
+ * `claimed` is `unknown` because it comes straight off a parsed JSON body: only
+ * `true` skips, so a string `"false"` (or anything else truthy-but-not-true)
+ * cannot turn extraction off by accident either.
+ */
+export function skipExtractionsFor(c: Context, claimed: unknown): boolean {
+  return claimed === true || extractionsForcedOff(c);
 }

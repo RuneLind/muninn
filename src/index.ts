@@ -20,6 +20,7 @@ import { auditMcpAdapters } from "./startup/adapter-audit.ts";
 import { isWikiReadonly, WIKI_READONLY_ENV } from "./wiki/readonly.ts";
 import { AuthConfigError, resolveAuthConfig, isAuthenticatingMode, type AuthConfig } from "./auth/mode.ts";
 import { createAuthMiddleware } from "./auth/middleware.ts";
+import { createIntrospector } from "./auth/introspect.ts";
 import { createOriginMiddleware } from "./auth/origin.ts";
 import { createZoneMiddleware } from "./auth/zone-middleware.ts";
 import { setAuthPolicy } from "./auth/policy.ts";
@@ -187,8 +188,16 @@ const app = new Hono();
 // Registered BEFORE any route: Hono matches handlers in registration order, so
 // a `use` added after `route` would never run for those routes. Mounted only in
 // an authenticating mode — with auth off there is no middleware to run.
+// ONE introspector per process, shared by the HTTP middleware and the WebSocket
+// upgrade below. Not a tidiness choice: in `entra` mode it holds the Texas
+// introspection cache AND is the DB-provisioning path, so a second instance
+// means the chat page's socket upgrade misses the cache its own HTTP request
+// just filled (the pair the cache exists for, milliseconds apart) and two
+// provisioning transactions race on a colleague's first login. Null with auth
+// off, where neither consumer is mounted.
+const introspector = createIntrospector(auth);
 if (isAuthenticatingMode(auth.mode)) {
-  app.use("*", createAuthMiddleware(auth));
+  app.use("*", createAuthMiddleware(auth, introspector));
   // AFTER the auth middleware, so a request with no credential is answered 401
   // by identity rather than 403 by origin — a scripted client must be able to
   // tell "you are not logged in" from "your origin is refused". Not mounted
@@ -216,7 +225,7 @@ app.all("/simulator", (c) => c.redirect("/chat", 301));
 // Built once at boot, like the two Hono middlewares: with auth off it is a
 // constant "allow", so the wiring is exercised on every instance rather than
 // only on the one that authenticates.
-const authorizeWsUpgrade = createWsUpgradeAuthorizer(auth, config.dashboardPort);
+const authorizeWsUpgrade = createWsUpgradeAuthorizer(auth, config.dashboardPort, introspector);
 
 const server = Bun.serve<import("./chat/index.ts").ChatWsData>({
   port: config.dashboardPort,

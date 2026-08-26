@@ -20,7 +20,7 @@ import { getConnInfo } from "hono/bun";
 import type { Context, MiddlewareHandler, Next } from "hono";
 import { getLog } from "../logging.ts";
 import { AUTH_EXCLUDED_PATHS, type AuthConfig } from "./mode.ts";
-import { createIntrospector, localIdentity, type Identity, type Introspector } from "./introspect.ts";
+import { localIdentity, type Identity, type Introspector } from "./introspect.ts";
 import { resolveRole, type AuthRole } from "./role.ts";
 import { mintSession, SESSION_COOKIE, SESSION_TTL_MS } from "./session.ts";
 
@@ -393,8 +393,18 @@ function tokenStrippedTarget(c: Context): string {
   return `${path}${url.search}${url.hash}`;
 }
 
-export function createAuthMiddleware(config: AuthConfig): MiddlewareHandler {
-  const introspector = createIntrospector(config);
+/**
+ * @param introspector Built ONCE at boot by `src/index.ts` and handed to both
+ * this and `createWsUpgradeAuthorizer`, deliberately rather than constructed
+ * here. In `entra` mode the introspector holds the Texas cache AND is the
+ * DB-provisioning path, so a second instance would mean the `/chat/ws` upgrade
+ * misses the HTTP cache entirely — the chat page opens both on one token within
+ * milliseconds, which is exactly the case the cache exists for — and two
+ * provisioning transactions racing on a colleague's first login. `null` is
+ * accepted (and refused) so the "nothing to mount with auth off" guard stays
+ * where it was.
+ */
+export function createAuthMiddleware(config: AuthConfig, introspector: Introspector | null): MiddlewareHandler {
   if (!introspector) {
     throw new Error(`createAuthMiddleware called for MUNINN_AUTH="${config.mode}" — nothing to mount.`);
   }

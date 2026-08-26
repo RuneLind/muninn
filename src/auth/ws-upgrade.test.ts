@@ -2,6 +2,7 @@ import { describe, test, expect, beforeEach, afterAll } from "bun:test";
 import { createWsUpgradeAuthorizer, __resetWsWarningsForTest } from "./ws-upgrade.ts";
 import { __setLoopbackBypassForTest } from "./middleware.ts";
 import { resolveAuthConfig } from "./mode.ts";
+import { createIntrospector } from "./introspect.ts";
 import { mintSession, SESSION_COOKIE } from "./session.ts";
 
 const SECRET = "a-sufficiently-long-secret";
@@ -60,7 +61,7 @@ const PORT = Number(server.port);
 // Built once the port is known: the accepted set includes the loopback literals
 // at the CONFIGURED port, which is the whole point of `loopbackOrigins` taking a
 // port rather than reading one off the request.
-authorizeAtPort = createWsUpgradeAuthorizer(LOCAL_CONFIG, PORT);
+authorizeAtPort = createWsUpgradeAuthorizer(LOCAL_CONFIG, PORT, createIntrospector(LOCAL_CONFIG));
 
 afterAll(() => {
   server.stop(true);
@@ -271,13 +272,13 @@ describe("with auth OFF", () => {
   test("the authorizer is a constant allow, carrying no identity", async () => {
     // "Off is off": no middleware is mounted on the HTTP side either, and the
     // socket stays exactly as unfiltered as it is today.
-    const off = createWsUpgradeAuthorizer(OFF_CONFIG, PORT);
+    const off = createWsUpgradeAuthorizer(OFF_CONFIG, PORT, createIntrospector(OFF_CONFIG));
     const decision = await off(new Request("http://127.0.0.1/chat/ws"), "203.0.113.9");
     expect(decision).toEqual({ ok: true, identity: null, role: null });
   });
 
   test("even a cross-origin handshake is allowed", async () => {
-    const off = createWsUpgradeAuthorizer(OFF_CONFIG, PORT);
+    const off = createWsUpgradeAuthorizer(OFF_CONFIG, PORT, createIntrospector(OFF_CONFIG));
     const decision = await off(
       new Request("http://127.0.0.1/chat/ws", { headers: { origin: "https://evil.example" } }),
       "203.0.113.9",
@@ -310,7 +311,7 @@ describe("MUNINN_LOCAL_ROLE reaches the upgrade, on the same terms as HTTP", () 
   beforeEach(() => __setLoopbackBypassForTest(null));
 
   const decide = (headers: Record<string, string>, peer: string) =>
-    createWsUpgradeAuthorizer(ADMIN_CONFIG, PORT)(new Request("http://127.0.0.1/chat/ws", { headers }), peer);
+    createWsUpgradeAuthorizer(ADMIN_CONFIG, PORT, createIntrospector(ADMIN_CONFIG))(new Request("http://127.0.0.1/chat/ws", { headers }), peer);
 
   test("a credential-less loopback upgrade is `user`", async () => {
     const d = await decide({}, "127.0.0.1");
@@ -333,7 +334,7 @@ describe("MUNINN_LOCAL_ROLE reaches the upgrade, on the same terms as HTTP", () 
   test("and a `user`-role identity can still complete the upgrade", async () => {
     // The socket makes no zone decision: a `user` opening their own chat page
     // is the ordinary case, and a zone check here would break it.
-    const d = await createWsUpgradeAuthorizer(LOCAL_CONFIG, PORT)(
+    const d = await createWsUpgradeAuthorizer(LOCAL_CONFIG, PORT, createIntrospector(LOCAL_CONFIG))(
       new Request("http://127.0.0.1/chat/ws", { headers: { authorization: `Bearer ${SECRET}` } }),
       "127.0.0.1",
     );

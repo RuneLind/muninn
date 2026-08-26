@@ -75,6 +75,14 @@ const AUTH_FLAGS = [
   "MUNINN_ADMIN_IDENTS",
   "MUNINN_ALLOWED_ORIGINS",
   "NAIS_CLUSTER_NAME",
+  // The `entra` half. Inert on their own — nothing reads either unless
+  // `MUNINN_AUTH=entra`, which is blanked above — but they are the same class
+  // of value (this instance's deployment identity), and leaving them ambient
+  // would mean an entra-shaped `.env` decides which tenant a spawned server
+  // stamps onto provisioned rows. The specs that DO exercise entra set both
+  // themselves, per this file's convention.
+  "MUNINN_TENANT",
+  "NAIS_TOKEN_INTROSPECTION_ENDPOINT",
 ];
 
 /** Every name above, in one array. */

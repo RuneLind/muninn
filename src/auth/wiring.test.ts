@@ -39,7 +39,7 @@ describe("src/index.ts wiring", () => {
     // has no role, so a zone check in front would answer 403 where the honest
     // answer is 401.
     const text = await readFile(INDEX, "utf8");
-    const auth = text.indexOf("createAuthMiddleware(auth)");
+    const auth = text.indexOf("createAuthMiddleware(auth, introspector)");
     const origin = text.indexOf("createOriginMiddleware(auth.allowedOrigins, config.dashboardPort)");
     const zones = text.indexOf("createZoneMiddleware(auth)");
     expect(auth).toBeGreaterThan(-1);
@@ -68,8 +68,31 @@ describe("src/index.ts wiring", () => {
     const text = await readFile(INDEX, "utf8");
     const branch = text.match(/if \(isAuthenticatingMode\(auth\.mode\)\) \{[\s\S]*?\n\}/);
     expect(branch, "the isAuthenticatingMode branch was not found").not.toBeNull();
-    expect(branch![0]).toContain("createAuthMiddleware(auth)");
+    expect(branch![0]).toContain("createAuthMiddleware(auth, introspector)");
     expect(branch![0]).toContain("createOriginMiddleware(auth.allowedOrigins, config.dashboardPort)");
     expect(branch![0]).toContain("createZoneMiddleware(auth)");
+  });
+
+  test("the introspector is built ONCE and injected into both consumers", async () => {
+    // The duplicate-introspector shape is invisible to tsc, to every unit test
+    // and to a live instance's happy path: two instances both work. What breaks
+    // is (a) the `/chat/ws` upgrade missing the HTTP cache the chat page's own
+    // first request just filled, milliseconds earlier — the exact pair the
+    // cache exists for — and (b) in `entra` mode, where the introspector is also
+    // the DB-provisioning path, two first-login transactions racing.
+    const text = await readFile(INDEX, "utf8");
+    const calls = text.match(/createIntrospector\(/g) ?? [];
+    expect(calls.length, "src/index.ts must call createIntrospector exactly once").toBe(1);
+    expect(text).toContain("createAuthMiddleware(auth, introspector)");
+    expect(text).toContain("createWsUpgradeAuthorizer(auth, config.dashboardPort, introspector)");
+  });
+
+  test("no consumer builds its own introspector", async () => {
+    // The other half of the pin above: `createAuthMiddleware` and
+    // `createWsUpgradeAuthorizer` both DID call `createIntrospector` before this
+    // PR, so re-adding one is a one-line regression that nothing else notices.
+    for (const file of ["src/auth/middleware.ts", "src/auth/ws-upgrade.ts"]) {
+      expect(await readFile(file, "utf8"), file).not.toContain("createIntrospector(");
+    }
   });
 });

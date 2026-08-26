@@ -336,7 +336,7 @@ export function streamingUiScript(): string {
     down.title = 'Bad response';
     down.textContent = '\\uD83D\\uDC4E';
     function send(value) {
-      fetch('/chat/feedback', {
+      authedFetch('/chat/feedback', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messageId: messageId, value: value })
@@ -371,7 +371,7 @@ export function streamingUiScript(): string {
 
   // Load tool calls from a persisted trace and render as a collapsed tool-activity container
   function loadToolCallsFromTrace(messageDom, traceId) {
-    fetch('/api/traces/' + traceId)
+    authedFetch('/api/traces/' + traceId)
       .then(function(r) { return r.json(); })
       .then(function(data) {
         var spans = data.spans || [];

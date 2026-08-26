@@ -57,7 +57,7 @@ export function researchCardScript(): string {
 
   function checkReportExists(botName, issueKey) {
     if (!botName || !issueKey || !selectedUserId) return;
-    fetch('/chat/reports/' + encodeURIComponent(botName) + '/' + encodeURIComponent(selectedUserId) + '/' + encodeURIComponent(issueKey), { method: 'HEAD' })
+    authedFetch('/chat/reports/' + encodeURIComponent(botName) + '/' + encodeURIComponent(selectedUserId) + '/' + encodeURIComponent(issueKey), { method: 'HEAD' })
       .then(function(res) {
         reportExists = res.ok;
         // Refresh the affordance if a research-action row is currently showing so
@@ -79,7 +79,7 @@ export function researchCardScript(): string {
     if (!botName || !issueKey || !selectedUserId) return;
     var bot = bots.find(function(b) { return b.name === botName; });
     if (!(bot && bot.prompts && bot.prompts.specDomain)) return;
-    fetch('/chat/specs/' + encodeURIComponent(botName) + '/' + encodeURIComponent(selectedUserId) + '/' + encodeURIComponent(issueKey))
+    authedFetch('/chat/specs/' + encodeURIComponent(botName) + '/' + encodeURIComponent(selectedUserId) + '/' + encodeURIComponent(issueKey))
       .then(function(res) { return res.ok ? res.json() : null; })
       .then(function(data) {
         if (!data || !data.content) { specApproved = false; return; }
@@ -118,7 +118,7 @@ export function researchCardScript(): string {
   function fetchDevRun(cb) {
     if (!activeThreadId) { if (cb) cb(null); return; }
     var tid = activeThreadId;
-    fetch('/chat/dev-run/by-thread/' + encodeURIComponent(tid))
+    authedFetch('/chat/dev-run/by-thread/' + encodeURIComponent(tid))
       .then(function(res) { return res.ok ? res.json() : null; })
       .then(function(data) {
         if (tid !== activeThreadId) { if (cb) cb(devRun); return; }
@@ -703,7 +703,7 @@ export function researchCardScript(): string {
 
     var url = '/chat/conversations/' + activeConvId + '/messages?raw=true';
     if (activeThreadId) url += '&thread=' + encodeURIComponent(activeThreadId);
-    var res = await fetch(url);
+    var res = await authedFetch(url);
     var data = await res.json();
     var msgs = data.messages || [];
 
@@ -736,7 +736,7 @@ export function researchCardScript(): string {
     var spec = sections.join('\\n');
 
     try {
-      var saveRes = await fetch('/chat/specs/' + encodeURIComponent(selectedBot) + '/' + encodeURIComponent(selectedUserId) + '/' + encodeURIComponent(issueKey), {
+      var saveRes = await authedFetch('/chat/specs/' + encodeURIComponent(selectedBot) + '/' + encodeURIComponent(selectedUserId) + '/' + encodeURIComponent(issueKey), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: spec, status: devRunStatus }),
@@ -780,7 +780,7 @@ export function researchCardScript(): string {
     // Fetch raw messages from DB (preserves markdown formatting, links, code blocks)
     var url = '/chat/conversations/' + activeConvId + '/messages?raw=true';
     if (activeThreadId) url += '&thread=' + encodeURIComponent(activeThreadId);
-    var res = await fetch(url);
+    var res = await authedFetch(url);
     var data = await res.json();
     var msgs = data.messages || [];
 
@@ -873,7 +873,7 @@ export function researchCardScript(): string {
 
     // Save to backend
     try {
-      var saveRes = await fetch('/chat/reports/' + encodeURIComponent(selectedBot) + '/' + encodeURIComponent(selectedUserId) + '/' + encodeURIComponent(issueKey), {
+      var saveRes = await authedFetch('/chat/reports/' + encodeURIComponent(selectedBot) + '/' + encodeURIComponent(selectedUserId) + '/' + encodeURIComponent(issueKey), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: report }),
@@ -917,7 +917,7 @@ export function researchCardScript(): string {
     overlay.classList.add('visible');
     document.body.style.overflow = 'hidden';
 
-    fetch('/chat/reports/' + encodeURIComponent(selectedBot) + '/' + encodeURIComponent(selectedUserId) + '/' + encodeURIComponent(researchIssueKey))
+    authedFetch('/chat/reports/' + encodeURIComponent(selectedBot) + '/' + encodeURIComponent(selectedUserId) + '/' + encodeURIComponent(researchIssueKey))
       .then(function(res) {
         if (!res.ok) throw new Error('HTTP ' + res.status);
         return res.json();

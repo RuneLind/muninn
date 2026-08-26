@@ -1,7 +1,8 @@
 import { beforeAll, afterAll, beforeEach } from "bun:test";
 import { initDb, getDb } from "../db/client.ts";
+import { TEST_DATABASE_URL } from "./test-db-url.ts";
 
-const TEST_DATABASE_URL = "postgresql://muninn:muninn@127.0.0.1:5435/muninn_test";
+
 
 const ALL_TABLES = [
   "wiki_proposals",
@@ -22,6 +23,12 @@ const ALL_TABLES = [
   "threads",
   "connectors",
   "user_settings",
+  // Before `users`: it carries an FK to it. TRUNCATE … CASCADE would reach it
+  // anyway, but naming it keeps the list an honest inventory of what a test run
+  // must not accumulate — an Entra identity row surviving between cases would
+  // make "a second login provisions nothing" pass without provisioning ever
+  // having worked.
+  "user_identities",
   "users",
   "bot_default_user",
   "peer_thread_correlation",

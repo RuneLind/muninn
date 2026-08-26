@@ -173,7 +173,7 @@ async function harness(opts: {
   };
 
   const prelude =
-    "var document = ctx.document; var fetch = ctx.fetch; var seedJiraCard = ctx.seedJiraCard;" +
+    "var document = ctx.document; var authedFetch = ctx.fetch; var seedJiraCard = ctx.seedJiraCard;" +
     "var initialJiraEntryState = ctx.pure.initialJiraEntryState;" +
     "var jiraEntryButtonHtml = ctx.pure.jiraEntryButtonHtml;" +
     "var jiraEntryCanSubmit = ctx.pure.jiraEntryCanSubmit;" +

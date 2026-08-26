@@ -34,11 +34,15 @@
  * on the live feed, and never reach the table. The shape is distinguished by
  * the text and by `metadata.audit` instead.
  *
- * **It is gated to `entra`.** On a `local` instance there is one human, so
- * every row would be the operator auditing themselves on their own feed —
- * noise that makes the real thing unfindable the day there is one. Since
- * `entra` cannot boot yet (`AUTH_ZONES_IMPLEMENTED`), this is inert in
- * production and exercised by tests that pass the mode explicitly.
+ * **It is gated to `entra`, and that gate is LIVE.** On a `local` instance
+ * there is one human, so every row would be the operator auditing themselves on
+ * their own feed — noise that makes the real thing unfindable the day there is
+ * one. It was written while `entra` could not boot and was therefore inert;
+ * PR 2 flipped `AUTH_ZONES_IMPLEMENTED`, so on an `entra` instance these rows
+ * are now WRITTEN — every admin passthrough and every unfiltered collection
+ * read a NAV admin makes lands in `activity_log` as a `system` row carrying
+ * `metadata.audit`. Nothing about the code changed; what changed is that the
+ * mode it waits for is reachable.
  */
 import { activityLog } from "../observability/activity-log.ts";
 import { getLog } from "../logging.ts";

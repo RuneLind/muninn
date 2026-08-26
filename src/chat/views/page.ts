@@ -17,6 +17,7 @@ import { connectorSelectorScript } from "./components/connector-selector.ts";
 import { researchCardScript } from "./components/research-card.ts";
 import { threadManagerScript } from "./components/thread-manager.ts";
 import { knowledgeLinksScript } from "./components/knowledge-links.ts";
+import { authedFetchScript } from "./components/authed-fetch.ts";
 
 export async function renderChatPage(): Promise<string> {
   const [webFormatScript, helpersScript, inspectorScript, jiraEntryBundle, jiraCardBundle] =
@@ -140,6 +141,11 @@ export async function renderChatPage(): Promise<string> {
 
   ${MARKED_CDN_SCRIPT}
   <script>
+    ${/* FIRST, ahead of every other script constant: it installs
+          window.authedFetch, and every fetch on this page goes through that.
+          A call site evaluated before the definition would be a ReferenceError
+          on the one path whose job is to degrade gracefully. */ ""}
+    ${authedFetchScript()}
     ${helpersScript}
     ${agentStatusScript()}
     ${requestProgressScript()}
@@ -224,6 +230,22 @@ const CHAT_SSE_SCRIPT = `
       },
 
       onerror: function() {
+        // EventSource gets its OWN rule and cannot go through authedFetch: it
+        // takes a URL and exposes neither status nor body on a non-200, so the
+        // loginUrl predicate is structurally unreadable here. readyState 2
+        // (CLOSED) is a PERMANENT failure - the browser has given up - which is
+        // what an expired credential produces, and without this branch a
+        // colleague's progress stream just dies at expiry with no banner and no
+        // reload while the 3 s retry below spins against a 401 forever.
+        //
+        // Same mode-conditional decision as the socket, same cached provider,
+        // and the SAME breaker: a persistent refusal must not have three
+        // independent reload budgets. A permanent 403 lands here identically
+        // and is indistinguishable from this side; the breaker is what bounds
+        // that case to one reload per window.
+        if (mine.source && mine.source.readyState === 2) {
+          if (window.__muninnAuthRefusal('sse') === 'reload') return;
+        }
         mine.close();
         if (conn !== mine) return;   // superseded by a viewer switch — stay dead
         setTimeout(function() {
@@ -355,11 +377,18 @@ const CHAT_SCRIPT = `
   async function loadSessionUser() {
     for (var attempt = 0; attempt < 2; attempt++) {
       try {
-        var res = await fetch('/chat/me');
+        var res = await authedFetch('/chat/me');
         if (res.ok) {
           var me = await res.json();
           sessionUser = me && me.mode === 'session' ? me : null;
           identityUnknown = false;
+          // The provider is what the WebSocket and EventSource expiry rules key
+          // on — neither channel can read a body, so this is the only place it
+          // can come from. Published before anything opens either.
+          window.__muninnSetAuthProvider(me && me.provider);
+          // A working session is the evidence that a previous automatic reload
+          // succeeded. Window-guarded inside — see authed-fetch.ts.
+          window.__muninnClearAuthReloadStamp();
           return;
         }
       } catch {}
@@ -426,7 +455,7 @@ const CHAT_SCRIPT = `
 
   async function loadBotList() {
     try {
-      var res = await fetch('/chat/bots').then(function(r) { return r.json(); });
+      var res = await authedFetch('/chat/bots').then(function(r) { return r.json(); });
       bots = res.bots || [];
       connectors = res.connectors || [];
       // The Jira composer's bot, resolved server-side. Null on an install where
@@ -506,8 +535,8 @@ const CHAT_SCRIPT = `
     var dbDefaultUserId = null;
     try {
       var results = await Promise.allSettled([
-        fetch('/api/users?bot=' + encodeURIComponent(botName)).then(function(r) { return r.json(); }),
-        fetch('/chat/bot-preferences/' + encodeURIComponent(botName) + '/default-user').then(function(r) { return r.json(); }),
+        authedFetch('/api/users?bot=' + encodeURIComponent(botName)).then(function(r) { return r.json(); }),
+        authedFetch('/chat/bot-preferences/' + encodeURIComponent(botName) + '/default-user').then(function(r) { return r.json(); }),
       ]);
       if (results[0].status === 'fulfilled') {
         (results[0].value.users || []).forEach(function(u) {
@@ -568,7 +597,7 @@ const CHAT_SCRIPT = `
     // admin-zone route to keep those readers working.
     if (sessionUser) return;
     if (!botName || !userId) return;
-    fetch('/chat/bot-preferences/' + encodeURIComponent(botName) + '/default-user', {
+    authedFetch('/chat/bot-preferences/' + encodeURIComponent(botName) + '/default-user', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId: userId }),
@@ -594,7 +623,7 @@ const CHAT_SCRIPT = `
     // Create a web conversation if not found
     activeConvId = null;
     try {
-      var res = await fetch('/chat/conversations', {
+      var res = await authedFetch('/chat/conversations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ type: 'web', botName: selectedBot, userId: selectedUserId, username: selectedUsername || 'user' }),
@@ -666,16 +695,20 @@ const CHAT_SCRIPT = `
       // ONCE, so reconnecting can only 401 — and the ordinary 2 s retry would
       // then spin against it forever with nothing on screen to say why.
       //
-      // It deliberately does NOT reload: in "local" mode there is no login
-      // page (AUTH_EXCLUDED_PATHS is empty by design), so an automatic reload
-      // replaces the chat with raw 401 JSON — strictly worse than a stalled
-      // page that explains itself. The operator re-presents the credential and
-      // reloads by hand.
+      // The decision is MODE-CONDITIONAL, and a close event carries no body —
+      // only a code — so the predicate is the provider cached from /chat/me:
+      //
+      //   entra → the sidecar signs the reader back in on the next navigation,
+      //           so a reload is a transparent re-login (breaker-bounded).
+      //   anything else → the historical static banner. In "local" mode there
+      //           is no login page (AUTH_EXCLUDED_PATHS is the two health
+      //           endpoints by design), so a reload would replace the chat with
+      //           raw 401 JSON: strictly worse than a stalled page that
+      //           explains itself.
+      //
+      // Both outcomes are terminal for this socket — see authed-fetch.ts.
       if (e && e.code === 4401) {
-        var banner = document.createElement('div');
-        banner.className = 'empty-state';
-        banner.textContent = 'Your session expired — reload the page to sign in again.';
-        chatMessages.appendChild(banner);
+        window.__muninnAuthRefusal('ws');
         return;
       }
       setTimeout(connectWs, 2000);
@@ -926,7 +959,7 @@ const CHAT_SCRIPT = `
         await stampConnectorOnThread(activeThreadId, selectedConnectorId, true);
       }
       try {
-        var pendingRes = await fetch('/chat/pending/' + encodeURIComponent(threadParam));
+        var pendingRes = await authedFetch('/chat/pending/' + encodeURIComponent(threadParam));
         var pendingData = await pendingRes.json();
         if (pendingData.text) {
           chatInput.value = pendingData.text;
@@ -963,7 +996,7 @@ const CHAT_SCRIPT = `
     if (getSkipExtractions()) {
       payload.skipExtractions = true;
     }
-    await fetch('/chat/conversations/' + activeConvId + '/messages', {
+    await authedFetch('/chat/conversations/' + activeConvId + '/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -1007,7 +1040,7 @@ const CHAT_SCRIPT = `
     try {
       var url = '/chat/conversations/' + activeConvId + '/messages';
       if (threadId) url += '?thread=' + encodeURIComponent(threadId);
-      var res = await fetch(url);
+      var res = await authedFetch(url);
       var data = await res.json();
       var msgs = data.messages || [];
 

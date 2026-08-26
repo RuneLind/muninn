@@ -67,7 +67,7 @@ export function threadManagerScript(): string {
     var desc = threadModalDesc.value.trim() || undefined;
     var connId = threadModalConnector.value || undefined;
 
-    fetch('/chat/threads', {
+    authedFetch('/chat/threads', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -120,7 +120,7 @@ export function threadManagerScript(): string {
     }
 
     try {
-      var res = await fetch('/chat/threads/' + encodeURIComponent(selectedUserId) + '/' + encodeURIComponent(selectedBot));
+      var res = await authedFetch('/chat/threads/' + encodeURIComponent(selectedUserId) + '/' + encodeURIComponent(selectedBot));
       var data = await res.json();
       threads = data.threads || [];
     } catch {
@@ -209,7 +209,7 @@ export function threadManagerScript(): string {
           if (threads[i].id === threadId) { threadName = threads[i].name; break; }
         }
         if (!confirm('Delete thread "' + threadName + '" and all its messages?')) return;
-        fetch('/chat/threads/' + encodeURIComponent(threadId), { method: 'DELETE' })
+        authedFetch('/chat/threads/' + encodeURIComponent(threadId), { method: 'DELETE' })
           .then(function(res) {
             if (!res.ok) throw new Error('Failed to delete');
             threads = threads.filter(function(t) { return t.id !== threadId; });
@@ -298,7 +298,7 @@ export function threadManagerScript(): string {
     if (!current) return;
     var nextPaused = current.autoRespondPaused !== true;
     autoRespondPill.disabled = true;
-    fetch('/chat/threads/' + encodeURIComponent(activeThreadId) + '/auto-respond', {
+    authedFetch('/chat/threads/' + encodeURIComponent(activeThreadId) + '/auto-respond', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ paused: nextPaused }),

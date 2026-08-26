@@ -9,6 +9,7 @@
 | `memories.ts` | Memory CRUD, hybrid search (FTS + pgvector RRF), dashboard search, stats |
 | `threads.ts` | Thread CRUD, switch/activate, Slack thread management, cascade delete |
 | `users.ts` | User upsert (`ensureUser`), lookup, update |
+| `user-identities.ts` | The `entra` → `users.id` link (`resolveNavUser`). Keyed `(provider, tenant, oid)`; provisions `users` + `user_identities` in ONE transaction on first login, refreshes the mutable claims on every later one. ⚠️ The `users` insert is deliberately NOT `ON CONFLICT DO NOTHING` — a re-issued NAVident would otherwise provision a newcomer onto the previous holder's account |
 | `goals.ts` | Goal CRUD with status tracking |
 | `scheduled-tasks.ts` | Scheduled task CRUD (cron + interval styles) |
 | `watchers.ts` | Watcher CRUD with dedup tracking (`lastNotifiedIds`) |
@@ -100,6 +101,7 @@ Test files are co-located: `messages.test.ts`, `memories.test.ts`, `threads.test
 | Table | Key columns | Notes |
 |---|---|---|
 | `users` | id, username, platform, is_active | Canonical user identity across platforms |
+| `user_identities` | provider, tenant, oid, user_id | The `entra` link. PK on (provider, tenant, oid) — `oid` is the only claim immutable for a person in a tenant; `tenant` is provenance from `MUNINN_TENANT`, never compared against the token's `tid`. FK to `users` ON DELETE CASCADE |
 | `messages` | user_id, bot_name, role, content, platform, thread_id, trace_id | Token tracking (input/output/context), cost |
 | `memories` | user_id, bot_name, summary, embedding, scope, search_vector | pgvector + FTS for hybrid search |
 | `threads` | user_id, bot_name, name, connector_id, is_active | Unique on (user_id, bot_name, name) |

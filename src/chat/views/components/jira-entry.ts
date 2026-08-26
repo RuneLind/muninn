@@ -116,7 +116,7 @@ export function jiraEntryScript(): string {
     if (jiraEntryTemplates) { jiraEntryTemplatesErr = null; return; }
     jiraEntryTemplatesErr = null;
     try {
-      var res = await fetch('/api/jira/templates');
+      var res = await authedFetch('/api/jira/templates');
       var body = await res.json();
       if (!res.ok) {
         jiraEntryTemplatesErr = (body && body.error) || ('Kunne ikke hente maler (HTTP ' + res.status + ').');
@@ -180,7 +180,7 @@ export function jiraEntryScript(): string {
     var status = 0;
     var body = null;
     try {
-      var res = await fetch('/api/jira/draft/from-thread', {
+      var res = await authedFetch('/api/jira/draft/from-thread', {
         method: 'POST',
         // NOT optional: the route 415s anything else. See the module header.
         headers: { 'content-type': 'application/json' },
