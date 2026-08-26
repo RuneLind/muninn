@@ -14,6 +14,10 @@ function entra(over: Partial<Identity> = {}): Identity {
   };
 }
 
+function local(): Identity {
+  return { userId: "rune", displayName: "rune", navIdent: null, oid: null, provider: "local", expiresAt: null };
+}
+
 describe("resolveRole", () => {
   test("auth off (no identity) is admin — today's local muninn is untouched", () => {
     expect(resolveRole(null, [])).toBe("admin");
@@ -22,13 +26,24 @@ describe("resolveRole", () => {
   // Load-bearing: an admin pinned identity would make PRs C-D's claimed-id
   // guards a no-op through requireOwnUser's admin passthrough, and the central
   // acceptance of this pass would pass without the diff.
-  test("the pinned LOCAL identity is user, never admin", () => {
-    const local: Identity = {
-      userId: "rune", displayName: "rune", navIdent: null, oid: null, provider: "local", expiresAt: null,
-    };
-    expect(resolveRole(local, ["rune"])).toBe("user");
+  test("the pinned LOCAL identity is user by DEFAULT, never admin", () => {
+    expect(resolveRole(local(), ["rune"])).toBe("user");
     // Even if someone lists it, and even if it somehow carried claims.
-    expect(resolveRole({ ...local, navIdent: "A123456" }, ["a123456"])).toBe("user");
+    expect(resolveRole({ ...local(), navIdent: "A123456" }, ["a123456"])).toBe("user");
+  });
+
+  test("the third argument is the ONLY way a local identity becomes admin", () => {
+    // MUNINN_LOCAL_ROLE, threaded from AuthConfig rather than read from
+    // process.env here — the function stays pure and both call sites are
+    // visible. `MUNINN_ADMIN_IDENTS` still grants nothing in local mode.
+    expect(resolveRole(local(), [], "admin")).toBe("admin");
+    expect(resolveRole(local(), [], "user")).toBe("user");
+    expect(resolveRole(local(), ["rune"], "user")).toBe("user");
+  });
+
+  test("it does NOT reach an entra identity — that role comes from the allowlist", () => {
+    expect(resolveRole(entra({ navIdent: "B999999", oid: "other" }), [], "admin")).toBe("user");
+    expect(resolveRole(entra(), ["a123456"], "user")).toBe("admin");
   });
 
   test("matches the NAVident case-insensitively on trimmed values", () => {

@@ -1,5 +1,8 @@
 import { Hono } from "hono";
 import type { Config } from "../config.ts";
+import { sessionRole } from "../auth/guard.ts";
+import { HEALTH_LIVE_PATH, HEALTH_READY_PATH } from "../auth/zones.ts";
+import { readiness } from "./health.ts";
 import { renderDashboardPage } from "./views/page.ts";
 import { FAVICON_SVG, FAVICON_HEADERS } from "./views/favicon.ts";
 import { getDashboardBuildHash } from "./dashboard-build-hash.ts";
@@ -33,9 +36,27 @@ import { registerJiraRoutes } from "./routes/jira-routes.ts";
 export function createDashboardRoutes(config: Config): Hono {
   const app = new Hono();
 
-  // Dashboard home page
+  // Dashboard home page — role-aware since the zone model landed. `/` is the
+  // address people type, and the dashboard behind it is admin-only, so a role
+  // `user` is sent to the surface they DO have rather than 403'd at their own
+  // bookmark. The branch lives here rather than in the zone middleware because
+  // it is a product decision about one route, not a boundary: with auth off
+  // `sessionRole` is null and this is byte-identical to what it was.
   app.get("/", async (c) => {
+    if (sessionRole(c) === "user") return c.redirect("/chat", 302);
     return c.html(await renderDashboardPage());
+  });
+
+  /**
+   * The open zone: the only two routes an authenticating instance answers with
+   * NO credential (`AUTH_EXCLUDED_PATHS`). Registered inline here, beside the
+   * other instance-level routes, and deliberately carrying nothing but a
+   * verdict — see `src/dashboard/health.ts`.
+   */
+  app.get(HEALTH_LIVE_PATH, (c) => c.json({ status: "ok" }));
+  app.get(HEALTH_READY_PATH, async (c) => {
+    const result = await readiness();
+    return c.json(result, result.ready ? 200 : 503);
   });
 
   // Brand favicon. Both paths serve the same SVG — browsers auto-fetch

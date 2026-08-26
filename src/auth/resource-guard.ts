@@ -50,7 +50,8 @@
 import type { Context } from "hono";
 import { getLog } from "../logging.ts";
 import { sessionIdentity, sessionRole } from "./guard.ts";
-import { pinnedLocalUserId } from "./policy.ts";
+import { authMode, pinnedLocalUserId } from "./policy.ts";
+import { auditAdminPassthrough } from "./audit.ts";
 import type { AuthRole } from "./role.ts";
 
 const log = getLog("auth", "resource");
@@ -228,6 +229,13 @@ export async function requireOwnedResource(
     // difference between an audited role and an unaudited one is this line.
     log.info("Admin {admin} read {kind} {id} owned by {owner} on {path}", {
       admin: identity.userId, kind, id, owner: owner.userId, path: c.req.path,
+    });
+    auditAdminPassthrough({
+      mode: authMode(),
+      reader: identity.userId,
+      owner: owner.userId!,
+      path: c.req.path,
+      kind,
     });
   }
   return verdict;

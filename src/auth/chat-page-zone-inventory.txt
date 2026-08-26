@@ -1,0 +1,98 @@
+# Every same-origin URL the COMPOSED chat page references, with its zone.
+#
+# Re-derived from `renderChatPage()`'s output by src/auth/zone-inventory.ts on
+# every test run and compared against this file. The user zone is an ALLOWLIST,
+# so the failure it introduces is silent: a fetch added to the chat client lands
+# outside the list, role `user` gets a 403, and the symptom is a panel that
+# quietly stops filling. A new URL therefore has to arrive here as unassigned
+# work, exactly as a new claimed id arrives in claimed-id-inventory.txt.
+#
+# Format:  <url> | <disposition> | <probe>       # optional note
+#   <probe>       the concrete path the zone assertion is made against; blank
+#                 means the url itself. A PREFIX row needs one.
+#   dispositions  open | user-zone | admin-zone | fragment | not-a-url
+#                 (the vocabulary in src/auth/zone-inventory.ts; a row with any
+#                 other value, or none, FAILS)
+#
+# `open`, `user-zone` and `admin-zone` rows are CHECKED against decideZone() at
+# role `user` — a row cannot claim a zone the model does not give it. The other
+# two carry no zone claim, and are the honest cost of an extractor that takes
+# every path-shaped literal rather than a `fetch(` grep: a filter is where a
+# real route would hide.
+
+## the page itself, and the open zone
+
+/ | user-zone |    # role-aware in the handler: an admin gets the dashboard, a user is 302'd to /chat
+/chat | user-zone |
+/favicon.svg | open |
+
+## the chat sub-app — one prefix, one carve-out
+
+/chat/bots | user-zone |
+/chat/context-usage/ | user-zone | /chat/context-usage/u/jarvis
+/chat/conversations | user-zone |
+/chat/conversations/ | user-zone | /chat/conversations/abc
+/chat/dev-run/by-thread/ | user-zone | /chat/dev-run/by-thread/abc
+/chat/events | user-zone |    # the chat page's own stream; /api/events stays admin
+/chat/feedback | user-zone |
+/chat/knowledge-config | user-zone |
+/chat/mcp-status/ | user-zone | /chat/mcp-status/jarvis
+/chat/me | user-zone |
+/chat/pending/ | user-zone | /chat/pending/abc
+/chat/preferences/ | user-zone | /chat/preferences/u/jarvis
+/chat/reports/ | user-zone | /chat/reports/jarvis/u/KEY-1
+/chat/specs/ | user-zone | /chat/specs/jarvis/u/KEY-1
+/chat/threads | user-zone |
+/chat/threads/ | user-zone | /chat/threads/abc
+/chat/tool-usage/ | user-zone | /chat/tool-usage/u/jarvis
+/chat/ws | user-zone |    # never reaches Hono — src/index.ts handles it before app.fetch; listed because the page names it
+/chat/bot-preferences/ | admin-zone | /chat/bot-preferences/jarvis/default-user    # the deny list: bot-GLOBAL state under a user-zone prefix
+
+## dashboard routes the chat page fetches
+
+/api/dashboard-build-hash | user-zone |    # the "muninn was restarted" watcher, on every page
+/api/goals/ | user-zone | /api/goals/u
+/api/memories/user/ | user-zone | /api/memories/user/u
+/api/scheduled-tasks/ | user-zone | /api/scheduled-tasks/u
+/api/traces/ | user-zone | /api/traces/abc    # the waterfall drill-down; the /api/traces LIST is admin
+/api/search/collection/ | user-zone | /api/search/collection/wiki/documents
+/api/search/document/ | user-zone | /api/search/document/wiki/some/doc
+/api/jira/templates | user-zone |
+/api/jira/drafts | user-zone |
+/api/jira/draft/ | user-zone | /api/jira/draft/abc
+/api/jira/draft/from-thread | user-zone |
+/api/users | admin-zone |    # named on the page, but PR C's client skips loadUsersForBot ENTIRELY under a session
+
+## the operator nav, rendered on every page
+
+/agents | admin-zone |
+/benchmark | admin-zone |
+/graph | admin-zone |
+/indexing | admin-zone |
+/jira | admin-zone |
+/logs | admin-zone |
+/mcp-debug | admin-zone |
+/models | admin-zone |
+/plans | admin-zone |
+/research | admin-zone |
+/search | admin-zone |
+/serena | admin-zone |
+/summaries | admin-zone |
+/traces | admin-zone |
+/wiki | admin-zone |
+
+## path suffixes, from `'/a/' + id + '/b'` concatenation
+
+/auto-respond | fragment |    # PATCH /chat/threads/:id/auto-respond
+/connector | fragment |    # PUT /chat/preferences/:userId/:botName/connector
+/default-user | fragment |    # /chat/bot-preferences/:botName/default-user — the deny-list row above
+/documents | fragment |    # GET /api/search/collection/:name/documents
+/messages | fragment |    # GET /chat/conversations/:id/messages
+/refresh | fragment |    # POST /chat/mcp-status/:bot/refresh
+/save | fragment |    # POST /api/jira/draft/:id/save
+
+## path-shaped, but not a URL
+
+// | not-a-url |    # the scheme separator in `protocol + '//' + location.host`
+/reports/ | not-a-url |    # a DISK path: `bot.dir + '/reports/' + …`, shown as planPath
+/specs/ | not-a-url |    # ditto, specPath

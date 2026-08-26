@@ -66,6 +66,12 @@ const AUTH_FLAGS = [
   "MUNINN_LOCAL_TOKEN",
   "MUNINN_LOCAL_USER",
   "MUNINN_LOCAL_NAME",
+  // `MUNINN_LOCAL_ROLE` decides whether the pinned identity is admin, i.e. what
+  // the zone model lets it call. A machine whose `.env` sets it would spawn e2e
+  // muninns at role `admin` while the other machine spawns `user`, and the
+  // acceptance rows would flip by HOST — the same failure shape as
+  // `MUNINN_WIKI_READONLY`, on a flag whose direction is "grants more".
+  "MUNINN_LOCAL_ROLE",
   "MUNINN_ADMIN_IDENTS",
   "MUNINN_ALLOWED_ORIGINS",
   "NAIS_CLUSTER_NAME",

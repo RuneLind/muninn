@@ -40,6 +40,10 @@ export const E2E_PORTS = {
   "summaries-share/huginn": 3029,
   "wiki-start-cards": 3030,
   "ws-scope": 3031,
+  // Two instances, one spec: MUNINN_LOCAL_ROLE is a per-PROCESS setting, so the
+  // admin and `user` halves of the zone acceptance cannot share a server.
+  "auth-zones/admin": 3032,
+  "auth-zones/user": 3033,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

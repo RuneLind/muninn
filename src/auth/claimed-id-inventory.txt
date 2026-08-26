@@ -34,15 +34,15 @@ src/dashboard/routes/data-routes.ts | GET /api/goals/:userId | own-user-guard
 src/dashboard/routes/data-routes.ts | GET /api/memories/user/:userId | own-user-guard
 src/dashboard/routes/data-routes.ts | GET /api/scheduled-tasks/:userId | own-user-guard
 src/dashboard/routes/data-routes.ts | GET /api/user-settings/:userId | own-user-guard
-src/dashboard/routes/data-routes.ts | GET /api/messages/:userId | admin-zone-deferred   # §4: reading a colleague's whole message history is an operator act with no "own" version
-src/dashboard/routes/data-routes.ts | GET /api/users/:userId/overview | admin-zone-deferred   # §4, same reason
+src/dashboard/routes/data-routes.ts | GET /api/messages/:userId | admin-zone   # reading a colleague's whole message history is an operator act with no "own" version; the zone model now denies it to role `user`
+src/dashboard/routes/data-routes.ts | GET /api/users/:userId/overview | admin-zone   # same reason
 
 ## claimed userId in a body or query, per route
 
 src/chat/routes.ts | body.userId in POST /conversations | own-user-guard
 src/chat/routes.ts | body.userId in POST /threads | own-user-guard
-src/chat/routes.ts | body.userId in PUT /bot-preferences/:botName/default-user | admin-zone-deferred   # §4 moves this route to the admin zone; it sets BOT-GLOBAL state, so there is no "own" version
-src/dashboard/routes/data-routes.ts | body.userId in POST /api/users | admin-zone-deferred   # minting a row has no "own" version, and a guard here would only make it un-callable
+src/chat/routes.ts | body.userId in PUT /bot-preferences/:botName/default-user | admin-zone   # it sets BOT-GLOBAL state, so there is no "own" version; it sits under /chat/* and is therefore on zones.ts's DENY LIST rather than reached by default-deny
+src/dashboard/routes/data-routes.ts | body.userId in POST /api/users | admin-zone   # minting a row has no "own" version, and a guard here would only make it un-callable
 src/dashboard/routes/research-routes.ts | body.userId in POST /api/research/chat | own-user-guard   # creates a conversation AND a real thread
 src/chat/routes.ts | query("viewer") in GET /events | own-user-guard   # PR D's replacement stream: the same claimed identity, on the route the chat page consumes instead of /api/events
 src/dashboard/routes/sse-routes.ts | query("viewer") in GET /api/events | own-user-guard   # a claimed identity under another name: it scopes the waterfall + phase pill, and the run metadata carries a traceId that /api/prompts/:traceId expands into a whole prompt

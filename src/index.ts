@@ -21,6 +21,7 @@ import { isWikiReadonly, WIKI_READONLY_ENV } from "./wiki/readonly.ts";
 import { AuthConfigError, resolveAuthConfig, isAuthenticatingMode, type AuthConfig } from "./auth/mode.ts";
 import { createAuthMiddleware } from "./auth/middleware.ts";
 import { createOriginMiddleware } from "./auth/origin.ts";
+import { createZoneMiddleware } from "./auth/zone-middleware.ts";
 import { setAuthPolicy } from "./auth/policy.ts";
 import { createWsUpgradeAuthorizer } from "./auth/ws-upgrade.ts";
 import { Hono } from "hono";
@@ -194,6 +195,12 @@ if (isAuthenticatingMode(auth.mode)) {
   // with auth off: there is no ambient session to ride there, so the refusal
   // would change today's muninn to close nothing.
   app.use("*", createOriginMiddleware(auth.allowedOrigins, config.dashboardPort));
+  // LAST of the three, and on the TOP-LEVEL app: it decides ROLE, so it must
+  // run after identity exists (or every request is 403 before it can be 401)
+  // and after the origin check (or a cross-origin side effect is judged by role
+  // rather than refused). Mounting it inside `createDashboardRoutes` would
+  // leave the `/chat` sub-app — the second `app.route` below — uncovered.
+  app.use("*", createZoneMiddleware(auth));
 }
 app.route("/", dashboard);
 
@@ -261,23 +268,30 @@ activityLog.push("system", `Dashboard running on http://localhost:${server.port}
 if (isAuthenticatingMode(auth.mode)) {
   log.info(
     "MUNINN_AUTH={mode} — HTTP requests and the /chat/ws upgrade require a session; direct-loopback " +
-    "requests bypass it by design. Resource guards and the socket's owner filter are in place (PR D). " +
-    "NB nothing is denied by ROLE yet: the zone model is deferred, so an authenticated caller still " +
-    "reaches /traces, /api/prompts/:traceId and the rest of the operator surface. Two exceptions the " +
-    "operator will notice: GET /api/events is denied to role `user` (the chat page uses /chat/events " +
-    "instead), and a `local` identity is role `user`, so another users.id's traces and conversations " +
-    "answer 404 to it.",
+    "requests bypass it by design. Resource guards, the socket's owner filter and the ZONE model are all " +
+    "in place: role `user` reaches /chat and the routes that page calls, and every other route — /traces, " +
+    "/models, /plans, /agents, /logs, /api/prompts/:traceId, the unfiltered collection reads — answers 403. " +
+    "GET / redirects a `user` to /chat. Only /api/live and /api/ready are reachable with no credential.",
     { mode: auth.mode },
+  );
+  log.info(
+    "MUNINN_AUTH={mode}, MUNINN_LOCAL_ROLE={localRole} — a `local` identity resolves to that role, but ONLY " +
+    "when the request presented a credential (a token, or a session cookie). A DIRECT-LOOPBACK request with " +
+    "no credential is always role `user`, so a browser running on this host stays `user` even with " +
+    "MUNINN_LOCAL_ROLE=admin: the bypass fills the identity before the cookie is read. Reach the operator " +
+    "surface through the proxy (which stamps x-forwarded-*), or from the host with the token on the request.",
+    { mode: auth.mode, localRole: auth.localRole },
   );
   log.info(
     "MUNINN_AUTH={mode} — the loopback bypass trusts the PEER ADDRESS, so it is only sound behind an HTTP " +
     "proxy that stamps forwarding headers (e.g. `tailscale serve` in HTTP mode). An L4 forward — " +
     "`tailscale serve --tcp`, an nginx `stream` block, `ssh -L`, `socat`, `kubectl port-forward` — or a bare " +
     "`proxy_pass` with no `proxy_set_header` adds no headers, and every client through one is granted the " +
-    "pinned identity with NO credential. See src/auth/CLAUDE.md.",
+    "pinned identity with NO credential — at role `user`, which is why the bypass is not promotable. " +
+    "See src/auth/CLAUDE.md.",
     { mode: auth.mode },
   );
-  activityLog.push("system", `Auth mode: ${auth.mode}`);
+  activityLog.push("system", `Auth mode: ${auth.mode} (local role: ${auth.localRole})`);
 }
 
 // The instance profile is env-only and otherwise invisible until two instances

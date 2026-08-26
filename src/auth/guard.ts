@@ -55,6 +55,8 @@ import type { Context } from "hono";
 import { getLog } from "../logging.ts";
 import type { Identity } from "./introspect.ts";
 import type { AuthRole } from "./role.ts";
+import { auditAdminPassthrough } from "./audit.ts";
+import { authMode } from "./policy.ts";
 
 const log = getLog("auth", "guard");
 
@@ -135,6 +137,15 @@ export function requireOwnUser(
         admin: identity.userId,
         claimed,
         path: c.req.path,
+      });
+      // …and on the operator's own feed, which is where a person would notice.
+      // Gated to `entra` inside: on a `local` instance every row is self-audit.
+      auditAdminPassthrough({
+        mode: authMode(),
+        reader: identity.userId,
+        owner: claimed,
+        path: c.req.path,
+        kind: "claimed-id",
       });
     }
     return { ok: true, userId: claimed ?? identity.userId, username: claimedName };
