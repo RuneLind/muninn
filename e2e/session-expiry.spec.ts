@@ -222,18 +222,24 @@ test.describe("acceptance 19 — a PERMANENTLY refused EventSource is terminal",
     // reconnect, which re-entered the rule every cycle and re-armed the breaker
     // every 60 s — a reload a minute, forever, plus "your session expired"
     // about a session that had not expired.
+    // Counted rather than marked: the stream is refused during init, so the
+    // reload can land BEFORE a `page.evaluate` marker could be planted — which
+    // is a flake, not a signal (it failed exactly once, under a loaded parallel
+    // run). A main-frame navigation count is immune to that ordering.
+    let navigations = 0;
+    page.on("framenavigated", (frame) => { if (frame === page.mainFrame()) navigations++; });
+
     await open(page, { provider: "entra", eventsStatus: 403 });
-    await markPage(page);
-    expect(await reloaded(page)).toBe(true);
+    // The goto, plus exactly one reload.
+    await expect.poll(() => navigations, { timeout: 10_000 }).toBe(2);
 
     await page.waitForFunction(() => typeof (window as { authedFetch?: unknown }).authedFetch === "function");
     await expect(banner(page)).toBeVisible();
-    await markPage(page);
     const afterReload = hits.events;
     // Two full 3 s poll cycles and then some: neither a reconnect nor a reload.
     await page.waitForTimeout(7000);
     expect(hits.events).toBe(afterReload);
-    expect(await reloaded(page)).toBe(false);
+    expect(navigations).toBe(2);
   });
 });
 
