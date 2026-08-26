@@ -219,8 +219,8 @@ describe("MUNINN_LOCAL_ROLE", () => {
 
   test("it is INERT outside `local` mode", () => {
     // Auth off: no identity is resolved at all, so a stale line in `.env`
-    // grants nothing. (The `entra` branch cannot be reached while
-    // AUTH_ZONES_IMPLEMENTED is false, and its role source is the allowlist.)
+    // grants nothing. (`entra` does not read the variable either — its role
+    // source is MUNINN_ADMIN_IDENTS, matched against the token's own claims.)
     expect(resolveAuthConfig({ MUNINN_LOCAL_ROLE: "admin" }).localRole).toBe("user");
     expect(resolveAuthConfig({ MUNINN_AUTH: "off", MUNINN_LOCAL_ROLE: "admin" }).localRole).toBe("user");
   });

@@ -22,9 +22,9 @@ const LOCAL = resolveAuthConfig({
   MUNINN_ALLOWED_ORIGINS: "https://muninn-host.example-tailnet.ts.net",
 });
 
-/** `entra` cannot be built through `resolveAuthConfig` (it refuses to boot until
- *  `AUTH_ZONES_IMPLEMENTED` flips), so the audit gate is exercised over a
- *  literal — the mode is the only field it reads. */
+/** The audit gate reads nothing but the MODE, so it is exercised over a literal
+ *  rather than a `resolveAuthConfig({...})` that would also need an
+ *  introspection endpoint, a tenant and an origin allowlist to build. */
 const ENTRA: AuthConfig = { ...LOCAL, mode: "entra", local: null };
 
 /** The genuine auth-off config. The zone middleware is not mounted in this mode

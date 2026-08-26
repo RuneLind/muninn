@@ -547,13 +547,55 @@ consumer.
 5-minute cap is the revocation bound. Concurrent misses collapse onto one
 in-flight promise.
 
-**Three-way, not `Identity | null`.** `denied` (Texas answered, and the answer was
-no) is cached for `INTROSPECTION_NEGATIVE_TTL_MS` (30 s) because a token string is
-immutable and a retrying background tab would otherwise be a round-trip per
-retry. `unavailable` — Texas unreachable, non-200, unparseable body, or the
-DATABASE down — refuses the request and caches **nothing**, because remembering an
-outage keeps refusing logins for a window after it clears. Collapsing the two into
-`null` is a real defect the unit test caught before it shipped.
+**Three-way, not `Identity | null`, and the third value reaches the EDGE.**
+`denied` (Texas answered, and the answer was no) is cached for
+`INTROSPECTION_NEGATIVE_TTL_MS` (30 s) because a token string is immutable and a
+retrying background tab would otherwise be a round-trip per retry. `unavailable`
+— Texas unreachable, non-200, unparseable body, or the DATABASE down — caches
+**nothing**, because remembering an outage keeps refusing logins for a window
+after it clears, and is answered **503 with no `loginUrl`** on HTTP and on the
+`/chat/ws` upgrade. It used to answer the same 401 a denial does, which is the
+chat page's reload predicate: a Texas blip sent every open tab through the
+sidecar and back into the service that was already failing (measured).
+
+**The cache has a HARD CAP** (`INTROSPECTION_CACHE_MAX_ENTRIES`, 4096). The
+sweep only ever evicted EXPIRED rows and a denial is live for its whole 30 s
+window, so the map's size was an input an unauthenticated client controlled —
+measured, 5000 distinct forged tokens ⇒ 5000 live entries. Eviction takes the
+SOONEST-to-expire first, so a flood of 30-second denials evicts itself before it
+evicts a colleague's five-minute session.
+
+**Three `exp` rules, all of them defects that shipped:**
+
+- A missing, zero or garbage `exp` yielded `expiresAt: null`, which
+  `src/chat/ws.ts` reads as **no cap** — the socket outlived its own credential
+  (measured, still open eight seconds past it). An entra identity now defaults
+  to `settledAt + INTROSPECTION_CACHE_MAX_MS`, the longest this process goes
+  without re-asking Texas anyway.
+- A token whose own `exp` has PASSED is **denied**, whatever `active` says.
+  Measured: such a token got a 200 and provisioned a user. The cache clamped its
+  TTL to `exp` so it was never REUSED, which is why it looked handled — every
+  request simply asked again and was let in again.
+- The socket's expiry timer is CLAMPED to `2**31-1` ms. Over that, `setTimeout`
+  silently fires immediately, so a far-future `exp` closed the socket at once
+  with 4401 — which the client reads as an expiry and, on entra, reloads.
+
+**`idtyp` must be `user` when present.** A client-credentials (app) token
+introspects as `active: true` WITH an `oid`, so a machine was provisioned a
+`users` row and held a role, memories and threads. Absent ⇒ allowed: Texas need
+not send the claim, and refusing on its absence refuses every human.
+
+**A refusal that looked active is LOGGED** (`denialReason`, warn-once per shape).
+An `active: true` body with no usable `oid` was cached as a denial in silence:
+every colleague 401s while the sidecar, the pod and Texas all look healthy.
+
+**The credential channels are per mode.** `Authorization: Bearer` is the only one
+`entra` reads. `X-Muninn-Token` and `?muninn_token=` are `local`-mode channels:
+in `entra` they can only carry something Texas will refuse, so reading them
+spends a round-trip per forged value — and the query one also fired the
+strip-redirect, which DISCARDED the credential (entra mints no cookie, so the
+redirect target 401'd). The `local`-only gate travels as `IdentityDeps.localChannels`,
+so the WebSocket upgrade reads the same set.
 
 **The `session` channel is refused outright**, with no Texas call. `entra` mints
 no muninn cookie (`writeSessionCookie` returns early on `!config.local`), so a
@@ -601,9 +643,40 @@ three predicates, **one breaker**:
 
 | channel | predicate | why it differs |
 |---|---|---|
-| HTTP | the 401 body's `loginUrl === "/oauth2/login"` | it HAS a body, and that is the more direct evidence a login page exists |
+| HTTP | the 401 body's `loginUrl === LOGIN_URL_HINT` | it HAS a body, and that is the more direct evidence a login page exists |
+| HTTP, body unreadable | cached `provider === "entra"` ⇒ **banner, never reload** | a proxy's own HTML 401, a `loginUrl` that is something else, and every **HEAD** (no body by definition) land here. Refused, but with no evidence a reload lands on a login page |
 | `/chat/ws` | cached `provider === "entra"` | a `close` event carries a CODE and nothing else |
 | `EventSource` | cached `provider === "entra"` | it exposes neither status nor body, so it cannot go through a fetch wrapper at all |
+
+**`provider === null` is two states and neither reloads.** It is "auth is off"
+AND "`/chat/me` has not answered yet", so on `ws`/`sse` the verdict there is
+`ignore` — the silent reconnect those instances had before this module existed.
+Banner'ing instead told readers of an auth-OFF instance, which has no sessions,
+that their session had expired on any permanent stream failure. ⚠️ The provider
+is cached ONCE, at init: a tab whose `/chat/me` failed both attempts keeps
+`null` for its whole lifetime, so it never reloads and never banners.
+
+**A refused UPGRADE carries no code.** The browser reports a 401'd handshake as
+an ordinary 1006 close, so the 4401 rule was structurally blind to it and the
+2 s retry ran forever in silence (measured: five refused handshakes, zero
+reloads, no banner). `connectWs` tracks whether the socket ever fired `open` and
+PROBES `/chat/me` before retrying one that did not. Only a **401** on that probe
+is a refusal — a 503 (introspection unavailable) or a transport error earns the
+ordinary retry.
+
+**A spent verdict LATCHES the channel** (`__muninnAuthLatched`). The SSE error
+path used to fall through to its 3-second reconnect after a banner, re-entering
+the rule every cycle and re-arming the breaker every 60 s: measured on a
+permanent 403 for `/chat/events`, one reload a minute forever. The latch is
+released by a successful `/chat/me`. NB the SSE handler reads `readyState`
+BEFORE closing the stream — `close()` sets it to 2, so a state read afterwards
+reports every transient reconnect as permanent (that reorder shipped, briefly,
+and the e2e suite caught it).
+
+**The banner is a fixed page-level bar**, not a child of `#chatMessages`:
+`clearChat()` and `loadThreadMessages()` both assign that container's
+`innerHTML`, so the old banner vanished on the next thread or bot switch while
+the session was still expired.
 
 `authedFetch` is a `window.`-installed global — every client script on the chat
 page is an inline `<script>` template string, so there is no module graph to
@@ -614,12 +687,22 @@ test refuses any bare `fetch(` under `src/chat/views/`; three call sites reach t
 page from SHARED `src/dashboard/views/` modules and are dispositioned in that
 test rather than converted (they serve five other pages with no `authedFetch`).
 
-**The breaker is a `sessionStorage` TIMESTAMP, not a boolean** — a boolean gives
-one transparent re-login and then a static banner for every later hourly expiry.
-At most one reload per 60 s across all three channels. ⚠️ The successful-`/chat/me`
-clear is **window-guarded**: it drops the stamp only when it is already outside
-the window, so the clear can never SHORTEN the breaker and re-open the
-reload → init → 401 → reload loop it exists to close.
+**The breaker is a TIMESTAMP, not a boolean** — a boolean gives one transparent
+re-login and then a static banner for every later hourly expiry. At most one
+reload per 60 s across all three channels. It is kept in `sessionStorage` AND in
+a module-scope variable, because `sessionStorage` THROWS in a context that blocks
+site data and `armReload` used to return `true` on that throw — the breaker was
+inert exactly where nobody could see it (measured: 11.5 reloads per second).
+⚠️ **It is per TAB**, which is the right scope for "each tab gets its own one
+reload" and means ten open tabs can spend ten reloads in one window.
+
+⚠️ The successful-`/chat/me` clear releases the LATCHES but is
+**window-guarded for the stamp**: it drops the stamp only when it is already
+outside the window, so it can never SHORTEN the breaker. That is what keeps a
+PARTIAL refusal bounded — in the measured case `/chat/me` answers 200 while
+`/chat/events` answers 403, so an unconditional clear would re-arm the budget on
+every page load. (Review round 1 asked for the clear to be unconditional; it is
+not, and this is why. The latch release is what that finding actually needed.)
 
 ## Operator notes for a `local` instance (config traps PR C created)
 
@@ -770,6 +853,29 @@ operator auditing themselves on their own feed.
   is a redeploy to change and carries no group membership; sourcing the role from
   an Entra `groups` claim is a later change, and `resolveRole` is the single seam
   it moves through.
+- **There is no in-app login allowlist: muninn provisions anyone Texas
+  accepts.** Every `active: true` human token with an `oid` gets a `users` row
+  on first sight. What decides WHO MAY LOG IN is the nais sidecar's own group
+  gate (`allowAllUsers: false` plus the AAD group in the manifest, which lives
+  in another repository) — so on an instance whose manifest says
+  `allowAllUsers: true`, every colleague in the tenant is provisioned an
+  account with role `user`. Deliberate: a second allowlist here would be a
+  weaker copy of a check the platform already makes, and it would fail closed
+  in the wrong place (an operator adding someone to the group would then also
+  have to redeploy muninn).
+- **`aud` is not validated here, and that is an assumption about Texas.** Texas
+  introspects a token FOR THIS APPLICATION's client id, so a token minted for a
+  different audience is expected to come back `active: false`. muninn does not
+  check the claim itself. If that assumption is ever wrong, any token in the
+  tenant would authenticate here — it is written down rather than defended
+  twice, for the same reason `tenant` is provenance and not a check.
+- **A re-issued NAVident inherits admin from `MUNINN_ADMIN_IDENTS`.** The
+  allowlist is matched against the token's own `NAVident` AND `oid`, and a
+  NAVident is re-issued when someone leaves: the newcomer who takes it resolves
+  to `admin` on their first login. The linking TABLE is safe (it keys on `oid`
+  and mints a collision id rather than adopting the account), but the role
+  allowlist has no such protection. **Prefer `oid` entries** — the boot refusal
+  now says so, and so does the env-var row in the root `CLAUDE.md`.
 - **A revoked token keeps working for up to `INTROSPECTION_CACHE_MAX_MS`** (5
   minutes). That is the price of not asking Texas once per request; the socket's
   own cap is the token's `exp`, which the cache never extends past.

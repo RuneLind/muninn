@@ -5,10 +5,10 @@
  * opened with the sentence "There is no zone middleware, so an authenticated
  * `user` still reaches /traces, /agents, /logs, /models and the rest of the
  * operator surface." That is what this file closes. It was the last thing
- * `MUNINN_AUTH=entra` waited on inside muninn. It is no longer waiting: the PR
- * after this one shipped the token introspector and the identity link and
- * flipped `AUTH_ZONES_IMPLEMENTED` to `true`, so every rule below is what an
- * authenticated NAV colleague is actually held to.
+ * `MUNINN_AUTH=entra` waited on inside muninn. It is no longer waiting: the
+ * Texas token introspector (`introspect.ts`) and the `user_identities` link
+ * (migration 073) shipped, `AUTH_ZONES_IMPLEMENTED` is `true`, and every rule
+ * below is what an authenticated NAV colleague is actually held to.
  *
  * ## Shape: a short deny list, two allowlists, and default-deny
  *

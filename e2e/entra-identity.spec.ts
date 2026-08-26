@@ -14,9 +14,10 @@
  *      they cost is a second Texas call and a second first-login transaction,
  *      and only a live server with both channels can see it. The stub counts.
  *
- * The stub Texas is an in-process `Bun.serve` whose claims are per-token, so a
- * case can present a second token for the same `oid`, or a claim set with no
- * NAVident, without restarting anything.
+ * The stub Texas is an in-process `node:http` server (Playwright runs this file
+ * under NODE) whose claims are per-token, so a case can present a second token
+ * for the same `oid`, a claim set with no NAVident, or a 5xx outage, without
+ * restarting anything.
  *
  * No NAV values: placeholder UUIDs, `example-tenant`, `X999999`-shaped idents
  * that belong to nobody. muninn is a public repo.
@@ -46,6 +47,8 @@ const TENANT = "example-tenant";
 const OID_A = "00000000-1111-2222-3333-aaaaaaaaaaaa";
 const OID_B = "00000000-1111-2222-3333-bbbbbbbbbbbb";
 const OID_C = "00000000-1111-2222-3333-cccccccccccc";
+const OID_APP = "00000000-1111-2222-3333-dddddddddddd";
+const OID_EXPIRED = "00000000-1111-2222-3333-eeeeeeeeeeee";
 
 /** Far future, so no case is clock-sensitive. */
 const EXP = Math.floor(Date.now() / 1000) + 3600;
@@ -56,6 +59,8 @@ interface StubClaims {
   NAVident?: string | null;
   name?: string;
   exp?: number;
+  /** Entra's identity type. `"app"` is a client-credentials token. */
+  idtyp?: string;
 }
 
 /** token → what Texas answers for it. Mutated per test. */
@@ -91,6 +96,12 @@ function startTexas(): Promise<Server> {
         }
         const token = body.token ?? "";
         calls.set(token, (calls.get(token) ?? 0) + 1);
+        // The outage case: Texas up but answering 5xx. A `fetch` that throws
+        // (Texas down) takes the same path in muninn; this one is reproducible.
+        if (token.startsWith("boom-")) {
+          res.writeHead(500, { "content-type": "application/json" }).end("{}");
+          return;
+        }
         const claims = tokens.get(token);
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify(claims ? { exp: EXP, ...claims } : { active: false }));
@@ -246,6 +257,54 @@ test.describe("acceptance 15 — a claim set with no NAVident", () => {
   });
 });
 
+test.describe("what a live entra instance REFUSES", () => {
+  test("an APP token is not a person, however active Texas says it is", async () => {
+    // Client-credentials tokens introspect as active WITH an oid, so before the
+    // idtyp gate a machine was provisioned a users row and held a role.
+    tokens.set("tok-app", { active: true, oid: OID_APP, NAVident: "X777777", idtyp: "app" });
+    expect((await fetch(`${BASE}/chat/me`, { headers: bearer("tok-app") })).status).toBe(401);
+    expect(await sql!`SELECT 1 FROM user_identities WHERE oid = ${OID_APP}`).toHaveLength(0);
+  });
+
+  test("a token past its own exp is refused, and provisions nothing", async () => {
+    // Measured before the fix: 200 AND a provisioned users row.
+    tokens.set("tok-expired", {
+      active: true, oid: OID_EXPIRED, NAVident: "X666666", exp: Math.floor(Date.now() / 1000) - 60,
+    });
+    expect((await fetch(`${BASE}/chat/me`, { headers: bearer("tok-expired") })).status).toBe(401);
+    expect(await sql!`SELECT 1 FROM user_identities WHERE oid = ${OID_EXPIRED}`).toHaveLength(0);
+  });
+
+  test("the local-mode token channels are not channels here", async () => {
+    // A valid-looking value on X-Muninn-Token or ?muninn_token= must not even
+    // reach Texas — reading them is a round-trip per forged value. `tok-a1` IS
+    // a token this instance accepts on Bearer, so this is the sharpest form.
+    const before = calls.get("tok-a1") ?? 0;
+    expect((await fetch(`${BASE}/chat/me`, { headers: { "x-muninn-token": "tok-a1" } })).status).toBe(401);
+    const viaQuery = await fetch(`${BASE}/chat/me?muninn_token=tok-a1`, { redirect: "manual" });
+    expect(viaQuery.status).toBe(401);   // and NOT a 302 that throws the token away
+    expect(calls.get("tok-a1") ?? 0).toBe(before);
+  });
+
+  test("an introspection OUTAGE is 503 with no loginUrl — not the login 401", async () => {
+    // The distinction the client rules rest on: a 401 carrying /oauth2/login is
+    // what makes the chat page reload through the sidecar. During a Texas
+    // outage that is every open tab, against the service that is already down.
+    const res = await fetch(`${BASE}/chat/me`, { headers: bearer("boom-1") });
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body).not.toHaveProperty("loginUrl");
+    expect(body.error).toBe("auth_unavailable");
+    // Nothing is cached for an outage, so a good token still works immediately.
+    expect((await fetch(`${BASE}/chat/me`, { headers: bearer("tok-a1") })).status).toBe(200);
+  });
+
+  test("…and the same outage on a /chat/ws upgrade is 503 too, not 401", async () => {
+    expect(await upgradeStatus("boom-2")).toBe(503);
+    expect(await upgradeStatus("never-issued")).toBe(401);
+  });
+});
+
 test.describe("acceptance 17 — ONE introspection across BOTH credential paths", () => {
   test("an HTTP request and a /chat/ws upgrade on one token cost one Texas call", async () => {
     // The assertion that catches the duplicate-introspector shape. Two
@@ -289,6 +348,15 @@ test.describe("acceptance 17 — ONE introspection across BOTH credential paths"
  * Same shape as `src/auth/ws-upgrade.test.ts`'s `rawHandshake`.
  */
 function upgrade(token: string): Promise<boolean> {
+  return rawUpgrade(token).then((buf) => buf.startsWith("HTTP/1.1 101"));
+}
+
+/** The same handshake, as a STATUS — 401 (refused) vs 503 (could not decide). */
+async function upgradeStatus(token: string): Promise<number> {
+  return Number((await rawUpgrade(token)).split(" ")[1] ?? 0);
+}
+
+function rawUpgrade(token: string): Promise<string> {
   return new Promise((resolve) => {
     let buf = "";
     const sock = connect(PORT, "127.0.0.1", () => {
@@ -301,7 +369,7 @@ function upgrade(token: string): Promise<boolean> {
     });
     const done = () => {
       sock.destroy();
-      resolve(buf.startsWith("HTTP/1.1 101"));
+      resolve(buf);
     };
     sock.on("data", (d) => {
       buf += d.toString();

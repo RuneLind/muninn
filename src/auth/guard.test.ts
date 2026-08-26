@@ -131,7 +131,8 @@ describe("an authenticating mode, role admin", () => {
   // Inert in `local` mode — `resolveRole` answers `user` for the pinned
   // identity unconditionally, and that is load-bearing: an admin passthrough
   // for the local identity would make acceptance 9 pass without the diff. The
-  // branch is tested here because the deferred Entra half is what activates it.
+  // branch is tested here because `entra`, where a real admin identity exists,
+  // is what activates it.
   const app = appWith(ENTRA, "admin");
 
   test("a differing claim passes through unchanged", async () => {
