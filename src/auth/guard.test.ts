@@ -1,6 +1,6 @@
 import { test, expect, describe, afterEach } from "bun:test";
 import { Hono } from "hono";
-import { requireOwnUser, extractionsForcedOff, sessionIdentity, sessionRole } from "./guard.ts";
+import { requireOwnUser, extractionsForcedOff, skipExtractionsFor, sessionIdentity, sessionRole } from "./guard.ts";
 import { __setAuthPolicyForTest } from "./policy.ts";
 import { __resetAuditDedupForTest } from "./audit.ts";
 import { activityLog } from "../observability/activity-log.ts";
@@ -45,6 +45,12 @@ function appWith(identity: Identity | null, role: AuthRole | null) {
     return c.json({ userId: own.userId ?? null, username: own.username ?? null });
   });
   app.get("/extractions", (c) => c.json({ forced: extractionsForcedOff(c) }));
+  // The route's OWN expression, over a real request with a real identity —
+  // `POST /chat/conversations/:id/messages` calls exactly this.
+  app.post("/turn", async (c) => {
+    const body = await c.req.json();
+    return c.json({ skip: skipExtractionsFor(c, body.skipExtractions) });
+  });
   app.get("/context", (c) => c.json({
     identity: sessionIdentity(c)?.userId ?? null,
     role: sessionRole(c),
@@ -125,7 +131,8 @@ describe("an authenticating mode, role admin", () => {
   // Inert in `local` mode — `resolveRole` answers `user` for the pinned
   // identity unconditionally, and that is load-bearing: an admin passthrough
   // for the local identity would make acceptance 9 pass without the diff. The
-  // branch is tested here because the deferred Entra half is what activates it.
+  // branch is tested here because `entra`, where a real admin identity exists,
+  // is what activates it.
   const app = appWith(ENTRA, "admin");
 
   test("a differing claim passes through unchanged", async () => {
@@ -167,5 +174,38 @@ describe("extractionsForcedOff", () => {
 
   test("true for an entra account — §8's ROS decision", async () => {
     expect(await (await appWith(ENTRA, "user").request("/extractions")).json()).toEqual({ forced: true });
+  });
+});
+
+describe("acceptance 18 — a client cannot CLEAR the force", () => {
+  const turn = async (identity: Identity | null, skipExtractions: unknown) =>
+    await (await appWith(identity, "user").request("/turn", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "hei", skipExtractions }),
+    })).json();
+
+  test("an entra turn skips extraction even with skipExtractions: false", async () => {
+    // The regression pin. `skipExtractions` is a CHECKBOX in the inspector
+    // panel, so a rule that only read the body would be cleared by the client —
+    // and every turn a colleague types would write distilled facts about them
+    // to `memories` and `goals` as a side effect of ordinary use.
+    expect(await turn(ENTRA, false)).toEqual({ skip: true });
+    expect(await turn(ENTRA, undefined)).toEqual({ skip: true });
+    expect(await turn(ENTRA, true)).toEqual({ skip: true });
+  });
+
+  test("a local identity and auth off are unchanged — the client still decides", async () => {
+    expect(await turn(LOCAL, false)).toEqual({ skip: false });
+    expect(await turn(LOCAL, true)).toEqual({ skip: true });
+    expect(await turn(null, false)).toEqual({ skip: false });
+    expect(await turn(null, true)).toEqual({ skip: true });
+  });
+
+  test("only a literal true skips — a truthy body value does not", async () => {
+    // It comes off a parsed JSON body, so "false" (a string) must not turn
+    // extraction off by accident.
+    expect(await turn(LOCAL, "false")).toEqual({ skip: false });
+    expect(await turn(LOCAL, 1)).toEqual({ skip: false });
   });
 });

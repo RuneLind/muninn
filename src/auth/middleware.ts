@@ -20,9 +20,10 @@ import { getConnInfo } from "hono/bun";
 import type { Context, MiddlewareHandler, Next } from "hono";
 import { getLog } from "../logging.ts";
 import { AUTH_EXCLUDED_PATHS, type AuthConfig } from "./mode.ts";
-import { createIntrospector, localIdentity, type Identity, type Introspector } from "./introspect.ts";
+import { identityOf, localIdentity, type Identity, type Introspector } from "./introspect.ts";
 import { resolveRole, type AuthRole } from "./role.ts";
 import { mintSession, SESSION_COOKIE, SESSION_TTL_MS } from "./session.ts";
+import { LOGIN_URL_HINT } from "./zones.ts";
 
 const log = getLog("auth", "middleware");
 
@@ -163,12 +164,33 @@ function peerAddress(c: Context): string | undefined {
  *  campaign's own rule is that the upgrade reuses this decision rather than
  *  growing a second one beside it (PR C's first cut of the origin check was a
  *  second implementation, and it was the bypassable one). */
-export function presentedToken(headers: Headers, url: string): string | null {
+export function presentedToken(headers: Headers, url: string, localChannels: boolean): string | null {
+  const bearer = () => headers.get("authorization")?.match(/^bearer\s+(.+)$/i)?.[1]?.trim() || null;
+
+  // ⚠️ `X-Muninn-Token` and `?muninn_token=` are `local`-mode ONLY, and the gate
+  // is not cosmetic. In `entra` either can only ever carry something Texas will
+  // refuse, so reading them spends a Texas round-trip per forged value — a
+  // request amplifier against the platform's auth service, from any browser.
+  // The query channel was worse than useless there for a second reason: the
+  // strip-redirect below fires on the parameter, and `entra` mints no cookie,
+  // so a credential accepted on it was DISCARDED and the redirect target 401'd
+  // (measured). In `entra`, Bearer is therefore the whole list — it is what
+  // wonderwall forwards.
+  if (!localChannels) return bearer();
+
+  // ⚠️ In `local` mode `X-Muninn-Token` comes FIRST, and the order is a
+  // contract, not a preference. Only ONE channel is read, and whatever it
+  // returns is the credential the request is judged on — there is no "try the
+  // next one" — so putting Bearer ahead of the dedicated header meant a proxy
+  // that injects an `Authorization` header of its own (a tailnet identity
+  // header, an upstream SSO) turned a request carrying a CORRECT
+  // `X-Muninn-Token` into a 401. The operator's explicit credential must win
+  // over an ambient one. `entra` is unaffected: it never reaches this line.
   const header = headers.get(TOKEN_HEADER);
   if (header && header.trim() !== "") return header.trim();
 
-  const bearer = headers.get("authorization")?.match(/^bearer\s+(.+)$/i)?.[1]?.trim();
-  if (bearer) return bearer;
+  const fromBearer = bearer();
+  if (fromBearer) return fromBearer;
 
   const query = safeUrl(url)?.searchParams.get(TOKEN_QUERY_PARAM);
   if (query && query.trim() !== "") return query.trim();
@@ -213,6 +235,16 @@ export interface IdentityDeps {
   readonly introspector: Introspector;
   /** The pinned `local` identity, or null in a mode that has none. */
   readonly pinned: Identity | null;
+  /**
+   * Whether the `local`-only credential channels (`X-Muninn-Token`,
+   * `?muninn_token=`) may be read — i.e. `config.local !== null`.
+   *
+   * Passed explicitly rather than inferred from `pinned !== null`, which is the
+   * same fact today: one is "this mode has a pinned identity" and the other is
+   * "this mode has a shared secret", and a future mode with one and not the
+   * other would silently re-open the channel.
+   */
+  readonly localChannels: boolean;
 }
 
 /**
@@ -248,6 +280,15 @@ export interface IdentityResolution {
   readonly mint: boolean;
   /** See {@link IdentityVia}. */
   readonly via: IdentityVia;
+  /**
+   * True when an introspection could not be DECIDED — Texas unreachable, a
+   * non-200, an unparseable body, the database down. The edge answers **503**
+   * for this, never the 401-with-a-login-url a real denial gets: on `entra`
+   * that 401 is the chat page's reload predicate, so a Texas outage answered as
+   * a denial sends every open tab in the building through the sidecar and back
+   * into the service that is already failing.
+   */
+  readonly unavailable: boolean;
 }
 
 /**
@@ -265,10 +306,14 @@ export async function resolveRequestIdentity(
   peer: string | undefined,
   deps: IdentityDeps,
 ): Promise<IdentityResolution> {
-  const presented = presentedToken(headers, url);
+  const presented = presentedToken(headers, url, deps.localChannels);
   let identity: Identity | null = null;
   let mint = false;
   let via: IdentityVia = "bypass";
+  // Sticky: any `unavailable` answer on any channel means we could not DECIDE,
+  // which the edge must answer 503 rather than 401. A denial after an outage on
+  // another channel is still an outage as far as the caller is concerned.
+  let unavailable = false;
 
   const bypassAllowed = loopbackBypassOverride ?? true;
   if (bypassAllowed && deps.pinned && isDirectLoopback(peer, headers)) {
@@ -282,7 +327,7 @@ export async function resolveRequestIdentity(
     // that DID present a valid secret is credentialed even though the bypass
     // is what happened to answer first. `ssh` + a token header is the escape
     // hatch that has to keep working from the road.
-    if (presented && (await deps.introspector.introspect(presented, "credential"))) {
+    if (presented && identityOf(await deps.introspector.introspect(presented, "credential"))) {
       mint = true;
       via = "credential";
     }
@@ -296,20 +341,24 @@ export async function resolveRequestIdentity(
     // property `src/auth/session.ts` exists to prevent.
     const cookie = readCookie(headers, SESSION_COOKIE);
     if (cookie) {
-      identity = await deps.introspector.introspect(cookie, "session");
+      const outcome = await deps.introspector.introspect(cookie, "session");
+      if (outcome.kind === "unavailable") unavailable = true;
+      identity = identityOf(outcome);
       if (identity) via = "session";
     }
   }
 
   if (!identity && presented) {
-    identity = await deps.introspector.introspect(presented, "credential");
+    const outcome = await deps.introspector.introspect(presented, "credential");
+    if (outcome.kind === "unavailable") unavailable = true;
+    identity = identityOf(outcome);
     if (identity) {
       mint = true;
       via = "credential";
     }
   }
 
-  return { identity, mint, via };
+  return { identity, mint, via, unavailable };
 }
 
 /**
@@ -371,7 +420,10 @@ export function unauthenticatedBody(config: AuthConfig): { error: string; mode: 
     loginUrl:
       config.mode === "local"
         ? `/?${TOKEN_QUERY_PARAM}=${LOGIN_TOKEN_PLACEHOLDER}`
-        : "/oauth2/login",
+        // The chat page's HTTP expiry predicate compares against this exact
+        // string (`src/chat/views/components/authed-fetch.ts`), so it is ONE
+        // exported constant rather than a literal at each end.
+        : LOGIN_URL_HINT,
   };
 }
 
@@ -379,6 +431,17 @@ function unauthenticated(c: Context, config: AuthConfig): Response {
   // JSON, always — a client must be able to tell "session expired" from
   // "server broke" without a browser.
   return c.json(unauthenticatedBody(config), 401);
+}
+
+/**
+ * The answer when we could not DECIDE — deliberately not the 401 above.
+ *
+ * No `loginUrl`, and a status the chat page's rules do not treat as a refusal
+ * at all: a Texas outage is not an expired session, and answering it like one
+ * turns every open tab into a reload against the failing service.
+ */
+export function authUnavailableBody(): { error: string; retryable: true } {
+  return { error: "auth_unavailable", retryable: true };
 }
 
 /** The same-URL-without-the-secret target. `URL.pathname` keeps a leading `//`,
@@ -393,8 +456,18 @@ function tokenStrippedTarget(c: Context): string {
   return `${path}${url.search}${url.hash}`;
 }
 
-export function createAuthMiddleware(config: AuthConfig): MiddlewareHandler {
-  const introspector = createIntrospector(config);
+/**
+ * @param introspector Built ONCE at boot by `src/index.ts` and handed to both
+ * this and `createWsUpgradeAuthorizer`, deliberately rather than constructed
+ * here. In `entra` mode the introspector holds the Texas cache AND is the
+ * DB-provisioning path, so a second instance would mean the `/chat/ws` upgrade
+ * misses the HTTP cache entirely — the chat page opens both on one token within
+ * milliseconds, which is exactly the case the cache exists for — and two
+ * provisioning transactions racing on a colleague's first login. `null` is
+ * accepted (and refused) so the "nothing to mount with auth off" guard stays
+ * where it was.
+ */
+export function createAuthMiddleware(config: AuthConfig, introspector: Introspector | null): MiddlewareHandler {
   if (!introspector) {
     throw new Error(`createAuthMiddleware called for MUNINN_AUTH="${config.mode}" — nothing to mount.`);
   }
@@ -419,15 +492,23 @@ export function createAuthMiddleware(config: AuthConfig): MiddlewareHandler {
   return async (c, next) => {
     if (hasExclusions && AUTH_EXCLUDED_PATHS.includes(c.req.path)) return next();
 
-    const { identity, mint, via } = await resolveRequestIdentity(
+    const { identity, mint, via, unavailable } = await resolveRequestIdentity(
       c.req.raw.headers,
       c.req.url,
       peerAddress(c),
-      { introspector, pinned },
+      { introspector, pinned, localChannels: config.local !== null },
     );
 
+    if (!identity && unavailable) {
+      // 503, not 401: see `authUnavailableBody`. Retry-After is the honest
+      // hint — the introspection cache holds nothing for an outage, so the next
+      // request really does try again.
+      c.header("retry-after", "5");
+      return c.json(authUnavailableBody(), 503);
+    }
+
     if (!identity) {
-      if (presentedToken(c.req.raw.headers, c.req.url) && !warnedRejectedPaths.has(c.req.path)) {
+      if (presentedToken(c.req.raw.headers, c.req.url, config.local !== null) && !warnedRejectedPaths.has(c.req.path)) {
         warnedRejectedPaths.add(c.req.path);
         log.warn("Rejected a request presenting an invalid credential for {path}", { path: c.req.path });
       }
@@ -442,8 +523,11 @@ export function createAuthMiddleware(config: AuthConfig): MiddlewareHandler {
     // never stripped at all. POST is excluded because a redirected POST loses
     // its body. (The proxy's own access log still records the original request
     // line; `src/auth/CLAUDE.md` says so.)
+    // Only in `local` mode, where the parameter is a credential channel at all.
+    // In `entra` it carries nothing (see `presentedToken`), so redirecting on
+    // it would strip an unrelated query parameter off somebody's URL.
     const safeMethod = c.req.method === "GET" || c.req.method === "HEAD";
-    if (safeMethod && c.req.query(TOKEN_QUERY_PARAM)) {
+    if (config.local && safeMethod && c.req.query(TOKEN_QUERY_PARAM)) {
       if (mint) writeSessionCookie(c, config, identity.userId);
       return c.redirect(tokenStrippedTarget(c), 302);
     }

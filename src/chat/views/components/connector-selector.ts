@@ -16,7 +16,7 @@ export function connectorSelectorScript(): string {
   // Sync preferred connector to DB so extensions (Jira plugin) and page reloads get the same selection
   function syncPreferredConnector(userId, botName, connectorId) {
     if (!userId || !botName) return;
-    fetch('/chat/preferences/' + encodeURIComponent(userId) + '/' + encodeURIComponent(botName) + '/connector', {
+    authedFetch('/chat/preferences/' + encodeURIComponent(userId) + '/' + encodeURIComponent(botName) + '/connector', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ connectorId: connectorId || null }),
@@ -48,7 +48,7 @@ export function connectorSelectorScript(): string {
     selectedConnectorId = '';
     if (selectedUserId && selectedBot) {
       try {
-        var prefRes = await fetch('/chat/preferences/' + encodeURIComponent(selectedUserId) + '/' + encodeURIComponent(selectedBot));
+        var prefRes = await authedFetch('/chat/preferences/' + encodeURIComponent(selectedUserId) + '/' + encodeURIComponent(selectedBot));
         if (prefRes.ok) {
           var prefData = await prefRes.json();
           if (prefData.connectorId) selectedConnectorId = prefData.connectorId;
@@ -117,7 +117,7 @@ export function connectorSelectorScript(): string {
       }
     }
     try {
-      await fetch('/chat/threads/' + encodeURIComponent(threadId) + '/connector', {
+      await authedFetch('/chat/threads/' + encodeURIComponent(threadId) + '/connector', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ connectorId: effectiveId }),

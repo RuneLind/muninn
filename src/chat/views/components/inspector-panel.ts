@@ -355,7 +355,7 @@ export function inspectorPanelScript(): string {
     if (!selectedUserId || !selectedBot) return;
     var url = '/chat/tool-usage/' + encodeURIComponent(selectedUserId) + '/' + encodeURIComponent(selectedBot);
     if (activeThreadId) url += '?thread=' + encodeURIComponent(activeThreadId);
-    fetch(url)
+    authedFetch(url)
       .then(function(r) { return r.json(); })
       .then(function(data) {
         aggregateToolUsage = data.tools || [];
@@ -368,7 +368,7 @@ export function inspectorPanelScript(): string {
     if (!selectedUserId || !selectedBot) return;
     var url = '/chat/context-usage/' + encodeURIComponent(selectedUserId) + '/' + encodeURIComponent(selectedBot);
     if (activeThreadId) url += '?thread=' + encodeURIComponent(activeThreadId);
-    fetch(url)
+    authedFetch(url)
       .then(function(r) { return r.json(); })
       .then(function(data) {
         if (data && data.inputTokens) {
@@ -564,7 +564,7 @@ export function inspectorPanelScript(): string {
       }], true);
     }
     mcpStatusFetchedAt[bot] = Date.now();
-    fetch('/chat/mcp-status/' + encodeURIComponent(bot))
+    authedFetch('/chat/mcp-status/' + encodeURIComponent(bot))
       .then(function(r) { return r.json(); })
       .then(function(data) {
         var servers = data.servers || [];
@@ -582,7 +582,7 @@ export function inspectorPanelScript(): string {
     mcpStatusRefreshing = true;
     var existing = mcpStatusByBot[bot] || [];
     renderMcpStatus(existing, true);
-    fetch('/chat/mcp-status/' + encodeURIComponent(bot) + '/refresh', {
+    authedFetch('/chat/mcp-status/' + encodeURIComponent(bot) + '/refresh', {
       method: 'POST',
     })
       .then(function(r) { return r.json(); })
@@ -623,7 +623,7 @@ export function inspectorPanelScript(): string {
     }
 
     // Memories
-    fetch('/api/memories/user/' + up + '?limit=5&bot=' + bp)
+    authedFetch('/api/memories/user/' + up + '?limit=5&bot=' + bp)
       .then(function(r) { return r.json(); })
       .then(function(data) {
         var el = document.getElementById('insMemories');
@@ -643,7 +643,7 @@ export function inspectorPanelScript(): string {
       });
 
     // Goals
-    fetch('/api/goals/' + up + '?bot=' + bp)
+    authedFetch('/api/goals/' + up + '?bot=' + bp)
       .then(function(r) { return r.json(); })
       .then(function(data) {
         var el = document.getElementById('insGoals');
@@ -660,7 +660,7 @@ export function inspectorPanelScript(): string {
       });
 
     // Tasks
-    fetch('/api/scheduled-tasks/' + up + '?bot=' + bp)
+    authedFetch('/api/scheduled-tasks/' + up + '?bot=' + bp)
       .then(function(r) { return r.json(); })
       .then(function(data) {
         var el = document.getElementById('insTasks');

@@ -96,3 +96,4 @@
 // | not-a-url |    # the scheme separator in `protocol + '//' + location.host`
 /reports/ | not-a-url |    # a DISK path: `bot.dir + '/reports/' + …`, shown as planPath
 /specs/ | not-a-url |    # ditto, specPath
+/oauth2/login | not-a-url |    # the WONDERWALL sidecar's path, and muninn serves nothing there. It appears only as the COMPARISON in authedFetch's 401 predicate (`hint === '/oauth2/login'`, src/chat/views/components/authed-fetch.ts) — the page never fetches or navigates to it; the reload does, via the sidecar, on the next navigation

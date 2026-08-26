@@ -44,6 +44,10 @@ export const E2E_PORTS = {
   // admin and `user` halves of the zone acceptance cannot share a server.
   "auth-zones/admin": 3032,
   "auth-zones/user": 3033,
+  // MUNINN_AUTH=entra, plus the stub Texas introspection endpoint it points at
+  // (an in-process Bun.serve in the spec, not a muninn).
+  "entra-identity": 3034,
+  "entra-identity/texas": 3035,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

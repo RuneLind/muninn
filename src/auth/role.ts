@@ -32,8 +32,9 @@ export type AuthRole = "user" | "admin";
  *    yet.
  *
  *    The zone model is what made an override necessary at all: with
- *    default-deny, `MUNINN_ADMIN_IDENTS` inert in `local` mode and `entra`
- *    unbootable, no admin identity was reachable on any bootable instance and
+ *    default-deny and `MUNINN_ADMIN_IDENTS` inert in `local` mode (and, at the
+ *    time, `entra` unbootable), no admin identity was reachable on a `local`
+ *    instance — which is every instance that is not on nais — and
  *    the operator's own dashboard was permanently 403. `MUNINN_LOCAL_ROLE` is
  *    that opt-in — an explicit third argument rather than a `process.env` read,
  *    so this function stays pure and both call sites are visible.

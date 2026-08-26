@@ -98,7 +98,7 @@ export function jiraCardScript(): string {
     if (jiraCardThread !== threadId) { resetJiraCards(); jiraCardThread = threadId; }
     jiraCardListing = threadId;
     try {
-      var res = await fetch('/api/jira/drafts?thread=' + encodeURIComponent(threadId));
+      var res = await authedFetch('/api/jira/drafts?thread=' + encodeURIComponent(threadId));
       if (!res.ok) return;
       var body = await res.json();
       if (jiraCardThread !== threadId || activeThreadId !== threadId) return;
@@ -170,7 +170,7 @@ export function jiraCardScript(): string {
     if (!rec || rec.reading) return;
     rec.reading = true;
     try {
-      var res = await fetch('/api/jira/draft/' + encodeURIComponent(draftId));
+      var res = await authedFetch('/api/jira/draft/' + encodeURIComponent(draftId));
       if (jiraCardThread !== threadId || activeThreadId !== threadId) return;
       if (!res.ok) {
         // A 404 is TERMINAL — the row is gone, and nothing will bring it back.
@@ -374,7 +374,7 @@ export function jiraCardScript(): string {
     var status = 0;
     var body = null;
     try {
-      var res = await fetch('/api/jira/draft/' + encodeURIComponent(draftId) + '/save', {
+      var res = await authedFetch('/api/jira/draft/' + encodeURIComponent(draftId) + '/save', {
         method: 'POST',
         // NOT optional: the route 415s anything else. A body-less POST is a CORS
         // *simple* request, which executes whatever the response headers say.

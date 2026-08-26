@@ -258,6 +258,24 @@ describe("socket lifetime", () => {
     expect(raw.data.expiryTimer).toBeNull();
   });
 
+  test("an expiry beyond the 32-bit timer range does NOT fire immediately", async () => {
+    // `setTimeout` clamps a delay over 2**31-1 ms to 1 — with a
+    // TimeoutOverflowWarning on stderr — so a far-future `expiresAt` (a token
+    // whose `exp` is years out, or a clock skew) closed the socket at once with
+    // 4401, which the client reads as "your session expired" and reloads. The
+    // loop that produces is a reload per socket, immediately, forever.
+    const { ws, closes, raw } = fakeSocket({
+      userId: A,
+      role: "user",
+      expiresAt: Date.now() + 2 ** 31 + 60_000,
+    });
+    chatWebSocket.open(ws);
+    await Bun.sleep(30);
+    expect(closes).toEqual([]);
+    expect(raw.data.expiryTimer).not.toBeNull();
+    chatWebSocket.close(ws);
+  });
+
   test("a NULL expiry — the raw shared secret, and auth off — arms nothing", () => {
     const { ws, raw } = fakeSocket({ userId: A, role: "user", expiresAt: null });
     chatWebSocket.open(ws);

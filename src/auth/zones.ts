@@ -5,10 +5,10 @@
  * opened with the sentence "There is no zone middleware, so an authenticated
  * `user` still reaches /traces, /agents, /logs, /models and the rest of the
  * operator surface." That is what this file closes. It was the last thing
- * `MUNINN_AUTH=entra` waited on inside muninn; `entra` still refuses to boot
- * (`AUTH_ZONES_IMPLEMENTED` is `false`), but the reason is now the Entra half of
- * the DEPLOY — the token introspector, the profile, the wonderwall sidecar —
- * not a missing zone model, which is exactly the code shipping in this file.
+ * `MUNINN_AUTH=entra` waited on inside muninn. It is no longer waiting: the
+ * Texas token introspector (`introspect.ts`) and the `user_identities` link
+ * (migration 073) shipped, `AUTH_ZONES_IMPLEMENTED` is `true`, and every rule
+ * below is what an authenticated NAV colleague is actually held to.
  *
  * ## Shape: a short deny list, two allowlists, and default-deny
  *
@@ -44,6 +44,21 @@ import type { AuthRole } from "./role.ts";
 export const HEALTH_LIVE_PATH = "/api/live";
 /** Readiness: pings the database, so it answers whether the process can serve. */
 export const HEALTH_READY_PATH = "/api/ready";
+
+/**
+ * The wonderwall sidecar's login path, as ONE constant.
+ *
+ * It is written by `unauthenticatedBody` (`middleware.ts`) into every `entra`
+ * 401 and READ by the chat page's HTTP expiry predicate
+ * (`src/chat/views/components/authed-fetch.ts`): a 401 whose `loginUrl` is this
+ * exact string is the evidence that reloading lands on a login page. Producer
+ * and consumer sat in different files as hand-copied literals, plus a third and
+ * fourth copy in their tests — four places for one string that a sidecar
+ * upgrade could move. It lives here because this module is a leaf (one type
+ * import), so the browser-script builder and a Playwright spec can both import
+ * it without dragging the Hono middleware in.
+ */
+export const LOGIN_URL_HINT = "/oauth2/login";
 
 export interface ZoneDenyEntry {
   /** Methods this row denies. `GET` implies `HEAD`: Hono dispatches `HEAD /x`

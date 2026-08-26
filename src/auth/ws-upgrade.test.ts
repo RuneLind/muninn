@@ -2,6 +2,7 @@ import { describe, test, expect, beforeEach, afterAll } from "bun:test";
 import { createWsUpgradeAuthorizer, __resetWsWarningsForTest } from "./ws-upgrade.ts";
 import { __setLoopbackBypassForTest } from "./middleware.ts";
 import { resolveAuthConfig } from "./mode.ts";
+import { createIntrospector, type Introspector } from "./introspect.ts";
 import { mintSession, SESSION_COOKIE } from "./session.ts";
 
 const SECRET = "a-sufficiently-long-secret";
@@ -60,7 +61,7 @@ const PORT = Number(server.port);
 // Built once the port is known: the accepted set includes the loopback literals
 // at the CONFIGURED port, which is the whole point of `loopbackOrigins` taking a
 // port rather than reading one off the request.
-authorizeAtPort = createWsUpgradeAuthorizer(LOCAL_CONFIG, PORT);
+authorizeAtPort = createWsUpgradeAuthorizer(LOCAL_CONFIG, PORT, createIntrospector(LOCAL_CONFIG));
 
 afterAll(() => {
   server.stop(true);
@@ -271,13 +272,13 @@ describe("with auth OFF", () => {
   test("the authorizer is a constant allow, carrying no identity", async () => {
     // "Off is off": no middleware is mounted on the HTTP side either, and the
     // socket stays exactly as unfiltered as it is today.
-    const off = createWsUpgradeAuthorizer(OFF_CONFIG, PORT);
+    const off = createWsUpgradeAuthorizer(OFF_CONFIG, PORT, createIntrospector(OFF_CONFIG));
     const decision = await off(new Request("http://127.0.0.1/chat/ws"), "203.0.113.9");
     expect(decision).toEqual({ ok: true, identity: null, role: null });
   });
 
   test("even a cross-origin handshake is allowed", async () => {
-    const off = createWsUpgradeAuthorizer(OFF_CONFIG, PORT);
+    const off = createWsUpgradeAuthorizer(OFF_CONFIG, PORT, createIntrospector(OFF_CONFIG));
     const decision = await off(
       new Request("http://127.0.0.1/chat/ws", { headers: { origin: "https://evil.example" } }),
       "203.0.113.9",
@@ -310,7 +311,7 @@ describe("MUNINN_LOCAL_ROLE reaches the upgrade, on the same terms as HTTP", () 
   beforeEach(() => __setLoopbackBypassForTest(null));
 
   const decide = (headers: Record<string, string>, peer: string) =>
-    createWsUpgradeAuthorizer(ADMIN_CONFIG, PORT)(new Request("http://127.0.0.1/chat/ws", { headers }), peer);
+    createWsUpgradeAuthorizer(ADMIN_CONFIG, PORT, createIntrospector(ADMIN_CONFIG))(new Request("http://127.0.0.1/chat/ws", { headers }), peer);
 
   test("a credential-less loopback upgrade is `user`", async () => {
     const d = await decide({}, "127.0.0.1");
@@ -333,11 +334,51 @@ describe("MUNINN_LOCAL_ROLE reaches the upgrade, on the same terms as HTTP", () 
   test("and a `user`-role identity can still complete the upgrade", async () => {
     // The socket makes no zone decision: a `user` opening their own chat page
     // is the ordinary case, and a zone check here would break it.
-    const d = await createWsUpgradeAuthorizer(LOCAL_CONFIG, PORT)(
+    const d = await createWsUpgradeAuthorizer(LOCAL_CONFIG, PORT, createIntrospector(LOCAL_CONFIG))(
       new Request("http://127.0.0.1/chat/ws", { headers: { authorization: `Bearer ${SECRET}` } }),
       "127.0.0.1",
     );
     expect(d.ok).toBe(true);
     expect(d.ok && d.role).toBe("user");
+  });
+});
+
+/**
+ * The upgrade's answer when introspection is UNAVAILABLE.
+ *
+ * No server needed: the authorizer returns the Response it would have sent, and
+ * what matters is the STATUS. A 401 here becomes a client-side "your session
+ * expired" and — on entra — a reload into the very service that is down.
+ */
+describe("an introspection outage on the handshake", () => {
+  const ENTRA = resolveAuthConfig({
+    MUNINN_AUTH: "entra",
+    NAIS_TOKEN_INTROSPECTION_ENDPOINT: "http://texas.test/introspect",
+    MUNINN_TENANT: "example-tenant",
+    MUNINN_ADMIN_IDENTS: "A123456",
+    MUNINN_ALLOWED_ORIGINS: "https://muninn.example.test",
+  });
+  const stub: Introspector = {
+    async introspect(token) {
+      return token === "outage" ? { kind: "unavailable" } : { kind: "denied" };
+    },
+  };
+  const authorize = createWsUpgradeAuthorizer(ENTRA, 3010, stub);
+  const upgradeReq = (token: string) =>
+    new Request("http://127.0.0.1:3010/chat/ws", { headers: { authorization: `Bearer ${token}` } });
+
+  test("answers 503, distinguishable from a refusal", async () => {
+    const decision = await authorize(upgradeReq("outage"), "10.0.0.9");
+    expect(decision.ok).toBe(false);
+    if (decision.ok) return;
+    expect(decision.response.status).toBe(503);
+    expect(await decision.response.json()).not.toHaveProperty("loginUrl");
+  });
+
+  test("a real denial is still 401 — the two must not collapse", async () => {
+    const decision = await authorize(upgradeReq("nope"), "10.0.0.9");
+    expect(decision.ok).toBe(false);
+    if (decision.ok) return;
+    expect(decision.response.status).toBe(401);
   });
 });

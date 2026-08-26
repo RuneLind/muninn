@@ -17,6 +17,8 @@ import { connectorSelectorScript } from "./components/connector-selector.ts";
 import { researchCardScript } from "./components/research-card.ts";
 import { threadManagerScript } from "./components/thread-manager.ts";
 import { knowledgeLinksScript } from "./components/knowledge-links.ts";
+import { authedFetchScript, EXPIRED_BANNER_ID } from "./components/authed-fetch.ts";
+import { wsRetryScript, WS_STALLED_NOTICE_ID, WS_STALLED_NOTICE_TEXT } from "./components/ws-retry.ts";
 
 export async function renderChatPage(): Promise<string> {
   const [webFormatScript, helpersScript, inspectorScript, jiraEntryBundle, jiraCardBundle] =
@@ -140,6 +142,13 @@ export async function renderChatPage(): Promise<string> {
 
   ${MARKED_CDN_SCRIPT}
   <script>
+    ${/* FIRST, ahead of every other script constant: it installs
+          window.authedFetch, which every CHAT-VIEW fetch goes through (three
+          call sites reach this page from shared src/dashboard/views/ modules
+          and are dispositioned in authed-fetch.test.ts instead). A call site
+          evaluated before the definition would be a ReferenceError on the one
+          path whose job is to degrade gracefully. */ ""}
+    ${authedFetchScript()}
     ${helpersScript}
     ${agentStatusScript()}
     ${requestProgressScript()}
@@ -196,6 +205,18 @@ const CHAT_SSE_SCRIPT = `
     // can close the live one, and a STALE stream's onerror must not close (or
     // resurrect itself over) the stream that replaced it.
     var mine = sseClient(url, {
+      onopen: function() {
+        // The stream is OPEN, which is the only evidence that a previous
+        // refusal is over. Without this the latch below was released by
+        // __muninnClearAuthReloadStamp alone — whose one caller is init — so a
+        // single transient failure killed the stream for the life of the tab
+        // and left a "session expired" banner over a session that was fine.
+        // Measured on a local instance: permanent, where the pre-latch page
+        // recovered in 3 s.
+        if (conn !== mine) return;   // a superseded stream must speak for nothing
+        window.__muninnAuthChannelRecovered('sse');
+      },
+
       agent_status: function(e) {
         updateAgentStatus(JSON.parse(e.data));
       },
@@ -224,8 +245,48 @@ const CHAT_SSE_SCRIPT = `
       },
 
       onerror: function() {
+        // ORDER, and every step is load-bearing:
+        //
+        //   1. READ readyState first. close() SETS it to 2, so a state read
+        //      after the close reports every transient reconnect as a permanent
+        //      failure — measured, that alone turned an ordinary stub stream
+        //      ending into a reload at page load.
+        //   2. CLOSE this stream. It used to be possible to return from the
+        //      refusal branch with the EventSource still open — a page that then
+        //      reloaded left the old stream retrying underneath it.
+        //   3. The STALENESS guard, before any verdict is acted on. A stream
+        //      superseded by a viewer switch must not spend the page's one
+        //      reload, and must not resurrect itself over its replacement.
+        //   4. Only then, the refusal decision.
+        var permanent = !!(mine.source && mine.source.readyState === 2);
         mine.close();
         if (conn !== mine) return;   // superseded by a viewer switch — stay dead
+
+        // EventSource gets its OWN rule and cannot go through authedFetch: it
+        // takes a URL and exposes neither status nor body on a non-200, so the
+        // loginUrl predicate is structurally unreadable here. readyState 2
+        // (CLOSED) is a PERMANENT failure - the browser has given up - which is
+        // what an expired credential produces, and without this branch a
+        // colleague's progress stream just dies at expiry with no banner and no
+        // reload while the 3 s retry below spins against a 401 forever.
+        //
+        // Same mode-conditional decision as the socket, same cached provider,
+        // and the SAME breaker: a persistent refusal must not have three
+        // independent reload budgets. A permanent 403 lands here identically
+        // and is indistinguishable from this side.
+        if (permanent) {
+          if (window.__muninnAuthRefusal('sse') === 'reload') return;
+        }
+        // A spent verdict is TERMINAL for this stream. Falling through to the
+        // retry re-entered the rule every 3 s and re-armed the breaker every
+        // 60 s: measured on a permanent 403 for /chat/events, that is a reload
+        // a minute forever plus a banner about a session that never expired.
+        //
+        // Released three ways, and the last two exist because the first is not
+        // enough: a successful /chat/me (init only), an explicit
+        // reconnectChatSse() below, and the onopen handler above — a stream that
+        // opens is the evidence that whatever refused it has stopped.
+        if (window.__muninnAuthLatched('sse')) return;
         setTimeout(function() {
           if (conn !== mine) return;
           conn = null;
@@ -249,6 +310,12 @@ const CHAT_SSE_SCRIPT = `
     updateAgentStatus({ phase: 'idle' });
     if (conn) { try { conn.close(); } catch {} }
     conn = null;
+    // An explicit reconnect releases the latch — otherwise the new stream is
+    // opened with the old one's verdict still spent, and its FIRST transient
+    // error takes the terminal branch above instead of the 3 s retry. The
+    // banner is deliberately left alone: asking for a reconnect is not evidence
+    // that one succeeded, and onopen is what removes it.
+    window.__muninnAuthReleaseLatch('sse');
     connectSSE();   // a no-op while no viewer is known — see connectSSE
   };
 
@@ -355,11 +422,18 @@ const CHAT_SCRIPT = `
   async function loadSessionUser() {
     for (var attempt = 0; attempt < 2; attempt++) {
       try {
-        var res = await fetch('/chat/me');
+        var res = await authedFetch('/chat/me');
         if (res.ok) {
           var me = await res.json();
           sessionUser = me && me.mode === 'session' ? me : null;
           identityUnknown = false;
+          // The provider is what the WebSocket and EventSource expiry rules key
+          // on — neither channel can read a body, so this is the only place it
+          // can come from. Published before anything opens either.
+          window.__muninnSetAuthProvider(me && me.provider);
+          // A working session is the evidence that a previous automatic reload
+          // succeeded. Window-guarded inside — see authed-fetch.ts.
+          window.__muninnClearAuthReloadStamp();
           return;
         }
       } catch {}
@@ -426,7 +500,7 @@ const CHAT_SCRIPT = `
 
   async function loadBotList() {
     try {
-      var res = await fetch('/chat/bots').then(function(r) { return r.json(); });
+      var res = await authedFetch('/chat/bots').then(function(r) { return r.json(); });
       bots = res.bots || [];
       connectors = res.connectors || [];
       // The Jira composer's bot, resolved server-side. Null on an install where
@@ -506,8 +580,8 @@ const CHAT_SCRIPT = `
     var dbDefaultUserId = null;
     try {
       var results = await Promise.allSettled([
-        fetch('/api/users?bot=' + encodeURIComponent(botName)).then(function(r) { return r.json(); }),
-        fetch('/chat/bot-preferences/' + encodeURIComponent(botName) + '/default-user').then(function(r) { return r.json(); }),
+        authedFetch('/api/users?bot=' + encodeURIComponent(botName)).then(function(r) { return r.json(); }),
+        authedFetch('/chat/bot-preferences/' + encodeURIComponent(botName) + '/default-user').then(function(r) { return r.json(); }),
       ]);
       if (results[0].status === 'fulfilled') {
         (results[0].value.users || []).forEach(function(u) {
@@ -568,7 +642,7 @@ const CHAT_SCRIPT = `
     // admin-zone route to keep those readers working.
     if (sessionUser) return;
     if (!botName || !userId) return;
-    fetch('/chat/bot-preferences/' + encodeURIComponent(botName) + '/default-user', {
+    authedFetch('/chat/bot-preferences/' + encodeURIComponent(botName) + '/default-user', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId: userId }),
@@ -594,7 +668,7 @@ const CHAT_SCRIPT = `
     // Create a web conversation if not found
     activeConvId = null;
     try {
-      var res = await fetch('/chat/conversations', {
+      var res = await authedFetch('/chat/conversations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ type: 'web', botName: selectedBot, userId: selectedUserId, username: selectedUsername || 'user' }),
@@ -652,10 +726,100 @@ const CHAT_SCRIPT = `
     closeJiraEntry(); // same seam as loadThreadMessages: the picker's thread is gone too
   }
 
+  // ── The pre-open retry rules (src/chat/views/components/ws-retry.ts) ──
+  //
+  // Emitted from that module's own functions, not hand-ported: the page used to
+  // index the backoff array itself while the tested helper sat unused.
+  ${wsRetryScript()}
+
+  /**
+   * What does the server say about the session behind a socket that NEVER
+   * OPENED? THREE answers, not two — see ws-retry.ts.
+   *
+   *   401  → dead. The mode-conditional expiry rule (reload, or banner).
+   *   2xx  → alive, and the upgrade is still refused: a config fact. Ladder.
+   *   else → unknown, and a transport failure lands here too. A restart, a
+   *          laptop waking with no network, a 503 from an introspection outage:
+   *          none of them says anything about this session and all of them
+   *          self-heal, so the page keeps retrying and says nothing.
+   */
+  function chatSessionProbe() {
+    return authedFetch('/chat/me').then(classifyChatSessionProbe, function() { return 'unknown'; });
+  }
+
+  // Both bars are fixed to the top of the viewport, and the expiry banner has
+  // the higher z-index — so at top:0 the amber one was simply INVISIBLE whenever
+  // both were up. The expiry banner still wins the top slot (it reports the more
+  // serious fact); the amber bar stacks UNDER it rather than behind it.
+  // authed-fetch.ts calls window.__muninnRestackNotices whenever the banner
+  // appears or is removed, since the offset only exists while the banner does.
+  function stalledNoticeTopPx() {
+    var banner = document.getElementById(${JSON.stringify(EXPIRED_BANNER_ID)});
+    if (!banner) return '0';
+    // offsetHeight is 0 in a layout-less context (a stubbed DOM, a hidden tab);
+    // one line of the banner's 13px/1.4 type plus its padding is ~34px.
+    return (banner.offsetHeight || 34) + 'px';
+  }
+
+  window.__muninnRestackNotices = function() {
+    var bar = document.getElementById(${JSON.stringify(WS_STALLED_NOTICE_ID)});
+    if (bar) bar.style.top = stalledNoticeTopPx();
+  };
+  // The banner's height changes when its text re-wraps, so the cached offset
+  // goes stale on a resize/rotate while both bars are up.
+  window.addEventListener('resize', window.__muninnRestackNotices);
+
+  function showWsStalledNotice() {
+    if (document.getElementById(${JSON.stringify(WS_STALLED_NOTICE_ID)}) || !document.body) return;
+    var bar = document.createElement('div');
+    bar.id = ${JSON.stringify(WS_STALLED_NOTICE_ID)};
+    bar.setAttribute('role', 'status');
+    bar.style.cssText =
+      'position:fixed;top:0;left:0;right:0;z-index:99998;padding:8px 14px;' +
+      'background:#f59e0b;color:#1f2937;font:600 13px/1.4 ui-sans-serif,system-ui,sans-serif;' +
+      'text-align:center;box-shadow:0 2px 8px rgba(0,0,0,0.3);';
+    bar.textContent = ${JSON.stringify(WS_STALLED_NOTICE_TEXT)};
+    document.body.appendChild(bar);
+    window.__muninnRestackNotices();
+  }
+
+  function hideWsStalledNotice() {
+    var bar = document.getElementById(${JSON.stringify(WS_STALLED_NOTICE_ID)});
+    if (bar && bar.parentNode) bar.parentNode.removeChild(bar);
+  }
+
+  // The ladder itself, with the page's real effects bound to it.
+  var wsPreOpenRetry = makePreOpenRetry({
+    probe: chatSessionProbe,
+    retry: function() { connectWs(); },
+    // Idempotent with authedFetch's own 401 handling, which may already have
+    // acted on the same probe response: a second banner is the same banner.
+    expired: function() { window.__muninnAuthRefusal('ws'); },
+    stall: showWsStalledNotice,
+    clearStall: hideWsStalledNotice,
+    schedule: function(fn, ms) { setTimeout(fn, ms); },
+  });
+
   // WebSocket connection
   function connectWs() {
     var protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(protocol + '//' + location.host + '/chat/ws');
+    // A REFUSED UPGRADE never fires an open event. The browser reports a 401/403 on a
+    // handshake as an ordinary close — code 1006, no reason — so the code
+    // carries no evidence at all and the old rule (act on 4401, else retry in
+    // 2 s) reconnected forever in silence: measured on an entra instance, five
+    // refused handshakes, zero reloads, no banner. This flag is the only thing
+    // that distinguishes "the connection dropped" from "the server would not
+    // let us in".
+    var everOpened = false;
+    ws.onopen = function() {
+      everOpened = true;
+      // The handshake was accepted, so the ladder starts over and anything it
+      // put on screen comes off. Same "an open IS the evidence" rule the SSE
+      // stream follows.
+      wsPreOpenRetry.reset();
+      window.__muninnAuthChannelRecovered('ws');
+    };
     ws.onmessage = function(e) {
       try { handleWsEvent(JSON.parse(e.data)); }
       catch (err) { console.warn('Failed to parse WS message:', err); }
@@ -666,19 +830,32 @@ const CHAT_SCRIPT = `
       // ONCE, so reconnecting can only 401 — and the ordinary 2 s retry would
       // then spin against it forever with nothing on screen to say why.
       //
-      // It deliberately does NOT reload: in "local" mode there is no login
-      // page (AUTH_EXCLUDED_PATHS is empty by design), so an automatic reload
-      // replaces the chat with raw 401 JSON — strictly worse than a stalled
-      // page that explains itself. The operator re-presents the credential and
-      // reloads by hand.
+      // The decision is MODE-CONDITIONAL, and a close event carries no body —
+      // only a code — so the predicate is the provider cached from /chat/me:
+      //
+      //   entra → the sidecar signs the reader back in on the next navigation,
+      //           so a reload is a transparent re-login (breaker-bounded).
+      //   anything else → the historical static banner. In "local" mode there
+      //           is no login page (AUTH_EXCLUDED_PATHS is the two health
+      //           endpoints by design), so a reload would replace the chat with
+      //           raw 401 JSON: strictly worse than a stalled page that
+      //           explains itself.
+      //
+      // Both outcomes are terminal for this socket — see authed-fetch.ts.
       if (e && e.code === 4401) {
-        var banner = document.createElement('div');
-        banner.className = 'empty-state';
-        banner.textContent = 'Your session expired — reload the page to sign in again.';
-        chatMessages.appendChild(banner);
+        window.__muninnAuthRefusal('ws');
         return;
       }
-      setTimeout(connectWs, 2000);
+      if (everOpened) {
+        // A connection that demonstrably WORKED once and then dropped is an
+        // ordinary blip: unchanged, 2 s, forever.
+        setTimeout(connectWs, 2000);
+        return;
+      }
+      // Never opened: ASK, instead of assuming a dropped connection — and act
+      // on WHICH of the three answers came back (ws-retry.ts). Only a 2xx is a
+      // refusal worth counting; an outage keeps retrying and says nothing.
+      wsPreOpenRetry.onClose();
     };
   }
 
@@ -926,7 +1103,7 @@ const CHAT_SCRIPT = `
         await stampConnectorOnThread(activeThreadId, selectedConnectorId, true);
       }
       try {
-        var pendingRes = await fetch('/chat/pending/' + encodeURIComponent(threadParam));
+        var pendingRes = await authedFetch('/chat/pending/' + encodeURIComponent(threadParam));
         var pendingData = await pendingRes.json();
         if (pendingData.text) {
           chatInput.value = pendingData.text;
@@ -963,7 +1140,7 @@ const CHAT_SCRIPT = `
     if (getSkipExtractions()) {
       payload.skipExtractions = true;
     }
-    await fetch('/chat/conversations/' + activeConvId + '/messages', {
+    await authedFetch('/chat/conversations/' + activeConvId + '/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -1007,7 +1184,7 @@ const CHAT_SCRIPT = `
     try {
       var url = '/chat/conversations/' + activeConvId + '/messages';
       if (threadId) url += '?thread=' + encodeURIComponent(threadId);
-      var res = await fetch(url);
+      var res = await authedFetch(url);
       var data = await res.json();
       var msgs = data.messages || [];
 

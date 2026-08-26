@@ -228,7 +228,7 @@ function harness(opts: {
   };
 
   const prelude =
-    "var document = ctx.document; var chatMessages = ctx.chatMessages; var fetch = ctx.fetch;" +
+    "var document = ctx.document; var chatMessages = ctx.chatMessages; var authedFetch = ctx.fetch;" +
     "var navigator = ctx.navigator;" +
     "var setTimeout = ctx.setTimeout; var clearTimeout = ctx.clearTimeout;" +
     "var Date = { now: ctx.now };" +

@@ -848,6 +848,30 @@ CREATE INDEX idx_jira_drafts_thread
   ON jira_drafts (thread_id, created_at DESC);
 
 -- ============================================================================
+-- User identities: the Entra → users.id link (MUNINN_AUTH=entra)
+-- ============================================================================
+-- Keyed on (provider, tenant, oid) because `oid` is the only claim immutable for
+-- a person within a tenant — a NAVident is RE-ISSUED, so keying on it would
+-- eventually resolve two humans to one account. `tenant` is provenance from
+-- MUNINN_TENANT, never compared against the token's `tid`. `nav_ident` and
+-- `display_name` are mutable and refreshed on every login.
+-- Rationale: src/db/user-identities.ts. Mirror of migration 073.
+CREATE TABLE user_identities (
+  provider      TEXT NOT NULL,
+  tenant        TEXT NOT NULL,
+  oid           TEXT NOT NULL,
+  user_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  nav_ident     TEXT,
+  display_name  TEXT,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_login_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (provider, tenant, oid)
+);
+
+CREATE INDEX idx_user_identities_user_id
+  ON user_identities (user_id);
+
+-- ============================================================================
 -- Schema migrations: tracks which migrations have been applied
 -- ============================================================================
 CREATE TABLE schema_migrations (

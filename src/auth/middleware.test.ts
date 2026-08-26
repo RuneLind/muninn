@@ -4,13 +4,15 @@ import {
   createAuthMiddleware,
   isDirectLoopback,
   LOGIN_TOKEN_PLACEHOLDER,
+  presentedToken,
   TOKEN_HEADER,
   TOKEN_QUERY_PARAM,
   __setLoopbackBypassForTest,
 } from "./middleware.ts";
-import { createIntrospector } from "./introspect.ts";
+import { createIntrospector, type Introspector } from "./introspect.ts";
 import { resolveAuthConfig } from "./mode.ts";
 import { mintSession, SESSION_COOKIE } from "./session.ts";
+import { LOGIN_URL_HINT } from "./zones.ts";
 
 const SECRET = "a-sufficiently-long-secret";
 const CONFIG = resolveAuthConfig({
@@ -28,7 +30,7 @@ const CONFIG = resolveAuthConfig({
  * wrong fails silently, in the fail-CLOSED direction, as a lockout.
  */
 const app = new Hono();
-app.use("*", createAuthMiddleware(CONFIG));
+app.use("*", createAuthMiddleware(CONFIG, createIntrospector(CONFIG)));
 // `?.` because `ContextVariableMap` types these as OPTIONAL — with auth off no
 // middleware is mounted and they are genuinely absent. That the compiler forces
 // the `?.` here is the point of the optional declaration.
@@ -95,6 +97,67 @@ const TAILSCALE_SERVE_HEADERS = {
   "tailscale-user-login": "someone@example.com",
   "tailscale-user-name": "Example Operator",
 };
+
+describe("credential-channel priority — X-Muninn-Token wins in local mode", () => {
+  /**
+   * Only ONE channel is read, and whatever it yields is the credential the
+   * request is judged on — there is no "try the next one". So the ORDER is the
+   * whole behaviour, and putting `Authorization: Bearer` first meant any proxy
+   * that injects an `Authorization` header of its own (an upstream SSO, a
+   * tailnet identity header) turned a request carrying a CORRECT
+   * `X-Muninn-Token` into a 401. The operator's explicit credential has to beat
+   * an ambient one.
+   */
+  test("a correct X-Muninn-Token authenticates even under a foreign Authorization header", async () => {
+    // Through a proxy, so the loopback bypass is off and the credential is the
+    // only thing that can grant this request.
+    const res = await fetch(`${BASE}/who`, {
+      headers: {
+        ...TAILSCALE_SERVE_HEADERS,
+        [TOKEN_HEADER]: SECRET,
+        authorization: "Bearer some-upstream-sso-token",
+      },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ userId: "rune", role: "user" });
+  });
+
+  test("Bearer still carries the secret when there is no X-Muninn-Token", async () => {
+    // The channel is not demoted, only ordered: wonderwall forwards Bearer, and
+    // it stays a first-class way to present the local secret.
+    const res = await fetch(`${BASE}/who`, {
+      headers: { ...TAILSCALE_SERVE_HEADERS, authorization: `Bearer ${SECRET}` },
+    });
+    expect(res.status).toBe(200);
+  });
+
+  test("presentedToken: the local order is header → bearer → query", () => {
+    const url = `http://x/y?${TOKEN_QUERY_PARAM}=from-query`;
+    const all = new Headers({ [TOKEN_HEADER]: "from-header", authorization: "Bearer from-bearer" });
+    expect(presentedToken(all, url, true)).toBe("from-header");
+
+    const noHeader = new Headers({ authorization: "Bearer from-bearer" });
+    expect(presentedToken(noHeader, url, true)).toBe("from-bearer");
+    expect(presentedToken(new Headers(), url, true)).toBe("from-query");
+    expect(presentedToken(new Headers(), "http://x/y", true)).toBeNull();
+
+    // A blank header must not shadow a real Bearer — an empty value is not a
+    // presented credential.
+    const blank = new Headers({ [TOKEN_HEADER]: "   ", authorization: "Bearer from-bearer" });
+    expect(presentedToken(blank, url, true)).toBe("from-bearer");
+  });
+
+  test("…and in entra, Bearer is the WHOLE list — the reorder does not reach it", () => {
+    // The `local`-only gate is not cosmetic: in `entra` either of the other two
+    // can only carry something Texas will refuse, so reading them is a Texas
+    // round-trip per forged value.
+    const url = `http://x/y?${TOKEN_QUERY_PARAM}=from-query`;
+    const all = new Headers({ [TOKEN_HEADER]: "from-header", authorization: "Bearer from-bearer" });
+    expect(presentedToken(all, url, false)).toBe("from-bearer");
+    expect(presentedToken(new Headers({ [TOKEN_HEADER]: "from-header" }), url, false)).toBeNull();
+    expect(presentedToken(new Headers(), url, false)).toBeNull();
+  });
+});
 
 describe("the loopback bypass — §8's escape hatch", () => {
   test("a direct loopback request is granted with no credential at all", async () => {
@@ -303,7 +366,8 @@ describe("off is off", () => {
   });
 
   test("and therefore no middleware can be constructed", () => {
-    expect(() => createAuthMiddleware(resolveAuthConfig({}))).toThrow(/nothing to mount/);
+    const off = resolveAuthConfig({});
+    expect(() => createAuthMiddleware(off, createIntrospector(off))).toThrow(/nothing to mount/);
   });
 });
 
@@ -328,7 +392,7 @@ describe("MUNINN_LOCAL_ROLE — which channel may be promoted", () => {
     MUNINN_ALLOWED_ORIGINS: "https://muninn-host.example-tailnet.ts.net",
   });
   const adminApp = new Hono();
-  adminApp.use("*", createAuthMiddleware(ADMIN_CONFIG));
+  adminApp.use("*", createAuthMiddleware(ADMIN_CONFIG, createIntrospector(ADMIN_CONFIG)));
   adminApp.get("/who", (c) => c.json({ userId: c.get("identity")?.userId, role: c.get("role") }));
   const adminServer = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req, srv) => adminApp.fetch(req, srv) });
   const ADMIN_BASE = `http://127.0.0.1:${adminServer.port}`;
@@ -380,5 +444,90 @@ describe("MUNINN_LOCAL_ROLE — which channel may be promoted", () => {
     } finally {
       __setLoopbackBypassForTest(null);
     }
+  });
+});
+
+/**
+ * The `entra` middleware, on a THIRD live server with a stub introspector.
+ *
+ * Two properties nothing else can reach: WHICH channels a token may arrive on
+ * (in `entra` the query-string and `X-Muninn-Token` channels are pure attack
+ * surface and are refused), and what an introspection OUTAGE answers — 503,
+ * not the 401-with-a-login-url a real denial gets.
+ */
+describe("entra — the credential channels and the outage answer", () => {
+  const ENTRA_CONFIG = resolveAuthConfig({
+    MUNINN_AUTH: "entra",
+    NAIS_TOKEN_INTROSPECTION_ENDPOINT: "http://texas.test/introspect",
+    MUNINN_TENANT: "example-tenant",
+    MUNINN_ADMIN_IDENTS: "A123456",
+    MUNINN_ALLOWED_ORIGINS: "https://muninn.example.test",
+  });
+  /** Texas, as three answers. `channels` records what actually reached it. */
+  const seen: string[] = [];
+  const stub: Introspector = {
+    async introspect(token, channel) {
+      seen.push(`${channel}:${token}`);
+      if (channel === "session") return { kind: "denied" };
+      if (token === "outage") return { kind: "unavailable" };
+      if (token !== "good-token") return { kind: "denied" };
+      return {
+        kind: "identity",
+        identity: {
+          userId: "nav-a123456", displayName: "A Person", navIdent: "A123456",
+          oid: "00000000-1111-2222-3333-444444444444", provider: "entra", expiresAt: null,
+        },
+      };
+    },
+  };
+  const entraApp = new Hono();
+  entraApp.use("*", createAuthMiddleware(ENTRA_CONFIG, stub));
+  entraApp.get("/who", (c) => c.json({ userId: c.get("identity")?.userId, role: c.get("role") }));
+  const entraServer = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req, srv) => entraApp.fetch(req, srv) });
+  const E_BASE = `http://127.0.0.1:${entraServer.port}`;
+  afterAll(() => entraServer.stop(true));
+
+  test("Authorization: Bearer is the channel, and it works", async () => {
+    const res = await fetch(`${E_BASE}/who`, { headers: { authorization: "Bearer good-token" } });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ userId: "nav-a123456", role: "admin" });
+  });
+
+  test("X-Muninn-Token is NOT a channel in entra", async () => {
+    // It is the `local` shared-secret header. In entra it can only ever carry
+    // a value muninn will not accept, so reading it spends a Texas round-trip
+    // per forged header — an amplifier against the platform's auth service.
+    seen.length = 0;
+    const res = await fetch(`${E_BASE}/who`, { headers: { [TOKEN_HEADER]: "good-token" } });
+    expect(res.status).toBe(401);
+    expect(seen).toEqual([]);
+  });
+
+  test("?muninn_token= is NOT a channel either, and does NOT redirect", async () => {
+    // Measured before the fix: the query token was accepted, and then the
+    // strip-redirect threw the credential away — entra mints no cookie, so the
+    // redirect target 401s. Accepting a credential and then discarding it is
+    // strictly worse than never accepting it.
+    seen.length = 0;
+    const res = await fetch(`${E_BASE}/who?${TOKEN_QUERY_PARAM}=good-token`, { redirect: "manual" });
+    expect(res.status).toBe(401);
+    expect(seen).toEqual([]);
+  });
+
+  test("an introspection OUTAGE is 503 with no loginUrl — never the login 401", async () => {
+    // A Texas outage answered like a denial sends every client in the building
+    // to /oauth2/login, i.e. a reload storm into the service that is already
+    // struggling. The client rule ignores a 503 by construction.
+    const res = await fetch(`${E_BASE}/who`, { headers: { authorization: "Bearer outage" } });
+    expect(res.status).toBe(503);
+    const body = await res.json() as Record<string, unknown>;
+    expect(body.loginUrl).toBeUndefined();
+    expect(body.error).toBe("auth_unavailable");
+  });
+
+  test("a real denial is still the 401 the page's predicate reads", async () => {
+    const res = await fetch(`${E_BASE}/who`, { headers: { authorization: "Bearer nope" } });
+    expect(res.status).toBe(401);
+    expect(await res.json()).toMatchObject({ mode: "entra", loginUrl: LOGIN_URL_HINT });
   });
 });

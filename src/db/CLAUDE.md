@@ -9,10 +9,11 @@
 | `memories.ts` | Memory CRUD, hybrid search (FTS + pgvector RRF), dashboard search, stats |
 | `threads.ts` | Thread CRUD, switch/activate, Slack thread management, cascade delete |
 | `users.ts` | User upsert (`ensureUser`), lookup, update |
+| `user-identities.ts` | The `entra` → `users.id` link (`resolveNavUser`). Keyed `(provider, tenant, oid)`; provisions `users` + `user_identities` in ONE transaction on first login, refreshes the mutable claims on every later one. ⚠️ The `users` insert is deliberately NOT `ON CONFLICT DO NOTHING` — a re-issued NAVident would otherwise provision a newcomer onto the previous holder's account. `mintNavUserId` throws **`UnmintableClaimsError`**, whose `unmintableClaims === true` property is what `src/auth/introspect.ts` classifies as a `denied` (30 s negative cache) rather than an `unavailable` retry storm — the marker is read STRUCTURALLY, so that module keeps its lazy-`import()`-only edge to `src/db/`; renaming the property is silent |
 | `goals.ts` | Goal CRUD with status tracking |
 | `scheduled-tasks.ts` | Scheduled task CRUD (cron + interval styles) |
 | `watchers.ts` | Watcher CRUD with dedup tracking (`lastNotifiedIds`) |
-| `activity.ts` | Activity log persistence |
+| `activity.ts` | Activity log persistence. ⚠️ `metadata` goes in via **`sql.json(...)`**, never `JSON.stringify(...)` — the string form is encoded a SECOND time on its way into the jsonb column, so every row held a JSON *string* scalar and every `metadata->>'key'` read matched nothing (`getActivityForJob`'s `watcherId`, and the `metadata->>'audit'` key `src/auth/audit.ts` documents as the way to find an admin-audit row). Migration **074** repairs the historical rows in place — row by row with a per-row exception handler, so one payload whose inner text is not valid JSON cannot abort the migration for every instance carrying it |
 | `traces.ts` | Trace span storage, waterfall queries, tool usage stats |
 | `connectors.ts` | Named AI connector configurations (DB-persisted) |
 | `chat-preferences.ts` | Per-user+bot preferred connector |
@@ -100,6 +101,7 @@ Test files are co-located: `messages.test.ts`, `memories.test.ts`, `threads.test
 | Table | Key columns | Notes |
 |---|---|---|
 | `users` | id, username, platform, is_active | Canonical user identity across platforms |
+| `user_identities` | provider, tenant, oid, user_id | The `entra` link. PK on (provider, tenant, oid) — `oid` is the only claim immutable for a person in a tenant; `tenant` is provenance from `MUNINN_TENANT`, never compared against the token's `tid`. FK to `users` ON DELETE CASCADE |
 | `messages` | user_id, bot_name, role, content, platform, thread_id, trace_id | Token tracking (input/output/context), cost |
 | `memories` | user_id, bot_name, summary, embedding, scope, search_vector | pgvector + FTS for hybrid search |
 | `threads` | user_id, bot_name, name, connector_id, is_active | Unique on (user_id, bot_name, name) |

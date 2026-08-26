@@ -3,6 +3,7 @@ import { Hono } from "hono";
 import { createAuthMiddleware } from "./middleware.ts";
 import { createOriginMiddleware, decideOrigin, isSideEffectingRequest, loopbackOrigins, SIDE_EFFECTING_GETS } from "./origin.ts";
 import { resolveAuthConfig } from "./mode.ts";
+import { createIntrospector } from "./introspect.ts";
 
 const SECRET = "a-sufficiently-long-secret";
 const EXTENSION = "chrome-extension://abcdefghijklmnopabcdefghijklmnop";
@@ -165,7 +166,7 @@ const PORT = Number(server.port);
 afterAll(() => server.stop(true));
 
 const app = new Hono();
-app.use("*", createAuthMiddleware(CONFIG));
+app.use("*", createAuthMiddleware(CONFIG, createIntrospector(CONFIG)));
 app.use("*", createOriginMiddleware(CONFIG.allowedOrigins, PORT));
 app.post("/chat/conversations", (c) => c.json({ ok: true }));
 let consumed = 0;
