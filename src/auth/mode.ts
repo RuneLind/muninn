@@ -12,6 +12,8 @@
  */
 import { adminIdentsFromEnv, allowedOriginsFromEnv } from "../config.ts";
 import { getLog } from "../logging.ts";
+import type { AuthRole } from "./role.ts";
+import { HEALTH_LIVE_PATH, HEALTH_READY_PATH } from "./zones.ts";
 
 const log = getLog("auth", "mode");
 
@@ -20,7 +22,7 @@ export const AUTH_MODES = ["off", "local", "entra"] as const;
 export type AuthMode = (typeof AUTH_MODES)[number];
 
 /**
- * Flipped to `true` by the DEFERRED zone model PR, and by nothing else.
+ * Flipped to `true` by the PR that turns `entra` on, and by nothing else.
  *
  * `entra` authenticates a NAV colleague but the zone model is what decides
  * which routes their `user` role may call — without it every authenticated
@@ -28,6 +30,11 @@ export type AuthMode = (typeof AUTH_MODES)[number];
  * `/api/users`, every CRUD route). "Entra is unsupported until zones land" is
  * therefore enforced here rather than left as a README note: a half-built auth
  * mode in a public repo invites someone to enable it and trust it.
+ *
+ * ⚠️ **The zone model itself has landed** (`src/auth/zones.ts`) — this flag is
+ * still `false` because the Entra half of the deploy (the introspector, the
+ * profile, the sidecar) has not, and flipping it is that PR's job. Do not read
+ * a `false` here as "there are no zones".
  *
  * This is a CONSTANT on purpose. An env override would let the deploy that must
  * not happen happen anyway, which is the whole failure this guards.
@@ -39,13 +46,18 @@ export type AuthMode = (typeof AUTH_MODES)[number];
 export const AUTH_ZONES_IMPLEMENTED: boolean = false;
 
 /**
- * Paths the middleware lets through with no credential.
+ * Paths the middleware lets through with no credential — and which the ZONE
+ * middleware skips for the same reason.
  *
- * EMPTY in this PR, and deliberately a constant rather than an env list:
- * exclusion and zone are the same axis, so an entry here would keep a route
- * reachable with no token whatever the deferred zone model later decides.
+ * Deliberately a constant rather than an env list, and deliberately just the
+ * two health endpoints. Exclusion and zone were once described as the same
+ * axis, which was true only while there were no zones: an entry here now means
+ * "the open zone, reached with no credential at all", which is exactly what a
+ * platform's liveness and readiness probes need and what nothing else should
+ * get. `/api/live` is dependency-free; `/api/ready` pings the database. Both
+ * are instance-wide and unauthenticated, so neither may carry per-user data.
  */
-export const AUTH_EXCLUDED_PATHS: readonly string[] = [];
+export const AUTH_EXCLUDED_PATHS: readonly string[] = [HEALTH_LIVE_PATH, HEALTH_READY_PATH];
 
 /** The shortest `MUNINN_LOCAL_TOKEN` we will boot with. The mode exists to close
  *  a tailnet/LAN exposure; a four-character secret would close nothing, and a
@@ -72,6 +84,21 @@ export interface AuthConfig {
   readonly allowedOrigins: readonly string[];
   /** Present exactly when `mode === "local"`. */
   readonly local: LocalAuthConfig | null;
+  /**
+   * The role the pinned `local` identity resolves to (`MUNINN_LOCAL_ROLE`),
+   * default `user`. Honoured ONLY in `local` mode and only for an identity
+   * established from a credential channel — see `resolveGrantedRole`.
+   *
+   * It exists because default-deny plus the three shipped facts —
+   * `resolveRole` answers `user` for a local identity unconditionally,
+   * `MUNINN_ADMIN_IDENTS` is inert in `local` mode, and `entra` cannot boot —
+   * would otherwise make the operator's own dashboard permanently unreachable
+   * on every `MUNINN_AUTH=local` instance. Default `user` so nothing changes
+   * without an opt-in: PRs C–D's guard tests run against a `user`-role local
+   * identity, and `requireOwnUser`'s admin passthrough would make every one of
+   * them a no-op.
+   */
+  readonly localRole: AuthRole;
 }
 
 /** Thrown by `resolveAuthConfig`. A distinct class so `src/index.ts` can print
@@ -137,10 +164,11 @@ export function resolveAuthConfig(env: Record<string, string | undefined> = proc
   // (2) The boundary this pass depends on.
   if (mode === "entra" && !AUTH_ZONES_IMPLEMENTED) {
     throw new AuthConfigError(
-      `${AUTH_ENV}="entra" is not supported yet: the zone model that decides which routes a ` +
-      `non-admin role may call has not landed (AUTH_ZONES_IMPLEMENTED is false in src/auth/mode.ts). ` +
-      `Authenticating colleagues without it would admit every one of them to the full operator ` +
-      `surface — traces, prompt snapshots, every CRUD route. Refusing to start.`,
+      `${AUTH_ENV}="entra" is not supported yet. The zone model that decides which routes a ` +
+      `non-admin role may call HAS landed (src/auth/zones.ts), but the Entra half of the deploy — ` +
+      `the token introspector, the profile, the wonderwall sidecar — has not, and flipping ` +
+      `AUTH_ZONES_IMPLEMENTED is that PR's job. Booting now would authenticate colleagues against a ` +
+      `deploy that cannot yet introspect their tokens. Refusing to start.`,
     );
   }
 
@@ -149,7 +177,7 @@ export function resolveAuthConfig(env: Record<string, string | undefined> = proc
     // made an auth-OFF instance log `MUNINN_ALLOWED_ORIGINS contains "*"` at
     // every boot from a stale `.env` line — a warning about a variable nothing
     // in that mode consults, i.e. exactly the "nothing changes" claim breaking.
-    return { mode, adminIdents: [], allowedOrigins: [], local: null };
+    return { mode, adminIdents: [], allowedOrigins: [], local: null, localRole: "user" };
   }
 
   const adminIdents = adminIdentsFromEnv(env);
@@ -181,7 +209,7 @@ export function resolveAuthConfig(env: Record<string, string | undefined> = proc
         throw new AuthConfigError(`${AUTH_ENV}="entra" requires ${name}. Refusing to start.`);
       }
     }
-    return { mode, adminIdents, allowedOrigins, local: null };
+    return { mode, adminIdents, allowedOrigins, local: null, localRole: "user" };
   }
 
   const token = trimmed(env, "MUNINN_LOCAL_TOKEN");
@@ -228,5 +256,47 @@ export function resolveAuthConfig(env: Record<string, string | undefined> = proc
       userId,
       displayName: trimmed(env, "MUNINN_LOCAL_NAME") || userId,
     },
+    localRole: parseLocalRole(env),
   };
+}
+
+export const LOCAL_ROLE_ENV = "MUNINN_LOCAL_ROLE";
+
+/**
+ * `MUNINN_LOCAL_ROLE`, the `local`-mode escape hatch for the zone model.
+ *
+ * Unset ⇒ `user`, with a loud WARN, because the default is a working instance
+ * whose operator surface is closed to its own operator and there is exactly one
+ * moment anyone is looking. An unrecognised value throws — the same inverted
+ * direction as `MUNINN_AUTH` itself: this variable only ever GRANTS, so a typo
+ * degrading to `user` would be a silent lockout while `…=admin` sits in the
+ * `.env` looking correct.
+ *
+ * ⚠️ Setting it to `admin` does NOT make the loopback bypass admin. The grant
+ * is conditioned on the identity having come from a credential channel
+ * (`resolveGrantedRole`), because the bypass hands out the pinned identity with
+ * no credential at all and is blind to an L4 forward.
+ */
+function parseLocalRole(env: Record<string, string | undefined>): AuthRole {
+  const raw = trimmed(env, LOCAL_ROLE_ENV).toLowerCase();
+  if (raw === "") {
+    log.warn(
+      `${AUTH_ENV}="local" without ${LOCAL_ROLE_ENV}: the pinned identity resolves to role "user", ` +
+      `so the zone model closes the whole operator surface to it — /traces, /models, /plans, /agents, ` +
+      `/logs and the unfiltered collection reads all answer 403, and GET / redirects to /chat. ` +
+      `${LOCAL_ROLE_ENV}=admin grants admin ONLY to a request whose identity came from a credential ` +
+      `channel. A BROWSER on this host cannot reach the operator surface even with it set: the ` +
+      `login redirect strips the token, so the browser's cookie-only request takes the loopback ` +
+      `bypass (identity filled before the cookie is read) and stays "user". Reach it by fronting ` +
+      `muninn with an HTTP proxy that stamps x-forwarded-* (so the bypass is removed and the cookie ` +
+      `is honoured), or with curl -H "x-muninn-token: <secret>" from the host.`,
+    );
+    return "user";
+  }
+  if (raw === "user" || raw === "admin") return raw;
+  throw new AuthConfigError(
+    `${LOCAL_ROLE_ENV}="${raw}" is not a role (expected "user" or "admin"). Refusing to start: ` +
+    `a typo degrading to "user" would lock the operator out of their own dashboard while the ` +
+    `variable sits in .env looking correct.`,
+  );
 }

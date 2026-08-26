@@ -21,7 +21,7 @@
  * would silently widen CORS and shared-memory reads; a missed guard would not
  * exist at all. `src/auth/wiring.test.ts` pins the one call site.
  */
-import type { AuthConfig } from "./mode.ts";
+import type { AuthConfig, AuthMode } from "./mode.ts";
 import { isAuthenticatingMode } from "./mode.ts";
 
 interface Policy {
@@ -29,9 +29,13 @@ interface Policy {
   readonly allowedOrigins: readonly string[];
   /** The single `users.id` a `local` instance acts as, else null. */
   readonly pinnedUserId: string | null;
+  /** The resolved mode, for the one reader that needs the MODE rather than the
+   *  authenticating/off split: `src/auth/audit.ts`, whose rows are gated to
+   *  `entra` because on a `local` instance every one is self-audit. */
+  readonly mode: AuthMode;
 }
 
-const OFF: Policy = { authenticating: false, allowedOrigins: [], pinnedUserId: null };
+const OFF: Policy = { authenticating: false, allowedOrigins: [], pinnedUserId: null, mode: "off" };
 
 let current: Policy = OFF;
 
@@ -41,7 +45,13 @@ export function setAuthPolicy(config: AuthConfig): void {
     authenticating: isAuthenticatingMode(config.mode),
     allowedOrigins: config.allowedOrigins,
     pinnedUserId: config.local?.userId ?? null,
+    mode: config.mode,
   };
+}
+
+/** The resolved `MUNINN_AUTH` mode, `off` until `setAuthPolicy` runs. */
+export function authMode(): AuthMode {
+  return current.mode;
 }
 
 /** Test-only reset to the `off` default (the `src/wiki/readonly.ts` idiom). */

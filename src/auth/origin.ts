@@ -62,9 +62,9 @@ const log = getLog("auth", "origin");
  * GET paths that change server state or spend money, listed as PATHS rather
  * than line numbers. Prefix entries end in `/` and match a path parameter.
  *
- * `GET /api/research/ask` is admin-zone under the deferred zone model, which
- * buys it nothing today AND would buy it nothing then: §4 has already
- * established that an admin is a real person browsing the real web.
+ * `GET /api/research/ask` is admin-zone under the zone model, which buys it
+ * nothing here: §4 has already established that an admin is a real person
+ * browsing the real web, so the origin check still has to cover it.
  */
 export const SIDE_EFFECTING_GETS: readonly string[] = [
   // A one-time CONSUME: reading it destroys it.

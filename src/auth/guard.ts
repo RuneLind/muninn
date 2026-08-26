@@ -55,6 +55,8 @@ import type { Context } from "hono";
 import { getLog } from "../logging.ts";
 import type { Identity } from "./introspect.ts";
 import type { AuthRole } from "./role.ts";
+import { auditAdminPassthrough } from "./audit.ts";
+import { authMode } from "./policy.ts";
 
 const log = getLog("auth", "guard");
 
@@ -127,14 +129,27 @@ export function requireOwnUser(
   if (sessionRole(c) === "admin") {
     // §4: role beats the own-data guard, because an operator reaching another
     // user's rows is the reason the dashboard exists. Audited rather than
-    // silent. Inert in `local` mode, where `resolveRole` answers `user` for the
-    // pinned identity unconditionally — deliberately, since an admin
-    // passthrough here would make acceptance 9 pass without the diff.
+    // silent. In `local` mode this branch is inert at the DEFAULT
+    // `MUNINN_LOCAL_ROLE=user` (the pinned identity resolves to `user`, so this
+    // is never entered) — the default is deliberate, since an admin passthrough
+    // by default would make acceptance 9 pass without the diff. But
+    // `MUNINN_LOCAL_ROLE=admin` on a credential-channel request DOES make the
+    // pinned identity admin, and then this branch runs and the audit below
+    // fires. It is not unconditionally inert in `local` mode.
     if (claimed && claimed !== identity.userId) {
       log.info("Admin {admin} read a claimed userId {claimed} on {path}", {
         admin: identity.userId,
         claimed,
         path: c.req.path,
+      });
+      // …and on the operator's own feed, which is where a person would notice.
+      // Gated to `entra` inside: on a `local` instance every row is self-audit.
+      auditAdminPassthrough({
+        mode: authMode(),
+        reader: identity.userId,
+        owner: claimed,
+        path: c.req.path,
+        kind: "claimed-id",
       });
     }
     return { ok: true, userId: claimed ?? identity.userId, username: claimedName };

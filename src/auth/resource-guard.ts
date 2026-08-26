@@ -50,7 +50,8 @@
 import type { Context } from "hono";
 import { getLog } from "../logging.ts";
 import { sessionIdentity, sessionRole } from "./guard.ts";
-import { pinnedLocalUserId } from "./policy.ts";
+import { authMode, pinnedLocalUserId } from "./policy.ts";
+import { auditAdminPassthrough } from "./audit.ts";
 import type { AuthRole } from "./role.ts";
 
 const log = getLog("auth", "resource");
@@ -66,7 +67,7 @@ export type ResourceKind =
    *  non-admin renamed and disabled another user's email watcher and morning
    *  briefing, and force-queued their Gmail-MCP watcher to run now. They are
    *  exactly this guard's shape (id-addressed, owner on the row), so they are
-   *  closed here rather than left to the deferred zone model. */
+   *  closed here rather than left to the zone model. */
   | "scheduledTask"
   | "watcher";
 
@@ -95,12 +96,14 @@ export interface ResourceAccessInput {
    * Whether a row with NO owner may be read.
    *
    * §4 makes a NULL owner admin-only — a watcher or gardener trace is an
-   * operator artefact. `resolveRole` answers `user` for a `local` identity
-   * unconditionally (deliberately: an admin passthrough there would make this
-   * whole campaign's acceptance pass without the diff), so on a single-operator
-   * instance that rule would lock the operator out of their own watcher traces.
-   * §4 pays the cost the other way instead: a NULL owner is allowed in `local`
-   * mode, where there is one human and the distinction has no meaning yet.
+   * operator artefact. A `local` identity resolves to `MUNINN_LOCAL_ROLE`
+   * (default `user`; the default is deliberate — an admin passthrough by
+   * default would make this whole campaign's acceptance pass without the diff),
+   * so at the default a single-operator instance would lose its own watcher
+   * traces. §4 pays the cost the other way instead: a NULL owner is allowed in
+   * `local` mode, where there is one human and the distinction has no meaning
+   * yet. (A `MUNINN_LOCAL_ROLE=admin` operator would already pass the admin
+   * branch below; this rule is what covers the DEFAULT `user` operator.)
    */
   readonly nullOwnerAllowed: boolean;
 }
@@ -117,8 +120,11 @@ export function decideResourceAccess(input: ResourceAccessInput): OwnedResult {
 
   if (!input.owner.found) return { ok: false, reason: "missing" };
 
-  // §4: role beats the own-data guard. Inert in `local` mode — see
-  // `nullOwnerAllowed` above for why that is deliberate rather than an oversight.
+  // §4: role beats the own-data guard, BEFORE any owner comparison — so an
+  // admin reads any owned row, its own or a colleague's. Inert in `local` mode
+  // only at the DEFAULT `MUNINN_LOCAL_ROLE=user`; `MUNINN_LOCAL_ROLE=admin` (on
+  // a credential-channel request) makes the pinned identity admin and lifts the
+  // ownership check here. See `nullOwnerAllowed` above.
   if (input.role === "admin") return ALLOWED;
 
   if (input.owner.userId === null) {
@@ -222,12 +228,24 @@ export async function requireOwnedResource(
     nullOwnerAllowed: pinnedLocalUserId() !== null,
   });
 
-  if (verdict.ok && role === "admin" && owner.found && owner.userId !== identity.userId) {
+  // `owner.userId != null` guards BOTH the log line and the audit call: a
+  // NULL-owner row (an orphaned jira_draft off a deleted thread, a watcher
+  // trace) is owned by NOBODY, and a passthrough row whose whole purpose is
+  // naming who was read cannot honestly say "owned by null". Without it the
+  // non-null assertion on `owner.userId` below is also a lie.
+  if (verdict.ok && role === "admin" && owner.found && owner.userId != null && owner.userId !== identity.userId) {
     // The same audit line `requireOwnUser` writes, for the same reason: an
     // operator reading a colleague's row is the point of the dashboard, and the
     // difference between an audited role and an unaudited one is this line.
     log.info("Admin {admin} read {kind} {id} owned by {owner} on {path}", {
       admin: identity.userId, kind, id, owner: owner.userId, path: c.req.path,
+    });
+    auditAdminPassthrough({
+      mode: authMode(),
+      reader: identity.userId,
+      owner: owner.userId,
+      path: c.req.path,
+      kind,
     });
   }
   return verdict;

@@ -1,11 +1,11 @@
 # `src/auth/` — the `MUNINN_AUTH` switch
 
 This module answers **who is calling**, **which user id a route is allowed to
-act on** (PR C) and **whose row a route is allowed to touch** (PR D). It still
-answers almost nothing about *which routes a role may call*: that is the
-deferred zone model, and the one exception — `GET /api/events` — is a per-route
-denial rather than a zone. Reading a closed boundary into the presence of this
-directory is the mistake to avoid — see *What this does not close* below.
+act on** (PR C), **whose row a route is allowed to touch** (PR D) and — since
+the zone model landed — **which routes a role may call at all** (`zones.ts`).
+Reading a closed boundary into the presence of this directory is still the
+mistake to avoid: what remains open is listed under *What this does not close*
+below, and it is now a shorter list about different things.
 
 ## The three modes
 
@@ -13,7 +13,7 @@ directory is the mistake to avoid — see *What this does not close* below.
 |---|---|
 | unset / `off` | **No middleware is mounted at all**: the user dropdown, `sim-user-1`, no tokens. One deliberate exception to "unchanged" — refusal (2) below means an instance with `NAIS_CLUSTER_NAME` set now refuses to boot where it previously started. |
 | `local` | One **pinned identity** behind a **shared secret**. The shape for a single human's instance that is reachable beyond loopback. |
-| `entra` | **Refuses to boot.** See `AUTH_ZONES_IMPLEMENTED`. |
+| `entra` | **Refuses to boot.** See `AUTH_ZONES_IMPLEMENTED` — the zone model has landed, but the Entra half of the deploy has not, and flipping that constant is its PR's job. |
 
 An unrecognised value **throws** rather than degrading to `off`. That inverts
 `optionalEnvFlag`'s "a typo must not brick an instance" rule on purpose: a typo'd
@@ -33,6 +33,10 @@ which is wide open.
    `MUNINN_ALLOWED_ORIGINS`.
 5. `local` without `MUNINN_LOCAL_TOKEN` / `MUNINN_LOCAL_USER`, or with a secret
    shorter than `LOCAL_TOKEN_MIN_LENGTH`.
+6. `MUNINN_LOCAL_ROLE` set to anything other than `user` / `admin`. The same
+   inverted direction as `MUNINN_AUTH` itself: this variable only ever GRANTS,
+   so a typo degrading to `user` would be a silent lockout while `…=admin` sits
+   in the `.env` looking correct.
 
 `AUTH_ZONES_IMPLEMENTED` is a **constant, not an env var**. An override would let
 exactly the deploy that must not happen happen anyway.
@@ -132,24 +136,71 @@ Two answers skip the list entirely:
   with auth off no middleware is mounted, so `c.get("identity")` is `undefined`
   and `resolveRole` is never called. The branch is for PRs C–D's guards, which
   run in both modes. Do not read it as something enforced now.
-- **a `local` identity ⇒ `user`, always.** Load-bearing, not a default:
-  `requireOwnUser`'s admin passthrough (PRs C–D) makes every claimed-id guard a
-  no-op for an admin, so a pinned identity resolving to `admin` would make the
-  central acceptance of this whole pass pass *without the diff*. The cost —
-  NULL-owner resources being admin-only — is paid instead by allowing a NULL
-  owner in local mode, where there is one human and the distinction has no
-  meaning yet.
+- **a `local` identity ⇒ `MUNINN_LOCAL_ROLE`, default `user`.** The default is
+  load-bearing, not a shrug: `requireOwnUser`'s admin passthrough (PRs C–D)
+  makes every claimed-id guard a no-op for an admin, so a pinned identity
+  resolving to `admin` by default would make the central acceptance of that
+  pass pass *without the diff*. The cost — NULL-owner resources being
+  admin-only — is paid instead by allowing a NULL owner in local mode, where
+  there is one human and the distinction has no meaning yet.
+
+### `MUNINN_LOCAL_ROLE` — the operator escape hatch the zone model needed
+
+Default-deny plus three shipped facts — `resolveRole` answers `user` for a local
+identity, `MUNINN_ADMIN_IDENTS` is inert in `local` mode, and `entra` cannot boot
+— means **no admin identity is reachable on any bootable instance**. The zone
+model as first drafted therefore made the operator's own dashboard permanently
+403 on every `MUNINN_AUTH=local` instance. `MUNINN_LOCAL_ROLE=admin` is the
+explicit opt-in, and it is deliberately NOT a promotion of `MUNINN_ADMIN_IDENTS`.
+
+⚠️ **It does not reach the loopback bypass, and that is the whole design.** The
+bypass grants the pinned identity with **no credential at all** and is blind to
+an L4 forward, so promoting it would hand full admin over every user's data to
+anyone behind `ssh -L`, `socat`, `tailscale serve --tcp` or a bare `proxy_pass`.
+The predicate is therefore **the channel that established the identity**, carried
+as `IdentityVia` (`"session" | "credential" | "bypass"`) on `IdentityResolution`
+and applied in exactly one place, `resolveGrantedRole`, which both the HTTP
+middleware and the WebSocket upgrade call. Three near-misses, all rejected:
+
+| spelling | why it is wrong |
+|---|---|
+| "a credential was **presented**" | `presentedToken` reads header/bearer/query and **never the cookie**, so the operator's next request after the login redirect drops to `user` permanently. |
+| "did not take the bypass branch" | the bypass branch runs first and can itself carry a valid token, so `ssh` + `curl -H 'x-muninn-token: …'` would be refused admin. |
+| `IdentityResolution.mint` | `mint` is `false` in the cookie branch — the first bug again. |
+
+**The consequence, stated because it will be met:** a browser running ON the
+muninn host resolves through the bypass (`resolveRequestIdentity` fills
+`identity` there and reads the cookie only `if (!identity)`), so a cookie-only
+request from localhost stays role `user` **regardless of the variable**. Through
+a reverse proxy — which stamps `x-forwarded-*` and therefore removes the bypass —
+the cookie branch runs and the operator gets `admin`. Reach the dashboard through
+the proxy, or from the host with the token on the request. The bypass/cookie
+ordering is shipped PR D behaviour and is deliberately not restructured.
+
+`MUNINN_LOCAL_ROLE` is in `AUTH_FLAGS` (`src/test/ambient-env.ts`), so neither
+`bun test` nor a Playwright-spawned muninn inherits it — a machine whose `.env`
+sets it would otherwise spawn e2e servers at role `admin` while the other machine
+spawns `user`, and the acceptance rows would flip by host.
 
 `MUNINN_ADMIN_IDENTS` is matched case-insensitively on trimmed values against
 **both** `NAVident` and `oid`, because a claim set missing one of them would
 otherwise leave *nobody* resolving to admin.
 
-## `AUTH_EXCLUDED_PATHS` is empty, deliberately
+## `AUTH_EXCLUDED_PATHS` is the two health endpoints, and nothing else
 
-Exclusion and zone are the same axis, so an entry here would keep a route
-reachable with no token whatever the deferred zone model later decides. It is a
-constant rather than an env list for the same reason. The login flow needs no
-exclusion because the *middleware itself* is what accepts the secret.
+`/api/live` (dependency-free) and `/api/ready` (a cached `SELECT 1`) are the only
+paths an authenticating instance answers with **no credential at all**. Both are
+registered inline in `createDashboardRoutes` and both are in the open zone, so
+the zone middleware cannot re-close them.
+
+This list was empty until the zone model landed, described as "exclusion and zone
+are the same axis" — true only while there were no zones. An entry here now means
+"the open zone, reached with no credential", which is exactly what a platform's
+liveness and readiness probes need and what nothing else should get. So: neither
+may carry a byte of per-user data, neither may become a lever (the readiness
+verdict is cached ~2 s precisely because it is unauthenticated and instance-wide),
+and the list stays a constant rather than an env list. The login flow still needs
+no exclusion, because the *middleware itself* is what accepts the secret.
 
 ## PR C — the session id wins over a claimed one
 
@@ -285,13 +336,18 @@ fails. A route added next month therefore lands as unassigned work rather than
 as a silently unguarded surface.
 
 Two dispositions are deliberately *not* guards. `GET /api/messages/:userId`,
-`GET /api/users/:userId/overview` and `POST /api/users` are
-`admin-zone-deferred`: §4 assigns them to the admin zone, where an "own" version
-is meaningless (minting a user row has none, and a guard there would only make
-the route un-callable). Nothing denies them until the zone model lands, and the
-fixture says so rather than letting the absence read as an oversight. The same
-is true of **`PUT /chat/bot-preferences/:botName/default-user`** — the GET
-beside it reads no claimed id, it *returns* one.
+`GET /api/users/:userId/overview` and `POST /api/users` are **`admin-zone`**: an
+"own" version is meaningless (minting a user row has none, and a guard there
+would only make the route un-callable), so what protects them is the ZONE — role
+`user` cannot call them at all. The same is true of
+**`PUT /chat/bot-preferences/:botName/default-user`**, which additionally needs
+a deny-list entry because it sits under the `/chat/*` user-zone prefix; the GET
+beside it reads no claimed id, it *returns* one, and is denied for the same
+reason.
+
+That value REPLACED `admin-zone-deferred` when the zone model landed — replaced,
+not added, so a row still carrying the old spelling fails the fixture loudly
+instead of quietly reading as covered.
 
 ## PR D — the row's owner, and the two channels
 
@@ -309,8 +365,8 @@ The last two are **not** in §4's list, and the review round is why they are
 here: the empirical pass demonstrated an authenticated non-admin renaming and
 DISABLING another user's email watcher and morning-briefing task, and
 force-queueing their Gmail-MCP watcher to run now. They are exactly this
-guard's shape, so leaving them to the deferred zone model would have shipped a
-cross-user WRITE behind a PR whose subject is resource ownership.
+guard's shape, so leaving them to the zone model would have shipped a cross-user
+WRITE behind a PR whose subject is resource ownership.
 
 **It answers 404, never 403**, because a web conversation id is
 `sha256("<userId>:<botName>:web")[0:16]` and therefore derivable: a 403 would
@@ -329,17 +385,22 @@ class. HEAD needs no special handling on the body: measured on Bun 1.3.14, a
 `c.json(…, 404)` returned from a HEAD is emitted with `content-length: 0`.
 
 **A NULL owner is admin-only, relaxed in `local` mode.** A watcher or gardener
-trace has no user. §4 makes those admin-only — but `resolveRole` answers `user`
-for a local identity unconditionally (deliberately: see *Roles* above), so the
-rule as written would lock the operator out of their own instance. The cost is
-paid the other way instead: `pinnedLocalUserId() !== null` allows it.
+trace has no user. §4 makes those admin-only — but a `local` identity resolves
+to `MUNINN_LOCAL_ROLE`, default `user` (the default is deliberate: see *Roles*
+above), so at the default the rule would lock the operator out of their own
+instance. The cost is paid the other way instead: `pinnedLocalUserId() !== null`
+allows it.
 
 ⚠️ **The operator consequence, stated because it will be met:** on
-`MUNINN_AUTH=local` the session is ONE `users.id`, so a trace, thread or
-conversation belonging to a DIFFERENT `users.id` — a Telegram bot's user row,
-say — answers 404/empty to the operator's own `/traces` page. That is the
-resource model working as specified, and the durable fix is the admin role the
-deferred zone model brings.
+`MUNINN_AUTH=local` at the DEFAULT `MUNINN_LOCAL_ROLE=user`, the session is ONE
+`users.id`, so a trace, thread or conversation belonging to a DIFFERENT
+`users.id` — a Telegram bot's user row, say — answers 404/empty to the
+operator's own `/traces` page. That is the resource model working as specified.
+**It IS lifted by `MUNINN_LOCAL_ROLE=admin`** (on a credential-channel request):
+`decideResourceAccess` returns ALLOWED for role `admin` BEFORE any owner
+comparison, so a `MUNINN_LOCAL_ROLE=admin` operator reads every row whatever its
+owner — measured, the full span tree at admin versus `{spans:[]}` at `user`.
+The 404 is the DEFAULT-role experience, not one `MUNINN_LOCAL_ROLE=admin` shares.
 
 **No `jira_drafts.user_id` migration**, though §4 assigns PR D one. Re-grepped at
 PR D time, as §4 itself instructs: the Jira composer's PR 4 deleted every
@@ -431,9 +492,10 @@ activity feed, the `/agents` live zone and the connection indicator stop
 updating and show Disconnected — measured: a 403 fails an `EventSource`
 permanently (`readyState` 2, one request in nine seconds), so those pages
 freeze rather than retry.
-That is the deferred zone model's shape arriving early. With auth off —
-today's default and the only mode the operator dashboard runs in — nothing
-changes.
+That is now the zone model's ordinary shape rather than a preview of it, and
+`MUNINN_LOCAL_ROLE=admin` is what lifts it: an admin identity passes both this
+per-route check and the zone. With auth off — today's default and the only mode
+the operator dashboard runs in — nothing changes.
 
 ### What the wonderwall sidecar actually does (measured)
 
@@ -463,66 +525,185 @@ feature — which is why they are written down here rather than left to be found
   segment on `/chat/reports/*` and `/chat/specs/*`. An id with `.`, `@` or `:`
   makes those six routes 400, and the chat client reads that as "no saved
   report" and disables the buttons. `resolveAuthConfig` warns once at boot.
-- **The four Chrome extensions in `extensions/` need their
-  `chrome-extension://<id>` origin in `MUNINN_ALLOWED_ORIGINS`,** or every
-  capture and research POST is refused as cross-origin. Allowlisting fixes the
-  CORS header AND the origin check — but not `requireOwnUser`: the Jira
-  extension's own user picker sends a claimed `userId`, and any value other than
-  the pinned identity is a 403 no allowlist can lift.
+- **The four Chrome extensions in `extensions/` do NOT work on an authenticating
+  instance, and allowlisting their origin does not change that.** Allowlisting
+  `chrome-extension://<id>` in `MUNINN_ALLOWED_ORIGINS` fixes the CORS header and
+  the origin check, but the extensions' capture and research routes are NOT in
+  the user zone — measured, they answer 403 by ZONE for role `user` however the
+  origin is configured — and `requireOwnUser` refuses the Jira extension's
+  claimed `userId` on top of that. This is a documented residual (see *What this
+  does not close*): the user zone is derived from the composed chat page, and the
+  extension routes are deliberately NOT re-zoned into it, because they carry no
+  token and `entra` could not authenticate them regardless.
+
+## The zone model — which routes a role may call
+
+`zones.ts` is **pure data plus one pure function**; `zone-middleware.ts` is its
+only request-facing consumer, mounted THIRD on the top-level app in
+`src/index.ts` (after auth, after origin, before both `app.route()` calls).
+Mounting it inside `createDashboardRoutes` would miss the `/chat` sub-app, which
+is the one surface the user zone is written around.
+
+**Order: a short deny list, then two allowlists, then default-deny.**
+
+1. **The deny list** — routes that sit UNDER a user-zone prefix and must not be
+   admitted by it. Today exactly the `/chat/bot-preferences/:botName/default-user`
+   trio (GET, PUT, and its OPTIONS preflight — reachable from a loopback request,
+   where the bypass supplies an identity and zones run: measured, OPTIONS from
+   loopback answers 403 here, not 401; through a proxy a credential-less preflight
+   is 401'd by auth first). They set
+   BOT-GLOBAL state, so there is no "own" version. `GET` implies `HEAD`, because
+   Hono dispatches `HEAD /x` to the `app.get("/x")` handler and RUNS its body.
+2. **The open zone** — `/api/live`, `/api/ready`, `/favicon.svg`, `/favicon.ico`.
+   The first two are additionally in `AUTH_EXCLUDED_PATHS`; the favicons
+   authenticate like everything else and merely need no role.
+3. **The user zone** — `/chat` and `/chat/*`, the `/simulator` compat redirects,
+   `/` (role-aware in the HANDLER: a `user` is 302'd to `/chat`), and the
+   dashboard routes the composed chat page fetches. All but the two
+   `/api/search/` reads were already owner-guarded, so this is enumeration
+   rather than new protection.
+4. **Everything else is admin**, and default-deny is the point: a route added
+   next month arrives CLOSED. That is the inverse of the claimed-id inventory,
+   which can only report what it knows to look for.
+
+**Entries are exact paths or `/`-suffixed prefixes, and the distinction carries
+the design.** `/api/goals/` admits `/api/goals/<user>` and does NOT admit
+`/api/goals` — so every unfiltered collection read stays admin while its
+owner-guarded sibling is reachable. `/api/memories/by-user` is a separate
+registration beside `/api/memories`, which is why the audited-path list carries
+both.
+
+**The user zone is derived, not remembered.** `zone-inventory.ts` extracts every
+same-origin URL from `renderChatPage()`'s output — bundles included, and by
+taking every path-shaped literal rather than grepping `fetch(`, which misses
+`<link rel="icon">`, `EventSource`, `new WebSocket` and every non-literal call
+site — and `chat-page-zone-inventory.txt` gives each a disposition that is then
+CHECKED against `decideZone`. A fetch added to the chat client lands as an
+unassigned row rather than as a panel that quietly stops filling. The cost is
+that path FRAGMENTS (`'/chat/threads/' + id + '/auto-respond'` yields both
+halves) appear too; they are dispositioned rather than filtered, because a filter
+is where a real route would hide.
+
+**`GET /api/events` is not in the user zone**, and its own `resolveRole` denial
+stays: the zone is the second lock, not a replacement.
+
+**The socket carries no zone decision.** `/chat/ws` and `/simulator/ws` are
+handled inside `Bun.serve`'s `fetch` before `app.fetch`; they are `/chat/*`
+surfaces, already identity-authenticated and owner-scoped. `createWsUpgradeAuthorizer`
+still resolves a ROLE (it rides `ws.data`), through the same `resolveGrantedRole`
+the HTTP path uses — threading `MUNINN_LOCAL_ROLE` through only one call site
+would leave HTTP `admin` and the socket `user` for one credential.
+
+### The admin audit trail
+
+`audit.ts` writes an `activity_log` row for the two ways an admin reaches
+somebody else's data, alongside the LogTape lines that already existed:
+
+- **Passthrough** — an id-addressed guard let an admin through
+  (`requireOwnUser`, `requireOwnedResource`). The row names reader AND owner.
+  Deduped per (reader, kind, resource) per 5 minutes: it hooks
+  `requireOwnedResource`, which sits on polled routes (`GET
+  /api/jira/drafts?thread=`, `GET /api/traces/:id`), so an operator watching a
+  colleague's thread would otherwise write one row per poll tick.
+- **Collection read** — one of the eight unfiltered collection paths (seven
+  collections; `memories` has two, `/api/memories` and `/api/memories/by-user`).
+  The row names reader and ROUTE, and is deduped per (reader, route) per 5
+  minutes, because `/api/traces` is polled every 15 s by every open `/traces`
+  tab. Hooked in ONE
+  place — a path list in the zone middleware, the `SIDE_EFFECTING_GETS` idiom —
+  and written BEFORE the handler runs, so an attempted read that 404s still rows.
+
+Two properties that are easy to get wrong: the row type is **`system`**, because
+`activity_log.type` carries a DB CHECK and `ActivityLog.push` persists
+fire-and-forget with a swallowed `.catch`, so a TS-only `"audit"` value would
+compile, render on the live feed and never reach the table (`src/db/auth-audit.test.ts`
+reads the rows back OUT of the database for exactly that reason); and the whole
+thing is **gated to `entra`**, since on a `local` instance every row would be the
+operator auditing themselves on their own feed.
 
 ## What this does not close
 
-- **Four routes still accept a claimed `userId`, and nothing denies them.**
+- **The READ collections still return everyone's rows** — `GET /api/traces` (the
+  list), `GET /api/tasks`, `/api/watchers`, `/api/goals`, `/api/memories`,
+  `/api/threads`, `/api/users`. They are admin-only now and audited, but they are
+  not FILTERED: an admin still gets every user's rows from one call, and
+  `GET /api/tasks` returns another user's task `prompt` verbatim. That is the
+  admin zone working as specified, not a leak — but the day there is more than
+  one operator it becomes one.
+- **The four claimed-`userId` routes are admin-zone, not guarded.**
   `GET /api/messages/:userId`, `GET /api/users/:userId/overview`,
-  `POST /api/users` and `PUT /chat/bot-preferences/:botName/default-user` are
-  `admin-zone-deferred` in `claimed-id-inventory.txt`: §4 assigns them to the
-  admin zone, where an "own" version is meaningless. The zone model is
-  deferred, so in `local` mode — where `resolveRole` answers `user` for
-  everyone — they are open to any authenticated caller. Verified live:
-  `GET /api/messages/<anyone>` answers 200.
-- **Which routes a role may call.** There is no zone middleware, so an
-  authenticated `user` still reaches `/traces`, `/agents`, `/logs`, `/models`
-  and the rest of the operator surface. `/api/events` is the ONE per-route
-  exception, and it is a denial rather than a zone. **Deferred zone model**, and
-  the reason `MUNINN_AUTH=entra` refuses to boot.
-- **The READ collections still return everyone's rows**, and they are what hands
-  out the ids the guards then refuse: `GET /api/traces` (the list),
-  `GET /api/tasks`, `GET /api/watchers`, `GET /api/goals`, `GET /api/memories`,
-  `GET /api/threads`, `GET /api/users`. §4 leaves them in the admin zone rather
-  than filtering them. Measured consequence worth knowing: `GET /api/tasks`
-  returns another user's task `prompt` verbatim, and `GET /api/goals` their
-  goals. Guarded WRITES with unguarded LISTS is a deliberate half-measure, not
-  an oversight — but it is a half-measure.
-- **`GET /api/messages/:userId` and `GET /api/users/:userId/overview`** are
-  `admin-zone-deferred` from PR C and read the same content
-  `GET /chat/conversations/:id/messages` is now guarded to protect. The zone
-  model is what closes them.
-- **The `/traces` page lists traces it can no longer open.** `GET /api/traces`
-  is unfiltered while `/api/traces/:traceId` is guarded, so on an
-  authenticating instance a row for another user's trace is listed and answers
-  with no spans. The waterfall SAYS so rather than silently doing nothing —
-  filtering the list is the zone model's job.
+  `POST /api/users` and `PUT /chat/bot-preferences/:botName/default-user` still
+  take a client-named id; what changed is that role `user` can no longer call
+  them. An "own" version of each is meaningless, so the zone IS the answer.
+- **The `/traces` page lists traces it cannot open.** `GET /api/traces` is
+  unfiltered while `/api/traces/:traceId` is owner-guarded, so on a `local`
+  instance an admin sees rows whose spans answer empty. The waterfall SAYS so;
+  filtering the list is a separate change.
+- **A `user` still sees the operator nav.** The nav is rendered on every page
+  including `/chat`, so a role `user` can click `/traces` and get a 403 rather
+  than not seeing the link. Hiding it needs the role at render time on the chat
+  page and is deliberately out of this pass — a 403 is honest, an invisible link
+  is a second place for the boundary to be spelled.
 - **A resource guard's owner is a `users.id`, and `local` mode pins ONE.** So on
-  an authenticating instance the operator's own Telegram-owned traces and
-  threads answer 404 to their own web session. See the PR D section above.
-- **`MUNINN_ALLOWED_ORIGINS` is enforced everywhere**, the `/chat/ws` upgrade
-  included since PR D — measured in review, a cross-origin handshake with a
-  valid credential answers **403**. (This bullet said the opposite until PR D
-  landed; a residuals list that has gone stale is worse than no list, since it
-  is what a reader checks the boundary against.)
-- **`MUNINN_ADMIN_IDENTS` is inert in `local` mode.** The pinned identity always
-  resolves to `user`, so the allowlist grants nobody anything today. It is a
-  boot requirement so the deferred Entra mode — where it IS the role source —
-  cannot ship without it.
+  an authenticating instance at the DEFAULT `MUNINN_LOCAL_ROLE=user`, the
+  operator's own Telegram-owned traces and threads answer 404 to their own web
+  session — the guard keys on the id, and the pinned `user`-role session does not
+  own those rows. This IS lifted by `MUNINN_LOCAL_ROLE=admin`:
+  `decideResourceAccess` returns ALLOWED for role `admin` before any owner
+  comparison, so an admin operator reads every row whatever its owner. See the
+  PR D section above.
+- **`MUNINN_ADMIN_IDENTS` is still inert in `local` mode.** The pinned identity's
+  role comes from `MUNINN_LOCAL_ROLE`, never from the allowlist. It is a boot
+  requirement so the deferred Entra mode — where it IS the role source — cannot
+  ship without it.
+- **The loopback bypass is unchanged, and so are its limits.** It grants role
+  `user` and nothing promotes it; an L4 forward still makes every client look
+  local, which now means every client gets a `user`-role session rather than an
+  admin one. That is a smaller blast radius, not a fix.
 - **Credential guessing is not rate-limited**, and `LOCAL_TOKEN_MIN_LENGTH` is a
   length check only: a 16-character passphrase boots. Use `openssl rand -hex 24`.
-- **An unauthenticated browser gets raw 401 JSON, not a login page.** There is no
-  login route (`AUTH_EXCLUDED_PATHS` is empty), by design.
+- **An unauthenticated browser gets raw 401 JSON, not a login page.** There is
+  still no login route — `AUTH_EXCLUDED_PATHS` carries only the two health
+  endpoints, and the middleware itself is what accepts the secret.
+- **The user-zone search reads are NOT bot-scoped.** `GET
+  /api/search/collection/:col/documents` and `GET /api/search/document/:col/:id`
+  are in the user zone (the chat page fetches them) but take ANY collection name,
+  so role `user` reads every huginn collection's document bodies — internal
+  Confluence included — not just the selected bot's `wikiCollections`. The user
+  zone is wider than the chat-page fetch it was derived from. This is a
+  pre-existing exposure, not a regression vs `main`, and v1 is dev-only /
+  chat-only; scoping these two routes to the caller's bot is a follow-up.
+- **`GET /chat/bots` (user zone) discloses filesystem layout and the prompt
+  corpus.** It returns each bot's absolute server `dir` path and full prompt
+  bodies, so any colleague on `entra` reads muninn's directory layout and every
+  persona/system prompt. A follow-up should trim the payload; not re-zoned,
+  because the chat page needs the bot list.
+- **`POST /chat/mcp-status/:botName/refresh` (user zone via the `/chat/` prefix)
+  is a bot-global side effect at role `user`.** It re-probes / re-spawns every
+  MCP server for the bot — a process-spawn amplifier, the same class as the
+  `default-user` deny-list entries — but the inspector panel fetches it, so
+  denying it degrades a user-zone feature. Needs a product decision, not a
+  reflexive deny.
+- **The four `extensions/` Chrome extensions have no config remedy on an
+  authenticating instance.** Their capture/research routes are denied by the zone
+  model (not in the user zone), allowlisting the origin does not lift it (F5
+  above), and they carry no token so `entra` could not authenticate them
+  regardless. Deliberately NOT re-zoned — the user zone is the composed chat
+  page's surface.
 
 `src/index.ts` logs all of this at boot in an authenticating mode rather than
-letting the mode's presence imply a boundary it does not yet have.
+letting the mode's presence imply a boundary it does not have.
 
 ## Wiring
+
+Three middlewares, in this order, inside the `isAuthenticatingMode` branch on the
+TOP-LEVEL app and before both `app.route()` calls:
+`createAuthMiddleware` → `createOriginMiddleware` → `createZoneMiddleware`. Each
+answers a different refusal — 401 "you are not logged in", 403 "this side effect
+did not come from a page of mine", 403 "you are not an operator" — and the order
+is what keeps them distinguishable: zones LAST because a request with no identity
+has no role. `src/auth/wiring.test.ts` pins all three by reading the file, since
+every one of them fails silently and in the fail-OPEN direction.
 
 `src/index.ts` must call `app.fetch(req, server)` — `hono/bun`'s `getConnInfo`
 reads the peer address off that second argument, and without it the loopback

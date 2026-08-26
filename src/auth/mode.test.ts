@@ -141,13 +141,42 @@ describe("the resolved local config", () => {
   });
 });
 
-test("the excluded-path list is empty in this PR", () => {
-  // `expect([]).toEqual([])` would restate the constant and pin nothing, so the
-  // assertion that carries weight is the HTTP one: no path is reachable without
-  // a credential. Exclusion and zone are the same axis, and an entry here would
-  // keep a route reachable with no token whatever the deferred zone model
-  // decides — which is why the list is a constant rather than an env var.
-  expect(AUTH_EXCLUDED_PATHS).toHaveLength(0);
+describe("MUNINN_LOCAL_ROLE", () => {
+  test("defaults to `user` over a FULL local env with the variable absent", () => {
+    // Over `localEnv()`, not `{}`: an empty env returns at mode `off` before
+    // the local branch is reached, so the "default" it would prove is the
+    // constant in the off branch rather than the parse.
+    expect(resolveAuthConfig(localEnv()).localRole).toBe("user");
+  });
+
+  test("`admin` is honoured, case-insensitively and with whitespace", () => {
+    expect(resolveAuthConfig(localEnv({ MUNINN_LOCAL_ROLE: "admin" })).localRole).toBe("admin");
+    expect(resolveAuthConfig(localEnv({ MUNINN_LOCAL_ROLE: " ADMIN " })).localRole).toBe("admin");
+    expect(resolveAuthConfig(localEnv({ MUNINN_LOCAL_ROLE: "user" })).localRole).toBe("user");
+  });
+
+  test("an unrecognised value throws — a typo must not degrade to a silent lockout", () => {
+    expect(() => resolveAuthConfig(localEnv({ MUNINN_LOCAL_ROLE: "operator" }))).toThrow(AuthConfigError);
+    expect(() => resolveAuthConfig(localEnv({ MUNINN_LOCAL_ROLE: "operator" }))).toThrow(/not a role/);
+  });
+
+  test("it is INERT outside `local` mode", () => {
+    // Auth off: no identity is resolved at all, so a stale line in `.env`
+    // grants nothing. (The `entra` branch cannot be reached while
+    // AUTH_ZONES_IMPLEMENTED is false, and its role source is the allowlist.)
+    expect(resolveAuthConfig({ MUNINN_LOCAL_ROLE: "admin" }).localRole).toBe("user");
+    expect(resolveAuthConfig({ MUNINN_AUTH: "off", MUNINN_LOCAL_ROLE: "admin" }).localRole).toBe("user");
+  });
+});
+
+test("the excluded-path list is the two health endpoints and nothing else", () => {
+  // An entry here is a route reachable with NO credential on an authenticating
+  // instance, so the list being short is the property. It was empty until the
+  // zone model landed; `/api/live` and `/api/ready` are what a platform probe
+  // needs and are the reason the open zone exists. Anything else added here
+  // must be justified the same way — which is why this is a constant rather
+  // than an env var, and why this test names the members rather than counting.
+  expect([...AUTH_EXCLUDED_PATHS].sort()).toEqual(["/api/live", "/api/ready"]);
 });
 
 describe("MUNINN_LOCAL_USER and the report/spec path segment", () => {

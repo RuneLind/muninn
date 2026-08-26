@@ -56,10 +56,13 @@ const ROUTE_PATHS = ["src/chat/routes.ts", "src/dashboard/routes/"];
  * rather than a silently unguarded surface.
  *
  * - `own-user-guard` - `requireOwnUser` is applied; the session identity wins.
- * - `admin-zone-deferred` - §4 assigns it to the ADMIN zone, where an "own"
- *   version is meaningless (`POST /api/users` mints a row; `/api/messages/:userId`
- *   is an operator read). The zone model is deferred, so nothing denies it
- *   today. Listed rather than forgotten.
+ * - `admin-zone` - the route is in the ADMIN zone, where an "own" version is
+ *   meaningless (`POST /api/users` mints a row; `/api/messages/:userId` is an
+ *   operator read). It is now DENIED to role `user` by `src/auth/zones.ts`'s
+ *   default-deny, so the claimed id it accepts is only ever named by an
+ *   operator. This value REPLACED `admin-zone-deferred` when the zone model
+ *   landed: replaced rather than added, so a row still carrying the old
+ *   spelling fails the fixture loudly instead of quietly reading as covered.
  * - `doc-only` - a comment or a type, not a live read.
  *
  * There is deliberately no `cors-helper` value: `corsRows` counts LITERAL
@@ -67,7 +70,7 @@ const ROUTE_PATHS = ["src/chat/routes.ts", "src/dashboard/routes/"];
  * `src/auth/cors.ts` contains none, so such a row cannot exist. A disposition
  * no row can carry is a disposition that reads as coverage without being any.
  */
-export const DISPOSITIONS = ["own-user-guard", "admin-zone-deferred", "doc-only"] as const;
+export const DISPOSITIONS = ["own-user-guard", "admin-zone", "doc-only"] as const;
 export type Disposition = (typeof DISPOSITIONS)[number];
 
 export interface InventoryRow {

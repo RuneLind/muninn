@@ -1,8 +1,17 @@
-import { test, expect, describe } from "bun:test";
+import { test, expect, describe, afterEach } from "bun:test";
 import { Hono } from "hono";
 import { requireOwnUser, extractionsForcedOff, sessionIdentity, sessionRole } from "./guard.ts";
+import { __setAuthPolicyForTest } from "./policy.ts";
+import { __resetAuditDedupForTest } from "./audit.ts";
+import { activityLog } from "../observability/activity-log.ts";
+import type { ActivityEvent } from "../types.ts";
 import type { Identity } from "./introspect.ts";
 import type { AuthRole } from "./role.ts";
+
+afterEach(() => {
+  __setAuthPolicyForTest(null);
+  __resetAuditDedupForTest();
+});
 
 const LOCAL: Identity = {
   userId: "rune",
@@ -127,6 +136,26 @@ describe("an authenticating mode, role admin", () => {
 
   test("an absent claim falls back to the admin's own id", async () => {
     expect(await (await app.request("/absent")).json()).toEqual({ userId: "nav-a150244", username: null });
+  });
+
+  test("the admin passthrough WRITES an audit row (the call site, not just the fn)", async () => {
+    // Mutation proof: replacing the `auditAdminPassthrough(...)` call in
+    // requireOwnUser with a no-op leaves 264 tests green — every existing test
+    // asserts the returned userId, none proves the guard CALLS the audit. This
+    // one does. `authMode()` reads the policy, which the test preload clears to
+    // `off`, so entra is injected explicitly.
+    __setAuthPolicyForTest({ authenticating: true, mode: "entra" });
+    const rows: ActivityEvent[] = [];
+    const stop = activityLog.subscribe((e) => rows.push(e));
+    try {
+      const res = await app.request("/probe/colleague-b");
+      expect(res.status).toBe(200);
+    } finally {
+      stop();
+    }
+    const passthrough = rows.filter((r) => r.metadata?.audit === "admin-passthrough");
+    expect(passthrough).toHaveLength(1);
+    expect(passthrough[0]!.metadata).toMatchObject({ reader: "nav-a150244", owner: "colleague-b", kind: "claimed-id" });
   });
 });
 

@@ -55,10 +55,10 @@ import { getLog } from "../logging.ts";
 import type { AuthConfig } from "./mode.ts";
 import { isAuthenticatingMode } from "./mode.ts";
 import { createIntrospector, localIdentity, type Identity } from "./introspect.ts";
-import { resolveRequestIdentity, unauthenticatedBody } from "./middleware.ts";
+import { resolveGrantedRole, resolveRequestIdentity, unauthenticatedBody } from "./middleware.ts";
 import { decideOrigin, loopbackOrigins } from "./origin.ts";
 import { normalizeOrigin } from "../config.ts";
-import { resolveRole, type AuthRole } from "./role.ts";
+import type { AuthRole } from "./role.ts";
 
 const log = getLog("auth", "ws");
 
@@ -118,7 +118,11 @@ export function createWsUpgradeAuthorizer(
   ];
 
   return async (req, peer) => {
-    const { identity } = await resolveRequestIdentity(req.headers, req.url, peer, { introspector, pinned });
+    // `via` as well as `identity`: the role this grants must equal the role
+    // HTTP grants for the same credential, and `MUNINN_LOCAL_ROLE` is applied
+    // from the channel that established the identity. Destructuring only
+    // `{ identity }` here is what would leave HTTP admin and the socket `user`.
+    const { identity, via } = await resolveRequestIdentity(req.headers, req.url, peer, { introspector, pinned });
     if (!identity) {
       warnOnce("unauthenticated", "Refused an unauthenticated WebSocket upgrade");
       return { ok: false, response: refuse(unauthenticatedBody(auth), 401) };
@@ -146,7 +150,11 @@ export function createWsUpgradeAuthorizer(
       return { ok: false, response: refuse({ error: "forbidden", reason: "cross-origin request" }, 403) };
     }
 
-    return { ok: true, identity, role: resolveRole(identity, auth.adminIdents) };
+    // No ZONE decision is made here, deliberately: `/chat/ws` and
+    // `/simulator/ws` are `/chat/*` surfaces, i.e. inside the user zone, and
+    // they are already identity-authenticated and owner-scoped (`wsDataFor` +
+    // `eventVisibleTo`). A role is still resolved because `ws.data` carries it.
+    return { ok: true, identity, role: resolveGrantedRole(identity, via, auth) };
   };
 }
 

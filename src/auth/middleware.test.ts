@@ -306,3 +306,79 @@ describe("off is off", () => {
     expect(() => createAuthMiddleware(resolveAuthConfig({}))).toThrow(/nothing to mount/);
   });
 });
+
+/**
+ * `MUNINN_LOCAL_ROLE=admin` on a SECOND live server, because the promotion is a
+ * property of the config and the one above deliberately does not set it.
+ *
+ * These are the rows the operator escape hatch stands or falls on. The first
+ * two are the pair that makes the grant sound: promoting through `resolveRole`
+ * alone would hand admin to every credential-less loopback request, and the
+ * loopback test is blind to an L4 forward (`tailscale serve --tcp`, `ssh -L`,
+ * `socat`, a bare `proxy_pass`), so that is full admin over every user's data
+ * with no secret at all.
+ */
+describe("MUNINN_LOCAL_ROLE — which channel may be promoted", () => {
+  const ADMIN_CONFIG = resolveAuthConfig({
+    MUNINN_AUTH: "local",
+    MUNINN_LOCAL_TOKEN: SECRET,
+    MUNINN_LOCAL_USER: "rune",
+    MUNINN_LOCAL_ROLE: "admin",
+    MUNINN_ADMIN_IDENTS: "A123456",
+    MUNINN_ALLOWED_ORIGINS: "https://muninn-host.example-tailnet.ts.net",
+  });
+  const adminApp = new Hono();
+  adminApp.use("*", createAuthMiddleware(ADMIN_CONFIG));
+  adminApp.get("/who", (c) => c.json({ userId: c.get("identity")?.userId, role: c.get("role") }));
+  const adminServer = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req, srv) => adminApp.fetch(req, srv) });
+  const ADMIN_BASE = `http://127.0.0.1:${adminServer.port}`;
+  afterAll(() => adminServer.stop(true));
+
+  const who = async (headers: Record<string, string> = {}) =>
+    (await (await fetch(`${ADMIN_BASE}/who`, { headers })).json()) as { userId?: string; role?: string };
+
+  test("a direct-loopback request with NO credential stays `user`", async () => {
+    expect(await who()).toEqual({ userId: "rune", role: "user" });
+  });
+
+  test("the same request WITH a valid token is admin — the ssh escape hatch", async () => {
+    // `ssh` + `curl -H 'x-muninn-token: …'` must reach the operator surface.
+    // "did not take the bypass branch" would refuse this one, which is why the
+    // predicate is the CHANNEL and not the branch.
+    expect(await who({ [TOKEN_HEADER]: SECRET })).toEqual({ userId: "rune", role: "admin" });
+  });
+
+  test("an INVALID token on a loopback request is still just the bypass", async () => {
+    expect(await who({ [TOKEN_HEADER]: "not-the-secret" })).toEqual({ userId: "rune", role: "user" });
+  });
+
+  test("a COOKIE-only request through a proxy is admin — the row the hatch stands on", async () => {
+    // The operator's second and every later request after following the login
+    // link. `presentedToken` never sees a cookie, so "a credential was
+    // presented" would drop them to `user` permanently one redirect in.
+    const cookie = `${SESSION_COOKIE}=${mintSession(SECRET, "rune")}`;
+    expect(await who({ ...TAILSCALE_SERVE_HEADERS, cookie })).toEqual({ userId: "rune", role: "admin" });
+  });
+
+  test("a token through a proxy is admin too", async () => {
+    expect(await who({ ...TAILSCALE_SERVE_HEADERS, [TOKEN_HEADER]: SECRET })).toEqual({ userId: "rune", role: "admin" });
+  });
+
+  test("a COOKIE from the host itself stays `user` — the consequence, stated", async () => {
+    // `resolveRequestIdentity` fills `identity` from the bypass and reads the
+    // cookie only `if (!identity)`, so a browser ON the muninn host never
+    // reaches the cookie branch. Documented rather than restructured: the
+    // ordering is shipped PR D behaviour.
+    const cookie = `${SESSION_COOKIE}=${mintSession(SECRET, "rune")}`;
+    expect(await who({ cookie })).toEqual({ userId: "rune", role: "user" });
+  });
+
+  test("with the bypass off, an unauthenticated request is 401 rather than a promoted `user`", async () => {
+    __setLoopbackBypassForTest(false);
+    try {
+      expect((await fetch(`${ADMIN_BASE}/who`)).status).toBe(401);
+    } finally {
+      __setLoopbackBypassForTest(null);
+    }
+  });
+});

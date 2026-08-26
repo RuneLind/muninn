@@ -285,3 +285,59 @@ describe("with auth OFF", () => {
     expect(decision.ok).toBe(true);
   });
 });
+
+/**
+ * The socket carries no ZONE decision — `/chat/ws` and `/simulator/ws` are
+ * `/chat/*` surfaces, already identity-authenticated and owner-scoped — but it
+ * does carry a ROLE, and that role must equal the one HTTP grants for the same
+ * credential. `resolveRole` has two call sites; threading `MUNINN_LOCAL_ROLE`
+ * through only the middleware would leave HTTP `admin` and the socket `user`,
+ * which nothing else in the suite can see.
+ */
+describe("MUNINN_LOCAL_ROLE reaches the upgrade, on the same terms as HTTP", () => {
+  const ADMIN_CONFIG = resolveAuthConfig({
+    MUNINN_AUTH: "local",
+    MUNINN_LOCAL_TOKEN: SECRET,
+    MUNINN_LOCAL_USER: "rune",
+    MUNINN_LOCAL_ROLE: "admin",
+    MUNINN_ADMIN_IDENTS: "A123456",
+    MUNINN_ALLOWED_ORIGINS: TAILNET,
+  });
+
+  // The file-level `beforeEach` turns the bypass OFF so refusals are
+  // observable at all; these cases are ABOUT the bypass, so it goes back on.
+  // The file's `afterAll` restores the default either way.
+  beforeEach(() => __setLoopbackBypassForTest(null));
+
+  const decide = (headers: Record<string, string>, peer: string) =>
+    createWsUpgradeAuthorizer(ADMIN_CONFIG, PORT)(new Request("http://127.0.0.1/chat/ws", { headers }), peer);
+
+  test("a credential-less loopback upgrade is `user`", async () => {
+    const d = await decide({}, "127.0.0.1");
+    expect(d.ok && d.role).toBe("user");
+  });
+
+  test("a token on the upgrade is `admin` — the same answer HTTP gives", async () => {
+    const d = await decide({ authorization: `Bearer ${SECRET}` }, "127.0.0.1");
+    expect(d.ok && d.role).toBe("admin");
+  });
+
+  test("a session cookie through a proxy is `admin`", async () => {
+    const d = await decide(
+      { cookie: `${SESSION_COOKIE}=${mintSession(SECRET, "rune")}`, "x-forwarded-for": "100.64.0.1" },
+      "127.0.0.1",
+    );
+    expect(d.ok && d.role).toBe("admin");
+  });
+
+  test("and a `user`-role identity can still complete the upgrade", async () => {
+    // The socket makes no zone decision: a `user` opening their own chat page
+    // is the ordinary case, and a zone check here would break it.
+    const d = await createWsUpgradeAuthorizer(LOCAL_CONFIG, PORT)(
+      new Request("http://127.0.0.1/chat/ws", { headers: { authorization: `Bearer ${SECRET}` } }),
+      "127.0.0.1",
+    );
+    expect(d.ok).toBe(true);
+    expect(d.ok && d.role).toBe("user");
+  });
+});

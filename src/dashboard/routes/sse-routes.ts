@@ -54,19 +54,22 @@ export function registerSSERoutes(app: Hono): void {
      * handlers" was never a fix; the chat page now consumes `GET /chat/events`
      * instead, which serves those two channels and nothing else.
      *
-     * A per-route check rather than a zone entry, because the zone model is
-     * DEFERRED: "moves to the admin zone" would leave this route wide open to any
-     * authenticated caller. `sessionRole` answers `null` with auth off — no
-     * middleware is mounted — so today's operator dashboard is untouched.
+     * A per-route check BESIDE the zone model, not a replacement for it: the
+     * zone model puts `/api/events` outside the user zone too, and this check is
+     * the second lock — a regression that added the route to the user zone would
+     * still be refused here. It is not in the user zone precisely because "move
+     * it to the admin zone" is what the zone already does; the extra `resolveRole`
+     * guard predates the zone and is KEPT. `sessionRole` answers `null` with auth
+     * off — no middleware is mounted — so today's operator dashboard is untouched.
      *
      * ⚠️ The consequence on an authenticating instance, stated because the
-     * operator will meet it: `resolveRole` answers `user` for a `local` identity
-     * unconditionally, so on `MUNINN_AUTH=local` this route is denied to
-     * EVERYONE, and the dashboard's own activity feed, `/agents` live zone and
-     * connection indicator stop updating. That is the deferred zone model's
-     * shape arriving early, not a bug — the durable fix is the admin role, which
-     * cannot exist in `local` mode without making this campaign's central
-     * acceptance pass without the diff (see `role.ts`).
+     * operator will meet it: a `local` identity resolves to `MUNINN_LOCAL_ROLE`,
+     * default `user`, so at the default this route is denied to EVERYONE and the
+     * dashboard's own activity feed, `/agents` live zone and connection indicator
+     * stop updating. The fix is `MUNINN_LOCAL_ROLE=admin` reached through an HTTP
+     * proxy that stamps x-forwarded-* (a browser on the host stays `user` — the
+     * loopback bypass fills the identity before the cookie is read; see
+     * `role.ts` / `middleware.ts`). An admin passes both this check and the zone.
      *
      * **What the two consumers actually do, measured rather than reasoned about**
      * (`views/components/connection.ts` and `views/agents-page.ts`, the only two
@@ -87,10 +90,11 @@ export function registerSSERoutes(app: Hono): void {
         warnedRoleDenial = true;
         log.warn(
           "Refused GET /api/events for role `user` — the operator stream carries every user's message " +
-          "text and a process-wide agent_runs snapshot. On MUNINN_AUTH=local EVERY identity is role " +
-          "`user` (the loopback bypass included), so the dashboard's activity feed and /agents live " +
-          "zone will show Disconnected and stop updating until the deferred zone model lands. The " +
-          "chat page is unaffected: it uses /chat/events.",
+          "text and a process-wide agent_runs snapshot. On MUNINN_AUTH=local the default role is " +
+          "`user` (the loopback bypass always is), so the dashboard's activity feed and /agents live " +
+          "zone will show Disconnected and stop updating. To use them, set MUNINN_LOCAL_ROLE=admin and " +
+          "reach the dashboard through an HTTP proxy that stamps x-forwarded-* (a browser on the host " +
+          "stays `user`). The chat page is unaffected: it uses /chat/events.",
         );
       }
       return c.json(

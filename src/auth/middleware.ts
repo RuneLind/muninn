@@ -215,12 +215,39 @@ export interface IdentityDeps {
   readonly pinned: Identity | null;
 }
 
+/**
+ * WHICH CHANNEL established the identity — three values, not a `credentialed`
+ * boolean, because the two "yes" answers are genuinely different things and the
+ * boolean spelling of this got the grant wrong twice in review:
+ *
+ *  - `"session"` — a valid `muninn_session` cookie. The operator's SECOND and
+ *    every later request through a proxy. Reading "a credential was PRESENTED"
+ *    instead (`presentedToken`, which sees header/bearer/query and never the
+ *    cookie) drops them to `user` permanently one redirect after login.
+ *  - `"credential"` — a validly presented token, INCLUDING one presented on a
+ *    request that also took the bypass. `ssh` + `curl -H 'x-muninn-token: …'`
+ *    must reach the operator surface, so "did not take the bypass branch" is
+ *    wrong in the other direction.
+ *  - `"bypass"` — the loopback bypass alone, with no credential at all. This is
+ *    the only value that must never be granted `MUNINN_LOCAL_ROLE=admin`: the
+ *    bypass tests the PEER ADDRESS and is blind to an L4 forward
+ *    (`tailscale serve --tcp`, `ssh -L`, `socat`, a bare `proxy_pass`), so
+ *    promoting it would hand every client behind one full admin over every
+ *    user's data with no credential.
+ *
+ * Meaningless when `identity` is `null`; `"bypass"` is the inert default there.
+ * NB `mint` is NOT this decision — it is `false` in the cookie branch.
+ */
+export type IdentityVia = "session" | "credential" | "bypass";
+
 export interface IdentityResolution {
   readonly identity: Identity | null;
   /** True when a session cookie should be written back — the client presented a
    *  valid explicit credential. Meaningless on the WebSocket path, which cannot
    *  set a cookie on a 101. */
   readonly mint: boolean;
+  /** See {@link IdentityVia}. */
+  readonly via: IdentityVia;
 }
 
 /**
@@ -241,17 +268,24 @@ export async function resolveRequestIdentity(
   const presented = presentedToken(headers, url);
   let identity: Identity | null = null;
   let mint = false;
+  let via: IdentityVia = "bypass";
 
   const bypassAllowed = loopbackBypassOverride ?? true;
   if (bypassAllowed && deps.pinned && isDirectLoopback(peer, headers)) {
     // The escape hatch. `ssh` + `curl 127.0.0.1:3010` must work whatever the
-    // auth config says, and it resolves to the SAME pinned identity at the
-    // same role `user` — not to admin, or every guard PRs C–D add would be a
-    // no-op for the loopback tests that are supposed to prove them.
+    // auth config says, and it resolves to the SAME pinned identity — at role
+    // `user` unless a credential rode along, since a bypass grant costs
+    // nothing to obtain and this branch cannot see an L4 forward.
     identity = deps.pinned;
     // A login link followed on the host itself should still leave a session
-    // behind, so the same URL behaves the same way everywhere.
-    if (presented && (await deps.introspector.introspect(presented, "credential"))) mint = true;
+    // behind, so the same URL behaves the same way everywhere — and a request
+    // that DID present a valid secret is credentialed even though the bypass
+    // is what happened to answer first. `ssh` + a token header is the escape
+    // hatch that has to keep working from the road.
+    if (presented && (await deps.introspector.introspect(presented, "credential"))) {
+      mint = true;
+      via = "credential";
+    }
   }
 
   if (!identity) {
@@ -261,15 +295,42 @@ export async function resolveRequestIdentity(
     // into every request's cookie jar with no expiry — which is exactly the
     // property `src/auth/session.ts` exists to prevent.
     const cookie = readCookie(headers, SESSION_COOKIE);
-    if (cookie) identity = await deps.introspector.introspect(cookie, "session");
+    if (cookie) {
+      identity = await deps.introspector.introspect(cookie, "session");
+      if (identity) via = "session";
+    }
   }
 
   if (!identity && presented) {
     identity = await deps.introspector.introspect(presented, "credential");
-    if (identity) mint = true;
+    if (identity) {
+      mint = true;
+      via = "credential";
+    }
   }
 
-  return { identity, mint };
+  return { identity, mint, via };
+}
+
+/**
+ * The role one request is granted — the ONE place `MUNINN_LOCAL_ROLE` is
+ * applied, so the HTTP middleware and the WebSocket upgrade cannot disagree.
+ *
+ * `resolveRole` has two call sites (`createAuthMiddleware` and
+ * `createWsUpgradeAuthorizer`); threading the local role through only one would
+ * leave HTTP `admin` and the socket `user` for the same credential, which is a
+ * failure nothing else in the suite can see.
+ *
+ * ⚠️ **A browser ON the muninn host stays `user`.** `resolveRequestIdentity`
+ * fills `identity` from the bypass BEFORE the cookie branch is reached (it
+ * reads the cookie only `if (!identity)`), so a local browser's session cookie
+ * is never consulted and `via` is `"bypass"`. Through a reverse proxy — which
+ * stamps `x-forwarded-*` and therefore removes the bypass — the cookie branch
+ * runs and the operator gets `admin`. That ordering is shipped PR D behaviour
+ * and is deliberately not restructured here.
+ */
+export function resolveGrantedRole(identity: Identity, via: IdentityVia, config: AuthConfig): AuthRole {
+  return resolveRole(identity, config.adminIdents, via === "bypass" ? "user" : config.localRole);
 }
 
 function isSecureRequest(c: Context): boolean {
@@ -342,8 +403,8 @@ export function createAuthMiddleware(config: AuthConfig): MiddlewareHandler {
   const pinned = config.local ? localIdentity(config.local) : null;
   const hasExclusions = AUTH_EXCLUDED_PATHS.length > 0;
 
-  const grant = async (c: Context, next: Next, identity: Identity, mint: boolean) => {
-    const role: AuthRole = resolveRole(identity, config.adminIdents);
+  const grant = async (c: Context, next: Next, identity: Identity, mint: boolean, via: IdentityVia) => {
+    const role: AuthRole = resolveGrantedRole(identity, via, config);
     c.set("identity", identity);
     c.set("role", role);
     await next();
@@ -358,7 +419,7 @@ export function createAuthMiddleware(config: AuthConfig): MiddlewareHandler {
   return async (c, next) => {
     if (hasExclusions && AUTH_EXCLUDED_PATHS.includes(c.req.path)) return next();
 
-    const { identity, mint } = await resolveRequestIdentity(
+    const { identity, mint, via } = await resolveRequestIdentity(
       c.req.raw.headers,
       c.req.url,
       peerAddress(c),
@@ -387,7 +448,7 @@ export function createAuthMiddleware(config: AuthConfig): MiddlewareHandler {
       return c.redirect(tokenStrippedTarget(c), 302);
     }
 
-    return grant(c, next, identity, mint);
+    return grant(c, next, identity, mint, via);
   };
 }
 
