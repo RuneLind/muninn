@@ -24,6 +24,10 @@ import { isValidUuid } from "../dashboard/routes/route-utils.ts";
 import { resolveJiraBotLive } from "../jira/bot.ts";
 import { getLog } from "../logging.ts";
 import { requireOwnUser, forbiddenHead, sessionIdentity, sessionRole, extractionsForcedOff } from "../auth/guard.ts";
+import { requireOwnedResource, filterToOwner, decideResourceAccess } from "../auth/resource-guard.ts";
+import { pinnedLocalUserId } from "../auth/policy.ts";
+import { streamSSE } from "hono/streaming";
+import { agentStatus } from "../observability/agent-status.ts";
 import { applyCors, corsHeaders } from "../auth/cors.ts";
 
 const log = getLog("chat");
@@ -148,6 +152,78 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
       // degrade silently without it), a multi-user provider may not.
       provider: identity.provider,
       role: sessionRole(c),
+    });
+  });
+
+  /**
+   * The chat page's OWN event stream — PR D's replacement for `GET /api/events`.
+   *
+   * Two channels, and deliberately only two: `agent_status` (the phase pill) and
+   * `request_progress` (the single-pane waterfall). Those are the ones the chat
+   * page renders as ITS OWN, and both were already viewer-scopeable
+   * (`src/observability/agent-status.ts`).
+   *
+   * The other two channels on `/api/events` are why this route exists rather
+   * than a `?viewer=` on that one: `activity` replays 50 events carrying the
+   * full message text of every turn on the instance, and `agent_runs` is
+   * `snapshotAll()` — every run process-wide, with `username`, `traceId` and
+   * tool inputs. `EventSource` delivers every event over the wire regardless of
+   * which ones the page reads, so "the page only registers two handlers" was
+   * never a fix. **Nothing here may re-add `agent_runs`.**
+   *
+   * `?viewer=` goes through `requireOwnUser` exactly as it did on the old route:
+   * the claim verbatim with auth off (the page picks its own user there), the
+   * session id in any authenticating mode. The page still fails CLOSED and does
+   * not connect at all without a resolved viewer — see `connectSSE` in
+   * `views/page.ts`.
+   */
+  app.get("/events", (c) => {
+    const own = requireOwnUser(c, c.req.query("viewer"));
+    if (!own.ok) return own.response;
+    const viewer = own.userId || undefined;
+    return streamSSE(c, async (stream) => {
+      await stream.writeSSE({ event: "agent_status", data: JSON.stringify(agentStatus.get(viewer)) });
+      await stream.writeSSE({ event: "request_progress", data: JSON.stringify(agentStatus.getProgress(viewer)) });
+
+      let alive = true;
+      const unsubscribeProgress = agentStatus.subscribeProgress(async (progress) => {
+        if (!alive) return;
+        try {
+          await stream.writeSSE({ event: "request_progress", data: JSON.stringify(progress) });
+        } catch {
+          alive = false;
+        }
+      }, viewer);
+      const unsubscribeStatus = agentStatus.subscribe(async (status) => {
+        if (!alive) return;
+        try {
+          await stream.writeSSE({ event: "agent_status", data: JSON.stringify(status) });
+        } catch {
+          alive = false;
+        }
+      }, viewer);
+
+      // Same 30s heartbeat as the operator stream: `Bun.serve`'s `idleTimeout`
+      // is 255s, so a quiet chat page would otherwise be dropped and reconnect.
+      const heartbeat = setInterval(async () => {
+        if (!alive) return;
+        try {
+          await stream.writeSSE({ event: "heartbeat", data: "{}" });
+        } catch {
+          alive = false;
+        }
+      }, 30_000);
+
+      stream.onAbort(() => {
+        alive = false;
+        unsubscribeStatus();
+        unsubscribeProgress();
+        clearInterval(heartbeat);
+      });
+
+      while (alive) {
+        await Bun.sleep(1000);
+      }
     });
   });
 
@@ -288,7 +364,13 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
 
   // List all conversations
   app.get("/conversations", (c) => {
-    const conversations = chatState.getConversations().map((conv) => ({
+    // The FILTER shape (§4's third annotation). This route has neither a claimed
+    // id nor a single resource, so it cannot be gated — it must return less. It
+    // publishes `id`, `userId` and `username` for every conversation in memory,
+    // i.e. exactly the derivable id set every `requireOwnedResource` route below
+    // is protecting; guarding those while leaving this index open would close
+    // nothing.
+    const conversations = filterToOwner(c, chatState.getConversations(), (conv) => conv.userId).map((conv) => ({
       id: conv.id,
       type: conv.type,
       botName: conv.botName,
@@ -302,20 +384,25 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
   });
 
   // Get a specific conversation with messages
-  app.get("/conversations/:id", (c) => {
+  app.get("/conversations/:id", async (c) => {
     const id = c.req.param("id");
-    const conversation = chatState.getConversation(id);
+    const owned = await requireOwnedResource(c, "conversation", id);
+    const conversation = owned.ok ? chatState.getConversation(id) : undefined;
     if (!conversation) {
+      // The denial and the genuine miss are the SAME expression, deliberately: a
+      // web conversation id is derivable, so a 403 (or a differently-worded 404)
+      // would confirm "this id exists and is someone else's".
       return c.json({ error: "Conversation not found" }, 404);
     }
     return c.json({ conversation });
   });
 
   // Delete a specific conversation
-  app.delete("/conversations/:id", (c) => {
+  app.delete("/conversations/:id", async (c) => {
     const id = c.req.param("id");
-    const deleted = chatState.deleteConversation(id);
-    if (!deleted) {
+    const owned = await requireOwnedResource(c, "conversation", id);
+    // BEFORE the delete, not after: the effect is the thing being guarded.
+    if (!owned.ok || !chatState.deleteConversation(id)) {
       return c.json({ error: "Conversation not found" }, 404);
     }
     return c.json({ ok: true });
@@ -359,6 +446,8 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
   app.patch("/threads/:id/connector", async (c) => {
     const id = c.req.param("id");
     if (!isValidUuid(id)) return c.json({ error: "Invalid thread ID" }, 400);
+    const owned = await requireOwnedResource(c, "thread", id);
+    if (!owned.ok) return c.json({ error: "Thread not found" }, 404);
     const body = await c.req.json<{ connectorId: string | null }>();
     if (body.connectorId && !isValidUuid(body.connectorId)) {
       return c.json({ error: "Invalid connectorId" }, 400);
@@ -376,6 +465,8 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
   app.patch("/threads/:id/auto-respond", async (c) => {
     const id = c.req.param("id");
     if (!isValidUuid(id)) return c.json({ error: "Invalid thread ID" }, 400);
+    const owned = await requireOwnedResource(c, "thread", id);
+    if (!owned.ok) return c.json({ error: "Thread not found" }, 404);
     const body = await c.req.json<{ paused: boolean; reason?: string }>();
     if (typeof body.paused !== "boolean") {
       return c.json({ error: "paused (boolean) is required" }, 400);
@@ -395,6 +486,14 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
   app.delete("/threads/:id", async (c) => {
     const id = c.req.param("id");
     try {
+      // INSIDE the try, and behind the uuid check: `threads.id` is a uuid column,
+      // so a non-uuid is a postgres cast error, and a guard placed above the
+      // existing `try` put that error outside the catch that used to absorb it.
+      if (!isValidUuid(id)) return c.json({ error: "Thread not found or is the main thread" }, 404);
+      const owned = await requireOwnedResource(c, "thread", id);
+      // Same wording as the route's own miss below: "not yours" and "not there"
+      // must be one answer.
+      if (!owned.ok) return c.json({ error: "Thread not found or is the main thread" }, 404);
       const deleted = await deleteThreadById(id);
       if (!deleted) {
         return c.json({ error: "Thread not found or is the main thread" }, 404);
@@ -412,7 +511,8 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
   // Get messages for a conversation, optionally filtered by thread
   app.get("/conversations/:id/messages", async (c) => {
     const id = c.req.param("id");
-    const conversation = chatState.getConversation(id);
+    const owned = await requireOwnedResource(c, "conversation", id);
+    const conversation = owned.ok ? chatState.getConversation(id) : undefined;
     if (!conversation) {
       return c.json({ error: "Conversation not found" }, 404);
     }
@@ -458,7 +558,18 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     }
 
     const owner = await getMessageById(messageId);
-    if (!owner) {
+    // The resource guard runs on the SAME row the route already reads, so the
+    // lookup is not repeated: `requireOwnedResource` would re-read `messages`
+    // for an answer that is in hand. The verdict is the shared one.
+    if (
+      !owner ||
+      !decideResourceAccess({
+        sessionUserId: sessionIdentity(c)?.userId ?? null,
+        role: sessionRole(c),
+        owner: { found: true, userId: owner.userId },
+        nullOwnerAllowed: pinnedLocalUserId() !== null,
+      }).ok
+    ) {
       return c.json({ error: "Message not found" }, 404);
     }
 
@@ -479,8 +590,22 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
   });
 
   // Consume a pending research message (one-time use)
-  app.get("/pending/:threadId", (c) => {
+  app.get("/pending/:threadId", async (c) => {
     const threadId = c.req.param("threadId");
+    // BEFORE the consume. This route DESTROYS what it reads, which is why it is
+    // also on `SIDE_EFFECTING_GETS`: a guard placed after it would answer 404
+    // having already thrown away the owner's pending message. The denial is the
+    // route's own "nothing pending" answer — `{ text: null }` — because that is
+    // what it says for a threadId it does not know.
+    //
+    // The uuid pre-check is the guard's, not the route's: `threads.id` is a uuid
+    // COLUMN, so an unparseable value reaches postgres as a cast ERROR rather
+    // than an empty result, and this handler has no `try`. Without it the guard
+    // turned `GET /chat/pending/garbage` from `{text:null}` into a 500 — the
+    // `unknownDraft` rule the Jira routes already live by.
+    if (!isValidUuid(threadId)) return c.json({ text: null });
+    const owned = await requireOwnedResource(c, "thread", threadId);
+    if (!owned.ok) return c.json({ text: null });
     const pending = consumePendingMessage(threadId);
     if (!pending) return c.json({ text: null });
     return c.json({ text: pending.text, jiraContent: pending.jiraContent, title: pending.title });
@@ -489,7 +614,11 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
   // Send a message in a conversation (triggers Claude processing)
   app.post("/conversations/:id/messages", async (c) => {
     const id = c.req.param("id");
-    const conversation = chatState.getConversation(id);
+    // The route this whole PR exists for: it spends a model turn AS the
+    // conversation's owner and writes into their thread. PR C could not reach
+    // it — it names no `userId` at all.
+    const owned = await requireOwnedResource(c, "conversation", id);
+    const conversation = owned.ok ? chatState.getConversation(id) : undefined;
     if (!conversation) {
       return c.json({ error: "Conversation not found" }, 404);
     }
@@ -497,6 +626,22 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
     const body = await c.req.json<{ text: string; threadId?: string; connector?: string; skipExtractions?: boolean }>();
     if (!body.text) {
       return c.json({ error: "text is required" }, 400);
+    }
+
+    // ⚠️ This route addresses TWO resources, and guarding only `:id` was the
+    // review round's highest finding. `body.threadId` reaches, below and
+    // downstream: `handlePeerOutbound` (which `saveMessage`s under the THREAD
+    // owner's `user_id` and sends out on their hivemind peer),
+    // `setResearchStageByThread` (an unconditional cross-user UPDATE), the
+    // thread's connector, and `processChatMessage`, which persists the turn
+    // against that thread — the same key `seedThreadCitations` and
+    // `GET /api/jira/drafts?thread=` read. Owning the conversation says nothing
+    // about owning the thread. Same 404 as the conversation's, so a thread id
+    // cannot be probed through this route either.
+    if (body.threadId) {
+      if (!isValidUuid(body.threadId)) return c.json({ error: "Conversation not found" }, 404);
+      const ownsThread = await requireOwnedResource(c, "thread", body.threadId);
+      if (!ownsThread.ok) return c.json({ error: "Conversation not found" }, 404);
     }
 
     const bot = botConfigs.find((b) => b.name === conversation.botName);
@@ -828,6 +973,8 @@ export function createChatRoutes(botConfigs: BotConfig[], config: Config): Hono 
   app.get("/dev-run/by-thread/:threadId", async (c) => {
     const threadId = c.req.param("threadId");
     if (!isValidUuid(threadId)) return c.json({ error: "Invalid thread ID" }, 400);
+    const owned = await requireOwnedResource(c, "thread", threadId);
+    if (!owned.ok) return c.json({ error: "No dev_run for thread" }, 404);
     const run = await getDevRunByThreadId(threadId);
     if (!run) return c.json({ error: "No dev_run for thread" }, 404);
     const handoffs = await listHandoffs(run.id);

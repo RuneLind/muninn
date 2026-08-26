@@ -50,6 +50,7 @@ import {
 } from "../../watchers/wiki-drafting.ts";
 import type { WatcherType } from "../../types.ts";
 import { requireOwnUser } from "../../auth/guard.ts";
+import { requireOwnedResource } from "../../auth/resource-guard.ts";
 
 const log = getLog("dashboard");
 
@@ -233,6 +234,10 @@ export function registerDataRoutes(app: Hono): void {
   app.delete("/api/threads/:id", async (c) => {
     try {
       const id = c.req.param("id");
+      // §4's resource list. The `/chat/threads/:id` sibling carries the same
+      // guard; this one is the dashboard's copy of the same delete.
+      const owned = await requireOwnedResource(c, "thread", id);
+      if (!owned.ok) return c.json({ error: "Thread not found or is the main thread" }, 404);
       const deleted = await deleteThreadById(id);
       if (!deleted) {
         return c.json({ error: "Thread not found or is the main thread" }, 404);
@@ -378,6 +383,11 @@ export function registerDataRoutes(app: Hono): void {
     try {
       const id = c.req.param("id");
       if (!isValidUuid(id)) return c.json({ error: "Invalid watcher ID" }, 400);
+      // Demonstrated in review: without this an authenticated non-admin renamed
+      // and DISABLED another user's email watcher. `watchers.user_id` is the
+      // owner; the route's own miss is the refusal.
+      const owned = await requireOwnedResource(c, "watcher", id);
+      if (!owned.ok) return c.json({ error: "Watcher not found" }, 404);
       const body = await c.req.json<{
         name?: string;
         intervalMs?: number;
@@ -400,6 +410,10 @@ export function registerDataRoutes(app: Hono): void {
     try {
       const id = c.req.param("id");
       if (!isValidUuid(id)) return c.json({ error: "Invalid task ID" }, 400);
+      // Same class as the watcher above — demonstrated in review by disabling
+      // another user's morning briefing.
+      const owned = await requireOwnedResource(c, "scheduledTask", id);
+      if (!owned.ok) return c.json({ error: "Task not found" }, 404);
       const body = await c.req.json<{
         title?: string;
         scheduleHour?: number;
@@ -431,6 +445,10 @@ export function registerDataRoutes(app: Hono): void {
     try {
       const id = c.req.param("id");
       if (!isValidUuid(id)) return c.json({ error: "Invalid watcher ID" }, 400);
+      // BEFORE the force-queue. Triggering someone else's Gmail-MCP watcher is
+      // a side effect that reaches their mailbox, not merely a read.
+      const owned = await requireOwnedResource(c, "watcher", id);
+      if (!owned.ok) return c.json({ error: "Watcher not found" }, 404);
       const watcher = await getWatcherById(id);
       if (!watcher) return c.json({ error: "Watcher not found" }, 404);
       // Wiki-readonly instance: refuse the WIKI-DRAFTING watchers only. Both mint
@@ -487,6 +505,14 @@ export function registerDataRoutes(app: Hono): void {
     try {
       const id = c.req.param("id");
       if (!isValidUuid(id)) return c.json({ error: "Invalid task ID" }, 400);
+      // BEFORE the read and before the run: this SPENDS a model turn as the
+      // task's owner and delivers to their platform. Deliberately the GUARD
+      // rather than the row-in-hand verdict the sibling routes use — one extra
+      // indexed read on a hand-triggered operator action buys a call site the
+      // injected-lookup tests can reach, and this is the most expensive of the
+      // four to leave unpinned.
+      const owned = await requireOwnedResource(c, "scheduledTask", id);
+      if (!owned.ok) return c.json({ error: "Task not found" }, 404);
       const task = await getScheduledTaskById(id);
       if (!task) return c.json({ error: "Task not found" }, 404);
       const ctx = getSchedulerContext(task.botName);

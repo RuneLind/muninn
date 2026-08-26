@@ -155,7 +155,8 @@ test.describe("Chat page", () => {
 
 test.describe("Chat SSE connection", () => {
   /**
-   * The chat page never opens an UNSCOPED `/api/events`.
+   * The chat page never opens an UNSCOPED event stream — and never touches
+   * `/api/events` at all.
    *
    * This replaced a "connects to the SSE endpoint" assertion, which encoded the
    * old contract: connect immediately, unfiltered. The page now waits for a
@@ -166,11 +167,20 @@ test.describe("Chat SSE connection", () => {
    * host is the negative one. The positive half — that it DOES connect, scoped,
    * once a user resolves — is `chat-viewer-scope.spec.ts`, which stubs the bot
    * and user lists so it holds regardless of the DB.
+   *
+   * PR D added the second half: the page consumes `/chat/events`, which serves
+   * only the phase pill and the waterfall. `/api/events` also replays 50
+   * activity events with the full message text of every turn plus a
+   * process-wide `agent_runs` snapshot, and is now denied to role `user`, so a
+   * page still reaching for it is both a leak and a broken panel.
    */
-  test("never opens an unscoped event stream", async ({ page }) => {
-    const eventUrls: string[] = [];
+  test("never opens an unscoped event stream, and never touches /api/events", async ({ page }) => {
+    const chatEventUrls: string[] = [];
+    const operatorStreamUrls: string[] = [];
     page.on("request", (req) => {
-      if (req.url().includes("/api/events")) eventUrls.push(req.url());
+      const url = req.url();
+      if (url.includes("/chat/events")) chatEventUrls.push(url);
+      else if (url.includes("/api/events")) operatorStreamUrls.push(url);
     });
 
     await page.goto("/chat");
@@ -178,6 +188,7 @@ test.describe("Chat SSE connection", () => {
     if (await pills.count()) await pills.first().click();
     await page.waitForTimeout(1500);
 
-    expect(eventUrls.filter((u) => !u.includes("viewer="))).toEqual([]);
+    expect(chatEventUrls.filter((u) => !u.includes("viewer="))).toEqual([]);
+    expect(operatorStreamUrls, "the chat page reached for the operator stream").toEqual([]);
   });
 });

@@ -121,7 +121,20 @@ async function loadWaterfall(traceId: string): Promise<void> {
     g.currentWaterfallTraceId = traceId;
     const res = await fetch("/api/traces/" + traceId);
     const { spans } = (await res.json()) as { spans: WaterfallSpan[] };
-    if (spans.length === 0) return;
+    if (spans.length === 0) {
+      // A silent `return` here made a real product defect out of PR D's trace
+      // guard: `GET /api/traces` is unfiltered while `/api/traces/:id` answers
+      // `{spans: []}` for a trace the session does not own, so on an
+      // authenticating instance the row is listed, the click does literally
+      // nothing, and nothing anywhere says why. Say it instead. (Filtering the
+      // LIST is the deferred zone model's job — §4 puts `/traces` and its index
+      // in the admin zone.)
+      document.getElementById("waterfallTitle")!.textContent = "No spans for this trace";
+      document.getElementById("waterfall")!.innerHTML =
+        '<div class="empty-state">This trace has no spans, or it belongs to another user.</div>';
+      document.getElementById("waterfallContainer")!.classList.add("visible");
+      return;
+    }
 
     const root = spans.find((s) => !s.parentId) || spans[0]!;
     document.getElementById("waterfallTitle")!.textContent =

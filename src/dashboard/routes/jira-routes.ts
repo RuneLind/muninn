@@ -85,6 +85,9 @@ import {
 import { runJiraThreadDraft, type JiraThreadTurnRunner } from "./jira-thread-run.ts";
 import { threadSeedLine } from "../../jira/thread-draft.ts";
 import { getLog } from "../../logging.ts";
+import { requireOwnedResource, decideResourceAccess, ownerScope } from "../../auth/resource-guard.ts";
+import { sessionIdentity, sessionRole } from "../../auth/guard.ts";
+import { pinnedLocalUserId } from "../../auth/policy.ts";
 
 const log = getLog("dashboard", "jira-routes");
 
@@ -278,7 +281,11 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
         // error, not an empty result — and a stale link in someone's notes must
         // land on a page that says so, never on a 500.
         const draft = isValidUuid(draftId) ? await getJiraDraft(draftId) : null;
-        if (!draft) {
+        // The SAME guard `GET /api/jira/draft/:id` carries. Guarding the JSON
+        // route and leaving its HTML twin open in the same file would just move
+        // the read one url over — the chat card's own fallback notice deep-links
+        // here, so it is the reachable half.
+        if (!draft || !ownsJiraDraft(c, draft)) {
           return c.html(await renderJiraPage({ kind: "missing", draftId, list }), 404);
         }
         return c.html(await renderJiraPage({ kind: "draft", draft, list }));
@@ -286,7 +293,7 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
 
       const savedOnly = !all;
       const limit = limitParam ?? JIRA_ARCHIVE_LIMIT_DEFAULT;
-      const { drafts, capped } = await listJiraDrafts({ savedOnly, limit });
+      const { drafts, capped } = await listJiraDrafts({ savedOnly, limit, ...archiveOwner(c) });
       return c.html(
         await renderJiraPage({ kind: "list", drafts, savedOnly, limit, limitParam, capped }),
       );
@@ -322,7 +329,11 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
     try {
       const savedOnly = !parseArchiveAll(c.req.query("all"));
       const limit = clampJiraArchiveLimit(c.req.query("limit"));
-      const { drafts, capped } = await listJiraDrafts({ savedOnly, limit });
+      // A corpus-wide listing in front of the guarded per-id routes protects
+      // nothing — the `filterToOwner` argument, one column over. It cannot be a
+      // `.filter()` on the result: `capped` is a fact from the read, so the
+      // constraint goes into the SQL.
+      const { drafts, capped } = await listJiraDrafts({ savedOnly, limit, ...archiveOwner(c) });
       // `no-store` for the same reason the thread listing is: a draft saved
       // seconds ago must appear, and a heuristically cached listing would hide
       // it for reasons the reader cannot see.
@@ -388,6 +399,16 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
 
       const thread = await getThreadById(body.threadId);
       if (!thread) return unknownThread(c);
+      // §4: structurally the same case as `POST /chat/conversations/:id/messages`
+      // — it runs a turn in a thread and writes into it — and until PR D its
+      // only identity check was that the thread's BOT matched the Jira bot;
+      // `thread.userId` was never read. BEFORE the MCP probe and the flight
+      // lock, so a refused caller spends neither.
+      //
+      // The verdict is taken over the row ALREADY READ, not through
+      // `requireOwnedResource`, which would re-run `getThreadById` for an answer
+      // in hand — the same rule `ownsJiraDraft` below is written for.
+      if (!ownsResourceRow(c, thread.userId)) return unknownThread(c);
       // The bot is IMPLIED by the thread, and it must be the composer's bot. A
       // draft turn in a jarvis thread would be written by a bot whose collections
       // are the AI/tech shelf — the same wrong-corpus failure `resolveJiraBot`
@@ -512,7 +533,12 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
       const id = c.req.param("id");
       if (!isValidUuid(id)) return unknownDraft(c);
       const draft = await getJiraDraft(id);
-      if (!draft) return unknownDraft(c);
+      // The `jiraDraft` kind resolves `jira_drafts.thread_id → threads.user_id`,
+      // which `getJiraDraft` has already joined — so the verdict is taken from
+      // the row in hand rather than re-read. A `source = 'notes'` row (nothing
+      // writes one any more) has no thread and so no owner: readable on a
+      // `local` instance, admin-only otherwise.
+      if (!draft || !ownsJiraDraft(c, draft)) return unknownDraft(c);
       // A poll target must never be cached — the whole point is that `generating`
       // becomes `ready`.
       c.header("Cache-Control", "no-store");
@@ -542,6 +568,10 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
       // The `unknownDraft` rule, one column over: a non-uuid reaches postgres as
       // a cast error, not an empty result.
       if (!isValidUuid(threadId)) return unknownThread(c);
+      // A thread-keyed listing hands over every draft id on the thread at once,
+      // so it is guarded on the THREAD rather than per row.
+      const owned = await requireOwnedResource(c, "thread", threadId);
+      if (!owned.ok) return unknownThread(c);
       const drafts = await listJiraDraftsForThread(threadId);
       // A poll target must never be cached — the whole point is that a row's
       // `message_id` fills in and its `generating` becomes `ready`.
@@ -567,6 +597,10 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
       }
       const id = c.req.param("id");
       if (!isValidUuid(id)) return unknownDraft(c);
+      // BEFORE the write. `saveJiraDraft` stamps `saved_at`, so a guard placed
+      // after it would answer 404 having already mutated someone else's row.
+      const existingForOwner = await getJiraDraft(id);
+      if (!existingForOwner || !ownsJiraDraft(c, existingForOwner)) return unknownDraft(c);
       const saved = await saveJiraDraft(id);
       if (!saved) {
         // The write is gated on `status = 'ready'`, so "nothing kept" is two
@@ -593,3 +627,33 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
 
 /** Re-exported so the route test can drive the depth type without the wire import. */
 export type { JiraDepth };
+
+/**
+ * The `jiraDraft` owner verdict, over a row the caller already read.
+ *
+ * `requireOwnedResource(c, "jiraDraft", id)` would re-run the same query for an
+ * answer that is in hand — `getJiraDraft` joins `threads.user_id` onto every row
+ * for the archive's «Juster i samtalen» deep link — so the shared DECISION is
+ * used and the lookup is not repeated.
+ */
+function ownsJiraDraft(c: Context, draft: { threadUserId: string | null }): boolean {
+  return ownsResourceRow(c, draft.threadUserId);
+}
+
+/** The shared verdict over an owner already in hand. */
+function ownsResourceRow(c: Context, ownerUserId: string | null): boolean {
+  return decideResourceAccess({
+    sessionUserId: sessionIdentity(c)?.userId ?? null,
+    role: sessionRole(c),
+    owner: { found: true, userId: ownerUserId },
+    nullOwnerAllowed: pinnedLocalUserId() !== null,
+  }).ok;
+}
+
+/** `ownerScope` in the shape `listJiraDrafts` takes — spread into its options so
+ *  an unscoped caller passes no `owner` key at all. */
+function archiveOwner(c: Context): { owner?: { userId: string; allowNullOwner: boolean } } {
+  const scope = ownerScope(c);
+  if (scope.all || scope.userId === null) return {};
+  return { owner: { userId: scope.userId, allowNullOwner: scope.allowNullOwner } };
+}

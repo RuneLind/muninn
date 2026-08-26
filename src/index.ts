@@ -22,6 +22,7 @@ import { AuthConfigError, resolveAuthConfig, isAuthenticatingMode, type AuthConf
 import { createAuthMiddleware } from "./auth/middleware.ts";
 import { createOriginMiddleware } from "./auth/origin.ts";
 import { setAuthPolicy } from "./auth/policy.ts";
+import { createWsUpgradeAuthorizer } from "./auth/ws-upgrade.ts";
 import { Hono } from "hono";
 import type { Bot } from "grammy";
 
@@ -205,6 +206,11 @@ app.all("/simulator/*", (c) => c.redirect(c.req.path.replace("/simulator", "/cha
 app.all("/simulator", (c) => c.redirect("/chat", 301));
 
 // Start server — with WebSocket support for chat
+// Built once at boot, like the two Hono middlewares: with auth off it is a
+// constant "allow", so the wiring is exercised on every instance rather than
+// only on the one that authenticates.
+const authorizeWsUpgrade = createWsUpgradeAuthorizer(auth, config.dashboardPort);
+
 const server = Bun.serve<import("./chat/index.ts").ChatWsData>({
   port: config.dashboardPort,
   // Bind loopback-only by default — with MUNINN_AUTH=off (the default) the
@@ -217,12 +223,23 @@ const server = Bun.serve<import("./chat/index.ts").ChatWsData>({
   // "bind everywhere", silently re-opening the very hole this default closes.
   hostname: process.env.DASHBOARD_HOST || "127.0.0.1",
   idleTimeout: 255, // max value, needed for SSE connections
-  fetch(req, server) {
+  // `async` for the upgrade branch below, which must await introspection before
+  // deciding. Measured on Bun 1.3.14 (`src/auth/ws-upgrade.test.ts`, acceptance
+  // 13): `server.upgrade` still returns `true` after an `await` inside `fetch`,
+  // and the socket delivers frames — the bundled Bun docs and types show only
+  // the synchronous form and say nothing either way, and this plan does not
+  // build on "very likely".
+  async fetch(req, server) {
     const url = new URL(req.url);
     if (url.pathname === "/chat/ws" || url.pathname === "/simulator/ws") {
-      const upgraded = server.upgrade(req, {
-        data: { unsubscribe: null },
-      });
+      // The one surface no Hono middleware can see: this runs before
+      // `app.fetch`. Identity AND origin are decided here, by the same two
+      // functions the HTTP path uses.
+      const decision = await authorizeWsUpgrade(req, server.requestIP(req)?.address);
+      if (!decision.ok) return decision.response;
+      // `wsDataFor` rather than a literal: see its doc comment — a slip there is
+      // an unfiltered socket that typechecks.
+      const upgraded = server.upgrade(req, { data: chat.wsDataFor(decision) });
       if (upgraded) return undefined;
       return new Response("WebSocket upgrade failed", { status: 500 });
     }
@@ -243,9 +260,13 @@ activityLog.push("system", `Dashboard running on http://localhost:${server.port}
 // have yet.
 if (isAuthenticatingMode(auth.mode)) {
   log.info(
-    "MUNINN_AUTH={mode} — HTTP requests require a session; direct-loopback requests bypass it by design. " +
-    "NB the /chat/ws upgrade is NOT yet authenticated (it runs before Hono) and per-route guards are not " +
-    "in place: this mode is the switch, not yet a closed boundary.",
+    "MUNINN_AUTH={mode} — HTTP requests and the /chat/ws upgrade require a session; direct-loopback " +
+    "requests bypass it by design. Resource guards and the socket's owner filter are in place (PR D). " +
+    "NB nothing is denied by ROLE yet: the zone model is deferred, so an authenticated caller still " +
+    "reaches /traces, /api/prompts/:traceId and the rest of the operator surface. Two exceptions the " +
+    "operator will notice: GET /api/events is denied to role `user` (the chat page uses /chat/events " +
+    "instead), and a `local` identity is role `user`, so another users.id's traces and conversations " +
+    "answer 404 to it.",
     { mode: auth.mode },
   );
   log.info(
