@@ -10,16 +10,17 @@
  *
  * ⚠️ NOT covered: the `/chat/ws` (and `/simulator/ws`) upgrade. It is handled in
  * `Bun.serve`'s `fetch` before `app.fetch` ever runs, so no Hono middleware can
- * see it. PR D authenticates it in the upgrade handler. Until then an
- * authenticating mode is NOT a closed boundary, and `src/index.ts` says so at
- * boot rather than letting the mode's presence imply otherwise.
+ * see it. `src/auth/ws-upgrade.ts` (PR D) authenticates it there, and it does so
+ * by calling `resolveRequestIdentity` BELOW rather than reading the three
+ * credential channels a second time — which is why that function takes
+ * primitives instead of a Hono `Context`.
  */
-import { getCookie, setCookie } from "hono/cookie";
+import { setCookie } from "hono/cookie";
 import { getConnInfo } from "hono/bun";
 import type { Context, MiddlewareHandler, Next } from "hono";
 import { getLog } from "../logging.ts";
 import { AUTH_EXCLUDED_PATHS, type AuthConfig } from "./mode.ts";
-import { createIntrospector, localIdentity, type Identity } from "./introspect.ts";
+import { createIntrospector, localIdentity, type Identity, type Introspector } from "./introspect.ts";
 import { resolveRole, type AuthRole } from "./role.ts";
 import { mintSession, SESSION_COOKIE, SESSION_TTL_MS } from "./session.ts";
 
@@ -155,18 +156,120 @@ function peerAddress(c: Context): string | undefined {
 
 /** The credential a client presented explicitly, as opposed to the ambient
  *  cookie. Checked in a fixed order; the query form is last because it is the
- *  one that ends up in browser history. */
-function presentedToken(c: Context): string | null {
-  const header = c.req.header(TOKEN_HEADER);
+ *  one that ends up in browser history.
+ *
+ *  Written over a raw `Headers` + URL rather than a Hono `Context` because PR
+ *  D's WebSocket upgrade runs BEFORE `app.fetch` and has no context — and the
+ *  campaign's own rule is that the upgrade reuses this decision rather than
+ *  growing a second one beside it (PR C's first cut of the origin check was a
+ *  second implementation, and it was the bypassable one). */
+export function presentedToken(headers: Headers, url: string): string | null {
+  const header = headers.get(TOKEN_HEADER);
   if (header && header.trim() !== "") return header.trim();
 
-  const bearer = c.req.header("authorization")?.match(/^bearer\s+(.+)$/i)?.[1]?.trim();
+  const bearer = headers.get("authorization")?.match(/^bearer\s+(.+)$/i)?.[1]?.trim();
   if (bearer) return bearer;
 
-  const query = c.req.query(TOKEN_QUERY_PARAM);
+  const query = safeUrl(url)?.searchParams.get(TOKEN_QUERY_PARAM);
   if (query && query.trim() !== "") return query.trim();
 
   return null;
+}
+
+/** `new URL` throws on a target Bun accepted at the socket layer; a throw here
+ *  would be a 500 on a path whose whole job is to answer 401. */
+function safeUrl(url: string): URL | null {
+  try {
+    return new URL(url);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read one cookie off a raw `Headers`, for the same no-context reason as
+ * {@link presentedToken}.
+ *
+ * No percent-decoding: `mintSession` emits `v1.<base64url>.<base64url>`, whose
+ * alphabet (`A-Za-z0-9-_.`) contains nothing `encodeURIComponent` would have
+ * escaped, and anything else reaching `verifySession` is rejected there — one
+ * null for every defect. Decoding would only add a `URIError` throw on a
+ * malformed `%` a client controls.
+ */
+export function readCookie(headers: Headers, name: string): string | null {
+  const raw = headers.get("cookie");
+  if (!raw) return null;
+  for (const part of raw.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq === -1) continue;
+    if (part.slice(0, eq).trim() !== name) continue;
+    const value = part.slice(eq + 1).trim();
+    return value === "" ? null : value;
+  }
+  return null;
+}
+
+export interface IdentityDeps {
+  readonly introspector: Introspector;
+  /** The pinned `local` identity, or null in a mode that has none. */
+  readonly pinned: Identity | null;
+}
+
+export interface IdentityResolution {
+  readonly identity: Identity | null;
+  /** True when a session cookie should be written back — the client presented a
+   *  valid explicit credential. Meaningless on the WebSocket path, which cannot
+   *  set a cookie on a 101. */
+  readonly mint: boolean;
+}
+
+/**
+ * The whole identity decision for one request, over primitives: the loopback
+ * bypass, then the session cookie, then an explicitly presented credential.
+ *
+ * Shared by `createAuthMiddleware` and `src/auth/ws-upgrade.ts`. Extracting it
+ * is the point — the upgrade must grant EXACTLY what the middleware grants, and
+ * the alternative (a second reading of the same three channels) is how PR C
+ * shipped a bypassable origin check.
+ */
+export async function resolveRequestIdentity(
+  headers: Headers,
+  url: string,
+  peer: string | undefined,
+  deps: IdentityDeps,
+): Promise<IdentityResolution> {
+  const presented = presentedToken(headers, url);
+  let identity: Identity | null = null;
+  let mint = false;
+
+  const bypassAllowed = loopbackBypassOverride ?? true;
+  if (bypassAllowed && deps.pinned && isDirectLoopback(peer, headers)) {
+    // The escape hatch. `ssh` + `curl 127.0.0.1:3010` must work whatever the
+    // auth config says, and it resolves to the SAME pinned identity at the
+    // same role `user` — not to admin, or every guard PRs C–D add would be a
+    // no-op for the loopback tests that are supposed to prove them.
+    identity = deps.pinned;
+    // A login link followed on the host itself should still leave a session
+    // behind, so the same URL behaves the same way everywhere.
+    if (presented && (await deps.introspector.introspect(presented, "credential"))) mint = true;
+  }
+
+  if (!identity) {
+    // Cookie: sessions ONLY. The local introspector also accepts the raw
+    // shared secret, and honouring that here would mean a hand-set
+    // `muninn_session=<MUNINN_LOCAL_TOKEN>` cookie puts the long-lived secret
+    // into every request's cookie jar with no expiry — which is exactly the
+    // property `src/auth/session.ts` exists to prevent.
+    const cookie = readCookie(headers, SESSION_COOKIE);
+    if (cookie) identity = await deps.introspector.introspect(cookie, "session");
+  }
+
+  if (!identity && presented) {
+    identity = await deps.introspector.introspect(presented, "credential");
+    if (identity) mint = true;
+  }
+
+  return { identity, mint };
 }
 
 function isSecureRequest(c: Context): boolean {
@@ -196,20 +299,25 @@ function writeSessionCookie(c: Context, config: AuthConfig, userId: string): voi
   });
 }
 
+/** The 401 payload, as a value, so the WebSocket upgrade — which has no Hono
+ *  context — refuses in exactly the shape every other route does. §8's
+ *  session-expiry UX keys on `loginUrl`, and a socket that refused in a second
+ *  shape would be the one place the client could not act on. */
+export function unauthenticatedBody(config: AuthConfig): { error: string; mode: string; loginUrl: string } {
+  return {
+    error: "unauthenticated",
+    mode: config.mode,
+    loginUrl:
+      config.mode === "local"
+        ? `/?${TOKEN_QUERY_PARAM}=${LOGIN_TOKEN_PLACEHOLDER}`
+        : "/oauth2/login",
+  };
+}
+
 function unauthenticated(c: Context, config: AuthConfig): Response {
   // JSON, always — a client must be able to tell "session expired" from
   // "server broke" without a browser.
-  return c.json(
-    {
-      error: "unauthenticated",
-      mode: config.mode,
-      loginUrl:
-        config.mode === "local"
-          ? `/?${TOKEN_QUERY_PARAM}=${LOGIN_TOKEN_PLACEHOLDER}`
-          : "/oauth2/login",
-    },
-    401,
-  );
+  return c.json(unauthenticatedBody(config), 401);
 }
 
 /** The same-URL-without-the-secret target. `URL.pathname` keeps a leading `//`,
@@ -250,42 +358,20 @@ export function createAuthMiddleware(config: AuthConfig): MiddlewareHandler {
   return async (c, next) => {
     if (hasExclusions && AUTH_EXCLUDED_PATHS.includes(c.req.path)) return next();
 
-    const presented = presentedToken(c);
-    let identity: Identity | null = null;
-    let mint = false;
-
-    const bypassAllowed = loopbackBypassOverride ?? true;
-    if (bypassAllowed && pinned && isDirectLoopback(peerAddress(c), c.req.raw.headers)) {
-      // The escape hatch. `ssh` + `curl 127.0.0.1:3010` must work whatever the
-      // auth config says, and it resolves to the SAME pinned identity at the
-      // same role `user` — not to admin, or every guard PRs C–D add would be a
-      // no-op for the loopback tests that are supposed to prove them.
-      identity = pinned;
-      // A login link followed on the host itself should still leave a session
-      // behind, so the same URL behaves the same way everywhere.
-      if (presented && (await introspector.introspect(presented, "credential"))) mint = true;
-    }
+    const { identity, mint } = await resolveRequestIdentity(
+      c.req.raw.headers,
+      c.req.url,
+      peerAddress(c),
+      { introspector, pinned },
+    );
 
     if (!identity) {
-      // Cookie: sessions ONLY. The local introspector also accepts the raw
-      // shared secret, and honouring that here would mean a hand-set
-      // `muninn_session=<MUNINN_LOCAL_TOKEN>` cookie puts the long-lived secret
-      // into every request's cookie jar with no expiry — which is exactly the
-      // property `src/auth/session.ts` exists to prevent.
-      const cookie = getCookie(c, SESSION_COOKIE);
-      if (cookie) identity = await introspector.introspect(cookie, "session");
-    }
-
-    if (!identity && presented) {
-      identity = await introspector.introspect(presented, "credential");
-      if (identity) mint = true;
-      if (!identity && !warnedRejectedPaths.has(c.req.path)) {
+      if (presentedToken(c.req.raw.headers, c.req.url) && !warnedRejectedPaths.has(c.req.path)) {
         warnedRejectedPaths.add(c.req.path);
         log.warn("Rejected a request presenting an invalid credential for {path}", { path: c.req.path });
       }
+      return unauthenticated(c, config);
     }
-
-    if (!identity) return unauthenticated(c, config);
 
     // A secret on the query string lands in history, in the address bar and in
     // any Referer the page later sends — so strip it whenever it is there on a

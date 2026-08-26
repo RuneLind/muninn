@@ -85,6 +85,9 @@ import {
 import { runJiraThreadDraft, type JiraThreadTurnRunner } from "./jira-thread-run.ts";
 import { threadSeedLine } from "../../jira/thread-draft.ts";
 import { getLog } from "../../logging.ts";
+import { requireOwnedResource, decideResourceAccess } from "../../auth/resource-guard.ts";
+import { sessionIdentity, sessionRole } from "../../auth/guard.ts";
+import { pinnedLocalUserId } from "../../auth/policy.ts";
 
 const log = getLog("dashboard", "jira-routes");
 
@@ -388,6 +391,13 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
 
       const thread = await getThreadById(body.threadId);
       if (!thread) return unknownThread(c);
+      // §4: structurally the same case as `POST /chat/conversations/:id/messages`
+      // — it runs a turn in a thread and writes into it — and until PR D its
+      // only identity check was that the thread's BOT matched the Jira bot;
+      // `thread.userId` was never read. BEFORE the MCP probe and the flight
+      // lock, so a refused caller spends neither.
+      const owned = await requireOwnedResource(c, "thread", body.threadId);
+      if (!owned.ok) return unknownThread(c);
       // The bot is IMPLIED by the thread, and it must be the composer's bot. A
       // draft turn in a jarvis thread would be written by a bot whose collections
       // are the AI/tech shelf — the same wrong-corpus failure `resolveJiraBot`
@@ -512,7 +522,12 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
       const id = c.req.param("id");
       if (!isValidUuid(id)) return unknownDraft(c);
       const draft = await getJiraDraft(id);
-      if (!draft) return unknownDraft(c);
+      // The `jiraDraft` kind resolves `jira_drafts.thread_id → threads.user_id`,
+      // which `getJiraDraft` has already joined — so the verdict is taken from
+      // the row in hand rather than re-read. A `source = 'notes'` row (nothing
+      // writes one any more) has no thread and so no owner: readable on a
+      // `local` instance, admin-only otherwise.
+      if (!draft || !ownsJiraDraft(c, draft)) return unknownDraft(c);
       // A poll target must never be cached — the whole point is that `generating`
       // becomes `ready`.
       c.header("Cache-Control", "no-store");
@@ -542,6 +557,10 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
       // The `unknownDraft` rule, one column over: a non-uuid reaches postgres as
       // a cast error, not an empty result.
       if (!isValidUuid(threadId)) return unknownThread(c);
+      // A thread-keyed listing hands over every draft id on the thread at once,
+      // so it is guarded on the THREAD rather than per row.
+      const owned = await requireOwnedResource(c, "thread", threadId);
+      if (!owned.ok) return unknownThread(c);
       const drafts = await listJiraDraftsForThread(threadId);
       // A poll target must never be cached — the whole point is that a row's
       // `message_id` fills in and its `generating` becomes `ready`.
@@ -567,6 +586,10 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
       }
       const id = c.req.param("id");
       if (!isValidUuid(id)) return unknownDraft(c);
+      // BEFORE the write. `saveJiraDraft` stamps `saved_at`, so a guard placed
+      // after it would answer 404 having already mutated someone else's row.
+      const existingForOwner = await getJiraDraft(id);
+      if (!existingForOwner || !ownsJiraDraft(c, existingForOwner)) return unknownDraft(c);
       const saved = await saveJiraDraft(id);
       if (!saved) {
         // The write is gated on `status = 'ready'`, so "nothing kept" is two
@@ -593,3 +616,20 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
 
 /** Re-exported so the route test can drive the depth type without the wire import. */
 export type { JiraDepth };
+
+/**
+ * The `jiraDraft` owner verdict, over a row the caller already read.
+ *
+ * `requireOwnedResource(c, "jiraDraft", id)` would re-run the same query for an
+ * answer that is in hand — `getJiraDraft` joins `threads.user_id` onto every row
+ * for the archive's «Juster i samtalen» deep link — so the shared DECISION is
+ * used and the lookup is not repeated.
+ */
+function ownsJiraDraft(c: Context, draft: { threadUserId: string | null }): boolean {
+  return decideResourceAccess({
+    sessionUserId: sessionIdentity(c)?.userId ?? null,
+    role: sessionRole(c),
+    owner: { found: true, userId: draft.threadUserId },
+    nullOwnerAllowed: pinnedLocalUserId() !== null,
+  }).ok;
+}

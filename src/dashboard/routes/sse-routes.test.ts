@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { registerSSERoutes } from "./sse-routes.ts";
 import { agentStatus } from "../../observability/agent-status.ts";
+import type { AuthRole } from "../../auth/role.ts";
 
 /**
  * The wiring half of PR A acceptance 1 + 2.
@@ -111,5 +112,62 @@ describe("GET /api/events — the viewer parameter", () => {
     expect((frame(text, "request_progress") as { requestId: string }).requestId).toBe(bRun);
 
     agentStatus.clearRequest();
+  });
+});
+
+/**
+ * PR D denies this route to role `user` — directly, not through a zone entry,
+ * because the zone model is deferred and "moves to the admin zone" would leave
+ * it wide open to any authenticated caller.
+ *
+ * The `?viewer=` guard above scopes two of the four channels. The other two are
+ * the leak this denial closes: `activity` replays 50 events carrying the full
+ * message text of every turn on the instance, and `agent_runs` is
+ * `snapshotAll()`.
+ */
+describe("GET /api/events — the role denial", () => {
+  function appWithRole(role: AuthRole | null): Hono {
+    const app = new Hono();
+    app.use("*", async (c, next) => {
+      if (role) {
+        c.set("role", role);
+        c.set("identity", {
+          userId: "user-a", displayName: "A", navIdent: null, oid: null,
+          provider: "local", expiresAt: null,
+        });
+      }
+      await next();
+    });
+    registerSSERoutes(app);
+    return app;
+  }
+
+  test("with auth off the stream opens, exactly as today", async () => {
+    // `sessionRole` answers null when no middleware ran, and this is the ONLY
+    // mode the operator dashboard runs in today. A denial here would be a
+    // regression on every muninn in existence.
+    const res = await appWithRole(null).request("/api/events");
+    expect(res.status).toBe(200);
+    await res.body?.cancel();
+  });
+
+  test("role `user` is refused with 403 and pointed at /chat/events", async () => {
+    const res = await appWithRole("user").request("/api/events?viewer=user-a");
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ error: "forbidden" });
+  });
+
+  test("role `admin` still opens the operator stream", async () => {
+    const res = await appWithRole("admin").request("/api/events");
+    expect(res.status).toBe(200);
+    await res.body?.cancel();
+  });
+
+  test("the denial outranks the viewer guard — a matching claim is still refused", async () => {
+    // Order matters: `requireOwnUser` runs first and would ANSWER 200 for a
+    // claim equal to the session id, so a denial placed before it would be the
+    // only thing this route has. It is placed after, so both hold.
+    const res = await appWithRole("user").request("/api/events?viewer=user-a");
+    expect(res.status).toBe(403);
   });
 });

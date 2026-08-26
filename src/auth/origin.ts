@@ -83,6 +83,17 @@ export const SIDE_EFFECTING_GETS: readonly string[] = [
   "/api/wiki/explain",
   "/api/wiki/factcheck",
   "/api/wiki/factcheck/claim",
+  // The two WebSocket upgrades. They never reach this middleware — `src/index.ts`
+  // handles them inside `Bun.serve`'s `fetch`, before `app.fetch` — and the
+  // enforcement point is `src/auth/ws-upgrade.ts`, which consults this same
+  // list through `decideOrigin`. They are listed here rather than special-cased
+  // there so that (a) the upgrade's origin rule IS the HTTP one, byte for byte,
+  // and (b) if a future refactor ever routes them through Hono they arrive
+  // guarded rather than exempt. A handshake is the largest READ surface muninn
+  // has: it streams every event the subscriber is entitled to for as long as the
+  // tab is open, and handshakes are not subject to CORS.
+  "/chat/ws",
+  "/simulator/ws",
 ];
 
 /**

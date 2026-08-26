@@ -44,6 +44,7 @@ src/chat/routes.ts | body.userId in POST /threads | own-user-guard
 src/chat/routes.ts | body.userId in PUT /bot-preferences/:botName/default-user | admin-zone-deferred   # §4 moves this route to the admin zone; it sets BOT-GLOBAL state, so there is no "own" version
 src/dashboard/routes/data-routes.ts | body.userId in POST /api/users | admin-zone-deferred   # minting a row has no "own" version, and a guard here would only make it un-callable
 src/dashboard/routes/research-routes.ts | body.userId in POST /api/research/chat | own-user-guard   # creates a conversation AND a real thread
+src/chat/routes.ts | query("viewer") in GET /events | own-user-guard   # PR D's replacement stream: the same claimed identity, on the route the chat page consumes instead of /api/events
 src/dashboard/routes/sse-routes.ts | query("viewer") in GET /api/events | own-user-guard   # a claimed identity under another name: it scopes the waterfall + phase pill, and the run metadata carries a traceId that /api/prompts/:traceId expands into a whole prompt
 src/dashboard/routes/wiki-routes.ts | body.userId in POST /api/wiki/ask/chat | own-user-guard   # same shape as research/chat
 

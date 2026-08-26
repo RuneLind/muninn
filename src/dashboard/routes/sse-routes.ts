@@ -2,7 +2,7 @@ import type { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { activityLog } from "../../observability/activity-log.ts";
 import { agentStatus } from "../../observability/agent-status.ts";
-import { requireOwnUser } from "../../auth/guard.ts";
+import { requireOwnUser, sessionRole } from "../../auth/guard.ts";
 
 export function registerSSERoutes(app: Hono): void {
   app.get("/api/events", (c) => {
@@ -31,6 +31,39 @@ export function registerSSERoutes(app: Hono): void {
     const own = requireOwnUser(c, c.req.query("viewer"));
     if (!own.ok) return own.response;
     const viewer = own.userId || undefined;
+
+    /**
+     * PR D denies this route to role `user` — directly, not through a zone entry.
+     *
+     * The `viewer` guard above scopes exactly TWO of the four channels. The other
+     * two are the leak: `activity` replays 50 events carrying the **full message
+     * text** of every turn on the instance, and `agent_runs` is
+     * `agentStatus.snapshotAll()` — every run process-wide with `username`,
+     * `traceId` and tool inputs. `EventSource` delivers all of them over the wire
+     * whatever the page chooses to read, so "the chat page only registers two
+     * handlers" was never a fix; the chat page now consumes `GET /chat/events`
+     * instead, which serves those two channels and nothing else.
+     *
+     * A per-route check rather than a zone entry, because the zone model is
+     * DEFERRED: "moves to the admin zone" would leave this route wide open to any
+     * authenticated caller. `sessionRole` answers `null` with auth off — no
+     * middleware is mounted — so today's operator dashboard is untouched.
+     *
+     * ⚠️ The consequence on an authenticating instance, stated because the
+     * operator will meet it: `resolveRole` answers `user` for a `local` identity
+     * unconditionally, so on `MUNINN_AUTH=local` this route is denied to
+     * EVERYONE, and the dashboard's own activity feed, `/agents` live zone and
+     * connection indicator go dead. That is the deferred zone model's shape
+     * arriving early, not a bug — the durable fix is the admin role, which
+     * cannot exist in `local` mode without making this campaign's central
+     * acceptance pass without the diff (see `role.ts`).
+     */
+    if (sessionRole(c) === "user") {
+      return c.json(
+        { error: "forbidden", reason: "operator stream; use /chat/events for your own runs" },
+        403,
+      );
+    }
     return streamSSE(c, async (stream) => {
       // Send recent history
       const recent = activityLog.getRecent(50);

@@ -1,11 +1,11 @@
 # `src/auth/` — the `MUNINN_AUTH` switch
 
-This module answers **who is calling**, and — since PR C — **which user id a
-route is allowed to act on**. It still answers nothing about *which routes a
-role may call* or *who owns a given row*: no route is denied by role, and no
-resource is owned. Those are the deferred zone model and PR D. Reading a closed
-boundary into the presence of this directory is the mistake to avoid — see
-*What this does not close* below.
+This module answers **who is calling**, **which user id a route is allowed to
+act on** (PR C) and **whose row a route is allowed to touch** (PR D). It still
+answers almost nothing about *which routes a role may call*: that is the
+deferred zone model, and the one exception — `GET /api/events` — is a per-route
+denial rather than a zone. Reading a closed boundary into the presence of this
+directory is the mistake to avoid — see *What this does not close* below.
 
 ## The three modes
 
@@ -293,6 +293,141 @@ fixture says so rather than letting the absence read as an oversight. The same
 is true of **`PUT /chat/bot-preferences/:botName/default-user`** — the GET
 beside it reads no claimed id, it *returns* one.
 
+## PR D — the row's owner, and the two channels
+
+Two new modules (`resource-guard`, `ws-upgrade`), plus the socket's own filter in
+`src/chat/ws.ts` and the replacement event stream in `src/chat/routes.ts`.
+
+### `resource-guard.ts` — `requireOwnedResource(c, kind, id)`
+
+The shape `requireOwnUser` structurally cannot reach: a route addressed by the
+RESOURCE's id, carrying no claimed user at all. Five kinds — `conversation`
+(resolved from `chatState`), `thread`, `message`, `trace`, `jiraDraft`.
+
+**It answers 404, never 403**, because a web conversation id is
+`sha256("<userId>:<botName>:web")[0:16]` and therefore derivable: a 403 would
+confirm "this exists and is someone else's". That only works if the denial is
+byte-identical to the route's own miss, which is why the guard returns a
+**verdict, not a Response** — the call site answers with the expression it
+already had. Two call sites do not answer 404 at all, and that is the same rule:
+`GET /chat/pending/:threadId` answers `{ text: null }` and `GET
+/api/traces/:traceId` answers `{ spans: [] }`, because that is what each already
+says for an id it does not know.
+
+Every call is placed **BEFORE the side effect**. `GET /chat/pending/:threadId`
+is the sharpest case — it DESTROYS what it reads — and `POST
+/api/jira/draft/:id/save` and `DELETE /chat/conversations/:id` are the same
+class. HEAD needs no special handling on the body: measured on Bun 1.3.14, a
+`c.json(…, 404)` returned from a HEAD is emitted with `content-length: 0`.
+
+**A NULL owner is admin-only, relaxed in `local` mode.** A watcher or gardener
+trace has no user. §4 makes those admin-only — but `resolveRole` answers `user`
+for a local identity unconditionally (deliberately: see *Roles* above), so the
+rule as written would lock the operator out of their own instance. The cost is
+paid the other way instead: `pinnedLocalUserId() !== null` allows it.
+
+⚠️ **The operator consequence, stated because it will be met:** on
+`MUNINN_AUTH=local` the session is ONE `users.id`, so a trace, thread or
+conversation belonging to a DIFFERENT `users.id` — a Telegram bot's user row,
+say — answers 404/empty to the operator's own `/traces` page. That is the
+resource model working as specified, and the durable fix is the admin role the
+deferred zone model brings.
+
+**No `jira_drafts.user_id` migration**, though §4 assigns PR D one. Re-grepped at
+PR D time, as §4 itself instructs: the Jira composer's PR 4 deleted every
+`source = 'notes'` writer, `createJiraDraft`'s one remaining caller passes a
+`threadId`, and `getJiraDraft` already joins `threads.user_id`. A column whose
+only justification has been deleted is one more thing to keep in step with the
+join. Residual, stated rather than hidden: `jira_drafts.thread_id` has no FK, so
+a DELETED thread orphans its drafts into the NULL-owner class.
+
+`filterToOwner(c, rows, ownerOf)` is the third shape, for a COLLECTION route
+that cannot be gated at all. `GET /chat/conversations` is the one that matters:
+it publishes `id`, `userId` and `username` for every conversation in memory —
+the derivable id set every guard above is protecting. Gating the per-id routes
+behind an ungated index protects nothing.
+
+### `ws-upgrade.ts` — the one surface no middleware can see
+
+`src/index.ts` handles `/chat/ws` and `/simulator/ws` inside `Bun.serve`'s
+`fetch`, before `app.fetch`. Until PR D an authenticating instance answered 401
+to every REST call and then streamed every conversation in the process to
+anyone who opened a socket.
+
+**Both decisions are borrowed, not rewritten.** Identity is
+`resolveRequestIdentity` — the same function `createAuthMiddleware` calls, moved
+out of it for exactly this — so the upgrade grants precisely what HTTP grants,
+loopback bypass included. Origin is `decideOrigin` with the same CONFIGURED
+accepted set, and `/chat/ws` + `/simulator/ws` are entries in
+`SIDE_EFFECTING_GETS` so that rule evaluates them. ⚠️ **Do not write a second
+origin check here.** PR C's first cut compared `Origin` to the request's own
+`Host` and review demonstrated `Host: evil.example` with a matching Origin
+creating a real conversation.
+
+Identity is checked first (401), then origin (403) — the same order as HTTP,
+where the auth middleware is mounted before the origin middleware.
+
+What a browser actually sends on a handshake: `Origin`, always. `Sec-Fetch-*`,
+never — they are excluded from WebSocket handshakes — so the Origin branch is
+the whole browser story and the `Sec-Fetch-Site` branch is unreachable from one.
+A non-browser client sends neither and is allowed through to the credential
+check, the same trade `decideOrigin` documents for HTTP.
+
+**Measured, not assumed:** `server.upgrade` still returns `true` after an
+`await` inside `fetch` (Bun 1.3.14, `ws-upgrade.test.ts`) — asserted before the
+async introspection path was built on it, because the bundled Bun docs and types
+show only the synchronous form. That is acceptance item 13.
+
+### The socket's own filter, and its lifetime
+
+`src/chat/ws.ts` filters the opening snapshot AND every event by owner
+(`eventVisibleTo`). `mcp_status` is delivered to everyone: it carries no
+`conversationId` and no user data, the inspector panel consumes it, and dropping
+it silently is the "passes every security test while breaking the product"
+failure §4 warns about. An event for an unknown conversation is DROPPED.
+
+`wsDataFor` builds `ws.data` rather than `src/index.ts` writing a literal — a
+literal spelling `userId: null` typechecks, upgrades fine and delivers an
+unfiltered socket.
+
+The upgrade authenticates ONCE, so a socket is capped at the introspected
+`expiresAt` and closed with **4401** (application range; the client turns it
+into a reload-to-login rather than the ordinary 2 s reconnect). `expiresAt` is
+null for the raw shared secret and with auth off, where there is nothing to cap.
+
+### `GET /api/events` is denied to role `user`
+
+Directly, via `resolveRole` — not a zone entry, because the zone model is
+deferred and "moves to the admin zone" would leave the route wide open to any
+authenticated caller. The `?viewer=` guard PR C added scopes only two of its
+four channels; the other two are the leak — `activity` replays 50 events
+carrying the full message text of every turn, and `agent_runs` is
+`snapshotAll()` process-wide. `EventSource` delivers every event over the wire
+regardless of which the page reads.
+
+The chat page consumes **`GET /chat/events`** instead: the same `?viewer=` guard,
+`agent_status` and `request_progress` and nothing else.
+
+⚠️ **The operator consequence:** a `local` identity is role `user`, so on an
+authenticating instance this route is denied to EVERYONE, and the dashboard's
+activity feed, the `/agents` live zone and the connection indicator go dead.
+That is the deferred zone model's shape arriving early. With auth off —
+today's default and the only mode the operator dashboard runs in — nothing
+changes.
+
+### What the wonderwall sidecar actually does (measured)
+
+`scripts/wonderwall-ws-harness.sh` stands up wonderwall + mock-oauth2-server
+locally and answers the question §6 refused to assume. Measured 2026-08-26
+against wonderwall `2026-08-21-123251-1e1066a`: a WebSocket **upgrade** through
+the sidecar reaches the upstream carrying `Authorization: Bearer <access_token>`
+and the 101 is proxied back; the session cookie is sent as **`SameSite=Lax`**
+(read off the real `Set-Cookie`, not the config dump — which is what the CSRF
+reasoning above leans on); and with `--auto-login` an unauthenticated upgrade is
+refused 401 by the sidecar and never reaches the app. None of it is exercised
+today — `MUNINN_AUTH=entra` cannot boot — but the deferred half now inherits a
+measurement instead of a guess.
+
 ## Operator notes for a `local` instance (config traps PR C created)
 
 None of these refuse the boot, and all three are silent until someone uses the
@@ -325,21 +460,23 @@ feature — which is why they are written down here rather than left to be found
   deferred, so in `local` mode — where `resolveRole` answers `user` for
   everyone — they are open to any authenticated caller. Verified live:
   `GET /api/messages/<anyone>` answers 200.
-- **The `/chat/ws` and `/simulator/ws` upgrade.** It runs inside `Bun.serve`'s
-  `fetch`, before `app.fetch`, so no Hono middleware can see it. **PR D.**
-- **Resource ownership.** Any authenticated caller still reaches any
-  conversation, thread or draft by **id** — `GET|POST /chat/conversations/:id/messages`,
-  `PATCH|DELETE /chat/threads/:id`, `GET /chat/pending/:threadId`, the
-  `/api/jira/draft*` routes. Those carry no claimed `:userId`, so PR C's guard
-  structurally cannot reach them. **PR D.**
-- **Collection routes still return everyone's rows.** `GET /chat/conversations`
-  publishes `id`, `userId` and `username` for every conversation in memory.
-  They need a FILTER, not a gate. **PR D.**
-- **Which routes a role may call.** Nothing is denied by role. `resolveRole`
-  answers, and `requireOwnUser`'s admin passthrough uses it, but there is no
-  zone middleware — so an authenticated `user` still reaches `/traces`,
-  `/api/prompts/:traceId` and `/api/events`. **Deferred zone model**, and the
-  reason `MUNINN_AUTH=entra` refuses to boot.
+- **Which routes a role may call.** There is no zone middleware, so an
+  authenticated `user` still reaches `/traces`, `/api/prompts/:traceId`,
+  `/agents`, `/logs`, `/models` and the rest of the operator surface.
+  `/api/events` is the ONE per-route exception, and it is a denial rather than a
+  zone. **Deferred zone model**, and the reason `MUNINN_AUTH=entra` refuses to
+  boot.
+- **`GET /api/prompts/:traceId` is unguarded**, and it is the sharpest one left:
+  it expands a traceId into a whole assembled prompt — conversation history and
+  extracted memories verbatim. `GET /api/traces/:traceId` beside it IS guarded,
+  so the id it hands out is now the reader's own; the prompt route is admin-zone
+  under §4 and nothing denies it until the zone model lands.
+- **Collection routes other than `GET /chat/conversations` still return
+  everyone's rows** — `GET /api/threads`, `GET /api/users`, `GET /api/traces`
+  (the list). §4 leaves them in the admin zone rather than filtering them.
+- **A resource guard's owner is a `users.id`, and `local` mode pins ONE.** So on
+  an authenticating instance the operator's own Telegram-owned traces and
+  threads answer 404 to their own web session. See the PR D section above.
 - **`MUNINN_ALLOWED_ORIGINS` is now enforced** by the origin middleware and the
   CORS disposition — but **not** on the `/chat/ws` upgrade, which no Hono
   middleware can see. A cross-origin `wss://` handshake is still accepted.

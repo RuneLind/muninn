@@ -185,6 +185,23 @@ export class ChatState {
     return Array.from(this.conversations.values());
   }
 
+  /**
+   * The owner of a conversation, WITHOUT marking it recently-used.
+   *
+   * `getConversation` touches the LRU, which is right for a request that is
+   * about to read or write the conversation and wrong for the two PR D callers:
+   * the WebSocket fan-out asks this per EVENT for every open socket, and the
+   * resource guard asks it on a request that may be denied. Either would let a
+   * caller reorder the trim queue for conversations it never legitimately
+   * reaches.
+   *
+   * `undefined` means no such conversation — distinct from a conversation whose
+   * owner is empty, which cannot happen (every shell is created with a userId).
+   */
+  conversationOwner(id: string): string | undefined {
+    return this.conversations.get(id)?.userId;
+  }
+
   addMessage(conversationId: string, message: ChatMessage): void {
     const conversation = this.conversations.get(conversationId);
     if (!conversation) return;

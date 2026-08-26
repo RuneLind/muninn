@@ -34,7 +34,7 @@ const RUN = {
   kind: "chat",
 };
 
-/** One canned `/api/events` body carrying the two frames the chat page reads. */
+/** One canned `/chat/events` body carrying the two frames the chat page reads. */
 function cannedEvents(run: Record<string, unknown>, status: Record<string, unknown>): string {
   return [
     `event: agent_status`,
@@ -47,14 +47,14 @@ function cannedEvents(run: Record<string, unknown>, status: Record<string, unkno
   ].join("\n");
 }
 
-/** Stub the page's three dependencies. Returns the `/api/events` URLs requested. */
+/** Stub the page's three dependencies. Returns the `/chat/events` URLs requested. */
 async function stubChat(
   page: Page,
   opts: { users?: unknown[]; status?: Record<string, unknown>; run?: Record<string, unknown> } = {},
 ): Promise<string[]> {
   const eventUrls: string[] = [];
   page.on("request", (req) => {
-    if (req.url().includes("/api/events")) eventUrls.push(req.url());
+    if (req.url().includes("/chat/events")) eventUrls.push(req.url());
   });
 
   await page.route("**/chat/bots", (route) =>
@@ -63,7 +63,7 @@ async function stubChat(
   await page.route("**/api/users*", (route) =>
     route.fulfill({ json: { users: opts.users ?? [USER] } }),
   );
-  await page.route("**/api/events*", (route) =>
+  await page.route("**/chat/events*", (route) =>
     route.fulfill({
       status: 200,
       headers: { "content-type": "text/event-stream", "cache-control": "no-cache" },
@@ -125,9 +125,10 @@ test.describe("Chat page: viewer-scoped progress", () => {
   });
 
   test("with NO user to scope to, the page opens no stream at all", async ({ page }) => {
-    // Fail closed. An unscoped `/api/events` is the operator stream, so falling
-    // back to it here would render every user's phase and waterfall — the defect
-    // this scoping removes — in the state least likely to be noticed.
+    // Fail closed. PR D denies `/api/events` to role `user` outright, and this
+    // page must not fall back to it (or to an unscoped `/chat/events`) — that
+    // would render every user's phase and waterfall in the state least likely
+    // to be noticed.
     const eventUrls = await stubChat(page, { users: [] });
     await page.goto("/chat");
     await selectBot(page);

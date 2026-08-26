@@ -45,7 +45,7 @@ async function stub(page: Page, me: Record<string, unknown> | null): Promise<Cal
   await page.route("**/chat/bots", (route) => route.fulfill({ json: { bots: [BOT], connectors: [] } }));
   await page.route("**/api/users*", (route) => route.fulfill({ json: { users: [PICKER_USER] } }));
   await page.route("**/chat/bot-preferences/**", (route) => route.fulfill({ json: { userId: null } }));
-  await page.route("**/api/events*", (route) =>
+  await page.route("**/chat/events*", (route) =>
     route.fulfill({ status: 200, headers: { "content-type": "text/event-stream" }, body: "\n\n" }));
   await page.route("**/chat/conversations", async (route, req) => {
     if (req.method() === "POST") {

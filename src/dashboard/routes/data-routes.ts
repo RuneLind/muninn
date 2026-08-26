@@ -50,6 +50,7 @@ import {
 } from "../../watchers/wiki-drafting.ts";
 import type { WatcherType } from "../../types.ts";
 import { requireOwnUser } from "../../auth/guard.ts";
+import { requireOwnedResource } from "../../auth/resource-guard.ts";
 
 const log = getLog("dashboard");
 
@@ -233,6 +234,10 @@ export function registerDataRoutes(app: Hono): void {
   app.delete("/api/threads/:id", async (c) => {
     try {
       const id = c.req.param("id");
+      // §4's resource list. The `/chat/threads/:id` sibling carries the same
+      // guard; this one is the dashboard's copy of the same delete.
+      const owned = await requireOwnedResource(c, "thread", id);
+      if (!owned.ok) return c.json({ error: "Thread not found or is the main thread" }, 404);
       const deleted = await deleteThreadById(id);
       if (!deleted) {
         return c.json({ error: "Thread not found or is the main thread" }, 404);

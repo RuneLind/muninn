@@ -39,6 +39,7 @@ export const E2E_PORTS = {
   "summaries-share": 3028,
   "summaries-share/huginn": 3029,
   "wiki-start-cards": 3030,
+  "ws-scope": 3031,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

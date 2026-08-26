@@ -95,6 +95,35 @@ export async function getTrace(traceId: string): Promise<SpanRow[]> {
   return rows.map(mapRow);
 }
 
+/**
+ * Who owns a trace, for PR D's `requireOwnedResource("trace", …)`.
+ *
+ * `GET /api/traces/:traceId` carries no `:userId`, so PR C's claimed-id guard
+ * could not reach it — and the chat page fetches it for its own turns, so it
+ * cannot simply move to the admin zone either.
+ *
+ * The ROOT span is preferred but any span answers: `user_id` is stamped on
+ * every span, not only the root, which is what makes this one indexed read
+ * rather than a join. A trace with no rows is `found: false`; a watcher or
+ * gardener trace has rows with a NULL `user_id` and is `found: true, userId:
+ * null` — the caller decides what an owner-less row means, and collapsing the
+ * two here is what would hand every watcher trace to every caller.
+ */
+export async function getTraceOwner(
+  traceId: string,
+): Promise<{ found: false } | { found: true; userId: string | null }> {
+  const sql = getDb();
+  const [row] = await sql`
+    SELECT user_id
+    FROM traces
+    WHERE trace_id = ${traceId}
+    ORDER BY (parent_id IS NULL) DESC, started_at ASC
+    LIMIT 1
+  `;
+  if (!row) return { found: false };
+  return { found: true, userId: (row.user_id as string | null) ?? null };
+}
+
 export async function getRecentTraces(
   limit = 50,
   offset = 0,
