@@ -765,6 +765,9 @@ const CHAT_SCRIPT = `
     var bar = document.getElementById(${JSON.stringify(WS_STALLED_NOTICE_ID)});
     if (bar) bar.style.top = stalledNoticeTopPx();
   };
+  // The banner's height changes when its text re-wraps, so the cached offset
+  // goes stale on a resize/rotate while both bars are up.
+  window.addEventListener('resize', window.__muninnRestackNotices);
 
   function showWsStalledNotice() {
     if (document.getElementById(${JSON.stringify(WS_STALLED_NOTICE_ID)}) || !document.body) return;

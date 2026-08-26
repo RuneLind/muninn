@@ -56,6 +56,16 @@
  * on a condition that does not self-heal, and the recovery — reload the page —
  * is one the reader can only take once they are told.
  *
+ * Two ACCEPTED limits, assumptions rather than facts. The rung counter is
+ * monotonic for the tab's lifetime (only a successful `open` resets it), so
+ * three `refused` verdicts hours apart — an intermittent proxy dropping the
+ * Upgrade while HTTP stays fine — spend the ladder on a condition that was
+ * self-healing after all; accepted because a decaying counter is the
+ * un-releasable-latch shape in miniature. And the probe trusts any 2xx: a
+ * fronting proxy that 302s `/chat/me` to its own login page (fetch follows
+ * redirects) reads as `refused`, and the amber bar's "session is still valid"
+ * is then wrong — pre-existing in the old `status !== 401` predicate too.
+ *
  * ## One source for the rules, in BOTH places they run
  *
  * The page's `connectWs` is a template string, invisible to `tsc`, and the first

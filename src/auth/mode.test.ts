@@ -122,9 +122,9 @@ describe("acceptance 5 — fail closed, both directions", () => {
     // `texas.nais:introspect` is the sharpest one — a host with the scheme left
     // off and a colon where the operator meant a slash or a port. It PARSES, as
     // scheme `texas.nais:` with path `introspect`, and this gate is the only
-    // thing that stops it. (The SLASH spelling, `texas.nais/introspect`, is in
-    // the parse test above instead: measured, `new URL` refuses that one
-    // outright, so it never reaches here.)
+    // thing that stops it. (The SLASH spelling — `texas.test/introspect` in the
+    // parse test above — is measured: `new URL` refuses it outright, so it
+    // never reaches here.)
     for (const bad of ["mailto:x", "file:///etc/passwd", "texas.nais:introspect", "ftp://texas.test/x", "data:,x"]) {
       expect(() => resolveAuthConfig(entraEnv({ NAIS_TOKEN_INTROSPECTION_ENDPOINT: bad })), bad)
         .toThrow(/NAIS_TOKEN_INTROSPECTION_ENDPOINT/);

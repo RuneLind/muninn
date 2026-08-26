@@ -135,9 +135,18 @@ export function slugifyIdPart(value: string): string {
 export class UnmintableClaimsError extends Error {
   /** The structural marker `src/auth/introspect.ts` reads. */
   readonly unmintableClaims = true as const;
-  constructor(message: string) {
+  /**
+   * Which refusal this is — `introspect.ts` keys its warn-once on it, so the
+   * two conditions log independently: a process that has already warned about
+   * an empty-slug claim set must still warn the first time the
+   * operator-actionable both-ids-taken collision fires. A closed set, per the
+   * `warnedReasons` discipline.
+   */
+  readonly unmintableKind: "mint" | "collision";
+  constructor(message: string, kind: "mint" | "collision" = "mint") {
     super(message);
     this.name = "UnmintableClaimsError";
+    this.unmintableKind = kind;
   }
 }
 
@@ -253,7 +262,7 @@ async function provision(claims: NavClaims): Promise<string> {
   const base = mintNavUserId(claims);
   const username = claims.navIdent ?? claims.oid;
 
-  return await sql.begin(async (_tx) => {
+  const result = await sql.begin(async (_tx) => {
     // `TransactionSql` loses the tagged-template call signature — the house cast
     // (`src/db/threads.ts`, `connectors.ts`).
     const tx = _tx as unknown as Sql;
@@ -265,17 +274,6 @@ async function provision(claims: NavClaims): Promise<string> {
     let userId = base;
     if (taken.length > 0) {
       userId = collisionUserId(base, claims.oid);
-      // No `oid` property: the log lines land in a JSONL file sink, and the oid
-      // is a directory-wide personal identifier that adds nothing an operator
-      // acting on this line can use — the two minted ids are what identifies
-      // the rows, and the database holds the link. (A NAVident still rides
-      // INSIDE `userId`, which is the id an operator has to be able to grep.)
-      log.warn(
-        "Minted user id {base} is already taken — provisioning {userId} instead. A NAVident that has " +
-        "been re-issued is the expected cause; the existing account belongs to whoever held it before " +
-        "and is deliberately NOT adopted.",
-        { base, userId },
-      );
       const alsoTaken = await tx`SELECT 1 FROM users WHERE id = ${userId}`;
       if (alsoTaken.length > 0) {
         // `UnmintableClaimsError`, not a plain one, and for the same reason the
@@ -289,6 +287,7 @@ async function provision(claims: NavClaims): Promise<string> {
         throw new UnmintableClaimsError(
           `Cannot provision an Entra identity: both "${base}" and the collision form "${userId}" are ` +
           `taken by other users.id rows. Resolve by hand — refusing to adopt an existing account.`,
+          "collision",
         );
       }
     }
@@ -309,4 +308,22 @@ async function provision(claims: NavClaims): Promise<string> {
     // the transaction committed.
     return userId;
   }) as string;
+
+  // AFTER commit, same reason as the announcement note above: an in-transaction
+  // warn once claimed "provisioning <id> instead" for an attempt the very next
+  // statement rolled back.
+  if (result !== base) {
+    // No `oid` property: the log lines land in a JSONL file sink, and the oid
+    // is a directory-wide personal identifier that adds nothing an operator
+    // acting on this line can use — the two minted ids are what identifies
+    // the rows, and the database holds the link. (A NAVident still rides
+    // INSIDE the id, which is what an operator has to be able to grep.)
+    log.warn(
+      "Minted user id {base} is already taken — provisioned {userId} instead. A NAVident that has " +
+      "been re-issued is the expected cause; the existing account belongs to whoever held it before " +
+      "and is deliberately NOT adopted.",
+      { base, userId: result },
+    );
+  }
+  return result;
 }

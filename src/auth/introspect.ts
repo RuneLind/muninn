@@ -369,6 +369,19 @@ function isUnmintableClaims(err: unknown): boolean {
     (err as { unmintableClaims?: unknown }).unmintableClaims === true;
 }
 
+/**
+ * The warn-once key for an unmintable-claims refusal. The error's
+ * `unmintableKind` ("mint" | "collision") joins the key so the two conditions
+ * log independently — the collision message is the operator-actionable one
+ * ("resolve by hand", naming both ids), and under a shared key it was silenced
+ * for the process lifetime by any earlier empty-slug refusal. Still a closed
+ * set: the kind has two literals and the fallback is one more.
+ */
+function unmintableWarnKey(err: unknown): string {
+  const kind = (err as { unmintableKind?: unknown }).unmintableKind;
+  return `unmintable-claims:${kind === "collision" ? "collision" : "mint"}`;
+}
+
 /** The cache key. A HASH, not the token: the map is process-memory a heap dump
  *  or a debugger reaches, and an access token in it is a credential at rest. */
 function cacheKey(token: string): string {
@@ -491,7 +504,7 @@ export function createEntraIntrospector(config: AuthConfig, deps: EntraIntrospec
       // every retry from every open tab spent another Texas round-trip, another
       // provisioning transaction and another log line, forever.
       if (isUnmintableClaims(err)) {
-        warnOnce("unmintable-claims", `Refusing an Entra login: ${message}`);
+        warnOnce(unmintableWarnKey(err), `Refusing an Entra login: ${message}`);
         return DENIED;
       }
       // Everything else here IS an outage: the database is the provisioning
