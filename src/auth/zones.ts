@@ -5,10 +5,10 @@
  * opened with the sentence "There is no zone middleware, so an authenticated
  * `user` still reaches /traces, /agents, /logs, /models and the rest of the
  * operator surface." That is what this file closes. It was the last thing
- * `MUNINN_AUTH=entra` waited on inside muninn; `entra` still refuses to boot
- * (`AUTH_ZONES_IMPLEMENTED` is `false`), but the reason is now the Entra half of
- * the DEPLOY — the token introspector, the profile, the wonderwall sidecar —
- * not a missing zone model, which is exactly the code shipping in this file.
+ * `MUNINN_AUTH=entra` waited on inside muninn. It is no longer waiting: the PR
+ * after this one shipped the token introspector and the identity link and
+ * flipped `AUTH_ZONES_IMPLEMENTED` to `true`, so every rule below is what an
+ * authenticated NAV colleague is actually held to.
  *
  * ## Shape: a short deny list, two allowlists, and default-deny
  *

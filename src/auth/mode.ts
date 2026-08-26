@@ -111,9 +111,11 @@ export interface AuthConfig {
    *
    * It exists because default-deny plus the three shipped facts —
    * `resolveRole` answers `user` for a local identity unconditionally,
-   * `MUNINN_ADMIN_IDENTS` is inert in `local` mode, and `entra` cannot boot —
-   * would otherwise make the operator's own dashboard permanently unreachable
-   * on every `MUNINN_AUTH=local` instance. Default `user` so nothing changes
+   * `MUNINN_ADMIN_IDENTS` is inert in `local` mode, and (before the Entra
+   * identity PR) `entra` could not boot — would otherwise make the operator's
+   * own dashboard permanently unreachable on every `MUNINN_AUTH=local`
+   * instance. It stays necessary there: on a `local` instance the allowlist is
+   * still inert, whatever `entra` can now do. Default `user` so nothing changes
    * without an opt-in: PRs C–D's guard tests run against a `user`-role local
    * identity, and `requireOwnUser`'s admin passthrough would make every one of
    * them a no-op.
@@ -209,7 +211,7 @@ export function resolveAuthConfig(env: Record<string, string | undefined> = proc
       `${AUTH_ENV}="${mode}" requires a non-empty MUNINN_ADMIN_IDENTS. Refusing to start. ` +
       `NB in "local" mode this variable is currently INERT: the pinned identity always resolves to ` +
       `role "user" by design (src/auth/role.ts), so setting it does not grant anyone admin. It is ` +
-      `required now so the deferred Entra mode — where it IS the role source — cannot ship without it.`,
+      `required in every authenticating mode because in "entra" it IS the role source, matched against the token's own NAVident/oid.`,
     );
   }
   if (allowedOrigins.length === 0) {

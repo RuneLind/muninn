@@ -40,8 +40,9 @@ export interface Identity {
  * Without this distinction a hand-set `muninn_session=<MUNINN_LOCAL_TOKEN>`
  * cookie authenticates — putting the long-lived secret in every request's
  * cookie jar with no expiry, which is the property `session.ts` exists to
- * prevent. The seam carries it so the deferred Entra introspector inherits the
- * same discipline rather than rediscovering it.
+ * prevent. The seam carries it so the Entra introspector inherits the same
+ * discipline rather than rediscovering it — and it does: `createEntraIntrospector`
+ * refuses the `session` channel outright, with no Texas call at all.
  */
 export type TokenChannel = "session" | "credential";
 

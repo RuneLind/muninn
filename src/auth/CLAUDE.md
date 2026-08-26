@@ -297,9 +297,9 @@ freely.
 ### `GET /chat/me` — and a name collision worth knowing about
 
 ⚠️ **`mode: "local"` from `/chat/me` means "auth is OFF", which is the OPPOSITE
-of `MUNINN_AUTH=local`.** The wire value is the plan's, and the deferred Entra
-half expects it, so it is kept — but read it as "this page picks its own user",
-never as "the local auth mode". An authenticating instance, `local` included,
+of `MUNINN_AUTH=local`.** The wire value is the plan's and the Entra half reads
+it, so it is kept — but read it as "this page picks its own user", never as "the
+local auth mode". An authenticating instance, `local` included,
 answers `mode: "session"`.
 
 ### `cors.ts` + `policy.ts` — the per-site CORS disposition
