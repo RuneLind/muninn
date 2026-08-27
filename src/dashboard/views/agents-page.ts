@@ -255,6 +255,8 @@ export async function renderAgentsPage(): Promise<string> {
     var recentExpanded = false;
     var estimatesMap = {};   // identity -> expectedDurationMs (from /api/agents/overview)
     var processStartedAt = null;
+    var sseConnected = false;     // drives the "reconnecting…" half of the meta line
+    var sseEverConnected = false; // distinguishes the first connect from a reconnect
     var agentsRaf = null;
     var agentsLastTick = 0;
     var AGENTS_TICK_MS = 100;
@@ -358,7 +360,9 @@ export async function renderAgentsPage(): Promise<string> {
 
     function updateMeta() {
       var meta = document.getElementById('agMeta');
-      if (meta) meta.textContent = 'live over SSE · ' + (selectedBot ? 'filtered to ' + selectedBot : 'all bots');
+      if (!meta) return;
+      var live = sseConnected ? 'live over SSE' : 'reconnecting…';
+      meta.textContent = live + ' · ' + (selectedBot ? 'filtered to ' + selectedBot : 'all bots');
     }
 
     // Honest empty state: name when the process started, since the in-memory
@@ -696,8 +700,47 @@ export async function renderAgentsPage(): Promise<string> {
         .map(function (r) { return r.requestId; }).sort().join(',');
     }
 
+    // --- Keeping the page honest when nothing is running --------------------
+    // Everything below exists because the overview used to be fetched exactly
+    // once (page load) and then only when the running-set signature changed. On
+    // a --watch dev server that restarts under an open tab, that is three
+    // separate ways to sit on a dead page: a load that raced the restart wrote
+    // one err-note and never retried; a reconnected EventSource re-delivered the
+    // same (usually empty) running set, so no refetch fired; and with nothing
+    // running the rAF ticker is stopped, so even the "N m ago" labels froze.
+    //
+    // The poll is deliberately visibility-gated: an overview hit is 4 DB
+    // queries, and a background tab left open for a day should cost nothing.
+    var OVERVIEW_POLL_MS = 30000;
+    var pollTimer = null;
+    function pageVisible() { return document.visibilityState !== 'hidden'; }
+    function startPoll() {
+      if (pollTimer != null) return;
+      pollTimer = setInterval(function () { if (pageVisible()) loadOverview(); }, OVERVIEW_POLL_MS);
+    }
+    document.addEventListener('visibilitychange', function () {
+      // Coming back to the tab: refresh NOW rather than up to a poll late.
+      if (pageVisible()) loadOverview();
+    });
+
     // --- SSE wiring ---
     sseClient('/api/events', {
+      onopen: function () {
+        // Fires on the first connect AND on every native reconnect after a drop
+        // (a server restart). The snapshot that follows re-renders the live
+        // zone; up-next/recent only move if we ask, so ask.
+        sseConnected = true;
+        updateMeta();
+        // Not on the FIRST connect: the init load below already covers that, and
+        // an overview hit is 4 DB queries.
+        if (sseEverConnected) loadOverview();
+        sseEverConnected = true;
+      },
+      onerror: function () {
+        // EventSource retries on its own — say so instead of silently freezing.
+        sseConnected = false;
+        updateMeta();
+      },
       agent_runs: function (ev) {
         try {
           var runs = JSON.parse(ev.data);
@@ -715,6 +758,7 @@ export async function renderAgentsPage(): Promise<string> {
 
     updateMeta();
     loadOverview();
+    startPoll();
   </script>
 </body>
 </html>`;

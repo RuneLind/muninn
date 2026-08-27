@@ -10,7 +10,10 @@ import {
  * `/agents` live-agent dashboard + `GET /api/agents/overview` (JSON). The page
  * renders a server shell; the client subscribes to the `agent_runs` SSE event
  * (on the shared `/api/events` stream) for the live zone and fetches the
- * overview for up-next + recent. `deps` stays injectable for the overview test.
+ * overview for up-next + recent — at load, on a running-set change, every 30 s
+ * while the tab is VISIBLE, on the tab becoming visible, and on an SSE
+ * RECONNECT (a server restart), which is the only refresh trigger an idle page
+ * has. `deps` stays injectable for the overview test.
  */
 export function registerAgentsRoutes(
   app: Hono,
