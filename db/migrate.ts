@@ -203,12 +203,30 @@ if (import.meta.main) {
     // an unparseable URL fails loudly two statements later; don't pre-empt it
   }
 
+  // A URL whose TLS material cannot be used is an OPERATOR error, and it must
+  // read like one. Without this, `--status` against a wrong cert mount printed
+  // a bun stack trace out of `openPostgres` and exited 1 — indistinguishable
+  // from "the migration failed". Its sibling `db/require-provisioned.ts` makes
+  // the same distinction with its own exit code; here there is only one, so the
+  // message carries the difference.
+  const open = (): ReturnType<typeof openPostgres> => {
+    try {
+      const opened = openPostgres(DATABASE_URL, { max: 1, onnotice: () => {} });
+      for (const note of opened.notes) console.log(`  TLS: ${note}`);
+      return opened;
+    } catch (err) {
+      console.error(
+        `Cannot use this database URL: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      process.exit(1);
+    }
+  };
+
   if (STATUS) {
-    // The notes are printed here too: --status and --dry-run are the two paths
+    // `open()` prints the TLS notes: --status and --dry-run are the two paths
     // an operator uses to DIAGNOSE a connection, and they were the two that
     // said nothing about how it was made.
-    const { sql, notes } = openPostgres(DATABASE_URL, { max: 1, onnotice: () => {} });
-    for (const note of notes) console.log(`  TLS: ${note}`);
+    const { sql } = open();
     await ensureMigrationsTable(sql);
     const applied = await getAppliedMigrations(sql);
     const all = await discoverMigrations();
@@ -222,11 +240,10 @@ if (import.meta.main) {
     console.log(`\n${applied.size} applied, ${pending.length} pending`);
     await sql.end();
   } else if (DRY_RUN) {
-    // The notes are printed here too: --status and --dry-run are the two paths
+    // `open()` prints the TLS notes: --status and --dry-run are the two paths
     // an operator uses to DIAGNOSE a connection, and they were the two that
     // said nothing about how it was made.
-    const { sql, notes } = openPostgres(DATABASE_URL, { max: 1, onnotice: () => {} });
-    for (const note of notes) console.log(`  TLS: ${note}`);
+    const { sql } = open();
     await ensureMigrationsTable(sql);
     const applied = await getAppliedMigrations(sql);
     const all = await discoverMigrations();
