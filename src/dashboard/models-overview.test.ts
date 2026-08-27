@@ -539,7 +539,7 @@ import { resolveVertexConfig } from "../config.ts";
 function withVertexEnv<T>(env: Record<string, string>, fn: () => T): T {
   const names = [
     "CLAUDE_CODE_USE_VERTEX", "ANTHROPIC_VERTEX_PROJECT_ID", "ANTHROPIC_VERTEX_BASE_URL",
-    "CLOUD_ML_REGION", "VERTEX_PROJECT_ID", "VERTEX_REGION",
+    "CLOUD_ML_REGION", "VERTEX_PROJECT_ID", "VERTEX_REGION", "VERTEX_REGION_CLAUDE_4_5_SONNET",
   ];
   const saved: Record<string, string | undefined> = {};
   for (const n of names) { saved[n] = process.env[n]; delete process.env[n]; }
@@ -574,11 +574,10 @@ test("vertexInfo: a DECLARED but not enabled Vertex still renders — that is th
   });
 });
 
-test("vertexInfo: the SDK's own names are reported as the winning source", () => {
+test("vertexInfo: an ENABLED instance reports the SDK's names as the source", () => {
   const { vertexInfo } = _internalsForTest();
   withVertexEnv({
     CLAUDE_CODE_USE_VERTEX: "1",
-    VERTEX_PROJECT_ID: "muninn-name",
     ANTHROPIC_VERTEX_PROJECT_ID: "sdk-name",
     CLOUD_ML_REGION: "europe-west1",
   }, () => {
@@ -587,6 +586,26 @@ test("vertexInfo: the SDK's own names are reported as the winning source", () =>
     expect(info.projectId).toBe("sdk-name");
     expect(info.projectIdSource).toBe("ANTHROPIC_VERTEX_PROJECT_ID");
     expect(info.regionSource).toBe("CLOUD_ML_REGION");
+    expect(info.perModelRegions).toEqual([]);
+  });
+});
+
+test("vertexInfo: a per-model region override is CARRIED to the card", () => {
+  // The card said `europe-north1` while every Sonnet 4.5 turn went elsewhere,
+  // because this override beats CLOUD_ML_REGION in the SDK and nothing rendered
+  // it. A non-global one is legal, so the row is the only signal there is.
+  const { vertexInfo } = _internalsForTest();
+  withVertexEnv({
+    CLAUDE_CODE_USE_VERTEX: "1",
+    ANTHROPIC_VERTEX_PROJECT_ID: "p",
+    CLOUD_ML_REGION: "europe-north1",
+    VERTEX_REGION_CLAUDE_4_5_SONNET: "europe-west1",
+  }, () => {
+    const info = vertexInfo([])!;
+    expect(info.region).toBe("europe-north1");
+    expect(info.perModelRegions).toEqual([
+      { name: "VERTEX_REGION_CLAUDE_4_5_SONNET", region: "europe-west1" },
+    ]);
   });
 });
 

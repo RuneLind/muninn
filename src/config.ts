@@ -138,67 +138,124 @@ export function resolveServingProfile(env: Record<string, string | undefined> = 
 const VERTEX_GLOBAL_REGION = "global";
 
 /**
- * The region-less Vertex host, which IS the global endpoint. Refusing only the
- * region NAME would be an inert guard: `ANTHROPIC_VERTEX_BASE_URL` steers the
- * SDK past `CLOUD_ML_REGION` entirely, so `global` walks in through a second
- * door that never spells the word. The EU multi-region host
- * (`aiplatform.eu.rep.googleapis.com`) is a different host and is NOT refused —
- * whether it satisfies the føring is Team KI's answer to give, not ours to
- * pre-empt, and the plan tracks it as an open question.
+ * The region-less Vertex host, which IS the global endpoint — confirmed against
+ * the bundled Agent SDK binary, which maps the region `global` to exactly this
+ * origin. Refusing only the region NAME would be an inert guard:
+ * `ANTHROPIC_VERTEX_BASE_URL` steers the SDK past every region variable, so
+ * `global` walks in through a second door that never spells the word. The EU
+ * multi-region host (`aiplatform.eu.rep.googleapis.com`) is a different host and
+ * is NOT refused — whether it satisfies the føring is Team KI's answer to give,
+ * not ours to pre-empt, and the plan tracks it as an open question.
  */
 const VERTEX_GLOBAL_HOST = "aiplatform.googleapis.com";
 
 /**
+ * The SDK's PER-MODEL region overrides, by prefix rather than by list.
+ *
+ * ⚠️ This prefix is the whole reason the region guard is not inert. The bundled
+ * CLI resolves a region as: find the first entry of its model→env map whose key
+ * prefixes the model id, and if one matches, use `process.env[thatName]` —
+ * **falling back to `CLOUD_ML_REGION` only when none does**. So
+ * `VERTEX_REGION_CLAUDE_4_5_SONNET=global` BEATS `CLOUD_ML_REGION=europe-north1`
+ * for every Sonnet 4.5 turn, and the resulting host is the global endpoint. A
+ * guard on the two obvious names alone booted that config cleanly while
+ * `/models` asserted `europe-north1`.
+ *
+ * Matched by PREFIX, not against the twelve names the installed binary happens
+ * to carry (`…_3_5_HAIKU` through `…_4_7_OPUS`): that list grows with every
+ * model, and a hard-coded copy would be silently short by one the first time it
+ * did. Anthropic's own Vertex documentation steers operators to these variables
+ * precisely because availability differs by region — which is exactly the
+ * situation NAV is in — so this is the LIKELY misconfiguration, not an exotic one.
+ */
+const VERTEX_PER_MODEL_REGION_PREFIX = "VERTEX_REGION_CLAUDE_";
+
+/**
+ * `CLAUDE_CODE_USE_VERTEX` spellings the SDK accepts, copied from the bundled
+ * binary (`["1","true","yes","on"].includes(value.toLowerCase())`).
+ *
+ * Deliberately NOT `optionalEnvFlag`, which accepts only `1`/`true` and treats
+ * everything else as an explicit or accidental off. Inverting a DENYLIST here —
+ * "anything that is not `0`/`false`/`no`/`off` is on" — is what made muninn and
+ * the SDK disagree about `CLAUDE_CODE_USE_VERTEX=y`: muninn said Vertex,
+ * `assertHaveAuth()` waived the credential requirement, and the SDK took the
+ * first-party path with no credential at all, failing per turn with a cryptic
+ * error instead of at boot with a clear one. An allowlist copied from the
+ * consumer is the only parse that cannot diverge.
+ */
+const VERTEX_ON_VALUES = new Set(["1", "true", "yes", "on"]);
+
+/**
  * What this process would do if a Vertex call were made right now.
  *
- * Five env names steer that, and only two of them are muninn's. The three
- * `CLAUDE_CODE_USE_VERTEX` / `ANTHROPIC_VERTEX_PROJECT_ID` / `CLOUD_ML_REGION`
- * names belong to the Agent SDK, which reads `process.env` itself — so a guard
- * that looked only at muninn's own `VERTEX_*` names would be inert exactly when
- * it mattered, refusing nothing while the SDK dialled `global`. This resolver
- * therefore reads BOTH sets and reports which name won.
+ * Seven-plus env names steer that, and only two of them are muninn's. Four
+ * belong to the Agent SDK — `CLAUDE_CODE_USE_VERTEX`,
+ * `ANTHROPIC_VERTEX_PROJECT_ID`, `CLOUD_ML_REGION`, `ANTHROPIC_VERTEX_BASE_URL`
+ * — plus the open-ended `VERTEX_REGION_CLAUDE_*` family, and the SDK reads all
+ * of them from `process.env` itself. A guard that looked only at muninn's own
+ * `VERTEX_*` names would be inert exactly when it mattered, refusing nothing
+ * while the SDK dialled `global`.
  */
 export interface VertexConfig {
   /**
    * Will the Agent SDK take the Vertex path? This is `CLAUDE_CODE_USE_VERTEX`
-   * and nothing else, because that is the switch the SDK itself reads. Muninn's
-   * `VERTEX_PROJECT_ID` is configuration, not a switch: setting it must not
-   * silently move a bot onto Vertex.
+   * and nothing else, parsed with the SDK's own allowlist, because that is the
+   * switch the SDK itself reads. Muninn's `VERTEX_PROJECT_ID` is configuration,
+   * not a switch: setting it must not silently move a bot onto Vertex.
    */
   enabled: boolean;
   projectId: string | null;
-  /** Which name supplied `projectId` — rendered on `/models`, so a value set
-   *  under muninn's name while the SDK reads the other one is diagnosable. */
+  /** Which name supplied `projectId` — rendered on `/models`. When Vertex is
+   *  ENABLED this is always the SDK's name, because nothing else is accepted. */
   projectIdSource: "ANTHROPIC_VERTEX_PROJECT_ID" | "VERTEX_PROJECT_ID" | null;
   region: string | null;
   regionSource: "CLOUD_ML_REGION" | "VERTEX_REGION" | null;
   /** `ANTHROPIC_VERTEX_BASE_URL`, verbatim. Set for the EU multi-region
    *  endpoint, whose host is not `<region>-aiplatform.googleapis.com`. */
   baseUrl: string | null;
+  /**
+   * Every `VERTEX_REGION_CLAUDE_*` that is SET, name and value. Rendered on
+   * `/models` because these BEAT `regionSource` for the models they name, and a
+   * card that reported only `CLOUD_ML_REGION` was telling an operator their
+   * traffic went somewhere it did not.
+   */
+  perModelRegions: { name: string; region: string }[];
 }
 
 /**
- * `VERTEX_PROJECT_ID` / `VERTEX_REGION` and the SDK's three — one parse, and the
- * boot refusals that go with them.
+ * The Vertex credential seam — one parse, and the boot refusals that go with it.
  *
  * A function as well as a `Config` field, by the pair rule
  * {@link resolveServingProfile} states: `assertHaveAuth()` in the claude-sdk
  * connector takes no `Config` and must not need `DATABASE_URL`, which
  * `loadConfig` demands.
  *
- * THROWS on four misconfigurations, and the split between them is deliberate:
+ * THROWS on six misconfigurations, and the split between them is deliberate.
  *
- *   - a `global` region, in EITHER region name, **whether or not Vertex is
- *     enabled**. It has no other consumer in this process, and a forbidden
- *     value sitting in `.env` waiting for someone to flip the switch is the
- *     `MUNINN_PROFILE` failure shape exactly — a misconfiguration that arrives
- *     with no signal at all.
- *   - a base URL on the global host, same rule, other door, same unconditional
- *     treatment.
- *   - Vertex enabled with no project, and enabled with neither region nor base
- *     URL. These fire ONLY when enabled, because only then are they wrong. The
- *     SDK does report them, eventually and far less clearly, per turn rather
- *     than at boot.
+ * **Unconditional — whether or not Vertex is enabled**, because a forbidden
+ * value sitting in `.env` waiting for someone to flip the switch is the
+ * `MUNINN_PROFILE` failure shape, a misconfiguration that arrives with no
+ * signal at all:
+ *   - a `global` region, in EITHER of the two region names OR in any
+ *     `VERTEX_REGION_CLAUDE_*`;
+ *   - a base URL on the global host, same rule, other door;
+ *   - a base URL that is not a URL.
+ *
+ * **Only when enabled**, because only then are they wrong — and each names the
+ * SDK's OWN variable, because muninn does not export its own names into the
+ * SDK's and a value under the wrong name reaches nothing:
+ *   - no `ANTHROPIC_VERTEX_PROJECT_ID`. `VERTEX_PROJECT_ID` does NOT satisfy
+ *     this: the SDK never reads it, and with no project of its own it falls
+ *     back to whatever project ADC defaults to — so the old rule booted a
+ *     config that silently billed and routed somewhere else entirely.
+ *   - no `CLOUD_ML_REGION`. A base URL does NOT satisfy this either: the SDK
+ *     builds the resource path from the region regardless, and its default is
+ *     **`us-east5`** — measured in the bundled binary. Accepting a base URL
+ *     alone certified an EU-multi-region config whose every request said
+ *     `locations/us-east5`.
+ *   - muninn's name and the SDK's name both set and DISAGREEING, for either
+ *     project or region. One of the two is dead config, and guessing which the
+ *     operator meant is not this layer's job.
  */
 export function resolveVertexConfig(env: Record<string, string | undefined> = process.env): VertexConfig {
   const read = (name: string): string | null => {
@@ -222,11 +279,24 @@ export function resolveVertexConfig(env: Record<string, string | undefined> = pr
   refuseGlobalRegion("VERTEX_REGION", vertexRegion);
   refuseGlobalRegion("CLOUD_ML_REGION", cloudMlRegion);
 
+  const perModelRegions: { name: string; region: string }[] = [];
+  for (const name of Object.keys(env).sort()) {
+    if (!name.startsWith(VERTEX_PER_MODEL_REGION_PREFIX)) continue;
+    const region = read(name);
+    if (region === null) continue;
+    refuseGlobalRegion(name, region);
+    perModelRegions.push({ name, region });
+  }
+
   const baseUrl = read("ANTHROPIC_VERTEX_BASE_URL");
   if (baseUrl !== null) {
     let host: string | null = null;
     try {
-      host = new URL(baseUrl).host.toLowerCase();
+      // The trailing dot is stripped before comparing: `aiplatform.googleapis.com.`
+      // is the same name in DNS, and a bare string compare would let it through.
+      // (It does not resolve on Bun today — the TLS name check refuses it — but
+      // that is the runtime's accident, not this guard's doing.)
+      host = new URL(baseUrl).host.toLowerCase().replace(/\.$/, "");
     } catch {
       throw new Error(`ANTHROPIC_VERTEX_BASE_URL="${baseUrl}" is not a URL.`);
     }
@@ -234,41 +304,65 @@ export function resolveVertexConfig(env: Record<string, string | undefined> = pr
       throw new Error(
         `ANTHROPIC_VERTEX_BASE_URL="${baseUrl}" is the GLOBAL Vertex endpoint, which NAV may not ` +
         `use — refusing for the same reason a \`global\` region is refused, and refused here ` +
-        `because a base URL steers the SDK past CLOUD_ML_REGION entirely. A regional host is ` +
+        `because a base URL steers the SDK past every region variable. A regional host is ` +
         `<region>-${VERTEX_GLOBAL_HOST}.`,
       );
     }
   }
 
-  // The SDK's switch decides `enabled`; muninn's own names never do. Read with
-  // `optionalEnvFlag`'s recognised spellings so `CLAUDE_CODE_USE_VERTEX=0` is an
-  // explicit off rather than an unrecognised truthy value.
   const useVertexRaw = (env["CLAUDE_CODE_USE_VERTEX"] ?? "").trim().toLowerCase();
-  const enabled = useVertexRaw !== "" && !OFF_VALUES.has(useVertexRaw);
+  const enabled = VERTEX_ON_VALUES.has(useVertexRaw);
+  if (useVertexRaw !== "" && !enabled && !OFF_VALUES.has(useVertexRaw)) {
+    // Warn rather than refuse: muninn and the SDK now AGREE this is off, so the
+    // failure is loud either way — `assertHaveAuth()` demands an Anthropic
+    // credential and says so. Silence is the only bad answer.
+    log.warn(
+      "Unrecognized value for CLAUDE_CODE_USE_VERTEX: \"{value}\" — treated as OFF, which is what " +
+      "the Agent SDK does too (it accepts 1/true/yes/on)",
+      { value: useVertexRaw },
+    );
+  }
 
-  const projectId = read("ANTHROPIC_VERTEX_PROJECT_ID") ?? read("VERTEX_PROJECT_ID");
-  const projectIdSource = read("ANTHROPIC_VERTEX_PROJECT_ID")
-    ? ("ANTHROPIC_VERTEX_PROJECT_ID" as const)
-    : read("VERTEX_PROJECT_ID")
-      ? ("VERTEX_PROJECT_ID" as const)
-      : null;
+  const sdkProject = read("ANTHROPIC_VERTEX_PROJECT_ID");
+  const muninnProject = read("VERTEX_PROJECT_ID");
+  if (sdkProject !== null && muninnProject !== null && sdkProject !== muninnProject) {
+    throw new Error(
+      `ANTHROPIC_VERTEX_PROJECT_ID="${sdkProject}" and VERTEX_PROJECT_ID="${muninnProject}" disagree. ` +
+      `The Agent SDK reads only the first, so the second is dead config — set one, or set both alike.`,
+    );
+  }
+  if (cloudMlRegion !== null && vertexRegion !== null && cloudMlRegion !== vertexRegion) {
+    throw new Error(
+      `CLOUD_ML_REGION="${cloudMlRegion}" and VERTEX_REGION="${vertexRegion}" disagree. ` +
+      `The Agent SDK reads only the first, so the second is dead config — set one, or set both alike.`,
+    );
+  }
+
+  const projectId = sdkProject ?? muninnProject;
+  const projectIdSource = sdkProject ? ("ANTHROPIC_VERTEX_PROJECT_ID" as const)
+    : muninnProject ? ("VERTEX_PROJECT_ID" as const) : null;
   const region = cloudMlRegion ?? vertexRegion;
-  const regionSource = cloudMlRegion ? ("CLOUD_ML_REGION" as const) : vertexRegion ? ("VERTEX_REGION" as const) : null;
+  const regionSource = cloudMlRegion ? ("CLOUD_ML_REGION" as const)
+    : vertexRegion ? ("VERTEX_REGION" as const) : null;
 
-  if (enabled && projectId === null) {
+  if (enabled && sdkProject === null) {
     throw new Error(
-      "CLAUDE_CODE_USE_VERTEX is set but no Vertex project is: set ANTHROPIC_VERTEX_PROJECT_ID " +
-      "(the name the Agent SDK reads) or VERTEX_PROJECT_ID.",
+      "CLAUDE_CODE_USE_VERTEX is on but ANTHROPIC_VERTEX_PROJECT_ID is not set. That is the name " +
+      "the Agent SDK reads; muninn does not export VERTEX_PROJECT_ID into it, and the SDK with no " +
+      "project of its own falls back to whatever project Application Default Credentials resolve " +
+      "to — a different project, silently.",
     );
   }
-  if (enabled && region === null && baseUrl === null) {
+  if (enabled && cloudMlRegion === null) {
     throw new Error(
-      "CLAUDE_CODE_USE_VERTEX is set but no Vertex region is: set CLOUD_ML_REGION (the name the " +
-      "Agent SDK reads) or VERTEX_REGION, or ANTHROPIC_VERTEX_BASE_URL for a multi-region endpoint.",
+      "CLAUDE_CODE_USE_VERTEX is on but CLOUD_ML_REGION is not set. A base URL does not substitute: " +
+      "the Agent SDK builds the resource path from the region regardless, and its default is " +
+      "\"us-east5\" — outside the EU/EØS the føring requires. Set CLOUD_ML_REGION (use \"eu\" with " +
+      "the EU multi-region base URL).",
     );
   }
 
-  return { enabled, projectId, projectIdSource, region, regionSource, baseUrl };
+  return { enabled, projectId, projectIdSource, region, regionSource, baseUrl, perModelRegions };
 }
 
 /**

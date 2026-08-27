@@ -29,7 +29,20 @@ import { createWsUpgradeAuthorizer } from "./auth/ws-upgrade.ts";
 import { Hono } from "hono";
 import type { Bot } from "grammy";
 
-const config = loadConfig();
+// `loadConfig()` throws on every fail-closed config condition — a missing
+// DATABASE_URL, an unrecognised MUNINN_PROFILE, a `global` Vertex region. It has
+// to run before `setupLogging`, which needs `logDir` from it, so there is no
+// logger yet and an uncaught throw prints a Bun stack trace. In a nais pod that
+// reaches the shared aggregator as an unhandled exception rather than as the one
+// legible line the message already is. Same shape as the auth refusal below,
+// minus the logger it cannot have yet.
+let config: ReturnType<typeof loadConfig>;
+try {
+  config = loadConfig();
+} catch (err) {
+  console.error(`Refusing to start: ${(err as Error).message}`);
+  process.exit(1);
+}
 await setupLogging(config.logDir);
 const log = getLog("core");
 

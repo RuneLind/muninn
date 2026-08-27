@@ -248,8 +248,11 @@ export interface MachineInfo {
    * The project id IS published, unlike `wikis[].root`. The two are not the same
    * call: a filesystem path was never rendered and had no diagnostic use, while
    * naming the project is the whole point of the row — a Vertex card that hid it
-   * could not tell an operator they are pointed at the wrong one. `/models` is
-   * admin-zone (`src/auth/zones.ts`), so the reader is already the operator.
+   * could not tell an operator they are pointed at the wrong one. A GCP project
+   * id is also not a secret: it is in every Vertex URL and in the nais manifest.
+   * (`/models` is admin-zone in `src/auth/zones.ts` — but only in an
+   * authenticating mode, and `MUNINN_AUTH` defaults to `off`, which mounts no
+   * middleware at all. So the zone is a reason, not the reason.)
    *
    * `null` rather than a zeroed record when nothing is configured, so the card
    * can omit the block instead of asserting "Vertex: not configured" on the many

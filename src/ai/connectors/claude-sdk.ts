@@ -61,10 +61,13 @@ export function resolveThinking(maxTokens: number | undefined): ThinkingConfig |
  *
  * `resolveVertexConfig()` is the gate rather than a bare env read because it is
  * the SAME parse `loadConfig` uses, and because a half-configured Vertex (the
- * switch on, no project) should fail HERE with the name that is missing, not
- * later inside the SDK. Note it keys on `CLAUDE_CODE_USE_VERTEX` — the variable
- * the SDK itself reads — so this waiver can never disagree with which transport
- * the SDK actually chose.
+ * switch on, no `ANTHROPIC_VERTEX_PROJECT_ID`) should fail HERE with the name
+ * that is missing, not later inside the SDK. It keys on `CLAUDE_CODE_USE_VERTEX`
+ * — the variable the SDK reads — parsed with the SDK's OWN allowlist
+ * (`1`/`true`/`yes`/`on`). Same variable is not enough: an earlier draft
+ * inverted a denylist instead, so `CLAUDE_CODE_USE_VERTEX=y` was ON here and OFF
+ * to the SDK, and this waiver let a first-party turn run with no credential at
+ * all. Copying the consumer's allowlist is the only parse that cannot diverge.
  */
 export function assertHaveAuth(): void {
   if (hasHaikuDirectAuth()) return;

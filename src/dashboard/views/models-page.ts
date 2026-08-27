@@ -759,8 +759,24 @@ export async function renderModelsPage(): Promise<string> {
         if (vx.region) where.push('<code>' + esc(vx.region) + '</code> (' + esc(vx.regionSource || '?') + ')');
         if (vx.baseUrl) where.push('<code>' + esc(vx.baseUrl) + '</code> (ANTHROPIC_VERTEX_BASE_URL)');
         h += machineRow('Vertex target',
-          vx.region ? val(vx.region) : (vx.baseUrl ? val('base URL') : val('no region', 'warn')),
+          vx.region ? val(vx.region) : val('no region', 'warn'),
           where.length ? where.join(' · ') : 'nothing resolved');
+        // ⚠️ Loud, and its own row. A VERTEX_REGION_CLAUDE_* override BEATS
+        // CLOUD_ML_REGION for the models it names, so a card that showed only
+        // the row above was telling the operator their traffic went somewhere
+        // it did not — europe-north1 on the page, a different region in every
+        // request. 'warn' because an override is by definition a divergence
+        // from the region stated one line up.
+        var pmr = vx.perModelRegions || [];
+        if (pmr.length) {
+          h += machineRow('Per-model regions',
+            val(String(pmr.length) + ' override' + (pmr.length === 1 ? '' : 's'), 'warn'),
+            'these BEAT the region above for the models they name: ' +
+              pmr.map(function (o) {
+                return '<code>' + esc(o.name) + '</code> = <code>' + esc(o.region) + '</code>';
+              }).join(' · '),
+            'warn');
+        }
       }
       h += machineRow('Bots', botsVal, botsNote);
       var wikis = m.wikis || [];

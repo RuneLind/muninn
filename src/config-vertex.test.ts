@@ -16,6 +16,7 @@ import { assertHaveAuth } from "./ai/connectors/claude-sdk.ts";
 const OWNED = [
   "CLAUDE_CODE_USE_VERTEX", "ANTHROPIC_VERTEX_PROJECT_ID", "ANTHROPIC_VERTEX_BASE_URL",
   "CLOUD_ML_REGION", "VERTEX_PROJECT_ID", "VERTEX_REGION",
+  "VERTEX_REGION_CLAUDE_4_5_SONNET",
   "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN",
 ];
 
@@ -24,11 +25,11 @@ describe("resolveVertexConfig", () => {
     const v = resolveVertexConfig({});
     expect(v).toEqual({
       enabled: false, projectId: null, projectIdSource: null,
-      region: null, regionSource: null, baseUrl: null,
+      region: null, regionSource: null, baseUrl: null, perModelRegions: [],
     });
   });
 
-  test("muninn's own names are read, and named as the source", () => {
+  test("muninn's own names are read while Vertex is OFF, and named as the source", () => {
     const v = resolveVertexConfig({ VERTEX_PROJECT_ID: "p-1", VERTEX_REGION: "europe-north1" });
     expect(v.projectId).toBe("p-1");
     expect(v.projectIdSource).toBe("VERTEX_PROJECT_ID");
@@ -38,32 +39,38 @@ describe("resolveVertexConfig", () => {
     expect(v.enabled).toBe(false);
   });
 
-  test("the SDK's names WIN over muninn's, because the SDK is what reads them", () => {
+  test("the SDK's names are the source when both are set and AGREE", () => {
     const v = resolveVertexConfig({
-      VERTEX_PROJECT_ID: "muninn-name", VERTEX_REGION: "europe-north1",
-      ANTHROPIC_VERTEX_PROJECT_ID: "sdk-name", CLOUD_ML_REGION: "europe-west1",
+      VERTEX_PROJECT_ID: "same-p", ANTHROPIC_VERTEX_PROJECT_ID: "same-p",
+      VERTEX_REGION: "europe-west1", CLOUD_ML_REGION: "europe-west1",
     });
-    expect(v.projectId).toBe("sdk-name");
     expect(v.projectIdSource).toBe("ANTHROPIC_VERTEX_PROJECT_ID");
-    expect(v.region).toBe("europe-west1");
     expect(v.regionSource).toBe("CLOUD_ML_REGION");
   });
 
-  test("`enabled` keys on CLAUDE_CODE_USE_VERTEX and nothing else", () => {
-    const complete = { VERTEX_PROJECT_ID: "p", VERTEX_REGION: "europe-north1" };
-    expect(resolveVertexConfig({ ...complete, CLAUDE_CODE_USE_VERTEX: "1" }).enabled).toBe(true);
-    expect(resolveVertexConfig({ ...complete, CLAUDE_CODE_USE_VERTEX: "true" }).enabled).toBe(true);
-    // Any other non-empty spelling is ON too: erring toward "the SDK took the
-    // Vertex path" keeps the missing-project/region refusals reachable, and both
-    // directions of a wrong guess here are LOUD — this one throws at boot, the
-    // other lets the SDK report its own credential error.
-    expect(resolveVertexConfig({ ...complete, CLAUDE_CODE_USE_VERTEX: "yes" }).enabled).toBe(true);
-    for (const off of ["0", "false", "no", "off", "", "  "]) {
+  test("the two names DISAGREEING refuses, rather than silently picking one", () => {
+    // The old rule let the SDK's name win quietly, which made the other name
+    // dead config that still looked configured on /models.
+    expect(() => resolveVertexConfig({ VERTEX_PROJECT_ID: "a", ANTHROPIC_VERTEX_PROJECT_ID: "b" }))
+      .toThrow(/disagree.*dead config/s);
+    expect(() => resolveVertexConfig({ VERTEX_REGION: "europe-north1", CLOUD_ML_REGION: "europe-west1" }))
+      .toThrow(/disagree.*dead config/s);
+  });
+
+  test("`enabled` uses the SDK's OWN ALLOWLIST, so the two can never disagree", () => {
+    const complete = { ANTHROPIC_VERTEX_PROJECT_ID: "p", CLOUD_ML_REGION: "europe-north1" };
+    // The four spellings the bundled binary accepts:
+    //   ["1","true","yes","on"].includes(value.toLowerCase())
+    for (const on of ["1", "true", "yes", "on", "TRUE", " On "]) {
+      expect(resolveVertexConfig({ ...complete, CLAUDE_CODE_USE_VERTEX: on }).enabled).toBe(true);
+    }
+    // ⚠️ The regression this pins. An inverted DENYLIST ("anything not 0/false/
+    // no/off is on") called these ON while the SDK called them OFF and took the
+    // FIRST-PARTY path — so `assertHaveAuth()` waived the Anthropic credential
+    // for a turn that then needed one.
+    for (const off of ["y", "2", "enabled", "vertex", "0", "false", "no", "off", "", "  "]) {
       expect(resolveVertexConfig({ ...complete, CLAUDE_CODE_USE_VERTEX: off }).enabled).toBe(false);
     }
-    // And the switch alone, with a complete declaration absent, is not enough to
-    // call it configured — it refuses instead.
-    expect(() => resolveVertexConfig({ CLAUDE_CODE_USE_VERTEX: "1" })).toThrow();
   });
 
   describe("refusals", () => {
@@ -86,6 +93,36 @@ describe("resolveVertexConfig", () => {
       }
     });
 
+    test("`global` is refused in a PER-MODEL region override — the door that made the guard inert", () => {
+      // ⚠️ The critical one. The SDK resolves a region by finding the first
+      // entry of its model→env map whose key prefixes the model id and reading
+      // THAT variable, falling back to CLOUD_ML_REGION only when none matches.
+      // So this beats a perfectly good CLOUD_ML_REGION, and the resulting host
+      // is the global endpoint — while /models reported europe-north1.
+      expect(() => resolveVertexConfig({
+        CLOUD_ML_REGION: "europe-north1",
+        VERTEX_REGION_CLAUDE_4_5_SONNET: "global",
+      })).toThrow(/VERTEX_REGION_CLAUDE_4_5_SONNET="global" is refused/);
+    });
+
+    test("the per-model prefix is matched by PREFIX, so a model added next year is covered", () => {
+      // Not a hard-coded list of the twelve the installed binary carries: that
+      // list grows, and a stale copy would be short by exactly the new one.
+      for (const name of ["VERTEX_REGION_CLAUDE_9_9_SONNET", "VERTEX_REGION_CLAUDE_FUTURE"]) {
+        expect(() => resolveVertexConfig({ [name]: "global" })).toThrow(new RegExp(`${name}="global"`));
+      }
+    });
+
+    test("a NON-global per-model override is kept and REPORTED, not silently dropped", () => {
+      const v = resolveVertexConfig({
+        CLOUD_ML_REGION: "europe-north1",
+        VERTEX_REGION_CLAUDE_4_5_SONNET: "europe-west1",
+      });
+      // It beats CLOUD_ML_REGION for that model, so a card showing only the
+      // region would be telling the operator something untrue.
+      expect(v.perModelRegions).toEqual([{ name: "VERTEX_REGION_CLAUDE_4_5_SONNET", region: "europe-west1" }]);
+    });
+
     test("the GLOBAL HOST is refused through the base-URL door", () => {
       // The door the region check cannot see: ANTHROPIC_VERTEX_BASE_URL steers
       // the SDK past CLOUD_ML_REGION entirely, so a guard on the region NAME
@@ -93,6 +130,11 @@ describe("resolveVertexConfig", () => {
       expect(() => resolveVertexConfig({ ANTHROPIC_VERTEX_BASE_URL: "https://aiplatform.googleapis.com" }))
         .toThrow(/GLOBAL Vertex endpoint/);
       expect(() => resolveVertexConfig({ ANTHROPIC_VERTEX_BASE_URL: "https://AIPLATFORM.googleapis.com/v1" }))
+        .toThrow(/GLOBAL Vertex endpoint/);
+      // A trailing dot is the same DNS name; a bare string compare let it past.
+      expect(() => resolveVertexConfig({ ANTHROPIC_VERTEX_BASE_URL: "https://aiplatform.googleapis.com./v1" }))
+        .toThrow(/GLOBAL Vertex endpoint/);
+      expect(() => resolveVertexConfig({ ANTHROPIC_VERTEX_BASE_URL: "https://aiplatform.googleapis.com:443" }))
         .toThrow(/GLOBAL Vertex endpoint/);
     });
 
@@ -110,20 +152,39 @@ describe("resolveVertexConfig", () => {
         .toThrow(/is not a URL/);
     });
 
-    test("enabled with no project, and enabled with no region, refuse — naming the SDK's variable", () => {
+    test("enabled demands the SDK's OWN names — muninn's do not satisfy them", () => {
       expect(() => resolveVertexConfig({ CLAUDE_CODE_USE_VERTEX: "1" }))
-        .toThrow(/no Vertex project is: set ANTHROPIC_VERTEX_PROJECT_ID/);
+        .toThrow(/ANTHROPIC_VERTEX_PROJECT_ID is not set/);
+      // ⚠️ The regression this pins: VERTEX_PROJECT_ID used to satisfy it, and
+      // the SDK — which never reads that name — then fell back to whatever
+      // project ADC resolves to. A different project, silently, with no signal.
       expect(() => resolveVertexConfig({ CLAUDE_CODE_USE_VERTEX: "1", VERTEX_PROJECT_ID: "p" }))
-        .toThrow(/no Vertex region is: set CLOUD_ML_REGION/);
+        .toThrow(/ANTHROPIC_VERTEX_PROJECT_ID is not set/);
+      expect(() => resolveVertexConfig({ CLAUDE_CODE_USE_VERTEX: "1", ANTHROPIC_VERTEX_PROJECT_ID: "p" }))
+        .toThrow(/CLOUD_ML_REGION is not set/);
+      expect(() => resolveVertexConfig({
+        CLAUDE_CODE_USE_VERTEX: "1", ANTHROPIC_VERTEX_PROJECT_ID: "p", VERTEX_REGION: "eu",
+      })).toThrow(/CLOUD_ML_REGION is not set/);
     });
 
-    test("a base URL satisfies the region requirement — a multi-region endpoint has no region name", () => {
-      const v = resolveVertexConfig({
-        CLAUDE_CODE_USE_VERTEX: "1", VERTEX_PROJECT_ID: "p",
+    test("a base URL does NOT satisfy the region requirement — the SDK's default is us-east5", () => {
+      // ⚠️ The other regression. Accepting a base URL alone certified an
+      // EU-multi-region config whose every request said `locations/us-east5`,
+      // because the SDK builds the resource path from the region regardless.
+      expect(() => resolveVertexConfig({
+        CLAUDE_CODE_USE_VERTEX: "1", ANTHROPIC_VERTEX_PROJECT_ID: "p",
         ANTHROPIC_VERTEX_BASE_URL: "https://aiplatform.eu.rep.googleapis.com",
+      })).toThrow(/us-east5/);
+    });
+
+    test("the EU multi-region endpoint, configured correctly, passes", () => {
+      const v = resolveVertexConfig({
+        CLAUDE_CODE_USE_VERTEX: "1", ANTHROPIC_VERTEX_PROJECT_ID: "p",
+        CLOUD_ML_REGION: "eu", ANTHROPIC_VERTEX_BASE_URL: "https://aiplatform.eu.rep.googleapis.com",
       });
       expect(v.enabled).toBe(true);
-      expect(v.region).toBeNull();
+      expect(v.region).toBe("eu");
+      expect(v.baseUrl).toBe("https://aiplatform.eu.rep.googleapis.com");
     });
 
     test("those two refuse ONLY when enabled — an incomplete declaration is not yet wrong", () => {
@@ -166,11 +227,26 @@ describe("assertHaveAuth — the real function, over the real env", () => {
     expect(() => assertHaveAuth()).not.toThrow();
   });
 
-  test("muninn's own VERTEX_PROJECT_ID/REGION satisfy it too", () => {
+  test("muninn's own names do NOT satisfy it — the SDK never reads them", () => {
     process.env.CLAUDE_CODE_USE_VERTEX = "1";
     process.env.VERTEX_PROJECT_ID = "some-project";
     process.env.VERTEX_REGION = "europe-north1";
-    expect(() => assertHaveAuth()).not.toThrow();
+    expect(() => assertHaveAuth()).toThrow(/ANTHROPIC_VERTEX_PROJECT_ID is not set/);
+  });
+
+  test("a spelling the SDK reads as OFF is OFF here too, so the waiver cannot outrun it", () => {
+    process.env.CLAUDE_CODE_USE_VERTEX = "y";
+    process.env.ANTHROPIC_VERTEX_PROJECT_ID = "some-project";
+    process.env.CLOUD_ML_REGION = "europe-north1";
+    expect(() => assertHaveAuth()).toThrow(/no credential/);
+  });
+
+  test("a `global` PER-MODEL override refuses even on an otherwise valid Vertex config", () => {
+    process.env.CLAUDE_CODE_USE_VERTEX = "1";
+    process.env.ANTHROPIC_VERTEX_PROJECT_ID = "some-project";
+    process.env.CLOUD_ML_REGION = "europe-north1";
+    process.env.VERTEX_REGION_CLAUDE_4_5_SONNET = "global";
+    expect(() => assertHaveAuth()).toThrow(/VERTEX_REGION_CLAUDE_4_5_SONNET="global" is refused/);
   });
 
   test("the waiver is NOT granted by declaring a project — only the SDK's switch grants it", () => {
@@ -183,7 +259,7 @@ describe("assertHaveAuth — the real function, over the real env", () => {
 
   test("a HALF-configured Vertex fails here, with the missing name, not later in the SDK", () => {
     process.env.CLAUDE_CODE_USE_VERTEX = "1";
-    expect(() => assertHaveAuth()).toThrow(/no Vertex project is/);
+    expect(() => assertHaveAuth()).toThrow(/ANTHROPIC_VERTEX_PROJECT_ID is not set/);
   });
 
   test("a `global` region is refused even when an Anthropic key would have passed", () => {
