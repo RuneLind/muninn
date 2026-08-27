@@ -10,7 +10,7 @@
  * testing a signature the connector does not call.
  */
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import { resolveVertexConfig } from "./config.ts";
+import { ConfigError, resolveVertexConfig } from "./config.ts";
 import { assertHaveAuth } from "./ai/connectors/claude-sdk.ts";
 
 const OWNED = [
@@ -48,13 +48,17 @@ describe("resolveVertexConfig", () => {
     expect(v.regionSource).toBe("CLOUD_ML_REGION");
   });
 
-  test("the two names DISAGREEING refuses, rather than silently picking one", () => {
+  test("the two names DISAGREEING refuses when Vertex is on, rather than picking one", () => {
     // The old rule let the SDK's name win quietly, which made the other name
-    // dead config that still looked configured on /models.
-    expect(() => resolveVertexConfig({ VERTEX_PROJECT_ID: "a", ANTHROPIC_VERTEX_PROJECT_ID: "b" }))
+    // dead config that still looked configured on /models. Conditional on
+    // `enabled` — see the dedicated block at the end of this file.
+    const on = { CLAUDE_CODE_USE_VERTEX: "1", CLOUD_ML_REGION: "europe-north1" };
+    expect(() => resolveVertexConfig({ ...on, VERTEX_PROJECT_ID: "a", ANTHROPIC_VERTEX_PROJECT_ID: "b" }))
       .toThrow(/disagree.*dead config/s);
-    expect(() => resolveVertexConfig({ VERTEX_REGION: "europe-north1", CLOUD_ML_REGION: "europe-west1" }))
-      .toThrow(/disagree.*dead config/s);
+    expect(() => resolveVertexConfig({
+      CLAUDE_CODE_USE_VERTEX: "1", ANTHROPIC_VERTEX_PROJECT_ID: "p",
+      VERTEX_REGION: "europe-north1", CLOUD_ML_REGION: "europe-west1",
+    })).toThrow(/disagree.*dead config/s);
   });
 
   test("`enabled` uses the SDK's OWN ALLOWLIST, so the two can never disagree", () => {
@@ -82,9 +86,14 @@ describe("resolveVertexConfig", () => {
       expect(() => resolveVertexConfig({ CLOUD_ML_REGION: " GLOBAL " })).toThrow(/is refused/);
     });
 
-    test("the refusal cites the føring, so the message survives without the plan", () => {
+    test("the refusal SAYS WHY, so the message survives without the plan doc", () => {
+      // Not just "refused": the reason is what stops the next person from
+      // working around it. It names the mechanism (global routes anywhere and
+      // does not report where) and what to do instead.
       expect(() => resolveVertexConfig({ VERTEX_REGION: "global" }))
-        .toThrow(/ikke innsikt i hvor data blir prosessert/);
+        .toThrow(/does not report which/);
+      expect(() => resolveVertexConfig({ VERTEX_REGION: "global" }))
+        .toThrow(/Name an explicit region/);
     });
 
     test("an EU region — including the multi-region `eu` — is NOT refused", () => {
@@ -271,5 +280,44 @@ describe("assertHaveAuth — the real function, over the real env", () => {
     process.env.VERTEX_REGION = "global";
     expect(() => assertHaveAuth()).not.toThrow();
     expect(() => resolveVertexConfig()).toThrow(/is refused/);
+  });
+});
+
+describe("the refusals are ConfigError, so a boot can tell them from a bug", () => {
+  test("a deliberate refusal is a ConfigError", () => {
+    // `src/index.ts` prints one line for these and rethrows anything else. A
+    // plain Error here would make a TypeError in the config layer arrive as a
+    // context-free sentence with no file and no line number.
+    expect(() => resolveVertexConfig({ VERTEX_REGION: "global" })).toThrow(ConfigError);
+    expect(() => resolveVertexConfig({ CLAUDE_CODE_USE_VERTEX: "1" })).toThrow(ConfigError);
+  });
+});
+
+describe("mismatch refusals are conditional on Vertex being ON", () => {
+  test("disagreeing names with Vertex OFF do not refuse a boot", () => {
+    // CLOUD_ML_REGION is a generic Google variable that unrelated tooling sets.
+    // Refusing a boot over it disagreeing with a stale VERTEX_REGION, on an
+    // instance that touches Vertex nowhere, is a hard failure with no upside.
+    expect(() => resolveVertexConfig({ CLOUD_ML_REGION: "europe-north1", VERTEX_REGION: "europe-west1" }))
+      .not.toThrow();
+    expect(() => resolveVertexConfig({ ANTHROPIC_VERTEX_PROJECT_ID: "a", VERTEX_PROJECT_ID: "b" }))
+      .not.toThrow();
+  });
+
+  test("…and DO refuse once it is on", () => {
+    expect(() => resolveVertexConfig({
+      CLAUDE_CODE_USE_VERTEX: "1", ANTHROPIC_VERTEX_PROJECT_ID: "p",
+      CLOUD_ML_REGION: "europe-north1", VERTEX_REGION: "europe-west1",
+    })).toThrow(/disagree/);
+  });
+
+  test("a non-default PORT does not smuggle the global host past the check", () => {
+    // `.host` keeps the port, so this compared unequal and walked through.
+    for (const url of [
+      "https://aiplatform.googleapis.com:8443",
+      "https://aiplatform.googleapis.com.:443/v1",
+    ]) {
+      expect(() => resolveVertexConfig({ ANTHROPIC_VERTEX_BASE_URL: url })).toThrow(/GLOBAL Vertex endpoint/);
+    }
   });
 });

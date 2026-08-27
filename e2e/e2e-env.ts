@@ -28,8 +28,8 @@
  * server. A spec that spreads only `blankBotTokens()` is the shape of the bug.
  */
 
-import { AMBIENT_INSTANCE_ENV } from "../src/test/ambient-env.ts";
-import { blankBotTokens } from "./blank-bot-tokens.ts";
+import { AMBIENT_INSTANCE_ENV, AMBIENT_INSTANCE_ENV_PREFIXES } from "../src/test/ambient-env.ts";
+import { blankBotTokens, envNamesMatchingPrefixes } from "./blank-bot-tokens.ts";
 
 /**
  * Every instance-profile flag mapped to `""`. Unlike `blankBotTokens()` this
@@ -41,6 +41,13 @@ import { blankBotTokens } from "./blank-bot-tokens.ts";
 export function blankInstanceProfile(): Record<string, string> {
   const blanked: Record<string, string> = {};
   for (const name of AMBIENT_INSTANCE_ENV) blanked[name] = "";
+  // The open-ended families DO need the scan `blankBotTokens` does, for both of
+  // its reasons: no fixed list can enumerate a prefix, and `playwright.config.ts`
+  // runs under node, where a name living only in `.env` is not in `process.env`.
+  // Without this a single `VERTEX_REGION_CLAUDE_4_5_SONNET=global` line makes
+  // every spawned muninn REFUSE TO BOOT — the config guard firing correctly, on
+  // a host where the suite has nothing to do with Vertex.
+  for (const name of envNamesMatchingPrefixes(AMBIENT_INSTANCE_ENV_PREFIXES)) blanked[name] = "";
   return blanked;
 }
 

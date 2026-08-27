@@ -18,8 +18,16 @@
  * the dev server still see the real flags).
  */
 
-import { AMBIENT_INSTANCE_ENV } from "./ambient-env.ts";
+import { AMBIENT_INSTANCE_ENV, AMBIENT_INSTANCE_ENV_PREFIXES } from "./ambient-env.ts";
 
 for (const name of AMBIENT_INSTANCE_ENV) {
   delete process.env[name];
+}
+// And the open-ended families. `process.env` here has already absorbed `.env`,
+// so enumerating it is the whole scan — unlike the e2e side, where a spawned
+// child re-reads the files itself.
+for (const name of Object.keys(process.env)) {
+  if (AMBIENT_INSTANCE_ENV_PREFIXES.some((p) => name.toUpperCase().startsWith(p))) {
+    delete process.env[name];
+  }
 }

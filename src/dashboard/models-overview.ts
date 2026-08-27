@@ -249,7 +249,7 @@ export interface MachineInfo {
    * call: a filesystem path was never rendered and had no diagnostic use, while
    * naming the project is the whole point of the row — a Vertex card that hid it
    * could not tell an operator they are pointed at the wrong one. A GCP project
-   * id is also not a secret: it is in every Vertex URL and in the nais manifest.
+   * id is also not a secret — it appears in every Vertex request URL.
    * (`/models` is admin-zone in `src/auth/zones.ts` — but only in an
    * authenticating mode, and `MUNINN_AUTH` defaults to `off`, which mounts no
    * middleware at all. So the zone is a reason, not the reason.)
@@ -862,7 +862,12 @@ export async function assembleModelsOverview(
 function vertexInfo(errors: string[]): VertexConfig | null {
   try {
     const vertex = resolveVertexConfig();
-    if (!vertex.enabled && !vertex.projectId && !vertex.region && !vertex.baseUrl) return null;
+    // `perModelRegions` is part of "is anything configured?" — omitting it hid the
+    // whole block for an instance whose ONLY Vertex setting is a per-model region
+    // override, which is exactly the case the override row exists to report,
+    // since there is then no region line for it to contradict.
+    if (!vertex.enabled && !vertex.projectId && !vertex.region && !vertex.baseUrl
+        && vertex.perModelRegions.length === 0) return null;
     return vertex;
   } catch (err) {
     errors.push(`vertex config: ${(err as Error).message}`);

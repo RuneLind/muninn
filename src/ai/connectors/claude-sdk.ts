@@ -51,13 +51,13 @@ export function resolveThinking(maxTokens: number | undefined): ThinkingConfig |
  *
  * **There is a third credential and this used to deny it.** On Vertex the SDK
  * needs NEITHER Anthropic variable: it authenticates with Application Default
- * Credentials — a laptop's `gcloud auth application-default login`, a nais pod's
- * workload-identity metadata server. Measured directly (PR 0,
+ * Credentials — a developer's `gcloud auth application-default login`, a
+ * workload-identity metadata server in a GCP-hosted deployment. Measured directly (PR 0,
  * `scripts/smoke-vertex.ts` probe C): with both Anthropic names DELETED from the
  * process and `CLAUDE_CODE_USE_VERTEX=1`, the SDK reports `apiKeySource: "none"`,
  * reaches Vertex and comes back with Vertex's own answer. So the old assert was
  * not a safety net over that path — it was a wrong claim about it, throwing
- * before the SDK on the one deployment NAV approves.
+ * before the SDK ever ran on a perfectly valid credential.
  *
  * `resolveVertexConfig()` is the gate rather than a bare env read because it is
  * the SAME parse `loadConfig` uses, and because a half-configured Vertex (the

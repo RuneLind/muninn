@@ -107,6 +107,20 @@ const VERTEX_FLAGS = [
   "VERTEX_REGION",
 ];
 
+/**
+ * Instance-profile env families that are open-ended PREFIXES rather than names.
+ *
+ * `VERTEX_REGION_CLAUDE_*` is the Agent SDK's per-model region override family
+ * (`src/config.ts` refuses `global` in any of them, matched by prefix because the
+ * family grows with every model). A fixed name list cannot enumerate it — which
+ * is exactly the hole: an operator who runs `scripts/smoke-vertex.ts` and leaves
+ * `VERTEX_REGION_CLAUDE_4_5_SONNET=global` in `.env` — the very config the guard
+ * exists to catch — turns every `loadConfig()`-touching test RED on that laptop
+ * and green on the other. That is this file's whole failure shape, arriving
+ * through a door the name list structurally cannot close.
+ */
+export const AMBIENT_INSTANCE_ENV_PREFIXES: readonly string[] = ["VERTEX_REGION_CLAUDE_"];
+
 /** Every name above, in one array. */
 export const AMBIENT_INSTANCE_ENV: readonly string[] = [
   ...WIKI_WRITE_FLAGS,

@@ -46,11 +46,19 @@ const DOTENV_FILES = [".env", ".env.local"];
  * anything else that process spawns (a Playwright worker, a nested helper)
  * inherits the blank rather than a live token.
  */
-export function blankBotTokens(): Record<string, string> {
+/**
+ * Every env name matching one of `prefixes`, from the caller's env AND the dotenv
+ * FILES. Exported because the instance-profile blank needs exactly this scan for
+ * the `VERTEX_REGION_CLAUDE_*` family: that one is an open-ended PREFIX, so no
+ * fixed list of names can enumerate it, and the file half is load-bearing for
+ * the same reason it is here — `playwright.config.ts` is evaluated under node,
+ * where a name that lives only in `.env` is not in `process.env` at all.
+ */
+export function envNamesMatchingPrefixes(prefixes: readonly string[]): Set<string> {
   // Case-insensitive so a lowercase `.env` line is blanked under the name it
   // actually exports, not an uppercased guess.
   const matches = (k: string): boolean =>
-    TOKEN_PREFIXES.some((p) => k.toUpperCase().startsWith(p));
+    prefixes.some((p) => k.toUpperCase().startsWith(p));
   const names = new Set(Object.keys(process.env).filter(matches));
   for (const file of DOTENV_FILES) {
     let text: string;
@@ -66,6 +74,11 @@ export function blankBotTokens(): Record<string, string> {
       if (m && matches(m[1]!)) names.add(m[1]!);
     }
   }
+  return names;
+}
+
+export function blankBotTokens(): Record<string, string> {
+  const names = envNamesMatchingPrefixes(TOKEN_PREFIXES);
   const blanked: Record<string, string> = {};
   for (const n of names) {
     blanked[n] = "";
