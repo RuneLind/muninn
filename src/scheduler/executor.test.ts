@@ -510,6 +510,44 @@ describe("spawnHaiku on MUNINN_PROFILE=nais", () => {
     // `spawnHaiku` that refused unconditionally.
     expect(await spawnAttempts(() => spawnHaiku("hi", { source: "nais-test", botName: "jarvis" }))).toBe(1);
   });
+
+  /**
+   * `callHaiku` is the one caller that CANNOT propagate the refusal: its whole
+   * contract is "return the fallback string". So on a nais pod the scheduled
+   * task keeps emitting its generic boilerplate every tick and the refusal —
+   * the one line that names the missing credential — is swallowed. The warning
+   * is the only operator signal that exists on this path, so it is asserted
+   * against a real LogTape sink rather than assumed.
+   */
+  test("callHaiku returns the fallback AND warns — the refusal is not silent", async () => {
+    const { configure } = await import("@logtape/logtape");
+    const records: string[] = [];
+    await configure({
+      sinks: { capture: (r: any) => records.push(r.message.join("")) },
+      loggers: [
+        { category: ["muninn", "scheduler", "executor"], lowestLevel: "warning", sinks: ["capture"] },
+        { category: ["logtape", "meta"], lowestLevel: "error", sinks: [] },
+      ],
+      reset: true,
+    });
+    process.env.MUNINN_PROFILE = "nais";
+    try {
+      const answer = await callHaiku("hi", "FALLBACK-TEXT", "task", undefined, "melosys");
+      expect(answer).toBe("FALLBACK-TEXT");
+      // Named, not merely counted: an operator grepping a pod log needs the
+      // error TYPE (which says "this image has no CLI") and the source.
+      const warned = records.filter((r) => r.includes("HaikuCliUnavailableError"));
+      expect(`warned: ${warned.length}`).toBe("warned: 1");
+      expect(warned[0]!).toContain("task");
+    } finally {
+      delete process.env.MUNINN_PROFILE;
+      await configure({
+        sinks: {},
+        loggers: [{ category: ["logtape", "meta"], lowestLevel: "error", sinks: [] }],
+        reset: true,
+      });
+    }
+  });
 });
 
 /**

@@ -577,7 +577,19 @@ export async function callHaiku(
       ...(telemetry?.onUsage ? { onUsage: telemetry.onUsage } : {}),
     });
     return result.trim();
-  } catch {
+  } catch (err) {
+    // The fallback is the contract, so the failure cannot propagate — which
+    // makes a bare swallow invisible by construction: the task emits its
+    // generic string and LOOKS like it ran. On a nais pod every tick refuses
+    // with `HaikuCliUnavailableError` (the image is built WITH_CLI=false), so
+    // without this line a scheduled task repeats boilerplate forever with zero
+    // operator signal anywhere. Warn, not error: degrading to the fallback IS
+    // the designed behaviour.
+    log.warn("Haiku call for {source} failed — returning the fallback: {error}", {
+      botName: botName ?? "haiku",
+      source,
+      error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
+    });
     return fallback;
   }
 }
