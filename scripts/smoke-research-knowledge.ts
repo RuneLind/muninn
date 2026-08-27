@@ -11,7 +11,7 @@
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import postgres from "postgres";
+import { openPostgres } from "../db/postgres-connection.ts";
 
 const botName = process.argv[2] || "melosys";
 const question = process.argv[3] || "Hva er forskjellen mellom A001 og A002, og hva utløser hver av dem?";
@@ -50,7 +50,7 @@ for (const c of content) {
 await client.close();
 console.log("\n→ Querying muninn DB for the most recent research_knowledge trace");
 
-const sql = postgres(process.env.DATABASE_URL || "postgresql://muninn:muninn@127.0.0.1:5435/muninn");
+const { sql } = openPostgres(process.env.DATABASE_URL || "postgresql://muninn:muninn@127.0.0.1:5435/muninn");
 const root = await sql<Array<{ id: string; trace_id: string; bot_name: string; started_at: Date; duration_ms: number; status: string; attributes: unknown }>>`
   SELECT id, trace_id, bot_name, started_at, duration_ms, status, attributes
   FROM traces

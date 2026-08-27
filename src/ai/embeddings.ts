@@ -35,6 +35,22 @@ export async function generateEmbedding(text: string): Promise<number[] | null> 
   }
 }
 
+/**
+ * The THROWING load path — `getExtractor()` under a name callers can use.
+ *
+ * It exists for the image build (`--build-arg WITH_EMBEDDINGS=true`), which
+ * must fail loudly when the model cannot be fetched. Neither exported helper
+ * below can do that: `warmupEmbeddings` catches and logs, and
+ * `generateEmbedding` catches and returns `null`, so a build driven by either
+ * would have to infer the failure from a falsy value — and would print no
+ * cause, since LogTape is an unconfigured no-op outside the server. Here the
+ * real error, with its stack, reaches whoever asked for it, which is the
+ * difference between "our egress blocks huggingface.co" and "retry and hope".
+ */
+export async function loadEmbeddingModel(): Promise<FeatureExtractionPipeline> {
+  return getExtractor();
+}
+
 export async function warmupEmbeddings(): Promise<void> {
   try {
     log.info("Loading embedding model...");

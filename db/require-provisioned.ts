@@ -39,8 +39,8 @@
  * entrypoint, which exports one from the other, but it is also runnable by hand
  * from a pod where the entrypoint never ran).
  */
-import postgres from "postgres";
 import { resolveCliDatabaseUrl, DATABASE_URL_ENV_NAMES } from "./database-url.ts";
+import { openPostgres } from "./postgres-connection.ts";
 
 /** How long to keep retrying a CONNECTION failure. Under docker-compose the app
  *  waits on a `service_healthy` postgres, and on nais the sidecar proxy is up
@@ -162,7 +162,23 @@ async function main(): Promise<number> {
   const deadline = Date.now() + CONNECT_BUDGET_MS;
   let lastError = "";
   for (;;) {
-    const sql = postgres(databaseUrl, { max: 1, onnotice: () => {} });
+    // INSIDE the try, and that placement is the point. `openPostgres` throws on
+    // a URL whose TLS material it cannot use — a wrong secret mount, an
+    // `sslmode` typo. Constructed outside, that throw escapes `main()` as an
+    // uncaught rejection, which exits 1 — this script's code for "the database
+    // is empty, run init.sql". An operator (and anything reading the code)
+    // would then chase a schema problem over a certificate path, with a stack
+    // trace instead of the one-line diagnosis this script exists to print.
+    // A configuration error is a 2: "could not use this database".
+    let sql: ReturnType<typeof openPostgres>["sql"];
+    try {
+      ({ sql } = openPostgres(databaseUrl, { max: 1, onnotice: () => {} }));
+    } catch (err) {
+      console.error(
+        `Cannot use this database URL: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return 2;
+    }
     try {
       // `to_regclass` answers NULL instead of throwing for an absent relation,
       // so "no such table" is a VALUE here rather than an error indistinguishable

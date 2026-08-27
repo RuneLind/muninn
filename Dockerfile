@@ -12,18 +12,22 @@ WORKDIR /app
 # (MUNINN_PROFILE=nais — src/dashboard/routes.ts, src/ai/haiku-direct.ts).
 ARG WITH_MEDIA=true
 ARG WITH_CLI=true
+# Bake the embedding model into the image instead of downloading it at boot.
+# Default OFF so the compose build is unchanged and needs no build-time egress;
+# the nais build turns it ON. See the RUN after `COPY src` for why it matters.
+ARG WITH_EMBEDDINGS=false
 
 # Both args are read as `= "true"` below, so ANY other spelling silently means
 # "off" — `--build-arg WITH_CLI=0`, `=False`, a typo — and produces an image
 # whose missing binary is discovered at runtime. Refuse the build instead, in
 # the one place that can, and echo which branches were taken.
-RUN for pair in "WITH_MEDIA=$WITH_MEDIA" "WITH_CLI=$WITH_CLI"; do \
+RUN for pair in "WITH_MEDIA=$WITH_MEDIA" "WITH_CLI=$WITH_CLI" "WITH_EMBEDDINGS=$WITH_EMBEDDINGS"; do \
       case "${pair#*=}" in \
         true|false) ;; \
         *) echo "[build] ERROR: $pair — expected true or false" >&2; exit 1 ;; \
       esac; \
     done; \
-    echo "[build] WITH_MEDIA=$WITH_MEDIA (ffmpeg) WITH_CLI=$WITH_CLI (claude)"
+    echo "[build] WITH_MEDIA=$WITH_MEDIA (ffmpeg) WITH_CLI=$WITH_CLI (claude) WITH_EMBEDDINGS=$WITH_EMBEDDINGS (MiniLM)"
 
 # System deps. curl + ca-certificates are unconditional (small, and the Claude
 # CLI installer needs them); ffmpeg is the audio/keyframe half of the capture
@@ -52,6 +56,52 @@ USER root
 # Dependencies
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile --production
+
+# Embedding model, baked.
+#
+# `warmupEmbeddings()` runs at boot and downloads Xenova/all-MiniLM-L6-v2 on
+# first use — but it CATCHES its own failure and logs it, so a pod with no
+# egress to the model host looks healthy while every memory search silently
+# returns nothing. Baking converts that runtime degradation into a build-time
+# fact. nais egress is default-deny, which is exactly where it would have bitten.
+#
+# Two things about this block are deliberate and easy to "tidy" into a bug:
+#
+# 1. It runs through `loadEmbeddingModel()`, which is the only entry point in
+#    `src/ai/embeddings.ts` that THROWS. The other two swallow — one logs (into
+#    an unconfigured LogTape no-op out here), one returns null — so a build
+#    driven by either could succeed with an empty cache, preserving the precise
+#    silent failure this step exists to remove.
+# 2. It sits directly after `bun install`, behind a COPY of the two source files
+#    it actually needs, rather than after `COPY src`. Placed there, every commit
+#    to any file in src/ re-ran it: a 23 MB fetch, and a hard dependency on
+#    huggingface.co being reachable for an urgent rollback build of something
+#    unrelated. The narrow COPY keeps the model id and dtype in ONE place —
+#    re-stating them in a `pipeline(...)` call here would let a dtype change in
+#    embeddings.ts silently invalidate the bake, which is the same bug wearing a
+#    different hat.
+#
+#    The narrow COPY does constrain those two files: a USED import of anything
+#    outside node_modules breaks the build here with `Cannot find module`. That
+#    is loud, and CI builds with the arg on, so it cannot ship silently — but an
+#    UNUSED import compiles away and would not be caught, so the constraint is
+#    written down rather than left to be rediscovered.
+#
+# The weights land in `node_modules/@huggingface/transformers/.cache/` (~23 MB),
+# a directory this image builds itself — hence a RUN and not a COPY of a
+# checked-in blob, which would put a binary in the public repo's git history.
+# ⚠️ This step needs egress to the model host at BUILD time; the saving is a
+# runtime one.
+ARG WITH_EMBEDDINGS
+COPY src/logging.ts ./src/logging.ts
+COPY src/ai/embeddings.ts ./src/ai/embeddings.ts
+RUN if [ "$WITH_EMBEDDINGS" = "true" ]; then \
+      bun -e 'const { loadEmbeddingModel } = await import("./src/ai/embeddings.ts"); \
+              await loadEmbeddingModel(); \
+              console.log("[build] embedding model baked");'; \
+    else \
+      echo "[build] embedding model NOT baked — it will be downloaded at first use"; \
+    fi
 
 # Source
 COPY src ./src

@@ -16,11 +16,11 @@
  *   # Add a custom Ollama connector
  *   bun scripts/seed-connectors.ts --add openai-compat qwen3.5:35b http://localhost:11434/v1
  */
-import postgres from "postgres";
+import { openPostgres } from "../db/postgres-connection.ts";
 import { loadConfig } from "../src/config.ts";
 
 const config = loadConfig();
-const sql = postgres(config.databaseUrl, { max: 1 });
+const { sql } = openPostgres(config.databaseUrl, { max: 1 });
 
 interface ConnectorSeed {
   name: string;

@@ -148,8 +148,15 @@ jobs:
             */api/live*) ;;
             *) echo "::error::the HEALTHCHECK does not probe /api/live (the dependency-free open-zone path)"; exit 1 ;;
           esac
-      - name: Build the serving-profile image (both args off)
-        run: docker build --build-arg WITH_MEDIA=false --build-arg WITH_CLI=false -t muninn:nais .
+      - name: The default build does NOT bake the embedding model
+        # WITH_EMBEDDINGS defaults off, so the compose image keeps downloading at
+        # first use exactly as it did before the arg existed.
+        run: |
+          if docker run --rm --entrypoint sh muninn:default -c 'test -d node_modules/@huggingface/transformers/.cache'; then
+            echo "::error::the default build baked the embedding model"; exit 1
+          fi
+      - name: Build the serving-profile image (media/CLI off, embeddings baked)
+        run: docker build --build-arg WITH_MEDIA=false --build-arg WITH_CLI=false --build-arg WITH_EMBEDDINGS=true -t muninn:nais .
       - name: Serving-profile image carries NEITHER
         run: |
           if docker run --rm --entrypoint sh muninn:nais -c 'command -v ffmpeg'; then
@@ -157,6 +164,18 @@ jobs:
           fi
           if docker run --rm --entrypoint sh muninn:nais -c 'command -v claude'; then
             echo "::error::the Claude CLI is present despite WITH_CLI=false"; exit 1
+          fi
+      - name: Serving-profile image DOES carry the embedding model
+        # The bake exists because `warmupEmbeddings()` swallows its own failure:
+        # without this assertion a build that silently produced an empty cache
+        # would ship, and memory search would return nothing in a pod with no
+        # egress to the model host — with the pod reporting healthy throughout.
+        run: |
+          # The ONNX weights, not tokenizer.json: the weights are the ~23 MB the
+          # build-time egress actually buys, and a cache holding only the 711 KB
+          # tokenizer would pass the weaker check.
+          if ! docker run --rm --entrypoint sh muninn:nais -c 'test -s node_modules/@huggingface/transformers/.cache/Xenova/all-MiniLM-L6-v2/onnx/model_quantized.onnx'; then
+            echo "::error::WITH_EMBEDDINGS=true produced no model weights"; exit 1
           fi
       - name: A build arg that is neither true nor false FAILS the build
         # Both args are read as `= "true"`, so an unvalidated `WITH_CLI=0` would

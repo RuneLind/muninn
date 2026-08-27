@@ -18,10 +18,11 @@
  *   DATABASE_URL=... bun db/migrate.ts # Custom database URL (DB_URL also works —
  *                                      # nais's envVarPrefix form; see ./database-url.ts)
  */
-import postgres from "postgres";
+import type postgres from "postgres";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { resolveCliDatabaseUrl } from "./database-url.ts";
+import { openPostgres, parsePostgresUrl } from "./postgres-connection.ts";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "migrations");
 
@@ -110,6 +111,16 @@ async function runMigration(sql: postgres.Sql, migration: MigrationFile) {
   }
 }
 
+/** A connection string this process cannot use — an operator error, not a
+ *  failed migration. Separated so the CLI can print it as one line instead of
+ *  under a heading that sends the reader looking at the migrations. */
+export class DatabaseUrlError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DatabaseUrlError";
+  }
+}
+
 export async function runMigrations(
   databaseUrl: string,
   opts?: { baseline?: boolean; quiet?: boolean },
@@ -117,7 +128,24 @@ export async function runMigrations(
   // `quiet` silences progress chatter for programmatic callers (e.g. the drift
   // test); the CLI path below leaves it off. Errors throw regardless.
   const say: (...args: unknown[]) => void = opts?.quiet ? () => {} : console.log;
-  const sql = postgres(databaseUrl, { max: 1, onnotice: () => {} });
+  // The same one-line diagnosis the CLI's --status/--dry-run paths give, and it
+  // has to live HERE too: this is the function `--baseline` and the default
+  // apply run, i.e. the invocation every remedy this repo prints names
+  // (`kubectl debug … -- bun db/migrate.ts --baseline`, the compose form). A
+  // first version wrapped only the two diagnostic paths, so the one operators
+  // are actually told to run still printed a source snippet and a stack trace
+  // under the heading "Migration failed:" — the exact confusion the wrapper
+  // exists to remove, on the exact path that matters.
+  let sql: postgres.Sql;
+  let notes: string[];
+  try {
+    ({ sql, notes } = openPostgres(databaseUrl, { max: 1, onnotice: () => {} }));
+  } catch (err) {
+    throw new DatabaseUrlError(
+      `Cannot use this database URL: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  for (const note of notes) say(`  TLS: ${note}`);
   try {
     // Taken BEFORE `schema_migrations` is read, because the read is what the
     // race is about: the pending list has to be computed by a run that already
@@ -195,14 +223,36 @@ if (import.meta.main) {
   // credentials. This is the only line on the remedy paths (which bypass the
   // entrypoint and its own echo) that names the database about to be migrated.
   try {
-    const target = new URL(DATABASE_URL);
+    const target = new URL(parsePostgresUrl(DATABASE_URL).url);
     console.log(`Database: ${target.hostname}:${target.port || "5432"}${target.pathname}`);
   } catch {
     // an unparseable URL fails loudly two statements later; don't pre-empt it
   }
 
+  // A URL whose TLS material cannot be used is an OPERATOR error, and it must
+  // read like one. Without this, `--status` against a wrong cert mount printed
+  // a bun stack trace out of `openPostgres` and exited 1 — indistinguishable
+  // from "the migration failed". Its sibling `db/require-provisioned.ts` makes
+  // the same distinction with its own exit code; here there is only one, so the
+  // message carries the difference.
+  const open = (): ReturnType<typeof openPostgres> => {
+    try {
+      const opened = openPostgres(DATABASE_URL, { max: 1, onnotice: () => {} });
+      for (const note of opened.notes) console.log(`  TLS: ${note}`);
+      return opened;
+    } catch (err) {
+      console.error(
+        `Cannot use this database URL: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      process.exit(1);
+    }
+  };
+
   if (STATUS) {
-    const sql = postgres(DATABASE_URL, { max: 1, onnotice: () => {} });
+    // `open()` prints the TLS notes: --status and --dry-run are the two paths
+    // an operator uses to DIAGNOSE a connection, and they were the two that
+    // said nothing about how it was made.
+    const { sql } = open();
     await ensureMigrationsTable(sql);
     const applied = await getAppliedMigrations(sql);
     const all = await discoverMigrations();
@@ -216,7 +266,10 @@ if (import.meta.main) {
     console.log(`\n${applied.size} applied, ${pending.length} pending`);
     await sql.end();
   } else if (DRY_RUN) {
-    const sql = postgres(DATABASE_URL, { max: 1, onnotice: () => {} });
+    // `open()` prints the TLS notes: --status and --dry-run are the two paths
+    // an operator uses to DIAGNOSE a connection, and they were the two that
+    // said nothing about how it was made.
+    const { sql } = open();
     await ensureMigrationsTable(sql);
     const applied = await getAppliedMigrations(sql);
     const all = await discoverMigrations();
@@ -233,7 +286,8 @@ if (import.meta.main) {
     await sql.end();
   } else {
     await runMigrations(DATABASE_URL, { baseline: BASELINE }).catch((err) => {
-      console.error("Migration failed:", err);
+      if (err instanceof DatabaseUrlError) console.error(err.message);
+      else console.error("Migration failed:", err);
       process.exit(1);
     });
   }
