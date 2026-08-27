@@ -1,5 +1,5 @@
 /**
- * PR 0 of `mimir/plans/muninn-nav-vertex-models.mdx` — the MEASUREMENT.
+ * A Vertex AI availability + tool-loop MEASUREMENT.
  *
  * Some deployments must run their model calls on GCP Vertex AI, pinned to
  * explicit regions, with the `global` region off the table. Which models that
@@ -17,8 +17,8 @@
  *      that exists, and reports four outcomes that mean four different things:
  *      reachable, entitled-but-no-quota (429), not-available (404), denied.
  *   2. Does Gemini 2.5 in `europe-north1` survive muninn's TOOL LOOP? That is
- *      the whole risk in the plan's PR 2, and the trigger for dropping PR 5.
- *      Probe B runs the real two-turn shape — call, tool result, answer —
+ *      the risk in moving a bot to Gemini at all, and the thing a region
+ *      decision turns on. Probe B runs the real two-turn shape — call, tool result, answer —
  *      through the OpenAI-compatible endpoint `openai-compat` would use, with
  *      the one real tool buried in a field of decoys.
  *   3. Is `assertHaveAuth()` really the only muninn-side blocker on the
@@ -353,10 +353,10 @@ async function probeRegions(token: string): Promise<Availability[]> {
 // ---------------------------------------------------------------------------
 
 /**
- * Decoys. muninn's melosys bot carries roughly forty MCP tools, and the plan
- * rates "the tool loop with ~40 tools is unproven on Gemini" as PR 2's whole
- * risk. Selecting the right tool out of one is not a measurement; selecting it
- * out of forty-one, from the middle of the list, is.
+ * Decoys. A muninn bot with a full MCP surface carries roughly forty tools, and
+ * whether a model still picks the right one at that scale is the open question.
+ * Selecting the right tool out of one is not a measurement; selecting it out of
+ * forty-one, from the middle of the list, is.
  */
 const DECOY_TOOLS = [
   "read_file", "write_file", "list_dir", "git_log", "send_email", "calendar_add", "weather", "stock_price",
@@ -389,7 +389,7 @@ function toolSet(): unknown[] {
  * DIFFERENT PRs into one number.
  *
  *   `loop-completed`   tool called, tool result fed back, prose came out. The
- *                      only outcome that is evidence FOR PR 2.
+ *                      only outcome that is evidence the loop works.
  *   `loop-broken`      tool called and the second turn produced nothing. The
  *                      only outcome that is evidence AGAINST it, and the one a
  *                      "tool selected correctly: 8/8" headline hid entirely.
@@ -531,7 +531,7 @@ async function probeGemini(token: string, questions: string[]): Promise<GeminiTu
  *
  * The question is only "did a request reach Vertex on ADC alone", so the answer
  * must not be inferred from vocabulary. A 403 `PERMISSION_DENIED` on a project
- * the caller cannot use IS Vertex answering — the exact proof the plan needs —
+ * the caller cannot use IS Vertex answering — the exact proof this probe wants —
  * and a regex looking for the word "vertex" called that a failure and printed
  * the opposite conclusion. Anything that does not clearly land in one of the
  * three decided buckets is reported as `unknown` with the raw detail, rather
@@ -760,6 +760,7 @@ if (RUN.has("gemini")) {
     for (const r of subset) counts.set(r.outcome, (counts.get(r.outcome) ?? 0) + 1);
     return [...counts].map(([o, n]) => `${o} ${n}`).join(", ");
   };
+  const count = (o: TurnOutcome) => rows.filter((r) => r.outcome === o).length;
   const outsideBreakdown = tally(rows.filter((r) => !r.enteredLoop));
   // The in-loop breakdown is named too: a second-turn 429 lands in `broken`, and
   // a bare "broken/truncated: 3" invited the reader to conclude the model fails
@@ -778,12 +779,26 @@ if (RUN.has("gemini")) {
   summary.geminiVerdict = {
     total: rows.length, entered: inLoop.length, completed, broken, outside, failureRatePct: rate,
   };
-  // Only a run where EVERY question failed in transport is unmeasured. "The
-  // model answered all twenty directly and never selected the tool out of 41" is
-  // the single most decision-relevant thing probe B can report — exiting 1 on it
-  // with "no question entered the tool loop" dressed a finding up as breakage.
-  if (rows.length > 0 && rows.every((r) => r.outcome === "error")) {
+  // Two ways this probe measures NOTHING, and one that looks like it and is not.
+  //
+  //   - every question failed BEFORE entering the loop. `enteredLoop` is what
+  //     makes that precise: a second-turn 429 is an `error` too, and a run of
+  //     twenty of those reported "loop entered: 20/20 … 100%" AND "nothing was
+  //     measured" on the same screen — the rate is the finding there, not a
+  //     broken run.
+  //   - nothing entered the loop and OUR OWN token cap is why. A run that is
+  //     100% `truncated` is this file's constant misconfigured, and it exited 0.
+  //
+  // The case that stays exit 0 is a run the model answered directly throughout:
+  // "never selected the tool out of 41" is the single most decision-relevant
+  // thing probe B can say, and exiting 1 on it dresses a finding up as breakage.
+  if (rows.length > 0 && rows.every((r) => r.outcome === "error" && !r.enteredLoop)) {
     failures.push("probe B: every question failed before a reply — nothing was measured");
+  } else if (inLoop.length === 0 && rows.some((r) => r.outcome === "truncated")) {
+    failures.push(
+      `probe B: no question entered the loop and ${count("truncated")} were truncated — ` +
+      `ANSWER_MAX_TOKENS (${ANSWER_MAX_TOKENS}) is too small to measure anything`,
+    );
   }
   say("");
 }
@@ -806,7 +821,7 @@ if (RUN.has("claude-sdk")) {
           ? `\n  ⇒ TIMED OUT after ${SDK_TIMEOUT_MS}ms with no result event. Undecided — the request may\n` +
             "    still have been in flight. Re-run, or raise SDK_TIMEOUT_MS.\n"
           : "\n  ⇒ UNDECIDED. The outcome matched neither a Vertex answer nor a transport failure;\n" +
-            "    read `detail` above before concluding anything about Vei A.\n",
+            "    read `detail` above before concluding anything about the ADC path.\n",
   );
   if (probe.outcome === "timeout") failures.push("probe C: timed out with no result");
 }
