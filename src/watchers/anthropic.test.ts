@@ -28,21 +28,15 @@ let lastGatePrompt = ""; // captured so the body-excerpt threading can be assert
 mock.module("../scheduler/executor.ts", () => ({
   ...realExecutor,
   // ⚠️ The spread above installs the REAL implementations of everything these
-  // tests do not override, and two of them have side effects that must never run
+  // tests do not override, and one of them has a side effect that must never run
   // from a test: `trackUsage` calls `getDb()` and INSERTs into `haiku_usage`
-  // (`src/watchers/wiki-gardener.ts` calls it, in this same `bun test` process),
-  // and `callHaiku` calls the module-internal real `spawnHaiku`, which spawns the
-  // `claude` CLI. Nothing reaches them today — but the whole reason the hand-listed
-  // surface was deleted is that the next change is not supposed to have to notice.
+  // (`src/watchers/wiki-gardener.ts` calls it, in this same `bun test` process).
+  // Nothing reaches it today — but the whole reason the hand-listed surface was
+  // deleted is that the next change is not supposed to have to notice.
   // (`buildHaikuArgs` also writes temp files, via `buildInlineSettings`, and is
   // NOT stubbed: its only caller is the real `spawnHaiku`, which every file here
   // overrides. Everything else executor.ts exports is pure or stream-local.)
   trackUsage: () => {},
-  // `Promise<string>`, not a `HaikuResult` — the real `callHaiku` returns the
-  // text. A stub with the `spawnHaiku` shape would reach the next caller as
-  // "[object Object]" in a prompt, or as `.trim is not a function`, and
-  // `mock.module`'s factory is untyped so tsc cannot see the mismatch.
-  callHaiku: async () => "",
   DEFAULT_MODEL: "claude-haiku-4-5-20251001",
   spawnHaiku: async (prompt: string) => {
     lastGatePrompt = prompt;

@@ -1,4 +1,5 @@
-import { test, expect, describe, mock, beforeEach } from "bun:test";
+import { test, expect, describe, mock, beforeEach, afterEach } from "bun:test";
+import { configure, reset, type LogRecord } from "@logtape/logtape";
 
 // Mock all dependencies
 const mockExecuteClaudePrompt = mock(() => Promise.resolve({
@@ -554,6 +555,61 @@ describe("processMessage", () => {
     expect(userSave.platform).toBe("slack_assistant");
     const assistantSave = (mockSaveMessage.mock.calls[1] as any[])[0];
     expect(assistantSave.platform).toBe("slack_assistant");
+  });
+});
+
+/**
+ * The one log line that carries message CONTENT.
+ *
+ * On a personal instance the 80-char preview plus the username is the operator
+ * reading their own chat; on the nais profile the pod's stdout is a shared log
+ * aggregator and the previews are colleagues\' messages. The line therefore
+ * drops to `debug` there — at the CALL SITE, on the profile the function
+ * already receives, and NOT by raising the category\'s LogTape threshold, which
+ * would also silence the two content-free lines that are a pod turn\'s only
+ * per-turn observability.
+ */
+describe("the inbound message preview log line", () => {
+  async function capture(): Promise<LogRecord[]> {
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
+      reset: true,
+    });
+    return records;
+  }
+
+  /** Records whose message actually carries the preview text. */
+  function previewRecords(records: LogRecord[], text: string) {
+    return records.filter((r) => JSON.stringify(r.properties ?? {}).includes(text));
+  }
+
+  afterEach(async () => { await reset(); });
+
+  test("is INFO on the default profile", async () => {
+    const records = await capture();
+    await processMessage({
+      text: "a secret from a colleague",
+      userId: "U123", username: "testuser", platform: "slack_dm",
+      botConfig, config, say: mock(() => Promise.resolve()),
+    });
+    const hits = previewRecords(records, "a secret from a colleague");
+    expect(hits.map((r) => r.level)).toEqual(["info"]);
+  });
+
+  test("is DEBUG on the nais profile — and the two content-free lines stay INFO", async () => {
+    const records = await capture();
+    await processMessage({
+      text: "a secret from a colleague",
+      userId: "U123", username: "testuser", platform: "slack_dm",
+      botConfig, config: { ...config, profile: "nais" }, say: mock(() => Promise.resolve()),
+    });
+    const hits = previewRecords(records, "a secret from a colleague");
+    expect(hits.map((r) => r.level)).toEqual(["debug"]);
+    // The half a category threshold would have broken: the turn is still
+    // observable at info, it just says nothing about what was said.
+    expect(records.some((r) => r.level === "info")).toBe(true);
   });
 });
 

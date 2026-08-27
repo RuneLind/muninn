@@ -15,11 +15,13 @@
  *   bun db/migrate.ts --baseline       # Mark all as applied (fresh DB from init.sql)
  *   bun db/migrate.ts --status         # Show migration status
  *   bun db/migrate.ts --dry-run        # Show what would run without running
- *   DATABASE_URL=... bun db/migrate.ts # Custom database URL
+ *   DATABASE_URL=... bun db/migrate.ts # Custom database URL (DB_URL also works —
+ *                                      # nais's envVarPrefix form; see ./database-url.ts)
  */
 import postgres from "postgres";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
+import { resolveCliDatabaseUrl } from "./database-url.ts";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "migrations");
 
@@ -33,6 +35,23 @@ interface MigrationFile {
   filename: string;
   ext: string;
 }
+
+/**
+ * The advisory-lock key the migration runner serialises on — the ASCII bytes of
+ * `munn` (0x6d756e6e), so it is recognisable in `pg_locks` and cannot collide
+ * with an application lock chosen by hand.
+ *
+ * Why a lock at all: the runner takes `max: 1` and wraps each migration in
+ * `sql.begin`, which makes ONE run atomic per migration and says nothing about
+ * two runs. Two pods rolling out at the same moment both read
+ * `schema_migrations`, both see the same pending list, and both apply it —
+ * `CREATE TABLE` (no IF NOT EXISTS, as most of `db/migrations/` is written)
+ * then fails in one of them and the deploy reports a crash-loop for a database
+ * that is in fact fine. `pg_advisory_lock` is SESSION-level, so it is held
+ * across the whole pending list rather than per statement, and the loser simply
+ * waits and then finds nothing pending.
+ */
+const MIGRATION_LOCK_KEY = 0x6d756e6e;
 
 async function ensureMigrationsTable(sql: postgres.Sql) {
   await sql`
@@ -100,6 +119,13 @@ export async function runMigrations(
   const say: (...args: unknown[]) => void = opts?.quiet ? () => {} : console.log;
   const sql = postgres(databaseUrl, { max: 1, onnotice: () => {} });
   try {
+    // Taken BEFORE `schema_migrations` is read, because the read is what the
+    // race is about: the pending list has to be computed by a run that already
+    // holds the lock, or the loser applies a list it decided on before the
+    // winner's work existed. Blocking (not `try_advisory_lock`) — a second
+    // rollout should wait for the first and then find nothing pending, not fail
+    // and be restarted by the platform.
+    await sql`SELECT pg_advisory_lock(${MIGRATION_LOCK_KEY})`;
     await ensureMigrationsTable(sql);
     const applied = await getAppliedMigrations(sql);
     const all = await discoverMigrations();
@@ -149,13 +175,31 @@ export async function runMigrations(
     }
     say(`\nDone. Applied ${pending.length} migration(s).`);
   } finally {
+    // `sql.end()` releases the session-level lock — no explicit unlock, which
+    // could only fail on a connection that is already gone.
     await sql.end();
   }
 }
 
 // --- CLI entrypoint ---
 if (import.meta.main) {
-  const DATABASE_URL = process.env.DATABASE_URL ?? "postgresql://muninn:muninn@127.0.0.1:5435/muninn";
+  // `DATABASE_URL` → `DB_URL` → the dev default, in that order (see
+  // ./database-url.ts). The dev default stays LAST because `bun run db:migrate`
+  // on a laptop relies on it — but it must not be reachable while nais's
+  // `DB_URL` is sitting right there, since every remedy this repo prints for a
+  // pod (`kubectl debug … -- bun db/migrate.ts --baseline`, a naisjob with its
+  // own `command:`) bypasses the entrypoint that exports one from the other.
+  const DATABASE_URL = resolveCliDatabaseUrl() ?? "postgresql://muninn:muninn@127.0.0.1:5435/muninn";
+
+  // Three sources feed one target, so say which won — host/db only, never
+  // credentials. This is the only line on the remedy paths (which bypass the
+  // entrypoint and its own echo) that names the database about to be migrated.
+  try {
+    const target = new URL(DATABASE_URL);
+    console.log(`Database: ${target.hostname}:${target.port || "5432"}${target.pathname}`);
+  } catch {
+    // an unparseable URL fails loudly two statements later; don't pre-empt it
+  }
 
   if (STATUS) {
     const sql = postgres(DATABASE_URL, { max: 1, onnotice: () => {} });

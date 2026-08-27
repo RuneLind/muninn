@@ -3,6 +3,7 @@ import { getLog } from "../logging.ts";
 import { pickPrimaryModel } from "../ai/result-parser.ts";
 import { StreamParser, type StreamProgressCallback } from "../ai/stream-parser.ts";
 import { resolveAgentCwd } from "../ai/agent-cwd.ts";
+import { assertHaikuCliAvailable, type HaikuCliFallback } from "../ai/haiku-cli-unavailable.ts";
 import { buildInlineMcpConfig, buildInlineSettings, unreadableBotConfigs } from "../ai/mcp-config-utils.ts";
 import { attachToolSpans } from "../core/tool-spans.ts";
 import type { ClaudeResult, ToolCall } from "../types.ts";
@@ -153,6 +154,13 @@ export interface SpawnHaikuOptions extends HaikuTelemetry {
    * makes the CLI match rather than diverge.
    */
   system?: string;
+  /**
+   * Set by the Haiku ROUTER when it fell through to the CLI: which backend it
+   * tried and why. Read only by the `nais` refusal, so that a pod's error names
+   * the missing credential instead of the missing binary. A direct caller
+   * (the watchers) passes nothing.
+   */
+  cliFallback?: HaikuCliFallback;
 }
 
 /**
@@ -304,6 +312,11 @@ export async function spawnHaiku(
     onUsage,
     onModelError,
   } = opts;
+  // The ONE door into the Claude CLI, so this is where a profile without one
+  // refuses — before the spawn, and for the router and the direct callers
+  // alike. See `src/ai/haiku-cli-unavailable.ts`.
+  assertHaikuCliAvailable(botName ?? "haiku", opts.cliFallback);
+
   const effectiveModel = model || DEFAULT_MODEL;
   const wallStart = performance.now();
 
@@ -533,40 +546,6 @@ export async function readAndParseHaikuStream(
     return { result: parser.getResult(), rawLines };
   }
   return { result: null, rawLines };
-}
-
-/**
- * High-level Haiku call with fallback — used by scheduler runner.
- *
- * `telemetry` threads the {@link HaikuTelemetry} `tracer` + `onUsage` seams into
- * the underlying {@link spawnHaiku} so a traced caller (the scheduled-task
- * reminder/custom paths) gets the `haiku_usage` row joined to its trace
- * (`trace_id`, #267) and the call's token usage surfaced. Absent ⇒ byte-identical
- * to the untelemetered call. `onProgress`/`captureToolOutputs` are intentionally
- * not exposed here — these prompts run no tools.
- */
-export async function callHaiku(
-  prompt: string,
-  fallback: string,
-  source = "task",
-  botDir?: string,
-  botName?: string,
-  timeoutMs?: number,
-  telemetry?: Pick<HaikuTelemetry, "tracer" | "onUsage">,
-): Promise<string> {
-  try {
-    const { result } = await spawnHaiku(prompt, {
-      source,
-      botDir,
-      botName,
-      timeoutMs,
-      ...(telemetry?.tracer ? { tracer: telemetry.tracer } : {}),
-      ...(telemetry?.onUsage ? { onUsage: telemetry.onUsage } : {}),
-    });
-    return result.trim();
-  } catch {
-    return fallback;
-  }
 }
 
 export function trackUsage(

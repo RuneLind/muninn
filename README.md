@@ -87,6 +87,7 @@ graph LR
 | `DATABASE_URL` | Yes | — | Postgres connection string |
 | `DASHBOARD_PORT` | No | `3010` | Web dashboard port |
 | `DASHBOARD_HOST` | No | `127.0.0.1` | Dashboard/chat bind address. Defaults to loopback because with `MUNINN_AUTH=off` the dashboard exposes MCP tools, logs, traces, and full CRUD with **no authentication**. Set `0.0.0.0` to deliberately expose on the LAN (trusted home network) — required when running under Docker, where the container's network is the trust boundary (docker-compose sets it). |
+| `MUNINN_PROFILE` | No | *(unset ⇒ `default`)* | Which deployment this process is. Unset is today's muninn — every route registered. `nais` is a pod: thirteen route groups (wiki, wiki-gardener, plans, sync, claude-usage, benchmark, logs, summaries and the five capture verticals) are **not registered**, so they answer 404 with no handler and the nav omits their links; the one log line carrying message text drops to `debug`; and the **Haiku** spawns — `spawnHaiku`, i.e. the Haiku router's CLI fallback, the watchers and the scheduler — refuse with a typed `HaikuCliUnavailableError` instead of hanging on a binary the `WITH_CLI=false` image does not ship. ⚠️ That guard is `spawnHaiku` only: the **`claude-cli` chat connector** (`src/ai/executor.ts`) and the `executeOneShot` capture family spawn the CLI on their own path and are **not** covered, so every bot on a `nais` deployment must be pinned to a non-CLI `connector` in its `config.json`. `/chat`, the DB/huginn-bound operator routes and both health paths are unchanged. An unrecognised value **throws at startup** rather than degrading to `default` — the degrade direction here is "serve everything". |
 | `MUNINN_AUTH` | No | `off` | `off` is the default and is unchanged behaviour. `local` requires a session for HTTP requests: one pinned identity (`MUNINN_LOCAL_USER`) behind a shared secret (`MUNINN_LOCAL_TOKEN`, min 16 chars), presented on `X-Muninn-Token` / `Authorization: Bearer` / `?muninn_token=` and exchanged for an `HttpOnly` cookie. Also requires `MUNINN_ADMIN_IDENTS` and `MUNINN_ALLOWED_ORIGINS`; the process refuses to start without them. Optional `MUNINN_LOCAL_ROLE` (`user` by default, `admin` to reach the operator surface). A **direct** loopback request bypasses auth by design, so a wrong secret is not a lockout. Routes with an "own" version derive the id from the session rather than the client; id-addressed routes resolve the owner from the row (404, never 403); the `/chat/ws` upgrade is authenticated and owner-scoped; `MUNINN_ALLOWED_ORIGINS` is enforced on side-effecting requests, on the CORS headers and on the socket handshake; and **role decides which routes are reachable at all** — a `user` gets `/chat` and the routes that page calls, everything else answers 403, and `GET /` redirects them to `/chat`. Only `/api/live` and `/api/ready` answer with no credential. ⚠️ **It is still not multi-tenant.** The pinned identity is role `user` unless `MUNINN_LOCAL_ROLE=admin`, so by default the operator's own dashboard is 403 — and that promotion deliberately does not apply to a credential-less loopback request, so a browser on the muninn host stays `user` (reach the dashboard through the proxy, or with the token on the request). Admin-zone collection routes still return every user's rows to an admin (audited, not filtered); a `user` still sees operator nav links they get 403 on; and the loopback bypass is blind to an L4 forward (`ssh -L`, `socat`, `tailscale serve --tcp`, a bare nginx `proxy_pass`) — behind one, every client is granted the pinned identity with no credential, at role `user`. An unauthenticated browser gets raw 401 JSON, not a login page. The four Chrome extensions in `extensions/` do **not** work on an authenticating instance: allowlisting their `chrome-extension://<id>` origin in `MUNINN_ALLOWED_ORIGINS` fixes CORS and the origin check, but their capture/research routes are not in the user zone and answer 403 by role — a documented residual, not something the allowlist lifts. It hardens a single-human instance against casual LAN/tailnet access; it does not make muninn multi-tenant. `entra` is the third mode: every credential is a Bearer access token introspected against `NAIS_TOKEN_INTROSPECTION_ENDPOINT` (one introspection per token, cached and single-flighted), the claims are linked to a `users` row keyed on the token's `oid`, and role comes from `MUNINN_ADMIN_IDENTS` matched against the token's own claims. It additionally requires `MUNINN_TENANT` (written onto the identity row as provenance) and refuses to start without it or the introspection endpoint. No muninn cookie is minted in that mode — an external auth proxy owns the session — and memory/goal extraction is forced OFF for such accounts. **Read `src/auth/CLAUDE.md` before exposing an instance.** |
 | `CLAUDE_TIMEOUT_MS` | No | `120000` | Claude response timeout in ms |
 | `CLAUDE_MODEL` | No | `sonnet` | Claude model for main responses |
@@ -795,6 +796,36 @@ This starts:
 - **postgres** — pgvector/pg17 with the schema from `db/init.sql`
 - **app** — Bun + ffmpeg + Claude CLI, running as non-root `muninn` user
 
+The image is built from one `Dockerfile` with two build args, both **on** by default (so the compose image is unchanged): `--build-arg WITH_MEDIA=false` drops ffmpeg and `--build-arg WITH_CLI=false` drops the Claude CLI. Anything other than `true`/`false` fails the build rather than silently meaning "off".
+
+### Database provisioning (the container will not do it for you)
+
+The container's entrypoint runs, in order: adopt `DB_URL` as `DATABASE_URL` if only the former is set, refuse an unready database, apply pending migrations (serialised across replicas by an advisory lock), then `exec` the CMD. Both scripts it calls resolve the same pair themselves (`DATABASE_URL` → `DB_URL`, then — for the migration runner only — the dev default; `db/database-url.ts`), so the remedies below still find nais's credentials when they replace the entrypoint.
+
+"Unready" is two distinct states, each answered with the command that fixes it rather than a raw SQL error:
+
+| State | What the entrypoint says |
+|---|---|
+| No `users` table — never provisioned | Apply `db/init.sql` **and** `bun db/migrate.ts --baseline`. The `psql -f db/init.sql` half needs a machine that has psql and can reach the database (this image ships **no psql**); the baseline half does not — the image carries bun and `db/`, so it runs from the image itself (see the one-off forms below) |
+| Schema present, `schema_migrations` empty — provisioned but never baselined | Run `bun db/migrate.ts --baseline` (`bun run db:migrate:baseline`) — from the image itself, no psql and no checkout needed (see the one-off forms below) |
+
+**The baseline command cannot be an `exec`.** The refusal makes the entrypoint exit, so under `restart: unless-stopped` (or a Deployment) there is no running process to exec into — `docker compose exec app …` answers `service "app" is not running`. Run it as a one-off container instead:
+
+```bash
+docker compose run --rm --entrypoint bun app db/migrate.ts --baseline
+```
+
+The `--entrypoint` override is required; without it the same refusal runs first. On Kubernetes the equivalent is ad-hoc off the Deployment's own pod spec — the copied pod inherits its env and secrets, and `db/migrate.ts` resolves `DATABASE_URL` → `DB_URL` itself (`db/database-url.ts`), so it finds nais's credentials even though this command replaces the entrypoint that normally exports one from the other:
+
+```bash
+kubectl debug deploy/<app> --copy-to=<app>-baseline --container=<app> \
+  --profile=general -- bun db/migrate.ts --baseline   # delete the copied pod afterwards
+```
+
+`--profile=general` is what kubectl wants; without it it warns that the legacy profile is deprecated. A one-off Job from the same image carrying the same env and secrets (nais: a naisjob) works too — but it **must set its own command**, or the image's default entrypoint re-runs the refusal before it gets to the baseline.
+
+The second state is the one a fresh compose `prod` stack lands in: `db/init.sql` creates `schema_migrations` **empty**, so without a baseline the migration runner reads "everything is pending" and dies inside migration 006 with `column "bot_name" of relation "messages" already exists` — a crash-loop about a database that is in fact fine. Neither state is auto-repaired: baselining a schema laid down by an older `init.sql` would record migrations it has never seen.
+
 ### Volume Mounts
 
 | Mount | Container Path | Description |
@@ -812,11 +843,11 @@ The app container reads `.env` via `env_file`, with `DATABASE_URL` overridden to
 DATABASE_URL=postgresql://muninn:muninn@postgres:5432/muninn
 ```
 
-The dashboard port maps `DASHBOARD_PORT` (default 3010) on the host to port 3000 inside the container.
+The dashboard port maps `DASHBOARD_PORT` (default 3010) on the host to port 3000 inside the container. The **image** pins `DASHBOARD_PORT=3000` and `DASHBOARD_HOST=0.0.0.0` so a bare `docker run -p 3000:3000` works: the app's own defaults (3010, loopback) would otherwise serve on a port nothing maps and bind to an address no probe outside the container can reach.
 
 ### Health Check
 
-The app container has a health check that polls `GET /api/stats` every 30 seconds. Use `docker compose ps` to verify the app is healthy.
+The app container polls `GET /api/live` every 30 seconds — the dependency-free open-zone path, which answers with no credential on an authenticating instance (the old `/api/stats` probe is an admin-zone DB read and reported a healthy process as unhealthy the moment `MUNINN_AUTH` was on). The probe reads its port from `DASHBOARD_PORT` at runtime, and `--start-period` is 120s because the entrypoint's connect budget alone is 30s before migrations run. Use `docker compose ps` to verify the app is healthy.
 
 ### Limitations
 

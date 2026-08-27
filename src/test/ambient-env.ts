@@ -90,4 +90,13 @@ export const AMBIENT_INSTANCE_ENV: readonly string[] = [
   ...WIKI_WRITE_FLAGS,
   ...SYNC_FLAGS,
   ...AUTH_FLAGS,
+  // `MUNINN_PROFILE` — the instance-profile flag by definition: its whole job
+  // is to say WHICH DEPLOYMENT this process is. An ambient `nais` drops
+  // thirteen route groups and turns every Claude-CLI spawn into a throw, so the
+  // wiki/gardener/plans/sync/capture tests would 404 on the machine carrying it
+  // and pass on the other. The tests that DO exercise it pass an explicit
+  // profile or set the variable themselves. (Spelled here rather than imported
+  // from `src/config.ts`: this file is a test PRELOAD, and pulling the config
+  // layer into it would evaluate the logging stack before any suite runs.)
+  "MUNINN_PROFILE",
 ];

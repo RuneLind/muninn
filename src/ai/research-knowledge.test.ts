@@ -43,7 +43,15 @@ mock.module("../db/traces.ts", () => ({
   updateSpan: async () => {},
 }));
 
+// Spread the REAL module rather than replacing it: `mock.module` swaps the whole
+// registry entry, so a two-key stub silently deletes every other export for this
+// process — and `research-knowledge.ts` reaches `config.ts` transitively through
+// the Haiku router, which reads `resolveProfile`. That failure surfaces as
+// `SyntaxError: Export named '…' not found`, from a module this file never
+// mentions, the moment an unrelated PR adds an export.
+const realConfig = await import("../config.ts");
 mock.module("../config.ts", () => ({
+  ...realConfig,
   loadConfig: () => ({ tracingEnabled: false }),
 }));
 

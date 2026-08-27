@@ -79,6 +79,54 @@ export function optionalEnvFlag(name: string): boolean {
   return false;
 }
 
+/** The env var name, so the boot refusal and the message below agree. Not
+ *  exported: this file is the only parser, and `src/test/ambient-env.ts` spells
+ *  the name itself rather than importing the config layer into a test preload. */
+const PROFILE_ENV = "MUNINN_PROFILE";
+
+/**
+ * The serving profiles. `default` is today's muninn — every route registered,
+ * every vertical present. `nais` is the pod: no wiki working trees, no
+ * `yt-dlp`/`ffmpeg`, colleagues on the other side of the door.
+ */
+export const MUNINN_PROFILES = ["default", "nais"] as const;
+export type MuninnProfile = (typeof MUNINN_PROFILES)[number];
+
+/**
+ * `MUNINN_PROFILE` — WHICH DEPLOYMENT this process is, parsed fail-closed.
+ *
+ * Unset ⇒ `default`, so nothing about a laptop or the mini changes. An
+ * unrecognised value THROWS rather than degrading to `default`, for the same
+ * reason `parseAuthMode` throws (`src/auth/mode.ts`) and the inverse of
+ * `optionalEnvFlag`'s warn-and-stay-off rule: here the degrade direction is
+ * "the full surface" — `MUNINN_PROFILE=NAIS-prod` silently serving the wiki,
+ * gardener, plans and logs routes on a pod is exactly the misconfiguration the
+ * variable exists to prevent, and it would arrive with no signal at all.
+ *
+ * A function as well as a `Config` field, for the reason `wikiReadonlyFromEnv`
+ * is one: the consumers below the config layer — the Haiku router's CLI refusal
+ * (`src/ai/haiku-cli-unavailable.ts`) and `renderNav` — take no `Config` at all
+ * and must not need `DATABASE_URL`, which `loadConfig` demands. **The pair is
+ * the rule: a `Config` field where a `Config` exists, this getter where none
+ * does, one parse either way** — `loadConfig` calls it too, so the field and the
+ * getter can never disagree.
+ *
+ * Named `resolveServingProfile`, not `resolveProfile`: `src/research/corpus.ts`
+ * already exports a `resolveProfile` (the research CORPUS profile), and two
+ * same-named exports one import away from each other is how the wrong one gets
+ * auto-imported.
+ */
+export function resolveServingProfile(env: Record<string, string | undefined> = process.env): MuninnProfile {
+  const raw = (env[PROFILE_ENV] ?? "").trim().toLowerCase();
+  if (raw === "") return "default";
+  if ((MUNINN_PROFILES as readonly string[]).includes(raw)) return raw as MuninnProfile;
+  throw new Error(
+    `${PROFILE_ENV}="${raw}" is not a known serving profile (expected one of: ${MUNINN_PROFILES.join(", ")}). ` +
+    `Refusing to start: an unrecognised value must not silently degrade to "default", which would ` +
+    `serve the filesystem-bound routes this profile exists to drop.`,
+  );
+}
+
 /**
  * `MUNINN_WIKI_READONLY=1` — this instance must make NO programmatic wiki page
  * CONTENT writes. Exported as a function (not only a `loadConfig()` field)
@@ -226,6 +274,10 @@ export function optionalEnvInt(name: string, defaultValue: number): number {
 export function loadConfig() {
   const whisperModelPath = optionalEnv("WHISPER_MODEL_PATH", "./models/ggml-base.en.bin");
   return {
+    // WHICH deployment this is. Read through `resolveServingProfile()` — the
+    // same parse the seams below the config layer use, so a field here can
+    // never disagree with what they enforce.
+    profile: resolveServingProfile(),
     dashboardPort: optionalEnvInt("DASHBOARD_PORT", 3010),
     claudeTimeoutMs: optionalEnvInt("CLAUDE_TIMEOUT_MS", 120000),
     claudeModel: optionalEnv("CLAUDE_MODEL", "sonnet"),

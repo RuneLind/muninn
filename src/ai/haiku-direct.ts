@@ -10,6 +10,11 @@ import {
 } from "../scheduler/executor.ts";
 import type { ConnectorType } from "../bots/config.ts";
 import { getRoleOverride } from "../db/role-overrides.ts";
+import type { HaikuCliFallback } from "./haiku-cli-unavailable.ts";
+
+// The refusal every path here ends at, re-exported so a caller catching it does
+// not have to know that `spawnHaiku` — not this router — is what throws it.
+export { HaikuCliUnavailableError } from "./haiku-cli-unavailable.ts";
 
 const log = getLog("ai", "haiku-router");
 
@@ -382,19 +387,27 @@ export async function callHaikuWithFallback(
 ): Promise<HaikuResult> {
   const backend = resolveBackend(opts);
   const botName = opts.botName ?? "haiku";
+  // WHY this call is about to spawn the CLI — accumulated, not acted on. The
+  // refusal itself lives in `spawnHaiku` (one door: the watchers reach it
+  // without passing through here), and this is the context
+  // that makes its message name the missing CREDENTIAL rather than the missing
+  // binary. On the default profile it is read by nothing.
+  let cliFallback: HaikuCliFallback | undefined;
 
   if (backend === "anthropic" && !hasHaikuDirectAuth()) {
     // No auth → skip the attempt entirely rather than failing one call first.
+    cliFallback = { backend, reason: "no Anthropic auth (ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN)" };
     log.warn("haiku-router anthropic backend requested but no auth, falling back to CLI", { botName });
   } else if (backend !== "cli") {
     try {
       return await NON_CLI_BACKENDS[backend](prompt, opts);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      cliFallback = { backend, reason: message, cause: err };
       log.warn("haiku-router {backend} failed, falling back to CLI: {error}", { botName, backend, error: message });
     }
   }
-  return spawnHaiku(prompt, opts);
+  return spawnHaiku(prompt, cliFallback ? { ...opts, cliFallback } : opts);
 }
 
 /** Usage/backend for one {@link callHaikuMessageWithFallback} call. `backend` is
@@ -418,8 +431,9 @@ export interface HaikuMessageResult {
 }
 
 /**
- * Router-backed replacement for the scheduler's `callHaiku` string-or-fallback
- * wrapper. Runs a TOOL-LESS Haiku prompt through {@link callHaikuWithFallback} so
+ * Router-backed replacement for the scheduler's old `callHaiku` string-or-fallback
+ * wrapper (deleted — this is the only remaining spelling of that contract).
+ * Runs a TOOL-LESS Haiku prompt through {@link callHaikuWithFallback} so
  * the backend is picked from the bot's connector/haikuBackend (a claude-sdk /
  * copilot-sdk bot no longer pays a hardcoded `claude -p` cold-start, and an
  * anthropic/copilot Haiku backend actually runs) instead of the old raw
@@ -428,7 +442,7 @@ export interface HaikuMessageResult {
  *
  * On ANY error (the router already falls back CLI→…; this catches the case where
  * even the CLI floor throws) it returns the caller's `fallback` text with
- * `usage: null` — byte-identical to the old `callHaiku` contract, so the caller's
+ * `usage: null` — byte-identical to that old contract, so the caller's
  * meta stays empty on failure and no connector/model is fabricated. Pass `tracer`
  * to tie the `haiku_usage` row back to the request trace (the backends' own
  * `trackUsage` reads `opts.tracer?.traceId`).

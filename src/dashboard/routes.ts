@@ -1,5 +1,6 @@
 import { Hono } from "hono";
-import type { Config } from "../config.ts";
+import { resolveServingProfile, type Config } from "../config.ts";
+import { droppedRouteGroups, type RouteGroup } from "./route-groups.ts";
 import { sessionRole } from "../auth/guard.ts";
 import { HEALTH_LIVE_PATH, HEALTH_READY_PATH } from "../auth/zones.ts";
 import { readiness } from "./health.ts";
@@ -33,8 +34,25 @@ import { registerClaudeUsageRoutes } from "./routes/claude-usage-routes.ts";
 import { registerPlansRoutes } from "./routes/plans-routes.ts";
 import { registerJiraRoutes } from "./routes/jira-routes.ts";
 
+/**
+ * Every dashboard route, minus whatever the serving profile drops (the drop
+ * list and its rationale: `./route-groups.ts`).
+ *
+ * The five INLINE routes below (`/`, the two health paths, the favicons, the
+ * build hash, `/api/attention`) are profile-independent and always present —
+ * they are the instance itself, not a feature. So is the `/chat` slice, which
+ * is mounted separately in `src/index.ts` and is therefore not filterable here
+ * at all: on the nais profile chat is the whole point.
+ *
+ * The profile is `config.profile ?? resolveServingProfile()` — the field where
+ * a `Config` carries one, the same parse's env getter where it does not, which
+ * is what keeps the unit tests that hand-build a `{} as Config` on today's full
+ * surface. There is no options channel: a second way to say which profile this
+ * is, is a second answer.
+ */
 export function createDashboardRoutes(config: Config): Hono {
   const app = new Hono();
+  const dropped = droppedRouteGroups(config.profile ?? resolveServingProfile());
 
   // Dashboard home page — role-aware since the zone model landed. `/` is the
   // address people type, and the dashboard behind it is admin-only, so a role
@@ -81,31 +99,50 @@ export function createDashboardRoutes(config: Config): Hono {
     return c.json(await assembleAttention());
   });
 
-  registerDataRoutes(app);
-  registerTracesRoutes(app);
-  registerMemsearchRoutes(app);
-  registerLogsRoutes(app, config);
-  registerSearchRoutes(app, config);
-  registerResearchRoutes(app, config);
-  registerToolsRoutes(app);
-  registerSummariesRoutes(app, config);
-  registerAnthropicRoutes(app, config);
-  registerArticleRoutes(app, config);
-  registerYouTubeRoutes(app, config);
-  registerXArticleRoutes(app, config);
-  registerTikTokRoutes(app, config);
-  registerSSERoutes(app);
-  registerGraphRoutes(app, config);
-  registerWikiRoutes(app, config);
-  registerWikiGardenerRoutes(app);
-  registerBenchmarkRoutes(app);
-  registerModelsRoutes(app);
-  registerIndexingRoutes(app, config);
-  registerAgentsRoutes(app);
-  registerSyncRoutes(app, config);
-  registerClaudeUsageRoutes(app, config);
-  registerPlansRoutes(app, config);
-  registerJiraRoutes(app, config);
+  // The register* list, wrapped UNIFORMLY first (the two arities are why —
+  // filtering a list that mixes `f(app)` and `f(app, config)` invites the drop
+  // to be written per-call and drift) and only then filtered. Registration
+  // order is preserved exactly as it was.
+  const groups = [
+    ["data", (a) => registerDataRoutes(a)],
+    ["traces", (a) => registerTracesRoutes(a)],
+    ["memsearch", (a) => registerMemsearchRoutes(a)],
+    ["logs", (a) => registerLogsRoutes(a, config)],
+    ["search", (a) => registerSearchRoutes(a, config)],
+    ["research", (a) => registerResearchRoutes(a, config)],
+    ["tools", (a) => registerToolsRoutes(a)],
+    ["summaries", (a) => registerSummariesRoutes(a, config)],
+    ["anthropic", (a) => registerAnthropicRoutes(a, config)],
+    ["article", (a) => registerArticleRoutes(a, config)],
+    ["youtube", (a) => registerYouTubeRoutes(a, config)],
+    ["x-article", (a) => registerXArticleRoutes(a, config)],
+    ["tiktok", (a) => registerTikTokRoutes(a, config)],
+    ["sse", (a) => registerSSERoutes(a)],
+    ["graph", (a) => registerGraphRoutes(a, config)],
+    ["wiki", (a) => registerWikiRoutes(a, config)],
+    ["wiki-gardener", (a) => registerWikiGardenerRoutes(a)],
+    ["benchmark", (a) => registerBenchmarkRoutes(a)],
+    ["models", (a) => registerModelsRoutes(a)],
+    ["indexing", (a) => registerIndexingRoutes(a, config)],
+    ["agents", (a) => registerAgentsRoutes(a)],
+    ["sync", (a) => registerSyncRoutes(a, config)],
+    ["claude-usage", (a) => registerClaudeUsageRoutes(a, config)],
+    ["plans", (a) => registerPlansRoutes(a, config)],
+    ["jira", (a) => registerJiraRoutes(a, config)],
+  ] as const satisfies readonly (readonly [RouteGroup, (a: Hono) => void])[];
+
+  // Exhaustiveness tie: a group named in `ROUTE_GROUPS` but never registered
+  // above is unreachable on EVERY profile, and nothing else would say so. When
+  // the two agree this type is `never` and the line compiles; when they don't,
+  // it fails to compile naming the missing group.
+  type Unregistered = Exclude<RouteGroup, (typeof groups)[number][0]>;
+  const _allGroupsRegistered: Unregistered extends never ? true : Unregistered = true;
+  void _allGroupsRegistered;
+
+  for (const [name, register] of groups) {
+    if (dropped.has(name)) continue;
+    register(app);
+  }
 
   return app;
 }

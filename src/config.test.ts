@@ -1,6 +1,6 @@
 import { test, expect, describe, afterEach } from "bun:test";
 import { configure, reset, type LogRecord } from "@logtape/logtape";
-import { loadConfig, optionalEnvFlag, __resetEnvFlagWarningsForTest, adminIdentsFromEnv, allowedOriginsFromEnv } from "./config.ts";
+import { loadConfig, optionalEnvFlag, __resetEnvFlagWarningsForTest, adminIdentsFromEnv, allowedOriginsFromEnv, resolveServingProfile } from "./config.ts";
 
 /**
  * `optionalEnvFlag` is how the instance-profile switches (`MUNINN_WIKI_READONLY`)
@@ -185,5 +185,47 @@ describe("allowedOriginsFromEnv", () => {
 
   test("unset means empty", () => {
     expect(allowedOriginsFromEnv({})).toEqual([]);
+  });
+});
+
+/**
+ * `MUNINN_PROFILE` — the serving profile, parsed fail-CLOSED.
+ *
+ * The direction is the whole point and it is the opposite of `optionalEnvFlag`'s
+ * above: a typo there degrades to OFF (safe), a typo here would degrade to
+ * `default`, i.e. serving the filesystem-bound and CLI-bound routes the `nais`
+ * profile exists to drop — on the one deployment where colleagues are on the
+ * other side of the door. So it throws, like `parseAuthMode`.
+ */
+describe("resolveServingProfile", () => {
+  test("unset, blank or whitespace-only means the default profile", () => {
+    expect(resolveServingProfile({})).toBe("default");
+    expect(resolveServingProfile({ MUNINN_PROFILE: "" })).toBe("default");
+    expect(resolveServingProfile({ MUNINN_PROFILE: "   " })).toBe("default");
+  });
+
+  test("accepts the known profiles, trimmed and case-insensitively", () => {
+    for (const raw of ["nais", "NAIS", " nais ", "Nais"]) {
+      expect(`${raw} → ${resolveServingProfile({ MUNINN_PROFILE: raw })}`).toBe(`${raw} → nais`);
+    }
+    expect(resolveServingProfile({ MUNINN_PROFILE: "default" })).toBe("default");
+  });
+
+  test("an unrecognised value THROWS rather than degrading to default", () => {
+    // The near-misses an operator actually types. Each one would silently serve
+    // the full surface if this parsed like a boolean flag.
+    for (const raw of ["nais-prod", "prod", "nais1", "true", "1"]) {
+      expect(() => resolveServingProfile({ MUNINN_PROFILE: raw })).toThrow(/not a known serving profile/);
+    }
+  });
+
+  test("the refusal names the variable, the value and the known profiles", () => {
+    // A boot refusal is read once, in a container log, by someone who cannot
+    // attach a debugger — it has to carry the fix.
+    let message = "";
+    try { resolveServingProfile({ MUNINN_PROFILE: "nais-prod" }); } catch (err) { message = String(err); }
+    expect(message).toContain("MUNINN_PROFILE");
+    expect(message).toContain("nais-prod");
+    expect(message).toContain("default, nais");
   });
 });

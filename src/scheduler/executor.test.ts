@@ -19,11 +19,16 @@ mock.module("../db/traces.ts", () => ({
   saveSpan: async (params: Record<string, unknown>) => { saveSpanCalls.push(params); },
   updateSpan: async () => {},
 }));
+// Spread the REAL module: `mock.module` swaps the whole registry entry, so a
+// one-key stub deletes every other export for this process — and `spawnHaiku`
+// now reaches `resolveServingProfile` through the CLI-refusal guard.
+const realConfig = await import("../config.ts");
 mock.module("../config.ts", () => ({
+  ...realConfig,
   loadConfig: () => ({ tracingEnabled: true, tracingCaptureToolOutputs: true }),
 }));
 
-const { spawnHaiku, callHaiku, HAIKU_TIMEOUT_MS, parseHaikuJson, parseLegacyHaikuOutput, readAndParseHaikuStream, buildHaikuArgs, claudeResultToHaiku, _resetSpawnWarningsForTests } =
+const { spawnHaiku, HAIKU_TIMEOUT_MS, parseHaikuJson, parseLegacyHaikuOutput, readAndParseHaikuStream, buildHaikuArgs, claudeResultToHaiku, _resetSpawnWarningsForTests } =
   await import("./executor.ts");
 const { attachToolSpans } = await import("../core/tool-spans.ts");
 const { resolveAgentCwd } = await import("../ai/agent-cwd.ts");
@@ -68,7 +73,7 @@ describe("parseHaikuJson", () => {
 });
 
 /**
- * Any cwd-less `spawnHaiku`/`callHaiku` call resolves its cwd via
+ * Any cwd-less `spawnHaiku` call resolves its cwd via
  * `resolveAgentCwd` and CREATES it — in the developer's real
  * `~/.muninn/agent-cwd` unless redirected. Every test in this file that reaches a
  * real spawn goes through here so the suite leaves nothing in `$HOME`.
@@ -160,16 +165,6 @@ describe("spawnHaiku timeout", () => {
     }
 
     expect(timerCleared).toBe(true);
-  });
-});
-
-describe("callHaiku", () => {
-  test("returns fallback when process fails", async () => {
-    // cwd-less, like the spawnHaiku timeout test above — same scratch guard.
-    await withScratchAgentCwd(async () => {
-      const result = await callHaiku("test", "fallback-value", "test-source", undefined, undefined, 100);
-      expect(result).toBe("fallback-value");
-    });
   });
 });
 
@@ -450,6 +445,62 @@ describe("spawnHaiku cwd", () => {
     // The bot dir must reach the CLI as configuration, never as a working directory.
     expect(spawned[0]!.cmd).toContain("--mcp-config");
   });
+});
+
+/**
+ * The CLI refusal on the `nais` profile — ONE door, and this is it.
+ *
+ * The image is built `WITH_CLI=false`, so the spawn below would be an ENOENT or
+ * a credential-less `claude` hanging to `HAIKU_TIMEOUT_MS`. Asserted HERE and
+ * not only through the Haiku router, because the router is not the only caller:
+ * `src/watchers/{email,x,anthropic}.ts` reach `spawnHaiku` directly, and a
+ * refusal written in the router would leave those spawning.
+ */
+describe("spawnHaiku on MUNINN_PROFILE=nais", () => {
+  /** Stubs Bun.spawn so the assertion can be "it never got that far". */
+  async function spawnAttempts(fn: () => Promise<unknown>): Promise<number> {
+    let calls = 0;
+    const realSpawn = Bun.spawn;
+    (Bun as any).spawn = (cmd: string[], o: any) => {
+      calls++;
+      return {
+        pid: 1,
+        stdout: ndjsonStream([
+          JSON.stringify({ type: "result", subtype: "success", result: "ok", usage: { input_tokens: 1, output_tokens: 1 } }),
+        ]),
+        stderr: new ReadableStream({ start: (c) => c.close() }),
+        exited: Promise.resolve(0),
+        kill: () => {},
+      };
+    };
+    try { await fn().catch(() => {}); } finally { (Bun as any).spawn = realSpawn; }
+    return calls;
+  }
+
+  test("refuses with a typed error and never reaches the spawn", async () => {
+    process.env.MUNINN_PROFILE = "nais";
+    try {
+      let caught: unknown = null;
+      const calls = await spawnAttempts(() =>
+        spawnHaiku("hi", { source: "nais-test", botName: "melosys" }).catch((err) => { caught = err; }),
+      );
+      expect(calls).toBe(0);
+      expect((caught as Error).name).toBe("HaikuCliUnavailableError");
+      // The operator reads this once, in a pod log: it has to name the profile
+      // and which bot's call died.
+      expect(String(caught)).toContain("MUNINN_PROFILE=nais");
+      expect(String(caught)).toContain("melosys");
+    } finally {
+      delete process.env.MUNINN_PROFILE;
+    }
+  });
+
+  test("the DEFAULT profile spawns exactly as before", async () => {
+    // The compatibility half: without it the case above would pass on a
+    // `spawnHaiku` that refused unconditionally.
+    expect(await spawnAttempts(() => spawnHaiku("hi", { source: "nais-test", botName: "jarvis" }))).toBe(1);
+  });
+
 });
 
 /**
