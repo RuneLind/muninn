@@ -85,8 +85,11 @@ describe("db/migrate.ts database URL resolution", () => {
     // `scripts/docker-entrypoint.sh` exports DATABASE_URL from it — but every
     // remedy this repo prints for a pod (`kubectl debug … -- bun db/migrate.ts
     // --baseline`, a naisjob with its own `command:`) REPLACES that entrypoint.
-    // Reading only DATABASE_URL therefore fell through to the dev default and
-    // migrated whatever answers on 127.0.0.1:5435.
+    // On a pod (DATABASE_URL genuinely absent) the old read fell through to
+    // the dev default and migrated whatever answers on 127.0.0.1:5435. In THIS
+    // harness DATABASE_URL is blanked to "", which the old `??` kept as a
+    // connection string — either way the run never reached SCRATCH_URL, which
+    // is what the scratchTouched() assertion pins.
     expect(await migrateStatus({ DB_URL: SCRATCH_URL })).toBe(0);
     expect(await scratchTouched()).toBe(true);
   });

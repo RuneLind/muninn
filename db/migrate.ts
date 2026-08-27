@@ -191,6 +191,16 @@ if (import.meta.main) {
   // own `command:`) bypasses the entrypoint that exports one from the other.
   const DATABASE_URL = resolveCliDatabaseUrl() ?? "postgresql://muninn:muninn@127.0.0.1:5435/muninn";
 
+  // Three sources feed one target, so say which won — host/db only, never
+  // credentials. This is the only line on the remedy paths (which bypass the
+  // entrypoint and its own echo) that names the database about to be migrated.
+  try {
+    const target = new URL(DATABASE_URL);
+    console.log(`Database: ${target.hostname}:${target.port || "5432"}${target.pathname}`);
+  } catch {
+    // an unparseable URL fails loudly two statements later; don't pre-empt it
+  }
+
   if (STATUS) {
     const sql = postgres(DATABASE_URL, { max: 1, onnotice: () => {} });
     await ensureMigrationsTable(sql);

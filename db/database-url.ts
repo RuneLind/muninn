@@ -11,9 +11,11 @@
  * silently falls through to its dev default and migrates a laptop.
  *
  * `DATABASE_URL` still wins: docker-compose sets it directly, and a shell that
- * exports it means it. `DB_URL` is adopted only when non-empty — an empty
+ * exports it means it. Both reads are `||`, so a set-but-EMPTY value falls
+ * through — for `DATABASE_URL=""` that is a deliberate change from the old
+ * `??` (which passed `""` to postgres() as a connection string): an empty
  * adoption would turn "no database configured" into a parse error several
- * layers down.
+ * layers down, and for `db/migrate.ts` it now means the dev default instead.
  */
 
 /** The resolved URL, or `undefined` when neither variable carries one. Callers
