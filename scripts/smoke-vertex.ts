@@ -6,31 +6,38 @@
  * Google's published region table. This script asks the API instead, against a
  * real project, and answers the three questions the PR slate branches on:
  *
- *   1. WHICH models does this project actually reach, in which region?
- *      Not "which does the table list" — an entitlement the project has never
- *      accepted looks identical to a region that does not carry the model, and
- *      only one of those is an engineering problem. Probe A separates them.
- *   2. Does Gemini 2.5 in `europe-north1` survive muninn's TOOL LOOP?
- *      That is the whole risk in the plan's PR 2, and the trigger for dropping
- *      PR 5. Probe B runs the real two-turn shape — call, tool result, answer —
+ *   1. WHICH models can this project actually CALL, in which region? Not which
+ *      the catalogue lists — those are different facts, and the difference is
+ *      the whole finding. `publishers/*\/models` is the public catalogue for a
+ *      host; a project that has never accepted a partner model's terms, or has
+ *      zero quota for it, is listed identically to one that can call it. So
+ *      probe A lists AND THEN DIALS every listed model with the cheapest call
+ *      that exists, and reports four outcomes that mean four different things:
+ *      reachable, entitled-but-no-quota (429), not-available (404), denied.
+ *   2. Does Gemini 2.5 in `europe-north1` survive muninn's TOOL LOOP? That is
+ *      the whole risk in the plan's PR 2, and the trigger for dropping PR 5.
+ *      Probe B runs the real two-turn shape — call, tool result, answer —
  *      through the OpenAI-compatible endpoint `openai-compat` would use, with
  *      the one real tool buried in a field of decoys.
  *   3. Is `assertHaveAuth()` really the only muninn-side blocker on the
  *      "zero-code" Claude-on-Vertex path? Probe C runs the Agent SDK with BOTH
- *      Anthropic credentials removed from the environment and reports how far
- *      it gets. If it reaches a Vertex answer, the seam is proven and the fix
- *      is one line; if it dies before the network, the plan's Vei A is wrong.
+ *      Anthropic credentials removed from the environment and CLASSIFIES how
+ *      far it got — reached Vertex, never left the machine, or unknown.
  *
  *     VERTEX_PROJECT_ID=<your-gcp-project> bun scripts/smoke-vertex.ts
- *     … --probe=regions|gemini|claude-sdk    (default: all three)
+ *     … --probe=regions|gemini|claude-sdk   (comma-separated; default: all)
+ *     … --json                              (JSON on stdout, prose on stderr)
  *
- * NO NAV VALUES LIVE HERE. Every project id, region and question set is env or
- * flag input; the defaults are Google's own public region names. The eight
+ * NO NAV VALUES LIVE HERE, and none leave at RUNTIME either: every project id,
+ * region and question is env or flag input, the defaults are Google's own
+ * public region names, and every line printed — including verbatim server error
+ * messages, which name the project — goes through `redact()` first. The eight
  * built-in questions are generic, publicly-derivable phrasings about a public
  * NAV system (Melosys, the A1 form, EESSI) that a person could write from
- * nav.no — they are NOT drawn from any internal corpus. Point
- * `VERTEX_SMOKE_QUESTIONS` at a file (one question per line) to measure against
- * real ones without them entering this repo.
+ * nav.no; they are NOT drawn from any internal corpus. Point
+ * `VERTEX_SMOKE_QUESTIONS` at a file (one question per line, `#` comments) to
+ * measure against real ones without them entering this repo — but note that
+ * `--json` then carries them verbatim in its output.
  *
  * Credentials come from ADC — `gcloud auth application-default login` on a
  * laptop, the workload-identity metadata server in a pod. No key material is
@@ -43,51 +50,51 @@ const GEMINI_MODEL = (process.env.VERTEX_GEMINI_MODEL ?? "gemini-2.5-flash").tri
 const CLAUDE_REGION = (process.env.VERTEX_CLAUDE_REGION ?? "europe-west1").trim();
 const CLAUDE_MODEL = (process.env.VERTEX_CLAUDE_MODEL ?? "claude-sonnet-4-5").trim();
 
+/**
+ * Gemini 2.5 Flash spends thinking tokens inside the SAME budget as its answer,
+ * so a small cap produces an empty `content` with `finish_reason: "length"` —
+ * which reads exactly like "the tool loop failed to answer". Generous, because
+ * the thing being measured is whether the loop completes, not how terse it is.
+ * The bucket for it exists anyway (`truncated`), because a budget can never be
+ * proven large enough.
+ */
+const ANSWER_MAX_TOKENS = 2048;
+
+const KNOWN_PROBES = ["regions", "gemini", "claude-sdk"] as const;
+const JSON_MODE = process.argv.includes("--json");
+/** Prose goes to stderr under `--json` so `… --json | jq` works. */
+const say = (line = "") => (JSON_MODE ? console.error(line) : console.log(line));
+
 if (!PROJECT) {
   console.error("VERTEX_PROJECT_ID is required (the GCP project that owns the Vertex quota).");
   process.exit(2);
 }
 
 const probeArg = process.argv.find((a) => a.startsWith("--probe="))?.slice("--probe=".length);
-const RUN = new Set(probeArg ? probeArg.split(",") : ["regions", "gemini", "claude-sdk"]);
+const requested = probeArg ? probeArg.split(",").map((p) => p.trim()).filter(Boolean) : [...KNOWN_PROBES];
+const unknownProbes = requested.filter((p) => !(KNOWN_PROBES as readonly string[]).includes(p));
+if (unknownProbes.length > 0 || requested.length === 0) {
+  // Silently running nothing and exiting 0 is the worst answer a measurement
+  // tool can give: "measured, all fine" and "measured nothing" then look the same.
+  console.error(
+    `--probe: unknown ${JSON.stringify(unknownProbes)} — expected some of ${KNOWN_PROBES.join(", ")}`,
+  );
+  process.exit(2);
+}
+const RUN = new Set(requested);
 
 /**
- * The regional API hosts, plus the two special ones that decide the plan.
+ * Every string that reaches stdout, stderr or `--json` passes through here.
  *
- * `eu` is the MULTI-REGION endpoint (`aiplatform.eu.rep.googleapis.com`), whose
- * whole promise is that processing stays inside the EU — the opposite of
- * `global`, which Team KI forbids precisely because the region is unknowable.
- * Whether the føring's "EU/EØS-regioner" covers it is question 1 to Team KI,
- * and this probe is what makes the question concrete: it reports what is
- * REACHABLE there, not whether it is allowed.
- *
- * `us-central1` is the CONTROL, and it is not decoration. A denial there tells
- * us the org policy is doing the enforcing rather than our own discipline — and
- * `constraints/gcp.restrictEndpointUsage` answers with a distinct message, so
- * "policy blocked this endpoint" never reads as "this region has no models".
+ * Not paranoia about our own literals — about the SERVER's. Google's errors
+ * quote the resource, so a refusal reads `Access to projects/<the real id>
+ * through endpoint … was denied`, and that line is exactly what a person pastes
+ * into a public plan or PR. Redacting only the header line gave false
+ * confidence.
  */
-const REGION_HOSTS: { location: string; host: string; note?: string }[] = [
-  { location: "europe-north1", host: "europe-north1-aiplatform.googleapis.com", note: "the nais region" },
-  { location: "europe-west1", host: "europe-west1-aiplatform.googleapis.com" },
-  { location: "europe-west4", host: "europe-west4-aiplatform.googleapis.com" },
-  { location: "eu", host: "aiplatform.eu.rep.googleapis.com", note: "EU multi-region — open question 1" },
-  { location: "us-central1", host: "us-central1-aiplatform.googleapis.com", note: "control: expected to be refused" },
-];
-
-const DEFAULT_QUESTIONS = [
-  "Hva sier vår interne dokumentasjon om A1-søknader?",
-  "Hvordan behandles en søknad om medlemskap i folketrygden ved arbeid i utlandet?",
-  "Hva er forskjellen på en A1-attest og et medlemskapsvedtak?",
-  "Hvilke SED-er sendes ved utsending av arbeidstaker til et annet EØS-land?",
-  "Hvordan beregnes trygdeavgift for en person med inntekt i to land?",
-  "Hva skjer når et annet land bestrider vår lovvalgsvurdering?",
-  "Hvilke opplysninger trenger vi fra arbeidsgiver for å vurdere lovvalg?",
-  "Hvordan håndterer vi en sak der arbeidstakeren jobber i flere land samtidig?",
-];
-
-// ---------------------------------------------------------------------------
-// Access token
-// ---------------------------------------------------------------------------
+function redact(text: string): string {
+  return PROJECT ? text.split(PROJECT).join("<project>") : text;
+}
 
 /**
  * ADC, in the two shapes this script can run under. The metadata server is
@@ -108,14 +115,25 @@ async function accessToken(): Promise<string> {
   } catch {
     // Not on GCE — fall through to gcloud.
   }
-  const proc = Bun.spawn(["gcloud", "auth", "application-default", "print-access-token"], {
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  let proc;
+  try {
+    proc = Bun.spawn(["gcloud", "auth", "application-default", "print-access-token"], {
+      stdout: "pipe", stderr: "pipe",
+    });
+  } catch {
+    // `Bun.spawn` THROWS for a binary that is not on PATH, so without this the
+    // careful message below is unreachable in the commonest case of all.
+    throw new Error(
+      "no ADC token: not on GCE and `gcloud` is not on PATH — install the Google Cloud SDK and " +
+      "run `gcloud auth application-default login`",
+    );
+  }
   const out = (await new Response(proc.stdout).text()).trim();
   if ((await proc.exited) !== 0 || !out) {
     const err = (await new Response(proc.stderr).text()).trim();
-    throw new Error(`no ADC token: metadata server unreachable and gcloud failed — ${err.slice(0, 300)}`);
+    throw new Error(
+      `no ADC token: metadata server unreachable and gcloud failed — ${redact(err).slice(0, 300)}`,
+    );
   }
   return out;
 }
@@ -135,68 +153,150 @@ function authHeaders(token: string): Record<string, string> {
   };
 }
 
+interface Attempt { status: number; body: string; transportError?: string }
+
+/**
+ * One HTTP attempt, retried ONCE on 429 or 5xx.
+ *
+ * Not robustness for its own sake: probe A classifies 429 as a MEANINGFUL
+ * outcome ("entitled, no quota"), and a transient 429 from a burst of our own
+ * calls would be indistinguishable from a standing quota of zero. One retry
+ * after a second separates the two well enough to act on, and the report says
+ * when a retry happened.
+ */
+async function attempt(
+  url: string, token: string, init: RequestInit = {}, timeoutMs = 30_000,
+): Promise<Attempt & { retried: boolean }> {
+  let retried = false;
+  for (let round = 0; round < 2; round++) {
+    try {
+      const res = await fetch(url, {
+        ...init, headers: authHeaders(token), signal: AbortSignal.timeout(timeoutMs),
+      });
+      const body = await res.text();
+      if ((res.status === 429 || res.status >= 500) && round === 0) {
+        retried = true;
+        await Bun.sleep(1000);
+        continue;
+      }
+      return { status: res.status, body, retried };
+    } catch (err) {
+      const message = String((err as Error).message);
+      if (round === 0) { retried = true; await Bun.sleep(1000); continue; }
+      return { status: 0, body: "", transportError: message.slice(0, 160), retried };
+    }
+  }
+  /* c8 ignore next */ throw new Error("unreachable");
+}
+
+function errorMessage(body: string): string {
+  try {
+    const parsed = JSON.parse(body) as { error?: { message?: string } } | { error?: { message?: string } }[];
+    const one = Array.isArray(parsed) ? parsed[0] : parsed;
+    if (one?.error?.message) return one.error.message;
+  } catch { /* fall through to the raw head */ }
+  return body.slice(0, 200);
+}
+
 // ---------------------------------------------------------------------------
-// Probe A — what does this project actually reach, and where?
+// Probe A — what can this project CALL, and where?
 // ---------------------------------------------------------------------------
+
+/**
+ * The four answers a dial can give, and why each is its own word.
+ *
+ * `no-quota` is the one that earns the whole probe. Measured 2026-08-27:
+ * `claude-sonnet-4-5` on the EU multi-region endpoint answers **429 Quota
+ * exceeded**, while `claude-sonnet-5` on the same endpoint answers 404. Those
+ * are opposite situations — one is a quota request, the other is "this project
+ * cannot have that model" — and the catalogue listing shows both identically.
+ */
+type Reach = "reachable" | "no-quota" | "not-available" | "denied" | `http-${number}` | "transport-error";
+
+interface ModelReach { model: string; reach: Reach; detail?: string; retried?: boolean }
 
 interface Availability {
   location: string;
   host: string;
   note?: string;
-  status: number;
-  /** Model ids, `name@versionId`, or null when the listing did not answer. */
-  anthropic: string[] | null;
-  gemini: string[] | null;
-  /** The org-policy refusal, when that is what happened, rather than a count. */
-  refusal?: string;
+  /** Per publisher, because a refusal on one says nothing about the other — and
+   *  folding a refused listing into "0 models" is the exact false diagnosis
+   *  this probe exists to prevent. */
+  publishers: Record<string, { listed: string[] | null; refusal?: string; status: number; dialled: ModelReach[] }>;
 }
 
-async function listPublisherModels(
-  token: string,
-  host: string,
-  publisher: string,
-): Promise<{ status: number; models: string[] | null; refusal?: string }> {
-  const url = `https://${host}/v1beta1/publishers/${publisher}/models?pageSize=200`;
-  let res: Response;
-  try {
-    res = await fetch(url, { headers: authHeaders(token), signal: AbortSignal.timeout(20_000) });
-  } catch (err) {
-    return { status: 0, models: null, refusal: `transport: ${String((err as Error).message).slice(0, 160)}` };
-  }
-  const text = await res.text();
-  if (!res.ok) {
-    // The message matters more than the code: a 403 from
-    // `constraints/gcp.restrictEndpointUsage` is the platform enforcing the
-    // region rule, and is a PASS for our purposes, not a failure.
-    let message = text.slice(0, 200);
-    try {
-      message = (JSON.parse(text) as { error?: { message?: string } }).error?.message ?? message;
-    } catch { /* keep the raw head */ }
-    return { status: res.status, models: null, refusal: message };
-  }
-  const body = JSON.parse(text) as { publisherModels?: { name: string; versionId?: string }[] };
-  const models = (body.publisherModels ?? []).map(
-    (m) => `${m.name.split("/").pop()}@${m.versionId ?? "?"}`,
-  );
-  return { status: res.status, models };
+const REGION_HOSTS: { location: string; host: string; note?: string }[] = [
+  { location: "europe-north1", host: "europe-north1-aiplatform.googleapis.com", note: "the nais region" },
+  { location: "europe-west1", host: "europe-west1-aiplatform.googleapis.com" },
+  { location: "europe-west4", host: "europe-west4-aiplatform.googleapis.com" },
+  { location: "eu", host: "aiplatform.eu.rep.googleapis.com", note: "EU multi-region — open question 1" },
+  { location: "us-central1", host: "us-central1-aiplatform.googleapis.com", note: "control: expected to be refused" },
+];
+
+function classify(status: number, body: string): Reach {
+  if (status === 200) return "reachable";
+  if (status === 429) return "no-quota";
+  if (status === 404) return "not-available";
+  if (status === 403) return "denied";
+  if (status === 0) return "transport-error";
+  // A 400 from a model that exists is a payload problem and must not be read as
+  // an availability answer; it is surfaced with its own code and its message.
+  void body;
+  return `http-${status}` as Reach;
+}
+
+/**
+ * The cheapest call that proves reachability, per publisher.
+ *
+ * Gemini has `:countTokens`, which runs no inference and bills nothing. The
+ * Anthropic publisher does NOT accept it (400, "Unknown name anthropic_version"
+ * — measured), so it is dialled with `:rawPredict` and `max_tokens: 1`, which
+ * is a real but negligible generation. That asymmetry is why the call is chosen
+ * here rather than shared.
+ */
+async function dial(
+  token: string, host: string, location: string, publisher: string, model: string,
+): Promise<ModelReach> {
+  const base = `https://${host}/v1/projects/${PROJECT}/locations/${location}/publishers/${publisher}/models/${model}`;
+  const [url, payload] = publisher === "anthropic"
+    ? [`${base}:rawPredict`,
+       { anthropic_version: "vertex-2023-10-16", messages: [{ role: "user", content: "x" }], max_tokens: 1 }]
+    : [`${base}:countTokens`, { contents: [{ role: "user", parts: [{ text: "x" }] }] }];
+  const res = await attempt(url, token, { method: "POST", body: JSON.stringify(payload) });
+  const reach = classify(res.status, res.body);
+  return {
+    model,
+    reach,
+    ...(reach === "reachable" ? {} : { detail: redact(res.transportError ?? errorMessage(res.body)).slice(0, 160) }),
+    ...(res.retried ? { retried: true } : {}),
+  };
 }
 
 async function probeRegions(token: string): Promise<Availability[]> {
   const rows: Availability[] = [];
   for (const { location, host, note } of REGION_HOSTS) {
-    const [anthropic, google] = await Promise.all([
-      listPublisherModels(token, host, "anthropic"),
-      listPublisherModels(token, host, "google"),
-    ]);
-    rows.push({
-      location,
-      host,
-      note,
-      status: anthropic.status,
-      anthropic: anthropic.models,
-      gemini: google.models?.filter((m) => m.startsWith("gemini")) ?? null,
-      ...(anthropic.refusal ? { refusal: anthropic.refusal } : {}),
-    });
+    const publishers: Availability["publishers"] = {};
+    for (const publisher of ["anthropic", "google"]) {
+      const res = await attempt(`https://${host}/v1beta1/publishers/${publisher}/models?pageSize=200`, token);
+      if (res.status !== 200) {
+        publishers[publisher] = {
+          listed: null, status: res.status, dialled: [],
+          refusal: redact(res.transportError ?? errorMessage(res.body)),
+        };
+        continue;
+      }
+      const body = JSON.parse(res.body) as { publisherModels?: { name: string; versionId?: string }[] };
+      const listed = (body.publisherModels ?? [])
+        .map((m) => m.name.split("/").pop() as string)
+        // Only the text models are dialled: the TTS and live-audio variants take
+        // a different payload, and a 400 from them would be noise in a column
+        // whose whole job is availability.
+        .filter((m) => publisher === "anthropic" || /^gemini-[\d.]+-(flash|pro)(-lite)?$/.test(m));
+      const dialled: ModelReach[] = [];
+      for (const model of listed) dialled.push(await dial(token, host, location, publisher, model));
+      publishers[publisher] = { listed, status: res.status, dialled };
+    }
+    rows.push({ location, host, note, publishers });
   }
   return rows;
 }
@@ -226,8 +326,7 @@ function toolSet(): unknown[] {
   const fn = (name: string, description: string, arg: string) => ({
     type: "function",
     function: {
-      name,
-      description,
+      name, description,
       parameters: { type: "object", properties: { [arg]: { type: "string" } }, required: [arg] },
     },
   });
@@ -238,20 +337,39 @@ function toolSet(): unknown[] {
   return [...decoys.slice(0, 20), real, ...decoys.slice(20)];
 }
 
+/**
+ * Five outcomes, because the earlier three collapsed cases that decide
+ * DIFFERENT PRs into one number.
+ *
+ *   `loop-completed`   tool called, tool result fed back, prose came out. The
+ *                      only outcome that is evidence FOR PR 2.
+ *   `loop-broken`      tool called and the second turn produced nothing. The
+ *                      only outcome that is evidence AGAINST it, and the one a
+ *                      "tool selected correctly: 8/8" headline hid entirely.
+ *   `truncated`        second turn hit the token budget. Separate because the
+ *                      cause is ours, not the model's.
+ *   `answered-no-tool` the model answered directly. Neither passes nor fails
+ *                      the loop trigger — it never entered the loop — so it is
+ *                      excluded from the rate and reported on its own line.
+ *   `error`            an HTTP failure on either turn.
+ */
+type TurnOutcome = "loop-completed" | "loop-broken" | "truncated" | "answered-no-tool" | "error";
+
 interface GeminiTurn {
   question: string;
+  outcome: TurnOutcome;
   calledTool: string | null;
-  /** Did the SECOND turn — the one fed a tool result — produce prose? */
-  answered: boolean;
+  finishReason: string | null;
   answerHead: string;
   ms: number;
   promptTokens: number;
   cachedTokens: number;
+  retried?: boolean;
   error?: string;
 }
 
 async function probeGemini(token: string, questions: string[]): Promise<GeminiTurn[]> {
-  const base =
+  const url =
     `https://${GEMINI_REGION}-aiplatform.googleapis.com/v1/projects/${PROJECT}` +
     `/locations/${GEMINI_REGION}/endpoints/openapi/chat/completions`;
   const tools = toolSet();
@@ -260,7 +378,8 @@ async function probeGemini(token: string, questions: string[]): Promise<GeminiTu
   for (const question of questions) {
     const started = performance.now();
     const row: GeminiTurn = {
-      question, calledTool: null, answered: false, answerHead: "", ms: 0, promptTokens: 0, cachedTokens: 0,
+      question, outcome: "error", calledTool: null, finishReason: null,
+      answerHead: "", ms: 0, promptTokens: 0, cachedTokens: 0,
     };
     try {
       const messages: unknown[] = [
@@ -271,35 +390,42 @@ async function probeGemini(token: string, questions: string[]): Promise<GeminiTu
         { role: "user", content: question },
       ];
       const post = async (body: unknown) => {
-        const res = await fetch(base, {
-          method: "POST",
-          headers: authHeaders(token),
-          body: JSON.stringify(body),
-          signal: AbortSignal.timeout(60_000),
-        });
-        const text = await res.text();
-        if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
-        return JSON.parse(text) as {
+        const res = await attempt(url, token, { method: "POST", body: JSON.stringify(body) }, 60_000);
+        if (res.retried) row.retried = true;
+        if (res.status !== 200) {
+          throw new Error(`HTTP ${res.status}: ${redact(res.transportError ?? errorMessage(res.body)).slice(0, 200)}`);
+        }
+        return JSON.parse(res.body) as {
           choices: { finish_reason: string; message: Record<string, unknown> }[];
           usage?: { prompt_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } };
         };
       };
 
-      const first = await post({ model: `google/${GEMINI_MODEL}`, messages, tools, max_tokens: 400 });
+      const first = await post({ model: `google/${GEMINI_MODEL}`, messages, tools, max_tokens: ANSWER_MAX_TOKENS });
       const message = first.choices[0]?.message ?? {};
       const calls = (message.tool_calls ?? []) as { id: string; function: { name: string } }[];
       row.calledTool = calls[0]?.function.name ?? null;
+      row.finishReason = first.choices[0]?.finish_reason ?? null;
+
       if (!row.calledTool) {
+        // NOT a failure, and not "no answer" either: the model answered the
+        // question directly. Reported on its own line, excluded from the rate.
         row.answerHead = String(message.content ?? "").slice(0, 120);
+        row.outcome = row.finishReason === "length"
+          ? "truncated"
+          : row.answerHead.trim() ? "answered-no-tool" : "loop-broken";
         row.ms = Math.round(performance.now() - started);
         results.push(row);
         continue;
       }
 
       // The assistant message goes back VERBATIM. Gemini attaches an opaque
-      // `extra_content.google.thought_signature` to a tool call, and the second
-      // turn is rejected if it is stripped — a reconstructed message is not the
-      // same message. `openai-compat`'s loop must preserve it too.
+      // `extra_content.google.thought_signature` to a tool call; measured
+      // 2026-08-27 against this endpoint, stripping it is ACCEPTED (both
+      // directions returned 200), so this is not a preservation requirement to
+      // build `openai-compat` around — it is simply the honest thing to send,
+      // and the field is documented as carrying reasoning state the next turn
+      // may use.
       messages.push(message);
       messages.push({
         role: "tool",
@@ -308,14 +434,19 @@ async function probeGemini(token: string, questions: string[]): Promise<GeminiTu
           "Treff i intern dokumentasjon: saken behandles i fagsystemet, og saksbehandler oppretter " +
           "riktig strukturert melding til det andre landet.",
       });
-      const second = await post({ model: `google/${GEMINI_MODEL}`, messages, tools, max_tokens: 400 });
-      const answer = String(second.choices[0]?.message?.content ?? "");
-      row.answered = answer.trim().length > 0;
+      const second = await post({ model: `google/${GEMINI_MODEL}`, messages, tools, max_tokens: ANSWER_MAX_TOKENS });
+      const choice = second.choices[0];
+      const answer = String(choice?.message?.content ?? "");
+      row.finishReason = choice?.finish_reason ?? null;
       row.answerHead = answer.slice(0, 120);
       row.promptTokens = second.usage?.prompt_tokens ?? 0;
       row.cachedTokens = second.usage?.prompt_tokens_details?.cached_tokens ?? 0;
+      row.outcome = answer.trim()
+        ? "loop-completed"
+        : row.finishReason === "length" ? "truncated" : "loop-broken";
     } catch (err) {
-      row.error = String((err as Error).message).slice(0, 220);
+      row.outcome = "error";
+      row.error = redact(String((err as Error).message)).slice(0, 220);
     }
     row.ms = Math.round(performance.now() - started);
     results.push(row);
@@ -327,28 +458,37 @@ async function probeGemini(token: string, questions: string[]): Promise<GeminiTu
 // Probe C — the Agent SDK on Vertex, with no Anthropic credential at all
 // ---------------------------------------------------------------------------
 
+/**
+ * Four outcomes, and `unknown` is a real one.
+ *
+ * The question is only "did a request reach Vertex on ADC alone", so the answer
+ * must not be inferred from vocabulary. A 403 `PERMISSION_DENIED` on a project
+ * the caller cannot use IS Vertex answering — the exact proof the plan needs —
+ * and a regex looking for the word "vertex" called that a failure and printed
+ * the opposite conclusion. Anything that does not clearly land in one of the
+ * three decided buckets is reported as `unknown` with the raw detail, rather
+ * than as a verdict.
+ */
+type SdkOutcome = "completed" | "reached-vertex" | "did-not-reach" | "timeout" | "unknown";
+
 interface SdkProbe {
-  reachedVertex: boolean;
+  outcome: SdkOutcome;
+  /** Reported IDENTICALLY whether or not the request left the machine, so it
+   *  corroborates nothing on its own — printed because it is the direct
+   *  evidence that no Anthropic credential was in play. */
   apiKeySource: string | null;
-  completed: boolean;
   detail: string;
   ms: number;
 }
 
-/**
- * The plan's "Vei A" claims Vertex is an env variable rather than a connector,
- * and that the only thing in the way is `assertHaveAuth()`. This proves or
- * disproves it WITHOUT touching that function: it deletes both Anthropic
- * credentials from this process's environment — Bun loads muninn's `.env`, so
- * they are usually present — and calls the SDK directly.
- *
- * Reading the outcome:
- *   - `apiKeySource: "none"` plus ANY answer from Vertex ⇒ the SDK authenticated
- *     with ADC and the transport works. Whatever fails after that is
- *     entitlement or model naming, not muninn's code.
- *   - a throw BEFORE any Vertex answer ⇒ Vei A is wrong and PR 5 is not a
- *     one-line change.
- */
+const SDK_TIMEOUT_MS = 60_000;
+
+/** Vertex/Google answering: an HTTP status from the API, or one of Google's own
+ *  status enums, or the CLI's own model-availability message. */
+const REACHED_VERTEX = /API Error: \d{3}|PERMISSION_DENIED|NOT_FOUND|RESOURCE_EXHAUSTED|UNAUTHENTICATED|INVALID_ARGUMENT|not available on your vertex deployment/i;
+/** The request never left: transport, DNS, TLS. */
+const NEVER_LEFT = /ConnectionRefused|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|getaddrinfo|socket hang up|unable to (verify|get local)/i;
+
 async function probeClaudeSdk(): Promise<SdkProbe> {
   const started = performance.now();
   delete process.env.ANTHROPIC_API_KEY;
@@ -359,29 +499,42 @@ async function probeClaudeSdk(): Promise<SdkProbe> {
   if (CLAUDE_REGION === "eu") process.env.ANTHROPIC_VERTEX_BASE_URL = "https://aiplatform.eu.rep.googleapis.com";
 
   const { query } = await import("@anthropic-ai/claude-agent-sdk");
-  const probe: SdkProbe = { reachedVertex: false, apiKeySource: null, completed: false, detail: "", ms: 0 };
-  try {
+  const probe: SdkProbe = { outcome: "unknown", apiKeySource: null, detail: "", ms: 0 };
+
+  const run = async () => {
     const q = query({
       prompt: "Reply with the single word OK",
       options: { model: CLAUDE_MODEL, settingSources: [], permissionMode: "bypassPermissions", maxTurns: 1 },
     });
     for await (const event of q as AsyncGenerator<Record<string, unknown>, void>) {
-      if (event.type === "system" && event.subtype === "init") {
-        probe.apiKeySource = String(event.apiKeySource ?? "");
-      }
+      if (event.type === "system" && event.subtype === "init") probe.apiKeySource = String(event.apiKeySource ?? "");
       if (event.type === "result") {
         const text = String(event.result ?? "");
-        // Vertex's own vocabulary for "the project cannot use this model".
-        // Reaching THIS is the finding: the request was made and answered.
-        probe.reachedVertex = /vertex|not available|access to it/i.test(text);
-        probe.completed = event.subtype === "success" && /\bOK\b/.test(text) && !probe.reachedVertex;
-        probe.detail = text.slice(0, 220);
+        probe.detail = redact(text).slice(0, 220);
+        probe.outcome = REACHED_VERTEX.test(text) ? "reached-vertex"
+          : NEVER_LEFT.test(text) ? "did-not-reach"
+          : event.subtype === "success" && text.trim() ? "completed"
+          : "unknown";
       }
     }
+  };
+
+  try {
+    // The SDK has no timeout of its own here, and an endpoint that blackholes
+    // made this hang for three minutes with no output. Whatever the CLI is
+    // doing behind the generator keeps going; the script exits regardless.
+    await Promise.race([
+      run(),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(`__timeout__ after ${SDK_TIMEOUT_MS}ms`)), SDK_TIMEOUT_MS)),
+    ]);
   } catch (err) {
     const message = String((err as Error).message);
-    if (/vertex|not available|access to it/i.test(message)) probe.reachedVertex = true;
-    probe.detail = message.slice(0, 220);
+    probe.detail = redact(message).slice(0, 220);
+    probe.outcome = message.startsWith("__timeout__") ? "timeout"
+      : REACHED_VERTEX.test(message) ? "reached-vertex"
+      : NEVER_LEFT.test(message) ? "did-not-reach"
+      : "unknown";
   }
   probe.ms = Math.round(performance.now() - started);
   return probe;
@@ -391,72 +544,141 @@ async function probeClaudeSdk(): Promise<SdkProbe> {
 // Report
 // ---------------------------------------------------------------------------
 
+/**
+ * Twenty, because the plan's PR-5 drop trigger is stated over twenty questions
+ * and a threshold of 10% cannot be measured on eight — one bad row out of eight
+ * is 12.5%, so the smallest possible failure already crosses it. Generic,
+ * publicly-derivable phrasings about a public NAV system (Melosys, the A1 form,
+ * EESSI, lovvalg), authored here rather than drawn from any corpus. Point
+ * `VERTEX_SMOKE_QUESTIONS` at real ones to keep those out of this repo.
+ */
+const DEFAULT_QUESTIONS = [
+  "Hva sier vår interne dokumentasjon om A1-søknader?",
+  "Hvordan behandles en søknad om medlemskap i folketrygden ved arbeid i utlandet?",
+  "Hva er forskjellen på en A1-attest og et medlemskapsvedtak?",
+  "Hvilke SED-er sendes ved utsending av arbeidstaker til et annet EØS-land?",
+  "Hvordan beregnes trygdeavgift for en person med inntekt i to land?",
+  "Hva skjer når et annet land bestrider vår lovvalgsvurdering?",
+  "Hvilke opplysninger trenger vi fra arbeidsgiver for å vurdere lovvalg?",
+  "Hvordan håndterer vi en sak der arbeidstakeren jobber i flere land samtidig?",
+  "Hva er saksgangen når en sak må sendes tilbake til avsenderlandet?",
+  "Hvilke frister gjelder for å svare på en henvendelse fra et annet EØS-land?",
+  "Hvordan dokumenterer vi at en arbeidstaker er utsendt og ikke lokalt ansatt?",
+  "Hva gjør vi når opplysningene fra arbeidsgiver og arbeidstaker spriker?",
+  "Hvilken betydning har varigheten av oppdraget for lovvalgsvurderingen?",
+  "Hvordan behandles selvstendig næringsdrivende som arbeider i flere land?",
+  "Hva skjer med en løpende sak hvis arbeidstakeren bytter arbeidsgiver?",
+  "Hvordan registreres et vedtak slik at det blir synlig for det andre landet?",
+  "Hvilke vedlegg må ligge ved en søknad før den kan behandles?",
+  "Hva er forskjellen på en midlertidig og en endelig avgjørelse om lovvalg?",
+  "Hvordan følger vi opp en sak der det andre landet ikke svarer?",
+  "Hvilke opplysninger kan vi dele med et annet EØS-land i en pågående sak?",
+];
+
 function loadQuestions(): string[] {
   const path = process.env.VERTEX_SMOKE_QUESTIONS?.trim();
   if (!path) return DEFAULT_QUESTIONS;
-  const text = require("node:fs").readFileSync(path, "utf8") as string;
+  let text: string;
+  try {
+    text = require("node:fs").readFileSync(path, "utf8") as string;
+  } catch (err) {
+    throw new Error(`VERTEX_SMOKE_QUESTIONS=${path}: ${(err as Error).message}`);
+  }
   const lines = text.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
-  if (lines.length === 0) throw new Error(`${path} has no questions`);
+  if (lines.length === 0) throw new Error(`VERTEX_SMOKE_QUESTIONS=${path} has no questions (only blanks/comments)`);
   return lines;
+}
+
+// Resolved BEFORE any probe runs. A typo'd path used to abort the script after
+// probe A had already spent its calls and printed, throwing away the result.
+let QUESTIONS: string[];
+try {
+  QUESTIONS = loadQuestions();
+} catch (err) {
+  console.error((err as Error).message);
+  process.exit(2);
 }
 
 const summary: Record<string, unknown> = { project: "<redacted>", generatedAt: new Date().toISOString() };
 
-const token = await accessToken();
-console.log(`\nVertex smoke — project <VERTEX_PROJECT_ID>, ADC token acquired\n`);
+let token: string;
+try {
+  token = await accessToken();
+} catch (err) {
+  console.error((err as Error).message);
+  process.exit(2);
+}
+say(`\nVertex smoke — project from VERTEX_PROJECT_ID (redacted in all output), ADC token acquired\n`);
+
+const REACH_GLYPH: Record<string, string> = {
+  "reachable": "✔ reachable", "no-quota": "◐ entitled, NO QUOTA (429)",
+  "not-available": "✘ not available (404)", "denied": "✘ denied (403)", "transport-error": "? transport error",
+};
 
 if (RUN.has("regions")) {
-  console.log("── Probe A: model availability, measured ──────────────────────");
+  say("── Probe A: what this project can CALL, dialled (not the catalogue) ──");
   const rows = await probeRegions(token);
   summary.availability = rows;
   for (const r of rows) {
-    const note = r.note ? `  (${r.note})` : "";
-    console.log(`\n  ${r.location}${note}`);
-    if (r.refusal) {
-      console.log(`    anthropic: — HTTP ${r.status}: ${r.refusal.slice(0, 140)}`);
-    } else {
-      console.log(`    anthropic: ${r.anthropic?.length ?? 0} — ${r.anthropic?.join(", ") || "(none)"}`);
+    say(`\n  ${r.location}${r.note ? `  (${r.note})` : ""}`);
+    for (const [publisher, p] of Object.entries(r.publishers)) {
+      if (p.listed === null) { say(`    ${publisher.padEnd(9)} — HTTP ${p.status}: ${p.refusal?.slice(0, 130)}`); continue; }
+      if (p.listed.length === 0) { say(`    ${publisher.padEnd(9)} catalogue lists none`); continue; }
+      say(`    ${publisher.padEnd(9)} catalogue lists ${p.listed.length}:`);
+      for (const d of p.dialled) {
+        say(`      ${(REACH_GLYPH[d.reach] ?? d.reach).padEnd(27)} ${d.model}${d.retried ? "  (retried)" : ""}` +
+            (d.detail && d.reach !== "not-available" ? `\n          ${d.detail.slice(0, 120)}` : ""));
+      }
     }
-    console.log(`    gemini:    ${r.gemini?.length ?? 0} — ${r.gemini?.join(", ") || "(none)"}`);
   }
-  console.log("");
+  say("");
 }
 
 if (RUN.has("gemini")) {
-  const questions = loadQuestions();
-  console.log(`── Probe B: ${GEMINI_MODEL} @ ${GEMINI_REGION}, ${questions.length} questions, 41 tools ──`);
-  const rows = await probeGemini(token, questions);
+  say(`── Probe B: ${GEMINI_MODEL} @ ${GEMINI_REGION}, ${QUESTIONS.length} questions, 41 tools ──`);
+  const rows = await probeGemini(token, QUESTIONS);
   summary.gemini = rows;
-  const picked = rows.filter((r) => r.calledTool === REAL_TOOL).length;
-  const answered = rows.filter((r) => r.answered).length;
-  const errored = rows.filter((r) => r.error).length;
+  const count = (o: TurnOutcome) => rows.filter((r) => r.outcome === o).length;
   for (const r of rows) {
-    const verdict = r.error ? `ERROR ${r.error}` : `${r.calledTool ?? "(no tool)"} → ${r.answered ? "answered" : "no answer"}`;
-    console.log(`  ${String(r.ms).padStart(5)}ms  ${verdict}`);
-    if (r.error) console.log(`         q: ${r.question}`);
+    say(`  ${String(r.ms).padStart(5)}ms  ${r.outcome.padEnd(17)} ${r.calledTool ?? "(no tool)"}` +
+        (r.error ? `\n           ${r.error}` : ""));
   }
-  const rate = rows.length ? Math.round((100 * (rows.length - picked)) / rows.length) : 100;
-  console.log(
-    `\n  tool selected correctly: ${picked}/${rows.length}   answered after tool result: ${answered}/${rows.length}   errors: ${errored}` +
-    `\n  failure rate: ${rate}%  (plan's PR-5 drop trigger: < 10%)\n`,
+  const completed = count("loop-completed");
+  const broken = count("loop-broken") + count("truncated") + count("error");
+  const noTool = count("answered-no-tool");
+  const entered = completed + broken;
+  // The DENOMINATOR is stated, because the trigger is about the loop and a run
+  // the model answered directly never entered it. Excluding those from both
+  // halves is the only definition under which the number means what it says.
+  const rate = entered > 0 ? Math.round((100 * broken) / entered) : null;
+  say(
+    `\n  loop entered: ${entered}/${rows.length}   completed: ${completed}   broken/truncated/error: ${broken}` +
+    `\n  answered WITHOUT a tool (excluded from the rate, exercised no loop): ${noTool}` +
+    `\n  failure rate over the loop runs: ${rate === null ? "n/a — the loop was never entered" : rate + "%"}` +
+    `  (plan's PR-5 drop trigger: < 10%)`,
   );
-  summary.geminiVerdict = { picked, answered, errored, total: rows.length, failureRatePct: rate };
+  if (entered < rows.length / 2) {
+    say("  ⚠ over half the questions never entered the loop — the rate above is a thin sample.");
+  }
+  summary.geminiVerdict = { total: rows.length, entered, completed, broken, noTool, failureRatePct: rate };
+  say("");
 }
 
 if (RUN.has("claude-sdk")) {
-  console.log(`── Probe C: Agent SDK → Vertex ${CLAUDE_REGION}/${CLAUDE_MODEL}, no Anthropic credential ──`);
+  say(`── Probe C: Agent SDK → Vertex ${CLAUDE_REGION}/${CLAUDE_MODEL}, no Anthropic credential ──`);
   const probe = await probeClaudeSdk();
   summary.claudeSdk = probe;
-  console.log(`  apiKeySource: ${probe.apiKeySource ?? "(never reported)"}`);
-  console.log(`  reached Vertex: ${probe.reachedVertex}   turn completed: ${probe.completed}   ${probe.ms}ms`);
-  console.log(`  detail: ${probe.detail}`);
-  console.log(
-    probe.reachedVertex || probe.completed
-      ? "\n  ⇒ ADC authenticated the SDK with no ANTHROPIC_API_KEY. assertHaveAuth() is the only muninn-side blocker.\n"
-      : "\n  ⇒ The SDK did NOT reach Vertex. Vei A needs more than a one-line change — re-read the plan.\n",
+  say(`  apiKeySource: ${probe.apiKeySource ?? "(never reported)"}   outcome: ${probe.outcome}   ${probe.ms}ms`);
+  say(`  detail: ${probe.detail}`);
+  say(
+    probe.outcome === "completed" || probe.outcome === "reached-vertex"
+      ? "\n  ⇒ ADC authenticated the SDK with no ANTHROPIC_API_KEY, and a request reached Vertex.\n" +
+        "    assertHaveAuth() is the only muninn-side blocker.\n"
+      : probe.outcome === "did-not-reach"
+        ? "\n  ⇒ The request never left this machine. Says nothing about ADC — fix the endpoint and re-run.\n"
+        : "\n  ⇒ UNDECIDED. The outcome matched neither a Vertex answer nor a transport failure;\n" +
+          "    read `detail` above before concluding anything about Vei A.\n",
   );
 }
 
-if (process.argv.includes("--json")) {
-  console.log(JSON.stringify(summary, null, 2));
-}
+if (JSON_MODE) console.log(redact(JSON.stringify(summary, null, 2)));
