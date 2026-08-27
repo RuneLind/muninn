@@ -1,10 +1,12 @@
 /**
  * PR 0 of `mimir/plans/muninn-nav-vertex-models.mdx` — the MEASUREMENT.
  *
- * Team KI points NAV projects at GCP Vertex AI, in an EU/EØS region, and
- * forbids `global`. The plan reasoned about what that costs muninn from
- * Google's published region table. This script asks the API instead, against a
- * real project, and answers the three questions the PR slate branches on:
+ * Some deployments must run their model calls on GCP Vertex AI, pinned to
+ * explicit regions, with the `global` region off the table. Which models that
+ * leaves you is a question Google's published region table answers only
+ * approximately — it lists what EXISTS, not what your project can CALL. This
+ * script asks the API instead, against a real project, and answers the three
+ * questions such a migration turns on:
  *
  *   1. WHICH models can this project actually CALL, in which region? Not which
  *      the catalogue lists — those are different facts, and the difference is
@@ -28,16 +30,16 @@
  *     … --probe=regions|gemini|claude-sdk   (comma-separated; default: all)
  *     … --json                              (JSON on stdout, prose on stderr)
  *
- * NO NAV VALUES LIVE HERE, and none leave at RUNTIME either: every project id,
- * region and question is env or flag input, the defaults are Google's own
- * public region names, and every line printed — including verbatim server error
- * messages, which name the project — goes through `redact()` first. The twenty
- * built-in questions are generic, publicly-derivable phrasings about a public
- * NAV system (Melosys, the A1 form, EESSI) that a person could write from
- * nav.no; they are NOT drawn from any internal corpus. Point
- * `VERTEX_SMOKE_QUESTIONS` at a file (one question per line, `#` comments) to
- * measure against real ones without them entering this repo — but note that
- * `--json` then carries them verbatim in its output.
+ * NOTHING DEPLOYMENT-SPECIFIC LIVES HERE, and nothing leaks at RUNTIME either:
+ * every project id, region and question is env or flag input, the defaults are
+ * Google's own public region names, and every line printed — including verbatim
+ * server error messages, which name the project — goes through `redact()`
+ * first. The twenty built-in questions are invented placeholders about a
+ * fictional internal handbook, there only to give the tool loop something
+ * plausible to retrieve against. Point `VERTEX_SMOKE_QUESTIONS` at a file (one
+ * question per line, `#` comments) to measure against your own — but note that
+ * `--json` then carries them verbatim in its output, so keep that file out of
+ * the repo.
  *
  * Credentials come from ADC — `gcloud auth application-default login` on a
  * laptop, the workload-identity metadata server in a pod. No key material is
@@ -82,7 +84,9 @@ if (unknownProbes.length > 0 || requested.length === 0) {
   // Silently running nothing and exiting 0 is the worst answer a measurement
   // tool can give: "measured, all fine" and "measured nothing" then look the same.
   console.error(
-    `--probe: unknown ${JSON.stringify(unknownProbes)} — expected some of ${KNOWN_PROBES.join(", ")}`,
+    unknownProbes.length > 0
+      ? `--probe: unknown ${JSON.stringify(unknownProbes)} — expected some of ${KNOWN_PROBES.join(", ")}`
+      : `--probe: named no probe — expected some of ${KNOWN_PROBES.join(", ")}`,
   );
   process.exit(2);
 }
@@ -106,6 +110,12 @@ function redact(text: string): string {
     // Matching the `projects/<x>` SHAPE catches both, plus any project we did
     // not configure.
     .replace(/projects\/[A-Za-z0-9_.:-]+/g, "projects/<project>")
+    // Google's quota messages carry the number with no `projects/` in front:
+    // `… for consumer 'project_number:594181726752'`. Probe A's whole finding is
+    // a family of 429s, so that is exactly the message most likely to be pasted.
+    // A bare long-digit sweep is safe here because nothing this script prints —
+    // latencies, token counts, model ids — reaches nine digits.
+    .replace(/\b\d{9,}\b/g, "<number>")
     // Then the configured id anywhere else it appears. Guarded on length: a
     // three-character id would rewrite unrelated substrings (`api` inside
     // `aiplatform`), and GCP project ids are at least six characters.
@@ -202,7 +212,13 @@ async function attempt(
       // 429 from a standing quota of zero; retrying an expired budget only
       // doubles the wait, and at 60 s per Gemini turn that is forty minutes
       // across twenty questions. Other transport failures (DNS, reset) get one.
-      const timedOut = (err as Error).name === "TimeoutError" || /timed? ?out|abort/i.test(message);
+      // `AbortSignal.timeout` reports `name: "TimeoutError"` / "The operation
+      // timed out." — measured. Matched on the NAME plus that exact phrasing,
+      // deliberately not a loose /timed out|abort/: that also matched
+      // `ETIMEDOUT`, a transport failure the comment below promises to retry.
+      const timedOut = (err as Error).name === "TimeoutError"
+        || (err as Error).name === "AbortError"
+        || /operation timed out|operation was aborted/i.test(message);
       if (round === 0 && !timedOut) { retried = true; await Bun.sleep(1000); continue; }
       return { status: 0, body: "", transportError: message.slice(0, 160), retried };
     }
@@ -247,7 +263,7 @@ interface Availability {
 }
 
 const REGION_HOSTS: { location: string; host: string; note?: string }[] = [
-  { location: "europe-north1", host: "europe-north1-aiplatform.googleapis.com", note: "the nais region" },
+  { location: "europe-north1", host: "europe-north1-aiplatform.googleapis.com", note: "the deployment region" },
   { location: "europe-west1", host: "europe-west1-aiplatform.googleapis.com" },
   { location: "europe-west4", host: "europe-west4-aiplatform.googleapis.com" },
   { location: "eu", host: "aiplatform.eu.rep.googleapis.com", note: "EU multi-region — open question 1" },
@@ -452,12 +468,17 @@ async function probeGemini(token: string, questions: string[]): Promise<GeminiTu
       row.finishReason = first.choices[0]?.finish_reason ?? null;
 
       if (!row.calledTool) {
-        // Neither branch here is a LOOP failure: no tool was called, so there
-        // was no second turn to break. The model either answered directly or
-        // produced nothing at all — Gemini 2.5 Flash does the latter when
-        // thinking consumes the turn. Both are excluded from the rate.
+        // No branch here is a LOOP failure: no tool was called, so there was no
+        // second turn to break. All three are excluded from the rate — but they
+        // are three, not two. `truncated` is checked FIRST because that cause is
+        // OURS: Gemini spends thinking tokens inside the same budget, so a small
+        // `ANSWER_MAX_TOKENS` produces an empty `content` with
+        // `finish_reason: "length"`, and reporting that as `no-answer-no-tool`
+        // points the reader at the model when the cause is a constant in this
+        // file. (An earlier round deleted this arm instead of re-routing it.)
         row.answerHead = String(message.content ?? "").slice(0, 120);
-        row.outcome = row.answerHead.trim() ? "answered-no-tool" : "no-answer-no-tool";
+        row.outcome = row.finishReason === "length" ? "truncated"
+          : row.answerHead.trim() ? "answered-no-tool" : "no-answer-no-tool";
         row.ms = Math.round(performance.now() - started);
         results.push(row);
         continue;
@@ -478,8 +499,8 @@ async function probeGemini(token: string, questions: string[]): Promise<GeminiTu
         role: "tool",
         tool_call_id: calls[0]!.id,
         content:
-          "Treff i intern dokumentasjon: saken behandles i fagsystemet, og saksbehandler oppretter " +
-          "riktig strukturert melding til det andre landet.",
+          "Treff i håndboken: saken registreres i fagsystemet, og saksbehandler oppretter " +
+          "riktig strukturert melding til motparten.",
       });
       const second = await post({ model: `google/${GEMINI_MODEL}`, messages, tools, max_tokens: ANSWER_MAX_TOKENS });
       const choice = second.choices[0];
@@ -590,13 +611,17 @@ async function probeClaudeSdk(): Promise<SdkProbe> {
       : NEVER_LEFT.test(message) ? "did-not-reach"
       : "unknown";
   } finally {
+    // BEFORE the teardown below: awaiting `q.return()` adds ~2 s of CLI shutdown,
+    // and reporting `10068ms` beside "TIMED OUT after 8000ms" made the script
+    // contradict itself in a file whose thesis is that printed numbers are
+    // measurements.
+    probe.ms = Math.round(performance.now() - started);
     if (timer) clearTimeout(timer);
     // Closes the generator, which is what terminates the CLI subprocess. The
     // race leaves it mid-iteration on the timeout path, and without this the
     // child outlives the script.
     await (q as AsyncGenerator<unknown, void>).return?.(undefined).catch(() => {});
   }
-  probe.ms = Math.round(performance.now() - started);
   return probe;
 }
 
@@ -605,34 +630,36 @@ async function probeClaudeSdk(): Promise<SdkProbe> {
 // ---------------------------------------------------------------------------
 
 /**
- * Twenty, because the plan's PR-5 drop trigger is stated over twenty questions
- * and a threshold of 10% cannot be measured on eight — one bad row out of eight
- * is 12.5%, so the smallest possible failure already crosses it. Generic,
- * publicly-derivable phrasings about a public NAV system (Melosys, the A1 form,
- * EESSI, lovvalg), authored here rather than drawn from any corpus. Point
- * `VERTEX_SMOKE_QUESTIONS` at real ones to keep those out of this repo.
+ * Twenty, because a 10% threshold cannot be measured on eight — one bad row out
+ * of eight is already 12.5%.
+ *
+ * INVENTED placeholders about a fictional internal handbook, not drawn from any
+ * corpus. They exist to give the tool loop something plausible to retrieve
+ * against: what is being measured is whether the model picks the right tool out
+ * of forty-one and survives the round trip, not what it knows. Point
+ * `VERTEX_SMOKE_QUESTIONS` at your own set to measure against real traffic.
  */
 const DEFAULT_QUESTIONS = [
-  "Hva sier vår interne dokumentasjon om A1-søknader?",
-  "Hvordan behandles en søknad om medlemskap i folketrygden ved arbeid i utlandet?",
-  "Hva er forskjellen på en A1-attest og et medlemskapsvedtak?",
-  "Hvilke SED-er sendes ved utsending av arbeidstaker til et annet EØS-land?",
-  "Hvordan beregnes trygdeavgift for en person med inntekt i to land?",
-  "Hva skjer når et annet land bestrider vår lovvalgsvurdering?",
-  "Hvilke opplysninger trenger vi fra arbeidsgiver for å vurdere lovvalg?",
-  "Hvordan håndterer vi en sak der arbeidstakeren jobber i flere land samtidig?",
-  "Hva er saksgangen når en sak må sendes tilbake til avsenderlandet?",
-  "Hvilke frister gjelder for å svare på en henvendelse fra et annet EØS-land?",
-  "Hvordan dokumenterer vi at en arbeidstaker er utsendt og ikke lokalt ansatt?",
-  "Hva gjør vi når opplysningene fra arbeidsgiver og arbeidstaker spriker?",
-  "Hvilken betydning har varigheten av oppdraget for lovvalgsvurderingen?",
-  "Hvordan behandles selvstendig næringsdrivende som arbeider i flere land?",
-  "Hva skjer med en løpende sak hvis arbeidstakeren bytter arbeidsgiver?",
-  "Hvordan registreres et vedtak slik at det blir synlig for det andre landet?",
-  "Hvilke vedlegg må ligge ved en søknad før den kan behandles?",
-  "Hva er forskjellen på en midlertidig og en endelig avgjørelse om lovvalg?",
-  "Hvordan følger vi opp en sak der det andre landet ikke svarer?",
-  "Hvilke opplysninger kan vi dele med et annet EØS-land i en pågående sak?",
+  "Hva sier håndboken om hvordan vi registrerer en ny sak?",
+  "Hvordan behandles en henvendelse som kommer inn utenfor åpningstid?",
+  "Hva er forskjellen på et forhåndsvarsel og et endelig svar?",
+  "Hvilke felter er obligatoriske før en sak kan sendes videre?",
+  "Hvordan beregnes fristen når en sak settes på vent?",
+  "Hva gjør vi når motparten bestrider vurderingen vår?",
+  "Hvilke opplysninger må vi ha fra innsender før vi kan starte?",
+  "Hvordan håndterer vi en sak som berører flere avdelinger samtidig?",
+  "Hva er rutinen når en sak må sendes tilbake til avsender?",
+  "Hvilke frister gjelder for å svare på en ekstern henvendelse?",
+  "Hvordan dokumenterer vi at et vedtak er formidlet?",
+  "Hva gjør vi når to kilder oppgir motstridende opplysninger?",
+  "Hvilken betydning har varigheten av oppdraget for vurderingen?",
+  "Hvordan behandles saker der innsender er selvstendig næringsdrivende?",
+  "Hva skjer med en løpende sak hvis kontaktpersonen byttes ut?",
+  "Hvordan registreres et vedtak slik at det blir synlig for motparten?",
+  "Hvilke vedlegg må ligge ved før en sak kan behandles?",
+  "Hva er forskjellen på en midlertidig og en endelig avgjørelse?",
+  "Hvordan følger vi opp en sak der motparten ikke svarer?",
+  "Hvilke opplysninger kan vi dele med en ekstern part i en pågående sak?",
 ];
 
 function loadQuestions(): string[] {
@@ -724,17 +751,26 @@ if (RUN.has("gemini")) {
   const completed = inLoop.filter((r) => r.outcome === "loop-completed").length;
   const broken = inLoop.length - completed;
   const outside = rows.length - inLoop.length;
-  const outsideBreakdown = (["answered-no-tool", "no-answer-no-tool", "error"] as const)
-    .map((o) => [o, rows.filter((r) => !r.enteredLoop && r.outcome === o).length] as const)
-    .filter(([, n]) => n > 0)
-    .map(([o, n]) => `${o} ${n}`)
-    .join(", ");
+  // Derived from the OUTCOMES PRESENT, not from a hand-written tuple: a literal
+  // list silently dropped any outcome missing from it — `truncated` among them —
+  // from the breakdown while it still counted in `outside`, so the numbers on
+  // the two lines stopped adding up with nothing to say why.
+  const tally = (subset: GeminiTurn[]) => {
+    const counts = new Map<TurnOutcome, number>();
+    for (const r of subset) counts.set(r.outcome, (counts.get(r.outcome) ?? 0) + 1);
+    return [...counts].map(([o, n]) => `${o} ${n}`).join(", ");
+  };
+  const outsideBreakdown = tally(rows.filter((r) => !r.enteredLoop));
+  // The in-loop breakdown is named too: a second-turn 429 lands in `broken`, and
+  // a bare "broken/truncated: 3" invited the reader to conclude the model fails
+  // 15% of the time when the failure was HTTP.
+  const brokenBreakdown = tally(inLoop.filter((r) => r.outcome !== "loop-completed"));
   const rate = inLoop.length > 0 ? Math.round((100 * broken) / inLoop.length) : null;
   say(
-    `\n  loop entered: ${inLoop.length}/${rows.length}   completed: ${completed}   broken/truncated: ${broken}` +
+    `\n  loop entered: ${inLoop.length}/${rows.length}   completed: ${completed}   ` +
+    `did not complete: ${broken}${brokenBreakdown ? ` — ${brokenBreakdown}` : ""}` +
     `\n  never entered the loop (excluded from BOTH halves): ${outside}${outsideBreakdown ? ` — ${outsideBreakdown}` : ""}` +
-    `\n  failure rate over the loop runs: ${rate === null ? "n/a — the loop was never entered" : rate + "%"}` +
-    `  (plan's PR-5 drop trigger: < 10%)`,
+    `\n  failure rate over the loop runs: ${rate === null ? "n/a — the loop was never entered" : rate + "%"}`,
   );
   if (inLoop.length < rows.length / 2) {
     say("  ⚠ over half the questions never entered the loop — the rate above is a thin sample.");
@@ -742,7 +778,13 @@ if (RUN.has("gemini")) {
   summary.geminiVerdict = {
     total: rows.length, entered: inLoop.length, completed, broken, outside, failureRatePct: rate,
   };
-  if (inLoop.length === 0) failures.push("probe B: no question entered the tool loop");
+  // Only a run where EVERY question failed in transport is unmeasured. "The
+  // model answered all twenty directly and never selected the tool out of 41" is
+  // the single most decision-relevant thing probe B can report — exiting 1 on it
+  // with "no question entered the tool loop" dressed a finding up as breakage.
+  if (rows.length > 0 && rows.every((r) => r.outcome === "error")) {
+    failures.push("probe B: every question failed before a reply — nothing was measured");
+  }
   say("");
 }
 
