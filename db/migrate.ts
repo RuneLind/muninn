@@ -18,10 +18,11 @@
  *   DATABASE_URL=... bun db/migrate.ts # Custom database URL (DB_URL also works —
  *                                      # nais's envVarPrefix form; see ./database-url.ts)
  */
-import postgres from "postgres";
+import type postgres from "postgres";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { resolveCliDatabaseUrl } from "./database-url.ts";
+import { openPostgres, parsePostgresUrl } from "./postgres-connection.ts";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "migrations");
 
@@ -117,7 +118,8 @@ export async function runMigrations(
   // `quiet` silences progress chatter for programmatic callers (e.g. the drift
   // test); the CLI path below leaves it off. Errors throw regardless.
   const say: (...args: unknown[]) => void = opts?.quiet ? () => {} : console.log;
-  const sql = postgres(databaseUrl, { max: 1, onnotice: () => {} });
+  const { sql, notes } = openPostgres(databaseUrl, { max: 1, onnotice: () => {} });
+  for (const note of notes) say(`  TLS: ${note}`);
   try {
     // Taken BEFORE `schema_migrations` is read, because the read is what the
     // race is about: the pending list has to be computed by a run that already
@@ -195,14 +197,14 @@ if (import.meta.main) {
   // credentials. This is the only line on the remedy paths (which bypass the
   // entrypoint and its own echo) that names the database about to be migrated.
   try {
-    const target = new URL(DATABASE_URL);
+    const target = new URL(parsePostgresUrl(DATABASE_URL).url);
     console.log(`Database: ${target.hostname}:${target.port || "5432"}${target.pathname}`);
   } catch {
     // an unparseable URL fails loudly two statements later; don't pre-empt it
   }
 
   if (STATUS) {
-    const sql = postgres(DATABASE_URL, { max: 1, onnotice: () => {} });
+    const { sql } = openPostgres(DATABASE_URL, { max: 1, onnotice: () => {} });
     await ensureMigrationsTable(sql);
     const applied = await getAppliedMigrations(sql);
     const all = await discoverMigrations();
@@ -216,7 +218,7 @@ if (import.meta.main) {
     console.log(`\n${applied.size} applied, ${pending.length} pending`);
     await sql.end();
   } else if (DRY_RUN) {
-    const sql = postgres(DATABASE_URL, { max: 1, onnotice: () => {} });
+    const { sql } = openPostgres(DATABASE_URL, { max: 1, onnotice: () => {} });
     await ensureMigrationsTable(sql);
     const applied = await getAppliedMigrations(sql);
     const all = await discoverMigrations();

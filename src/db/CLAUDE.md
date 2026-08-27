@@ -4,7 +4,7 @@
 
 | File | Role |
 |---|---|
-| `client.ts` | `initDb()` / `getDb()` / `closeDb()` — postgres singleton (max 5 connections) |
+| `client.ts` | `initDb()` / `getDb()` / `closeDb()` — postgres singleton (max 5 connections). Constructs the client through **`openPostgres`** (`db/postgres-connection.ts`), never `postgres()` directly: on nais the injected URL carries the Cloud SQL TLS material as query parameters, which postgres.js forwards into the startup packet and the server refuses. A unit test walks `src/` and `db/` and fails on any other construction — tests and `db/setup-test-db.ts` are the named exemptions |
 | `messages.ts` | Message CRUD, conversation listing, response metadata, alert messages |
 | `memories.ts` | Memory CRUD, hybrid search (FTS + pgvector RRF), dashboard search, stats |
 | `threads.ts` | Thread CRUD, switch/activate, Slack thread management, cascade delete |
@@ -20,6 +20,22 @@
 | `prompt-snapshots.ts` | Prompt snapshot storage with retention cleanup |
 | `user-settings.ts` | Per-user settings (quiet hours, timezone, preferences) |
 | `stats.ts` | Aggregate usage statistics |
+
+## Connecting
+
+`db/postgres-connection.ts` is the one place a `postgres.Sql` is built. It exists because the URL nais hands
+a pod is not a URL postgres.js can consume — see the module comment for the two measured failures and
+`scripts/smoke-nais-db-tls.ts` for the end-to-end proof against a real TLS server with a client certificate.
+Three rules worth knowing before touching it:
+
+- **`verify-ca` waives the hostname check, and must.** A Cloud SQL certificate names the instance; the URL
+  dials a private IP. This is the mode nais actually injects.
+- **`verify-full` against a bare IP is refused, not downgraded.** postgres.js sets no `servername` for an IP
+  host, and with no servername the runtime performs no identity check *and never calls a
+  `checkServerIdentity` callback* — so a first repair that supplied one was inert. Refusing is the only
+  answer that cannot lie about what was verified.
+- **A plain URL is passed through untouched**, so the compose and laptop paths are byte-identical to what
+  they were before the module existed.
 
 ## Connection Pattern
 

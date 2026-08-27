@@ -39,8 +39,8 @@
  * entrypoint, which exports one from the other, but it is also runnable by hand
  * from a pod where the entrypoint never ran).
  */
-import postgres from "postgres";
 import { resolveCliDatabaseUrl, DATABASE_URL_ENV_NAMES } from "./database-url.ts";
+import { openPostgres } from "./postgres-connection.ts";
 
 /** How long to keep retrying a CONNECTION failure. Under docker-compose the app
  *  waits on a `service_healthy` postgres, and on nais the sidecar proxy is up
@@ -162,7 +162,7 @@ async function main(): Promise<number> {
   const deadline = Date.now() + CONNECT_BUDGET_MS;
   let lastError = "";
   for (;;) {
-    const sql = postgres(databaseUrl, { max: 1, onnotice: () => {} });
+    const { sql } = openPostgres(databaseUrl, { max: 1, onnotice: () => {} });
     try {
       // `to_regclass` answers NULL instead of throwing for an absent relation,
       // so "no such table" is a VALUE here rather than an error indistinguishable

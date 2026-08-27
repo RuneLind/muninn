@@ -12,18 +12,22 @@ WORKDIR /app
 # (MUNINN_PROFILE=nais — src/dashboard/routes.ts, src/ai/haiku-direct.ts).
 ARG WITH_MEDIA=true
 ARG WITH_CLI=true
+# Bake the embedding model into the image instead of downloading it at boot.
+# Default OFF so the compose build is unchanged and needs no build-time egress;
+# the nais build turns it ON. See the RUN after `COPY src` for why it matters.
+ARG WITH_EMBEDDINGS=false
 
 # Both args are read as `= "true"` below, so ANY other spelling silently means
 # "off" — `--build-arg WITH_CLI=0`, `=False`, a typo — and produces an image
 # whose missing binary is discovered at runtime. Refuse the build instead, in
 # the one place that can, and echo which branches were taken.
-RUN for pair in "WITH_MEDIA=$WITH_MEDIA" "WITH_CLI=$WITH_CLI"; do \
+RUN for pair in "WITH_MEDIA=$WITH_MEDIA" "WITH_CLI=$WITH_CLI" "WITH_EMBEDDINGS=$WITH_EMBEDDINGS"; do \
       case "${pair#*=}" in \
         true|false) ;; \
         *) echo "[build] ERROR: $pair — expected true or false" >&2; exit 1 ;; \
       esac; \
     done; \
-    echo "[build] WITH_MEDIA=$WITH_MEDIA (ffmpeg) WITH_CLI=$WITH_CLI (claude)"
+    echo "[build] WITH_MEDIA=$WITH_MEDIA (ffmpeg) WITH_CLI=$WITH_CLI (claude) WITH_EMBEDDINGS=$WITH_EMBEDDINGS (MiniLM)"
 
 # System deps. curl + ca-certificates are unconditional (small, and the Claude
 # CLI installer needs them); ffmpeg is the audio/keyframe half of the capture
@@ -60,6 +64,33 @@ COPY db ./db
 # layer.
 COPY scripts/docker-entrypoint.sh ./scripts/
 COPY tsconfig.json ./
+
+# Embedding model, baked.
+#
+# `warmupEmbeddings()` runs at boot and downloads Xenova/all-MiniLM-L6-v2 on
+# first use — but it CATCHES its own failure and logs it, so a pod with no
+# egress to the model host looks healthy while every memory search silently
+# returns nothing. Baking converts that runtime degradation into a build-time
+# fact. nais egress is default-deny, which is exactly where it would have bitten.
+#
+# ⚠️ The throwing path, not `warmupEmbeddings()`. That helper swallows the error,
+# so a builder with no egress would SUCCEED and ship an empty cache — preserving
+# the precise silent failure the bake exists to remove. `generateEmbedding`
+# returns `null` on failure, so a null check is the equivalent assertion.
+#
+# The weights land in `node_modules/@huggingface/transformers/.cache/` (~23 MB),
+# a directory this image builds itself — hence a RUN here and not a COPY of a
+# checked-in blob, which would put a binary in the public repo's git history.
+# This step needs egress to the model host at BUILD time; the saving is runtime.
+ARG WITH_EMBEDDINGS
+RUN if [ "$WITH_EMBEDDINGS" = "true" ]; then \
+      bun -e 'const { generateEmbedding } = await import("./src/ai/embeddings.ts"); \
+              const v = await generateEmbedding("warmup"); \
+              if (!v || v.length === 0) { console.error("[build] embedding warmup produced nothing"); process.exit(1); } \
+              console.log("[build] embedding model baked (dim " + v.length + ")");'; \
+    else \
+      echo "[build] embedding model NOT baked — it will be downloaded at first use"; \
+    fi
 
 # Bot folders, if the build context has any.
 #

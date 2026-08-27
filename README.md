@@ -796,7 +796,7 @@ This starts:
 - **postgres** — pgvector/pg17 with the schema from `db/init.sql`
 - **app** — Bun + ffmpeg + Claude CLI, running as non-root `muninn` user
 
-The image is built from one `Dockerfile` with two build args, both **on** by default (so the compose image is unchanged): `--build-arg WITH_MEDIA=false` drops ffmpeg and `--build-arg WITH_CLI=false` drops the Claude CLI. Anything other than `true`/`false` fails the build rather than silently meaning "off".
+The image is built from one `Dockerfile` with three build args. Two are **on** by default (so the compose image is unchanged): `--build-arg WITH_MEDIA=false` drops ffmpeg and `--build-arg WITH_CLI=false` drops the Claude CLI. The third is **off** by default: `--build-arg WITH_EMBEDDINGS=true` bakes the ~23 MB embedding model into the image instead of downloading it at first use — worth it wherever runtime egress is restricted, since the download failure is swallowed and shows up only as memory search returning nothing. Anything other than `true`/`false` fails the build rather than silently meaning "off".
 
 ### Database provisioning (the container will not do it for you)
 
