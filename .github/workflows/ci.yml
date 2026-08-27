@@ -90,21 +90,21 @@ jobs:
       - run: bun run test
 
   # The image's two build ARGs decide what a deployment CAN do, and neither is
-  # visible to tsc or to any suite: `WITH_MEDIA=false` removes ffmpeg (the
-  # capture verticals' transcode/keyframe half) and `WITH_CLI=false` removes the
-  # Claude CLI (`resolveConnector`'s default backend, and every `spawnHaiku`).
-  # Both DEFAULT ON because docker-compose builds this same Dockerfile; a
-  # regression that dropped them unconditionally would break that deployment
-  # silently, and a regression that ignored the args would ship the serving
-  # profile an image carrying a CLI it has no credential for.
+  # visible to tsc or to any suite (rationale for the pair: the Dockerfile).
+  # TWO builds, not three: the default image is built once with a plain log the
+  # bots/ assertion reads, and every image-content check runs against it.
   docker-build:
     runs-on: ubuntu-latest
+    # The claude.ai installer and the Debian mirrors are on this job's critical
+    # path, so a hung mirror must not hold a PR open for six hours.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       # `docker build` on the runner image is BuildKit, the same engine the
-      # `COPY bot[s]` glob behaviour below was measured on.
+      # `COPY bot[s]` glob behaviour was measured on. `--progress=plain` so the
+      # build's own RUN output survives into build.log.
       - name: Build the default image (no build args)
-        run: docker build -t muninn:default .
+        run: docker build --progress=plain -t muninn:default . 2>&1 | tee build.log
       - name: Default image carries ffmpeg AND the Claude CLI
         # `--entrypoint` because the image's ENTRYPOINT is the migrate-then-serve
         # script; without it these words would be arguments to a booting server.
@@ -113,6 +113,41 @@ jobs:
             || { echo "::error::ffmpeg missing from the DEFAULT image — docker-compose's capture verticals need it"; exit 1; }
           docker run --rm --entrypoint sh muninn:default -c 'command -v claude' \
             || { echo "::error::the Claude CLI is missing from the DEFAULT image — resolveConnector falls back to claude-cli"; exit 1; }
+      - name: The bots/ glob tolerates a context with no bot folder, and says so
+        # This repo's `.dockerignore` excludes `bots/`, so EVERY build here is the
+        # no-bot-folder case — which is the half the public repo can test. The
+        # positive case (a context that does ship bot folders) belongs to the
+        # internal deploy repo, which carries its own dockerignore.
+        run: |
+          grep -q "no bots/ in the build context" build.log \
+            || { echo "::error::the bots/ COPY check did not report the empty-context case"; exit 1; }
+          # And the image really has no bot folders — a COPY form that silently
+          # copied nothing and a COPY form that worked look identical from the
+          # build log alone.
+          test -z "$(docker run --rm --entrypoint sh muninn:default -c 'ls -A ./bots 2>/dev/null')" \
+            || { echo "::error::bots/ landed in an image built from a context that excludes it"; exit 1; }
+      - name: The image pins the port and the bind address the probe assumes
+        run: |
+          ENVS=$(docker inspect --format '{{json .Config.Env}}' muninn:default)
+          echo "$ENVS" | grep -q 'DASHBOARD_PORT=3000' \
+            || { echo "::error::the image does not pin DASHBOARD_PORT=3000 — the app defaults to 3010 and the HEALTHCHECK probes 3000"; exit 1; }
+          echo "$ENVS" | grep -q 'DASHBOARD_HOST=0.0.0.0' \
+            || { echo "::error::the image does not pin DASHBOARD_HOST=0.0.0.0 — a container bound to loopback refuses every probe from outside its own namespace"; exit 1; }
+      - name: The HEALTHCHECK is declared, and reads its port at runtime
+        # Read off the IMAGE, not re-typed into `docker run`: an assertion that
+        # re-states the expression stays green when the HEALTHCHECK line is
+        # deleted, which is the one regression worth catching here.
+        run: |
+          HC=$(docker inspect --format '{{json .Config.Healthcheck}}' muninn:default)
+          echo "$HC"
+          case "$HC" in
+            *DASHBOARD_PORT*) ;;
+            *) echo "::error::the image declares no HEALTHCHECK reading DASHBOARD_PORT"; exit 1 ;;
+          esac
+          case "$HC" in
+            */api/live*) ;;
+            *) echo "::error::the HEALTHCHECK does not probe /api/live (the dependency-free open-zone path)"; exit 1 ;;
+          esac
       - name: Build the serving-profile image (both args off)
         run: docker build --build-arg WITH_MEDIA=false --build-arg WITH_CLI=false -t muninn:nais .
       - name: Serving-profile image carries NEITHER
@@ -123,31 +158,15 @@ jobs:
           if docker run --rm --entrypoint sh muninn:nais -c 'command -v claude'; then
             echo "::error::the Claude CLI is present despite WITH_CLI=false"; exit 1
           fi
-      - name: The bots/ glob tolerates a context with no bot folder, and says so
-        # This repo's `.dockerignore` excludes `bots/`, so EVERY build here is the
-        # no-bot-folder case — which is the half the public repo can test. The
-        # positive case (a context that does ship bot folders) belongs to the
-        # internal deploy repo, which carries its own dockerignore.
+      - name: A build arg that is neither true nor false FAILS the build
+        # Both args are read as `= "true"`, so an unvalidated `WITH_CLI=0` would
+        # quietly produce a CLI-less image nobody asked for.
         run: |
-          docker build --no-cache --progress=plain -t muninn:noboots . 2>&1 | tee build.log
-          grep -q "no bots/ in the build context" build.log \
-            || { echo "::error::the bots/ COPY check did not report the empty-context case"; exit 1; }
-          # And the image really has no bot folders — a COPY form that silently
-          # copied nothing and a COPY form that worked look identical from the
-          # build log alone.
-          test -z "$(docker run --rm --entrypoint sh muninn:noboots -c 'ls -A ./bots 2>/dev/null')" \
-            || { echo "::error::bots/ landed in an image built from a context that excludes it"; exit 1; }
-      - name: The HEALTHCHECK probe resolves its port from the environment
-        # The mechanism, exercised without booting a server: BuildKit does NOT
-        # substitute build-time variables into HEALTHCHECK, so the port is read
-        # by the probe itself at runtime. This asserts that read, not the fetch.
-        run: |
-          PORT=$(docker run --rm -e DASHBOARD_PORT=4321 --entrypoint sh muninn:default \
-            -c 'bun -e "console.log(process.env.DASHBOARD_PORT || 3000)"')
-          test "$PORT" = "4321" || { echo "::error::probe port did not resolve from DASHBOARD_PORT (got '$PORT')"; exit 1; }
-          PORT=$(docker run --rm --entrypoint sh muninn:default \
-            -c 'bun -e "console.log(process.env.DASHBOARD_PORT || 3000)"')
-          test "$PORT" = "3000" || { echo "::error::probe port did not default to 3000 (got '$PORT')"; exit 1; }
+          if docker build --build-arg WITH_CLI=0 -t muninn:bogus . >bogus.log 2>&1; then
+            echo "::error::a bogus build arg was accepted"; exit 1
+          fi
+          grep -q "expected true or false" bogus.log \
+            || { echo "::error::the build failed, but not on the build-arg check"; cat bogus.log; exit 1; }
 
   e2e:
     runs-on: ubuntu-latest

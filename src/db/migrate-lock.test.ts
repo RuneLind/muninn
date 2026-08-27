@@ -50,13 +50,9 @@ describe("db/migrate.ts advisory lock", () => {
     // into a permanent block on every later one, which is a worse outage than
     // the race it closes.
     await runMigrations(TEST_DATABASE_URL, { quiet: true });
-    const [row] = await holder`
-      SELECT count(*)::int AS held FROM pg_locks
-      WHERE locktype = 'advisory' AND objid = ${LOCK_KEY} AND granted
-    `;
-    expect(row?.held).toBe(0);
-
-    // And it can be taken again immediately, from here.
+    // Asserted by TAKING it, not by counting `pg_locks`: that view is
+    // cluster-wide, so an unrelated muninn on the same dev Postgres makes the
+    // count flaky — and taking the lock is the only property that matters.
     const [got] = await holder`SELECT pg_try_advisory_lock(${LOCK_KEY}) AS ok`;
     expect(got?.ok).toBe(true);
     await holder`SELECT pg_advisory_unlock(${LOCK_KEY})`;

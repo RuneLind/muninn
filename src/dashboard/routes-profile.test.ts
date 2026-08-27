@@ -1,22 +1,31 @@
 import { test, expect, describe } from "bun:test";
 import { Hono } from "hono";
 import type { Config } from "../config.ts";
-import { createDashboardRoutes, NAIS_DROPPED_ROUTE_GROUPS } from "./routes.ts";
+import { createDashboardRoutes } from "./routes.ts";
+import { NAIS_DROPPED_ROUTE_GROUPS } from "./route-groups.ts";
+import { renderNav } from "./views/shared-styles.ts";
 
 /**
- * The `nais` serving profile's route surface.
+ * The `nais` serving profile's surface — the routes it drops, and the nav that
+ * must stop linking to them.
  *
- * The distinction under test is ABSENT versus DENIED. A dropped group has no
- * handler at all, so the answer is Hono's own 404 — not a 403 from the zone
- * middleware, which is a policy someone can later relax, and not a 500 from a
- * route reaching for a working tree that does not exist in a pod. That is why
- * every assertion below reads the status of a real request through a real
- * `createDashboardRoutes` rather than inspecting a list.
+ * The distinction under test on the DROPPED half is ABSENT versus DENIED, so
+ * those cases issue a real request through a real `createDashboardRoutes`: a
+ * dropped group has no handler at all, so the answer is Hono's own 404 — not a
+ * 403 from the zone middleware, which is a policy someone can later relax, and
+ * not a 500 from a route reaching for a working tree a pod does not have.
  *
- * These cases pass an explicit `{ profile }` rather than setting
- * `MUNINN_PROFILE`: the variable is in `AMBIENT_INSTANCE_ENV` (the preload
- * deletes it), and an env-driven test here would be the one thing that flips
- * behaviour for every OTHER file in the same `bun test` process.
+ * The PRESENT half reads `app.routes` instead of issuing the same request
+ * against a live registration. That is not squeamishness: `/api/events` is an
+ * SSE stream that never closes, `/api/claude-usage/overview` fetches an
+ * external service, and `/api/wiki/pages` reads whatever `WIKI_EXTRA` this
+ * machine carries — a presence check that runs handlers is a presence check
+ * that depends on the machine.
+ *
+ * The profile is passed on the `Config`, never through `MUNINN_PROFILE`: the
+ * variable is in `AMBIENT_INSTANCE_ENV` (the preload deletes it), and an
+ * env-driven test here would be the one thing that flips behaviour for every
+ * OTHER file in the same `bun test` process.
  */
 const CONFIG = { dashboardPort: 3010, profile: "default" } as Config;
 
@@ -29,6 +38,7 @@ const DROPPED_PATHS: Record<string, string> = {
   "claude-usage": "/api/claude-usage/overview",
   "benchmark": "/api/benchmark/runs",
   "logs": "/api/logs",
+  "summaries": "/api/summaries/documents",
   "anthropic": "/api/anthropic/candidates",
   "article": "/api/articles/summarize",
   "youtube": "/api/youtube/summarize",
@@ -39,11 +49,11 @@ const DROPPED_PATHS: Record<string, string> = {
 /** The page routes that go with them — a dropped group must take its HTML
  *  surface with it, or a `/plans` bookmark renders a shell whose every fetch
  *  404s and reads as a broken page rather than as an absent feature. */
-const DROPPED_PAGES = ["/wiki", "/wiki/gardener", "/plans", "/logs", "/benchmark"];
+const DROPPED_PAGES = ["/wiki", "/wiki/gardener", "/plans", "/logs", "/benchmark", "/summaries"];
 
 function build(profile: "default" | "nais"): Hono {
   const app = new Hono();
-  app.route("/", createDashboardRoutes(CONFIG, { profile }));
+  app.route("/", createDashboardRoutes({ ...CONFIG, profile } as Config));
   return app;
 }
 
@@ -57,6 +67,11 @@ async function status(app: Hono, path: string): Promise<number> {
     ...(method === "POST" ? { headers: { "content-type": "application/json" }, body: "{}" } : {}),
   });
   return res.status;
+}
+
+/** Registered path patterns — presence without running a handler. */
+function registeredPaths(app: Hono): ReadonlySet<string> {
+  return new Set(app.routes.map((r) => r.path));
 }
 
 describe("MUNINN_PROFILE=nais route surface", () => {
@@ -82,46 +97,84 @@ describe("MUNINN_PROFILE=nais route surface", () => {
     }
   });
 
-  test("the same paths are PRESENT on the default profile", async () => {
+  test("the same paths are REGISTERED on the default profile", () => {
     // The other half of the pin: a 404 above has to mean "dropped", not "that
     // path never existed" — a typo'd path would make the whole suite vacuous.
-    const app = build("default");
-    for (const [group, path] of Object.entries(DROPPED_PATHS)) {
-      expect(`${group} ${path} → ${(await status(app, path)) === 404}`).toBe(`${group} ${path} → false`);
+    const paths = registeredPaths(build("default"));
+    for (const [group, path] of Object.entries({ ...DROPPED_PATHS, ...Object.fromEntries(DROPPED_PAGES.map((p) => [p, p])) })) {
+      expect(`${group} ${path} → ${paths.has(path)}`).toBe(`${group} ${path} → true`);
     }
   });
 
-  test("the inline instance routes and both health paths answer on nais", async () => {
+  test("the inline instance routes and both health paths survive on nais", async () => {
     const app = build("nais");
-    // `/` renders the dashboard shell, the favicons are inline, and the two
-    // health paths are the open zone — none of them belong to a register* call,
-    // and a profile must not be able to take a liveness probe away.
+    // `/api/live` is the liveness contract itself, so it is asserted by ANSWER.
     expect((await app.request("/api/live")).status).toBe(200);
-    expect((await app.request("/favicon.svg")).status).toBe(200);
-    expect((await app.request("/favicon.ico")).status).toBe(200);
-    expect((await app.request("/api/dashboard-build-hash")).status).toBe(200);
-    expect((await app.request("/")).status).toBe(200);
-    // `/api/ready` and `/api/attention` both touch the database, so their STATUS
-    // depends on the environment; what this asserts is that they are routed at
-    // all (a 404 would mean the inline block was filtered).
-    expect((await app.request("/api/ready")).status).not.toBe(404);
-  });
-
-  test("the surfaces the profile KEEPS are still registered", async () => {
-    const app = build("nais");
-    for (const path of ["/api/stats", "/traces", "/api/events", "/models", "/agents", "/jira", "/summaries"]) {
-      expect(`${path} → ${(await app.request(path)).status === 404}`).toBe(`${path} → false`);
+    // The rest are asserted by registration: none of them belongs to a
+    // `register*` call, and a profile must not be able to take them away.
+    // (`/api/ready` and `/api/attention` touch the database, so their STATUS
+    // depends on the environment; that they are ROUTED does not.)
+    const paths = registeredPaths(app);
+    for (const path of ["/", "/favicon.svg", "/favicon.ico", "/api/dashboard-build-hash", "/api/ready", "/api/attention"]) {
+      expect(`${path} → ${paths.has(path)}`).toBe(`${path} → true`);
     }
   });
 
-  test("createDashboardRoutes(config) with no options drops nothing", async () => {
-    // The compatibility pin. Every existing caller — src/index.ts included —
-    // passes one argument, and on a machine with no MUNINN_PROFILE that must be
-    // byte-for-byte the surface it was before this PR.
+  test("the surfaces the profile KEEPS are still registered", () => {
+    const paths = registeredPaths(build("nais"));
+    for (const path of ["/api/stats", "/traces", "/api/events", "/models", "/agents", "/jira", "/graph", "/research"]) {
+      expect(`${path} → ${paths.has(path)}`).toBe(`${path} → true`);
+    }
+  });
+
+  test("a Config with no profile falls through to the env, i.e. today's full surface", () => {
+    // The compatibility pin. The unit tests that hand-build a `{} as Config`
+    // (health, owner-guard) go down this path, and on a machine with no
+    // MUNINN_PROFILE it must be the surface it was before this PR.
     const app = new Hono();
-    app.route("/", createDashboardRoutes(CONFIG));
+    app.route("/", createDashboardRoutes({ dashboardPort: 3010 } as Config));
+    const paths = registeredPaths(app);
     for (const path of [...Object.values(DROPPED_PATHS), ...DROPPED_PAGES]) {
-      expect(`${path} → ${(await status(app, path)) === 404}`).toBe(`${path} → false`);
+      expect(`${path} → ${paths.has(path)}`).toBe(`${path} → true`);
     }
+  });
+});
+
+/**
+ * The nav that goes with it.
+ *
+ * `renderNav` is on EVERY page, `/chat` included — the pod's one page — so a
+ * hardcoded `/wiki` there is a dead link on the only surface a nais deployment
+ * has. The nav is not part of `createDashboardRoutes`, so nothing above would
+ * have caught it.
+ */
+describe("renderNav under the nais profile", () => {
+  const hrefs = (html: string): string[] => [...html.matchAll(/href="([^"]+)"/g)].map((m) => m[1]!);
+
+  test("links to dropped groups are absent — on the chat page too", () => {
+    for (const page of ["chat", "dashboard"] as const) {
+      const linked = hrefs(renderNav(page, { profile: "nais" }));
+      for (const dead of ["/wiki", "/plans", "/logs", "/benchmark", "/summaries"]) {
+        expect(`${page} links ${dead}: ${linked.includes(dead)}`).toBe(`${page} links ${dead}: false`);
+      }
+    }
+  });
+
+  test("the kept links — including the Tools ▾ entries — are still there", () => {
+    const linked = hrefs(renderNav("chat", { profile: "nais" }));
+    for (const kept of ["/", "/chat", "/agents", "/traces", "/research", "/search", "/graph", "/jira", "/models", "/indexing"]) {
+      expect(`nais links ${kept}: ${linked.includes(kept)}`).toBe(`nais links ${kept}: true`);
+    }
+  });
+
+  test("the default profile links everything, dropdown included", () => {
+    const linked = hrefs(renderNav("dashboard", { profile: "default" }));
+    for (const kept of ["/wiki", "/plans", "/logs", "/benchmark", "/summaries", "/mcp-debug", "/serena"]) {
+      expect(`default links ${kept}: ${linked.includes(kept)}`).toBe(`default links ${kept}: true`);
+    }
+  });
+
+  test("no options at all is the default profile, byte for byte", () => {
+    expect(renderNav("dashboard")).toBe(renderNav("dashboard", { profile: "default" }));
   });
 });

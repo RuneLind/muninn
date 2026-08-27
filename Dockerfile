@@ -13,6 +13,18 @@ WORKDIR /app
 ARG WITH_MEDIA=true
 ARG WITH_CLI=true
 
+# Both args are read as `= "true"` below, so ANY other spelling silently means
+# "off" — `--build-arg WITH_CLI=0`, `=False`, a typo — and produces an image
+# whose missing binary is discovered at runtime. Refuse the build instead, in
+# the one place that can, and echo which branches were taken.
+RUN for pair in "WITH_MEDIA=$WITH_MEDIA" "WITH_CLI=$WITH_CLI"; do \
+      case "${pair#*=}" in \
+        true|false) ;; \
+        *) echo "[build] ERROR: $pair — expected true or false" >&2; exit 1 ;; \
+      esac; \
+    done; \
+    echo "[build] WITH_MEDIA=$WITH_MEDIA (ffmpeg) WITH_CLI=$WITH_CLI (claude)"
+
 # System deps. curl + ca-certificates are unconditional (small, and the Claude
 # CLI installer needs them); ffmpeg is the audio/keyframe half of the capture
 # verticals and is what WITH_MEDIA gates.
@@ -44,9 +56,10 @@ RUN bun install --frozen-lockfile --production
 # Source
 COPY src ./src
 COPY db ./db
+# The entrypoint is committed 100755 and COPY preserves the mode, so no chmod
+# layer.
 COPY scripts/docker-entrypoint.sh ./scripts/
 COPY tsconfig.json ./
-RUN chmod +x ./scripts/docker-entrypoint.sh
 
 # Bot folders, if the build context has any.
 #
@@ -72,8 +85,18 @@ RUN if [ -d ./bots ] && [ -n "$(ls -A ./bots 2>/dev/null)" ]; then \
 RUN chown -R muninn:muninn /app
 USER muninn
 
-# Internal container port is always 3000 (docker-compose overrides DASHBOARD_PORT).
-# Host port is configurable via DASHBOARD_PORT in .env (default 3010).
+# The internal container port is 3000, and the IMAGE is what pins it: the app's
+# own default is 3010 (`optionalEnvInt("DASHBOARD_PORT", 3010)`), so without this
+# line a bare `docker run` served 3010 while EXPOSE, the compose mapping and the
+# HEALTHCHECK below all said 3000 — measured, the container was permanently
+# unhealthy. Host port stays configurable via DASHBOARD_PORT in .env (3010).
+ENV DASHBOARD_PORT=3000
+# 0.0.0.0, not the app's 127.0.0.1 default: inside a container loopback is the
+# container, so the process would answer its OWN healthcheck (which runs in the
+# same namespace) while kubelet probes and Service traffic got connection
+# refused. compose already sets this; the image now does too, so a plain
+# `docker run -p` works. The loopback default remains right for a bare host.
+ENV DASHBOARD_HOST=0.0.0.0
 EXPOSE 3000
 
 # Liveness, not /api/stats: `/api/live` is the dependency-free open-zone probe
@@ -86,7 +109,9 @@ EXPOSE 3000
 # build-time variables into, so an `${DASHBOARD_PORT:-3000}` written here would
 # have to survive as a literal into the runtime shell. Reading process.env in
 # the probe itself needs no shell at all — measured below in CI.
-HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+# `--start-period=120s`: the entrypoint's connect budget ALONE is 30s, and the
+# migrations run after it — 40s could fail the container for still starting.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
   CMD bun -e "const p = process.env.DASHBOARD_PORT || 3000; const r = await fetch('http://127.0.0.1:' + p + '/api/live'); if (!r.ok) process.exit(1);"
 
 # Adopt DB_URL, refuse an unprovisioned database, migrate, then `exec "$@"` —

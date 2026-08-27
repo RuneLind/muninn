@@ -33,5 +33,11 @@ bun db/migrate.ts
 #     in front of it and the pod would be SIGKILLed at the end of its
 #     termination grace period instead of shutting down. `"$@"` rather than a
 #     hardcoded command so `docker run <image> <cmd>` and a compose `command:`
-#     still work.
+#     still work — but an EMPTY `$@` (a compose `command: []`, `docker run
+#     --entrypoint ""`) makes `exec` a no-op that exits 0, i.e. a container that
+#     migrates the database and then reports success for never having started.
+if [ "$#" -eq 0 ]; then
+  echo "[entrypoint] nothing to exec — the image's CMD was replaced with an empty command" >&2
+  exit 1
+fi
 exec "$@"

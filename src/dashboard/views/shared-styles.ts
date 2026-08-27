@@ -1,4 +1,6 @@
 import { themeInitScript, themeToggleHtml, themeToggleScript } from "./components/theme.ts";
+import { resolveServingProfile, type MuninnProfile } from "../../config.ts";
+import { droppedRouteGroups, type RouteGroup } from "../route-groups.ts";
 
 /** Dark palette — the default, and the forced value under html[data-theme="dark"]. */
 const DARK_TOKENS = `
@@ -377,11 +379,44 @@ export const SHARED_STYLES = `
     .hover-wash:hover { background: color-mix(in srgb, var(--accent) 5%, transparent); }
 `;
 
+type NavPage = "dashboard" | "traces" | "search" | "research" | "logs" | "mcp-debug" | "chat" | "summaries" | "serena" | "wiki" | "graph" | "plans" | "benchmark" | "models" | "indexing" | "agents" | "jira";
+
+/**
+ * Which route GROUP each nav destination belongs to — the whole reason the nav
+ * takes a profile. A link to a group the profile did not register is a 404 from
+ * every page that renders this header, `/chat` included, which on a nais pod is
+ * the only page there is. Mapping EVERY link (not just today's dropped ones)
+ * means a change to `NAIS_DROPPED_ROUTE_GROUPS` updates the nav by itself.
+ *
+ * `dashboard` and `chat` map to nothing: `/` is inline in the route factory and
+ * `/chat` is a separately-mounted sub-app, so neither is droppable.
+ */
+const NAV_PAGE_GROUP: Record<NavPage, RouteGroup | null> = {
+  dashboard: null, chat: null,
+  agents: "agents", traces: "traces", research: "research", search: "search",
+  summaries: "summaries", wiki: "wiki", graph: "graph", plans: "plans",
+  jira: "jira", logs: "logs", "mcp-debug": "tools", serena: "tools",
+  benchmark: "benchmark", models: "models", indexing: "indexing",
+};
+
 /** Shared header HTML with nav links */
 export function renderNav(
-  activePage: "dashboard" | "traces" | "search" | "research" | "logs" | "mcp-debug" | "chat" | "summaries" | "serena" | "wiki" | "graph" | "plans" | "benchmark" | "models" | "indexing" | "agents" | "jira",
-  options?: { headerLeftExtra?: string; headerRight?: string },
+  activePage: NavPage,
+  options?: { headerLeftExtra?: string; headerRight?: string; profile?: MuninnProfile },
 ): string {
+  // Read at CALL time when the caller does not say, like `isWikiReadonly()`:
+  // a view takes no `Config`, and the option exists so a test never has to set
+  // a process-wide flag. Same one parse either way.
+  const dropped = droppedRouteGroups(options?.profile ?? resolveServingProfile());
+  const shown = (page: NavPage): boolean => {
+    const group = NAV_PAGE_GROUP[page];
+    return group === null || !dropped.has(group);
+  };
+  /** A top-level link, or nothing at all when its group was not registered. */
+  const link = (page: NavPage, href: string, label: string): string =>
+    shown(page) ? `<a href="${href}" class="nav-link${activePage === page ? " active" : ""}">${label}</a>` : "";
+  const dropItem = (page: NavPage, href: string, label: string): string =>
+    shown(page) ? `<a href="${href}" class="nav-dropdown-item${activePage === page ? " active" : ""}">${label}</a>` : "";
   // Pages collapsed under the "Tools ▾" dropdown. The trigger reads as active
   // whenever the current page is one of these (and the matching entry inside is
   // highlighted too).
@@ -393,6 +428,23 @@ export function renderNav(
   // the dropdown for the same reason.)
   const toolsPages = ["logs", "mcp-debug", "serena", "benchmark", "models", "indexing", "jira"] as const;
   const toolsActive = (toolsPages as readonly string[]).includes(activePage);
+  // The dropdown itself goes when it would be empty — a profile that dropped
+  // every tool would otherwise render a "Tools ▾" trigger opening onto nothing.
+  const toolsItems = [
+    dropItem("jira", "/jira", "Jira"),
+    dropItem("logs", "/logs", "Logs"),
+    dropItem("mcp-debug", "/mcp-debug", "MCP Debug"),
+    dropItem("serena", "/serena", "Serena"),
+    dropItem("benchmark", "/benchmark", "Benchmark"),
+    dropItem("models", "/models", "Models"),
+    dropItem("indexing", "/indexing", "Indexing"),
+  ].filter((item) => item !== "");
+  const toolsDropdown = toolsItems.length === 0 ? "" : `<details class="nav-dropdown">
+          <summary class="nav-link${toolsActive ? " active" : ""}">Tools <span class="nav-caret" aria-hidden="true">▾</span></summary>
+          <div class="nav-dropdown-panel">
+${toolsItems.map((item) => `            ${item}`).join("\n")}
+          </div>
+        </details>`;
   return `
   <script>${themeInitScript()}</script>
   <script>
@@ -444,30 +496,19 @@ export function renderNav(
     <div class="header-left">
       <h1><span>M</span>uninn</h1>
       <nav>
-        <a href="/" class="nav-link${activePage === "dashboard" ? " active" : ""}">Dashboard</a>
-        <a href="/agents" class="nav-link${activePage === "agents" ? " active" : ""}">Agents</a>
-        <a href="/traces" class="nav-link${activePage === "traces" ? " active" : ""}">Traces</a>
+        ${link("dashboard", "/", "Dashboard")}
+        ${link("agents", "/agents", "Agents")}
+        ${link("traces", "/traces", "Traces")}
         <span class="nav-sep" aria-hidden="true"></span>
-        <a href="/chat" class="nav-link${activePage === "chat" ? " active" : ""}">Chat</a>
-        <a href="/research" class="nav-link${activePage === "research" ? " active" : ""}">Research</a>
-        <a href="/search" class="nav-link${activePage === "search" ? " active" : ""}">Search</a>
-        <a href="/summaries" class="nav-link${activePage === "summaries" ? " active" : ""}">Summaries</a>
-        <a href="/wiki" class="nav-link${activePage === "wiki" ? " active" : ""}">Wiki</a>
-        <a href="/graph" class="nav-link${activePage === "graph" ? " active" : ""}">Graph</a>
-        <a href="/plans" class="nav-link${activePage === "plans" ? " active" : ""}">Plans</a>
+        ${link("chat", "/chat", "Chat")}
+        ${link("research", "/research", "Research")}
+        ${link("search", "/search", "Search")}
+        ${link("summaries", "/summaries", "Summaries")}
+        ${link("wiki", "/wiki", "Wiki")}
+        ${link("graph", "/graph", "Graph")}
+        ${link("plans", "/plans", "Plans")}
         <span class="nav-sep" aria-hidden="true"></span>
-        <details class="nav-dropdown">
-          <summary class="nav-link${toolsActive ? " active" : ""}">Tools <span class="nav-caret" aria-hidden="true">▾</span></summary>
-          <div class="nav-dropdown-panel">
-            <a href="/jira" class="nav-dropdown-item${activePage === "jira" ? " active" : ""}">Jira</a>
-            <a href="/logs" class="nav-dropdown-item${activePage === "logs" ? " active" : ""}">Logs</a>
-            <a href="/mcp-debug" class="nav-dropdown-item${activePage === "mcp-debug" ? " active" : ""}">MCP Debug</a>
-            <a href="/serena" class="nav-dropdown-item${activePage === "serena" ? " active" : ""}">Serena</a>
-            <a href="/benchmark" class="nav-dropdown-item${activePage === "benchmark" ? " active" : ""}">Benchmark</a>
-            <a href="/models" class="nav-dropdown-item${activePage === "models" ? " active" : ""}">Models</a>
-            <a href="/indexing" class="nav-dropdown-item${activePage === "indexing" ? " active" : ""}">Indexing</a>
-          </div>
-        </details>
+        ${toolsDropdown}
       </nav>
 ${options?.headerLeftExtra ?? ""}
     </div>

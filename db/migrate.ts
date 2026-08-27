@@ -173,12 +173,8 @@ export async function runMigrations(
     }
     say(`\nDone. Applied ${pending.length} migration(s).`);
   } finally {
-    // Ending the connection would release a session-level lock anyway; the
-    // explicit unlock is here so the lock's lifetime is readable in one place
-    // and so a future caller that keeps the handle open cannot hold it. It is
-    // swallowed because the failure it can report — the connection is already
-    // gone — is exactly the case where the lock is already released.
-    await sql`SELECT pg_advisory_unlock(${MIGRATION_LOCK_KEY})`.catch(() => {});
+    // `sql.end()` releases the session-level lock — no explicit unlock, which
+    // could only fail on a connection that is already gone.
     await sql.end();
   }
 }

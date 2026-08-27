@@ -17,8 +17,22 @@
  * init.sql's canonical identity table, has been there since the first schema,
  * and no migration creates it.
  *
- * Exit codes: 0 provisioned, 1 not provisioned (with the operator instruction),
- * 2 could not reach the database within the connect budget.
+ * **There is a SECOND unready state, and it is the one the compose production
+ * path lands in:** `init.sql` creates `schema_migrations` EMPTY, so a database
+ * provisioned that way and never baselined has every table and no recorded
+ * migration. The runner then computes "001 onwards are pending" and dies inside
+ * 006 with `column "bot_name" of relation "messages" already exists` — under
+ * `restart: unless-stopped`, a crash-loop reporting a raw PostgresError about a
+ * database that is fine and needs one command. So `users` present + no recorded
+ * migration is refused too, with the BASELINE half of the instruction.
+ *
+ * Deliberately NOT auto-baselined: a schema laid down by an OLDER `init.sql`
+ * would be recorded as carrying migrations it has never seen, and the next real
+ * migration would apply onto columns that do not exist. Which command to run is
+ * the operator's call; naming it is ours.
+ *
+ * Exit codes: 0 ready, 1 not ready (with the operator instruction), 2 could not
+ * reach the database within the connect budget.
  *
  * Usage: `DATABASE_URL=… bun db/require-provisioned.ts`
  */
@@ -54,12 +68,34 @@ const UNPROVISIONED_INSTRUCTION = [
   "  an empty database would apply migrations onto nothing and leave a broken",
   "  half-schema.",
   "",
-  "  Provision it once, against this DATABASE_URL:",
+  "  Provision it once, from a machine that has psql and can reach this database",
+  "  (this image ships neither psql nor the repo's tooling):",
   "",
-  "    psql \"$DATABASE_URL\" -f db/init.sql   # the consolidated schema",
+  "    psql \"<DATABASE_URL>\" -f db/init.sql   # the consolidated schema",
   "    bun db/migrate.ts --baseline           # record those migrations as applied",
   "",
   "  Then restart this container; the entrypoint will run any pending migrations.",
+  "",
+].join("\n");
+
+const UNBASELINED_INSTRUCTION = [
+  "",
+  "  This database HAS the schema (`users` exists) but `schema_migrations` records",
+  "  nothing — it was provisioned from db/init.sql and never baselined.",
+  "",
+  "  db/init.sql creates `schema_migrations` empty, so the migration runner would",
+  "  read \"everything is pending\" and re-apply migrations onto tables that already",
+  "  carry them — it fails inside 006 with",
+  "  `column \"bot_name\" of relation \"messages\" already exists`, which under a",
+  "  restart policy is a crash-loop about a database that is in fact fine.",
+  "",
+  "  Record the shipped migrations as applied, against this DATABASE_URL:",
+  "",
+  "    bun db/migrate.ts --baseline           # or: bun run db:migrate:baseline",
+  "",
+  "  Then restart this container; the entrypoint will run any pending migrations.",
+  "  (Not done automatically: a schema laid down by an OLDER init.sql would be",
+  "  recorded as carrying migrations it never saw.)",
   "",
 ].join("\n");
 
@@ -78,10 +114,26 @@ async function main(): Promise<number> {
       // `to_regclass` answers NULL instead of throwing for an absent relation,
       // so "no such table" is a VALUE here rather than an error indistinguishable
       // from a connection fault.
-      const [row] = await sql`SELECT to_regclass('public.users') IS NOT NULL AS provisioned`;
-      if (row?.provisioned) return 0;
-      console.error(UNPROVISIONED_INSTRUCTION);
-      return 1;
+      const [row] = await sql`
+        SELECT to_regclass('public.users') IS NOT NULL AS provisioned,
+               to_regclass('public.schema_migrations') IS NOT NULL AS tracked
+      `;
+      if (!row?.provisioned) {
+        console.error(UNPROVISIONED_INSTRUCTION);
+        return 1;
+      }
+      // The count is a SECOND statement on purpose: Postgres parses a whole
+      // statement before running it, so a `CASE … ELSE (SELECT count(*) FROM
+      // schema_migrations)` would fail to parse on the very database where the
+      // table is missing.
+      const recorded = row.tracked
+        ? Number((await sql`SELECT count(*)::int AS n FROM schema_migrations`)[0]?.n ?? 0)
+        : 0;
+      if (recorded === 0) {
+        console.error(UNBASELINED_INSTRUCTION);
+        return 1;
+      }
+      return 0;
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
       const code = (err as { code?: string } | null)?.code;
@@ -100,4 +152,8 @@ async function main(): Promise<number> {
   }
 }
 
-process.exit(await main());
+// `process.exitCode` + a natural exit, never `process.exit(code)`: the whole
+// contract of this script is an instruction on stderr, and an immediate exit can
+// truncate a pending write when stderr is a PIPE — which is exactly what it is
+// under `docker logs`, a compose collector and the test that drives it.
+process.exitCode = await main();

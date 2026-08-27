@@ -79,8 +79,10 @@ export function optionalEnvFlag(name: string): boolean {
   return false;
 }
 
-/** The env var name, so the boot refusal, the docs row and the test agree. */
-export const PROFILE_ENV = "MUNINN_PROFILE";
+/** The env var name, so the boot refusal and the message below agree. Not
+ *  exported: this file is the only parser, and `src/test/ambient-env.ts` spells
+ *  the name itself rather than importing the config layer into a test preload. */
+const PROFILE_ENV = "MUNINN_PROFILE";
 
 /**
  * The serving profiles. `default` is today's muninn — every route registered,
@@ -101,15 +103,20 @@ export type MuninnProfile = (typeof MUNINN_PROFILES)[number];
  * gardener, plans and logs routes on a pod is exactly the misconfiguration the
  * variable exists to prevent, and it would arrive with no signal at all.
  *
- * A function rather than only a `Config` field for the reason
- * `wikiReadonlyFromEnv` is one: the two consumers below the config layer — the
- * route factory (`src/dashboard/routes.ts`, called from unit tests with a
- * hand-built `{} as Config`) and the Haiku router's CLI-fallback refusal
- * (`src/ai/haiku-direct.ts`, which takes no `Config` at all) — must not need
- * `DATABASE_URL`. This is the ONE parse; `loadConfig` calls it too, so the
- * field and the getter can never disagree.
+ * A function as well as a `Config` field, for the reason `wikiReadonlyFromEnv`
+ * is one: the consumers below the config layer — the Haiku router's CLI refusal
+ * (`src/ai/haiku-cli-unavailable.ts`) and `renderNav` — take no `Config` at all
+ * and must not need `DATABASE_URL`, which `loadConfig` demands. **The pair is
+ * the rule: a `Config` field where a `Config` exists, this getter where none
+ * does, one parse either way** — `loadConfig` calls it too, so the field and the
+ * getter can never disagree.
+ *
+ * Named `resolveServingProfile`, not `resolveProfile`: `src/research/corpus.ts`
+ * already exports a `resolveProfile` (the research CORPUS profile), and two
+ * same-named exports one import away from each other is how the wrong one gets
+ * auto-imported.
  */
-export function resolveProfile(env: Record<string, string | undefined> = process.env): MuninnProfile {
+export function resolveServingProfile(env: Record<string, string | undefined> = process.env): MuninnProfile {
   const raw = (env[PROFILE_ENV] ?? "").trim().toLowerCase();
   if (raw === "") return "default";
   if ((MUNINN_PROFILES as readonly string[]).includes(raw)) return raw as MuninnProfile;
@@ -267,10 +274,10 @@ export function optionalEnvInt(name: string, defaultValue: number): number {
 export function loadConfig() {
   const whisperModelPath = optionalEnv("WHISPER_MODEL_PATH", "./models/ggml-base.en.bin");
   return {
-    // WHICH deployment this is. Read through `resolveProfile()` — the same
-    // parse the route factory and the Haiku router use, so a field here can
-    // never disagree with what those seams enforce.
-    profile: resolveProfile(),
+    // WHICH deployment this is. Read through `resolveServingProfile()` — the
+    // same parse the seams below the config layer use, so a field here can
+    // never disagree with what they enforce.
+    profile: resolveServingProfile(),
     dashboardPort: optionalEnvInt("DASHBOARD_PORT", 3010),
     claudeTimeoutMs: optionalEnvInt("CLAUDE_TIMEOUT_MS", 120000),
     claudeModel: optionalEnv("CLAUDE_MODEL", "sonnet"),

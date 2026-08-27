@@ -3,6 +3,7 @@ import { getLog } from "../logging.ts";
 import { pickPrimaryModel } from "../ai/result-parser.ts";
 import { StreamParser, type StreamProgressCallback } from "../ai/stream-parser.ts";
 import { resolveAgentCwd } from "../ai/agent-cwd.ts";
+import { assertHaikuCliAvailable, type HaikuCliFallback } from "../ai/haiku-cli-unavailable.ts";
 import { buildInlineMcpConfig, buildInlineSettings, unreadableBotConfigs } from "../ai/mcp-config-utils.ts";
 import { attachToolSpans } from "../core/tool-spans.ts";
 import type { ClaudeResult, ToolCall } from "../types.ts";
@@ -153,6 +154,13 @@ export interface SpawnHaikuOptions extends HaikuTelemetry {
    * makes the CLI match rather than diverge.
    */
   system?: string;
+  /**
+   * Set by the Haiku ROUTER when it fell through to the CLI: which backend it
+   * tried and why. Read only by the `nais` refusal, so that a pod's error names
+   * the missing credential instead of the missing binary. A direct caller
+   * (watchers, `callHaiku`) passes nothing.
+   */
+  cliFallback?: HaikuCliFallback;
 }
 
 /**
@@ -304,6 +312,11 @@ export async function spawnHaiku(
     onUsage,
     onModelError,
   } = opts;
+  // The ONE door into the Claude CLI, so this is where a profile without one
+  // refuses — before the spawn, and for the router and the five direct callers
+  // alike. See `src/ai/haiku-cli-unavailable.ts`.
+  assertHaikuCliAvailable(botName ?? "haiku", opts.cliFallback);
+
   const effectiveModel = model || DEFAULT_MODEL;
   const wallStart = performance.now();
 

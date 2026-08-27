@@ -1,5 +1,6 @@
 import { Hono } from "hono";
-import { resolveProfile, type Config, type MuninnProfile } from "../config.ts";
+import { resolveServingProfile, type Config } from "../config.ts";
+import { droppedRouteGroups, type RouteGroup } from "./route-groups.ts";
 import { sessionRole } from "../auth/guard.ts";
 import { HEALTH_LIVE_PATH, HEALTH_READY_PATH } from "../auth/zones.ts";
 import { readiness } from "./health.ts";
@@ -34,61 +35,8 @@ import { registerPlansRoutes } from "./routes/plans-routes.ts";
 import { registerJiraRoutes } from "./routes/jira-routes.ts";
 
 /**
- * The route GROUPS a profile can drop, named once so the drop list, the test
- * and the PR body all read the same words. The name is the `register*` call it
- * gates, minus the ceremony.
- */
-export type RouteGroup =
-  | "data" | "traces" | "memsearch" | "logs" | "search" | "research" | "tools"
-  | "summaries" | "anthropic" | "article" | "youtube" | "x-article" | "tiktok"
-  | "sse" | "graph" | "wiki" | "wiki-gardener" | "benchmark" | "models"
-  | "indexing" | "agents" | "sync" | "claude-usage" | "plans" | "jira";
-
-/**
- * What the `nais` profile does NOT register — **absent, not denied**: there is
- * no handler, so the answer is Hono's own 404 and the route cannot be reached
- * by a role check that someone later relaxes.
- *
- * Two things belong here and nothing else does:
- *
- *  - **Filesystem-bound surfaces.** `wiki`, `wiki-gardener`, `plans` and `sync`
- *    all read and WRITE working trees (`WIKI_EXTRA` roots, mimir's `plans/`,
- *    the repo-sync checkouts) that exist on a laptop and on the mini and simply
- *    do not exist in a pod; `claude-usage` proxies a launchd service on the
- *    mini's loopback. `logs` is here for a different reason with the same
- *    shape: `/logs` + `/api/logs*` serve the JSONL sink verbatim, and those
- *    lines carry other people's message previews.
- *  - **The yt-dlp/ffmpeg capture verticals** — `anthropic`, `article`,
- *    `youtube`, `x-article`, `tiktok`. The nais image ships neither binary
- *    (`WITH_MEDIA=false`), so registering them would answer 500 on a route that
- *    can never work. `benchmark` joins them: it spawns judge runs against the
- *    Claude CLI, which the nais image also drops (`WITH_CLI=false`).
- *
- * Everything else STAYS, deliberately: `data`, `traces`, `memsearch`, `sse`,
- * `models`, `agents`, `indexing` and `jira` are DB- or huginn-bound and are the
- * operator surface the zone model already closes to a role `user`; `search`,
- * `research` and `graph` are huginn HTTP clients; `summaries` reads the job
- * store and huginn (its author-score file degrades to "no author" when absent);
- * `tools` discovers Serena instances from the bots' `.mcp.json` project paths
- * and reports an EMPTY list when there are none — which is what a pod has.
- */
-export const NAIS_DROPPED_ROUTE_GROUPS: readonly RouteGroup[] = [
-  "wiki", "wiki-gardener", "plans", "sync", "claude-usage", "benchmark", "logs",
-  "anthropic", "article", "youtube", "x-article", "tiktok",
-];
-
-export interface DashboardRouteOptions {
-  /**
-   * Which profile decides the drop list. Defaults to `resolveProfile()` — the
-   * env — rather than to `config.profile`, because the unit tests that build a
-   * `{} as Config` by hand (health, owner-guard) must keep getting today's full
-   * surface, and because this is the same one parse `loadConfig` uses.
-   */
-  readonly profile?: MuninnProfile;
-}
-
-/**
- * Every dashboard route, minus whatever the serving profile drops.
+ * Every dashboard route, minus whatever the serving profile drops (the drop
+ * list and its rationale: `./route-groups.ts`).
  *
  * The five INLINE routes below (`/`, the two health paths, the favicons, the
  * build hash, `/api/attention`) are profile-independent and always present —
@@ -96,14 +44,15 @@ export interface DashboardRouteOptions {
  * is mounted separately in `src/index.ts` and is therefore not filterable here
  * at all: on the nais profile chat is the whole point.
  *
- * `createDashboardRoutes(config)` with no options is byte-for-byte today's
- * behaviour on every instance that does not set `MUNINN_PROFILE`.
+ * The profile is `config.profile ?? resolveServingProfile()` — the field where
+ * a `Config` carries one, the same parse's env getter where it does not, which
+ * is what keeps the unit tests that hand-build a `{} as Config` on today's full
+ * surface. There is no options channel: a second way to say which profile this
+ * is, is a second answer.
  */
-export function createDashboardRoutes(config: Config, options?: DashboardRouteOptions): Hono {
+export function createDashboardRoutes(config: Config): Hono {
   const app = new Hono();
-  const profile = options?.profile ?? resolveProfile();
-  const dropped: ReadonlySet<string> =
-    profile === "nais" ? new Set<string>(NAIS_DROPPED_ROUTE_GROUPS) : new Set<string>();
+  const dropped = droppedRouteGroups(config.profile ?? resolveServingProfile());
 
   // Dashboard home page — role-aware since the zone model landed. `/` is the
   // address people type, and the dashboard behind it is admin-only, so a role
@@ -154,7 +103,7 @@ export function createDashboardRoutes(config: Config, options?: DashboardRouteOp
   // filtering a list that mixes `f(app)` and `f(app, config)` invites the drop
   // to be written per-call and drift) and only then filtered. Registration
   // order is preserved exactly as it was.
-  const groups: readonly (readonly [RouteGroup, (a: Hono) => void])[] = [
+  const groups = [
     ["data", (a) => registerDataRoutes(a)],
     ["traces", (a) => registerTracesRoutes(a)],
     ["memsearch", (a) => registerMemsearchRoutes(a)],
@@ -180,7 +129,15 @@ export function createDashboardRoutes(config: Config, options?: DashboardRouteOp
     ["claude-usage", (a) => registerClaudeUsageRoutes(a, config)],
     ["plans", (a) => registerPlansRoutes(a, config)],
     ["jira", (a) => registerJiraRoutes(a, config)],
-  ];
+  ] as const satisfies readonly (readonly [RouteGroup, (a: Hono) => void])[];
+
+  // Exhaustiveness tie: a group named in `ROUTE_GROUPS` but never registered
+  // above is unreachable on EVERY profile, and nothing else would say so. When
+  // the two agree this type is `never` and the line compiles; when they don't,
+  // it fails to compile naming the missing group.
+  type Unregistered = Exclude<RouteGroup, (typeof groups)[number][0]>;
+  const _allGroupsRegistered: Unregistered extends never ? true : Unregistered = true;
+  void _allGroupsRegistered;
 
   for (const [name, register] of groups) {
     if (dropped.has(name)) continue;

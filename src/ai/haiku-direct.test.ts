@@ -173,7 +173,6 @@ afterEach(() => {
   delete process.env.HAIKU_BACKEND;
   delete process.env.ANTHROPIC_API_KEY;
   delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
-  delete process.env.MUNINN_PROFILE;
 });
 
 describe("isHaikuDirectEnabled", () => {
@@ -690,55 +689,54 @@ describe("trackUsage trace_id join (obs-tail #1)", () => {
 });
 
 /**
- * The CLI fallback on the `nais` profile.
+ * The CLI fallback and the `nais` profile.
  *
- * Every path through `callHaikuWithFallback` ends at `spawnHaiku`, and the nais
- * image ships no Claude CLI (`WITH_CLI=false`). A spawn there is an ENOENT — or
- * a `claude` with no credential, which hangs until `HAIKU_TIMEOUT_MS` on every
- * extractor call and reads as "the assistant is slow". These pin that all three
- * doors into that spawn throw a TYPED error instead, and that nothing about the
- * default profile moved.
+ * The REFUSAL is not here: it lives in `spawnHaiku`, ONE door, so the watchers
+ * and the scheduler — five call sites that never pass through this router — are
+ * covered too (`src/scheduler/executor.test.ts` pins the throw). What the router
+ * owes it is the CONTEXT: which backend it tried and why it fell through, so a
+ * pod's error names the missing CREDENTIAL (`ANTHROPIC_API_KEY`, `gh auth
+ * login`) rather than the missing binary.
+ *
+ * `spawnHaiku` is mocked in this file, so these assert the HANDOFF — the only
+ * half this module decides.
  */
-describe("callHaikuWithFallback on MUNINN_PROFILE=nais", () => {
-  test("the no-auth skip throws instead of falling back to the CLI", async () => {
-    process.env.MUNINN_PROFILE = "nais";
+describe("callHaikuWithFallback hands its fallback reason to spawnHaiku", () => {
+  /** The `cliFallback` on the single spawn this file's mock recorded. */
+  function handedDown(): { backend?: string; reason?: string; cause?: unknown } | undefined {
+    expect(spawnCalls).toHaveLength(1);
+    return (spawnCalls[0]!.opts as { cliFallback?: { backend?: string; reason?: string; cause?: unknown } }).cliFallback;
+  }
+
+  test("the no-auth skip names the backend and the missing credential", async () => {
     process.env.HAIKU_BACKEND = "anthropic";
     // No ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN — the hasHaikuDirectAuth
     // branch, which is exactly what a pod with a missing secret looks like.
-    let caught: unknown = null;
-    try { await callHaikuWithFallback("hi", { source: "test" }); } catch (err) { caught = err; }
-    expect(caught).toBeInstanceOf(HaikuCliUnavailableError);
-    expect((caught as { backend?: string }).backend).toBe("anthropic");
-    expect(String(caught)).toContain("no Anthropic auth");
-    expect(spawnCalls).toHaveLength(0);
+    expect((await callHaikuWithFallback("hi", { source: "test" })).result).toBe("fallback-result");
+    expect(handedDown()).toMatchObject({ backend: "anthropic", reason: expect.stringContaining("no Anthropic auth") });
   });
 
-  test("a thrown non-CLI backend throws instead of falling back, and carries the cause", async () => {
-    process.env.MUNINN_PROFILE = "nais";
+  test("a thrown non-CLI backend carries the upstream message AND the cause", async () => {
     process.env.HAIKU_BACKEND = "anthropic";
     process.env.ANTHROPIC_API_KEY = "sk-test";
     sdkThrow = new Error("rate limited");
-    let caught: unknown = null;
-    try { await callHaikuWithFallback("hi", { source: "test" }); } catch (err) { caught = err; }
-    expect(caught).toBeInstanceOf(HaikuCliUnavailableError);
-    // The operator question is WHICH credential failed, so the upstream message
-    // has to survive — a bare "no CLI" would send them looking at the image.
-    expect(String(caught)).toContain("rate limited");
+    expect((await callHaikuWithFallback("hi", { source: "test" })).result).toBe("fallback-result");
     expect(sdkCalls).toHaveLength(1);
-    expect(spawnCalls).toHaveLength(0);
+    const handed = handedDown();
+    expect(handed).toMatchObject({ backend: "anthropic", reason: "rate limited" });
+    expect(handed?.cause).toBe(sdkThrow);
   });
 
-  test("asking FOR the cli backend throws too — the third door into spawnHaiku", async () => {
-    process.env.MUNINN_PROFILE = "nais";
+  test("asking FOR the cli backend hands nothing down — there was no fallback", async () => {
+    // The guard's own default reason covers this case and the direct watcher
+    // callers in one sentence; inventing a fallback here would report a backend
+    // that was never tried.
     process.env.HAIKU_BACKEND = "cli";
-    let caught: unknown = null;
-    try { await callHaikuWithFallback("hi", { source: "test" }); } catch (err) { caught = err; }
-    expect(caught).toBeInstanceOf(HaikuCliUnavailableError);
-    expect(spawnCalls).toHaveLength(0);
+    expect((await callHaikuWithFallback("hi", { source: "test" })).result).toBe("fallback-result");
+    expect(handedDown()).toBeUndefined();
   });
 
-  test("a successful non-CLI backend is untouched", async () => {
-    process.env.MUNINN_PROFILE = "nais";
+  test("a successful non-CLI backend never reaches the spawn at all", async () => {
     process.env.HAIKU_BACKEND = "anthropic";
     process.env.ANTHROPIC_API_KEY = "sk-test";
     sdkResponse = {
@@ -749,19 +747,12 @@ describe("callHaikuWithFallback on MUNINN_PROFILE=nais", () => {
     const result = await callHaikuWithFallback("hi", { source: "test" });
     expect(result.result).toBe("direct-result");
     expect(result.backend).toBe("anthropic");
+    expect(spawnCalls).toHaveLength(0);
   });
 
-  test("the DEFAULT profile still falls back to the CLI on every one of those paths", async () => {
-    // The compatibility half. Without it a mistake in the profile read would be
-    // invisible: the three cases above would pass on a router that always threw.
-    process.env.HAIKU_BACKEND = "anthropic";
-    expect((await callHaikuWithFallback("hi", { source: "test" })).result).toBe("fallback-result");
-
-    process.env.ANTHROPIC_API_KEY = "sk-test";
-    sdkThrow = new Error("rate limited");
-    expect((await callHaikuWithFallback("hi", { source: "test" })).result).toBe("fallback-result");
-
-    process.env.HAIKU_BACKEND = "cli";
-    expect((await callHaikuWithFallback("hi", { source: "test" })).result).toBe("fallback-result");
+  test("HaikuCliUnavailableError is re-exported here, where callers catch it", () => {
+    // The refusal moved modules; a caller that catches it imports from the
+    // router, and a lost re-export would be a silent `undefined` in a catch.
+    expect(new HaikuCliUnavailableError("anthropic", "melosys", "why").name).toBe("HaikuCliUnavailableError");
   });
 });

@@ -1,4 +1,5 @@
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
+import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import { TEST_DATABASE_URL } from "../test/test-db-url.ts";
 
@@ -16,8 +17,19 @@ import { TEST_DATABASE_URL } from "../test/test-db-url.ts";
  * needs an actually-empty database.
  */
 const SCRATCH_DB = "muninn_unprovisioned_test";
-const ADMIN_URL = new URL(TEST_DATABASE_URL).toString().replace(/\/[^/]*$/, "/muninn");
-const SCRATCH_URL = new URL(TEST_DATABASE_URL).toString().replace(/\/[^/]*$/, `/${SCRATCH_DB}`);
+
+/** Swap the database NAME, keeping everything else — a `?sslmode=` query
+ *  string included, which a `.pathname` round-trip would have to re-attach and
+ *  which the old `/[^/]*$/` form ate. */
+function withDatabase(url: string, name: string): string {
+  return url.replace(/\/[^/?#]*(?=(\?|#|$))/, `/${name}`);
+}
+
+const ADMIN_URL = withDatabase(TEST_DATABASE_URL, "muninn");
+const SCRATCH_URL = withDatabase(TEST_DATABASE_URL, SCRATCH_DB);
+/** `fileURLToPath`, never `.pathname` — a checkout under a path with a space
+ *  (or any percent-encodable byte) comes back encoded and the spawn fails. */
+const REPO_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 
 async function admin<T>(fn: (sql: postgres.Sql) => Promise<T>): Promise<T> {
   const sql = postgres(ADMIN_URL, { max: 1, onnotice: () => {} });
@@ -26,7 +38,7 @@ async function admin<T>(fn: (sql: postgres.Sql) => Promise<T>): Promise<T> {
 
 async function runCheck(databaseUrl: string): Promise<{ code: number; stderr: string }> {
   const proc = Bun.spawn(["bun", "db/require-provisioned.ts"], {
-    cwd: new URL("../..", import.meta.url).pathname,
+    cwd: REPO_ROOT,
     env: { ...process.env, DATABASE_URL: databaseUrl },
     stdout: "pipe",
     stderr: "pipe",
@@ -35,12 +47,15 @@ async function runCheck(databaseUrl: string): Promise<{ code: number; stderr: st
   return { code: await proc.exited, stderr };
 }
 
-beforeAll(async () => {
+/** A fresh scratch database, empty. */
+async function resetScratch(): Promise<void> {
   await admin(async (sql) => {
     await sql.unsafe(`DROP DATABASE IF EXISTS ${SCRATCH_DB}`);
     await sql.unsafe(`CREATE DATABASE ${SCRATCH_DB}`);
   });
-});
+}
+
+beforeAll(resetScratch);
 
 afterAll(async () => {
   await admin((sql) => sql.unsafe(`DROP DATABASE IF EXISTS ${SCRATCH_DB}`));
@@ -89,5 +104,67 @@ describe("db/require-provisioned.ts", () => {
     const stderr = await new Response(proc.stderr).text();
     expect(await proc.exited).toBe(2);
     expect(stderr).toContain("DATABASE_URL");
+  });
+});
+
+/**
+ * PROVISIONED BUT NOT BASELINED — the second half of the same question, and the
+ * one the compose production path actually lands in.
+ *
+ * `db/init.sql` creates `schema_migrations` EMPTY. A database provisioned that
+ * way and never baselined has every table and no recorded migration, so the
+ * runner computes "001 onwards are pending" and dies inside 006 with
+ * `column "bot_name" of relation "messages" already exists` — under
+ * `restart: unless-stopped` that is a crash-loop reporting a raw PostgresError
+ * about a database that is fine and needs one command.
+ *
+ * Deliberately NOT auto-baselined: a schema laid down by an OLDER init.sql would
+ * then be recorded as carrying migrations it has never seen, and the next real
+ * migration would apply onto columns that do not exist.
+ */
+describe("db/require-provisioned.ts — provisioned but not baselined", () => {
+  beforeAll(async () => {
+    await resetScratch();
+    const schema = await Bun.file(`${REPO_ROOT}/db/init.sql`).text();
+    const sql = postgres(SCRATCH_URL, { max: 1, onnotice: () => {} });
+    // One simple-protocol call: init.sql is exactly what an operator pipes into
+    // psql, statements and all.
+    try { await sql.unsafe(schema); } finally { await sql.end(); }
+  });
+
+  async function baseline(): Promise<number> {
+    const proc = Bun.spawn(["bun", "db/migrate.ts", "--baseline"], {
+      cwd: REPO_ROOT,
+      env: { ...process.env, DATABASE_URL: SCRATCH_URL },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    return await proc.exited;
+  }
+
+  test("refuses, and the instruction is the BASELINE half — not init.sql again", async () => {
+    const { code, stderr } = await runCheck(SCRATCH_URL);
+    expect(code).toBe(1);
+    expect(stderr).toContain("--baseline");
+    // The distinguishing assertion: this database HAS the schema, so telling
+    // the operator to apply init.sql would be telling them to do the one thing
+    // that is already done.
+    expect(stderr).not.toContain("-f db/init.sql");
+    expect(stderr).toContain("schema_migrations");
+  });
+
+  test("after `db/migrate.ts --baseline` it passes, and migrate is a clean no-op", async () => {
+    expect(await baseline()).toBe(0);
+    expect((await runCheck(SCRATCH_URL)).code).toBe(0);
+    // The whole point of the refusal: the very next thing the entrypoint runs
+    // must not be the 006 crash.
+    const migrate = Bun.spawn(["bun", "db/migrate.ts"], {
+      cwd: REPO_ROOT,
+      env: { ...process.env, DATABASE_URL: SCRATCH_URL },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const stderr = await new Response(migrate.stderr).text();
+    expect(`${await migrate.exited} ${stderr}`).toBe("0 ");
   });
 });
