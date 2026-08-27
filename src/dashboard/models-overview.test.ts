@@ -80,7 +80,20 @@ beforeEach(() => {
   _resetSnapshotForTests();
 });
 afterEach(() => {
-  process.env = { ...SAVED };
+  // Restore KEY BY KEY. `process.env = {...}` replaces the runtime's magic env
+  // object with a plain one, and every later `process.env.X = …` in the PROCESS
+  // then writes to an ordinary property that never reaches `setenv` — so the
+  // runtime stops seeing it. Harmless while this file was the only one in its
+  // chunk; the moment it was registered in the `bun run test` chain it broke a
+  // LATER file, `claude-usage-overview.test.ts`, whose `withTz` sets
+  // `process.env.TZ` and depends on `Intl` picking it up. That failure names a
+  // date arithmetic bug in a file this one does not import.
+  for (const key of Object.keys(process.env)) {
+    if (!(key in SAVED)) delete process.env[key];
+  }
+  for (const [key, value] of Object.entries(SAVED)) {
+    if (value !== undefined) process.env[key] = value;
+  }
   _resetSnapshotForTests();
 });
 
@@ -512,4 +525,80 @@ test("machine: bots distinguish DISCOVERED from actually polling", async () => {
     { name: "halfslack", polling: false },
     { name: "tokenless", polling: false },
   ]);
+});
+
+// ---------------------------------------------------------------------------
+// Vertex — the Machine card's credential block
+// ---------------------------------------------------------------------------
+
+import { resolveVertexConfig } from "../config.ts";
+
+/** `vertexInfo` reads `process.env`, so each case owns the six names outright.
+ *  `src/test/preload.ts` already deletes them before any suite runs; this
+ *  save/restore is what keeps ONE case from leaking into the next. */
+function withVertexEnv<T>(env: Record<string, string>, fn: () => T): T {
+  const names = [
+    "CLAUDE_CODE_USE_VERTEX", "ANTHROPIC_VERTEX_PROJECT_ID", "ANTHROPIC_VERTEX_BASE_URL",
+    "CLOUD_ML_REGION", "VERTEX_PROJECT_ID", "VERTEX_REGION",
+  ];
+  const saved: Record<string, string | undefined> = {};
+  for (const n of names) { saved[n] = process.env[n]; delete process.env[n]; }
+  for (const [k, v] of Object.entries(env)) process.env[k] = v;
+  try {
+    return fn();
+  } finally {
+    for (const n of names) {
+      if (saved[n] === undefined) delete process.env[n];
+      else process.env[n] = saved[n]!;
+    }
+  }
+}
+
+test("vertexInfo: nothing configured ⇒ null, so the card omits the block", () => {
+  const { vertexInfo } = _internalsForTest();
+  withVertexEnv({}, () => {
+    const errors: string[] = [];
+    expect(vertexInfo(errors)).toBeNull();
+    expect(errors).toEqual([]);
+  });
+});
+
+test("vertexInfo: a DECLARED but not enabled Vertex still renders — that is the state worth showing", () => {
+  const { vertexInfo } = _internalsForTest();
+  withVertexEnv({ VERTEX_PROJECT_ID: "p-1", VERTEX_REGION: "europe-north1" }, () => {
+    const info = vertexInfo([]);
+    expect(info).not.toBeNull();
+    expect(info!.enabled).toBe(false);
+    expect(info!.projectId).toBe("p-1");
+    expect(info!.projectIdSource).toBe("VERTEX_PROJECT_ID");
+  });
+});
+
+test("vertexInfo: the SDK's own names are reported as the winning source", () => {
+  const { vertexInfo } = _internalsForTest();
+  withVertexEnv({
+    CLAUDE_CODE_USE_VERTEX: "1",
+    VERTEX_PROJECT_ID: "muninn-name",
+    ANTHROPIC_VERTEX_PROJECT_ID: "sdk-name",
+    CLOUD_ML_REGION: "europe-west1",
+  }, () => {
+    const info = vertexInfo([])!;
+    expect(info.enabled).toBe(true);
+    expect(info.projectId).toBe("sdk-name");
+    expect(info.projectIdSource).toBe("ANTHROPIC_VERTEX_PROJECT_ID");
+    expect(info.regionSource).toBe("CLOUD_ML_REGION");
+  });
+});
+
+test("vertexInfo: a refusing config DEGRADES the card instead of 5xx-ing the page", () => {
+  // Unreachable on a booted instance — `loadConfig` refused at boot — but the
+  // page is the one surface that must still render when the config is wrong.
+  const { vertexInfo } = _internalsForTest();
+  withVertexEnv({ VERTEX_REGION: "global" }, () => {
+    expect(() => resolveVertexConfig()).toThrow();
+    const errors: string[] = [];
+    expect(vertexInfo(errors)).toBeNull();
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatch(/vertex config: .*is refused/);
+  });
 });

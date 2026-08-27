@@ -17,7 +17,7 @@
  */
 
 import os from "node:os";
-import { schedulerEnabledFromEnv } from "../config.ts";
+import { resolveVertexConfig, schedulerEnabledFromEnv, type VertexConfig } from "../config.ts";
 import { isWikiReadonly, readonlyWikiRoots } from "../wiki/readonly.ts";
 import type { BotConfig } from "../bots/config.ts";
 import { discoverAllBots, resolveResearchBot, resolveSummarizerBot, resolveWikiSynthesisBot } from "../bots/config.ts";
@@ -235,6 +235,27 @@ export interface MachineInfo {
    * a readonly instance look harmless. The detail is in `errors[]`.
    */
   wikisKnown: boolean;
+  /**
+   * The Vertex credential seam, or null when this instance declares none.
+   *
+   * On `/models` because that is where "what would actually run" already lives,
+   * and because the two failure shapes are invisible everywhere else: a project
+   * set under muninn's `VERTEX_PROJECT_ID` while the Agent SDK reads
+   * `ANTHROPIC_VERTEX_PROJECT_ID` (so the card names the WINNING variable, not
+   * just the value), and `CLAUDE_CODE_USE_VERTEX` off while the region and
+   * project are configured — a bot that looks Vertex-bound and is not.
+   *
+   * The project id IS published, unlike `wikis[].root`. The two are not the same
+   * call: a filesystem path was never rendered and had no diagnostic use, while
+   * naming the project is the whole point of the row — a Vertex card that hid it
+   * could not tell an operator they are pointed at the wrong one. `/models` is
+   * admin-zone (`src/auth/zones.ts`), so the reader is already the operator.
+   *
+   * `null` rather than a zeroed record when nothing is configured, so the card
+   * can omit the block instead of asserting "Vertex: not configured" on the many
+   * instances for which that is not a fact worth a row.
+   */
+  vertex: VertexConfig | null;
 }
 
 export interface ModelsOverview {
@@ -765,6 +786,11 @@ export async function assembleModelsOverview(
     used: [],
   });
 
+  // BEFORE the warn below, deliberately: it can push an error of its own, and a
+  // warn line that counted every degraded source except this one would be wrong
+  // exactly when a boot-refusing misconfiguration is what degraded the page.
+  const vertex = vertexInfo(errors);
+
   if (errors.length > 0) {
     log.warn("models overview assembled with {count} degraded source(s)", { count: errors.length });
   }
@@ -803,6 +829,13 @@ export async function assembleModelsOverview(
       ? unmatchedReadonlyWikiRoots(wikiRegistry, readonlyWikiRoots())
       : [],
     wikisKnown: wikiRegistryKnown,
+    // Resolved above, through the SAME resolver the boot refusal uses — reading
+    // a level below the enforcement point is what let the readonly card and the
+    // readonly seams disagree. It can THROW (a `global` region), which on a
+    // booted instance is unreachable because `loadConfig` already refused;
+    // catching it keeps a diagnostic page from 5xx-ing on the one instance that
+    // most needs to be read.
+    vertex,
   };
 
   return {
@@ -817,6 +850,23 @@ export async function assembleModelsOverview(
   };
 }
 
+/**
+ * The Vertex block for the Machine card. Returns null when nothing is
+ * configured — which is every field unset, not merely "the switch is off": an
+ * instance with a project and region declared but `CLAUDE_CODE_USE_VERTEX`
+ * absent is exactly the state the card exists to show, so it renders.
+ */
+function vertexInfo(errors: string[]): VertexConfig | null {
+  try {
+    const vertex = resolveVertexConfig();
+    if (!vertex.enabled && !vertex.projectId && !vertex.region && !vertex.baseUrl) return null;
+    return vertex;
+  } catch (err) {
+    errors.push(`vertex config: ${(err as Error).message}`);
+    return null;
+  }
+}
+
 export function _internalsForTest() {
-  return { haikuBackendOrigin, uniqSorted, computeModelMismatch, buildWhyChain, EMBEDDINGS_MODEL, GARDENER_DRAFT_THINKING_MAX_TOKENS };
+  return { haikuBackendOrigin, uniqSorted, computeModelMismatch, buildWhyChain, vertexInfo, EMBEDDINGS_MODEL, GARDENER_DRAFT_THINKING_MAX_TOKENS };
 }

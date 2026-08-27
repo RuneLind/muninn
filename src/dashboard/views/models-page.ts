@@ -731,6 +731,37 @@ export async function renderModelsPage(): Promise<string> {
         ? esc(idle.map(function (b) { return b.name; }).join(', ')) +
           ' — discovered but no platform tokens, not polling'
         : '';
+      // Vertex — rendered only when this instance declares one. Two rows, because
+      // the two facts fail apart: WHETHER the SDK takes the Vertex path
+      // (CLAUDE_CODE_USE_VERTEX, and nothing else decides it) and WHAT it would
+      // dial. A project set under muninn's own name while the SDK reads
+      // ANTHROPIC_VERTEX_PROJECT_ID is a working-looking config that dials
+      // nothing, so the winning VARIABLE is named beside the value.
+      var vx = m.vertex;
+      if (vx) {
+        h += machineRow('Vertex',
+          vx.enabled ? val('enabled') : val('declared, not enabled', 'warn'),
+          vx.enabled
+            ? 'CLAUDE_CODE_USE_VERTEX — the claude-sdk connector authenticates with ADC, no ANTHROPIC_API_KEY needed'
+            : 'project/region are set but CLAUDE_CODE_USE_VERTEX is not — the SDK still uses an Anthropic credential');
+        // The whole lc-note is already muted (color: var(--text-dim)), so the
+        // variable name needs no class of its own — and the page has none to give
+        // it. Each value is paired with the NAME that supplied it, because that
+        // pairing is the diagnosis: "p-1 (VERTEX_PROJECT_ID)" on a row whose
+        // switch is on means the SDK, which reads ANTHROPIC_VERTEX_PROJECT_ID,
+        // is dialling nothing.
+        // NB no backticks anywhere in this block: it lives inside a TS template
+        // literal, so one would END the literal — the same invisible-to-tsc-ish
+        // trap as the apostrophe documented in models-page.test.ts, except this
+        // one tsc does catch, three lines later and blaming the wrong line.
+        var where = [];
+        if (vx.projectId) where.push('<code>' + esc(vx.projectId) + '</code> (' + esc(vx.projectIdSource || '?') + ')');
+        if (vx.region) where.push('<code>' + esc(vx.region) + '</code> (' + esc(vx.regionSource || '?') + ')');
+        if (vx.baseUrl) where.push('<code>' + esc(vx.baseUrl) + '</code> (ANTHROPIC_VERTEX_BASE_URL)');
+        h += machineRow('Vertex target',
+          vx.region ? val(vx.region) : (vx.baseUrl ? val('base URL') : val('no region', 'warn')),
+          where.length ? where.join(' · ') : 'nothing resolved');
+      }
       h += machineRow('Bots', botsVal, botsNote);
       var wikis = m.wikis || [];
       // wikisKnown === false means the registry THREW. "none" would read as a

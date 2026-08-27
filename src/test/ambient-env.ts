@@ -85,11 +85,34 @@ const AUTH_FLAGS = [
   "NAIS_TOKEN_INTROSPECTION_ENDPOINT",
 ];
 
+/** The Vertex credential seam (`src/config.ts` → `resolveVertexConfig`). Four
+ *  of these six are the AGENT SDK's own names, which is why they belong here:
+ *  the SDK reads `process.env` directly, so a developer who has run the Vertex
+ *  smoke and left `CLAUDE_CODE_USE_VERTEX=1` in `.env` would have every
+ *  `assertHaveAuth()` case waive the Anthropic-credential requirement — a green
+ *  suite on that laptop and a red one everywhere else, which is this file's
+ *  whole failure shape. `CLOUD_ML_REGION`/`VERTEX_REGION` matter for the
+ *  opposite reason: `global` in either REFUSES, so an ambient one would fail
+ *  every bare `loadConfig()` test on that machine alone. The tests that DO
+ *  exercise the seam pass an explicit env record to `resolveVertexConfig(env)`,
+ *  per this file's convention. `ANTHROPIC_API_KEY` is deliberately NOT here —
+ *  it is a personal credential, not an instance-profile flag, and the suites
+ *  that care about it already set and clear it themselves. */
+const VERTEX_FLAGS = [
+  "CLAUDE_CODE_USE_VERTEX",
+  "ANTHROPIC_VERTEX_PROJECT_ID",
+  "ANTHROPIC_VERTEX_BASE_URL",
+  "CLOUD_ML_REGION",
+  "VERTEX_PROJECT_ID",
+  "VERTEX_REGION",
+];
+
 /** Every name above, in one array. */
 export const AMBIENT_INSTANCE_ENV: readonly string[] = [
   ...WIKI_WRITE_FLAGS,
   ...SYNC_FLAGS,
   ...AUTH_FLAGS,
+  ...VERTEX_FLAGS,
   // `MUNINN_PROFILE` — the instance-profile flag by definition: its whole job
   // is to say WHICH DEPLOYMENT this process is. An ambient `nais` drops
   // thirteen route groups and turns every Claude-CLI spawn into a throw, so the
