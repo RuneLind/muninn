@@ -106,52 +106,46 @@ export interface ParsedPostgresUrl {
 export function parsePostgresUrl(raw: string): ParsedPostgresUrl {
   const url = new URL(repairDoubleQuestionMark(raw));
 
-  // Case-insensitive, and last-wins, because both differ from the obvious
-  // implementation in a direction that matters. `URLSearchParams` is
-  // case-SENSITIVE, so a `SSLMODE=` would survive the sweep below and land in
-  // the startup packet — the exact failure this module exists to prevent. And
-  // `.get()` returns the FIRST of a repeated key while libpq takes the LAST, so
-  // `?sslmode=disable&sslmode=verify-ca` would have been read as `disable`: a
-  // silent downgrade, which is the one class of bug worth extra code here.
-  const byLowerName = new Map<string, string[]>();
-  for (const key of url.searchParams.keys()) {
-    const lower = key.toLowerCase();
-    if (!byLowerName.has(lower)) byLowerName.set(lower, []);
-    byLowerName.get(lower)!.push(key);
-  }
-  const take = (name: string): string | undefined => {
-    let value: string | undefined;
-    for (const key of byLowerName.get(name) ?? []) {
-      value = url.searchParams.getAll(key).at(-1) ?? value;
-      url.searchParams.delete(key);
-    }
-    return value && value.length > 0 ? value : undefined;
-  };
+  // ONE ordered pass over the entries, and both properties of it are load-bearing.
+  //
+  // Case-insensitive, because `URLSearchParams` is not: an `SSLMODE=` would
+  // survive the sweep and land in the startup packet — the exact failure this
+  // module exists to prevent.
+  //
+  // Last-wins, because libpq is: `?sslmode=disable&sslmode=verify-ca` must read
+  // as `verify-ca`, or it is a silent downgrade to plaintext. It has to be a
+  // single pass in DOCUMENT order to be true — an earlier version grouped by
+  // key spelling first, and `?SSLMODE=verify-ca&sslmode=disable&SSLMODE=require`
+  // then answered `disable`, losing the interleaving between spellings.
+  const consumed: Record<string, string | undefined> = {};
+  const dropped: string[] = [];
+  const remove: string[] = [];
+  for (const [name, value] of url.searchParams) {
+    const lower = name.toLowerCase();
+    if (!lower.startsWith("ssl")) continue;
 
-  const sslcert = take("sslcert");
-  const sslkey = take("sslkey");
-  const sslrootcert = take("sslrootcert");
-  const rawMode = take("sslmode");
+    if (lower === "sslmode" || lower === "sslcert" || lower === "sslkey" || lower === "sslrootcert") {
+      consumed[lower] = value.length > 0 ? value : undefined;
+      remove.push(name);
+      continue;
+    }
+    if (name === "sslnegotiation") {
+      // Kept: postgres.js reads this one itself — but ONLY at this exact
+      // spelling (`index.js` defaults). Any other casing is a parameter nothing
+      // consumes, so it falls through to the drop below rather than being
+      // forwarded as a GUC the server will reject.
+      continue;
+    }
+    remove.push(name);
+    if (!dropped.includes(lower)) dropped.push(lower);
+  }
+  for (const name of remove) url.searchParams.delete(name);
 
   // An empty-named parameter, which a stray `?` produces. Dropping it is always
   // right: there is no Postgres GUC named "".
   url.searchParams.delete("");
 
-  // Anything else in the ssl family — `sslkey_pk8` today, whatever nais adds
-  // next. `sslnegotiation` stays: it is one of postgres.js's own option names.
-  const dropped: string[] = [];
-  for (const [lower, keys] of byLowerName) {
-    if (!lower.startsWith("ssl") || lower === "sslnegotiation") continue;
-    let removedOne = false;
-    for (const key of keys) {
-      if (url.searchParams.has(key)) {
-        url.searchParams.delete(key);
-        removedOne = true;
-      }
-    }
-    if (removedOne) dropped.push(lower);
-  }
-
+  const rawMode = consumed.sslmode;
   const mode = rawMode?.toLowerCase();
   if (mode !== undefined && !SSL_MODES.includes(mode)) {
     throw new Error(
@@ -162,9 +156,9 @@ export function parsePostgresUrl(raw: string): ParsedPostgresUrl {
   return {
     url: url.toString(),
     sslmode: mode as SslMode | undefined,
-    sslcert,
-    sslkey,
-    sslrootcert,
+    sslcert: consumed.sslcert,
+    sslkey: consumed.sslkey,
+    sslrootcert: consumed.sslrootcert,
     host: url.hostname.replace(/^\[|\]$/g, ""),
     hostIsIp: isIP(url.hostname.replace(/^\[|\]$/g, "")) !== 0,
     dropped,
@@ -236,16 +230,28 @@ export function buildSslOption(
     return { notes };
   }
 
-  // `require`/`allow`/`prefer` mean "encrypt, but do not verify who you are
-  // talking to". postgres.js implements all three for the literal string,
-  // including the SSLRequest negotiation, so hand back the mode ITSELF rather
-  // than a stand-in. Collapsing them onto `"require"` is not equivalent:
-  // `prefer` (libpq's default, and a common hand-written dev URL) falls back to
-  // plaintext when the server says no, and `require` does not — measured, that
-  // substitution broke a plain local server that had worked.
+  // `require`/`allow`/`prefer` all mean "encrypt, but do not verify who you are
+  // talking to", and postgres.js accepts each as a literal string — so hand one
+  // back rather than reimplementing the relaxation in an object. Collapsing
+  // them onto `"require"` is NOT equivalent: `prefer` is libpq's default and
+  // falls back to plaintext when the server refuses TLS, and `require` does not
+  // — measured, that substitution broke a plain local server that had worked.
+  //
+  // `allow` is the one that does not survive the translation intact. libpq's
+  // `allow` is "plaintext first, TLS only if the server insists"; postgres.js
+  // has no such mode and treats the literal `'allow'` exactly like `require`
+  // (only `'prefer'` triggers its fallback — `connection.js`, measured). Passed
+  // through, a URL libpq connects with fails here. So it is mapped to `prefer`:
+  // the preference order is inverted, which nothing about `allow` promises, and
+  // the connection succeeds either way, which is the whole point of the mode.
   if ((mode === "require" || mode === "allow" || mode === "prefer") && !hasMaterial) {
-    notes.push(`sslmode=${mode} — TLS without certificate verification`);
-    return { ssl: mode, notes };
+    const passthrough: PassthroughSslMode = mode === "allow" ? "prefer" : mode;
+    notes.push(
+      mode === "allow"
+        ? "sslmode=allow — mapped to prefer (this driver has no plaintext-first mode)"
+        : `sslmode=${mode} — TLS without certificate verification`,
+    );
+    return { ssl: passthrough, notes };
   }
 
   const read = (path: string, what: string): string => {

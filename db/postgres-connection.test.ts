@@ -154,13 +154,42 @@ describe("buildSslOption", () => {
     expect(buildSslOption(parsed, readFake).ssl).toBeUndefined();
   });
 
-  test("require/allow/prefer are handed back AS THEMSELVES, not collapsed", () => {
+  test("require and prefer are handed back as themselves, not collapsed", () => {
     // Collapsing onto "require" cost `prefer` its plaintext fallback — libpq's
     // default mode, and a plain local server that had worked stopped working.
-    for (const mode of ["require", "allow", "prefer"] as const) {
+    for (const mode of ["require", "prefer"] as const) {
       const parsed = parsePostgresUrl(`postgresql://u:p@h:5432/db?sslmode=${mode}`);
       expect(buildSslOption(parsed, readFake).ssl).toBe(mode);
     }
+  });
+
+  test("allow is mapped to prefer, because this driver has no allow", () => {
+    // Measured: postgres.js triggers its plaintext fallback for the literal
+    // 'prefer' only and treats 'allow' exactly like 'require', so passing
+    // `allow` through fails against a plaintext server that libpq connects to.
+    const parsed = parsePostgresUrl("postgresql://u:p@h:5432/db?sslmode=allow");
+    const { ssl, notes } = buildSslOption(parsed, readFake);
+    expect(ssl).toBe("prefer");
+    expect(notes.join(" ")).toContain("mapped to prefer");
+  });
+
+  test("last-wins holds ACROSS spellings, in document order", () => {
+    // Grouping by key spelling first loses the interleaving: this case answered
+    // `disable` — a silent plaintext downgrade — when libpq says `require`.
+    expect(
+      parsePostgresUrl("postgresql://u:p@h/db?SSLMODE=verify-ca&sslmode=disable&SSLMODE=require")
+        .sslmode,
+    ).toBe("require");
+  });
+
+  test("sslnegotiation survives ONLY at the spelling postgres.js reads", () => {
+    // It reads the lowercase name and nothing else, so any other casing is a
+    // parameter nothing consumes — forwarded, it is another 42704.
+    expect(new URL(parsePostgresUrl("postgresql://u:p@h/db?sslnegotiation=direct").url)
+      .searchParams.get("sslnegotiation")).toBe("direct");
+    const odd = parsePostgresUrl("postgresql://u:p@h/db?SSLNegotiation=direct");
+    expect(new URL(odd.url).search).toBe("");
+    expect(odd.dropped).toEqual(["sslnegotiation"]);
   });
 
   test("sslrootcert=system means the platform CA bundle, not a file", () => {

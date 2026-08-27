@@ -41,11 +41,27 @@ const RUN_ID = String(process.pid);
 const CONTAINER = `muninn-smoke-nais-tls-${RUN_ID}`;
 const PLAIN_CONTAINER = `muninn-smoke-nais-plain-${RUN_ID}`;
 const IMAGE = `muninn-smoke-nais-tls:${RUN_ID}`;
-const PORT = 55432;
+/** Host ports are assigned by DOCKER, not chosen here. Fixed constants made the
+ *  per-run naming above only half a protection: two overlapping runs got unique
+ *  containers and then collided on `Bind for 0.0.0.0:55432`. Read back with
+ *  `docker port` after start. */
+let PORT = 0;
 /** A second, ordinary server. The startup-packet failure can only be shown
  *  where a plaintext connection is admitted — and admitting one on the TLS
  *  server would gut the assertion above it. */
-const PLAIN_PORT = 55433;
+let PLAIN_PORT = 0;
+
+/** The host port docker actually bound for a container's 5432. */
+async function hostPort(container: string): Promise<number> {
+  const out = (await $`docker port ${container} 5432/tcp`.text()).trim();
+  // e.g. "0.0.0.0:55123" or two lines (v4 + v6); the port is after the last ":".
+  const first = out.split("\n")[0] ?? "";
+  const port = Number(first.slice(first.lastIndexOf(":") + 1));
+  if (!Number.isInteger(port) || port <= 0) {
+    throw new Error(`could not read the host port for ${container} (docker port said: ${out})`);
+  }
+  return port;
+}
 const DB = "muninn";
 const USER = "muninn";
 /** The name on the server certificate. Deliberately not `127.0.0.1`. */
@@ -133,12 +149,16 @@ async function main() {
   // One line: Bun's shell treats a newline inside the template as a command
   // separator, so a "readable" multi-line docker invocation runs as several
   // broken commands.
-  const run = await $`docker run -d --name ${CONTAINER} -p ${`${PORT}:5432`} -e POSTGRES_USER=${USER} -e POSTGRES_PASSWORD=smoke -e POSTGRES_DB=${DB} ${IMAGE} -c hba_file=/certs/pg_hba.conf -c ssl=on -c ssl_cert_file=/certs/server.pem -c ssl_key_file=/certs/server.key -c ssl_ca_file=/certs/ca.pem`.nothrow().quiet();
+  const run = await $`docker run -d --name ${CONTAINER} -P -e POSTGRES_USER=${USER} -e POSTGRES_PASSWORD=smoke -e POSTGRES_DB=${DB} ${IMAGE} -c hba_file=/certs/pg_hba.conf -c ssl=on -c ssl_cert_file=/certs/server.pem -c ssl_key_file=/certs/server.key -c ssl_ca_file=/certs/ca.pem`.nothrow().quiet();
   if (run.exitCode !== 0) throw new Error(`docker run failed: ${run.stderr.toString()}`);
 
   await $`docker rm -f ${PLAIN_CONTAINER}`.nothrow().quiet();
-  const plain = await $`docker run -d --name ${PLAIN_CONTAINER} -p ${`${PLAIN_PORT}:5432`} -e POSTGRES_USER=${USER} -e POSTGRES_PASSWORD=smoke -e POSTGRES_DB=${DB} -e POSTGRES_HOST_AUTH_METHOD=trust postgres:17`.nothrow().quiet();
+  const plain = await $`docker run -d --name ${PLAIN_CONTAINER} -P -e POSTGRES_USER=${USER} -e POSTGRES_PASSWORD=smoke -e POSTGRES_DB=${DB} -e POSTGRES_HOST_AUTH_METHOD=trust postgres:17`.nothrow().quiet();
   if (plain.exitCode !== 0) throw new Error(`docker run (plain) failed: ${plain.stderr.toString()}`);
+
+  PORT = await hostPort(CONTAINER);
+  PLAIN_PORT = await hostPort(PLAIN_CONTAINER);
+  console.log(`tls server on :${PORT}, plaintext server on :${PLAIN_PORT}`);
 
   // Wait for readiness. `pg_isready` runs inside the container over the unix
   // socket, so it is unaffected by the TLS rules we are here to test.
