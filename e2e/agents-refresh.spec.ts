@@ -117,10 +117,10 @@ test.describe("Agents page: overview refresh", () => {
     expect(requests).toHaveLength(1);
   });
 
-  test("a stream that is dead for good says so, and stops the poll", async ({ page }) => {
+  test("a dead stream stops the LIVE zone, not the data half", async ({ page }) => {
     const requests = countOverviewRequests(page);
-    // What an expired session or a role-denied /api/events actually answers.
-    // EventSource does not retry a non-200 — readyState goes to 2 and stays.
+    // What an expired session or a role-denied /api/events answers. EventSource
+    // does not retry a non-200 — readyState goes to 2 and stays.
     await page.route("**/api/events*", (route) => route.fulfill({ status: 403, body: "denied" }));
 
     await page.clock.install();
@@ -128,13 +128,109 @@ test.describe("Agents page: overview refresh", () => {
     await expect(page.locator("#recentCard")).toBeVisible();
     const pollMs = await pollIntervalMs(page);
 
-    await expect(page.locator("#agMeta")).toHaveText(/disconnected — reload the page/);
+    // The live zone is over until a reload — say that, and say it is the live
+    // zone. The overview is a DIFFERENT route and nothing here has refused it.
+    await expect(page.locator("#agMeta")).toHaveText(/live updates off — reload to reconnect/);
 
-    // …and it must not keep polling a route that is answering the same way.
-    const afterClose = requests.length;
+    const before = requests.length;
+    await page.clock.fastForward(pollMs + 1_000);
+    await expect.poll(() => requests.length).toBeGreaterThan(before);
+  });
+
+  test("a transient proxy error on the stream does not freeze the page", async ({ page }) => {
+    const requests = countOverviewRequests(page);
+    // A tailnet/nginx front end answering 502 for 200ms while the backend blips.
+    // EventSource still dies permanently, but the overview never stopped working
+    // — and this used to leave the whole page frozen until a manual reload.
+    let firstEvents = true;
+    await page.route("**/api/events*", (route) => {
+      if (firstEvents) {
+        firstEvents = false;
+        return route.fulfill({ status: 502, body: "bad gateway" });
+      }
+      return route.fallback();
+    });
+
+    await page.clock.install();
+    await page.goto("/agents");
+    await expect(page.locator("#recentCard")).toBeVisible();
+    const pollMs = await pollIntervalMs(page);
+    await page.waitForTimeout(500);
+
+    const before = requests.length;
+    await page.clock.fastForward(pollMs + 1_000);
+    await expect.poll(() => requests.length).toBeGreaterThan(before);
+  });
+
+  test("an overview route that refuses us stops the poll", async ({ page }) => {
+    const requests = countOverviewRequests(page);
+    // The case that DOES justify stopping: the data route itself is answering
+    // 403 to every request, so polling it twice a minute from every open tab
+    // buys nothing. The stream is denied too — that is what an expired session
+    // actually looks like, and it also makes the count deterministic: a LIVE
+    // EventSource may legitimately reconnect mid-test, and a reconnect refetch
+    // is not a poll. (The other direction — a dead stream must NOT stop the
+    // data half — is pinned by its own case above.)
+    await page.route("**/api/events*", (route) => route.fulfill({ status: 403, body: "denied" }));
+    await page.route("**/api/agents/overview*", (route) =>
+      route.fulfill({ status: 403, body: "{}" }),
+    );
+
+    await page.clock.install();
+    await page.goto("/agents");
+    await expect(page.locator("#agMeta")).toHaveText(/disconnected — reload the page/);
+    const pollMs = await pollIntervalMs(page);
+
+    const afterDenial = requests.length;
     await page.clock.fastForward(pollMs * 3);
     await page.waitForTimeout(300);
-    expect(requests).toHaveLength(afterClose);
+    expect(requests).toHaveLength(afterDenial);
+  });
+
+  test("a page that has never connected does not claim to be reconnecting", async ({ page }) => {
+    const requests = countOverviewRequests(page);
+    // The stream's first attempt is dropped mid-handshake — a page opened while
+    // a --watch server is restarting. It has never connected, so "reconnecting…"
+    // is false; and treating it as a reconnect would also make the first real
+    // connect fire a second boot fetch.
+    let attempts = 0;
+    await page.route("**/api/events*", (route) => {
+      attempts += 1;
+      if (attempts <= 2) return route.abort("connectionreset");
+      return route.fallback();
+    });
+
+    await page.goto("/agents");
+    await expect(page.locator("#recentCard")).toBeVisible();
+    // Anchored: /connecting…/ alone also matches "REconnecting…", which is the
+    // very claim under test.
+    await expect(page.locator("#agMeta")).toHaveText(/^connecting…/);
+    await expect(page.locator("#agMeta")).not.toHaveText(/reconnecting/);
+
+    // …and the first real connect must not count as a RE-connect, which would
+    // fire a second boot fetch.
+    await page.waitForTimeout(1_000);
+    expect(requests).toHaveLength(1);
+  });
+
+  test("a persistently failing overview retries once, not every 3 seconds", async ({ page }) => {
+    const requests = countOverviewRequests(page);
+    // A 500 is a server that is down, not one refusing us, so the fast retry is
+    // right — ONCE. Per failure it would be a 3s poll: 10x the interval the
+    // whole design is cost-gated around.
+    await page.route("**/api/agents/overview*", (route) => route.fulfill({ status: 500, body: "{}" }));
+
+    // REAL time deliberately: under a fake clock `fastForward` runs the timers
+    // synchronously while the fetch rejections resolve afterwards, so a retry
+    // CASCADE never forms and the assertion proves nothing. 11 s is three retry
+    // intervals and well inside one 30 s poll, so every request in the window is
+    // either the boot load or a retry.
+    await page.goto("/agents");
+    await expect(page.locator("#recentCard")).toBeVisible();
+    await page.waitForTimeout(11_000);
+
+    // Boot load + at most one fast retry. Per-failure, this window holds four.
+    expect(requests.length).toBeLessThanOrEqual(2);
   });
 
   test("a boot load that failed retries without waiting out a poll interval", async ({ page }) => {

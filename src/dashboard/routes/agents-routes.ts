@@ -13,9 +13,10 @@ import {
  * overview for up-next + recent. An IDLE page (no run starting or finishing)
  * refreshes on four triggers, none of which existed before: a visible-only 30 s
  * poll, the tab becoming visible (sharing the poll's floor), an SSE RECONNECT,
- * and a short retry after a failed load. A stream that closed for good — a
- * non-200, which EventSource never retries — stops the poll instead.
- * `deps` stays injectable for the overview test.
+ * and one short retry per failure streak. A stream that closed for good — a
+ * non-200, which EventSource never retries — ends the LIVE zone only; the poll
+ * stops for the overview's OWN 401/403 and nothing else. `deps` stays
+ * injectable for the overview test.
  */
 export function registerAgentsRoutes(
   app: Hono,

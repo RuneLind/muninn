@@ -265,6 +265,7 @@ export async function renderAgentsPage(): Promise<string> {
     // and a stream CLOSED for good (a non-200 — EventSource never retries those)
     // must not promise a recovery. Drives the meta line and the poll.
     var sseState = 'connecting'; // connecting | live | reconnecting | closed
+    var overviewDenied = false;  // the OVERVIEW route refused us (401/403)
     var lastOverviewAt = 0;      // request-time stamp; floors the tab-return refetch
     var agentsRaf = null;
     var agentsLastTick = 0;
@@ -367,16 +368,21 @@ export async function renderAgentsPage(): Promise<string> {
       loadOverview();
     });
 
+    // The stream and the overview are different routes with different failure
+    // modes, so they get different sentences. A proxy answering one with a 502
+    // says nothing about the other.
     var SSE_STATE_LABEL = {
       connecting: 'connecting…',
       live: 'live over SSE',
       reconnecting: 'reconnecting…',
-      closed: 'disconnected — reload the page'
+      closed: 'live updates off — reload to reconnect'
     };
     function updateMeta() {
       var meta = document.getElementById('agMeta');
       if (!meta) return;
-      var live = SSE_STATE_LABEL[sseState] || 'live over SSE';
+      var live = overviewDenied
+        ? 'disconnected — reload the page'
+        : (SSE_STATE_LABEL[sseState] || 'live over SSE');
       meta.textContent = live + ' · ' + (selectedBot ? 'filtered to ' + selectedBot : 'all bots');
     }
 
@@ -608,6 +614,7 @@ export async function renderAgentsPage(): Promise<string> {
     // overwrite a newer render if two loads overlap.
     var overviewSeq = 0;
     var retryTimer = null;
+    var retryUsed = false;       // one fast retry per failure streak, not per failure
     var OVERVIEW_RETRY_MS = 3000;
     function loadOverview() {
       var mySeq = ++overviewSeq;
@@ -616,6 +623,7 @@ export async function renderAgentsPage(): Promise<string> {
       lastOverviewAt = Date.now();
       getJson('/api/agents/overview').then(function (data) {
         if (mySeq !== overviewSeq) return; // superseded by a newer load
+        retryUsed = false;
         document.getElementById('errBox').innerHTML = (data.errors && data.errors.length)
           ? '<div class="err-note">Degraded sources: ' + esc(data.errors.join('; ')) + '</div>' : '';
         estimatesMap = data.estimates || {};
@@ -630,14 +638,28 @@ export async function renderAgentsPage(): Promise<string> {
         if (mySeq !== overviewSeq) return;
         document.getElementById('errBox').innerHTML =
           '<div class="err-note">Failed to load overview: ' + esc(String(e)) + '</div>';
-        // The failure this page was built around: a load that raced a server
-        // restart. Retry once, soon — waiting out a whole poll interval to clear
-        // an err-note the server stopped meaning 200ms later is the old bug in
-        // slower form. Not scheduled into a dead stream, and only one in flight.
-        if (sseState !== 'closed' && retryTimer == null) {
+        // Stop polling a route that is REFUSING us — an expired session answers
+        // every request the same way, and hammering it from every open tab is
+        // exactly what the poll's cost gate exists to prevent. Keyed on the
+        // overview's OWN answer, deliberately not on the stream's state: those
+        // are different routes and a proxy can 502 one while the other is fine.
+        if (e && (e.status === 401 || e.status === 403)) {
+          overviewDenied = true;
+          stopPoll();
+          updateMeta();
+          return;
+        }
+        // Otherwise: the failure this page was built around, a load that raced a
+        // server restart. Retry ONCE, soon — waiting out a whole poll interval to
+        // clear an err-note the server stopped meaning 200ms later is the old bug
+        // in slower form. Exactly one per failure STREAK (reset on the next
+        // success), and never from a hidden tab, or a background tab left open
+        // through an outage becomes a 3s poll — 10x the interval it replaces.
+        if (!retryUsed && retryTimer == null && pageVisible()) {
+          retryUsed = true;
           retryTimer = setTimeout(function () {
             retryTimer = null;
-            if (sseState !== 'closed') loadOverview();
+            if (pageVisible()) loadOverview();
           }, OVERVIEW_RETRY_MS);
         }
       });
@@ -772,7 +794,7 @@ export async function renderAgentsPage(): Promise<string> {
     document.addEventListener('visibilitychange', function () {
       // Coming back to the tab: refresh NOW rather than up to a poll late — but
       // no more often than the poll would have, and never into a dead stream.
-      if (!pageVisible() || sseState === 'closed') return;
+      if (!pageVisible() || overviewDenied) return;
       if (Date.now() - lastOverviewAt < OVERVIEW_POLL_MS) return;
       loadOverview();
     });
@@ -800,13 +822,18 @@ export async function renderAgentsPage(): Promise<string> {
       },
       onerror: function () {
         if (sse && sse.source && sse.source.readyState === 2) {
-          // Dead for good. Stop polling a route that is answering the same way
-          // /api/events just did, and say what actually helps.
+          // Dead for good — EventSource never retries a non-200. The LIVE zone is
+          // over until a reload; up-next and recent are not, so the poll keeps
+          // running. Generalising "role-denied /api/events" into "the overview is
+          // denied too" froze the whole page on a 200ms proxy 502.
           sseState = 'closed';
-          stopPoll();
-        } else {
+        } else if (sseState !== 'connecting') {
           sseState = 'reconnecting';
         }
+        // else: still 'connecting'. A first connect that is merely SLOW or was
+        // dropped mid-handshake has never connected, so it is not reconnecting —
+        // and leaving the state alone is also what keeps the first successful
+        // onopen from counting as a RE-connect and firing a second boot fetch.
         updateMeta();
       },
       agent_runs: function (ev) {
@@ -818,7 +845,7 @@ export async function renderAgentsPage(): Promise<string> {
           var key = runningKey(runs);
           if (key !== lastRunningKey) {
             lastRunningKey = key;
-            loadOverview();
+            if (!overviewDenied) loadOverview();
           }
         } catch (e) {}
       }
