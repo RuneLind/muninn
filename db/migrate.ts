@@ -34,6 +34,23 @@ interface MigrationFile {
   ext: string;
 }
 
+/**
+ * The advisory-lock key the migration runner serialises on — the ASCII bytes of
+ * `munn` (0x6d756e6e), so it is recognisable in `pg_locks` and cannot collide
+ * with an application lock chosen by hand.
+ *
+ * Why a lock at all: the runner takes `max: 1` and wraps each migration in
+ * `sql.begin`, which makes ONE run atomic per migration and says nothing about
+ * two runs. Two pods rolling out at the same moment both read
+ * `schema_migrations`, both see the same pending list, and both apply it —
+ * `CREATE TABLE` (no IF NOT EXISTS, as most of `db/migrations/` is written)
+ * then fails in one of them and the deploy reports a crash-loop for a database
+ * that is in fact fine. `pg_advisory_lock` is SESSION-level, so it is held
+ * across the whole pending list rather than per statement, and the loser simply
+ * waits and then finds nothing pending.
+ */
+const MIGRATION_LOCK_KEY = 0x6d756e6e;
+
 async function ensureMigrationsTable(sql: postgres.Sql) {
   await sql`
     CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -100,6 +117,13 @@ export async function runMigrations(
   const say: (...args: unknown[]) => void = opts?.quiet ? () => {} : console.log;
   const sql = postgres(databaseUrl, { max: 1, onnotice: () => {} });
   try {
+    // Taken BEFORE `schema_migrations` is read, because the read is what the
+    // race is about: the pending list has to be computed by a run that already
+    // holds the lock, or the loser applies a list it decided on before the
+    // winner's work existed. Blocking (not `try_advisory_lock`) — a second
+    // rollout should wait for the first and then find nothing pending, not fail
+    // and be restarted by the platform.
+    await sql`SELECT pg_advisory_lock(${MIGRATION_LOCK_KEY})`;
     await ensureMigrationsTable(sql);
     const applied = await getAppliedMigrations(sql);
     const all = await discoverMigrations();
@@ -149,6 +173,12 @@ export async function runMigrations(
     }
     say(`\nDone. Applied ${pending.length} migration(s).`);
   } finally {
+    // Ending the connection would release a session-level lock anyway; the
+    // explicit unlock is here so the lock's lifetime is readable in one place
+    // and so a future caller that keeps the handle open cannot hold it. It is
+    // swallowed because the failure it can report — the connection is already
+    // gone — is exactly the case where the lock is already released.
+    await sql`SELECT pg_advisory_unlock(${MIGRATION_LOCK_KEY})`.catch(() => {});
     await sql.end();
   }
 }

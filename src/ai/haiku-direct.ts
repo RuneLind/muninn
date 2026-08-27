@@ -10,8 +10,40 @@ import {
 } from "../scheduler/executor.ts";
 import type { ConnectorType } from "../bots/config.ts";
 import { getRoleOverride } from "../db/role-overrides.ts";
+import { resolveProfile } from "../config.ts";
 
 const log = getLog("ai", "haiku-router");
+
+/**
+ * The CLI fallback, refused.
+ *
+ * Every path through {@link callHaikuWithFallback} ends at `spawnHaiku`, which
+ * IS the Claude CLI subprocess. The `nais` image ships without it
+ * (`WITH_CLI=false`), so on that profile the fallback is not a fallback: it is
+ * a spawn that fails on ENOENT — or, worse, a `claude` on PATH with no
+ * credential, which sits there until `HAIKU_TIMEOUT_MS` on every extractor
+ * call. Both shapes read as "the assistant is slow" rather than "this pod has
+ * no model credential".
+ *
+ * So on nais the two fallback sites and the ask-for-the-CLI site throw this
+ * instead. It carries the backend that was tried and why, because the operator
+ * question it has to answer is which credential is missing — `gh auth login`
+ * for Copilot, `ANTHROPIC_API_KEY` for the direct SDK.
+ */
+export class HaikuCliUnavailableError extends Error {
+  constructor(
+    readonly backend: HaikuBackend,
+    readonly botName: string,
+    readonly cause_: string,
+    override readonly cause?: unknown,
+  ) {
+    super(
+      `Haiku backend "${backend}" is unavailable for ${botName} and this profile (MUNINN_PROFILE=nais) ` +
+      `has no Claude CLI to fall back to: ${cause_}`,
+    );
+    this.name = "HaikuCliUnavailableError";
+  }
+}
 
 // Decomposer / memory / goal / schedule extractors all emit small JSON blobs.
 // 4096 is comfortable headroom without inviting runaway outputs.
@@ -382,17 +414,29 @@ export async function callHaikuWithFallback(
 ): Promise<HaikuResult> {
   const backend = resolveBackend(opts);
   const botName = opts.botName ?? "haiku";
+  // Read at CALL time, like `isWikiReadonly()` — the router is imported by
+  // modules that never see a `Config`, and a snapshot could only disagree with
+  // what the process actually is.
+  const noCli = resolveProfile() === "nais";
 
   if (backend === "anthropic" && !hasHaikuDirectAuth()) {
     // No auth → skip the attempt entirely rather than failing one call first.
+    if (noCli) throw new HaikuCliUnavailableError(backend, botName, "no Anthropic auth (ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN)");
     log.warn("haiku-router anthropic backend requested but no auth, falling back to CLI", { botName });
   } else if (backend !== "cli") {
     try {
       return await NON_CLI_BACKENDS[backend](prompt, opts);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      if (noCli) throw new HaikuCliUnavailableError(backend, botName, message, err);
       log.warn("haiku-router {backend} failed, falling back to CLI: {error}", { botName, backend, error: message });
     }
+  }
+  if (noCli && backend === "cli") {
+    // The third door into `spawnHaiku`: not a fallback at all, but a bot (or
+    // `HAIKU_BACKEND=cli`) that ASKED for the CLI. Same outcome on nais, and
+    // refusing here rather than letting the spawn fail keeps one error shape.
+    throw new HaikuCliUnavailableError(backend, botName, "the resolved backend IS the CLI (bot connector / haikuBackend / HAIKU_BACKEND)");
   }
   return spawnHaiku(prompt, opts);
 }

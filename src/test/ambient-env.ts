@@ -85,9 +85,20 @@ const AUTH_FLAGS = [
   "NAIS_TOKEN_INTROSPECTION_ENDPOINT",
 ];
 
+/** `MUNINN_PROFILE` is the instance-profile flag by definition — it is the one
+ *  variable whose entire job is to say WHICH DEPLOYMENT this process is. An
+ *  ambient `nais` would drop twelve route groups out of `createDashboardRoutes`
+ *  and turn the Haiku router's CLI fallback into a throw, so the wiki, gardener,
+ *  plans, sync and capture route tests would 404 on the machine that carries it
+ *  and pass on the other — the `MUNINN_WIKI_READONLY` failure again, on a flag
+ *  that moves more surface. The tests that DO exercise it pass an explicit
+ *  `{ profile: "nais" }` or set the variable themselves. */
+const PROFILE_FLAGS = ["MUNINN_PROFILE"];
+
 /** Every name above, in one array. */
 export const AMBIENT_INSTANCE_ENV: readonly string[] = [
   ...WIKI_WRITE_FLAGS,
   ...SYNC_FLAGS,
   ...AUTH_FLAGS,
+  ...PROFILE_FLAGS,
 ];

@@ -79,6 +79,47 @@ export function optionalEnvFlag(name: string): boolean {
   return false;
 }
 
+/** The env var name, so the boot refusal, the docs row and the test agree. */
+export const PROFILE_ENV = "MUNINN_PROFILE";
+
+/**
+ * The serving profiles. `default` is today's muninn — every route registered,
+ * every vertical present. `nais` is the pod: no wiki working trees, no
+ * `yt-dlp`/`ffmpeg`, colleagues on the other side of the door.
+ */
+export const MUNINN_PROFILES = ["default", "nais"] as const;
+export type MuninnProfile = (typeof MUNINN_PROFILES)[number];
+
+/**
+ * `MUNINN_PROFILE` — WHICH DEPLOYMENT this process is, parsed fail-closed.
+ *
+ * Unset ⇒ `default`, so nothing about a laptop or the mini changes. An
+ * unrecognised value THROWS rather than degrading to `default`, for the same
+ * reason `parseAuthMode` throws (`src/auth/mode.ts`) and the inverse of
+ * `optionalEnvFlag`'s warn-and-stay-off rule: here the degrade direction is
+ * "the full surface" — `MUNINN_PROFILE=NAIS-prod` silently serving the wiki,
+ * gardener, plans and logs routes on a pod is exactly the misconfiguration the
+ * variable exists to prevent, and it would arrive with no signal at all.
+ *
+ * A function rather than only a `Config` field for the reason
+ * `wikiReadonlyFromEnv` is one: the two consumers below the config layer — the
+ * route factory (`src/dashboard/routes.ts`, called from unit tests with a
+ * hand-built `{} as Config`) and the Haiku router's CLI-fallback refusal
+ * (`src/ai/haiku-direct.ts`, which takes no `Config` at all) — must not need
+ * `DATABASE_URL`. This is the ONE parse; `loadConfig` calls it too, so the
+ * field and the getter can never disagree.
+ */
+export function resolveProfile(env: Record<string, string | undefined> = process.env): MuninnProfile {
+  const raw = (env[PROFILE_ENV] ?? "").trim().toLowerCase();
+  if (raw === "") return "default";
+  if ((MUNINN_PROFILES as readonly string[]).includes(raw)) return raw as MuninnProfile;
+  throw new Error(
+    `${PROFILE_ENV}="${raw}" is not a known serving profile (expected one of: ${MUNINN_PROFILES.join(", ")}). ` +
+    `Refusing to start: an unrecognised value must not silently degrade to "default", which would ` +
+    `serve the filesystem-bound routes this profile exists to drop.`,
+  );
+}
+
 /**
  * `MUNINN_WIKI_READONLY=1` — this instance must make NO programmatic wiki page
  * CONTENT writes. Exported as a function (not only a `loadConfig()` field)
@@ -226,6 +267,10 @@ export function optionalEnvInt(name: string, defaultValue: number): number {
 export function loadConfig() {
   const whisperModelPath = optionalEnv("WHISPER_MODEL_PATH", "./models/ggml-base.en.bin");
   return {
+    // WHICH deployment this is. Read through `resolveProfile()` — the same
+    // parse the route factory and the Haiku router use, so a field here can
+    // never disagree with what those seams enforce.
+    profile: resolveProfile(),
     dashboardPort: optionalEnvInt("DASHBOARD_PORT", 3010),
     claudeTimeoutMs: optionalEnvInt("CLAUDE_TIMEOUT_MS", 120000),
     claudeModel: optionalEnv("CLAUDE_MODEL", "sonnet"),

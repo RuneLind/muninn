@@ -89,6 +89,66 @@ jobs:
       # `bun test` process (see CLAUDE.md, Testing).
       - run: bun run test
 
+  # The image's two build ARGs decide what a deployment CAN do, and neither is
+  # visible to tsc or to any suite: `WITH_MEDIA=false` removes ffmpeg (the
+  # capture verticals' transcode/keyframe half) and `WITH_CLI=false` removes the
+  # Claude CLI (`resolveConnector`'s default backend, and every `spawnHaiku`).
+  # Both DEFAULT ON because docker-compose builds this same Dockerfile; a
+  # regression that dropped them unconditionally would break that deployment
+  # silently, and a regression that ignored the args would ship the serving
+  # profile an image carrying a CLI it has no credential for.
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # `docker build` on the runner image is BuildKit, the same engine the
+      # `COPY bot[s]` glob behaviour below was measured on.
+      - name: Build the default image (no build args)
+        run: docker build -t muninn:default .
+      - name: Default image carries ffmpeg AND the Claude CLI
+        # `--entrypoint` because the image's ENTRYPOINT is the migrate-then-serve
+        # script; without it these words would be arguments to a booting server.
+        run: |
+          docker run --rm --entrypoint sh muninn:default -c 'command -v ffmpeg' \
+            || { echo "::error::ffmpeg missing from the DEFAULT image — docker-compose's capture verticals need it"; exit 1; }
+          docker run --rm --entrypoint sh muninn:default -c 'command -v claude' \
+            || { echo "::error::the Claude CLI is missing from the DEFAULT image — resolveConnector falls back to claude-cli"; exit 1; }
+      - name: Build the serving-profile image (both args off)
+        run: docker build --build-arg WITH_MEDIA=false --build-arg WITH_CLI=false -t muninn:nais .
+      - name: Serving-profile image carries NEITHER
+        run: |
+          if docker run --rm --entrypoint sh muninn:nais -c 'command -v ffmpeg'; then
+            echo "::error::ffmpeg is present despite WITH_MEDIA=false"; exit 1
+          fi
+          if docker run --rm --entrypoint sh muninn:nais -c 'command -v claude'; then
+            echo "::error::the Claude CLI is present despite WITH_CLI=false"; exit 1
+          fi
+      - name: The bots/ glob tolerates a context with no bot folder, and says so
+        # This repo's `.dockerignore` excludes `bots/`, so EVERY build here is the
+        # no-bot-folder case — which is the half the public repo can test. The
+        # positive case (a context that does ship bot folders) belongs to the
+        # internal deploy repo, which carries its own dockerignore.
+        run: |
+          docker build --no-cache --progress=plain -t muninn:noboots . 2>&1 | tee build.log
+          grep -q "no bots/ in the build context" build.log \
+            || { echo "::error::the bots/ COPY check did not report the empty-context case"; exit 1; }
+          # And the image really has no bot folders — a COPY form that silently
+          # copied nothing and a COPY form that worked look identical from the
+          # build log alone.
+          test -z "$(docker run --rm --entrypoint sh muninn:noboots -c 'ls -A ./bots 2>/dev/null')" \
+            || { echo "::error::bots/ landed in an image built from a context that excludes it"; exit 1; }
+      - name: The HEALTHCHECK probe resolves its port from the environment
+        # The mechanism, exercised without booting a server: BuildKit does NOT
+        # substitute build-time variables into HEALTHCHECK, so the port is read
+        # by the probe itself at runtime. This asserts that read, not the fetch.
+        run: |
+          PORT=$(docker run --rm -e DASHBOARD_PORT=4321 --entrypoint sh muninn:default \
+            -c 'bun -e "console.log(process.env.DASHBOARD_PORT || 3000)"')
+          test "$PORT" = "4321" || { echo "::error::probe port did not resolve from DASHBOARD_PORT (got '$PORT')"; exit 1; }
+          PORT=$(docker run --rm --entrypoint sh muninn:default \
+            -c 'bun -e "console.log(process.env.DASHBOARD_PORT || 3000)"')
+          test "$PORT" = "3000" || { echo "::error::probe port did not default to 3000 (got '$PORT')"; exit 1; }
+
   e2e:
     runs-on: ubuntu-latest
     services:

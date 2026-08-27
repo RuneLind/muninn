@@ -153,7 +153,24 @@ export async function processMessage(params: ProcessMessageParams): Promise<Proc
   // `userId` is what scopes both the waterfall and the phase indicator to this
   // turn's owner — a run without it is visible only on the operator surfaces.
   const requestId = agentStatus.startRequest(botConfig.name, "receiving", username, { userId });
-  log.info("Message from {username}: \"{preview}\"", { ...props, preview: text.slice(0, 80) + (text.length > 80 ? "..." : "") });
+  // The one log line that carries message CONTENT — an 80-char preview plus the
+  // username. On a personal instance that is the operator reading their own
+  // chat; on the nais profile the pod's stdout is a shared log aggregator and
+  // the previews are colleagues' messages, so the line drops to `debug` (off by
+  // default) there.
+  //
+  // Branched HERE, at the call site, on the profile this function already
+  // receives — NOT by raising the category's LogTape threshold, which would
+  // also silence the two content-free lines around it ("Response sent…",
+  // "Processing failed…") and leave a pod turn with no per-turn observability
+  // at all. Line 151's activity_log push keeps the FULL text: that row is
+  // admin-zone by design and is how an operator reconstructs a turn.
+  const preview = text.slice(0, 80) + (text.length > 80 ? "..." : "");
+  if (config.profile === "nais") {
+    log.debug("Message from {username}: \"{preview}\"", { ...props, preview });
+  } else {
+    log.info("Message from {username}: \"{preview}\"", { ...props, preview });
+  }
 
   // The request is now tracked in agent-status. Everything from here — DB save,
   // prompt assembly, connector call — runs inside the try so any failure routes
