@@ -28,7 +28,7 @@
  *   bun scripts/setup-anthropic-watchers.ts             # dry-run — prints the plan
  *   bun scripts/setup-anthropic-watchers.ts --apply     # writes to the DB
  */
-import postgres from "postgres";
+import { openPostgres } from "../db/postgres-connection.ts";
 import { loadConfig } from "../src/config.ts";
 import { DEFAULT_ANTHROPIC_WEEKLY_PROMPT } from "../src/watchers/anthropic.ts";
 
@@ -43,7 +43,7 @@ const SONNET = "claude-sonnet-4-6";
 const TIMEOUT_MS = 300000; // clears the runner's 120s watcher-timeout floor (net = +30s)
 
 const config = loadConfig();
-const sql = postgres(config.databaseUrl, { max: 1 });
+const { sql } = openPostgres(config.databaseUrl, { max: 1 });
 
 /** Highlights: real-time, quiet, AND the capture source for the Candidates → Summaries
  *  inbox (Phase B). Keeps the base row's warm ids/snapshots. No `feeds` key (tracks the

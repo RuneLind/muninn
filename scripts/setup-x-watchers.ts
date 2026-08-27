@@ -14,7 +14,7 @@
  *   bun scripts/setup-x-watchers.ts             # dry-run — prints the plan
  *   bun scripts/setup-x-watchers.ts --apply     # writes to the DB
  */
-import postgres from "postgres";
+import { openPostgres } from "../db/postgres-connection.ts";
 import { loadConfig } from "../src/config.ts";
 import { DEFAULT_X_PROMPT, DEFAULT_X_HIGHLIGHTS_PROMPT } from "../src/watchers/x.ts";
 
@@ -37,7 +37,7 @@ Format rules:
 const apply = process.argv.includes("--apply");
 
 const config = loadConfig();
-const sql = postgres(config.databaseUrl, { max: 1 });
+const { sql } = openPostgres(config.databaseUrl, { max: 1 });
 
 async function main() {
   const [timeline] = await sql`

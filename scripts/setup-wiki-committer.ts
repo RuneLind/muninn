@@ -30,7 +30,7 @@
  *   bun scripts/setup-wiki-committer.ts            # dry-run — prints the plan
  *   bun scripts/setup-wiki-committer.ts --apply    # writes to the DB
  */
-import postgres from "postgres";
+import { openPostgres } from "../db/postgres-connection.ts";
 import { loadConfig } from "../src/config.ts";
 
 const apply = process.argv.includes("--apply");
@@ -44,7 +44,7 @@ const committerConfig = {
 };
 
 const config = loadConfig();
-const sql = postgres(config.databaseUrl, { max: 1 });
+const { sql } = openPostgres(config.databaseUrl, { max: 1 });
 
 async function main() {
   const botName = process.env.OWNER_BOT_NAME ?? "jarvis";

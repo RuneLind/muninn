@@ -171,8 +171,11 @@ jobs:
         # would ship, and memory search would return nothing in a pod with no
         # egress to the model host — with the pod reporting healthy throughout.
         run: |
-          if ! docker run --rm --entrypoint sh muninn:nais -c 'test -s node_modules/@huggingface/transformers/.cache/Xenova/all-MiniLM-L6-v2/tokenizer.json'; then
-            echo "::error::WITH_EMBEDDINGS=true produced no model cache"; exit 1
+          # The ONNX weights, not tokenizer.json: the weights are the ~23 MB the
+          # build-time egress actually buys, and a cache holding only the 711 KB
+          # tokenizer would pass the weaker check.
+          if ! docker run --rm --entrypoint sh muninn:nais -c 'test -s node_modules/@huggingface/transformers/.cache/Xenova/all-MiniLM-L6-v2/onnx/model_quantized.onnx'; then
+            echo "::error::WITH_EMBEDDINGS=true produced no model weights"; exit 1
           fi
       - name: A build arg that is neither true nor false FAILS the build
         # Both args are read as `= "true"`, so an unvalidated `WITH_CLI=0` would

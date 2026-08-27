@@ -57,14 +57,6 @@ USER root
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile --production
 
-# Source
-COPY src ./src
-COPY db ./db
-# The entrypoint is committed 100755 and COPY preserves the mode, so no chmod
-# layer.
-COPY scripts/docker-entrypoint.sh ./scripts/
-COPY tsconfig.json ./
-
 # Embedding model, baked.
 #
 # `warmupEmbeddings()` runs at boot and downloads Xenova/all-MiniLM-L6-v2 on
@@ -73,24 +65,45 @@ COPY tsconfig.json ./
 # returns nothing. Baking converts that runtime degradation into a build-time
 # fact. nais egress is default-deny, which is exactly where it would have bitten.
 #
-# ⚠️ The throwing path, not `warmupEmbeddings()`. That helper swallows the error,
-# so a builder with no egress would SUCCEED and ship an empty cache — preserving
-# the precise silent failure the bake exists to remove. `generateEmbedding`
-# returns `null` on failure, so a null check is the equivalent assertion.
+# Two things about this block are deliberate and easy to "tidy" into a bug:
+#
+# 1. It runs through `loadEmbeddingModel()`, which is the only entry point in
+#    `src/ai/embeddings.ts` that THROWS. The other two swallow — one logs (into
+#    an unconfigured LogTape no-op out here), one returns null — so a build
+#    driven by either could succeed with an empty cache, preserving the precise
+#    silent failure this step exists to remove.
+# 2. It sits directly after `bun install`, behind a COPY of the two source files
+#    it actually needs, rather than after `COPY src`. Placed there, every commit
+#    to any file in src/ re-ran it: a 23 MB fetch, and a hard dependency on
+#    huggingface.co being reachable for an urgent rollback build of something
+#    unrelated. The narrow COPY keeps the model id and dtype in ONE place —
+#    re-stating them in a `pipeline(...)` call here would let a dtype change in
+#    embeddings.ts silently invalidate the bake, which is the same bug wearing a
+#    different hat.
 #
 # The weights land in `node_modules/@huggingface/transformers/.cache/` (~23 MB),
-# a directory this image builds itself — hence a RUN here and not a COPY of a
+# a directory this image builds itself — hence a RUN and not a COPY of a
 # checked-in blob, which would put a binary in the public repo's git history.
-# This step needs egress to the model host at BUILD time; the saving is runtime.
+# ⚠️ This step needs egress to the model host at BUILD time; the saving is a
+# runtime one.
 ARG WITH_EMBEDDINGS
+COPY src/logging.ts ./src/logging.ts
+COPY src/ai/embeddings.ts ./src/ai/embeddings.ts
 RUN if [ "$WITH_EMBEDDINGS" = "true" ]; then \
-      bun -e 'const { generateEmbedding } = await import("./src/ai/embeddings.ts"); \
-              const v = await generateEmbedding("warmup"); \
-              if (!v || v.length === 0) { console.error("[build] embedding warmup produced nothing"); process.exit(1); } \
-              console.log("[build] embedding model baked (dim " + v.length + ")");'; \
+      bun -e 'const { loadEmbeddingModel } = await import("./src/ai/embeddings.ts"); \
+              await loadEmbeddingModel(); \
+              console.log("[build] embedding model baked");'; \
     else \
       echo "[build] embedding model NOT baked — it will be downloaded at first use"; \
     fi
+
+# Source
+COPY src ./src
+COPY db ./db
+# The entrypoint is committed 100755 and COPY preserves the mode, so no chmod
+# layer.
+COPY scripts/docker-entrypoint.sh ./scripts/
+COPY tsconfig.json ./
 
 # Bot folders, if the build context has any.
 #

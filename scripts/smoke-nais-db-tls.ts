@@ -33,9 +33,19 @@ import { join } from "node:path";
 import postgres from "postgres";
 import { openPostgres } from "../db/postgres-connection.ts";
 
-const CONTAINER = "muninn-smoke-nais-tls";
-const IMAGE = "muninn-smoke-nais-tls:local";
+// Names carry the pid: two runs of this script overlapped once, and the second
+// `docker rm -f` took the first's container out from under it — the kept certs
+// no longer matched the running server, producing a false RED. A false GREEN is
+// equally reachable that way.
+const RUN_ID = String(process.pid);
+const CONTAINER = `muninn-smoke-nais-tls-${RUN_ID}`;
+const PLAIN_CONTAINER = `muninn-smoke-nais-plain-${RUN_ID}`;
+const IMAGE = `muninn-smoke-nais-tls:${RUN_ID}`;
 const PORT = 55432;
+/** A second, ordinary server. The startup-packet failure can only be shown
+ *  where a plaintext connection is admitted — and admitting one on the TLS
+ *  server would gut the assertion above it. */
+const PLAIN_PORT = 55433;
 const DB = "muninn";
 const USER = "muninn";
 /** The name on the server certificate. Deliberately not `127.0.0.1`. */
@@ -54,13 +64,16 @@ function check(label: string, ok: boolean, detail = "") {
 }
 
 async function cleanup() {
-  // `KEEP=1` leaves the container and the certificates behind — the only way to
-  // read `docker logs` when the server refuses to start.
+  // `KEEP=1` leaves the containers and the certificates behind — the only way
+  // to read `docker logs` when a server refuses to start.
   if (process.env.KEEP === "1") {
-    console.log(`\nKEEP=1 — container ${CONTAINER} and ${dir} left in place`);
+    console.log(`\nKEEP=1 — containers ${CONTAINER}, ${PLAIN_CONTAINER} and ${dir} left in place`);
     return;
   }
   await $`docker rm -f ${CONTAINER}`.nothrow().quiet();
+  await $`docker rm -f ${PLAIN_CONTAINER}`.nothrow().quiet();
+  // The image too: a fixed tag left a 661 MB layer set behind on every run.
+  await $`docker rmi -f ${IMAGE}`.nothrow().quiet();
   rmSync(dir, { recursive: true, force: true });
 }
 
@@ -94,11 +107,13 @@ async function main() {
       // makes case 1 a real assertion rather than "TLS happened to be optional".
       "hostssl all   all   0.0.0.0/0    cert",
       "hostssl all   all   ::/0         cert",
-      // Plaintext is allowed only AFTER the two hostssl lines, which a TLS
-      // connection matches first. It exists so the startup-packet case below
-      // can actually reach the startup packet — on a TLS-only server the
-      // handshake dies first and hides the defect being demonstrated.
-      "host    all   all   0.0.0.0/0    trust",
+      // NO plaintext line. An earlier version had one, so that the
+      // startup-packet case below could reach a startup packet — and it
+      // silently negated check 1: a client that never sends SSLRequest matched
+      // the trust line and was admitted, so the assertion passed over an
+      // unencrypted, un-authenticated session. The plaintext case gets its own
+      // server instead (PLAIN_PORT), and check 1 now reads pg_stat_ssl rather
+      // than trusting that `select 1` implies TLS.
       "",
     ].join("\n"),
   );
@@ -121,14 +136,20 @@ async function main() {
   const run = await $`docker run -d --name ${CONTAINER} -p ${`${PORT}:5432`} -e POSTGRES_USER=${USER} -e POSTGRES_PASSWORD=smoke -e POSTGRES_DB=${DB} ${IMAGE} -c hba_file=/certs/pg_hba.conf -c ssl=on -c ssl_cert_file=/certs/server.pem -c ssl_key_file=/certs/server.key -c ssl_ca_file=/certs/ca.pem`.nothrow().quiet();
   if (run.exitCode !== 0) throw new Error(`docker run failed: ${run.stderr.toString()}`);
 
+  await $`docker rm -f ${PLAIN_CONTAINER}`.nothrow().quiet();
+  const plain = await $`docker run -d --name ${PLAIN_CONTAINER} -p ${`${PLAIN_PORT}:5432`} -e POSTGRES_USER=${USER} -e POSTGRES_PASSWORD=smoke -e POSTGRES_DB=${DB} -e POSTGRES_HOST_AUTH_METHOD=trust postgres:17`.nothrow().quiet();
+  if (plain.exitCode !== 0) throw new Error(`docker run (plain) failed: ${plain.stderr.toString()}`);
+
   // Wait for readiness. `pg_isready` runs inside the container over the unix
   // socket, so it is unaffected by the TLS rules we are here to test.
   const deadline = Date.now() + 60_000;
-  for (;;) {
-    const r = await $`docker exec ${CONTAINER} pg_isready -U ${USER}`.nothrow().quiet();
-    if (r.exitCode === 0) break;
-    if (Date.now() > deadline) throw new Error("postgres did not become ready in 60s");
-    await Bun.sleep(500);
+  for (const name of [CONTAINER, PLAIN_CONTAINER]) {
+    for (;;) {
+      const r = await $`docker exec ${name} pg_isready -U ${USER}`.nothrow().quiet();
+      if (r.exitCode === 0) break;
+      if (Date.now() > deadline) throw new Error(`${name} did not become ready in 60s`);
+      await Bun.sleep(500);
+    }
   }
 
   // --- the URLs nais would hand us ----------------------------------------
@@ -138,10 +159,23 @@ async function main() {
     `${base}?sslcert=${enc("client.pem")}&sslkey=${enc("client.key")}` +
     `&sslrootcert=${enc("ca.pem")}&sslmode=verify-ca`;
 
-  const tryQuery = async (sql: postgres.Sql): Promise<string> => {
+  /**
+   * Asks the SERVER what kind of session this is, rather than inferring it from
+   * a successful `select 1`. That inference is what let a plaintext connection
+   * pass check 1 for a whole review round: the query worked, so the TLS was
+   * assumed. `pg_stat_ssl` cannot be fooled that way.
+   */
+  const tryQuery = async (sql: postgres.Sql, requireTls = false): Promise<string> => {
     try {
-      const [row] = await sql`select 1 as ok`;
-      return row?.ok === 1 ? "" : `unexpected row ${JSON.stringify(row)}`;
+      const [row] = await sql`
+        SELECT ssl, version, client_dn FROM pg_stat_ssl WHERE pid = pg_backend_pid()
+      `;
+      if (requireTls) {
+        if (!row?.ssl) return `connected WITHOUT TLS (pg_stat_ssl.ssl = ${row?.ssl})`;
+        if (!row?.client_dn) return `connected over ${row.version} but presented NO client certificate`;
+        console.log(`    · server sees: ${row.version}, client_dn=${row.client_dn}`);
+      }
+      return "";
     } catch (err) {
       const e = err as { code?: string; message?: string };
       return `${e.code ?? ""} ${e.message ?? String(err)}`.trim();
@@ -153,8 +187,12 @@ async function main() {
   console.log("\nthe fix:");
   const { sql, notes } = openPostgres(naisUrl, { max: 1, onnotice: () => {} });
   for (const n of notes) console.log(`    · ${n}`);
-  const okErr = await tryQuery(sql);
-  check("openPostgres connects with the nais-shaped URL", okErr === "", okErr);
+  const okErr = await tryQuery(sql, true);
+  check(
+    "openPostgres connects over TLS, presenting the client certificate",
+    okErr === "",
+    okErr,
+  );
 
   console.log("\nwhat it replaces (all three must fail):");
   const rawErr = await tryQuery(postgres(naisUrl, { max: 1, onnotice: () => {} }));
@@ -164,8 +202,11 @@ async function main() {
   // the same defect seen from two sides; the case below isolates the other one.
   check("raw postgres() cannot use the nais URL at all", rawErr !== "", rawErr || "it connected");
 
+  // Against the PLAINTEXT server: the startup packet is only reached where a
+  // plaintext connection is admitted at all.
+  const plainBase = `postgresql://${USER}:smoke@127.0.0.1:${PLAIN_PORT}/${DB}`;
   const certOnlyErr = await tryQuery(
-    postgres(`${base}?sslcert=${enc("client.pem")}`, { max: 1, onnotice: () => {} }),
+    postgres(`${plainBase}?sslcert=${enc("client.pem")}`, { max: 1, onnotice: () => {} }),
   );
   check(
     "raw postgres() forwards sslcert into the startup packet",

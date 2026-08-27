@@ -204,7 +204,11 @@ if (import.meta.main) {
   }
 
   if (STATUS) {
-    const { sql } = openPostgres(DATABASE_URL, { max: 1, onnotice: () => {} });
+    // The notes are printed here too: --status and --dry-run are the two paths
+    // an operator uses to DIAGNOSE a connection, and they were the two that
+    // said nothing about how it was made.
+    const { sql, notes } = openPostgres(DATABASE_URL, { max: 1, onnotice: () => {} });
+    for (const note of notes) console.log(`  TLS: ${note}`);
     await ensureMigrationsTable(sql);
     const applied = await getAppliedMigrations(sql);
     const all = await discoverMigrations();
@@ -218,7 +222,11 @@ if (import.meta.main) {
     console.log(`\n${applied.size} applied, ${pending.length} pending`);
     await sql.end();
   } else if (DRY_RUN) {
-    const { sql } = openPostgres(DATABASE_URL, { max: 1, onnotice: () => {} });
+    // The notes are printed here too: --status and --dry-run are the two paths
+    // an operator uses to DIAGNOSE a connection, and they were the two that
+    // said nothing about how it was made.
+    const { sql, notes } = openPostgres(DATABASE_URL, { max: 1, onnotice: () => {} });
+    for (const note of notes) console.log(`  TLS: ${note}`);
     await ensureMigrationsTable(sql);
     const applied = await getAppliedMigrations(sql);
     const all = await discoverMigrations();

@@ -13,6 +13,7 @@ import {
   parsePostgresUrl,
   buildSslOption,
   resolvePostgresConnection,
+  openPostgres,
 } from "./postgres-connection.ts";
 
 /** The shape nais injects for a private-IP Cloud SQL instance, verbatim modulo
@@ -76,6 +77,35 @@ describe("parsePostgresUrl", () => {
     expect(parsePostgresUrl("postgresql://u:p@[::1]:5432/x").hostIsIp).toBe(true);
   });
 
+  test("a repeated parameter takes the LAST value, as libpq does", () => {
+    // First-wins would be a silent DOWNGRADE here: `disable` then `verify-ca`
+    // read as `disable` connects in plaintext to a server the URL asked to
+    // verify.
+    expect(parsePostgresUrl("postgresql://u:p@h/db?sslmode=disable&sslmode=verify-ca").sslmode)
+      .toBe("verify-ca");
+    expect(parsePostgresUrl("postgresql://u:p@h/db?sslmode=require&sslmode=disable").sslmode)
+      .toBe("disable");
+  });
+
+  test("ssl parameters are stripped case-insensitively", () => {
+    // URLSearchParams is case-sensitive, so an uppercase spelling would survive
+    // into the startup packet — the very failure this module removes.
+    const parsed = parsePostgresUrl(
+      "postgresql://u:p@h/db?SSLMODE=verify-ca&SSLRootCert=%2Fr.pem&SSLKEY_PK8=%2Fk",
+    );
+    expect(parsed.sslmode).toBe("verify-ca");
+    expect(parsed.sslrootcert).toBe("/r.pem");
+    expect(new URL(parsed.url).search).toBe("");
+    expect(parsed.dropped).toEqual(["sslkey_pk8"]);
+  });
+
+  test("the ?? repair is anchored to the query delimiter", () => {
+    // A blanket replace corrupts a value that legitimately contains `??`.
+    const parsed = parsePostgresUrl("postgresql://u:p@h/db?a=x%3F%3Fy&sslmode=require");
+    expect(new URL(parsed.url).searchParams.get("a")).toBe("x??y");
+    expect(parsed.sslmode).toBe("require");
+  });
+
   test("an unknown sslmode is refused rather than guessed at", () => {
     expect(() => parsePostgresUrl("postgresql://u:p@h/db?sslmode=maybe")).toThrow(/Unsupported sslmode/);
   });
@@ -124,9 +154,27 @@ describe("buildSslOption", () => {
     expect(buildSslOption(parsed, readFake).ssl).toBeUndefined();
   });
 
-  test("sslmode=require with no material hands postgres.js its own string", () => {
-    const parsed = parsePostgresUrl("postgresql://u:p@h:5432/db?sslmode=require");
-    expect(buildSslOption(parsed, readFake).ssl).toBe("require");
+  test("require/allow/prefer are handed back AS THEMSELVES, not collapsed", () => {
+    // Collapsing onto "require" cost `prefer` its plaintext fallback — libpq's
+    // default mode, and a plain local server that had worked stopped working.
+    for (const mode of ["require", "allow", "prefer"] as const) {
+      const parsed = parsePostgresUrl(`postgresql://u:p@h:5432/db?sslmode=${mode}`);
+      expect(buildSslOption(parsed, readFake).ssl).toBe(mode);
+    }
+  });
+
+  test("sslrootcert=system means the platform CA bundle, not a file", () => {
+    // libpq 16's sentinel. Reading it as a path is an ENOENT on a file called
+    // "system" — a boot failure for any managed Postgres behind a public CA.
+    const parsed = parsePostgresUrl(
+      "postgresql://u:p@db.example:5432/x?sslmode=verify-full&sslrootcert=system",
+    );
+    const { ssl, notes } = buildSslOption(parsed, () => {
+      throw new Error("must not read anything");
+    });
+    expect(ssl).toMatchObject({ rejectUnauthorized: true });
+    expect((ssl as { ca?: unknown }).ca).toBeUndefined();
+    expect(notes.join(" ")).toContain("platform CA bundle");
   });
 
   test("sslmode=require WITH a client certificate still presents it", () => {
@@ -160,6 +208,48 @@ describe("resolvePostgresConnection", () => {
   });
 });
 
+describe("openPostgres wiring", () => {
+  /**
+   * The JOIN, which the two pure functions above cannot pin between them: a
+   * `postgres(url, options)` that drops the built `ssl` leaves every other test
+   * in this file green while connecting in plaintext. postgres.js exposes its
+   * resolved options, so this is checkable without a server.
+   */
+  test("the built ssl option reaches the client", () => {
+    const { sql } = openPostgres(
+      "postgresql://u:p@10.0.0.1:5432/db?sslrootcert=%2Fca.pem&sslmode=verify-ca",
+      { max: 1 },
+      (path) => (path === "/ca.pem" ? "ROOT" : (() => { throw new Error("ENOENT"); })()),
+    );
+    const ssl = (sql.options as { ssl?: unknown }).ssl;
+    expect(ssl).toMatchObject({ ca: "ROOT", rejectUnauthorized: true });
+  });
+
+  test("the URL handed to the client carries no ssl parameters", () => {
+    // Re-introducing the original bug — passing `raw` through — must fail here.
+    const { sql } = openPostgres(NAIS_URL, { max: 1 }, readFake);
+    const opts = sql.options as { database?: string; connection?: Record<string, unknown> };
+    expect(opts.database).toBe("muninn");
+    // `connection` is what postgres.js sends as startup parameters. An `sslcert`
+    // in there is the exact 42704 this module exists to remove.
+    expect(Object.keys(opts.connection ?? {}).filter((k) => k.startsWith("ssl"))).toEqual([]);
+  });
+
+  test("a plain URL still produces a client with no ssl", () => {
+    const { sql } = openPostgres("postgresql://muninn:muninn@127.0.0.1:5435/muninn", { max: 1 });
+    expect((sql.options as { ssl?: unknown }).ssl).toBe(false);
+  });
+
+  test("an empty-named parameter never reaches the startup packet", () => {
+    // The belt to the `??` repair's suspenders. NB the input is `?=x`, not
+    // `?&`: an EMPTY segment is dropped by URLSearchParams outright, so `?&`
+    // never produces the key this line removes and would pin nothing.
+    const { sql } = openPostgres("postgresql://u:p@h:5432/db?=x&sslmode=require", { max: 1 });
+    expect(Object.keys((sql.options as { connection?: Record<string, unknown> }).connection ?? {}))
+      .not.toContain("");
+  });
+});
+
 describe("call sites", () => {
   /**
    * The pin that keeps this fix from going inert. A fourth `postgres(` written
@@ -178,6 +268,9 @@ describe("call sites", () => {
     // Provisions the local test database from `src/test/test-db-url.ts`, whose
     // URLs are plain by construction — no nais URL ever reaches it.
     "db/setup-test-db.ts",
+    // The negative control: it must construct raw clients to demonstrate the
+    // failures `openPostgres` removes.
+    "scripts/smoke-nais-db-tls.ts",
   ]);
 
   test("nothing constructs a postgres client except openPostgres", async () => {
@@ -195,7 +288,15 @@ describe("call sites", () => {
 
     const root = join(import.meta.dir, "..");
     const offenders: string[] = [];
-    for (const file of [...walk(join(root, "src")), ...walk(join(root, "db"))]) {
+    // `scripts/` is walked too, and that is not thoroughness for its own sake:
+    // seven scripts there constructed their own clients, and they are exactly
+    // the operator tools a `kubectl debug` runs INSIDE the pod, against the
+    // nais URL, where a raw client fails on the startup packet.
+    for (const file of [
+      ...walk(join(root, "src")),
+      ...walk(join(root, "db")),
+      ...walk(join(root, "scripts")),
+    ]) {
       const rel = relative(root, file);
       // Tests dial the local test database directly and legitimately.
       if (EXEMPT.has(rel) || rel.endsWith(".test.ts")) continue;

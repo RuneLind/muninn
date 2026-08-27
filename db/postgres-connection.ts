@@ -48,6 +48,12 @@ import { isIP } from "node:net";
  *  refused rather than guessed at — see `buildSslOption`. */
 export type SslMode = "disable" | "allow" | "prefer" | "require" | "verify-ca" | "verify-full";
 
+/** The three modes postgres.js implements itself, as a literal string. The
+ *  others are either "no TLS" (`disable`) or need the `ssl` OBJECT, which is
+ *  what this module builds — postgres.js's own type does not accept them as
+ *  strings, which is a useful confirmation rather than a limitation. */
+export type PassthroughSslMode = "allow" | "prefer" | "require";
+
 const SSL_MODES: readonly string[] = [
   "disable",
   "allow",
@@ -98,12 +104,27 @@ export interface ParsedPostgresUrl {
  * friends are startup parameters the server really does understand.
  */
 export function parsePostgresUrl(raw: string): ParsedPostgresUrl {
-  const normalised = raw.replace(/\?\?/, "?");
-  const url = new URL(normalised);
+  const url = new URL(repairDoubleQuestionMark(raw));
 
+  // Case-insensitive, and last-wins, because both differ from the obvious
+  // implementation in a direction that matters. `URLSearchParams` is
+  // case-SENSITIVE, so a `SSLMODE=` would survive the sweep below and land in
+  // the startup packet — the exact failure this module exists to prevent. And
+  // `.get()` returns the FIRST of a repeated key while libpq takes the LAST, so
+  // `?sslmode=disable&sslmode=verify-ca` would have been read as `disable`: a
+  // silent downgrade, which is the one class of bug worth extra code here.
+  const byLowerName = new Map<string, string[]>();
+  for (const key of url.searchParams.keys()) {
+    const lower = key.toLowerCase();
+    if (!byLowerName.has(lower)) byLowerName.set(lower, []);
+    byLowerName.get(lower)!.push(key);
+  }
   const take = (name: string): string | undefined => {
-    const value = url.searchParams.get(name) ?? undefined;
-    url.searchParams.delete(name);
+    let value: string | undefined;
+    for (const key of byLowerName.get(name) ?? []) {
+      value = url.searchParams.getAll(key).at(-1) ?? value;
+      url.searchParams.delete(key);
+    }
     return value && value.length > 0 ? value : undefined;
   };
 
@@ -112,21 +133,27 @@ export function parsePostgresUrl(raw: string): ParsedPostgresUrl {
   const sslrootcert = take("sslrootcert");
   const rawMode = take("sslmode");
 
-  // A `??` that slipped through as an empty-named parameter. Dropping it is
-  // always right: there is no Postgres GUC named "".
+  // An empty-named parameter, which a stray `?` produces. Dropping it is always
+  // right: there is no Postgres GUC named "".
   url.searchParams.delete("");
 
   // Anything else in the ssl family — `sslkey_pk8` today, whatever nais adds
   // next. `sslnegotiation` stays: it is one of postgres.js's own option names.
   const dropped: string[] = [];
-  for (const name of [...url.searchParams.keys()]) {
-    if (name.startsWith("ssl") && name !== "sslnegotiation") {
-      url.searchParams.delete(name);
-      dropped.push(name);
+  for (const [lower, keys] of byLowerName) {
+    if (!lower.startsWith("ssl") || lower === "sslnegotiation") continue;
+    let removedOne = false;
+    for (const key of keys) {
+      if (url.searchParams.has(key)) {
+        url.searchParams.delete(key);
+        removedOne = true;
+      }
     }
+    if (removedOne) dropped.push(lower);
   }
 
-  if (rawMode !== undefined && !SSL_MODES.includes(rawMode)) {
+  const mode = rawMode?.toLowerCase();
+  if (mode !== undefined && !SSL_MODES.includes(mode)) {
     throw new Error(
       `Unsupported sslmode="${rawMode}" in the database URL. Expected one of ${SSL_MODES.join(", ")}.`,
     );
@@ -134,7 +161,7 @@ export function parsePostgresUrl(raw: string): ParsedPostgresUrl {
 
   return {
     url: url.toString(),
-    sslmode: rawMode as SslMode | undefined,
+    sslmode: mode as SslMode | undefined,
     sslcert,
     sslkey,
     sslrootcert,
@@ -142,6 +169,22 @@ export function parsePostgresUrl(raw: string): ParsedPostgresUrl {
     hostIsIp: isIP(url.hostname.replace(/^\[|\]$/g, "")) !== 0,
     dropped,
   };
+}
+
+/**
+ * Repair the `??` nais has been observed to inject between the path and the
+ * query — and ONLY that one, at the position where it happens.
+ *
+ * A blanket `replace(/\?\?/g, "?")` corrupts a parameter whose *value*
+ * contains `??`, and the un-anchored single replace this started as could eat a
+ * `?` from anywhere in the URL. So: find the first `?` (the query delimiter)
+ * and drop a second one immediately after it. Everything to the right is left
+ * exactly as written.
+ */
+function repairDoubleQuestionMark(raw: string): string {
+  const q = raw.indexOf("?");
+  if (q === -1 || raw[q + 1] !== "?") return raw;
+  return raw.slice(0, q + 1) + raw.slice(q + 2);
 }
 
 /** The subset of node's TLS options postgres.js spreads into `tls.connect`.
@@ -158,7 +201,7 @@ export interface PostgresSslOption {
 export interface SslBuildResult {
   /** What to pass as `postgres(url, { ssl })`. `undefined` ⇒ no TLS at all,
    *  which is `sslmode=disable` or a URL that carried no SSL parameters. */
-  ssl?: PostgresSslOption | "require";
+  ssl?: PostgresSslOption | PassthroughSslMode;
   /** One line per decision, for the boot log. An operator debugging a refused
    *  connection needs to know which files were read and whether the hostname
    *  check was waived, and neither is visible from the URL afterwards. */
@@ -194,12 +237,15 @@ export function buildSslOption(
   }
 
   // `require`/`allow`/`prefer` mean "encrypt, but do not verify who you are
-  // talking to". postgres.js already implements exactly that for the literal
-  // string, including the SSLRequest negotiation, so hand it back rather than
-  // reimplementing the relaxation in an object.
+  // talking to". postgres.js implements all three for the literal string,
+  // including the SSLRequest negotiation, so hand back the mode ITSELF rather
+  // than a stand-in. Collapsing them onto `"require"` is not equivalent:
+  // `prefer` (libpq's default, and a common hand-written dev URL) falls back to
+  // plaintext when the server says no, and `require` does not — measured, that
+  // substitution broke a plain local server that had worked.
   if ((mode === "require" || mode === "allow" || mode === "prefer") && !hasMaterial) {
     notes.push(`sslmode=${mode} — TLS without certificate verification`);
-    return { ssl: "require", notes };
+    return { ssl: mode, notes };
   }
 
   const read = (path: string, what: string): string => {
@@ -218,7 +264,14 @@ export function buildSslOption(
 
   const option: PostgresSslOption = { rejectUnauthorized: true };
 
-  if (parsed.sslrootcert) {
+  // `system` is libpq 16's sentinel for the platform CA bundle, not a path —
+  // postgres.js knows it too. Reading it as a filename turns a URL that worked
+  // (any managed Postgres fronted by a public CA) into a boot failure with an
+  // ENOENT on a file called "system".
+  const useSystemRoots = parsed.sslrootcert?.toLowerCase() === "system";
+  if (useSystemRoots) {
+    notes.push("sslrootcert=system — verifying against the platform CA bundle");
+  } else if (parsed.sslrootcert) {
     option.ca = read(parsed.sslrootcert, "sslrootcert");
     notes.push(`sslrootcert=${parsed.sslrootcert}`);
   }
@@ -236,10 +289,16 @@ export function buildSslOption(
     // certificate (the server may require it) but do not check the server's.
     option.rejectUnauthorized = false;
     notes.push(`sslmode=${mode} — server certificate not verified`);
+    if (mode !== "require") {
+      // An object cannot carry postgres.js's plaintext fallback, which only the
+      // literal `"prefer"` triggers. Presenting the client certificate is the
+      // more useful half of the two, so it wins — but the trade is stated.
+      notes.push(`⚠️ sslmode=${mode} with a client certificate: no plaintext fallback if TLS is refused`);
+    }
     return { ssl: option, notes };
   }
 
-  if (option.ca === undefined) {
+  if (option.ca === undefined && !useSystemRoots) {
     throw new Error(
       `sslmode=${mode ?? "verify-ca"} requires a CA certificate, but the database URL carries no ` +
         `sslrootcert. Either add one or lower sslmode to require.`,
@@ -280,7 +339,11 @@ export function buildSslOption(
   }
 
   option.checkServerIdentity = () => undefined;
-  notes.push("sslmode=verify-ca — chain verified, hostname check waived");
+  notes.push(
+    mode === undefined
+      ? "no sslmode, but certificates were supplied — verifying the chain, hostname check waived"
+      : "sslmode=verify-ca — chain verified, hostname check waived",
+  );
   return { ssl: option, notes };
 }
 
@@ -288,7 +351,7 @@ export interface PostgresConnection {
   /** The URL to hand `postgres()`, stripped of SSL parameters. */
   url: string;
   /** The `ssl` option, or `undefined` when the URL asked for none. */
-  ssl?: PostgresSslOption | "require";
+  ssl?: PostgresSslOption | PassthroughSslMode;
   notes: string[];
 }
 
@@ -324,8 +387,9 @@ export function resolvePostgresConnection(
 export function openPostgres(
   raw: string,
   options: postgres.Options<Record<string, postgres.PostgresType>> = {},
+  readFile?: (path: string) => string,
 ): { sql: postgres.Sql; notes: string[] } {
-  const { url, ssl, notes } = resolvePostgresConnection(raw);
+  const { url, ssl, notes } = resolvePostgresConnection(raw, readFile);
   // `ssl` is only spread when there is one: postgres.js reads `"ssl" in options`
   // nowhere, but an explicit `ssl: undefined` would still shadow a future
   // caller-supplied value, and the no-TLS path must stay byte-identical to the
