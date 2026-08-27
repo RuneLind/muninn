@@ -431,8 +431,9 @@ export interface HaikuMessageResult {
 }
 
 /**
- * Router-backed replacement for the scheduler's `callHaiku` string-or-fallback
- * wrapper. Runs a TOOL-LESS Haiku prompt through {@link callHaikuWithFallback} so
+ * Router-backed replacement for the scheduler's old `callHaiku` string-or-fallback
+ * wrapper (deleted — this is the only remaining spelling of that contract).
+ * Runs a TOOL-LESS Haiku prompt through {@link callHaikuWithFallback} so
  * the backend is picked from the bot's connector/haikuBackend (a claude-sdk /
  * copilot-sdk bot no longer pays a hardcoded `claude -p` cold-start, and an
  * anthropic/copilot Haiku backend actually runs) instead of the old raw
@@ -441,7 +442,7 @@ export interface HaikuMessageResult {
  *
  * On ANY error (the router already falls back CLI→…; this catches the case where
  * even the CLI floor throws) it returns the caller's `fallback` text with
- * `usage: null` — byte-identical to the old `callHaiku` contract, so the caller's
+ * `usage: null` — byte-identical to that old contract, so the caller's
  * meta stays empty on failure and no connector/model is fabricated. Pass `tracer`
  * to tie the `haiku_usage` row back to the request trace (the backends' own
  * `trackUsage` reads `opts.tracer?.traceId`).

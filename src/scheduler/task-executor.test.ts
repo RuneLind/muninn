@@ -94,7 +94,7 @@ mock.module("./briefing-prompt.ts", () => ({
 
 // Haiku router — reminder/custom tasks now route through
 // `callHaikuMessageWithFallback` (the connector-aware seam), not the raw
-// `spawnHaiku`-backed `callHaiku`. The mock records the opts it receives (tracer +
+// `spawnHaiku`-backed `callHaiku` (since deleted). The mock records the opts it receives (tracer +
 // routing fields) and returns text + usage (incl. the real `backend`) the task
 // stamps onto its span.
 let haikuMessageUsage: any = { model: "claude-haiku-test", inputTokens: 50, outputTokens: 10, numTurns: 1, backend: "cli" };

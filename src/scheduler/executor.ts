@@ -158,7 +158,7 @@ export interface SpawnHaikuOptions extends HaikuTelemetry {
    * Set by the Haiku ROUTER when it fell through to the CLI: which backend it
    * tried and why. Read only by the `nais` refusal, so that a pod's error names
    * the missing credential instead of the missing binary. A direct caller
-   * (watchers, `callHaiku`) passes nothing.
+   * (the watchers) passes nothing.
    */
   cliFallback?: HaikuCliFallback;
 }
@@ -546,52 +546,6 @@ export async function readAndParseHaikuStream(
     return { result: parser.getResult(), rawLines };
   }
   return { result: null, rawLines };
-}
-
-/**
- * High-level Haiku call with fallback — used by scheduler runner.
- *
- * `telemetry` threads the {@link HaikuTelemetry} `tracer` + `onUsage` seams into
- * the underlying {@link spawnHaiku} so a traced caller (the scheduled-task
- * reminder/custom paths) gets the `haiku_usage` row joined to its trace
- * (`trace_id`, #267) and the call's token usage surfaced. Absent ⇒ byte-identical
- * to the untelemetered call. `onProgress`/`captureToolOutputs` are intentionally
- * not exposed here — these prompts run no tools.
- */
-export async function callHaiku(
-  prompt: string,
-  fallback: string,
-  source = "task",
-  botDir?: string,
-  botName?: string,
-  timeoutMs?: number,
-  telemetry?: Pick<HaikuTelemetry, "tracer" | "onUsage">,
-): Promise<string> {
-  try {
-    const { result } = await spawnHaiku(prompt, {
-      source,
-      botDir,
-      botName,
-      timeoutMs,
-      ...(telemetry?.tracer ? { tracer: telemetry.tracer } : {}),
-      ...(telemetry?.onUsage ? { onUsage: telemetry.onUsage } : {}),
-    });
-    return result.trim();
-  } catch (err) {
-    // The fallback is the contract, so the failure cannot propagate — which
-    // makes a bare swallow invisible by construction: the task emits its
-    // generic string and LOOKS like it ran. On a nais pod every tick refuses
-    // with `HaikuCliUnavailableError` (the image is built WITH_CLI=false), so
-    // without this line a scheduled task repeats boilerplate forever with zero
-    // operator signal anywhere. Warn, not error: degrading to the fallback IS
-    // the designed behaviour.
-    log.warn("Haiku call for {source} failed — returning the fallback: {error}", {
-      botName: botName ?? "haiku",
-      source,
-      error: err instanceof Error ? `${err.name}: ${err.message}` : String(err),
-    });
-    return fallback;
-  }
 }
 
 export function trackUsage(

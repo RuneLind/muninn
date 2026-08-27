@@ -806,10 +806,23 @@ The container's entrypoint runs, in order: adopt `DB_URL` as `DATABASE_URL` if o
 
 | State | What the entrypoint says |
 |---|---|
-| No `users` table — never provisioned | Apply `db/init.sql` **and** `bun db/migrate.ts --baseline`. The `psql -f db/init.sql` half needs a machine that has psql and can reach the database (this image ships **no psql**); the baseline half does not — the image carries bun and `db/`, so `docker compose exec app bun db/migrate.ts --baseline` (or `kubectl exec deploy/<app> -- …`) works in place |
-| Schema present, `schema_migrations` empty — provisioned but never baselined | Run `bun db/migrate.ts --baseline` (`bun run db:migrate:baseline`) — in place via `docker compose exec app` / `kubectl exec`, no psql and no checkout needed |
+| No `users` table — never provisioned | Apply `db/init.sql` **and** `bun db/migrate.ts --baseline`. The `psql -f db/init.sql` half needs a machine that has psql and can reach the database (this image ships **no psql**); the baseline half does not — the image carries bun and `db/`, so it runs from the image itself (see the one-off forms below) |
+| Schema present, `schema_migrations` empty — provisioned but never baselined | Run `bun db/migrate.ts --baseline` (`bun run db:migrate:baseline`) — from the image itself, no psql and no checkout needed (see the one-off forms below) |
 
-The second is the one a fresh compose `prod` stack lands in: `db/init.sql` creates `schema_migrations` **empty**, so without a baseline the migration runner reads "everything is pending" and dies inside migration 006 with `column "bot_name" of relation "messages" already exists` — a crash-loop about a database that is in fact fine. Neither state is auto-repaired: baselining a schema laid down by an older `init.sql` would record migrations it has never seen.
+**The baseline command cannot be an `exec`.** The refusal makes the entrypoint exit, so under `restart: unless-stopped` (or a Deployment) there is no running process to exec into — `docker compose exec app …` answers `service "app" is not running`. Run it as a one-off container instead:
+
+```bash
+docker compose run --rm --entrypoint bun app db/migrate.ts --baseline
+```
+
+The `--entrypoint` override is required; without it the same refusal runs first. On Kubernetes the equivalent is a one-off Job from the same image carrying the same env and secrets (nais: a naisjob), or ad-hoc off the Deployment's own pod spec:
+
+```bash
+kubectl debug deploy/<app> --copy-to=<app>-baseline --container=<app> \
+  -- bun db/migrate.ts --baseline   # delete the copied pod afterwards
+```
+
+The second state is the one a fresh compose `prod` stack lands in: `db/init.sql` creates `schema_migrations` **empty**, so without a baseline the migration runner reads "everything is pending" and dies inside migration 006 with `column "bot_name" of relation "messages" already exists` — a crash-loop about a database that is in fact fine. Neither state is auto-repaired: baselining a schema laid down by an older `init.sql` would record migrations it has never seen.
 
 ### Volume Mounts
 

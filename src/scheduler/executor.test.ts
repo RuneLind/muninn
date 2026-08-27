@@ -28,7 +28,7 @@ mock.module("../config.ts", () => ({
   loadConfig: () => ({ tracingEnabled: true, tracingCaptureToolOutputs: true }),
 }));
 
-const { spawnHaiku, callHaiku, HAIKU_TIMEOUT_MS, parseHaikuJson, parseLegacyHaikuOutput, readAndParseHaikuStream, buildHaikuArgs, claudeResultToHaiku, _resetSpawnWarningsForTests } =
+const { spawnHaiku, HAIKU_TIMEOUT_MS, parseHaikuJson, parseLegacyHaikuOutput, readAndParseHaikuStream, buildHaikuArgs, claudeResultToHaiku, _resetSpawnWarningsForTests } =
   await import("./executor.ts");
 const { attachToolSpans } = await import("../core/tool-spans.ts");
 const { resolveAgentCwd } = await import("../ai/agent-cwd.ts");
@@ -73,7 +73,7 @@ describe("parseHaikuJson", () => {
 });
 
 /**
- * Any cwd-less `spawnHaiku`/`callHaiku` call resolves its cwd via
+ * Any cwd-less `spawnHaiku` call resolves its cwd via
  * `resolveAgentCwd` and CREATES it — in the developer's real
  * `~/.muninn/agent-cwd` unless redirected. Every test in this file that reaches a
  * real spawn goes through here so the suite leaves nothing in `$HOME`.
@@ -165,16 +165,6 @@ describe("spawnHaiku timeout", () => {
     }
 
     expect(timerCleared).toBe(true);
-  });
-});
-
-describe("callHaiku", () => {
-  test("returns fallback when process fails", async () => {
-    // cwd-less, like the spawnHaiku timeout test above — same scratch guard.
-    await withScratchAgentCwd(async () => {
-      const result = await callHaiku("test", "fallback-value", "test-source", undefined, undefined, 100);
-      expect(result).toBe("fallback-value");
-    });
   });
 });
 
@@ -463,8 +453,8 @@ describe("spawnHaiku cwd", () => {
  * The image is built `WITH_CLI=false`, so the spawn below would be an ENOENT or
  * a credential-less `claude` hanging to `HAIKU_TIMEOUT_MS`. Asserted HERE and
  * not only through the Haiku router, because the router is not the only caller:
- * `src/watchers/{email,x,anthropic}.ts` and `callHaiku` reach `spawnHaiku`
- * directly, and a refusal written in the router would leave those five spawning.
+ * `src/watchers/{email,x,anthropic}.ts` reach `spawnHaiku` directly, and a
+ * refusal written in the router would leave those spawning.
  */
 describe("spawnHaiku on MUNINN_PROFILE=nais", () => {
   /** Stubs Bun.spawn so the assertion can be "it never got that far". */
@@ -511,43 +501,6 @@ describe("spawnHaiku on MUNINN_PROFILE=nais", () => {
     expect(await spawnAttempts(() => spawnHaiku("hi", { source: "nais-test", botName: "jarvis" }))).toBe(1);
   });
 
-  /**
-   * `callHaiku` is the one caller that CANNOT propagate the refusal: its whole
-   * contract is "return the fallback string". So on a nais pod the scheduled
-   * task keeps emitting its generic boilerplate every tick and the refusal —
-   * the one line that names the missing credential — is swallowed. The warning
-   * is the only operator signal that exists on this path, so it is asserted
-   * against a real LogTape sink rather than assumed.
-   */
-  test("callHaiku returns the fallback AND warns — the refusal is not silent", async () => {
-    const { configure } = await import("@logtape/logtape");
-    const records: string[] = [];
-    await configure({
-      sinks: { capture: (r: any) => records.push(r.message.join("")) },
-      loggers: [
-        { category: ["muninn", "scheduler", "executor"], lowestLevel: "warning", sinks: ["capture"] },
-        { category: ["logtape", "meta"], lowestLevel: "error", sinks: [] },
-      ],
-      reset: true,
-    });
-    process.env.MUNINN_PROFILE = "nais";
-    try {
-      const answer = await callHaiku("hi", "FALLBACK-TEXT", "task", undefined, "melosys");
-      expect(answer).toBe("FALLBACK-TEXT");
-      // Named, not merely counted: an operator grepping a pod log needs the
-      // error TYPE (which says "this image has no CLI") and the source.
-      const warned = records.filter((r) => r.includes("HaikuCliUnavailableError"));
-      expect(`warned: ${warned.length}`).toBe("warned: 1");
-      expect(warned[0]!).toContain("task");
-    } finally {
-      delete process.env.MUNINN_PROFILE;
-      await configure({
-        sinks: {},
-        loggers: [{ category: ["logtape", "meta"], lowestLevel: "error", sinks: [] }],
-        reset: true,
-      });
-    }
-  });
 });
 
 /**

@@ -108,12 +108,16 @@ describe("MUNINN_PROFILE=nais route surface", () => {
 
   test("the inline instance routes and both health paths survive on nais", async () => {
     const app = build("nais");
-    // ANSWERED, not merely registered. `/` is the pod's shell — it renders the
-    // whole dashboard page, `renderNav` and its `droppedRouteGroups` lookup
-    // included — and a registration check cannot tell "renders" from "throws
-    // inside the handler", which is exactly the failure a profile branch
-    // introduces. These four are the cheap, hermetic ones: no DB, no network,
-    // no filesystem beyond the inlined bundles.
+    // ANSWERED, not merely registered: a registration check cannot tell
+    // "renders" from "throws inside the handler", which is exactly the failure
+    // a profile branch introduces. `/` renders the whole dashboard page, so
+    // this asserts that render path executes — NOT the nais nav: this app is
+    // built with no `Config`, `renderDashboardPage` passes no profile, and the
+    // env is blanked, so `renderNav` runs its DEFAULT branch here. The nais nav
+    // (`droppedRouteGroups` omitting links) is covered by the explicit
+    // "renderNav under the nais profile" describe below. These are the cheap,
+    // hermetic paths: no DB, no network, no filesystem beyond the inlined
+    // bundles.
     const answers: Record<string, number> = {};
     for (const path of ["/api/live", "/", "/favicon.svg", "/favicon.ico", "/api/dashboard-build-hash"]) {
       answers[path] = (await app.request(path)).status;

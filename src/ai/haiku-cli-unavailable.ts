@@ -8,9 +8,8 @@
  * assistant is slow" rather than "this pod has no model credential".
  *
  * ONE door: the refusal lives in `spawnHaiku` itself, so it covers the Haiku
- * ROUTER's fallback, a bot that ASKS for the CLI backend, and the five direct
- * callers the router never sees (`src/watchers/{email,x,anthropic}.ts`,
- * `src/scheduler/executor.ts`'s own `callHaiku`).
+ * ROUTER's fallback, a bot that ASKS for the CLI backend, and the direct callers
+ * the router never sees (`src/watchers/{email,x,anthropic}.ts`).
  *
  * Its own module because both ends need it — `src/scheduler/executor.ts` throws
  * it and `src/ai/haiku-direct.ts` re-exports it — and importing one from the
