@@ -36,6 +36,12 @@ import { statusChipsScript } from "./components/status-chips.ts";
  * The bot pills live in the header (right side); they filter all three planes
  * client-side (same `muninn-selected-bot` localStorage key as the other pages).
  */
+/** How often the client re-fetches `/api/agents/overview` while the tab is
+ *  VISIBLE — and the floor the tab-return refetch shares. Interpolated into the
+ *  inline script below; `e2e/agents-refresh.spec.ts` reads it back out of the
+ *  served HTML rather than hand-copying it. */
+export const OVERVIEW_POLL_MS = 30_000;
+
 export async function renderAgentsPage(): Promise<string> {
   const helpers = await helpersClientScript();
 
@@ -175,7 +181,7 @@ export async function renderAgentsPage(): Promise<string> {
   <div class="page">
     ${pageHeaderHtml({
       title: "Agents",
-      metaHtml: `<span id="agMeta">live over SSE</span>`,
+      metaHtml: `<span id="agMeta">connecting…</span>`,
       helpHtml,
     })}
 
@@ -255,8 +261,11 @@ export async function renderAgentsPage(): Promise<string> {
     var recentExpanded = false;
     var estimatesMap = {};   // identity -> expectedDurationMs (from /api/agents/overview)
     var processStartedAt = null;
-    var sseConnected = false;     // drives the "reconnecting…" half of the meta line
-    var sseEverConnected = false; // distinguishes the first connect from a reconnect
+    // Four realities, not two: a page that has never connected is not "reconnecting",
+    // and a stream CLOSED for good (a non-200 — EventSource never retries those)
+    // must not promise a recovery. Drives the meta line and the poll.
+    var sseState = 'connecting'; // connecting | live | reconnecting | closed
+    var lastOverviewAt = 0;      // request-time stamp; floors the tab-return refetch
     var agentsRaf = null;
     var agentsLastTick = 0;
     var AGENTS_TICK_MS = 100;
@@ -358,10 +367,16 @@ export async function renderAgentsPage(): Promise<string> {
       loadOverview();
     });
 
+    var SSE_STATE_LABEL = {
+      connecting: 'connecting…',
+      live: 'live over SSE',
+      reconnecting: 'reconnecting…',
+      closed: 'disconnected — reload the page'
+    };
     function updateMeta() {
       var meta = document.getElementById('agMeta');
       if (!meta) return;
-      var live = sseConnected ? 'live over SSE' : 'reconnecting…';
+      var live = SSE_STATE_LABEL[sseState] || 'live over SSE';
       meta.textContent = live + ' · ' + (selectedBot ? 'filtered to ' + selectedBot : 'all bots');
     }
 
@@ -592,8 +607,13 @@ export async function renderAgentsPage(): Promise<string> {
     // Monotonic fetch-sequence guard: a slower earlier response must never
     // overwrite a newer render if two loads overlap.
     var overviewSeq = 0;
+    var retryTimer = null;
+    var OVERVIEW_RETRY_MS = 3000;
     function loadOverview() {
       var mySeq = ++overviewSeq;
+      // Stamped at REQUEST time, not on success: a hung fetch must not let a
+      // burst of tab-returns through the floor behind it.
+      lastOverviewAt = Date.now();
       getJson('/api/agents/overview').then(function (data) {
         if (mySeq !== overviewSeq) return; // superseded by a newer load
         document.getElementById('errBox').innerHTML = (data.errors && data.errors.length)
@@ -610,16 +630,38 @@ export async function renderAgentsPage(): Promise<string> {
         if (mySeq !== overviewSeq) return;
         document.getElementById('errBox').innerHTML =
           '<div class="err-note">Failed to load overview: ' + esc(String(e)) + '</div>';
+        // The failure this page was built around: a load that raced a server
+        // restart. Retry once, soon — waiting out a whole poll interval to clear
+        // an err-note the server stopped meaning 200ms later is the old bug in
+        // slower form. Not scheduled into a dead stream, and only one in flight.
+        if (sseState !== 'closed' && retryTimer == null) {
+          retryTimer = setTimeout(function () {
+            retryTimer = null;
+            if (sseState !== 'closed') loadOverview();
+          }, OVERVIEW_RETRY_MS);
+        }
       });
+    }
+
+    // The poll re-renders these cards on an idle page, and replacing innerHTML
+    // wipes any text selection inside them — measured: select a run name, wait
+    // for one refresh, the selection is gone. Skipping an identical write makes
+    // the common idle refresh a no-op for the DOM, while a changed row (or a
+    // "N m ago" label ticking over) still repaints.
+    var lastCardHtml = {};
+    function setCardHtml(el, key, html) {
+      if (lastCardHtml[key] === html) return;
+      lastCardHtml[key] = html;
+      el.innerHTML = html;
     }
 
     function renderUpNext(items) {
       var visible = items.filter(function (r) { return matchesBot(r.bot); });
       document.getElementById('upNextCount').textContent = visible.length;
       var card = document.getElementById('upNextCard');
-      if (visible.length === 0) { card.innerHTML = '<div class="empty-msg">Nothing scheduled.</div>'; return; }
+      if (visible.length === 0) { setCardHtml(card, 'upNext', '<div class="empty-msg">Nothing scheduled.</div>'); return; }
       var now = Date.now();
-      card.innerHTML = visible.map(function (r) {
+      setCardHtml(card, 'upNext', visible.map(function (r) {
         // Preserve the label override: force-queued watchers render "queued for
         // next tick" / "due now" instead of a countdown (and read as imminent).
         var when = r.label || fmtUntil(r.nextRunAt);
@@ -634,7 +676,7 @@ export async function renderAgentsPage(): Promise<string> {
           '<span class="un-name">' + nameHtml + '</span>' +
           '<span class="un-bot">' + (r.bot ? esc(r.bot) : '') + '</span>' +
         '</div>';
-      }).join('');
+      }).join(''));
     }
 
     function recentRowHtml(r) {
@@ -664,7 +706,7 @@ export async function renderAgentsPage(): Promise<string> {
       var visible = items.filter(function (r) { return matchesBot(r.bot); });
       document.getElementById('recentCount').textContent = visible.length;
       var card = document.getElementById('recentCard');
-      if (visible.length === 0) { card.innerHTML = '<div class="empty-msg">No recent runs.</div>'; return; }
+      if (visible.length === 0) { setCardHtml(card, 'recent', '<div class="empty-msg">No recent runs.</div>'); return; }
       var shown = recentExpanded ? visible : visible.slice(0, RECENT_SHOWN);
       var rows = shown.map(recentRowHtml).join('');
       var more = '';
@@ -674,7 +716,7 @@ export async function renderAgentsPage(): Promise<string> {
           : '<div class="rf-more">' + (visible.length - RECENT_SHOWN) + ' more · ' +
             '<span class="rf-showall" role="button" tabindex="0" aria-expanded="false">show all</span></div>';
       }
-      card.innerHTML = rows + more;
+      setCardHtml(card, 'recent', rows + more);
     }
 
     // Recently-finished expander — delegated click + keydown (the card subtree is
@@ -693,7 +735,7 @@ export async function renderAgentsPage(): Promise<string> {
 
     // Signature of the currently-running requestIds, so we can refetch the
     // overview only when a run actually starts or finishes — not on every ~1/s
-    // agent_runs snapshot (each of which hits /api/agents/overview → 4 DB queries).
+    // agent_runs snapshot (each of which hits /api/agents/overview → 5 DB queries).
     var lastRunningKey = '';
     function runningKey(runs) {
       return (runs || []).filter(function (r) { return !r.completed; })
@@ -709,36 +751,62 @@ export async function renderAgentsPage(): Promise<string> {
     // same (usually empty) running set, so no refetch fired; and with nothing
     // running the rAF ticker is stopped, so even the "N m ago" labels froze.
     //
-    // The poll is deliberately visibility-gated: an overview hit is 4 DB
-    // queries, and a background tab left open for a day should cost nothing.
-    var OVERVIEW_POLL_MS = 30000;
+    // The poll is visibility-gated and the tab-return refetch shares its floor:
+    // one overview hit is five DB queries (counted in assembleAgentsOverview's
+    // Promise.all), a background tab left open for a day should cost nothing,
+    // and on macOS mere window OCCLUSION flips visibilityState — so an operator
+    // alt-tabbing between two overlapping windows would otherwise buy a full
+    // overview assembly per switch.
+    var OVERVIEW_POLL_MS = ${OVERVIEW_POLL_MS};
     var pollTimer = null;
     function pageVisible() { return document.visibilityState !== 'hidden'; }
     function startPoll() {
       if (pollTimer != null) return;
       pollTimer = setInterval(function () { if (pageVisible()) loadOverview(); }, OVERVIEW_POLL_MS);
     }
+    function stopPoll() {
+      if (pollTimer == null) return;
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
     document.addEventListener('visibilitychange', function () {
-      // Coming back to the tab: refresh NOW rather than up to a poll late.
-      if (pageVisible()) loadOverview();
+      // Coming back to the tab: refresh NOW rather than up to a poll late — but
+      // no more often than the poll would have, and never into a dead stream.
+      if (!pageVisible() || sseState === 'closed') return;
+      if (Date.now() - lastOverviewAt < OVERVIEW_POLL_MS) return;
+      loadOverview();
     });
 
     // --- SSE wiring ---
-    sseClient('/api/events', {
+    // The handle is captured because readyState is the ONLY way to tell a
+    // retrying stream from a dead one: EventSource fails PERMANENTLY on any
+    // non-200 (readyState 2, no retry) — which is exactly what an expired
+    // session or a role-denied /api/events answers — and calling that
+    // "reconnecting…" promises a recovery that will never come.
+    var sse = sseClient('/api/events', {
       onopen: function () {
         // Fires on the first connect AND on every native reconnect after a drop
         // (a server restart). The snapshot that follows re-renders the live
         // zone; up-next/recent only move if we ask, so ask.
-        sseConnected = true;
+        var wasConnecting = sseState === 'connecting';
+        sseState = 'live';
         updateMeta();
-        // Not on the FIRST connect: the init load below already covers that, and
-        // an overview hit is 4 DB queries.
-        if (sseEverConnected) loadOverview();
-        sseEverConnected = true;
+        startPoll();
+        // Only a genuine RE-connect: the init load below covers the first one.
+        // A first connect that fires while that load is still in flight must not
+        // race it into a second request — and a load that FAILED is recovered by
+        // its own retry below, which does not depend on the stream at all.
+        if (!wasConnecting) loadOverview();
       },
       onerror: function () {
-        // EventSource retries on its own — say so instead of silently freezing.
-        sseConnected = false;
+        if (sse && sse.source && sse.source.readyState === 2) {
+          // Dead for good. Stop polling a route that is answering the same way
+          // /api/events just did, and say what actually helps.
+          sseState = 'closed';
+          stopPoll();
+        } else {
+          sseState = 'reconnecting';
+        }
         updateMeta();
       },
       agent_runs: function (ev) {
