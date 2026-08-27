@@ -339,7 +339,7 @@ if (config.profile === "nais") {
   log.info(
     "MUNINN_PROFILE=nais — serving profile: {dropped} route groups are NOT REGISTERED ({groups}), so they answer 404 " +
     "with no handler; the nav omits their links; the inbound-message preview log line drops to debug; and the HAIKU " +
-    "spawns (spawnHaiku — the Haiku router's CLI fallback, the watchers, the scheduler) refuse with " +
+    "spawns (spawnHaiku — the Haiku router's CLI fallback, plus the watchers, which call it directly) refuse with " +
     "HaikuCliUnavailableError (the image is built WITH_CLI=false). NOT covered: the claude-cli CHAT connector and the " +
     "executeOneShot family, which spawn the CLI on their own path — every bot on this deployment must be pinned to a " +
     "non-CLI connector. /chat, the DB/huginn-bound operator routes and both health paths are unchanged.",

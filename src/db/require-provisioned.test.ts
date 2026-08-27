@@ -96,14 +96,37 @@ describe("db/require-provisioned.ts", () => {
       cwd: new URL("../..", import.meta.url).pathname,
       // Bun auto-loads `.env`, which on a developer machine carries a real
       // DATABASE_URL — an explicit empty string is what beats the dotenv line
-      // (the `src/test/ambient-env.ts` rule).
-      env: { ...process.env, DATABASE_URL: "" },
+      // (the `src/test/ambient-env.ts` rule). DB_URL is blanked for the same
+      // reason: it is a second source this script now reads, and a machine that
+      // happens to export one must not turn "not set" into a live check.
+      env: { ...process.env, DATABASE_URL: "", DB_URL: "" },
       stdout: "pipe",
       stderr: "pipe",
     });
     const stderr = await new Response(proc.stderr).text();
     expect(await proc.exited).toBe(2);
     expect(stderr).toContain("DATABASE_URL");
+    expect(stderr).toContain("DB_URL");
+  });
+
+  test("DB_URL is adopted when DATABASE_URL is unset", async () => {
+    // The same hole `db/migrate.ts` had: nais hands the pod DB_URL and the
+    // entrypoint exports DATABASE_URL from it, but this script is also run by
+    // hand from a pod where that entrypoint never ran. Reading only
+    // DATABASE_URL made it answer "not set" (exit 2) with the credentials right
+    // there — so the check that guards the migration would be skipped by
+    // whoever worked around it.
+    const proc = Bun.spawn(["bun", "db/require-provisioned.ts"], {
+      cwd: REPO_ROOT,
+      env: { ...process.env, DATABASE_URL: "", DB_URL: SCRATCH_URL },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const stderr = await new Response(proc.stderr).text();
+    // It really reached the scratch database: exit 1 is the REFUSAL (this
+    // database has no `users` table), not the exit 2 of an unresolved URL.
+    expect(await proc.exited).toBe(1);
+    expect(stderr).toContain("users");
   });
 });
 

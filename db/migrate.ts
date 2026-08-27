@@ -15,11 +15,13 @@
  *   bun db/migrate.ts --baseline       # Mark all as applied (fresh DB from init.sql)
  *   bun db/migrate.ts --status         # Show migration status
  *   bun db/migrate.ts --dry-run        # Show what would run without running
- *   DATABASE_URL=... bun db/migrate.ts # Custom database URL
+ *   DATABASE_URL=... bun db/migrate.ts # Custom database URL (DB_URL also works —
+ *                                      # nais's envVarPrefix form; see ./database-url.ts)
  */
 import postgres from "postgres";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
+import { resolveCliDatabaseUrl } from "./database-url.ts";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "migrations");
 
@@ -181,7 +183,13 @@ export async function runMigrations(
 
 // --- CLI entrypoint ---
 if (import.meta.main) {
-  const DATABASE_URL = process.env.DATABASE_URL ?? "postgresql://muninn:muninn@127.0.0.1:5435/muninn";
+  // `DATABASE_URL` → `DB_URL` → the dev default, in that order (see
+  // ./database-url.ts). The dev default stays LAST because `bun run db:migrate`
+  // on a laptop relies on it — but it must not be reachable while nais's
+  // `DB_URL` is sitting right there, since every remedy this repo prints for a
+  // pod (`kubectl debug … -- bun db/migrate.ts --baseline`, a naisjob with its
+  // own `command:`) bypasses the entrypoint that exports one from the other.
+  const DATABASE_URL = resolveCliDatabaseUrl() ?? "postgresql://muninn:muninn@127.0.0.1:5435/muninn";
 
   if (STATUS) {
     const sql = postgres(DATABASE_URL, { max: 1, onnotice: () => {} });

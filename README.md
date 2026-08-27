@@ -800,7 +800,7 @@ The image is built from one `Dockerfile` with two build args, both **on** by def
 
 ### Database provisioning (the container will not do it for you)
 
-The container's entrypoint runs, in order: adopt `DB_URL` as `DATABASE_URL` if only the former is set, refuse an unready database, apply pending migrations (serialised across replicas by an advisory lock), then `exec` the CMD.
+The container's entrypoint runs, in order: adopt `DB_URL` as `DATABASE_URL` if only the former is set, refuse an unready database, apply pending migrations (serialised across replicas by an advisory lock), then `exec` the CMD. Both scripts it calls resolve the same pair themselves (`DATABASE_URL` → `DB_URL`, then — for the migration runner only — the dev default; `db/database-url.ts`), so the remedies below still find nais's credentials when they replace the entrypoint.
 
 "Unready" is two distinct states, each answered with the command that fixes it rather than a raw SQL error:
 
@@ -815,12 +815,14 @@ The container's entrypoint runs, in order: adopt `DB_URL` as `DATABASE_URL` if o
 docker compose run --rm --entrypoint bun app db/migrate.ts --baseline
 ```
 
-The `--entrypoint` override is required; without it the same refusal runs first. On Kubernetes the equivalent is a one-off Job from the same image carrying the same env and secrets (nais: a naisjob), or ad-hoc off the Deployment's own pod spec:
+The `--entrypoint` override is required; without it the same refusal runs first. On Kubernetes the equivalent is ad-hoc off the Deployment's own pod spec — the copied pod inherits its env and secrets, and `db/migrate.ts` resolves `DATABASE_URL` → `DB_URL` itself (`db/database-url.ts`), so it finds nais's credentials even though this command replaces the entrypoint that normally exports one from the other:
 
 ```bash
 kubectl debug deploy/<app> --copy-to=<app>-baseline --container=<app> \
-  -- bun db/migrate.ts --baseline   # delete the copied pod afterwards
+  --profile=general -- bun db/migrate.ts --baseline   # delete the copied pod afterwards
 ```
+
+`--profile=general` is what kubectl wants; without it it warns that the legacy profile is deprecated. A one-off Job from the same image carrying the same env and secrets (nais: a naisjob) works too — but it **must set its own command**, or the image's default entrypoint re-runs the refusal before it gets to the baseline.
 
 The second state is the one a fresh compose `prod` stack lands in: `db/init.sql` creates `schema_migrations` **empty**, so without a baseline the migration runner reads "everything is pending" and dies inside migration 006 with `column "bot_name" of relation "messages" already exists` — a crash-loop about a database that is in fact fine. Neither state is auto-repaired: baselining a schema laid down by an older `init.sql` would record migrations it has never seen.
 

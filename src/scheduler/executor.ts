@@ -313,7 +313,7 @@ export async function spawnHaiku(
     onModelError,
   } = opts;
   // The ONE door into the Claude CLI, so this is where a profile without one
-  // refuses — before the spawn, and for the router and the five direct callers
+  // refuses — before the spawn, and for the router and the direct callers
   // alike. See `src/ai/haiku-cli-unavailable.ts`.
   assertHaikuCliAvailable(botName ?? "haiku", opts.cliFallback);
 

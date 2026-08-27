@@ -388,8 +388,8 @@ export async function callHaikuWithFallback(
   const backend = resolveBackend(opts);
   const botName = opts.botName ?? "haiku";
   // WHY this call is about to spawn the CLI — accumulated, not acted on. The
-  // refusal itself lives in `spawnHaiku` (one door: the watchers and the
-  // scheduler reach it without passing through here), and this is the context
+  // refusal itself lives in `spawnHaiku` (one door: the watchers reach it
+  // without passing through here), and this is the context
   // that makes its message name the missing CREDENTIAL rather than the missing
   // binary. On the default profile it is read by nothing.
   let cliFallback: HaikuCliFallback | undefined;

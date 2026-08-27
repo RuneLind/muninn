@@ -37,7 +37,7 @@ Scheduler (60s tick, independent)
 
 **File:** `src/scheduler/executor.ts`
 
-All async Haiku calls flow through `spawnHaiku(prompt, source, entrypoint)`:
+`spawnHaiku(prompt, opts)` is the Claude CLI leg — the watchers call it directly, and the Haiku router falls back to it:
 
 - Spawns `claude -p <prompt> --output-format json --model claude-haiku-4-5-20251001` via `Bun.spawn`
 - Sets `CLAUDE_CODE_ENTRYPOINT` env var per caller
@@ -45,7 +45,7 @@ All async Haiku calls flow through `spawnHaiku(prompt, source, entrypoint)`:
 - Fires `trackUsage()` → INSERT into `haiku_usage` table (fire-and-forget)
 - Returns `{ result, inputTokens, outputTokens, model }`
 
-**`callHaiku(prompt, fallback, source)`** — high-level wrapper used by scheduler. Returns `fallback` string on error.
+**`callHaikuMessageWithFallback(prompt, fallback, opts)`** (`src/ai/haiku-direct.ts`) — the high-level wrapper the scheduler uses. Routes through the Haiku router (`cli` / `anthropic` / `copilot`, picked per bot) and returns `{ text, usage }` with `text` = the `fallback` string on error. The old `callHaiku(prompt, fallback, source)` is gone; nothing in the scheduler spawns the CLI directly any more — it reaches `spawnHaiku` only as the router's fallback.
 
 **No timeout** on Haiku calls (unlike main executor which uses `Promise.race`).
 
@@ -162,9 +162,9 @@ Runs on configurable interval (default 60s). Guard `tickRunning` prevents overla
 
 **Three sequential jobs per tick:**
 
-1. **Scheduled tasks:** `getTasksDueNow()` → update `next_run_at` FIRST (prevent re-fire) → `callHaiku()` → Telegram
-2. **Goal deadline reminders:** Deadline within 24h, not reminded in 12h → `callHaiku()` → Telegram
-3. **Goal check-ins:** Not checked in 3+ days → `callHaiku()` → Telegram (max 1 per tick)
+1. **Scheduled tasks:** `getTasksDueNow()` → update `next_run_at` FIRST (prevent re-fire) → `callHaikuMessageWithFallback()` → Telegram
+2. **Goal deadline reminders:** Deadline within 24h, not reminded in 12h → `callHaikuMessageWithFallback()` → Telegram
+3. **Goal check-ins:** Not checked in 3+ days → `callHaikuMessageWithFallback()` → Telegram (max 1 per tick)
 
 ## Key Files
 

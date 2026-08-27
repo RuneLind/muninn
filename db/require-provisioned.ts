@@ -34,9 +34,13 @@
  * Exit codes: 0 ready, 1 not ready (with the operator instruction), 2 could not
  * reach the database within the connect budget.
  *
- * Usage: `DATABASE_URL=… bun db/require-provisioned.ts`
+ * Usage: `DATABASE_URL=… bun db/require-provisioned.ts` (or `DB_URL=…`, nais's
+ * envVarPrefix form — see ./database-url.ts; this script is normally run BY the
+ * entrypoint, which exports one from the other, but it is also runnable by hand
+ * from a pod where the entrypoint never ran).
  */
 import postgres from "postgres";
+import { resolveCliDatabaseUrl, DATABASE_URL_ENV_NAMES } from "./database-url.ts";
 
 /** How long to keep retrying a CONNECTION failure. Under docker-compose the app
  *  waits on a `service_healthy` postgres, and on nais the sidecar proxy is up
@@ -82,11 +86,17 @@ const UNPROVISIONED_INSTRUCTION = [
   "    docker compose run --rm --entrypoint bun app db/migrate.ts --baseline",
   "",
   "  (the --entrypoint override is required; without it this same refusal runs",
-  "  first). On Kubernetes, a one-off Job from the same image carrying the same",
-  "  env and secrets (nais: a naisjob), or ad-hoc off the Deployment's pod spec:",
+  "  first). On Kubernetes, ad-hoc off the Deployment's own pod spec — the copy",
+  "  inherits its env and secrets, and db/migrate.ts reads nais's DB_URL itself:",
   "",
   "    kubectl debug deploy/<app> --copy-to=<app>-baseline --container=<app> \\",
-  "      -- bun db/migrate.ts --baseline     # delete the copied pod afterwards",
+  "      --profile=general -- bun db/migrate.ts --baseline",
+  "",
+  "  (--profile=general is what kubectl wants; without it it warns that the",
+  "  legacy profile is deprecated. Delete the copied pod afterwards.) A one-off",
+  "  Job from the same image carrying the same env and secrets (nais: a naisjob)",
+  "  works too, but it MUST set its own command — the image's default entrypoint",
+  "  re-runs the refusal you are reading before it gets to anything else.",
   "",
   "  Then restart this container; the entrypoint will run any pending migrations.",
   "",
@@ -117,12 +127,19 @@ const UNBASELINED_INSTRUCTION = [
   "",
   "      docker compose run --rm --entrypoint bun app db/migrate.ts --baseline",
   "",
-  "  · or, on Kubernetes, a one-off Job from the same image carrying the same",
-  "    env and secrets (nais: a naisjob), or ad-hoc off the Deployment's own",
-  "    pod spec:",
+  "  · or, on Kubernetes, ad-hoc off the Deployment's own pod spec — the copy",
+  "    inherits its env and secrets, and db/migrate.ts reads nais's DB_URL",
+  "    itself:",
   "",
   "      kubectl debug deploy/<app> --copy-to=<app>-baseline --container=<app> \\",
-  "        -- bun db/migrate.ts --baseline    # delete the copied pod afterwards",
+  "        --profile=general -- bun db/migrate.ts --baseline",
+  "",
+  "    (--profile=general is what kubectl wants; without it it warns that the",
+  "    legacy profile is deprecated. Delete the copied pod afterwards.)",
+  "",
+  "  · or a one-off Job from the same image carrying the same env and secrets",
+  "    (nais: a naisjob) — but it MUST set its own command, or the image's",
+  "    default entrypoint re-runs the refusal you are reading first.",
   "",
   "  Then restart this container; the entrypoint will run any pending migrations.",
   "  (Not done automatically: a schema laid down by an OLDER init.sql would be",
@@ -131,9 +148,11 @@ const UNBASELINED_INSTRUCTION = [
 ].join("\n");
 
 async function main(): Promise<number> {
-  const databaseUrl = process.env.DATABASE_URL;
+  const databaseUrl = resolveCliDatabaseUrl();
   if (!databaseUrl) {
-    console.error("DATABASE_URL is not set — cannot check whether the database is provisioned.");
+    console.error(
+      `${DATABASE_URL_ENV_NAMES} is not set — cannot check whether the database is provisioned.`,
+    );
     return 2;
   }
 

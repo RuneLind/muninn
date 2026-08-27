@@ -111,9 +111,11 @@ describe("MUNINN_PROFILE=nais route surface", () => {
     // ANSWERED, not merely registered: a registration check cannot tell
     // "renders" from "throws inside the handler", which is exactly the failure
     // a profile branch introduces. `/` renders the whole dashboard page, so
-    // this asserts that render path executes — NOT the nais nav: this app is
-    // built with no `Config`, `renderDashboardPage` passes no profile, and the
-    // env is blanked, so `renderNav` runs its DEFAULT branch here. The nais nav
+    // this asserts that render path executes — NOT the nais nav: this app IS
+    // built with a `Config` carrying `profile: "nais"`, but `routes.ts` calls
+    // `renderDashboardPage()` with no arguments, so the profile never reaches
+    // `renderNav`, which falls back to the (blanked) env and runs its DEFAULT
+    // branch here. The nais nav
     // (`droppedRouteGroups` omitting links) is covered by the explicit
     // "renderNav under the nais profile" describe below. These are the cheap,
     // hermetic paths: no DB, no network, no filesystem beyond the inlined
