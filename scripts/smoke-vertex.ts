@@ -31,7 +31,7 @@
  * NO NAV VALUES LIVE HERE, and none leave at RUNTIME either: every project id,
  * region and question is env or flag input, the defaults are Google's own
  * public region names, and every line printed — including verbatim server error
- * messages, which name the project — goes through `redact()` first. The eight
+ * messages, which name the project — goes through `redact()` first. The twenty
  * built-in questions are generic, publicly-derivable phrasings about a public
  * NAV system (Melosys, the A1 form, EESSI) that a person could write from
  * nav.no; they are NOT drawn from any internal corpus. Point
@@ -70,8 +70,13 @@ if (!PROJECT) {
   process.exit(2);
 }
 
-const probeArg = process.argv.find((a) => a.startsWith("--probe="))?.slice("--probe=".length);
-const requested = probeArg ? probeArg.split(",").map((p) => p.trim()).filter(Boolean) : [...KNOWN_PROBES];
+// The flag being PRESENT is the signal, not its value being non-empty:
+// `--probe=` slices to `""`, which is falsy, so a plain `arg ? … : all` ran
+// EVERY probe — ~40 API calls, 20 model turns and the SDK — on a plain typo.
+const probeFlag = process.argv.find((a) => a.startsWith("--probe="));
+const requested = probeFlag === undefined
+  ? [...KNOWN_PROBES]
+  : probeFlag.slice("--probe=".length).split(",").map((p) => p.trim()).filter(Boolean);
 const unknownProbes = requested.filter((p) => !(KNOWN_PROBES as readonly string[]).includes(p));
 if (unknownProbes.length > 0 || requested.length === 0) {
   // Silently running nothing and exiting 0 is the worst answer a measurement
@@ -93,7 +98,18 @@ const RUN = new Set(requested);
  * confidence.
  */
 function redact(text: string): string {
-  return PROJECT ? text.split(PROJECT).join("<project>") : text;
+  return text
+    // FIRST, and this is the half a literal-id replace misses: Google's openapi
+    // endpoint resolves the id to the project NUMBER in its errors, so a message
+    // reads `projects/594181726752/locations/…` and the configured id never
+    // appears at all. A number is just as identifying and just as pasteable.
+    // Matching the `projects/<x>` SHAPE catches both, plus any project we did
+    // not configure.
+    .replace(/projects\/[A-Za-z0-9_.:-]+/g, "projects/<project>")
+    // Then the configured id anywhere else it appears. Guarded on length: a
+    // three-character id would rewrite unrelated substrings (`api` inside
+    // `aiplatform`), and GCP project ids are at least six characters.
+    .split(PROJECT.length >= 6 ? PROJECT : "\u0000").join("<project>");
 }
 
 /**
@@ -182,7 +198,12 @@ async function attempt(
       return { status: res.status, body, retried };
     } catch (err) {
       const message = String((err as Error).message);
-      if (round === 0) { retried = true; await Bun.sleep(1000); continue; }
+      // A TIMEOUT is not retried. The retry exists to disambiguate a transient
+      // 429 from a standing quota of zero; retrying an expired budget only
+      // doubles the wait, and at 60 s per Gemini turn that is forty minutes
+      // across twenty questions. Other transport failures (DNS, reset) get one.
+      const timedOut = (err as Error).name === "TimeoutError" || /timed? ?out|abort/i.test(message);
+      if (round === 0 && !timedOut) { retried = true; await Bun.sleep(1000); continue; }
       return { status: 0, body: "", transportError: message.slice(0, 160), retried };
     }
   }
@@ -248,11 +269,17 @@ function classify(status: number, body: string): Reach {
 /**
  * The cheapest call that proves reachability, per publisher.
  *
- * Gemini has `:countTokens`, which runs no inference and bills nothing. The
- * Anthropic publisher does NOT accept it (400, "Unknown name anthropic_version"
- * — measured), so it is dialled with `:rawPredict` and `max_tokens: 1`, which
- * is a real but negligible generation. That asymmetry is why the call is chosen
- * here rather than shared.
+ * Gemini has `:countTokens`, which runs no inference and bills nothing.
+ *
+ * ⚠️ The Anthropic publisher does not, and the way it says so is a TRAP. Sent
+ * the Gemini-shaped `:countTokens` body — exactly what a shared code path would
+ * have sent — it answers **404 NOT_FOUND**, and `classify()` maps 404 to
+ * `not-available`. Every Anthropic model in every region would then have read
+ * "✘ not available", silently and plausibly, wiping out the five-model 429
+ * finding this probe exists to produce. (Sent an Anthropic-shaped body it
+ * answers 400 "Unknown name anthropic_version" instead — a truer error, from an
+ * experiment no real caller would run.) So the dial is asymmetric on purpose:
+ * `:rawPredict` with `max_tokens: 1`, a real but negligible generation.
  */
 async function dial(
   token: string, host: string, location: string, publisher: string, model: string,
@@ -286,14 +313,18 @@ async function probeRegions(token: string): Promise<Availability[]> {
         continue;
       }
       const body = JSON.parse(res.body) as { publisherModels?: { name: string; versionId?: string }[] };
-      const listed = (body.publisherModels ?? [])
-        .map((m) => m.name.split("/").pop() as string)
-        // Only the text models are dialled: the TTS and live-audio variants take
-        // a different payload, and a 400 from them would be noise in a column
-        // whose whole job is availability.
-        .filter((m) => publisher === "anthropic" || /^gemini-[\d.]+-(flash|pro)(-lite)?$/.test(m));
+      const listed = (body.publisherModels ?? []).map((m) => m.name.split("/").pop() as string);
+      // Only the text models are dialled: the TTS, live-audio, embedding and
+      // image variants take a different payload, and a 400 from them would be
+      // noise in a column whose whole job is availability. BOTH counts are
+      // reported — labelling the filtered number "catalogue lists N" produced a
+      // third number that is neither the catalogue nor the reachable set, in the
+      // one probe whose entire thesis is that those two differ.
+      const dialable = listed.filter(
+        (m) => publisher === "anthropic" || /^gemini-[\d.]+-(flash|pro)(-lite)?$/.test(m),
+      );
       const dialled: ModelReach[] = [];
-      for (const model of listed) dialled.push(await dial(token, host, location, publisher, model));
+      for (const model of dialable) dialled.push(await dial(token, host, location, publisher, model));
       publishers[publisher] = { listed, status: res.status, dialled };
     }
     rows.push({ location, host, note, publishers });
@@ -351,13 +382,26 @@ function toolSet(): unknown[] {
  *   `answered-no-tool` the model answered directly. Neither passes nor fails
  *                      the loop trigger — it never entered the loop — so it is
  *                      excluded from the rate and reported on its own line.
- *   `error`            an HTTP failure on either turn.
+ *   `no-answer-no-tool` first turn produced neither a tool call nor prose.
+ *                      Also never entered the loop, so also excluded — folding
+ *                      it into `loop-broken` inflated the very number the drop
+ *                      trigger is read off, with a row that had no second turn.
+ *   `error`            an HTTP failure. Excluded from the rate too when it hit
+ *                      the FIRST turn, for the same reason: a 429 or a 500 on
+ *                      question one is not the tool loop failing.
  */
-type TurnOutcome = "loop-completed" | "loop-broken" | "truncated" | "answered-no-tool" | "error";
+type TurnOutcome =
+  | "loop-completed" | "loop-broken" | "truncated" | "answered-no-tool" | "no-answer-no-tool" | "error";
 
 interface GeminiTurn {
   question: string;
   outcome: TurnOutcome;
+  /** Was a tool actually called, i.e. did the two-turn loop start? The rate's
+   *  denominator, and NOT derivable from `outcome`: an `error` row can be either
+   *  a first-turn HTTP failure (never entered) or a second-turn one (entered
+   *  and broke), and folding the two together reported "loop entered: 2/2" on a
+   *  run against a model that does not exist. */
+  enteredLoop: boolean;
   calledTool: string | null;
   finishReason: string | null;
   answerHead: string;
@@ -378,7 +422,7 @@ async function probeGemini(token: string, questions: string[]): Promise<GeminiTu
   for (const question of questions) {
     const started = performance.now();
     const row: GeminiTurn = {
-      question, outcome: "error", calledTool: null, finishReason: null,
+      question, outcome: "error", enteredLoop: false, calledTool: null, finishReason: null,
       answerHead: "", ms: 0, promptTokens: 0, cachedTokens: 0,
     };
     try {
@@ -408,16 +452,19 @@ async function probeGemini(token: string, questions: string[]): Promise<GeminiTu
       row.finishReason = first.choices[0]?.finish_reason ?? null;
 
       if (!row.calledTool) {
-        // NOT a failure, and not "no answer" either: the model answered the
-        // question directly. Reported on its own line, excluded from the rate.
+        // Neither branch here is a LOOP failure: no tool was called, so there
+        // was no second turn to break. The model either answered directly or
+        // produced nothing at all — Gemini 2.5 Flash does the latter when
+        // thinking consumes the turn. Both are excluded from the rate.
         row.answerHead = String(message.content ?? "").slice(0, 120);
-        row.outcome = row.finishReason === "length"
-          ? "truncated"
-          : row.answerHead.trim() ? "answered-no-tool" : "loop-broken";
+        row.outcome = row.answerHead.trim() ? "answered-no-tool" : "no-answer-no-tool";
         row.ms = Math.round(performance.now() - started);
         results.push(row);
         continue;
       }
+      // Past this point a tool WAS called, so the loop was entered and its
+      // outcome counts.
+      row.enteredLoop = true;
 
       // The assistant message goes back VERBATIM. Gemini attaches an opaque
       // `extra_content.google.thought_signature` to a tool call; measured
@@ -501,11 +548,11 @@ async function probeClaudeSdk(): Promise<SdkProbe> {
   const { query } = await import("@anthropic-ai/claude-agent-sdk");
   const probe: SdkProbe = { outcome: "unknown", apiKeySource: null, detail: "", ms: 0 };
 
+  const q = query({
+    prompt: "Reply with the single word OK",
+    options: { model: CLAUDE_MODEL, settingSources: [], permissionMode: "bypassPermissions", maxTurns: 1 },
+  });
   const run = async () => {
-    const q = query({
-      prompt: "Reply with the single word OK",
-      options: { model: CLAUDE_MODEL, settingSources: [], permissionMode: "bypassPermissions", maxTurns: 1 },
-    });
     for await (const event of q as AsyncGenerator<Record<string, unknown>, void>) {
       if (event.type === "system" && event.subtype === "init") probe.apiKeySource = String(event.apiKeySource ?? "");
       if (event.type === "result") {
@@ -519,14 +566,21 @@ async function probeClaudeSdk(): Promise<SdkProbe> {
     }
   };
 
+  // ⚠️ The timer is held so it can be CLEARED, and the generator is closed in
+  // `finally`. An un-cleared `setTimeout` inside a `Promise.race` keeps Bun's
+  // event loop alive, so the happy path printed its result in 3 s and then sat
+  // there for the full 60 s before exiting; on the timeout path the CLI child
+  // was orphaned and the script was still alive minutes later. An earlier
+  // comment here asserted "the script exits regardless", which was the opposite
+  // of what it did — and an unmeasured claim in a file whose thesis is measure,
+  // do not reason.
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    // The SDK has no timeout of its own here, and an endpoint that blackholes
-    // made this hang for three minutes with no output. Whatever the CLI is
-    // doing behind the generator keeps going; the script exits regardless.
     await Promise.race([
       run(),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error(`__timeout__ after ${SDK_TIMEOUT_MS}ms`)), SDK_TIMEOUT_MS)),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`__timeout__ after ${SDK_TIMEOUT_MS}ms`)), SDK_TIMEOUT_MS);
+      }),
     ]);
   } catch (err) {
     const message = String((err as Error).message);
@@ -535,6 +589,12 @@ async function probeClaudeSdk(): Promise<SdkProbe> {
       : REACHED_VERTEX.test(message) ? "reached-vertex"
       : NEVER_LEFT.test(message) ? "did-not-reach"
       : "unknown";
+  } finally {
+    if (timer) clearTimeout(timer);
+    // Closes the generator, which is what terminates the CLI subprocess. The
+    // race leaves it mid-iteration on the timeout path, and without this the
+    // child outlives the script.
+    await (q as AsyncGenerator<unknown, void>).return?.(undefined).catch(() => {});
   }
   probe.ms = Math.round(performance.now() - started);
   return probe;
@@ -601,6 +661,14 @@ try {
 
 const summary: Record<string, unknown> = { project: "<redacted>", generatedAt: new Date().toISOString() };
 
+/**
+ * Reasons this run did not actually MEASURE anything. A bogus project produced
+ * ten `HTTP 400 … not found or deleted` rows and exited 0 — after which nothing
+ * automated, and no reader skimming a log tail, could tell a measured result
+ * from a measurement that never happened.
+ */
+const failures: string[] = [];
+
 let token: string;
 try {
   token = await accessToken();
@@ -619,12 +687,19 @@ if (RUN.has("regions")) {
   say("── Probe A: what this project can CALL, dialled (not the catalogue) ──");
   const rows = await probeRegions(token);
   summary.availability = rows;
+  // Every host refusing the LISTING is not an availability finding, it is a
+  // broken run — a bad project id, a disabled API, no network.
+  if (rows.every((r) => Object.values(r.publishers).every((p) => p.listed === null))) {
+    failures.push("probe A: every region refused the catalogue listing — nothing was measured");
+  }
   for (const r of rows) {
     say(`\n  ${r.location}${r.note ? `  (${r.note})` : ""}`);
     for (const [publisher, p] of Object.entries(r.publishers)) {
       if (p.listed === null) { say(`    ${publisher.padEnd(9)} — HTTP ${p.status}: ${p.refusal?.slice(0, 130)}`); continue; }
       if (p.listed.length === 0) { say(`    ${publisher.padEnd(9)} catalogue lists none`); continue; }
-      say(`    ${publisher.padEnd(9)} catalogue lists ${p.listed.length}:`);
+      const skipped = p.listed.length - p.dialled.length;
+      say(`    ${publisher.padEnd(9)} catalogue lists ${p.listed.length}, dialled ${p.dialled.length}` +
+          `${skipped > 0 ? ` (${skipped} non-text model${skipped === 1 ? "" : "s"} not dialled)` : ""}:`);
       for (const d of p.dialled) {
         say(`      ${(REACH_GLYPH[d.reach] ?? d.reach).padEnd(27)} ${d.model}${d.retried ? "  (retried)" : ""}` +
             (d.detail && d.reach !== "not-available" ? `\n          ${d.detail.slice(0, 120)}` : ""));
@@ -638,29 +713,36 @@ if (RUN.has("gemini")) {
   say(`── Probe B: ${GEMINI_MODEL} @ ${GEMINI_REGION}, ${QUESTIONS.length} questions, 41 tools ──`);
   const rows = await probeGemini(token, QUESTIONS);
   summary.gemini = rows;
-  const count = (o: TurnOutcome) => rows.filter((r) => r.outcome === o).length;
   for (const r of rows) {
-    say(`  ${String(r.ms).padStart(5)}ms  ${r.outcome.padEnd(17)} ${r.calledTool ?? "(no tool)"}` +
+    say(`  ${String(r.ms).padStart(5)}ms  ${r.outcome.padEnd(18)} ${r.calledTool ?? "(no tool)"}` +
         (r.error ? `\n           ${r.error}` : ""));
   }
-  const completed = count("loop-completed");
-  const broken = count("loop-broken") + count("truncated") + count("error");
-  const noTool = count("answered-no-tool");
-  const entered = completed + broken;
-  // The DENOMINATOR is stated, because the trigger is about the loop and a run
-  // the model answered directly never entered it. Excluding those from both
-  // halves is the only definition under which the number means what it says.
-  const rate = entered > 0 ? Math.round((100 * broken) / entered) : null;
+  // The denominator is `enteredLoop`, not a sum over outcomes. Only a run that
+  // actually called a tool can have a broken second turn, so a first-turn 404,
+  // a direct answer and an empty first turn are all outside BOTH halves.
+  const inLoop = rows.filter((r) => r.enteredLoop);
+  const completed = inLoop.filter((r) => r.outcome === "loop-completed").length;
+  const broken = inLoop.length - completed;
+  const outside = rows.length - inLoop.length;
+  const outsideBreakdown = (["answered-no-tool", "no-answer-no-tool", "error"] as const)
+    .map((o) => [o, rows.filter((r) => !r.enteredLoop && r.outcome === o).length] as const)
+    .filter(([, n]) => n > 0)
+    .map(([o, n]) => `${o} ${n}`)
+    .join(", ");
+  const rate = inLoop.length > 0 ? Math.round((100 * broken) / inLoop.length) : null;
   say(
-    `\n  loop entered: ${entered}/${rows.length}   completed: ${completed}   broken/truncated/error: ${broken}` +
-    `\n  answered WITHOUT a tool (excluded from the rate, exercised no loop): ${noTool}` +
+    `\n  loop entered: ${inLoop.length}/${rows.length}   completed: ${completed}   broken/truncated: ${broken}` +
+    `\n  never entered the loop (excluded from BOTH halves): ${outside}${outsideBreakdown ? ` — ${outsideBreakdown}` : ""}` +
     `\n  failure rate over the loop runs: ${rate === null ? "n/a — the loop was never entered" : rate + "%"}` +
     `  (plan's PR-5 drop trigger: < 10%)`,
   );
-  if (entered < rows.length / 2) {
+  if (inLoop.length < rows.length / 2) {
     say("  ⚠ over half the questions never entered the loop — the rate above is a thin sample.");
   }
-  summary.geminiVerdict = { total: rows.length, entered, completed, broken, noTool, failureRatePct: rate };
+  summary.geminiVerdict = {
+    total: rows.length, entered: inLoop.length, completed, broken, outside, failureRatePct: rate,
+  };
+  if (inLoop.length === 0) failures.push("probe B: no question entered the tool loop");
   say("");
 }
 
@@ -676,9 +758,20 @@ if (RUN.has("claude-sdk")) {
         "    assertHaveAuth() is the only muninn-side blocker.\n"
       : probe.outcome === "did-not-reach"
         ? "\n  ⇒ The request never left this machine. Says nothing about ADC — fix the endpoint and re-run.\n"
-        : "\n  ⇒ UNDECIDED. The outcome matched neither a Vertex answer nor a transport failure;\n" +
-          "    read `detail` above before concluding anything about Vei A.\n",
+        : probe.outcome === "timeout"
+          // Its own sentence: a timeout matched nothing because we STOPPED
+          // LISTENING, which is a different fact from "matched neither pattern".
+          ? `\n  ⇒ TIMED OUT after ${SDK_TIMEOUT_MS}ms with no result event. Undecided — the request may\n` +
+            "    still have been in flight. Re-run, or raise SDK_TIMEOUT_MS.\n"
+          : "\n  ⇒ UNDECIDED. The outcome matched neither a Vertex answer nor a transport failure;\n" +
+            "    read `detail` above before concluding anything about Vei A.\n",
   );
+  if (probe.outcome === "timeout") failures.push("probe C: timed out with no result");
 }
 
 if (JSON_MODE) console.log(redact(JSON.stringify(summary, null, 2)));
+
+if (failures.length > 0) {
+  for (const f of failures) console.error(`FAILED — ${f}`);
+  process.exit(1);
+}
