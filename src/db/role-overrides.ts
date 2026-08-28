@@ -7,7 +7,7 @@ const log = getLog("db", "role-overrides");
  * DB-backed overrides for the process-wide role assignments that are otherwise
  * env-only. The key is the env-var name the override supersedes:
  *   - SUMMARIZER_BOT / RESEARCH_BOT — value is a bot name
- *   - HAIKU_BACKEND — value is a Haiku backend ("cli" | "anthropic" | "copilot")
+ *   - HAIKU_BACKEND — value is a Haiku backend ("cli" | "anthropic" | "copilot" | "vertex")
  *
  * These overrides are HOT: the resolvers (resolveSummarizerBot /
  * resolveResearchBot in bots/config.ts, resolveBackendWithReason in

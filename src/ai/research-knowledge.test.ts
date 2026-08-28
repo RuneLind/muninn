@@ -22,6 +22,10 @@ mock.module("../scheduler/executor.ts", () => ({
   spawnHaiku: mockSpawnHaiku,
   DEFAULT_MODEL: "claude-haiku-4-5-20251001",
   HAIKU_TIMEOUT_MS: 60_000,
+  // Imported transitively too (haiku-direct.ts → the non-CLI backends' output
+  // ceiling). A module factory REPLACES the module, so every named export a
+  // consumer in the graph imports has to appear here or the import fails.
+  HAIKU_DEFAULT_MAX_TOKENS: 4096,
   // trackUsage is imported transitively (haiku-direct.ts) — stub it so the
   // partial module mock doesn't drop the export and break the import.
   trackUsage: () => {},

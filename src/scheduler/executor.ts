@@ -19,13 +19,13 @@ export interface HaikuResult {
   /**
    * The backend that ACTUALLY produced this result — `"cli"` for every
    * `spawnHaiku` path (including the router's error/no-auth fallback to CLI),
-   * `"anthropic"`/`"copilot"` for the direct-SDK backends. Lets a traced caller
+   * `"anthropic"`/`"copilot"`/`"vertex"` for the non-CLI backends. Lets a traced caller
    * stamp the honest backend on its span (the router resolves cli/anthropic/
    * copilot but callers otherwise couldn't tell which one ran, so router-backed
    * spans rendered blank-backend rows). Typed inline (not `HaikuBackend` from
    * `../ai/haiku-direct.ts`) to avoid an import cycle — that module imports this.
    */
-  backend?: "cli" | "anthropic" | "copilot";
+  backend?: "cli" | "anthropic" | "copilot" | "vertex";
   /**
    * Tool calls the run made.
    *
@@ -36,7 +36,7 @@ export interface HaikuResult {
    *
    * It does NOT hold for `HaikuResult`s from the ROUTER: `callHaikuDirect` /
    * `callHaikuViaCopilot` (`src/ai/haiku-direct.ts`) never set this field, so on the
-   * `anthropic`/`copilot` backends `undefined` just means "not the CLI". Any future
+   * non-CLI backends `undefined` just means "not the CLI". Any future
    * tool-liveness check routed through `callHaikuWithFallback` would be silently
    * 100% inert there — and would pass its unit tests, since mocks return `undefined`
    * too. Check `backend === "cli"` before reading this as evidence of anything.
@@ -93,6 +93,19 @@ export interface HaikuUsage {
 export const HAIKU_TIMEOUT_MS = 60_000;
 
 export const DEFAULT_MODEL = "claude-haiku-4-5-20251001";
+
+/**
+ * Output ceiling for a router one-shot on the non-CLI backends (the CLI has no
+ * such knob). The decomposer / memory / goal / schedule extractors all emit
+ * small JSON blobs and the two prose paths a short paragraph — 4096 is
+ * comfortable headroom without inviting runaway outputs.
+ *
+ * Here rather than in `haiku-direct.ts` because BOTH the router and the Vertex
+ * backend need it, and the Vertex backend is imported BY the router: a constant
+ * exported from the router and read by its own import would be an import cycle
+ * for a number.
+ */
+export const HAIKU_DEFAULT_MAX_TOKENS = 4096;
 
 /**
  * Parse Haiku stdout as JSON, throwing a descriptive error (including a stdout
@@ -558,11 +571,23 @@ export function trackUsage(
 ): void {
   if (inputTokens === 0 && outputTokens === 0) return;
 
-  const sql = getDb();
-  sql`
-    INSERT INTO haiku_usage (source, model, input_tokens, output_tokens, bot_name, trace_id)
-    VALUES (${source}, ${model}, ${inputTokens}, ${outputTokens}, ${botName ?? null}, ${traceId ?? null})
-  `.catch((err) => {
+  // The whole body, not just the query's promise. `getDb()` THROWS
+  // synchronously when the pool was never opened, so the existing `.catch` only
+  // ever covered half the ways this can fail — and the uncovered half throws
+  // from inside a backend that has already made its model call, discarding a
+  // finished answer because a usage row could not be written. Measured through
+  // `scripts/smoke-vertex.ts --probe=haiku`, which drives the shipped router
+  // without a database: "Database not initialized" surfaced as the ROUTER
+  // failing and falling back to the CLI. Telemetry must not be able to do that.
+  try {
+    const sql = getDb();
+    sql`
+      INSERT INTO haiku_usage (source, model, input_tokens, output_tokens, bot_name, trace_id)
+      VALUES (${source}, ${model}, ${inputTokens}, ${outputTokens}, ${botName ?? null}, ${traceId ?? null})
+    `.catch((err) => {
+      log.error("Failed to track Haiku usage: {error}", { botName: botName ?? "haiku", error: err instanceof Error ? err.message : String(err) });
+    });
+  } catch (err) {
     log.error("Failed to track Haiku usage: {error}", { botName: botName ?? "haiku", error: err instanceof Error ? err.message : String(err) });
-  });
+  }
 }

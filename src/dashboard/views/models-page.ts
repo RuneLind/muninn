@@ -354,7 +354,7 @@ export async function renderModelsPage(): Promise<string> {
     const editOpen = new Set();
 
     const CONNECTORS = ['claude-cli', 'copilot-sdk', 'openai-compat', 'claude-sdk'];
-    const BACKENDS = ['cli', 'anthropic', 'copilot'];
+    const BACKENDS = ['cli', 'anthropic', 'copilot', 'vertex'];
 
     // --- Runtime merge (hand-mirror of src/dashboard/models-runtime.ts) ---
     function rowMatches(row, kind, bot, name) {

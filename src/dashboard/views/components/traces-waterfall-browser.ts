@@ -254,7 +254,7 @@ function isAiSpan(s: WaterfallSpan): boolean {
   const a = s.attributes ?? {};
   return !!(a.connector || a.model || a.requestedModel || a.haikuBackend);
 }
-// Friendly display for a Haiku-router backend value (cli/anthropic/copilot);
+// Friendly display for a Haiku-router backend value (cli/anthropic/copilot/vertex);
 // leaves real ConnectorType values (claude-sdk/copilot-sdk/…) untouched.
 function backendDisplay(v: string): string {
   // Both the legacy bare backend token (`cli`, still on historical `haikuBackend`
@@ -263,6 +263,7 @@ function backendDisplay(v: string): string {
   if (v === "cli" || v === "claude-cli") return "Claude Code";
   if (v === "anthropic") return "Anthropic API";
   if (v === "copilot") return "Copilot SDK";
+  if (v === "vertex") return "Vertex AI";
   return v;
 }
 // For a bare "claude" span: "{connector}, {model}" — and "unknown" (never a

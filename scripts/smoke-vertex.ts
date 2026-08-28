@@ -27,13 +27,21 @@
  *      drives that seam — the shipped one, `src/ai/connectors/openai-compat-auth.ts`
  *      — against the real endpoint with a deliberately invalid token, so the 401
  *      is Google's rather than a fixture's.
- *   4. Is `assertHaveAuth()` really the only muninn-side blocker on the
+ *   4. Do the SHORT calls go to the same place as the chat turn? Every
+ *      `research_knowledge` call decomposes through a Haiku-tier call FIRST,
+ *      with the user's question in the prompt — so a deployment can be compliant
+ *      on its answer and not on the lookup right before it. Probe E drives the
+ *      SHIPPED router (`callHaikuWithFallback`) and the SHIPPED decomposer with
+ *      the Vertex backend selected, and reads back WHICH backend actually ran:
+ *      the router falls back to the Claude CLI on any failure, so "it answered"
+ *      is not evidence and "vertex answered" is.
+ *   5. Is `assertHaveAuth()` really the only muninn-side blocker on the
  *      "zero-code" Claude-on-Vertex path? Probe C runs the Agent SDK with BOTH
  *      Anthropic credentials removed from the environment and CLASSIFIES how
  *      far it got — reached Vertex, never left the machine, or unknown.
  *
  *     VERTEX_PROJECT_ID=<your-gcp-project> bun scripts/smoke-vertex.ts
- *     … --probe=regions|gemini|claude-sdk|refresh  (comma-separated; default: all)
+ *     … --probe=regions|gemini|claude-sdk|refresh|haiku  (comma-separated; default: all)
  *     … --json                              (JSON on stdout, prose on stderr)
  *
  * NOTHING DEPLOYMENT-SPECIFIC LIVES HERE, and nothing leaks at RUNTIME either:
@@ -68,7 +76,7 @@ const CLAUDE_MODEL = (process.env.VERTEX_CLAUDE_MODEL ?? "claude-sonnet-4-5").tr
  */
 const ANSWER_MAX_TOKENS = 2048;
 
-const KNOWN_PROBES = ["regions", "gemini", "claude-sdk", "refresh"] as const;
+const KNOWN_PROBES = ["regions", "gemini", "claude-sdk", "refresh", "haiku"] as const;
 const JSON_MODE = process.argv.includes("--json");
 /** Prose goes to stderr under `--json` so `… --json | jq` works. */
 const say = (line = "") => (JSON_MODE ? console.error(line) : console.log(line));
@@ -738,6 +746,118 @@ async function probeTokenRefresh(): Promise<RefreshProbe> {
 }
 
 // ---------------------------------------------------------------------------
+
+/**
+ * The Haiku router on Vertex, driven through the SHIPPED entry points.
+ *
+ * The trap this is built around: `callHaikuWithFallback` falls back to the
+ * Claude CLI on ANY failure, and the CLI answers perfectly well on a laptop. So
+ * a probe that asserted "we got an answer" would report success for a Vertex
+ * backend that never ran — the exact false green this file exists to refuse
+ * elsewhere. The router returns the backend that ACTUALLY ran; that field, not
+ * the text, is the measurement.
+ *
+ * Two steps, because they fail differently. The first is the router itself on an
+ * extraction-shaped prompt (does the backend run, and is its output parseable
+ * JSON — a truncated Gemini answer is empty, not half a blob). The second is
+ * `decomposeQuestion`, the real hot path, which SWALLOWS a Haiku failure and
+ * degrades to passthrough — so on that one the router's own backend field is
+ * unreachable and the signal is the rationale it fell back with.
+ */
+type HaikuProbeOutcome =
+  | "vertex-answered"   // the Vertex backend ran and produced usable output
+  | "fell-back"         // something failed and the CLI floor answered instead
+  | "unparseable"       // Vertex answered, and the answer was not usable JSON
+  | "failed";           // the whole chain threw
+
+interface HaikuProbeStep {
+  step: string;
+  outcome: HaikuProbeOutcome;
+  backend: string | null;
+  model: string | null;
+  ms: number;
+  detail: string;
+}
+
+const HAIKU_PROBE_BOT = "vertex-smoke";
+
+async function probeHaikuRouter(): Promise<HaikuProbeStep[]> {
+  // The resolver reads the same two names `resolveVertexConfig` does. This
+  // script's own region input is the one being measured, so make it the one the
+  // resolver sees — without overwriting an explicitly-set value.
+  process.env.VERTEX_REGION ||= GEMINI_REGION;
+  const { callHaikuWithFallback } = await import("../src/ai/haiku-direct.ts");
+  const { decomposeQuestion } = await import("../src/ai/knowledge-decomposer.ts");
+  const { extractJson } = await import("../src/ai/json-extract.ts");
+  const { resolveVertexHaikuTarget } = await import("../src/ai/haiku-vertex.ts");
+
+  const steps: HaikuProbeStep[] = [];
+  const target = resolveVertexHaikuTarget();
+  if (!target.ok) {
+    return [{
+      step: "config", outcome: "failed", backend: null, model: null, ms: 0,
+      detail: `not configured: ${target.missing} is not set`,
+    }];
+  }
+
+  // Extraction-shaped: a small JSON contract, which is what three of the four
+  // router callers ask for.
+  const started = performance.now();
+  try {
+    const haiku = await callHaikuWithFallback(
+      'Extract the facts as JSON: {"facts": ["..."]}. Reply with ONLY the JSON.\n\n' +
+      "Text: The office moves to the third floor on Monday, and the coffee machine stays.",
+      { source: "vertex-smoke", botName: HAIKU_PROBE_BOT, backend: "vertex" },
+    );
+    const ms = Math.round(performance.now() - started);
+    let parsed = false;
+    try { extractJson(haiku.result); parsed = true; } catch { parsed = false; }
+    steps.push({
+      step: "router one-shot",
+      // `backend`, not the text: a CLI fallback answers this prompt just as well.
+      outcome: haiku.backend !== "vertex" ? "fell-back" : parsed ? "vertex-answered" : "unparseable",
+      backend: haiku.backend ?? null,
+      model: haiku.model ?? null,
+      ms,
+      detail: redact(haiku.result.trim().slice(0, 120)),
+    });
+  } catch (err) {
+    steps.push({
+      step: "router one-shot", outcome: "failed", backend: null, model: null,
+      ms: Math.round(performance.now() - started), detail: redact((err as Error).message).slice(0, 200),
+    });
+  }
+
+  // The hot path. `decomposeQuestion` catches its own failures, so the outcome
+  // here is read off the RATIONALE it degraded with rather than off a throw.
+  const decomposeStarted = performance.now();
+  try {
+    const result = await decomposeQuestion({
+      question: "Hva er forskjellen på et forhåndsvarsel og et endelig svar, og når sendes hvert av dem?",
+      botName: HAIKU_PROBE_BOT,
+      haikuBackend: "vertex",
+    });
+    const degraded = /haiku call failed|could not parse/i.test(result.rationale);
+    steps.push({
+      step: "decomposer",
+      outcome: degraded ? "fell-back" : "vertex-answered",
+      backend: null, model: null,
+      ms: Math.round(performance.now() - decomposeStarted),
+      detail: redact(
+        `${result.passthrough ? "passthrough" : `${result.subQuestions.length} sub-questions`}: ${result.rationale}`,
+      ).slice(0, 200),
+    });
+  } catch (err) {
+    steps.push({
+      step: "decomposer", outcome: "failed", backend: null, model: null,
+      ms: Math.round(performance.now() - decomposeStarted), detail: redact((err as Error).message).slice(0, 200),
+    });
+  }
+
+  return steps;
+}
+
+// ---------------------------------------------------------------------------
 // Report
 // ---------------------------------------------------------------------------
 
@@ -971,6 +1091,27 @@ if (RUN.has("refresh")) {
     failures.push(`probe D: ${probe.outcome} — the per-request credential did not recover a 401`);
   }
   say("");
+}
+
+if (RUN.has("haiku")) {
+  say(`── Probe E: the Haiku router on Vertex ${GEMINI_REGION}, through the shipped entry points ──`);
+  const steps = await probeHaikuRouter();
+  summary.haikuRouter = steps;
+  for (const st of steps) {
+    say(`  ${String(st.ms).padStart(5)}ms  ${st.step.padEnd(16)} ${st.outcome.padEnd(16)}` +
+        `${st.backend ? ` backend=${st.backend}` : ""}${st.model ? ` model=${st.model}` : ""}` +
+        `\n           ${st.detail}`);
+  }
+  const answered = steps.filter((st) => st.outcome === "vertex-answered").length;
+  say(
+    answered === steps.length
+      ? "\n  ⇒ The decomposer and the extractors run on the same endpoint as the chat turn.\n"
+      : "\n  ⇒ At least one short call did NOT run on Vertex. A `fell-back` row means the Claude CLI\n" +
+        "    answered instead — which on this laptop looks like success and in a pod is a refusal.\n",
+  );
+  for (const st of steps) {
+    if (st.outcome !== "vertex-answered") failures.push(`probe E: ${st.step} — ${st.outcome}: ${st.detail}`);
+  }
 }
 
 if (JSON_MODE) console.log(redact(JSON.stringify(summary, null, 2)));
