@@ -299,3 +299,11 @@ test("the unreachable message does not tell the reader the topic is unindexed", 
   expect(msg).not.toMatch(/indexed/i);
   expect(msg).toMatch(/could not|unavailable|reach/i);
 });
+
+test("an unclassified coverage verdict never claims the corpus is unindexed", () => {
+  // Same unreachable-`default:` shape as the decline bar: a default returning
+  // NO_HITS_MESSAGE — "may simply not be indexed yet" — passed the whole suite.
+  const msg = coverageMessage("from_the_future" as never);
+  expect(msg).not.toMatch(/indexed/i);
+  expect(msg).toMatch(/could not reach/i);
+});

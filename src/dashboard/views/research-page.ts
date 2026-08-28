@@ -7,6 +7,7 @@ import { wikiMermaidClientScript } from "./components/wiki-mermaid-client.ts";
 import { codeTabsClientScript } from "./components/code-tabs-client.ts";
 import { clientCorpusJson, clientProfilesJson, DEFAULT_PROFILE } from "../../research/corpus.ts";
 import { askDeclineReason, askStatusText } from "./components/wiki-ask-session.ts";
+import { DECLINE_REASONS, toDeclineReason } from "../../wiki/ask-chat.ts";
 import { componentBlockCss } from "../../format/component-styles.ts";
 
 export async function renderResearchPage(): Promise<string> {
@@ -383,17 +384,24 @@ export async function renderResearchPage(): Promise<string> {
     ${wikiMermaid}
     ${codeTabs}
 
-    // The REAL \`askDeclineReason\` (src/dashboard/views/components/wiki-ask-session.ts),
-    // injected as source rather than hand-mirrored. This page's client is an inline
-    // script string — it has no bundler and cannot import — but the one thing worth
-    // sharing here is the ORDER: the server sets \`noHits\` on both decline branches
-    // (src/research/ask.ts), so a \`noHits ? … : …\` test mislabels every
-    // low-confidence decline. Injecting the function keeps that order in exactly one
-    // place. Safe to serialize: it is pure, closes over nothing, and its body carries
-    // no backtick or \${ that would break this template.
+    // The REAL \`askDeclineReason\` / \`askStatusText\`
+    // (src/dashboard/views/components/wiki-ask-session.ts), injected as source rather
+    // than hand-mirrored. This page's client is an inline script string — it has no
+    // bundler and cannot import — but the one thing worth sharing here is the ORDER:
+    // the server sets \`noHits\` on both decline branches (src/research/ask.ts), so a
+    // \`noHits ? … : …\` test mislabels every low-confidence decline. Injecting the
+    // functions keeps that order in exactly one place.
+    //
+    // ⚠️ \`.toString()\` serializes a body, NOT its dependencies. Every identifier a
+    // injected function references must be injected ABOVE it or the page throws
+    // \`ReferenceError\` on the first \`done\` event — for EVERY ask, decline or not,
+    // in a handler with no try/catch. That shipped once (round 4 of PR #485: an
+    // added \`toDeclineReason\` call), typechecked clean, and was invisible to 2,179
+    // unit tests. \`research-page.test.ts\` now evaluates these bodies against the
+    // rendered page, so the next one fails there instead of in a browser.
+    var DECLINE_REASONS = ${JSON.stringify(DECLINE_REASONS)};
+    var toDeclineReason = ${toDeclineReason.toString()};
     var askDeclineReason = ${askDeclineReason.toString()};
-    // Same reason as above: inlined, not re-typed, so the two pages cannot drift
-    // on which verdicts count as declines.
     var askStatusText = ${askStatusText.toString()};
 
     var CORPUS = ${clientCorpusJson()};

@@ -525,6 +525,16 @@ describe("every decline reason gets its OWN sentence, none borrows another's", (
     expect(askStatusText(undefined, 1)).toMatch(/Answered from 1 source$/);
   });
 
+  test("an unknown reason never inherits the no_hits sentence on the bar", () => {
+    // The `default:` arm is unreachable from DECLINE_REASONS (every member is
+    // cased), so iterating the list cannot pin it — and a default that returned
+    // "The wiki had nothing on this." survived every test in the suite.
+    const html = declineChatBarHtml("from_the_future" as never);
+    expect(html).not.toContain("had nothing on this");
+    expect(html).not.toContain("had nothing solid");
+    expect(html).toContain("did not answer this");
+  });
+
   test("an unknown reason degrades to an explicit decline, never to an answer", () => {
     // The property a compile error cannot enforce in the inlined client copies.
     expect(askStatusText("from_the_future" as never, 0)).not.toMatch(/answered/i);

@@ -2411,10 +2411,13 @@ describe("POST /api/wiki/ask/chat", () => {
       expect(((await res.json()) as { error: string }).error).toContain("declineReason");
     });
 
-    test("declineReason is ignored outside direct mode", async () => {
-      await post(askBody({ declineReason: "no_hits" }));
-      expect(pending[0]!.text).not.toContain("already been searched");
-    });
+    // NB there is deliberately no "ignored outside direct mode" case for
+    // `declineReason`, though there is one for the retired boolean: escalate mode
+    // builds its seed with `buildAskChatSeed`, which takes no such parameter, so
+    // the assertion holds however the route treats the field. It was written, it
+    // could not fail (measured: honouring the client value in escalate mode left
+    // 210/210 green), and a test that cannot fail is worse than none. The
+    // scoping is structurally identical to the `askDeclined` path tested above.
 
     test("a wiki with NO collections isn't told to search notes it can't search", async () => {
       // `collwiki` has collections, `lonewiki` (a bare WIKI_EXTRA entry) does not.

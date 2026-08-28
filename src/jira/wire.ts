@@ -353,7 +353,7 @@ function clipUnits(text: string, max: number): string {
 }
 
 /**
- * Retrieval coverage verdict — `research/answer.ts`'s `Coverage` plus one value
+ * Retrieval coverage verdict — the four verdicts a Jira draft row can hold — deliberately NOT derived from `research/answer.ts`'s `Coverage`, which is now `"answer" | DeclineReason` and grows with `DECLINE_REASONS`; this union is frozen because archived rows carry these exact strings
  * of this feature's own, so the browser half never imports the research layer.
  *
  * **`unreachable` is not a coverage verdict about the corpus; it is the absence

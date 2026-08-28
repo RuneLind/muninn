@@ -57,8 +57,11 @@ test("the done handler orders the decline reasons through the SHARED helper", as
   const start = html.indexOf("done: function(e)");
   const segment = html.slice(start, html.indexOf("answer_html: function(e)", start));
   expect(segment).toContain("askDeclineReason(d)");
-  expect(segment).toContain("declined === 'low_confidence'");
-  expect(segment).toContain("declined === 'no_hits'");
+  // The per-reason chain that used to live here is gone: BOTH pages now derive
+  // the status through the shared `askStatusText`, whose truthiness guard is what
+  // stops an unrecognised verdict rendering as "Answered from N sources".
+  expect(segment).toContain("askStatusText(declined, a.citations.length)");
+  expect(segment).not.toContain("declined === 'low_confidence'");
   // No second, hand-rolled ordering of the raw flags.
   expect(segment).not.toContain("d.lowConfidence");
   expect(segment).not.toContain("d.noHits");
@@ -69,4 +72,47 @@ test("answer-body scope carries the component block CSS", async () => {
   // componentBlockCss(".answer-body") injects the callout rule under that scope.
   expect(html).toContain(".answer-body .callout");
   expect(html).toContain(".answer-body .verdict");
+});
+
+/**
+ * The inlined-function guard.
+ *
+ * `.toString()` serializes a body, NOT its dependencies. Round 4 of PR #485 added
+ * a `toDeclineReason` call inside `askDeclineReason`, which is injected into this
+ * page as source — the definition was never emitted, so the `done` handler threw
+ * `ReferenceError` on EVERY ask (decline or not), in a handler with no try/catch:
+ * the status line never left its streaming state, history stopped accumulating,
+ * and the next ask deleted the previous card. It typechecked clean and no unit
+ * test saw it. This EXECUTES what the page actually ships.
+ */
+test("every function injected into the page can actually run there", async () => {
+  const html = await pageHtml();
+  // Pull the injected declarations out of the rendered page and evaluate them in
+  // one scope, exactly as the browser would.
+  const names = ["DECLINE_REASONS", "toDeclineReason", "askDeclineReason", "askStatusText"];
+  for (const n of names) {
+    expect(html).toContain("var " + n + " = ");
+  }
+  const start = html.indexOf("var DECLINE_REASONS = ");
+  const end = html.indexOf("var CORPUS = ");
+  expect(start).toBeGreaterThan(-1);
+  expect(end).toBeGreaterThan(start);
+  const injected = html.slice(start, end);
+
+  const run = new Function(
+    injected + "\nreturn { askDeclineReason: askDeclineReason, askStatusText: askStatusText };",
+  ) as () => {
+    askDeclineReason: (p: Record<string, unknown>) => string | undefined;
+    askStatusText: (d: string | undefined, n: number) => string;
+  };
+  const api = run();
+
+  // The payload shapes src/research/ask.ts actually emits.
+  expect(api.askDeclineReason({ noHits: true, lowConfidence: false, unreachable: true, declineReason: "unreachable" })).toBe("unreachable");
+  expect(api.askDeclineReason({ noHits: true, lowConfidence: true })).toBe("low_confidence");
+  expect(api.askDeclineReason({ noHits: true })).toBe("no_hits");
+  // A successful answer — the case the ReferenceError also broke.
+  expect(api.askDeclineReason({ noHits: false, lowConfidence: false })).toBeUndefined();
+  expect(api.askStatusText(undefined, 2)).toBe("Answered from 2 sources");
+  expect(api.askStatusText("unreachable", 0)).toMatch(/Search unavailable/);
 });
