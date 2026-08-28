@@ -887,7 +887,7 @@ export const VERTEX_NOTE_TEXT: Record<VertexView["note"], string> = {
   // exists to remove: it rendered directly above a "Vertex target: no region"
   // row on the EU multi-region shape, which is a first-class configuration.
   declared: "a project and a region or base URL are set but CLAUDE_CODE_USE_VERTEX is not — the SDK still uses an Anthropic credential",
-    // Two false versions of this sentence have shipped, so it names the actual
+  // Two false versions of this sentence have shipped, so it names the actual
   // variables now. It must NOT say "see the target row below for what is
   // missing" (that row shows nothing missing for two of the three shapes), and
   // it must NOT say "a project and a region or base URL" — that is what makes
