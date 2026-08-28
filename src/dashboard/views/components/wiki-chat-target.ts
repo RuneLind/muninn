@@ -1015,13 +1015,18 @@ export function chatOptConflictFootHtml(
  *  drift. */
 export const DECLINE_CHAT_BTN_ID = "wikiChatDeclineBtn";
 
+/** The three verdicts a declined Ask turn can carry. */
+export type DeclineReason = "no_hits" | "low_confidence" | "unreachable";
+
 /** Why the wiki declined, in the reader's words. `low_confidence` must NOT read as
  *  "nothing found" — weak sources did ride out and are listed under the answer, so
- *  the honest framing is "nothing solid", not "nothing". */
-function declineNote(reason: "no_hits" | "low_confidence"): string {
-  return reason === "low_confidence"
-    ? "The wiki had nothing solid on this."
-    : "The wiki had nothing on this.";
+ *  the honest framing is "nothing solid", not "nothing". And `unreachable` must not
+ *  read as either: the search never happened, so the wiki's contents are unknown,
+ *  not empty. */
+function declineNote(reason: DeclineReason): string {
+  if (reason === "low_confidence") return "The wiki had nothing solid on this.";
+  if (reason === "unreachable") return "The wiki search could not be reached.";
+  return "The wiki had nothing on this.";
 }
 
 /**
@@ -1037,7 +1042,7 @@ function declineNote(reason: "no_hits" | "low_confidence"): string {
  * a confident answer the reader still wants to take further — is served by the
  * always-visible "New chat" button beside the Ask box.)
  */
-export function declineChatBarHtml(reason: "no_hits" | "low_confidence"): string {
+export function declineChatBarHtml(reason: DeclineReason): string {
   return (
     '<span class="wiki-chatesc-msg">' + declineNote(reason) + "</span>" +
     '<button id="' + DECLINE_CHAT_BTN_ID + '" class="wiki-chatesc-btn wiki-chatesc-decline">' +
@@ -1067,7 +1072,7 @@ export interface ChatEscState {
 export interface ChatEscTurn {
   answer: string;
   kind?: string;
-  declined?: "no_hits" | "low_confidence";
+  declined?: "no_hits" | "low_confidence" | "unreachable";
   chatEsc?: ChatEscState;
 }
 

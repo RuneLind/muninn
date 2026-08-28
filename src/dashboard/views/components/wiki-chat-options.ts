@@ -106,7 +106,7 @@ export interface ChatOptTurn {
   answer: string;
   citations: { title: string; pageName?: string }[];
   kind?: string;
-  declined?: "no_hits" | "low_confidence";
+  declined?: "no_hits" | "low_confidence" | "unreachable";
   explainPage?: string;
   originQuestion?: string;
   chatEsc?: ChatEscState;

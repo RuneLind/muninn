@@ -23,7 +23,7 @@ describe("fullDepthUnavailableMessage", () => {
 
   test("down servers keep the start-them remedy", () => {
     const msg = fullDepthUnavailableMessage({ unconfigured: [], down: ["code"] });
-    expect(msg).toMatch(/Start\s+code\s+fra dashbordet/);
+    expect(msg).toMatch(/Start\s+code\s+fra dashbordet \(\/serena\)/);
     expect(msg).toContain("Skisse");
   });
 
@@ -45,12 +45,9 @@ describe("fullDepthUnavailableMessage", () => {
     expect(remedy).not.toContain("yggdrasil");
   });
 
-  test("an empty gap renders a coherent sentence, not a dangling clause", () => {
-    // Exported with no guard of its own; only today's single call site happens
-    // to check the length first.
-    const msg = fullDepthUnavailableMessage({ unconfigured: [], down: [] });
-    expect(msg).not.toMatch(/og\s*\./);
-    expect(msg).not.toMatch(/:\s*\./);
-    expect(msg).toContain("Skisse");
+  test("an empty gap is refused, not composed into a sentence", () => {
+    // Neither "og ." nor an invented "er ikke tilgjengelig": an empty gap means
+    // Full IS available, so there is no honest refusal to render.
+    expect(() => fullDepthUnavailableMessage({ unconfigured: [], down: [] })).toThrow(/empty gap/);
   });
 });

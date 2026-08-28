@@ -62,7 +62,7 @@ async function recreateDatabases() {
   try {
     // DROP/CREATE DATABASE can't run inside a transaction.
     for (const db of [DB_INITSQL, DB_MIGRATE]) {
-      await admin.unsafe(`DROP DATABASE IF EXISTS ${db}`);
+      await admin.unsafe(`DROP DATABASE IF EXISTS ${db} WITH (FORCE)`);
       await admin.unsafe(`CREATE DATABASE ${db}`);
     }
   } finally {
@@ -70,11 +70,21 @@ async function recreateDatabases() {
   }
 }
 
+/**
+ * `WITH (FORCE)` (pg13+) is load-bearing, not tidiness. Every helper here closes
+ * with `sql.end({ timeout: 5 })` — postgres.js counts that in SECONDS, so a
+ * connection can still be draining when this runs, and a plain `DROP DATABASE`
+ * BLOCKS while any session is attached. The hook's own budget is bun's 5000 ms
+ * default, so on a loaded runner the drop lost that race and the whole `src/db/`
+ * link died as `(fail) (unnamed) [5000ms]` — observed on main at 7783735 and
+ * cf789b6 before it ever showed up on a branch. FORCE terminates the stragglers
+ * instead of waiting for them; the explicit hook timeout is the second belt.
+ */
 async function dropDatabases() {
   const admin = postgres(ADMIN_URL, { max: 1, onnotice: () => {} });
   try {
     for (const db of [DB_INITSQL, DB_MIGRATE]) {
-      await admin.unsafe(`DROP DATABASE IF EXISTS ${db}`);
+      await admin.unsafe(`DROP DATABASE IF EXISTS ${db} WITH (FORCE)`);
     }
   } finally {
     await admin.end({ timeout: 5 });
@@ -184,7 +194,7 @@ const reachable = await isPostgresReachable();
 
 afterAll(async () => {
   if (reachable) await dropDatabases();
-});
+}, 30_000);
 
 test.skipIf(!reachable)(
   "init.sql schema matches a full migration replay (no drift)",

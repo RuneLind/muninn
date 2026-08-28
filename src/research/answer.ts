@@ -94,7 +94,7 @@ export interface CoverageInput {
 export function assessCoverage(input: CoverageInput): Coverage {
   // Checked FIRST: an empty result set caused by a transport failure is not an
   // empty corpus, and only this ordering can tell the two apart.
-  if (input.hitCount === 0 && input.subSearches.some((s) => s.error)) return "unreachable";
+  if (input.hitCount === 0 && input.subSearches.some((s) => s?.error)) return "unreachable";
   if (input.hitCount === 0) return "no_hits";
   const withResults = input.subSearches.filter((s) => s.resultCount > 0);
   if (withResults.length === 0) return "no_hits";

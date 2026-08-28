@@ -5,6 +5,7 @@ import {
   deserializeAskSession,
   type StoredAskTurn,
 } from "./wiki-ask-session.ts";
+import { declineChatBarHtml } from "./wiki-chat-target.ts";
 
 function turn(overrides: Partial<StoredAskTurn> = {}): StoredAskTurn {
   return {
@@ -435,5 +436,34 @@ describe("pageRelPath round-trips and is dropped-not-fatal when malformed", () =
     expect(parsed).toHaveLength(1);
     expect((parsed![0] as { pageRelPath?: unknown }).pageRelPath).toBeUndefined();
     expect(parsed![0]!.page).toBe("architecture");
+  });
+});
+
+/**
+ * `unreachable` must survive the WIRE, not just the answer body. The server sets
+ * `noHits: true` on every decline branch, so a verdict that is not carried as its
+ * own flag collapses back to "no_hits" here — and the reader then gets the honest
+ * sentence with "The wiki had nothing on this." rendered directly beneath it.
+ */
+describe("askDeclineReason — unreachable", () => {
+  test("an unreachable decline is not reported as no_hits", () => {
+    // `noHits` is true here because the server sets it on BOTH decline branches.
+    expect(askDeclineReason({ noHits: true, lowConfidence: false, unreachable: true })).toBe("unreachable");
+  });
+
+  test("it outranks lowConfidence — a lookup that never happened has no confidence to judge", () => {
+    expect(askDeclineReason({ noHits: true, lowConfidence: true, unreachable: true })).toBe("unreachable");
+  });
+
+  test("the existing two verdicts are unchanged", () => {
+    expect(askDeclineReason({ noHits: true, lowConfidence: true })).toBe("low_confidence");
+    expect(askDeclineReason({ noHits: true, lowConfidence: false })).toBe("no_hits");
+    expect(askDeclineReason({})).toBeUndefined();
+  });
+
+  test("the decline bar does not claim the wiki was empty", () => {
+    const html = declineChatBarHtml("unreachable");
+    expect(html).not.toContain("had nothing");
+    expect(html).toMatch(/could not|reach/i);
   });
 });

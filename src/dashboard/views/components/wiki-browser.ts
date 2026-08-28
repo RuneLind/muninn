@@ -1490,7 +1490,7 @@ interface AskTurn {
   // decline branches). PERSISTED: the decline hook replaces the ordinary escalate
   // bar and is re-derived on every turn switch / rehydrate, while the flags exist
   // only on the transient `done` event.
-  declined?: "no_hits" | "low_confidence";
+  declined?: "no_hits" | "low_confidence" | "unreachable";
   // Explain turns only: the page the passage was selected from (its title, else
   // its name). PERSISTED — without it an escalated Explain turn carries only the
   // `Explain: "…"` display label, which names neither the page nor the real
@@ -2938,6 +2938,7 @@ function runAskStream(url: string, turn: AskTurn): void {
         // lowConfidence-before-noHits order both branches below depend on.
         turn.declined = askDeclineReason(d);
         if (turn.declined === "low_confidence") statusText = "No strong match — closest sources below";
+        else if (turn.declined === "unreachable") statusText = "Search unavailable — nothing was looked up";
         else if (turn.declined === "no_hits") statusText = "No matching sources";
         else statusText = "Answered from " + turn.citations.length + " source" + (turn.citations.length === 1 ? "" : "s");
       }

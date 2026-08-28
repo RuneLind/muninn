@@ -314,7 +314,7 @@ export function formatResearchResultText(result: ResearchKnowledgeResult): strin
       lines.push(`**Knowledge search is UNAVAILABLE — this is NOT an empty corpus.**`);
       lines.push("");
       lines.push(
-        `All ${total} sub-search${total === 1 ? "" : "es"} failed before reaching the knowledge base. ` +
+        `All ${total} sub-search${total === 1 ? "" : "es"} failed — see the per-question errors above. ` +
         `Tell the user the knowledge base could not be reached, and answer only from what is ` +
         `already in this conversation. Do not present anything as checked against the sources.`,
       );
@@ -324,7 +324,7 @@ export function formatResearchResultText(result: ResearchKnowledgeResult): strin
     // first pass let this fall through to the bare sentence below, which is the
     // very claim this surface exists to stop — one flapping sub-search is enough.
     if (failedCount > 0) {
-      lines.push(`**No results, and the lookup was INCOMPLETE: ${failedCount} of ${total} sub-searches never reached the knowledge base.**`);
+      lines.push(`**No results, and the lookup was INCOMPLETE: ${failedCount} of ${total} sub-searches did not complete.**`);
       lines.push("");
       lines.push(
         `Do not report this as "nothing exists" — say the lookup was partial, and that what did run found nothing.`,

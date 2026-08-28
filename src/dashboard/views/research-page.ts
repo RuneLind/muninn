@@ -681,6 +681,7 @@ export async function renderResearchPage(): Promise<string> {
           var statusText;
           var declined = askDeclineReason(d);
           if (declined === 'low_confidence') statusText = 'No strong match — showing the closest sources';
+          else if (declined === 'unreachable') statusText = 'Search unavailable — nothing was looked up';
           else if (declined === 'no_hits') statusText = 'No matching sources';
           else statusText = 'Answered from ' + a.citations.length + ' source' + (a.citations.length === 1 ? '' : 's');
           setCardStatus(a, statusText, 'done');

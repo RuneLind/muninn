@@ -50,14 +50,22 @@ export function fullDepthUnavailableMessage(gap: FullDepthGap): string {
   if (gap.down.length > 0) {
     clauses.push(`disse er nede: ${gap.down.join(", ")}`);
   }
-  // Exported without a guard of its own, and only today's single call site
-  // happens to check the length first — a second caller must not ship "og .".
-  if (clauses.length === 0) return "Full teknisk dybde er ikke tilgjengelig. Velg dybde «Skisse».";
+  // An empty gap means Full is AVAILABLE, so there is no honest sentence to
+  // return — the first pass invented one ("er ikke tilgjengelig"), which is a
+  // refusal for a state that is not a refusal. Refuse to compose instead: the
+  // caller must check, and a caller that does not should fail loudly.
+  if (clauses.length === 0) {
+    throw new Error("fullDepthUnavailableMessage: empty gap — Full is available; the caller must check before composing a refusal.");
+  }
   // The remedy names the servers that can actually be started, and nothing else:
   // offering to start a server the same sentence just called absent is the exact
   // confusion this split exists to remove.
+  // `code` is the Serena proxy, so /serena is where it is started; yggdrasil has
+  // no such page. Naming a page only when one exists keeps the pointer the first
+  // pass dropped without re-introducing the absent-server confusion.
+  const page = gap.down.includes("code") ? " (/serena)" : "";
   const remedy = gap.down.length > 0
-    ? `Start ${gap.down.join(" og ")} fra dashbordet, eller velg dybde «Skisse».`
+    ? `Start ${gap.down.join(" og ")} fra dashbordet${page}, eller velg dybde «Skisse».`
     : "Velg dybde «Skisse».";
   return `Full teknisk dybde krever kodeverktøyene, og ${clauses.join("; ")}. ${remedy}`;
 }

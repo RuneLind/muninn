@@ -128,7 +128,7 @@ export interface StoredAskTurn {
    *  answered (or is a fact-check turn, which has no retrieval at all).
    *  Validated as the two-value union, but FORWARD-TOLERANTLY: an unknown value
    *  drops the field and keeps the turn (see `isValidTurn`). */
-  declined?: "no_hits" | "low_confidence";
+  declined?: "no_hits" | "low_confidence" | "unreachable";
   /** Explain turns only: the page the passage was selected from (its title, else
    *  its name). Persisted because an Explain turn's `question` is a display LABEL
    *  (`Explain: "<slice>…"`) — the real question is built server-side from `sel`
@@ -145,7 +145,7 @@ export interface StoredAskTurn {
 /**
  * Map an Ask/Explain `done` payload's decline flags onto {@link StoredAskTurn.declined}.
  *
- * **`lowConfidence` is checked FIRST and that order is load-bearing.** The server
+ * **Order is load-bearing: `unreachable`, then `lowConfidence`, then `noHits`.** The server
  * sets `noHits: true` unconditionally on BOTH decline branches (`src/research/ask.ts`
  * — it means "no answer was synthesized", not "zero documents came back") and
  * distinguishes them only by `lowConfidence`. The natural-reading
@@ -157,7 +157,11 @@ export interface StoredAskTurn {
 export function askDeclineReason(payload: {
   noHits?: unknown;
   lowConfidence?: unknown;
-}): "no_hits" | "low_confidence" | undefined {
+  unreachable?: unknown;
+}): "no_hits" | "low_confidence" | "unreachable" | undefined {
+  // `unreachable` outranks both: a lookup that never happened has no confidence
+  // to judge and no emptiness to report.
+  if (payload.unreachable) return "unreachable";
   if (payload.lowConfidence) return "low_confidence";
   if (payload.noHits) return "no_hits";
   return undefined;
