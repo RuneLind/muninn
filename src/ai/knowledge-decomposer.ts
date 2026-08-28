@@ -26,11 +26,11 @@ export interface DecomposeOptions {
  * WHY a result is a passthrough that nobody asked for.
  *
  * `decomposeQuestion` has exactly six outcomes: a fan-out, the one-sub-question
- * passthrough the prompt PREFERS for a simple lookup, and four degradations —
- * and a consumer has to tell the first two from the last four. It cannot do that
- * from `passthrough` (the valid cheap path sets it) nor from `rationale`, which
- * carries the MODEL's own words whenever it supplied any, which is nearly
- * always. Two rounds of regex over that field in `scripts/smoke-vertex.ts` each
+ * passthrough the prompt PREFERS for a simple lookup, and four degradation SITES
+ * carrying the THREE kinds below — and a consumer has to tell the first two from
+ * the rest. It cannot do that from `passthrough` (the valid cheap path sets it)
+ * nor from `rationale`, which on the two `malformed` sites is whatever the MODEL
+ * wrote whenever it supplied anything, which is nearly always. Two rounds of regex over that field in `scripts/smoke-vertex.ts` each
  * closed one door and left the others open; this is the enumeration instead.
  *
  *  - `call-failed`  — the router threw (no backend ran to completion).

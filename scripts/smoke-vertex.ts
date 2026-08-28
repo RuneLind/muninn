@@ -762,12 +762,18 @@ async function probeTokenRefresh(): Promise<RefreshProbe> {
  * path, which SWALLOWS a Haiku failure and degrades to a passthrough rather than
  * throwing.
  *
- * BOTH steps therefore ask the same two questions in the same order — which
- * backend ran, and was the answer usable — because either alone is a false
- * green. Backend alone passes a Vertex answer that could not be used (measured:
- * a decomposer whose JSON carries the wrong key still reports
- * `backend: "vertex"`, and every knowledge lookup then silently loses its
- * fan-out); usability alone passes an answer the Claude CLI produced.
+ * BOTH steps therefore ask the same two questions — which backend ran, and was
+ * the answer usable — because either alone is a false green. Backend alone
+ * passes a Vertex answer that could not be used (measured: a decomposer whose
+ * JSON carries the wrong key still reports `backend: "vertex"`, and every
+ * knowledge lookup then silently loses its fan-out); usability alone passes an
+ * answer the Claude CLI produced.
+ *
+ * The decomposer step asks them in the order `call-failed` → backend → usable,
+ * and that order is load-bearing rather than stylistic: `call-failed` means the
+ * whole chain threw, so there is no backend to report and "the CLI answered
+ * instead" is false. Testing the backend first said exactly that on a `nais`
+ * run where nothing ran at all.
  *
  * Usability comes from a field the producer SETS — the one-shot's own JSON
  * parse, `DecomposeResult.degraded` — never from matching the model's prose.
@@ -856,13 +862,11 @@ async function probeHaikuRouter(): Promise<HaikuProbeStep[]> {
       botName: HAIKU_PROBE_BOT,
       haikuBackend: "vertex",
     });
-    // Backend FIRST, then usability — the same order as the step above, and
-    // usability read from `result.degraded`, which the decomposer SETS, rather
-    // than matched out of `result.rationale`, which the MODEL writes. Two
-    // rounds of regex here each closed one of the four degradation paths: the
-    // three that fall back on a model-supplied rationale were still reported
-    // `vertex-answered` (measured live — a key-name drift lost the whole
-    // fan-out and this probe exited 0).
+    // Usability read from `result.degraded`, which the decomposer SETS, rather
+    // than matched out of `result.rationale`, which the MODEL writes: two rounds
+    // of regex here each closed one degradation path and left the others open
+    // (measured live — a key-name drift lost the whole fan-out and this probe
+    // exited 0).
     steps.push({
       step: "decomposer",
       // Mapped from the enumerated state, in the order that keeps each outcome
@@ -1152,9 +1156,14 @@ if (RUN.has("haiku")) {
       ? "    `unusable` means Vertex DID answer and the answer could not be used, which for the\n" +
         "    decomposer means every knowledge lookup silently loses its fan-out."
       : null,
+    // True for all THREE producers of `failed`: the config early-return (nothing
+    // was attempted), and either step's catch (the whole chain threw, CLI floor
+    // included). An earlier wording named the CLI floor unconditionally and so
+    // described a `nais` profile to a run that had set none — the same shape of
+    // sentence-the-run-refutes this probe exists to remove.
     seen.has("failed")
-      ? "    `failed` means nothing ran to completion — not even the CLI floor, which on the\n" +
-        "    `nais` profile does not exist. Read the detail line."
+      ? "    `failed` means this step produced no answer at all. The detail line says which:\n" +
+        "    configuration refused before any call, or every backend in the chain threw."
       : null,
   ].filter(Boolean);
   say(

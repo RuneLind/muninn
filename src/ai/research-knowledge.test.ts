@@ -1,4 +1,5 @@
 import { test, expect, describe, mock, beforeEach } from "bun:test";
+import type { HaikuResult } from "../scheduler/executor.ts";
 
 // Force the CLI Haiku backend so the spawnHaiku mock below is actually exercised.
 // Without this the dev's ambient .env (HAIKU_BACKEND / ANTHROPIC_API_KEY) makes
@@ -10,9 +11,10 @@ interface MockHaikuResult {
   inputTokens: number;
   outputTokens: number;
   model: string;
-  /** Optional, exactly as on the real `HaikuResult` — so a per-test override may
-   *  omit it, and the default below can still mirror production's "cli" tag. */
-  backend?: string;
+  /** The real union, not `string`: a per-test override may omit it (as on
+   *  `HaikuResult`), but a value production can never emit — pinning a span
+   *  attribute that cannot occur — is a compile error. */
+  backend?: HaikuResult["backend"];
 }
 const mockSpawnHaiku = mock((): Promise<MockHaikuResult> => Promise.resolve({
   result: '{"subQuestions": ["What is BUC 02?"], "rationale": "Single lookup"}',
@@ -285,13 +287,13 @@ describe("researchKnowledge fan-out", () => {
   });
 });
 
-// The span this suite cannot observe (it runs with `tracingEnabled: false`), so
-// the RULE is tested directly. `passthrough` and `rationale` cannot separate a
-// decomposer that gave up from one that correctly took the cheap single-lookup
-// path: the valid path sets `passthrough` too, and three of the four
-// degradations carry a rationale the MODEL wrote. Without `degraded` on the
-// span, a decomposition that lost its entire fan-out renders on /traces exactly
-// like a healthy lookup — and a pod is not a place where anyone runs the probe.
+// The RULE, tested directly; the WIRING is pinned separately below. `passthrough`
+// and `rationale` cannot separate a decomposer that gave up from one that
+// correctly took the cheap single-lookup path: the valid path sets `passthrough`
+// too, and the two `malformed` sites carry whatever rationale the MODEL wrote.
+// Without `degraded` on the span, a decomposition that lost its entire fan-out
+// renders on /traces like a healthy lookup — and a pod is not a place where
+// anyone runs the smoke probe.
 describe("decomposeSpanAttributes", () => {
   const base = { subQuestions: ["a"], rationale: "r", haikuMs: 1, passthrough: true };
 

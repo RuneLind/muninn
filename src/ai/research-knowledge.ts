@@ -102,8 +102,8 @@ interface SearchResponse {
  * "is it recorded?" has to be a test rather than a reading.
  *
  * `passthrough` and `rationale` alone cannot say whether the decomposer GAVE UP:
- * the valid single-lookup path sets `passthrough` too, and three of the four
- * degradations carry a rationale the MODEL wrote (see `DecomposeDegradation`).
+ * the valid single-lookup path sets `passthrough` too, and the two `malformed`
+ * sites carry whatever rationale the MODEL wrote (see `DecomposeDegradation`).
  * Without `degraded`, a decomposition that lost its entire fan-out renders on
  * /traces exactly like a healthy cheap lookup — and the smoke probe, which does
  * read it, is not something anyone runs in a pod. Both new fields are OMITTED
