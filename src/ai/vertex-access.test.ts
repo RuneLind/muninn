@@ -103,67 +103,74 @@ describe("assertVertexEndpointAllowed", () => {
    * The state space, enumerated rather than patched case by case.
    *
    * `global` can be written into a Vertex URL in three POSITIONS — as a host
-   * prefix, as the ABSENCE of one (the region-less host), and in the resource
-   * path — and each admits the same four spellings: plain, percent-escaped,
-   * uppercase, trailing dot. Twelve cells. Three rounds of review found three of
-   * them one at a time (`%67lobal` in the path, `global.` in the path, the dot
-   * on the host), which is what a per-finding fix looks like when the space is
-   * small enough to just write down.
+   * prefix, as the ABSENCE of one (the region-less host, which IS the global
+   * endpoint), and in the resource path — and each is spelled four ways: plain,
+   * percent-escaped, uppercase, trailing dot. Twelve cells. Three rounds of
+   * review found three of them one at a time (`%67lobal` in the path, `global.`
+   * in the path, the dot on the host), which is what a per-finding fix looks
+   * like when the space is small enough to just write down.
    *
-   * Not every cell discriminates: `new URL()` normalizes a percent-escaped or
-   * uppercase HOST before `hostOf` sees it, so those four are documentation of
-   * the input space rather than independent pins. The path cells and both
-   * trailing-dot host cells do bind — no `new URL()` normalization reaches them.
+   * Eight of the twelve are independent pins: all four path cells, and the
+   * `plain` and `dotted` host cells. The percent and uppercase HOST cells are
+   * not — `new URL()` maps them byte-identically onto their `plain` sibling, so
+   * they document the input space rather than test anything new. (That is true
+   * of the `https:` URLs here. It is NOT true in general: a non-special scheme's
+   * host stays opaque and verbatim, which is what `normalizes a host the URL
+   * parser leaves alone` covers.)
    *
-   * The host cells are the ones that bind: `aiplatform.googleapis.com.` is a
-   * LIVE route — measured, it answers 301 to the region-less host, which is the
-   * global endpoint — and had `hostOf` not stripped the dot, `isVertexEndpoint`
-   * would have said "not Vertex" and handed the request to the static-key path
-   * with no guard at all.
+   * Each position carries its own DOOR pattern, in the same object rather than a
+   * lookup table beside it. Keyed separately, renaming a position silently made
+   * `DOOR[position]` undefined — and `toThrow(undefined)` passes for any throw,
+   * so all four path cells stopped asserting a door while staying green.
    */
   const PATH = (r: string) => `/v1/projects/p/locations/${r}/endpoints/openapi`;
-  // A trailing dot belongs to the whole HOSTNAME, so for the two host positions
-  // that rewriting is the dot at the end of the host — not one spliced into the
-  // middle of a label, which is a different name and no route at all.
-  const CELLS: Record<string, Record<string, string>> = {
-    "host, `global-` prefix": {
-      plain: `https://global-aiplatform.googleapis.com${PATH("europe-north1")}`,
-      percent: `https://%67lob%61l-aiplatform.googleapis.com${PATH("europe-north1")}`,
-      upper: `https://GLOBAL-aiplatform.googleapis.com${PATH("europe-north1")}`,
-      dotted: `https://global-aiplatform.googleapis.com.${PATH("europe-north1")}`,
+  const POSITIONS = [
+    {
+      name: "host, `global-` prefix",
+      // Anchored on the PARENTHESISED clause. Two looser patterns were tried and
+      // rejected by mutation, both matching every refusal: `/global/` (the
+      // message opens "names the `global` Vertex region") and a bare
+      // `/in the path/` (the remedy sentence ends "…/locations/<region>/ in the
+      // path"). With those, a path cell whose host ALSO said `global` passed
+      // while measuring the host door — the defect review found in round 1.
+      door: /\(host prefix\)/,
+      urls: {
+        plain: `https://global-aiplatform.googleapis.com${PATH("europe-north1")}`,
+        percent: `https://%67lob%61l-aiplatform.googleapis.com${PATH("europe-north1")}`,
+        upper: `https://GLOBAL-aiplatform.googleapis.com${PATH("europe-north1")}`,
+        // A trailing dot belongs to the whole HOSTNAME, so for the host
+        // positions that spelling is the dot at the END — not one spliced into a
+        // label, which is a different name and no route at all.
+        dotted: `https://global-aiplatform.googleapis.com.${PATH("europe-north1")}`,
+      },
     },
-    "host, region-less (IS the global endpoint)": {
-      plain: `https://aiplatform.googleapis.com${PATH("europe-north1")}`,
-      percent: `https://%61iplatform.googleapis.com${PATH("europe-north1")}`,
-      upper: `https://AIPLATFORM.GOOGLEAPIS.COM${PATH("europe-north1")}`,
-      dotted: `https://aiplatform.googleapis.com.${PATH("europe-north1")}`,
+    {
+      name: "host, region-less (IS the global endpoint)",
+      door: /\(the region-less host IS the global endpoint\)/,
+      urls: {
+        plain: `https://aiplatform.googleapis.com${PATH("europe-north1")}`,
+        percent: `https://%61iplatform.googleapis.com${PATH("europe-north1")}`,
+        upper: `https://AIPLATFORM.GOOGLEAPIS.COM${PATH("europe-north1")}`,
+        dotted: `https://aiplatform.googleapis.com.${PATH("europe-north1")}`,
+      },
     },
-    path: {
-      plain: `https://europe-north1-aiplatform.googleapis.com${PATH("global")}`,
-      percent: `https://europe-north1-aiplatform.googleapis.com${PATH("%67lob%61l")}`,
-      upper: `https://europe-north1-aiplatform.googleapis.com${PATH("GLOBAL")}`,
-      dotted: `https://europe-north1-aiplatform.googleapis.com${PATH("global.")}`,
+    {
+      name: "path",
+      door: /\(\/locations\/global\/ in the path\)/,
+      urls: {
+        plain: `https://europe-north1-aiplatform.googleapis.com${PATH("global")}`,
+        percent: `https://europe-north1-aiplatform.googleapis.com${PATH("%67lob%61l")}`,
+        upper: `https://europe-north1-aiplatform.googleapis.com${PATH("GLOBAL")}`,
+        dotted: `https://europe-north1-aiplatform.googleapis.com${PATH("global.")}`,
+      },
     },
-  };
+  ] as const;
 
-  /** The parenthesised clause each refusal names, so a cell asserts the door it
-   *  claims. Two weaker patterns were tried and REJECTED by mutation, both
-   *  matching every refusal: `/global/` (the message opens "names the `global`
-   *  Vertex region") and a bare `/in the path/` (the remedy sentence ends
-   *  "…with a matching /locations/<region>/ in the path"). Anchored on the
-   *  parentheses, a path cell whose HOST also says `global` — the round-1 defect
-   *  — fails instead of passing while measuring the other door. */
-  const DOOR: Record<string, RegExp> = {
-    "host, `global-` prefix": /\(host prefix\)/,
-    "host, region-less (IS the global endpoint)": /\(the region-less host IS the global endpoint\)/,
-    path: /\(\/locations\/global\/ in the path\)/,
-  };
-
-  for (const [position, rewritings] of Object.entries(CELLS)) {
-    for (const [rewriting, url] of Object.entries(rewritings)) {
-      test(`refuses \`global\` in the ${position}, written ${rewriting}`, () => {
+  for (const { name, door, urls } of POSITIONS) {
+    for (const [spelling, url] of Object.entries(urls)) {
+      test(`refuses \`global\` in the ${name}, written ${spelling}`, () => {
         expect(() => assertVertexEndpointAllowed(url, "bot")).toThrow(/global/);
-        expect(() => assertVertexEndpointAllowed(url, "bot")).toThrow(DOOR[position]!);
+        expect(() => assertVertexEndpointAllowed(url, "bot")).toThrow(door);
       });
     }
   }
