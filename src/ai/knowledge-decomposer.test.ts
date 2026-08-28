@@ -64,10 +64,11 @@ describe("decomposeQuestion surfaces the backend that ran", () => {
 // and a consumer that has to tell "the decomposer worked" from "the decomposer
 // gave up" needs all six classified. Two of them are VALID (a fan-out, and the
 // one-sub-question passthrough the prompt explicitly prefers for a simple
-// lookup) and four are degradations. Three of the four carry a rationale the
-// MODEL wrote whenever it supplied one, so no string match over `rationale` can
-// separate them — which is how two rounds of regex in `scripts/smoke-vertex.ts`
-// each closed one door and left the others open. The signal is structured here
+// lookup) and four are degradation SITES carrying three KINDS. The two
+// `malformed` sites carry whatever rationale the MODEL wrote whenever it
+// supplied any, so no string match over `rationale` can separate them — which is
+// how two rounds of regex in `scripts/smoke-vertex.ts` each closed one door and
+// left the others open. The signal is structured here
 // instead, once, and the `passthrough()` helper REQUIRES it so a new degradation
 // site cannot forget.
 describe("decomposeQuestion classifies its own degradations", () => {

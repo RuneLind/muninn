@@ -785,7 +785,12 @@ type HaikuProbeOutcome =
   // the commonest shape is valid JSON carrying the wrong key, which parses
   // perfectly and still loses the whole fan-out.
   | "unusable"
-  | "failed";           // the whole chain threw — nothing ran, CLI floor included
+  // No answer from this step, from any of four producers: configuration refused
+  // before a call was attempted, either step's chain threw (CLI floor included),
+  // or the decomposer reported `call-failed`. NOT "the chain threw" alone — that
+  // wording survived here after the printed explainer was corrected for saying
+  // it, which is the more authoritative of the two places to be wrong.
+  | "failed";
 
 interface HaikuProbeStep {
   step: string;
@@ -817,8 +822,9 @@ async function probeHaikuRouter(): Promise<HaikuProbeStep[]> {
     }];
   }
 
-  // Extraction-shaped: a small JSON contract, which is what three of the four
-  // router callers ask for.
+  // Extraction-shaped: a small JSON contract, which is what most of the router's
+  // callers ask for (the decomposer and the three extractors; the two prose
+  // reminder paths are the exception).
   const started = performance.now();
   try {
     const haiku = await callHaikuWithFallback(
@@ -1156,11 +1162,14 @@ if (RUN.has("haiku")) {
       ? "    `unusable` means Vertex DID answer and the answer could not be used, which for the\n" +
         "    decomposer means every knowledge lookup silently loses its fan-out."
       : null,
-    // True for all THREE producers of `failed`: the config early-return (nothing
-    // was attempted), and either step's catch (the whole chain threw, CLI floor
-    // included). An earlier wording named the CLI floor unconditionally and so
+    // True for all FOUR producers of `failed`: the config early-return (nothing
+    // was attempted), either step's catch, and the decomposer's `call-failed`
+    // mapping — which is not a catch here, because `decomposeQuestion` catches
+    // its own. An earlier wording named the CLI floor unconditionally and so
     // described a `nais` profile to a run that had set none — the same shape of
-    // sentence-the-run-refutes this probe exists to remove.
+    // sentence-the-run-refutes this probe exists to remove. (An earlier version
+    // of THIS comment counted three, omitting the mapping — the producer the
+    // reference `MUNINN_PROFILE=nais` run actually exercises.)
     seen.has("failed")
       ? "    `failed` means this step produced no answer at all. The detail line says which:\n" +
         "    configuration refused before any call, or every backend in the chain threw."

@@ -30,7 +30,8 @@ export interface DecomposeOptions {
  * carrying the THREE kinds below — and a consumer has to tell the first two from
  * the rest. It cannot do that from `passthrough` (the valid cheap path sets it)
  * nor from `rationale`, which on the two `malformed` sites is whatever the MODEL
- * wrote whenever it supplied anything, which is nearly always. Two rounds of regex over that field in `scripts/smoke-vertex.ts` each
+ * wrote whenever it supplied anything, which is nearly always. Two rounds of
+ * regex over that field in `scripts/smoke-vertex.ts` each
  * closed one door and left the others open; this is the enumeration instead.
  *
  *  - `call-failed`  — the router threw (no backend ran to completion).
