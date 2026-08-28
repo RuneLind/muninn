@@ -875,16 +875,6 @@ export async function assembleModelsOverview(
  * absent is exactly the state the card exists to show, so it renders.
  */
 /**
- * The Vertex row's sentence, as a kind. Pure over the resolved config.
- *
- *   `adc`            Vertex is on; the connector authenticates with ADC.
- *   `declared`       off, but a project AND a region (or base URL) are set.
- *   `partial`        off, and only SOME of those is set — the state a single
- *                    "project/region are set" sentence lied about, since the
- *                    target row directly below it says what is missing.
- *   `per-model-only` off, with nothing set but a per-model region override.
- */
-/**
  * The sentence per kind. Here, WITH the rule, and interpolated into the page —
  * not written as a literal inside the view.
  *
@@ -903,11 +893,24 @@ export const VERTEX_NOTE_TEXT: Record<VertexView["note"], string> = {
   // exists to remove: it rendered directly above a "Vertex target: no region"
   // row on the EU multi-region shape, which is a first-class configuration.
   declared: "a project and a region or base URL are set but CLAUDE_CODE_USE_VERTEX is not — the SDK still uses an Anthropic credential",
-  partial: "partly configured and CLAUDE_CODE_USE_VERTEX is not set — see the target row below for what is missing",
+    // NOT "see the target row below for what is missing": measured, that row shows
+  // nothing missing for two of this kind's three shapes — a region with no
+  // project renders a clean target line, and a base URL with no project warns
+  // "no region" when the base URL is legitimately standing in for one. So the
+  // sentence states the REQUIREMENT instead of pointing at a row that may not
+  // show the gap.
+  partial: "partly configured and CLAUDE_CODE_USE_VERTEX is not set — Vertex needs a project AND a region or base URL before it can be switched on",
   "per-model-only": "only a per-model region override is set — no project, no region, and CLAUDE_CODE_USE_VERTEX is not on",
 };
 
 /**
+ * The Vertex row's sentence, as a kind. Pure over the resolved config.
+ *
+ *   `adc`            Vertex is on; the connector authenticates with ADC.
+ *   `declared`       off, but a project AND a region (or base URL) are set.
+ *   `partial`        off, and only SOME of those is set.
+ *   `per-model-only` off, with nothing set but a per-model region override.
+ *
  * ⚠️ Exported and pure, so it can be called with a shape `vertexInfo` would
  * never hand it: an all-empty config answers `per-model-only`, a sentence
  * claiming an override that is not there. Unreachable through the card, which

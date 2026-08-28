@@ -684,6 +684,18 @@ test("VERTEX_NOTE_TEXT: every kind has a sentence, and none claims more than its
   const kinds = ["adc", "declared", "partial", "per-model-only"] as const;
   for (const k of kinds) expect(VERTEX_NOTE_TEXT[k].length).toBeGreaterThan(20);
 
+  // ⚠️ The assertions that matter are NEGATIVE. A verify pass produced two
+  // rewrites that were plainly false and still passed a substring-grep test —
+  // "Vertex traffic is already live, nothing is missing" for `partial`, and
+  // "ADC is already authenticating every request" for `declared`. Only `adc`
+  // may say the connector is live; every other kind describes an instance where
+  // Vertex is DECLARED AND OFF, so any claim of live traffic there is a lie
+  // regardless of how it is worded.
+  for (const k of ["declared", "partial", "per-model-only"] as const) {
+    expect(VERTEX_NOTE_TEXT[k]).not.toMatch(/\bADC\b|already|is live|authenticat/i);
+  }
+  expect(VERTEX_NOTE_TEXT.adc).toMatch(/\bADC\b/);
+
   // `declared` is reachable with a base URL and NO region name (the EU
   // multi-region shape), so a flat "region is set" contradicts the target row
   // rendered directly below it.
@@ -694,6 +706,10 @@ test("VERTEX_NOTE_TEXT: every kind has a sentence, and none claims more than its
   };
   expect(vertexNoteKind(base)).toBe("declared");
   expect(VERTEX_NOTE_TEXT.declared).toContain("base URL");
+
+  // `partial` must not promise the target row shows the gap — measured false for
+  // two of its three shapes.
+  expect(VERTEX_NOTE_TEXT.partial).not.toMatch(/target row/i);
 
   // Only `adc` may claim Vertex is on; the other three must say it is not.
   expect(VERTEX_NOTE_TEXT.adc).toContain("CLAUDE_CODE_USE_VERTEX —");
