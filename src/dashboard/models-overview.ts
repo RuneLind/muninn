@@ -869,12 +869,6 @@ export async function assembleModelsOverview(
 }
 
 /**
- * The Vertex block for the Machine card. Returns null when nothing is
- * configured — which is every field unset, not merely "the switch is off": an
- * instance with a project and region declared but `CLAUDE_CODE_USE_VERTEX`
- * absent is exactly the state the card exists to show, so it renders.
- */
-/**
  * The sentence per kind. Here, WITH the rule, and interpolated into the page —
  * not written as a literal inside the view.
  *
@@ -893,13 +887,15 @@ export const VERTEX_NOTE_TEXT: Record<VertexView["note"], string> = {
   // exists to remove: it rendered directly above a "Vertex target: no region"
   // row on the EU multi-region shape, which is a first-class configuration.
   declared: "a project and a region or base URL are set but CLAUDE_CODE_USE_VERTEX is not — the SDK still uses an Anthropic credential",
-    // NOT "see the target row below for what is missing": measured, that row shows
-  // nothing missing for two of this kind's three shapes — a region with no
-  // project renders a clean target line, and a base URL with no project warns
-  // "no region" when the base URL is legitimately standing in for one. So the
-  // sentence states the REQUIREMENT instead of pointing at a row that may not
-  // show the gap.
-  partial: "partly configured and CLAUDE_CODE_USE_VERTEX is not set — Vertex needs a project AND a region or base URL before it can be switched on",
+    // Two false versions of this sentence have shipped, so it names the actual
+  // variables now. It must NOT say "see the target row below for what is
+  // missing" (that row shows nothing missing for two of the three shapes), and
+  // it must NOT say "a project and a region or base URL" — that is what makes
+  // this kind `partial`, but it is NOT what switching Vertex on requires:
+  // `resolveVertexConfig` demands the SDK's own names, and a base URL
+  // explicitly does not substitute for the region. An operator who followed the
+  // previous wording added a base URL and got a boot refusal.
+  partial: "partly configured and CLAUDE_CODE_USE_VERTEX is not set — switching it on needs ANTHROPIC_VERTEX_PROJECT_ID and CLOUD_ML_REGION; a base URL does not substitute for the region",
   "per-model-only": "only a per-model region override is set — no project, no region, and CLAUDE_CODE_USE_VERTEX is not on",
 };
 
@@ -925,6 +921,12 @@ export function vertexNoteKind(v: VertexConfig): VertexView["note"] {
   return "partial";
 }
 
+/**
+ * The Vertex block for the Machine card. Returns null when nothing is
+ * configured — which is every field unset, not merely "the switch is off": an
+ * instance with a project and region declared but `CLAUDE_CODE_USE_VERTEX`
+ * absent is exactly the state the card exists to show, so it renders.
+ */
 function vertexInfo(errors: string[]): VertexView | null {
   try {
     const vertex = resolveVertexConfig();

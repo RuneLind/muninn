@@ -684,17 +684,19 @@ test("VERTEX_NOTE_TEXT: every kind has a sentence, and none claims more than its
   const kinds = ["adc", "declared", "partial", "per-model-only"] as const;
   for (const k of kinds) expect(VERTEX_NOTE_TEXT[k].length).toBeGreaterThan(20);
 
-  // ⚠️ The assertions that matter are NEGATIVE. A verify pass produced two
-  // rewrites that were plainly false and still passed a substring-grep test —
-  // "Vertex traffic is already live, nothing is missing" for `partial`, and
-  // "ADC is already authenticating every request" for `declared`. Only `adc`
-  // may say the connector is live; every other kind describes an instance where
-  // Vertex is DECLARED AND OFF, so any claim of live traffic there is a lie
-  // regardless of how it is worded.
-  for (const k of ["declared", "partial", "per-model-only"] as const) {
-    expect(VERTEX_NOTE_TEXT[k]).not.toMatch(/\bADC\b|already|is live|authenticat/i);
-  }
-  expect(VERTEX_NOTE_TEXT.adc).toMatch(/\bADC\b/);
+  // ⚠️ EXACT strings, deliberately. Two weaker shapes have already failed here:
+  // substring greps passed two plainly-false rewrites, and the vocabulary
+  // denylist that replaced them passed a third ("no further configuration is
+  // required") while REJECTING true sentences that happened to contain the word
+  // "already". These are four short operator-facing claims about a deployment;
+  // a change to any of them should have to be a deliberate edit of this test,
+  // which is exactly what a change-detector gives.
+  expect(VERTEX_NOTE_TEXT).toEqual({
+    adc: "CLAUDE_CODE_USE_VERTEX — the claude-sdk connector authenticates with ADC, no ANTHROPIC_API_KEY needed",
+    declared: "a project and a region or base URL are set but CLAUDE_CODE_USE_VERTEX is not — the SDK still uses an Anthropic credential",
+    partial: "partly configured and CLAUDE_CODE_USE_VERTEX is not set — switching it on needs ANTHROPIC_VERTEX_PROJECT_ID and CLOUD_ML_REGION; a base URL does not substitute for the region",
+    "per-model-only": "only a per-model region override is set — no project, no region, and CLAUDE_CODE_USE_VERTEX is not on",
+  });
 
   // `declared` is reachable with a base URL and NO region name (the EU
   // multi-region shape), so a flat "region is set" contradicts the target row
@@ -707,9 +709,14 @@ test("VERTEX_NOTE_TEXT: every kind has a sentence, and none claims more than its
   expect(vertexNoteKind(base)).toBe("declared");
   expect(VERTEX_NOTE_TEXT.declared).toContain("base URL");
 
-  // `partial` must not promise the target row shows the gap — measured false for
-  // two of its three shapes.
+  // The two claims the exact strings above encode, spelled out so a future edit
+  // reads WHY the wording is what it is rather than only that it changed.
+  // `partial` must not promise the target row shows the gap (false for two of
+  // its three shapes), and it must name the SDK's own variables, since a base
+  // URL does not satisfy the region requirement `resolveVertexConfig` enforces.
   expect(VERTEX_NOTE_TEXT.partial).not.toMatch(/target row/i);
+  expect(VERTEX_NOTE_TEXT.partial).toContain("CLOUD_ML_REGION");
+  expect(VERTEX_NOTE_TEXT.partial).toContain("does not substitute");
 
   // Only `adc` may claim Vertex is on; the other three must say it is not.
   expect(VERTEX_NOTE_TEXT.adc).toContain("CLAUDE_CODE_USE_VERTEX —");
