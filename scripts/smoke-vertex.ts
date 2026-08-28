@@ -804,7 +804,10 @@ if (RUN.has("gemini")) {
     failures.push("probe B: every question failed before a reply — nothing was measured");
   } else if (truncated * 2 > rows.length) {
     failures.push(
-      `probe B: ${truncated}/${rows.length} turns hit the token cap — ` +
+      // "questions", not "turns": `rows` is one row per QUESTION, and a question
+      // runs up to two turns — so a 3-question run that truncated on every
+      // second turn ran six turns and would have read "3/3 turns".
+      `probe B: ${truncated}/${rows.length} questions hit the token cap — ` +
       `ANSWER_MAX_TOKENS (${ANSWER_MAX_TOKENS}) is too small to measure anything`,
     );
   }
