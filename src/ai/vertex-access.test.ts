@@ -169,11 +169,41 @@ describe("assertVertexEndpointAllowed", () => {
   for (const { name, door, urls } of POSITIONS) {
     for (const [spelling, url] of Object.entries(urls)) {
       test(`refuses \`global\` in the ${name}, written ${spelling}`, () => {
-        expect(() => assertVertexEndpointAllowed(url, "bot")).toThrow(/global/);
         expect(() => assertVertexEndpointAllowed(url, "bot")).toThrow(door);
       });
     }
   }
+
+  test("the table still has twelve cells", () => {
+    // The two ways this enumeration can stop enumerating, neither of which any
+    // individual case can see: delete a position, or empty its `urls`. Both left
+    // the file at 36 pass / 0 fail — fewer tests, all green, and a docstring
+    // still claiming twelve.
+    expect(POSITIONS).toHaveLength(3);
+    expect(POSITIONS.flatMap((p) => Object.keys(p.urls))).toHaveLength(12);
+  });
+
+  test("each door pattern discriminates — it must not match another position's refusal", () => {
+    // The last route to a door that asserts nothing. Anchoring the patterns
+    // closed the two loose ones a reviewer happened to try; a permissive regex
+    // (`/./`) still passed all twelve cells. This makes the discrimination a
+    // property the suite checks rather than one a past reviewer remembers.
+    const refusalFor = (url: string): string => {
+      try {
+        assertVertexEndpointAllowed(url, "bot");
+      } catch (err) {
+        return (err as Error).message;
+      }
+      throw new Error(`expected a refusal for ${url}`);
+    };
+    for (const position of POSITIONS) {
+      expect(refusalFor(position.urls.plain)).toMatch(position.door);
+      for (const other of POSITIONS) {
+        if (other.name === position.name) continue;
+        expect(refusalFor(other.urls.plain)).not.toMatch(position.door);
+      }
+    }
+  });
 
   test("normalizes a host the URL parser leaves alone", () => {
     // `URL.hostname` lowercases a SPECIAL scheme's host and leaves a non-special
