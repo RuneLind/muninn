@@ -13,7 +13,7 @@
  * the name preview must be byte-identical to the name the route creates (the
  * `synthesisTopicKey` precedent).
  */
-import { deriveAskThreadTitle, deriveAskThreadTitleOrNull } from "../../../wiki/ask-chat.ts";
+import { deriveAskThreadTitle, deriveAskThreadTitleOrNull, type DeclineReason } from "../../../wiki/ask-chat.ts";
 import { escHtml as esc } from "./escape.ts";
 import { explainSelectionFromLabel } from "./wiki-explain.ts";
 
@@ -1017,11 +1017,26 @@ export const DECLINE_CHAT_BTN_ID = "wikiChatDeclineBtn";
 
 /** Why the wiki declined, in the reader's words. `low_confidence` must NOT read as
  *  "nothing found" — weak sources did ride out and are listed under the answer, so
- *  the honest framing is "nothing solid", not "nothing". */
-function declineNote(reason: "no_hits" | "low_confidence"): string {
-  return reason === "low_confidence"
-    ? "The wiki had nothing solid on this."
-    : "The wiki had nothing on this.";
+ *  the honest framing is "nothing solid", not "nothing". And `unreachable` must not
+ *  read as either: the search never happened, so the wiki's contents are unknown,
+ *  not empty. */
+function declineNote(reason: DeclineReason): string {
+  switch (reason) {
+    case "low_confidence":
+      return "The wiki had nothing solid on this.";
+    case "unreachable":
+      return "The wiki search could not be reached.";
+    case "no_hits":
+      return "The wiki had nothing on this.";
+    default: {
+      // Compile-time: a new reason must be given words here. Runtime: it must NOT
+      // inherit the no_hits sentence — that is the empty-corpus claim this slate
+      // exists to stop, and a fallthrough default handed it to every future value.
+      const exhaustive: never = reason;
+      void exhaustive;
+      return "The wiki did not answer this.";
+    }
+  }
 }
 
 /**
@@ -1037,7 +1052,7 @@ function declineNote(reason: "no_hits" | "low_confidence"): string {
  * a confident answer the reader still wants to take further — is served by the
  * always-visible "New chat" button beside the Ask box.)
  */
-export function declineChatBarHtml(reason: "no_hits" | "low_confidence"): string {
+export function declineChatBarHtml(reason: DeclineReason): string {
   return (
     '<span class="wiki-chatesc-msg">' + declineNote(reason) + "</span>" +
     '<button id="' + DECLINE_CHAT_BTN_ID + '" class="wiki-chatesc-btn wiki-chatesc-decline">' +
@@ -1067,7 +1082,7 @@ export interface ChatEscState {
 export interface ChatEscTurn {
   answer: string;
   kind?: string;
-  declined?: "no_hits" | "low_confidence";
+  declined?: DeclineReason;
   chatEsc?: ChatEscState;
 }
 

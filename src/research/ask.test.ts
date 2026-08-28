@@ -12,6 +12,7 @@ import type { AnswerEvent } from "./ask.ts";
 // vars below, reset to a happy-path default in beforeEach.
 
 let mockResults: ResearchHit[] = [];
+let mockSubSearchError: string | null = null;
 let mockLowConfidence = false;
 let researchThrows: string | null = null;
 let lastResearchOpts: Record<string, unknown> | null = null;
@@ -40,7 +41,7 @@ mock.module("../ai/research-knowledge.ts", () => ({
     return {
       results: mockResults,
       decomposition: { subQuestions: ["q"], rationale: "passthrough", passthrough: true, haikuMs: 5 },
-      subSearches: [{ subQuestion: "q", durationMs: 10, resultCount: mockResults.length, lowConfidence: mockLowConfidence }],
+      subSearches: [{ subQuestion: "q", durationMs: 10, resultCount: mockResults.length, lowConfidence: mockLowConfidence, ...(mockSubSearchError ? { error: mockSubSearchError } : {}) }],
       traceId: "trace-123",
     };
   },
@@ -102,6 +103,7 @@ async function collect(
 beforeEach(() => {
   mockResults = [makeHit(), makeHit({ collection: "wiki", id: "concepts/mcp.md", title: "MCP", url: undefined, relevance: 0.6 })];
   mockLowConfidence = false;
+  mockSubSearchError = null;
   researchThrows = null;
   lastResearchOpts = null;
   claudeAnswer = "Claude Code is an agentic CLI [1]. It supports MCP servers [2].";
@@ -203,6 +205,37 @@ test("low confidence: weak-but-nonzero retrieval declines synthesis but still sh
   expect(done.lowConfidence).toBe(true);
   expect(done.answer.toLowerCase()).toContain("don't confidently cover");
   expect(done.cited).toEqual([]);
+});
+
+test("an unreachable knowledge base declines as UNREACHABLE, on the wire and not just in the prose", async () => {
+  // The seam finding-2 named: every coverage test above drives the pure function,
+  // so nothing pinned that `ask.ts` passes `subSearches` through with diagnostics
+  // intact. A refactor that projected the array before `assessCoverage` would
+  // restore the lie with the unit tests still green.
+  mockResults = [];
+  mockSubSearchError = "Knowledge API unreachable";
+  const events = await collect("hva er 25%-regelen?");
+
+  expect(lastUserPrompt).toBe(""); // no synthesis call spent on an outage
+  const done = events.find((e) => e.type === "done") as Extract<AnswerEvent, { type: "done" }>;
+  // The answer must not claim anything about what the corpus holds…
+  expect(done.answer).not.toMatch(/indexed/i);
+  expect(done.answer).toMatch(/could not reach/i);
+  // …and the FLAG must carry it, or the UI renders "The wiki had nothing on this."
+  expect(done.unreachable).toBe(true);
+  expect(done.lowConfidence).toBe(false);
+  // …and as the REASON itself, so a verdict added later does not have to grow a
+  // fourth boolean that every consumer must learn about separately.
+  expect(done.declineReason).toBe("unreachable");
+});
+
+test("a genuinely empty corpus is still a no_hits decline, with no unreachable flag", async () => {
+  // The discriminator for the wire, mirroring the one on the verdict itself.
+  mockResults = [];
+  const events = await collect("something nobody wrote about");
+  const done = events.find((e) => e.type === "done") as Extract<AnswerEvent, { type: "done" }>;
+  expect(done.noHits).toBe(true);
+  expect(done.unreachable).toBeFalsy();
 });
 
 test("retrieval failure surfaces as a single error event, never throws", async () => {

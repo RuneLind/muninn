@@ -145,6 +145,8 @@ import {
   truncateUnits,
   uniqueAskThreadTitle,
   type AskChatCitation,
+  DECLINE_REASONS,
+  toDeclineReason,
 } from "../../wiki/ask-chat.ts";
 import { buildSynthesisSystemPrompt } from "../../research/answer.ts";
 import { streamResearchSSE } from "./research-sse.ts";
@@ -2839,8 +2841,11 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
          *  reference was actually sent, both when both were. */
         page?: string;
         relPath?: string;
-        /** Direct mode only: this question reached chat from an Ask the wiki
-         *  DECLINED, so the seed must not order the search that just failed. */
+        /** Direct mode only: WHY the wiki's Ask declined, so the seed neither
+         *  orders the search that just failed nor — on `unreachable` — claims a
+         *  search happened at all. `askDeclined` is the retired boolean, still
+         *  read so a tab opened before this shipped keeps escalating. */
+        declineReason?: string;
         askDeclined?: boolean;
         connectorId?: string;
         threadName?: string;
@@ -2876,6 +2881,9 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       }
       if (body.askDeclined !== undefined && typeof body.askDeclined !== "boolean") {
         return c.json({ error: "askDeclined must be a boolean" }, 400);
+      }
+      if (body.declineReason !== undefined && toDeclineReason(body.declineReason) === undefined) {
+        return c.json({ error: "declineReason must be one of: " + DECLINE_REASONS.join(", ") }, 400);
       }
       // Article mode needs a page REFERENCE, and its absence is a body-shape
       // problem like every other check in this block — so it is answered here,
@@ -3004,7 +3012,12 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // Only meaningful in direct mode (the escalate seed quotes an answer the
       // wiki DID produce), so it is scoped to that branch rather than trusted
       // wherever the client happens to send it.
-      const askDeclined = direct && body.askDeclined === true;
+      // The retired boolean meant "declined, and the index DID run", which is
+      // exactly `no_hits` — so a stale tab degrades to the old wording rather
+      // than to no clause at all.
+      const declineReason = !direct
+        ? undefined
+        : (toDeclineReason(body.declineReason) ?? (body.askDeclined === true ? "no_hits" : undefined));
 
       // Article mode resolves the page SERVER-side against the wiki index rather
       // than trusting a client-posted title/path: the path is the part the seed
@@ -3045,7 +3058,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
               question,
               webSearch: canWebSearch,
               hasCollections,
-              askDeclined,
+              declineReason,
             })
           : buildAskChatSeed({ wikiName: entry.name, question, answer, citations });
       };

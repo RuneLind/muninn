@@ -10,6 +10,7 @@ import {
   buildArticleThreadDescription,
   buildAskChatSeed,
   buildDirectChatSeed,
+  DECLINE_REASONS,
   deriveAskThreadTitle,
   deriveAskThreadTitleOrNull,
   parseArticleThreadTag,
@@ -264,7 +265,7 @@ describe("buildDirectChatSeed", () => {
     // against the wiki's own index and got nothing solid. "Search the wiki's own
     // notes first" would order the one step known to fail, and an answer whose
     // finding is "the wiki has nothing" is the finding the reader already has.
-    const seed = buildDirectChatSeed({ ...base, webSearch: true, askDeclined: true });
+    const seed = buildDirectChatSeed({ ...base, webSearch: true, declineReason: "no_hits" });
     expect(seed).not.toContain("wiki's own notes first");
     expect(seed).toContain("already been searched");
     expect(seed).toContain("nothing solid");
@@ -272,17 +273,17 @@ describe("buildDirectChatSeed", () => {
     // The capability conditioning is untouched by the new branch.
     expect(seed).toContain("including web search");
     expect(
-      buildDirectChatSeed({ ...base, webSearch: false, askDeclined: true }),
+      buildDirectChatSeed({ ...base, webSearch: false, declineReason: "no_hits" }),
     ).not.toContain("web search");
-    // Absent/false ⇒ byte-identical to the pre-flag seed.
-    expect(buildDirectChatSeed({ ...base, webSearch: true, askDeclined: false })).toBe(
+    // Absent ⇒ byte-identical to the pre-flag seed.
+    expect(buildDirectChatSeed({ ...base, webSearch: true, declineReason: undefined })).toBe(
       buildDirectChatSeed({ ...base, webSearch: true }),
     );
   });
 
   test("a decline beats the collection-less clause — a wiki that declined HAS collections", () => {
     const seed = buildDirectChatSeed({
-      ...base, webSearch: true, hasCollections: false, askDeclined: true,
+      ...base, webSearch: true, hasCollections: false, declineReason: "no_hits",
     });
     expect(seed).toContain("already been searched");
     expect(seed).not.toContain("wiki's own notes first");
@@ -293,7 +294,7 @@ describe("buildDirectChatSeed", () => {
       wikiName: "w".repeat(500),
       question: "q".repeat(200_000),
       webSearch: true,
-      askDeclined: true,
+      declineReason: "no_hits",
     });
     expect(seed.length).toBeLessThanOrEqual(ASK_CHAT_SEED_MAX);
   });
@@ -531,5 +532,48 @@ describe("article thread description tag", () => {
     expect(desc.length).toBeLessThan(260);
     // …and the tag tail survives the truncation intact, which is the point.
     expect(articleThreadTagMatches(desc, "mimir", "a/b.md")).toBe(true);
+  });
+});
+
+/**
+ * The class check at round 3: the decline verdict has to survive five hops
+ * (assessCoverage → the wire → askDeclineReason → the persisted turn → the
+ * consumers), and rounds 1–3 each lost it at a different one. These drive the
+ * ENUMERATION rather than one more value, so a fourth reason fails loudly here.
+ */
+describe("buildDirectChatSeed — every decline reason, not just the two that existed", () => {
+  const seed = (declineReason?: (typeof DECLINE_REASONS)[number]) =>
+    buildDirectChatSeed({ question: "hva er 25%-regelen?", wikiName: "nav", webSearch: true, declineReason });
+
+  test("an unreachable Ask must NOT tell the bot the index was searched", () => {
+    // Nothing ran. Asserting "already been searched … had nothing solid" is the
+    // same empty-corpus lie this PR exists to remove, on the button the decline
+    // bar renders.
+    const text = seed("unreachable");
+    expect(text).not.toMatch(/already been searched/i);
+    expect(text).not.toMatch(/nothing solid/i);
+  });
+
+  test("the two verdicts where the index DID run keep the clause", () => {
+    for (const reason of ["no_hits", "low_confidence"] as const) {
+      expect(seed(reason)).toMatch(/already been searched/i);
+    }
+  });
+
+  test("only the reasons where the index RAN may claim it was searched", () => {
+    // The previous form asserted non-empty + contains-the-question, which stayed
+    // green while a fourth reason carried the "already been searched" lie.
+    const ran = new Set(["no_hits", "low_confidence"]);
+    for (const reason of DECLINE_REASONS) {
+      const text = seed(reason);
+      expect(text).toContain("hva er 25%-regelen?");
+      expect(/already been searched/i.test(text)).toBe(ran.has(reason));
+    }
+  });
+
+  test("an unknown reason does not claim the index was searched", () => {
+    // The `never` arm's RUNTIME behaviour: it returned the reason string, which
+    // is truthy, so an unclassified value took the searched-already branch.
+    expect(seed("from_the_future" as never)).not.toMatch(/already been searched/i);
   });
 });

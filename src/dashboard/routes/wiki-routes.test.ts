@@ -2388,6 +2388,42 @@ describe("POST /api/wiki/ask/chat", () => {
       expect(((await res.json()) as { error: string }).error).toContain("askDeclined");
     });
 
+    test("declineReason carries the verdict, and unreachable does NOT claim a search ran", async () => {
+      // The whole point of the field: `askDeclined` was a boolean, so an outage
+      // and an empty corpus arrived identically and the seed told the model the
+      // index had already been searched for a search that never happened.
+      await post(directBody({ wiki: "collwiki", declineReason: "unreachable" }));
+      expect(pending[0]!.text).not.toContain("already been searched");
+      // …while a verdict where the index DID run keeps the clause.
+      pending = [];
+      await post(directBody({ wiki: "collwiki", forceNew: true, declineReason: "no_hits" }));
+      expect(pending[0]!.text).toContain("already been searched");
+    });
+
+    test("declineReason beats the retired boolean, and an unknown value 400s", async () => {
+      // A tab opened before this shipped sends only `askDeclined: true`, which
+      // meant "declined AND the index ran" — exactly `no_hits`. When both arrive,
+      // the named verdict is the more specific one and wins.
+      await post(directBody({ wiki: "collwiki", askDeclined: true, declineReason: "unreachable" }));
+      expect(pending[0]!.text).not.toContain("already been searched");
+      const res = await post(directBody({ wiki: "collwiki", forceNew: true, declineReason: "from_the_future" }));
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toContain("declineReason");
+    });
+
+    // NB there is deliberately no "ignored outside direct mode" case for
+    // `declineReason`. Escalate mode builds its seed with `buildAskChatSeed`,
+    // which takes no such parameter, so a seed assertion holds however the route
+    // treats the field: one was written, it could not fail (measured — deleting
+    // the `!direct ?` scoping entirely leaves the file green), and a test that
+    // cannot fail is worse than none.
+    //
+    // ⚠️ The two `askDeclined is ignored …` cases (":2381" above, "…here too"
+    // below) are the SAME non-cover on their scoping half, for the same reason —
+    // they earn their keep on the 400/type half only. Do not read them as
+    // proving the mode scoping. Pinning that needs a seam that can observe it
+    // (the resolved value, not the rendered seed).
+
     test("a wiki with NO collections isn't told to search notes it can't search", async () => {
       // `collwiki` has collections, `lonewiki` (a bare WIKI_EXTRA entry) does not.
       await post(directBody({ wiki: "collwiki" }));

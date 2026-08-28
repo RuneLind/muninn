@@ -5,6 +5,9 @@ import {
   deserializeAskSession,
   type StoredAskTurn,
 } from "./wiki-ask-session.ts";
+import { declineChatBarHtml } from "./wiki-chat-target.ts";
+import { askStatusText } from "./wiki-ask-session.ts";
+import { DECLINE_REASONS } from "../../../wiki/ask-chat.ts";
 
 function turn(overrides: Partial<StoredAskTurn> = {}): StoredAskTurn {
   return {
@@ -435,5 +438,106 @@ describe("pageRelPath round-trips and is dropped-not-fatal when malformed", () =
     expect(parsed).toHaveLength(1);
     expect((parsed![0] as { pageRelPath?: unknown }).pageRelPath).toBeUndefined();
     expect(parsed![0]!.page).toBe("architecture");
+  });
+});
+
+/**
+ * `unreachable` must survive the WIRE, not just the answer body. The server sets
+ * `noHits: true` on every decline branch, so a verdict that is not carried as its
+ * own flag collapses back to "no_hits" here — and the reader then gets the honest
+ * sentence with "The wiki had nothing on this." rendered directly beneath it.
+ */
+describe("askDeclineReason — unreachable", () => {
+  test("an unreachable decline is not reported as no_hits", () => {
+    // `noHits` is true here because the server sets it on BOTH decline branches.
+    expect(askDeclineReason({ noHits: true, lowConfidence: false, unreachable: true })).toBe("unreachable");
+  });
+
+  test("it outranks lowConfidence — a lookup that never happened has no confidence to judge", () => {
+    expect(askDeclineReason({ noHits: true, lowConfidence: true, unreachable: true })).toBe("unreachable");
+  });
+
+  test("the existing two verdicts are unchanged", () => {
+    expect(askDeclineReason({ noHits: true, lowConfidence: true })).toBe("low_confidence");
+    expect(askDeclineReason({ noHits: true, lowConfidence: false })).toBe("no_hits");
+    expect(askDeclineReason({})).toBeUndefined();
+  });
+
+  test("the decline bar does not claim the wiki was empty", () => {
+    const html = declineChatBarHtml("unreachable");
+    expect(html).not.toContain("had nothing");
+    expect(html).toMatch(/could not|reach/i);
+  });
+});
+
+/**
+ * Finding 1 of the round-2 verify, generalised: `isValidTurn` validated the
+ * decline reason against a hand-written two-value list while the TYPE had three,
+ * so `unreachable` was silently stripped on rehydrate and the decline bar
+ * vanished on reload. Driven off the enumeration so a fourth value cannot be
+ * half-added again.
+ */
+describe("a declined turn survives a session round-trip, for every reason", () => {
+  for (const reason of DECLINE_REASONS) {
+    test(`"${reason}" round-trips`, () => {
+      const restored = deserializeAskSession(serializeAskSession([turn({ declined: reason })], 10));
+      expect(restored).toHaveLength(1);
+      expect(restored[0]!.declined).toBe(reason);
+    });
+  }
+
+  test("an unknown reason is still dropped, and keeps the turn", () => {
+    const raw = serializeAskSession([turn({ declined: "no_hits" })], 10).replace('"no_hits"', '"from_the_future"');
+    const restored = deserializeAskSession(raw);
+    expect(restored).toHaveLength(1);
+    expect(restored[0]!.declined).toBeUndefined();
+  });
+});
+
+/**
+ * The round-3 verify proved the enumeration reached the SEED hop only: a fourth
+ * reason still fell through `declineNote` to "The wiki had nothing on this."
+ * (the round-1 lie, at the round-1 hop) and through both status chains to
+ * "Answered from N sources" — an answer claim above a decline bar. These pin the
+ * property that survives a value nobody has added yet.
+ */
+describe("every decline reason gets its OWN sentence, none borrows another's", () => {
+  test("the bar note is distinct per reason", () => {
+    const notes = DECLINE_REASONS.map((r) => declineChatBarHtml(r));
+    // A fallthrough shows up as a duplicate: the new reason wearing an old one's
+    // sentence. Counting distinct notes catches it without naming the future value.
+    expect(new Set(notes).size).toBe(DECLINE_REASONS.length);
+  });
+
+  test("no reason claims an empty corpus except no_hits", () => {
+    for (const r of DECLINE_REASONS) {
+      if (r === "no_hits") continue;
+      expect(declineChatBarHtml(r)).not.toContain("had nothing on this");
+    }
+  });
+
+  test("a declined turn never reads as answered, whatever the reason", () => {
+    for (const r of DECLINE_REASONS) {
+      expect(askStatusText(r, 0)).not.toMatch(/answered from/i);
+    }
+    // …and an undeclined turn still does.
+    expect(askStatusText(undefined, 2)).toMatch(/Answered from 2 sources/);
+    expect(askStatusText(undefined, 1)).toMatch(/Answered from 1 source$/);
+  });
+
+  test("an unknown reason never inherits the no_hits sentence on the bar", () => {
+    // The `default:` arm is unreachable from DECLINE_REASONS (every member is
+    // cased), so iterating the list cannot pin it — and a default that returned
+    // "The wiki had nothing on this." survived every test in the suite.
+    const html = declineChatBarHtml("from_the_future" as never);
+    expect(html).not.toContain("had nothing on this");
+    expect(html).not.toContain("had nothing solid");
+    expect(html).toContain("did not answer this");
+  });
+
+  test("an unknown reason degrades to an explicit decline, never to an answer", () => {
+    // The property a compile error cannot enforce in the inlined client copies.
+    expect(askStatusText("from_the_future" as never, 0)).not.toMatch(/answered/i);
+    expect(askStatusText("from_the_future" as never, 0)).toMatch(/declined/i);
   });
 });

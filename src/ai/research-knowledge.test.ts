@@ -79,7 +79,7 @@ mock.module("../config.ts", () => ({
   loadConfig: () => ({ tracingEnabled: true }),
 }));
 
-const { researchKnowledge, mergeHit, decomposeSpanAttributes } = await import("./research-knowledge.ts");
+const { researchKnowledge, mergeHit, decomposeSpanAttributes, formatResearchResultText } = await import("./research-knowledge.ts");
 
 interface RawHit {
   collection: string;
@@ -373,5 +373,83 @@ describe("researchKnowledge degradation paths", () => {
 
     expect(result.decomposition.passthrough).toBe(true);
     expect(result.decomposition.subQuestions).toEqual(["original"]);
+  });
+});
+
+/**
+ * A5 of the Vertex/nais slate: with `KNOWLEDGE_API_URL` pointing nowhere, the
+ * bot must SAY it has no source search rather than answer confidently without
+ * one. The tool text is the only channel that reaches the model, and it used to
+ * end a transport failure and a genuinely empty corpus with the same sentence
+ * ("No results across N sub-questions"). The house precedent is `JiraCoverage`,
+ * which separates `no_hits` from `unreachable` for exactly this reason.
+ */
+describe("formatResearchResultText — unreachable vs empty", () => {
+  const decomposition = (subQuestions: string[], passthrough = true) => ({
+    subQuestions,
+    rationale: "test",
+    passthrough,
+    haikuMs: 1,
+  });
+
+  test("every sub-search failing reads as UNAVAILABLE, not as an empty corpus", () => {
+    const text = formatResearchResultText({
+      results: [],
+      decomposition: decomposition(["What is X?"]),
+      subSearches: [{ subQuestion: "What is X?", durationMs: 30000, resultCount: 0, error: "connect ECONNREFUSED 127.0.0.1:8321" }],
+      traceId: "t",
+    });
+    expect(text).toMatch(/UNAVAILABLE/i);
+    // The discriminator: it must not be reported as "we looked and found nothing".
+    expect(text).not.toContain("No results across");
+    // And it must tell the model what to do instead of answering unsourced.
+    expect(text).toMatch(/conversation/i);
+  });
+
+  test("a genuinely empty corpus still reads as no results, and never claims unavailability", () => {
+    const text = formatResearchResultText({
+      results: [],
+      decomposition: decomposition(["What is X?"]),
+      subSearches: [{ subQuestion: "What is X?", durationMs: 190, resultCount: 0, bestScore: 0 }],
+      traceId: "t",
+    });
+    expect(text).toContain("No results across");
+    expect(text).not.toMatch(/UNAVAILABLE/i);
+  });
+
+  test("a partial failure with ZERO results is still not an empty corpus", () => {
+    // The gap the first pass left: the "Partial" banner sat AFTER the
+    // `results.length === 0` early return, so 1-of-2 failing with nothing
+    // retrieved fell through to the verbatim pre-fix sentence. A flapping
+    // huginn and a per-sub-search timeout both land here.
+    const text = formatResearchResultText({
+      results: [],
+      decomposition: decomposition(["A", "B"], false),
+      subSearches: [
+        { subQuestion: "A", durationMs: 30000, resultCount: 0, error: "connect ECONNREFUSED" },
+        { subQuestion: "B", durationMs: 200, resultCount: 0, bestScore: 0 },
+      ],
+      traceId: "t",
+    });
+    expect(text).toMatch(/1 of 2/);
+    expect(text).toMatch(/incomplete|did not reach/i);
+    // Not a TOTAL outage either — one sub-search did reach the knowledge base.
+    expect(text).not.toMatch(/UNAVAILABLE/i);
+  });
+
+  test("a partial failure says the results are incomplete", () => {
+    const text = formatResearchResultText({
+      results: [{ collection: "nav-wiki", id: "a.md", relevance: 0.9, viaSubQuestion: ["B"] }],
+      decomposition: decomposition(["A", "B"], false),
+      subSearches: [
+        { subQuestion: "A", durationMs: 30000, resultCount: 0, error: "timeout" },
+        { subQuestion: "B", durationMs: 200, resultCount: 1, bestScore: 0.9 },
+      ],
+      traceId: "t",
+    });
+    expect(text).toMatch(/incomplete/i);
+    // It is not a total outage — the hit it did get must still be rendered.
+    expect(text).toContain("nav-wiki");
+    expect(text).not.toMatch(/UNAVAILABLE/i);
   });
 });

@@ -300,9 +300,46 @@ export function formatResearchResultText(result: ResearchKnowledgeResult): strin
   }
   lines.push("");
 
+  // A5 (nais slate): a transport failure and a genuinely empty corpus used to end
+  // in the same sentence, so a bot whose `KNOWLEDGE_API_URL` pointed nowhere read
+  // its own outage as "the corpus has nothing" and answered unsourced with
+  // confidence. The per-sub-question line already carries `error: …` via
+  // formatSubMeta; what was missing is the VERDICT the model acts on. Same
+  // separation `JiraCoverage` makes between `no_hits` and `unreachable`.
+  const total = decomposition.subQuestions.length;
+  const failedCount = subSearches.filter((s) => s?.error).length;
+
   if (results.length === 0) {
-    lines.push(`No results across ${decomposition.subQuestions.length} sub-question${decomposition.subQuestions.length === 1 ? "" : "s"}.`);
+    if (failedCount > 0 && failedCount === total) {
+      lines.push(`**Knowledge search is UNAVAILABLE — this is NOT an empty corpus.**`);
+      lines.push("");
+      lines.push(
+        `All ${total} sub-search${total === 1 ? "" : "es"} failed — see the per-question errors above. ` +
+        `Tell the user the knowledge base could not be reached, and answer only from what is ` +
+        `already in this conversation. Do not present anything as checked against the sources.`,
+      );
+      return lines.join("\n");
+    }
+    // Some reached the knowledge base and found nothing; the rest never ran. The
+    // first pass let this fall through to the bare sentence below, which is the
+    // very claim this surface exists to stop — one flapping sub-search is enough.
+    if (failedCount > 0) {
+      lines.push(`**No results, and the lookup was INCOMPLETE: ${failedCount} of ${total} sub-searches did not complete.**`);
+      lines.push("");
+      lines.push(
+        `Do not report this as "nothing exists" — say the lookup was partial, and that what did run found nothing.`,
+      );
+      return lines.join("\n");
+    }
+    lines.push(`No results across ${total} sub-question${total === 1 ? "" : "s"}.`);
     return lines.join("\n");
+  }
+
+  // Some reached the knowledge base and some did not: the hits below are real,
+  // but they are not the whole answer, and only the tool text can say so.
+  if (failedCount > 0) {
+    lines.push(`**Partial: ${failedCount} of ${total} sub-searches failed to reach the knowledge base — the results below are incomplete.**`);
+    lines.push("");
   }
 
   lines.push(`## Results (${results.length} unique documents)`);

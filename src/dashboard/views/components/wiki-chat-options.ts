@@ -46,6 +46,7 @@
  */
 
 import { escHtml as esc } from "./escape.ts";
+import { type DeclineReason } from "../../../wiki/ask-chat.ts";
 import {
   articleChatContextHtml,
   botDefaultOptionLabel,
@@ -106,7 +107,7 @@ export interface ChatOptTurn {
   answer: string;
   citations: { title: string; pageName?: string }[];
   kind?: string;
-  declined?: "no_hits" | "low_confidence";
+  declined?: DeclineReason;
   explainPage?: string;
   originQuestion?: string;
   chatEsc?: ChatEscState;
@@ -255,8 +256,9 @@ interface ChatOptState {
    *  written to. See `chatOptQuestion`. */
   pinnedQuestion?: string;
   /** The pinned question comes from a turn the WIKI DECLINED — the POST says so
-   *  (`askDeclined`) so the seed stops ordering the search that just failed. */
-  askDeclined?: boolean;
+   *  (`declineReason`) so the seed stops ordering the search that just failed —
+   *  and, on `unreachable`, stops claiming it ever ran. */
+  declineReason?: DeclineReason;
   target: ChatTarget | null;
   loading: boolean;
   /** Fatal load error (no target ⇒ nothing to send). */
@@ -391,7 +393,7 @@ function openChatOptions(
   opts: {
     pinnedQuestion?: string;
     turn?: ChatOptTurn | null;
-    askDeclined?: boolean;
+    declineReason?: DeclineReason;
     article?: ChatOptArticle;
     links?: string[];
   } = {},
@@ -432,7 +434,7 @@ function openChatOptions(
     article: opts.article,
     links: opts.links,
     pinnedQuestion: pinned ? question : undefined,
-    askDeclined: opts.askDeclined || undefined,
+    declineReason: opts.declineReason,
     target: null, loading: true,
     botName: "", bots: [], needsBotPicker: false,
     userId: "", connectorId: "", threadName: "",
@@ -465,7 +467,7 @@ function openDeclineChat(): void {
       originQuestion: turn.originQuestion,
     }),
     turn,
-    askDeclined: true,
+    declineReason: turn.declined,
   });
 }
 
@@ -1096,7 +1098,7 @@ async function submitChatOptions(
       // The wiki already looked and came up empty on this exact question, and the
       // route knows nothing about that — without the flag the seed opens by
       // ordering the bot to run the search that just failed.
-      if (state.askDeclined) payload.askDeclined = true;
+      if (state.declineReason) payload.declineReason = state.declineReason;
     } else {
       const turn = state.turn!;
       payload.answer = turn.answer.slice(0, CHAT_ESC_ANSWER_MAX);

@@ -10,6 +10,7 @@
  */
 
 import type { Config } from "../config.ts";
+import type { DeclineReason } from "../wiki/ask-chat.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { StreamProgressCallback } from "../ai/stream-parser.ts";
 import { tracedOneShot } from "../core/traced-one-shot.ts";
@@ -47,7 +48,24 @@ export type AnswerEvent =
       traceId: string;
     }
   | { type: "delta"; text: string }
-  | { type: "done"; answer: string; noHits: boolean; lowConfidence: boolean; cited: number[] }
+  // `noHits` means "no answer was synthesized", NOT "zero documents" — it is true
+  // on every decline branch. `unreachable` is the one that says the lookup never
+  // happened, and it has to ride the wire: without it the client collapses the
+  // verdict back to "no_hits" and renders "nothing found" under an answer that
+  // just said the opposite.
+  | {
+      type: "done";
+      answer: string;
+      noHits: boolean;
+      lowConfidence: boolean;
+      unreachable?: boolean;
+      /** The verdict itself. The three booleans above are the older, per-reason
+       *  encoding kept for a client bundle that predates this; a verdict added
+       *  later rides HERE rather than growing a fourth flag every consumer would
+       *  have to learn separately. */
+      declineReason?: DeclineReason;
+      cited: number[];
+    }
   | { type: "error"; message: string };
 
 export interface ResearchAnswerOptions {
@@ -168,6 +186,8 @@ export async function streamResearchAnswer(
         answer: message,
         noHits: true,
         lowConfidence: coverage === "low_confidence",
+        unreachable: coverage === "unreachable",
+        declineReason: coverage,
         cited: [],
       });
       return;

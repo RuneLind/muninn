@@ -17,6 +17,7 @@
 // exactly how a sixth outcome ships half-handled. Import direction is one-way
 // (claim-retry knows nothing about persistence), so no cycle.
 import { isClaimOutcome } from "./wiki-claim-retry.ts";
+import { toDeclineReason, type DeclineReason } from "../../../wiki/ask-chat.ts";
 
 /** The full shape of a persisted Ask turn — mirrors `AskTurn` in wiki-browser.ts.
  *  `citations` is kept loose (`unknown[]`) so this module stays free of the
@@ -128,7 +129,7 @@ export interface StoredAskTurn {
    *  answered (or is a fact-check turn, which has no retrieval at all).
    *  Validated as the two-value union, but FORWARD-TOLERANTLY: an unknown value
    *  drops the field and keeps the turn (see `isValidTurn`). */
-  declined?: "no_hits" | "low_confidence";
+  declined?: DeclineReason;
   /** Explain turns only: the page the passage was selected from (its title, else
    *  its name). Persisted because an Explain turn's `question` is a display LABEL
    *  (`Explain: "<slice>…"`) — the real question is built server-side from `sel`
@@ -145,7 +146,7 @@ export interface StoredAskTurn {
 /**
  * Map an Ask/Explain `done` payload's decline flags onto {@link StoredAskTurn.declined}.
  *
- * **`lowConfidence` is checked FIRST and that order is load-bearing.** The server
+ * **Order is load-bearing: `unreachable`, then `lowConfidence`, then `noHits`.** The server
  * sets `noHits: true` unconditionally on BOTH decline branches (`src/research/ask.ts`
  * — it means "no answer was synthesized", not "zero documents came back") and
  * distinguishes them only by `lowConfidence`. The natural-reading
@@ -157,10 +158,40 @@ export interface StoredAskTurn {
 export function askDeclineReason(payload: {
   noHits?: unknown;
   lowConfidence?: unknown;
-}): "no_hits" | "low_confidence" | undefined {
+  unreachable?: unknown;
+  declineReason?: unknown;
+}): DeclineReason | undefined {
+  // The verdict itself, when the server sent it — this is the hop a fourth reason
+  // now arrives through, instead of needing a fourth boolean.
+  const named = toDeclineReason(payload.declineReason);
+  if (named) return named;
+  // The older per-reason encoding, for a payload that predates the field.
+  // `unreachable` outranks both: a lookup that never happened has no confidence
+  // to judge and no emptiness to report.
+  if (payload.unreachable) return "unreachable";
   if (payload.lowConfidence) return "low_confidence";
   if (payload.noHits) return "no_hits";
   return undefined;
+}
+
+/**
+ * The Ask status line, for both the /wiki reader and /research.
+ *
+ * One derivation because the two `if/else if` chains it replaces both ENDED in an
+ * unguarded `else` that read "Answered from N sources" — so a decline reason
+ * neither chain knew about rendered an answer claim directly above a decline bar.
+ * The truthiness guard is the load-bearing part: an unknown reason lands on an
+ * explicit decline, never on the answered branch. `research-page.ts` inlines this
+ * through `.toString()`, so it must stay dependency-free.
+ */
+export function askStatusText(declined: DeclineReason | undefined, citationCount: number): string {
+  if (declined) {
+    if (declined === "low_confidence") return "No strong match — closest sources below";
+    if (declined === "unreachable") return "Search unavailable — nothing was looked up";
+    if (declined === "no_hits") return "No matching sources";
+    return "Declined — no answer was produced";
+  }
+  return "Answered from " + citationCount + " source" + (citationCount === 1 ? "" : "s");
 }
 
 /** True when `v` is a well-formed persisted turn. Malformed entries (partial
@@ -230,7 +261,7 @@ function isValidTurn(v: unknown): v is StoredAskTurn {
   // answer over it is the strictly larger loss. Dropping also keeps a FUTURE
   // reason value (a third decline kind) from wiping the reader's session on a
   // downgrade.
-  if (typeof t.declined !== "undefined" && t.declined !== "no_hits" && t.declined !== "low_confidence") {
+  if (typeof t.declined !== "undefined" && toDeclineReason(t.declined) === undefined) {
     delete t.declined;
   }
   // Advisory context strings for the chat escalation — a malformed value degrades

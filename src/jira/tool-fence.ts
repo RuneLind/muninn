@@ -19,3 +19,53 @@
 
 /** MCP servers `Full` depth is allowed to reach. The only path to NAV source. */
 export const JIRA_FULL_MCP_SERVERS = ["code", "yggdrasil"] as const;
+
+/**
+ * How `Full` depth is blocked, per server. The probe already tells these two
+ * states apart and the refusal used to collapse them: an ABSENT name means the
+ * bot carries no such entry in its `.mcp.json` at all — the nais pod's steady
+ * state, where the overlay ships only `research` — while a present-but-`down`
+ * name is a laptop with the Serena listeners stopped. Only the second has a
+ * remedy, and offering it in a pod sends the reader to a dashboard that cannot
+ * start anything.
+ */
+export interface FullDepthGap {
+  /** Named in {@link JIRA_FULL_MCP_SERVERS} but absent from the bot's `.mcp.json`. */
+  unconfigured: string[];
+  /** Configured, but the probe reports it down. */
+  down: string[];
+}
+
+/**
+ * The `Full` pre-flight's refusal sentence. Its own function because the wording
+ * is the whole point: it is the one refusal a reader is expected to act on, and
+ * the action differs by state. Naming a server the instance was never built with
+ * as "nede" invites a reader to go start it.
+ */
+export function fullDepthUnavailableMessage(gap: FullDepthGap): string {
+  const clauses: string[] = [];
+  if (gap.unconfigured.length > 0) {
+    clauses.push(`de er ikke tilgjengelige i denne installasjonen: ${gap.unconfigured.join(", ")}`);
+  }
+  if (gap.down.length > 0) {
+    clauses.push(`disse er nede: ${gap.down.join(", ")}`);
+  }
+  // An empty gap means Full is AVAILABLE, so there is no honest sentence to
+  // return — the first pass invented one ("er ikke tilgjengelig"), which is a
+  // refusal for a state that is not a refusal. Refuse to compose instead: the
+  // caller must check, and a caller that does not should fail loudly.
+  if (clauses.length === 0) {
+    throw new Error("fullDepthUnavailableMessage: empty gap — Full is available; the caller must check before composing a refusal.");
+  }
+  // The remedy names the servers that can actually be started, and nothing else:
+  // offering to start a server the same sentence just called absent is the exact
+  // confusion this split exists to remove.
+  // `code` is the Serena proxy, so /serena is where it is started; yggdrasil has
+  // no such page. The pointer goes beside the server it starts, not after the
+  // list — trailing it read as the page for every name in a multi-server list.
+  const named = gap.down.map((s) => (s === "code" ? "code (/serena)" : s));
+  const remedy = gap.down.length > 0
+    ? `Start ${named.join(" og ")} fra dashbordet, eller velg dybde «Skisse».`
+    : "Velg dybde «Skisse».";
+  return `Full teknisk dybde krever kodeverktøyene, og ${clauses.join("; ")}. ${remedy}`;
+}

@@ -260,3 +260,50 @@ test("buildSynthesisSystemPrompt lands the framing line first, shares the rules 
   // Wiki framing carries no false "for its owner" claim.
   expect(prompt).not.toContain("for its owner");
 });
+
+/**
+ * The sibling of the tool-text fix: `/api/research/ask` shows a HUMAN the canned
+ * "this topic may simply not be indexed yet" whenever `hitCount === 0`, without
+ * ever reading whether the sub-searches actually reached huginn. With a dead
+ * `KNOWLEDGE_API_URL` that is the same confident falsehood, one surface over.
+ */
+test("every sub-search failing is unreachable, not no_hits", () => {
+  expect(assessCoverage({
+    hitCount: 0,
+    subSearches: [{ resultCount: 0, error: "Knowledge API unreachable" }],
+  })).toBe("unreachable");
+});
+
+test("nothing retrieved and SOME sub-search failed is unreachable — we cannot claim it is unindexed", () => {
+  expect(assessCoverage({
+    hitCount: 0,
+    subSearches: [{ resultCount: 0, error: "timeout" }, { resultCount: 0 }],
+  })).toBe("unreachable");
+});
+
+test("a genuinely empty corpus is still no_hits", () => {
+  // The discriminator: a change that always reported unreachable passes the two
+  // above and fails here.
+  expect(assessCoverage({ hitCount: 0, subSearches: [{ resultCount: 0 }] })).toBe("no_hits");
+});
+
+test("hits that came back are unaffected by an unrelated sub-search failure", () => {
+  expect(assessCoverage({
+    hitCount: 2,
+    subSearches: [{ resultCount: 2 }, { resultCount: 0, error: "timeout" }],
+  })).toBe("answer");
+});
+
+test("the unreachable message does not tell the reader the topic is unindexed", () => {
+  const msg = coverageMessage("unreachable");
+  expect(msg).not.toMatch(/indexed/i);
+  expect(msg).toMatch(/could not|unavailable|reach/i);
+});
+
+test("an unclassified coverage verdict never claims the corpus is unindexed", () => {
+  // Same unreachable-`default:` shape as the decline bar: a default returning
+  // NO_HITS_MESSAGE — "may simply not be indexed yet" — passed the whole suite.
+  const msg = coverageMessage("from_the_future" as never);
+  expect(msg).not.toMatch(/indexed/i);
+  expect(msg).toMatch(/could not reach/i);
+});
