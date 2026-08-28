@@ -383,9 +383,13 @@ const NON_CLI_BACKENDS: Record<Exclude<HaikuBackend, "cli">, HaikuBackendHandler
  * Why `backend` cannot run in this process — or null when it can be attempted.
  *
  * The point is to skip the attempt rather than spend one failing call on it, and
- * to name the missing VARIABLE: both of these are configuration, not outages, so
- * the fallback reason an operator reads (and, on `MUNINN_PROFILE=nais`, the
- * refusal `spawnHaiku` throws) has to say which name to set.
+ * to hand down a REASON an operator can act on: these are configuration, not
+ * outages, so the fallback reason they read (and, on `MUNINN_PROFILE=nais`, the
+ * refusal `spawnHaiku` throws) has to say what is wrong.
+ *
+ * The reason is rendered AS-IS — never a name with a fixed suffix appended. A
+ * hardcoded "is not set" is what told an operator whose region was
+ * set-but-malformed to go looking for a variable sitting in their `.env`.
  */
 function preflightMissing(backend: HaikuBackend): string | null {
   if (backend === "anthropic" && !hasHaikuDirectAuth()) {

@@ -5,11 +5,24 @@ import { test, expect, describe, mock, beforeEach } from "bun:test";
 // the decomposer hit a real backend, bypassing the mock — flaky + env-sensitive.
 process.env.HAIKU_BACKEND = "cli";
 
-const mockSpawnHaiku = mock(() => Promise.resolve({
+interface MockHaikuResult {
+  result: string;
+  inputTokens: number;
+  outputTokens: number;
+  model: string;
+  /** Optional, exactly as on the real `HaikuResult` — so a per-test override may
+   *  omit it, and the default below can still mirror production's "cli" tag. */
+  backend?: string;
+}
+const mockSpawnHaiku = mock((): Promise<MockHaikuResult> => Promise.resolve({
   result: '{"subQuestions": ["What is BUC 02?"], "rationale": "Single lookup"}',
   inputTokens: 10,
   outputTokens: 10,
   model: "claude-haiku-4-5-20251001",
+  // Production `spawnHaiku` tags every CLI result "cli", and the decomposer
+  // forwards it onto the span — a mock that omits it makes the span's backend
+  // field untestable here for a reason that exists only in the mock.
+  backend: "cli",
 }));
 
 type FetchResult = { results?: unknown[]; bestScore?: number; lowConfidence?: boolean; traceId?: string };
@@ -42,8 +55,12 @@ mock.module("./knowledge-api-client.ts", () => ({
   },
 }));
 
+// Spans are CAPTURED, not discarded — and `tracingEnabled` is true below for the
+// same reason: the attribute rule being right is worth nothing if nothing
+// attaches it, and that wiring is invisible to both tsc and the pure test.
+const savedSpans: Array<{ name: string; attributes?: Record<string, unknown> }> = [];
 mock.module("../db/traces.ts", () => ({
-  saveSpan: async () => {},
+  saveSpan: async (params: { name: string; attributes?: Record<string, unknown> }) => { savedSpans.push(params); },
   updateSpan: async () => {},
 }));
 
@@ -56,10 +73,11 @@ mock.module("../db/traces.ts", () => ({
 const realConfig = await import("../config.ts");
 mock.module("../config.ts", () => ({
   ...realConfig,
-  loadConfig: () => ({ tracingEnabled: false }),
+  // ON, so the span-wiring case below observes a real `addChildSpan`.
+  loadConfig: () => ({ tracingEnabled: true }),
 }));
 
-const { researchKnowledge, mergeHit } = await import("./research-knowledge.ts");
+const { researchKnowledge, mergeHit, decomposeSpanAttributes } = await import("./research-knowledge.ts");
 
 interface RawHit {
   collection: string;
@@ -264,6 +282,59 @@ describe("researchKnowledge fan-out", () => {
     expect(calledPath).toContain("collection=wiki");
     expect(calledPath).toContain("collection=jira-issues");
     expect(calledPath).toContain("limit=5");
+  });
+});
+
+// The span this suite cannot observe (it runs with `tracingEnabled: false`), so
+// the RULE is tested directly. `passthrough` and `rationale` cannot separate a
+// decomposer that gave up from one that correctly took the cheap single-lookup
+// path: the valid path sets `passthrough` too, and three of the four
+// degradations carry a rationale the MODEL wrote. Without `degraded` on the
+// span, a decomposition that lost its entire fan-out renders on /traces exactly
+// like a healthy lookup — and a pod is not a place where anyone runs the probe.
+describe("decomposeSpanAttributes", () => {
+  const base = { subQuestions: ["a"], rationale: "r", haikuMs: 1, passthrough: true };
+
+  test("a degradation and the backend that ran are both recorded", () => {
+    expect(decomposeSpanAttributes("q", { ...base, degraded: "malformed", backend: "vertex" }))
+      .toEqual({ question: "q", subQuestions: ["a"], rationale: "r", passthrough: true, degraded: "malformed", backend: "vertex" });
+  });
+
+  // Omitted, not falsified: a healthy result has no degradation, and a chain
+  // that threw outright has no backend to name.
+  test("absent fields are omitted rather than written as undefined", () => {
+    const attrs = decomposeSpanAttributes("q", { ...base, passthrough: false, subQuestions: ["a", "b"] });
+    expect(Object.keys(attrs).sort()).toEqual(["passthrough", "question", "rationale", "subQuestions"]);
+  });
+});
+
+describe("the knowledge_decompose span actually carries it", () => {
+  // The rule above is only useful if `researchKnowledge` attaches it. Nothing
+  // else would notice a call site that went back to the old four-field literal:
+  // tsc accepts it, and the pure test passes either way.
+  test("a degraded decomposition reaches the span", async () => {
+    savedSpans.length = 0;
+    mockSpawnHaiku.mockResolvedValueOnce({
+      result: '{"sub_questions": ["a", "b"], "rationale": "Two focused queries."}',
+      inputTokens: 10, outputTokens: 10, model: "claude-haiku-4-5-20251001", backend: "cli" as const,
+    });
+    mockFetch.mockResolvedValueOnce({ results: [] });
+
+    await researchKnowledge({ question: "original", botName: "testbot", knowledgeApiUrl: "http://huginn" });
+
+    const span = savedSpans.find((sp) => sp.name === "knowledge_decompose");
+    expect(span?.attributes).toMatchObject({ passthrough: true, degraded: "malformed", backend: "cli" });
+  });
+
+  test("a healthy decomposition reaches it with no degradation", async () => {
+    savedSpans.length = 0;
+    mockFetch.mockResolvedValueOnce({ results: [] });
+
+    await researchKnowledge({ question: "original", botName: "testbot", knowledgeApiUrl: "http://huginn" });
+
+    const span = savedSpans.find((sp) => sp.name === "knowledge_decompose");
+    expect(span?.attributes?.degraded).toBeUndefined();
+    expect(span?.attributes?.backend).toBe("cli");
   });
 });
 

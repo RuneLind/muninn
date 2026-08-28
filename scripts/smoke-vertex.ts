@@ -775,8 +775,11 @@ async function probeTokenRefresh(): Promise<RefreshProbe> {
 type HaikuProbeOutcome =
   | "vertex-answered"   // the Vertex backend ran and produced usable output
   | "fell-back"         // something failed and the CLI floor answered instead
-  | "unparseable"       // Vertex answered, and the answer was not usable JSON
-  | "failed";           // the whole chain threw
+  // Vertex answered and the answer could not be used. NOT "unparseable JSON":
+  // the commonest shape is valid JSON carrying the wrong key, which parses
+  // perfectly and still loses the whole fan-out.
+  | "unusable"
+  | "failed";           // the whole chain threw — nothing ran, CLI floor included
 
 interface HaikuProbeStep {
   step: string;
@@ -823,7 +826,7 @@ async function probeHaikuRouter(): Promise<HaikuProbeStep[]> {
     steps.push({
       step: "router one-shot",
       // `backend`, not the text: a CLI fallback answers this prompt just as well.
-      outcome: haiku.backend !== "vertex" ? "fell-back" : parsed ? "vertex-answered" : "unparseable",
+      outcome: haiku.backend !== "vertex" ? "fell-back" : parsed ? "vertex-answered" : "unusable",
       backend: haiku.backend ?? null,
       model: haiku.model ?? null,
       ms,
@@ -862,9 +865,16 @@ async function probeHaikuRouter(): Promise<HaikuProbeStep[]> {
     // fan-out and this probe exited 0).
     steps.push({
       step: "decomposer",
-      // `?? null` and the backend test first: an absent backend means no model
-      // call was made at all, which is a fall-back, not a Vertex answer.
-      outcome: result.backend !== "vertex" ? "fell-back" : result.degraded ? "unparseable" : "vertex-answered",
+      // Mapped from the enumerated state, in the order that keeps each outcome
+      // TRUE. `call-failed` first: it means the whole chain threw — nothing ran,
+      // including the CLI floor — so it is `failed`, not `fell-back`. Testing
+      // the backend first put it in `fell-back`, and the explainer then told the
+      // reader "the Claude CLI answered instead" about a run where nothing did:
+      // exactly the claim a `nais` pod, which has no CLI, refutes.
+      outcome: result.degraded === "call-failed" ? "failed"
+        : result.backend !== "vertex" ? "fell-back"
+        : result.degraded ? "unusable"
+        : "vertex-answered",
       backend: result.backend ?? null,
       model: null,
       ms: Math.round(performance.now() - decomposeStarted),
@@ -1138,11 +1148,14 @@ if (RUN.has("haiku")) {
       ? "    `fell-back` means the Claude CLI answered instead — which on this laptop looks like\n" +
         "    success and in a pod is a refusal."
       : null,
-    seen.has("unparseable")
-      ? "    `unparseable` means Vertex DID answer and the answer was not usable, which for the\n" +
+    seen.has("unusable")
+      ? "    `unusable` means Vertex DID answer and the answer could not be used, which for the\n" +
         "    decomposer means every knowledge lookup silently loses its fan-out."
       : null,
-    seen.has("failed") ? "    `failed` means the call did not complete at all — read the detail line." : null,
+    seen.has("failed")
+      ? "    `failed` means nothing ran to completion — not even the CLI floor, which on the\n" +
+        "    `nais` profile does not exist. Read the detail line."
+      : null,
   ].filter(Boolean);
   say(
     answered === steps.length
