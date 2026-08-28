@@ -27,8 +27,17 @@ const PATH_REGION = /\/locations\/([^/]+)(?:\/|$)/;
 
 function hostOf(baseUrl: string): string | null {
   try {
-    // Trailing dots stripped for the same reason `resolveVertexConfig` strips
-    // them: `aiplatform.googleapis.com.` is the same name in DNS.
+    // The trailing dot is the load-bearing half, and it is not cosmetic:
+    // `aiplatform.googleapis.com.` is the same name in DNS and a LIVE route —
+    // measured, it answers 301 to the region-less host, which IS the global
+    // endpoint. Without the strip, `isVertexEndpoint` answers false for it, and
+    // a request to the global endpoint is then handed to the static-key path
+    // with no guard applied at all.
+    //
+    // `.toLowerCase()` is redundant belt-and-braces: `URL.hostname` already
+    // lowercases (measured — no test can tell it from its absence). Kept so the
+    // three normalizations read together here and in `pathRegion`, where none of
+    // them is redundant.
     return new URL(baseUrl).hostname.toLowerCase().replace(/\.+$/, "");
   } catch {
     return null;

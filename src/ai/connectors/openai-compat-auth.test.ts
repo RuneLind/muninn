@@ -91,6 +91,38 @@ describe("vertex authorizer", () => {
     expect((await createAuthorizer(VERTEX_URL, "bot", provider).headers()).Authorization).toBe("Bearer t1");
   });
 
+  test("TWO 401s on the same authorizer each get a fresh token", async () => {
+    // One authorizer serves a whole turn, and a turn is many requests (the agent
+    // loop). Every other case here issues at most ONE 401, which is the single
+    // shape that cannot see a stale remembered generation: with one, the second
+    // and third refusals compare as superseded, `invalidate` does nothing, and
+    // the retry re-sends the token that was just refused — with the suite green.
+    const { provider, issued } = countingProvider();
+    const auth = createAuthorizer(VERTEX_URL, "bot", provider);
+    const unauthorized = () => new OpenAiCompatHttpError(401, "UNAUTHENTICATED");
+    const sent: (string | undefined)[] = [];
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      sent.push((await auth.headers()).Authorization);
+      expect(auth.refreshAfterFailure(unauthorized())).toBe(true);
+    }
+    sent.push((await auth.headers()).Authorization);
+
+    expect(sent).toEqual(["Bearer t1", "Bearer t2", "Bearer t3", "Bearer t4"]);
+    expect(issued()).toBe(4);
+  });
+
+  test("a 401 before any request was authorized is not ours to retry", async () => {
+    // Nothing was sent through this authorizer, so there is no token of ours to
+    // report as refused — and invalidating on someone else's behalf would throw
+    // away a perfectly good cached token.
+    const { provider, issued } = countingProvider();
+    const auth = createAuthorizer(VERTEX_URL, "bot", provider);
+    expect(auth.refreshAfterFailure(new OpenAiCompatHttpError(401, "UNAUTHENTICATED"))).toBe(false);
+    expect(issued()).toBe(0);
+    expect((await auth.headers()).Authorization).toBe("Bearer t1");
+  });
+
   test("refuses a `global` endpoint at construction, before any request", () => {
     const { provider, issued } = countingProvider();
     expect(() => createAuthorizer(

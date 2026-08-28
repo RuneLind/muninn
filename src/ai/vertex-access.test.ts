@@ -99,6 +99,69 @@ describe("assertVertexEndpointAllowed", () => {
     )).toThrow(/somebot/);
   });
 
+  /**
+   * The state space, enumerated rather than patched case by case.
+   *
+   * `global` can be written into a Vertex URL in two POSITIONS — the host and
+   * the resource path — and each position admits the same three rewritings that
+   * change the bytes without changing the request: percent-escapes, case, and a
+   * trailing dot. Six cells. Three rounds of review found three of them one at a
+   * time (`%67lobal` in the path, `global.` in the path, the dot on the host),
+   * which is what a per-finding fix looks like when the space is small enough to
+   * just write down.
+   *
+   * The host cells are the ones that bind: `aiplatform.googleapis.com.` is a
+   * LIVE route — measured, it answers 301 to the region-less host, which is the
+   * global endpoint — and had `hostOf` not stripped the dot, `isVertexEndpoint`
+   * would have said "not Vertex" and handed the request to the static-key path
+   * with no guard at all.
+   */
+  const PATH = (r: string) => `/v1/projects/p/locations/${r}/endpoints/openapi`;
+  // A trailing dot belongs to the whole HOSTNAME, so for the two host positions
+  // that rewriting is the dot at the end of the host — not one spliced into the
+  // middle of a label, which is a different name and no route at all.
+  const CELLS: Record<string, Record<string, string>> = {
+    "host, `global-` prefix": {
+      plain: `https://global-aiplatform.googleapis.com${PATH("europe-north1")}`,
+      percent: `https://%67lob%61l-aiplatform.googleapis.com${PATH("europe-north1")}`,
+      upper: `https://GLOBAL-aiplatform.googleapis.com${PATH("europe-north1")}`,
+      dotted: `https://global-aiplatform.googleapis.com.${PATH("europe-north1")}`,
+    },
+    "host, region-less (IS the global endpoint)": {
+      plain: `https://aiplatform.googleapis.com${PATH("europe-north1")}`,
+      percent: `https://%61iplatform.googleapis.com${PATH("europe-north1")}`,
+      upper: `https://AIPLATFORM.GOOGLEAPIS.COM${PATH("europe-north1")}`,
+      dotted: `https://aiplatform.googleapis.com.${PATH("europe-north1")}`,
+    },
+    path: {
+      plain: `https://europe-north1-aiplatform.googleapis.com${PATH("global")}`,
+      percent: `https://europe-north1-aiplatform.googleapis.com${PATH("%67lob%61l")}`,
+      upper: `https://europe-north1-aiplatform.googleapis.com${PATH("GLOBAL")}`,
+      dotted: `https://europe-north1-aiplatform.googleapis.com${PATH("global.")}`,
+    },
+  };
+
+  for (const [position, rewritings] of Object.entries(CELLS)) {
+    for (const [rewriting, url] of Object.entries(rewritings)) {
+      test(`refuses \`global\` in the ${position}, written ${rewriting}`, () => {
+        expect(() => assertVertexEndpointAllowed(url, "bot")).toThrow(/global/);
+      });
+    }
+  }
+
+  test("and a legitimate region survives every one of those rewritings", () => {
+    // The other direction: normalization must not start refusing real URLs.
+    for (const url of [
+      "https://europe-north1-aiplatform.googleapis.com/v1/projects/p/locations/europe-north1/endpoints/openapi",
+      "https://EUROPE-NORTH1-aiplatform.googleapis.com/v1/projects/p/locations/EUROPE-NORTH1/endpoints/openapi",
+      "https://europe-north1-aiplatform.googleapis.com./v1/projects/p/locations/europe-north1./endpoints/openapi",
+      "https://aiplatform.eu.rep.googleapis.com/v1/projects/p/locations/eu/endpoints/openapi",
+    ]) {
+      expect(isVertexEndpoint(url)).toBe(true);
+      expect(() => assertVertexEndpointAllowed(url, "bot")).not.toThrow();
+    }
+  });
+
   test("is silent about non-Vertex URLs", () => {
     expect(() => assertVertexEndpointAllowed("http://localhost:11434/v1/locations/global", "bot")).not.toThrow();
   });
@@ -248,6 +311,41 @@ describe("VertexTokenProvider", () => {
     p.invalidate(second.generation);
     expect((await p.acquire(1_000_000)).token).toBe("t3");
     expect(calls).toBe(3);
+  });
+
+  test("a caller that JOINED a flight reports that flight's generation, not a later one", async () => {
+    // The other end of the hand-off the round self-caught for the flight
+    // STARTER. A joiner that reported the current generation would have its 401
+    // pass the superseded check and throw away the good token another turn had
+    // just installed.
+    let calls = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const p = new VertexTokenProvider(async () => {
+      const n = ++calls;
+      if (n === 1) await gate;
+      return token(`t${n}`, 1_000_000 + 3_600_000);
+    });
+    const starter = p.acquire(1_000_000);   // starts flight 1
+    const joiner = p.acquire(1_000_000);    // joins flight 1
+    p.invalidate(0);                        // generation → 1, flight 1 detached
+    release();
+    expect((await starter).generation).toBe(0);
+    expect((await joiner).generation).toBe(0);
+    expect((await joiner).token).toBe("t1");
+    expect(calls).toBe(1);
+  });
+
+  test("a cached read reports the CURRENT generation", async () => {
+    let calls = 0;
+    const p = new VertexTokenProvider(async () => token(`t${++calls}`, 1_000_000 + 3_600_000));
+    const first = await p.acquire(1_000_000);
+    p.invalidate(first.generation);
+    const second = await p.acquire(1_000_000);   // fetched
+    const cached = await p.acquire(1_000_000);   // served from cache
+    expect(cached.token).toBe(second.token);
+    expect(cached.generation).toBe(second.generation);
+    expect(calls).toBe(2);
   });
 
   test("a failed fetch does not wedge the provider", async () => {

@@ -682,6 +682,9 @@ async function probeTokenRefresh(): Promise<RefreshProbe> {
   const url = `${baseUrl}/chat/completions`;
   let firstStatus: number | null = null;
   let attempts = 0;
+  /** Set once the seam has ASKED for a retry, so a failure to obtain the fresh
+   *  credential is not reported as the seam declining to try. */
+  let retryRequested = false;
   const done = (outcome: RefreshOutcome, detail: string): RefreshProbe =>
     ({ outcome, firstStatus, detail: redact(detail).slice(0, 220), ms: Math.round(performance.now() - started) });
 
@@ -694,18 +697,24 @@ async function probeTokenRefresh(): Promise<RefreshProbe> {
     // The SHIPPED sequence, not a copy of it — the same function the connector
     // calls. `attempts` is what makes "recovered" mean recovered: a single
     // successful request would otherwise report the same outcome.
-    const ok = await requestWithRefresh(authorizer, async (headers) => {
-      attempts++;
-      try {
-        return await doStreamRequest(url, headers, body, 60_000, GEMINI_MODEL, bot);
-      } catch (err) {
-        // Guarded on the ATTEMPT, not on `firstStatus` still being null: a
-        // first failure with no HTTP status leaves it null, and the guard then
-        // recorded the SECOND attempt's status as "first".
-        if (attempts === 1) firstStatus = err instanceof OpenAiCompatHttpError ? err.status : null;
-        throw err;
-      }
-    });
+    const ok = await requestWithRefresh(
+      {
+        headers: () => authorizer.headers(),
+        refreshAfterFailure: (err) => (retryRequested = authorizer.refreshAfterFailure(err)),
+      },
+      async (headers) => {
+        attempts++;
+        try {
+          return await doStreamRequest(url, headers, body, 60_000, GEMINI_MODEL, bot);
+        } catch (err) {
+          // Guarded on the ATTEMPT, not on `firstStatus` still being null: a
+          // first failure with no HTTP status leaves it null, and the guard then
+          // recorded the SECOND attempt's status as "first".
+          if (attempts === 1) firstStatus = err instanceof OpenAiCompatHttpError ? err.status : null;
+          throw err;
+        }
+      },
+    );
     if (attempts < 2) return done("no-refusal", "the invalid token was accepted — nothing was measured");
     return done("refreshed-and-recovered", `answered ${JSON.stringify(ok.resultText.trim().slice(0, 40))}`);
   } catch (err) {
@@ -716,9 +725,11 @@ async function probeTokenRefresh(): Promise<RefreshProbe> {
     // one printed "a token expiring mid-conversation would surface as a failed
     // turn" about a URL that was never dialled.
     if (attempts === 0) return done("not-dialled", `nothing was sent: ${message}`);
-    return attempts < 2
-      ? done("no-retry", `the seam declined to retry: ${message}`)
-      : done("retry-failed", message);
+    // `retryRequested`, not the attempt count. A second `headers()` that throws
+    // leaves attempts at 1 while the seam DID ask to retry — reported as
+    // "declined to retry", that accused the one component behaving correctly.
+    if (retryRequested) return done("retry-failed", message);
+    return done("no-retry", `the seam declined to retry: ${message}`);
   }
 }
 
