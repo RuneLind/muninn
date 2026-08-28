@@ -55,8 +55,17 @@ function staticKeyAuthorizer(): RequestAuthorizer {
  * weakest credential shape this runs under.
  */
 function vertexAuthorizer(provider: VertexTokenProvider): RequestAuthorizer {
+  // The generation the LAST `headers()` call drew from, so a refusal reports the
+  // token it actually sent. An authorizer belongs to ONE turn (`createAuthorizer`
+  // is called per `executePrompt`) and `requestWithRefresh` pairs the two calls
+  // one-for-one, so this is never read across interleaved requests.
+  let generation: number | null = null;
   return {
-    headers: async () => ({ ...JSON_HEADERS, Authorization: `Bearer ${await provider.get()}` }),
+    headers: async () => {
+      const acquired = await provider.acquire();
+      generation = acquired.generation;
+      return { ...JSON_HEADERS, Authorization: `Bearer ${acquired.token}` };
+    },
     refreshAfterFailure: (err) => {
       // 401 only, and one retry only. Measured against the live endpoint: an
       // invalid or expired token answers 401 UNAUTHENTICATED, while 403
@@ -66,8 +75,11 @@ function vertexAuthorizer(provider: VertexTokenProvider): RequestAuthorizer {
       // turn a clear refusal into a slower one. (A model the project may not call
       // is a third answer again, 404, and is likewise not a credential problem.)
       if (!(err instanceof OpenAiCompatHttpError) || err.status !== 401) return false;
+      // No generation means no request was ever authorized through this
+      // authorizer, so there is no token of ours to report as refused.
+      if (generation === null) return false;
       log.warn("Vertex returned 401 — discarding the cached access token and retrying once");
-      provider.invalidate();
+      provider.invalidate(generation);
       return true;
     },
   };

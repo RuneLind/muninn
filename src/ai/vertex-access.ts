@@ -51,17 +51,28 @@ export function isVertexEndpoint(baseUrl: string): boolean {
 }
 
 /**
- * Refuse a Vertex `baseUrl` that resolves to the `global` region.
+ * Refuse a Vertex `baseUrl` that names the `global` region.
  *
  * The same rule `resolveVertexConfig` enforces for the Agent SDK's env names,
- * through the third door: a connector `baseUrl` steers past every one of those
+ * through the door a connector `baseUrl` opens past every one of those
  * variables. `global` routes to whichever region has capacity and does not
  * report which, so it cannot satisfy a deployment that must keep inference
  * inside a named jurisdiction.
  *
- * Two spellings reach it and both are checked, because the OpenAI-compatible
- * URL carries the region TWICE — once in the host, once in the resource path —
- * and Vertex accepts the path as authoritative for the resource.
+ * **The HOST is the control point, and that part is measured.** Google's refusal
+ * for a blocked region names the endpoint — `Access to projects/… through
+ * endpoint us-central1-aiplatform.googleapis.com was denied` — so the two host
+ * checks are the ones that bind. The resource path is checked as well, and
+ * deliberately NOT because it routes: against `endpoints/openapi`,
+ * `locations/global`, `locations/%67lobal` and `locations/nosuchregion` ALL
+ * answer 200 from the same regional host, which shows the segment is not
+ * validated there rather than that it is authoritative. (An earlier version of
+ * this comment cited the first two of those as proof that it routes — a
+ * conclusion drawn without the third, which is the control that refutes it.) It
+ * is refused anyway, on two grounds that do not need it to route: a URL naming
+ * `global` is at best confused about what it is asking for, and other Vertex
+ * path shapes — `:rawPredict` and friends — do resolve the location from the
+ * path. Conservative in the safe direction, and honest about which half binds.
  */
 export function assertVertexEndpointAllowed(baseUrl: string, botName: string): void {
   const host = hostOf(baseUrl);
@@ -69,7 +80,7 @@ export function assertVertexEndpointAllowed(baseUrl: string, botName: string): v
 
   const refuse = (what: string): never => {
     throw new ConfigError(
-      `Bot "${botName}" has baseUrl="${baseUrl}", which addresses the \`global\` Vertex ` +
+      `Bot "${botName}" has baseUrl="${baseUrl}", which names the \`global\` Vertex ` +
       `region (${what}). \`global\` routes to whichever region has capacity and does not ` +
       `report which, so it cannot satisfy a deployment that must keep inference inside a ` +
       `named jurisdiction. Name an explicit region — the regional host is ` +
@@ -90,14 +101,16 @@ export function assertVertexEndpointAllowed(baseUrl: string, botName: string): v
 }
 
 /**
- * The region a Vertex resource path names, DECODED.
+ * The region a Vertex resource path names, NORMALIZED.
  *
- * `URL.pathname` preserves percent-escapes, and Google's API frontend decodes
- * path segments before it resolves the resource — measured against the live
- * endpoint: `…/locations/%67lobal/endpoints/openapi/chat/completions` answers
- * 200 exactly as `…/locations/global/…` does. So a raw string compare refused
- * one spelling of a URL and cheerfully minted a bearer token for the other
- * spelling of THE SAME URL.
+ * Three normalizations, because the check above must give one answer for one
+ * URL. `URL.pathname` preserves percent-escapes, keeps case, and keeps a
+ * trailing dot — so `%67lobal`, `GLOBAL` and `global.` all compared unequal to
+ * `global` while being the same request to write down. A door that refuses one
+ * spelling and admits another is not a door.
+ *
+ * (The host is normalized the same three ways already: `URL.hostname` decodes
+ * and lowercases, and `hostOf` strips the trailing dot.)
  */
 function pathRegion(pathname: string): string | null {
   const raw = PATH_REGION.exec(pathname)?.[1];
@@ -106,11 +119,10 @@ function pathRegion(pathname: string): string | null {
   try {
     decoded = decodeURIComponent(raw);
   } catch {
-    // A lone `%` throws. Such a segment cannot decode to `global` on Google's
-    // side either — it is rejected there — so the raw form is the honest
-    // comparison rather than a reason to refuse.
+    // A lone `%` throws. Such a segment is rejected by Google rather than
+    // resolved, so the raw form is the honest comparison, not a reason to refuse.
   }
-  return decoded.toLowerCase();
+  return decoded.toLowerCase().replace(/\.+$/, "");
 }
 
 // ── The access token ─────────────────────────────────────────────
@@ -222,7 +234,10 @@ export const defaultVertexTokenFetcher: VertexTokenFetcher = async () =>
  */
 export class VertexTokenProvider {
   #cached: VertexAccessToken | null = null;
-  #inFlight: Promise<VertexAccessToken> | null = null;
+  /** The outstanding fetch AND the generation it was started at, together —
+   *  a caller that joins it must report that flight's generation, not whatever
+   *  the counter has reached since. */
+  #inFlight: { generation: number; promise: Promise<VertexAccessToken> } | null = null;
   #loggedSource: string | null = null;
   /** Bumped by `invalidate()`. A fetch that started before the bump must not
    *  install its result — see there. */
@@ -230,9 +245,17 @@ export class VertexTokenProvider {
 
   constructor(private readonly fetcher: VertexTokenFetcher = defaultVertexTokenFetcher) {}
 
-  async get(now: number = Date.now()): Promise<string> {
+  /**
+   * A token, plus the GENERATION it came from — the value to hand back to
+   * {@link invalidate} if it turns out to be refused. Without it, a burst of
+   * concurrent 401s each invalidates the refresh the previous one started (see
+   * there).
+   */
+  async acquire(now: number = Date.now()): Promise<{ token: string; generation: number }> {
     const cached = this.#cached;
-    if (cached && this.#usable(cached, now)) return cached.token;
+    if (cached && this.#usable(cached, now)) {
+      return { token: cached.token, generation: this.#generation };
+    }
 
     // Whatever comes back is returned, even if it is already inside the margin.
     // Refetching on that condition was tried and reverted: a token legitimately
@@ -240,19 +263,30 @@ export class VertexTokenProvider {
     // the branch fired on the ordinary refresh and fetched twice for nothing. A
     // source that keeps returning near-dead tokens is not something a second
     // call fixes — the 401 retry in `openai-compat-auth.ts` is that backstop.
-    return (await this.#fetchShared()).token;
+    const fetched = await this.#fetchShared();
+    return { token: fetched.token.token, generation: fetched.generation };
   }
 
   /**
-   * Drop the cached token — after a 401, where the expiry estimate was wrong.
+   * Report the token from `generation` as refused, and make the next `acquire()`
+   * fetch a new one.
    *
    * Detaching `#inFlight` is the load-bearing half. Clearing only `#cached` made
-   * this a NO-OP whenever a fetch happened to be in flight: the next `get()`
+   * this a NO-OP whenever a fetch happened to be in flight: the next acquire
    * joined that flight, and the flight then re-installed the very token that had
    * just been refused. The generation bump is the other half — the detached
    * flight must not write `#cached` when it lands either.
+   *
+   * And the generation ARGUMENT is the third. Detaching unconditionally made
+   * every caller in a 401 burst throw away the refresh the previous caller had
+   * already started: five simultaneous turns produced five credential fetches
+   * (five ~700 ms subprocesses on the `gcloud` path) and five tokens, four of
+   * them discarded unwritten — defeating the single flight on the one path it
+   * exists for. A caller reporting a generation that has already been superseded
+   * is reporting a token someone else has replaced, so there is nothing to do.
    */
-  invalidate(): void {
+  invalidate(generation: number): void {
+    if (generation < this.#generation) return;
     this.#cached = null;
     this.#inFlight = null;
     this.#generation++;
@@ -262,19 +296,24 @@ export class VertexTokenProvider {
     return token.expiresAtMs - REFRESH_MARGIN_MS > now;
   }
 
-  async #fetchShared(): Promise<VertexAccessToken> {
+  async #fetchShared(): Promise<{ token: VertexAccessToken; generation: number }> {
     // Join an in-flight fetch rather than starting a second one. No expiry test
     // here, and none is owed: a flight in progress is at most one fetch old
     // (sub-second on both sources), so its token cannot be staler than one this
     // caller would have fetched itself.
-    if (this.#inFlight) return await this.#inFlight;
+    const existing = this.#inFlight;
+    if (existing) return { token: await existing.promise, generation: existing.generation };
 
     const generation = this.#generation;
-    const flight = this.fetcher().finally(() => {
-      if (this.#inFlight === flight) this.#inFlight = null;
+    const entry: { generation: number; promise: Promise<VertexAccessToken> } = {
+      generation,
+      promise: undefined as unknown as Promise<VertexAccessToken>,
+    };
+    entry.promise = this.fetcher().finally(() => {
+      if (this.#inFlight === entry) this.#inFlight = null;
     });
-    this.#inFlight = flight;
-    const fresh = await flight;
+    this.#inFlight = entry;
+    const fresh = await entry.promise;
     if (this.#generation === generation) {
       this.#cached = fresh;
       if (this.#loggedSource !== fresh.source) {
@@ -282,7 +321,7 @@ export class VertexTokenProvider {
         log.info("Vertex access token from {source}", { source: fresh.source });
       }
     }
-    return fresh;
+    return { token: fresh, generation };
   }
 }
 

@@ -647,6 +647,7 @@ async function probeClaudeSdk(): Promise<SdkProbe> {
 type RefreshOutcome =
   | "refreshed-and-recovered"
   | "no-refusal"      // the invalid token was ACCEPTED — the probe measured nothing
+  | "not-dialled"     // nothing was ever sent (a refused endpoint, a dead credential source)
   | "no-retry"        // the seam declined to retry a 401
   | "retry-failed";   // it retried, and the fresh token did not work either
 
@@ -698,7 +699,10 @@ async function probeTokenRefresh(): Promise<RefreshProbe> {
       try {
         return await doStreamRequest(url, headers, body, 60_000, GEMINI_MODEL, bot);
       } catch (err) {
-        if (firstStatus === null) firstStatus = err instanceof OpenAiCompatHttpError ? err.status : null;
+        // Guarded on the ATTEMPT, not on `firstStatus` still being null: a
+        // first failure with no HTTP status leaves it null, and the guard then
+        // recorded the SECOND attempt's status as "first".
+        if (attempts === 1) firstStatus = err instanceof OpenAiCompatHttpError ? err.status : null;
         throw err;
       }
     });
@@ -706,6 +710,12 @@ async function probeTokenRefresh(): Promise<RefreshProbe> {
     return done("refreshed-and-recovered", `answered ${JSON.stringify(ok.resultText.trim().slice(0, 40))}`);
   } catch (err) {
     const message = (err as Error).message;
+    // THREE outcomes, not two, and the first is why. A throw before anything was
+    // sent — a `ConfigError` from `createAuthorizer`, a credential source that
+    // cannot answer — is not the seam declining to retry, and reporting it as
+    // one printed "a token expiring mid-conversation would surface as a failed
+    // turn" about a URL that was never dialled.
+    if (attempts === 0) return done("not-dialled", `nothing was sent: ${message}`);
     return attempts < 2
       ? done("no-retry", `the seam declined to retry: ${message}`)
       : done("retry-failed", message);
@@ -933,9 +943,16 @@ if (RUN.has("refresh")) {
   say(
     probe.outcome === "refreshed-and-recovered"
       ? "\n  ⇒ An expired access token costs one extra round trip, not a failed turn.\n"
-      : "\n  ⇒ A token expiring mid-conversation would surface as a failed turn. Read `detail`.\n",
+      : probe.outcome === "not-dialled"
+        // Its own sentence: nothing was measured about token expiry at all, and
+        // saying otherwise sends the reader after the wrong thing entirely.
+        ? "\n  ⇒ NOT MEASURED — no request left this process. Read `detail`: the endpoint or the\n" +
+          "    credential source was refused before the first call.\n"
+        : "\n  ⇒ A token expiring mid-conversation would surface as a failed turn. Read `detail`.\n",
   );
-  if (probe.outcome !== "refreshed-and-recovered") {
+  if (probe.outcome === "not-dialled") {
+    failures.push(`probe D: not-dialled — nothing was sent, so nothing was measured`);
+  } else if (probe.outcome !== "refreshed-and-recovered") {
     failures.push(`probe D: ${probe.outcome} — the per-request credential did not recover a 401`);
   }
   say("");
