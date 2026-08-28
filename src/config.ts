@@ -153,7 +153,7 @@ export function resolveServingProfile(env: Record<string, string | undefined> = 
  * moment the process runs somewhere else, and "it happened to work when I
  * tested" is not evidence the region was permitted.
  */
-const VERTEX_GLOBAL_REGION = "global";
+export const VERTEX_GLOBAL_REGION = "global";
 
 /**
  * The region-less Vertex host, which IS the global endpoint — confirmed against
@@ -168,7 +168,7 @@ const VERTEX_GLOBAL_REGION = "global";
  * `global` unusable. Whether a given deployment's policy accepts a multi-region
  * endpoint is that deployment's question, not this layer's to pre-empt.
  */
-const VERTEX_GLOBAL_HOST = "aiplatform.googleapis.com";
+export const VERTEX_GLOBAL_HOST = "aiplatform.googleapis.com";
 
 /**
  * The SDK's PER-MODEL region overrides, by prefix rather than by list.
