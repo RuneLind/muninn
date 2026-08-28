@@ -739,19 +739,23 @@ export async function renderModelsPage(): Promise<string> {
       // nothing, so the winning VARIABLE is named beside the value.
       var vx = m.vertex;
       if (vx) {
-        // The disabled note has TWO cases, because a per-model override alone
-        // reaches this row with no project and no region — and claiming
-        // "project/region are set" there contradicted the "Vertex target" row
-        // rendered directly below it, on exactly the config this block exists
-        // to surface.
-        var hasTarget = !!(vx.projectId || vx.region || vx.baseUrl);
+        // The sentence is chosen SERVER-side (vertexNoteKind), because this
+        // block is JS in a template literal and nothing here can be unit-tested
+        // below "does it parse" — which is how a single sentence came to claim
+        // "project/region are set" one line above a row saying "no region". The
+        // prose stays here; the rule and its four cases live in
+        // models-overview.ts with tests.
+        // NB no backticks in this block: it is inside a TS template literal, so
+        // one ENDS the literal. Second time in this PR.
+        var vxNotes = {
+          'adc': 'CLAUDE_CODE_USE_VERTEX — the claude-sdk connector authenticates with ADC, no ANTHROPIC_API_KEY needed',
+          'declared': 'project and region are set but CLAUDE_CODE_USE_VERTEX is not — the SDK still uses an Anthropic credential',
+          'partial': 'partly configured and CLAUDE_CODE_USE_VERTEX is not set — see the target row below for what is missing',
+          'per-model-only': 'only a per-model region override is set — no project, no region, and CLAUDE_CODE_USE_VERTEX is not on'
+        };
         h += machineRow('Vertex',
           vx.enabled ? val('enabled') : val('declared, not enabled', 'warn'),
-          vx.enabled
-            ? 'CLAUDE_CODE_USE_VERTEX — the claude-sdk connector authenticates with ADC, no ANTHROPIC_API_KEY needed'
-            : hasTarget
-              ? 'project/region are set but CLAUDE_CODE_USE_VERTEX is not — the SDK still uses an Anthropic credential'
-              : 'only a per-model region override is set — no project, no region, and CLAUDE_CODE_USE_VERTEX is not on');
+          vxNotes[vx.note] || '');
         // The whole lc-note is already muted (color: var(--text-dim)), so the
         // variable name needs no class of its own — and the page has none to give
         // it. Each value is paired with the NAME that supplied it, because that

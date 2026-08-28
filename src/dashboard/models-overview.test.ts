@@ -531,7 +531,7 @@ test("machine: bots distinguish DISCOVERED from actually polling", async () => {
 // Vertex — the Machine card's credential block
 // ---------------------------------------------------------------------------
 
-import { resolveVertexConfig } from "../config.ts";
+import { resolveVertexConfig, type VertexConfig } from "../config.ts";
 
 /** `vertexInfo` reads `process.env`, so each case owns the six names outright.
  *  `src/test/preload.ts` already deletes them before any suite runs; this
@@ -639,5 +639,39 @@ test("vertexInfo: a PER-MODEL override ALONE still renders the block", () => {
     expect(info!.perModelRegions).toEqual([
       { name: "VERTEX_REGION_CLAUDE_4_5_SONNET", region: "europe-west1" },
     ]);
+  });
+});
+
+test("vertexNoteKind: the four cases the card's sentence must tell apart", () => {
+  // The rule lives here BECAUSE the view cannot be tested — `models-page.ts`
+  // embeds its client JS in a template literal, so collapsing the note back to
+  // one sentence failed no test at all. These are the shapes that reach it.
+  const { vertexNoteKind } = _internalsForTest();
+  // Not `as const`: `perModelRegions: []` would widen to `readonly []`, which
+  // is not assignable to the mutable array on `VertexConfig`.
+  const base: VertexConfig = {
+    enabled: false, projectId: null, projectIdSource: null,
+    region: null, regionSource: null, baseUrl: null, perModelRegions: [],
+  };
+
+  expect(vertexNoteKind({ ...base, enabled: true })).toBe("adc");
+  expect(vertexNoteKind({ ...base, projectId: "p", region: "europe-north1" })).toBe("declared");
+  // A base URL counts as the region half — a multi-region endpoint has no name.
+  expect(vertexNoteKind({ ...base, projectId: "p", baseUrl: "https://x" })).toBe("declared");
+  // ⚠️ The cases the old single sentence lied about: it claimed BOTH were set.
+  expect(vertexNoteKind({ ...base, projectId: "p" })).toBe("partial");
+  expect(vertexNoteKind({ ...base, region: "europe-north1" })).toBe("partial");
+  expect(vertexNoteKind({ ...base, baseUrl: "https://x" })).toBe("partial");
+  expect(vertexNoteKind({
+    ...base, perModelRegions: [{ name: "VERTEX_REGION_CLAUDE_4_5_SONNET", region: "europe-west1" }],
+  })).toBe("per-model-only");
+});
+
+test("vertexInfo carries the note kind onto the card payload", () => {
+  const { vertexInfo } = _internalsForTest();
+  withVertexEnv({ VERTEX_PROJECT_ID: "p-1" }, () => {
+    // Project only, Vertex off — legal (the completeness refusals are gated on
+    // `enabled`), and the exact shape that used to render a false sentence.
+    expect(vertexInfo([])!.note).toBe("partial");
   });
 });

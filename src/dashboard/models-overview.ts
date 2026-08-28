@@ -18,6 +18,21 @@
 
 import os from "node:os";
 import { resolveVertexConfig, schedulerEnabledFromEnv, type VertexConfig } from "../config.ts";
+
+/**
+ * The resolved Vertex config plus the one thing only the card needs: WHICH
+ * sentence its Vertex row should carry.
+ *
+ * Decided here rather than in the view, because the view is JavaScript inside a
+ * template literal — it can neither import a helper nor be tested below "does
+ * this parse". A note built there is guarded by syntax and nothing else, which
+ * is how it came to assert "project/region are set" one line above a row
+ * reading "no region". Shipping the KIND leaves the prose in the view and puts
+ * the RULE where the cases are testable.
+ */
+export type VertexView = VertexConfig & {
+  note: "adc" | "declared" | "partial" | "per-model-only";
+};
 import { isWikiReadonly, readonlyWikiRoots } from "../wiki/readonly.ts";
 import type { BotConfig } from "../bots/config.ts";
 import { discoverAllBots, resolveResearchBot, resolveSummarizerBot, resolveWikiSynthesisBot } from "../bots/config.ts";
@@ -258,7 +273,7 @@ export interface MachineInfo {
    * can omit the block instead of asserting "Vertex: not configured" on the many
    * instances for which that is not a fact worth a row.
    */
-  vertex: VertexConfig | null;
+  vertex: VertexView | null;
 }
 
 export interface ModelsOverview {
@@ -859,7 +874,26 @@ export async function assembleModelsOverview(
  * instance with a project and region declared but `CLAUDE_CODE_USE_VERTEX`
  * absent is exactly the state the card exists to show, so it renders.
  */
-function vertexInfo(errors: string[]): VertexConfig | null {
+/**
+ * The Vertex row's sentence, as a kind. Pure over the resolved config.
+ *
+ *   `adc`            Vertex is on; the connector authenticates with ADC.
+ *   `declared`       off, but a project AND a region (or base URL) are set.
+ *   `partial`        off, and only SOME of those is set — the state a single
+ *                    "project/region are set" sentence lied about, since the
+ *                    target row directly below it says what is missing.
+ *   `per-model-only` off, with nothing set but a per-model region override.
+ */
+export function vertexNoteKind(v: VertexConfig): VertexView["note"] {
+  if (v.enabled) return "adc";
+  const hasProject = !!v.projectId;
+  const hasRegion = !!v.region || !!v.baseUrl;
+  if (hasProject && hasRegion) return "declared";
+  if (!hasProject && !hasRegion) return "per-model-only";
+  return "partial";
+}
+
+function vertexInfo(errors: string[]): VertexView | null {
   try {
     const vertex = resolveVertexConfig();
     // `perModelRegions` is part of "is anything configured?" — omitting it hid the
@@ -868,7 +902,7 @@ function vertexInfo(errors: string[]): VertexConfig | null {
     // since there is then no region line for it to contradict.
     if (!vertex.enabled && !vertex.projectId && !vertex.region && !vertex.baseUrl
         && vertex.perModelRegions.length === 0) return null;
-    return vertex;
+    return { ...vertex, note: vertexNoteKind(vertex) };
   } catch (err) {
     errors.push(`vertex config: ${(err as Error).message}`);
     return null;
@@ -876,5 +910,5 @@ function vertexInfo(errors: string[]): VertexConfig | null {
 }
 
 export function _internalsForTest() {
-  return { haikuBackendOrigin, uniqSorted, computeModelMismatch, buildWhyChain, vertexInfo, EMBEDDINGS_MODEL, GARDENER_DRAFT_THINKING_MAX_TOKENS };
+  return { haikuBackendOrigin, uniqSorted, computeModelMismatch, buildWhyChain, vertexInfo, vertexNoteKind, EMBEDDINGS_MODEL, GARDENER_DRAFT_THINKING_MAX_TOKENS };
 }
