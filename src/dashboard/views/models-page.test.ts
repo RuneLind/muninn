@@ -1,5 +1,6 @@
 import { test, expect } from "bun:test";
 import { renderModelsPage } from "./models-page.ts";
+import { VERTEX_NOTE_TEXT } from "../models-overview.ts";
 
 /**
  * `/models` renders its client half as JavaScript inside a TypeScript TEMPLATE
@@ -33,4 +34,22 @@ test("every inline script on /models parses as JavaScript", async () => {
     }
   });
   expect(failures).toEqual([]);
+});
+
+
+/**
+ * The rendered page must USE the shared note map, not a copy of it.
+ *
+ * Without this, deleting the `${JSON.stringify(VERTEX_NOTE_TEXT)}` interpolation
+ * and hand-writing the object literal back into the view — with a sentence
+ * wrong — was measured fully GREEN, tsc included: the map kept passing its own
+ * tests in `models-overview.test.ts` while the card rendered something else.
+ * That is the "fix inert where it matters, tests stay green" shape exactly, and
+ * inlining to drop an import is a plausible future edit.
+ */
+test("/models renders the shared Vertex note sentences, not a copy", async () => {
+  const html = await renderModelsPage();
+  for (const sentence of Object.values(VERTEX_NOTE_TEXT)) {
+    expect(html).toContain(sentence);
+  }
 });

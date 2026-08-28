@@ -1,3 +1,4 @@
+import { VERTEX_NOTE_TEXT } from "../models-overview.ts";
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { botSelectorStyles, botSelectorHtml } from "./components/bot-selector.ts";
 import { helpersClientScript } from "./components/helpers-client.ts";
@@ -731,6 +732,61 @@ export async function renderModelsPage(): Promise<string> {
         ? esc(idle.map(function (b) { return b.name; }).join(', ')) +
           ' — discovered but no platform tokens, not polling'
         : '';
+      // Vertex — rendered only when this instance declares one. Two rows, because
+      // the two facts fail apart: WHETHER the SDK takes the Vertex path
+      // (CLAUDE_CODE_USE_VERTEX, and nothing else decides it) and WHAT it would
+      // dial. A project set under muninn's own name while the SDK reads
+      // ANTHROPIC_VERTEX_PROJECT_ID is a working-looking config that dials
+      // nothing, so the winning VARIABLE is named beside the value.
+      var vx = m.vertex;
+      if (vx) {
+        // Both the KIND and the SENTENCE come from models-overview.ts, the
+        // second one INTERPOLATED rather than written here. Leaving the prose in
+        // this block put it back out of reach of every test: rewriting one of
+        // these strings to something plainly false failed nothing, because a
+        // template literal is only covered by a "does it parse" guard. That is
+        // how the note came to claim a region was set one line above a row
+        // reading "no region".
+        // NB no backticks in this block: it is inside a TS template literal, so
+        // one ENDS the literal. Twice in this PR already.
+        var vxNotes = ${JSON.stringify(VERTEX_NOTE_TEXT)};
+        h += machineRow('Vertex',
+          vx.enabled ? val('enabled') : val('declared, not enabled', 'warn'),
+          vxNotes[vx.note] || '');
+        // The whole lc-note is already muted (color: var(--text-dim)), so the
+        // variable name needs no class of its own — and the page has none to give
+        // it. Each value is paired with the NAME that supplied it, because that
+        // pairing is the diagnosis: "p-1 (VERTEX_PROJECT_ID)" on a row whose
+        // switch is on means the SDK, which reads ANTHROPIC_VERTEX_PROJECT_ID,
+        // is dialling nothing.
+        // NB no backticks anywhere in this block: it lives inside a TS template
+        // literal, so one would END the literal — the same invisible-to-tsc-ish
+        // trap as the apostrophe documented in models-page.test.ts, except this
+        // one tsc does catch, three lines later and blaming the wrong line.
+        var where = [];
+        if (vx.projectId) where.push('<code>' + esc(vx.projectId) + '</code> (' + esc(vx.projectIdSource || '?') + ')');
+        if (vx.region) where.push('<code>' + esc(vx.region) + '</code> (' + esc(vx.regionSource || '?') + ')');
+        if (vx.baseUrl) where.push('<code>' + esc(vx.baseUrl) + '</code> (ANTHROPIC_VERTEX_BASE_URL)');
+        h += machineRow('Vertex target',
+          vx.region ? val(vx.region) : val('no region', 'warn'),
+          where.length ? where.join(' · ') : 'nothing resolved');
+        // ⚠️ Loud, and its own row. A VERTEX_REGION_CLAUDE_* override BEATS
+        // CLOUD_ML_REGION for the models it names, so a card that showed only
+        // the row above was telling the operator their traffic went somewhere
+        // it did not — europe-north1 on the page, a different region in every
+        // request. 'warn' because an override is by definition a divergence
+        // from the region stated one line up.
+        var pmr = vx.perModelRegions || [];
+        if (pmr.length) {
+          h += machineRow('Per-model regions',
+            val(String(pmr.length) + ' override' + (pmr.length === 1 ? '' : 's'), 'warn'),
+            'these BEAT the region above for the models they name: ' +
+              pmr.map(function (o) {
+                return '<code>' + esc(o.name) + '</code> = <code>' + esc(o.region) + '</code>';
+              }).join(' · '),
+            'warn');
+        }
+      }
       h += machineRow('Bots', botsVal, botsNote);
       var wikis = m.wikis || [];
       // wikisKnown === false means the registry THREW. "none" would read as a

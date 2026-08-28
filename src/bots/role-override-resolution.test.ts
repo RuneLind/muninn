@@ -27,7 +27,17 @@ beforeEach(() => {
 });
 afterEach(() => {
   _resetSnapshotForTests();
-  process.env = { ...SAVED };
+  // Key by key, NOT `process.env = { ...SAVED }`: that replaces the runtime's
+  // magic env object with a plain one, after which every later
+  // `process.env.X = …` in the PROCESS never reaches `setenv` and the runtime
+  // stops seeing it. It broke a `withTz` two files away the moment a sibling
+  // carrying the same line was registered in the `bun run test` chain.
+  for (const key of Object.keys(process.env)) {
+    if (!(key in SAVED)) delete process.env[key];
+  }
+  for (const [key, value] of Object.entries(SAVED)) {
+    if (value !== undefined) process.env[key] = value;
+  }
 });
 
 test("summarizer: DB override beats env", () => {

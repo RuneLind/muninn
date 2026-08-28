@@ -5,7 +5,7 @@ import type {
   BetaToolUseBlock,
   BetaToolResultBlockParam,
 } from "@anthropic-ai/sdk/resources/beta/messages/messages.mjs";
-import type { Config } from "../../config.ts";
+import { resolveVertexConfig, type Config } from "../../config.ts";
 import type { BotConfig } from "../../bots/config.ts";
 import type { ClaudeExecResult } from "../executor.ts";
 import {
@@ -32,11 +32,6 @@ interface PendingTool {
 }
 
 /**
- * Auth check — the Agent SDK reads ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN
- * from process.env directly (same surface as `haiku-direct.ts`). Throw early so
- * a misconfigured bot fails with a clear message instead of cryptic SDK errors.
- */
-/**
  * Map a bot's `thinkingMaxTokens` to the SDK's `thinking` option. The CLI honors
  * this via the `MAX_THINKING_TOKENS` env; the SDK exposes it as a structured
  * option instead. Without this, flipping a bot from claude-cli to claude-sdk
@@ -49,11 +44,38 @@ export function resolveThinking(maxTokens: number | undefined): ThinkingConfig |
   return { type: "enabled", budgetTokens: maxTokens };
 }
 
+/**
+ * Auth check — the Agent SDK reads ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN
+ * from process.env directly (same surface as `haiku-direct.ts`). Throw early so
+ * a misconfigured bot fails with a clear message instead of cryptic SDK errors.
+ *
+ * **There is a third credential and this used to deny it.** On Vertex the SDK
+ * needs NEITHER Anthropic variable: it authenticates with Application Default
+ * Credentials — a developer's `gcloud auth application-default login`, a
+ * workload-identity metadata server in a GCP-hosted deployment. Measured directly (PR 0,
+ * `scripts/smoke-vertex.ts` probe C): with both Anthropic names DELETED from the
+ * process and `CLAUDE_CODE_USE_VERTEX=1`, the SDK reports `apiKeySource: "none"`,
+ * reaches Vertex and comes back with Vertex's own answer. So the old assert was
+ * not a safety net over that path — it was a wrong claim about it, throwing
+ * before the SDK ever ran on a perfectly valid credential.
+ *
+ * `resolveVertexConfig()` is the gate rather than a bare env read because it is
+ * the SAME parse `loadConfig` uses, and because a half-configured Vertex (the
+ * switch on, no `ANTHROPIC_VERTEX_PROJECT_ID`) should fail HERE with the name
+ * that is missing, not later inside the SDK. It keys on `CLAUDE_CODE_USE_VERTEX`
+ * — the variable the SDK reads — parsed with the SDK's OWN allowlist
+ * (`1`/`true`/`yes`/`on`). Same variable is not enough: an earlier draft
+ * inverted a denylist instead, so `CLAUDE_CODE_USE_VERTEX=y` was ON here and OFF
+ * to the SDK, and this waiver let a first-party turn run with no credential at
+ * all. Copying the consumer's allowlist is the only parse that cannot diverge.
+ */
 export function assertHaveAuth(): void {
   if (hasHaikuDirectAuth()) return;
+  if (resolveVertexConfig().enabled) return;
   throw new Error(
-    "claude-sdk: neither ANTHROPIC_API_KEY nor CLAUDE_CODE_OAUTH_TOKEN is set — " +
-      "run `claude setup-token` or set ANTHROPIC_API_KEY",
+    "claude-sdk: no credential — set ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN " +
+      "(`claude setup-token`), or CLAUDE_CODE_USE_VERTEX=1 with a Vertex project for " +
+      "Application Default Credentials",
   );
 }
 

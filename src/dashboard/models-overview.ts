@@ -17,7 +17,22 @@
  */
 
 import os from "node:os";
-import { schedulerEnabledFromEnv } from "../config.ts";
+import { resolveVertexConfig, schedulerEnabledFromEnv, type VertexConfig } from "../config.ts";
+
+/**
+ * The resolved Vertex config plus the one thing only the card needs: WHICH
+ * sentence its Vertex row should carry.
+ *
+ * Decided here rather than in the view, because the view is JavaScript inside a
+ * template literal — it can neither import a helper nor be tested below "does
+ * this parse". A note built there is guarded by syntax and nothing else, which
+ * is how it came to assert "project/region are set" one line above a row
+ * reading "no region". Shipping the KIND leaves the prose in the view and puts
+ * the RULE where the cases are testable.
+ */
+export type VertexView = VertexConfig & {
+  note: "adc" | "declared" | "partial" | "per-model-only";
+};
 import { isWikiReadonly, readonlyWikiRoots } from "../wiki/readonly.ts";
 import type { BotConfig } from "../bots/config.ts";
 import { discoverAllBots, resolveResearchBot, resolveSummarizerBot, resolveWikiSynthesisBot } from "../bots/config.ts";
@@ -235,6 +250,30 @@ export interface MachineInfo {
    * a readonly instance look harmless. The detail is in `errors[]`.
    */
   wikisKnown: boolean;
+  /**
+   * The Vertex credential seam, or null when this instance declares none.
+   *
+   * On `/models` because that is where "what would actually run" already lives,
+   * and because the two failure shapes are invisible everywhere else: a project
+   * set under muninn's `VERTEX_PROJECT_ID` while the Agent SDK reads
+   * `ANTHROPIC_VERTEX_PROJECT_ID` (so the card names the WINNING variable, not
+   * just the value), and `CLAUDE_CODE_USE_VERTEX` off while the region and
+   * project are configured — a bot that looks Vertex-bound and is not.
+   *
+   * The project id IS published, unlike `wikis[].root`. The two are not the same
+   * call: a filesystem path was never rendered and had no diagnostic use, while
+   * naming the project is the whole point of the row — a Vertex card that hid it
+   * could not tell an operator they are pointed at the wrong one. A GCP project
+   * id is also not a secret — it appears in every Vertex request URL.
+   * (`/models` is admin-zone in `src/auth/zones.ts` — but only in an
+   * authenticating mode, and `MUNINN_AUTH` defaults to `off`, which mounts no
+   * middleware at all. So the zone is a reason, not the reason.)
+   *
+   * `null` rather than a zeroed record when nothing is configured, so the card
+   * can omit the block instead of asserting "Vertex: not configured" on the many
+   * instances for which that is not a fact worth a row.
+   */
+  vertex: VertexView | null;
 }
 
 export interface ModelsOverview {
@@ -765,6 +804,11 @@ export async function assembleModelsOverview(
     used: [],
   });
 
+  // BEFORE the warn below, deliberately: it can push an error of its own, and a
+  // warn line that counted every degraded source except this one would be wrong
+  // exactly when a boot-refusing misconfiguration is what degraded the page.
+  const vertex = vertexInfo(errors);
+
   if (errors.length > 0) {
     log.warn("models overview assembled with {count} degraded source(s)", { count: errors.length });
   }
@@ -803,6 +847,13 @@ export async function assembleModelsOverview(
       ? unmatchedReadonlyWikiRoots(wikiRegistry, readonlyWikiRoots())
       : [],
     wikisKnown: wikiRegistryKnown,
+    // Resolved above, through the SAME resolver the boot refusal uses — reading
+    // a level below the enforcement point is what let the readonly card and the
+    // readonly seams disagree. It can THROW (a `global` region), which on a
+    // booted instance is unreachable because `loadConfig` already refused;
+    // catching it keeps a diagnostic page from 5xx-ing on the one instance that
+    // most needs to be read.
+    vertex,
   };
 
   return {
@@ -817,6 +868,81 @@ export async function assembleModelsOverview(
   };
 }
 
+/**
+ * The sentence per kind. Here, WITH the rule, and interpolated into the page —
+ * not written as a literal inside the view.
+ *
+ * The previous round put the rule here and left the prose in `models-page.ts`,
+ * on the reasoning that presentation belongs in the view. Measured: rewriting
+ * one of those strings to something plainly false failed NO test, because they
+ * live inside a template literal that only a "does this parse" guard covers. So
+ * the untested surface had moved, not gone — and the `declared` sentence was
+ * still lying, claiming a region on a config whose region is a base URL. Prose
+ * and rule travel together now, and the page interpolates this map.
+ */
+export const VERTEX_NOTE_TEXT: Record<VertexView["note"], string> = {
+  adc: "CLAUDE_CODE_USE_VERTEX — the claude-sdk connector authenticates with ADC, no ANTHROPIC_API_KEY needed",
+  // "a region or a base URL", because `hasRegion` is satisfied by either — and
+  // saying "region" flatly reproduced the exact contradiction this whole note
+  // exists to remove: it rendered directly above a "Vertex target: no region"
+  // row on the EU multi-region shape, which is a first-class configuration.
+  declared: "a project and a region or base URL are set but CLAUDE_CODE_USE_VERTEX is not — the SDK still uses an Anthropic credential",
+  // Two false versions of this sentence have shipped, so it names the actual
+  // variables now. It must NOT say "see the target row below for what is
+  // missing" (that row shows nothing missing for two of the three shapes), and
+  // it must NOT say "a project and a region or base URL" — that is what makes
+  // this kind `partial`, but it is NOT what switching Vertex on requires:
+  // `resolveVertexConfig` demands the SDK's own names, and a base URL
+  // explicitly does not substitute for the region. An operator who followed the
+  // previous wording added a base URL and got a boot refusal.
+  partial: "partly configured and CLAUDE_CODE_USE_VERTEX is not set — switching it on needs ANTHROPIC_VERTEX_PROJECT_ID and CLOUD_ML_REGION; a base URL does not substitute for the region",
+  "per-model-only": "only a per-model region override is set — no project, no region, and CLAUDE_CODE_USE_VERTEX is not on",
+};
+
+/**
+ * The Vertex row's sentence, as a kind. Pure over the resolved config.
+ *
+ *   `adc`            Vertex is on; the connector authenticates with ADC.
+ *   `declared`       off, but a project AND a region (or base URL) are set.
+ *   `partial`        off, and only SOME of those is set.
+ *   `per-model-only` off, with nothing set but a per-model region override.
+ *
+ * ⚠️ Exported and pure, so it can be called with a shape `vertexInfo` would
+ * never hand it: an all-empty config answers `per-model-only`, a sentence
+ * claiming an override that is not there. Unreachable through the card, which
+ * returns `null` for that shape first — but do not reuse this without the gate.
+ */
+export function vertexNoteKind(v: VertexConfig): VertexView["note"] {
+  if (v.enabled) return "adc";
+  const hasProject = !!v.projectId;
+  const hasRegion = !!v.region || !!v.baseUrl;
+  if (hasProject && hasRegion) return "declared";
+  if (!hasProject && !hasRegion) return "per-model-only";
+  return "partial";
+}
+
+/**
+ * The Vertex block for the Machine card. Returns null when nothing is
+ * configured — which is every field unset, not merely "the switch is off": an
+ * instance with a project and region declared but `CLAUDE_CODE_USE_VERTEX`
+ * absent is exactly the state the card exists to show, so it renders.
+ */
+function vertexInfo(errors: string[]): VertexView | null {
+  try {
+    const vertex = resolveVertexConfig();
+    // `perModelRegions` is part of "is anything configured?" — omitting it hid the
+    // whole block for an instance whose ONLY Vertex setting is a per-model region
+    // override, which is exactly the case the override row exists to report,
+    // since there is then no region line for it to contradict.
+    if (!vertex.enabled && !vertex.projectId && !vertex.region && !vertex.baseUrl
+        && vertex.perModelRegions.length === 0) return null;
+    return { ...vertex, note: vertexNoteKind(vertex) };
+  } catch (err) {
+    errors.push(`vertex config: ${(err as Error).message}`);
+    return null;
+  }
+}
+
 export function _internalsForTest() {
-  return { haikuBackendOrigin, uniqSorted, computeModelMismatch, buildWhyChain, EMBEDDINGS_MODEL, GARDENER_DRAFT_THINKING_MAX_TOKENS };
+  return { haikuBackendOrigin, uniqSorted, computeModelMismatch, buildWhyChain, vertexInfo, vertexNoteKind, VERTEX_NOTE_TEXT, EMBEDDINGS_MODEL, GARDENER_DRAFT_THINKING_MAX_TOKENS };
 }

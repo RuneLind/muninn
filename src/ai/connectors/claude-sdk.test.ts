@@ -69,10 +69,19 @@ afterEach(() => {
 });
 
 describe("claude-sdk assertHaveAuth", () => {
-  test("throws when neither ANTHROPIC_API_KEY nor CLAUDE_CODE_OAUTH_TOKEN is set", () => {
+  test("throws when no credential of ANY of the three kinds is set", () => {
+    // Three kinds now, not two: Vertex authenticates with ADC and needs neither
+    // Anthropic variable. `src/test/preload.ts` clears the Vertex names, so this
+    // case does not have to — but the message must still NAME all three, or an
+    // operator on the NAV deployment reads "set ANTHROPIC_API_KEY" as the only
+    // way out of a state it is not the fix for. Full coverage of the Vertex
+    // waiver itself lives in `src/config-vertex.test.ts`.
     delete process.env.ANTHROPIC_API_KEY;
     delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
-    expect(() => assertHaveAuth()).toThrow(/neither ANTHROPIC_API_KEY/);
+    expect(() => assertHaveAuth()).toThrow(/no credential/);
+    expect(() => assertHaveAuth()).toThrow(/ANTHROPIC_API_KEY/);
+    expect(() => assertHaveAuth()).toThrow(/CLAUDE_CODE_OAUTH_TOKEN/);
+    expect(() => assertHaveAuth()).toThrow(/CLAUDE_CODE_USE_VERTEX/);
   });
 
   test("passes when ANTHROPIC_API_KEY is set", () => {

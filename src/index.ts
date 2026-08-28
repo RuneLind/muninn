@@ -1,5 +1,5 @@
 import { setupLogging, getLog } from "./logging.ts";
-import { loadConfig } from "./config.ts";
+import { ConfigError, loadConfig } from "./config.ts";
 import { discoverActiveBots, discoverAllBots } from "./bots/config.ts";
 import { initDb, closeDb } from "./db/client.ts";
 import { createBot } from "./bot/index.ts";
@@ -29,7 +29,27 @@ import { createWsUpgradeAuthorizer } from "./auth/ws-upgrade.ts";
 import { Hono } from "hono";
 import type { Bot } from "grammy";
 
-const config = loadConfig();
+// `loadConfig()` throws on every fail-closed config condition — a missing
+// DATABASE_URL, an unrecognised MUNINN_PROFILE, a `global` Vertex region. It has
+// to run before `setupLogging`, which needs `logDir` from it, so there is no
+// logger yet and an uncaught throw prints a Bun stack trace. In a nais pod that
+// reaches the shared aggregator as an unhandled exception rather than as the one
+// legible line the message already is. Same shape as the auth refusal below,
+// minus the logger it cannot have yet.
+let config: ReturnType<typeof loadConfig>;
+try {
+  config = loadConfig();
+} catch (err) {
+  // A deliberate refusal is one line — its message is the whole diagnosis, and
+  // in a container a stack reaches the log aggregator as an unhandled
+  // exception. Anything else is a BUG in the config layer and keeps its stack,
+  // or it becomes a context-free sentence with no file and no line number.
+  if (err instanceof ConfigError) {
+    console.error(`Refusing to start: ${err.message}`);
+    process.exit(1);
+  }
+  throw err;
+}
 await setupLogging(config.logDir);
 const log = getLog("core");
 

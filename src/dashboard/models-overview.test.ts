@@ -80,7 +80,20 @@ beforeEach(() => {
   _resetSnapshotForTests();
 });
 afterEach(() => {
-  process.env = { ...SAVED };
+  // Restore KEY BY KEY. `process.env = {...}` replaces the runtime's magic env
+  // object with a plain one, and every later `process.env.X = …` in the PROCESS
+  // then writes to an ordinary property that never reaches `setenv` — so the
+  // runtime stops seeing it. Harmless while this file was the only one in its
+  // chunk; the moment it was registered in the `bun run test` chain it broke a
+  // LATER file, `claude-usage-overview.test.ts`, whose `withTz` sets
+  // `process.env.TZ` and depends on `Intl` picking it up. That failure names a
+  // date arithmetic bug in a file this one does not import.
+  for (const key of Object.keys(process.env)) {
+    if (!(key in SAVED)) delete process.env[key];
+  }
+  for (const [key, value] of Object.entries(SAVED)) {
+    if (value !== undefined) process.env[key] = value;
+  }
   _resetSnapshotForTests();
 });
 
@@ -512,4 +525,202 @@ test("machine: bots distinguish DISCOVERED from actually polling", async () => {
     { name: "halfslack", polling: false },
     { name: "tokenless", polling: false },
   ]);
+});
+
+// ---------------------------------------------------------------------------
+// Vertex — the Machine card's credential block
+// ---------------------------------------------------------------------------
+
+import { resolveVertexConfig, type VertexConfig } from "../config.ts";
+
+/** `vertexInfo` reads `process.env`, so each case owns the six names outright.
+ *  `src/test/preload.ts` already deletes them before any suite runs; this
+ *  save/restore is what keeps ONE case from leaking into the next. */
+function withVertexEnv<T>(env: Record<string, string>, fn: () => T): T {
+  const names = [
+    "CLAUDE_CODE_USE_VERTEX", "ANTHROPIC_VERTEX_PROJECT_ID", "ANTHROPIC_VERTEX_BASE_URL",
+    "CLOUD_ML_REGION", "VERTEX_PROJECT_ID", "VERTEX_REGION", "VERTEX_REGION_CLAUDE_4_5_SONNET",
+  ];
+  const saved: Record<string, string | undefined> = {};
+  for (const n of names) { saved[n] = process.env[n]; delete process.env[n]; }
+  for (const [k, v] of Object.entries(env)) process.env[k] = v;
+  try {
+    return fn();
+  } finally {
+    for (const n of names) {
+      if (saved[n] === undefined) delete process.env[n];
+      else process.env[n] = saved[n]!;
+    }
+  }
+}
+
+test("vertexInfo: nothing configured ⇒ null, so the card omits the block", () => {
+  const { vertexInfo } = _internalsForTest();
+  withVertexEnv({}, () => {
+    const errors: string[] = [];
+    expect(vertexInfo(errors)).toBeNull();
+    expect(errors).toEqual([]);
+  });
+});
+
+test("vertexInfo: a DECLARED but not enabled Vertex still renders — that is the state worth showing", () => {
+  const { vertexInfo } = _internalsForTest();
+  withVertexEnv({ VERTEX_PROJECT_ID: "p-1", VERTEX_REGION: "europe-north1" }, () => {
+    const info = vertexInfo([]);
+    expect(info).not.toBeNull();
+    expect(info!.enabled).toBe(false);
+    expect(info!.projectId).toBe("p-1");
+    expect(info!.projectIdSource).toBe("VERTEX_PROJECT_ID");
+  });
+});
+
+test("vertexInfo: an ENABLED instance reports the SDK's names as the source", () => {
+  const { vertexInfo } = _internalsForTest();
+  withVertexEnv({
+    CLAUDE_CODE_USE_VERTEX: "1",
+    ANTHROPIC_VERTEX_PROJECT_ID: "sdk-name",
+    CLOUD_ML_REGION: "europe-west1",
+  }, () => {
+    const info = vertexInfo([])!;
+    expect(info.enabled).toBe(true);
+    expect(info.projectId).toBe("sdk-name");
+    expect(info.projectIdSource).toBe("ANTHROPIC_VERTEX_PROJECT_ID");
+    expect(info.regionSource).toBe("CLOUD_ML_REGION");
+    expect(info.perModelRegions).toEqual([]);
+  });
+});
+
+test("vertexInfo: a per-model region override is CARRIED to the card", () => {
+  // The card said `europe-north1` while every Sonnet 4.5 turn went elsewhere,
+  // because this override beats CLOUD_ML_REGION in the SDK and nothing rendered
+  // it. A non-global one is legal, so the row is the only signal there is.
+  const { vertexInfo } = _internalsForTest();
+  withVertexEnv({
+    CLAUDE_CODE_USE_VERTEX: "1",
+    ANTHROPIC_VERTEX_PROJECT_ID: "p",
+    CLOUD_ML_REGION: "europe-north1",
+    VERTEX_REGION_CLAUDE_4_5_SONNET: "europe-west1",
+  }, () => {
+    const info = vertexInfo([])!;
+    expect(info.region).toBe("europe-north1");
+    expect(info.perModelRegions).toEqual([
+      { name: "VERTEX_REGION_CLAUDE_4_5_SONNET", region: "europe-west1" },
+    ]);
+  });
+});
+
+test("vertexInfo: a refusing config DEGRADES the card instead of 5xx-ing the page", () => {
+  // Unreachable on a booted instance — `loadConfig` refused at boot — but the
+  // page is the one surface that must still render when the config is wrong.
+  const { vertexInfo } = _internalsForTest();
+  withVertexEnv({ VERTEX_REGION: "global" }, () => {
+    expect(() => resolveVertexConfig()).toThrow();
+    const errors: string[] = [];
+    expect(vertexInfo(errors)).toBeNull();
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatch(/vertex config: .*is refused/);
+  });
+});
+
+test("vertexInfo: a PER-MODEL override ALONE still renders the block", () => {
+  // The gate's `perModelRegions` clause has no other coverage: every case above
+  // sets a project or a region too, which short-circuits the boolean before it
+  // is reached — so deleting that clause left the suite green while re-hiding
+  // the whole /models Vertex block for the one instance the row exists for.
+  // This is the case with no region line for the override to contradict, which
+  // is precisely when reporting it matters.
+  const { vertexInfo } = _internalsForTest();
+  withVertexEnv({ VERTEX_REGION_CLAUDE_4_5_SONNET: "europe-west1" }, () => {
+    const info = vertexInfo([]);
+    expect(info).not.toBeNull();
+    expect(info!.enabled).toBe(false);
+    expect(info!.projectId).toBeNull();
+    expect(info!.region).toBeNull();
+    expect(info!.perModelRegions).toEqual([
+      { name: "VERTEX_REGION_CLAUDE_4_5_SONNET", region: "europe-west1" },
+    ]);
+  });
+});
+
+test("vertexNoteKind: the four cases the card's sentence must tell apart", () => {
+  // The rule lives here BECAUSE the view cannot be tested — `models-page.ts`
+  // embeds its client JS in a template literal, so collapsing the note back to
+  // one sentence failed no test at all. These are the shapes that reach it.
+  const { vertexNoteKind } = _internalsForTest();
+  // Not `as const`: `perModelRegions: []` would widen to `readonly []`, which
+  // is not assignable to the mutable array on `VertexConfig`.
+  const base: VertexConfig = {
+    enabled: false, projectId: null, projectIdSource: null,
+    region: null, regionSource: null, baseUrl: null, perModelRegions: [],
+  };
+
+  expect(vertexNoteKind({ ...base, enabled: true })).toBe("adc");
+  expect(vertexNoteKind({ ...base, projectId: "p", region: "europe-north1" })).toBe("declared");
+  // A base URL counts as the region half — a multi-region endpoint has no name.
+  expect(vertexNoteKind({ ...base, projectId: "p", baseUrl: "https://x" })).toBe("declared");
+  // ⚠️ The cases the old single sentence lied about: it claimed BOTH were set.
+  expect(vertexNoteKind({ ...base, projectId: "p" })).toBe("partial");
+  expect(vertexNoteKind({ ...base, region: "europe-north1" })).toBe("partial");
+  expect(vertexNoteKind({ ...base, baseUrl: "https://x" })).toBe("partial");
+  expect(vertexNoteKind({
+    ...base, perModelRegions: [{ name: "VERTEX_REGION_CLAUDE_4_5_SONNET", region: "europe-west1" }],
+  })).toBe("per-model-only");
+});
+
+test("vertexInfo carries the note kind onto the card payload", () => {
+  const { vertexInfo } = _internalsForTest();
+  withVertexEnv({ VERTEX_PROJECT_ID: "p-1" }, () => {
+    // Project only, Vertex off — legal (the completeness refusals are gated on
+    // `enabled`), and the exact shape that used to render a false sentence.
+    expect(vertexInfo([])!.note).toBe("partial");
+  });
+});
+
+test("VERTEX_NOTE_TEXT: every kind has a sentence, and none claims more than its kind knows", () => {
+  // ⚠️ The prose used to live in the view, where rewriting a sentence to
+  // something plainly false failed NO test — a template literal is covered only
+  // by "does it parse". These assertions are what that guard could not give.
+  const { VERTEX_NOTE_TEXT, vertexNoteKind } = _internalsForTest();
+  const kinds = ["adc", "declared", "partial", "per-model-only"] as const;
+  for (const k of kinds) expect(VERTEX_NOTE_TEXT[k].length).toBeGreaterThan(20);
+
+  // ⚠️ EXACT strings, deliberately. Two weaker shapes have already failed here:
+  // substring greps passed two plainly-false rewrites, and the vocabulary
+  // denylist that replaced them passed a third ("no further configuration is
+  // required") while REJECTING true sentences that happened to contain the word
+  // "already". These are four short operator-facing claims about a deployment;
+  // a change to any of them should have to be a deliberate edit of this test,
+  // which is exactly what a change-detector gives.
+  expect(VERTEX_NOTE_TEXT).toEqual({
+    adc: "CLAUDE_CODE_USE_VERTEX — the claude-sdk connector authenticates with ADC, no ANTHROPIC_API_KEY needed",
+    declared: "a project and a region or base URL are set but CLAUDE_CODE_USE_VERTEX is not — the SDK still uses an Anthropic credential",
+    partial: "partly configured and CLAUDE_CODE_USE_VERTEX is not set — switching it on needs ANTHROPIC_VERTEX_PROJECT_ID and CLOUD_ML_REGION; a base URL does not substitute for the region",
+    "per-model-only": "only a per-model region override is set — no project, no region, and CLAUDE_CODE_USE_VERTEX is not on",
+  });
+
+  // `declared` is reachable with a base URL and NO region name (the EU
+  // multi-region shape), so a flat "region is set" contradicts the target row
+  // rendered directly below it.
+  const base: VertexConfig = {
+    enabled: false, projectId: "p", projectIdSource: "VERTEX_PROJECT_ID",
+    region: null, regionSource: null, baseUrl: "https://aiplatform.eu.rep.googleapis.com",
+    perModelRegions: [],
+  };
+  expect(vertexNoteKind(base)).toBe("declared");
+  expect(VERTEX_NOTE_TEXT.declared).toContain("base URL");
+
+  // The two claims the exact strings above encode, spelled out so a future edit
+  // reads WHY the wording is what it is rather than only that it changed.
+  // `partial` must not promise the target row shows the gap (false for two of
+  // its three shapes), and it must name the SDK's own variables, since a base
+  // URL does not satisfy the region requirement `resolveVertexConfig` enforces.
+  expect(VERTEX_NOTE_TEXT.partial).not.toMatch(/target row/i);
+  expect(VERTEX_NOTE_TEXT.partial).toContain("CLOUD_ML_REGION");
+  expect(VERTEX_NOTE_TEXT.partial).toContain("does not substitute");
+
+  // Only `adc` may claim Vertex is on; the other three must say it is not.
+  expect(VERTEX_NOTE_TEXT.adc).toContain("CLAUDE_CODE_USE_VERTEX —");
+  for (const k of ["declared", "partial", "per-model-only"] as const) {
+    expect(VERTEX_NOTE_TEXT[k]).toMatch(/CLAUDE_CODE_USE_VERTEX is not/);
+  }
 });
