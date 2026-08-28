@@ -34,10 +34,15 @@ function hostOf(baseUrl: string): string | null {
     // a request to the global endpoint is then handed to the static-key path
     // with no guard applied at all.
     //
-    // `.toLowerCase()` is redundant belt-and-braces: `URL.hostname` already
-    // lowercases (measured — no test can tell it from its absence). Kept so the
-    // three normalizations read together here and in `pathRegion`, where none of
-    // them is redundant.
+    // `.toLowerCase()` looks redundant and is not quite. `URL.hostname`
+    // lowercases a SPECIAL scheme's host (`https:`) but leaves a non-special
+    // scheme's host opaque and verbatim — measured:
+    // `new URL("foo://AIPLATFORM.GOOGLEAPIS.COM/x").hostname` is unchanged. That
+    // is the only input that can tell this call from its absence, and it is not
+    // a live exploit: the connector could not fetch such a URL anyway. Kept and
+    // pinned by a test, because an expression no test can distinguish is one
+    // someone deletes later. (Two earlier versions of this comment got the
+    // reason wrong in both directions — "redundant", then "load-bearing".)
     return new URL(baseUrl).hostname.toLowerCase().replace(/\.+$/, "");
   } catch {
     return null;

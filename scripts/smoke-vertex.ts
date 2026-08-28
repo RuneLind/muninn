@@ -700,7 +700,11 @@ async function probeTokenRefresh(): Promise<RefreshProbe> {
     const ok = await requestWithRefresh(
       {
         headers: () => authorizer.headers(),
-        refreshAfterFailure: (err) => (retryRequested = authorizer.refreshAfterFailure(err)),
+        // `||=`, not `=`: the classification must not assume `requestWithRefresh`
+        // asks exactly once. A second call answering false would erase the first
+        // true and report `no-retry` for a run that did retry — a wrong verdict
+        // in the one function this probe exists to police.
+        refreshAfterFailure: (err) => (retryRequested ||= authorizer.refreshAfterFailure(err)),
       },
       async (headers) => {
         attempts++;

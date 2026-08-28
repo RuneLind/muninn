@@ -102,13 +102,18 @@ describe("assertVertexEndpointAllowed", () => {
   /**
    * The state space, enumerated rather than patched case by case.
    *
-   * `global` can be written into a Vertex URL in two POSITIONS — the host and
-   * the resource path — and each position admits the same three rewritings that
-   * change the bytes without changing the request: percent-escapes, case, and a
-   * trailing dot. Six cells. Three rounds of review found three of them one at a
-   * time (`%67lobal` in the path, `global.` in the path, the dot on the host),
-   * which is what a per-finding fix looks like when the space is small enough to
-   * just write down.
+   * `global` can be written into a Vertex URL in three POSITIONS — as a host
+   * prefix, as the ABSENCE of one (the region-less host), and in the resource
+   * path — and each admits the same four spellings: plain, percent-escaped,
+   * uppercase, trailing dot. Twelve cells. Three rounds of review found three of
+   * them one at a time (`%67lobal` in the path, `global.` in the path, the dot
+   * on the host), which is what a per-finding fix looks like when the space is
+   * small enough to just write down.
+   *
+   * Not every cell discriminates: `new URL()` normalizes a percent-escaped or
+   * uppercase HOST before `hostOf` sees it, so those four are documentation of
+   * the input space rather than independent pins. The path cells and both
+   * trailing-dot host cells do bind — no `new URL()` normalization reaches them.
    *
    * The host cells are the ones that bind: `aiplatform.googleapis.com.` is a
    * LIVE route — measured, it answers 301 to the region-less host, which is the
@@ -141,13 +146,40 @@ describe("assertVertexEndpointAllowed", () => {
     },
   };
 
+  /** The parenthesised clause each refusal names, so a cell asserts the door it
+   *  claims. Two weaker patterns were tried and REJECTED by mutation, both
+   *  matching every refusal: `/global/` (the message opens "names the `global`
+   *  Vertex region") and a bare `/in the path/` (the remedy sentence ends
+   *  "…with a matching /locations/<region>/ in the path"). Anchored on the
+   *  parentheses, a path cell whose HOST also says `global` — the round-1 defect
+   *  — fails instead of passing while measuring the other door. */
+  const DOOR: Record<string, RegExp> = {
+    "host, `global-` prefix": /\(host prefix\)/,
+    "host, region-less (IS the global endpoint)": /\(the region-less host IS the global endpoint\)/,
+    path: /\(\/locations\/global\/ in the path\)/,
+  };
+
   for (const [position, rewritings] of Object.entries(CELLS)) {
     for (const [rewriting, url] of Object.entries(rewritings)) {
       test(`refuses \`global\` in the ${position}, written ${rewriting}`, () => {
         expect(() => assertVertexEndpointAllowed(url, "bot")).toThrow(/global/);
+        expect(() => assertVertexEndpointAllowed(url, "bot")).toThrow(DOOR[position]!);
       });
     }
   }
+
+  test("normalizes a host the URL parser leaves alone", () => {
+    // `URL.hostname` lowercases a SPECIAL scheme's host and leaves a non-special
+    // scheme's host opaque and verbatim (measured). Nothing validates a bot's
+    // `baseUrl` scheme, so `hostOf` lowercases rather than trusting the parser
+    // to have done it. Not a live exploit — the connector could not fetch such a
+    // URL — but it is the only input that can tell that call from its absence,
+    // and an expression no test can distinguish is one someone deletes later.
+    expect(isVertexEndpoint("foo://EUROPE-NORTH1-AIPLATFORM.GOOGLEAPIS.COM/v1")).toBe(true);
+    expect(() => assertVertexEndpointAllowed(
+      "foo://AIPLATFORM.GOOGLEAPIS.COM/v1/projects/p/locations/europe-north1/endpoints/openapi", "bot",
+    )).toThrow(/\(the region-less host IS the global endpoint\)/);
+  });
 
   test("and a legitimate region survives every one of those rewritings", () => {
     // The other direction: normalization must not start refusing real URLs.
@@ -156,6 +188,9 @@ describe("assertVertexEndpointAllowed", () => {
       "https://EUROPE-NORTH1-aiplatform.googleapis.com/v1/projects/p/locations/EUROPE-NORTH1/endpoints/openapi",
       "https://europe-north1-aiplatform.googleapis.com./v1/projects/p/locations/europe-north1./endpoints/openapi",
       "https://aiplatform.eu.rep.googleapis.com/v1/projects/p/locations/eu/endpoints/openapi",
+      // Percent-escaped, so the decode half is covered in this direction too:
+      // over-refusal is the failure mode a decoding guard invites.
+      "https://europe-north1-aiplatform.googleapis.com/v1/projects/p/locations/europe%2Dnorth1/endpoints/openapi",
     ]) {
       expect(isVertexEndpoint(url)).toBe(true);
       expect(() => assertVertexEndpointAllowed(url, "bot")).not.toThrow();
