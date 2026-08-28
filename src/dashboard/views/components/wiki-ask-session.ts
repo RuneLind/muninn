@@ -17,6 +17,7 @@
 // exactly how a sixth outcome ships half-handled. Import direction is one-way
 // (claim-retry knows nothing about persistence), so no cycle.
 import { isClaimOutcome } from "./wiki-claim-retry.ts";
+import { toDeclineReason, type DeclineReason } from "../../../wiki/ask-chat.ts";
 
 /** The full shape of a persisted Ask turn — mirrors `AskTurn` in wiki-browser.ts.
  *  `citations` is kept loose (`unknown[]`) so this module stays free of the
@@ -128,7 +129,7 @@ export interface StoredAskTurn {
    *  answered (or is a fact-check turn, which has no retrieval at all).
    *  Validated as the two-value union, but FORWARD-TOLERANTLY: an unknown value
    *  drops the field and keeps the turn (see `isValidTurn`). */
-  declined?: "no_hits" | "low_confidence" | "unreachable";
+  declined?: DeclineReason;
   /** Explain turns only: the page the passage was selected from (its title, else
    *  its name). Persisted because an Explain turn's `question` is a display LABEL
    *  (`Explain: "<slice>…"`) — the real question is built server-side from `sel`
@@ -234,7 +235,7 @@ function isValidTurn(v: unknown): v is StoredAskTurn {
   // answer over it is the strictly larger loss. Dropping also keeps a FUTURE
   // reason value (a third decline kind) from wiping the reader's session on a
   // downgrade.
-  if (typeof t.declined !== "undefined" && t.declined !== "no_hits" && t.declined !== "low_confidence") {
+  if (typeof t.declined !== "undefined" && toDeclineReason(t.declined) === undefined) {
     delete t.declined;
   }
   // Advisory context strings for the chat escalation — a malformed value degrades

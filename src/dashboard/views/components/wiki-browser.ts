@@ -72,6 +72,7 @@ import { enhanceMermaid } from "./wiki-mermaid.ts";
 import { atlasBodyHtml, initAtlas } from "./wiki-atlas.ts";
 import { enhanceCodeTabs } from "./code-tabs.ts";
 import { enhanceFactCheck } from "./wiki-factcheck-reader.ts";
+import { type DeclineReason } from "../../../wiki/ask-chat.ts";
 import {
   askDeclineReason,
   serializeAskSession,
@@ -1490,7 +1491,7 @@ interface AskTurn {
   // decline branches). PERSISTED: the decline hook replaces the ordinary escalate
   // bar and is re-derived on every turn switch / rehydrate, while the flags exist
   // only on the transient `done` event.
-  declined?: "no_hits" | "low_confidence" | "unreachable";
+  declined?: DeclineReason;
   // Explain turns only: the page the passage was selected from (its title, else
   // its name). PERSISTED — without it an escalated Explain turn carries only the
   // `Explain: "…"` display label, which names neither the page nor the real

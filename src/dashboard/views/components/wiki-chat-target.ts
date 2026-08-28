@@ -13,7 +13,7 @@
  * the name preview must be byte-identical to the name the route creates (the
  * `synthesisTopicKey` precedent).
  */
-import { deriveAskThreadTitle, deriveAskThreadTitleOrNull } from "../../../wiki/ask-chat.ts";
+import { deriveAskThreadTitle, deriveAskThreadTitleOrNull, type DeclineReason } from "../../../wiki/ask-chat.ts";
 import { escHtml as esc } from "./escape.ts";
 import { explainSelectionFromLabel } from "./wiki-explain.ts";
 
@@ -1015,9 +1015,6 @@ export function chatOptConflictFootHtml(
  *  drift. */
 export const DECLINE_CHAT_BTN_ID = "wikiChatDeclineBtn";
 
-/** The three verdicts a declined Ask turn can carry. */
-export type DeclineReason = "no_hits" | "low_confidence" | "unreachable";
-
 /** Why the wiki declined, in the reader's words. `low_confidence` must NOT read as
  *  "nothing found" — weak sources did ride out and are listed under the answer, so
  *  the honest framing is "nothing solid", not "nothing". And `unreachable` must not
@@ -1072,7 +1069,7 @@ export interface ChatEscState {
 export interface ChatEscTurn {
   answer: string;
   kind?: string;
-  declined?: "no_hits" | "low_confidence" | "unreachable";
+  declined?: DeclineReason;
   chatEsc?: ChatEscState;
 }
 

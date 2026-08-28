@@ -23,7 +23,7 @@ describe("fullDepthUnavailableMessage", () => {
 
   test("down servers keep the start-them remedy", () => {
     const msg = fullDepthUnavailableMessage({ unconfigured: [], down: ["code"] });
-    expect(msg).toMatch(/Start\s+code\s+fra dashbordet \(\/serena\)/);
+    expect(msg).toMatch(/Start code \(\/serena\) fra dashbordet/);
     expect(msg).toContain("Skisse");
   });
 
@@ -43,6 +43,15 @@ describe("fullDepthUnavailableMessage", () => {
     // Offering to start the server the same sentence just called absent undoes
     // the whole point of splitting the two states.
     expect(remedy).not.toContain("yggdrasil");
+  });
+
+  test("the page pointer sits beside the server it actually starts", () => {
+    // `(/serena)` after a two-server list reads as the page for both; it starts
+    // only `code`.
+    const msg = fullDepthUnavailableMessage({ unconfigured: [], down: ["code", "yggdrasil"] });
+    expect(msg).toMatch(/code \(\/serena\)/);
+    expect(msg).not.toMatch(/yggdrasil \(\/serena\)/);
+    expect(msg).not.toMatch(/yggdrasil fra dashbordet \(\/serena\)/);
   });
 
   test("an empty gap is refused, not composed into a sentence", () => {

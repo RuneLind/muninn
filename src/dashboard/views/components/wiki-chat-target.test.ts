@@ -1086,7 +1086,9 @@ describe("wiki reader chat-dialog wiring", () => {
     // The turn rides along so a successful escalation mirrors onto its own bar
     // (`state.turn.chatEsc`) instead of being lost with the popover.
     expect(body).toContain("turn,");
-    expect(body).toContain("askDeclined: true");
+    // Carries the REASON now, not a boolean: `unreachable` must not tell the
+    // seed the index was searched.
+    expect(body).toContain("declineReason: turn.declined");
   });
 
   test("the panel shows the pinned question — it is nowhere else on screen", async () => {

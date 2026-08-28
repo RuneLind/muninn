@@ -61,11 +61,11 @@ export function fullDepthUnavailableMessage(gap: FullDepthGap): string {
   // offering to start a server the same sentence just called absent is the exact
   // confusion this split exists to remove.
   // `code` is the Serena proxy, so /serena is where it is started; yggdrasil has
-  // no such page. Naming a page only when one exists keeps the pointer the first
-  // pass dropped without re-introducing the absent-server confusion.
-  const page = gap.down.includes("code") ? " (/serena)" : "";
+  // no such page. The pointer goes beside the server it starts, not after the
+  // list — trailing it read as the page for every name in a multi-server list.
+  const named = gap.down.map((s) => (s === "code" ? "code (/serena)" : s));
   const remedy = gap.down.length > 0
-    ? `Start ${gap.down.join(" og ")} fra dashbordet${page}, eller velg dybde «Skisse».`
+    ? `Start ${named.join(" og ")} fra dashbordet, eller velg dybde «Skisse».`
     : "Velg dybde «Skisse».";
   return `Full teknisk dybde krever kodeverktøyene, og ${clauses.join("; ")}. ${remedy}`;
 }

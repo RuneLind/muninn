@@ -6,6 +6,7 @@ import {
   type StoredAskTurn,
 } from "./wiki-ask-session.ts";
 import { declineChatBarHtml } from "./wiki-chat-target.ts";
+import { DECLINE_REASONS } from "../../../wiki/ask-chat.ts";
 
 function turn(overrides: Partial<StoredAskTurn> = {}): StoredAskTurn {
   return {
@@ -465,5 +466,29 @@ describe("askDeclineReason — unreachable", () => {
     const html = declineChatBarHtml("unreachable");
     expect(html).not.toContain("had nothing");
     expect(html).toMatch(/could not|reach/i);
+  });
+});
+
+/**
+ * Finding 1 of the round-2 verify, generalised: `isValidTurn` validated the
+ * decline reason against a hand-written two-value list while the TYPE had three,
+ * so `unreachable` was silently stripped on rehydrate and the decline bar
+ * vanished on reload. Driven off the enumeration so a fourth value cannot be
+ * half-added again.
+ */
+describe("a declined turn survives a session round-trip, for every reason", () => {
+  for (const reason of DECLINE_REASONS) {
+    test(`"${reason}" round-trips`, () => {
+      const restored = deserializeAskSession(serializeAskSession([turn({ declined: reason })], 10));
+      expect(restored).toHaveLength(1);
+      expect(restored[0]!.declined).toBe(reason);
+    });
+  }
+
+  test("an unknown reason is still dropped, and keeps the turn", () => {
+    const raw = serializeAskSession([turn({ declined: "no_hits" })], 10).replace('"no_hits"', '"from_the_future"');
+    const restored = deserializeAskSession(raw);
+    expect(restored).toHaveLength(1);
+    expect(restored[0]!.declined).toBeUndefined();
   });
 });

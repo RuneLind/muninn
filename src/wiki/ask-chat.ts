@@ -373,7 +373,7 @@ export function buildAskChatSeed(input: {
  * huginn collections (a `WIKI_EXTRA` entry without the 3rd segment), where it
  * produced answers that opened by apologizing for a search that could never work.
  *
- * `askDeclined` is the third: this question reached chat FROM a wiki Ask that
+ * `declineReason` is the third: this question reached chat FROM a wiki Ask that
  * declined it, i.e. the wiki's own index has already been searched for this exact
  * question and came up with nothing solid. Ordering that search again is ordering
  * the one step known to fail — so the clause is replaced by what actually
@@ -397,23 +397,41 @@ export function buildDirectChatSeed(input: {
   /** Whether the wiki has huginn collections its notes can actually be searched
    *  in. Absent ⇒ treated as true (the overwhelmingly common shape). */
   hasCollections?: boolean;
-  /** Whether the wiki's Ask already DECLINED this question (no hits / only weak
-   *  nearest-neighbours). Absent ⇒ false. */
-  askDeclined?: boolean;
+  /** WHY the wiki's Ask declined this question, when it did. Absent ⇒ it did not.
+   *  Deliberately the reason and not a boolean: `unreachable` means the index was
+   *  never searched, so the clause below must not claim that it was. */
+  declineReason?: DeclineReason;
 }): string {
   const rawQuestion = typeof input.question === "string" ? input.question.trim() : "";
   const wiki = flatten(typeof input.wikiName === "string" ? input.wikiName : "") || "knowledge";
-  const declined = input.askDeclined === true;
   const searchable = input.hasCollections !== false;
 
   const opening = `[Question asked from the "${wiki}" wiki reader]\n\n`;
   const tools = input.webSearch ? "your tools, including web search" : "the tools you have";
-  // The declined branch wins over `hasCollections`: a wiki that declined an Ask
-  // necessarily HAS collections (that is what ran), and what it knows now is the
-  // stronger fact.
+  // A decline that RAN wins over `hasCollections`: such a wiki necessarily HAS
+  // collections (that is what ran), and what it knows now is the stronger fact.
+  // A decline that did NOT run says nothing about the index — it falls through to
+  // the ordinary framing, which is the honest instruction on an outage.
+  const searchedAlready = ((reason?: DeclineReason): boolean => {
+    switch (reason) {
+      case "no_hits":
+      case "low_confidence":
+        return true;
+      case "unreachable":
+      case undefined:
+        return false;
+      default: {
+        // A fourth reason must be classified HERE rather than defaulting into a
+        // claim about a search that may never have happened.
+        const exhaustive: never = reason;
+        return exhaustive;
+      }
+    }
+  })(input.declineReason);
+
   const framing =
     "\n\nAnswer it properly: " +
-    (declined
+    (searchedAlready
       ? `the "${wiki}" wiki's own index has already been searched for this and had ` +
         `nothing solid on it, so don't stop at that — research it with ${tools}, `
       : searchable
@@ -425,6 +443,25 @@ export function buildDirectChatSeed(input: {
 
   const seed = opening + question + framing;
   return seed.length <= ASK_CHAT_SEED_MAX ? seed : truncateUnits(seed, ASK_CHAT_SEED_MAX);
+}
+
+/**
+ * Every verdict a declined Ask turn can carry — the ONE list.
+ *
+ * It lives here because this module has no imports of its own, so the persistence
+ * validator, the decline bar, the status lines and this seed builder can all
+ * derive from it rather than each restating the literals. That restating is what
+ * three fix rounds kept losing a value to: `assessCoverage` grew `unreachable`,
+ * then the wire dropped it, then `isValidTurn` stripped it back off on rehydrate.
+ * A fourth reason is now a compile error at the seam below and a test failure at
+ * the round-trip, instead of a silent downgrade at whichever hop was forgotten.
+ */
+export const DECLINE_REASONS = ["no_hits", "low_confidence", "unreachable"] as const;
+export type DeclineReason = (typeof DECLINE_REASONS)[number];
+
+/** Narrow an untrusted value (a POST body, a persisted session) to a reason. */
+export function toDeclineReason(v: unknown): DeclineReason | undefined {
+  return (DECLINE_REASONS as readonly string[]).includes(v as string) ? (v as DeclineReason) : undefined;
 }
 
 /**
