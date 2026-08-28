@@ -96,7 +96,7 @@ export type VertexHaikuTargetResult =
   | { ok: false; reason: string };
 
 /**
- * Where a Vertex Haiku call would go, or WHICH variable is missing.
+ * Where a Vertex Haiku call would go, or WHY it cannot go anywhere.
  *
  * Reads the same two names `resolveVertexConfig` does, in the same order, so an
  * instance states its project and region ONCE. It deliberately does NOT consult
@@ -105,8 +105,11 @@ export type VertexHaikuTargetResult =
  * or the `/models` override) — requiring both would mean a router that silently
  * ignores the backend it was asked for.
  *
- * Returning the missing NAME rather than throwing is what lets the router skip
- * the attempt and say why, the way it already does for a missing Anthropic key.
+ * Returning a REASON rather than throwing is what lets the router skip the
+ * attempt and say why, the way it already does for a missing Anthropic key. It
+ * is a complete phrase, not a variable name — both call sites render it as-is,
+ * because appending a fixed "is not set" told an operator whose region was
+ * set-but-malformed to go looking for a variable sitting in their `.env`.
  */
 export function resolveVertexHaikuTarget(
   env: Record<string, string | undefined> = process.env,
@@ -119,7 +122,8 @@ export function resolveVertexHaikuTarget(
   // same `CLOUD_ML_REGION` for the Agent SDK — applies no case rule at all.
   // Refusing it here would mean one `.env` line puts `claude-sdk` on Vertex
   // while the Haiku router quietly falls back to the CLI.
-  const region = (read("CLOUD_ML_REGION") || read("VERTEX_REGION")).toLowerCase();
+  const regionRaw = read("CLOUD_ML_REGION") || read("VERTEX_REGION");
+  const region = regionRaw.toLowerCase();
   if (!project) return { ok: false, reason: "ANTHROPIC_VERTEX_PROJECT_ID / VERTEX_PROJECT_ID is not set" };
   if (!region) return { ok: false, reason: "CLOUD_ML_REGION / VERTEX_REGION is not set" };
   // A region becomes a HOSTNAME LABEL below, so it has to be one. The failure a
@@ -130,7 +134,10 @@ export function resolveVertexHaikuTarget(
   // early-returns on a host it does not recognise as Vertex. Refused here,
   // where the operator can be told which variable to fix.
   if (!/^[a-z0-9-]+$/.test(region)) {
-    return { ok: false, reason: `CLOUD_ML_REGION / VERTEX_REGION is "${region}", which is not a region name` };
+    // The RAW value, not the normalized one: quoting `europe_north1` back at an
+    // operator who wrote `Europe_North1` is the same misdirection as telling
+    // them a set variable is unset.
+    return { ok: false, reason: `CLOUD_ML_REGION / VERTEX_REGION is "${regionRaw}", which is not a region name` };
   }
   const model = read("HAIKU_VERTEX_MODEL") || DEFAULT_VERTEX_HAIKU_MODEL;
   return { ok: true, target: { project, region, model, baseUrl: vertexOpenAiBaseUrl(project, region) } };

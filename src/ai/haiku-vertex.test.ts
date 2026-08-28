@@ -8,13 +8,13 @@ import { afterEach, describe, expect, mock, test } from "bun:test";
 // (measured: the dispatch cases below, written in `haiku-direct.test.ts`, ran
 // the REAL backend inside that file's chunk and passed or failed by luck).
 const spawnCalls: Array<{ prompt: string; opts: any }> = [];
-const usageCalls: Array<{ source: string; model: string; inputTokens: number; outputTokens: number; botName?: string }> = [];
+const usageCalls: Array<{ source: string; model: string; inputTokens: number; outputTokens: number; botName?: string; traceId?: string }> = [];
 mock.module("../scheduler/executor.ts", () => ({
   HAIKU_TIMEOUT_MS: 60_000,
   HAIKU_DEFAULT_MAX_TOKENS: 4096,
   DEFAULT_MODEL: "claude-haiku-4-5-20251001",
-  trackUsage: (source: string, model: string, inputTokens: number, outputTokens: number, botName?: string) => {
-    usageCalls.push({ source, model, inputTokens, outputTokens, botName });
+  trackUsage: (source: string, model: string, inputTokens: number, outputTokens: number, botName?: string, traceId?: string) => {
+    usageCalls.push({ source, model, inputTokens, outputTokens, botName, traceId });
   },
   spawnHaiku: async (prompt: string, opts: unknown) => {
     spawnCalls.push({ prompt, opts });
@@ -155,6 +155,10 @@ describe("resolveVertexHaikuTarget", () => {
       // operator whose region is set-but-wrong must not be told it is unset.
       expect(r.ok === false && r.reason).toMatch(/VERTEX_REGION/);
       expect(r.ok === false && r.reason).not.toMatch(/is not set/);
+      // The RAW value, not the normalized one: quoting `europe_north1` back at
+      // an operator who wrote `Europe_North1` is the same class of misdirection
+      // as telling them a set variable is unset.
+      expect(r.ok === false && r.reason).toContain(`"${region}"`);
     }
     expect(resolveVertexHaikuTarget({ VERTEX_PROJECT_ID: "proj", VERTEX_REGION: "europe-north1" }).ok).toBe(true);
     expect(resolveVertexHaikuTarget({ VERTEX_PROJECT_ID: "proj", VERTEX_REGION: "eu" }).ok).toBe(true);
@@ -299,10 +303,12 @@ describe("callHaikuViaVertex", () => {
       usage: { prompt_tokens: 5, completion_tokens: 3, completion_tokens_details: { reasoning_tokens: 53 } },
       model: "google/gemini-2.5-flash",
     } }]);
-    await callHaikuViaVertex("q", { source: "test", botName: "bot" },
+    // The tracer too: without it the row is written with a NULL trace_id and
+    // the truncation cannot be joined back to the request that caused it.
+    await callHaikuViaVertex("q", { source: "test", botName: "bot", tracer: { traceId: "trace-1" } as never },
       { env: ENV, provider: countingProvider() }).catch(() => {});
     expect(usageCalls).toEqual([
-      { source: "test", model: "google/gemini-2.5-flash", inputTokens: 5, outputTokens: 56, botName: "bot" },
+      { source: "test", model: "google/gemini-2.5-flash", inputTokens: 5, outputTokens: 56, botName: "bot", traceId: "trace-1" },
     ]);
   });
 
