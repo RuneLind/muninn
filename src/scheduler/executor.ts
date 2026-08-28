@@ -152,18 +152,21 @@ export interface SpawnHaikuOptions extends HaikuTelemetry {
   botName?: string;
   timeoutMs?: number;
   model?: string;
-  /** Max output tokens for direct-SDK backends (anthropic). Ignored by the CLI spawn. */
+  /** Max output tokens for every non-CLI backend (anthropic, vertex — where it is
+   *  also the ceiling a thinking model's reasoning is spent from). Ignored by the
+   *  CLI spawn, which has no such knob. */
   maxTokens?: number;
   /**
    * System prompt (bot persona) — `--system-prompt` on the CLI path, `system` on
-   * anthropic, `systemMessage` on copilot. Honored by ALL THREE backends since the
+   * anthropic, `systemMessage` on copilot, a leading `system` message on vertex.
+   * Honored by EVERY backend since the
    * cwd change above: the CLI used to get the persona for free by running inside
    * the bot folder (so passing it here would have double-injected), and it no
    * longer does.
    *
    * Only the prose callers (goal + task reminders) set it. Extraction/JSON callers
    * deliberately do not — their prompts are self-contained format contracts, and
-   * they have always run persona-less on the anthropic/copilot backends, so this
+   * they have always run persona-less on the non-CLI backends, so this
    * makes the CLI match rather than diverge.
    */
   system?: string;

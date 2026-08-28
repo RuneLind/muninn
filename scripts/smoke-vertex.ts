@@ -828,8 +828,17 @@ async function probeHaikuRouter(): Promise<HaikuProbeStep[]> {
     });
   }
 
-  // The hot path. `decomposeQuestion` catches its own failures, so the outcome
-  // here is read off the RATIONALE it degraded with rather than off a throw.
+  // The hot path. `decomposeQuestion` catches its own failures and degrades to a
+  // passthrough, so a throw is not the signal — and neither is the text. The
+  // outcome is read off the BACKEND it reports, for the same reason the step
+  // above reads one: the router falls back to the Claude CLI, which answers this
+  // prompt perfectly well.
+  //
+  // Classifying on the rationale was tried and is not enough. It matched two of
+  // the four passthrough strings, and — measured — a run with a bogus
+  // `HAIKU_VERTEX_MODEL` printed `decomposer vertex-answered  3 sub-questions`
+  // while the step above correctly printed `backend=cli`: a failure that spared
+  // the one-shot and hit the decomposer would have reported this probe green.
   const decomposeStarted = performance.now();
   try {
     const result = await decomposeQuestion({
@@ -837,11 +846,13 @@ async function probeHaikuRouter(): Promise<HaikuProbeStep[]> {
       botName: HAIKU_PROBE_BOT,
       haikuBackend: "vertex",
     });
-    const degraded = /haiku call failed|could not parse/i.test(result.rationale);
     steps.push({
       step: "decomposer",
-      outcome: degraded ? "fell-back" : "vertex-answered",
-      backend: null, model: null,
+      outcome: result.backend === "vertex" ? "vertex-answered" : "fell-back",
+      // `?? null`: an absent backend means no model call was made at all, which
+      // is a fall-back, not a Vertex answer.
+      backend: result.backend ?? null,
+      model: null,
       ms: Math.round(performance.now() - decomposeStarted),
       detail: redact(
         `${result.passthrough ? "passthrough" : `${result.subQuestions.length} sub-questions`}: ${result.rationale}`,

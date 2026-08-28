@@ -133,6 +133,23 @@ describe("resolveVertexHaikuTarget", () => {
       .toEqual({ ok: false, missing: "ANTHROPIC_VERTEX_PROJECT_ID / VERTEX_PROJECT_ID" });
   });
 
+  // A region is interpolated straight into a HOSTNAME. A value carrying a dot
+  // builds `aiplatform.eu.west.rep.googleapis.com`, which `isVertexEndpoint`
+  // does NOT match — so `createAuthorizer` would hand the request to the
+  // static-key path and send `Authorization: Bearer $OPENAI_API_KEY` to Google,
+  // with the `global` refusal never reached either (it early-returns on a
+  // non-Vertex host). Refuse the value here instead, where the operator is
+  // named the variable.
+  test("a region that is not a plain label is refused, not interpolated", () => {
+    for (const region of ["eu.west", "europe north1", "eu/west", "EU_WEST", "eu@west"]) {
+      const r = resolveVertexHaikuTarget({ VERTEX_PROJECT_ID: "proj", VERTEX_REGION: region });
+      expect(r.ok).toBe(false);
+      expect(r.ok === false && r.missing).toMatch(/VERTEX_REGION/);
+    }
+    expect(resolveVertexHaikuTarget({ VERTEX_PROJECT_ID: "proj", VERTEX_REGION: "europe-north1" }).ok).toBe(true);
+    expect(resolveVertexHaikuTarget({ VERTEX_PROJECT_ID: "proj", VERTEX_REGION: "eu" }).ok).toBe(true);
+  });
+
   test("HAIKU_VERTEX_MODEL overrides the default model", () => {
     const r = resolveVertexHaikuTarget(ENV);
     expect(r.ok && r.target.model).toBe(DEFAULT_VERTEX_HAIKU_MODEL);
@@ -228,20 +245,48 @@ describe("callHaikuViaVertex", () => {
   });
 
   // Gemini spends reasoning tokens from the SAME max_tokens budget, so a
-  // truncated answer can carry no text at all. Empty is returned as empty (the
-  // caller's JSON parse fails and falls back) rather than crashing here.
-  test("a truncated, text-less response returns empty text and real usage", async () => {
+  // truncated answer can carry no text at all — measured against the live
+  // endpoint on flash with a small cap: finish_reason "length", 3 completion
+  // tokens, 53 reasoning tokens, empty content. Returning that as a SUCCESS
+  // defeats both fallbacks: the router only falls back on a throw, and
+  // `callHaikuMessageWithFallback` only substitutes its fallback text on one
+  // too — so a goal reminder would send an empty message to Telegram (400) and
+  // never stamp `reminder_sent_at`, re-firing every tick.
+  test("a text-less response THROWS, so the router falls back instead of answering nothing", async () => {
     stubFetch([{ status: 200, body: {
       choices: [{ message: { role: "assistant" }, finish_reason: "length" }],
-      usage: { prompt_tokens: 5, completion_tokens: 4096 },
+      usage: { prompt_tokens: 5, completion_tokens: 3, completion_tokens_details: { reasoning_tokens: 53 } },
+      model: "google/gemini-2.5-flash",
+    } }]);
+    const err = await callHaikuViaVertex("q", { source: "test" },
+      { env: ENV, provider: countingProvider() }).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(String(err)).toMatch(/no text/i);
+    // The diagnosis, not just the symptom: `length` says the budget ran out.
+    expect(String(err)).toMatch(/length/);
+  });
+
+  test("whitespace-only content counts as no text", async () => {
+    stubFetch([{ status: 200, body: completion("   \n  ") }]);
+    const err = await callHaikuViaVertex("q", { source: "test" },
+      { env: ENV, provider: countingProvider() }).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+  });
+
+  // Measured against the live endpoint 2026-08-28: `total_tokens` 105 =
+  // prompt 19 + completion 1 + reasoning 85, so `completion_tokens` EXCLUDES
+  // reasoning and reasoning is billed output. Dropping it under-reports a
+  // thinking model's spend by ~18× on a short answer — the same reason the
+  // other two backends sum their cache-token fields into usage.
+  test("reasoning tokens are billed output and are summed in", async () => {
+    stubFetch([{ status: 200, body: {
+      choices: [{ message: { content: "Blue" }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 19, completion_tokens: 1, completion_tokens_details: { reasoning_tokens: 85 } },
       model: "google/gemini-2.5-flash",
     } }]);
     const result = await callHaikuViaVertex("q", { source: "test" },
       { env: ENV, provider: countingProvider() });
-    expect(result).toEqual({
-      result: "", inputTokens: 5, outputTokens: 4096,
-      model: "google/gemini-2.5-flash", backend: "vertex",
-    });
+    expect(result).toMatchObject({ inputTokens: 19, outputTokens: 86 });
   });
 });
 
@@ -294,6 +339,23 @@ describe("callHaikuWithFallback → vertex", () => {
     expect(spawnCalls[0]!.opts.cliFallback.backend).toBe("vertex");
     expect(spawnCalls[0]!.opts.cliFallback.reason).toContain("403");
     expect(result.backend).toBe("cli");
+  });
+
+  // The user-visible half of the text-less case: the router must reach its
+  // floor, not hand an empty string to a caller that will send it.
+  test("a text-less Vertex answer falls back to the CLI", async () => {
+    setEnv({ VERTEX_PROJECT_ID: "proj", VERTEX_REGION: "europe-north1", HAIKU_BACKEND: undefined });
+    stubFetch([{ status: 200, body: {
+      choices: [{ message: { role: "assistant" }, finish_reason: "length" }],
+      usage: { prompt_tokens: 5, completion_tokens: 3, completion_tokens_details: { reasoning_tokens: 53 } },
+      model: "google/gemini-2.5-flash",
+    } }]);
+
+    const result = await callHaikuWithFallback("q", { source: "test", botName: "bot", backend: "vertex" });
+
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0]!.opts.cliFallback.backend).toBe("vertex");
+    expect(result).toMatchObject({ result: "cli-fallback", backend: "cli" });
   });
 
   test("HAIKU_BACKEND=vertex selects it with no per-call backend", async () => {

@@ -3,10 +3,15 @@ import { test, expect, describe, beforeEach, mock } from "bun:test";
 // Capture the opts handed to the Haiku router so we can assert the tracer (and
 // thus its trace_id) is threaded through decomposeQuestion.
 const haikuCalls: Array<{ prompt: string; opts: Record<string, unknown> }> = [];
+let haikuBackendThatRan: string | undefined = "vertex";
 mock.module("./haiku-direct.ts", () => ({
   callHaikuWithFallback: async (prompt: string, opts: Record<string, unknown>) => {
     haikuCalls.push({ prompt, opts });
-    return { result: JSON.stringify({ subQuestions: ["q"], rationale: "r" }), inputTokens: 1, outputTokens: 1, model: "m" };
+    return {
+      result: JSON.stringify({ subQuestions: ["q"], rationale: "r" }),
+      inputTokens: 1, outputTokens: 1, model: "m",
+      backend: haikuBackendThatRan,
+    };
   },
 }));
 
@@ -27,6 +32,27 @@ describe("decomposeQuestion tracer threading (obs-tail #1)", () => {
     await decomposeQuestion({ question: "What is X?", botName: "jarvis" });
     expect(haikuCalls).toHaveLength(1);
     expect(haikuCalls[0]!.opts.tracer).toBeUndefined();
+  });
+});
+
+describe("decomposeQuestion surfaces the backend that ran", () => {
+  beforeEach(() => { haikuCalls.length = 0; haikuBackendThatRan = "vertex"; });
+
+  // Without this the decomposer is the one router caller whose backend is
+  // unobservable: the router falls back to the Claude CLI on any failure and
+  // `decomposeQuestion` swallows a failure into a passthrough, so "it produced
+  // sub-questions" says nothing about WHERE the question went. The compliance
+  // question this whole path exists for ("did the lookup go to the same
+  // endpoint as the answer?") is only answerable from this field.
+  test("reports the backend the router actually used", async () => {
+    const result = await decomposeQuestion({ question: "What is X?", botName: "jarvis" });
+    expect(result.backend).toBe("vertex");
+  });
+
+  test("reports a CLI fallback as cli, not as the backend that was asked for", async () => {
+    haikuBackendThatRan = "cli";
+    const result = await decomposeQuestion({ question: "What is X?", botName: "jarvis", haikuBackend: "vertex" });
+    expect(result.backend).toBe("cli");
   });
 });
 

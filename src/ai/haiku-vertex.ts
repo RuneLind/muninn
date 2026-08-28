@@ -103,13 +103,28 @@ export function resolveVertexHaikuTarget(
   const region = read("CLOUD_ML_REGION") || read("VERTEX_REGION");
   if (!project) return { ok: false, missing: "ANTHROPIC_VERTEX_PROJECT_ID / VERTEX_PROJECT_ID" };
   if (!region) return { ok: false, missing: "CLOUD_ML_REGION / VERTEX_REGION" };
+  // A region becomes a HOSTNAME LABEL below, so it has to be one. The failure a
+  // dot buys is not a bad URL: `aiplatform.eu.west.rep.googleapis.com` does not
+  // match `isVertexEndpoint`, so `createAuthorizer` falls through to the
+  // STATIC-KEY path and sends `Authorization: Bearer $OPENAI_API_KEY` to
+  // Google — and `assertVertexEndpointAllowed` never runs either, since it
+  // early-returns on a host it does not recognise as Vertex. Refused here,
+  // where the operator can be told which variable to fix.
+  if (!/^[a-z0-9-]+$/.test(region)) {
+    return { ok: false, missing: `CLOUD_ML_REGION / VERTEX_REGION ("${region}" is not a region name)` };
+  }
   const model = read("HAIKU_VERTEX_MODEL") || DEFAULT_VERTEX_HAIKU_MODEL;
   return { ok: true, target: { project, region, model, baseUrl: vertexOpenAiBaseUrl(project, region) } };
 }
 
 interface ChatCompletion {
   choices?: Array<{ message?: { content?: string | null }; finish_reason?: string }>;
-  usage?: { prompt_tokens?: number; completion_tokens?: number };
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    /** Gemini's thinking tokens, reported here and NOT in `completion_tokens`. */
+    completion_tokens_details?: { reasoning_tokens?: number };
+  };
   model?: string;
 }
 
@@ -170,6 +185,12 @@ export async function callHaikuViaVertex(
   const completion = await requestWithRefresh(authorizer, async (headers) => {
     let res: Response;
     try {
+      // Per REQUEST, which is not the same as per call and is known: acquiring
+      // the ADC token sits outside it (a cold `gcloud` path is ~700 ms), and a
+      // 401 runs the whole sequence a second time, so the worst case exceeds
+      // `timeoutMs`. Accepted, and shared with the `openai-compat` connector,
+      // which bounds its own requests the same way — a whole-operation budget
+      // belongs at that seam, for both, not as a second spelling here.
       res = await fetch(url, {
         method: "POST",
         headers,
@@ -192,13 +213,44 @@ export async function callHaikuViaVertex(
   const choice = completion.choices?.[0];
   const resultText = choice?.message?.content ?? "";
   const inputTokens = completion.usage?.prompt_tokens ?? 0;
-  const outputTokens = completion.usage?.completion_tokens ?? 0;
+  // Reasoning tokens are BILLED OUTPUT and are not included in
+  // `completion_tokens` — measured against the live endpoint 2026-08-28, a
+  // flash answer reported `total_tokens` 105 = prompt 19 + completion 1 +
+  // reasoning 85. Reading only `completion_tokens` under-reports a thinking
+  // model's spend by an order of magnitude on a short answer. The same reason
+  // the other two backends fold their cache-token fields into usage.
+  const outputTokens = (completion.usage?.completion_tokens ?? 0)
+    + (completion.usage?.completion_tokens_details?.reasoning_tokens ?? 0);
   const reportedModel = completion.model || effectiveModel;
 
-  // `length` is the OpenAI-compat spelling of the same truncation
-  // `callHaikuDirect` warns about — and it bites harder here: on a thinking
-  // model the reasoning tokens are spent from the SAME budget, so a truncated
-  // response can carry no text at all rather than half a JSON blob.
+  // `length` is the OpenAI-compat spelling of the truncation `callHaikuDirect`
+  // warns about, and it bites harder here: on a thinking model the reasoning
+  // tokens come out of the SAME budget, so a truncated response carries no text
+  // at all rather than half a JSON blob (measured on flash with a small cap —
+  // `finish_reason: "length"`, 3 completion tokens, 53 reasoning tokens, empty
+  // content).
+  //
+  // An answer with no text is a FAILED call and is thrown, not returned. A
+  // returned empty string is worse than an error twice over: the router only
+  // falls back on a throw, and `callHaikuMessageWithFallback` only substitutes
+  // its fallback text on one — so the two prose callers would send an empty
+  // message (Telegram answers 400, and the goal runner then never stamps
+  // `reminder_sent_at`, re-firing the same reminder every tick).
+  if (!resultText.trim()) {
+    // Usage is still recorded: the tokens were spent whether or not text came
+    // back, and a truncation that burns the whole budget is exactly the row an
+    // operator needs to see.
+    trackUsage(source, reportedModel, inputTokens, outputTokens, botName, opts.tracer?.traceId);
+    throw new Error(
+      `Vertex returned no text (finish_reason: ${choice?.finish_reason ?? "none"}, model: ${reportedModel}, ` +
+      `max_tokens: ${effectiveMaxTokens}). On a thinking model the reasoning tokens come out of the same ` +
+      `budget — raise maxTokens or set HAIKU_VERTEX_MODEL to a model that does not think.`,
+    );
+  }
+
+  // Truncated WITH text is the other half, and it stays a warning rather than a
+  // throw: half a JSON blob fails the caller's parse (which every JSON caller
+  // handles), and half a paragraph is still a usable reminder.
   if (choice?.finish_reason === "length") {
     log.warn(
       "haiku-router vertex response truncated at max_tokens ({maxTokens}) — JSON parse may fail",

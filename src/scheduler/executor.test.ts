@@ -3,9 +3,12 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// Mock DB to prevent real SQL calls
+// Mock DB to prevent real SQL calls. `dbThrows` makes `getDb()` throw the way
+// the real one does when the pool was never opened — see the trackUsage case.
+let dbThrows = false;
 mock.module("../db/client.ts", () => ({
   getDb: () => {
+    if (dbThrows) throw new Error("Database not initialized — call initDb() first");
     const sql = (_strings: TemplateStringsArray, ..._values: any[]) =>
       Promise.resolve([]);
     return sql;
@@ -28,7 +31,7 @@ mock.module("../config.ts", () => ({
   loadConfig: () => ({ tracingEnabled: true, tracingCaptureToolOutputs: true }),
 }));
 
-const { spawnHaiku, HAIKU_TIMEOUT_MS, parseHaikuJson, parseLegacyHaikuOutput, readAndParseHaikuStream, buildHaikuArgs, claudeResultToHaiku, _resetSpawnWarningsForTests } =
+const { spawnHaiku, trackUsage, HAIKU_TIMEOUT_MS, parseHaikuJson, parseLegacyHaikuOutput, readAndParseHaikuStream, buildHaikuArgs, claudeResultToHaiku, _resetSpawnWarningsForTests } =
   await import("./executor.ts");
 const { attachToolSpans } = await import("../core/tool-spans.ts");
 const { resolveAgentCwd } = await import("../ai/agent-cwd.ts");
@@ -616,5 +619,28 @@ describe("toolCalls: 'saw zero tools' vs 'could not see the run'", () => {
       "claude-haiku-4-5-20251001",
     );
     expect(haiku.toolCalls).toBeUndefined();
+  });
+});
+
+describe("trackUsage never takes down the call it is reporting on", () => {
+  // `getDb()` throws SYNCHRONOUSLY when the pool was never opened, so the
+  // query's own `.catch` covers only half the ways this can fail. The other
+  // half throws out of `trackUsage` — from inside a backend that has already
+  // made its model call — and discards a finished answer because a usage row
+  // could not be written. Measured through `scripts/smoke-vertex.ts
+  // --probe=haiku`, which drives the shipped router with no database: it
+  // reported the ROUTER failing and falling back to the CLI for a request
+  // Vertex had answered.
+  test("a synchronous getDb() failure is swallowed, not thrown", () => {
+    dbThrows = true;
+    try {
+      expect(() => trackUsage("test", "model", 10, 5, "bot", "trace-1")).not.toThrow();
+    } finally {
+      dbThrows = false;
+    }
+  });
+
+  test("the usual path still writes", () => {
+    expect(() => trackUsage("test", "model", 10, 5, "bot", "trace-1")).not.toThrow();
   });
 });
