@@ -396,7 +396,7 @@ function toolSet(): unknown[] {
  *   `truncated`        second turn hit the token budget. Separate because the
  *                      cause is ours, not the model's.
  *   `answered-no-tool` the model answered directly. Neither passes nor fails
- *                      the loop trigger — it never entered the loop — so it is
+ *                      the loop threshold — it never entered the loop — so it is
  *                      excluded from the rate and reported on its own line.
  *   `no-answer-no-tool` first turn produced neither a tool call nor prose.
  *                      Also never entered the loop, so also excluded — folding
@@ -786,17 +786,25 @@ if (RUN.has("gemini")) {
   //     twenty of those reported "loop entered: 20/20 … 100%" AND "nothing was
   //     measured" on the same screen — the rate is the finding there, not a
   //     broken run.
-  //   - nothing entered the loop and OUR OWN token cap is why. A run that is
-  //     100% `truncated` is this file's constant misconfigured, and it exited 0.
+  //   - OUR OWN token cap dominated. Two corrections over the first attempt at
+  //     this branch, both measured. It required a MAJORITY rather than `some`:
+  //     one stray truncation beside two direct answers exited 1 blaming a
+  //     constant that was fine, and printed the cap as the diagnosis for a run
+  //     whose real cause was the network. And it is no longer gated on
+  //     `inLoop.length === 0`: a small cap does not stop a tool call, which is
+  //     cheap — it stops the PROSE, so the likelier shape is twenty entered
+  //     loops all truncated on the second turn, which exited 0 while reporting
+  //     a 100% failure rate composed entirely of our-fault rows.
   //
   // The case that stays exit 0 is a run the model answered directly throughout:
   // "never selected the tool out of 41" is the single most decision-relevant
   // thing probe B can say, and exiting 1 on it dresses a finding up as breakage.
+  const truncated = count("truncated");
   if (rows.length > 0 && rows.every((r) => r.outcome === "error" && !r.enteredLoop)) {
     failures.push("probe B: every question failed before a reply — nothing was measured");
-  } else if (inLoop.length === 0 && rows.some((r) => r.outcome === "truncated")) {
+  } else if (truncated * 2 > rows.length) {
     failures.push(
-      `probe B: no question entered the loop and ${count("truncated")} were truncated — ` +
+      `probe B: ${truncated}/${rows.length} turns hit the token cap — ` +
       `ANSWER_MAX_TOKENS (${ANSWER_MAX_TOKENS}) is too small to measure anything`,
     );
   }
