@@ -2412,12 +2412,17 @@ describe("POST /api/wiki/ask/chat", () => {
     });
 
     // NB there is deliberately no "ignored outside direct mode" case for
-    // `declineReason`, though there is one for the retired boolean: escalate mode
-    // builds its seed with `buildAskChatSeed`, which takes no such parameter, so
-    // the assertion holds however the route treats the field. It was written, it
-    // could not fail (measured: honouring the client value in escalate mode left
-    // 210/210 green), and a test that cannot fail is worse than none. The
-    // scoping is structurally identical to the `askDeclined` path tested above.
+    // `declineReason`. Escalate mode builds its seed with `buildAskChatSeed`,
+    // which takes no such parameter, so a seed assertion holds however the route
+    // treats the field: one was written, it could not fail (measured — deleting
+    // the `!direct ?` scoping entirely leaves the file green), and a test that
+    // cannot fail is worse than none.
+    //
+    // ⚠️ The two `askDeclined is ignored outside direct mode` cases above and
+    // below are the SAME non-cover on their scoping half, for the same reason —
+    // they earn their keep on the 400//type half only. Do not read them as
+    // proving the mode scoping. Pinning that needs a seam that can observe it
+    // (the resolved value, not the rendered seed).
 
     test("a wiki with NO collections isn't told to search notes it can't search", async () => {
       // `collwiki` has collections, `lonewiki` (a bare WIKI_EXTRA entry) does not.

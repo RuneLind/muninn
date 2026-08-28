@@ -1,5 +1,6 @@
 import { test, expect } from "bun:test";
 import { renderResearchPage } from "./research-page.ts";
+import { DECLINE_REASONS } from "../../wiki/ask-chat.ts";
 
 // The /research client is an inline-script string (no DOM harness), so we pin the
 // `answer_html` listener's behaviour at the source level: it must be wired, swap
@@ -85,34 +86,54 @@ test("answer-body scope carries the component block CSS", async () => {
  * and the next ask deleted the previous card. It typechecked clean and no unit
  * test saw it. This EXECUTES what the page actually ships.
  */
-test("every function injected into the page can actually run there", async () => {
+test("every function injected into the page can actually run there, on EVERY arm", async () => {
   const html = await pageHtml();
-  // Pull the injected declarations out of the rendered page and evaluate them in
-  // one scope, exactly as the browser would.
-  const names = ["DECLINE_REASONS", "toDeclineReason", "askDeclineReason", "askStatusText"];
-  for (const n of names) {
-    expect(html).toContain("var " + n + " = ");
-  }
-  const start = html.indexOf("var DECLINE_REASONS = ");
-  const end = html.indexOf("var CORPUS = ");
+  // Bounded by the markers the page emits, not by "the next unrelated var": a
+  // positional window silently stops guarding whatever is added below it.
+  const start = html.indexOf("// --- injected-fns:start ---");
+  const end = html.indexOf("// --- injected-fns:end ---");
   expect(start).toBeGreaterThan(-1);
   expect(end).toBeGreaterThan(start);
   const injected = html.slice(start, end);
 
-  const run = new Function(
-    injected + "\nreturn { askDeclineReason: askDeclineReason, askStatusText: askStatusText };",
-  ) as () => {
-    askDeclineReason: (p: Record<string, unknown>) => string | undefined;
-    askStatusText: (d: string | undefined, n: number) => string;
-  };
-  const api = run();
+  // Discovered, not listed: a fifth injection is covered the day it lands.
+  const names = [...injected.matchAll(/var (\w+) = function/g)].map((m) => m[1]!);
+  expect(names).toContain("askDeclineReason");
+  expect(names).toContain("askStatusText");
 
-  // The payload shapes src/research/ask.ts actually emits.
-  expect(api.askDeclineReason({ noHits: true, lowConfidence: false, unreachable: true, declineReason: "unreachable" })).toBe("unreachable");
-  expect(api.askDeclineReason({ noHits: true, lowConfidence: true })).toBe("low_confidence");
-  expect(api.askDeclineReason({ noHits: true })).toBe("no_hits");
-  // A successful answer — the case the ReferenceError also broke.
-  expect(api.askDeclineReason({ noHits: false, lowConfidence: false })).toBeUndefined();
-  expect(api.askStatusText(undefined, 2)).toBe("Answered from 2 sources");
-  expect(api.askStatusText("unreachable", 0)).toMatch(/Search unavailable/);
+  const api = new Function(
+    injected + "\nreturn {" + names.map((n) => n + ": " + n).join(",") + "};",
+  )() as Record<string, (...args: unknown[]) => unknown>;
+
+  // `new Function` resolves a free identifier only when its BRANCH runs, so
+  // calling one arm proves nothing about the others. Round 4's bug happened to
+  // sit on the first line; a dependency added to the `low_confidence` arm would
+  // have shipped green. Drive every reason through every injected function.
+  const reasons = [...DECLINE_REASONS, undefined, "from_the_future"];
+  for (const [name, fn] of Object.entries(api)) {
+    for (const reason of reasons) {
+      for (const args of [[reason, 0], [{ declineReason: reason, noHits: true }], [{ noHits: true, lowConfidence: reason === "low_confidence" }]]) {
+        try {
+          fn(...args);
+        } catch (err) {
+          // A wrong-shaped argument throwing a TypeError is fine — these are two
+          // different signatures. A ReferenceError is the bug: an identifier the
+          // page never injected.
+          if (err instanceof ReferenceError) {
+            throw new Error(`injected ${name} references an identifier the page does not define (reason=${String(reason)}): ${(err as Error).message}`);
+          }
+        }
+      }
+    }
+  }
+
+  // …and the values are right, for the payload shapes src/research/ask.ts emits.
+  const decline = api.askDeclineReason as (p: Record<string, unknown>) => string | undefined;
+  const status = api.askStatusText as (d: string | undefined, n: number) => string;
+  expect(decline({ noHits: true, lowConfidence: false, unreachable: true, declineReason: "unreachable" })).toBe("unreachable");
+  expect(decline({ noHits: true, lowConfidence: true })).toBe("low_confidence");
+  expect(decline({ noHits: true })).toBe("no_hits");
+  expect(decline({ noHits: false, lowConfidence: false })).toBeUndefined();
+  expect(status(undefined, 2)).toBe("Answered from 2 sources");
+  expect(status("unreachable", 0)).toMatch(/Search unavailable/);
 });

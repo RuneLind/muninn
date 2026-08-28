@@ -399,10 +399,14 @@ export async function renderResearchPage(): Promise<string> {
     // added \`toDeclineReason\` call), typechecked clean, and was invisible to 2,179
     // unit tests. \`research-page.test.ts\` now evaluates these bodies against the
     // rendered page, so the next one fails there instead of in a browser.
+    // --- injected-fns:start --- (every \`.toString()\` injection goes BETWEEN the
+    // markers; research-page.test.ts discovers them from here, evaluates them, and
+    // calls each across every decline reason. One placed outside is unguarded.)
     var DECLINE_REASONS = ${JSON.stringify(DECLINE_REASONS)};
     var toDeclineReason = ${toDeclineReason.toString()};
     var askDeclineReason = ${askDeclineReason.toString()};
     var askStatusText = ${askStatusText.toString()};
+    // --- injected-fns:end ---
 
     var CORPUS = ${clientCorpusJson()};
     var PROFILES = ${clientProfilesJson()};

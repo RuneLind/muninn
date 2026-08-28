@@ -353,8 +353,15 @@ function clipUnits(text: string, max: number): string {
 }
 
 /**
- * Retrieval coverage verdict — the four verdicts a Jira draft row can hold — deliberately NOT derived from `research/answer.ts`'s `Coverage`, which is now `"answer" | DeclineReason` and grows with `DECLINE_REASONS`; this union is frozen because archived rows carry these exact strings
- * of this feature's own, so the browser half never imports the research layer.
+ * Retrieval coverage verdict — the four verdicts a Jira draft row can hold,
+ * spelled out here rather than imported, so the browser half never pulls in the
+ * research layer.
+ *
+ * It once read as "`research/answer.ts`'s `Coverage` plus one value". That is no
+ * longer true: `Coverage` is `"answer" | DeclineReason` and now GROWS with
+ * `DECLINE_REASONS`, while this union is deliberately FROZEN at four — archived
+ * rows carry these exact strings, and a fifth decline reason must not silently
+ * become a coverage verdict a stored row could never have held.
  *
  * **`unreachable` is not a coverage verdict about the corpus; it is the absence
  * of one.** Measured on the first real run: huginn was down, every sub-search
