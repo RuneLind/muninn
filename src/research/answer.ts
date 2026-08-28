@@ -47,6 +47,15 @@ export const NO_HITS_MESSAGE =
  * confident-looking answer from loosely-related material. The weak sources are
  * still shown so the reader can judge them.
  */
+/**
+ * The reply when the lookup itself failed. Deliberately says nothing about what
+ * the corpus does or does not contain — that is the whole difference from
+ * `NO_HITS_MESSAGE`, which a reader is entitled to read as "we looked".
+ */
+export const UNREACHABLE_MESSAGE =
+  "I could not reach the knowledge base, so I can't say whether anything covers this. " +
+  "That's a lookup failure, not an empty result — worth trying again shortly.";
+
 export const LOW_CONFIDENCE_MESSAGE =
   "The closest matches on the shelf don't confidently cover this, so I'd rather not " +
   "synthesize an answer that isn't well-grounded. The nearest documents are listed below — " +
@@ -57,6 +66,13 @@ export const LOW_CONFIDENCE_MESSAGE =
  * - `answer`         — at least one sub-search confidently retrieved → synthesize.
  * - `no_hits`        — nothing survived Huginn's noise filter → canned no-coverage.
  * - `low_confidence` — documents came back but every sub-search was flagged weak.
+ * - `unreachable`    — nothing came back AND a sub-search never reached Huginn.
+ *
+ * That last one is not a nicety. `no_hits` tells a HUMAN the topic "may simply
+ * not be indexed yet"; on a dead `KNOWLEDGE_API_URL` that is a confident claim
+ * about a corpus we never asked. Absence of evidence needs the lookup to have
+ * happened, so any sub-search error with nothing retrieved answers `unreachable`
+ * — we do not know, and saying so is the only honest verdict.
  *
  * The honest relevance floor lives here. The exposed `relevance` field is NOT a
  * usable threshold: Huginn skips the cross-encoder reranker for English queries
@@ -65,16 +81,20 @@ export const LOW_CONFIDENCE_MESSAGE =
  * raw-score signal is Huginn's per-search `lowConfidence` (computed from
  * `LOW_CONFIDENCE_THRESHOLD` before rank-normalization), which is what we gate on.
  */
-export type Coverage = "answer" | "no_hits" | "low_confidence";
+export type Coverage = "answer" | "no_hits" | "low_confidence" | "unreachable";
 
 export interface CoverageInput {
   /** Merged unique-document count, after Huginn's noise filter. */
   hitCount: number;
-  /** Per-sub-question diagnostics — `lowConfidence` is the raw-score signal. */
-  subSearches: Array<{ resultCount: number; lowConfidence?: boolean }>;
+  /** Per-sub-question diagnostics — `lowConfidence` is the raw-score signal, and
+   *  `error` is set when the sub-search never reached Huginn at all. */
+  subSearches: Array<{ resultCount: number; lowConfidence?: boolean; error?: string }>;
 }
 
 export function assessCoverage(input: CoverageInput): Coverage {
+  // Checked FIRST: an empty result set caused by a transport failure is not an
+  // empty corpus, and only this ordering can tell the two apart.
+  if (input.hitCount === 0 && input.subSearches.some((s) => s.error)) return "unreachable";
   if (input.hitCount === 0) return "no_hits";
   const withResults = input.subSearches.filter((s) => s.resultCount > 0);
   if (withResults.length === 0) return "no_hits";
@@ -85,7 +105,9 @@ export function assessCoverage(input: CoverageInput): Coverage {
 
 /** The canned reply for a non-answer verdict (used by the no-synthesis paths). */
 export function coverageMessage(coverage: Exclude<Coverage, "answer">): string {
-  return coverage === "low_confidence" ? LOW_CONFIDENCE_MESSAGE : NO_HITS_MESSAGE;
+  if (coverage === "low_confidence") return LOW_CONFIDENCE_MESSAGE;
+  if (coverage === "unreachable") return UNREACHABLE_MESSAGE;
+  return NO_HITS_MESSAGE;
 }
 
 export interface Citation {

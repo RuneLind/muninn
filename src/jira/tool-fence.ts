@@ -50,9 +50,14 @@ export function fullDepthUnavailableMessage(gap: FullDepthGap): string {
   if (gap.down.length > 0) {
     clauses.push(`disse er nede: ${gap.down.join(", ")}`);
   }
-  // The remedy is offered only when something can actually be started.
+  // Exported without a guard of its own, and only today's single call site
+  // happens to check the length first — a second caller must not ship "og .".
+  if (clauses.length === 0) return "Full teknisk dybde er ikke tilgjengelig. Velg dybde «Skisse».";
+  // The remedy names the servers that can actually be started, and nothing else:
+  // offering to start a server the same sentence just called absent is the exact
+  // confusion this split exists to remove.
   const remedy = gap.down.length > 0
-    ? "Start dem fra dashbordet (/serena og yggdrasil), eller velg dybde «Skisse»."
+    ? `Start ${gap.down.join(" og ")} fra dashbordet, eller velg dybde «Skisse».`
     : "Velg dybde «Skisse».";
   return `Full teknisk dybde krever kodeverktøyene, og ${clauses.join("; ")}. ${remedy}`;
 }

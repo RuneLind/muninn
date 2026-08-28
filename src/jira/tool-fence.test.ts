@@ -14,8 +14,8 @@ describe("fullDepthUnavailableMessage", () => {
     const msg = fullDepthUnavailableMessage({ unconfigured: ["code", "yggdrasil"], down: [] });
     expect(msg).toContain("code");
     expect(msg).toContain("yggdrasil");
-    // The remedy must NOT be offered: there is nothing to start in this instance.
-    expect(msg).not.toContain("Start dem");
+    // The remedy must NOT be offered: there is nothing to start here.
+    expect(msg).not.toMatch(/\bStart\b/);
     expect(msg).toMatch(/denne installasjonen/i);
     // The reader still needs a way forward.
     expect(msg).toContain("Skisse");
@@ -23,20 +23,34 @@ describe("fullDepthUnavailableMessage", () => {
 
   test("down servers keep the start-them remedy", () => {
     const msg = fullDepthUnavailableMessage({ unconfigured: [], down: ["code"] });
-    expect(msg).toContain("code");
-    expect(msg).toContain("Start dem");
+    expect(msg).toMatch(/Start\s+code\s+fra dashbordet/);
     expect(msg).toContain("Skisse");
   });
 
-  test("a mixed gap names both states separately", () => {
+  test("a mixed gap names each server under the state it is actually in", () => {
     const msg = fullDepthUnavailableMessage({ unconfigured: ["yggdrasil"], down: ["code"] });
-    expect(msg).toMatch(/denne installasjonen/i);
-    expect(msg).toContain("Start dem");
-    // Each server appears under the state it is actually in.
-    const absentIdx = msg.indexOf("yggdrasil");
-    const downIdx = msg.indexOf("code");
-    expect(absentIdx).toBeGreaterThanOrEqual(0);
-    expect(downIdx).toBeGreaterThanOrEqual(0);
-    expect(absentIdx).not.toBe(downIdx);
+    // Pin the CLAUSES, not two substring positions: comparing indexOf("yggdrasil")
+    // against indexOf("code") holds for any wording, including one that merges
+    // both servers into a single clause.
+    expect(msg).toMatch(/ikke tilgjengelige i denne installasjonen: yggdrasil/);
+    expect(msg).toMatch(/nede: code/);
+  });
+
+  test("the remedy names only the servers that can actually be started", () => {
+    const msg = fullDepthUnavailableMessage({ unconfigured: ["yggdrasil"], down: ["code"] });
+    const remedy = msg.slice(msg.indexOf("Start"));
+    expect(remedy).toContain("code");
+    // Offering to start the server the same sentence just called absent undoes
+    // the whole point of splitting the two states.
+    expect(remedy).not.toContain("yggdrasil");
+  });
+
+  test("an empty gap renders a coherent sentence, not a dangling clause", () => {
+    // Exported with no guard of its own; only today's single call site happens
+    // to check the length first.
+    const msg = fullDepthUnavailableMessage({ unconfigured: [], down: [] });
+    expect(msg).not.toMatch(/og\s*\./);
+    expect(msg).not.toMatch(/:\s*\./);
+    expect(msg).toContain("Skisse");
   });
 });

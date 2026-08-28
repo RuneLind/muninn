@@ -315,8 +315,19 @@ export function formatResearchResultText(result: ResearchKnowledgeResult): strin
       lines.push("");
       lines.push(
         `All ${total} sub-search${total === 1 ? "" : "es"} failed before reaching the knowledge base. ` +
-        `Tell the user the source lookup is unavailable in this instance, and answer only from what is ` +
+        `Tell the user the knowledge base could not be reached, and answer only from what is ` +
         `already in this conversation. Do not present anything as checked against the sources.`,
+      );
+      return lines.join("\n");
+    }
+    // Some reached the knowledge base and found nothing; the rest never ran. The
+    // first pass let this fall through to the bare sentence below, which is the
+    // very claim this surface exists to stop — one flapping sub-search is enough.
+    if (failedCount > 0) {
+      lines.push(`**No results, and the lookup was INCOMPLETE: ${failedCount} of ${total} sub-searches never reached the knowledge base.**`);
+      lines.push("");
+      lines.push(
+        `Do not report this as "nothing exists" — say the lookup was partial, and that what did run found nothing.`,
       );
       return lines.join("\n");
     }

@@ -411,6 +411,21 @@ describe("missingFullServers", () => {
     expect(missingFullServers([okServer("code", ["call_tool"])])).toEqual(["yggdrasil"]);
     expect(missingFullServers(ALL_UP as never)).toEqual([]);
   });
+
+  test("an inconclusive probe (\"unknown\") blocks nothing", () => {
+    // Pre-existing behaviour, pinned rather than left to a comment: a slow probe
+    // on a laptop that DOES have the servers must not refuse the draft. The pod
+    // is a different shape — there the servers are absent, not unconfirmed.
+    const unknown = { ...okServer("code", []), status: "unknown" as const };
+    expect(missingFullServers([unknown, okServer("yggdrasil", [])])).toEqual([]);
+  });
+
+  test("the order is the fence's, not the order the two buckets filled", () => {
+    // `code` absent (unconfigured) and `yggdrasil` present-but-down fill the two
+    // buckets in the opposite order to the canonical list, which is the only
+    // shape that can tell a concatenation apart from a canonical filter.
+    expect(missingFullServers([okServer("yggdrasil", [], "down")])).toEqual(["code", "yggdrasil"]);
+  });
 });
 
 // ── Single flight ────────────────────────────────────────────────────────────
@@ -1138,6 +1153,23 @@ describe("POST /api/jira/draft/from-thread", () => {
     expect(rows.size).toBe(0);
     // Skisse is unaffected.
     expect((await post({ threadId: THREAD_ID, template: "bug", depth: "skisse" })).status).toBe(200);
+  });
+
+  test("Full in the POD shape — the code servers absent, not down — offers no remedy", async () => {
+    threads.set(THREAD_ID, THREAD);
+    // The nais overlay ships only `research`, so `code`/`yggdrasil` are not in
+    // `.mcp.json` at all. Nothing can be started; naming the dashboard sends the
+    // reader somewhere that cannot help them.
+    mcpServers = [okServer("research", ["research_knowledge"])];
+    const res = await post({ threadId: THREAD_ID, template: "bug", depth: "full" });
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    // The union, in the fence's order — a caller asking "which servers blocked
+    // this" must get both, not just the down half.
+    expect(body.unreachableServers).toEqual(["code", "yggdrasil"]);
+    expect(String(body.error)).toContain("denne installasjonen");
+    expect(String(body.error)).not.toMatch(/\bStart\b/);
+    expect(rows.size).toBe(0);
   });
 
   /**

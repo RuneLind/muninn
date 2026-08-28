@@ -417,6 +417,26 @@ describe("formatResearchResultText — unreachable vs empty", () => {
     expect(text).not.toMatch(/UNAVAILABLE/i);
   });
 
+  test("a partial failure with ZERO results is still not an empty corpus", () => {
+    // The gap the first pass left: the "Partial" banner sat AFTER the
+    // `results.length === 0` early return, so 1-of-2 failing with nothing
+    // retrieved fell through to the verbatim pre-fix sentence. A flapping
+    // huginn and a per-sub-search timeout both land here.
+    const text = formatResearchResultText({
+      results: [],
+      decomposition: decomposition(["A", "B"], false),
+      subSearches: [
+        { subQuestion: "A", durationMs: 30000, resultCount: 0, error: "connect ECONNREFUSED" },
+        { subQuestion: "B", durationMs: 200, resultCount: 0, bestScore: 0 },
+      ],
+      traceId: "t",
+    });
+    expect(text).toMatch(/1 of 2/);
+    expect(text).toMatch(/incomplete|did not reach/i);
+    // Not a TOTAL outage either — one sub-search did reach the knowledge base.
+    expect(text).not.toMatch(/UNAVAILABLE/i);
+  });
+
   test("a partial failure says the results are incomplete", () => {
     const text = formatResearchResultText({
       results: [{ collection: "nav-wiki", id: "a.md", relevance: 0.9, viaSubQuestion: ["B"] }],

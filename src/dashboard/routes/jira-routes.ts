@@ -54,7 +54,7 @@ import type { Hono } from "hono";
 import type { Context } from "hono";
 import type { Config } from "../../config.ts";
 import { corsHeaders } from "../../auth/cors.ts";
-import { getMcpStatus, findCriticalDown, type McpServerStatus } from "../../ai/mcp-status.ts";
+import { getMcpStatus, type McpServerStatus } from "../../ai/mcp-status.ts";
 import { jiraBotMissingMessage, resolveJiraBotLive } from "../../jira/bot.ts";
 import { findJiraTemplate, resolveJiraTemplates } from "../../jira/templates.ts";
 import { JIRA_FULL_MCP_SERVERS, fullDepthUnavailableMessage, type FullDepthGap } from "../../jira/tool-fence.ts";
@@ -238,19 +238,28 @@ function parseJiraThreadDraftBody(
 }
 
 /**
- * Which of `code`/`yggdrasil` are not usable right now, and WHY — the two states
- * kept apart rather than merged.
+ * Which of `code`/`yggdrasil` are not usable right now, and WHY — the two BLOCKED
+ * states kept apart rather than merged.
  *
  * A server ABSENT from the probe is not fine: the probe lists every server in the
  * bot's `.mcp.json`, so an absent name means the bot is not configured with it at
  * all. For whether `Full` can run, that is the same outcome as down — which is
  * why {@link missingFullServers} still merges them — but for what to TELL the
  * reader it is the opposite: nothing can be started, so the remedy must not be
- * offered. `findCriticalDown` is consulted too so a bot that marks these critical
- * gets the same verdict from either direction.
+ * offered.
+ *
+ * `McpStatus` has a THIRD value, `"unknown"` (a probe that did not conclude), and
+ * it deliberately blocks nothing — the pre-existing behaviour, kept: a slow or
+ * inconclusive probe on a laptop that does have the servers must not refuse the
+ * draft. It is not a gap in the pod, where the servers are absent rather than
+ * unconfirmed. A test pins it so the reading is not left to this comment.
+ *
+ * `findCriticalDown` is NOT consulted: it filters `critical && status === "down"`,
+ * a strict subset of the `status === "down"` test right here, so as a second
+ * disjunct it could never fire. The comment that claimed it was "a second door"
+ * described one that did not exist.
  */
 export function classifyFullServers(servers: McpServerStatus[]): FullDepthGap {
-  const criticalDown = new Set(findCriticalDown(servers).map((s) => s.name));
   const unconfigured: string[] = [];
   const down: string[] = [];
   for (const name of JIRA_FULL_MCP_SERVERS) {
@@ -258,7 +267,7 @@ export function classifyFullServers(servers: McpServerStatus[]): FullDepthGap {
     // Absent from the probe = absent from `.mcp.json` = this instance was never
     // built with it. Present but down = something a reader can go start.
     if (!s) unconfigured.push(name);
-    else if (s.status === "down" || criticalDown.has(name)) down.push(name);
+    else if (s.status === "down") down.push(name);
   }
   return { unconfigured, down };
 }
