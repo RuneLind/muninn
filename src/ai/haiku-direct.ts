@@ -2,6 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { getLog } from "../logging.ts";
 import {
   DEFAULT_MODEL,
+  HAIKU_DEFAULT_MAX_TOKENS,
   HAIKU_TIMEOUT_MS,
   spawnHaiku,
   trackUsage,
@@ -11,6 +12,7 @@ import {
 import type { ConnectorType } from "../bots/config.ts";
 import { getRoleOverride } from "../db/role-overrides.ts";
 import type { HaikuCliFallback } from "./haiku-cli-unavailable.ts";
+import { callHaikuViaVertex, resolveVertexHaikuTarget } from "./haiku-vertex.ts";
 
 // The refusal every path here ends at, re-exported so a caller catching it does
 // not have to know that `spawnHaiku` — not this router — is what throws it.
@@ -18,22 +20,18 @@ export { HaikuCliUnavailableError } from "./haiku-cli-unavailable.ts";
 
 const log = getLog("ai", "haiku-router");
 
-// Decomposer / memory / goal / schedule extractors all emit small JSON blobs.
-// 4096 is comfortable headroom without inviting runaway outputs.
-const DEFAULT_MAX_TOKENS = 4096;
-
 // Copilot's model registry uses dotted ids ("claude-haiku-4.5") rather than
 // Anthropic's full date-suffixed form ("claude-haiku-4-5-20251001"). Verified
 // 2026-05-17 via `client.listModels()` — see scripts/smoke-haiku-copilot.ts.
 // Sending an unknown id silently substitutes Sonnet, so this must match exactly.
 const COPILOT_HAIKU_MODEL = "claude-haiku-4.5";
 
-export type HaikuBackend = "cli" | "anthropic" | "copilot";
+export type HaikuBackend = "cli" | "anthropic" | "copilot" | "vertex";
 
 /**
  * Map a Haiku-router {@link HaikuBackend} to the connector vocabulary the trace
  * read side speaks: `cli` → `"claude-cli"` (spawnHaiku IS the Claude CLI), and
- * `anthropic`/`copilot` pass through unchanged. Stamped as a span's `connector`
+ * `anthropic`/`copilot`/`vertex` pass through unchanged. Stamped as a span's `connector`
  * attr so a claude-cli bot's router-backed rows read `"claude-cli"` — the SAME
  * value the briefing `claude` child + watcher spans stamp — instead of the bare
  * `"cli"`. The /traces walk collapses DISTINCT connector values, so unifying the
@@ -68,7 +66,7 @@ export function hasHaikuDirectAuth(): boolean {
 
 function parseHaikuBackendValue(raw: string | undefined): HaikuBackend | null {
   const v = raw?.trim().toLowerCase();
-  if (v === "cli" || v === "anthropic" || v === "copilot") return v;
+  if (v === "cli" || v === "anthropic" || v === "copilot" || v === "vertex") return v;
   return null;
 }
 
@@ -123,11 +121,20 @@ export interface BackendChainLink {
  * place. Levels, top to bottom:
  *   1. explicit opts.backend
  *   2. HAIKU_BACKEND DB override (edited from /models) — hot, beats env
- *   3. HAIKU_BACKEND env (cli|anthropic|copilot) — debug knob
+ *   3. HAIKU_BACKEND env (cli|anthropic|copilot|vertex) — debug knob
  *   4. opts.haikuBackend (per-bot config from `BotConfig.haikuBackend`)
  *   5. legacy HAIKU_DIRECT_ENABLED=1 → anthropic
  *   6. opts.connector === "copilot-sdk" → copilot
  *   7. floor → cli (always contributes, so a winner is guaranteed)
+ *
+ * `vertex` has NO connector-derived level, deliberately. The connector that
+ * would imply it is `openai-compat`, which is equally the local-Ollama shape —
+ * telling the two apart needs the bot's `baseUrl`, which no caller passes here.
+ * Deriving it from the connector alone would send an Ollama bot's extractions to
+ * Google. It is reached through the levels above instead, and on the profile
+ * that must not leak (`MUNINN_PROFILE=nais`) forgetting to set one is not a
+ * silent leak but a refusal: the floor is the Claude CLI, which that image does
+ * not ship, and neither of the other two backends has a credential there.
  *
  * Invalid-enum fall-through is preserved by reusing `parseHaikuBackendOverride`
  * / `parseHaikuBackendEnv` (both return null on an unrecognised value).
@@ -222,7 +229,7 @@ export async function callHaikuDirect(
 ): Promise<HaikuResult> {
   const { source, botName, timeoutMs = HAIKU_TIMEOUT_MS, model, maxTokens } = opts;
   const effectiveModel = model || DEFAULT_MODEL;
-  const effectiveMaxTokens = maxTokens && maxTokens > 0 ? maxTokens : DEFAULT_MAX_TOKENS;
+  const effectiveMaxTokens = maxTokens && maxTokens > 0 ? maxTokens : HAIKU_DEFAULT_MAX_TOKENS;
 
   const client = getAnthropic();
 
@@ -362,14 +369,38 @@ export async function callHaikuViaCopilot(
 
 type HaikuBackendHandler = (prompt: string, opts: HaikuRouterOptions) => Promise<HaikuResult>;
 
-// resolveBackend() picks the key; this maps the two non-CLI keys to their
+// resolveBackend() picks the key; this maps the non-CLI keys to their
 // handler — mirroring resolveConnector()'s registry, so adding a backend is
 // additive. The CLI is the universal fallback (not a registry entry) and is
 // handled separately below.
-const NON_CLI_BACKENDS: Record<"anthropic" | "copilot", HaikuBackendHandler> = {
+const NON_CLI_BACKENDS: Record<Exclude<HaikuBackend, "cli">, HaikuBackendHandler> = {
   anthropic: callHaikuDirect,
   copilot: callHaikuViaCopilot,
+  vertex: callHaikuViaVertex,
 };
+
+/**
+ * Why `backend` cannot run in this process — or null when it can be attempted.
+ *
+ * The point is to skip the attempt rather than spend one failing call on it, and
+ * to hand down a REASON an operator can act on: these are configuration, not
+ * outages, so the fallback reason they read (and, on `MUNINN_PROFILE=nais`, the
+ * refusal `spawnHaiku` throws) has to say what is wrong.
+ *
+ * The reason is rendered AS-IS — never a name with a fixed suffix appended. A
+ * hardcoded "is not set" is what told an operator whose region was
+ * set-but-malformed to go looking for a variable sitting in their `.env`.
+ */
+function preflightMissing(backend: HaikuBackend): string | null {
+  if (backend === "anthropic" && !hasHaikuDirectAuth()) {
+    return "no Anthropic auth (ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN)";
+  }
+  if (backend === "vertex") {
+    const resolved = resolveVertexHaikuTarget();
+    if (!resolved.ok) return `no Vertex target: ${resolved.reason}`;
+  }
+  return null;
+}
 
 /**
  * Drop-in replacement for `spawnHaiku` that routes through a backend picked
@@ -377,7 +408,7 @@ const NON_CLI_BACKENDS: Record<"anthropic" | "copilot", HaikuBackendHandler> = {
  *
  * The returned `HaikuResult.backend` reports the backend that ACTUALLY ran, not
  * the one requested: a NON_CLI handler tags its own result (`"anthropic"`/
- * `"copilot"`), and both fallback paths below (no-auth skip, or a thrown
+ * `"copilot"`/`"vertex"`), and both fallback paths below (no-auth skip, or a thrown
  * NON_CLI handler) return `spawnHaiku`'s result, which is tagged `"cli"`. So a
  * caller can honestly stamp the real backend on its span even after a fallback.
  */
@@ -394,10 +425,14 @@ export async function callHaikuWithFallback(
   // binary. On the default profile it is read by nothing.
   let cliFallback: HaikuCliFallback | undefined;
 
-  if (backend === "anthropic" && !hasHaikuDirectAuth()) {
-    // No auth → skip the attempt entirely rather than failing one call first.
-    cliFallback = { backend, reason: "no Anthropic auth (ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN)" };
-    log.warn("haiku-router anthropic backend requested but no auth, falling back to CLI", { botName });
+  const missingConfig = preflightMissing(backend);
+  if (missingConfig) {
+    // Unconfigured → skip the attempt entirely rather than failing one call
+    // first, and name the variable rather than the symptom.
+    cliFallback = { backend, reason: missingConfig };
+    log.warn("haiku-router {backend} backend requested but {reason}, falling back to CLI", {
+      botName, backend, reason: missingConfig,
+    });
   } else if (backend !== "cli") {
     try {
       return await NON_CLI_BACKENDS[backend](prompt, opts);
@@ -411,9 +446,10 @@ export async function callHaikuWithFallback(
 }
 
 /** Usage/backend for one {@link callHaikuMessageWithFallback} call. `backend` is
- *  the backend that ACTUALLY ran (cli/anthropic/copilot), which the caller stamps
- *  as the span's `connector` attr — the read side (`connectorLabel`) maps
- *  cli→"Claude Code", anthropic→"Anthropic API", copilot→"Copilot SDK". */
+ *  the backend that ACTUALLY ran (cli/anthropic/copilot/vertex), which the caller
+ *  stamps as the span's `connector` attr — the read side (`connectorLabel`) maps
+ *  cli→"Claude Code", anthropic→"Anthropic API", copilot→"Copilot SDK",
+ *  vertex→"Vertex AI". */
 export interface HaikuMessageUsage {
   model: string;
   inputTokens: number;

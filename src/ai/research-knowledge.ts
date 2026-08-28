@@ -1,5 +1,5 @@
 import { getLog } from "../logging.ts";
-import { decomposeQuestion } from "./knowledge-decomposer.ts";
+import { decomposeQuestion, type DecomposeResult } from "./knowledge-decomposer.ts";
 import { fetchKnowledgeApi, KnowledgeApiError } from "./knowledge-api-client.ts";
 import { fetchHuginnTrace } from "./huginn-trace-pointer.ts";
 import { Tracer, type TraceContext } from "../tracing/index.ts";
@@ -94,6 +94,36 @@ interface SearchResponse {
   traceId?: string;
 }
 
+/**
+ * What the `knowledge_decompose` span records.
+ *
+ * A function, so the rule is testable without a tracing-enabled harness: the
+ * decomposer's degradation is only visible in production THROUGH this span, so
+ * "is it recorded?" has to be a test rather than a reading.
+ *
+ * `passthrough` and `rationale` alone cannot say whether the decomposer GAVE UP:
+ * the valid single-lookup path sets `passthrough` too, and the two `malformed`
+ * sites carry whatever rationale the MODEL wrote (see `DecomposeDegradation`).
+ * Without `degraded`, a decomposition that lost its entire fan-out renders on
+ * /traces exactly like a healthy cheap lookup — and the smoke probe, which does
+ * read it, is not something anyone runs in a pod. Both new fields are OMITTED
+ * rather than falsified when absent: no degradation, and no backend at all on a
+ * chain that threw outright.
+ */
+export function decomposeSpanAttributes(
+  question: string,
+  decomposition: DecomposeResult,
+): Record<string, unknown> {
+  return {
+    question,
+    subQuestions: decomposition.subQuestions,
+    rationale: decomposition.rationale,
+    passthrough: decomposition.passthrough,
+    ...(decomposition.degraded ? { degraded: decomposition.degraded } : {}),
+    ...(decomposition.backend ? { backend: decomposition.backend } : {}),
+  };
+}
+
 export async function researchKnowledge(opts: ResearchKnowledgeOptions): Promise<ResearchKnowledgeResult> {
   const { question, collections, limit, botName, knowledgeApiUrl, traceContext, userId, connector, haikuBackend } = opts;
 
@@ -109,12 +139,7 @@ export async function researchKnowledge(opts: ResearchKnowledgeOptions): Promise
     "knowledge_decompose",
     "knowledge_decompose",
     decomposition.haikuMs,
-    {
-      question,
-      subQuestions: decomposition.subQuestions,
-      rationale: decomposition.rationale,
-      passthrough: decomposition.passthrough,
-    },
+    decomposeSpanAttributes(question, decomposition),
   );
 
   // One /api/search per sub-question. Huginn's Path D handles rescue server-side

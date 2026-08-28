@@ -37,7 +37,7 @@ export type ConnectorType = "claude-cli" | "copilot-sdk" | "openai-compat" | "cl
 /** Valid `connector` values — shared by discovery validation + the /models editor. */
 export const CONNECTOR_VALUES = ["claude-cli", "copilot-sdk", "openai-compat", "claude-sdk"] as const;
 /** Valid `haikuBackend` values — shared by discovery validation + the /models editor. */
-export const HAIKU_BACKEND_VALUES = ["cli", "anthropic", "copilot"] as const;
+export const HAIKU_BACKEND_VALUES = ["cli", "anthropic", "copilot", "vertex"] as const;
 
 /** The per-bot config.json fields editable from the /models dashboard page. */
 export const EDITABLE_BOT_FIELDS = ["connector", "model", "thinkingMaxTokens", "haikuBackend"] as const;

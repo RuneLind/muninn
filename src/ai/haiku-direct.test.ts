@@ -60,6 +60,7 @@ const trackUsageCalls: Array<{
 }> = [];
 mock.module("../scheduler/executor.ts", () => ({
   DEFAULT_MODEL: "claude-haiku-4-5-20251001",
+  HAIKU_DEFAULT_MAX_TOKENS: 4096,
   HAIKU_TIMEOUT_MS: 60_000,
   spawnHaiku: async (prompt: string, opts: unknown) => {
     spawnCalls.push({ prompt, opts });
@@ -754,5 +755,29 @@ describe("callHaikuWithFallback hands its fallback reason to spawnHaiku", () => 
     // The refusal moved modules; a caller that catches it imports from the
     // router, and a lost re-export would be a silent `undefined` in a catch.
     expect(new HaikuCliUnavailableError("anthropic", "melosys", "why").name).toBe("HaikuCliUnavailableError");
+  });
+});
+
+describe("vertex backend resolution", () => {
+  // Resolution only. The DISPATCH tests live in `haiku-vertex.test.ts`, which
+  // has its own `bun test` link: driving them here needs `./haiku-vertex.ts`
+  // mocked, and in this file's chunk that module is already loaded through
+  // another importer by the time a `mock.module` here could take — measured, the
+  // dispatch ran the real backend and the case passed or failed by luck.
+  test("HAIKU_BACKEND=vertex resolves", () => {
+    process.env.HAIKU_BACKEND = "vertex";
+    expect(resolveBackendWithReason({})).toEqual({ backend: "vertex", reason: "HAIKU_BACKEND env" });
+  });
+
+  test("per-bot haikuBackend picks it too", () => {
+    expect(resolveBackend({ haikuBackend: "vertex" })).toBe("vertex");
+  });
+
+  // No connector implies it: `openai-compat` is equally the local-Ollama shape,
+  // and the router is not given the bot's baseUrl to tell them apart.
+  test("no connector derives it", () => {
+    for (const connector of ["openai-compat", "claude-sdk", "claude-cli", "copilot-sdk"] as const) {
+      expect(resolveBackend({ connector })).not.toBe("vertex");
+    }
   });
 });

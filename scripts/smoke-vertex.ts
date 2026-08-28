@@ -27,13 +27,21 @@
  *      drives that seam — the shipped one, `src/ai/connectors/openai-compat-auth.ts`
  *      — against the real endpoint with a deliberately invalid token, so the 401
  *      is Google's rather than a fixture's.
- *   4. Is `assertHaveAuth()` really the only muninn-side blocker on the
+ *   4. Do the SHORT calls go to the same place as the chat turn? Every
+ *      `research_knowledge` call decomposes through a Haiku-tier call FIRST,
+ *      with the user's question in the prompt — so a deployment can be compliant
+ *      on its answer and not on the lookup right before it. Probe E drives the
+ *      SHIPPED router (`callHaikuWithFallback`) and the SHIPPED decomposer with
+ *      the Vertex backend selected, and reads back WHICH backend actually ran:
+ *      the router falls back to the Claude CLI on any failure, so "it answered"
+ *      is not evidence and "vertex answered" is.
+ *   5. Is `assertHaveAuth()` really the only muninn-side blocker on the
  *      "zero-code" Claude-on-Vertex path? Probe C runs the Agent SDK with BOTH
  *      Anthropic credentials removed from the environment and CLASSIFIES how
  *      far it got — reached Vertex, never left the machine, or unknown.
  *
  *     VERTEX_PROJECT_ID=<your-gcp-project> bun scripts/smoke-vertex.ts
- *     … --probe=regions|gemini|claude-sdk|refresh  (comma-separated; default: all)
+ *     … --probe=regions|gemini|claude-sdk|refresh|haiku  (comma-separated; default: all)
  *     … --json                              (JSON on stdout, prose on stderr)
  *
  * NOTHING DEPLOYMENT-SPECIFIC LIVES HERE, and nothing leaks at RUNTIME either:
@@ -68,7 +76,7 @@ const CLAUDE_MODEL = (process.env.VERTEX_CLAUDE_MODEL ?? "claude-sonnet-4-5").tr
  */
 const ANSWER_MAX_TOKENS = 2048;
 
-const KNOWN_PROBES = ["regions", "gemini", "claude-sdk", "refresh"] as const;
+const KNOWN_PROBES = ["regions", "gemini", "claude-sdk", "refresh", "haiku"] as const;
 const JSON_MODE = process.argv.includes("--json");
 /** Prose goes to stderr under `--json` so `… --json | jq` works. */
 const say = (line = "") => (JSON_MODE ? console.error(line) : console.log(line));
@@ -738,6 +746,164 @@ async function probeTokenRefresh(): Promise<RefreshProbe> {
 }
 
 // ---------------------------------------------------------------------------
+
+/**
+ * The Haiku router on Vertex, driven through the SHIPPED entry points.
+ *
+ * The trap this is built around: `callHaikuWithFallback` falls back to the
+ * Claude CLI on ANY failure, and the CLI answers perfectly well on a laptop. So
+ * a probe that asserted "we got an answer" would report success for a Vertex
+ * backend that never ran — the exact false green this file exists to refuse
+ * elsewhere. The router returns the backend that ACTUALLY ran; that field, not
+ * the text, is the measurement.
+ *
+ * Two steps, because they fail differently. The first is the router itself on an
+ * extraction-shaped prompt. The second is `decomposeQuestion`, the real hot
+ * path, which SWALLOWS a Haiku failure and degrades to a passthrough rather than
+ * throwing.
+ *
+ * BOTH steps therefore ask the same two questions — which backend ran, and was
+ * the answer usable — because either alone is a false green. Backend alone
+ * passes a Vertex answer that could not be used (measured: a decomposer whose
+ * JSON carries the wrong key still reports `backend: "vertex"`, and every
+ * knowledge lookup then silently loses its fan-out); usability alone passes an
+ * answer the Claude CLI produced.
+ *
+ * The decomposer step asks them in the order `call-failed` → backend → usable,
+ * and that order is load-bearing rather than stylistic: `call-failed` means the
+ * whole chain threw, so there is no backend to report and "the CLI answered
+ * instead" is false. Testing the backend first said exactly that on a `nais`
+ * run where nothing ran at all.
+ *
+ * Usability comes from a field the producer SETS — the one-shot's own JSON
+ * parse, `DecomposeResult.degraded` — never from matching the model's prose.
+ */
+type HaikuProbeOutcome =
+  | "vertex-answered"   // the Vertex backend ran and produced usable output
+  | "fell-back"         // something failed and the CLI floor answered instead
+  // Vertex answered and the answer could not be used. NOT "unparseable JSON":
+  // the commonest shape is valid JSON carrying the wrong key, which parses
+  // perfectly and still loses the whole fan-out.
+  | "unusable"
+  // No answer from this step, from any of four producers: configuration refused
+  // before a call was attempted, either step's chain threw (CLI floor included),
+  // or the decomposer reported `call-failed`. NOT "the chain threw" alone — that
+  // wording survived here after the printed explainer was corrected for saying
+  // it, which is the more authoritative of the two places to be wrong.
+  | "failed";
+
+interface HaikuProbeStep {
+  step: string;
+  outcome: HaikuProbeOutcome;
+  backend: string | null;
+  model: string | null;
+  ms: number;
+  detail: string;
+}
+
+const HAIKU_PROBE_BOT = "vertex-smoke";
+
+async function probeHaikuRouter(): Promise<HaikuProbeStep[]> {
+  // The resolver reads the same two names `resolveVertexConfig` does. This
+  // script's own region input is the one being measured, so make it the one the
+  // resolver sees — without overwriting an explicitly-set value.
+  process.env.VERTEX_REGION ||= GEMINI_REGION;
+  const { callHaikuWithFallback } = await import("../src/ai/haiku-direct.ts");
+  const { decomposeQuestion } = await import("../src/ai/knowledge-decomposer.ts");
+  const { extractJson } = await import("../src/ai/json-extract.ts");
+  const { resolveVertexHaikuTarget } = await import("../src/ai/haiku-vertex.ts");
+
+  const steps: HaikuProbeStep[] = [];
+  const target = resolveVertexHaikuTarget();
+  if (!target.ok) {
+    return [{
+      step: "config", outcome: "failed", backend: null, model: null, ms: 0,
+      detail: `not configured: ${target.reason}`,
+    }];
+  }
+
+  // Extraction-shaped: a small JSON contract, which is what most of the router's
+  // callers ask for (the decomposer and the three extractors; the two prose
+  // reminder paths are the exception).
+  const started = performance.now();
+  try {
+    const haiku = await callHaikuWithFallback(
+      'Extract the facts as JSON: {"facts": ["..."]}. Reply with ONLY the JSON.\n\n' +
+      "Text: The office moves to the third floor on Monday, and the coffee machine stays.",
+      { source: "vertex-smoke", botName: HAIKU_PROBE_BOT, backend: "vertex" },
+    );
+    const ms = Math.round(performance.now() - started);
+    let parsed = false;
+    try { extractJson(haiku.result); parsed = true; } catch { parsed = false; }
+    steps.push({
+      step: "router one-shot",
+      // `backend`, not the text: a CLI fallback answers this prompt just as well.
+      outcome: haiku.backend !== "vertex" ? "fell-back" : parsed ? "vertex-answered" : "unusable",
+      backend: haiku.backend ?? null,
+      model: haiku.model ?? null,
+      ms,
+      detail: redact(haiku.result.trim().slice(0, 120)),
+    });
+  } catch (err) {
+    steps.push({
+      step: "router one-shot", outcome: "failed", backend: null, model: null,
+      ms: Math.round(performance.now() - started), detail: redact((err as Error).message).slice(0, 200),
+    });
+  }
+
+  // The hot path. `decomposeQuestion` catches its own failures and degrades to a
+  // passthrough, so a throw is not the signal — and neither is the text. The
+  // outcome is read off the BACKEND it reports, for the same reason the step
+  // above reads one: the router falls back to the Claude CLI, which answers this
+  // prompt perfectly well.
+  //
+  // Both halves are load-bearing, and each was measured failing alone: a bogus
+  // `HAIKU_VERTEX_MODEL` printed `decomposer vertex-answered  3 sub-questions`
+  // with no backend test, and a key-name drift printed the same with no
+  // usability test. See the header.
+  const decomposeStarted = performance.now();
+  try {
+    const result = await decomposeQuestion({
+      question: "Hva er forskjellen på et forhåndsvarsel og et endelig svar, og når sendes hvert av dem?",
+      botName: HAIKU_PROBE_BOT,
+      haikuBackend: "vertex",
+    });
+    // Usability read from `result.degraded`, which the decomposer SETS, rather
+    // than matched out of `result.rationale`, which the MODEL writes: two rounds
+    // of regex here each closed one degradation path and left the others open
+    // (measured live — a key-name drift lost the whole fan-out and this probe
+    // exited 0).
+    steps.push({
+      step: "decomposer",
+      // Mapped from the enumerated state, in the order that keeps each outcome
+      // TRUE. `call-failed` first: it means the whole chain threw — nothing ran,
+      // including the CLI floor — so it is `failed`, not `fell-back`. Testing
+      // the backend first put it in `fell-back`, and the explainer then told the
+      // reader "the Claude CLI answered instead" about a run where nothing did:
+      // exactly the claim a `nais` pod, which has no CLI, refutes.
+      outcome: result.degraded === "call-failed" ? "failed"
+        : result.backend !== "vertex" ? "fell-back"
+        : result.degraded ? "unusable"
+        : "vertex-answered",
+      backend: result.backend ?? null,
+      model: null,
+      ms: Math.round(performance.now() - decomposeStarted),
+      detail: redact(
+        `${result.degraded ? `degraded (${result.degraded})` : result.passthrough ? "passthrough" : `${result.subQuestions.length} sub-questions`}` +
+        `: ${result.rationale}`,
+      ).slice(0, 200),
+    });
+  } catch (err) {
+    steps.push({
+      step: "decomposer", outcome: "failed", backend: null, model: null,
+      ms: Math.round(performance.now() - decomposeStarted), detail: redact((err as Error).message).slice(0, 200),
+    });
+  }
+
+  return steps;
+}
+
+// ---------------------------------------------------------------------------
 // Report
 // ---------------------------------------------------------------------------
 
@@ -971,6 +1137,52 @@ if (RUN.has("refresh")) {
     failures.push(`probe D: ${probe.outcome} — the per-request credential did not recover a 401`);
   }
   say("");
+}
+
+if (RUN.has("haiku")) {
+  say(`── Probe E: the Haiku router on Vertex ${GEMINI_REGION}, through the shipped entry points ──`);
+  const steps = await probeHaikuRouter();
+  summary.haikuRouter = steps;
+  for (const st of steps) {
+    say(`  ${String(st.ms).padStart(5)}ms  ${st.step.padEnd(16)} ${st.outcome.padEnd(16)}` +
+        `${st.backend ? ` backend=${st.backend}` : ""}${st.model ? ` model=${st.model}` : ""}` +
+        `\n           ${st.detail}`);
+  }
+  const answered = steps.filter((st) => st.outcome === "vertex-answered").length;
+  // The explainer names only the outcomes THIS run produced. A `config`
+  // early-return yields one `failed` step and no others, and printing the
+  // two-paragraph fell-back/unparseable note for it described neither.
+  const seen = new Set(steps.map((st) => st.outcome));
+  const notes = [
+    seen.has("fell-back")
+      ? "    `fell-back` means the Claude CLI answered instead — which on this laptop looks like\n" +
+        "    success and in a pod is a refusal."
+      : null,
+    seen.has("unusable")
+      ? "    `unusable` means Vertex DID answer and the answer could not be used, which for the\n" +
+        "    decomposer means every knowledge lookup silently loses its fan-out."
+      : null,
+    // True for all FOUR producers of `failed`: the config early-return (nothing
+    // was attempted), either step's catch, and the decomposer's `call-failed`
+    // mapping — which is not a catch here, because `decomposeQuestion` catches
+    // its own. An earlier wording named the CLI floor unconditionally and so
+    // described a `nais` profile to a run that had set none — the same shape of
+    // sentence-the-run-refutes this probe exists to remove. (An earlier version
+    // of THIS comment counted three, omitting the mapping — the producer the
+    // reference `MUNINN_PROFILE=nais` run actually exercises.)
+    seen.has("failed")
+      ? "    `failed` means this step produced no answer at all. The detail line says which:\n" +
+        "    configuration refused before any call, or every backend in the chain threw."
+      : null,
+  ].filter(Boolean);
+  say(
+    answered === steps.length
+      ? "\n  ⇒ The decomposer and the extractors run on the same endpoint as the chat turn.\n"
+      : `\n  ⇒ At least one short call is not usable ON Vertex.\n${notes.join("\n")}\n`,
+  );
+  for (const st of steps) {
+    if (st.outcome !== "vertex-answered") failures.push(`probe E: ${st.step} — ${st.outcome}: ${st.detail}`);
+  }
 }
 
 if (JSON_MODE) console.log(redact(JSON.stringify(summary, null, 2)));

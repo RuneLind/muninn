@@ -85,8 +85,9 @@ const AUTH_FLAGS = [
   "NAIS_TOKEN_INTROSPECTION_ENDPOINT",
 ];
 
-/** The Vertex credential seam (`src/config.ts` → `resolveVertexConfig`). Four
- *  of these six are the AGENT SDK's own names, which is why they belong here:
+/** The Vertex credential seam (`src/config.ts` → `resolveVertexConfig`, plus the
+ *  Haiku router's `vertex` backend). Four of these are the AGENT SDK's own
+ *  names, which is why they belong here:
  *  the SDK reads `process.env` directly, so a developer who has run the Vertex
  *  smoke and left `CLAUDE_CODE_USE_VERTEX=1` in `.env` would have every
  *  `assertHaveAuth()` case waive the Anthropic-credential requirement — a green
@@ -99,6 +100,12 @@ const AUTH_FLAGS = [
  *  it is a personal credential, not an instance-profile flag, and the suites
  *  that care about it already set and clear it themselves. */
 const VERTEX_FLAGS = [
+  // The model the Haiku router's `vertex` backend calls. Latent rather than
+  // live today — the resolver's own tests pass an explicit env record — but the
+  // ROUTER path reads `process.env`, so the first assertion about the default
+  // model through it would be green on a machine with no override and red on
+  // one carrying `HAIKU_VERTEX_MODEL`. Exactly this file's failure shape.
+  "HAIKU_VERTEX_MODEL",
   "CLAUDE_CODE_USE_VERTEX",
   "ANTHROPIC_VERTEX_PROJECT_ID",
   "ANTHROPIC_VERTEX_BASE_URL",

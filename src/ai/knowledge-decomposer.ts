@@ -22,6 +22,24 @@ export interface DecomposeOptions {
   tracer?: Tracer;
 }
 
+/**
+ * WHY a result is a passthrough that nobody asked for.
+ *
+ * `decomposeQuestion` has exactly six outcomes: a fan-out, the one-sub-question
+ * passthrough the prompt PREFERS for a simple lookup, and four degradation SITES
+ * carrying the THREE kinds below — and a consumer has to tell the first two from
+ * the rest. It cannot do that from `passthrough` (the valid cheap path sets it)
+ * nor from `rationale`, which on the two `malformed` sites is whatever the MODEL
+ * wrote whenever it supplied anything, which is nearly always. Two rounds of
+ * regex over that field in `scripts/smoke-vertex.ts` each
+ * closed one door and left the others open; this is the enumeration instead.
+ *
+ *  - `call-failed`  — the router threw (no backend ran to completion).
+ *  - `unparseable`  — a model answered, and the answer was not JSON.
+ *  - `malformed`    — it was JSON, and carried no usable `subQuestions`.
+ */
+export type DecomposeDegradation = "call-failed" | "unparseable" | "malformed";
+
 export interface DecomposeResult {
   /** 1 entry = passthrough (no decomposition needed). 2–4 entries = fan-out. */
   subQuestions: string[];
@@ -30,6 +48,24 @@ export interface DecomposeResult {
   haikuMs: number;
   /** True when the model decided this is a passthrough, false when it fanned out. */
   passthrough: boolean;
+  /**
+   * The Haiku backend that ACTUALLY ran, when one did — `undefined` on a
+   * passthrough produced without a model call.
+   *
+   * The decomposer is otherwise the one router caller whose backend is
+   * unobservable from its result: the router falls back to the Claude CLI on any
+   * failure and this function swallows a failure into a passthrough, so
+   * "it returned sub-questions" says nothing about WHERE the question was sent.
+   * That is the question this path exists to answer on a deployment whose model
+   * calls must stay on one endpoint — the decomposer carries the user's question
+   * to a model before every knowledge lookup.
+   */
+  backend?: HaikuBackend;
+  /**
+   * Set when this result is a passthrough because something FAILED — absent on
+   * both valid outcomes. See {@link DecomposeDegradation}.
+   */
+  degraded?: DecomposeDegradation;
 }
 
 const MIN_SUB_QUESTIONS = 1;
@@ -71,6 +107,7 @@ export async function decomposeQuestion(opts: DecomposeOptions): Promise<Decompo
 
   const t0 = performance.now();
   let raw: string;
+  let backend: HaikuBackend | undefined;
   try {
     const haiku = await callHaikuWithFallback(prompt, {
       source: "knowledge-decompose",
@@ -81,10 +118,11 @@ export async function decomposeQuestion(opts: DecomposeOptions): Promise<Decompo
       tracer,
     });
     raw = haiku.result;
+    backend = haiku.backend;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log.warn("decompose_haiku_failed botName={botName} error={error} — falling back to passthrough", { botName, error: message });
-    return passthrough(question, "haiku call failed", performance.now() - t0);
+    return passthrough(question, "haiku call failed", performance.now() - t0, "call-failed");
   }
   const haikuMs = performance.now() - t0;
 
@@ -93,17 +131,20 @@ export async function decomposeQuestion(opts: DecomposeOptions): Promise<Decompo
     parsed = extractJson<RawResult>(raw);
   } catch {
     log.warn("decompose_parse_failed botName={botName} raw={raw} — falling back to passthrough", { botName, raw: raw.slice(0, 200) });
-    return passthrough(question, "could not parse decomposer response", haikuMs);
+    return { ...passthrough(question, "could not parse decomposer response", haikuMs, "unparseable"), backend };
   }
 
-  return normalize(parsed, question, haikuMs);
+  // Spread rather than threaded into `normalize`: that function is also called
+  // directly (and unit-tested) on a raw payload with no call behind it, so the
+  // backend belongs to THIS function, which made the call.
+  return { ...normalize(parsed, question, haikuMs), backend };
 }
 
 export function normalize(raw: RawResult, originalQuestion: string, haikuMs: number): DecomposeResult {
   const rationaleRaw = typeof raw.rationale === "string" ? raw.rationale.trim() : "";
 
   if (!Array.isArray(raw.subQuestions)) {
-    return passthrough(originalQuestion, rationaleRaw || "decomposer omitted subQuestions", haikuMs);
+    return passthrough(originalQuestion, rationaleRaw || "decomposer omitted subQuestions", haikuMs, "malformed");
   }
 
   const cleaned: string[] = [];
@@ -115,7 +156,7 @@ export function normalize(raw: RawResult, originalQuestion: string, haikuMs: num
   }
 
   if (cleaned.length < MIN_SUB_QUESTIONS) {
-    return passthrough(originalQuestion, rationaleRaw || "decomposer returned no usable sub-questions", haikuMs);
+    return passthrough(originalQuestion, rationaleRaw || "decomposer returned no usable sub-questions", haikuMs, "malformed");
   }
 
   const clamped = cleaned.slice(0, MAX_SUB_QUESTIONS);
@@ -129,11 +170,23 @@ export function normalize(raw: RawResult, originalQuestion: string, haikuMs: num
   };
 }
 
-function passthrough(question: string, rationale: string, haikuMs: number): DecomposeResult {
+/**
+ * The degraded passthrough — every caller of THIS helper is one, which is why
+ * `degraded` is a required parameter rather than an option: a degradation site
+ * added later cannot forget to classify itself. The two VALID outcomes build
+ * their result inline in `normalize` and never come through here.
+ */
+function passthrough(
+  question: string,
+  rationale: string,
+  haikuMs: number,
+  degraded: DecomposeDegradation,
+): DecomposeResult {
   return {
     subQuestions: [question],
     rationale,
     haikuMs,
     passthrough: true,
+    degraded,
   };
 }
