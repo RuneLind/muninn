@@ -82,11 +82,35 @@ export function assertVertexEndpointAllowed(baseUrl: string, botName: string): v
 
   let path: string;
   try {
-    path = new URL(baseUrl).pathname.toLowerCase();
+    path = new URL(baseUrl).pathname;
   } catch {
     return;
   }
-  if (PATH_REGION.exec(path)?.[1] === VERTEX_GLOBAL_REGION) refuse("/locations/global/ in the path");
+  if (pathRegion(path) === VERTEX_GLOBAL_REGION) refuse("/locations/global/ in the path");
+}
+
+/**
+ * The region a Vertex resource path names, DECODED.
+ *
+ * `URL.pathname` preserves percent-escapes, and Google's API frontend decodes
+ * path segments before it resolves the resource — measured against the live
+ * endpoint: `…/locations/%67lobal/endpoints/openapi/chat/completions` answers
+ * 200 exactly as `…/locations/global/…` does. So a raw string compare refused
+ * one spelling of a URL and cheerfully minted a bearer token for the other
+ * spelling of THE SAME URL.
+ */
+function pathRegion(pathname: string): string | null {
+  const raw = PATH_REGION.exec(pathname)?.[1];
+  if (raw === undefined) return null;
+  let decoded = raw;
+  try {
+    decoded = decodeURIComponent(raw);
+  } catch {
+    // A lone `%` throws. Such a segment cannot decode to `global` on Google's
+    // side either — it is rejected there — so the raw form is the honest
+    // comparison rather than a reason to refuse.
+  }
+  return decoded.toLowerCase();
 }
 
 // ── The access token ─────────────────────────────────────────────
@@ -125,6 +149,10 @@ const REFRESH_MARGIN_MS = 120_000;
  */
 const GCLOUD_ASSUMED_TTL_MS = 30 * 60_000;
 
+/** Google's own ceiling for an OAuth access token. Nothing may be cached longer,
+ *  whatever a credential source claims. */
+const MAX_TOKEN_TTL_MS = 60 * 60_000;
+
 /** The metadata server answers in single-digit ms in a pod; off one it is an
  *  unroutable address that must not delay `gcloud` getting its turn. */
 const METADATA_TIMEOUT_MS = 700;
@@ -140,10 +168,14 @@ async function fetchFromMetadataServer(): Promise<VertexAccessToken | null> {
     if (!body.access_token) return null;
     // A missing or nonsensical `expires_in` falls back to the same conservative
     // window gcloud gets, rather than to `now` (a refresh storm) or to an hour
-    // (a stale token).
-    const ttlMs = typeof body.expires_in === "number" && body.expires_in > 0
+    // (a stale token). CLAMPED at the top, because the number is trusted
+    // verbatim otherwise: one absurd-but-numeric value (`1e15`) would pin a
+    // single token for the life of the process. An hour is Google's own maximum
+    // for these tokens, so the clamp can only ever shorten a real answer.
+    const reportedMs = typeof body.expires_in === "number" && body.expires_in > 0
       ? body.expires_in * 1000
       : GCLOUD_ASSUMED_TTL_MS;
+    const ttlMs = Math.min(reportedMs, MAX_TOKEN_TTL_MS);
     return { token: body.access_token, expiresAtMs: Date.now() + ttlMs, source: "metadata-server" };
   } catch {
     return null; // Not on GCE — `gcloud` is the other shape this runs in.
@@ -192,34 +224,65 @@ export class VertexTokenProvider {
   #cached: VertexAccessToken | null = null;
   #inFlight: Promise<VertexAccessToken> | null = null;
   #loggedSource: string | null = null;
+  /** Bumped by `invalidate()`. A fetch that started before the bump must not
+   *  install its result — see there. */
+  #generation = 0;
 
   constructor(private readonly fetcher: VertexTokenFetcher = defaultVertexTokenFetcher) {}
 
   async get(now: number = Date.now()): Promise<string> {
     const cached = this.#cached;
-    if (cached && cached.expiresAtMs - REFRESH_MARGIN_MS > now) return cached.token;
+    if (cached && this.#usable(cached, now)) return cached.token;
 
-    // Await an in-flight fetch rather than starting a second one. Note this is
-    // read AFTER the cache check, so a caller that arrives during a refresh gets
-    // the new token rather than the expiring one it would otherwise reuse.
-    if (this.#inFlight) return (await this.#inFlight).token;
+    // Whatever comes back is returned, even if it is already inside the margin.
+    // Refetching on that condition was tried and reverted: a token legitimately
+    // near its end is exactly what a source hands over just before it rolls, so
+    // the branch fired on the ordinary refresh and fetched twice for nothing. A
+    // source that keeps returning near-dead tokens is not something a second
+    // call fixes — the 401 retry in `openai-compat-auth.ts` is that backstop.
+    return (await this.#fetchShared()).token;
+  }
 
+  /**
+   * Drop the cached token — after a 401, where the expiry estimate was wrong.
+   *
+   * Detaching `#inFlight` is the load-bearing half. Clearing only `#cached` made
+   * this a NO-OP whenever a fetch happened to be in flight: the next `get()`
+   * joined that flight, and the flight then re-installed the very token that had
+   * just been refused. The generation bump is the other half — the detached
+   * flight must not write `#cached` when it lands either.
+   */
+  invalidate(): void {
+    this.#cached = null;
+    this.#inFlight = null;
+    this.#generation++;
+  }
+
+  #usable(token: VertexAccessToken, now: number): boolean {
+    return token.expiresAtMs - REFRESH_MARGIN_MS > now;
+  }
+
+  async #fetchShared(): Promise<VertexAccessToken> {
+    // Join an in-flight fetch rather than starting a second one. No expiry test
+    // here, and none is owed: a flight in progress is at most one fetch old
+    // (sub-second on both sources), so its token cannot be staler than one this
+    // caller would have fetched itself.
+    if (this.#inFlight) return await this.#inFlight;
+
+    const generation = this.#generation;
     const flight = this.fetcher().finally(() => {
       if (this.#inFlight === flight) this.#inFlight = null;
     });
     this.#inFlight = flight;
     const fresh = await flight;
-    this.#cached = fresh;
-    if (this.#loggedSource !== fresh.source) {
-      this.#loggedSource = fresh.source;
-      log.info("Vertex access token from {source}", { source: fresh.source });
+    if (this.#generation === generation) {
+      this.#cached = fresh;
+      if (this.#loggedSource !== fresh.source) {
+        this.#loggedSource = fresh.source;
+        log.info("Vertex access token from {source}", { source: fresh.source });
+      }
     }
-    return fresh.token;
-  }
-
-  /** Drop the cached token — after a 401, where the estimate above was wrong. */
-  invalidate(): void {
-    this.#cached = null;
+    return fresh;
   }
 }
 

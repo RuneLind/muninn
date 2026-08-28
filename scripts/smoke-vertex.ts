@@ -654,7 +654,7 @@ interface RefreshProbe { outcome: RefreshOutcome; firstStatus: number | null; de
 
 async function probeTokenRefresh(): Promise<RefreshProbe> {
   const started = performance.now();
-  const { createAuthorizer } = await import("../src/ai/connectors/openai-compat-auth.ts");
+  const { createAuthorizer, requestWithRefresh } = await import("../src/ai/connectors/openai-compat-auth.ts");
   const { OpenAiCompatHttpError, doStreamRequest } = await import("../src/ai/connectors/openai-compat-stream.ts");
   const { VertexTokenProvider } = await import("../src/ai/vertex-access.ts");
 
@@ -672,7 +672,6 @@ async function probeTokenRefresh(): Promise<RefreshProbe> {
       source: "gcloud-adc" as const,
     };
   });
-  const authorizer = createAuthorizer(baseUrl, "vertex-smoke", provider);
   const bot = { name: "vertex-smoke" } as never;
   const body = {
     model: `google/${GEMINI_MODEL}`,
@@ -680,23 +679,36 @@ async function probeTokenRefresh(): Promise<RefreshProbe> {
     stream: true, stream_options: { include_usage: true }, max_tokens: 64,
   };
   const url = `${baseUrl}/chat/completions`;
-  const done = (outcome: RefreshOutcome, detail: string, firstStatus: number | null): RefreshProbe =>
+  let firstStatus: number | null = null;
+  let attempts = 0;
+  const done = (outcome: RefreshOutcome, detail: string): RefreshProbe =>
     ({ outcome, firstStatus, detail: redact(detail).slice(0, 220), ms: Math.round(performance.now() - started) });
 
+  // Everything below is inside the try, INCLUDING `createAuthorizer` — its
+  // ConfigError embeds the base URL, which embeds the project id, and thrown
+  // from out here it reached the terminal as an uncaught stack trace, past every
+  // `redact()` this file promises in its header.
   try {
-    await doStreamRequest(url, await authorizer.headers(), body, 60_000, GEMINI_MODEL, bot);
-    return done("no-refusal", "the invalid token was accepted — nothing was measured", 200);
+    const authorizer = createAuthorizer(baseUrl, "vertex-smoke", provider);
+    // The SHIPPED sequence, not a copy of it — the same function the connector
+    // calls. `attempts` is what makes "recovered" mean recovered: a single
+    // successful request would otherwise report the same outcome.
+    const ok = await requestWithRefresh(authorizer, async (headers) => {
+      attempts++;
+      try {
+        return await doStreamRequest(url, headers, body, 60_000, GEMINI_MODEL, bot);
+      } catch (err) {
+        if (firstStatus === null) firstStatus = err instanceof OpenAiCompatHttpError ? err.status : null;
+        throw err;
+      }
+    });
+    if (attempts < 2) return done("no-refusal", "the invalid token was accepted — nothing was measured");
+    return done("refreshed-and-recovered", `answered ${JSON.stringify(ok.resultText.trim().slice(0, 40))}`);
   } catch (err) {
-    const status = err instanceof OpenAiCompatHttpError ? err.status : null;
-    if (!authorizer.refreshAfterFailure(err)) {
-      return done("no-retry", `the seam declined to retry: ${(err as Error).message}`, status);
-    }
-    try {
-      const ok = await doStreamRequest(url, await authorizer.headers(), body, 60_000, GEMINI_MODEL, bot);
-      return done("refreshed-and-recovered", `answered ${JSON.stringify(ok.resultText.trim().slice(0, 40))}`, status);
-    } catch (retryErr) {
-      return done("retry-failed", (retryErr as Error).message, status);
-    }
+    const message = (err as Error).message;
+    return attempts < 2
+      ? done("no-retry", `the seam declined to retry: ${message}`)
+      : done("retry-failed", message);
   }
 }
 

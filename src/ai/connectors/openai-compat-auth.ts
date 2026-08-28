@@ -58,10 +58,13 @@ function vertexAuthorizer(provider: VertexTokenProvider): RequestAuthorizer {
   return {
     headers: async () => ({ ...JSON_HEADERS, Authorization: `Bearer ${await provider.get()}` }),
     refreshAfterFailure: (err) => {
-      // 401 only, and one retry only. Vertex answers 401 UNAUTHENTICATED for an
-      // expired or invalid token and 403 PERMISSION_DENIED for a credential that
-      // is valid but not entitled (measured) — retrying the latter would turn a
-      // clear "this identity may not call this model" into a slower one.
+      // 401 only, and one retry only. Measured against the live endpoint: an
+      // invalid or expired token answers 401 UNAUTHENTICATED, while 403
+      // PERMISSION_DENIED is Google refusing the CALLER or the endpoint — an org
+      // policy restricting which Vertex endpoints a project may use answers it,
+      // for instance. A fresh token cannot change either, so retrying a 403 would
+      // turn a clear refusal into a slower one. (A model the project may not call
+      // is a third answer again, 404, and is likewise not a credential problem.)
       if (!(err instanceof OpenAiCompatHttpError) || err.status !== 401) return false;
       log.warn("Vertex returned 401 — discarding the cached access token and retrying once");
       provider.invalidate();
@@ -83,4 +86,28 @@ export function createAuthorizer(
   if (!isVertexEndpoint(baseUrl)) return staticKeyAuthorizer();
   assertVertexEndpointAllowed(baseUrl, botName);
   return vertexAuthorizer(provider);
+}
+
+
+/**
+ * One request, plus ONE retry if the failure was a stale credential.
+ *
+ * Lives here rather than inside the connector so there is exactly ONE
+ * implementation of the sequence: the connector calls it, and so does the
+ * `--probe=refresh` measurement in `scripts/smoke-vertex.ts`. A probe that
+ * re-implemented the sequence would keep reporting success after the shipped one
+ * regressed — which is the single thing that probe exists to rule out.
+ *
+ * `send` is called at most twice and is handed fresh headers each time.
+ */
+export async function requestWithRefresh<T>(
+  authorizer: RequestAuthorizer,
+  send: (headers: Record<string, string>) => Promise<T>,
+): Promise<T> {
+  try {
+    return await send(await authorizer.headers());
+  } catch (err) {
+    if (!authorizer.refreshAfterFailure(err)) throw err;
+    return await send(await authorizer.headers());
+  }
 }
