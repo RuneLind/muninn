@@ -400,8 +400,10 @@ export async function renderResearchPage(): Promise<string> {
     // unit tests. \`research-page.test.ts\` now evaluates these bodies against the
     // rendered page, so the next one fails there instead of in a browser.
     // --- injected-fns:start --- (every \`.toString()\` injection goes BETWEEN the
-    // markers; research-page.test.ts discovers them from here, evaluates them, and
-    // calls each across every decline reason. One placed outside is unguarded.)
+    // markers, spelled \`var NAME = function\`; research-page.test.ts discovers
+    // them from here, evaluates them, and calls each across every decline reason.
+    // It REFUSES an arrow- or const-form injection, which its discovery cannot
+    // see, and an injection placed outside the markers is not guarded at all.)
     var DECLINE_REASONS = ${JSON.stringify(DECLINE_REASONS)};
     var toDeclineReason = ${toDeclineReason.toString()};
     var askDeclineReason = ${askDeclineReason.toString()};

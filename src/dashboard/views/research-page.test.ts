@@ -96,8 +96,26 @@ test("every function injected into the page can actually run there, on EVERY arm
   expect(end).toBeGreaterThan(start);
   const injected = html.slice(start, end);
 
+  // Discovery only sees `var NAME = function`, so the block's own DECLARATIONS
+  // are held to that grammar — otherwise the guard silently stops covering an
+  // arrow- or const-form injection while the page comment promises it does. A
+  // future author gets a red test here, not a ReferenceError in someone's
+  // browser. Anchored to the injection indent so a `const` or `=>` INSIDE a
+  // transpiled function body (which is ordinary and fine) is not caught.
+  const declarations = injected.split("\n").filter((l) => /^\s{4}(?:var|const|let)\s/.test(l));
+  expect(declarations.length).toBeGreaterThan(0);
+  for (const line of declarations) {
+    expect(line).toMatch(/^\s{4}var \w+ = (?:function\b|\[|\{|")/);
+  }
+
   // Discovered, not listed: a fifth injection is covered the day it lands.
-  const names = [...injected.matchAll(/var (\w+) = function/g)].map((m) => m[1]!);
+  // Derived from the DECLARATION lines, never from the raw block — the block
+  // carries prose, and a comment quoting the grammar (this page's does) otherwise
+  // yields a phantom name whose only symptom is a confusing ReferenceError from
+  // the return-object composition below.
+  const names = declarations
+    .map((l) => l.match(/^\s{4}var (\w+) = function/)?.[1])
+    .filter((n): n is string => Boolean(n));
   expect(names).toContain("askDeclineReason");
   expect(names).toContain("askStatusText");
 

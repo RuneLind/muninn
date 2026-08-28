@@ -2418,9 +2418,9 @@ describe("POST /api/wiki/ask/chat", () => {
     // the `!direct ?` scoping entirely leaves the file green), and a test that
     // cannot fail is worse than none.
     //
-    // ⚠️ The two `askDeclined is ignored outside direct mode` cases above and
-    // below are the SAME non-cover on their scoping half, for the same reason —
-    // they earn their keep on the 400//type half only. Do not read them as
+    // ⚠️ The two `askDeclined is ignored …` cases (":2381" above, "…here too"
+    // below) are the SAME non-cover on their scoping half, for the same reason —
+    // they earn their keep on the 400/type half only. Do not read them as
     // proving the mode scoping. Pinning that needs a seam that can observe it
     // (the resolved value, not the rendered seed).
 
