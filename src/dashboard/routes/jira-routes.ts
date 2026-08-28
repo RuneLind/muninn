@@ -57,7 +57,7 @@ import { corsHeaders } from "../../auth/cors.ts";
 import { getMcpStatus, findCriticalDown, type McpServerStatus } from "../../ai/mcp-status.ts";
 import { jiraBotMissingMessage, resolveJiraBotLive } from "../../jira/bot.ts";
 import { findJiraTemplate, resolveJiraTemplates } from "../../jira/templates.ts";
-import { JIRA_FULL_MCP_SERVERS } from "../../jira/tool-fence.ts";
+import { JIRA_FULL_MCP_SERVERS, fullDepthUnavailableMessage, type FullDepthGap } from "../../jira/tool-fence.ts";
 import { isValidUuid } from "./route-utils.ts";
 import { renderJiraFallback, renderJiraPage } from "../views/jira-page.ts";
 import { parseArchiveAll } from "../views/components/jira-archive-pure.ts";
@@ -168,16 +168,18 @@ function isJsonRequest(c: Context): boolean {
 }
 
 /**
- * The `Full` pre-flight's 503 body. Its own function because the sentence names
- * the two servers and the remedy, and it is the one refusal a reader is expected
- * to act on rather than report.
+ * The `Full` pre-flight's 503 body. The sentence itself lives in
+ * `fullDepthUnavailableMessage` (`src/jira/tool-fence.ts`) beside the fence it
+ * describes, because the wording depends on WHICH way the depth is blocked —
+ * this function only pairs it with the machine-readable server list.
  */
-function fullDepthUnavailable(down: string[]): { error: string; unreachableServers: string[] } {
+function fullDepthUnavailable(gap: FullDepthGap): { error: string; unreachableServers: string[] } {
+  const blocked = new Set<string>([...gap.unconfigured, ...gap.down]);
   return {
-    error:
-      `Full teknisk dybde krever kodeverktøyene, og disse er ikke tilgjengelige: ${down.join(", ")}. ` +
-      `Start dem fra dashbordet (/serena og yggdrasil), eller velg dybde «Skisse».`,
-    unreachableServers: down,
+    error: fullDepthUnavailableMessage(gap),
+    // The field name predates the split and stays the union: a caller asking
+    // "which servers blocked this" wants both, and the sentence carries the why.
+    unreachableServers: JIRA_FULL_MCP_SERVERS.filter((name) => blocked.has(name)),
   };
 }
 
@@ -236,20 +238,37 @@ function parseJiraThreadDraftBody(
 }
 
 /**
- * Which of `code`/`yggdrasil` are not usable right now.
+ * Which of `code`/`yggdrasil` are not usable right now, and WHY — the two states
+ * kept apart rather than merged.
  *
- * A server ABSENT from the probe counts as missing, not as fine: the probe lists
- * every server in the bot's `.mcp.json`, so an absent name means the bot is not
- * configured with it at all — which for `Full` is the same outcome as down.
- * `findCriticalDown` is consulted too so a bot that marks these critical gets the
- * same verdict from either direction.
+ * A server ABSENT from the probe is not fine: the probe lists every server in the
+ * bot's `.mcp.json`, so an absent name means the bot is not configured with it at
+ * all. For whether `Full` can run, that is the same outcome as down — which is
+ * why {@link missingFullServers} still merges them — but for what to TELL the
+ * reader it is the opposite: nothing can be started, so the remedy must not be
+ * offered. `findCriticalDown` is consulted too so a bot that marks these critical
+ * gets the same verdict from either direction.
  */
-export function missingFullServers(servers: McpServerStatus[]): string[] {
+export function classifyFullServers(servers: McpServerStatus[]): FullDepthGap {
   const criticalDown = new Set(findCriticalDown(servers).map((s) => s.name));
-  return JIRA_FULL_MCP_SERVERS.filter((name) => {
+  const unconfigured: string[] = [];
+  const down: string[] = [];
+  for (const name of JIRA_FULL_MCP_SERVERS) {
     const s = servers.find((x) => x.name === name);
-    return !s || s.status === "down" || criticalDown.has(name);
-  });
+    // Absent from the probe = absent from `.mcp.json` = this instance was never
+    // built with it. Present but down = something a reader can go start.
+    if (!s) unconfigured.push(name);
+    else if (s.status === "down" || criticalDown.has(name)) down.push(name);
+  }
+  return { unconfigured, down };
+}
+
+export function missingFullServers(servers: McpServerStatus[]): string[] {
+  const gap = classifyFullServers(servers);
+  const blocked = new Set<string>([...gap.unconfigured, ...gap.down]);
+  // Filtered through the canonical list so the order is the fence's, not the
+  // order the two buckets happened to fill.
+  return JIRA_FULL_MCP_SERVERS.filter((name) => blocked.has(name));
 }
 
 export function registerJiraRoutes(app: Hono, config: Config): void {
@@ -438,8 +457,8 @@ export function registerJiraRoutes(app: Hono, config: Config): void {
         });
       }
       if (body.depth === "full") {
-        const down = missingFullServers(mcpServers);
-        if (down.length > 0) return c.json(fullDepthUnavailable(down), 503);
+        const gap = classifyFullServers(mcpServers);
+        if (gap.unconfigured.length + gap.down.length > 0) return c.json(fullDepthUnavailable(gap), 503);
       }
 
       // **Keyed on the THREAD ALONE.** Everything else that identifies a draft —

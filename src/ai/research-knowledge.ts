@@ -300,9 +300,35 @@ export function formatResearchResultText(result: ResearchKnowledgeResult): strin
   }
   lines.push("");
 
+  // A5 (nais slate): a transport failure and a genuinely empty corpus used to end
+  // in the same sentence, so a bot whose `KNOWLEDGE_API_URL` pointed nowhere read
+  // its own outage as "the corpus has nothing" and answered unsourced with
+  // confidence. The per-sub-question line already carries `error: …` via
+  // formatSubMeta; what was missing is the VERDICT the model acts on. Same
+  // separation `JiraCoverage` makes between `no_hits` and `unreachable`.
+  const total = decomposition.subQuestions.length;
+  const failedCount = subSearches.filter((s) => s?.error).length;
+
   if (results.length === 0) {
-    lines.push(`No results across ${decomposition.subQuestions.length} sub-question${decomposition.subQuestions.length === 1 ? "" : "s"}.`);
+    if (failedCount > 0 && failedCount === total) {
+      lines.push(`**Knowledge search is UNAVAILABLE — this is NOT an empty corpus.**`);
+      lines.push("");
+      lines.push(
+        `All ${total} sub-search${total === 1 ? "" : "es"} failed before reaching the knowledge base. ` +
+        `Tell the user the source lookup is unavailable in this instance, and answer only from what is ` +
+        `already in this conversation. Do not present anything as checked against the sources.`,
+      );
+      return lines.join("\n");
+    }
+    lines.push(`No results across ${total} sub-question${total === 1 ? "" : "s"}.`);
     return lines.join("\n");
+  }
+
+  // Some reached the knowledge base and some did not: the hits below are real,
+  // but they are not the whole answer, and only the tool text can say so.
+  if (failedCount > 0) {
+    lines.push(`**Partial: ${failedCount} of ${total} sub-searches failed to reach the knowledge base — the results below are incomplete.**`);
+    lines.push("");
   }
 
   lines.push(`## Results (${results.length} unique documents)`);

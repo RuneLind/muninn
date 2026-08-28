@@ -19,3 +19,40 @@
 
 /** MCP servers `Full` depth is allowed to reach. The only path to NAV source. */
 export const JIRA_FULL_MCP_SERVERS = ["code", "yggdrasil"] as const;
+
+/**
+ * How `Full` depth is blocked, per server. The probe already tells these two
+ * states apart and the refusal used to collapse them: an ABSENT name means the
+ * bot carries no such entry in its `.mcp.json` at all — the nais pod's steady
+ * state, where the overlay ships only `research` — while a present-but-`down`
+ * name is a laptop with the Serena listeners stopped. Only the second has a
+ * remedy, and offering it in a pod sends the reader to a dashboard that cannot
+ * start anything.
+ */
+export interface FullDepthGap {
+  /** Named in {@link JIRA_FULL_MCP_SERVERS} but absent from the bot's `.mcp.json`. */
+  unconfigured: string[];
+  /** Configured, but the probe reports it down. */
+  down: string[];
+}
+
+/**
+ * The `Full` pre-flight's refusal sentence. Its own function because the wording
+ * is the whole point: it is the one refusal a reader is expected to act on, and
+ * the action differs by state. Naming a server the instance was never built with
+ * as "nede" invites a reader to go start it.
+ */
+export function fullDepthUnavailableMessage(gap: FullDepthGap): string {
+  const clauses: string[] = [];
+  if (gap.unconfigured.length > 0) {
+    clauses.push(`de er ikke tilgjengelige i denne installasjonen: ${gap.unconfigured.join(", ")}`);
+  }
+  if (gap.down.length > 0) {
+    clauses.push(`disse er nede: ${gap.down.join(", ")}`);
+  }
+  // The remedy is offered only when something can actually be started.
+  const remedy = gap.down.length > 0
+    ? "Start dem fra dashbordet (/serena og yggdrasil), eller velg dybde «Skisse»."
+    : "Velg dybde «Skisse».";
+  return `Full teknisk dybde krever kodeverktøyene, og ${clauses.join("; ")}. ${remedy}`;
+}
