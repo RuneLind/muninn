@@ -1,3 +1,4 @@
+import { VERTEX_NOTE_TEXT } from "../models-overview.ts";
 import { SHARED_STYLES, renderNav } from "./shared-styles.ts";
 import { botSelectorStyles, botSelectorHtml } from "./components/bot-selector.ts";
 import { helpersClientScript } from "./components/helpers-client.ts";
@@ -739,20 +740,16 @@ export async function renderModelsPage(): Promise<string> {
       // nothing, so the winning VARIABLE is named beside the value.
       var vx = m.vertex;
       if (vx) {
-        // The sentence is chosen SERVER-side (vertexNoteKind), because this
-        // block is JS in a template literal and nothing here can be unit-tested
-        // below "does it parse" — which is how a single sentence came to claim
-        // "project/region are set" one line above a row saying "no region". The
-        // prose stays here; the rule and its four cases live in
-        // models-overview.ts with tests.
+        // Both the KIND and the SENTENCE come from models-overview.ts, the
+        // second one INTERPOLATED rather than written here. Leaving the prose in
+        // this block put it back out of reach of every test: rewriting one of
+        // these strings to something plainly false failed nothing, because a
+        // template literal is only covered by a "does it parse" guard. That is
+        // how the note came to claim a region was set one line above a row
+        // reading "no region".
         // NB no backticks in this block: it is inside a TS template literal, so
-        // one ENDS the literal. Second time in this PR.
-        var vxNotes = {
-          'adc': 'CLAUDE_CODE_USE_VERTEX — the claude-sdk connector authenticates with ADC, no ANTHROPIC_API_KEY needed',
-          'declared': 'project and region are set but CLAUDE_CODE_USE_VERTEX is not — the SDK still uses an Anthropic credential',
-          'partial': 'partly configured and CLAUDE_CODE_USE_VERTEX is not set — see the target row below for what is missing',
-          'per-model-only': 'only a per-model region override is set — no project, no region, and CLAUDE_CODE_USE_VERTEX is not on'
-        };
+        // one ENDS the literal. Twice in this PR already.
+        var vxNotes = ${JSON.stringify(VERTEX_NOTE_TEXT)};
         h += machineRow('Vertex',
           vx.enabled ? val('enabled') : val('declared, not enabled', 'warn'),
           vxNotes[vx.note] || '');

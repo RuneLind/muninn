@@ -884,6 +884,35 @@ export async function assembleModelsOverview(
  *                    target row directly below it says what is missing.
  *   `per-model-only` off, with nothing set but a per-model region override.
  */
+/**
+ * The sentence per kind. Here, WITH the rule, and interpolated into the page —
+ * not written as a literal inside the view.
+ *
+ * The previous round put the rule here and left the prose in `models-page.ts`,
+ * on the reasoning that presentation belongs in the view. Measured: rewriting
+ * one of those strings to something plainly false failed NO test, because they
+ * live inside a template literal that only a "does this parse" guard covers. So
+ * the untested surface had moved, not gone — and the `declared` sentence was
+ * still lying, claiming a region on a config whose region is a base URL. Prose
+ * and rule travel together now, and the page interpolates this map.
+ */
+export const VERTEX_NOTE_TEXT: Record<VertexView["note"], string> = {
+  adc: "CLAUDE_CODE_USE_VERTEX — the claude-sdk connector authenticates with ADC, no ANTHROPIC_API_KEY needed",
+  // "a region or a base URL", because `hasRegion` is satisfied by either — and
+  // saying "region" flatly reproduced the exact contradiction this whole note
+  // exists to remove: it rendered directly above a "Vertex target: no region"
+  // row on the EU multi-region shape, which is a first-class configuration.
+  declared: "a project and a region or base URL are set but CLAUDE_CODE_USE_VERTEX is not — the SDK still uses an Anthropic credential",
+  partial: "partly configured and CLAUDE_CODE_USE_VERTEX is not set — see the target row below for what is missing",
+  "per-model-only": "only a per-model region override is set — no project, no region, and CLAUDE_CODE_USE_VERTEX is not on",
+};
+
+/**
+ * ⚠️ Exported and pure, so it can be called with a shape `vertexInfo` would
+ * never hand it: an all-empty config answers `per-model-only`, a sentence
+ * claiming an override that is not there. Unreachable through the card, which
+ * returns `null` for that shape first — but do not reuse this without the gate.
+ */
 export function vertexNoteKind(v: VertexConfig): VertexView["note"] {
   if (v.enabled) return "adc";
   const hasProject = !!v.projectId;
@@ -910,5 +939,5 @@ function vertexInfo(errors: string[]): VertexView | null {
 }
 
 export function _internalsForTest() {
-  return { haikuBackendOrigin, uniqSorted, computeModelMismatch, buildWhyChain, vertexInfo, vertexNoteKind, EMBEDDINGS_MODEL, GARDENER_DRAFT_THINKING_MAX_TOKENS };
+  return { haikuBackendOrigin, uniqSorted, computeModelMismatch, buildWhyChain, vertexInfo, vertexNoteKind, VERTEX_NOTE_TEXT, EMBEDDINGS_MODEL, GARDENER_DRAFT_THINKING_MAX_TOKENS };
 }

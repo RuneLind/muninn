@@ -675,3 +675,29 @@ test("vertexInfo carries the note kind onto the card payload", () => {
     expect(vertexInfo([])!.note).toBe("partial");
   });
 });
+
+test("VERTEX_NOTE_TEXT: every kind has a sentence, and none claims more than its kind knows", () => {
+  // ⚠️ The prose used to live in the view, where rewriting a sentence to
+  // something plainly false failed NO test — a template literal is covered only
+  // by "does it parse". These assertions are what that guard could not give.
+  const { VERTEX_NOTE_TEXT, vertexNoteKind } = _internalsForTest();
+  const kinds = ["adc", "declared", "partial", "per-model-only"] as const;
+  for (const k of kinds) expect(VERTEX_NOTE_TEXT[k].length).toBeGreaterThan(20);
+
+  // `declared` is reachable with a base URL and NO region name (the EU
+  // multi-region shape), so a flat "region is set" contradicts the target row
+  // rendered directly below it.
+  const base: VertexConfig = {
+    enabled: false, projectId: "p", projectIdSource: "VERTEX_PROJECT_ID",
+    region: null, regionSource: null, baseUrl: "https://aiplatform.eu.rep.googleapis.com",
+    perModelRegions: [],
+  };
+  expect(vertexNoteKind(base)).toBe("declared");
+  expect(VERTEX_NOTE_TEXT.declared).toContain("base URL");
+
+  // Only `adc` may claim Vertex is on; the other three must say it is not.
+  expect(VERTEX_NOTE_TEXT.adc).toContain("CLAUDE_CODE_USE_VERTEX —");
+  for (const k of ["declared", "partial", "per-model-only"] as const) {
+    expect(VERTEX_NOTE_TEXT[k]).toMatch(/CLAUDE_CODE_USE_VERTEX is not/);
+  }
+});
