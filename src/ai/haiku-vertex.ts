@@ -27,6 +27,13 @@ import type { VertexTokenProvider } from "./vertex-access.ts";
  * Anthropic-on-Vertex (`@anthropic-ai/vertex-sdk`) would be the other shape and
  * is deliberately NOT built: measured 2026-08-28, no Anthropic model is callable
  * in the region this targets, so it would be a backend with nothing to call.
+ *
+ * One consequence to know, since compliance is the reason this exists: a FAILURE
+ * here — including a benign `max_tokens` truncation, which throws below — sends
+ * the router to its CLI floor, which re-sends the same prompt (carrying the
+ * user's question) to a different provider. That is the right trade for an
+ * instance that has a CLI, and it does not arise on the profile that must not
+ * leak: `MUNINN_PROFILE=nais` ships no CLI and `spawnHaiku` refuses instead.
  */
 
 const log = getLog("ai", "haiku-vertex");
@@ -80,7 +87,13 @@ export function vertexOpenAiBaseUrl(project: string, location: string): string {
 
 export type VertexHaikuTargetResult =
   | { ok: true; target: VertexHaikuTarget }
-  | { ok: false; missing: string };
+  /**
+   * `reason` is a COMPLETE phrase, not a variable name. It used to be the name
+   * alone, with both call sites appending "is not set" — which told an operator
+   * whose region was set-but-malformed to go looking for a variable sitting
+   * right there in their `.env`.
+   */
+  | { ok: false; reason: string };
 
 /**
  * Where a Vertex Haiku call would go, or WHICH variable is missing.
@@ -100,9 +113,15 @@ export function resolveVertexHaikuTarget(
 ): VertexHaikuTargetResult {
   const read = (name: string): string => (env[name] ?? "").trim();
   const project = read("ANTHROPIC_VERTEX_PROJECT_ID") || read("VERTEX_PROJECT_ID");
-  const region = read("CLOUD_ML_REGION") || read("VERTEX_REGION");
-  if (!project) return { ok: false, missing: "ANTHROPIC_VERTEX_PROJECT_ID / VERTEX_PROJECT_ID" };
-  if (!region) return { ok: false, missing: "CLOUD_ML_REGION / VERTEX_REGION" };
+  // LOWERCASED, not case-refused. A mixed-case region works on this path today
+  // (`URL.hostname` lowercases an https host, so `isVertexEndpoint` matches and
+  // the Google-token path is taken), and `resolveVertexConfig` — reading the
+  // same `CLOUD_ML_REGION` for the Agent SDK — applies no case rule at all.
+  // Refusing it here would mean one `.env` line puts `claude-sdk` on Vertex
+  // while the Haiku router quietly falls back to the CLI.
+  const region = (read("CLOUD_ML_REGION") || read("VERTEX_REGION")).toLowerCase();
+  if (!project) return { ok: false, reason: "ANTHROPIC_VERTEX_PROJECT_ID / VERTEX_PROJECT_ID is not set" };
+  if (!region) return { ok: false, reason: "CLOUD_ML_REGION / VERTEX_REGION is not set" };
   // A region becomes a HOSTNAME LABEL below, so it has to be one. The failure a
   // dot buys is not a bad URL: `aiplatform.eu.west.rep.googleapis.com` does not
   // match `isVertexEndpoint`, so `createAuthorizer` falls through to the
@@ -111,7 +130,7 @@ export function resolveVertexHaikuTarget(
   // early-returns on a host it does not recognise as Vertex. Refused here,
   // where the operator can be told which variable to fix.
   if (!/^[a-z0-9-]+$/.test(region)) {
-    return { ok: false, missing: `CLOUD_ML_REGION / VERTEX_REGION ("${region}" is not a region name)` };
+    return { ok: false, reason: `CLOUD_ML_REGION / VERTEX_REGION is "${region}", which is not a region name` };
   }
   const model = read("HAIKU_VERTEX_MODEL") || DEFAULT_VERTEX_HAIKU_MODEL;
   return { ok: true, target: { project, region, model, baseUrl: vertexOpenAiBaseUrl(project, region) } };
@@ -156,7 +175,7 @@ export async function callHaikuViaVertex(
   const { source, botName, timeoutMs = HAIKU_TIMEOUT_MS, model, maxTokens } = opts;
   const resolved = resolveVertexHaikuTarget(deps.env);
   if (!resolved.ok) {
-    throw new Error(`Vertex Haiku backend is not configured: ${resolved.missing} is not set`);
+    throw new Error(`Vertex Haiku backend is not configured: ${resolved.reason}`);
   }
   const target = resolved.target;
   // An explicit per-call model wins, as on every other backend. The env default

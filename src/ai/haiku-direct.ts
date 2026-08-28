@@ -393,7 +393,7 @@ function preflightMissing(backend: HaikuBackend): string | null {
   }
   if (backend === "vertex") {
     const resolved = resolveVertexHaikuTarget();
-    if (!resolved.ok) return `no Vertex target (${resolved.missing} is not set)`;
+    if (!resolved.ok) return `no Vertex target: ${resolved.reason}`;
   }
   return null;
 }

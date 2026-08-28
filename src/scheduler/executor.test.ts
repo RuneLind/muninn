@@ -640,6 +640,8 @@ describe("trackUsage never takes down the call it is reporting on", () => {
     }
   });
 
+  // A CONTROL, not a red->green case: it passes with the guard removed too. It
+  // exists so the case above cannot pass by breaking the ordinary path.
   test("the usual path still writes", () => {
     expect(() => trackUsage("test", "model", 10, 5, "bot", "trace-1")).not.toThrow();
   });

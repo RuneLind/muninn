@@ -8,11 +8,14 @@ import { afterEach, describe, expect, mock, test } from "bun:test";
 // (measured: the dispatch cases below, written in `haiku-direct.test.ts`, ran
 // the REAL backend inside that file's chunk and passed or failed by luck).
 const spawnCalls: Array<{ prompt: string; opts: any }> = [];
+const usageCalls: Array<{ source: string; model: string; inputTokens: number; outputTokens: number; botName?: string }> = [];
 mock.module("../scheduler/executor.ts", () => ({
   HAIKU_TIMEOUT_MS: 60_000,
   HAIKU_DEFAULT_MAX_TOKENS: 4096,
   DEFAULT_MODEL: "claude-haiku-4-5-20251001",
-  trackUsage: () => {},
+  trackUsage: (source: string, model: string, inputTokens: number, outputTokens: number, botName?: string) => {
+    usageCalls.push({ source, model, inputTokens, outputTokens, botName });
+  },
   spawnHaiku: async (prompt: string, opts: unknown) => {
     spawnCalls.push({ prompt, opts });
     return { result: "cli-fallback", inputTokens: 1, outputTokens: 2, model: "claude-haiku-4-5-20251001", backend: "cli" };
@@ -61,7 +64,7 @@ function stubFetch(responses: Array<{ status: number; body: unknown }>): Capture
 }
 
 const realFetch = globalThis.fetch;
-afterEach(() => { globalThis.fetch = realFetch; spawnCalls.length = 0; });
+afterEach(() => { globalThis.fetch = realFetch; spawnCalls.length = 0; usageCalls.length = 0; });
 
 const VERTEX_ENV_NAMES = ["VERTEX_PROJECT_ID", "VERTEX_REGION", "HAIKU_BACKEND"] as const;
 const savedEnv = new Map<string, string | undefined>();
@@ -118,11 +121,15 @@ describe("resolveVertexHaikuTarget", () => {
     expect(r).toMatchObject({ ok: true, target: { project: "proj", region: "europe-north1" } });
   });
 
-  test("names the MISSING variable rather than throwing", () => {
+  // A complete phrase, not a bare variable name: the two call sites render it
+  // into a sentence, and a name plus a hardcoded "is not set" told an operator
+  // whose region was SET-but-malformed to go look for a variable that is right
+  // there in their `.env`.
+  test("says what is wrong, in a phrase both call sites can render", () => {
     expect(resolveVertexHaikuTarget({ VERTEX_REGION: "europe-north1" }))
-      .toEqual({ ok: false, missing: "ANTHROPIC_VERTEX_PROJECT_ID / VERTEX_PROJECT_ID" });
+      .toEqual({ ok: false, reason: "ANTHROPIC_VERTEX_PROJECT_ID / VERTEX_PROJECT_ID is not set" });
     expect(resolveVertexHaikuTarget({ VERTEX_PROJECT_ID: "proj" }))
-      .toEqual({ ok: false, missing: "CLOUD_ML_REGION / VERTEX_REGION" });
+      .toEqual({ ok: false, reason: "CLOUD_ML_REGION / VERTEX_REGION is not set" });
   });
 
   // A blank line in `.env` is "unset", not "set to nothing": without the trim a
@@ -130,7 +137,7 @@ describe("resolveVertexHaikuTarget", () => {
   // instead of being refused once with the variable's name.
   test("a whitespace-only value is unset", () => {
     expect(resolveVertexHaikuTarget({ VERTEX_PROJECT_ID: "  ", VERTEX_REGION: "europe-north1" }))
-      .toEqual({ ok: false, missing: "ANTHROPIC_VERTEX_PROJECT_ID / VERTEX_PROJECT_ID" });
+      .toEqual({ ok: false, reason: "ANTHROPIC_VERTEX_PROJECT_ID / VERTEX_PROJECT_ID is not set" });
   });
 
   // A region is interpolated straight into a HOSTNAME. A value carrying a dot
@@ -144,10 +151,27 @@ describe("resolveVertexHaikuTarget", () => {
     for (const region of ["eu.west", "europe north1", "eu/west", "EU_WEST", "eu@west"]) {
       const r = resolveVertexHaikuTarget({ VERTEX_PROJECT_ID: "proj", VERTEX_REGION: region });
       expect(r.ok).toBe(false);
-      expect(r.ok === false && r.missing).toMatch(/VERTEX_REGION/);
+      // The refusal names the variable AND says the value is the problem — the
+      // operator whose region is set-but-wrong must not be told it is unset.
+      expect(r.ok === false && r.reason).toMatch(/VERTEX_REGION/);
+      expect(r.ok === false && r.reason).not.toMatch(/is not set/);
     }
     expect(resolveVertexHaikuTarget({ VERTEX_PROJECT_ID: "proj", VERTEX_REGION: "europe-north1" }).ok).toBe(true);
     expect(resolveVertexHaikuTarget({ VERTEX_PROJECT_ID: "proj", VERTEX_REGION: "eu" }).ok).toBe(true);
+  });
+
+  // `URL.hostname` lowercases an https host, so a mixed-case region WORKS on
+  // this path today — and `resolveVertexConfig`, reading the same
+  // `CLOUD_ML_REGION` for the Agent SDK, applies no case rule at all. Refusing
+  // it here would mean one `.env` line puts claude-sdk on Vertex while the Haiku
+  // router silently falls back to the CLI. Normalize instead of refusing.
+  test("a mixed-case region is normalized, not refused", () => {
+    const r = resolveVertexHaikuTarget({ VERTEX_PROJECT_ID: "proj", VERTEX_REGION: "EUROPE-NORTH1" });
+    expect(r.ok).toBe(true);
+    expect(r.ok && r.target.region).toBe("europe-north1");
+    expect(r.ok && r.target.baseUrl).toBe(
+      "https://europe-north1-aiplatform.googleapis.com/v1/projects/proj/locations/europe-north1/endpoints/openapi",
+    );
   });
 
   test("HAIKU_VERTEX_MODEL overrides the default model", () => {
@@ -266,6 +290,22 @@ describe("callHaikuViaVertex", () => {
     expect(String(err)).toMatch(/length/);
   });
 
+  // The tokens were spent whether or not text came back — a truncation that
+  // burns the whole budget is exactly the row an operator needs to see, and it
+  // is the one behavioural decision in the throw path that nothing else pins.
+  test("the throw path still records the usage the call spent", async () => {
+    stubFetch([{ status: 200, body: {
+      choices: [{ message: { role: "assistant" }, finish_reason: "length" }],
+      usage: { prompt_tokens: 5, completion_tokens: 3, completion_tokens_details: { reasoning_tokens: 53 } },
+      model: "google/gemini-2.5-flash",
+    } }]);
+    await callHaikuViaVertex("q", { source: "test", botName: "bot" },
+      { env: ENV, provider: countingProvider() }).catch(() => {});
+    expect(usageCalls).toEqual([
+      { source: "test", model: "google/gemini-2.5-flash", inputTokens: 5, outputTokens: 56, botName: "bot" },
+    ]);
+  });
+
   test("whitespace-only content counts as no text", async () => {
     stubFetch([{ status: 200, body: completion("   \n  ") }]);
     const err = await callHaikuViaVertex("q", { source: "test" },
@@ -323,7 +363,7 @@ describe("callHaikuWithFallback → vertex", () => {
     expect(sent).toHaveLength(0);
     expect(spawnCalls).toHaveLength(1);
     expect(spawnCalls[0]!.opts.cliFallback).toEqual({
-      backend: "vertex", reason: "no Vertex target (CLOUD_ML_REGION / VERTEX_REGION is not set)",
+      backend: "vertex", reason: "no Vertex target: CLOUD_ML_REGION / VERTEX_REGION is not set",
     });
     expect(result.backend).toBe("cli");
   });

@@ -758,11 +758,16 @@ async function probeTokenRefresh(): Promise<RefreshProbe> {
  * the text, is the measurement.
  *
  * Two steps, because they fail differently. The first is the router itself on an
- * extraction-shaped prompt (does the backend run, and is its output parseable
- * JSON — a truncated Gemini answer is empty, not half a blob). The second is
- * `decomposeQuestion`, the real hot path, which SWALLOWS a Haiku failure and
- * degrades to passthrough — so on that one the router's own backend field is
- * unreachable and the signal is the rationale it fell back with.
+ * extraction-shaped prompt. The second is `decomposeQuestion`, the real hot
+ * path, which SWALLOWS a Haiku failure and degrades to a passthrough rather than
+ * throwing.
+ *
+ * BOTH steps therefore ask the same two questions in the same order — which
+ * backend ran, and was the answer usable — because either alone is a false
+ * green. Backend alone passes a Vertex answer that could not be parsed into
+ * sub-questions (measured: a decomposer whose JSON parse fails still reports
+ * `backend: "vertex"`, and every knowledge lookup then silently loses its
+ * fan-out); usability alone passes an answer the Claude CLI produced.
  */
 type HaikuProbeOutcome =
   | "vertex-answered"   // the Vertex backend ran and produced usable output
@@ -796,7 +801,7 @@ async function probeHaikuRouter(): Promise<HaikuProbeStep[]> {
   if (!target.ok) {
     return [{
       step: "config", outcome: "failed", backend: null, model: null, ms: 0,
-      detail: `not configured: ${target.missing} is not set`,
+      detail: `not configured: ${target.reason}`,
     }];
   }
 
@@ -834,11 +839,10 @@ async function probeHaikuRouter(): Promise<HaikuProbeStep[]> {
   // above reads one: the router falls back to the Claude CLI, which answers this
   // prompt perfectly well.
   //
-  // Classifying on the rationale was tried and is not enough. It matched two of
-  // the four passthrough strings, and — measured — a run with a bogus
-  // `HAIKU_VERTEX_MODEL` printed `decomposer vertex-answered  3 sub-questions`
-  // while the step above correctly printed `backend=cli`: a failure that spared
-  // the one-shot and hit the decomposer would have reported this probe green.
+  // Classifying on the rationale ALONE was tried and is not enough: measured, a
+  // run with a bogus `HAIKU_VERTEX_MODEL` printed `decomposer vertex-answered
+  // 3 sub-questions` while the step above correctly printed `backend=cli`.
+  // Classifying on the BACKEND alone is not enough either — see the header.
   const decomposeStarted = performance.now();
   try {
     const result = await decomposeQuestion({
@@ -846,11 +850,18 @@ async function probeHaikuRouter(): Promise<HaikuProbeStep[]> {
       botName: HAIKU_PROBE_BOT,
       haikuBackend: "vertex",
     });
+    // Backend FIRST, then usability — the same order as the step above. The
+    // rationale is what says a Vertex answer was unusable: `decomposeQuestion`
+    // catches its own parse failure and returns a passthrough with the backend
+    // still set, so classifying on the backend alone reported `vertex-answered`
+    // for a decomposer that had lost its fan-out entirely (measured against the
+    // live endpoint with the parse forced to fail).
+    const unusable = /could not parse|omitted subQuestions|no usable sub-questions/i.test(result.rationale);
     steps.push({
       step: "decomposer",
-      outcome: result.backend === "vertex" ? "vertex-answered" : "fell-back",
-      // `?? null`: an absent backend means no model call was made at all, which
-      // is a fall-back, not a Vertex answer.
+      // `?? null` and the backend test first: an absent backend means no model
+      // call was made at all, which is a fall-back, not a Vertex answer.
+      outcome: result.backend !== "vertex" ? "fell-back" : unusable ? "unparseable" : "vertex-answered",
       backend: result.backend ?? null,
       model: null,
       ms: Math.round(performance.now() - decomposeStarted),
@@ -1117,8 +1128,10 @@ if (RUN.has("haiku")) {
   say(
     answered === steps.length
       ? "\n  ⇒ The decomposer and the extractors run on the same endpoint as the chat turn.\n"
-      : "\n  ⇒ At least one short call did NOT run on Vertex. A `fell-back` row means the Claude CLI\n" +
-        "    answered instead — which on this laptop looks like success and in a pod is a refusal.\n",
+      : "\n  ⇒ At least one short call is not usable ON Vertex. `fell-back` means the Claude CLI\n" +
+        "    answered instead — which on this laptop looks like success and in a pod is a refusal.\n" +
+        "    `unparseable` means Vertex DID answer and the answer was not usable, which for the\n" +
+        "    decomposer means every knowledge lookup silently loses its fan-out.\n",
   );
   for (const st of steps) {
     if (st.outcome !== "vertex-answered") failures.push(`probe E: ${st.step} — ${st.outcome}: ${st.detail}`);
