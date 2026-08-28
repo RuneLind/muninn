@@ -2,6 +2,21 @@ import { getLog } from "./logging.ts";
 
 const log = getLog("config");
 
+/**
+ * A DELIBERATE fail-closed config refusal, as opposed to a bug in the config
+ * layer. The distinction is what `src/index.ts` prints: a refusal is one legible
+ * line (its message IS the whole diagnosis, and in a container a stack reaches
+ * the log aggregator as an unhandled exception), while a `TypeError` from a bug
+ * in here must keep its stack or nobody can find it. Same shape as
+ * `AuthConfigError` in `src/auth/mode.ts`.
+ */
+export class ConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ConfigError";
+  }
+}
+
 function requireEnv(name: string): string {
   const value = process.env[name];
   if (!value) {
@@ -82,21 +97,6 @@ export function optionalEnvFlag(name: string): boolean {
 /** The env var name, so the boot refusal and the message below agree. Not
  *  exported: this file is the only parser, and `src/test/ambient-env.ts` spells
  *  the name itself rather than importing the config layer into a test preload. */
-/**
- * A DELIBERATE fail-closed config refusal, as opposed to a bug in the config
- * layer. The distinction is what `src/index.ts` prints: a refusal is one legible
- * line (its message IS the whole diagnosis, and in a container a stack reaches
- * the log aggregator as an unhandled exception), while a `TypeError` from a bug
- * in here must keep its stack or nobody can find it. Same shape as
- * `AuthConfigError` in `src/auth/mode.ts`.
- */
-export class ConfigError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "ConfigError";
-  }
-}
-
 const PROFILE_ENV = "MUNINN_PROFILE";
 
 /**

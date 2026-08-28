@@ -621,3 +621,23 @@ test("vertexInfo: a refusing config DEGRADES the card instead of 5xx-ing the pag
     expect(errors[0]).toMatch(/vertex config: .*is refused/);
   });
 });
+
+test("vertexInfo: a PER-MODEL override ALONE still renders the block", () => {
+  // The gate's `perModelRegions` clause has no other coverage: every case above
+  // sets a project or a region too, which short-circuits the boolean before it
+  // is reached — so deleting that clause left the suite green while re-hiding
+  // the whole /models Vertex block for the one instance the row exists for.
+  // This is the case with no region line for the override to contradict, which
+  // is precisely when reporting it matters.
+  const { vertexInfo } = _internalsForTest();
+  withVertexEnv({ VERTEX_REGION_CLAUDE_4_5_SONNET: "europe-west1" }, () => {
+    const info = vertexInfo([]);
+    expect(info).not.toBeNull();
+    expect(info!.enabled).toBe(false);
+    expect(info!.projectId).toBeNull();
+    expect(info!.region).toBeNull();
+    expect(info!.perModelRegions).toEqual([
+      { name: "VERTEX_REGION_CLAUDE_4_5_SONNET", region: "europe-west1" },
+    ]);
+  });
+});

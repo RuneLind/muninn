@@ -739,11 +739,19 @@ export async function renderModelsPage(): Promise<string> {
       // nothing, so the winning VARIABLE is named beside the value.
       var vx = m.vertex;
       if (vx) {
+        // The disabled note has TWO cases, because a per-model override alone
+        // reaches this row with no project and no region — and claiming
+        // "project/region are set" there contradicted the "Vertex target" row
+        // rendered directly below it, on exactly the config this block exists
+        // to surface.
+        var hasTarget = !!(vx.projectId || vx.region || vx.baseUrl);
         h += machineRow('Vertex',
           vx.enabled ? val('enabled') : val('declared, not enabled', 'warn'),
           vx.enabled
             ? 'CLAUDE_CODE_USE_VERTEX — the claude-sdk connector authenticates with ADC, no ANTHROPIC_API_KEY needed'
-            : 'project/region are set but CLAUDE_CODE_USE_VERTEX is not — the SDK still uses an Anthropic credential');
+            : hasTarget
+              ? 'project/region are set but CLAUDE_CODE_USE_VERTEX is not — the SDK still uses an Anthropic credential'
+              : 'only a per-model region override is set — no project, no region, and CLAUDE_CODE_USE_VERTEX is not on');
         // The whole lc-note is already muted (color: var(--text-dim)), so the
         // variable name needs no class of its own — and the page has none to give
         // it. Each value is paired with the NAME that supplied it, because that

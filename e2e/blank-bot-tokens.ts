@@ -41,12 +41,6 @@ const TOKEN_PREFIXES = ["TELEGRAM_BOT_TOKEN_", "SLACK_BOT_TOKEN_", "SLACK_APP_TO
 const DOTENV_FILES = [".env", ".env.local"];
 
 /**
- * Every platform-token env name we can see, mapped to `""` — spread into the env
- * of any muninn an e2e run spawns. Also blanks them on the CALLER's own env, so
- * anything else that process spawns (a Playwright worker, a nested helper)
- * inherits the blank rather than a live token.
- */
-/**
  * Every env name matching one of `prefixes`, from the caller's env AND the dotenv
  * FILES. Exported because the instance-profile blank needs exactly this scan for
  * the `VERTEX_REGION_CLAUDE_*` family: that one is an open-ended PREFIX, so no
@@ -77,6 +71,12 @@ export function envNamesMatchingPrefixes(prefixes: readonly string[]): Set<strin
   return names;
 }
 
+/**
+ * Every platform-token env name we can see, mapped to `""` — spread into the env
+ * of any muninn an e2e run spawns. Also blanks them on the CALLER's own env, so
+ * anything else that process spawns (a Playwright worker, a nested helper)
+ * inherits the blank rather than a live token.
+ */
 export function blankBotTokens(): Record<string, string> {
   const names = envNamesMatchingPrefixes(TOKEN_PREFIXES);
   const blanked: Record<string, string> = {};
