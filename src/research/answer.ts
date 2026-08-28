@@ -9,6 +9,7 @@
  */
 
 import type { ResearchHit } from "../ai/research-knowledge.ts";
+import type { DeclineReason } from "../wiki/ask-chat.ts";
 import { badgeForCollection, getResearchCollection } from "./corpus.ts";
 
 /** Default number of top-ranked hits handed to the model as numbered sources. */
@@ -81,7 +82,7 @@ export const LOW_CONFIDENCE_MESSAGE =
  * raw-score signal is Huginn's per-search `lowConfidence` (computed from
  * `LOW_CONFIDENCE_THRESHOLD` before rank-normalization), which is what we gate on.
  */
-export type Coverage = "answer" | "no_hits" | "low_confidence" | "unreachable";
+export type Coverage = "answer" | DeclineReason;
 
 export interface CoverageInput {
   /** Merged unique-document count, after Huginn's noise filter. */
@@ -105,9 +106,23 @@ export function assessCoverage(input: CoverageInput): Coverage {
 
 /** The canned reply for a non-answer verdict (used by the no-synthesis paths). */
 export function coverageMessage(coverage: Exclude<Coverage, "answer">): string {
-  if (coverage === "low_confidence") return LOW_CONFIDENCE_MESSAGE;
-  if (coverage === "unreachable") return UNREACHABLE_MESSAGE;
-  return NO_HITS_MESSAGE;
+  switch (coverage) {
+    case "low_confidence":
+      return LOW_CONFIDENCE_MESSAGE;
+    case "unreachable":
+      return UNREACHABLE_MESSAGE;
+    case "no_hits":
+      return NO_HITS_MESSAGE;
+    default: {
+      // Compile-time: a verdict added to DECLINE_REASONS must be given a message
+      // here. Runtime: fall back to the one that CLAIMS NOTHING about the corpus,
+      // never to NO_HITS_MESSAGE — "may simply not be indexed yet" is the exact
+      // sentence this whole slate exists to stop guessing at.
+      const exhaustive: never = coverage;
+      void exhaustive;
+      return UNREACHABLE_MESSAGE;
+    }
+  }
 }
 
 export interface Citation {

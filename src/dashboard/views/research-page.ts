@@ -6,7 +6,7 @@ import { webFormatClientScript } from "../../chat/views/components/web-format-cl
 import { wikiMermaidClientScript } from "./components/wiki-mermaid-client.ts";
 import { codeTabsClientScript } from "./components/code-tabs-client.ts";
 import { clientCorpusJson, clientProfilesJson, DEFAULT_PROFILE } from "../../research/corpus.ts";
-import { askDeclineReason } from "./components/wiki-ask-session.ts";
+import { askDeclineReason, askStatusText } from "./components/wiki-ask-session.ts";
 import { componentBlockCss } from "../../format/component-styles.ts";
 
 export async function renderResearchPage(): Promise<string> {
@@ -392,6 +392,9 @@ export async function renderResearchPage(): Promise<string> {
     // place. Safe to serialize: it is pure, closes over nothing, and its body carries
     // no backtick or \${ that would break this template.
     var askDeclineReason = ${askDeclineReason.toString()};
+    // Same reason as above: inlined, not re-typed, so the two pages cannot drift
+    // on which verdicts count as declines.
+    var askStatusText = ${askStatusText.toString()};
 
     var CORPUS = ${clientCorpusJson()};
     var PROFILES = ${clientProfilesJson()};
@@ -680,10 +683,7 @@ export async function renderResearchPage(): Promise<string> {
           bindSources(a.sourcesEl, a.citations);
           var statusText;
           var declined = askDeclineReason(d);
-          if (declined === 'low_confidence') statusText = 'No strong match — showing the closest sources';
-          else if (declined === 'unreachable') statusText = 'Search unavailable — nothing was looked up';
-          else if (declined === 'no_hits') statusText = 'No matching sources';
-          else statusText = 'Answered from ' + a.citations.length + ' source' + (a.citations.length === 1 ? '' : 's');
+          statusText = askStatusText(declined, a.citations.length);
           setCardStatus(a, statusText, 'done');
           // Commit the turn so the next ask carries it as context (only question +
           // answer are replayed — see compactHistory). We keep even a declined

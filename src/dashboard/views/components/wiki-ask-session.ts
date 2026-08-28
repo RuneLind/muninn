@@ -159,13 +159,39 @@ export function askDeclineReason(payload: {
   noHits?: unknown;
   lowConfidence?: unknown;
   unreachable?: unknown;
-}): "no_hits" | "low_confidence" | "unreachable" | undefined {
+  declineReason?: unknown;
+}): DeclineReason | undefined {
+  // The verdict itself, when the server sent it — this is the hop a fourth reason
+  // now arrives through, instead of needing a fourth boolean.
+  const named = toDeclineReason(payload.declineReason);
+  if (named) return named;
+  // The older per-reason encoding, for a payload that predates the field.
   // `unreachable` outranks both: a lookup that never happened has no confidence
   // to judge and no emptiness to report.
   if (payload.unreachable) return "unreachable";
   if (payload.lowConfidence) return "low_confidence";
   if (payload.noHits) return "no_hits";
   return undefined;
+}
+
+/**
+ * The Ask status line, for both the /wiki reader and /research.
+ *
+ * One derivation because the two `if/else if` chains it replaces both ENDED in an
+ * unguarded `else` that read "Answered from N sources" — so a decline reason
+ * neither chain knew about rendered an answer claim directly above a decline bar.
+ * The truthiness guard is the load-bearing part: an unknown reason lands on an
+ * explicit decline, never on the answered branch. `research-page.ts` inlines this
+ * through `.toString()`, so it must stay dependency-free.
+ */
+export function askStatusText(declined: DeclineReason | undefined, citationCount: number): string {
+  if (declined) {
+    if (declined === "low_confidence") return "No strong match — closest sources below";
+    if (declined === "unreachable") return "Search unavailable — nothing was looked up";
+    if (declined === "no_hits") return "No matching sources";
+    return "Declined — no answer was produced";
+  }
+  return "Answered from " + citationCount + " source" + (citationCount === 1 ? "" : "s");
 }
 
 /** True when `v` is a well-formed persisted turn. Malformed entries (partial

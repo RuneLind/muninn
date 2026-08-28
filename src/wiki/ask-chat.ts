@@ -421,10 +421,13 @@ export function buildDirectChatSeed(input: {
       case undefined:
         return false;
       default: {
-        // A fourth reason must be classified HERE rather than defaulting into a
-        // claim about a search that may never have happened.
+        // Compile-time: a fourth reason must be classified HERE. Runtime: it must
+        // fail SAFE — returning `exhaustive` returned the reason STRING, which is
+        // truthy, so an unclassified value took the searched-already branch and
+        // carried the exact claim this switch exists to withhold.
         const exhaustive: never = reason;
-        return exhaustive;
+        void exhaustive;
+        return false;
       }
     }
   })(input.declineReason);

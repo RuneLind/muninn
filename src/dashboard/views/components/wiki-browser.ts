@@ -75,6 +75,7 @@ import { enhanceFactCheck } from "./wiki-factcheck-reader.ts";
 import { type DeclineReason } from "../../../wiki/ask-chat.ts";
 import {
   askDeclineReason,
+  askStatusText,
   serializeAskSession,
   deserializeAskSession,
   type StoredAskTurn,
@@ -2938,10 +2939,7 @@ function runAskStream(url: string, turn: AskTurn): void {
         // and `done` fires exactly once. `askDeclineReason` owns the
         // lowConfidence-before-noHits order both branches below depend on.
         turn.declined = askDeclineReason(d);
-        if (turn.declined === "low_confidence") statusText = "No strong match — closest sources below";
-        else if (turn.declined === "unreachable") statusText = "Search unavailable — nothing was looked up";
-        else if (turn.declined === "no_hits") statusText = "No matching sources";
-        else statusText = "Answered from " + turn.citations.length + " source" + (turn.citations.length === 1 ? "" : "s");
+        statusText = askStatusText(turn.declined, turn.citations.length);
       }
       setAskStatus(statusText, "done");
       // Drop the transient claim checklist before persisting — it's fully folded

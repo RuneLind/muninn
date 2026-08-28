@@ -6,6 +6,7 @@ import {
   type StoredAskTurn,
 } from "./wiki-ask-session.ts";
 import { declineChatBarHtml } from "./wiki-chat-target.ts";
+import { askStatusText } from "./wiki-ask-session.ts";
 import { DECLINE_REASONS } from "../../../wiki/ask-chat.ts";
 
 function turn(overrides: Partial<StoredAskTurn> = {}): StoredAskTurn {
@@ -490,5 +491,43 @@ describe("a declined turn survives a session round-trip, for every reason", () =
     const restored = deserializeAskSession(raw);
     expect(restored).toHaveLength(1);
     expect(restored[0]!.declined).toBeUndefined();
+  });
+});
+
+/**
+ * The round-3 verify proved the enumeration reached the SEED hop only: a fourth
+ * reason still fell through `declineNote` to "The wiki had nothing on this."
+ * (the round-1 lie, at the round-1 hop) and through both status chains to
+ * "Answered from N sources" — an answer claim above a decline bar. These pin the
+ * property that survives a value nobody has added yet.
+ */
+describe("every decline reason gets its OWN sentence, none borrows another's", () => {
+  test("the bar note is distinct per reason", () => {
+    const notes = DECLINE_REASONS.map((r) => declineChatBarHtml(r));
+    // A fallthrough shows up as a duplicate: the new reason wearing an old one's
+    // sentence. Counting distinct notes catches it without naming the future value.
+    expect(new Set(notes).size).toBe(DECLINE_REASONS.length);
+  });
+
+  test("no reason claims an empty corpus except no_hits", () => {
+    for (const r of DECLINE_REASONS) {
+      if (r === "no_hits") continue;
+      expect(declineChatBarHtml(r)).not.toContain("had nothing on this");
+    }
+  });
+
+  test("a declined turn never reads as answered, whatever the reason", () => {
+    for (const r of DECLINE_REASONS) {
+      expect(askStatusText(r, 0)).not.toMatch(/answered from/i);
+    }
+    // …and an undeclined turn still does.
+    expect(askStatusText(undefined, 2)).toMatch(/Answered from 2 sources/);
+    expect(askStatusText(undefined, 1)).toMatch(/Answered from 1 source$/);
+  });
+
+  test("an unknown reason degrades to an explicit decline, never to an answer", () => {
+    // The property a compile error cannot enforce in the inlined client copies.
+    expect(askStatusText("from_the_future" as never, 0)).not.toMatch(/answered/i);
+    expect(askStatusText("from_the_future" as never, 0)).toMatch(/declined/i);
   });
 });

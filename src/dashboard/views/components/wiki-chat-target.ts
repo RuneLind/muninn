@@ -1021,9 +1021,22 @@ export const DECLINE_CHAT_BTN_ID = "wikiChatDeclineBtn";
  *  read as either: the search never happened, so the wiki's contents are unknown,
  *  not empty. */
 function declineNote(reason: DeclineReason): string {
-  if (reason === "low_confidence") return "The wiki had nothing solid on this.";
-  if (reason === "unreachable") return "The wiki search could not be reached.";
-  return "The wiki had nothing on this.";
+  switch (reason) {
+    case "low_confidence":
+      return "The wiki had nothing solid on this.";
+    case "unreachable":
+      return "The wiki search could not be reached.";
+    case "no_hits":
+      return "The wiki had nothing on this.";
+    default: {
+      // Compile-time: a new reason must be given words here. Runtime: it must NOT
+      // inherit the no_hits sentence — that is the empty-corpus claim this slate
+      // exists to stop, and a fallthrough default handed it to every future value.
+      const exhaustive: never = reason;
+      void exhaustive;
+      return "The wiki did not answer this.";
+    }
+  }
 }
 
 /**

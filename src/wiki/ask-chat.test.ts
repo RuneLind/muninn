@@ -560,11 +560,20 @@ describe("buildDirectChatSeed — every decline reason, not just the two that ex
     }
   });
 
-  test("every reason in the enumeration produces a seed, and none is empty", () => {
+  test("only the reasons where the index RAN may claim it was searched", () => {
+    // The previous form asserted non-empty + contains-the-question, which stayed
+    // green while a fourth reason carried the "already been searched" lie.
+    const ran = new Set(["no_hits", "low_confidence"]);
     for (const reason of DECLINE_REASONS) {
       const text = seed(reason);
-      expect(text.length).toBeGreaterThan(0);
       expect(text).toContain("hva er 25%-regelen?");
+      expect(/already been searched/i.test(text)).toBe(ran.has(reason));
     }
+  });
+
+  test("an unknown reason does not claim the index was searched", () => {
+    // The `never` arm's RUNTIME behaviour: it returned the reason string, which
+    // is truthy, so an unclassified value took the searched-already branch.
+    expect(seed("from_the_future" as never)).not.toMatch(/already been searched/i);
   });
 });

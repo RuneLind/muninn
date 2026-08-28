@@ -224,6 +224,9 @@ test("an unreachable knowledge base declines as UNREACHABLE, on the wire and not
   // …and the FLAG must carry it, or the UI renders "The wiki had nothing on this."
   expect(done.unreachable).toBe(true);
   expect(done.lowConfidence).toBe(false);
+  // …and as the REASON itself, so a verdict added later does not have to grow a
+  // fourth boolean that every consumer must learn about separately.
+  expect(done.declineReason).toBe("unreachable");
 });
 
 test("a genuinely empty corpus is still a no_hits decline, with no unreachable flag", async () => {
