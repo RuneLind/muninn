@@ -10,6 +10,22 @@ interface ParsedToolCall {
   arguments: string;
 }
 
+/**
+ * An HTTP status the API answered with, carried as a TYPE rather than only
+ * inside a message string.
+ *
+ * The authorizer has to tell an expired credential (401, retry with a fresh
+ * token) from an unentitled one (403, do not) — and matching a status out of a
+ * formatted English sentence is the kind of check that keeps working until
+ * someone rewords the sentence.
+ */
+export class OpenAiCompatHttpError extends Error {
+  constructor(readonly status: number, readonly bodyHead: string) {
+    super(`OpenAI-compat API error ${status}: ${bodyHead}`);
+    this.name = "OpenAiCompatHttpError";
+  }
+}
+
 export interface StreamResult {
   resultText: string;
   toolCalls: ParsedToolCall[];
@@ -58,9 +74,7 @@ export async function doStreamRequest(
   if (!response.ok) {
     clearTimeout(timeoutTimer);
     const errorBody = await response.text();
-    throw new Error(
-      `OpenAI-compat API error ${response.status}: ${errorBody.slice(0, 500)}`,
-    );
+    throw new OpenAiCompatHttpError(response.status, errorBody.slice(0, 500));
   }
 
   const reader = response.body!.getReader();

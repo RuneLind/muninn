@@ -10,6 +10,7 @@ import { preflightMcpForRequest } from "../mcp-status.ts";
 import { getLog } from "../../logging.ts";
 import { doStreamRequest, type StreamResult } from "./openai-compat-stream.ts";
 import { loadToolsForBot, type OpenAITool } from "./openai-compat-tools.ts";
+import { createAuthorizer } from "./openai-compat-auth.ts";
 import { optionalEnvInt } from "../../config.ts";
 import { currentActiveTurn } from "../../hivemind/active-turn.ts";
 
@@ -51,11 +52,24 @@ export async function executePrompt(
   }
 
   const url = `${baseUrl.replace(/\/+$/, "")}/chat/completions`;
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    ...(process.env.OPENAI_API_KEY
-      ? { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` }
-      : {}),
+  // Resolved once per turn (it can refuse the endpoint outright), consulted
+  // before every request: a Vertex access token expires inside a long thread.
+  const authorizer = createAuthorizer(baseUrl, botConfig.name);
+
+  /** One request, plus ONE retry if the failure was a stale credential. */
+  const requestWithAuth = async (body: Record<string, unknown>): Promise<StreamResult> => {
+    try {
+      return await doStreamRequest(
+        url, await authorizer.headers(), body, timeoutMs, model, botConfig, onProgress,
+      );
+    } catch (err) {
+      // Safe to re-send: the connector throws on a non-2xx BEFORE reading the
+      // body, so a refused request has emitted no `text_delta` to replay.
+      if (!authorizer.refreshAfterFailure(err)) throw err;
+      return await doStreamRequest(
+        url, await authorizer.headers(), body, timeoutMs, model, botConfig, onProgress,
+      );
+    }
   };
 
   // For thinking models (Qwen3 etc.), max_tokens covers both thinking + answer.
@@ -102,9 +116,7 @@ export async function executePrompt(
     // Retry loop for empty responses from LM Studio
     let streamResult: StreamResult | null = null;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-      streamResult = await doStreamRequest(
-        url, headers, body, timeoutMs, model, botConfig, onProgress,
-      );
+      streamResult = await requestWithAuth(body);
 
       const hasContent = streamResult.resultText.trim() || streamResult.toolCalls.length > 0;
       if (hasContent || attempt === MAX_RETRIES) {

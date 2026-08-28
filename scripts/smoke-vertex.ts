@@ -21,13 +21,19 @@
  *      decision turns on. Probe B runs the real two-turn shape — call, tool result, answer —
  *      through the OpenAI-compatible endpoint `openai-compat` would use, with
  *      the one real tool buried in a field of decoys.
- *   3. Is `assertHaveAuth()` really the only muninn-side blocker on the
+ *   3. Does a Vertex access token EXPIRING mid-conversation break a turn? A
+ *      Google token lives about an hour and a chat thread outlives that, so the
+ *      connector re-authorizes per request and retries once on a 401. Probe D
+ *      drives that seam — the shipped one, `src/ai/connectors/openai-compat-auth.ts`
+ *      — against the real endpoint with a deliberately invalid token, so the 401
+ *      is Google's rather than a fixture's.
+ *   4. Is `assertHaveAuth()` really the only muninn-side blocker on the
  *      "zero-code" Claude-on-Vertex path? Probe C runs the Agent SDK with BOTH
  *      Anthropic credentials removed from the environment and CLASSIFIES how
  *      far it got — reached Vertex, never left the machine, or unknown.
  *
  *     VERTEX_PROJECT_ID=<your-gcp-project> bun scripts/smoke-vertex.ts
- *     … --probe=regions|gemini|claude-sdk   (comma-separated; default: all)
+ *     … --probe=regions|gemini|claude-sdk|refresh  (comma-separated; default: all)
  *     … --json                              (JSON on stdout, prose on stderr)
  *
  * NOTHING DEPLOYMENT-SPECIFIC LIVES HERE, and nothing leaks at RUNTIME either:
@@ -62,7 +68,7 @@ const CLAUDE_MODEL = (process.env.VERTEX_CLAUDE_MODEL ?? "claude-sonnet-4-5").tr
  */
 const ANSWER_MAX_TOKENS = 2048;
 
-const KNOWN_PROBES = ["regions", "gemini", "claude-sdk"] as const;
+const KNOWN_PROBES = ["regions", "gemini", "claude-sdk", "refresh"] as const;
 const JSON_MODE = process.argv.includes("--json");
 /** Prose goes to stderr under `--json` so `… --json | jq` works. */
 const say = (line = "") => (JSON_MODE ? console.error(line) : console.log(line));
@@ -626,6 +632,75 @@ async function probeClaudeSdk(): Promise<SdkProbe> {
 }
 
 // ---------------------------------------------------------------------------
+// Probe D — an expired credential, through the connector's own auth seam
+// ---------------------------------------------------------------------------
+
+/**
+ * The one thing a static `OPENAI_API_KEY` never had to survive.
+ *
+ * Imports the SHIPPED seam rather than re-implementing the retry: a copy of the
+ * logic here would keep passing after the real one regressed, which is the
+ * failure this probe exists to rule out. The 401 is Google's own — an invalid
+ * token is presented to the real endpoint — so the predicate is measured against
+ * the status Vertex actually answers with, not the one we assumed.
+ */
+type RefreshOutcome =
+  | "refreshed-and-recovered"
+  | "no-refusal"      // the invalid token was ACCEPTED — the probe measured nothing
+  | "no-retry"        // the seam declined to retry a 401
+  | "retry-failed";   // it retried, and the fresh token did not work either
+
+interface RefreshProbe { outcome: RefreshOutcome; firstStatus: number | null; detail: string; ms: number }
+
+async function probeTokenRefresh(): Promise<RefreshProbe> {
+  const started = performance.now();
+  const { createAuthorizer } = await import("../src/ai/connectors/openai-compat-auth.ts");
+  const { OpenAiCompatHttpError, doStreamRequest } = await import("../src/ai/connectors/openai-compat-stream.ts");
+  const { VertexTokenProvider } = await import("../src/ai/vertex-access.ts");
+
+  const baseUrl =
+    `https://${GEMINI_REGION}-aiplatform.googleapis.com/v1/projects/${PROJECT}` +
+    `/locations/${GEMINI_REGION}/endpoints/openapi`;
+  // First fetch hands over a token Google will refuse; every later one is real.
+  // That is exactly the shape of a token that expired between two turns.
+  let issued = 0;
+  const provider = new VertexTokenProvider(async () => {
+    issued++;
+    return {
+      token: issued === 1 ? "ya29.deliberately-invalid-token" : await accessToken(),
+      expiresAtMs: Date.now() + 3_600_000,
+      source: "gcloud-adc" as const,
+    };
+  });
+  const authorizer = createAuthorizer(baseUrl, "vertex-smoke", provider);
+  const bot = { name: "vertex-smoke" } as never;
+  const body = {
+    model: `google/${GEMINI_MODEL}`,
+    messages: [{ role: "user", content: "Svar med ett ord: hei" }],
+    stream: true, stream_options: { include_usage: true }, max_tokens: 64,
+  };
+  const url = `${baseUrl}/chat/completions`;
+  const done = (outcome: RefreshOutcome, detail: string, firstStatus: number | null): RefreshProbe =>
+    ({ outcome, firstStatus, detail: redact(detail).slice(0, 220), ms: Math.round(performance.now() - started) });
+
+  try {
+    await doStreamRequest(url, await authorizer.headers(), body, 60_000, GEMINI_MODEL, bot);
+    return done("no-refusal", "the invalid token was accepted — nothing was measured", 200);
+  } catch (err) {
+    const status = err instanceof OpenAiCompatHttpError ? err.status : null;
+    if (!authorizer.refreshAfterFailure(err)) {
+      return done("no-retry", `the seam declined to retry: ${(err as Error).message}`, status);
+    }
+    try {
+      const ok = await doStreamRequest(url, await authorizer.headers(), body, 60_000, GEMINI_MODEL, bot);
+      return done("refreshed-and-recovered", `answered ${JSON.stringify(ok.resultText.trim().slice(0, 40))}`, status);
+    } catch (retryErr) {
+      return done("retry-failed", (retryErr as Error).message, status);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Report
 // ---------------------------------------------------------------------------
 
@@ -835,6 +910,23 @@ if (RUN.has("claude-sdk")) {
             "    read `detail` above before concluding anything about the ADC path.\n",
   );
   if (probe.outcome === "timeout") failures.push("probe C: timed out with no result");
+}
+
+if (RUN.has("refresh")) {
+  say(`── Probe D: a 401 from ${GEMINI_REGION}, through the openai-compat auth seam ──`);
+  const probe = await probeTokenRefresh();
+  summary.tokenRefresh = probe;
+  say(`  first request: HTTP ${probe.firstStatus ?? "(no status)"}   outcome: ${probe.outcome}   ${probe.ms}ms`);
+  say(`  detail: ${probe.detail}`);
+  say(
+    probe.outcome === "refreshed-and-recovered"
+      ? "\n  ⇒ An expired access token costs one extra round trip, not a failed turn.\n"
+      : "\n  ⇒ A token expiring mid-conversation would surface as a failed turn. Read `detail`.\n",
+  );
+  if (probe.outcome !== "refreshed-and-recovered") {
+    failures.push(`probe D: ${probe.outcome} — the per-request credential did not recover a 401`);
+  }
+  say("");
 }
 
 if (JSON_MODE) console.log(redact(JSON.stringify(summary, null, 2)));
