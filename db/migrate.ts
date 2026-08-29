@@ -176,13 +176,21 @@ export async function runMigrations(
       // through a state its predicate cannot see. The inserts are plain
       // bookkeeping with no DDL, so nothing here needs to run outside a
       // transaction the way `CREATE INDEX CONCURRENTLY` does below.
+      // Buffered, and emitted only after the COMMIT. Printing inside the
+      // transaction made the progress lines lie: measured, a rejected last
+      // insert produced 68 "✓ recorded" checkmarks and then zero rows. For a
+      // refusal path whose whole contract is an honest one-line answer in a
+      // container log, a log that claims work that was rolled back is worse
+      // than a silent one.
+      const recorded: string[] = [];
       await sql.begin(async (tx) => {
         const txSql = tx as unknown as postgres.Sql;
         for (const m of pending) {
           await txSql`INSERT INTO schema_migrations (version, name) VALUES (${m.version}, ${m.name})`;
-          say(`  ✓ ${m.filename} (recorded)`);
+          recorded.push(`  ✓ ${m.filename} (recorded)`);
         }
       });
+      for (const line of recorded) say(line);
       say("\nDone. All migrations marked as applied.");
       return;
     }

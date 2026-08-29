@@ -716,7 +716,7 @@ Incremental changes go in `db/migrations/` as numbered files. Both `.sql` and `.
 A Flyway-style migration runner tracks applied migrations in a `schema_migrations` table:
 
 ```bash
-bun run db:provision          # Empty database → apply init.sql, then baseline
+bun run db:provision -- --yes # Empty database → apply init.sql, then baseline
 bun run db:migrate            # Apply pending migrations
 bun run db:migrate:status     # Show which migrations are applied/pending
 bun run db:migrate:baseline   # Mark all migrations as applied (for fresh DBs)
@@ -730,14 +730,32 @@ It **requires `--yes`**, and prints the host and database it resolved before
 asking for it. That is not ceremony: Bun auto-loads `.env`, so a bare invocation
 in a checkout resolves whatever `DATABASE_URL` that file names, with nothing
 typed and nothing exported — and this command writes a schema. (`--dry-run`
-needs no `--yes`; it is the form that cannot write. An unrecognised flag is
-refused rather than ignored, so a typo'd `--dryrun` cannot become a real run.)
+needs no `--yes` — it is the form that cannot write, though against a database it
+would refuse it exits 1 rather than 0. An unrecognised flag is refused rather
+than ignored, so a typo'd `--dryrun` cannot become a real run.)
 
-It refuses three states rather than writing into them: a database that already
-has a `users` table, one that is neither empty nor provisioned (tables present,
-no `users` — what a `psql -f db/init.sql` that died mid-file leaves, since psql
-without `-1` is not atomic), and a role that may not run what `init.sql` asks
-for. **Applying `init.sql` is all-or-nothing** — `sql.unsafe` on a parameterless
+**The predicate is the whole table set, not one table.** `db/provision.ts`
+parses the tables `db/init.sql` declares out of the file itself and compares
+them with what is actually in `public`. That is not fussiness: `users` is
+init.sql's *first* table and `schema_migrations` its *last*, so a
+`psql -f db/init.sql` that died mid-file — psql without `-1` is not atomic —
+leaves `users` present and `schema_migrations` absent in almost every case. Read
+through a `users`-only predicate, that state looks like "provisioned but never
+baselined", whose remedy is `bun db/migrate.ts --baseline` — and that command
+*succeeds*, satisfies `db/require-provisioned.ts`, boots the pod on a stump of a
+schema, and records every migration as applied so nothing can repair it
+afterwards.
+
+So four states, and only one of them writes: **complete** (refused, and told to
+baseline only when `schema_migrations` is genuinely empty), **incomplete**
+(refused by name, listing what is present and what is missing, and explicitly
+told *not* to baseline — with a one-line `DROP TABLE schema_migrations` for the
+common case where `db:migrate` against an empty database left just the ledger),
+**not ours** (tables present, none of them init.sql's), and **empty**, which is
+the one it provisions. A role that may not run what `init.sql` asks for is
+refused separately, with the Postgres message verbatim.
+
+**Applying `init.sql` is all-or-nothing** — `sql.unsafe` on a parameterless
 string uses the simple protocol and Postgres wraps it in one implicit
 transaction — and so is the baseline that follows it, separately. On a managed
 instance have an elevated role run `CREATE EXTENSION vector` once first: the app

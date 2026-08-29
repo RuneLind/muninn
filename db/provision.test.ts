@@ -22,7 +22,7 @@ import { fileURLToPath } from "node:url";
 import { readdir } from "node:fs/promises";
 import postgres from "postgres";
 import { TEST_DATABASE_URL } from "../src/test/test-db-url.ts";
-import { provisionDatabase, ProvisionPrivilegeError } from "./provision.ts";
+import { provisionDatabase, ProvisionPrivilegeError, unreachableMessage } from "./provision.ts";
 import { DatabaseUrlError, runMigrations } from "./migrate.ts";
 
 /** A database this file owns outright. Derived from the shared test URL so the
@@ -248,8 +248,8 @@ describe("provisionDatabase — states that are neither empty nor provisioned", 
     // The bug this pins: the only predicate was `users`, so a dry run answered
     // "would provision" for every non-empty-but-unprovisioned database — i.e.
     // it reported green for the one state guaranteed to fail.
-    expect(result.status).not.toBe("would-provision");
-    expect(result.notes.join("\n")).toContain("not empty");
+    expect(result.status).toBe("not-empty");
+    expect(result.notes.join("\n")).toContain("would refuse");
   });
 });
 
@@ -265,15 +265,16 @@ describe("provisionDatabase — the already-provisioned note", () => {
     expect(result.notes.join("\n")).not.toContain("--baseline");
   });
 
-  test("DOES prescribe --baseline when the schema is there and nothing is recorded", async () => {
+  test("DOES prescribe --baseline when the schema is COMPLETE and nothing is recorded", async () => {
+    // The genuine never-baselined state, and the ONLY one that may be answered
+    // with a baseline: `db/init.sql` applied in full — every table it declares
+    // present — and `schema_migrations` empty, which is what init.sql leaves,
+    // since it creates that table empty.
     await provisionDatabase(SCRATCH_URL);
     await withScratch((sql) => sql`DELETE FROM schema_migrations`);
     const result = await provisionDatabase(SCRATCH_URL);
     expect(result.status).toBe("already-provisioned");
-    // What the note SAYS is the "already-provisioned note" pair below; this
-    // case is about the write, and the two were entangled until a review
-    // pointed out that the baseline remedy was being printed at healthy
-    // databases as though it were a diagnosis.
+    expect(result.notes.join("\n")).toContain("--baseline");
   });
 });
 
@@ -334,16 +335,38 @@ describe("db/provision.ts — the CLI contract", () => {
     expect(row?.users).toBe(false);
   });
 
-  test("the refusal is what stands between a bare invocation and the developer's OWN database", async () => {
+  test("the refusal is what stands between a bare invocation and a database nobody named", async () => {
     // The hazard in one case. Bun auto-loads `.env`, which on a developer
     // machine carries a real DATABASE_URL — so a bare `bun db/provision.ts`
     // resolves a live database with nothing typed and nothing exported, and
     // before --yes existed it applied 881 lines of DDL to whatever that named.
     // `.env` is in `.dockerignore`, so this hazard is a laptop one, which is
     // exactly where an unattended agent runs the command.
-    const { code, stderr } = await runCli([], {});
+    //
+    // ⚠️ Driven with an EXPLICIT throwaway URL, never by inheriting the ambient
+    // one. Inheriting is the faithful reproduction and it is unacceptable here:
+    // measured, with the gate mutated out, inheriting fired 881 lines of DDL at
+    // whatever `.env` named and left 33 tables behind. The test that proves the
+    // guard must not be the one that does the damage the day the guard
+    // regresses.
+    const { code, stderr } = await runCli([], { DATABASE_URL: SCRATCH_URL });
     expect(code).toBe(2);
     expect(stderr).toContain("--yes");
+  });
+
+  test("a URL it cannot parse is refused WITHOUT echoing it — passwords included", async () => {
+    // The refusal names the target so an operator can check it, and the
+    // fallback for an unparseable URL was the raw string. `DB_URL` on nais
+    // carries a password, and this repo already documents nais injecting bytes
+    // that break parsing (the `??` in db/postgres-connection.ts) — so the bare
+    // invocation the refusal text tells operators to run first would have
+    // written a secret to the pod's shared log aggregator.
+    const secret = "S3cr3tP@ssw0rd";
+    const { code, stdout, stderr } = await runCli([], {
+      DATABASE_URL: `postgres://appuser:${secret}@[bad host]:5432/mydb`,
+    });
+    expect(code).toBe(2);
+    expect(stdout + stderr).not.toContain(secret);
   });
 
   test("--dry-run needs no --yes: it is the form that cannot write", async () => {
@@ -488,5 +511,197 @@ describe("the privilege wall on a managed instance", () => {
     await withScratch((sql) => sql.unsafe(`CREATE EXTENSION IF NOT EXISTS vector`));
     const result = await provisionDatabase(roleUrl());
     expect(result.status).toBe("provisioned");
+  });
+});
+
+describe("the state space, enumerated against db/init.sql's OWN table list", () => {
+  /** `db/init.sql`'s declared tables, parsed from the file. The predicate has
+   *  to be derived, not remembered: a hand-kept list is one migration away from
+   *  reporting a complete schema as incomplete. */
+  async function declaredTables(): Promise<string[]> {
+    const initSql = await Bun.file(new URL("./init.sql", import.meta.url)).text();
+    return [...initSql.matchAll(/^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"?([a-z_][a-z0-9_]*)"?\s*\(/gim)]
+      .map((m) => m[1]!);
+  }
+
+  test("db/init.sql declares many tables and `users` is the FIRST — the fact this rests on", async () => {
+    const declared = await declaredTables();
+    expect(declared.length).toBeGreaterThan(20);
+    // This is why `users` alone cannot mean "provisioned". A `psql -f
+    // db/init.sql` that dies mid-file has `users` in almost every case, because
+    // it is created first — and `schema_migrations`, created LAST, in almost
+    // none. Read through the old predicate that state was "provisioned but not
+    // baselined", whose remedy is `--baseline` — which would succeed, satisfy
+    // db/require-provisioned.ts, boot the pod on a stump of a schema, and mark
+    // all 74 migrations applied so nothing could ever repair it.
+    expect(declared[0]).toBe("users");
+    expect(declared.at(-1)).toBe("schema_migrations");
+  });
+
+  test("a half-applied init.sql is INCOMPLETE, not 'provisioned but unbaselined'", async () => {
+    const initSql = await Bun.file(new URL("./init.sql", import.meta.url)).text();
+    // The real prefix of the real file, cut at its second CREATE TABLE — so
+    // this is the state psql actually leaves, not an approximation of it.
+    const secondTable = initSql.indexOf("CREATE TABLE", initSql.indexOf("CREATE TABLE") + 1);
+    await withScratch((sql) => sql.unsafe(initSql.slice(0, secondTable)));
+
+    let thrown: unknown;
+    try {
+      await provisionDatabase(SCRATCH_URL);
+    } catch (err) {
+      thrown = err;
+    }
+    expect((thrown as Error | undefined)?.name).toBe("ProvisionStateError");
+    // The load-bearing half: it must not send the operator to `--baseline`,
+    // which is the one action that makes this state unrecoverable. Asserted as
+    // the explicit warning rather than as the absence of the substring — the
+    // message names the command in order to forbid it, and "does not mention
+    // it" would be satisfied by a message that says nothing at all.
+    expect(String(thrown)).toContain("Do NOT baseline");
+    expect(String(thrown)).toContain("INCOMPLETE");
+  });
+
+  test("a lone empty `schema_migrations` gets the one-line remedy, not a schema drop", async () => {
+    // Reachable and documented: `bun db/migrate.ts` against an empty database
+    // creates exactly this table (`ensureMigrationsTable`) and then fails.
+    // `DROP SCHEMA public CASCADE` is a dangerous answer to it.
+    await withScratch(
+      (sql) => sql.unsafe(`CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, name TEXT NOT NULL)`),
+    );
+    const result = await provisionDatabase(SCRATCH_URL, { dryRun: true });
+    expect(result.status).toBe("not-empty");
+    expect(result.notes.join("\n")).toContain("DROP TABLE schema_migrations");
+    expect(result.notes.join("\n")).not.toContain("DROP SCHEMA");
+  });
+
+  test("a complete schema with rows recorded is 'already provisioned' and says nothing about baselining", async () => {
+    await provisionDatabase(SCRATCH_URL);
+    const result = await provisionDatabase(SCRATCH_URL);
+    expect(result.status).toBe("already-provisioned");
+    expect(result.notes.join("\n")).not.toContain("--baseline");
+  });
+});
+
+describe("the diagnoses that only exist to be read once, in a log", () => {
+  test("a baseline that fails AFTER init.sql applied says the schema IS there", async () => {
+    // Driven through the real race the runner's own advisory lock exists for:
+    // two rollouts at once. A second session holds the lock; this run carries a
+    // `lock_timeout` (postgres.js forwards an unknown query parameter into the
+    // startup packet — the same mechanism db/postgres-connection.ts translates
+    // `ssl*` away from, used here on purpose), so init.sql applies and the
+    // baseline then gives up waiting.
+    const holder = postgres(SCRATCH_URL, { max: 1, onnotice: () => {} });
+    try {
+      await holder`SELECT pg_advisory_lock(${0x6d756e6e})`;
+      const impatient = `${SCRATCH_URL}?options=${encodeURIComponent("-c lock_timeout=1000")}`;
+
+      let thrown: unknown;
+      try {
+        await provisionDatabase(impatient);
+      } catch (err) {
+        thrown = err;
+      }
+      expect((thrown as Error | undefined)?.name).toBe("ProvisionBaselineError");
+      // The operator-facing fact is the opposite of what a bare rethrow implied:
+      // the schema IS present and ONE command finishes the job. Without this the
+      // CLI printed a bun source snippet under "Provisioning failed:", which
+      // reads as "nothing happened" and sends the operator to re-run instead.
+      expect(String(thrown)).toContain("--baseline");
+      // And the Postgres diagnosis has to survive the wrapping, or the wrapper
+      // has traded a stack trace for a sentence with no cause in it.
+      expect(String((thrown as { cause?: unknown }).cause)).toContain("lock timeout");
+
+      const [row] = await withScratch(
+        (sql) => sql`SELECT to_regclass('public.users') IS NOT NULL AS users`,
+      );
+      expect(row?.users).toBe(true);
+    } finally {
+      await holder.end();
+    }
+  });
+
+  test("a name that collides but is not a BASE TABLE is answered by name, not by a driver stack", async () => {
+    // The pre-flight counts BASE TABLEs, so a VIEW sharing a name with one of
+    // init.sql's tables is invisible to it — and then `CREATE TABLE` fails with
+    // 42P07. This is the race the mapping exists for, reachable without one:
+    // whatever slips past the probe must still come back as a sentence.
+    await withScratch((sql) => sql.unsafe(`CREATE VIEW connectors AS SELECT 1 AS x`));
+    let thrown: unknown;
+    try {
+      await provisionDatabase(SCRATCH_URL);
+    } catch (err) {
+      thrown = err;
+    }
+    expect((thrown as Error | undefined)?.name).toBe("ProvisionStateError");
+    expect(String(thrown)).toContain("connectors");
+    expect(String(thrown)).not.toContain("node_modules");
+  });
+
+  test("an unreachable database reports how long it actually waited, not the budget", async () => {
+    // The budget is checked only AFTER an attempt returns, and postgres.js adds
+    // its own connect handling on top, so a 30s budget was measured taking 41s.
+    // A message naming 30s for a 41s wait sends an operator hunting a second
+    // timeout that does not exist. A pure helper because the alternative is a
+    // 41-second test.
+    expect(unreachableMessage(41_000, "connect ECONNREFUSED")).toContain("after 41s");
+    expect(unreachableMessage(41_000, "connect ECONNREFUSED")).not.toContain("30s");
+    expect(unreachableMessage(41_000, "connect ECONNREFUSED")).toContain("ECONNREFUSED");
+  });
+});
+
+describe("db/migrate.ts --baseline reports only what it kept", () => {
+  test("prints no '✓ recorded' line for rows a rollback discarded", async () => {
+    // `sql.begin` made the progress lines lie: 68 checkmarks, then a rollback,
+    // then zero rows — in the same file whose thesis is an honest one-line
+    // answer in a container log.
+    await provisionDatabase(SCRATCH_URL);
+    const versions = (await readdir(new URL("./migrations/", import.meta.url)))
+      .filter((f) => /^\d{3}-/.test(f) && !f.includes(".test."))
+      .map((f) => f.slice(0, 3))
+      .sort();
+    await withScratch(async (sql) => {
+      await sql`DELETE FROM schema_migrations`;
+      await sql.unsafe(
+        `ALTER TABLE schema_migrations ADD CONSTRAINT refuse_last CHECK (version <> '${versions.at(-1)}')`,
+      );
+    });
+
+    const proc = Bun.spawn(["bun", "db/migrate.ts", "--baseline"], {
+      cwd: REPO_ROOT,
+      env: { ...process.env, DATABASE_URL: SCRATCH_URL },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const stdout = await new Response(proc.stdout).text();
+    await proc.exited;
+
+    const [after] = await withScratch(
+      (sql) => sql`SELECT count(*)::int AS n FROM schema_migrations`,
+    );
+    expect(after?.n).toBe(0);
+    expect(stdout).not.toContain("recorded");
+  });
+
+  test("but DOES print one per row when the transaction commits", async () => {
+    // The other half, and it is not decoration: without it, deleting the
+    // emit-after-commit loop outright leaves the suite green — the rollback
+    // case above is satisfied by a runner that never reports anything at all.
+    await provisionDatabase(SCRATCH_URL);
+    await withScratch((sql) => sql`DELETE FROM schema_migrations`);
+
+    const proc = Bun.spawn(["bun", "db/migrate.ts", "--baseline"], {
+      cwd: REPO_ROOT,
+      env: { ...process.env, DATABASE_URL: SCRATCH_URL },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const stdout = await new Response(proc.stdout).text();
+    await proc.exited;
+
+    const [after] = await withScratch(
+      (sql) => sql`SELECT count(*)::int AS n FROM schema_migrations`,
+    );
+    expect(after?.n).toBeGreaterThan(0);
+    expect(stdout.match(/\(recorded\)/g)?.length).toBe(after?.n);
   });
 });
