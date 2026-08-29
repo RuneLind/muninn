@@ -75,6 +75,39 @@ export const DEFAULT_CATALOG_KINDS: string[] = ["concept"];
 /** Hard cap on the index one-liner (rationale / first body paragraph). */
 const ONE_LINER_MAX = 120;
 
+/** Below this many characters the truncated one-liner says nothing, so the bullet
+ *  ships as a bare `- [[Title]]` instead of `- [[Title]] — Th…`. Only reachable
+ *  when a `[[wikilink]]` starts at/near offset 0 (see {@link truncateOneLiner}). */
+const ONE_LINER_MIN = 20;
+
+/**
+ * Cut `text` to at most `ONE_LINER_MAX` characters WITHOUT splitting a
+ * `[[wikilink]]`, appending `…`. A bare slice ships an unclosed `[[`, and
+ * `WIKILINK_RE` (and every line-based `\[\[([^\]]+)\]\]` scan) then matches
+ * across the newline and swallows the NEXT index entry's link — measured
+ * 2026-08-16 as 26 false "missing from index" findings and 17 duplicate entries,
+ * and still visible as 5 phantom broken links on the jarvis index.
+ *
+ * We truncate rather than repair: appending `]]` would invent a link target the
+ * summary never asserted, and `insertIndexLine`'s idempotence check reads
+ * `[[Title]]` substrings, so a fabricated target is worse than a dropped one.
+ * Handles the piped form `[[Target|label]]` (the open bracket is what matters),
+ * and the cut landing BETWEEN the two brackets, which no `[[`-vs-`]]` count sees.
+ */
+function truncateOneLiner(text: string): string {
+  if (text.length <= ONE_LINER_MAX) return text;
+  let cut = text.slice(0, ONE_LINER_MAX - 1);
+  // Back up before a `[[` that has no `]]` after it within the cut.
+  const open = cut.lastIndexOf("[[");
+  if (open !== -1 && cut.indexOf("]]", open + 2) === -1) cut = cut.slice(0, open);
+  // The cut can also land between the two brackets, leaving a lone `[` (or, from
+  // a `[[[`, one left over after the strip above).
+  cut = cut.trimEnd();
+  while (cut.endsWith("[")) cut = cut.slice(0, -1).trimEnd();
+  if (cut.length < ONE_LINER_MIN) return "";
+  return `${cut}…`;
+}
+
 /**
  * Per-wiki cataloging policy decision: does a page of `kind` get an index.md
  * catalog line under this wiki's `catalogKinds` policy? Two kinds are ALWAYS
@@ -145,8 +178,7 @@ function indexOneLiner(rationale: string | null | undefined, body: string | null
     .find((s) => s.length > 0);
   let text = fromRationale ?? firstBodyParagraph(body);
   text = text.replace(/\s+/g, " ").trim();
-  if (text.length > ONE_LINER_MAX) text = `${text.slice(0, ONE_LINER_MAX - 1).trimEnd()}…`;
-  return text;
+  return truncateOneLiner(text);
 }
 
 /** First non-empty, non-heading, non-fence line of a page body. */

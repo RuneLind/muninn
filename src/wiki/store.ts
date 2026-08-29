@@ -518,7 +518,15 @@ function extRank(relPath: string): number {
   return 2; // .html explainer
 }
 
-const WIKILINK_RE = /\[\[([^\]|]+?)(?:\|[^\]]*?)?\]\]/g;
+/**
+ * A `[[wikilink]]`, target and alias both NEWLINE-FREE. Obsidian has no
+ * multi-line wikilink, and without the `\n` exclusion an unclosed `[[` (an
+ * index one-liner truncated mid-link, say) matched across the line break and
+ * consumed the NEXT line's link — measured on the jarvis wiki as 5 phantom
+ * broken links that ALSO hid the 5 real links they swallowed, on the linter and
+ * in the backlink graph alike.
+ */
+const WIKILINK_RE = /\[\[([^\]|\n]+?)(?:\|[^\]\n]*?)?\]\]/g;
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const DEFAULT_REL_PATH = "../huginn/huginn-jarvis/data/wiki";
 

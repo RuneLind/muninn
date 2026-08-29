@@ -275,6 +275,21 @@ describe("extractWikilinks", () => {
   test("drops backslash escapes so targets match the page name", () => {
     expect(extractWikilinks("Escaped [[Claude Code\\]] here.")).toEqual(["Claude Code"]);
   });
+
+  test("an unclosed [[ never swallows the next line's link", () => {
+    // A truncated index one-liner leaves a dangling `[[`. Without the newline
+    // exclusion the match spans the break, yielding one phantom target AND
+    // hiding the real link on the following line.
+    const links = extractWikilinks(
+      ["- [[Entry One]] — prose mentioning [[Cordis…", "- [[Entry Two]] — more prose."].join("\n"),
+    );
+    expect(links).toEqual(["Entry One", "Entry Two"]);
+  });
+
+  test("a piped link's alias does not span lines either", () => {
+    const links = extractWikilinks(["Prose with [[Target|label…", "- [[Next Entry]] tail."].join("\n"));
+    expect(links).toEqual(["Next Entry"]);
+  });
 });
 
 describe("extractMarkdownLinks", () => {

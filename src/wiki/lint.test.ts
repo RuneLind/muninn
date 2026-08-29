@@ -3,7 +3,7 @@ import { mkdtemp, rm, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { buildWikiIndex } from "./store.ts";
-import { lintWiki, type LintFinding } from "./lint.ts";
+import { lintWiki, LINT_CHECKS, type LintFinding } from "./lint.ts";
 
 /**
  * Lint-engine tests over temp-dir wiki fixtures (modeled on store.test.ts).
@@ -370,10 +370,56 @@ describe("lintWiki", () => {
     expect(missing).not.toContain("concepts/Good Concept.md");
   });
 
+  // ── index-truncation ───────────────────────────────────────────────────────
+
+  test("a line whose [[ never closes is reported, with its line number", async () => {
+    await write(
+      "index.md",
+      [
+        "# Wiki Index",
+        "",
+        "- [[Good Concept]] — a summary that was cut mid-link at [[Some Long Page",
+        "- [[Sidekick]] — fine.",
+      ].join("\n"),
+    );
+    const findings = await lint();
+    const truncation = findings.filter((f) => f.check === "index-truncation");
+    expect(truncation.map((f) => f.relPath)).toEqual(["index.md"]);
+    expect(truncation[0]!.detail).toBe("line 3");
+    expect(truncation[0]!.message).toContain("[[Some Long Page");
+  });
+
+  test("balanced lines, fenced blocks and inline code never fire", async () => {
+    await write(
+      "concepts/Good Concept.md",
+      [
+        "---",
+        "type: concept",
+        "title: Good Concept",
+        "updated: 2026-06-01",
+        "---",
+        "",
+        "Links to [[Real Source]] and [[Sidekick|the sidekick]].",
+        "",
+        "A meta-mention of `[[an unclosed one` in a code span.",
+        "",
+        "```md",
+        "[[Docs about wikilink syntax",
+        "```",
+        "",
+        "## Sources",
+        "- https://example.com/a",
+      ].join("\n"),
+    );
+    const findings = await lint();
+    expect(relPathsFor(findings, "index-truncation")).toEqual([]);
+  });
+
   test("counts summarize findings per check", async () => {
     const index = await buildWikiIndex(root);
     const report = await lintWiki(index);
-    for (const key of ["broken-link", "orphan", "stale-updated", "missing-sources"]) {
+    // Iterate the engine's own list — a new check must appear in `counts` too.
+    for (const key of LINT_CHECKS) {
       expect(typeof report.counts[key]).toBe("number");
     }
     const total = Object.values(report.counts).reduce((a, b) => a + b, 0);

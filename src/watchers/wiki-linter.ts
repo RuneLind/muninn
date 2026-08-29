@@ -15,23 +15,31 @@
 import type { Watcher, WatcherAlert } from "../types.ts";
 import type { BotConfig } from "../bots/config.ts";
 import { getWikiIndex } from "../wiki/store.ts";
-import { lintWiki } from "../wiki/lint.ts";
+import { lintWiki, LINT_CHECKS, type LintCheck } from "../wiki/lint.ts";
 import { todayOslo } from "../gardener/util.ts";
 import { getLog } from "../logging.ts";
 
 const log = getLog("watchers", "wiki-linter");
 
-/** Human labels + pluralization for the one-line alert summary. */
-const CHECK_SUMMARY: Record<string, { one: string; many: string }> = {
+/**
+ * Human labels + pluralization for the one-line alert summary. `Record<LintCheck, …>`
+ * so a new check cannot compile without one — an unlabelled check would alert with
+ * an empty sentence ("Wiki lint:  — review at …") while findings piled up.
+ */
+const CHECK_SUMMARY: Record<LintCheck, { one: string; many: string }> = {
   "broken-link": { one: "broken link", many: "broken links" },
   orphan: { one: "orphan", many: "orphans" },
   "stale-updated": { one: "stale updated:", many: "stale updated:" },
   "missing-sources": { one: "missing Sources", many: "missing Sources" },
+  "index-truncation": { one: "truncated wikilink", many: "truncated wikilinks" },
 };
 
-const CHECK_ORDER = ["broken-link", "orphan", "stale-updated", "missing-sources"] as const;
+/** DERIVED from the engine's own list, never re-typed: `summarizeCounts` iterates
+ *  the ORDER, not the label map, so a hand-maintained copy missing a new check
+ *  produced the empty sentence even with the map above fully typed. */
+const CHECK_ORDER: readonly LintCheck[] = LINT_CHECKS;
 
-function summarizeCounts(counts: Record<string, number>): string {
+function summarizeCounts(counts: Record<LintCheck, number>): string {
   const parts: string[] = [];
   for (const check of CHECK_ORDER) {
     const n = counts[check] ?? 0;

@@ -8,6 +8,8 @@ The `wiki-gardener` watcher clusters recent summaries (Haiku + interest profile)
 
 Drafts are contained at persist + apply time: unresolvable body wikilinks de-link to bold (`containBodyLinks`), `sources:` is sanitized to http(s)-only with a pending-ingestion callout for URL-less docs.
 
+The index one-liner is truncated at a WIKILINK-SAFE boundary (`truncateOneLiner`, `wire.ts`): a bare 119-char slice can land inside `[[Some Page]]` and ship an unclosed `[[`, which any line-based `\[\[([^\]]+)\]\]` scan then matches across the newline, consuming the NEXT entry's link (26 false "missing from index" findings, 2026-08-16). Truncate, never repair — appending `]]` invents a target the summary never asserted, and `insertIndexLine`'s idempotence check reads `[[Title]]` substrings. The linter's `index-truncation` check is the recurrence detector (`src/watchers/CLAUDE.md`).
+
 Requires `wikiDir`; per-bot `gardener` config block; seed via `scripts/setup-wiki-gardener.ts`.
 
 ## Consolidation gardener (weekly)

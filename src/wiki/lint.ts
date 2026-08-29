@@ -7,7 +7,7 @@
  * watcher (report-only) and the `/api/wiki/linter-findings` route both call
  * `lintWiki`.
  *
- * Four checks, each finding `{ check, relPath, message, detail? }`:
+ * Five checks, each finding `{ check, relPath, message, detail? }`:
  *  1. broken-link    — [[wikilink]] / relative .md link that resolves to no page.
  *  2. orphan         — a page with no inbound links (reserved files discounted as
  *                      both subjects and sole-linkers).
@@ -17,6 +17,12 @@
  *                      sorts silently ignore — this is its only operator-visible signal).
  *  4. missing-sources — a synthesized `concept` page that cites no sources (no
  *                      `## Sources` heading AND no `sources:` frontmatter).
+ *  5. index-truncation — a line carrying a `[[` that never closes on that line.
+ *                      A wikilink cannot span lines, so the `[[` is the debris of
+ *                      a truncated line (the gardener's index one-liner was cut
+ *                      mid-link until 2026-08-29) — and any line-based
+ *                      `\[\[([^\]]+)\]\]` scan run over such a file matches
+ *                      across the break and consumes the NEXT line's link.
  *
  * The store's index builder silently drops unresolved link targets
  * (`store.ts:389-399`), so broken-link recomputes resolution here from the raw
@@ -36,7 +42,13 @@ import {
   isImplausibleFutureDate,
 } from "../dashboard/views/components/wiki-filter.ts";
 
-export const LINT_CHECKS = ["broken-link", "orphan", "stale-updated", "missing-sources"] as const;
+export const LINT_CHECKS = [
+  "broken-link",
+  "orphan",
+  "stale-updated",
+  "missing-sources",
+  "index-truncation",
+] as const;
 export type LintCheck = (typeof LINT_CHECKS)[number];
 
 export interface LintFinding {
@@ -51,7 +63,7 @@ export interface LintFinding {
 export interface LintReport {
   findings: LintFinding[];
   /** Count of findings per check key (every check key present, 0 when clean). */
-  counts: Record<string, number>;
+  counts: Record<LintCheck, number>;
   generatedAt: number;
 }
 
@@ -144,6 +156,49 @@ function checkBrokenLinks(page: WikiPageMeta, rawContent: string, index: WikiInd
     }
   }
 
+  return out;
+}
+
+/** How much of the offending line the finding quotes. */
+const TRUNCATION_EXCERPT_MAX = 60;
+
+/**
+ * Lines carrying a `[[` that never closes on that line.
+ *
+ * This is the recurrence detector for the truncated index one-liner
+ * (`indexOneLiner`, `src/gardener/wire.ts`): the write side now cuts at a safe
+ * boundary, and this reports any line that still ends up in the broken shape —
+ * a hand edit, another writer, or a regression. It matters beyond cosmetics
+ * because a `\[\[([^\]]+)\]\]` scan without a `\n` exclusion (which is what the
+ * 2026-08-16 index lint was) matches across the break and reports the swallowed
+ * page as uncatalogued.
+ *
+ * Fenced blocks are skipped and inline code spans stripped PER LINE (not via
+ * `stripCodeSpans`, whose fence removal joins the lines around a block and could
+ * balance a genuinely dangling `[[` against a later line's `]]`).
+ */
+function checkIndexTruncation(page: WikiPageMeta, rawContent: string): LintFinding[] {
+  const out: LintFinding[] = [];
+  let inFence = false;
+  const lines = rawContent.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i]!;
+    if (/^\s*(```|~~~)/.test(raw)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    const line = raw.replace(/`[^`]*`/g, "");
+    const open = line.lastIndexOf("[[");
+    if (open === -1 || line.indexOf("]]", open + 2) !== -1) continue;
+    const excerpt = line.slice(open).trim().slice(0, TRUNCATION_EXCERPT_MAX);
+    out.push({
+      check: "index-truncation",
+      relPath: page.relPath,
+      message: `Unclosed [[ on line ${i + 1} — a wikilink scan can run past the line end (${excerpt})`,
+      detail: `line ${i + 1}`,
+    });
+  }
   return out;
 }
 
@@ -296,6 +351,9 @@ export async function lintWiki(
     // Broken links apply to every markdown page (a dead link in index.md is
     // still a dead link); the frontmatter-shaped checks skip reserved infra.
     findings.push(...checkBrokenLinks(page, content, index));
+    // Reserved infra is IN scope: index.md is exactly where the truncated
+    // one-liners land, and a dangling `[[` there hides a real catalog entry.
+    findings.push(...checkIndexTruncation(page, content));
 
     if (!reservedBasename(page.relPath)) {
       // One clock read per lint pass, so two pages at the 48h boundary are judged
@@ -308,8 +366,7 @@ export async function lintWiki(
 
   findings.push(...checkOrphans(index));
 
-  const counts: Record<string, number> = {};
-  for (const c of LINT_CHECKS) counts[c] = 0;
+  const counts = Object.fromEntries(LINT_CHECKS.map((c) => [c, 0])) as Record<LintCheck, number>;
   for (const f of findings) counts[f.check] = (counts[f.check] ?? 0) + 1;
 
   return { findings, counts, generatedAt: nowMs };

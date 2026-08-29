@@ -1188,7 +1188,10 @@ header carries a 🌱 Gardener link + pending-draft count badge.
     pure + unit-tested; best-effort **per file** — a wiring failure warns and
     continues, the page write stays source of truth): (a) inserts the page's
     `## Concepts` **index.md** bullet (`- [[Title]] — <one-liner>`, one-liner from
-    rationale/first body paragraph ≤120 chars) in case-sensitive ASCII order within
+    rationale/first body paragraph ≤120 chars, **cut back to before any `[[` the
+    cap would split** — a bare slice shipped an unclosed `[[`, and a link starting
+    at/near offset 0 drops the one-liner entirely rather than emitting `— [[…`)
+    in case-sensitive ASCII order within
     the byte-matched `### AI / Claude / Coding` (domain ai) or `### Health / Learning`
     (domain life) block — **create mode only**; **entity ⇒ skipped** (People/Orgs/
     Products isn't derivable — file manually) and a **missing `###` ⇒ skip, never
@@ -1406,7 +1409,7 @@ wiki or DB. v1 is purely a report.
 
 - **Lint engine** (`src/wiki/lint.ts`): pure functions over a built `WikiIndex`
   plus per-file content reads. Each finding is `{ check, relPath, message,
-  detail? }`. Four checks:
+  detail? }`. Five checks:
   1. **broken-link** — re-runs `extractWikilinks` + `extractMarkdownLinks` per
      page and resolves against the index (the store's builder silently drops
      unresolved targets, so resolution is recomputed here); `../`-escapes are
@@ -1434,6 +1437,28 @@ wiki or DB. v1 is purely a report.
      frontmatter (the conservative reading; a literal `## Sources`-only check
      would flag every gardener-written page). `entity` stubs + reserved files
      are out of scope.
+  5. **index-truncation** — a line carrying a `[[` that never closes on that
+     line. A wikilink cannot span lines, so the `[[` is debris from a truncated
+     line — which the gardener's own `indexOneLiner` produced until 2026-08-29
+     by slicing at 119 chars regardless of where a `[[` sat. It matters beyond
+     cosmetics: a line-based `\[\[([^\]]+)\]\]` scan WITHOUT a `\n` exclusion
+     (which the 2026-08-16 index lint was) then matches across the break and
+     reports the swallowed next entry as uncatalogued — 26 false "missing from
+     index" findings and 17 duplicate entries in that pass. Reserved infra is IN
+     scope here (index.md is exactly where it lands); fenced blocks are skipped
+     and inline code spans stripped PER LINE, deliberately not via
+     `stripCodeSpans`, whose fence removal joins the lines around a block and
+     could balance a genuine dangling `[[` against a later line's `]]`.
+     Measured on the live roots the day it shipped: jarvis 5 (all real, all
+     `index.md`), memory 1 (a real `[[[link\nspanning]]]`), mimir 0,
+     melosys-kode-wiki 0 — i.e. no false positives over 2,284 pages.
+- **Adding a check is compiler-enforced now.** `LintReport.counts`, the watcher's
+  `CHECK_SUMMARY` and the gardener page's `LINT_LABELS` are all
+  `Record<LintCheck, …>`, and `CHECK_ORDER` is DERIVED from `LINT_CHECKS` rather
+  than re-typed — `summarizeCounts` iterates the order, not the label map, so a
+  hand-kept order missing a new check alerted with an empty sentence even with
+  every map full. In the client bundle `LintCheck` must come in as `import type`
+  only; a value import drags `node:path`/`Bun.file` into the browser bundle.
 - **Route**: `GET /api/wiki/linter-findings?wiki=` (in `wiki-gardener-routes.ts`)
   resolves the wiki like the proposals route, runs `lintWiki` on demand, and
   returns `{ findings, counts, generatedAt }`. A missing/unreadable wiki degrades
