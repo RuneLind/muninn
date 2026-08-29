@@ -716,10 +716,21 @@ Incremental changes go in `db/migrations/` as numbered files. Both `.sql` and `.
 A Flyway-style migration runner tracks applied migrations in a `schema_migrations` table:
 
 ```bash
+bun run db:provision          # Empty database → apply init.sql, then baseline
 bun run db:migrate            # Apply pending migrations
 bun run db:migrate:status     # Show which migrations are applied/pending
 bun run db:migrate:baseline   # Mark all migrations as applied (for fresh DBs)
 ```
+
+`db:provision` is the one to reach for on a database that has never been
+provisioned — the schema comes from `db/init.sql`, not from the runner, so
+`db:migrate` against an empty database applies migrations onto nothing. It
+refuses a database that already has a `users` table rather than writing over it,
+and the whole file is one implicit transaction, so a failure leaves nothing
+behind. On a managed instance have an elevated role run
+`CREATE EXTENSION vector` once first — the app user may not create an extension,
+and `init.sql`'s own `IF NOT EXISTS` then short-circuits before the privilege
+check.
 
 ### Creating a new migration
 
@@ -806,7 +817,7 @@ The container's entrypoint runs, in order: adopt `DB_URL` as `DATABASE_URL` if o
 
 | State | What the entrypoint says |
 |---|---|
-| No `users` table — never provisioned | Apply `db/init.sql` **and** `bun db/migrate.ts --baseline`. The `psql -f db/init.sql` half needs a machine that has psql and can reach the database (this image ships **no psql**); the baseline half does not — the image carries bun and `db/`, so it runs from the image itself (see the one-off forms below) |
+| No `users` table — never provisioned | Run `bun db/provision.ts` (`bun run db:provision`) — it applies `db/init.sql` **and** records the shipped migrations, from the image itself. No psql, no checkout, no file transport (see the one-off forms below). `psql -f db/init.sql` still works from a machine that has psql *and* can reach the database — but a private-IP Cloud SQL instance has no such machine, which is why this is not the leading answer |
 | Schema present, `schema_migrations` empty — provisioned but never baselined | Run `bun db/migrate.ts --baseline` (`bun run db:migrate:baseline`) — from the image itself, no psql and no checkout needed (see the one-off forms below) |
 
 **The baseline command cannot be an `exec`.** The refusal makes the entrypoint exit, so under `restart: unless-stopped` (or a Deployment) there is no running process to exec into — `docker compose exec app …` answers `service "app" is not running`. Run it as a one-off container instead:
@@ -820,6 +831,15 @@ The `--entrypoint` override is required; without it the same refusal runs first.
 ```bash
 kubectl debug deploy/<app> --copy-to=<app>-baseline --container=<app> \
   --profile=general -- bun db/migrate.ts --baseline   # delete the copied pod afterwards
+```
+
+The same shape provisions a database that has never been provisioned at all —
+which is the case on a nais deployment, where the Cloud SQL instance is
+private-IP and the app user's credentials exist only inside the pod:
+
+```bash
+kubectl debug deploy/<app> --copy-to=<app>-provision --container=<app> \
+  --profile=general -- bun db/provision.ts           # delete the copied pod afterwards
 ```
 
 `--profile=general` is what kubectl wants; without it it warns that the legacy profile is deprecated. A one-off Job from the same image carrying the same env and secrets (nais: a naisjob) works too — but it **must set its own command**, or the image's default entrypoint re-runs the refusal before it gets to the baseline.

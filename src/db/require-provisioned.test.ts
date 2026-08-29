@@ -62,14 +62,24 @@ afterAll(async () => {
 });
 
 describe("db/require-provisioned.ts", () => {
-  test("an empty database exits non-zero with the init.sql + baseline instruction", async () => {
+  test("an empty database exits non-zero and names a remedy runnable FROM THIS IMAGE", async () => {
     const { code, stderr } = await runCheck(SCRATCH_URL);
     expect(code).toBe(1);
     // A boot refusal is read once, in a container log. It has to carry the fix,
     // not a raw SQL error.
     expect(stderr).toContain("users");
     expect(stderr).toContain("db/init.sql");
-    expect(stderr).toContain("--baseline");
+
+    // The load-bearing half, and the reason this assertion changed. The
+    // refusal used to lead with `psql -f db/init.sql` and then admit psql is
+    // not in the image — "run it from a machine that has it and can reach this
+    // database". For a private-IP Cloud SQL instance whose app credentials live
+    // only in the pod there IS no such machine, so the one command this refusal
+    // printed was unrunnable exactly where it is printed. It must lead with the
+    // applier, which the image can run.
+    expect(stderr).toContain("db/provision.ts");
+    const leadsWithProvision = stderr.indexOf("db/provision.ts") < stderr.indexOf("psql");
+    expect(leadsWithProvision).toBe(true);
   });
 
   test("a `schema_migrations` table alone does NOT satisfy it", async () => {
