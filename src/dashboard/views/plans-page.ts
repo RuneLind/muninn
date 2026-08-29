@@ -424,6 +424,12 @@ const PLAN_BOARD_STYLES = `
     .pb-priset button[aria-pressed="true"] { background: var(--pb-pri-color); border-color: var(--pb-pri-color); color: #fff; font-weight: 700; }
     .pb-priset button:disabled { opacity: .55; cursor: default; }
     a.pb-filelink { font-family: var(--pb-mono); font-size: 12px; color: var(--accent-light); text-decoration: none; overflow-wrap: anywhere; }
+    .pb-filerow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    button.pb-copy {
+      border: 1px solid var(--border-primary); background: var(--bg-panel); border-radius: 6px;
+      padding: 2px 9px; font-size: 11.5px; color: var(--text-muted); white-space: nowrap;
+    }
+    button.pb-copy:hover { color: var(--text-secondary); border-color: var(--text-muted); }
 
     /* ---- footer --------------------------------------------------------- */
     .pb-foot { color: var(--pb-muted); font-size: 12px; margin-top: 8px; }

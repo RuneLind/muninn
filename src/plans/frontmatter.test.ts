@@ -10,7 +10,7 @@
 
 import { describe, expect, test } from "bun:test";
 import path from "node:path";
-import { setPlanPriority, type PlanPriorityEdit } from "./frontmatter.ts";
+import { setPlanPriority, setPlanStatus, type PlanPriorityEdit } from "./frontmatter.ts";
 import { planRecordFromContent } from "./source.ts";
 import type { PlanPriority } from "./constants.ts";
 
@@ -215,5 +215,92 @@ describe("setPlanPriority on a CRLF file", () => {
 
   test("clearing removes exactly that line, terminator included", () => {
     expect(set(set(CRLF, "p1"), null)).toBe(CRLF);
+  });
+});
+
+describe("setPlanStatus", () => {
+  const setStatus = (content: string, status: Parameters<typeof setPlanStatus>[1], date = "2026-08-29"): string => {
+    const edit = setPlanStatus(content, status, date);
+    if (edit.kind !== "changed") {
+      throw new Error(`expected a changed edit, got ${edit.kind}: ${JSON.stringify(edit)}`);
+    }
+    return edit.content;
+  };
+
+  const PLAN = `---\ntitle: T\nplan_status: in-flight\nstatus_date: 2026-08-01\n---\n\n# Body\n`;
+
+  test("replaces the status and restamps status_date, touching nothing else", () => {
+    const out = setStatus(PLAN, "abandoned");
+    expect(out).toBe(`---\ntitle: T\nplan_status: abandoned\nstatus_date: 2026-08-29\n---\n\n# Body\n`);
+    const rec = planRecordFromContent("plans/t.mdx", out, 1, [])!;
+    expect(rec.planStatus).toBe("abandoned");
+    expect(rec.statusDate).toBe("2026-08-29");
+  });
+
+  test("inserts status_date when the plan carries none", () => {
+    const noDate = `---\ntitle: T\nplan_status: ready\n---\n\n# Body\n`;
+    expect(setStatus(noDate, "superseded")).toBe(
+      `---\ntitle: T\nplan_status: superseded\nstatus_date: 2026-08-29\n---\n\n# Body\n`,
+    );
+  });
+
+  test("the same status is a noop that leaves status_date alone", () => {
+    expect(setPlanStatus(PLAN, "in-flight", "2026-08-29").kind).toBe("noop");
+  });
+
+  test("a status_date line BEFORE plan_status is replaced in place", () => {
+    const flipped = `---\nstatus_date: 2026-08-01\nplan_status: ready\n---\n\n# Body\n`;
+    expect(setStatus(flipped, "abandoned")).toBe(
+      `---\nstatus_date: 2026-08-29\nplan_status: abandoned\n---\n\n# Body\n`,
+    );
+  });
+
+  test("duplicate plan_status lines: the reader's LAST value drives the noop test, and the write normalizes to one", () => {
+    const dup = `---\nplan_status: ready\nplan_status: blocked\n---\n\n# Body\n`;
+    // The reader takes the last (blocked), so setting blocked is a noop…
+    expect(setPlanStatus(dup, "blocked", "2026-08-29").kind).toBe("noop");
+    // …and a real change leaves exactly one line.
+    const out = setStatus(dup, "abandoned");
+    expect(out.match(/^plan_status:/gm)!.length).toBe(1);
+    expect(out).toContain("plan_status: abandoned");
+  });
+
+  test("a missing plan_status line is inserted, not refused", () => {
+    const bare = `---\ntitle: T\n---\n\n# Body\n`;
+    const out = setStatus(bare, "abandoned");
+    expect(out).toBe(`---\nplan_status: abandoned\nstatus_date: 2026-08-29\ntitle: T\n---\n\n# Body\n`);
+  });
+
+  test("a missing plan_status with an EXISTING status_date leaves exactly one date line", () => {
+    const bare = `---\ntitle: t\nstatus_date: 2020-01-01\n---\n\n# Body\n`;
+    const out = setStatus(bare, "superseded");
+    expect(out.match(/^status_date:/gm)!.length).toBe(1);
+    expect(out).toBe(`---\nplan_status: superseded\ntitle: t\nstatus_date: 2026-08-29\n---\n\n# Body\n`);
+  });
+
+  test("a QUOTED same status is a noop — the compare reads what the reader reads", () => {
+    // `parseFrontmatter` unquotes scalar values, so `plan_status: "superseded"`
+    // IS superseded to the board; restamping status_date on it would destroy
+    // the real transition's date on a re-click.
+    const quoted = `---\ntitle: t\nplan_status: "superseded"\nstatus_date: 2020-01-01\n---\n\n# Body\n`;
+    expect(setPlanStatus(quoted, "superseded", "2026-08-29").kind).toBe("noop");
+  });
+
+  test("no readable fence is a refusal", () => {
+    expect(setPlanStatus("# just a heading\n", "abandoned", "2026-08-29").kind).toBe("refused");
+  });
+
+  test("the real lifecycle plan: bytes after the fence are untouched", () => {
+    const out = setStatus(LIFECYCLE, "abandoned");
+    expect(bodyAfterFence(out)).toBe(bodyAfterFence(LIFECYCLE));
+    expect(fenceLines(out)).toContain("plan_status: abandoned");
+  });
+
+  test("CRLF file keeps its terminators", () => {
+    const crlf = `---\r\ntitle: T\r\nplan_status: ready\r\n---\r\n\r\n# Body\r\n`;
+    const out = setStatus(crlf, "abandoned");
+    expect(out).toBe(
+      `---\r\ntitle: T\r\nplan_status: abandoned\r\nstatus_date: 2026-08-29\r\n---\r\n\r\n# Body\r\n`,
+    );
   });
 });

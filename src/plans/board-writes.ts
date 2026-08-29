@@ -51,6 +51,8 @@ import { PLAN_PRIORITIES, PLAN_STATUSES, type PlanPriority, type PlanStatus } fr
 import {
   ACTIVE_COLUMN_KEYS,
   BOARD_COLUMNS,
+  ageInDays,
+  columnForStatus,
   type BoardCard,
   type BoardColumnKey,
   type BoardColumnMeta,
@@ -95,9 +97,21 @@ export const NUDGE_RELOADING = "refreshing the board…";
 export const COLUMN_SAVING = "saving…";
 
 /** The two 409 sentences. Per surface: a reader who just clicked a priority is
- *  not being told about a queue file they never touched. */
+ *  not being told about a queue file they never touched. A status write edits
+ *  the same file a priority write does, so it shares the plan sentence. */
 export const PRIORITY_STALE_MESSAGE = "this plan changed on disk — reload";
 export const ORDER_STALE_MESSAGE = "the queue changed on disk — reload";
+
+/** The archive control's two targets, and the way back. `abandoned` is the
+ *  closest thing the lifecycle has to delete — the FILE stays in mimir, the
+ *  card leaves the active board. */
+export const ARCHIVE_TARGETS: readonly PlanStatus[] = ["superseded", "abandoned"];
+export const RESTORE_TARGET: PlanStatus = "proposed";
+
+/** Why the archive buttons are disabled on a readonly instance: unlike a
+ *  priority there is NO draft fallback — a status draft would show a card in a
+ *  column mimir contradicts on every load. */
+export const ARCHIVE_READONLY_TITLE = `${PLAN_READONLY_SHORT} — edit plan_status in mimir`;
 
 // ---------------------------------------------------------------- capability
 
@@ -201,13 +215,13 @@ export function writeModeSentence(capability: WriteCapability): string {
   if (capability.readonly) return `Nothing is written back on this host — ${PLAN_READONLY_NOTE}`;
   if (capability.orderMode === "off") {
     return (
-      "Setting a priority writes priority: into the plan's frontmatter — straight to the wiki, and " +
+      "Setting a priority (or archiving) writes the plan's frontmatter — straight to the wiki, and " +
       "refused if the file changed since this board was read. Ranking is off: plans/queue.yaml could not be read."
     );
   }
   return (
-    "Setting a priority writes priority: into the plan's frontmatter and ranking a column writes " +
-    "plans/queue.yaml — both straight to the wiki, both refused if the file changed since this board was read."
+    "Setting a priority (or archiving) writes the plan's frontmatter and ranking a column writes " +
+    "plans/queue.yaml — all straight to the wiki, refused if the file changed since this board was read."
   );
 }
 
@@ -353,6 +367,24 @@ export function foldRefusedPriority(diskPriority: PlanPriority | null): RefusedP
     : { kind: "note", message: priorityOnDiskNote(diskPriority) };
 }
 
+/**
+ * The drawer's archive/restore buttons. Simpler than the priority state on
+ * purpose: there is no draft mode (see {@link ARCHIVE_READONLY_TITLE}), so a
+ * readonly board disables them outright.
+ */
+export function archiveControlState(input: {
+  readonly: boolean;
+  busy: boolean;
+  staleHash?: boolean;
+  reloading?: boolean;
+}): PriorityControlState {
+  if (input.busy) return { disabled: true, title: "saving…" };
+  if (input.reloading) return { disabled: true, title: NUDGE_RELOADING };
+  if (input.staleHash) return { disabled: true, title: NUDGE_RELOAD_FIRST };
+  if (input.readonly) return { disabled: true, title: ARCHIVE_READONLY_TITLE };
+  return { disabled: false, title: null };
+}
+
 // ---------------------------------------------------------------- requests
 
 export interface PriorityRequest {
@@ -372,6 +404,16 @@ export function priorityRequest(
     priority: card.priority === clicked ? "clear" : clicked,
     baseHash: card.hash,
   };
+}
+
+export interface StatusRequest {
+  slug: string;
+  status: PlanStatus;
+  baseHash: string;
+}
+
+export function statusRequest(card: { slug: string; hash: string }, status: PlanStatus): StatusRequest {
+  return { slug: card.slug, status, baseHash: card.hash };
 }
 
 export interface OrderRequest {
@@ -533,6 +575,73 @@ export function applyPriorityResult<
   return hit ? next : (cards as T[]);
 }
 
+export interface StatusResult {
+  slug: string;
+  /** What is ON DISK — a `noop` echoes the unchanged value, which can be null
+   *  for a plan whose frontmatter carries a status outside the enum. */
+  status: PlanStatus | null;
+  statusDate: string | null;
+  hash: string;
+  written: boolean;
+}
+
+/** Null ⇒ the body is not the contract (rule 4, same as the priority parse). */
+export function parseStatusResult(raw: unknown): StatusResult | null {
+  const body = record(raw);
+  if (!body) return null;
+  const { slug, hash, status, statusDate, written } = body;
+  if (typeof slug !== "string" || !slug) return null;
+  if (typeof hash !== "string" || !hash) return null;
+  const st =
+    status === null || status === undefined
+      ? null
+      : typeof status === "string" && (PLAN_STATUSES as readonly string[]).includes(status)
+        ? (status as PlanStatus)
+        : undefined;
+  if (st === undefined) return null;
+  const date =
+    statusDate === null || statusDate === undefined
+      ? null
+      : typeof statusDate === "string"
+        ? statusDate
+        : undefined;
+  if (date === undefined) return null;
+  return { slug, status: st, statusDate: date, hash, written: written === true };
+}
+
+/**
+ * Fold a status 200 into the card list. The COLUMN is re-derived exactly as the
+ * server derives it (`columnForStatus`, followups beating shipped) and the age
+ * from the stamped date, so the card moves on this render rather than on the
+ * next reload. Same no-hit contract as {@link applyPriorityResult}.
+ */
+export function applyStatusResult<
+  T extends {
+    slug: string;
+    planStatus: PlanStatus | null;
+    statusDate: string | null;
+    ageDays: number | null;
+    column: BoardColumnKey;
+    followupsOpen: boolean;
+    hash: string;
+  },
+>(cards: readonly T[], result: StatusResult, now: number): T[] {
+  let hit = false;
+  const next = cards.map((card) => {
+    if (card.slug !== result.slug) return card;
+    hit = true;
+    return {
+      ...card,
+      planStatus: result.status,
+      statusDate: result.statusDate,
+      ageDays: ageInDays(result.statusDate, now),
+      column: columnForStatus(result.status, card.followupsOpen),
+      hash: result.hash,
+    };
+  });
+  return hit ? next : (cards as T[]);
+}
+
 // ---------------------------------------------------------------- failures
 
 export type WriteFailureKind = "stale" | "readonly" | "refused" | "error";
@@ -562,14 +671,16 @@ export interface WriteFailure {
 export function classifyWriteFailure(
   status: number,
   body: unknown,
-  surface: "priority" | "order",
+  surface: "priority" | "order" | "status",
 ): WriteFailure {
   const parsed = record(body);
   const error = typeof parsed?.error === "string" && parsed.error.trim() ? parsed.error.trim() : null;
   if (status === 409) {
     return {
       kind: "stale",
-      message: surface === "priority" ? PRIORITY_STALE_MESSAGE : ORDER_STALE_MESSAGE,
+      // A status write edits the plan file a priority write edits, so the two
+      // share the plan sentence.
+      message: surface === "order" ? ORDER_STALE_MESSAGE : PRIORITY_STALE_MESSAGE,
       reload: true,
     };
   }

@@ -7,7 +7,7 @@
  * injected (through the already-injectable `loadSource`); nothing else is faked.
  */
 
-import { afterAll, afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, setSystemTime, test } from "bun:test";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -554,5 +554,153 @@ describe("POST /api/plans/order", () => {
     expect(await queueText(root)).toBe(
       serializeQueue({ proposed: ["beta-plan", "alpha-plan"], blocked: ["gamma-plan"] }),
     );
+  });
+});
+
+describe("POST /api/plans/status", () => {
+  test("archives a plan: writes plan_status + a stamped status_date, returns the NEW hash, no log.md", async () => {
+    const root = await makeWiki();
+    const a = app(root);
+    const res = await post(a, "/api/plans/status", {
+      slug: "alpha-plan",
+      status: "abandoned",
+      baseHash: await hashOf(root, "alpha-plan"),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toMatchObject({ slug: "alpha-plan", status: "abandoned", written: true });
+    expect(body.statusDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+
+    const after = await pageText(root, "alpha-plan");
+    expect(after).toBe(
+      `---\ntitle: alpha-plan\nplan_status: abandoned\nstatus_date: ${body.statusDate}\n---\n\n# alpha-plan\n\nBody.\n`,
+    );
+    expect(body.hash).toBe(sha256(after));
+    expect(await Bun.file(path.join(root, "log.md")).exists()).toBe(false);
+    expect(await pageText(root, "beta-plan")).toBe(plan("beta-plan"));
+  });
+
+  test("restore works off the archive's returned hash; re-archiving the same status is a noop echoing disk", async () => {
+    const root = await makeWiki();
+    const a = app(root);
+    const archived = await post(a, "/api/plans/status", {
+      slug: "alpha-plan",
+      status: "superseded",
+      baseHash: await hashOf(root, "alpha-plan"),
+    });
+    const archivedBody = await archived.json();
+    // Same status again: a 200 noop that does NOT restamp status_date.
+    const again = await post(a, "/api/plans/status", {
+      slug: "alpha-plan",
+      status: "superseded",
+      baseHash: archivedBody.hash,
+    });
+    const againBody = await again.json();
+    expect(againBody.written).toBe(false);
+    expect(againBody.hash).toBe(archivedBody.hash);
+    expect(againBody.status).toBe("superseded");
+    // The noop reports the date ON DISK — the archive's stamp, never "today
+    // recomputed": the board adopts this value, and a fresh date on a noop
+    // would show a transition that never happened.
+    expect(againBody.statusDate).toBe(archivedBody.statusDate);
+    expect(againBody.relPath).toBe("plans/alpha-plan.mdx");
+    // Restore on the noop's hash.
+    const restored = await post(a, "/api/plans/status", {
+      slug: "alpha-plan",
+      status: "proposed",
+      baseHash: againBody.hash,
+    });
+    expect(restored.status).toBe(200);
+    expect(await pageText(root, "alpha-plan")).toContain("plan_status: proposed");
+    // …and the ORIGINAL hash is stale now.
+    const stale = await post(a, "/api/plans/status", {
+      slug: "alpha-plan",
+      status: "abandoned",
+      baseHash: sha256(plan("alpha-plan")),
+    });
+    expect(stale.status).toBe(409);
+    expect((await stale.json()).stale).toBe(true);
+  });
+
+  test("status_date is the operator's Oslo day, never the host clock's", async () => {
+    // 22:30 UTC on the 29th is 00:30 CEST on the 30th — the docker/nais images
+    // run UTC, so a host-local (or UTC-slice) stamp writes yesterday for every
+    // late-evening archive. This is the one test that fails if `todayOslo` is
+    // ever reverted to a bare date slice.
+    const root = await makeWiki();
+    const baseHash = await hashOf(root, "alpha-plan");
+    setSystemTime(new Date("2026-08-29T22:30:00Z"));
+    try {
+      const res = await post(app(root), "/api/plans/status", {
+        slug: "alpha-plan",
+        status: "abandoned",
+        baseHash,
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.written).toBe(true);
+      expect(body.statusDate).toBe("2026-08-30");
+      expect(await pageText(root, "alpha-plan")).toContain("status_date: 2026-08-30");
+    } finally {
+      setSystemTime();
+    }
+  });
+
+  test("a noop echoes the HISTORICAL date on disk, never today's", async () => {
+    // The same-day noop above cannot distinguish "echoed disk" from "recomputed
+    // today" — the two coincide. A plan archived on a PAST date can: the
+    // mutation `statusDate: statusDate` (always today) survived the suite until
+    // this test existed.
+    const root = await makeWiki();
+    const old = `---\ntitle: alpha-plan\nplan_status: superseded\nstatus_date: 2020-01-01\n---\n\n# alpha-plan\n\nBody.\n`;
+    await writeFile(path.join(root, "plans", "alpha-plan.mdx"), old);
+    const res = await post(app(root), "/api/plans/status", {
+      slug: "alpha-plan",
+      status: "superseded",
+      baseHash: sha256(old),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.written).toBe(false);
+    expect(body.statusDate).toBe("2020-01-01");
+    expect(body.status).toBe("superseded");
+    expect(await pageText(root, "alpha-plan")).toBe(old);
+  });
+
+  test.each([
+    ["an unknown value", { slug: "alpha-plan", status: "deleted", baseHash: "h" }],
+    ["an omitted status", { slug: "alpha-plan", baseHash: "h" }],
+    ["a missing baseHash", { slug: "alpha-plan", status: "abandoned" }],
+    ["a missing slug", { status: "abandoned", baseHash: "h" }],
+  ])("400s on %s, writing nothing", async (_label, body) => {
+    const root = await makeWiki();
+    const res = await post(app(root), "/api/plans/status", body);
+    expect(res.status).toBe(400);
+    expect(await pageText(root, "alpha-plan")).toBe(plan("alpha-plan"));
+  });
+
+  test("404s on an unknown slug and on an unregistered wiki", async () => {
+    const root = await makeWiki();
+    expect(
+      (await post(app(root), "/api/plans/status", { slug: "no-such-plan", status: "abandoned", baseHash: "h" }))
+        .status,
+    ).toBe(404);
+    expect(
+      (await post(app(null), "/api/plans/status", { slug: "alpha-plan", status: "abandoned", baseHash: "h" }))
+        .status,
+    ).toBe(404);
+  });
+
+  test("403 on a readonly instance, writing nothing", async () => {
+    const root = await makeWiki();
+    __setWikiReadonlyForTest(true);
+    const res = await post(app(root), "/api/plans/status", {
+      slug: "alpha-plan",
+      status: "abandoned",
+      baseHash: await hashOf(root, "alpha-plan"),
+    });
+    expect(res.status).toBe(403);
+    expect((await res.json()).readonly).toBe(true);
+    expect(await pageText(root, "alpha-plan")).toBe(plan("alpha-plan"));
   });
 });

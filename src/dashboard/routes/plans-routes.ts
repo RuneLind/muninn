@@ -102,10 +102,12 @@ import {
   loadPlanSource,
   PLANS_WIKI_NAME,
   PLAN_PRIORITIES,
+  PLAN_STATUSES,
   type PlanPriority,
+  type PlanStatus,
   type PlanSourceResult,
 } from "../../plans/source.ts";
-import { setPlanPriority } from "../../plans/frontmatter.ts";
+import { setPlanPriority, setPlanStatus } from "../../plans/frontmatter.ts";
 import { writePlanQueue } from "../../plans/write.ts";
 import {
   QUEUE_COLUMNS,
@@ -116,7 +118,7 @@ import {
   type QueueOrder,
 } from "../../plans/queue.ts";
 import { defaultPageWriteIo, writeWikiPage } from "../../wiki/page-write.ts";
-import { sha256 } from "../../gardener/util.ts";
+import { sha256, todayOslo } from "../../gardener/util.ts";
 import { readonlyRefusal } from "./route-utils.ts";
 import { renderPlansPage } from "../views/plans-page.ts";
 
@@ -373,6 +375,95 @@ export function registerPlansRoutes(
       });
     } catch (err) {
       log.error("plan priority: unexpected failure: {error}", { error: errText(err) });
+      return c.json({ error: "internal error" }, 500);
+    }
+  });
+
+  // The board's THIRD write — the archive/restore control. Same discipline as
+  // `/priority` line for line: `writeWikiPage` in no-log mode, the CAS base, the
+  // closure-variable refusal, and a 200 that echoes what is ON DISK. The one
+  // divergence: the transform also stamps `status_date` (today), because a
+  // status flip without a date sorts the card by the previous transition.
+  // NB the route accepts EVERY enum value, `shipped` included — the drawer's
+  // refusal to un-ship (no archive section on shipped cards) is a UI-only
+  // invariant, and any transition is drivable by a hand-rolled client.
+  app.post("/api/plans/status", async (c) => {
+    const refusal = readonlyRefusal(c, log);
+    if (refusal) return refusal;
+    try {
+      const read = await readJsonBody(c);
+      if ("error" in read) return c.json({ error: read.error }, read.status);
+      const body = read.body;
+
+      const slug = typeof body.slug === "string" ? body.slug.trim() : "";
+      if (!slug) return c.json({ error: "slug is required" }, 400);
+      const wanted = body.status;
+      if (typeof wanted !== "string" || !(PLAN_STATUSES as readonly string[]).includes(wanted)) {
+        return c.json({ error: `status must be one of ${PLAN_STATUSES.join(", ")}` }, 400);
+      }
+      const status = wanted as PlanStatus;
+      const baseHash = typeof body.baseHash === "string" ? body.baseHash.trim() : "";
+      if (!baseHash) return c.json({ error: "baseHash is required" }, 400);
+
+      const loaded = await loadSourceOrDegrade(deps);
+      if ("error" in loaded) return c.json({ error: loaded.error }, 503);
+      const source = loaded.source;
+      const root = source.root;
+      if (!root) return c.json({ error: unregisteredMessage() }, 404);
+      const plan = source.plans.find((p) => p.slug === slug);
+      if (!plan) return c.json({ error: `no plan named "${slug}"` }, 404);
+
+      // `todayOslo`, not the host clock: `status_date` is the operator's
+      // calendar day, and the docker/nais images run UTC — a host-local (or
+      // UTC-slice) date stamps yesterday for every late-evening archive in CET.
+      // Same rule `writeWikiPage` uses for log.md entries.
+      const statusDate = todayOslo(Date.now());
+      let written: string | null = null;
+      let refused: string | null = null;
+      const result = await writeWikiPage({
+        wikiDir: root,
+        relPath: plan.relPath,
+        baseHash,
+        staleReason: `${plan.relPath} changed since the board was loaded`,
+        collections: [],
+        logKind: null,
+        now: () => Date.now(),
+        transform: (raw) => {
+          const edit = setPlanStatus(raw, status, statusDate);
+          refused = edit.kind === "refused" ? edit.reason : null;
+          written = edit.kind === "changed" ? edit.content : null;
+          return written;
+        },
+        ...defaultPageWriteIo(root),
+        refreshIndex: async () => {},
+        reindex: async () => {},
+      });
+
+      if (refused) {
+        log.warn("plan status: refused {slug}: {reason}", { slug, reason: refused });
+        return c.json({ error: refused }, 422);
+      }
+      if (result.outcome === "forbidden") {
+        return c.json({ error: result.reason, readonly: true }, 403);
+      }
+      if (result.outcome === "stale") {
+        return c.json({ error: result.reason, stale: true }, 409);
+      }
+      if (result.outcome === "error") {
+        log.error("plan status: write failed for {slug}: {error}", { slug, error: result.reason });
+        return c.json({ error: result.reason }, 500);
+      }
+      const changed = result.outcome === "written" && written !== null;
+      return c.json({
+        slug,
+        status: changed ? status : plan.planStatus ?? null,
+        statusDate: changed ? statusDate : plan.statusDate ?? null,
+        hash: changed ? sha256(written!) : baseHash,
+        written: changed,
+        relPath: plan.relPath,
+      });
+    } catch (err) {
+      log.error("plan status: unexpected failure: {error}", { error: errText(err) });
       return c.json({ error: "internal error" }, 500);
     }
   });

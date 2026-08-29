@@ -798,5 +798,43 @@ test.describe("Plan board: writing back to mimir", () => {
     });
     expect(res.status()).toBe(403);
     expect(await planText(roRoot, "alpha-plan")).toContain("priority: p1");
+
+    // The archive control is disabled the same way — no draft fallback exists.
+    const arch = page.locator('.pb-drawer button[data-key="st-abandoned"]');
+    await expect(arch).toBeVisible();
+    await expect(arch).toBeDisabled();
+  });
+
+  test("archive/restore writes plan_status + status_date, and copy-path yields the on-disk path", async ({
+    page,
+    context,
+  }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await page.goto(`${BASE}/plans`);
+    await openCard(page, "alpha-plan");
+
+    // Copy path: an absolute path an agent brief can open, ending in the plan file.
+    await page.locator(".pb-drawer button.pb-copy").click();
+    await expect(page.locator(".pb-drawer button.pb-copy")).toHaveText("Copied");
+    const copied = await page.evaluate(() => navigator.clipboard.readText());
+    expect(copied.startsWith("/")).toBe(true);
+    expect(copied.endsWith("/plans/alpha-plan.mdx")).toBe(true);
+
+    // Archive. The drawer re-renders into the archived shape (Restore offered),
+    // the FILE carries the flip and a stamped date, and the card leaves the
+    // default `active` scope — which is what "archived" means on this board.
+    await page.locator('.pb-drawer button[data-key="st-abandoned"]').click();
+    await expect(page.locator('.pb-drawer button[data-key="st-proposed"]')).toBeVisible();
+    const archived = await planText(root, "alpha-plan");
+    expect(archived).toContain("plan_status: abandoned");
+    expect(archived).toMatch(/status_date: \d{4}-\d{2}-\d{2}/);
+    await expect(page.locator('.pb-card[data-slug="alpha-plan"]')).toHaveCount(0);
+
+    // Restore works off the hash the archive's 200 answered with — the second
+    // write on one card, which is the CAS-adoption proof.
+    await page.locator('.pb-drawer button[data-key="st-proposed"]').click();
+    await expect(page.locator('.pb-card[data-slug="alpha-plan"]')).toBeVisible();
+    expect(await planText(root, "alpha-plan")).toContain("plan_status: proposed");
+    await expect(page.locator(".pb-drawer .pb-wmsg")).toHaveCount(0);
   });
 });

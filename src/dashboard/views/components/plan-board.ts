@@ -86,6 +86,8 @@ import {
 import {
   admitPriorityEdit,
   applyPriorityResult,
+  applyStatusResult,
+  archiveControlState,
   classifyWriteFailure,
   foldRefusedPriority,
   nudgeBlockedReason,
@@ -94,6 +96,7 @@ import {
   parseBoardRefresh,
   parseOrderResult,
   parsePriorityResult,
+  parseStatusResult,
   priorityControlState,
   priorityDraftReason,
   priorityRequest,
@@ -101,18 +104,21 @@ import {
   prunedRankWarning,
   queuedMovesDroppedNote,
   retainDraft,
+  statusRequest,
   transportFailure,
   unknownColumnWarning,
   writeCapability,
   writeModeSentence,
+  ARCHIVE_TARGETS,
   COLUMN_SAVING,
   PLAN_READONLY_NOTE,
+  RESTORE_TARGET,
   type BoardRefresh,
   type WriteCapability,
 } from "../../../plans/board-writes.ts";
 import { getJson } from "./client-runtime.ts";
 import type { BoardPayload } from "../../../plans/board.ts";
-import type { PlanPriority } from "../../../plans/constants.ts";
+import type { PlanPriority, PlanStatus } from "../../../plans/constants.ts";
 
 const OVERLAY_KEY = "muninn.planboard.draft.v1";
 
@@ -246,6 +252,10 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
   let columnMeta = new Map<string, BoardColumnMeta>(payload.columns.map((c) => [c.key, c]));
   let money: { available: boolean; reason: string | null } = payload.money;
 
+  /** The wiki root on THIS host — what makes the drawer's copy-path button
+   *  yield a path an agent can open. Boot-time fact; a refresh cannot move it. */
+  const wikiRoot = payload.wiki.root;
+
   let overlay = retainDraft(loadOverlay(), capability);
   saveOverlay();
 
@@ -263,6 +273,9 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
    *  singleton node and a message left over from another plan reads as this
    *  one's failure. */
   let priorityMsg: (WriteMessage & { slug: string }) | null = null;
+  /** The archive control's message — its own slot for the same singleton-drawer
+   *  reason, rendered under the Archive heading rather than Priority's. */
+  let statusMsg: (WriteMessage & { slug: string }) | null = null;
   /** Order writes in flight, per column — the "saving…" marker's source. One
    *  CHAIN for all of them, so two ▲ presses cannot send the same CAS base
    *  twice; per-COLUMN counting only so the marker names the right column. */
@@ -446,6 +459,7 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
   function flipReadonly(): void {
     capability = writeCapability({ readonly: true, queueHash: queue.hash });
     priorityMsg = null;
+    statusMsg = null;
     orderMsg = null;
     // A stale mark is a statement about a CAS BASE, and this board no longer
     // sends one — the draft it falls back to has no hash. Left set, it disabled
@@ -507,6 +521,52 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     // describing a file that is not there any more.
     if (fail.reload) staleCards.add(card.slug);
     priorityMsg = { slug: card.slug, ...stamp(fail.message, fail.reload) };
+  }
+
+  /**
+   * Write one plan's `plan_status` — the archive/restore control. It shares the
+   * per-card lock with the priority writes ON PURPOSE: both edit the same file
+   * under the same CAS base, so two concurrent writes on one card could only
+   * 409 each other.
+   */
+  function writeStatus(slug: string, status: PlanStatus): void {
+    if (reloading || staleCards.has(slug)) return;
+    const card = cards.find((c) => c.slug === slug);
+    if (!card || !admitPriorityEdit(priorityPending, slug)) return;
+    priorityPending.add(slug);
+    statusMsg = null;
+    refreshDrawer(slug);
+
+    const run = runStatusWrite(card, status).finally(() => {
+      priorityPending.delete(slug);
+      priorityInFlight.delete(slug);
+      render();
+      refreshDrawer(slug, `st-${status}`);
+    });
+    priorityInFlight.set(slug, run);
+  }
+
+  async function runStatusWrite(
+    card: { slug: string; priority: PlanPriority | null; hash: string },
+    status: PlanStatus,
+  ): Promise<void> {
+    const out = await postJson("/api/plans/status", statusRequest(card, status));
+    if (out.ok) {
+      const result = parseStatusResult(out.body);
+      if (result) cards = applyStatusResult(cards, result, Date.now());
+      else statusMsg = { slug: card.slug, ...stamp(transportFailure(BAD_BODY).message, true) };
+      return;
+    }
+    const fail = classifyWriteFailure(out.status, out.body, "status");
+    if (fail.kind === "readonly") {
+      // No draft to fold into — a status draft would show a card in a column
+      // mimir contradicts on every load — so the click becomes the sentence.
+      flipReadonly();
+      statusMsg = { slug: card.slug, ...stamp(fail.message, false) };
+      return;
+    }
+    if (fail.reload) staleCards.add(card.slug);
+    statusMsg = { slug: card.slug, ...stamp(fail.message, fail.reload) };
   }
 
   /**
@@ -679,6 +739,7 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
     // Every card's hash was just replaced, so no card is known-stale any more.
     staleCards.clear();
     if (priorityMsg && priorityMsg.at < reloadStartedAt) priorityMsg = null;
+    if (statusMsg && statusMsg.at < reloadStartedAt) statusMsg = null;
     if (orderMsg && orderMsg.at < reloadStartedAt) orderMsg = null;
     if (orderWarningsAt < reloadStartedAt) orderWarnings = [];
   }
@@ -1454,16 +1515,20 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
       body.append(s);
     }
     body.append(prioritySection(card));
+    const archive = archiveSection(card);
+    if (archive) body.append(archive);
 
     const fileSec = el("div", "pb-sec");
     fileSec.append(el("h3", null, "File"));
+    const fileRow = el("div", "pb-filerow");
     const fileLink = document.createElement("a");
     fileLink.className = "pb-filelink";
     fileLink.href = card.wikiUrl;
     fileLink.target = "_blank";
     fileLink.rel = "noopener";
     fileLink.textContent = card.relPath;
-    fileSec.append(fileLink);
+    fileRow.append(fileLink, copyPathButton(card.relPath));
+    fileSec.append(fileRow);
     fileSec.append(
       el(
         "p",
@@ -1684,6 +1749,120 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
       ),
     );
     return sec;
+  }
+
+  /**
+   * The drawer's archive control — the one surface that writes `plan_status`.
+   *
+   * Three shapes: an active card offers the two terminal targets (superseded /
+   * abandoned — both file under the Shipped column, which the default `active`
+   * scope does not show, i.e. archived); ANY superseded/abandoned card offers
+   * the way back (restore to proposed) — the control has no memory of who
+   * archived it, so the restore prose says outright that clicking restamps
+   * `status_date` over the original transition's date; a `shipped` card gets NO
+   * section at all — shipped is an earned end state, not an archive, and
+   * un-shipping a plan is a mimir edit, not a board click. Null for that third
+   * shape.
+   */
+  function archiveSection(card: EffectiveCard): HTMLElement | null {
+    const archived = card.planStatus === "superseded" || card.planStatus === "abandoned";
+    if (!archived && card.planStatus === "shipped") return null;
+    const sec = el("div", "pb-sec");
+    sec.append(el("h3", null, "Archive"));
+    const busy = priorityPending.has(card.slug);
+    const state = archiveControlState({
+      readonly: capability.readonly,
+      busy,
+      staleHash: staleCards.has(card.slug),
+      reloading,
+    });
+    const set = el("div", "pb-priset");
+    const targets: Array<{ status: PlanStatus; label: string; what: string }> = archived
+      ? [{ status: RESTORE_TARGET, label: `Restore to ${RESTORE_TARGET}`, what: "back onto the active board" }]
+      : ARCHIVE_TARGETS.map((status) => ({
+          status,
+          label: status,
+          what: "into the Shipped column (All scope)",
+        }));
+    for (const t of targets) {
+      const b = el("button", null, t.label) as HTMLButtonElement;
+      b.type = "button";
+      b.dataset.key = `st-${t.status}`;
+      b.disabled = state.disabled;
+      const title =
+        state.title ?? `Set plan_status: ${t.status} in mimir — moves this plan ${t.what}`;
+      b.title = title;
+      b.setAttribute("aria-label", `${title} — ${card.title}`);
+      b.onclick = () => writeStatus(card.slug, t.status);
+      set.append(b);
+    }
+    sec.append(set);
+    if (busy) sec.append(el("p", "pb-basis", "saving to mimir…"));
+    if (statusMsg && statusMsg.slug === card.slug) sec.append(writeMessage(statusMsg));
+    sec.append(
+      el(
+        "p",
+        "pb-basis",
+        capability.readonly
+          ? "This instance cannot write the wiki — edit plan_status in mimir."
+          : archived
+            ? `plan_status: ${card.planStatus}${card.statusDate ? ` since ${card.statusDate}` : ""} — this plan is archived. Restoring writes the frontmatter and REPLACES that status_date with today's.`
+            : "Archiving writes plan_status (and today's status_date) into the plan's frontmatter. The file stays in mimir; the card leaves the active board.",
+      ),
+    );
+    return sec;
+  }
+
+  /**
+   * Copy the plan's ON-DISK path — the string you paste into an agent brief.
+   * Absolute (root + relPath) when the payload named the root; the relPath
+   * alone otherwise, which still identifies the file inside mimir.
+   */
+  function copyPathButton(relPath: string): HTMLButtonElement {
+    const full = wikiRoot ? `${wikiRoot}/${relPath}` : relPath;
+    const b = el("button", "pb-copy") as HTMLButtonElement;
+    b.type = "button";
+    b.textContent = "⧉ Copy path";
+    b.title = `Copy ${full}`;
+    b.setAttribute("aria-label", `Copy the plan's file path: ${full}`);
+    b.onclick = async () => {
+      const done = (label: string) => {
+        b.textContent = label;
+        setTimeout(() => {
+          if (b.isConnected) b.textContent = "⧉ Copy path";
+        }, 1500);
+      };
+      try {
+        // The clipboard API needs a secure context; the tailnet-over-http case
+        // falls back to the selection-based copy below.
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(full);
+          done("Copied");
+          return;
+        }
+        throw new Error("no clipboard API");
+      } catch {
+        // `execCommand` can itself throw (CSP sandboxes; it is on removal
+        // tracks) — its own try/finally so a hidden focusable textarea is never
+        // left in the DOM and the button never reads as a dead control.
+        const ta = document.createElement("textarea");
+        ta.value = full;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.append(ta);
+        let ok = false;
+        try {
+          ta.select();
+          ok = document.execCommand("copy");
+        } catch {
+          /* reported below */
+        } finally {
+          ta.remove();
+        }
+        done(ok ? "Copied" : "Copy failed");
+      }
+    };
+    return b;
   }
 
   /** The readonly board's priority edit: the overlay, which `applyOverlay`

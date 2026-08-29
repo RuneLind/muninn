@@ -507,7 +507,9 @@ function renderList(): void {
     html +=
       `<div class="wiki-list-item${active ? " active" : ""}" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}">` +
       `<div class="wiki-type-dot type-${esc(p.type)}"></div>` +
-      `<div class="wiki-list-title">${esc(displayTitleOf(p))}</div>` +
+      // `title=` carries the full name: the row ellipsizes, and a status pill +
+      // ⚑ flag eat enough width that plan titles routinely clip.
+      `<div class="wiki-list-title" title="${esc(displayTitleOf(p))}">${esc(displayTitleOf(p))}</div>` +
       // Pill THEN flag, the same order as the article header's `badgeHtml` — the
       // two surfaces show the same two facts and must not read differently.
       statusPillHtml(p) +
