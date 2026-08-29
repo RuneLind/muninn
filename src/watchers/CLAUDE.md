@@ -1409,7 +1409,7 @@ wiki or DB. v1 is purely a report.
 
 - **Lint engine** (`src/wiki/lint.ts`): pure functions over a built `WikiIndex`
   plus per-file content reads. Each finding is `{ check, relPath, message,
-  detail? }`. Five checks:
+  detail? }`. Six checks:
   1. **broken-link** — re-runs `extractWikilinks` + `extractMarkdownLinks` per
      page and resolves against the index (the store's builder silently drops
      unresolved targets, so resolution is recomputed here); `../`-escapes are
@@ -1478,6 +1478,33 @@ wiki or DB. v1 is purely a report.
      (`<ComparisonTable rows={[[`, mimir house style) — that narrow and no wider.
      The finding quotes the RAW line, since a quote from the code-span-stripped
      text greps to nothing. An INDENTED code block is still in scope (accepted).
+  6. **nested-annotation** — a `[[wikilink]]` whose TARGET carries component
+     markup: `[[<Fact n="4" v="ok">Some Page</Fact>]]`. The markup IS the link
+     target, so the link resolves to nothing and the mark's chrome renders between
+     the brackets. Shipped by the fact-check integrate pass on 2026-08-10 (jarvis
+     commit `1c1f978`, three links on one page, repaired by hand 2026-08-16);
+     the write side expands such a span over the whole link now
+     (`factSpanForm`/`expandOverWikilinks`, `src/wiki/integrate-edits.ts`) and
+     `repairNestedFactWrappers` re-nests anything that still reaches the splice,
+     so this check is the third line of defence — a hand edit, another writer, a
+     regression.
+
+     **Exclusions are `index-truncation`'s, through the same shared helpers**
+     (`fencedLineMask`, `stripLineCodeSpans` — the latter moved into
+     `views/components/wiki-integrate.ts` beside the mask so the three
+     line-oriented scanners share ONE implementation), plus frontmatter. All
+     three matter concretely: mimir's own plan for this fix quotes the broken
+     shape in a ```markdown fence and again in backticks, six times over.
+
+     **`<` must be followed by an UPPERCASE letter or `/`**, and that narrowness
+     is measured: MDX/JSX component tags are capitalized by the language's rule,
+     while a lowercase `[[<raw YouTube title>]]` is a naming convention jarvis's
+     `log.md` describes in three places — a `<[A-Za-z]` class reports all three.
+     The target may carry no `]`, so a match cannot run past the link's closer.
+     Reserved infra is IN scope (the shape is a dead link wherever it lands).
+     Measured the day it shipped: jarvis 0, mimir 0 (1,625 pages), and a control
+     copy of mimir's plan page with ONE live occurrence added reports exactly
+     that line and none of its six documented ones.
 - **Adding a check is compiler-enforced now.** `LintReport.counts`, the watcher's
   `CHECK_SUMMARY` and the gardener page's `LINT_LABELS` are all
   `Record<LintCheck, …>`, and `summarizeCounts` iterates `LINT_CHECKS` itself

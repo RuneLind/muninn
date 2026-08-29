@@ -63,6 +63,7 @@ import {
   maxChangedChars,
   neutralizeFactcheckSentinels,
   originalsOfOutcomes,
+  repairNestedFactWrappers,
   parseEditList,
   promptMaskBody,
   countFactWrappers,
@@ -3935,6 +3936,28 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
           // this into a write — "applied: 0" stays a clean no-op, and the ➕ button
           // remains the way to add a callout on its own.
           if (applyResult.appliedCount === 0) return null;
+          // POST-SPLICE GUARD, on the body this write is about to persist: a `<Fact>`
+          // mark nested inside a `[[wikilink]]` makes the markup the link TARGET —
+          // the link dies and the chip renders between the brackets. `factSpanForm`
+          // expands such a span over the whole link now, but this route also splices
+          // CLIENT-ECHOED edits, which no engine tier constrains. Auto-corrected
+          // rather than refused: a page legitimately DOCUMENTING the shape must still
+          // be writable (which is also why there is no such check at `writeWikiPage`),
+          // and the repair leaves fenced + inline-code occurrences alone.
+          const nested = repairNestedFactWrappers(applyResult.body);
+          if (nested.repaired.length > 0 || nested.residual.length > 0) {
+            log.warn(
+              "Wiki fact-check integrate: nested annotation in wiki={wiki} page={page} — repaired={repaired} residual={residual} spans={spans}",
+              {
+                wiki: entry.name,
+                page: meta.relPath,
+                repaired: nested.repaired.length,
+                residual: nested.residual.length,
+                spans: [...nested.repaired, ...nested.residual].join(" · ").slice(0, 400),
+              },
+            );
+          }
+          const editedBody = nested.body;
           // Did any mark actually land? If so the appendix is MANDATORY regardless of
           // the checkbox — the chips have nowhere to point without it.
           // Same authority as the payload-shape pre-check above — one wrapper-shape
@@ -3945,7 +3968,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
           // BOTH branches end in the same normalization (exactly one trailing
           // newline) so ticking the callout checkbox can't be the reason an
           // unrelated trailing byte changed.
-          if (!appendCallout && !wroteWrapper) return withTrailingNewline(applyResult.body);
+          if (!appendCallout && !wroteWrapper) return withTrailingNewline(editedBody);
           // Same splice the ➕ route uses: REPLACE an existing sentinel block in
           // place (a stale callout is refreshed, never duplicated), else insert
           // before a trailing `## Sources`, else append. Runs on the already-edited
@@ -3962,7 +3985,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
                 originals: originalsOfOutcomes(applyResult.outcomes),
               })
             : buildFactcheckBlock(calloutAnswer, todayOslo(Date.now()));
-          const spliced = spliceSentinelBlock(applyResult.body, block);
+          const spliced = spliceSentinelBlock(editedBody, block);
           calloutAdded = true;
           return withTrailingNewline(spliced);
         },

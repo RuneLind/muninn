@@ -163,6 +163,61 @@ export function fencedLineMask(lines: readonly string[]): boolean[] {
 }
 
 /**
+ * Strip inline code spans from ONE line, CommonMark's pairing rule: a run of N
+ * backticks opens a span that only a run of exactly N closes.
+ *
+ * The per-LINE sibling of {@link fencedLineMask}, and the ONE implementation for
+ * every line-oriented scanner that must tell markup from a literal quoted in
+ * backticks (`checkIndexTruncation` + `checkNestedAnnotation` in `src/wiki/lint.ts`,
+ * `repairNestedFactWrappers` in `src/wiki/integrate-edits.ts`). Deliberately NOT
+ * the linter's whole-document `stripCodeSpans`, whose fence removal joins the lines
+ * around a block and could balance a genuinely dangling `[[` against a later line's
+ * `]]`.
+ *
+ * A `` `[^`]*` `` replace mis-pairs the double-backtick form the syntax exists
+ * for — `` `` [[x `` `` is how a page writes a literal containing a backtick —
+ * leaving the `[[` exposed and the line falsely reported. An UNMATCHED run is
+ * emitted literally and the scan continues past it, so a stray backtick cannot
+ * swallow the rest of the line either.
+ */
+export function stripLineCodeSpans(line: string): string {
+  let out = "";
+  let i = 0;
+  while (i < line.length) {
+    if (line[i] !== "`") {
+      out += line[i];
+      i++;
+      continue;
+    }
+    let openEnd = i;
+    while (openEnd < line.length && line[openEnd] === "`") openEnd++;
+    const runLen = openEnd - i;
+    let closeAt = -1;
+    let k = openEnd;
+    while (k < line.length) {
+      if (line[k] !== "`") {
+        k++;
+        continue;
+      }
+      let runEnd = k;
+      while (runEnd < line.length && line[runEnd] === "`") runEnd++;
+      if (runEnd - k === runLen) {
+        closeAt = k;
+        break;
+      }
+      k = runEnd;
+    }
+    if (closeAt === -1) {
+      out += line.slice(i, openEnd); // unmatched run — literal backticks
+      i = openEnd;
+    } else {
+      i = closeAt + runLen; // whole span dropped
+    }
+  }
+  return out;
+}
+
+/**
  * Could `line` be a fence delimiter at all (opener OR closer), judged context-free?
  *
  * Used only by the post-splice invariant guard, which compares a count across a

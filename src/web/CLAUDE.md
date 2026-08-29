@@ -27,6 +27,45 @@ The `stripFactWrappers`/`countFactWrappers` pair — and `isFactWrapperText`, th
 
 Two things that rule is deliberately NOT scoped by. **It runs on `.md` pages too.** "A `.md` page never carries marks" is an invariant of the write paths (integrate only annotates `.mdx`), not of the file: a hand-edit, or a rename from `.mdx`, lands marks on a `.md`, and gating the strip on the extension left exactly that page with every chip dangling off a rebuilt callout. `stripFactWrappers` is identity on a body with no tag, so a mark-free `.md` write stays byte-for-byte what it was — which is the assertion that pins it. And **the COUNT is taken off the strip ITSELF** (`stripSupersededMarks` returns `{body, removed}`, `removed` = `countFactWrappers(current) - countFactWrappers(body)`), so what the note claims is what the write did, on the same bytes. `removed` therefore means "marks removed by this write", INCLUDING a `<Fact>` quoted inside the old appendix (a `Was:` line): the strip is whole-body, so the tag really does come off — and on integrate apply's `!appendCallout && !wroteWrapper` branch the region even survives, stripped. The earlier spelling counted over a `stripFactcheckBlock`ped body while the strip ran on the full one; they disagree the moment removing the region flips FENCE PARITY, because `buildFactcheckAppendix` does not balance fences and an appendix quoting an unterminated ``` opens a fence running to EOF that makes every mark below it documentation. Measured on that fixture: strip removes 0, old count said 2, and the response, the `log.md` line and the commit subject all announced a deletion the file disproved. Both routes take it from that one helper, so ➕ and integrate can never report different numbers for one page. A strip that removed marks is also named in the `log.md` line and the commit subject, not just in the response: the reader who did not click ➕ finds out there only.
 
+**A mark never lands inside a `[[wikilink]]`.** A claim quote resolving to text
+inside a link used to be wrapped where it sat, which put the tags between the
+brackets — `[[<Fact n="4" v="ok">Some Page</Fact>]]` — making the MARKUP the link
+target: the link dies and the chip renders inside the brackets. It shipped into the
+jarvis wiki on 2026-08-10 (three links, one page). The rule now, and it splits by
+wrapper path because only one of them can express it:
+
+- **Annotate path (`factSpanForm`).** A span that starts inside a link, ends inside
+  one, or sits WHOLLY inside one (the shipped shape) EXPANDS to the link's full
+  extent (`expandOverWikilinks`) and is wrapped around the ORIGINAL link —
+  `<Fact …>[[Some Page]]</Fact>`. Never a piped retarget: which page the label
+  should point at is an editorial decision the annotator has no basis for. A span
+  that CONTAINS a link whole needs no expansion and is untouched.
+- **Order, and the refusal it needs.** Expansion runs FIRST and `markableRange` then
+  guards the EXPANDED range, because `ownsLineStart` is evaluated on the span's
+  start and expanding leftwards over a `[[` at column 0 is what flips it. That
+  guard's third outcome — refuse — is scoped to the expansion path ONLY: an
+  owns-line-start span with no leading marker is the ordinary paragraph-initial
+  mark, and a blanket refusal would kill live output (re-counted 2026-08-30, 89
+  inline marks on the jarvis wiki, 15 at column 0; an old-vs-new run of the shipped
+  pass over every one of them diffs to zero).
+- **Correction path (`wrapCorrectionText`).** Expansion is not expressible there —
+  the wrapper covers `edit.new`, which is not in the page, so expanding a correction
+  whose `old` sits inside `[[Target]]` would emit `[[<new text>]]`, inventing a link
+  target. A correction crossing a link is refused, and the refusal drops the WHOLE
+  EDIT: "the correction still applies unwrapped" is this file's default for a
+  refused wrapper, and here that default IS the damage (`[[X]]` → `[[Y]]`, silently,
+  downstream of every containment seam). It is therefore tested in `annotateEdits`'
+  pass-1 loop, before the wrapping branches — most of them (unknown claim, ❓
+  verdict, a claim pass 1 already wrapped) never reach `wrapCorrectionText` at all,
+  and those are the paths the rewrite hid on.
+- **`repairNestedFactWrappers`** is the post-splice backstop in the apply route's
+  transform (the apply also splices client-echoed edits, which no engine tier
+  constrains): it re-nests the shape and warns with the page + the spans. Auto-
+  correct, deliberately not a `writeWikiPage` reject — a page DOCUMENTING the bug
+  must stay writable, which is also why fenced and inline-code occurrences are left
+  alone. The recurrence detector is the `nested-annotation` lint check
+  (`src/wiki/lint.ts`; rationale + measurements in `src/watchers/CLAUDE.md`).
+
 Golden fixture: `src/wiki/__fixtures__/factcheck-annotated-page.mdx` (+ the acceptance triple `factcheck-creatine-{original.mdx,answer.md,quotes.json}` and the shared `Was:` originals in `factcheck-creatine-originals.ts`).
 
 ## Reader interaction layer
