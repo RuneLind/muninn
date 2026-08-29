@@ -1,4 +1,4 @@
-import { test, expect, describe, beforeAll, afterAll } from "bun:test";
+import { test, expect, describe, beforeAll, afterAll, setDefaultTimeout } from "bun:test";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import { TEST_DATABASE_URL } from "../test/test-db-url.ts";
@@ -16,6 +16,11 @@ import { TEST_DATABASE_URL } from "../test/test-db-url.ts";
  * `muninn_test`, which is provisioned by construction — an "is it empty?" test
  * needs an actually-empty database.
  */
+// Same reason as db/provision.test.ts: these cases SPAWN a process per
+// assertion and one describe applies the whole of db/init.sql, which fits in
+// bun's 5s default here and not on a CI runner.
+setDefaultTimeout(60_000);
+
 const SCRATCH_DB = "muninn_unprovisioned_test";
 
 /** Swap the database NAME, keeping everything else — a `?sslmode=` query

@@ -17,7 +17,7 @@
  * here with a connection or privilege error rather than with the documented
  * setup step — hence this paragraph.
  */
-import { describe, expect, test, beforeEach, afterAll } from "bun:test";
+import { describe, expect, test, beforeEach, afterAll, setDefaultTimeout } from "bun:test";
 import { fileURLToPath } from "node:url";
 import { readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -30,6 +30,21 @@ import { DatabaseUrlError, runMigrations } from "./migrate.ts";
 /** A database this file owns outright. Derived from the shared test URL so the
  *  host, port and credentials stay in ONE place (see test-db-url.ts), with only
  *  the name replaced. */
+// bun's default is 5s per test, and the heaviest case here applies db/init.sql
+// — 881 lines of DDL — and baselines 69 migrations TWICE, to reach the
+// "already provisioned" branch. That fits on a developer laptop and does NOT
+// fit on a CI runner: measured, `refuses a database that already has a schema`
+// died at exactly 5000.05ms on GitHub Actions while taking ~100ms here. The
+// timeout then took the NEXT test with it — the abandoned `beforeEach` was
+// still mid-`CREATE DATABASE`, so the following one collided with
+// `duplicate key value violates unique constraint "pg_database_datname_index"`,
+// which reads as a test bug rather than as fallout.
+//
+// Set here rather than as a `--timeout` flag in package.json so it travels with
+// the file: running `bun test db/provision.test.ts` directly is exactly how
+// these cases get iterated on.
+setDefaultTimeout(60_000);
+
 const SCRATCH_DB = "muninn_provision_test";
 const SCRATCH_URL = new URL(TEST_DATABASE_URL).toString().replace(/\/[^/]*$/, `/${SCRATCH_DB}`);
 const ADMIN_URL = new URL(TEST_DATABASE_URL).toString().replace(/\/[^/]*$/, "/muninn");
