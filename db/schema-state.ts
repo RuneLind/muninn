@@ -123,6 +123,44 @@ export function tablesDeclaredByInitSql(sql: string): string[] {
     return { text: m[0], quoted: false };
   };
 
+  /** Skip whitespace, comments and quoted runs, stopping at the first character
+   *  that is none of those — punctuation included.
+   *
+   *  Distinct from `skipTrivia`, which additionally steps over punctuation to
+   *  reach the next WORD. The difference is load-bearing exactly once, at the
+   *  schema qualifier: `CREATE TABLE public . users` must see the `.` rather
+   *  than skip it and take `public` for the table name, which is a table that
+   *  can never exist and so refuses the database forever. Returns false when
+   *  the file ran out. */
+  const skipBlanks = (): boolean => {
+    for (;;) {
+      const ch = sql[i];
+      if (ch === undefined) return false;
+      if (ch === "-" && sql[i + 1] === "-") {
+        const nl = sql.indexOf("\n", i);
+        if (nl === -1) return false;
+        i = nl + 1;
+        continue;
+      }
+      if (ch === "/" && sql[i + 1] === "*") {
+        let depth = 1;
+        i += 2;
+        while (i < sql.length && depth > 0) {
+          if (sql.startsWith("/*", i)) (depth++, (i += 2));
+          else if (sql.startsWith("*/", i)) (depth--, (i += 2));
+          else i++;
+        }
+        if (depth > 0) return false;
+        continue;
+      }
+      if (/\s/.test(ch)) {
+        i++;
+        continue;
+      }
+      return true;
+    }
+  };
+
   /** Skip everything that is not the start of a word. Returns false when the
    *  file ran out — including on an unterminated run, which stops the scan. */
   const skipTrivia = (): boolean => {
@@ -204,27 +242,57 @@ export function tablesDeclaredByInitSql(sql: string): string[] {
 
     let head = readWord();
     if (!head) break;
+
+    // `IF NOT EXISTS`, PEEKED rather than consumed. `IF` is a non-reserved
+    // keyword, so `CREATE TABLE if (i int)` is legal and names the table `if`
+    // (measured). Consuming the lookahead and giving up on a mismatch abandoned
+    // the rest of the FILE — a silently truncated declared set, which is the
+    // under-match direction: a stump then classifies COMPLETE and the pod
+    // migrates onto a half-schema.
     if (!head.quoted && head.text.toUpperCase() === "IF") {
+      const beforeLookahead = i;
+      let matched = true;
       for (const expected of ["NOT", "EXISTS"]) {
-        if (!skipTrivia()) return [...new Set(names)];
+        if (!skipTrivia()) {
+          matched = false;
+          break;
+        }
         const w = readWord();
-        if (!w || w.quoted || w.text.toUpperCase() !== expected) return [...new Set(names)];
+        if (!w || w.quoted || w.text.toUpperCase() !== expected) {
+          matched = false;
+          break;
+        }
       }
-      if (!skipTrivia()) break;
-      const named = readWord();
-      if (!named) break;
-      head = named;
+      if (matched) {
+        if (!skipTrivia()) break;
+        const named = readWord();
+        if (!named) break;
+        head = named;
+      } else {
+        // `IF` was the table's name after all.
+        i = beforeLookahead;
+      }
     }
 
-    // A schema qualifier: in `public.users` the NAME is the last part.
+    // A schema qualifier: in `public.users` the NAME is the last part. Trivia
+    // is legal on either side of the dot — `public /*x*/ . users` — so it is
+    // skipped WITHOUT stepping over the dot itself.
     let name = head;
-    while (sql[i] === ".") {
+    for (;;) {
+      const beforeDot = i;
+      if (!skipBlanks() || sql[i] !== ".") {
+        i = beforeDot;
+        break;
+      }
       i++;
+      if (!skipBlanks()) break;
       const next = readWord();
       if (!next) break;
       name = next;
     }
-    names.push(name.quoted ? name.text : name.text.toLowerCase());
+    // A zero-length quoted identifier is not a name — Postgres refuses `""`.
+    const text = name.quoted ? name.text : name.text.toLowerCase();
+    if (text !== "") names.push(text);
   }
 
   return [...new Set(names)];

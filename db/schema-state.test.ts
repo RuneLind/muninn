@@ -293,6 +293,65 @@ describe("one case per lexer state", () => {
     expect(tablesDeclaredByInitSql(`SELECT "create" TABLE ghost;`)).toEqual([]);
   });
 
+  test("a schema qualifier with trivia around the dot still names the TABLE", () => {
+    // Measured: `CREATE TABLE public . a6 (i int)` creates `a6`. Taking
+    // `public` for the name declares a SCHEMA as a table — one that can never
+    // appear in `information_schema.tables`, so a healthy database is refused
+    // on every restart with the schema-drop remedy printed beside it.
+    expect(tablesDeclaredByInitSql("CREATE TABLE public . a6 (i int);")).toEqual(["a6"]);
+    expect(tablesDeclaredByInitSql("CREATE TABLE public.\n  a7 (i int);")).toEqual(["a7"]);
+    expect(tablesDeclaredByInitSql("CREATE TABLE public/*x*/.a8 (i int);")).toEqual(["a8"]);
+    expect(tablesDeclaredByInitSql("CREATE TABLE public.--c\n a9 (i int);")).toEqual(["a9"]);
+    // And a qualifier chain takes the LAST part, not the second.
+    expect(tablesDeclaredByInitSql("CREATE TABLE db.public.t3 (i int);")).toEqual(["t3"]);
+  });
+
+  test("`IF` is a legal table name, and a failed IF-NOT-EXISTS peek must not end the scan", () => {
+    // Measured: `CREATE TABLE if (i int)` creates a table called `if`.
+    // Consuming the lookahead and giving up abandoned the REST OF THE FILE —
+    // the under-match direction, where a stump classifies COMPLETE and the pod
+    // migrates onto a half-schema.
+    expect(tablesDeclaredByInitSql("CREATE TABLE if (i int); CREATE TABLE a49 (i int);"))
+      .toEqual(["if", "a49"]);
+    // A typo'd modifier is the half-merged shape this scanner exists to survive.
+    expect(tablesDeclaredByInitSql("CREATE TABLE IF NOT EXIST t (i int); CREATE TABLE a50 (i int);"))
+      .toContain("a50");
+    // The real form still works.
+    expect(tablesDeclaredByInitSql("CREATE TABLE IF NOT EXISTS t (i int); CREATE TABLE a51 (i int);"))
+      .toEqual(["t", "a51"]);
+  });
+
+  test("a quoted `IF` is a name, not the start of IF NOT EXISTS", () => {
+    expect(tablesDeclaredByInitSql(`CREATE TABLE "IF" (i int); CREATE TABLE later (i int);`))
+      .toEqual(["IF", "later"]);
+    // The input that actually distinguishes the guard is not valid SQL — with
+    // the lookahead now non-destructive, a quoted `"IF"` followed by anything
+    // OTHER than `NOT EXISTS` already falls back to being the name. Only the
+    // `NOT EXISTS` sequence tells the two apart, and `CREATE TABLE "IF" NOT
+    // EXISTS t` is a syntax error. It is pinned anyway, for the same reason the
+    // quoted-`CREATE` case is: this scanner runs over files that may be
+    // truncated or half-merged, which is when invalid sequences appear.
+    expect(tablesDeclaredByInitSql(`CREATE TABLE "IF" NOT EXISTS t (i int);`)).toEqual(["IF"]);
+  });
+
+  test("a quoted `TABLE` after CREATE does not declare anything", () => {
+    // `CREATE "TABLE" ghost` is not a table declaration — the quoted word is an
+    // identifier, and a quoted identifier is never a keyword.
+    expect(tablesDeclaredByInitSql(`CREATE "TABLE" ghost (i int);`)).toEqual([]);
+  });
+
+  test("a quoted `E` before a literal is an identifier, not an escape-string", () => {
+    expect(tablesDeclaredByInitSql(String.raw`SELECT "E"'a\'b'; CREATE TABLE later (i int);`))
+      .toEqual([]);
+  });
+
+  test("a zero-length quoted identifier is not a name", () => {
+    // Postgres refuses `""` outright; pushing the empty string would put a name
+    // in `declared` that nothing can ever satisfy.
+    expect(tablesDeclaredByInitSql(`CREATE TABLE "" (i int); CREATE TABLE t (i int);`))
+      .toEqual(["t"]);
+  });
+
   test("U&, B and X prefixes need no state of their own", () => {
     expect(tablesDeclaredByInitSql(`SELECT U&'d\\0061t'; CREATE TABLE t (i int);`)).toEqual(["t"]);
     expect(tablesDeclaredByInitSql(`SELECT B'1011'; CREATE TABLE t (i int);`)).toEqual(["t"]);
