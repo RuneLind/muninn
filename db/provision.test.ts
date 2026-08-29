@@ -20,6 +20,8 @@
 import { describe, expect, test, beforeEach, afterAll } from "bun:test";
 import { fileURLToPath } from "node:url";
 import { readdir } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import postgres from "postgres";
 import { TEST_DATABASE_URL } from "../src/test/test-db-url.ts";
 import { provisionDatabase, ProvisionPrivilegeError, unreachableMessage } from "./provision.ts";
@@ -49,6 +51,10 @@ const ADMIN_URL = new URL(TEST_DATABASE_URL).toString().replace(/\/[^/]*$/, "/mu
  *  (or any percent-encodable byte) comes back encoded and the spawn fails. The
  *  same reason `src/db/require-provisioned.test.ts` gives. */
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+
+/** Scratch space for the one case that needs a checkout WITHOUT db/init.sql.
+ *  `os.tmpdir()`, never a literal — CI has no developer scratchpad. */
+const SCRATCH_DIR = join(tmpdir(), "muninn-provision-test");
 
 /** Drive the CLI as a PROCESS. Half of what this PR ships is an exit code and
  *  an operator instruction on stderr, and neither exists in-process. */
@@ -767,7 +773,7 @@ describe("the remedy forks with the state", () => {
     // drop somebody else's schema.
     expect(text).not.toContain("died mid-file");
     expect(text).not.toContain("DROP SCHEMA");
-    expect(text).toContain("wrong");
+    expect(text).toContain("not the database");
   });
 
   test("a lone ledger WITH rows gets the one-line remedy too", async () => {
@@ -808,5 +814,39 @@ describe("the CLI prints the Postgres diagnosis, not just its message", () => {
     } finally {
       await holder.end();
     }
+  });
+});
+
+describe("the boot gate diagnoses a FILE problem as a file problem", () => {
+  test("a missing db/init.sql answers at once, not after the connect budget", async () => {
+    // Read inside the connect-retry loop, an ENOENT was caught by the catch that
+    // treats every non-fatal error as "not up yet" — so a crash-looping pod
+    // burned 30s per restart and then reported
+    // `Could not reach the database within 30s: ENOENT … db/init.sql`.
+    // A file problem wearing a connectivity diagnosis, on the boot gate.
+    const stage = `${SCRATCH_DIR}/no-init`;
+    await Bun.$`rm -rf ${stage}`.quiet();
+    await Bun.$`mkdir -p ${stage}/db`.quiet();
+    for (const f of ["require-provisioned.ts", "database-url.ts", "postgres-connection.ts", "schema-state.ts", "provision.ts", "migrate.ts"]) {
+      await Bun.$`cp ${REPO_ROOT}/db/${f} ${stage}/db/${f}`.quiet();
+    }
+    await Bun.$`cp -R ${REPO_ROOT}/db/migrations ${stage}/db/migrations`.quiet();
+    await Bun.$`ln -sfn ${REPO_ROOT}/node_modules ${stage}/node_modules`.quiet();
+
+    const started = Date.now();
+    const proc = Bun.spawn(["bun", "db/require-provisioned.ts"], {
+      cwd: stage,
+      env: { ...process.env, DATABASE_URL: SCRATCH_URL },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const stderr = await new Response(proc.stderr).text();
+    const code = await proc.exited;
+
+    expect(code).toBe(2);
+    expect(stderr).toContain("db/init.sql");
+    expect(stderr).not.toContain("Could not reach the database");
+    // Well under bun's own per-test timeout, and nowhere near the 30s budget.
+    expect(Date.now() - started).toBeLessThan(4_000);
   });
 });

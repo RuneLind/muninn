@@ -52,7 +52,7 @@
 import { join } from "node:path";
 import { resolveCliDatabaseUrl, DATABASE_URL_ENV_NAMES } from "./database-url.ts";
 import { openPostgres } from "./postgres-connection.ts";
-import { classifySchemaState, tablesDeclaredByInitSql } from "./schema-state.ts";
+import { classifySchemaState, LEDGER_TABLE, tablesDeclaredByInitSql } from "./schema-state.ts";
 import { describeUnusableState } from "./provision.ts";
 
 /** How long to keep retrying a CONNECTION failure. Under docker-compose the app
@@ -78,7 +78,7 @@ const FATAL_PG_CODES = new Set([
 
 const UNPROVISIONED_INSTRUCTION = [
   "",
-  "  This database has no `users` table — it has never been provisioned.",
+  "  This database has no tables at all — it has never been provisioned.",
   "",
   "  Muninn's schema comes from db/init.sql, NOT from the migration runner:",
   "  db/migrate.ts only carries an existing schema forward. Running it against",
@@ -194,6 +194,27 @@ async function main(): Promise<number> {
     return 2;
   }
 
+  // BEFORE the retry loop, and that placement is the point. Read inside it, a
+  // missing or unparseable db/init.sql is caught by the loop's catch — which
+  // treats every non-fatal error as "the database is not up yet" — so the pod
+  // burned the full 30s budget per restart and then reported
+  // `Could not reach the database within 30s: ENOENT … db/init.sql`. A file
+  // problem diagnosed as a connectivity problem, on a crash-looping boot gate.
+  // Neither the read nor the parse depends on the database.
+  let declared: string[];
+  try {
+    declared = tablesDeclaredByInitSql(await Bun.file(join(import.meta.dir, "init.sql")).text());
+    if (declared.length === 0) {
+      throw new Error("no CREATE TABLE statements found — is the file truncated?");
+    }
+  } catch (err) {
+    console.error(
+      `Cannot read db/init.sql, so this check cannot tell a provisioned database from an ` +
+        `empty one: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return 2;
+  }
+
   const deadline = Date.now() + CONNECT_BUDGET_MS;
   let lastError = "";
   for (;;) {
@@ -220,14 +241,13 @@ async function main(): Promise<number> {
       // `db/provision.ts` cannot drift into disagreeing about the only question
       // that matters. (See db/schema-state.ts: they DID, and the weaker one was
       // this file, which is what prints the remedies.)
-      const initSql = await Bun.file(join(import.meta.dir, "init.sql")).text();
       const presentRows = await sql`
         SELECT table_name FROM information_schema.tables
          WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
          ORDER BY table_name
       `;
       const present = new Set(presentRows.map((r) => String(r.table_name)));
-      const state = classifySchemaState(tablesDeclaredByInitSql(initSql), present);
+      const state = classifySchemaState(declared, present);
 
       if (state.kind === "empty") {
         console.error(UNPROVISIONED_INSTRUCTION);
@@ -249,7 +269,7 @@ async function main(): Promise<number> {
       // is missing. It cannot be missing in the `complete` branch — the ledger
       // is one of init.sql's declared tables — but the shape is kept so the
       // reasoning survives a future branch that is less sure.
-      const recorded = present.has("schema_migrations")
+      const recorded = present.has(LEDGER_TABLE)
         ? Number((await sql`SELECT count(*)::int AS n FROM schema_migrations`)[0]?.n ?? 0)
         : 0;
       if (recorded === 0) {

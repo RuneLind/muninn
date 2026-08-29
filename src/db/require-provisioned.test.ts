@@ -67,7 +67,10 @@ describe("db/require-provisioned.ts", () => {
     expect(code).toBe(1);
     // A boot refusal is read once, in a container log. It has to carry the fix,
     // not a raw SQL error.
-    expect(stderr).toContain("users");
+    // NOT "users". The predicate is the whole table set now, and pinning the
+    // refusal to one table name is what kept the old one alive in the text an
+    // operator actually reads.
+    expect(stderr).toContain("no tables at all");
     expect(stderr).toContain("db/init.sql");
 
     // The load-bearing half, and the reason this assertion changed. The

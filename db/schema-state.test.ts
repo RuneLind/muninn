@@ -77,12 +77,70 @@ describe("tablesDeclaredByInitSql — what must be counted", () => {
     });
   }
 
+  test("does NOT count a TEMP table — it can never be in `public` to be found", () => {
+    // Measured: a temp table lives in `pg_temp_N`, so it never appears under
+    // `table_schema = 'public'`. Counting one as declared makes it a permanent
+    // phantom — the same "every healthy database refused, with a schema drop"
+    // outcome as an over-match. The first version listed TEMP as a feature.
+    expect(tablesDeclaredByInitSql("CREATE TEMP TABLE t (x int);")).toEqual([]);
+    expect(tablesDeclaredByInitSql("CREATE TEMPORARY TABLE t (x int);")).toEqual([]);
+    expect(tablesDeclaredByInitSql("CREATE GLOBAL TEMPORARY TABLE t (x int);")).toEqual([]);
+  });
+
   test("folds an unquoted name to lower case, and keeps a quoted one verbatim", () => {
     // Postgres stores an unquoted identifier lower-cased, so `CREATE TABLE
     // Users` is `users` in information_schema — comparing the spellings
     // literally would make it permanently "missing" and refuse the database.
     expect(tablesDeclaredByInitSql("CREATE TABLE Users (x int);")).toEqual(["users"]);
     expect(tablesDeclaredByInitSql('CREATE TABLE "MixedCase" (x int);')).toEqual(["MixedCase"]);
+  });
+});
+
+describe("stripNonCode — the two inputs that broke the first version", () => {
+  test("a NESTED dollar-quoted body: a bare $$ must NOT close a tagged one", () => {
+    // Nesting an outer tag BECAUSE the body contains `$$` is the standard
+    // Postgres idiom, so this fires on the first nested function anyone adds to
+    // db/init.sql. The first version used an OPTIONAL backreference, so the
+    // inner `$$` closed the outer `$tag$` and everything after it was read as
+    // code — a phantom table, and then every healthy production database
+    // classifies incomplete and the boot gate refuses it forever with a schema
+    // drop printed beside the refusal.
+    const sql =
+      "CREATE FUNCTION f() AS $tag$ a $$ b CREATE TABLE ghost (i int); $$ c $tag$;\n" +
+      "CREATE TABLE real_one (i int);";
+    expect(tablesDeclaredByInitSql(sql)).toEqual(["real_one"]);
+  });
+
+  test("two string literals that each contain a $tag$ must not swallow what is between them", () => {
+    // The other direction, and the dangerous one for a boot gate: a declaration
+    // silently dropped from the declared set makes `missing` short, so a
+    // database genuinely missing that table classifies COMPLETE, the check
+    // passes, and the entrypoint runs the migration runner onto a half-schema —
+    // the crash this whole module exists to prevent.
+    const sql =
+      "INSERT INTO t VALUES ('cost $x$');\n" +
+      "CREATE TABLE swallowed (i int);\n" +
+      "INSERT INTO t VALUES ('also $x$');\n" +
+      "CREATE TABLE tail (i int);";
+    expect(tablesDeclaredByInitSql(sql)).toEqual(["swallowed", "tail"]);
+  });
+
+  test("a dollar-quoted body containing an apostrophe still strips whole", () => {
+    // Which is why literals cannot simply be stripped first.
+    const sql = "CREATE FUNCTION f() AS $$ it's a body; CREATE TABLE ghost (i int); $$ LANGUAGE plpgsql;\nCREATE TABLE real_one (i int);";
+    expect(tablesDeclaredByInitSql(sql)).toEqual(["real_one"]);
+  });
+
+  test("an UNTERMINATED dollar quote does not swallow the file silently", () => {
+    // If it did, `declared` would come back short or empty — and empty is the
+    // vacuous-complete hole `classifySchemaState` throws on.
+    const sql = "CREATE TABLE before_it (i int);\nCREATE FUNCTION f() AS $$ unterminated";
+    expect(tablesDeclaredByInitSql(sql)).toContain("before_it");
+  });
+
+  test("positional parameters ($1, $2) are not dollar quotes", () => {
+    const sql = "CREATE TABLE t (i int);\n-- a prepared statement shape: $1, $2\nCREATE TABLE u (i int);";
+    expect(tablesDeclaredByInitSql(sql)).toEqual(["t", "u"]);
   });
 });
 

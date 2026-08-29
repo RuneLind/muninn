@@ -194,10 +194,15 @@ export function describeUnusableState(state: Exclude<SchemaState, { kind: "empty
       // init.sql, so neither the diagnosis nor the destructive remedy applies.
       // Saying "most likely a psql that died mid-file" about someone else's
       // database is a false diagnosis attached to `DROP SCHEMA public CASCADE`.
+      // No caller-specific wording. This block is printed by BOTH
+      // db/provision.ts (which echoes a `Database:` line) and
+      // db/require-provisioned.ts (which does not, and never writes) — so a
+      // sentence naming either one sends half its readers looking for output
+      // that is not there.
       remedy: [
-        "  Nothing here came from db/init.sql, so this is almost certainly the wrong",
-        "  database. Check the `Database:` line above against the one you meant.",
-        "  This script will not write into it.",
+        "  Nothing here came from db/init.sql, so this is almost certainly not the database",
+        "  you meant. Check the connection this process resolved against the one you intended.",
+        "  Nothing has been written to it.",
       ],
     };
   }
@@ -215,7 +220,7 @@ export function describeUnusableState(state: Exclude<SchemaState, { kind: "empty
       "  Most likely a `psql -f db/init.sql` that died mid-file — psql without `-1` is not",
       "  atomic. Decide what is there, then either drop it (a throwaway database:",
       "  `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`) or provision a fresh one.",
-      "  This script will not write over it.",
+      "  Nothing has been written to it.",
     ],
   };
 }
