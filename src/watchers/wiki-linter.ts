@@ -34,15 +34,13 @@ const CHECK_SUMMARY: Record<LintCheck, { one: string; many: string }> = {
   "index-truncation": { one: "truncated wikilink", many: "truncated wikilinks" },
 };
 
-/** DERIVED from the engine's own list, never re-typed: `summarizeCounts` iterates
- *  the ORDER, not the label map, so a hand-maintained copy missing a new check
+/** Iterates the ENGINE's own list, never a re-typed order: `summarizeCounts` walks
+ *  the checks, not the label map, so a hand-maintained copy missing a new check
  *  produced the empty sentence even with the map above fully typed. */
-const CHECK_ORDER: readonly LintCheck[] = LINT_CHECKS;
-
 function summarizeCounts(counts: Record<LintCheck, number>): string {
   const parts: string[] = [];
-  for (const check of CHECK_ORDER) {
-    const n = counts[check] ?? 0;
+  for (const check of LINT_CHECKS) {
+    const n = counts[check];
     if (n <= 0) continue;
     const label = CHECK_SUMMARY[check]!;
     parts.push(`${n} ${n === 1 ? label.one : label.many}`);

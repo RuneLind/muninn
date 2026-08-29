@@ -41,6 +41,20 @@ describe("renderWikiHtml", () => {
     expect(html).not.toContain("Nonexistent Page</a>");
   });
 
+  test("a dangling [[ never merges two lines into one missing-link span", () => {
+    // The reader is where the missing `\n` exclusion was VISIBLE: an index.md
+    // entry truncated mid-link paired with the NEXT entry's `]]`, so both lines
+    // rendered as one `wiki-link-missing` span and the second entry's real link
+    // disappeared from the page.
+    const html = renderWikiHtml(
+      ["- [[Claude Code]] — a summary cut at [[Some Long", "- [[Claude Code]] — the next entry."].join("\n"),
+      resolve,
+    );
+    // The second entry still resolves to a real anchor.
+    expect(html.match(/data-wiki-page="Claude Code"/g)?.length).toBe(2);
+    expect(html).not.toContain("Some Long\n");
+  });
+
   test("wikilinks survive inside headings, lists, and bold text", () => {
     const html = renderWikiHtml(
       "## About [[Claude Code]]\n\n- item with [[Claude Code|CC]]\n\n**bold [[Claude Code]]**",

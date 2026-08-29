@@ -12,7 +12,12 @@ const log = getLog("dashboard", "graph-routes");
 /** Collections that support wikilink edge extraction. */
 const WIKILINK_COLLECTIONS = ["wiki", "nav-wiki", "capra-wiki"];
 
-const WIKILINK_RE = /\[\[([^\]|]+?)(?:\|[^\]]*?)?\]\]/g;
+/** Target and alias are NEWLINE-FREE — `WIKILINK_RE`'s exclusion in
+ *  `src/wiki/store.ts`, restated here because this scan runs over WHOLE huginn
+ *  documents: without it a dangling `[[` pairs with a later line's `]]` and
+ *  invents an edge to a page nobody linked (while hiding the real one).
+ *  Exported for its unit test only. */
+export const WIKILINK_RE = /\[\[([^\]|\n]+?)(?:\|[^\]\n]*?)?\]\]/g;
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
 interface WikilinkEdge {

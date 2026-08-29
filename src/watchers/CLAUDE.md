@@ -1437,25 +1437,51 @@ wiki or DB. v1 is purely a report.
      frontmatter (the conservative reading; a literal `## Sources`-only check
      would flag every gardener-written page). `entity` stubs + reserved files
      are out of scope.
-  5. **index-truncation** — a line carrying a `[[` that never closes on that
-     line. A wikilink cannot span lines, so the `[[` is debris from a truncated
-     line — which the gardener's own `indexOneLiner` produced until 2026-08-29
-     by slicing at 119 chars regardless of where a `[[` sat. It matters beyond
+  5. **index-truncation** — a line carrying a DANGLING `[[`. **This block owns
+     the numbers**; `src/gardener/CLAUDE.md`, `wire.ts`, `store.ts` and `lint.ts`
+     point here rather than re-stating them.
+
+     A wikilink cannot span lines, so a dangling `[[` is debris from a truncated
+     line — which the gardener's own `indexOneLiner` produced until 2026-08-29 by
+     slicing at 119 chars regardless of where a `[[` sat. It matters beyond
      cosmetics: a line-based `\[\[([^\]]+)\]\]` scan WITHOUT a `\n` exclusion
      (which the 2026-08-16 index lint was) then matches across the break and
      reports the swallowed next entry as uncatalogued — 26 false "missing from
-     index" findings and 17 duplicate entries in that pass. Reserved infra is IN
-     scope here (index.md is exactly where it lands); fenced blocks are skipped
-     and inline code spans stripped PER LINE, deliberately not via
-     `stripCodeSpans`, whose fence removal joins the lines around a block and
-     could balance a genuine dangling `[[` against a later line's `]]`.
-     Measured on the live roots the day it shipped: jarvis 5 (all real, all
-     `index.md`), memory 1 (a real `[[[link\nspanning]]]`), mimir 0,
-     melosys-kode-wiki 0 — i.e. no false positives over 2,284 pages.
+     index" findings and 17 duplicate entries in that pass. Measured on the live
+     roots the day it shipped: jarvis 5 (all real, all `index.md`), memory 1 (a
+     real `[[[link\nspanning]]]`), mimir 0, melosys-kode-wiki 0 — i.e. no false
+     positives over 2,284 pages. Reserved infra is IN scope here (index.md is
+     exactly where it lands).
+
+     **The predicate is SHARED with the writer** — `firstDanglingWikilinkOpen`
+     (`src/wiki/store.ts`), which `truncateOneLiner` backs its cut up to and this
+     check reports — so the two cannot disagree about what "dangling" means. It
+     answers the FIRST dangling opener, and dangling has TWO branches: no `]]`
+     follows on the line (the cross-line swallow), or another `[[` intervenes
+     before it (`[[Foo [[Bar]]` → the phantom target `Foo [[Bar`, eating the real
+     `[[Bar]]`). Both used to be judged by `lastIndexOf("[[")`, which sees
+     neither once a LATER opener closes normally: `…[[Unclosed junk …[[Real
+     Page]]` shipped and reported clean.
+
+     Four exclusions, each a false positive: **fenced blocks**, via the SHARED
+     `fencedLineMask` (`views/components/wiki-integrate.ts` — CommonMark opener
+     and closer rules, reused rather than re-implemented; the naive
+     `/^\s*(```|~~~)/` toggle lets ``` and `~~~` close each other, lets a
+     3-backtick line close a 4-backtick block, and — worst, because it is silent
+     and unbounded — is flipped ON by an ordinary prose line carrying an inline
+     code span, masking the rest of the file); **YAML frontmatter**, whose values
+     are strings (`title: 'A [[weird'`); **inline code spans**, stripped PER LINE
+     with CommonMark's run-length pairing (not via `stripCodeSpans`, whose fence
+     removal joins the lines around a block and could balance a genuine dangling
+     `[[` against a later line's `]]`; and not via a `` `[^`]*` `` replace, which
+     mis-pairs the double-backtick form); and **an MDX/JSX `{[[` opener**
+     (`<ComparisonTable rows={[[`, mimir house style) — that narrow and no wider.
+     The finding quotes the RAW line, since a quote from the code-span-stripped
+     text greps to nothing. An INDENTED code block is still in scope (accepted).
 - **Adding a check is compiler-enforced now.** `LintReport.counts`, the watcher's
   `CHECK_SUMMARY` and the gardener page's `LINT_LABELS` are all
-  `Record<LintCheck, …>`, and `CHECK_ORDER` is DERIVED from `LINT_CHECKS` rather
-  than re-typed — `summarizeCounts` iterates the order, not the label map, so a
+  `Record<LintCheck, …>`, and `summarizeCounts` iterates `LINT_CHECKS` itself
+  rather than a re-typed order — it walks the CHECKS, not the label map, so a
   hand-kept order missing a new check alerted with an empty sentence even with
   every map full. In the client bundle `LintCheck` must come in as `import type`
   only; a value import drags `node:path`/`Bun.file` into the browser bundle.

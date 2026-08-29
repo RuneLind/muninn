@@ -300,7 +300,7 @@ function renderLint(findings: LintFinding[]): void {
     if (!items.length) continue;
     html +=
       '<div class="lint-group"><div class="lint-group-head">' +
-      esc(LINT_LABELS[check] || check) +
+      esc(LINT_LABELS[check]) +
       ` <span class="lint-count">${items.length}</span></div><ul class="lint-items">`;
     items.forEach((f) => {
       html +=

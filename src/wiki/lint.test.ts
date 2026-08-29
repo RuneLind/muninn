@@ -385,8 +385,116 @@ describe("lintWiki", () => {
     const findings = await lint();
     const truncation = findings.filter((f) => f.check === "index-truncation");
     expect(truncation.map((f) => f.relPath)).toEqual(["index.md"]);
-    expect(truncation[0]!.detail).toBe("line 3");
+    expect(truncation[0]!.message).toContain("line 3");
     expect(truncation[0]!.message).toContain("[[Some Long Page");
+  });
+
+  test("an EARLIER dangling [[ is reported even when a later one closes", async () => {
+    // The `lastIndexOf` predicate this replaced saw only `[[Beta]]`, found its
+    // `]]`, and reported nothing — while `[[Frag and later [[Beta` is exactly the
+    // phantom target that hides the real `[[Beta]]` link.
+    await write(
+      "index.md",
+      ["# Wiki Index", "", "- [[A]] — earlier unclosed [[Frag and later [[Beta]] end"].join("\n"),
+    );
+    const truncation = (await lint()).filter((f) => f.check === "index-truncation");
+    expect(truncation.map((f) => f.relPath)).toEqual(["index.md"]);
+    expect(truncation[0]!.message).toContain("[[Frag and later [[Beta]] end");
+  });
+
+  test("the excerpt is quoted from the RAW line, so the finding greps", async () => {
+    const line = "- [[Good Concept]] — see `the [[x]] form` then [[Truncated Here";
+    await write("index.md", ["# Wiki Index", "", line].join("\n"));
+    const truncation = (await lint()).filter((f) => f.check === "index-truncation");
+    expect(truncation).toHaveLength(1);
+    // The quoted excerpt appears VERBATIM in the file, code span included.
+    const msg = truncation[0]!.message;
+    const excerpt = msg.slice(msg.lastIndexOf("(") + 1, -1);
+    expect(excerpt).toBe("[[Truncated Here");
+    expect(line).toContain(excerpt);
+  });
+
+  test("a mixed ``` / ~~~ pair does not close, and a nested fence stays inside", async () => {
+    await write(
+      "index.md",
+      [
+        "# Wiki Index",
+        "",
+        "````md", // 4-backtick outer fence
+        "```", // inner 3-backtick run — NOT a closer of a 4-run opener
+        "- [[Documented dangling",
+        "```",
+        "````",
+        "",
+        "```",
+        "~~~", // a tilde line never closes a backtick fence
+        "- [[Also documented",
+        "```",
+      ].join("\n"),
+    );
+    expect(relPathsFor(await lint(), "index-truncation")).toEqual([]);
+  });
+
+  test("a prose line carrying an inline code span does not disarm the rest of the file", async () => {
+    // The naive `/^\s*(```|~~~)/` toggle treated this line as a fence OPENER,
+    // masking every line after it — a silent false NEGATIVE over the whole page.
+    await write(
+      "index.md",
+      [
+        "# Wiki Index",
+        "",
+        "```bash``` is how you fence a shell block.",
+        "",
+        "- [[Really truncated here",
+      ].join("\n"),
+    );
+    const truncation = (await lint()).filter((f) => f.check === "index-truncation");
+    expect(truncation).toHaveLength(1);
+    expect(truncation[0]!.message).toContain("[[Really truncated here");
+  });
+
+  test("YAML frontmatter is not markdown and is never flagged", async () => {
+    await write(
+      "concepts/Good Concept.md",
+      [
+        "---",
+        "type: concept",
+        "title: 'A [[weird title'",
+        "updated: 2026-06-01",
+        "---",
+        "",
+        "Links to [[Real Source]].",
+        "",
+        "## Sources",
+        "- https://example.com/a",
+      ].join("\n"),
+    );
+    expect(relPathsFor(await lint(), "index-truncation")).toEqual([]);
+  });
+
+  test("a double-backtick code span is paired by run length, not by the next backtick", async () => {
+    await write(
+      "index.md",
+      ["# Wiki Index", "", "- [[Good Concept]] — write a literal as `` [[x` `` in prose."].join("\n"),
+    );
+    expect(relPathsFor(await lint(), "index-truncation")).toEqual([]);
+  });
+
+  test("an MDX/JSX array prop opener is exempt, and only that shape", async () => {
+    await write(
+      "index.md",
+      [
+        "# Wiki Index",
+        "",
+        "<ComparisonTable rows={[[",
+        '  ["a", "b"],',
+        "]} />",
+      ].join("\n"),
+    );
+    expect(relPathsFor(await lint(), "index-truncation")).toEqual([]);
+
+    await write("index.md", ["# Wiki Index", "", "prose { [[Not a JSX opener"].join("\n"));
+    expect(relPathsFor(await lint(), "index-truncation")).toEqual(["index.md"]);
   });
 
   test("balanced lines, fenced blocks and inline code never fire", async () => {

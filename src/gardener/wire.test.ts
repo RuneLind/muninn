@@ -1,5 +1,12 @@
 import { test, expect, describe } from "bun:test";
-import { buildIndexEntry, catalogPage, insertIndexLine, buildSeeAlsoEdit, selectWirablePages } from "./wire.ts";
+import {
+  buildIndexEntry,
+  catalogPage,
+  insertIndexLine,
+  buildSeeAlsoEdit,
+  selectWirablePages,
+  ONE_LINER_MAX,
+} from "./wire.ts";
 import type { WikiIndex, WikiPageMeta } from "../wiki/store.ts";
 
 /**
@@ -27,9 +34,6 @@ function fakeIndex(pages: Record<string, string>): WikiIndex {
     root: "/fake",
   };
 }
-
-/** Mirrors `wire.ts`'s module-private `ONE_LINER_MAX`. */
-const ONE_LINER_MAX_FOR_TEST = 120;
 
 describe("buildIndexEntry", () => {
   test("concept + ai → AI / Claude / Coding section, rationale one-liner", () => {
@@ -74,15 +78,26 @@ describe("buildIndexEntry", () => {
   }
 
   /**
-   * True when a `[[` is left open (the shape that swallows the next line), or a
-   * lone `[` survives the cut. The trailing `…` is stripped FIRST — with it in
-   * place the trailing-bracket test can never fire, and dropping the truncator's
-   * lone-`[` strip left the whole suite green.
+   * True when the cut left a `[[` that nothing closes, or a lone `[`.
+   *
+   * Deliberately NOT the shipped predicate's algorithm: it is the UNION of two
+   * independent weak checks — a non-overlapping `[[`-vs-`]]` COUNT, and "nothing
+   * closes the last opener" — so it cannot be satisfied by an implementation bug
+   * it shares. The first spelling of this oracle re-implemented the truncator's
+   * own `lastIndexOf` scan and was therefore structurally incapable of catching
+   * the case that scan is blind to (an EARLIER dangling opener followed by a
+   * later closing one). The trailing `…` is stripped FIRST — with it in place the
+   * trailing-bracket test can never fire, and dropping the truncator's lone-`[`
+   * strip left the whole suite green.
    */
   function hasDanglingOpen(s: string): boolean {
     const body = s.endsWith("…") ? s.slice(0, -1) : s;
-    const open = body.lastIndexOf("[[");
-    return (open !== -1 && body.indexOf("]]", open + 2) === -1) || body.trimEnd().endsWith("[");
+    const opens = body.split("[[").length - 1;
+    const closes = body.split("]]").length - 1;
+    if (opens > closes) return true;
+    const last = body.lastIndexOf("[[");
+    if (last !== -1 && body.indexOf("]]", last + 2) === -1) return true;
+    return body.trimEnd().endsWith("[");
   }
 
   test("cut landing inside a bare link truncates before the [[", () => {
@@ -143,10 +158,59 @@ describe("buildIndexEntry", () => {
       for (const l of [link, "[[Cordis (DeepSeek Coding Harness)]]"]) {
         const rationale = `${"a".repeat(at)}${l} and then some trailing prose to pass the cap`;
         const one = oneLinerOf(rationale);
-        expect(one.length).toBeLessThanOrEqual(ONE_LINER_MAX_FOR_TEST);
+        expect(one.length).toBeLessThanOrEqual(ONE_LINER_MAX);
         expect(hasDanglingOpen(one)).toBe(false);
       }
     }
+  });
+
+  test("an EARLIER dangling opener is backed up to, even when a later one closes", () => {
+    // The `lastIndexOf` scan this replaced saw only `[[Real Page]]`, found its
+    // `]]` inside the cut, and shipped the first opener verbatim.
+    const one = oneLinerOf(`${"d".repeat(60)}[[Unclosed junk ${"e".repeat(30)}[[Real Page]] tail and more prose`);
+    expect(one).toBe(`${"d".repeat(60)}…`);
+    expect(hasDanglingOpen(one)).toBe(false);
+  });
+
+  test("an already-nested construct is cut away rather than shipped", () => {
+    // `[[Foo [[Bar]]` extracts as ONE phantom target `Foo [[Bar`, swallowing the
+    // real `[[Bar]]` link — debris the cut must not preserve.
+    const one = oneLinerOf(`${"m".repeat(70)}[[Foo [[Bar]] and then enough trailing prose to force the cap here`);
+    expect(one).toBe(`${"m".repeat(70)}…`);
+    expect(hasDanglingOpen(one)).toBe(false);
+  });
+
+  test("an emoji straddling the cut is never split into a lone surrogate", () => {
+    // 🎉 (U+1F389) is a surrogate PAIR; a bare slice at 119 halves it.
+    for (let pad = 115; pad <= 122; pad++) {
+      const one = oneLinerOf(`${"q".repeat(pad)}🎉${"r".repeat(40)}`);
+      expect(one.length).toBeLessThanOrEqual(ONE_LINER_MAX);
+      expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(one)).toBe(false);
+    }
+  });
+
+  test("a ZWJ sequence at the cut leaves whole code points, never half a char", () => {
+    const family = "\u{1F468}‍\u{1F469}‍\u{1F467}"; // 👨‍👩‍👧
+    for (let pad = 110; pad <= 122; pad++) {
+      const one = oneLinerOf(`${"s".repeat(pad)}${family}${"t".repeat(40)}`);
+      expect(one.length).toBeLessThanOrEqual(ONE_LINER_MAX);
+      // Every code unit round-trips: no U+FFFD would be produced by a re-encode.
+      expect([...one].join("")).toBe(one);
+      expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(one)).toBe(false);
+    }
+  });
+
+  test("a rationale that degenerates under the floor falls back to the body paragraph", () => {
+    // The rationale opens on a long wikilink, so the safe cut leaves nothing —
+    // the page has a perfectly good first paragraph and used to ship bare.
+    const e = buildIndexEntry({
+      title: "T",
+      kind: "concept",
+      domain: "ai",
+      rationale: `[[${"A Page With A Very Long Title ".repeat(6)}]] tail`,
+      body: "\n# T\n\nA pattern where the model writes code that calls tools.\n",
+    });
+    expect(e!.line).toBe("- [[T]] — A pattern where the model writes code that calls tools.");
   });
 
   test("no rationale and no body → bare bullet, no em-dash", () => {

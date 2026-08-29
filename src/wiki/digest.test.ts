@@ -166,6 +166,18 @@ describe("markPageMentions", () => {
     expect(out).toBe("See [[Harness Engineering]] and [[Nonexistent]].");
   });
 
+  test("a dangling [[ in one bullet does not eat the bullets after it", () => {
+    // Without the `\n` exclusion the rewrite matched from the dangling opener to
+    // a LATER line's `]]` and replaced every line between them with one link.
+    // Driven through a resolve-anything seam, because the damage only shows once
+    // the swallowed multi-line target resolves to something.
+    // The resolver must CANONICALIZE to something different — echoing the target
+    // back re-emits the very bytes it swallowed, so the merge is invisible.
+    const anything = (): WikiPageMeta => ({ name: "Canonical" }) as WikiPageMeta;
+    const input = ["- cut at [[harness eng", "- and knowledge-graph]] moved."].join("\n");
+    expect(markPageMentions(input, anything)).toBe(input);
+  });
+
   test("links backticked and quoted page names that resolve", () => {
     expect(markPageMentions("Updated `knowledge-graph` today.", resolve)).toBe(
       "Updated [[knowledge-graph]] today.",
