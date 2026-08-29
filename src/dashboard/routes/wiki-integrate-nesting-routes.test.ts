@@ -143,20 +143,55 @@ describe("integrate routes — wikilink containment", () => {
     expect(written).not.toContain("[[<Fact");
   });
 
-  test("apply leaves a page DOCUMENTING the broken shape in backticks alone", async () => {
+  test("apply leaves a FENCED example of the broken shape alone", async () => {
+    // A fenced block renders as code and `renderWikiHtml`'s wikilink substitution is
+    // invisible inside one, so a fenced occurrence really is inert documentation.
     await Bun.write(
       path.join(root, "doc.md"),
-      "# Doc\n\nThe broken shape is `[[<Fact n=\"4\" v=\"ok\">A Page</Fact>]]` — never ship it.\n",
+      [
+        "# Doc",
+        "",
+        "How the bug looked:",
+        "",
+        "```markdown",
+        '[[<Fact n="4" v="ok">A Page</Fact>]]',
+        "```",
+        "",
+        "Never ship it.",
+        "",
+      ].join("\n"),
     );
     __resetWikiCacheForTest();
     const res = await post("/api/wiki/factcheck/integrate/apply?wiki=nestwiki", {
       relPath: "doc.md",
       baseHash: await hashOf("doc.md"),
-      edits: [{ claimIndex: 0, verdict: "", old: "never ship it", new: "do not ship it", reason: "x" }],
+      edits: [{ claimIndex: 0, verdict: "", old: "Never ship it", new: "Do not ship it", reason: "x" }],
     });
     expect(res.status).toBe(200);
     const written = await onDisk("doc.md");
-    expect(written).toContain('`[[<Fact n="4" v="ok">A Page</Fact>]]`');
+    expect(written).toContain('[[<Fact n="4" v="ok">A Page</Fact>]]');
+    expect(written).toContain("Do not ship it");
+  });
+
+  test("REPRO: apply RE-NESTS a mark inside an INLINE CODE span too", async () => {
+    // `renderWikiHtml` substitutes wikilinks over the raw body BEFORE `formatWebHtml`
+    // sees a backtick, so this shape renders as a DEAD `wiki-link-missing` inside a
+    // `<code>` — live damage the backstop was masked away from. Only the FILE is
+    // observable, which is why this lives at the route.
+    await Bun.write(
+      path.join(root, "coded.md"),
+      "# Doc\n\nThe broken shape is `[[<Fact n=\"4\" v=\"ok\">A Page</Fact>]]` — never ship it.\n",
+    );
+    __resetWikiCacheForTest();
+    const res = await post("/api/wiki/factcheck/integrate/apply?wiki=nestwiki", {
+      relPath: "coded.md",
+      baseHash: await hashOf("coded.md"),
+      edits: [{ claimIndex: 0, verdict: "", old: "never ship it", new: "do not ship it", reason: "x" }],
+    });
+    expect(res.status).toBe(200);
+    const written = await onDisk("coded.md");
+    expect(written).toContain('`<Fact n="4" v="ok">[[A Page]]</Fact>`');
+    expect(written).not.toContain("[[<Fact");
     expect(written).toContain("do not ship it");
   });
 });

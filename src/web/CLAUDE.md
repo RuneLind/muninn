@@ -40,16 +40,23 @@ wrapper path because only one of them can express it:
   `<Fact …>[[Some Page]]</Fact>`. Never a piped retarget: which page the label
   should point at is an editorial decision the annotator has no basis for. A span
   that CONTAINS a link whole needs no expansion and is untouched.
-- **What counts as a link, and that is two exclusions.** The scan is line-scoped and
-  runs over the code-span-MASKED line (`maskLineCodeSpans`, same-length): a
-  backticked `` `[[Old Name]]` `` is a page writing ABOUT a link, and reading it as
-  one made a correction on that literal unappliable ("would rewrite the link target"
-  about a link that does not exist). And a candidate whose interior carries another
-  `[[` is rejected and the scan resumes two chars in — the target class admits `[`
-  (as every sibling copy does), so `A [[ b [[ c [[Real Page]]` otherwise paired the
-  FIRST opener with the only closer and marked 20 characters nobody checked, running
-  the mark across a table's `|` in the process. Same shape `firstDanglingWikilinkOpen`
-  (`src/wiki/store.ts`) calls dangling.
+- **What counts as a link is whatever the RENDERER resolves, and that is ONE
+  exclusion.** The scan is line-scoped and runs over the RAW line. A candidate whose
+  interior carries another `[[` is rejected and the scan resumes two chars in — the
+  target class admits `[` (as every sibling copy does), so `A [[ b [[ c [[Real Page]]`
+  otherwise paired the FIRST opener with the only closer and marked 20 characters
+  nobody checked, running the mark across a table's `|` in the process. Same shape
+  `firstDanglingWikilinkOpen` (`src/wiki/store.ts`) calls dangling. **Inline code is
+  NOT excluded**, and a masked spelling of this scan was a shipped defect:
+  `renderWikiHtml` substitutes wikilinks over the raw body BEFORE `formatWebHtml`
+  sees a backtick, so `` `[[Old Name]]` `` renders as
+  `<code><a class="wiki-link">Old Name</a></code>` — a live link (measured
+  2026-08-30). Masking it made the annotator splice
+  `` `[[<Fact …>Old Name</Fact>]]` ``, i.e. the forbidden shape, rendering as a dead
+  `wiki-link-missing`. A backticked link is expanded over and a correction crossing
+  one is dropped, exactly as for an unbackticked link. Fences need no handling here
+  (already an exclusion zone), and they are genuinely different: `formatWebHtml`
+  renders a fenced block as code, so the substitution is invisible inside one.
 - **Order, and NO refusal at column 0.** Expansion runs FIRST and `markableRange`
   then guards the EXPANDED range, because `ownsLineStart` is evaluated on the span's
   start and expanding leftwards over a `[[` at column 0 is what flips it. The guard
@@ -106,6 +113,19 @@ wrapper path because only one of them can express it:
   produce one. The recurrence detector is the `nested-annotation` lint check
   (`src/wiki/lint.ts`; scheduling + measurements in `src/watchers/CLAUDE.md`), which
   shares this file's shape constant `NESTED_MARKUP_RE` with the repair.
+- **The repair and the lint disagree about INLINE CODE, deliberately.** The repair
+  fixes a nesting inside a backtick span (per the renderer measurement above, it is
+  live damage: a dead `wiki-link-missing` inside a `<code>`); the lint check masks
+  inline code and does NOT report one. The lint's exclusion is kept because pages
+  document this bug in quoted examples — measured 2026-08-30, mimir's own plan for
+  this fix carries four `[[<Fact` occurrences, two inside a ```markdown fence and
+  two in inline code spans, and a check that fires on its own plan document is a
+  check nobody reads. It is acceptable because the write side can no longer PRODUCE the
+  shape inside a code span (`wikilinkSpansIn` scans the raw line, so a backticked
+  link is expanded over) and the backstop repairs the client-echoed ones before they
+  reach disk. The residual the lint will not see is a HAND-WRITTEN inline-code
+  nesting. FENCED occurrences are skipped by both, and that one is not an asymmetry:
+  a fenced block renders as code, so the substitution never happens inside it.
 
 Golden fixture: `src/wiki/__fixtures__/factcheck-annotated-page.mdx` (+ the acceptance triple `factcheck-creatine-{original.mdx,answer.md,quotes.json}` and the shared `Was:` originals in `factcheck-creatine-originals.ts`).
 

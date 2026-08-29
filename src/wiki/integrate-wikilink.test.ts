@@ -265,33 +265,91 @@ describe("corrections that cross a wikilink boundary are dropped WHOLE", () => {
   });
 });
 
-describe("inline code spans are not links", () => {
+describe("a BACKTICKED wikilink is a link — the renderer resolves it", () => {
+  // Measured 2026-08-30 through the shipped `renderWikiHtml`: wikilink substitution
+  // runs over the RAW body BEFORE `formatWebHtml` sees a backtick, so
+  // `` `[[Old Name]]` `` comes out as `<code><a class="wiki-link">Old Name</a></code>`.
+  // The earlier spelling of `wikilinkSpansIn` masked inline code and therefore
+  // disagreed with the renderer in the one direction that produces damage: it left
+  // the mark INSIDE the brackets, i.e. the forbidden shape, rendering as a dead link.
   const body = "Write `[[Old Name]]` to link a page from another one.\n";
 
-  test("REPRO: a correction on a BACKTICKED bracket pair is not a link rewrite", () => {
-    // The drop said "applying it would rewrite the link target" about a literal the
-    // page is quoting. There is no link on this line at all.
+  test("REPRO: a correction on a BACKTICKED link's TARGET is dropped as link-crossing", () => {
+    // Under the mask this correction resolved to a line with no link on it, so it
+    // applied and silently rewrote a link target — exactly what the guard exists to
+    // stop, one code span away. NB the `old: "[[Old Name]]"` shape this replaced
+    // CONTAINED the whole link, so it could never cross one and could never fail.
     const r = annotate({
       body,
-      corrections: [correction({ claimIndex: 1, old: "[[Old Name]]", new: "[[New Name]]" })],
+      corrections: [correction({ claimIndex: 1, old: "Old Name", new: "New Name" })],
       claims: [anchor(1, "❌")],
     });
-    expect(r.dropped.map((d) => d.reason).join(" ")).not.toContain("rewrite the link target");
-    expect(r.edits).toHaveLength(1);
-    expect(applyEdits(body, r.edits, true).body).toContain("[[New Name]]");
+    expect(r.edits).toHaveLength(0);
+    expect(r.dropped.map((d) => d.reason).join(" ")).toContain("rewrite the link target");
+    expect(applyEdits(body, r.edits, true).body).toBe(body);
   });
 
-  test("REPRO: a mark inside a code span does not expand over the backticked brackets", () => {
+  test("a correction CONTAINING the backticked link whole still applies", () => {
+    const r = annotate({
+      body,
+      corrections: [correction({ claimIndex: 1, old: "`[[Old Name]]` to link", new: "`[[Old Name]]` to reach" })],
+      claims: [anchor(1, "❌")],
+    });
+    expect(r.edits).toHaveLength(1);
+    expect(applyEdits(body, r.edits, true).body).toContain("`[[Old Name]]` to reach");
+  });
+
+  test("REPRO: a mark inside a backticked link expands over the WHOLE link", () => {
     const r = markOne(body, "Old Name");
     expect(r.edits).toHaveLength(1);
-    expect(r.edits[0]!.old).toBe("Old Name");
-    expect(r.edits[0]!.reason).toBe("marks the checked passage");
+    expect(r.edits[0]!.old).toBe("[[Old Name]]");
+    expect(r.edits[0]!.new).toBe('<Fact n="1" v="ok">[[Old Name]]</Fact>');
+    expect(r.edits[0]!.reason).toContain("expanded to cover the whole [[wikilink]]");
+    // The forbidden shape, stated directly.
+    expect(applyEdits(body, r.edits, true).body).not.toContain("[[<Fact");
   });
 
-  test("a REAL link on the same line as a coded one still expands", () => {
+  test("a REAL link on the same line as a backticked one still expands", () => {
     const mixed = "Write `[[Old Name]]` when you mean [[Tidal Router]] exactly.\n";
     const r = markOne(mixed, "Tidal Router");
     expect(r.edits[0]!.old).toBe("[[Tidal Router]]");
+  });
+
+  test("a link STRADDLING a backtick pairs the way the renderer pairs it", () => {
+    // `renderWikiHtml` runs one regex over the raw body, so the link here is
+    // `[[Tidal `Router]]` — backtick and all. Under the mask the ` `Router]]` ` span
+    // was blanked, the `[[` was left dangling, and the mark landed mid-link.
+    const straddle = "Write [[Tidal `Router]]` here.\n";
+    const r = markOne(straddle, "Tidal");
+    expect(r.edits[0]!.old).toBe("[[Tidal `Router]]");
+    expect(applyEdits(straddle, r.edits, true).body).not.toContain("[[<Fact");
+  });
+
+  test("…and the mirror-image straddle pairs the same way", () => {
+    const straddle = "Write `[[Tidal` Router]] here.\n";
+    const r = markOne(straddle, "Router");
+    expect(r.edits[0]!.old).toBe("[[Tidal` Router]]");
+    expect(applyEdits(straddle, r.edits, true).body).not.toContain("[[<Fact");
+  });
+});
+
+describe("a leading `[` — the mark covers exactly what the renderer replaces", () => {
+  test("`[[[Tidal Router]]` marks the same 17 characters the renderer consumes", () => {
+    // The dangling test starts at index 2, so the extra opener here reads as `[T` and
+    // passes. That is correct, not a miss: `renderWikiHtml` runs the SAME regex from
+    // the same start and replaces the SAME range, so the mark and the rendered link
+    // cover identical bytes — asserted through the real renderer below.
+    const body = "Write [[[Tidal Router]] here.\n";
+    const r = markOne(body, "Tidal Router");
+    expect(r.edits).toHaveLength(1);
+    expect(r.edits[0]!.old).toBe("[[[Tidal Router]]");
+
+    const spliced = applyEdits(body, r.edits, true).body;
+    expect(spliced).not.toContain("[[<Fact");
+    const html = renderWikiHtml(spliced, () => undefined);
+    // The mark WRAPS the rendered link element — no orphan bracket outside it.
+    expect(html).toContain('<span class="fc-mark fc-mark-ok" data-fact="1"><span class="wiki-link-missing"');
+    expect(html).not.toContain("&lt;Fact");
   });
 });
 
@@ -394,6 +452,39 @@ describe("the marked page renders", () => {
     expect(html).not.toContain("&lt;Fact");
   });
 
+  test("REPRO: a mark over a BACKTICKED link renders a LIVE link, never a dead one", () => {
+    // The whole shipped chain — annotate → apply → the post-splice backstop → the
+    // renderer — over the fixture round 1 got wrong. Under the code-span mask the
+    // mark landed between the brackets and the link died; with the mask gone the
+    // mark wraps the link and the link resolves.
+    //
+    // ⚠️ KNOWN, MEASURED, and deliberately asserted rather than hidden: the wrapper
+    // sits INSIDE the code span, and `formatWebHtml` escapes code-span content, so
+    // the `<Fact>` tags render as literal text there and no `fc-mark`/`fc-chip`
+    // chrome appears. That is strictly better than what it replaced (which produced
+    // literal tags AND a dead link) and it is not a reason to re-add the mask — a
+    // mark that cannot be seen is cosmetic, a link target replaced by markup is
+    // durable damage. Marking inside a code span at all is the follow-up.
+    const body = "The engine `[[Tidal Router]]` is the default.\n";
+    const r = markOne(body, "Tidal Router");
+    expect(r.edits[0]!.old).toBe("[[Tidal Router]]");
+    const spliced = applyEdits(body, r.edits, true).body;
+    const repaired = repairNestedFactWrappers(spliced);
+    expect(repaired.body).toBe(spliced); // nothing to repair — the write side is correct now
+    expect(repaired.repaired).toHaveLength(0);
+    expect(repaired.residual).toHaveLength(0);
+
+    const html = renderWikiHtml(repaired.body, resolve);
+    expect(html).toContain('<code>');
+    expect(html).toContain('class="wiki-link"');
+    expect(html).toContain(">Tidal Router</a>");
+    // The defect's signature — the tags as the link TARGET — is gone.
+    expect(html).not.toContain("wiki-link-missing");
+    expect(html).not.toContain("[[<Fact");
+    // The stated cosmetic residual, pinned so it cannot change unnoticed.
+    expect(html).toContain("&lt;Fact");
+  });
+
   test("a mark owning its whole line renders as the BLOCK-form mark, link intact", () => {
     const body = "Intro.\n\n[[Tidal Router]]\n\nTail.\n";
     const r = markOne(body, "Tidal Router");
@@ -440,31 +531,43 @@ describe("repairNestedFactWrappers — the post-splice backstop", () => {
     expect(r.residual).toHaveLength(0);
   });
 
-  test("an INLINE CODE example is left alone too", () => {
+  test("REPRO: an INLINE CODE nesting is REPAIRED — the renderer resolves it, so it is live damage", () => {
+    // A backticked `[[…]]` is substituted before `formatWebHtml` sees the backtick,
+    // so this shape renders as a DEAD `wiki-link-missing` inside a `<code>` — not
+    // documentation. Skipping it left the backstop blind to exactly the damage the
+    // apply route's client-echoed edits can produce.
     const body = 'The broken shape is `[[<Fact n="4" v="ok">A Page</Fact>]]` — do not ship it.\n';
     const r = repairNestedFactWrappers(body);
-    expect(r.body).toBe(body);
-    expect(r.repaired).toHaveLength(0);
+    expect(r.body).toBe('The broken shape is `<Fact n="4" v="ok">[[A Page]]</Fact>` — do not ship it.\n');
+    expect(r.repaired).toHaveLength(1);
+    expect(r.residual).toHaveLength(0);
+    expect(r.body).not.toContain("[[<Fact");
   });
 
-  test("a line mixing a real nesting with a coded example is reported, not rewritten", () => {
+  test("a line mixing a live nesting with a backticked one repairs BOTH", () => {
     const body =
       'Live: [[<Fact n="1" v="ok">A Page</Fact>]] and coded: `[[<Fact n="2" v="ok">B Page</Fact>]]`.\n';
     const r = repairNestedFactWrappers(body);
-    expect(r.body).toBe(body);
-    expect(r.residual).toHaveLength(1);
+    expect(r.body).toBe(
+      'Live: <Fact n="1" v="ok">[[A Page]]</Fact> and coded: `<Fact n="2" v="ok">[[B Page]]</Fact>`.\n',
+    );
+    expect(r.repaired).toHaveLength(2);
+    expect(r.residual).toHaveLength(0);
   });
 
-  test("REPRO: the residual excerpt is quoted from the LIVE occurrence, not the coded one", () => {
-    // The excerpt was pushed from the code-span-STRIPPED line, so it greps to
-    // nothing — and located there, it named the wrong occurrence.
+  test("REPRO: a residual excerpt is located in the REWRITTEN line, so it greps the file", () => {
+    // The rewrite shortens the line by 4 per repair (the brackets move inside the
+    // tags), so an offset taken before the rewrite indexes a string that is in no
+    // file. Here the unrepairable occurrence sits AFTER a repaired one, which is the
+    // only arrangement that can tell the two offsets apart.
     const body =
-      'Coded first: `[[<Fact n="2" v="ok">B Page</Fact>]]` then live: [[<Fact n="1" v="bad">A Page</Fact>]] end.\n';
+      'Good: [[<Fact n="2" v="ok">Q</Fact>]] then bad: [[<Fact n="1" v="ok>P</Fact>]] end.\n';
     const r = repairNestedFactWrappers(body);
-    expect(r.body).toBe(body);
+    expect(r.repaired).toHaveLength(1);
     expect(r.residual).toHaveLength(1);
-    expect(r.residual[0]!).toStartWith('[[<Fact n="1" v="bad">A Page</Fact>]]');
-    expect(body).toContain(r.residual[0]!);
+    expect(r.residual[0]!).toStartWith('[[<Fact n="1" v="ok>P</Fact>]]');
+    // The excerpt is quoted from what is on disk after the repair.
+    expect(r.body).toContain(r.residual[0]!);
   });
 
   test("REPRO: an attribute value carrying a `>` is parsed WHOLE, never cut open", () => {

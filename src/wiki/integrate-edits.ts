@@ -85,7 +85,6 @@ import {
   fencedLineMask,
   frontmatterEndLine,
   isWrapperOnlyEdit,
-  maskLineCodeSpans,
   NESTED_FACT_SOURCE,
   NESTED_MARKUP_RE,
   WIKILINK_SPAN_SOURCE,
@@ -853,14 +852,21 @@ function lineWindowAround(body: string, start: number, end: number): { from: num
 /**
  * Every real `[[wikilink]]` in the line window `[from, to)`, as body offsets.
  *
- * TWO things are excluded, and each one was a live defect:
+ * The scan runs over the RAW line, and inline code spans are deliberately NOT
+ * excluded. `renderWikiHtml` substitutes wikilinks over the raw body BEFORE
+ * `formatWebHtml` ever sees a backtick, so a backticked `` `[[Old Name]]` ``
+ * renders as `<code><a class="wiki-link">…</a></code>` — a LIVE link (measured
+ * 2026-08-30 through the shipped renderer). Masking those spans here made this
+ * scanner disagree with the renderer in the one direction that produces damage:
+ * the annotator spliced `` `[[<Fact …>Old Name</Fact>]]` `` — the forbidden shape,
+ * rendering as a dead `wiki-link-missing` — while the backstop and the lint were
+ * blinded by the same mask. Whatever the renderer resolves IS a link here:
+ * expansion wraps it, and a correction crossing it is dropped as link-crossing.
+ * Fenced blocks need no handling: a fence is already an exclusion zone, so no
+ * edit can resolve into one, and frontmatter likewise.
  *
- *  - **Inline code spans** ({@link maskLineCodeSpans}, same-length so the offsets
- *    still index `body`). A backticked `` `[[Old Name]]` `` is a page WRITING ABOUT a
- *    link, not a link — and treating it as one made a correction on that literal
- *    unappliable ("would rewrite the link target" about a link that does not exist)
- *    and mis-refused a mark over it. Fenced blocks need no handling here: a fence is
- *    already an exclusion zone, so no edit can resolve into one.
+ * ONE thing is still excluded, and it was a live defect:
+ *
  *  - **A candidate spanning a DANGLING `[[`.** The target class admits `[` (as every
  *    sibling copy does), so on `A [[ b [[ c [[Real Page]]` the regex pairs the FIRST
  *    opener with the only `]]` and yields a 20-char "link" — expanding a mark over
@@ -869,14 +875,20 @@ function lineWindowAround(body: string, start: number, end: number): { from: num
  *    (`src/wiki/store.ts`) calls dangling; the candidate is rejected and the scan
  *    RESUMES two chars in, so the genuine inner link is still found (skipping the
  *    match wholesale would consume it).
+ *
+ * NB the dangling test starts at index 2 for a reason and has one known gap: on
+ * `[[[Tidal Router]]` the extra opener is at index 2 of the match, so `includes("[[", 2)`
+ * sees `[T` and passes it. That is CORRECT rather than a miss — `renderWikiHtml` runs
+ * the same regex from the same start and replaces the same 17 characters, so the mark
+ * and the link the reader sees cover exactly the same range (measured; probe in the
+ * `[[[` case of `integrate-wikilink.test.ts`).
  */
 function wikilinkSpansIn(body: string, from: number, to: number): { start: number; end: number }[] {
   const spans: { start: number; end: number }[] = [];
   let lineStart = from;
   for (const line of body.slice(from, to).split("\n")) {
-    const masked = maskLineCodeSpans(line);
     WIKILINK_SPAN_RE.lastIndex = 0;
-    for (let m = WIKILINK_SPAN_RE.exec(masked); m; m = WIKILINK_SPAN_RE.exec(masked)) {
+    for (let m = WIKILINK_SPAN_RE.exec(line); m; m = WIKILINK_SPAN_RE.exec(line)) {
       if (m[0].includes("[[", 2)) {
         WIKILINK_SPAN_RE.lastIndex = m.index + 2; // dangling opener — re-scan inside it
         continue;
@@ -1400,14 +1412,17 @@ const RESIDUAL_EXCERPT_MAX = 120;
  * measured corruption: `title="a>b"` moved the brackets inside the attribute, an
  * empty inner emitted the bare `[[]]`, and a trailing `]]]` left an orphan bracket.
  *
- * Code is documentation and is left alone — fenced lines via the shared
- * `fencedLineMask`, inline spans via the shared `maskLineCodeSpans`. Because the
- * rewrite runs on the RAW line, the decision is made by COUNT: a line is rewritten
- * only when every occurrence survives the mask, i.e. none of them is inside code. A
- * line mixing a live nesting with a quoted example is reported instead of guessed at.
- * YAML frontmatter is skipped for the same reason `checkNestedAnnotation` skips it —
- * its values are strings, not markdown — and the two halves scanning different bytes
- * would mean the repair rewriting a title the lint never looks at.
+ * FENCED lines are documentation and are left alone (the shared `fencedLineMask`),
+ * and YAML frontmatter is skipped because its values are strings, not markdown.
+ * INLINE CODE is deliberately NOT skipped, and that asymmetry is the point:
+ * `renderWikiHtml` substitutes wikilinks over the raw body before any code handling,
+ * so a backticked `` `[[<Fact …>P</Fact>]]` `` renders as a DEAD
+ * `wiki-link-missing` inside a `<code>` — live damage, not documentation (measured
+ * 2026-08-30). A fence is different: `formatWebHtml` renders a fenced block as a code
+ * block and `renderWikiHtml`'s substitution is invisible inside one, so a fenced
+ * example really is inert. `checkNestedAnnotation` (`src/wiki/lint.ts`) keeps masking
+ * inline code and therefore does NOT report what this repairs — see the asymmetry
+ * note in its docblock and in `src/web/CLAUDE.md`.
  *
  * **Known gap, deliberate:** a MULTI-LINE nesting (`[[<Fact …>` … `</Fact>]]` across
  * a line break) is invisible to this repair AND to the lint check, both of which are
@@ -1430,25 +1445,20 @@ export function repairNestedFactWrappers(body: string): {
   for (let i = frontmatterEndLine(lines); i < lines.length; i++) {
     const raw = lines[i]!;
     if (fenced[i]) continue;
-    // SAME-LENGTH, so the residual excerpt below can be located here and quoted from
-    // the raw line: an offset into the code-span-STRIPPED text points at the wrong
-    // place on any line that carries a backticked span before the match.
-    const masked = maskLineCodeSpans(raw);
-    const rawHits = raw.match(NESTED_FACT_RE)?.length ?? 0;
-    const liveHits = masked.match(NESTED_FACT_RE)?.length ?? 0;
-    if (rawHits > 0 && liveHits === rawHits) {
-      lines[i] = raw.replace(NESTED_FACT_RE, (_m, open: string, inner: string) => {
-        const fixed = `${open}[[${inner}]]</Fact>`;
-        repaired.push(fixed);
-        return fixed;
-      });
-      continue;
-    }
-    // Not repairable here: a mixed line (some occurrences quoted in code), or a
-    // nesting the repairable shape refuses. Report only what is NOT in code, quoted
-    // from the RAW line so the log line greps.
-    const at = masked.search(NESTED_MARKUP_RE);
-    if (at !== -1) residual.push(raw.slice(at).trim().slice(0, RESIDUAL_EXCERPT_MAX));
+    const fixedLine =
+      raw.match(NESTED_FACT_RE) === null
+        ? raw
+        : raw.replace(NESTED_FACT_RE, (_m, open: string, inner: string) => {
+            const fixed = `${open}[[${inner}]]</Fact>`;
+            repaired.push(fixed);
+            return fixed;
+          });
+    lines[i] = fixedLine;
+    // What is LEFT after the rewrite — a nesting the repairable shape refuses, on a
+    // line whose other occurrences may well have been repaired. Reported (never
+    // guessed at) and quoted from the rewritten line, which is what is on disk.
+    const at = fixedLine.search(NESTED_MARKUP_RE);
+    if (at !== -1) residual.push(fixedLine.slice(at).trim().slice(0, RESIDUAL_EXCERPT_MAX));
   }
   return { body: repaired.length > 0 ? lines.join("\n") : body, repaired, residual };
 }

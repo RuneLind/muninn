@@ -266,6 +266,23 @@ function checkIndexTruncation(page: WikiPageMeta, rawContent: string): LintFindi
  * offset. Masking is same-length precisely so those two agree: `search`ing the raw
  * line found the BACKTICKED documentation occurrence on a mixed line, and an offset
  * into the code-span-STRIPPED line indexes a string that appears in no file.
+ *
+ * ⚠️ **The inline-code exclusion is a deliberate ASYMMETRY with the repair, not a
+ * shared rule, and it under-reports.** `renderWikiHtml` substitutes wikilinks over
+ * the RAW body before `formatWebHtml` sees a backtick, so a backticked
+ * `` `[[<Fact …>P</Fact>]]` `` renders as a DEAD `wiki-link-missing` inside a
+ * `<code>` — live damage (measured 2026-08-30), which
+ * {@link repairNestedFactWrappers} therefore repairs and this check deliberately
+ * does not report. A fenced example is genuinely inert (a fenced block renders as
+ * code and the substitution is invisible inside one), so that exclusion is not the
+ * same kind of thing. This one is acceptable because the write side can no longer
+ * PRODUCE an inline-code nesting — `wikilinkSpansIn` scans the raw line now, so a
+ * backticked link is expanded over like any other — and the backstop repairs the
+ * client-echoed ones on the way to disk; a HAND-WRITTEN one is the residual. It is
+ * kept because pages document this bug in quoted examples: measured 2026-08-30,
+ * mimir's own plan for this fix carries four `[[<Fact` occurrences — two inside a
+ * ```markdown fence, two in inline code spans — and a check that fires on its own
+ * plan document is a check nobody reads. Full rule: `src/web/CLAUDE.md`.
  */
 function checkNestedAnnotation(page: WikiPageMeta, rawContent: string): LintFinding[] {
   const out: LintFinding[] = [];
