@@ -1,4 +1,4 @@
-import { test, expect, describe, beforeAll, afterAll } from "bun:test";
+import { test, expect, describe, beforeAll, afterAll, setDefaultTimeout } from "bun:test";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import { TEST_DATABASE_URL } from "../test/test-db-url.ts";
@@ -16,6 +16,11 @@ import { TEST_DATABASE_URL } from "../test/test-db-url.ts";
  * `muninn_test`, which is provisioned by construction — an "is it empty?" test
  * needs an actually-empty database.
  */
+// Same reason as db/provision.test.ts: these cases SPAWN a process per
+// assertion and one describe applies the whole of db/init.sql, which fits in
+// bun's 5s default here and not on a CI runner.
+setDefaultTimeout(60_000);
+
 const SCRATCH_DB = "muninn_unprovisioned_test";
 
 /** Swap the database NAME, keeping everything else — a `?sslmode=` query
@@ -62,14 +67,27 @@ afterAll(async () => {
 });
 
 describe("db/require-provisioned.ts", () => {
-  test("an empty database exits non-zero with the init.sql + baseline instruction", async () => {
+  test("an empty database exits non-zero and names a remedy runnable FROM THIS IMAGE", async () => {
     const { code, stderr } = await runCheck(SCRATCH_URL);
     expect(code).toBe(1);
     // A boot refusal is read once, in a container log. It has to carry the fix,
     // not a raw SQL error.
-    expect(stderr).toContain("users");
+    // NOT "users". The predicate is the whole table set now, and pinning the
+    // refusal to one table name is what kept the old one alive in the text an
+    // operator actually reads.
+    expect(stderr).toContain("no tables at all");
     expect(stderr).toContain("db/init.sql");
-    expect(stderr).toContain("--baseline");
+
+    // The load-bearing half, and the reason this assertion changed. The
+    // refusal used to lead with `psql -f db/init.sql` and then admit psql is
+    // not in the image — "run it from a machine that has it and can reach this
+    // database". For a private-IP Cloud SQL instance whose app credentials live
+    // only in the pod there IS no such machine, so the one command this refusal
+    // printed was unrunnable exactly where it is printed. It must lead with the
+    // applier, which the image can run.
+    expect(stderr).toContain("db/provision.ts");
+    const leadsWithProvision = stderr.indexOf("db/provision.ts") < stderr.indexOf("psql");
+    expect(leadsWithProvision).toBe(true);
   });
 
   test("a `schema_migrations` table alone does NOT satisfy it", async () => {
@@ -116,6 +134,12 @@ describe("db/require-provisioned.ts", () => {
     // DATABASE_URL made it answer "not set" (exit 2) with the credentials right
     // there — so the check that guards the migration would be skipped by
     // whoever worked around it.
+    // Its OWN empty database. An earlier case in this file leaves a lone
+    // `schema_migrations` behind, and since the predicate became the whole
+    // table set that is a DIFFERENT refusal with different words — so a case
+    // about URL RESOLUTION was reading an assertion about schema state, and
+    // passed or failed on test order.
+    await resetScratch();
     const proc = Bun.spawn(["bun", "db/require-provisioned.ts"], {
       cwd: REPO_ROOT,
       env: { ...process.env, DATABASE_URL: "", DB_URL: SCRATCH_URL },
@@ -124,9 +148,9 @@ describe("db/require-provisioned.ts", () => {
     });
     const stderr = await new Response(proc.stderr).text();
     // It really reached the scratch database: exit 1 is the REFUSAL (this
-    // database has no `users` table), not the exit 2 of an unresolved URL.
+    // database has never been provisioned), not the exit 2 of an unresolved URL.
     expect(await proc.exited).toBe(1);
-    expect(stderr).toContain("users");
+    expect(stderr).toContain("never been provisioned");
   });
 });
 

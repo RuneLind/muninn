@@ -716,10 +716,56 @@ Incremental changes go in `db/migrations/` as numbered files. Both `.sql` and `.
 A Flyway-style migration runner tracks applied migrations in a `schema_migrations` table:
 
 ```bash
+bun run db:provision -- --yes # Empty database → apply init.sql, then baseline
 bun run db:migrate            # Apply pending migrations
 bun run db:migrate:status     # Show which migrations are applied/pending
 bun run db:migrate:baseline   # Mark all migrations as applied (for fresh DBs)
 ```
+
+`db:provision` is the one to reach for on a database that has never been
+provisioned — the schema comes from `db/init.sql`, not from the runner, so
+`db:migrate` against an empty database applies migrations onto nothing.
+
+It **requires `--yes`**, and prints the host and database it resolved before
+asking for it. That is not ceremony: Bun auto-loads `.env`, so a bare invocation
+in a checkout resolves whatever `DATABASE_URL` that file names, with nothing
+typed and nothing exported — and this command writes a schema. (`--dry-run`
+needs no `--yes` — it is the form that cannot write, though against a database it
+would refuse it exits 1 rather than 0. An unrecognised flag is refused rather
+than ignored, so a typo'd `--dryrun` cannot become a real run.)
+
+**The predicate is the whole table set, not one table — and it is shared.**
+`db/schema-state.ts` parses the tables `db/init.sql` declares out of the file
+itself and compares them with what is actually in `public`; both `db/provision.ts`
+and `db/require-provisioned.ts` classify with it. The sharing is the load-bearing
+part: the entrypoint's check is what an operator actually reads, and while it
+kept a `users`-only copy of its own it printed the fatal instruction below. That is not fussiness: `users` is
+init.sql's *first* table and `schema_migrations` its *last*, so a
+`psql -f db/init.sql` that died mid-file — psql without `-1` is not atomic —
+leaves `users` present and `schema_migrations` absent in almost every case. Read
+through a `users`-only predicate, that state looks like "provisioned but never
+baselined", whose remedy is `bun db/migrate.ts --baseline` — and that command
+*succeeds*, satisfies `db/require-provisioned.ts`, boots the pod on a stump of a
+schema, and records every migration as applied so nothing can repair it
+afterwards.
+
+So five states, and only one of them writes: **complete** (refused, and told to
+baseline only when `schema_migrations` is genuinely empty), **incomplete**
+(refused by name, listing what is present and what is missing, and explicitly
+told *not* to baseline), **lone ledger** (only `schema_migrations` — what
+`db:migrate` or `db:migrate:baseline` against an empty database leaves, with or
+without rows; the remedy is `DROP TABLE schema_migrations`, never a schema
+drop), **foreign** (tables present, none of them init.sql's — which gets neither
+the mid-file diagnosis nor `DROP SCHEMA public CASCADE`, because nothing there
+came from init.sql), and **empty**, which is the one it provisions. A role that may not run what `init.sql` asks for is
+refused separately, with the Postgres message verbatim.
+
+**Applying `init.sql` is all-or-nothing** — `sql.unsafe` on a parameterless
+string uses the simple protocol and Postgres wraps it in one implicit
+transaction — and so is the baseline that follows it, separately. On a managed
+instance have an elevated role run `CREATE EXTENSION vector` once first: the app
+user may not create an extension, and `init.sql`'s own `IF NOT EXISTS` then
+short-circuits before the privilege check.
 
 ### Creating a new migration
 
@@ -802,12 +848,13 @@ The image is built from one `Dockerfile` with three build args. Two are **on** b
 
 The container's entrypoint runs, in order: adopt `DB_URL` as `DATABASE_URL` if only the former is set, refuse an unready database, apply pending migrations (serialised across replicas by an advisory lock), then `exec` the CMD. Both scripts it calls resolve the same pair themselves (`DATABASE_URL` → `DB_URL`, then — for the migration runner only — the dev default; `db/database-url.ts`), so the remedies below still find nais's credentials when they replace the entrypoint.
 
-"Unready" is two distinct states, each answered with the command that fixes it rather than a raw SQL error:
+"Unready" is three distinct states, each answered with the command that fixes it rather than a raw SQL error. The predicate is the whole table set (see above), so a *partly* applied schema is its own answer rather than being mistaken for the second row:
 
 | State | What the entrypoint says |
 |---|---|
-| No `users` table — never provisioned | Apply `db/init.sql` **and** `bun db/migrate.ts --baseline`. The `psql -f db/init.sql` half needs a machine that has psql and can reach the database (this image ships **no psql**); the baseline half does not — the image carries bun and `db/`, so it runs from the image itself (see the one-off forms below) |
-| Schema present, `schema_migrations` empty — provisioned but never baselined | Run `bun db/migrate.ts --baseline` (`bun run db:migrate:baseline`) — from the image itself, no psql and no checkout needed (see the one-off forms below) |
+| No tables at all — never provisioned | Run `bun db/provision.ts --yes` (`bun run db:provision -- --yes`) — it applies `db/init.sql` **and** records the shipped migrations, from the image itself. No psql, no checkout, no file transport (see the one-off forms below). `psql -f db/init.sql` still works from a machine that has psql *and* can reach the database — but a private-IP Cloud SQL instance has no such machine, which is why this is not the leading answer |
+| Partly applied — some of `db/init.sql`'s tables, not all | Refused by name, listing what is present and what is missing, and told explicitly **not** to baseline. `--baseline` here succeeds, satisfies this very check, and boots the pod on a stump of a schema with every migration recorded — so nothing could repair it afterwards. (A lone `schema_migrations`, with or without rows, gets `DROP TABLE schema_migrations` instead of a schema drop; tables that never came from `init.sql` get neither.) |
+| Complete schema, `schema_migrations` empty — provisioned but never baselined | Run `bun db/migrate.ts --baseline` (`bun run db:migrate:baseline`) — from the image itself, no psql and no checkout needed (see the one-off forms below) |
 
 **The baseline command cannot be an `exec`.** The refusal makes the entrypoint exit, so under `restart: unless-stopped` (or a Deployment) there is no running process to exec into — `docker compose exec app …` answers `service "app" is not running`. Run it as a one-off container instead:
 
@@ -820,6 +867,15 @@ The `--entrypoint` override is required; without it the same refusal runs first.
 ```bash
 kubectl debug deploy/<app> --copy-to=<app>-baseline --container=<app> \
   --profile=general -- bun db/migrate.ts --baseline   # delete the copied pod afterwards
+```
+
+The same shape provisions a database that has never been provisioned at all —
+which is the case on a nais deployment, where the Cloud SQL instance is
+private-IP and the app user's credentials exist only inside the pod:
+
+```bash
+kubectl debug deploy/<app> --copy-to=<app>-provision --container=<app> \
+  --profile=general -- bun db/provision.ts --yes     # delete the copied pod afterwards
 ```
 
 `--profile=general` is what kubectl wants; without it it warns that the legacy profile is deprecated. A one-off Job from the same image carrying the same env and secrets (nais: a naisjob) works too — but it **must set its own command**, or the image's default entrypoint re-runs the refusal before it gets to the baseline.
