@@ -165,10 +165,24 @@ export async function runMigrations(
         return;
       }
       say(`Baselining ${pending.length} migration(s):\n`);
-      for (const m of pending) {
-        await sql`INSERT INTO schema_migrations (version, name) VALUES (${m.version}, ${m.name})`;
-        say(`  ✓ ${m.filename} (recorded)`);
-      }
+      // ONE transaction, all of them. A partial baseline is the worst of the
+      // three states: `db/require-provisioned.ts` refuses only on
+      // `recorded === 0`, so a half-recorded database PASSES it, and the
+      // entrypoint then runs the migration runner, which applies everything
+      // after the last recorded version onto a schema that already carries it —
+      // dying in 006 with `column "bot_name" of relation "messages" already
+      // exists`, under a restart policy, about a database that is fine. That is
+      // the exact crash-loop the provisioning check exists to prevent, reached
+      // through a state its predicate cannot see. The inserts are plain
+      // bookkeeping with no DDL, so nothing here needs to run outside a
+      // transaction the way `CREATE INDEX CONCURRENTLY` does below.
+      await sql.begin(async (tx) => {
+        const txSql = tx as unknown as postgres.Sql;
+        for (const m of pending) {
+          await txSql`INSERT INTO schema_migrations (version, name) VALUES (${m.version}, ${m.name})`;
+          say(`  ✓ ${m.filename} (recorded)`);
+        }
+      });
       say("\nDone. All migrations marked as applied.");
       return;
     }

@@ -56,7 +56,15 @@ import { DatabaseUrlError, runMigrations } from "./migrate.ts";
 /** Same budget and reason as ./require-provisioned.ts: under `kubectl debug
  *  --copy-to` the Cloud SQL proxy sidecar starts alongside this process, so a
  *  refused CONNECTION for the first seconds is normal. An ANSWER is never
- *  retried — it will not change. */
+ *  retried — it will not change.
+ *
+ *  One difference from that mirror, stated because the reader would otherwise
+ *  assume equivalence: it rebuilds the client on every attempt, this retries
+ *  `SELECT 1` on ONE client. postgres.js reconnects underneath, so the
+ *  ECONNREFUSED case behaves identically (measured) — but a client wedged in an
+ *  unrecoverable internal state is retried here rather than replaced. Accepted:
+ *  the alternative moves `openPostgres`, whose throw is a DIFFERENT exit code,
+ *  inside the retry loop. */
 const CONNECT_BUDGET_MS = 30_000;
 const RETRY_DELAY_MS = 1_000;
 
@@ -84,13 +92,49 @@ export class ProvisionPrivilegeError extends Error {
   }
 }
 
+/**
+ * The database is neither empty nor provisioned — tables present, no `users`.
+ * Its own class because it is a STATE an operator resolves, not a driver fault,
+ * and because it has a likely cause worth naming: a `psql -f db/init.sql` that
+ * died mid-file. psql without `-1` is not atomic, so the remedy this applier
+ * replaces is itself the most common way to reach this state.
+ */
+export class ProvisionStateError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ProvisionStateError";
+  }
+}
+
+/**
+ * `db/init.sql` applied and the baseline did not. Separated from every other
+ * failure because the operator-facing fact is the opposite of what a bare stack
+ * trace implies: the schema IS there, and one command finishes the job. Without
+ * this, `console.error("Provisioning failed:", err)` prints a bun source
+ * snippet for a database that is most of the way provisioned.
+ */
+export class ProvisionBaselineError extends Error {
+  constructor(readonly cause2: unknown) {
+    super(
+      "db/init.sql applied, but recording the shipped migrations did not. " +
+        "The schema IS present. Finish with `bun db/migrate.ts --baseline`.",
+    );
+    this.name = "ProvisionBaselineError";
+  }
+}
+
 export type ProvisionStatus =
   /** init.sql applied and the shipped migrations recorded. */
   | "provisioned"
   /** `users` was already there. Nothing was written. */
   | "already-provisioned"
   /** --dry-run against a database that would be provisioned. */
-  | "would-provision";
+  | "would-provision"
+  /** --dry-run against a database that is neither empty nor provisioned. A dry
+   *  run REPORTS this rather than throwing, because its whole contract is to
+   *  say what would happen without failing; the real run throws
+   *  `ProvisionStateError` for the same state. */
+  | "not-empty";
 
 export interface ProvisionResult {
   status: ProvisionStatus;
@@ -102,7 +146,8 @@ export interface ProvisionResult {
 /** Wait for the database to ANSWER, distinguishing "not up yet" from "will
  *  never work". Returns nothing; throws on a fatal code or a spent budget. */
 async function awaitAnswer(sql: ReturnType<typeof openPostgres>["sql"]): Promise<void> {
-  const deadline = Date.now() + CONNECT_BUDGET_MS;
+  const start = Date.now();
+  const deadline = start + CONNECT_BUDGET_MS;
   for (;;) {
     try {
       await sql`SELECT 1`;
@@ -114,9 +159,14 @@ async function awaitAnswer(sql: ReturnType<typeof openPostgres>["sql"]): Promise
         throw new DatabaseUrlError(`Cannot use this database (${code}): ${message}`);
       }
       if (Date.now() >= deadline) {
-        throw new DatabaseUrlError(
-          `Could not reach the database within ${CONNECT_BUDGET_MS / 1000}s: ${message}`,
-        );
+        // Elapsed, not the budget. The deadline is only checked AFTER an
+        // attempt returns and postgres.js adds its own connect handling on top,
+        // so a 30s budget was measured taking 41s — a message naming "30s" for
+        // a 41s wait sends an operator looking for a second timeout that does
+        // not exist. (./require-provisioned.ts still names the budget; that is
+        // the same overstatement, not a difference in behaviour.)
+        const waited = Math.round((Date.now() - start) / 1000);
+        throw new DatabaseUrlError(`Could not reach the database after ${waited}s: ${message}`);
       }
       await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
     }
@@ -151,15 +201,57 @@ export async function provisionDatabase(
     // it as a side effect.
     const [state] = await sql`
       SELECT to_regclass('public.users') IS NOT NULL AS provisioned,
-             EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') AS has_vector
+             to_regclass('public.schema_migrations') IS NOT NULL AS tracked,
+             EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') AS has_vector,
+             (SELECT count(*)::int FROM information_schema.tables
+               WHERE table_schema = 'public' AND table_type = 'BASE TABLE') AS tables
     `;
     if (state?.provisioned) {
-      notes.push(
-        "This database already has a `users` table — it is provisioned. Nothing was written.",
-        "If the schema is there but `schema_migrations` is empty, the missing step is",
-        "  bun db/migrate.ts --baseline",
-      );
+      notes.push("This database already has a `users` table — it is provisioned. Nothing was written.");
+      // Only when it is actually true. Printed unconditionally this is the
+      // wrong instruction presented as a diagnosis, and it collapses the two
+      // states ./require-provisioned.ts goes to some length to tell apart.
+      // A second statement, not a CASE: Postgres parses a whole statement
+      // before running it, so a subselect over `schema_migrations` would fail
+      // to parse on a database where that table is missing.
+      const recorded = state.tracked
+        ? Number((await sql`SELECT count(*)::int AS n FROM schema_migrations`)[0]?.n ?? 0)
+        : 0;
+      if (recorded === 0) {
+        notes.push(
+          "The schema is there but `schema_migrations` records nothing. The missing step is",
+          "  bun db/migrate.ts --baseline",
+        );
+      }
       return { status: "already-provisioned", notes };
+    }
+
+    // Neither empty nor provisioned. `db/init.sql` is bare `CREATE TABLE`
+    // throughout, so applying it here fails on the first collision — and
+    // without this branch it fails as a raw `PostgresError: relation "…"
+    // already exists` with a node_modules stack, in a container log whose whole
+    // point is a one-line answer.
+    if ((state?.tables ?? 0) > 0) {
+      const present = await sql`
+        SELECT table_name FROM information_schema.tables
+         WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+         ORDER BY table_name LIMIT 5
+      `;
+      const names = present.map((r) => r.table_name).join(", ");
+      const summary =
+        `This database is not empty and not provisioned: ${state?.tables} table(s) in ` +
+        `\`public\` (${names}${(state?.tables ?? 0) > 5 ? ", …" : ""}) and no \`users\`.`;
+      if (opts?.dryRun) {
+        notes.push(summary, "Dry run: would refuse. Nothing here can be provisioned as-is.");
+        return { status: "not-empty", notes };
+      }
+      throw new ProvisionStateError(
+        `${summary}\n` +
+          "  Most likely a `psql -f db/init.sql` that died mid-file — psql without `-1`\n" +
+          "  is not atomic. Decide what those tables are, then either drop them (a\n" +
+          "  throwaway database: `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`) or\n" +
+          "  provision a fresh database. This script will not write over them.",
+      );
     }
 
     // Probed rather than required. `db/init.sql` opens with `CREATE EXTENSION
@@ -191,8 +283,20 @@ export async function provisionDatabase(
       // PUBLIC — `CREATE TABLE` for a role that does not own the database. The
       // remedies differ, so the underlying message is carried through rather
       // than replaced by whichever guess is written here.
-      if ((err as { code?: string } | null)?.code === "42501") {
+      const code = (err as { code?: string } | null)?.code;
+      if (code === "42501") {
         throw new ProvisionPrivilegeError(err instanceof Error ? err.message : String(err));
+      }
+      // 42P07 is duplicate_table. The pre-flight above catches the ordinary
+      // partial-schema case; this catches the race — something created a table
+      // between the probe and the apply — and gives it the same named answer
+      // rather than a driver stack.
+      if (code === "42P07") {
+        throw new ProvisionStateError(
+          `${err instanceof Error ? err.message : String(err)}\n` +
+            "  This database gained a table between the emptiness check and the apply.\n" +
+            "  Nothing was written — the whole file is one implicit transaction.",
+        );
       }
       throw err;
     }
@@ -205,7 +309,14 @@ export async function provisionDatabase(
   // of its own, and it takes the session-level advisory lock that serialises
   // two rollouts. Handing it a connection this function still owned would give
   // it a lock lifetime it does not control.
-  await runMigrations(databaseUrl, { baseline: true, quiet: true });
+  try {
+    await runMigrations(databaseUrl, { baseline: true, quiet: true });
+  } catch (err) {
+    // The schema landed. Saying so is the whole point: the naked rethrow
+    // printed a bun source snippet under "Provisioning failed:", which reads as
+    // "nothing happened" for a database that is most of the way there.
+    throw new ProvisionBaselineError(err);
+  }
   notes.push("Recorded the shipped migrations as applied (baseline).");
 
   return { status: "provisioned", notes };
@@ -240,48 +351,102 @@ const PRIVILEGE_REMEDIES = [
 ];
 
 // --- CLI entrypoint ---
-if (import.meta.main) {
-  const DRY_RUN = process.argv.includes("--dry-run");
 
-  // `DATABASE_URL` → `DB_URL`, and NO dev default. db/migrate.ts falls back to
-  // a laptop URL because `bun run db:migrate` relies on it; this script APPLIES
-  // A SCHEMA, so falling through to a developer's own database is the one
-  // outcome worth refusing outright. ./require-provisioned.ts refuses for the
-  // same reason.
+/** Every flag this script accepts. Anything else is refused rather than
+ *  ignored: `--dryrun`, `--dry_run` and `-n` all used to fall through to a REAL
+ *  provisioning run, because the flag was read with `argv.includes` and an
+ *  unmatched argument meant nothing. For the one command in this repo whose
+ *  purpose is applying a schema, a typo in the safety valve must not BE the
+ *  unsafe path. */
+const KNOWN_FLAGS = new Set(["--dry-run", "--yes"]);
+
+const CONFIRM_INSTRUCTION = [
+  "",
+  "  Re-run with --yes to provision THAT database:",
+  "",
+  "    bun db/provision.ts --yes",
+  "",
+  "  Why the confirmation. Bun auto-loads `.env`, so a bare invocation in a",
+  "  checkout resolves whatever DATABASE_URL that file names — with nothing",
+  "  typed and nothing exported. This script applies 881 lines of DDL, so the",
+  "  target is confirmed rather than inferred. (`.env` is in .dockerignore, so",
+  "  in a pod the URL can only have come from the platform.)",
+  "",
+  "  --dry-run needs no --yes: it is the form that cannot write.",
+  "",
+].join("\n");
+
+if (import.meta.main) {
+  const args = process.argv.slice(2);
+  const unknown = args.filter((a) => !KNOWN_FLAGS.has(a));
+  const DRY_RUN = args.includes("--dry-run");
+  const CONFIRMED = args.includes("--yes");
+
   const databaseUrl = resolveCliDatabaseUrl();
-  if (!databaseUrl) {
-    console.error(`${DATABASE_URL_ENV_NAMES} is not set — refusing to guess which database to provision.`);
+
+  if (unknown.length > 0) {
+    console.error(
+      `Unrecognised argument(s): ${unknown.join(" ")}. ` +
+        `Known flags: ${[...KNOWN_FLAGS].join(", ")}. Nothing was written.`,
+    );
+    process.exitCode = 2;
+  } else if (!databaseUrl) {
+    // `DATABASE_URL` → `DB_URL`, and NO dev default. db/migrate.ts falls back to
+    // a laptop URL because `bun run db:migrate` relies on it; this script
+    // APPLIES A SCHEMA, so guessing is the one outcome worth refusing outright.
+    // ./require-provisioned.ts refuses for the same reason.
+    console.error(
+      `${DATABASE_URL_ENV_NAMES} is not set — refusing to guess which database to provision.`,
+    );
     process.exitCode = 2;
   } else {
     // Host and database only, never credentials. This is the only line naming
     // what is about to be written, on a path that bypasses the entrypoint's own
-    // echo.
+    // echo — and it prints BEFORE the confirmation gate, so the operator being
+    // asked to type --yes can see what they would be agreeing to.
+    let target = databaseUrl;
     try {
-      const target = new URL(parsePostgresUrl(databaseUrl).url);
-      console.log(`Database: ${target.hostname}:${target.port || "5432"}${target.pathname}`);
+      const parsed = new URL(parsePostgresUrl(databaseUrl).url);
+      target = `${parsed.hostname}:${parsed.port || "5432"}${parsed.pathname}`;
+      console.log(`Database: ${target}`);
     } catch {
       // an unparseable URL fails loudly one statement later; don't pre-empt it
     }
 
-    try {
-      const result = await provisionDatabase(databaseUrl, { dryRun: DRY_RUN });
-      for (const note of result.notes) console.log(`  ${note}`);
-      // "already provisioned" is not success: someone ran this expecting a
-      // schema to be laid down, and none was. Exit 1 so a script that chains on
-      // it stops rather than reporting a provisioned database it did not build.
-      process.exitCode = result.status === "already-provisioned" ? 1 : 0;
-    } catch (err) {
-      if (err instanceof ProvisionPrivilegeError) {
-        console.error(PRIVILEGE_INSTRUCTION.join("\n"));
-        console.error(`    ${err.pgMessage}`);
-        console.error(PRIVILEGE_REMEDIES.join("\n"));
-        process.exitCode = 1;
-      } else if (err instanceof DatabaseUrlError) {
-        console.error(err.message);
-        process.exitCode = 2;
-      } else {
-        console.error("Provisioning failed:", err);
-        process.exitCode = 1;
+    if (!DRY_RUN && !CONFIRMED) {
+      console.error(`Refusing to provision ${target} without confirmation.`);
+      console.error(CONFIRM_INSTRUCTION);
+      process.exitCode = 2;
+    } else {
+      try {
+        const result = await provisionDatabase(databaseUrl, { dryRun: DRY_RUN });
+        for (const note of result.notes) console.log(`  ${note}`);
+        // "already provisioned" and "not empty" are not success: someone ran
+        // this expecting a schema to be laid down, and none was. Exit 1 so a
+        // script chaining on it stops rather than reporting a database it did
+        // not build.
+        process.exitCode =
+          result.status === "already-provisioned" || result.status === "not-empty" ? 1 : 0;
+      } catch (err) {
+        if (err instanceof ProvisionPrivilegeError) {
+          console.error(PRIVILEGE_INSTRUCTION.join("\n"));
+          console.error(`    ${err.pgMessage}`);
+          console.error(PRIVILEGE_REMEDIES.join("\n"));
+          process.exitCode = 1;
+        } else if (err instanceof ProvisionStateError) {
+          console.error(`\n  ${err.message}\n`);
+          process.exitCode = 1;
+        } else if (err instanceof ProvisionBaselineError) {
+          console.error(`\n  ${err.message}\n`);
+          console.error(`  Underlying failure: ${String(err.cause2)}\n`);
+          process.exitCode = 1;
+        } else if (err instanceof DatabaseUrlError) {
+          console.error(err.message);
+          process.exitCode = 2;
+        } else {
+          console.error("Provisioning failed:", err);
+          process.exitCode = 1;
+        }
       }
     }
   }

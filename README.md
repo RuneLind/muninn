@@ -724,13 +724,25 @@ bun run db:migrate:baseline   # Mark all migrations as applied (for fresh DBs)
 
 `db:provision` is the one to reach for on a database that has never been
 provisioned — the schema comes from `db/init.sql`, not from the runner, so
-`db:migrate` against an empty database applies migrations onto nothing. It
-refuses a database that already has a `users` table rather than writing over it,
-and the whole file is one implicit transaction, so a failure leaves nothing
-behind. On a managed instance have an elevated role run
-`CREATE EXTENSION vector` once first — the app user may not create an extension,
-and `init.sql`'s own `IF NOT EXISTS` then short-circuits before the privilege
-check.
+`db:migrate` against an empty database applies migrations onto nothing.
+
+It **requires `--yes`**, and prints the host and database it resolved before
+asking for it. That is not ceremony: Bun auto-loads `.env`, so a bare invocation
+in a checkout resolves whatever `DATABASE_URL` that file names, with nothing
+typed and nothing exported — and this command writes a schema. (`--dry-run`
+needs no `--yes`; it is the form that cannot write. An unrecognised flag is
+refused rather than ignored, so a typo'd `--dryrun` cannot become a real run.)
+
+It refuses three states rather than writing into them: a database that already
+has a `users` table, one that is neither empty nor provisioned (tables present,
+no `users` — what a `psql -f db/init.sql` that died mid-file leaves, since psql
+without `-1` is not atomic), and a role that may not run what `init.sql` asks
+for. **Applying `init.sql` is all-or-nothing** — `sql.unsafe` on a parameterless
+string uses the simple protocol and Postgres wraps it in one implicit
+transaction — and so is the baseline that follows it, separately. On a managed
+instance have an elevated role run `CREATE EXTENSION vector` once first: the app
+user may not create an extension, and `init.sql`'s own `IF NOT EXISTS` then
+short-circuits before the privilege check.
 
 ### Creating a new migration
 
@@ -817,7 +829,7 @@ The container's entrypoint runs, in order: adopt `DB_URL` as `DATABASE_URL` if o
 
 | State | What the entrypoint says |
 |---|---|
-| No `users` table — never provisioned | Run `bun db/provision.ts` (`bun run db:provision`) — it applies `db/init.sql` **and** records the shipped migrations, from the image itself. No psql, no checkout, no file transport (see the one-off forms below). `psql -f db/init.sql` still works from a machine that has psql *and* can reach the database — but a private-IP Cloud SQL instance has no such machine, which is why this is not the leading answer |
+| No `users` table — never provisioned | Run `bun db/provision.ts --yes` (`bun run db:provision -- --yes`) — it applies `db/init.sql` **and** records the shipped migrations, from the image itself. No psql, no checkout, no file transport (see the one-off forms below). `psql -f db/init.sql` still works from a machine that has psql *and* can reach the database — but a private-IP Cloud SQL instance has no such machine, which is why this is not the leading answer |
 | Schema present, `schema_migrations` empty — provisioned but never baselined | Run `bun db/migrate.ts --baseline` (`bun run db:migrate:baseline`) — from the image itself, no psql and no checkout needed (see the one-off forms below) |
 
 **The baseline command cannot be an `exec`.** The refusal makes the entrypoint exit, so under `restart: unless-stopped` (or a Deployment) there is no running process to exec into — `docker compose exec app …` answers `service "app" is not running`. Run it as a one-off container instead:
@@ -839,7 +851,7 @@ private-IP and the app user's credentials exist only inside the pod:
 
 ```bash
 kubectl debug deploy/<app> --copy-to=<app>-provision --container=<app> \
-  --profile=general -- bun db/provision.ts           # delete the copied pod afterwards
+  --profile=general -- bun db/provision.ts --yes     # delete the copied pod afterwards
 ```
 
 `--profile=general` is what kubectl wants; without it it warns that the legacy profile is deprecated. A one-off Job from the same image carrying the same env and secrets (nais: a naisjob) works too — but it **must set its own command**, or the image's default entrypoint re-runs the refusal before it gets to the baseline.
