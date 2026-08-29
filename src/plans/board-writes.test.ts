@@ -7,6 +7,9 @@ import { describe, expect, test } from "bun:test";
 import {
   admitPriorityEdit,
   applyPriorityResult,
+  applyStatusResult,
+  archiveControlState,
+  ARCHIVE_READONLY_TITLE,
   classifyWriteFailure,
   foldRefusedPriority,
   isRankableColumn,
@@ -20,6 +23,7 @@ import {
   parseBoardRefresh,
   parseOrderResult,
   parsePriorityResult,
+  parseStatusResult,
   PLAN_READONLY_ENV,
   PRIORITY_STALE_MESSAGE,
   priorityControlState,
@@ -31,16 +35,17 @@ import {
   queuedMovesDroppedNote,
   QUEUE_UNREADABLE_REASON,
   retainDraft,
+  statusRequest,
   transportFailure,
   unknownColumnWarning,
   writeCapability,
   writeModeSentence,
   type WriteCapability,
 } from "./board-writes.ts";
-import { ACTIVE_COLUMN_KEYS } from "./board-client-pure.ts";
+import { ACTIVE_COLUMN_KEYS, type BoardColumnKey } from "./board-client-pure.ts";
 import { QUEUE_COLUMNS } from "./queue.ts";
 import { WIKI_READONLY_ENV } from "../wiki/readonly.ts";
-import type { PlanPriority } from "./constants.ts";
+import type { PlanPriority, PlanStatus } from "./constants.ts";
 
 const WRITE = writeCapability({ readonly: false, queueHash: "abc" });
 const DRAFT = writeCapability({ readonly: true, queueHash: "abc" });
@@ -557,5 +562,108 @@ describe("parseBoardRefresh", () => {
     expect(parseBoardRefresh({ ...payload, columns: [{ key: "ready" }] })).toBeNull();
     expect(parseBoardRefresh(null)).toBeNull();
     expect(parseBoardRefresh([payload])).toBeNull();
+  });
+});
+
+describe("status writes (archive/restore)", () => {
+  const statusCard: {
+    slug: string;
+    planStatus: PlanStatus | null;
+    statusDate: string | null;
+    ageDays: number | null;
+    column: BoardColumnKey;
+    followupsOpen: boolean;
+    hash: string;
+  } = {
+    slug: "alpha",
+    planStatus: "in-flight",
+    statusDate: "2026-08-01",
+    ageDays: 28,
+    column: "in-flight",
+    followupsOpen: false,
+    hash: "h1",
+  };
+
+  test("statusRequest carries the card's CAS base", () => {
+    expect(statusRequest({ slug: "alpha", hash: "h1" }, "abandoned")).toEqual({
+      slug: "alpha",
+      status: "abandoned",
+      baseHash: "h1",
+    });
+  });
+
+  test("parseStatusResult: contract in, junk out", () => {
+    expect(
+      parseStatusResult({ slug: "alpha", status: "abandoned", statusDate: "2026-08-29", hash: "h2", written: true }),
+    ).toEqual({ slug: "alpha", status: "abandoned", statusDate: "2026-08-29", hash: "h2", written: true });
+    // Nulls are legal — a noop can echo a plan whose status is outside the enum.
+    expect(parseStatusResult({ slug: "alpha", status: null, statusDate: null, hash: "h2" })).toEqual({
+      slug: "alpha",
+      status: null,
+      statusDate: null,
+      hash: "h2",
+      written: false,
+    });
+    expect(parseStatusResult({ slug: "alpha", status: "deleted", statusDate: null, hash: "h2" })).toBeNull();
+    expect(parseStatusResult({ slug: "alpha", status: "abandoned", statusDate: 5, hash: "h2" })).toBeNull();
+    expect(parseStatusResult({ slug: "alpha", status: "abandoned", statusDate: null, hash: "" })).toBeNull();
+    expect(parseStatusResult(null)).toBeNull();
+  });
+
+  test("applyStatusResult moves the card to the terminal column and re-derives its age", () => {
+    const now = Date.parse("2026-08-29T12:00:00Z");
+    const next = applyStatusResult(
+      [statusCard],
+      { slug: "alpha", status: "abandoned", statusDate: "2026-08-29", hash: "h2", written: true },
+      now,
+    );
+    expect(next[0]).toMatchObject({
+      planStatus: "abandoned",
+      statusDate: "2026-08-29",
+      column: "shipped",
+      ageDays: 0,
+      hash: "h2",
+    });
+    // followups beats shipped, exactly as the server files it.
+    const flagged = applyStatusResult(
+      [{ ...statusCard, followupsOpen: true }],
+      { slug: "alpha", status: "shipped", statusDate: "2026-08-29", hash: "h2", written: true },
+      now,
+    );
+    expect(flagged[0]!.column).toBe("followups");
+    // Restore comes back to proposed.
+    const archivedCard: typeof statusCard = { ...statusCard, planStatus: "abandoned", column: "shipped" };
+    const restored = applyStatusResult(
+      [archivedCard],
+      { slug: "alpha", status: "proposed", statusDate: "2026-08-29", hash: "h3", written: true },
+      now,
+    );
+    expect(restored[0]!.column).toBe("proposed");
+    // A slug not on the board returns the SAME array.
+    const same = applyStatusResult(
+      [statusCard],
+      { slug: "gone", status: "abandoned", statusDate: null, hash: "h2", written: true },
+      now,
+    );
+    expect(same[0]).toBe(statusCard);
+  });
+
+  test("archiveControlState: busy, reloading and a dead hash disable with their own sentences; readonly has no draft fallback", () => {
+    expect(archiveControlState({ readonly: false, busy: false })).toEqual({ disabled: false, title: null });
+    expect(archiveControlState({ readonly: false, busy: true }).disabled).toBe(true);
+    expect(archiveControlState({ readonly: false, busy: false, reloading: true }).title).toBe(NUDGE_RELOADING);
+    expect(archiveControlState({ readonly: false, busy: false, staleHash: true }).title).toBe(NUDGE_RELOAD_FIRST);
+    const ro = archiveControlState({ readonly: true, busy: false });
+    expect(ro.disabled).toBe(true);
+    expect(ro.title).toBe(ARCHIVE_READONLY_TITLE);
+  });
+
+  test("a status 409 gets the PLAN sentence — it edits the same file a priority write does", () => {
+    expect(classifyWriteFailure(409, {}, "status")).toMatchObject({
+      kind: "stale",
+      message: PRIORITY_STALE_MESSAGE,
+      reload: true,
+    });
+    expect(classifyWriteFailure(404, { error: 'no plan named "x"' }, "status").reload).toBe(true);
   });
 });

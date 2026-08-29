@@ -45,12 +45,13 @@
  * sha256 the caller returns is a hash of what is actually on disk.
  */
 
-import type { PlanPriority } from "./constants.ts";
+import type { PlanPriority, PlanStatus } from "./constants.ts";
 
 const FENCE = "---";
 /** `parseFrontmatter`'s key shape: name at column 0, colon immediately after. */
 const PRIORITY_LINE = /^priority:/;
 const PLAN_STATUS_LINE = /^plan_status:/;
+const STATUS_DATE_LINE = /^status_date:/;
 
 /**
  * The outcome of one priority edit. A REFUSAL is not a noop: the caller answers
@@ -133,6 +134,99 @@ export function setPlanPriority(content: string, priority: PlanPriority | null):
   // rule 2's corruption through. This catches a fence boundary that MOVED (a
   // body line promoted into the frontmatter, or vice versa) as well as any byte
   // after it differing.
+  const outBounds = fenceBounds(out);
+  if (!outBounds || out.slice(outBounds.closeNl) !== tail) {
+    return {
+      kind: "refused",
+      reason: "the edit would have changed bytes outside the frontmatter fence",
+    };
+  }
+  return { kind: "changed", content: out };
+}
+
+/**
+ * Set a plan's frontmatter `plan_status`, stamping `status_date` in the same
+ * write — mimir's lifecycle records WHEN a status changed, and a flip without a
+ * date would sort the card by a date describing the previous state.
+ *
+ * The archive move the board offers, but generic on purpose: any enum value is
+ * a legal target, so a later column drag can reuse it.
+ *
+ * Same rules as {@link setPlanPriority}: fence-scoped line upsert, duplicate
+ * lines normalized, refusal on an unreadable fence, output re-checked with the
+ * reader's own boundary rule. Two of its own:
+ *
+ *   - **The same status is a noop that leaves `status_date` alone.** Re-clicking
+ *     "abandoned" on an already-abandoned plan must not rewrite the date the
+ *     real transition happened on.
+ *   - **A missing `plan_status` line is inserted, not refused.** `source.ts`
+ *     makes the key the membership test, so no card the board renders lacks it —
+ *     but a file edited between the render and the click should gain the line
+ *     rather than 422.
+ */
+export function setPlanStatus(
+  content: string,
+  status: PlanStatus,
+  statusDate: string,
+): PlanPriorityEdit {
+  const bounds = fenceBounds(content);
+  if (!bounds) {
+    return {
+      kind: "refused",
+      reason: "the file has no readable frontmatter fence — refusing to edit it",
+    };
+  }
+  const { openEnd, closeNl } = bounds;
+  const openLine = content.slice(0, openEnd);
+  const tail = content.slice(closeNl);
+  const body = closeNl > openEnd ? content.slice(openEnd + 1, closeNl) : null;
+
+  const cr = openLine.endsWith("\r") ? "\r" : "";
+  const lines = body === null ? [] : body.split("\n");
+
+  // The reader takes the LAST duplicate; this writer normalizes to the first —
+  // but the noop test must read what the reader reads, or a duplicate fence
+  // could noop on the wrong value.
+  const statusLines = lines.filter((l) => PLAN_STATUS_LINE.test(l));
+  const current = statusLines.length
+    ? statusLines[statusLines.length - 1]!.slice("plan_status:".length).replace(/\r$/, "").trim()
+    : null;
+  if (current === status) return { kind: "noop" };
+
+  const fence: string[] = [];
+  let statusDone = false;
+  let dateDone = false;
+  for (const line of lines) {
+    if (PLAN_STATUS_LINE.test(line)) {
+      if (statusDone) continue;
+      fence.push(`plan_status: ${status}${cr}`);
+      statusDone = true;
+      if (!dateDone) {
+        fence.push(`status_date: ${statusDate}${cr}`);
+        dateDone = true;
+      }
+      continue;
+    }
+    if (STATUS_DATE_LINE.test(line)) {
+      // Replaced in place only when it precedes plan_status (dateDone false);
+      // once the stamped pair is emitted, later copies are dropped.
+      if (dateDone) continue;
+      fence.push(`status_date: ${statusDate}${cr}`);
+      dateDone = true;
+      continue;
+    }
+    fence.push(line);
+  }
+  if (!statusDone) fence.unshift(`plan_status: ${status}${cr}`, `status_date: ${statusDate}${cr}`);
+  else if (!dateDone) {
+    // Unreachable today (the date is emitted beside the status), kept as a
+    // guard should the emit order change.
+    fence.push(`status_date: ${statusDate}${cr}`);
+  }
+
+  const out = openLine + (fence.length > 0 ? `\n${fence.join("\n")}` : "") + tail;
+  if (out === content) return { kind: "noop" };
+
   const outBounds = fenceBounds(out);
   if (!outBounds || out.slice(outBounds.closeNl) !== tail) {
     return {

@@ -556,3 +556,101 @@ describe("POST /api/plans/order", () => {
     );
   });
 });
+
+describe("POST /api/plans/status", () => {
+  test("archives a plan: writes plan_status + a stamped status_date, returns the NEW hash, no log.md", async () => {
+    const root = await makeWiki();
+    const a = app(root);
+    const res = await post(a, "/api/plans/status", {
+      slug: "alpha-plan",
+      status: "abandoned",
+      baseHash: await hashOf(root, "alpha-plan"),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toMatchObject({ slug: "alpha-plan", status: "abandoned", written: true });
+    expect(body.statusDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+
+    const after = await pageText(root, "alpha-plan");
+    expect(after).toBe(
+      `---\ntitle: alpha-plan\nplan_status: abandoned\nstatus_date: ${body.statusDate}\n---\n\n# alpha-plan\n\nBody.\n`,
+    );
+    expect(body.hash).toBe(sha256(after));
+    expect(await Bun.file(path.join(root, "log.md")).exists()).toBe(false);
+    expect(await pageText(root, "beta-plan")).toBe(plan("beta-plan"));
+  });
+
+  test("restore works off the archive's returned hash; re-archiving the same status is a noop echoing disk", async () => {
+    const root = await makeWiki();
+    const a = app(root);
+    const archived = await post(a, "/api/plans/status", {
+      slug: "alpha-plan",
+      status: "superseded",
+      baseHash: await hashOf(root, "alpha-plan"),
+    });
+    const archivedBody = await archived.json();
+    // Same status again: a 200 noop that does NOT restamp status_date.
+    const again = await post(a, "/api/plans/status", {
+      slug: "alpha-plan",
+      status: "superseded",
+      baseHash: archivedBody.hash,
+    });
+    const againBody = await again.json();
+    expect(againBody.written).toBe(false);
+    expect(againBody.hash).toBe(archivedBody.hash);
+    expect(againBody.status).toBe("superseded");
+    // Restore on the noop's hash.
+    const restored = await post(a, "/api/plans/status", {
+      slug: "alpha-plan",
+      status: "proposed",
+      baseHash: againBody.hash,
+    });
+    expect(restored.status).toBe(200);
+    expect(await pageText(root, "alpha-plan")).toContain("plan_status: proposed");
+    // …and the ORIGINAL hash is stale now.
+    const stale = await post(a, "/api/plans/status", {
+      slug: "alpha-plan",
+      status: "abandoned",
+      baseHash: sha256(plan("alpha-plan")),
+    });
+    expect(stale.status).toBe(409);
+    expect((await stale.json()).stale).toBe(true);
+  });
+
+  test.each([
+    ["an unknown value", { slug: "alpha-plan", status: "deleted", baseHash: "h" }],
+    ["an omitted status", { slug: "alpha-plan", baseHash: "h" }],
+    ["a missing baseHash", { slug: "alpha-plan", status: "abandoned" }],
+    ["a missing slug", { status: "abandoned", baseHash: "h" }],
+  ])("400s on %s, writing nothing", async (_label, body) => {
+    const root = await makeWiki();
+    const res = await post(app(root), "/api/plans/status", body);
+    expect(res.status).toBe(400);
+    expect(await pageText(root, "alpha-plan")).toBe(plan("alpha-plan"));
+  });
+
+  test("404s on an unknown slug and on an unregistered wiki", async () => {
+    const root = await makeWiki();
+    expect(
+      (await post(app(root), "/api/plans/status", { slug: "no-such-plan", status: "abandoned", baseHash: "h" }))
+        .status,
+    ).toBe(404);
+    expect(
+      (await post(app(null), "/api/plans/status", { slug: "alpha-plan", status: "abandoned", baseHash: "h" }))
+        .status,
+    ).toBe(404);
+  });
+
+  test("403 on a readonly instance, writing nothing", async () => {
+    const root = await makeWiki();
+    __setWikiReadonlyForTest(true);
+    const res = await post(app(root), "/api/plans/status", {
+      slug: "alpha-plan",
+      status: "abandoned",
+      baseHash: await hashOf(root, "alpha-plan"),
+    });
+    expect(res.status).toBe(403);
+    expect((await res.json()).readonly).toBe(true);
+    expect(await pageText(root, "alpha-plan")).toBe(plan("alpha-plan"));
+  });
+});
