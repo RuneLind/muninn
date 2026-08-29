@@ -22,10 +22,11 @@
  * because `--copy-to … -- <command>` REPLACES the entrypoint that would
  * otherwise export `DATABASE_URL` from it (see ./database-url.ts).
  *
- * **What it deliberately does not do.** It never touches a database that is
- * already provisioned: `users` present is a refusal, not a no-op with a
- * rewrite, because `db/init.sql` is bare `CREATE TABLE` throughout and the
- * honest answer to "this already has a schema" is an operator decision. And it
+ * **What it deliberately does not do.** It never writes into a database that
+ * already has a schema — and "has a schema" is the WHOLE table set, not one
+ * table: see `db/schema-state.ts` for why a `users`-only predicate is the
+ * unrepairable-pod path. `db/init.sql` is bare `CREATE TABLE` throughout, so
+ * the honest answer to "this already has some of it" is an operator decision. And it
  * does not run pending migrations — `--baseline` records the shipped ones as
  * applied, which is the whole contract of a database built from the
  * consolidated schema; the container entrypoint runs anything newer on the
@@ -58,6 +59,13 @@
 import { join } from "node:path";
 import { resolveCliDatabaseUrl, DATABASE_URL_ENV_NAMES } from "./database-url.ts";
 import { openPostgres, parsePostgresUrl } from "./postgres-connection.ts";
+import type { SchemaState } from "./schema-state.ts";
+import {
+  classifySchemaState,
+  LEDGER_TABLE,
+  plural,
+  tablesDeclaredByInitSql,
+} from "./schema-state.ts";
 import { DatabaseUrlError, runMigrations } from "./migrate.ts";
 
 /** Same budget and reason as ./require-provisioned.ts: under `kubectl debug
@@ -136,19 +144,80 @@ export class ProvisionBaselineError extends Error {
 }
 
 /**
- * Every table `db/init.sql` declares, read out of the file itself.
+ * The refusal for a database that is neither empty nor complete — one summary
+ * and one remedy per state.
  *
- * DERIVED, never a remembered list. The predicate for "is this database
- * provisioned" has to move with the schema: a hand-kept list is one migration
- * away from reporting a complete database as incomplete, and this function is
- * the only thing standing between a half-applied schema and the wrong remedy.
+ * The remedy FORKS with the state, and that is the whole point: the generic
+ * answer is `DROP SCHEMA public CASCADE`, which is a fine thing to say about a
+ * half-applied muninn schema on a throwaway database and a terrible thing to
+ * say about somebody else's tables or about one empty ledger. Exported so
+ * `db/require-provisioned.ts` prints the SAME words the applier does.
  */
-export function tablesDeclaredByInitSql(initSql: string): string[] {
-  return [
-    ...initSql.matchAll(
-      /^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"?([a-z_][a-z0-9_]*)"?\s*\(/gim,
-    ),
-  ].map((m) => m[1]!);
+export function describeUnusableState(state: Exclude<SchemaState, { kind: "empty" | "complete" }>): {
+  summary: string;
+  remedy: string[];
+} {
+  const doNotBaseline = [
+    "  Do NOT baseline it: `bun db/migrate.ts --baseline` would record every migration as",
+    "  applied against a schema that does not have them, and nothing could repair it",
+    "  afterwards.",
+    "",
+  ];
+
+  if (state.kind === "lone-ledger") {
+    return {
+      summary:
+        "This database contains only `schema_migrations` and none of the schema — which is " +
+        "what `bun db/migrate.ts` against an EMPTY database leaves behind: it creates the " +
+        "ledger table and then has nothing to migrate.",
+      // Deliberately regardless of whether it carries ROWS. `--baseline` on an
+      // empty database succeeds and leaves the ledger full, and that database
+      // needs the same one line — an earlier version required the table to be
+      // empty, so the likelier of the two states got the schema-drop remedy.
+      remedy: [
+        "  The safe remedy is one line:",
+        "",
+        "    DROP TABLE schema_migrations;",
+        "",
+        "  then run this script again.",
+      ],
+    };
+  }
+
+  if (state.kind === "foreign") {
+    return {
+      summary:
+        `This database is not empty and carries no muninn schema at all: ` +
+        `${plural(state.present.length, "unrelated table")} in \`public\` ` +
+        `(${state.present.slice(0, 5).join(", ")}${state.present.length > 5 ? ", …" : ""}).`,
+      // No `Do NOT baseline` line and no schema drop: nothing here was ever
+      // init.sql, so neither the diagnosis nor the destructive remedy applies.
+      // Saying "most likely a psql that died mid-file" about someone else's
+      // database is a false diagnosis attached to `DROP SCHEMA public CASCADE`.
+      remedy: [
+        "  Nothing here came from db/init.sql, so this is almost certainly the wrong",
+        "  database. Check the `Database:` line above against the one you meant.",
+        "  This script will not write into it.",
+      ],
+    };
+  }
+
+  return {
+    summary:
+      `This database has an INCOMPLETE muninn schema: ` +
+      `${plural(state.present.length, "table")} of ${plural(state.missing.length + state.present.length, "table")} ` +
+      `db/init.sql declares are present (${state.present.slice(0, 5).join(", ")}` +
+      `${state.present.length > 5 ? ", …" : ""}), and ` +
+      `${plural(state.missing.length, "table")} missing (${state.missing.slice(0, 5).join(", ")}` +
+      `${state.missing.length > 5 ? ", …" : ""}).`,
+    remedy: [
+      ...doNotBaseline,
+      "  Most likely a `psql -f db/init.sql` that died mid-file — psql without `-1` is not",
+      "  atomic. Decide what is there, then either drop it (a throwaway database:",
+      "  `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`) or provision a fresh one.",
+      "  This script will not write over it.",
+    ],
+  };
 }
 
 /** The "could not reach it" message. A function so the elapsed number can be
@@ -245,21 +314,12 @@ export async function provisionDatabase(
     // it, and `users` is the same canonical predicate: init.sql owns it, no
     // migration creates it, and unlike `schema_migrations` nothing else creates
     // it as a side effect.
-    // ── The state space, enumerated once ─────────────────────────────────
+    // ── The state space ──────────────────────────────────────────────────
     //
-    // This block replaced two rounds of patching a `users`-only predicate, and
-    // the reason is worth keeping. `users` is init.sql's FIRST table and
-    // `schema_migrations` its LAST, so a `psql -f db/init.sql` that died
-    // mid-file — psql without `-1` is not atomic, and it is the remedy this
-    // applier replaces — leaves `users` present and `schema_migrations` absent
-    // in almost every case. Read through `users`, that state is "provisioned
-    // but never baselined", whose remedy is `bun db/migrate.ts --baseline`.
-    // That command SUCCEEDS, satisfies db/require-provisioned.ts, boots the pod
-    // on a stump of a schema, and records all 74 migrations as applied so
-    // nothing can ever repair it. The predicate has to be the WHOLE table set.
-    //
-    // Derived from db/init.sql, never remembered: a hand-kept list is one
-    // migration away from calling a complete database incomplete.
+    // Classified by ONE shared predicate (`db/schema-state.ts`), which is the
+    // point: this module and `db/require-provisioned.ts` each had their own,
+    // and the weaker one — the one the container entrypoint runs and prints
+    // remedies from — was the unrepairable-pod path. See that module's header.
     const initSql = await Bun.file(join(import.meta.dir, "init.sql")).text();
     const declared = tablesDeclaredByInitSql(initSql);
 
@@ -269,19 +329,18 @@ export async function provisionDatabase(
        ORDER BY table_name
     `;
     const present = new Set(presentRows.map((r) => String(r.table_name)));
-    const missing = declared.filter((t) => !present.has(t));
-    const [ext] = await sql`
-      SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') AS has_vector
-    `;
+    const state = classifySchemaState(declared, present);
 
-    // 1. Complete — every table init.sql declares is here.
-    if (present.size > 0 && missing.length === 0) {
-      notes.push(`This database already carries all ${declared.length} tables db/init.sql declares. Nothing was written.`);
+    if (state.kind === "complete") {
+      notes.push(
+        `This database already carries all ${plural(declared.length, "table")} db/init.sql declares. Nothing was written.`,
+      );
       // The baseline remedy ONLY here, and only when it is true. This is the
-      // genuine never-baselined state: init.sql creates `schema_migrations`
-      // empty, so a complete schema with nothing recorded is exactly what it
-      // leaves. Printed at any other state it is the wrong instruction wearing
-      // the clothes of a diagnosis.
+      // genuine never-baselined state: init.sql creates the ledger empty, so a
+      // COMPLETE schema with nothing recorded is exactly what it leaves. At any
+      // other state it is the wrong instruction wearing a diagnosis's clothes —
+      // and at an incomplete one it is the instruction that makes the database
+      // unrepairable.
       const recorded = Number(
         (await sql`SELECT count(*)::int AS n FROM schema_migrations`)[0]?.n ?? 0,
       );
@@ -294,53 +353,8 @@ export async function provisionDatabase(
       return { status: "already-provisioned", notes };
     }
 
-    // 2. Not empty, and not complete. Every branch below refuses; what differs
-    //    is the remedy, and getting THAT wrong is what makes a database
-    //    unrepairable.
-    if (present.size > 0) {
-      const ours = declared.filter((t) => present.has(t));
-      const summary =
-        ours.length > 0
-          ? `This database has an INCOMPLETE muninn schema: ${ours.length} of ` +
-            `${declared.length} tables db/init.sql declares are present ` +
-            `(${ours.slice(0, 5).join(", ")}${ours.length > 5 ? ", …" : ""}), and ` +
-            `${missing.length} are missing (${missing.slice(0, 5).join(", ")}` +
-            `${missing.length > 5 ? ", …" : ""}).`
-          : `This database is not empty and carries no muninn schema: ` +
-            `${present.size} unrelated table(s) in \`public\` ` +
-            `(${[...present].slice(0, 5).join(", ")}${present.size > 5 ? ", …" : ""}).`;
-
-      // The one benign shape, and it is REACHABLE and documented: `bun
-      // db/migrate.ts` against an empty database creates `schema_migrations`
-      // (`ensureMigrationsTable`) and then fails. Answering that with
-      // `DROP SCHEMA public CASCADE` is a dangerous remedy for a one-table
-      // mistake, so it gets the one-line one.
-      const onlyEmptyLedger =
-        ours.length === 1 &&
-        ours[0] === "schema_migrations" &&
-        present.size === 1 &&
-        Number((await sql`SELECT count(*)::int AS n FROM schema_migrations`)[0]?.n ?? 0) === 0;
-
-      const remedy = onlyEmptyLedger
-        ? [
-            "  That is what `bun db/migrate.ts` against an EMPTY database leaves behind — it",
-            "  creates the ledger table and then fails. The safe remedy is one line:",
-            "",
-            "    DROP TABLE schema_migrations;",
-            "",
-            "  then run this script again.",
-          ]
-        : [
-            "  Do NOT baseline it: `bun db/migrate.ts --baseline` would record every migration",
-            "  as applied against a schema that does not have them, and nothing could repair it",
-            "  afterwards.",
-            "",
-            "  Most likely a `psql -f db/init.sql` that died mid-file — psql without `-1` is not",
-            "  atomic. Decide what is there, then either drop it (a throwaway database:",
-            "  `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`) or provision a fresh one.",
-            "  This script will not write over it.",
-          ];
-
+    if (state.kind !== "empty") {
+      const { summary, remedy } = describeUnusableState(state);
       if (opts?.dryRun) {
         notes.push(summary, ...remedy.map((l) => l.trim()).filter(Boolean));
         notes.push("Dry run: would refuse. Nothing here can be provisioned as-is.");
@@ -349,13 +363,16 @@ export async function provisionDatabase(
       throw new ProvisionStateError([summary, "", ...remedy].join("\n"));
     }
 
-    // 3. Empty. Probed rather than required: `db/init.sql` opens with
-    //    `CREATE EXTENSION IF NOT EXISTS vector`, which the app user on a
-    //    managed instance may not run — but `IF NOT EXISTS` short-circuits
-    //    BEFORE the privilege check, so once an elevated role has created it
-    //    the app user applies the whole file. Refusing here would break the
-    //    case where the role CAN create it (a local superuser, docker-compose),
-    //    so this is a note, and the 42501 handler below does the diagnosing.
+    // Empty. Probed rather than required: `db/init.sql` opens with
+    // `CREATE EXTENSION IF NOT EXISTS vector`, which the app user on a managed
+    // instance may not run — but `IF NOT EXISTS` short-circuits BEFORE the
+    // privilege check, so once an elevated role has created it the app user
+    // applies the whole file. Refusing here would break the case where the role
+    // CAN create it (a local superuser, docker-compose), so this is a note and
+    // the 42501 handler below does the diagnosing.
+    const [ext] = await sql`
+      SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') AS has_vector
+    `;
     if (!ext?.has_vector) {
       notes.push(
         "Note: the `vector` extension does not exist yet. init.sql will try to create it,",

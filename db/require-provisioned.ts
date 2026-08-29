@@ -8,7 +8,17 @@
  * it at an empty database and it happily applies migration 001 onwards onto
  * nothing, producing a half-schema that fails at the first table init.sql owns.
  *
- * **The predicate is `users`, not `schema_migrations`.** `schema_migrations` is
+ * **The predicate is the WHOLE table set, not `users` and not
+ * `schema_migrations`.** It was `users` alone until 2026-08-29, and that is the
+ * unrepairable-pod path: `users` is init.sql's FIRST table, so a
+ * `psql -f db/init.sql` that died mid-file satisfies it — and this file then
+ * printed the BASELINE instruction, which succeeds, makes this very check pass,
+ * and boots the pod on a stump of a schema with every migration recorded as
+ * applied. `db/schema-state.ts` is now the one predicate, shared with
+ * `db/provision.ts`, and its header carries the measurement.
+ *
+ * The rest of the original reasoning still holds, and is why the predicate is
+ * not `schema_migrations`: `schema_migrations` is
  * the tempting test and it is wrong twice over: `ensureMigrationsTable` is a
  * `CREATE TABLE IF NOT EXISTS`, so the runner CREATES the thing being tested —
  * which is also why this check must run as its own process, before the runner —
@@ -39,8 +49,11 @@
  * entrypoint, which exports one from the other, but it is also runnable by hand
  * from a pod where the entrypoint never ran).
  */
+import { join } from "node:path";
 import { resolveCliDatabaseUrl, DATABASE_URL_ENV_NAMES } from "./database-url.ts";
 import { openPostgres } from "./postgres-connection.ts";
+import { classifySchemaState, tablesDeclaredByInitSql } from "./schema-state.ts";
+import { describeUnusableState } from "./provision.ts";
 
 /** How long to keep retrying a CONNECTION failure. Under docker-compose the app
  *  waits on a `service_healthy` postgres, and on nais the sidecar proxy is up
@@ -126,8 +139,9 @@ const UNPROVISIONED_INSTRUCTION = [
 
 const UNBASELINED_INSTRUCTION = [
   "",
-  "  This database HAS the schema (`users` exists) but `schema_migrations` records",
-  "  nothing — it was provisioned from db/init.sql and never baselined.",
+  "  This database HAS the COMPLETE schema — every table db/init.sql declares is",
+  "  present — but `schema_migrations` records nothing: it was provisioned from",
+  "  db/init.sql and never baselined.",
   "",
   "  db/init.sql creates `schema_migrations` empty, so the migration runner would",
   "  read \"everything is pending\" and re-apply migrations onto tables that already",
@@ -201,22 +215,41 @@ async function main(): Promise<number> {
       return 2;
     }
     try {
-      // `to_regclass` answers NULL instead of throwing for an absent relation,
-      // so "no such table" is a VALUE here rather than an error indistinguishable
-      // from a connection fault.
-      const [row] = await sql`
-        SELECT to_regclass('public.users') IS NOT NULL AS provisioned,
-               to_regclass('public.schema_migrations') IS NOT NULL AS tracked
+      // The SHARED predicate — the whole table set, not one table. Reading
+      // `public` is one query and the classification is pure, so this check and
+      // `db/provision.ts` cannot drift into disagreeing about the only question
+      // that matters. (See db/schema-state.ts: they DID, and the weaker one was
+      // this file, which is what prints the remedies.)
+      const initSql = await Bun.file(join(import.meta.dir, "init.sql")).text();
+      const presentRows = await sql`
+        SELECT table_name FROM information_schema.tables
+         WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+         ORDER BY table_name
       `;
-      if (!row?.provisioned) {
+      const present = new Set(presentRows.map((r) => String(r.table_name)));
+      const state = classifySchemaState(tablesDeclaredByInitSql(initSql), present);
+
+      if (state.kind === "empty") {
         console.error(UNPROVISIONED_INSTRUCTION);
         return 1;
       }
+
+      // Neither empty nor complete. This is the state that used to be reported
+      // as "provisioned but not baselined", with the baseline command printed
+      // beside it — the one action that makes it unrepairable.
+      if (state.kind !== "complete") {
+        const { summary, remedy } = describeUnusableState(state);
+        console.error(["", `  ${summary}`, "", ...remedy, ""].join("\n"));
+        return 1;
+      }
+
       // The count is a SECOND statement on purpose: Postgres parses a whole
       // statement before running it, so a `CASE … ELSE (SELECT count(*) FROM
-      // schema_migrations)` would fail to parse on the very database where the
-      // table is missing.
-      const recorded = row.tracked
+      // schema_migrations)` would fail to parse on a database where the table
+      // is missing. It cannot be missing in the `complete` branch — the ledger
+      // is one of init.sql's declared tables — but the shape is kept so the
+      // reasoning survives a future branch that is less sure.
+      const recorded = present.has("schema_migrations")
         ? Number((await sql`SELECT count(*)::int AS n FROM schema_migrations`)[0]?.n ?? 0)
         : 0;
       if (recorded === 0) {

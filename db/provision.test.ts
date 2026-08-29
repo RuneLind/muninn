@@ -515,29 +515,6 @@ describe("the privilege wall on a managed instance", () => {
 });
 
 describe("the state space, enumerated against db/init.sql's OWN table list", () => {
-  /** `db/init.sql`'s declared tables, parsed from the file. The predicate has
-   *  to be derived, not remembered: a hand-kept list is one migration away from
-   *  reporting a complete schema as incomplete. */
-  async function declaredTables(): Promise<string[]> {
-    const initSql = await Bun.file(new URL("./init.sql", import.meta.url)).text();
-    return [...initSql.matchAll(/^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"?([a-z_][a-z0-9_]*)"?\s*\(/gim)]
-      .map((m) => m[1]!);
-  }
-
-  test("db/init.sql declares many tables and `users` is the FIRST — the fact this rests on", async () => {
-    const declared = await declaredTables();
-    expect(declared.length).toBeGreaterThan(20);
-    // This is why `users` alone cannot mean "provisioned". A `psql -f
-    // db/init.sql` that dies mid-file has `users` in almost every case, because
-    // it is created first — and `schema_migrations`, created LAST, in almost
-    // none. Read through the old predicate that state was "provisioned but not
-    // baselined", whose remedy is `--baseline` — which would succeed, satisfy
-    // db/require-provisioned.ts, boot the pod on a stump of a schema, and mark
-    // all 74 migrations applied so nothing could ever repair it.
-    expect(declared[0]).toBe("users");
-    expect(declared.at(-1)).toBe("schema_migrations");
-  });
-
   test("a half-applied init.sql is INCOMPLETE, not 'provisioned but unbaselined'", async () => {
     const initSql = await Bun.file(new URL("./init.sql", import.meta.url)).text();
     // The real prefix of the real file, cut at its second CREATE TABLE — so
@@ -703,5 +680,133 @@ describe("db/migrate.ts --baseline reports only what it kept", () => {
     );
     expect(after?.n).toBeGreaterThan(0);
     expect(stdout.match(/\(recorded\)/g)?.length).toBe(after?.n);
+  });
+});
+
+describe("the entrypoint's OWN check, on the state that used to be fatal", () => {
+  /** The stump a `psql -f db/init.sql` leaves: the real file, cut at its second
+   *  CREATE TABLE, so `users` exists and nothing else does. */
+  async function seedStump() {
+    const initSql = await Bun.file(new URL("./init.sql", import.meta.url)).text();
+    const second = initSql.indexOf("CREATE TABLE", initSql.indexOf("CREATE TABLE") + 1);
+    await withScratch((sql) => sql.unsafe(initSql.slice(0, second)));
+  }
+
+  async function runRequireProvisioned(): Promise<{ code: number; stderr: string }> {
+    const proc = Bun.spawn(["bun", "db/require-provisioned.ts"], {
+      cwd: REPO_ROOT,
+      env: { ...process.env, DATABASE_URL: SCRATCH_URL },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const stderr = await new Response(proc.stderr).text();
+    return { code: await proc.exited, stderr };
+  }
+
+  test("does NOT prescribe --baseline for a half-applied schema", async () => {
+    // THE finding. `db/require-provisioned.ts` is what the container entrypoint
+    // runs and what PRINTS the remedies, and it kept its own `users`-only
+    // predicate after the applier's was fixed. Measured before this change:
+    //   require-provisioned → "HAS the schema (`users` exists) … --baseline"
+    //   migrate --baseline  → "Done. All migrations marked as applied."
+    //   require-provisioned → rc=0, and the pod boots on a ONE-table schema
+    //     with every migration recorded, so nothing can repair it.
+    // The applier refusing is not enough: nothing routes an operator to the
+    // applier in that state. The check itself has to refuse.
+    await seedStump();
+    const { code, stderr } = await runRequireProvisioned();
+    expect(code).toBe(1);
+    expect(stderr).toContain("Do NOT baseline");
+    expect(stderr).toContain("INCOMPLETE");
+  });
+
+  test("and running the command it DOES print leaves the database repairable", async () => {
+    // The whole chain, end to end: the fatal version's own instruction, run.
+    await seedStump();
+    await runRequireProvisioned();
+
+    const baseline = Bun.spawn(["bun", "db/migrate.ts", "--baseline"], {
+      cwd: REPO_ROOT,
+      env: { ...process.env, DATABASE_URL: SCRATCH_URL },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    await baseline.exited;
+
+    // Even if somebody baselines it anyway, the check must still refuse — the
+    // stump is not a bootable database, and `recorded > 0` must not be what
+    // decides that.
+    const after = await runRequireProvisioned();
+    expect(after.code).toBe(1);
+  });
+
+  test("still passes a complete, baselined database", async () => {
+    await provisionDatabase(SCRATCH_URL);
+    const { code } = await runRequireProvisioned();
+    expect(code).toBe(0);
+  });
+
+  test("still refuses a complete database that was never baselined, WITH the baseline remedy", async () => {
+    await provisionDatabase(SCRATCH_URL);
+    await withScratch((sql) => sql`DELETE FROM schema_migrations`);
+    const { code, stderr } = await runRequireProvisioned();
+    expect(code).toBe(1);
+    expect(stderr).toContain("--baseline");
+    expect(stderr).not.toContain("Do NOT baseline");
+  });
+});
+
+describe("the remedy forks with the state", () => {
+  test("someone else's database is not diagnosed as our own half-applied one", async () => {
+    await withScratch((sql) => sql.unsafe(`CREATE TABLE customers (id int); CREATE TABLE orders (id int)`));
+    const result = await provisionDatabase(SCRATCH_URL, { dryRun: true });
+    expect(result.status).toBe("not-empty");
+    const text = result.notes.join("\n");
+    // Nothing here ever came from init.sql, so "a psql that died mid-file" is a
+    // false diagnosis — and it used to arrive attached to an instruction to
+    // drop somebody else's schema.
+    expect(text).not.toContain("died mid-file");
+    expect(text).not.toContain("DROP SCHEMA");
+    expect(text).toContain("wrong");
+  });
+
+  test("a lone ledger WITH rows gets the one-line remedy too", async () => {
+    // `bun run db:migrate:baseline` against an empty database — a documented
+    // command, and the one require-provisioned.ts prescribes — succeeds and
+    // leaves the ledger holding every version. An earlier version required the
+    // table to be EMPTY, so the likelier of the two states got the schema drop.
+    await withScratch(
+      (sql) => sql.unsafe(
+        `CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, name TEXT NOT NULL);
+         INSERT INTO schema_migrations VALUES ('001','x'), ('002','y')`,
+      ),
+    );
+    const result = await provisionDatabase(SCRATCH_URL, { dryRun: true });
+    expect(result.status).toBe("not-empty");
+    expect(result.notes.join("\n")).toContain("DROP TABLE schema_migrations");
+    expect(result.notes.join("\n")).not.toContain("DROP SCHEMA");
+  });
+});
+
+describe("the CLI prints the Postgres diagnosis, not just its message", () => {
+  test("a baseline failure names the code, and the line survives to stderr", async () => {
+    // `describePgError` had no test at all: replacing its whole body with
+    // `String(err)` — exactly the behaviour it was written to replace — left the
+    // suite green. This drives the CLI's ProvisionBaselineError branch, which
+    // nothing did.
+    const holder = postgres(SCRATCH_URL, { max: 1, onnotice: () => {} });
+    try {
+      await holder`SELECT pg_advisory_lock(${0x6d756e6e})`;
+      const impatient = `${SCRATCH_URL}?options=${encodeURIComponent("-c lock_timeout=1000")}`;
+      const { code, stderr } = await runCli(["--yes"], { DATABASE_URL: impatient });
+      expect(code).toBe(1);
+      expect(stderr).toContain("The schema IS present");
+      // The Postgres SQLSTATE. `String(err)` on a PostgresError drops it, along
+      // with `detail` and `hint` — which for a baseline failure is most of the
+      // diagnosis an operator has to work from.
+      expect(stderr).toContain("code 55P03");
+    } finally {
+      await holder.end();
+    }
   });
 });

@@ -126,6 +126,12 @@ describe("db/require-provisioned.ts", () => {
     // DATABASE_URL made it answer "not set" (exit 2) with the credentials right
     // there — so the check that guards the migration would be skipped by
     // whoever worked around it.
+    // Its OWN empty database. An earlier case in this file leaves a lone
+    // `schema_migrations` behind, and since the predicate became the whole
+    // table set that is a DIFFERENT refusal with different words — so a case
+    // about URL RESOLUTION was reading an assertion about schema state, and
+    // passed or failed on test order.
+    await resetScratch();
     const proc = Bun.spawn(["bun", "db/require-provisioned.ts"], {
       cwd: REPO_ROOT,
       env: { ...process.env, DATABASE_URL: "", DB_URL: SCRATCH_URL },
@@ -134,9 +140,9 @@ describe("db/require-provisioned.ts", () => {
     });
     const stderr = await new Response(proc.stderr).text();
     // It really reached the scratch database: exit 1 is the REFUSAL (this
-    // database has no `users` table), not the exit 2 of an unresolved URL.
+    // database has never been provisioned), not the exit 2 of an unresolved URL.
     expect(await proc.exited).toBe(1);
-    expect(stderr).toContain("users");
+    expect(stderr).toContain("never been provisioned");
   });
 });
 

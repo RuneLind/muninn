@@ -734,9 +734,12 @@ needs no `--yes` — it is the form that cannot write, though against a database
 would refuse it exits 1 rather than 0. An unrecognised flag is refused rather
 than ignored, so a typo'd `--dryrun` cannot become a real run.)
 
-**The predicate is the whole table set, not one table.** `db/provision.ts`
-parses the tables `db/init.sql` declares out of the file itself and compares
-them with what is actually in `public`. That is not fussiness: `users` is
+**The predicate is the whole table set, not one table — and it is shared.**
+`db/schema-state.ts` parses the tables `db/init.sql` declares out of the file
+itself and compares them with what is actually in `public`; both `db/provision.ts`
+and `db/require-provisioned.ts` classify with it. The sharing is the load-bearing
+part: the entrypoint's check is what an operator actually reads, and while it
+kept a `users`-only copy of its own it printed the fatal instruction below. That is not fussiness: `users` is
 init.sql's *first* table and `schema_migrations` its *last*, so a
 `psql -f db/init.sql` that died mid-file — psql without `-1` is not atomic —
 leaves `users` present and `schema_migrations` absent in almost every case. Read
@@ -746,13 +749,15 @@ baselined", whose remedy is `bun db/migrate.ts --baseline` — and that command
 schema, and records every migration as applied so nothing can repair it
 afterwards.
 
-So four states, and only one of them writes: **complete** (refused, and told to
+So five states, and only one of them writes: **complete** (refused, and told to
 baseline only when `schema_migrations` is genuinely empty), **incomplete**
 (refused by name, listing what is present and what is missing, and explicitly
-told *not* to baseline — with a one-line `DROP TABLE schema_migrations` for the
-common case where `db:migrate` against an empty database left just the ledger),
-**not ours** (tables present, none of them init.sql's), and **empty**, which is
-the one it provisions. A role that may not run what `init.sql` asks for is
+told *not* to baseline), **lone ledger** (only `schema_migrations` — what
+`db:migrate` or `db:migrate:baseline` against an empty database leaves, with or
+without rows; the remedy is `DROP TABLE schema_migrations`, never a schema
+drop), **foreign** (tables present, none of them init.sql's — which gets neither
+the mid-file diagnosis nor `DROP SCHEMA public CASCADE`, because nothing there
+came from init.sql), and **empty**, which is the one it provisions. A role that may not run what `init.sql` asks for is
 refused separately, with the Postgres message verbatim.
 
 **Applying `init.sql` is all-or-nothing** — `sql.unsafe` on a parameterless
