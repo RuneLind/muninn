@@ -15,6 +15,7 @@ import {
   extractPubDate,
   extractDesc,
   flattenWikiLinks,
+  flattenLinks,
   deriveFolderLabels,
   stemDisplayTitle,
   PLAN_STATUS_VALUES,
@@ -1800,6 +1801,22 @@ describe("extractDesc", () => {
   test("drops the leading ! from an image, keeping its alt text", () => {
     const md = "---\ntype: note\n---\n\n![a diagram](img.png) shows the flow.";
     expect(extractDesc(md)).toBe("a diagram shows the flow.");
+  });
+});
+
+describe("flattenLinks", () => {
+  // Driven DIRECTLY, not through extractDesc, which splits on "\n" and feeds
+  // this one line at a time — so the `\n` exclusion is unreachable from there
+  // and a test routed through it stays green when the exclusion is removed.
+  test("a dangling [[ never pairs with a LATER line's ]]", () => {
+    // Without the `\n` exclusion the lazy target group runs from the unclosed
+    // opener to the next line's `]]`, flattening both lines into one phantom
+    // target and destroying the real `[[Beta]]` link between them.
+    expect(flattenLinks("see [[Half Of A Link\n- [[Beta]] tail")).toBe("see [[Half Of A Link\n- Beta tail");
+  });
+
+  test("an alias is still taken from a well-formed link on one line", () => {
+    expect(flattenLinks("- [[Beta|the label]] tail")).toBe("- the label tail");
   });
 });
 

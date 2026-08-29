@@ -914,8 +914,12 @@ export function flattenWikiLinks(body: string): string {
  * markers (`**`, `__`, backticks, and boundary `*`/`_`) removed. A simple
  * markers-removal pass — not a markdown parser — so interior underscores in
  * `some_var_name` are left alone (they're never at a word boundary).
+ *
+ * Exported for its own unit test only — {@link extractDesc} feeds it one line at
+ * a time, so the `\n` exclusion below is unreachable through the public surface
+ * and a test driving it from there cannot fail when the exclusion is removed.
  */
-function flattenLinks(s: string): string {
+export function flattenLinks(s: string): string {
   return s
     // `\n`-free for {@link WIKILINK_RE}'s reason. Its caller feeds it one line at
     // a time today, so this is the invariant made explicit rather than a fix.

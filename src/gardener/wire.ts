@@ -95,7 +95,7 @@ const ONE_LINER_MIN = 20;
  * summary never asserted, and `insertIndexLine`'s idempotence check reads
  * `[[Title]]` substrings, so a fabricated target is worse than a dropped one.
  *
- * Three properties, each one a defect that shipped:
+ * Four properties, each one a defect that shipped:
  *  - the backup goes to the FIRST unclosed `[[`, via the shared
  *    {@link firstDanglingWikilinkOpen} — the detector (`checkIndexTruncation`)
  *    runs the same function, so writer and lint cannot disagree. Backing up to
@@ -106,11 +106,24 @@ const ONE_LINER_MIN = 20;
  *    `[[`-vs-`]]` reasoning sees; it is stripped after the backup.
  *  - the cut is by CODE POINT (`truncateUnits`), because a bare `slice` through
  *    an emoji stores a lone surrogate in `index.md` (the `ask-chat.ts` rule).
+ *  - **the dangling-open cut runs regardless of length.** The invariant is "a
+ *    one-liner never contains a partial link", NOT "truncation never creates
+ *    one": the model writes the rationale, so a 40-char one can carry a bare
+ *    `[[` or a nested `[[Foo [[Bar]]` of its own. An `if (length <= MAX) return
+ *    text` ahead of the check shipped both verbatim into index.md — the first as
+ *    the cross-line swallow this function exists to stop, the second as the
+ *    phantom target `Foo [[Bar` that eats the real `[[Bar]]` link — and the
+ *    linter's `index-truncation` check then reported the gardener's own write.
+ *
+ * The `…` marks removed content, so it is appended whenever anything was cut —
+ * including a dangling-open cut on a short rationale, which drops the debris and
+ * everything after it.
  */
 function truncateOneLiner(text: string): string {
-  if (text.length <= ONE_LINER_MAX) return text;
-  let cut = truncateUnits(text, ONE_LINER_MAX - 1);
+  const overLong = text.length > ONE_LINER_MAX;
+  let cut = overLong ? truncateUnits(text, ONE_LINER_MAX - 1) : text;
   const open = firstDanglingWikilinkOpen(cut);
+  if (open === -1 && !overLong) return text; // short and balanced — verbatim
   if (open !== -1) cut = cut.slice(0, open);
   cut = cut.trimEnd();
   while (cut.endsWith("[")) cut = cut.slice(0, -1).trimEnd();

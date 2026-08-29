@@ -7,7 +7,7 @@ import {
   selectWirablePages,
   ONE_LINER_MAX,
 } from "./wire.ts";
-import type { WikiIndex, WikiPageMeta } from "../wiki/store.ts";
+import { extractWikilinks, type WikiIndex, type WikiPageMeta } from "../wiki/store.ts";
 
 /**
  * Minimal WikiIndex fake: `pages` are { title → relPath }. `resolve` matches by
@@ -140,6 +140,50 @@ describe("buildIndexEntry", () => {
     expect(oneLinerOf("Short one about [[Code Mode]] and nothing else")).toBe(
       "Short one about [[Code Mode]] and nothing else",
     );
+  });
+
+  // ── The dangling-open cut also runs on text UNDER the cap ─────────────────
+  //
+  // The rationale is model-written prose, so a short one can carry a partial
+  // link the truncator never created. A `length <= MAX` early return ahead of
+  // the check shipped it verbatim into index.md, and the linter's
+  // `index-truncation` check then reported the gardener's own write.
+
+  test("a SHORT rationale carrying a bare dangling [[ is cut at the opener", () => {
+    const one = oneLinerOf("The gate compares the two drafts, see [[Half Of A Link and more");
+    expect(one).toBe("The gate compares the two drafts, see…");
+    expect(hasDanglingOpen(one)).toBe(false);
+  });
+
+  test("a SHORT rationale carrying a nested [[Foo [[Bar]] ships no phantom target", () => {
+    // `[[Foo [[Bar]]` extracts as the single phantom target `Foo [[Bar`,
+    // swallowing the real `[[Bar]]` — under the cap as much as over it.
+    const e = buildIndexEntry({
+      title: "T",
+      kind: "concept",
+      domain: "ai",
+      rationale: "Compare the two harness designs: [[Foo [[Bar]] here",
+    });
+    expect(e!.line).toBe("- [[T]] — Compare the two harness designs:…");
+    expect(extractWikilinks(e!.line)).toEqual(["T"]);
+    expect(hasDanglingOpen(e!.line)).toBe(false);
+  });
+
+  test("a SHORT, balanced rationale is still byte-identical", () => {
+    const rationale = "Short one about [[Code Mode]] and [[Another Page|its alias]] here";
+    const e = buildIndexEntry({ title: "T", kind: "concept", domain: "ai", rationale });
+    expect(e!.line).toBe(`- [[T]] — ${rationale}`);
+  });
+
+  test("a SHORT rationale whose cut degenerates under the floor falls back to the body", () => {
+    const e = buildIndexEntry({
+      title: "T",
+      kind: "concept",
+      domain: "ai",
+      rationale: "see [[Half Of A Link and more",
+      body: "The first body paragraph, which is a perfectly good one-liner.",
+    });
+    expect(e!.line).toBe("- [[T]] — The first body paragraph, which is a perfectly good one-liner.");
   });
 
   test("a link starting at offset 0 drops the one-liner rather than shipping `[[…`", () => {
