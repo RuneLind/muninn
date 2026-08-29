@@ -818,6 +818,13 @@ describe("the CLI prints the Postgres diagnosis, not just its message", () => {
 });
 
 describe("the boot gate diagnoses a FILE problem as a file problem", () => {
+  afterAll(async () => {
+    // The staging tree is rebuilt at the start of the case, but nothing removed
+    // it afterwards — 384 KB and a symlink into node_modules, left in tmpdir on
+    // every run, forever.
+    await Bun.$`rm -rf ${SCRATCH_DIR}`.quiet().nothrow();
+  });
+
   test("a missing db/init.sql answers at once, not after the connect budget", async () => {
     // Read inside the connect-retry loop, an ENOENT was caught by the catch that
     // treats every non-fatal error as "not up yet" — so a crash-looping pod
@@ -846,7 +853,12 @@ describe("the boot gate diagnoses a FILE problem as a file problem", () => {
     expect(code).toBe(2);
     expect(stderr).toContain("db/init.sql");
     expect(stderr).not.toContain("Could not reach the database");
-    // Well under bun's own per-test timeout, and nowhere near the 30s budget.
-    expect(Date.now() - started).toBeLessThan(4_000);
-  });
+    // Reachable, which it was not: at 4s under bun's default 5s per-test
+    // timeout, the RED against the unfixed code arrived as a harness timeout and
+    // this line never evaluated — so the assertion documenting the property was
+    // not the thing that failed. The case carries its own timeout now, well
+    // above the 30s budget it is asserting the absence of. Measured on the fixed
+    // path: 19–22 ms.
+    expect(Date.now() - started).toBeLessThan(10_000);
+  }, 45_000);
 });

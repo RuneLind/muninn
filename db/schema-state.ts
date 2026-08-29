@@ -26,56 +26,86 @@
 export const LEDGER_TABLE = "schema_migrations";
 
 /**
- * Strip everything Postgres would not read as code, so a `CREATE TABLE` inside
- * a comment, a plpgsql body or a string literal is not counted as a declaration.
+ * Blank out everything Postgres would not read as executable code, leaving the
+ * statement structure intact.
  *
- * Not cosmetic. An OVER-match is the dangerous direction: one phantom table name
- * makes every complete, healthy production database report as incomplete and be
- * refused forever, with a `DROP SCHEMA public CASCADE` beside the refusal.
- * `db/init.sql` already carries ten `$$ … $$` bodies, so a `CREATE TEMP TABLE`
- * inside a trigger function is one edit away.
+ * A SCANNER over Postgres's LEXER STATES, and the enumeration is the design.
+ * Two earlier versions each added the state whose absence had just been
+ * measured — layered regexes, then a scanner that knew about comments,
+ * standard literals and dollar quotes but not quoted identifiers or
+ * escape-strings. Each gap is a defect of the same shape, so the states are
+ * listed once, here, and each is pinned by a test:
  *
- * Dollar-quoted bodies go FIRST: they can contain quotes and comment markers,
- * and stripping quotes first would tear them in half. Nested block comments
- * (which Postgres does support) are not handled — the non-greedy match ends at
- * the first closing marker; that under-strips rather than over-strips, and
- * init.sql has none.
- */
-/**
- * Blank out everything Postgres would not read as code — comments, string
- * literals and dollar-quoted bodies — leaving the statement structure intact.
+ *   `-- …`            line comment, to the newline
+ *   `/* … *\u002f`   block comment, NESTED (Postgres nests these)
+ *   `'…'`             standard literal; `''` is an escaped quote
+ *   `E'…'`            escape-string; `\'` escapes too, and `\\` is a literal
+ *                     backslash. Only the E form — with the default
+ *                     `standard_conforming_strings=on`, a backslash in a plain
+ *                     literal is an ordinary character
+ *   `"…"`             quoted IDENTIFIER; `""` is an escaped quote. Everything
+ *                     else inside — `'`, `--`, `$$` — is ordinary
+ *   `$tag$ … $tag$`   dollar quote; the closing tag must MATCH
  *
- * A SCANNER, not layered regexes, and that is a correction rather than a
- * preference. Layering cannot express the precedence: strip literals first and
- * a `$$ it's a body $$` tears in half; strip dollar quotes first and two
- * literals that each contain `$x$` are read as one body, swallowing every
- * declaration between them. Both were measured on the regex version.
+ * `U&'…'`, `U&"…"`, `B'…'` and `X'…'` need no state of their own: the prefix is
+ * ordinary characters and the quote that follows behaves as its own kind does.
  *
- * Both directions are dangerous, in different ways. An OVER-match invents a
+ * Both failure directions are dangerous, differently. An OVER-match invents a
  * table, so every healthy production database classifies incomplete and the boot
- * gate refuses it forever with a schema drop printed beside the refusal. An
- * UNDER-match drops one, so a database genuinely missing it classifies COMPLETE,
- * the gate passes, and the entrypoint runs the migration runner onto a
- * half-schema — the crash this module exists to prevent.
+ * gate refuses it on every restart with a schema drop printed beside the
+ * refusal. An UNDER-match drops one, so a database genuinely missing it
+ * classifies COMPLETE, the gate passes, and the entrypoint runs the migration
+ * runner onto a half-schema — the crash this module exists to prevent.
  *
  * Everything skipped is replaced by a space, so tokens on either side cannot
- * fuse into a keyword that was not written.
+ * fuse into a keyword nobody wrote (`CREATE/*x*\u002fTABLE`).
  */
 export function stripNonCode(sql: string): string {
   let out = "";
   let i = 0;
-  while (i < sql.length) {
-    const two = sql.slice(i, i + 2);
 
-    if (two === "--") {
+  /** Consume a quote-delimited run. The doubled quote (`''`, `""`) is the SQL
+   *  escape; `backslash` adds the E-string one. Unterminated consumes to the
+   *  end — for a truncated file that under-matches, which `classifySchemaState`
+   *  then refuses outright rather than reading as a state.
+   *
+   *  ⚠️ The doubled-quote branch is NOT observable through this function's
+   *  output, and no test pins it — measured, by mutation. `'a''b'` without it is
+   *  two adjacent literals covering the same span, and a quoted identifier is
+   *  emitted as a verbatim slice either way, so the text out is identical.
+   *  It stays because this reads as a general "consume a quoted run" helper and
+   *  the next caller — anything that wants the CONTENT rather than the span —
+   *  would be silently wrong without it. Said out loud rather than covered by a
+   *  test that could not fail. (The `""` that IS observable is the one in the
+   *  NAME, handled by the capture below and pinned.) */
+  const consumeQuoted = (quote: string, backslash: boolean): void => {
+    i++;
+    while (i < sql.length) {
+      if (backslash && sql[i] === "\\") {
+        i += 2;
+        continue;
+      }
+      if (sql[i] === quote) {
+        if (sql[i + 1] === quote) i += 2;
+        else {
+          i++;
+          return;
+        }
+      } else i++;
+    }
+  };
+
+  while (i < sql.length) {
+    const ch = sql[i]!;
+
+    if (ch === "-" && sql[i + 1] === "-") {
       const nl = sql.indexOf("\n", i);
       i = nl === -1 ? sql.length : nl;
       out += " ";
       continue;
     }
 
-    if (two === "/*") {
-      // Postgres nests block comments; so does this.
+    if (ch === "/" && sql[i + 1] === "*") {
       let depth = 1;
       i += 2;
       while (i < sql.length && depth > 0) {
@@ -87,39 +117,49 @@ export function stripNonCode(sql: string): string {
       continue;
     }
 
-    if (sql[i] === "'") {
+    // An E-string is `E'`/`e'` where the E is its own token — not the tail of an
+    // identifier like `value'`. Checked against the preceding character rather
+    // than assumed, since `CREATE'` would otherwise read as an escape-string.
+    if ((ch === "E" || ch === "e") && sql[i + 1] === "'" && !/[A-Za-z0-9_$]/.test(sql[i - 1] ?? " ")) {
       i++;
-      while (i < sql.length) {
-        if (sql[i] === "'") {
-          if (sql[i + 1] === "'") i += 2; // an escaped quote, not the end
-          else {
-            i++;
-            break;
-          }
-        } else i++;
-      }
+      consumeQuoted("'", true);
       out += " '' ";
       continue;
     }
 
-    // A dollar quote opens with `$$` or `$tag$`, where tag is an identifier —
+    if (ch === "'") {
+      consumeQuoted("'", false);
+      out += " '' ";
+      continue;
+    }
+
+    // A quoted IDENTIFIER is code — it names the thing — so unlike the others it
+    // is emitted rather than blanked, and the regex below accepts it. What
+    // matters is that `'`, `--` and `$$` inside it are ordinary characters: with
+    // no state here, `CREATE TABLE "it's"` opened a literal that ran to the next
+    // apostrophe ANYWHERE in the file, swallowing every declaration between.
+    if (ch === '"') {
+      const start = i;
+      consumeQuoted('"', false);
+      out += sql.slice(start, i);
+      continue;
+    }
+
+    // A dollar quote opens with `$$` or `$tag$`, tag being an identifier —
     // which is what separates it from a positional parameter like `$1`.
     const open = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/.exec(sql.slice(i));
     if (open) {
       const tag = open[0];
       const close = sql.indexOf(tag, i + tag.length);
-      // The closing tag must MATCH. An optional backreference — the first
-      // version's spelling — let a bare `$$` close a `$tag$`, which is exactly
-      // the nesting idiom used when a body itself contains `$$`.
-      // Unterminated: consume to the end rather than emitting a half-body, but
-      // keep what came before, so the declared set is short by that tail rather
-      // than empty.
+      // The closing tag must MATCH: an optional backreference let a bare `$$`
+      // close a `$tag$`, which is exactly the nesting idiom used when a body
+      // itself contains `$$`.
       i = close === -1 ? sql.length : close + tag.length;
       out += " ";
       continue;
     }
 
-    out += sql[i];
+    out += ch;
     i++;
   }
   return out;
@@ -142,10 +182,14 @@ export function stripNonCode(sql: string): string {
 export function tablesDeclaredByInitSql(initSql: string): string[] {
   const code = stripNonCode(initSql);
   const pattern =
-    /\bCREATE\s+(?:UNLOGGED\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)\s*\.\s*)?("[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)/gi;
+    /\bCREATE\s+(?:UNLOGGED\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:(?:"(?:[^"]|"")*"|[A-Za-z_][A-Za-z0-9_$]*)\s*\.\s*)?("(?:[^"]|"")*"|[A-Za-z_][A-Za-z0-9_$]*)/gi;
   const names = [...code.matchAll(pattern)].map((m) => {
     const raw = m[1]!;
-    return raw.startsWith('"') ? raw.slice(1, -1) : raw.toLowerCase();
+    // `""` inside a quoted identifier is ONE literal quote: Postgres names
+    // `"a""b"` the table `a"b`. Capturing `"a"` instead reports the real table
+    // as missing, which refuses a healthy database — the under-match direction
+    // by way of a name rather than a count.
+    return raw.startsWith('"') ? raw.slice(1, -1).replaceAll('""', '"') : raw.toLowerCase();
   });
   return [...new Set(names)];
 }

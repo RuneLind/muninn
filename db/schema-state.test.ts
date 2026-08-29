@@ -144,13 +144,107 @@ describe("stripNonCode — the two inputs that broke the first version", () => {
   });
 });
 
-describe("stripNonCode", () => {
-  test("takes the dollar-quoted body first, so its quotes cannot tear the rest", () => {
-    // Order matters: a body can contain an apostrophe, and stripping string
-    // literals first would consume from inside it to somewhere else entirely.
+describe("stripNonCode — one case per lexer state", () => {
+  // The states are enumerated in the function's header, and each one is pinned
+  // here. Two earlier versions each added the state whose absence had just been
+  // measured; the list is the design, so the list is the test.
+
+  test("a dollar-quoted body swallows quotes and comment markers whole", () => {
     const out = stripNonCode("$$ it's a body with -- and /* inside $$ CREATE TABLE t (x int);");
     expect(out).toContain("CREATE TABLE t");
     expect(out).not.toContain("body");
+  });
+
+  test("a QUOTED IDENTIFIER containing an apostrophe does not open a literal", () => {
+    // Without this state, `"it's"` opened a literal that ran to the next
+    // apostrophe ANYWHERE in the file — an unbounded UNDER-match, which is the
+    // direction that boots a pod onto a half-schema.
+    expect(tablesDeclaredByInitSql(`CREATE TABLE "it's" (i int); CREATE TABLE after (i int);`))
+      .toEqual(["it's", "after"]);
+  });
+
+  test("a quoted identifier containing -- or a dollar quote is still just a name", () => {
+    expect(tablesDeclaredByInitSql(`CREATE TABLE "a--b" (i int); CREATE TABLE after (i int);`))
+      .toEqual(["a--b", "after"]);
+    expect(tablesDeclaredByInitSql(`CREATE TABLE t ("user's id" int); CREATE TABLE after (i int);`))
+      .toEqual(["t", "after"]);
+  });
+
+  test("an E-string escapes with a backslash — both directions of getting it wrong", () => {
+    // UNDER-match if `\'` is read as the end of the literal:
+    expect(tablesDeclaredByInitSql(`SELECT E'don\\'t'; CREATE TABLE t (i int);`)).toEqual(["t"]);
+    // OVER-match if the run between two escaped quotes is read as code:
+    expect(
+      tablesDeclaredByInitSql(
+        `SELECT E'a\\' CREATE TABLE ghost (i int); \\'b'; CREATE TABLE ok (i int);`,
+      ),
+    ).toEqual(["ok"]);
+  });
+
+  test("a PLAIN literal does NOT escape with a backslash", () => {
+    // standard_conforming_strings has defaulted on since 9.1, so a backslash in
+    // a plain literal is an ordinary character and the quote after it CLOSES.
+    // Treating it as an escape would run the literal on and swallow code.
+    expect(tablesDeclaredByInitSql(`SELECT 'a\\'; CREATE TABLE t (i int);`)).toEqual(["t"]);
+  });
+
+  test("`E` must be its own token, not the tail of an identifier", () => {
+    // `value'` would otherwise read as an escape-string opener.
+    expect(tablesDeclaredByInitSql(`SELECT value'x'; CREATE TABLE t (i int);`)).toEqual(["t"]);
+  });
+
+  test("BLOCK COMMENTS NEST, as they do in Postgres", () => {
+    // Un-nested, the first closing marker ends the comment and the tail is read
+    // as code — an OVER-match, inventing `ghost`.
+    expect(tablesDeclaredByInitSql("/* a /* b */ CREATE TABLE ghost (i int); */ CREATE TABLE t (i int);"))
+      .toEqual(["t"]);
+  });
+
+  test("a skipped region leaves a SPACE, so tokens cannot fuse", () => {
+    // `CREATE/*x*/TABLE t` is `CREATE TABLE t` to Postgres. Blanked to nothing
+    // it becomes `CREATETABLE t` and the table is silently dropped.
+    expect(tablesDeclaredByInitSql("CREATE/**/TABLE t (i int);")).toEqual(["t"]);
+  });
+
+  test("an UNTERMINATED dollar body consumes to the end rather than emitting half of one", () => {
+    // Emitting the tail would read the body's contents as declarations.
+    expect(
+      tablesDeclaredByInitSql(
+        "CREATE TABLE before_it (i int);\nCREATE FUNCTION f() AS $$ CREATE TABLE inside_body (i int);",
+      ),
+    ).toEqual(["before_it"]);
+  });
+
+  test("an unterminated literal and an unterminated block comment also consume to the end", () => {
+    expect(tablesDeclaredByInitSql("CREATE TABLE t (i int); SELECT 'oops CREATE TABLE ghost (i int);"))
+      .toEqual(["t"]);
+    expect(tablesDeclaredByInitSql("CREATE TABLE t (i int); /* oops CREATE TABLE ghost (i int);"))
+      .toEqual(["t"]);
+  });
+
+  test("`E` at the tail of an identifier does not turn a plain literal into an escape one", () => {
+    // `value'a\\'` is `value` followed by the plain literal `a\\`, which CLOSES at
+    // that quote. Read as an E-string, the backslash escapes it and the literal
+    // runs to the next apostrophe — swallowing every declaration after it.
+    expect(tablesDeclaredByInitSql(String.raw`SELECT value'a\'; CREATE TABLE t (i int);`))
+      .toEqual(["t"]);
+  });
+
+  test('`""` inside a quoted identifier is ONE quote, as Postgres names it', () => {
+    // Measured against the real lexer: `CREATE TABLE "a""b"` creates a table
+    // named `a"b`. Capturing `a` instead reports the real one as missing, which
+    // refuses a healthy database — an under-match by way of the NAME rather
+    // than the count, and the only thing that makes the doubled-quote escape
+    // observable at all (inside a plain literal it is not: `''` is simply two
+    // adjacent literals covering the same span).
+    expect(tablesDeclaredByInitSql(`CREATE TABLE "a""b" (i int); CREATE TABLE after (i int);`))
+      .toEqual([`a"b`, "after"]);
+  });
+
+  test("U&, B and X prefixes need no state of their own", () => {
+    expect(tablesDeclaredByInitSql(`SELECT U&'d\\0061t'; CREATE TABLE t (i int);`)).toEqual(["t"]);
+    expect(tablesDeclaredByInitSql(`SELECT B'1011'; CREATE TABLE t (i int);`)).toEqual(["t"]);
+    expect(tablesDeclaredByInitSql(`SELECT X'1FF'; CREATE TABLE t (i int);`)).toEqual(["t"]);
   });
 });
 

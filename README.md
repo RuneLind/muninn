@@ -848,12 +848,13 @@ The image is built from one `Dockerfile` with three build args. Two are **on** b
 
 The container's entrypoint runs, in order: adopt `DB_URL` as `DATABASE_URL` if only the former is set, refuse an unready database, apply pending migrations (serialised across replicas by an advisory lock), then `exec` the CMD. Both scripts it calls resolve the same pair themselves (`DATABASE_URL` → `DB_URL`, then — for the migration runner only — the dev default; `db/database-url.ts`), so the remedies below still find nais's credentials when they replace the entrypoint.
 
-"Unready" is two distinct states, each answered with the command that fixes it rather than a raw SQL error:
+"Unready" is three distinct states, each answered with the command that fixes it rather than a raw SQL error. The predicate is the whole table set (see above), so a *partly* applied schema is its own answer rather than being mistaken for the second row:
 
 | State | What the entrypoint says |
 |---|---|
-| No `users` table — never provisioned | Run `bun db/provision.ts --yes` (`bun run db:provision -- --yes`) — it applies `db/init.sql` **and** records the shipped migrations, from the image itself. No psql, no checkout, no file transport (see the one-off forms below). `psql -f db/init.sql` still works from a machine that has psql *and* can reach the database — but a private-IP Cloud SQL instance has no such machine, which is why this is not the leading answer |
-| Schema present, `schema_migrations` empty — provisioned but never baselined | Run `bun db/migrate.ts --baseline` (`bun run db:migrate:baseline`) — from the image itself, no psql and no checkout needed (see the one-off forms below) |
+| No tables at all — never provisioned | Run `bun db/provision.ts --yes` (`bun run db:provision -- --yes`) — it applies `db/init.sql` **and** records the shipped migrations, from the image itself. No psql, no checkout, no file transport (see the one-off forms below). `psql -f db/init.sql` still works from a machine that has psql *and* can reach the database — but a private-IP Cloud SQL instance has no such machine, which is why this is not the leading answer |
+| Partly applied — some of `db/init.sql`'s tables, not all | Refused by name, listing what is present and what is missing, and told explicitly **not** to baseline. `--baseline` here succeeds, satisfies this very check, and boots the pod on a stump of a schema with every migration recorded — so nothing could repair it afterwards. (A lone `schema_migrations`, with or without rows, gets `DROP TABLE schema_migrations` instead of a schema drop; tables that never came from `init.sql` get neither.) |
+| Complete schema, `schema_migrations` empty — provisioned but never baselined | Run `bun db/migrate.ts --baseline` (`bun run db:migrate:baseline`) — from the image itself, no psql and no checkout needed (see the one-off forms below) |
 
 **The baseline command cannot be an `exec`.** The refusal makes the entrypoint exit, so under `restart: unless-stopped` (or a Deployment) there is no running process to exec into — `docker compose exec app …` answers `service "app" is not running`. Run it as a one-off container instead:
 

@@ -42,7 +42,10 @@
  * the operator's call; naming it is ours.
  *
  * Exit codes: 0 ready, 1 not ready (with the operator instruction), 2 could not
- * reach the database within the connect budget.
+ * ASK — an unresolved or unusable database URL, a database that never answered
+ * within the connect budget, or a `db/init.sql` this process cannot read or
+ * parse, which is what the predicate is built from. The distinction that
+ * matters is 1 "the answer is no" versus 2 "there was no answer".
  *
  * Usage: `DATABASE_URL=… bun db/require-provisioned.ts` (or `DB_URL=…`, nais's
  * envVarPrefix form — see ./database-url.ts; this script is normally run BY the
@@ -209,8 +212,8 @@ async function main(): Promise<number> {
     }
   } catch (err) {
     console.error(
-      `Cannot read db/init.sql, so this check cannot tell a provisioned database from an ` +
-        `empty one: ${err instanceof Error ? err.message : String(err)}`,
+      `Cannot build the schema predicate from db/init.sql, so this check cannot tell a ` +
+        `provisioned database from an empty one: ${err instanceof Error ? err.message : String(err)}`,
     );
     return 2;
   }
