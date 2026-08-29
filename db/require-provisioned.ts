@@ -42,10 +42,13 @@
  * the operator's call; naming it is ours.
  *
  * Exit codes: 0 ready, 1 not ready (with the operator instruction), 2 could not
- * ASK — an unresolved or unusable database URL, a database that never answered
- * within the connect budget, or a `db/init.sql` this process cannot read or
- * parse, which is what the predicate is built from. The distinction that
- * matters is 1 "the answer is no" versus 2 "there was no answer".
+ * ASK. The distinction that matters is 1 "the answer is no" versus 2 "there was
+ * no answer" — and 2 has four doors: an unresolved database URL, a URL whose
+ * TLS material this process cannot use, a database that never answered within
+ * the connect budget OR answered with a fatal code (`FATAL_PG_CODES` — no such
+ * catalog, bad credentials; it DID answer, but not about the schema), and a
+ * `db/init.sql` this process cannot read or parse, which is what the predicate
+ * is built from.
  *
  * Usage: `DATABASE_URL=… bun db/require-provisioned.ts` (or `DB_URL=…`, nais's
  * envVarPrefix form — see ./database-url.ts; this script is normally run BY the

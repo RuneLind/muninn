@@ -13,7 +13,6 @@ import {
   classifySchemaState,
   LEDGER_TABLE,
   plural,
-  stripNonCode,
   tablesDeclaredByInitSql,
 } from "./schema-state.ts";
 
@@ -96,7 +95,7 @@ describe("tablesDeclaredByInitSql — what must be counted", () => {
   });
 });
 
-describe("stripNonCode — the two inputs that broke the first version", () => {
+describe("the two inputs that broke the first parser", () => {
   test("a NESTED dollar-quoted body: a bare $$ must NOT close a tagged one", () => {
     // Nesting an outer tag BECAUSE the body contains `$$` is the standard
     // Postgres idiom, so this fires on the first nested function anyone adds to
@@ -144,15 +143,17 @@ describe("stripNonCode — the two inputs that broke the first version", () => {
   });
 });
 
-describe("stripNonCode — one case per lexer state", () => {
+describe("one case per lexer state", () => {
   // The states are enumerated in the function's header, and each one is pinned
   // here. Two earlier versions each added the state whose absence had just been
   // measured; the list is the design, so the list is the test.
 
   test("a dollar-quoted body swallows quotes and comment markers whole", () => {
-    const out = stripNonCode("$$ it's a body with -- and /* inside $$ CREATE TABLE t (x int);");
-    expect(out).toContain("CREATE TABLE t");
-    expect(out).not.toContain("body");
+    expect(
+      tablesDeclaredByInitSql(
+        "$$ it's a body with -- and /* CREATE TABLE ghost (i int); inside $$ CREATE TABLE t (x int);",
+      ),
+    ).toEqual(["t"]);
   });
 
   test("a QUOTED IDENTIFIER containing an apostrophe does not open a literal", () => {
@@ -239,6 +240,57 @@ describe("stripNonCode — one case per lexer state", () => {
     // adjacent literals covering the same span).
     expect(tablesDeclaredByInitSql(`CREATE TABLE "a""b" (i int); CREATE TABLE after (i int);`))
       .toEqual([`a"b`, "after"]);
+  });
+
+  test("a doubled quote inside an E-string keeps the run going — the branch is NOT a no-op", () => {
+    // Claimed an equivalent mutant in an earlier round; it is not, and these are
+    // the counterexamples. `E'a''b\'c'` is ONE string to Postgres (measured: it
+    // selects `a'b'c`). Handing control back at the first quote of the `''`
+    // re-enters as a PLAIN literal, which does not honour `\'` — so the two
+    // scanners disagree about every escape after it, in BOTH directions.
+    expect(tablesDeclaredByInitSql(String.raw`SELECT E'a''b\'c'; CREATE TABLE t (i int);`))
+      .toEqual(["t"]);
+    expect(tablesDeclaredByInitSql(String.raw`SELECT E'''\'q'; CREATE TABLE t (i int);`))
+      .toEqual(["t"]);
+    // And the other direction: unterminated, so nothing after it counts.
+    expect(tablesDeclaredByInitSql(String.raw`SELECT E'a''\'; CREATE TABLE t (i int);`))
+      .toEqual([]);
+  });
+
+  test("an UNTERMINATED quoted identifier stops the scan instead of emitting the file", () => {
+    // The regression this rewrite removes at the root. The previous scanner
+    // EMITTED an identifier's span so a regex could read the name, so one
+    // unpaired `"` handed the whole rest of the file to that regex as code —
+    // every comment, literal and function body in it. Over-match: phantom names
+    // enter `declared`, are never in `present`, and a complete healthy database
+    // is refused on every restart with a schema drop printed beside it.
+    // No `--` in the tail: resuming inside the identifier must not find this
+    // `CREATE TABLE`. (With a comment in the way the two behaviours agree by
+    // accident, which is how the first version of this case passed against the
+    // bug it was written for.)
+    expect(
+      tablesDeclaredByInitSql(
+        `CREATE TABLE t_ok (i int); SELECT 1 AS "oops CREATE TABLE ghost (i int);`,
+      ),
+    ).toEqual(["t_ok"]);
+  });
+
+  test("a quoted identifier's CONTENT is never read as a declaration", () => {
+    // Same root cause, reachable without a stray quote: the regex read inside
+    // the identifier text the scanner emitted.
+    expect(tablesDeclaredByInitSql(`CREATE TABLE t ("CREATE TABLE ghost" int);`)).toEqual(["t"]);
+    expect(tablesDeclaredByInitSql(`COMMENT ON COLUMN t."create table ghost" IS 'x';`)).toEqual([]);
+  });
+
+  test("a quoted identifier is never a keyword, even when it spells one", () => {
+    // A table may legally be named `"CREATE"`, and the scan must not re-enter
+    // the state machine on it. The distinguishing input is deliberately not
+    // valid SQL — `"create" TABLE ghost` cannot appear in a working file — and
+    // that is the point: this scanner runs over a file that may be TRUNCATED or
+    // half-merged, which is exactly when invalid token sequences show up, and an
+    // over-match there refuses a healthy database on every restart.
+    expect(tablesDeclaredByInitSql(`CREATE TABLE "CREATE" (i int);`)).toEqual(["CREATE"]);
+    expect(tablesDeclaredByInitSql(`SELECT "create" TABLE ghost;`)).toEqual([]);
   });
 
   test("U&, B and X prefixes need no state of their own", () => {

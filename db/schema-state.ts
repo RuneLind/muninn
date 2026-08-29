@@ -24,27 +24,34 @@
 /** The ledger table. Named once — three call sites reason about it specially,
  *  and it is the one table `db/migrate.ts` creates by itself. */
 export const LEDGER_TABLE = "schema_migrations";
-
 /**
- * Blank out everything Postgres would not read as executable code, leaving the
- * statement structure intact.
+ * Every table `db/init.sql` declares, read out of the file itself.
  *
- * A SCANNER over Postgres's LEXER STATES, and the enumeration is the design.
- * Two earlier versions each added the state whose absence had just been
- * measured — layered regexes, then a scanner that knew about comments,
- * standard literals and dollar quotes but not quoted identifiers or
- * escape-strings. Each gap is a defect of the same shape, so the states are
- * listed once, here, and each is pinned by a test:
+ * DERIVED, never a remembered list: a hand-kept one is a single migration away
+ * from calling a complete database incomplete.
+ *
+ * ONE PASS, and that is the design. Three earlier versions stripped the
+ * non-code and then ran a regex over what was left, and that seam is where the
+ * defects lived — the strip and the match disagreed about what a token was. The
+ * last of them emitted quoted identifiers verbatim so the regex could read the
+ * name, which meant the regex also read INSIDE them (`t ("CREATE TABLE ghost"
+ * int)` declared `ghost`), and an unterminated `"` emitted the whole rest of the
+ * file as code. Recognising the statement while scanning removes the seam:
+ * nothing is emitted, so nothing is re-lexed.
+ *
+ * The scan walks Postgres's LEXER STATES. Each is pinned by a test, and the
+ * list is the design — earlier versions added the state whose absence had just
+ * been measured, three times running:
  *
  *   `-- …`            line comment, to the newline
- *   `/* … *\u002f`   block comment, NESTED (Postgres nests these)
+ *   block comment    `/*` … its closing marker, NESTED (Postgres nests these)
  *   `'…'`             standard literal; `''` is an escaped quote
- *   `E'…'`            escape-string; `\'` escapes too, and `\\` is a literal
- *                     backslash. Only the E form — with the default
- *                     `standard_conforming_strings=on`, a backslash in a plain
- *                     literal is an ordinary character
- *   `"…"`             quoted IDENTIFIER; `""` is an escaped quote. Everything
- *                     else inside — `'`, `--`, `$$` — is ordinary
+ *   `E'…'`            escape-string; `\'` escapes too. Only the E form — with
+ *                     the default `standard_conforming_strings=on`, a backslash
+ *                     in a plain literal is an ordinary character
+ *   `"…"`             quoted IDENTIFIER; `""` is one literal quote, so
+ *                     `"a""b"` names the table `a"b`. Everything else inside —
+ *                     `'`, `--`, `$$` — is ordinary
  *   `$tag$ … $tag$`   dollar quote; the closing tag must MATCH
  *
  * `U&'…'`, `U&"…"`, `B'…'` and `X'…'` need no state of their own: the prefix is
@@ -57,140 +64,169 @@ export const LEDGER_TABLE = "schema_migrations";
  * classifies COMPLETE, the gate passes, and the entrypoint runs the migration
  * runner onto a half-schema — the crash this module exists to prevent.
  *
- * Everything skipped is replaced by a space, so tokens on either side cannot
- * fuse into a keyword nobody wrote (`CREATE/*x*\u002fTABLE`).
+ * An unterminated anything — literal, identifier, dollar body, block comment —
+ * ends the scan there. That under-matches, which is the right way round for a
+ * truncated file: there is nothing trustworthy after the break, and
+ * `classifySchemaState` refuses an empty result outright.
+ *
+ * `TEMP`/`TEMPORARY` declarations are deliberately NOT collected: a temp table
+ * lives in `pg_temp_N` and never appears under `table_schema = 'public'`
+ * (measured), so counting one makes it a permanent phantom — the over-match
+ * failure by another door.
  */
-export function stripNonCode(sql: string): string {
-  let out = "";
+export function tablesDeclaredByInitSql(sql: string): string[] {
+  const names: string[] = [];
   let i = 0;
 
-  /** Consume a quote-delimited run. The doubled quote (`''`, `""`) is the SQL
-   *  escape; `backslash` adds the E-string one. Unterminated consumes to the
-   *  end — for a truncated file that under-matches, which `classifySchemaState`
-   *  then refuses outright rather than reading as a state.
+  /** Consume a quote-delimited run, returning its CONTENT with the doubled
+   *  quote un-escaped, or null if it never closed. `backslash` is the E-string
+   *  escape; a plain literal has none.
    *
-   *  ⚠️ The doubled-quote branch is NOT observable through this function's
-   *  output, and no test pins it — measured, by mutation. `'a''b'` without it is
-   *  two adjacent literals covering the same span, and a quoted identifier is
-   *  emitted as a verbatim slice either way, so the text out is identical.
-   *  It stays because this reads as a general "consume a quoted run" helper and
-   *  the next caller — anything that wants the CONTENT rather than the span —
-   *  would be silently wrong without it. Said out loud rather than covered by a
-   *  test that could not fail. (The `""` that IS observable is the one in the
-   *  NAME, handled by the capture below and pinned.) */
-  const consumeQuoted = (quote: string, backslash: boolean): void => {
+   *  The doubled-quote branch is load-bearing in BOTH kinds. In an identifier
+   *  it is what makes `"a""b"` the table `a"b`. In an E-string it is what keeps
+   *  the run going — handing control back at the first quote of a `''` would
+   *  re-enter as a PLAIN literal and disagree about every `\'` after it. */
+  const readQuoted = (quote: string, backslash: boolean): string | null => {
     i++;
+    let value = "";
     while (i < sql.length) {
       if (backslash && sql[i] === "\\") {
+        value += sql.slice(i, i + 2);
         i += 2;
         continue;
       }
       if (sql[i] === quote) {
-        if (sql[i + 1] === quote) i += 2;
-        else {
-          i++;
-          return;
+        if (sql[i + 1] === quote) {
+          value += quote;
+          i += 2;
+          continue;
         }
-      } else i++;
+        i++;
+        return value;
+      }
+      value += sql[i];
+      i++;
+    }
+    return null;
+  };
+
+  /** The next word: a bare identifier/keyword, or a quoted identifier. Quoting
+   *  is recorded because a quoted name keeps its case and is never a keyword. */
+  const readWord = (): { text: string; quoted: boolean } | null => {
+    if (sql[i] === '"') {
+      const value = readQuoted('"', false);
+      return value === null ? null : { text: value, quoted: true };
+    }
+    const m = /^[A-Za-z_][A-Za-z0-9_$]*/.exec(sql.slice(i));
+    if (!m) return null;
+    i += m[0].length;
+    return { text: m[0], quoted: false };
+  };
+
+  /** Skip everything that is not the start of a word. Returns false when the
+   *  file ran out — including on an unterminated run, which stops the scan. */
+  const skipTrivia = (): boolean => {
+    for (;;) {
+      const ch = sql[i];
+      if (ch === undefined) return false;
+
+      if (ch === "-" && sql[i + 1] === "-") {
+        const nl = sql.indexOf("\n", i);
+        if (nl === -1) return false;
+        i = nl + 1;
+        continue;
+      }
+      if (ch === "/" && sql[i + 1] === "*") {
+        let depth = 1;
+        i += 2;
+        while (i < sql.length && depth > 0) {
+          if (sql.startsWith("/*", i)) (depth++, (i += 2));
+          else if (sql.startsWith("*/", i)) (depth--, (i += 2));
+          else i++;
+        }
+        if (depth > 0) return false;
+        continue;
+      }
+      if (ch === "'") {
+        if (readQuoted("'", false) === null) return false;
+        continue;
+      }
+      const dollar = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/.exec(sql.slice(i));
+      if (dollar) {
+        const tag = dollar[0];
+        const close = sql.indexOf(tag, i + tag.length);
+        if (close === -1) return false;
+        i = close + tag.length;
+        continue;
+      }
+      if (ch === '"' || /[A-Za-z_]/.test(ch)) return true;
+      i++;
     }
   };
 
-  while (i < sql.length) {
-    const ch = sql[i]!;
+  /** After `CREATE`: true when a real, non-temporary TABLE follows. */
+  const createsARealTable = (): boolean => {
+    for (;;) {
+      if (!skipTrivia()) return false;
+      const w = readWord();
+      if (!w || w.quoted) return false;
+      const upper = w.text.toUpperCase();
+      if (upper === "TABLE") return true;
+      if (upper === "UNLOGGED") continue;
+      // GLOBAL/LOCAL only ever precede TEMP/TEMPORARY, so they are abandoned
+      // with it rather than skipped.
+      return false;
+    }
+  };
 
-    if (ch === "-" && sql[i + 1] === "-") {
-      const nl = sql.indexOf("\n", i);
-      i = nl === -1 ? sql.length : nl;
-      out += " ";
+  while (skipTrivia()) {
+    const before = i;
+    const word = readWord();
+    if (!word) {
+      // An unterminated quoted identifier. Stop, rather than resuming inside it.
+      if (sql[before] === '"') break;
+      i = before + 1;
       continue;
     }
 
-    if (ch === "/" && sql[i + 1] === "*") {
-      let depth = 1;
-      i += 2;
-      while (i < sql.length && depth > 0) {
-        if (sql.startsWith("/*", i)) (depth++, (i += 2));
-        else if (sql.startsWith("*/", i)) (depth--, (i += 2));
-        else i++;
+    // An E-string opens with `E'` where the E is its OWN word — which is why
+    // this is checked here, after skipTrivia put us at a word start, rather
+    // than on the character. `value'x'` is the identifier `value` followed by a
+    // PLAIN literal, and reading it as an escape-string would swallow the rest.
+    if (!word.quoted && /^[Ee]$/.test(word.text) && sql[i] === "'") {
+      if (readQuoted("'", true) === null) break;
+      continue;
+    }
+
+    if (word.quoted || word.text.toUpperCase() !== "CREATE") continue;
+    if (!createsARealTable()) continue;
+    if (!skipTrivia()) break;
+
+    let head = readWord();
+    if (!head) break;
+    if (!head.quoted && head.text.toUpperCase() === "IF") {
+      for (const expected of ["NOT", "EXISTS"]) {
+        if (!skipTrivia()) return [...new Set(names)];
+        const w = readWord();
+        if (!w || w.quoted || w.text.toUpperCase() !== expected) return [...new Set(names)];
       }
-      out += " ";
-      continue;
+      if (!skipTrivia()) break;
+      const named = readWord();
+      if (!named) break;
+      head = named;
     }
 
-    // An E-string is `E'`/`e'` where the E is its own token — not the tail of an
-    // identifier like `value'`. Checked against the preceding character rather
-    // than assumed, since `CREATE'` would otherwise read as an escape-string.
-    if ((ch === "E" || ch === "e") && sql[i + 1] === "'" && !/[A-Za-z0-9_$]/.test(sql[i - 1] ?? " ")) {
+    // A schema qualifier: in `public.users` the NAME is the last part.
+    let name = head;
+    while (sql[i] === ".") {
       i++;
-      consumeQuoted("'", true);
-      out += " '' ";
-      continue;
+      const next = readWord();
+      if (!next) break;
+      name = next;
     }
-
-    if (ch === "'") {
-      consumeQuoted("'", false);
-      out += " '' ";
-      continue;
-    }
-
-    // A quoted IDENTIFIER is code — it names the thing — so unlike the others it
-    // is emitted rather than blanked, and the regex below accepts it. What
-    // matters is that `'`, `--` and `$$` inside it are ordinary characters: with
-    // no state here, `CREATE TABLE "it's"` opened a literal that ran to the next
-    // apostrophe ANYWHERE in the file, swallowing every declaration between.
-    if (ch === '"') {
-      const start = i;
-      consumeQuoted('"', false);
-      out += sql.slice(start, i);
-      continue;
-    }
-
-    // A dollar quote opens with `$$` or `$tag$`, tag being an identifier —
-    // which is what separates it from a positional parameter like `$1`.
-    const open = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/.exec(sql.slice(i));
-    if (open) {
-      const tag = open[0];
-      const close = sql.indexOf(tag, i + tag.length);
-      // The closing tag must MATCH: an optional backreference let a bare `$$`
-      // close a `$tag$`, which is exactly the nesting idiom used when a body
-      // itself contains `$$`.
-      i = close === -1 ? sql.length : close + tag.length;
-      out += " ";
-      continue;
-    }
-
-    out += ch;
-    i++;
+    names.push(name.quoted ? name.text : name.text.toLowerCase());
   }
-  return out;
-}
 
-/**
- * Every table `db/init.sql` declares, read out of the file itself.
- *
- * DERIVED, never a remembered list: a hand-kept one is a single migration away
- * from calling a complete database incomplete.
- *
- * `TEMP`/`TEMPORARY` tables are deliberately NOT counted. A temp table lives in
- * `pg_temp_N`, so it never appears under `table_schema = 'public'` — measured —
- * and counting one as declared makes it a permanent phantom, which is the
- * over-match failure by another door. Names are folded to lower case
- * unless double-quoted, because that is what Postgres stores — an unquoted
- * `CREATE TABLE Users` becomes `users` in `information_schema`, and comparing
- * the spellings literally would make it permanently "missing".
- */
-export function tablesDeclaredByInitSql(initSql: string): string[] {
-  const code = stripNonCode(initSql);
-  const pattern =
-    /\bCREATE\s+(?:UNLOGGED\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:(?:"(?:[^"]|"")*"|[A-Za-z_][A-Za-z0-9_$]*)\s*\.\s*)?("(?:[^"]|"")*"|[A-Za-z_][A-Za-z0-9_$]*)/gi;
-  const names = [...code.matchAll(pattern)].map((m) => {
-    const raw = m[1]!;
-    // `""` inside a quoted identifier is ONE literal quote: Postgres names
-    // `"a""b"` the table `a"b`. Capturing `"a"` instead reports the real table
-    // as missing, which refuses a healthy database — the under-match direction
-    // by way of a name rather than a count.
-    return raw.startsWith('"') ? raw.slice(1, -1).replaceAll('""', '"') : raw.toLowerCase();
-  });
   return [...new Set(names)];
 }
 

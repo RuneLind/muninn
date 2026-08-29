@@ -853,12 +853,13 @@ describe("the boot gate diagnoses a FILE problem as a file problem", () => {
     expect(code).toBe(2);
     expect(stderr).toContain("db/init.sql");
     expect(stderr).not.toContain("Could not reach the database");
-    // Reachable, which it was not: at 4s under bun's default 5s per-test
-    // timeout, the RED against the unfixed code arrived as a harness timeout and
-    // this line never evaluated — so the assertion documenting the property was
-    // not the thing that failed. The case carries its own timeout now, well
-    // above the 30s budget it is asserting the absence of. Measured on the fixed
-    // path: 19–22 ms.
+    // A backstop, not the assertion that carries the case. At 4s under bun's
+    // default 5s per-test timeout the RED arrived as a harness timeout, so the
+    // per-test timeout is raised to sit above the 30s budget being asserted
+    // against — but what actually fails against the unfixed code is the
+    // `not.toContain("Could not reach the database")` line above, which is the
+    // better failure anyway: a readable diff rather than a stopwatch. Measured
+    // on the fixed path: 19–22 ms.
     expect(Date.now() - started).toBeLessThan(10_000);
   }, 45_000);
 });
