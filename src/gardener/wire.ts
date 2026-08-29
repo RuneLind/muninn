@@ -98,7 +98,12 @@ const ONE_LINER_MIN = 20;
  * Four properties, each one a defect that shipped:
  *  - the backup goes to the FIRST unclosed `[[`, via the shared
  *    {@link firstDanglingWikilinkOpen} — the detector (`checkIndexTruncation`)
- *    runs the same function, so writer and lint cannot disagree. Backing up to
+ *    runs the same function, so writer and lint cannot disagree about what
+ *    "dangling" means. They DO differ on input normalization: the detector
+ *    strips inline code spans first, this writer decides on the raw text — so
+ *    a rationale quoting `[[` inside backticks is over-cut here while the lint
+ *    stays clean. Accepted: the strict side is the writer, so the asymmetry
+ *    can lose one-liner content but never ship debris. Backing up to
  *    the LAST opener (a `lastIndexOf` here and there) left an EARLIER dangling
  *    one untouched and unreported: `…[[Unclosed junk …[[Real Page]] tail` cut
  *    inside the second link, saw that one close, and shipped the first verbatim.
