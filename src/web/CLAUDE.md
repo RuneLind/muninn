@@ -120,10 +120,12 @@ wrapper path because only one of them can express it:
   document this bug in quoted examples — measured 2026-08-30, mimir's own plan for
   this fix carries four `[[<Fact` occurrences, two inside a ```markdown fence and
   two in inline code spans, and a check that fires on its own plan document is a
-  check nobody reads. It is acceptable because the write side can no longer PRODUCE the
-  shape inside a code span (`wikilinkSpansIn` scans the raw line, so a backticked
-  link is expanded over) and the backstop repairs the client-echoed ones before they
-  reach disk. The residual the lint will not see is a HAND-WRITTEN inline-code
+  check nobody reads. It is acceptable because the write side can no longer produce the
+  shape inside a code span on any live input (`wikilinkSpansIn` scans the raw line, so a
+  backticked link is expanded over — with one measured pathological exception: a `[[[[`
+  multi-opener makes writer and renderer diverge and CAN nest; 0 occurrences across both
+  corpora 2026-08-30, see the `wikilinkSpansIn` NB) and the backstop repairs the
+  client-echoed ones before they reach disk. The residual the lint will not see is a HAND-WRITTEN inline-code
   nesting. FENCED occurrences are skipped by both, and that one is not an asymmetry:
   a fenced block renders as code, so the substitution never happens inside it.
 

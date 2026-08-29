@@ -515,6 +515,17 @@ describe("repairNestedFactWrappers — the post-splice backstop", () => {
     expect(r.residual).toHaveLength(0);
   });
 
+  test("a repair whose inner carries a tag does not report its OWN output as residual", () => {
+    // The repaired shape `<Fact…>[[the <em>fast</em> path]]</Fact>` re-matches
+    // NESTED_MARKUP_RE via `</em`; scanning the rewritten line reported a
+    // fully-corrected page as residual (verify pass, fix round 2).
+    const body = 'See [[<Fact n="1" v="ok">the <em>fast</em> path</Fact>]] here.\n';
+    const r = repairNestedFactWrappers(body);
+    expect(r.body).toBe('See <Fact n="1" v="ok">[[the <em>fast</em> path]]</Fact> here.\n');
+    expect(r.repaired).toHaveLength(1);
+    expect(r.residual).toHaveLength(0);
+  });
+
   test("a clean body is returned byte-for-byte with nothing reported", () => {
     const body = 'Send <Fact n="1" v="ok">[[Tidal Router]]</Fact> onward.\n';
     const r = repairNestedFactWrappers(body);

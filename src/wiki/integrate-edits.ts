@@ -881,7 +881,11 @@ function lineWindowAround(body: string, start: number, end: number): { from: num
  * sees `[T` and passes it. That is CORRECT rather than a miss — `renderWikiHtml` runs
  * the same regex from the same start and replaces the same 17 characters, so the mark
  * and the link the reader sees cover exactly the same range (measured; probe in the
- * `[[[` case of `integrate-wikilink.test.ts`).
+ * `[[[` case of `integrate-wikilink.test.ts`). The identity holds for exactly ONE
+ * extra opener: at `[[[[` and beyond the rescan lands on an inner span the renderer
+ * does not use, so writer and reader diverge and the spliced mark can nest — measured,
+ * 0 occurrences of `[[[[` across both live corpora (2026-08-30), accepted as a
+ * pathological-input gap rather than guarded.
  */
 function wikilinkSpansIn(body: string, from: number, to: number): { start: number; end: number }[] {
   const spans: { start: number; end: number }[] = [];
@@ -1455,10 +1459,18 @@ export function repairNestedFactWrappers(body: string): {
           });
     lines[i] = fixedLine;
     // What is LEFT after the rewrite — a nesting the repairable shape refuses, on a
-    // line whose other occurrences may well have been repaired. Reported (never
-    // guessed at) and quoted from the rewritten line, which is what is on disk.
-    const at = fixedLine.search(NESTED_MARKUP_RE);
-    if (at !== -1) residual.push(fixedLine.slice(at).trim().slice(0, RESIDUAL_EXCERPT_MAX));
+    // line whose other occurrences may well have been repaired. Scanned on the RAW
+    // line with the consumed occurrences masked out (a `]` breaks the char class),
+    // because the repair's own output `<Fact…>[[inner]]</Fact>` re-matches
+    // NESTED_MARKUP_RE whenever `inner` carries a tag — searching the rewritten
+    // line reported a fully-corrected page as residual. The excerpt is still
+    // quoted from the rewritten line, which is what is on disk.
+    const scanBase = raw.replace(NESTED_FACT_RE, "]");
+    const m2 = scanBase.match(NESTED_MARKUP_RE);
+    if (m2) {
+      const at = fixedLine.indexOf(m2[0]);
+      residual.push((at !== -1 ? fixedLine.slice(at) : m2[0]).trim().slice(0, RESIDUAL_EXCERPT_MAX));
+    }
   }
   return { body: repaired.length > 0 ? lines.join("\n") : body, repaired, residual };
 }
