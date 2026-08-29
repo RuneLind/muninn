@@ -271,6 +271,21 @@ describe("setPlanStatus", () => {
     expect(out).toBe(`---\nplan_status: abandoned\nstatus_date: 2026-08-29\ntitle: T\n---\n\n# Body\n`);
   });
 
+  test("a missing plan_status with an EXISTING status_date leaves exactly one date line", () => {
+    const bare = `---\ntitle: t\nstatus_date: 2020-01-01\n---\n\n# Body\n`;
+    const out = setStatus(bare, "superseded");
+    expect(out.match(/^status_date:/gm)!.length).toBe(1);
+    expect(out).toBe(`---\nplan_status: superseded\ntitle: t\nstatus_date: 2026-08-29\n---\n\n# Body\n`);
+  });
+
+  test("a QUOTED same status is a noop — the compare reads what the reader reads", () => {
+    // `parseFrontmatter` unquotes scalar values, so `plan_status: "superseded"`
+    // IS superseded to the board; restamping status_date on it would destroy
+    // the real transition's date on a re-click.
+    const quoted = `---\ntitle: t\nplan_status: "superseded"\nstatus_date: 2020-01-01\n---\n\n# Body\n`;
+    expect(setPlanStatus(quoted, "superseded", "2026-08-29").kind).toBe("noop");
+  });
+
   test("no readable fence is a refusal", () => {
     expect(setPlanStatus("# just a heading\n", "abandoned", "2026-08-29").kind).toBe("refused");
   });

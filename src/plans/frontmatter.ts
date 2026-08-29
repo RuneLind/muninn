@@ -71,6 +71,16 @@ export type PlanPriorityEdit =
  * before the closing fence line. The frontmatter body is `(openEnd, closeNl)` —
  * empty when the two coincide, which is what `---\n---` looks like.
  */
+/** `parseFrontmatter`'s own scalar rule (`unquote` in `src/wiki/store.ts`):
+ *  trim, then strip one matching pair of surrounding quotes. */
+function unquoteScalar(v: string): string {
+  const t = v.trim();
+  if (t.length >= 2 && ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'")))) {
+    return t.slice(1, -1);
+  }
+  return t;
+}
+
 function fenceBounds(content: string): { openEnd: number; closeNl: number } | null {
   if (!content.startsWith(FENCE)) return null;
   const openEnd = content.indexOf("\n");
@@ -184,12 +194,15 @@ export function setPlanStatus(
   const cr = openLine.endsWith("\r") ? "\r" : "";
   const lines = body === null ? [] : body.split("\n");
 
-  // The reader takes the LAST duplicate; this writer normalizes to the first —
-  // but the noop test must read what the reader reads, or a duplicate fence
-  // could noop on the wrong value.
+  // The reader takes the LAST duplicate and UNQUOTES the scalar
+  // (`parseFrontmatter`'s rule); the noop test must read what the reader reads,
+  // or a duplicate fence — or a quoted value — restamps `status_date` on a
+  // status the board already shows.
   const statusLines = lines.filter((l) => PLAN_STATUS_LINE.test(l));
   const current = statusLines.length
-    ? statusLines[statusLines.length - 1]!.slice("plan_status:".length).replace(/\r$/, "").trim()
+    ? unquoteScalar(
+        statusLines[statusLines.length - 1]!.slice("plan_status:".length).replace(/\r$/, ""),
+      )
     : null;
   if (current === status) return { kind: "noop" };
 
@@ -217,8 +230,15 @@ export function setPlanStatus(
     }
     fence.push(line);
   }
-  if (!statusDone) fence.unshift(`plan_status: ${status}${cr}`, `status_date: ${statusDate}${cr}`);
-  else if (!dateDone) {
+  if (!statusDone) {
+    // `dateDone` may already be true — the loop replaces a pre-existing
+    // `status_date` in place — and unshifting a second one would emit exactly
+    // the duplicate-key shape this writer exists to normalize away.
+    fence.unshift(
+      `plan_status: ${status}${cr}`,
+      ...(dateDone ? [] : [`status_date: ${statusDate}${cr}`]),
+    );
+  } else if (!dateDone) {
     // Unreachable today (the date is emitted beside the status), kept as a
     // guard should the emit order change.
     fence.push(`status_date: ${statusDate}${cr}`);

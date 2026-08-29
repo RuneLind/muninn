@@ -599,6 +599,11 @@ describe("POST /api/plans/status", () => {
     expect(againBody.written).toBe(false);
     expect(againBody.hash).toBe(archivedBody.hash);
     expect(againBody.status).toBe("superseded");
+    // The noop reports the date ON DISK — the archive's stamp, never "today
+    // recomputed": the board adopts this value, and a fresh date on a noop
+    // would show a transition that never happened.
+    expect(againBody.statusDate).toBe(archivedBody.statusDate);
+    expect(againBody.relPath).toBe("plans/alpha-plan.mdx");
     // Restore on the noop's hash.
     const restored = await post(a, "/api/plans/status", {
       slug: "alpha-plan",
@@ -615,6 +620,27 @@ describe("POST /api/plans/status", () => {
     });
     expect(stale.status).toBe(409);
     expect((await stale.json()).stale).toBe(true);
+  });
+
+  test("a noop echoes the HISTORICAL date on disk, never today's", async () => {
+    // The same-day noop above cannot distinguish "echoed disk" from "recomputed
+    // today" — the two coincide. A plan archived on a PAST date can: the
+    // mutation `statusDate: statusDate` (always today) survived the suite until
+    // this test existed.
+    const root = await makeWiki();
+    const old = `---\ntitle: alpha-plan\nplan_status: superseded\nstatus_date: 2020-01-01\n---\n\n# alpha-plan\n\nBody.\n`;
+    await writeFile(path.join(root, "plans", "alpha-plan.mdx"), old);
+    const res = await post(app(root), "/api/plans/status", {
+      slug: "alpha-plan",
+      status: "superseded",
+      baseHash: sha256(old),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.written).toBe(false);
+    expect(body.statusDate).toBe("2020-01-01");
+    expect(body.status).toBe("superseded");
+    expect(await pageText(root, "alpha-plan")).toBe(old);
   });
 
   test.each([

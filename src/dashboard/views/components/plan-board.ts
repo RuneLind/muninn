@@ -1756,10 +1756,13 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
    *
    * Three shapes: an active card offers the two terminal targets (superseded /
    * abandoned — both file under the Shipped column, which the default `active`
-   * scope does not show, i.e. archived); a card THIS control archived offers the
-   * way back (restore to proposed); a `shipped` card gets NO section at all —
-   * shipped is an earned end state, not an archive, and un-shipping a plan is a
-   * mimir edit, not a board click. Null for that third shape.
+   * scope does not show, i.e. archived); ANY superseded/abandoned card offers
+   * the way back (restore to proposed) — the control has no memory of who
+   * archived it, so the restore prose says outright that clicking restamps
+   * `status_date` over the original transition's date; a `shipped` card gets NO
+   * section at all — shipped is an earned end state, not an archive, and
+   * un-shipping a plan is a mimir edit, not a board click. Null for that third
+   * shape.
    */
   function archiveSection(card: EffectiveCard): HTMLElement | null {
     const archived = card.planStatus === "superseded" || card.planStatus === "abandoned";
@@ -1803,7 +1806,7 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
         capability.readonly
           ? "This instance cannot write the wiki — edit plan_status in mimir."
           : archived
-            ? `plan_status: ${card.planStatus} — this plan is archived. Restoring writes the frontmatter and stamps today's status_date.`
+            ? `plan_status: ${card.planStatus}${card.statusDate ? ` since ${card.statusDate}` : ""} — this plan is archived. Restoring writes the frontmatter and REPLACES that status_date with today's.`
             : "Archiving writes plan_status (and today's status_date) into the plan's frontmatter. The file stays in mimir; the card leaves the active board.",
       ),
     );
@@ -1839,14 +1842,23 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
         }
         throw new Error("no clipboard API");
       } catch {
+        // `execCommand` can itself throw (CSP sandboxes; it is on removal
+        // tracks) — its own try/finally so a hidden focusable textarea is never
+        // left in the DOM and the button never reads as a dead control.
         const ta = document.createElement("textarea");
         ta.value = full;
         ta.style.position = "fixed";
         ta.style.opacity = "0";
         document.body.append(ta);
-        ta.select();
-        const ok = document.execCommand("copy");
-        ta.remove();
+        let ok = false;
+        try {
+          ta.select();
+          ok = document.execCommand("copy");
+        } catch {
+          /* reported below */
+        } finally {
+          ta.remove();
+        }
         done(ok ? "Copied" : "Copy failed");
       }
     };

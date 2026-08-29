@@ -118,7 +118,7 @@ import {
   type QueueOrder,
 } from "../../plans/queue.ts";
 import { defaultPageWriteIo, writeWikiPage } from "../../wiki/page-write.ts";
-import { sha256 } from "../../gardener/util.ts";
+import { sha256, todayOslo } from "../../gardener/util.ts";
 import { readonlyRefusal } from "./route-utils.ts";
 import { renderPlansPage } from "../views/plans-page.ts";
 
@@ -384,6 +384,9 @@ export function registerPlansRoutes(
   // closure-variable refusal, and a 200 that echoes what is ON DISK. The one
   // divergence: the transform also stamps `status_date` (today), because a
   // status flip without a date sorts the card by the previous transition.
+  // NB the route accepts EVERY enum value, `shipped` included — the drawer's
+  // refusal to un-ship (no archive section on shipped cards) is a UI-only
+  // invariant, and any transition is drivable by a hand-rolled client.
   app.post("/api/plans/status", async (c) => {
     const refusal = readonlyRefusal(c, log);
     if (refusal) return refusal;
@@ -410,7 +413,11 @@ export function registerPlansRoutes(
       const plan = source.plans.find((p) => p.slug === slug);
       if (!plan) return c.json({ error: `no plan named "${slug}"` }, 404);
 
-      const statusDate = localIsoDate();
+      // `todayOslo`, not the host clock: `status_date` is the operator's
+      // calendar day, and the docker/nais images run UTC — a host-local (or
+      // UTC-slice) date stamps yesterday for every late-evening archive in CET.
+      // Same rule `writeWikiPage` uses for log.md entries.
+      const statusDate = todayOslo(Date.now());
       let written: string | null = null;
       let refused: string | null = null;
       const result = await writeWikiPage({
@@ -638,13 +645,6 @@ async function loadSourceOrDegrade(
     warnSourceOnce(message);
     return { error: message };
   }
-}
-
-/** Today as a LOCAL `YYYY-MM-DD` — `status_date` is a human's calendar day, and
- *  a UTC slice stamps yesterday for every late-evening archive in CET. */
-function localIsoDate(now = new Date()): string {
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
 }
 
 function unregisteredMessage(): string {
