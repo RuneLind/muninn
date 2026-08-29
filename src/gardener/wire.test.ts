@@ -1,6 +1,13 @@
 import { test, expect, describe } from "bun:test";
-import { buildIndexEntry, catalogPage, insertIndexLine, buildSeeAlsoEdit, selectWirablePages } from "./wire.ts";
-import type { WikiIndex, WikiPageMeta } from "../wiki/store.ts";
+import {
+  buildIndexEntry,
+  catalogPage,
+  insertIndexLine,
+  buildSeeAlsoEdit,
+  selectWirablePages,
+  ONE_LINER_MAX,
+} from "./wire.ts";
+import { extractWikilinks, type WikiIndex, type WikiPageMeta } from "../wiki/store.ts";
 
 /**
  * Minimal WikiIndex fake: `pages` are { title → relPath }. `resolve` matches by
@@ -55,6 +62,199 @@ describe("buildIndexEntry", () => {
     const oneLiner = e!.line.replace("- [[T]] — ", "");
     expect(oneLiner.length).toBeLessThanOrEqual(120);
     expect(oneLiner.endsWith("…")).toBe(true);
+  });
+
+  // ── One-liner truncation must never split a [[wikilink]] ──────────────────
+  //
+  // A bare slice at 119 chars can land inside `[[Some Page]]`, shipping an
+  // unclosed `[[`; a line-based `\[\[([^\]]+)\]\]` scan then matches across the
+  // newline and consumes the NEXT entry's link. Every case below drives the
+  // truncator through `buildIndexEntry` (`indexOneLiner` is module-private).
+
+  /** The one-liner as it lands in the bullet, minus the `- [[T]] — ` prefix. */
+  function oneLinerOf(rationale: string): string {
+    const e = buildIndexEntry({ title: "T", kind: "concept", domain: "ai", rationale });
+    return e!.line === "- [[T]]" ? "" : e!.line.replace("- [[T]] — ", "");
+  }
+
+  /**
+   * True when the cut left a `[[` that nothing closes, or a lone `[`.
+   *
+   * Deliberately NOT the shipped predicate's algorithm: it is the UNION of two
+   * independent weak checks — a non-overlapping `[[`-vs-`]]` COUNT, and "nothing
+   * closes the last opener" — so it cannot be satisfied by an implementation bug
+   * it shares. The first spelling of this oracle re-implemented the truncator's
+   * own `lastIndexOf` scan and was therefore structurally incapable of catching
+   * the case that scan is blind to (an EARLIER dangling opener followed by a
+   * later closing one). The trailing `…` is stripped FIRST — with it in place the
+   * trailing-bracket test can never fire, and dropping the truncator's lone-`[`
+   * strip left the whole suite green.
+   */
+  function hasDanglingOpen(s: string): boolean {
+    const body = s.endsWith("…") ? s.slice(0, -1) : s;
+    const opens = body.split("[[").length - 1;
+    const closes = body.split("]]").length - 1;
+    if (opens > closes) return true;
+    const last = body.lastIndexOf("[[");
+    if (last !== -1 && body.indexOf("]]", last + 2) === -1) return true;
+    return body.trimEnd().endsWith("[");
+  }
+
+  test("cut landing inside a bare link truncates before the [[", () => {
+    // The link starts at 110, so a 119-char slice lands mid-target.
+    const one = oneLinerOf(`${"x".repeat(110)}[[A Very Long Page Title]] tail`);
+    expect(one).toBe(`${"x".repeat(110)}…`);
+    expect(hasDanglingOpen(one)).toBe(false);
+  });
+
+  test("cut landing inside a piped link truncates before the [[", () => {
+    const one = oneLinerOf(`${"y".repeat(105)}[[Some Target Page|the label shown]] tail`);
+    expect(one).toBe(`${"y".repeat(105)}…`);
+    expect(one).not.toContain("[[");
+  });
+
+  test("cut landing exactly on the [[ drops the bracket pair", () => {
+    // 119 chars of text then `[[` — the two brackets are chars 120-121, so the
+    // slice keeps neither; the trailing-`[` strip covers the off-by-one sibling.
+    for (const pad of [117, 118, 119]) {
+      const one = oneLinerOf(`${"z".repeat(pad)}[[Target Page]] more text here`);
+      expect(hasDanglingOpen(one)).toBe(false);
+      expect(one.endsWith("…")).toBe(true);
+    }
+  });
+
+  test("cut landing on the closing ]] keeps the link whole or drops it entirely", () => {
+    // `[[Target]]` ends at 118; cutting at 119 keeps it, at 117 drops it.
+    for (const pad of [106, 107, 108, 109]) {
+      const one = oneLinerOf(`${"w".repeat(pad)}[[Target]] trailing words follow here to force the cap`);
+      expect(hasDanglingOpen(one)).toBe(false);
+    }
+  });
+
+  test("no link present → byte-identical to the plain slice", () => {
+    const long = "x".repeat(200);
+    expect(oneLinerOf(long)).toBe(`${"x".repeat(119)}…`);
+  });
+
+  test("text under the cap is untouched (no ellipsis, links intact)", () => {
+    expect(oneLinerOf("Short one about [[Code Mode]] and nothing else")).toBe(
+      "Short one about [[Code Mode]] and nothing else",
+    );
+  });
+
+  // ── The dangling-open cut also runs on text UNDER the cap ─────────────────
+  //
+  // The rationale is model-written prose, so a short one can carry a partial
+  // link the truncator never created. A `length <= MAX` early return ahead of
+  // the check shipped it verbatim into index.md, and the linter's
+  // `index-truncation` check then reported the gardener's own write.
+
+  test("a SHORT rationale carrying a bare dangling [[ is cut at the opener", () => {
+    const one = oneLinerOf("The gate compares the two drafts, see [[Half Of A Link and more");
+    expect(one).toBe("The gate compares the two drafts, see…");
+    expect(hasDanglingOpen(one)).toBe(false);
+  });
+
+  test("a SHORT rationale carrying a nested [[Foo [[Bar]] ships no phantom target", () => {
+    // `[[Foo [[Bar]]` extracts as the single phantom target `Foo [[Bar`,
+    // swallowing the real `[[Bar]]` — under the cap as much as over it.
+    const e = buildIndexEntry({
+      title: "T",
+      kind: "concept",
+      domain: "ai",
+      rationale: "Compare the two harness designs: [[Foo [[Bar]] here",
+    });
+    expect(e!.line).toBe("- [[T]] — Compare the two harness designs:…");
+    expect(extractWikilinks(e!.line)).toEqual(["T"]);
+    expect(hasDanglingOpen(e!.line)).toBe(false);
+  });
+
+  test("a SHORT, balanced rationale is still byte-identical", () => {
+    const rationale = "Short one about [[Code Mode]] and [[Another Page|its alias]] here";
+    const e = buildIndexEntry({ title: "T", kind: "concept", domain: "ai", rationale });
+    expect(e!.line).toBe(`- [[T]] — ${rationale}`);
+  });
+
+  test("a SHORT rationale whose cut degenerates under the floor falls back to the body", () => {
+    const e = buildIndexEntry({
+      title: "T",
+      kind: "concept",
+      domain: "ai",
+      rationale: "see [[Half Of A Link and more",
+      body: "The first body paragraph, which is a perfectly good one-liner.",
+    });
+    expect(e!.line).toBe("- [[T]] — The first body paragraph, which is a perfectly good one-liner.");
+  });
+
+  test("a link starting at offset 0 drops the one-liner rather than shipping `[[…`", () => {
+    const e = buildIndexEntry({
+      title: "T",
+      kind: "concept",
+      domain: "ai",
+      rationale: `[[${"A Page With A Very Long Title ".repeat(6)}]] tail`,
+    });
+    expect(e!.line).toBe("- [[T]]");
+  });
+
+  test("property: a link at EVERY offset across the cap never leaves an open [[", () => {
+    const link = "[[Cordis (DeepSeek Coding Harness)|the harness]]";
+    for (let at = 90; at <= 130; at++) {
+      for (const l of [link, "[[Cordis (DeepSeek Coding Harness)]]"]) {
+        const rationale = `${"a".repeat(at)}${l} and then some trailing prose to pass the cap`;
+        const one = oneLinerOf(rationale);
+        expect(one.length).toBeLessThanOrEqual(ONE_LINER_MAX);
+        expect(hasDanglingOpen(one)).toBe(false);
+      }
+    }
+  });
+
+  test("an EARLIER dangling opener is backed up to, even when a later one closes", () => {
+    // The `lastIndexOf` scan this replaced saw only `[[Real Page]]`, found its
+    // `]]` inside the cut, and shipped the first opener verbatim.
+    const one = oneLinerOf(`${"d".repeat(60)}[[Unclosed junk ${"e".repeat(30)}[[Real Page]] tail and more prose`);
+    expect(one).toBe(`${"d".repeat(60)}…`);
+    expect(hasDanglingOpen(one)).toBe(false);
+  });
+
+  test("an already-nested construct is cut away rather than shipped", () => {
+    // `[[Foo [[Bar]]` extracts as ONE phantom target `Foo [[Bar`, swallowing the
+    // real `[[Bar]]` link — debris the cut must not preserve.
+    const one = oneLinerOf(`${"m".repeat(70)}[[Foo [[Bar]] and then enough trailing prose to force the cap here`);
+    expect(one).toBe(`${"m".repeat(70)}…`);
+    expect(hasDanglingOpen(one)).toBe(false);
+  });
+
+  test("an emoji straddling the cut is never split into a lone surrogate", () => {
+    // 🎉 (U+1F389) is a surrogate PAIR; a bare slice at 119 halves it.
+    for (let pad = 115; pad <= 122; pad++) {
+      const one = oneLinerOf(`${"q".repeat(pad)}🎉${"r".repeat(40)}`);
+      expect(one.length).toBeLessThanOrEqual(ONE_LINER_MAX);
+      expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(one)).toBe(false);
+    }
+  });
+
+  test("a ZWJ sequence at the cut leaves whole code points, never half a char", () => {
+    const family = "\u{1F468}‍\u{1F469}‍\u{1F467}"; // 👨‍👩‍👧
+    for (let pad = 110; pad <= 122; pad++) {
+      const one = oneLinerOf(`${"s".repeat(pad)}${family}${"t".repeat(40)}`);
+      expect(one.length).toBeLessThanOrEqual(ONE_LINER_MAX);
+      // Every code unit round-trips: no U+FFFD would be produced by a re-encode.
+      expect([...one].join("")).toBe(one);
+      expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(one)).toBe(false);
+    }
+  });
+
+  test("a rationale that degenerates under the floor falls back to the body paragraph", () => {
+    // The rationale opens on a long wikilink, so the safe cut leaves nothing —
+    // the page has a perfectly good first paragraph and used to ship bare.
+    const e = buildIndexEntry({
+      title: "T",
+      kind: "concept",
+      domain: "ai",
+      rationale: `[[${"A Page With A Very Long Title ".repeat(6)}]] tail`,
+      body: "\n# T\n\nA pattern where the model writes code that calls tools.\n",
+    });
+    expect(e!.line).toBe("- [[T]] — A pattern where the model writes code that calls tools.");
   });
 
   test("no rationale and no body → bare bullet, no em-dash", () => {

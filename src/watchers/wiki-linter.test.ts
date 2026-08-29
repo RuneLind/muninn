@@ -77,6 +77,18 @@ describe("checkWikiLinter", () => {
     );
   });
 
+  // Pins `CHECK_ORDER`'s derivation from `LINT_CHECKS`: `summarizeCounts` walks
+  // the ORDER, not the label map, so a hand-kept order list missing a check
+  // drops it from the sentence while the counts still carry it.
+  test("a newly added check reaches the alert sentence", async () => {
+    await Bun.write(
+      path.join(root, "concepts/Cut.md"),
+      "---\ntype: concept\ntitle: Cut\nupdated: 2026-06-01\nsources: [x]\n---\n\nA line cut at [[Some Long Page",
+    );
+    const alerts = await checkWikiLinter(watcher, botConfig({ wikiDir: root }));
+    expect(alerts[0]!.summary).toContain("1 truncated wikilink");
+  });
+
   test("pluralizes counts in the summary", async () => {
     // Two orphans, each with a distinct broken link.
     await Bun.write(

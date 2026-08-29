@@ -8,12 +8,14 @@ import {
   splitInlineArray,
   extractWikilinks,
   extractMarkdownLinks,
+  firstDanglingWikilinkOpen,
   buildWikiIndex,
   getWikiIndex,
   readWikiPage,
   extractPubDate,
   extractDesc,
   flattenWikiLinks,
+  flattenLinks,
   deriveFolderLabels,
   stemDisplayTitle,
   PLAN_STATUS_VALUES,
@@ -274,6 +276,59 @@ describe("extractWikilinks", () => {
 
   test("drops backslash escapes so targets match the page name", () => {
     expect(extractWikilinks("Escaped [[Claude Code\\]] here.")).toEqual(["Claude Code"]);
+  });
+
+  test("an unclosed [[ never swallows the next line's link", () => {
+    // A truncated index one-liner leaves a dangling `[[`. Without the newline
+    // exclusion the match spans the break, yielding one phantom target AND
+    // hiding the real link on the following line.
+    const links = extractWikilinks(
+      ["- [[Entry One]] — prose mentioning [[Cordis…", "- [[Entry Two]] — more prose."].join("\n"),
+    );
+    expect(links).toEqual(["Entry One", "Entry Two"]);
+  });
+
+  test("a piped link's alias does not span lines either", () => {
+    const links = extractWikilinks(["Prose with [[Target|label…", "- [[Next Entry]] tail."].join("\n"));
+    expect(links).toEqual(["Next Entry"]);
+  });
+});
+
+describe("firstDanglingWikilinkOpen", () => {
+  test("cleanly paired lines answer -1, whatever the shape", () => {
+    expect(firstDanglingWikilinkOpen("")).toBe(-1);
+    expect(firstDanglingWikilinkOpen("no links here at all")).toBe(-1);
+    expect(firstDanglingWikilinkOpen("- [[One]] — prose")).toBe(-1);
+    expect(firstDanglingWikilinkOpen("[[a]][[b]]")).toBe(-1);
+    expect(firstDanglingWikilinkOpen("[[Target|the label]] tail")).toBe(-1);
+    // A single `[` inside the piped LABEL is ordinary text — the `]]` is there and
+    // no second opener intervenes.
+    expect(firstDanglingWikilinkOpen("[[Target|label with a [ bracket]] tail")).toBe(-1);
+    // `[[[Foo]]` is a link to a page named `[Foo` — self-contained, not dangling.
+    expect(firstDanglingWikilinkOpen("[[[Foo]]")).toBe(-1);
+  });
+
+  test("branch 1 — no ]] follows the opener at all", () => {
+    expect(firstDanglingWikilinkOpen("- [[One]] — cut at [[Two")).toBe(19);
+    expect(firstDanglingWikilinkOpen("[[Unclosed")).toBe(0);
+  });
+
+  test("branch 2 — an opener whose ]] belongs to a nested one", () => {
+    // `WIKILINK_RE` pairs the OUTER `[[` with that `]]`, yielding a phantom target
+    // and swallowing the real `[[Bar]]` link. A bracket-pairing scan that ignored
+    // the nesting would call this clean.
+    const line = "[[Foo [[Bar]] baz";
+    expect(firstDanglingWikilinkOpen(line)).toBe(0);
+    expect(extractWikilinks(line)).toEqual(["Foo [[Bar"]);
+  });
+
+  test("reports the FIRST dangling opener, not the last — the lastIndexOf blind spot", () => {
+    // The LAST opener closes normally, so a `lastIndexOf`-based predicate answers
+    // "clean" while the middle one is the debris.
+    const line = "- [[A]] — earlier unclosed [[Frag and later [[Beta]] end";
+    expect(firstDanglingWikilinkOpen(line)).toBe(27);
+    expect(line.slice(27, 33)).toBe("[[Frag");
+    expect(extractWikilinks(line)).toEqual(["A", "Frag and later [[Beta"]);
   });
 });
 
@@ -1749,6 +1804,22 @@ describe("extractDesc", () => {
   });
 });
 
+describe("flattenLinks", () => {
+  // Driven DIRECTLY, not through extractDesc, which splits on "\n" and feeds
+  // this one line at a time — so the `\n` exclusion is unreachable from there
+  // and a test routed through it stays green when the exclusion is removed.
+  test("a dangling [[ never pairs with a LATER line's ]]", () => {
+    // Without the `\n` exclusion the lazy target group runs from the unclosed
+    // opener to the next line's `]]`, flattening both lines into one phantom
+    // target and destroying the real `[[Beta]]` link between them.
+    expect(flattenLinks("see [[Half Of A Link\n- [[Beta]] tail")).toBe("see [[Half Of A Link\n- Beta tail");
+  });
+
+  test("an alias is still taken from a well-formed link on one line", () => {
+    expect(flattenLinks("- [[Beta|the label]] tail")).toBe("- the label tail");
+  });
+});
+
 describe("buildWikiIndex — Atlas fields + trails", () => {
   let root: string;
   beforeEach(async () => {
@@ -2320,6 +2391,13 @@ describe("flattenWikiLinks", () => {
 
   test("an empty pipe label falls back to the target", () => {
     expect(flattenWikiLinks("[[Target|]]")).toBe("Target");
+  });
+
+  test("a dangling [[ does not flatten the lines between it and a later ]]", () => {
+    // This runs over a whole page body on its way OUT of the wiki, so a cross-line
+    // match deletes headings, bullets and the next entry's link from the post.
+    const body = ["- cut at [[Some Frag", "", "## Heading", "", "- see Harness Engineering]]"].join("\n");
+    expect(flattenWikiLinks(body)).toBe(body);
   });
 
   for (const [target, label] of [

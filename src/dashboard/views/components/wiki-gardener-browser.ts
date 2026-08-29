@@ -8,6 +8,9 @@
  */
 
 import { escHtml as esc } from "./escape.ts";
+// TYPE-ONLY: a value import from the lint engine would drag `node:path` + `Bun.file`
+// into this browser bundle.
+import type { LintCheck } from "../../../wiki/lint.ts";
 import { installWikiReadonlyGuard } from "./wiki-readonly-client.ts";
 import {
   backlogStripModel,
@@ -64,7 +67,7 @@ interface ProposalsResponse {
   error?: string;
 }
 interface LintFinding {
-  check: string;
+  check: LintCheck;
   relPath: string;
   message: string;
   detail?: string;
@@ -273,12 +276,15 @@ document.getElementById("gardList")!.addEventListener("click", (e) => {
 
 // ── Lint findings (report-only) ─────────────────────────────────────────────
 
-// Grouped display order + labels; keys mirror the lint engine's check names.
-const LINT_LABELS: Record<string, string> = {
+// Grouped display order + labels. `Record<LintCheck, string>` so a check added to
+// the engine cannot compile without a label here — `renderLint` iterates THIS map,
+// so an unlabelled check renders nothing at all, findings and count included.
+const LINT_LABELS: Record<LintCheck, string> = {
   "broken-link": "Broken links",
   orphan: "Orphan pages",
   "stale-updated": "Unusable updated: (missing / unparseable / future)",
   "missing-sources": "Missing sources",
+  "index-truncation": "Truncated wikilinks (unclosed [[)",
 };
 
 function renderLint(findings: LintFinding[]): void {
@@ -289,12 +295,12 @@ function renderLint(findings: LintFinding[]): void {
     return;
   }
   let html = "";
-  for (const check of Object.keys(LINT_LABELS)) {
+  for (const check of Object.keys(LINT_LABELS) as LintCheck[]) {
     const items = findings.filter((f) => f.check === check);
     if (!items.length) continue;
     html +=
       '<div class="lint-group"><div class="lint-group-head">' +
-      esc(LINT_LABELS[check] || check) +
+      esc(LINT_LABELS[check]) +
       ` <span class="lint-count">${items.length}</span></div><ul class="lint-items">`;
     items.forEach((f) => {
       html +=

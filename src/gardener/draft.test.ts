@@ -577,6 +577,17 @@ describe("containBodyLinks", () => {
     expect(out.delinked).toEqual(["Missing Page"]);
   });
 
+  test("a dangling [[ is not bolded across the line break", () => {
+    // The two halves of containment DIVERGED without the `\n` exclusion:
+    // `scanUnresolvedBodyLinks` (via `extractWikilinks`, newline-free since the
+    // store fix) reported nothing to contain, while this rewrite matched from the
+    // dangling opener to a LATER line's `]]` and bolded every byte between them.
+    const body = ["- cut at [[Missing Frag", "- and the rest of that page]] after it."].join("\n");
+    const out = containBodyLinks(body, { resolve: resolveFrom(["Real Page"]) });
+    expect(out.body).toBe(body);
+    expect(out.delinked).toEqual([]);
+  });
+
   test("piped unresolvable link de-links to its label", () => {
     const out = containBodyLinks("Try [[Zone 2 Cardio|easy cardio]] today.", {
       resolve: resolveFrom([]),

@@ -481,8 +481,14 @@ export function scanUnresolvedBodyLinks(
  * is tried first so a `[[link]]` inside a fence is swallowed by the fence match
  * and never rewritten. Its OWN capturing regex (not `extractWikilinks`, which
  * dedupes + drops labels/positions and so can't drive a rewrite).
+ *
+ * Target and label are NEWLINE-FREE — `WIKILINK_RE`'s exclusion (`store.ts`).
+ * Without it the two halves of containment DIVERGED: `scanUnresolvedBodyLinks`
+ * (which reads `extractWikilinks`) saw nothing to contain across a line break
+ * while this rewrite bolded a construct spanning one, swallowing the lines
+ * between the dangling `[[` and a later `]]`.
  */
-const CONTAIN_BODY_RE = /(```[\s\S]*?```|`[^`\n]*`)|\[\[([^\[\]|]+)(?:\|([^\[\]]*))?\]\]/g;
+const CONTAIN_BODY_RE = /(```[\s\S]*?```|`[^`\n]*`)|\[\[([^\[\]|\n]+)(?:\|([^\[\]\n]*))?\]\]/g;
 
 /**
  * Persist-time BODY-link containment (symmetric with `replaceUnresolvedSourceLinks`

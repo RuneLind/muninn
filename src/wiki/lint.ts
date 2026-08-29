@@ -7,7 +7,7 @@
  * watcher (report-only) and the `/api/wiki/linter-findings` route both call
  * `lintWiki`.
  *
- * Four checks, each finding `{ check, relPath, message, detail? }`:
+ * Five checks, each finding `{ check, relPath, message, detail? }`:
  *  1. broken-link    — [[wikilink]] / relative .md link that resolves to no page.
  *  2. orphan         — a page with no inbound links (reserved files discounted as
  *                      both subjects and sole-linkers).
@@ -17,6 +17,10 @@
  *                      sorts silently ignore — this is its only operator-visible signal).
  *  4. missing-sources — a synthesized `concept` page that cites no sources (no
  *                      `## Sources` heading AND no `sources:` frontmatter).
+ *  5. index-truncation — a line carrying a DANGLING `[[` (see
+ *                      `firstDanglingWikilinkOpen`, `store.ts`, which the
+ *                      gardener's writer shares). Rationale + the measured
+ *                      numbers: `src/watchers/CLAUDE.md`.
  *
  * The store's index builder silently drops unresolved link targets
  * (`store.ts:389-399`), so broken-link recomputes resolution here from the raw
@@ -28,6 +32,7 @@ import type { WikiIndex, WikiPageMeta } from "./store.ts";
 import {
   extractWikilinks,
   extractMarkdownLinks,
+  firstDanglingWikilinkOpen,
   parseFrontmatter,
   normalizeRelPath,
 } from "./store.ts";
@@ -35,8 +40,15 @@ import {
   FUTURE_DATE_SKEW_MS,
   isImplausibleFutureDate,
 } from "../dashboard/views/components/wiki-filter.ts";
+import { fencedLineMask } from "../dashboard/views/components/wiki-integrate.ts";
 
-export const LINT_CHECKS = ["broken-link", "orphan", "stale-updated", "missing-sources"] as const;
+export const LINT_CHECKS = [
+  "broken-link",
+  "orphan",
+  "stale-updated",
+  "missing-sources",
+  "index-truncation",
+] as const;
 export type LintCheck = (typeof LINT_CHECKS)[number];
 
 export interface LintFinding {
@@ -51,7 +63,7 @@ export interface LintFinding {
 export interface LintReport {
   findings: LintFinding[];
   /** Count of findings per check key (every check key present, 0 when clean). */
-  counts: Record<string, number>;
+  counts: Record<LintCheck, number>;
   generatedAt: number;
 }
 
@@ -144,6 +156,134 @@ function checkBrokenLinks(page: WikiPageMeta, rawContent: string, index: WikiInd
     }
   }
 
+  return out;
+}
+
+/** How much of the offending line the finding quotes. */
+const TRUNCATION_EXCERPT_MAX = 60;
+
+/**
+ * Strip inline code spans from ONE line, CommonMark's pairing rule: a run of N
+ * backticks opens a span that only a run of exactly N closes.
+ *
+ * A `` `[^`]*` `` replace mis-pairs the double-backtick form the syntax exists
+ * for — `` `` [[x `` `` is how a page writes a literal containing a backtick —
+ * leaving the `[[` exposed and the line falsely reported. An UNMATCHED run is
+ * emitted literally and the scan continues past it, so a stray backtick cannot
+ * swallow the rest of the line either.
+ */
+function stripLineCodeSpans(line: string): string {
+  let out = "";
+  let i = 0;
+  while (i < line.length) {
+    if (line[i] !== "`") {
+      out += line[i];
+      i++;
+      continue;
+    }
+    let openEnd = i;
+    while (openEnd < line.length && line[openEnd] === "`") openEnd++;
+    const runLen = openEnd - i;
+    let closeAt = -1;
+    let k = openEnd;
+    while (k < line.length) {
+      if (line[k] !== "`") {
+        k++;
+        continue;
+      }
+      let runEnd = k;
+      while (runEnd < line.length && line[runEnd] === "`") runEnd++;
+      if (runEnd - k === runLen) {
+        closeAt = k;
+        break;
+      }
+      k = runEnd;
+    }
+    if (closeAt === -1) {
+      out += line.slice(i, openEnd); // unmatched run — literal backticks
+      i = openEnd;
+    } else {
+      i = closeAt + runLen; // whole span dropped
+    }
+  }
+  return out;
+}
+
+/**
+ * Blank the `[[` of an MDX/JSX expression opener so it is not read as a wikilink
+ * opener, PRESERVING LENGTH (the caller's offsets index into this string).
+ *
+ * Deliberately as narrow as the false positive it answers: a `{` immediately
+ * before the brackets, which is the array-of-arrays prop mimir house style writes
+ * (`<ComparisonTable rows={[[…`). Anything wider starts excusing the debris this
+ * check exists to find.
+ */
+function maskJsxArrayOpeners(line: string): string {
+  return line.replace(/\{\[\[/g, "{  ");
+}
+
+/** Line index (0-based) of the first line AFTER a terminated `---` frontmatter
+ *  fence, or 0 when the page carries none. */
+function frontmatterEndLine(lines: readonly string[]): number {
+  if (lines[0]?.trim() !== "---") return 0;
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i]!.trim() === "---") return i + 1;
+  }
+  return 0; // unterminated — not frontmatter, so lint the whole file
+}
+
+/**
+ * Lines carrying a `[[` that never closes on that line.
+ *
+ * This is the recurrence detector for the truncated index one-liner
+ * (`indexOneLiner`, `src/gardener/wire.ts`): the write side now cuts at a safe
+ * boundary, and this reports any line that still ends up in the broken shape —
+ * a hand edit, another writer, or a regression. It matters beyond cosmetics
+ * because a `\[\[([^\]]+)\]\]` scan without a `\n` exclusion matches across the
+ * break and reports the swallowed page as uncatalogued (`src/watchers/CLAUDE.md`
+ * owns the measurements).
+ *
+ * The predicate is the SHARED `firstDanglingWikilinkOpen` — the same function
+ * `truncateOneLiner` backs its cut up to, so the writer and this detector cannot
+ * disagree about what "unclosed" means. It reports the FIRST unclosed opener on
+ * the line; a `lastIndexOf` spelling is silent on
+ * `- [[A]] — earlier unclosed [[Frag and later [[Beta]] end`, whose LAST opener
+ * closes while the middle one is exactly the debris that swallows the next line.
+ *
+ * Four exclusions, each a false positive:
+ *  - **fenced blocks**, via the shared `fencedLineMask` (CommonMark rules — a
+ *    hand-rolled `/^\s*(```|~~~)/` toggle is disarmed for the rest of the file by
+ *    one prose line carrying an inline code span, and lets ``` and `~~~` close
+ *    each other);
+ *  - **YAML frontmatter**, whose values are strings, not markdown
+ *    (`title: 'A [[weird'` is not a link);
+ *  - **inline code spans**, stripped PER LINE (not via `stripCodeSpans`, whose
+ *    fence removal joins the lines around a block and could balance a genuinely
+ *    dangling `[[` against a later line's `]]`) with the run-length pairing rule;
+ *  - **an MDX/JSX `{[[` opener**, and nothing wider.
+ *
+ * The excerpt is quoted from the RAW line — quoting the code-span-stripped text
+ * produced a string that appears in no file, so the finding could not be grepped.
+ */
+function checkIndexTruncation(page: WikiPageMeta, rawContent: string): LintFinding[] {
+  const out: LintFinding[] = [];
+  const lines = rawContent.split("\n");
+  const fenced = fencedLineMask(lines);
+  for (let i = frontmatterEndLine(lines); i < lines.length; i++) {
+    if (fenced[i]) continue;
+    const raw = lines[i]!;
+    if (firstDanglingWikilinkOpen(maskJsxArrayOpeners(stripLineCodeSpans(raw))) === -1) continue;
+    // Anchor the quote on the RAW line's own unclosed opener where it has one; a
+    // `[[` whose `]]` lived inside a stripped code span leaves none, so quote the
+    // whole line rather than nothing.
+    const rawOpen = firstDanglingWikilinkOpen(maskJsxArrayOpeners(raw));
+    const excerpt = (rawOpen === -1 ? raw : raw.slice(rawOpen)).trim().slice(0, TRUNCATION_EXCERPT_MAX);
+    out.push({
+      check: "index-truncation",
+      relPath: page.relPath,
+      message: `Unclosed [[ on line ${i + 1} — a wikilink scan can run past the line end (${excerpt})`,
+    });
+  }
   return out;
 }
 
@@ -296,6 +436,9 @@ export async function lintWiki(
     // Broken links apply to every markdown page (a dead link in index.md is
     // still a dead link); the frontmatter-shaped checks skip reserved infra.
     findings.push(...checkBrokenLinks(page, content, index));
+    // Reserved infra is IN scope: index.md is exactly where the truncated
+    // one-liners land, and a dangling `[[` there hides a real catalog entry.
+    findings.push(...checkIndexTruncation(page, content));
 
     if (!reservedBasename(page.relPath)) {
       // One clock read per lint pass, so two pages at the 48h boundary are judged
@@ -308,9 +451,11 @@ export async function lintWiki(
 
   findings.push(...checkOrphans(index));
 
-  const counts: Record<string, number> = {};
+  // Pre-seeded by a typed loop rather than `Object.fromEntries(...) as Record<…>`
+  // — the cast is what let a partially-seeded map type-check as complete.
+  const counts = {} as Record<LintCheck, number>;
   for (const c of LINT_CHECKS) counts[c] = 0;
-  for (const f of findings) counts[f.check] = (counts[f.check] ?? 0) + 1;
+  for (const f of findings) counts[f.check] += 1;
 
   return { findings, counts, generatedAt: nowMs };
 }

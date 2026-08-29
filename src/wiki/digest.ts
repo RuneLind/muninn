@@ -244,7 +244,11 @@ export function renderEntriesBlock(entries: LogEntry[]): string {
     .join("\n\n");
 }
 
-const WIKILINK_RE = /\[\[([^\]|]+?)(?:\|[^\]]*?)?\]\]/g;
+/** Target and alias NEWLINE-FREE — `WIKILINK_RE`'s exclusion in `store.ts`. The
+ *  digest rewrites whole multi-line segments, so without it a dangling `[[` in a
+ *  bullet pairs with a later bullet's `]]` and the rewrite eats every line
+ *  between them. */
+const WIKILINK_RE = /\[\[([^\]|\n]+?)(?:\|[^\]\n]*?)?\]\]/g;
 const BACKTICK_RE = /`([^`\n]+)`/g;
 const QUOTED_RE = /[“"]([^“”"\n]+)[”"]/g;
 

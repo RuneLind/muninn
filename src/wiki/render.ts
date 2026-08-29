@@ -19,7 +19,12 @@ import { FACTCHECK_SENTINEL_START, FACTCHECK_SENTINEL_END } from "./factcheck-co
 // gardener consumers that import it from render.ts keep working unchanged.
 export { stripFrontmatter } from "./store.ts";
 
-const WIKILINK_WITH_LABEL_RE = /\[\[([^\]|]+?)(?:\|([^\]]*?))?\]\]/g;
+/** A `[[wikilink]]` with an optional `|label`, target and label both NEWLINE-FREE
+ *  — `WIKILINK_RE`'s exclusion (`store.ts`), and the reader is where its absence
+ *  was VISIBLE: a dangling `[[` from a truncated index one-liner paired with the
+ *  NEXT line's `]]`, so five index.md entries rendered as one merged
+ *  `wiki-link-missing` span that ate the following entry's real link. */
+const WIKILINK_WITH_LABEL_RE = /\[\[([^\]|\n]+?)(?:\|([^\]\n]*?))?\]\]/g;
 
 /**
  * Drop the fact-check sentinel MARKERS that own a whole line, leaving the block

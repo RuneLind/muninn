@@ -123,6 +123,46 @@ function isFenceCloser(line: string, fence: OpenFence): boolean {
 }
 
 /**
+ * Per-line "is this line fenced code?" mask over a whole document — `true` for
+ * every line inside a fenced block AND for the two delimiter lines themselves.
+ *
+ * The ONE fence walk any line-oriented scanner over wiki markdown should use
+ * (`checkIndexTruncation`, `src/wiki/lint.ts`, is the first non-fact-check
+ * consumer). It runs {@link fenceOpener}/{@link isFenceCloser}, i.e. CommonMark's
+ * real rules, because the naive `/^\s*(```|~~~)/` toggle every hand-rolled walk
+ * reaches for is wrong four ways: a ``` and a `~~~` close each other, a
+ * ```` ```` ````-opened block is closed by its own three-backtick CONTENT, a
+ * closer is accepted with a trailing info string, and — worst, because it is
+ * silent and unbounded — an ordinary prose line carrying an inline code span
+ * (`` ```mermaid``` is a fence ``) toggles the flag ON and masks the entire rest
+ * of the file.
+ *
+ * An unclosed fence at EOF runs to the end of the document, per CommonMark. That
+ * is deliberately NOT {@link scanClaimLines}' retirement rule: there, masking
+ * hides claims from a parse that then SPLICES, so believing a stray opener
+ * corrupts a file; here the cost is a missed report on a page whose fences do not
+ * balance, and inventing content the author did not write is the worse error.
+ */
+export function fencedLineMask(lines: readonly string[]): boolean[] {
+  const mask: boolean[] = new Array(lines.length).fill(false);
+  let open: OpenFence | null = null;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (open) {
+      mask[i] = true; // the closer line is itself fenced
+      if (isFenceCloser(line, open)) open = null;
+      continue;
+    }
+    const opener = fenceOpener(line);
+    if (opener) {
+      open = opener;
+      mask[i] = true;
+    }
+  }
+  return mask;
+}
+
+/**
  * Could `line` be a fence delimiter at all (opener OR closer), judged context-free?
  *
  * Used only by the post-splice invariant guard, which compares a count across a

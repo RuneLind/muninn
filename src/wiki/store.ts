@@ -518,7 +518,57 @@ function extRank(relPath: string): number {
   return 2; // .html explainer
 }
 
-const WIKILINK_RE = /\[\[([^\]|]+?)(?:\|[^\]]*?)?\]\]/g;
+/**
+ * A `[[wikilink]]`, target and alias both NEWLINE-FREE. Obsidian has no
+ * multi-line wikilink, and without the `\n` exclusion an unclosed `[[` (an
+ * index one-liner truncated mid-link, say) matched across the line break and
+ * consumed the NEXT line's link. Measurements: `src/watchers/CLAUDE.md`
+ * (`index-truncation`) owns those numbers.
+ *
+ * Six sibling copies of this shape carry the same exclusion, each for its own
+ * consumer: `render.ts`, `digest.ts`, `graph-routes.ts`, `draft.ts`'s
+ * `CONTAIN_BODY_RE`, and the two flatteners below.
+ */
+const WIKILINK_RE = /\[\[([^\]|\n]+?)(?:\|[^\]\n]*?)?\]\]/g;
+
+/**
+ * Index of the FIRST DANGLING `[[` on `line`, or `-1` when every opener is
+ * cleanly paired. Line-scoped by contract: pass one line.
+ *
+ * The ONE implementation shared by the writer (`truncateOneLiner`,
+ * `src/gardener/wire.ts`, which backs its cut up to this offset) and the detector
+ * (`checkIndexTruncation`, `src/wiki/lint.ts`, which reports it) — so the two
+ * cannot disagree about what "dangling" means.
+ *
+ * An opener dangles when EITHER of two things is true, and both branches are
+ * load-bearing:
+ *
+ *  1. **No `]]` follows it on the line.** This is the cross-line swallow: an
+ *     `\[\[([^\]]+)\]\]` scan without a `\n` exclusion matches across the break
+ *     and consumes the NEXT line's link.
+ *  2. **Another `[[` intervenes before that `]]`.** The `]]` then closes a
+ *     construct that STARTED at the inner opener as far as any reader is
+ *     concerned, while `WIKILINK_RE` pairs it with the OUTER one and yields a
+ *     phantom target (`[[Foo [[Bar]]` → target `Foo [[Bar`) — swallowing the real
+ *     `[[Bar]]` link with it. Same damage as (1), confined to one line.
+ *
+ * Both used to be judged by `lastIndexOf("[[")` alone, which sees neither once a
+ * LATER opener closes normally: on `…[[Unclosed junk …[[Real Page]] tail` the
+ * last opener closes, so the writer shipped the dangling first one verbatim and
+ * the detector reported nothing — measured, the exact shape this exists to stop.
+ */
+export function firstDanglingWikilinkOpen(line: string): number {
+  let from = 0;
+  for (;;) {
+    const open = line.indexOf("[[", from);
+    if (open === -1) return -1;
+    const close = line.indexOf("]]", open + 2);
+    if (close === -1) return open; // (1) runs past the line end
+    const nested = line.indexOf("[[", open + 2);
+    if (nested !== -1 && nested < close) return open; // (2) swallows an inner opener
+    from = close + 2;
+  }
+}
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const DEFAULT_REL_PATH = "../huginn/huginn-jarvis/data/wiki";
 
@@ -811,9 +861,13 @@ export function stripFrontmatter(content: string): string {
  * order matters: the code branch is tried FIRST so a link inside a fence is
  * swallowed by the fence match and never rewritten. Shape mirrors
  * `CONTAIN_BODY_RE` in `src/gardener/draft.ts`.
+ *
+ * The wikilink groups exclude `\n` for {@link WIKILINK_RE}'s reason: a dangling
+ * `[[` on one line otherwise pairs with a LATER line's `]]` and this flattener
+ * eats every byte between them — headings, bullets, the next entry's own link.
  */
 const FLATTEN_WIKI_LINKS_RE =
-  /(```[\s\S]*?```|`[^`\n]*`)|\[\[([^\[\]|]+)(?:\|([^\[\]]*))?\]\]|!?\[([^\]]*)\]\(([^)]*)\)/g;
+  /(```[\s\S]*?```|`[^`\n]*`)|\[\[([^\[\]|\n]+)(?:\|([^\[\]\n]*))?\]\]|!?\[([^\]]*)\]\(([^)]*)\)/g;
 
 /** A link target that survives outside the wiki — everything else is a path only
  *  the reader can resolve. Deliberately a SCHEME test, not an extension test:
@@ -860,10 +914,16 @@ export function flattenWikiLinks(body: string): string {
  * markers (`**`, `__`, backticks, and boundary `*`/`_`) removed. A simple
  * markers-removal pass — not a markdown parser — so interior underscores in
  * `some_var_name` are left alone (they're never at a word boundary).
+ *
+ * Exported for its own unit test only — {@link extractDesc} feeds it one line at
+ * a time, so the `\n` exclusion below is unreachable through the public surface
+ * and a test driving it from there cannot fail when the exclusion is removed.
  */
-function flattenLinks(s: string): string {
+export function flattenLinks(s: string): string {
   return s
-    .replace(/\[\[([^\]]+?)\]\]/g, (_m, inner: string) => inner.split("|").pop()!.trim())
+    // `\n`-free for {@link WIKILINK_RE}'s reason. Its caller feeds it one line at
+    // a time today, so this is the invariant made explicit rather than a fix.
+    .replace(/\[\[([^\]\n]+?)\]\]/g, (_m, inner: string) => inner.split("|").pop()!.trim())
     // Images `![alt](url)` → alt (drop the leading `!`); links `[text](url)` → text.
     .replace(/!?\[([^\]]*)\]\(([^)]+)\)/g, (_m, text: string) => text.trim())
     // Strip bold/code markers, then leading/trailing (wrapping) `*`/`_` emphasis.
