@@ -163,29 +163,43 @@ export function fencedLineMask(lines: readonly string[]): boolean[] {
 }
 
 /**
- * Strip inline code spans from ONE line, CommonMark's pairing rule: a run of N
- * backticks opens a span that only a run of exactly N closes.
+ * Line index (0-based) of the first line AFTER a terminated `---` frontmatter fence,
+ * or 0 when the page carries none (an UNTERMINATED fence is not frontmatter, so the
+ * whole file is in scope).
  *
- * The per-LINE sibling of {@link fencedLineMask}, and the ONE implementation for
- * every line-oriented scanner that must tell markup from a literal quoted in
- * backticks (`checkIndexTruncation` + `checkNestedAnnotation` in `src/wiki/lint.ts`,
- * `repairNestedFactWrappers` in `src/wiki/integrate-edits.ts`). Deliberately NOT
- * the linter's whole-document `stripCodeSpans`, whose fence removal joins the lines
- * around a block and could balance a genuinely dangling `[[` against a later line's
- * `]]`.
+ * Shared by every line-oriented scanner that must not read YAML as markdown — the
+ * two lint checks and `repairNestedFactWrappers` — because a repair rewriting a
+ * `title:` the lint never scans is the two halves disagreeing about the same bytes.
+ */
+export function frontmatterEndLine(lines: readonly string[]): number {
+  if (lines[0]?.trim() !== "---") return 0;
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i]!.trim() === "---") return i + 1;
+  }
+  return 0;
+}
+
+/**
+ * Every inline code span on ONE line, as `[start, end)` ranges over that line,
+ * by CommonMark's pairing rule: a run of N backticks opens a span that only a run
+ * of exactly N closes. The range covers the whole span, delimiters included.
+ *
+ * The ONE pairing implementation behind both {@link stripLineCodeSpans} (which
+ * removes the ranges) and {@link maskLineCodeSpans} (which blanks them in place) —
+ * a second walk is exactly the drift that would let one scanner call a backticked
+ * literal markup while the other calls it documentation.
  *
  * A `` `[^`]*` `` replace mis-pairs the double-backtick form the syntax exists
  * for — `` `` [[x `` `` is how a page writes a literal containing a backtick —
- * leaving the `[[` exposed and the line falsely reported. An UNMATCHED run is
- * emitted literally and the scan continues past it, so a stray backtick cannot
- * swallow the rest of the line either.
+ * leaving the `[[` exposed and the line falsely reported. An UNMATCHED run opens
+ * no span and the scan continues past it, so a stray backtick cannot swallow the
+ * rest of the line either.
  */
-export function stripLineCodeSpans(line: string): string {
-  let out = "";
+export function lineCodeSpanRanges(line: string): { start: number; end: number }[] {
+  const ranges: { start: number; end: number }[] = [];
   let i = 0;
   while (i < line.length) {
     if (line[i] !== "`") {
-      out += line[i];
       i++;
       continue;
     }
@@ -208,14 +222,133 @@ export function stripLineCodeSpans(line: string): string {
       k = runEnd;
     }
     if (closeAt === -1) {
-      out += line.slice(i, openEnd); // unmatched run — literal backticks
-      i = openEnd;
+      i = openEnd; // unmatched run — literal backticks, no span
     } else {
-      i = closeAt + runLen; // whole span dropped
+      ranges.push({ start: i, end: closeAt + runLen });
+      i = closeAt + runLen;
     }
   }
-  return out;
+  return ranges;
 }
+
+/**
+ * Strip inline code spans from ONE line.
+ *
+ * The per-LINE sibling of {@link fencedLineMask}, for every line-oriented scanner
+ * that must tell markup from a literal quoted in backticks (`checkIndexTruncation`
+ * in `src/wiki/lint.ts`). Deliberately NOT the linter's whole-document
+ * `stripCodeSpans`, whose fence removal joins the lines around a block and could
+ * balance a genuinely dangling `[[` against a later line's `]]`.
+ *
+ * ⚠️ The result is SHORTER than the line, so an offset into it means nothing in the
+ * raw line. Any scanner that needs to quote or rewrite what it found must use
+ * {@link maskLineCodeSpans} instead.
+ */
+export function stripLineCodeSpans(line: string): string {
+  const ranges = lineCodeSpanRanges(line);
+  if (ranges.length === 0) return line;
+  let out = "";
+  let cursor = 0;
+  for (const r of ranges) {
+    out += line.slice(cursor, r.start);
+    cursor = r.end;
+  }
+  return out + line.slice(cursor);
+}
+
+/**
+ * The SAME-LENGTH form of {@link stripLineCodeSpans}: every code-span code unit
+ * becomes a `\n`, so offsets into the result index the raw line unchanged.
+ *
+ * `\n` is the blank on purpose rather than a space or a private-use sentinel: every
+ * scanner reading this string is line-scoped by a `\n` exclusion in its own regex
+ * (`WIKILINK_SPAN_SOURCE`, {@link NESTED_MARKUP_RE}, `firstDanglingWikilinkOpen`'s
+ * callers), so a blanked span cannot be read as part of a match NOR supply a
+ * bracket to one — which a space would.
+ *
+ * This is what the code-span exclusion has to be for anything that reports an
+ * offset: `stripLineCodeSpans` moves every offset left by the length of the spans
+ * before it, so a finding located in the stripped text and quoted from the raw line
+ * quotes the wrong place (measured: on a line carrying a live occurrence AND a
+ * backticked one, the excerpt was the DOCUMENTATION).
+ */
+export function maskLineCodeSpans(line: string): string {
+  const ranges = lineCodeSpanRanges(line);
+  if (ranges.length === 0) return line;
+  let out = "";
+  let cursor = 0;
+  for (const r of ranges) {
+    out += line.slice(cursor, r.start) + "\n".repeat(r.end - r.start);
+    cursor = r.end;
+  }
+  return out + line.slice(cursor);
+}
+
+/**
+ * One complete `[[target]]` / `[[target|alias]]`, newline-free — the SOURCE, so each
+ * consumer owns its own `RegExp` (a shared `g` instance carries `lastIndex` state
+ * across modules).
+ *
+ * The `\n` exclusion is what keeps a link line-scoped: a dangling `[[` cannot pair
+ * with a later line's `]]` and drag a mark across a paragraph. It is a SOURCE rather
+ * than a copy for the same reason `COMPONENT_TAG_SOURCE_SINGLE_LINE` is — the two
+ * consumers (`expandOverWikilinks` in `src/wiki/integrate-edits.ts` and the store's
+ * own `WIKILINK_RE`, which keeps its own spelling because it must not import a
+ * dashboard module) are what the shape has to agree with.
+ *
+ * NB the target class admits `[`, as every sibling copy does — so a candidate can
+ * still SPAN a dangling `[[` (`[[ b [[ c [[Real]]`). That is the same shape
+ * `firstDanglingWikilinkOpen` (`src/wiki/store.ts`) calls dangling, and the scanner
+ * over this source must reject it the same way rather than the class being narrowed
+ * here, where a legitimate `[`-bearing target would stop matching for every consumer.
+ */
+export const WIKILINK_SPAN_SOURCE = "\\[\\[([^\\]|\\n]+?)(?:\\|[^\\]\\n]*?)?\\]\\]";
+
+/**
+ * A `[[wikilink]]` whose TARGET carries component markup — the `nested-annotation`
+ * damage in ANY shape. The ONE spelling, shared by the lint check that reports it
+ * (`checkNestedAnnotation`, `src/wiki/lint.ts`) and the repair that reports what it
+ * could not fix (`repairNestedFactWrappers`, `src/wiki/integrate-edits.ts`); two
+ * copies would let the repair pass a line the lint then flags forever.
+ *
+ * `<` is followed by an UPPERCASE letter or a `/` on purpose. MDX/JSX component tags
+ * are capitalized by the language's own rule (`<Fact …>`, `</Fact>`, `<Callout>`),
+ * while a lowercase OPENING `<…>` inside brackets is placeholder prose — measured on
+ * the jarvis wiki, `[[<raw YouTube title>]]` is a naming convention its `log.md`
+ * describes in three places, and a `<[A-Za-z]` class reports all three.
+ *
+ * The `/` is not symmetrical with that, and the asymmetry is accepted rather than
+ * accidental: it also matches a lowercase CLOSING tag, so `[[Page <b>bold</b>]]` IS
+ * reported. That is HTML inside a link target — dead in the same way — and it costs
+ * nothing to report, measured at zero live occurrences across both wikis; dropping
+ * the `/` would cost the `</Fact>`-only shapes this check exists for.
+ *
+ * The target may carry no `]`, so a match cannot run past the link's own closer.
+ * Non-global, so `.test`/`.search` carry no `lastIndex` state.
+ */
+export const NESTED_MARKUP_RE = /\[\[[^\]\n]*<[A-Z/][^\]\n]*\]\]/;
+
+/**
+ * The REPAIRABLE sub-shape of {@link NESTED_MARKUP_RE}: one whole `<Fact>` mark
+ * sitting inside a link's brackets, with a parseable opening tag and non-empty inner
+ * text. The SOURCE, since its consumer needs a `g` instance for `.replace`.
+ *
+ * Every clause bounds the rewrite:
+ *  - the inner text carries no `[`/`]`, so one match can never run across a
+ *    neighbouring link, and the whole thing is line-scoped by the `\n` exclusions;
+ *  - the inner text is NON-EMPTY (`+`), because re-nesting an empty one emits the
+ *    bare `[[]]` — markup for a link that never existed;
+ *  - the attribute tail is QUOTE-AWARE (`[^>"\n]` or a complete `"…"` run), so the
+ *    `>` that ends the tag is the one outside the quotes. A plain `[^>\n]*` stops at
+ *    an inner `>` (`title="a>b"`) and the rewrite then moved the brackets INTO the
+ *    attribute and logged it as repaired. A tag whose quotes do not BALANCE matches
+ *    nothing here at all, so it falls through to the residual report — this shape is
+ *    parsed cleanly or not rewritten, never guessed at;
+ *  - the closing `]]` may not be followed by another `]`, or the rewrite leaves an
+ *    orphan bracket behind the mark it just moved.
+ */
+export const NESTED_FACT_SOURCE =
+  '\\[\\[(<Fact\\b(?:[^>"\\n]|"[^"\\n]*")*>)([^[\\]\\n]+)</Fact>\\]\\](?!\\])';
 
 /**
  * Could `line` be a fence delimiter at all (opener OR closer), judged context-free?

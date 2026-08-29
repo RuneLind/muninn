@@ -589,6 +589,33 @@ describe("lintWiki", () => {
     expect(relPathsFor(await lint(), "nested-annotation")).toEqual([]);
   });
 
+  test("REPRO: on a MIXED line the excerpt quotes the live occurrence, not the coded one", async () => {
+    // `raw.search(...)` found the BACKTICKED documentation occurrence — the finding
+    // pointed the reader at the one thing on the line that is not the defect.
+    await write(
+      "index.md",
+      [
+        "# Wiki Index",
+        "",
+        'Coded: `[[<Fact n="2" v="ok">Doc Page</Fact>]]` — and live: [[<Fact n="1" v="bad">Real Page</Fact>]] here.',
+      ].join("\n"),
+    );
+    const findings = (await lint()).filter((f) => f.check === "nested-annotation");
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.message).toContain('[[<Fact n="1" v="bad">Real Page');
+    expect(findings[0]!.message).not.toContain("Doc Page");
+  });
+
+  test("an MDX/JSX array opener is not a wikilink", async () => {
+    // `rows={[[<Verdict …` is mimir house style — the same exclusion
+    // `index-truncation` already carries, through the same shared mask.
+    await write(
+      "index.md",
+      ["# Wiki Index", "", '<ComparisonTable rows={[[<Verdict v="ok" />, "yes"]]} />'].join("\n"),
+    );
+    expect(relPathsFor(await lint(), "nested-annotation")).toEqual([]);
+  });
+
   test("a lowercase placeholder in brackets is prose, not markup", async () => {
     // `[[<raw YouTube title>]]` is a naming convention the jarvis wiki's log.md
     // describes; a `<[A-Za-z]` class would report it three times over.

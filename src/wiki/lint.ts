@@ -22,12 +22,10 @@
  *                      gardener's writer shares). Rationale + the measured
  *                      numbers: `src/watchers/CLAUDE.md`.
  *  6. nested-annotation — a `[[wikilink]]` whose TARGET carries component markup
- *                      (`[[<Fact n="4" v="ok">Page</Fact>]]`): the link is dead and
- *                      the mark renders inside the brackets. The fact-check
- *                      integrate pass shipped that shape on 2026-08-10; the write
- *                      side expands such a span over the whole link now
- *                      (`factSpanForm`, `integrate-edits.ts`) and this reports any
- *                      that still lands — a hand edit, another writer, a regression.
+ *                      (`[[<Fact n="4" v="ok">Page</Fact>]]`), i.e. a dead link.
+ *                      The write side that must not produce it, and the whole
+ *                      rule: `src/web/CLAUDE.md`; scheduling + the measured
+ *                      numbers: `src/watchers/CLAUDE.md`.
  *
  * The store's index builder silently drops unresolved link targets
  * (`store.ts:389-399`), so broken-link recomputes resolution here from the raw
@@ -49,6 +47,9 @@ import {
 } from "../dashboard/views/components/wiki-filter.ts";
 import {
   fencedLineMask,
+  frontmatterEndLine,
+  maskLineCodeSpans,
+  NESTED_MARKUP_RE,
   stripLineCodeSpans,
 } from "../dashboard/views/components/wiki-integrate.ts";
 
@@ -186,16 +187,6 @@ function maskJsxArrayOpeners(line: string): string {
   return line.replace(/\{\[\[/g, "{  ");
 }
 
-/** Line index (0-based) of the first line AFTER a terminated `---` frontmatter
- *  fence, or 0 when the page carries none. */
-function frontmatterEndLine(lines: readonly string[]): number {
-  if (lines[0]?.trim() !== "---") return 0;
-  for (let i = 1; i < lines.length; i++) {
-    if (lines[i]!.trim() === "---") return i + 1;
-  }
-  return 0; // unterminated — not frontmatter, so lint the whole file
-}
-
 /**
  * Lines carrying a `[[` that never closes on that line.
  *
@@ -252,37 +243,29 @@ function checkIndexTruncation(page: WikiPageMeta, rawContent: string): LintFindi
 }
 
 /**
- * A wikilink whose TARGET carries a component tag — the `nested-annotation` shape.
- *
- * `<` is followed by an UPPERCASE letter or a `/` on purpose, and that is the whole
- * false-positive story. MDX/JSX component tags are capitalized by the language's own
- * rule (`<Fact …>`, `</Fact>`, `<Callout>`), while a LOWERCASE `<…>` inside brackets
- * is placeholder prose — measured on the jarvis wiki, `[[<raw YouTube title>]]` is a
- * naming convention its `log.md` describes in three places, and a `<[A-Za-z]` class
- * reports all three. The target may not contain `]`, so the match cannot run past
- * the link's own closer.
- */
-const NESTED_ANNOTATION_RE = /\[\[[^\]\n]*<[A-Z/][^\]\n]*\]\]/;
-
-/**
  * Lines where component markup sits INSIDE a wikilink's brackets.
  *
- * The recurrence detector for the fact-check annotation defect (PR 2 of the
- * gardener-index-integrity campaign): a claim quote resolving to text inside
- * `[[Some Page]]` used to be wrapped where it sat, producing
+ * The recurrence detector for the fact-check annotation defect: a claim quote
+ * resolving to text inside `[[Some Page]]` used to be wrapped where it sat, producing
  * `[[<Fact n="4" v="ok">Some Page</Fact>]]` — the target becomes markup, so the link
- * resolves to nothing and the chrome renders between the brackets. `factSpanForm`
- * now expands such a span over the whole link and `repairNestedFactWrappers` is the
- * post-splice backstop; this is the third line of defence, over pages nobody wrote
- * through those seams.
+ * resolves to nothing and the chrome renders between the brackets. The write side and
+ * its backstop are `factSpanForm`/`repairNestedFactWrappers` (`integrate-edits.ts`);
+ * this is the third line of defence, over pages nobody wrote through those seams. The
+ * whole rule, and why the shape is what it is: `src/web/CLAUDE.md`.
  *
- * The same three exclusions as {@link checkIndexTruncation}, for the same reasons and
- * through the same shared helpers — fenced blocks (`fencedLineMask`), YAML
- * frontmatter, and inline code spans stripped PER LINE. All three matter here
- * concretely: mimir's plan for this very PR quotes the broken shape in a ```markdown
+ * The predicate is the SHARED {@link NESTED_MARKUP_RE} — the same constant the repair
+ * reports its residual with, so the two cannot disagree about what the damage looks
+ * like — and the exclusions are {@link checkIndexTruncation}'s, for the same reasons
+ * and through the same shared helpers: fenced blocks, YAML frontmatter, inline code
+ * spans, and the `{[[` MDX/JSX array opener (`rows={[[<Verdict …` is mimir house
+ * style and reads as a wikilink carrying a capitalized tag). All of them matter
+ * concretely: mimir's own plan for this fix quotes the broken shape in a ```markdown
  * fence and again in backticks, six times over.
  *
- * The excerpt is quoted from the RAW line, so the finding can be grepped.
+ * The excerpt is located in the MASKED line and quoted from the RAW one at that same
+ * offset. Masking is same-length precisely so those two agree: `search`ing the raw
+ * line found the BACKTICKED documentation occurrence on a mixed line, and an offset
+ * into the code-span-STRIPPED line indexes a string that appears in no file.
  */
 function checkNestedAnnotation(page: WikiPageMeta, rawContent: string): LintFinding[] {
   const out: LintFinding[] = [];
@@ -291,9 +274,9 @@ function checkNestedAnnotation(page: WikiPageMeta, rawContent: string): LintFind
   for (let i = frontmatterEndLine(lines); i < lines.length; i++) {
     if (fenced[i]) continue;
     const raw = lines[i]!;
-    if (!NESTED_ANNOTATION_RE.test(stripLineCodeSpans(raw))) continue;
-    const at = raw.search(NESTED_ANNOTATION_RE);
-    const excerpt = (at === -1 ? raw : raw.slice(at)).trim().slice(0, TRUNCATION_EXCERPT_MAX);
+    const at = maskJsxArrayOpeners(maskLineCodeSpans(raw)).search(NESTED_MARKUP_RE);
+    if (at === -1) continue;
+    const excerpt = raw.slice(at).trim().slice(0, TRUNCATION_EXCERPT_MAX);
     out.push({
       check: "nested-annotation",
       relPath: page.relPath,

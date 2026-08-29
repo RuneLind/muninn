@@ -525,9 +525,15 @@ function extRank(relPath: string): number {
  * consumed the NEXT line's link. Measurements: `src/watchers/CLAUDE.md`
  * (`index-truncation`) owns those numbers.
  *
- * Six sibling copies of this shape carry the same exclusion, each for its own
+ * FIVE sibling copies of this shape carry the same exclusion, each for its own
  * consumer: `render.ts`, `digest.ts`, `graph-routes.ts`, `draft.ts`'s
- * `CONTAIN_BODY_RE`, and the two flatteners below.
+ * `CONTAIN_BODY_RE`, and the two flatteners below (which share one). The sixth was
+ * the fact-check annotate pass, and it is now the exported SOURCE
+ * `WIKILINK_SPAN_SOURCE` (`dashboard/views/components/wiki-integrate.ts`) — the
+ * side of the split that has to answer "is this a link?" rather than "which pages
+ * does this page name", so it also rejects a candidate spanning a dangling `[[`
+ * ({@link firstDanglingWikilinkOpen}'s rule) and scans a code-span-masked line.
+ * This copy stays a copy: `store.ts` must not import a dashboard module.
  */
 const WIKILINK_RE = /\[\[([^\]|\n]+?)(?:\|[^\]\n]*?)?\]\]/g;
 

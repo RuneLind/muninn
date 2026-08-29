@@ -83,8 +83,12 @@ import { extractJson } from "../ai/json-extract.ts";
 import {
   factWrapperForms,
   fencedLineMask,
+  frontmatterEndLine,
   isWrapperOnlyEdit,
-  stripLineCodeSpans,
+  maskLineCodeSpans,
+  NESTED_FACT_SOURCE,
+  NESTED_MARKUP_RE,
+  WIKILINK_SPAN_SOURCE,
   type ClaimQuote,
   type FactcheckClaimAnchor,
 } from "../dashboard/views/components/wiki-integrate.ts";
@@ -833,27 +837,66 @@ function longestLineRange(
 /** A leading BLOCK MARKER: list bullet, ordered number, blockquote, heading. */
 const LEADING_BLOCK_MARKER_RE = /^(?:[-*+]|\d+[.)]|>+|#{1,6})[ \t]+/;
 
+/** This module's own `g` instance over the shared {@link WIKILINK_SPAN_SOURCE} — a
+ *  shared `g` RegExp carries `lastIndex` between callers in different modules. */
+const WIKILINK_SPAN_RE = new RegExp(WIKILINK_SPAN_SOURCE, "g");
+
+/** The line-aligned window `[start, end)` sits in. A wikilink is newline-free by
+ *  construction, so a link intersecting the span lies wholly inside these lines —
+ *  which is why the scan is scoped here instead of running over the whole body. */
+function lineWindowAround(body: string, start: number, end: number): { from: number; to: number } {
+  const prevNl = start === 0 ? -1 : body.lastIndexOf("\n", start - 1);
+  const nextNl = body.indexOf("\n", end);
+  return { from: prevNl + 1, to: nextNl === -1 ? body.length : nextNl };
+}
+
 /**
- * One complete `[[target]]` / `[[target|alias]]`, newline-free.
+ * Every real `[[wikilink]]` in the line window `[from, to)`, as body offsets.
  *
- * The seventh sibling copy of `store.ts`'s `WIKILINK_RE` — each consumer carries its
- * own for the reason stated there, and this module must not import the store (it is
- * the side-effect-free engine, and `store.ts` reads the filesystem). The `\n`
- * exclusion is what keeps an expansion line-scoped: a dangling `[[` cannot pair with
- * a later line's `]]` and drag a mark across a paragraph.
+ * TWO things are excluded, and each one was a live defect:
+ *
+ *  - **Inline code spans** ({@link maskLineCodeSpans}, same-length so the offsets
+ *    still index `body`). A backticked `` `[[Old Name]]` `` is a page WRITING ABOUT a
+ *    link, not a link — and treating it as one made a correction on that literal
+ *    unappliable ("would rewrite the link target" about a link that does not exist)
+ *    and mis-refused a mark over it. Fenced blocks need no handling here: a fence is
+ *    already an exclusion zone, so no edit can resolve into one.
+ *  - **A candidate spanning a DANGLING `[[`.** The target class admits `[` (as every
+ *    sibling copy does), so on `A [[ b [[ c [[Real Page]]` the regex pairs the FIRST
+ *    opener with the only `]]` and yields a 20-char "link" — expanding a mark over
+ *    which marks prose nobody checked, and inside a table row runs the mark across a
+ *    `|` cell separator. That is exactly the shape `firstDanglingWikilinkOpen`
+ *    (`src/wiki/store.ts`) calls dangling; the candidate is rejected and the scan
+ *    RESUMES two chars in, so the genuine inner link is still found (skipping the
+ *    match wholesale would consume it).
  */
-const WIKILINK_SPAN_RE = /\[\[([^\]|\n]+?)(?:\|[^\]\n]*?)?\]\]/g;
+function wikilinkSpansIn(body: string, from: number, to: number): { start: number; end: number }[] {
+  const spans: { start: number; end: number }[] = [];
+  let lineStart = from;
+  for (const line of body.slice(from, to).split("\n")) {
+    const masked = maskLineCodeSpans(line);
+    WIKILINK_SPAN_RE.lastIndex = 0;
+    for (let m = WIKILINK_SPAN_RE.exec(masked); m; m = WIKILINK_SPAN_RE.exec(masked)) {
+      if (m[0].includes("[[", 2)) {
+        WIKILINK_SPAN_RE.lastIndex = m.index + 2; // dangling opener — re-scan inside it
+        continue;
+      }
+      spans.push({ start: lineStart + m.index, end: lineStart + m.index + m[0].length });
+    }
+    lineStart += line.length + 1;
+  }
+  return spans;
+}
 
 /**
  * The smallest range covering `[start, end)` PLUS every wikilink it intersects, or
  * `null` when it already covers each of them whole (i.e. nothing to expand).
  *
  * A span that starts inside a link, ends inside one, or sits WHOLLY inside one is
- * cutting a link in half. Wrapping it where it sits puts the mark's tags between the
- * brackets — `[[<Fact n="4" v="ok">Some Page</Fact>]]` — which makes the markup the
- * link TARGET: the link resolves to nothing and the chip renders inside the
- * brackets. Shipped on 2026-08-10; the fix is the inverse nesting over the ORIGINAL
- * link, `<Fact …>[[Some Page]]</Fact>`, which is what this range produces.
+ * cutting a link in half — wrapping it where it sits makes the mark's tags the link
+ * TARGET (`[[<Fact …>Some Page</Fact>]]`, shipped 2026-08-10). This range is the
+ * inverse nesting the fix wraps instead. The whole rule and its measurements live in
+ * `src/web/CLAUDE.md`.
  *
  * Intersection is judged against the ORIGINAL span, so one pass suffices: the
  * expanded edges land ON link boundaries, and a link merely TOUCHING an edge does
@@ -871,12 +914,11 @@ function expandOverWikilinks(
 ): { start: number; end: number } | null {
   let s = start;
   let e = end;
-  for (const m of body.matchAll(WIKILINK_SPAN_RE)) {
-    const ls = m.index!;
-    const le = ls + m[0]!.length;
-    if (ls >= end || le <= start) continue;
-    if (ls < s) s = ls;
-    if (le > e) e = le;
+  const window = lineWindowAround(body, start, end);
+  for (const link of wikilinkSpansIn(body, window.from, window.to)) {
+    if (link.start >= end || link.end <= start) continue;
+    if (link.start < s) s = link.start;
+    if (link.end > e) e = link.end;
   }
   return s === start && e === end ? null : { start: s, end: e };
 }
@@ -903,22 +945,28 @@ function ownsLineStart(body: string, pos: number): boolean {
  *    table, not just that line.
  * A span that does not start its own line is inline by construction and untouched.
  *
- * `opts.expanded` adds a THIRD outcome, and it is scoped to the wikilink expansion
- * for a measured reason. An owns-line-start span with no leading marker is returned
- * as a SUCCESS here — that is the ordinary paragraph-initial mark, 15 of which are
- * live on the jarvis wiki today (re-counted 2026-08-30: 91 marks, 15 at column 0,
- * all 15 in this same-line inline form) and which `web-format.ts` renders
- * deliberately. But a span EXPANDED leftwards over a `[[` at column 0 was NOT at a
- * line start before the expansion: the expansion is what makes the opening tag own
- * the line, and there is no sub-range to shrink to that both covers the link and
- * clears column 0. So that case — and only that case — is refused. Every
- * pre-existing column-0 mark is byte-identical.
+ * There is deliberately NO third outcome for a span EXPANDED leftwards over a `[[`
+ * at column 0, and the reason is a render measurement rather than a reading of the
+ * parser. Such a span is returned as an ordinary success — the same answer the
+ * paragraph-initial mark gets (89 inline marks live on the jarvis wiki, 15 of them
+ * at column 0; an old-vs-new run of the shipped pass over every one of them diffs to
+ * zero). Driven through the real `renderWikiHtml`/`web-format` pipeline, BOTH shapes
+ * the expansion can produce render correctly: `<Fact …>[[Some Page]]</Fact> rest.`
+ * comes out as an `fc-mark` span with a LIVE `<a class="wiki-link">` inside it, and
+ * one owning its whole line comes out as the block form's `fc-mark-block` div with
+ * the same live link — which is the sanctioned second spelling (`src/web/CLAUDE.md`:
+ * both forms must look marked). The refusal that shipped here cost the mark on the
+ * PRIMARY defect shape (`[[Some Page]] is a good resource.`), on every tier-3
+ * multi-line quote (those ranges start at column 0 by construction) and on any span
+ * merely expanded RIGHTWARDS, and it reported all of them as a wikilink "opening its
+ * own line". Emitting the BLOCK form instead is NOT the alternative it looks like:
+ * measured through the same renderer, `<Fact …>\n[[Some Page]]\n</Fact> rest.` puts
+ * prose after the closing tag line and renders the tags as escaped literal text.
  */
 function markableRange(
   body: string,
   start: number,
   end: number,
-  opts?: { expanded?: boolean },
 ): { start: number; end: number; trimmedMarker?: boolean } | { error: string } {
   if (!ownsLineStart(body, start)) return { start, end };
   let s = start;
@@ -927,15 +975,7 @@ function markableRange(
     return { error: "the checked passage is a table row — marking it would break the table" };
   }
   const marker = LEADING_BLOCK_MARKER_RE.exec(body.slice(s, end));
-  if (!marker) {
-    if (opts?.expanded) {
-      return {
-        error:
-          "the checked passage is a [[wikilink]] opening its own line — a mark covering the whole link would turn the line into a component",
-      };
-    }
-    return { start: s, end };
-  }
+  if (!marker) return { start: s, end };
   const after = s + marker[0].length;
   if (after >= end) {
     return { error: "the checked passage is only a list or quote marker — nothing to mark" };
@@ -973,42 +1013,69 @@ function factSpanForm(
   body: string,
   start: number,
   end: number,
-):
-  | {
-      form: "inline" | "block";
-      start: number;
-      end: number;
-      truncated?: boolean;
-      trimmedMarker?: boolean;
-      expandedOverLink?: boolean;
-    }
-  | { error: string } {
+): FactSpan | { error: string } {
   if (!body.slice(start, end).includes("\n")) {
-    const expanded = expandOverWikilinks(body, start, end);
-    const range = expanded ?? { start, end };
-    const guarded = markableRange(body, range.start, range.end, { expanded: expanded !== null });
-    if ("error" in guarded) return guarded;
-    return { form: "inline", ...guarded, ...(expanded ? { expandedOverLink: true } : {}) };
+    return withForm(expandAndGuard(body, { start, end }));
   }
   if (isWholeParagraph(body, start, end)) return { form: "block", start, end };
   const trimmed = longestLineRange(body, start, end);
   if (!trimmed) {
     return { error: "the checked passage spans several lines with no markable text on any of them" };
   }
-  // `longestLineRange` already skips a leading list/quote marker; the guard adds
-  // the table refusal (its longest line can be a table row) and the expansion
-  // refusal. Expansion stays on the trimmed line — a wikilink is newline-free.
-  const expanded = expandOverWikilinks(body, trimmed.start, trimmed.end);
-  const range = expanded ?? trimmed;
-  const guarded = markableRange(body, range.start, range.end, { expanded: expanded !== null });
+  // `longestLineRange` already skips a leading list/quote marker; the guard adds the
+  // table refusal (its longest line can be a table row). Expansion stays on the
+  // trimmed line — a wikilink is newline-free.
+  const guarded = expandAndGuard(body, trimmed);
   if ("error" in guarded) return guarded;
-  return {
-    form: "inline",
-    start: guarded.start,
-    end: guarded.end,
-    truncated: true,
-    ...(expanded ? { expandedOverLink: true } : {}),
-  };
+  return { form: "inline", ...guarded, truncated: true };
+}
+
+interface FactSpan {
+  form: "inline" | "block";
+  start: number;
+  end: number;
+  truncated?: boolean;
+  trimmedMarker?: boolean;
+  expandedOverLink?: boolean;
+}
+
+/** Expand over any wikilink the range cuts, then guard the EXPANDED range — the
+ *  order is the point (`ownsLineStart` is evaluated on the span's start, and
+ *  expanding leftwards over a `[[` at column 0 is what flips it). Written out at
+ *  both inline tiers before; one spelling now, because the two copies are exactly
+ *  what a fix to either half would have to remember to apply twice. */
+function expandAndGuard(
+  body: string,
+  range: { start: number; end: number },
+): { start: number; end: number; trimmedMarker?: boolean; expandedOverLink?: boolean } | { error: string } {
+  const expanded = expandOverWikilinks(body, range.start, range.end);
+  const guarded = markableRange(body, (expanded ?? range).start, (expanded ?? range).end);
+  if ("error" in guarded) return guarded;
+  return { ...guarded, ...(expanded ? { expandedOverLink: true } : {}) };
+}
+
+function withForm(
+  guarded: ReturnType<typeof expandAndGuard>,
+): FactSpan | { error: string } {
+  return "error" in guarded ? guarded : { form: "inline", ...guarded };
+}
+
+/**
+ * What the preview tells the reviewer about a mark whose range is not the quote's.
+ *
+ * EVERY adjustment is named, not the first one that matched: a 4-deep ternary
+ * reported a tier-3 truncation and stayed silent about the same mark having grown
+ * over a `[[wikilink]]` — which is the one adjustment that changes what text the
+ * mark covers.
+ */
+function markReason(span: FactSpan): string {
+  const notes: string[] = [];
+  if (span.expandedOverLink) notes.push("expanded to cover the whole [[wikilink]]");
+  if (span.truncated) notes.push("trimmed to one line");
+  if (span.trimmedMarker) notes.push("list or quote marker left outside the mark");
+  return notes.length === 0
+    ? "marks the checked passage"
+    : `marks the checked passage (${notes.join("; ")})`;
 }
 
 /** The wrapper text for a CORRECTION: the mark goes around the replacement prose,
@@ -1112,6 +1179,48 @@ export interface AnnotateEditsResult {
  * post-wrapper `new` over `maxEditChars`, which would hard-400 the apply route —
  * that edit is dropped outright.
  */
+/** The ONE sentence a link-crossing correction is refused with, on BOTH paths that
+ *  refuse one ({@link annotateEdits}' pass 1 and {@link dropLinkCrossingCorrections}) —
+ *  the drop is the same decision about the same hazard, and the reviewer reads the
+ *  reason. */
+const LINK_CROSSING_CORRECTION_REASON =
+  "the correction starts or ends inside a [[wikilink]] — applying it would rewrite the link target, so the whole edit was dropped";
+
+/**
+ * The link-crossing correction guard ALONE, for a page that takes no marks.
+ *
+ * `annotateEdits` runs on `.mdx` only (a `.md` page carries no inline annotations by
+ * policy), and the propose route's non-annotatable branch used to hand the model's
+ * corrections straight through as `{edits: bounded.kept, dropped: []}` — so a
+ * correction rewriting `[[Old Name]]` → `[[New Name]]` applied UNCHECKED on exactly
+ * the pages where nothing else looks. The harm is not the mark (there is none), it is
+ * the link target: `[[X]]` → `[[Y]]` invents a target no editor chose, downstream of
+ * every gardener containment seam, in a shape the `[[<` scan cannot see. Gating a
+ * containment check on the file extension is the same mistake `stripFactWrappers`
+ * documents (`src/web/CLAUDE.md`): "a `.md` page never carries marks" is an invariant
+ * of the write paths, not of the file.
+ *
+ * Corrections ONLY — nothing here wraps anything. Unresolvable edits are passed
+ * through rather than dropped, because the caller re-resolves the surviving list and
+ * reports those misses itself; dropping them here would report each one twice.
+ */
+export function dropLinkCrossingCorrections(
+  body: string,
+  corrections: IntegrateEdit[],
+  isMdx: boolean,
+): AnnotateEditsResult {
+  const edits: IntegrateEdit[] = [];
+  const dropped: DroppedEdit[] = [];
+  for (const o of applyEdits(body, corrections, isMdx).outcomes) {
+    if (o.applied && o.start !== undefined && o.end !== undefined && expandOverWikilinks(body, o.start, o.end)) {
+      dropped.push({ edit: o.edit, reason: LINK_CROSSING_CORRECTION_REASON });
+      continue;
+    }
+    edits.push(o.edit);
+  }
+  return { edits, dropped };
+}
+
 export function annotateEdits(input: AnnotateEditsInput): AnnotateEditsResult {
   const { body, isMdx } = input;
   const nl = bodyNewline(body);
@@ -1140,11 +1249,7 @@ export function annotateEdits(input: AnnotateEditsInput): AnnotateEditsResult {
     // A correction CONTAINING a whole link is untouched: it covers the link's own
     // brackets, so `expandOverWikilinks` has nothing to widen and answers null.
     if (expandOverWikilinks(body, o.start, o.end)) {
-      dropped.push({
-        edit: o.edit,
-        reason:
-          "the correction starts or ends inside a [[wikilink]] — applying it would rewrite the link target, so the whole edit was dropped",
-      });
+      dropped.push({ edit: o.edit, reason: LINK_CROSSING_CORRECTION_REASON });
       continue;
     }
     claimed.push({ start: o.start, end: o.end });
@@ -1206,6 +1311,9 @@ export function annotateEdits(input: AnnotateEditsInput): AnnotateEditsResult {
       reason: "",
     }));
   const wrappers: IntegrateEdit[] = [];
+  // Where the marks emitted so far actually landed — the POST-expansion ranges, which
+  // is the whole point (see the collision drop below).
+  const markedSpans: { start: number; end: number; claimIndex: number }[] = [];
   for (const o of applyEdits(body, candidates, isMdx).outcomes) {
     if (!o.applied || o.start === undefined || o.end === undefined) {
       dropped.push({ edit: o.edit, reason: o.reason ?? "could not be placed" });
@@ -1220,17 +1328,26 @@ export function annotateEdits(input: AnnotateEditsInput): AnnotateEditsResult {
       dropped.push({ edit: o.edit, reason: span.error });
       continue;
     }
-    // The overlap gate above ran on the PRE-expansion offsets. Expanding over a
-    // wikilink is the one thing that can grow a span outward, so the expanded range
-    // is re-tested against the corrections' claimed spans — an overlap `applyEdits`
-    // would otherwise arbitrate by position, killing the correction. A backstop
-    // rather than a live path today: the pass-1 refusal above removes every
-    // correction that could claim a region strictly inside a link, and a correction
-    // that contains a link whole already overlaps the wrapper before expansion.
-    if (span.expandedOverLink && claimed.some((c) => span.start < c.end && c.start < span.end)) {
+    // There is deliberately no wrapper-vs-CORRECTION re-test on the expanded range.
+    // It is unreachable by construction and was verified so: pass 1 drops every
+    // correction that cuts a link, so a surviving correction's span either contains a
+    // link whole or touches none — and an expansion only ever grows the wrapper over
+    // links it already intersects, whose overlap with such a correction therefore
+    // existed before the expansion and was caught by the gate above.
+    //
+    // Wrapper-vs-WRAPPER is the reachable half of that hazard, and it is REAL: two
+    // claims quoting different words inside ONE link expand to the same extent, so
+    // both edits carry an identical `old` and the second dies in `applyEdits` under
+    // the generic "overlaps an earlier edit" — leaving the appendix with a section no
+    // chip points at, and the gate with no explanation. Named here instead.
+    const collision = markedSpans.find((m) => span.start < m.end && m.start < span.end);
+    if (collision) {
       dropped.push({
         edit: o.edit,
-        reason: "overlaps a correction once expanded over its [[wikilink]] — the correction wins",
+        reason:
+          span.expandedOverLink && span.start === collision.start && span.end === collision.end
+            ? `expanded over the same [[wikilink]] as claim ${collision.claimIndex} — one mark carries both`
+            : `overlaps the mark for claim ${collision.claimIndex} — one mark carries both`,
       });
       continue;
     }
@@ -1242,18 +1359,8 @@ export function annotateEdits(input: AnnotateEditsInput): AnnotateEditsResult {
       dropped.push({ edit: o.edit, reason: `the inline mark exceeds ${input.maxEditChars} chars` });
       continue;
     }
-    wrappers.push({
-      ...o.edit,
-      old: inner,
-      new: text,
-      reason: span.truncated
-        ? "marks the checked passage (trimmed to one line)"
-        : span.expandedOverLink
-          ? "marks the checked passage (expanded to cover the whole [[wikilink]])"
-          : span.trimmedMarker
-            ? "marks the checked passage (list or quote marker left outside the mark)"
-            : "marks the checked passage",
-    });
+    markedSpans.push({ start: span.start, end: span.end, claimIndex: o.edit.claimIndex });
+    wrappers.push({ ...o.edit, old: inner, new: text, reason: markReason(span) });
   }
 
   // Corrections first, so the cap can only ever trim MARKS — never a correction.
@@ -1268,34 +1375,45 @@ export function annotateEdits(input: AnnotateEditsInput): AnnotateEditsResult {
   return { edits, dropped };
 }
 
-/** A mark that landed INSIDE a wikilink's brackets, in the repairable inline shape.
- *  The inner text may carry no `[` or `]`, so one match can never run across a
- *  neighbouring link, and the whole thing is line-scoped by the `\n` exclusions. */
-const NESTED_FACT_RE = /\[\[(<Fact\b[^>\n]*>)([^[\]\n]*)<\/Fact>\]\]/g;
+/** This module's own `g` instance over the shared {@link NESTED_FACT_SOURCE} — the
+ *  repairable shape, whose every clause is documented there. */
+const NESTED_FACT_RE = new RegExp(NESTED_FACT_SOURCE, "g");
 
-/** The same damage in any shape — used only to REPORT what the repair could not fix.
- *  Uppercase-or-`/` after the `<` for `checkNestedAnnotation`'s reason (`src/wiki/lint.ts`):
- *  a lowercase `[[<raw title>]]` is placeholder prose, not markup. */
-const NESTED_MARKUP_RE = /\[\[[^\]\n]*<[A-Z/][^\]\n]*\]\]/;
+/** How much of an unrepaired line the log line quotes. */
+const RESIDUAL_EXCERPT_MAX = 120;
 
 /**
  * Post-splice backstop: re-nest any `<Fact>` mark that ended up INSIDE a wikilink.
  *
  * `factSpanForm` expands a span over the link it intersects, so this should never
  * fire on a write this build produced — it is here because the damage is silent and
- * durable (`[[<Fact n="4" v="ok">Some Page</Fact>]]` makes the markup the link
- * TARGET, so the link is dead and the chip renders between the brackets) and because
- * the apply route also splices CLIENT-ECHOED edits, which no engine tier constrains.
- * Deliberately NOT a write-time reject at `writeWikiPage`: pages documenting this bug
- * carry the shape legitimately, and refusing the whole write would be worse than the
- * defect.
+ * durable (the tags become the link TARGET; `src/web/CLAUDE.md` owns the rule) and
+ * because the apply route also splices CLIENT-ECHOED edits, which no engine tier
+ * constrains. Deliberately NOT a write-time reject at `writeWikiPage`: pages
+ * documenting this bug carry the shape legitimately, and refusing the whole write
+ * would be worse than the defect.
+ *
+ * **It rewrites only what it can parse WHOLE**, which is the difference between a
+ * backstop and a second source of damage. `NESTED_FACT_SOURCE` requires a
+ * quote-balanced opening tag, non-empty inner text and a `]]` not followed by another
+ * `]`; anything else falls through to the residual report. Each of those was a
+ * measured corruption: `title="a>b"` moved the brackets inside the attribute, an
+ * empty inner emitted the bare `[[]]`, and a trailing `]]]` left an orphan bracket.
  *
  * Code is documentation and is left alone — fenced lines via the shared
- * `fencedLineMask`, inline spans via the shared `stripLineCodeSpans`. Because the
- * rewrite needs RAW offsets that the strip does not preserve, the decision is made
- * by COUNT: a line is rewritten only when every occurrence survives the strip, i.e.
- * none of them is inside code. A line mixing a live nesting with a quoted example is
- * reported instead of guessed at.
+ * `fencedLineMask`, inline spans via the shared `maskLineCodeSpans`. Because the
+ * rewrite runs on the RAW line, the decision is made by COUNT: a line is rewritten
+ * only when every occurrence survives the mask, i.e. none of them is inside code. A
+ * line mixing a live nesting with a quoted example is reported instead of guessed at.
+ * YAML frontmatter is skipped for the same reason `checkNestedAnnotation` skips it —
+ * its values are strings, not markdown — and the two halves scanning different bytes
+ * would mean the repair rewriting a title the lint never looks at.
+ *
+ * **Known gap, deliberate:** a MULTI-LINE nesting (`[[<Fact …>` … `</Fact>]]` across
+ * a line break) is invisible to this repair AND to the lint check, both of which are
+ * line-scoped. No engine tier can produce one (a wrapper is refused outright when its
+ * span carries a newline and the block form starts on its own line), so it is
+ * reachable only through a client-echoed edit that spells it deliberately.
  *
  * Returns the (possibly unchanged) body plus two excerpt lists for the caller's log
  * line: what was repaired, and what still carries the shape.
@@ -1309,26 +1427,30 @@ export function repairNestedFactWrappers(body: string): {
   const residual: string[] = [];
   const lines = body.split("\n");
   const fenced = fencedLineMask(lines);
-  let changed = false;
-  for (let i = 0; i < lines.length; i++) {
+  for (let i = frontmatterEndLine(lines); i < lines.length; i++) {
     const raw = lines[i]!;
     if (fenced[i]) continue;
-    const stripped = stripLineCodeSpans(raw);
+    // SAME-LENGTH, so the residual excerpt below can be located here and quoted from
+    // the raw line: an offset into the code-span-STRIPPED text points at the wrong
+    // place on any line that carries a backticked span before the match.
+    const masked = maskLineCodeSpans(raw);
     const rawHits = raw.match(NESTED_FACT_RE)?.length ?? 0;
-    const liveHits = stripped.match(NESTED_FACT_RE)?.length ?? 0;
+    const liveHits = masked.match(NESTED_FACT_RE)?.length ?? 0;
     if (rawHits > 0 && liveHits === rawHits) {
       lines[i] = raw.replace(NESTED_FACT_RE, (_m, open: string, inner: string) => {
-        repaired.push(`${open}[[${inner}]]</Fact>`);
-        return `${open}[[${inner}]]</Fact>`;
+        const fixed = `${open}[[${inner}]]</Fact>`;
+        repaired.push(fixed);
+        return fixed;
       });
-      changed = true;
       continue;
     }
     // Not repairable here: a mixed line (some occurrences quoted in code), or a
-    // nesting this narrow shape does not match. Report only what is NOT in code.
-    if (NESTED_MARKUP_RE.test(stripped)) residual.push(stripped.trim().slice(0, 120));
+    // nesting the repairable shape refuses. Report only what is NOT in code, quoted
+    // from the RAW line so the log line greps.
+    const at = masked.search(NESTED_MARKUP_RE);
+    if (at !== -1) residual.push(raw.slice(at).trim().slice(0, RESIDUAL_EXCERPT_MAX));
   }
-  return { body: changed ? lines.join("\n") : body, repaired, residual };
+  return { body: repaired.length > 0 ? lines.join("\n") : body, repaired, residual };
 }
 
 /**

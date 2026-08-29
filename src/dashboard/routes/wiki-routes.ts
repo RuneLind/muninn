@@ -60,6 +60,7 @@ import {
   enforceEditBounds,
   hasSourcesSection,
   integrateBodyLen,
+  dropLinkCrossingCorrections,
   maxChangedChars,
   neutralizeFactcheckSentinels,
   originalsOfOutcomes,
@@ -3725,7 +3726,11 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
             maxEdits,
             maxEditChars: INTEGRATE_MAX_EDIT_CHARS,
           })
-        : { edits: bounded.kept, dropped: [] as DroppedEdit[] };
+        : // A `.md` page takes no marks — but the link-crossing CORRECTION guard is
+          // not about marks. Handing `bounded.kept` straight through let a
+          // `[[Old Name]]` → `[[New Name]]` rewrite apply unchecked on exactly the
+          // pages the annotate path never looks at.
+          dropLinkCrossingCorrections(editable, bounded.kept, isMdx);
       const resolvedEdits = applyEdits(editable, annotation.edits, isMdx);
       const budgetDrops = enforceChangeBudget(resolvedEdits.outcomes, bodyLen);
       const edits = resolvedEdits.outcomes
@@ -3937,25 +3942,27 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
           // remains the way to add a callout on its own.
           if (applyResult.appliedCount === 0) return null;
           // POST-SPLICE GUARD, on the body this write is about to persist: a `<Fact>`
-          // mark nested inside a `[[wikilink]]` makes the markup the link TARGET —
-          // the link dies and the chip renders between the brackets. `factSpanForm`
-          // expands such a span over the whole link now, but this route also splices
-          // CLIENT-ECHOED edits, which no engine tier constrains. Auto-corrected
-          // rather than refused: a page legitimately DOCUMENTING the shape must still
-          // be writable (which is also why there is no such check at `writeWikiPage`),
-          // and the repair leaves fenced + inline-code occurrences alone.
+          // mark nested inside a `[[wikilink]]` makes the markup the link TARGET.
+          // `factSpanForm` expands such a span over the whole link now, but this route
+          // also splices CLIENT-ECHOED edits, which no engine tier constrains. Rule +
+          // rationale: `src/web/CLAUDE.md`.
           const nested = repairNestedFactWrappers(applyResult.body);
           if (nested.repaired.length > 0 || nested.residual.length > 0) {
+            // COUNTS at warn, CONTENT at debug: the spans are up to 400 chars of the
+            // wiki page itself, and on `MUNINN_PROFILE=nais` stdout is a shared
+            // aggregator (the same rule that dropped the inbound-message preview).
             log.warn(
-              "Wiki fact-check integrate: nested annotation in wiki={wiki} page={page} — repaired={repaired} residual={residual} spans={spans}",
+              "Wiki fact-check integrate: nested annotation in wiki={wiki} page={page} — repaired={repaired} residual={residual}",
               {
                 wiki: entry.name,
                 page: meta.relPath,
                 repaired: nested.repaired.length,
                 residual: nested.residual.length,
-                spans: [...nested.repaired, ...nested.residual].join(" · ").slice(0, 400),
               },
             );
+            log.debug("Wiki fact-check integrate: nested annotation spans={spans}", {
+              spans: [...nested.repaired, ...nested.residual].join(" · ").slice(0, 400),
+            });
           }
           const editedBody = nested.body;
           // Did any mark actually land? If so the appendix is MANDATORY regardless of
