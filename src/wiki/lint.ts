@@ -21,6 +21,11 @@
  *                      `firstDanglingWikilinkOpen`, `store.ts`, which the
  *                      gardener's writer shares). Rationale + the measured
  *                      numbers: `src/watchers/CLAUDE.md`.
+ *  6. nested-annotation — a `[[wikilink]]` whose TARGET carries component markup
+ *                      (`[[<Fact n="4" v="ok">Page</Fact>]]`), i.e. a dead link.
+ *                      The write side that must not produce it, and the whole
+ *                      rule: `src/web/CLAUDE.md`; scheduling + the measured
+ *                      numbers: `src/watchers/CLAUDE.md`.
  *
  * The store's index builder silently drops unresolved link targets
  * (`store.ts:389-399`), so broken-link recomputes resolution here from the raw
@@ -40,7 +45,13 @@ import {
   FUTURE_DATE_SKEW_MS,
   isImplausibleFutureDate,
 } from "../dashboard/views/components/wiki-filter.ts";
-import { fencedLineMask } from "../dashboard/views/components/wiki-integrate.ts";
+import {
+  fencedLineMask,
+  frontmatterEndLine,
+  maskLineCodeSpans,
+  NESTED_MARKUP_RE,
+  stripLineCodeSpans,
+} from "../dashboard/views/components/wiki-integrate.ts";
 
 export const LINT_CHECKS = [
   "broken-link",
@@ -48,6 +59,7 @@ export const LINT_CHECKS = [
   "stale-updated",
   "missing-sources",
   "index-truncation",
+  "nested-annotation",
 ] as const;
 export type LintCheck = (typeof LINT_CHECKS)[number];
 
@@ -163,53 +175,6 @@ function checkBrokenLinks(page: WikiPageMeta, rawContent: string, index: WikiInd
 const TRUNCATION_EXCERPT_MAX = 60;
 
 /**
- * Strip inline code spans from ONE line, CommonMark's pairing rule: a run of N
- * backticks opens a span that only a run of exactly N closes.
- *
- * A `` `[^`]*` `` replace mis-pairs the double-backtick form the syntax exists
- * for — `` `` [[x `` `` is how a page writes a literal containing a backtick —
- * leaving the `[[` exposed and the line falsely reported. An UNMATCHED run is
- * emitted literally and the scan continues past it, so a stray backtick cannot
- * swallow the rest of the line either.
- */
-function stripLineCodeSpans(line: string): string {
-  let out = "";
-  let i = 0;
-  while (i < line.length) {
-    if (line[i] !== "`") {
-      out += line[i];
-      i++;
-      continue;
-    }
-    let openEnd = i;
-    while (openEnd < line.length && line[openEnd] === "`") openEnd++;
-    const runLen = openEnd - i;
-    let closeAt = -1;
-    let k = openEnd;
-    while (k < line.length) {
-      if (line[k] !== "`") {
-        k++;
-        continue;
-      }
-      let runEnd = k;
-      while (runEnd < line.length && line[runEnd] === "`") runEnd++;
-      if (runEnd - k === runLen) {
-        closeAt = k;
-        break;
-      }
-      k = runEnd;
-    }
-    if (closeAt === -1) {
-      out += line.slice(i, openEnd); // unmatched run — literal backticks
-      i = openEnd;
-    } else {
-      i = closeAt + runLen; // whole span dropped
-    }
-  }
-  return out;
-}
-
-/**
  * Blank the `[[` of an MDX/JSX expression opener so it is not read as a wikilink
  * opener, PRESERVING LENGTH (the caller's offsets index into this string).
  *
@@ -220,16 +185,6 @@ function stripLineCodeSpans(line: string): string {
  */
 function maskJsxArrayOpeners(line: string): string {
   return line.replace(/\{\[\[/g, "{  ");
-}
-
-/** Line index (0-based) of the first line AFTER a terminated `---` frontmatter
- *  fence, or 0 when the page carries none. */
-function frontmatterEndLine(lines: readonly string[]): number {
-  if (lines[0]?.trim() !== "---") return 0;
-  for (let i = 1; i < lines.length; i++) {
-    if (lines[i]!.trim() === "---") return i + 1;
-  }
-  return 0; // unterminated — not frontmatter, so lint the whole file
 }
 
 /**
@@ -282,6 +237,67 @@ function checkIndexTruncation(page: WikiPageMeta, rawContent: string): LintFindi
       check: "index-truncation",
       relPath: page.relPath,
       message: `Unclosed [[ on line ${i + 1} — a wikilink scan can run past the line end (${excerpt})`,
+    });
+  }
+  return out;
+}
+
+/**
+ * Lines where component markup sits INSIDE a wikilink's brackets.
+ *
+ * The recurrence detector for the fact-check annotation defect: a claim quote
+ * resolving to text inside `[[Some Page]]` used to be wrapped where it sat, producing
+ * `[[<Fact n="4" v="ok">Some Page</Fact>]]` — the target becomes markup, so the link
+ * resolves to nothing and the chrome renders between the brackets. The write side and
+ * its backstop are `factSpanForm`/`repairNestedFactWrappers` (`integrate-edits.ts`);
+ * this is the third line of defence, over pages nobody wrote through those seams. The
+ * whole rule, and why the shape is what it is: `src/web/CLAUDE.md`.
+ *
+ * The predicate is the SHARED {@link NESTED_MARKUP_RE} — the same constant the repair
+ * reports its residual with, so the two cannot disagree about what the damage looks
+ * like — and the exclusions are {@link checkIndexTruncation}'s, for the same reasons
+ * and through the same shared helpers: fenced blocks, YAML frontmatter, inline code
+ * spans, and the `{[[` MDX/JSX array opener (`rows={[[<Verdict …` is mimir house
+ * style and reads as a wikilink carrying a capitalized tag). All of them matter
+ * concretely: mimir's own plan for this fix quotes the broken shape in a ```markdown
+ * fence and again in backticks, six times over.
+ *
+ * The excerpt is located in the MASKED line and quoted from the RAW one at that same
+ * offset. Masking is same-length precisely so those two agree: `search`ing the raw
+ * line found the BACKTICKED documentation occurrence on a mixed line, and an offset
+ * into the code-span-STRIPPED line indexes a string that appears in no file.
+ *
+ * ⚠️ **The inline-code exclusion is a deliberate ASYMMETRY with the repair, not a
+ * shared rule, and it under-reports.** `renderWikiHtml` substitutes wikilinks over
+ * the RAW body before `formatWebHtml` sees a backtick, so a backticked
+ * `` `[[<Fact …>P</Fact>]]` `` renders as a DEAD `wiki-link-missing` inside a
+ * `<code>` — live damage (measured 2026-08-30), which
+ * {@link repairNestedFactWrappers} therefore repairs and this check deliberately
+ * does not report. A fenced example is genuinely inert (a fenced block renders as
+ * code and the substitution is invisible inside one), so that exclusion is not the
+ * same kind of thing. This one is acceptable because the write side can no longer
+ * PRODUCE an inline-code nesting — `wikilinkSpansIn` scans the raw line now, so a
+ * backticked link is expanded over like any other — and the backstop repairs the
+ * client-echoed ones on the way to disk; a HAND-WRITTEN one is the residual. It is
+ * kept because pages document this bug in quoted examples: measured 2026-08-30,
+ * mimir's own plan for this fix carries four `[[<Fact` occurrences — two inside a
+ * ```markdown fence, two in inline code spans — and a check that fires on its own
+ * plan document is a check nobody reads. Full rule: `src/web/CLAUDE.md`.
+ */
+function checkNestedAnnotation(page: WikiPageMeta, rawContent: string): LintFinding[] {
+  const out: LintFinding[] = [];
+  const lines = rawContent.split("\n");
+  const fenced = fencedLineMask(lines);
+  for (let i = frontmatterEndLine(lines); i < lines.length; i++) {
+    if (fenced[i]) continue;
+    const raw = lines[i]!;
+    const at = maskJsxArrayOpeners(maskLineCodeSpans(raw)).search(NESTED_MARKUP_RE);
+    if (at === -1) continue;
+    const excerpt = raw.slice(at).trim().slice(0, TRUNCATION_EXCERPT_MAX);
+    out.push({
+      check: "nested-annotation",
+      relPath: page.relPath,
+      message: `Markup inside a wikilink on line ${i + 1} — the link target is markup, so the link is dead (${excerpt})`,
     });
   }
   return out;
@@ -439,6 +455,9 @@ export async function lintWiki(
     // Reserved infra is IN scope: index.md is exactly where the truncated
     // one-liners land, and a dangling `[[` there hides a real catalog entry.
     findings.push(...checkIndexTruncation(page, content));
+    // Reserved infra too, and for the same reason: the shape is a dead link
+    // wherever it lands, and log.md/index.md carry [[links]] like any page.
+    findings.push(...checkNestedAnnotation(page, content));
 
     if (!reservedBasename(page.relPath)) {
       // One clock read per lint pass, so two pages at the 48h boundary are judged

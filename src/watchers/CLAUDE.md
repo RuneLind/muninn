@@ -1409,7 +1409,7 @@ wiki or DB. v1 is purely a report.
 
 - **Lint engine** (`src/wiki/lint.ts`): pure functions over a built `WikiIndex`
   plus per-file content reads. Each finding is `{ check, relPath, message,
-  detail? }`. Five checks:
+  detail? }`. Six checks:
   1. **broken-link** — re-runs `extractWikilinks` + `extractMarkdownLinks` per
      page and resolves against the index (the store's builder silently drops
      unresolved targets, so resolution is recomputed here); `../`-escapes are
@@ -1478,6 +1478,30 @@ wiki or DB. v1 is purely a report.
      (`<ComparisonTable rows={[[`, mimir house style) — that narrow and no wider.
      The finding quotes the RAW line, since a quote from the code-span-stripped
      text greps to nothing. An INDENTED code block is still in scope (accepted).
+  6. **nested-annotation** — a `[[wikilink]]` whose TARGET carries component
+     markup: `[[<Fact n="4" v="ok">Some Page</Fact>]]`, which makes the markup the
+     link target. Shipped by the fact-check integrate pass on 2026-08-10 (jarvis
+     commit `1c1f978`, three links on one page, repaired by hand 2026-08-16). **The
+     whole rule — the write-side expansion, the correction refusal, the post-splice
+     repair and why the shape is what it is — lives in `src/web/CLAUDE.md`**, stated
+     once; this check is its third line of defence, over pages nobody wrote through
+     those seams (a hand edit, another writer, a regression), and it consumes that
+     rule's own `NESTED_MARKUP_RE` rather than a copy.
+
+     Lint-specific facts: exclusions are `index-truncation`'s, through the same
+     shared helpers in `views/components/wiki-integrate.ts` (`fencedLineMask`,
+     `frontmatterEndLine`, `maskLineCodeSpans`, `maskJsxArrayOpeners`) — all of
+     which matter concretely, since mimir's own plan for this fix quotes the broken
+     shape in a ```markdown fence and again in backticks, six times over. The
+     excerpt is LOCATED in the masked line and QUOTED from the raw one at that
+     offset, which is what makes it greppable: `search`ing the raw line found the
+     backticked documentation occurrence on a mixed line, and an offset into the
+     code-span-STRIPPED line indexes a string that appears in no file. Reserved
+     infra is IN scope (the shape is a dead link wherever it lands). Re-measured
+     2026-08-30: **jarvis 0 (1,148 pages), mimir 0 (477)** — the earlier "1,625
+     pages" was those two counts added together and attributed to mimir alone — and
+     a control copy of mimir's plan page with ONE live occurrence added reports
+     exactly that line and none of its six documented ones.
 - **Adding a check is compiler-enforced now.** `LintReport.counts`, the watcher's
   `CHECK_SUMMARY` and the gardener page's `LINT_LABELS` are all
   `Record<LintCheck, …>`, and `summarizeCounts` iterates `LINT_CHECKS` itself

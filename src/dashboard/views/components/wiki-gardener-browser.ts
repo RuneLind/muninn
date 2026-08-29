@@ -285,6 +285,7 @@ const LINT_LABELS: Record<LintCheck, string> = {
   "stale-updated": "Unusable updated: (missing / unparseable / future)",
   "missing-sources": "Missing sources",
   "index-truncation": "Truncated wikilinks (unclosed [[)",
+  "nested-annotation": "Markup nested inside a wikilink",
 };
 
 function renderLint(findings: LintFinding[]): void {

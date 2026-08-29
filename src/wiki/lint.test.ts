@@ -523,6 +523,106 @@ describe("lintWiki", () => {
     expect(relPathsFor(findings, "index-truncation")).toEqual([]);
   });
 
+  // ── nested-annotation ──────────────────────────────────────────────────────
+
+  test("a `<Fact>` mark inside a wikilink's brackets is reported", async () => {
+    await write(
+      "concepts/Good Concept.md",
+      [
+        "---",
+        "type: concept",
+        "title: Good Concept",
+        "updated: 2026-06-01",
+        "---",
+        "",
+        'Send [[<Fact n="4" v="ok">Real Source</Fact>]] to the slow queue.',
+        "",
+        "## Sources",
+        "- https://example.com/a",
+      ].join("\n"),
+    );
+    const findings = (await lint()).filter((f) => f.check === "nested-annotation");
+    expect(findings.map((f) => f.relPath)).toEqual(["concepts/Good Concept.md"]);
+    // The excerpt is quoted from the raw line, so the finding can be grepped.
+    expect(findings[0]!.message).toContain("line 7");
+    expect(findings[0]!.message).toContain('[[<Fact n="4" v="ok">Real Source');
+  });
+
+  test("the correct nesting — the mark AROUND the link — is clean", async () => {
+    await write(
+      "concepts/Good Concept.md",
+      [
+        "---",
+        "type: concept",
+        "title: Good Concept",
+        "updated: 2026-06-01",
+        "---",
+        "",
+        'Send <Fact n="4" v="ok">[[Real Source]]</Fact> to the slow queue.',
+        "",
+        "## Sources",
+        "- https://example.com/a",
+      ].join("\n"),
+    );
+    expect(relPathsFor(await lint(), "nested-annotation")).toEqual([]);
+  });
+
+  test("fenced, inline-code and frontmatter occurrences are documentation", async () => {
+    // The shape a page documenting this very defect carries — mimir's own plan
+    // quotes it in a ```markdown fence and again in backticks.
+    await write(
+      "index.md",
+      [
+        "---",
+        'title: \'Broken: [[<Fact n="1" v="ok">x</Fact>]]\'',
+        "---",
+        "",
+        "# Wiki Index",
+        "",
+        "```markdown",
+        '- [[<Fact n="4" v="ok">A Page</Fact>]]-class engines',
+        "```",
+        "",
+        'The broken shape is `[[<Fact n="4" v="ok">A Page</Fact>]]` — do not ship it.',
+      ].join("\n"),
+    );
+    expect(relPathsFor(await lint(), "nested-annotation")).toEqual([]);
+  });
+
+  test("REPRO: on a MIXED line the excerpt quotes the live occurrence, not the coded one", async () => {
+    // `raw.search(...)` found the BACKTICKED documentation occurrence — the finding
+    // pointed the reader at the one thing on the line that is not the defect.
+    await write(
+      "index.md",
+      [
+        "# Wiki Index",
+        "",
+        'Coded: `[[<Fact n="2" v="ok">Doc Page</Fact>]]` — and live: [[<Fact n="1" v="bad">Real Page</Fact>]] here.',
+      ].join("\n"),
+    );
+    const findings = (await lint()).filter((f) => f.check === "nested-annotation");
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.message).toContain('[[<Fact n="1" v="bad">Real Page');
+    expect(findings[0]!.message).not.toContain("Doc Page");
+  });
+
+  test("an MDX/JSX array opener is not a wikilink", async () => {
+    // `rows={[[<Verdict …` is mimir house style — the same exclusion
+    // `index-truncation` already carries, through the same shared mask.
+    await write(
+      "index.md",
+      ["# Wiki Index", "", '<ComparisonTable rows={[[<Verdict v="ok" />, "yes"]]} />'].join("\n"),
+    );
+    expect(relPathsFor(await lint(), "nested-annotation")).toEqual([]);
+  });
+
+  test("a lowercase placeholder in brackets is prose, not markup", async () => {
+    // `[[<raw YouTube title>]]` is a naming convention the jarvis wiki's log.md
+    // describes; a `<[A-Za-z]` class would report it three times over.
+    await write("index.md", ["# Wiki Index", "", "The old convention was [[<raw title>]]."].join("\n"));
+    expect(relPathsFor(await lint(), "nested-annotation")).toEqual([]);
+  });
+
   test("counts summarize findings per check", async () => {
     const index = await buildWikiIndex(root);
     const report = await lintWiki(index);

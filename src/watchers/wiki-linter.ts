@@ -32,6 +32,7 @@ const CHECK_SUMMARY: Record<LintCheck, { one: string; many: string }> = {
   "stale-updated": { one: "stale updated:", many: "stale updated:" },
   "missing-sources": { one: "missing Sources", many: "missing Sources" },
   "index-truncation": { one: "truncated wikilink", many: "truncated wikilinks" },
+  "nested-annotation": { one: "nested annotation", many: "nested annotations" },
 };
 
 /** Iterates the ENGINE's own list, never a re-typed order: `summarizeCounts` walks
