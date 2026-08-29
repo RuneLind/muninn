@@ -123,8 +123,11 @@ export function tablesDeclaredByInitSql(sql: string): string[] {
     return { text: m[0], quoted: false };
   };
 
-  /** Skip whitespace, comments and quoted runs, stopping at the first character
-   *  that is none of those — punctuation included.
+  /** Skip whitespace and comments, stopping at the first character that is
+   *  neither — punctuation and every kind of quote included. (It deliberately
+   *  does NOT skip quoted runs: after a table name the only thing that may
+   *  follow is a dot or the end of the name, and a literal or dollar body there
+   *  is invalid SQL that must not be scanned past.)
    *
    *  Distinct from `skipTrivia`, which additionally steps over punctuation to
    *  reach the next WORD. The difference is load-bearing exactly once, at the

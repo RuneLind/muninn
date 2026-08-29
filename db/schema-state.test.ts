@@ -352,6 +352,50 @@ describe("one case per lexer state", () => {
       .toEqual(["t"]);
   });
 
+  test("a failed IF-peek RESTORES the cursor — the next declaration must survive it", () => {
+    // The mechanism of the fix, and nothing pinned it: deleting the restore left
+    // the whole suite green, because in every other `IF` case the swallowed
+    // lookahead words are ones the outer loop skips anyway. Here they are a
+    // `CREATE TABLE`, so a consuming lookahead drops the NEXT table — under-match,
+    // which is round 6's defect in a slightly different shape.
+    expect(tablesDeclaredByInitSql("CREATE TABLE if CREATE TABLE t2 (i int);"))
+      .toEqual(["if", "t2"]);
+    expect(tablesDeclaredByInitSql("CREATE TABLE if NOT CREATE TABLE t3 (i int);"))
+      .toEqual(["if", "t3"]);
+  });
+
+  test("the IF-peek's own quoted guard: a quoted NOT is not the keyword", () => {
+    expect(tablesDeclaredByInitSql(`CREATE TABLE IF "NOT" EXISTS t (i int);`)).toEqual(["if"]);
+  });
+
+  test("a LOWERCASE e'…' is an escape string too — and this one is valid SQL", () => {
+    // The only unpinned branch here that a working file could reach.
+    expect(
+      tablesDeclaredByInitSql(String.raw`SELECT e'a\'CREATE TABLE ghost (i int)'; CREATE TABLE t (i int);`),
+    ).toEqual(["t"]);
+  });
+
+  test("after a dot, trivia is skipped but a quoted run is NOT scanned past", () => {
+    // `skipBlanks`, not `skipTrivia`: the latter steps over literals and dollar
+    // bodies to reach the next word, which after a qualifier dot would take a
+    // token out of a literal for the table name. Invalid SQL either way — the
+    // point is which way it fails on a half-merged file.
+    expect(tablesDeclaredByInitSql("CREATE TABLE public . 'x' (i int);")).toEqual(["public"]);
+  });
+
+  test("a quoted or dollar-quoted token before the dot is not trivia", () => {
+    // `skipBlanks` stops AT a quote rather than skipping it, so these do not
+    // reach the dot and the qualifier is not taken. Postgres rejects all three;
+    // what matters is that the scan does not wander.
+    for (const sql of [
+      `CREATE TABLE public "x" . t (i int);`,
+      `CREATE TABLE public $$q$$ . t (i int);`,
+      `CREATE TABLE public 'q' . t (i int);`,
+    ]) {
+      expect(tablesDeclaredByInitSql(sql)).toEqual(["public"]);
+    }
+  });
+
   test("U&, B and X prefixes need no state of their own", () => {
     expect(tablesDeclaredByInitSql(`SELECT U&'d\\0061t'; CREATE TABLE t (i int);`)).toEqual(["t"]);
     expect(tablesDeclaredByInitSql(`SELECT B'1011'; CREATE TABLE t (i int);`)).toEqual(["t"]);
