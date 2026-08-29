@@ -71,16 +71,6 @@ export type PlanPriorityEdit =
  * before the closing fence line. The frontmatter body is `(openEnd, closeNl)` —
  * empty when the two coincide, which is what `---\n---` looks like.
  */
-/** `parseFrontmatter`'s own scalar rule (`unquote` in `src/wiki/store.ts`):
- *  trim, then strip one matching pair of surrounding quotes. */
-function unquoteScalar(v: string): string {
-  const t = v.trim();
-  if (t.length >= 2 && ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'")))) {
-    return t.slice(1, -1);
-  }
-  return t;
-}
-
 function fenceBounds(content: string): { openEnd: number; closeNl: number } | null {
   if (!content.startsWith(FENCE)) return null;
   const openEnd = content.indexOf("\n");
@@ -89,6 +79,16 @@ function fenceBounds(content: string): { openEnd: number; closeNl: number } | nu
   const closeNl = content.indexOf(`\n${FENCE}`, 3);
   if (closeNl === -1 || closeNl < openEnd) return null;
   return { openEnd, closeNl };
+}
+
+/** `parseFrontmatter`'s own scalar rule (`unquote` in `src/wiki/store.ts`):
+ *  trim, then strip one matching pair of surrounding quotes. */
+function unquoteScalar(v: string): string {
+  const t = v.trim();
+  if (t.length >= 2 && ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'")))) {
+    return t.slice(1, -1);
+  }
+  return t;
 }
 
 /**

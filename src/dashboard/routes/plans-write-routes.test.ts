@@ -7,7 +7,7 @@
  * injected (through the already-injectable `loadSource`); nothing else is faked.
  */
 
-import { afterAll, afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, setSystemTime, test } from "bun:test";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -620,6 +620,30 @@ describe("POST /api/plans/status", () => {
     });
     expect(stale.status).toBe(409);
     expect((await stale.json()).stale).toBe(true);
+  });
+
+  test("status_date is the operator's Oslo day, never the host clock's", async () => {
+    // 22:30 UTC on the 29th is 00:30 CEST on the 30th — the docker/nais images
+    // run UTC, so a host-local (or UTC-slice) stamp writes yesterday for every
+    // late-evening archive. This is the one test that fails if `todayOslo` is
+    // ever reverted to a bare date slice.
+    const root = await makeWiki();
+    const baseHash = await hashOf(root, "alpha-plan");
+    setSystemTime(new Date("2026-08-29T22:30:00Z"));
+    try {
+      const res = await post(app(root), "/api/plans/status", {
+        slug: "alpha-plan",
+        status: "abandoned",
+        baseHash,
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.written).toBe(true);
+      expect(body.statusDate).toBe("2026-08-30");
+      expect(await pageText(root, "alpha-plan")).toContain("status_date: 2026-08-30");
+    } finally {
+      setSystemTime();
+    }
   });
 
   test("a noop echoes the HISTORICAL date on disk, never today's", async () => {
