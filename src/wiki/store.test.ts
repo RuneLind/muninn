@@ -9,6 +9,7 @@ import {
   extractWikilinks,
   extractMarkdownLinks,
   firstDanglingWikilinkOpen,
+  isMarkdownWikiPath,
   buildWikiIndex,
   getWikiIndex,
   readWikiPage,
@@ -389,6 +390,31 @@ describe("extractMarkdownLinks", () => {
   });
 });
 
+describe("isMarkdownWikiPath", () => {
+  test("splits markdown pages from standalone .html explainers", () => {
+    expect(isMarkdownWikiPath("concepts/Foo.md")).toBe(true);
+    expect(isMarkdownWikiPath("blogs/foo.mdx")).toBe(true);
+    expect(isMarkdownWikiPath("blogs/foo.html")).toBe(false);
+    // Not a suffix-anywhere test: the extension is what decides.
+    expect(isMarkdownWikiPath("concepts/foo.md.html")).toBe(false);
+    expect(isMarkdownWikiPath("concepts/mdx-notes.txt")).toBe(false);
+  });
+
+  test("folds case — defensive, and unreachable from either caller today", () => {
+    // Stated because it is easy to read the fold as load-bearing and it is not:
+    // `resolve()` lowercases its target before calling this, and `lint.ts`'s
+    // `checkStemCollisions` passes a raw on-disk relPath that reached the index
+    // through a case-SENSITIVE discovery glob (`**/*.{md,mdx,html}`), so an
+    // uppercase extension is not a page at all (pinned in `lint.test.ts`). The fold
+    // is kept — it is what makes the predicate answer the question its NAME asks,
+    // for a caller that hands it an arbitrary path — and pinned here so a future
+    // case-insensitive glob does not need it rediscovered.
+    expect(isMarkdownWikiPath("concepts/Foo.MD")).toBe(true);
+    expect(isMarkdownWikiPath("blogs/Foo.MDX")).toBe(true);
+    expect(isMarkdownWikiPath("blogs/Foo.HTML")).toBe(false);
+  });
+});
+
 describe("buildWikiIndex", () => {
   let root: string;
 
@@ -457,6 +483,7 @@ describe("buildWikiIndex", () => {
       "flows/aarsavregning.md",
     );
   });
+
 
   test("stamps every markdown page with its file mtime", async () => {
     const before = Date.now();

@@ -54,6 +54,24 @@ export type ApplyOutcome =
    * the write-owning instance can still approve it later.
    */
   | { outcome: "forbidden"; reason: string }
+  /**
+   * A stem collision the in-queue re-check caught (see step 2c). A REFUSAL on
+   * policy, like `forbidden` — nothing was written, and the remedy (rename one of
+   * the two pages, then approve) belongs to the reviewer.
+   *
+   * **This variant is why the guard's original "no new `ApplyOutcome`" constraint
+   * no longer binds.** That constraint was written for the ROUTE's pre-CAS guard,
+   * where the row is still a `draft` and refusing costs nothing; its stated
+   * rationale was that a refusal reaching the apply stage arrives with the row
+   * already `approved`, and any new variant would strand it in `approved` with no
+   * verb behind it — the gate renders Approve/Reject on `draft` and nothing else.
+   * The route now answers this variant by CAS-ing the row back to `draft`
+   * (`revertWikiProposalToDraft`), which removes the stranding that was the whole
+   * objection. Mapping it to `error` instead — what this did in its first cut —
+   * lands the row terminal on a policy answer: no verb, no remedy, a draft burned
+   * because two people clicked Approve at the same moment.
+   */
+  | { outcome: "collision"; reason: string }
   | { outcome: "error"; reason: string };
 
 export interface ApplyDeps {
@@ -392,15 +410,22 @@ async function applyInner(
   //     what covers the one case the route guard deliberately skips: an `approved`
   //     crash-recovery re-run whose twin appeared inside the crash window.
   //
-  //     `index` is the same object steps 1a/1c/1d use and is fetched in-queue; the
-  //     route builds it with `refresh: true` precisely so this sees a page written
-  //     by the apply that just released the queue. A null index (outage) degrades
-  //     to no check, like every other index-dependent step here.
+  //     `index` is the same object steps 1a/1c/1d use and is fetched in-queue.
+  //     Freshness for the race this covers comes from the PREVIOUS apply, not from
+  //     a refresh here: every write path below awaits `deps.refreshIndex()` (step 5,
+  //     and step 2a's re-run branch) before releasing the queue, so the second of
+  //     two concurrent approves reads a cache the first one refreshed after writing.
+  //     A null index (outage) degrades to no check, like every other index-dependent
+  //     step here. Residual, accepted: if a twin lands OFF-PATH (a pull, a hand edit)
+  //     inside the TTL window and this apply is an `approved` re-run — the one case
+  //     the route's own `refresh: true` guard skips — this check reads a warm cache
+  //     and misses it. The route guard covers every `draft` approve.
   //
-  //     The outcome is the EXISTING `error` variant carrying the route's own
-  //     refusal sentence — deliberately no new `ApplyOutcome`: the row is already
-  //     `approved` by the time we get here, so the honest terminal state is the
-  //     one the route already flips to and reports.
+  //     The outcome is the `collision` variant, NOT `error`: nothing was written and
+  //     the remedy is the reviewer's, so the route CASes the row back to `draft` and
+  //     answers 409 with this sentence. See `ApplyOutcome.collision` for why the
+  //     original "no new variant" constraint stopped binding once the row is
+  //     reverted rather than left in `approved`.
   if (proposal.mode === "create") {
     const stem = wikiPageStem(proposal.targetPath);
     const blocking = findStemTwin(index, stem, proposal.targetPath);
@@ -409,7 +434,7 @@ async function applyInner(
         path: proposal.targetPath,
         blocking: blocking.relPath,
       });
-      return { outcome: "error", reason: stemCollisionMessage(blocking, stem) };
+      return { outcome: "collision", reason: stemCollisionMessage(blocking, stem) };
     }
   }
 

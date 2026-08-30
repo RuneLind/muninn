@@ -27,6 +27,7 @@ import {
   markWikiProposalApplied,
   markWikiProposalStale,
   markWikiProposalError,
+  revertWikiProposalToDraft,
   listAllWikiProposals,
   listAllWikiProposalsByWiki,
   getWikiProposalById,
@@ -246,15 +247,19 @@ function applyDepsFor(
     writeFile: async (absPath, content) => {
       await Bun.write(absPath, content);
     },
-    // `refresh: true`, because `applyInner` calls this INSIDE the per-wiki write
-    // queue and calls it "the FRESH index": it backs the update-target check, the
-    // alias re-strip, the body-link containment and — since the stem guard — the
-    // in-queue collision re-check that closes the two-concurrent-approves TOCTOU.
-    // Off the 5-minute TTL cache none of those four sees a page written by the
-    // apply that just released the queue, which is exactly the window they exist
-    // for. One index build per approve (measured warm 2026-08-30: 245 ms on the
-    // 1,148-page jarvis wiki), which is human-paced.
-    getWikiIndex: () => getWikiIndex({ root: wikiDir, refresh: true }),
+    // Deliberately NOT `refresh: true`, and the freshness the in-queue checks need
+    // comes from somewhere else: every write path in `applyInner` awaits
+    // `refreshIndex()` below (step 5, and step 2a's re-run branch) BEFORE releasing
+    // the write queue, so the second of two concurrent approves already reads a
+    // cache the first one refreshed after writing — which is the exact window the
+    // in-queue collision re-check exists for. A refresh here would rebuild the
+    // whole index a second time (measured warm 2026-08-30: 245 ms on the 1,148-page
+    // jarvis wiki) INSIDE the shared per-wiki write queue, on every approve, which
+    // is the one thing that queue's docblock says not to grow — and mutation-proven
+    // inert: the suite is green in both directions. The route's own pre-CAS guard
+    // keeps its explicit `refresh: true`; that one IS the guard, and it runs outside
+    // the queue.
+    getWikiIndex: () => getWikiIndex({ root: wikiDir }),
     refreshIndex: async () => {
       await getWikiIndex({ root: wikiDir, refresh: true });
     },
@@ -329,6 +334,13 @@ export interface BacklogRouteDeps extends CoverageDeps {
    */
   getProposalById: (id: string) => Promise<WikiProposal | null>;
   approveProposal: (id: string) => Promise<WikiProposal | null>;
+  /**
+   * The third seam, and injectable for the same reason: the approved→draft CAS the
+   * route runs when the apply REFUSES on a stem collision it only saw inside the
+   * write queue. Its whole observable is "the row is reviewable again", which a
+   * test that cannot see the CAS can only assume.
+   */
+  revertProposal: (id: string) => Promise<WikiProposal | null>;
 }
 
 export const DEFAULT_BACKLOG_ROUTE_DEPS: BacklogRouteDeps = {
@@ -351,6 +363,7 @@ export const DEFAULT_BACKLOG_ROUTE_DEPS: BacklogRouteDeps = {
   listProposals: (botName) => listAllWikiProposals(botName),
   getProposalById: (id) => getWikiProposalById(id),
   approveProposal: (id) => approveWikiProposal(id),
+  revertProposal: (id) => revertWikiProposalToDraft(id),
 };
 
 /** Read the offered-key snapshot as a Set (JSONB array → Set; anything else ⇒ ∅). */
@@ -2290,6 +2303,42 @@ export function registerWikiGardenerRoutes(
       // must be able to recognize the refusal by one shape, and the extra
       // `outcome: "forbidden"` here was a third spelling nothing read.
       return c.json({ error: result.reason, readonly: true }, 403);
+    }
+    // The in-queue stem-collision re-check (the TOCTOU the pre-CAS guard above
+    // cannot see: it sits OUTSIDE the per-wiki write queue, and each gate card
+    // only disables its OWN buttons, so two colliding proposals approved together
+    // both pass it). A REFUSAL on policy, exactly like `forbidden` — nothing was
+    // written — but with the opposite disposition on the ROW, and that difference
+    // is the whole point of this branch:
+    //
+    //  · `forbidden` keeps `approved`, because the refusal is about the INSTANCE
+    //    (this muninn may not write) and the write-owning instance re-runs the
+    //    same approved row later.
+    //  · a collision is about the WIKI, and every instance answers it the same
+    //    way. Nobody re-runs it; a human renames one of the two pages. So the row
+    //    goes back to `draft`, where the gate renders Approve/Reject and the
+    //    reviewer has a verb again. Leaving it `approved` strands it (no verb at
+    //    all); `markWikiProposalError` — what this did first — burns a perfectly
+    //    good draft terminal on a policy answer, which is exactly the objection
+    //    the route states above for the read-only refusal beside it.
+    //
+    // A LOST revert CAS (the row moved under us) is logged, not surfaced: the
+    // answer to the caller is the collision either way, and nothing was written.
+    if (result.outcome === "collision") {
+      const reverted = await backlogDeps.revertProposal(id);
+      if (!reverted) {
+        log.error(
+          "Wiki-gardener: approved→draft revert lost for proposal {id} — state changed during apply",
+          { id },
+        );
+      }
+      log.info("Wiki-gardener apply refused for {id} (collision), row returned to draft: {reason}", {
+        id,
+        reason: result.reason,
+      });
+      // Byte-identical to the pre-CAS guard's body — a reviewer hitting the two
+      // paths seconds apart must not be able to tell them apart.
+      return c.json({ error: result.reason, collision: true }, 409);
     }
     if (result.outcome === "stale") {
       if (!(await finishProposal(id, markWikiProposalStale, "stale"))) {

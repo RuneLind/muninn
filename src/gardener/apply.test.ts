@@ -268,14 +268,18 @@ describe("applyWikiProposal", () => {
         draft: `---\ntype: source\ntitle: Context Compaction\nurl: https://example.invalid/a\n---\n\n# Context Compaction\n\nSynthesized fixture body.\n`,
       });
 
-    test("two colliding creates through the queue: the first applies, the second errors", async () => {
+    test("two colliding creates through the queue: the first applies, the second REFUSES with `collision`", async () => {
       const d = deps();
       const first = await applyWikiProposal(makeProposal(), d);
       expect(first.outcome).toBe("applied");
 
       const second = await applyWikiProposal(twinProposal(), d);
-      expect(second.outcome).toBe("error");
-      if (second.outcome === "error") {
+      // `collision`, NOT `error`: nothing was written and the remedy is the
+      // reviewer's, so the route can send the row back to `draft` instead of
+      // burning it terminal. The two are only distinguishable HERE — the route's
+      // 409 body is deliberately identical to the pre-CAS guard's.
+      expect(second.outcome).toBe("collision");
+      if (second.outcome === "collision") {
         expect(second.reason).toContain("already owns the page name");
         expect(second.reason).toContain("concepts/Context Compaction.md");
       }

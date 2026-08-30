@@ -53,12 +53,15 @@ clauses:
 - **Above the draft→approved CAS**, the same position and the same reason as the
   read-only refusal beside it: a refusal after the flip strands the row in
   `approved` with no verb. The row stays a draft and a re-click just refuses again.
-  There is deliberately NO new `ApplyOutcome` variant — there is no model at apply
-  time to rename with, so the answer is a refusal a human acts on, not a state.
+  There is no new terminal STATE — there is no model at apply time to rename with,
+  so the answer is a refusal a human acts on. (The in-queue half below does carry
+  its own `ApplyOutcome` variant, `collision`; that constraint was about the row's
+  STATUS, and the route answers that variant by putting the row back to `draft`.)
 - **CREATE mode only.** An update rewrites a page that already exists; a twin
   standing elsewhere is a pre-existing collision the write did not create, and
   refusing would make that page permanently un-updatable.
-- **`refresh: true` on the index read.** The store's index is a 5-minute TTL cache,
+- **`refresh: true` on the index READ — this guard's own, not the apply's.** The
+  store's index is a 5-minute TTL cache,
   and measured, the exact historical incident REPRODUCES with the guard installed
   if the twin lands through a non-refreshing path (a pull, the sync loop, a hand
   edit) while the cache is warm. An approve is human-paced; every comparable write
@@ -75,12 +78,35 @@ them, the same reason this file dropped `outcome: "forbidden"`.
 **Inside `applyWikiProposal`'s write queue, before the create-mode write** — because
 the route guard sits OUTSIDE that queue and each gate card only disables its OWN
 buttons, so two colliding proposals approved together both pass it and the second
-write lands the twin. It reuses the same predicate over the in-queue index (which
-the route builds with `refresh: true` precisely so it sees a page the apply that
-just released the queue wrote), and returns the EXISTING `error` outcome carrying
-the route's own refusal sentence (`stemCollisionMessage`, one spelling for both
-paths). This is also what covers the one case the route guard deliberately skips:
-an `approved` crash-recovery re-run whose twin appeared inside the crash window.
+write lands the twin. It reuses the same predicate over the in-queue index and
+returns the `collision` `ApplyOutcome` carrying the route's own refusal sentence
+(`stemCollisionMessage`, one spelling for both paths). This is also what covers the
+one case the route guard deliberately skips: an `approved` crash-recovery re-run
+whose twin appeared inside the crash window.
+
+Two rules on that half, both corrected after review:
+
+- **A collision must NOT burn the row.** The first cut returned `{outcome: "error"}`,
+  which the route's fall-through handed to `markWikiProposalError` and answered 500:
+  the row landed TERMINAL, the gate rendered no verb, and the reviewer lost the
+  remedy — on a refusal where nothing was written and the wiki is what needs fixing.
+  So `collision` is its own outcome, and the route answers it by CAS-ing the row
+  **`approved → draft`** (`revertWikiProposalToDraft`, the one CAS here that does not
+  stamp `resolved_at`) and returning the pre-CAS guard's exact 409 body. A re-click
+  then just refuses again, harmlessly. This is the same policy the route already
+  stated for the read-only refusal beside it — "flipping it to error would burn a
+  perfectly good draft on a policy answer" — and it is why the pre-CAS guard's "no
+  new `ApplyOutcome`" constraint stopped binding: its rationale was rows stranded in
+  `approved` with no verb, which reverting removes.
+- **The in-queue index is NOT built with `refresh: true`.** Freshness for the race
+  this covers comes from the PREVIOUS apply: every write path awaits
+  `deps.refreshIndex()` before releasing the queue, so the second of two concurrent
+  approves reads a cache the first refreshed after writing. Refreshing again would
+  rebuild the whole index (245 ms on jarvis) inside the shared per-wiki write queue
+  on every approve — the one thing that queue's docblock says not to grow. Residual,
+  accepted and stated in the code: a twin landing OFF-PATH (a pull, a hand edit)
+  inside the TTL window is missed by this check on an `approved` re-run, the one path
+  the route's own refreshing guard does not cover.
 
 **`findStemTwin` (`source-drafter.ts`) is the ONE stem-twin resolver** — the drafter's
 `findCollidingPage`, its title-override pre-flight, the approve route and the apply

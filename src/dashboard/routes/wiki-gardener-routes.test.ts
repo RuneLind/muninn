@@ -777,6 +777,7 @@ describe("GET /api/wiki/ingest-backlog — docs=1 through the route", () => {
       // object satisfies `BacklogRouteDeps` (see the approve read-only test).
       getProposalById: async () => null,
       approveProposal: async () => null,
+      revertProposal: async () => null,
     });
   });
 
@@ -1186,6 +1187,7 @@ describe("prune routes — dismiss / un-dismiss / reset guards (PR 2)", () => {
       // object satisfies `BacklogRouteDeps` (see the approve read-only test).
       getProposalById: async () => null,
       approveProposal: async () => null,
+      revertProposal: async () => null,
     });
   });
 
@@ -1392,6 +1394,7 @@ describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
       // object satisfies `BacklogRouteDeps` (see the approve read-only test).
       getProposalById: async () => null,
       approveProposal: async () => null,
+      revertProposal: async () => null,
     });
   });
 
@@ -1547,6 +1550,7 @@ describe("POST /api/wiki/gardener/source-draft-doc — pre-I/O guards", () => {
       // object satisfies `BacklogRouteDeps` (see the approve read-only test).
       getProposalById: async () => null,
       approveProposal: async () => null,
+      revertProposal: async () => null,
     });
   });
 
@@ -1675,6 +1679,7 @@ describe("POST /api/wiki/gardener/source-draft-run — the per-bot mutex", () =>
       // object satisfies `BacklogRouteDeps` (see the approve read-only test).
       getProposalById: async () => null,
       approveProposal: async () => null,
+      revertProposal: async () => null,
     });
   });
 
@@ -1794,6 +1799,7 @@ describe("POST /api/wiki/gardener/source-draft-run — an unexpected throw is a 
       // object satisfies `BacklogRouteDeps` (see the approve read-only test).
       getProposalById: async () => null,
       approveProposal: async () => null,
+      revertProposal: async () => null,
     });
   });
 
@@ -2105,5 +2111,191 @@ describe("approve — stem-collision refusal (the apply path had no check at all
     expect(approved).toEqual(["p1"]);
     // The apply ran: the page really was written at the near-miss-free stem.
     expect(await Bun.file(path.join(root, "entities", `${STEM}.md`)).exists()).toBe(true);
+  });
+});
+
+/**
+ * The IN-QUEUE half of the same refusal — the TOCTOU the pre-CAS guard above cannot
+ * see, because it sits OUTSIDE the per-wiki write queue and each gate card only
+ * disables its OWN buttons. Two colliding proposals approved together both pass the
+ * pre-CAS guard; the first writes its page and refreshes the index before releasing
+ * the queue, and the second's in-queue re-check is what stops the twin.
+ *
+ * What these pin is the DISPOSITION OF THE ROW, which is the whole of fix R1. The
+ * refusal used to come back as `{outcome: "error"}`, which the route's fall-through
+ * handed to `markWikiProposalError` and answered 500 — so the row landed TERMINAL on
+ * a policy answer: the gate renders Approve/Reject on `draft` and nothing else, so
+ * the reviewer lost the verb and with it the remedy (rename one of the two pages,
+ * then approve). That directly contradicted the policy the same route states for the
+ * read-only refusal a few lines above it — "Flipping it to error would burn a
+ * perfectly good draft on a policy answer."
+ *
+ * The race is driven through the `approveProposal` seam rather than by launching two
+ * real requests: the state the second apply must observe is "twin on disk AND the
+ * store cache refreshed", which is exactly what the FIRST apply leaves behind (step 5
+ * awaits `refreshIndex()` before the queue releases). Reproducing it from the seam is
+ * deterministic; two concurrent `app.request`s are a coin flip on which one reads the
+ * index first. Every fixture string is synthesized — muninn is a public repo.
+ */
+describe("approve — the in-queue collision refusal returns the row to draft", () => {
+  let root: string;
+  let app: Hono;
+  let prevExtra: string | undefined;
+  /** The single mutable row every seam in this block reads and writes. */
+  let row: { id: string; status: string; [k: string]: unknown };
+  let reverted: string[];
+
+  const STEM = "Basalt Ledger Protocol";
+
+  /** The page the "other" concurrent approve lands while this one is between the
+   *  pre-CAS guard and the write queue. `.mdx` vs the proposal's `.md`: DIFFERENT
+   *  `extRank`, i.e. the shape the store's precedence rule silently drops. */
+  const landTwin = async () => {
+    await Bun.write(
+      path.join(root, "sources", `${STEM}.mdx`),
+      `---\ntitle: ${STEM}\ntype: source\n---\n\nSynthesized fixture body.\n`,
+    );
+    // …and the refresh the winning apply performs before it releases the queue.
+    await getWikiIndex({ root, refresh: true });
+  };
+
+  const deps = (onClaim?: () => Promise<void>) =>
+    ({
+      getConsumed: async () => new Set<string>(),
+      getPending: async () => new Set<string>(),
+      getWikiGardenerWatcher: async () => null,
+      getSnapshot: async () => null,
+      setSnapshot: async () => {},
+      listProposals: async () => [],
+      getProposalById: async () => ({ ...row }),
+      approveProposal: async () => {
+        if (row.status !== "draft") return null;
+        row.status = "approved";
+        // The colliding write lands HERE — after this request's pre-CAS guard has
+        // already read a twin-free index, which is the whole point of the TOCTOU.
+        await onClaim?.();
+        return { ...row };
+      },
+      revertProposal: async (id: string) => {
+        if (row.status !== "approved") return null;
+        row.status = "draft";
+        reverted.push(id);
+        return { ...row };
+      },
+    }) as unknown as Parameters<typeof registerWikiGardenerRoutes>[1];
+
+  beforeEach(async () => {
+    reverted = [];
+    root = await mkdtemp(path.join(tmpdir(), "wiki-stem-inqueue-"));
+    prevExtra = process.env.WIKI_EXTRA;
+    process.env.WIKI_EXTRA = `inqueuewiki=${root}`;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    row = {
+      id: "q1",
+      botName: "jarvis",
+      wikiName: "inqueuewiki",
+      topicKey: "basalt-ledger-protocol",
+      kind: "entity",
+      mode: "create",
+      targetPath: `entities/${STEM}.md`,
+      baseHash: null,
+      sourceDocs: [],
+      relatedPages: [],
+      rationale: "Synthesized fixture.",
+      draft: `---\ntitle: ${STEM}\ntype: entity\n---\n\n# ${STEM}\n\nSynthesized fixture body.\n`,
+      status: "draft",
+    };
+    app = new Hono();
+    app.onError((err, c) => c.json({ error: String(err) }, 500));
+  });
+
+  afterEach(async () => {
+    if (prevExtra === undefined) delete process.env.WIKI_EXTRA;
+    else process.env.WIKI_EXTRA = prevExtra;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("a twin landing after the CAS: 409 with the collision sentence, row back to draft, nothing written", async () => {
+    registerWikiGardenerRoutes(app, deps(landTwin));
+
+    const res = await app.request("/api/wiki/proposals/q1/approve", { method: "POST" });
+
+    // Same status and same body shape as the pre-CAS guard — a reviewer hitting the
+    // two paths seconds apart must not be able to tell them apart. NOT the 500 the
+    // `error` fall-through used to answer.
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string; collision?: boolean };
+    expect(body.collision).toBe(true);
+    expect(body.error).toContain(`sources/${STEM}.mdx`);
+    expect(body.error).toContain("already owns the page name");
+
+    // The row is REVIEWABLE again — the fix. Terminal `error` (or a row stranded in
+    // `approved`) is what leaves the gate rendering no verb at all.
+    expect(reverted).toEqual(["q1"]);
+    expect(row.status).toBe("draft");
+
+    // …and the twin the guard exists for was never written.
+    expect(await Bun.file(path.join(root, "entities", `${STEM}.md`)).exists()).toBe(false);
+  });
+
+  test("a re-click re-refuses harmlessly — the verb survives the refusal", async () => {
+    // The twin is on disk from the first click onwards, so the SECOND request is
+    // caught by the pre-CAS guard instead. Both answer 409 + `collision`, and the
+    // row is a draft after each — which is the property that makes the refusal
+    // repeatable rather than a one-way trip.
+    registerWikiGardenerRoutes(app, deps(landTwin));
+
+    const first = await app.request("/api/wiki/proposals/q1/approve", { method: "POST" });
+    expect(first.status).toBe(409);
+    expect(row.status).toBe("draft");
+
+    const second = await app.request("/api/wiki/proposals/q1/approve", { method: "POST" });
+    expect(second.status).toBe(409);
+    expect(((await second.json()) as { collision?: boolean }).collision).toBe(true);
+    expect(row.status).toBe("draft");
+    // The second refusal never claimed the row, so it had nothing to revert.
+    expect(reverted).toEqual(["q1"]);
+    expect(await Bun.file(path.join(root, "entities", `${STEM}.md`)).exists()).toBe(false);
+  });
+
+  test("an `approved` crash-recovery row whose twin appeared in the crash window ends re-reviewable", async () => {
+    // The one case the pre-CAS guard deliberately skips (it is `draft`-only, so an
+    // `approved` recovery row is re-runnable rather than 409ing forever). The twin
+    // landed while this row was stuck `approved`, so the in-queue check is the ONLY
+    // thing that sees it — and before the fix that meant the recovery row's own
+    // re-run burned it to `error`.
+    row.status = "approved";
+    await landTwin();
+    registerWikiGardenerRoutes(app, deps());
+
+    const res = await app.request("/api/wiki/proposals/q1/approve", { method: "POST" });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { collision?: boolean }).collision).toBe(true);
+    // Re-reviewable: the recovery row is a draft with Approve/Reject on it again.
+    expect(row.status).toBe("draft");
+    expect(reverted).toEqual(["q1"]);
+    expect(await Bun.file(path.join(root, "entities", `${STEM}.md`)).exists()).toBe(false);
+  });
+
+  test("a lost revert CAS still answers the collision — the refusal is not a failure", async () => {
+    // The row moved under us between the apply and the revert. Nothing was written
+    // either way, so the caller hears the collision rather than a 500; the lost CAS
+    // is a log line (the `finishProposal` convention).
+    const d = deps(async () => {
+      await landTwin();
+      // Something else takes the row terminal while the apply is in the queue.
+      row.status = "rejected";
+    });
+    registerWikiGardenerRoutes(app, d);
+
+    const res = await app.request("/api/wiki/proposals/q1/approve", { method: "POST" });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { collision?: boolean }).collision).toBe(true);
+    expect(reverted).toEqual([]);
+    expect(row.status).toBe("rejected");
+    expect(await Bun.file(path.join(root, "entities", `${STEM}.md`)).exists()).toBe(false);
   });
 });

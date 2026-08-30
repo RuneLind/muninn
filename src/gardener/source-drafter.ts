@@ -246,10 +246,19 @@ function urlCovered(refs: WikiRefs, url: string): boolean {
   return id !== null && refs.idTokens.has(id);
 }
 
-/** NFC-folded, lowercased, posix-normalized key for a path comparison. Paired with
- *  {@link stemKey} so both halves of the twin test fold the same way. */
+/**
+ * Posix-normalized, NFC-folded, lowercased key for a path comparison — in that
+ * ORDER, which is the same order {@link stemKey} folds in (NFC first, then case),
+ * so the two halves of the twin test cannot disagree about a stem that differs
+ * only in composition. The first spelling folded case FIRST (`normalizeRelPath`
+ * lowercases) and then NFC'd, and claimed in a comment to fold "the same way" as
+ * `stemKey`, which it did not: `toLowerCase` is not composition-preserving in
+ * general (U+0130 İ lowercases to a decomposed i + U+0307 that NFC does not
+ * recompose), so the two orders are only equivalent over the Latin subset the
+ * wikis happen to use today.
+ */
 function pathKey(relPath: string): string {
-  return normalizeRelPath(relPath).normalize("NFC");
+  return normalizeRelPath(relPath.normalize("NFC"));
 }
 
 /**
@@ -305,6 +314,17 @@ function pathKey(relPath: string): string {
  * stemKey}/`pathKey`): macOS writes decomposed filenames and a queried title is
  * composed, so a bare `toLowerCase()` cannot see an NFD `Blåbær.mdx` from an NFC
  * `Blåbær` query and the guard is silently inert on any non-ASCII stem.
+ *
+ * **Known residual, landed as-is:** this reads `index.pages`, and `buildWikiIndex`
+ * has ALREADY removed every page its precedence rule shadowed (they survive only
+ * on `index.shadowed`, which the linter reads). So a page that is currently
+ * shadowed — today that is only the `.md`-over-`.html` shape — is invisible here.
+ * No wrong ALLOW is reachable through it: a shadowed page has a same-stem WINNER
+ * by construction, and that winner is itself in `pages` and is itself a blocking
+ * twin under condition (1) or (2), so the write is refused anyway. What is lost is
+ * only WHICH page the refusal names — the winner, never the page underneath it.
+ * Scanning `index.shadowed` too would fix the naming; it is not worth a second
+ * source of truth for a message.
  *
  * **Known residual, landed as-is:** the self-exclusion is case-FOLDED, so on a
  * case-SENSITIVE filesystem a genuine `sources/X.md` + `sources/x.md` pair reads

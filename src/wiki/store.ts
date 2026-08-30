@@ -581,10 +581,18 @@ export function wikiPageStem(relPath: string): string {
 
 /**
  * Is this a MARKDOWN wiki page (`.md` or `.mdx`) rather than a standalone `.html`
- * explainer? The one spelling of that test — the gardener's stem-twin guard and the
- * linter's `stem-collision` check both call it, so "which pages share one title
+ * explainer? The one spelling of that test, so "which pages share one title
  * namespace" cannot be answered two ways. Lives here beside {@link extRank}, which
- * is the rule it qualifies.
+ * is the rule it qualifies. Two callers: `resolve()`'s path-form branch below, and
+ * the linter's `stem-collision` check (`lint.ts`).
+ *
+ * **The case fold is defensive and currently unreachable**, which is worth stating
+ * because the name invites the opposite reading. `resolve()` lowercases its target
+ * before calling; the linter passes a raw on-disk relPath, but that path reached
+ * the index through the case-SENSITIVE discovery glob (`**​/*.{md,mdx,html}`), so no
+ * indexed page carries an uppercase extension in the first place. It is kept so the
+ * predicate answers the question its name asks for any path a future caller hands
+ * it, and pinned in `store.test.ts` / `lint.test.ts` so that stays deliberate.
  */
 export function isMarkdownWikiPath(relPath: string): boolean {
   const l = relPath.toLowerCase();
@@ -2155,6 +2163,11 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
     // `.mdx` extension is used as-is; a bare path implies `.md` first, then a
     // native `.mdx` page (so [[blogs/src/foo]] finds foo.mdx).
     if (t.includes("/")) {
+      // NB `t` is already lowercased above, so calling the shared predicate here is
+      // a NAMING change, not a behaviour change (it was `t.endsWith(".md") ||
+      // t.endsWith(".mdx")` inline). Worth stating: neither this call nor the
+      // linter's reaches the predicate's case fold — the discovery glob below is
+      // case-sensitive, so no page in the index carries an uppercase extension.
       if (isMarkdownWikiPath(t)) return byRelPath.get(normalizeRelPath(t));
       return (
         byRelPath.get(normalizeRelPath(`${t}.md`)) ??

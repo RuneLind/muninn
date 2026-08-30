@@ -268,6 +268,28 @@ export async function markWikiProposalStale(id: string): Promise<WikiProposal | 
   return row ? mapRow(row) : null;
 }
 
+/**
+ * CAS `approved → draft` — the apply step REFUSED on policy (a stem collision it
+ * re-checked inside the write queue), so nothing was written and the row must go
+ * back to being reviewable.
+ *
+ * The odd one out among the terminal transitions above, deliberately: it does NOT
+ * stamp `resolved_at`, because the row is not resolved — it is a draft again, with
+ * Approve/Reject rendered on it and a remedy (rename one of the two pages) the
+ * reviewer can act on. Leaving it `approved` strands it where the gate offers no
+ * verb; flipping it to `error` burns a perfectly good draft on a policy answer.
+ * `approve` never sets `resolved_at`, so there is nothing to clear here.
+ */
+export async function revertWikiProposalToDraft(id: string): Promise<WikiProposal | null> {
+  const sql = getDb();
+  const [row] = await sql`
+    UPDATE wiki_proposals SET status = 'draft'
+    WHERE id = ${id} AND status = 'approved'
+    RETURNING *
+  `;
+  return row ? mapRow(row) : null;
+}
+
 /** CAS `approved → error` (+ resolved_at) — the apply step failed unexpectedly. */
 export async function markWikiProposalError(id: string): Promise<WikiProposal | null> {
   const sql = getDb();

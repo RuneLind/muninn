@@ -716,6 +716,21 @@ describe("lintWiki — stem-collision", () => {
     expect(found[0]!.detail).toBe("concepts/Only Md Wins.md");
   });
 
+  test("an UPPERCASE-extension file is not a page at all — nothing to shadow", async () => {
+    // Not a case-folding assertion: `buildWikiIndex`'s discovery glob
+    // (`**/*.{md,mdx,html}`) is case-SENSITIVE, so `Casefold Stem.MDX` is never
+    // scanned, never a page, and therefore can neither shadow nor be shadowed.
+    // Pinned because it is the reason `isMarkdownWikiPath`'s own `.toLowerCase()`
+    // is unreachable from here (see its docblock): a reader checking whether this
+    // check handles uppercase extensions should find the answer in a test rather
+    // than re-derive it from the glob.
+    await write("concepts/Casefold Stem.md", md("Casefold Stem", "concept"));
+    await write("sources/Casefold Stem.MDX", md("Casefold Stem", "source"));
+    const index = await buildWikiIndex(root);
+    expect(index.pages.map((p) => p.relPath)).toEqual(["concepts/Casefold Stem.md"]);
+    expect(await stemFindings()).toEqual([]);
+  });
+
   test("a clean wiki reports nothing", async () => {
     await write("concepts/One.md", md("One", "concept"));
     await write("sources/Two.mdx", md("Two", "source"));
