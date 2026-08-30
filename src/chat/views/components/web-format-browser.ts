@@ -18,7 +18,7 @@ import {
   enhanceCodeBlocks,
   unwrapCodeBlockChrome,
 } from "../../../dashboard/views/components/code-block-chrome.ts";
-import { HIGHLIGHT_TOKEN_CLASSES } from "../../../format/highlight.ts";
+import { COMPONENT_CLASS_ALLOW } from "./component-class-allow.ts";
 
 const TG_TAGS = ["b", "strong", "i", "em", "u", "s", "del", "code", "pre", "a", "br", "span"];
 const WEB_TAGS = [
@@ -40,34 +40,9 @@ const WEB_TAGS = [
   "button",
 ];
 
-// Class names emitted by the component renderers. `class` is normally stripped
-// from every tag but `code`; these are preserved so component styling survives.
-const COMPONENT_CLASS_ALLOW = new Set([
-  "callout", "callout-info", "callout-warn", "callout-good", "callout-bad",
-  "callout-title", "callout-body",
-  "verdict", "verdict-yes", "verdict-no",
-  "pill", "pill-rec", "pill-warn",
-  "figure", "figure-body", "caption", "fileref", "tablewrap",
-  // CodeTabs markup — kept so the enhancer can find/switch tabs and the CSS
-  // applies. (The other tier-1 blocks render as unstyled-but-present markup in
-  // the chat re-render, matching the Meter precedent; CodeTabs is the only one
-  // whose classes are load-bearing for behavior, so only it is allowlisted.)
-  "code-tabs", "code-tabs-bar", "code-tabs-tab", "code-tabs-panels",
-  "code-tabs-panel", "code-tabs-fallback", "code-tab-standalone", "code-tab-label",
-  "is-active",
-  // Fact-check annotation (`<Fact>` marks + the collapsed `<FactCheck>` appendix).
-  // `fc-chip-label` in particular is load-bearing: it is the visually-hidden
-  // screen-reader label, so a stripped class turns "Claim 1 — confirmed" into
-  // visible prose in the middle of the paragraph.
-  "fc-mark", "fc-mark-block", "fc-mark-ok", "fc-mark-warn", "fc-mark-bad", "fc-mark-unknown",
-  "fc-chip", "fc-chip-ok", "fc-chip-warn", "fc-chip-bad", "fc-chip-unknown", "fc-chip-label",
-  "fc-block", "fc-block-body", "fc-strip", "fc-strip-lead",
-  "fc-count", "fc-count-ok", "fc-count-warn", "fc-count-bad", "fc-claim",
-  // Syntax highlighting. Imported from the module that EMITS them rather than
-  // retyped: a `tok-*` class added there and forgotten here renders colorless
-  // in chat while looking perfect in /wiki — a bug visible on one surface only.
-  ...HIGHLIGHT_TOKEN_CLASSES,
-]);
+// The sanitizer's class allowlist. Its own dependency-free module so a unit
+// test can read it without importing this ENTRYPOINT, whose last line publishes
+// six browser globals — see `component-class-allow.ts`.
 
 /** The only `id` the sanitizer lets through — the fact-check appendix's per-claim
  *  anchor, which the chip's expand-on-click resolves by id. */

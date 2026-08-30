@@ -38,7 +38,7 @@
 
 ## Web Format
 
-Fenced code blocks are syntax-highlighted server-side (`src/format/highlight.ts`) and reach a bubble as `<span class="tok-*">`. ⚠️ `sanitizeHtml` strips `class` off a `<span>` by default, so those names are in `COMPONENT_CLASS_ALLOW` — spread in from `HIGHLIGHT_TOKEN_CLASSES` rather than retyped, because the failure is invisible here and absent in `/wiki`. See the syntax-highlighting section of `src/web/CLAUDE.md`.
+Fenced code blocks are syntax-highlighted server-side (`src/format/highlight.ts`) and reach a bubble as `<span class="tok-*">`. ⚠️ `sanitizeHtml` strips `class` off a `<span>` by default, so those names are in `COMPONENT_CLASS_ALLOW` (`views/components/component-class-allow.ts` — its own dependency-free module, so a unit test can read the set without importing the bundle ENTRYPOINT that publishes six browser globals) — spread in from `HIGHLIGHT_TOKEN_CLASSES` rather than retyped, because the failure is invisible here and absent in `/wiki`. See the syntax-highlighting section of `src/web/CLAUDE.md`.
 
 Bot responses are formatted via `formatWebHtml()` from `src/web/web-format.ts` (server-side). The chat page also calls `formatWebHtml()` for streaming text deltas — but it imports the SAME function via `views/components/web-format-browser.ts`, which is bundled by `Bun.build()` (see `web-format-client.ts`) and injected into the page's inline `<script>` as a self-contained IIFE that attaches `formatWebHtml`, `renderSlackMrkdwn`, and `sanitizeHtml` to `globalThis`. There is no manual port to keep in sync.
 

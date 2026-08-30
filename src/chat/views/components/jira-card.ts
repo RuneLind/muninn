@@ -283,6 +283,16 @@ export function jiraCardScript(): string {
     }
     if (existing) existing.outerHTML = html;
     else host.insertAdjacentHTML('beforeend', html);
+    // CodeTabs wiring + #494's fence header bar and Copy button. Both are CLIENT
+    // enhancers, so a render site that never calls them ships bare fences — and
+    // a Jira description routinely carries SQL and log fences, which is why this
+    // card is the one that mattered. RE-QUERIED rather than reusing \`existing\`:
+    // \`outerHTML =\` detaches the node it was set on, so that reference is dead.
+    // No \`unwrapCodeBlockChrome\` is needed here — \`html\` is re-rendered from
+    // \`view.markdown\` on every redraw, never cloned from enhanced DOM, so the
+    // old wrapper leaves with the node it wrapped.
+    var card = host.querySelector('[${JCARD_ATTR}="' + cssAttrValue(draftId) + '"]');
+    if (card) { enhanceCodeTabs(card); enhanceCodeBlocks(card); }
     removeJiraDraftingNote(draftId);
     return true;
   }

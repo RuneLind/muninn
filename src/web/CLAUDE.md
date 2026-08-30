@@ -18,11 +18,24 @@ Two properties it is written to hold, both pinned in `highlight.test.ts`:
 The bar and the copy button are built by a CLIENT enhancer,
 `enhanceCodeBlocks` (`src/dashboard/views/components/code-block-chrome.ts`),
 never by `web-format.ts`. That is forced by the same sanitizer coupling as the
-token classes above, one step further: `sanitizeHtml`'s tag allowlist has no
-`div` at the fence level, so a server-emitted `<div class="fence">` wrapper is
-FLATTENED TO TEXT in chat while rendering correctly in `/wiki`. Because the
-enhancer runs after `innerHTML = sanitizeHtml(…)`, everything it builds is past
-that gate — the `enhanceCodeTabs` precedent, and the reason both exist.
+token classes above, one step further. Measured through the real bundled
+sanitizer: a server-emitted `<div class="fence">` wrapper is NOT flattened to
+text (`div` is in the web tag allowlist) — it survives as a bare `<div>` with
+every `fence*` class stripped, so the bar and the button render unstyled and the
+button carries no listener, i.e. a dead Copy button in chat and a perfect one in
+`/wiki`. Because the enhancer runs after `innerHTML = sanitizeHtml(…)`,
+everything it builds is past that gate — the `enhanceCodeTabs` precedent, and the
+reason both exist.
+
+⚠️ **The skip in rule 3 below depends on the same allowlist, in the opposite
+direction.** `closest(OWN_CHROME)` reads a CLASS, so every selector in
+`COMPONENT_FENCE_CHROME` must also be in `COMPONENT_CLASS_ALLOW`
+(`chat/views/components/component-class-allow.ts`) or the skip is inert in chat and
+the block gets the doubled bar there. `annotated-code` and `filetree` were
+missing when #494 shipped — before it those classes were styling-only, and the
+allowlist said so in as many words — so a `<AnnotatedCode>` answer in web chat
+grew a stacked bar while `/wiki` was correct. Both are allowlisted now, and
+`e2e/chat-card-fences.spec.ts` drives the real bundle to keep it that way.
 
 Five rules it lives by, each a defect it prevents:
 
@@ -55,6 +68,19 @@ Five rules it lives by, each a defect it prevents:
    anything but localhost, i.e. exactly how this dashboard is reached on a
    tailnet, so the `execCommand` path is the PRIMARY one there and is unit-
    tested; the e2e runs on `127.0.0.1` and can only ever exercise the other.
+
+⚠️ **Every render site that inserts `formatWebHtml` output must call the pair
+itself** — `enhanceCodeTabs(root); enhanceCodeBlocks(root);` — because both are
+client enhancers and nothing walks the document for them. Three chat sites did
+not, from before this chrome existed: the Jira draft card
+(`components/jira-card.ts`), the Jira Research card and the research-action
+prompt card (both in `chat/views/page.ts`), so their fences rendered as bare
+`pre` blocks with no bar, no Copy and no CodeTabs wiring while every unit test
+stayed green — a Jira description routinely carries SQL and log fences. The
+failure is invisible server-side, so the acceptance is `e2e/chat-card-fences.spec.ts`
+(real page, real bundle, seeded rows, no model call); `jira-card.test.ts` pins the
+call and the node it is handed. `/jira` is still the one deliberate gap: it renders
+server-side with no client enhancer at all.
 
 A cloned fence is the same class seen from the other side, and copying the
 CodeTabs idiom for it is WRONG: `enhanceCodeTabs` only binds listeners onto

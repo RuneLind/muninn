@@ -39,6 +39,8 @@ interface Harness {
   notice: () => string | null;
   /** Placeholder notes the 🧾 click left, by draft id. */
   draftingNotes: () => string[];
+  /** `"tabs:<draftId>"` / `"blocks:<draftId>"`, one per client-enhancer call. */
+  enhanced: () => string[];
   refresh: () => Promise<void>;
   seed: (draftId: string, threadId?: string | null) => Promise<void>;
   reset: () => void;
@@ -95,6 +97,7 @@ function harness(opts: {
     const key = cardKeyFor(messageId, draftId);
     return {
       __msg: messageId,
+      __card: draftId,
       remove() {
         delete cards[key];
       },
@@ -173,6 +176,11 @@ function harness(opts: {
   const ctx = {
     document: doc,
     chatMessages,
+    // The two client enhancers the page bundles onto globalThis. Recorded rather
+    // than stubbed inert: they are what gives a card's fences their header bar
+    // and Copy button (#494), and the card is inserted as an HTML STRING, so
+    // nothing but an explicit call after the insert can wire them.
+    enhanced: [] as string[],
     navigator: {
       clipboard: {
         writeText: async (text: string) => {
@@ -248,6 +256,10 @@ function harness(opts: {
     // identity stub keeps this file about the binding, not about web-format.
     "function formatWebHtml(s) { return '<p>' + s + '</p>'; }" +
     "function sanitizeHtml(h) { return h; }" +
+    // See ctx.enhanced. `__card` is the draft id, so a test can assert WHICH node
+    // was handed over — a call on the wrong node is the failure that matters.
+    "function enhanceCodeTabs(n) { ctx.enhanced.push('tabs:' + (n && n.__card)); }" +
+    "function enhanceCodeBlocks(n) { ctx.enhanced.push('blocks:' + (n && n.__card)); }" +
     `var selectedBot = ${JSON.stringify(opts.selectedBot ?? "melosys")};` +
     `var jiraBotName = ${JSON.stringify(opts.jiraBot === undefined ? "melosys" : opts.jiraBot)};` +
     `var activeThreadId = ${JSON.stringify(opts.thread === undefined ? "t-1" : opts.thread)};`;
@@ -287,6 +299,7 @@ function harness(opts: {
     cards: () => cards,
     notice: () => notice,
     draftingNotes: () => Array.from(draftingNotes),
+    enhanced: () => ctx.enhanced,
     copied: () => copied,
     pendingTimers: () => timers.size,
     setNow: (ms: number) => {
@@ -393,6 +406,41 @@ describe("every listed row is read once on adopt", () => {
     expect(h.cards()["m-1|d-1"]).toContain("Noe er galt");
     // Settled and on screen: nothing left to poll.
     expect(h.pendingTimers()).toBe(0);
+  });
+
+  test("the card's fences are ENHANCED after the insert — bare `pre` otherwise", async () => {
+    // #494's header bar and Copy button, plus the CodeTabs wiring, are CLIENT
+    // enhancers. This card is inserted as an HTML STRING, so nothing wires them
+    // unless `attachJiraCard` calls them itself — and a Jira description
+    // routinely carries SQL and log fences. The DOM half is
+    // `e2e/chat-card-fences.spec.ts`; this pins the CALL and the node.
+    const h = harness({
+      bubbles: ["m-1"],
+      listings: [[{ draftId: "d-1", messageId: "m-1", status: "ready" }]],
+      drafts: { "d-1": [{ status: 200, body: readyView() }] },
+    });
+    await h.refresh();
+    expect(h.enhanced()).toEqual(["tabs:d-1", "blocks:d-1"]);
+  });
+
+  test("a REDRAW re-enhances — `outerHTML =` replaces the node, wrapper and all", async () => {
+    // The generating → ready transition. The new node is built from
+    // `view.markdown`, never cloned from enhanced DOM, so the old wrapper leaves
+    // with the old node: no `unwrapCodeBlockChrome` is owed here, but the fresh
+    // node does have to be enhanced again or the landed draft ships bare fences.
+    const h = harness({
+      bubbles: ["m-1"],
+      listings: [[{ draftId: "d-1", messageId: "m-1", status: "generating" }]],
+      drafts: {
+        "d-1": [
+          { status: 200, body: readyView({ status: "generating", markdown: null }) },
+          { status: 200, body: readyView() },
+        ],
+      },
+    });
+    await h.refresh();
+    await h.tick();
+    expect(h.enhanced()).toEqual(["tabs:d-1", "blocks:d-1", "tabs:d-1", "blocks:d-1"]);
   });
 
   test("a settled row already on screen is NOT re-read on the next listing", async () => {

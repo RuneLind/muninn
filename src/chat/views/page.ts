@@ -1305,6 +1305,12 @@ const CHAT_SCRIPT = `
       rdiv.className = 'msg msg-research-card';
       var parsed = parseResearchContent(msg.text);
       rdiv.innerHTML = renderResearchCard(parsed);
+      // The same pair every other web-rendered body gets (see the bot branch
+      // below). Both are CLIENT enhancers — CodeTabs wiring and #494's header
+      // bar + Copy button — so a render site that omits them ships bare fences
+      // while looking identical in the reader. Called on the card element after
+      // its innerHTML: they walk pre > code and no-op when there is none.
+      enhanceCodeTabs(rdiv); enhanceCodeBlocks(rdiv);
       if (parsed.issueKey) {
         researchIssueKey = parsed.issueKey;
         checkReportExists(selectedBot, parsed.issueKey);
@@ -1327,6 +1333,7 @@ const CHAT_SCRIPT = `
         '<span class="research-card-label">' + escapeHtml(promptLabel(promptMatch[1])) + '</span>' +
         '</div>' +
         '<div class="research-card-body web-content">' + sanitizeHtml(formatWebHtml(pBody), true) + '</div>';
+      enhanceCodeTabs(pdiv); enhanceCodeBlocks(pdiv);
       chatMessages.appendChild(pdiv);
       scrollToBottom();
       return;
