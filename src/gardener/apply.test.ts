@@ -250,6 +250,74 @@ describe("applyWikiProposal", () => {
     expect(reindexed).toEqual([]);
   });
 
+  /**
+   * The TOCTOU the approve route's pre-CAS guard cannot close: it sits OUTSIDE the
+   * per-wiki write queue and each gate card only disables its OWN buttons, so two
+   * colliding proposals approved together both pass it and the second write lands
+   * the twin the first refusal existed to prevent. The re-check runs inside the
+   * queued section, on the same in-queue index the alias/link re-checks use.
+   */
+  describe("in-queue stem-collision re-check", () => {
+    /** Same stem as the concept draft, filed as a source page — the measured shape. */
+    const twinProposal = () =>
+      makeProposal({
+        id: "22222222-2222-2222-2222-222222222222",
+        topicKey: "source:youtube-summaries:abc",
+        kind: "source",
+        targetPath: "sources/Context Compaction.mdx",
+        draft: `---\ntype: source\ntitle: Context Compaction\nurl: https://example.invalid/a\n---\n\n# Context Compaction\n\nSynthesized fixture body.\n`,
+      });
+
+    test("two colliding creates through the queue: the first applies, the second errors", async () => {
+      const d = deps();
+      const first = await applyWikiProposal(makeProposal(), d);
+      expect(first.outcome).toBe("applied");
+
+      const second = await applyWikiProposal(twinProposal(), d);
+      expect(second.outcome).toBe("error");
+      if (second.outcome === "error") {
+        expect(second.reason).toContain("already owns the page name");
+        expect(second.reason).toContain("concepts/Context Compaction.md");
+      }
+      // The twin was never written, and the log carries only the first entry.
+      expect(
+        await readFile(path.join(wikiDir, "sources/Context Compaction.mdx"), "utf8").catch(
+          () => null,
+        ),
+      ).toBeNull();
+      const logMd = await readFile(path.join(wikiDir, "log.md"), "utf8");
+      expect(logMd.match(/## \[2026-07-08\] create \|/g)?.length).toBe(1);
+    });
+
+    test("a SAME-extension twin in another folder is not a collision — the apply proceeds", async () => {
+      // `store.ts` keeps both of these (displayTitle disambiguation); refusing them
+      // made a consolidation proposal for a second `projects/<x>/architecture.md`
+      // permanently unapprovable.
+      await mkdir(path.join(wikiDir, "entities"), { recursive: true });
+      await writeFile(
+        path.join(wikiDir, "entities/Context Compaction.md"),
+        "---\ntype: entity\ntitle: Context Compaction\n---\n\nBody.\n",
+      );
+      const res = await applyWikiProposal(makeProposal(), deps());
+      expect(res.outcome).toBe("applied");
+    });
+
+    test("update mode is exempt — a twin does not make a page un-updatable", async () => {
+      const body = `---\ntype: concept\ntitle: Context Compaction\n---\n\n# Context Compaction\n\nOriginal.\n`;
+      await mkdir(path.join(wikiDir, "concepts"), { recursive: true });
+      await writeFile(path.join(wikiDir, "concepts/Context Compaction.md"), body);
+      await writeFile(
+        path.join(wikiDir, "concepts/Context Compaction.mdx"),
+        "---\ntitle: Context Compaction\n---\n\nTwin.\n",
+      );
+      const res = await applyWikiProposal(
+        makeProposal({ mode: "update", baseHash: sha256(body) }),
+        deps(),
+      );
+      expect(res.outcome).toBe("applied");
+    });
+  });
+
   test("re-run safety: target already equals the draft ⇒ applied without rewriting", async () => {
     // Simulates a crash between the file write and the terminal status CAS: the
     // file is on disk (write happened, incl. trailing newline) but the row is

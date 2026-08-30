@@ -438,9 +438,9 @@ function checkOrphans(index: WikiIndex): LintFinding[] {
 }
 
 /**
- * Two same-stem pages of DIFFERENT extensions — the shape the gardener's apply
- * path now refuses at approve time, reported here for anything that got in another
- * way (a hand-authored file, a rename, an older applied proposal).
+ * Two same-stem MARKDOWN pages of DIFFERENT extensions — the shape the gardener's
+ * apply path now refuses at approve time, reported here for anything that got in
+ * another way (a hand-authored file, a rename, an older applied proposal).
  *
  * **What a "stem" is here, and what is deliberately NOT reported.** A page's stem
  * is its bare filename (`WikiPageMeta.name`), matched case-insensitively across the
@@ -456,21 +456,33 @@ function checkOrphans(index: WikiIndex): LintFinding[] {
  *    so this check reads `index.shadowed` — the store's own record of what it removed.
  *  - **Same-extension (NOT reported).** `store.ts` calls these "two real pages that
  *    simply share a filename" and keeps BOTH, disambiguating them with a
- *    `displayTitle` prefix. They are a supported shape and a common one — mimir has
- *    10 such pages, the `memory` wiki 32 (its 30 per-project `MEMORY.md` hubs) — so
- *    reporting them would bury every real finding under a permanent, unfixable list.
+ *    `displayTitle` prefix — they are not in `index.shadowed` at all, so this is a
+ *    statement of intent rather than a filter. A supported shape and a common one;
+ *    the counts live with the rest of this check's measurements in
+ *    `src/watchers/CLAUDE.md`. The write-side guard (`findStemTwin`) allows the
+ *    cross-folder case for the same reason.
  *  - **Reserved infrastructure (NOT reported).** `index`/`log`/`CLAUDE` are wiki
  *    plumbing, one per folder by design and never wikilink targets; the same
- *    exclusion `checkStaleUpdated` and `checkMissingSources` make.
- *  - **A shadowed `.html` EXPLAINER (NOT reported).** Scope is markdown-vs-markdown,
- *    mirroring the write guard (`findStemTwin`, which excludes `.html` for the same
- *    reason — an explainer is a different serving path, not a wikilink target). This
- *    is a deliberate line, not an oversight: measured 2026-08-30 it is the ONLY
- *    shape live today (jarvis 1, mimir 4, e.g. `blogs/<slug>.html` beside
- *    `blogs/<slug>.md`), it belongs to the MDX compile pipeline — which `store.ts`
- *    already handles with its own `pipelineSourceSiblingHtml` exclusion — and
- *    reporting it would ship this check permanently red on both real wikis, burying
- *    the regression it exists to catch. Worth its own check; not this one.
+ *    exclusion `checkStaleUpdated` and `checkMissingSources` make, and the same set
+ *    `findStemTwin` exempts.
+ *  - **A shadowed `.html` EXPLAINER (NOT reported) — and this is where the scope
+ *    deliberately DIVERGES from the write guard,** which does count `.html`. The two
+ *    answer different questions: the guard refuses a write that would CREATE a
+ *    shadow, this check reports shadows that already exist. Measured 2026-08-30
+ *    across the six real roots, `.md`-over-`.html` is the ONLY live shape and every
+ *    instance of it is a pre-existing pair a human chose to keep — an `.html`
+ *    explainer standing beside a same-stem `.md` page. Including them would ship
+ *    this check permanently red on three of the six wikis and bury the regression it
+ *    exists to catch, while costing the guard nothing on a wiki nobody is writing
+ *    to. Counts per root: `src/watchers/CLAUDE.md`.
+ *
+ *    NB the rationale this comment used to give for the exclusion — that the pairs
+ *    are MDX-compile-pipeline output "which `store.ts` already handles with
+ *    `pipelineSourceSiblingHtml`" — is false, and was checked: that helper drops a
+ *    `<dir>/src/<stem>.mdx` SOURCE and never touches an `.html`, none of the live
+ *    `.html` twins has such a source or the generated marker, and one of them is
+ *    cross-folder. The pairs are hand-authored. Reporting them properly is worth its
+ *    own check with its own remedy; it is not this one.
  *
  * The finding is filed against the SHADOWED page — the one that vanished — because
  * that is the file whose owner needs to act.
@@ -479,7 +491,10 @@ function checkStemCollisions(index: WikiIndex): LintFinding[] {
   const out: LintFinding[] = [];
   for (const s of index.shadowed ?? []) {
     if (reservedBasename(s.relPath)) continue;
-    if (!isMarkdownWikiPath(s.relPath) || !isMarkdownWikiPath(s.shadowedBy)) continue;
+    // Only the shadowed page is tested: `shadowedBy` won on a strictly LOWER
+    // `extRank`, so a markdown loser can only ever have been displaced by an `.md`
+    // — testing it too was an unreachable clause, not a second condition.
+    if (!isMarkdownWikiPath(s.relPath)) continue;
     out.push({
       check: "stem-collision",
       relPath: s.relPath,

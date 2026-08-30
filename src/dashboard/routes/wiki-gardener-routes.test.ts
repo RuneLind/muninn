@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
@@ -21,7 +21,7 @@ import {
 } from "./wiki-gardener-routes.ts";
 import { runExclusive, __resetGardenerMutexForTest } from "../../gardener/backlog.ts";
 import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki/registry-memo.ts";
-import { __resetWikiCacheForTest } from "../../wiki/store.ts";
+import { getWikiIndex, __resetWikiCacheForTest } from "../../wiki/store.ts";
 import { computeWatcherNextRun } from "../agents-overview.ts";
 import type { Watcher } from "../../types.ts";
 
@@ -1919,11 +1919,12 @@ describe("approve — stem-collision refusal (the apply path had no check at all
 
     const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
     expect(res.status).toBe(409);
-    const body = (await res.json()) as { error: string; collision?: boolean; blockingPath?: string };
+    const body = (await res.json()) as { error: string; collision?: boolean };
+    // `collision` is the whole machine marker — the blocking path and title used to
+    // ride as fields nothing read.
     expect(body.collision).toBe(true);
-    expect(body.blockingPath).toBe(`sources/${STEM}.mdx`);
     // The reason names the blocking page — the gate renders `data.error` verbatim.
-    expect(body.error).toContain(STEM);
+    expect(body.error).toContain(`sources/${STEM}.mdx`);
 
     // The two observables that separate this from a refusal one layer down: the
     // row is still a draft (so the gate still offers Approve/Reject), and the
@@ -1990,18 +1991,107 @@ describe("approve — stem-collision refusal (the apply path had no check at all
     expect(approved).toEqual(["p1"]);
   });
 
-  test("a SAME-extension cross-folder twin blocks a create too (one title namespace)", async () => {
+  test("a SAME-extension cross-folder twin APPLIES — that shape is supported, not a collision", async () => {
+    // `store.ts` keeps both such pages and disambiguates them with a `displayTitle`
+    // prefix; measured 2026-08-30, mimir carries 4 such groups over 9 pages. The
+    // first cut refused them, which made a consolidation proposal for another
+    // `projects/<x>/architecture.md` permanently unapprovable.
     await Bun.write(
       path.join(root, "concepts", `${STEM}.md`),
       `---\ntitle: ${STEM}\ntype: concept\n---\n\nBody.\n`,
     );
     registerWikiGardenerRoutes(app, deps(proposalRow()));
     const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
-    expect(res.status).toBe(409);
-    expect(((await res.json()) as { blockingPath: string }).blockingPath).toBe(
-      `concepts/${STEM}.md`,
+    expect(((await res.json()) as { collision?: boolean }).collision).toBeUndefined();
+    expect(approved).toEqual(["p1"]);
+    expect(await Bun.file(path.join(root, "entities", `${STEM}.md`)).exists()).toBe(true);
+  });
+
+  test("an existing .html explainer blocks the apply that would make it vanish", async () => {
+    // `extRank` drops the `.html` the moment a same-stem `.md` lands. Measured
+    // 2026-08-30 this is the ONLY shadow shape live on the six real roots.
+    await Bun.write(
+      path.join(root, "blogs", `${STEM}.html`),
+      `<!doctype html><html><head><title>${STEM}</title></head><body>Synthesized fixture.</body></html>`,
     );
+    registerWikiGardenerRoutes(app, deps(proposalRow()));
+    const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toContain(`blogs/${STEM}.html`);
     expect(approved).toEqual([]);
+    expect(await Bun.file(path.join(root, "entities", `${STEM}.md`)).exists()).toBe(false);
+  });
+
+  test("the guard reads a REFRESHED index — a twin landed off-path while the cache was warm", async () => {
+    // The exact historical incident, with the guard installed. `getWikiIndex` is a
+    // 5-minute TTL cache: warm it (any reader page load does), land the source page
+    // through a path that does not refresh (a `git pull`, the sync loop before its
+    // own refresh, a hand edit), then approve. Off a cached read the guard sees a
+    // wiki with no twin in it and the apply writes the page that drops the source
+    // page out of the index.
+    registerWikiGardenerRoutes(app, deps(proposalRow()));
+    // 1. Warm the cache on the empty wiki — the same call the route makes.
+    await getWikiIndex({ root });
+    // 2. The twin lands without going through muninn's write seams.
+    await Bun.write(
+      path.join(root, "sources", `${STEM}.mdx`),
+      `---\ntitle: ${STEM}\ntype: source\n---\n\nSynthesized fixture body.\n`,
+    );
+    // 3. Approve. No cache reset here on purpose — that IS the reproduction.
+    const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { collision?: boolean }).collision).toBe(true);
+    expect(approved).toEqual([]);
+    expect(await Bun.file(path.join(root, "entities", `${STEM}.md`)).exists()).toBe(false);
+  });
+
+  test("a NON-draft row is never answered with a collision — it gets 'not reviewable'", async () => {
+    // The gate renders Approve/Reject only on `draft`, so a 409 about a collision on
+    // any other status is a refusal with no verb behind it. A terminal row must hear
+    // the truth (it is not reviewable), and an `approved` crash-recovery row — whose
+    // whole purpose is to be re-runnable — must not 409 forever. The twin is real
+    // here: only the STATUS scoping keeps the guard out of the way.
+    await Bun.write(
+      path.join(root, "sources", `${STEM}.mdx`),
+      `---\ntitle: ${STEM}\ntype: source\n---\n\nBody.\n`,
+    );
+    registerWikiGardenerRoutes(app, deps(proposalRow({ status: "rejected" })));
+    const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string; collision?: boolean; status?: string };
+    expect(body.collision).toBeUndefined();
+    expect(body.error).toContain("not reviewable");
+    expect(body.status).toBe("rejected");
+  });
+
+  test("a THROWING index build skips the guard instead of escaping it", async () => {
+    // `getWikiIndex` degrades a MISSING directory to null (the branch above), but a
+    // `buildWikiIndex` throw propagates — and this guard sits above the route's own
+    // try/catch, so it turned an approve into a Hono 500 with the row still a draft
+    // and no explanation. Reproduced for real, no mocks: `stat` succeeds on a mode
+    // 000 directory and the glob scan then fails EACCES.
+    await chmod(root, 0o000);
+    try {
+      registerWikiGardenerRoutes(app, deps(proposalRow()));
+      const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+      // The observable is the CAS, not the status: the row was CLAIMED, which only
+      // happens PAST the guard — before this fix the throw escaped the guard and
+      // the CAS was never reached. (The apply's own index read then throws too;
+      // that is the route's pre-existing try/catch → `error` row → structured 500,
+      // a different path, and it is why the status here is not the discriminator.)
+      expect(approved).toEqual(["p1"]);
+      expect(((await res.json()) as { collision?: boolean }).collision).toBeUndefined();
+    } finally {
+      await chmod(root, 0o755);
+    }
+  });
+
+  test("a row whose wiki this process cannot resolve skips the guard, does not 409", async () => {
+    registerWikiGardenerRoutes(app, deps(proposalRow({ wikiName: "no-such-wiki" })));
+    const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    expect(((await res.json()) as { collision?: boolean }).collision).toBeUndefined();
+    // The apply block below the CAS is what reports the unresolvable wiki properly.
+    expect(approved).toEqual(["p1"]);
   });
 
   test("a near-miss stem is not a collision — the apply proceeds", async () => {

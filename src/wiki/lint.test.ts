@@ -675,9 +675,9 @@ describe("lintWiki — stem-collision", () => {
   });
 
   test("SAME-extension twins in two folders are NOT reported (a supported shape)", async () => {
-    // `store.ts` keeps both and disambiguates them with a displayTitle prefix;
-    // mimir has 10 such pages and the memory wiki 32. Reporting them would bury
-    // every real finding under a permanent, unfixable list.
+    // `store.ts` keeps both and disambiguates them with a displayTitle prefix, so
+    // neither is in `index.shadowed` at all. Counts per root live in
+    // `src/watchers/CLAUDE.md`; the write-side guard allows the same shape.
     await write("concepts/Shared Stem.md", md("Shared Stem", "concept"));
     await write("entities/Shared Stem.md", md("Shared Stem", "entity"));
     expect(await stemFindings()).toEqual([]);
@@ -690,15 +690,30 @@ describe("lintWiki — stem-collision", () => {
   });
 
   test("a shadowed .html EXPLAINER is NOT reported (markdown-vs-markdown only)", async () => {
-    // The MDX compile pipeline's own shape, and the only one live on the real
-    // wikis (jarvis 1, mimir 4 as of 2026-08-30). Reporting it would ship this
-    // check permanently red and bury the regression it exists to catch.
+    // The one place this check's scope DIVERGES from the write guard, which does
+    // count `.html`: the guard refuses a write that would create a shadow, this
+    // reports shadows that already exist — and every live instance (11 groups over
+    // the six real roots, measured 2026-08-30) is a pre-existing pair a human kept.
+    // Reporting them would ship this check permanently red on three of six wikis.
     await write("blogs/Aurora Ledger Protocol.md", md("Aurora Ledger Protocol", "note"));
-    await write(
-      "blogs/Aurora Ledger Protocol.html",
-      "<!-- generated from blogs/src/aurora.mdx -->\n<html><body>x</body></html>",
-    );
+    // Deliberately NOT carrying a `generated from` marker: the live pairs are
+    // hand-authored explainers, not compile output — the exclusion holds either way.
+    await write("blogs/Aurora Ledger Protocol.html", "<html><body>x</body></html>");
     expect(await stemFindings()).toEqual([]);
+  });
+
+  test("only the SHADOWED page's extension is tested — the winner's is implied", async () => {
+    // A markdown loser can only ever have been displaced by an `.md` (the winner
+    // won on a strictly lower `extRank`), so testing `shadowedBy` too was an
+    // unreachable clause. Pinning the reachable half: a `.mdx` loser under a `.md`
+    // winner IS reported, and no fixture can produce a markdown loser under an
+    // `.html` winner.
+    await write("concepts/Only Md Wins.md", md("Only Md Wins", "concept"));
+    await write("sources/Only Md Wins.mdx", md("Only Md Wins", "source"));
+    await write("blogs/Only Md Wins.html", "<html><body>x</body></html>");
+    const found = await stemFindings();
+    expect(found.map((f) => f.relPath)).toEqual(["sources/Only Md Wins.mdx"]);
+    expect(found[0]!.detail).toBe("concepts/Only Md Wins.md");
   });
 
   test("a clean wiki reports nothing", async () => {

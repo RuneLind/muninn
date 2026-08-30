@@ -2,7 +2,7 @@ import type { Context, Hono } from "hono";
 import path from "node:path";
 import { renderWikiGardenerPage } from "../views/wiki-gardener-page.ts";
 import { renderWikiHtml, stripFrontmatter } from "../../wiki/render.ts";
-import { getWikiIndex } from "../../wiki/store.ts";
+import { getWikiIndex, wikiPageStem, type WikiIndex } from "../../wiki/store.ts";
 import { scanUnresolvedBodyLinks } from "../../gardener/draft.ts";
 import { buildIndexEntry, catalogPage, selectWirablePages } from "../../gardener/wire.ts";
 import type { WiringPreview } from "../views/components/wiki-gardener-wiring.ts";
@@ -78,7 +78,7 @@ import {
   draftOneBacklogDoc,
   defaultSourceBacklogDeps,
 } from "../../gardener/source-drafter-run.ts";
-import { findStemTwin } from "../../gardener/source-drafter.ts";
+import { findStemTwin, stemCollisionMessage } from "../../gardener/source-drafter.ts";
 import {
   getWikiGardenerWatcher,
   getWatcherSnapshot,
@@ -246,7 +246,15 @@ function applyDepsFor(
     writeFile: async (absPath, content) => {
       await Bun.write(absPath, content);
     },
-    getWikiIndex: () => getWikiIndex({ root: wikiDir }),
+    // `refresh: true`, because `applyInner` calls this INSIDE the per-wiki write
+    // queue and calls it "the FRESH index": it backs the update-target check, the
+    // alias re-strip, the body-link containment and — since the stem guard — the
+    // in-queue collision re-check that closes the two-concurrent-approves TOCTOU.
+    // Off the 5-minute TTL cache none of those four sees a page written by the
+    // apply that just released the queue, which is exactly the window they exist
+    // for. One index build per approve (measured warm 2026-08-30: 245 ms on the
+    // 1,148-page jarvis wiki), which is human-paced.
+    getWikiIndex: () => getWikiIndex({ root: wikiDir, refresh: true }),
     refreshIndex: async () => {
       await getWikiIndex({ root: wikiDir, refresh: true });
     },
@@ -2134,44 +2142,75 @@ export function registerWikiGardenerRoutes(
     // and the store's same-stem precedence (`.md` > `.mdx`) then DROPPED the source
     // page from the index entirely. There is no model at apply time to rename with,
     // so the answer is a refusal the reviewer acts on, not a new terminal state:
-    // deliberately NO new `ApplyOutcome` variant, since the gate renders
-    // Approve/Reject only on `status === "draft"` and an `approved` row would have no
-    // verb at all. Hence pre-CAS — the row stays a draft and a re-click just refuses
-    // again.
+    // deliberately NO new `ApplyOutcome` variant.
     //
-    // CREATE mode only. In update mode the proposal's own page IS at the target and
-    // is the point of the write; the twin lookup excludes that page by path
-    // (`findStemTwin`), which is also what keeps an `approved` re-run and a
-    // crash-recovery re-apply working.
-    if (targetRoot && existing.mode === "create") {
-      const index = await getWikiIndex({ root: targetRoot });
-      if (!index) {
-        // Consistent with every other index-dependent step here (the apply's own
-        // body-link containment skips on a null index): degrade, don't refuse. Logged
-        // because a silently disabled guard is exactly the failure this PR is about.
+    // Three scoping clauses, each load-bearing:
+    //
+    //  · **`draft` ONLY.** The gate renders Approve/Reject on `status === "draft"`
+    //    and nothing else, so a 409 here on any other status is a refusal with no
+    //    verb behind it: an `approved` crash-recovery row (whose whole purpose is
+    //    to be re-runnable) would 409 forever, and a terminal `error`/`rejected`/
+    //    `stale` row would be told about a collision instead of the truth, which is
+    //    that it is not reviewable. Those two statuses fall through to the branch
+    //    below that says exactly that. The `approved`-re-run residual — a twin that
+    //    appeared inside the crash window — is covered by the re-check INSIDE
+    //    `applyWikiProposal`'s write queue, which is also the TOCTOU close for two
+    //    concurrent approves this pre-CAS guard cannot see.
+    //  · **CREATE mode only.** In update mode the proposal's own page IS at the
+    //    target and is the point of the write; a twin standing elsewhere is a
+    //    pre-existing collision the write did not create.
+    //  · **`refresh: true`.** This index is the whole guard, and the store's cache
+    //    is a 5-minute TTL — measured, the exact historical incident reproduces
+    //    with the guard installed if a page lands through a non-refreshing path
+    //    while the cache is warm. An approve is human-paced and a build is cheap
+    //    (measured warm 2026-08-30: jarvis 245 ms / 1,148 pages, mimir 129 ms / 477);
+    //    every comparable write seam already refreshes (`page-write.ts`,
+    //    `sync/run.ts`).
+    if (existing.status === "draft" && existing.mode === "create") {
+      if (!targetRoot) {
+        // The row names a wiki/bot this process can't resolve. The apply block below
+        // reports that properly (and flips the row to `error`); logged here because
+        // otherwise the guard is silently skipped and nothing says so.
         log.warn(
-          "Wiki-gardener approve: wiki index unavailable for {root} — stem-collision check skipped for proposal {id}",
-          { root: targetRoot, id },
+          "Wiki-gardener approve: no wiki root for proposal {id} (wiki={wiki}) — stem-collision check skipped",
+          { id, wiki: existing.wikiName ?? existing.botName },
         );
       } else {
-        const stem = path.posix.basename(existing.targetPath).replace(/\.mdx?$/i, "");
-        const blocking = findStemTwin(index, stem, existing.targetPath);
+        let index: WikiIndex | null = null;
+        try {
+          index = await getWikiIndex({ root: targetRoot, refresh: true });
+          if (!index) {
+            // Consistent with every other index-dependent step here (the apply's own
+            // body-link containment skips on a null index): degrade, don't refuse.
+            // Logged because a silently disabled guard is the failure this PR is about.
+            log.warn(
+              "Wiki-gardener approve: wiki index unavailable for {root} — stem-collision check skipped for proposal {id}",
+              { root: targetRoot, id },
+            );
+          }
+        } catch (err) {
+          // `getWikiIndex` degrades a missing directory to null but does NOT catch a
+          // `buildWikiIndex` throw, and this guard sits above the route's own
+          // try/catch — so an unreadable wiki turned an approve into a Hono 500 with
+          // the row still a draft and no explanation. Skip-with-warn, like the null.
+          log.warn(
+            "Wiki-gardener approve: wiki index build failed for {root} ({error}) — stem-collision check skipped for proposal {id}",
+            { root: targetRoot, id, error: err instanceof Error ? err.message : String(err) },
+          );
+        }
+        const stem = wikiPageStem(existing.targetPath);
+        const blocking = index ? findStemTwin(index, stem, existing.targetPath) : null;
         if (blocking) {
           log.info(
             "Wiki-gardener approve refused for {id}: stem \"{stem}\" is already owned by {blocking}",
             { id, stem, blocking: blocking.relPath },
           );
-          return c.json(
-            {
-              // The gate renders `data.error` verbatim, so the machine-readable part
-              // rides beside it rather than in it (the `{error, readonly}` shape).
-              error: `"${blocking.title}" (${blocking.relPath}) already owns the page name "${stem}" — approving this would put two pages under one wiki title. Rename one of them, then approve.`,
-              collision: true,
-              blockingPath: blocking.relPath,
-              blockingTitle: blocking.title,
-            },
-            409,
-          );
+          // The gate renders `data.error` verbatim, so the machine-readable part
+          // rides beside it rather than in it (the `{error, readonly}` shape).
+          // `collision: true` is the whole marker: the blocking page's path and
+          // title were also shipped as fields and nothing read them — the same file
+          // dropped `outcome: "forbidden"` for exactly that reason.
+          return c.json({ error: stemCollisionMessage(blocking, stem), collision: true }, 409);
         }
       }
     }

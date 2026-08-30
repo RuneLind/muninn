@@ -30,43 +30,85 @@ Both collision skips carry the BLOCKING PAGE (`findCollidingPage` returns the pa
 
 ## Stem collisions — the apply path refuses, at approve time
 
-Obsidian has ONE title namespace across folders, so two same-stem markdown pages make
-`[[Stem]]` ambiguous — and when their extensions differ, `store.ts`'s precedence rule
-(`.md` > `.mdx`) DROPS the loser from the index entirely, so one of them simply
-disappears from the reader. Measured 2026-08-29 on the jarvis wiki: a source page was
+`store.ts`'s precedence rule (`.md` > `.mdx` > `.html`) DROPS the loser when two
+same-stem pages have DIFFERENT extensions, so one of them simply disappears from the
+reader: unreachable, contributing no backlinks, with `[[Stem]]` silently resolving to
+the winner. Measured 2026-08-29 on the jarvis wiki: a source page was
 drafted first as `sources/<Stem>.mdx`, an approved ENTITY proposal then landed
 `entities/<Stem>.md`, and the source page vanished.
 
 **No drafter-side check could have prevented that** — the drafter ran first, and
 `applyWikiProposal` had no stem check at all: its only create-mode guard is
 path-EXACT (`current !== null` ⇒ `stale: "target path already exists"`). So the guard
-lives on the APPROVE ROUTE, and three things about its placement are load-bearing:
+lives in TWO places, and both are load-bearing.
 
+**On the APPROVE ROUTE, pre-CAS** — where a human can act on the refusal. Four
+clauses:
+
+- **`status === "draft"` ONLY.** The gate renders Approve/Reject on that status and
+  nothing else, so a 409 on any other status is a refusal with no verb behind it: an
+  `approved` crash-recovery row (whose whole purpose is to be re-runnable) 409s
+  forever, and a terminal `error`/`rejected`/`stale` row is told about a collision
+  instead of the truth, which is that it is not reviewable.
 - **Above the draft→approved CAS**, the same position and the same reason as the
-  read-only refusal beside it: the gate renders Approve/Reject only on
-  `status === "draft"`, so a refusal after the flip strands the row in `approved`
-  with no verb. The row stays a draft and a re-click just refuses again. There is
-  deliberately NO new `ApplyOutcome` variant — there is no model at apply time to
-  rename with, so the answer is a refusal a human acts on, not a terminal state.
+  read-only refusal beside it: a refusal after the flip strands the row in
+  `approved` with no verb. The row stays a draft and a re-click just refuses again.
+  There is deliberately NO new `ApplyOutcome` variant — there is no model at apply
+  time to rename with, so the answer is a refusal a human acts on, not a state.
 - **CREATE mode only.** An update rewrites a page that already exists; a twin
   standing elsewhere is a pre-existing collision the write did not create, and
   refusing would make that page permanently un-updatable.
-- **The twin lookup EXCLUDES the page at the proposal's own `targetPath`**
-  (`findStemTwin`), or a crash-recovery re-apply and an `approved` re-run refuse
-  with the row named as its own blocker.
+- **`refresh: true` on the index read.** The store's index is a 5-minute TTL cache,
+  and measured, the exact historical incident REPRODUCES with the guard installed
+  if the twin lands through a non-refreshing path (a pull, the sync loop, a hand
+  edit) while the cache is warm. An approve is human-paced; every comparable write
+  seam already refreshes (`page-write.ts`, `sync/run.ts`). A null index degrades to
+  a skipped check with a warn — and so does a THROWING `buildWikiIndex`, which
+  otherwise escaped past the route's own try/catch as a Hono 500 on a row that
+  stayed a draft with no explanation. An unresolvable wiki root logs the skip too.
 
-Refusal shape: `409 {error, collision: true, blockingPath, blockingTitle}` — the
-`{error, readonly}` convention, since the gate renders `data.error` verbatim.
+Refusal shape: `409 {error, collision: true}` — the `{error, readonly}` convention,
+since the gate renders `data.error` verbatim. `collision` is the whole machine
+marker; the blocking page's path and title also rode as fields and nothing read
+them, the same reason this file dropped `outcome: "forbidden"`.
 
-**`findStemTwin` (`source-drafter.ts`) is the ONE stem-twin resolver**, shared with
-the drafter's `findCollidingPage`, and it counts BOTH markdown extensions. The
-`.md`-only test it replaced was written for reader-precedence SHADOWING, which an
-`.mdx`-vs-`.mdx` pair cannot cause; the rule now is the title namespace, which any
-same-stem markdown pair breaks. That widening is what makes the guard catch the
-measured case at all — an apply-side check reusing the narrow predicate would have
-been inert exactly where it mattered. `.html` explainers are excluded (a different
-serving path, never a wikilink target). The linter's `stem-collision` check
-(`src/watchers/CLAUDE.md`) is the continuous regression guard over the same rule.
+**Inside `applyWikiProposal`'s write queue, before the create-mode write** — because
+the route guard sits OUTSIDE that queue and each gate card only disables its OWN
+buttons, so two colliding proposals approved together both pass it and the second
+write lands the twin. It reuses the same predicate over the in-queue index (which
+the route builds with `refresh: true` precisely so it sees a page the apply that
+just released the queue wrote), and returns the EXISTING `error` outcome carrying
+the route's own refusal sentence (`stemCollisionMessage`, one spelling for both
+paths). This is also what covers the one case the route guard deliberately skips:
+an `approved` crash-recovery re-run whose twin appeared inside the crash window.
+
+**`findStemTwin` (`source-drafter.ts`) is the ONE stem-twin resolver** — the drafter's
+`findCollidingPage`, its title-override pre-flight, the approve route and the apply
+re-check all call it. A twin BLOCKS on exactly two conditions:
+
+1. **It would SHADOW, or be shadowed by, the new page** — same stem, DIFFERENT
+   `extRank`. `.html` is IN, both directions: an apply landing `blogs/<Stem>.md` over
+   an existing `blogs/<Stem>.html` makes the explainer vanish just as quietly, and
+   measured 2026-08-30 that `.md`-over-`.html` shape is the only shadow live on the
+   six real roots.
+2. **It sits in the SAME FOLDER under the same stem** — today implied by (1), stated
+   because it is the rule a reader expects.
+
+**A SAME-EXTENSION twin in a DIFFERENT folder is ALLOWED**, deliberately narrowing
+the first cut (which refused every same-stem markdown pair on a "one title
+namespace" argument). `store.ts` supports that shape on purpose — it keeps both
+pages behind a `displayTitle` prefix — and mimir carries 4 such groups over 9 pages,
+so refusing them made a consolidation proposal for another
+`projects/<x>/architecture.md` permanently unapprovable, and on the drafter side it
+burned the one collision retry and refused human-chosen titles. Reserved basenames
+(`index`/`log`/`CLAUDE`) are exempt, and every stem comparison folds through NFC
+(`stemKey`) so an NFD filename on macOS is not invisible to an NFC query.
+
+The linter's `stem-collision` check (`src/watchers/CLAUDE.md`, which OWNS the census
+numbers for both shapes) is the continuous regression guard — with one deliberate
+scope split, stated on both ends: the guard counts `.html`, the lint does not,
+because the guard refuses a write that would create a shadow while the lint reports
+pre-existing pairs a human kept.
 
 ## Write-queue serialization (load-bearing)
 

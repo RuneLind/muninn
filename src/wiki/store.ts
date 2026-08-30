@@ -507,6 +507,10 @@ export interface WikiIndex {
    * page than the file the reader expects, with the loser unreachable in the reader.
    * Empty on a healthy wiki. Optional so hand-built test indexes stay valid;
    * `buildWikiIndex` always sets it.
+   *
+   * **Deterministic**: sorted by `relPath`, and each entry's `shadowedBy` is picked
+   * from a relPath-sorted scan — a human reads this through the linter, and an
+   * attribution that flips between builds is a bug report nobody can reproduce.
    */
   shadowed?: ShadowedPage[];
 }
@@ -531,12 +535,48 @@ export function normalizeRelPath(relPath: string): string {
  * `.mdx` (1) beats `.html`/explainer (2). Lower wins. Used to drop the losing
  * page when two DIFFERENT extensions share a stem (a `.md` and a same-stem `.mdx`
  * are one authoring mistake, not two pages).
+ *
+ * Exported because the gardener's write-side stem guard (`findStemTwin`,
+ * `src/gardener/source-drafter.ts`) has to answer "would this write shadow, or be
+ * shadowed by, an existing page?" — which is a question about THIS rule. A second
+ * spelling of the ranking on the write side is exactly how a guard ends up inert
+ * for the pair the read side actually drops.
  */
-function extRank(relPath: string): number {
+export function extRank(relPath: string): number {
   const l = relPath.toLowerCase();
   if (l.endsWith(".mdx")) return 1;
   if (l.endsWith(".md")) return 0;
   return 2; // .html explainer
+}
+
+/**
+ * Canonical key for a page STEM comparison — Unicode **NFC** then lowercase.
+ *
+ * The NFC fold is not cosmetic: macOS writes decomposed (NFD) filenames while a
+ * title typed on the same keyboard, or emitted by a model, is composed, so a
+ * bare `.toLowerCase()` reads an on-disk `Blåbær.mdx` and a queried `Blåbær` as
+ * two different stems — measured, and the same class `coverageKey`
+ * (`index-coverage.ts`) already folds for the huginn↔disk comparison. Every stem
+ * comparison in the shadow bookkeeping below and in the gardener's write-side
+ * twin guard runs through this one function.
+ *
+ * NB the fold is deliberately NOT case-preserving-aware: two files whose stems
+ * differ only in CASE are one stem here, which matches how `resolve()` and the
+ * precedence rule have always behaved (and how APFS behaves by default).
+ */
+export function stemKey(stem: string): string {
+  return stem.normalize("NFC").toLowerCase();
+}
+
+/**
+ * The bare page stem for a wiki-relative path — the value `buildWikiIndex` stores
+ * as `WikiPageMeta.name`. One spelling, because a caller that needs a stem for a
+ * page the index has not built yet (the gardener's apply-time guard, working from
+ * a proposal's `targetPath`) must derive it exactly as the index would; a re-typed
+ * `/\.mdx?$/i` at the call site is a copy waiting to drift.
+ */
+export function wikiPageStem(relPath: string): string {
+  return path.posix.basename(relPath).replace(/\.mdx?$/i, "");
 }
 
 /**
@@ -1826,7 +1866,7 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
       // Native `.mdx` pages take the same branch as `.md` — same frontmatter,
       // same wikilink extraction, same graph membership. The only difference is
       // the extension stripped off the stem.
-      const name = path.basename(relPath).replace(/\.mdx?$/i, "");
+      const name = wikiPageStem(relPath);
       const meta: WikiPageMeta = {
         name,
         title: titleFromFrontmatter(fm, name, readerConfig),
@@ -1975,10 +2015,20 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
   // guard in `scripts/mdx-explainer/checks.ts` (a case-insensitive stem-collision
   // check that refuses to compile two sources onto one output stem); here we can't
   // refuse — the files already exist — so we resolve the ambiguity by precedence.
+  //
+  // **Sorted FIRST, and that is load-bearing for the record below.** `pages` is in
+  // `Promise.all` completion order at this point, and the winner scan keeps the
+  // FIRST page it sees at the best rank — so with two same-rank candidates (a
+  // `.md` in two folders shadowing one `.mdx`) `shadowedBy` named whichever file
+  // the filesystem happened to return first, and flipped between runs (measured
+  // across 4 consecutive builds of one unchanged wiki). The dropped SET was always
+  // right; the attribution was not, and it is what the linter reports to a human.
+  pages.sort((a, b) => a.relPath.localeCompare(b.relPath));
+
   const bestRankByStem = new Map<string, number>();
   const winnerByStem = new Map<string, WikiPageMeta>();
   for (const p of pages) {
-    const key = p.name.toLowerCase();
+    const key = stemKey(p.name);
     const rank = extRank(p.relPath);
     const cur = bestRankByStem.get(key);
     if (cur === undefined || rank < cur) {
@@ -1993,7 +2043,7 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
   const shadowed: ShadowedPage[] = [];
   for (let i = pages.length - 1; i >= 0; i--) {
     const p = pages[i]!;
-    const key = p.name.toLowerCase();
+    const key = stemKey(p.name);
     const best = bestRankByStem.get(key)!;
     if (extRank(p.relPath) > best) {
       log.warn("wiki page {relPath} shadowed by a higher-precedence same-stem page — dropped", {
@@ -2007,10 +2057,11 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
       pages.splice(i, 1);
     }
   }
-  // Reverse-iterated above, so restore document order for a stable report.
-  shadowed.reverse();
-
-  pages.sort((a, b) => a.relPath.localeCompare(b.relPath));
+  // Walked backwards above (so the splice can't skip an entry), so the report is
+  // in reverse relPath order — sorted explicitly rather than reversed, because the
+  // guarantee wanted here is "the same order every build" and that must not depend
+  // on the loop direction of the code above it.
+  shadowed.sort((a, b) => a.relPath.localeCompare(b.relPath));
 
   // Same-EXTENSION same-stem pages in different folders are NOT dropped above —
   // they are two real pages that simply share a filename, and on the `memory`
@@ -2104,7 +2155,7 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
     // `.mdx` extension is used as-is; a bare path implies `.md` first, then a
     // native `.mdx` page (so [[blogs/src/foo]] finds foo.mdx).
     if (t.includes("/")) {
-      if (t.endsWith(".md") || t.endsWith(".mdx")) return byRelPath.get(normalizeRelPath(t));
+      if (isMarkdownWikiPath(t)) return byRelPath.get(normalizeRelPath(t));
       return (
         byRelPath.get(normalizeRelPath(`${t}.md`)) ??
         byRelPath.get(normalizeRelPath(`${t}.mdx`))

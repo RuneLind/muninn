@@ -1510,20 +1510,48 @@ wiki or DB. v1 is purely a report.
      store's own new `WikiIndex.shadowed` record rather than scanning for pairs.
      The finding is filed against the SHADOWED page, the one that vanished.
 
+     **This section OWNS the same-stem census.** `lint.ts`, `store.ts` and
+     `src/gardener/CLAUDE.md` point here rather than restating numbers — three
+     different counts for one measurement is what the first cut shipped. Everything
+     below re-measured 2026-08-30 over all **six** registered roots (jarvis 1,148
+     pages · capra 70 · huginn-nav 540 · mimir 477 · melosys-kode-wiki 355 · memory
+     304), with `scripts/`-free read-only index builds.
+
+     **Cross-extension SHADOW groups (what `index.shadowed` records): 11 groups /
+     22 pages, and every single one is a `.md` page shadowing a same-stem `.html`
+     explainer** — jarvis 1, mimir 4, melosys-kode-wiki 6, the other three roots 0.
+     Markdown-vs-markdown shadows: **0**. So with the `.html` exclusion in place
+     this check reports **0 on all six roots**.
+
+     **Same-EXTENSION same-stem groups (the `displayTitle` shape, never shadowed and
+     never reported): mimir 5 groups / 11 pages** — 4 groups / 9 pages once the
+     reserved `index` group is discounted, e.g. three `projects/<x>/architecture.md`
+     — **melosys-kode-wiki 2 / 4, memory 2 / 32** (the 30 per-project `MEMORY.md`
+     hubs), the other three roots 0.
+
      **Three exclusions, each stated because each is a real population.**
      *Same-EXTENSION twins in two folders are NOT reported*: `store.ts` calls them
      "two real pages that simply share a filename" and keeps both behind a
-     `displayTitle` prefix — mimir has 5 such groups (11 pages) and the memory wiki
-     32, so reporting them would be a permanent unfixable list. *Reserved infra*
-     (`index`/`log`/`CLAUDE`) is out, the `checkStaleUpdated` exclusion. *A shadowed
-     `.html` EXPLAINER is out*, mirroring the write guard's own `.html` exclusion
-     (an explainer is a different serving path, not a wikilink target) — and
-     measured 2026-08-30 that is the ONLY live shape: **jarvis 1, mimir 4**, all
-     `blogs/<slug>.html` beside a same-stem `.md`, i.e. MDX-compile-pipeline output,
-     which `store.ts` already handles with `pipelineSourceSiblingHtml`. Including
-     it would ship this check permanently red on both real wikis and bury the
-     regression it exists to catch. Worth its own check; not this one. Measured
-     with the exclusion in place: **jarvis 0 (1,148 pages), mimir 0 (477)**.
+     `displayTitle` prefix, so they are not in `index.shadowed` at all — reporting
+     them would be a permanent unfixable list, and the write-side guard
+     (`findStemTwin`) allows the cross-folder case for the same reason. *Reserved
+     infra* (`index`/`log`/`CLAUDE`) is out, the `checkStaleUpdated` exclusion, and
+     the same set the guard exempts. *A shadowed `.html` EXPLAINER is out* — **and
+     this is where the check's scope deliberately DIVERGES from the write guard,
+     which DOES count `.html`.** The two answer different questions: the guard
+     refuses a write that would CREATE a shadow, this reports shadows that already
+     exist, and all 11 live ones are pre-existing pairs a human kept. Including them
+     would ship this check permanently red on three of the six wikis while costing
+     the guard nothing on a wiki nobody is writing to. ⚠️ The rationale the first
+     cut gave for this exclusion — that the pairs are MDX-compile-pipeline output
+     "which `store.ts` already handles with `pipelineSourceSiblingHtml`" — is
+     **false and was checked**: that helper drops a `<dir>/src/<stem>.mdx` SOURCE and
+     never touches an `.html`, none of the four mimir `.html` twins has such a source
+     or the `<!-- generated from` marker, and one of them
+     (`blogs/claude-hivemind-reply-correlation.html` under
+     `plans/claude-hivemind-reply-correlation.md`) is cross-folder. They are
+     hand-authored. Reporting them properly is worth its own check with its own
+     remedy; it is not this one.
 - **Adding a check is compiler-enforced now.** `LintReport.counts`, the watcher's
   `CHECK_SUMMARY` and the gardener page's `LINT_LABELS` are all
   `Record<LintCheck, …>`, and `summarizeCounts` iterates `LINT_CHECKS` itself

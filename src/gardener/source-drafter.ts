@@ -22,7 +22,7 @@
 
 import path from "node:path";
 import type { WikiIndex } from "../wiki/store.ts";
-import { isMarkdownWikiPath, normalizeRelPath, parseFrontmatter } from "../wiki/store.ts";
+import { extRank, normalizeRelPath, parseFrontmatter, stemKey } from "../wiki/store.ts";
 import type { WikiRefs } from "../wiki/ingest-backlog.ts";
 import { normalizeUrl, docIdFromUrl } from "../wiki/ingest-backlog.ts";
 import type { InsertWikiProposalParams, WikiProposal } from "../db/wiki-proposals.ts";
@@ -30,6 +30,7 @@ import { expectedDir, sanitizeFilename } from "./target-resolve.ts";
 import {
   appendPendingIngestionCallout,
   containDraftBodyLinks,
+  hasForbiddenBasename,
   isHttpUrl,
   normalizeDraftOutput,
   pinFrontmatterTitle,
@@ -245,23 +246,75 @@ function urlCovered(refs: WikiRefs, url: string): boolean {
   return id !== null && refs.idTokens.has(id);
 }
 
+/** NFC-folded, lowercased, posix-normalized key for a path comparison. Paired with
+ *  {@link stemKey} so both halves of the twin test fold the same way. */
+function pathKey(relPath: string): string {
+  return normalizeRelPath(relPath).normalize("NFC");
+}
+
 /**
- * The MARKDOWN page sharing `stem` with the page about to be written at
- * `targetPath`, excluding whatever sits at `targetPath` itself. The one stem-twin
- * resolver — `findCollidingPage` (drafter) and the approve route's create-mode
- * guard both call it, so the two writers cannot disagree about what a twin is.
+ * The existing page a write to `targetPath` under `stem` must not stand beside —
+ * or null. The ONE stem-twin resolver: `findCollidingPage` (the drafter and its
+ * title-override pre-flight), the approve route's create-mode guard and
+ * `applyWikiProposal`'s in-queue re-check all call it, so no two writers can
+ * disagree about what a twin is.
  *
- * **Both extensions count, and the rule is NOT the one the `.md`-only test was
- * written for.** That test's rationale was reader-precedence SHADOWING — a `.md`
- * twin drops the drafter's `.mdx` page out of the index (`extRank`, `store.ts`) —
- * which an `.mdx`-vs-`.mdx` pair cannot cause. The rule here is wider: Obsidian
- * has ONE title namespace across folders, so any two same-stem markdown pages make
- * `[[Stem]]` ambiguous whatever their extensions. Measured (2026-08-29): the live
- * collision was exactly the pair the narrow test could not see — an existing
- * `sources/<Stem>.mdx` and an applied `entities/<Stem>.md`, after which the source
- * page was dropped from the index entirely. Do not narrow this back to `.md`.
+ * **A twin BLOCKS on exactly two conditions, and the narrowness is the point.**
  *
- * The `targetPath` exclusion is what keeps it usable on the APPLY side, where the
+ *  1. **It would SHADOW, or be SHADOWED BY, the new page** — same stem, DIFFERENT
+ *     `extRank` (`store.ts`). That rank is the store's precedence rule (`.md` >
+ *     `.mdx` > `.html`), and the loser is dropped from `index.pages` entirely: it
+ *     is unreachable in the reader, contributes no backlinks, and `[[Stem]]`
+ *     silently resolves to the winner. That is the measured 2026-08-29 incident —
+ *     a drafted `sources/<Stem>.mdx` displaced by an applied `entities/<Stem>.md`
+ *     — and `.html` is IN, both directions: an apply landing `blogs/<Stem>.md`
+ *     over an existing `blogs/<Stem>.html` makes the explainer vanish just as
+ *     quietly (measured 2026-08-30: every one of the 11 live shadow groups across
+ *     the six real roots is exactly that `.md`-over-`.html` shape).
+ *  2. **It sits in the SAME FOLDER under the same stem.** Today this is implied by
+ *     (1) — same folder + same stem + same extension is the target file itself,
+ *     which is excluded below — but it is stated separately because it is the rule
+ *     a reader would expect, and a future extension added to `extRank` at an equal
+ *     rank must still be refused inside one folder.
+ *
+ * **A SAME-EXTENSION twin in a DIFFERENT folder is ALLOWED**, and that is a
+ * deliberate narrowing of the first cut (which refused every same-stem markdown
+ * pair on the "one title namespace" argument). `store.ts` supports that shape on
+ * purpose — it keeps BOTH pages and disambiguates them with a `displayTitle`
+ * prefix — and it is common: measured 2026-08-30, mimir carries 4 such groups over
+ * 9 pages (`projects/<x>/architecture.md`, `projects/<x>/tracing.md`, …), the memory
+ * wiki 2 over 32. The linter's `stem-collision` check declines to report them for
+ * the same reason. Refusing them here would make a consolidation proposal for
+ * another `projects/<x>/architecture.md` permanently unapprovable, with a refusal
+ * whose only remedy is renaming a page the wiki is happy with.
+ *
+ * **Reserved infrastructure is exempt** (`index`/`log`/`CLAUDE`, either markdown
+ * extension — {@link hasForbiddenBasename}, the same set the linter's
+ * `reservedBasename` mirrors). A per-folder `index.md` is a designed shape that
+ * `catalogKinds` writes, not a collision.
+ *
+ * **Scope split with the LINTER, stated on both ends:** this predicate counts
+ * `.html`, `checkStemCollisions` (`src/wiki/lint.ts`) does not. They are answering
+ * different questions — this one refuses a write that would CREATE a shadow, the
+ * lint reports shadows that already exist — and the 11 live `.md`-over-`.html`
+ * groups are pre-existing pairs a human chose, so reporting them would ship that
+ * check permanently red while this guard costs nothing on a wiki nobody is writing
+ * to. See the lint's own docblock for the other half.
+ *
+ * **Both stem comparisons and the self-exclusion fold through NFC** ({@link
+ * stemKey}/`pathKey`): macOS writes decomposed filenames and a queried title is
+ * composed, so a bare `toLowerCase()` cannot see an NFD `Blåbær.mdx` from an NFC
+ * `Blåbær` query and the guard is silently inert on any non-ASCII stem.
+ *
+ * **Known residual, landed as-is:** the self-exclusion is case-FOLDED, so on a
+ * case-SENSITIVE filesystem a genuine `sources/X.md` + `sources/x.md` pair reads
+ * as the target excluding itself and no twin is reported. macOS (APFS, case-
+ * insensitive by default) cannot hold that pair at all, the `nais` profile drops
+ * the wiki routes entirely, and folding is what makes the guard match the store's
+ * own case-insensitive precedence — so a case-SENSITIVE self test would be the
+ * inconsistency, not the fix.
+ *
+ * The `targetPath` exclusion is what keeps this usable on the APPLY side, where the
  * page at the target may be the proposal's own (a crash-recovery re-apply, an
  * `approved` re-run): without it the twin branch matches the target file by stem
  * and names the row as its own blocker. On the drafter side the exclusion is a
@@ -274,24 +327,41 @@ export function findStemTwin(
   targetPath: string,
 ): CollidingPage | null {
   if (!index) return null;
-  const s = stem.toLowerCase();
-  const self = normalizeRelPath(targetPath);
-  const twin = index.pages.find(
-    (p) =>
-      p.name.toLowerCase() === s &&
-      isMarkdownWikiPath(p.relPath) &&
-      normalizeRelPath(p.relPath) !== self,
-  );
+  const s = stemKey(stem);
+  const self = pathKey(targetPath);
+  const selfDir = path.posix.dirname(self);
+  const selfRank = extRank(targetPath);
+  const twin = index.pages.find((p) => {
+    if (stemKey(p.name) !== s) return false;
+    const key = pathKey(p.relPath);
+    if (key === self) return false;
+    if (hasForbiddenBasename(p.relPath)) return false;
+    return extRank(p.relPath) !== selfRank || path.posix.dirname(key) === selfDir;
+  });
   return twin ? { title: twin.title, relPath: twin.relPath } : null;
 }
 
 /**
+ * The refusal sentence for a stem collision — one spelling, because the approve
+ * route answers it as a 409 body and `applyWikiProposal`'s in-queue re-check
+ * answers it as an `error` reason, and a reviewer hitting the two paths seconds
+ * apart must not read two different explanations of one condition.
+ */
+export function stemCollisionMessage(blocking: CollidingPage, stem: string): string {
+  return `"${blocking.title}" (${blocking.relPath}) already owns the page name "${stem}" — approving this would put two pages under one wiki title. Rename one of them, then approve.`;
+}
+
+/**
  * The existing page a stem collides with, or null. A stem collides when an existing
- * page shares the bare stem (see {@link findStemTwin} for why both markdown
- * extensions count), or when an exact same-path source page can't be overwritten in
- * create mode. Either ⇒ the draft can't ship under this title. The drafter gets ONE
- * retry with a distinct-title nudge (see `buildCollisionRetryPrompt`) before the doc
- * is skipped for good.
+ * page is a blocking twin ({@link findStemTwin} — it would shadow or be shadowed by
+ * the draft, or shares its folder), or when an exact same-path source page can't be
+ * overwritten in create mode. Either ⇒ the draft can't ship under this title. The
+ * drafter gets ONE retry with a distinct-title nudge (see `buildCollisionRetryPrompt`)
+ * before the doc is skipped for good.
+ *
+ * The drafter writes `.mdx`, so the twin narrowing matters here twice: a same-stem
+ * `.mdx` in ANOTHER folder no longer burns the one collision retry, and no longer
+ * refuses a title a human chose through the rename-and-draft pre-flight.
  *
  * Returns the PAGE rather than a boolean so both collision skips can name — and the
  * backlog row can link to — whatever is standing in the way. A collision the caller

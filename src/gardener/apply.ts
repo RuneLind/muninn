@@ -30,7 +30,8 @@ import type { WikiProposal } from "../db/wiki-proposals.ts";
 import type { WikiIndex } from "../wiki/store.ts";
 import { containDraftBodyLinks, isPathConfined, stripOwnedAliases } from "./draft.ts";
 import { buildIndexEntry, buildSeeAlsoEdit, insertIndexLine, selectWirablePages } from "./wire.ts";
-import { parseFrontmatter } from "../wiki/store.ts";
+import { parseFrontmatter, wikiPageStem } from "../wiki/store.ts";
+import { findStemTwin, stemCollisionMessage } from "./source-drafter.ts";
 import { stripFrontmatter } from "../wiki/render.ts";
 import { runWikiWriteExclusive } from "../wiki/queue.ts";
 import {
@@ -381,6 +382,35 @@ async function applyInner(
     }
   } else if (current !== null) {
     return { outcome: "stale", reason: "target path already exists" };
+  }
+
+  // 2c. Stem collision, re-checked INSIDE the write queue. The approve route
+  //     refuses this before its draft→approved CAS, but that guard sits OUTSIDE
+  //     this queue and each gate card only disables its OWN buttons — so two
+  //     colliding proposals approved together both pass it, and the second write
+  //     lands the twin the first one's refusal was for. Measured. This is also
+  //     what covers the one case the route guard deliberately skips: an `approved`
+  //     crash-recovery re-run whose twin appeared inside the crash window.
+  //
+  //     `index` is the same object steps 1a/1c/1d use and is fetched in-queue; the
+  //     route builds it with `refresh: true` precisely so this sees a page written
+  //     by the apply that just released the queue. A null index (outage) degrades
+  //     to no check, like every other index-dependent step here.
+  //
+  //     The outcome is the EXISTING `error` variant carrying the route's own
+  //     refusal sentence — deliberately no new `ApplyOutcome`: the row is already
+  //     `approved` by the time we get here, so the honest terminal state is the
+  //     one the route already flips to and reports.
+  if (proposal.mode === "create") {
+    const stem = wikiPageStem(proposal.targetPath);
+    const blocking = findStemTwin(index, stem, proposal.targetPath);
+    if (blocking) {
+      log.warn("Wiki-gardener apply refused for {path}: stem is already owned by {blocking}", {
+        path: proposal.targetPath,
+        blocking: blocking.relPath,
+      });
+      return { outcome: "error", reason: stemCollisionMessage(blocking, stem) };
+    }
   }
 
   // 3. Write the draft.
