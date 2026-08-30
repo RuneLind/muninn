@@ -807,15 +807,18 @@ describe("what an UNCLOSED fence actually does", () => {
 });
 
 describe("the placeholder namespace is unforgeable", () => {
-  // Three review rounds landed on the SANITISER that used to defend this — one
-  // pass reassembled a live placeholder from a nested spelling and threw; a
-  // bounded loop stopped early at its bound and left a raw NUL or a FORGED
-  // DUPLICATE of a real fence's block; unbounded, it was quadratic in time.
-  // The class behind all three was a forgeable namespace, so the marker is now
-  // chosen per parse to be one `~` longer than any run the input already has.
-  // No input is rewritten, so nothing can be reassembled, and the two failure
-  // modes below are what these assert against — for EVERY nesting depth, since
-  // depth was the axis every bound got wrong.
+  // FOUR designs have defended this, and the first three each shipped their own
+  // defect — a one-pass sanitiser that reassembled a live placeholder from a
+  // nested spelling and threw; the same loop bounded at 10, which left a raw NUL
+  // or a FORGED DUPLICATE of a real fence's block at its bound; unbounded, which
+  // was quadratic in time. The fourth, a per-parse `~` marker compiled into a
+  // per-parse regex, was unforgeable but grew the PATTERN with the input and hit
+  // JavaScriptCore's 2^20 cap, throwing out of all five renderers on a 1.05 MB
+  // page. What they have in common is defending a namespace the input can spell.
+  // The ids are DISJOINT now: one scan reads the ids the input already spells and
+  // the allocator never issues one, so a forged placeholder names an empty slot
+  // and stays text. Depth is still an axis here because it is the one every
+  // bounded design got wrong.
   const nest = (d: number) => {
     let s = `${NUL}CB0${NUL}`;
     for (let i = 0; i < d; i++) s = `${NUL}C${s}B0${NUL}`;
@@ -846,34 +849,85 @@ describe("the placeholder namespace is unforgeable", () => {
   });
 
   test("CRLF is normalized before anything else looks at the text", () => {
-    // A preservation pin, not a red->green: `rendered-code.ts` documents this as
-    // the first of four reasons its scan reads the RENDERED html rather than the
-    // markdown ("a raw-body scan finds no fence at all in a CRLF file"), and the
-    // property was load-bearing there while pinned nowhere.
+    // A preservation pin, not a red->green. `rendered-code.ts` documents this
+    // as the first of four reasons its scan reads the RENDERED html rather than
+    // the markdown ("a raw-body scan finds no fence at all in a CRLF file").
+    // NB an earlier version of this comment said the property was "pinned
+    // nowhere" — false: `normalizes \r\n to \n` above predates this change and
+    // kills the same mutant. What it does not cover is a fence BODY, which is
+    // the angle this adds.
     expect(parseBlocks("```js\r\nx\r\n```")).toEqual([
       { type: "code_block", lang: "js", code: "x" },
     ]);
   });
 
-  test("the marker outruns any run of ~ the input already has", () => {
-    // The property the whole design rests on, computed rather than argued: for
-    // an input carrying k tildes after a \x00CB, the emitted placeholder must
-    // not be spellable by that input. Read off the RENDERED text: whatever
-    // marker was chosen, the forged line must not have become a code block.
-    for (let k = 0; k < 40; k++) {
-      const forged = `${NUL}CB${"~".repeat(k)}0${NUL}`;
-      const blocks = parseBlocks(`\`\`\`js\nREAL\n\`\`\`\n\n${forged}`);
-      expect(blocks.filter((b) => b.type === "code_block")).toHaveLength(1);
-    }
+  test("an id the input spells is never allocated, so it cannot be stolen", () => {
+    // The property the whole design rests on, computed rather than argued. The
+    // forged id is exactly the one a naive allocator would hand the first fence,
+    // so a mechanism that ignored the input would render the forged line as the
+    // fence's block — the FORGERY failure, from the other direction.
+    const blocks = parseBlocks(`${NUL}CB0${NUL}\n\n\`\`\`js\nREAL\n\`\`\``);
+    expect(blocks.filter((b) => b.type === "code_block")).toEqual([
+      { type: "code_block", lang: "js", code: "REAL" },
+    ]);
+    expect(allStrings(blocks).join("\n")).toContain(`${NUL}CB0${NUL}`);
   });
 
-  test("choosing the marker is linear, not quadratic, in nesting depth", () => {
-    // The round-3 finding was that the sanitiser it replaces was O(n^2) in
-    // TIME: 298 ms at 80 KB of nested spelling, 1.2 s at 160 KB, 4.8 s at
-    // 320 KB, blocking the process, per streaming delta. Nothing rewrites the
-    // input now, so this is one scan. 2000 ms separates the two by ~100x
-    // without being tight on a slow CI runner.
-    const md = nest(40_000); // ~320 KB, the size that measured 4.8 s
+  test("collision is decided by VALUE, so a leading-zero spelling cannot steal a slot", () => {
+    // The restore reads the digits with parseInt, so `\x00CB007\x00` and
+    // `\x00CB7\x00` are the same slot. Comparing the spellings instead would let
+    // the padded form through — it would not be in `taken`, id 7 would be
+    // allocated, and the forged line would render as that fence's block.
+    const forged = `${NUL}CB007${NUL}`;
+    const fences = Array.from({ length: 9 }, (_, i) => `\`\`\`js\nF${i}\n\`\`\``).join("\n\n");
+    const blocks = parseBlocks(`${forged}\n\n${fences}`);
+    expect(blocks.filter((b) => b.type === "code_block")).toHaveLength(9);
+    expect(allStrings(blocks).join("\n")).toContain(forged);
+  });
+
+  test("a huge placeholder-shaped run does not throw out of any formatter", () => {
+    // The round-3 design compiled the marker into a per-parse regex, so the
+    // PATTERN grew with the input and hit JavaScriptCore's 2^20 cap. Measured to
+    // the character on that design: 1 048 558 tildes parse, 1 048 559 throw
+    // `Invalid regular expression: regular expression too large` — out of
+    // formatWebHtml, renderWikiHtml, renderAskAnswerHtml, formatTelegramHtml and
+    // formatSlackMrkdwn alike, on a 1.05 MB page. Nothing is built from input
+    // now, so size is not a cliff; this walks well past where the cap was.
+    const md = `intro\n\n${NUL}CB${"~".repeat(1_100_000)}\n\n\`\`\`js\nx\n\`\`\`\n`;
+    let blocks: Block[] = [];
+    expect(() => (blocks = parseBlocks(md))).not.toThrow();
+    expect(blocks.filter((b) => b.type === "code_block")).toHaveLength(1);
+  });
+
+  test("a fence inside a component body still resolves when the page carries a forged id", () => {
+    // The store is threaded through the recursive component parse, and with no
+    // forged id on the page every allocation scheme agrees, so an ordinary
+    // component+fence test cannot tell them apart. This one can: the page's
+    // forged id shifts the allocation, and a body parsed against the wrong store
+    // loses the block and serves the raw NUL that this whole change removes.
+    const blocks = parseBlocks(
+      `${NUL}CB0${NUL} stray\n\n<Callout tone="info">\n\n\`\`\`ts\nconst x = 1;\n\`\`\`\n\n</Callout>`,
+    );
+    const callout = blocks.find((b) => b.type === "component");
+    expect(callout && callout.type === "component" ? callout.children : []).toContainEqual({
+      type: "code_block",
+      lang: "ts",
+      code: "const x = 1;",
+    });
+  });
+
+  test.each([
+    ["nested spelling, ~320 KB", () => nest(40_000)],
+    ["one long run, ~400 KB", () => `intro\n\n${NUL}CB${"~".repeat(400_000)}\n\ntail`],
+  ])("%s parses in well under a second", (_name, build) => {
+    // Two shapes, because two designs were slow on different ones. The looped
+    // sanitiser was O(n^2) on NESTED input: 298 ms at 80 KB, 1.2 s at 160 KB,
+    // 4.8 s at 320 KB, blocking the process, per streaming delta. The per-parse
+    // marker was fine there but paid 23.7 ms on ONE LONG RUN, building a 400 KB
+    // marker string and compiling a 400 KB pattern each parse. Neither shape
+    // costs more than a single scan now (measured 0.1 ms each). 2000 ms
+    // separates that from both predecessors without being tight on slow CI.
+    const md = build();
     const t0 = performance.now();
     parseBlocks(md);
     expect(performance.now() - t0).toBeLessThan(2000);

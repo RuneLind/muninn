@@ -518,66 +518,86 @@ const FENCE_LINE_RE = /^( {0,3})(`{3,})(.*)$/;
  */
 const FENCE_LANG_RE = /^[A-Za-z0-9_+#.-]*/;
 
-/** Every `\x00CB` in the input, with the run of `~` that follows it. */
-const CODE_MARKER_SCAN_RE = /\x00CB(~*)/g;
+/**
+ * A placeholder, ANYWHERE in the text — used to read the ids the input already
+ * spells, so this parse can avoid them.
+ *
+ * ⚠️ The scan being unanchored and the restore being anchored are individually
+ * redundant and JOINTLY load-bearing, so neither is pinned on its own and both
+ * are deliberate. Mutating either alone changes no output — a mid-line forged
+ * placeholder is inert because its id is in `taken` (scan), and because a
+ * mid-line match is not restored (restore) — so each mutant survives the suite.
+ * Mutating BOTH makes a mid-line `\x00CB0\x00` restore an allocated block, which
+ * is forgery. Two independent reasons for one property, kept as two.
+ */
+const CODE_ID_SCAN_RE = /\x00CB(\d+)\x00/g;
+
+/** A placeholder that is the WHOLE line — the only shape the walker restores.
+ *  See the note on {@link CODE_ID_SCAN_RE} for why the anchors stay. */
+const CODE_PLACEHOLDER_RE = /^\x00CB(\d+)\x00$/;
 
 /**
- * The placeholder marker for ONE parse: `\x00CB`, then one more `~` than the
- * longest run this input already has after a `\x00CB`. Unforgeable by
- * construction — the input provably contains no `\x00CB~^(n+1)` — in a single
- * linear scan.
+ * The ids a placeholder in THIS input already spells, by VALUE.
  *
- * ⚠️ **This replaces a sanitiser, and the sanitiser is the lesson.** U+0000 is
- * not typable prose, but a page's bytes can hold one (the live jarvis `log.md`
- * does), and a `\x00CB<n>\x00` in the INPUT used to deref `codeBlocks[n]` for an
- * `n` no fence ever wrote and THROW, taking down the shared renderer for chat,
- * Telegram, Slack and email at once. Three review rounds each patched the strip
- * that was supposed to prevent it, and each patch had its own defect:
- *
- *  1. one `replace` pass — a NESTED spelling reassembles a live placeholder out
- *     of what is left either side of the removal (`\x00C` + `\x00CB0\x00` +
- *     `B0\x00` strips to `\x00CB0\x00`), so the pass MANUFACTURED the thing it
- *     existed to remove, and threw;
- *  2. looped, bounded at 10 — at nesting depth 10 it stops early and leaves
- *     either a raw NUL or, beside any real fence, a FORGED DUPLICATE of that
- *     fence's block;
- *  3. looped, unbounded — terminates (each pass deletes >= 5 chars) but each
- *     pass is a full scan and the nesting peels one level per pass, so it is
- *     quadratic in TIME: measured 298 ms at 80 KB, 1.2 s at 160 KB, 4.8 s at
- *     320 KB of that shape, blocking the whole process, per streaming delta.
- *
- * The class behind all three is that the placeholder namespace was FORGEABLE and
- * the input had to be scrubbed to protect it. A marker the input cannot spell
- * removes the need to scrub: nothing is rewritten, so nothing can be
- * reassembled, mis-forged or re-scanned. The input passes through untouched — a
- * literal `\x00CB0\x00` on a page stays the text it always was.
+ * By value, not by spelling: the restore reads the digits with `parseInt`, so a
+ * forged `\x00CB007\x00` and an allocated `\x00CB7\x00` are the same slot.
+ * Comparing the strings would let the leading-zero form through.
  */
-function chooseCodeMarker(text: string): string {
-  let longest = -1;
-  for (const m of text.matchAll(CODE_MARKER_SCAN_RE)) {
-    if (m[1]!.length > longest) longest = m[1]!.length;
-  }
-  return "~".repeat(longest + 1);
+function takenCodeIds(text: string): Set<number> {
+  const taken = new Set<number>();
+  for (const m of text.matchAll(CODE_ID_SCAN_RE)) taken.add(parseInt(m[1]!, 10));
+  return taken;
 }
 
-/** The store threaded through the recursive parse: the extracted blocks plus
- *  the anchored restore regex for THIS parse's marker. Both travel together so
- *  a component body can never be parsed against a different marker than the one
- *  its placeholders were written with. */
+/**
+ * The store threaded through the recursive parse: the extracted blocks, keyed by
+ * the id their placeholder carries, plus the allocator that skips ids the input
+ * already spells.
+ *
+ * ⚠️ **This is the fourth design for one problem, and the first three are the
+ * reason it looks like this.** U+0000 is not typable prose, but a page's bytes
+ * can hold it — the live jarvis `log.md` does — and a `\x00CB<n>\x00` in the
+ * INPUT used to deref slot `n` no fence ever wrote and THROW, taking down the
+ * shared renderer for chat, Telegram, Slack and email at once. Then:
+ *
+ *  1. a one-pass sanitiser — a NESTED spelling reassembles a live placeholder
+ *     out of what is left either side of the removal (`\x00C` + `\x00CB0\x00` +
+ *     `B0\x00` strips to `\x00CB0\x00`), so the pass MANUFACTURED the thing it
+ *     existed to remove, and threw;
+ *  2. the same loop, bounded at 10 — at nesting depth 10 it stops early and
+ *     leaves a raw NUL, or, beside any real fence, a FORGED DUPLICATE of that
+ *     fence's block;
+ *  3. unbounded — terminates, but each pass is a full scan and the nesting peels
+ *     one level per pass, so it is quadratic in TIME (4.8 s on 320 KB, blocking
+ *     the process, per streaming delta);
+ *  4. a per-parse MARKER (one more `~` than the longest run the input carried)
+ *     compiled into a per-parse regex — unforgeable, but the pattern grew with
+ *     the input and JavaScriptCore caps a pattern at 2^20: a 1.05 MB page threw
+ *     `regular expression too large` out of all five renderers. Measured to the
+ *     character: 1 048 558 tildes parse, 1 048 559 throw.
+ *
+ * Every one of those defends a FORGEABLE namespace, three by rewriting the input
+ * and one by growing the pattern. This design makes the namespace disjoint
+ * instead: one linear scan reads the ids the input already spells, and the
+ * allocator never issues one of them. So a forged placeholder names a slot that
+ * was never filled, `store.blocks.get(id)` is `undefined`, and the walker leaves
+ * the line as the text it always was. Nothing is rewritten, no pattern is built
+ * from input, the placeholder is a constant six-or-so characters, and the total
+ * deref below is no longer defensive — it is the mechanism, and it is reachable
+ * from a one-line page.
+ */
 interface FenceStore {
-  blocks: { lang: string; code: string }[];
-  /**
-   * Anchored: a placeholder is only a code block when it is the WHOLE line.
-   *
-   * ⚠️ UNPINNED, and structurally redundant — said rather than implied. The
-   * extractor pushes each placeholder as its own `out` element, so it is always
-   * alone on a line, and the marker makes the input unable to spell one
-   * anywhere else; removing the anchors therefore changes no output and no test
-   * fails. Kept because the anchoring is what the ORIGINAL bug was about (the
-   * restore was anchored while the extractor was not), so relaxing it silently
-   * is the one direction this file must not drift.
-   */
-  placeholder: RegExp;
+  blocks: Map<number, { lang: string; code: string }>;
+  /** Ids the input already spells; never allocated. */
+  taken: Set<number>;
+  /** Next candidate id. Monotone, so allocation is amortised O(1). */
+  next: number;
+}
+
+/** Reserve the next id no placeholder in the input spells. */
+function allocateCodeId(store: FenceStore): number {
+  while (store.taken.has(store.next)) store.next++;
+  return store.next++;
 }
 
 const HR_RE = /^---+$/;
@@ -588,21 +608,17 @@ const OL_RE = /^(\d+)\.\s+(.*)$/;
 
 export function parseBlocks(text: string): Block[] {
   const normalized = text.replace(/\r\n/g, "\n");
-  // The marker is chosen from the NORMALIZED text, which is also the text the
-  // extractor scans. CRLF collapse only deletes `\r`, and `\r\n` -> `\n` leaves
-  // the `\n` behind, so it can never splice two `~` runs into a longer one.
-  const marker = chooseCodeMarker(normalized);
 
   // Extract code blocks first; their content must not be parsed as markdown.
-  // The extraction happens ONCE against `codeBlocks`, before any further
-  // line-splitting; the array is then threaded through the recursive
-  // component-body parse so a `\x00CB{idx}\x00` placeholder inside a component
-  // still derefs the same array.
-  const store: FenceStore = {
-    blocks: [],
-    placeholder: new RegExp(`^\\x00CB${marker}(\\d+)\\x00$`),
-  };
-  const protectedText = extractFences(normalized, store, marker);
+  // The extraction happens ONCE against `store`, before any further
+  // line-splitting; the SAME store is threaded through the recursive
+  // component-body parse, so a placeholder inside a component derefs the slots
+  // this parse filled and no other. `taken` is read from the NORMALIZED text,
+  // which is the text the extractor also scans — CRLF collapse only deletes
+  // `\r` and leaves the `\n`, so it can neither create nor destroy a
+  // placeholder-shaped run between the two.
+  const store: FenceStore = { blocks: new Map(), taken: takenCodeIds(normalized), next: 0 };
+  const protectedText = extractFences(normalized, store);
 
   return parseBlocksInner(protectedText, store, 0);
 }
@@ -658,7 +674,7 @@ export function parseBlocks(text: string): Block[] {
  * wiki contains one (measured, same sweep) -- adding them is a separate change
  * with its own corpus diff, not a free ride on this one.
  */
-function extractFences(text: string, store: FenceStore, marker: string): string {
+function extractFences(text: string, store: FenceStore): string {
   const lines = text.split("\n");
   const out: string[] = [];
   let i = 0;
@@ -727,12 +743,12 @@ function extractFences(text: string, store: FenceStore, marker: string): string 
     }
 
     const body = lines.slice(i + 1, close).map((l) => dedentFenceLine(l, indent));
-    const idx = store.blocks.length;
-    store.blocks.push({
+    const id = allocateCodeId(store);
+    store.blocks.set(id, {
       lang: info.trim().match(FENCE_LANG_RE)![0],
       code: body.join("\n").trimEnd(),
     });
-    out.push(`\x00CB${marker}${idx}\x00`);
+    out.push(`\x00CB${id}\x00`);
     i = close + 1;
   }
 
@@ -790,20 +806,20 @@ function parseBlocksInner(
       }
     }
 
-    const cbMatch = line.match(store.placeholder);
-    // Total, not `codeBlocks[n]!`: a slot that does not exist falls through to
-    // text instead of throwing.
+    const cbMatch = line.match(CODE_PLACEHOLDER_RE);
+    // Total, not `store.blocks.get(n)!`: a slot that was never filled falls
+    // through to text instead of throwing.
     //
-    // ⚠️ UNPINNED, and said out loud rather than left to imply coverage. With
-    // the strip a true fixed point, the input carries no placeholder this parser
-    // did not write, `extractFences` only emits indices it has just pushed, and
-    // the recursive component-body parse shares that same array — so the branch
-    // is unreachable and no test can enter it. That is the same enumeration
-    // claimed one round ago, while the strip was still BOUNDED, and it was false
-    // then: depth-10 nesting reached this deref and threw. It stays as a
-    // backstop for the next time the enumeration is wrong. What is actually
-    // tested is the strip's fixed-point property.
-    const cb = cbMatch ? store.blocks[parseInt(cbMatch[1]!, 10)] : undefined;
+    // This is the MECHANISM, not a backstop, and it is reachable from a one-line
+    // page: the allocator never issues an id the input already spells, so a
+    // forged `\x00CB0\x00` names an empty slot and lands here. Two earlier
+    // revisions of this comment argued it was unreachable-by-construction — from
+    // a sanitiser's fixed point, and then from a per-parse marker. The first of
+    // those was false when written (depth-10 nesting reached this deref and
+    // threw) and the second was true only until the pattern hit JavaScriptCore's
+    // size cap. Pinned by "an id the input spells is never allocated" and the
+    // leading-zero case beside it.
+    const cb = cbMatch ? store.blocks.get(parseInt(cbMatch[1]!, 10)) : undefined;
     if (cb) {
       flushText();
       blocks.push({ type: "code_block", lang: cb.lang, code: cb.code });

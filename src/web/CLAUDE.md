@@ -53,27 +53,38 @@ leading `[A-Za-z0-9_+#.-]*` run and nothing wider, because
 escaping — pinned by the hostile-info-string cases in
 `markdown-all-platforms.test.ts`, not by this paragraph.
 
-**The placeholder marker is chosen per parse, and the input is never rewritten.**
-`chooseCodeMarker` scans once for the longest run of `~` following a `\x00CB` and
-uses one more, so the input provably cannot spell this parse's placeholder. That
-matters because U+0000 *does* occur in the corpus — the live jarvis `log.md`
-carries two literal NUL bytes — and a `\x00CB<n>\x00` in the input used to deref
-`codeBlocks[n]` for an `n` no fence wrote and **throw**, taking down the shared
-renderer for chat, Telegram, Slack and email at once.
+**Placeholder ids are DISJOINT from the input's, and the input is never
+rewritten.** One linear scan (`takenCodeIds`) reads every id a `\x00CB<n>\x00` in
+the input already spells — by *value*, so a padded `\x00CB007\x00` cannot steal
+slot 7 — and the allocator never issues one of them. A forged placeholder
+therefore names a slot nothing filled, `store.blocks.get(id)` is `undefined`, and
+the walker leaves the line as the text it always was.
 
-That was first defended with a sanitiser, and the sanitiser is the lesson: three
-review rounds each patched it and each patch had its own defect — one `replace`
-pass *manufactures* a live placeholder out of a nested spelling (`\x00C` +
-`\x00CB0\x00` + `B0\x00` → `\x00CB0\x00`) and throws; a loop bounded at 10 stops
-early at nesting depth 10 and leaves a raw NUL, or, beside any real fence, a
-**forged duplicate** of that fence's block; unbounded, it terminates but is
-quadratic in *time* (measured 4.8 s on 320 KB of that shape, blocking the whole
-process, per streaming delta). The class behind all three was a **forgeable
-namespace** that had to be defended by scrubbing. A marker the input cannot spell
-removes the need to scrub: nothing is rewritten, so nothing can be reassembled,
-mis-forged, or re-scanned, and a literal `\x00CB0\x00` on a page simply stays the
-text it always was. `wiki/render.ts` and `wiki/ask-render.ts` park their own
-`\x00` sentinels across this call and are unaffected either way.
+That matters because U+0000 *does* occur in the corpus — the live jarvis `log.md`
+carries two literal NUL bytes — and a `\x00CB<n>\x00` in the input used to deref
+slot `n` and **throw**, taking down the shared renderer for chat, Telegram, Slack
+and email at once. **Four designs have defended this and the first three each
+shipped their own defect**, which is why the current one looks the way it does:
+
+1. a one-pass sanitiser — *manufactures* a live placeholder out of a nested
+   spelling (`\x00C` + `\x00CB0\x00` + `B0\x00` → `\x00CB0\x00`) and throws;
+2. the same loop bounded at 10 — at nesting depth 10 it stops early and leaves a
+   raw NUL, or, beside any real fence, a **forged duplicate** of that block;
+3. unbounded — terminates, but quadratic in *time* (4.8 s on 320 KB, blocking the
+   process, per streaming delta);
+4. a per-parse `~` **marker** compiled into a per-parse regex — unforgeable, but
+   the pattern grew with the input and JavaScriptCore caps a pattern at 2²⁰: a
+   1.05 MB page threw `regular expression too large` out of all five renderers
+   (measured to the character — 1 048 558 tildes parse, 1 048 559 throw).
+
+Three of those defend a forgeable namespace by rewriting the input and one by
+growing the pattern. Disjoint ids need neither: nothing is rewritten, nothing is
+built from input, and the placeholder stays a constant handful of characters.
+The **total deref is the mechanism, not a backstop** — it is what a forged id
+lands on, reachable from a one-line page and pinned as such. `wiki/render.ts` and
+`wiki/ask-render.ts` park their own `\x00` sentinels across this call; they carry
+no `\x00CB`, so they cannot move an id, and a fallen-through placeholder carries
+no `WIKIPAGELINK`/`ASKCITE`, so it cannot collide with either restore.
 
 **Nothing but a backtick refuses an opener**, and that restraint is load-bearing.
 A refused opener does not leave "just that line as prose": the fence's closing
