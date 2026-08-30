@@ -7,6 +7,7 @@ import {
   markWikiProposalApplied,
   markWikiProposalStale,
   markWikiProposalError,
+  revertWikiProposalToDraft,
   listAllWikiProposals,
   countDraftWikiProposals,
   getWikiProposalById,
@@ -88,6 +89,28 @@ describe("wiki-proposals CAS transitions", () => {
     const stale = await markWikiProposalStale(row.id);
     expect(stale!.status).toBe("stale");
     expect(stale!.resolvedAt).not.toBeNull();
+  });
+
+  test("revert flips approved → draft, leaves resolved_at null, and the row is reviewable again", async () => {
+    const row = (await insertWikiProposal(draftParams()))!;
+    await approveWikiProposal(row.id);
+    const reverted = await revertWikiProposalToDraft(row.id);
+    expect(reverted!.status).toBe("draft");
+    expect(reverted!.resolvedAt).toBeNull();
+    const reApproved = await approveWikiProposal(row.id);
+    expect(reApproved!.status).toBe("approved");
+  });
+
+  test("revert only works from approved — draft/rejected/error rows answer null", async () => {
+    const draft = (await insertWikiProposal(draftParams()))!;
+    expect(await revertWikiProposalToDraft(draft.id)).toBeNull();
+    const rejectedRow = (await insertWikiProposal(draftParams()))!;
+    await rejectWikiProposal(rejectedRow.id);
+    expect(await revertWikiProposalToDraft(rejectedRow.id)).toBeNull();
+    const erroredRow = (await insertWikiProposal(draftParams()))!;
+    await approveWikiProposal(erroredRow.id);
+    await markWikiProposalError(erroredRow.id);
+    expect(await revertWikiProposalToDraft(erroredRow.id)).toBeNull();
   });
 
   test("countDraftWikiProposals counts only drafts for the bot", async () => {

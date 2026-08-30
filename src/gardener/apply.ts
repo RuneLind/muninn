@@ -287,8 +287,11 @@ async function applyInner(
 ): Promise<ApplyOutcome> {
   const domain: "ai" | "life" = proposal.targetPath.startsWith("life/") ? "life" : "ai";
 
-  // The fresh index backs both the update-target check (1a) and the apply-time
-  // alias re-strip (1c) — create mode needs it too now.
+  // This index backs the update-target check (1a), the alias re-strip (1c) and
+  // the create-mode collision re-check (2c). It is the TTL cache, NOT a forced
+  // rebuild — in-queue freshness comes from the previous queue holder's step-5
+  // `refreshIndex()`, so it is current w.r.t. every apply-path write; an
+  // off-path write inside the TTL window is the documented residual.
   const index = await deps.getWikiIndex();
 
   // 1a. Update mode: the target must be a REAL indexed wiki page — look it up in
@@ -320,7 +323,7 @@ async function applyInner(
     return { outcome: "error", reason: `path confinement failed for "${proposal.targetPath}"` };
   }
 
-  // 1c. Alias-hijack re-strip against the FRESH index (defense in depth — the
+  // 1c. Alias-hijack re-strip against the in-queue index (defense in depth — the
   //     runner stripped at persist time, but a canonical page created while the
   //     proposal awaited review must still win its aliases). The target path
   //     itself is always "self": on a create re-run after a crash-after-write,
@@ -337,7 +340,7 @@ async function applyInner(
     });
   }
 
-  // 1d. Body-link containment re-run against the FRESH index (TOCTOU symmetry with
+  // 1d. Body-link containment re-run against the in-queue index (TOCTOU symmetry with
   //     the alias re-strip): a page linked in the body that was deleted between
   //     draft and approve must not ship as a dangling wikilink. Null index ⇒ skip
   //     (can't tell resolvable from phantom; don't de-link a whole page on an index
@@ -415,6 +418,11 @@ async function applyInner(
   //     a refresh here: every write path below awaits `deps.refreshIndex()` (step 5,
   //     and step 2a's re-run branch) before releasing the queue, so the second of
   //     two concurrent approves reads a cache the first one refreshed after writing.
+  //     NB `caches.set` is last-writer-wins with no scannedAt monotonicity, so a
+  //     `refresh: true` build that STARTED before that refresh (the route's own
+  //     pre-CAS guard runs one per approve, outside the queue) and finishes after
+  //     it can clobber the fresh entry with a pre-write snapshot — a latent,
+  //     unreproduced inversion needing I/O contention; accepted as residual.
   //     A null index (outage) degrades to no check, like every other index-dependent
   //     step here. Residual, accepted: if a twin lands OFF-PATH (a pull, a hand edit)
   //     inside the TTL window and this apply is an `approved` re-run — the one case

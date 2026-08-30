@@ -2154,8 +2154,10 @@ export function registerWikiGardenerRoutes(
     // `sources/<Stem>.mdx` was drafted first, `entities/<Stem>.md` applied second,
     // and the store's same-stem precedence (`.md` > `.mdx`) then DROPPED the source
     // page from the index entirely. There is no model at apply time to rename with,
-    // so the answer is a refusal the reviewer acts on, not a new terminal state:
-    // deliberately NO new `ApplyOutcome` variant.
+    // so the answer is a refusal the reviewer acts on, not a new terminal state.
+    // (The in-queue re-check DOES use a dedicated `collision` outcome — see
+    // `apply.ts` — the route reverts the row to `draft` on it, so the original
+    // "no new variant" rationale, a stranded `approved` row, no longer applies.)
     //
     // Three scoping clauses, each load-bearing:
     //

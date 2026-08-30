@@ -364,7 +364,7 @@ export function findStemTwin(
 /**
  * The refusal sentence for a stem collision — one spelling, because the approve
  * route answers it as a 409 body and `applyWikiProposal`'s in-queue re-check
- * answers it as an `error` reason, and a reviewer hitting the two paths seconds
+ * answers it as a `collision` outcome's reason, and a reviewer hitting the two paths seconds
  * apart must not read two different explanations of one condition.
  */
 export function stemCollisionMessage(blocking: CollidingPage, stem: string): string {
