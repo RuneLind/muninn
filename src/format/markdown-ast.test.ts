@@ -873,6 +873,43 @@ describe("the placeholder namespace is unforgeable", () => {
     expect(allStrings(blocks).join("\n")).toContain(`${NUL}CB0${NUL}`);
   });
 
+  test("CONSECUTIVE taken ids are all skipped, not just the first", () => {
+    // The allocator's skip is a `while`, and a `while` -> `if` mutant survived
+    // every earlier test in this file: one skip step is enough whenever the
+    // taken ids are non-adjacent, which every other case here happens to make
+    // them. With 0 and 1 both forged, `if` hands the fence id 1 and the second
+    // forged line renders as a DUPLICATE of the real block — the forgery this
+    // whole mechanism exists to prevent, found by review, not by the suite.
+    const blocks = parseBlocks(`${NUL}CB0${NUL}\n\n${NUL}CB1${NUL}\n\n\`\`\`js\nSECRET\n\`\`\``);
+    expect(blocks.filter((b) => b.type === "code_block")).toEqual([
+      { type: "code_block", lang: "js", code: "SECRET" },
+    ]);
+  });
+
+  test("ids are read in DECIMAL, so 8 and 9 are not silently free", () => {
+    // `parseInt(digits, 10)` — the radix is explicit, and a radix-8 mutant
+    // survived: "8" and "9" become NaN, so those ids never enter `taken` and
+    // the allocator hands them out. Twelve fences reach id 8, so a page that
+    // spells 8 and 9 would then have two of its blocks forged.
+    const fences = Array.from({ length: 12 }, (_, i) => `\`\`\`js\nF${i}\n\`\`\``).join("\n\n");
+    const blocks = parseBlocks(`${NUL}CB8${NUL}\n\n${NUL}CB9${NUL}\n\n${fences}`);
+    expect(blocks.filter((b) => b.type === "code_block")).toHaveLength(12);
+    expect(allStrings(blocks).join("\n")).toContain(`${NUL}CB8${NUL}`);
+  });
+
+  test("an OVERLAPPING placeholder pair cannot forge a block", () => {
+    // `matchAll` consumes the trailing NUL of a match, so it cannot see an
+    // occurrence that starts on it: `\x00CB1\x00CB2\x00` yields id 1 only,
+    // while `\x00CB2\x00` really does occur at offset 4 — and 2 IS then
+    // allocated. Harmless for a reason the code has to keep: an overlap-hidden
+    // occurrence always has the previous match's digits immediately before it,
+    // so it is never leftmost on its line, and the restore is anchored.
+    const fences = Array.from({ length: 4 }, (_, i) => `\`\`\`js\nF${i}\n\`\`\``).join("\n\n");
+    const blocks = parseBlocks(`${NUL}CB1${NUL}CB2${NUL}\n\n${fences}`);
+    expect(blocks.filter((b) => b.type === "code_block")).toHaveLength(4);
+    expect(allStrings(blocks).join("\n")).toContain(`${NUL}CB1${NUL}CB2${NUL}`);
+  });
+
   test("collision is decided by VALUE, so a leading-zero spelling cannot steal a slot", () => {
     // The restore reads the digits with parseInt, so `\x00CB007\x00` and
     // `\x00CB7\x00` are the same slot. Comparing the spellings instead would let
@@ -916,20 +953,20 @@ describe("the placeholder namespace is unforgeable", () => {
     });
   });
 
-  test.each([
-    ["nested spelling, ~320 KB", () => nest(40_000)],
-    ["one long run, ~400 KB", () => `intro\n\n${NUL}CB${"~".repeat(400_000)}\n\ntail`],
-  ])("%s parses in well under a second", (_name, build) => {
-    // Two shapes, because two designs were slow on different ones. The looped
-    // sanitiser was O(n^2) on NESTED input: 298 ms at 80 KB, 1.2 s at 160 KB,
-    // 4.8 s at 320 KB, blocking the process, per streaming delta. The per-parse
-    // marker was fine there but paid 23.7 ms on ONE LONG RUN, building a 400 KB
-    // marker string and compiling a 400 KB pattern each parse. Neither shape
-    // costs more than a single scan now (measured 0.1 ms each). 2000 ms
-    // separates that from both predecessors without being tight on slow CI.
-    const md = build();
+  test("nested spelling, ~320 KB, parses in well under a second", () => {
+    // The looped sanitiser was O(n^2) on NESTED input: 298 ms at 80 KB, 1.2 s at
+    // 160 KB, 4.8 s at 320 KB, blocking the process, per streaming delta. One
+    // scan now. 2000 ms separates the two by ~30x without being tight on CI.
+    //
+    // There is deliberately NO sibling case for the one-long-run shape, which an
+    // earlier revision of this file had. That shape cost the per-parse-marker
+    // design ~34 ms — 59x inside this bound — so the assertion was green on the
+    // design it named and could not be pushed over the bound by any mutation of
+    // this one. A test that cannot fail is worse than no test: it reads as
+    // coverage. The long-run REGRESSION is pinned instead by "a huge
+    // placeholder-shaped run does not throw", which is a behaviour red.
     const t0 = performance.now();
-    parseBlocks(md);
+    parseBlocks(nest(40_000));
     expect(performance.now() - t0).toBeLessThan(2000);
   });
 });

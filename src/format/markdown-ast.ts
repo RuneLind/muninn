@@ -522,13 +522,26 @@ const FENCE_LANG_RE = /^[A-Za-z0-9_+#.-]*/;
  * A placeholder, ANYWHERE in the text — used to read the ids the input already
  * spells, so this parse can avoid them.
  *
- * ⚠️ The scan being unanchored and the restore being anchored are individually
- * redundant and JOINTLY load-bearing, so neither is pinned on its own and both
- * are deliberate. Mutating either alone changes no output — a mid-line forged
- * placeholder is inert because its id is in `taken` (scan), and because a
- * mid-line match is not restored (restore) — so each mutant survives the suite.
- * Mutating BOTH makes a mid-line `\x00CB0\x00` restore an allocated block, which
- * is forgery. Two independent reasons for one property, kept as two.
+ * ⚠️ **The scan does NOT see every occurrence, and the anchored restore is what
+ * makes that safe.** `matchAll` consumes each match's trailing `\x00`, so an
+ * occurrence starting on it is skipped: `\x00CB1\x00CB2\x00` yields id 1 alone,
+ * while `\x00CB2\x00` really does occur at offset 4 — and id 2 is then handed to
+ * a fence. (An earlier revision of this comment claimed the scan and the anchor
+ * were "individually redundant", i.e. that every occurrence lands in `taken`.
+ * That is false, and it is the third stated reason in this file's history to be
+ * wrong; measured, not argued.)
+ *
+ * The property that actually holds is narrower: **the LEFTMOST
+ * placeholder-shaped occurrence on a line is always in `taken`** — nothing
+ * starts earlier, so nothing can have consumed its opening `\x00` — and the
+ * restore uses `String.match` with no `/g`, which returns the leftmost. An
+ * overlap-hidden occurrence therefore always has the previous match's digits
+ * immediately before it, is never leftmost on its line, and is never restored.
+ *
+ * So the two are JOINTLY load-bearing, not redundant: unanchor the restore and
+ * the overlap case becomes live forgery. Pinned by "an OVERLAPPING placeholder
+ * pair cannot forge a block", and the pair-mutant is killed by the suite even
+ * though each half survives alone.
  */
 const CODE_ID_SCAN_RE = /\x00CB(\d+)\x00/g;
 
@@ -573,8 +586,10 @@ function takenCodeIds(text: string): Set<number> {
  *  4. a per-parse MARKER (one more `~` than the longest run the input carried)
  *     compiled into a per-parse regex — unforgeable, but the pattern grew with
  *     the input and JavaScriptCore caps a pattern at 2^20: a 1.05 MB page threw
- *     `regular expression too large` out of all five renderers. Measured to the
- *     character: 1 048 558 tildes parse, 1 048 559 throw.
+ *     `regular expression too large` out of ALL SIX entry points -- web, wiki,
+ *     ask, Telegram, Slack and EMAIL (`format/email-format.ts`, the one an
+ *     earlier count of "five renderers" left out, and it threw like the rest).
+ *     Measured to the character: 1 048 558 tildes parse, 1 048 559 throw.
  *
  * Every one of those defends a FORGEABLE namespace, three by rewriting the input
  * and one by growing the pattern. This design makes the namespace disjoint
@@ -594,7 +609,17 @@ interface FenceStore {
   next: number;
 }
 
-/** Reserve the next id no placeholder in the input spells. */
+/**
+ * Reserve the next id no placeholder in the input spells.
+ *
+ * `next` is monotone across the whole parse, so the skip loop costs O(taken) in
+ * total, not per fence. Measured residual, stated because the round-4 commit
+ * claimed the design was "flat in input size" and that is only true of the
+ * shapes it measured: on NUL-DENSE input this is the slowest of the three
+ * designs — 200 000 placeholder-shaped ids plus a fence cost 0.41 ms before this
+ * PR and 19.2 ms now. Linear in input, no cliff, and 130 NULs across the two
+ * wikis' 1571 pages, so it is a residual and not a regression worth a mechanism.
+ */
 function allocateCodeId(store: FenceStore): number {
   while (store.taken.has(store.next)) store.next++;
   return store.next++;
@@ -625,7 +650,8 @@ export function parseBlocks(text: string): Block[] {
 
 /**
  * Replace every fenced code block in `text` with a `\x00CB{idx}\x00` placeholder
- * ON A LINE OF ITS OWN, pushing the block onto `codeBlocks`.
+ * ON A LINE OF ITS OWN, filing the block in `store.blocks` under the id the
+ * placeholder carries.
  *
  * This is a LINE WALKER, and that is the whole fix. The regex it replaced --
  * ```` /```(\w*)\n([\s\S]*?)```/g ```` -- matched a fence opener ANYWHERE,
@@ -765,7 +791,7 @@ function dedentFenceLine(line: string, indent: number): string {
   return line.slice(n);
 }
 
-/** Parse already-fence-extracted text into blocks. `codeBlocks` is the shared
+/** Parse already-fence-extracted text into blocks. `store` is the shared
  *  placeholder store; `depth` is the current component-nesting level. */
 function parseBlocksInner(
   protectedText: string,

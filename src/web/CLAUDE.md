@@ -5,9 +5,9 @@
 ## What counts as a fenced code block
 
 `parseBlocks` (`src/format/markdown-ast.ts`) extracts every fence into a
-`FenceStore` and leaves a `\x00CB<marker><idx>\x00` placeholder, which the block
-walker turns back into a `code_block` only when the placeholder is the WHOLE line
-(`store.placeholder` is anchored). The extractor is therefore a **line walker**,
+`FenceStore` and leaves a `\x00CB<id>\x00` placeholder, which the block walker
+turns back into a `code_block` only when the placeholder is the WHOLE line
+(`CODE_PLACEHOLDER_RE` is anchored). The extractor is therefore a **line walker**,
 not a regex sweep — anything left on a placeholder's line breaks the restore and
 serves a raw U+0000 to the browser with the code block gone. Measured across the
 two wikis on 2026-08-30 before the walker landed — every `.md`/`.mdx` under
@@ -74,8 +74,10 @@ shipped their own defect**, which is why the current one looks the way it does:
    process, per streaming delta);
 4. a per-parse `~` **marker** compiled into a per-parse regex — unforgeable, but
    the pattern grew with the input and JavaScriptCore caps a pattern at 2²⁰: a
-   1.05 MB page threw `regular expression too large` out of all five renderers
-   (measured to the character — 1 048 558 tildes parse, 1 048 559 throw).
+   1.05 MB page threw `regular expression too large` out of **all six** entry
+   points — web, wiki, ask, Telegram, Slack and **email**, the one an earlier
+   count of "five renderers" left out, and it threw like the rest (measured to
+   the character — 1 048 558 tildes parse, 1 048 559 throw).
 
 Three of those defend a forgeable namespace by rewriting the input and one by
 growing the pattern. Disjoint ids need neither: nothing is rewritten, nothing is
