@@ -157,6 +157,8 @@ const article = {
 let shownTurn: FakeTurn | null = null;
 let currentArticle: typeof article | null = null;
 const fetched: string[] = [];
+/** Per-test additions to the chat-target response (ok-path `bots`, `isJiraBot`). */
+let chatTargetExtra: Record<string, unknown> = {};
 
 const CHAT_TARGET = {
   botName: "jarvis",
@@ -178,7 +180,11 @@ beforeAll(() => {
   };
   g.fetch = (url: string) => {
     fetched.push(url);
-    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(CHAT_TARGET) });
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ ...CHAT_TARGET, ...chatTargetExtra }),
+    });
   };
   // The ONE call that wires the module's document listeners — everything below
   // reaches the dialog through them, exactly as the reader page does.
@@ -199,6 +205,7 @@ beforeEach(() => {
   fire("keydown", { key: "Escape" });
   registry.clear();
   fetched.length = 0;
+  chatTargetExtra = {};
   shownTurn = null;
   currentArticle = null;
   doc.activeElement = null;
@@ -385,5 +392,80 @@ describe("the dialog's keyboard and navigation rules", () => {
     fire("click", { target: new ShimEl("wikiNewChatBtn") });
     closeChatOptionsIfNavigatingAway("concepts/backlog-drain.md");
     expect(registry.has("wikiChatOpt")).toBe(true);
+  });
+});
+
+// ── Resolved-wiki bot override + Jira chip ────────────────────────────────────
+
+/** A click target standing in for the ⚙ Options toggle INSIDE the panel: the
+ *  shim's `closest` is self-match only, so it answers both the toggle's id and
+ *  the click-away's `#wikiChatOpt` in-panel probe. */
+function advToggleTarget(): ShimEl {
+  const el = new ShimEl("wikiChatOptAdv");
+  (el as unknown as { closest: (sel: string) => ShimEl | null }).closest = (sel: string) =>
+    sel === "#wikiChatOptAdv" || sel === "#wikiChatOpt" ? el : null;
+  return el;
+}
+
+describe("the ok-path bot list feeds an override, never the mandatory picker", () => {
+  const THREE_BOTS = [{ name: "jarvis" }, { name: "vertex-test" }, { name: "melosys" }];
+
+  test("a resolved wiki with >1 bot reports the bot in the summary and offers the picker in ⚙", async () => {
+    chatTargetExtra = { bots: THREE_BOTS };
+    currentArticle = article;
+    fire("click", { target: new ShimEl("wikiDiscussBtn") });
+    await settle();
+
+    const html = panel().innerHTML;
+    // The collapsed line names the bot FIRST — a re-pointed escalation must be
+    // visible without expanding anything.
+    expect(html).toContain("bot <b>jarvis</b>");
+    // The mandatory needs-a-bot picker (with its empty "Pick a bot…" row) must
+    // NOT appear: the wiki resolved.
+    expect(html).not.toContain("Pick a bot…");
+
+    // The override lives behind ⚙ Options. The shim's `closest` matches self
+    // only, so the ⚙ target also answers the click-away's `#wikiChatOpt` probe —
+    // on the live page the button IS inside the panel.
+    fire("click", { target: advToggleTarget() });
+    const open = panel().innerHTML;
+    expect(open).toContain('id="wikiChatOptBot"');
+    expect(open).toContain("vertex-test");
+  });
+
+  test("picking another bot refetches the target bot-keyed", async () => {
+    chatTargetExtra = { bots: THREE_BOTS };
+    currentArticle = article;
+    fire("click", { target: new ShimEl("wikiDiscussBtn") });
+    await settle();
+    fetched.length = 0;
+
+    const sel = new ShimEl("wikiChatOptBot");
+    sel.value = "vertex-test";
+    fire("change", { target: sel });
+    await settle();
+    expect(fetched[0]).toBe("/api/wiki/chat-target?wiki=probe&bot=vertex-test");
+  });
+
+  test("a single-bot install renders neither the bot line nor the picker", async () => {
+    // The default CHAT_TARGET ships no `bots` — the pre-override wire shape.
+    currentArticle = article;
+    fire("click", { target: new ShimEl("wikiDiscussBtn") });
+    await settle();
+    const html = panel().innerHTML;
+    expect(html).not.toContain("bot <b>");
+    fire("click", { target: advToggleTarget() });
+    expect(panel().innerHTML).not.toContain('id="wikiChatOptBot"');
+  });
+
+  test("the Draft Jira task chip appears exactly when the target says isJiraBot", async () => {
+    chatTargetExtra = { isJiraBot: true };
+    currentArticle = article;
+    fire("click", { target: new ShimEl("wikiDiscussBtn") });
+    // Before the target lands the chip is absent (the flag is server-derived)…
+    expect(panel().innerHTML).not.toContain("Draft Jira task");
+    await settle();
+    // …and the re-render on load adds it.
+    expect(panel().innerHTML).toContain("Draft Jira task");
   });
 });

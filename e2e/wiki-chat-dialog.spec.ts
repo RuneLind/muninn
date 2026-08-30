@@ -95,6 +95,22 @@ const PAGES: Record<string, string> = {
 let server: ChildProcess | undefined;
 let root = "";
 
+/** Every discovered bot folder, sorted — the bot-override test needs a second
+ *  name to switch to, and self-skips (saying so) when the install has only one
+ *  (CI tracks only `bots/jarvis/`). */
+async function allBotNames(): Promise<string[]> {
+  const entries = await readdir(path.join(REPO_ROOT, "bots"), { withFileTypes: true });
+  const names: string[] = [];
+  for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    if (!e.isDirectory()) continue;
+    try {
+      await stat(path.join(REPO_ROOT, "bots", e.name, "CLAUDE.md"));
+      names.push(e.name);
+    } catch { /* not a bot folder */ }
+  }
+  return names;
+}
+
 /** First discovered bot folder — the same rule `discoverAllBots` applies, so the
  *  pin can resolve. A bot folder is a directory carrying a CLAUDE.md. */
 async function firstBotName(): Promise<string> {
@@ -204,6 +220,25 @@ test.describe("Wiki reader: chat dialog", () => {
     await page.locator("#wikiDiscussBtn").click();
     await expect(page.locator("#wikiChatOpt")).toBeVisible();
     await expect(page.locator(".wiki-chatopt-ctx")).toContainText("Wiki gardener");
+  });
+
+  test("a resolved wiki offers a bot OVERRIDE behind ⚙ Options", async ({ page }) => {
+    const bots = await allBotNames();
+    test.skip(bots.length < 2, "needs a second bot folder to switch to — CI tracks only jarvis");
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&page=${encodeURIComponent("Wiki gardener")}`);
+    await page.locator("#wikiDiscussBtn").click();
+    await expect(page.locator("#wikiChatOpt")).toBeVisible();
+    await settled(page);
+    // The collapsed summary names the resolved (pinned) bot — the first by name.
+    await expect(page.locator(".wiki-chatopt-sum")).toContainText("bot " + bots[0]!);
+    // No mandatory picker: the wiki resolved.
+    await expect(page.locator("#wikiChatOpt")).not.toContainText("Pick a bot…");
+    await page.locator("#wikiChatOptAdv").click();
+    const sel = page.locator("#wikiChatOptBot");
+    await expect(sel).toBeVisible();
+    await sel.selectOption(bots[1]!);
+    // The pick refetches the target bot-keyed and the summary follows it.
+    await expect(page.locator(".wiki-chatopt-sum")).toContainText("bot " + bots[1]!);
   });
 
   test("the dialog paints an OPAQUE background over the page", async ({ page }) => {

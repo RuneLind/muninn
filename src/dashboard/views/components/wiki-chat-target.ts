@@ -60,8 +60,12 @@ export interface ChatTarget {
   botName: string | null;
   reason?: "unknown_bot" | "bot_gone" | "needs_bot";
   error?: string;
-  /** Only on the failure branch — the bot picker's options. */
+  /** Both branches: the failure branch's mandatory picker AND the ok branch's
+   *  advanced-section bot override render from this list. */
   bots?: { name: string }[];
+  /** ok branch only — the resolved bot IS the Jira composer's pinned bot
+   *  (`JIRA_BOT`), which gates the "Draft Jira task" starter chip. */
+  isJiraBot?: boolean;
   users?: { id: string; name: string }[];
   defaultUserId?: string | null;
   /** Which user `preferredConnectorId` belongs to (a preference is per user+bot,
@@ -412,6 +416,11 @@ export function suggestedQuestions(input: {
   wiki?: string;
   /** The question that opened this reader's Ask session, if there was one. */
   lastQuestion?: string;
+  /** The resolved chat bot is the Jira composer's pinned bot (`ChatTarget.
+   *  isJiraBot`) — offers the "Draft Jira task" chip in article mode, first,
+   *  since starting a Jira task from a wiki page is that bot's headline flow
+   *  (the thread's reply then carries the 🧾 «Lag Jira-sak» control). */
+  jiraBot?: boolean;
 }): ChatOptSuggestion[] {
   if (input.pinned || input.mode === "escalate") return [];
   const out: ChatOptSuggestion[] = [];
@@ -420,6 +429,15 @@ export function suggestedQuestions(input: {
     if (!article) return [];
     const t = titleForPrompt(article.title || "");
     if (!t) return [];
+    if (input.jiraBot) {
+      // Bokmål on purpose: the pinned Jira bot drafts in bokmål, and the chip
+      // fills the box editable like every other one — never a one-click send.
+      out.push({
+        label: "Draft Jira task",
+        question: `Lag et utkast til en Jira-sak basert på "${t}": beskriv symptom/problem, ` +
+          "verdi og akseptansekriterier — hold deg til det siden dokumenterer.",
+      });
+    }
     out.push(
       { label: "Summarise it", question: `Summarise "${t}" and tell me what it is actually claiming.` },
       {
@@ -599,8 +617,12 @@ export function chatOptSummaryTextHtml(input: {
   userName: string;
   modelLabel: string;
   threadName: string;
+  /** Named only when the dialog offers a bot override (>1 discovered bot) — a
+   *  single-bot install's line would just repeat the obvious. */
+  botName?: string;
 }): string {
   const parts: string[] = [];
+  if (input.botName) parts.push("bot <b>" + esc(input.botName) + "</b>");
   if (input.userName) parts.push("as <b>" + esc(input.userName) + "</b>");
   if (input.modelLabel) parts.push("<b>" + esc(input.modelLabel) + "</b>");
   if (input.threadName) parts.push("thread <b>" + esc(input.threadName) + "</b>");
@@ -619,6 +641,7 @@ export function chatOptSummaryHtml(input: {
   userName: string;
   modelLabel: string;
   threadName: string;
+  botName?: string;
   advOpen: boolean;
 }): string {
   return (

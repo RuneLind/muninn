@@ -3206,11 +3206,22 @@ describe("GET /api/wiki/chat-target", () => {
     expect(data.botDefault).not.toBeNull();
   });
 
-  test("the ok path ships no bot list — the picker exists only when unresolved", async () => {
+  test("the ok path ships the bot list too — the advanced bot override renders from it", async () => {
     const data = (await (
       await app.request("/api/wiki/chat-target?wiki=jarviswiki")
     ).json()) as TargetBody;
-    expect(data.bots).toBeUndefined();
+    expect(data.bots!.map((b) => b.name)).toEqual(["jarviswiki", "melosys"]);
+  });
+
+  test("isJiraBot flags exactly the Jira composer's pinned bot (JIRA_BOT default melosys)", async () => {
+    const owner = (await (
+      await app.request("/api/wiki/chat-target?wiki=jarviswiki")
+    ).json()) as TargetBody & { isJiraBot?: boolean };
+    expect(owner.isJiraBot).toBe(false);
+    const jira = (await (
+      await app.request("/api/wiki/chat-target?wiki=jarviswiki&bot=melosys")
+    ).json()) as TargetBody & { isJiraBot?: boolean };
+    expect(jira.isJiraBot).toBe(true);
   });
 
   test("the default user's connector preference is folded in, stamped with its user", async () => {

@@ -442,6 +442,20 @@ describe("suggestedQuestions", () => {
     expect(chip!.question).toContain(long);
   });
 
+  test("the Jira chip is offered ONLY when the resolved bot is the Jira bot, and first", () => {
+    const plain = suggestedQuestions({ mode: "article", article: page });
+    expect(plain.some((s) => s.label === "Draft Jira task")).toBe(false);
+
+    const jira = suggestedQuestions({ mode: "article", article: page, jiraBot: true });
+    expect(jira[0]!.label).toBe("Draft Jira task");
+    // Bokmål, page-anchored, and the box stays editable like every chip.
+    expect(jira[0]!.question).toContain('Jira-sak basert på "Wiki gardener"');
+
+    // Direct mode has no page to anchor the task on — no chip there.
+    const direct = suggestedQuestions({ mode: "direct", wiki: "mimir", jiraBot: true });
+    expect(direct.some((s) => s.label === "Draft Jira task")).toBe(false);
+  });
+
   test("escalate mode and a pinned question get NO suggestions", () => {
     // The reader already asked something; a row of alternatives beside it is an
     // invitation to throw their own question away.
@@ -632,6 +646,18 @@ describe("chatOptSummaryHtml", () => {
     expect(html).not.toContain("<img src=x>");
     expect(html).not.toContain("<b>m</b>");
     expect(html).not.toContain("<script>");
+  });
+
+  test("the bot joins the line FIRST when a choice exists, and is escaped too", () => {
+    const html = chatOptSummaryTextHtml({
+      botName: "vertex-test", userName: "rune", modelLabel: "m", threadName: "t",
+    });
+    expect(html.startsWith("bot <b>vertex-test</b>")).toBe(true);
+    // Absent (a single-bot install passes ""), the line reads exactly as before.
+    expect(chatOptSummaryTextHtml({ botName: "", userName: "", modelLabel: "", threadName: "t" }))
+      .toBe("thread <b>t</b>");
+    expect(chatOptSummaryTextHtml({ botName: "<x>", userName: "", modelLabel: "", threadName: "" }))
+      .not.toContain("<x>");
   });
 });
 
