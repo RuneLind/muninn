@@ -457,6 +457,21 @@ describe("the ok-path bot list feeds an override, never the mandatory picker", (
     expect(fetched[0]).toBe("/api/wiki/chat-target?wiki=probe&bot=vertex-test");
   });
 
+  test("the MANDATORY needs-a-bot picker still offers the empty row", async () => {
+    // Round-2 pin: every other assertion on "Pick a bot…" is NEGATIVE, so
+    // deleting the ternary that renders it stayed green (verify pass, mutation
+    // D). Without the empty row an unresolved wiki opens with the first bot
+    // DISPLAYED as picked while `state.botName` is "" — Send blocked, and no
+    // `change` event can ever fire for that bot.
+    chatTargetExtra = { botName: null, reason: "needs_bot", bots: THREE_BOTS };
+    currentArticle = article;
+    fire("click", { target: new ShimEl("wikiDiscussBtn") });
+    await settle();
+    const html = panel().innerHTML;
+    expect(html).toContain('id="wikiChatOptBot"');
+    expect(html).toContain('<option value="">Pick a bot…</option>');
+  });
+
   test("a FAILED override refetch keeps a picker — with no dead-end empty row", async () => {
     // Finding 1+2 of the PR review: the recovery picker rendered the mandatory
     // path's empty "Pick a bot…" option, and selecting it cleared the error and
