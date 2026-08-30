@@ -7,7 +7,7 @@ import {
   shouldEnhanceFence,
 } from "./code-block-chrome.ts";
 import { COMPONENT_NAMES } from "../../../format/markdown-ast.ts";
-import { COMPONENT_CLASS_ALLOW } from "../../../chat/views/components/web-format-browser.ts";
+import { COMPONENT_CLASS_ALLOW } from "../../../chat/views/components/component-class-allow.ts";
 import { formatWebHtml } from "../../../web/web-format.ts";
 
 /**
@@ -320,22 +320,51 @@ describe("COMPONENT_FENCE_CHROME", () => {
  * Derived over the Record, deliberately, rather than re-listing the four
  * components: classifying a fifth (`Diff: ".diff"` is the obvious next one —
  * `web-format.ts` already emits `class="diff"`) must fail HERE until its class is
- * allowlisted, not silently in a browser nobody is looking at. That is the same
- * default-deny reason `COMPONENT_FENCE_CHROME` is a `Record` and not a list.
+ * allowlisted, not silently in a browser nobody is looking at. Same default-deny
+ * reason `COMPONENT_FENCE_CHROME` is a `Record` and not a list.
+ *
+ * ⚠️ And derived from the RENDERED markup, not from the selector STRING, because
+ * `classIsComponent` strips the whole `class` attribute unless EVERY
+ * space-separated token is allowlisted. A selector naming one token of a
+ * two-token class — `Diff: ".diff-line"` against an emitted
+ * `class="diff-line diff-added"` — passes a string check and is still stripped in
+ * the browser. Today's four entries are single-token, so that gap is latent; a
+ * check that only holds while the data stays simple is the shape this file's own
+ * history warns about.
  */
-test("componentClassAllowCoversOwnChrome: every own-chrome selector survives the chat sanitizer", () => {
-  const missing = Object.entries(COMPONENT_FENCE_CHROME)
-    .filter(([, sel]) => sel !== null)
-    .flatMap(([name, sel]) =>
-      // A selector is `.class` today; split on `,` and strip the dot so a future
-      // multi-class entry is checked rather than silently skipped.
-      sel!
-        .split(",")
-        .map((s) => s.trim().replace(/^\./, ""))
-        .filter((cls) => !COMPONENT_CLASS_ALLOW.has(cls))
-        .map((cls) => `${name} -> .${cls}`),
-    );
-  // Named in the failure: "AnnotatedCode -> .annotated-code" is the whole
-  // diagnosis, and a bare length assertion would withhold it.
-  expect(missing).toEqual([]);
+test("componentClassAllowCoversOwnChrome: every own-chrome class SURVIVES the chat sanitizer", () => {
+  // One fixture per chrome-owning component, keyed by the Record's own names so
+  // a new entry with no fixture fails the coverage assertion below rather than
+  // being skipped.
+  const FIXTURES: Partial<Record<string, string>> = {
+    CodeTabs: '<CodeTabs>\n<Tab label="a">\n\n```ts\nconst x = 1;\n```\n\n</Tab>\n</CodeTabs>',
+    Tab: '<Tab label="a">\n\n```ts\nconst x = 1;\n```\n\n</Tab>',
+    AnnotatedCode:
+      '<AnnotatedCode file="src/index.ts">\n\n```ts\nconst x = 1;\n```\n\nA note.\n\n</AnnotatedCode>',
+    FileTree: "<FileTree>\n\n```\nsrc/\n  index.ts\n```\n\n</FileTree>",
+  };
+
+  const owners = Object.entries(COMPONENT_FENCE_CHROME).filter(([, sel]) => sel !== null);
+
+  // Every chrome-owning component has a fixture — the coverage half, so the
+  // check cannot go quiet by omission.
+  expect(owners.map(([name]) => name).filter((name) => !FIXTURES[name])).toEqual([]);
+
+  const stripped: string[] = [];
+  for (const [name] of owners) {
+    const html = formatWebHtml(FIXTURES[name]!);
+    // `classIsComponent`'s rule, applied to what the renderer really emits: a
+    // class attribute survives only when EVERY token is allowlisted.
+    for (const m of html.matchAll(/ class="([^"]*)"/g)) {
+      const tokens = m[1]!.trim().split(/\s+/).filter(Boolean);
+      // `code` keeps its class unconditionally (the `language-*` hook), so a
+      // fence's own attribute is not this rule's business.
+      if (tokens.some((t) => t.startsWith("language-"))) continue;
+      const bad = tokens.filter((t) => !COMPONENT_CLASS_ALLOW.has(t));
+      if (bad.length > 0) stripped.push(`${name}: class="${m[1]}" (unlisted: ${bad.join(", ")})`);
+    }
+  }
+  // Named in the failure: "AnnotatedCode: class=\"annotated-code-file\"" is the
+  // whole diagnosis, and a bare length assertion would withhold it.
+  expect(stripped).toEqual([]);
 });

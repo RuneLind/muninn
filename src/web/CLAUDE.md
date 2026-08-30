@@ -30,7 +30,7 @@ reason both exist.
 ⚠️ **The skip in rule 3 below depends on the same allowlist, in the opposite
 direction.** `closest(OWN_CHROME)` reads a CLASS, so every selector in
 `COMPONENT_FENCE_CHROME` must also be in `COMPONENT_CLASS_ALLOW`
-(`chat/views/components/web-format-browser.ts`) or the skip is inert in chat and
+(`chat/views/components/component-class-allow.ts`) or the skip is inert in chat and
 the block gets the doubled bar there. `annotated-code` and `filetree` were
 missing when #494 shipped — before it those classes were styling-only, and the
 allowlist said so in as many words — so a `<AnnotatedCode>` answer in web chat

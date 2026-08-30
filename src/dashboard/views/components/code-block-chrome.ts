@@ -15,7 +15,7 @@
  * ⚠️ The `OWN_CHROME` skip below depends on classes SURVIVING the chat
  * sanitizer, which is a coupling in the other direction: all four selectors in
  * `COMPONENT_FENCE_CHROME` must be in `COMPONENT_CLASS_ALLOW`
- * (`chat/views/components/web-format-browser.ts`) or `closest()` cannot match in
+ * (`chat/views/components/component-class-allow.ts`) or `closest()` cannot match in
  * chat and the block gets the doubled bar anyway. Two of them were missing when
  * #494 shipped, because before it those classes were styling-only.
  *

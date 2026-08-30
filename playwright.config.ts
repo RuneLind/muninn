@@ -10,8 +10,8 @@ export default defineConfig({
   testMatch: "**/*.spec.ts",
   timeout: 30_000,
   retries: 0,
-  // Spec FILES run in parallel, and THIRTEEN of them boot a muninn of their own
-  // — 16 muninn processes, since `plans-write` boots 3 and `auth-zones` 2
+  // Spec FILES run in parallel, and FIFTEEN of them boot a muninn of their own
+  // — 18 muninn processes, since `plans-write` boots 3 and `auth-zones` 2
   // (`summaries-share` and `entra-identity` each boot one muninn plus an
   // IN-PROCESS `node:http` stub — a huginn and a Texas — not a second process),
   // on top of this config's own shared server on 3011. Each is a Bun process that

@@ -64,6 +64,8 @@ let muninn: ChildProcess | undefined;
 let sql: ReturnType<typeof postgres> | null = null;
 let threadId = "";
 let draftId = "";
+/** Did `beforeAll` finish? The teardown's error handling forks on it — see there. */
+let seeded = false;
 
 async function waitUp(): Promise<void> {
   const deadline = Date.now() + 40_000;
@@ -133,6 +135,7 @@ test.beforeAll(async () => {
     stdio: "ignore",
   });
   await waitUp();
+  seeded = true;
 });
 
 test.afterAll(async () => {
@@ -145,11 +148,18 @@ test.afterAll(async () => {
   //
   // ⚠️ try/finally, not an `if (sql)` guard. `postgres()` does not connect
   // eagerly and is `beforeAll`'s FIRST statement, so `sql` is non-null in every
-  // realistic setup failure and the guard protects nothing: with the database
+  // realistic setup failure and such a guard protects nothing: with the database
   // down, `beforeAll` throws on its first DELETE, these four throw again, the
   // hook aborts on the first one and `end()` never runs — a teardown error
-  // stacked on the setup error, plus a leaked pool. The catch keeps the setup
-  // failure as the only thing reported; the finally always closes the pool.
+  // stacked on the setup error, plus a leaked pool. The finally always closes
+  // the pool.
+  //
+  // ⚠️ And the catch RE-THROWS unless setup itself failed. Swallowing outright
+  // was the easy version and the wrong one: this block's whole reason for
+  // existing is that a leaked draft row is cascaded away by nothing, so a DELETE
+  // failing for a real reason — a constraint, a permission, schema drift — must
+  // not leave those rows behind under a green run and one warn line in stdout.
+  // `seeded` is the narrow case the swallow is actually for.
   try {
     if (sql) {
       await sql`DELETE FROM jira_drafts WHERE thread_id IN (SELECT id FROM threads WHERE user_id = ${USER_ID})`;
@@ -158,7 +168,8 @@ test.afterAll(async () => {
       await sql`DELETE FROM users WHERE id = ${USER_ID}`;
     }
   } catch (err) {
-    console.warn("chat-card-fences teardown could not clean up:", err);
+    if (seeded) throw err;
+    console.warn("chat-card-fences: setup failed, so teardown could not clean up:", err);
   } finally {
     await sql?.end();
   }
@@ -238,14 +249,27 @@ test.describe("chat card fences get the same chrome as every other bubble", () =
     await expect(card).toBeVisible({ timeout: 20_000 });
 
     await page.locator(`[data-jc-copy="${draftId}"]`).click();
-    // The redraw actually happened: this NODE exists only in the rebuilt markup.
-    // Asserted on its presence rather than on the word «kopiert», because
-    // `copyJiraCard` calls `navigator.clipboard.writeText` with no fallback and
-    // writes a DIFFERENT sentence when it rejects — both go through
-    // `setJiraCardMessage`, so both trigger the redraw this case is about, and a
-    // text match would report a clipboard-permission failure as a redraw failure.
-    await expect(card.locator(".jira-card-msg")).toHaveCount(1);
-    expect((await card.locator(".jira-card-msg").textContent())?.trim()).not.toBe("");
+    // ⚠️ THE REDRAW PROBE. Three review rounds patched this one line, so the
+    // choice is written down rather than re-derived: what distinguishes the card
+    // BEFORE the in-place redraw from the card after it?
+    //
+    //   .jira-card                 present → present          proves nothing
+    //   .jira-card-msg present     present → present          proves nothing —
+    //     `jira-card-pure.ts:277` renders `<span class="jira-card-msg" hidden>`
+    //     on the FIRST paint, so `toHaveCount(1)` is satisfied before the click
+    //   .jira-card-msg textContent ""      → non-empty        correct, but a
+    //     one-shot `textContent()` read does NOT retry and races
+    //     `copyJiraCard`'s `await navigator.clipboard.writeText`
+    //   text contains «kopiert»    ""      → success only     branch-specific:
+    //     the write has no fallback and writes a DIFFERENT sentence on reject,
+    //     so this reports a clipboard-permission failure as a redraw failure
+    //   .jira-card-msg VISIBLE     false   → true             ← the only cell
+    //     that is both retrying and branch-independent: `hidden` is on the node
+    //     until a message exists, and BOTH copy branches set one
+    //   .fence count               1       → 1                unchanged
+    //
+    // So: visibility. Nothing below it can pass without a redraw having landed.
+    await expect(card.locator(".jira-card-msg")).toBeVisible();
 
     await expect(card.locator(".fence")).toHaveCount(1);
     await expect(card.locator(".fence .fence")).toHaveCount(0);
@@ -287,6 +311,9 @@ test.describe("chat card fences get the same chrome as every other bubble", () =
           '<AnnotatedCode file="src/index.ts">\n\n```ts\nconst x = 1;\n```\n\nA note.\n\n</AnnotatedCode>',
         FileTree: "<FileTree>\n\n```\nsrc/\n  index.ts\n```\n\n</FileTree>",
         CodeTabs: '<CodeTabs>\n<Tab label="a">\n\n```ts\nconst x = 1;\n```\n\n</Tab>\n</CodeTabs>',
+        // A <Tab> OUTSIDE a <CodeTabs> renders its own labelled box — the fourth
+        // selector in the Record, and the one with no fixture until now.
+        Tab: '<Tab label="a">\n\n```ts\nconst x = 1;\n```\n\n</Tab>',
         // The control: a Callout owns no chrome, so its fence SHOULD get a bar.
         Callout: '<Callout tone="info" title="t">\n\n```ts\nconst x = 1;\n```\n\n</Callout>',
       };
@@ -323,6 +350,7 @@ test.describe("chat card fences get the same chrome as every other bubble", () =
     expect(counts.AnnotatedCode!.bars).toBe(0);
     expect(counts.FileTree!.bars).toBe(0);
     expect(counts.CodeTabs!.bars).toBe(0);
+    expect(counts.Tab!.bars).toBe(0);
     // The control still gets one: the skip is a skip, not an off switch.
     expect(counts.Callout!.bars).toBe(1);
   });
