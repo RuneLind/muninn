@@ -526,14 +526,16 @@ async function loadChatTarget(): Promise<void> {
     if (chatOpt !== state || seq !== chatOptLoadSeq) return; // superseded
     if (!res.ok) throw new Error(data.error || "HTTP " + res.status);
     state.target = data;
-    // `bots` rides the FAILURE branch only (the ok path ships none — the picker
-    // exists for a wiki that didn't resolve). Latch both the options and the fact
-    // that this popover needs a picker, so it survives a later resolve AND a later
-    // failure: without the latch an error response rendered no select at all, and
-    // the reader had to close and re-open the panel to try another bot.
+    // `bots` rides BOTH branches now (the ok path feeds the advanced-section bot
+    // override). Latch the options either way, but the MANDATORY picker only for
+    // a response that resolved no bot — latching it on the ok path would force
+    // the prominent pick-a-bot row onto every resolved wiki. Once latched it
+    // survives a later resolve AND a later failure: without that an error
+    // response rendered no select at all, and the reader had to close and
+    // re-open the panel to try another bot.
     if (data.bots?.length) {
       state.bots = data.bots;
-      state.needsBotPicker = true;
+      if (!data.botName) state.needsBotPicker = true;
     }
     if (data.botName) {
       state.botName = data.botName;
@@ -592,10 +594,13 @@ async function fetchPreferredConnector(userId: string, botName: string): Promise
 function chatOptSummaryInput(
   state: ChatOptState,
   question: string,
-): { userName: string; modelLabel: string; threadName: string } {
+): { userName: string; modelLabel: string; threadName: string; botName: string } {
   const t = state.target;
   const nameSource = chatOptNameSource(state.mode, question, state.article?.title);
   return {
+    // The bot joins the collapsed line only when there is a choice to report —
+    // with one discovered bot the disclosure renders no picker either.
+    botName: state.bots.length > 1 ? state.botName : "",
     userName: (t?.users ?? []).find((u) => u.id === state.userId)?.name || "",
     modelLabel: state.connectorId
       ? (t?.connectors ?? []).find((c) => c.id === state.connectorId)?.name || ""
@@ -638,6 +643,9 @@ function chatOptBodyHtml(state: ChatOptState, question: string): string {
       links: state.links,
       wiki: wikiName(),
       lastQuestion: lastAskedQuestion(),
+      // Resolves with the target, so the chip appears once the load lands —
+      // the row re-renders then anyway.
+      jiraBot: !!state.target?.isJiraBot,
     });
     rows.push(
       chatOptSuggestionsHtml(
@@ -651,10 +659,21 @@ function chatOptBodyHtml(state: ChatOptState, question: string): string {
   // pick can still be changed, a re-fetch IN FLIGHT still shows the pick that
   // started it, and — crucially — a FAILED re-fetch still offers a way back
   // instead of dead-ending until the reader closes and re-opens.
-  if (state.needsBotPicker && state.bots.length) {
+  // The second clause is the resolved-wiki override's continuity: its own picker
+  // lives in the advanced section, which only renders with a live target — so
+  // during a bot-switch re-fetch (the handler nulls the target) the <select> the
+  // reader just operated would vanish mid-change and take focus with it, and a
+  // FAILED re-fetch would dead-end with no way back, exactly the failure the
+  // needs-bot latch exists for. The empty "Pick a bot…" row is the MANDATORY
+  // path's only: the override path always has a current pick, and selecting the
+  // empty row there cleared both the pick and the error, leaving a body with no
+  // picker, no summary and no Send (PR #492 review, finding 1).
+  const overridePickerLive =
+    state.bots.length > 1 && (!!state.error || (state.loading && !state.target));
+  if ((state.needsBotPicker || overridePickerLive) && state.bots.length) {
     rows.push(
       '<label class="wiki-chatopt-row"><span>Bot</span><select id="wikiChatOptBot">' +
-      '<option value="">Pick a bot…</option>' +
+      (state.needsBotPicker ? '<option value="">Pick a bot…</option>' : "") +
       state.bots.map((b) =>
         '<option value="' + esc(b.name) + '"' +
         (b.name === state.botName ? " selected" : "") + ">" + esc(b.name) + "</option>",
@@ -693,6 +712,21 @@ function chatOptBodyHtml(state: ChatOptState, question: string): string {
       }),
     );
     const adv: string[] = [];
+    // Bot override for a RESOLVED wiki — same id as the mandatory picker above
+    // (they can't coexist: this branch is gated on `!needsBotPicker`), so the
+    // one delegated `change` handler serves both. No empty "Pick a bot…" row:
+    // a resolved dialog always has a current pick to show. Hidden with a single
+    // discovered bot, where a picker is a choice of one.
+    if (!state.needsBotPicker && state.bots.length > 1) {
+      adv.push(
+        '<label class="wiki-chatopt-row"><span>Bot</span><select id="wikiChatOptBot">' +
+        state.bots.map((b) =>
+          '<option value="' + esc(b.name) + '"' +
+          (b.name === state.botName ? " selected" : "") + ">" + esc(b.name) + "</option>",
+        ).join("") +
+        "</select></label>",
+      );
+    }
     if (users.length > 1) {
       adv.push(
         '<label class="wiki-chatopt-row"><span>As</span><select id="wikiChatOptUser">' +

@@ -90,6 +90,7 @@ import { WIKI_SHARE_COPY } from "../views/components/wiki-share-dialog.ts";
 import { commitWikiChange } from "../../wiki/commit.ts";
 import { todayOslo } from "../../gardener/util.ts";
 import { capabilitiesForConnectorType, connectorCapabilities } from "../../ai/one-shot.ts";
+import { jiraBotName } from "../../jira/bot.ts";
 import type { executeOneShot } from "../../ai/one-shot.ts";
 import { streamFactcheckSSE } from "./factcheck-sse.ts";
 import { acquireShareFlight, shareFlightKey, streamShareSSE } from "./share-sse.ts";
@@ -595,11 +596,10 @@ export type AskChatTarget =
   | {
       ok: true;
       botConfig: BotConfig;
-      /** Every discovered bot. Carried on the ok path only for callers that need
-       *  the full list; the popover's bot picker exists only for a wiki that did
-       *  NOT resolve, so `GET /api/wiki/chat-target` deliberately does not ship
-       *  this on its ok path (the client caches the list from the failure
-       *  response it opened with). */
+      /** Every discovered bot. Shipped by `GET /api/wiki/chat-target` on BOTH
+       *  branches now: the failure branch renders the mandatory picker from it,
+       *  and the ok branch feeds the advanced-section bot OVERRIDE (a resolved
+       *  wiki's escalation can be re-pointed at another bot per-click). */
       bots: { name: string }[];
       users: { id: string; name: string }[];
       /** The bot's `bot_default_user`, **only when it is a member of `users`**.
@@ -2784,6 +2784,17 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       const botDefaultType = target.botConfig.connector ?? "claude-cli";
       return c.json({
         botName: target.botConfig.name,
+        // The ok path ships the bot list too (it used not to): the popover's
+        // advanced section offers a bot OVERRIDE even when the wiki resolved —
+        // "discuss this page with vertex-test instead" — and without the list a
+        // resolved open had no options to render. One-name installs get a
+        // one-entry list the client simply doesn't render a picker for.
+        bots: target.bots,
+        // Whether the resolved chat bot IS the Jira composer's pinned bot
+        // (`JIRA_BOT`, default melosys) — gates the "Draft Jira task" starter
+        // chip client-side, so it is only offered where the chat's 🧾 flow can
+        // actually finish the job. Name comparison only; no second discovery.
+        isJiraBot: target.botConfig.name.toLowerCase() === jiraBotName(),
         users: target.users,
         defaultUserId: target.defaultUserId,
         preferredForUserId,

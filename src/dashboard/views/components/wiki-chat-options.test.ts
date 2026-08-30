@@ -157,6 +157,10 @@ const article = {
 let shownTurn: FakeTurn | null = null;
 let currentArticle: typeof article | null = null;
 const fetched: string[] = [];
+/** Per-test additions to the chat-target response (ok-path `bots`, `isJiraBot`). */
+let chatTargetExtra: Record<string, unknown> = {};
+/** When true, the next chat-target fetches answer 500 — the override-recovery path. */
+let fetchFails = false;
 
 const CHAT_TARGET = {
   botName: "jarvis",
@@ -178,7 +182,18 @@ beforeAll(() => {
   };
   g.fetch = (url: string) => {
     fetched.push(url);
-    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(CHAT_TARGET) });
+    if (fetchFails) {
+      return Promise.resolve({
+        ok: false,
+        status: 500,
+        json: () => Promise.resolve({ error: "boom" }),
+      });
+    }
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ ...CHAT_TARGET, ...chatTargetExtra }),
+    });
   };
   // The ONE call that wires the module's document listeners — everything below
   // reaches the dialog through them, exactly as the reader page does.
@@ -199,6 +214,8 @@ beforeEach(() => {
   fire("keydown", { key: "Escape" });
   registry.clear();
   fetched.length = 0;
+  chatTargetExtra = {};
+  fetchFails = false;
   shownTurn = null;
   currentArticle = null;
   doc.activeElement = null;
@@ -385,5 +402,137 @@ describe("the dialog's keyboard and navigation rules", () => {
     fire("click", { target: new ShimEl("wikiNewChatBtn") });
     closeChatOptionsIfNavigatingAway("concepts/backlog-drain.md");
     expect(registry.has("wikiChatOpt")).toBe(true);
+  });
+});
+
+// ── Resolved-wiki bot override + Jira chip ────────────────────────────────────
+
+/** A click target standing in for the ⚙ Options toggle INSIDE the panel: the
+ *  shim's `closest` is self-match only, so it answers both the toggle's id and
+ *  the click-away's `#wikiChatOpt` in-panel probe. */
+function advToggleTarget(): ShimEl {
+  const el = new ShimEl("wikiChatOptAdv");
+  (el as unknown as { closest: (sel: string) => ShimEl | null }).closest = (sel: string) =>
+    sel === "#wikiChatOptAdv" || sel === "#wikiChatOpt" ? el : null;
+  return el;
+}
+
+describe("the ok-path bot list feeds an override, never the mandatory picker", () => {
+  const THREE_BOTS = [{ name: "jarvis" }, { name: "vertex-test" }, { name: "melosys" }];
+
+  test("a resolved wiki with >1 bot reports the bot in the summary and offers the picker in ⚙", async () => {
+    chatTargetExtra = { bots: THREE_BOTS };
+    currentArticle = article;
+    fire("click", { target: new ShimEl("wikiDiscussBtn") });
+    await settle();
+
+    const html = panel().innerHTML;
+    // The collapsed line names the bot FIRST — a re-pointed escalation must be
+    // visible without expanding anything.
+    expect(html).toContain("bot <b>jarvis</b>");
+    // The mandatory needs-a-bot picker (with its empty "Pick a bot…" row) must
+    // NOT appear: the wiki resolved.
+    expect(html).not.toContain("Pick a bot…");
+
+    // The override lives behind ⚙ Options. The shim's `closest` matches self
+    // only, so the ⚙ target also answers the click-away's `#wikiChatOpt` probe —
+    // on the live page the button IS inside the panel.
+    fire("click", { target: advToggleTarget() });
+    const open = panel().innerHTML;
+    expect(open).toContain('id="wikiChatOptBot"');
+    expect(open).toContain("vertex-test");
+  });
+
+  test("picking another bot refetches the target bot-keyed", async () => {
+    chatTargetExtra = { bots: THREE_BOTS };
+    currentArticle = article;
+    fire("click", { target: new ShimEl("wikiDiscussBtn") });
+    await settle();
+    fetched.length = 0;
+
+    const sel = new ShimEl("wikiChatOptBot");
+    sel.value = "vertex-test";
+    fire("change", { target: sel });
+    await settle();
+    expect(fetched[0]).toBe("/api/wiki/chat-target?wiki=probe&bot=vertex-test");
+  });
+
+  test("the MANDATORY needs-a-bot picker still offers the empty row", async () => {
+    // Round-2 pin: every other assertion on "Pick a bot…" is NEGATIVE, so
+    // deleting the ternary that renders it stayed green (verify pass, mutation
+    // D). Without the empty row an unresolved wiki opens with the first bot
+    // DISPLAYED as picked while `state.botName` is "" — Send blocked, and no
+    // `change` event can ever fire for that bot.
+    chatTargetExtra = { botName: null, reason: "needs_bot", bots: THREE_BOTS };
+    currentArticle = article;
+    fire("click", { target: new ShimEl("wikiDiscussBtn") });
+    await settle();
+    const html = panel().innerHTML;
+    expect(html).toContain('id="wikiChatOptBot"');
+    expect(html).toContain('<option value="">Pick a bot…</option>');
+  });
+
+  test("a FAILED override refetch keeps a picker — with no dead-end empty row", async () => {
+    // Finding 1+2 of the PR review: the recovery picker rendered the mandatory
+    // path's empty "Pick a bot…" option, and selecting it cleared the error and
+    // the pick, leaving a body with no picker, no summary and no Send.
+    chatTargetExtra = { bots: THREE_BOTS };
+    currentArticle = article;
+    fire("click", { target: new ShimEl("wikiDiscussBtn") });
+    await settle();
+
+    fetchFails = true;
+    const sel = new ShimEl("wikiChatOptBot");
+    sel.value = "vertex-test";
+    fire("change", { target: sel });
+    await settle();
+
+    const html = panel().innerHTML;
+    expect(html).toContain("work out where this chat would go"); // apostrophe is esc()'d
+    // The way back stays on screen…
+    expect(html).toContain('id="wikiChatOptBot"');
+    // …and offers only REAL bots: this path always has a current pick, so the
+    // empty option is exactly a dead end here.
+    expect(html).not.toContain("Pick a bot…");
+  });
+
+  test("the pick that started an override refetch stays on screen while it resolves", async () => {
+    // Finding 3: the change handler nulls the target, so the loading body used to
+    // drop the very <select> the reader just operated (and its focus with it).
+    chatTargetExtra = { bots: THREE_BOTS };
+    currentArticle = article;
+    fire("click", { target: new ShimEl("wikiDiscussBtn") });
+    await settle();
+
+    const sel = new ShimEl("wikiChatOptBot");
+    sel.value = "vertex-test";
+    fire("change", { target: sel });
+    // BEFORE the fetch resolves: the loading paint must keep the picker.
+    const html = panel().innerHTML;
+    expect(html).toContain("Working out where this chat lands");
+    expect(html).toContain('id="wikiChatOptBot"');
+    await settle();
+  });
+
+  test("a single-bot install renders neither the bot line nor the picker", async () => {
+    // The default CHAT_TARGET ships no `bots` — the pre-override wire shape.
+    currentArticle = article;
+    fire("click", { target: new ShimEl("wikiDiscussBtn") });
+    await settle();
+    const html = panel().innerHTML;
+    expect(html).not.toContain("bot <b>");
+    fire("click", { target: advToggleTarget() });
+    expect(panel().innerHTML).not.toContain('id="wikiChatOptBot"');
+  });
+
+  test("the Draft Jira task chip appears exactly when the target says isJiraBot", async () => {
+    chatTargetExtra = { isJiraBot: true };
+    currentArticle = article;
+    fire("click", { target: new ShimEl("wikiDiscussBtn") });
+    // Before the target lands the chip is absent (the flag is server-derived)…
+    expect(panel().innerHTML).not.toContain("Draft Jira task");
+    await settle();
+    // …and the re-render on load adds it.
+    expect(panel().innerHTML).toContain("Draft Jira task");
   });
 });
