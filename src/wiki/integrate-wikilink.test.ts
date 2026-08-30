@@ -452,19 +452,25 @@ describe("the marked page renders", () => {
     expect(html).not.toContain("&lt;Fact");
   });
 
-  test("REPRO: a mark over a BACKTICKED link renders a LIVE link, never a dead one", () => {
+  test("REPRO: a mark over a BACKTICKED link renders as CODE, with the link text intact", () => {
     // The whole shipped chain — annotate → apply → the post-splice backstop → the
     // renderer — over the fixture round 1 got wrong. Under the code-span mask the
-    // mark landed between the brackets and the link died; with the mask gone the
-    // mark wraps the link and the link resolves.
+    // mark landed between the brackets; with the mask gone it wraps the link whole.
+    //
+    // ⚠️ What the RENDER end of this looks like changed once `renderWikiHtml`
+    // stopped substituting wikilinks inside code (see `render.test.ts`). It used
+    // to produce a live `<a>` INSIDE the code span — the wikilink was parked
+    // before `formatWebHtml` saw a backtick — which is what the original spelling
+    // of this test asserted. That was the bug, not the guarantee: a code span must
+    // show the bytes on disk. So the expectation here is now the honest one, and
+    // the ANNOTATOR's behaviour is unchanged either way.
     //
     // ⚠️ KNOWN, MEASURED, and deliberately asserted rather than hidden: the wrapper
     // sits INSIDE the code span, and `formatWebHtml` escapes code-span content, so
     // the `<Fact>` tags render as literal text there and no `fc-mark`/`fc-chip`
-    // chrome appears. That is strictly better than what it replaced (which produced
-    // literal tags AND a dead link) and it is not a reason to re-add the mask — a
-    // mark that cannot be seen is cosmetic, a link target replaced by markup is
-    // durable damage. Marking inside a code span at all is the follow-up.
+    // chrome appears. Still not a reason to re-add the mask — a mark that cannot
+    // be seen is cosmetic, a link target replaced by markup is durable damage.
+    // Marking inside a code span at all is the follow-up.
     const body = "The engine `[[Tidal Router]]` is the default.\n";
     const r = markOne(body, "Tidal Router");
     expect(r.edits[0]!.old).toBe("[[Tidal Router]]");
@@ -475,10 +481,11 @@ describe("the marked page renders", () => {
     expect(repaired.residual).toHaveLength(0);
 
     const html = renderWikiHtml(repaired.body, resolve);
-    expect(html).toContain('<code>');
-    expect(html).toContain('class="wiki-link"');
-    expect(html).toContain(">Tidal Router</a>");
-    // The defect's signature — the tags as the link TARGET — is gone.
+    expect(html).toContain("<code>");
+    // Code, not a link — in either direction. The brackets are still there.
+    expect(html).not.toContain("class=\"wiki-link\"");
+    expect(html).toContain("[[Tidal Router]]");
+    // The defect's signature — the tags as the link TARGET — is still gone.
     expect(html).not.toContain("wiki-link-missing");
     expect(html).not.toContain("[[<Fact");
     // The stated cosmetic residual, pinned so it cannot change unnoticed.

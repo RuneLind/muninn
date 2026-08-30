@@ -87,12 +87,42 @@ const PAGE = [
   "",
 ].join("\n");
 
+/**
+ * The wikilink-in-code fixture. `[[Fence Page]]` RESOLVES in this wiki, which is
+ * the half that matters: an unresolvable target only ever produced a dead span,
+ * while a resolvable one became a live `<a>` inside the `<pre><code>` with the
+ * brackets deleted from the fence's own text — so the reader copied source the
+ * file does not contain.
+ */
+const LINK_FENCE_BODY = [
+  "// see [[Fence Page]] for the query",
+  "const pages = [[1, 2], [3, 4]];",
+].join("\n");
+
+const LINK_PAGE = [
+  "---",
+  "title: Link Page",
+  "---",
+  "",
+  "# Link Page",
+  "",
+  "Prose linking to [[Fence Page]], which must stay a real link.",
+  "",
+  "Write `[[Fence Page]]` to make one.",
+  "",
+  "```ts",
+  LINK_FENCE_BODY,
+  "```",
+  "",
+].join("\n");
+
 let server: ChildProcess | undefined;
 let root = "";
 
 test.beforeAll(async () => {
   root = await mkdtemp(path.join(tmpdir(), "muninn-e2e-code-"));
   await writeFile(path.join(root, "fence-page.md"), PAGE, "utf8");
+  await writeFile(path.join(root, "link-page.md"), LINK_PAGE, "utf8");
 
   server = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
@@ -459,5 +489,56 @@ test.describe("Chat bubbles: the sanitizer keeps the token classes", () => {
     expect(counts.nested).toBe(0);
     // …and the wrapping did not disturb the source.
     expect(counts.text).toBe(SQL_BODY);
+  });
+});
+
+/**
+ * A `[[wikilink]]` inside code renders as the bytes on disk.
+ *
+ * `renderWikiHtml` parks every wikilink as a `\x00`-sentinel BEFORE
+ * `formatWebHtml` and restores it over the RENDERED HTML, and that pass used not
+ * to be scoped to prose — so a link written inside a fence or inside backticks
+ * was substituted like any other and the restore landed inside the `<code>`.
+ *
+ * Asserted HERE, in a browser, rather than only on the HTML string, because the
+ * consequence is a DOM one: `code.textContent` is what the Copy button hands the
+ * reader, and the clipboard read below is the only assertion that actually proves
+ * what leaves the page.
+ */
+test.describe("Wiki reader: a wikilink inside code is code", () => {
+  test("the fence's text is the file's, and Copy hands over exactly that", async ({
+    page,
+    context,
+  }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&page=link-page`);
+    const fence = page.locator("code.language-ts");
+    await expect(fence).toBeVisible();
+
+    // Byte-identical, brackets included…
+    expect(await fence.textContent()).toBe(LINK_FENCE_BODY);
+    // …and nothing in the fence became a link, resolvable target or not.
+    expect(await fence.locator("a.wiki-link, span.wiki-link-missing").count()).toBe(0);
+
+    // The clipboard is the acceptance: this is the string that reaches an editor.
+    await fence.hover();
+    await page.locator(".fence .fence-copy").click();
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(LINK_FENCE_BODY);
+  });
+
+  test("an INLINE code span is protected, and prose on the same page still links", async ({
+    page,
+  }) => {
+    // The guard is not a kill switch — measured on the real corpus, inline spans
+    // are the majority of the affected cases, and the prose link beside them is
+    // exactly what must not be lost to fixing them.
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}&page=link-page`);
+    const article = page.locator("#articleWrap");
+    await expect(article.locator("a.wiki-link").first()).toBeVisible();
+
+    // The prose link resolved…
+    expect(await article.locator("a.wiki-link").count()).toBe(1);
+    // …while the backticked one is literal code.
+    await expect(article.locator("p code").filter({ hasText: "[[Fence Page]]" })).toHaveCount(1);
   });
 });

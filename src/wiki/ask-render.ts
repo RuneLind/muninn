@@ -13,11 +13,15 @@
  *
  * The `[n]` markers are swapped for `\x00`-sentinel tokens *before* rendering (so
  * the markdown pipeline's HTML-escaping can't mangle them) and restored after —
- * the same technique `renderWikiHtml` uses for wikilinks.
+ * the same technique `renderWikiHtml` uses for wikilinks, and it skips code the
+ * same way and for the same reason. `[1]` is ordinary syntax in almost every
+ * language an answer quotes, so an unscoped pass turned `arr[1]` inside a fence
+ * into a clickable citation and deleted the subscript from the code's own text.
  */
 
 import { formatWebHtml } from "../web/web-format.ts";
 import { escapeHtml } from "../format/markdown-core.ts";
+import { codeSpanRegions, inCodeSpan } from "../format/markdown-ast.ts";
 import type { Citation } from "../research/answer.ts";
 
 const CITE_MARKER_RE = /\[(\d+)\]/g;
@@ -30,7 +34,11 @@ const CITE_MARKER_RE = /\[(\d+)\]/g;
 export function renderAskAnswerHtml(answer: string, citations: Citation[]): string {
   const maxN = citations.length;
   const tokens: string[] = [];
-  const withTokens = (answer ?? "").replace(CITE_MARKER_RE, (whole, num: string) => {
+  const body = answer ?? "";
+  const codeRegions = codeSpanRegions(body);
+  const withTokens = body.replace(CITE_MARKER_RE, (whole, num: string, offset: number) => {
+    // See the header: a marker inside a fence or backticks is code, not a cite.
+    if (inCodeSpan(codeRegions, offset)) return whole;
     const n = parseInt(num, 10);
     const c = citations[n - 1];
     // Only linkify in-range markers whose citation matched a wiki page — mirrors

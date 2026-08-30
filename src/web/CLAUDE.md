@@ -13,6 +13,38 @@ Two properties it is written to hold, both pinned in `highlight.test.ts`:
 
 ⚠️ **The chat sanitizer is the coupling that bites.** `/wiki` injects this HTML unsanitized (trusted disk content), but the chat re-renders every bubble through `sanitizeHtml` (`web-format-browser.ts`), which strips `class` off a `<span>` unless the value is allowlisted — so a token class missing from `COMPONENT_CLASS_ALLOW` renders perfectly in the reader and colorless in chat, with every unit test green. That list therefore spreads `HIGHLIGHT_TOKEN_CLASSES` in rather than retyping the names, and `e2e/wiki-code-highlight.spec.ts` drives the real bundled `sanitizeHtml` on the real chat page. **Any new `tok-*` class must be added to that exported array, never to the CSS alone.**
 
+## Wikilinks and `[n]` citations are parked BEFORE rendering — and skip code
+
+`src/wiki/render.ts` and `src/wiki/ask-render.ts` are the only two passes that
+swap a construct for a `\x00`-delimited sentinel before `formatWebHtml` and
+restore it by regex over the RENDERED HTML. Both ask
+`codeSpanRegions(body)` (`markdown-ast.ts`) first and leave a match whose START
+offset falls inside a code region alone, so it reaches the page as the bytes on
+disk.
+
+⚠️ **The regions are derived from the RENDERER's own two regexes**
+(`CODE_FENCE_SOURCE`, `INLINE_CODE_SOURCE`), not from CommonMark, and that is
+load-bearing: measured, `formatWebHtml` renders a `~~~`-fenced block as ordinary
+prose, so the CommonMark-accurate walk this repo already owns for the write path
+(`fencedLineMask`, `wiki-integrate.ts`) would call it code and silently turn a
+working link into literal brackets. The only rule that cannot disagree with the
+renderer is the renderer's own.
+
+Both shapes are covered, not just fences: measured over mimir + the jarvis wiki,
+1495 wikilinks sit inside code across 57 pages and **522 of them are in inline
+spans** — in the jarvis wiki inline is 99% of the cases. The failure this closes
+is not cosmetic: a RESOLVABLE target became a live `<a>` inside `<pre><code>`
+with the `[[` `]]` gone from the text, and `code.textContent` is what the Copy
+button hands over, what `wiki-mermaid.ts` reads to build a diagram and what the
+fact-check evidence card clones — silently altered source, one click from the
+reader's editor. `[1]` is ordinary syntax in almost every language an answer
+quotes, so the citation half had the same shape.
+
+The acceptance, in `render.test.ts` and `ask-render.test.ts`: **a fence's text
+equals the bytes on disk**, asserted on the resolvable case as well as the
+unresolvable one — only the first tells a real fix from "the dead
+`wiki-link-missing` span went away".
+
 ## Code-block chrome (header bar + copy)
 
 The bar and the copy button are built by a CLIENT enhancer,
@@ -123,16 +155,29 @@ wrapper path because only one of them can express it:
   otherwise paired the FIRST opener with the only closer and marked 20 characters
   nobody checked, running the mark across a table's `|` in the process. Same shape
   `firstDanglingWikilinkOpen` (`src/wiki/store.ts`) calls dangling. **Inline code is
-  NOT excluded**, and a masked spelling of this scan was a shipped defect:
-  `renderWikiHtml` substitutes wikilinks over the raw body BEFORE `formatWebHtml`
-  sees a backtick, so `` `[[Old Name]]` `` renders as
-  `<code><a class="wiki-link">Old Name</a></code>` — a live link (measured
-  2026-08-30). Masking it made the annotator splice
-  `` `[[<Fact …>Old Name</Fact>]]` ``, i.e. the forbidden shape, rendering as a dead
-  `wiki-link-missing`. A backticked link is expanded over and a correction crossing
-  one is dropped, exactly as for an unbackticked link. Fences need no handling here
-  (already an exclusion zone), and they are genuinely different: `formatWebHtml`
-  renders a fenced block as code, so the substitution is invisible inside one.
+  NOT excluded**, and a masked spelling of this scan was a shipped defect: masking
+  it made the annotator splice `` `[[<Fact …>Old Name</Fact>]]` ``, i.e. the
+  forbidden shape. A backticked link is expanded over and a correction crossing one
+  is dropped, exactly as for an unbackticked link.
+
+  ⚠️ **The RENDER-side reason recorded here was true and is now obsolete, and the
+  fence sentence beside it was never true.** It read: `renderWikiHtml` substitutes
+  wikilinks over the raw body before `formatWebHtml` sees a backtick, so
+  `` `[[Old Name]]` `` renders as a live `<a>` inside the `<code>` (measured
+  2026-08-30, correct at the time) — *"Fences need no handling here (already an
+  exclusion zone), and they are genuinely different: `formatWebHtml` renders a
+  fenced block as code, so the substitution is invisible inside one."* The
+  exclusion zone is real but it belongs to the **write** path (`matchMaskBody`,
+  `integrate-edits.ts`); the **read** path had no such zone and substituted BEFORE
+  anything was decided to be code, so a wikilink in a fence was substituted exactly
+  like one in a backtick span — a resolvable target became a live clickable link
+  inside `<pre><code>` with the brackets gone from the code's own text. That
+  sentence is why the bug survived a year. `renderWikiHtml`/`renderAskAnswerHtml`
+  now skip code on the read path too (`codeSpanRegions`, `markdown-ast.ts`), so a
+  backticked or fenced link renders as the bytes on disk. The ANNOTATOR's behaviour
+  is unchanged by that — it still expands over the whole link, because splicing
+  inside the brackets is the forbidden shape whether the result is a dead link or
+  literal tags in a code span.
 - **Order, and NO refusal at column 0.** Expansion runs FIRST and `markableRange`
   then guards the EXPANDED range, because `ownsLineStart` is evaluated on the span's
   start and expanding leftwards over a `[[` at column 0 is what flips it. The guard
