@@ -10,10 +10,13 @@ walker turns back into a `code_block` only when the placeholder is the WHOLE lin
 (`CODE_PLACEHOLDER_RE` is anchored). The extractor is therefore a **line walker**,
 not a regex sweep — anything left on a placeholder's line breaks the restore and
 serves a raw U+0000 to the browser with the code block gone. Measured across the
-two wikis on 2026-08-30 before the walker landed — mimir `d7b6cdb` + huginn
-`7d69031`, every `.md`/`.mdx` outside `.git` and `node_modules` — 42 of 1571
-pages leaked 130 NULs, from two ordinary shapes: an indented fence (the "code
-block inside a numbered list") and a fence delimiter starting mid-line.
+two wikis on 2026-08-30 before the walker landed — every `.md`/`.mdx` under
+`mimir/` and under `huginn/huginn-jarvis/data/wiki/`, excluding `.git` and
+`node_modules` — **42 of 1571 pages leaked 130 NULs**, from two ordinary shapes:
+an indented fence (the "code block inside a numbered list") and a fence
+delimiter starting mid-line. Both wikis are live working trees and most of the
+jarvis wiki is untracked, so the page count drifts daily; mimir `d7b6cdb` /
+huginn `7d69031` name the moment rather than a checkout anyone can restore.
 
 **The grammar is tabulated, not described.** `markdown-ast.test.ts`'s "the fence
 grammar, tabulated" enumerates every axis — opener indent, run length, info
@@ -49,16 +52,25 @@ leading `[A-Za-z0-9_+#.-]*` run and nothing wider, because
 `bot/telegram-format.ts` interpolates it into `class="language-${lang}"` with no
 escaping — pinned by the hostile-info-string cases in
 `markdown-all-platforms.test.ts`, not by this paragraph. And a `\x00CB<n>\x00`
-appearing in the INPUT is stripped **to a fixed point**: dereferencing an index
-no fence wrote throws and takes down the shared renderer for chat, Telegram,
-Slack and email at once, and a single-pass strip *manufactures* such a
-placeholder out of a nested spelling (`\x00C` + `\x00CB0\x00` + `B0\x00` strips
-to `\x00CB0\x00`). The restore is total as well, so the throw cannot return
-through a route nobody enumerated. The strip is deliberately narrow —
-`wiki/render.ts` and `wiki/ask-render.ts` park their own `\x00` sentinels across
-this call — and a parked sentinel landing in an **info string** disqualifies the
-opener outright, since everything past the lang token is discarded and that
-would delete a `[[wikilink]]` from the page, text and all.
+appearing in the INPUT is stripped **to a fixed point, with no iteration bound**:
+dereferencing an index no fence wrote throws and takes down the shared renderer
+for chat, Telegram, Slack and email at once, and a single-pass strip
+*manufactures* such a placeholder out of a nested spelling (`\x00C` +
+`\x00CB0\x00` + `B0\x00` strips to `\x00CB0\x00`). A **bounded** loop is no better
+in kind: at the bound it leaves a raw NUL, or forges a duplicate of a real
+fence's block. Unbounded is safe because each pass deletes ≥5 characters. The
+strip is deliberately narrow — `wiki/render.ts` and `wiki/ask-render.ts` park
+their own `\x00` sentinels across this call.
+
+**Nothing but a backtick refuses an opener**, and that restraint is load-bearing.
+A refused opener does not leave "just that line as prose": the fence's closing
+delimiter stays in the stream and is itself an opener, so the rest of the
+document re-pairs one delimiter over. A review round added a second refusal — an
+info string holding a parked wikilink sentinel, to save the link from being
+discarded with the rest of the info string — and it swallowed the following prose
+and the next code block into one lang-less block. Everything past the lang token
+is discarded, sentinel included; that is CommonMark's rule, the same one that
+drops `title="x"`.
 
 ## Syntax highlighting in fenced code blocks
 

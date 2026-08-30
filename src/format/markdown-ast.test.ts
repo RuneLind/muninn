@@ -816,6 +816,27 @@ describe("a forged code placeholder cannot reach the block store", () => {
     expect(() => parseBlocks(md)).not.toThrow();
     expect(leaksNul(parseBlocks(md))).toBe(false);
   });
+
+  // Each nesting level peels off in exactly one pass, so a BOUNDED strip has a
+  // depth at which it stops early — and what it leaves behind is either a raw
+  // NUL or, with any real fence on the page, a forged duplicate of that fence's
+  // block. Measured at the round-1 bound of 10: depth 9 clean, depth 10 leaked,
+  // depth 10 + one fence rendered the fence TWICE. The loop is unbounded now
+  // (each pass deletes at least 5 characters, so it cannot fail to terminate),
+  // and this walks past where any bound would have been.
+  const nest = (d: number) => {
+    let s = `${NUL}CB0${NUL}`;
+    for (let i = 0; i < d; i++) s = `${NUL}C${s}B0${NUL}`;
+    return s;
+  };
+  test.each([9, 10, 11, 12, 25])("nesting depth %i, alone and beside a real fence", (d) => {
+    for (const md of [nest(d), `\`\`\`js\nREAL\n\`\`\`\n\n${nest(d)}`]) {
+      const blocks = parseBlocks(md);
+      expect(leaksNul(blocks)).toBe(false);
+      // No forged duplicate: the page has at most the one fence it wrote.
+      expect(blocks.filter((b) => b.type === "code_block").length).toBeLessThanOrEqual(1);
+    }
+  });
 });
 
 describe("the closer scan is not quadratic", () => {

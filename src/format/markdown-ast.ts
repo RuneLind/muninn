@@ -480,14 +480,19 @@ export function parseChecklist(children: Block[]): { checked: boolean; text: str
  * A fenced-code DELIMITER line: up to 3 leading spaces, a run of >= 3 backticks,
  * then the rest of the line (an info string on an opener, nothing on a closer).
  *
- * The 0-3 space bound is CommonMark's and is the same one
- * `dashboard/views/components/wiki-integrate.ts` already encodes in its own
- * `FENCE_SHAPE_RE`, so the AST and that file's per-line "is this code?" mask
- * agree about which lines are delimiters. Where this parser DIVERGES from
- * CommonMark is what happens to a >= 4-space-indented ```` ``` ````: CommonMark
- * calls it indented code, and this AST has no indented-code block at all, so it
- * degrades to a paragraph rather than to a code block. Asserted, not assumed --
- * see "4-space-indented fence" in markdown-ast.test.ts.
+ * The 0-3 space bound is CommonMark's, and is the same bound
+ * `dashboard/views/components/wiki-integrate.ts` uses in its own
+ * `FENCE_SHAPE_RE`. The two agree on INDENT and disagree on MARKER: that file
+ * accepts `~~~` and this parser does not, so a tilde block is code to the
+ * fact-check line mask and markdown here. Narrower than the earlier spelling of
+ * this sentence, which claimed the two "agree about which lines are delimiters"
+ * — refuted by the tilde row in the `extractFences` docblock below it.
+ *
+ * Where this parser diverges from CommonMark is a >= 4-space-indented
+ * ```` ``` ````: CommonMark calls it indented code, and this AST has no
+ * indented-code block at all, so it degrades to a paragraph. Every such
+ * property is TABULATED rather than described — "the fence grammar, tabulated"
+ * in markdown-ast.test.ts is the authority this comment defers to.
  */
 const FENCE_LINE_RE = /^( {0,3})(`{3,})(.*)$/;
 
@@ -530,20 +535,26 @@ const CODE_PLACEHOLDER_RE = /^\x00CB(\d+)\x00$/;
  * matches, and a nested spelling reassembles a valid placeholder out of what is
  * left either side of the removal — `\x00C` + `\x00CB0\x00` + `B0\x00` strips to
  * `\x00CB0\x00`. A single pass therefore MANUFACTURED the exact thing it exists
- * to remove, and threw on input the unfixed parser rendered fine. Bounded so a
- * pathological input cannot spin; `Placeholders.restore` in `markdown-core.ts`
- * loops for the mirror-image reason.
+ * to remove, and threw on input the unfixed parser rendered fine.
+ *
+ * ⚠️ And the loop is UNBOUNDED, which is safe here and was got wrong once. Each
+ * pass deletes at least five characters, so it terminates in at most `len / 5`
+ * passes and needs no bound. A bound of 10 stopped early at nesting depth 10
+ * and left behind precisely what this exists to prevent — a raw NUL, or, on a
+ * page carrying any real fence, a FORGED DUPLICATE of that fence's block.
+ * `Placeholders.restore` in `markdown-core.ts` does need its bound: a restored
+ * VALUE there can re-introduce a sentinel without shortening the string, so
+ * that loop has no termination measure. This one does.
  */
 const FORGED_CODE_PLACEHOLDER_RE = /\x00CB\d+\x00/g;
 
 function stripForgedCodePlaceholders(text: string): string {
   let out = text;
-  for (let i = 0; i < 10; i++) {
+  for (;;) {
     const next = out.replace(FORGED_CODE_PLACEHOLDER_RE, "");
     if (next === out) return out;
     out = next;
   }
-  return out;
 }
 
 const HR_RE = /^---+$/;
@@ -576,9 +587,12 @@ export function parseBlocks(text: string): Block[] {
  * (`CODE_PLACEHOLDER_RE`). Anything left on the placeholder's line therefore
  * broke the restore and served the raw U+0000 to the browser, losing the code
  * block outright. Two shapes did that, both ordinary and both measured across
- * the two wikis on 2026-08-30 -- mimir `d7b6cdb` + huginn `7d69031`, every
- * `.md`/`.mdx` outside `.git` and `node_modules`, 1571 pages, 42 of them
- * leaking 130 NULs:
+ * the two wikis on 2026-08-30: every `.md`/`.mdx` under `mimir/` and under
+ * `huginn/huginn-jarvis/data/wiki/`, excluding `.git` and `node_modules`, is
+ * 1571 pages, 42 of them leaking 130 NULs. Both are LIVE working trees and most
+ * of the jarvis wiki is untracked, so the count drifts by a page or two a day —
+ * mimir `d7b6cdb` / huginn `7d69031` name the moment, not a checkout anyone can
+ * restore:
  *
  *  - **An indented fence** -- the "code block inside a numbered list" shape.
  *    The opener's leading spaces stayed on the placeholder's line.
@@ -629,26 +643,35 @@ function extractFences(text: string, codeBlocks: { lang: string; code: string }[
   // (a 3-backtick closer can close them while it could not close the 5-backtick
   // opener that failed). Without it, 24k lines of never-closing fences took
   // 9.8 s; the test that pins this carries the whole measured curve.
+  //
+  // One scalar is not the same as "linear in every case": k openers with
+  // STRICTLY DECREASING run lengths still cost k full scans (measured, 4k such
+  // lines: 3.1 s). Writing that input costs O(n^2) bytes and no real document
+  // has it — runs are 3 to 5 — so it is a stated residual, not a fix.
   let noCloserAtRunAtLeast = Number.POSITIVE_INFINITY;
 
   while (i < lines.length) {
     const open = lines[i]!.match(FENCE_LINE_RE);
     const info = open?.[3] ?? "";
-    // Two ways an info string refuses the opener.
+    // A BACKTICK in the info string refuses the opener, per CommonMark: an
+    // ordinary prose line that opens with inline code -- ```` ```x``` ```` -- is
+    // not a fence. Without this, such a line opened a fence that swallowed the
+    // page up to the next bare delimiter.
     //
-    // A BACKTICK, per CommonMark: an ordinary prose line that opens with inline
-    // code -- ```` ```x``` ```` -- is not a fence. Without this, such a line
-    // opened a fence that swallowed the page up to the next bare delimiter.
-    //
-    // A U+0000, because a parked SENTINEL is page CONTENT. `wiki/render.ts` and
-    // `wiki/ask-render.ts` swap every `[[wikilink]]` / `[n]` for one before this
-    // runs, and everything past the lang token is DISCARDED here — so a link
-    // written in an info string was deleted from the page outright, text and
-    // all. Refusing the opener keeps the line as prose, which is exactly what
-    // it did before the extractor became a line walker. Pinned by "a wikilink
-    // in a fence's INFO STRING survives" in `wiki/render.test.ts`, at the seam
-    // where the sentinel actually exists.
-    if (!open || info.includes("`") || info.includes("\x00")) {
+    // ⚠️ Refusing is EXPENSIVE, which is why nothing else refuses here. A
+    // refused opener does not leave "just that line as prose": the fence's own
+    // CLOSING delimiter stays in the line stream, and a lone ```` ``` ```` line
+    // is itself an opener, so the rest of the document re-pairs one delimiter
+    // over. Round 1 of review on this change added a second refusal -- an info
+    // string holding a parked `\x00` wikilink sentinel, to save the link from
+    // being discarded with the rest of the info string -- and that is exactly
+    // what happened: the following prose and the NEXT code block were swallowed
+    // into one lang-less block. Reverted. Everything past the lang token is
+    // discarded, sentinel included; that is CommonMark's rule, the same one
+    // that drops `title="x"` from ```` ```ts title="x" ````. Both halves are
+    // pinned in `wiki/render.test.ts` -- the discard, and the swallowing not
+    // coming back.
+    if (!open || info.includes("`")) {
       out.push(lines[i]!);
       i++;
       continue;
@@ -739,10 +762,17 @@ function parseBlocksInner(
 
     const cbMatch = line.match(CODE_PLACEHOLDER_RE);
     // Total, not `codeBlocks[n]!`: a slot that does not exist falls through to
-    // text instead of throwing. `stripForgedCodePlaceholders` is what makes that
-    // branch unreachable today, and the round-1 review found the crash by
-    // constructing an input the FIRST spelling of that strip let through — so
-    // the deref no longer relies on anyone having enumerated the routes in.
+    // text instead of throwing.
+    //
+    // ⚠️ UNPINNED, and said out loud rather than left to imply coverage. With
+    // the strip a true fixed point, the input carries no placeholder this parser
+    // did not write, `extractFences` only emits indices it has just pushed, and
+    // the recursive component-body parse shares that same array — so the branch
+    // is unreachable and no test can enter it. That is the same enumeration
+    // claimed one round ago, while the strip was still BOUNDED, and it was false
+    // then: depth-10 nesting reached this deref and threw. It stays as a
+    // backstop for the next time the enumeration is wrong. What is actually
+    // tested is the strip's fixed-point property.
     const cb = cbMatch ? codeBlocks[parseInt(cbMatch[1]!, 10)] : undefined;
     if (cb) {
       flushText();
