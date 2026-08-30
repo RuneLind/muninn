@@ -418,6 +418,22 @@ describe("renderWikiHtml: a wikilink inside code is CODE", () => {
     });
   });
 
+  test("a wikilink in a fence's INFO STRING survives — the info string is dropped", () => {
+    // Round-1 finding on this change. `renderWikiHtml` parks every wikilink
+    // BEFORE `formatWebHtml`, so one written in an info string arrives as a
+    // sentinel there — and the fence grammar keeps only the leading lang token
+    // and DISCARDS the rest of the info string, which would delete the link and
+    // its literal text from the page. A parked sentinel in an info string
+    // therefore disqualifies the opener: the line stays prose, exactly as it
+    // did before the extractor became a line walker.
+    for (const md of ["```[[Claude Code]]\nbody\n```", "```ts [[Claude Code]]\nbody\n```"]) {
+      const html = renderWikiHtml(md, resolve);
+      expect(html).toContain("wiki-link");
+      expect(html).toContain("Claude Code");
+      expect(html).not.toContain("\u0000");
+    }
+  });
+
   test("nothing leaks: no sentinel and no raw NUL reach the page", () => {
     const html = renderWikiHtml(
       "[[Claude Code]]\n\n```ts\nconst m = [[1,2,3]];\n```\n\n`[[Claude Code]]`",

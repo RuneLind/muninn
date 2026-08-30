@@ -651,9 +651,11 @@ describe("parseBlocks fence grammar", () => {
     expect(allStrings(blocks).join("\n")).toContain("``` and more");
   });
 
-  // Two PRESERVATION pins: both already held before the line walker and are
-  // here so the walker cannot quietly drop them. They do not go red on the old
-  // parser, by design.
+  // ONE preservation pin follows: "an unclosed fence stays text" already held
+  // before the line walker, so it does not go red on the old parser. The
+  // backtick-info-string test below it is NOT one — it was strengthened to
+  // require a real fence after the decoy line, and in that form it IS red on
+  // the old parser. The earlier label here said "two"; review measured it false.
   test("an unclosed fence stays text — a half-streamed delta must not flicker", () => {
     const blocks = parseBlocks("```js\nconst x =");
     expect(hasCodeBlock(blocks)).toBe(false);
@@ -690,5 +692,152 @@ describe("parseBlocks fence grammar", () => {
     expect(() => parseBlocks(`${NUL}CB5${NUL}`)).not.toThrow();
     expect(leaksNul(parseBlocks(`${NUL}CB5${NUL}`))).toBe(false);
     expect(() => parseBlocks(`\`\`\`js\nx\n\`\`\`\n\n${NUL}CB7${NUL}`)).not.toThrow();
+  });
+});
+
+// ── The fence grammar's state space, enumerated ─────────────────────────────
+// Round 1 of review on this PR produced five findings that were all the SAME
+// defect: a claim about the grammar written into a comment instead of computed.
+// So the grammar is TABULATED here rather than described anywhere — every axis
+// (opener indent, run length, info string, mid-line, closer indent/run/tail,
+// unclosed) gets at least one row, `axisCoverage` fails if an axis loses its
+// last row, and the docs point here instead of restating.
+//
+// `summarize` is deliberately lossy in one direction only: it names every
+// code_block a parse produced, so "no code block" and "this exact block" are
+// both expressible and neither can be satisfied by accident.
+function summarize(blocks: Block[]): string {
+  const codes = blocks
+    .filter((b): b is Extract<Block, { type: "code_block" }> => b.type === "code_block")
+    .map((b) => `code[${b.lang}]${JSON.stringify(b.code)}`);
+  return codes.length === 0 ? "none" : codes.join(" + ");
+}
+
+const B = "`".repeat(3);
+const FENCE_CASES: { axis: string; md: string; want: string }[] = [
+  // opener indent
+  { axis: "opener-indent", md: `${B}js\nx\n${B}`, want: 'code[js]"x"' },
+  { axis: "opener-indent", md: ` ${B}js\n x\n ${B}`, want: 'code[js]"x"' },
+  { axis: "opener-indent", md: `   ${B}js\n   x\n   ${B}`, want: 'code[js]"x"' },
+  { axis: "opener-indent", md: `    ${B}js\n    x\n    ${B}`, want: "none" },
+  // opener run length
+  { axis: "opener-run", md: "`js\nx\n`", want: "none" },
+  { axis: "opener-run", md: "``js\nx\n``", want: "none" },
+  { axis: "opener-run", md: `${B}${B}\nx\n${B}${B}`, want: 'code[]"x"' },
+  // a longer opener is not closed by a shorter run
+  { axis: "closer-run", md: "````\n```\nx\n```\n````", want: 'code[]"```\\nx\\n```"' },
+  { axis: "closer-run", md: "````js\nx\n```", want: "none" },
+  { axis: "closer-run", md: "```js\nx\n`````", want: 'code[js]"x"' },
+  // closer indent — same 0-3 bound as the opener
+  { axis: "closer-indent", md: `${B}js\nx\n   ${B}`, want: 'code[js]"x"' },
+  { axis: "closer-indent", md: `${B}js\nx\n    ${B}`, want: "none" },
+  // closer tail
+  { axis: "closer-tail", md: `${B}js\nx\n${B}   `, want: 'code[js]"x"' },
+  { axis: "closer-tail", md: `${B}js\nx\n${B}\t`, want: 'code[js]"x"' },
+  { axis: "closer-tail", md: `${B}js\nx\n${B} and more`, want: "none" },
+  // info string -> lang
+  { axis: "info-lang", md: `${B}\nx\n${B}`, want: 'code[]"x"' },
+  { axis: "info-lang", md: `${B}objective-c\nx\n${B}`, want: 'code[objective-c]"x"' },
+  { axis: "info-lang", md: `${B}c++\nx\n${B}`, want: 'code[c++]"x"' },
+  { axis: "info-lang", md: `${B}c#\nx\n${B}`, want: 'code[c#]"x"' },
+  { axis: "info-lang", md: `${B}asp.net\nx\n${B}`, want: 'code[asp.net]"x"' },
+  { axis: "info-lang", md: `${B}ts title="x"\nx\n${B}`, want: 'code[ts]"x"' },
+  { axis: "info-lang", md: `${B} ts\nx\n${B}`, want: 'code[ts]"x"' },
+  { axis: "info-lang", md: `${B}ts!!\nx\n${B}`, want: 'code[ts]"x"' },
+  // a backtick in a backtick fence's info string is not a fence at all
+  { axis: "info-backtick", md: "```x```\nprose\n\n```js\nreal\n```", want: 'code[js]"real"' },
+  // mid-line opener
+  { axis: "midline", md: `text ${B}ts\nx\n${B}`, want: "none" },
+  { axis: "midline", md: `text ${B}ts\nx\n${B} more`, want: "none" },
+  // unclosed
+  { axis: "unclosed", md: `${B}js\nconst x =`, want: "none" },
+  // body handling
+  { axis: "body", md: `${B}js\nx\n\n\n${B}`, want: 'code[js]"x"' },
+  { axis: "body", md: `${B}js\n\nx\n${B}`, want: 'code[js]"\\nx"' },
+  { axis: "body", md: `  ${B}js\n    x\n  y\n  ${B}`, want: 'code[js]"  x\\ny"' },
+  { axis: "body", md: `  ${B}js\nx\n  ${B}`, want: 'code[js]"x"' },
+  // tildes are not fences here
+  { axis: "tilde", md: "~~~js\nx\n~~~", want: "none" },
+  // The futility memo's edge: a LONGER opener finding no closer must not
+  // silence a later SHORTER one, which a 3-backtick closer can still close.
+  // (The mirror case is not expressible: for a 3-run opener to fail there must
+  // be no bare delimiter left in the document at all, and then a longer opener
+  // after it cannot close either. That is the memo's soundness argument, and it
+  // is why there is no row for it rather than an unfailable one.)
+  { axis: "scan-memo", md: "`````\nA\n\n```ts\ny\n```", want: 'code[ts]"y"' },
+];
+
+describe("the fence grammar, tabulated", () => {
+  test.each(FENCE_CASES)("$axis: $md", ({ md, want }) => {
+    expect(summarize(parseBlocks(md))).toBe(want);
+  });
+
+  test("every axis still has at least one row", () => {
+    const axes = new Set(FENCE_CASES.map((c) => c.axis));
+    expect([...axes].sort()).toEqual([
+      "body",
+      "closer-indent",
+      "closer-run",
+      "closer-tail",
+      "info-backtick",
+      "info-lang",
+      "midline",
+      "opener-indent",
+      "opener-run",
+      "scan-memo",
+      "tilde",
+      "unclosed",
+    ]);
+  });
+});
+
+describe("what an UNCLOSED fence actually does", () => {
+  // NOT "stays literal text" — an earlier revision of this file and of
+  // src/web/CLAUDE.md both said that, and both were wrong. The lines are handed
+  // to the ordinary block parser, so headings, lists and COMPONENTS inside an
+  // unclosed fence render. Computed, and pinned so the doc cannot drift back.
+  test("its body is parsed as ordinary markdown, components included", () => {
+    const blocks = parseBlocks("````js\n# heading\n- item\n<Callout>boom</Callout>\n```");
+    expect(blocks.map((b) => b.type)).toEqual(["text", "heading", "ul", "component", "text"]);
+  });
+});
+
+describe("a forged code placeholder cannot reach the block store", () => {
+  // Round-1 finding: the strip was a single pass, so a NESTED spelling
+  // reassembled a valid placeholder AFTER the removal and threw — a crash the
+  // unfixed parser did not have. The strip runs to a fixed point now.
+  test.each([
+    ["flat", `${NUL}CB5${NUL}`],
+    ["multi-digit", `${NUL}CB12${NUL}`],
+    ["nested", `${NUL}C${NUL}CB0${NUL}B0${NUL}`],
+    ["doubly nested", `${NUL}C${NUL}C${NUL}CB0${NUL}B0${NUL}B0${NUL}`],
+    ["after a real fence", `\`\`\`js\nx\n\`\`\`\n\n${NUL}C${NUL}CB0${NUL}B0${NUL}`],
+  ])("%s", (_name, md) => {
+    expect(() => parseBlocks(md)).not.toThrow();
+    expect(leaksNul(parseBlocks(md))).toBe(false);
+  });
+});
+
+describe("the closer scan is not quadratic", () => {
+  // `parseBlocks` re-runs on every streaming chat delta, so an opener that
+  // re-scans the whole tail is a hot-path cost, not a theoretical one. The
+  // trigger is not adversarial: a page whose fences all close with trailing
+  // text (``` end) has no valid closer at all under CommonMark, so every
+  // opener scanned to EOF. Measured on this machine before the memo:
+  // 1500 lines 45 ms, 3000 152 ms, 6000 632 ms, 12000 2436 ms, 24000 9848 ms —
+  // 4x per doubling. After: single-digit ms at 24000.
+  test("24k lines of never-closing fences parse in well under a second", () => {
+    const lines: string[] = [];
+    for (let i = 0; i < 8000; i++) lines.push("```js", `x${i}`, "``` end");
+    const md = lines.join("\n");
+    const t0 = performance.now();
+    const blocks = parseBlocks(md);
+    const ms = performance.now() - t0;
+    // None of them close, so none is extracted — the point is the time.
+    expect(blocks.some((b) => b.type === "code_block")).toBe(false);
+    // 2000 ms is ~5x the pre-memo cost of the HALF-size document and ~100x the
+    // post-memo cost of this one, so it separates the two without being tight
+    // on a slow CI runner.
+    expect(ms).toBeLessThan(2000);
   });
 });

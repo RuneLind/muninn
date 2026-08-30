@@ -506,6 +506,10 @@ const FENCE_LINE_RE = /^( {0,3})(`{3,})(.*)$/;
  * ```` ```objective-c ````) and, unlike it, a NON-matching info string no longer
  * disqualifies the fence: ```` ```ts title="x" ```` is a `ts` fence now, where
  * before it was not a fence at all and its body rendered as prose.
+ *
+ * Read off the TRIMMED info string, per CommonMark — ```` ``` ts ```` names `ts`,
+ * and without the trim it silently named nothing, losing the highlight and the
+ * `language-*` class the mermaid enhancer selects on.
  */
 const FENCE_LANG_RE = /^[A-Za-z0-9_+#.-]*/;
 
@@ -521,8 +525,26 @@ const CODE_PLACEHOLDER_RE = /^\x00CB(\d+)\x00$/;
  * a raw NUL. Deliberately narrower than "strip every U+0000": `wiki/render.ts`
  * and `wiki/ask-render.ts` park their own `\x00`-delimited sentinels across this
  * call, and stripping those would delete every wikilink on the page.
+ *
+ * ⚠️ **Applied to a FIXED POINT, not once.** One pass removes non-overlapping
+ * matches, and a nested spelling reassembles a valid placeholder out of what is
+ * left either side of the removal — `\x00C` + `\x00CB0\x00` + `B0\x00` strips to
+ * `\x00CB0\x00`. A single pass therefore MANUFACTURED the exact thing it exists
+ * to remove, and threw on input the unfixed parser rendered fine. Bounded so a
+ * pathological input cannot spin; `Placeholders.restore` in `markdown-core.ts`
+ * loops for the mirror-image reason.
  */
 const FORGED_CODE_PLACEHOLDER_RE = /\x00CB\d+\x00/g;
+
+function stripForgedCodePlaceholders(text: string): string {
+  let out = text;
+  for (let i = 0; i < 10; i++) {
+    const next = out.replace(FORGED_CODE_PLACEHOLDER_RE, "");
+    if (next === out) return out;
+    out = next;
+  }
+  return out;
+}
 
 const HR_RE = /^---+$/;
 const HEADING_RE = /^(#{1,6})\s+(.+)$/;
@@ -531,9 +553,7 @@ const UL_RE = /^[-*]\s+(.*)$/;
 const OL_RE = /^(\d+)\.\s+(.*)$/;
 
 export function parseBlocks(text: string): Block[] {
-  const normalized = text
-    .replace(/\r\n/g, "\n")
-    .replace(FORGED_CODE_PLACEHOLDER_RE, "");
+  const normalized = stripForgedCodePlaceholders(text.replace(/\r\n/g, "\n"));
 
   // Extract code blocks first; their content must not be parsed as markdown.
   // The extraction happens ONCE against `codeBlocks`, before any further
@@ -556,7 +576,9 @@ export function parseBlocks(text: string): Block[] {
  * (`CODE_PLACEHOLDER_RE`). Anything left on the placeholder's line therefore
  * broke the restore and served the raw U+0000 to the browser, losing the code
  * block outright. Two shapes did that, both ordinary and both measured across
- * the two wikis on 2026-08-30 (1558 pages, 39 of them leaking 112 NULs):
+ * the two wikis on 2026-08-30 -- mimir `d7b6cdb` + huginn `7d69031`, every
+ * `.md`/`.mdx` outside `.git` and `node_modules`, 1571 pages, 42 of them
+ * leaking 130 NULs:
  *
  *  - **An indented fence** -- the "code block inside a numbered list" shape.
  *    The opener's leading spaces stayed on the placeholder's line.
@@ -567,16 +589,26 @@ export function parseBlocks(text: string): Block[] {
  * So CommonMark's fence grammar is what is implemented here, not just a laxer
  * placeholder test: an opener owns its line (<= 3 spaces of indent), a closer is
  * a bare run of the same character at least as long, and the body is dedented by
- * the opener's own indent. Three deliberate consequences, each with a test:
+ * the opener's own indent. Four deliberate consequences, each with a row in the
+ * grammar table:
  *
  *  - A ```` ```` ````-long fence closes only on >= 4 backticks, so a 4-backtick
  *    fence is a real block instead of the `<code>`-wrapped placeholder it used
  *    to render as (the old regex started its match one backtick in).
  *  - A closer may not carry trailing text, per CommonMark. ```` ```js ````
  *    ... ```` ``` and more ```` is now an UNCLOSED fence.
- *  - An unclosed fence stays literal text, which is the pre-existing behavior
- *    (the old regex needed a closer to match at all) and is what keeps a
- *    half-streamed chat delta from flickering into a code block.
+ *  - A closer obeys the opener's <= 3-space indent bound too, so a closer
+ *    indented 4+ spaces closes nothing.
+ *  - An unclosed fence is not extracted, which is the pre-existing behaviour
+ *    (the old regex needed a closer to match at all). Note what that does NOT
+ *    mean: an earlier spelling of this line said "stays literal text" and
+ *    claimed it stopped a half-streamed chat delta flickering into a code
+ *    block. Both false. The lines go to the ordinary block parser, so a
+ *    heading, a list or a `<Callout>` inside an unclosed fence RENDERS -- and
+ *    a streaming delta therefore flickers as headings and callouts instead.
+ *    Pinned by "what an UNCLOSED fence actually does". CommonMark would run it
+ *    to EOF as code; that is a separate change with its own corpus diff, and
+ *    exactly one page in 1571 carries an unclosed fence.
  *
  * Tildes (`~~~`) are NOT fences here. They were not before either, and neither
  * wiki contains one (measured, same sweep) -- adding them is a separate change
@@ -587,14 +619,36 @@ function extractFences(text: string, codeBlocks: { lang: string; code: string }[
   const out: string[] = [];
   let i = 0;
 
+  // Memo of scan futility, the same idiom `parseBlocksInner` uses for component
+  // opens and for the same reason: this parser re-runs on every streaming chat
+  // delta, so an opener that re-scans the tail is a hot-path cost. Once a scan
+  // for a closer of run length >= r finds nothing, no LATER opener whose run is
+  // >= r can find one either — the search range only shrinks, and a closer long
+  // enough for the longer run would have been long enough for r. So one scalar
+  // suffices: no position is needed, and openers with a SHORTER run still scan
+  // (a 3-backtick closer can close them while it could not close the 5-backtick
+  // opener that failed). Without it, 24k lines of never-closing fences took
+  // 9.8 s; the test that pins this carries the whole measured curve.
+  let noCloserAtRunAtLeast = Number.POSITIVE_INFINITY;
+
   while (i < lines.length) {
     const open = lines[i]!.match(FENCE_LINE_RE);
     const info = open?.[3] ?? "";
-    // Per CommonMark a BACKTICK fence's info string may not contain a backtick,
-    // so an ordinary prose line that opens with inline code -- ```` ```x``` ```` --
-    // is not a fence. Without this, such a line opened a fence that swallowed
-    // the rest of the page up to the next delimiter.
-    if (!open || info.includes("`")) {
+    // Two ways an info string refuses the opener.
+    //
+    // A BACKTICK, per CommonMark: an ordinary prose line that opens with inline
+    // code -- ```` ```x``` ```` -- is not a fence. Without this, such a line
+    // opened a fence that swallowed the page up to the next bare delimiter.
+    //
+    // A U+0000, because a parked SENTINEL is page CONTENT. `wiki/render.ts` and
+    // `wiki/ask-render.ts` swap every `[[wikilink]]` / `[n]` for one before this
+    // runs, and everything past the lang token is DISCARDED here — so a link
+    // written in an info string was deleted from the page outright, text and
+    // all. Refusing the opener keeps the line as prose, which is exactly what
+    // it did before the extractor became a line walker. Pinned by "a wikilink
+    // in a fence's INFO STRING survives" in `wiki/render.test.ts`, at the seam
+    // where the sentinel actually exists.
+    if (!open || info.includes("`") || info.includes("\x00")) {
       out.push(lines[i]!);
       i++;
       continue;
@@ -603,14 +657,17 @@ function extractFences(text: string, codeBlocks: { lang: string; code: string }[
     const indent = open[1]!.length;
     const runLen = open[2]!.length;
     let close = -1;
-    for (let j = i + 1; j < lines.length; j++) {
-      const c = lines[j]!.match(FENCE_LINE_RE);
-      if (c && c[2]!.length >= runLen && c[3]!.trim() === "") {
-        close = j;
-        break;
+    if (runLen < noCloserAtRunAtLeast) {
+      for (let j = i + 1; j < lines.length; j++) {
+        const c = lines[j]!.match(FENCE_LINE_RE);
+        if (c && c[2]!.length >= runLen && c[3]!.trim() === "") {
+          close = j;
+          break;
+        }
       }
     }
     if (close === -1) {
+      noCloserAtRunAtLeast = Math.min(noCloserAtRunAtLeast, runLen);
       out.push(lines[i]!);
       i++;
       continue;
@@ -618,7 +675,10 @@ function extractFences(text: string, codeBlocks: { lang: string; code: string }[
 
     const body = lines.slice(i + 1, close).map((l) => dedentFenceLine(l, indent));
     const idx = codeBlocks.length;
-    codeBlocks.push({ lang: info.match(FENCE_LANG_RE)![0], code: body.join("\n").trimEnd() });
+    codeBlocks.push({
+      lang: info.trim().match(FENCE_LANG_RE)![0],
+      code: body.join("\n").trimEnd(),
+    });
     out.push(`\x00CB${idx}\x00`);
     i = close + 1;
   }
@@ -678,9 +738,14 @@ function parseBlocksInner(
     }
 
     const cbMatch = line.match(CODE_PLACEHOLDER_RE);
-    if (cbMatch) {
+    // Total, not `codeBlocks[n]!`: a slot that does not exist falls through to
+    // text instead of throwing. `stripForgedCodePlaceholders` is what makes that
+    // branch unreachable today, and the round-1 review found the crash by
+    // constructing an input the FIRST spelling of that strip let through — so
+    // the deref no longer relies on anyone having enumerated the routes in.
+    const cb = cbMatch ? codeBlocks[parseInt(cbMatch[1]!, 10)] : undefined;
+    if (cb) {
       flushText();
-      const cb = codeBlocks[parseInt(cbMatch[1]!, 10)]!;
       blocks.push({ type: "code_block", lang: cb.lang, code: cb.code });
       i++;
       continue;

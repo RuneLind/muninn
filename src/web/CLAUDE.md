@@ -10,11 +10,19 @@ walker turns back into a `code_block` only when the placeholder is the WHOLE lin
 (`CODE_PLACEHOLDER_RE` is anchored). The extractor is therefore a **line walker**,
 not a regex sweep — anything left on a placeholder's line breaks the restore and
 serves a raw U+0000 to the browser with the code block gone. Measured across the
-two wikis on 2026-08-30 before the walker landed: 39 of 1558 pages leaked 112
-NULs, from two ordinary shapes — an indented fence (the "code block inside a
-numbered list") and a fence delimiter starting mid-line.
+two wikis on 2026-08-30 before the walker landed — mimir `d7b6cdb` + huginn
+`7d69031`, every `.md`/`.mdx` outside `.git` and `node_modules` — 42 of 1571
+pages leaked 130 NULs, from two ordinary shapes: an indented fence (the "code
+block inside a numbered list") and a fence delimiter starting mid-line.
 
-The grammar is CommonMark's, and the parts that bite:
+**The grammar is tabulated, not described.** `markdown-ast.test.ts`'s "the fence
+grammar, tabulated" enumerates every axis — opener indent, run length, info
+string, mid-line, closer indent/run/tail, unclosed, the scan memo's edge — and
+fails if an axis loses its last row. Read it rather than trusting the summary
+below: a review round on this change produced five findings that were all the
+same defect, a property of the grammar asserted in a comment instead of computed.
+
+The parts that bite:
 
 - An **opener owns its line**, with at most 3 leading spaces. A 4th space is
   indented code to CommonMark; this AST has no indented-code block, so such a
@@ -26,8 +34,13 @@ The grammar is CommonMark's, and the parts that bite:
 - A backtick fence's **info string may not contain a backtick**, so a prose line
   that starts with inline code (```` ```x``` ````) opens nothing. Without that
   rule it swallows the page down to the next bare closer.
-- An **unclosed fence stays literal text**. Pre-existing behaviour, and what
-  keeps a half-streamed chat delta from flickering into a code block.
+- An **unclosed fence is not extracted** — pre-existing behaviour, the old regex
+  needed a closer too. It does *not* mean the body is literal: those lines reach
+  the ordinary block parser, so a heading, a list or a `<Callout>` inside an
+  unclosed fence renders. CommonMark would run it to EOF as code instead; that
+  is a separate change (exactly one page in 1571 carries an unclosed fence).
+- A **closer obeys the same ≤3-space indent bound as the opener**, so a closer
+  indented 4+ spaces closes nothing and the region degrades to markdown.
 - Tildes (`~~~`) are **not** fences here. Neither wiki contains one; adding them
   is a separate change with its own corpus diff.
 
@@ -36,10 +49,16 @@ leading `[A-Za-z0-9_+#.-]*` run and nothing wider, because
 `bot/telegram-format.ts` interpolates it into `class="language-${lang}"` with no
 escaping — pinned by the hostile-info-string cases in
 `markdown-all-platforms.test.ts`, not by this paragraph. And a `\x00CB<n>\x00`
-appearing in the INPUT is stripped: dereferencing an index no fence wrote used to
-throw and take down the shared renderer for chat, Telegram, Slack and email at
-once. The strip is deliberately narrow — `wiki/render.ts` and `wiki/ask-render.ts`
-park their own `\x00` sentinels across this call.
+appearing in the INPUT is stripped **to a fixed point**: dereferencing an index
+no fence wrote throws and takes down the shared renderer for chat, Telegram,
+Slack and email at once, and a single-pass strip *manufactures* such a
+placeholder out of a nested spelling (`\x00C` + `\x00CB0\x00` + `B0\x00` strips
+to `\x00CB0\x00`). The restore is total as well, so the throw cannot return
+through a route nobody enumerated. The strip is deliberately narrow —
+`wiki/render.ts` and `wiki/ask-render.ts` park their own `\x00` sentinels across
+this call — and a parked sentinel landing in an **info string** disqualifies the
+opener outright, since everything past the lang token is discarded and that
+would delete a `[[wikilink]]` from the page, text and all.
 
 ## Syntax highlighting in fenced code blocks
 
