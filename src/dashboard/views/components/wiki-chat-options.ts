@@ -659,14 +659,21 @@ function chatOptBodyHtml(state: ChatOptState, question: string): string {
   // pick can still be changed, a re-fetch IN FLIGHT still shows the pick that
   // started it, and — crucially — a FAILED re-fetch still offers a way back
   // instead of dead-ending until the reader closes and re-opens.
-  // The second clause is the resolved-wiki override's recovery: its own picker
-  // lives in the advanced section, which only renders with a live target — so a
-  // FAILED re-fetch after a bot switch would otherwise dead-end with no way back,
-  // exactly the failure the needs-bot latch exists for.
-  if ((state.needsBotPicker || (!!state.error && state.bots.length > 1)) && state.bots.length) {
+  // The second clause is the resolved-wiki override's continuity: its own picker
+  // lives in the advanced section, which only renders with a live target — so
+  // during a bot-switch re-fetch (the handler nulls the target) the <select> the
+  // reader just operated would vanish mid-change and take focus with it, and a
+  // FAILED re-fetch would dead-end with no way back, exactly the failure the
+  // needs-bot latch exists for. The empty "Pick a bot…" row is the MANDATORY
+  // path's only: the override path always has a current pick, and selecting the
+  // empty row there cleared both the pick and the error, leaving a body with no
+  // picker, no summary and no Send (PR #492 review, finding 1).
+  const overridePickerLive =
+    state.bots.length > 1 && (!!state.error || (state.loading && !state.target));
+  if ((state.needsBotPicker || overridePickerLive) && state.bots.length) {
     rows.push(
       '<label class="wiki-chatopt-row"><span>Bot</span><select id="wikiChatOptBot">' +
-      '<option value="">Pick a bot…</option>' +
+      (state.needsBotPicker ? '<option value="">Pick a bot…</option>' : "") +
       state.bots.map((b) =>
         '<option value="' + esc(b.name) + '"' +
         (b.name === state.botName ? " selected" : "") + ">" + esc(b.name) + "</option>",

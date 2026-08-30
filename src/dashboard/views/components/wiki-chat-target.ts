@@ -419,7 +419,11 @@ export function suggestedQuestions(input: {
   /** The resolved chat bot is the Jira composer's pinned bot (`ChatTarget.
    *  isJiraBot`) — offers the "Draft Jira task" chip in article mode, first,
    *  since starting a Jira task from a wiki page is that bot's headline flow
-   *  (the thread's reply then carries the 🧾 «Lag Jira-sak» control). */
+   *  (the thread's reply then carries the 🧾 «Lag Jira-sak» control). The
+   *  breadth is DELIBERATE: on a wiki chatted through that bot this is every
+   *  page, reference pages included — the chip only fills an editable box
+   *  (never a one-click send), so an irrelevant offer costs a glance, while a
+   *  page-type gate would need an ontology the dialog doesn't have. */
   jiraBot?: boolean;
 }): ChatOptSuggestion[] {
   if (input.pinned || input.mode === "escalate") return [];

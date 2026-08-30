@@ -112,17 +112,12 @@ async function allBotNames(): Promise<string[]> {
 }
 
 /** First discovered bot folder — the same rule `discoverAllBots` applies, so the
- *  pin can resolve. A bot folder is a directory carrying a CLAUDE.md. */
+ *  pin can resolve. ONE discovery walk: the override spec's `bots[0] === the
+ *  pinned bot` assertion depends on the two agreeing. */
 async function firstBotName(): Promise<string> {
-  const entries = await readdir(path.join(REPO_ROOT, "bots"), { withFileTypes: true });
-  for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-    if (!e.isDirectory()) continue;
-    try {
-      await stat(path.join(REPO_ROOT, "bots", e.name, "CLAUDE.md"));
-      return e.name;
-    } catch { /* not a bot folder */ }
-  }
-  throw new Error("no bot folder with a CLAUDE.md — this spec needs one to pin");
+  const first = (await allBotNames())[0];
+  if (!first) throw new Error("no bot folder with a CLAUDE.md — this spec needs one to pin");
+  return first;
 }
 
 test.beforeAll(async () => {

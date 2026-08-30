@@ -159,6 +159,8 @@ let currentArticle: typeof article | null = null;
 const fetched: string[] = [];
 /** Per-test additions to the chat-target response (ok-path `bots`, `isJiraBot`). */
 let chatTargetExtra: Record<string, unknown> = {};
+/** When true, the next chat-target fetches answer 500 — the override-recovery path. */
+let fetchFails = false;
 
 const CHAT_TARGET = {
   botName: "jarvis",
@@ -180,6 +182,13 @@ beforeAll(() => {
   };
   g.fetch = (url: string) => {
     fetched.push(url);
+    if (fetchFails) {
+      return Promise.resolve({
+        ok: false,
+        status: 500,
+        json: () => Promise.resolve({ error: "boom" }),
+      });
+    }
     return Promise.resolve({
       ok: true,
       status: 200,
@@ -206,6 +215,7 @@ beforeEach(() => {
   registry.clear();
   fetched.length = 0;
   chatTargetExtra = {};
+  fetchFails = false;
   shownTurn = null;
   currentArticle = null;
   doc.activeElement = null;
@@ -445,6 +455,48 @@ describe("the ok-path bot list feeds an override, never the mandatory picker", (
     fire("change", { target: sel });
     await settle();
     expect(fetched[0]).toBe("/api/wiki/chat-target?wiki=probe&bot=vertex-test");
+  });
+
+  test("a FAILED override refetch keeps a picker — with no dead-end empty row", async () => {
+    // Finding 1+2 of the PR review: the recovery picker rendered the mandatory
+    // path's empty "Pick a bot…" option, and selecting it cleared the error and
+    // the pick, leaving a body with no picker, no summary and no Send.
+    chatTargetExtra = { bots: THREE_BOTS };
+    currentArticle = article;
+    fire("click", { target: new ShimEl("wikiDiscussBtn") });
+    await settle();
+
+    fetchFails = true;
+    const sel = new ShimEl("wikiChatOptBot");
+    sel.value = "vertex-test";
+    fire("change", { target: sel });
+    await settle();
+
+    const html = panel().innerHTML;
+    expect(html).toContain("work out where this chat would go"); // apostrophe is esc()'d
+    // The way back stays on screen…
+    expect(html).toContain('id="wikiChatOptBot"');
+    // …and offers only REAL bots: this path always has a current pick, so the
+    // empty option is exactly a dead end here.
+    expect(html).not.toContain("Pick a bot…");
+  });
+
+  test("the pick that started an override refetch stays on screen while it resolves", async () => {
+    // Finding 3: the change handler nulls the target, so the loading body used to
+    // drop the very <select> the reader just operated (and its focus with it).
+    chatTargetExtra = { bots: THREE_BOTS };
+    currentArticle = article;
+    fire("click", { target: new ShimEl("wikiDiscussBtn") });
+    await settle();
+
+    const sel = new ShimEl("wikiChatOptBot");
+    sel.value = "vertex-test";
+    fire("change", { target: sel });
+    // BEFORE the fetch resolves: the loading paint must keep the picker.
+    const html = panel().innerHTML;
+    expect(html).toContain("Working out where this chat lands");
+    expect(html).toContain('id="wikiChatOptBot"');
+    await settle();
   });
 
   test("a single-bot install renders neither the bot line nor the picker", async () => {

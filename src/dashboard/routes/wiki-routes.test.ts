@@ -3213,15 +3213,25 @@ describe("GET /api/wiki/chat-target", () => {
     expect(data.bots!.map((b) => b.name)).toEqual(["jarviswiki", "melosys"]);
   });
 
-  test("isJiraBot flags exactly the Jira composer's pinned bot (JIRA_BOT default melosys)", async () => {
-    const owner = (await (
-      await app.request("/api/wiki/chat-target?wiki=jarviswiki")
-    ).json()) as TargetBody & { isJiraBot?: boolean };
-    expect(owner.isJiraBot).toBe(false);
-    const jira = (await (
-      await app.request("/api/wiki/chat-target?wiki=jarviswiki&bot=melosys")
-    ).json()) as TargetBody & { isJiraBot?: boolean };
-    expect(jira.isJiraBot).toBe(true);
+  test("isJiraBot flags exactly the Jira composer's pinned bot", async () => {
+    // Pinned explicitly: `jiraBotName()` reads ambient JIRA_BOT, which is not in
+    // the ambient-env preload list — without the pin this test is green on CI
+    // (no .env) and red on any host that pins a different Jira bot.
+    const prev = process.env.JIRA_BOT;
+    process.env.JIRA_BOT = "melosys";
+    try {
+      const owner = (await (
+        await app.request("/api/wiki/chat-target?wiki=jarviswiki")
+      ).json()) as TargetBody & { isJiraBot?: boolean };
+      expect(owner.isJiraBot).toBe(false);
+      const jira = (await (
+        await app.request("/api/wiki/chat-target?wiki=jarviswiki&bot=melosys")
+      ).json()) as TargetBody & { isJiraBot?: boolean };
+      expect(jira.isJiraBot).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env.JIRA_BOT;
+      else process.env.JIRA_BOT = prev;
+    }
   });
 
   test("the default user's connector preference is folded in, stamped with its user", async () => {
