@@ -200,6 +200,98 @@ test.describe("Wiki reader: fenced code highlighting", () => {
   });
 });
 
+test.describe("Wiki reader: code-block chrome (header bar + copy)", () => {
+  test("the block reads as its own surface, not as the page behind it", async ({ page }) => {
+    // The reported bug: --bg-inset (#0d0d14) sits ~2 L* from the panel (#12121a),
+    // so on dark the block had no visible edge at all. Contrast RATIO is useless
+    // this far down the scale — it reads 1.04 either way — so this measures the
+    // perceptual lightness step, and accepts a border as the other way to have
+    // an edge.
+    await openPage(page);
+    await page.evaluate(() => document.documentElement.setAttribute("data-theme", "dark"));
+    await expect(page.locator(".fence").first()).toBeVisible();
+
+    const gap = await page.evaluate(() => {
+      const fence = document.querySelector(".wiki-article .fence") as HTMLElement | null;
+      const article = document.querySelector(".wiki-article") as HTMLElement | null;
+      if (!fence || !article) return null;
+      const cs = getComputedStyle(fence);
+      const parse = (c: string): number[] => (c.match(/-?[\d.]+/g) ?? ["0", "0", "0"]).map(Number);
+      const lum = (c: number[]): number =>
+        c.slice(0, 3)
+          .map((v) => {
+            const s = v / 255;
+            return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+          })
+          .reduce((a, v, i) => a + v * [0.2126, 0.7152, 0.0722][i]!, 0);
+      const lstar = (c: number[]): number => {
+        const y = lum(c);
+        return y <= 0.008856 ? y * 903.3 : 116 * Math.pow(y, 1 / 3) - 16;
+      };
+      let host: HTMLElement | null = fence.parentElement;
+      let behind = "rgba(0, 0, 0, 0)";
+      while (host && (behind === "rgba(0, 0, 0, 0)" || behind === "transparent")) {
+        behind = getComputedStyle(host).backgroundColor;
+        host = host.parentElement;
+      }
+      return {
+        deltaL: Math.abs(lstar(parse(cs.backgroundColor)) - lstar(parse(behind))),
+        borderWidth: parseFloat(cs.borderTopWidth) || 0,
+        borderColor: cs.borderTopColor,
+      };
+    });
+
+    expect(gap).not.toBeNull();
+    // ⚠️ Asserted as two SEPARATE facts, not `deltaL >= 3 || hasBorder`. The
+    // fence always carries a border, so that disjunct was unconditionally true
+    // and the test passed with the fill reverted to --bg-inset — the exact
+    // regression it is named after. The FILL has to separate on its own.
+    expect(gap!.deltaL).toBeGreaterThanOrEqual(3);
+    expect(gap!.borderWidth).toBeGreaterThan(0);
+    expect(gap!.borderColor).not.toBe("rgba(0, 0, 0, 0)");
+  });
+
+  test("the header bar names the language and the copy button appears on hover", async ({
+    page,
+  }) => {
+    await openPage(page);
+    const fence = page.locator(".wiki-article .fence").first();
+    await expect(fence.locator(".fence-lang")).toHaveText("sql");
+
+    const copy = fence.locator(".fence-copy");
+    // At rest it is present but invisible — zero noise on a page of fences.
+    await expect(copy).toHaveCSS("opacity", "0");
+    await fence.hover();
+    await expect(copy).toHaveCSS("opacity", "1");
+  });
+
+  test("the copy button puts the fence source on the clipboard, spans and all stripped", async ({
+    page,
+    context,
+  }) => {
+    // The whole point of highlight.ts's round-trip property, checked where it is
+    // actually spent: the reader copies a query and pastes it into psql.
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await openPage(page);
+    const fence = page.locator(".wiki-article .fence").first();
+    await fence.hover();
+    await fence.locator(".fence-copy").click();
+    await expect(fence.locator(".fence-copy")).toHaveClass(/is-done/);
+
+    const clip = await page.evaluate(() => navigator.clipboard.readText());
+    expect(clip).toBe(SQL_BODY);
+  });
+
+  test("a mermaid fence gets no chrome", async ({ page }) => {
+    await openPage(page);
+    // The diagram is upgraded in place, so if the chrome had wrapped that pre
+    // first, `enhanceMermaid`'s replaceWith would have left the SVG INSIDE a
+    // .fence carrying a header bar reading "MERMAID".
+    await expect(page.locator("[data-mermaid-src]")).toHaveCount(1);
+    expect(await page.locator(".fence [data-mermaid-src]").count()).toBe(0);
+  });
+});
+
 test.describe("Chat bubbles: the sanitizer keeps the token classes", () => {
   test("sanitizeHtml(formatWebHtml(fence)) preserves tok-* classes", async ({ page }) => {
     // Drives the REAL bundled functions on the REAL chat page. The chat renders
@@ -237,5 +329,135 @@ test.describe("Chat bubbles: the sanitizer keeps the token classes", () => {
     // …and the sanitizer did not flatten the block or eat a character.
     expect(result.stillAPre).toBe(true);
     expect(result.text).toBe(SQL_BODY);
+  });
+
+  test("a CLONED fence is unwrapped before re-enhancing, never nested", async ({ page }) => {
+    // The exact defect the first fact-check fix shipped. `buildCard` clones an
+    // appendix section whose fences are ALREADY wrapped; the clone carries the
+    // wrapper and a DEAD button (listeners are not cloned), so stripping the
+    // idempotency marker and re-enhancing wraps it a second time inside the
+    // dead one — two bars, two Copy buttons, the outer inert. Unwrap first.
+    await page.goto(`${BASE}/chat`);
+    await page.waitForFunction(
+      () => typeof (globalThis as { unwrapCodeBlockChrome?: unknown }).unwrapCodeBlockChrome === "function",
+    );
+
+    const out = await page.evaluate((body: string) => {
+      const g = globalThis as unknown as {
+        formatWebHtml: (s: string) => string;
+        sanitizeHtml: (h: string, isWeb: boolean) => string;
+        enhanceCodeBlocks: (root: ParentNode) => void;
+        unwrapCodeBlockChrome: (root: ParentNode) => void;
+      };
+      const host = document.createElement("div");
+      host.innerHTML = g.sanitizeHtml(g.formatWebHtml("```sql\n" + body + "\n```"), true);
+      document.body.appendChild(host);
+      g.enhanceCodeBlocks(host);
+
+      // …the clone a card build makes.
+      const clone = host.cloneNode(true) as HTMLElement;
+      document.body.appendChild(clone);
+
+      // Enumerate the unwrap helper's DOM cases in one place, since each of
+      // them was a live trap: an ALREADY-NESTED pair (what a marker-strip
+      // re-enhance produces), a wrapper whose `pre` sits deeper than a direct
+      // child, and a wrapper with no `pre` at all (dead chrome).
+      const nestedCase = document.createElement("div");
+      nestedCase.innerHTML =
+        '<div class="fence"><div class="fence-bar"></div>' +
+        '<div class="fence"><div class="fence-bar"></div>' +
+        '<pre data-fence-enhanced="1"><code>x</code></pre></div></div>' +
+        '<div class="fence"><div class="fence-bar"></div><section><pre><code>y</code></pre></section></div>' +
+        '<div class="fence"><div class="fence-bar"></div></div>';
+      document.body.appendChild(nestedCase);
+      g.unwrapCodeBlockChrome(nestedCase);
+      const edge = {
+        fences: nestedCase.querySelectorAll(".fence").length,
+        pres: nestedCase.querySelectorAll("pre").length,
+        bars: nestedCase.querySelectorAll(".fence-bar").length,
+        marked: nestedCase.querySelectorAll("[data-fence-enhanced]").length,
+      };
+      nestedCase.remove();
+
+      g.unwrapCodeBlockChrome(clone);
+      const afterUnwrap = {
+        fences: clone.querySelectorAll(".fence").length,
+        pres: clone.querySelectorAll("pre").length,
+        marked: clone.querySelectorAll("[data-fence-enhanced]").length,
+      };
+      g.enhanceCodeBlocks(clone);
+      const res = {
+        edge,
+        afterUnwrap,
+        fences: clone.querySelectorAll(".fence").length,
+        nested: clone.querySelectorAll(".fence .fence").length,
+        buttons: clone.querySelectorAll(".fence-copy").length,
+        text: clone.querySelector("pre > code")?.textContent ?? null,
+      };
+      host.remove();
+      clone.remove();
+      return res;
+    }, SQL_BODY);
+
+    // A nested pair collapses FULLY (both wrappers), a deeper `pre` is still
+    // rescued, and a wrapper with no code is dropped rather than left as a bar
+    // with a button that can never copy anything.
+    expect(out.edge.fences).toBe(0);
+    expect(out.edge.pres).toBe(2);
+    expect(out.edge.bars).toBe(0);
+    expect(out.edge.marked).toBe(0);
+
+    // Unwrap really restored a bare pre and cleared the marker…
+    expect(out.afterUnwrap.fences).toBe(0);
+    expect(out.afterUnwrap.pres).toBe(1);
+    expect(out.afterUnwrap.marked).toBe(0);
+    // …and re-enhancing produced exactly ONE wrapper with ONE (live) button.
+    expect(out.fences).toBe(1);
+    expect(out.nested).toBe(0);
+    expect(out.buttons).toBe(1);
+    expect(out.text).toBe(SQL_BODY);
+  });
+
+  test("re-enhancing the same nodes never double-wraps", async ({ page }) => {
+    // Asserted HERE and not on /wiki deliberately: `enhanceCodeBlocks` is a real
+    // global only in the chat bundle, so the same evaluate() on the reader would
+    // find `undefined`, do nothing, and pass whatever the enhancer did — the
+    // "skips itself green" shape, which is how this test read on its first cut.
+    //
+    // NB the re-enhance paths are article swaps and history repaints, NOT the
+    // streaming delta loop: `streaming-ui.ts` sets innerHTML per delta and calls
+    // no enhancer, enhancing once in promoteStreamingBubble.
+    await page.goto(`${BASE}/chat`);
+    await page.waitForFunction(
+      () =>
+        typeof (globalThis as { formatWebHtml?: unknown }).formatWebHtml === "function" &&
+        typeof (globalThis as { enhanceCodeBlocks?: unknown }).enhanceCodeBlocks === "function",
+    );
+
+    const counts = await page.evaluate((body: string) => {
+      const g = globalThis as unknown as {
+        formatWebHtml: (s: string) => string;
+        sanitizeHtml: (h: string, isWeb: boolean) => string;
+        enhanceCodeBlocks: (root: ParentNode) => void;
+      };
+      const host = document.createElement("div");
+      host.innerHTML = g.sanitizeHtml(g.formatWebHtml("```sql\n" + body + "\n```"), true);
+      document.body.appendChild(host);
+      g.enhanceCodeBlocks(host);
+      const afterFirst = host.querySelectorAll(".fence").length;
+      g.enhanceCodeBlocks(host);
+      g.enhanceCodeBlocks(host);
+      const afterThird = host.querySelectorAll(".fence").length;
+      const nested = host.querySelectorAll(".fence .fence").length;
+      const text = host.querySelector("pre > code")?.textContent ?? null;
+      host.remove();
+      return { afterFirst, afterThird, nested, text };
+    }, SQL_BODY);
+
+    expect(counts.afterFirst).toBe(1);
+    expect(counts.afterThird).toBe(1);
+    expect(counts.nested).toBe(0);
+    // …and the wrapping did not disturb the source.
+    expect(counts.text).toBe(SQL_BODY);
   });
 });

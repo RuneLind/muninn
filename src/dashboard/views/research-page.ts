@@ -692,7 +692,7 @@ export async function renderResearchPage(): Promise<string> {
           a.bodyEl.innerHTML = formatWebHtml(a.buffer);
           linkifyCitations(a.bodyEl, a.citations);
           enhanceMermaid(a.bodyEl); // upgrade any mermaid fences; no-op when absent
-          enhanceCodeTabs(a.bodyEl); // wire any CodeTabs blocks; no-op when absent
+          enhanceCodeTabs(a.bodyEl); enhanceCodeBlocks(a.bodyEl); // wire CodeTabs + fence chrome; no-ops when absent
           a.sourcesEl.innerHTML = sourcesHtml(a.citations, d.cited || []);
           bindSources(a.sourcesEl, a.citations);
           var statusText;
@@ -730,7 +730,7 @@ export async function renderResearchPage(): Promise<string> {
           a.bodyEl.innerHTML = d.html;
           linkifyCitations(a.bodyEl, a.citations);
           enhanceMermaid(a.bodyEl); // upgrade any mermaid fences; no-op when absent
-          enhanceCodeTabs(a.bodyEl); // wire any CodeTabs blocks; no-op when absent
+          enhanceCodeTabs(a.bodyEl); enhanceCodeBlocks(a.bodyEl); // wire CodeTabs + fence chrome; no-ops when absent
         },
 
         // App-level failure from the server (synthesis error, no bot, etc.). Named

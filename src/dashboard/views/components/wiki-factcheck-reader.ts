@@ -33,6 +33,7 @@
  */
 
 import { enhanceCodeTabs } from "./code-tabs.ts";
+import { enhanceCodeBlocks, unwrapCodeBlockChrome } from "./code-block-chrome.ts";
 
 const ENHANCED = "data-fc-enhanced";
 const LAYER_OFF = "fc-off";
@@ -139,11 +140,20 @@ export function buildCard(n: string, section: Element, verdict: string): HTMLEle
   clone
     .querySelectorAll("[data-code-tabs-enhanced]")
     .forEach((el) => el.removeAttribute("data-code-tabs-enhanced"));
+  // The code-block chrome needs the OPPOSITE of the CodeTabs treatment above,
+  // and copying that idiom is what shipped a nested double-wrap: `enhanceCodeTabs`
+  // only BINDS listeners onto server markup, so stripping its marker and re-running
+  // is right — while `enhanceCodeBlocks` BUILDS the wrapper, which the clone
+  // already carries (with a dead button, since listeners are not cloned). Marker-
+  // strip alone made the enhancer wrap it again INSIDE the dead one: two bars,
+  // two Copy buttons, the outer one inert. Unwrap first, then re-enhance.
+  unwrapCodeBlockChrome(clone);
   demoteHeadings(clone);
   body.appendChild(clone);
 
   card.append(close, body);
   enhanceCodeTabs(card);
+  enhanceCodeBlocks(card);
   return card;
 }
 
