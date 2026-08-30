@@ -6,7 +6,7 @@ import {
   ownChromeSelector,
   shouldEnhanceFence,
 } from "./code-block-chrome.ts";
-import { COMPONENT_NAMES } from "../../../format/markdown-ast.ts";
+import { COMPONENT_NAMES, type ComponentName } from "../../../format/markdown-ast.ts";
 import { COMPONENT_CLASS_ALLOW } from "../../../chat/views/components/component-class-allow.ts";
 import { OWN_CHROME_FIXTURES } from "../../../test/own-chrome-fixtures.ts";
 import { formatWebHtml } from "../../../web/web-format.ts";
@@ -229,13 +229,11 @@ describe("copyText", () => {
  * matches nothing and fails exactly as silently as a missing entry.
  */
 describe("COMPONENT_FENCE_CHROME", () => {
-  /** A component wrapping one fence, in the shape its parser expects. */
-  const withFence: Partial<Record<string, string>> = {
-    CodeTabs: '<CodeTabs>\n<Tab label="A">\n```ts\nconst x = 1;\n```\n</Tab>\n</CodeTabs>',
-    Tab: '<Tab label="A">\n```ts\nconst x = 1;\n```\n</Tab>',
-    AnnotatedCode: '<AnnotatedCode file="a.ts" lang="ts">\n```ts\nconst x = 1;\n```\n\nNote.\n</AnnotatedCode>',
-    FileTree: "<FileTree>\n```\nsrc/\n```\n</FileTree>",
-  };
+  /** The SHARED map. This was the THIRD hand-listed copy, and it is why the
+   *  consolidation had to finish: dropping a component from the shared map left
+   *  this test green over its own duplicate — the drift that module exists to
+   *  end, surviving inside the file that documents the rule. */
+  const withFence = OWN_CHROME_FIXTURES;
 
   test("every component in the vocabulary is classified", () => {
     // The Record type already makes this a compile error; asserted at runtime
@@ -247,7 +245,8 @@ describe("COMPONENT_FENCE_CHROME", () => {
   });
 
   test("each chrome-owning component really emits the class it is mapped to", () => {
-    for (const [name, selector] of Object.entries(COMPONENT_FENCE_CHROME)) {
+    const entries = Object.entries(COMPONENT_FENCE_CHROME) as [ComponentName, string | null][];
+    for (const [name, selector] of entries) {
       if (!selector) continue;
       const md = withFence[name];
       expect(md, `no fixture for chrome-owning component ${name}`).toBeTruthy();
@@ -307,66 +306,94 @@ describe("COMPONENT_FENCE_CHROME", () => {
 });
 
 /**
+ * `sanitizeHtml`'s rule, mirrored: a `class` attribute survives only when EVERY
+ * space-separated token is allowlisted, and `<code>` is exempt by TAG.
+ *
+ * ⚠️ **By TAG, not by the class containing a `language-*` token.** The two
+ * coincide only because `codeFenceHtml` is the sole emitter of that prefix and
+ * only ever on a `<code>` — and the content-keyed form really did miss a case;
+ * the test below is that case.
+ *
+ * ⚠️ `[^>]*?` cannot cross a `>`, so an UNESCAPED `>` inside an EARLIER attribute
+ * value makes this skip that element's class silently — it fails OPEN. Not
+ * reachable today, because the renderer escapes attribute text (measured with
+ * `file="a>b.ts"` and `label="a>b"`: both arrive as `&gt;`), and written down
+ * because the failure direction is the quiet one.
+ */
+function strippedClassAttributes(label: string, html: string): string[] {
+  const out: string[] = [];
+  for (const m of html.matchAll(/<([a-zA-Z][\w-]*)\b[^>]*?\sclass="([^"]*)"/g)) {
+    if (m[1]!.toLowerCase() === "code") continue;
+    const tokens = m[2]!.trim().split(/\s+/).filter(Boolean);
+    // An empty class attribute is stripped too; stripping nothing breaks nothing.
+    if (tokens.length === 0) continue;
+    const bad = tokens.filter((t) => !COMPONENT_CLASS_ALLOW.has(t));
+    if (bad.length > 0) out.push(`${label}: class="${m[2]}" (unlisted: ${bad.join(", ")})`);
+  }
+  return out;
+}
+
+/**
  * The THIRD leg of the own-chrome contract, and the one that had no guard.
  *
  * A component is skipped when `pre.closest(COMPONENT_FENCE_CHROME[name])`
  * matches. Two things already have tests: the Record is exhaustive over
  * `ComponentName` (a compile error otherwise), and each chrome-owning component
  * really emits the class it is mapped to. The third — that the class SURVIVES
- * the chat sanitizer — did not, and `annotated-code`/`filetree` were missing
- * from `COMPONENT_CLASS_ALLOW` from #494 until the PR this test arrived with, so
- * the skip was inert in chat and those blocks grew a second bar there while
- * `/wiki` was correct.
+ * the chat sanitizer — did not, and `annotated-code`/`filetree` were missing from
+ * `COMPONENT_CLASS_ALLOW` from #494 until the PR this test arrived with, so the
+ * skip was inert in chat and those blocks grew a second bar there while `/wiki`
+ * was correct.
  *
- * Derived over the Record, deliberately, rather than re-listing the four
- * components: classifying a fifth (`Diff: ".diff"` is the obvious next one —
- * `web-format.ts` already emits `class="diff"`) must fail HERE until its class is
- * allowlisted, not silently in a browser nobody is looking at. Same default-deny
- * reason `COMPONENT_FENCE_CHROME` is a `Record` and not a list.
- *
- * ⚠️ And derived from the RENDERED markup, not from the selector STRING, because
- * `classIsComponent` strips the whole `class` attribute unless EVERY
- * space-separated token is allowlisted. A selector naming one token of a
- * two-token class — `Diff: ".diff-line"` against an emitted
- * `class="diff-line diff-added"` — passes a string check and is still stripped in
- * the browser. Today's four entries are single-token, so that gap is latent; a
- * check that only holds while the data stays simple is the shape this file's own
- * history warns about.
+ * Derived over the Record rather than re-listing the four components:
+ * classifying a fifth (`Diff` is the obvious next one — `web-format.ts` already
+ * emits `class="diff"`) must fail HERE until its class is allowlisted, not
+ * silently in a browser nobody is looking at. Same default-deny reason
+ * `COMPONENT_FENCE_CHROME` is a `Record` and not a list.
  */
 test("componentClassAllowCoversOwnChrome: every own-chrome class SURVIVES the chat sanitizer", () => {
-  const FIXTURES = OWN_CHROME_FIXTURES;
+  // `Object.entries` widens the key to `string`; the fixture map is keyed by
+  // `ComponentName` on purpose (a typo'd key must be a compile error, not a
+  // silent coverage hole), so the narrowing happens once, here.
+  const owners = (Object.entries(COMPONENT_FENCE_CHROME) as [ComponentName, string | null][])
+    .filter(([, sel]) => sel !== null);
 
-  const owners = Object.entries(COMPONENT_FENCE_CHROME).filter(([, sel]) => sel !== null);
+  // Every chrome-owning component has a fixture. Derived from the RECORD, which
+  // is the half that can fail: the e2e sibling built its expectation from the
+  // fixture map itself and was a tautology — measured, dropping `Tab` left it
+  // green over three components.
+  expect(owners.map(([name]) => name).filter((name) => !OWN_CHROME_FIXTURES[name])).toEqual([]);
 
-  // Every chrome-owning component has a fixture — the coverage half, so the
-  // check cannot go quiet by omission.
-  expect(owners.map(([name]) => name).filter((name) => !FIXTURES[name])).toEqual([]);
-
-  const stripped: string[] = [];
-  for (const [name] of owners) {
-    const html = formatWebHtml(FIXTURES[name]!);
-    // `classIsComponent`'s rule, applied to what the renderer really emits: a
-    // class attribute survives only when EVERY token is allowlisted.
-    //
-    // ⚠️ The exemption is keyed on the TAG, matching `sanitizeHtml`'s own rule
-    // (`tag === "code" && attr.name === "class"`), NOT on the class containing a
-    // `language-*` token. The two coincide only because `codeFenceHtml` is the
-    // sole emitter of that prefix and only ever on a `<code>`; a chrome-owning
-    // component that stamped a language token on its OWN wrapper —
-    // `<div class="terminal language-bash">` — would have its whole attribute
-    // skipped by the content form, and the wrapper class it needs for
-    // `closest()` would be stripped in chat with this guard still green.
-    for (const m of html.matchAll(/<([a-zA-Z][\w-]*)\b[^>]*?\sclass="([^"]*)"/g)) {
-      if (m[1]!.toLowerCase() === "code") continue;
-      const tokens = m[2]!.trim().split(/\s+/).filter(Boolean);
-      // An EMPTY class attribute is stripped too (`[""].every` is false on the
-      // set), but stripping nothing from nothing breaks nothing.
-      if (tokens.length === 0) continue;
-      const bad = tokens.filter((t) => !COMPONENT_CLASS_ALLOW.has(t));
-      if (bad.length > 0) stripped.push(`${name}: class="${m[2]}" (unlisted: ${bad.join(", ")})`);
-    }
-  }
-  // Named in the failure: "AnnotatedCode: class=\"annotated-code-file\"" is the
+  const stripped = owners.flatMap(([name]) =>
+    strippedClassAttributes(name, formatWebHtml(OWN_CHROME_FIXTURES[name]!)),
+  );
+  // Named in the failure: `AnnotatedCode: class="annotated-code-file"` is the
   // whole diagnosis, and a bare length assertion would withhold it.
   expect(stripped).toEqual([]);
+});
+
+/**
+ * The exemption AXIS, pinned on synthetic markup rather than through the renderer.
+ *
+ * ⚠️ This is the case the round-4 commit said it could not isolate — WRONGLY. It
+ * only tried stamping a `language-*` token on the MAPPED wrapper, which also
+ * breaks the sibling "emits the class it is mapped to" assertion, so both forms
+ * went red and the difference stayed invisible. Put the token on a NON-mapped
+ * INNER wrapper and the sibling never notices: measured by making `web-format.ts`
+ * emit `<div class="annotated-code-file language-bash">`, the tag-keyed form
+ * fails and the content-keyed form passes 18/18. So the axis change is a real
+ * behaviour change with a demonstrable red, not the "analytical" one that commit
+ * claimed — and this test is the demonstration, kept so the claim cannot rot.
+ *
+ * It matters because `classIsComponent` requires EVERY token: that class would be
+ * stripped whole in chat, unstyling a header the block still renders.
+ */
+test("the exemption is keyed on the TAG — a non-code element carrying language-* is still checked", () => {
+  const html =
+    '<div class="annotated-code"><div class="annotated-code-file language-bash">a.ts</div>' +
+    '<pre><code class="language-ts">x</code></pre></div>';
+  // The `<code>` is exempt by tag; the div carrying the same prefix is not.
+  expect(strippedClassAttributes("probe", html)).toEqual([
+    'probe: class="annotated-code-file language-bash" (unlisted: language-bash)',
+  ]);
 });

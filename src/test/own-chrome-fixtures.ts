@@ -1,8 +1,12 @@
+import type { ComponentName } from "../format/markdown-ast.ts";
+
 /**
  * One markdown fixture per component that owns its own fence chrome.
  *
  * ONE map, because there were three: the unit guard's, the e2e own-chrome case's
- * and a third inline in `code-block-chrome.test.ts`. `COMPONENT_FENCE_CHROME`
+ * and `withFence` in `code-block-chrome.test.ts`. (The first version of this
+ * module said all three were merged while `withFence` was still a copy — which
+ * is exactly the drift below, inside the file documenting it.) `COMPONENT_FENCE_CHROME`
  * (`dashboard/views/components/code-block-chrome.ts`) is a `Record` precisely so
  * a new chrome-owning component cannot be forgotten — and hand-listing its
  * fixtures in each test rebuilt the forgettable list one layer up, which is the
@@ -18,10 +22,12 @@
  * A fixture that exercises fewer of a component's branches than the component
  * has is a fixture that can pass while the component is broken.
  *
- * Dependency-free (plain strings) so both a `bun test` and a Playwright spec can
- * import it without dragging a renderer or the DOM into the other's process.
+ * Dependency-free apart from the `ComponentName` TYPE, which is erased at build:
+ * both a `bun test` and a Playwright spec import this without dragging a renderer
+ * or the DOM into the other's process. The key type is not decoration — a typo'd
+ * key would otherwise be a silent coverage hole rather than a compile error.
  */
-export const OWN_CHROME_FIXTURES: Record<string, string> = {
+export const OWN_CHROME_FIXTURES: Partial<Record<ComponentName, string>> = {
   CodeTabs: '<CodeTabs>\n<Tab label="a">\n\n```ts\nconst x = 1;\n```\n\n</Tab>\n</CodeTabs>',
   // A <Tab> OUTSIDE a <CodeTabs> renders its own labelled box — the fourth
   // selector in the Record, and the one that had no fixture at all until now.

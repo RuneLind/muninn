@@ -33,6 +33,7 @@ import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { TEST_DATABASE_URL as TEST_DB } from "../src/test/test-db-url.ts";
 import { OWN_CHROME_FIXTURES, NO_OWN_CHROME_FIXTURE } from "../src/test/own-chrome-fixtures.ts";
+import { COMPONENT_FENCE_CHROME } from "../src/dashboard/views/components/code-block-chrome.ts";
 
 const PORT = e2ePort("chat-card-fences");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -72,6 +73,13 @@ let draftId = "";
  * likeliest setup failure — `waitUp()` timing out on a busy port or a muninn that
  * dies at boot — leaves rows on the table, and a flag set after the spawn would
  * still read `false` there and swallow a genuine cleanup failure over them.
+ *
+ * Residual, accepted and written down: a throw BETWEEN the inserts (schema drift,
+ * a constraint) leaves some rows with the flag still `false`, so a real cleanup
+ * failure over them is still swallowed. Bounded on both sides — `beforeAll`'s own
+ * leading DELETEs heal it on the next run, and `jira_drafts`, the one row nothing
+ * cascades, is written last — so the flag covers the failure that matters rather
+ * than every failure.
  */
 let seeded = false;
 
@@ -337,11 +345,16 @@ test.describe("chat card fences get the same chrome as every other bubble", () =
       return out;
     }, { fixtures: OWN_CHROME_FIXTURES, control: NO_OWN_CHROME_FIXTURE });
 
-    // Every chrome-owning component was actually exercised — the coverage half,
-    // so a fixture added to the shared map cannot be silently skipped here.
-    expect(Object.keys(counts).sort()).toEqual(
-      [...Object.keys(OWN_CHROME_FIXTURES), "Callout"].sort(),
-    );
+    // Every chrome-owning component was actually exercised. Derived from the
+    // RECORD, not from the fixture map: the first cut compared `counts`' keys
+    // against `OWN_CHROME_FIXTURES`, but `counts` is BUILT from that same map, so
+    // the two moved together and the assertion could not fail — measured,
+    // dropping `Tab` from the map left this green over three components.
+    const owners = Object.entries(COMPONENT_FENCE_CHROME)
+      .filter(([, sel]) => sel !== null)
+      .map(([name]) => name);
+    expect(owners.filter((name) => !(name in counts))).toEqual([]);
+    expect(Object.keys(counts)).toContain("Callout");
     for (const name of Object.keys(OWN_CHROME_FIXTURES)) {
       expect(`${name}: ${counts[name]!.bars} bars`).toBe(`${name}: 0 bars`);
     }

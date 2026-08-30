@@ -14,7 +14,8 @@
  *
  * ⚠️ The chat re-render passes this HTML through `sanitizeHtml`, which strips
  * `class` off a `<span>` unless the value is allowlisted. The `tok-*` names are
- * in `COMPONENT_CLASS_ALLOW` (`chat/views/components/component-class-allow.ts`) for exactly that reason —
+ * in `COMPONENT_CLASS_ALLOW` (`chat/views/components/component-class-allow.ts`)
+ * for exactly that reason —
  * a new token class added here without a matching entry there renders colorless
  * in chat while looking perfect in `/wiki`.
  *
