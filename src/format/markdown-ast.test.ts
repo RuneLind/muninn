@@ -9,6 +9,7 @@ import {
   parseChecklistItem,
   parseChecklist,
   scanInlineComponents,
+  type Block,
 } from "./markdown-ast.ts";
 
 describe("parseBlocks", () => {
@@ -567,5 +568,127 @@ describe("Fact: own-line = block, mid-text = inline, self-closing allowed", () =
     expect(scanInlineComponents('mid <FactCheck date="2026-07-29">x</FactCheck> line')).toEqual([
       { kind: "text", text: 'mid <FactCheck date="2026-07-29">x</FactCheck> line' },
     ]);
+  });
+});
+
+const NUL = String.fromCharCode(0);
+
+/**
+ * Every string anywhere in a parsed block tree.
+ *
+ * The NUL assertions below read THIS and not `JSON.stringify(blocks)` — that
+ * renders U+0000 as the six characters ` `, so a `.toContain(NUL)` over it
+ * can never match and every leak assertion written that way passes on the
+ * unfixed parser. (Written that way first; caught by the red run.)
+ */
+function allStrings(value: unknown): string[] {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) return value.flatMap(allStrings);
+  if (value && typeof value === "object") return Object.values(value).flatMap(allStrings);
+  return [];
+}
+const leaksNul = (blocks: Block[]) => allStrings(blocks).some((s) => s.includes(NUL));
+const hasCodeBlock = (blocks: Block[]) => blocks.some((b) => b.type === "code_block");
+
+// The fence grammar is a LINE grammar: an opener owns its line (<= 3 spaces of
+// indent), a closer is a bare run at least as long, the body is dedented by the
+// opener's indent. Before that, the extraction regex matched an opener anywhere
+// while the restore that turns a placeholder back into a block is anchored, so a
+// fence that did not own its line lost its code block and served a raw U+0000.
+describe("parseBlocks fence grammar", () => {
+  test("an indented fence is a code block, dedented by its opener's indent", () => {
+    // The ordinary "code block inside a numbered list" shape.
+    const blocks = parseBlocks("1. Step\n\n   ```bash\n   echo hi\n     nested\n   ```\n");
+    expect(blocks).toContainEqual({
+      type: "code_block",
+      lang: "bash",
+      code: "echo hi\n  nested",
+    });
+  });
+
+  test.each([1, 2, 3])("a fence indented by %i spaces is still a fence", (n) => {
+    const pad = " ".repeat(n);
+    expect(parseBlocks(`${pad}\`\`\`js\n${pad}x\n${pad}\`\`\``)).toEqual([
+      { type: "code_block", lang: "js", code: "x" },
+    ]);
+  });
+
+  test("a >= 4-space-indented fence is not a fence — and not a NUL either", () => {
+    // CommonMark calls this indented code. This AST has no indented-code block,
+    // so it degrades to a paragraph; what it must NEVER do is leak a placeholder.
+    const blocks = parseBlocks("    ```js\n    x\n    ```");
+    expect(hasCodeBlock(blocks)).toBe(false);
+    expect(leaksNul(blocks)).toBe(false);
+  });
+
+  test.each([
+    ["with a bare closer", "text ```ts\nconst a = 1;\n```"],
+    ["with a trailing-text closer", "text ```ts\nconst a = 1;\n``` more"],
+  ])("a fence delimiter starting mid-line is not a fence (%s)", (_name, md) => {
+    // The sibling leak: the placeholder landed on a line holding prose either
+    // side of it, and in the wiki reader the fence body's [[wikilink]] vanished.
+    // The bare-closer case is the one that reads the OPENER's line anchor —
+    // without it the closer rule alone already refuses the trailing-text case.
+    const blocks = parseBlocks(md);
+    expect(hasCodeBlock(blocks)).toBe(false);
+    expect(leaksNul(blocks)).toBe(false);
+    expect(allStrings(blocks).join("\n")).toContain("const a = 1;");
+  });
+
+  test("a 4-backtick fence is one code block, and 3 backticks do not close it", () => {
+    expect(parseBlocks("````\n```\nx\n```\n````")).toEqual([
+      { type: "code_block", lang: "", code: "```\nx\n```" },
+    ]);
+  });
+
+  test("a closer carrying trailing text does not close the fence", () => {
+    // CommonMark: a closing fence may be followed by spaces only. With no
+    // closer the fence is unclosed, which stays literal text — and, unlike
+    // before, keeps the whole line rather than a placeholder.
+    const blocks = parseBlocks("```js\nx\n``` and more");
+    expect(hasCodeBlock(blocks)).toBe(false);
+    expect(leaksNul(blocks)).toBe(false);
+    expect(allStrings(blocks).join("\n")).toContain("``` and more");
+  });
+
+  // Two PRESERVATION pins: both already held before the line walker and are
+  // here so the walker cannot quietly drop them. They do not go red on the old
+  // parser, by design.
+  test("an unclosed fence stays text — a half-streamed delta must not flicker", () => {
+    const blocks = parseBlocks("```js\nconst x =");
+    expect(hasCodeBlock(blocks)).toBe(false);
+    expect(leaksNul(blocks)).toBe(false);
+  });
+
+  test("a line whose info string holds a backtick opens nothing", () => {
+    // ```x``` is inline code the line happens to start with, not a fence. A
+    // REAL fence has to follow it: treated as an opener, that line swallows
+    // everything down to the next bare closer, so the js fence below it
+    // disappears and the prose becomes code — which is the failure this pins,
+    // and it is invisible when nothing closes.
+    const blocks = parseBlocks("```x```\nordinary prose\n\n```js\nreal code\n```");
+    expect(blocks.filter((b) => b.type === "code_block")).toEqual([
+      { type: "code_block", lang: "js", code: "real code" },
+    ]);
+    expect(allStrings(blocks).join("\n")).toContain("ordinary prose");
+    expect(leaksNul(blocks)).toBe(false);
+  });
+
+  test("lang is the info string's leading token, and the rest is dropped", () => {
+    expect(parseBlocks('```ts title="x"\nconst a = 1;\n```')).toEqual([
+      { type: "code_block", lang: "ts", code: "const a = 1;" },
+    ]);
+    expect(parseBlocks("```objective-c\nint x;\n```")).toEqual([
+      { type: "code_block", lang: "objective-c", code: "int x;" },
+    ]);
+  });
+
+  test("a forged code placeholder in the input is stripped, not dereferenced", () => {
+    // U+0000 is not typable prose, but a page's bytes can hold this shape — and
+    // dereferencing an index no fence wrote threw, killing the shared renderer
+    // for chat, Telegram, Slack and email at once.
+    expect(() => parseBlocks(`${NUL}CB5${NUL}`)).not.toThrow();
+    expect(leaksNul(parseBlocks(`${NUL}CB5${NUL}`))).toBe(false);
+    expect(() => parseBlocks(`\`\`\`js\nx\n\`\`\`\n\n${NUL}CB7${NUL}`)).not.toThrow();
   });
 });

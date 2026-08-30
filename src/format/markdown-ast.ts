@@ -476,8 +476,54 @@ export function parseChecklist(children: Block[]): { checked: boolean; text: str
   return ul.items.map(parseChecklistItem);
 }
 
-const CODE_BLOCK_RE = /```(\w*)\n([\s\S]*?)```/g;
+/**
+ * A fenced-code DELIMITER line: up to 3 leading spaces, a run of >= 3 backticks,
+ * then the rest of the line (an info string on an opener, nothing on a closer).
+ *
+ * The 0-3 space bound is CommonMark's and is the same one
+ * `dashboard/views/components/wiki-integrate.ts` already encodes in its own
+ * `FENCE_SHAPE_RE`, so the AST and that file's per-line "is this code?" mask
+ * agree about which lines are delimiters. Where this parser DIVERGES from
+ * CommonMark is what happens to a >= 4-space-indented ```` ``` ````: CommonMark
+ * calls it indented code, and this AST has no indented-code block at all, so it
+ * degrades to a paragraph rather than to a code block. Asserted, not assumed --
+ * see "4-space-indented fence" in markdown-ast.test.ts.
+ */
+const FENCE_LINE_RE = /^( {0,3})(`{3,})(.*)$/;
+
+/**
+ * The language taken off a fence's info string: its leading run of characters
+ * that are safe in an HTML attribute and a CSS class.
+ *
+ * Narrow ON PURPOSE, and the narrowness is load-bearing rather than tidy:
+ * `telegram-format.ts` interpolates `block.lang` into `class="language-${lang}"`
+ * with NO escaping, so a lang that could contain a quote would be an injection
+ * through every Telegram message. Pinned from the other end by the
+ * "lang can never break an HTML attribute" test, which runs hostile info
+ * strings through `parseBlocks` and checks the rendered Telegram output.
+ *
+ * It is wider than the `\w*` this replaced (which matched `objective` out of
+ * ```` ```objective-c ````) and, unlike it, a NON-matching info string no longer
+ * disqualifies the fence: ```` ```ts title="x" ```` is a `ts` fence now, where
+ * before it was not a fence at all and its body rendered as prose.
+ */
+const FENCE_LANG_RE = /^[A-Za-z0-9_+#.-]*/;
+
 const CODE_PLACEHOLDER_RE = /^\x00CB(\d+)\x00$/;
+
+/**
+ * A code-block placeholder appearing in the INPUT, before this parser makes any.
+ * Nothing legitimate produces one -- U+0000 is not typable prose -- but a page
+ * whose bytes happen to hold one used to deref `codeBlocks[n]` for an `n` no
+ * fence ever wrote and THROW (`undefined is not an object (evaluating
+ * 'cb.lang')`), taking down the shared renderer for chat, Telegram, Slack and
+ * email alike. Stripped on the way in, which also keeps such a page from serving
+ * a raw NUL. Deliberately narrower than "strip every U+0000": `wiki/render.ts`
+ * and `wiki/ask-render.ts` park their own `\x00`-delimited sentinels across this
+ * call, and stripping those would delete every wikilink on the page.
+ */
+const FORGED_CODE_PLACEHOLDER_RE = /\x00CB\d+\x00/g;
+
 const HR_RE = /^---+$/;
 const HEADING_RE = /^(#{1,6})\s+(.+)$/;
 const BLOCKQUOTE_RE = /^>\s?(.*)$/;
@@ -485,20 +531,109 @@ const UL_RE = /^[-*]\s+(.*)$/;
 const OL_RE = /^(\d+)\.\s+(.*)$/;
 
 export function parseBlocks(text: string): Block[] {
-  const normalized = text.replace(/\r\n/g, "\n");
+  const normalized = text
+    .replace(/\r\n/g, "\n")
+    .replace(FORGED_CODE_PLACEHOLDER_RE, "");
 
   // Extract code blocks first; their content must not be parsed as markdown.
-  // The extraction happens ONCE against `codeBlocks`, before any line-splitting;
-  // the array is then threaded through the recursive component-body parse so a
-  // `\x00CB{idx}\x00` placeholder inside a component still derefs the same array.
+  // The extraction happens ONCE against `codeBlocks`, before any further
+  // line-splitting; the array is then threaded through the recursive
+  // component-body parse so a `\x00CB{idx}\x00` placeholder inside a component
+  // still derefs the same array.
   const codeBlocks: { lang: string; code: string }[] = [];
-  const protectedText = normalized.replace(CODE_BLOCK_RE, (_match, lang: string, code: string) => {
-    const idx = codeBlocks.length;
-    codeBlocks.push({ lang, code: code.trimEnd() });
-    return `\x00CB${idx}\x00`;
-  });
+  const protectedText = extractFences(normalized, codeBlocks);
 
   return parseBlocksInner(protectedText, codeBlocks, 0);
+}
+
+/**
+ * Replace every fenced code block in `text` with a `\x00CB{idx}\x00` placeholder
+ * ON A LINE OF ITS OWN, pushing the block onto `codeBlocks`.
+ *
+ * This is a LINE WALKER, and that is the whole fix. The regex it replaced --
+ * ```` /```(\w*)\n([\s\S]*?)```/g ```` -- matched a fence opener ANYWHERE,
+ * while the restore that turns a placeholder back into a block is anchored
+ * (`CODE_PLACEHOLDER_RE`). Anything left on the placeholder's line therefore
+ * broke the restore and served the raw U+0000 to the browser, losing the code
+ * block outright. Two shapes did that, both ordinary and both measured across
+ * the two wikis on 2026-08-30 (1558 pages, 39 of them leaking 112 NULs):
+ *
+ *  - **An indented fence** -- the "code block inside a numbered list" shape.
+ *    The opener's leading spaces stayed on the placeholder's line.
+ *  - **A fence delimiter starting mid-line** -- ``` text ```ts ``` --  which
+ *    joined the prose either side onto the placeholder's line AND, in the wiki
+ *    reader, silently ate a `[[wikilink]]` in the fence body.
+ *
+ * So CommonMark's fence grammar is what is implemented here, not just a laxer
+ * placeholder test: an opener owns its line (<= 3 spaces of indent), a closer is
+ * a bare run of the same character at least as long, and the body is dedented by
+ * the opener's own indent. Three deliberate consequences, each with a test:
+ *
+ *  - A ```` ```` ````-long fence closes only on >= 4 backticks, so a 4-backtick
+ *    fence is a real block instead of the `<code>`-wrapped placeholder it used
+ *    to render as (the old regex started its match one backtick in).
+ *  - A closer may not carry trailing text, per CommonMark. ```` ```js ````
+ *    ... ```` ``` and more ```` is now an UNCLOSED fence.
+ *  - An unclosed fence stays literal text, which is the pre-existing behavior
+ *    (the old regex needed a closer to match at all) and is what keeps a
+ *    half-streamed chat delta from flickering into a code block.
+ *
+ * Tildes (`~~~`) are NOT fences here. They were not before either, and neither
+ * wiki contains one (measured, same sweep) -- adding them is a separate change
+ * with its own corpus diff, not a free ride on this one.
+ */
+function extractFences(text: string, codeBlocks: { lang: string; code: string }[]): string {
+  const lines = text.split("\n");
+  const out: string[] = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const open = lines[i]!.match(FENCE_LINE_RE);
+    const info = open?.[3] ?? "";
+    // Per CommonMark a BACKTICK fence's info string may not contain a backtick,
+    // so an ordinary prose line that opens with inline code -- ```` ```x``` ```` --
+    // is not a fence. Without this, such a line opened a fence that swallowed
+    // the rest of the page up to the next delimiter.
+    if (!open || info.includes("`")) {
+      out.push(lines[i]!);
+      i++;
+      continue;
+    }
+
+    const indent = open[1]!.length;
+    const runLen = open[2]!.length;
+    let close = -1;
+    for (let j = i + 1; j < lines.length; j++) {
+      const c = lines[j]!.match(FENCE_LINE_RE);
+      if (c && c[2]!.length >= runLen && c[3]!.trim() === "") {
+        close = j;
+        break;
+      }
+    }
+    if (close === -1) {
+      out.push(lines[i]!);
+      i++;
+      continue;
+    }
+
+    const body = lines.slice(i + 1, close).map((l) => dedentFenceLine(l, indent));
+    const idx = codeBlocks.length;
+    codeBlocks.push({ lang: info.match(FENCE_LANG_RE)![0], code: body.join("\n").trimEnd() });
+    out.push(`\x00CB${idx}\x00`);
+    i = close + 1;
+  }
+
+  return out.join("\n");
+}
+
+/** Strip up to `indent` leading SPACES from a fence body line -- CommonMark's
+ *  rule, so an indented fence's code is not shifted right by its own indent.
+ *  Up to, not exactly: a body line indented less than its opener keeps what it
+ *  has rather than losing a non-space character. */
+function dedentFenceLine(line: string, indent: number): string {
+  let n = 0;
+  while (n < indent && line[n] === " ") n++;
+  return line.slice(n);
 }
 
 /** Parse already-fence-extracted text into blocks. `codeBlocks` is the shared

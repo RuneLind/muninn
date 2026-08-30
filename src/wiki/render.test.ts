@@ -405,13 +405,16 @@ describe("renderWikiHtml: a wikilink inside code is CODE", () => {
       expect(html).toBe('<code class="fileref"><code>a</code> [[Claude Code]] <code>b</code></code>');
     });
 
-    test("a mid-line fence delimiter: the renderer joins the two sides onto ONE line", () => {
-      // `parseBlocks` swaps the fence for a placeholder, so the text before the
-      // opener and after the closer end up on one line where two lone backticks
-      // pair — a line-wise scan of the body sees neither.
+    test("a line SHAPED like a fence delimiter that is prose, and pairs backticks", () => {
+      // Neither line here opens a fence: the first does not start with the run,
+      // and the third's info string holds a backtick (CommonMark). So the third
+      // line stays PROSE, its two backticks pair into an inline span, and the
+      // sentinel lands inside it — while a line-wise scan of the markdown reads
+      // that same line as a delimiter and gets the region wrong. The rendered
+      // output is what settles it, which is the whole point of this seam.
       const html = renderWikiHtml("a ` ```\ncode\n``` [[Claude Code]] ` b", resolve);
+      expect(html).toContain("<code> [[Claude Code]] </code>");
       expect(html).not.toContain("wiki-link");
-      expect(html).toContain("[[Claude Code]]");
     });
   });
 

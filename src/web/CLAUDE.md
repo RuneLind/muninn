@@ -2,6 +2,45 @@
 
 `src/web/web-format.ts` converts AI markdown to HTML for web chat (server side; client mirror in `src/chat/views/components/web-format-client.ts`). This file also documents the **fact-check annotation pair**, whose code spans `src/web/`, `src/format/`, `src/wiki/`, and `src/dashboard/` — this is the one authority page for it.
 
+## What counts as a fenced code block
+
+`parseBlocks` (`src/format/markdown-ast.ts`) extracts every fence into a
+`codeBlocks` array and leaves a `\x00CB<idx>\x00` placeholder, which the block
+walker turns back into a `code_block` only when the placeholder is the WHOLE line
+(`CODE_PLACEHOLDER_RE` is anchored). The extractor is therefore a **line walker**,
+not a regex sweep — anything left on a placeholder's line breaks the restore and
+serves a raw U+0000 to the browser with the code block gone. Measured across the
+two wikis on 2026-08-30 before the walker landed: 39 of 1558 pages leaked 112
+NULs, from two ordinary shapes — an indented fence (the "code block inside a
+numbered list") and a fence delimiter starting mid-line.
+
+The grammar is CommonMark's, and the parts that bite:
+
+- An **opener owns its line**, with at most 3 leading spaces. A 4th space is
+  indented code to CommonMark; this AST has no indented-code block, so such a
+  line degrades to a paragraph rather than to a fence.
+- A **closer is a bare run** of the same character, at least as long as the
+  opener's, with nothing but spaces after it. So a 4-backtick fence really does
+  need 4 backticks to close, and ```` ``` and more ```` closes nothing.
+- The **body is dedented** by the opener's own indent.
+- A backtick fence's **info string may not contain a backtick**, so a prose line
+  that starts with inline code (```` ```x``` ````) opens nothing. Without that
+  rule it swallows the page down to the next bare closer.
+- An **unclosed fence stays literal text**. Pre-existing behaviour, and what
+  keeps a half-streamed chat delta from flickering into a code block.
+- Tildes (`~~~`) are **not** fences here. Neither wiki contains one; adding them
+  is a separate change with its own corpus diff.
+
+Two things ride on this that are easy to miss. `lang` is the info string's
+leading `[A-Za-z0-9_+#.-]*` run and nothing wider, because
+`bot/telegram-format.ts` interpolates it into `class="language-${lang}"` with no
+escaping — pinned by the hostile-info-string cases in
+`markdown-all-platforms.test.ts`, not by this paragraph. And a `\x00CB<n>\x00`
+appearing in the INPUT is stripped: dereferencing an index no fence wrote used to
+throw and take down the shared renderer for chat, Telegram, Slack and email at
+once. The strip is deliberately narrow — `wiki/render.ts` and `wiki/ask-render.ts`
+park their own `\x00` sentinels across this call.
+
 ## Syntax highlighting in fenced code blocks
 
 `code_block` (and `AnnotatedCode`, through the shared `codeFenceHtml`) runs the body through `highlightCode` (`src/format/highlight.ts`), which emits `<span class="tok-*">` for seven token classes; the colors are `--tok-*` in `shared-styles.ts`, so both themes come from one palette and a theme flip costs nothing at render time. Languages are the ones the wikis actually use (ts/js/kotlin/java, sql, shell, json, yaml); `html`, `mermaid`, `diff` and anything unknown fall through to plain `escapeHtml`.
@@ -54,9 +93,13 @@ divergences, all four now regression tests in `render.test.ts`:
 - **The same shift read backwards**: a link the scan believed was inside code
   stopped being parked, and a working prose link rendered as literal brackets.
   A regression, in the direction the guard exists to prevent.
-- **A fence delimiter starting or ending mid-line.** The renderer swaps the fence
-  for a placeholder and joins the text either side onto ONE line, where two lone
-  backticks pair; a line-wise scan sees neither.
+- **A line SHAPED like a fence delimiter that is not one.** A backtick run that
+  does not start its line, or whose info string holds a backtick, opens no fenced
+  block (CommonMark), so the line stays PROSE and its own backticks pair into an
+  inline span; a line-wise scan reads the same line as a delimiter and puts the
+  region somewhere else. (Before `parseBlocks`' extractor became a line walker
+  the same input diverged for a different reason: the mid-line placeholder joined
+  the text either side onto one line.)
 
 ⚠️ **What reading the output costs instead: the scan has to know every container
 the renderer uses for code, and there are TWO.** The first revision assumed one,
