@@ -7,7 +7,7 @@
  * watcher (report-only) and the `/api/wiki/linter-findings` route both call
  * `lintWiki`.
  *
- * Five checks, each finding `{ check, relPath, message, detail? }`:
+ * Seven checks, each finding `{ check, relPath, message, detail? }`:
  *  1. broken-link    — [[wikilink]] / relative .md link that resolves to no page.
  *  2. orphan         — a page with no inbound links (reserved files discounted as
  *                      both subjects and sole-linkers).
@@ -26,6 +26,11 @@
  *                      The write side that must not produce it, and the whole
  *                      rule: `src/web/CLAUDE.md`; scheduling + the measured
  *                      numbers: `src/watchers/CLAUDE.md`.
+ *  7. stem-collision — two same-stem MARKDOWN pages, one of which the store
+ *                      therefore DROPPED from the index (precedence `.md` > `.mdx`).
+ *                      The continuous regression guard behind the apply path's
+ *                      approve-time refusal; `checkStemCollisions` states what
+ *                      counts as a stem and the three shapes deliberately excluded.
  *
  * The store's index builder silently drops unresolved link targets
  * (`store.ts:389-399`), so broken-link recomputes resolution here from the raw
@@ -38,6 +43,7 @@ import {
   extractWikilinks,
   extractMarkdownLinks,
   firstDanglingWikilinkOpen,
+  isMarkdownWikiPath,
   parseFrontmatter,
   normalizeRelPath,
 } from "./store.ts";
@@ -60,6 +66,7 @@ export const LINT_CHECKS = [
   "missing-sources",
   "index-truncation",
   "nested-annotation",
+  "stem-collision",
 ] as const;
 export type LintCheck = (typeof LINT_CHECKS)[number];
 
@@ -431,6 +438,74 @@ function checkOrphans(index: WikiIndex): LintFinding[] {
 }
 
 /**
+ * Two same-stem MARKDOWN pages of DIFFERENT extensions — the shape the gardener's
+ * apply path now refuses at approve time, reported here for anything that got in
+ * another way (a hand-authored file, a rename, an older applied proposal).
+ *
+ * **What a "stem" is here, and what is deliberately NOT reported.** A page's stem
+ * is its bare filename (`WikiPageMeta.name`), matched case-insensitively across the
+ * WHOLE wiki — Obsidian has one title namespace, so folders do not separate stems.
+ * But two same-stem pages are only a HYGIENE problem when the wiki cannot show both:
+ *
+ *  - **Cross-extension (reported).** `store.ts` resolves these by precedence
+ *    (`.md` > `.mdx` > `.html`) and DROPS the loser from the index entirely: it is
+ *    unreachable in the reader, contributes no backlinks, and `[[Stem]]` silently
+ *    resolves to the winner. That is a page that has effectively disappeared, which
+ *    is exactly the measured 2026-08-29 failure (`sources/<Stem>.mdx` displaced by an
+ *    applied `entities/<Stem>.md`). The dropped page is not in `index.pages` at all,
+ *    so this check reads `index.shadowed` — the store's own record of what it removed.
+ *  - **Same-extension (NOT reported).** `store.ts` calls these "two real pages that
+ *    simply share a filename" and keeps BOTH, disambiguating them with a
+ *    `displayTitle` prefix — they are not in `index.shadowed` at all, so this is a
+ *    statement of intent rather than a filter. A supported shape and a common one;
+ *    the counts live with the rest of this check's measurements in
+ *    `src/watchers/CLAUDE.md`. The write-side guard (`findStemTwin`) allows the
+ *    cross-folder case for the same reason.
+ *  - **Reserved infrastructure (NOT reported).** `index`/`log`/`CLAUDE` are wiki
+ *    plumbing, one per folder by design and never wikilink targets; the same
+ *    exclusion `checkStaleUpdated` and `checkMissingSources` make, and the same set
+ *    `findStemTwin` exempts.
+ *  - **A shadowed `.html` EXPLAINER (NOT reported) — and this is where the scope
+ *    deliberately DIVERGES from the write guard,** which does count `.html`. The two
+ *    answer different questions: the guard refuses a write that would CREATE a
+ *    shadow, this check reports shadows that already exist. Measured 2026-08-30
+ *    across the six real roots, `.md`-over-`.html` is the ONLY live shape and every
+ *    instance of it is a pre-existing pair a human chose to keep — an `.html`
+ *    explainer standing beside a same-stem `.md` page. Including them would ship
+ *    this check permanently red on three of the six wikis and bury the regression it
+ *    exists to catch, while costing the guard nothing on a wiki nobody is writing
+ *    to. Counts per root: `src/watchers/CLAUDE.md`.
+ *
+ *    NB the rationale this comment used to give for the exclusion — that the pairs
+ *    are MDX-compile-pipeline output "which `store.ts` already handles with
+ *    `pipelineSourceSiblingHtml`" — is false, and was checked: that helper drops a
+ *    `<dir>/src/<stem>.mdx` SOURCE and never touches an `.html`, none of the live
+ *    `.html` twins has such a source or the generated marker, and one of them is
+ *    cross-folder. The pairs are hand-authored. Reporting them properly is worth its
+ *    own check with its own remedy; it is not this one.
+ *
+ * The finding is filed against the SHADOWED page — the one that vanished — because
+ * that is the file whose owner needs to act.
+ */
+function checkStemCollisions(index: WikiIndex): LintFinding[] {
+  const out: LintFinding[] = [];
+  for (const s of index.shadowed ?? []) {
+    if (reservedBasename(s.relPath)) continue;
+    // Only the shadowed page is tested: `shadowedBy` won on a strictly LOWER
+    // `extRank`, so a markdown loser can only ever have been displaced by an `.md`
+    // — testing it too was an unreachable clause, not a second condition.
+    if (!isMarkdownWikiPath(s.relPath)) continue;
+    out.push({
+      check: "stem-collision",
+      relPath: s.relPath,
+      message: `Shadowed by the same-stem page "${s.shadowedBy}" — this page is dropped from the wiki index and [[${s.stem}]] resolves to the other one`,
+      detail: s.shadowedBy,
+    });
+  }
+  return out;
+}
+
+/**
  * Run every hygiene check over a built wiki index. Returns findings + per-check
  * counts + a timestamp. Report-only: nothing is written. `deps.readFile` is
  * injectable for tests; it defaults to reading the file off disk.
@@ -469,6 +544,9 @@ export async function lintWiki(
   }
 
   findings.push(...checkOrphans(index));
+  // Index-level, not per-page: the subject of this finding is a page the loop
+  // above never sees — the store dropped it from `index.pages`.
+  findings.push(...checkStemCollisions(index));
 
   // Pre-seeded by a typed loop rather than `Object.fromEntries(...) as Record<…>`
   // — the cast is what let a partially-seeded map type-check as complete.

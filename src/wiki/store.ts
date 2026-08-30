@@ -498,6 +498,31 @@ export interface WikiIndex {
    * valid; `buildWikiIndex` always sets it.
    */
   trails?: WikiTrail[];
+  /**
+   * Pages DROPPED from `pages` by the same-stem precedence rule below (`.md` >
+   * `.mdx` > `.html`), each with the page that displaced it. Recorded because the
+   * drop is otherwise invisible to every consumer — the page is simply gone from
+   * the index — and the linter's `stem-collision` check has no other way to see the
+   * one shape that actually breaks: a wikilink target that resolves to a different
+   * page than the file the reader expects, with the loser unreachable in the reader.
+   * Empty on a healthy wiki. Optional so hand-built test indexes stay valid;
+   * `buildWikiIndex` always sets it.
+   *
+   * **Deterministic**: sorted by `relPath`, and each entry's `shadowedBy` is picked
+   * from a relPath-sorted scan — a human reads this through the linter, and an
+   * attribution that flips between builds is a bug report nobody can reproduce.
+   */
+  shadowed?: ShadowedPage[];
+}
+
+/** A page the same-stem precedence rule dropped, and the page that displaced it. */
+export interface ShadowedPage {
+  /** The dropped page's wiki-relative path. */
+  relPath: string;
+  /** The wiki-relative path of the higher-precedence same-stem page that won. */
+  shadowedBy: string;
+  /** The shared bare stem (the page `name`). */
+  stem: string;
 }
 
 /** Canonical graph key for a page path: posix-normalized, lowercased relPath. */
@@ -510,12 +535,68 @@ export function normalizeRelPath(relPath: string): string {
  * `.mdx` (1) beats `.html`/explainer (2). Lower wins. Used to drop the losing
  * page when two DIFFERENT extensions share a stem (a `.md` and a same-stem `.mdx`
  * are one authoring mistake, not two pages).
+ *
+ * Exported because the gardener's write-side stem guard (`findStemTwin`,
+ * `src/gardener/source-drafter.ts`) has to answer "would this write shadow, or be
+ * shadowed by, an existing page?" — which is a question about THIS rule. A second
+ * spelling of the ranking on the write side is exactly how a guard ends up inert
+ * for the pair the read side actually drops.
  */
-function extRank(relPath: string): number {
+export function extRank(relPath: string): number {
   const l = relPath.toLowerCase();
   if (l.endsWith(".mdx")) return 1;
   if (l.endsWith(".md")) return 0;
   return 2; // .html explainer
+}
+
+/**
+ * Canonical key for a page STEM comparison — Unicode **NFC** then lowercase.
+ *
+ * The NFC fold is not cosmetic: macOS writes decomposed (NFD) filenames while a
+ * title typed on the same keyboard, or emitted by a model, is composed, so a
+ * bare `.toLowerCase()` reads an on-disk `Blåbær.mdx` and a queried `Blåbær` as
+ * two different stems — measured, and the same class `coverageKey`
+ * (`index-coverage.ts`) already folds for the huginn↔disk comparison. Every stem
+ * comparison in the shadow bookkeeping below and in the gardener's write-side
+ * twin guard runs through this one function.
+ *
+ * NB the fold is deliberately NOT case-preserving-aware: two files whose stems
+ * differ only in CASE are one stem here, which matches how `resolve()` and the
+ * precedence rule have always behaved (and how APFS behaves by default).
+ */
+export function stemKey(stem: string): string {
+  return stem.normalize("NFC").toLowerCase();
+}
+
+/**
+ * The bare page stem for a wiki-relative path — the value `buildWikiIndex` stores
+ * as `WikiPageMeta.name`. One spelling, because a caller that needs a stem for a
+ * page the index has not built yet (the gardener's apply-time guard, working from
+ * a proposal's `targetPath`) must derive it exactly as the index would; a re-typed
+ * `/\.mdx?$/i` at the call site is a copy waiting to drift.
+ */
+export function wikiPageStem(relPath: string): string {
+  return path.posix.basename(relPath).replace(/\.mdx?$/i, "");
+}
+
+/**
+ * Is this a MARKDOWN wiki page (`.md` or `.mdx`) rather than a standalone `.html`
+ * explainer? The one spelling of that test, so "which pages share one title
+ * namespace" cannot be answered two ways. Lives here beside {@link extRank}, which
+ * is the rule it qualifies. Two callers: `resolve()`'s path-form branch below, and
+ * the linter's `stem-collision` check (`lint.ts`).
+ *
+ * **The case fold is defensive and currently unreachable**, which is worth stating
+ * because the name invites the opposite reading. `resolve()` lowercases its target
+ * before calling; the linter passes a raw on-disk relPath, but that path reached
+ * the index through the case-SENSITIVE discovery glob (`**​/*.{md,mdx,html}`), so no
+ * indexed page carries an uppercase extension in the first place. It is kept so the
+ * predicate answers the question its name asks for any path a future caller hands
+ * it, and pinned in `store.test.ts` / `lint.test.ts` so that stays deliberate.
+ */
+export function isMarkdownWikiPath(relPath: string): boolean {
+  const l = relPath.toLowerCase();
+  return l.endsWith(".md") || l.endsWith(".mdx");
 }
 
 /**
@@ -1793,7 +1874,7 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
       // Native `.mdx` pages take the same branch as `.md` — same frontmatter,
       // same wikilink extraction, same graph membership. The only difference is
       // the extension stripped off the stem.
-      const name = path.basename(relPath).replace(/\.mdx?$/i, "");
+      const name = wikiPageStem(relPath);
       const meta: WikiPageMeta = {
         name,
         title: titleFromFrontmatter(fm, name, readerConfig),
@@ -1942,25 +2023,53 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
   // guard in `scripts/mdx-explainer/checks.ts` (a case-insensitive stem-collision
   // check that refuses to compile two sources onto one output stem); here we can't
   // refuse — the files already exist — so we resolve the ambiguity by precedence.
+  //
+  // **Sorted FIRST, and that is load-bearing for the record below.** `pages` is in
+  // `Promise.all` completion order at this point, and the winner scan keeps the
+  // FIRST page it sees at the best rank — so with two same-rank candidates (a
+  // `.md` in two folders shadowing one `.mdx`) `shadowedBy` named whichever file
+  // the filesystem happened to return first, and flipped between runs (measured
+  // across 4 consecutive builds of one unchanged wiki). The dropped SET was always
+  // right; the attribution was not, and it is what the linter reports to a human.
+  pages.sort((a, b) => a.relPath.localeCompare(b.relPath));
+
   const bestRankByStem = new Map<string, number>();
+  const winnerByStem = new Map<string, WikiPageMeta>();
   for (const p of pages) {
-    const key = p.name.toLowerCase();
+    const key = stemKey(p.name);
     const rank = extRank(p.relPath);
     const cur = bestRankByStem.get(key);
-    if (cur === undefined || rank < cur) bestRankByStem.set(key, rank);
+    if (cur === undefined || rank < cur) {
+      bestRankByStem.set(key, rank);
+      winnerByStem.set(key, p);
+    }
   }
+  // The drop is recorded, not just warned about: a log line reaches nobody the
+  // next morning, and the dropped page is gone from every consumer's view of the
+  // wiki — including the linter's, which is exactly the check that should report
+  // it. See `WikiIndex.shadowed`.
+  const shadowed: ShadowedPage[] = [];
   for (let i = pages.length - 1; i >= 0; i--) {
     const p = pages[i]!;
-    const best = bestRankByStem.get(p.name.toLowerCase())!;
+    const key = stemKey(p.name);
+    const best = bestRankByStem.get(key)!;
     if (extRank(p.relPath) > best) {
       log.warn("wiki page {relPath} shadowed by a higher-precedence same-stem page — dropped", {
         relPath: p.relPath,
       });
+      shadowed.push({
+        relPath: p.relPath,
+        shadowedBy: winnerByStem.get(key)!.relPath,
+        stem: p.name,
+      });
       pages.splice(i, 1);
     }
   }
-
-  pages.sort((a, b) => a.relPath.localeCompare(b.relPath));
+  // Walked backwards above (so the splice can't skip an entry), so the report is
+  // in reverse relPath order — sorted explicitly rather than reversed, because the
+  // guarantee wanted here is "the same order every build" and that must not depend
+  // on the loop direction of the code above it.
+  shadowed.sort((a, b) => a.relPath.localeCompare(b.relPath));
 
   // Same-EXTENSION same-stem pages in different folders are NOT dropped above —
   // they are two real pages that simply share a filename, and on the `memory`
@@ -2054,7 +2163,12 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
     // `.mdx` extension is used as-is; a bare path implies `.md` first, then a
     // native `.mdx` page (so [[blogs/src/foo]] finds foo.mdx).
     if (t.includes("/")) {
-      if (t.endsWith(".md") || t.endsWith(".mdx")) return byRelPath.get(normalizeRelPath(t));
+      // NB `t` is already lowercased above, so calling the shared predicate here is
+      // a NAMING change, not a behaviour change (it was `t.endsWith(".md") ||
+      // t.endsWith(".mdx")` inline). Worth stating: neither this call nor the
+      // linter's reaches the predicate's case fold — the discovery glob below is
+      // case-sensitive, so no page in the index carries an uppercase extension.
+      if (isMarkdownWikiPath(t)) return byRelPath.get(normalizeRelPath(t));
       return (
         byRelPath.get(normalizeRelPath(`${t}.md`)) ??
         byRelPath.get(normalizeRelPath(`${t}.mdx`))
@@ -2107,6 +2221,7 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
     readerConfig,
     folderLabels,
     trails,
+    shadowed,
   };
 }
 

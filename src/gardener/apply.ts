@@ -30,7 +30,8 @@ import type { WikiProposal } from "../db/wiki-proposals.ts";
 import type { WikiIndex } from "../wiki/store.ts";
 import { containDraftBodyLinks, isPathConfined, stripOwnedAliases } from "./draft.ts";
 import { buildIndexEntry, buildSeeAlsoEdit, insertIndexLine, selectWirablePages } from "./wire.ts";
-import { parseFrontmatter } from "../wiki/store.ts";
+import { parseFrontmatter, wikiPageStem } from "../wiki/store.ts";
+import { findStemTwin, stemCollisionMessage } from "./source-drafter.ts";
 import { stripFrontmatter } from "../wiki/render.ts";
 import { runWikiWriteExclusive } from "../wiki/queue.ts";
 import {
@@ -53,6 +54,24 @@ export type ApplyOutcome =
    * the write-owning instance can still approve it later.
    */
   | { outcome: "forbidden"; reason: string }
+  /**
+   * A stem collision the in-queue re-check caught (see step 2c). A REFUSAL on
+   * policy, like `forbidden` — nothing was written, and the remedy (rename one of
+   * the two pages, then approve) belongs to the reviewer.
+   *
+   * **This variant is why the guard's original "no new `ApplyOutcome`" constraint
+   * no longer binds.** That constraint was written for the ROUTE's pre-CAS guard,
+   * where the row is still a `draft` and refusing costs nothing; its stated
+   * rationale was that a refusal reaching the apply stage arrives with the row
+   * already `approved`, and any new variant would strand it in `approved` with no
+   * verb behind it — the gate renders Approve/Reject on `draft` and nothing else.
+   * The route now answers this variant by CAS-ing the row back to `draft`
+   * (`revertWikiProposalToDraft`), which removes the stranding that was the whole
+   * objection. Mapping it to `error` instead — what this did in its first cut —
+   * lands the row terminal on a policy answer: no verb, no remedy, a draft burned
+   * because two people clicked Approve at the same moment.
+   */
+  | { outcome: "collision"; reason: string }
   | { outcome: "error"; reason: string };
 
 export interface ApplyDeps {
@@ -268,8 +287,11 @@ async function applyInner(
 ): Promise<ApplyOutcome> {
   const domain: "ai" | "life" = proposal.targetPath.startsWith("life/") ? "life" : "ai";
 
-  // The fresh index backs both the update-target check (1a) and the apply-time
-  // alias re-strip (1c) — create mode needs it too now.
+  // This index backs the update-target check (1a), the alias re-strip (1c) and
+  // the create-mode collision re-check (2c). It is the TTL cache, NOT a forced
+  // rebuild — in-queue freshness comes from the previous queue holder's step-5
+  // `refreshIndex()`, so it is current w.r.t. every apply-path write; an
+  // off-path write inside the TTL window is the documented residual.
   const index = await deps.getWikiIndex();
 
   // 1a. Update mode: the target must be a REAL indexed wiki page — look it up in
@@ -301,7 +323,7 @@ async function applyInner(
     return { outcome: "error", reason: `path confinement failed for "${proposal.targetPath}"` };
   }
 
-  // 1c. Alias-hijack re-strip against the FRESH index (defense in depth — the
+  // 1c. Alias-hijack re-strip against the in-queue index (defense in depth — the
   //     runner stripped at persist time, but a canonical page created while the
   //     proposal awaited review must still win its aliases). The target path
   //     itself is always "self": on a create re-run after a crash-after-write,
@@ -318,7 +340,7 @@ async function applyInner(
     });
   }
 
-  // 1d. Body-link containment re-run against the FRESH index (TOCTOU symmetry with
+  // 1d. Body-link containment re-run against the in-queue index (TOCTOU symmetry with
   //     the alias re-strip): a page linked in the body that was deleted between
   //     draft and approve must not ship as a dangling wikilink. Null index ⇒ skip
   //     (can't tell resolvable from phantom; don't de-link a whole page on an index
@@ -381,6 +403,47 @@ async function applyInner(
     }
   } else if (current !== null) {
     return { outcome: "stale", reason: "target path already exists" };
+  }
+
+  // 2c. Stem collision, re-checked INSIDE the write queue. The approve route
+  //     refuses this before its draft→approved CAS, but that guard sits OUTSIDE
+  //     this queue and each gate card only disables its OWN buttons — so two
+  //     colliding proposals approved together both pass it, and the second write
+  //     lands the twin the first one's refusal was for. Measured. This is also
+  //     what covers the one case the route guard deliberately skips: an `approved`
+  //     crash-recovery re-run whose twin appeared inside the crash window.
+  //
+  //     `index` is the same object steps 1a/1c/1d use and is fetched in-queue.
+  //     Freshness for the race this covers comes from the PREVIOUS apply, not from
+  //     a refresh here: every write path below awaits `deps.refreshIndex()` (step 5,
+  //     and step 2a's re-run branch) before releasing the queue, so the second of
+  //     two concurrent approves reads a cache the first one refreshed after writing.
+  //     NB `caches.set` is last-writer-wins with no scannedAt monotonicity, so a
+  //     `refresh: true` build that STARTED before that refresh (the route's own
+  //     pre-CAS guard runs one per approve, outside the queue) and finishes after
+  //     it can clobber the fresh entry with a pre-write snapshot — a latent,
+  //     unreproduced inversion needing I/O contention; accepted as residual.
+  //     A null index (outage) degrades to no check, like every other index-dependent
+  //     step here. Residual, accepted: if a twin lands OFF-PATH (a pull, a hand edit)
+  //     inside the TTL window and this apply is an `approved` re-run — the one case
+  //     the route's own `refresh: true` guard skips — this check reads a warm cache
+  //     and misses it. The route guard covers every `draft` approve.
+  //
+  //     The outcome is the `collision` variant, NOT `error`: nothing was written and
+  //     the remedy is the reviewer's, so the route CASes the row back to `draft` and
+  //     answers 409 with this sentence. See `ApplyOutcome.collision` for why the
+  //     original "no new variant" constraint stopped binding once the row is
+  //     reverted rather than left in `approved`.
+  if (proposal.mode === "create") {
+    const stem = wikiPageStem(proposal.targetPath);
+    const blocking = findStemTwin(index, stem, proposal.targetPath);
+    if (blocking) {
+      log.warn("Wiki-gardener apply refused for {path}: stem is already owned by {blocking}", {
+        path: proposal.targetPath,
+        blocking: blocking.relPath,
+      });
+      return { outcome: "collision", reason: stemCollisionMessage(blocking, stem) };
+    }
   }
 
   // 3. Write the draft.

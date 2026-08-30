@@ -7,6 +7,8 @@ import {
   MIN_SOURCE_BODY_CHARS,
   COLLISION_SKIP_SENTINEL,
   sanitizeTitleOverride,
+  findCollidingPage,
+  findStemTwin,
   titleMatchKey,
   type DraftSourcePageDeps,
   type SourceDraftInput,
@@ -687,5 +689,285 @@ describe("titleMatchKey", () => {
   test("titles a reader would call different still differ", () => {
     expect(titleMatchKey("Graph Engineering")).not.toBe(titleMatchKey("Graph Engineering v2"));
     expect(titleMatchKey("RAG")).not.toBe(titleMatchKey("RAGs"));
+  });
+});
+
+/**
+ * The stem-twin resolver every writer shares. It blocks on SHADOWING (a different
+ * `extRank`, `.html` included) or on a same-folder stem, and deliberately ALLOWS a
+ * same-extension twin in another folder — the shape `store.ts` supports with a
+ * `displayTitle` prefix and mimir carries 4 groups of. See `findStemTwin`'s doc
+ * comment for why each clause is where it is.
+ */
+describe("findStemTwin / findCollidingPage — which same-stem pages count", () => {
+  const src = (relPath: string, title: string) =>
+    page({ relPath, title, name: title, type: "source" });
+
+  test("CROSS-FOLDER .mdx twin collides (the measured shape: sources/*.mdx vs entities/*.md)", () => {
+    const index = fakeIndex([src("sources/Aurora Ledger Protocol.mdx", "Aurora Ledger Protocol")]);
+    const hit = findStemTwin(index, "Aurora Ledger Protocol", "entities/Aurora Ledger Protocol.md");
+    expect(hit?.relPath).toBe("sources/Aurora Ledger Protocol.mdx");
+  });
+
+  test("SAME-FOLDER .mdx twin collides — caught by NEITHER branch before", () => {
+    // `resolveRelPath` is exact-path with no extension tolerance, so
+    // `sources/X.md` never resolved `sources/X.mdx`, and the twin test excluded
+    // `.mdx`. The source drafter writes `.mdx` and the apply path writes `.md`,
+    // so this pair is a real shape, not a hypothetical.
+    const index = fakeIndex([src("sources/Aurora Ledger Protocol.mdx", "Aurora Ledger Protocol")]);
+    const hit = findStemTwin(index, "Aurora Ledger Protocol", "sources/Aurora Ledger Protocol.md");
+    expect(hit?.relPath).toBe("sources/Aurora Ledger Protocol.mdx");
+  });
+
+  test("the pre-existing .md twin still collides (no behaviour retired)", () => {
+    const index = fakeIndex([
+      page({
+        relPath: "concepts/Aurora Ledger Protocol.md",
+        title: "Aurora Ledger Protocol",
+        name: "Aurora Ledger Protocol",
+      }),
+    ]);
+    const hit = findStemTwin(index, "Aurora Ledger Protocol", "sources/Aurora Ledger Protocol.mdx");
+    expect(hit?.relPath).toBe("concepts/Aurora Ledger Protocol.md");
+  });
+
+  test("the page AT the target path is never its own twin (crash-recovery re-apply)", () => {
+    const index = fakeIndex([
+      page({
+        relPath: "entities/Aurora Ledger Protocol.md",
+        title: "Aurora Ledger Protocol",
+        name: "Aurora Ledger Protocol",
+        type: "entity",
+      }),
+    ]);
+    expect(
+      findStemTwin(index, "Aurora Ledger Protocol", "entities/Aurora Ledger Protocol.md"),
+    ).toBeNull();
+    // …and the path-form is normalized, so a `./`-prefixed spelling of the same
+    // file is still excluded rather than matching itself.
+    expect(
+      findStemTwin(index, "Aurora Ledger Protocol", "./entities/Aurora Ledger Protocol.md"),
+    ).toBeNull();
+  });
+
+  test("a near-miss stem is not a twin", () => {
+    const index = fakeIndex([src("sources/Aurora Ledger Protocols.mdx", "Aurora Ledger Protocols")]);
+    expect(
+      findStemTwin(index, "Aurora Ledger Protocol", "entities/Aurora Ledger Protocol.md"),
+    ).toBeNull();
+  });
+
+  test("a same-stem .html explainer IS a twin — a .md apply over it makes it vanish", () => {
+    // `extRank` is `.md` (0) > `.mdx` (1) > `.html` (2), so an applied `.md` drops
+    // the explainer out of the index exactly as it drops a `.mdx` source page.
+    // Measured 2026-08-30: `.md`-over-`.html` is the ONLY shadow shape live on the
+    // six real roots, i.e. the one this direction actually happens in.
+    const index = fakeIndex([
+      page({
+        relPath: "blogs/Aurora Ledger Protocol.html",
+        title: "Aurora Ledger Protocol",
+        name: "Aurora Ledger Protocol",
+        type: "explainer",
+      }),
+    ]);
+    expect(
+      findStemTwin(index, "Aurora Ledger Protocol", "entities/Aurora Ledger Protocol.md")?.relPath,
+    ).toBe("blogs/Aurora Ledger Protocol.html");
+    // …and the drafter's own `.mdx` write shadows it too (rank 1 beats rank 2).
+    expect(
+      findStemTwin(index, "Aurora Ledger Protocol", "sources/Aurora Ledger Protocol.mdx")?.relPath,
+    ).toBe("blogs/Aurora Ledger Protocol.html");
+  });
+
+  test("a SAME-extension twin in ANOTHER folder is ALLOWED (the displayTitle shape)", () => {
+    // `store.ts` keeps both of these and disambiguates them with a `displayTitle`
+    // prefix — measured 2026-08-30, mimir carries 4 such groups over 9 pages
+    // (`projects/<x>/architecture.md` and friends). Refusing them made a
+    // consolidation proposal for another one permanently unapprovable.
+    const md = fakeIndex([
+      page({
+        relPath: "projects/huginn/architecture.md",
+        title: "architecture",
+        name: "architecture",
+      }),
+    ]);
+    expect(findStemTwin(md, "architecture", "projects/yggdrasil/architecture.md")).toBeNull();
+    // Same for the drafter's `.mdx`-vs-`.mdx` pair, which is what burned its one
+    // collision retry and refused human-chosen titles.
+    const mdx = fakeIndex([src("blogs/Aurora Ledger Protocol.mdx", "Aurora Ledger Protocol")]);
+    expect(
+      findStemTwin(mdx, "Aurora Ledger Protocol", "sources/Aurora Ledger Protocol.mdx"),
+    ).toBeNull();
+  });
+
+  test("SAME folder still blocks whatever the extensions (clause b)", () => {
+    const index = fakeIndex([src("sources/Aurora Ledger Protocol.html", "Aurora Ledger Protocol")]);
+    expect(
+      findStemTwin(index, "Aurora Ledger Protocol", "sources/Aurora Ledger Protocol.mdx")?.relPath,
+    ).toBe("sources/Aurora Ledger Protocol.html");
+  });
+
+  test("reserved infrastructure is exempt — a per-folder index.md is a designed shape", () => {
+    // `catalogKinds` writes `index.md` per folder; `hasForbiddenBasename` is the set
+    // the linter's `reservedBasename` mirrors.
+    const index = fakeIndex([
+      page({ relPath: "index.md", title: "Index", name: "index" }),
+      page({ relPath: "concepts/log.md", title: "Log", name: "log" }),
+    ]);
+    expect(findStemTwin(index, "index", "concepts/index.mdx")).toBeNull();
+    expect(findStemTwin(index, "log", "concepts/log.mdx")).toBeNull();
+  });
+
+  test("stems compare through NFC — an NFD filename on disk is still a twin", () => {
+    // macOS writes decomposed filenames; a model- or human-supplied title is
+    // composed. Without the fold the two are different stems and the guard is
+    // silently inert on every non-ASCII page (`index-coverage.ts` folds the same
+    // class for the huginn↔disk comparison).
+    const nfd = "Blåbær".normalize("NFD");
+    const nfc = "Blåbær".normalize("NFC");
+    expect(nfd).not.toBe(nfc);
+    const index = fakeIndex([src(`sources/${nfd}.mdx`, nfd)]);
+    expect(findStemTwin(index, nfc, `entities/${nfc}.md`)?.relPath).toBe(`sources/${nfd}.mdx`);
+    // …and the self-exclusion folds too, so an NFD target path still excludes its
+    // own NFC-spelled page rather than naming it as its own blocker.
+    const self = fakeIndex([src(`sources/${nfc}.mdx`, nfc)]);
+    expect(findStemTwin(self, nfd, `sources/${nfd}.mdx`)).toBeNull();
+  });
+
+  test("a null index disables the check (degrade, never refuse on an index outage)", () => {
+    expect(findStemTwin(null, "Anything", "entities/Anything.md")).toBeNull();
+    expect(findCollidingPage(null, "Anything", "entities/Anything.md")).toBeNull();
+  });
+
+  test("findCollidingPage still answers the exact-path branch first", () => {
+    const index = fakeIndex([src("sources/Aurora Ledger Protocol.mdx", "Aurora Ledger Protocol")]);
+    const hit = findCollidingPage(
+      index,
+      "Aurora Ledger Protocol",
+      "sources/Aurora Ledger Protocol.mdx",
+    );
+    expect(hit?.relPath).toBe("sources/Aurora Ledger Protocol.mdx");
+  });
+});
+
+/**
+ * The drafter's collision retry is pre-existing behaviour (`buildCollisionRetryPrompt`
+ * + the SKIP sentinel + the ledger row); what the guard changed is WHICH twins reach
+ * it. The drafter writes `.mdx` into `sources/`, so its two new shapes are a
+ * same-stem `.html` explainer (rank 2, which the `.mdx` would shadow) and — no
+ * longer — a same-extension page in another folder.
+ */
+describe("source drafter — which twins reach the existing collision retry", () => {
+  const explainerTwin = () =>
+    fakeIndex([
+      page({
+        relPath: "blogs/Retrieval-Augmented Generation.html",
+        title: "Retrieval-Augmented Generation",
+        name: "Retrieval-Augmented Generation",
+        type: "explainer",
+      }),
+    ]);
+
+  test("a shadowed .html explainer collides on attempt 1, then drafts at the new stem", async () => {
+    const prompts: string[] = [];
+    const inserted: InsertWikiProposalParams[] = [];
+    const out = await draftSourcePage(
+      baseDeps({
+        index: explainerTwin(),
+        callDrafter: async (prompt: string) => {
+          prompts.push(prompt);
+          return prompts.length === 1
+            ? mdxDraft()
+            : mdxDraft({
+                title: "Aurora Ledger Protocol",
+                body: "# Aurora Ledger Protocol\n\nSynthesized fixture body.",
+              });
+        },
+        insertProposal: async (params: InsertWikiProposalParams) => {
+          inserted.push(params);
+          return { id: "row-0", ...params } as unknown as WikiProposal;
+        },
+      }),
+    );
+
+    expect(prompts.length).toBe(2);
+    expect(prompts[1]).toContain("TITLE COLLISION");
+    expect(prompts[1]).toContain("Retrieval-Augmented Generation");
+    expect(prompts[1]).toContain(COLLISION_SKIP_SENTINEL);
+    expect(out.outcome).toBe("drafted");
+    expect(inserted[0]?.targetPath).toBe("sources/Aurora Ledger Protocol.mdx");
+  });
+
+  test("still colliding after the retry → skipped, and the blocking page is named", async () => {
+    const out = await draftSourcePage(
+      baseDeps({ index: explainerTwin(), callDrafter: async () => mdxDraft() }),
+    );
+    expect(out.outcome).toBe("skipped");
+    if (out.outcome === "skipped") {
+      expect(out.reason).toContain("collides");
+      expect(out.collidingPage?.relPath).toBe("blogs/Retrieval-Augmented Generation.html");
+    }
+  });
+
+  test("a same-extension .mdx twin in ANOTHER folder no longer burns the retry", async () => {
+    // Measured regression of the first cut: the drafter always writes into
+    // `sources/`, so a `concepts/<Stem>.mdx` — a shape `store.ts` keeps BOTH halves
+    // of — spent a second model call and then skipped the doc for good.
+    const prompts: string[] = [];
+    const inserted: InsertWikiProposalParams[] = [];
+    const out = await draftSourcePage(
+      baseDeps({
+        index: fakeIndex([
+          page({
+            relPath: "concepts/Retrieval-Augmented Generation.mdx",
+            title: "Retrieval-Augmented Generation",
+            name: "Retrieval-Augmented Generation",
+            type: "source",
+          }),
+        ]),
+        callDrafter: async (prompt: string) => {
+          prompts.push(prompt);
+          return mdxDraft();
+        },
+        insertProposal: async (params: InsertWikiProposalParams) => {
+          inserted.push(params);
+          return { id: "row-0", ...params } as unknown as WikiProposal;
+        },
+      }),
+    );
+    expect(prompts.length).toBe(1);
+    expect(out.outcome).toBe("drafted");
+    expect(inserted[0]?.targetPath).toBe("sources/Retrieval-Augmented Generation.mdx");
+  });
+
+  test("a human-chosen title is no longer refused by a cross-folder same-extension twin", async () => {
+    // The rename-and-draft pre-flight runs the same predicate before any model
+    // call, so the widening also made `POST …/source-draft-doc` answer "the chosen
+    // title collides — pick another" for a title nothing was standing on.
+    const inserted: InsertWikiProposalParams[] = [];
+    const out = await draftSourcePage(
+      baseDeps({
+        input: { ...baseDeps().input, titleOverride: "Aurora Ledger Protocol" },
+        index: fakeIndex([
+          page({
+            relPath: "concepts/Aurora Ledger Protocol.mdx",
+            title: "Aurora Ledger Protocol",
+            name: "Aurora Ledger Protocol",
+            type: "source",
+          }),
+        ]),
+        callDrafter: async () =>
+          mdxDraft({
+            title: "Aurora Ledger Protocol",
+            body: "# Aurora Ledger Protocol\n\nSynthesized fixture body.",
+          }),
+        insertProposal: async (params: InsertWikiProposalParams) => {
+          inserted.push(params);
+          return { id: "row-0", ...params } as unknown as WikiProposal;
+        },
+      }),
+    );
+    expect(out.outcome).toBe("drafted");
+    expect(inserted[0]?.targetPath).toBe("sources/Aurora Ledger Protocol.mdx");
   });
 });

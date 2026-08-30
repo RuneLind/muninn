@@ -2,7 +2,7 @@ import type { Context, Hono } from "hono";
 import path from "node:path";
 import { renderWikiGardenerPage } from "../views/wiki-gardener-page.ts";
 import { renderWikiHtml, stripFrontmatter } from "../../wiki/render.ts";
-import { getWikiIndex } from "../../wiki/store.ts";
+import { getWikiIndex, wikiPageStem, type WikiIndex } from "../../wiki/store.ts";
 import { scanUnresolvedBodyLinks } from "../../gardener/draft.ts";
 import { buildIndexEntry, catalogPage, selectWirablePages } from "../../gardener/wire.ts";
 import type { WiringPreview } from "../views/components/wiki-gardener-wiring.ts";
@@ -27,6 +27,7 @@ import {
   markWikiProposalApplied,
   markWikiProposalStale,
   markWikiProposalError,
+  revertWikiProposalToDraft,
   listAllWikiProposals,
   listAllWikiProposalsByWiki,
   getWikiProposalById,
@@ -78,6 +79,7 @@ import {
   draftOneBacklogDoc,
   defaultSourceBacklogDeps,
 } from "../../gardener/source-drafter-run.ts";
+import { findStemTwin, stemCollisionMessage } from "../../gardener/source-drafter.ts";
 import {
   getWikiGardenerWatcher,
   getWatcherSnapshot,
@@ -245,6 +247,18 @@ function applyDepsFor(
     writeFile: async (absPath, content) => {
       await Bun.write(absPath, content);
     },
+    // Deliberately NOT `refresh: true`, and the freshness the in-queue checks need
+    // comes from somewhere else: every write path in `applyInner` awaits
+    // `refreshIndex()` below (step 5, and step 2a's re-run branch) BEFORE releasing
+    // the write queue, so the second of two concurrent approves already reads a
+    // cache the first one refreshed after writing — which is the exact window the
+    // in-queue collision re-check exists for. A refresh here would rebuild the
+    // whole index a second time (measured warm 2026-08-30: 245 ms on the 1,148-page
+    // jarvis wiki) INSIDE the shared per-wiki write queue, on every approve, which
+    // is the one thing that queue's docblock says not to grow — and mutation-proven
+    // inert: the suite is green in both directions. The route's own pre-CAS guard
+    // keeps its explicit `refresh: true`; that one IS the guard, and it runs outside
+    // the queue.
     getWikiIndex: () => getWikiIndex({ root: wikiDir }),
     refreshIndex: async () => {
       await getWikiIndex({ root: wikiDir, refresh: true });
@@ -320,6 +334,13 @@ export interface BacklogRouteDeps extends CoverageDeps {
    */
   getProposalById: (id: string) => Promise<WikiProposal | null>;
   approveProposal: (id: string) => Promise<WikiProposal | null>;
+  /**
+   * The third seam, and injectable for the same reason: the approved→draft CAS the
+   * route runs when the apply REFUSES on a stem collision it only saw inside the
+   * write queue. Its whole observable is "the row is reviewable again", which a
+   * test that cannot see the CAS can only assume.
+   */
+  revertProposal: (id: string) => Promise<WikiProposal | null>;
 }
 
 export const DEFAULT_BACKLOG_ROUTE_DEPS: BacklogRouteDeps = {
@@ -342,6 +363,7 @@ export const DEFAULT_BACKLOG_ROUTE_DEPS: BacklogRouteDeps = {
   listProposals: (botName) => listAllWikiProposals(botName),
   getProposalById: (id) => getWikiProposalById(id),
   approveProposal: (id) => approveWikiProposal(id),
+  revertProposal: (id) => revertWikiProposalToDraft(id),
 };
 
 /** Read the offered-key snapshot as a Set (JSONB array → Set; anything else ⇒ ∅). */
@@ -2124,6 +2146,90 @@ export function registerWikiGardenerRoutes(
       return c.json({ error: wikiReadonlyRootReason(targetRoot), readonly: true }, 403);
     }
 
+    // …and the stem-collision guard, in the same place and for the same reason.
+    //
+    // `applyWikiProposal`'s only create-mode guard is path-EXACT (`current !== null`
+    // ⇒ "target path already exists"), so an approved entity/concept proposal landed
+    // on a stem an existing source page already owned — measured 2026-08-29:
+    // `sources/<Stem>.mdx` was drafted first, `entities/<Stem>.md` applied second,
+    // and the store's same-stem precedence (`.md` > `.mdx`) then DROPPED the source
+    // page from the index entirely. There is no model at apply time to rename with,
+    // so the answer is a refusal the reviewer acts on, not a new terminal state.
+    // (The in-queue re-check DOES use a dedicated `collision` outcome — see
+    // `apply.ts` — the route reverts the row to `draft` on it, so the original
+    // "no new variant" rationale, a stranded `approved` row, no longer applies.)
+    //
+    // Three scoping clauses, each load-bearing:
+    //
+    //  · **`draft` ONLY.** The gate renders Approve/Reject on `status === "draft"`
+    //    and nothing else, so a 409 here on any other status is a refusal with no
+    //    verb behind it: an `approved` crash-recovery row (whose whole purpose is
+    //    to be re-runnable) would 409 forever, and a terminal `error`/`rejected`/
+    //    `stale` row would be told about a collision instead of the truth, which is
+    //    that it is not reviewable. Those two statuses fall through to the branch
+    //    below that says exactly that. The `approved`-re-run residual — a twin that
+    //    appeared inside the crash window — is covered by the re-check INSIDE
+    //    `applyWikiProposal`'s write queue, which is also the TOCTOU close for two
+    //    concurrent approves this pre-CAS guard cannot see.
+    //  · **CREATE mode only.** In update mode the proposal's own page IS at the
+    //    target and is the point of the write; a twin standing elsewhere is a
+    //    pre-existing collision the write did not create.
+    //  · **`refresh: true`.** This index is the whole guard, and the store's cache
+    //    is a 5-minute TTL — measured, the exact historical incident reproduces
+    //    with the guard installed if a page lands through a non-refreshing path
+    //    while the cache is warm. An approve is human-paced and a build is cheap
+    //    (measured warm 2026-08-30: jarvis 245 ms / 1,148 pages, mimir 129 ms / 477);
+    //    every comparable write seam already refreshes (`page-write.ts`,
+    //    `sync/run.ts`).
+    if (existing.status === "draft" && existing.mode === "create") {
+      if (!targetRoot) {
+        // The row names a wiki/bot this process can't resolve. The apply block below
+        // reports that properly (and flips the row to `error`); logged here because
+        // otherwise the guard is silently skipped and nothing says so.
+        log.warn(
+          "Wiki-gardener approve: no wiki root for proposal {id} (wiki={wiki}) — stem-collision check skipped",
+          { id, wiki: existing.wikiName ?? existing.botName },
+        );
+      } else {
+        let index: WikiIndex | null = null;
+        try {
+          index = await getWikiIndex({ root: targetRoot, refresh: true });
+          if (!index) {
+            // Consistent with every other index-dependent step here (the apply's own
+            // body-link containment skips on a null index): degrade, don't refuse.
+            // Logged because a silently disabled guard is the failure this PR is about.
+            log.warn(
+              "Wiki-gardener approve: wiki index unavailable for {root} — stem-collision check skipped for proposal {id}",
+              { root: targetRoot, id },
+            );
+          }
+        } catch (err) {
+          // `getWikiIndex` degrades a missing directory to null but does NOT catch a
+          // `buildWikiIndex` throw, and this guard sits above the route's own
+          // try/catch — so an unreadable wiki turned an approve into a Hono 500 with
+          // the row still a draft and no explanation. Skip-with-warn, like the null.
+          log.warn(
+            "Wiki-gardener approve: wiki index build failed for {root} ({error}) — stem-collision check skipped for proposal {id}",
+            { root: targetRoot, id, error: err instanceof Error ? err.message : String(err) },
+          );
+        }
+        const stem = wikiPageStem(existing.targetPath);
+        const blocking = index ? findStemTwin(index, stem, existing.targetPath) : null;
+        if (blocking) {
+          log.info(
+            "Wiki-gardener approve refused for {id}: stem \"{stem}\" is already owned by {blocking}",
+            { id, stem, blocking: blocking.relPath },
+          );
+          // The gate renders `data.error` verbatim, so the machine-readable part
+          // rides beside it rather than in it (the `{error, readonly}` shape).
+          // `collision: true` is the whole marker: the blocking page's path and
+          // title were also shipped as fields and nothing read them — the same file
+          // dropped `outcome: "forbidden"` for exactly that reason.
+          return c.json({ error: stemCollisionMessage(blocking, stem), collision: true }, 409);
+        }
+      }
+    }
+
     let claimed: WikiProposal | null = null;
     if (existing.status === "draft") {
       claimed = await backlogDeps.approveProposal(id);
@@ -2199,6 +2305,42 @@ export function registerWikiGardenerRoutes(
       // must be able to recognize the refusal by one shape, and the extra
       // `outcome: "forbidden"` here was a third spelling nothing read.
       return c.json({ error: result.reason, readonly: true }, 403);
+    }
+    // The in-queue stem-collision re-check (the TOCTOU the pre-CAS guard above
+    // cannot see: it sits OUTSIDE the per-wiki write queue, and each gate card
+    // only disables its OWN buttons, so two colliding proposals approved together
+    // both pass it). A REFUSAL on policy, exactly like `forbidden` — nothing was
+    // written — but with the opposite disposition on the ROW, and that difference
+    // is the whole point of this branch:
+    //
+    //  · `forbidden` keeps `approved`, because the refusal is about the INSTANCE
+    //    (this muninn may not write) and the write-owning instance re-runs the
+    //    same approved row later.
+    //  · a collision is about the WIKI, and every instance answers it the same
+    //    way. Nobody re-runs it; a human renames one of the two pages. So the row
+    //    goes back to `draft`, where the gate renders Approve/Reject and the
+    //    reviewer has a verb again. Leaving it `approved` strands it (no verb at
+    //    all); `markWikiProposalError` — what this did first — burns a perfectly
+    //    good draft terminal on a policy answer, which is exactly the objection
+    //    the route states above for the read-only refusal beside it.
+    //
+    // A LOST revert CAS (the row moved under us) is logged, not surfaced: the
+    // answer to the caller is the collision either way, and nothing was written.
+    if (result.outcome === "collision") {
+      const reverted = await backlogDeps.revertProposal(id);
+      if (!reverted) {
+        log.error(
+          "Wiki-gardener: approved→draft revert lost for proposal {id} — state changed during apply",
+          { id },
+        );
+      }
+      log.info("Wiki-gardener apply refused for {id} (collision), row returned to draft: {reason}", {
+        id,
+        reason: result.reason,
+      });
+      // Byte-identical to the pre-CAS guard's body — a reviewer hitting the two
+      // paths seconds apart must not be able to tell them apart.
+      return c.json({ error: result.reason, collision: true }, 409);
     }
     if (result.outcome === "stale") {
       if (!(await finishProposal(id, markWikiProposalStale, "stale"))) {

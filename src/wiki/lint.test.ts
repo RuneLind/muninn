@@ -635,3 +635,113 @@ describe("lintWiki", () => {
     expect(typeof report.generatedAt).toBe("number");
   });
 });
+
+/**
+ * `stem-collision` — the continuous regression guard behind the apply path's
+ * approve-time refusal. Its own describe because every fixture here is a PAIR of
+ * files, and the shape it reports is one the shared fixture wiki deliberately
+ * has none of.
+ */
+describe("lintWiki — stem-collision", () => {
+  let root: string;
+  const write = (rel: string, content: string) => Bun.write(path.join(root, rel), content);
+  const md = (title: string, type: string) =>
+    `---\ntype: ${type}\ntitle: ${title}\nupdated: 2026-06-01\n---\n\n# ${title}\n\nBody.\n`;
+
+  async function stemFindings(): Promise<LintFinding[]> {
+    const index = await buildWikiIndex(root);
+    const { findings } = await lintWiki(index, { now: () => Date.parse("2026-06-20T12:00:00Z") });
+    return findings.filter((f) => f.check === "stem-collision");
+  }
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-lint-stem-"));
+  });
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("cross-extension twin is reported, filed against the SHADOWED page", async () => {
+    // The measured 2026-08-29 shape: a source page drafted as .mdx, an entity page
+    // applied as .md. `.md` wins, so the .mdx is dropped from the index entirely.
+    await write("sources/Aurora Ledger Protocol.mdx", md("Aurora Ledger Protocol", "source"));
+    await write("entities/Aurora Ledger Protocol.md", md("Aurora Ledger Protocol", "entity"));
+
+    const found = await stemFindings();
+    expect(found.length).toBe(1);
+    expect(found[0]!.relPath).toBe("sources/Aurora Ledger Protocol.mdx");
+    expect(found[0]!.detail).toBe("entities/Aurora Ledger Protocol.md");
+    expect(found[0]!.message).toContain("Aurora Ledger Protocol");
+  });
+
+  test("SAME-extension twins in two folders are NOT reported (a supported shape)", async () => {
+    // `store.ts` keeps both and disambiguates them with a displayTitle prefix, so
+    // neither is in `index.shadowed` at all. Counts per root live in
+    // `src/watchers/CLAUDE.md`; the write-side guard allows the same shape.
+    await write("concepts/Shared Stem.md", md("Shared Stem", "concept"));
+    await write("entities/Shared Stem.md", md("Shared Stem", "entity"));
+    expect(await stemFindings()).toEqual([]);
+  });
+
+  test("reserved infrastructure basenames are exempt", async () => {
+    await write("index.md", "# Index\n");
+    await write("notes/index.mdx", "---\ntitle: Index\n---\n\n# Index\n");
+    expect(await stemFindings()).toEqual([]);
+  });
+
+  test("a shadowed .html EXPLAINER is NOT reported (markdown-vs-markdown only)", async () => {
+    // The one place this check's scope DIVERGES from the write guard, which does
+    // count `.html`: the guard refuses a write that would create a shadow, this
+    // reports shadows that already exist — and every live instance (11 groups over
+    // the six real roots, measured 2026-08-30) is a pre-existing pair a human kept.
+    // Reporting them would ship this check permanently red on three of six wikis.
+    await write("blogs/Aurora Ledger Protocol.md", md("Aurora Ledger Protocol", "note"));
+    // Deliberately NOT carrying a `generated from` marker: the live pairs are
+    // hand-authored explainers, not compile output — the exclusion holds either way.
+    await write("blogs/Aurora Ledger Protocol.html", "<html><body>x</body></html>");
+    expect(await stemFindings()).toEqual([]);
+  });
+
+  test("only the SHADOWED page's extension is tested — the winner's is implied", async () => {
+    // A markdown loser can only ever have been displaced by an `.md` (the winner
+    // won on a strictly lower `extRank`), so testing `shadowedBy` too was an
+    // unreachable clause. Pinning the reachable half: a `.mdx` loser under a `.md`
+    // winner IS reported, and no fixture can produce a markdown loser under an
+    // `.html` winner.
+    await write("concepts/Only Md Wins.md", md("Only Md Wins", "concept"));
+    await write("sources/Only Md Wins.mdx", md("Only Md Wins", "source"));
+    await write("blogs/Only Md Wins.html", "<html><body>x</body></html>");
+    const found = await stemFindings();
+    expect(found.map((f) => f.relPath)).toEqual(["sources/Only Md Wins.mdx"]);
+    expect(found[0]!.detail).toBe("concepts/Only Md Wins.md");
+  });
+
+  test("an UPPERCASE-extension file is not a page at all — nothing to shadow", async () => {
+    // Not a case-folding assertion: `buildWikiIndex`'s discovery glob
+    // (`**/*.{md,mdx,html}`) is case-SENSITIVE, so `Casefold Stem.MDX` is never
+    // scanned, never a page, and therefore can neither shadow nor be shadowed.
+    // Pinned because it is the reason `isMarkdownWikiPath`'s own `.toLowerCase()`
+    // is unreachable from here (see its docblock): a reader checking whether this
+    // check handles uppercase extensions should find the answer in a test rather
+    // than re-derive it from the glob.
+    await write("concepts/Casefold Stem.md", md("Casefold Stem", "concept"));
+    await write("sources/Casefold Stem.MDX", md("Casefold Stem", "source"));
+    const index = await buildWikiIndex(root);
+    expect(index.pages.map((p) => p.relPath)).toEqual(["concepts/Casefold Stem.md"]);
+    expect(await stemFindings()).toEqual([]);
+  });
+
+  test("a clean wiki reports nothing", async () => {
+    await write("concepts/One.md", md("One", "concept"));
+    await write("sources/Two.mdx", md("Two", "source"));
+    expect(await stemFindings()).toEqual([]);
+  });
+
+  test("the check key is in LINT_CHECKS, so counts always carry it", async () => {
+    await write("concepts/One.md", md("One", "concept"));
+    const index = await buildWikiIndex(root);
+    const { counts } = await lintWiki(index);
+    expect(LINT_CHECKS).toContain("stem-collision");
+    expect(counts["stem-collision"]).toBe(0);
+  });
+});

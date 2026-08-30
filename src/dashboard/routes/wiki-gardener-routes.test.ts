@@ -1,5 +1,5 @@
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Hono } from "hono";
@@ -21,7 +21,7 @@ import {
 } from "./wiki-gardener-routes.ts";
 import { runExclusive, __resetGardenerMutexForTest } from "../../gardener/backlog.ts";
 import { __resetWikiRegistryForTest, __setWikiRegistryForTest } from "../../wiki/registry-memo.ts";
-import { __resetWikiCacheForTest } from "../../wiki/store.ts";
+import { getWikiIndex, __resetWikiCacheForTest } from "../../wiki/store.ts";
 import { computeWatcherNextRun } from "../agents-overview.ts";
 import type { Watcher } from "../../types.ts";
 
@@ -777,6 +777,7 @@ describe("GET /api/wiki/ingest-backlog — docs=1 through the route", () => {
       // object satisfies `BacklogRouteDeps` (see the approve read-only test).
       getProposalById: async () => null,
       approveProposal: async () => null,
+      revertProposal: async () => null,
     });
   });
 
@@ -1186,6 +1187,7 @@ describe("prune routes — dismiss / un-dismiss / reset guards (PR 2)", () => {
       // object satisfies `BacklogRouteDeps` (see the approve read-only test).
       getProposalById: async () => null,
       approveProposal: async () => null,
+      revertProposal: async () => null,
     });
   });
 
@@ -1392,6 +1394,7 @@ describe("backlog-doc-delete — the huginn DELETE proxy (PR 2)", () => {
       // object satisfies `BacklogRouteDeps` (see the approve read-only test).
       getProposalById: async () => null,
       approveProposal: async () => null,
+      revertProposal: async () => null,
     });
   });
 
@@ -1547,6 +1550,7 @@ describe("POST /api/wiki/gardener/source-draft-doc — pre-I/O guards", () => {
       // object satisfies `BacklogRouteDeps` (see the approve read-only test).
       getProposalById: async () => null,
       approveProposal: async () => null,
+      revertProposal: async () => null,
     });
   });
 
@@ -1675,6 +1679,7 @@ describe("POST /api/wiki/gardener/source-draft-run — the per-bot mutex", () =>
       // object satisfies `BacklogRouteDeps` (see the approve read-only test).
       getProposalById: async () => null,
       approveProposal: async () => null,
+      revertProposal: async () => null,
     });
   });
 
@@ -1794,6 +1799,7 @@ describe("POST /api/wiki/gardener/source-draft-run — an unexpected throw is a 
       // object satisfies `BacklogRouteDeps` (see the approve read-only test).
       getProposalById: async () => null,
       approveProposal: async () => null,
+      revertProposal: async () => null,
     });
   });
 
@@ -1830,5 +1836,466 @@ describe("POST /api/wiki/gardener/source-draft-run — an unexpected throw is a 
     // 500 (the same throw), NOT the 409 a leaked mutex would produce.
     expect(second.status).toBe(500);
     expect((await second.json()).error).toContain("watcher_snapshots read failed");
+  });
+});
+
+/**
+ * The stem-collision guard on `POST /api/wiki/proposals/:id/approve`.
+ *
+ * The historical shape, reproduced: a source page was drafted FIRST as
+ * `sources/<Stem>.mdx`, and an approved ENTITY proposal then landed
+ * `entities/<Stem>.md` beside it. `applyWikiProposal`'s only create-mode guard is
+ * path-exact (`current !== null` ⇒ "target path already exists"), so the apply
+ * wrote the twin — after which the store's same-stem precedence rule (`.md` >
+ * `.mdx`) DROPS the source page from the index entirely and Obsidian resolves the
+ * title ambiguously.
+ *
+ * These drive the REAL route into the REAL `applyWikiProposal` against a REAL temp
+ * wiki; only the two DB seams are faked, so the gap between the read and the
+ * draft→approved CAS is drivable (the `wiki-readonly-roots.test.ts` rationale).
+ * Every fixture string is synthesized — muninn is a public repo.
+ */
+describe("approve — stem-collision refusal (the apply path had no check at all)", () => {
+  let root: string;
+  let app: Hono;
+  let prevExtra: string | undefined;
+  /** Ids the fake CAS claimed — a refusal must leave this empty. */
+  let approved: string[];
+
+  const STEM = "Aurora Ledger Protocol";
+
+  const proposalRow = (over: Record<string, unknown> = {}) =>
+    ({
+      id: "p1",
+      botName: "jarvis",
+      wikiName: "stemwiki",
+      topicKey: "aurora-ledger-protocol",
+      kind: "entity",
+      mode: "create",
+      targetPath: `entities/${STEM}.md`,
+      baseHash: null,
+      sourceDocs: [],
+      relatedPages: [],
+      rationale: "Synthesized fixture.",
+      draft: `---\ntitle: ${STEM}\ntype: entity\n---\n\n# ${STEM}\n\nSynthesized fixture body.\n`,
+      status: "draft",
+      ...over,
+    }) as never;
+
+  const deps = (proposal: unknown) =>
+    ({
+      getConsumed: async () => new Set<string>(),
+      getPending: async () => new Set<string>(),
+      getWikiGardenerWatcher: async () => null,
+      getSnapshot: async () => null,
+      setSnapshot: async () => {},
+      listProposals: async () => [],
+      getProposalById: async () => proposal,
+      approveProposal: async (id: string) => {
+        approved.push(id);
+        return proposal ? { ...(proposal as object), status: "approved" } : null;
+      },
+    }) as unknown as Parameters<typeof registerWikiGardenerRoutes>[1];
+
+  beforeEach(async () => {
+    approved = [];
+    root = await mkdtemp(path.join(tmpdir(), "wiki-stem-collide-"));
+    prevExtra = process.env.WIKI_EXTRA;
+    process.env.WIKI_EXTRA = `stemwiki=${root}`;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    app = new Hono();
+    app.onError((err, c) => c.json({ error: String(err) }, 500));
+  });
+
+  afterEach(async () => {
+    if (prevExtra === undefined) delete process.env.WIKI_EXTRA;
+    else process.env.WIKI_EXTRA = prevExtra;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("an existing .mdx source page blocks a same-stem .md entity apply — 409, no CAS, no write", async () => {
+    await Bun.write(
+      path.join(root, "sources", `${STEM}.mdx`),
+      `---\ntitle: ${STEM}\ntype: source\nurl: https://example.invalid/aurora\n---\n\n# ${STEM}\n\nSynthesized fixture body.\n`,
+    );
+    registerWikiGardenerRoutes(app, deps(proposalRow()));
+
+    const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string; collision?: boolean };
+    // `collision` is the whole machine marker — the blocking path and title used to
+    // ride as fields nothing read.
+    expect(body.collision).toBe(true);
+    // The reason names the blocking page — the gate renders `data.error` verbatim.
+    expect(body.error).toContain(`sources/${STEM}.mdx`);
+
+    // The two observables that separate this from a refusal one layer down: the
+    // row is still a draft (so the gate still offers Approve/Reject), and the
+    // stem twin was never written.
+    expect(approved).toEqual([]);
+    expect(await Bun.file(path.join(root, "entities", `${STEM}.md`)).exists()).toBe(false);
+  });
+
+  test("a re-click refuses again, identically — the refusal is repeatable", async () => {
+    await Bun.write(
+      path.join(root, "sources", `${STEM}.mdx`),
+      `---\ntitle: ${STEM}\ntype: source\n---\n\nBody.\n`,
+    );
+    registerWikiGardenerRoutes(app, deps(proposalRow()));
+    const first = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    const second = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    expect(first.status).toBe(409);
+    expect(second.status).toBe(409);
+    expect(approved).toEqual([]);
+  });
+
+  test("an `approved` row whose page is already at the target still applies (crash recovery)", async () => {
+    // The proposal's OWN page sits at the target — a crash between the write and
+    // the terminal CAS. The stem twin the guard looks for must EXCLUDE that page,
+    // or the recovery re-apply refuses with the row named as its own blocker.
+    const draft = `---\ntitle: ${STEM}\ntype: entity\n---\n\n# ${STEM}\n\nSynthesized fixture body.\n`;
+    await Bun.write(path.join(root, "entities", `${STEM}.md`), draft);
+    registerWikiGardenerRoutes(app, deps(proposalRow({ status: "approved", draft })));
+
+    const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    // Assert on the GUARD's own observable, never on `status !== 409`: 409 is also
+    // the route's "proposal state changed during apply" answer, which this fixture
+    // reaches whenever a DB happens to be connected (it is, in the full suite —
+    // another file opens the pool — and is not, file-alone). Only the collision
+    // refusal carries `collision`.
+    expect(((await res.json()) as { collision?: boolean }).collision).toBeUndefined();
+    // …and the recovery really did short-circuit on the existing page.
+    expect(await Bun.file(path.join(root, "entities", `${STEM}.md`)).text()).toBe(draft);
+  });
+
+  test("UPDATE mode is never refused, even with a pre-existing same-stem twin", async () => {
+    // The guard is scoped to create mode. An update rewrites a page that already
+    // exists; a twin standing elsewhere is a pre-existing collision this write did
+    // not create, and refusing would make that page permanently un-updatable — the
+    // reviewer would have no verb for a proposal whose only fault is the wiki's.
+    // The twin must SURVIVE the index build to exercise this: same-stem pages of
+    // DIFFERENT extensions are resolved by precedence in `store.ts` (`.md` > `.mdx`)
+    // and the loser is dropped, so a `.mdx` sibling of a `.md` target is not in
+    // `index.pages` at all. A same-extension pair in two folders is what stays.
+    const body = `---\ntitle: ${STEM}\ntype: entity\n---\n\n# ${STEM}\n\nOriginal fixture body.\n`;
+    await Bun.write(path.join(root, "entities", `${STEM}.md`), body);
+    await Bun.write(
+      path.join(root, "concepts", `${STEM}.md`),
+      `---\ntitle: ${STEM}\ntype: concept\n---\n\nBody.\n`,
+    );
+    registerWikiGardenerRoutes(
+      app,
+      deps(proposalRow({ mode: "update", baseHash: Bun.SHA256.hash(body, "hex") })),
+    );
+    const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    expect(((await res.json()) as { collision?: boolean }).collision).toBeUndefined();
+    // The row was CLAIMED — the guard sits above the CAS, so reaching it proves
+    // the guard let this through rather than refusing it.
+    expect(approved).toEqual(["p1"]);
+  });
+
+  test("a SAME-extension cross-folder twin APPLIES — that shape is supported, not a collision", async () => {
+    // `store.ts` keeps both such pages and disambiguates them with a `displayTitle`
+    // prefix; measured 2026-08-30, mimir carries 4 such groups over 9 pages. The
+    // first cut refused them, which made a consolidation proposal for another
+    // `projects/<x>/architecture.md` permanently unapprovable.
+    await Bun.write(
+      path.join(root, "concepts", `${STEM}.md`),
+      `---\ntitle: ${STEM}\ntype: concept\n---\n\nBody.\n`,
+    );
+    registerWikiGardenerRoutes(app, deps(proposalRow()));
+    const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    expect(((await res.json()) as { collision?: boolean }).collision).toBeUndefined();
+    expect(approved).toEqual(["p1"]);
+    expect(await Bun.file(path.join(root, "entities", `${STEM}.md`)).exists()).toBe(true);
+  });
+
+  test("an existing .html explainer blocks the apply that would make it vanish", async () => {
+    // `extRank` drops the `.html` the moment a same-stem `.md` lands. Measured
+    // 2026-08-30 this is the ONLY shadow shape live on the six real roots.
+    await Bun.write(
+      path.join(root, "blogs", `${STEM}.html`),
+      `<!doctype html><html><head><title>${STEM}</title></head><body>Synthesized fixture.</body></html>`,
+    );
+    registerWikiGardenerRoutes(app, deps(proposalRow()));
+    const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toContain(`blogs/${STEM}.html`);
+    expect(approved).toEqual([]);
+    expect(await Bun.file(path.join(root, "entities", `${STEM}.md`)).exists()).toBe(false);
+  });
+
+  test("the guard reads a REFRESHED index — a twin landed off-path while the cache was warm", async () => {
+    // The exact historical incident, with the guard installed. `getWikiIndex` is a
+    // 5-minute TTL cache: warm it (any reader page load does), land the source page
+    // through a path that does not refresh (a `git pull`, the sync loop before its
+    // own refresh, a hand edit), then approve. Off a cached read the guard sees a
+    // wiki with no twin in it and the apply writes the page that drops the source
+    // page out of the index.
+    registerWikiGardenerRoutes(app, deps(proposalRow()));
+    // 1. Warm the cache on the empty wiki — the same call the route makes.
+    await getWikiIndex({ root });
+    // 2. The twin lands without going through muninn's write seams.
+    await Bun.write(
+      path.join(root, "sources", `${STEM}.mdx`),
+      `---\ntitle: ${STEM}\ntype: source\n---\n\nSynthesized fixture body.\n`,
+    );
+    // 3. Approve. No cache reset here on purpose — that IS the reproduction.
+    const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { collision?: boolean }).collision).toBe(true);
+    expect(approved).toEqual([]);
+    expect(await Bun.file(path.join(root, "entities", `${STEM}.md`)).exists()).toBe(false);
+  });
+
+  test("a NON-draft row is never answered with a collision — it gets 'not reviewable'", async () => {
+    // The gate renders Approve/Reject only on `draft`, so a 409 about a collision on
+    // any other status is a refusal with no verb behind it. A terminal row must hear
+    // the truth (it is not reviewable), and an `approved` crash-recovery row — whose
+    // whole purpose is to be re-runnable — must not 409 forever. The twin is real
+    // here: only the STATUS scoping keeps the guard out of the way.
+    await Bun.write(
+      path.join(root, "sources", `${STEM}.mdx`),
+      `---\ntitle: ${STEM}\ntype: source\n---\n\nBody.\n`,
+    );
+    registerWikiGardenerRoutes(app, deps(proposalRow({ status: "rejected" })));
+    const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string; collision?: boolean; status?: string };
+    expect(body.collision).toBeUndefined();
+    expect(body.error).toContain("not reviewable");
+    expect(body.status).toBe("rejected");
+  });
+
+  test("a THROWING index build skips the guard instead of escaping it", async () => {
+    // `getWikiIndex` degrades a MISSING directory to null (the branch above), but a
+    // `buildWikiIndex` throw propagates — and this guard sits above the route's own
+    // try/catch, so it turned an approve into a Hono 500 with the row still a draft
+    // and no explanation. Reproduced for real, no mocks: `stat` succeeds on a mode
+    // 000 directory and the glob scan then fails EACCES.
+    await chmod(root, 0o000);
+    try {
+      registerWikiGardenerRoutes(app, deps(proposalRow()));
+      const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+      // The observable is the CAS, not the status: the row was CLAIMED, which only
+      // happens PAST the guard — before this fix the throw escaped the guard and
+      // the CAS was never reached. (The apply's own index read then throws too;
+      // that is the route's pre-existing try/catch → `error` row → structured 500,
+      // a different path, and it is why the status here is not the discriminator.)
+      expect(approved).toEqual(["p1"]);
+      expect(((await res.json()) as { collision?: boolean }).collision).toBeUndefined();
+    } finally {
+      await chmod(root, 0o755);
+    }
+  });
+
+  test("a row whose wiki this process cannot resolve skips the guard, does not 409", async () => {
+    registerWikiGardenerRoutes(app, deps(proposalRow({ wikiName: "no-such-wiki" })));
+    const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    expect(((await res.json()) as { collision?: boolean }).collision).toBeUndefined();
+    // The apply block below the CAS is what reports the unresolvable wiki properly.
+    expect(approved).toEqual(["p1"]);
+  });
+
+  test("a near-miss stem is not a collision — the apply proceeds", async () => {
+    await Bun.write(
+      path.join(root, "sources", "Aurora Ledger Protocols.mdx"),
+      "---\ntitle: Aurora Ledger Protocols\ntype: source\n---\n\nBody.\n",
+    );
+    registerWikiGardenerRoutes(app, deps(proposalRow()));
+    const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    expect(((await res.json()) as { collision?: boolean }).collision).toBeUndefined();
+    expect(approved).toEqual(["p1"]);
+    // The apply ran: the page really was written at the near-miss-free stem.
+    expect(await Bun.file(path.join(root, "entities", `${STEM}.md`)).exists()).toBe(true);
+  });
+});
+
+/**
+ * The IN-QUEUE half of the same refusal — the TOCTOU the pre-CAS guard above cannot
+ * see, because it sits OUTSIDE the per-wiki write queue and each gate card only
+ * disables its OWN buttons. Two colliding proposals approved together both pass the
+ * pre-CAS guard; the first writes its page and refreshes the index before releasing
+ * the queue, and the second's in-queue re-check is what stops the twin.
+ *
+ * What these pin is the DISPOSITION OF THE ROW, which is the whole of fix R1. The
+ * refusal used to come back as `{outcome: "error"}`, which the route's fall-through
+ * handed to `markWikiProposalError` and answered 500 — so the row landed TERMINAL on
+ * a policy answer: the gate renders Approve/Reject on `draft` and nothing else, so
+ * the reviewer lost the verb and with it the remedy (rename one of the two pages,
+ * then approve). That directly contradicted the policy the same route states for the
+ * read-only refusal a few lines above it — "Flipping it to error would burn a
+ * perfectly good draft on a policy answer."
+ *
+ * The race is driven through the `approveProposal` seam rather than by launching two
+ * real requests: the state the second apply must observe is "twin on disk AND the
+ * store cache refreshed", which is exactly what the FIRST apply leaves behind (step 5
+ * awaits `refreshIndex()` before the queue releases). Reproducing it from the seam is
+ * deterministic; two concurrent `app.request`s are a coin flip on which one reads the
+ * index first. Every fixture string is synthesized — muninn is a public repo.
+ */
+describe("approve — the in-queue collision refusal returns the row to draft", () => {
+  let root: string;
+  let app: Hono;
+  let prevExtra: string | undefined;
+  /** The single mutable row every seam in this block reads and writes. */
+  let row: { id: string; status: string; [k: string]: unknown };
+  let reverted: string[];
+
+  const STEM = "Basalt Ledger Protocol";
+
+  /** The page the "other" concurrent approve lands while this one is between the
+   *  pre-CAS guard and the write queue. `.mdx` vs the proposal's `.md`: DIFFERENT
+   *  `extRank`, i.e. the shape the store's precedence rule silently drops. */
+  const landTwin = async () => {
+    await Bun.write(
+      path.join(root, "sources", `${STEM}.mdx`),
+      `---\ntitle: ${STEM}\ntype: source\n---\n\nSynthesized fixture body.\n`,
+    );
+    // …and the refresh the winning apply performs before it releases the queue.
+    await getWikiIndex({ root, refresh: true });
+  };
+
+  const deps = (onClaim?: () => Promise<void>) =>
+    ({
+      getConsumed: async () => new Set<string>(),
+      getPending: async () => new Set<string>(),
+      getWikiGardenerWatcher: async () => null,
+      getSnapshot: async () => null,
+      setSnapshot: async () => {},
+      listProposals: async () => [],
+      getProposalById: async () => ({ ...row }),
+      approveProposal: async () => {
+        if (row.status !== "draft") return null;
+        row.status = "approved";
+        // The colliding write lands HERE — after this request's pre-CAS guard has
+        // already read a twin-free index, which is the whole point of the TOCTOU.
+        await onClaim?.();
+        return { ...row };
+      },
+      revertProposal: async (id: string) => {
+        if (row.status !== "approved") return null;
+        row.status = "draft";
+        reverted.push(id);
+        return { ...row };
+      },
+    }) as unknown as Parameters<typeof registerWikiGardenerRoutes>[1];
+
+  beforeEach(async () => {
+    reverted = [];
+    root = await mkdtemp(path.join(tmpdir(), "wiki-stem-inqueue-"));
+    prevExtra = process.env.WIKI_EXTRA;
+    process.env.WIKI_EXTRA = `inqueuewiki=${root}`;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    row = {
+      id: "q1",
+      botName: "jarvis",
+      wikiName: "inqueuewiki",
+      topicKey: "basalt-ledger-protocol",
+      kind: "entity",
+      mode: "create",
+      targetPath: `entities/${STEM}.md`,
+      baseHash: null,
+      sourceDocs: [],
+      relatedPages: [],
+      rationale: "Synthesized fixture.",
+      draft: `---\ntitle: ${STEM}\ntype: entity\n---\n\n# ${STEM}\n\nSynthesized fixture body.\n`,
+      status: "draft",
+    };
+    app = new Hono();
+    app.onError((err, c) => c.json({ error: String(err) }, 500));
+  });
+
+  afterEach(async () => {
+    if (prevExtra === undefined) delete process.env.WIKI_EXTRA;
+    else process.env.WIKI_EXTRA = prevExtra;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("a twin landing after the CAS: 409 with the collision sentence, row back to draft, nothing written", async () => {
+    registerWikiGardenerRoutes(app, deps(landTwin));
+
+    const res = await app.request("/api/wiki/proposals/q1/approve", { method: "POST" });
+
+    // Same status and same body shape as the pre-CAS guard — a reviewer hitting the
+    // two paths seconds apart must not be able to tell them apart. NOT the 500 the
+    // `error` fall-through used to answer.
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string; collision?: boolean };
+    expect(body.collision).toBe(true);
+    expect(body.error).toContain(`sources/${STEM}.mdx`);
+    expect(body.error).toContain("already owns the page name");
+
+    // The row is REVIEWABLE again — the fix. Terminal `error` (or a row stranded in
+    // `approved`) is what leaves the gate rendering no verb at all.
+    expect(reverted).toEqual(["q1"]);
+    expect(row.status).toBe("draft");
+
+    // …and the twin the guard exists for was never written.
+    expect(await Bun.file(path.join(root, "entities", `${STEM}.md`)).exists()).toBe(false);
+  });
+
+  test("a re-click re-refuses harmlessly — the verb survives the refusal", async () => {
+    // The twin is on disk from the first click onwards, so the SECOND request is
+    // caught by the pre-CAS guard instead. Both answer 409 + `collision`, and the
+    // row is a draft after each — which is the property that makes the refusal
+    // repeatable rather than a one-way trip.
+    registerWikiGardenerRoutes(app, deps(landTwin));
+
+    const first = await app.request("/api/wiki/proposals/q1/approve", { method: "POST" });
+    expect(first.status).toBe(409);
+    expect(row.status).toBe("draft");
+
+    const second = await app.request("/api/wiki/proposals/q1/approve", { method: "POST" });
+    expect(second.status).toBe(409);
+    expect(((await second.json()) as { collision?: boolean }).collision).toBe(true);
+    expect(row.status).toBe("draft");
+    // The second refusal never claimed the row, so it had nothing to revert.
+    expect(reverted).toEqual(["q1"]);
+    expect(await Bun.file(path.join(root, "entities", `${STEM}.md`)).exists()).toBe(false);
+  });
+
+  test("an `approved` crash-recovery row whose twin appeared in the crash window ends re-reviewable", async () => {
+    // The one case the pre-CAS guard deliberately skips (it is `draft`-only, so an
+    // `approved` recovery row is re-runnable rather than 409ing forever). The twin
+    // landed while this row was stuck `approved`, so the in-queue check is the ONLY
+    // thing that sees it — and before the fix that meant the recovery row's own
+    // re-run burned it to `error`.
+    row.status = "approved";
+    await landTwin();
+    registerWikiGardenerRoutes(app, deps());
+
+    const res = await app.request("/api/wiki/proposals/q1/approve", { method: "POST" });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { collision?: boolean }).collision).toBe(true);
+    // Re-reviewable: the recovery row is a draft with Approve/Reject on it again.
+    expect(row.status).toBe("draft");
+    expect(reverted).toEqual(["q1"]);
+    expect(await Bun.file(path.join(root, "entities", `${STEM}.md`)).exists()).toBe(false);
+  });
+
+  test("a lost revert CAS still answers the collision — the refusal is not a failure", async () => {
+    // The row moved under us between the apply and the revert. Nothing was written
+    // either way, so the caller hears the collision rather than a 500; the lost CAS
+    // is a log line (the `finishProposal` convention).
+    const d = deps(async () => {
+      await landTwin();
+      // Something else takes the row terminal while the apply is in the queue.
+      row.status = "rejected";
+    });
+    registerWikiGardenerRoutes(app, d);
+
+    const res = await app.request("/api/wiki/proposals/q1/approve", { method: "POST" });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { collision?: boolean }).collision).toBe(true);
+    expect(reverted).toEqual([]);
+    expect(row.status).toBe("rejected");
+    expect(await Bun.file(path.join(root, "entities", `${STEM}.md`)).exists()).toBe(false);
   });
 });

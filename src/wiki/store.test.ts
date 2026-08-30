@@ -9,6 +9,7 @@ import {
   extractWikilinks,
   extractMarkdownLinks,
   firstDanglingWikilinkOpen,
+  isMarkdownWikiPath,
   buildWikiIndex,
   getWikiIndex,
   readWikiPage,
@@ -389,6 +390,31 @@ describe("extractMarkdownLinks", () => {
   });
 });
 
+describe("isMarkdownWikiPath", () => {
+  test("splits markdown pages from standalone .html explainers", () => {
+    expect(isMarkdownWikiPath("concepts/Foo.md")).toBe(true);
+    expect(isMarkdownWikiPath("blogs/foo.mdx")).toBe(true);
+    expect(isMarkdownWikiPath("blogs/foo.html")).toBe(false);
+    // Not a suffix-anywhere test: the extension is what decides.
+    expect(isMarkdownWikiPath("concepts/foo.md.html")).toBe(false);
+    expect(isMarkdownWikiPath("concepts/mdx-notes.txt")).toBe(false);
+  });
+
+  test("folds case — defensive, and unreachable from either caller today", () => {
+    // Stated because it is easy to read the fold as load-bearing and it is not:
+    // `resolve()` lowercases its target before calling this, and `lint.ts`'s
+    // `checkStemCollisions` passes a raw on-disk relPath that reached the index
+    // through a case-SENSITIVE discovery glob (`**/*.{md,mdx,html}`), so an
+    // uppercase extension is not a page at all (pinned in `lint.test.ts`). The fold
+    // is kept — it is what makes the predicate answer the question its NAME asks,
+    // for a caller that hands it an arbitrary path — and pinned here so a future
+    // case-insensitive glob does not need it rediscovered.
+    expect(isMarkdownWikiPath("concepts/Foo.MD")).toBe(true);
+    expect(isMarkdownWikiPath("blogs/Foo.MDX")).toBe(true);
+    expect(isMarkdownWikiPath("blogs/Foo.HTML")).toBe(false);
+  });
+});
+
 describe("buildWikiIndex", () => {
   let root: string;
 
@@ -457,6 +483,7 @@ describe("buildWikiIndex", () => {
       "flows/aarsavregning.md",
     );
   });
+
 
   test("stamps every markdown page with its file mtime", async () => {
     const before = Date.now();
@@ -1446,6 +1473,58 @@ describe("buildWikiIndex", () => {
       (r) => r.level === "warning" && r.rawMessage.includes("shadowed"),
     );
     expect(shadowWarns.length).toBe(2); // the .mdx and the .html loser
+  });
+
+  test("index.shadowed records the three-way group, sorted, attributed to the .md winner", async () => {
+    await mkdir(path.join(root, "blogs/src"), { recursive: true });
+    await Bun.write(path.join(root, "concepts/Trio.md"), "---\ntype: concept\n---\n\nThe winner.");
+    await Bun.write(path.join(root, "blogs/src/Trio.mdx"), "---\ntitle: Trio\n---\n\nMdx loser.");
+    await Bun.write(
+      path.join(root, "blogs/Trio.html"),
+      "<!doctype html><html><head><title>Trio</title></head><body>Html loser.</body></html>",
+    );
+    const index = await buildWikiIndex(root);
+    const trio = (index.shadowed ?? []).filter((s) => s.stem.toLowerCase() === "trio");
+    // BOTH losers are recorded, each naming the same winner, in the SAME relPath
+    // order `pages` itself is sorted in (`localeCompare`, which collates
+    // `blogs/src/…` ahead of `blogs/Trio…` — punctuation is not primary-weighted).
+    expect(trio.map((s) => s.relPath)).toEqual(["blogs/src/Trio.mdx", "blogs/Trio.html"]);
+    expect(trio.map((s) => s.shadowedBy)).toEqual([
+      "concepts/Trio.md",
+      "concepts/Trio.md",
+    ]);
+  });
+
+  test("index.shadowed is byte-identical across two builds (attribution can't flip)", async () => {
+    // `pages` arrives in `Promise.all` completion order and the winner scan keeps
+    // the FIRST page at the best rank — so with two same-rank `.md` candidates the
+    // `.mdx` loser's `shadowedBy` named whichever file the filesystem returned
+    // first, and flipped between builds. A human reads this through the linter.
+    await Bun.write(path.join(root, "concepts/Flip.md"), "---\ntype: concept\n---\n\nOne.");
+    await Bun.write(path.join(root, "entities/Flip.md"), "---\ntype: entity\n---\n\nTwo.");
+    await Bun.write(path.join(root, "sources/Flip.mdx"), "---\ntitle: Flip\n---\n\nLoser.");
+    const a = await buildWikiIndex(root);
+    const b = await buildWikiIndex(root);
+    expect(JSON.stringify(a.shadowed)).toBe(JSON.stringify(b.shadowed));
+    // …and the winner is the relPath-first one, not an arbitrary same-rank page.
+    const flip = (a.shadowed ?? []).find((s) => s.stem.toLowerCase() === "flip");
+    expect(flip?.shadowedBy).toBe("concepts/Flip.md");
+  });
+
+  test("same-stem detection folds NFC — an NFD filename still shadows its NFC twin", async () => {
+    // macOS writes decomposed filenames. Without the fold these are two different
+    // stems, both survive, and the reader silently serves whichever `[[Blåbær]]`
+    // registered first.
+    const nfd = "Blåbær".normalize("NFD");
+    const nfc = "Blåbær".normalize("NFC");
+    await Bun.write(path.join(root, "concepts", `${nfc}.md`), "---\ntype: concept\n---\n\nWinner.");
+    await Bun.write(path.join(root, "sources", `${nfd}.mdx`), `---\ntitle: ${nfd}\n---\n\nLoser.`);
+    const index = await buildWikiIndex(root);
+    const berry = (index.shadowed ?? []).filter((s) => s.stem.normalize("NFC") === nfc);
+    expect(berry.length).toBe(1);
+    expect(berry[0]!.relPath.normalize("NFC")).toBe(`sources/${nfc}.mdx`);
+    expect(berry[0]!.shadowedBy.normalize("NFC")).toBe(`concepts/${nfc}.md`);
+    expect(index.pages.filter((p) => p.name.normalize("NFC") === nfc).length).toBe(1);
   });
 
   test("stem-collision: .mdx wins over .html when no .md exists", async () => {
