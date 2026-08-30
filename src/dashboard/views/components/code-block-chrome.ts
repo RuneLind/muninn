@@ -4,9 +4,13 @@
  * language label and a copy-to-clipboard button.
  *
  * Runs in the /wiki reader (article + Ask/Explain panes), the /research answer
- * pane, the fact-check evidence card and web chat. NOT every `formatWebHtml`
- * surface: `/jira` renders server-side with no client enhancer at all, so its
- * fences stay bare — a deliberate gap, not an oversight.
+ * pane, the fact-check evidence card and web chat — in chat that means EVERY
+ * render site, bot bubbles plus the three cards (Jira draft, Jira Research,
+ * research-action prompt), each of which has to call this itself: nothing walks
+ * the document for them, and a site that omits the call ships bare fences with
+ * every unit test green. NOT every `formatWebHtml` surface: `/jira` renders
+ * server-side with no client enhancer at all, so its fences stay bare — a
+ * deliberate gap, not an oversight.
  *
  * ⚠️ **This is deliberately an ENHANCER, not server-rendered markup.** The chat
  * re-renders every bubble through `sanitizeHtml`, whose tag allowlist does not

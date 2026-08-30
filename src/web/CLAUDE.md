@@ -56,6 +56,19 @@ Five rules it lives by, each a defect it prevents:
    tailnet, so the `execCommand` path is the PRIMARY one there and is unit-
    tested; the e2e runs on `127.0.0.1` and can only ever exercise the other.
 
+⚠️ **Every render site that inserts `formatWebHtml` output must call the pair
+itself** — `enhanceCodeTabs(root); enhanceCodeBlocks(root);` — because both are
+client enhancers and nothing walks the document for them. Three chat sites did
+not, from before this chrome existed: the Jira draft card
+(`components/jira-card.ts`), the Jira Research card and the research-action
+prompt card (both in `chat/views/page.ts`), so their fences rendered as bare
+`pre` blocks with no bar, no Copy and no CodeTabs wiring while every unit test
+stayed green — a Jira description routinely carries SQL and log fences. The
+failure is invisible server-side, so the acceptance is `e2e/chat-card-fences.spec.ts`
+(real page, real bundle, seeded rows, no model call); `jira-card.test.ts` pins the
+call and the node it is handed. `/jira` is still the one deliberate gap: it renders
+server-side with no client enhancer at all.
+
 A cloned fence is the same class seen from the other side, and copying the
 CodeTabs idiom for it is WRONG: `enhanceCodeTabs` only binds listeners onto
 server markup, so strip-marker-and-re-run is correct there, while this enhancer

@@ -49,6 +49,9 @@ export const E2E_PORTS = {
   "entra-identity": 3034,
   "entra-identity/texas": 3035,
   "wiki-code-highlight": 3036,
+  // JIRA_BOT is pinned to the tracked bot so the Jira draft card renders at all —
+  // a per-PROCESS setting, so this spec cannot share the config's 3011 server.
+  "chat-card-fences": 3037,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,
