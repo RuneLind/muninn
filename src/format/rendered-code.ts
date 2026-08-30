@@ -26,51 +26,96 @@
  *    appears, and a sentinel lands inside it.
  *  - **The same thing read backwards**: a link the scanner thought was in prose
  *    stops being parked, so a working link on that line renders as literal
- *    brackets — a regression, in the direction the guard exists to avoid.
+ *    brackets — an OVER-skip, the failure direction this guard must not have.
  *  - **A fence delimiter that starts or ends mid-line.** The renderer replaces
  *    the fence with a placeholder and joins the text either side onto ONE line,
  *    where two lone backticks then pair; a line-wise scanner sees neither.
  *
- * None of that can happen here. The renderer has already decided what is code,
- * and this reads its answer.
+ * ⚠️ **What it costs to read the output instead: this module has to know EVERY
+ * container the renderer uses for code, and there are two — not one.** The first
+ * revision assumed `<code>`, which is wrong twice over, and both were found by
+ * review rather than by reasoning:
+ *
+ *  - **`<Diff>` emits no `<code>` at all.** Its fence becomes
+ *    `<div class="diff-line …">` per line (`web-format.ts`), so a `<code>`-only
+ *    scan reported no code and a wikilink inside a diff came back as a live link
+ *    — a REGRESSION against the markdown-side scanner, which matched the raw
+ *    ```` ```diff ```` fence wherever it sat. `<Diff>` is live in mimir today.
+ *  - **`<code>` NESTS.** `<FileRef>` wraps its already-rendered inline children
+ *    in `<code class="fileref">`, so `` <FileRef>`a` [[P]]</FileRef> `` yields a
+ *    `<code>` inside a `<code>` — and pairing an open tag with the NEXT `</code>`
+ *    closed the outer region at the inner's close, leaving the rest of the
+ *    FileRef outside every region. An earlier revision of this comment asserted
+ *    non-nesting as "a property of the renderer rather than an assumption". It
+ *    was neither; it was wrong.
+ *
+ * The container set is therefore pinned by a DERIVED test rather than by this
+ * list being kept up to date by hand: `rendered-code.test.ts` renders a probe
+ * inside a fence and inside a backtick span for EVERY name in `COMPONENT_NAMES`
+ * and asserts the probe lands in a region, so a component that introduces a
+ * third container fails there instead of silently in a reader's browser.
  */
 
-/** A half-open `[start, end)` span of rendered HTML that sits inside a `<code>`. */
+/** A half-open `[start, end)` span of rendered HTML that is code. */
 export interface RenderedCodeRegion {
   start: number;
   end: number;
 }
 
-const CODE_OPEN_RE = /<code\b[^>]*>/g;
+/** `<code …>` and `</code>`, in one scan, so nesting can be tracked. */
+const CODE_TAG_RE = /<code\b[^>]*>|<\/code>/g;
 
 /**
- * The body of every `<code …>…</code>` in `html`, in document order.
+ * `<Diff>`'s per-line container — the one code shape that is not a `<code>`.
+ * Its body is `escapeHtml(line)`, so it holds no nested tags and the next
+ * `</div>` is always its own.
+ */
+const DIFF_LINE_RE = /<div class="diff-line[^"]*">/g;
+
+/**
+ * The body of every code container in `html`, in document order, OUTERMOST only.
  *
- * Both shapes the pipeline emits are covered by the one scan: a fenced block's
- * `<pre><code class="language-x">` and an inline span's bare `<code>`.
+ * Nesting is real (`<FileRef>` — see the header), so `<code>` is depth-tracked
+ * and an inner span is simply inside its parent's region; emitting only the
+ * outermost keeps `inRenderedCode` a plain containment test.
  *
- * **Non-nesting, and that is a property of the renderer rather than an
- * assumption.** `formatWebHtml` escapes everything it does not itself emit, so a
- * `<code>` written in a page's prose, quoted inside a fence, or put in a
- * component attribute arrives as `&lt;code&gt;` — measured on all four. A literal
- * `<code` in the output can therefore only be one the renderer wrote.
- *
- * An unclosed `<code>` (which the renderer does not produce) runs to the end of
+ * An unclosed container (which the renderer does not produce) runs to the end of
  * the document: the conservative direction, since treating prose as code costs a
  * link that renders as its own brackets, while the reverse costs the source.
  */
 export function renderedCodeRegions(html: string): RenderedCodeRegion[] {
   const regions: RenderedCodeRegion[] = [];
-  for (const m of html.matchAll(CODE_OPEN_RE)) {
-    const start = m.index + m[0].length;
-    const close = html.indexOf("</code>", start);
-    regions.push({ start, end: close === -1 ? html.length : close });
+
+  let depth = 0;
+  let start = -1;
+  for (const m of html.matchAll(CODE_TAG_RE)) {
+    if (m[0] === "</code>") {
+      if (depth === 0) continue; // stray close — not ours to pair
+      depth--;
+      if (depth === 0) {
+        regions.push({ start, end: m.index });
+        start = -1;
+      }
+      continue;
+    }
+    if (depth === 0) start = m.index + m[0].length;
+    depth++;
   }
-  return regions;
+  if (depth > 0 && start >= 0) regions.push({ start, end: html.length });
+
+  for (const m of html.matchAll(DIFF_LINE_RE)) {
+    const bodyStart = m.index + m[0].length;
+    const close = html.indexOf("</div>", bodyStart);
+    regions.push({ start: bodyStart, end: close === -1 ? html.length : close });
+  }
+
+  // `<code>` regions come out in document order and the diff pass appends its
+  // own afterwards — sorted so `inRenderedCode` can binary-search.
+  return regions.sort((a, b) => a.start - b.start);
 }
 
-/** Is `index` inside one of `regions`? Binary search; `regions` comes back in
- *  document order from {@link renderedCodeRegions}, which is what that needs. */
+/** Is `index` inside one of `regions`? Binary search; `regions` comes back
+ *  sorted and non-overlapping from {@link renderedCodeRegions}. */
 export function inRenderedCode(regions: readonly RenderedCodeRegion[], index: number): boolean {
   let lo = 0;
   let hi = regions.length - 1;

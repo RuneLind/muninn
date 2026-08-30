@@ -1,6 +1,7 @@
 import { test, expect, describe } from "bun:test";
 import { renderedCodeRegions, inRenderedCode } from "./rendered-code.ts";
 import { formatWebHtml } from "../web/web-format.ts";
+import { COMPONENT_NAMES } from "./markdown-ast.ts";
 
 describe("renderedCodeRegions / inRenderedCode", () => {
   /** Offset of `needle` in `html`, so a case names what it probes. */
@@ -71,5 +72,75 @@ describe("renderedCodeRegions / inRenderedCode", () => {
   test("no code, no regions", () => {
     expect(renderedCodeRegions(formatWebHtml("just prose"))).toEqual([]);
     expect(inRenderedCode([], 0)).toBe(false);
+  });
+});
+
+/**
+ * The container set, DERIVED over the component vocabulary.
+ *
+ * ⚠️ This is the test that was missing, and its absence cost a regression. The
+ * first cut of this module assumed one container, `<code>`, and pinned that with
+ * hand-picked cases — none of which was a component whose fence does NOT render
+ * a `<code>`. `<Diff>` is exactly that: its fence becomes
+ * `<div class="diff-line …">` per line, so a wikilink inside a diff came back as
+ * a live link, which the markdown-side scanner it replaced had got right.
+ *
+ * So the check is over `COMPONENT_NAMES`, not over a list of components someone
+ * thought of: a component that introduces a THIRD container fails here rather
+ * than silently in a reader's browser. Same default-deny reason
+ * `COMPONENT_FENCE_CHROME` is a `Record` and not a list.
+ *
+ * A component that cannot hold the probe at all (its parser drops the body) is
+ * skipped by the `probe MISSING` guard rather than asserted on — the point is
+ * that anything the renderer DOES show as code is covered.
+ */
+describe("every component's code lands in a region", () => {
+  const PROBE = "ZZPROBEZZ";
+
+  for (const name of COMPONENT_NAMES) {
+    for (const [kind, inner] of [
+      ["fenced", "```ts\n" + PROBE + "\n```"],
+      ["inline", "`" + PROBE + "`"],
+    ] as [string, string][]) {
+      test(`${name}: a ${kind} probe is inside a code region`, () => {
+        const html = formatWebHtml(`<${name}>\n\n${inner}\n\n</${name}>`);
+        const at = html.indexOf(PROBE);
+        // The component's parser dropped the body — nothing to assert about.
+        if (at === -1) return;
+        expect(
+          `${name}/${kind}: ${inRenderedCode(renderedCodeRegions(html), at)}`,
+        ).toBe(`${name}/${kind}: true`);
+      });
+    }
+  }
+
+  test("…and a BARE fence and inline span, with no component around them", () => {
+    for (const src of ["```ts\n" + PROBE + "\n```", "`" + PROBE + "`"]) {
+      const html = formatWebHtml(src);
+      expect(inRenderedCode(renderedCodeRegions(html), html.indexOf(PROBE))).toBe(true);
+    }
+  });
+
+  test("prose is NOT a region — the guard is not an off switch", () => {
+    const html = formatWebHtml(`Some ${PROBE} prose.`);
+    expect(inRenderedCode(renderedCodeRegions(html), html.indexOf(PROBE))).toBe(false);
+  });
+});
+
+describe("nesting — <FileRef> wraps already-rendered children in <code>", () => {
+  test("the OUTER region spans the whole FileRef, not just up to the inner close", () => {
+    // Pairing an open tag with the NEXT `</code>` closed the outer region at the
+    // INNER one, leaving everything after it outside every region — a live link
+    // inside a `<code>`, the exact failure this module exists to prevent.
+    const html = formatWebHtml("<FileRef>`a` MIDDLE `b`</FileRef>");
+    expect(html).toContain('<code class="fileref"><code>a</code>');
+    const regions = renderedCodeRegions(html);
+    expect(inRenderedCode(regions, html.indexOf("MIDDLE"))).toBe(true);
+    // Outermost only: one region for the whole FileRef, not three.
+    expect(regions).toHaveLength(1);
+  });
+
+  test("a stray </code> with nothing open is ignored, not paired backwards", () => {
+    expect(renderedCodeRegions("prose </code> more")).toEqual([]);
   });
 });

@@ -387,6 +387,24 @@ describe("renderWikiHtml: a wikilink inside code is CODE", () => {
       expect(html).toContain("<code>d</code>");
     });
 
+    test("<Diff> renders code with NO <code> tag at all", () => {
+      // The regression the rendered-HTML rework injected and the markdown-side
+      // scanner had right: `<Diff>` emits `<div class="diff-line …">` per line,
+      // so a `<code>`-only scan reported no code and the link came back live.
+      // `<Diff>` is live in mimir today.
+      const html = renderWikiHtml("<Diff>\n\n```diff\n-old [[Claude Code]]\n+new\n```\n\n</Diff>", resolve);
+      expect(html).toContain('<div class="diff-line diff-del">-old [[Claude Code]]</div>');
+      expect(html).not.toContain("wiki-link");
+    });
+
+    test("<FileRef> NESTS <code>, so the outer region must not close at the inner", () => {
+      // FileRef wraps already-rendered children, so a backtick span inside it is
+      // a `<code>` inside a `<code>`. Pairing with the NEXT close ended the outer
+      // region early and left the rest of the FileRef outside every region.
+      const html = renderWikiHtml("<FileRef>`a` [[Claude Code]] `b`</FileRef>", resolve);
+      expect(html).toBe('<code class="fileref"><code>a</code> [[Claude Code]] <code>b</code></code>');
+    });
+
     test("a mid-line fence delimiter: the renderer joins the two sides onto ONE line", () => {
       // `parseBlocks` swaps the fence for a placeholder, so the text before the
       // opener and after the closer end up on one line where two lone backticks

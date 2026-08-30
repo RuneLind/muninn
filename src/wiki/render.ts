@@ -136,8 +136,11 @@ export function renderWikiHtml(
     /\x00WIKIPAGELINK(\d+)\x00/g,
     (_m, idx: string, offset: number) => {
       const i = parseInt(idx, 10);
-      // Inside code the page must show the bytes on disk — escaped, because that
-      // is what the pipeline would have done to them had they never been parked.
+      // Inside code the page must show the bytes on disk, escaped. TEXT-exact,
+      // not render-exact: `textContent` matches an unparked render byte for byte
+      // — the acceptance — but the restored run is not tokenized, so the brackets
+      // are uncoloured where the code around them is highlighted. Cosmetic, and
+      // stated because the first spelling of this comment claimed more.
       if (inRenderedCode(codeRegions, offset)) return escapeHtml(literal[i] ?? "");
       return rendered[i] ?? "";
     },

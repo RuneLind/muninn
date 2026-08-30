@@ -21,8 +21,10 @@ restore it by regex over the RENDERED HTML. The restore was not scoped to prose,
 so a wikilink written inside a fence or inside backticks came back as a live
 clickable `<a>` INSIDE `<pre><code>` with the `[[` `]]` gone from the code's own
 text. Both passes now decide PER SENTINEL: outside code it becomes the link,
-inside code it becomes the source text, escaped exactly as the pipeline would
-have escaped it had it never been parked.
+inside code it becomes the source text, escaped. That restore is TEXT-exact, not
+render-exact: `code.textContent` is byte-identical to what an unparked render
+produces — which is the acceptance — but the restored run is not tokenized, so a
+`[[Page]]` inside a `ts` fence is uncoloured where the surrounding code is not.
 
 The failure this closes is not cosmetic. `code.textContent` is what #494's Copy
 button hands over, what `wiki-mermaid.ts` reads to build a diagram and what the
@@ -56,13 +58,33 @@ divergences, all four now regression tests in `render.test.ts`:
   for a placeholder and joins the text either side onto ONE line, where two lone
   backticks pair; a line-wise scan sees neither.
 
-The region scan relies on `<code>` not nesting, which is the RENDERER's property
-rather than an assumption: `formatWebHtml` escapes everything it does not itself
-emit, so a `<code>` in prose, quoted inside a fence, or in a component attribute
-all arrive as `&lt;code&gt;` — measured on all four, and pinned in
-`rendered-code.test.ts`. Cost, measured warm on the same corpus: **11 µs/page,
-17 ms for all 1561 rendered pages; 0.91 ms of the 33.7 ms render of the largest
-page in either wiki (958 KB).**
+⚠️ **What reading the output costs instead: the scan has to know every container
+the renderer uses for code, and there are TWO.** The first revision assumed one,
+`<code>`, and was wrong twice — both found by review, not by reasoning:
+
+- **`<Diff>` emits no `<code>` at all.** Its fence becomes
+  `<div class="diff-line …">` per line, so a `<code>`-only scan reported no code
+  and a wikilink inside a diff came back as a live link — a REGRESSION against
+  the markdown-side scanner, which matched the raw ` ```diff ` fence wherever it
+  sat. `<Diff>` is live in mimir today.
+- **`<code>` NESTS.** `<FileRef>` wraps its already-rendered inline children in
+  `<code class="fileref">`, so `` <FileRef>`a` [[P]]</FileRef> `` produces a
+  `<code>` inside a `<code>`; pairing an open tag with the NEXT `</code>` closed
+  the outer region at the inner's close and left the rest of the FileRef outside
+  every region. An earlier revision of this page called non-nesting "the
+  RENDERER's property rather than an assumption". It was neither.
+
+So the container set is pinned by a DERIVED test rather than by this list being
+hand-maintained: `rendered-code.test.ts` renders a probe inside a fence and
+inside a backtick span for EVERY name in `COMPONENT_NAMES` and asserts it lands
+in a region, so a component introducing a third container fails there instead of
+silently in a reader's browser — the `COMPONENT_FENCE_CHROME` default-deny idiom.
+One consequence worth knowing: a `[[wikilink]]` written directly inside a
+`<FileRef>` renders literal now, because a FileRef IS a `<code>`.
+
+Cost, measured warm on the same corpus: **18 µs/page, 29 ms for all 1562
+rendered pages; 1.8 ms of the 36.2 ms render of the largest page in either wiki
+(960 KB).**
 
 The share path had already reached the same conclusion from the other side:
 `flattenWikiLinks` (`src/wiki/store.ts`) is code-region-aware for the stated
