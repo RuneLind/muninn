@@ -40,9 +40,19 @@ const WEB_TAGS = [
   "button",
 ];
 
-// Class names emitted by the component renderers. `class` is normally stripped
-// from every tag but `code`; these are preserved so component styling survives.
-const COMPONENT_CLASS_ALLOW = new Set([
+/**
+ * Class names emitted by the component renderers. `class` is normally stripped
+ * from every tag but `code`; these are preserved so component styling survives.
+ *
+ * Exported for ONE reason: `COMPONENT_FENCE_CHROME`'s own-chrome skip
+ * (`code-block-chrome.ts`) resolves a class through `closest()`, so a selector
+ * mapped there but missing here is a skip that is inert IN CHAT ONLY — the
+ * `Record` compiles, its own unit tests pass, and the doubled bar comes back on
+ * the one surface none of them can see. `code-block-chrome.test.ts` derives that
+ * check over the Record rather than re-listing the components, which is the same
+ * reason the Record is a Record.
+ */
+export const COMPONENT_CLASS_ALLOW = new Set([
   "callout", "callout-info", "callout-warn", "callout-good", "callout-bad",
   "callout-title", "callout-body",
   "verdict", "verdict-yes", "verdict-no",
@@ -63,8 +73,16 @@ const COMPONENT_CLASS_ALLOW = new Set([
   // Record exists to prevent, on the one surface its unit tests cannot see.
   // (`code-tabs`/`code-tab-standalone`, the other two selectors, were already
   // allowlisted for the tab wiring and were never exposed.) The inner classes
-  // ride along so the block is not left unstyled once it is left unwrapped.
-  "annotated-code", "annotated-code-panel", "annotated-code-notes", "filetree",
+  // ride along so the block is not left unstyled once it is left unwrapped —
+  // `annotated-code-file` included, which the first cut of this list dropped:
+  // with the outer box styled and the filename header not, a `<AnnotatedCode
+  // file="…">` answer rendered its filename as bare body text flush above the
+  // code, i.e. WORSE than the uniformly-unstyled block it replaced.
+  // `componentClassAllowCoversOwnChrome` in `code-block-chrome.test.ts` is what
+  // stops the behavioral half of this drifting again; the inner styling classes
+  // are checked by the same file's exhaustive-render case.
+  "annotated-code", "annotated-code-file", "annotated-code-panel",
+  "annotated-code-notes", "filetree",
   // Fact-check annotation (`<Fact>` marks + the collapsed `<FactCheck>` appendix).
   // `fc-chip-label` in particular is load-bearing: it is the visually-hidden
   // screen-reader label, so a stripped class turns "Claim 1 — confirmed" into

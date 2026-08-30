@@ -7,6 +7,7 @@ import {
   shouldEnhanceFence,
 } from "./code-block-chrome.ts";
 import { COMPONENT_NAMES } from "../../../format/markdown-ast.ts";
+import { COMPONENT_CLASS_ALLOW } from "../../../chat/views/components/web-format-browser.ts";
 import { formatWebHtml } from "../../../web/web-format.ts";
 
 /**
@@ -302,4 +303,39 @@ describe("COMPONENT_FENCE_CHROME", () => {
     const code = { classList: ["language-ts"], textContent: "const x = 1;" } as unknown as Element;
     expect(shouldEnhanceFence(pre, code)).toBe(false);
   });
+});
+
+/**
+ * The THIRD leg of the own-chrome contract, and the one that had no guard.
+ *
+ * A component is skipped when `pre.closest(COMPONENT_FENCE_CHROME[name])`
+ * matches. Two things already have tests: the Record is exhaustive over
+ * `ComponentName` (a compile error otherwise), and each chrome-owning component
+ * really emits the class it is mapped to. The third — that the class SURVIVES
+ * the chat sanitizer — did not, and `annotated-code`/`filetree` were missing
+ * from `COMPONENT_CLASS_ALLOW` from #494 until the PR this test arrived with, so
+ * the skip was inert in chat and those blocks grew a second bar there while
+ * `/wiki` was correct.
+ *
+ * Derived over the Record, deliberately, rather than re-listing the four
+ * components: classifying a fifth (`Diff: ".diff"` is the obvious next one —
+ * `web-format.ts` already emits `class="diff"`) must fail HERE until its class is
+ * allowlisted, not silently in a browser nobody is looking at. That is the same
+ * default-deny reason `COMPONENT_FENCE_CHROME` is a `Record` and not a list.
+ */
+test("componentClassAllowCoversOwnChrome: every own-chrome selector survives the chat sanitizer", () => {
+  const missing = Object.entries(COMPONENT_FENCE_CHROME)
+    .filter(([, sel]) => sel !== null)
+    .flatMap(([name, sel]) =>
+      // A selector is `.class` today; split on `,` and strip the dot so a future
+      // multi-class entry is checked rather than silently skipped.
+      sel!
+        .split(",")
+        .map((s) => s.trim().replace(/^\./, ""))
+        .filter((cls) => !COMPONENT_CLASS_ALLOW.has(cls))
+        .map((cls) => `${name} -> .${cls}`),
+    );
+  // Named in the failure: "AnnotatedCode -> .annotated-code" is the whole
+  // diagnosis, and a bare length assertion would withhold it.
+  expect(missing).toEqual([]);
 });

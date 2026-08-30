@@ -141,16 +141,27 @@ test.afterAll(async () => {
   // suite is correct without this — but `jira_drafts.thread_id`/`message_id` are
   // plain UUID columns with no FK (migration 071), so a draft left behind is not
   // cascaded away by anything and would sit in `/jira?all=1` forever on whatever
-  // database this ran against. Deleted in FK order, and skipped wholesale when
-  // `beforeAll` never got a client — teardown must not turn a setup failure into
-  // a second, louder error on top of it.
-  if (sql) {
-    await sql`DELETE FROM jira_drafts WHERE thread_id IN (SELECT id FROM threads WHERE user_id = ${USER_ID})`;
-    await sql`DELETE FROM messages WHERE user_id = ${USER_ID}`;
-    await sql`DELETE FROM threads WHERE user_id = ${USER_ID}`;
-    await sql`DELETE FROM users WHERE id = ${USER_ID}`;
+  // database this ran against. Deleted in FK order.
+  //
+  // ⚠️ try/finally, not an `if (sql)` guard. `postgres()` does not connect
+  // eagerly and is `beforeAll`'s FIRST statement, so `sql` is non-null in every
+  // realistic setup failure and the guard protects nothing: with the database
+  // down, `beforeAll` throws on its first DELETE, these four throw again, the
+  // hook aborts on the first one and `end()` never runs — a teardown error
+  // stacked on the setup error, plus a leaked pool. The catch keeps the setup
+  // failure as the only thing reported; the finally always closes the pool.
+  try {
+    if (sql) {
+      await sql`DELETE FROM jira_drafts WHERE thread_id IN (SELECT id FROM threads WHERE user_id = ${USER_ID})`;
+      await sql`DELETE FROM messages WHERE user_id = ${USER_ID}`;
+      await sql`DELETE FROM threads WHERE user_id = ${USER_ID}`;
+      await sql`DELETE FROM users WHERE id = ${USER_ID}`;
+    }
+  } catch (err) {
+    console.warn("chat-card-fences teardown could not clean up:", err);
+  } finally {
+    await sql?.end();
   }
-  await sql?.end();
 });
 
 async function openThread(page: import("@playwright/test").Page): Promise<void> {
@@ -227,8 +238,14 @@ test.describe("chat card fences get the same chrome as every other bubble", () =
     await expect(card).toBeVisible({ timeout: 20_000 });
 
     await page.locator(`[data-jc-copy="${draftId}"]`).click();
-    // The redraw actually happened: this line exists only in the rebuilt markup.
-    await expect(card.locator(".jira-card-msg")).toContainText("kopiert");
+    // The redraw actually happened: this NODE exists only in the rebuilt markup.
+    // Asserted on its presence rather than on the word «kopiert», because
+    // `copyJiraCard` calls `navigator.clipboard.writeText` with no fallback and
+    // writes a DIFFERENT sentence when it rejects — both go through
+    // `setJiraCardMessage`, so both trigger the redraw this case is about, and a
+    // text match would report a clipboard-permission failure as a redraw failure.
+    await expect(card.locator(".jira-card-msg")).toHaveCount(1);
+    expect((await card.locator(".jira-card-msg").textContent())?.trim()).not.toBe("");
 
     await expect(card.locator(".fence")).toHaveCount(1);
     await expect(card.locator(".fence .fence")).toHaveCount(0);
@@ -261,20 +278,30 @@ test.describe("chat card fences get the same chrome as every other bubble", () =
         enhanceCodeBlocks: (root: ParentNode) => void;
       };
       const sources: Record<string, string> = {
-        AnnotatedCode: "<AnnotatedCode>\n\n```ts\nconst x = 1;\n```\n\nA note.\n\n</AnnotatedCode>",
+        // ⚠️ `file="…"` is not decoration: it is what emits the
+        // `annotated-code-file` header, whose class was left out of the
+        // allowlist on the first cut of this fix — with the outer box styled and
+        // the header not, the filename rendered as bare body text flush above
+        // the code. The attribute-less fixture could not see it.
+        AnnotatedCode:
+          '<AnnotatedCode file="src/index.ts">\n\n```ts\nconst x = 1;\n```\n\nA note.\n\n</AnnotatedCode>',
         FileTree: "<FileTree>\n\n```\nsrc/\n  index.ts\n```\n\n</FileTree>",
         CodeTabs: '<CodeTabs>\n<Tab label="a">\n\n```ts\nconst x = 1;\n```\n\n</Tab>\n</CodeTabs>',
         // The control: a Callout owns no chrome, so its fence SHOULD get a bar.
         Callout: '<Callout tone="info" title="t">\n\n```ts\nconst x = 1;\n```\n\n</Callout>',
       };
-      const out: Record<string, { bars: number; wrapperClass: string }> = {};
+      const out: Record<string, { bars: number; wrapperClass: string; classes: string[] }> = {};
       for (const [name, src] of Object.entries(sources)) {
         const host = document.createElement("div");
         host.innerHTML = g.sanitizeHtml(g.formatWebHtml(src), true);
         document.body.appendChild(host);
-        const wrapperClass = host.querySelector("div")?.className ?? "";
+        const divs = Array.from(host.querySelectorAll("div"));
+        const wrapperClass = divs[0]?.className ?? "";
+        // Every surviving class, so an INNER one the allowlist forgot is visible
+        // here too — the outer wrapper surviving is not proof the block is whole.
+        const classes = divs.map((d) => d.className).filter(Boolean);
         g.enhanceCodeBlocks(host);
-        out[name] = { bars: host.querySelectorAll(".fence-bar").length, wrapperClass };
+        out[name] = { bars: host.querySelectorAll(".fence-bar").length, wrapperClass, classes };
         host.remove();
       }
       return out;
@@ -283,6 +310,15 @@ test.describe("chat card fences get the same chrome as every other bubble", () =
     // The class survived the sanitizer — which is the whole mechanism.
     expect(counts.AnnotatedCode!.wrapperClass).toBe("annotated-code");
     expect(counts.FileTree!.wrapperClass).toBe("filetree");
+    // …and so did the block's INNER classes. The skip only needs the outer one;
+    // a stripped inner class is the other half of the same allowlist omission,
+    // and it renders a half-styled block that looks worse than an unstyled one.
+    expect(counts.AnnotatedCode!.classes).toEqual([
+      "annotated-code",
+      "annotated-code-file",
+      "annotated-code-panel",
+      "annotated-code-notes",
+    ]);
     // …so `closest()` matches and no bar is stacked inside the component's own.
     expect(counts.AnnotatedCode!.bars).toBe(0);
     expect(counts.FileTree!.bars).toBe(0);
