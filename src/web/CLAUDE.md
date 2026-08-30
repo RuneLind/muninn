@@ -5,9 +5,9 @@
 ## What counts as a fenced code block
 
 `parseBlocks` (`src/format/markdown-ast.ts`) extracts every fence into a
-`codeBlocks` array and leaves a `\x00CB<idx>\x00` placeholder, which the block
+`FenceStore` and leaves a `\x00CB<marker><idx>\x00` placeholder, which the block
 walker turns back into a `code_block` only when the placeholder is the WHOLE line
-(`CODE_PLACEHOLDER_RE` is anchored). The extractor is therefore a **line walker**,
+(`store.placeholder` is anchored). The extractor is therefore a **line walker**,
 not a regex sweep — anything left on a placeholder's line breaks the restore and
 serves a raw U+0000 to the browser with the code block gone. Measured across the
 two wikis on 2026-08-30 before the walker landed — every `.md`/`.mdx` under
@@ -51,16 +51,29 @@ Two things ride on this that are easy to miss. `lang` is the info string's
 leading `[A-Za-z0-9_+#.-]*` run and nothing wider, because
 `bot/telegram-format.ts` interpolates it into `class="language-${lang}"` with no
 escaping — pinned by the hostile-info-string cases in
-`markdown-all-platforms.test.ts`, not by this paragraph. And a `\x00CB<n>\x00`
-appearing in the INPUT is stripped **to a fixed point, with no iteration bound**:
-dereferencing an index no fence wrote throws and takes down the shared renderer
-for chat, Telegram, Slack and email at once, and a single-pass strip
-*manufactures* such a placeholder out of a nested spelling (`\x00C` +
-`\x00CB0\x00` + `B0\x00` strips to `\x00CB0\x00`). A **bounded** loop is no better
-in kind: at the bound it leaves a raw NUL, or forges a duplicate of a real
-fence's block. Unbounded is safe because each pass deletes ≥5 characters. The
-strip is deliberately narrow — `wiki/render.ts` and `wiki/ask-render.ts` park
-their own `\x00` sentinels across this call.
+`markdown-all-platforms.test.ts`, not by this paragraph.
+
+**The placeholder marker is chosen per parse, and the input is never rewritten.**
+`chooseCodeMarker` scans once for the longest run of `~` following a `\x00CB` and
+uses one more, so the input provably cannot spell this parse's placeholder. That
+matters because U+0000 *does* occur in the corpus — the live jarvis `log.md`
+carries two literal NUL bytes — and a `\x00CB<n>\x00` in the input used to deref
+`codeBlocks[n]` for an `n` no fence wrote and **throw**, taking down the shared
+renderer for chat, Telegram, Slack and email at once.
+
+That was first defended with a sanitiser, and the sanitiser is the lesson: three
+review rounds each patched it and each patch had its own defect — one `replace`
+pass *manufactures* a live placeholder out of a nested spelling (`\x00C` +
+`\x00CB0\x00` + `B0\x00` → `\x00CB0\x00`) and throws; a loop bounded at 10 stops
+early at nesting depth 10 and leaves a raw NUL, or, beside any real fence, a
+**forged duplicate** of that fence's block; unbounded, it terminates but is
+quadratic in *time* (measured 4.8 s on 320 KB of that shape, blocking the whole
+process, per streaming delta). The class behind all three was a **forgeable
+namespace** that had to be defended by scrubbing. A marker the input cannot spell
+removes the need to scrub: nothing is rewritten, so nothing can be reassembled,
+mis-forged, or re-scanned, and a literal `\x00CB0\x00` on a page simply stays the
+text it always was. `wiki/render.ts` and `wiki/ask-render.ts` park their own
+`\x00` sentinels across this call and are unaffected either way.
 
 **Nothing but a backtick refuses an opener**, and that restraint is load-bearing.
 A refused opener does not leave "just that line as prose": the fence's closing

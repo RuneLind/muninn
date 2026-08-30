@@ -685,13 +685,17 @@ describe("parseBlocks fence grammar", () => {
     ]);
   });
 
-  test("a forged code placeholder in the input is stripped, not dereferenced", () => {
-    // U+0000 is not typable prose, but a page's bytes can hold this shape — and
-    // dereferencing an index no fence wrote threw, killing the shared renderer
-    // for chat, Telegram, Slack and email at once.
-    expect(() => parseBlocks(`${NUL}CB5${NUL}`)).not.toThrow();
-    expect(leaksNul(parseBlocks(`${NUL}CB5${NUL}`))).toBe(false);
-    expect(() => parseBlocks(`\`\`\`js\nx\n\`\`\`\n\n${NUL}CB7${NUL}`)).not.toThrow();
+  test("a placeholder-shaped string in the input is text, not a code block", () => {
+    // U+0000 is not typable prose, but a page's bytes can hold this shape — the
+    // live jarvis log.md holds NULs — and dereferencing an index no fence wrote
+    // threw, killing the shared renderer for chat, Telegram, Slack and email at
+    // once. The per-parse marker means such a string is not a placeholder at
+    // all, so it stays the text it was: no throw, no block, nothing deleted.
+    for (const md of [`${NUL}CB5${NUL}`, `${NUL}CB12${NUL}`, `\`\`\`js\nx\n\`\`\`\n\n${NUL}CB7${NUL}`]) {
+      const blocks = parseBlocks(md);
+      expect(blocks.filter((b) => b.type === "code_block")).toHaveLength(md.startsWith("```") ? 1 : 0);
+      expect(allStrings(blocks).join("\n")).toContain(`${NUL}CB`);
+    }
   });
 });
 
@@ -802,40 +806,77 @@ describe("what an UNCLOSED fence actually does", () => {
   });
 });
 
-describe("a forged code placeholder cannot reach the block store", () => {
-  // Round-1 finding: the strip was a single pass, so a NESTED spelling
-  // reassembled a valid placeholder AFTER the removal and threw — a crash the
-  // unfixed parser did not have. The strip runs to a fixed point now.
-  test.each([
-    ["flat", `${NUL}CB5${NUL}`],
-    ["multi-digit", `${NUL}CB12${NUL}`],
-    ["nested", `${NUL}C${NUL}CB0${NUL}B0${NUL}`],
-    ["doubly nested", `${NUL}C${NUL}C${NUL}CB0${NUL}B0${NUL}B0${NUL}`],
-    ["after a real fence", `\`\`\`js\nx\n\`\`\`\n\n${NUL}C${NUL}CB0${NUL}B0${NUL}`],
-  ])("%s", (_name, md) => {
-    expect(() => parseBlocks(md)).not.toThrow();
-    expect(leaksNul(parseBlocks(md))).toBe(false);
-  });
-
-  // Each nesting level peels off in exactly one pass, so a BOUNDED strip has a
-  // depth at which it stops early — and what it leaves behind is either a raw
-  // NUL or, with any real fence on the page, a forged duplicate of that fence's
-  // block. Measured at the round-1 bound of 10: depth 9 clean, depth 10 leaked,
-  // depth 10 + one fence rendered the fence TWICE. The loop is unbounded now
-  // (each pass deletes at least 5 characters, so it cannot fail to terminate),
-  // and this walks past where any bound would have been.
+describe("the placeholder namespace is unforgeable", () => {
+  // Three review rounds landed on the SANITISER that used to defend this — one
+  // pass reassembled a live placeholder from a nested spelling and threw; a
+  // bounded loop stopped early at its bound and left a raw NUL or a FORGED
+  // DUPLICATE of a real fence's block; unbounded, it was quadratic in time.
+  // The class behind all three was a forgeable namespace, so the marker is now
+  // chosen per parse to be one `~` longer than any run the input already has.
+  // No input is rewritten, so nothing can be reassembled, and the two failure
+  // modes below are what these assert against — for EVERY nesting depth, since
+  // depth was the axis every bound got wrong.
   const nest = (d: number) => {
     let s = `${NUL}CB0${NUL}`;
     for (let i = 0; i < d; i++) s = `${NUL}C${s}B0${NUL}`;
     return s;
   };
-  test.each([9, 10, 11, 12, 25])("nesting depth %i, alone and beside a real fence", (d) => {
-    for (const md of [nest(d), `\`\`\`js\nREAL\n\`\`\`\n\n${nest(d)}`]) {
-      const blocks = parseBlocks(md);
-      expect(leaksNul(blocks)).toBe(false);
-      // No forged duplicate: the page has at most the one fence it wrote.
-      expect(blocks.filter((b) => b.type === "code_block").length).toBeLessThanOrEqual(1);
+  const shapes: [string, string][] = [
+    ["flat", `${NUL}CB5${NUL}`],
+    ["multi-digit", `${NUL}CB12${NUL}`],
+    ["marker-shaped", `${NUL}CB~0${NUL}`],
+    ["longer marker-shaped", `${NUL}CB~~~~~~~~~~0${NUL}`],
+    ...([0, 1, 2, 9, 10, 11, 12, 25].map((d) => [`nested x${d}`, nest(d)]) as [string, string][]),
+  ];
+  test.each(shapes)("%s: no throw, and no block the page did not write", (_name, forged) => {
+    for (const [md, realFences] of [
+      [forged, 0],
+      [`\`\`\`js\nREAL\n\`\`\`\n\n${forged}`, 1],
+    ] as const) {
+      let blocks: Block[] = [];
+      expect(() => (blocks = parseBlocks(md))).not.toThrow();
+      const codes = blocks.filter((b) => b.type === "code_block");
+      // EXACTLY, not <=: a one-sided bound also passes when the real fence is
+      // dropped, which is the other direction this has to catch.
+      expect(codes).toHaveLength(realFences);
+      // Nothing was deleted from the page either — the forged text is still
+      // text. Round 2 scrubbed it; scrubbing is what kept going wrong.
+      expect(allStrings(blocks).join("\n")).toContain(`${NUL}CB`);
     }
+  });
+
+  test("CRLF is normalized before anything else looks at the text", () => {
+    // A preservation pin, not a red->green: `rendered-code.ts` documents this as
+    // the first of four reasons its scan reads the RENDERED html rather than the
+    // markdown ("a raw-body scan finds no fence at all in a CRLF file"), and the
+    // property was load-bearing there while pinned nowhere.
+    expect(parseBlocks("```js\r\nx\r\n```")).toEqual([
+      { type: "code_block", lang: "js", code: "x" },
+    ]);
+  });
+
+  test("the marker outruns any run of ~ the input already has", () => {
+    // The property the whole design rests on, computed rather than argued: for
+    // an input carrying k tildes after a \x00CB, the emitted placeholder must
+    // not be spellable by that input. Read off the RENDERED text: whatever
+    // marker was chosen, the forged line must not have become a code block.
+    for (let k = 0; k < 40; k++) {
+      const forged = `${NUL}CB${"~".repeat(k)}0${NUL}`;
+      const blocks = parseBlocks(`\`\`\`js\nREAL\n\`\`\`\n\n${forged}`);
+      expect(blocks.filter((b) => b.type === "code_block")).toHaveLength(1);
+    }
+  });
+
+  test("choosing the marker is linear, not quadratic, in nesting depth", () => {
+    // The round-3 finding was that the sanitiser it replaces was O(n^2) in
+    // TIME: 298 ms at 80 KB of nested spelling, 1.2 s at 160 KB, 4.8 s at
+    // 320 KB, blocking the process, per streaming delta. Nothing rewrites the
+    // input now, so this is one scan. 2000 ms separates the two by ~100x
+    // without being tight on a slow CI runner.
+    const md = nest(40_000); // ~320 KB, the size that measured 4.8 s
+    const t0 = performance.now();
+    parseBlocks(md);
+    expect(performance.now() - t0).toBeLessThan(2000);
   });
 });
 

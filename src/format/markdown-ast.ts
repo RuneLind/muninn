@@ -518,43 +518,66 @@ const FENCE_LINE_RE = /^( {0,3})(`{3,})(.*)$/;
  */
 const FENCE_LANG_RE = /^[A-Za-z0-9_+#.-]*/;
 
-const CODE_PLACEHOLDER_RE = /^\x00CB(\d+)\x00$/;
+/** Every `\x00CB` in the input, with the run of `~` that follows it. */
+const CODE_MARKER_SCAN_RE = /\x00CB(~*)/g;
 
 /**
- * A code-block placeholder appearing in the INPUT, before this parser makes any.
- * Nothing legitimate produces one -- U+0000 is not typable prose -- but a page
- * whose bytes happen to hold one used to deref `codeBlocks[n]` for an `n` no
- * fence ever wrote and THROW (`undefined is not an object (evaluating
- * 'cb.lang')`), taking down the shared renderer for chat, Telegram, Slack and
- * email alike. Stripped on the way in, which also keeps such a page from serving
- * a raw NUL. Deliberately narrower than "strip every U+0000": `wiki/render.ts`
- * and `wiki/ask-render.ts` park their own `\x00`-delimited sentinels across this
- * call, and stripping those would delete every wikilink on the page.
+ * The placeholder marker for ONE parse: `\x00CB`, then one more `~` than the
+ * longest run this input already has after a `\x00CB`. Unforgeable by
+ * construction — the input provably contains no `\x00CB~^(n+1)` — in a single
+ * linear scan.
  *
- * ⚠️ **Applied to a FIXED POINT, not once.** One pass removes non-overlapping
- * matches, and a nested spelling reassembles a valid placeholder out of what is
- * left either side of the removal — `\x00C` + `\x00CB0\x00` + `B0\x00` strips to
- * `\x00CB0\x00`. A single pass therefore MANUFACTURED the exact thing it exists
- * to remove, and threw on input the unfixed parser rendered fine.
+ * ⚠️ **This replaces a sanitiser, and the sanitiser is the lesson.** U+0000 is
+ * not typable prose, but a page's bytes can hold one (the live jarvis `log.md`
+ * does), and a `\x00CB<n>\x00` in the INPUT used to deref `codeBlocks[n]` for an
+ * `n` no fence ever wrote and THROW, taking down the shared renderer for chat,
+ * Telegram, Slack and email at once. Three review rounds each patched the strip
+ * that was supposed to prevent it, and each patch had its own defect:
  *
- * ⚠️ And the loop is UNBOUNDED, which is safe here and was got wrong once. Each
- * pass deletes at least five characters, so it terminates in at most `len / 5`
- * passes and needs no bound. A bound of 10 stopped early at nesting depth 10
- * and left behind precisely what this exists to prevent — a raw NUL, or, on a
- * page carrying any real fence, a FORGED DUPLICATE of that fence's block.
- * `Placeholders.restore` in `markdown-core.ts` does need its bound: a restored
- * VALUE there can re-introduce a sentinel without shortening the string, so
- * that loop has no termination measure. This one does.
+ *  1. one `replace` pass — a NESTED spelling reassembles a live placeholder out
+ *     of what is left either side of the removal (`\x00C` + `\x00CB0\x00` +
+ *     `B0\x00` strips to `\x00CB0\x00`), so the pass MANUFACTURED the thing it
+ *     existed to remove, and threw;
+ *  2. looped, bounded at 10 — at nesting depth 10 it stops early and leaves
+ *     either a raw NUL or, beside any real fence, a FORGED DUPLICATE of that
+ *     fence's block;
+ *  3. looped, unbounded — terminates (each pass deletes >= 5 chars) but each
+ *     pass is a full scan and the nesting peels one level per pass, so it is
+ *     quadratic in TIME: measured 298 ms at 80 KB, 1.2 s at 160 KB, 4.8 s at
+ *     320 KB of that shape, blocking the whole process, per streaming delta.
+ *
+ * The class behind all three is that the placeholder namespace was FORGEABLE and
+ * the input had to be scrubbed to protect it. A marker the input cannot spell
+ * removes the need to scrub: nothing is rewritten, so nothing can be
+ * reassembled, mis-forged or re-scanned. The input passes through untouched — a
+ * literal `\x00CB0\x00` on a page stays the text it always was.
  */
-const FORGED_CODE_PLACEHOLDER_RE = /\x00CB\d+\x00/g;
-
-function stripForgedCodePlaceholders(text: string): string {
-  let out = text;
-  for (;;) {
-    const next = out.replace(FORGED_CODE_PLACEHOLDER_RE, "");
-    if (next === out) return out;
-    out = next;
+function chooseCodeMarker(text: string): string {
+  let longest = -1;
+  for (const m of text.matchAll(CODE_MARKER_SCAN_RE)) {
+    if (m[1]!.length > longest) longest = m[1]!.length;
   }
+  return "~".repeat(longest + 1);
+}
+
+/** The store threaded through the recursive parse: the extracted blocks plus
+ *  the anchored restore regex for THIS parse's marker. Both travel together so
+ *  a component body can never be parsed against a different marker than the one
+ *  its placeholders were written with. */
+interface FenceStore {
+  blocks: { lang: string; code: string }[];
+  /**
+   * Anchored: a placeholder is only a code block when it is the WHOLE line.
+   *
+   * ⚠️ UNPINNED, and structurally redundant — said rather than implied. The
+   * extractor pushes each placeholder as its own `out` element, so it is always
+   * alone on a line, and the marker makes the input unable to spell one
+   * anywhere else; removing the anchors therefore changes no output and no test
+   * fails. Kept because the anchoring is what the ORIGINAL bug was about (the
+   * restore was anchored while the extractor was not), so relaxing it silently
+   * is the one direction this file must not drift.
+   */
+  placeholder: RegExp;
 }
 
 const HR_RE = /^---+$/;
@@ -564,17 +587,24 @@ const UL_RE = /^[-*]\s+(.*)$/;
 const OL_RE = /^(\d+)\.\s+(.*)$/;
 
 export function parseBlocks(text: string): Block[] {
-  const normalized = stripForgedCodePlaceholders(text.replace(/\r\n/g, "\n"));
+  const normalized = text.replace(/\r\n/g, "\n");
+  // The marker is chosen from the NORMALIZED text, which is also the text the
+  // extractor scans. CRLF collapse only deletes `\r`, and `\r\n` -> `\n` leaves
+  // the `\n` behind, so it can never splice two `~` runs into a longer one.
+  const marker = chooseCodeMarker(normalized);
 
   // Extract code blocks first; their content must not be parsed as markdown.
   // The extraction happens ONCE against `codeBlocks`, before any further
   // line-splitting; the array is then threaded through the recursive
   // component-body parse so a `\x00CB{idx}\x00` placeholder inside a component
   // still derefs the same array.
-  const codeBlocks: { lang: string; code: string }[] = [];
-  const protectedText = extractFences(normalized, codeBlocks);
+  const store: FenceStore = {
+    blocks: [],
+    placeholder: new RegExp(`^\\x00CB${marker}(\\d+)\\x00$`),
+  };
+  const protectedText = extractFences(normalized, store, marker);
 
-  return parseBlocksInner(protectedText, codeBlocks, 0);
+  return parseBlocksInner(protectedText, store, 0);
 }
 
 /**
@@ -628,7 +658,7 @@ export function parseBlocks(text: string): Block[] {
  * wiki contains one (measured, same sweep) -- adding them is a separate change
  * with its own corpus diff, not a free ride on this one.
  */
-function extractFences(text: string, codeBlocks: { lang: string; code: string }[]): string {
+function extractFences(text: string, store: FenceStore, marker: string): string {
   const lines = text.split("\n");
   const out: string[] = [];
   let i = 0;
@@ -697,12 +727,12 @@ function extractFences(text: string, codeBlocks: { lang: string; code: string }[
     }
 
     const body = lines.slice(i + 1, close).map((l) => dedentFenceLine(l, indent));
-    const idx = codeBlocks.length;
-    codeBlocks.push({
+    const idx = store.blocks.length;
+    store.blocks.push({
       lang: info.trim().match(FENCE_LANG_RE)![0],
       code: body.join("\n").trimEnd(),
     });
-    out.push(`\x00CB${idx}\x00`);
+    out.push(`\x00CB${marker}${idx}\x00`);
     i = close + 1;
   }
 
@@ -723,7 +753,7 @@ function dedentFenceLine(line: string, indent: number): string {
  *  placeholder store; `depth` is the current component-nesting level. */
 function parseBlocksInner(
   protectedText: string,
-  codeBlocks: { lang: string; code: string }[],
+  store: FenceStore,
   depth: number,
 ): Block[] {
   const lines = protectedText.split("\n");
@@ -751,7 +781,7 @@ function parseBlocksInner(
     const line = lines[i]!;
 
     if (depth < MAX_COMPONENT_DEPTH) {
-      const comp = tryParseComponent(lines, i, codeBlocks, depth, noCloseFrom);
+      const comp = tryParseComponent(lines, i, store, depth, noCloseFrom);
       if (comp) {
         flushText();
         blocks.push(comp.block);
@@ -760,7 +790,7 @@ function parseBlocksInner(
       }
     }
 
-    const cbMatch = line.match(CODE_PLACEHOLDER_RE);
+    const cbMatch = line.match(store.placeholder);
     // Total, not `codeBlocks[n]!`: a slot that does not exist falls through to
     // text instead of throwing.
     //
@@ -773,7 +803,7 @@ function parseBlocksInner(
     // then: depth-10 nesting reached this deref and threw. It stays as a
     // backstop for the next time the enumeration is wrong. What is actually
     // tested is the strip's fixed-point property.
-    const cb = cbMatch ? codeBlocks[parseInt(cbMatch[1]!, 10)] : undefined;
+    const cb = cbMatch ? store.blocks[parseInt(cbMatch[1]!, 10)] : undefined;
     if (cb) {
       flushText();
       blocks.push({ type: "code_block", lang: cb.lang, code: cb.code });
@@ -874,7 +904,7 @@ function parseBlocksInner(
 function tryParseComponent(
   lines: string[],
   i: number,
-  codeBlocks: { lang: string; code: string }[],
+  store: FenceStore,
   depth: number,
   noCloseFrom: Map<string, number>,
 ): { block: Block; next: number } | null {
@@ -900,7 +930,7 @@ function tryParseComponent(
   if (inlineClose !== -1) {
     if (rest.slice(inlineClose + closeTag.length).trim() !== "") return null; // trailing junk
     const content = rest.slice(0, inlineClose);
-    const children = parseBlocksInner(content, codeBlocks, depth + 1);
+    const children = parseBlocksInner(content, store, depth + 1);
     return { block: { type: "component", name: cname, attrs, children }, next: i + 1 };
   }
 
@@ -941,7 +971,7 @@ function tryParseComponent(
     return null; // unclosed → fall through as text
   }
 
-  const children = parseBlocksInner(body.join("\n"), codeBlocks, depth + 1);
+  const children = parseBlocksInner(body.join("\n"), store, depth + 1);
   return { block: { type: "component", name: cname, attrs, children }, next: j + 1 };
 }
 
