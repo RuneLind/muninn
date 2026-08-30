@@ -50,11 +50,21 @@ const COMPONENT_CLASS_ALLOW = new Set([
   "figure", "figure-body", "caption", "fileref", "tablewrap",
   // CodeTabs markup — kept so the enhancer can find/switch tabs and the CSS
   // applies. (The other tier-1 blocks render as unstyled-but-present markup in
-  // the chat re-render, matching the Meter precedent; CodeTabs is the only one
-  // whose classes are load-bearing for behavior, so only it is allowlisted.)
+  // the chat re-render, matching the Meter precedent.)
   "code-tabs", "code-tabs-bar", "code-tabs-tab", "code-tabs-panels",
   "code-tabs-panel", "code-tabs-fallback", "code-tab-standalone", "code-tab-label",
   "is-active",
+  // ⚠️ `annotated-code` and `filetree` are here for BEHAVIOR, not styling, and
+  // that changed with #494: `shouldEnhanceFence` skips a fence whose
+  // `closest(OWN_CHROME)` matches one of `COMPONENT_FENCE_CHROME`'s selectors,
+  // and `closest` reads the CLASS. Stripped here, the selector can never match
+  // in chat, so an `<AnnotatedCode>`/`<FileTree>` answer grows a `.fence-bar`
+  // stacked inside the component's own header — the exact doubled bar that
+  // Record exists to prevent, on the one surface its unit tests cannot see.
+  // (`code-tabs`/`code-tab-standalone`, the other two selectors, were already
+  // allowlisted for the tab wiring and were never exposed.) The inner classes
+  // ride along so the block is not left unstyled once it is left unwrapped.
+  "annotated-code", "annotated-code-panel", "annotated-code-notes", "filetree",
   // Fact-check annotation (`<Fact>` marks + the collapsed `<FactCheck>` appendix).
   // `fc-chip-label` in particular is load-bearing: it is the visually-hidden
   // screen-reader label, so a stripped class turns "Claim 1 — confirmed" into

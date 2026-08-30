@@ -82,8 +82,9 @@ test.beforeAll(async () => {
   sql = postgres(TEST_DB, { max: 2 });
 
   // Idempotent: the rows are addressed by fixed ids/names, and a re-run must not
-  // stack a second copy of each card into the same thread (every assertion below
-  // is `.first()`-free on purpose, so a duplicate would read as a failure).
+  // stack a second copy of each card into the same thread — the card assertions
+  // below resolve ONE node each (Playwright strict mode), so a duplicate reads as
+  // a failure rather than silently passing on whichever came first.
   await sql`DELETE FROM jira_drafts WHERE bot_name = ${BOT} AND notes = 'e2e-card-fences'`;
   await sql`DELETE FROM messages WHERE user_id = ${USER_ID}`;
   await sql`DELETE FROM threads WHERE user_id = ${USER_ID}`;
@@ -136,6 +137,19 @@ test.beforeAll(async () => {
 
 test.afterAll(async () => {
   muninn?.kill("SIGTERM");
+  // Delete what this file wrote. `beforeAll` already clears the same rows, so the
+  // suite is correct without this — but `jira_drafts.thread_id`/`message_id` are
+  // plain UUID columns with no FK (migration 071), so a draft left behind is not
+  // cascaded away by anything and would sit in `/jira?all=1` forever on whatever
+  // database this ran against. Deleted in FK order, and skipped wholesale when
+  // `beforeAll` never got a client — teardown must not turn a setup failure into
+  // a second, louder error on top of it.
+  if (sql) {
+    await sql`DELETE FROM jira_drafts WHERE thread_id IN (SELECT id FROM threads WHERE user_id = ${USER_ID})`;
+    await sql`DELETE FROM messages WHERE user_id = ${USER_ID}`;
+    await sql`DELETE FROM threads WHERE user_id = ${USER_ID}`;
+    await sql`DELETE FROM users WHERE id = ${USER_ID}`;
+  }
   await sql?.end();
 });
 
@@ -145,10 +159,19 @@ async function openThread(page: import("@playwright/test").Page): Promise<void> 
   await expect(page.locator(".msg-bot").last()).toContainText("Her er utkastet.");
 }
 
-/** The chrome #494 builds, as the DOM shows it: a wrapper, a bar, a Copy button. */
+/**
+ * The chrome #494 builds, as the DOM shows it: a wrapper, a bar, a Copy button.
+ *
+ * NB the button assertion is a PRESENCE check, not a visibility one, and cannot
+ * be more than that here: `shared-styles.ts` gives `.fence-copy { opacity: 0 }`
+ * and lifts it only on `.fence:hover` / `:focus-within`, and Playwright counts an
+ * `opacity: 0` element as visible. The hover reveal is asserted once, on its own,
+ * in the case below — asserting it in every call would be three identical hovers
+ * proving one CSS rule.
+ */
 async function expectChrome(fence: import("@playwright/test").Locator, source: string) {
   await expect(fence).toBeVisible();
-  await expect(fence.locator(".fence-bar .fence-copy")).toBeVisible();
+  await expect(fence.locator(".fence-bar .fence-copy")).toHaveCount(1);
   // …and wrapping did not disturb the source. This is what Copy hands over.
   expect(await fence.locator("pre > code").textContent()).toBe(source);
 }
@@ -181,17 +204,90 @@ test.describe("chat card fences get the same chrome as every other bubble", () =
     await expect(card.locator(".fence-lang")).toHaveText("bash");
   });
 
-  test("a card redraw re-enhances without nesting a second bar", async ({ page }) => {
+  test("the IN-PLACE redraw re-enhances without nesting a second bar", async ({
+    page,
+    context,
+  }) => {
+    // ⚠️ This has to hit `existing.outerHTML = html` in `attachJiraCard`, which
+    // a `page.reload()` does NOT: a reload throws the document away, so the
+    // rebuild finds no existing card and takes the `insertAdjacentHTML` branch —
+    // i.e. the same path the three cases above already cover, under a name that
+    // claims otherwise. The reachable in-place paths are the generating→ready
+    // transition and a message-signature change; a Kopier markdown click is the
+    // latter, needs no model call, and is the one this drives.
+    //
+    // What it pins: the redraw builds fresh markup from `view.markdown` and never
+    // clones enhanced DOM, which is why no `unwrapCodeBlockChrome` is owed here.
+    // If that ever stops being true the clone carries the old wrapper and a dead
+    // button, and re-enhancing wraps it a SECOND time inside the first — the
+    // measured failure `unwrapCodeBlockChrome`'s docblock records.
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     await openThread(page);
     const card = page.locator(`[data-jira-card="${draftId}"]`);
     await expect(card).toBeVisible({ timeout: 20_000 });
-    // A thread switch away and back is the ordinary redraw path: the card is
-    // rebuilt from `view.markdown`, so the old wrapper leaves with the old node
-    // and no `unwrapCodeBlockChrome` is owed. A nested `.fence .fence` here is
-    // what the clone hazard would look like if that ever stopped being true.
-    await page.reload();
-    await expect(card).toBeVisible({ timeout: 20_000 });
+
+    await page.locator(`[data-jc-copy="${draftId}"]`).click();
+    // The redraw actually happened: this line exists only in the rebuilt markup.
+    await expect(card.locator(".jira-card-msg")).toContainText("kopiert");
+
     await expect(card.locator(".fence")).toHaveCount(1);
     await expect(card.locator(".fence .fence")).toHaveCount(0);
+    await expect(card.locator(".fence-bar")).toHaveCount(1);
+    // The rebuilt button is LIVE, not the dead clone a nested wrap would leave.
+    await expectChrome(card.locator(".fence"), JIRA_FENCE);
+    await card.locator(".fence").hover();
+    await expect(card.locator(".fence-copy")).toHaveCSS("opacity", "1");
+  });
+
+  test("a component that owns its chrome gets NO second bar — in chat too", async ({ page }) => {
+    // The `COMPONENT_FENCE_CHROME` skip reads a CLASS through `closest()`, and the
+    // chat sanitizer strips a class that is not in `COMPONENT_CLASS_ALLOW`. Two of
+    // the four selectors — `annotated-code` and `filetree` — were NOT allowlisted
+    // when #494 shipped, so the skip was inert in chat and those blocks grew the
+    // doubled bar the Record exists to prevent, on the one surface no unit test
+    // sees. Driven through the real bundled `formatWebHtml` + `sanitizeHtml` +
+    // `enhanceCodeBlocks`, because a copy of the allowlist would prove nothing.
+    await page.goto(`${BASE}/chat`);
+    await page.waitForFunction(
+      () =>
+        typeof (globalThis as { formatWebHtml?: unknown }).formatWebHtml === "function" &&
+        typeof (globalThis as { enhanceCodeBlocks?: unknown }).enhanceCodeBlocks === "function",
+    );
+
+    const counts = await page.evaluate(() => {
+      const g = globalThis as unknown as {
+        formatWebHtml: (s: string) => string;
+        sanitizeHtml: (h: string, isWeb: boolean) => string;
+        enhanceCodeBlocks: (root: ParentNode) => void;
+      };
+      const sources: Record<string, string> = {
+        AnnotatedCode: "<AnnotatedCode>\n\n```ts\nconst x = 1;\n```\n\nA note.\n\n</AnnotatedCode>",
+        FileTree: "<FileTree>\n\n```\nsrc/\n  index.ts\n```\n\n</FileTree>",
+        CodeTabs: '<CodeTabs>\n<Tab label="a">\n\n```ts\nconst x = 1;\n```\n\n</Tab>\n</CodeTabs>',
+        // The control: a Callout owns no chrome, so its fence SHOULD get a bar.
+        Callout: '<Callout tone="info" title="t">\n\n```ts\nconst x = 1;\n```\n\n</Callout>',
+      };
+      const out: Record<string, { bars: number; wrapperClass: string }> = {};
+      for (const [name, src] of Object.entries(sources)) {
+        const host = document.createElement("div");
+        host.innerHTML = g.sanitizeHtml(g.formatWebHtml(src), true);
+        document.body.appendChild(host);
+        const wrapperClass = host.querySelector("div")?.className ?? "";
+        g.enhanceCodeBlocks(host);
+        out[name] = { bars: host.querySelectorAll(".fence-bar").length, wrapperClass };
+        host.remove();
+      }
+      return out;
+    });
+
+    // The class survived the sanitizer — which is the whole mechanism.
+    expect(counts.AnnotatedCode!.wrapperClass).toBe("annotated-code");
+    expect(counts.FileTree!.wrapperClass).toBe("filetree");
+    // …so `closest()` matches and no bar is stacked inside the component's own.
+    expect(counts.AnnotatedCode!.bars).toBe(0);
+    expect(counts.FileTree!.bars).toBe(0);
+    expect(counts.CodeTabs!.bars).toBe(0);
+    // The control still gets one: the skip is a skip, not an off switch.
+    expect(counts.Callout!.bars).toBe(1);
   });
 });

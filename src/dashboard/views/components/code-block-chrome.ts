@@ -12,14 +12,24 @@
  * server-side with no client enhancer at all, so its fences stay bare — a
  * deliberate gap, not an oversight.
  *
+ * ⚠️ The `OWN_CHROME` skip below depends on classes SURVIVING the chat
+ * sanitizer, which is a coupling in the other direction: all four selectors in
+ * `COMPONENT_FENCE_CHROME` must be in `COMPONENT_CLASS_ALLOW`
+ * (`chat/views/components/web-format-browser.ts`) or `closest()` cannot match in
+ * chat and the block gets the doubled bar anyway. Two of them were missing when
+ * #494 shipped, because before it those classes were styling-only.
+ *
  * ⚠️ **This is deliberately an ENHANCER, not server-rendered markup.** The chat
- * re-renders every bubble through `sanitizeHtml`, whose tag allowlist does not
- * include `div` at the fence level and which strips `class` off anything not
- * allowlisted — a server-emitted `<div class="fence">` wrapper would be
- * FLATTENED TO TEXT in chat while looking perfect in the reader. Because the
- * enhancer runs after `innerHTML = sanitizeHtml(…)`, everything it builds is
- * past that gate. `enhanceCodeTabs` exists for the same reason; this module
- * mirrors its shape deliberately:
+ * re-renders every bubble through `sanitizeHtml`, which strips `class` off every
+ * tag but `code` unless the value is in `COMPONENT_CLASS_ALLOW`. Measured
+ * through the real bundled sanitizer: a server-emitted `<div class="fence">`
+ * wrapper survives as a bare `<div>` — `div` IS in the web tag allowlist — with
+ * every `fence`/`fence-bar`/`fence-lang`/`fence-copy` class GONE, so the bar and
+ * the button render unstyled and the button carries no listener (markup cannot
+ * bring one), i.e. a dead Copy button in chat and a perfect one in the reader.
+ * Because the enhancer runs after `innerHTML = sanitizeHtml(…)`, everything it
+ * builds is past that gate. `enhanceCodeTabs` exists for the same reason; this
+ * module mirrors its shape deliberately:
  *
  *  - No-op when a root has no `pre > code` — nothing loads, nothing runs.
  *  - Idempotent via a marker attribute. The re-enhance paths are the wiki

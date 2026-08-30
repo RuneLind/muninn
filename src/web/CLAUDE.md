@@ -18,11 +18,24 @@ Two properties it is written to hold, both pinned in `highlight.test.ts`:
 The bar and the copy button are built by a CLIENT enhancer,
 `enhanceCodeBlocks` (`src/dashboard/views/components/code-block-chrome.ts`),
 never by `web-format.ts`. That is forced by the same sanitizer coupling as the
-token classes above, one step further: `sanitizeHtml`'s tag allowlist has no
-`div` at the fence level, so a server-emitted `<div class="fence">` wrapper is
-FLATTENED TO TEXT in chat while rendering correctly in `/wiki`. Because the
-enhancer runs after `innerHTML = sanitizeHtml(…)`, everything it builds is past
-that gate — the `enhanceCodeTabs` precedent, and the reason both exist.
+token classes above, one step further. Measured through the real bundled
+sanitizer: a server-emitted `<div class="fence">` wrapper is NOT flattened to
+text (`div` is in the web tag allowlist) — it survives as a bare `<div>` with
+every `fence*` class stripped, so the bar and the button render unstyled and the
+button carries no listener, i.e. a dead Copy button in chat and a perfect one in
+`/wiki`. Because the enhancer runs after `innerHTML = sanitizeHtml(…)`,
+everything it builds is past that gate — the `enhanceCodeTabs` precedent, and the
+reason both exist.
+
+⚠️ **The skip in rule 3 below depends on the same allowlist, in the opposite
+direction.** `closest(OWN_CHROME)` reads a CLASS, so every selector in
+`COMPONENT_FENCE_CHROME` must also be in `COMPONENT_CLASS_ALLOW`
+(`chat/views/components/web-format-browser.ts`) or the skip is inert in chat and
+the block gets the doubled bar there. `annotated-code` and `filetree` were
+missing when #494 shipped — before it those classes were styling-only, and the
+allowlist said so in as many words — so a `<AnnotatedCode>` answer in web chat
+grew a stacked bar while `/wiki` was correct. Both are allowlisted now, and
+`e2e/chat-card-fences.spec.ts` drives the real bundle to keep it that way.
 
 Five rules it lives by, each a defect it prevents:
 
