@@ -538,7 +538,13 @@ test.describe("Wiki reader: a wikilink inside code is code", () => {
 
     // The prose link resolved…
     expect(await article.locator("a.wiki-link").count()).toBe(1);
-    // …while the backticked one is literal code.
-    await expect(article.locator("p code").filter({ hasText: "[[Fence Page]]" })).toHaveCount(1);
+    // …while the backticked one is literal code. `:not(pre > code)` is the INLINE
+    // half: the fence's own <code> carries the same text, and `formatWebHtml`
+    // does not wrap a plain text block in a <p>, so neither a bare `code` nor a
+    // `p code` selector can tell the two apart.
+    const inlineCode = article.locator("code:not(pre > code)");
+    await expect(inlineCode.filter({ hasText: "[[Fence Page]]" })).toHaveCount(1);
+    // …and it is text, not markup: no anchor was substituted into it.
+    expect(await inlineCode.locator("a, span.wiki-link-missing").count()).toBe(0);
   });
 });
