@@ -8,6 +8,7 @@ import {
 } from "./code-block-chrome.ts";
 import { COMPONENT_NAMES } from "../../../format/markdown-ast.ts";
 import { COMPONENT_CLASS_ALLOW } from "../../../chat/views/components/component-class-allow.ts";
+import { OWN_CHROME_FIXTURES } from "../../../test/own-chrome-fixtures.ts";
 import { formatWebHtml } from "../../../web/web-format.ts";
 
 /**
@@ -333,16 +334,7 @@ describe("COMPONENT_FENCE_CHROME", () => {
  * history warns about.
  */
 test("componentClassAllowCoversOwnChrome: every own-chrome class SURVIVES the chat sanitizer", () => {
-  // One fixture per chrome-owning component, keyed by the Record's own names so
-  // a new entry with no fixture fails the coverage assertion below rather than
-  // being skipped.
-  const FIXTURES: Partial<Record<string, string>> = {
-    CodeTabs: '<CodeTabs>\n<Tab label="a">\n\n```ts\nconst x = 1;\n```\n\n</Tab>\n</CodeTabs>',
-    Tab: '<Tab label="a">\n\n```ts\nconst x = 1;\n```\n\n</Tab>',
-    AnnotatedCode:
-      '<AnnotatedCode file="src/index.ts">\n\n```ts\nconst x = 1;\n```\n\nA note.\n\n</AnnotatedCode>',
-    FileTree: "<FileTree>\n\n```\nsrc/\n  index.ts\n```\n\n</FileTree>",
-  };
+  const FIXTURES = OWN_CHROME_FIXTURES;
 
   const owners = Object.entries(COMPONENT_FENCE_CHROME).filter(([, sel]) => sel !== null);
 
@@ -355,13 +347,23 @@ test("componentClassAllowCoversOwnChrome: every own-chrome class SURVIVES the ch
     const html = formatWebHtml(FIXTURES[name]!);
     // `classIsComponent`'s rule, applied to what the renderer really emits: a
     // class attribute survives only when EVERY token is allowlisted.
-    for (const m of html.matchAll(/ class="([^"]*)"/g)) {
-      const tokens = m[1]!.trim().split(/\s+/).filter(Boolean);
-      // `code` keeps its class unconditionally (the `language-*` hook), so a
-      // fence's own attribute is not this rule's business.
-      if (tokens.some((t) => t.startsWith("language-"))) continue;
+    //
+    // ⚠️ The exemption is keyed on the TAG, matching `sanitizeHtml`'s own rule
+    // (`tag === "code" && attr.name === "class"`), NOT on the class containing a
+    // `language-*` token. The two coincide only because `codeFenceHtml` is the
+    // sole emitter of that prefix and only ever on a `<code>`; a chrome-owning
+    // component that stamped a language token on its OWN wrapper —
+    // `<div class="terminal language-bash">` — would have its whole attribute
+    // skipped by the content form, and the wrapper class it needs for
+    // `closest()` would be stripped in chat with this guard still green.
+    for (const m of html.matchAll(/<([a-zA-Z][\w-]*)\b[^>]*?\sclass="([^"]*)"/g)) {
+      if (m[1]!.toLowerCase() === "code") continue;
+      const tokens = m[2]!.trim().split(/\s+/).filter(Boolean);
+      // An EMPTY class attribute is stripped too (`[""].every` is false on the
+      // set), but stripping nothing from nothing breaks nothing.
+      if (tokens.length === 0) continue;
       const bad = tokens.filter((t) => !COMPONENT_CLASS_ALLOW.has(t));
-      if (bad.length > 0) stripped.push(`${name}: class="${m[1]}" (unlisted: ${bad.join(", ")})`);
+      if (bad.length > 0) stripped.push(`${name}: class="${m[2]}" (unlisted: ${bad.join(", ")})`);
     }
   }
   // Named in the failure: "AnnotatedCode: class=\"annotated-code-file\"" is the

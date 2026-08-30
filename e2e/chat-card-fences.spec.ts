@@ -32,6 +32,7 @@ import postgres from "postgres";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import { TEST_DATABASE_URL as TEST_DB } from "../src/test/test-db-url.ts";
+import { OWN_CHROME_FIXTURES, NO_OWN_CHROME_FIXTURE } from "../src/test/own-chrome-fixtures.ts";
 
 const PORT = e2ePort("chat-card-fences");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -64,7 +65,14 @@ let muninn: ChildProcess | undefined;
 let sql: ReturnType<typeof postgres> | null = null;
 let threadId = "";
 let draftId = "";
-/** Did `beforeAll` finish? The teardown's error handling forks on it — see there. */
+/**
+ * Have the ROWS been written? The teardown's error handling forks on it.
+ *
+ * ⚠️ Not "did `beforeAll` finish". The inserts happen before the spawn, so the
+ * likeliest setup failure — `waitUp()` timing out on a busy port or a muninn that
+ * dies at boot — leaves rows on the table, and a flag set after the spawn would
+ * still read `false` there and swallow a genuine cleanup failure over them.
+ */
 let seeded = false;
 
 async function waitUp(): Promise<void> {
@@ -120,6 +128,8 @@ test.beforeAll(async () => {
             'no_hits', 'thread', ${threadId}, ${botMsg!.id})
     RETURNING id`;
   draftId = draft!.id;
+  // Every row this file owns now exists — see the declaration.
+  seeded = true;
 
   muninn = spawn("bun", ["run", "src/index.ts"], {
     cwd: REPO_ROOT,
@@ -135,7 +145,6 @@ test.beforeAll(async () => {
     stdio: "ignore",
   });
   await waitUp();
-  seeded = true;
 });
 
 test.afterAll(async () => {
@@ -269,7 +278,10 @@ test.describe("chat card fences get the same chrome as every other bubble", () =
     //   .fence count               1       → 1                unchanged
     //
     // So: visibility. Nothing below it can pass without a redraw having landed.
-    await expect(card.locator(".jira-card-msg")).toBeVisible();
+    // The same 20 s the sibling card assertions ask for: this round exists because
+    // a contended runner is the failure mode, so the probe should not be the one
+    // assertion on the default 5 s.
+    await expect(card.locator(".jira-card-msg")).toBeVisible({ timeout: 20_000 });
 
     await expect(card.locator(".fence")).toHaveCount(1);
     await expect(card.locator(".fence .fence")).toHaveCount(0);
@@ -295,28 +307,19 @@ test.describe("chat card fences get the same chrome as every other bubble", () =
         typeof (globalThis as { enhanceCodeBlocks?: unknown }).enhanceCodeBlocks === "function",
     );
 
-    const counts = await page.evaluate(() => {
+    const counts = await page.evaluate(({ fixtures, control }) => {
       const g = globalThis as unknown as {
         formatWebHtml: (s: string) => string;
         sanitizeHtml: (h: string, isWeb: boolean) => string;
         enhanceCodeBlocks: (root: ParentNode) => void;
       };
-      const sources: Record<string, string> = {
-        // ⚠️ `file="…"` is not decoration: it is what emits the
-        // `annotated-code-file` header, whose class was left out of the
-        // allowlist on the first cut of this fix — with the outer box styled and
-        // the header not, the filename rendered as bare body text flush above
-        // the code. The attribute-less fixture could not see it.
-        AnnotatedCode:
-          '<AnnotatedCode file="src/index.ts">\n\n```ts\nconst x = 1;\n```\n\nA note.\n\n</AnnotatedCode>',
-        FileTree: "<FileTree>\n\n```\nsrc/\n  index.ts\n```\n\n</FileTree>",
-        CodeTabs: '<CodeTabs>\n<Tab label="a">\n\n```ts\nconst x = 1;\n```\n\n</Tab>\n</CodeTabs>',
-        // A <Tab> OUTSIDE a <CodeTabs> renders its own labelled box — the fourth
-        // selector in the Record, and the one with no fixture until now.
-        Tab: '<Tab label="a">\n\n```ts\nconst x = 1;\n```\n\n</Tab>',
-        // The control: a Callout owns no chrome, so its fence SHOULD get a bar.
-        Callout: '<Callout tone="info" title="t">\n\n```ts\nconst x = 1;\n```\n\n</Callout>',
-      };
+      // The SHARED fixture map, plus the no-chrome control. Hand-listing them
+      // here was rebuilding, one layer up, the forgettable list
+      // `COMPONENT_FENCE_CHROME` is a Record to prevent — and the unit guard's
+      // coverage assertion is derived over that Record, so a fifth chrome-owning
+      // component fails there until it has a fixture, and the fixture it gets is
+      // the one this case iterates.
+      const sources: Record<string, string> = { ...fixtures, Callout: control };
       const out: Record<string, { bars: number; wrapperClass: string; classes: string[] }> = {};
       for (const [name, src] of Object.entries(sources)) {
         const host = document.createElement("div");
@@ -332,7 +335,16 @@ test.describe("chat card fences get the same chrome as every other bubble", () =
         host.remove();
       }
       return out;
-    });
+    }, { fixtures: OWN_CHROME_FIXTURES, control: NO_OWN_CHROME_FIXTURE });
+
+    // Every chrome-owning component was actually exercised — the coverage half,
+    // so a fixture added to the shared map cannot be silently skipped here.
+    expect(Object.keys(counts).sort()).toEqual(
+      [...Object.keys(OWN_CHROME_FIXTURES), "Callout"].sort(),
+    );
+    for (const name of Object.keys(OWN_CHROME_FIXTURES)) {
+      expect(`${name}: ${counts[name]!.bars} bars`).toBe(`${name}: 0 bars`);
+    }
 
     // The class survived the sanitizer — which is the whole mechanism.
     expect(counts.AnnotatedCode!.wrapperClass).toBe("annotated-code");
@@ -346,11 +358,6 @@ test.describe("chat card fences get the same chrome as every other bubble", () =
       "annotated-code-panel",
       "annotated-code-notes",
     ]);
-    // …so `closest()` matches and no bar is stacked inside the component's own.
-    expect(counts.AnnotatedCode!.bars).toBe(0);
-    expect(counts.FileTree!.bars).toBe(0);
-    expect(counts.CodeTabs!.bars).toBe(0);
-    expect(counts.Tab!.bars).toBe(0);
     // The control still gets one: the skip is a skip, not an off switch.
     expect(counts.Callout!.bars).toBe(1);
   });
