@@ -286,6 +286,7 @@ const LINT_LABELS: Record<LintCheck, string> = {
   "missing-sources": "Missing sources",
   "index-truncation": "Truncated wikilinks (unclosed [[)",
   "nested-annotation": "Markup nested inside a wikilink",
+  "stem-collision": "Same-stem pages (one is hidden from the wiki)",
 };
 
 function renderLint(findings: LintFinding[]): void {

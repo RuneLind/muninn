@@ -22,7 +22,7 @@
 
 import path from "node:path";
 import type { WikiIndex } from "../wiki/store.ts";
-import { parseFrontmatter } from "../wiki/store.ts";
+import { isMarkdownWikiPath, normalizeRelPath, parseFrontmatter } from "../wiki/store.ts";
 import type { WikiRefs } from "../wiki/ingest-backlog.ts";
 import { normalizeUrl, docIdFromUrl } from "../wiki/ingest-backlog.ts";
 import type { InsertWikiProposalParams, WikiProposal } from "../db/wiki-proposals.ts";
@@ -246,12 +246,52 @@ function urlCovered(refs: WikiRefs, url: string): boolean {
 }
 
 /**
+ * The MARKDOWN page sharing `stem` with the page about to be written at
+ * `targetPath`, excluding whatever sits at `targetPath` itself. The one stem-twin
+ * resolver — `findCollidingPage` (drafter) and the approve route's create-mode
+ * guard both call it, so the two writers cannot disagree about what a twin is.
+ *
+ * **Both extensions count, and the rule is NOT the one the `.md`-only test was
+ * written for.** That test's rationale was reader-precedence SHADOWING — a `.md`
+ * twin drops the drafter's `.mdx` page out of the index (`extRank`, `store.ts`) —
+ * which an `.mdx`-vs-`.mdx` pair cannot cause. The rule here is wider: Obsidian
+ * has ONE title namespace across folders, so any two same-stem markdown pages make
+ * `[[Stem]]` ambiguous whatever their extensions. Measured (2026-08-29): the live
+ * collision was exactly the pair the narrow test could not see — an existing
+ * `sources/<Stem>.mdx` and an applied `entities/<Stem>.md`, after which the source
+ * page was dropped from the index entirely. Do not narrow this back to `.md`.
+ *
+ * The `targetPath` exclusion is what keeps it usable on the APPLY side, where the
+ * page at the target may be the proposal's own (a crash-recovery re-apply, an
+ * `approved` re-run): without it the twin branch matches the target file by stem
+ * and names the row as its own blocker. On the drafter side the exclusion is a
+ * no-op — `findCollidingPage` only reaches here when nothing resolves at
+ * `targetPath` at all.
+ */
+export function findStemTwin(
+  index: WikiIndex | null,
+  stem: string,
+  targetPath: string,
+): CollidingPage | null {
+  if (!index) return null;
+  const s = stem.toLowerCase();
+  const self = normalizeRelPath(targetPath);
+  const twin = index.pages.find(
+    (p) =>
+      p.name.toLowerCase() === s &&
+      isMarkdownWikiPath(p.relPath) &&
+      normalizeRelPath(p.relPath) !== self,
+  );
+  return twin ? { title: twin.title, relPath: twin.relPath } : null;
+}
+
+/**
  * The existing page a stem collides with, or null. A stem collides when an existing
- * page shares the bare stem: an `.md` twin would SHADOW the new `.mdx` page via
- * reader precedence (`.md` > `.mdx`), and an exact same-path source page can't be
- * overwritten in create mode. Either ⇒ the draft can't ship under this title. The
- * drafter gets ONE retry with a distinct-title nudge (see `buildCollisionRetryPrompt`)
- * before the doc is skipped for good.
+ * page shares the bare stem (see {@link findStemTwin} for why both markdown
+ * extensions count), or when an exact same-path source page can't be overwritten in
+ * create mode. Either ⇒ the draft can't ship under this title. The drafter gets ONE
+ * retry with a distinct-title nudge (see `buildCollisionRetryPrompt`) before the doc
+ * is skipped for good.
  *
  * Returns the PAGE rather than a boolean so both collision skips can name — and the
  * backlog row can link to — whatever is standing in the way. A collision the caller
@@ -266,11 +306,7 @@ export function findCollidingPage(
   if (!index) return null;
   const exact = index.resolveRelPath(targetPath); // exact page already exists
   if (exact) return { title: exact.title, relPath: exact.relPath };
-  const s = stem.toLowerCase();
-  const twin = index.pages.find(
-    (p) => p.name.toLowerCase() === s && p.relPath.toLowerCase().endsWith(".md"),
-  );
-  return twin ? { title: twin.title, relPath: twin.relPath } : null;
+  return findStemTwin(index, stem, targetPath);
 }
 
 /** The exact sentinel the collision retry may answer with instead of a draft. */

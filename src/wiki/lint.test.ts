@@ -635,3 +635,83 @@ describe("lintWiki", () => {
     expect(typeof report.generatedAt).toBe("number");
   });
 });
+
+/**
+ * `stem-collision` — the continuous regression guard behind the apply path's
+ * approve-time refusal. Its own describe because every fixture here is a PAIR of
+ * files, and the shape it reports is one the shared fixture wiki deliberately
+ * has none of.
+ */
+describe("lintWiki — stem-collision", () => {
+  let root: string;
+  const write = (rel: string, content: string) => Bun.write(path.join(root, rel), content);
+  const md = (title: string, type: string) =>
+    `---\ntype: ${type}\ntitle: ${title}\nupdated: 2026-06-01\n---\n\n# ${title}\n\nBody.\n`;
+
+  async function stemFindings(): Promise<LintFinding[]> {
+    const index = await buildWikiIndex(root);
+    const { findings } = await lintWiki(index, { now: () => Date.parse("2026-06-20T12:00:00Z") });
+    return findings.filter((f) => f.check === "stem-collision");
+  }
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-lint-stem-"));
+  });
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("cross-extension twin is reported, filed against the SHADOWED page", async () => {
+    // The measured 2026-08-29 shape: a source page drafted as .mdx, an entity page
+    // applied as .md. `.md` wins, so the .mdx is dropped from the index entirely.
+    await write("sources/Aurora Ledger Protocol.mdx", md("Aurora Ledger Protocol", "source"));
+    await write("entities/Aurora Ledger Protocol.md", md("Aurora Ledger Protocol", "entity"));
+
+    const found = await stemFindings();
+    expect(found.length).toBe(1);
+    expect(found[0]!.relPath).toBe("sources/Aurora Ledger Protocol.mdx");
+    expect(found[0]!.detail).toBe("entities/Aurora Ledger Protocol.md");
+    expect(found[0]!.message).toContain("Aurora Ledger Protocol");
+  });
+
+  test("SAME-extension twins in two folders are NOT reported (a supported shape)", async () => {
+    // `store.ts` keeps both and disambiguates them with a displayTitle prefix;
+    // mimir has 10 such pages and the memory wiki 32. Reporting them would bury
+    // every real finding under a permanent, unfixable list.
+    await write("concepts/Shared Stem.md", md("Shared Stem", "concept"));
+    await write("entities/Shared Stem.md", md("Shared Stem", "entity"));
+    expect(await stemFindings()).toEqual([]);
+  });
+
+  test("reserved infrastructure basenames are exempt", async () => {
+    await write("index.md", "# Index\n");
+    await write("notes/index.mdx", "---\ntitle: Index\n---\n\n# Index\n");
+    expect(await stemFindings()).toEqual([]);
+  });
+
+  test("a shadowed .html EXPLAINER is NOT reported (markdown-vs-markdown only)", async () => {
+    // The MDX compile pipeline's own shape, and the only one live on the real
+    // wikis (jarvis 1, mimir 4 as of 2026-08-30). Reporting it would ship this
+    // check permanently red and bury the regression it exists to catch.
+    await write("blogs/Aurora Ledger Protocol.md", md("Aurora Ledger Protocol", "note"));
+    await write(
+      "blogs/Aurora Ledger Protocol.html",
+      "<!-- generated from blogs/src/aurora.mdx -->\n<html><body>x</body></html>",
+    );
+    expect(await stemFindings()).toEqual([]);
+  });
+
+  test("a clean wiki reports nothing", async () => {
+    await write("concepts/One.md", md("One", "concept"));
+    await write("sources/Two.mdx", md("Two", "source"));
+    expect(await stemFindings()).toEqual([]);
+  });
+
+  test("the check key is in LINT_CHECKS, so counts always carry it", async () => {
+    await write("concepts/One.md", md("One", "concept"));
+    const index = await buildWikiIndex(root);
+    const { counts } = await lintWiki(index);
+    expect(LINT_CHECKS).toContain("stem-collision");
+    expect(counts["stem-collision"]).toBe(0);
+  });
+});

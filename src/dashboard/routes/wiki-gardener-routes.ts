@@ -78,6 +78,7 @@ import {
   draftOneBacklogDoc,
   defaultSourceBacklogDeps,
 } from "../../gardener/source-drafter-run.ts";
+import { findStemTwin } from "../../gardener/source-drafter.ts";
 import {
   getWikiGardenerWatcher,
   getWatcherSnapshot,
@@ -2122,6 +2123,57 @@ export function registerWikiGardenerRoutes(
         wiki: existing.wikiName ?? existing.botName,
       });
       return c.json({ error: wikiReadonlyRootReason(targetRoot), readonly: true }, 403);
+    }
+
+    // …and the stem-collision guard, in the same place and for the same reason.
+    //
+    // `applyWikiProposal`'s only create-mode guard is path-EXACT (`current !== null`
+    // ⇒ "target path already exists"), so an approved entity/concept proposal landed
+    // on a stem an existing source page already owned — measured 2026-08-29:
+    // `sources/<Stem>.mdx` was drafted first, `entities/<Stem>.md` applied second,
+    // and the store's same-stem precedence (`.md` > `.mdx`) then DROPPED the source
+    // page from the index entirely. There is no model at apply time to rename with,
+    // so the answer is a refusal the reviewer acts on, not a new terminal state:
+    // deliberately NO new `ApplyOutcome` variant, since the gate renders
+    // Approve/Reject only on `status === "draft"` and an `approved` row would have no
+    // verb at all. Hence pre-CAS — the row stays a draft and a re-click just refuses
+    // again.
+    //
+    // CREATE mode only. In update mode the proposal's own page IS at the target and
+    // is the point of the write; the twin lookup excludes that page by path
+    // (`findStemTwin`), which is also what keeps an `approved` re-run and a
+    // crash-recovery re-apply working.
+    if (targetRoot && existing.mode === "create") {
+      const index = await getWikiIndex({ root: targetRoot });
+      if (!index) {
+        // Consistent with every other index-dependent step here (the apply's own
+        // body-link containment skips on a null index): degrade, don't refuse. Logged
+        // because a silently disabled guard is exactly the failure this PR is about.
+        log.warn(
+          "Wiki-gardener approve: wiki index unavailable for {root} — stem-collision check skipped for proposal {id}",
+          { root: targetRoot, id },
+        );
+      } else {
+        const stem = path.posix.basename(existing.targetPath).replace(/\.mdx?$/i, "");
+        const blocking = findStemTwin(index, stem, existing.targetPath);
+        if (blocking) {
+          log.info(
+            "Wiki-gardener approve refused for {id}: stem \"{stem}\" is already owned by {blocking}",
+            { id, stem, blocking: blocking.relPath },
+          );
+          return c.json(
+            {
+              // The gate renders `data.error` verbatim, so the machine-readable part
+              // rides beside it rather than in it (the `{error, readonly}` shape).
+              error: `"${blocking.title}" (${blocking.relPath}) already owns the page name "${stem}" — approving this would put two pages under one wiki title. Rename one of them, then approve.`,
+              collision: true,
+              blockingPath: blocking.relPath,
+              blockingTitle: blocking.title,
+            },
+            409,
+          );
+        }
+      }
     }
 
     let claimed: WikiProposal | null = null;

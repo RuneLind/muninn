@@ -28,6 +28,46 @@ Three of the four outcomes (`covered`/`skipped`/`error`) persist NO `wiki_propos
 
 Both collision skips carry the BLOCKING PAGE (`findCollidingPage` returns the page, not a boolean) so the row deep-links it. **`POST /api/wiki/gardener/source-draft-doc`** re-runs one doc with an optional `title` override: the drafter uses it verbatim and **forgoes the collision retry** — that retry's SKIP branch is exactly what drops these docs, and it must not overrule a title a human chose. An override that is also taken is answered from the index before any model call; `sanitizeTitleOverride` collapses whitespace + drops quotes, since the value is interpolated into the prompt.
 
+## Stem collisions — the apply path refuses, at approve time
+
+Obsidian has ONE title namespace across folders, so two same-stem markdown pages make
+`[[Stem]]` ambiguous — and when their extensions differ, `store.ts`'s precedence rule
+(`.md` > `.mdx`) DROPS the loser from the index entirely, so one of them simply
+disappears from the reader. Measured 2026-08-29 on the jarvis wiki: a source page was
+drafted first as `sources/<Stem>.mdx`, an approved ENTITY proposal then landed
+`entities/<Stem>.md`, and the source page vanished.
+
+**No drafter-side check could have prevented that** — the drafter ran first, and
+`applyWikiProposal` had no stem check at all: its only create-mode guard is
+path-EXACT (`current !== null` ⇒ `stale: "target path already exists"`). So the guard
+lives on the APPROVE ROUTE, and three things about its placement are load-bearing:
+
+- **Above the draft→approved CAS**, the same position and the same reason as the
+  read-only refusal beside it: the gate renders Approve/Reject only on
+  `status === "draft"`, so a refusal after the flip strands the row in `approved`
+  with no verb. The row stays a draft and a re-click just refuses again. There is
+  deliberately NO new `ApplyOutcome` variant — there is no model at apply time to
+  rename with, so the answer is a refusal a human acts on, not a terminal state.
+- **CREATE mode only.** An update rewrites a page that already exists; a twin
+  standing elsewhere is a pre-existing collision the write did not create, and
+  refusing would make that page permanently un-updatable.
+- **The twin lookup EXCLUDES the page at the proposal's own `targetPath`**
+  (`findStemTwin`), or a crash-recovery re-apply and an `approved` re-run refuse
+  with the row named as its own blocker.
+
+Refusal shape: `409 {error, collision: true, blockingPath, blockingTitle}` — the
+`{error, readonly}` convention, since the gate renders `data.error` verbatim.
+
+**`findStemTwin` (`source-drafter.ts`) is the ONE stem-twin resolver**, shared with
+the drafter's `findCollidingPage`, and it counts BOTH markdown extensions. The
+`.md`-only test it replaced was written for reader-precedence SHADOWING, which an
+`.mdx`-vs-`.mdx` pair cannot cause; the rule now is the title namespace, which any
+same-stem markdown pair breaks. That widening is what makes the guard catch the
+measured case at all — an apply-side check reusing the narrow predicate would have
+been inert exactly where it mattered. `.html` explainers are excluded (a different
+serving path, never a wikilink target). The linter's `stem-collision` check
+(`src/watchers/CLAUDE.md`) is the continuous regression guard over the same rule.
+
 ## Write-queue serialization (load-bearing)
 
 **`applyWikiProposal` serializes on the SHARED per-wiki write queue** (`src/wiki/queue.ts`, realpath-keyed on the wiki ROOT) — the same chain `writeWikiPage` holds, because `log.md` is wiki-GLOBAL and the gardener + fact-check append/integrate families are three read-modify-writers of one file (they raced until 2026-07-30). Two rules for anything joining that chain:

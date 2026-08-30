@@ -498,6 +498,27 @@ export interface WikiIndex {
    * valid; `buildWikiIndex` always sets it.
    */
   trails?: WikiTrail[];
+  /**
+   * Pages DROPPED from `pages` by the same-stem precedence rule below (`.md` >
+   * `.mdx` > `.html`), each with the page that displaced it. Recorded because the
+   * drop is otherwise invisible to every consumer — the page is simply gone from
+   * the index — and the linter's `stem-collision` check has no other way to see the
+   * one shape that actually breaks: a wikilink target that resolves to a different
+   * page than the file the reader expects, with the loser unreachable in the reader.
+   * Empty on a healthy wiki. Optional so hand-built test indexes stay valid;
+   * `buildWikiIndex` always sets it.
+   */
+  shadowed?: ShadowedPage[];
+}
+
+/** A page the same-stem precedence rule dropped, and the page that displaced it. */
+export interface ShadowedPage {
+  /** The dropped page's wiki-relative path. */
+  relPath: string;
+  /** The wiki-relative path of the higher-precedence same-stem page that won. */
+  shadowedBy: string;
+  /** The shared bare stem (the page `name`). */
+  stem: string;
 }
 
 /** Canonical graph key for a page path: posix-normalized, lowercased relPath. */
@@ -516,6 +537,18 @@ function extRank(relPath: string): number {
   if (l.endsWith(".mdx")) return 1;
   if (l.endsWith(".md")) return 0;
   return 2; // .html explainer
+}
+
+/**
+ * Is this a MARKDOWN wiki page (`.md` or `.mdx`) rather than a standalone `.html`
+ * explainer? The one spelling of that test — the gardener's stem-twin guard and the
+ * linter's `stem-collision` check both call it, so "which pages share one title
+ * namespace" cannot be answered two ways. Lives here beside {@link extRank}, which
+ * is the rule it qualifies.
+ */
+export function isMarkdownWikiPath(relPath: string): boolean {
+  const l = relPath.toLowerCase();
+  return l.endsWith(".md") || l.endsWith(".mdx");
 }
 
 /**
@@ -1943,22 +1976,39 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
   // check that refuses to compile two sources onto one output stem); here we can't
   // refuse — the files already exist — so we resolve the ambiguity by precedence.
   const bestRankByStem = new Map<string, number>();
+  const winnerByStem = new Map<string, WikiPageMeta>();
   for (const p of pages) {
     const key = p.name.toLowerCase();
     const rank = extRank(p.relPath);
     const cur = bestRankByStem.get(key);
-    if (cur === undefined || rank < cur) bestRankByStem.set(key, rank);
+    if (cur === undefined || rank < cur) {
+      bestRankByStem.set(key, rank);
+      winnerByStem.set(key, p);
+    }
   }
+  // The drop is recorded, not just warned about: a log line reaches nobody the
+  // next morning, and the dropped page is gone from every consumer's view of the
+  // wiki — including the linter's, which is exactly the check that should report
+  // it. See `WikiIndex.shadowed`.
+  const shadowed: ShadowedPage[] = [];
   for (let i = pages.length - 1; i >= 0; i--) {
     const p = pages[i]!;
-    const best = bestRankByStem.get(p.name.toLowerCase())!;
+    const key = p.name.toLowerCase();
+    const best = bestRankByStem.get(key)!;
     if (extRank(p.relPath) > best) {
       log.warn("wiki page {relPath} shadowed by a higher-precedence same-stem page — dropped", {
         relPath: p.relPath,
       });
+      shadowed.push({
+        relPath: p.relPath,
+        shadowedBy: winnerByStem.get(key)!.relPath,
+        stem: p.name,
+      });
       pages.splice(i, 1);
     }
   }
+  // Reverse-iterated above, so restore document order for a stable report.
+  shadowed.reverse();
 
   pages.sort((a, b) => a.relPath.localeCompare(b.relPath));
 
@@ -2107,6 +2157,7 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
     readerConfig,
     folderLabels,
     trails,
+    shadowed,
   };
 }
 

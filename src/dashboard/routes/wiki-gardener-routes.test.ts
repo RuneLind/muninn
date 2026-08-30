@@ -1832,3 +1832,188 @@ describe("POST /api/wiki/gardener/source-draft-run — an unexpected throw is a 
     expect((await second.json()).error).toContain("watcher_snapshots read failed");
   });
 });
+
+/**
+ * The stem-collision guard on `POST /api/wiki/proposals/:id/approve`.
+ *
+ * The historical shape, reproduced: a source page was drafted FIRST as
+ * `sources/<Stem>.mdx`, and an approved ENTITY proposal then landed
+ * `entities/<Stem>.md` beside it. `applyWikiProposal`'s only create-mode guard is
+ * path-exact (`current !== null` ⇒ "target path already exists"), so the apply
+ * wrote the twin — after which the store's same-stem precedence rule (`.md` >
+ * `.mdx`) DROPS the source page from the index entirely and Obsidian resolves the
+ * title ambiguously.
+ *
+ * These drive the REAL route into the REAL `applyWikiProposal` against a REAL temp
+ * wiki; only the two DB seams are faked, so the gap between the read and the
+ * draft→approved CAS is drivable (the `wiki-readonly-roots.test.ts` rationale).
+ * Every fixture string is synthesized — muninn is a public repo.
+ */
+describe("approve — stem-collision refusal (the apply path had no check at all)", () => {
+  let root: string;
+  let app: Hono;
+  let prevExtra: string | undefined;
+  /** Ids the fake CAS claimed — a refusal must leave this empty. */
+  let approved: string[];
+
+  const STEM = "Aurora Ledger Protocol";
+
+  const proposalRow = (over: Record<string, unknown> = {}) =>
+    ({
+      id: "p1",
+      botName: "jarvis",
+      wikiName: "stemwiki",
+      topicKey: "aurora-ledger-protocol",
+      kind: "entity",
+      mode: "create",
+      targetPath: `entities/${STEM}.md`,
+      baseHash: null,
+      sourceDocs: [],
+      relatedPages: [],
+      rationale: "Synthesized fixture.",
+      draft: `---\ntitle: ${STEM}\ntype: entity\n---\n\n# ${STEM}\n\nSynthesized fixture body.\n`,
+      status: "draft",
+      ...over,
+    }) as never;
+
+  const deps = (proposal: unknown) =>
+    ({
+      getConsumed: async () => new Set<string>(),
+      getPending: async () => new Set<string>(),
+      getWikiGardenerWatcher: async () => null,
+      getSnapshot: async () => null,
+      setSnapshot: async () => {},
+      listProposals: async () => [],
+      getProposalById: async () => proposal,
+      approveProposal: async (id: string) => {
+        approved.push(id);
+        return proposal ? { ...(proposal as object), status: "approved" } : null;
+      },
+    }) as unknown as Parameters<typeof registerWikiGardenerRoutes>[1];
+
+  beforeEach(async () => {
+    approved = [];
+    root = await mkdtemp(path.join(tmpdir(), "wiki-stem-collide-"));
+    prevExtra = process.env.WIKI_EXTRA;
+    process.env.WIKI_EXTRA = `stemwiki=${root}`;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    app = new Hono();
+    app.onError((err, c) => c.json({ error: String(err) }, 500));
+  });
+
+  afterEach(async () => {
+    if (prevExtra === undefined) delete process.env.WIKI_EXTRA;
+    else process.env.WIKI_EXTRA = prevExtra;
+    __resetWikiRegistryForTest();
+    __resetWikiCacheForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  test("an existing .mdx source page blocks a same-stem .md entity apply — 409, no CAS, no write", async () => {
+    await Bun.write(
+      path.join(root, "sources", `${STEM}.mdx`),
+      `---\ntitle: ${STEM}\ntype: source\nurl: https://example.invalid/aurora\n---\n\n# ${STEM}\n\nSynthesized fixture body.\n`,
+    );
+    registerWikiGardenerRoutes(app, deps(proposalRow()));
+
+    const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: string; collision?: boolean; blockingPath?: string };
+    expect(body.collision).toBe(true);
+    expect(body.blockingPath).toBe(`sources/${STEM}.mdx`);
+    // The reason names the blocking page — the gate renders `data.error` verbatim.
+    expect(body.error).toContain(STEM);
+
+    // The two observables that separate this from a refusal one layer down: the
+    // row is still a draft (so the gate still offers Approve/Reject), and the
+    // stem twin was never written.
+    expect(approved).toEqual([]);
+    expect(await Bun.file(path.join(root, "entities", `${STEM}.md`)).exists()).toBe(false);
+  });
+
+  test("a re-click refuses again, identically — the refusal is repeatable", async () => {
+    await Bun.write(
+      path.join(root, "sources", `${STEM}.mdx`),
+      `---\ntitle: ${STEM}\ntype: source\n---\n\nBody.\n`,
+    );
+    registerWikiGardenerRoutes(app, deps(proposalRow()));
+    const first = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    const second = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    expect(first.status).toBe(409);
+    expect(second.status).toBe(409);
+    expect(approved).toEqual([]);
+  });
+
+  test("an `approved` row whose page is already at the target still applies (crash recovery)", async () => {
+    // The proposal's OWN page sits at the target — a crash between the write and
+    // the terminal CAS. The stem twin the guard looks for must EXCLUDE that page,
+    // or the recovery re-apply refuses with the row named as its own blocker.
+    const draft = `---\ntitle: ${STEM}\ntype: entity\n---\n\n# ${STEM}\n\nSynthesized fixture body.\n`;
+    await Bun.write(path.join(root, "entities", `${STEM}.md`), draft);
+    registerWikiGardenerRoutes(app, deps(proposalRow({ status: "approved", draft })));
+
+    const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    // Assert on the GUARD's own observable, never on `status !== 409`: 409 is also
+    // the route's "proposal state changed during apply" answer, which this fixture
+    // reaches whenever a DB happens to be connected (it is, in the full suite —
+    // another file opens the pool — and is not, file-alone). Only the collision
+    // refusal carries `collision`.
+    expect(((await res.json()) as { collision?: boolean }).collision).toBeUndefined();
+    // …and the recovery really did short-circuit on the existing page.
+    expect(await Bun.file(path.join(root, "entities", `${STEM}.md`)).text()).toBe(draft);
+  });
+
+  test("UPDATE mode is never refused, even with a pre-existing same-stem twin", async () => {
+    // The guard is scoped to create mode. An update rewrites a page that already
+    // exists; a twin standing elsewhere is a pre-existing collision this write did
+    // not create, and refusing would make that page permanently un-updatable — the
+    // reviewer would have no verb for a proposal whose only fault is the wiki's.
+    // The twin must SURVIVE the index build to exercise this: same-stem pages of
+    // DIFFERENT extensions are resolved by precedence in `store.ts` (`.md` > `.mdx`)
+    // and the loser is dropped, so a `.mdx` sibling of a `.md` target is not in
+    // `index.pages` at all. A same-extension pair in two folders is what stays.
+    const body = `---\ntitle: ${STEM}\ntype: entity\n---\n\n# ${STEM}\n\nOriginal fixture body.\n`;
+    await Bun.write(path.join(root, "entities", `${STEM}.md`), body);
+    await Bun.write(
+      path.join(root, "concepts", `${STEM}.md`),
+      `---\ntitle: ${STEM}\ntype: concept\n---\n\nBody.\n`,
+    );
+    registerWikiGardenerRoutes(
+      app,
+      deps(proposalRow({ mode: "update", baseHash: Bun.SHA256.hash(body, "hex") })),
+    );
+    const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    expect(((await res.json()) as { collision?: boolean }).collision).toBeUndefined();
+    // The row was CLAIMED — the guard sits above the CAS, so reaching it proves
+    // the guard let this through rather than refusing it.
+    expect(approved).toEqual(["p1"]);
+  });
+
+  test("a SAME-extension cross-folder twin blocks a create too (one title namespace)", async () => {
+    await Bun.write(
+      path.join(root, "concepts", `${STEM}.md`),
+      `---\ntitle: ${STEM}\ntype: concept\n---\n\nBody.\n`,
+    );
+    registerWikiGardenerRoutes(app, deps(proposalRow()));
+    const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { blockingPath: string }).blockingPath).toBe(
+      `concepts/${STEM}.md`,
+    );
+    expect(approved).toEqual([]);
+  });
+
+  test("a near-miss stem is not a collision — the apply proceeds", async () => {
+    await Bun.write(
+      path.join(root, "sources", "Aurora Ledger Protocols.mdx"),
+      "---\ntitle: Aurora Ledger Protocols\ntype: source\n---\n\nBody.\n",
+    );
+    registerWikiGardenerRoutes(app, deps(proposalRow()));
+    const res = await app.request("/api/wiki/proposals/p1/approve", { method: "POST" });
+    expect(((await res.json()) as { collision?: boolean }).collision).toBeUndefined();
+    expect(approved).toEqual(["p1"]);
+    // The apply ran: the page really was written at the near-miss-free stem.
+    expect(await Bun.file(path.join(root, "entities", `${STEM}.md`)).exists()).toBe(true);
+  });
+});

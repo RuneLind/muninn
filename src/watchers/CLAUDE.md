@@ -1502,6 +1502,28 @@ wiki or DB. v1 is purely a report.
      pages" was those two counts added together and attributed to mimir alone — and
      a control copy of mimir's plan page with ONE live occurrence added reports
      exactly that line and none of its six documented ones.
+  7. **stem-collision** — two same-stem MARKDOWN pages, one of which `store.ts`'s
+     precedence rule (`.md` > `.mdx`) therefore DROPPED from the index. The
+     continuous regression guard behind the apply path's approve-time refusal
+     (`src/gardener/CLAUDE.md`); it exists because the drop is otherwise invisible
+     — the shadowed page is not in `index.pages` at all — so the check reads the
+     store's own new `WikiIndex.shadowed` record rather than scanning for pairs.
+     The finding is filed against the SHADOWED page, the one that vanished.
+
+     **Three exclusions, each stated because each is a real population.**
+     *Same-EXTENSION twins in two folders are NOT reported*: `store.ts` calls them
+     "two real pages that simply share a filename" and keeps both behind a
+     `displayTitle` prefix — mimir has 5 such groups (11 pages) and the memory wiki
+     32, so reporting them would be a permanent unfixable list. *Reserved infra*
+     (`index`/`log`/`CLAUDE`) is out, the `checkStaleUpdated` exclusion. *A shadowed
+     `.html` EXPLAINER is out*, mirroring the write guard's own `.html` exclusion
+     (an explainer is a different serving path, not a wikilink target) — and
+     measured 2026-08-30 that is the ONLY live shape: **jarvis 1, mimir 4**, all
+     `blogs/<slug>.html` beside a same-stem `.md`, i.e. MDX-compile-pipeline output,
+     which `store.ts` already handles with `pipelineSourceSiblingHtml`. Including
+     it would ship this check permanently red on both real wikis and bury the
+     regression it exists to catch. Worth its own check; not this one. Measured
+     with the exclusion in place: **jarvis 0 (1,148 pages), mimir 0 (477)**.
 - **Adding a check is compiler-enforced now.** `LintReport.counts`, the watcher's
   `CHECK_SUMMARY` and the gardener page's `LINT_LABELS` are all
   `Record<LintCheck, …>`, and `summarizeCounts` iterates `LINT_CHECKS` itself

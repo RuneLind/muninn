@@ -7,6 +7,8 @@ import {
   MIN_SOURCE_BODY_CHARS,
   COLLISION_SKIP_SENTINEL,
   sanitizeTitleOverride,
+  findCollidingPage,
+  findStemTwin,
   titleMatchKey,
   type DraftSourcePageDeps,
   type SourceDraftInput,
@@ -687,5 +689,165 @@ describe("titleMatchKey", () => {
   test("titles a reader would call different still differ", () => {
     expect(titleMatchKey("Graph Engineering")).not.toBe(titleMatchKey("Graph Engineering v2"));
     expect(titleMatchKey("RAG")).not.toBe(titleMatchKey("RAGs"));
+  });
+});
+
+/**
+ * The stem-twin resolver both writers share. The `.md`-only test this widened was
+ * written for reader-precedence SHADOWING; the rule now is Obsidian's single title
+ * namespace, which an `.mdx`-vs-`.mdx` pair breaks just as well. The measured live
+ * collision was invisible to the narrow test — see `findStemTwin`'s doc comment.
+ */
+describe("findStemTwin / findCollidingPage — which same-stem pages count", () => {
+  const src = (relPath: string, title: string) =>
+    page({ relPath, title, name: title, type: "source" });
+
+  test("CROSS-FOLDER .mdx twin collides (the measured shape: sources/*.mdx vs entities/*.md)", () => {
+    const index = fakeIndex([src("sources/Aurora Ledger Protocol.mdx", "Aurora Ledger Protocol")]);
+    const hit = findStemTwin(index, "Aurora Ledger Protocol", "entities/Aurora Ledger Protocol.md");
+    expect(hit?.relPath).toBe("sources/Aurora Ledger Protocol.mdx");
+  });
+
+  test("SAME-FOLDER .mdx twin collides — caught by NEITHER branch before", () => {
+    // `resolveRelPath` is exact-path with no extension tolerance, so
+    // `sources/X.md` never resolved `sources/X.mdx`, and the twin test excluded
+    // `.mdx`. The source drafter writes `.mdx` and the apply path writes `.md`,
+    // so this pair is a real shape, not a hypothetical.
+    const index = fakeIndex([src("sources/Aurora Ledger Protocol.mdx", "Aurora Ledger Protocol")]);
+    const hit = findStemTwin(index, "Aurora Ledger Protocol", "sources/Aurora Ledger Protocol.md");
+    expect(hit?.relPath).toBe("sources/Aurora Ledger Protocol.mdx");
+  });
+
+  test("the pre-existing .md twin still collides (no behaviour retired)", () => {
+    const index = fakeIndex([
+      page({
+        relPath: "concepts/Aurora Ledger Protocol.md",
+        title: "Aurora Ledger Protocol",
+        name: "Aurora Ledger Protocol",
+      }),
+    ]);
+    const hit = findStemTwin(index, "Aurora Ledger Protocol", "sources/Aurora Ledger Protocol.mdx");
+    expect(hit?.relPath).toBe("concepts/Aurora Ledger Protocol.md");
+  });
+
+  test("the page AT the target path is never its own twin (crash-recovery re-apply)", () => {
+    const index = fakeIndex([
+      page({
+        relPath: "entities/Aurora Ledger Protocol.md",
+        title: "Aurora Ledger Protocol",
+        name: "Aurora Ledger Protocol",
+        type: "entity",
+      }),
+    ]);
+    expect(
+      findStemTwin(index, "Aurora Ledger Protocol", "entities/Aurora Ledger Protocol.md"),
+    ).toBeNull();
+    // …and the path-form is normalized, so a `./`-prefixed spelling of the same
+    // file is still excluded rather than matching itself.
+    expect(
+      findStemTwin(index, "Aurora Ledger Protocol", "./entities/Aurora Ledger Protocol.md"),
+    ).toBeNull();
+  });
+
+  test("a near-miss stem is not a twin", () => {
+    const index = fakeIndex([src("sources/Aurora Ledger Protocols.mdx", "Aurora Ledger Protocols")]);
+    expect(
+      findStemTwin(index, "Aurora Ledger Protocol", "entities/Aurora Ledger Protocol.md"),
+    ).toBeNull();
+  });
+
+  test("a same-stem .html explainer is NOT a twin (it is a different serving path)", () => {
+    const index = fakeIndex([
+      page({
+        relPath: "blogs/Aurora Ledger Protocol.html",
+        title: "Aurora Ledger Protocol",
+        name: "Aurora Ledger Protocol",
+        type: "explainer",
+      }),
+    ]);
+    expect(
+      findStemTwin(index, "Aurora Ledger Protocol", "entities/Aurora Ledger Protocol.md"),
+    ).toBeNull();
+  });
+
+  test("a null index disables the check (degrade, never refuse on an index outage)", () => {
+    expect(findStemTwin(null, "Anything", "entities/Anything.md")).toBeNull();
+    expect(findCollidingPage(null, "Anything", "entities/Anything.md")).toBeNull();
+  });
+
+  test("findCollidingPage still answers the exact-path branch first", () => {
+    const index = fakeIndex([src("sources/Aurora Ledger Protocol.mdx", "Aurora Ledger Protocol")]);
+    const hit = findCollidingPage(
+      index,
+      "Aurora Ledger Protocol",
+      "sources/Aurora Ledger Protocol.mdx",
+    );
+    expect(hit?.relPath).toBe("sources/Aurora Ledger Protocol.mdx");
+  });
+});
+
+/**
+ * Step 4's regression assertion: the drafter's collision retry is pre-existing
+ * behaviour (`buildCollisionRetryPrompt` + the SKIP sentinel + the ledger row);
+ * what changed is that an `.mdx` twin now REACHES it.
+ */
+describe("source drafter — an .mdx stem twin now drives the existing collision retry", () => {
+  test("collides on attempt 1, retries with the distinct-title nudge, drafts at the new stem", async () => {
+    const prompts: string[] = [];
+    const inserted: InsertWikiProposalParams[] = [];
+    const out = await draftSourcePage(
+      baseDeps({
+        // The ONLY twin is an `.mdx` — invisible to the `.md`-only test.
+        index: fakeIndex([
+          page({
+            relPath: "concepts/Retrieval-Augmented Generation.mdx",
+            title: "Retrieval-Augmented Generation",
+            name: "Retrieval-Augmented Generation",
+            type: "source",
+          }),
+        ]),
+        callDrafter: async (prompt: string) => {
+          prompts.push(prompt);
+          return prompts.length === 1
+            ? mdxDraft()
+            : mdxDraft({
+                title: "Aurora Ledger Protocol",
+                body: "# Aurora Ledger Protocol\n\nSynthesized fixture body.",
+              });
+        },
+        insertProposal: async (params: InsertWikiProposalParams) => {
+          inserted.push(params);
+          return { id: "row-0", ...params } as unknown as WikiProposal;
+        },
+      }),
+    );
+
+    expect(prompts.length).toBe(2);
+    expect(prompts[1]).toContain("TITLE COLLISION");
+    expect(prompts[1]).toContain("Retrieval-Augmented Generation");
+    expect(prompts[1]).toContain(COLLISION_SKIP_SENTINEL);
+    expect(out.outcome).toBe("drafted");
+    expect(inserted[0]?.targetPath).toBe("sources/Aurora Ledger Protocol.mdx");
+  });
+
+  test("still colliding after the retry → skipped, and the .mdx page is named", async () => {
+    const out = await draftSourcePage(
+      baseDeps({
+        index: fakeIndex([
+          page({
+            relPath: "concepts/Retrieval-Augmented Generation.mdx",
+            title: "Retrieval-Augmented Generation",
+            name: "Retrieval-Augmented Generation",
+            type: "source",
+          }),
+        ]),
+        callDrafter: async () => mdxDraft(),
+      }),
+    );
+    expect(out.outcome).toBe("skipped");
+    if (out.outcome === "skipped") {
+      expect(out.reason).toContain("collides");
+      expect(out.collidingPage?.relPath).toBe("concepts/Retrieval-Augmented Generation.mdx");
+    }
   });
 });
