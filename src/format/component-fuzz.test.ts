@@ -3,6 +3,7 @@ import { parseBlocks, scanInlineComponents } from "./markdown-ast.ts";
 import { formatWebHtml } from "../web/web-format.ts";
 import { formatTelegramHtml } from "../bot/telegram-format.ts";
 import { formatSlackMrkdwn } from "../slack/slack-format.ts";
+import { stripTokenSpans } from "../test/highlighted-code.ts";
 
 /**
  * Hostile-input fuzz set for component blocks. The contract: the parser never
@@ -204,9 +205,13 @@ describe("component fuzz — never throws, never injects", () => {
       '<AnnotatedCode file="x\"><script>alert(1)</script>" lang="ts">\n```ts\n<img src=x onerror=alert(1)>\n```\n</AnnotatedCode>';
     expect(() => format(md)).not.toThrow();
     const out = format(md);
-    expect(out.web).not.toContain("<script>");
-    expect(out.web).not.toContain("<img");
-    expect(out.web).toContain("&lt;img");
+    // The fence body is a token stream now, so BOTH halves run on the stripped
+    // text: a leaked `<img` would otherwise be split across spans
+    // (`<span class="tok-pun"><</span><span class="tok-fn">img</span>`) and the
+    // negative canary — the half that names the vulnerability — would pass.
+    expect(stripTokenSpans(out.web)).not.toContain("<script>");
+    expect(stripTokenSpans(out.web)).not.toContain("<img");
+    expect(stripTokenSpans(out.web)).toContain("&lt;img");
     expect(out.telegram).not.toContain("<script>");
   });
 
@@ -215,9 +220,9 @@ describe("component fuzz — never throws, never injects", () => {
       '<CodeTabs>\n<Tab label="x\"><script>alert(1)</script>">\n```ts\n<img src=x onerror=alert(1)>\n```\n</Tab>\n</CodeTabs>';
     expect(() => format(md)).not.toThrow();
     const out = format(md);
-    expect(out.web).not.toContain("<script>");
-    expect(out.web).not.toContain("<img");
-    expect(out.web).toContain("&lt;img");
+    expect(stripTokenSpans(out.web)).not.toContain("<script>");
+    expect(stripTokenSpans(out.web)).not.toContain("<img");
+    expect(stripTokenSpans(out.web)).toContain("&lt;img");
     expect(out.telegram).not.toContain("<script>");
   });
 

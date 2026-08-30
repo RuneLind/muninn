@@ -2,6 +2,17 @@
 
 `src/web/web-format.ts` converts AI markdown to HTML for web chat (server side; client mirror in `src/chat/views/components/web-format-client.ts`). This file also documents the **fact-check annotation pair**, whose code spans `src/web/`, `src/format/`, `src/wiki/`, and `src/dashboard/` — this is the one authority page for it.
 
+## Syntax highlighting in fenced code blocks
+
+`code_block` (and `AnnotatedCode`, through the shared `codeFenceHtml`) runs the body through `highlightCode` (`src/format/highlight.ts`), which emits `<span class="tok-*">` for seven token classes; the colors are `--tok-*` in `shared-styles.ts`, so both themes come from one palette and a theme flip costs nothing at render time. Languages are the ones the wikis actually use (ts/js/kotlin/java, sql, shell, json, yaml); `html`, `mermaid`, `diff` and anything unknown fall through to plain `escapeHtml`.
+
+Two properties it is written to hold, both pinned in `highlight.test.ts`:
+
+1. **The rendered text is byte-identical to the source.** `textContent` is what a copy button hands over and what `wiki-mermaid.ts` reads back to build a diagram, so a tokenizer that drops a character is a data bug wearing a styling bug's clothes. Unknown input, unterminated strings and oversized bodies all fall through rather than being partially consumed.
+2. **Everything it does not tokenize is still escaped.** It replaced an `escapeHtml(code)` call and is a drop-in for it. The component-fuzz cases that assert "injected markup comes through escaped" now assert on `stripTokenSpans(...)` (`src/test/highlighted-code.ts`) — the fence body is a token stream, so the escaped text is no longer one contiguous substring.
+
+⚠️ **The chat sanitizer is the coupling that bites.** `/wiki` injects this HTML unsanitized (trusted disk content), but the chat re-renders every bubble through `sanitizeHtml` (`web-format-browser.ts`), which strips `class` off a `<span>` unless the value is allowlisted — so a token class missing from `COMPONENT_CLASS_ALLOW` renders perfectly in the reader and colorless in chat, with every unit test green. That list therefore spreads `HIGHLIGHT_TOKEN_CLASSES` in rather than retyping the names, and `e2e/wiki-code-highlight.spec.ts` drives the real bundled `sanitizeHtml` on the real chat page. **Any new `tok-*` class must be added to that exported array, never to the CSS alone.**
+
 ## Fact-check annotation pair
 
 - `<Fact n="4" v="bad">passage</Fact>` (inline, paired + self-closing) marks a fact-checked passage with a verdict-tinted underline plus a `<button class="fc-chip">`.

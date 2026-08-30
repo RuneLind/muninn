@@ -48,6 +48,7 @@ export const E2E_PORTS = {
   // (an in-process Bun.serve in the spec, not a muninn).
   "entra-identity": 3034,
   "entra-identity/texas": 3035,
+  "wiki-code-highlight": 3036,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

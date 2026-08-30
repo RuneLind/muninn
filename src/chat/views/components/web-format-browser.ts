@@ -14,6 +14,7 @@
 import { formatWebHtml } from "../../../web/web-format.ts";
 import { renderSlackMrkdwn } from "./slack-mrkdwn.ts";
 import { enhanceCodeTabs } from "../../../dashboard/views/components/code-tabs.ts";
+import { HIGHLIGHT_TOKEN_CLASSES } from "../../../format/highlight.ts";
 
 const TG_TAGS = ["b", "strong", "i", "em", "u", "s", "del", "code", "pre", "a", "br", "span"];
 const WEB_TAGS = [
@@ -58,6 +59,10 @@ const COMPONENT_CLASS_ALLOW = new Set([
   "fc-chip", "fc-chip-ok", "fc-chip-warn", "fc-chip-bad", "fc-chip-unknown", "fc-chip-label",
   "fc-block", "fc-block-body", "fc-strip", "fc-strip-lead",
   "fc-count", "fc-count-ok", "fc-count-warn", "fc-count-bad", "fc-claim",
+  // Syntax highlighting. Imported from the module that EMITS them rather than
+  // retyped: a `tok-*` class added there and forgotten here renders colorless
+  // in chat while looking perfect in /wiki — a bug visible on one surface only.
+  ...HIGHLIGHT_TOKEN_CLASSES,
 ]);
 
 /** The only `id` the sanitizer lets through — the fact-check appendix's per-claim
