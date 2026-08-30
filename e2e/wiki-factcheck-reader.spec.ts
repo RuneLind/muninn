@@ -38,6 +38,43 @@ const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
 const REL_PATH = "creatine-loading.mdx";
 const FIXTURE = path.join(REPO_ROOT, "src/wiki/__fixtures__/factcheck-annotated-page.mdx");
 
+/**
+ * A SECOND page, written here rather than into the golden fixture: that file is
+ * asserted BYTE-EXACT by `factcheck-appendix.test.ts`, so adding a fence to it
+ * would break an unrelated contract. This one exists for one reason — the
+ * golden appendix contains no code fence, which is why the evidence card's
+ * code-block chrome had no regression coverage at its only production call
+ * site and the whole fix could be deleted with every suite still green.
+ */
+const FENCE_REL_PATH = "fenced-claim.mdx";
+const FENCE_CLAIM_CODE = "SELECT lean_mass FROM trials WHERE age >= 50;";
+const FENCE_PAGE = [
+  "---",
+  "title: Fenced claim",
+  "---",
+  "",
+  "# Fenced claim",
+  "",
+  '<Fact n="1" v="bad">The query counted every trial.</Fact>',
+  "",
+  "<!-- factcheck:start -->",
+  '<FactCheck date="2026-08-30" ok="0" warn="0" bad="1">',
+  "",
+  "### ❌ Claim 1/1 — The query counted every trial",
+  "",
+  "It filtered on age, so it counted a subset:",
+  "",
+  "```sql",
+  FENCE_CLAIM_CODE,
+  "```",
+  "",
+  "Confidence: 90/100",
+  "",
+  "</FactCheck>",
+  "<!-- factcheck:end -->",
+  "",
+].join("\n");
+
 let root: string;
 let server: ChildProcess | undefined;
 
@@ -85,6 +122,7 @@ async function openFixturePage(page: Page): Promise<void> {
 test.beforeAll(async () => {
   root = await mkdtemp(path.join(tmpdir(), "muninn-e2e-fc-"));
   await writeFile(path.join(root, REL_PATH), readFileSync(FIXTURE, "utf8"), "utf8");
+  await writeFile(path.join(root, FENCE_REL_PATH), FENCE_PAGE, "utf8");
   await writeFile(path.join(root, "log.md"), "# Log\n", "utf8");
 
   server = spawn("bun", ["run", "src/index.ts"], {
@@ -270,3 +308,42 @@ test.describe("Fact-check reader interaction", () => {
     await expect(counts).toBeVisible();
   });
 });
+
+test.describe("Evidence card: a fence inside a claim", () => {
+  test("the card's copy button is LIVE, not a cloned corpse", async ({ page, context }) => {
+    // `buildCard` clones an appendix section whose fences the article enhancer
+    // has ALREADY wrapped. A clone carries the wrapper and the bar but NOT the
+    // listeners, so without `unwrapCodeBlockChrome` + a re-enhance the reader
+    // gets a Copy button that does nothing, forever — and the first attempt at
+    // fixing it (marker-strip only, copied from the CodeTabs idiom) produced
+    // TWO stacked bars with the outer one still dead. Both shapes are asserted.
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await page.goto(
+      `${BASE}/wiki?wiki=${WIKI_NAME}&relPath=${encodeURIComponent(FENCE_REL_PATH)}`,
+      { waitUntil: "domcontentloaded" },
+    );
+    // NB not a title assertion: `stripTitle` removes an H1 matching the
+    // frontmatter title, so the words never appear in the article body.
+    await expect(page.locator('.wiki-article .fc-chip[data-fact="1"]')).toBeVisible();
+
+    // Seed the clipboard so "the button did nothing" is distinguishable from
+    // "the button copied an empty string".
+    await page.evaluate(() => navigator.clipboard.writeText("SENTINEL"));
+
+    await page.locator('.wiki-article .fc-chip[data-fact="1"]').click();
+    const card = page.locator('.wiki-article .fc-card[data-fc-card="1"]');
+    await expect(card).toBeVisible();
+
+    // Exactly one bar and one button — not the nested pair.
+    await expect(card.locator(".fence")).toHaveCount(1);
+    await expect(card.locator(".fence .fence")).toHaveCount(0);
+    await expect(card.locator(".fence-copy")).toHaveCount(1);
+
+    const copy = card.locator(".fence-copy");
+    await card.locator(".fence").hover();
+    await copy.click();
+    await expect(copy).toHaveClass(/is-done/);
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(FENCE_CLAIM_CODE);
+  });
+});
+

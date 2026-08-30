@@ -13,6 +13,71 @@ Two properties it is written to hold, both pinned in `highlight.test.ts`:
 
 ⚠️ **The chat sanitizer is the coupling that bites.** `/wiki` injects this HTML unsanitized (trusted disk content), but the chat re-renders every bubble through `sanitizeHtml` (`web-format-browser.ts`), which strips `class` off a `<span>` unless the value is allowlisted — so a token class missing from `COMPONENT_CLASS_ALLOW` renders perfectly in the reader and colorless in chat, with every unit test green. That list therefore spreads `HIGHLIGHT_TOKEN_CLASSES` in rather than retyping the names, and `e2e/wiki-code-highlight.spec.ts` drives the real bundled `sanitizeHtml` on the real chat page. **Any new `tok-*` class must be added to that exported array, never to the CSS alone.**
 
+## Code-block chrome (header bar + copy)
+
+The bar and the copy button are built by a CLIENT enhancer,
+`enhanceCodeBlocks` (`src/dashboard/views/components/code-block-chrome.ts`),
+never by `web-format.ts`. That is forced by the same sanitizer coupling as the
+token classes above, one step further: `sanitizeHtml`'s tag allowlist has no
+`div` at the fence level, so a server-emitted `<div class="fence">` wrapper is
+FLATTENED TO TEXT in chat while rendering correctly in `/wiki`. Because the
+enhancer runs after `innerHTML = sanitizeHtml(…)`, everything it builds is past
+that gate — the `enhanceCodeTabs` precedent, and the reason both exist.
+
+Five rules it lives by, each a defect it prevents:
+
+1. **Idempotent via a marker attribute.** The re-enhance paths are the wiki
+   article swap, the Ask-pane history repaint and the chat's history render —
+   NOT the streaming delta loop, which sets `innerHTML` and calls no enhancer
+   (`streaming-ui.ts` enhances once, in `promoteStreamingBubble`). Without the
+   marker a repaint wraps the same fence again: three passes, three nested
+   `.fence` wrappers.
+2. **`language-mermaid` is skipped, and that skip is LOAD-BEARING.**
+   `enhanceMermaid` is asynchronous — it injects a CDN script and awaits it — so
+   at every call site this enhancer runs while the mermaid `pre` is still a
+   `pre`. "We run after mermaid" does not hold; without the skip a diagram is
+   wrapped in a header bar reading MERMAID on the HAPPY path.
+3. **A component that owns its own chrome is skipped.** This was a hand-kept
+   selector list twice and was incomplete both times — `.code-tabs` alone (so
+   `<AnnotatedCode>`/`<FileTree>` pages in mimir grew a doubled bar), then
+   those three (so a standalone `<Tab>` still did). It is a
+   `Record<ComponentName, string | null>` now, so a component added to
+   `COMPONENT_NAMES` is a COMPILE error until classified — the `zones.ts` /
+   `route-groups.ts` default-deny idiom. `null` means "a fence in here is an
+   ordinary fence" (a `<Callout>` holding code wants the bar).
+4. **An empty fence gets no button.** `navigator.clipboard.writeText("")`
+   RESOLVES, so the button reported success while silently emptying whatever
+   the reader had on the clipboard.
+5. **The copy button copies `code.textContent`**, which is the fence source
+   verbatim only because of `highlightCode`'s round-trip property — the body is
+   a token stream now, so copying `innerHTML` would ship spans into the
+   reader's clipboard. `navigator.clipboard` is unavailable over plain HTTP to
+   anything but localhost, i.e. exactly how this dashboard is reached on a
+   tailnet, so the `execCommand` path is the PRIMARY one there and is unit-
+   tested; the e2e runs on `127.0.0.1` and can only ever exercise the other.
+
+A cloned fence is the same class seen from the other side, and copying the
+CodeTabs idiom for it is WRONG: `enhanceCodeTabs` only binds listeners onto
+server markup, so strip-marker-and-re-run is correct there, while this enhancer
+BUILDS the wrapper the clone already carries (with a dead button — listeners
+are not cloned). Marker-strip alone makes it wrap a second time inside the dead
+one: two bars, two Copy buttons, the outer inert. `wiki-factcheck-reader.ts`
+therefore calls `unwrapCodeBlockChrome(clone)` and re-enhances — unwrap, then
+wrap.
+
+The chat scopes the wrapper's margin to zero (`.web-content .fence`): `.msg-body`
+is `white-space: pre-wrap`, so the source newlines already render a blank line
+and the shared 14px doubles it — the rule the chat sheet states for every other
+block.
+
+The CSS lives in `shared-styles.ts` beside the token colours. ⚠️ Its selectors
+are element-qualified (`div.fence > pre`) on purpose: page sheets are injected
+AFTER the shared block, `wiki-page.ts` defines `.wiki-article pre`, and at equal
+specificity the later rule wins — so `.fence pre` would lose to the very fill it
+replaces. `--bg-code` separates in each theme's own direction (dark goes lighter
+than the page, light keeps its well), because `--bg-inset` sits ~2 L* BELOW
+`--bg-panel` on dark and left the block with no visible edge at all.
+
 ## Fact-check annotation pair
 
 - `<Fact n="4" v="bad">passage</Fact>` (inline, paired + self-closing) marks a fact-checked passage with a verdict-tinted underline plus a `<button class="fc-chip">`.

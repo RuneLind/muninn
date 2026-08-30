@@ -14,6 +14,10 @@
 import { formatWebHtml } from "../../../web/web-format.ts";
 import { renderSlackMrkdwn } from "./slack-mrkdwn.ts";
 import { enhanceCodeTabs } from "../../../dashboard/views/components/code-tabs.ts";
+import {
+  enhanceCodeBlocks,
+  unwrapCodeBlockChrome,
+} from "../../../dashboard/views/components/code-block-chrome.ts";
 import { HIGHLIGHT_TOKEN_CLASSES } from "../../../format/highlight.ts";
 
 const TG_TAGS = ["b", "strong", "i", "em", "u", "s", "del", "code", "pre", "a", "br", "span"];
@@ -116,4 +120,4 @@ function sanitizeHtml(html: string, isWeb: boolean): string {
   return tmp.innerHTML;
 }
 
-Object.assign(globalThis, { formatWebHtml, renderSlackMrkdwn, sanitizeHtml, enhanceCodeTabs });
+Object.assign(globalThis, { formatWebHtml, renderSlackMrkdwn, sanitizeHtml, enhanceCodeTabs, enhanceCodeBlocks, unwrapCodeBlockChrome });

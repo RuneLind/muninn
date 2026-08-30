@@ -72,7 +72,7 @@ export function streamingUiScript(): string {
     // Finalize HTML content
     if (isWeb) {
       bubble.innerHTML = sanitizeHtml(formatWebHtml(streamingRawText), true);
-      enhanceCodeTabs(bubble);
+      enhanceCodeTabs(bubble); enhanceCodeBlocks(bubble);
       augmentIndexLinks(bubble);
       augmentIssueLinks(bubble);
     }

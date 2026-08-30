@@ -76,6 +76,15 @@ const DARK_TOKENS = `
       --tok-fn: #60a5fa;
       --tok-typ: #22d3ee;
       --tok-pun: #8e8e9c;
+
+      /* Code-block chrome. --bg-inset is the WRONG fill for a code block on
+         dark: it sits ~2 L* BELOW --bg-panel, so the block has no visible edge
+         at all (measured from the reported screenshot — contrast ratio is
+         useless there, it reads 1.04 either way). Dark separates by going
+         LIGHTER than the page, light keeps its well; one token, each theme in
+         its own direction. */
+      --bg-code: #1a1a2e;
+      --bg-code-bar: #22223c;
 `;
 
 /**
@@ -154,6 +163,11 @@ const LIGHT_TOKENS = `
       --tok-fn: #1d4ed8;
       --tok-typ: #0e7490;
       --tok-pun: #5e6270;
+
+      /* The light theme already separated correctly — this is --bg-inset's
+         value, kept under the new name so both themes read one token. */
+      --bg-code: #eceef3;
+      --bg-code-bar: #e2e4ea;
 `;
 
 /** Shared CSS for all dashboard pages — base reset, header, and nav */
@@ -308,6 +322,64 @@ export const SHARED_STYLES = `
     .tok-fn  { color: var(--tok-fn); }
     .tok-typ { color: var(--tok-typ); }
     .tok-pun { color: var(--tok-pun); }
+
+    /* --- Code-block chrome (header bar + copy) ------------------------------
+       Built by the enhanceCodeBlocks CLIENT enhancer, never server-rendered:
+       the chat sanitizer drops a div at the fence level, so a server-emitted
+       wrapper flattens code blocks to plain text in chat. See that module.
+
+       ⚠️ The element-qualified selectors are load-bearing, not style. Page
+       sheets are injected AFTER these (wiki-page.ts defines .wiki-article
+       pre, chat defines .web-content pre code), and at equal specificity the
+       later rule wins — so .fence pre would lose to the very fill this
+       replaces. div.fence > pre outranks it by one element selector. */
+    .fence {
+      margin: 14px 0;
+      border: 1px solid var(--border-secondary);
+      border-radius: 8px;
+      overflow: hidden;
+      background: var(--bg-code);
+    }
+    .fence-bar {
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      background: var(--bg-code-bar);
+      border-bottom: 1px solid var(--border-secondary);
+      padding: 5px 8px 5px 12px;
+      min-height: 30px;
+    }
+    .fence-lang {
+      font: 500 10.5px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-dim);
+    }
+    div.fence > pre {
+      margin: 0; background: transparent; border: 0; border-radius: 0;
+      padding: 12px 14px 14px; overflow-x: auto;
+    }
+    div.fence > pre > code {
+      background: none; padding: 0; border-radius: 0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    /* Copy: hidden until the block is hovered or holds focus — zero resting
+       noise on a page of fences. :focus-within is what keeps it reachable by
+       keyboard, and the hover: none block is what keeps it usable at all on a
+       touch device, where the hover state never arrives. */
+    .fence-copy {
+      display: inline-flex; align-items: center; gap: 5px;
+      font: 500 11px/1 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      color: var(--text-muted); background: var(--bg-surface);
+      border: 1px solid var(--border-secondary);
+      padding: 4px 9px; border-radius: 6px; cursor: pointer;
+      opacity: 0; transition: opacity 0.13s, color 0.13s, border-color 0.13s;
+    }
+    .fence:hover .fence-copy,
+    .fence:focus-within .fence-copy { opacity: 1; }
+    @media (hover: none) { .fence-copy { opacity: 1; } }
+    .fence-copy:hover { color: var(--text-primary); border-color: var(--text-dim); }
+    .fence-copy:focus-visible { opacity: 1; outline: 2px solid var(--accent); outline-offset: 1px; }
+    .fence-copy.is-done { color: var(--status-success); border-color: var(--status-success); }
+    .fence-copy.is-failed { color: var(--status-error); border-color: var(--status-error); }
+    .fence-copy svg { width: 12px; height: 12px; flex: none; }
 
     /* ========================================================================
        Shared dashboard-redesign primitives (PR 1). Consumed by /agents,

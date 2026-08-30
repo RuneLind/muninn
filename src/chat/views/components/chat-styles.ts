@@ -762,6 +762,13 @@ export function chatStyles(): string {
     .web-content h2 { font-size: 1.25em; }
     .web-content h3 { font-size: 1.15em; }
     .web-content h4 { font-size: 1.05em; }
+    /* The fence WRAPPER follows the same rule as the pre it replaced: .msg-body
+       is white-space: pre-wrap, so the source newlines around a block already
+       render a blank line and the shared 14px margin doubles it. Measured on a
+       real bubble: +28px per fence over the /wiki spacing, where that margin is
+       correct. Scoped here rather than dropped from the shared rule, which the
+       reader does want. */
+    .web-content .fence { margin: 0; }
     .web-content pre {
       background: var(--bg-surface);
       border: 1px solid var(--border-secondary);

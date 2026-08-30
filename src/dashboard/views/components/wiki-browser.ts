@@ -71,6 +71,7 @@ import { readActiveWikiName, withWikiParam } from "./wiki-param.ts";
 import { enhanceMermaid } from "./wiki-mermaid.ts";
 import { atlasBodyHtml, initAtlas } from "./wiki-atlas.ts";
 import { enhanceCodeTabs } from "./code-tabs.ts";
+import { enhanceCodeBlocks } from "./code-block-chrome.ts";
 import { enhanceFactCheck } from "./wiki-factcheck-reader.ts";
 import { type DeclineReason } from "../../../wiki/ask-chat.ts";
 import {
@@ -1244,7 +1245,9 @@ function fetchAndRenderPage(url: string, push: boolean): void {
       // funnel through loadPage. (The Ask/Explain answer replaces #articleWrap
       // with its own markup, so rendered diagrams disappear with it — not hooked.)
       enhanceMermaid(document.getElementById("articleWrap")!);
-      enhanceCodeTabs(document.getElementById("articleWrap")!);
+      const articleRoot = document.getElementById("articleWrap")!;
+      enhanceCodeTabs(articleRoot);
+      enhanceCodeBlocks(articleRoot);
       // Fact-check layer: chip → evidence card, the summary strip, and the
       // layer toggle. No-op on a page carrying no annotation.
       enhanceFactCheck(document.getElementById("articleWrap")!);
@@ -2135,7 +2138,7 @@ function repaintAskAnswerBody(turn: AskTurn): void {
   if (!b) return;
   b.innerHTML = renderStreamingBody(turn.answer);
   enhanceMermaid(b);
-  enhanceCodeTabs(b);
+  enhanceCodeTabs(b); enhanceCodeBlocks(b);
   applyRetryAffordances(b, turn);
 }
 
@@ -2721,7 +2724,7 @@ function showAskAnswer(turn: AskTurn, buffer: string): void {
   if (askBody) {
     // Confidence chips are already baked into the body HTML by askAnswerBodyHtml.
     enhanceMermaid(askBody);
-    enhanceCodeTabs(askBody);
+    enhanceCodeTabs(askBody); enhanceCodeBlocks(askBody);
     // The ↻ rows are re-applied at EVERY paint site (never injected once): this is
     // the turn-switch / history-click repaint.
     applyRetryAffordances(askBody, turn);
@@ -2905,7 +2908,7 @@ function runAskStream(url: string, turn: AskTurn): void {
       // the meta count with the final `cited` set.
       cancelAskStreamRender();
       const b = document.getElementById("askAnswerBody");
-      if (b && !turn.html) { b.innerHTML = renderStreamingBody(turn.answer); enhanceMermaid(b); enhanceCodeTabs(b); } // chip baked into renderStreamingBody
+      if (b && !turn.html) { b.innerHTML = renderStreamingBody(turn.answer); enhanceMermaid(b); enhanceCodeTabs(b); enhanceCodeBlocks(b); } // chip baked into renderStreamingBody
       refreshAskSources(turn);
       let statusText: string;
       // NB the ↻ rows are applied further down, AFTER `claimOutcomeByIndex` is
@@ -2983,7 +2986,7 @@ function runAskStream(url: string, turn: AskTurn): void {
       // progressive-render frame so it can't repaint over the final article.
       cancelAskStreamRender();
       const b = document.getElementById("askAnswerBody");
-      if (b && turn.html) { b.innerHTML = enhanceConfidenceHtml(turn.html); enhanceMermaid(b); enhanceCodeTabs(b); applyRetryAffordances(b, turn); }
+      if (b && turn.html) { b.innerHTML = enhanceConfidenceHtml(turn.html); enhanceMermaid(b); enhanceCodeTabs(b); enhanceCodeBlocks(b); applyRetryAffordances(b, turn); }
       refreshAskSources(turn);
       persistAskSession(); // re-store so the rehydrated turn carries the final HTML
       setFollowupDisabled(false); // belt: `done` enabled it, but never re-render since
