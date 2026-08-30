@@ -92,7 +92,11 @@ describe("renderedCodeRegions / inRenderedCode", () => {
  *
  * A component that cannot hold the probe at all (its parser drops the body) is
  * skipped by the `probe MISSING` guard rather than asserted on — the point is
- * that anything the renderer DOES show as code is covered.
+ * that anything the renderer DOES show as code is covered. Measured: NO component
+ * skips today, all 15 × 2 shapes find their probe. Two residuals, accepted: a
+ * future component that drops its body would pass silently, and `indexOf` checks
+ * only the FIRST occurrence, so one that rendered its body twice — once as code,
+ * once as prose — would be checked at whichever came first.
  */
 describe("every component's code lands in a region", () => {
   const PROBE = "ZZPROBEZZ";
@@ -142,5 +146,62 @@ describe("nesting — <FileRef> wraps already-rendered children in <code>", () =
 
   test("a stray </code> with nothing open is ignored, not paired backwards", () => {
     expect(renderedCodeRegions("prose </code> more")).toEqual([]);
+    // …and the NEXT container still works, which the line above cannot show:
+    // without the guard, depth goes to -1 and the real `<code>` after it opens at
+    // depth 0 -> 1 without ever returning to 0, so it is never emitted.
+    const html = "</code> then <code>REAL</code>";
+    const r = renderedCodeRegions(html);
+    expect(r).toHaveLength(1);
+    expect(html.slice(r[0]!.start, r[0]!.end)).toBe("REAL");
+  });
+});
+
+/**
+ * The two containers are collected by separate passes, so the ALGEBRA that joins
+ * them is its own invariant — and it was asserted rather than earned: the module
+ * documented "sorted and non-overlapping" while simply pushing both lists.
+ * `inRenderedCode` binary-searches, which is sound only on disjoint spans.
+ *
+ * Neither of these shapes existed in any fixture, which is why both mutations
+ * below survived the whole suite when review found them.
+ */
+describe("the region algebra — sorted AND disjoint", () => {
+  test("a <Diff> BEFORE an ordinary fence — BOTH must stay code", () => {
+    // The diff pass appends after the `<code>` pass, so array order is [later,
+    // earlier] here: document order is not array order.
+    //
+    // ⚠️ Probe BOTH containers, and that is the whole point of this fixture. The
+    // first version asserted only sortedness and the fence's probe, and it passed
+    // with the sort removed — because the merge, handed [later, earlier], sees
+    // `earlier.start <= later.end`, folds them into the LATER span and silently
+    // drops the diff. One region, trivially sorted, fence still covered, diff
+    // gone. Asserting the diff's own text is what makes the sort load-bearing.
+    const html = formatWebHtml("<Diff>\n\n```diff\n-ZZDIFFZZ\n```\n\n</Diff>\n\n```ts\nZZPROBEZZ\n```");
+    const regions = renderedCodeRegions(html);
+    expect(`diff:${inRenderedCode(regions, html.indexOf("ZZDIFFZZ"))}`).toBe("diff:true");
+    expect(`fence:${inRenderedCode(regions, html.indexOf("ZZPROBEZZ"))}`).toBe("fence:true");
+  });
+
+  test("a <Diff> INSIDE a <FileRef>: the nested diff regions must not hide their parent", () => {
+    // Two diff-line regions inside one `<code>` region. Left unmerged, the search
+    // over [outer, inner, inner] walks past the outer and answers false for a
+    // position plainly inside it — a live link inside `<code class="fileref">`.
+    const html = formatWebHtml(
+      "<FileRef>\n\n<Diff>\n\n```diff\n-a\n-b\n```\n\n</Diff>\n\nZZPROBEZZ\n\n</FileRef>",
+    );
+    expect(inRenderedCode(renderedCodeRegions(html), html.indexOf("ZZPROBEZZ"))).toBe(true);
+  });
+
+  test("the returned spans are disjoint — the property the binary search needs", () => {
+    const html = formatWebHtml(
+      "<FileRef>\n\n<Diff>\n\n```diff\n-a\n-b\n```\n\n</Diff>\n\nx\n\n</FileRef>\n\n```ts\ny\n```",
+    );
+    const regions = renderedCodeRegions(html);
+    for (let i = 1; i < regions.length; i++) {
+      expect(`${i}: ${regions[i]!.start} > ${regions[i - 1]!.end}`).toBe(
+        `${i}: ${regions[i]!.start} > ${regions[i - 1]!.end}`,
+      );
+      expect(regions[i]!.start > regions[i - 1]!.end).toBe(true);
+    }
   });
 });

@@ -73,11 +73,21 @@ const CODE_TAG_RE = /<code\b[^>]*>|<\/code>/g;
 const DIFF_LINE_RE = /<div class="diff-line[^"]*">/g;
 
 /**
- * The body of every code container in `html`, in document order, OUTERMOST only.
+ * The code in `html`, as MAXIMAL DISJOINT spans in document order.
  *
- * Nesting is real (`<FileRef>` — see the header), so `<code>` is depth-tracked
- * and an inner span is simply inside its parent's region; emitting only the
- * outermost keeps `inRenderedCode` a plain containment test.
+ * ⚠️ **Disjoint by CONSTRUCTION, not by assumption.** `inRenderedCode` binary-
+ * searches this, which is only sound on non-overlapping intervals — and the two
+ * containers really do overlap: a `<Diff>` inside a `<FileRef>` puts several
+ * `diff-line` regions inside one `<code>` region, and with them left in, the
+ * search walked straight past the containing outer span and answered FALSE for a
+ * position plainly inside it (measured). So the halves are collected separately
+ * and then MERGED. An earlier revision documented "outermost only, sorted and
+ * non-overlapping" and simply pushed both lists — the same unearned-invariant
+ * mistake this module's header was already corrected for once.
+ *
+ * `<code>` nesting is handled by depth-tracking (a `<FileRef>` wraps rendered
+ * children, so an inline span inside it is a `<code>` in a `<code>`); the merge
+ * then absorbs anything the diff pass adds inside one.
  *
  * An unclosed container (which the renderer does not produce) runs to the end of
  * the document: the conservative direction, since treating prose as code costs a
@@ -109,13 +119,37 @@ export function renderedCodeRegions(html: string): RenderedCodeRegion[] {
     regions.push({ start: bodyStart, end: close === -1 ? html.length : close });
   }
 
-  // `<code>` regions come out in document order and the diff pass appends its
-  // own afterwards — sorted so `inRenderedCode` can binary-search.
-  return regions.sort((a, b) => a.start - b.start);
+  return mergeRegions(regions);
 }
 
-/** Is `index` inside one of `regions`? Binary search; `regions` comes back
- *  sorted and non-overlapping from {@link renderedCodeRegions}. */
+/**
+ * Sort and merge into maximal disjoint spans.
+ *
+ * Both steps are load-bearing and both are pinned: without the SORT, a
+ * `<Diff>` followed by an ordinary fence leaves the fence's region ahead of the
+ * diff's in the array and the search misses it — measured, a live `<a>` inside
+ * `<pre><code>`. Without the MERGE, a `diff-line` inside a `<code>` sits inside
+ * its parent and the search walks past the parent.
+ *
+ * Touching spans are merged too (`start <= last.end`): adjacent code with
+ * nothing between it is still code, and leaving a zero-width gap would only give
+ * the search another edge to get wrong.
+ */
+function mergeRegions(regions: RenderedCodeRegion[]): RenderedCodeRegion[] {
+  if (regions.length < 2) return regions;
+  const sorted = regions.slice().sort((a, b) => a.start - b.start || a.end - b.end);
+  const out: RenderedCodeRegion[] = [sorted[0]!];
+  for (const r of sorted.slice(1)) {
+    const last = out[out.length - 1]!;
+    if (r.start <= last.end) last.end = Math.max(last.end, r.end);
+    else out.push(r);
+  }
+  return out;
+}
+
+/** Is `index` inside one of `regions`? Binary search — sound because
+ *  {@link renderedCodeRegions} returns maximal DISJOINT spans; see the merge
+ *  there for why that is a construction rather than a claim. */
 export function inRenderedCode(regions: readonly RenderedCodeRegion[], index: number): boolean {
   let lo = 0;
   let hi = regions.length - 1;
