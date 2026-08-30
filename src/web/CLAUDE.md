@@ -45,6 +45,26 @@ equals the bytes on disk**, asserted on the resolvable case as well as the
 unresolvable one — only the first tells a real fix from "the dead
 `wiki-link-missing` span went away".
 
+The share path had already reached this conclusion: `flattenWikiLinks`
+(`src/wiki/store.ts`) is code-region-aware for the same stated reason — "a
+documented `[[wikilink]]` or a relative path in a code sample survives" — through
+its own single-alternation `FLATTEN_WIKI_LINKS_RE`. The READ path was the odd one
+out, not the innovator. The two are deliberately NOT merged: that one is a
+replace with an alternation over the same string it rewrites, this one answers a
+membership question about offsets, and folding either into the other would change
+the share output for no reader-visible gain.
+
+⚠️ **Known residual, stated because this change is what makes it visible.**
+`extractWikilinks` — the LINK GRAPH — does not special-case code and says so
+deliberately. So a wikilink that appears only inside a fence now renders as text
+while still contributing an outgoing link and a backlink: the reader sees no link
+in the article and one in the Connections rail. Measured over mimir + the jarvis
+wiki, that is **7 resolving targets on 5 pages** — the other 529 code-only targets
+resolve to nothing and were already invisible to the graph. Not fixed here on
+purpose: changing the extractor moves backlinks across every wiki at once, and a
+fence that names a page is arguably a reference worth graphing. It is a separate
+decision, not an oversight.
+
 ## Code-block chrome (header bar + copy)
 
 The bar and the copy button are built by a CLIENT enhancer,
