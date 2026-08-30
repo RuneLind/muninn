@@ -150,7 +150,11 @@ Cataloging policy (`catalogKinds`) and commit/push behavior: see `src/wiki/CLAUD
 The jarvis wiki's own `log.md` carries a note claiming the gardener "committed twice
 during this lint and clobbered an earlier version of this entry", with
 `insertLogEntry`'s read-modify-write named as the mechanism. **That note is wrong,
-and it is wrong twice over.** Reconstructed from the wiki's git history:
+and it is wrong twice over.** Reconstructed from the wiki's git history (which can
+refute a clobber of COMMITTED content only — an overwrite of an uncommitted edit
+before 21:31:27 would leave no trace; the stronger closure is that `applyWikiProposal`
+had already joined the shared write queue on 2026-07-30, before the incident, so no
+in-process race existed to lose an earlier version either):
 
 - 21:31:27 — the gardener's last apply; the manual lint entry is not yet on disk.
 - 21:32:54 — the source-drafter's own commit contains **both** its new entry and the
@@ -164,14 +168,25 @@ position downward, not deleted** — the failure was a misreading of a newest-fi
 splice, and the residue is a duplicated entry plus a false root-cause note that a
 later session then "confirmed" against this file, cementing the wrong mechanism.
 
-The stronger check: across the wiki's entire history, **every** commit that deletes a
-line from `log.md` is a human lint or rename commit (5 of them). No gardener,
-source-drafter, fact-check or sync commit has ever removed one. Re-derive with
+The stronger check, measured with `--numstat` (2026-08-30): across the wiki's
+entire history, **8** commits delete lines from `log.md`. Five delete a `## `
+HEADING and all five are human lint/rename commits; the other three delete
+bullets only — two human edits and ONE `[sync]` loop commit (`731beb1`), which
+carried the human's own 21:59 rewrite of the concurrency note from the other
+machine. So the honest invariant is: **no unattended writer has ever deleted a
+log HEADING, and none has removed a line it did not itself author** — not "no
+writer commit ever deleted a line". Re-derive with
 
 ```
 git log --all --format='%H|%ad|%s' --date=short -- data/wiki/log.md | while IFS='|' read -r h d s; do
-  n=$(git show --format='' "$h" -- data/wiki/log.md | grep -ac '^-[^-]'); [ "$n" != 0 ] && echo "$d $n $s"; done
+  n=$(git show --numstat --format='' "$h" -- data/wiki/log.md | awk '{print $2}'); [ "${n:-0}" != 0 ] && echo "$d $n $s"; done; true
 ```
+
+(NB an earlier spelling grepped `^-[^-]`, which is blind to deleted markdown
+BULLETS — `- **x**` renders as `-- **x**` in a diff — and undercounted 8 as 5.
+Any grep over this file also needs `-a`: macOS grep judges `log.md` binary in
+the default locale and silently returns empty without it. The trailing `true`
+keeps the pipeline exit 0 under `set -e`.)
 
 **So no lock was built, and none should be.** The in-process race is already closed by
 the shared write queue above, and the read sits immediately before the write inside
@@ -185,8 +200,10 @@ and could park the weekly run.
 
 **No detector either, deliberately.** The cheap restart-proof design — compare the
 on-disk `log.md` against `git show HEAD:log.md` and warn on a heading that vanished —
-was measured against the history above and dropped: it would not have fired on
-2026-08-16 (nothing vanished), it has zero true positives in the corpus, and the only
+was measured against the history above and dropped: it would not have fired in the
+21:31→21:35 incident window (both writer commits are pure insertions) — it WOULD
+have fired at 22:33 that day, on the human's own disambiguating rename, which is
+the noise argument demonstrating itself — it has zero true positives in the corpus, and the only
 window in which it *can* fire is while a human is deliberately editing log headings,
 so its precision is ~0 by construction. It would also put a `git` subprocess inside the
 per-wiki write critical section, which rule 2 above exists to keep subprocess-free. If
