@@ -144,3 +144,72 @@ pre-existing pairs a human kept.
 2. The **commit tail must run outside it** — `commitWikiChange` dispatches its push without awaiting it, and the push is bounded only by `GIT_NETWORK_TIMEOUT_MS` (60s, added with the repo-sync loop), so one unreachable origin would park every other writer on that wiki for up to a minute.
 
 Cataloging policy (`catalogKinds`) and commit/push behavior: see `src/wiki/CLAUDE.md` (`wikiAutoCommit`); code in `src/wiki/commit.ts` + `catalogPage`/`buildIndexEntry` in `wire.ts`.
+
+### The queue does not bind external editors — and the 2026-08-16 "clobber" never happened
+
+The jarvis wiki's own `log.md` carries a note claiming the gardener "committed twice
+during this lint and clobbered an earlier version of this entry", with
+`insertLogEntry`'s read-modify-write named as the mechanism. **That note is wrong,
+and it is wrong twice over.** Reconstructed from the wiki's git history (which can
+refute a clobber of COMMITTED content only — an overwrite of an uncommitted edit
+before 21:31:27 would leave no trace; the stronger closure is that `applyWikiProposal`
+had already joined the shared write queue on 2026-07-30, before the incident, so no
+in-process race existed to lose an earlier version either):
+
+- 21:31:27 — the gardener's last apply; the manual lint entry is not yet on disk.
+- 21:32:54 — the source-drafter's own commit contains **both** its new entry and the
+  manual lint entry. Its read-modify-write picked the manual entry up and
+  *preserved* it, splicing its own block above it (newest-first).
+- 21:35:08 — the lint session, seeing its entry no longer at the top of the file,
+  concludes it was clobbered and writes a longer replacement.
+
+Both versions are in `log.md` today, ~19 lines apart. The entry was **displaced one
+position downward, not deleted** — the failure was a misreading of a newest-first
+splice, and the residue is a duplicated entry plus a false root-cause note that a
+later session then "confirmed" against this file, cementing the wrong mechanism.
+
+The stronger check, measured with `--numstat` (2026-08-30): across the wiki's
+entire history, **8** commits delete lines from `log.md`. Five delete a `## `
+HEADING and all five are human lint/rename commits; the other three delete
+bullets only — two human edits and ONE `[sync]` loop commit (`731beb1`), which
+carried the human's own 21:59 rewrite of the concurrency note from the other
+machine. So the honest invariant is: **no unattended writer has ever deleted a
+log HEADING, and none has removed a line it did not itself author** — not "no
+writer commit ever deleted a line". Re-derive with
+
+```
+git log --all --format='%H|%ad|%s' --date=short -- data/wiki/log.md | while IFS='|' read -r h d s; do
+  n=$(git show --numstat --format='' "$h" -- data/wiki/log.md | awk '{print $2}'); [ "${n:-0}" != 0 ] && echo "$d $n $s"; done; true
+```
+
+(NB an earlier spelling grepped `^-[^-]`, which is blind to deleted markdown
+BULLETS — `- **x**` renders as `-- **x**` in a diff — and undercounted 8 as 5.
+Any grep over this file also needs `-a`: macOS grep judges `log.md` binary in
+the default locale and silently returns empty without it. The trailing `true`
+keeps the pipeline exit 0 under `set -e`.)
+
+**So no lock was built, and none should be.** The in-process race is already closed by
+the shared write queue above, and the read sits immediately before the write inside
+that span (`apply.ts` step 4). The rebase-side loss is closed too: the wiki declares
+`log.md merge=union` and the sync loop warns when a wiki does not
+(`logMergeUnionWarning`, `src/sync/run.ts`) — a union merge duplicates at worst, never
+drops. The one shape left is an editor or agent saving a whole-file buffer it read
+before the gardener's write. **No muninn-side lock can bind that**, advisory or
+otherwise: the writer is another process that never asked us. A lock would buy nothing
+and could park the weekly run.
+
+**No detector either, deliberately.** The cheap restart-proof design — compare the
+on-disk `log.md` against `git show HEAD:log.md` and warn on a heading that vanished —
+was measured against the history above and dropped: it would not have fired in the
+21:31→21:35 incident window (both writer commits are pure insertions) — it WOULD
+have fired at 22:33 that day, on the human's own disambiguating rename, which is
+the noise argument demonstrating itself — it has zero true positives in the corpus, and the only
+window in which it *can* fire is while a human is deliberately editing log headings,
+so its precision is ~0 by construction. It would also put a `git` subprocess inside the
+per-wiki write critical section, which rule 2 above exists to keep subprocess-free. If
+this is revisited, that noise argument is the thing to refute first.
+
+**Operational rule, for humans and agents editing `log.md` or `index.md` by hand:**
+commit the edit immediately, and expect an unattended writer to splice its own entry
+*above* yours between your read and your save — your entry moving down the file is
+normal and is not a loss.
