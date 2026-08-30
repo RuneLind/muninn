@@ -197,11 +197,17 @@ describe("the region algebra — sorted AND disjoint", () => {
       "<FileRef>\n\n<Diff>\n\n```diff\n-a\n-b\n```\n\n</Diff>\n\nx\n\n</FileRef>\n\n```ts\ny\n```",
     );
     const regions = renderedCodeRegions(html);
+    // ⚠️ The label is compared against a LITERAL. The first spelling of this
+    // compared the same interpolation on both sides — `expect(X).toBe(X)`, which
+    // can never fail — sitting directly above the real assertion, where the next
+    // reader would have taken it for the labelled one and deleted the duplicate.
+    // A can't-fail line, in the round whose subject was can't-fail lines.
+    expect(regions.length).toBeGreaterThan(1); // the loop must actually run
     for (let i = 1; i < regions.length; i++) {
-      expect(`${i}: ${regions[i]!.start} > ${regions[i - 1]!.end}`).toBe(
-        `${i}: ${regions[i]!.start} > ${regions[i - 1]!.end}`,
-      );
-      expect(regions[i]!.start > regions[i - 1]!.end).toBe(true);
+      expect(
+        regions[i]!.start > regions[i - 1]!.end,
+        `region ${i} starts at ${regions[i]!.start}, at or inside the previous end ${regions[i - 1]!.end}`,
+      ).toBe(true);
     }
   });
 });

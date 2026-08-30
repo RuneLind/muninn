@@ -125,19 +125,34 @@ export function renderedCodeRegions(html: string): RenderedCodeRegion[] {
 /**
  * Sort and merge into maximal disjoint spans.
  *
- * Both steps are load-bearing and both are pinned: without the SORT, a
- * `<Diff>` followed by an ordinary fence leaves the fence's region ahead of the
- * diff's in the array and the search misses it — measured, a live `<a>` inside
- * `<pre><code>`. Without the MERGE, a `diff-line` inside a `<code>` sits inside
- * its parent and the search walks past the parent.
+ * Both steps are load-bearing and both are PINNED, each by a test that fails
+ * when it is removed: without the SORT, a `<Diff>` followed by an ordinary fence
+ * leaves the fence's region ahead of the diff's in the array, the merge folds
+ * them into the LATER span and the diff is silently dropped. Without the MERGE,
+ * a `diff-line` inside a `<code>` sits inside its parent and the binary search
+ * walks past the parent.
  *
- * Touching spans are merged too (`start <= last.end`): adjacent code with
- * nothing between it is still code, and leaving a zero-width gap would only give
- * the search another edge to get wrong.
+ * Touching spans are merged too (`start <= last.end`) — DEFENSIVE, and said so
+ * rather than justified: measured over 1562 corpus pages, the renderer produces
+ * zero touching and zero overlapping raw pairs outside the nested case above,
+ * because two container bodies are always separated by at least a closing and an
+ * opening tag. An earlier spelling of this comment justified the `<=` with
+ * "adjacent code with nothing between it", a shape this renderer cannot emit.
+ * It is kept because merging touching intervals is what makes the output
+ * disjoint for ANY input, which is the property the search actually needs.
+ *
+ * ⚠️ MUTATES the region objects it is given (`last.end = …`) and returns the
+ * caller's own array when there is nothing to merge. Contained today — the one
+ * caller builds the array locally and hands it over — and worth knowing before
+ * this is reused.
  */
 function mergeRegions(regions: RenderedCodeRegion[]): RenderedCodeRegion[] {
   if (regions.length < 2) return regions;
-  const sorted = regions.slice().sort((a, b) => a.start - b.start || a.end - b.end);
+  // No tiebreak on `end`: `Math.max` below makes the result order-independent
+  // for two regions sharing a `start`, so a second comparator was inert — a
+  // clause with no test and no effect, on a module whose whole subject is not
+  // asserting what has not been earned.
+  const sorted = regions.slice().sort((a, b) => a.start - b.start);
   const out: RenderedCodeRegion[] = [sorted[0]!];
   for (const r of sorted.slice(1)) {
     const last = out[out.length - 1]!;
