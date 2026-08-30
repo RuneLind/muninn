@@ -158,3 +158,34 @@ test("a citation with no relPath emits the marker byte-identically to before", (
   expect(html).toContain('data-page="Creatine"');
   expect(html).not.toContain("data-relpath");
 });
+
+
+/**
+ * The sentinel-in-a-fence regression.
+ *
+ * This renderer parks each in-range `[n]` as a \u0000-delimited token BEFORE
+ * `formatWebHtml` and restores it with a regex over the RENDERED HTML. Once
+ * fences became syntax-highlighted, the C-family capitalized-identifier rule
+ * matched `ASKCITE0` and wrapped it in a span — splitting the sentinel, so the
+ * restore missed, a raw U+0000 was served, and `arr[1]` was DESTROYED rather
+ * than merely mis-colored. `highlight.ts`'s SENTINEL rule keeps it opaque.
+ *
+ * NB a marker inside a fence is still LINKIFIED (the parking runs over the whole
+ * answer, fences included) — that is pre-existing and not what this pins. What it
+ * pins is that nothing leaks and nothing is lost.
+ */
+test("a citation-shaped marker inside a ts fence survives rendering", () => {
+  const citations = [
+    { title: "Page one", pageName: "Page One", url: "", snippet: "" },
+  ] as unknown as Citation[];
+  const html = renderAskAnswerHtml("Prose citing [1].\n\n```ts\nconst v = arr[1];\n```", citations);
+
+  expect(html).not.toContain("\u0000");
+  expect(html).not.toContain("ASKCITE");
+  // The marker resolved to the citation chip on both sides of the answer…
+  expect(html.match(/wiki-ask-cite/g)?.length).toBe(2);
+  // …and every character of the fence body is still there, in order.
+  expect(html).toContain("const");
+  expect(html).toContain("arr");
+  expect(html.replace(/<[^>]*>/g, "")).toContain("const v = arr[1];");
+});

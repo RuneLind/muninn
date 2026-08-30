@@ -4,6 +4,7 @@ import { formatTelegramHtml } from "../bot/telegram-format.ts";
 import { formatSlackMrkdwn } from "../slack/slack-format.ts";
 import { formatEmailHtml } from "./email-format.ts";
 import { RAW_EMPHASIS_SOURCES } from "./markdown-core.ts";
+import { stripTokenSpans } from "../test/highlighted-code.ts";
 
 // Early-warning system for divergence: the FOUR platform formatters share one
 // block AST + dispatcher, so the same markdown must keep producing each
@@ -154,7 +155,16 @@ describe("emphasis characters inside a link URL never reach the href", () => {
 describe("fenced code block", () => {
   const md = "```ts\nconst x = 1;\n```";
   test("web → pre/code with language class", () =>
-    expect(formatWebHtml(md)).toBe('<pre><code class="language-ts">const x = 1;</code></pre>'));
+    // Web is the ONLY platform that highlights: strip the token spans and the
+    // contract is the same one the other three answer to.
+    expect(stripTokenSpans(formatWebHtml(md))).toBe(
+      '<pre><code class="language-ts">const x = 1;</code></pre>',
+    ));
+  test("web → and ONLY web colors the body", () => {
+    expect(formatWebHtml(md)).toContain('<span class="tok-kw">const</span>');
+    expect(formatTelegramHtml(md)).not.toContain("tok-");
+    expect(formatSlackMrkdwn(md)).not.toContain("tok-");
+  });
   test("telegram → pre/code with language class", () =>
     expect(formatTelegramHtml(md)).toBe('<pre><code class="language-ts">const x = 1;</code></pre>'));
   test("slack → triple-backtick block (no language, no escaping)", () =>

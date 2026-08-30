@@ -18,6 +18,7 @@ import {
 import type { Block, FactVerdict } from "../format/markdown-ast.ts";
 import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
 import { Placeholders, escapeHtml } from "../format/markdown-core.ts";
+import { highlightCode } from "../format/highlight.ts";
 
 type ComponentBlock = Extract<Block, { type: "component" }>;
 const isTab = (b: Block): b is ComponentBlock => b.type === "component" && b.name === "Tab";
@@ -129,10 +130,23 @@ export function formatWebHtml(text: string): string {
   return collapseBlockSpacing(rendered).trim();
 }
 
+/**
+ * The ONE place a fence becomes HTML — both the ordinary `code_block` branch
+ * and `AnnotatedCode` go through it, so a fence is highlighted the same way
+ * whichever wrapper it sits in.
+ *
+ * `highlightCode` escapes what it does not tokenize, so this is a drop-in for
+ * the `escapeHtml(code)` it replaced; an unknown language returns exactly that.
+ * The `language-*` class stays: the mermaid enhancer selects on it.
+ */
+function codeFenceHtml(lang: string, code: string): string {
+  const langClass = lang ? ` class="language-${escapeHtml(lang)}"` : "";
+  return `<pre><code${langClass}>${highlightCode(code, lang)}</code></pre>`;
+}
+
 const webRenderer: BlockRenderer = {
   code_block(block) {
-    const langClass = block.lang ? ` class="language-${escapeHtml(block.lang)}"` : "";
-    return `<pre><code${langClass}>${escapeHtml(block.code)}</code></pre>`;
+    return codeFenceHtml(block.lang, block.code);
   },
   hr: () => "<hr>",
   heading(block) {
@@ -227,8 +241,7 @@ const webRenderer: BlockRenderer = {
         const fence = firstCodeBlock(rawChildren);
         if (!fence) return children; // no code fence → nothing to annotate; body as-is
         const lang = attrs.lang || fence.lang;
-        const langClass = lang ? ` class="language-${escapeHtml(lang)}"` : "";
-        const codeHtml = `<pre><code${langClass}>${escapeHtml(fence.code)}</code></pre>`;
+        const codeHtml = codeFenceHtml(lang, fence.code);
         const fileHeader = attrs.file
           ? `<div class="annotated-code-file">${escapeHtml(attrs.file)}</div>`
           : "";

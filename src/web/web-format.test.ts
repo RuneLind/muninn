@@ -1,5 +1,6 @@
 import { test, expect, describe } from "bun:test";
 import { formatWebHtml } from "./web-format.ts";
+import { stripTokenSpans } from "../test/highlighted-code.ts";
 
 describe("formatWebHtml", () => {
   test("converts headings", () => {
@@ -38,7 +39,7 @@ describe("formatWebHtml", () => {
     const input = "```ts\nconst x = 1;\n```";
     const result = formatWebHtml(input);
     expect(result).toContain('<pre><code class="language-ts">');
-    expect(result).toContain("const x = 1;");
+    expect(stripTokenSpans(result)).toContain("const x = 1;");
     expect(result).toContain("</code></pre>");
   });
 
@@ -467,7 +468,7 @@ describe("formatWebHtml — component blocks", () => {
     );
     expect(out).toContain('<div class="annotated-code">');
     expect(out).toContain('<div class="annotated-code-file">src/x.ts</div>');
-    expect(out).toContain('<div class="annotated-code-panel"><pre><code class="language-ts">const x = 1;</code></pre></div>');
+    expect(stripTokenSpans(out)).toContain('<div class="annotated-code-panel"><pre><code class="language-ts">const x = 1;</code></pre></div>');
     expect(out).toContain('<div class="annotated-code-notes">');
     expect(out).toContain("This sets x.");
   });
@@ -477,7 +478,7 @@ describe("formatWebHtml — component blocks", () => {
       "<AnnotatedCode file=\"a<b\" lang=\"ts\">\n```ts\n<script>alert(1)</script>\n```\n</AnnotatedCode>",
     );
     expect(out).not.toContain("<script>");
-    expect(out).toContain("&lt;script&gt;");
+    expect(stripTokenSpans(out)).toContain("&lt;script&gt;");
     expect(out).toContain("a&lt;b");
   });
 
@@ -494,8 +495,8 @@ describe("formatWebHtml — component blocks", () => {
     expect(out).toContain('<div class="code-tabs">');
     expect(out).toContain('<button class="code-tabs-tab is-active" type="button">TS</button>');
     expect(out).toContain('<button class="code-tabs-tab" type="button">JS</button>');
-    expect(out).toContain('<div class="code-tabs-panel is-active"><pre><code class="language-ts">const x=1;</code></pre></div>');
-    expect(out).toContain('<div class="code-tabs-panel"><pre><code class="language-js">var x=1;</code></pre></div>');
+    expect(stripTokenSpans(out)).toContain('<div class="code-tabs-panel is-active"><pre><code class="language-ts">const x=1;</code></pre></div>');
+    expect(stripTokenSpans(out)).toContain('<div class="code-tabs-panel"><pre><code class="language-js">var x=1;</code></pre></div>');
   });
 
   test("CodeTabs with zero recognized Tab children renders a visible fallback", () => {

@@ -1,6 +1,7 @@
 import { test, expect, describe } from "bun:test";
 import { renderWikiHtml, stripFrontmatter } from "./render.ts";
 import type { WikiPageMeta } from "./store.ts";
+import { stripTokenSpans } from "../test/highlighted-code.ts";
 
 const page = (name: string): WikiPageMeta => ({
   name,
@@ -115,7 +116,7 @@ describe("renderWikiHtml", () => {
     expect(html).toContain("<strong>heartbeat</strong>");
     // Code fence renders as a code block, unescaped tag text.
     expect(html).toContain('<pre><code class="language-ts">');
-    expect(html).toContain("const drain = true;");
+    expect(stripTokenSpans(html)).toContain("const drain = true;");
   });
 
   test("wikilinks inside a component body resolve to internal anchors", () => {
@@ -253,4 +254,39 @@ describe("wikilink href", () => {
     );
     expect(html).toContain('href="/wiki?relPath=projects%2Fyggdrasil%2Farchitecture.md"');
   });
+});
+
+
+/**
+ * Same regression as `ask-render.test.ts`'s, through the wikilink sentinel.
+ *
+ * `renderWikiHtml` parks a `[[wikilink]]` as a \u0000-delimited sentinel BEFORE
+ * `formatWebHtml` and restores it over the rendered HTML — and it does so
+ * INSIDE fences too, which is pre-existing behaviour (an `html` fence, or one
+ * with no language at all, resolves `[[1,2,3]]` to a `wiki-link-missing` span
+ * exactly the same way; measured 2026-08-30). Highlighting must not change that
+ * either way: the C-family capitalized-identifier rule matched `WIKIPAGELINK0`
+ * and split the sentinel, so the restore missed and a raw U+0000 was SERVED.
+ *
+ * The assertion is therefore PARITY between a highlighted fence and an
+ * unhighlighted one, which pins the fix without freezing the wikilink-in-fence
+ * behaviour this test does not own.
+ */
+test("a wikilink-shaped literal in a fence renders the same highlighted or not", () => {
+  const body = "const m = [[1,2,3]];";
+  const highlighted = renderWikiHtml("```ts" + "\n" + body + "\n```", () => undefined);
+  const plain = renderWikiHtml("```html" + "\n" + body + "\n```", () => undefined);
+
+  // No raw \u0000 and no leaked sentinel word ever reaches the served HTML.
+  for (const html of [highlighted, plain]) {
+    expect(html).not.toContain("\u0000");
+    expect(html).not.toContain("WIKIPAGELINK");
+  }
+
+  // Strip the token spans and the two are the same document apart from the
+  // language class — i.e. the tokenizer is transparent to the sentinel machinery.
+  expect(stripTokenSpans(highlighted).replace('language-ts', "LANG")).toBe(
+    plain.replace('language-html', "LANG"),
+  );
+  expect(stripTokenSpans(highlighted)).toContain("wiki-link-missing");
 });

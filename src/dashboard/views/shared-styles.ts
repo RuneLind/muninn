@@ -62,6 +62,20 @@ const DARK_TOKENS = `
       --chat-user-text: #c8ddf5;
       --chat-assistant-bg: #1a1d25;
       --chat-assistant-text: #d8d8dc;
+
+      /* Syntax highlighting (src/format/highlight.ts emits .tok-*).
+         Deliberately the --status-* ramp rather than a new hue set: those six
+         colors are already tuned for both themes, so a code fence reads as the
+         same design system as the rest of the page. Every value clears 4.5:1
+         against --bg-inset (measured 2026-08-30 — comments are 40% of a
+         typical query here, so the dimmest one is the one that matters). */
+      --tok-com: #7d8798;
+      --tok-str: #4ade80;
+      --tok-kw: #c084fc;
+      --tok-num: #fbbf24;
+      --tok-fn: #60a5fa;
+      --tok-typ: #22d3ee;
+      --tok-pun: #8e8e9c;
 `;
 
 /**
@@ -129,6 +143,17 @@ const LIGHT_TOKENS = `
       --chat-user-text: #1e3a5f;
       --chat-assistant-bg: #f1f2f6;
       --chat-assistant-text: #3a3d47;
+
+      /* Syntax highlighting — the light half of the ramp above. Darkened past
+         the plain --status-* values, which sit at 4.2–4.4:1 on --bg-inset:
+         close enough to read as "fine" and measurably under AA. */
+      --tok-com: #5e6270;
+      --tok-str: #0f6e39;
+      --tok-kw: #8b2fd0;
+      --tok-num: #9c4a07;
+      --tok-fn: #1d4ed8;
+      --tok-typ: #0e7490;
+      --tok-pun: #5e6270;
 `;
 
 /** Shared CSS for all dashboard pages — base reset, header, and nav */
@@ -269,6 +294,20 @@ export const SHARED_STYLES = `
     }
     .nav-dropdown-item:hover { color: var(--accent-light); background: color-mix(in srgb, var(--accent) 10%, transparent); }
     .nav-dropdown-item.active { color: var(--accent); background: color-mix(in srgb, var(--accent) 15%, transparent); }
+
+    /* --- Syntax highlighting -------------------------------------------------
+       Deliberately UNSCOPED. The .tok-* classes are emitted by exactly one
+       module (src/format/highlight.ts) and every page that renders markdown
+       through formatWebHtml wants them: /wiki, /jira, the gardener preview,
+       /research. Scoping them to .wiki-article was the version of this that
+       shipped colored code on one page and gray code on four. */
+    .tok-com { color: var(--tok-com); font-style: italic; }
+    .tok-str { color: var(--tok-str); }
+    .tok-kw  { color: var(--tok-kw); }
+    .tok-num { color: var(--tok-num); }
+    .tok-fn  { color: var(--tok-fn); }
+    .tok-typ { color: var(--tok-typ); }
+    .tok-pun { color: var(--tok-pun); }
 
     /* ========================================================================
        Shared dashboard-redesign primitives (PR 1). Consumed by /agents,
