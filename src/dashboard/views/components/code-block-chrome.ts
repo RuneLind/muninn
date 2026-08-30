@@ -103,20 +103,37 @@ export const COMPONENT_FENCE_CHROME: Record<ComponentName, string | null> = {
   FactCheck: null,
 };
 
-/** The `closest()` selector list, derived so it can never drift from the map. */
-const OWN_CHROME = Object.values(COMPONENT_FENCE_CHROME)
-  .filter((sel): sel is string => sel !== null)
-  .join(", ");
+const OWN_CHROME = ownChromeSelector(COMPONENT_FENCE_CHROME);
 
-/** Whether this fence gets chrome. Exported for the unit tests. */
-export function shouldEnhanceFence(pre: Element, code: Element): boolean {
+/**
+ * The `closest()` selector list, derived so it can never drift from the map.
+ * Exported so the empty case — which no module-level const can reach — is
+ * reachable from a test.
+ */
+export function ownChromeSelector(map: Record<string, string | null>): string {
+  return Object.values(map)
+    .filter((sel): sel is string => sel !== null)
+    .join(", ");
+}
+
+/**
+ * Whether this fence gets chrome. Exported for the unit tests, and `ownChrome`
+ * is injectable for the same reason: the guard against an empty selector is
+ * otherwise unreachable, since the module-level value is derived from a Record
+ * that is never all-`null` in production.
+ */
+export function shouldEnhanceFence(
+  pre: Element,
+  code: Element,
+  ownChrome: string = OWN_CHROME,
+): boolean {
   if (pre.getAttribute(ENHANCED)) return false;
   if (fenceLanguage(code) === "mermaid") return false;
   // `closest("")` throws a SyntaxError, and an all-`null` Record — a legal,
   // compile-clean edit of the map above — makes OWN_CHROME exactly that. The
   // throw escapes `enhanceCodeBlocks` at the first fence, taking the statements
   // chained after it at several call sites with it.
-  if (OWN_CHROME && pre.closest(OWN_CHROME)) return false;
+  if (ownChrome && pre.closest(ownChrome)) return false;
   // An empty fence has nothing to copy, and `writeText("")` RESOLVES — so the
   // button reported success while silently emptying the reader's clipboard.
   if (!(code.textContent ?? "").trim()) return false;
@@ -181,22 +198,26 @@ function setButtonState(btn: HTMLElement, state: "idle" | "done" | "failed"): vo
  * difference and the reason copying that idiom was wrong.
  */
 export function unwrapCodeBlockChrome(root: ParentNode): void {
-  // INNERMOST FIRST. `querySelectorAll` yields document order, so an outer
-  // wrapper would be unwrapped before the inner one it contains — re-parenting
-  // the inner fence and leaving it wrapped, which is the nested state this
-  // function exists to undo. Reversed, the inner collapses to a bare `pre`
-  // first and the outer then finds it.
+  // ⚠️ THE SELECTOR BELOW IS WHAT MAKES NESTING WORK — not this `.reverse()`.
+  // Measured: dropping `.reverse()` leaves the DOM byte-identical on all eleven
+  // shapes probed, because the unqualified `querySelector("pre")` finds the
+  // INNER `pre` from the outer wrapper and hoists it, collapsing both. The
+  // reverse is belt-and-braces (it makes the innermost collapse first, which is
+  // the order that stays correct if the selector is ever narrowed), and saying
+  // so matters: crediting it as the mechanism is what would let someone
+  // re-narrow the selector "for safety" — the single edit that turns the
+  // `fence.remove()` below from tidy-up into data loss.
   const fences = Array.from(root.querySelectorAll("div.fence")).reverse();
   for (const fence of fences) {
-    // Deliberately NOT `:scope > pre`. The two spellings differ only when the
-    // `pre` sits deeper than one level — a nested pair, or chrome someone
-    // wrapped by hand — and there the direct-child form finds nothing and
-    // leaves the dead wrapper standing.
+    // Deliberately NOT `:scope > pre`. The direct-child form finds nothing when
+    // the `pre` sits deeper — a nested pair, or hand-written chrome — and then
+    // the branch below DELETES the block. The two lines are coupled.
     const pre = fence.querySelector("pre");
     if (!pre) {
-      // A wrapper with no code left in it is dead chrome: a bar and a button
-      // that can never copy anything. Dropping it is the only reading of
-      // "restore the bare fences" that does not leave litter behind.
+      // Reached only for a wrapper that genuinely holds no code: a bar and a
+      // button that can never copy anything. ⚠️ Coupled to the selector above —
+      // narrow it and this deletes real code blocks instead (measured:
+      // `pres=0, text=""` on a fence whose `pre` is one level deeper).
       fence.remove();
       continue;
     }

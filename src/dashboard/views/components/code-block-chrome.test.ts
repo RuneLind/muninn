@@ -3,6 +3,7 @@ import {
   COMPONENT_FENCE_CHROME,
   copyText,
   fenceLanguage,
+  ownChromeSelector,
   shouldEnhanceFence,
 } from "./code-block-chrome.ts";
 import { COMPONENT_NAMES } from "../../../format/markdown-ast.ts";
@@ -264,6 +265,35 @@ describe("COMPONENT_FENCE_CHROME", () => {
     for (const cls of chromeClasses) {
       expect(html).not.toContain(`class="${cls.slice(1)}"`); // …and owns no chrome for it
     }
+  });
+
+  test("the derived selector is a comma list of the non-null entries", () => {
+    expect(ownChromeSelector({ A: ".a", B: null, C: ".c" })).toBe(".a, .c");
+    // The case no module-level const can reach, and the reason this is
+    // injectable: an all-null map yields the EMPTY selector.
+    expect(ownChromeSelector({ A: null, B: null })).toBe("");
+    expect(ownChromeSelector({})).toBe("");
+  });
+
+  test("an empty selector is skipped, not passed to closest()", () => {
+    // `closest("")` throws a SyntaxError — verified in Chromium — which escapes
+    // enhanceCodeBlocks at the first fence and takes the statements chained
+    // after it at several call sites with it. An all-null Record is a legal,
+    // compile-clean, tsc-clean edit of the map above, so the guard has to hold.
+    let asked: string | null = null;
+    const pre = {
+      getAttribute: () => null,
+      closest: (sel: string) => {
+        asked = sel;
+        if (sel === "") throw new SyntaxError("The provided selector is empty.");
+        return null;
+      },
+    } as unknown as Element;
+    const code = { classList: ["language-ts"], textContent: "x" } as unknown as Element;
+
+    expect(() => shouldEnhanceFence(pre, code, "")).not.toThrow();
+    expect(shouldEnhanceFence(pre, code, "")).toBe(true);
+    expect(asked).toBeNull(); // closest() was never called at all
   });
 
   test("a standalone <Tab> is skipped — the fourth component, missed twice", () => {

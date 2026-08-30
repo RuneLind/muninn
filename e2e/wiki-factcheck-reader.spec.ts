@@ -317,6 +317,10 @@ test.describe("Evidence card: a fence inside a claim", () => {
     // gets a Copy button that does nothing, forever — and the first attempt at
     // fixing it (marker-strip only, copied from the CodeTabs idiom) produced
     // TWO stacked bars with the outer one still dead. Both shapes are asserted.
+    // Same error gate the five sibling tests carry: an exception thrown from
+    // enhanceCodeBlocks on the DETACHED card would otherwise only surface
+    // indirectly, as a missing button rather than as the throw it is.
+    const errs = collectErrors(page);
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     await page.goto(
       `${BASE}/wiki?wiki=${WIKI_NAME}&relPath=${encodeURIComponent(FENCE_REL_PATH)}`,
@@ -344,6 +348,9 @@ test.describe("Evidence card: a fence inside a claim", () => {
     await copy.click();
     await expect(copy).toHaveClass(/is-done/);
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(FENCE_CLAIM_CODE);
+
+    expect(errs.page).toEqual([]);
+    expect(errs.console).toEqual([]);
   });
 });
 
