@@ -316,9 +316,12 @@ describe("COMPONENT_FENCE_CHROME", () => {
  *
  * ⚠️ `[^>]*?` cannot cross a `>`, so an UNESCAPED `>` inside an EARLIER attribute
  * value makes this skip that element's class silently — it fails OPEN. Not
- * reachable today, because the renderer escapes attribute text (measured with
- * `file="a>b.ts"` and `label="a>b"`: both arrive as `&gt;`), and written down
- * because the failure direction is the quiet one.
+ * reachable today, and for a stronger reason than "the attribute is escaped":
+ * measured, a component's `file`/`label` never becomes an HTML ATTRIBUTE at all —
+ * it is emitted as escaped TEXT CONTENT (`<div class="annotated-code-file">a&gt;b.ts</div>`),
+ * so there is no author-controlled attribute value on these wrappers to carry a
+ * `>` in the first place. Written down because the failure direction is the quiet
+ * one, and because the earlier spelling of this note named the wrong mechanism.
  */
 function strippedClassAttributes(label: string, html: string): string[] {
   const out: string[] = [];
@@ -362,7 +365,9 @@ test("componentClassAllowCoversOwnChrome: every own-chrome class SURVIVES the ch
   // is the half that can fail: the e2e sibling built its expectation from the
   // fixture map itself and was a tautology — measured, dropping `Tab` left it
   // green over three components.
-  expect(owners.map(([name]) => name).filter((name) => !OWN_CHROME_FIXTURES[name])).toEqual([]);
+  expect(
+    owners.map(([name]) => name).filter((name) => !Object.hasOwn(OWN_CHROME_FIXTURES, name)),
+  ).toEqual([]);
 
   const stripped = owners.flatMap(([name]) =>
     strippedClassAttributes(name, formatWebHtml(OWN_CHROME_FIXTURES[name]!)),

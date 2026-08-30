@@ -353,8 +353,16 @@ test.describe("chat card fences get the same chrome as every other bubble", () =
     const owners = Object.entries(COMPONENT_FENCE_CHROME)
       .filter(([, sel]) => sel !== null)
       .map(([name]) => name);
-    expect(owners.filter((name) => !(name in counts))).toEqual([]);
-    expect(Object.keys(counts)).toContain("Callout");
+    // `Object.hasOwn`, not `in`: a future ComponentName equal to an
+    // Object.prototype key (`constructor`, `toString`) would otherwise read as
+    // covered with no fixture ever run. The repo's idiom, and free.
+    expect(owners.filter((name) => !Object.hasOwn(counts, name))).toEqual([]);
+    // Both directions, in one comparison: every chrome-owning component was
+    // exercised AND nothing else was. The set form replaced a
+    // `toContain("Callout")` that could not fail — `sources` is
+    // `{...fixtures, Callout: control}`, so that key was unconditional — which is
+    // precisely the kind of line this round exists to delete.
+    expect(Object.keys(counts).sort()).toEqual([...owners, "Callout"].sort());
     for (const name of Object.keys(OWN_CHROME_FIXTURES)) {
       expect(`${name}: ${counts[name]!.bars} bars`).toBe(`${name}: 0 bars`);
     }
