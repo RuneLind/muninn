@@ -54,28 +54,28 @@ type Rule = readonly [TokenClass | null, RegExp];
 /**
  * ⚠️ FIRST rule in every grammar, and it must stay first.
  *
- * **This is a BACKSTOP, and saying so is the point.** `src/wiki/render.ts` and
- * `src/wiki/ask-render.ts` park a `[[wikilink]]` / an `[n]` citation as a
- * \u0000-delimited sentinel BEFORE calling `formatWebHtml` and restore it with a
- * regex over the RENDERED HTML. Both passes now SKIP code (`codeSpanRegions`,
- * `markdown-ast.ts`), derived from the renderer's own fence and inline-code
- * regexes, so as of that change no sentinel from either caller should reach a
- * fence body at all — this rule is no longer what stops the failure below, and
- * anyone reading it as the live defence has it backwards.
+ * `src/wiki/render.ts` and `src/wiki/ask-render.ts` park a `[[wikilink]]` / an
+ * `[n]` citation as a \u0000-delimited sentinel BEFORE calling `formatWebHtml`,
+ * and restore it with a regex over the RENDERED HTML. A fence body routinely
+ * contains one — `arr[1]` inside an Ask answer's citation range, `[[1,2,3]]` in a
+ * nested-array literal, a `[[wikilink]]` in a code sample — and any rule that
+ * matches PART of it (the C-family capitalized-type heuristic matches
+ * `WIKIPAGELINK0`) SPLITS it across a span, so the restore misses, a raw U+0000
+ * is served, and the source text is destroyed rather than merely mis-colored.
+ * Matching the whole sentinel with a `null` class keeps it in one plain run,
+ * byte-identical, where the restore regex can still find it.
  *
- * It is kept because of what the failure IS, not how likely it is. A fence body
- * really can contain a sentinel shape — `arr[1]` inside an Ask answer's citation
- * range, `[[1,2,3]]` in a nested-array literal — and any rule that matches PART
- * of one (the C-family capitalized-type heuristic matches `WIKIPAGELINK0`) splits
- * it across a span: the restore then misses, a raw U+0000 is served, and the
- * source text is DESTROYED rather than merely mis-colored. Matching the whole
- * sentinel with a `null` class keeps it in one plain run, byte-identical, where
- * the restore regex can still find it. That is a one-rule price for a silent
- * data loss, and it holds for any future pass that parks before rendering —
- * including one written by someone who never reads the two callers above.
+ * ⚠️ **A sentinel reaching a fence body is now the ORDINARY case, not the
+ * accident.** The restore decides per sentinel whether it landed inside a
+ * rendered `<code>` and puts the SOURCE TEXT back there instead of a link
+ * (`src/format/rendered-code.ts`) — which it can only do if the sentinel is
+ * still intact and still findable at that point. This rule is what makes that
+ * true. An earlier revision of this comment called it a backstop, on the premise
+ * that a markdown-side fence scanner kept sentinels out of fences; that scanner
+ * could not see the string the renderer parses and was replaced. Read this as
+ * the live defence.
  *
- * `highlight.test.ts` pins the round-trip directly; `render.test.ts` and
- * `ask-render.test.ts` pin the property that now makes it unreachable.
+ * `highlight.test.ts` pins the round-trip directly.
  */
 /**
  * ⚠️ Must precede any rule with a VARIABLE-LENGTH LOOKBEHIND.

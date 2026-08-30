@@ -353,6 +353,50 @@ describe("renderWikiHtml: a wikilink inside code is CODE", () => {
     expect(stripTokenSpans(html)).toContain("// [[Claude Code]]");
   });
 
+  /**
+   * The four inputs a markdown-side fence scanner got wrong, kept as regression
+   * tests because they are what moved this decision onto the RENDERED HTML.
+   * Each one was measured against the shipped renderer before the rework.
+   */
+  describe("inputs a markdown-side scanner could not get right", () => {
+    test("CRLF: `parseBlocks` normalizes \\r\\n, so a raw-body scan finds no fence at all", () => {
+      const html = renderWikiHtml("t\r\n\r\n```ts\r\n// [[Claude Code]]\r\n```\r\n", resolve);
+      expect(html).not.toContain("wiki-link");
+      expect(stripTokenSpans(html)).toContain("// [[Claude Code]]");
+    });
+
+    test("a backtick inside a wikilink TARGET shifts inline-code parity", () => {
+      // Parking `[[x`y]]` REMOVES a backtick, so every later backtick on the line
+      // re-pairs one position over and an inline span appears that a scan of the
+      // unparked body never saw — with a sentinel inside it.
+      const html = renderWikiHtml("[[x`y]] `A [[Claude Code]] B` end", resolve);
+      expect(html).toContain("<code>A [[Claude Code]] B</code>");
+      expect(html).not.toContain('<code>A <a');
+    });
+
+    test("…and inside a LABEL, which the same parking removes", () => {
+      const html = renderWikiHtml("[[a|b`c]] `A [[Claude Code]] B` end", resolve);
+      expect(html).toContain("<code>A [[Claude Code]] B</code>");
+    });
+
+    test("the same parity shift read backwards must NOT de-link prose", () => {
+      // The over-skip direction: a scanner that thought the later link was inside
+      // code stopped parking it, and a working prose link rendered as brackets.
+      const html = renderWikiHtml("[[a`b]] X [[Claude Code]] Y `d`", resolve);
+      expect(html).toContain('class="wiki-link"');
+      expect(html).toContain("<code>d</code>");
+    });
+
+    test("a mid-line fence delimiter: the renderer joins the two sides onto ONE line", () => {
+      // `parseBlocks` swaps the fence for a placeholder, so the text before the
+      // opener and after the closer end up on one line where two lone backticks
+      // pair — a line-wise scan of the body sees neither.
+      const html = renderWikiHtml("a ` ```\ncode\n``` [[Claude Code]] ` b", resolve);
+      expect(html).not.toContain("wiki-link");
+      expect(html).toContain("[[Claude Code]]");
+    });
+  });
+
   test("nothing leaks: no sentinel and no raw NUL reach the page", () => {
     const html = renderWikiHtml(
       "[[Claude Code]]\n\n```ts\nconst m = [[1,2,3]];\n```\n\n`[[Claude Code]]`",

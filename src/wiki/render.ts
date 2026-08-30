@@ -8,20 +8,24 @@
  * become `<a href="/wiki?page=…" data-wiki-page="…">`; unresolved ones become
  * muted spans so dead links are visible but not clickable.
  *
- * ⚠️ **The parking pass skips code** (`codeSpanRegions`, `markdown-ast.ts`).
- * Without that it was not scoped to prose at all: a wikilink written inside a
- * fence or inside backticks was parked like any other and the restore landed
- * INSIDE the rendered `<code>`, so a RESOLVABLE target became a live clickable
- * link and the `[[` `]]` brackets vanished from the code's own text. That is
- * altered source rather than a display bug — `code.textContent` is what #494's
- * Copy button hands over, what `wiki-mermaid.ts` reads to build a diagram, and
- * what the fact-check evidence card clones. Measured over mimir + the jarvis
- * wiki: 1495 wikilinks inside code across 57 pages, 522 of them in inline spans.
+ * ⚠️ **A sentinel that lands inside a rendered `<code>` is restored as the
+ * SOURCE TEXT, not as a link.** The restore was not scoped to prose, so a
+ * wikilink written inside a fence or inside backticks came back as a live
+ * clickable `<a>` INSIDE `<pre><code>` with the `[[` `]]` gone from the code's
+ * own text. That is altered source rather than a display bug: `code.textContent`
+ * is what #494's Copy button hands the reader, what `wiki-mermaid.ts` reads to
+ * build a diagram, and what the fact-check evidence card clones. Measured over
+ * mimir + the jarvis wiki: 1495 wikilinks inside code across 57 pages, 522 of
+ * them in inline spans.
+ *
+ * The decision is made on the RENDERED HTML (`renderedCodeRegions`), never by
+ * scanning the markdown for fences — see that module for the four measured ways
+ * a markdown-side scanner diverges from what the renderer actually parses.
  */
 
 import { formatWebHtml } from "../web/web-format.ts";
 import { escapeHtml } from "../format/markdown-core.ts";
-import { codeSpanRegions, inCodeSpan } from "../format/markdown-ast.ts";
+import { renderedCodeRegions, inRenderedCode } from "../format/rendered-code.ts";
 import { stripFrontmatter, type WikiPageMeta } from "./store.ts";
 import { FACTCHECK_SENTINEL_START, FACTCHECK_SENTINEL_END } from "./factcheck-context.ts";
 
@@ -104,39 +108,39 @@ export function renderWikiHtml(
 
   const wikiQuery = opts?.wiki ? `wiki=${encodeURIComponent(opts.wiki)}&` : "";
   const rendered: string[] = [];
-  // Computed on the body the renderer is about to be handed, so the two agree by
-  // construction; the sentinel carries no backtick and no newline, so parking
-  // outside these regions cannot create or destroy one of them.
-  const codeRegions = codeSpanRegions(body);
-  const withTokens = body.replace(
-    WIKILINK_WITH_LABEL_RE,
-    (whole: string, target: string, label: string | undefined, offset: number) => {
-      // A wikilink the reader wrote inside code is a wikilink they wrote about,
-      // not one they wrote — it must reach the page as the bytes on disk. Tested
-      // on the START offset, so a match that straddles a code boundary is still
-      // parked exactly as it was before this guard existed.
-      if (inCodeSpan(codeRegions, offset)) return whole;
-      const text = (label ?? target).trim() || target.trim();
-      const meta = resolve(target);
-      const html = meta
-        ? // `data-relpath` names the page the link RESOLVED to, so the in-page click
-          // delegate opens that exact page instead of re-resolving the stem
-          // (first-registration-wins) client-side — and the `href` now says the same
-          // thing. It is used by exactly one path, a middle-click / "open in new
-          // tab", and in the `?page=` form that path lost BOTH facts: the wiki (so a
-          // link on mimir opened jarvis) and the page (the stem re-resolved to
-          // whichever registered first).
-          `<a href="/wiki?${wikiQuery}relPath=${encodeURIComponent(meta.relPath)}" class="wiki-link" data-wiki-page="${escapeHtml(meta.name)}" data-relpath="${escapeHtml(meta.relPath)}">${escapeHtml(text)}</a>`
-        : `<span class="wiki-link-missing" title="No page named ${escapeHtml(target.trim())}">${escapeHtml(text)}</span>`;
-      const idx = rendered.length;
-      rendered.push(html);
-      return `\x00WIKIPAGELINK${idx}\x00`;
-    },
-  );
+  // The source text each sentinel stands for, kept alongside its rendered form:
+  // where the sentinel turns out to be inside code, THIS is what goes back.
+  const literal: string[] = [];
+  const withTokens = body.replace(WIKILINK_WITH_LABEL_RE, (whole: string, target: string, label?: string) => {
+    literal.push(whole);
+    const text = (label ?? target).trim() || target.trim();
+    const meta = resolve(target);
+    const html = meta
+      ? // `data-relpath` names the page the link RESOLVED to, so the in-page click
+        // delegate opens that exact page instead of re-resolving the stem
+        // (first-registration-wins) client-side — and the `href` now says the same
+        // thing. It is used by exactly one path, a middle-click / "open in new
+        // tab", and in the `?page=` form that path lost BOTH facts: the wiki (so a
+        // link on mimir opened jarvis) and the page (the stem re-resolved to
+        // whichever registered first).
+        `<a href="/wiki?${wikiQuery}relPath=${encodeURIComponent(meta.relPath)}" class="wiki-link" data-wiki-page="${escapeHtml(meta.name)}" data-relpath="${escapeHtml(meta.relPath)}">${escapeHtml(text)}</a>`
+      : `<span class="wiki-link-missing" title="No page named ${escapeHtml(target.trim())}">${escapeHtml(text)}</span>`;
+    const idx = rendered.length;
+    rendered.push(html);
+    return `\x00WIKIPAGELINK${idx}\x00`;
+  });
 
-  const html = formatWebHtml(withTokens).replace(
+  const renderedHtml = formatWebHtml(withTokens);
+  const codeRegions = renderedCodeRegions(renderedHtml);
+  const html = renderedHtml.replace(
     /\x00WIKIPAGELINK(\d+)\x00/g,
-    (_m, idx: string) => rendered[parseInt(idx, 10)] ?? "",
+    (_m, idx: string, offset: number) => {
+      const i = parseInt(idx, 10);
+      // Inside code the page must show the bytes on disk — escaped, because that
+      // is what the pipeline would have done to them had they never been parked.
+      if (inRenderedCode(codeRegions, offset)) return escapeHtml(literal[i] ?? "");
+      return rendered[i] ?? "";
+    },
   );
   return upgradeObsidianCallouts(html);
 }

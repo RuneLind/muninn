@@ -211,6 +211,12 @@ describe("an [n] marker inside code is CODE", () => {
     expect(fenceText(html)).toBe("const v = arr[1];");
   });
 
+  test("CRLF too — the citation path had the identical hole", () => {
+    const html = renderAskAnswerHtml("Hi [1].\r\n\r\n```ts\r\nconst v = arr[1];\r\n```\r\n", citations);
+    expect(html.match(/wiki-ask-cite/g)?.length).toBe(1);
+    expect(fenceText(html)).toBe("const v = arr[1];");
+  });
+
   test("an inline code span is protected too", () => {
     const html = renderAskAnswerHtml("Read `arr[1]` and cite [1].", citations);
     expect(html).toContain("<code>arr[1]</code>");

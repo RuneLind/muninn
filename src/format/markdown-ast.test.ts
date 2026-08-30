@@ -9,8 +9,6 @@ import {
   parseChecklistItem,
   parseChecklist,
   scanInlineComponents,
-  codeSpanRegions,
-  inCodeSpan,
 } from "./markdown-ast.ts";
 
 describe("parseBlocks", () => {
@@ -569,84 +567,5 @@ describe("Fact: own-line = block, mid-text = inline, self-closing allowed", () =
     expect(scanInlineComponents('mid <FactCheck date="2026-07-29">x</FactCheck> line')).toEqual([
       { kind: "text", text: 'mid <FactCheck date="2026-07-29">x</FactCheck> line' },
     ]);
-  });
-});
-
-describe("codeSpanRegions / inCodeSpan", () => {
-  /** Every index of `needle` in `text`, so a case names the construct rather
-   *  than a magic offset. */
-  const at = (text: string, needle: string) => text.indexOf(needle);
-
-  test("a fenced block is one region, covering its delimiters", () => {
-    const text = "before\n```ts\nconst x = 1;\n```\nafter";
-    const regions = codeSpanRegions(text);
-    expect(regions).toHaveLength(1);
-    expect(text.slice(regions[0]!.start, regions[0]!.end)).toBe("```ts\nconst x = 1;\n```");
-    expect(inCodeSpan(regions, at(text, "const"))).toBe(true);
-    expect(inCodeSpan(regions, at(text, "before"))).toBe(false);
-    expect(inCodeSpan(regions, at(text, "after"))).toBe(false);
-  });
-
-  test("inline spans on either side of a fence are found, and the prose between is not", () => {
-    const text = "use `a` then\n```\nx\n```\nand `b`";
-    const regions = codeSpanRegions(text);
-    expect(inCodeSpan(regions, at(text, "`a`"))).toBe(true);
-    expect(inCodeSpan(regions, at(text, "`b`"))).toBe(true);
-    expect(inCodeSpan(regions, at(text, "then"))).toBe(false);
-    expect(inCodeSpan(regions, at(text, "and"))).toBe(false);
-  });
-
-  test("a fence's own backticks never pair with prose ones — the blanking pass", () => {
-    // Mirrors `parseBlocks`, which swaps each fence for a backtick-free
-    // placeholder BEFORE `renderInline` scans lines, so a fence delimiter can
-    // never become half of an inline pair. Without the blanking this exact input
-    // yields the SPURIOUS regions "`b `" and "` c`" — i.e. the prose words `b`
-    // and `c` are reported as code, and a wikilink written there would stop
-    // being parked. That is an OVER-skip: a working link silently turned into
-    // literal brackets, the failure direction this whole guard must not have.
-    // Distinct letters throughout, so `at()` cannot resolve a prose probe to a
-    // character inside the fence body.
-    const text = "a`b ```\nzz\n``` c`d";
-    const regions = codeSpanRegions(text);
-    expect(regions.map((r) => text.slice(r.start, r.end))).toEqual(["```\nzz\n```"]);
-    expect(inCodeSpan(regions, at(text, "b"))).toBe(false);
-    expect(inCodeSpan(regions, at(text, "c"))).toBe(false);
-    expect(inCodeSpan(regions, at(text, "zz"))).toBe(true);
-  });
-
-  test("the inline pass is LINE-scoped, exactly as renderInline applies it", () => {
-    // A lone backtick on one line must not pair with one two paragraphs down.
-    const text = "a ` stray\n\nprose here\n\nanother ` one";
-    expect(inCodeSpan(codeSpanRegions(text), at(text, "prose"))).toBe(false);
-  });
-
-  test("a fence inside a block component is found — extraction is document-wide", () => {
-    const text = '<Callout tone="info" title="t">\n\n```ts\nconst x = 1;\n```\n\n</Callout>';
-    expect(inCodeSpan(codeSpanRegions(text), at(text, "const"))).toBe(true);
-  });
-
-  test("regions come back SORTED, which is what inCodeSpan's binary search needs", () => {
-    // Fences are collected first and inline spans second, so the two lists
-    // interleave; an unsorted return makes the search answer false at random.
-    const text = "`a`\n\n```\nfence\n```\n\n`b`\n\n```\ntwo\n```\n\n`c`";
-    const regions = codeSpanRegions(text);
-    const starts = regions.map((r) => r.start);
-    expect(starts).toEqual([...starts].sort((x, y) => x - y));
-    for (const needle of ["`a`", "fence", "`b`", "two", "`c`"]) {
-      expect(inCodeSpan(regions, at(text, needle))).toBe(true);
-    }
-  });
-
-  test("a ~~~ block is NOT a region — this pipeline renders it as prose", () => {
-    // The load-bearing divergence from CommonMark. Measured: formatWebHtml
-    // renders a tilde-fenced block as ordinary text, so calling it code here
-    // would turn a working wikilink inside it into literal brackets.
-    const text = "~~~\nplain text\n~~~";
-    expect(inCodeSpan(codeSpanRegions(text), at(text, "plain"))).toBe(false);
-  });
-
-  test("no code, no regions", () => {
-    expect(codeSpanRegions("just prose, no code at all")).toEqual([]);
-    expect(inCodeSpan([], 0)).toBe(false);
   });
 });

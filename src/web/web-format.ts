@@ -14,7 +14,6 @@ import {
   firstCodeBlock,
   diffLineClass,
   parseChecklist,
-  INLINE_CODE_SOURCE,
 } from "../format/markdown-ast.ts";
 import type { Block, FactVerdict } from "../format/markdown-ast.ts";
 import { renderBlocks, type BlockRenderer } from "../format/block-renderer.ts";
@@ -352,7 +351,7 @@ function renderInline(text: string): string {
   // Parking code before the component scan is what keeps a component tag inside
   // backticks (`` `<Verdict …>x</Verdict>` ``) literal: the parked sentinel
   // contains no `<`, so the scan below never sees the tag and it stays code.
-  let result = text.replace(new RegExp(INLINE_CODE_SOURCE, "g"), (_m, code: string) =>
+  let result = text.replace(/`([^`]+)`/g, (_m, code: string) =>
     ph.add("INLINE", `<code>${escapeHtml(code)}</code>`),
   );
 

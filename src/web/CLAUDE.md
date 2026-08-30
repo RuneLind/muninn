@@ -13,57 +13,84 @@ Two properties it is written to hold, both pinned in `highlight.test.ts`:
 
 ⚠️ **The chat sanitizer is the coupling that bites.** `/wiki` injects this HTML unsanitized (trusted disk content), but the chat re-renders every bubble through `sanitizeHtml` (`web-format-browser.ts`), which strips `class` off a `<span>` unless the value is allowlisted — so a token class missing from `COMPONENT_CLASS_ALLOW` renders perfectly in the reader and colorless in chat, with every unit test green. That list therefore spreads `HIGHLIGHT_TOKEN_CLASSES` in rather than retyping the names, and `e2e/wiki-code-highlight.spec.ts` drives the real bundled `sanitizeHtml` on the real chat page. **Any new `tok-*` class must be added to that exported array, never to the CSS alone.**
 
-## Wikilinks and `[n]` citations are parked BEFORE rendering — and skip code
+## Wikilinks and `[n]` citations are parked BEFORE rendering — and restored SCOPED
 
 `src/wiki/render.ts` and `src/wiki/ask-render.ts` are the only two passes that
 swap a construct for a `\x00`-delimited sentinel before `formatWebHtml` and
-restore it by regex over the RENDERED HTML. Both ask
-`codeSpanRegions(body)` (`markdown-ast.ts`) first and leave a match whose START
-offset falls inside a code region alone, so it reaches the page as the bytes on
-disk.
+restore it by regex over the RENDERED HTML. The restore was not scoped to prose,
+so a wikilink written inside a fence or inside backticks came back as a live
+clickable `<a>` INSIDE `<pre><code>` with the `[[` `]]` gone from the code's own
+text. Both passes now decide PER SENTINEL: outside code it becomes the link,
+inside code it becomes the source text, escaped exactly as the pipeline would
+have escaped it had it never been parked.
 
-⚠️ **The regions are derived from the RENDERER's own two regexes**
-(`CODE_FENCE_SOURCE`, `INLINE_CODE_SOURCE`), not from CommonMark, and that is
-load-bearing: measured, `formatWebHtml` renders a `~~~`-fenced block as ordinary
-prose, so the CommonMark-accurate walk this repo already owns for the write path
-(`fencedLineMask`, `wiki-integrate.ts`) would call it code and silently turn a
-working link into literal brackets. The only rule that cannot disagree with the
-renderer is the renderer's own.
-
-Both shapes are covered, not just fences: measured over mimir + the jarvis wiki,
-1495 wikilinks sit inside code across 57 pages and **522 of them are in inline
-spans** — in the jarvis wiki inline is 99% of the cases. The failure this closes
-is not cosmetic: a RESOLVABLE target became a live `<a>` inside `<pre><code>`
-with the `[[` `]]` gone from the text, and `code.textContent` is what the Copy
+The failure this closes is not cosmetic. `code.textContent` is what #494's Copy
 button hands over, what `wiki-mermaid.ts` reads to build a diagram and what the
-fact-check evidence card clones — silently altered source, one click from the
-reader's editor. `[1]` is ordinary syntax in almost every language an answer
-quotes, so the citation half had the same shape.
+fact-check evidence card clones, so the button handed the reader
+`// see Some Page` where the file says `// see [[Some Page]]`. `[1]` is ordinary
+syntax in almost every language an Ask answer quotes, so the citation half had
+the same shape: `arr[1]` in a fence became a chip and lost its subscript.
 
-The acceptance, in `render.test.ts` and `ask-render.test.ts`: **a fence's text
-equals the bytes on disk**, asserted on the resolvable case as well as the
-unresolvable one — only the first tells a real fix from "the dead
-`wiki-link-missing` span went away".
+Measured 2026-08-30 over mimir + the jarvis wiki (1561 pages): **1495 wikilinks
+sit inside code across 57 pages, 522 of them in INLINE spans** — in the jarvis
+wiki inline is 99% of the cases, so fences alone would have left the majority
+unfixed.
 
-The share path had already reached this conclusion: `flattenWikiLinks`
-(`src/wiki/store.ts`) is code-region-aware for the same stated reason — "a
-documented `[[wikilink]]` or a relative path in a code sample survives" — through
-its own single-alternation `FLATTEN_WIKI_LINKS_RE`. The READ path was the odd one
-out, not the innovator. The two are deliberately NOT merged: that one is a
-replace with an alternation over the same string it rewrites, this one answers a
-membership question about offsets, and folding either into the other would change
-the share output for no reader-visible gain.
+⚠️ **The decision is made on the RENDERED HTML** (`renderedCodeRegions`,
+`src/format/rendered-code.ts`), never by scanning the markdown for fences. A
+markdown-side scanner was written first, derived from the renderer's own fence
+and inline-code regexes, and it was still wrong — because it cannot see the
+string the renderer parses: parking rewrites the body in between. Four measured
+divergences, all four now regression tests in `render.test.ts`:
+
+- **CRLF.** `parseBlocks` normalizes `\r\n` before matching, so a raw-body scan
+  finds no fence at all in a CRLF file and the original bug survives untouched.
+- **A backtick inside a wikilink TARGET or LABEL** (`[[x`y]]` — the regex admits
+  both). Parking removes it, every later backtick on the line re-pairs one
+  position over, an inline span appears that the scan never saw, and a sentinel
+  lands inside it.
+- **The same shift read backwards**: a link the scan believed was inside code
+  stopped being parked, and a working prose link rendered as literal brackets.
+  A regression, in the direction the guard exists to prevent.
+- **A fence delimiter starting or ending mid-line.** The renderer swaps the fence
+  for a placeholder and joins the text either side onto ONE line, where two lone
+  backticks pair; a line-wise scan sees neither.
+
+The region scan relies on `<code>` not nesting, which is the RENDERER's property
+rather than an assumption: `formatWebHtml` escapes everything it does not itself
+emit, so a `<code>` in prose, quoted inside a fence, or in a component attribute
+all arrive as `&lt;code&gt;` — measured on all four, and pinned in
+`rendered-code.test.ts`. Cost, measured warm on the same corpus: **11 µs/page,
+17 ms for all 1561 rendered pages; 0.91 ms of the 33.7 ms render of the largest
+page in either wiki (958 KB).**
+
+The share path had already reached the same conclusion from the other side:
+`flattenWikiLinks` (`src/wiki/store.ts`) is code-region-aware for the stated
+reason that "a documented `[[wikilink]]` or a relative path in a code sample
+survives". The READ path was the odd one out, not the innovator.
+
+⚠️ **This is also why `highlight.ts`'s `SENTINEL` rule is load-bearing rather
+than defensive.** A sentinel reaching a fence body is the ORDINARY case here, and
+the restore can only put the source text back if the tokenizer left the sentinel
+intact and findable.
 
 ⚠️ **Known residual, stated because this change is what makes it visible.**
 `extractWikilinks` — the LINK GRAPH — does not special-case code and says so
 deliberately. So a wikilink that appears only inside a fence now renders as text
 while still contributing an outgoing link and a backlink: the reader sees no link
-in the article and one in the Connections rail. Measured over mimir + the jarvis
-wiki, that is **7 resolving targets on 5 pages** — the other 529 code-only targets
-resolve to nothing and were already invisible to the graph. Not fixed here on
-purpose: changing the extractor moves backlinks across every wiki at once, and a
-fence that names a page is arguably a reference worth graphing. It is a separate
-decision, not an oversight.
+in the article and one in the Connections rail. Measured over both wikis, that is
+**7 resolving targets on 5 pages** — the other 529 code-only targets resolve to
+nothing and were already invisible to the graph. Not fixed here on purpose:
+changing the extractor moves backlinks across every wiki at once, and a fence
+that names a page is arguably a reference worth graphing. A separate decision,
+not an oversight.
+
+The acceptance, in `render.test.ts` and `ask-render.test.ts`: **a fence's text
+equals the bytes on disk**, asserted on the resolvable case as well as the
+unresolvable one — only the first tells a real fix from "the dead
+`wiki-link-missing` span went away" — plus the browser-level half in
+`e2e/wiki-code-highlight.spec.ts`, which reads the CLIPBOARD, the only assertion
+that proves what actually leaves the page.
 
 ## Code-block chrome (header bar + copy)
 
@@ -193,8 +220,9 @@ wrapper path because only one of them can express it:
   like one in a backtick span — a resolvable target became a live clickable link
   inside `<pre><code>` with the brackets gone from the code's own text. That
   sentence is why the bug survived a year. `renderWikiHtml`/`renderAskAnswerHtml`
-  now skip code on the read path too (`codeSpanRegions`, `markdown-ast.ts`), so a
-  backticked or fenced link renders as the bytes on disk. The ANNOTATOR's behaviour
+  scope their RESTORE to prose now (`renderedCodeRegions`,
+  `src/format/rendered-code.ts`), so a backticked or fenced link renders as the
+  bytes on disk. The ANNOTATOR's behaviour
   is unchanged by that — it still expands over the whole link, because splicing
   inside the brackets is the forbidden shape whether the result is a dead link or
   literal tags in a code span.
