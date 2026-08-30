@@ -7,10 +7,25 @@
  * mangle them) and restored as internal anchors afterwards. Resolved links
  * become `<a href="/wiki?page=…" data-wiki-page="…">`; unresolved ones become
  * muted spans so dead links are visible but not clickable.
+ *
+ * ⚠️ **A sentinel that lands inside a rendered `<code>` is restored as the
+ * SOURCE TEXT, not as a link.** The restore was not scoped to prose, so a
+ * wikilink written inside a fence or inside backticks came back as a live
+ * clickable `<a>` INSIDE `<pre><code>` with the `[[` `]]` gone from the code's
+ * own text. That is altered source rather than a display bug: `code.textContent`
+ * is what #494's Copy button hands the reader, what `wiki-mermaid.ts` reads to
+ * build a diagram, and what the fact-check evidence card clones. Measured over
+ * mimir + the jarvis wiki: 1495 wikilinks inside code across 57 pages, 522 of
+ * them in inline spans.
+ *
+ * The decision is made on the RENDERED HTML (`renderedCodeRegions`), never by
+ * scanning the markdown for fences — see that module for the four measured ways
+ * a markdown-side scanner diverges from what the renderer actually parses.
  */
 
 import { formatWebHtml } from "../web/web-format.ts";
 import { escapeHtml } from "../format/markdown-core.ts";
+import { renderedCodeRegions, inRenderedCode } from "../format/rendered-code.ts";
 import { stripFrontmatter, type WikiPageMeta } from "./store.ts";
 import { FACTCHECK_SENTINEL_START, FACTCHECK_SENTINEL_END } from "./factcheck-context.ts";
 
@@ -93,7 +108,11 @@ export function renderWikiHtml(
 
   const wikiQuery = opts?.wiki ? `wiki=${encodeURIComponent(opts.wiki)}&` : "";
   const rendered: string[] = [];
-  const withTokens = body.replace(WIKILINK_WITH_LABEL_RE, (_m, target: string, label?: string) => {
+  // The source text each sentinel stands for, kept alongside its rendered form:
+  // where the sentinel turns out to be inside code, THIS is what goes back.
+  const literal: string[] = [];
+  const withTokens = body.replace(WIKILINK_WITH_LABEL_RE, (whole: string, target: string, label?: string) => {
+    literal.push(whole);
     const text = (label ?? target).trim() || target.trim();
     const meta = resolve(target);
     const html = meta
@@ -111,9 +130,20 @@ export function renderWikiHtml(
     return `\x00WIKIPAGELINK${idx}\x00`;
   });
 
-  const html = formatWebHtml(withTokens).replace(
+  const renderedHtml = formatWebHtml(withTokens);
+  const codeRegions = renderedCodeRegions(renderedHtml);
+  const html = renderedHtml.replace(
     /\x00WIKIPAGELINK(\d+)\x00/g,
-    (_m, idx: string) => rendered[parseInt(idx, 10)] ?? "",
+    (_m, idx: string, offset: number) => {
+      const i = parseInt(idx, 10);
+      // Inside code the page must show the bytes on disk, escaped. TEXT-exact,
+      // not render-exact: `textContent` matches an unparked render byte for byte
+      // — the acceptance — but the restored run is not tokenized, so the brackets
+      // are uncoloured where the code around them is highlighted. Cosmetic, and
+      // stated because the first spelling of this comment claimed more.
+      if (inRenderedCode(codeRegions, offset)) return escapeHtml(literal[i] ?? "");
+      return rendered[i] ?? "";
+    },
   );
   return upgradeObsidianCallouts(html);
 }

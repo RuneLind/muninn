@@ -13,6 +13,107 @@ Two properties it is written to hold, both pinned in `highlight.test.ts`:
 
 ⚠️ **The chat sanitizer is the coupling that bites.** `/wiki` injects this HTML unsanitized (trusted disk content), but the chat re-renders every bubble through `sanitizeHtml` (`web-format-browser.ts`), which strips `class` off a `<span>` unless the value is allowlisted — so a token class missing from `COMPONENT_CLASS_ALLOW` renders perfectly in the reader and colorless in chat, with every unit test green. That list therefore spreads `HIGHLIGHT_TOKEN_CLASSES` in rather than retyping the names, and `e2e/wiki-code-highlight.spec.ts` drives the real bundled `sanitizeHtml` on the real chat page. **Any new `tok-*` class must be added to that exported array, never to the CSS alone.**
 
+## Wikilinks and `[n]` citations are parked BEFORE rendering — and restored SCOPED
+
+`src/wiki/render.ts` and `src/wiki/ask-render.ts` are the only two passes that
+swap a construct for a `\x00`-delimited sentinel before `formatWebHtml` and
+restore it by regex over the RENDERED HTML. The restore was not scoped to prose,
+so a wikilink written inside a fence or inside backticks came back as a live
+clickable `<a>` INSIDE `<pre><code>` with the `[[` `]]` gone from the code's own
+text. Both passes now decide PER SENTINEL: outside code it becomes the link,
+inside code it becomes the source text, escaped. That restore is TEXT-exact, not
+render-exact: `code.textContent` is byte-identical to what an unparked render
+produces — which is the acceptance — but the restored run is not tokenized, so a
+`[[Page]]` inside a `ts` fence is uncoloured where the surrounding code is not.
+
+The failure this closes is not cosmetic. `code.textContent` is what #494's Copy
+button hands over, what `wiki-mermaid.ts` reads to build a diagram and what the
+fact-check evidence card clones, so the button handed the reader
+`// see Some Page` where the file says `// see [[Some Page]]`. `[1]` is ordinary
+syntax in almost every language an Ask answer quotes, so the citation half had
+the same shape: `arr[1]` in a fence became a chip and lost its subscript.
+
+Measured 2026-08-30 over mimir + the jarvis wiki (1561 pages): **1495 wikilinks
+sit inside code across 57 pages, 522 of them in INLINE spans** — in the jarvis
+wiki inline is 99% of the cases, so fences alone would have left the majority
+unfixed.
+
+⚠️ **The decision is made on the RENDERED HTML** (`renderedCodeRegions`,
+`src/format/rendered-code.ts`), never by scanning the markdown for fences. A
+markdown-side scanner was written first, derived from the renderer's own fence
+and inline-code regexes, and it was still wrong — because it cannot see the
+string the renderer parses: parking rewrites the body in between. Four measured
+divergences, all four now regression tests in `render.test.ts`:
+
+- **CRLF.** `parseBlocks` normalizes `\r\n` before matching, so a raw-body scan
+  finds no fence at all in a CRLF file and the original bug survives untouched.
+- **A backtick inside a wikilink TARGET or LABEL** (`[[x`y]]` — the regex admits
+  both). Parking removes it, every later backtick on the line re-pairs one
+  position over, an inline span appears that the scan never saw, and a sentinel
+  lands inside it.
+- **The same shift read backwards**: a link the scan believed was inside code
+  stopped being parked, and a working prose link rendered as literal brackets.
+  A regression, in the direction the guard exists to prevent.
+- **A fence delimiter starting or ending mid-line.** The renderer swaps the fence
+  for a placeholder and joins the text either side onto ONE line, where two lone
+  backticks pair; a line-wise scan sees neither.
+
+⚠️ **What reading the output costs instead: the scan has to know every container
+the renderer uses for code, and there are TWO.** The first revision assumed one,
+`<code>`, and was wrong twice — both found by review, not by reasoning:
+
+- **`<Diff>` emits no `<code>` at all.** Its fence becomes
+  `<div class="diff-line …">` per line, so a `<code>`-only scan reported no code
+  and a wikilink inside a diff came back as a live link — a REGRESSION against
+  the markdown-side scanner, which matched the raw ` ```diff ` fence wherever it
+  sat. `<Diff>` is live in mimir today.
+- **`<code>` NESTS.** `<FileRef>` wraps its already-rendered inline children in
+  `<code class="fileref">`, so `` <FileRef>`a` [[P]]</FileRef> `` produces a
+  `<code>` inside a `<code>`; pairing an open tag with the NEXT `</code>` closed
+  the outer region at the inner's close and left the rest of the FileRef outside
+  every region. An earlier revision of this page called non-nesting "the
+  RENDERER's property rather than an assumption". It was neither.
+
+So the container set is pinned by a DERIVED test rather than by this list being
+hand-maintained: `rendered-code.test.ts` renders a probe inside a fence and
+inside a backtick span for EVERY name in `COMPONENT_NAMES` and asserts it lands
+in a region, so a component introducing a third container fails there instead of
+silently in a reader's browser — the `COMPONENT_FENCE_CHROME` default-deny idiom.
+One consequence worth knowing: a `[[wikilink]]` written directly inside a
+`<FileRef>` renders literal now, because a FileRef IS a `<code>`.
+
+Cost, measured warm on the same corpus: **18 µs/page, 29 ms for all 1562
+rendered pages; 1.8 ms of the 36.2 ms render of the largest page in either wiki
+(960 KB).**
+
+The share path had already reached the same conclusion from the other side:
+`flattenWikiLinks` (`src/wiki/store.ts`) is code-region-aware for the stated
+reason that "a documented `[[wikilink]]` or a relative path in a code sample
+survives". The READ path was the odd one out, not the innovator.
+
+⚠️ **This is also why `highlight.ts`'s `SENTINEL` rule is load-bearing rather
+than defensive.** A sentinel reaching a fence body is the ORDINARY case here, and
+the restore can only put the source text back if the tokenizer left the sentinel
+intact and findable.
+
+⚠️ **Known residual, stated because this change is what makes it visible.**
+`extractWikilinks` — the LINK GRAPH — does not special-case code and says so
+deliberately. So a wikilink that appears only inside a fence now renders as text
+while still contributing an outgoing link and a backlink: the reader sees no link
+in the article and one in the Connections rail. Measured over both wikis, that is
+**7 resolving targets on 5 pages** — the other 529 code-only targets resolve to
+nothing and were already invisible to the graph. Not fixed here on purpose:
+changing the extractor moves backlinks across every wiki at once, and a fence
+that names a page is arguably a reference worth graphing. A separate decision,
+not an oversight.
+
+The acceptance, in `render.test.ts` and `ask-render.test.ts`: **a fence's text
+equals the bytes on disk**, asserted on the resolvable case as well as the
+unresolvable one — only the first tells a real fix from "the dead
+`wiki-link-missing` span went away" — plus the browser-level half in
+`e2e/wiki-code-highlight.spec.ts`, which reads the CLIPBOARD, the only assertion
+that proves what actually leaves the page.
+
 ## Code-block chrome (header bar + copy)
 
 The bar and the copy button are built by a CLIENT enhancer,
@@ -149,16 +250,30 @@ wrapper path because only one of them can express it:
   otherwise paired the FIRST opener with the only closer and marked 20 characters
   nobody checked, running the mark across a table's `|` in the process. Same shape
   `firstDanglingWikilinkOpen` (`src/wiki/store.ts`) calls dangling. **Inline code is
-  NOT excluded**, and a masked spelling of this scan was a shipped defect:
-  `renderWikiHtml` substitutes wikilinks over the raw body BEFORE `formatWebHtml`
-  sees a backtick, so `` `[[Old Name]]` `` renders as
-  `<code><a class="wiki-link">Old Name</a></code>` — a live link (measured
-  2026-08-30). Masking it made the annotator splice
-  `` `[[<Fact …>Old Name</Fact>]]` ``, i.e. the forbidden shape, rendering as a dead
-  `wiki-link-missing`. A backticked link is expanded over and a correction crossing
-  one is dropped, exactly as for an unbackticked link. Fences need no handling here
-  (already an exclusion zone), and they are genuinely different: `formatWebHtml`
-  renders a fenced block as code, so the substitution is invisible inside one.
+  NOT excluded**, and a masked spelling of this scan was a shipped defect: masking
+  it made the annotator splice `` `[[<Fact …>Old Name</Fact>]]` ``, i.e. the
+  forbidden shape. A backticked link is expanded over and a correction crossing one
+  is dropped, exactly as for an unbackticked link.
+
+  ⚠️ **The RENDER-side reason recorded here was true and is now obsolete, and the
+  fence sentence beside it was never true.** It read: `renderWikiHtml` substitutes
+  wikilinks over the raw body before `formatWebHtml` sees a backtick, so
+  `` `[[Old Name]]` `` renders as a live `<a>` inside the `<code>` (measured
+  2026-08-30, correct at the time) — *"Fences need no handling here (already an
+  exclusion zone), and they are genuinely different: `formatWebHtml` renders a
+  fenced block as code, so the substitution is invisible inside one."* The
+  exclusion zone is real but it belongs to the **write** path (`matchMaskBody`,
+  `integrate-edits.ts`); the **read** path had no such zone and substituted BEFORE
+  anything was decided to be code, so a wikilink in a fence was substituted exactly
+  like one in a backtick span — a resolvable target became a live clickable link
+  inside `<pre><code>` with the brackets gone from the code's own text. That
+  sentence is why the bug survived a year. `renderWikiHtml`/`renderAskAnswerHtml`
+  scope their RESTORE to prose now (`renderedCodeRegions`,
+  `src/format/rendered-code.ts`), so a backticked or fenced link renders as the
+  bytes on disk. The ANNOTATOR's behaviour
+  is unchanged by that — it still expands over the whole link, because splicing
+  inside the brackets is the forbidden shape whether the result is a dead link or
+  literal tags in a code span.
 - **Order, and NO refusal at column 0.** Expansion runs FIRST and `markableRange`
   then guards the EXPANDED range, because `ownsLineStart` is evaluated on the span's
   start and expanding leftwards over a `[[` at column 0 is what flips it. The guard

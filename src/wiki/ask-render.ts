@@ -13,11 +13,17 @@
  *
  * The `[n]` markers are swapped for `\x00`-sentinel tokens *before* rendering (so
  * the markdown pipeline's HTML-escaping can't mangle them) and restored after —
- * the same technique `renderWikiHtml` uses for wikilinks.
+ * the same technique `renderWikiHtml` uses for wikilinks, and with the same
+ * scoping for the same reason: a sentinel that lands inside a rendered `<code>`
+ * comes back as the SOURCE TEXT, not as a citation. `[1]` is ordinary syntax in
+ * almost every language an answer quotes, so the unscoped restore turned
+ * `arr[1]` inside a fence into a clickable chip and deleted the subscript from
+ * the code's own text.
  */
 
 import { formatWebHtml } from "../web/web-format.ts";
 import { escapeHtml } from "../format/markdown-core.ts";
+import { renderedCodeRegions, inRenderedCode } from "../format/rendered-code.ts";
 import type { Citation } from "../research/answer.ts";
 
 const CITE_MARKER_RE = /\[(\d+)\]/g;
@@ -30,6 +36,8 @@ const CITE_MARKER_RE = /\[(\d+)\]/g;
 export function renderAskAnswerHtml(answer: string, citations: Citation[]): string {
   const maxN = citations.length;
   const tokens: string[] = [];
+  /** The source text behind each token — restored where it lands inside code. */
+  const literal: string[] = [];
   const withTokens = (answer ?? "").replace(CITE_MARKER_RE, (whole, num: string) => {
     const n = parseInt(num, 10);
     const c = citations[n - 1];
@@ -47,11 +55,18 @@ export function renderAskAnswerHtml(answer: string, citations: Citation[]): stri
         (c.pageRelPath ? ` data-relpath="${escapeHtml(c.pageRelPath)}"` : "") +
         ` title="${escapeHtml(c.title || "")}">[${n}]</sup>`,
     );
+    literal.push(whole);
     return `\x00ASKCITE${idx}\x00`;
   });
-  return formatWebHtml(withTokens).replace(
+  const renderedHtml = formatWebHtml(withTokens);
+  const codeRegions = renderedCodeRegions(renderedHtml);
+  return renderedHtml.replace(
     /\x00ASKCITE(\d+)\x00/g,
-    (_m, idx: string) => tokens[parseInt(idx, 10)] ?? "",
+    (_m, idx: string, offset: number) => {
+      const i = parseInt(idx, 10);
+      if (inRenderedCode(codeRegions, offset)) return escapeHtml(literal[i] ?? "");
+      return tokens[i] ?? "";
+    },
   );
 }
 

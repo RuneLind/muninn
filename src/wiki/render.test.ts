@@ -261,16 +261,16 @@ describe("wikilink href", () => {
  * Same regression as `ask-render.test.ts`'s, through the wikilink sentinel.
  *
  * `renderWikiHtml` parks a `[[wikilink]]` as a \u0000-delimited sentinel BEFORE
- * `formatWebHtml` and restores it over the rendered HTML — and it does so
- * INSIDE fences too, which is pre-existing behaviour (an `html` fence, or one
- * with no language at all, resolves `[[1,2,3]]` to a `wiki-link-missing` span
- * exactly the same way; measured 2026-08-30). Highlighting must not change that
- * either way: the C-family capitalized-identifier rule matched `WIKIPAGELINK0`
- * and split the sentinel, so the restore missed and a raw U+0000 was SERVED.
+ * `formatWebHtml` and restores it over the rendered HTML. It used to do so
+ * INSIDE fences too — the bug the sibling describe-block below now pins as
+ * fixed — and the highlighter's C-family capitalized-identifier rule matched
+ * `WIKIPAGELINK0` and SPLIT the sentinel, so the restore missed and a raw U+0000
+ * was SERVED.
  *
- * The assertion is therefore PARITY between a highlighted fence and an
- * unhighlighted one, which pins the fix without freezing the wikilink-in-fence
- * behaviour this test does not own.
+ * The assertion is PARITY between a highlighted fence and an unhighlighted one,
+ * which is the property that has to hold whatever the parking pass decides: the
+ * tokenizer must be transparent to the sentinel machinery. It deliberately does
+ * not assert WHAT the fence contains — that is the sibling block's job.
  */
 test("a wikilink-shaped literal in a fence renders the same highlighted or not", () => {
   const body = "const m = [[1,2,3]];";
@@ -288,5 +288,139 @@ test("a wikilink-shaped literal in a fence renders the same highlighted or not",
   expect(stripTokenSpans(highlighted).replace('language-ts', "LANG")).toBe(
     plain.replace('language-html', "LANG"),
   );
-  expect(stripTokenSpans(highlighted)).toContain("wiki-link-missing");
+  // …and the fence is the source, byte for byte, on both.
+  expect(stripTokenSpans(highlighted)).toContain(body);
+});
+
+describe("renderWikiHtml: a wikilink inside code is CODE", () => {
+  // The acceptance for the whole guard, stated once: a fence's text must equal
+  // the bytes on disk. Both halves are asserted, because only the RESOLVABLE one
+  // distinguishes a real fix from "the dead wiki-link-missing span went away".
+  //
+  // Why it matters beyond looks: `code.textContent` is what #494's Copy button
+  // hands the reader, what `wiki-mermaid.ts` reads to build a diagram, and what
+  // the fact-check evidence card clones. A substituted link there is silently
+  // altered source, one click from someone's editor.
+  const fenceText = (html: string) =>
+    stripTokenSpans(html).replace(/^[\s\S]*?<code[^>]*>/, "").replace(/<\/code>[\s\S]*$/, "");
+
+  test("a RESOLVABLE target stays literal — no anchor, brackets intact", () => {
+    const source = "// see [[Claude Code]]";
+    const html = renderWikiHtml("```ts\n" + source + "\n```", resolve);
+    expect(html).not.toContain("wiki-link");
+    expect(fenceText(html)).toBe(source);
+  });
+
+  test("an UNRESOLVABLE target stays literal too — an array literal is not a dead link", () => {
+    const source = "const m = [[1,2,3]];";
+    const html = renderWikiHtml("```ts\n" + source + "\n```", resolve);
+    expect(html).not.toContain("wiki-link-missing");
+    expect(fenceText(html)).toBe(source);
+  });
+
+  test("an INLINE code span is protected too — the majority of real cases", () => {
+    // Measured over mimir + the jarvis wiki: 522 of the 1495 wikilinks inside
+    // code are in inline spans, and in the jarvis wiki they are 99% of them.
+    const html = renderWikiHtml("Write `[[Claude Code]]` to link it.", resolve);
+    expect(html).toContain("<code>[[Claude Code]]</code>");
+    expect(html).not.toContain("wiki-link");
+  });
+
+  test("prose on the same page is UNAFFECTED — the guard is not a kill switch", () => {
+    const html = renderWikiHtml(
+      "See [[Claude Code]].\n\n```ts\n// [[Claude Code]]\n```\n\nAnd [[Claude Code]] again.",
+      resolve,
+    );
+    expect(html.match(/class="wiki-link"/g)?.length).toBe(2);
+    expect(stripTokenSpans(html)).toContain("// [[Claude Code]]");
+  });
+
+  test("a ~~~ block is prose here, so a link inside it still resolves", () => {
+    // The reason the code regions are derived from THIS renderer's regexes and
+    // not from a CommonMark walk: formatWebHtml does not treat ~~~ as a fence,
+    // so skipping it would delete a link the reader can see working today.
+    const html = renderWikiHtml("~~~\n[[Claude Code]]\n~~~", resolve);
+    expect(html).toContain('class="wiki-link"');
+  });
+
+  test("a fence inside a component is still code", () => {
+    const html = renderWikiHtml(
+      '<Callout tone="info" title="t">\n\n```ts\n// [[Claude Code]]\n```\n\n</Callout>',
+      resolve,
+    );
+    expect(html).toContain('class="callout callout-info"');
+    expect(html).not.toContain("wiki-link");
+    expect(stripTokenSpans(html)).toContain("// [[Claude Code]]");
+  });
+
+  /**
+   * The four inputs a markdown-side fence scanner got wrong, kept as regression
+   * tests because they are what moved this decision onto the RENDERED HTML.
+   * Each one was measured against the shipped renderer before the rework.
+   */
+  describe("inputs a markdown-side scanner could not get right", () => {
+    test("CRLF: `parseBlocks` normalizes \\r\\n, so a raw-body scan finds no fence at all", () => {
+      const html = renderWikiHtml("t\r\n\r\n```ts\r\n// [[Claude Code]]\r\n```\r\n", resolve);
+      expect(html).not.toContain("wiki-link");
+      expect(stripTokenSpans(html)).toContain("// [[Claude Code]]");
+    });
+
+    test("a backtick inside a wikilink TARGET shifts inline-code parity", () => {
+      // Parking `[[x`y]]` REMOVES a backtick, so every later backtick on the line
+      // re-pairs one position over and an inline span appears that a scan of the
+      // unparked body never saw — with a sentinel inside it.
+      const html = renderWikiHtml("[[x`y]] `A [[Claude Code]] B` end", resolve);
+      expect(html).toContain("<code>A [[Claude Code]] B</code>");
+      expect(html).not.toContain('<code>A <a');
+    });
+
+    test("…and inside a LABEL, which the same parking removes", () => {
+      const html = renderWikiHtml("[[a|b`c]] `A [[Claude Code]] B` end", resolve);
+      expect(html).toContain("<code>A [[Claude Code]] B</code>");
+    });
+
+    test("the same parity shift read backwards must NOT de-link prose", () => {
+      // The over-skip direction: a scanner that thought the later link was inside
+      // code stopped parking it, and a working prose link rendered as brackets.
+      const html = renderWikiHtml("[[a`b]] X [[Claude Code]] Y `d`", resolve);
+      expect(html).toContain('class="wiki-link"');
+      expect(html).toContain("<code>d</code>");
+    });
+
+    test("<Diff> renders code with NO <code> tag at all", () => {
+      // The regression the rendered-HTML rework injected and the markdown-side
+      // scanner had right: `<Diff>` emits `<div class="diff-line …">` per line,
+      // so a `<code>`-only scan reported no code and the link came back live.
+      // `<Diff>` is live in mimir today.
+      const html = renderWikiHtml("<Diff>\n\n```diff\n-old [[Claude Code]]\n+new\n```\n\n</Diff>", resolve);
+      expect(html).toContain('<div class="diff-line diff-del">-old [[Claude Code]]</div>');
+      expect(html).not.toContain("wiki-link");
+    });
+
+    test("<FileRef> NESTS <code>, so the outer region must not close at the inner", () => {
+      // FileRef wraps already-rendered children, so a backtick span inside it is
+      // a `<code>` inside a `<code>`. Pairing with the NEXT close ended the outer
+      // region early and left the rest of the FileRef outside every region.
+      const html = renderWikiHtml("<FileRef>`a` [[Claude Code]] `b`</FileRef>", resolve);
+      expect(html).toBe('<code class="fileref"><code>a</code> [[Claude Code]] <code>b</code></code>');
+    });
+
+    test("a mid-line fence delimiter: the renderer joins the two sides onto ONE line", () => {
+      // `parseBlocks` swaps the fence for a placeholder, so the text before the
+      // opener and after the closer end up on one line where two lone backticks
+      // pair — a line-wise scan of the body sees neither.
+      const html = renderWikiHtml("a ` ```\ncode\n``` [[Claude Code]] ` b", resolve);
+      expect(html).not.toContain("wiki-link");
+      expect(html).toContain("[[Claude Code]]");
+    });
+  });
+
+  test("nothing leaks: no sentinel and no raw NUL reach the page", () => {
+    const html = renderWikiHtml(
+      "[[Claude Code]]\n\n```ts\nconst m = [[1,2,3]];\n```\n\n`[[Claude Code]]`",
+      resolve,
+    );
+    expect(html).not.toContain("\u0000");
+    expect(html).not.toContain("WIKIPAGELINK");
+  });
 });

@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { test, expect, describe } from "bun:test";
 import { renderAskAnswerHtml, renderResearchAnswerHtml } from "./ask-render.ts";
 import { formatTelegramHtml } from "../bot/telegram-format.ts";
 import { formatSlackMrkdwn } from "../slack/slack-format.ts";
@@ -170,9 +170,10 @@ test("a citation with no relPath emits the marker byte-identically to before", (
  * restore missed, a raw U+0000 was served, and `arr[1]` was DESTROYED rather
  * than merely mis-colored. `highlight.ts`'s SENTINEL rule keeps it opaque.
  *
- * NB a marker inside a fence is still LINKIFIED (the parking runs over the whole
- * answer, fences included) — that is pre-existing and not what this pins. What it
- * pins is that nothing leaks and nothing is lost.
+ * The parking pass SKIPS code now, so a marker inside a fence is no longer
+ * linkified at all — see the sibling test below, which pins that. This one keeps
+ * pinning the property that has to hold either way: nothing leaks and nothing is
+ * lost.
  */
 test("a citation-shaped marker inside a ts fence survives rendering", () => {
   const citations = [
@@ -182,10 +183,43 @@ test("a citation-shaped marker inside a ts fence survives rendering", () => {
 
   expect(html).not.toContain("\u0000");
   expect(html).not.toContain("ASKCITE");
-  // The marker resolved to the citation chip on both sides of the answer…
-  expect(html.match(/wiki-ask-cite/g)?.length).toBe(2);
+  // The PROSE marker resolved to a citation chip; the one in the fence did not.
+  expect(html.match(/wiki-ask-cite/g)?.length).toBe(1);
   // …and every character of the fence body is still there, in order.
   expect(html).toContain("const");
   expect(html).toContain("arr");
   expect(html.replace(/<[^>]*>/g, "")).toContain("const v = arr[1];");
+});
+
+/**
+ * `[1]` is ordinary syntax in almost every language an answer quotes, so the
+ * unscoped parking pass turned `arr[1]` inside a fence into a clickable citation
+ * and deleted the subscript from the code's own text. Same guard, same reason and
+ * same acceptance as the wikilink half in `render.test.ts`: a fence's text is the
+ * bytes the answer said.
+ */
+describe("an [n] marker inside code is CODE", () => {
+  const citations = [
+    { title: "Page one", pageName: "Page One", pageRelPath: "p.md", url: "", snippet: "" },
+  ] as unknown as Citation[];
+  const fenceText = (html: string) =>
+    html.replace(/^[\s\S]*?<code[^>]*>/, "").replace(/<\/code>[\s\S]*$/, "").replace(/<[^>]*>/g, "");
+
+  test("an in-range marker in a fence stays literal, and the prose one still links", () => {
+    const html = renderAskAnswerHtml("Prose [1].\n\n```ts\nconst v = arr[1];\n```", citations);
+    expect(html.match(/wiki-ask-cite/g)?.length).toBe(1);
+    expect(fenceText(html)).toBe("const v = arr[1];");
+  });
+
+  test("CRLF too — the citation path had the identical hole", () => {
+    const html = renderAskAnswerHtml("Hi [1].\r\n\r\n```ts\r\nconst v = arr[1];\r\n```\r\n", citations);
+    expect(html.match(/wiki-ask-cite/g)?.length).toBe(1);
+    expect(fenceText(html)).toBe("const v = arr[1];");
+  });
+
+  test("an inline code span is protected too", () => {
+    const html = renderAskAnswerHtml("Read `arr[1]` and cite [1].", citations);
+    expect(html).toContain("<code>arr[1]</code>");
+    expect(html.match(/wiki-ask-cite/g)?.length).toBe(1);
+  });
 });

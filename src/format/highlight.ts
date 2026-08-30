@@ -55,15 +55,28 @@ type Rule = readonly [TokenClass | null, RegExp];
 /**
  * ⚠️ FIRST rule in every grammar, and it must stay first.
  *
- * `src/wiki/render.ts` and `src/wiki/ask-render.ts` park a `[[wikilink]]` / a
- * `[n]` citation as a \u0000-delimited sentinel BEFORE calling `formatWebHtml`, and
- * restore it with a regex over the RENDERED HTML. A fence body can contain one —
- * `arr[1]` inside an Ask answer's citation range, `[[1,2,3]]` in a nested-array
- * literal — and any rule that matches part of it (the C-family capitalized-type
- * heuristic matches `WIKIPAGELINK0`) SPLITS it across a span, so the restore
- * misses, a raw U+0000 is served, and the source text is destroyed rather than
- * merely mis-colored. Matching the whole sentinel with a `null` class keeps it in
- * one plain run, byte-identical, where the restore regex can still find it.
+ * `src/wiki/render.ts` and `src/wiki/ask-render.ts` park a `[[wikilink]]` / an
+ * `[n]` citation as a \u0000-delimited sentinel BEFORE calling `formatWebHtml`,
+ * and restore it with a regex over the RENDERED HTML. A fence body routinely
+ * contains one — `arr[1]` inside an Ask answer's citation range, `[[1,2,3]]` in a
+ * nested-array literal, a `[[wikilink]]` in a code sample — and any rule that
+ * matches PART of it (the C-family capitalized-type heuristic matches
+ * `WIKIPAGELINK0`) SPLITS it across a span, so the restore misses, a raw U+0000
+ * is served, and the source text is destroyed rather than merely mis-colored.
+ * Matching the whole sentinel with a `null` class keeps it in one plain run,
+ * byte-identical, where the restore regex can still find it.
+ *
+ * ⚠️ **A sentinel reaching a fence body is now the ORDINARY case, not the
+ * accident.** The restore decides per sentinel whether it landed inside a
+ * rendered `<code>` and puts the SOURCE TEXT back there instead of a link
+ * (`src/format/rendered-code.ts`) — which it can only do if the sentinel is
+ * still intact and still findable at that point. This rule is what makes that
+ * true. An earlier revision of this comment called it a backstop, on the premise
+ * that a markdown-side fence scanner kept sentinels out of fences; that scanner
+ * could not see the string the renderer parses and was replaced. Read this as
+ * the live defence.
+ *
+ * `highlight.test.ts` pins the round-trip directly.
  */
 /**
  * ⚠️ Must precede any rule with a VARIABLE-LENGTH LOOKBEHIND.
