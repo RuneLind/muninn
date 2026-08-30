@@ -132,19 +132,34 @@ export function renderedCodeRegions(html: string): RenderedCodeRegion[] {
  * a `diff-line` inside a `<code>` sits inside its parent and the binary search
  * walks past the parent.
  *
- * Touching spans are merged too (`start <= last.end`) — DEFENSIVE, and said so
- * rather than justified: measured over 1562 corpus pages, the renderer produces
- * zero touching and zero overlapping raw pairs outside the nested case above,
- * because two container bodies are always separated by at least a closing and an
- * opening tag. An earlier spelling of this comment justified the `<=` with
- * "adjacent code with nothing between it", a shape this renderer cannot emit.
- * It is kept because merging touching intervals is what makes the output
- * disjoint for ANY input, which is the property the search actually needs.
+ * TWO clauses here are DEFENSIVE rather than load-bearing, and both say so
+ * rather than being justified by a scenario. Measured over 1562 corpus pages —
+ * 72 043 raw regions — the adjacent-pair classes are `disjoint` and `nested`
+ * only: **zero** touching and **zero** partially-overlapping pairs, because two
+ * container bodies are always separated by at least a closing plus an opening
+ * tag. So:
+ *   · `start <= last.end` rather than `<` covers TOUCHING spans — unreachable
+ *     here. An earlier spelling justified it with "adjacent code with nothing
+ *     between it", a shape this renderer cannot emit.
+ *   · `Math.max(last.end, r.end)` rather than `r.end` covers a PARTIAL overlap,
+ *     where the absorbed span ends first — equally unreachable. Only the other
+ *     direction is pinned: `→ r.end` truncates a NESTED span's parent and
+ *     reddens the `<Diff>`-inside-`<FileRef>` test; `→ last.end` leaves the
+ *     suite green. A round-4 commit message claimed both directions redden;
+ *     they do not.
+ * Both are kept because merging touching and overlapping intervals is what makes
+ * the output disjoint for ANY input, which is the property `inRenderedCode`'s
+ * binary search actually needs — and an unreachable branch that upholds a stated
+ * invariant is cheaper than a reachable one that quietly does not.
  *
- * ⚠️ MUTATES the region objects it is given (`last.end = …`) and returns the
- * caller's own array when there is nothing to merge. Contained today — the one
- * caller builds the array locally and hands it over — and worth knowing before
- * this is reused.
+ * ⚠️ MUTATES the region objects it is given (`last.end = …`), and returns the
+ * caller's OWN array when handed fewer than two regions — the `length < 2`
+ * guard, not "when nothing merged". A fully disjoint input of two or more still
+ * returns a FRESH array holding the caller's objects, so identity is not a
+ * did-anything-change signal. (The first spelling of this line said "when there
+ * is nothing to merge", which is exactly the reuse a future caller would branch
+ * on and exactly the case where it is false.) Contained today — the one caller
+ * builds the array locally and hands it over.
  */
 function mergeRegions(regions: RenderedCodeRegion[]): RenderedCodeRegion[] {
   if (regions.length < 2) return regions;

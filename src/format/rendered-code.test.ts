@@ -197,11 +197,14 @@ describe("the region algebra — sorted AND disjoint", () => {
       "<FileRef>\n\n<Diff>\n\n```diff\n-a\n-b\n```\n\n</Diff>\n\nx\n\n</FileRef>\n\n```ts\ny\n```",
     );
     const regions = renderedCodeRegions(html);
-    // ⚠️ The label is compared against a LITERAL. The first spelling of this
-    // compared the same interpolation on both sides — `expect(X).toBe(X)`, which
-    // can never fail — sitting directly above the real assertion, where the next
-    // reader would have taken it for the labelled one and deleted the duplicate.
-    // A can't-fail line, in the round whose subject was can't-fail lines.
+    // ⚠️ `expect(cond, "why")` — the boolean is the assertion and the message is
+    // only a message. NOT the label-vs-literal idiom the sibling tests above use
+    // (`expect(\`diff:${…}\`).toBe("diff:true")`); the first spelling here tried
+    // that shape and got it wrong, comparing the same interpolation on BOTH sides
+    // — `expect(X).toBe(X)`, which can never fail — directly above the real
+    // assertion, where the next reader would have taken it for the labelled one
+    // and deleted the duplicate. If you are here to "restore the label", that is
+    // the line you would be restoring.
     expect(regions.length).toBeGreaterThan(1); // the loop must actually run
     for (let i = 1; i < regions.length; i++) {
       expect(
