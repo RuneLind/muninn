@@ -1312,55 +1312,83 @@ function withForm(
  * mark covers.
  */
 /**
- * Why the span `factSpanForm` finally settled on cannot be wrapped; null when it can.
+ * Whether the span `factSpanForm` settled on may be WRAPPED — the one authority on
+ * that question, written as an enumeration rather than as accumulated conditionals.
  *
- * The rescue gate validated the range `applyEdits` resolved. `factSpanForm` may then
- * SHRINK it — `longestLineRange` on a multi-line span — and the shrunk range was
- * never re-checked: a legitimately-grown, balanced `**Bold text\nmore**` was trimmed
- * to `**Bold text`, written to the page, and rendered as two literal asterisks with
- * the bold gone.
+ * This is the third spelling, and the first two are the argument for the shape.
+ * Round 1 asked "is the final span balanced in isolation" and refused every passage
+ * carrying `user_id`, `2 * 3` or a glob. Round 2 asked "did the TRIM change parity"
+ * and lost both corruption catches while inventing two more false refusals — an `*`
+ * list bullet, and a multi-line wikilink. Each round patched the finding in front of
+ * it. The state space is small, so here it is in full.
  *
- * **The comparison is against the PRE-TRIM span, never against zero.** An absolute
- * "even runs" rule was tried and is wrong for the same reason `collapsedRescueRisk`
- * compares against `old` rather than counting in isolation: an odd delimiter count
- * is not evidence of a cut construct. `user_id`, `2 * 3` and the glob `a*b` all
- * carry one — none is emphasis, and `formatWebHtml` renders each identically with
- * and without the mark — yet the absolute rule refused every passage containing one,
- * with a reason that was false. What matters is whether the TRIM changed anything:
- * the pre-trim range is already validated, so the trim is safe exactly when it
- * preserves per-delimiter run parity and does not move an edge into a delimiter.
+ * What can differ between the range `applyEdits` validated and the span that reaches
+ * this point, and what each implies:
  *
- * Consequently this only runs on a span `factSpanForm` actually adjusted. An
- * untrimmed span IS the validated range; re-judging it in isolation is what produced
- * the false refusals. That leaves a mark landing strictly inside a code span
- * untouched — still the filed follow-up `integrate-wikilink.test.ts` already names,
- * and deliberately not widened here.
+ *  1. NOTHING (the common case). The range is the validated one, and the rescue gate
+ *     already ruled on its interior — but NOT on where a mark would SIT. That is
+ *     rule A below, and it binds at every tier: an exact-tier quote needs no rescue
+ *     at all, so nothing else ever looks at it.
+ *  2. `expandOverWikilinks` GREW it to cover a whole `[[…]]`. Exempt from everything.
+ *     `renderWikiHtml` substitutes wikilinks over the raw body before any code
+ *     handling, so a `[[Page]]` inside backticks is a LIVE link and a link straddling
+ *     a backtick is the link the reader resolves — marking those whole, odd delimiter
+ *     count and all, is the documented behaviour (`src/web/CLAUDE.md`,
+ *     `integrate-wikilink.test.ts`). Refusing them trades durable damage — a link
+ *     target replaced by markup — for a cosmetic one.
+ *  3. `longestLineRange` TRIMMED it to one line, and/or `markableRange` stripped a
+ *     leading block marker. A trim can throw away the delimiter that balanced the
+ *     span (`**Bold text\nmore**` → `**Bold text`, written to the page as two literal
+ *     asterisks). That is rule B — and it compares against the PRE-trim range, never
+ *     against zero, because an odd delimiter count is not evidence of a cut: it is
+ *     evidence of a `_` in an identifier. Both sides have their leading block markers
+ *     stripped first, because `*` is a bullet AND an emphasis delimiter, so a trim
+ *     that removes `* ` changes the count without touching a construct.
  */
-function trimCutReason(
+function markSpanRefusal(
   body: string,
   span: FactSpan,
   pre: { start: number; end: number },
 ): string | null {
-  // ONLY the one-line trim. `expandOverWikilinks` also moves the edges, but it GROWS
-  // and carries its own rule — a `[[…]]` inside backticks is a live link the reader
-  // resolves, so marking it whole (odd backtick count and all) is the documented
-  // behaviour `integrate-wikilink.test.ts` pins. Comparing an expansion against the
-  // pre-expansion range refused exactly those.
+  // 2. A whole-wikilink expansion is exempt from both rules.
+  if (span.expandedOverLink) return null;
+
+  // A. Where the mark would SIT — every tier, every span. A body character just
+  //    outside the span that is an emphasis delimiter means the mark begins or ends
+  //    offset inside a construct: `Run \`<Fact…>bun test</Fact>\`` puts the tags
+  //    inside a code span, where they render as literal text AND where the
+  //    zone-aware `stripFactWrappers` cannot remove them — so the next integrate run
+  //    nests a second wrapper. `_alpha_` marked from `alpha` re-pairs its opener with
+  //    the `_` of a neighbouring `target="_blank"`.
+  if (EMPHASIS_DELIM_SET.has(body[span.start - 1] ?? "")) {
+    return "the marked passage would start inside markdown formatting";
+  }
+  if (EMPHASIS_DELIM_SET.has(body[span.end] ?? "")) {
+    return "the marked passage would end inside markdown formatting";
+  }
+
+  // B. What a TRIM threw away. Nothing was trimmed ⇒ nothing to compare.
   if (!span.truncated) return null;
-  const before = body.slice(pre.start, pre.end);
-  const after = body.slice(span.start, span.end);
+  const before = withoutLeadingBlockMarkers(body.slice(pre.start, pre.end));
+  const after = withoutLeadingBlockMarkers(body.slice(span.start, span.end));
   for (const d of EMPHASIS_DELIMS) {
     if (countRuns(after, d) % 2 !== countRuns(before, d) % 2) {
       return "the passage was trimmed to one line, which would cut through markdown formatting";
     }
   }
-  // There is deliberately NO neighbour test here to pair with the parity one. A trim
-  // is `longestLineRange`, which returns a range INSIDE one line, so an edge it moved
-  // sits at a line boundary and its neighbour is the `\n` (or, past a stripped list
-  // marker, the space). Neither is a delimiter, so the test would be dead code with a
-  // confident comment on it — which is the shape a review pass just spent a round
-  // removing elsewhere in this file.
   return null;
+}
+
+/** Every line's leading list/quote/heading marker removed — the SAME shape
+ *  `longestLineRange`/`markableRange` strip. Applied to both sides of rule B's parity
+ *  comparison because `*` is a bullet as well as an emphasis delimiter: a trim that
+ *  drops `* ` from the front of a line changes the `*` count without cutting any
+ *  construct, and the comparison would read that as corruption. */
+function withoutLeadingBlockMarkers(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => line.replace(LEADING_BLOCK_MARKER_RE, ""))
+    .join("\n");
 }
 
 function markReason(span: FactSpan): string {
@@ -1632,7 +1660,7 @@ export function annotateEdits(input: AnnotateEditsInput): AnnotateEditsResult {
     // The LAST word on markup safety, and only about what `factSpanForm` CHANGED:
     // the rescue gate already validated the range it was handed, so re-judging an
     // untrimmed span in isolation only invents refusals (see `trimCutReason`).
-    const cut = trimCutReason(body, span, { start: o.start, end: o.end });
+    const cut = markSpanRefusal(body, span, { start: o.start, end: o.end });
     if (cut) {
       dropped.push({ edit: o.edit, reason: cut });
       continue;

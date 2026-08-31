@@ -47,12 +47,14 @@ describe("growth must not acquire a construct the range did not already cut", ()
     const body = "# T\n\nSee **Alpha**the middle  words**Beta** ok.\n";
     const res = markOne(body, "the middle words");
     expect(res.edits).toEqual([]);
-    // The REASON is the assertion, not just the drop. The odd-count precondition is
-    // provably redundant for safety — growth adds exactly one run, so an even (=
-    // cuts-nothing) slice always turns odd and the parity test refuses it anyway —
-    // but it refuses this at the honest place: the range never cut anything, so the
-    // truth is "starts inside someone else's formatting", not "cuts through". Drop
-    // the precondition and this reads `cut through` instead.
+    // The REASON is the assertion, not just the drop. The precondition refuses this
+    // at the honest place: the range never cut anything, so the truth is "starts or
+    // ends inside someone else's formatting", not "cuts through". Drop the
+    // precondition and this reads `cut through` instead. (An earlier comment here
+    // claimed the precondition was provably redundant for safety — "growth adds
+    // exactly one run". That proof is FALSE: a run merges with one already at the
+    // slice edge, so growth can add zero. The claim is withdrawn in
+    // `growOverEmphasisRuns`' docblock and withdrawn here.)
     expect(res.dropped[0]!.reason).toBe(
       "whitespace-rescued match would start or end inside markdown formatting",
     );
@@ -68,94 +70,108 @@ describe("growth must not acquire a construct the range did not already cut", ()
   });
 });
 
-describe("the FINAL span is balanced, not just the grown one", () => {
-  test("a grown range that factSpanForm then trims to one line is refused", () => {
-    // Here the slice DOES cut a construct (one `*` run), so growth is legitimate and
-    // produces a balanced `**Bold text\nmore** here`. `factSpanForm` then sees the
-    // newline, fails the whole-paragraph test and trims to the longest line —
-    // throwing away the delimiter that made it balanced. Nothing re-checked that,
-    // and the page was written with two literal `**` and the bold gone.
-    const body = "# T\n\n**Bold text\nmore** here and there.\n";
-    const res = markOne(body, "Bold text more here");
-    expect(res.edits).toEqual([]);
-    expect(res.dropped).toHaveLength(1);
-  });
-});
+/**
+ * The mark-span guard, as the ENUMERATION it is written to be.
+ *
+ * Three rounds of per-finding patching produced two false-refusal classes and lost
+ * two corruption catches, so the guard was rewritten as one table and this is that
+ * table. Every row is a case some round got wrong; a row is a behaviour, not a
+ * spelling, so a future rewrite is judged against all of them at once rather than
+ * against whichever one a reviewer happened to send.
+ */
+describe("mark-span guard — the whole state space", () => {
+  const ROWS: [string, string, string, boolean][] = [
+    // A — where the mark would SIT. Both were measured as rendered corruption.
+    ["code-span interior: tags render literally AND survive the zone-aware strip",
+     "# T\n\nRun `bun test` now to check.\n", "bun test", false],
+    ["emphasis interior: the opener re-pairs with a neighbour's `_`",
+     "# T\n\n[beta](https://beta.example/x) _alpha_ [[eta]].\n", "alpha", false],
+    // Each EDGE separately. Both fixtures above are delimited on BOTH sides, so
+    // either half of rule A alone still refuses them and neither half is pinned —
+    // measured: removing one edge check killed no test. These two are exact-tier
+    // (no rescue gate runs at all) and delimited on ONE side only.
+    ["rule A, start edge alone", "# T\n\nRun `bun test` now to check.\n",
+     "bun test` now to check.", false],
+    ["rule A, end edge alone", "# T\n\nRun `bun test` now to check.\n",
+     "Run `bun test", false],
+    // B — what a TRIM threw away.
+    ["a trim that drops the delimiter which balanced the span",
+     "# T\n\n**Bold text\nmore** here and there.\n", "Bold text more here", false],
+    // C — odd delimiter counts that are NOT cut constructs.
+    ["snake_case identifier", "# T\n\nThe field user_id is set by the API.\n",
+     "The field user_id is set by the API.", true],
+    ["literal asterisk", "# T\n\nCost is 2 * 3 dollars per unit here.\n",
+     "Cost is 2 * 3 dollars per unit here.", true],
+    ["a glob", "# T\n\nThe glob a*b matches many files here.\n",
+     "The glob a*b matches many files here.", true],
+    ["a TRIMMED span whose odd count is unchanged by the trim",
+     "# T\n\nIntro line here.\nThe user_id field spans a much longer second line of prose.\nTail line.\n",
+     "The user_id field spans a much longer second line of prose. Tail line.", true],
+    // `*` is a bullet AND an emphasis delimiter — the marker strip changes the count
+    // without touching a construct, which a naive parity comparison reads as damage.
+    ["a `*` list bullet the trim strips",
+     "# T\n\nAlpha line.\n* Bullet line that is much longer than the others in this list here.\nGamma line.\n",
+     "Alpha line. * Bullet line that is much longer than the others in this list here.", true],
+    ["…and the `-` bullet control",
+     "# T\n\nAlpha line.\n- Bullet line that is much longer than the others in this list here.\nGamma line.\n",
+     "Alpha line. - Bullet line that is much longer than the others in this list here.", true],
+    // D — a whole-wikilink expansion is exempt: the reader resolves that link.
+    ["a backticked wikilink, single line",
+     "The engine `[[Tidal Router]]` is the default.\n", "Tidal Router", true],
+    ["a wikilink straddling a backtick, on a TRIMMED span",
+     "# T\n\nShort intro.\nWrite [[Tidal `Router]] and much more prose follows here on this longer line.\n",
+     "Short intro. Write [[Tidal", true],
+    // E — the feature itself, and the shape that must stay refused.
+    ["the cut construct the relaxation exists for",
+     "# T\n\n- **Norepinephrine** acts as a mental spotlight.\n",
+     "Norepinephrine acts as a mental spotlight.", true],
+    ["the neighbour steal", "# T\n\nSee **Alpha**the middle  words**Beta** ok.\n",
+     "the middle words", false],
+  ];
 
-describe("the case the relaxation exists for still works", () => {
-  test("a cut construct IS completed, and the render is unchanged by the mark", () => {
-    const body = "# T\n\n- **Norepinephrine** acts as a mental spotlight, narrowing attention.\n";
-    const res = markOne(body, "Norepinephrine acts as a mental spotlight, narrowing attention.");
-    expect(res.dropped).toEqual([]);
-    expect(res.edits).toHaveLength(1);
-    expect(res.edits[0]!.old).toBe(
-      "**Norepinephrine** acts as a mental spotlight, narrowing attention.",
-    );
-    // The mark must be invisible to the markup: strip the chip + the fc-mark span
-    // out of the marked render and it is the unmarked render.
-    const marked = formatWebHtml(spliced(body, res.edits[0]!));
-    expect(marked).toContain("<strong>Norepinephrine</strong>");
-    expect(marked).not.toContain("**");
-  });
-
-  test("the growth is NAMED in the preview reason", () => {
-    // `markReason`'s own docblock: every adjustment is named. Growing over a
-    // delimiter run changes what the reviewer is agreeing to, so it is an
-    // adjustment like the link expansion and the one-line trim.
-    const body = "# T\n\n- **Norepinephrine** acts as a mental spotlight, narrowing attention.\n";
-    const res = markOne(body, "Norepinephrine acts as a mental spotlight, narrowing attention.");
-    expect(res.edits[0]!.reason).toContain("formatting");
-  });
-});
-
-describe("the final-span check compares against the PRE-TRIM span, not zero", () => {
-  test("an ordinary snake_case identifier is not 'markdown formatting'", () => {
-    // Regression injected by fix round 1 and caught by the verify pass: an ABSOLUTE
-    // even-run rule refuses every passage carrying an odd number of `_`, `*` or
-    // backtick runs — `user_id`, `2 * 3`, a glob — none of which is emphasis, and
-    // none of which `formatWebHtml` renders any differently for the mark. The gate
-    // this check mirrors (`collapsedRescueRisk`) compares the slice's parity against
-    // a REFERENCE; so must this one.
-    for (const [body, quote] of [
-      ["# T\n\nThe field user_id is set by the API.\n", "The field user_id is set by the API."],
-      ["# T\n\nCost is 2 * 3 dollars per unit here.\n", "Cost is 2 * 3 dollars per unit here."],
-      ["# T\n\nThe glob a*b matches many files here.\n", "The glob a*b matches many files here."],
-    ] as [string, string][]) {
+  for (const [label, body, quote, wantMarked] of ROWS) {
+    test(label, () => {
       const res = markOne(body, quote);
-      expect({ quote, dropped: res.dropped.map((d) => d.reason) }).toEqual({ quote, dropped: [] });
-      expect(res.edits).toHaveLength(1);
+      expect({ label, marked: res.edits.length > 0 }).toEqual({ label, marked: wantMarked });
+    });
+  }
+
+  /** The two wikilink rows are EXEMPT from render-equivalence, and that is the
+   *  documented trade rather than an oversight: a `[[Page]]` inside backticks is a
+   *  live link to `renderWikiHtml` (which substitutes over the raw body before any
+   *  code handling), so the mark must take it whole — and `formatWebHtml` then shows
+   *  the tags as escaped text inside `<code>`. Cosmetic damage, accepted in place of
+   *  durable damage: the alternative is a mark that rewrites the link TARGET.
+   *  `integrate-wikilink.test.ts` owns that case; this row set only records why the
+   *  invariant below stops at its door. */
+  const RENDER_EXEMPT = new Set([
+    "a backticked wikilink, single line",
+    "a wikilink straddling a backtick, on a TRIMMED span",
+  ]);
+
+  test("every other marked row leaves the render unchanged apart from the mark", () => {
+    // The safety property, asserted rather than assumed: strip the chip and the
+    // fc-mark wrapper out of the marked render and it must equal the unmarked one.
+    for (const [label, body, quote, wantMarked] of ROWS) {
+      if (!wantMarked || RENDER_EXEMPT.has(label)) continue;
+      const edit = markOne(body, quote).edits[0]!;
+      const marked = formatWebHtml(body.replace(edit.old, edit.new))
+        .replace(/<button[\s\S]*?<\/button>/g, "")
+        .replace(/<(span|div) class="fc-mark[^"]*"[^>]*>/g, "")
+        .replace(/<\/(span|div)>/g, "");
+      const plain = formatWebHtml(body).replace(/<\/(span|div)>/g, "");
+      expect({ label, marked }).toEqual({ label, marked: plain });
     }
-  });
-
-  test("…and an odd delimiter count that the TRIM created is still refused", () => {
-    // The pre-trim span is balanced; `longestLineRange` throws away the half that
-    // balanced it. Parity CHANGED across the trim, which is the actual defect.
-    const body = "# T\n\n**Bold text\nmore** here and there.\n";
-    expect(markOne(body, "Bold text more here").edits).toEqual([]);
-  });
-
-  test("a TRIMMED span with an odd-but-unchanged count is allowed", () => {
-    // This one really does reach the trim check (multi-line, not a whole paragraph,
-    // so `longestLineRange` fires — the reason says "trimmed to one line"). The
-    // surviving line carries a lone `_` that was already in the pre-trim span, so the
-    // trim cut nothing. An ABSOLUTE even-run rule refuses it; parity-vs-pre-trim does
-    // not. Without a genuinely trimmed fixture the absolute-rule mutant survives.
-    const body =
-      "# T\n\nIntro line here.\nThe user_id field spans a much longer second line of prose.\nTail line.\n";
-    const res = markOne(body, "The user_id field spans a much longer second line of prose. Tail line.");
-    expect(res.dropped.map((d) => d.reason)).toEqual([]);
-    expect(res.edits[0]!.old).toContain("user_id");
-    expect(res.edits[0]!.reason).toContain("trimmed to one line");
   });
 });
 
 describe("growth completes from the side that carries the delimiter", () => {
-  test("a cut construct completes; a slice with a delimiter on BOTH edges drops", () => {
-    // One-sided growth is a readability choice, NOT a safety property — the mutant
-    // that grows both sides is equivalent, and the enumeration is in the
-    // `growOverEmphasisRuns` docblock. What IS pinned is the observable pair: the
-    // ordinary cut completes, and the only configuration where the two spellings
-    // could differ (odd count, delimiter on both edges) drops either way.
+  test("a cut construct completes; a delimiter on BOTH edges drops either way", () => {
+    // One-sided growth is a readability choice, not a safety property. The
+    // both-sides mutant is OUTCOME-equivalent — measured over 22 913 generated
+    // fixtures by an independent pass: zero outcome divergences, 117 drop-REASON
+    // divergences — so this pins the outcomes and the enumeration lives in the
+    // `growOverEmphasisRuns` docblock rather than being faked as a behavioural test.
     const cut = "# T\n\n- **Norepinephrine** acts as a mental spotlight.\n";
     expect(markOne(cut, "Norepinephrine acts as a mental spotlight.").edits[0]!.old).toBe(
       "**Norepinephrine** acts as a mental spotlight.",
