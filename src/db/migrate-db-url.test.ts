@@ -1,4 +1,4 @@
-import { test, expect, describe, beforeAll, afterAll } from "bun:test";
+import { test, expect, describe, beforeAll, afterAll, setDefaultTimeout } from "bun:test";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import { TEST_DATABASE_URL } from "../test/test-db-url.ts";
@@ -17,6 +17,20 @@ import { TEST_DATABASE_URL } from "../test/test-db-url.ts";
  * Driven as a PROCESS because the resolution lives in the `import.meta.main`
  * block; `runMigrations` takes the URL as an argument and never sees an env var.
  */
+/**
+ * Each case SPAWNS `bun db/migrate.ts --status` and opens Postgres connections,
+ * so bun's 5s per-test default is not a budget these can live inside on a loaded
+ * machine. Measured on this repo's CI runner: two consecutive failures at
+ * 5000.04ms and 5001.04ms — a timeout, not an assertion, and green on every
+ * re-run and on every developer machine, i.e. the local-green/CI-red shape.
+ *
+ * Set in the FILE rather than as a `--timeout` flag in package.json, for the
+ * same reason `db/provision.test.ts` does it: running `bun test <this file>`
+ * directly is how these cases get iterated on, and a flag in the script does not
+ * travel with them.
+ */
+setDefaultTimeout(30_000);
+
 const SCRATCH_DB = "muninn_dburl_test";
 
 /** Swap the database NAME, keeping any `?sslmode=` tail — the same helper (and
