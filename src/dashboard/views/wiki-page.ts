@@ -57,6 +57,12 @@ export async function renderWikiPage(opts?: {
    *  click-block of both the write and the egress affordances. Presentation only
    *  — every server seam re-checks the root. */
   readonlyWiki?: boolean;
+  /** Absolute filesystem root the selected wiki is SERVED from — the same value
+   *  the read-only check is keyed on. Injected as `__WIKI_ROOT__` so the
+   *  breadcrumb's ⧉ Copy path button can hand over `root + relPath`. Null when
+   *  the request names no servable wiki, and the button then copies the relPath
+   *  alone (`wikiPagePath`). */
+  wikiRoot?: string | null;
 }): Promise<string> {
   const clientScript = await wikiClientScript();
   const wikis = opts?.wikis ?? [];
@@ -68,6 +74,7 @@ export async function renderWikiPage(opts?: {
   const gardener = opts?.gardener ?? true;
   const askBot = opts?.askBot ?? null;
   const readonlyWiki = opts?.readonlyWiki ?? false;
+  const wikiRoot = opts?.wikiRoot ?? null;
   // "Answered by …" line under the Ask hint — who synthesizes this wiki's
   // answers and why (wiki owner vs the shared research-bot fallback).
   const askBotLine = askBot
@@ -508,8 +515,42 @@ export async function renderWikiPage(opts?: {
       flex-shrink: 0; display: flex; align-items: center; gap: 8px;
       padding: 9px 24px; border-bottom: 1px solid var(--border-primary);
       font-size: 12px; color: var(--text-muted);
+      /* The actions WRAP rather than crush the trail. ".wiki-bc-trail" is the
+         row's only shrinkable item, so every action added to this row comes out
+         of the trail's width — with a LABELLED copy button (~104px, measured as
+         the difference between main and the first cut at 1280) the trail
+         rendered at 27px at 1280 and 0px at 800, where the last action hung 72px
+         past the pane and the document scrolled sideways.
+
+         ⚠️ THE RULE, and it is enforced by measurement rather than by a list of
+         widths: the trail keeps a legible width everywhere, the row never
+         overflows its pane, and it wraps ONLY where a single line would leave
+         the trail cramped. "e2e/wiki-copy-path.spec.ts" sweeps 760–1920px in
+         both selection states — both states because ✨ Explain and ✓ Fact check
+         are hidden until the reader selects text, so any measurement of the
+         resting row is of a row two items shorter than the one a reader
+         reaching for Explain sees; that axis was missed by every hand sweep,
+         mine and three reviewers'.
+
+         The no-wrap half is a COUNTERFACTUAL, not a width list: the spec forces
+         "nowrap", reads what the trail would have got, and only then decides
+         whether wrapping bought anything. That is what makes it portable —
+         where a flex row breaks depends on the platform's font metrics, and CI
+         proved it by failing on Linux at two widths that stay on one line on
+         macOS. Measured against that rule, each mutation shown to apply: a basis
+         of 0 fails 7 cases, 100 fails 1, 180 fails 3, 200 fails 4, 260 fails 5,
+         and removing flex-wrap fails 7 — while 120, 140 and 160 all pass. So the
+         spec brackets the basis from both sides without dictating one value.
+         Re-tune by changing it and running the spec; do not read a number out of
+         this comment, which is how three previous attempts went wrong. */
+      flex-wrap: wrap; row-gap: 7px;
     }
-    .wiki-bc-trail { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* "flex: 1 1 160px" rather than "flex: 1" (basis 0): with wrapping on, the
+       basis is what reserves the trail a legible width before anything wraps —
+       at basis 0 the trail is free to shrink toward nothing, which IS the 27px
+       case this fix exists for. "min-width: 0" keeps the ellipsis working inside
+       a flex item. The admissible band is the spec's, not this comment's. */
+    .wiki-bc-trail { flex: 1 1 160px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .wiki-bc-sep { color: var(--text-dim); margin: 0 5px; }
     .wiki-bc-cur { color: var(--text-secondary); }
     .wiki-bc-date { color: var(--text-dim); flex-shrink: 0; }
@@ -525,15 +566,25 @@ export async function renderWikiPage(opts?: {
        is always visible; the selection-gated one rides the same show/hide. */
     /* …and "💬 Discuss" (chat) and "📤 Share" (a pasteable post) share that
        treatment: all three are article-level actions on the same breadcrumb row. */
-    .wiki-bc-factcheck, .wiki-bc-discuss, .wiki-bc-share {
+    .wiki-bc-factcheck, .wiki-bc-discuss, .wiki-bc-share, .wiki-bc-copy {
       flex-shrink: 0; padding: 4px 11px; border-radius: 999px;
       background: transparent; color: var(--text-secondary);
       border: 1px solid var(--border-primary);
       font-size: 12px; font-weight: 600; line-height: 1; cursor: pointer; font-family: inherit;
     }
-    .wiki-bc-factcheck:hover, .wiki-bc-discuss:hover, .wiki-bc-share:hover {
+    .wiki-bc-factcheck:hover, .wiki-bc-discuss:hover, .wiki-bc-share:hover, .wiki-bc-copy:hover {
       background: var(--tint-neutral); color: var(--text-primary);
       border-color: color-mix(in srgb, var(--accent) 45%, var(--border-primary));
+    }
+    /* ⧉ Copy path is a utility, not one of the three article ACTIONS beside it:
+       quieter, and ICON-ONLY — the words cost the trail ~104px on a row where
+       the trail is the only thing that shrinks, and the tooltip says more than
+       they did (it names the path). The fixed width holds across ⧉ / ✓ / ✕ so a
+       click cannot shift the row; the glyph is bumped a little because a bare
+       symbol at 12px reads as a speck. */
+    .wiki-bc-copy {
+      color: var(--text-muted); font-weight: 500; font-size: 13px;
+      min-width: 30px; padding: 4px 8px; text-align: center;
     }
     .wiki-article-wrap { flex: 1; overflow-y: auto; padding: 24px 32px; }
     .wiki-article-head { margin-bottom: 18px; padding-bottom: 14px; border-bottom: 1px solid var(--border-primary); }
@@ -1322,6 +1373,10 @@ export async function renderWikiPage(opts?: {
     // wiki it must never write or send to a model. The picker navigates with a
     // full page load, so the flag is always the open wiki's.
     window.__WIKI_READONLY_WIKI__ = ${readonlyWiki ? "true" : "false"};
+    // The wiki's root on THIS host — what makes the breadcrumb's ⧉ Copy path
+    // yield a path an agent can open. A boot-time fact for the open wiki; the
+    // picker navigates with a full page load, so it cannot go stale in place.
+    window.__WIKI_ROOT__ = ${escJsonScript(wikiRoot)};
   </script>
   <script>
     ${clientScript}

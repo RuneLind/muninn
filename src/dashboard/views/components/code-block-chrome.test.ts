@@ -1,7 +1,6 @@
-import { afterEach, test, expect, describe } from "bun:test";
+import { test, expect, describe } from "bun:test";
 import {
   COMPONENT_FENCE_CHROME,
-  copyText,
   fenceLanguage,
   ownChromeSelector,
   shouldEnhanceFence,
@@ -106,113 +105,6 @@ describe("shouldEnhanceFence", () => {
     expect(shouldEnhanceFence(fakeEl({}), fakeEl({ text: "" }))).toBe(false);
     expect(shouldEnhanceFence(fakeEl({}), fakeEl({ text: "   \n\t " }))).toBe(false);
     expect(shouldEnhanceFence(fakeEl({}), fakeEl({ text: "SELECT 1;" }))).toBe(true);
-  });
-});
-
-/**
- * The `execCommand` path is not a legacy fallback here — `navigator.clipboard`
- * is unavailable on a page served over plain HTTP to anything but localhost,
- * which is exactly how this dashboard is reached over a tailnet. So it is the
- * PRIMARY path on the deployment that matters, and the e2e (which runs on
- * 127.0.0.1, a secure context) can never reach it.
- */
-describe("copyText", () => {
-  const g = globalThis as unknown as {
-    navigator?: unknown;
-    document?: unknown;
-  };
-  const realNavigator = g.navigator;
-  const realDocument = g.document;
-
-  function withEnv(opts: {
-    clipboard?: { writeText: (t: string) => Promise<void> };
-    execCommandResult?: boolean | (() => never);
-  }): { appended: number; removed: number; value: () => string } {
-    let value = "";
-    const box = { appended: 0, removed: 0 };
-    g.navigator = opts.clipboard ? { clipboard: opts.clipboard } : {};
-    g.document = {
-      createElement: () => ({
-        set value(v: string) {
-          value = v;
-        },
-        get value() {
-          return value;
-        },
-        setAttribute: () => {},
-        style: {},
-        select: () => {},
-      }),
-      body: {
-        appendChild: () => {
-          box.appended++;
-        },
-        removeChild: () => {
-          box.removed++;
-        },
-      },
-      execCommand: () => {
-        const r = opts.execCommandResult;
-        if (typeof r === "function") return r();
-        return r ?? true;
-      },
-    };
-    return { ...box, value: () => value, get appended() { return box.appended; }, get removed() { return box.removed; } } as never;
-  }
-
-  afterEach(() => {
-    g.navigator = realNavigator;
-    g.document = realDocument;
-  });
-
-  test("uses the async clipboard when it is available", async () => {
-    // Collected into an array rather than a `let`: TS narrows a `string | null`
-    // local to `null` when the only assignment is inside a callback it cannot
-    // see running, and `bun test` strips types so only tsc catches it.
-    const written: string[] = [];
-    withEnv({
-      clipboard: {
-        writeText: async (t: string) => {
-          written.push(t);
-        },
-      },
-    });
-    expect(await copyText("SELECT 1;")).toBe(true);
-    expect(written).toEqual(["SELECT 1;"]);
-  });
-
-  test("falls back to the textarea path when the clipboard API is absent", async () => {
-    const env = withEnv({ execCommandResult: true });
-    expect(await copyText("SELECT 1;")).toBe(true);
-    // The value really was staged for the copy, and the node was cleaned up.
-    expect(env.value()).toBe("SELECT 1;");
-    expect(env.appended).toBe(1);
-    expect(env.removed).toBe(1);
-  });
-
-  test("falls back when the clipboard API REJECTS (permission denied)", async () => {
-    const env = withEnv({
-      clipboard: {
-        writeText: async () => {
-          throw new Error("NotAllowedError");
-        },
-      },
-      execCommandResult: true,
-    });
-    expect(await copyText("SELECT 1;")).toBe(true);
-    expect(env.value()).toBe("SELECT 1;");
-  });
-
-  test("reports failure rather than throwing when both paths fail", async () => {
-    withEnv({ execCommandResult: false });
-    expect(await copyText("SELECT 1;")).toBe(false);
-    // …including when execCommand has been removed outright.
-    withEnv({
-      execCommandResult: () => {
-        throw new Error("execCommand is not a function");
-      },
-    });
-    expect(await copyText("SELECT 1;")).toBe(false);
   });
 });
 

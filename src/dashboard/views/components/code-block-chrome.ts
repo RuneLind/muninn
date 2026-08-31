@@ -51,12 +51,10 @@
  */
 
 import type { ComponentName } from "../../../format/markdown-ast.ts";
+import { COPIED_MS, copyText } from "./copy-path.ts";
 
 /** Marks a wrapped fence. Also the "already done" test. */
 const ENHANCED = "data-fence-enhanced";
-
-/** How long the button reads "Copied" before reverting. */
-const COPIED_MS = 1600;
 
 const COPY_ICON =
   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" ' +
@@ -152,39 +150,6 @@ export function shouldEnhanceFence(
   // button reported success while silently emptying the reader's clipboard.
   if (!(code.textContent ?? "").trim()) return false;
   return true;
-}
-
-/**
- * Copy `text`, resolving `true` on success.
- *
- * `navigator.clipboard` is unavailable on a page served over plain HTTP to
- * anything but localhost — which is exactly how this dashboard is reached over
- * a tailnet — so the `execCommand` path is the common case there, not a legacy
- * fallback.
- */
-export async function copyText(text: string): Promise<boolean> {
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch {
-    /* fall through to the textarea path */
-  }
-  try {
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.setAttribute("readonly", "");
-    ta.style.position = "fixed";
-    ta.style.opacity = "0";
-    document.body.appendChild(ta);
-    ta.select();
-    const ok = document.execCommand("copy");
-    document.body.removeChild(ta);
-    return ok;
-  } catch {
-    return false;
-  }
 }
 
 function setButtonState(btn: HTMLElement, state: "idle" | "done" | "failed"): void {

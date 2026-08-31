@@ -1150,8 +1150,11 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     // page whose client half thinks the wiki is writable while every route 403s.
     // An UNKNOWN name is served from no root at all, so it inherits nothing (see
     // `readonlyCandidateRoot`) — it renders the ordinary unknown-wiki page.
-    const readonlyRoot = readonlyCandidateRoot(entry, unknownWiki);
-    const readonlyWiki = readonlyRoot !== null && isReadonlyWikiRoot(readonlyRoot);
+    // Also what the breadcrumb's ⧉ Copy path button copies: the reader is where
+    // you decide a page needs an agent, and the path it needs is this root plus
+    // the page's relPath. Every registered wiki, not just the one `/plans` reads.
+    const servedRoot = readonlyCandidateRoot(entry, unknownWiki);
+    const readonlyWiki = servedRoot !== null && isReadonlyWikiRoot(servedRoot);
     // Resolved synthesis bot for the Ask tab's "Answered by …" line — same
     // owner-routing the ask/digest handlers use, computed at render time so
     // the tab can say who will answer before a question is asked. Skipped on a
@@ -1192,6 +1195,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         // Read from the ROOT, not `entry.readonly`: the render and the seams then
         // answer the same question the same way even if the memo were stale.
         readonlyWiki,
+        wikiRoot: servedRoot,
       }),
     );
   });

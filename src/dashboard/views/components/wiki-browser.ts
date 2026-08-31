@@ -67,7 +67,17 @@ import {
   startReindex,
   type IndexCoverage,
 } from "./wiki-start-cards.ts";
-import { readActiveWikiName, withWikiParam } from "./wiki-param.ts";
+import { readActiveWikiName, readActiveWikiRoot, withWikiParam } from "./wiki-param.ts";
+import {
+  COPY_PATH_BTN_ID,
+  COPY_PATH_FAIL,
+  COPY_PATH_IDLE,
+  COPY_PATH_OK,
+  copyPathAriaLabel,
+  copyText,
+  flashCopyResult,
+  wikiPagePath,
+} from "./copy-path.ts";
 import { enhanceMermaid } from "./wiki-mermaid.ts";
 import { atlasBodyHtml, initAtlas } from "./wiki-atlas.ts";
 import { enhanceCodeTabs } from "./code-tabs.ts";
@@ -213,6 +223,10 @@ interface WikiPageDetail {
  *  which `wiki-start-cards.ts` re-uses for its un-wired default. Empty =
  *  default/env. */
 const WIKI = readActiveWikiName();
+/** Where this wiki lives ON DISK — injected by the server, `null` when it named
+ *  no servable root. Only the breadcrumb's ⧉ Copy path reads it, and like `WIKI`
+ *  it is a boot-time fact: switching wiki is a full navigation. */
+const WIKI_ROOT = readActiveWikiRoot();
 /** Append the active `wiki` param to a URL so every /api/wiki/* fetch stays on-wiki. */
 function withWiki(url: string): string {
   return withWikiParam(url, WIKI);
@@ -570,6 +584,51 @@ function loadCoverageFooter(): void {
     });
 }
 
+/**
+ * ⧉ Copy path — the open page's path ON DISK, for pasting into an agent brief.
+ *
+ * The same control the plan drawer got, on the surface where the decision is
+ * actually made: you read a page, decide it needs an agent, and the one string
+ * you then need is the one the breadcrumb does NOT show — its trail's leaf is
+ * the page's TITLE, not its filename. Absolute where the server named a root,
+ * the relPath alone otherwise (`wikiPagePath`) — and every registered wiki has
+ * a root, not just mimir.
+ *
+ * The path is carried on the button rather than re-derived at click time, so the
+ * string in the tooltip and the string on the clipboard cannot be different
+ * pages — which is the whole failure mode of a control that reads "the current
+ * article" from module state a navigation may already have moved.
+ */
+function copyPathBtnHtml(m: WikiListing): string {
+  const full = wikiPagePath(WIKI_ROOT, m.relPath);
+  const aria = copyPathAriaLabel(full);
+  // Icon-only: the `title` is the whole discoverability story AND names the exact
+  // string, which the dropped "Copy path" label never did.
+  return (
+    `<button class="wiki-bc-copy" id="${COPY_PATH_BTN_ID}" type="button" ` +
+    `data-copy-path="${esc(full)}" title="${esc(full ? "Copy " + full : "Nothing to copy")}" ` +
+    `aria-label="${esc(aria)}">${COPY_PATH_IDLE}</button>`
+  );
+}
+
+/** Run the copy and report it IN the button — the only feedback a clipboard
+ *  write can give, and the only way the tailnet `execCommand` path's failure is
+ *  visible at all. A missing path reports "Copy failed" rather than returning
+ *  silently: `writeText("")` RESOLVES, so copying nothing would report success
+ *  while emptying the reader's clipboard, and a bare `return` is a control that
+ *  looks live and does nothing — the one outcome with no feedback at all. */
+function copyArticlePath(btn: HTMLButtonElement): void {
+  const full = btn.getAttribute("data-copy-path") || "";
+  const idle = {
+    text: COPY_PATH_IDLE,
+    ariaLabel: copyPathAriaLabel(full),
+    okText: COPY_PATH_OK,
+    failText: COPY_PATH_FAIL,
+  };
+  if (!full) return flashCopyResult(btn, false, idle);
+  void copyText(full).then((ok) => flashCopyResult(btn, ok, idle));
+}
+
 // ── Breadcrumb bar (above the article) ────────────────────────────────
 // Shows "wiki / folder / page · updated" for the open page and hosts the
 // Explain affordance (a button shown only while a selection exists — see the
@@ -630,6 +689,13 @@ function renderBreadcrumb(m: WikiListing): void {
     crumbs.join('<span class="wiki-bc-sep">/</span>') +
     "</div>" +
     dateHtml +
+    // ⧉ Copy path — first in the action cluster because it is about the trail to
+    // its left, not about the page's content. Deliberately NOT in either
+    // read-only selector list (`wiki-readonly-client.ts`): it spends no model
+    // call, writes nothing and reaches no network at all, so it stays live on
+    // the wiki this instance may only read — which is the one whose paths get
+    // pasted into briefs most.
+    copyPathBtnHtml(m) +
     // Selection-gated actions (hidden until a selection exists — see maybeShowExplainPill).
     '<button class="wiki-bc-explain" id="wikiExplainBtn" style="display:none">✨ Explain</button>' +
     '<button class="wiki-bc-factcheck" id="wikiFactcheckBtn" style="display:none">✓ Fact check</button>' +
@@ -3743,6 +3809,11 @@ document.addEventListener("click", (e) => {
   // bundle: this file IS a bundle, and doing both would put two copies of the
   // module (two states, two listener sets) on the same page.
   else if (t.closest("#" + SHARE_BTN_ID)) openArticleShare();
+  // ⧉ Copy path — delegated like its neighbours because the breadcrumb's
+  // innerHTML is rewritten on every navigation, which would drop a direct
+  // listener on the second page the reader opens.
+  else if (t.closest("#" + COPY_PATH_BTN_ID))
+    copyArticlePath(t.closest("#" + COPY_PATH_BTN_ID) as HTMLButtonElement);
   else if (t.closest("#wikiFactcheckAppendBtn")) submitFactcheckAppend();
   // ↻ claim retry — the row buttons are injected into the answer body by a DOM
   // pass, so they are delegated by ATTRIBUTE rather than by id.
