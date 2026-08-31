@@ -68,7 +68,14 @@ import {
   type IndexCoverage,
 } from "./wiki-start-cards.ts";
 import { readActiveWikiName, readActiveWikiRoot, withWikiParam } from "./wiki-param.ts";
-import { copyText, wikiPagePath } from "./copy-path.ts";
+import {
+  COPY_PATH_BTN_ID,
+  COPY_PATH_IDLE,
+  copyPathAriaLabel,
+  copyText,
+  flashCopyResult,
+  wikiPagePath,
+} from "./copy-path.ts";
 import { enhanceMermaid } from "./wiki-mermaid.ts";
 import { atlasBodyHtml, initAtlas } from "./wiki-atlas.ts";
 import { enhanceCodeTabs } from "./code-tabs.ts";
@@ -575,12 +582,6 @@ function loadCoverageFooter(): void {
     });
 }
 
-/** The breadcrumb's ⧉ Copy path button — the id the render, the click delegate
- *  and the e2e spec all key on. */
-const COPY_PATH_BTN_ID = "wikiCopyPathBtn";
-/** Label at rest; the click swaps it for a verdict and swaps it back. */
-const COPY_PATH_IDLE = "⧉ Copy path";
-
 /**
  * ⧉ Copy path — the open page's path ON DISK, for pasting into an agent brief.
  *
@@ -598,27 +599,25 @@ const COPY_PATH_IDLE = "⧉ Copy path";
  */
 function copyPathBtnHtml(m: WikiListing): string {
   const full = wikiPagePath(WIKI_ROOT, m.relPath);
+  const aria = copyPathAriaLabel(full);
   return (
     `<button class="wiki-bc-copy" id="${COPY_PATH_BTN_ID}" type="button" ` +
-    `data-copy-path="${esc(full)}" title="Copy ${esc(full)}" ` +
-    `aria-label="Copy this page's file path: ${esc(full)}">${COPY_PATH_IDLE}</button>`
+    `data-copy-path="${esc(full)}" title="${esc(full ? "Copy " + full : "Nothing to copy")}" ` +
+    `aria-label="${esc(aria)}">${COPY_PATH_IDLE}</button>`
   );
 }
 
 /** Run the copy and report it IN the button — the only feedback a clipboard
  *  write can give, and the only way the tailnet `execCommand` path's failure is
- *  visible at all. */
+ *  visible at all. A missing path reports "Copy failed" rather than returning
+ *  silently: `writeText("")` RESOLVES, so copying nothing would report success
+ *  while emptying the reader's clipboard, and a bare `return` is a control that
+ *  looks live and does nothing — the one outcome with no feedback at all. */
 function copyArticlePath(btn: HTMLButtonElement): void {
   const full = btn.getAttribute("data-copy-path") || "";
-  if (!full) return;
-  void copyText(full).then((ok) => {
-    btn.textContent = ok ? "Copied" : "Copy failed";
-    setTimeout(() => {
-      // A navigation within the window replaces the breadcrumb wholesale, so the
-      // button this closure holds is detached; writing into it is pointless.
-      if (btn.isConnected) btn.textContent = COPY_PATH_IDLE;
-    }, 1500);
-  });
+  const idle = { text: COPY_PATH_IDLE, ariaLabel: copyPathAriaLabel(full) };
+  if (!full) return flashCopyResult(btn, false, idle);
+  void copyText(full).then((ok) => flashCopyResult(btn, ok, idle));
 }
 
 // ── Breadcrumb bar (above the article) ────────────────────────────────

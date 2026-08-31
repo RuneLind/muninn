@@ -117,7 +117,7 @@ import {
   type WriteCapability,
 } from "../../../plans/board-writes.ts";
 import { getJson } from "./client-runtime.ts";
-import { copyText, wikiPagePath } from "./copy-path.ts";
+import { COPIED_MS, copyText, flashCopyResult, wikiPagePath } from "./copy-path.ts";
 import type { BoardPayload } from "../../../plans/board.ts";
 import type { PlanPriority, PlanStatus } from "../../../plans/constants.ts";
 
@@ -1817,26 +1817,27 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
   /**
    * Copy the plan's ON-DISK path — the string you paste into an agent brief.
    * Absolute (root + relPath) when the payload named the root; the relPath
-   * alone otherwise, which still identifies the file inside mimir. The join and
-   * the clipboard write are shared with the /wiki reader's own copy-path button
-   * (`copy-path.ts`) — one fallback path, not two that drift.
+   * alone otherwise, which still identifies the file inside mimir. The join,
+   * the clipboard write and the label flip are shared with the /wiki reader's
+   * own copy-path button (`copy-path.ts`) — one fallback path and one revert
+   * timer, not two of each that drift.
    */
   function copyPathButton(relPath: string): HTMLButtonElement {
     const full = wikiPagePath(wikiRoot, relPath);
+    const idle = {
+      text: "⧉ Copy path",
+      ariaLabel: full ? `Copy the plan's file path: ${full}` : "Copy the plan's file path",
+    };
     const b = el("button", "pb-copy") as HTMLButtonElement;
     b.type = "button";
-    b.textContent = "⧉ Copy path";
-    b.title = `Copy ${full}`;
-    b.setAttribute("aria-label", `Copy the plan's file path: ${full}`);
+    b.textContent = idle.text;
+    b.title = full ? `Copy ${full}` : "Nothing to copy";
+    b.setAttribute("aria-label", idle.ariaLabel);
     b.onclick = () => {
-      void copyText(full).then((ok) => {
-        b.textContent = ok ? "Copied" : "Copy failed";
-        setTimeout(() => {
-          // An overlay close or a re-render within the window detaches the
-          // button; writing into it then is harmless but pointless.
-          if (b.isConnected) b.textContent = "⧉ Copy path";
-        }, 1500);
-      });
+      // A blank path reports the refusal rather than copying "" — `writeText("")`
+      // resolves, so the button would say Copied and empty the clipboard.
+      if (!full) return flashCopyResult(b, false, idle, COPIED_MS);
+      void copyText(full).then((ok) => flashCopyResult(b, ok, idle, COPIED_MS));
     };
     return b;
   }

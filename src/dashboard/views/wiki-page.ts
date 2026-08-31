@@ -515,8 +515,20 @@ export async function renderWikiPage(opts?: {
       flex-shrink: 0; display: flex; align-items: center; gap: 8px;
       padding: 9px 24px; border-bottom: 1px solid var(--border-primary);
       font-size: 12px; color: var(--text-muted);
+      /* The actions WRAP to a second line rather than crushing the trail. The
+         trail is the row's only shrinkable item, so every action added to it
+         came out of the trail's width: measured at 1280px (the common laptop
+         width) the trail rendered at 27px — "mimir…", folder and title gone —
+         and at 800px the last action hung 73px past the pane and the whole
+         document scrolled sideways. Wrapping costs a second row only at the
+         widths where the alternative is an unreadable first one. */
+      flex-wrap: wrap; row-gap: 7px;
     }
-    .wiki-bc-trail { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* "flex: 1 1 260px" rather than "flex: 1" (basis 0): with wrapping on, the
+       basis is what reserves the trail a legible width before anything wraps —
+       with basis 0 the trail shrinks to nothing and the row never wraps at all.
+       "min-width: 0" keeps the ellipsis working inside a flex item. */
+    .wiki-bc-trail { flex: 1 1 260px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .wiki-bc-sep { color: var(--text-dim); margin: 0 5px; }
     .wiki-bc-cur { color: var(--text-secondary); }
     .wiki-bc-date { color: var(--text-dim); flex-shrink: 0; }

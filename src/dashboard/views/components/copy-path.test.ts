@@ -1,5 +1,5 @@
 import { afterEach, test, expect, describe } from "bun:test";
-import { copyText, wikiPagePath } from "./copy-path.ts";
+import { copyPathAriaLabel, copyText, flashCopyResult, wikiPagePath } from "./copy-path.ts";
 
 /**
  * The `execCommand` path is not a legacy fallback here — `navigator.clipboard`
@@ -37,10 +37,7 @@ describe("copyText", () => {
         select: () => {
           if (opts.selectThrows) throw new Error("select is not a function");
         },
-        // The cleanup the implementation calls. Counted on the ELEMENT, not on
-        // `body.removeChild`: `ta.remove()` is what runs in the `finally`, and a
-        // fake that only counted the body method would report zero removals for
-        // a correct implementation.
+        // Cleanup, counted on the ELEMENT…
         remove: () => {
           box.removed++;
         },
@@ -48,6 +45,15 @@ describe("copyText", () => {
       body: {
         appendChild: () => {
           box.appended++;
+        },
+        // …and on the BODY, both. The property under test is "the staged node
+        // left the document", not "you called `.remove()`": counting only the
+        // element's method makes the suite reject a correct refactor back to
+        // `document.body.removeChild(ta)`, which is what this code shipped as
+        // and is identical in a real DOM. Either spelling passes; neither
+        // passes.
+        removeChild: () => {
+          box.removed++;
         },
       },
       execCommand: () => {
@@ -169,10 +175,95 @@ describe("wikiPagePath", () => {
     expect(wikiPagePath("/wiki/root///", "a/b.md")).toBe("/wiki/root/a/b.md");
   });
 
+  test("a blank relPath answers NOTHING, not the directory it lives in", () => {
+    // Both arguments degrade the same way. `<root>/` is a directory, not the
+    // page, and `<root>/undefined` is worse than nothing precisely because it is
+    // path-shaped — the caller renders "" as a refusal.
+    for (const rel of [null, undefined, "", "   "]) {
+      expect(wikiPagePath("/wiki/root", rel)).toBe("");
+      expect(wikiPagePath(null, rel)).toBe("");
+    }
+  });
+
   test("a root that is nothing but slashes keeps one", () => {
     // The degenerate case the trailing-slash strip creates: stripping to "" and
     // then falling into the unknown-root branch would drop the one thing the
     // caller did know.
     expect(wikiPagePath("/", "a/b.md")).toBe("/a/b.md");
+  });
+});
+
+/**
+ * The two defects the shipped copy buttons had, both found by review and both
+ * invisible to a test that only checks the clipboard.
+ *
+ * A fake button rather than a DOM: the helper touches exactly three members, so
+ * naming them is the test's own documentation of its blast radius. `timeoutMs`
+ * is threaded through so these run in milliseconds instead of 1.6 s.
+ */
+describe("flashCopyResult", () => {
+  function fakeBtn(idleAria: string, connected = true) {
+    const attrs: Record<string, string> = { "aria-label": idleAria };
+    return {
+      textContent: "⧉ Copy path" as string | null,
+      get isConnected() {
+        return connected;
+      },
+      setAttribute(name: string, value: string) {
+        attrs[name] = value;
+      },
+      aria: () => attrs["aria-label"],
+    };
+  }
+  const IDLE = { text: "⧉ Copy path", ariaLabel: "Copy this page's file path: /w/a.md" };
+  const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  test("a SECOND click's verdict is not erased by the first click's timer", async () => {
+    // The measured defect: click, click again 1.2 s later, and ~300 ms after the
+    // second copy the label is back to "⧉ Copy path" — a copy that DID happen
+    // reading as a dead control, which is what provokes a third click.
+    const b = fakeBtn(IDLE.ariaLabel);
+    flashCopyResult(b, true, IDLE, 60);
+    await wait(40);
+    flashCopyResult(b, true, IDLE, 60);
+    await wait(40); // the FIRST timer's deadline has now passed
+    expect(b.textContent).toBe("Copied");
+    expect(b.aria()).toBe(`Copied — ${IDLE.ariaLabel}`);
+    await wait(45); // …and the second timer's has too
+    expect(b.textContent).toBe("⧉ Copy path");
+    expect(b.aria()).toBe(IDLE.ariaLabel);
+  });
+
+  test("the ACCESSIBLE NAME carries the verdict, on success and on failure", async () => {
+    // An aria-label OVERRIDES the button's text, so a static one makes
+    // textContent invisible to a screen reader — silencing the only feedback a
+    // clipboard write can give, hardest on the execCommand path that fails.
+    const ok = fakeBtn(IDLE.ariaLabel);
+    flashCopyResult(ok, true, IDLE, 30);
+    expect(ok.aria()).toBe(`Copied — ${IDLE.ariaLabel}`);
+
+    const bad = fakeBtn(IDLE.ariaLabel);
+    flashCopyResult(bad, false, IDLE, 30);
+    expect(bad.textContent).toBe("Copy failed");
+    expect(bad.aria()).toBe(`Copy failed — ${IDLE.ariaLabel}`);
+
+    await wait(50);
+    expect(ok.aria()).toBe(IDLE.ariaLabel);
+    expect(bad.aria()).toBe(IDLE.ariaLabel);
+  });
+
+  test("a DETACHED button is not written to when the timer fires", async () => {
+    const b = fakeBtn(IDLE.ariaLabel, false);
+    flashCopyResult(b, true, IDLE, 20);
+    await wait(40);
+    expect(b.textContent).toBe("Copied");
+  });
+});
+
+describe("copyPathAriaLabel", () => {
+  test("names the path, and says nothing false when there is none", () => {
+    expect(copyPathAriaLabel("/w/a.md")).toBe("Copy this page's file path: /w/a.md");
+    // Not "…file path: " with a dangling colon and nothing after it.
+    expect(copyPathAriaLabel("")).toBe("Copy this page's file path");
   });
 });

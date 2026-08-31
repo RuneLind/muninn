@@ -36,6 +36,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
+import { COPY_PATH_BTN_ID, COPY_PATH_IDLE } from "../src/dashboard/views/components/copy-path.ts";
+
+/** The id the render keys on, imported rather than re-typed. */
+const BTN = `#${COPY_PATH_BTN_ID}`;
 
 const PORT = e2ePort("wiki-copy-path");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -120,7 +124,7 @@ async function openPage(
   relPath: string,
 ): Promise<void> {
   await page.goto(`${BASE}/wiki?wiki=${wiki}&relPath=${encodeURIComponent(relPath)}`);
-  await expect(page.locator("#wikiCopyPathBtn")).toBeVisible();
+  await expect(page.locator(BTN)).toBeVisible();
 }
 
 test.describe("Wiki reader: ⧉ Copy path", () => {
@@ -128,7 +132,7 @@ test.describe("Wiki reader: ⧉ Copy path", () => {
     await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     await openPage(page, WIKI, PAGE_REL);
 
-    const btn = page.locator("#wikiCopyPathBtn");
+    const btn = page.locator(BTN);
     await btn.click();
     await expect(btn).toHaveText("Copied");
 
@@ -140,7 +144,7 @@ test.describe("Wiki reader: ⧉ Copy path", () => {
     page,
   }) => {
     await openPage(page, WIKI, PAGE_REL);
-    const btn = page.locator("#wikiCopyPathBtn");
+    const btn = page.locator(BTN);
     await expect(btn).toHaveAttribute("title", `Copy ${root}/${PAGE_REL}`);
     await expect(btn).toHaveAttribute("aria-label", new RegExp(`${root}/${PAGE_REL}$`));
 
@@ -161,7 +165,7 @@ test.describe("Wiki reader: ⧉ Copy path", () => {
     await page.locator(`.wiki-list-item[data-relpath="${OTHER_REL}"]`).click();
     await expect(page.locator(".wiki-bc-cur")).toContainText("Second Page");
 
-    const btn = page.locator("#wikiCopyPathBtn");
+    const btn = page.locator(BTN);
     await expect(btn).toHaveAttribute("title", `Copy ${root}/${OTHER_REL}`);
     await btn.click();
     await expect(btn).toHaveText("Copied");
@@ -180,11 +184,81 @@ test.describe("Wiki reader: ⧉ Copy path", () => {
     await expect(page.locator("body.wiki-readonly-wiki")).toHaveCount(1);
     await expect(page.locator("#wikiShareBtn")).toHaveCSS("opacity", "0.45");
 
-    const btn = page.locator("#wikiCopyPathBtn");
+    const btn = page.locator(BTN);
     await expect(btn).toHaveCSS("opacity", "1");
     await btn.click();
     await expect(btn).toHaveText("Copied");
     // …and the root it copies is the READ-ONLY wiki's, not the other one's.
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(`${roRoot}/${RO_REL}`);
+  });
+
+  /**
+   * The regression the first version of this spec structurally could not see.
+   *
+   * `.wiki-bc-trail` is the breadcrumb row's ONLY shrinkable item, so every
+   * action button added to that row comes out of the trail's width. Measured on
+   * the unfixed commit: the trail rendered at 27px at 1280 (the common laptop
+   * width) and 0px at 800, where the last action hung 72px past the pane and the
+   * whole document scrolled sideways. Every other assertion in this file stayed
+   * green — `toContainText` reads `textContent`, which is intact at 3px wide.
+   *
+   * So the assertion is GEOMETRY, and the floor is deliberately well below what
+   * the fix delivers (272–322px across 800–1440) and well above what the defect
+   * produced: it is a regression alarm, not a pin on the exact layout.
+   */
+  for (const width of [1280, 800]) {
+    test(`the trail stays legible and the row does not overflow at ${width}px`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 900 });
+      await openPage(page, WIKI, PAGE_REL);
+
+      const m = await page.evaluate(() => {
+        const trail = document.querySelector(".wiki-bc-trail");
+        const bc = document.querySelector(".wiki-breadcrumb");
+        const share = document.querySelector("#wikiShareBtn");
+        const pane = bc?.parentElement;
+        return {
+          trail: trail?.getBoundingClientRect().width ?? -1,
+          // The row is allowed to WRAP; what it may not do is push its last
+          // action out of the pane or give the page a horizontal scrollbar.
+          shareOverflow:
+            share && pane
+              ? share.getBoundingClientRect().right - pane.getBoundingClientRect().right
+              : -1,
+          docOverflow: document.documentElement.scrollWidth - window.innerWidth,
+        };
+      });
+
+      expect(m.trail).toBeGreaterThan(120);
+      expect(m.shareOverflow).toBeLessThanOrEqual(0);
+      expect(m.docOverflow).toBeLessThanOrEqual(0);
+    });
+  }
+
+  test("a second click's confirmation is not erased by the first click's timer", async ({
+    page,
+    context,
+  }) => {
+    // Each click used to schedule its own revert, so the first one wiped the
+    // second's "Copied" — a copy that DID happen reading as a dead control.
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await openPage(page, WIKI, PAGE_REL);
+    const btn = page.locator(BTN);
+
+    await btn.click();
+    await expect(btn).toHaveText("Copied");
+    await page.waitForTimeout(1200);
+    await btn.click();
+    await expect(btn).toHaveText("Copied");
+
+    // Past the FIRST click's deadline (1600ms), inside the second's.
+    await page.waitForTimeout(600);
+    await expect(btn).toHaveText("Copied");
+    // The accessible name moves with the text — an aria-label overrides the
+    // button's text, so a static one silences the only feedback there is.
+    await expect(btn).toHaveAttribute("aria-label", new RegExp(`^Copied — Copy this page`));
+
+    // …and it does go back on its own.
+    await expect(btn).toHaveText(COPY_PATH_IDLE, { timeout: 4000 });
+    await expect(btn).toHaveAttribute("aria-label", `Copy this page's file path: ${root}/${PAGE_REL}`);
   });
 });
