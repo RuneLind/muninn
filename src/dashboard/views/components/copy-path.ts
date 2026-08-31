@@ -3,26 +3,28 @@
  * The clipboard primitive two of the dashboard's copy controls share, the path
  * they copy, and the way they report the result.
  *
- * **Scope, stated exactly, because the first version of this comment was wrong.**
- * Six places on the dashboard write the clipboard. This module unified TWO of
- * them — the fenced-code copy button (`code-block-chrome.ts`) and the ⧉ Copy path
- * pair (`plan-board.ts`, `wiki-browser.ts`). The other four each have their own
- * write and their own fallback (or none): `share-dialog.ts`, `jira-archive-browser.ts`,
- * `sum-outcomes.ts` and `chat/views/components/jira-card.ts`. Three of those have
- * NO `execCommand` fallback at all, so on the tailnet-over-plain-HTTP deployment
- * this file's own reasoning is about, they are silently inert — 📤 Share's Copy
- * sits in the same breadcrumb row as ⧉ Copy path and is one of them. That is a
- * real gap; it is not this module's yet, and a reader must not conclude from
- * here that copying is now one function everywhere.
+ * **Scope, stated exactly, because the first version of this comment was wrong
+ * twice.** Six places on the dashboard write the clipboard; this module unified
+ * TWO — the fenced-code copy button (`code-block-chrome.ts`) and the ⧉ Copy path
+ * pair (`plan-board.ts`, `wiki-browser.ts`). The other four keep their own write:
+ * `share-dialog.ts` and `chat/views/components/jira-card.ts` report a failure in
+ * their own UI, `jira-archive-browser.ts` falls back to selecting the raw pane,
+ * and `sum-outcomes.ts` alone swallows it (`.catch(function(){})`, no else
+ * branch). NONE of the four has an `execCommand` fallback, so on the
+ * tailnet-over-plain-HTTP deployment this file's own reasoning is about, all four
+ * fail — 📤 Share, in the same breadcrumb row as ⧉ Copy path, is one of them.
+ * That is a real gap; it is not this module's yet, and a reader must not conclude
+ * from here that copying is now one function everywhere.
  *
- * The two that ARE unified had genuinely different fallbacks — verified against
- * `origin/main`, not remembered: the plan drawer's ran `select()`/`execCommand`
- * inside a `try` with the removal in a `finally`, while the fence's removed the
- * staged `<textarea>` in the statement AFTER `execCommand`, so any throw left a
- * hidden but focusable node in the DOM of a page the reader keeps tabbing
- * through. They were written three weeks apart (#487, #494) and never shared a
- * version, so this is not drift between copies — it is two independent authors
- * getting a fiddly fallback differently right. One copy, with the `finally`.
+ * The two that ARE unified had genuinely different fallbacks — verified with
+ * `git show origin/main:…`, not remembered: the plan drawer's ran
+ * `select()`/`execCommand` inside a `try` with the removal in a `finally`, while
+ * the fence's removed the staged `<textarea>` in the statement AFTER
+ * `execCommand`, so any throw left a hidden but focusable node in the DOM of a
+ * page the reader keeps tabbing through. `git log` puts them ~15 hours apart
+ * (#487 2026-08-29 22:11, #494 2026-08-30 13:25) by the same author — so this is
+ * not two authors and not drift over time; it is one fiddly fallback written
+ * twice in a day and got right once. One copy, with the `finally`.
  *
  * `wikiPagePath` is here rather than beside the navigation rules because it is
  * not a navigation path — it is the on-disk string the two ⧉ buttons hand to
@@ -104,8 +106,23 @@ export function wikiPagePath(
  *  `DISCUSS_ARTICLE_BTN_ID`, so those four cannot key on four spellings. */
 export const COPY_PATH_BTN_ID = "wikiCopyPathBtn";
 
-/** Its label at rest. */
-export const COPY_PATH_IDLE = "⧉ Copy path";
+/**
+ * Its label at rest — the GLYPH ALONE, no words.
+ *
+ * The breadcrumb row carries five actions beside the trail, and the trail is the
+ * only item that shrinks; a labelled button cost it ~104px, which is most of
+ * what made it unreadable at 1280. The tooltip and the accessible name carry the
+ * whole meaning instead, and both name the exact path — which the words never
+ * did. The plan drawer keeps its label: its File row has the space, and nothing
+ * there competes for it.
+ */
+export const COPY_PATH_IDLE = "⧉";
+
+/** What the glyph becomes while it reports. Glyphs, not words, so the button's
+ *  width is identical in all three states and the row cannot shift under a
+ *  click — the words still reach a screen reader through the aria-label. */
+export const COPY_PATH_OK = "✓";
+export const COPY_PATH_FAIL = "✕";
 
 /** Its accessible name at rest. Built by a FUNCTION, not written twice: the
  *  markup and the click both need it, and the click cannot read it back off the
@@ -116,9 +133,11 @@ export function copyPathAriaLabel(full: string): string {
 }
 
 /** How long a copy button shows its verdict before going back to its label.
- *  ONE number for all of them — the fence button and the two ⧉ Copy path
- *  buttons shipped 1600 and 1500 respectively, which is the same drift this
- *  module exists to stop, one layer up from the clipboard write. */
+ *  ONE number for all THREE — the fence button and the two ⧉ Copy path buttons
+ *  shipped 1600 and 1500 respectively, which is the same drift this module
+ *  exists to stop, one layer up from the clipboard write. `code-block-chrome.ts`
+ *  imports it rather than declaring its own; a review round caught this comment
+ *  claiming the merge while that file still had the literal. */
 export const COPIED_MS = 1600;
 
 /** Just enough of a button for `flashCopyResult` — keeps it testable without a
@@ -127,6 +146,20 @@ export interface CopyFlashButton {
   textContent: string | null;
   readonly isConnected: boolean;
   setAttribute(name: string, value: string): void;
+}
+
+/** What a copy button shows at rest and while it reports.
+ *
+ *  `okText`/`failText` exist because the two buttons report in different
+ *  alphabets: the breadcrumb's is icon-only and swaps GLYPHS (so its width never
+ *  changes and the crowded row cannot shift under a click), while the plan
+ *  drawer's is labelled and swaps WORDS. The accessible name is words on both —
+ *  it is not competing for pixels. */
+export interface CopyFlashLabels {
+  text: string;
+  ariaLabel: string;
+  okText?: string;
+  failText?: string;
 }
 
 /** The revert timer PER BUTTON. A `WeakMap` rather than a field on the element
@@ -155,12 +188,14 @@ const pendingRevert = new WeakMap<CopyFlashButton, ReturnType<typeof setTimeout>
 export function flashCopyResult(
   btn: CopyFlashButton,
   ok: boolean,
-  idle: { text: string; ariaLabel: string },
+  idle: CopyFlashLabels,
   timeoutMs: number = COPIED_MS,
 ): void {
-  const verdict = ok ? "Copied" : "Copy failed";
-  btn.textContent = verdict;
-  btn.setAttribute("aria-label", `${verdict} — ${idle.ariaLabel}`);
+  const words = ok ? "Copied" : "Copy failed";
+  btn.textContent = ok ? (idle.okText ?? words) : (idle.failText ?? words);
+  // The accessible name is ALWAYS the words, whatever the button shows: "✓" read
+  // aloud is not a report, and this is the half a screen reader hears.
+  btn.setAttribute("aria-label", `${words} — ${idle.ariaLabel}`);
   const prev = pendingRevert.get(btn);
   if (prev !== undefined) clearTimeout(prev);
   pendingRevert.set(

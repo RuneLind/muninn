@@ -517,18 +517,27 @@ export async function renderWikiPage(opts?: {
       font-size: 12px; color: var(--text-muted);
       /* The actions WRAP to a second line rather than crushing the trail. The
          trail is the row's only shrinkable item, so every action added to it
-         came out of the trail's width: measured at 1280px (the common laptop
-         width) the trail rendered at 27px — "mimir…", folder and title gone —
-         and at 800px the last action hung 73px past the pane and the whole
-         document scrolled sideways. Wrapping costs a second row only at the
-         widths where the alternative is an unreadable first one. */
+         comes out of the trail's width — with a LABELLED copy button (~104px)
+         it rendered at 27px at 1280 ("mimir…", folder and title gone) and 0px
+         at 800, where the last action hung 72px past the pane and the document
+         scrolled sideways. Icon-only costs 38px instead, and wrapping is the
+         SAFETY NET for what is left, not the default. Measured against
+         origin/main, same page, 14 widths 800–1920: one row and −38px of trail
+         at 1920/1700/1600/1550/1500/1440/1366/1100/1024/1000, two rows at
+         1280/1200/900/800 — which are exactly the widths where main's trail had
+         already collapsed to 131/51/107/7px, so the wrap BUYS 47–257px there.
+         No horizontal overflow at any width. */
       flex-wrap: wrap; row-gap: 7px;
     }
-    /* "flex: 1 1 260px" rather than "flex: 1" (basis 0): with wrapping on, the
+    /* "flex: 1 1 160px" rather than "flex: 1" (basis 0): with wrapping on, the
        basis is what reserves the trail a legible width before anything wraps —
-       with basis 0 the trail shrinks to nothing and the row never wraps at all.
-       "min-width: 0" keeps the ellipsis working inside a flex item. */
-    .wiki-bc-trail { flex: 1 1 260px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+       with basis 0 the trail shrinks to nothing and the row never wraps at all
+       (that IS the 27px case). 160px chosen by sweeping 0/120/160/200/260 across
+       800–1920 on the icon-only build: 0 leaves the trail at 54–93px, 260 wraps
+       at every width including 1920, and 160 is the value that holds ≥169px
+       everywhere while still fitting on ONE row wherever main did. "min-width: 0"
+       keeps the ellipsis working inside a flex item. */
+    .wiki-bc-trail { flex: 1 1 160px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .wiki-bc-sep { color: var(--text-dim); margin: 0 5px; }
     .wiki-bc-cur { color: var(--text-secondary); }
     .wiki-bc-date { color: var(--text-dim); flex-shrink: 0; }
@@ -555,9 +564,15 @@ export async function renderWikiPage(opts?: {
       border-color: color-mix(in srgb, var(--accent) 45%, var(--border-primary));
     }
     /* ⧉ Copy path is a utility, not one of the three article ACTIONS beside it:
-       quieter still, and a fixed width so the label swapping to "Copied" /
-       "Copy failed" doesn't shove the row's other buttons sideways mid-click. */
-    .wiki-bc-copy { color: var(--text-muted); font-weight: 500; min-width: 96px; text-align: center; }
+       quieter, and ICON-ONLY — the words cost the trail ~104px on a row where
+       the trail is the only thing that shrinks, and the tooltip says more than
+       they did (it names the path). The fixed width holds across ⧉ / ✓ / ✕ so a
+       click cannot shift the row; the glyph is bumped a little because a bare
+       symbol at 12px reads as a speck. */
+    .wiki-bc-copy {
+      color: var(--text-muted); font-weight: 500; font-size: 13px;
+      min-width: 30px; padding: 4px 8px; text-align: center;
+    }
     .wiki-article-wrap { flex: 1; overflow-y: auto; padding: 24px 32px; }
     .wiki-article-head { margin-bottom: 18px; padding-bottom: 14px; border-bottom: 1px solid var(--border-primary); }
     .wiki-article-head h1 { font-size: 22px; color: var(--text-primary); margin-bottom: 10px; }

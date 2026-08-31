@@ -70,7 +70,9 @@ import {
 import { readActiveWikiName, readActiveWikiRoot, withWikiParam } from "./wiki-param.ts";
 import {
   COPY_PATH_BTN_ID,
+  COPY_PATH_FAIL,
   COPY_PATH_IDLE,
+  COPY_PATH_OK,
   copyPathAriaLabel,
   copyText,
   flashCopyResult,
@@ -600,6 +602,8 @@ function loadCoverageFooter(): void {
 function copyPathBtnHtml(m: WikiListing): string {
   const full = wikiPagePath(WIKI_ROOT, m.relPath);
   const aria = copyPathAriaLabel(full);
+  // Icon-only: the `title` is the whole discoverability story AND names the exact
+  // string, which the dropped "Copy path" label never did.
   return (
     `<button class="wiki-bc-copy" id="${COPY_PATH_BTN_ID}" type="button" ` +
     `data-copy-path="${esc(full)}" title="${esc(full ? "Copy " + full : "Nothing to copy")}" ` +
@@ -615,7 +619,12 @@ function copyPathBtnHtml(m: WikiListing): string {
  *  looks live and does nothing — the one outcome with no feedback at all. */
 function copyArticlePath(btn: HTMLButtonElement): void {
   const full = btn.getAttribute("data-copy-path") || "";
-  const idle = { text: COPY_PATH_IDLE, ariaLabel: copyPathAriaLabel(full) };
+  const idle = {
+    text: COPY_PATH_IDLE,
+    ariaLabel: copyPathAriaLabel(full),
+    okText: COPY_PATH_OK,
+    failText: COPY_PATH_FAIL,
+  };
   if (!full) return flashCopyResult(btn, false, idle);
   void copyText(full).then((ok) => flashCopyResult(btn, ok, idle));
 }

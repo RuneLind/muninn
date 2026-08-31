@@ -51,13 +51,10 @@
  */
 
 import type { ComponentName } from "../../../format/markdown-ast.ts";
-import { copyText } from "./copy-path.ts";
+import { COPIED_MS, copyText } from "./copy-path.ts";
 
 /** Marks a wrapped fence. Also the "already done" test. */
 const ENHANCED = "data-fence-enhanced";
-
-/** How long the button reads "Copied" before reverting. */
-const COPIED_MS = 1600;
 
 const COPY_ICON =
   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" ' +

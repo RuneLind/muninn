@@ -36,7 +36,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
-import { COPY_PATH_BTN_ID, COPY_PATH_IDLE } from "../src/dashboard/views/components/copy-path.ts";
+import {
+  COPY_PATH_BTN_ID,
+  COPY_PATH_IDLE,
+  COPY_PATH_OK,
+} from "../src/dashboard/views/components/copy-path.ts";
 
 /** The id the render keys on, imported rather than re-typed. */
 const BTN = `#${COPY_PATH_BTN_ID}`;
@@ -134,7 +138,7 @@ test.describe("Wiki reader: ⧉ Copy path", () => {
 
     const btn = page.locator(BTN);
     await btn.click();
-    await expect(btn).toHaveText("Copied");
+    await expect(btn).toHaveText(COPY_PATH_OK);
 
     // The acceptance: this is the string that reaches an agent brief.
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(`${root}/${PAGE_REL}`);
@@ -168,7 +172,7 @@ test.describe("Wiki reader: ⧉ Copy path", () => {
     const btn = page.locator(BTN);
     await expect(btn).toHaveAttribute("title", `Copy ${root}/${OTHER_REL}`);
     await btn.click();
-    await expect(btn).toHaveText("Copied");
+    await expect(btn).toHaveText(COPY_PATH_OK);
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(`${root}/${OTHER_REL}`);
   });
 
@@ -187,7 +191,7 @@ test.describe("Wiki reader: ⧉ Copy path", () => {
     const btn = page.locator(BTN);
     await expect(btn).toHaveCSS("opacity", "1");
     await btn.click();
-    await expect(btn).toHaveText("Copied");
+    await expect(btn).toHaveText(COPY_PATH_OK);
     // …and the root it copies is the READ-ONLY wiki's, not the other one's.
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(`${roRoot}/${RO_REL}`);
   });
@@ -203,10 +207,17 @@ test.describe("Wiki reader: ⧉ Copy path", () => {
    * green — `toContainText` reads `textContent`, which is intact at 3px wide.
    *
    * So the assertion is GEOMETRY, and the floor is deliberately well below what
-   * the fix delivers (272–322px across 800–1440) and well above what the defect
+   * the fix delivers (169–733px across 800–1920) and well above what the defect
    * produced: it is a regression alarm, not a pin on the exact layout.
+   *
+   * The width list covers BOTH sides of the wrap, which a verify pass found the
+   * first version did not: 1280 and 800 wrap, while 1440 and 1024 do not — and
+   * the non-wrapping band is where a too-eager basis would silently cost every
+   * reader a second breadcrumb row forever. At 1280 only the trail assertion
+   * distinguishes fixed from broken (the overflow pair passes either way); at
+   * 800 all three bite.
    */
-  for (const width of [1280, 800]) {
+  for (const width of [1440, 1280, 1024, 800]) {
     test(`the trail stays legible and the row does not overflow at ${width}px`, async ({ page }) => {
       await page.setViewportSize({ width, height: 900 });
       await openPage(page, WIKI, PAGE_REL);
@@ -225,14 +236,40 @@ test.describe("Wiki reader: ⧉ Copy path", () => {
               ? share.getBoundingClientRect().right - pane.getBoundingClientRect().right
               : -1,
           docOverflow: document.documentElement.scrollWidth - window.innerWidth,
+          // How many lines the row occupies, derived from its own height rather
+          // than a pixel constant: one row is ~41px, two ~70px.
+          rows: Math.round((bc?.getBoundingClientRect().height ?? 0) / 40),
         };
       });
 
       expect(m.trail).toBeGreaterThan(120);
       expect(m.shareOverflow).toBeLessThanOrEqual(0);
       expect(m.docOverflow).toBeLessThanOrEqual(0);
+      // …and the row does not double where it does not have to. A basis large
+      // enough to wrap at every width costs 29px of article height on every
+      // laptop forever, which is how the first version of this fix regressed
+      // 1024–1550 while every assertion above still passed.
+      if (width === 1440 || width === 1024) expect(m.rows).toBe(1);
     });
   }
+
+  test("is icon-only, and the tooltip carries what the dropped label used to", async ({ page }) => {
+    await openPage(page, WIKI, PAGE_REL);
+    const btn = page.locator(BTN);
+
+    // The words are gone — that is the point of the control being a glyph.
+    await expect(btn).toHaveText(COPY_PATH_IDLE);
+    expect(await btn.textContent()).not.toContain("Copy path");
+
+    // …and what replaced them says MORE than they did: the exact string.
+    await expect(btn).toHaveAttribute("title", `Copy ${root}/${PAGE_REL}`);
+    await expect(btn).toHaveAttribute("aria-label", `Copy this page's file path: ${root}/${PAGE_REL}`);
+
+    // The whole reason for the change: the button's own width. The labelled
+    // version measured 96px on this row; a glyph must not creep back toward it.
+    const box = await btn.boundingBox();
+    expect(box!.width).toBeLessThan(48);
+  });
 
   test("a second click's confirmation is not erased by the first click's timer", async ({
     page,
@@ -245,16 +282,18 @@ test.describe("Wiki reader: ⧉ Copy path", () => {
     const btn = page.locator(BTN);
 
     await btn.click();
-    await expect(btn).toHaveText("Copied");
+    await expect(btn).toHaveText(COPY_PATH_OK);
     await page.waitForTimeout(1200);
     await btn.click();
-    await expect(btn).toHaveText("Copied");
+    await expect(btn).toHaveText(COPY_PATH_OK);
 
     // Past the FIRST click's deadline (1600ms), inside the second's.
     await page.waitForTimeout(600);
-    await expect(btn).toHaveText("Copied");
+    await expect(btn).toHaveText(COPY_PATH_OK);
     // The accessible name moves with the text — an aria-label overrides the
     // button's text, so a static one silences the only feedback there is.
+    // The button shows a GLYPH; the accessible name still says the words, which
+    // is the half a screen reader hears.
     await expect(btn).toHaveAttribute("aria-label", new RegExp(`^Copied — Copy this page`));
 
     // …and it does go back on its own.

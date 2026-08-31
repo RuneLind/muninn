@@ -1,5 +1,13 @@
 import { afterEach, test, expect, describe } from "bun:test";
-import { copyPathAriaLabel, copyText, flashCopyResult, wikiPagePath } from "./copy-path.ts";
+import {
+  COPY_PATH_FAIL,
+  COPY_PATH_IDLE,
+  COPY_PATH_OK,
+  copyPathAriaLabel,
+  copyText,
+  flashCopyResult,
+  wikiPagePath,
+} from "./copy-path.ts";
 
 /**
  * The `execCommand` path is not a legacy fallback here — `navigator.clipboard`
@@ -215,6 +223,8 @@ describe("flashCopyResult", () => {
       aria: () => attrs["aria-label"],
     };
   }
+  /** The LABELLED shape (the plan drawer's): no okText/failText, so the
+   *  verdict words are what the button shows. */
   const IDLE = { text: "⧉ Copy path", ariaLabel: "Copy this page's file path: /w/a.md" };
   const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -265,5 +275,63 @@ describe("copyPathAriaLabel", () => {
     expect(copyPathAriaLabel("/w/a.md")).toBe("Copy this page's file path: /w/a.md");
     // Not "…file path: " with a dangling colon and nothing after it.
     expect(copyPathAriaLabel("")).toBe("Copy this page's file path");
+  });
+});
+
+/**
+ * The breadcrumb's button is ICON-ONLY (the words cost the trail ~104px on a row
+ * where the trail is the only shrinkable item), so it reports in glyphs. What
+ * must NOT follow is that the report becomes inaudible: "✓" read aloud is not a
+ * verdict, so the accessible name stays words on both buttons.
+ */
+describe("flashCopyResult — the icon-only shape", () => {
+  function fakeBtn() {
+    const attrs: Record<string, string> = {};
+    return {
+      textContent: COPY_PATH_IDLE as string | null,
+      isConnected: true,
+      setAttribute: (n: string, v: string) => {
+        attrs[n] = v;
+      },
+      aria: () => attrs["aria-label"],
+    };
+  }
+  const ICON = {
+    text: COPY_PATH_IDLE,
+    ariaLabel: "Copy this page's file path: /w/a.md",
+    okText: COPY_PATH_OK,
+    failText: COPY_PATH_FAIL,
+  };
+  const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  test("swaps the GLYPH, and the accessible name still says the words", async () => {
+    const ok = fakeBtn();
+    flashCopyResult(ok, true, ICON, 30);
+    expect(ok.textContent).toBe("✓");
+    expect(ok.aria()).toBe("Copied — Copy this page's file path: /w/a.md");
+
+    const bad = fakeBtn();
+    flashCopyResult(bad, false, ICON, 30);
+    expect(bad.textContent).toBe("✕");
+    expect(bad.aria()).toBe("Copy failed — Copy this page's file path: /w/a.md");
+
+    await wait(50);
+    expect(ok.textContent).toBe("⧉");
+    expect(bad.textContent).toBe("⧉");
+  });
+
+  test("all three states are ONE character, so the row cannot shift under a click", () => {
+    // The CSS reserves a fixed 30px; that only holds the neighbours still if the
+    // three labels are the same size to begin with.
+    expect([...COPY_PATH_IDLE]).toHaveLength(1);
+    expect([...COPY_PATH_OK]).toHaveLength(1);
+    expect([...COPY_PATH_FAIL]).toHaveLength(1);
+  });
+
+  test("a button with no okText/failText still reports in WORDS", () => {
+    // The plan drawer's shape — the default must not follow the reader's.
+    const b = fakeBtn();
+    flashCopyResult(b, true, { text: "⧉ Copy path", ariaLabel: "x" }, 30);
+    expect(b.textContent).toBe("Copied");
   });
 });
