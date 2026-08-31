@@ -108,25 +108,64 @@ describe("the case the relaxation exists for still works", () => {
   });
 });
 
-describe("the final-span check also covers the EXACT tier", () => {
-  test("a quote that exactly matches a construct's interior is refused", () => {
-    // Pre-existing before the `"mark"` mode: an exact-tier match needs no rescue, so
-    // nothing looked at the span at all and the mark was spliced INSIDE the
-    // delimiters. `finalSpanCutReason` runs on every pass-2 span regardless of tier,
-    // so it closes this too.
-    const body = "# T\n\n[beta](https://beta.example/x) _alpha_ [[eta]].\n";
-    const res = markOne(body, "alpha");
-    expect(res.edits).toEqual([]);
-    expect(res.dropped[0]!.reason).toContain("inside markdown formatting");
+describe("the final-span check compares against the PRE-TRIM span, not zero", () => {
+  test("an ordinary snake_case identifier is not 'markdown formatting'", () => {
+    // Regression injected by fix round 1 and caught by the verify pass: an ABSOLUTE
+    // even-run rule refuses every passage carrying an odd number of `_`, `*` or
+    // backtick runs — `user_id`, `2 * 3`, a glob — none of which is emphasis, and
+    // none of which `formatWebHtml` renders any differently for the mark. The gate
+    // this check mirrors (`collapsedRescueRisk`) compares the slice's parity against
+    // a REFERENCE; so must this one.
+    for (const [body, quote] of [
+      ["# T\n\nThe field user_id is set by the API.\n", "The field user_id is set by the API."],
+      ["# T\n\nCost is 2 * 3 dollars per unit here.\n", "Cost is 2 * 3 dollars per unit here."],
+      ["# T\n\nThe glob a*b matches many files here.\n", "The glob a*b matches many files here."],
+    ] as [string, string][]) {
+      const res = markOne(body, quote);
+      expect({ quote, dropped: res.dropped.map((d) => d.reason) }).toEqual({ quote, dropped: [] });
+      expect(res.edits).toHaveLength(1);
+    }
   });
 
-  test("…including inside a code span, which strip cannot undo", () => {
-    // The worst instance: `stripFactWrappers` is zone-aware, so a `<Fact>` inside a
-    // backtick span is DOCUMENTATION to it — the strip is a no-op and the next
-    // integrate run wraps the mark again, nesting `<Fact><Fact>…</Fact></Fact>`.
-    const body = "# T\n\nRun `bun test` now to check.\n";
-    const res = markOne(body, "bun test");
-    expect(res.edits).toEqual([]);
-    expect(res.dropped[0]!.reason).toContain("inside markdown formatting");
+  test("…and an odd delimiter count that the TRIM created is still refused", () => {
+    // The pre-trim span is balanced; `longestLineRange` throws away the half that
+    // balanced it. Parity CHANGED across the trim, which is the actual defect.
+    const body = "# T\n\n**Bold text\nmore** here and there.\n";
+    expect(markOne(body, "Bold text more here").edits).toEqual([]);
+  });
+
+  test("a TRIMMED span with an odd-but-unchanged count is allowed", () => {
+    // This one really does reach the trim check (multi-line, not a whole paragraph,
+    // so `longestLineRange` fires — the reason says "trimmed to one line"). The
+    // surviving line carries a lone `_` that was already in the pre-trim span, so the
+    // trim cut nothing. An ABSOLUTE even-run rule refuses it; parity-vs-pre-trim does
+    // not. Without a genuinely trimmed fixture the absolute-rule mutant survives.
+    const body =
+      "# T\n\nIntro line here.\nThe user_id field spans a much longer second line of prose.\nTail line.\n";
+    const res = markOne(body, "The user_id field spans a much longer second line of prose. Tail line.");
+    expect(res.dropped.map((d) => d.reason)).toEqual([]);
+    expect(res.edits[0]!.old).toContain("user_id");
+    expect(res.edits[0]!.reason).toContain("trimmed to one line");
+  });
+});
+
+describe("growth completes from the side that carries the delimiter", () => {
+  test("a cut construct completes; a slice with a delimiter on BOTH edges drops", () => {
+    // One-sided growth is a readability choice, NOT a safety property — the mutant
+    // that grows both sides is equivalent, and the enumeration is in the
+    // `growOverEmphasisRuns` docblock. What IS pinned is the observable pair: the
+    // ordinary cut completes, and the only configuration where the two spellings
+    // could differ (odd count, delimiter on both edges) drops either way.
+    const cut = "# T\n\n- **Norepinephrine** acts as a mental spotlight.\n";
+    expect(markOne(cut, "Norepinephrine acts as a mental spotlight.").edits[0]!.old).toBe(
+      "**Norepinephrine** acts as a mental spotlight.",
+    );
+    for (const [body, quote] of [
+      ["# T\n\n**Bold** middle**more** text here.\n", "Bold middle"],
+      ["# T\n\n_em_ middle_more_ text here now.\n", "em middle"],
+      ["# T\n\n`cd` middle`more` text here now.\n", "cd middle"],
+    ] as [string, string][]) {
+      expect({ quote, edits: markOne(body, quote).edits }).toEqual({ quote, edits: [] });
+    }
   });
 });

@@ -541,3 +541,30 @@ describe("every decline reason gets its OWN sentence, none borrows another's", (
     expect(askStatusText("from_the_future" as never, 0)).toMatch(/declined/i);
   });
 });
+
+/**
+ * `wroteBlock` — the field the ➕ bar's factual claim rests on. A stored non-boolean
+ * is truthy and would render "the integrate write already added the fact-check
+ * appendix", in the non-error tone, on a page that has none.
+ */
+describe("wroteBlock round-trips and is union-validated like `wrote`", () => {
+  test("a boolean survives the round trip", () => {
+    const restored = deserializeAskSession(
+      serializeAskSession([turn({ wrote: "integrate", wroteBlock: true })], 20),
+    );
+    expect(restored[0]!.wroteBlock).toBe(true);
+  });
+
+  test("a non-boolean drops the whole turn rather than lying about the page", () => {
+    const raw = JSON.parse(
+      serializeAskSession([turn({ wrote: "integrate" })], 20),
+    ) as Record<string, unknown>[];
+    raw[0]!.wroteBlock = "yes";
+    expect(deserializeAskSession(JSON.stringify(raw))).toEqual([]);
+  });
+
+  test("absence means no block — what every pre-field turn already means", () => {
+    const restored = deserializeAskSession(serializeAskSession([turn({ wrote: "integrate" })], 20));
+    expect(restored[0]!.wroteBlock).toBeUndefined();
+  });
+});

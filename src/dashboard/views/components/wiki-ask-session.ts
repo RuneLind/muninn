@@ -105,6 +105,17 @@ export interface StoredAskTurn {
    *  after a reload and could only ever 409. Absent ⇒ nothing written yet.
    *  Validated as the two-value union — an unknown value is a dropped turn. */
   wrote?: "append" | "integrate";
+  /** Did that write PERSIST a fact-check block — the `.mdx` `<FactCheck>` appendix
+   *  or the `.md` `> [!factcheck]` callout? The apply route answers it on
+   *  `calloutAdded`, and the disabled ➕ bar's copy AND its tone come from it: a
+   *  write that added one says so, a write that did not keeps the staleness copy.
+   *  Deliberately NOT inferred from `annotatable` — the apply route has an explicit
+   *  no-block branch that an `.mdx` page reaches whenever every mark drops and the
+   *  callout checkbox is off, and claiming an appendix there is a falsehood that
+   *  ALSO hides the only control that would add one. Absent ⇒ treated as "no block",
+   *  which is what every turn stored before this field existed means anyway, and is
+   *  the direction that degrades to a merely-unhelpful message rather than a lie. */
+  wroteBlock?: boolean;
   /** Integrate-relevant body length of the checked page (the `done` payload's
    *  `bodyLen`, omitted for explainers). Drives the client's page-too-long gate.
    *  Absent ⇒ render the button and let a server 400 decide. */
@@ -234,6 +245,12 @@ function isValidTurn(v: unknown): v is StoredAskTurn {
   // against a baseHash the real write already staled — so validate the union, not
   // just the type.
   if (typeof t.wrote !== "undefined" && t.wrote !== "append" && t.wrote !== "integrate") return false;
+  // Same treatment as `wrote`, for the same reason: a stored `wroteBlock: "yes"` is
+  // truthy, and would render "the integrate write already added the fact-check
+  // appendix" — with the non-error tone — on a page that has none. Unlike
+  // `annotatable` this is not advisory: it is the whole basis of a factual claim
+  // the reader acts on, so a malformed value is fatal to the turn, not dropped.
+  if (typeof t.wroteBlock !== "undefined" && typeof t.wroteBlock !== "boolean") return false;
   if (typeof t.bodyLen !== "undefined" && typeof t.bodyLen !== "number") return false;
   // `annotatable` is a purely ADVISORY hint (does this page take inline `<Fact>`
   // wrappers), and its absence already means "not annotatable" — so a malformed

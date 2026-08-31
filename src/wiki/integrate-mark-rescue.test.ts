@@ -8,7 +8,12 @@
  * a SPLICE and has nothing to protect when the range is only being wrapped.
  */
 import { test, expect, describe } from "bun:test";
-import { annotateEdits, collapsedRescueRisk, dropReasonTally } from "./integrate-edits.ts";
+import {
+  annotateEdits,
+  collapsedRescueRisk,
+  dropReasonTally,
+  RESCUE_DELIM_FAMILIES,
+} from "./integrate-edits.ts";
 import type { FactcheckClaimAnchor } from "../dashboard/views/components/wiki-integrate.ts";
 
 const okClaim = (index: number): FactcheckClaimAnchor => ({
@@ -112,5 +117,20 @@ describe("dropReasonTally", () => {
 
   test("is empty for an empty list", () => {
     expect(dropReasonTally([])).toBe("");
+  });
+});
+
+describe("the two delimiter families", () => {
+  test("partition RESCUE_DELIMS, with EMPHASIS as the explicit half", () => {
+    const { all, emphasis, bracket } = RESCUE_DELIM_FAMILIES;
+    expect([...emphasis, ...bracket].sort()).toEqual([...all].sort());
+    expect(emphasis.filter((d) => bracket.includes(d))).toEqual([]);
+    // The DIRECTION is the point. `bracket` is derived by subtraction, so a
+    // delimiter added to `RESCUE_DELIMS` for a new construct (`~~strike~~`) lands on
+    // the STRICT count-equality path until someone classifies it. Deriving
+    // `emphasis` instead reads tidier and fails OPEN — it would join the lenient
+    // parity path silently, with no compile error.
+    expect(emphasis).toEqual(["*", "`", "_"]);
+    expect(bracket).toEqual(["[", "]", "(", ")"]);
   });
 });
