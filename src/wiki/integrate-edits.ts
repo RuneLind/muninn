@@ -589,6 +589,10 @@ export interface EditOutcome {
   resolvedText?: string;
   beforeCtx?: string;
   afterCtx?: string;
+  /** The `"mark"`-mode rescue grew this range over an emphasis delimiter run it
+   *  cut ({@link growOverEmphasisRuns}) — carried so `markReason` can NAME the
+   *  adjustment, the way it names a link expansion or a one-line trim. */
+  grownOverEmphasis?: boolean;
 }
 
 export interface ApplyEditsResult {
@@ -655,7 +659,11 @@ function resolveRange(
  * `"mark"` — the range is only WRAPPED (`X` → `<Fact …>X</Fact>`); the inner text
  * survives byte-for-byte, and `renderInline` leaves a wrapper's body in the stream
  * for the bold/link passes, so `<Fact …>**Bold** rest</Fact>` renders exactly as
- * `**Bold** rest` did. The count-equality rule therefore has nothing left to
+ * `**Bold** rest` did. That equivalence holds for a BALANCED span and only for one
+ * — it is not a licence to wrap any range at all, which is why the relaxation is
+ * paired with {@link growOverEmphasisRuns}' odd-count precondition and with
+ * {@link finalSpanCutReason}, and why the run-parity test below replaces the count
+ * rule rather than removing it. The count-equality rule therefore has nothing left to
  * protect on the emphasis family and refuses the single most common legitimate
  * anchor there is: the claim extractor returns the READING text of a sentence
  * (`Norepinephrine acts as…`) while the body carries the SOURCE text
@@ -665,8 +673,10 @@ function resolveRange(
  *
  * What `"mark"` keeps, because wrapping does not make them safe:
  *  - the paragraph-break ban (a mapped range can be arbitrarily larger than `old`),
- *  - the {@link offsetInsideMarkup} EDGE test, which is what catches a range whose
- *    start sits offset inside a delimiter run,
+ *  - the {@link offsetInsideMarkup} EDGE test. NB it still binds for the BRACKET
+ *    family, but for the emphasis family it is unreachable by construction in this
+ *    mode: {@link growOverEmphasisRuns} runs first and terminates exactly when the
+ *    outside character stops being one of those three,
  *  - strict count-equality on the BRACKET family (`[`, `]`, `(`, `)`): wrapping
  *    half of a `[label](url)` still puts the tag inside link markup,
  *  - and, for the emphasis family, a RUN-PARITY test in place of count-equality —
@@ -704,9 +714,21 @@ export function dropReasonTally(dropped: { reason: string }[]): string {
 /** Markup delimiters whose balance a whitespace-rescued range must preserve. */
 const RESCUE_DELIMS = ["*", "`", "_", "[", "]", "(", ")"] as const;
 
-/** The EMPHASIS/code half of {@link RESCUE_DELIMS} — the ones a `"mark"`-mode
- *  rescue checks by run parity rather than by count equality. */
-const EMPHASIS_DELIMS = ["*", "`", "_"] as const;
+/** The LINK/bracket half of {@link RESCUE_DELIMS} — the family whose count
+ *  equality binds in BOTH rescue modes, because wrapping half a `[label](url)`
+ *  puts the tag inside link markup just as splicing it does. */
+const BRACKET_DELIMS: readonly string[] = ["[", "]", "(", ")"];
+
+/** The EMPHASIS/code half — the ones a `"mark"`-mode rescue checks by run parity
+ *  rather than by count equality. DERIVED from {@link RESCUE_DELIMS} rather than
+ *  re-listed: a delimiter added there for a new construct (`~~strike~~`) must land
+ *  in one family or the other, and a hand-kept subset would silently leave it on
+ *  the strict path with no compile error and a docblock still claiming otherwise. */
+const EMPHASIS_DELIMS: readonly string[] = RESCUE_DELIMS.filter(
+  (d) => !BRACKET_DELIMS.includes(d),
+);
+
+const EMPHASIS_DELIM_SET = new Set<string>(EMPHASIS_DELIMS);
 
 /** Runs (maximal consecutive stretches) of `ch` in `s`. A `**` pair is ONE run, so
  *  `**Bold** rest` answers 2 and `Bold** rest` answers 1 — the distinction
@@ -720,29 +742,57 @@ function countRuns(s: string, ch: string): number {
 }
 
 /**
- * Grow a `"mark"`-mode range outward over the emphasis/code delimiter RUNS its
- * edges sit inside — the step that makes the relaxation reach the case it exists
- * for.
+ * Grow a `"mark"`-mode range outward to COMPLETE an emphasis construct the range
+ * already cuts — never to acquire one it does not.
  *
  * `collapseWithMap` strips `*`/`_`/backtick, so the plain-text quote
- * `Norepinephrine acts as…` maps back to a range that STARTS after the opening
- * `**` and ENDS after the closing one: an unbalanced slice both the edge test and
- * the parity test correctly refuse. For a SPLICE that refusal is the whole point.
- * For a WRAP the honest repair is to take the construct whole — the wrapper
- * preserves its inner text, and `<Fact …>**Bold** rest</Fact>` renders exactly as
- * the source did (verified against `formatWebHtml`).
+ * `Norepinephrine acts as…` maps back to a range that starts AFTER the opening
+ * `**` and consumes the closing one. That slice carries an ODD number of `**`
+ * runs: it provably cuts a construct, and taking the rest of that construct is the
+ * honest repair — the wrapper preserves the inner text, and
+ * `<Fact …>**Bold** rest</Fact>` renders exactly as the source did.
  *
- * Deliberately narrow: only the emphasis family, and only over a contiguous run of
- * the SAME character. The parity + edge tests still run on the GROWN range, so a
- * stray literal `*` that this pulls in is refused exactly as it was before —
- * growing is an attempt, not a waiver.
+ * **The odd-count precondition is the safety property, not an optimisation.** An
+ * earlier spelling grew both edges unconditionally and two review passes
+ * reproduced the corruption in rendered HTML:
+ *  - `See **Alpha**|the middle words|**Beta** ok.` — the range cuts NOTHING (zero
+ *    runs), and growing anyway steals `Alpha`'s closer and `Beta`'s opener. That
+ *    is TWO runs, so a parity test waves it through, and `offsetInsideMarkup` sees
+ *    ordinary letters because it runs on the GROWN edges. Render: crossed tags,
+ *    `<strong>Alpha<span…></strong>the middle words<strong></span>Beta</strong>`.
+ *  - `**Norepinephrine acts here\nand there**` — same zero-run shape across a line
+ *    break; growing produced a balanced span that `factSpanForm` then trimmed back
+ *    to one unbalanced line (see `finalSpanCutReason`, which is the second half of
+ *    this guard and catches that one).
+ * With the precondition both are refused exactly as they were before this feature,
+ * which is what the pre-change `offsetInsideMarkup` edge test was already doing.
  *
- * The {@link ZONE_SENTINEL} test is DEFENSIVE and, on today's zone set, unreachable
- * — stated rather than pinned by a test. Expansion only steps onto a char that is
- * `*`, `_` or a backtick, so reaching a zone requires a zone to END on one of those
- * three; every zone kind ends on a line boundary (frontmatter `---`, a closing code
- * fence, the `factcheck:end` comment) or on the `>` of a line-anchored component
- * tag. It is kept because the zone set is the thing most likely to grow.
+ * For SAFETY the precondition is in fact redundant, and the proof is short enough
+ * to state: growth walks ONE contiguous run on ONE side per delimiter, so it adds
+ * exactly one run of that delimiter — an even (cuts-nothing) slice therefore always
+ * becomes odd, and the parity test refuses it. What the precondition buys is the
+ * honest REASON: the range never cut anything, so "starts or ends inside markdown
+ * formatting" is what happened, not "cuts through" — and the reviewer reads that
+ * line. It is pinned by asserting exactly that string.
+ *
+ * Per DELIMITER CHARACTER, and only over a contiguous run of that same character:
+ * an odd `*` count is completed with `*`, never with a neighbouring backtick. The
+ * side is chosen by which one actually carries that delimiter (left first — a cut
+ * construct's missing half is its opener whenever the quote ran past its closer,
+ * which is the common case).
+ *
+ * The parity + edge tests still run on the GROWN range, so a growth that lands
+ * somewhere unbalanced anyway is refused — growing is an attempt, not a waiver.
+ *
+ * The {@link ZONE_SENTINEL} test is DEFENSIVE and cold on today's zone set —
+ * stated rather than pinned, and stated correctly this time (two reviewers caught
+ * an earlier, wrong derivation). It is NOT that no zone begins or ends on one of
+ * these three characters: `findExclusionZones` ends a fenced zone at
+ * `offset + line.length`, i.e. ON the closing fence's last backtick, and begins one
+ * on the opening fence's first backtick. What keeps it cold is that a fence is
+ * LINE-ANCHORED, so the character between a fence zone and any prose is always the
+ * `\n` this loop stops at. The guard is kept because that is a property of the
+ * zone builder, not of this function.
  */
 function growOverEmphasisRuns(
   body: string,
@@ -750,12 +800,16 @@ function growOverEmphasisRuns(
   start: number,
   end: number,
 ): { start: number; end: number } {
-  const isDelim = (ch: string | undefined): boolean =>
-    ch !== undefined && (EMPHASIS_DELIMS as readonly string[]).includes(ch);
   let s0 = start;
-  while (s0 > 0 && isDelim(body[s0 - 1]) && masked[s0 - 1] !== ZONE_SENTINEL) s0--;
   let e0 = end;
-  while (e0 < body.length && isDelim(body[e0]) && masked[e0] !== ZONE_SENTINEL) e0++;
+  for (const d of EMPHASIS_DELIMS) {
+    if (countRuns(body.slice(s0, e0), d) % 2 === 0) continue; // cuts nothing of `d`
+    if (body[s0 - 1] === d) {
+      while (s0 > 0 && body[s0 - 1] === d && masked[s0 - 1] !== ZONE_SENTINEL) s0--;
+    } else if (body[e0] === d) {
+      while (e0 < body.length && body[e0] === d && masked[e0] !== ZONE_SENTINEL) e0++;
+    }
+  }
   return { start: s0, end: e0 };
 }
 
@@ -822,7 +876,7 @@ export function collapsedRescueRisk(
     // In `"mark"` mode the emphasis family is checked by run PARITY instead: the
     // wrapper preserves the inner text, so a balanced superset is safe and only a
     // CUT construct is not. The bracket family keeps count-equality in both modes.
-    if (mode === "mark" && (EMPHASIS_DELIMS as readonly string[]).includes(d)) {
+    if (mode === "mark" && EMPHASIS_DELIM_SET.has(d)) {
       if (countRuns(rawSlice, d) % 2 !== countRuns(old, d) % 2) {
         return "whitespace-rescued match would cut through markdown formatting";
       }
@@ -865,8 +919,10 @@ export function applyEdits(
     // THAT is rejected (see `growOverEmphasisRuns` / `collapsedRescueRisk`).
     let start = r.start;
     let end = r.end;
+    let grownOverEmphasis = false;
     if (r.tier === "collapsed" && mode === "mark") {
       const grown = growOverEmphasisRuns(body, masked, start, end);
+      grownOverEmphasis = grown.start !== start || grown.end !== end;
       start = grown.start;
       end = grown.end;
     }
@@ -888,6 +944,7 @@ export function applyEdits(
       end,
       tier: r.tier,
       resolvedText,
+      ...(grownOverEmphasis ? { grownOverEmphasis: true } : {}),
       beforeCtx: contextBefore(body, masked, start),
       afterCtx: contextAfter(body, masked, end),
     };
@@ -1191,6 +1248,9 @@ interface FactSpan {
   truncated?: boolean;
   trimmedMarker?: boolean;
   expandedOverLink?: boolean;
+  /** The tier-2 rescue grew this range over an emphasis delimiter run it cut
+   *  ({@link growOverEmphasisRuns}) — an adjustment `markReason` must name. */
+  grownOverEmphasis?: boolean;
 }
 
 /** Expand over any wikilink the range cuts, then guard the EXPANDED range — the
@@ -1222,8 +1282,52 @@ function withForm(
  * over a `[[wikilink]]` — which is the one adjustment that changes what text the
  * mark covers.
  */
+/**
+ * Why the FINAL mark span — the one `factSpanForm` settled on, after any growth,
+ * wikilink expansion, marker trim or one-line truncation — cannot be wrapped; null
+ * when it can.
+ *
+ * The rescue gate validates the range `applyEdits` resolved. `factSpanForm` may
+ * then SHRINK it (`longestLineRange` on a multi-line span), and the shrunk range
+ * was never re-checked: a legitimately-grown, balanced `**Bold text\nmore**` was
+ * trimmed to `**Bold text`, written to the page, and rendered as two literal
+ * asterisks with the bold gone. So the balance test is applied ONCE MORE at the
+ * end, on the bytes actually about to be wrapped.
+ *
+ * Even RUN counts per emphasis delimiter (see {@link countRuns} for why runs and
+ * not characters), plus the same neighbour test the rescue gate uses — a span
+ * whose first or last character sits directly against a delimiter of that family
+ * is offset inside a construct whichever tier put it there.
+ */
+function finalSpanCutReason(span: FactSpan, body: string): string | null {
+  // A span `expandOverWikilinks` widened to a whole `[[…]]` is EXEMPT from this
+  // check ENTIRELY — both halves — and that exemption is a standing decision, not
+  // an oversight. `renderWikiHtml` substitutes wikilinks over the RAW body before
+  // any code handling, so a `[[Page]]` inside backticks is a LIVE link, and a link
+  // STRADDLING a backtick (`[[Tidal \`Router]]`) is the link the renderer pairs —
+  // odd backtick count and all. Marking those whole is the documented behaviour
+  // (`src/web/CLAUDE.md`, pinned by `integrate-wikilink.test.ts`), because refusing
+  // trades durable damage — a link target replaced by markup — for a cosmetic one.
+  // Marking inside a code span that is NOT a link stays refused, and stays filed as
+  // the follow-up that suite already names.
+  if (span.expandedOverLink) return null;
+  const { start, end } = span;
+  const slice = body.slice(start, end);
+  for (const d of EMPHASIS_DELIMS) {
+    if (countRuns(slice, d) % 2 !== 0) {
+      return "the marked passage would cut through markdown formatting";
+    }
+  }
+  const outside = [body[start - 1], body[end]];
+  if (outside.some((ch) => ch !== undefined && EMPHASIS_DELIM_SET.has(ch))) {
+    return "the marked passage would start or end inside markdown formatting";
+  }
+  return null;
+}
+
 function markReason(span: FactSpan): string {
   const notes: string[] = [];
+  if (span.grownOverEmphasis) notes.push("expanded to cover the whole **formatting** span");
   if (span.expandedOverLink) notes.push("expanded to cover the whole [[wikilink]]");
   if (span.truncated) notes.push("trimmed to one line");
   if (span.trimmedMarker) notes.push("list or quote marker left outside the mark");
@@ -1484,6 +1588,15 @@ export function annotateEdits(input: AnnotateEditsInput): AnnotateEditsResult {
     const span = factSpanForm(body, o.start, o.end);
     if ("error" in span) {
       dropped.push({ edit: o.edit, reason: span.error });
+      continue;
+    }
+    if (o.grownOverEmphasis) span.grownOverEmphasis = true;
+    // The LAST word on markup safety, after every adjustment `factSpanForm` makes.
+    // The rescue gate validated the range it was handed; a `longestLineRange` trim
+    // can hand back a narrower one that is no longer balanced.
+    const cut = finalSpanCutReason(span, body);
+    if (cut) {
+      dropped.push({ edit: o.edit, reason: cut });
       continue;
     }
     // There is deliberately no wrapper-vs-CORRECTION re-test on the expanded range.

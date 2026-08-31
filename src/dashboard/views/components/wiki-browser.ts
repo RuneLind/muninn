@@ -137,6 +137,7 @@ import {
   INTEGRATE_NO_ANCHORS_COPY,
   INTEGRATE_STALE_COPY,
   appendBlockedCopy,
+  appendBlockedTone,
   shouldOpenDroppedList,
   INTEGRATE_STALE_COPY_EDIT,
   type DroppedEditRow,
@@ -1548,6 +1549,13 @@ interface AskTurn {
   // would come back enabled after a reload and the click would only ever 409
   // (whichever write happened staled this turn's baseHash).
   wrote?: string; // "append" | "integrate"
+  // Did that write actually persist a fact-check BLOCK (the `.mdx` `<FactCheck>`
+  // appendix or the `.md` `> [!factcheck]` callout)? PERSISTED for the same reason
+  // as `wrote`: the ➕ bar's copy AND its tone are derived from it at render time.
+  // Deliberately not inferred from `annotatable` — the apply route has an explicit
+  // no-block branch that an `.mdx` page reaches whenever every mark drops and the
+  // callout checkbox is off.
+  wroteBlock?: boolean;
   // Integrate-relevant body length of the checked page (from the `done` payload;
   // omitted for explainers). Drives the client-side page-too-long gate so ~10% of
   // pages don't have to learn it from a server 400.
@@ -1817,9 +1825,13 @@ function factcheckAppendInnerHtml(turn: AskTurn): string {
   }
   const blocked = appendBlockedByIntegrate(turn);
   const disabled = turn.answer && !blocked ? "" : " disabled";
+  // A write that COMPLETED is not an error. The tone and the words come from the
+  // same turn state, so the red class and the sentence can never disagree the way
+  // they did when the class was derived from `blocked` alone.
+  const tone = blocked && appendBlockedTone(turn) === "error" ? " error" : "";
   return (
     '<button id="wikiFactcheckAppendBtn" class="wiki-fc-append-btn"' + disabled + ">➕ Add to article</button>" +
-    '<span class="wiki-fc-append-msg' + (blocked ? " error" : "") + '" id="wikiFactcheckAppendMsg">' +
+    '<span class="wiki-fc-append-msg' + tone + '" id="wikiFactcheckAppendMsg">' +
     (blocked ? esc(appendBlockedCopy(turn)) : "") +
     "</span>"
   );
@@ -3389,7 +3401,7 @@ async function submitFactcheckAppend(): Promise<void> {
     if (res.status === 409 || data.stale) {
       btn.disabled = false;
       btn.textContent = prevLabel;
-      showErr("The page changed since the check — re-run the fact check, then add it.");
+      showErr(INTEGRATE_STALE_COPY);
       return;
     }
     if (!res.ok || !data.written) {
@@ -3704,6 +3716,11 @@ async function acceptFactcheckIntegrate(): Promise<void> {
     // persists on explicit calls, and this flag is what makes both write buttons
     // come back correctly disabled after a reload.
     turn.wrote = "integrate";
+    // What the write actually PERSISTED, not what the page's extension allows. The
+    // route sets `calloutAdded` on the one branch that splices a fact-check block,
+    // and the ➕ bar's copy + tone are derived from this on every later render
+    // (a reload included — the whole turn is serialized).
+    turn.wroteBlock = data.calloutAdded === true;
     integratedNotes[turn.askedAt] = copy;
     delete integrateBarMsgs[turn.askedAt];
     persistAskSession();
