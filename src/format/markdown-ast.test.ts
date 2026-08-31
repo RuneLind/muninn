@@ -9,6 +9,7 @@ import {
   parseChecklistItem,
   parseChecklist,
   scanInlineComponents,
+  type Block,
 } from "./markdown-ast.ts";
 
 describe("parseBlocks", () => {
@@ -567,5 +568,429 @@ describe("Fact: own-line = block, mid-text = inline, self-closing allowed", () =
     expect(scanInlineComponents('mid <FactCheck date="2026-07-29">x</FactCheck> line')).toEqual([
       { kind: "text", text: 'mid <FactCheck date="2026-07-29">x</FactCheck> line' },
     ]);
+  });
+});
+
+const NUL = String.fromCharCode(0);
+
+/**
+ * Every string anywhere in a parsed block tree.
+ *
+ * The NUL assertions below read THIS and not `JSON.stringify(blocks)` — that
+ * renders U+0000 as the six characters ` `, so a `.toContain(NUL)` over it
+ * can never match and every leak assertion written that way passes on the
+ * unfixed parser. (Written that way first; caught by the red run.)
+ */
+function allStrings(value: unknown): string[] {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) return value.flatMap(allStrings);
+  if (value && typeof value === "object") return Object.values(value).flatMap(allStrings);
+  return [];
+}
+const leaksNul = (blocks: Block[]) => allStrings(blocks).some((s) => s.includes(NUL));
+const hasCodeBlock = (blocks: Block[]) => blocks.some((b) => b.type === "code_block");
+
+// The fence grammar is a LINE grammar: an opener owns its line (<= 3 spaces of
+// indent), a closer is a bare run at least as long, the body is dedented by the
+// opener's indent. Before that, the extraction regex matched an opener anywhere
+// while the restore that turns a placeholder back into a block is anchored, so a
+// fence that did not own its line lost its code block and served a raw U+0000.
+describe("parseBlocks fence grammar", () => {
+  test("an indented fence is a code block, dedented by its opener's indent", () => {
+    // The ordinary "code block inside a numbered list" shape.
+    const blocks = parseBlocks("1. Step\n\n   ```bash\n   echo hi\n     nested\n   ```\n");
+    expect(blocks).toContainEqual({
+      type: "code_block",
+      lang: "bash",
+      code: "echo hi\n  nested",
+    });
+  });
+
+  test.each([1, 2, 3])("a fence indented by %i spaces is still a fence", (n) => {
+    const pad = " ".repeat(n);
+    expect(parseBlocks(`${pad}\`\`\`js\n${pad}x\n${pad}\`\`\``)).toEqual([
+      { type: "code_block", lang: "js", code: "x" },
+    ]);
+  });
+
+  test("a >= 4-space-indented fence is not a fence — and not a NUL either", () => {
+    // CommonMark calls this indented code. This AST has no indented-code block,
+    // so it degrades to a paragraph; what it must NEVER do is leak a placeholder.
+    const blocks = parseBlocks("    ```js\n    x\n    ```");
+    expect(hasCodeBlock(blocks)).toBe(false);
+    expect(leaksNul(blocks)).toBe(false);
+  });
+
+  test.each([
+    ["with a bare closer", "text ```ts\nconst a = 1;\n```"],
+    ["with a trailing-text closer", "text ```ts\nconst a = 1;\n``` more"],
+  ])("a fence delimiter starting mid-line is not a fence (%s)", (_name, md) => {
+    // The sibling leak: the placeholder landed on a line holding prose either
+    // side of it, and in the wiki reader the fence body's [[wikilink]] vanished.
+    // The bare-closer case is the one that reads the OPENER's line anchor —
+    // without it the closer rule alone already refuses the trailing-text case.
+    const blocks = parseBlocks(md);
+    expect(hasCodeBlock(blocks)).toBe(false);
+    expect(leaksNul(blocks)).toBe(false);
+    expect(allStrings(blocks).join("\n")).toContain("const a = 1;");
+  });
+
+  test("a 4-backtick fence is one code block, and 3 backticks do not close it", () => {
+    expect(parseBlocks("````\n```\nx\n```\n````")).toEqual([
+      { type: "code_block", lang: "", code: "```\nx\n```" },
+    ]);
+  });
+
+  test("a closer carrying trailing text does not close the fence", () => {
+    // CommonMark: a closing fence may be followed by spaces only. With no
+    // closer the fence is unclosed, which stays literal text — and, unlike
+    // before, keeps the whole line rather than a placeholder.
+    const blocks = parseBlocks("```js\nx\n``` and more");
+    expect(hasCodeBlock(blocks)).toBe(false);
+    expect(leaksNul(blocks)).toBe(false);
+    expect(allStrings(blocks).join("\n")).toContain("``` and more");
+  });
+
+  // ONE preservation pin follows: "an unclosed fence stays text" already held
+  // before the line walker, so it does not go red on the old parser. The
+  // backtick-info-string test below it is NOT one — it was strengthened to
+  // require a real fence after the decoy line, and in that form it IS red on
+  // the old parser. The earlier label here said "two"; review measured it false.
+  test("an unclosed fence stays text — a half-streamed delta must not flicker", () => {
+    const blocks = parseBlocks("```js\nconst x =");
+    expect(hasCodeBlock(blocks)).toBe(false);
+    expect(leaksNul(blocks)).toBe(false);
+  });
+
+  test("a line whose info string holds a backtick opens nothing", () => {
+    // ```x``` is inline code the line happens to start with, not a fence. A
+    // REAL fence has to follow it: treated as an opener, that line swallows
+    // everything down to the next bare closer, so the js fence below it
+    // disappears and the prose becomes code — which is the failure this pins,
+    // and it is invisible when nothing closes.
+    const blocks = parseBlocks("```x```\nordinary prose\n\n```js\nreal code\n```");
+    expect(blocks.filter((b) => b.type === "code_block")).toEqual([
+      { type: "code_block", lang: "js", code: "real code" },
+    ]);
+    expect(allStrings(blocks).join("\n")).toContain("ordinary prose");
+    expect(leaksNul(blocks)).toBe(false);
+  });
+
+  test("lang is the info string's leading token, and the rest is dropped", () => {
+    expect(parseBlocks('```ts title="x"\nconst a = 1;\n```')).toEqual([
+      { type: "code_block", lang: "ts", code: "const a = 1;" },
+    ]);
+    expect(parseBlocks("```objective-c\nint x;\n```")).toEqual([
+      { type: "code_block", lang: "objective-c", code: "int x;" },
+    ]);
+  });
+
+  test("a placeholder-shaped string in the input is text, not a code block", () => {
+    // U+0000 is not typable prose, but a page's bytes can hold this shape — the
+    // live jarvis log.md holds NULs — and dereferencing an index no fence wrote
+    // threw, killing the shared renderer for chat, Telegram, Slack and email at
+    // once. The per-parse marker means such a string is not a placeholder at
+    // all, so it stays the text it was: no throw, no block, nothing deleted.
+    for (const md of [`${NUL}CB5${NUL}`, `${NUL}CB12${NUL}`, `\`\`\`js\nx\n\`\`\`\n\n${NUL}CB7${NUL}`]) {
+      const blocks = parseBlocks(md);
+      expect(blocks.filter((b) => b.type === "code_block")).toHaveLength(md.startsWith("```") ? 1 : 0);
+      expect(allStrings(blocks).join("\n")).toContain(`${NUL}CB`);
+    }
+  });
+});
+
+// ── The fence grammar's state space, enumerated ─────────────────────────────
+// Round 1 of review on this PR produced five findings that were all the SAME
+// defect: a claim about the grammar written into a comment instead of computed.
+// So the grammar is TABULATED here rather than described anywhere — every axis
+// (opener indent, run length, info string, mid-line, closer indent/run/tail,
+// unclosed) gets at least one row, `axisCoverage` fails if an axis loses its
+// last row, and the docs point here instead of restating.
+//
+// `summarize` is deliberately lossy in one direction only: it names every
+// code_block a parse produced, so "no code block" and "this exact block" are
+// both expressible and neither can be satisfied by accident.
+function summarize(blocks: Block[]): string {
+  const codes = blocks
+    .filter((b): b is Extract<Block, { type: "code_block" }> => b.type === "code_block")
+    .map((b) => `code[${b.lang}]${JSON.stringify(b.code)}`);
+  return codes.length === 0 ? "none" : codes.join(" + ");
+}
+
+const B = "`".repeat(3);
+const FENCE_CASES: { axis: string; md: string; want: string }[] = [
+  // opener indent
+  { axis: "opener-indent", md: `${B}js\nx\n${B}`, want: 'code[js]"x"' },
+  { axis: "opener-indent", md: ` ${B}js\n x\n ${B}`, want: 'code[js]"x"' },
+  { axis: "opener-indent", md: `   ${B}js\n   x\n   ${B}`, want: 'code[js]"x"' },
+  { axis: "opener-indent", md: `    ${B}js\n    x\n    ${B}`, want: "none" },
+  // opener run length
+  { axis: "opener-run", md: "`js\nx\n`", want: "none" },
+  { axis: "opener-run", md: "``js\nx\n``", want: "none" },
+  { axis: "opener-run", md: `${B}${B}\nx\n${B}${B}`, want: 'code[]"x"' },
+  // a longer opener is not closed by a shorter run
+  { axis: "closer-run", md: "````\n```\nx\n```\n````", want: 'code[]"```\\nx\\n```"' },
+  { axis: "closer-run", md: "````js\nx\n```", want: "none" },
+  { axis: "closer-run", md: "```js\nx\n`````", want: 'code[js]"x"' },
+  // closer indent — same 0-3 bound as the opener
+  { axis: "closer-indent", md: `${B}js\nx\n   ${B}`, want: 'code[js]"x"' },
+  { axis: "closer-indent", md: `${B}js\nx\n    ${B}`, want: "none" },
+  // closer tail
+  { axis: "closer-tail", md: `${B}js\nx\n${B}   `, want: 'code[js]"x"' },
+  { axis: "closer-tail", md: `${B}js\nx\n${B}\t`, want: 'code[js]"x"' },
+  { axis: "closer-tail", md: `${B}js\nx\n${B} and more`, want: "none" },
+  // info string -> lang
+  { axis: "info-lang", md: `${B}\nx\n${B}`, want: 'code[]"x"' },
+  { axis: "info-lang", md: `${B}objective-c\nx\n${B}`, want: 'code[objective-c]"x"' },
+  { axis: "info-lang", md: `${B}c++\nx\n${B}`, want: 'code[c++]"x"' },
+  { axis: "info-lang", md: `${B}c#\nx\n${B}`, want: 'code[c#]"x"' },
+  { axis: "info-lang", md: `${B}asp.net\nx\n${B}`, want: 'code[asp.net]"x"' },
+  { axis: "info-lang", md: `${B}ts title="x"\nx\n${B}`, want: 'code[ts]"x"' },
+  { axis: "info-lang", md: `${B} ts\nx\n${B}`, want: 'code[ts]"x"' },
+  { axis: "info-lang", md: `${B}ts!!\nx\n${B}`, want: 'code[ts]"x"' },
+  // a backtick in a backtick fence's info string is not a fence at all
+  { axis: "info-backtick", md: "```x```\nprose\n\n```js\nreal\n```", want: 'code[js]"real"' },
+  // mid-line opener
+  { axis: "midline", md: `text ${B}ts\nx\n${B}`, want: "none" },
+  { axis: "midline", md: `text ${B}ts\nx\n${B} more`, want: "none" },
+  // unclosed
+  { axis: "unclosed", md: `${B}js\nconst x =`, want: "none" },
+  // body handling
+  { axis: "body", md: `${B}js\nx\n\n\n${B}`, want: 'code[js]"x"' },
+  { axis: "body", md: `${B}js\n\nx\n${B}`, want: 'code[js]"\\nx"' },
+  { axis: "body", md: `  ${B}js\n    x\n  y\n  ${B}`, want: 'code[js]"  x\\ny"' },
+  { axis: "body", md: `  ${B}js\nx\n  ${B}`, want: 'code[js]"x"' },
+  // tildes are not fences here
+  { axis: "tilde", md: "~~~js\nx\n~~~", want: "none" },
+  // The futility memo's edge: a LONGER opener finding no closer must not
+  // silence a later SHORTER one, which a 3-backtick closer can still close.
+  // (The mirror case is not expressible: for a 3-run opener to fail there must
+  // be no bare delimiter left in the document at all, and then a longer opener
+  // after it cannot close either. That is the memo's soundness argument, and it
+  // is why there is no row for it rather than an unfailable one.)
+  { axis: "scan-memo", md: "`````\nA\n\n```ts\ny\n```", want: 'code[ts]"y"' },
+];
+
+describe("the fence grammar, tabulated", () => {
+  test.each(FENCE_CASES)("$axis: $md", ({ md, want }) => {
+    expect(summarize(parseBlocks(md))).toBe(want);
+  });
+
+  test("every axis still has at least one row", () => {
+    const axes = new Set(FENCE_CASES.map((c) => c.axis));
+    expect([...axes].sort()).toEqual([
+      "body",
+      "closer-indent",
+      "closer-run",
+      "closer-tail",
+      "info-backtick",
+      "info-lang",
+      "midline",
+      "opener-indent",
+      "opener-run",
+      "scan-memo",
+      "tilde",
+      "unclosed",
+    ]);
+  });
+});
+
+describe("what an UNCLOSED fence actually does", () => {
+  // NOT "stays literal text" — an earlier revision of this file and of
+  // src/web/CLAUDE.md both said that, and both were wrong. The lines are handed
+  // to the ordinary block parser, so headings, lists and COMPONENTS inside an
+  // unclosed fence render. Computed, and pinned so the doc cannot drift back.
+  test("its body is parsed as ordinary markdown, components included", () => {
+    const blocks = parseBlocks("````js\n# heading\n- item\n<Callout>boom</Callout>\n```");
+    expect(blocks.map((b) => b.type)).toEqual(["text", "heading", "ul", "component", "text"]);
+  });
+});
+
+describe("the placeholder namespace is unforgeable", () => {
+  // FOUR designs have defended this, and the first three each shipped their own
+  // defect — a one-pass sanitiser that reassembled a live placeholder from a
+  // nested spelling and threw; the same loop bounded at 10, which left a raw NUL
+  // or a FORGED DUPLICATE of a real fence's block at its bound; unbounded, which
+  // was quadratic in time. The fourth, a per-parse `~` marker compiled into a
+  // per-parse regex, was unforgeable but grew the PATTERN with the input and hit
+  // JavaScriptCore's 2^20 cap, throwing out of all five renderers on a 1.05 MB
+  // page. What they have in common is defending a namespace the input can spell.
+  // The ids are DISJOINT now: one scan reads the ids the input already spells and
+  // the allocator never issues one, so a forged placeholder names an empty slot
+  // and stays text. Depth is still an axis here because it is the one every
+  // bounded design got wrong.
+  const nest = (d: number) => {
+    let s = `${NUL}CB0${NUL}`;
+    for (let i = 0; i < d; i++) s = `${NUL}C${s}B0${NUL}`;
+    return s;
+  };
+  const shapes: [string, string][] = [
+    ["flat", `${NUL}CB5${NUL}`],
+    ["multi-digit", `${NUL}CB12${NUL}`],
+    ["marker-shaped", `${NUL}CB~0${NUL}`],
+    ["longer marker-shaped", `${NUL}CB~~~~~~~~~~0${NUL}`],
+    ...([0, 1, 2, 9, 10, 11, 12, 25].map((d) => [`nested x${d}`, nest(d)]) as [string, string][]),
+  ];
+  test.each(shapes)("%s: no throw, and no block the page did not write", (_name, forged) => {
+    for (const [md, realFences] of [
+      [forged, 0],
+      [`\`\`\`js\nREAL\n\`\`\`\n\n${forged}`, 1],
+    ] as const) {
+      let blocks: Block[] = [];
+      expect(() => (blocks = parseBlocks(md))).not.toThrow();
+      const codes = blocks.filter((b) => b.type === "code_block");
+      // EXACTLY, not <=: a one-sided bound also passes when the real fence is
+      // dropped, which is the other direction this has to catch.
+      expect(codes).toHaveLength(realFences);
+      // Nothing was deleted from the page either — the forged text is still
+      // text. Round 2 scrubbed it; scrubbing is what kept going wrong.
+      expect(allStrings(blocks).join("\n")).toContain(`${NUL}CB`);
+    }
+  });
+
+  test("CRLF is normalized before anything else looks at the text", () => {
+    // A preservation pin, not a red->green. `rendered-code.ts` documents this
+    // as the first of four reasons its scan reads the RENDERED html rather than
+    // the markdown ("a raw-body scan finds no fence at all in a CRLF file").
+    // NB an earlier version of this comment said the property was "pinned
+    // nowhere" — false: `normalizes \r\n to \n` above predates this change and
+    // kills the same mutant. What it does not cover is a fence BODY, which is
+    // the angle this adds.
+    expect(parseBlocks("```js\r\nx\r\n```")).toEqual([
+      { type: "code_block", lang: "js", code: "x" },
+    ]);
+  });
+
+  test("an id the input spells is never allocated, so it cannot be stolen", () => {
+    // The property the whole design rests on, computed rather than argued. The
+    // forged id is exactly the one a naive allocator would hand the first fence,
+    // so a mechanism that ignored the input would render the forged line as the
+    // fence's block — the FORGERY failure, from the other direction.
+    const blocks = parseBlocks(`${NUL}CB0${NUL}\n\n\`\`\`js\nREAL\n\`\`\``);
+    expect(blocks.filter((b) => b.type === "code_block")).toEqual([
+      { type: "code_block", lang: "js", code: "REAL" },
+    ]);
+    expect(allStrings(blocks).join("\n")).toContain(`${NUL}CB0${NUL}`);
+  });
+
+  test("CONSECUTIVE taken ids are all skipped, not just the first", () => {
+    // The allocator's skip is a `while`, and a `while` -> `if` mutant survived
+    // every earlier test in this file: one skip step is enough whenever the
+    // taken ids are non-adjacent, which every other case here happens to make
+    // them. With 0 and 1 both forged, `if` hands the fence id 1 and the second
+    // forged line renders as a DUPLICATE of the real block — the forgery this
+    // whole mechanism exists to prevent, found by review, not by the suite.
+    const blocks = parseBlocks(`${NUL}CB0${NUL}\n\n${NUL}CB1${NUL}\n\n\`\`\`js\nSECRET\n\`\`\``);
+    expect(blocks.filter((b) => b.type === "code_block")).toEqual([
+      { type: "code_block", lang: "js", code: "SECRET" },
+    ]);
+  });
+
+  test("ids are read in DECIMAL, so 8 and 9 are not silently free", () => {
+    // `parseInt(digits, 10)` — the radix is explicit, and a radix-8 mutant
+    // survived: "8" and "9" become NaN, so those ids never enter `taken` and
+    // the allocator hands them out. Twelve fences reach id 8, so a page that
+    // spells 8 and 9 would then have two of its blocks forged.
+    const fences = Array.from({ length: 12 }, (_, i) => `\`\`\`js\nF${i}\n\`\`\``).join("\n\n");
+    const blocks = parseBlocks(`${NUL}CB8${NUL}\n\n${NUL}CB9${NUL}\n\n${fences}`);
+    expect(blocks.filter((b) => b.type === "code_block")).toHaveLength(12);
+    expect(allStrings(blocks).join("\n")).toContain(`${NUL}CB8${NUL}`);
+  });
+
+  test("an OVERLAPPING placeholder pair cannot forge a block", () => {
+    // `matchAll` consumes the trailing NUL of a match, so it cannot see an
+    // occurrence that starts on it: `\x00CB1\x00CB2\x00` yields id 1 only,
+    // while `\x00CB2\x00` really does occur at offset 4 — and 2 IS then
+    // allocated. Harmless for a reason the code has to keep: an overlap-hidden
+    // occurrence always has the previous match's digits immediately before it,
+    // so it is never leftmost on its line, and the restore is anchored.
+    const fences = Array.from({ length: 4 }, (_, i) => `\`\`\`js\nF${i}\n\`\`\``).join("\n\n");
+    const blocks = parseBlocks(`${NUL}CB1${NUL}CB2${NUL}\n\n${fences}`);
+    expect(blocks.filter((b) => b.type === "code_block")).toHaveLength(4);
+    expect(allStrings(blocks).join("\n")).toContain(`${NUL}CB1${NUL}CB2${NUL}`);
+  });
+
+  test("collision is decided by VALUE, so a leading-zero spelling cannot steal a slot", () => {
+    // The restore reads the digits with parseInt, so `\x00CB007\x00` and
+    // `\x00CB7\x00` are the same slot. Comparing the spellings instead would let
+    // the padded form through — it would not be in `taken`, id 7 would be
+    // allocated, and the forged line would render as that fence's block.
+    const forged = `${NUL}CB007${NUL}`;
+    const fences = Array.from({ length: 9 }, (_, i) => `\`\`\`js\nF${i}\n\`\`\``).join("\n\n");
+    const blocks = parseBlocks(`${forged}\n\n${fences}`);
+    expect(blocks.filter((b) => b.type === "code_block")).toHaveLength(9);
+    expect(allStrings(blocks).join("\n")).toContain(forged);
+  });
+
+  test("a huge placeholder-shaped run does not throw out of any formatter", () => {
+    // The round-3 design compiled the marker into a per-parse regex, so the
+    // PATTERN grew with the input and hit JavaScriptCore's 2^20 cap. Measured to
+    // the character on that design: 1 048 558 tildes parse, 1 048 559 throw
+    // `Invalid regular expression: regular expression too large` — out of
+    // formatWebHtml, renderWikiHtml, renderAskAnswerHtml, formatTelegramHtml and
+    // formatSlackMrkdwn alike, on a 1.05 MB page. Nothing is built from input
+    // now, so size is not a cliff; this walks well past where the cap was.
+    const md = `intro\n\n${NUL}CB${"~".repeat(1_100_000)}\n\n\`\`\`js\nx\n\`\`\`\n`;
+    let blocks: Block[] = [];
+    expect(() => (blocks = parseBlocks(md))).not.toThrow();
+    expect(blocks.filter((b) => b.type === "code_block")).toHaveLength(1);
+  });
+
+  test("a fence inside a component body still resolves when the page carries a forged id", () => {
+    // The store is threaded through the recursive component parse, and with no
+    // forged id on the page every allocation scheme agrees, so an ordinary
+    // component+fence test cannot tell them apart. This one can: the page's
+    // forged id shifts the allocation, and a body parsed against the wrong store
+    // loses the block and serves the raw NUL that this whole change removes.
+    const blocks = parseBlocks(
+      `${NUL}CB0${NUL} stray\n\n<Callout tone="info">\n\n\`\`\`ts\nconst x = 1;\n\`\`\`\n\n</Callout>`,
+    );
+    const callout = blocks.find((b) => b.type === "component");
+    expect(callout && callout.type === "component" ? callout.children : []).toContainEqual({
+      type: "code_block",
+      lang: "ts",
+      code: "const x = 1;",
+    });
+  });
+
+  test("nested spelling, ~320 KB, parses in well under a second", () => {
+    // The looped sanitiser was O(n^2) on NESTED input: 298 ms at 80 KB, 1.2 s at
+    // 160 KB, 4.8 s at 320 KB, blocking the process, per streaming delta. One
+    // scan now. 2000 ms separates the two by ~30x without being tight on CI.
+    //
+    // There is deliberately NO sibling case for the one-long-run shape, which an
+    // earlier revision of this file had. That shape cost the per-parse-marker
+    // design ~34 ms — 59x inside this bound — so the assertion was green on the
+    // design it named and could not be pushed over the bound by any mutation of
+    // this one. A test that cannot fail is worse than no test: it reads as
+    // coverage. The long-run REGRESSION is pinned instead by "a huge
+    // placeholder-shaped run does not throw", which is a behaviour red.
+    const t0 = performance.now();
+    parseBlocks(nest(40_000));
+    expect(performance.now() - t0).toBeLessThan(2000);
+  });
+});
+
+describe("the closer scan is not quadratic", () => {
+  // `parseBlocks` re-runs on every streaming chat delta, so an opener that
+  // re-scans the whole tail is a hot-path cost, not a theoretical one. The
+  // trigger is not adversarial: a page whose fences all close with trailing
+  // text (``` end) has no valid closer at all under CommonMark, so every
+  // opener scanned to EOF. Measured on this machine before the memo:
+  // 1500 lines 45 ms, 3000 152 ms, 6000 632 ms, 12000 2436 ms, 24000 9848 ms —
+  // 4x per doubling. After: single-digit ms at 24000.
+  test("24k lines of never-closing fences parse in well under a second", () => {
+    const lines: string[] = [];
+    for (let i = 0; i < 8000; i++) lines.push("```js", `x${i}`, "``` end");
+    const md = lines.join("\n");
+    const t0 = performance.now();
+    const blocks = parseBlocks(md);
+    const ms = performance.now() - t0;
+    // None of them close, so none is extracted — the point is the time.
+    expect(blocks.some((b) => b.type === "code_block")).toBe(false);
+    // 2000 ms is ~5x the pre-memo cost of the HALF-size document and ~100x the
+    // post-memo cost of this one, so it separates the two without being tight
+    // on a slow CI runner.
+    expect(ms).toBeLessThan(2000);
   });
 });

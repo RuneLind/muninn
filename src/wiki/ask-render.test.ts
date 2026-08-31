@@ -192,6 +192,37 @@ test("a citation-shaped marker inside a ts fence survives rendering", () => {
 });
 
 /**
+ * The ask path's half of the fence grammar's info-string rule.
+ *
+ * A citation marker written in an INFO STRING is parked there like any other,
+ * and everything past the lang token is discarded — CommonMark's rule. Round 1
+ * of review on the fence line walker tried to rescue that marker by refusing
+ * the opener, which left the fence's CLOSING delimiter in the stream as a fresh
+ * opener and swallowed the following prose and the next code block whole. That
+ * was measured on THIS path and pinned only on the wiki one, so it is pinned
+ * here too: the coverage claim was the thing that was wrong.
+ */
+test("a citation marker in a fence's info string does not swallow the page", () => {
+  const citations = [
+    { title: "Page one", pageName: "Page One", url: "", snippet: "" },
+  ] as unknown as Citation[];
+  const html = renderAskAnswerHtml(
+    "```bash [1]\nsee [1]\n```\n\nafter\n\n```js\nreal();\n```",
+    citations,
+  );
+
+  expect(html.match(/<pre>/g) ?? []).toHaveLength(2);
+  expect(html).toContain('<code class="language-bash">');
+  expect(html).toContain('<code class="language-js">');
+  // The prose between the two fences is not inside either of them.
+  expect(html.slice(html.indexOf("</pre>"), html.lastIndexOf("<pre>"))).toContain("after");
+  // And the marker in the fence BODY is still literal code, not a chip.
+  expect(html).not.toContain("wiki-ask-cite");
+  expect(html.replace(/<[^>]*>/g, "")).toContain("see [1]");
+  expect(html).not.toContain("\u0000");
+});
+
+/**
  * `[1]` is ordinary syntax in almost every language an answer quotes, so the
  * unscoped parking pass turned `arr[1]` inside a fence into a clickable citation
  * and deleted the subscript from the code's own text. Same guard, same reason and

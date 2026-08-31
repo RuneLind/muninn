@@ -27,9 +27,11 @@
  *  - **The same thing read backwards**: a link the scanner thought was in prose
  *    stops being parked, so a working link on that line renders as literal
  *    brackets — an OVER-skip, the failure direction this guard must not have.
- *  - **A fence delimiter that starts or ends mid-line.** The renderer replaces
- *    the fence with a placeholder and joins the text either side onto ONE line,
- *    where two lone backticks then pair; a line-wise scanner sees neither.
+ *  - **A line SHAPED like a fence delimiter that is not one.** A run of
+ *    backticks that does not start its line, or whose info string holds a
+ *    backtick, opens no fenced block (CommonMark), so the line stays PROSE and
+ *    its own backticks pair into an inline span. A line-wise scanner reads the
+ *    same line as a delimiter and puts the region somewhere else entirely.
  *
  * ⚠️ **What it costs to read the output instead: this module has to know EVERY
  * container the renderer uses for code, and there are two — not one.** The first

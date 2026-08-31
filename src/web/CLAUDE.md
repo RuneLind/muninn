@@ -2,6 +2,102 @@
 
 `src/web/web-format.ts` converts AI markdown to HTML for web chat (server side; client mirror in `src/chat/views/components/web-format-client.ts`). This file also documents the **fact-check annotation pair**, whose code spans `src/web/`, `src/format/`, `src/wiki/`, and `src/dashboard/` — this is the one authority page for it.
 
+## What counts as a fenced code block
+
+`parseBlocks` (`src/format/markdown-ast.ts`) extracts every fence into a
+`FenceStore` and leaves a `\x00CB<id>\x00` placeholder, which the block walker
+turns back into a `code_block` only when the placeholder is the WHOLE line
+(`CODE_PLACEHOLDER_RE` is anchored). The extractor is therefore a **line walker**,
+not a regex sweep — anything left on a placeholder's line breaks the restore and
+serves a raw U+0000 to the browser with the code block gone. Measured across the
+two wikis on 2026-08-30 before the walker landed — every `.md`/`.mdx` under
+`mimir/` and under `huginn/huginn-jarvis/data/wiki/`, excluding `.git` and
+`node_modules` — **42 of 1571 pages leaked 130 NULs**, from two ordinary shapes:
+an indented fence (the "code block inside a numbered list") and a fence
+delimiter starting mid-line. Both wikis are live working trees and most of the
+jarvis wiki is untracked, so the page count drifts daily; mimir `d7b6cdb` /
+huginn `7d69031` name the moment rather than a checkout anyone can restore.
+
+**The grammar is tabulated, not described.** `markdown-ast.test.ts`'s "the fence
+grammar, tabulated" enumerates every axis — opener indent, run length, info
+string, mid-line, closer indent/run/tail, unclosed, the scan memo's edge — and
+fails if an axis loses its last row. Read it rather than trusting the summary
+below: a review round on this change produced five findings that were all the
+same defect, a property of the grammar asserted in a comment instead of computed.
+
+The parts that bite:
+
+- An **opener owns its line**, with at most 3 leading spaces. A 4th space is
+  indented code to CommonMark; this AST has no indented-code block, so such a
+  line degrades to a paragraph rather than to a fence.
+- A **closer is a bare run** of the same character, at least as long as the
+  opener's, with nothing but spaces after it. So a 4-backtick fence really does
+  need 4 backticks to close, and ```` ``` and more ```` closes nothing.
+- The **body is dedented** by the opener's own indent.
+- A backtick fence's **info string may not contain a backtick**, so a prose line
+  that starts with inline code (```` ```x``` ````) opens nothing. Without that
+  rule it swallows the page down to the next bare closer.
+- An **unclosed fence is not extracted** — pre-existing behaviour, the old regex
+  needed a closer too. It does *not* mean the body is literal: those lines reach
+  the ordinary block parser, so a heading, a list or a `<Callout>` inside an
+  unclosed fence renders. CommonMark would run it to EOF as code instead; that
+  is a separate change (exactly one page in 1571 carries an unclosed fence).
+- A **closer obeys the same ≤3-space indent bound as the opener**, so a closer
+  indented 4+ spaces closes nothing and the region degrades to markdown.
+- Tildes (`~~~`) are **not** fences here. Neither wiki contains one; adding them
+  is a separate change with its own corpus diff.
+
+Two things ride on this that are easy to miss. `lang` is the info string's
+leading `[A-Za-z0-9_+#.-]*` run and nothing wider, because
+`bot/telegram-format.ts` interpolates it into `class="language-${lang}"` with no
+escaping — pinned by the hostile-info-string cases in
+`markdown-all-platforms.test.ts`, not by this paragraph.
+
+**Placeholder ids are DISJOINT from the input's, and the input is never
+rewritten.** One linear scan (`takenCodeIds`) reads every id a `\x00CB<n>\x00` in
+the input already spells — by *value*, so a padded `\x00CB007\x00` cannot steal
+slot 7 — and the allocator never issues one of them. A forged placeholder
+therefore names a slot nothing filled, `store.blocks.get(id)` is `undefined`, and
+the walker leaves the line as the text it always was.
+
+That matters because U+0000 *does* occur in the corpus — the live jarvis `log.md`
+carries two literal NUL bytes — and a `\x00CB<n>\x00` in the input used to deref
+slot `n` and **throw**, taking down the shared renderer for chat, Telegram, Slack
+and email at once. **Four designs have defended this and the first three each
+shipped their own defect**, which is why the current one looks the way it does:
+
+1. a one-pass sanitiser — *manufactures* a live placeholder out of a nested
+   spelling (`\x00C` + `\x00CB0\x00` + `B0\x00` → `\x00CB0\x00`) and throws;
+2. the same loop bounded at 10 — at nesting depth 10 it stops early and leaves a
+   raw NUL, or, beside any real fence, a **forged duplicate** of that block;
+3. unbounded — terminates, but quadratic in *time* (4.8 s on 320 KB, blocking the
+   process, per streaming delta);
+4. a per-parse `~` **marker** compiled into a per-parse regex — unforgeable, but
+   the pattern grew with the input and JavaScriptCore caps a pattern at 2²⁰: a
+   1.05 MB page threw `regular expression too large` out of **all six** entry
+   points — web, wiki, ask, Telegram, Slack and **email**, the one an earlier
+   count of "five renderers" left out, and it threw like the rest (measured to
+   the character — 1 048 558 tildes parse, 1 048 559 throw).
+
+Three of those defend a forgeable namespace by rewriting the input and one by
+growing the pattern. Disjoint ids need neither: nothing is rewritten, nothing is
+built from input, and the placeholder stays a constant handful of characters.
+The **total deref is the mechanism, not a backstop** — it is what a forged id
+lands on, reachable from a one-line page and pinned as such. `wiki/render.ts` and
+`wiki/ask-render.ts` park their own `\x00` sentinels across this call; they carry
+no `\x00CB`, so they cannot move an id, and a fallen-through placeholder carries
+no `WIKIPAGELINK`/`ASKCITE`, so it cannot collide with either restore.
+
+**Nothing but a backtick refuses an opener**, and that restraint is load-bearing.
+A refused opener does not leave "just that line as prose": the fence's closing
+delimiter stays in the stream and is itself an opener, so the rest of the
+document re-pairs one delimiter over. A review round added a second refusal — an
+info string holding a parked wikilink sentinel, to save the link from being
+discarded with the rest of the info string — and it swallowed the following prose
+and the next code block into one lang-less block. Everything past the lang token
+is discarded, sentinel included; that is CommonMark's rule, the same one that
+drops `title="x"`.
+
 ## Syntax highlighting in fenced code blocks
 
 `code_block` (and `AnnotatedCode`, through the shared `codeFenceHtml`) runs the body through `highlightCode` (`src/format/highlight.ts`), which emits `<span class="tok-*">` for seven token classes; the colors are `--tok-*` in `shared-styles.ts`, so both themes come from one palette and a theme flip costs nothing at render time. Languages are the ones the wikis actually use (ts/js/kotlin/java, sql, shell, json, yaml); `html`, `mermaid`, `diff` and anything unknown fall through to plain `escapeHtml`.
@@ -54,9 +150,13 @@ divergences, all four now regression tests in `render.test.ts`:
 - **The same shift read backwards**: a link the scan believed was inside code
   stopped being parked, and a working prose link rendered as literal brackets.
   A regression, in the direction the guard exists to prevent.
-- **A fence delimiter starting or ending mid-line.** The renderer swaps the fence
-  for a placeholder and joins the text either side onto ONE line, where two lone
-  backticks pair; a line-wise scan sees neither.
+- **A line SHAPED like a fence delimiter that is not one.** A backtick run that
+  does not start its line, or whose info string holds a backtick, opens no fenced
+  block (CommonMark), so the line stays PROSE and its own backticks pair into an
+  inline span; a line-wise scan reads the same line as a delimiter and puts the
+  region somewhere else. (Before `parseBlocks`' extractor became a line walker
+  the same input diverged for a different reason: the mid-line placeholder joined
+  the text either side onto one line.)
 
 ⚠️ **What reading the output costs instead: the scan has to know every container
 the renderer uses for code, and there are TWO.** The first revision assumed one,

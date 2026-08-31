@@ -969,3 +969,66 @@ describe("Fact claim numbers are digits-only, and claim ids are unique", () => {
     expect(out).toContain("B.");
   });
 });
+
+const NUL = String.fromCharCode(0);
+
+// An indented fence — the "code block inside a numbered list" shape — used to
+// leave an anchored placeholder on a line that also held the indent, so all FOUR
+// formatters dropped the block and served a raw U+0000. The fix is in the shared
+// AST, so all four move together; this is the column that proves it.
+describe("indented fenced code block (inside a list)", () => {
+  const md = "1. Step\n\n   ```ts\n   const x = 1;\n   ```";
+  test("no platform serves a U+0000", () => {
+    for (const out of [
+      formatWebHtml(md),
+      formatTelegramHtml(md),
+      formatSlackMrkdwn(md),
+      formatEmailHtml(md),
+    ]) {
+      expect(out.includes(NUL)).toBe(false);
+    }
+  });
+  test("web → pre/code with language class", () =>
+    expect(stripTokenSpans(formatWebHtml(md))).toContain(
+      '<pre><code class="language-ts">const x = 1;</code></pre>',
+    ));
+  test("telegram → pre/code with language class", () =>
+    expect(formatTelegramHtml(md)).toContain(
+      '<pre><code class="language-ts">const x = 1;</code></pre>',
+    ));
+  test("slack → triple-backtick block", () =>
+    expect(formatSlackMrkdwn(md)).toContain("```\nconst x = 1;\n```"));
+  test("email → styled <pre>", () => {
+    const out = formatEmailHtml(md);
+    expect(out).toContain("<pre style=");
+    expect(out).toContain("<code>const x = 1;</code>");
+  });
+});
+
+// `telegram-format.ts` interpolates `block.lang` into `class="language-${lang}"`
+// with NO escaping — the one place a fence's info string reaches an HTML
+// attribute raw, and the reason `FENCE_LANG_RE` is a narrow charset rather than
+// "the info string's first word". COMPUTED here from hostile info strings, not
+// asserted in a comment. This one is a mutation-checked guard, not a red→green
+// test: before the line walker such an info string opened no fence at all, so
+// there was no attribute to break.
+describe("a fence's info string can never break an HTML attribute", () => {
+  const hostile = [
+    '```ts" onload="alert(1)',
+    "```ts' onload='alert(1)",
+    "```ts><script>alert(1)</script>",
+    "```ts&amp;",
+    "```ts x=1",
+  ];
+  test.each(hostile)("%j yields a well-formed telegram class", (opener) => {
+    const out = formatTelegramHtml(`${opener}\nbody\n\`\`\``);
+    // The hostile text may legitimately appear as escaped TEXT; what it may
+    // never do is appear inside a tag, so the property is read off the tags.
+    for (const tag of out.match(/<[^>]*>/g) ?? []) {
+      expect(tag).not.toContain("onload");
+      const cls = tag.match(/^<code class="([^"]*)">$/);
+      if (cls) expect(cls[1]!).toMatch(/^language-[A-Za-z0-9_+#.-]*$/);
+    }
+    expect(out).not.toContain("<script");
+  });
+});

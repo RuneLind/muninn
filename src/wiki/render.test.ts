@@ -405,14 +405,52 @@ describe("renderWikiHtml: a wikilink inside code is CODE", () => {
       expect(html).toBe('<code class="fileref"><code>a</code> [[Claude Code]] <code>b</code></code>');
     });
 
-    test("a mid-line fence delimiter: the renderer joins the two sides onto ONE line", () => {
-      // `parseBlocks` swaps the fence for a placeholder, so the text before the
-      // opener and after the closer end up on one line where two lone backticks
-      // pair — a line-wise scan of the body sees neither.
+    test("a line SHAPED like a fence delimiter that is prose, and pairs backticks", () => {
+      // Neither line here opens a fence: the first does not start with the run,
+      // and the third's info string holds a backtick (CommonMark). So the third
+      // line stays PROSE, its two backticks pair into an inline span, and the
+      // sentinel lands inside it — while a line-wise scan of the markdown reads
+      // that same line as a delimiter and gets the region wrong. The rendered
+      // output is what settles it, which is the whole point of this seam.
       const html = renderWikiHtml("a ` ```\ncode\n``` [[Claude Code]] ` b", resolve);
+      expect(html).toContain("<code> [[Claude Code]] </code>");
       expect(html).not.toContain("wiki-link");
-      expect(html).toContain("[[Claude Code]]");
     });
+  });
+
+  test("a fence whose INFO STRING holds a wikilink is still an ordinary fence", () => {
+    // Two rounds of review landed on this line, in opposite directions, so the
+    // contract is written out. Everything in an info string past the lang token
+    // is DISCARDED — CommonMark says so and every renderer does it, which is
+    // also what ```` ```ts title="x" ```` gets. A parked wikilink sentinel there
+    // goes with it, so the link is not rendered. That is a real loss of one
+    // malformed line, and it is the SMALL loss: round 1 tried to rescue it by
+    // refusing the opener, and refusing left the fence's CLOSING delimiter in
+    // the stream as a fresh opener that swallowed the following prose and the
+    // next code block whole. This asserts the swallowing cannot come back.
+    const html = renderWikiHtml(
+      "```bash [[Claude Code]]\nx = 1\n```\n\nafter\n\n```js\nreal();\n```",
+      resolve,
+    );
+    expect(html.match(/<pre>/g) ?? []).toHaveLength(2);
+    expect(html).toContain('<code class="language-bash">');
+    expect(html).toContain('<code class="language-js">');
+    expect(html).toContain("after");
+    expect(html).not.toContain("\u0000");
+    // The prose between the fences is NOT inside either of them.
+    expect(html.slice(html.indexOf("</pre>"), html.lastIndexOf("<pre>"))).toContain("after");
+  });
+
+  test("a wikilink in a fence BODY is still code, whatever the info string says", () => {
+    // The #496 invariant, re-pinned from the side round 1 broke: when the fence
+    // above it stopped being a fence, this body stopped being code and the
+    // wikilink in it became a live anchor.
+    const html = renderWikiHtml(
+      "```bash [[Claude Code]]\nsee [[Claude Code]]\n```",
+      resolve,
+    );
+    expect(html).not.toContain("wiki-link");
+    expect(html).toContain("[[Claude Code]]");
   });
 
   test("nothing leaks: no sentinel and no raw NUL reach the page", () => {

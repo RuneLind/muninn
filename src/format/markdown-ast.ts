@@ -476,8 +476,155 @@ export function parseChecklist(children: Block[]): { checked: boolean; text: str
   return ul.items.map(parseChecklistItem);
 }
 
-const CODE_BLOCK_RE = /```(\w*)\n([\s\S]*?)```/g;
+/**
+ * A fenced-code DELIMITER line: up to 3 leading spaces, a run of >= 3 backticks,
+ * then the rest of the line (an info string on an opener, nothing on a closer).
+ *
+ * The 0-3 space bound is CommonMark's, and is the same bound
+ * `dashboard/views/components/wiki-integrate.ts` uses in its own
+ * `FENCE_SHAPE_RE`. The two agree on INDENT and disagree on MARKER: that file
+ * accepts `~~~` and this parser does not, so a tilde block is code to the
+ * fact-check line mask and markdown here. Narrower than the earlier spelling of
+ * this sentence, which claimed the two "agree about which lines are delimiters"
+ * — refuted by the tilde row in the `extractFences` docblock below it.
+ *
+ * Where this parser diverges from CommonMark is a >= 4-space-indented
+ * ```` ``` ````: CommonMark calls it indented code, and this AST has no
+ * indented-code block at all, so it degrades to a paragraph. Every such
+ * property is TABULATED rather than described — "the fence grammar, tabulated"
+ * in markdown-ast.test.ts is the authority this comment defers to.
+ */
+const FENCE_LINE_RE = /^( {0,3})(`{3,})(.*)$/;
+
+/**
+ * The language taken off a fence's info string: its leading run of characters
+ * that are safe in an HTML attribute and a CSS class.
+ *
+ * Narrow ON PURPOSE, and the narrowness is load-bearing rather than tidy:
+ * `telegram-format.ts` interpolates `block.lang` into `class="language-${lang}"`
+ * with NO escaping, so a lang that could contain a quote would be an injection
+ * through every Telegram message. Pinned from the other end by the
+ * "lang can never break an HTML attribute" test, which runs hostile info
+ * strings through `parseBlocks` and checks the rendered Telegram output.
+ *
+ * It is wider than the `\w*` this replaced (which matched `objective` out of
+ * ```` ```objective-c ````) and, unlike it, a NON-matching info string no longer
+ * disqualifies the fence: ```` ```ts title="x" ```` is a `ts` fence now, where
+ * before it was not a fence at all and its body rendered as prose.
+ *
+ * Read off the TRIMMED info string, per CommonMark — ```` ``` ts ```` names `ts`,
+ * and without the trim it silently named nothing, losing the highlight and the
+ * `language-*` class the mermaid enhancer selects on.
+ */
+const FENCE_LANG_RE = /^[A-Za-z0-9_+#.-]*/;
+
+/**
+ * A placeholder, ANYWHERE in the text — used to read the ids the input already
+ * spells, so this parse can avoid them.
+ *
+ * ⚠️ **The scan does NOT see every occurrence, and the anchored restore is what
+ * makes that safe.** `matchAll` consumes each match's trailing `\x00`, so an
+ * occurrence starting on it is skipped: `\x00CB1\x00CB2\x00` yields id 1 alone,
+ * while `\x00CB2\x00` really does occur at offset 4 — and id 2 is then handed to
+ * a fence. (An earlier revision of this comment claimed the scan and the anchor
+ * were "individually redundant", i.e. that every occurrence lands in `taken`.
+ * That is false, and it is the third stated reason in this file's history to be
+ * wrong; measured, not argued.)
+ *
+ * The property that actually holds is narrower: **the LEFTMOST
+ * placeholder-shaped occurrence on a line is always in `taken`** — nothing
+ * starts earlier, so nothing can have consumed its opening `\x00` — and the
+ * restore uses `String.match` with no `/g`, which returns the leftmost. An
+ * overlap-hidden occurrence therefore always has the previous match's digits
+ * immediately before it, is never leftmost on its line, and is never restored.
+ *
+ * So the two are JOINTLY load-bearing, not redundant: unanchor the restore and
+ * the overlap case becomes live forgery. Pinned by "an OVERLAPPING placeholder
+ * pair cannot forge a block", and the pair-mutant is killed by the suite even
+ * though each half survives alone.
+ */
+const CODE_ID_SCAN_RE = /\x00CB(\d+)\x00/g;
+
+/** A placeholder that is the WHOLE line — the only shape the walker restores.
+ *  See the note on {@link CODE_ID_SCAN_RE} for why the anchors stay. */
 const CODE_PLACEHOLDER_RE = /^\x00CB(\d+)\x00$/;
+
+/**
+ * The ids a placeholder in THIS input already spells, by VALUE.
+ *
+ * By value, not by spelling: the restore reads the digits with `parseInt`, so a
+ * forged `\x00CB007\x00` and an allocated `\x00CB7\x00` are the same slot.
+ * Comparing the strings would let the leading-zero form through.
+ */
+function takenCodeIds(text: string): Set<number> {
+  const taken = new Set<number>();
+  for (const m of text.matchAll(CODE_ID_SCAN_RE)) taken.add(parseInt(m[1]!, 10));
+  return taken;
+}
+
+/**
+ * The store threaded through the recursive parse: the extracted blocks, keyed by
+ * the id their placeholder carries, plus the allocator that skips ids the input
+ * already spells.
+ *
+ * ⚠️ **This is the fourth design for one problem, and the first three are the
+ * reason it looks like this.** U+0000 is not typable prose, but a page's bytes
+ * can hold it — the live jarvis `log.md` does — and a `\x00CB<n>\x00` in the
+ * INPUT used to deref slot `n` no fence ever wrote and THROW, taking down the
+ * shared renderer for chat, Telegram, Slack and email at once. Then:
+ *
+ *  1. a one-pass sanitiser — a NESTED spelling reassembles a live placeholder
+ *     out of what is left either side of the removal (`\x00C` + `\x00CB0\x00` +
+ *     `B0\x00` strips to `\x00CB0\x00`), so the pass MANUFACTURED the thing it
+ *     existed to remove, and threw;
+ *  2. the same loop, bounded at 10 — at nesting depth 10 it stops early and
+ *     leaves a raw NUL, or, beside any real fence, a FORGED DUPLICATE of that
+ *     fence's block;
+ *  3. unbounded — terminates, but each pass is a full scan and the nesting peels
+ *     one level per pass, so it is quadratic in TIME (4.8 s on 320 KB, blocking
+ *     the process, per streaming delta);
+ *  4. a per-parse MARKER (one more `~` than the longest run the input carried)
+ *     compiled into a per-parse regex — unforgeable, but the pattern grew with
+ *     the input and JavaScriptCore caps a pattern at 2^20: a 1.05 MB page threw
+ *     `regular expression too large` out of ALL SIX entry points -- web, wiki,
+ *     ask, Telegram, Slack and EMAIL (`format/email-format.ts`, the one an
+ *     earlier count of "five renderers" left out, and it threw like the rest).
+ *     Measured to the character: 1 048 558 tildes parse, 1 048 559 throw.
+ *
+ * Every one of those defends a FORGEABLE namespace, three by rewriting the input
+ * and one by growing the pattern. This design makes the namespace disjoint
+ * instead: one linear scan reads the ids the input already spells, and the
+ * allocator never issues one of them. So a forged placeholder names a slot that
+ * was never filled, `store.blocks.get(id)` is `undefined`, and the walker leaves
+ * the line as the text it always was. Nothing is rewritten, no pattern is built
+ * from input, the placeholder is a constant six-or-so characters, and the total
+ * deref below is no longer defensive — it is the mechanism, and it is reachable
+ * from a one-line page.
+ */
+interface FenceStore {
+  blocks: Map<number, { lang: string; code: string }>;
+  /** Ids the input already spells; never allocated. */
+  taken: Set<number>;
+  /** Next candidate id. Monotone, so allocation is amortised O(1). */
+  next: number;
+}
+
+/**
+ * Reserve the next id no placeholder in the input spells.
+ *
+ * `next` is monotone across the whole parse, so the skip loop costs O(taken) in
+ * total, not per fence. Measured residual, stated because the round-4 commit
+ * claimed the design was "flat in input size" and that is only true of the
+ * shapes it measured: on NUL-DENSE input this is the slowest of the three
+ * designs — 200 000 placeholder-shaped ids plus a fence cost 0.41 ms before this
+ * PR and 19.2 ms now. Linear in input, no cliff, and 130 NULs across the two
+ * wikis' 1571 pages, so it is a residual and not a regression worth a mechanism.
+ */
+function allocateCodeId(store: FenceStore): number {
+  while (store.taken.has(store.next)) store.next++;
+  return store.next++;
+}
+
 const HR_RE = /^---+$/;
 const HEADING_RE = /^(#{1,6})\s+(.+)$/;
 const BLOCKQUOTE_RE = /^>\s?(.*)$/;
@@ -488,24 +635,167 @@ export function parseBlocks(text: string): Block[] {
   const normalized = text.replace(/\r\n/g, "\n");
 
   // Extract code blocks first; their content must not be parsed as markdown.
-  // The extraction happens ONCE against `codeBlocks`, before any line-splitting;
-  // the array is then threaded through the recursive component-body parse so a
-  // `\x00CB{idx}\x00` placeholder inside a component still derefs the same array.
-  const codeBlocks: { lang: string; code: string }[] = [];
-  const protectedText = normalized.replace(CODE_BLOCK_RE, (_match, lang: string, code: string) => {
-    const idx = codeBlocks.length;
-    codeBlocks.push({ lang, code: code.trimEnd() });
-    return `\x00CB${idx}\x00`;
-  });
+  // The extraction happens ONCE against `store`, before any further
+  // line-splitting; the SAME store is threaded through the recursive
+  // component-body parse, so a placeholder inside a component derefs the slots
+  // this parse filled and no other. `taken` is read from the NORMALIZED text,
+  // which is the text the extractor also scans — CRLF collapse only deletes
+  // `\r` and leaves the `\n`, so it can neither create nor destroy a
+  // placeholder-shaped run between the two.
+  const store: FenceStore = { blocks: new Map(), taken: takenCodeIds(normalized), next: 0 };
+  const protectedText = extractFences(normalized, store);
 
-  return parseBlocksInner(protectedText, codeBlocks, 0);
+  return parseBlocksInner(protectedText, store, 0);
 }
 
-/** Parse already-fence-extracted text into blocks. `codeBlocks` is the shared
+/**
+ * Replace every fenced code block in `text` with a `\x00CB{idx}\x00` placeholder
+ * ON A LINE OF ITS OWN, filing the block in `store.blocks` under the id the
+ * placeholder carries.
+ *
+ * This is a LINE WALKER, and that is the whole fix. The regex it replaced --
+ * ```` /```(\w*)\n([\s\S]*?)```/g ```` -- matched a fence opener ANYWHERE,
+ * while the restore that turns a placeholder back into a block is anchored
+ * (`CODE_PLACEHOLDER_RE`). Anything left on the placeholder's line therefore
+ * broke the restore and served the raw U+0000 to the browser, losing the code
+ * block outright. Two shapes did that, both ordinary and both measured across
+ * the two wikis on 2026-08-30: every `.md`/`.mdx` under `mimir/` and under
+ * `huginn/huginn-jarvis/data/wiki/`, excluding `.git` and `node_modules`, is
+ * 1571 pages, 42 of them leaking 130 NULs. Both are LIVE working trees and most
+ * of the jarvis wiki is untracked, so the count drifts by a page or two a day —
+ * mimir `d7b6cdb` / huginn `7d69031` name the moment, not a checkout anyone can
+ * restore:
+ *
+ *  - **An indented fence** -- the "code block inside a numbered list" shape.
+ *    The opener's leading spaces stayed on the placeholder's line.
+ *  - **A fence delimiter starting mid-line** -- ``` text ```ts ``` --  which
+ *    joined the prose either side onto the placeholder's line AND, in the wiki
+ *    reader, silently ate a `[[wikilink]]` in the fence body.
+ *
+ * So CommonMark's fence grammar is what is implemented here, not just a laxer
+ * placeholder test: an opener owns its line (<= 3 spaces of indent), a closer is
+ * a bare run of the same character at least as long, and the body is dedented by
+ * the opener's own indent. Four deliberate consequences, each with a row in the
+ * grammar table:
+ *
+ *  - A ```` ```` ````-long fence closes only on >= 4 backticks, so a 4-backtick
+ *    fence is a real block instead of the `<code>`-wrapped placeholder it used
+ *    to render as (the old regex started its match one backtick in).
+ *  - A closer may not carry trailing text, per CommonMark. ```` ```js ````
+ *    ... ```` ``` and more ```` is now an UNCLOSED fence.
+ *  - A closer obeys the opener's <= 3-space indent bound too, so a closer
+ *    indented 4+ spaces closes nothing.
+ *  - An unclosed fence is not extracted, which is the pre-existing behaviour
+ *    (the old regex needed a closer to match at all). Note what that does NOT
+ *    mean: an earlier spelling of this line said "stays literal text" and
+ *    claimed it stopped a half-streamed chat delta flickering into a code
+ *    block. Both false. The lines go to the ordinary block parser, so a
+ *    heading, a list or a `<Callout>` inside an unclosed fence RENDERS -- and
+ *    a streaming delta therefore flickers as headings and callouts instead.
+ *    Pinned by "what an UNCLOSED fence actually does". CommonMark would run it
+ *    to EOF as code; that is a separate change with its own corpus diff, and
+ *    exactly one page in 1571 carries an unclosed fence.
+ *
+ * Tildes (`~~~`) are NOT fences here. They were not before either, and neither
+ * wiki contains one (measured, same sweep) -- adding them is a separate change
+ * with its own corpus diff, not a free ride on this one.
+ */
+function extractFences(text: string, store: FenceStore): string {
+  const lines = text.split("\n");
+  const out: string[] = [];
+  let i = 0;
+
+  // Memo of scan futility, the same idiom `parseBlocksInner` uses for component
+  // opens and for the same reason: this parser re-runs on every streaming chat
+  // delta, so an opener that re-scans the tail is a hot-path cost. Once a scan
+  // for a closer of run length >= r finds nothing, no LATER opener whose run is
+  // >= r can find one either — the search range only shrinks, and a closer long
+  // enough for the longer run would have been long enough for r. So one scalar
+  // suffices: no position is needed, and openers with a SHORTER run still scan
+  // (a 3-backtick closer can close them while it could not close the 5-backtick
+  // opener that failed). Without it, 24k lines of never-closing fences took
+  // 9.8 s; the test that pins this carries the whole measured curve.
+  //
+  // One scalar is not the same as "linear in every case": k openers with
+  // STRICTLY DECREASING run lengths still cost k full scans (measured, 4k such
+  // lines: 3.1 s). Writing that input costs O(n^2) bytes and no real document
+  // has it — runs are 3 to 5 — so it is a stated residual, not a fix.
+  let noCloserAtRunAtLeast = Number.POSITIVE_INFINITY;
+
+  while (i < lines.length) {
+    const open = lines[i]!.match(FENCE_LINE_RE);
+    const info = open?.[3] ?? "";
+    // A BACKTICK in the info string refuses the opener, per CommonMark: an
+    // ordinary prose line that opens with inline code -- ```` ```x``` ```` -- is
+    // not a fence. Without this, such a line opened a fence that swallowed the
+    // page up to the next bare delimiter.
+    //
+    // ⚠️ Refusing is EXPENSIVE, which is why nothing else refuses here. A
+    // refused opener does not leave "just that line as prose": the fence's own
+    // CLOSING delimiter stays in the line stream, and a lone ```` ``` ```` line
+    // is itself an opener, so the rest of the document re-pairs one delimiter
+    // over. Round 1 of review on this change added a second refusal -- an info
+    // string holding a parked `\x00` wikilink sentinel, to save the link from
+    // being discarded with the rest of the info string -- and that is exactly
+    // what happened: the following prose and the NEXT code block were swallowed
+    // into one lang-less block. Reverted. Everything past the lang token is
+    // discarded, sentinel included; that is CommonMark's rule, the same one
+    // that drops `title="x"` from ```` ```ts title="x" ````. Both halves are
+    // pinned in `wiki/render.test.ts` -- the discard, and the swallowing not
+    // coming back.
+    if (!open || info.includes("`")) {
+      out.push(lines[i]!);
+      i++;
+      continue;
+    }
+
+    const indent = open[1]!.length;
+    const runLen = open[2]!.length;
+    let close = -1;
+    if (runLen < noCloserAtRunAtLeast) {
+      for (let j = i + 1; j < lines.length; j++) {
+        const c = lines[j]!.match(FENCE_LINE_RE);
+        if (c && c[2]!.length >= runLen && c[3]!.trim() === "") {
+          close = j;
+          break;
+        }
+      }
+    }
+    if (close === -1) {
+      noCloserAtRunAtLeast = Math.min(noCloserAtRunAtLeast, runLen);
+      out.push(lines[i]!);
+      i++;
+      continue;
+    }
+
+    const body = lines.slice(i + 1, close).map((l) => dedentFenceLine(l, indent));
+    const id = allocateCodeId(store);
+    store.blocks.set(id, {
+      lang: info.trim().match(FENCE_LANG_RE)![0],
+      code: body.join("\n").trimEnd(),
+    });
+    out.push(`\x00CB${id}\x00`);
+    i = close + 1;
+  }
+
+  return out.join("\n");
+}
+
+/** Strip up to `indent` leading SPACES from a fence body line -- CommonMark's
+ *  rule, so an indented fence's code is not shifted right by its own indent.
+ *  Up to, not exactly: a body line indented less than its opener keeps what it
+ *  has rather than losing a non-space character. */
+function dedentFenceLine(line: string, indent: number): string {
+  let n = 0;
+  while (n < indent && line[n] === " ") n++;
+  return line.slice(n);
+}
+
+/** Parse already-fence-extracted text into blocks. `store` is the shared
  *  placeholder store; `depth` is the current component-nesting level. */
 function parseBlocksInner(
   protectedText: string,
-  codeBlocks: { lang: string; code: string }[],
+  store: FenceStore,
   depth: number,
 ): Block[] {
   const lines = protectedText.split("\n");
@@ -533,7 +823,7 @@ function parseBlocksInner(
     const line = lines[i]!;
 
     if (depth < MAX_COMPONENT_DEPTH) {
-      const comp = tryParseComponent(lines, i, codeBlocks, depth, noCloseFrom);
+      const comp = tryParseComponent(lines, i, store, depth, noCloseFrom);
       if (comp) {
         flushText();
         blocks.push(comp.block);
@@ -543,9 +833,21 @@ function parseBlocksInner(
     }
 
     const cbMatch = line.match(CODE_PLACEHOLDER_RE);
-    if (cbMatch) {
+    // Total, not `store.blocks.get(n)!`: a slot that was never filled falls
+    // through to text instead of throwing.
+    //
+    // This is the MECHANISM, not a backstop, and it is reachable from a one-line
+    // page: the allocator never issues an id the input already spells, so a
+    // forged `\x00CB0\x00` names an empty slot and lands here. Two earlier
+    // revisions of this comment argued it was unreachable-by-construction — from
+    // a sanitiser's fixed point, and then from a per-parse marker. The first of
+    // those was false when written (depth-10 nesting reached this deref and
+    // threw) and the second was true only until the pattern hit JavaScriptCore's
+    // size cap. Pinned by "an id the input spells is never allocated" and the
+    // leading-zero case beside it.
+    const cb = cbMatch ? store.blocks.get(parseInt(cbMatch[1]!, 10)) : undefined;
+    if (cb) {
       flushText();
-      const cb = codeBlocks[parseInt(cbMatch[1]!, 10)]!;
       blocks.push({ type: "code_block", lang: cb.lang, code: cb.code });
       i++;
       continue;
@@ -644,7 +946,7 @@ function parseBlocksInner(
 function tryParseComponent(
   lines: string[],
   i: number,
-  codeBlocks: { lang: string; code: string }[],
+  store: FenceStore,
   depth: number,
   noCloseFrom: Map<string, number>,
 ): { block: Block; next: number } | null {
@@ -670,7 +972,7 @@ function tryParseComponent(
   if (inlineClose !== -1) {
     if (rest.slice(inlineClose + closeTag.length).trim() !== "") return null; // trailing junk
     const content = rest.slice(0, inlineClose);
-    const children = parseBlocksInner(content, codeBlocks, depth + 1);
+    const children = parseBlocksInner(content, store, depth + 1);
     return { block: { type: "component", name: cname, attrs, children }, next: i + 1 };
   }
 
@@ -711,7 +1013,7 @@ function tryParseComponent(
     return null; // unclosed → fall through as text
   }
 
-  const children = parseBlocksInner(body.join("\n"), codeBlocks, depth + 1);
+  const children = parseBlocksInner(body.join("\n"), store, depth + 1);
   return { block: { type: "component", name: cname, attrs, children }, next: j + 1 };
 }
 
