@@ -74,6 +74,7 @@ import {
 } from "../format/markdown-ast.ts";
 import type { FactVerdict } from "../format/markdown-ast.ts";
 import { collapseWithMap } from "./explain-context.ts";
+import { formatWebHtml } from "../web/web-format.ts";
 import {
   FACTCHECK_MAX_CLAIMS,
   FACTCHECK_SENTINEL_START,
@@ -1312,83 +1313,80 @@ function withForm(
  * mark covers.
  */
 /**
- * Whether the span `factSpanForm` settled on may be WRAPPED — the one authority on
- * that question, written as an enumeration rather than as accumulated conditionals.
+ * Whether the span `factSpanForm` settled on may be WRAPPED — decided by ASKING THE
+ * RENDERER, not by a delimiter heuristic.
  *
- * This is the third spelling, and the first two are the argument for the shape.
- * Round 1 asked "is the final span balanced in isolation" and refused every passage
- * carrying `user_id`, `2 * 3` or a glob. Round 2 asked "did the TRIM change parity"
- * and lost both corruption catches while inventing two more false refusals — an `*`
- * list bullet, and a multi-line wikilink. Each round patched the finding in front of
- * it. The state space is small, so here it is in full.
+ * The property a wrapper-only mark must have is exact and simple: **the page must
+ * render the same with the mark as without it**, apart from the mark's own chrome.
+ * That is what "the wrapper preserves the inner text" means operationally, and it is
+ * cheap to check — `formatWebHtml` is pure, and the propose path has at most
+ * `FACTCHECK_MAX_CLAIMS` candidates.
  *
- * What can differ between the range `applyEdits` validated and the span that reaches
- * this point, and what each implies:
+ * It replaces three rounds of delimiter bookkeeping, and the history is the argument.
+ * Round 1 asked "is the final span balanced in isolation" and refused `user_id`,
+ * `2 * 3` and a glob. Round 2 asked "did the trim change parity" and lost the
+ * corruption catches while refusing an `*` list bullet and a multi-line wikilink.
+ * Round 3 enumerated neighbours and parity, and an independent sweep measured 394
+ * marks lost against round 2 — 338 of them provably render-safe — because a WHOLLY
+ * bolded sentence, the single most common wrapper anchor there is, sits between two
+ * delimiters and is perfectly safe. That enumeration also had no rule at all for the
+ * bracket family, so marking a `[label](url)`'s URL destroyed the link.
  *
- *  1. NOTHING (the common case). The range is the validated one, and the rescue gate
- *     already ruled on its interior — but NOT on where a mark would SIT. That is
- *     rule A below, and it binds at every tier: an exact-tier quote needs no rescue
- *     at all, so nothing else ever looks at it.
- *  2. `expandOverWikilinks` GREW it to cover a whole `[[…]]`. Exempt from everything.
- *     `renderWikiHtml` substitutes wikilinks over the raw body before any code
- *     handling, so a `[[Page]]` inside backticks is a LIVE link and a link straddling
- *     a backtick is the link the reader resolves — marking those whole, odd delimiter
- *     count and all, is the documented behaviour (`src/web/CLAUDE.md`,
- *     `integrate-wikilink.test.ts`). Refusing them trades durable damage — a link
- *     target replaced by markup — for a cosmetic one.
- *  3. `longestLineRange` TRIMMED it to one line, and/or `markableRange` stripped a
- *     leading block marker. A trim can throw away the delimiter that balanced the
- *     span (`**Bold text\nmore**` → `**Bold text`, written to the page as two literal
- *     asterisks). That is rule B — and it compares against the PRE-trim range, never
- *     against zero, because an odd delimiter count is not evidence of a cut: it is
- *     evidence of a `_` in an identifier. Both sides have their leading block markers
- *     stripped first, because `*` is a bullet AND an emphasis delimiter, so a trim
- *     that removes `* ` changes the count without touching a construct.
+ * Every one of those is decided correctly, and without a rule of its own, by
+ * comparing two renders. A heuristic about delimiters is a model of the renderer;
+ * the renderer is available, so the model is what keeps being wrong.
+ *
+ * THE ONE EXEMPTION is a span `expandOverWikilinks` widened to a whole `[[…]]`.
+ * `formatWebHtml` shows the tags as escaped text inside a `<code>` there, so the
+ * property refuses it — but `renderWikiHtml` substitutes wikilinks over the RAW body
+ * before any code handling, so that link is LIVE and marking it whole is the
+ * documented behaviour (`src/web/CLAUDE.md`, pinned by `integrate-wikilink.test.ts`).
+ * Refusing it would trade durable damage — a mark that rewrites the link TARGET —
+ * for a cosmetic one. It is the only case where the two renderers disagree about
+ * what a mark costs, which is why it is the only exemption.
  */
-function markSpanRefusal(
-  body: string,
-  span: FactSpan,
-  pre: { start: number; end: number },
-): string | null {
-  // 2. A whole-wikilink expansion is exempt from both rules.
+function markSpanRefusal(body: string, span: FactSpan): string | null {
   if (span.expandedOverLink) return null;
-
-  // A. Where the mark would SIT — every tier, every span. A body character just
-  //    outside the span that is an emphasis delimiter means the mark begins or ends
-  //    offset inside a construct: `Run \`<Fact…>bun test</Fact>\`` puts the tags
-  //    inside a code span, where they render as literal text AND where the
-  //    zone-aware `stripFactWrappers` cannot remove them — so the next integrate run
-  //    nests a second wrapper. `_alpha_` marked from `alpha` re-pairs its opener with
-  //    the `_` of a neighbouring `target="_blank"`.
-  if (EMPHASIS_DELIM_SET.has(body[span.start - 1] ?? "")) {
-    return "the marked passage would start inside markdown formatting";
-  }
-  if (EMPHASIS_DELIM_SET.has(body[span.end] ?? "")) {
-    return "the marked passage would end inside markdown formatting";
-  }
-
-  // B. What a TRIM threw away. Nothing was trimmed ⇒ nothing to compare.
-  if (!span.truncated) return null;
-  const before = withoutLeadingBlockMarkers(body.slice(pre.start, pre.end));
-  const after = withoutLeadingBlockMarkers(body.slice(span.start, span.end));
-  for (const d of EMPHASIS_DELIMS) {
-    if (countRuns(after, d) % 2 !== countRuns(before, d) % 2) {
-      return "the passage was trimmed to one line, which would cut through markdown formatting";
-    }
-  }
-  return null;
+  // The guard must render the wrapper the EMIT SITE will actually write, so both go
+  // through `wrapperTextFor`. Choosing the form here independently would let the
+  // prediction and the write drift — and a guard that predicts a different string
+  // than the one that ships is worse than no guard.
+  const wrapped =
+    body.slice(0, span.start) + wrapperTextFor(body, span, 1, "ok", "\n") + body.slice(span.end);
+  return renderWithoutMarks(wrapped) === renderWithoutMarks(body, false)
+    ? null
+    : "marking this passage would change how the page renders";
 }
 
-/** Every line's leading list/quote/heading marker removed — the SAME shape
- *  `longestLineRange`/`markableRange` strip. Applied to both sides of rule B's parity
- *  comparison because `*` is a bullet as well as an emphasis delimiter: a trim that
- *  drops `* ` from the front of a line changes the `*` count without cutting any
- *  construct, and the comparison would read that as corruption. */
-function withoutLeadingBlockMarkers(text: string): string {
-  return text
-    .split("\n")
-    .map((line) => line.replace(LEADING_BLOCK_MARKER_RE, ""))
-    .join("\n");
+/** The wrapper text for one span — the ONE place the inline/block spelling is
+ *  chosen. `factWrapperForms` returns both because the wrapper-only PREDICATE has to
+ *  recognize either; the writer has to pick, and the picker is here so the guard and
+ *  the emit site cannot disagree about what is being written. */
+function wrapperTextFor(
+  body: string,
+  span: FactSpan,
+  claimIndex: number,
+  verdict: FactVerdict,
+  nl: string,
+): string {
+  const forms = factWrapperForms(claimIndex, verdict, body.slice(span.start, span.end), nl);
+  return span.form === "block" ? forms[1] : forms[0];
+}
+
+/** One render with the mark's own chrome taken back out, so two renders can be
+ *  compared for everything EXCEPT the mark. The chip is a whole element and the
+ *  `fc-mark` wrapper is a `span` or a `div`; nothing else the pipeline emits carries
+ *  an `fc-` class, so removing exactly those leaves the page's own markup. The
+ *  closing-tag strip is applied to BOTH sides (hence `stripChrome`), because the
+ *  opening tag it pairs with is gone on only one of them. */
+function renderWithoutMarks(source: string, stripChrome = true): string {
+  let html = formatWebHtml(source);
+  if (stripChrome) {
+    html = html
+      .replace(/<button[\s\S]*?<\/button>/g, "")
+      .replace(/<(?:span|div) class="fc-mark[^"]*"[^>]*>/g, "");
+  }
+  return html.replace(/<\/(?:span|div)>/g, "");
 }
 
 function markReason(span: FactSpan): string {
@@ -1660,7 +1658,7 @@ export function annotateEdits(input: AnnotateEditsInput): AnnotateEditsResult {
     // The LAST word on markup safety, and only about what `factSpanForm` CHANGED:
     // the rescue gate already validated the range it was handed, so re-judging an
     // untrimmed span in isolation only invents refusals (see `trimCutReason`).
-    const cut = markSpanRefusal(body, span, { start: o.start, end: o.end });
+    const cut = markSpanRefusal(body, span);
     if (cut) {
       dropped.push({ edit: o.edit, reason: cut });
       continue;
@@ -1690,8 +1688,7 @@ export function annotateEdits(input: AnnotateEditsInput): AnnotateEditsResult {
     }
     const inner = body.slice(span.start, span.end);
     const verdict = verdictByClaim.get(o.edit.claimIndex) ?? "ok";
-    const forms = factWrapperForms(o.edit.claimIndex, verdict, inner, nl);
-    const text = span.form === "block" ? forms[1] : forms[0];
+    const text = wrapperTextFor(body, span, o.edit.claimIndex, verdict, nl);
     if (text.length > input.maxEditChars) {
       dropped.push({ edit: o.edit, reason: `the inline mark exceeds ${input.maxEditChars} chars` });
       continue;

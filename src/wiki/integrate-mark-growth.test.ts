@@ -94,9 +94,15 @@ describe("mark-span guard — the whole state space", () => {
      "bun test` now to check.", false],
     ["rule A, end edge alone", "# T\n\nRun `bun test` now to check.\n",
      "Run `bun test", false],
-    // B — what a TRIM threw away.
-    ["a trim that drops the delimiter which balanced the span",
-     "# T\n\n**Bold text\nmore** here and there.\n", "Bold text more here", false],
+    // B — what a TRIM threw away. This row expected `false` for two rounds, on the
+    // strength of a reviewer's marked-render screenshot showing literal `**`. It is
+    // measured here BOTH ways, and the unmarked render shows the same literal `**`:
+    // `formatWebHtml`'s emphasis pass is LINE-SCOPED, so that bold never paired in
+    // this pipeline and the mark takes nothing away. Expecting `false` was modelling
+    // CommonMark rather than the renderer the reader actually uses — the same
+    // mistake, one level up, that the delimiter heuristics kept making.
+    ["a trim through a multi-line bold the renderer never paired",
+     "# T\n\n**Bold text\nmore** here and there.\n", "Bold text more here", true],
     // C — odd delimiter counts that are NOT cut constructs.
     ["snake_case identifier", "# T\n\nThe field user_id is set by the API.\n",
      "The field user_id is set by the API.", true],
@@ -149,7 +155,40 @@ describe("mark-span guard — the whole state space", () => {
     "a wikilink straddling a backtick, on a TRIMMED span",
   ]);
 
-  test("every other marked row leaves the render unchanged apart from the mark", () => {
+  test("the guard's verdict IS the render-equivalence property, both directions", () => {
+    // The rule is no longer a delimiter heuristic, so the table can assert the thing
+    // itself — and in BOTH directions, which is what the previous spelling could not
+    // do: it only ever checked that marking rows were safe, so it was structurally
+    // blind to a rule that refused something harmless (measured: round 3 lost 338
+    // render-safe marks and this suite saw none of it).
+    for (const [label, body, quote, wantMarked] of ROWS) {
+      if (RENDER_EXEMPT.has(label)) continue;
+      const edit = markOne(body, quote).edits[0];
+      // A row that marks must be render-equivalent; a row that refuses must NOT be.
+      // For the refusing rows the span the guard rejected is reconstructed from the
+      // quote so the claim "this really would have changed the render" is measured,
+      // not assumed.
+      const span = edit ? edit.old : quote;
+      const at = body.indexOf(span);
+      // A refusing row whose quote is not a verbatim substring was refused UPSTREAM
+      // of this guard, at the tier-2 rescue gate (the neighbour steal is the one such
+      // row: its quote differs from the body by a collapsed double space). There is
+      // no span for this assertion to reconstruct, and the guard never saw one.
+      if (at === -1) { expect({ label, marked: !!edit }).toEqual({ label, marked: false }); continue; }
+      const wrapped =
+        body.slice(0, at) + `<Fact n="1" v="ok">${span}</Fact>` + body.slice(at + span.length);
+      const strip = (h: string) =>
+        h
+          .replace(/<button[\s\S]*?<\/button>/g, "")
+          .replace(/<(?:span|div) class="fc-mark[^"]*"[^>]*>/g, "")
+          .replace(/<\/(?:span|div)>/g, "");
+      const equivalent =
+        strip(formatWebHtml(wrapped)) === formatWebHtml(body).replace(/<\/(?:span|div)>/g, "");
+      expect({ label, equivalent }).toEqual({ label, equivalent: wantMarked });
+    }
+  });
+
+  test("every marked row leaves the render unchanged apart from the mark", () => {
     // The safety property, asserted rather than assumed: strip the chip and the
     // fc-mark wrapper out of the marked render and it must equal the unmarked one.
     for (const [label, body, quote, wantMarked] of ROWS) {
