@@ -271,11 +271,26 @@ test.describe("Wiki reader: ⧉ Copy path", () => {
     await expect(page.locator("#wikiExplainBtn")).toBeVisible();
   }
 
-  /** Widths where a single row FITS, so wrapping there is the basis being too
-   *  greedy — round 1's regression, which cost 29px of article height on every
-   *  laptop. 1366 is the MacBook Pro logical width and is the one a verify pass
-   *  caught a 180px basis breaking while every other assertion stayed green. */
-  const NO_WRAP_WIDTHS = [1440, 1366, 1024, 1000];
+  /**
+   * Widths where a single row fits with HEADROOM, so wrapping there is the basis
+   * being too greedy — round 1's regression, which cost ~29px of article height
+   * (42px → 71px) on every laptop.
+   *
+   * ⚠️ **Deliberately coarse, and it cannot be otherwise.** Where the row wraps
+   * depends on the rendered width of its buttons, which depends on the platform's
+   * font metrics — measured, not assumed: a round-4 attempt to pin 1366 and 1000
+   * as well passed on macOS and FAILED on the Linux CI runner, where the same
+   * build wraps at both. So the machine-independent half of the rule is what the
+   * sweep asserts everywhere (a legible trail, no overflow), and the no-wrap pin
+   * is kept to widths with enough headroom to hold on both platforms.
+   *
+   * The consequence, stated rather than hidden: this pin catches a badly
+   * oversized basis (260 wraps here on both platforms) but not a marginal one —
+   * 180 wraps at 1366 on macOS and is indistinguishable from 160 on CI, because
+   * on CI the shipped basis wraps there too. Choosing between 120 and 180 is a
+   * local measurement, not something any CI assertion can settle.
+   */
+  const NO_WRAP_WIDTHS = [1440, 1024];
 
   for (const width of [1440, 1366, 1280, 1024, 1000, 800]) {
     test(`the trail stays legible and the row does not overflow at ${width}px`, async ({ page }) => {
@@ -337,7 +352,10 @@ test.describe("Wiki reader: ⧉ Copy path", () => {
         }
       }
     }
-    expect(violations).toEqual([]);
+    // Joined, not compared as an array: Playwright's diff truncates a long list
+    // to "+N", and on a CI-only failure the width that violated the rule is the
+    // whole diagnosis.
+    expect(violations.join("\n")).toBe("");
   });
 
   test("is icon-only, and the tooltip carries what the dropped label used to", async ({ page }) => {
