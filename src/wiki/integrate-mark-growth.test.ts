@@ -285,9 +285,12 @@ describe("a page that renders chrome of its OWN", () => {
     // FIRST match, so a page mark after the span cannot expose this. The first
     // spelling of these fixtures put it after, and used `n="4"` against a claim index
     // of 1 — two independent accidents, either of which hid the defect.
-    // `n="999"` is in the set on purpose: it is `factClaimIndex`'s largest valid value
-    // and therefore the sentinel's first probe, so a page documenting it is what makes
-    // the search actually have to search rather than return its starting point.
+    // Two arms, and they pin different things — the rest is a control set, said out
+    // loud because the matrix reads like six pins and is two. `pageMark="1"` with
+    // `claimIndex=1` is the collision itself (the only arm red before the fix).
+    // `pageMark="999"` is `factClaimIndex`'s largest valid value and therefore the
+    // sentinel's first probe, so it is the only arm that fails when the search returns
+    // its starting point instead of searching. The other four pass on unfixed code.
     for (const pageMark of ["1", "999"]) {
       expectClaimSurvives(pageMark);
     }
@@ -316,6 +319,18 @@ describe("a page that renders chrome of its OWN", () => {
   }
 });
 
+describe("a mark that would eat a link", () => {
+  test("a span covering a link's URL is refused", () => {
+    // Carried by the test the collision regression replaced, and not pinned anywhere
+    // else once that went — `grep` found no other assertion for it. It is the case
+    // NO delimiter heuristic ever covered: rounds 1–3 had no rule for the bracket
+    // family at all, so marking the URL rewrote `<a href=…>the docs</a>` to the bare
+    // words. The render comparison refuses it without a rule of its own.
+    const body = "# T\n\nWe use [the docs](https://example.com/x) here.\n";
+    expect(markOne(body, "https://example.com/x").edits).toEqual([]);
+  });
+});
+
 describe("a marked passage carrying an inline component", () => {
   test("a <Pill> inside the wrapper still compares equal", () => {
     // A regression pin, NOT a pin on the balanced scan, and the difference is worth
@@ -331,8 +346,10 @@ describe("a marked passage carrying an inline component", () => {
     // does not recurse), so it can never contain a nested span; a BLOCK (`<div>`)
     // wrapper CAN nest divs — a `<Callout>` renders several — but no quote can resolve
     // to a component's raw source (`"<Callout>…</Callout>"` answers "no longer found
-    // in the page"), and a single line inside such a group takes the inline form. So
-    // the counting is defensive against the component vocabulary and the resolver
+    // in the page"). A single line quoted inside such a group is NOT saved by the
+    // inline wrapper spelling — it still renders as a block `div` nested in the
+    // callout's — but by its children being one line of inline content. So the
+    // counting is defensive against the component vocabulary and the resolver
     // changing, not against anything reachable today.
     const body = "# T\n\nThe status is <Pill>beta</Pill> for now and stable soon.\n";
     expect((formatWebHtml(body).match(/<span/g) ?? []).length).toBeGreaterThan(0);

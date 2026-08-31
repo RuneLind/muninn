@@ -1390,8 +1390,11 @@ function markSpanRefusal(
  * largest valid value. The range is the constraint that shapes this: an index
  * outside `0 < n < 1000` is not a claim index at all, so the renderer emits the mark
  * with NO `data-fact` attribute — measured, and it is why a first attempt at this
- * used 1_000_000 and refused every candidate on every page. Real indices are bounded
- * by `FACTCHECK_MAX_CLAIMS`, so the first probe is free in practice.
+ * used 1_000_000 and refused every candidate on every page. The used set comes from
+ * the PAGE's authored marks, which `FACTCHECK_MAX_CLAIMS` does not bound — the test's
+ * own `n="999"` fixture is the counter-example, and the search then steps to 998. It
+ * is cheap regardless: pages carrying any mark at all are rare, and one carrying 999
+ * distinct ones does not exist.
  *
  * Exhaustion (999 distinct rendered indices on one page) returns
  * `SENTINEL_FACT_BASE` and degrades to the collision this function exists to remove —
@@ -1417,7 +1420,10 @@ const SENTINEL_FACT_BASE = 999;
  * sweep), which makes the comparison unequal for any page that renders chrome OF ITS
  * OWN — a `<CodeTabs>` block emits `<button class="code-tabs-tab">`, and a page
  * DOCUMENTING this feature keeps a `<Fact>` inside inline code that the zone-aware
- * `stripFactWrappers` preserves by design and `formatWebHtml` renders as a real mark.
+ * shows a `<Fact>` in PROSE, which `formatWebHtml` renders as a real mark. (Not one
+ * inside inline code — the zone-aware `stripFactWrappers` preserves that by design,
+ * but the renderer escapes it and emits no `data-fact` at all. An earlier comment
+ * here named the code case, which is the one that CANNOT produce this.)
  * Measured: 33 and 36 claims dropped on two real mimir pages, every one with a reason
  * untrue of the passage. Sweeping BOTH sides removes the page's own marks from each
  * render, which is a comparison that can no longer see a difference confined to them.
@@ -1433,9 +1439,13 @@ const SENTINEL_FACT_BASE = 999;
  * refused on its own. A block (`<div>`) wrapper CAN nest divs — a `<Callout>` renders
  * several — so the block half of this argument is about REACHABILITY, not the render:
  * no quote resolves to a component's raw source (`"<Callout>…</Callout>"` answers "no
- * longer found in the page"), and a single line inside such a group takes the inline
- * form. So nothing reachable today nests the same tag inside a wrapper, and a
- * first-close-tag match would behave identically. The counting is kept because that argument is about the COMPONENT
+ * longer found in the page"). NB a single line quoted INSIDE such a group is not
+ * saved by taking the inline wrapper spelling — measured, it still renders as a
+ * `<div class="fc-mark-block">` nested in the callout's own divs. What saves it is
+ * that its children are one line of INLINE content, which emits no `div` of its own.
+ * So nothing reachable today nests the same tag inside a wrapper, and a
+ * first-close-tag match behaves identically — confirmed over 19 746 probes on 1 581
+ * real pages: zero decisions differ. The counting is kept because that argument is about the COMPONENT
  * SET, which grows, while the cost is four lines. The chip is a `<button>`, which
  * cannot nest, so a non-greedy match is sound there.
  */
