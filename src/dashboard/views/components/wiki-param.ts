@@ -27,6 +27,19 @@ export function readActiveWikiName(): string {
   return params.get("wiki") || params.get("bot") || "";
 }
 
+/** The absolute filesystem root the open wiki is served from, or `null` when the
+ *  server named none (an unknown `?wiki=`), or when this page is not the reader.
+ *
+ *  Injected as `window.__WIKI_ROOT__` by `views/wiki-page.ts`, and read here for
+ *  the same reason the name is: one rule, read LAZILY so importing this file
+ *  outside a browser is harmless. Anything that is not a non-empty string is
+ *  `null` — the copy-path button then copies the relPath alone rather than
+ *  splicing `undefined` into the middle of a path. */
+export function readActiveWikiRoot(): string | null {
+  const injected = (globalThis as { __WIKI_ROOT__?: unknown }).__WIKI_ROOT__;
+  return typeof injected === "string" && injected.trim() !== "" ? injected : null;
+}
+
 /** Append the active `wiki` param to a URL so the fetch stays on-wiki. */
 export function withWikiParam(url: string, wiki: string): string {
   if (!wiki) return url;

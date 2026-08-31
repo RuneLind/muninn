@@ -117,6 +117,7 @@ import {
   type WriteCapability,
 } from "../../../plans/board-writes.ts";
 import { getJson } from "./client-runtime.ts";
+import { copyText, wikiPagePath } from "./copy-path.ts";
 import type { BoardPayload } from "../../../plans/board.ts";
 import type { PlanPriority, PlanStatus } from "../../../plans/constants.ts";
 
@@ -1816,51 +1817,26 @@ export function mountPlanBoard(payload: BoardPayload, root: HTMLElement): void {
   /**
    * Copy the plan's ON-DISK path — the string you paste into an agent brief.
    * Absolute (root + relPath) when the payload named the root; the relPath
-   * alone otherwise, which still identifies the file inside mimir.
+   * alone otherwise, which still identifies the file inside mimir. The join and
+   * the clipboard write are shared with the /wiki reader's own copy-path button
+   * (`copy-path.ts`) — one fallback path, not two that drift.
    */
   function copyPathButton(relPath: string): HTMLButtonElement {
-    const full = wikiRoot ? `${wikiRoot}/${relPath}` : relPath;
+    const full = wikiPagePath(wikiRoot, relPath);
     const b = el("button", "pb-copy") as HTMLButtonElement;
     b.type = "button";
     b.textContent = "⧉ Copy path";
     b.title = `Copy ${full}`;
     b.setAttribute("aria-label", `Copy the plan's file path: ${full}`);
-    b.onclick = async () => {
-      const done = (label: string) => {
-        b.textContent = label;
+    b.onclick = () => {
+      void copyText(full).then((ok) => {
+        b.textContent = ok ? "Copied" : "Copy failed";
         setTimeout(() => {
+          // An overlay close or a re-render within the window detaches the
+          // button; writing into it then is harmless but pointless.
           if (b.isConnected) b.textContent = "⧉ Copy path";
         }, 1500);
-      };
-      try {
-        // The clipboard API needs a secure context; the tailnet-over-http case
-        // falls back to the selection-based copy below.
-        if (navigator.clipboard?.writeText) {
-          await navigator.clipboard.writeText(full);
-          done("Copied");
-          return;
-        }
-        throw new Error("no clipboard API");
-      } catch {
-        // `execCommand` can itself throw (CSP sandboxes; it is on removal
-        // tracks) — its own try/finally so a hidden focusable textarea is never
-        // left in the DOM and the button never reads as a dead control.
-        const ta = document.createElement("textarea");
-        ta.value = full;
-        ta.style.position = "fixed";
-        ta.style.opacity = "0";
-        document.body.append(ta);
-        let ok = false;
-        try {
-          ta.select();
-          ok = document.execCommand("copy");
-        } catch {
-          /* reported below */
-        } finally {
-          ta.remove();
-        }
-        done(ok ? "Copied" : "Copy failed");
-      }
+      });
     };
     return b;
   }

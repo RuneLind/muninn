@@ -57,6 +57,12 @@ export async function renderWikiPage(opts?: {
    *  click-block of both the write and the egress affordances. Presentation only
    *  — every server seam re-checks the root. */
   readonlyWiki?: boolean;
+  /** Absolute filesystem root the selected wiki is SERVED from — the same value
+   *  the read-only check is keyed on. Injected as `__WIKI_ROOT__` so the
+   *  breadcrumb's ⧉ Copy path button can hand over `root + relPath`. Null when
+   *  the request names no servable wiki, and the button then copies the relPath
+   *  alone (`wikiPagePath`). */
+  wikiRoot?: string | null;
 }): Promise<string> {
   const clientScript = await wikiClientScript();
   const wikis = opts?.wikis ?? [];
@@ -68,6 +74,7 @@ export async function renderWikiPage(opts?: {
   const gardener = opts?.gardener ?? true;
   const askBot = opts?.askBot ?? null;
   const readonlyWiki = opts?.readonlyWiki ?? false;
+  const wikiRoot = opts?.wikiRoot ?? null;
   // "Answered by …" line under the Ask hint — who synthesizes this wiki's
   // answers and why (wiki owner vs the shared research-bot fallback).
   const askBotLine = askBot
@@ -525,16 +532,20 @@ export async function renderWikiPage(opts?: {
        is always visible; the selection-gated one rides the same show/hide. */
     /* …and "💬 Discuss" (chat) and "📤 Share" (a pasteable post) share that
        treatment: all three are article-level actions on the same breadcrumb row. */
-    .wiki-bc-factcheck, .wiki-bc-discuss, .wiki-bc-share {
+    .wiki-bc-factcheck, .wiki-bc-discuss, .wiki-bc-share, .wiki-bc-copy {
       flex-shrink: 0; padding: 4px 11px; border-radius: 999px;
       background: transparent; color: var(--text-secondary);
       border: 1px solid var(--border-primary);
       font-size: 12px; font-weight: 600; line-height: 1; cursor: pointer; font-family: inherit;
     }
-    .wiki-bc-factcheck:hover, .wiki-bc-discuss:hover, .wiki-bc-share:hover {
+    .wiki-bc-factcheck:hover, .wiki-bc-discuss:hover, .wiki-bc-share:hover, .wiki-bc-copy:hover {
       background: var(--tint-neutral); color: var(--text-primary);
       border-color: color-mix(in srgb, var(--accent) 45%, var(--border-primary));
     }
+    /* ⧉ Copy path is a utility, not one of the three article ACTIONS beside it:
+       quieter still, and a fixed width so the label swapping to "Copied" /
+       "Copy failed" doesn't shove the row's other buttons sideways mid-click. */
+    .wiki-bc-copy { color: var(--text-muted); font-weight: 500; min-width: 96px; text-align: center; }
     .wiki-article-wrap { flex: 1; overflow-y: auto; padding: 24px 32px; }
     .wiki-article-head { margin-bottom: 18px; padding-bottom: 14px; border-bottom: 1px solid var(--border-primary); }
     .wiki-article-head h1 { font-size: 22px; color: var(--text-primary); margin-bottom: 10px; }
@@ -1322,6 +1333,10 @@ export async function renderWikiPage(opts?: {
     // wiki it must never write or send to a model. The picker navigates with a
     // full page load, so the flag is always the open wiki's.
     window.__WIKI_READONLY_WIKI__ = ${readonlyWiki ? "true" : "false"};
+    // The wiki's root on THIS host — what makes the breadcrumb's ⧉ Copy path
+    // yield a path an agent can open. A boot-time fact for the open wiki; the
+    // picker navigates with a full page load, so it cannot go stale in place.
+    window.__WIKI_ROOT__ = ${escJsonScript(wikiRoot)};
   </script>
   <script>
     ${clientScript}

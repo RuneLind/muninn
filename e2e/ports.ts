@@ -52,6 +52,10 @@ export const E2E_PORTS = {
   // JIRA_BOT is pinned to the tracked bot so the Jira draft card renders at all —
   // a per-PROCESS setting, so this spec cannot share the config's 3011 server.
   "chat-card-fences": 3037,
+  // Two wikis, ONE process: the second is registered read-only, so the same
+  // server proves the copy-path button stays live where its egress neighbours
+  // are dimmed.
+  "wiki-copy-path": 3038,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,
