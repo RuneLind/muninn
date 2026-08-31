@@ -926,6 +926,10 @@ export interface IntegrateGateTurn {
    *  annotate-only (all-✅) path these ARE the anchors every mark resolves against,
    *  so an empty list means the run has nothing at all to write. */
   claimQuotes?: { index: number; quote: string }[];
+  /** Did the integrate write actually persist a fact-check BLOCK (the `.mdx`
+   *  `<FactCheck>` appendix or the `.md` `> [!factcheck]` callout)? The apply
+   *  route answers this on `calloutAdded`; `annotatable` does NOT. */
+  wroteBlock?: boolean;
 }
 
 /** True when the persisted answer carries at least one ❌/⚠️ claim block. Uses the
@@ -1007,10 +1011,72 @@ export function appendBlockedByIntegrate(turn: IntegrateGateTurn): boolean {
   return turn.wrote === "integrate";
 }
 
-/** The 409-shaped copy the ➕ **append** action shows once the other write has
- *  landed. Deliberately identical to `submitFactcheckAppend`'s live-409 message. */
+/** The 409-shaped copy the ➕ **append** action shows: on a genuine live 409, and
+ *  on a turn an integrate write staled WITHOUT persisting a fact-check block (see
+ *  {@link appendBlockedCopy} — a write that DID persist one says so instead).
+ *  `submitFactcheckAppend` uses this same constant for its live 409, so the two
+ *  cannot drift; it used to hand-type the literal. */
 export const INTEGRATE_STALE_COPY =
   "The page changed since the check — re-run the fact check, then add it.";
+
+/** What the ➕ bar says once an INTEGRATE write has retired it, when that write
+ *  actually persisted the `.mdx` `<FactCheck>` appendix. */
+export const INTEGRATE_WROTE_APPENDIX_COPY =
+  "The integrate write already added the fact-check appendix to this page.";
+
+/** The same, for a `.md` page — which takes the `> [!factcheck]` blockquote callout
+ *  rather than the component appendix, so the wording must not promise the latter. */
+export const INTEGRATE_WROTE_CALLOUT_COPY =
+  "The integrate write already added the fact-check callout to this page.";
+
+/**
+ * What the disabled ➕ bar says after an integrate write.
+ *
+ * Keyed on `wroteBlock` — whether the write PERSISTED a fact-check block — and
+ * NOT on `annotatable`, which means only "the checked page is `.mdx`". The apply
+ * route has an explicit no-block branch (`!appendCallout && !wroteWrapper`,
+ * `src/dashboard/routes/wiki-routes.ts`), reachable on an `.mdx` page whenever
+ * every mark drops and the reader leaves the callout checkbox off — precisely the
+ * table-row / fenced-anchor pages this feature's drop tally exists to diagnose.
+ * Keying on the extension therefore stated an appendix that is not on the page AND
+ * disabled the only control that would add one: worse than the staleness copy it
+ * replaced, which was at least actionable. (Three review passes reproduced it
+ * end-to-end against the live route.)
+ *
+ * `wroteBlock` comes from the apply response's `calloutAdded`, which is set on the
+ * one branch that splices the block and is reported on both terminal paths; the
+ * client persists it on the turn, so this survives a reload the way the disable does.
+ */
+export function appendBlockedCopy(turn: IntegrateGateTurn): string {
+  if (!turn.wroteBlock) return INTEGRATE_STALE_COPY;
+  return turn.annotatable ? INTEGRATE_WROTE_APPENDIX_COPY : INTEGRATE_WROTE_CALLOUT_COPY;
+}
+
+/**
+ * How that message is STYLED. The reported defect was that the bar read as a fault;
+ * moving the words while leaving the red `.error` class on the span would have
+ * fixed half of it. A completed write is `done`, a genuinely stale turn is `error`.
+ */
+export function appendBlockedTone(turn: IntegrateGateTurn): "done" | "error" {
+  return turn.wroteBlock ? "done" : "error";
+}
+
+/**
+ * Should the preview panel's "N not applied" list start OPEN?
+ *
+ * The drop reasons have always been in the response, behind a collapsed
+ * `<details>` nobody had a reason to expand — so a run that placed one anchor out
+ * of eight looked like "the editor found little", when the reasons said "four
+ * table rows and a fenced diagram". Open it exactly when the drops OUTNUMBER the
+ * proposed edits: that is the run whose headline count is misleading on its own,
+ * and it leaves the ordinary mostly-successful run collapsed.
+ */
+export function shouldOpenDroppedList(proposal: {
+  edits?: unknown[];
+  dropped?: unknown[];
+}): boolean {
+  return (proposal.dropped?.length ?? 0) > (proposal.edits?.length ?? 0);
+}
 
 /** The same 409 shape on the ✎ **integrate** bar. Separate string because "then
  *  add it" names the ➕ action — on the editing bar the only sensible next step is
@@ -1271,7 +1337,10 @@ export function nothingIntegrableHtml(proposal: IntegrateProposal): string {
     esc(proposal.note || "The editor proposed no edits that could be placed in this page.") +
     "</div>" +
     quotesNoteHtml(proposal) +
-    droppedListHtml(proposal.dropped || []) +
+    // Open here too: a run that proposed 0 and dropped 7 is the STRICTEST case of
+    // "the headline count misleads on its own", and it is the one panel the
+    // heuristic used to miss (the ≥1-edit panel below honoured it from the start).
+    droppedListHtml(proposal.dropped || [], shouldOpenDroppedList(proposal)) +
     '<div class="wiki-fc-int-actions">' +
     '<button id="wikiFcIntCancel" class="wiki-fc-int-btn">Close</button>' +
     "</div></div>"

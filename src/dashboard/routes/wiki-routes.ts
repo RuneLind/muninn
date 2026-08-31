@@ -55,6 +55,7 @@ import {
   annotatedMaxEdits,
   applyEdits,
   buildIntegratePrompt,
+  dropReasonTally,
   changedCharsOfOutcomes,
   enforceChangeBudget,
   enforceEditBounds,
@@ -3777,14 +3778,19 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
         "this run re-marks the page from its own claims",
       );
 
+      // The REASONS, not just the count. `proposed=1 dropped=7` is indistinguishable
+      // in the log between seven unrelated misses and one structural cause repeated
+      // seven times — and the reasons, which the response has always carried, were
+      // otherwise readable only by expanding a `<details>` in the preview panel.
       log.info(
-        "Wiki fact-check integrate: wiki={wiki} page={page} proposed={n} dropped={d} quotes={q}",
+        "Wiki fact-check integrate: wiki={wiki} page={page} proposed={n} dropped={d} quotes={q} why={why}",
         {
           wiki: entry.name,
           page: meta.relPath,
           n: edits.length,
           d: dropped.length,
           q: quoteCheck.quotes.length,
+          why: dropReasonTally(dropped),
         },
       );
 

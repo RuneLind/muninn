@@ -74,6 +74,7 @@ import {
 } from "../format/markdown-ast.ts";
 import type { FactVerdict } from "../format/markdown-ast.ts";
 import { collapseWithMap } from "./explain-context.ts";
+import { formatWebHtml } from "../web/web-format.ts";
 import {
   FACTCHECK_MAX_CLAIMS,
   FACTCHECK_SENTINEL_START,
@@ -589,6 +590,10 @@ export interface EditOutcome {
   resolvedText?: string;
   beforeCtx?: string;
   afterCtx?: string;
+  /** The `"mark"`-mode rescue grew this range over an emphasis delimiter run it
+   *  cut ({@link growOverEmphasisRuns}) — carried so `markReason` can NAME the
+   *  adjustment, the way it names a link expansion or a one-line trim. */
+  grownOverEmphasis?: boolean;
 }
 
 export interface ApplyEditsResult {
@@ -643,8 +648,200 @@ function resolveRange(
   return { start, end, tier: "collapsed" };
 }
 
+/**
+ * What a tier-2 rescue's resolved range is about to be USED for, which decides how
+ * much of `collapsedRescueRisk` binds.
+ *
+ * `"splice"` — the range is REPLACED by `new`. Everything the collapse threw away
+ * matters: a range that starts after an opening `**` and consumes the closing one
+ * leaves `**NEW`, and a half-eaten link re-pairs the replacement with another
+ * link's URL. This is the original (and still default) behaviour.
+ *
+ * `"mark"` — the range is only WRAPPED (`X` → `<Fact …>X</Fact>`); the inner text
+ * survives byte-for-byte, and `renderInline` leaves a wrapper's body in the stream
+ * for the bold/link passes, so `<Fact …>**Bold** rest</Fact>` renders exactly as
+ * `**Bold** rest` did. That equivalence holds for a BALANCED span and only for one
+ * — and not even then when the wrapper changes INTRAWORD adjacency, which is what
+ * decides emphasis (`beta*beta*` marked from `beta` onwards renders as `beta<em>`;
+ * pre-existing, and the reason this is a bounded relaxation rather than a licence)
+ * — it is not a licence to wrap any range at all, which is why the relaxation is
+ * paired with {@link growOverEmphasisRuns}' odd-count precondition and with
+ * {@link finalSpanCutReason}, and why the run-parity test below replaces the count
+ * rule rather than removing it. The count-equality rule therefore has nothing left to
+ * protect on the emphasis family and refuses the single most common legitimate
+ * anchor there is: the claim extractor returns the READING text of a sentence
+ * (`Norepinephrine acts as…`) while the body carries the SOURCE text
+ * (`**Norepinephrine** acts as…`), a BALANCED superset. Measured on
+ * `life/sources/Neurochemical Focus Stack…mdx` (2026-08-31): 8 quotes in, 1 mark
+ * out, and two of the seven drops were exactly this.
+ *
+ * What `"mark"` keeps, because wrapping does not make them safe:
+ *  - the paragraph-break ban (a mapped range can be arbitrarily larger than `old`),
+ *  - the {@link offsetInsideMarkup} EDGE test, which binds for BOTH families and is
+ *    doing real work here: growth is gated on an ODD run count, so a range that cuts
+ *    nothing is never grown and its edge is still sitting against a delimiter. That
+ *    is what refuses the neighbour-steal shape below, and the drop reason it produces
+ *    is asserted in `integrate-mark-growth.test.ts`,
+ *  - strict count-equality on the BRACKET family (`[`, `]`, `(`, `)`): wrapping
+ *    half of a `[label](url)` still puts the tag inside link markup,
+ *  - and, for the emphasis family, a RUN-PARITY test in place of count-equality —
+ *    `**Bold** rest` has two `*` runs (balanced, allowed) while `Bold** rest` has
+ *    one (cut, refused). Parity over RUNS, not over characters: `Bold** rest`
+ *    carries an even CHARACTER count and would sail through a naive parity check.
+ */
+export type RescueMode = "splice" | "mark";
+
+/**
+ * The drop reasons of one propose run, collapsed to `N× <reason>` phrases ordered
+ * most-frequent-first — the one line that turns `dropped=7` into a diagnosis.
+ *
+ * The route logged counts only, so a run that dropped every anchor for ONE
+ * structural reason (all four table rows; every quote landing in a fenced mermaid
+ * block) was indistinguishable in the log from seven unrelated misses, and the
+ * reasons — which the response has carried all along — could only be read by
+ * expanding a `<details>` in the preview panel nobody had a reason to open.
+ *
+ * Reasons are the engine's own bounded phrases, so they are tallied verbatim
+ * rather than normalized; ties keep first-seen order (`Map` insertion order).
+ */
+export function dropReasonTally(dropped: { reason: string }[]): string {
+  const counts = new Map<string, number>();
+  for (const d of dropped) {
+    const reason = d.reason || "dropped";
+    counts.set(reason, (counts.get(reason) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([reason, n]) => `${n}× ${reason}`)
+    .join("; ");
+}
+
 /** Markup delimiters whose balance a whitespace-rescued range must preserve. */
 const RESCUE_DELIMS = ["*", "`", "_", "[", "]", "(", ")"] as const;
+
+/** The EMPHASIS/code family — the ones a `"mark"`-mode rescue checks by run parity
+ *  rather than by count equality, because a WRAPPER preserves a balanced one.
+ *
+ *  Listed EXPLICITLY, and the bracket family derived from it rather than the other
+ *  way round, so the default for a delimiter added to {@link RESCUE_DELIMS} is the
+ *  STRICT path. Deriving this one by subtraction reads tidier and fails OPEN: a `~`
+ *  added for `~~strike~~` would silently join the lenient family with no compile
+ *  error. `RESCUE_DELIM_FAMILIES_COVER_ALL` pins that every delimiter has a family. */
+const EMPHASIS_DELIMS: readonly string[] = ["*", "`", "_"];
+
+const EMPHASIS_DELIM_SET = new Set<string>(EMPHASIS_DELIMS);
+
+/** The LINK/bracket family — count equality binds in BOTH rescue modes, because
+ *  wrapping half a `[label](url)` puts the tag inside link markup just as splicing
+ *  it does. DERIVED, so a new delimiter lands here until someone classifies it. */
+const BRACKET_DELIMS: readonly string[] = RESCUE_DELIMS.filter(
+  (d) => !EMPHASIS_DELIM_SET.has(d),
+);
+
+/** Exported for the test that pins the two families against {@link RESCUE_DELIMS}:
+ *  every delimiter belongs to exactly one, and the emphasis list is the explicit
+ *  half. A `~` added upstream must show up in `BRACKET_DELIMS` (strict), never
+ *  silently in the parity path. */
+export const RESCUE_DELIM_FAMILIES = {
+  all: RESCUE_DELIMS as readonly string[],
+  emphasis: EMPHASIS_DELIMS,
+  bracket: BRACKET_DELIMS,
+};
+
+/** Runs (maximal consecutive stretches) of `ch` in `s`. A `**` pair is ONE run, so
+ *  `**Bold** rest` answers 2 and `Bold** rest` answers 1 — the distinction
+ *  character counts cannot make (both are even). */
+function countRuns(s: string, ch: string): number {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === ch && s[i - 1] !== ch) n++;
+  }
+  return n;
+}
+
+/**
+ * Grow a `"mark"`-mode range outward to COMPLETE an emphasis construct the range
+ * already cuts — never to acquire one it does not.
+ *
+ * `collapseWithMap` strips `*`/`_`/backtick, so the plain-text quote
+ * `Norepinephrine acts as…` maps back to a range that starts AFTER the opening
+ * `**` and consumes the closing one. That slice carries an ODD number of `**`
+ * runs: it provably cuts a construct, and taking the rest of that construct is the
+ * honest repair — the wrapper preserves the inner text, and
+ * `<Fact …>**Bold** rest</Fact>` renders exactly as the source did.
+ *
+ * **The odd-count precondition is the safety property, not an optimisation.** An
+ * earlier spelling grew both edges unconditionally and two review passes
+ * reproduced the corruption in rendered HTML:
+ *  - `See **Alpha**|the middle words|**Beta** ok.` — the range cuts NOTHING (zero
+ *    runs), and growing anyway steals `Alpha`'s closer and `Beta`'s opener. That
+ *    is TWO runs, so a parity test waves it through, and `offsetInsideMarkup` sees
+ *    ordinary letters because it runs on the GROWN edges. Render: crossed tags,
+ *    `<strong>Alpha<span…></strong>the middle words<strong></span>Beta</strong>`.
+ *  - `**Norepinephrine acts here\nand there**` — same zero-run shape across a line
+ *    break; growing produced a balanced span that `factSpanForm` then trimmed back
+ *    to one unbalanced line (see `finalSpanCutReason`, which is the second half of
+ *    this guard and catches that one).
+ * With the precondition both are refused exactly as they were before this feature,
+ * which is what the pre-change `offsetInsideMarkup` edge test was already doing.
+ *
+ * An earlier docblock claimed the precondition was merely redundant for safety —
+ * "growth adds exactly one run, so an even slice always turns odd". **That proof is
+ * false** and the claim is withdrawn: the added run MERGES with one already at the
+ * slice edge whenever `slice[0] === d` and the outside character is also `d`, so an
+ * even slice can stay even. The precondition is load-bearing, not decoration; it is
+ * pinned by the neighbour-steal fixture and by asserting the exact drop reason it
+ * produces (the range cut nothing, so the truth is "starts or ends inside markdown
+ * formatting", not "cuts through").
+ *
+ * Per DELIMITER CHARACTER, and only over a contiguous run of that same character:
+ * an odd `*` count is completed with `*`, never with a neighbouring backtick. The
+ * side is chosen by which one actually carries that delimiter (left first — a cut
+ * construct's missing half is its opener whenever the quote ran past its closer,
+ * which is the common case).
+ *
+ * ONE side, not both — and that is a readability choice, not a safety property; the
+ * distinction is stated rather than pinned because the mutant is equivalent, and the
+ * state space is small enough to enumerate. The two spellings differ only when BOTH
+ * edges carry `d` while the count is odd. One side then leaves the other edge
+ * sitting against `d` with the span's own edge character not being `d`, which
+ * {@link offsetInsideMarkup} refuses; both sides add two runs to an odd count, which
+ * is still odd, which the parity test refuses. Measured for all three emphasis
+ * delimiters: the edit drops either way.
+ *
+ * The parity + edge tests still run on the GROWN range, so a growth that lands
+ * somewhere unbalanced anyway is refused — growing is an attempt, not a waiver.
+ *
+ * The {@link ZONE_SENTINEL} test is DEFENSIVE and cold on today's zone set —
+ * stated rather than pinned, and stated correctly this time (two reviewers caught
+ * an earlier, wrong derivation). It is NOT that no zone begins or ends on one of
+ * these three characters: `findExclusionZones` ends a fenced zone at
+ * `offset + line.length`, i.e. ON the closing fence's last backtick, and begins one
+ * on the opening fence's first backtick. What keeps it cold is that a fence is
+ * LINE-ANCHORED — `findExclusionZones` starts a fence zone at the line offset (an
+ * indented fence's zone therefore begins on the indentation, not on a backtick) and
+ * ends it at `offset + line.length` — so the character between a fence zone and any
+ * prose is always the `\n` this loop stops at. The guard is kept because that is a property of the
+ * zone builder, not of this function.
+ */
+function growOverEmphasisRuns(
+  body: string,
+  masked: string,
+  start: number,
+  end: number,
+): { start: number; end: number } {
+  let s0 = start;
+  let e0 = end;
+  for (const d of EMPHASIS_DELIMS) {
+    if (countRuns(body.slice(s0, e0), d) % 2 === 0) continue; // cuts nothing of `d`
+    if (body[s0 - 1] === d) {
+      while (s0 > 0 && body[s0 - 1] === d && masked[s0 - 1] !== ZONE_SENTINEL) s0--;
+    } else if (body[e0] === d) {
+      while (e0 < body.length && body[e0] === d && masked[e0] !== ZONE_SENTINEL) e0++;
+    }
+  }
+  return { start: s0, end: e0 };
+}
 
 const RESCUE_DELIM_SET = new Set<string>(RESCUE_DELIMS);
 
@@ -699,12 +896,22 @@ export function collapsedRescueRisk(
   old: string,
   before = "",
   after = "",
+  mode: RescueMode = "splice",
 ): string | null {
   // `\r\n\r\n` is a paragraph break too — a bare `\n\n` test misses CRLF pages.
   if (/\n[ \t\r]*\n/.test(rawSlice)) {
     return "whitespace-rescued match would span a paragraph break in the page";
   }
   for (const d of RESCUE_DELIMS) {
+    // In `"mark"` mode the emphasis family is checked by run PARITY instead: the
+    // wrapper preserves the inner text, so a balanced superset is safe and only a
+    // CUT construct is not. The bracket family keeps count-equality in both modes.
+    if (mode === "mark" && EMPHASIS_DELIM_SET.has(d)) {
+      if (countRuns(rawSlice, d) % 2 !== countRuns(old, d) % 2) {
+        return "whitespace-rescued match would cut through markdown formatting";
+      }
+      continue;
+    }
     if (countChar(rawSlice, d) !== countChar(old, d)) {
       return "whitespace-rescued match would cut through markdown formatting";
     }
@@ -721,7 +928,12 @@ export function collapsedRescueRisk(
  * start offset. See the module doc for why there is no per-edit re-validation
  * during application. Pure — the caller owns the write.
  */
-export function applyEdits(body: string, edits: IntegrateEdit[], isMdx = false): ApplyEditsResult {
+export function applyEdits(
+  body: string,
+  edits: IntegrateEdit[],
+  isMdx = false,
+  mode: RescueMode = "splice",
+): ApplyEditsResult {
   const masked = matchMaskBody(body, isMdx);
   const outcomes: EditOutcome[] = edits.map((edit) => {
     const r = resolveRange(masked, edit.old);
@@ -731,27 +943,40 @@ export function applyEdits(body: string, edits: IntegrateEdit[], isMdx = false):
     if (masked.slice(r.start, r.end).includes(ZONE_SENTINEL)) {
       return { edit, applied: false, reason: "resolves into an excluded region of the page" };
     }
-    const resolvedText = body.slice(r.start, r.end);
-    // A tier-2 rescue's raw span can cut through markup the collapse stripped —
-    // reject rather than corrupt (see `collapsedRescueRisk`).
+    // A tier-2 rescue's raw span can cut through markup the collapse stripped. In
+    // `"splice"` mode that is a rejection; in `"mark"` mode the range is first
+    // grown over the delimiter runs its edges sit inside, and only what survives
+    // THAT is rejected (see `growOverEmphasisRuns` / `collapsedRescueRisk`).
+    let start = r.start;
+    let end = r.end;
+    let grownOverEmphasis = false;
+    if (r.tier === "collapsed" && mode === "mark") {
+      const grown = growOverEmphasisRuns(body, masked, start, end);
+      grownOverEmphasis = grown.start !== start || grown.end !== end;
+      start = grown.start;
+      end = grown.end;
+    }
+    const resolvedText = body.slice(start, end);
     if (r.tier === "collapsed") {
       const risk = collapsedRescueRisk(
         resolvedText,
         edit.old,
-        r.start > 0 ? body[r.start - 1]! : "",
-        r.end < body.length ? body[r.end]! : "",
+        start > 0 ? body[start - 1]! : "",
+        end < body.length ? body[end]! : "",
+        mode,
       );
       if (risk) return { edit, applied: false, reason: risk };
     }
     return {
       edit,
       applied: true,
-      start: r.start,
-      end: r.end,
+      start,
+      end,
       tier: r.tier,
       resolvedText,
-      beforeCtx: contextBefore(body, masked, r.start),
-      afterCtx: contextAfter(body, masked, r.end),
+      ...(grownOverEmphasis ? { grownOverEmphasis: true } : {}),
+      beforeCtx: contextBefore(body, masked, start),
+      afterCtx: contextAfter(body, masked, end),
     };
   });
 
@@ -1053,6 +1278,9 @@ interface FactSpan {
   truncated?: boolean;
   trimmedMarker?: boolean;
   expandedOverLink?: boolean;
+  /** The tier-2 rescue grew this range over an emphasis delimiter run it cut
+   *  ({@link growOverEmphasisRuns}) — an adjustment `markReason` must name. */
+  grownOverEmphasis?: boolean;
 }
 
 /** Expand over any wikilink the range cuts, then guard the EXPANDED range — the
@@ -1084,8 +1312,193 @@ function withForm(
  * over a `[[wikilink]]` — which is the one adjustment that changes what text the
  * mark covers.
  */
+/**
+ * Whether the span `factSpanForm` settled on may be WRAPPED — decided by ASKING THE
+ * RENDERER, not by a delimiter heuristic.
+ *
+ * The property a wrapper-only mark must have is exact and simple: **the page must
+ * render the same with the mark as without it**, apart from the mark's own chrome.
+ * That is what "the wrapper preserves the inner text" means operationally, and it is
+ * cheap to check — `formatWebHtml` is pure, and the propose path has at most
+ * `FACTCHECK_MAX_CLAIMS` candidates.
+ *
+ * It replaces three rounds of delimiter bookkeeping, and the history is the argument.
+ * Round 1 asked "is the final span balanced in isolation" and refused `user_id`,
+ * `2 * 3` and a glob. Round 2 asked "did the trim change parity" and lost the
+ * corruption catches while refusing an `*` list bullet and a multi-line wikilink.
+ * Round 3 enumerated neighbours and parity, and an independent sweep measured 394
+ * marks lost against round 2 — 338 of them provably render-safe — because a WHOLLY
+ * bolded sentence, the single most common wrapper anchor there is, sits between two
+ * delimiters and is perfectly safe. That enumeration also had no rule at all for the
+ * bracket family, so marking a `[label](url)`'s URL destroyed the link.
+ *
+ * Every one of those is decided correctly, and without a rule of its own, by
+ * comparing two renders. A heuristic about delimiters is a model of the renderer;
+ * the renderer is available, so the model is what keeps being wrong.
+ *
+ * THE ONE EXEMPTION is a span `expandOverWikilinks` widened to a whole `[[…]]`.
+ * `formatWebHtml` shows the tags as escaped text inside a `<code>` there, so the
+ * property refuses it — but `renderWikiHtml` substitutes wikilinks over the RAW body
+ * before any code handling, so that link is LIVE and marking it whole is the
+ * documented behaviour (`src/web/CLAUDE.md`, pinned by `integrate-wikilink.test.ts`).
+ * Refusing it would trade durable damage — a mark that rewrites the link TARGET —
+ * for a cosmetic one. It is the only case where the two renderers disagree about
+ * what a mark costs, which is why it is the only exemption.
+ */
+function markSpanRefusal(
+  body: string,
+  span: FactSpan,
+  verdict: FactVerdict,
+  nl: string,
+): string | null {
+  if (span.expandedOverLink) return null;
+  // The inline/block spelling comes from the shared `wrapperTextFor`, which IS
+  // render-visible and is the one argument that has to match the emit site. The
+  // verdict and the newline are passed through for honesty rather than necessity:
+  // measured, an LF-joined and a CRLF-joined block wrapper render byte-identical
+  // html, so `nl` is render-invariant here — an earlier comment claimed otherwise and
+  // was wrong. The index is substituted outright; see below.
+  const plain = formatWebHtml(body);
+  // The guard's own mark is spliced under an index the PAGE provably does not use, so
+  // `removeOneMark` cannot delete someone else's. `data-fact` is not unique: a page
+  // that shows a `<Fact>` in prose renders a real mark with a real index, and if it
+  // sits before the guarded span under the SAME number the removal took the page's
+  // mark and left the guard's — two renders differ, and every claim carrying that
+  // number was refused with a reason untrue of the passage. Measured on a real mimir
+  // page: identical quotes marked at claim 1 and 3 and refused at claim 2, because
+  // that page documents `<Fact n="2">`.
+  //
+  // Substituting the index is sound because it is RENDER-INVARIANT: it appears only
+  // in `data-fact` and in the chip's title, both inside elements this comparison
+  // removes. `verdict` is invariant for the same reason (`fc-mark-<v>` sits in the
+  // removed opening tag) but is passed through honestly rather than substituted,
+  // since nothing is gained by faking it.
+  const sentinel = unusedFactIndex(plain);
+  const mark = wrapperTextFor(body, span, sentinel, verdict, nl);
+  const wrapped = body.slice(0, span.start) + mark + body.slice(span.end);
+  return removeOneMark(formatWebHtml(wrapped), sentinel) === plain
+    ? null
+    : "marking this passage would change how the page renders";
+}
+
+/**
+ * The highest `data-fact` index this html does not already use — the index
+ * {@link markSpanRefusal} splices its own mark under, so that mark is the only one
+ * carrying it.
+ *
+ * Searched DOWNWARD from {@link SENTINEL_FACT_BASE}, which is `factClaimIndex`'s
+ * largest valid value. The range is the constraint that shapes this: an index
+ * outside `0 < n < 1000` is not a claim index at all, so the renderer emits the mark
+ * with NO `data-fact` attribute — measured, and it is why a first attempt at this
+ * used 1_000_000 and refused every candidate on every page. The used set comes from
+ * the PAGE's authored marks, which `FACTCHECK_MAX_CLAIMS` does not bound — the test's
+ * own `n="999"` fixture is the counter-example, and the search then steps to 998. It
+ * is cheap regardless: pages carrying any mark at all are rare, and one carrying 999
+ * distinct ones does not exist.
+ *
+ * Exhaustion (999 distinct rendered indices on one page) returns
+ * `SENTINEL_FACT_BASE` and degrades to the collision this function exists to remove —
+ * a false refusal, which is the safe direction, on a page no run can produce.
+ */
+function unusedFactIndex(html: string): number {
+  const used = new Set<string>();
+  for (const m of html.matchAll(/ data-fact="(\d+)"/g)) used.add(m[1]!);
+  for (let n = SENTINEL_FACT_BASE; n > 0; n--) if (!used.has(String(n))) return n;
+  return SENTINEL_FACT_BASE;
+}
+
+/** `factClaimIndex`'s largest valid value (`0 < n < 1000`). Anything above it renders
+ *  with no `data-fact` at all, which would make the removal a no-op. */
+const SENTINEL_FACT_BASE = 999;
+
+/**
+ * One rendered mark — the one THIS guard spliced, identified by its `data-fact` —
+ * removed from the html, leaving everything else byte-for-byte.
+ *
+ * The removal is targeted rather than a sweep of `fc-` chrome, and that is the whole
+ * point. A sweep has to run on the marked side only (the unmarked side has nothing to
+ * sweep), which makes the comparison unequal for any page that renders chrome OF ITS
+ * OWN — a `<CodeTabs>` block emits `<button class="code-tabs-tab">`, and a page
+ * DOCUMENTING this feature keeps a `<Fact>` inside inline code that the zone-aware
+ * shows a `<Fact>` in PROSE, which `formatWebHtml` renders as a real mark. (Not one
+ * inside inline code — the zone-aware `stripFactWrappers` preserves that by design,
+ * but the renderer escapes it and emits no `data-fact` at all. An earlier comment
+ * here named the code case, which is the one that CANNOT produce this.)
+ * Measured: 33 and 36 claims dropped on two real mimir pages, every one with a reason
+ * untrue of the passage. Sweeping BOTH sides removes the page's own marks from each
+ * render, which is a comparison that can no longer see a difference confined to them.
+ * One verify pass reported two re-admitted corruptions from that; a later one could
+ * not reproduce the number over 18 646 quotes on 1 574 real pages, so the NUMBER is
+ * withdrawn and only the structural argument stands. The targeted removal is
+ * preferred for being the narrower operation, not on the strength of that count.
+ *
+ * The closing tag is found by a BALANCED scan rather than a regex. That is currently
+ * DEFENSIVE and is stated as such: an inline (`<span>`) wrapper cannot contain a
+ * component-rendered span, because `renderInline` escapes nested component tags — a
+ * `<Pill>` inside one comes out as `&lt;Pill&gt;`, which is a render change and is
+ * refused on its own. A block (`<div>`) wrapper CAN nest divs — a `<Callout>` renders
+ * several — so the block half of this argument is about REACHABILITY, not the render:
+ * no quote resolves to a component's raw source (`"<Callout>…</Callout>"` answers "no
+ * longer found in the page"). NB a single line quoted INSIDE such a group is not
+ * saved by taking the inline wrapper spelling — measured, it still renders as a
+ * `<div class="fc-mark-block">` nested in the callout's own divs. What saves it is
+ * that its children are one line of INLINE content, which emits no `div` of its own.
+ * So nothing reachable today nests the same tag inside a wrapper, and a
+ * first-close-tag match behaves identically — confirmed over 19 746 probes on 1 581
+ * real pages: zero decisions differ. The counting is kept because that argument is about the COMPONENT
+ * SET, which grows, while the cost is four lines. The chip is a `<button>`, which
+ * cannot nest, so a non-greedy match is sound there.
+ */
+function removeOneMark(html: string, claimIndex: number): string {
+  const attr = ` data-fact="${claimIndex}"`;
+  const withoutChip = html.replace(
+    new RegExp(`<button[^>]*${escapeRegExp(attr)}[^>]*>[\\s\\S]*?</button>`),
+    "",
+  );
+  const openRe = new RegExp(`<(span|div) class="fc-mark[^"]*"${escapeRegExp(attr)}>`);
+  const open = openRe.exec(withoutChip);
+  if (!open) return withoutChip;
+  const tag = open[1]!;
+  let depth = 1;
+  let i = open.index + open[0].length;
+  // `[^>]*>` is load-bearing: the match must CONSUME the tag's closing `>`, or the
+  // splice below leaves a stray `>` in the html and every comparison fails.
+  const scan = new RegExp(`</?${tag}\\b[^>]*>`, "g");
+  scan.lastIndex = i;
+  let m: RegExpExecArray | null;
+  while ((m = scan.exec(withoutChip)) !== null) {
+    depth += m[0].startsWith("</") ? -1 : 1;
+    if (depth === 0) {
+      return (
+        withoutChip.slice(0, open.index) +
+        withoutChip.slice(open.index + open[0].length, m.index) +
+        withoutChip.slice(m.index + m[0].length)
+      );
+    }
+  }
+  // Unbalanced — the wrapper did not close. That is itself a render difference, so
+  // returning the html untouched makes the comparison fail, which is the right answer.
+  return withoutChip;
+}
+
+/** The wrapper text for one span — the ONE place the inline/block spelling is
+ *  chosen. `factWrapperForms` returns both because the wrapper-only PREDICATE has to
+ *  recognize either; the writer has to pick, and the picker is here so the guard and
+ *  the emit site cannot disagree about what is being written. */
+function wrapperTextFor(
+  body: string,
+  span: FactSpan,
+  claimIndex: number,
+  verdict: FactVerdict,
+  nl: string,
+): string {
+  const forms = factWrapperForms(claimIndex, verdict, body.slice(span.start, span.end), nl);
+  return span.form === "block" ? forms[1] : forms[0];
+}
+
 function markReason(span: FactSpan): string {
   const notes: string[] = [];
+  if (span.grownOverEmphasis) notes.push("expanded to cover the whole **formatting** span");
   if (span.expandedOverLink) notes.push("expanded to cover the whole [[wikilink]]");
   if (span.truncated) notes.push("trimmed to one line");
   if (span.trimmedMarker) notes.push("list or quote marker left outside the mark");
@@ -1330,7 +1743,11 @@ export function annotateEdits(input: AnnotateEditsInput): AnnotateEditsResult {
   // Where the marks emitted so far actually landed — the POST-expansion ranges, which
   // is the whole point (see the collision drop below).
   const markedSpans: { start: number; end: number; claimIndex: number }[] = [];
-  for (const o of applyEdits(body, candidates, isMdx).outcomes) {
+  // `"mark"`: this call is a LOCATOR. Nothing it resolves is spliced — the range is
+  // handed to `factSpanForm` and the surviving edit replaces the raw slice with
+  // itself inside a `<Fact>` wrapper — so the splice-only half of the rescue gate
+  // must not refuse it. See {@link RescueMode}.
+  for (const o of applyEdits(body, candidates, isMdx, "mark").outcomes) {
     if (!o.applied || o.start === undefined || o.end === undefined) {
       dropped.push({ edit: o.edit, reason: o.reason ?? "could not be placed" });
       continue;
@@ -1342,6 +1759,16 @@ export function annotateEdits(input: AnnotateEditsInput): AnnotateEditsResult {
     const span = factSpanForm(body, o.start, o.end);
     if ("error" in span) {
       dropped.push({ edit: o.edit, reason: span.error });
+      continue;
+    }
+    if (o.grownOverEmphasis) span.grownOverEmphasis = true;
+    // The LAST word on markup safety, and it re-judges EVERY span rather than only
+    // what `factSpanForm` adjusted — which is the whole thesis of `markSpanRefusal`:
+    // an exact-tier match passes no gate at all, so nothing else ever looks at it.
+    const markVerdict = verdictByClaim.get(o.edit.claimIndex) ?? "ok";
+    const cut = markSpanRefusal(body, span, markVerdict, nl);
+    if (cut) {
+      dropped.push({ edit: o.edit, reason: cut });
       continue;
     }
     // There is deliberately no wrapper-vs-CORRECTION re-test on the expanded range.
@@ -1368,9 +1795,7 @@ export function annotateEdits(input: AnnotateEditsInput): AnnotateEditsResult {
       continue;
     }
     const inner = body.slice(span.start, span.end);
-    const verdict = verdictByClaim.get(o.edit.claimIndex) ?? "ok";
-    const forms = factWrapperForms(o.edit.claimIndex, verdict, inner, nl);
-    const text = span.form === "block" ? forms[1] : forms[0];
+    const text = wrapperTextFor(body, span, o.edit.claimIndex, markVerdict, nl);
     if (text.length > input.maxEditChars) {
       dropped.push({ edit: o.edit, reason: `the inline mark exceeds ${input.maxEditChars} chars` });
       continue;
