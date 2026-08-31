@@ -273,27 +273,67 @@ describe("a page that renders chrome of its OWN", () => {
     expect(markOne(body, SENTENCE).edits).toHaveLength(1);
   });
 
-  test("…and the page's own mark still cannot hide a real difference", () => {
-    // The other direction, which a BOTH-sides sweep gets wrong: it would remove the
-    // page's own mark from each render and mask the genuine difference below.
-    const body =
-      `# T\n\nA page may show <Fact n="4" v="bad">a marked passage</Fact> in prose.\n\nWe use [the docs](https://example.com/x) here.\n`;
-    expect(chromeCount(body).marks).toBeGreaterThan(0);
-    expect(markOne(body, "https://example.com/x").edits).toEqual([]);
+  test("a page-own mark under the SAME claim index does not cost the claim", () => {
+    // `data-fact` is not unique. The guard used to locate its own mark by the REAL
+    // claim index, so a page showing `<Fact n="2">` in prose made the removal take
+    // the PAGE's mark and leave the guard's — and claim 2, and only claim 2, was
+    // refused on that page with a reason untrue of the passage. Reproduced on a real
+    // mimir page before the fix; the guard now splices under an index the page
+    // provably does not use.
+    //
+    // The page's mark is placed BEFORE the quote deliberately: both locators take the
+    // FIRST match, so a page mark after the span cannot expose this. The first
+    // spelling of these fixtures put it after, and used `n="4"` against a claim index
+    // of 1 — two independent accidents, either of which hid the defect.
+    // `n="999"` is in the set on purpose: it is `factClaimIndex`'s largest valid value
+    // and therefore the sentinel's first probe, so a page documenting it is what makes
+    // the search actually have to search rather than return its starting point.
+    for (const pageMark of ["1", "999"]) {
+      expectClaimSurvives(pageMark);
+    }
   });
+
+  function expectClaimSurvives(pageMark: string): void {
+    const body =
+      `# T\n\nA page may show <Fact n="${pageMark}" v="bad">a marked passage</Fact> in prose.\n\n${SENTENCE}\n`;
+    expect(chromeCount(body).marks).toBeGreaterThan(0);
+    for (const claimIndex of [1, 2, 4]) {
+      const res = annotateEdits({
+        body,
+        isMdx: true,
+        corrections: [],
+        claims: [{ ...okClaim, index: claimIndex }],
+        quotes: [{ index: claimIndex, quote: SENTENCE }],
+        maxEdits: 32,
+        maxEditChars: 2000,
+      });
+      expect({ pageMark, claimIndex, edits: res.edits.length }).toEqual({
+        pageMark,
+        claimIndex,
+        edits: 1,
+      });
+    }
+  }
 });
 
 describe("a marked passage carrying an inline component", () => {
   test("a <Pill> inside the wrapper still compares equal", () => {
-    // A regression pin, NOT a pin on the balanced scan — stated because the
-    // difference matters. The mutant that matches the wrapper's close with the FIRST
-    // same-tag close survives this file, and the state space says why: an INLINE
-    // (`<span>`) wrapper cannot contain a component-rendered span at all, because
-    // `renderInline` escapes nested component tags (measured: the Pill comes out as
-    // `&lt;Pill&gt;`, which is a render change and is refused for that reason); and a
-    // BLOCK (`<div>`) wrapper covers exactly one paragraph, which a block component
-    // is never inside of. So the scan's counting is defensive against the component
-    // vocabulary growing, not against anything reachable today.
+    // A regression pin, NOT a pin on the balanced scan, and the difference is worth
+    // stating precisely because an earlier comment here got it backwards. THIS
+    // fixture is a whole-line quote, so the wrapper takes the BLOCK (`<div>`) form
+    // and the Pill really does render a nested `<span class="pill">` inside it — not
+    // escaped. What the fixture therefore pins is that a component inside a marked
+    // paragraph survives the comparison; it does not exercise the scan, which counts
+    // `div` here and never meets a second one.
+    //
+    // The first-close-tag mutant survives this file, and the reachability argument is:
+    // an INLINE (`<span>`) wrapper escapes any component tag inside it (`renderInline`
+    // does not recurse), so it can never contain a nested span; a BLOCK (`<div>`)
+    // wrapper CAN nest divs — a `<Callout>` renders several — but no quote can resolve
+    // to a component's raw source (`"<Callout>…</Callout>"` answers "no longer found
+    // in the page"), and a single line inside such a group takes the inline form. So
+    // the counting is defensive against the component vocabulary and the resolver
+    // changing, not against anything reachable today.
     const body = "# T\n\nThe status is <Pill>beta</Pill> for now and stable soon.\n";
     expect((formatWebHtml(body).match(/<span/g) ?? []).length).toBeGreaterThan(0);
     expect(markOne(body, "The status is <Pill>beta</Pill> for now and stable soon.").edits)

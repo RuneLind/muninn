@@ -1348,23 +1348,65 @@ function withForm(
 function markSpanRefusal(
   body: string,
   span: FactSpan,
-  claimIndex: number,
   verdict: FactVerdict,
   nl: string,
 ): string | null {
   if (span.expandedOverLink) return null;
-  // The guard must render EXACTLY what the emit site will write, so every argument
-  // comes from the caller and the inline/block spelling comes from the shared
-  // `wrapperTextFor`. An earlier spelling hardcoded the claim index, the verdict and
-  // the newline; the first two are render-invariant, but `nl` is not — on a CRLF page
-  // taking the block form the guard would have rendered an LF wrapper and the writer
-  // a CRLF one, i.e. predicted a different string than the one that ships.
-  const mark = wrapperTextFor(body, span, claimIndex, verdict, nl);
+  // The inline/block spelling comes from the shared `wrapperTextFor`, which IS
+  // render-visible and is the one argument that has to match the emit site. The
+  // verdict and the newline are passed through for honesty rather than necessity:
+  // measured, an LF-joined and a CRLF-joined block wrapper render byte-identical
+  // html, so `nl` is render-invariant here — an earlier comment claimed otherwise and
+  // was wrong. The index is substituted outright; see below.
+  const plain = formatWebHtml(body);
+  // The guard's own mark is spliced under an index the PAGE provably does not use, so
+  // `removeOneMark` cannot delete someone else's. `data-fact` is not unique: a page
+  // that shows a `<Fact>` in prose renders a real mark with a real index, and if it
+  // sits before the guarded span under the SAME number the removal took the page's
+  // mark and left the guard's — two renders differ, and every claim carrying that
+  // number was refused with a reason untrue of the passage. Measured on a real mimir
+  // page: identical quotes marked at claim 1 and 3 and refused at claim 2, because
+  // that page documents `<Fact n="2">`.
+  //
+  // Substituting the index is sound because it is RENDER-INVARIANT: it appears only
+  // in `data-fact` and in the chip's title, both inside elements this comparison
+  // removes. `verdict` is invariant for the same reason (`fc-mark-<v>` sits in the
+  // removed opening tag) but is passed through honestly rather than substituted,
+  // since nothing is gained by faking it.
+  const sentinel = unusedFactIndex(plain);
+  const mark = wrapperTextFor(body, span, sentinel, verdict, nl);
   const wrapped = body.slice(0, span.start) + mark + body.slice(span.end);
-  return removeOneMark(formatWebHtml(wrapped), claimIndex) === formatWebHtml(body)
+  return removeOneMark(formatWebHtml(wrapped), sentinel) === plain
     ? null
     : "marking this passage would change how the page renders";
 }
+
+/**
+ * The highest `data-fact` index this html does not already use — the index
+ * {@link markSpanRefusal} splices its own mark under, so that mark is the only one
+ * carrying it.
+ *
+ * Searched DOWNWARD from {@link SENTINEL_FACT_BASE}, which is `factClaimIndex`'s
+ * largest valid value. The range is the constraint that shapes this: an index
+ * outside `0 < n < 1000` is not a claim index at all, so the renderer emits the mark
+ * with NO `data-fact` attribute — measured, and it is why a first attempt at this
+ * used 1_000_000 and refused every candidate on every page. Real indices are bounded
+ * by `FACTCHECK_MAX_CLAIMS`, so the first probe is free in practice.
+ *
+ * Exhaustion (999 distinct rendered indices on one page) returns
+ * `SENTINEL_FACT_BASE` and degrades to the collision this function exists to remove —
+ * a false refusal, which is the safe direction, on a page no run can produce.
+ */
+function unusedFactIndex(html: string): number {
+  const used = new Set<string>();
+  for (const m of html.matchAll(/ data-fact="(\d+)"/g)) used.add(m[1]!);
+  for (let n = SENTINEL_FACT_BASE; n > 0; n--) if (!used.has(String(n))) return n;
+  return SENTINEL_FACT_BASE;
+}
+
+/** `factClaimIndex`'s largest valid value (`0 < n < 1000`). Anything above it renders
+ *  with no `data-fact` at all, which would make the removal a no-op. */
+const SENTINEL_FACT_BASE = 999;
 
 /**
  * One rendered mark — the one THIS guard spliced, identified by its `data-fact` —
@@ -1377,18 +1419,23 @@ function markSpanRefusal(
  * DOCUMENTING this feature keeps a `<Fact>` inside inline code that the zone-aware
  * `stripFactWrappers` preserves by design and `formatWebHtml` renders as a real mark.
  * Measured: 33 and 36 claims dropped on two real mimir pages, every one with a reason
- * untrue of the passage. Sweeping BOTH sides is not the fix either — it also removes
- * the page's own marks, which masks a genuine difference and re-admits corrupting
- * marks on exactly those pages (measured: 2).
+ * untrue of the passage. Sweeping BOTH sides removes the page's own marks from each
+ * render, which is a comparison that can no longer see a difference confined to them.
+ * One verify pass reported two re-admitted corruptions from that; a later one could
+ * not reproduce the number over 18 646 quotes on 1 574 real pages, so the NUMBER is
+ * withdrawn and only the structural argument stands. The targeted removal is
+ * preferred for being the narrower operation, not on the strength of that count.
  *
  * The closing tag is found by a BALANCED scan rather than a regex. That is currently
  * DEFENSIVE and is stated as such: an inline (`<span>`) wrapper cannot contain a
  * component-rendered span, because `renderInline` escapes nested component tags — a
  * `<Pill>` inside one comes out as `&lt;Pill&gt;`, which is a render change and is
- * refused on its own — and a block (`<div>`) wrapper covers exactly one paragraph,
- * which a block component is never inside of. So nothing in today's vocabulary nests
- * the same tag inside a wrapper, and a first-close-tag match would behave
- * identically. The counting is kept because that argument is about the COMPONENT
+ * refused on its own. A block (`<div>`) wrapper CAN nest divs — a `<Callout>` renders
+ * several — so the block half of this argument is about REACHABILITY, not the render:
+ * no quote resolves to a component's raw source (`"<Callout>…</Callout>"` answers "no
+ * longer found in the page"), and a single line inside such a group takes the inline
+ * form. So nothing reachable today nests the same tag inside a wrapper, and a
+ * first-close-tag match would behave identically. The counting is kept because that argument is about the COMPONENT
  * SET, which grows, while the cost is four lines. The chip is a `<button>`, which
  * cannot nest, so a non-greedy match is sound there.
  */
@@ -1437,22 +1484,6 @@ function wrapperTextFor(
 ): string {
   const forms = factWrapperForms(claimIndex, verdict, body.slice(span.start, span.end), nl);
   return span.form === "block" ? forms[1] : forms[0];
-}
-
-/** One render with the mark's own chrome taken back out, so two renders can be
- *  compared for everything EXCEPT the mark. The chip is a whole element and the
- *  `fc-mark` wrapper is a `span` or a `div`; nothing else the pipeline emits carries
- *  an `fc-` class, so removing exactly those leaves the page's own markup. The
- *  closing-tag strip is applied to BOTH sides (hence `stripChrome`), because the
- *  opening tag it pairs with is gone on only one of them. */
-function renderWithoutMarks(source: string, stripChrome = true): string {
-  let html = formatWebHtml(source);
-  if (stripChrome) {
-    html = html
-      .replace(/<button[\s\S]*?<\/button>/g, "")
-      .replace(/<(?:span|div) class="fc-mark[^"]*"[^>]*>/g, "");
-  }
-  return html.replace(/<\/(?:span|div)>/g, "");
 }
 
 function markReason(span: FactSpan): string {
@@ -1725,7 +1756,7 @@ export function annotateEdits(input: AnnotateEditsInput): AnnotateEditsResult {
     // what `factSpanForm` adjusted — which is the whole thesis of `markSpanRefusal`:
     // an exact-tier match passes no gate at all, so nothing else ever looks at it.
     const markVerdict = verdictByClaim.get(o.edit.claimIndex) ?? "ok";
-    const cut = markSpanRefusal(body, span, o.edit.claimIndex, markVerdict, nl);
+    const cut = markSpanRefusal(body, span, markVerdict, nl);
     if (cut) {
       dropped.push({ edit: o.edit, reason: cut });
       continue;
