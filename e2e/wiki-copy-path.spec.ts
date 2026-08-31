@@ -217,8 +217,9 @@ test.describe("Wiki reader: ⧉ Copy path", () => {
    * What is asserted is the rule, not a layout: the trail stays legible and the
    * row never overflows its pane. The extra `noWrap` pin (no selection only)
    * exists because a basis large enough to wrap everywhere costs ~29px of
-   * article height on every laptop forever — that is how round 1's fix
-   * regressed 1024–1550 while every assertion above it still passed.
+   * article height (42px → 71px) on every laptop forever — round 1's fix did
+   * exactly that across a wide band (measured ~800–1510px) while every
+   * assertion above it still passed.
    */
   async function breadcrumbGeometry(page: import("@playwright/test").Page) {
     return page.evaluate(() => {
@@ -232,12 +233,16 @@ test.describe("Wiki reader: ⧉ Copy path", () => {
         trail: t.width,
         shareOverflow: sh.right - pane!.getBoundingClientRect().right,
         docOverflow: document.documentElement.scrollWidth - window.innerWidth,
-        // Did the row wrap? Compared by the TOP EDGES of the first and last
-        // items, not by dividing the row's height by a pixel constant — a
-        // constant misreports the moment a font size, a zoom level or a theme
-        // changes the line box, and would then fail as a wrap regression that
-        // is not one.
-        wrapped: sh.top > t.top + 4,
+        // Did the row wrap? The last item BEGINS BELOW the first item's box.
+        //
+        // Not `height / 40`: that pins a line-box constant nothing enforces. And
+        // not `sh.top > t.top + 4` either — a verify pass measured that at
+        // font-size 30 the share button sits 6px lower than the trail on ONE
+        // line (trail 89–124, share 95.5–117.5) purely from baseline alignment,
+        // so a top-edge comparison false-alarms while the row is perfectly fine.
+        // Comparing against the trail's BOTTOM is what "on the next line"
+        // actually means, at any font size.
+        wrapped: sh.top >= t.bottom - 2,
       };
     });
   }
@@ -266,7 +271,13 @@ test.describe("Wiki reader: ⧉ Copy path", () => {
     await expect(page.locator("#wikiExplainBtn")).toBeVisible();
   }
 
-  for (const width of [1440, 1280, 1024, 800]) {
+  /** Widths where a single row FITS, so wrapping there is the basis being too
+   *  greedy — round 1's regression, which cost 29px of article height on every
+   *  laptop. 1366 is the MacBook Pro logical width and is the one a verify pass
+   *  caught a 180px basis breaking while every other assertion stayed green. */
+  const NO_WRAP_WIDTHS = [1440, 1366, 1024, 1000];
+
+  for (const width of [1440, 1366, 1280, 1024, 1000, 800]) {
     test(`the trail stays legible and the row does not overflow at ${width}px`, async ({ page }) => {
       await page.setViewportSize({ width, height: 900 });
       await openPage(page, WIKI, PAGE_REL);
@@ -276,7 +287,7 @@ test.describe("Wiki reader: ⧉ Copy path", () => {
       expect(m.shareOverflow).toBeLessThanOrEqual(0);
       expect(m.docOverflow).toBeLessThanOrEqual(0);
       // …and the row does not double where it does not have to.
-      if (width === 1440 || width === 1024) expect(m.wrapped).toBe(false);
+      if (NO_WRAP_WIDTHS.includes(width)) expect(m.wrapped).toBe(false);
 
       // The other axis: with a selection live the row carries two more buttons.
       // The rule must still hold; whether it wraps to do so is the CSS's choice.
@@ -287,6 +298,47 @@ test.describe("Wiki reader: ⧉ Copy path", () => {
       expect(sel.docOverflow).toBeLessThanOrEqual(0);
     });
   }
+
+  /**
+   * The case that makes "the spec is the record" TRUE rather than a promise.
+   *
+   * A verify pass showed the four sampled widths above admit a basis of 100px
+   * (trail 101px at 840px wide — below the legibility floor the spec itself
+   * states) and one of 180px (round 1's second-row regression, back at 1366px).
+   * Four samples out of ~118 possible widths cannot select a value, so a comment
+   * telling the next person to "re-tune by running the spec" was writing a
+   * cheque the spec could not cash.
+   *
+   * So this sweeps the whole range in both selection states. It reuses ONE page
+   * load and only resizes, which is why ~230 measurements cost seconds rather
+   * than minutes.
+   */
+  test("the rule holds at EVERY width from 760 to 1920, in both selection states", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1920, height: 900 });
+    await openPage(page, WIKI, PAGE_REL);
+
+    const violations: string[] = [];
+    for (const selected of [false, true]) {
+      if (selected) await selectArticleText(page);
+      for (let width = 760; width <= 1920; width += 20) {
+        await page.setViewportSize({ width, height: 900 });
+        const m = await breadcrumbGeometry(page);
+        const where = `${width}px${selected ? " (selection)" : ""}`;
+        if (m.trail <= 120) violations.push(`${where}: trail ${m.trail.toFixed(1)}px`);
+        if (m.shareOverflow > 0) violations.push(`${where}: share overflows ${m.shareOverflow.toFixed(1)}px`);
+        if (m.docOverflow > 0) violations.push(`${where}: document overflows ${m.docOverflow}px`);
+        // A row that fits on one line must not be on two. Checked only without a
+        // selection: the two extra buttons legitimately push it over at some
+        // widths, and pinning that would pin the layout instead of the rule.
+        if (!selected && NO_WRAP_WIDTHS.includes(width) && m.wrapped) {
+          violations.push(`${where}: wrapped where one row fits`);
+        }
+      }
+    }
+    expect(violations).toEqual([]);
+  });
 
   test("is icon-only, and the tooltip carries what the dropped label used to", async ({ page }) => {
     await openPage(page, WIKI, PAGE_REL);

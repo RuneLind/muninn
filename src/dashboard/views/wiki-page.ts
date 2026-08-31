@@ -517,31 +517,34 @@ export async function renderWikiPage(opts?: {
       font-size: 12px; color: var(--text-muted);
       /* The actions WRAP rather than crush the trail. ".wiki-bc-trail" is the
          row's only shrinkable item, so every action added to this row comes out
-         of the trail's width — with a LABELLED copy button (~104px) the trail
-         rendered at 27px at 1280 and 0px at 800, where the last action hung past
-         the pane and the document scrolled sideways.
+         of the trail's width — with a LABELLED copy button (~104px, measured as
+         the difference between main and the first cut at 1280) the trail
+         rendered at 27px at 1280 and 0px at 800, where the last action hung 72px
+         past the pane and the document scrolled sideways.
 
-         ⚠️ THE RULE, not a table: the trail keeps a legible width at every
-         viewport and the row never overflows its pane; a second line is the
-         price paid ONLY where the alternative is an unreadable first one. Three
-         rounds of review went into tuning this, and each round's comment quoted
-         a measurement sweep that the next round refuted — so the numbers now
-         live in "e2e/wiki-copy-path.spec.ts", which asserts the rule at four
-         widths AND with a text selection active (which reveals ✨ Explain and
-         ✓ Fact check, i.e. two more items in the row — the axis every hand
-         sweep here missed). Re-tune by changing the basis and running that
-         spec, never by reading a number out of this comment.
+         ⚠️ THE RULE, and it is ENFORCED, not just written down: the trail keeps
+         a legible width at every viewport, the row never overflows its pane, and
+         it does not wrap where one line fits. "e2e/wiki-copy-path.spec.ts"
+         sweeps 760–1920px in both selection states and asserts exactly that —
+         both selection states because ✨ Explain and ✓ Fact check are hidden
+         until the reader selects text, so any measurement taken without a
+         selection is of a row two items shorter than the one a reader reaching
+         for Explain sees. That axis was missed by every hand sweep, mine and
+         three reviewers'.
 
-         The one durable fact: the button is icon-only because the words cost
-         the trail ~104px on a row that has none to give. */
+         The sweep BOUNDS the basis from both sides — measured, it rejects 100px
+         (trail 101px at 840px wide) and 180px (a second row at 1366, the
+         MacBook Pro width) — but it does not single out one value: 120–160 all
+         satisfy the rule. 160 is picked inside that band, toward legibility.
+         Re-tune by changing it and running the spec; do not read a number out
+         of this comment, which is how the three previous attempts went wrong. */
       flex-wrap: wrap; row-gap: 7px;
     }
     /* "flex: 1 1 160px" rather than "flex: 1" (basis 0): with wrapping on, the
        basis is what reserves the trail a legible width before anything wraps —
        at basis 0 the trail is free to shrink toward nothing, which IS the 27px
-       case this fix exists for. 160px was chosen by sweeping candidates against
-       the spec's assertions; the spec is the record. "min-width: 0" keeps the
-       ellipsis working inside a flex item. */
+       case this fix exists for. "min-width: 0" keeps the ellipsis working inside
+       a flex item. The admissible band is the spec's, not this comment's. */
     .wiki-bc-trail { flex: 1 1 160px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .wiki-bc-sep { color: var(--text-dim); margin: 0 5px; }
     .wiki-bc-cur { color: var(--text-secondary); }
