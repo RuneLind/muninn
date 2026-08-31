@@ -224,7 +224,7 @@ test.describe("Wiki reader: ⧉ Copy path", () => {
   async function breadcrumbGeometry(page: import("@playwright/test").Page) {
     return page.evaluate(() => {
       const trail = document.querySelector(".wiki-bc-trail");
-      const bc = document.querySelector(".wiki-breadcrumb");
+      const bc = document.querySelector(".wiki-breadcrumb") as HTMLElement | null;
       const share = document.querySelector("#wikiShareBtn");
       const pane = bc?.parentElement;
       const t = trail!.getBoundingClientRect();
@@ -233,6 +233,19 @@ test.describe("Wiki reader: ⧉ Copy path", () => {
         trail: t.width,
         shareOverflow: sh.right - pane!.getBoundingClientRect().right,
         docOverflow: document.documentElement.scrollWidth - window.innerWidth,
+        // What the trail WOULD get on a single line, measured by forcing
+        // `nowrap` and reading it back. This is the counterfactual the no-wrap
+        // rule needs, and measuring it beats hardcoding widths: where a flex row
+        // breaks depends on the platform's font metrics (CI proved it — a build
+        // that stays on one line at 1366 on macOS wraps there on Linux), so any
+        // list of "widths that should not wrap" is a layout pin, not a rule.
+        oneLineTrail: (() => {
+          const prev = bc!.style.flexWrap;
+          bc!.style.flexWrap = "nowrap";
+          const w = trail!.getBoundingClientRect().width;
+          bc!.style.flexWrap = prev;
+          return w;
+        })(),
         // Did the row wrap? The last item BEGINS BELOW the first item's box.
         //
         // Not `height / 40`: that pins a line-box constant nothing enforces. And
@@ -272,25 +285,19 @@ test.describe("Wiki reader: ⧉ Copy path", () => {
   }
 
   /**
-   * Widths where a single row fits with HEADROOM, so wrapping there is the basis
-   * being too greedy — round 1's regression, which cost ~29px of article height
-   * (42px → 71px) on every laptop.
+   * The width below which a trail is too cramped for a single row to be worth
+   * keeping — so wrapping to buy the trail more space is the right call, and
+   * NOT wrapping above it means the second row bought nothing.
    *
-   * ⚠️ **Deliberately coarse, and it cannot be otherwise.** Where the row wraps
-   * depends on the rendered width of its buttons, which depends on the platform's
-   * font metrics — measured, not assumed: a round-4 attempt to pin 1366 and 1000
-   * as well passed on macOS and FAILED on the Linux CI runner, where the same
-   * build wraps at both. So the machine-independent half of the rule is what the
-   * sweep asserts everywhere (a legible trail, no overflow), and the no-wrap pin
-   * is kept to widths with enough headroom to hold on both platforms.
-   *
-   * The consequence, stated rather than hidden: this pin catches a badly
-   * oversized basis (260 wraps here on both platforms) but not a marginal one —
-   * 180 wraps at 1366 on macOS and is indistinguishable from 160 on CI, because
-   * on CI the shipped basis wraps there too. Choosing between 120 and 180 is a
-   * local measurement, not something any CI assertion can settle.
+   * ⚠️ **A constant, deliberately NOT read from the CSS basis.** It happens to
+   * equal it today because both encode the same judgement, but a test that read
+   * the basis would move with it and could never catch a basis that wraps too
+   * eagerly — which is exactly round 1's regression.
    */
-  const NO_WRAP_WIDTHS = [1440, 1024];
+  const COMFORTABLE_TRAIL_PX = 160;
+
+  /** The swept viewport widths: 760–1920 in 20px steps. */
+  const GRID = Array.from({ length: (1920 - 760) / 20 + 1 }, (_, i) => 760 + i * 20);
 
   for (const width of [1440, 1366, 1280, 1024, 1000, 800]) {
     test(`the trail stays legible and the row does not overflow at ${width}px`, async ({ page }) => {
@@ -301,8 +308,9 @@ test.describe("Wiki reader: ⧉ Copy path", () => {
       expect(m.trail).toBeGreaterThan(120);
       expect(m.shareOverflow).toBeLessThanOrEqual(0);
       expect(m.docOverflow).toBeLessThanOrEqual(0);
-      // …and the row does not double where it does not have to.
-      if (NO_WRAP_WIDTHS.includes(width)) expect(m.wrapped).toBe(false);
+      // …and the row does not double where a single line would have served:
+      // wrapping is only justified when one line leaves the trail cramped.
+      if (m.oneLineTrail >= COMFORTABLE_TRAIL_PX) expect(m.wrapped).toBe(false);
 
       // The other axis: with a selection live the row carries two more buttons.
       // The rule must still hold; whether it wraps to do so is the CSS's choice.
@@ -317,16 +325,16 @@ test.describe("Wiki reader: ⧉ Copy path", () => {
   /**
    * The case that makes "the spec is the record" TRUE rather than a promise.
    *
-   * A verify pass showed the four sampled widths above admit a basis of 100px
-   * (trail 101px at 840px wide — below the legibility floor the spec itself
-   * states) and one of 180px (round 1's second-row regression, back at 1366px).
-   * Four samples out of ~118 possible widths cannot select a value, so a comment
-   * telling the next person to "re-tune by running the spec" was writing a
-   * cheque the spec could not cash.
+   * A verify pass showed the six sampled widths above admit a basis of 100px
+   * (trail 101px at 840px wide with a selection — below the legibility floor the
+   * spec itself states) and one of 180px (round 1's second-row regression, back
+   * at 1366px). Six samples out of 61 swept widths cannot select a value, so a
+   * comment telling the next person to "re-tune by running the spec" was writing
+   * a cheque the spec could not cash.
    *
-   * So this sweeps the whole range in both selection states. It reuses ONE page
-   * load and only resizes, which is why ~230 measurements cost seconds rather
-   * than minutes.
+   * So this sweeps the whole range in both selection states: 61 widths × 2 =
+   * 122 measurements, on ONE page load with only resizes between them, which is
+   * why it costs a fraction of a second rather than minutes.
    */
   test("the rule holds at EVERY width from 760 to 1920, in both selection states", async ({
     page,
@@ -337,7 +345,11 @@ test.describe("Wiki reader: ⧉ Copy path", () => {
     const violations: string[] = [];
     for (const selected of [false, true]) {
       if (selected) await selectArticleText(page);
-      for (let width = 760; width <= 1920; width += 20) {
+      // The 20px grid PLUS the two common device widths that fall between its
+      // steps — 1366 (MacBook Pro) and 1024 (iPad landscape) are both off-grid,
+      // so a pin at either was unreachable from inside this sweep.
+      const widths = [...new Set([...GRID, 1024, 1366])].sort((a, b) => a - b);
+      for (const width of widths) {
         await page.setViewportSize({ width, height: 900 });
         const m = await breadcrumbGeometry(page);
         const where = `${width}px${selected ? " (selection)" : ""}`;
@@ -347,8 +359,16 @@ test.describe("Wiki reader: ⧉ Copy path", () => {
         // A row that fits on one line must not be on two. Checked only without a
         // selection: the two extra buttons legitimately push it over at some
         // widths, and pinning that would pin the layout instead of the rule.
-        if (!selected && NO_WRAP_WIDTHS.includes(width) && m.wrapped) {
-          violations.push(`${where}: wrapped where one row fits`);
+        // …and the inverse, which is what stops the detector from being wired to
+        // a constant `false`: where a single line cannot serve the trail AT ALL,
+        // the row must actually be wrapping.
+        if (m.oneLineTrail < 40 && !m.wrapped) {
+          violations.push(`${where}: did NOT wrap though one line gives ${m.oneLineTrail.toFixed(0)}px`);
+        }
+        if (!selected && m.wrapped && m.oneLineTrail >= COMFORTABLE_TRAIL_PX) {
+          violations.push(
+            `${where}: wrapped though one line gives the trail ${m.oneLineTrail.toFixed(0)}px`,
+          );
         }
       }
     }
@@ -356,6 +376,29 @@ test.describe("Wiki reader: ⧉ Copy path", () => {
     // to "+N", and on a CI-only failure the width that violated the rule is the
     // whole diagnosis.
     expect(violations.join("\n")).toBe("");
+  });
+
+  /**
+   * The wrap detector's own property, which a verify pass found had no test.
+   *
+   * `sh.top > t.top + 4` — the shape this replaced — reports a wrap at
+   * font-size 30 and up on a row that is plainly on ONE line (measured at 1920:
+   * trail 89–124, share 95.5–117.5), purely from baseline alignment. Comparing
+   * against the trail's BOTTOM is what "begins on the next line" means, and this
+   * pins it: a big font must not, by itself, read as a wrap.
+   */
+  test("the wrap detector is not fooled by a large font on a single-line row", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1920, height: 900 });
+    await openPage(page, WIKI, PAGE_REL);
+    for (const fontSize of [12, 30, 48]) {
+      await page.evaluate((fs) => {
+        (document.querySelector(".wiki-breadcrumb") as HTMLElement).style.fontSize = `${fs}px`;
+      }, fontSize);
+      const m = await breadcrumbGeometry(page);
+      expect(m.wrapped, `font-size ${fontSize}px at 1920 is one line`).toBe(false);
+    }
   });
 
   test("is icon-only, and the tooltip carries what the dropped label used to", async ({ page }) => {

@@ -522,25 +522,27 @@ export async function renderWikiPage(opts?: {
          rendered at 27px at 1280 and 0px at 800, where the last action hung 72px
          past the pane and the document scrolled sideways.
 
-         ⚠️ THE RULE, and it is ENFORCED: the trail keeps a legible width at
-         every viewport, the row never overflows its pane, and it does not wrap
-         where one line fits with headroom. "e2e/wiki-copy-path.spec.ts" sweeps
-         760–1920px in both selection states and asserts it — both states because
-         ✨ Explain and ✓ Fact check are hidden until the reader selects text, so
-         any measurement taken without a selection is of a row two items shorter
-         than the one a reader reaching for Explain sees. That axis was missed by
-         every hand sweep, mine and three reviewers'.
+         ⚠️ THE RULE, and it is enforced by measurement rather than by a list of
+         widths: the trail keeps a legible width everywhere, the row never
+         overflows its pane, and it wraps ONLY where a single line would leave
+         the trail cramped. "e2e/wiki-copy-path.spec.ts" sweeps 760–1920px in
+         both selection states — both states because ✨ Explain and ✓ Fact check
+         are hidden until the reader selects text, so any measurement of the
+         resting row is of a row two items shorter than the one a reader
+         reaching for Explain sees; that axis was missed by every hand sweep,
+         mine and three reviewers'.
 
-         What the spec CAN and CANNOT settle, measured rather than asserted: it
-         rejects a basis of 0 and 100 (an illegible trail) and 260 (a second row
-         where one fits), and it admits 120–180 alike. It cannot do better,
-         because WHERE the row wraps depends on the platform's font metrics —
-         CI proved it: pinning 1366 and 1000 as no-wrap passed on macOS and
-         failed on the Linux runner, where this same build wraps at both. 160 is
-         chosen inside the admissible band by local measurement (180 wraps at
-         1366 on macOS); that last step is not something CI can hold for us.
-         Re-tune by changing it and running the spec — and do not read a number
-         out of this comment, which is how three previous attempts went wrong. */
+         The no-wrap half is a COUNTERFACTUAL, not a width list: the spec forces
+         "nowrap", reads what the trail would have got, and only then decides
+         whether wrapping bought anything. That is what makes it portable —
+         where a flex row breaks depends on the platform's font metrics, and CI
+         proved it by failing on Linux at two widths that stay on one line on
+         macOS. Measured against that rule, each mutation shown to apply: a basis
+         of 0 fails 7 cases, 100 fails 1, 180 fails 3, 200 fails 4, 260 fails 5,
+         and removing flex-wrap fails 7 — while 120, 140 and 160 all pass. So the
+         spec brackets the basis from both sides without dictating one value.
+         Re-tune by changing it and running the spec; do not read a number out of
+         this comment, which is how three previous attempts went wrong. */
       flex-wrap: wrap; row-gap: 7px;
     }
     /* "flex: 1 1 160px" rather than "flex: 1" (basis 0): with wrapping on, the
