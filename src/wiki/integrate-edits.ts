@@ -643,8 +643,121 @@ function resolveRange(
   return { start, end, tier: "collapsed" };
 }
 
+/**
+ * What a tier-2 rescue's resolved range is about to be USED for, which decides how
+ * much of `collapsedRescueRisk` binds.
+ *
+ * `"splice"` — the range is REPLACED by `new`. Everything the collapse threw away
+ * matters: a range that starts after an opening `**` and consumes the closing one
+ * leaves `**NEW`, and a half-eaten link re-pairs the replacement with another
+ * link's URL. This is the original (and still default) behaviour.
+ *
+ * `"mark"` — the range is only WRAPPED (`X` → `<Fact …>X</Fact>`); the inner text
+ * survives byte-for-byte, and `renderInline` leaves a wrapper's body in the stream
+ * for the bold/link passes, so `<Fact …>**Bold** rest</Fact>` renders exactly as
+ * `**Bold** rest` did. The count-equality rule therefore has nothing left to
+ * protect on the emphasis family and refuses the single most common legitimate
+ * anchor there is: the claim extractor returns the READING text of a sentence
+ * (`Norepinephrine acts as…`) while the body carries the SOURCE text
+ * (`**Norepinephrine** acts as…`), a BALANCED superset. Measured on
+ * `life/sources/Neurochemical Focus Stack…mdx` (2026-08-31): 8 quotes in, 1 mark
+ * out, and two of the seven drops were exactly this.
+ *
+ * What `"mark"` keeps, because wrapping does not make them safe:
+ *  - the paragraph-break ban (a mapped range can be arbitrarily larger than `old`),
+ *  - the {@link offsetInsideMarkup} EDGE test, which is what catches a range whose
+ *    start sits offset inside a delimiter run,
+ *  - strict count-equality on the BRACKET family (`[`, `]`, `(`, `)`): wrapping
+ *    half of a `[label](url)` still puts the tag inside link markup,
+ *  - and, for the emphasis family, a RUN-PARITY test in place of count-equality —
+ *    `**Bold** rest` has two `*` runs (balanced, allowed) while `Bold** rest` has
+ *    one (cut, refused). Parity over RUNS, not over characters: `Bold** rest`
+ *    carries an even CHARACTER count and would sail through a naive parity check.
+ */
+export type RescueMode = "splice" | "mark";
+
+/**
+ * The drop reasons of one propose run, collapsed to `N× <reason>` phrases ordered
+ * most-frequent-first — the one line that turns `dropped=7` into a diagnosis.
+ *
+ * The route logged counts only, so a run that dropped every anchor for ONE
+ * structural reason (all four table rows; every quote landing in a fenced mermaid
+ * block) was indistinguishable in the log from seven unrelated misses, and the
+ * reasons — which the response has carried all along — could only be read by
+ * expanding a `<details>` in the preview panel nobody had a reason to open.
+ *
+ * Reasons are the engine's own bounded phrases, so they are tallied verbatim
+ * rather than normalized; ties keep first-seen order (`Map` insertion order).
+ */
+export function dropReasonTally(dropped: { reason: string }[]): string {
+  const counts = new Map<string, number>();
+  for (const d of dropped) {
+    const reason = d.reason || "dropped";
+    counts.set(reason, (counts.get(reason) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([reason, n]) => `${n}× ${reason}`)
+    .join("; ");
+}
+
 /** Markup delimiters whose balance a whitespace-rescued range must preserve. */
 const RESCUE_DELIMS = ["*", "`", "_", "[", "]", "(", ")"] as const;
+
+/** The EMPHASIS/code half of {@link RESCUE_DELIMS} — the ones a `"mark"`-mode
+ *  rescue checks by run parity rather than by count equality. */
+const EMPHASIS_DELIMS = ["*", "`", "_"] as const;
+
+/** Runs (maximal consecutive stretches) of `ch` in `s`. A `**` pair is ONE run, so
+ *  `**Bold** rest` answers 2 and `Bold** rest` answers 1 — the distinction
+ *  character counts cannot make (both are even). */
+function countRuns(s: string, ch: string): number {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === ch && s[i - 1] !== ch) n++;
+  }
+  return n;
+}
+
+/**
+ * Grow a `"mark"`-mode range outward over the emphasis/code delimiter RUNS its
+ * edges sit inside — the step that makes the relaxation reach the case it exists
+ * for.
+ *
+ * `collapseWithMap` strips `*`/`_`/backtick, so the plain-text quote
+ * `Norepinephrine acts as…` maps back to a range that STARTS after the opening
+ * `**` and ENDS after the closing one: an unbalanced slice both the edge test and
+ * the parity test correctly refuse. For a SPLICE that refusal is the whole point.
+ * For a WRAP the honest repair is to take the construct whole — the wrapper
+ * preserves its inner text, and `<Fact …>**Bold** rest</Fact>` renders exactly as
+ * the source did (verified against `formatWebHtml`).
+ *
+ * Deliberately narrow: only the emphasis family, and only over a contiguous run of
+ * the SAME character. The parity + edge tests still run on the GROWN range, so a
+ * stray literal `*` that this pulls in is refused exactly as it was before —
+ * growing is an attempt, not a waiver.
+ *
+ * The {@link ZONE_SENTINEL} test is DEFENSIVE and, on today's zone set, unreachable
+ * — stated rather than pinned by a test. Expansion only steps onto a char that is
+ * `*`, `_` or a backtick, so reaching a zone requires a zone to END on one of those
+ * three; every zone kind ends on a line boundary (frontmatter `---`, a closing code
+ * fence, the `factcheck:end` comment) or on the `>` of a line-anchored component
+ * tag. It is kept because the zone set is the thing most likely to grow.
+ */
+function growOverEmphasisRuns(
+  body: string,
+  masked: string,
+  start: number,
+  end: number,
+): { start: number; end: number } {
+  const isDelim = (ch: string | undefined): boolean =>
+    ch !== undefined && (EMPHASIS_DELIMS as readonly string[]).includes(ch);
+  let s0 = start;
+  while (s0 > 0 && isDelim(body[s0 - 1]) && masked[s0 - 1] !== ZONE_SENTINEL) s0--;
+  let e0 = end;
+  while (e0 < body.length && isDelim(body[e0]) && masked[e0] !== ZONE_SENTINEL) e0++;
+  return { start: s0, end: e0 };
+}
 
 const RESCUE_DELIM_SET = new Set<string>(RESCUE_DELIMS);
 
@@ -699,12 +812,22 @@ export function collapsedRescueRisk(
   old: string,
   before = "",
   after = "",
+  mode: RescueMode = "splice",
 ): string | null {
   // `\r\n\r\n` is a paragraph break too — a bare `\n\n` test misses CRLF pages.
   if (/\n[ \t\r]*\n/.test(rawSlice)) {
     return "whitespace-rescued match would span a paragraph break in the page";
   }
   for (const d of RESCUE_DELIMS) {
+    // In `"mark"` mode the emphasis family is checked by run PARITY instead: the
+    // wrapper preserves the inner text, so a balanced superset is safe and only a
+    // CUT construct is not. The bracket family keeps count-equality in both modes.
+    if (mode === "mark" && (EMPHASIS_DELIMS as readonly string[]).includes(d)) {
+      if (countRuns(rawSlice, d) % 2 !== countRuns(old, d) % 2) {
+        return "whitespace-rescued match would cut through markdown formatting";
+      }
+      continue;
+    }
     if (countChar(rawSlice, d) !== countChar(old, d)) {
       return "whitespace-rescued match would cut through markdown formatting";
     }
@@ -721,7 +844,12 @@ export function collapsedRescueRisk(
  * start offset. See the module doc for why there is no per-edit re-validation
  * during application. Pure — the caller owns the write.
  */
-export function applyEdits(body: string, edits: IntegrateEdit[], isMdx = false): ApplyEditsResult {
+export function applyEdits(
+  body: string,
+  edits: IntegrateEdit[],
+  isMdx = false,
+  mode: RescueMode = "splice",
+): ApplyEditsResult {
   const masked = matchMaskBody(body, isMdx);
   const outcomes: EditOutcome[] = edits.map((edit) => {
     const r = resolveRange(masked, edit.old);
@@ -731,27 +859,37 @@ export function applyEdits(body: string, edits: IntegrateEdit[], isMdx = false):
     if (masked.slice(r.start, r.end).includes(ZONE_SENTINEL)) {
       return { edit, applied: false, reason: "resolves into an excluded region of the page" };
     }
-    const resolvedText = body.slice(r.start, r.end);
-    // A tier-2 rescue's raw span can cut through markup the collapse stripped —
-    // reject rather than corrupt (see `collapsedRescueRisk`).
+    // A tier-2 rescue's raw span can cut through markup the collapse stripped. In
+    // `"splice"` mode that is a rejection; in `"mark"` mode the range is first
+    // grown over the delimiter runs its edges sit inside, and only what survives
+    // THAT is rejected (see `growOverEmphasisRuns` / `collapsedRescueRisk`).
+    let start = r.start;
+    let end = r.end;
+    if (r.tier === "collapsed" && mode === "mark") {
+      const grown = growOverEmphasisRuns(body, masked, start, end);
+      start = grown.start;
+      end = grown.end;
+    }
+    const resolvedText = body.slice(start, end);
     if (r.tier === "collapsed") {
       const risk = collapsedRescueRisk(
         resolvedText,
         edit.old,
-        r.start > 0 ? body[r.start - 1]! : "",
-        r.end < body.length ? body[r.end]! : "",
+        start > 0 ? body[start - 1]! : "",
+        end < body.length ? body[end]! : "",
+        mode,
       );
       if (risk) return { edit, applied: false, reason: risk };
     }
     return {
       edit,
       applied: true,
-      start: r.start,
-      end: r.end,
+      start,
+      end,
       tier: r.tier,
       resolvedText,
-      beforeCtx: contextBefore(body, masked, r.start),
-      afterCtx: contextAfter(body, masked, r.end),
+      beforeCtx: contextBefore(body, masked, start),
+      afterCtx: contextAfter(body, masked, end),
     };
   });
 
@@ -1330,7 +1468,11 @@ export function annotateEdits(input: AnnotateEditsInput): AnnotateEditsResult {
   // Where the marks emitted so far actually landed — the POST-expansion ranges, which
   // is the whole point (see the collision drop below).
   const markedSpans: { start: number; end: number; claimIndex: number }[] = [];
-  for (const o of applyEdits(body, candidates, isMdx).outcomes) {
+  // `"mark"`: this call is a LOCATOR. Nothing it resolves is spliced — the range is
+  // handed to `factSpanForm` and the surviving edit replaces the raw slice with
+  // itself inside a `<Fact>` wrapper — so the splice-only half of the rescue gate
+  // must not refuse it. See {@link RescueMode}.
+  for (const o of applyEdits(body, candidates, isMdx, "mark").outcomes) {
     if (!o.applied || o.start === undefined || o.end === undefined) {
       dropped.push({ edit: o.edit, reason: o.reason ?? "could not be placed" });
       continue;

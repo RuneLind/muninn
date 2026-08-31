@@ -136,6 +136,8 @@ import {
   integrateSuccessCopy,
   INTEGRATE_NO_ANCHORS_COPY,
   INTEGRATE_STALE_COPY,
+  appendBlockedCopy,
+  shouldOpenDroppedList,
   INTEGRATE_STALE_COPY_EDIT,
   type DroppedEditRow,
   type IntegrateProposal,
@@ -1818,7 +1820,7 @@ function factcheckAppendInnerHtml(turn: AskTurn): string {
   return (
     '<button id="wikiFactcheckAppendBtn" class="wiki-fc-append-btn"' + disabled + ">➕ Add to article</button>" +
     '<span class="wiki-fc-append-msg' + (blocked ? " error" : "") + '" id="wikiFactcheckAppendMsg">' +
-    (blocked ? esc(INTEGRATE_STALE_COPY) : "") +
+    (blocked ? esc(appendBlockedCopy(turn)) : "") +
     "</span>"
   );
 }
@@ -3509,7 +3511,18 @@ function newPreviewState(
   selected: boolean[],
   callout: boolean,
 ): IntegratePreviewState {
-  return { turn, proposal, selected, callout, applying: false, droppedOpen: false, focusEditIdx: -1 };
+  return {
+    turn,
+    proposal,
+    selected,
+    callout,
+    applying: false,
+    // A run whose drops OUTNUMBER its edits gets its reason list opened: the
+    // headline "1 proposed edit" is exactly the case where the reasons are the
+    // information (`shouldOpenDroppedList`).
+    droppedOpen: shouldOpenDroppedList(proposal),
+    focusEditIdx: -1,
+  };
 }
 
 /**

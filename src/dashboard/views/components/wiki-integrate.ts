@@ -1012,6 +1012,47 @@ export function appendBlockedByIntegrate(turn: IntegrateGateTurn): boolean {
 export const INTEGRATE_STALE_COPY =
   "The page changed since the check — re-run the fact check, then add it.";
 
+/** The ➕ bar's copy once an INTEGRATE write has retired it — an appendix statement
+ *  on an annotatable page, the staleness copy everywhere else. */
+export const INTEGRATE_WROTE_APPENDIX_COPY =
+  "The integrate write already added the fact-check appendix to this page.";
+
+/**
+ * What the disabled ➕ bar says after an integrate write.
+ *
+ * On an ANNOTATABLE (`.mdx`) page the integrate apply always persists the
+ * `<FactCheck>` appendix — every inline chip links into a `#fc-claim-N` section
+ * only that block provides, so the write has no branch that omits it. Showing the
+ * 409 copy there told the reader to re-run the check and add a callout that the
+ * same write had just added, which reads as a fault rather than as a completed
+ * action (reported 2026-08-31 on `Neurochemical Focus Stack…mdx`).
+ *
+ * On a plain `.md` page the summary callout is the checkbox's CHOICE, so the write
+ * genuinely may not have added one and "the page changed since the check" stays the
+ * honest thing to say. `annotatable` rides in on the `done` payload and is
+ * persisted with the turn, so this survives a reload the same way the disable does.
+ */
+export function appendBlockedCopy(turn: IntegrateGateTurn): string {
+  return turn.annotatable ? INTEGRATE_WROTE_APPENDIX_COPY : INTEGRATE_STALE_COPY;
+}
+
+/**
+ * Should the preview panel's "N not applied" list start OPEN?
+ *
+ * The drop reasons have always been in the response, behind a collapsed
+ * `<details>` nobody had a reason to expand — so a run that placed one anchor out
+ * of eight looked like "the editor found little", when the reasons said "four
+ * table rows and a fenced diagram". Open it exactly when the drops OUTNUMBER the
+ * proposed edits: that is the run whose headline count is misleading on its own,
+ * and it leaves the ordinary mostly-successful run collapsed.
+ */
+export function shouldOpenDroppedList(proposal: {
+  edits?: unknown[];
+  dropped?: unknown[];
+}): boolean {
+  return (proposal.dropped?.length ?? 0) > (proposal.edits?.length ?? 0);
+}
+
 /** The same 409 shape on the ✎ **integrate** bar. Separate string because "then
  *  add it" names the ➕ action — on the editing bar the only sensible next step is
  *  to integrate again. */
