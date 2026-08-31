@@ -197,59 +197,94 @@ test.describe("Wiki reader: ⧉ Copy path", () => {
   });
 
   /**
-   * The regression the first version of this spec structurally could not see.
+   * The regression the first version of this spec structurally could not see,
+   * now stated as the RULE the CSS comment used to spell out as a table.
    *
    * `.wiki-bc-trail` is the breadcrumb row's ONLY shrinkable item, so every
    * action button added to that row comes out of the trail's width. Measured on
-   * the unfixed commit: the trail rendered at 27px at 1280 (the common laptop
-   * width) and 0px at 800, where the last action hung 72px past the pane and the
-   * whole document scrolled sideways. Every other assertion in this file stayed
-   * green — `toContainText` reads `textContent`, which is intact at 3px wide.
+   * the unfixed commit: 27px at 1280 (the common laptop width) and 0px at 800,
+   * where the last action hung 72px past the pane and the whole document
+   * scrolled sideways. Every other assertion in this file stayed green —
+   * `toContainText` reads `textContent`, which is intact at 3px wide.
    *
-   * So the assertion is GEOMETRY, and the floor is deliberately well below what
-   * the fix delivers (169–733px across 800–1920) and well above what the defect
-   * produced: it is a regression alarm, not a pin on the exact layout.
+   * ⚠️ **Two axes, and the second is the one three rounds of hand-sweeping
+   * missed.** Width is the obvious one. The other is HOW MANY buttons are in
+   * the row: ✨ Explain and ✓ Fact check are hidden until the reader selects
+   * text, so every measurement taken without a selection is of a row two items
+   * shorter than the one a reader who is about to explain a passage sees. The
+   * cases below run both.
    *
-   * The width list covers BOTH sides of the wrap, which a verify pass found the
-   * first version did not: 1280 and 800 wrap, while 1440 and 1024 do not — and
-   * the non-wrapping band is where a too-eager basis would silently cost every
-   * reader a second breadcrumb row forever. At 1280 only the trail assertion
-   * distinguishes fixed from broken (the overflow pair passes either way); at
-   * 800 all three bite.
+   * What is asserted is the rule, not a layout: the trail stays legible and the
+   * row never overflows its pane. The extra `noWrap` pin (no selection only)
+   * exists because a basis large enough to wrap everywhere costs ~29px of
+   * article height on every laptop forever — that is how round 1's fix
+   * regressed 1024–1550 while every assertion above it still passed.
    */
+  async function breadcrumbGeometry(page: import("@playwright/test").Page) {
+    return page.evaluate(() => {
+      const trail = document.querySelector(".wiki-bc-trail");
+      const bc = document.querySelector(".wiki-breadcrumb");
+      const share = document.querySelector("#wikiShareBtn");
+      const pane = bc?.parentElement;
+      const t = trail!.getBoundingClientRect();
+      const sh = share!.getBoundingClientRect();
+      return {
+        trail: t.width,
+        shareOverflow: sh.right - pane!.getBoundingClientRect().right,
+        docOverflow: document.documentElement.scrollWidth - window.innerWidth,
+        // Did the row wrap? Compared by the TOP EDGES of the first and last
+        // items, not by dividing the row's height by a pixel constant — a
+        // constant misreports the moment a font size, a zoom level or a theme
+        // changes the line box, and would then fail as a wrap regression that
+        // is not one.
+        wrapped: sh.top > t.top + 4,
+      };
+    });
+  }
+
+  /** Select a run of article text, which is what reveals ✨ Explain and ✓ Fact
+   *  check — two more items in the row under test. */
+  async function selectArticleText(page: import("@playwright/test").Page): Promise<void> {
+    await page.evaluate(() => {
+      // The article body, not a `p`: `formatWebHtml` emits prose as text nodes
+      // under `.wiki-article`, so this fixture page has no paragraph element at
+      // all and a `p` selector silently selects nothing.
+      const body = document.querySelector(".wiki-article");
+      if (!body) throw new Error("no article body to select");
+      const r = document.createRange();
+      r.selectNodeContents(body);
+      const sel = window.getSelection()!;
+      sel.removeAllRanges();
+      sel.addRange(r);
+      // The reveal is wired to `mouseup` on #articleWrap (selectionchange only
+      // HIDES), so a programmatic selection has to dispatch the event the
+      // reader's drag would have.
+      document.getElementById("articleWrap")!.dispatchEvent(
+        new MouseEvent("mouseup", { bubbles: true }),
+      );
+    });
+    await expect(page.locator("#wikiExplainBtn")).toBeVisible();
+  }
+
   for (const width of [1440, 1280, 1024, 800]) {
     test(`the trail stays legible and the row does not overflow at ${width}px`, async ({ page }) => {
       await page.setViewportSize({ width, height: 900 });
       await openPage(page, WIKI, PAGE_REL);
 
-      const m = await page.evaluate(() => {
-        const trail = document.querySelector(".wiki-bc-trail");
-        const bc = document.querySelector(".wiki-breadcrumb");
-        const share = document.querySelector("#wikiShareBtn");
-        const pane = bc?.parentElement;
-        return {
-          trail: trail?.getBoundingClientRect().width ?? -1,
-          // The row is allowed to WRAP; what it may not do is push its last
-          // action out of the pane or give the page a horizontal scrollbar.
-          shareOverflow:
-            share && pane
-              ? share.getBoundingClientRect().right - pane.getBoundingClientRect().right
-              : -1,
-          docOverflow: document.documentElement.scrollWidth - window.innerWidth,
-          // How many lines the row occupies, derived from its own height rather
-          // than a pixel constant: one row is ~41px, two ~70px.
-          rows: Math.round((bc?.getBoundingClientRect().height ?? 0) / 40),
-        };
-      });
-
+      const m = await breadcrumbGeometry(page);
       expect(m.trail).toBeGreaterThan(120);
       expect(m.shareOverflow).toBeLessThanOrEqual(0);
       expect(m.docOverflow).toBeLessThanOrEqual(0);
-      // …and the row does not double where it does not have to. A basis large
-      // enough to wrap at every width costs 29px of article height on every
-      // laptop forever, which is how the first version of this fix regressed
-      // 1024–1550 while every assertion above still passed.
-      if (width === 1440 || width === 1024) expect(m.rows).toBe(1);
+      // …and the row does not double where it does not have to.
+      if (width === 1440 || width === 1024) expect(m.wrapped).toBe(false);
+
+      // The other axis: with a selection live the row carries two more buttons.
+      // The rule must still hold; whether it wraps to do so is the CSS's choice.
+      await selectArticleText(page);
+      const sel = await breadcrumbGeometry(page);
+      expect(sel.trail).toBeGreaterThan(120);
+      expect(sel.shareOverflow).toBeLessThanOrEqual(0);
+      expect(sel.docOverflow).toBeLessThanOrEqual(0);
     });
   }
 
@@ -258,17 +293,20 @@ test.describe("Wiki reader: ⧉ Copy path", () => {
     const btn = page.locator(BTN);
 
     // The words are gone — that is the point of the control being a glyph.
+    // (An exact `toHaveText` already excludes "Copy path"; a second
+    // `not.toContain` beside it asserts nothing the first does not.)
     await expect(btn).toHaveText(COPY_PATH_IDLE);
-    expect(await btn.textContent()).not.toContain("Copy path");
 
     // …and what replaced them says MORE than they did: the exact string.
     await expect(btn).toHaveAttribute("title", `Copy ${root}/${PAGE_REL}`);
     await expect(btn).toHaveAttribute("aria-label", `Copy this page's file path: ${root}/${PAGE_REL}`);
 
     // The whole reason for the change: the button's own width. The labelled
-    // version measured 96px on this row; a glyph must not creep back toward it.
+    // version measured 96px on this row; a glyph must not creep back toward it
+    // — and must not collapse either, which an upper bound alone would pass.
     const box = await btn.boundingBox();
     expect(box!.width).toBeLessThan(48);
+    expect(box!.width).toBeGreaterThan(20);
   });
 
   test("a second click's confirmation is not erased by the first click's timer", async ({

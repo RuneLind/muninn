@@ -515,28 +515,33 @@ export async function renderWikiPage(opts?: {
       flex-shrink: 0; display: flex; align-items: center; gap: 8px;
       padding: 9px 24px; border-bottom: 1px solid var(--border-primary);
       font-size: 12px; color: var(--text-muted);
-      /* The actions WRAP to a second line rather than crushing the trail. The
-         trail is the row's only shrinkable item, so every action added to it
-         comes out of the trail's width — with a LABELLED copy button (~104px)
-         it rendered at 27px at 1280 ("mimir…", folder and title gone) and 0px
-         at 800, where the last action hung 72px past the pane and the document
-         scrolled sideways. Icon-only costs 38px instead, and wrapping is the
-         SAFETY NET for what is left, not the default. Measured against
-         origin/main, same page, 14 widths 800–1920: one row and −38px of trail
-         at 1920/1700/1600/1550/1500/1440/1366/1100/1024/1000, two rows at
-         1280/1200/900/800 — which are exactly the widths where main's trail had
-         already collapsed to 131/51/107/7px, so the wrap BUYS 47–257px there.
-         No horizontal overflow at any width. */
+      /* The actions WRAP rather than crush the trail. ".wiki-bc-trail" is the
+         row's only shrinkable item, so every action added to this row comes out
+         of the trail's width — with a LABELLED copy button (~104px) the trail
+         rendered at 27px at 1280 and 0px at 800, where the last action hung past
+         the pane and the document scrolled sideways.
+
+         ⚠️ THE RULE, not a table: the trail keeps a legible width at every
+         viewport and the row never overflows its pane; a second line is the
+         price paid ONLY where the alternative is an unreadable first one. Three
+         rounds of review went into tuning this, and each round's comment quoted
+         a measurement sweep that the next round refuted — so the numbers now
+         live in "e2e/wiki-copy-path.spec.ts", which asserts the rule at four
+         widths AND with a text selection active (which reveals ✨ Explain and
+         ✓ Fact check, i.e. two more items in the row — the axis every hand
+         sweep here missed). Re-tune by changing the basis and running that
+         spec, never by reading a number out of this comment.
+
+         The one durable fact: the button is icon-only because the words cost
+         the trail ~104px on a row that has none to give. */
       flex-wrap: wrap; row-gap: 7px;
     }
     /* "flex: 1 1 160px" rather than "flex: 1" (basis 0): with wrapping on, the
        basis is what reserves the trail a legible width before anything wraps —
-       with basis 0 the trail shrinks to nothing and the row never wraps at all
-       (that IS the 27px case). 160px chosen by sweeping 0/120/160/200/260 across
-       800–1920 on the icon-only build: 0 leaves the trail at 54–93px, 260 wraps
-       at every width including 1920, and 160 is the value that holds ≥169px
-       everywhere while still fitting on ONE row wherever main did. "min-width: 0"
-       keeps the ellipsis working inside a flex item. */
+       at basis 0 the trail is free to shrink toward nothing, which IS the 27px
+       case this fix exists for. 160px was chosen by sweeping candidates against
+       the spec's assertions; the spec is the record. "min-width: 0" keeps the
+       ellipsis working inside a flex item. */
     .wiki-bc-trail { flex: 1 1 160px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .wiki-bc-sep { color: var(--text-dim); margin: 0 5px; }
     .wiki-bc-cur { color: var(--text-secondary); }
