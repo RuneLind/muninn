@@ -224,3 +224,79 @@ describe("growth completes from the side that carries the delimiter", () => {
     }
   });
 });
+
+/**
+ * The guard removes the ONE mark it spliced, never a sweep of `fc-` chrome.
+ *
+ * A sweep can only run on the marked side (the unmarked side has nothing to sweep),
+ * so any chrome the PAGE renders appears on exactly one side and the comparison can
+ * never be equal — dropping every claim on that page with a reason untrue of the
+ * passage. Measured on two real mimir pages: 33 and 36 claims lost. Sweeping both
+ * sides is not the fix either: it removes the page's own marks too, which masks a
+ * genuine difference and re-admits corrupting marks on exactly those pages.
+ */
+describe("a page that renders chrome of its OWN", () => {
+  const SENTENCE = "Norepinephrine acts as a mental spotlight here.";
+
+  /** Both fixtures are asserted to ACTUALLY emit page chrome before they are used to
+   *  assert anything about the guard — a first spelling of this block used a
+   *  `<CodeTabs>` with no `<Tab>` children and a backticked `<Fact>`, neither of
+   *  which renders a button or a mark, so both tests passed against the defect. */
+  function chromeCount(body: string): { buttons: number; marks: number } {
+    const html = formatWebHtml(body);
+    return {
+      buttons: (html.match(/<button/g) ?? []).length,
+      marks: (html.match(/class="fc-mark/g) ?? []).length,
+    };
+  }
+
+  test("a CodeTabs block does not cost the page its marks", () => {
+    // `<CodeTabs>` emits `<button class="code-tabs-tab">` per `<Tab>` — a button the
+    // page owns, on both sides of the comparison.
+    const plain = `# T\n\n${SENTENCE}\n`;
+    const withTabs =
+      `# T\n\n${SENTENCE}\n\n<CodeTabs>\n<Tab label="a">\ntext a\n</Tab>\n<Tab label="b">\ntext b\n</Tab>\n</CodeTabs>\n`;
+    expect(chromeCount(withTabs).buttons).toBeGreaterThan(0);
+    expect(markOne(plain, SENTENCE).edits).toHaveLength(1);
+    expect(markOne(withTabs, SENTENCE).edits).toHaveLength(1);
+  });
+
+  test("a page documenting THIS feature does not lose its marks", () => {
+    // A page that shows a `<Fact>` example in PROSE renders a real mark, chip and
+    // all. A one-sided chrome sweep removes it from the marked render only, so no
+    // claim on such a page can ever compare equal.
+    const body =
+      `# T\n\n${SENTENCE}\n\nA page may show <Fact n="4" v="bad">a marked passage</Fact> in prose.\n`;
+    const chrome = chromeCount(body);
+    expect(chrome.marks).toBeGreaterThan(0);
+    expect(chrome.buttons).toBeGreaterThan(0);
+    expect(markOne(body, SENTENCE).edits).toHaveLength(1);
+  });
+
+  test("…and the page's own mark still cannot hide a real difference", () => {
+    // The other direction, which a BOTH-sides sweep gets wrong: it would remove the
+    // page's own mark from each render and mask the genuine difference below.
+    const body =
+      `# T\n\nA page may show <Fact n="4" v="bad">a marked passage</Fact> in prose.\n\nWe use [the docs](https://example.com/x) here.\n`;
+    expect(chromeCount(body).marks).toBeGreaterThan(0);
+    expect(markOne(body, "https://example.com/x").edits).toEqual([]);
+  });
+});
+
+describe("a marked passage carrying an inline component", () => {
+  test("a <Pill> inside the wrapper still compares equal", () => {
+    // A regression pin, NOT a pin on the balanced scan — stated because the
+    // difference matters. The mutant that matches the wrapper's close with the FIRST
+    // same-tag close survives this file, and the state space says why: an INLINE
+    // (`<span>`) wrapper cannot contain a component-rendered span at all, because
+    // `renderInline` escapes nested component tags (measured: the Pill comes out as
+    // `&lt;Pill&gt;`, which is a render change and is refused for that reason); and a
+    // BLOCK (`<div>`) wrapper covers exactly one paragraph, which a block component
+    // is never inside of. So the scan's counting is defensive against the component
+    // vocabulary growing, not against anything reachable today.
+    const body = "# T\n\nThe status is <Pill>beta</Pill> for now and stable soon.\n";
+    expect((formatWebHtml(body).match(/<span/g) ?? []).length).toBeGreaterThan(0);
+    expect(markOne(body, "The status is <Pill>beta</Pill> for now and stable soon.").edits)
+      .toHaveLength(1);
+  });
+});

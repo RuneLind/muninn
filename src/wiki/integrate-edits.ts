@@ -1345,17 +1345,83 @@ function withForm(
  * for a cosmetic one. It is the only case where the two renderers disagree about
  * what a mark costs, which is why it is the only exemption.
  */
-function markSpanRefusal(body: string, span: FactSpan): string | null {
+function markSpanRefusal(
+  body: string,
+  span: FactSpan,
+  claimIndex: number,
+  verdict: FactVerdict,
+  nl: string,
+): string | null {
   if (span.expandedOverLink) return null;
-  // The guard must render the wrapper the EMIT SITE will actually write, so both go
-  // through `wrapperTextFor`. Choosing the form here independently would let the
-  // prediction and the write drift — and a guard that predicts a different string
-  // than the one that ships is worse than no guard.
-  const wrapped =
-    body.slice(0, span.start) + wrapperTextFor(body, span, 1, "ok", "\n") + body.slice(span.end);
-  return renderWithoutMarks(wrapped) === renderWithoutMarks(body, false)
+  // The guard must render EXACTLY what the emit site will write, so every argument
+  // comes from the caller and the inline/block spelling comes from the shared
+  // `wrapperTextFor`. An earlier spelling hardcoded the claim index, the verdict and
+  // the newline; the first two are render-invariant, but `nl` is not — on a CRLF page
+  // taking the block form the guard would have rendered an LF wrapper and the writer
+  // a CRLF one, i.e. predicted a different string than the one that ships.
+  const mark = wrapperTextFor(body, span, claimIndex, verdict, nl);
+  const wrapped = body.slice(0, span.start) + mark + body.slice(span.end);
+  return removeOneMark(formatWebHtml(wrapped), claimIndex) === formatWebHtml(body)
     ? null
     : "marking this passage would change how the page renders";
+}
+
+/**
+ * One rendered mark — the one THIS guard spliced, identified by its `data-fact` —
+ * removed from the html, leaving everything else byte-for-byte.
+ *
+ * The removal is targeted rather than a sweep of `fc-` chrome, and that is the whole
+ * point. A sweep has to run on the marked side only (the unmarked side has nothing to
+ * sweep), which makes the comparison unequal for any page that renders chrome OF ITS
+ * OWN — a `<CodeTabs>` block emits `<button class="code-tabs-tab">`, and a page
+ * DOCUMENTING this feature keeps a `<Fact>` inside inline code that the zone-aware
+ * `stripFactWrappers` preserves by design and `formatWebHtml` renders as a real mark.
+ * Measured: 33 and 36 claims dropped on two real mimir pages, every one with a reason
+ * untrue of the passage. Sweeping BOTH sides is not the fix either — it also removes
+ * the page's own marks, which masks a genuine difference and re-admits corrupting
+ * marks on exactly those pages (measured: 2).
+ *
+ * The closing tag is found by a BALANCED scan rather than a regex. That is currently
+ * DEFENSIVE and is stated as such: an inline (`<span>`) wrapper cannot contain a
+ * component-rendered span, because `renderInline` escapes nested component tags — a
+ * `<Pill>` inside one comes out as `&lt;Pill&gt;`, which is a render change and is
+ * refused on its own — and a block (`<div>`) wrapper covers exactly one paragraph,
+ * which a block component is never inside of. So nothing in today's vocabulary nests
+ * the same tag inside a wrapper, and a first-close-tag match would behave
+ * identically. The counting is kept because that argument is about the COMPONENT
+ * SET, which grows, while the cost is four lines. The chip is a `<button>`, which
+ * cannot nest, so a non-greedy match is sound there.
+ */
+function removeOneMark(html: string, claimIndex: number): string {
+  const attr = ` data-fact="${claimIndex}"`;
+  const withoutChip = html.replace(
+    new RegExp(`<button[^>]*${escapeRegExp(attr)}[^>]*>[\\s\\S]*?</button>`),
+    "",
+  );
+  const openRe = new RegExp(`<(span|div) class="fc-mark[^"]*"${escapeRegExp(attr)}>`);
+  const open = openRe.exec(withoutChip);
+  if (!open) return withoutChip;
+  const tag = open[1]!;
+  let depth = 1;
+  let i = open.index + open[0].length;
+  // `[^>]*>` is load-bearing: the match must CONSUME the tag's closing `>`, or the
+  // splice below leaves a stray `>` in the html and every comparison fails.
+  const scan = new RegExp(`</?${tag}\\b[^>]*>`, "g");
+  scan.lastIndex = i;
+  let m: RegExpExecArray | null;
+  while ((m = scan.exec(withoutChip)) !== null) {
+    depth += m[0].startsWith("</") ? -1 : 1;
+    if (depth === 0) {
+      return (
+        withoutChip.slice(0, open.index) +
+        withoutChip.slice(open.index + open[0].length, m.index) +
+        withoutChip.slice(m.index + m[0].length)
+      );
+    }
+  }
+  // Unbalanced — the wrapper did not close. That is itself a render difference, so
+  // returning the html untouched makes the comparison fail, which is the right answer.
+  return withoutChip;
 }
 
 /** The wrapper text for one span — the ONE place the inline/block spelling is
@@ -1655,10 +1721,11 @@ export function annotateEdits(input: AnnotateEditsInput): AnnotateEditsResult {
       continue;
     }
     if (o.grownOverEmphasis) span.grownOverEmphasis = true;
-    // The LAST word on markup safety, and only about what `factSpanForm` CHANGED:
-    // the rescue gate already validated the range it was handed, so re-judging an
-    // untrimmed span in isolation only invents refusals (see `trimCutReason`).
-    const cut = markSpanRefusal(body, span);
+    // The LAST word on markup safety, and it re-judges EVERY span rather than only
+    // what `factSpanForm` adjusted — which is the whole thesis of `markSpanRefusal`:
+    // an exact-tier match passes no gate at all, so nothing else ever looks at it.
+    const markVerdict = verdictByClaim.get(o.edit.claimIndex) ?? "ok";
+    const cut = markSpanRefusal(body, span, o.edit.claimIndex, markVerdict, nl);
     if (cut) {
       dropped.push({ edit: o.edit, reason: cut });
       continue;
@@ -1687,8 +1754,7 @@ export function annotateEdits(input: AnnotateEditsInput): AnnotateEditsResult {
       continue;
     }
     const inner = body.slice(span.start, span.end);
-    const verdict = verdictByClaim.get(o.edit.claimIndex) ?? "ok";
-    const text = wrapperTextFor(body, span, o.edit.claimIndex, verdict, nl);
+    const text = wrapperTextFor(body, span, o.edit.claimIndex, markVerdict, nl);
     if (text.length > input.maxEditChars) {
       dropped.push({ edit: o.edit, reason: `the inline mark exceeds ${input.maxEditChars} chars` });
       continue;
