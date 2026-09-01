@@ -466,7 +466,13 @@ describe("a table row trims to its widest cell", () => {
    * {row, separator, blank, prose, fence}, each row carrying a unique token, and the
    * ORACLE is per LINE — does that token render inside a `<td>`/`<th>`? (Header cells
    * are `<th>`; asking only about `<td>` reported the header row of every real table
-   * as a disagreement.) 3 711 (body, row) pairs, ~0.1 s.
+   * as a disagreement.) 7 422 (body, quotable-line) pairs — 3 905 sequences, of which
+   * 3 711 rows and 3 711 prose lines — in ~0.18 s, and the count is PINNED
+   * (`EXPECTED_PAIRS`) so a generator that silently stops producing cases cannot pass
+   * on an empty sweep. NB 3 711 is the ROWS-only count this sentence carried while the
+   * generator two blocks down already quoted prose as well: the third stale number
+   * this file has corrected, and the reason every count here is now pinned in an
+   * assertion rather than stated in prose.
    */
   test("the table predicate agrees with the renderer over the whole line grammar", () => {
     const KINDS = ["ROW", "SEP", "BLANK", "PROSE", "FENCE"] as const;
