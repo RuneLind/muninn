@@ -80,6 +80,18 @@ describe("growth must not acquire a construct the range did not already cut", ()
  * against whichever one a reviewer happened to send.
  */
 describe("mark-span guard — the whole state space", () => {
+  /** A real 3-column table. The widest cell of the `L-tyrosine` row is its middle
+   *  one, so a whole-row quote and a boundary-crossing quote must both land there. */
+  const TABLE_BODY =
+    "# T\n\n| Compound | Proposed role | Dose |\n|:---|---|---:|\n" +
+    "| L-tyrosine | Amino acid precursor to dopamine and norepinephrine | 500 mg |\n" +
+    "| Caffeine | Blocks adenosine signaling in the cortex | 100 mg |\n";
+  /** Same shape, with a `[[Target|Label]]` in the middle cell — the alias pipe sits
+   *  where a naive cell split would cut the link in half. */
+  const WIKILINK_TABLE_BODY =
+    "# T\n\n| Compound | Proposed role | Dose |\n|---|---|---|\n" +
+    "| Rhodiola | see [[Adaptogens|the adaptogen page]] for the mechanism | optional |\n";
+
   const ROWS: [string, string, string, boolean][] = [
     // A — where the mark would SIT. Both were measured as rendered corruption.
     ["code-span interior: tags render literally AND survive the zone-aware strip",
@@ -133,6 +145,62 @@ describe("mark-span guard — the whole state space", () => {
      "Norepinephrine acts as a mental spotlight.", true],
     ["the neighbour steal", "# T\n\nSee **Alpha**the middle  words**Beta** ok.\n",
      "the middle words", false],
+    // F — a TABLE ROW. The row itself has no wrapper form (a `<Fact>` across the
+    // pipes stops the line being a row and takes the whole table with it), but a
+    // CELL has one, so the row is TRIMMED to its widest cell instead of refused —
+    // the same move tier 3 makes for a multi-line span. Measured: 4 of the 8 claims
+    // on the page that motivated this were whole-row quotes.
+    ["a whole table row trims to its widest cell", TABLE_BODY,
+     "| L-tyrosine | Amino acid precursor to dopamine and norepinephrine | 500 mg |", true],
+    ["a span crossing ONE cell boundary trims to the wider side", TABLE_BODY,
+     "L-tyrosine | Amino acid precursor to dopamine and norepinephrine", true],
+    ["a quote that is already one cell is untouched", TABLE_BODY,
+     "Amino acid precursor to dopamine and norepinephrine", true],
+    // The delimiter row's cells are `---`, and marking one stops `isSeparatorRow`
+    // matching — so the table stops being a table. The render comparison is what
+    // refuses it; the trim has no rule of its own for it.
+    ["a table DELIMITER row stays refused", TABLE_BODY, "|:---|---|---:|", false],
+    // The alias pipe of `[[Target|Label]]` is NOT a cell boundary: `renderWikiHtml`
+    // substitutes the whole link over the RAW body before the table parser ever
+    // runs. The OUTCOME here is a refusal either way, and the row is still a pin —
+    // it separates the two refusals, which are not the same event:
+    //  - splitting AT the alias pipe makes `the adaptogen page]] for the mechanism`
+    //    the widest fragment. It sits inside one `<td>`, so the render comparison
+    //    passes it and the mark SHIPS — with its opening tag inside the link target,
+    //    where the alias class `[^\]\n]*?` swallows it. That is the
+    //    nested-annotation damage, reached through a door the whole-wikilink
+    //    expansion cannot close: expansion runs BEFORE this trim, never after it.
+    //  - not splitting there picks the whole cell, which `formatWebHtml` — which
+    //    resolves no wikilink — spreads across two `<td>`s, so the comparison
+    //    refuses it. A false refusal, and the ACCEPTED one: it costs a mark on a
+    //    rare shape, where the alternative costs a live link. Measured both ways.
+    // NB "the comparison refuses it" is only true because the exemption's flag now
+    // describes the FINAL range (row G1 below). While the flag survived a trim, the
+    // comparison did not run at all on the expanded path — the review that found
+    // that also found this comment asserting its outcome.
+    ["a [[link|alias]] is not split at its alias pipe", WIKILINK_TABLE_BODY,
+     "| Rhodiola | see [[Adaptogens|the adaptogen page]] for the mechanism | optional |", false],
+    // G — the guard is THREE properties, and the exemption waives exactly two of
+    // them. Every row here shipped a corrupt mark in review of the cell trim.
+    // G1: the expansion flag must describe the FINAL range. Expansion fires over
+    // `[[P|a]]`, the trim then throws that cell away, and the flag used to survive —
+    // turning OFF the render comparison for a range holding no link at all. The mark
+    // rendered as literal `<Fact …>` inside a `<code>`, i.e. row A, waved through.
+    ["an expansion the trim discards does not waive the render check",
+     "# T\n\n| C1 | C2 |\n|---|---|\n| [[P|a]] | the command to run is `bun test` now and later |\n",
+     "P|a]] | the command to run is `bun test", false],
+    // G2: the write must be REVERSIBLE. `parsePipeCells` splits at a `|` inside
+    // backticks on both sides, so both renders agree and the comparison is blind —
+    // but the zone-aware strip preserves a tag inside a code span, so the wrapper is
+    // an orphan that no later run can remove.
+    ["a pipe inside inline code: the mark would not strip back out",
+     "# T\n\n| A | B |\n|---|---|\n| `git log --oneline | head -5` runs it | other cell text |\n",
+     "`git log --oneline | head -5` runs it", false],
+    // G3: a dangling `[[` earlier in the row steals the closer, so the mark lands in
+    // the link TARGET — invisible to `formatWebHtml`, which resolves no wikilink.
+    ["a dangling [[ earlier in the row",
+     "# T\n\n| X | Y |\n|---|---|\n| a [[ b [[Target|lab]] end | dosing is 5 g daily |\n",
+     "| a [[ b", false],
   ];
 
   for (const [label, body, quote, wantMarked] of ROWS) {
@@ -317,6 +385,229 @@ describe("a page that renders chrome of its OWN", () => {
       });
     }
   }
+});
+
+describe("a table row trims to its widest cell", () => {
+  const BODY =
+    "# T\n\n| Compound | Proposed role | Dose |\n|:---|---|---:|\n" +
+    "| L-tyrosine | Amino acid precursor to dopamine and norepinephrine | 500 mg |\n";
+  const WIDEST = "Amino acid precursor to dopamine and norepinephrine";
+
+  test("the mark covers the widest cell — not the row, not a neighbour", () => {
+    // The ROWS table records only marked/not-marked, so the RANGE is asserted here:
+    // a trim that picked the first or last cell would still be "marked".
+    const edit = markOne(BODY, "| L-tyrosine | Amino acid precursor to dopamine and norepinephrine | 500 mg |").edits[0]!;
+    expect(edit.old).toBe(WIDEST);
+    // …and the mark is INSIDE the cell — the `|` characters stay outside it, which
+    // is the whole reason the row was refused before.
+    expect(edit.new).not.toContain("|");
+  });
+
+  test("the preview names the trim", () => {
+    // A mark that covers less than the quote must say so: the reviewer is looking at
+    // a row and getting one cell. `markReason` lists EVERY adjustment, so this is
+    // also the assertion that the cell trim was added to that list rather than to
+    // the 4-deep ternary it replaced.
+    const edit = markOne(BODY, "| L-tyrosine | Amino acid precursor to dopamine and norepinephrine | 500 mg |").edits[0]!;
+    expect(edit.reason).toBe("marks the checked passage (trimmed to one table cell)");
+  });
+
+  test("the note is not claimed for a whitespace-only trim", () => {
+    // The flag used to be inferred from "the range changed", which cannot tell a
+    // cell trim from the edge-whitespace trim every branch does. A quote resolving
+    // with surrounding spaces inside ONE cell crossed no boundary and must say so.
+    const body = "# T\n\n| A | B |\n|---|---|\n| first row middle cell text | second |\n";
+    const edit = markOne(body, " first row middle cell text ").edits[0]!;
+    expect(edit.old).toBe("first row middle cell text");
+    expect(edit.reason).toBe("marks the checked passage");
+  });
+
+  test("the note is not claimed for a line that is not a rendered table", () => {
+    // `isTableRow` alone is true of a lone `| a | b |` line, which the block parser
+    // renders as a PARAGRAPH — measured, `<td>` count 0. Trimming there and calling
+    // it a table cell is a false statement to the reviewer, so the predicate is the
+    // parser's run rule instead: ≥3 consecutive row lines, separator on the second.
+    const body = "# T\n\nSome intro prose here.\n\n| a | b |\n\nTail prose.\n";
+    expect((formatWebHtml(body).match(/<td>/g) ?? []).length).toBe(0);
+    const edit = markOne(body, "| a | b |").edits[0]!;
+    expect(edit.old).toBe("| a | b |");
+    expect(edit.reason).toBe("marks the checked passage");
+  });
+
+  test("the wikilink note is not claimed once the trim discards the link", () => {
+    // The reviewer was told the mark had "expanded to cover the whole [[wikilink]]"
+    // about a mark in a different cell that touches no link.
+    const body =
+      "# T\n\n| C1 | C2 | C3 |\n|---|---|---|\n| [[Adaptogens|alias]] | short | a very much longer third cell of prose text |\n";
+    const edit = markOne(body, "Adaptogens|alias]] | short | a very much longer third cell of prose text").edits[0]!;
+    expect(edit.old).toBe("a very much longer third cell of prose text");
+    expect(edit.reason).toBe("marks the checked passage (trimmed to one table cell)");
+  });
+
+  test("a quote already inside one cell keeps its exact range and says nothing", () => {
+    // The control for both assertions above: the trim must be a no-op — same range,
+    // and NO "trimmed to one table cell" note, which would be a false report.
+    const edit = markOne(BODY, WIDEST).edits[0]!;
+    expect(edit.old).toBe(WIDEST);
+    expect(edit.reason).toBe("marks the checked passage");
+  });
+
+  /**
+   * The table predicate, ENUMERATED against the renderer instead of sampled.
+   *
+   * Two rounds of hand-picked shapes each left clause-level mutants alive, and the
+   * third round's generated differential found what none of them could: `parseBlocks`
+   * RETRIES. On `ROW ROW SEP ROW` it fails at the run's start, emits that one line as
+   * text, re-enters at the next line and builds a table from there — so a predicate
+   * that only asks about the run's start answers "no table" for lines the reader sees
+   * inside one. The fixture list was the problem, not the fixtures.
+   *
+   * So the shapes are generated: every sequence of up to five lines over
+   * {row, separator, blank, prose, fence}, each row carrying a unique token, and the
+   * ORACLE is per LINE — does that token render inside a `<td>`/`<th>`? (Header cells
+   * are `<th>`; asking only about `<td>` reported the header row of every real table
+   * as a disagreement.) 7 422 (body, quotable-line) pairs — 3 905 sequences, of which
+   * 3 711 rows and 3 711 prose lines — in ~0.18 s, and the count is PINNED
+   * (`EXPECTED_PAIRS`) so a generator that silently stops producing cases cannot pass
+   * on an empty sweep. NB 3 711 is the ROWS-only count this sentence carried while the
+   * generator two blocks down already quoted prose as well: the third stale number
+   * this file has corrected, and the reason every count here is now pinned in an
+   * assertion rather than stated in prose.
+   */
+  test("the table predicate agrees with the renderer over the whole line grammar", () => {
+    const KINDS = ["ROW", "SEP", "BLANK", "PROSE", "FENCE"] as const;
+    type Kind = (typeof KINDS)[number];
+
+    const build = (seq: Kind[]) => {
+      const lines: string[] = [];
+      // Every quotable line, not only the rows: `markableRange` calls the predicate
+      // with the RESOLVED SPAN START, which need not be a pipe line at all, and a
+      // rows-only sweep can never fire the entry guard. Measured — with prose lines
+      // quoted, deleting that guard makes a prose line directly under a table report
+      // "trimmed to one table cell".
+      const cells: { token: string; line: string; masked: boolean }[] = [];
+      let openFence = false;
+      seq.forEach((k, i) => {
+        if (k === "ROW") {
+          const token = `tok${i}aaaaaaaaaaaa`; // longest cell, and unique in the body
+          const line = `| ${token} | b${i} |`;
+          cells.push({ token, line, masked: openFence });
+          lines.push(line);
+        } else if (k === "SEP") lines.push("|---|---|");
+        else if (k === "BLANK") lines.push("");
+        else if (k === "PROSE") {
+          // Prose CARRYING A PIPE, deliberately: without one the entry guard is inert
+          // (a pipe-free line has no cell boundary, so the cell walk returns the whole
+          // line and both branches agree). With one, a prose line under a table is
+          // trimmed at that pipe the moment the guard goes — measured.
+          const token = `pro${i}aaaaaaaaaaaa`;
+          const line = `${token} | tail ${i}`;
+          cells.push({ token, line, masked: openFence });
+          lines.push(line);
+        } else { lines.push("```"); openFence = !openFence; }
+      });
+      return { body: `${lines.join("\n")}\n`, rows: cells };
+    };
+
+    const seqs = (n: number): Kind[][] =>
+      n === 0 ? [[]] : seqs(n - 1).flatMap((s) => KINDS.map((k) => [...s, k]));
+
+    // Pinned so a generator that silently stops producing cases cannot pass empty.
+    const EXPECTED_PAIRS = 7422;
+    let checked = 0;
+    const disagreements: string[] = [];
+    for (let n = 1; n <= 5; n++) {
+      for (const seq of seqs(n)) {
+        const { body, rows } = build(seq);
+        for (const { token, line, masked } of rows) {
+          const res = markOne(body, line);
+          const edit = res.edits[0];
+          const got = !edit
+            ? `DROP:${res.dropped[0]?.reason}`
+            : edit.reason.includes("table cell")
+              ? `CELL:${edit.old}`
+              : `LINE:${edit.old}`;
+          // A fence is an exclusion zone, so a row inside one never resolves at all.
+          // Otherwise: one cell exactly when the reader sees one, the whole line
+          // otherwise — and a mark either way, since the predicate decides the mark's
+          // SHAPE and never whether the claim survives.
+          const want = masked
+            ? "DROP:no longer found in the page"
+            : new RegExp(`<t[dh]>[^<]*${token}`).test(formatWebHtml(body))
+              ? `CELL:${token}`
+              : `LINE:${line}`;
+          checked++;
+          if (got !== want) disagreements.push(`[${seq.join(",")}] ${token}: got ${got} / want ${want}`);
+        }
+      }
+    }
+    expect({ checked, disagreements }).toEqual({ checked: EXPECTED_PAIRS, disagreements: [] });
+  });
+
+  test("…and on the three axes the generator does not vary", () => {
+    // The generator always joins with `\n` and always ends with one, so CRLF, a body
+    // ending mid-line, and a table opening the file are its blind spots. Kept as
+    // fixtures for exactly that reason — the rest of the old hand-picked list is
+    // subsumed by the enumeration above and was removed with it.
+    const QUOTE = "| aaa bbb ccc | B |";
+    const SHAPES: [string, string][] = [
+      ["CRLF", `# T\r\n\r\n${QUOTE}\r\n|---|---|\r\n| x | y |\r\n`],
+      ["EOF with no trailing newline", `# T\n\n${QUOTE}\n|---|---|\n| x | y |`],
+      ["the table opens the file", `${QUOTE}\n|---|---|\n| x | y |\n`],
+    ];
+    for (const [label, body] of SHAPES) {
+      expect({ label, td: (formatWebHtml(body).match(/<t[dh]>/g) ?? []).length > 0 })
+        .toEqual({ label, td: true });
+      const edit = markOne(body, QUOTE).edits[0]!;
+      expect({ label, old: edit.old, reason: edit.reason }).toEqual({
+        label,
+        old: "aaa bbb ccc",
+        reason: "marks the checked passage (trimmed to one table cell)",
+      });
+    }
+  });
+
+  test("a pipe table inside a fence never reaches the predicate at all", () => {
+    // The one shape where the walk and `parseBlocks` disagree — the walk knows nothing
+    // about fences, so it would answer "table row" for a line the parser hands to a
+    // code block. It is latent, not live, and this is the assertion that keeps it so:
+    // a fence is an exclusion zone, so the quote does not resolve in the first place.
+    const body = "# T\n\n```\n| aaa bbb ccc | B |\n|---|---|\n| x | y |\n```\n";
+    expect((formatWebHtml(body).match(/<td>/g) ?? []).length).toBe(0);
+    const res = markOne(body, "| aaa bbb ccc | B |");
+    expect(res.edits).toEqual([]);
+    expect(res.dropped[0]!.reason).toBe("no longer found in the page");
+  });
+
+  // Two fixture tests lived here — one per clause of the run rule, one for the
+  // run's first line. Both are fully subsumed by the enumeration above (measured:
+  // every mutant they killed, it kills), and the previous round's lesson is that a
+  // fixture list reads as more pins than it is. The readable statement of the rule is
+  // the predicate's own docblock; the pin is the differential.
+  test("a row whose cells are all blank is refused by name", () => {
+    // `longestCellRange` returns null when every cell it touches is empty, and the
+    // refusal has to be its own sentence — the tier-3 "no markable text on any
+    // line" one is untrue of a single-line span.
+    const body = "# T\n\n| a | b |\n|---|---|\n|  |  |\n";
+    const res = markOne(body, "|  |  |");
+    expect(res.edits).toEqual([]);
+    expect(res.dropped[0]!.reason).toBe(
+      "the checked passage is a table row with no markable cell",
+    );
+  });
+});
+
+describe("the nesting check is a DELTA, not an absolute", () => {
+  test("a page already carrying a broken link keeps its unrelated claims", () => {
+    // The same rule the mark-index sentinel and the one-mark removal exist for: a
+    // page that is already damaged must not lose every claim to its own damage. An
+    // absolute `countNestedMarkup(probe) > 0` refuses everything on such a page.
+    const body =
+      '# T\n\nA broken one: [[Some <Fact n="9" v="ok">page</Fact> here]].\n\n' +
+      "Norepinephrine acts as a mental spotlight here today.\n";
+    expect(markOne(body, "Norepinephrine acts as a mental spotlight here today.").edits)
+      .toHaveLength(1);
+  });
 });
 
 describe("a mark that would eat a link", () => {

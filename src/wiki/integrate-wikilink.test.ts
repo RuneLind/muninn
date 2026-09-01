@@ -353,26 +353,52 @@ describe("a leading `[` — the mark covers exactly what the renderer replaces",
   });
 });
 
-describe("a dangling [[ does not pair with a later closer", () => {
-  test("REPRO: the mark covers the real link, not the prose before it", () => {
-    // `[[ b [[ c [[Tidal Router]]` is one match for a target class that admits `[` —
-    // so the mark swallowed 24 characters the fact check never looked at.
+describe("a dangling [[ does not pair with a later closer — for the SCANNER", () => {
+  // These two asserted a MARK until 2026-09-01, on the reasoning that the scanner's
+  // dangling rejection makes `[[Tidal Router]]` the link to mark. The scanner half is
+  // still true and still pinned below; the conclusion was not, and the renderer says
+  // so. `renderWikiHtml` has NO dangling rejection — it runs one regex over the raw
+  // body — so it pairs the FIRST opener with the only `]]`, and a mark on the inner
+  // link lands inside that pairing's target. Measured through the real renderer:
+  //
+  //   plain : <span class="wiki-link-missing" title="No page named b [[ c [[Tidal
+  //           Router">b [[ c [[Tidal Router</span> d.
+  //   marked: …title="No page named b [[ c &lt;Fact n=&quot;1&quot;…&gt;[[Tidal
+  //           Router">b [[ c &lt;Fact …&gt;[[Tidal Router</span>&lt;/Fact&gt; d.
+  //
+  // i.e. the opening tag is escaped INTO the link target and the closing tag is
+  // orphaned outside it — the `nested-annotation` shape `checkNestedAnnotation`
+  // reports. So the mark is refused, by the guard's shared `NESTED_MARKUP_RE` delta.
+  // The cost is measured rather than assumed: across both live wikis, 2026-09-01,
+  // **4 dangling spans on 3 of 1 573 pages, and 0 of them in a table row**. A refused
+  // mark on four spans beats a link the reader cannot follow, and beats the other
+  // candidate fix — teaching the scanner to pair like the renderer — which would mark
+  // 24 characters of prose the fact check never looked at.
+  const NESTED = "marking this passage would put the mark inside a [[wikilink]] target";
+
+  test("the scanner still finds the INNER link, and the guard then refuses it", () => {
     const body = "A [[ b [[ c [[Tidal Router]] d.\n";
     const r = markOne(body, "Tidal Router");
-    expect(r.edits).toHaveLength(1);
-    expect(r.edits[0]!.old).toBe("[[Tidal Router]]");
-    expect(r.edits[0]!.new).toBe('<Fact n="1" v="ok">[[Tidal Router]]</Fact>');
+    expect(r.edits).toEqual([]);
+    expect(r.dropped[0]!.reason).toBe(NESTED);
+    // The scanner's own answer is unchanged — it is the GUARD that refuses, not a
+    // scan that lost the link. The control puts the dangling opener AFTER the link,
+    // where it has no closer to steal (an opener BEFORE one always steals it: the
+    // target class admits `[`, so any earlier `[[` on the line pairs with the only
+    // `]]`). Same scanner, same link, no nesting, mark ships.
+    const clean = "A [[Tidal Router]] and then [[ dangling here.\n";
+    expect(markOne(clean, "Tidal Router").edits[0]!.old).toBe("[[Tidal Router]]");
   });
 
-  test("REPRO: and it cannot run across a table cell separator", () => {
-    // The alias branch admits `|`, so a dangling opener in an earlier cell paired
-    // with this cell's closer — the exact damage the table refusal exists to stop,
-    // unreachable there because the span does not own the line start.
+  test("…and the same across a table cell separator", () => {
+    // The alias branch admits `|`, so a dangling opener in an earlier cell pairs with
+    // this cell's closer. Before the cell trim this was unreachable (the span did not
+    // own the line start and the row was refused wholesale); it is reachable now, and
+    // it is the guard that closes it rather than the trim.
     const body = "| Note [[ dangling | [[Tidal Router]] |\n";
     const r = markOne(body, "Tidal Router");
-    expect(r.edits).toHaveLength(1);
-    expect(r.edits[0]!.old).toBe("[[Tidal Router]]");
-    expect(r.edits[0]!.new).not.toContain("|");
+    expect(r.edits).toEqual([]);
+    expect(r.dropped[0]!.reason).toBe(NESTED);
   });
 });
 

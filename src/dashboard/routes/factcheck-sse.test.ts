@@ -1,4 +1,5 @@
 import { test, expect, describe } from "bun:test";
+import { readFileSync } from "node:fs";
 import {
   runClaimPool,
   assembleFactcheckAnswer,
@@ -15,6 +16,7 @@ import {
   type ClaimVerifyOutcome,
   type StampedToolEvent,
 } from "./factcheck-sse.ts";
+import { claimExtractionText } from "./factcheck-sse.ts";
 import { CLAIM_QUOTE_MAX } from "../views/components/wiki-integrate.ts";
 import { formatWebHtml } from "../../web/web-format.ts";
 
@@ -652,5 +654,108 @@ describe("pairToolEvents", () => {
     // The end belongs to the latest start — the only one it could belong to.
     expect(out[1]).toMatchObject({ startOffsetMs: 200, durationMs: 400 });
     expect(out[1]!.unterminated).toBeUndefined();
+  });
+});
+
+/**
+ * What claim extraction READS.
+ *
+ * Extraction used to run over the raw stripped body, so the model happily quoted a
+ * mermaid node or a code comment — a claim that is perfectly checkable and can never
+ * be MARKED, because the integrate pass MASKS fenced blocks and the anchor then
+ * resolves to nothing ("no longer found in the page"). Measured on
+ * `life/sources/Neurochemical Focus Stack…mdx`: one of eight claims was quoted out
+ * of the mermaid diagram, and the prose sentence two lines below it says the same
+ * thing and marks cleanly. The two passes now read the same masked text, so the
+ * extractor no longer sees the text the annotator cannot resolve.
+ *
+ * NOT the stronger claim that every anchor the extractor produces resolves: the model
+ * still reads the PLACEHOLDERS (`[code block omitted]`, `[component tag omitted]`,
+ * `[frontmatter omitted]`) and can quote into or across one, which exists in neither
+ * the raw body nor the match mask and drops the same way. That is a smaller door, not
+ * a closed one.
+ */
+describe("claimExtractionText", () => {
+  const BODY =
+    "---\ntype: source\ntitle: T\n---\n\n" +
+    "# T\n\nThe stack is taken 20-30 minutes before deep work.\n\n" +
+    "```mermaid\nflowchart LR\n    D --> E[\"Wait 20-30 min\"]\n```\n\n" +
+    "<Callout>\nTreat the dosing claims as unverified.\n</Callout>\n";
+
+  test("article mode hides fenced blocks behind the integrate placeholder", () => {
+    const out = claimExtractionText({ mode: "article", sel: "", strippedBody: BODY, isMdx: true });
+    expect(out).not.toContain("flowchart LR");
+    expect(out).not.toContain("Wait 20-30 min");
+    expect(out).toContain("[code block omitted]");
+  });
+
+  test("the prose the extractor should anchor on instead is untouched", () => {
+    // The point of the mask is not to remove claims, it is to move the anchor onto
+    // text the annotator can find. Prose — including prose INSIDE a component — must
+    // survive verbatim, or the mask has traded one unmarkable claim for none at all.
+    const out = claimExtractionText({ mode: "article", sel: "", strippedBody: BODY, isMdx: true });
+    expect(out).toContain("The stack is taken 20-30 minutes before deep work.");
+    expect(out).toContain("Treat the dosing claims as unverified.");
+  });
+
+  test("`isMdx` decides component TAG masking and is threaded, not assumed", () => {
+    const mdx = claimExtractionText({ mode: "article", sel: "", strippedBody: BODY, isMdx: true });
+    const md = claimExtractionText({ mode: "article", sel: "", strippedBody: BODY, isMdx: false });
+    expect(mdx).not.toContain("<Callout>");
+    expect(md).toContain("<Callout>");
+    // The FENCE mask is extension-independent — a `.md` page's code block is just as
+    // unmarkable — so both sides hide it.
+    expect(md).not.toContain("flowchart LR");
+  });
+
+  test("the cap is applied AFTER the mask", () => {
+    // A code-heavy page used to spend its whole extraction budget on fences the
+    // annotator cannot anchor in. `max` counts the text the model actually reads.
+    const fence = "```ts\n" + "const x = 1;\n".repeat(200) + "```\n\n";
+    const tail = "The tail sentence is the checkable claim.";
+    const out = claimExtractionText({
+      mode: "article", sel: "", strippedBody: fence + tail, isMdx: false, max: 200,
+    });
+    expect(out).toContain(tail);
+    expect(out.length).toBeLessThanOrEqual(200);
+  });
+
+  test("the ROUTE passes isMdx — the one line no behavioural test can reach", () => {
+    // Every test above hands `isMdx` in directly, so dropping the field at the call
+    // site (or passing `annotatable`, the POLICY twin of the same extension test)
+    // would leave component tags visible to the extractor with nothing failing. The
+    // handler builds its opts inside a Hono route and cannot be driven from a unit
+    // test, so this is a SOURCE assertion — the house pattern already used to refuse
+    // a bare `fetch(` under `src/chat/views/` and a bare `postgres()` under `src/`.
+    // It pins the wiring's existence, not its value; the derivation itself is the
+    // same `endsWith(".mdx")` the integrate route uses two functions away.
+    const routes = readFileSync(
+      new URL("./wiki-routes.ts", import.meta.url).pathname,
+      "utf8",
+    );
+    // Both assertions are scoped to THIS handler — from its `let isMdx` declaration
+    // to its `streamFactcheckSSE` call. A whole-file `toContain` is vacuous here: the
+    // two integrate routes spell `const isMdx = meta.relPath.endsWith(".mdx")` of
+    // their own, so a mutation of the factcheck derivation still finds a match
+    // elsewhere in the file (measured — that mutant survived the first spelling).
+    const from = routes.indexOf("let isMdx = false;");
+    const to = routes.indexOf("return streamFactcheckSSE(c, {", from);
+    expect(from).toBeGreaterThan(-1);
+    expect(to).toBeGreaterThan(from);
+    const handler = routes.slice(from, to);
+    // Derived from the resolved PATH, never from `annotatable` (the policy twin).
+    expect(handler).toContain('isMdx = meta.relPath.endsWith(".mdx")');
+    expect(handler).not.toContain("isMdx = isAnnotatablePage");
+    // …and actually handed over.
+    const call = routes.slice(to);
+    expect(call.slice(0, call.indexOf("\n    });"))).toContain("isMdx,");
+  });
+
+  test("sel mode passes the reader's selection through untouched", () => {
+    // A selection is a FRAGMENT: its fences need not be balanced, so masking one is
+    // guesswork — and a reader who selected a code block asked about that code. The
+    // article body is not consulted at all in this mode.
+    const sel = "```ts\nconst answer = 42;\n```";
+    expect(claimExtractionText({ mode: "sel", sel, strippedBody: BODY, isMdx: true })).toBe(sel);
   });
 });

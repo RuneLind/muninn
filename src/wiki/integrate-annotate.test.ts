@@ -26,6 +26,7 @@ import {
   isWrapperOnlyEdit,
   type FactcheckClaimAnchor,
 } from "../dashboard/views/components/wiki-integrate.ts";
+import { formatWebHtml } from "../web/web-format.ts";
 
 const anchor = (index: number, verdict: string): FactcheckClaimAnchor => ({
   index,
@@ -471,16 +472,27 @@ describe("block-marker guard", () => {
     "",
   ].join("\n");
 
-  test("a TABLE-ROW quote is dropped, and the table survives", () => {
+  test("a TABLE-ROW quote is TRIMMED to its widest cell, and the table survives", () => {
+    // This test asserted a flat DROP until 2026-09-01. The refusal was true of the
+    // row and false of its cells: a `<Fact>` across the pipes really does destroy
+    // the table, but the widest cell has a wrapper form like any other prose. What
+    // is worth pinning is the second half, so that is what is measured — the written
+    // body still parses as the same table, cell for cell.
     const r = annotate({
       body: TABLE,
       claims: [anchor(1, "✅")],
       quotes: [{ index: 1, quote: "| 3g | maintenance |" }],
     });
-    expect(r.edits).toHaveLength(0);
-    expect(r.dropped.map((d) => d.reason).join(" ")).toContain("break the table");
-    // Nothing was written, so every row is still a row.
-    expect(applyEdits(TABLE, r.edits, true).body).toBe(TABLE);
+    expect(r.edits).toHaveLength(1);
+    expect(r.edits[0]!.old).toBe("maintenance");
+    const spliced = applyEdits(TABLE, r.edits, true).body;
+    // The pipes are untouched, so the row is still a row…
+    expect(spliced.split("\n")[4]!.startsWith("| 3g | ")).toBe(true);
+    expect(spliced.split("\n")[4]!.endsWith(" |")).toBe(true);
+    // …and the RENDERER agrees: same table, same cells, with the mark inside one.
+    const cells = (h: string) => (h.match(/<td>/g) ?? []).length;
+    expect(cells(formatWebHtml(spliced))).toBe(cells(formatWebHtml(TABLE)));
+    expect(formatWebHtml(spliced)).toContain("fc-mark");
   });
 
   test("a whole BULLET line keeps its marker outside the mark", () => {

@@ -2131,6 +2131,12 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
     // here from the RESOLVED path — the client only ever holds a display name and
     // must never guess the extension.
     let annotatable = false;
+    // The SYNTAX half of the same derivation — whether `promptMaskBody` should hide
+    // component TAG markup from claim extraction. Kept separate from `annotatable`
+    // (a policy call that happens to share the extension test today) and from the
+    // inline `endsWith` the body-length measure used, so extraction and integrate
+    // mask the same page the same way.
+    let isMdx = false;
     if (!preflightError && entry && index && meta) {
       // Explainers are HTML on disk; reduce to prose so claim extraction / the
       // locator see plain text. Markdown pages pass through verbatim. A missing/
@@ -2145,8 +2151,9 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // Measured on the WRAPPER-STRIPPED body, because that is what the integrate
       // route resolves against — the two must be the same number or the client
       // budgets a "too long" verdict the server would never reach.
+      isMdx = meta.relPath.endsWith(".mdx");
       if (meta.type !== "explainer") {
-        bodyLen = integrateBodyLen(stripFactWrappers(raw), meta.relPath.endsWith(".mdx"));
+        bodyLen = integrateBodyLen(stripFactWrappers(raw), isMdx);
       }
       annotatable = isAnnotatablePage(meta.relPath, meta.type);
       body = meta.type === "explainer" ? htmlToText(raw) : raw;
@@ -2173,6 +2180,7 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       baseHash,
       ...(bodyLen !== undefined ? { bodyLen } : {}),
       annotatable,
+      isMdx,
       // Same reader HTML pipeline as Ask/Explain (no citations — fact-check cites
       // raw URLs inline in the answer markdown, not numbered sources).
       renderAnswerHtml: (answer) => renderAskAnswerHtml(answer, []),

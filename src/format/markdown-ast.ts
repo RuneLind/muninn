@@ -1099,12 +1099,31 @@ function isUnclosedComponentOpenOf(line: string, name: string): boolean {
   return !m[4]!.includes(`</${name}>`); // inline-closed opens don't nest
 }
 
-function isTableRow(line: string): boolean {
+/**
+ * The block parser's own table-row test, EXPORTED so the fact-check annotator can
+ * ask which lines it must trim to a cell rather than re-spell the predicate.
+ *
+ * It is deliberately the loose one the parser uses: a lone `| a | b |` line with no
+ * delimiter row under it answers `true` here and renders as ordinary text, because
+ * the real table test also needs `tableLines.length >= 3` and `isSeparatorRow` on
+ * the second line — state a single line does not carry. For the annotator that
+ * over-reach is the safe direction (it trims a mark that could have been wider),
+ * and it is strictly narrower than the `body[s] === "|"` test it replaced.
+ */
+export function isTableRow(line: string): boolean {
   const trimmed = line.trim();
   return trimmed.startsWith("|") && trimmed.endsWith("|") && trimmed.length > 1;
 }
 
-function isSeparatorRow(line: string): boolean {
+/**
+ * The block parser's delimiter-row test, EXPORTED beside {@link isTableRow} for the
+ * same reason: `isTableRow` alone answers `true` for a LONE `| a | b |` line, which
+ * this parser renders as an ordinary paragraph. A caller that needs "is this line
+ * part of a rendered TABLE" needs both — a run of row lines, length ≥ 3, whose
+ * SECOND line is a separator. That is the rule `parseBlocks` applies a few lines
+ * above; exporting the two predicates is what keeps a caller from re-spelling it.
+ */
+export function isSeparatorRow(line: string): boolean {
   return /^\|[\s\-:|]+\|$/.test(line.trim());
 }
 

@@ -328,7 +328,7 @@ The `unknown=` count is the ❓ claims — they get NO `<Fact>` mark and NO appe
 
 1. `growOverEmphasisRuns` completes only a construct the range ALREADY cuts (odd run count), one contiguous run, one side, per delimiter character. Growing unconditionally steals a neighbour's delimiters — `See **Alpha**|the middle words|**Beta**` renders as crossed `<strong>`/`<span>` tags.
 2. The EMPHASIS family (`*`, `_`, backtick) is checked by run PARITY instead of count equality; the BRACKET family (`[`, `]`, `(`, `)`) keeps count equality in both modes, because wrapping half a `[label](url)` puts the tag inside link markup. The EMPHASIS family is the explicit list and the BRACKET family is derived from it — that direction, so a delimiter added to `RESCUE_DELIMS` for a new construct defaults to the STRICT path rather than silently joining the lenient one.
-3. `markSpanRefusal` decides whether the span may be wrapped by **asking the renderer**: it splices the wrapper the emit site will actually write (one shared `wrapperTextFor`, so the prediction and the write cannot drift), renders both bodies through `formatWebHtml`, strips the mark's own chrome and compares. Equal ⇒ allowed. This replaced three rounds of delimiter bookkeeping, each of which was a MODEL of the renderer and each of which was wrong in a different direction — refusing `user_id` and `2 * 3`; refusing an `*` list bullet; refusing a wholly-bolded sentence (the commonest wrapper anchor there is) while having no rule at all for `[label](url)`, so marking a URL destroyed the link. Worst case measured at 40 ms (a 24 KB page × the claim cap × two renders each), against a 90 s model call. The ONE exemption is a span expanded over a whole `[[…]]`: `formatWebHtml` shows the tags as escaped text inside a `<code>` there, but `renderWikiHtml` substitutes wikilinks over the raw body first, so that link is live and marking it whole is the documented trade (cosmetic damage instead of a rewritten link target) — the only case where the two renderers disagree about what a mark costs.
+3. `markSpanRefusal` decides whether the span may be wrapped by **asking the code that will read it**, as THREE properties in a fixed order — the enumeration replaced three per-finding patches. (a) **No new nested annotation**: the mark must not land inside a `[[wikilink]]` TARGET, tested with the SHARED `NESTED_MARKUP_RE` as a DELTA (an already-broken page keeps its claims). `formatWebHtml` resolves no wikilink, so this whole family is invisible to (c); the reachable shape is a range abutting a DANGLING `[[`, which `renderWikiHtml` — having no dangling rejection — pairs with the next `]]`, escaping the opening tag into the link text and orphaning the closer (measured). (b) **The write is reversible**: `stripFactWrappers(wrapped)` must equal `stripFactWrappers(body)`. The strip is zone-aware, so a tag inside an inline code span is preserved by design and the wrapper becomes an orphan that no later run can remove — and (c) is structurally blind to it on a table row, where `parsePipeCells` splits at a `|` inside backticks on BOTH sides so neither render ever pairs the span. (c) **Render-equivalence**: it splices the wrapper the emit site will actually write (one shared `wrapperTextFor`, so the prediction and the write cannot drift), renders both bodies through `formatWebHtml`, strips the mark's own chrome and compares. Equal ⇒ allowed. This replaced three rounds of delimiter bookkeeping, each of which was a MODEL of the renderer and each of which was wrong in a different direction — refusing `user_id` and `2 * 3`; refusing an `*` list bullet; refusing a wholly-bolded sentence (the commonest wrapper anchor there is) while having no rule at all for `[label](url)`, so marking a URL destroyed the link. Worst case measured at 40 ms (a 24 KB page × the claim cap × two renders each), against a 90 s model call. The ONE exemption is a span expanded over a whole `[[…]]`, and it waives **(b) and (c), never (a)** — because (b) and (c) are one disagreement rather than two: `formatWebHtml` and `stripFactWrappers` both read the backticks around a `[[Page]]` as code, while `renderWikiHtml` substitutes the link first, so the reader has a live link where those two have a code span. Marking it whole is the documented trade (cosmetic damage instead of a rewritten link target). ⚠️ **The exemption's flag must describe the FINAL range, not the fact that expansion fired**: the guard runs after expansion and can narrow past the link — the table-cell trim discards a whole cell — and a flag left standing there turns the render comparison OFF for a range holding no link at all. It shipped `<Fact …>` as literal text inside a `<code>`, the exact shape row A of the state-space table exists to refuse, while telling the reviewer the mark had been "expanded to cover the whole [[wikilink]]".
 
 The `stripFactWrappers`/`countFactWrappers` pair — and `isFactWrapperText`, the ONE wrapper-shape authority behind every payload gate on the write path — live in `src/format/markdown-ast.ts` and are **zone-aware**: a `<Fact>` tag inside frontmatter, a fenced code block or an inline backtick span is documentation, not markup, and survives the strip that the integrate apply writes back to disk.
 
@@ -380,11 +380,41 @@ wrapper path because only one of them can express it:
   is unchanged by that — it still expands over the whole link, because splicing
   inside the brackets is the forbidden shape whether the result is a dead link or
   literal tags in a code span.
+- **A table row is TRIMMED to its widest cell, not refused.** A `<Fact>` across the
+  pipes really does destroy the table, but a CELL has a wrapper form like any other
+  prose — so `markableRange` runs `longestCellRange` (the `longestLineRange` shape
+  with the cell separator in place of the newline) instead of refusing. Measured on
+  `life/sources/Neurochemical Focus Stack…mdx`, the page the mark-anchoring work came
+  from: 4 of its 8 claims were whole-row quotes, every one of whose widest cells marks
+  cleanly. The trim runs on any span whose LINE is a table row (`isTableRow`, exported
+  from `markdown-ast.ts` so the annotator asks the block parser rather than
+  re-spelling the predicate), not only one that owns the line start: a span crossing
+  ONE cell boundary needed it just as much and was refused one layer down, at the
+  render comparison. Nothing is weakened — the trim's whole job is to hand
+  `markSpanRefusal` a range with no `|` in it, and the DELIMITER row needs no rule of
+  its own (marking `---` stops `isSeparatorRow` matching, the table stops being a
+  table, and the two renders differ). **The predicate is the parser's RUN rule**
+  (`isTableRow` + `isSeparatorRow`, both exported from `markdown-ast.ts`): `isTableRow`
+  alone is true of a lone `| a | b |` line, which renders as a paragraph, and trimming
+  there told the reviewer the mark was "trimmed to one table cell" about a table that
+  does not exist. The note likewise fires only when a cell BOUNDARY was actually
+  crossed — not on the edge-whitespace trim every branch does.
+  **A cell boundary is a `|` OUTSIDE a `[[wikilink]]`**, and that exclusion is
+  load-bearing: `[[Target|Label]]` carries a pipe of its own, `renderWikiHtml`
+  substitutes the whole link before the table parser runs, and splitting there hands
+  the mark a fragment containing the `]]` but not the `[[` — the opening tag lands in
+  the link target, whose alias class swallows it. That is the nested-annotation
+  damage arriving through the one door the whole-link expansion cannot close:
+  expansion runs BEFORE the trim, never after it. Such a cell is then refused anyway
+  by the render comparison (`formatWebHtml` resolves no wikilink, so it spreads the
+  cell across two `<td>`s) — a false refusal, accepted, because the alternative costs
+  a live link. Both directions measured; the state-space table in
+  `integrate-mark-growth.test.ts` carries the row.
 - **Order, and NO refusal at column 0.** Expansion runs FIRST and `markableRange`
   then guards the EXPANDED range, because `ownsLineStart` is evaluated on the span's
   start and expanding leftwards over a `[[` at column 0 is what flips it. The guard
-  keeps its two outcomes (shrink past a list/quote/heading marker, refuse a table
-  row) and deliberately has no third one for an expanded span. Measured through the
+  keeps its two outcomes (shrink past a list/quote/heading marker, trim a table row
+  to its widest cell) and deliberately has no third one for an expanded span. Measured through the
   shipped `renderWikiHtml`/`web-format` pipeline, BOTH shapes an expansion produces
   render correctly: `<Fact …>[[Some Page]]</Fact> rest.` is an `fc-mark` span around
   a live `<a class="wiki-link">`, and one owning its whole line is the `fc-mark-block`
