@@ -63,7 +63,9 @@ describe("effectiveRailWidth", () => {
 
 describe("railWidthFromPointer", () => {
   test("is the pointer's offset from the RAIL's left edge (not the padded layout's)", () => {
-    expect(railWidthFromPointer(424, 24)).toBe(400);
+    // Rail at 48, i.e. NOT the layout's 24px padding — a fixture of 24 could not
+    // tell the two apart.
+    expect(railWidthFromPointer(424, 48)).toBe(376);
   });
   test("dragging past either edge clamps", () => {
     expect(railWidthFromPointer(0, 24)).toBe(RAIL_WIDTH_MIN);

@@ -19,7 +19,6 @@
  * behaviour the Ask-session persistence in `wiki-browser.ts` settles for.
  */
 import {
-  RAIL_WIDTH_DEFAULT,
   RAIL_WIDTH_KEY,
   RAIL_WIDTH_KEY_STEP,
   clampRailWidth,
@@ -90,13 +89,20 @@ export function initRailResize(): void {
     dragWidth = null;
     handle.classList.add("dragging");
     document.body.classList.add("wiki-rail-dragging");
+    // preventDefault (keeps the selection from starting) also suppresses the
+    // click's focus, which made the arrow keys reachable only by tabbing.
+    handle.focus({ preventScroll: true });
     e.preventDefault();
   });
   handle.addEventListener("pointermove", (e) => {
-    // `buttons`: a move that arrives with no button held is a hover after a lost
-    // capture, never a drag step.
+    // `buttons`: a move with no button held is a SECOND, uncaptured pointer (a
+    // mouse hovering while a pen drags) — never a drag step. The same pointer
+    // after a lost capture is already stopped by `!dragging`.
     if (!dragging || !(e.buttons & 1)) return;
-    dragWidth = railWidthFromPointer(e.clientX, rail.getBoundingClientRect().left);
+    // Bounded here, not only at apply: in a narrow window a drag toward the edge
+    // otherwise stored the raw pointer width (560 shown as 315).
+    const rect = rail.getBoundingClientRect();
+    dragWidth = effectiveRailWidth(railWidthFromPointer(e.clientX, rect.left), window.innerWidth);
     chosen = dragWidth;
     apply();
   });
@@ -106,7 +112,11 @@ export function initRailResize(): void {
   handle.addEventListener("dblclick", () => set(null));
 
   handle.addEventListener("keydown", (e) => {
-    const base = chosen ?? RAIL_WIDTH_DEFAULT;
+    // Step from what is SHOWN: stepping the stored value moved nothing for
+    // sixteen presses in a window where the bound had it at 315, while
+    // rewriting the stored value. Below 1100px the CSS default is 260, so the
+    // shown width is also the only base that is right there.
+    const base = Math.round(rail.getBoundingClientRect().width);
     if (e.key === "ArrowRight") set(clampRailWidth(base + RAIL_WIDTH_KEY_STEP));
     else if (e.key === "ArrowLeft") set(clampRailWidth(base - RAIL_WIDTH_KEY_STEP));
     else if (e.key === "Home") set(null);

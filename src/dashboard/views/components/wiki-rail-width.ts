@@ -17,10 +17,11 @@ export const RAIL_WIDTH_KEY = "muninn.wiki.railWidth.v1";
  *  the article column loses its ~65-character measure on a laptop screen. */
 export const RAIL_WIDTH_MIN = 260;
 export const RAIL_WIDTH_MAX = 560;
-/** The WIDE-layout default (`.wiki-layout` first column, interpolated into the
- *  CSS from here). Below the 1100px breakpoint the CSS ships 260 instead, so a
- *  reset there lands on 260, not on this. */
+/** The two CSS defaults (`.wiki-layout` first column), interpolated from here:
+ *  the wide layout's, and the one below the 1100px breakpoint. A reset lands on
+ *  whichever applies. */
 export const RAIL_WIDTH_DEFAULT = 300;
+export const RAIL_WIDTH_DEFAULT_NARROW = 260;
 /** Pixels one arrow-key press moves the rail. */
 export const RAIL_WIDTH_KEY_STEP = 16;
 /** The share of the window a stored width may take at apply time. */

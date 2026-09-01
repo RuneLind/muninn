@@ -6,7 +6,7 @@ import { agentPresenceStyles, agentPresenceHtml, agentPresenceScript } from "./c
 // The share dialog's CSS lives WITH the dialog (exported from its pure half) so
 // the /summaries mount in PR C cannot end up with a hand-copied second copy.
 import { shareDialogStyles } from "./components/wiki-share-dialog.ts";
-import { RAIL_WIDTH_DEFAULT } from "./components/wiki-rail-width.ts";
+import { RAIL_WIDTH_DEFAULT, RAIL_WIDTH_DEFAULT_NARROW } from "./components/wiki-rail-width.ts";
 import {
   wikiReadonlyStyles,
   WIKI_READONLY_ASK_HINT,
@@ -262,23 +262,24 @@ export async function renderWikiPage(opts?: {
       display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
       overflow: hidden; overflow-wrap: anywhere;
     }
-    /* The four siblings that used to share the title's BASELINE each get a nudge
-       onto its first line (measured against the 16.25px line box). */
+    /* Flex-start row: the title's siblings are nudged down onto its first line
+       (a 16.25px line box) so the row reads as one line when the title is one. */
     .wiki-list-item .wiki-type-dot { align-self: flex-start; margin-top: 5px; }
     .wiki-list-item .wiki-list-meta { margin-top: 2px; }
     .wiki-list-item .wiki-status { margin-top: 1px; }
     .wiki-list-item .wiki-followup-flag { margin-top: 2px; }
-    /* Drag handle on the rail's right edge. The hit zone starts ON the pane's 1px
-       border and extends into the 16px gap — never over the list, whose classic
-       scrollbar (Windows/Linux, macOS "always") would otherwise be grabbed as a
-       drag. A 2px accent line shows while hovered, dragging or focused. */
+    /* Drag handle on the rail's right edge. right:-14px against the padding box
+       puts the 14px hit zone at [border-right edge, +14) — i.e. entirely OUTSIDE
+       the pane's content, so a classic scrollbar on the list (Windows/Linux,
+       macOS "always") can never be grabbed as a drag. The 2px accent line sits on
+       the pane's border and shows while hovered, dragging or focused. */
     .wiki-layout > .wiki-pane:first-child { position: relative; }
     .wiki-rail-resizer {
-      position: absolute; top: 0; bottom: 0; right: -13px; width: 14px;
+      position: absolute; top: 0; bottom: 0; right: -14px; width: 14px;
       cursor: col-resize; z-index: 2; touch-action: none; outline: none;
     }
     .wiki-rail-resizer::after {
-      content: ""; position: absolute; top: 0; bottom: 0; left: 6px; width: 2px;
+      content: ""; position: absolute; top: 0; bottom: 0; left: -1px; width: 2px;
       background: var(--accent); opacity: 0; transition: opacity .12s;
     }
     .wiki-rail-resizer:hover::after, .wiki-rail-resizer.dragging::after,
@@ -1305,7 +1306,7 @@ export async function renderWikiPage(opts?: {
     .wiki-empty-state code { background: var(--bg-inset); padding: 2px 6px; border-radius: 4px; }
 
     @media (max-width: 1100px) {
-      .wiki-layout { grid-template-columns: var(--wiki-rail-w, 260px) minmax(0, 1fr); }
+      .wiki-layout { grid-template-columns: var(--wiki-rail-w, ${RAIL_WIDTH_DEFAULT_NARROW}px) minmax(0, 1fr); }
       .wiki-conn-pane { display: none; }
     }
     ${agentPresenceStyles()}

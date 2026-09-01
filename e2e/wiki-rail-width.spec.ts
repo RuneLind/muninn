@@ -189,6 +189,73 @@ test.describe("Wiki rail: full titles + remembered width", () => {
     expect(Number(await page.evaluate((k) => localStorage.getItem(k), RAIL_WIDTH_KEY))).toBe(settled);
   });
 
+  test("in a bounded window, arrows step the DISPLAYED width and a drag stores what was shown", async ({
+    page,
+  }) => {
+    await open(page);
+    await page.evaluate((k) => localStorage.setItem(k, "560"), RAIL_WIDTH_KEY);
+    await page.setViewportSize({ width: 700, height: 900 });
+    await page.reload();
+    await expect(page.locator(".wiki-list-item")).toHaveCount(2);
+    expect(await railWidth(page)).toBe(315);
+    // Stepping from the STORED 560 moved nothing for sixteen presses while
+    // rewriting the stored value (measured in review); the base is what is shown.
+    await page.locator(HANDLE).focus();
+    await page.keyboard.press("ArrowLeft");
+    expect(await railWidth(page)).toBe(315 - RAIL_WIDTH_KEY_STEP);
+    expect(Number(await page.evaluate((k) => localStorage.getItem(k), RAIL_WIDTH_KEY))).toBe(
+      315 - RAIL_WIDTH_KEY_STEP,
+    );
+    // A drag past the bound persists the bounded width, never the raw pointer.
+    const hb = await page.locator(HANDLE).boundingBox();
+    if (!hb) throw new Error("handle not laid out");
+    await page.mouse.move(hb.x + hb.width / 2, hb.y + 40);
+    await page.mouse.down();
+    await page.mouse.move(650, hb.y + 40, { steps: 4 });
+    await page.mouse.up();
+    const shown = await railWidth(page);
+    expect(shown).toBe(315);
+    expect(Number(await page.evaluate((k) => localStorage.getItem(k), RAIL_WIDTH_KEY))).toBe(shown);
+  });
+
+  test("a click on the handle focuses it, so the keyboard path is reachable by pointer", async ({ page }) => {
+    await open(page);
+    const hb = await page.locator(HANDLE).boundingBox();
+    if (!hb) throw new Error("handle not laid out");
+    await page.mouse.click(hb.x + hb.width / 2, hb.y + 40);
+    expect(await page.evaluate(() => document.activeElement?.id)).toBe("wikiRailResizer");
+  });
+
+  test("a move with no button held mid-drag, and a dead pointer's down, are ignored", async ({ page }) => {
+    // Both pin guards the drag path carries for other pointers: a second,
+    // uncaptured pointer hovering the handle while a pen drags (buttons = 0), and a
+    // pointerdown for a pointer the browser no longer knows (setPointerCapture
+    // throws). Neither is reachable with Playwright's one mouse, so both are
+    // dispatched. Written as pins after review found both guards unpinned.
+    await open(page);
+    const errors: string[] = [];
+    page.on("pageerror", (e) => errors.push(String(e)));
+    const hb = await page.locator(HANDLE).boundingBox();
+    if (!hb) throw new Error("handle not laid out");
+    const x0 = hb.x + hb.width / 2;
+    const y0 = hb.y + 40;
+    await page.mouse.move(x0, y0);
+    await page.mouse.down();
+    await page.mouse.move(x0 + 60, y0, { steps: 3 });
+    const during = await railWidth(page);
+    await page.locator(HANDLE).evaluate((el, x) => {
+      el.dispatchEvent(new PointerEvent("pointermove", { pointerId: 7, clientX: x, buttons: 0, bubbles: true }));
+    }, x0 + 200);
+    expect(await railWidth(page)).toBe(during);
+    await page.mouse.up();
+
+    await page.locator(HANDLE).evaluate((el) => {
+      el.dispatchEvent(new PointerEvent("pointerdown", { pointerId: 999, button: 0, buttons: 1, bubbles: true }));
+    });
+    await expect(page.locator("body")).not.toHaveClass(/wiki-rail-dragging/);
+    expect(errors).toEqual([]);
+  });
+
   test("the handle is keyboard-operable: arrows resize, Home resets", async ({ page }) => {
     await open(page);
     await page.locator(HANDLE).focus();
