@@ -181,8 +181,13 @@ Four things are deliberate and easy to undo by accident:
   and a finger tap in an invisible star's slot pins again. Of that media state
   space's four cells, two are pinned by tests, the hybrid one is **not
   constructible in Chromium's emulation** (touch emulation forces `hover: none`
-  regardless of `Emulation.setEmulatedMedia`) and is correct by construction
-  only, and the fourth is benign. It also shares
+  regardless of `Emulation.setEmulatedMedia`, and `setTouchEmulationEnabled`
+  forces `hover:false` and `any-pointer:coarse` together) and is correct by
+  construction only, and the fourth is benign. Two caveats: that unbuildability
+  is a CHROMIUM fact and `playwright.config.ts` runs only Chromium, so a WebKit
+  or Firefox project could pin it; and `not (…)` is MQ4 boolean syntax, so a
+  browser that cannot parse it (Safari < 16.4, older Firefox) drops the whole
+  block and shows the star on every row — which is the benign direction. It also shares
   one flex slot with the date (`.wiki-list-end`) so it costs the row its own
   width and not the row's 8px gap as well — as a sibling of the title the pair
   measured 21px off `.wiki-list-title` on every row, 42px of title left at
@@ -196,8 +201,18 @@ defect: a numeric scroll restore moved the row at the cursor ~96px, so a second
 click pinned a DIFFERENT page; the anchored restore that replaced it threw the
 reader down the list on a sort change and hid the new `Pinned` header when
 pinning at the top; and two more cells of it shipped unpinned. Painting one
-button deletes the space instead of choosing a fourth point in it. `renderList`
-is back to the plain `scrollTop` restore it always had.
+button deletes the space instead of choosing a fourth point in it, and the
+painter reads the WHOLE pin list back rather than the clicked row — `togglePin`
+displaces the oldest pin at `PINS_MAX`, so a toggle at the cap flips two pages
+and "repaint what was clicked" left the other one lit and doing the opposite of
+its own label. `renderList` is back to the plain `scrollTop` restore it always
+had.
+
+⚠️ **Residual**: "nothing moves" is true of the CLICK, not of every later render.
+The render that first paints the new section can be the background listing
+refresh rather than one the reader caused, and the section then appears on a
+repaint nothing on screen explains — measured at ~50px on top of the ~46px that
+refresh already shifts content by, which is pre-existing and unrelated to pins.
 
 Acceptance: `views/components/wiki-recents.test.ts` (the state space, enumerated)
 and `e2e/wiki-rail-recents.spec.ts` (two temp wikis in ONE process, so a

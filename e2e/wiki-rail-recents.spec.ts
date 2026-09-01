@@ -33,7 +33,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
-import { RECENTS_KEY_PREFIX, PINS_KEY_PREFIX } from "../src/dashboard/views/components/wiki-recents.ts";
+import {
+  RECENTS_KEY_PREFIX,
+  PINS_KEY_PREFIX,
+  PINS_MAX,
+} from "../src/dashboard/views/components/wiki-recents.ts";
 
 const PORT = e2ePort("wiki-rail-recents");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -68,8 +72,9 @@ const DATED: Array<[string, string]> = [
   ["archive/2026-08-30-wikilinks.md", md("Wikilinks inside code", ["q1-2026"])],
   ["blogs/2026-08-27-fix-rounds.md", md("Fix rounds inject defects")],
 ];
-// Enough rows that the list scrolls, for the pin mis-click case.
-const FILLER: Array<[string, string]> = Array.from({ length: 30 }, (_, i) => [
+// Enough rows that the list scrolls, and more than PINS_MAX so the cap's
+// displacement behaviour is reachable at all.
+const FILLER: Array<[string, string]> = Array.from({ length: 50 }, (_, i) => [
   `concepts/filler-${String(i).padStart(2, "0")}.md`,
   md(`Filler page number ${i} with a reasonably long title`),
 ]);
@@ -147,15 +152,15 @@ const reloadKeepingStore = openRail;
 
 /** The section headers' LABELS — `.wiki-sec-label`, not the header element, so
  *  the `clear` button's own text does not ride along. */
+const sectionLabels = (page: Page) => page.locator(".wiki-sec-label").allTextContents();
+
 /** Cause a render without changing what is on screen. The ★ toggle deliberately
- *  paints only its own button, so a section appears at the reader's NEXT render;
- *  in a test that moment has to be explicit rather than implied. */
+ *  paints buttons and nothing else, so a section appears at the reader's NEXT
+ *  render; in a test that moment has to be explicit rather than implied. */
 async function rerender(page: Page): Promise<void> {
   await page.fill("#wikiSearch", "zzz-no-such-page");
   await page.fill("#wikiSearch", "");
 }
-
-const sectionLabels = (page: Page) => page.locator(".wiki-sec-label").allTextContents();
 
 /** The rows under one section header, by relPath, in render order. */
 function rowsIn(page: Page, section: string) {
@@ -402,6 +407,15 @@ test.describe("Wiki rail: recents, pins, key jump", () => {
     await target.locator(".wiki-pin").click();
     await expect(target.locator(".wiki-pin")).toHaveAttribute("aria-pressed", "true");
 
+    // The VISIBLE half of the confirmation, with the cursor moved away so the
+    // hover reveal is not what is being read: a pinned ★ stays lit, an unpinned
+    // neighbour goes back to invisible.
+    await page.mouse.move(4, 4);
+    await expect(target.locator(".wiki-pin")).toHaveCSS("opacity", "1");
+    await expect(
+      page.locator(`.wiki-list-item[data-relpath="concepts/filler-20.md"] .wiki-pin`),
+    ).toHaveCSS("opacity", "0");
+
     // Nothing moved — not the neighbours, not the row itself, not the scroll.
     expect(await yOf("concepts/filler-20.md")).toBe(before);
     expect(await yOf("concepts/filler-15.md")).toBe(selfBefore);
@@ -501,6 +515,53 @@ test.describe("Wiki rail: recents, pins, key jump", () => {
     // The reader ends up on the page and reads it, so it IS recently opened.
     await expect(page.locator(".wiki-bc-cur")).toContainText("Kildeskatt");
     expect(await relPathsIn(page, "recent")).toEqual([KILDESKATT]);
+  });
+
+  /**
+   * A toggle at the pin cap flips TWO pages, and the second one's ★ has to know.
+   *
+   * `togglePin` displaces the oldest pin at `PINS_MAX`, so "repaint the row that
+   * was clicked" leaves the displaced page lit: its ★ still reads "Unpin this
+   * page", and clicking it RE-pins (evicting yet another page) while the star
+   * never changes — a control that reads as dead and does the opposite of its
+   * label. The painter therefore takes its state from storage for every row,
+   * which needs no notion of which pages changed.
+   */
+  test("a pin that displaces another at the cap darkens the displaced ★", async ({ page }) => {
+    await openRail(page);
+    const rels = await page
+      .locator(".wiki-list-item")
+      .evaluateAll((els) => els.map((e) => e.getAttribute("data-relpath")!));
+    expect(rels.length).toBeGreaterThan(PINS_MAX);
+
+    // Fill the pin list to the cap, oldest LAST — `togglePin` prepends, so the
+    // stored array's tail is what a further pin displaces.
+    await page.evaluate(
+      ([key, seeded]: [string, string[]]) => localStorage.setItem(key, JSON.stringify(seeded)),
+      [`${PINS_KEY_PREFIX}${WIKI}`, rels.slice(0, PINS_MAX)] as [string, string[]],
+    );
+    await reloadKeepingStore(page);
+
+    const victim = rels[PINS_MAX - 1]!;
+    await expect(
+      page.locator(`.wiki-list-item[data-relpath="${victim}"] .wiki-pin`),
+    ).toHaveAttribute("aria-pressed", "true");
+
+    // One more pin: the victim falls off the end of the list.
+    const fresh = page.locator(`.wiki-list-item[data-relpath="${rels[PINS_MAX]!}"]`);
+    await fresh.hover();
+    await fresh.locator(".wiki-pin").click();
+
+    const victimPin = page.locator(`.wiki-list-item[data-relpath="${victim}"] .wiki-pin`);
+    await expect(victimPin).toHaveAttribute("aria-pressed", "false");
+    await expect(victimPin).toHaveAttribute("title", "Pin this page");
+    // …and the star agrees with storage, which is the property that matters.
+    const stored = await page.evaluate(
+      (key: string) => JSON.parse(localStorage.getItem(key) || "[]") as string[],
+      `${PINS_KEY_PREFIX}${WIKI}`,
+    );
+    expect(stored).not.toContain(victim);
+    expect(stored).toHaveLength(PINS_MAX);
   });
 
   /**

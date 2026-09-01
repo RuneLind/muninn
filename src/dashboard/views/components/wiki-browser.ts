@@ -537,20 +537,27 @@ function pinBtnHtml(pinned: boolean): string {
   );
 }
 
-/** Repaint every row for one page after its pin flipped — the ★'s own state, and
- *  nothing else. There is at most one such row (sections MOVE rows), but this
- *  does not depend on that: it updates whatever it finds. */
-function paintPinState(relPath: string): void {
-  const pinned = pins.indexOf(relPath) !== -1;
-  const label = pinned ? "Unpin this page" : "Pin this page";
-  // Compared as an ATTRIBUTE rather than spliced into a selector: a relPath is a
-  // file path and needs `CSS.escape` to be safe there, which this file has no
-  // helper for and does not need one.
+/**
+ * Paint EVERY row's ★ from the stored pin list. No notion of which page changed,
+ * because "the page that was clicked" is the wrong unit: `togglePin` displaces
+ * the oldest pin at `PINS_MAX`, so a toggle at the cap flips TWO pages. Painting
+ * only the clicked row left the displaced one lit — its ★ still read "Unpin this
+ * page", and clicking it RE-pinned (evicting another page) while the star never
+ * moved, a control that reads as dead and does the opposite of its own label.
+ *
+ * Reading the whole list back is what makes that class unreachable rather than
+ * handled: there is no case to get wrong. It touches only class and attributes
+ * on one button per row, so it triggers no layout — which is the whole point of
+ * doing this instead of `renderList`.
+ */
+function paintPinState(): void {
   const rows = document.getElementById("wikiList")!.querySelectorAll<HTMLElement>(".wiki-list-item");
   for (let i = 0; i < rows.length; i++) {
-    if (rows[i]!.getAttribute("data-relpath") !== relPath) continue;
     const btn = rows[i]!.querySelector<HTMLElement>(".wiki-pin");
-    if (!btn) continue;
+    const relPath = rows[i]!.getAttribute("data-relpath");
+    if (!btn || !relPath) continue;
+    const pinned = pins.indexOf(relPath) !== -1;
+    const label = pinned ? "Unpin this page" : "Pin this page";
     btn.classList.toggle("on", pinned);
     btn.setAttribute("aria-pressed", String(pinned));
     btn.setAttribute("title", label);
@@ -1532,10 +1539,17 @@ document.getElementById("wikiList")!.addEventListener("click", (e) => {
   // row at the cursor ~96px so a second click pinned a DIFFERENT page; the
   // anchored restore that replaced it threw the reader down the list on a sort
   // change and hid the new Pinned header when pinning at the top. Painting one
-  // button removes the space rather than picking a third point in it. The
-  // sections rebuild on the next render the reader causes, and the ★ filling in
-  // is the confirmation in the meantime.
-  paintPinState(relPath);
+  // button removes the space rather than picking a third point in it. The ★
+  // filling in is the confirmation in the meantime.
+  //
+  // ⚠️ The residual, stated because "nothing moves" is only true of THIS click:
+  // the render that first paints the new section can be the BACKGROUND listing
+  // refresh rather than one the reader caused, and the section then appears on a
+  // repaint nothing on screen explains — measured at ~50px of extra downward
+  // shift on top of the ~46px that refresh already moves content by, which is
+  // pre-existing and unrelated to pins. Bounded, and only on a render that
+  // already repaints the list.
+  paintPinState();
 });
 
 (document.getElementById("wikiSearch") as HTMLInputElement).addEventListener("input", (e) => {
@@ -1643,9 +1657,11 @@ window.addEventListener("popstate", () => {
     // Back/forward to the start view ABANDONS any navigation still in flight:
     // its response must not write itself to the head of the PERSISTENT recents
     // list. The bump belongs HERE and not inside `renderStart`, which the Hubs /
-    // Timeline / Atlas tabs and the coverage link also call — while the reader
-    // is still ON the start view with a click of theirs in flight. Putting it
-    // there dropped the recent for a page the reader then sat and read
+    // Timeline / Atlas tabs also call while the reader is still ON the start
+    // view with a click of theirs in flight — and which the coverage-footer link
+    // calls from the ARTICLE view too, since `#wikiCoverageFoot` is a sibling of
+    // `#wikiList` in the rail rather than part of the start view. Putting the
+    // bump there dropped the recent for a page the reader then sat and read
     // (measured: articleRendered=1, recents=[]).
     navToken++;
     renderStart();
