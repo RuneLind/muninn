@@ -70,6 +70,13 @@ export function initRailResize(): void {
 
   let dragging = false;
   let dragWidth: number | null = null;
+  /** The rule is judged against the state at the START of the gesture. Fed its
+   *  own running result, a drag that overshot the bound and came back stored the
+   *  maximum the pointer ever reached (measured: out to 500, back to 330, stored
+   *  500) — the shown width pins at the bound, so once past it every move was a
+   *  "grow" over the previous move. */
+  let dragStartStored: number | null = null;
+  let dragStartShown = 0;
 
   const end = (): void => {
     if (!dragging) return;
@@ -88,6 +95,8 @@ export function initRailResize(): void {
     }
     dragging = true;
     dragWidth = null;
+    dragStartStored = chosen;
+    dragStartShown = Math.round(rail.getBoundingClientRect().width);
     handle.classList.add("dragging");
     document.body.classList.add("wiki-rail-dragging");
     // preventDefault (keeps the selection from starting) also suppresses the
@@ -102,9 +111,8 @@ export function initRailResize(): void {
     if (!dragging || !(e.buttons & 1)) return;
     // The pointer asks for a width; what gets remembered follows the same rule
     // as the arrow keys (`nextStoredWidth`), judged against what is on screen.
-    const rect = rail.getBoundingClientRect();
-    const requested = railWidthFromPointer(e.clientX, rect.left);
-    dragWidth = nextStoredWidth(chosen, Math.round(rect.width), requested);
+    const requested = railWidthFromPointer(e.clientX, rail.getBoundingClientRect().left);
+    dragWidth = nextStoredWidth(dragStartStored, dragStartShown, requested);
     chosen = dragWidth;
     apply();
   });

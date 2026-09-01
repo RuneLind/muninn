@@ -66,7 +66,9 @@ export function effectiveRailWidth(width: number, viewportWidth: number): number
  * screen and `stored` is remembered (null ⇒ the CSS default). Shown can be less
  * than stored when the viewport bound is in force, and that is the whole case:
  *   - a shrink (`requested < shown`) stores the requested width — the reader
- *     chose something smaller than what they can see;
+ *     chose something smaller than what they can see, and that choice replaces
+ *     a wider stored width on purpose: it is an explicit act on a visible
+ *     width, where an inert grow is not;
  *   - a grow stores `max(stored, requested)` — a grow the bound makes INERT
  *     (560 stored, 315 shown, ArrowRight asks 331) must not lower the desktop
  *     width the reader set on a wider screen and cannot see here.

@@ -244,6 +244,29 @@ test.describe("Wiki rail: full titles + remembered width", () => {
     expect(Number(await page.evaluate((k) => localStorage.getItem(k), RAIL_WIDTH_KEY))).toBe(shown);
   });
 
+  test("a drag that overshoots the bound and comes back stores the RELEASE width, not the maximum", async ({
+    page,
+  }) => {
+    await open(page);
+    await page.setViewportSize({ width: 700, height: 900 });
+    await page.reload();
+    await expect(page.locator(".wiki-list-item")).toHaveCount(2);
+    const rb = await page.locator(RAIL).boundingBox();
+    if (!rb) throw new Error("rail not laid out");
+    const hb = await page.locator(HANDLE).boundingBox();
+    if (!hb) throw new Error("handle not laid out");
+    const y = hb.y + 40;
+    await page.mouse.move(hb.x + hb.width / 2, y);
+    await page.mouse.down();
+    await page.mouse.move(rb.x + 500, y, { steps: 4 }); // out past the bound (shown pins at 315)
+    await page.mouse.move(rb.x + 330, y, { steps: 4 }); // back, still over the bound
+    await page.mouse.up();
+    expect(await railWidth(page)).toBe(315);
+    // The rule is judged against the state at the START of the gesture; fed its
+    // own running result it stored the maximum the pointer ever reached (500).
+    expect(await page.evaluate((k) => localStorage.getItem(k), RAIL_WIDTH_KEY)).toBe("330");
+  });
+
   test("the hit zone starts at the pane's border: the list's last pixel never starts a drag", async ({
     page,
   }) => {

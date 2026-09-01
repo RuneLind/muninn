@@ -268,14 +268,16 @@ export async function renderWikiPage(opts?: {
     .wiki-list-item .wiki-list-meta { margin-top: 2px; }
     .wiki-list-item .wiki-status { margin-top: 1px; }
     .wiki-list-item .wiki-followup-flag { margin-top: 2px; }
-    /* Drag handle on the rail's right edge. right:-14px against the padding box
-       puts the 14px box at [border-right edge, +14), outside the pane's content,
-       so a classic scrollbar on the list (Windows/Linux, macOS "always") is never
-       grabbed as a drag — PROVIDED nothing hit-testable hangs left of the box:
-       the accent pseudo-element is opacity-0 but still hit-testable, and at
-       left:-1px it made the list's last pixel start a drag (measured). It is
-       pointer-events:none and starts at the box's edge, right beside the border.
-       Pinned by the "list's last pixel never starts a drag" e2e case. */
+    /* Drag handle on the rail's right edge. right:-14px resolves against the
+       PADDING box, so the 14px box starts ON the pane's 1px border and runs 13px
+       into the gap (measured at 1400px: pane border-box right edge 324, handle
+       [323, 337)) — never over the list's content, so a classic scrollbar there
+       (Windows/Linux, macOS "always") is not grabbed as a drag. PROVIDED nothing
+       hit-testable hangs left of the box: the accent pseudo-element is opacity-0
+       but still hit-testable, and at left:-1px it made the list's last pixel
+       start a drag (measured). It is pointer-events:none at the box's left edge,
+       i.e. over the border pixel and one outside. Pinned by the "list's last
+       pixel never starts a drag" e2e case; the accent's POSITION is not pinned. */
     .wiki-layout > .wiki-pane:first-child { position: relative; }
     .wiki-rail-resizer {
       position: absolute; top: 0; bottom: 0; right: -14px; width: 14px;
