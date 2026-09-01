@@ -80,10 +80,7 @@ import {
 } from "./copy-path.ts";
 import { enhanceMermaid } from "./wiki-mermaid.ts";
 import { initRailResize } from "./wiki-rail-resize.ts";
-import {
-  buildRail,
-  type RailEntry,
-} from "./wiki-recents.ts";
+import { buildRail, type RailEntry } from "./wiki-recents.ts";
 import {
   clearRecents,
   readPins,
@@ -518,18 +515,84 @@ function syncFilters(autoOpen = true): void {
  *  would put a synchronous storage hit on every keystroke in the search box. */
 let recents: string[] = readRecents(WIKI);
 let pins: string[] = readPins(WIKI);
+/** Bumped by every navigation, so a response that lands after a newer one has
+ *  started cannot write itself to the head of Recently opened. */
+let navToken = 0;
 
-/** ★ — hover-only until pinned. `opacity` rather than `display`, so the slot is
- *  always reserved and a pin never reflows the row (see wiki-page.ts). */
+/**
+ * ★ — hidden until the row is hovered, always shown once pinned.
+ *
+ * `tabindex="-1"` is deliberate and measured: as an ordinary tab stop it put ONE
+ * per page into the tab order — 485 on mimir, 953 on jarvis — all of them ahead
+ * of the rail resizer PR #501 shipped for keyboard users, and the rail's rows are
+ * plain `div`s that a keyboard cannot open anyway. Pinning is a pointer
+ * affordance until the rail gets row-level keyboard navigation; adding 500 stops
+ * to a list nothing can navigate makes the page worse, not more accessible.
+ */
 function pinBtnHtml(pinned: boolean): string {
   const label = pinned ? "Unpin this page" : "Pin this page";
   return (
-    `<button type="button" class="wiki-pin${pinned ? " on" : ""}" data-pin="1"` +
+    `<button type="button" class="wiki-pin${pinned ? " on" : ""}" data-pin="1" tabindex="-1"` +
     ` aria-pressed="${pinned}" title="${label}" aria-label="${label}">\u2605</button>`
   );
 }
 
-function renderList(): void {
+/**
+ * Keep the rows under the reader's eye where they were across a re-render that
+ * changes the list's height ABOVE them.
+ *
+ * A plain `scrollTop` restore is right only while a render replaces like with
+ * like. Pinning inserts headers at the very top and lifts the row out of the
+ * listing, and the numeric restore then moved the row under the cursor 96px
+ * (measured at scrollTop 800: 119.8 → 216.3) — so a second click at the same
+ * point, which is exactly how a reader undoes a mis-pin, pinned a DIFFERENT
+ * page. `skipRelPath` is the row being toggled: it is about to move to the top,
+ * so anchoring on it would scroll the list there.
+ */
+interface ScrollAnchor {
+  relPath: string;
+  /** The anchor row's distance below the list's own top edge, preserved verbatim. */
+  delta: number;
+}
+
+/**
+ * ⚠️ Measured against the LIST's client rect, never `offsetTop`. `.wiki-list` is
+ * not a positioned element, so its rows' `offsetTop` resolves against the pane —
+ * head height included — and comparing that against `scrollTop` picked a row
+ * near the top of the whole list instead of the top of the viewport. The e2e
+ * case caught it: the correction over-scrolled by ~318px, ten rows, in the
+ * opposite direction from the bug it was written for.
+ */
+function captureScrollAnchor(listEl: HTMLElement, skipRelPath?: string): ScrollAnchor | null {
+  const listTop = listEl.getBoundingClientRect().top;
+  const rows = listEl.querySelectorAll<HTMLElement>(".wiki-list-item");
+  for (let i = 0; i < rows.length; i++) {
+    const el = rows[i]!;
+    const rect = el.getBoundingClientRect();
+    if (rect.bottom <= listTop) continue; // scrolled off the top
+    const relPath = el.getAttribute("data-relpath");
+    if (!relPath || relPath === skipRelPath) continue;
+    return { relPath, delta: rect.top - listTop };
+  }
+  return null;
+}
+
+function restoreScrollAnchor(listEl: HTMLElement, prev: number, anchor: ScrollAnchor | null): void {
+  if (!prev && !anchor) return;
+  listEl.scrollTop = prev; // the innerHTML swap reset it to 0
+  if (!anchor) return;
+  const listTop = listEl.getBoundingClientRect().top;
+  const rows = listEl.querySelectorAll<HTMLElement>(".wiki-list-item");
+  for (let i = 0; i < rows.length; i++) {
+    const el = rows[i]!;
+    if (el.getAttribute("data-relpath") !== anchor.relPath) continue;
+    const now = el.getBoundingClientRect().top - listTop;
+    listEl.scrollTop = Math.max(0, prev + (now - anchor.delta));
+    return;
+  }
+}
+
+function renderList(scrollSkipRelPath?: string): void {
   const mode = sortMode();
   // ONE anchored instant for the sort AND its row labels, so the date a row shows is
   // the date it sorted on even for a page sitting at the 48h future-guard boundary.
@@ -546,7 +609,7 @@ function renderList(): void {
   rail.entries.forEach((entry: RailEntry) => {
     if (entry.kind === "header") {
       html +=
-        `<div class="wiki-list-sec" data-sec="${esc(entry.section)}">` +
+        `<div class="wiki-list-sec" data-section="${esc(entry.section)}">` +
         `<span class="wiki-sec-label">${esc(entry.label)}</span>` +
         (entry.clear ? `<button type="button" class="wiki-sec-clear" data-clear-recents="1">clear</button>` : "") +
         `</div>`;
@@ -568,7 +631,7 @@ function renderList(): void {
     // while no relPath is known — see `wiki-nav.ts`.
     const active = isActivePage(p, { name: currentName, relPath: currentRelPath });
     html +=
-      `<div class="wiki-list-item${active ? " active" : ""}" data-sec="${esc(entry.section)}" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}">` +
+      `<div class="wiki-list-item${active ? " active" : ""}" data-section="${esc(entry.section)}" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}">` +
       `<div class="wiki-type-dot type-${esc(p.type)}"></div>` +
       // `title=` carries the full name: the row ellipsizes, and a status pill +
       // ⚑ flag eat enough width that plan titles routinely clip.
@@ -577,9 +640,14 @@ function renderList(): void {
       // two surfaces show the same two facts and must not read differently.
       statusPillHtml(p) +
       followupFlagHtml(p) +
-      // The ★ sits before the date so the date stays the row's right-hand anchor.
+      // ★ and date in ONE flex slot: as a sibling of the title the ★ also cost
+      // the row's 8px `gap`, and the pair measured 21px off `.wiki-list-title`
+      // on every row — a third of the title box at RAIL_WIDTH_MIN, paid by a
+      // reader who never pins anything.
+      `<div class="wiki-list-end">` +
       pinBtnHtml(entry.pinned) +
       `<div class="wiki-list-meta">${esc(meta)}</div>` +
+      `</div>` +
       `</div>`;
   });
   // Scroll restore lives HERE, not at the refresh call site (the `renderBacklog`
@@ -589,8 +657,9 @@ function renderList(): void {
   // every path — a background refresh can never yank a reader to the top.
   const listEl = document.getElementById("wikiList")!;
   const scroll = listEl.scrollTop;
+  const anchor = captureScrollAnchor(listEl, scrollSkipRelPath);
   listEl.innerHTML = html || '<div class="wiki-conn-empty">No pages match.</div>';
-  if (scroll) listEl.scrollTop = scroll;
+  restoreScrollAnchor(listEl, scroll, anchor);
   // `rail.shown` counts DISTINCT pages among the rendered rows, so a page that
   // appears both in a recall section and in the listing below is one, and a jump
   // hit the query itself would not have matched is counted.
@@ -1199,6 +1268,8 @@ function loadExplainer(m: WikiListing, push: boolean): void {
   currentRelPath = m.relPath;
   // Same rule as `fetchAndRenderPage`: an explainer opened is an explainer
   // recently opened. Its own `renderList()` at the end of this function repaints.
+  // No token check needed — nothing is awaited between here and the render.
+  navToken++;
   recents = recordRecent(WIKI, m.relPath);
   navInFlight = false; // `currentName` now carries the "article" signal on its own
   if (push) {
@@ -1318,6 +1389,7 @@ function loadPageByRelPath(relPath: string, push = true): void {
  *  the round-trip survives Back/reload/share even where stems collide; a response
  *  carrying no relPath at all falls back to the name-based `?page=<name>` URL. */
 function fetchAndRenderPage(url: string, push: boolean): void {
+  const token = ++navToken;
   fetch(url)
     .then((r) => r.json())
     .then((data: WikiPageDetail) => {
@@ -1341,10 +1413,6 @@ function fetchAndRenderPage(url: string, push: boolean): void {
       // resolves server-side, and the active row must key on the page that
       // actually came back.
       currentRelPath = data.meta.relPath || null;
-      // Viewing IS opening: Back/forward and a cold `?relPath=` deep link all
-      // count, because "the page I had open yesterday" arrives by every one of
-      // those routes. `renderList` below repaints the section.
-      if (currentRelPath) recents = recordRecent(WIKI, currentRelPath);
       renderBreadcrumb(data.meta);
       if (push) {
         // Push the resolved relPath whenever we have one, even for a by-name
@@ -1381,6 +1449,13 @@ function fetchAndRenderPage(url: string, push: boolean): void {
       // Lazy: fetch semantic cousins after the page + connections are on screen,
       // so it never blocks the article render.
       loadSimilar(data.meta);
+      // Recorded HERE, past everything that can throw: an article whose render
+      // blows up lands in the `.catch` below showing "Failed to load page", and
+      // pushing it to the front of a PERSISTENT list would outlive the failure.
+      // The token check is the same reason `loadExplainer` compares
+      // `currentRelPath`: on a fast A→B flip whose responses land out of order,
+      // A must not win the top of Recently opened for good.
+      if (currentRelPath && token === navToken) recents = recordRecent(WIKI, currentRelPath);
       renderList();
     })
     .catch((err: Error) => {
@@ -1429,6 +1504,12 @@ document.body.addEventListener("click", (e) => {
     switchConnTab(connTab.getAttribute("data-conntab") || "conn", true);
     return;
   }
+  // The rail's ★ and `clear` live inside a `[data-relpath]` row; they are the
+  // list's own listener's business, and opening the page as well is not what a
+  // click on either means. Skipped HERE rather than by stopping propagation
+  // there, so the other document-level listeners (the chat-options click-away)
+  // still run.
+  if (target.closest && target.closest("[data-pin], [data-clear-recents]")) return;
   const link = target.closest ? target.closest(NAV_LINK_SELECTOR) : null;
   if (!link) return;
   // `navTargetFrom` prefers `data-relpath` — the only key that names ONE page on a
@@ -1444,18 +1525,22 @@ document.body.addEventListener("click", (e) => {
  * The rail's two own controls: the ★ pin on every row, and `clear` on the
  * Recently-opened header.
  *
- * On `#wikiList`, not on the body delegate below — both controls sit INSIDE a
- * `.wiki-list-item` (or a header inside the list), and the body delegate opens
- * whatever `[data-relpath]` a click landed in. A listener on the list runs first
- * because it is deeper in the tree, so `stopPropagation()` here is what keeps a
- * pin from also navigating.
+ * On `#wikiList`, not on the body delegate above — both controls sit INSIDE a
+ * `.wiki-list-item` (or a header inside the list), and that delegate opens
+ * whatever `[data-relpath]` a click landed in. A listener on the list runs
+ * first because it is deeper in the tree.
+ *
+ * ⚠️ It deliberately does NOT call `stopPropagation`. That was the first cut,
+ * and it also silenced `wiki-chat-options.ts`'s document-level click-away: with
+ * the Discuss popover open, a click on a ★ toggled the pin and left the popover
+ * standing. The body delegate skips these two controls by selector instead, so
+ * every other document listener still sees the click.
  */
 document.getElementById("wikiList")!.addEventListener("click", (e) => {
   const target = e.target as HTMLElement;
   if (!target.closest) return;
   if (target.closest("[data-clear-recents]")) {
     e.preventDefault();
-    e.stopPropagation();
     recents = clearRecents(WIKI);
     renderList();
     return;
@@ -1463,12 +1548,13 @@ document.getElementById("wikiList")!.addEventListener("click", (e) => {
   const pin = target.closest("[data-pin]");
   if (!pin) return;
   e.preventDefault();
-  e.stopPropagation();
   const row = pin.closest(".wiki-list-item");
   const relPath = row?.getAttribute("data-relpath");
   if (!relPath) return;
   pins = togglePinned(WIKI, relPath);
-  renderList();
+  // The toggled row is about to move into (or out of) the Pinned section, so it
+  // is the one row that cannot anchor the scroll restore.
+  renderList(relPath);
 });
 
 (document.getElementById("wikiSearch") as HTMLInputElement).addEventListener("input", (e) => {
@@ -1550,7 +1636,7 @@ document.getElementById("tagChips")!.addEventListener("click", (e) => {
   syncFilters();
 });
 
-document.getElementById("wikiSort")!.addEventListener("change", renderList);
+document.getElementById("wikiSort")!.addEventListener("change", () => renderList());
 
 // Switching wiki is a full navigation — resets browse context and keeps the URL shareable.
 const wikiSel = document.getElementById("wikiSelect") as HTMLSelectElement | null;

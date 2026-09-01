@@ -57,7 +57,7 @@ export interface OpenPageRef {
  *  does for the graph: posix separators, lowercased. No `path` module in the
  *  browser, so the `.`/`..` normalization is deliberately skipped — every relPath
  *  compared here comes from the index, which already emits clean posix paths. */
-function normalizeRel(rel: string): string {
+export function normalizeRel(rel: string): string {
   return rel.replace(/\\/g, "/").toLowerCase();
 }
 

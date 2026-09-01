@@ -269,7 +269,7 @@ export async function renderWikiPage(opts?: {
     .wiki-list-item .wiki-status { margin-top: 1px; }
     .wiki-list-item .wiki-followup-flag { margin-top: 2px; }
 
-    /* Recall sections (Pinned · Recently opened · All pages) and the Jira-key
+    /* Recall sections (Pinned · Recently opened · Other pages) and the Jira-key
        jump header. One rule for all four — they are the same furniture, and the
        jump differs only by its tinted background. */
     .wiki-list-sec {
@@ -277,27 +277,40 @@ export async function renderWikiPage(opts?: {
       padding: 10px 10px 3px; font-size: 10px; letter-spacing: .07em;
       text-transform: uppercase; color: var(--text-faint);
     }
-    .wiki-list-sec[data-sec="jump"] {
+    .wiki-list-sec[data-section="jump"] {
       text-transform: none; letter-spacing: 0; font-size: 11.5px;
       color: var(--text-dim); background: var(--bg-surface);
       border-radius: 6px; margin: 2px 0 3px; padding: 6px 10px;
     }
+    /* The same two tokens as .wiki-ask-hist-clear, the rail's other "clear":
+       one word, one tab away, so they must not read as different controls. */
     .wiki-sec-clear {
       margin-left: auto; background: none; border: 0; padding: 0; cursor: pointer;
       font: inherit; letter-spacing: inherit; text-transform: inherit;
-      color: var(--accent-light);
+      color: var(--text-dim);
     }
-    .wiki-sec-clear:hover { text-decoration: underline; }
-    /* ★ hover-only. opacity, never display: the slot is reserved on every
-       row, so pinning a page cannot reflow the row under the cursor — and the
-       button stays keyboard-reachable while invisible, which is why
-       :focus-visible has to reveal it. */
+    .wiki-sec-clear:hover { color: var(--status-error); }
+    /* ★ and the date share one flex slot, so the ★ costs the row its own width
+       and NOT the row's 8px gap as well: as a sibling of the title the pair
+       measured 21px off .wiki-list-title on every row — 42px of title left at
+       RAIL_WIDTH_MIN with a status pill and a ⚑ — paid permanently by a reader
+       who never pins anything. */
+    .wiki-list-end { display: flex; align-items: flex-start; gap: 2px; flex-shrink: 0; }
+    /* Hidden until the row is hovered; always shown once pinned. opacity, never
+       display: the slot stays reserved, so hovering a row cannot re-wrap its
+       two-line title and change the row's height under a moving cursor.
+       pointer-events:none while invisible, the same pairing the drag handle
+       below uses — without it every row carried an invisible tap target, and on
+       a touch device (no hover) a tap in that slot toggled a pin instead of
+       opening the page. */
     .wiki-pin {
-      background: none; border: 0; padding: 0 1px; cursor: pointer;
-      font-size: 11px; line-height: 1.3; color: var(--status-warning);
-      flex-shrink: 0; margin-top: 2px; opacity: 0; transition: opacity .12s;
+      background: none; border: 0; padding: 0; cursor: pointer;
+      font-size: 10.5px; line-height: 1.55; color: var(--status-warning);
+      flex-shrink: 0; opacity: 0; pointer-events: none; transition: opacity .12s;
     }
-    .wiki-pin.on, .wiki-list-item:hover .wiki-pin, .wiki-pin:focus-visible { opacity: 1; }
+    .wiki-pin.on, .wiki-list-item:hover .wiki-pin, .wiki-pin:focus-visible {
+      opacity: 1; pointer-events: auto;
+    }
     /* Drag handle on the rail's right edge. right:-14px resolves against the
        PADDING box, so the 14px box starts ON the pane's 1px border and runs 13px
        into the gap (measured at 1400px: pane border-box right edge 324, handle

@@ -61,11 +61,26 @@ const PAGES: Array<[string, string]> = [
   ["concepts/arsavregning.md", md("Årsavregning", ["avregning"])],
   ["concepts/kildeskatt.md", md("Kildeskatt", ["skatt"])],
 ];
+// mimir's shape, in miniature: dated filenames and a `<word>-<year>` tag, which
+// is what a bare `2026` matched on the real corpus (121 of 485 pages).
+const DATED: Array<[string, string]> = [
+  ["archive/2026-08-27-seven-fix-rounds.md", md("Seven fix rounds", ["retro-2026"])],
+  ["archive/2026-08-30-wikilinks.md", md("Wikilinks inside code", ["q1-2026"])],
+  ["blogs/2026-08-27-fix-rounds.md", md("Fix rounds inject defects")],
+];
+// Enough rows that the list scrolls, for the pin mis-click case.
+const FILLER: Array<[string, string]> = Array.from({ length: 30 }, (_, i) => [
+  `concepts/filler-${String(i).padStart(2, "0")}.md`,
+  md(`Filler page number ${i} with a reasonably long title`),
+]);
+
 const ISSUE = "sources/jira/MELOSYS-7588.md";
 const ARCHIVE = "archive/opprydding.md";
 const DATAMODEL = "flows/datamodel.md";
 const ARSAVREGNING = "concepts/arsavregning.md";
 const KILDESKATT = "concepts/kildeskatt.md";
+
+const ALL_PAGES = PAGES.length + DATED.length + FILLER.length;
 
 const OTHER_REL = "only-here.md";
 
@@ -76,7 +91,7 @@ let otherRoot = "";
 test.beforeAll(async () => {
   root = await mkdtemp(path.join(tmpdir(), "muninn-e2e-rail-"));
   otherRoot = await mkdtemp(path.join(tmpdir(), "muninn-e2e-rail-other-"));
-  for (const [rel, body] of PAGES) {
+  for (const [rel, body] of [...PAGES, ...DATED, ...FILLER]) {
     await mkdir(path.join(root, path.dirname(rel)), { recursive: true });
     await writeFile(path.join(root, rel), body, "utf8");
   }
@@ -136,7 +151,7 @@ const sectionLabels = (page: Page) => page.locator(".wiki-sec-label").allTextCon
 
 /** The rows under one section header, by relPath, in render order. */
 function rowsIn(page: Page, section: string) {
-  return page.locator(`.wiki-list-item[data-sec="${section}"]`);
+  return page.locator(`.wiki-list-item[data-section="${section}"]`);
 }
 
 async function relPathsIn(page: Page, section: string): Promise<string[]> {
@@ -149,9 +164,9 @@ test.describe("Wiki rail: recents, pins, key jump", () => {
   test("a fresh browser gets the rail it has always had — no headers", async ({ page }) => {
     await openRail(page);
     expect(await sectionLabels(page)).toEqual([]);
-    expect(await page.locator(".wiki-list-item").count()).toBe(PAGES.length);
+    expect(await page.locator(".wiki-list-item").count()).toBe(ALL_PAGES);
     // The ★ is on every row, and invisible until the row is hovered.
-    expect(await page.locator(".wiki-pin").count()).toBe(PAGES.length);
+    expect(await page.locator(".wiki-pin").count()).toBe(ALL_PAGES);
     await expect(page.locator(".wiki-pin").first()).toHaveCSS("opacity", "0");
   });
 
@@ -160,12 +175,17 @@ test.describe("Wiki rail: recents, pins, key jump", () => {
     await page.locator(`.wiki-list-item[data-relpath="${ARSAVREGNING}"]`).click();
     await expect(page.locator(".wiki-article")).toContainText("Body.");
 
-    expect(await sectionLabels(page)).toEqual(["Recently opened", "All pages"]);
+    expect(await sectionLabels(page)).toEqual(["Recently opened", "Other pages"]);
     expect(await relPathsIn(page, "recent")).toEqual([ARSAVREGNING]);
 
-    // The listing below is still COMPLETE — the section is a shortcut, not a filter.
-    expect(await relPathsIn(page, "all")).toHaveLength(PAGES.length);
-    await expect(page.locator("#wikiCount")).toHaveText(`${PAGES.length} / ${PAGES.length}`);
+    // The section MOVED the row: every page is on screen exactly once, so the
+    // count still describes the rows, `[data-relpath=…]` still names ONE
+    // element, and the open page is highlighted in one place.
+    expect(await relPathsIn(page, "all")).toHaveLength(ALL_PAGES - 1);
+    expect(await page.locator(".wiki-list-item").count()).toBe(ALL_PAGES);
+    await expect(page.locator(`.wiki-list-item[data-relpath="${ARSAVREGNING}"]`)).toHaveCount(1);
+    await expect(page.locator(".wiki-list-item.active")).toHaveCount(1);
+    await expect(page.locator("#wikiCount")).toHaveText(`${ALL_PAGES} / ${ALL_PAGES}`);
 
     // …and it is there on the next visit, which is the whole promise.
     await reloadKeepingStore(page);
@@ -175,7 +195,7 @@ test.describe("Wiki rail: recents, pins, key jump", () => {
   test("the most recently opened page comes first, without duplicating", async ({ page }) => {
     await openRail(page);
     for (const rel of [ARSAVREGNING, KILDESKATT, ARSAVREGNING]) {
-      await page.locator(`.wiki-list-item[data-relpath="${rel}"][data-sec="all"]`).click();
+      await page.locator(`.wiki-list-item[data-relpath="${rel}"]`).click();
       await expect(page.locator(".wiki-article")).toBeVisible();
     }
     expect(await relPathsIn(page, "recent")).toEqual([ARSAVREGNING, KILDESKATT]);
@@ -204,10 +224,15 @@ test.describe("Wiki rail: recents, pins, key jump", () => {
     await row.locator(".wiki-pin").click();
 
     await expect(page.locator(".wiki-start")).toBeVisible();
-    expect(await sectionLabels(page)).toEqual(["Pinned", "All pages"]);
+    // …and the ★ is inert while invisible, so a touch device (which never
+    // hovers) taps the ROW rather than a control it cannot see.
+    await expect(page.locator(`.wiki-list-item[data-relpath="${ARSAVREGNING}"] .wiki-pin`))
+      .toHaveCSS("pointer-events", "none");
+    expect(await sectionLabels(page)).toEqual(["Pinned", "Other pages"]);
     expect(await relPathsIn(page, "pinned")).toEqual([KILDESKATT]);
+    await expect(page.locator(`.wiki-list-item[data-relpath="${KILDESKATT}"]`)).toHaveCount(1);
     // A pinned row's ★ is visible with no hover, and says what it will do.
-    const pinned = page.locator(`.wiki-list-item[data-sec="pinned"] .wiki-pin`);
+    const pinned = page.locator(`.wiki-list-item[data-section="pinned"] .wiki-pin`);
     await expect(pinned).toHaveCSS("opacity", "1");
     await expect(pinned).toHaveAttribute("aria-pressed", "true");
 
@@ -222,7 +247,7 @@ test.describe("Wiki rail: recents, pins, key jump", () => {
     await row.locator(".wiki-pin").click();
     await expect(rowsIn(page, "pinned")).toHaveCount(1);
 
-    await page.locator(`.wiki-list-item[data-sec="pinned"] .wiki-pin`).click();
+    await page.locator(`.wiki-list-item[data-section="pinned"] .wiki-pin`).click();
     expect(await sectionLabels(page)).toEqual([]);
   });
 
@@ -231,16 +256,16 @@ test.describe("Wiki rail: recents, pins, key jump", () => {
     await page.locator(`.wiki-list-item[data-relpath="${ARSAVREGNING}"]`).click();
     await expect(rowsIn(page, "recent")).toHaveCount(1);
 
-    const row = page.locator(`.wiki-list-item[data-relpath="${ARSAVREGNING}"][data-sec="recent"]`);
+    const row = page.locator(`.wiki-list-item[data-relpath="${ARSAVREGNING}"][data-section="recent"]`);
     await row.hover();
     await row.locator(".wiki-pin").click();
 
-    expect(await sectionLabels(page)).toEqual(["Pinned", "All pages"]);
+    expect(await sectionLabels(page)).toEqual(["Pinned", "Other pages"]);
     expect(await relPathsIn(page, "pinned")).toEqual([ARSAVREGNING]);
     expect(await rowsIn(page, "recent").count()).toBe(0);
 
     // …and un-pinning gives it back to the recents section.
-    await page.locator(`.wiki-list-item[data-sec="pinned"] .wiki-pin`).click();
+    await page.locator(`.wiki-list-item[data-section="pinned"] .wiki-pin`).click();
     expect(await relPathsIn(page, "recent")).toEqual([ARSAVREGNING]);
   });
 
@@ -294,7 +319,7 @@ test.describe("Wiki rail: recents, pins, key jump", () => {
     // The jump found a page the substring search could not: `flows/datamodel.md`
     // carries the key only as a tag `melosys-7588`, which "7588" does not match.
     expect(await relPathsIn(page, "all")).toEqual([]);
-    await expect(page.locator("#wikiCount")).toHaveText(`3 / ${PAGES.length}`);
+    await expect(page.locator("#wikiCount")).toHaveText(`3 / ${ALL_PAGES}`);
   });
 
   test("the prefixed key finds the same pages", async ({ page }) => {
@@ -309,7 +334,7 @@ test.describe("Wiki rail: recents, pins, key jump", () => {
   test("a jump row opens the page it names", async ({ page }) => {
     await openRail(page);
     await page.fill("#wikiSearch", "7588");
-    await page.locator(`.wiki-list-item[data-sec="jump"][data-relpath="${DATAMODEL}"]`).click();
+    await page.locator(`.wiki-list-item[data-section="jump"][data-relpath="${DATAMODEL}"]`).click();
     await expect(page.locator(".wiki-bc-cur")).toContainText("Trygdeavgift datamodel");
   });
 
@@ -317,9 +342,9 @@ test.describe("Wiki rail: recents, pins, key jump", () => {
     page,
   }) => {
     await openRail(page);
-    // 2026 parses as a bare key by design; it resolves to no page, so the jump
-    // renders nothing rather than an empty block.
-    await page.fill("#wikiSearch", "2026");
+    // 4242 is key-shaped and names nothing here, so the jump renders nothing
+    // rather than an empty block.
+    await page.fill("#wikiSearch", "4242");
     expect(await sectionLabels(page)).toEqual([]);
     expect(await page.locator(".wiki-list-item").count()).toBe(0);
     await expect(page.locator("#wikiList .wiki-conn-empty")).toHaveText("No pages match.");
@@ -330,5 +355,141 @@ test.describe("Wiki rail: recents, pins, key jump", () => {
     await page.fill("#wikiSearch", "kildeskatt");
     expect(await sectionLabels(page)).toEqual([]);
     expect(await relPathsIn(page, "all")).toEqual([KILDESKATT]);
+  });
+
+  /**
+   * The mis-click a verify pass measured: `renderList` restored `scrollTop`
+   * verbatim, so pinning — which inserts headers at the very top — moved the row
+   * under the cursor ~96px (measured 119.8 → 216.3 at scrollTop 800), and a
+   * second click at the same point pinned a page three rows away.
+   *
+   * The rule, and what is asserted here: **the only thing that moves is the row
+   * that left.** The neighbours shift up by exactly one row height, never by the
+   * inserted headers. The row height is measured at runtime from two adjacent
+   * rows rather than hardcoded, so this pins the rule and not a layout.
+   *
+   * ⚠️ Residual, and it is inherent rather than a defect: the pinned row does
+   * leave the cursor, so a second click at the same point lands on its
+   * neighbour. Under the section semantics this replaced that was invisible —
+   * the row stayed put and a duplicate appeared off-screen. Now the row visibly
+   * flies to `Pinned`, which is where the undo is.
+   */
+  test("pinning shifts the rows around the cursor by exactly the row that left", async ({
+    page,
+  }) => {
+    await openRail(page);
+    // Title order, so filler-15 is deterministically ABOVE filler-20. The default
+    // sort is by mtime and the fixture's files are written in a loop, so whether
+    // 15 precedes 20 depends on filesystem timestamp granularity — which passed
+    // in isolation and failed once under the full parallel suite.
+    await page.selectOption("#wikiSort", "title");
+    await page.locator("#wikiList").evaluate((el) => {
+      el.scrollTop = 300;
+    });
+
+    const yOf = async (rel: string): Promise<number> =>
+      (await page.locator(`.wiki-list-item[data-relpath="${rel}"]`).boundingBox())!.y;
+
+    // `hover()` scrolls the row into view, so every baseline is taken AFTER it —
+    // measuring before cost a debugging round on a 411px "shift" that was the
+    // hover's own scroll.
+    const target = page.locator(`.wiki-list-item[data-relpath="concepts/filler-15.md"]`);
+    await target.hover();
+
+    // The height of the row that is about to LEAVE — order-independent, unlike
+    // the gap between two rows named in the fixture.
+    const rowHeight = (await target.boundingBox())!.height;
+    expect(rowHeight).toBeGreaterThan(10);
+    const before = await yOf("concepts/filler-20.md");
+
+    await target.locator(".wiki-pin").click();
+    await expect(rowsIn(page, "pinned")).toHaveCount(1);
+
+    // The rule: the content under the cursor never moves DOWN, and the most it
+    // moves up is the one row that left. An exact figure would be a layout pin —
+    // rows are not all the same height, since a long title wraps to two lines.
+    // Without the anchored restore the two inserted headers pushed it down.
+    const after = await yOf("concepts/filler-20.md");
+    expect(after, "pinning must not push content down").toBeLessThanOrEqual(before + 1);
+    expect(before - after, "…nor up by more than the row that left").toBeLessThanOrEqual(
+      rowHeight + 2,
+    );
+  });
+
+  /**
+   * The regression a verify pass measured on the REAL mimir corpus: that wiki
+   * files pages as `archive/<yyyy-mm-dd>-<topic>.mdx`, so a date is how a reader
+   * finds one — and `2026` as a bare key resolved to 121 of 485 pages, burying
+   * the query's single real match under eight unrelated ones.
+   */
+  test("a date query is a search, not a Jira jump", async ({ page }) => {
+    await openRail(page);
+    await page.fill("#wikiSearch", "2026-08-27");
+    expect(await sectionLabels(page)).toEqual([]);
+    expect((await relPathsIn(page, "all")).sort()).toEqual([
+      "archive/2026-08-27-seven-fix-rounds.md",
+      "blogs/2026-08-27-fix-rounds.md",
+    ]);
+
+    // …and a bare year does not either, though `retro-2026` is a real tag here.
+    await page.fill("#wikiSearch", "2026");
+    expect(await sectionLabels(page)).toEqual([]);
+  });
+
+  /** A prefixed key in the year range is still a key — the project names it. */
+  test("MELOSYS-2026 is still a key", async ({ page }) => {
+    await openRail(page);
+    await page.fill("#wikiSearch", "MELOSYS-2026");
+    // Nothing here carries it, so no header — the point is that it PARSED and
+    // simply found nothing, which the date cases above can no longer distinguish.
+    expect(await sectionLabels(page)).toEqual([]);
+  });
+
+  /**
+   * The ★ must not join the tab order. As an ordinary tab stop it put ONE per
+   * page ahead of the rail resizer PR #501 shipped for keyboard users — 485 on
+   * mimir, measured — in a list whose rows are `div`s a keyboard cannot open
+   * anyway. The rule asserted is the one that matters: the resizer is still a
+   * few presses from the search box, whatever the page count.
+   */
+  test("the ★ does not bury the rail resizer in the tab order", async ({ page }) => {
+    await openRail(page);
+    await page.locator("#wikiSearch").focus();
+    let presses = 0;
+    for (; presses < 15; presses++) {
+      await page.keyboard.press("Tab");
+      if ((await page.evaluate(() => document.activeElement?.id)) === "wikiRailResizer") break;
+    }
+    expect(presses, `reached the resizer after ${presses} Tab presses`).toBeLessThan(12);
+    // …and there are far more rows than that, so the bound is a real one.
+    expect(await page.locator(".wiki-pin").count()).toBeGreaterThan(30);
+  });
+
+  /**
+   * A response that lands after a newer navigation started must not write itself
+   * to the head of a PERSISTENT list. The pre-existing clobber of `currentRelPath`
+   * was transient; recording a recent from it would outlive the session.
+   */
+  test("a slow response that loses the race does not become the newest recent", async ({
+    page,
+  }) => {
+    await openRail(page);
+    // Hold the FIRST page's response until the second navigation has finished.
+    let release: (() => void) | undefined;
+    const held = new Promise<void>((r) => (release = r));
+    await page.route(`**/api/wiki/page?relPath=${encodeURIComponent(ARSAVREGNING)}*`, async (route) => {
+      await held;
+      await route.continue();
+    });
+
+    await page.locator(`.wiki-list-item[data-relpath="${ARSAVREGNING}"]`).click();
+    await page.locator(`.wiki-list-item[data-relpath="${KILDESKATT}"]`).click();
+    await expect(page.locator(".wiki-bc-cur")).toContainText("Kildeskatt");
+
+    release!();
+    await page.waitForTimeout(400);
+
+    // The page the reader actually settled on is the newest recent.
+    expect((await relPathsIn(page, "recent"))[0]).toBe(KILDESKATT);
   });
 });

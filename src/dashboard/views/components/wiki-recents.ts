@@ -18,6 +18,7 @@
  */
 
 import { displayTitleOf, type WikiFilters, type WikiListing } from "./wiki-filter.ts";
+import { findPageByRelPath, normalizeRel } from "./wiki-nav.ts";
 
 /** localStorage key prefixes; the wiki's canonical name (`""` for the default
  *  wiki) is appended, so two wikis in one browser never share a list. Versioned
@@ -119,36 +120,82 @@ export interface ParsedJiraKey {
  *  the number is 3–6 digits, which covers a project from its first issue to well
  *  past this one. A preceding character, if any, must be a non-alphanumeric, so
  *  the key is a token in the query rather than the tail of an identifier. */
-const PREFIXED_RE = /(?:^|[^a-zA-Z0-9])([a-zA-Z][a-zA-Z0-9]{1,9})-(\d{3,6})(?![0-9])/;
+const PREFIXED_RE = /(?:^|[^a-zA-Z0-9])([a-zA-Z][a-zA-Z0-9]{1,9})-(\d{3,6})(?![0-9])/g;
 /** A bare `7588`: EXACTLY four digits, bounded by non-alphanumerics. Four is the
  *  shape of the keys on this wiki; three would fire on ordinary numbers and five
  *  would fire on the middle of a longer one. */
-const BARE_RE = /(?:^|[^a-zA-Z0-9])(\d{4})(?![0-9])/;
+const BARE_RE = /(?:^|[^a-zA-Z0-9])(\d{4})(?![0-9])/g;
 
 /**
- * The key a query names, or `null`.
+ * A bare four-digit run in this range is read as a YEAR, never as an issue
+ * number. Measured on the real mimir corpus (485 pages): `2026-08-27` is how a
+ * reader finds an archive page there — the convention is
+ * `archive/<yyyy-mm-dd>-<topic>.mdx` — and as a bare key `2026` resolved to
+ * **121 of 485 pages**, pushing the query's one real match below eight unrelated
+ * ones under an "Other matches" header. Requiring a `<prefix>-<number>` token
+ * is not enough on its own: `retro-2026`, `q1-2026` and `plan-2024` are ordinary
+ * tag shapes that match it exactly. Narrowing the prefix to letters was tried
+ * and dropped — it pinned nothing the year range does not already close, and a
+ * real Jira project key may carry digits.
  *
- * A PREFIXED match wins over a bare one wherever both appear, regardless of
- * order: `2026-08-27 MELOSYS-7588` names the issue, not the year. That is the
- * one ordering rule, and it is why the two regexes are tried in sequence rather
- * than as one alternation.
+ * Only the BARE form is affected. `MELOSYS-2026` still parses and still
+ * resolves — a reader who means issue 2026 names the project, which is also the
+ * only way anyone could tell the two apart.
+ */
+const YEAR_MIN = 1900;
+const YEAR_MAX = 2099;
+
+/**
+ * EVERY key a query could be naming, best-shaped first: the prefixed tokens in
+ * the order they appear, then the bare four-digit runs. `buildRail` walks this
+ * list and takes the first that RESOLVES to a page.
  *
- * The parse is deliberately permissive — `2026-09-01` alone does parse as the
- * number 2026 — because a parse that resolves to no page renders NOTHING (see
- * `jiraKeyJump`). The cost of a false key is zero; the cost of a strict parse
- * that misses `fikset i 7588` is a feature that only works when pasted alone.
+ * That fallback is the whole point, and its absence was a shipped defect: with
+ * "the leftmost prefixed match wins, full stop", `V155-2026 MELOSYS-7588` and
+ * `ISO-8601 og MELOSYS-7588` both answered about the noise token and showed the
+ * reader nothing at all about the key they typed. The module's own defence — a
+ * permissive parse is free because a key that resolves to nothing renders
+ * nothing — is only true if the next candidate then gets its turn.
+ *
+ * ⚠️ Residual, deliberately not solved: two key-shaped tokens that BOTH name
+ * real pages are genuinely ambiguous (`ISO-8601` is indistinguishable from a
+ * Jira key by shape alone), and the leftmost wins. The ordinary results are
+ * untouched either way — the jump only ever re-orders and labels.
+ */
+export function parseJiraKeyCandidates(query: string): ParsedJiraKey[] {
+  const q = (query || "").trim();
+  if (!q) return [];
+  const out: ParsedJiraKey[] = [];
+  const seen = new Set<string>();
+  const add = (c: ParsedJiraKey): void => {
+    const id = c.key ?? c.num;
+    if (seen.has(id)) return;
+    seen.add(id);
+    out.push(c);
+  };
+  for (const m of q.matchAll(PREFIXED_RE)) {
+    const key = (m[1] + "-" + m[2]).toLowerCase();
+    add({ key, num: m[2]!, display: key.toUpperCase() });
+  }
+  for (const m of q.matchAll(BARE_RE)) {
+    const n = Number(m[1]);
+    if (n >= YEAR_MIN && n <= YEAR_MAX) continue; // a year, not an issue
+    add({ key: null, num: m[1]!, display: m[1]! });
+  }
+  return out;
+}
+
+/**
+ * The single best-shaped key a query names, or `null` — the first candidate,
+ * ignoring whether it resolves. Kept as the parse's own unit, because "what does
+ * this string look like" and "which of those is on this wiki" are two questions
+ * and only the second needs a page listing.
+ *
+ * A PREFIXED candidate outranks a bare one wherever both appear, regardless of
+ * order: `2026-08-27 MELOSYS-7588` names the issue, not the year.
  */
 export function parseJiraKey(query: string): ParsedJiraKey | null {
-  const q = (query || "").trim();
-  if (!q) return null;
-  const prefixed = PREFIXED_RE.exec(q);
-  if (prefixed) {
-    const key = (prefixed[1] + "-" + prefixed[2]).toLowerCase();
-    return { key, num: prefixed[2]!, display: key.toUpperCase() };
-  }
-  const bare = BARE_RE.exec(q);
-  if (bare) return { key: null, num: bare[1]!, display: bare[1]! };
-  return null;
+  return parseJiraKeyCandidates(query)[0] ?? null;
 }
 
 /** The pages a key names: the issue's OWN page first, then everything that
@@ -163,56 +210,57 @@ export interface JiraKeyJump {
   total: number;
 }
 
-/** The last path segment without its extension — `sources/jira/MELOSYS-7588.md`
- *  → `MELOSYS-7588`. */
-function relPathStem(relPath: string): string {
-  const seg = relPath.slice(relPath.lastIndexOf("/") + 1);
-  const dot = seg.lastIndexOf(".");
-  return dot > 0 ? seg.slice(0, dot) : seg;
-}
-
 /**
  * Resolve a key against a page listing.
  *
- * **Own page** — the page whose ADDRESS is the issue: its filename stem or its
- * canonical name IS the key. On the nav wiki that is `sources/jira/<KEY>.md`;
- * the rule is written against the address rather than against that folder so a
- * wiki filing issues elsewhere still works.
+ * **Own page** — the page whose ADDRESS is the issue: its canonical `name`, which
+ * `WikiPageMeta` defines as the filename stem (`src/wiki/store.ts`). On the nav
+ * wiki that is `sources/jira/<KEY>.md`; the rule is written against the address
+ * rather than against that folder so a wiki filing issues elsewhere still works.
  *
  * The address, and deliberately NOT "the title opens with the key": on this wiki
  * the archive pages are titled `MELOSYS-7588 — Opprydding av avrunding`, so a
  * title-opener rule promoted every session note about the issue to an issue
- * page — measured by the enumeration in `wiki-recents.test.ts`, which is why the
- * fixture there keeps one. A page named after the issue in prose is a reference,
- * and reads correctly as one.
+ * page — measured by the enumeration in `wiki-recents.test.ts`, which keeps one.
  *
- * **Reference** — any other page whose tags, title, aliases or relPath mention
- * the key. A bare number matches a `<prefix>-<num>` tag from ANY project and the
- * number as a standalone digit run in text, so `7588` finds `melosys-7588`
- * without the reader having to type the project.
+ * **Reference** — any other page whose tags, title, aliases or relPath name the
+ * key. Both query forms are matched with the SAME boundary rule, and both
+ * require a whole `<prefix>-<number>` token:
+ *
+ *  - a prefixed query matches its own key, bounded so `MELOSYS-75880` (a
+ *    different issue) is not reported as referencing `MELOSYS-7588`. The bare
+ *    branch had that boundary from the start and the prefixed branch was a plain
+ *    `indexOf`, so the MORE specific query was the one that lied.
+ *  - a bare query matches `<any prefix>-<num>`, never a naked number. That is
+ *    what keeps a `2026` query off a wiki whose pages are named
+ *    `archive/2026-08-27-*.md`: dates live in relPaths and titles, and matching
+ *    a loose digit run there grew a Jira header over an entire wiki (measured on
+ *    a mimir-shaped fixture). A page that references an issue writes
+ *    `MELOSYS-7588`, not a naked `7588`.
  *
  * Input order is preserved inside each group (callers pass the rail's current
  * sort), and an own page never appears again among the references.
  */
 export function jiraKeyJump(pages: WikiListing[], parsed: ParsedJiraKey): JiraKeyJump {
-  // A bare number matches a tag from any project; a prefixed key matches itself.
+  // A bare number matches a key token from any project; a prefixed key matches
+  // itself. `isKeyToken` is the WHOLE-token test (a tag, a page name).
   const tokenRe = parsed.key ? null : new RegExp(`^[a-z][a-z0-9]{1,9}-${parsed.num}$`);
   const isKeyToken = (token: string): boolean => {
-    const t = token.toLowerCase();
+    const t = (token || "").toLowerCase();
     return parsed.key ? t === parsed.key : tokenRe!.test(t);
   };
-  // A bare number must not match inside a longer number (`75880`, `17588`);
-  // written without a lookbehind, which Safari only learned in 16.4.
-  const mentionRe = parsed.key ? null : new RegExp(`(^|[^0-9])${parsed.num}([^0-9]|$)`);
-  const mentions = (text: string): boolean => {
-    const t = (text || "").toLowerCase();
-    return parsed.key ? t.indexOf(parsed.key) !== -1 : mentionRe!.test(t);
-  };
+  // …and this is the same token, found INSIDE prose. Digit-bounded on the right
+  // so a longer issue number cannot match; written without a lookbehind, which
+  // Safari only learned in 16.4.
+  const inTextRe = parsed.key
+    ? new RegExp(`(^|[^0-9])${parsed.key}([^0-9]|$)`)
+    : new RegExp(`(^|[^a-z0-9])[a-z][a-z0-9]{1,9}-${parsed.num}([^0-9]|$)`);
+  const mentions = (text: string): boolean => inTextRe.test((text || "").toLowerCase());
 
   const own: WikiListing[] = [];
   const refs: WikiListing[] = [];
   for (const p of pages) {
-    if (isKeyToken(relPathStem(p.relPath)) || isKeyToken(p.name)) {
+    if (isKeyToken(p.name)) {
       own.push(p);
       continue;
     }
@@ -297,14 +345,21 @@ export function railSectionsVisible(filters: WikiFilters): boolean {
 }
 
 /** Resolve stored relPaths against a listing, in the STORED order, dropping what
- *  no longer resolves. Deliberately does not report the misses: an entry is
- *  unresolvable both when its page was deleted and when the listing has not
- *  arrived yet, and pruning storage on the second would erase the reader's pins
- *  on every slow load. */
-function resolve(relPaths: string[], byRelPath: Map<string, WikiListing>): WikiListing[] {
+ *  no longer resolves.
+ *
+ *  Through `findPageByRelPath`, which normalizes case and separators on BOTH
+ *  sides — the reader's one relPath lookup, and not an optimisation: a stored
+ *  relPath comes back from a `?relPath=` deep link and an Atlas node key
+ *  lowercases before it becomes a graph id, so a raw `===` drops a pin that is
+ *  in fact still there, with no way to tell it from a deleted page.
+ *
+ *  Deliberately does not report the misses: an entry is unresolvable both when
+ *  its page was deleted and when the listing has not arrived yet, and pruning
+ *  storage on the second would erase the reader's pins on every slow load. */
+function resolve(relPaths: string[], pages: WikiListing[]): WikiListing[] {
   const out: WikiListing[] = [];
   for (const rel of relPaths) {
-    const p = byRelPath.get(rel);
+    const p = findPageByRelPath(pages, rel);
     if (p) out.push(p);
   }
   return out;
@@ -313,6 +368,16 @@ function resolve(relPaths: string[], byRelPath: Map<string, WikiListing>): WikiL
 /**
  * The whole rail, in render order.
  *
+ * **The invariant: every page appears exactly ONCE.** Sections MOVE a row up,
+ * they never copy it. The first cut left the listing complete and let a pinned
+ * or recent page render twice, which was wrong in five measured ways at once:
+ * `.wiki-list-item[data-relpath=…]` stopped naming one element (a strict-mode
+ * violation for four existing e2e specs), the open page got TWO `.active`
+ * highlights, `#wikiCount` disagreed with the rows on screen, `e2e/wiki-refresh`
+ * went red counting rows, and the rail grew a row on every article view. The
+ * "it is a shortcut to a row dozens of positions down" argument does not survive
+ * any of that: the reader gets the row at the top, with a header saying why.
+ *
  * The states, enumerated:
  *
  *  - **No key, sections hidden** (a query, or any active facet) — the rows
@@ -320,19 +385,16 @@ function resolve(relPaths: string[], byRelPath: Map<string, WikiListing>): WikiL
  *  - **No key, sections visible, nothing stored** — also exactly as today. A
  *    fresh browser must not grow furniture it has nothing to put in.
  *  - **No key, sections visible, something stored** — `Pinned`, then
- *    `Recently opened` (with its clear affordance), then `All pages`. A page
- *    that is BOTH pinned and recent renders under Pinned only; it stays in the
- *    recents storage, so unpinning returns it to its place in that list.
- *    Sections do NOT remove anything from the listing below: they are shortcuts
- *    to rows dozens of positions down, and hiding those rows would make a
- *    complete-looking listing incomplete.
+ *    `Recently opened` (with its clear affordance), then `Other pages`: the
+ *    listing MINUS what the two sections lifted out of it. A page that is both
+ *    pinned and recent renders under Pinned only; it stays in the recents
+ *    storage, so unpinning returns it to its place in that list. When the
+ *    sections lift every page, there is no remainder and no third header.
  *  - **A key that resolves** — the jump block first, then `Other matches` with
- *    the ordinary results MINUS the jump's rows. This one DOES de-duplicate:
- *    the jump renders exactly when the query matches those pages, so the
- *    duplicate would be the adjacent row, and the block would read as a repeat
- *    of the list rather than as an answer.
- *  - **A key that resolves to nothing** — no jump block, no header, ordinary
- *    results. This is what makes the permissive key parse free.
+ *    the ordinary results minus the jump's rows.
+ *  - **A key that resolves to nothing** — the next candidate gets its turn
+ *    (`parseJiraKeyCandidates`); when none resolves, no jump block, no header,
+ *    ordinary results. That fallback is what makes the permissive parse free.
  *
  * Sections and the jump are mutually exclusive by construction: the jump needs a
  * query and the sections need an empty one.
@@ -340,50 +402,61 @@ function resolve(relPaths: string[], byRelPath: Map<string, WikiListing>): WikiL
 export function buildRail(input: RailInput): RailModel {
   const { filtered, facetOnly, filters, recents, pins } = input;
   const entries: RailEntry[] = [];
-  const pinSet = new Set(pins);
-  const byRelPath = new Map<string, WikiListing>();
-  for (const p of filtered) byRelPath.set(p.relPath, p);
+  const pinSet = new Set(pins.map(normalizeRel));
+  const isPinned = (p: WikiListing): boolean => pinSet.has(normalizeRel(p.relPath));
 
-  const parsed = parseJiraKey(filters.q);
-  const jump = parsed ? jiraKeyJump(facetOnly, parsed) : null;
-  const jumpRows = jump && jump.rows.length ? jump.rows : [];
+  /** Every page already rendered above, so the remainder can drop it. */
+  const claimed = new Set<string>();
+  const claim = (p: WikiListing): void => void claimed.add(normalizeRel(p.relPath));
 
-  if (jump && jumpRows.length) {
+  // The first candidate key that names a page on this wiki wins; a candidate
+  // resolving to nothing costs nothing and yields to the next.
+  let jump: JiraKeyJump | null = null;
+  for (const candidate of parseJiraKeyCandidates(filters.q)) {
+    const resolved = jiraKeyJump(facetOnly, candidate);
+    if (resolved.total > 0) {
+      jump = resolved;
+      break;
+    }
+  }
+
+  if (jump) {
     entries.push({ kind: "header", section: "jump", label: jumpHeaderLabel(jump) });
-    for (const p of jumpRows) {
-      entries.push({ kind: "row", section: "jump", page: p, pinned: pinSet.has(p.relPath) });
+    for (const p of jump.rows) {
+      entries.push({ kind: "row", section: "jump", page: p, pinned: isPinned(p) });
+      claim(p);
     }
   }
 
   if (railSectionsVisible(filters)) {
-    const pinned = resolve(pins, byRelPath);
+    const pinned = resolve(pins, filtered);
     // Pinned wins the overlap, so a pinned page is not two adjacent rows.
-    const recent = resolve(recents, byRelPath).filter((p) => !pinSet.has(p.relPath));
+    const recent = resolve(recents, filtered).filter((p) => !isPinned(p));
     if (pinned.length) {
       entries.push({ kind: "header", section: "pinned", label: "Pinned" });
-      for (const p of pinned) entries.push({ kind: "row", section: "pinned", page: p, pinned: true });
+      for (const p of pinned) {
+        entries.push({ kind: "row", section: "pinned", page: p, pinned: true });
+        claim(p);
+      }
     }
     if (recent.length) {
       entries.push({ kind: "header", section: "recent", label: "Recently opened", clear: true });
       for (const p of recent) {
         entries.push({ kind: "row", section: "recent", page: p, pinned: false });
+        claim(p);
       }
-    }
-    if (pinned.length || recent.length) {
-      entries.push({ kind: "header", section: "all", label: "All pages" });
     }
   }
 
-  const jumpSeen = new Set(jumpRows.map((p) => p.relPath));
-  const rest = jumpRows.length ? filtered.filter((p) => !jumpSeen.has(p.relPath)) : filtered;
-  if (jumpRows.length && rest.length) {
-    entries.push({ kind: "header", section: "all", label: "Other matches" });
+  const rest = claimed.size ? filtered.filter((p) => !claimed.has(normalizeRel(p.relPath))) : filtered;
+  if (claimed.size && rest.length) {
+    entries.push({ kind: "header", section: "all", label: jump ? "Other matches" : "Other pages" });
   }
   for (const p of rest) {
-    entries.push({ kind: "row", section: "all", page: p, pinned: pinSet.has(p.relPath) });
+    entries.push({ kind: "row", section: "all", page: p, pinned: isPinned(p) });
   }
 
   const distinct = new Set<string>();
-  for (const e of entries) if (e.kind === "row") distinct.add(e.page.relPath);
+  for (const e of entries) if (e.kind === "row") distinct.add(normalizeRel(e.page.relPath));
   return { entries, shown: distinct.size };
 }

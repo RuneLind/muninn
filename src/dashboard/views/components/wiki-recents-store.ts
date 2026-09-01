@@ -10,8 +10,9 @@
  * returns the list it decided on even when the write failed — the caller renders
  * from the return value, not from a re-read.
  *
- * Both keys are per WIKI (`readActiveWikiName()`, `""` for the default one), so
- * a browser that reads two wikis keeps two lists.
+ * Both keys are per WIKI — the caller passes the canonical name (`""` for the
+ * default one; `wiki-browser.ts` resolves it once at boot through
+ * `readActiveWikiName`), so a browser that reads two wikis keeps two lists.
  */
 import {
   PINS_MAX,

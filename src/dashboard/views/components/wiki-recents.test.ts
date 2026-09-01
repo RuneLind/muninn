@@ -16,6 +16,7 @@ import {
   jiraKeyJump,
   jumpHeaderLabel,
   parseJiraKey,
+  parseJiraKeyCandidates,
   parseRelPathList,
   pinsKey,
   pushRecent,
@@ -198,8 +199,19 @@ describe("parseJiraKey", () => {
       expect(parseJiraKey(q)).toBeNull();
     }
   });
-  test("a bare four-digit year DOES parse — deliberately, since a jump that resolves to nothing renders nothing", () => {
-    expect(parseJiraKey("2026-09-01")!.num).toBe("2026");
+  test("a bare four-digit YEAR is never a bare key", () => {
+    // Measured on real mimir: `2026` as a key resolved to 121 of 485 pages,
+    // because that wiki files pages as `archive/<yyyy-mm-dd>-<topic>.mdx`.
+    for (const q of ["2026-09-01", "2026", "1999", "2099", "notat fra 1900"]) {
+      expect(parseJiraKey(q), q).toBeNull();
+    }
+  });
+  test("…but a PREFIXED key in the year range still parses — the project names it", () => {
+    expect(parseJiraKey("MELOSYS-2026")!.key).toBe("melosys-2026");
+  });
+  test("a bare number just outside the year range is still a key", () => {
+    expect(parseJiraKey("1899")!.num).toBe("1899");
+    expect(parseJiraKey("2100")!.num).toBe("2100");
   });
 });
 
@@ -225,7 +237,7 @@ describe("jiraKeyJump", () => {
     aliases: ["MELOSYS-7588 datamodel"],
   });
   const unrelated = page({ relPath: "concepts/other.md", title: "Something else", tags: ["x"] });
-  const nearMiss = page({ relPath: "concepts/near.md", title: "Sak 75880 og 17588", tags: [] });
+  const nearMiss = page({ relPath: "concepts/near.md", title: "Sak MELOSYS-75880 og MELOSYS-17588", tags: [] });
   const all = [own, byTitle, byTag, byAlias, unrelated, nearMiss];
 
   test("the issue's own page is found by its filename stem and listed first", () => {
@@ -285,21 +297,21 @@ describe("jiraKeyJump", () => {
   });
 
   test("a key nothing matches resolves to nothing at all", () => {
-    const j = jiraKeyJump(all, parseJiraKey("2026-09-01")!);
+    const j = jiraKeyJump(all, parseJiraKey("MELOSYS-4242")!);
     expect(j.total).toBe(0);
     expect(j.rows).toEqual([]);
   });
 
   test("input order is preserved inside each group", () => {
-    const a = page({ relPath: "a.md", title: "x 7588", tags: [] });
-    const b = page({ relPath: "b.md", title: "y 7588", tags: [] });
+    const a = page({ relPath: "a.md", title: "x MELOSYS-7588", tags: [] });
+    const b = page({ relPath: "b.md", title: "y MELOSYS-7588", tags: [] });
     expect(jiraKeyJump([a, b], parseJiraKey("7588")!).refs).toEqual([a, b]);
     expect(jiraKeyJump([b, a], parseJiraKey("7588")!).refs).toEqual([b, a]);
   });
 
   test(`rows cap at ${JUMP_MAX} while total keeps counting`, () => {
     const many = Array.from({ length: 21 }, (_, i) =>
-      page({ relPath: `m${i}.md`, title: `Ref 7588 #${i}`, tags: [] }),
+      page({ relPath: `m${i}.md`, title: `Ref MELOSYS-7588 #${i}`, tags: [] }),
     );
     const j = jiraKeyJump(many, parseJiraKey("7588")!);
     expect(j.rows).toHaveLength(JUMP_MAX);
@@ -342,7 +354,7 @@ describe("jumpHeaderLabel", () => {
     expect(label).toBe(`MELOSYS-7588 · 21 referencing pages (showing ${JUMP_MAX})`);
   });
   test("a bare key shows the number, not an invented project", () => {
-    const j = jiraKeyJump([page({ relPath: "r.md", title: "ref 7588" })], parseJiraKey("7588")!);
+    const j = jiraKeyJump([page({ relPath: "r.md", title: "ref MELOSYS-7588" })], parseJiraKey("7588")!);
     expect(jumpHeaderLabel(j)).toBe("7588 · 1 referencing page");
   });
 });
@@ -393,14 +405,14 @@ describe("buildRail", () => {
     expect(rail.shown).toBe(3);
   });
 
-  test("recents alone: the section, its clear affordance, and the full listing below", () => {
+  test("recents alone: the section, its clear affordance, and the REMAINDER below", () => {
     const rail = build({ recents: ["c.md"] });
-    expect(headers(rail.entries)).toEqual(["Recently opened", "All pages"]);
+    expect(headers(rail.entries)).toEqual(["Recently opened", "Other pages"]);
     const rs = rows(rail.entries);
     expect(rs[0]!.section).toBe("recent");
     expect(rs[0]!.page).toBe(c);
-    // The listing below is COMPLETE — the section is a shortcut, not a filter.
-    expect(rs.filter((r) => r.section === "all").map((r) => r.page)).toEqual(all);
+    // The section MOVED the row: `c` is not down there as well.
+    expect(rs.filter((r) => r.section === "all").map((r) => r.page)).toEqual([a, b]);
     const clear = rail.entries.find((e) => e.kind === "header" && e.clear);
     expect(clear && (clear as { label: string }).label).toBe("Recently opened");
   });
@@ -413,13 +425,14 @@ describe("buildRail", () => {
 
   test("pins alone", () => {
     const rail = build({ pins: ["b.md"] });
-    expect(headers(rail.entries)).toEqual(["Pinned", "All pages"]);
+    expect(headers(rail.entries)).toEqual(["Pinned", "Other pages"]);
     expect(rows(rail.entries)[0]!.page).toBe(b);
+    expect(rows(rail.entries).map((r) => r.page)).toEqual([b, a, c]);
   });
 
   test("Pinned comes before Recently opened", () => {
     const rail = build({ recents: ["c.md"], pins: ["a.md"] });
-    expect(headers(rail.entries)).toEqual(["Pinned", "Recently opened", "All pages"]);
+    expect(headers(rail.entries)).toEqual(["Pinned", "Recently opened", "Other pages"]);
   });
 
   test("a page that is both pinned and recent renders under Pinned ONLY", () => {
@@ -442,7 +455,7 @@ describe("buildRail", () => {
 
   test("an entry naming no page in the listing is dropped from the render", () => {
     const rail = build({ recents: ["gone.md", "a.md"], pins: ["also-gone.md"] });
-    expect(headers(rail.entries)).toEqual(["Recently opened", "All pages"]);
+    expect(headers(rail.entries)).toEqual(["Recently opened", "Other pages"]);
     expect(rows(rail.entries).filter((r) => r.section === "recent").map((r) => r.page)).toEqual([a]);
   });
 
@@ -471,14 +484,10 @@ describe("buildRail", () => {
     expect(rows(rail.entries).map((r) => r.page)).toEqual([a]);
   });
 
-  test("the pinned flag rides every row, in every section", () => {
+  test("the pinned flag rides the row, and the row is in ONE place", () => {
     const rail = build({ pins: ["a.md"] });
     const pinnedRows = rows(rail.entries).filter((r) => r.pinned);
-    // Once in the Pinned section, once in the listing below.
-    expect(pinnedRows.map((r) => [r.section, r.page.relPath])).toEqual([
-      ["pinned", "a.md"],
-      ["all", "a.md"],
-    ]);
+    expect(pinnedRows.map((r) => [r.section, r.page.relPath])).toEqual([["pinned", "a.md"]]);
   });
 
   test("shown counts DISTINCT pages — a page in a section and in the listing is one", () => {
@@ -587,5 +596,153 @@ describe("buildRail", () => {
       });
       expect(rows(rail.entries)[0]!.pinned).toBe(true);
     });
+  });
+});
+// Appended to wiki-recents.test.ts — the RED batch for fix round 1.
+describe("fix round 1 — the three root causes", () => {
+  const P = (relPath: string, title = "Untitled", tags: string[] = [], aliases: string[] = []) =>
+    page({ relPath, title, tags, aliases });
+
+  // ── (B) the key parse ────────────────────────────────────────────────
+  describe("a candidate that resolves to nothing falls through to the next", () => {
+    const issue = P("sources/jira/MELOSYS-7588.md", "Utvid");
+    const corpus = [issue];
+
+    test("a Flyway-shaped token before the key does not suppress it", () => {
+      const rail = buildRail({
+        filtered: [], facetOnly: corpus,
+        filters: { ...INERT, q: "V155-2026 MELOSYS-7588" }, recents: [], pins: [],
+      });
+      const h = rail.entries.filter((e) => e.kind === "header");
+      expect(h.map((e) => (e as { label: string }).label)).toEqual(["MELOSYS-7588 · issue page"]);
+    });
+
+    test("a date before the key does not suppress it", () => {
+      const rail = buildRail({
+        filtered: [], facetOnly: corpus,
+        filters: { ...INERT, q: "2026-08-27 MELOSYS-7588" }, recents: [], pins: [],
+      });
+      expect(rail.entries.filter((e) => e.kind === "row")).toHaveLength(1);
+    });
+
+    test("nothing resolves ⇒ no jump", () => {
+      const rail = buildRail({
+        filtered: [], facetOnly: corpus,
+        filters: { ...INERT, q: "V155-2026 og AB-999" }, recents: [], pins: [],
+      });
+      expect(rail.entries).toEqual([]);
+    });
+  });
+
+  describe("a BARE number is only ever matched as part of a <prefix>-<number> key", () => {
+    // The mimir case: `archive/2026-08-27-*.md` everywhere, and a `2026` query
+    // must not grow a Jira header over the whole wiki.
+    const dated = [
+      P("archive/2026-08-27-seven-fix-rounds.mdx", "Seven fix rounds"),
+      P("archive/2026-08-30-wikilinks.mdx", "Wikilinks inside code", ["retro-2026"]),
+      P("blogs/2026-08-27-fix-rounds.mdx", "Fix rounds inject defects"),
+    ];
+    test("a year query resolves to nothing, so no jump renders", () => {
+      const rail = buildRail({
+        filtered: dated, facetOnly: dated,
+        filters: { ...INERT, q: "2026" }, recents: [], pins: [],
+      });
+      expect(rail.entries.filter((e) => e.kind === "header")).toEqual([]);
+    });
+    test("…because a year is not a candidate at all", () => {
+      expect(parseJiraKeyCandidates("2026-08-27")).toEqual([]);
+    });
+    test("a `<prefix>-<year>` TAG cannot stand in for a key either", () => {
+      // `retro-2026` is an ordinary tag shape and matched the bare-number rule
+      // exactly; the year range is what closes it.
+      expect(parseJiraKeyCandidates("2026")).toEqual([]);
+    });
+    test("a real key in a title is still a reference", () => {
+      const refs = jiraKeyJump([P("a.md", "MELOSYS-7588 — Opprydding")], parseJiraKey("7588")!);
+      expect(refs.total).toBe(1);
+    });
+  });
+
+  test("a PREFIXED key does not match inside a longer issue number", () => {
+    // MELOSYS-75880 is a different issue, and the more specific query is what
+    // used to report it as referencing MELOSYS-7588.
+    const other = P("sources/jira/MELOSYS-75880.md", "Et annet");
+    const j = jiraKeyJump([other], parseJiraKey("MELOSYS-7588")!);
+    expect(j.total).toBe(0);
+  });
+
+  test("the two query forms agree about the same wiki", () => {
+    const corpus = [
+      P("sources/jira/MELOSYS-7588.md", "Utvid"),
+      P("sources/jira/MELOSYS-75880.md", "Annet"),
+      P("flows/d.md", "Datamodel", ["melosys-7588"]),
+    ];
+    const bare = jiraKeyJump(corpus, parseJiraKey("7588")!);
+    const pre = jiraKeyJump(corpus, parseJiraKey("MELOSYS-7588")!);
+    expect(bare.rows.map((p) => p.relPath)).toEqual(pre.rows.map((p) => p.relPath));
+    expect(bare.total).toBe(2);
+  });
+
+  // ── (A) every page appears exactly ONCE in the rail ───────────────────
+  describe("sections MOVE rows, they never copy them", () => {
+    const a = P("a.md", "Alpha");
+    const b = P("b.md", "Beta");
+    const c = P("c.md", "Gamma");
+    const all = [a, b, c];
+
+    const rowsOf = (r: ReturnType<typeof buildRail>) =>
+      r.entries.filter((e) => e.kind === "row") as Array<Extract<RailEntry, { kind: "row" }>>;
+
+    test("a recent page is NOT also in the listing below", () => {
+      const rail = buildRail({ filtered: all, facetOnly: all, filters: INERT, recents: ["a.md"], pins: [] });
+      const rows = rowsOf(rail);
+      expect(rows.map((r) => r.page.relPath)).toEqual(["a.md", "b.md", "c.md"]);
+      expect(rows.filter((r) => r.page.relPath === "a.md")).toHaveLength(1);
+      expect(rows[0]!.section).toBe("recent");
+      expect(rows[1]!.section).toBe("all");
+    });
+
+    test("no relPath renders twice, in ANY arrangement", () => {
+      for (const recents of [[], ["a.md"], ["a.md", "c.md"], ["c.md", "b.md", "a.md"]]) {
+        for (const pins of [[], ["b.md"], ["a.md", "b.md"]]) {
+          const rail = buildRail({ filtered: all, facetOnly: all, filters: INERT, recents, pins });
+          const rels = rowsOf(rail).map((r) => r.page.relPath);
+          expect(new Set(rels).size, `recents=${recents} pins=${pins}`).toBe(rels.length);
+          expect(rels.length).toBe(all.length);
+        }
+      }
+    });
+
+    test("the count still equals the rows on screen", () => {
+      const rail = buildRail({ filtered: all, facetOnly: all, filters: INERT, recents: ["a.md"], pins: ["b.md"] });
+      expect(rail.shown).toBe(rowsOf(rail).length);
+      expect(rail.shown).toBe(3);
+    });
+
+    test("the remainder header says what it is", () => {
+      const rail = buildRail({ filtered: all, facetOnly: all, filters: INERT, recents: ["a.md"], pins: [] });
+      expect(rail.entries.filter((e) => e.kind === "header").map((e) => (e as { label: string }).label))
+        .toEqual(["Recently opened", "Other pages"]);
+    });
+
+    test("with everything pinned or recent there is no remainder header", () => {
+      const rail = buildRail({
+        filtered: all, facetOnly: all, filters: INERT,
+        recents: ["a.md", "b.md", "c.md"], pins: [],
+      });
+      expect(rail.entries.filter((e) => e.kind === "header").map((e) => (e as { label: string }).label))
+        .toEqual(["Recently opened"]);
+    });
+  });
+
+  // ── relPath resolution is normalized, like every other lookup ─────────
+  test("a stored relPath resolves case- and separator-insensitively", () => {
+    const p = P("Archive/Notes.md", "Notes");
+    const rail = buildRail({
+      filtered: [p], facetOnly: [p], filters: INERT,
+      recents: ["archive/notes.md"], pins: [],
+    });
+    const rows = rail.entries.filter((e) => e.kind === "row") as Array<Extract<RailEntry, { kind: "row" }>>;
+    expect(rows[0]!.section).toBe("recent");
   });
 });

@@ -127,6 +127,64 @@ Five things about it are deliberate and easy to undo by accident:
 
 Acceptance: `e2e/wiki-copy-path.spec.ts` (two temp wikis in ONE process, the second registered read-only).
 
+## The page rail's recall aids (Recently opened · Pinned · Jira-key jump)
+
+Client-only, per browser, per wiki. The rule is one pure function —
+`buildRail` in `views/components/wiki-recents.ts` returns the whole ordered list
+of headers and rows and `renderList` only paints it — with the localStorage half
+in `wiki-recents-store.ts`, the same pure/DOM split as the rail's drag handle
+(`wiki-rail-width.ts` + `wiki-rail-resize.ts`).
+
+Keys, both suffixed with the wiki's canonical name (`""` for the default wiki),
+so a browser reading two wikis keeps two lists: `muninn.wiki.recents.v1:<wiki>`
+(last 6 opened) and `muninn.wiki.pins.v1:<wiki>`. The rail's third key is
+`muninn.wiki.railWidth.v1` (PR #501), which is NOT per wiki — a width is a
+property of the reader's screen, not of the wiki. relPaths are stored, never
+names: a wiki with same-stem pages resolves a name to whichever page registered
+first, and they are resolved back through `findPageByRelPath`, the reader's one
+normalized lookup, so a case-differing spelling does not silently drop a pin.
+
+Four things are deliberate and easy to undo by accident:
+- **Sections MOVE a row, they never copy it — every page is on screen exactly
+  once.** Leaving the listing complete and letting a pinned page render twice
+  was wrong in five measured ways at once: `.wiki-list-item[data-relpath=…]`
+  stopped naming one element (a strict-mode violation for four existing e2e
+  specs), the open page got two `.active` highlights, `#wikiCount` disagreed
+  with the rows on screen, `e2e/wiki-refresh` went red counting rows, and the
+  rail grew a row on every article view.
+- **`#wikiCount` counts DISTINCT rendered rows**, not query matches. Under a key
+  jump that can exceed what the query itself matched, because the jump reads the
+  facets without the query.
+- ⚠️ **A bare four-digit run in 1900–2099 is a YEAR, never an issue number.**
+  mimir files pages as `archive/<yyyy-mm-dd>-<topic>.mdx`, so a date is how a
+  reader finds one there — and as a bare key `2026` resolved to **121 of 485
+  pages**, pushing the query's single real match below eight unrelated ones.
+  Requiring a `<prefix>-<number>` token is not enough on its own: `retro-2026`
+  and `q1-2026` are ordinary tag shapes. A PREFIXED `MELOSYS-2026` still
+  resolves — naming the project is the only way anyone could tell the two apart.
+  Every candidate the query yields is tried in order and the first that RESOLVES
+  wins, which is what makes a permissive parse free.
+- ⚠️ **The ★ is `tabindex="-1"` and `pointer-events:none` while invisible.** As
+  an ordinary tab stop it put one per page ahead of the rail resizer (485 on
+  mimir, 953 on jarvis) in a list whose rows a keyboard cannot open anyway; as a
+  hit-testable invisible button it gave every row a tap target that toggled a
+  pin instead of opening the page on a device that never hovers. It also shares
+  one flex slot with the date (`.wiki-list-end`) so it costs the row its own
+  width and not the row's 8px gap as well — as a sibling of the title the pair
+  measured 21px off `.wiki-list-title` on every row, 42px of title left at
+  `RAIL_WIDTH_MIN` with a status pill and a ⚑.
+
+`renderList` restores scroll by ANCHOR, not by pixel offset: pinning inserts
+headers at the top, and a numeric restore moved the row under the cursor ~96px,
+so a second click at the same point pinned a different page. The anchor is
+measured against the list's client rect — `.wiki-list` is not positioned, so its
+rows' `offsetTop` resolves against the pane and comparing it with `scrollTop`
+over-scrolled by ten rows.
+
+Acceptance: `views/components/wiki-recents.test.ts` (the state space, enumerated)
+and `e2e/wiki-rail-recents.spec.ts` (two temp wikis in ONE process, so a
+globally-keyed store cannot pass).
+
 ## Share (`POST /api/wiki/share`, `GET /api/wiki/share/presets`)
 
 Turns one wiki page into a pasteable post — the reader's **📤 Share** breadcrumb action, beside 💬 Discuss. One fenced one-shot on the wiki's synthesis bot (`resolveWikiSynthesisBot`, same routing as Ask), streamed as markdown, and on completion three server-rendered strings. Prompt/preset/body-prep layers live in `src/share/` (see the Share row in the repo `CLAUDE.md`); the SSE runner is `dashboard/routes/share-sse.ts`, the dialog `dashboard/views/components/share-dialog.ts` (+ its pure half `wiki-share-dialog.ts`).
