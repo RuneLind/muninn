@@ -69,6 +69,7 @@ import {
   COMPONENT_TAG_SOURCE_SINGLE_LINE,
   countFactWrappers,
   isFactWrapperText,
+  isTableRow,
   normalizeFactVerdict,
   stripFactWrappers,
 } from "../format/markdown-ast.ts";
@@ -1174,6 +1175,56 @@ function ownsLineStart(body: string, pos: number): boolean {
   return i < 0 || body[i] === "\n";
 }
 
+/** The whole line `pos` sits on. */
+function lineAround(body: string, pos: number): string {
+  const { from, to } = lineWindowAround(body, pos, pos);
+  return body.slice(from, to);
+}
+
+/**
+ * The longest CELL-interior sub-range of `[start, end)` on a table row — the same
+ * shape as {@link longestLineRange}, with the cell separator in place of the
+ * newline, and `null` when every cell the span touches is blank.
+ *
+ * A cell boundary is a `|` that is NOT inside a `[[wikilink]]`, and that exclusion
+ * is the load-bearing half. `[[Target|Label]]` carries a pipe of its own, and
+ * `renderWikiHtml` substitutes the whole link over the RAW body BEFORE the table
+ * parser ever runs — so to the reader that pipe is not a boundary at all. Splitting
+ * there would end a cell inside the link and hand the mark a range containing the
+ * `]]` but not the `[[`, which is the nested-annotation shape: the wrapper's opening
+ * tag lands inside the link TARGET and the alias class (`[^\]\n]*?`) swallows it.
+ * That is the durable damage the whole-wikilink expansion exists to avoid, arriving
+ * through a different door.
+ *
+ * NB the split is NOT `parsePipeCells`, even though that is the parser's own cell
+ * splitter: it works on a whole trimmed line and returns STRINGS, while what is
+ * needed here is body OFFSETS for a sub-range of one row. The predicate that decides
+ * whether a line is a row at all IS shared ({@link isTableRow}); only the offset walk
+ * is local.
+ */
+function longestCellRange(
+  body: string,
+  start: number,
+  end: number,
+): { start: number; end: number } | null {
+  const window = lineWindowAround(body, start, end);
+  const links = wikilinkSpansIn(body, window.from, window.to);
+  const insideLink = (i: number) => links.some((l) => i >= l.start && i < l.end);
+  let best: { start: number; end: number } | null = null;
+  let runStart = start;
+  for (let i = start; i <= end; i++) {
+    if (i === end || (body[i] === "|" && !insideLink(i))) {
+      let s = runStart;
+      let e = i;
+      while (s < e && /\s/.test(body[s]!)) s++;
+      while (e > s && /\s/.test(body[e - 1]!)) e--;
+      if (e > s && (!best || e - s > best.end - best.start)) best = { start: s, end: e };
+      runStart = i + 1;
+    }
+  }
+  return best;
+}
+
 /**
  * Guard for a newline-free candidate mark: a wrapper whose opening tag would own
  * the start of a line is parsed as a BLOCK component, which destroys any block
@@ -1181,10 +1232,21 @@ function ownsLineStart(body: string, pos: number): boolean {
  *
  * Two outcomes, matching what the tier-3 trim already does for the same reason:
  *  - a LIST / QUOTE / HEADING marker is left OUTSIDE the mark (the span shrinks);
- *  - a TABLE row (or delimiter row) is REFUSED — there is no sub-range to shrink to
- *    that keeps the row a row, and wrapping one empirically destroys the whole
- *    table, not just that line.
- * A span that does not start its own line is inline by construction and untouched.
+ *  - a TABLE row is TRIMMED to its widest cell ({@link longestCellRange}).
+ * A span that does not start its own line is inline by construction and untouched —
+ * EXCEPT on a table row, where the cell trim runs whatever the span's start column
+ * is. A row is the one line whose interior carries structure of its own, so a span
+ * crossing a cell boundary needs the trim exactly as much as a whole-row span does;
+ * both were refused before, one here and one at the render comparison.
+ *
+ * The trim replaces a flat refusal ("there is no sub-range that keeps the row a
+ * row"), which was true of the ROW and false of its CELLS: measured on the page that
+ * motivated it, 4 of 8 claims were whole-row quotes, every one of whose widest cells
+ * marks cleanly. Nothing about the row is weakened by it — a mark spanning a `|`
+ * still destroys the table, and the trim's whole job is to hand the render
+ * comparison a range that does not contain one. The DELIMITER row needs no rule of
+ * its own: its cells are `---`, marking one stops `isSeparatorRow` matching, the
+ * table stops being a table, and the two renders differ.
  *
  * There is deliberately NO third outcome for a span EXPANDED leftwards over a `[[`
  * at column 0, and the reason is a render measurement rather than a reading of the
@@ -1208,13 +1270,19 @@ function markableRange(
   body: string,
   start: number,
   end: number,
-): { start: number; end: number; trimmedMarker?: boolean } | { error: string } {
+): { start: number; end: number; trimmedMarker?: boolean; trimmedToCell?: boolean } | { error: string } {
+  if (isTableRow(lineAround(body, start))) {
+    const cell = longestCellRange(body, start, end);
+    if (!cell) {
+      return { error: "the checked passage is a table row with no markable cell" };
+    }
+    return cell.start === start && cell.end === end
+      ? { start, end }
+      : { ...cell, trimmedToCell: true };
+  }
   if (!ownsLineStart(body, start)) return { start, end };
   let s = start;
   while (s < end && (body[s] === " " || body[s] === "\t")) s++;
-  if (body[s] === "|") {
-    return { error: "the checked passage is a table row — marking it would break the table" };
-  }
   const marker = LEADING_BLOCK_MARKER_RE.exec(body.slice(s, end));
   if (!marker) return { start: s, end };
   const after = s + marker[0].length;
@@ -1240,8 +1308,7 @@ function markableRange(
  *  3. a partial-paragraph multi-line span ⇒ TRIM to the largest newline-free
  *     sub-range (an honestly truncated mark beats no mark and beats a broken one),
  *     then through the same guard.
- *  4. nothing left after trimming, or a span that cannot be marked without breaking
- *     a table ⇒ refuse, with a reason the reviewer sees.
+ *  4. nothing left after trimming ⇒ refuse, with a reason the reviewer sees.
  *
  * On the two INLINE tiers the span is first widened over any `[[wikilink]]` it cuts
  * in half ({@link expandOverWikilinks}) and the guard then runs on the EXPANDED
@@ -1264,8 +1331,8 @@ function factSpanForm(
     return { error: "the checked passage spans several lines with no markable text on any of them" };
   }
   // `longestLineRange` already skips a leading list/quote marker; the guard adds the
-  // table refusal (its longest line can be a table row). Expansion stays on the
-  // trimmed line — a wikilink is newline-free.
+  // cell trim (its longest line can be a table row). Expansion stays on the trimmed
+  // line — a wikilink is newline-free.
   const guarded = expandAndGuard(body, trimmed);
   if ("error" in guarded) return guarded;
   return { form: "inline", ...guarded, truncated: true };
@@ -1277,6 +1344,10 @@ interface FactSpan {
   end: number;
   truncated?: boolean;
   trimmedMarker?: boolean;
+  /** The span was a table row (or crossed a cell boundary) and was trimmed to the
+   *  widest cell it covered ({@link longestCellRange}) — an adjustment
+   *  {@link markReason} must name, since the mark then covers less than the quote. */
+  trimmedToCell?: boolean;
   expandedOverLink?: boolean;
   /** The tier-2 rescue grew this range over an emphasis delimiter run it cut
    *  ({@link growOverEmphasisRuns}) — an adjustment `markReason` must name. */
@@ -1291,7 +1362,7 @@ interface FactSpan {
 function expandAndGuard(
   body: string,
   range: { start: number; end: number },
-): { start: number; end: number; trimmedMarker?: boolean; expandedOverLink?: boolean } | { error: string } {
+): { start: number; end: number; trimmedMarker?: boolean; trimmedToCell?: boolean; expandedOverLink?: boolean } | { error: string } {
   const expanded = expandOverWikilinks(body, range.start, range.end);
   const guarded = markableRange(body, (expanded ?? range).start, (expanded ?? range).end);
   if ("error" in guarded) return guarded;
@@ -1501,6 +1572,7 @@ function markReason(span: FactSpan): string {
   if (span.grownOverEmphasis) notes.push("expanded to cover the whole **formatting** span");
   if (span.expandedOverLink) notes.push("expanded to cover the whole [[wikilink]]");
   if (span.truncated) notes.push("trimmed to one line");
+  if (span.trimmedToCell) notes.push("trimmed to one table cell");
   if (span.trimmedMarker) notes.push("list or quote marker left outside the mark");
   return notes.length === 0
     ? "marks the checked passage"
@@ -1511,7 +1583,10 @@ function markReason(span: FactSpan): string {
  *  which is not in the page yet, so the tier test runs on `edit.new` plus the shape
  *  of the span it replaces.
  *
- *  The block-marker guard applies here as a straight REFUSAL rather than a trim:
+ *  The block-marker guard applies here as a straight REFUSAL rather than a trim —
+ *  including for a table row, which the MARK path now trims to its widest cell: a
+ *  trim is not expressible here at all, since the wrapper must cover the whole
+ *  replacement.
  *  the wrapper must cover the whole replacement (a marker left outside it would put
  *  prose before the `<Fact` tag, and `carriesFactWrapper` — the payload-shape gate
  *  that makes the appendix mandatory — would then not recognize the edit at all,

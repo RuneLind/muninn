@@ -380,11 +380,36 @@ wrapper path because only one of them can express it:
   is unchanged by that — it still expands over the whole link, because splicing
   inside the brackets is the forbidden shape whether the result is a dead link or
   literal tags in a code span.
+- **A table row is TRIMMED to its widest cell, not refused.** A `<Fact>` across the
+  pipes really does destroy the table, but a CELL has a wrapper form like any other
+  prose — so `markableRange` runs `longestCellRange` (the `longestLineRange` shape
+  with the cell separator in place of the newline) instead of refusing. Measured on
+  `life/sources/Neurochemical Focus Stack…mdx`, the page the mark-anchoring work came
+  from: 4 of its 8 claims were whole-row quotes, every one of whose widest cells marks
+  cleanly. The trim runs on any span whose LINE is a table row (`isTableRow`, exported
+  from `markdown-ast.ts` so the annotator asks the block parser rather than
+  re-spelling the predicate), not only one that owns the line start: a span crossing
+  ONE cell boundary needed it just as much and was refused one layer down, at the
+  render comparison. Nothing is weakened — the trim's whole job is to hand
+  `markSpanRefusal` a range with no `|` in it, and the DELIMITER row needs no rule of
+  its own (marking `---` stops `isSeparatorRow` matching, the table stops being a
+  table, and the two renders differ).
+  **A cell boundary is a `|` OUTSIDE a `[[wikilink]]`**, and that exclusion is
+  load-bearing: `[[Target|Label]]` carries a pipe of its own, `renderWikiHtml`
+  substitutes the whole link before the table parser runs, and splitting there hands
+  the mark a fragment containing the `]]` but not the `[[` — the opening tag lands in
+  the link target, whose alias class swallows it. That is the nested-annotation
+  damage arriving through the one door the whole-link expansion cannot close:
+  expansion runs BEFORE the trim, never after it. Such a cell is then refused anyway
+  by the render comparison (`formatWebHtml` resolves no wikilink, so it spreads the
+  cell across two `<td>`s) — a false refusal, accepted, because the alternative costs
+  a live link. Both directions measured; the state-space table in
+  `integrate-mark-growth.test.ts` carries the row.
 - **Order, and NO refusal at column 0.** Expansion runs FIRST and `markableRange`
   then guards the EXPANDED range, because `ownsLineStart` is evaluated on the span's
   start and expanding leftwards over a `[[` at column 0 is what flips it. The guard
-  keeps its two outcomes (shrink past a list/quote/heading marker, refuse a table
-  row) and deliberately has no third one for an expanded span. Measured through the
+  keeps its two outcomes (shrink past a list/quote/heading marker, trim a table row
+  to its widest cell) and deliberately has no third one for an expanded span. Measured through the
   shipped `renderWikiHtml`/`web-format` pipeline, BOTH shapes an expansion produces
   render correctly: `<Fact …>[[Some Page]]</Fact> rest.` is an `fc-mark` span around
   a live `<a class="wiki-link">`, and one owning its whole line is the `fc-mark-block`

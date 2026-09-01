@@ -15,6 +15,7 @@ import {
   type ClaimVerifyOutcome,
   type StampedToolEvent,
 } from "./factcheck-sse.ts";
+import { claimExtractionText } from "./factcheck-sse.ts";
 import { CLAIM_QUOTE_MAX } from "../views/components/wiki-integrate.ts";
 import { formatWebHtml } from "../../web/web-format.ts";
 
@@ -652,5 +653,71 @@ describe("pairToolEvents", () => {
     // The end belongs to the latest start — the only one it could belong to.
     expect(out[1]).toMatchObject({ startOffsetMs: 200, durationMs: 400 });
     expect(out[1]!.unterminated).toBeUndefined();
+  });
+});
+
+/**
+ * What claim extraction READS.
+ *
+ * Extraction used to run over the raw stripped body, so the model happily quoted a
+ * mermaid node or a code comment — a claim that is perfectly checkable and can never
+ * be MARKED, because the integrate pass MASKS fenced blocks and the anchor then
+ * resolves to nothing ("no longer found in the page"). Measured on
+ * `life/sources/Neurochemical Focus Stack…mdx`: one of eight claims was quoted out
+ * of the mermaid diagram, and the prose sentence two lines below it says the same
+ * thing and marks cleanly. The two passes now read the same masked text, so an
+ * anchor the extractor can produce is one the annotator can resolve.
+ */
+describe("claimExtractionText", () => {
+  const BODY =
+    "---\ntype: source\ntitle: T\n---\n\n" +
+    "# T\n\nThe stack is taken 20-30 minutes before deep work.\n\n" +
+    "```mermaid\nflowchart LR\n    D --> E[\"Wait 20-30 min\"]\n```\n\n" +
+    "<Callout>\nTreat the dosing claims as unverified.\n</Callout>\n";
+
+  test("article mode hides fenced blocks behind the integrate placeholder", () => {
+    const out = claimExtractionText({ mode: "article", sel: "", strippedBody: BODY, isMdx: true });
+    expect(out).not.toContain("flowchart LR");
+    expect(out).not.toContain("Wait 20-30 min");
+    expect(out).toContain("[code block omitted]");
+  });
+
+  test("the prose the extractor should anchor on instead is untouched", () => {
+    // The point of the mask is not to remove claims, it is to move the anchor onto
+    // text the annotator can find. Prose — including prose INSIDE a component — must
+    // survive verbatim, or the mask has traded one unmarkable claim for none at all.
+    const out = claimExtractionText({ mode: "article", sel: "", strippedBody: BODY, isMdx: true });
+    expect(out).toContain("The stack is taken 20-30 minutes before deep work.");
+    expect(out).toContain("Treat the dosing claims as unverified.");
+  });
+
+  test("`isMdx` decides component TAG masking and is threaded, not assumed", () => {
+    const mdx = claimExtractionText({ mode: "article", sel: "", strippedBody: BODY, isMdx: true });
+    const md = claimExtractionText({ mode: "article", sel: "", strippedBody: BODY, isMdx: false });
+    expect(mdx).not.toContain("<Callout>");
+    expect(md).toContain("<Callout>");
+    // The FENCE mask is extension-independent — a `.md` page's code block is just as
+    // unmarkable — so both sides hide it.
+    expect(md).not.toContain("flowchart LR");
+  });
+
+  test("the cap is applied AFTER the mask", () => {
+    // A code-heavy page used to spend its whole extraction budget on fences the
+    // annotator cannot anchor in. `max` counts the text the model actually reads.
+    const fence = "```ts\n" + "const x = 1;\n".repeat(200) + "```\n\n";
+    const tail = "The tail sentence is the checkable claim.";
+    const out = claimExtractionText({
+      mode: "article", sel: "", strippedBody: fence + tail, isMdx: false, max: 200,
+    });
+    expect(out).toContain(tail);
+    expect(out.length).toBeLessThanOrEqual(200);
+  });
+
+  test("sel mode passes the reader's selection through untouched", () => {
+    // A selection is a FRAGMENT: its fences need not be balanced, so masking one is
+    // guesswork — and a reader who selected a code block asked about that code. The
+    // article body is not consulted at all in this mode.
+    const sel = "```ts\nconst answer = 42;\n```";
+    expect(claimExtractionText({ mode: "sel", sel, strippedBody: BODY, isMdx: true })).toBe(sel);
   });
 });

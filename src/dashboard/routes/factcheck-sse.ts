@@ -38,6 +38,7 @@ import type { executeOneShot } from "../../ai/one-shot.ts";
 import type { ToolCall } from "../../types.ts";
 import { locateExcerpt } from "../../wiki/explain-context.ts";
 import { stripFactWrappers } from "../../format/markdown-ast.ts";
+import { promptMaskBody } from "../../wiki/integrate-edits.ts";
 import {
   stripFactcheckBlock,
   buildClaimExtractionPrompt,
@@ -105,6 +106,18 @@ export interface FactcheckSseOptions {
   ctx?: string;
   /** Claim cap (defaults to {@link FACTCHECK_MAX_CLAIMS}). */
   maxClaims?: number;
+  /**
+   * Whether the checked page is `.mdx` — the argument {@link claimExtractionText}
+   * hands `promptMaskBody`, deciding whether BLOCK-component tag markup is masked
+   * alongside the fences (prose inside a `<Callout>` stays visible either way).
+   *
+   * Derived server-side from the resolved page path, like {@link annotatable}, and
+   * deliberately NOT that field: `annotatable` is a POLICY answer ("should this page
+   * carry inline `<Fact>` wrappers"), this one is a SYNTAX answer ("does the
+   * renderer read component tags here"). They agree today and are one
+   * `isAnnotatablePage` term away from disagreeing. Absent ⇒ plain markdown.
+   */
+  isMdx?: boolean;
   /** sha256 of the checked page's on-disk content — round-tripped on `done` so
    *  the ➕ POST can detect a drifted page. */
   baseHash: string;
@@ -844,6 +857,49 @@ interface Usage {
 
 /** The multi-phase fact-check pipeline (Phase 1 extract → Phase 2 fan-out → Phase 3
  *  compose), wrapped in a `factcheck` trace + an `/agents` run. */
+/**
+ * The text claim extraction READS — the article body behind the same mask the
+ * integrate pass resolves against, or, in `sel` mode, the reader's selection.
+ *
+ * Extraction used to run over the raw stripped body while `annotateEdits` resolves
+ * every anchor against a MASKED one, and the gap between the two is a claim class
+ * that can be checked and can never be marked: the extractor quotes a mermaid node
+ * or a code comment, the annotator answers "no longer found in the page", and the
+ * reviewer sees a verdict with no passage. Measured on `life/sources/Neurochemical
+ * Focus Stack…mdx` — one of eight claims came out of the diagram, and the prose
+ * sentence two lines under it states the same thing and marks cleanly. Reading the
+ * same masked text is what makes the extractor anchor there instead.
+ *
+ * `promptMaskBody` is the right mask and `matchMaskBody` is not: this text goes into
+ * a PROMPT, so the zones must collapse to something readable and argv-safe, and no
+ * offset math is done on it. It is the exact function the integrate one-shot's own
+ * body goes through, which is the property that matters — one mask, two readers.
+ *
+ * Two consequences are deliberate:
+ *
+ *  - **The cap is applied AFTER the mask**, so `FACTCHECK_ARTICLE_BODY_MAX` counts
+ *    prose rather than fences. On a code-heavy page that is strictly more checkable
+ *    content, not less.
+ *  - **`sel` mode is NOT masked.** A selection is a FRAGMENT — its fences need not be
+ *    balanced, so `findExclusionZones` over one is guesswork — and a reader who
+ *    selected a code block asked about that code. The sel-mode claim is anchored by
+ *    the selection the reader made, not by a body scan, so the mismatch this function
+ *    exists to close does not arise there.
+ */
+export function claimExtractionText(opts: {
+  mode: "sel" | "article";
+  sel: string;
+  strippedBody: string;
+  isMdx: boolean;
+  max?: number;
+}): string {
+  if (opts.mode === "sel") return opts.sel;
+  return promptMaskBody(opts.strippedBody, opts.isMdx).slice(
+    0,
+    opts.max ?? FACTCHECK_ARTICLE_BODY_MAX,
+  );
+}
+
 async function runFactcheck(
   stream: SseStream,
   opts: FactcheckSseOptions,
@@ -916,9 +972,12 @@ async function runFactcheck(
     // markup — which then resolves against nothing in the (stripped) integrate body.
     const strippedBody = stripFactWrappers(stripFactcheckBlock(opts.body));
     const sel = (opts.sel ?? "").trim();
-    const extractionText = opts.mode === "sel"
-      ? sel
-      : strippedBody.slice(0, FACTCHECK_ARTICLE_BODY_MAX);
+    const extractionText = claimExtractionText({
+      mode: opts.mode,
+      sel,
+      strippedBody,
+      isMdx: opts.isMdx ?? false,
+    });
 
     tracer.start("extract", { mode: opts.mode });
     let extraction: Awaited<ReturnType<typeof callHaikuWithFallback>>;

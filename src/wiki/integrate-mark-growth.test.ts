@@ -80,6 +80,18 @@ describe("growth must not acquire a construct the range did not already cut", ()
  * against whichever one a reviewer happened to send.
  */
 describe("mark-span guard — the whole state space", () => {
+  /** A real 3-column table. The widest cell of the `L-tyrosine` row is its middle
+   *  one, so a whole-row quote and a boundary-crossing quote must both land there. */
+  const TABLE_BODY =
+    "# T\n\n| Compound | Proposed role | Dose |\n|:---|---|---:|\n" +
+    "| L-tyrosine | Amino acid precursor to dopamine and norepinephrine | 500 mg |\n" +
+    "| Caffeine | Blocks adenosine signaling in the cortex | 100 mg |\n";
+  /** Same shape, with a `[[Target|Label]]` in the middle cell — the alias pipe sits
+   *  where a naive cell split would cut the link in half. */
+  const WIKILINK_TABLE_BODY =
+    "# T\n\n| Compound | Proposed role | Dose |\n|---|---|---|\n" +
+    "| Rhodiola | see [[Adaptogens|the adaptogen page]] for the mechanism | optional |\n";
+
   const ROWS: [string, string, string, boolean][] = [
     // A — where the mark would SIT. Both were measured as rendered corruption.
     ["code-span interior: tags render literally AND survive the zone-aware strip",
@@ -133,6 +145,37 @@ describe("mark-span guard — the whole state space", () => {
      "Norepinephrine acts as a mental spotlight.", true],
     ["the neighbour steal", "# T\n\nSee **Alpha**the middle  words**Beta** ok.\n",
      "the middle words", false],
+    // F — a TABLE ROW. The row itself has no wrapper form (a `<Fact>` across the
+    // pipes stops the line being a row and takes the whole table with it), but a
+    // CELL has one, so the row is TRIMMED to its widest cell instead of refused —
+    // the same move tier 3 makes for a multi-line span. Measured: 4 of the 8 claims
+    // on the page that motivated this were whole-row quotes.
+    ["a whole table row trims to its widest cell", TABLE_BODY,
+     "| L-tyrosine | Amino acid precursor to dopamine and norepinephrine | 500 mg |", true],
+    ["a span crossing ONE cell boundary trims to the wider side", TABLE_BODY,
+     "L-tyrosine | Amino acid precursor to dopamine and norepinephrine", true],
+    ["a quote that is already one cell is untouched", TABLE_BODY,
+     "Amino acid precursor to dopamine and norepinephrine", true],
+    // The delimiter row's cells are `---`, and marking one stops `isSeparatorRow`
+    // matching — so the table stops being a table. The render comparison is what
+    // refuses it; the trim has no rule of its own for it.
+    ["a table DELIMITER row stays refused", TABLE_BODY, "|:---|---|---:|", false],
+    // The alias pipe of `[[Target|Label]]` is NOT a cell boundary: `renderWikiHtml`
+    // substitutes the whole link over the RAW body before the table parser ever
+    // runs. The OUTCOME here is a refusal either way, and the row is still a pin —
+    // it separates the two refusals, which are not the same event:
+    //  - splitting AT the alias pipe makes `the adaptogen page]] for the mechanism`
+    //    the widest fragment. It sits inside one `<td>`, so the render comparison
+    //    passes it and the mark SHIPS — with its opening tag inside the link target,
+    //    where the alias class `[^\]\n]*?` swallows it. That is the
+    //    nested-annotation damage, reached through a door the whole-wikilink
+    //    expansion cannot close: expansion runs BEFORE this trim, never after it.
+    //  - not splitting there picks the whole cell, which `formatWebHtml` — which
+    //    resolves no wikilink — spreads across two `<td>`s, so the comparison
+    //    refuses it. A false refusal, and the ACCEPTED one: it costs a mark on a
+    //    rare shape, where the alternative costs a live link. Measured both ways.
+    ["a [[link|alias]] is not split at its alias pipe", WIKILINK_TABLE_BODY,
+     "| Rhodiola | see [[Adaptogens|the adaptogen page]] for the mechanism | optional |", false],
   ];
 
   for (const [label, body, quote, wantMarked] of ROWS) {
@@ -317,6 +360,52 @@ describe("a page that renders chrome of its OWN", () => {
       });
     }
   }
+});
+
+describe("a table row trims to its widest cell", () => {
+  const BODY =
+    "# T\n\n| Compound | Proposed role | Dose |\n|:---|---|---:|\n" +
+    "| L-tyrosine | Amino acid precursor to dopamine and norepinephrine | 500 mg |\n";
+  const WIDEST = "Amino acid precursor to dopamine and norepinephrine";
+
+  test("the mark covers the widest cell — not the row, not a neighbour", () => {
+    // The ROWS table records only marked/not-marked, so the RANGE is asserted here:
+    // a trim that picked the first or last cell would still be "marked".
+    const edit = markOne(BODY, "| L-tyrosine | Amino acid precursor to dopamine and norepinephrine | 500 mg |").edits[0]!;
+    expect(edit.old).toBe(WIDEST);
+    // …and the mark is INSIDE the cell — the `|` characters stay outside it, which
+    // is the whole reason the row was refused before.
+    expect(edit.new).not.toContain("|");
+  });
+
+  test("the preview names the trim", () => {
+    // A mark that covers less than the quote must say so: the reviewer is looking at
+    // a row and getting one cell. `markReason` lists EVERY adjustment, so this is
+    // also the assertion that the cell trim was added to that list rather than to
+    // the 4-deep ternary it replaced.
+    const edit = markOne(BODY, "| L-tyrosine | Amino acid precursor to dopamine and norepinephrine | 500 mg |").edits[0]!;
+    expect(edit.reason).toBe("marks the checked passage (trimmed to one table cell)");
+  });
+
+  test("a quote already inside one cell keeps its exact range and says nothing", () => {
+    // The control for both assertions above: the trim must be a no-op — same range,
+    // and NO "trimmed to one table cell" note, which would be a false report.
+    const edit = markOne(BODY, WIDEST).edits[0]!;
+    expect(edit.old).toBe(WIDEST);
+    expect(edit.reason).toBe("marks the checked passage");
+  });
+
+  test("a row whose cells are all blank is refused by name", () => {
+    // `longestCellRange` returns null when every cell it touches is empty, and the
+    // refusal has to be its own sentence — the tier-3 "no markable text on any
+    // line" one is untrue of a single-line span.
+    const body = "# T\n\n| a | b |\n|---|---|\n|  |  |\n";
+    const res = markOne(body, "|  |  |");
+    expect(res.edits).toEqual([]);
+    expect(res.dropped[0]!.reason).toBe(
+      "the checked passage is a table row with no markable cell",
+    );
+  });
 });
 
 describe("a mark that would eat a link", () => {
