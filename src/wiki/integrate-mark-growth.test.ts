@@ -452,6 +452,99 @@ describe("a table row trims to its widest cell", () => {
     expect(edit.reason).toBe("marks the checked passage");
   });
 
+  test("the table predicate agrees with the RENDERER, shape by shape", () => {
+    // The predicate is judged against `parseBlocks` itself rather than case by case:
+    // for each shape, does the page render a `<td>` at all, and does the mark on its
+    // pipe line report a cell trim? Those two must agree. Written as a sweep because
+    // the earlier per-case spelling pinned only a LONE `| a | b |` line — run length
+    // 1 — which every mutant of the rule still rejects, so it pinned "not a single
+    // line" while the docblock claimed it pinned the parser's rule.
+    const QUOTE = "| aaa bbb ccc | B |";
+    const ROW = `${QUOTE}\n`;
+    const SEP = "|---|---|\n";
+    const SHAPES: [string, string, "table" | "prose"][] = [
+      ["a real 3-line table", `# T\n\n${ROW}${SEP}| x | y |\n`, "table"],
+      ["…and the row is the FIRST line of the run", `# T\n\n${ROW}${SEP}| x | y |\n| z | w |\n`, "table"],
+      ["…with CRLF", `# T\r\n\r\n${QUOTE}\r\n|---|---|\r\n| x | y |\r\n`, "table"],
+      ["…at EOF with no trailing newline", `# T\n\n${ROW}${SEP}| x | y |`, "table"],
+      ["…as the very first line of the file", `${ROW}${SEP}| x | y |\n`, "table"],
+      ["a run of two (row + separator only)", `# T\n\n${ROW}${SEP}`, "prose"],
+      ["a run of three with no separator", `# T\n\n${ROW}| d | e |\n| f | g |\n`, "prose"],
+      ["a separator on the THIRD line, not the second", `# T\n\n${ROW}| d | e |\n${SEP}`, "prose"],
+      ["a lone pipe line", `# T\n\nIntro.\n\n${ROW}\nTail.\n`, "prose"],
+      ["a run split by a blank line", `# T\n\n${ROW}\n${SEP}| x | y |\n`, "prose"],
+      // Enough short lines above the table to move a drifting offset walk onto the
+      // wrong line — one code unit per preceding line, so it takes as many lines as
+      // the row is long. Renders identically to the first shape; the predicate must
+      // answer identically too.
+      ["a table under many short lines", `# T\n${"x\n".repeat(24)}${ROW}${SEP}| x | y |\n`, "table"],
+    ];
+
+    for (const [label, body, kind] of SHAPES) {
+      const rendersTable = (formatWebHtml(body).match(/<td>/g) ?? []).length > 0;
+      expect({ label, rendersTable }).toEqual({ label, rendersTable: kind === "table" });
+      const edit = markOne(body, QUOTE).edits[0]!;
+      // A rendered table ⇒ the mark is one cell and says so; prose ⇒ the whole line,
+      // untrimmed and unannotated. Either way the mark exists — the predicate decides
+      // its SHAPE, never whether the claim survives.
+      expect({ label, old: edit.old, reason: edit.reason }).toEqual(
+        kind === "table"
+          ? { label, old: "aaa bbb ccc", reason: "marks the checked passage (trimmed to one table cell)" }
+          : { label, old: QUOTE, reason: "marks the checked passage" },
+      );
+    }
+  });
+
+  test("a pipe table inside a fence never reaches the predicate at all", () => {
+    // The one shape where the walk and `parseBlocks` disagree — the walk knows nothing
+    // about fences, so it would answer "table row" for a line the parser hands to a
+    // code block. It is latent, not live, and this is the assertion that keeps it so:
+    // a fence is an exclusion zone, so the quote does not resolve in the first place.
+    const body = "# T\n\n```\n| aaa bbb ccc | B |\n|---|---|\n| x | y |\n```\n";
+    expect((formatWebHtml(body).match(/<td>/g) ?? []).length).toBe(0);
+    const res = markOne(body, "| aaa bbb ccc | B |");
+    expect(res.edits).toEqual([]);
+    expect(res.dropped[0]!.reason).toBe("no longer found in the page");
+  });
+
+  test("the run rule: BOTH its clauses decide, and each is measured", () => {
+    // The earlier spelling of this pinned only a LONE `| a | b |` line (run length 1),
+    // which every mutant of the rule still rejects — so it pinned "not a single line"
+    // while the docblock claimed it pinned the parser's rule. These two are the
+    // clauses themselves, each with the render as the oracle: `<td>` count 0 means the
+    // parser made a paragraph, so no cell trim may run and no cell note may be shown.
+    const RUNS: [string, string][] = [
+      // ≥3: a row plus its separator is a run of TWO, and renders as a paragraph.
+      ["run of two", "# T\n\n| aaa bbb ccc | B |\n|---|---|\n"],
+      // separator ON THE SECOND LINE: three rows with no separator is a paragraph too.
+      ["run of three, no separator", "# T\n\n| aaa bbb ccc | B |\n| d | e |\n| f | g |\n"],
+    ];
+    for (const [label, body] of RUNS) {
+      expect({ label, td: (formatWebHtml(body).match(/<td>/g) ?? []).length })
+        .toEqual({ label, td: 0 });
+      const edit = markOne(body, "| aaa bbb ccc | B |").edits[0]!;
+      expect({ label, old: edit.old, reason: edit.reason }).toEqual({
+        label,
+        old: "| aaa bbb ccc | B |",
+        reason: "marks the checked passage",
+      });
+    }
+  });
+
+  test("the FIRST line of a run is judged as itself, not as the line before it", () => {
+    // `isRenderedTableRow` walks the body to find `pos`'s line by hand, and the walk
+    // is the kind of arithmetic that drifts by one silently: every other table test
+    // here marks a MIDDLE row, where an off-by-one lands on another row of the same
+    // run and the answer is unchanged. A quote at column 0 of the run's first line,
+    // with a blank line above it, is the position where a drift reads the blank line
+    // instead — and answers "not a table", so the trim silently does not run.
+    const body = "# T\n\n| Compound name here | B |\n|---|---|\n| x | y |\n| z | w |\n";
+    expect((formatWebHtml(body).match(/<td>/g) ?? []).length).toBeGreaterThan(0);
+    const edit = markOne(body, "| Compound name here | B |").edits[0]!;
+    expect(edit.old).toBe("Compound name here");
+    expect(edit.reason).toBe("marks the checked passage (trimmed to one table cell)");
+  });
+
   test("a row whose cells are all blank is refused by name", () => {
     // `longestCellRange` returns null when every cell it touches is empty, and the
     // refusal has to be its own sentence — the tier-3 "no markable text on any

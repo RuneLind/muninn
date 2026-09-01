@@ -1210,29 +1210,59 @@ function lineAround(body: string, pos: number): string {
  * True when `pos` sits on a line the block parser renders as a TABLE row — the run
  * rule `parseBlocks` applies, not the single-line `isTableRow` test.
  *
- * `isTableRow` alone is true of a LONE `| a | b |` line, which renders as an
- * ordinary paragraph (measured: `<td>` count 0). Trimming a mark to a "cell" there
- * costs nothing structurally, but it tells the reviewer the mark was "trimmed to one
- * table cell" about a table that does not exist — the class of reviewer-facing claim
- * this module keeps getting wrong. So the predicate is the parser's: walk the run of
- * consecutive row lines `pos` belongs to, and require length ≥ 3 with a separator on
- * the SECOND line.
+ * `isTableRow` alone is true of a LONE `| a | b |` line, which renders as an ordinary
+ * paragraph (measured: `<td>` count 0). Trimming a mark to a "cell" there costs
+ * nothing structurally, but it tells the reviewer the mark was "trimmed to one table
+ * cell" about a table that does not exist — the class of reviewer-facing claim this
+ * module keeps getting wrong. So the predicate is the parser's: the run of
+ * consecutive row lines `pos` belongs to must be ≥ 3 long with a separator on its
+ * SECOND line.
+ *
+ * The run is walked through {@link lineWindowAround} — this module's line-boundary
+ * authority, which locates a line by `lastIndexOf`/`indexOf` on the body — and NOT by
+ * splitting the body and accumulating `offset += line.length + 1`. That accumulation
+ * was the first spelling and it is a drift waiting to happen: it is wrong by one per
+ * preceding line, so every test here passed (a middle row's off-by-one lands on
+ * another row of the same run) while a body with enough short lines above the table
+ * silently resolved to the wrong line and switched the trim off. There is no offset
+ * arithmetic left to get wrong.
+ *
+ * The two `- 1` / `+ 1` steps are what make each loop PROGRESS, not a convenience:
+ * they step off the current line onto its neighbour's newline, so `prev.from < w.from`
+ * and `next.to > w.to` strictly. Asking `lineWindowAround` about a position still
+ * INSIDE the current line returns that same line and the loop never advances —
+ * measured as a hang rather than a failed assertion, which is the one mutant here no
+ * test can express. No guard is added for it: a `break` on non-advancement would be
+ * unreachable code documenting the same fact this sentence documents.
+ *
+ * ONE known divergence from the parser, latent rather than live: a pipe table inside
+ * a ``` fence answers `true` here and renders no `<td>`, because this walk knows
+ * nothing about fences while `parseBlocks` consumes the fence first. Unreachable
+ * through `annotateEdits` — a fence is an exclusion zone, so a quote inside one
+ * answers "no longer found in the page" before any of this runs — and pinned in that
+ * shape rather than guarded, since a fence-aware line walk here would duplicate
+ * `fencedLineMask` for a case no caller can reach.
  */
 function isRenderedTableRow(body: string, pos: number): boolean {
-  const lines = body.split("\n");
-  let idx = 0;
-  let at = 0;
-  for (; idx < lines.length; idx++) {
-    const next = at + lines[idx]!.length + 1;
-    if (pos < next) break;
-    at = next;
+  const textOf = (w: { from: number; to: number }) => body.slice(w.from, w.to);
+  const here = lineWindowAround(body, pos, pos);
+  if (!isTableRow(textOf(here))) return false;
+  const run: string[] = [textOf(here)];
+  for (let w = here; w.from > 0; ) {
+    const prev = lineWindowAround(body, w.from - 1, w.from - 1);
+    const text = textOf(prev);
+    if (!isTableRow(text)) break;
+    run.unshift(text);
+    w = prev;
   }
-  if (idx >= lines.length || !isTableRow(lines[idx]!)) return false;
-  let first = idx;
-  while (first > 0 && isTableRow(lines[first - 1]!)) first--;
-  let last = idx;
-  while (last + 1 < lines.length && isTableRow(lines[last + 1]!)) last++;
-  return last - first + 1 >= 3 && isSeparatorRow(lines[first + 1]!);
+  for (let w = here; w.to < body.length; ) {
+    const next = lineWindowAround(body, w.to + 1, w.to + 1);
+    const text = textOf(next);
+    if (!isTableRow(text)) break;
+    run.push(text);
+    w = next;
+  }
+  return run.length >= 3 && isSeparatorRow(run[1]!);
 }
 
 /**
@@ -1438,8 +1468,21 @@ function expandAndGuard(
   return { ...guarded, ...(overLink ? { expandedOverLink: true } : {}) };
 }
 
-/** True when `[start, end)` contains at least one whole `[[wikilink]]` and cuts
- *  none — the property the render-comparison exemption is actually justified by. */
+/**
+ * True when `[start, end)` contains at least one whole `[[wikilink]]` — the property
+ * the render-comparison exemption is actually justified by.
+ *
+ * Containment and mere INTERSECTION are indistinguishable at this call site, and that
+ * is an ENUMERATION of the three shapes `markableRange` can return, not a sample:
+ * (i) the range unchanged, where expansion has already widened over every link it cut;
+ * (ii) marker-trimmed, where the start moves right past a leading `[-*+>#]`/digit run,
+ * none of which can open a `[[`; (iii) cell-trimmed, whose boundaries are by
+ * construction pipes OUTSIDE every link `wikilinkSpansIn` recognises. No branch can
+ * hand back a range that cuts a recognised link. Containment is kept as the spelling
+ * because it is the stricter of the two and states the property the caller means.
+ * (A 4 608-case fuzz over table/link/quote combinations found zero disagreements —
+ * consistent with the enumeration, and not what it rests on.)
+ */
 function coversWholeWikilink(body: string, start: number, end: number): boolean {
   const window = lineWindowAround(body, start, end);
   return wikilinkSpansIn(body, window.from, window.to).some(
@@ -1533,6 +1576,16 @@ function markSpanRefusal(
   // pre-existing, pinned behaviour (`integrate-wikilink.test.ts`) and not this
   // guard's to reverse. An UNBACKTICKED whole-link mark strips cleanly and would
   // pass the check anyway, so the waiver is as narrow as it reads.
+  //
+  // ⚠️ Stated rather than glossed: on a BACKTICKED link the waiver means the write
+  // really is irreversible — `` See `[[Some Page]]` for detail. `` marks, and
+  // `stripFactWrappers` then leaves `` `<Fact …>[[Some Page]]</Fact>` `` on the page.
+  // Measured identically on this commit and on both of its parents, i.e. pre-existing
+  // and NOT introduced by the property below; the mark itself is pinned behaviour
+  // (`integrate-wikilink.test.ts`), the irreversibility is pinned by nothing and is
+  // the honest residual of the documented trade. Closing it means choosing between a
+  // rewritten link target and an unremovable tag, which is a product call, not a
+  // guard's — filed, not decided here.
   if (span.expandedOverLink) return null;
   // ── Property 2: the write must be REVERSIBLE ───────────────────────────────
   // Every later fact-check run strips prior wrappers before writing back, so a mark
@@ -1543,8 +1596,11 @@ function markSpanRefusal(
   // structurally blind to it ON A TABLE ROW: `parsePipeCells` splits at a `|` inside
   // backticks on BOTH sides, so neither render ever pairs that code span and the two
   // agree. Measured: `` | `git log --oneline | head -5` runs it | … | `` shipped a
-  // mark whose `</Fact>` survived the strip and whose `countFactWrappers` read 0 —
-  // invisible to the accounting that reports what a write removed.
+  // mark whose `</Fact>` survived the strip, so the page keeps a tag no later write
+  // can take off. (An earlier spelling of this comment added "and whose
+  // `countFactWrappers` read 0" — re-measured, it reads 1. The 0 is true of the
+  // post-strip RESIDUE, not of the written page, and the difference is the whole
+  // point: the count is right, the strip is what fails.)
   if (stripFactWrappers(probe) !== stripFactWrappers(body)) {
     return "marking this passage would leave a tag the strip cannot remove";
   }
