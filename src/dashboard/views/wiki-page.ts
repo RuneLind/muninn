@@ -6,6 +6,7 @@ import { agentPresenceStyles, agentPresenceHtml, agentPresenceScript } from "./c
 // The share dialog's CSS lives WITH the dialog (exported from its pure half) so
 // the /summaries mount in PR C cannot end up with a hand-copied second copy.
 import { shareDialogStyles } from "./components/wiki-share-dialog.ts";
+import { RAIL_WIDTH_DEFAULT } from "./components/wiki-rail-width.ts";
 import {
   wikiReadonlyStyles,
   WIKI_READONLY_ASK_HINT,
@@ -117,11 +118,11 @@ export async function renderWikiPage(opts?: {
     ${SHARED_STYLES}
 
     /* The rail column reads --wiki-rail-w, which the drag handle sets inline
-       (wiki-rail-resize.ts) from a stored width; absent, the fallback is the
-       shipped default (RAIL_WIDTH_DEFAULT in wiki-rail-width.ts). */
+       (wiki-rail-resize.ts) from a stored width, viewport-bounded; absent, the
+       fallback is RAIL_WIDTH_DEFAULT, interpolated so there is one copy of it. */
     .wiki-layout {
       display: grid;
-      grid-template-columns: var(--wiki-rail-w, 300px) minmax(0, 1fr) 300px;
+      grid-template-columns: var(--wiki-rail-w, ${RAIL_WIDTH_DEFAULT}px) minmax(0, 1fr) 300px;
       gap: 16px;
       padding: 16px 24px;
       height: calc(100vh - 63px);
@@ -261,20 +262,27 @@ export async function renderWikiPage(opts?: {
       display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
       overflow: hidden; overflow-wrap: anywhere;
     }
+    /* The four siblings that used to share the title's BASELINE each get a nudge
+       onto its first line (measured against the 16.25px line box). */
     .wiki-list-item .wiki-type-dot { align-self: flex-start; margin-top: 5px; }
     .wiki-list-item .wiki-list-meta { margin-top: 2px; }
-    /* Drag handle on the rail's right edge — a hit zone straddling the pane border,
-       a 2px accent line while hovered or dragging. */
-    .wiki-pane:first-child { position: relative; }
+    .wiki-list-item .wiki-status { margin-top: 1px; }
+    .wiki-list-item .wiki-followup-flag { margin-top: 2px; }
+    /* Drag handle on the rail's right edge. The hit zone starts ON the pane's 1px
+       border and extends into the 16px gap — never over the list, whose classic
+       scrollbar (Windows/Linux, macOS "always") would otherwise be grabbed as a
+       drag. A 2px accent line shows while hovered, dragging or focused. */
+    .wiki-layout > .wiki-pane:first-child { position: relative; }
     .wiki-rail-resizer {
-      position: absolute; top: 0; bottom: 0; right: -8px; width: 14px;
-      cursor: col-resize; z-index: 2; touch-action: none;
+      position: absolute; top: 0; bottom: 0; right: -13px; width: 14px;
+      cursor: col-resize; z-index: 2; touch-action: none; outline: none;
     }
     .wiki-rail-resizer::after {
       content: ""; position: absolute; top: 0; bottom: 0; left: 6px; width: 2px;
       background: var(--accent); opacity: 0; transition: opacity .12s;
     }
-    .wiki-rail-resizer:hover::after, .wiki-rail-resizer.dragging::after { opacity: .8; }
+    .wiki-rail-resizer:hover::after, .wiki-rail-resizer.dragging::after,
+    .wiki-rail-resizer:focus-visible::after { opacity: .8; }
     body.wiki-rail-dragging { cursor: col-resize; user-select: none; }
     .wiki-list-item.active .wiki-list-title { color: var(--text-primary); }
     .wiki-list-meta { font-size: 10.5px; color: var(--text-faint); flex-shrink: 0; }
@@ -1347,7 +1355,7 @@ export async function renderWikiPage(opts?: {
       </div>
       <div class="wiki-list" id="wikiList"></div>
       <div class="wiki-coverage-foot" id="wikiCoverageFoot" style="display:none"></div>
-      <div class="wiki-rail-resizer" id="wikiRailResizer" title="Drag to resize · double-click to reset" aria-hidden="true"></div>
+      <div class="wiki-rail-resizer" id="wikiRailResizer" role="separator" aria-orientation="vertical" tabindex="0" aria-label="Resize the page list" title="Drag or use ← → to resize · double-click or Home to reset"></div>
     </div>
 
     <div class="wiki-pane">

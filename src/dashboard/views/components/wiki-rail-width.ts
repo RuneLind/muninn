@@ -1,7 +1,7 @@
 /**
- * The /wiki reader's page-rail width: the clamp, the storage round-trip and the
- * pointer→width rule, DOM-free so they are unit-testable. The drag handle that
- * uses them is `wiki-rail-resize.ts`.
+ * The /wiki reader's page-rail width: the clamp, the storage round-trip, the
+ * viewport bound and the pointer→width rule, DOM-free so they are unit-testable.
+ * The drag handle that uses them is `wiki-rail-resize.ts`.
  *
  * Why a stored width at all: the rail is 300 px and this wiki's titles carry
  * their meaning in the second half («MELOSYS-7588/7969 — Nullable trygdes…» twice
@@ -17,8 +17,14 @@ export const RAIL_WIDTH_KEY = "muninn.wiki.railWidth.v1";
  *  the article column loses its ~65-character measure on a laptop screen. */
 export const RAIL_WIDTH_MIN = 260;
 export const RAIL_WIDTH_MAX = 560;
-/** The width the CSS ships (`.wiki-layout` first column) when nothing is stored. */
+/** The WIDE-layout default (`.wiki-layout` first column, interpolated into the
+ *  CSS from here). Below the 1100px breakpoint the CSS ships 260 instead, so a
+ *  reset there lands on 260, not on this. */
 export const RAIL_WIDTH_DEFAULT = 300;
+/** Pixels one arrow-key press moves the rail. */
+export const RAIL_WIDTH_KEY_STEP = 16;
+/** The share of the window a stored width may take at apply time. */
+export const RAIL_VIEWPORT_SHARE = 0.45;
 
 /** Clamp to the allowed range, rounding to whole pixels. */
 export function clampRailWidth(n: number): number {
@@ -40,7 +46,23 @@ export function parseStoredRailWidth(raw: string | null | undefined): number | n
   return clampRailWidth(n);
 }
 
-/** The width a drag implies: the pointer's x minus the layout's left edge, clamped. */
-export function railWidthFromPointer(clientX: number, layoutLeft: number): number {
-  return clampRailWidth(clientX - layoutLeft);
+/**
+ * The width to APPLY for a given window: the stored/dragged width, bounded to
+ * `RAIL_VIEWPORT_SHARE` of the viewport. The range clamp is a desktop range and
+ * has no viewport term, so a 560 stored on a monitor was applied verbatim in a
+ * 600px window and left the article column 2px wide (measured in review). The
+ * bound is deliberately NOT re-clamped up to `RAIL_WIDTH_MIN` — on a phone that
+ * would reintroduce the squeeze — and it is applied, never persisted, so widening
+ * the window again gets the stored width back.
+ */
+export function effectiveRailWidth(width: number, viewportWidth: number): number {
+  if (!Number.isFinite(viewportWidth) || viewportWidth <= 0) return width;
+  return Math.min(width, Math.floor(viewportWidth * RAIL_VIEWPORT_SHARE));
+}
+
+/** The width a drag implies: the pointer's x minus the RAIL's left edge, clamped.
+ *  The rail's, not the layout's — the layout carries 24px of padding, and
+ *  measuring from it made every drag land ~24px wider than the pointer. */
+export function railWidthFromPointer(clientX: number, railLeft: number): number {
+  return clampRailWidth(clientX - railLeft);
 }

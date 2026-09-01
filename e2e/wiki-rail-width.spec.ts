@@ -24,7 +24,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
-import { RAIL_WIDTH_DEFAULT, RAIL_WIDTH_KEY } from "../src/dashboard/views/components/wiki-rail-width.ts";
+import {
+  RAIL_WIDTH_DEFAULT,
+  RAIL_WIDTH_KEY,
+  RAIL_WIDTH_KEY_STEP,
+} from "../src/dashboard/views/components/wiki-rail-width.ts";
 
 const PORT = e2ePort("wiki-rail-width");
 const BASE = `http://127.0.0.1:${PORT}`;
@@ -137,6 +141,67 @@ test.describe("Wiki rail: full titles + remembered width", () => {
     await page.reload();
     await expect(page.locator(".wiki-list-item")).toHaveCount(2);
     expect(await railWidth(page)).toBe(after);
+  });
+
+  test("a width stored on a wide monitor is bounded by a narrow window", async ({ page }) => {
+    await open(page);
+    await page.evaluate((k) => localStorage.setItem(k, "560"), RAIL_WIDTH_KEY);
+    await page.setViewportSize({ width: 700, height: 900 });
+    await page.reload();
+    await expect(page.locator(".wiki-list-item")).toHaveCount(2);
+    // 45% of 700 = 315: the stored value is bounded at APPLY time, never
+    // rewritten — widening the window again gets the stored width back.
+    expect(await railWidth(page)).toBe(315);
+    await page.setViewportSize({ width: 1400, height: 900 });
+    await expect.poll(() => railWidth(page)).toBe(560);
+    expect(await page.evaluate((k) => localStorage.getItem(k), RAIL_WIDTH_KEY)).toBe("560");
+  });
+
+  test("losing pointer capture mid-drag ends the drag instead of leaving the page in drag state", async ({
+    page,
+  }) => {
+    await open(page);
+    const hb = await page.locator(HANDLE).boundingBox();
+    if (!hb) throw new Error("handle not laid out");
+    const x0 = hb.x + hb.width / 2;
+    const y0 = hb.y + hb.height / 2;
+    await page.mouse.move(x0, y0);
+    await page.mouse.down();
+    await page.mouse.move(x0 + 80, y0, { steps: 4 });
+    await expect(page.locator("body")).toHaveClass(/wiki-rail-dragging/);
+    // A right-click's context-menu gesture (measured in review) drops the capture
+    // and the handle never sees the pointerup; Playwright's mouse cannot reproduce
+    // that gesture, so the browser-fired event is dispatched directly. Before the
+    // fix the body kept `user-select: none` + col-resize until a reload, and any
+    // later hover over the handle resized the rail with no button held.
+    await page.locator(HANDLE).evaluate((el) => {
+      el.dispatchEvent(new PointerEvent("lostpointercapture", { pointerId: 1, bubbles: true }));
+    });
+    await expect(page.locator("body")).not.toHaveClass(/wiki-rail-dragging/);
+    const settled = await railWidth(page);
+    expect(settled).toBeGreaterThan(RAIL_WIDTH_DEFAULT);
+    // Still physically captured by Playwright's mouse, so these moves reach the
+    // handle — with no drag in progress they must not resize.
+    await page.mouse.move(x0 + 140, y0, { steps: 3 });
+    expect(await railWidth(page)).toBe(settled);
+    await page.mouse.up();
+    // The width the drag reached before losing capture is what gets remembered.
+    expect(Number(await page.evaluate((k) => localStorage.getItem(k), RAIL_WIDTH_KEY))).toBe(settled);
+  });
+
+  test("the handle is keyboard-operable: arrows resize, Home resets", async ({ page }) => {
+    await open(page);
+    await page.locator(HANDLE).focus();
+    await page.keyboard.press("ArrowRight");
+    await page.keyboard.press("ArrowRight");
+    await page.keyboard.press("ArrowRight");
+    expect(await railWidth(page)).toBe(RAIL_WIDTH_DEFAULT + 3 * RAIL_WIDTH_KEY_STEP);
+    expect(Number(await page.evaluate((k) => localStorage.getItem(k), RAIL_WIDTH_KEY))).toBe(
+      RAIL_WIDTH_DEFAULT + 3 * RAIL_WIDTH_KEY_STEP,
+    );
+    await page.keyboard.press("Home");
+    expect(await railWidth(page)).toBe(RAIL_WIDTH_DEFAULT);
+    expect(await page.evaluate((k) => localStorage.getItem(k), RAIL_WIDTH_KEY)).toBeNull();
   });
 
   test("double-click resets to the default and clears the stored width", async ({ page }) => {
