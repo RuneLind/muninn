@@ -26,8 +26,10 @@ import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
 import {
   RAIL_WIDTH_DEFAULT,
+  RAIL_WIDTH_DEFAULT_NARROW,
   RAIL_WIDTH_KEY,
   RAIL_WIDTH_KEY_STEP,
+  RAIL_WIDTH_MAX,
 } from "../src/dashboard/views/components/wiki-rail-width.ts";
 
 const PORT = e2ePort("wiki-rail-width");
@@ -198,24 +200,88 @@ test.describe("Wiki rail: full titles + remembered width", () => {
     await page.reload();
     await expect(page.locator(".wiki-list-item")).toHaveCount(2);
     expect(await railWidth(page)).toBe(315);
-    // Stepping from the STORED 560 moved nothing for sixteen presses while
+    // Stepping from the STORED 560 moved nothing press after press while
     // rewriting the stored value (measured in review); the base is what is shown.
+    // A GROW the bound makes inert must not lower the stored desktop width.
     await page.locator(HANDLE).focus();
+    await page.keyboard.press("ArrowRight");
+    expect(await railWidth(page)).toBe(315);
+    expect(await page.evaluate((k) => localStorage.getItem(k), RAIL_WIDTH_KEY)).toBe("560");
+    // The same inert grow by a SHORT drag (to 320, under the stored 560).
+    const hb0 = await page.locator(HANDLE).boundingBox();
+    if (!hb0) throw new Error("handle not laid out");
+    await page.mouse.move(hb0.x + hb0.width / 2, hb0.y + 40);
+    await page.mouse.down();
+    await page.mouse.move(hb0.x + hb0.width / 2 + 5, hb0.y + 40, { steps: 2 });
+    await page.mouse.up();
+    expect(await railWidth(page)).toBe(315);
+    expect(await page.evaluate((k) => localStorage.getItem(k), RAIL_WIDTH_KEY)).toBe("560");
     await page.keyboard.press("ArrowLeft");
     expect(await railWidth(page)).toBe(315 - RAIL_WIDTH_KEY_STEP);
     expect(Number(await page.evaluate((k) => localStorage.getItem(k), RAIL_WIDTH_KEY))).toBe(
       315 - RAIL_WIDTH_KEY_STEP,
     );
-    // A drag past the bound persists the bounded width, never the raw pointer.
+    // A drag all the way right is a GROW: it stores what was asked for (the
+    // pointer's clamped width, 560) while the bound keeps showing 315 — the same
+    // rule as the arrow keys, so the desktop width is what the reader dragged to.
     const hb = await page.locator(HANDLE).boundingBox();
     if (!hb) throw new Error("handle not laid out");
     await page.mouse.move(hb.x + hb.width / 2, hb.y + 40);
     await page.mouse.down();
     await page.mouse.move(650, hb.y + 40, { steps: 4 });
     await page.mouse.up();
+    expect(await railWidth(page)).toBe(315);
+    expect(await page.evaluate((k) => localStorage.getItem(k), RAIL_WIDTH_KEY)).toBe(String(RAIL_WIDTH_MAX));
+    // And a drag back to a width UNDER the bound is a shrink: stored = shown.
+    const hb2 = await page.locator(HANDLE).boundingBox();
+    if (!hb2) throw new Error("handle not laid out");
+    await page.mouse.move(hb2.x + hb2.width / 2, hb2.y + 40);
+    await page.mouse.down();
+    await page.mouse.move(hb2.x - 40, hb2.y + 40, { steps: 4 });
+    await page.mouse.up();
     const shown = await railWidth(page);
-    expect(shown).toBe(315);
+    expect(shown).toBeLessThan(315);
     expect(Number(await page.evaluate((k) => localStorage.getItem(k), RAIL_WIDTH_KEY))).toBe(shown);
+  });
+
+  test("the hit zone starts at the pane's border: the list's last pixel never starts a drag", async ({
+    page,
+  }) => {
+    await open(page);
+    const rb = await page.locator(RAIL).boundingBox();
+    if (!rb) throw new Error("rail not laid out");
+    const railRight = Math.round(rb.x + rb.width); // first pixel OUTSIDE the pane
+    const y = rb.y + rb.height / 2;
+    // railRight-2 is the last pixel of the list's content box (the pane's 1px
+    // border is railRight-1). On Windows/Linux that pixel is the outer edge of a
+    // classic scrollbar; the accent pseudo-element used to be hit-testable there.
+    await page.mouse.move(railRight - 2, y);
+    await page.mouse.down();
+    await page.mouse.move(railRight + 60, y, { steps: 3 });
+    await expect(page.locator("body")).not.toHaveClass(/wiki-rail-dragging/);
+    await page.mouse.up();
+    expect(await railWidth(page)).toBe(RAIL_WIDTH_DEFAULT);
+    // One pixel further out is the handle.
+    await page.mouse.move(railRight - 1, y);
+    await page.mouse.down();
+    await page.mouse.move(railRight + 60, y, { steps: 3 });
+    await page.mouse.up();
+    expect(await railWidth(page)).toBeGreaterThan(RAIL_WIDTH_DEFAULT);
+  });
+
+  test("below the breakpoint the reset lands on the narrow default and arrows step from it", async ({
+    page,
+  }) => {
+    await open(page);
+    await page.setViewportSize({ width: 1000, height: 900 });
+    await page.reload();
+    await expect(page.locator(".wiki-list-item")).toHaveCount(2);
+    expect(await railWidth(page)).toBe(RAIL_WIDTH_DEFAULT_NARROW);
+    await page.locator(HANDLE).focus();
+    await page.keyboard.press("ArrowRight");
+    expect(await railWidth(page)).toBe(RAIL_WIDTH_DEFAULT_NARROW + RAIL_WIDTH_KEY_STEP);
+    await page.keyboard.press("Home");
+    expect(await railWidth(page)).toBe(RAIL_WIDTH_DEFAULT_NARROW);
   });
 
   test("a click on the handle focuses it, so the keyboard path is reachable by pointer", async ({ page }) => {

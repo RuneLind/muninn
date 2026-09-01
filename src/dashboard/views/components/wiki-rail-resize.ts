@@ -23,6 +23,7 @@ import {
   RAIL_WIDTH_KEY_STEP,
   clampRailWidth,
   effectiveRailWidth,
+  nextStoredWidth,
   parseStoredRailWidth,
   railWidthFromPointer,
 } from "./wiki-rail-width.ts";
@@ -99,10 +100,11 @@ export function initRailResize(): void {
     // mouse hovering while a pen drags) — never a drag step. The same pointer
     // after a lost capture is already stopped by `!dragging`.
     if (!dragging || !(e.buttons & 1)) return;
-    // Bounded here, not only at apply: in a narrow window a drag toward the edge
-    // otherwise stored the raw pointer width (560 shown as 315).
+    // The pointer asks for a width; what gets remembered follows the same rule
+    // as the arrow keys (`nextStoredWidth`), judged against what is on screen.
     const rect = rail.getBoundingClientRect();
-    dragWidth = effectiveRailWidth(railWidthFromPointer(e.clientX, rect.left), window.innerWidth);
+    const requested = railWidthFromPointer(e.clientX, rect.left);
+    dragWidth = nextStoredWidth(chosen, Math.round(rect.width), requested);
     chosen = dragWidth;
     apply();
   });
@@ -112,13 +114,15 @@ export function initRailResize(): void {
   handle.addEventListener("dblclick", () => set(null));
 
   handle.addEventListener("keydown", (e) => {
-    // Step from what is SHOWN: stepping the stored value moved nothing for
-    // sixteen presses in a window where the bound had it at 315, while
-    // rewriting the stored value. Below 1100px the CSS default is 260, so the
-    // shown width is also the only base that is right there.
-    const base = Math.round(rail.getBoundingClientRect().width);
-    if (e.key === "ArrowRight") set(clampRailWidth(base + RAIL_WIDTH_KEY_STEP));
-    else if (e.key === "ArrowLeft") set(clampRailWidth(base - RAIL_WIDTH_KEY_STEP));
+    // Step from what is SHOWN: stepping the stored value moved nothing press
+    // after press in a window where the bound had it at 315, while rewriting
+    // the stored value. Below 1100px the CSS default is 260, so the shown width
+    // is also the only base that is right there.
+    const shown = Math.round(rail.getBoundingClientRect().width);
+    const step = (d: number): void =>
+      set(nextStoredWidth(chosen, shown, clampRailWidth(shown + d)));
+    if (e.key === "ArrowRight") step(RAIL_WIDTH_KEY_STEP);
+    else if (e.key === "ArrowLeft") step(-RAIL_WIDTH_KEY_STEP);
     else if (e.key === "Home") set(null);
     else return;
     e.preventDefault();

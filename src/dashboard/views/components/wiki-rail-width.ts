@@ -61,6 +61,22 @@ export function effectiveRailWidth(width: number, viewportWidth: number): number
   return Math.min(width, Math.floor(viewportWidth * RAIL_VIEWPORT_SHARE));
 }
 
+/**
+ * What to STORE after the reader asks for `requested` while `shown` is on
+ * screen and `stored` is remembered (null ⇒ the CSS default). Shown can be less
+ * than stored when the viewport bound is in force, and that is the whole case:
+ *   - a shrink (`requested < shown`) stores the requested width — the reader
+ *     chose something smaller than what they can see;
+ *   - a grow stores `max(stored, requested)` — a grow the bound makes INERT
+ *     (560 stored, 315 shown, ArrowRight asks 331) must not lower the desktop
+ *     width the reader set on a wider screen and cannot see here.
+ * Keyboard and drag both go through this, so the two cannot disagree.
+ */
+export function nextStoredWidth(stored: number | null, shown: number, requested: number): number {
+  if (requested < shown) return requested;
+  return Math.max(stored ?? 0, requested);
+}
+
 /** The width a drag implies: the pointer's x minus the RAIL's left edge, clamped.
  *  The rail's, not the layout's — the layout carries 24px of padding, and
  *  measuring from it made every drag land ~24px wider than the pointer. */

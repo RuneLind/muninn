@@ -269,18 +269,21 @@ export async function renderWikiPage(opts?: {
     .wiki-list-item .wiki-status { margin-top: 1px; }
     .wiki-list-item .wiki-followup-flag { margin-top: 2px; }
     /* Drag handle on the rail's right edge. right:-14px against the padding box
-       puts the 14px hit zone at [border-right edge, +14) — i.e. entirely OUTSIDE
-       the pane's content, so a classic scrollbar on the list (Windows/Linux,
-       macOS "always") can never be grabbed as a drag. The 2px accent line sits on
-       the pane's border and shows while hovered, dragging or focused. */
+       puts the 14px box at [border-right edge, +14), outside the pane's content,
+       so a classic scrollbar on the list (Windows/Linux, macOS "always") is never
+       grabbed as a drag — PROVIDED nothing hit-testable hangs left of the box:
+       the accent pseudo-element is opacity-0 but still hit-testable, and at
+       left:-1px it made the list's last pixel start a drag (measured). It is
+       pointer-events:none and starts at the box's edge, right beside the border.
+       Pinned by the "list's last pixel never starts a drag" e2e case. */
     .wiki-layout > .wiki-pane:first-child { position: relative; }
     .wiki-rail-resizer {
       position: absolute; top: 0; bottom: 0; right: -14px; width: 14px;
       cursor: col-resize; z-index: 2; touch-action: none; outline: none;
     }
     .wiki-rail-resizer::after {
-      content: ""; position: absolute; top: 0; bottom: 0; left: -1px; width: 2px;
-      background: var(--accent); opacity: 0; transition: opacity .12s;
+      content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 2px;
+      pointer-events: none; background: var(--accent); opacity: 0; transition: opacity .12s;
     }
     .wiki-rail-resizer:hover::after, .wiki-rail-resizer.dragging::after,
     .wiki-rail-resizer:focus-visible::after { opacity: .8; }
