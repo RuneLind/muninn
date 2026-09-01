@@ -110,7 +110,10 @@ export function initRailResize(): void {
     // after a lost capture is already stopped by `!dragging`.
     if (!dragging || !(e.buttons & 1)) return;
     // The pointer asks for a width; what gets remembered follows the same rule
-    // as the arrow keys (`nextStoredWidth`), judged against what is on screen.
+    // as the arrow keys (`nextStoredWidth`), judged against the state at
+    // pointerdown — the release is the act, the positions in between are not.
+    // Accepted limitation: a window that GROWS mid-drag leaves dragStartShown
+    // stale, so the rest of that gesture is an inert grow until release.
     const requested = railWidthFromPointer(e.clientX, rail.getBoundingClientRect().left);
     dragWidth = nextStoredWidth(dragStartStored, dragStartShown, requested);
     chosen = dragWidth;

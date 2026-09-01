@@ -72,7 +72,11 @@ export function effectiveRailWidth(width: number, viewportWidth: number): number
  *   - a grow stores `max(stored, requested)` — a grow the bound makes INERT
  *     (560 stored, 315 shown, ArrowRight asks 331) must not lower the desktop
  *     width the reader set on a wider screen and cannot see here.
- * Keyboard and drag both go through this, so the two cannot disagree.
+ * Keyboard and drag both go through this per COMMITTED act — a key press, or a
+ * drag's release — judged against the state when that act began. A drag's
+ * positions between pointerdown and release are not acts: a dip under the bound
+ * and back up stores what the release asks for, while the same path as two
+ * key presses commits the dip. That is the one way the two paths differ.
  */
 export function nextStoredWidth(stored: number | null, shown: number, requested: number): number {
   if (requested < shown) return requested;
