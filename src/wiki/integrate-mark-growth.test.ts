@@ -174,8 +174,33 @@ describe("mark-span guard — the whole state space", () => {
     //    resolves no wikilink — spreads across two `<td>`s, so the comparison
     //    refuses it. A false refusal, and the ACCEPTED one: it costs a mark on a
     //    rare shape, where the alternative costs a live link. Measured both ways.
+    // NB "the comparison refuses it" is only true because the exemption's flag now
+    // describes the FINAL range (row G1 below). While the flag survived a trim, the
+    // comparison did not run at all on the expanded path — the review that found
+    // that also found this comment asserting its outcome.
     ["a [[link|alias]] is not split at its alias pipe", WIKILINK_TABLE_BODY,
      "| Rhodiola | see [[Adaptogens|the adaptogen page]] for the mechanism | optional |", false],
+    // G — the guard is THREE properties, and the exemption waives exactly two of
+    // them. Every row here shipped a corrupt mark in review of the cell trim.
+    // G1: the expansion flag must describe the FINAL range. Expansion fires over
+    // `[[P|a]]`, the trim then throws that cell away, and the flag used to survive —
+    // turning OFF the render comparison for a range holding no link at all. The mark
+    // rendered as literal `<Fact …>` inside a `<code>`, i.e. row A, waved through.
+    ["an expansion the trim discards does not waive the render check",
+     "# T\n\n| C1 | C2 |\n|---|---|\n| [[P|a]] | the command to run is `bun test` now and later |\n",
+     "P|a]] | the command to run is `bun test", false],
+    // G2: the write must be REVERSIBLE. `parsePipeCells` splits at a `|` inside
+    // backticks on both sides, so both renders agree and the comparison is blind —
+    // but the zone-aware strip preserves a tag inside a code span, so the wrapper is
+    // an orphan that no later run can remove.
+    ["a pipe inside inline code: the mark would not strip back out",
+     "# T\n\n| A | B |\n|---|---|\n| `git log --oneline | head -5` runs it | other cell text |\n",
+     "`git log --oneline | head -5` runs it", false],
+    // G3: a dangling `[[` earlier in the row steals the closer, so the mark lands in
+    // the link TARGET — invisible to `formatWebHtml`, which resolves no wikilink.
+    ["a dangling [[ earlier in the row",
+     "# T\n\n| X | Y |\n|---|---|\n| a [[ b [[Target|lab]] end | dosing is 5 g daily |\n",
+     "| a [[ b", false],
   ];
 
   for (const [label, body, quote, wantMarked] of ROWS) {
@@ -387,6 +412,38 @@ describe("a table row trims to its widest cell", () => {
     expect(edit.reason).toBe("marks the checked passage (trimmed to one table cell)");
   });
 
+  test("the note is not claimed for a whitespace-only trim", () => {
+    // The flag used to be inferred from "the range changed", which cannot tell a
+    // cell trim from the edge-whitespace trim every branch does. A quote resolving
+    // with surrounding spaces inside ONE cell crossed no boundary and must say so.
+    const body = "# T\n\n| A | B |\n|---|---|\n| first row middle cell text | second |\n";
+    const edit = markOne(body, " first row middle cell text ").edits[0]!;
+    expect(edit.old).toBe("first row middle cell text");
+    expect(edit.reason).toBe("marks the checked passage");
+  });
+
+  test("the note is not claimed for a line that is not a rendered table", () => {
+    // `isTableRow` alone is true of a lone `| a | b |` line, which the block parser
+    // renders as a PARAGRAPH — measured, `<td>` count 0. Trimming there and calling
+    // it a table cell is a false statement to the reviewer, so the predicate is the
+    // parser's run rule instead: ≥3 consecutive row lines, separator on the second.
+    const body = "# T\n\nSome intro prose here.\n\n| a | b |\n\nTail prose.\n";
+    expect((formatWebHtml(body).match(/<td>/g) ?? []).length).toBe(0);
+    const edit = markOne(body, "| a | b |").edits[0]!;
+    expect(edit.old).toBe("| a | b |");
+    expect(edit.reason).toBe("marks the checked passage");
+  });
+
+  test("the wikilink note is not claimed once the trim discards the link", () => {
+    // The reviewer was told the mark had "expanded to cover the whole [[wikilink]]"
+    // about a mark in a different cell that touches no link.
+    const body =
+      "# T\n\n| C1 | C2 | C3 |\n|---|---|---|\n| [[Adaptogens|alias]] | short | a very much longer third cell of prose text |\n";
+    const edit = markOne(body, "Adaptogens|alias]] | short | a very much longer third cell of prose text").edits[0]!;
+    expect(edit.old).toBe("a very much longer third cell of prose text");
+    expect(edit.reason).toBe("marks the checked passage (trimmed to one table cell)");
+  });
+
   test("a quote already inside one cell keeps its exact range and says nothing", () => {
     // The control for both assertions above: the trim must be a no-op — same range,
     // and NO "trimmed to one table cell" note, which would be a false report.
@@ -405,6 +462,19 @@ describe("a table row trims to its widest cell", () => {
     expect(res.dropped[0]!.reason).toBe(
       "the checked passage is a table row with no markable cell",
     );
+  });
+});
+
+describe("the nesting check is a DELTA, not an absolute", () => {
+  test("a page already carrying a broken link keeps its unrelated claims", () => {
+    // The same rule the mark-index sentinel and the one-mark removal exist for: a
+    // page that is already damaged must not lose every claim to its own damage. An
+    // absolute `countNestedMarkup(probe) > 0` refuses everything on such a page.
+    const body =
+      '# T\n\nA broken one: [[Some <Fact n="9" v="ok">page</Fact> here]].\n\n' +
+      "Norepinephrine acts as a mental spotlight here today.\n";
+    expect(markOne(body, "Norepinephrine acts as a mental spotlight here today.").edits)
+      .toHaveLength(1);
   });
 });
 

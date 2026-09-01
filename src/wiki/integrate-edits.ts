@@ -69,6 +69,7 @@ import {
   COMPONENT_TAG_SOURCE_SINGLE_LINE,
   countFactWrappers,
   isFactWrapperText,
+  isSeparatorRow,
   isTableRow,
   normalizeFactVerdict,
   stripFactWrappers,
@@ -1066,6 +1067,20 @@ const LEADING_BLOCK_MARKER_RE = /^(?:[-*+]|\d+[.)]|>+|#{1,6})[ \t]+/;
  *  shared `g` RegExp carries `lastIndex` between callers in different modules. */
 const WIKILINK_SPAN_RE = new RegExp(WIKILINK_SPAN_SOURCE, "g");
 
+/** This module's own `g` instance over the shared {@link NESTED_MARKUP_RE}, for the
+ *  same reason — and built from its `source` rather than re-spelled, so the guard and
+ *  the lint can never disagree about what the damage looks like. */
+const NESTED_MARKUP_G = new RegExp(NESTED_MARKUP_RE.source, "g");
+
+/** How many `[[wikilink]]` targets in `body` carry component markup. Compared as a
+ *  DELTA across the splice: an already-broken page keeps its claims. */
+function countNestedMarkup(body: string): number {
+  NESTED_MARKUP_G.lastIndex = 0;
+  let n = 0;
+  while (NESTED_MARKUP_G.exec(body) !== null) n++;
+  return n;
+}
+
 /** The line-aligned window `[start, end)` sits in. A wikilink is newline-free by
  *  construction, so a link intersecting the span lies wholly inside these lines —
  *  which is why the scan is scoped here instead of running over the whole body. */
@@ -1101,6 +1116,16 @@ function lineWindowAround(body: string, start: number, end: number): { from: num
  *    (`src/wiki/store.ts`) calls dangling; the candidate is rejected and the scan
  *    RESUMES two chars in, so the genuine inner link is still found (skipping the
  *    match wholesale would consume it).
+ *
+ *    ⚠️ Finding the inner link is NOT the same as being able to MARK it, and the
+ *    difference is the renderer: `renderWikiHtml` has no dangling rejection — it runs
+ *    one regex over the raw body — so it pairs the FIRST opener with the only `]]`
+ *    and a mark on the inner link lands inside THAT pairing's target. Measured, the
+ *    reader escapes the opening tag into the link text and orphans the closing one.
+ *    So this scan stays as it is (pairing like the renderer would mark prose nobody
+ *    checked) and `markSpanRefusal`'s nesting property refuses the mark instead.
+ *    Measured cost across both live wikis 2026-09-01: 4 dangling spans on 3 of 1 573
+ *    pages, none in a table row.
  *
  * NB the dangling test starts at index 2 for a reason and has one known gap: on
  * `[[[Tidal Router]]` the extra opener is at index 2 of the match, so `includes("[[", 2)`
@@ -1182,6 +1207,35 @@ function lineAround(body: string, pos: number): string {
 }
 
 /**
+ * True when `pos` sits on a line the block parser renders as a TABLE row — the run
+ * rule `parseBlocks` applies, not the single-line `isTableRow` test.
+ *
+ * `isTableRow` alone is true of a LONE `| a | b |` line, which renders as an
+ * ordinary paragraph (measured: `<td>` count 0). Trimming a mark to a "cell" there
+ * costs nothing structurally, but it tells the reviewer the mark was "trimmed to one
+ * table cell" about a table that does not exist — the class of reviewer-facing claim
+ * this module keeps getting wrong. So the predicate is the parser's: walk the run of
+ * consecutive row lines `pos` belongs to, and require length ≥ 3 with a separator on
+ * the SECOND line.
+ */
+function isRenderedTableRow(body: string, pos: number): boolean {
+  const lines = body.split("\n");
+  let idx = 0;
+  let at = 0;
+  for (; idx < lines.length; idx++) {
+    const next = at + lines[idx]!.length + 1;
+    if (pos < next) break;
+    at = next;
+  }
+  if (idx >= lines.length || !isTableRow(lines[idx]!)) return false;
+  let first = idx;
+  while (first > 0 && isTableRow(lines[first - 1]!)) first--;
+  let last = idx;
+  while (last + 1 < lines.length && isTableRow(lines[last + 1]!)) last++;
+  return last - first + 1 >= 3 && isSeparatorRow(lines[first + 1]!);
+}
+
+/**
  * The longest CELL-interior sub-range of `[start, end)` on a table row — the same
  * shape as {@link longestLineRange}, with the cell separator in place of the
  * newline, and `null` when every cell the span touches is blank.
@@ -1206,14 +1260,20 @@ function longestCellRange(
   body: string,
   start: number,
   end: number,
-): { start: number; end: number } | null {
+): { start: number; end: number; crossedBoundary: boolean } | null {
   const window = lineWindowAround(body, start, end);
   const links = wikilinkSpansIn(body, window.from, window.to);
   const insideLink = (i: number) => links.some((l) => i >= l.start && i < l.end);
   let best: { start: number; end: number } | null = null;
   let runStart = start;
+  // Whether the span really covered more than one cell. NOT inferrable from
+  // "the range changed": the edge whitespace trim below changes a range that
+  // crossed nothing, and reporting THAT as a cell trim is a false statement to the
+  // reviewer — measured on a quote resolving as `" first row middle cell text "`.
+  let crossedBoundary = false;
   for (let i = start; i <= end; i++) {
     if (i === end || (body[i] === "|" && !insideLink(i))) {
+      if (i !== end) crossedBoundary = true;
       let s = runStart;
       let e = i;
       while (s < e && /\s/.test(body[s]!)) s++;
@@ -1222,7 +1282,7 @@ function longestCellRange(
       runStart = i + 1;
     }
   }
-  return best;
+  return best && { ...best, crossedBoundary };
 }
 
 /**
@@ -1271,14 +1331,12 @@ function markableRange(
   start: number,
   end: number,
 ): { start: number; end: number; trimmedMarker?: boolean; trimmedToCell?: boolean } | { error: string } {
-  if (isTableRow(lineAround(body, start))) {
+  if (isRenderedTableRow(body, start)) {
     const cell = longestCellRange(body, start, end);
     if (!cell) {
       return { error: "the checked passage is a table row with no markable cell" };
     }
-    return cell.start === start && cell.end === end
-      ? { start, end }
-      : { ...cell, trimmedToCell: true };
+    return { start: cell.start, end: cell.end, ...(cell.crossedBoundary ? { trimmedToCell: true } : {}) };
   }
   if (!ownsLineStart(body, start)) return { start, end };
   let s = start;
@@ -1366,7 +1424,27 @@ function expandAndGuard(
   const expanded = expandOverWikilinks(body, range.start, range.end);
   const guarded = markableRange(body, (expanded ?? range).start, (expanded ?? range).end);
   if ("error" in guarded) return guarded;
-  return { ...guarded, ...(expanded ? { expandedOverLink: true } : {}) };
+  // The flag describes the FINAL range, not the fact that expansion fired. The guard
+  // runs AFTER expansion and can narrow the range past the link — the cell trim does
+  // exactly that, discarding the link's whole cell — and the flag is not cosmetic:
+  // `markSpanRefusal` reads it as "skip the render comparison", on the strength of a
+  // justification (the mark covers a whole `[[…]]`, which `formatWebHtml` cannot
+  // render but the reader can) that is FALSE of a range holding no link at all.
+  // Measured: a quote expanded over `[[P|a]]` and then trimmed to a neighbouring cell
+  // shipped `<Fact …>` as literal text inside a `<code>` — the exact shape row A of
+  // the state-space table exists to refuse — and told the reviewer the mark had been
+  // "expanded to cover the whole [[wikilink]]".
+  const overLink = expanded !== null && coversWholeWikilink(body, guarded.start, guarded.end);
+  return { ...guarded, ...(overLink ? { expandedOverLink: true } : {}) };
+}
+
+/** True when `[start, end)` contains at least one whole `[[wikilink]]` and cuts
+ *  none — the property the render-comparison exemption is actually justified by. */
+function coversWholeWikilink(body: string, start: number, end: number): boolean {
+  const window = lineWindowAround(body, start, end);
+  return wikilinkSpansIn(body, window.from, window.to).some(
+    (l) => l.start >= start && l.end <= end,
+  );
 }
 
 function withForm(
@@ -1422,7 +1500,55 @@ function markSpanRefusal(
   verdict: FactVerdict,
   nl: string,
 ): string | null {
+  // ── Property 1: the mark must not enter a [[wikilink]] TARGET ──────────────
+  // NEVER waived. `formatWebHtml` resolves no wikilink, so this whole family is
+  // invisible to the render comparison below; the reader's `renderWikiHtml`
+  // substitutes links over the RAW body first. A range abutting a DANGLING `[[` is
+  // the reachable shape — `wikilinkSpansIn` rejects a dangling candidate, so
+  // expansion does not widen over it and the mark cuts it: on
+  // `| a [[ b [[Target|lab]] end | … |` the regex pairs the first opener with the
+  // only `]]` and swallows `</Fact>` into the target, which is the `nested-annotation`
+  // damage the lint reports. The predicate is the SHARED `NESTED_MARKUP_RE` — the
+  // same spelling `checkNestedAnnotation` and `repairNestedFactWrappers` read, never
+  // a second one — and it is a DELTA, so a page already carrying the shape does not
+  // lose every claim to it.
+  //
+  // The index is invariant for this test and for the strip below (it appears only in
+  // the `n` attribute, which neither reads), so the probe is built with a constant
+  // rather than the render-derived sentinel further down — which keeps the exemption
+  // path free of a render it does not need.
+  const probe =
+    body.slice(0, span.start) + wrapperTextFor(body, span, 1, verdict, nl) + body.slice(span.end);
+  if (countNestedMarkup(probe) > countNestedMarkup(body)) {
+    return "marking this passage would put the mark inside a [[wikilink]] target";
+  }
+  // ── The exemption, and exactly what it waives ──────────────────────────────
+  // A span covering a whole `[[…]]` waives the two properties BELOW and neither
+  // above, and the two below are one disagreement rather than two: `formatWebHtml`
+  // and `stripFactWrappers` both read the backticks around a `[[Page]]` as CODE,
+  // while `renderWikiHtml` substitutes the link before any code handling — so the
+  // reader has a live link where those two have a code span. The documented trade
+  // (cosmetic damage instead of a rewritten link target) therefore covers the strip
+  // too: a mark on a BACKTICKED link is preserved by the zone-aware strip, which is
+  // pre-existing, pinned behaviour (`integrate-wikilink.test.ts`) and not this
+  // guard's to reverse. An UNBACKTICKED whole-link mark strips cleanly and would
+  // pass the check anyway, so the waiver is as narrow as it reads.
   if (span.expandedOverLink) return null;
+  // ── Property 2: the write must be REVERSIBLE ───────────────────────────────
+  // Every later fact-check run strips prior wrappers before writing back, so a mark
+  // `stripFactWrappers` cannot remove is written to disk permanently and renders as
+  // literal `<Fact …>` text from the next run onward. The strip is ZONE-AWARE — a tag
+  // inside an inline code span is documentation and is preserved by design — so a
+  // wrapper whose opening tag lands inside one is an orphan. The render comparison is
+  // structurally blind to it ON A TABLE ROW: `parsePipeCells` splits at a `|` inside
+  // backticks on BOTH sides, so neither render ever pairs that code span and the two
+  // agree. Measured: `` | `git log --oneline | head -5` runs it | … | `` shipped a
+  // mark whose `</Fact>` survived the strip and whose `countFactWrappers` read 0 —
+  // invisible to the accounting that reports what a write removed.
+  if (stripFactWrappers(probe) !== stripFactWrappers(body)) {
+    return "marking this passage would leave a tag the strip cannot remove";
+  }
+  // ── Property 3: the page must RENDER the same ──────────────────────────────
   // The inline/block spelling comes from the shared `wrapperTextFor`, which IS
   // render-visible and is the one argument that has to match the emit site. The
   // verdict and the newline are passed through for honesty rather than necessity:
@@ -1584,14 +1710,12 @@ function markReason(span: FactSpan): string {
  *  of the span it replaces.
  *
  *  The block-marker guard applies here as a straight REFUSAL rather than a trim —
- *  including for a table row, which the MARK path now trims to its widest cell: a
- *  trim is not expressible here at all, since the wrapper must cover the whole
- *  replacement.
- *  the wrapper must cover the whole replacement (a marker left outside it would put
- *  prose before the `<Fact` tag, and `carriesFactWrapper` — the payload-shape gate
- *  that makes the appendix mandatory — would then not recognize the edit at all,
- *  shipping a chip with no `#fc-claim-N` target). A refused mark is never fatal:
- *  the correction applies unwrapped.
+ *  including for a table row, which the MARK path now trims to its widest cell. No
+ *  trim is expressible here: the wrapper must cover the whole replacement (a marker
+ *  left outside it would put prose before the `<Fact` tag, and `carriesFactWrapper` —
+ *  the payload-shape gate that makes the appendix mandatory — would then not
+ *  recognize the edit at all, shipping a chip with no `#fc-claim-N` target). A
+ *  refused mark is never fatal: the correction applies unwrapped.
  *
  *  A correction CROSSING a wikilink never reaches this function — {@link annotateEdits}
  *  drops the whole edit one step earlier. Expansion is not expressible here (the

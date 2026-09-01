@@ -1,4 +1,5 @@
 import { test, expect, describe } from "bun:test";
+import { readFileSync } from "node:fs";
 import {
   runClaimPool,
   assembleFactcheckAnswer,
@@ -665,8 +666,14 @@ describe("pairToolEvents", () => {
  * resolves to nothing ("no longer found in the page"). Measured on
  * `life/sources/Neurochemical Focus Stack…mdx`: one of eight claims was quoted out
  * of the mermaid diagram, and the prose sentence two lines below it says the same
- * thing and marks cleanly. The two passes now read the same masked text, so an
- * anchor the extractor can produce is one the annotator can resolve.
+ * thing and marks cleanly. The two passes now read the same masked text, so the
+ * extractor no longer sees the text the annotator cannot resolve.
+ *
+ * NOT the stronger claim that every anchor the extractor produces resolves: the model
+ * still reads the PLACEHOLDERS (`[code block omitted]`, `[component tag omitted]`,
+ * `[frontmatter omitted]`) and can quote into or across one, which exists in neither
+ * the raw body nor the match mask and drops the same way. That is a smaller door, not
+ * a closed one.
  */
 describe("claimExtractionText", () => {
   const BODY =
@@ -711,6 +718,37 @@ describe("claimExtractionText", () => {
     });
     expect(out).toContain(tail);
     expect(out.length).toBeLessThanOrEqual(200);
+  });
+
+  test("the ROUTE passes isMdx — the one line no behavioural test can reach", () => {
+    // Every test above hands `isMdx` in directly, so dropping the field at the call
+    // site (or passing `annotatable`, the POLICY twin of the same extension test)
+    // would leave component tags visible to the extractor with nothing failing. The
+    // handler builds its opts inside a Hono route and cannot be driven from a unit
+    // test, so this is a SOURCE assertion — the house pattern already used to refuse
+    // a bare `fetch(` under `src/chat/views/` and a bare `postgres()` under `src/`.
+    // It pins the wiring's existence, not its value; the derivation itself is the
+    // same `endsWith(".mdx")` the integrate route uses two functions away.
+    const routes = readFileSync(
+      new URL("./wiki-routes.ts", import.meta.url).pathname,
+      "utf8",
+    );
+    // Both assertions are scoped to THIS handler — from its `let isMdx` declaration
+    // to its `streamFactcheckSSE` call. A whole-file `toContain` is vacuous here: the
+    // two integrate routes spell `const isMdx = meta.relPath.endsWith(".mdx")` of
+    // their own, so a mutation of the factcheck derivation still finds a match
+    // elsewhere in the file (measured — that mutant survived the first spelling).
+    const from = routes.indexOf("let isMdx = false;");
+    const to = routes.indexOf("return streamFactcheckSSE(c, {", from);
+    expect(from).toBeGreaterThan(-1);
+    expect(to).toBeGreaterThan(from);
+    const handler = routes.slice(from, to);
+    // Derived from the resolved PATH, never from `annotatable` (the policy twin).
+    expect(handler).toContain('isMdx = meta.relPath.endsWith(".mdx")');
+    expect(handler).not.toContain("isMdx = isAnnotatablePage");
+    // …and actually handed over.
+    const call = routes.slice(to);
+    expect(call.slice(0, call.indexOf("\n    });"))).toContain("isMdx,");
   });
 
   test("sel mode passes the reader's selection through untouched", () => {

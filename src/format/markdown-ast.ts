@@ -1115,7 +1115,15 @@ export function isTableRow(line: string): boolean {
   return trimmed.startsWith("|") && trimmed.endsWith("|") && trimmed.length > 1;
 }
 
-function isSeparatorRow(line: string): boolean {
+/**
+ * The block parser's delimiter-row test, EXPORTED beside {@link isTableRow} for the
+ * same reason: `isTableRow` alone answers `true` for a LONE `| a | b |` line, which
+ * this parser renders as an ordinary paragraph. A caller that needs "is this line
+ * part of a rendered TABLE" needs both — a run of row lines, length ≥ 3, whose
+ * SECOND line is a separator. That is the rule `parseBlocks` applies a few lines
+ * above; exporting the two predicates is what keeps a caller from re-spelling it.
+ */
+export function isSeparatorRow(line: string): boolean {
   return /^\|[\s\-:|]+\|$/.test(line.trim());
 }
 

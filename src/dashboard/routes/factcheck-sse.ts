@@ -877,6 +877,16 @@ interface Usage {
  *
  * Two consequences are deliberate:
  *
+ *  - **On `.mdx`, component ATTRIBUTE prose goes with the tag.** `promptMaskBody`
+ *    masks the whole opening tag, so a `<Callout title="…">` / `<Figure caption="…">`
+ *    sentence is no longer extractable — the largest content class this mask removes
+ *    (measured: 584 `<Callout … title="…">` occurrences in mimir alone). It is
+ *    consistent with the fix rather than an exception to it: that text lives inside
+ *    an exclusion zone, so a claim anchored there could never have been MARKED. It is
+ *    named here because the docblock used to say only that "prose inside a
+ *    `<Callout>` stays visible", which is true of its CHILDREN and not of its
+ *    attributes.
+ *
  *  - **The cap is applied AFTER the mask**, so `FACTCHECK_ARTICLE_BODY_MAX` counts
  *    prose rather than fences. On a code-heavy page that is strictly more checkable
  *    content, not less.
