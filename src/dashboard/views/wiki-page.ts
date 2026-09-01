@@ -6,6 +6,7 @@ import { agentPresenceStyles, agentPresenceHtml, agentPresenceScript } from "./c
 // The share dialog's CSS lives WITH the dialog (exported from its pure half) so
 // the /summaries mount in PR C cannot end up with a hand-copied second copy.
 import { shareDialogStyles } from "./components/wiki-share-dialog.ts";
+import { RAIL_WIDTH_DEFAULT, RAIL_WIDTH_DEFAULT_NARROW } from "./components/wiki-rail-width.ts";
 import {
   wikiReadonlyStyles,
   WIKI_READONLY_ASK_HINT,
@@ -116,9 +117,12 @@ export async function renderWikiPage(opts?: {
   <style>
     ${SHARED_STYLES}
 
+    /* The rail column reads --wiki-rail-w, which the drag handle sets inline
+       (wiki-rail-resize.ts) from a stored width, viewport-bounded; absent, the
+       fallback is RAIL_WIDTH_DEFAULT, interpolated so there is one copy of it. */
     .wiki-layout {
       display: grid;
-      grid-template-columns: 300px minmax(0, 1fr) 300px;
+      grid-template-columns: var(--wiki-rail-w, ${RAIL_WIDTH_DEFAULT}px) minmax(0, 1fr) 300px;
       gap: 16px;
       padding: 16px 24px;
       height: calc(100vh - 63px);
@@ -245,12 +249,47 @@ export async function renderWikiPage(opts?: {
       border-radius: 7px;
       cursor: pointer;
       display: flex;
-      align-items: baseline;
+      align-items: flex-start;
       gap: 8px;
     }
     .wiki-list-item:hover { background: var(--bg-surface); }
     .wiki-list-item.active { background: color-mix(in srgb, var(--accent) 14%, transparent); }
-    .wiki-list-title { font-size: 12.5px; color: var(--text-secondary); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* Two lines, then clip: this wiki's titles carry their meaning in the second
+       half, so a one-line ellipsis made sibling pages indistinguishable. The dot
+       and the date sit on the first line. */
+    .wiki-list-title {
+      font-size: 12.5px; line-height: 1.3; color: var(--text-secondary); flex: 1; min-width: 0;
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+      overflow: hidden; overflow-wrap: anywhere;
+    }
+    /* Flex-start row: the title's siblings are nudged down onto its first line
+       (a 16.25px line box) so the row reads as one line when the title is one. */
+    .wiki-list-item .wiki-type-dot { align-self: flex-start; margin-top: 5px; }
+    .wiki-list-item .wiki-list-meta { margin-top: 2px; }
+    .wiki-list-item .wiki-status { margin-top: 1px; }
+    .wiki-list-item .wiki-followup-flag { margin-top: 2px; }
+    /* Drag handle on the rail's right edge. right:-14px resolves against the
+       PADDING box, so the 14px box starts ON the pane's 1px border and runs 13px
+       into the gap (measured at 1400px: pane border-box right edge 324, handle
+       [323, 337)) — never over the list's content, so a classic scrollbar there
+       (Windows/Linux, macOS "always") is not grabbed as a drag. PROVIDED nothing
+       hit-testable hangs left of the box: the accent pseudo-element is opacity-0
+       but still hit-testable, and at left:-1px it made the list's last pixel
+       start a drag (measured). It is pointer-events:none at the box's left edge,
+       i.e. over the border pixel and one outside. Pinned by the "list's last
+       pixel never starts a drag" e2e case; the accent's POSITION is not pinned. */
+    .wiki-layout > .wiki-pane:first-child { position: relative; }
+    .wiki-rail-resizer {
+      position: absolute; top: 0; bottom: 0; right: -14px; width: 14px;
+      cursor: col-resize; z-index: 2; touch-action: none; outline: none;
+    }
+    .wiki-rail-resizer::after {
+      content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 2px;
+      pointer-events: none; background: var(--accent); opacity: 0; transition: opacity .12s;
+    }
+    .wiki-rail-resizer:hover::after, .wiki-rail-resizer.dragging::after,
+    .wiki-rail-resizer:focus-visible::after { opacity: .8; }
+    body.wiki-rail-dragging { cursor: col-resize; user-select: none; }
     .wiki-list-item.active .wiki-list-title { color: var(--text-primary); }
     .wiki-list-meta { font-size: 10.5px; color: var(--text-faint); flex-shrink: 0; }
 
@@ -1272,7 +1311,7 @@ export async function renderWikiPage(opts?: {
     .wiki-empty-state code { background: var(--bg-inset); padding: 2px 6px; border-radius: 4px; }
 
     @media (max-width: 1100px) {
-      .wiki-layout { grid-template-columns: 260px minmax(0, 1fr); }
+      .wiki-layout { grid-template-columns: var(--wiki-rail-w, ${RAIL_WIDTH_DEFAULT_NARROW}px) minmax(0, 1fr); }
       .wiki-conn-pane { display: none; }
     }
     ${agentPresenceStyles()}
@@ -1322,6 +1361,7 @@ export async function renderWikiPage(opts?: {
       </div>
       <div class="wiki-list" id="wikiList"></div>
       <div class="wiki-coverage-foot" id="wikiCoverageFoot" style="display:none"></div>
+      <div class="wiki-rail-resizer" id="wikiRailResizer" role="separator" aria-orientation="vertical" tabindex="0" aria-label="Resize the page list" title="Drag or use ← → to resize · double-click or Home to reset"></div>
     </div>
 
     <div class="wiki-pane">
