@@ -452,46 +452,112 @@ describe("a table row trims to its widest cell", () => {
     expect(edit.reason).toBe("marks the checked passage");
   });
 
-  test("the table predicate agrees with the RENDERER, shape by shape", () => {
-    // The predicate is judged against `parseBlocks` itself rather than case by case:
-    // for each shape, does the page render a `<td>` at all, and does the mark on its
-    // pipe line report a cell trim? Those two must agree. Written as a sweep because
-    // the earlier per-case spelling pinned only a LONE `| a | b |` line — run length
-    // 1 — which every mutant of the rule still rejects, so it pinned "not a single
-    // line" while the docblock claimed it pinned the parser's rule.
-    const QUOTE = "| aaa bbb ccc | B |";
-    const ROW = `${QUOTE}\n`;
-    const SEP = "|---|---|\n";
-    const SHAPES: [string, string, "table" | "prose"][] = [
-      ["a real 3-line table", `# T\n\n${ROW}${SEP}| x | y |\n`, "table"],
-      ["…and the row is the FIRST line of the run", `# T\n\n${ROW}${SEP}| x | y |\n| z | w |\n`, "table"],
-      ["…with CRLF", `# T\r\n\r\n${QUOTE}\r\n|---|---|\r\n| x | y |\r\n`, "table"],
-      ["…at EOF with no trailing newline", `# T\n\n${ROW}${SEP}| x | y |`, "table"],
-      ["…as the very first line of the file", `${ROW}${SEP}| x | y |\n`, "table"],
-      ["a run of two (row + separator only)", `# T\n\n${ROW}${SEP}`, "prose"],
-      ["a run of three with no separator", `# T\n\n${ROW}| d | e |\n| f | g |\n`, "prose"],
-      ["a separator on the THIRD line, not the second", `# T\n\n${ROW}| d | e |\n${SEP}`, "prose"],
-      ["a lone pipe line", `# T\n\nIntro.\n\n${ROW}\nTail.\n`, "prose"],
-      ["a run split by a blank line", `# T\n\n${ROW}\n${SEP}| x | y |\n`, "prose"],
-      // Enough short lines above the table to move a drifting offset walk onto the
-      // wrong line — one code unit per preceding line, so it takes as many lines as
-      // the row is long. Renders identically to the first shape; the predicate must
-      // answer identically too.
-      ["a table under many short lines", `# T\n${"x\n".repeat(24)}${ROW}${SEP}| x | y |\n`, "table"],
-    ];
+  /**
+   * The table predicate, ENUMERATED against the renderer instead of sampled.
+   *
+   * Two rounds of hand-picked shapes each left clause-level mutants alive, and the
+   * third round's generated differential found what none of them could: `parseBlocks`
+   * RETRIES. On `ROW ROW SEP ROW` it fails at the run's start, emits that one line as
+   * text, re-enters at the next line and builds a table from there — so a predicate
+   * that only asks about the run's start answers "no table" for lines the reader sees
+   * inside one. The fixture list was the problem, not the fixtures.
+   *
+   * So the shapes are generated: every sequence of up to five lines over
+   * {row, separator, blank, prose, fence}, each row carrying a unique token, and the
+   * ORACLE is per LINE — does that token render inside a `<td>`/`<th>`? (Header cells
+   * are `<th>`; asking only about `<td>` reported the header row of every real table
+   * as a disagreement.) 3 711 (body, row) pairs, ~0.1 s.
+   */
+  test("the table predicate agrees with the renderer over the whole line grammar", () => {
+    const KINDS = ["ROW", "SEP", "BLANK", "PROSE", "FENCE"] as const;
+    type Kind = (typeof KINDS)[number];
 
-    for (const [label, body, kind] of SHAPES) {
-      const rendersTable = (formatWebHtml(body).match(/<td>/g) ?? []).length > 0;
-      expect({ label, rendersTable }).toEqual({ label, rendersTable: kind === "table" });
+    const build = (seq: Kind[]) => {
+      const lines: string[] = [];
+      // Every quotable line, not only the rows: `markableRange` calls the predicate
+      // with the RESOLVED SPAN START, which need not be a pipe line at all, and a
+      // rows-only sweep can never fire the entry guard. Measured — with prose lines
+      // quoted, deleting that guard makes a prose line directly under a table report
+      // "trimmed to one table cell".
+      const cells: { token: string; line: string; masked: boolean }[] = [];
+      let openFence = false;
+      seq.forEach((k, i) => {
+        if (k === "ROW") {
+          const token = `tok${i}aaaaaaaaaaaa`; // longest cell, and unique in the body
+          const line = `| ${token} | b${i} |`;
+          cells.push({ token, line, masked: openFence });
+          lines.push(line);
+        } else if (k === "SEP") lines.push("|---|---|");
+        else if (k === "BLANK") lines.push("");
+        else if (k === "PROSE") {
+          // Prose CARRYING A PIPE, deliberately: without one the entry guard is inert
+          // (a pipe-free line has no cell boundary, so the cell walk returns the whole
+          // line and both branches agree). With one, a prose line under a table is
+          // trimmed at that pipe the moment the guard goes — measured.
+          const token = `pro${i}aaaaaaaaaaaa`;
+          const line = `${token} | tail ${i}`;
+          cells.push({ token, line, masked: openFence });
+          lines.push(line);
+        } else { lines.push("```"); openFence = !openFence; }
+      });
+      return { body: `${lines.join("\n")}\n`, rows: cells };
+    };
+
+    const seqs = (n: number): Kind[][] =>
+      n === 0 ? [[]] : seqs(n - 1).flatMap((s) => KINDS.map((k) => [...s, k]));
+
+    // Pinned so a generator that silently stops producing cases cannot pass empty.
+    const EXPECTED_PAIRS = 7422;
+    let checked = 0;
+    const disagreements: string[] = [];
+    for (let n = 1; n <= 5; n++) {
+      for (const seq of seqs(n)) {
+        const { body, rows } = build(seq);
+        for (const { token, line, masked } of rows) {
+          const res = markOne(body, line);
+          const edit = res.edits[0];
+          const got = !edit
+            ? `DROP:${res.dropped[0]?.reason}`
+            : edit.reason.includes("table cell")
+              ? `CELL:${edit.old}`
+              : `LINE:${edit.old}`;
+          // A fence is an exclusion zone, so a row inside one never resolves at all.
+          // Otherwise: one cell exactly when the reader sees one, the whole line
+          // otherwise — and a mark either way, since the predicate decides the mark's
+          // SHAPE and never whether the claim survives.
+          const want = masked
+            ? "DROP:no longer found in the page"
+            : new RegExp(`<t[dh]>[^<]*${token}`).test(formatWebHtml(body))
+              ? `CELL:${token}`
+              : `LINE:${line}`;
+          checked++;
+          if (got !== want) disagreements.push(`[${seq.join(",")}] ${token}: got ${got} / want ${want}`);
+        }
+      }
+    }
+    expect({ checked, disagreements }).toEqual({ checked: EXPECTED_PAIRS, disagreements: [] });
+  });
+
+  test("…and on the three axes the generator does not vary", () => {
+    // The generator always joins with `\n` and always ends with one, so CRLF, a body
+    // ending mid-line, and a table opening the file are its blind spots. Kept as
+    // fixtures for exactly that reason — the rest of the old hand-picked list is
+    // subsumed by the enumeration above and was removed with it.
+    const QUOTE = "| aaa bbb ccc | B |";
+    const SHAPES: [string, string][] = [
+      ["CRLF", `# T\r\n\r\n${QUOTE}\r\n|---|---|\r\n| x | y |\r\n`],
+      ["EOF with no trailing newline", `# T\n\n${QUOTE}\n|---|---|\n| x | y |`],
+      ["the table opens the file", `${QUOTE}\n|---|---|\n| x | y |\n`],
+    ];
+    for (const [label, body] of SHAPES) {
+      expect({ label, td: (formatWebHtml(body).match(/<t[dh]>/g) ?? []).length > 0 })
+        .toEqual({ label, td: true });
       const edit = markOne(body, QUOTE).edits[0]!;
-      // A rendered table ⇒ the mark is one cell and says so; prose ⇒ the whole line,
-      // untrimmed and unannotated. Either way the mark exists — the predicate decides
-      // its SHAPE, never whether the claim survives.
-      expect({ label, old: edit.old, reason: edit.reason }).toEqual(
-        kind === "table"
-          ? { label, old: "aaa bbb ccc", reason: "marks the checked passage (trimmed to one table cell)" }
-          : { label, old: QUOTE, reason: "marks the checked passage" },
-      );
+      expect({ label, old: edit.old, reason: edit.reason }).toEqual({
+        label,
+        old: "aaa bbb ccc",
+        reason: "marks the checked passage (trimmed to one table cell)",
+      });
     }
   });
 
@@ -507,44 +573,11 @@ describe("a table row trims to its widest cell", () => {
     expect(res.dropped[0]!.reason).toBe("no longer found in the page");
   });
 
-  test("the run rule: BOTH its clauses decide, and each is measured", () => {
-    // The earlier spelling of this pinned only a LONE `| a | b |` line (run length 1),
-    // which every mutant of the rule still rejects — so it pinned "not a single line"
-    // while the docblock claimed it pinned the parser's rule. These two are the
-    // clauses themselves, each with the render as the oracle: `<td>` count 0 means the
-    // parser made a paragraph, so no cell trim may run and no cell note may be shown.
-    const RUNS: [string, string][] = [
-      // ≥3: a row plus its separator is a run of TWO, and renders as a paragraph.
-      ["run of two", "# T\n\n| aaa bbb ccc | B |\n|---|---|\n"],
-      // separator ON THE SECOND LINE: three rows with no separator is a paragraph too.
-      ["run of three, no separator", "# T\n\n| aaa bbb ccc | B |\n| d | e |\n| f | g |\n"],
-    ];
-    for (const [label, body] of RUNS) {
-      expect({ label, td: (formatWebHtml(body).match(/<td>/g) ?? []).length })
-        .toEqual({ label, td: 0 });
-      const edit = markOne(body, "| aaa bbb ccc | B |").edits[0]!;
-      expect({ label, old: edit.old, reason: edit.reason }).toEqual({
-        label,
-        old: "| aaa bbb ccc | B |",
-        reason: "marks the checked passage",
-      });
-    }
-  });
-
-  test("the FIRST line of a run is judged as itself, not as the line before it", () => {
-    // `isRenderedTableRow` walks the body to find `pos`'s line by hand, and the walk
-    // is the kind of arithmetic that drifts by one silently: every other table test
-    // here marks a MIDDLE row, where an off-by-one lands on another row of the same
-    // run and the answer is unchanged. A quote at column 0 of the run's first line,
-    // with a blank line above it, is the position where a drift reads the blank line
-    // instead — and answers "not a table", so the trim silently does not run.
-    const body = "# T\n\n| Compound name here | B |\n|---|---|\n| x | y |\n| z | w |\n";
-    expect((formatWebHtml(body).match(/<td>/g) ?? []).length).toBeGreaterThan(0);
-    const edit = markOne(body, "| Compound name here | B |").edits[0]!;
-    expect(edit.old).toBe("Compound name here");
-    expect(edit.reason).toBe("marks the checked passage (trimmed to one table cell)");
-  });
-
+  // Two fixture tests lived here — one per clause of the run rule, one for the
+  // run's first line. Both are fully subsumed by the enumeration above (measured:
+  // every mutant they killed, it kills), and the previous round's lesson is that a
+  // fixture list reads as more pins than it is. The readable statement of the rule is
+  // the predicate's own docblock; the pin is the differential.
   test("a row whose cells are all blank is refused by name", () => {
     // `longestCellRange` returns null when every cell it touches is empty, and the
     // refusal has to be its own sentence — the tier-3 "no markable text on any

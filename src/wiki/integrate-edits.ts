@@ -1214,9 +1214,14 @@ function lineAround(body: string, pos: number): string {
  * paragraph (measured: `<td>` count 0). Trimming a mark to a "cell" there costs
  * nothing structurally, but it tells the reviewer the mark was "trimmed to one table
  * cell" about a table that does not exist — the class of reviewer-facing claim this
- * module keeps getting wrong. So the predicate is the parser's: the run of
- * consecutive row lines `pos` belongs to must be ≥ 3 long with a separator on its
- * SECOND line.
+ * module keeps getting wrong. So the predicate is the parser's, INCLUDING its retry:
+ * within the run of consecutive row lines `pos` belongs to, the first start whose
+ * remaining tail is ≥ 3 lines with a separator on its second wins and consumes the
+ * rest of the run; lines before that start are prose. Checking only the run's START —
+ * the shape two rounds of hand-picked fixtures agreed with — answers "no table" for
+ * `ROW ROW SEP ROW`, from which the renderer builds a table beginning at the second
+ * line. That divergence is what a generated differential against the renderer found
+ * and what a third round of clause-level mutants would not have.
  *
  * The run is walked through {@link lineWindowAround} — this module's line-boundary
  * authority, which locates a line by `lastIndexOf`/`indexOf` on the body — and NOT by
@@ -1226,6 +1231,11 @@ function lineAround(body: string, pos: number): string {
  * another row of the same run) while a body with enough short lines above the table
  * silently resolved to the wrong line and switched the trim off. There is no offset
  * arithmetic left to get wrong.
+ *
+ * The run is collected with `push` + one `reverse`, never `unshift`: the first
+ * spelling was O(run²) on the up-walk, measured 125 ms on a 40 000-row run against
+ * 1.5 ms — irrelevant at real table sizes and a quadratic on a per-candidate path
+ * regardless.
  *
  * The two `- 1` / `+ 1` steps are what make each loop PROGRESS, not a convenience:
  * they step off the current line onto its neighbour's newline, so `prev.from < w.from`
@@ -1247,22 +1257,31 @@ function isRenderedTableRow(body: string, pos: number): boolean {
   const textOf = (w: { from: number; to: number }) => body.slice(w.from, w.to);
   const here = lineWindowAround(body, pos, pos);
   if (!isTableRow(textOf(here))) return false;
-  const run: string[] = [textOf(here)];
+  const before: string[] = [];
   for (let w = here; w.from > 0; ) {
     const prev = lineWindowAround(body, w.from - 1, w.from - 1);
-    const text = textOf(prev);
-    if (!isTableRow(text)) break;
-    run.unshift(text);
+    if (!isTableRow(textOf(prev))) break;
+    before.push(textOf(prev));
     w = prev;
   }
+  const after: string[] = [];
   for (let w = here; w.to < body.length; ) {
     const next = lineWindowAround(body, w.to + 1, w.to + 1);
-    const text = textOf(next);
-    if (!isTableRow(text)) break;
-    run.push(text);
+    if (!isTableRow(textOf(next))) break;
+    after.push(textOf(next));
     w = next;
   }
-  return run.length >= 3 && isSeparatorRow(run[1]!);
+  before.reverse();
+  const run = [...before, textOf(here), ...after];
+  // The parser RETRIES: on a run whose start does not qualify it emits that one line
+  // as text and re-enters the loop at the next, so the first start whose TAIL
+  // qualifies wins and consumes the remainder of the run. Everything before it is
+  // prose. Walking only the run's start — the first spelling — called `ROW ROW SEP
+  // ROW` no table at all, while the renderer builds one from its second line.
+  for (let s = 0; s + 2 < run.length; s++) {
+    if (isSeparatorRow(run[s + 1]!)) return before.length >= s;
+  }
+  return false;
 }
 
 /**
@@ -1473,12 +1492,16 @@ function expandAndGuard(
  * the render-comparison exemption is actually justified by.
  *
  * Containment and mere INTERSECTION are indistinguishable at this call site, and that
- * is an ENUMERATION of the three shapes `markableRange` can return, not a sample:
- * (i) the range unchanged, where expansion has already widened over every link it cut;
- * (ii) marker-trimmed, where the start moves right past a leading `[-*+>#]`/digit run,
- * none of which can open a `[[`; (iii) cell-trimmed, whose boundaries are by
- * construction pipes OUTSIDE every link `wikilinkSpansIn` recognises. No branch can
- * hand back a range that cuts a recognised link. Containment is kept as the spelling
+ * is an ENUMERATION of all FOUR non-error shapes `markableRange` can return, not a
+ * sample: (i) the range unchanged (`!ownsLineStart`), where expansion has already
+ * widened over every link it cut; (ii) leading whitespace skipped with no marker
+ * matched, and whitespace cannot open a `[[`; (iii) marker-trimmed, where the start
+ * moves right past a leading `[-*+>#]`/digit run, none of which can open one either;
+ * (iv) cell-trimmed, whose boundaries are by construction pipes OUTSIDE every link
+ * `wikilinkSpansIn` recognises. No branch can hand back a range that cuts a
+ * recognised link. (An earlier spelling of this said "three shapes" and listed three
+ * — the whitespace branch was the one omitted; harmless, and the point of writing an
+ * enumeration down is that a reader can check it against the code.) Containment is kept as the spelling
  * because it is the stricter of the two and states the property the caller means.
  * (A 4 608-case fuzz over table/link/quote combinations found zero disagreements —
  * consistent with the enumeration, and not what it rests on.)
@@ -1578,8 +1601,12 @@ function markSpanRefusal(
   // pass the check anyway, so the waiver is as narrow as it reads.
   //
   // ⚠️ Stated rather than glossed: on a BACKTICKED link the waiver means the write
-  // really is irreversible — `` See `[[Some Page]]` for detail. `` marks, and
-  // `stripFactWrappers` then leaves `` `<Fact …>[[Some Page]]</Fact>` `` on the page.
+  // really is irreversible — and the QUOTE is part of the shape, so it is named:
+  // on `` See `[[Some Page]]` for detail here. `` a claim quoting `Some Page` expands
+  // to the whole link, marks, and leaves `` `<Fact …>[[Some Page]]</Fact>` `` behind
+  // the strip (`countFactWrappers` of the written page reads 0 — the tag really is
+  // invisible to the accounting there). A claim quoting the whole SENTENCE marks the
+  // sentence, strips cleanly, and does not exhibit this at all.
   // Measured identically on this commit and on both of its parents, i.e. pre-existing
   // and NOT introduced by the property below; the mark itself is pinned behaviour
   // (`integrate-wikilink.test.ts`), the irreversibility is pinned by nothing and is
@@ -1595,12 +1622,14 @@ function markSpanRefusal(
   // wrapper whose opening tag lands inside one is an orphan. The render comparison is
   // structurally blind to it ON A TABLE ROW: `parsePipeCells` splits at a `|` inside
   // backticks on BOTH sides, so neither render ever pairs that code span and the two
-  // agree. Measured: `` | `git log --oneline | head -5` runs it | … | `` shipped a
-  // mark whose `</Fact>` survived the strip, so the page keeps a tag no later write
-  // can take off. (An earlier spelling of this comment added "and whose
-  // `countFactWrappers` read 0" — re-measured, it reads 1. The 0 is true of the
-  // post-strip RESIDUE, not of the written page, and the difference is the whole
-  // point: the count is right, the strip is what fails.)
+  // agree. Measured on `` | `git log --oneline | head -5` runs it | … | ``: the
+  // shipped mark's `</Fact>` survives the strip, so the page keeps a tag no later
+  // write can take off. Two earlier spellings of this comment each added a
+  // `countFactWrappers` number — 0, then 1 — and BOTH were stated unconditionally
+  // while the count depends on which passage the model quoted (measured on the
+  // pre-guard tree: 0 for `git log --oneline | head -5`, 1 for the backticked quote
+  // or the whole row). The number is dropped rather than qualified; what holds for
+  // every quote is the strip failing, and that is what this property tests.
   if (stripFactWrappers(probe) !== stripFactWrappers(body)) {
     return "marking this passage would leave a tag the strip cannot remove";
   }
