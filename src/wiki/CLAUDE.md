@@ -159,27 +159,39 @@ Four things are deliberate and easy to undo by accident:
   mimir files pages as `archive/<yyyy-mm-dd>-<topic>.mdx`, so a date is how a
   reader finds one there — and as a bare key `2026` resolved to **121 of 485
   pages**, pushing the query's single real match below eight unrelated ones.
-  Requiring a `<prefix>-<number>` token is not enough on its own: `retro-2026`
-  and `q1-2026` are ordinary tag shapes. A PREFIXED `MELOSYS-2026` still
+  Requiring a `<prefix>-<number>` token instead was tried for one round and
+  reverted: it narrowed recall (`Sak 7588 løst` stopped being a reference), no
+  test pinned it, and it does not close the case anyway — `retro-2026` and
+  `q1-2026` are ordinary tag shapes that satisfy it exactly. A PREFIXED
+  `MELOSYS-2026` still
   resolves — naming the project is the only way anyone could tell the two apart.
   Every candidate the query yields is tried in order and the first that RESOLVES
   wins, which is what makes a permissive parse free.
-- ⚠️ **The ★ is `tabindex="-1"` and `pointer-events:none` while invisible.** As
-  an ordinary tab stop it put one per page ahead of the rail resizer (485 on
-  mimir, 953 on jarvis) in a list whose rows a keyboard cannot open anyway; as a
-  hit-testable invisible button it gave every row a tap target that toggled a
-  pin instead of opening the page on a device that never hovers. It also shares
+- ⚠️ **The ★ is `tabindex="-1"`, and hidden-until-hover only inside
+  `@media (hover: hover)`.** As an ordinary tab stop it put one per page ahead of
+  the rail resizer (485 on mimir, 953 on jarvis) in a list whose rows a keyboard
+  cannot open anyway. `pointer-events: none` on an invisible button was INERT for
+  the case it was written for — Chromium applies `:hover` on touchstart, so the
+  star became clickable before the click dispatched and a tap in that slot still
+  pinned instead of opening the page (measured with a real tap: pinned 1, article
+  0). Nothing invisible may be hit-testable, and on a device that cannot hover
+  the only way to satisfy that is to SHOW the star, so touch gets a visible one.
+  It also shares
   one flex slot with the date (`.wiki-list-end`) so it costs the row its own
   width and not the row's 8px gap as well — as a sibling of the title the pair
   measured 21px off `.wiki-list-title` on every row, 42px of title left at
   `RAIL_WIDTH_MIN` with a status pill and a ⚑.
 
-`renderList` restores scroll by ANCHOR, not by pixel offset: pinning inserts
-headers at the top, and a numeric restore moved the row under the cursor ~96px,
-so a second click at the same point pinned a different page. The anchor is
-measured against the list's client rect — `.wiki-list` is not positioned, so its
-rows' `offsetTop` resolves against the pane and comparing it with `scrollTop`
-over-scrolled by ten rows.
+`renderList` restores scroll by ANCHOR on **one** path — the ★ toggle, and only
+when the list is actually scrolled. A numeric restore there moved the row under
+the cursor ~96px, so a second click at the same point pinned a different page.
+Every other render keeps the plain numeric restore, because the anchor CHASES the
+previously-top row to its new position: applied to all renders it threw the
+reader 1256px down on a sort change, and applied at `scrollTop 0` it scrolled the
+new `Pinned` header out of view — the only confirmation the click did anything.
+The anchor is measured against the list's client rect: `.wiki-list` is not
+positioned, so its rows' `offsetTop` resolves against the pane, and comparing
+that with `scrollTop` over-scrolled by ten rows.
 
 Acceptance: `views/components/wiki-recents.test.ts` (the state space, enumerated)
 and `e2e/wiki-rail-recents.spec.ts` (two temp wikis in ONE process, so a

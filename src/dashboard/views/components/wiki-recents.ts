@@ -231,12 +231,13 @@ export interface JiraKeyJump {
  *    different issue) is not reported as referencing `MELOSYS-7588`. The bare
  *    branch had that boundary from the start and the prefixed branch was a plain
  *    `indexOf`, so the MORE specific query was the one that lied.
- *  - a bare query matches `<any prefix>-<num>`, never a naked number. That is
- *    what keeps a `2026` query off a wiki whose pages are named
- *    `archive/2026-08-27-*.md`: dates live in relPaths and titles, and matching
- *    a loose digit run there grew a Jira header over an entire wiki (measured on
- *    a mimir-shaped fixture). A page that references an issue writes
- *    `MELOSYS-7588`, not a naked `7588`.
+ *  - a bare query matches the number itself, digit-bounded — `Sak 7588 løst` is
+ *    how a person writes a reference in prose. Requiring a `<prefix>-<number>`
+ *    token here was tried for one round and reverted: it narrowed recall, no
+ *    test pinned it, and the case it was reached for (a `2026` query resolving
+ *    to 121 of 485 pages on mimir) is closed at the CANDIDATE stage by the year
+ *    range above — which had to close it anyway, since `retro-2026` is an
+ *    ordinary tag and satisfies the token rule exactly.
  *
  * Input order is preserved inside each group (callers pass the rail's current
  * sort), and an own page never appears again among the references.
@@ -254,7 +255,7 @@ export function jiraKeyJump(pages: WikiListing[], parsed: ParsedJiraKey): JiraKe
   // Safari only learned in 16.4.
   const inTextRe = parsed.key
     ? new RegExp(`(^|[^0-9])${parsed.key}([^0-9]|$)`)
-    : new RegExp(`(^|[^a-z0-9])[a-z][a-z0-9]{1,9}-${parsed.num}([^0-9]|$)`);
+    : new RegExp(`(^|[^0-9])${parsed.num}([^0-9]|$)`);
   const mentions = (text: string): boolean => inTextRe.test((text || "").toLowerCase());
 
   const own: WikiListing[] = [];

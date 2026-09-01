@@ -581,13 +581,17 @@ function restoreScrollAnchor(listEl: HTMLElement, prev: number, anchor: ScrollAn
   if (!prev && !anchor) return;
   listEl.scrollTop = prev; // the innerHTML swap reset it to 0
   if (!anchor) return;
+  // The browser clamps when the new list is shorter, and the correction below is
+  // relative to where we ACTUALLY are — computing it from `prev` overshot by the
+  // difference on any render that shortens the list.
+  const base = listEl.scrollTop;
   const listTop = listEl.getBoundingClientRect().top;
   const rows = listEl.querySelectorAll<HTMLElement>(".wiki-list-item");
   for (let i = 0; i < rows.length; i++) {
     const el = rows[i]!;
     if (el.getAttribute("data-relpath") !== anchor.relPath) continue;
     const now = el.getBoundingClientRect().top - listTop;
-    listEl.scrollTop = Math.max(0, prev + (now - anchor.delta));
+    listEl.scrollTop = Math.max(0, base + (now - anchor.delta));
     return;
   }
 }
@@ -657,7 +661,16 @@ function renderList(scrollSkipRelPath?: string): void {
   // every path — a background refresh can never yank a reader to the top.
   const listEl = document.getElementById("wikiList")!;
   const scroll = listEl.scrollTop;
-  const anchor = captureScrollAnchor(listEl, scrollSkipRelPath);
+  // ⚠️ Anchoring is for the ONE render that inserts content ABOVE the reader —
+  // the ★ toggle, which is where a numeric restore moved the row under the
+  // cursor. Every other path keeps the numeric restore it always had, and two
+  // regressions found in review say why: the anchor CHASES the previously-top
+  // row to its new position, so a SORT change at the top of the list threw the
+  // reader 1256px down (measured), and pinning at the top scrolled the new
+  // Pinned header out of view — the only confirmation the click did anything.
+  // `scroll === 0` is never anchored either: at the top, where the reader was IS
+  // the top.
+  const anchor = scrollSkipRelPath && scroll ? captureScrollAnchor(listEl, scrollSkipRelPath) : null;
   listEl.innerHTML = html || '<div class="wiki-conn-empty">No pages match.</div>';
   restoreScrollAnchor(listEl, scroll, anchor);
   // `rail.shown` counts DISTINCT pages among the rendered rows, so a page that
@@ -987,6 +1000,9 @@ function setAtlasFull(on: boolean): void {
 }
 
 function renderStart(): void {
+  // Leaving for the start view abandons any navigation still in flight: its
+  // response must not write itself to the head of the PERSISTENT recents list.
+  navToken++;
   // Returning to the browse view is the moment a page set stashed during reading
   // becomes safe to apply — before anything below reads `allPages`.
   applyPendingPages();
@@ -1506,9 +1522,9 @@ document.body.addEventListener("click", (e) => {
   }
   // The rail's ★ and `clear` live inside a `[data-relpath]` row; they are the
   // list's own listener's business, and opening the page as well is not what a
-  // click on either means. Skipped HERE rather than by stopping propagation
-  // there, so the other document-level listeners (the chat-options click-away)
-  // still run.
+  // click on either means. Skipped HERE rather than by stopping propagation in
+  // that listener, so one widget's handler cannot silence document-level
+  // listeners that have nothing to do with it.
   if (target.closest && target.closest("[data-pin], [data-clear-recents]")) return;
   const link = target.closest ? target.closest(NAV_LINK_SELECTOR) : null;
   if (!link) return;
@@ -1530,11 +1546,19 @@ document.body.addEventListener("click", (e) => {
  * whatever `[data-relpath]` a click landed in. A listener on the list runs
  * first because it is deeper in the tree.
  *
- * ⚠️ It deliberately does NOT call `stopPropagation`. That was the first cut,
- * and it also silenced `wiki-chat-options.ts`'s document-level click-away: with
- * the Discuss popover open, a click on a ★ toggled the pin and left the popover
- * standing. The body delegate skips these two controls by selector instead, so
- * every other document listener still sees the click.
+ * ⚠️ It deliberately does NOT call `stopPropagation`; the body delegate skips
+ * these two controls by selector instead, so a handler on ONE widget cannot
+ * silence unrelated document-level listeners.
+ *
+ * **Correcting the claim this comment first carried**, which a verify pass
+ * disproved by measurement: the failure named was "with the Discuss popover
+ * open, a click on a ★ leaves the popover standing". It cannot happen. The
+ * popover renders a full-viewport scrim (`.wiki-chatopt-scrim`), so a real click
+ * never reaches the rail at all — and forced past the scrim, the popover stays
+ * open regardless, because `shouldCloseChatOptions` returns false while
+ * unattached and `renderList` below swaps the clicked element out of the
+ * document synchronously, before any document listener runs. The rule stands as
+ * a rule; the story about it was invented.
  */
 document.getElementById("wikiList")!.addEventListener("click", (e) => {
   const target = e.target as HTMLElement;

@@ -224,10 +224,6 @@ test.describe("Wiki rail: recents, pins, key jump", () => {
     await row.locator(".wiki-pin").click();
 
     await expect(page.locator(".wiki-start")).toBeVisible();
-    // …and the ★ is inert while invisible, so a touch device (which never
-    // hovers) taps the ROW rather than a control it cannot see.
-    await expect(page.locator(`.wiki-list-item[data-relpath="${ARSAVREGNING}"] .wiki-pin`))
-      .toHaveCSS("pointer-events", "none");
     expect(await sectionLabels(page)).toEqual(["Pinned", "Other pages"]);
     expect(await relPathsIn(page, "pinned")).toEqual([KILDESKATT]);
     await expect(page.locator(`.wiki-list-item[data-relpath="${KILDESKATT}"]`)).toHaveCount(1);
@@ -491,5 +487,122 @@ test.describe("Wiki rail: recents, pins, key jump", () => {
 
     // The page the reader actually settled on is the newest recent.
     expect((await relPathsIn(page, "recent"))[0]).toBe(KILDESKATT);
+  });
+
+  /**
+   * Two regressions the anchored scroll restore injected, both invisible to the
+   * case it was written for because that one scrolls the list first.
+   *
+   * The anchor chases a row to its new position, which is right when a render
+   * INSERTS above the reader and wrong when it REORDERS — and wrong at the top
+   * of the list in both cases, where "keep the reader where they were" means
+   * "stay at the top", not "follow row 1 wherever it went".
+   */
+  test("changing the sort at the top of the list leaves the reader at the top", async ({
+    page,
+  }) => {
+    await openRail(page);
+    expect(await page.locator("#wikiList").evaluate((el) => el.scrollTop)).toBe(0);
+    await page.selectOption("#wikiSort", "title");
+    expect(await page.locator("#wikiList").evaluate((el) => el.scrollTop)).toBe(0);
+    // …and the first row of the new order is the one ON SCREEN. (Which page
+    // that is depends on the collation of "Å", which is not what this pins.)
+    await expect(page.locator(".wiki-list-item").first()).toBeInViewport();
+  });
+
+  test("pinning the top row leaves the Pinned header on screen", async ({ page }) => {
+    await openRail(page);
+    const row = page.locator(".wiki-list-item").first();
+    await row.hover();
+    await row.locator(".wiki-pin").click();
+
+    // The whole confirmation that anything happened. Scrolled out of view, the
+    // row just vanishes from where it was.
+    const header = page.locator('.wiki-list-sec[data-section="pinned"]');
+    await expect(header).toBeVisible();
+    const headerBox = (await header.boundingBox())!;
+    const listBox = (await page.locator("#wikiList").boundingBox())!;
+    expect(headerBox.y).toBeGreaterThanOrEqual(listBox.y - 1);
+  });
+
+  /**
+   * A navigation the reader ABANDONS must not write itself to the persistent
+   * recents list. `loadExplainer` and `fetchAndRenderPage` bump the token; the
+   * return-to-start path did not, so a slow response for a page the reader
+   * backed out of still won the top of Recently opened.
+   */
+  test("backing out to the start view before the response lands records nothing", async ({
+    page,
+  }) => {
+    await openRail(page);
+    // One page opened for real first: a HELD navigation pushes no history entry,
+    // so without this `goBack` leaves the reader page entirely and the popstate
+    // path — the one that calls `renderStart` — is never exercised.
+    await page.locator(`.wiki-list-item[data-relpath="${KILDESKATT}"]`).click();
+    await expect(page.locator(".wiki-bc-cur")).toContainText("Kildeskatt");
+
+    let release: (() => void) | undefined;
+    const held = new Promise<void>((r) => (release = r));
+    await page.route(`**/api/wiki/page?relPath=${encodeURIComponent(ARSAVREGNING)}*`, async (route) => {
+      await held;
+      await route.continue();
+    });
+
+    await page.locator(`.wiki-list-item[data-relpath="${ARSAVREGNING}"]`).click();
+    await page.goBack();
+    await expect(page.locator(".wiki-start")).toBeVisible();
+
+    release!();
+    await page.waitForTimeout(400);
+    // The abandoned page is NOT at the head — only the one actually read is there.
+    expect(await relPathsIn(page, "recent")).toEqual([KILDESKATT]);
+  });
+});
+
+/**
+ * The ★ on a device that never hovers.
+ *
+ * `pointer-events: none` alone was INERT here, and only a real tap showed it:
+ * Chromium applies `:hover` on touchstart, so the invisible star became
+ * clickable before the click dispatched and a tap in that slot pinned instead of
+ * opening the page (measured: pinned 1, article 0). The rule is that nothing
+ * INVISIBLE is hit-testable — which on a device that cannot hover means the star
+ * has to be visible, so a tap on it is a choice rather than an accident.
+ *
+ * Asserting the CSS declaration would restate the stylesheet; these tap.
+ */
+test.describe("Wiki rail: the ★ on a touch device", () => {
+  test.use({ hasTouch: true });
+
+  test("the ★ is VISIBLE, so a tap on it is deliberate", async ({ page }) => {
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}`);
+    await expect(page.locator(".wiki-list-item").first()).toBeVisible();
+
+    const row = page.locator(`.wiki-list-item[data-relpath="${KILDESKATT}"]`);
+    // `boundingBox()` reports the LAYOUT position, which for a row further down
+    // a scrolling rail is outside the viewport — a tap there lands on nothing
+    // and the test passes or fails for reasons that have nothing to do with the
+    // ★ (measured: y=1767 in a 720px viewport, `elementFromPoint` → null).
+    await row.scrollIntoViewIfNeeded();
+    await expect(row.locator(".wiki-pin")).toHaveCSS("opacity", "1");
+
+    const pinBox = (await row.locator(".wiki-pin").boundingBox())!;
+    await page.touchscreen.tap(pinBox.x + pinBox.width / 2, pinBox.y + pinBox.height / 2);
+    await expect(rowsIn(page, "pinned")).toHaveCount(1);
+    // …and it pinned, rather than also opening the page.
+    expect(await page.locator(".wiki-article").count()).toBe(0);
+  });
+
+  test("a tap on the row still opens the page", async ({ page }) => {
+    await page.goto(`${BASE}/wiki?wiki=${WIKI}`);
+    await expect(page.locator(".wiki-list-item").first()).toBeVisible();
+
+    const row = page.locator(`.wiki-list-item[data-relpath="${KILDESKATT}"]`);
+    await row.scrollIntoViewIfNeeded();
+    const titleBox = (await row.locator(".wiki-list-title").boundingBox())!;
+    await page.touchscreen.tap(titleBox.x + 5, titleBox.y + 5);
+
+    await expect(page.locator(".wiki-bc-cur")).toContainText("Kildeskatt");
+    expect(await page.locator('.wiki-list-sec[data-section="pinned"]').count()).toBe(0);
   });
 });

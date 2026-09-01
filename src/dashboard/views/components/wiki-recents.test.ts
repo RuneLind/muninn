@@ -746,3 +746,31 @@ describe("fix round 1 — the three root causes", () => {
     expect(rows[0]!.section).toBe("recent");
   });
 });
+
+describe("fix round 2 — what the verify pass found", () => {
+  const P = (relPath: string, title = "Untitled", tags: string[] = []) =>
+    page({ relPath, title, tags });
+
+  test("a bare number in PROSE is a reference — the recall the round-1 rule quietly removed", () => {
+    // `Sak 7588 løst` names the issue the way a person writes it. Requiring a
+    // `<prefix>-<number>` token here bought nothing the year range does not
+    // already close, and it was not pinned by any test.
+    const prose = P("archive/notat.md", "Sak 7588 løst i går");
+    expect(jiraKeyJump([prose], parseJiraKey("7588")!).refs).toEqual([prose]);
+  });
+
+  test("…still bounded by digits, so a longer number is not a reference", () => {
+    const longer = P("archive/annet.md", "Sak 75880 og 17588");
+    expect(jiraKeyJump([longer], parseJiraKey("7588")!).total).toBe(0);
+  });
+
+  test("a <prefix>-<year> TAG really would match — the year range is what closes it", () => {
+    // Both halves, because either alone is vacuous: the tag shape IS a hazard…
+    const tagged = P("archive/retro.md", "Retro", ["retro-2026"]);
+    expect(jiraKeyJump([tagged], { key: null, num: "2026", display: "2026" }).refs).toEqual([
+      tagged,
+    ]);
+    // …and the reason it never fires is that `2026` is not a candidate at all.
+    expect(parseJiraKeyCandidates("2026")).toEqual([]);
+  });
+});

@@ -296,20 +296,26 @@ export async function renderWikiPage(opts?: {
        RAIL_WIDTH_MIN with a status pill and a ⚑ — paid permanently by a reader
        who never pins anything. */
     .wiki-list-end { display: flex; align-items: flex-start; gap: 2px; flex-shrink: 0; }
-    /* Hidden until the row is hovered; always shown once pinned. opacity, never
-       display: the slot stays reserved, so hovering a row cannot re-wrap its
-       two-line title and change the row's height under a moving cursor.
-       pointer-events:none while invisible, the same pairing the drag handle
-       below uses — without it every row carried an invisible tap target, and on
-       a touch device (no hover) a tap in that slot toggled a pin instead of
-       opening the page. */
+    /* The star is VISIBLE by default, and hidden-until-hover only where hover
+       really exists. pointer-events:none alone was INERT for the case it was
+       written for: Chromium applies :hover on touchstart, so an invisible star
+       became clickable before the click dispatched and a tap in that slot still
+       pinned instead of opening the page (measured with a real touchscreen tap:
+       pinned 1, article 0). A control nobody can see must not be hit-testable,
+       and on a device that cannot hover the only way to satisfy that is to SHOW
+       it — so touch gets a visible star it can choose to tap, and a pointer gets
+       the quiet hover reveal.
+       opacity, never display, in both branches: the slot stays reserved either
+       way, so hovering a row cannot re-wrap its two-line title and change the
+       row's height under a moving cursor. */
     .wiki-pin {
       background: none; border: 0; padding: 0; cursor: pointer;
       font-size: 10.5px; line-height: 1.55; color: var(--status-warning);
-      flex-shrink: 0; opacity: 0; pointer-events: none; transition: opacity .12s;
+      flex-shrink: 0; opacity: 1; transition: opacity .12s;
     }
-    .wiki-pin.on, .wiki-list-item:hover .wiki-pin, .wiki-pin:focus-visible {
-      opacity: 1; pointer-events: auto;
+    @media (hover: hover) {
+      .wiki-pin { opacity: 0; pointer-events: none; }
+      .wiki-pin.on, .wiki-list-item:hover .wiki-pin { opacity: 1; pointer-events: auto; }
     }
     /* Drag handle on the rail's right edge. right:-14px resolves against the
        PADDING box, so the 14px box starts ON the pane's 1px border and runs 13px
