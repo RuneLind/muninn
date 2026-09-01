@@ -80,6 +80,17 @@ import {
 } from "./copy-path.ts";
 import { enhanceMermaid } from "./wiki-mermaid.ts";
 import { initRailResize } from "./wiki-rail-resize.ts";
+import {
+  buildRail,
+  type RailEntry,
+} from "./wiki-recents.ts";
+import {
+  clearRecents,
+  readPins,
+  readRecents,
+  recordRecent,
+  togglePinned,
+} from "./wiki-recents-store.ts";
 import { atlasBodyHtml, initAtlas } from "./wiki-atlas.ts";
 import { enhanceCodeTabs } from "./code-tabs.ts";
 import { enhanceCodeBlocks } from "./code-block-chrome.ts";
@@ -502,14 +513,46 @@ function syncFilters(autoOpen = true): void {
   if (autoOpen && details && count && !details.open) details.open = true;
 }
 
+/** The reader's own recall lists for THIS wiki, read once at boot and kept in
+ *  step by the two writers below — re-reading localStorage inside `renderList`
+ *  would put a synchronous storage hit on every keystroke in the search box. */
+let recents: string[] = readRecents(WIKI);
+let pins: string[] = readPins(WIKI);
+
+/** ★ — hover-only until pinned. `opacity` rather than `display`, so the slot is
+ *  always reserved and a pin never reflows the row (see wiki-page.ts). */
+function pinBtnHtml(pinned: boolean): string {
+  const label = pinned ? "Unpin this page" : "Pin this page";
+  return (
+    `<button type="button" class="wiki-pin${pinned ? " on" : ""}" data-pin="1"` +
+    ` aria-pressed="${pinned}" title="${label}" aria-label="${label}">\u2605</button>`
+  );
+}
+
 function renderList(): void {
   const mode = sortMode();
   // ONE anchored instant for the sort AND its row labels, so the date a row shows is
   // the date it sorted on even for a page sitting at the 48h future-guard boundary.
   const now = recencyNow();
-  const pages = sortPages(filterPages(allPages, filters), mode, now);
+  const filtered = sortPages(filterPages(allPages, filters), mode, now);
+  // The key jump reads the facets WITHOUT the query (the query is the key). Only
+  // computed when the query could name one — on every other keystroke this is the
+  // same single `filterPages` pass the rail has always done.
+  const facetOnly = /[0-9]/.test(filters.q)
+    ? sortPages(filterPages(allPages, { ...filters, q: "" }), mode, now)
+    : filtered;
+  const rail = buildRail({ filtered, facetOnly, filters, recents, pins });
   let html = "";
-  pages.forEach((p) => {
+  rail.entries.forEach((entry: RailEntry) => {
+    if (entry.kind === "header") {
+      html +=
+        `<div class="wiki-list-sec" data-sec="${esc(entry.section)}">` +
+        `<span class="wiki-sec-label">${esc(entry.label)}</span>` +
+        (entry.clear ? `<button type="button" class="wiki-sec-clear" data-clear-recents="1">clear</button>` : "") +
+        `</div>`;
+      return;
+    }
+    const p = entry.page;
     // In recency modes show the date we actually sorted on (mtime/birthtime or
     // frontmatter) — otherwise a frontmatter-less page would show nothing while
     // sitting at the top, which is exactly what looked broken before.
@@ -525,7 +568,7 @@ function renderList(): void {
     // while no relPath is known — see `wiki-nav.ts`.
     const active = isActivePage(p, { name: currentName, relPath: currentRelPath });
     html +=
-      `<div class="wiki-list-item${active ? " active" : ""}" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}">` +
+      `<div class="wiki-list-item${active ? " active" : ""}" data-sec="${esc(entry.section)}" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}">` +
       `<div class="wiki-type-dot type-${esc(p.type)}"></div>` +
       // `title=` carries the full name: the row ellipsizes, and a status pill +
       // ⚑ flag eat enough width that plan titles routinely clip.
@@ -534,6 +577,8 @@ function renderList(): void {
       // two surfaces show the same two facts and must not read differently.
       statusPillHtml(p) +
       followupFlagHtml(p) +
+      // The ★ sits before the date so the date stays the row's right-hand anchor.
+      pinBtnHtml(entry.pinned) +
       `<div class="wiki-list-meta">${esc(meta)}</div>` +
       `</div>`;
   });
@@ -546,7 +591,10 @@ function renderList(): void {
   const scroll = listEl.scrollTop;
   listEl.innerHTML = html || '<div class="wiki-conn-empty">No pages match.</div>';
   if (scroll) listEl.scrollTop = scroll;
-  document.getElementById("wikiCount")!.textContent = pages.length + " / " + allPages.length;
+  // `rail.shown` counts DISTINCT pages among the rendered rows, so a page that
+  // appears both in a recall section and in the listing below is one, and a jump
+  // hit the query itself would not have matched is counted.
+  document.getElementById("wikiCount")!.textContent = rail.shown + " / " + allPages.length;
 }
 
 /** The five payload-derived facet renders, in one place so the boot load and a
@@ -1149,6 +1197,9 @@ function loadExplainer(m: WikiListing, push: boolean): void {
   // The listing IS the identity here (no page response to wait for), so the
   // active-row test gets its relPath immediately.
   currentRelPath = m.relPath;
+  // Same rule as `fetchAndRenderPage`: an explainer opened is an explainer
+  // recently opened. Its own `renderList()` at the end of this function repaints.
+  recents = recordRecent(WIKI, m.relPath);
   navInFlight = false; // `currentName` now carries the "article" signal on its own
   if (push) {
     history.pushState({ relPath: m.relPath }, "", pageUrlByRelPath(m.relPath));
@@ -1290,6 +1341,10 @@ function fetchAndRenderPage(url: string, push: boolean): void {
       // resolves server-side, and the active row must key on the page that
       // actually came back.
       currentRelPath = data.meta.relPath || null;
+      // Viewing IS opening: Back/forward and a cold `?relPath=` deep link all
+      // count, because "the page I had open yesterday" arrives by every one of
+      // those routes. `renderList` below repaints the section.
+      if (currentRelPath) recents = recordRecent(WIKI, currentRelPath);
       renderBreadcrumb(data.meta);
       if (push) {
         // Push the resolved relPath whenever we have one, even for a by-name
@@ -1383,6 +1438,37 @@ document.body.addEventListener("click", (e) => {
   if (!targetPage) return;
   e.preventDefault();
   openNavTarget(targetPage, true);
+});
+
+/**
+ * The rail's two own controls: the ★ pin on every row, and `clear` on the
+ * Recently-opened header.
+ *
+ * On `#wikiList`, not on the body delegate below — both controls sit INSIDE a
+ * `.wiki-list-item` (or a header inside the list), and the body delegate opens
+ * whatever `[data-relpath]` a click landed in. A listener on the list runs first
+ * because it is deeper in the tree, so `stopPropagation()` here is what keeps a
+ * pin from also navigating.
+ */
+document.getElementById("wikiList")!.addEventListener("click", (e) => {
+  const target = e.target as HTMLElement;
+  if (!target.closest) return;
+  if (target.closest("[data-clear-recents]")) {
+    e.preventDefault();
+    e.stopPropagation();
+    recents = clearRecents(WIKI);
+    renderList();
+    return;
+  }
+  const pin = target.closest("[data-pin]");
+  if (!pin) return;
+  e.preventDefault();
+  e.stopPropagation();
+  const row = pin.closest(".wiki-list-item");
+  const relPath = row?.getAttribute("data-relpath");
+  if (!relPath) return;
+  pins = togglePinned(WIKI, relPath);
+  renderList();
 });
 
 (document.getElementById("wikiSearch") as HTMLInputElement).addEventListener("input", (e) => {

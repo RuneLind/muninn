@@ -268,6 +268,36 @@ export async function renderWikiPage(opts?: {
     .wiki-list-item .wiki-list-meta { margin-top: 2px; }
     .wiki-list-item .wiki-status { margin-top: 1px; }
     .wiki-list-item .wiki-followup-flag { margin-top: 2px; }
+
+    /* Recall sections (Pinned · Recently opened · All pages) and the Jira-key
+       jump header. One rule for all four — they are the same furniture, and the
+       jump differs only by its tinted background. */
+    .wiki-list-sec {
+      display: flex; align-items: center; gap: 6px;
+      padding: 10px 10px 3px; font-size: 10px; letter-spacing: .07em;
+      text-transform: uppercase; color: var(--text-faint);
+    }
+    .wiki-list-sec[data-sec="jump"] {
+      text-transform: none; letter-spacing: 0; font-size: 11.5px;
+      color: var(--text-dim); background: var(--bg-surface);
+      border-radius: 6px; margin: 2px 0 3px; padding: 6px 10px;
+    }
+    .wiki-sec-clear {
+      margin-left: auto; background: none; border: 0; padding: 0; cursor: pointer;
+      font: inherit; letter-spacing: inherit; text-transform: inherit;
+      color: var(--accent-light);
+    }
+    .wiki-sec-clear:hover { text-decoration: underline; }
+    /* ★ hover-only. opacity, never display: the slot is reserved on every
+       row, so pinning a page cannot reflow the row under the cursor — and the
+       button stays keyboard-reachable while invisible, which is why
+       :focus-visible has to reveal it. */
+    .wiki-pin {
+      background: none; border: 0; padding: 0 1px; cursor: pointer;
+      font-size: 11px; line-height: 1.3; color: var(--status-warning);
+      flex-shrink: 0; margin-top: 2px; opacity: 0; transition: opacity .12s;
+    }
+    .wiki-pin.on, .wiki-list-item:hover .wiki-pin, .wiki-pin:focus-visible { opacity: 1; }
     /* Drag handle on the rail's right edge. right:-14px resolves against the
        PADDING box, so the 14px box starts ON the pane's 1px border and runs 13px
        into the gap (measured at 1400px: pane border-box right edge 324, handle

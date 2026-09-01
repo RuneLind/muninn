@@ -57,6 +57,9 @@ export const E2E_PORTS = {
   // are dimmed.
   "wiki-copy-path": 3038,
   "wiki-rail-width": 3039,
+  // Two wikis, ONE process: the recents/pins keys are per wiki, and a spec with
+  // one root cannot tell a per-wiki key from a global one.
+  "wiki-rail-recents": 3040,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,
