@@ -336,6 +336,25 @@ export interface RailModel {
  * Recently-opened row from the ai domain is a row the active filter says should
  * not be there.
  */
+/**
+ * Is this page pinned? THE pin comparison — exported because there were two, and
+ * they disagreed: `buildRail` resolved pins through `findPageByRelPath`
+ * (case- and separator-insensitive, for the reason that function's own doc
+ * gives) while the rail's DOM painter used a raw `indexOf`. Measured live, a
+ * pins key holding `CONCEPTS/FILLER-56.MD` rendered the page under `Pinned`
+ * while its ★ read "Pin this page"; clicking it appended a SECOND entry for the
+ * same page, which then rendered twice under a `#wikiCount` that said otherwise
+ * — the "every page appears exactly ONCE" invariant, broken by the two halves
+ * answering differently.
+ *
+ * One function, so a second spelling of the comparison is a change to this line
+ * rather than a new one somewhere else.
+ */
+export function isPinnedRelPath(pins: readonly string[], relPath: string): boolean {
+  const want = normalizeRel(relPath);
+  return pins.some((p) => normalizeRel(p) === want);
+}
+
 export function railSectionsVisible(filters: WikiFilters): boolean {
   return (
     !filters.q.trim() &&
@@ -406,8 +425,7 @@ function resolve(relPaths: string[], pages: WikiListing[]): WikiListing[] {
 export function buildRail(input: RailInput): RailModel {
   const { filtered, facetOnly, filters, recents, pins } = input;
   const entries: RailEntry[] = [];
-  const pinSet = new Set(pins.map(normalizeRel));
-  const isPinned = (p: WikiListing): boolean => pinSet.has(normalizeRel(p.relPath));
+  const isPinned = (p: WikiListing): boolean => isPinnedRelPath(pins, p.relPath);
 
   /** Every page already rendered above, so the remainder can drop it. */
   const claimed = new Set<string>();

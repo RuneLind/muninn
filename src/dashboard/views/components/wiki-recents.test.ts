@@ -17,6 +17,7 @@ import {
   jumpHeaderLabel,
   parseJiraKey,
   parseJiraKeyCandidates,
+  isPinnedRelPath,
   parseRelPathList,
   pinsKey,
   pushRecent,
@@ -787,5 +788,31 @@ describe("fix round 3 — the class check", () => {
   test("…and a prefixed query still needs the prefix on the address", () => {
     const bare = page({ relPath: "sources/jira/7588.md", title: "Utvid" });
     expect(jiraKeyJump([bare], parseJiraKey("MELOSYS-7588")!).own).toEqual([]);
+  });
+});
+
+describe("fix round 5 — one pin comparison, not two", () => {
+  test("a pin is recognised however the stored relPath is spelled", () => {
+    // `buildRail` resolves pins through `findPageByRelPath` (case- and
+    // separator-insensitive) while the DOM painter used a raw `indexOf`, so the
+    // two answered differently for the same state — measured live: the section
+    // said pinned, the ★ said not, and clicking it added a SECOND entry for one
+    // page, which then rendered twice under a count that said otherwise.
+    expect(isPinnedRelPath(["CONCEPTS/FILLER-56.MD"], "concepts/Filler-56.md")).toBe(true);
+    expect(isPinnedRelPath(["archive\\notes.md"], "archive/notes.md")).toBe(true);
+    expect(isPinnedRelPath(["concepts/a.md"], "concepts/b.md")).toBe(false);
+    expect(isPinnedRelPath([], "concepts/a.md")).toBe(false);
+  });
+
+  test("…and buildRail's own pinned flag uses that same comparison", () => {
+    const p = page({ relPath: "Archive/Notes.md", title: "Notes" });
+    const rail = buildRail({
+      filtered: [p], facetOnly: [p], filters: INERT,
+      recents: [], pins: ["archive/notes.md"],
+    });
+    const rows = rail.entries.filter((e) => e.kind === "row") as Array<
+      Extract<RailEntry, { kind: "row" }>
+    >;
+    expect(rows.map((r) => [r.section, r.pinned])).toEqual([["pinned", true]]);
   });
 });

@@ -384,9 +384,15 @@ test.describe("Wiki rail: recents, pins, key jump", () => {
    * (render cause × scroll position × whether the list reorders) — wrong in
    * three different ways.
    *
-   * So the toggle does not re-render at all: it flips that one row's ★ in place
-   * and the sections rebuild on the next render the reader causes. Nothing moves,
-   * which is why there is no scroll rule left to get wrong.
+   * So the toggle does not re-render at all: it repaints the ★ of every row from
+   * the stored pin list — every row, because a toggle at `PINS_MAX` displaces a
+   * second page — and the sections rebuild at the reader's next render.
+   *
+   * ⚠️ "Nothing moves" is true of the CLICK, not of every later render: the one
+   * that first paints a new section can be the BACKGROUND listing refresh, which
+   * then shifts content by the section headers' height on a repaint nothing on
+   * screen explains. Bounded, named in `src/wiki/CLAUDE.md`, and only on a
+   * render that already repaints the list.
    */
   test("pinning moves nothing under the reader", async ({ page }) => {
     await openRail(page);
@@ -562,6 +568,57 @@ test.describe("Wiki rail: recents, pins, key jump", () => {
     );
     expect(stored).not.toContain(victim);
     expect(stored).toHaveLength(PINS_MAX);
+  });
+
+  /**
+   * The painter and the renderer must answer the SAME question about a pin.
+   *
+   * `buildRail` resolves pins case- and separator-insensitively; the DOM painter
+   * used a raw `indexOf`. Measured live, a pins key holding a differently-cased
+   * relPath rendered the page under `Pinned` while its ★ read "Pin this page" —
+   * and clicking that star appended a SECOND entry for one page, which then
+   * rendered twice under a `#wikiCount` that said otherwise. That is the
+   * "every page appears exactly ONCE" invariant, broken by the two halves
+   * disagreeing.
+   */
+  test("a differently-cased stored pin is pinned to BOTH halves", async ({ page }) => {
+    await openRail(page);
+    await page.evaluate(
+      ([key, rel]: [string, string]) => localStorage.setItem(key, JSON.stringify([rel])),
+      [`${PINS_KEY_PREFIX}${WIKI}`, KILDESKATT.toUpperCase()] as [string, string],
+    );
+    await reloadKeepingStore(page);
+
+    // The renderer resolved it…
+    expect(await relPathsIn(page, "pinned")).toEqual([KILDESKATT]);
+    // …and the painter agrees, which is what stops the next click from adding a
+    // second entry for the same page.
+    await expect(
+      page.locator(`.wiki-list-item[data-relpath="${KILDESKATT}"] .wiki-pin`),
+    ).toHaveAttribute("aria-pressed", "true");
+
+    // Pinning something ELSE repaints every row; the mismatch used to surface here.
+    const other = page.locator(`.wiki-list-item[data-relpath="${ARSAVREGNING}"]`);
+    await other.hover();
+    await other.locator(".wiki-pin").click();
+    await expect(
+      page.locator(`.wiki-list-item[data-relpath="${KILDESKATT}"] .wiki-pin`),
+    ).toHaveAttribute("aria-pressed", "true");
+
+    await rerender(page);
+    expect(await page.locator(`.wiki-list-item[data-relpath="${KILDESKATT}"]`).count()).toBe(1);
+    await expect(page.locator("#wikiCount")).toHaveText(`${ALL_PAGES} / ${ALL_PAGES}`);
+  });
+
+  /** An `aria-label` overrides a button's text, so it is the string a screen
+   *  reader actually announces — and the one that must move with the state. */
+  test("the ★'s accessible name follows the pin state", async ({ page }) => {
+    await openRail(page);
+    const row = page.locator(`.wiki-list-item[data-relpath="${KILDESKATT}"]`);
+    await expect(row.locator(".wiki-pin")).toHaveAttribute("aria-label", "Pin this page");
+    await row.hover();
+    await row.locator(".wiki-pin").click();
+    await expect(row.locator(".wiki-pin")).toHaveAttribute("aria-label", "Unpin this page");
   });
 
   /**

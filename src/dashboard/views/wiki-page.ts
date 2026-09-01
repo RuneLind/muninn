@@ -322,7 +322,11 @@ export async function renderWikiPage(opts?: {
        Of this media state space's four cells two are pinned by tests; the
        HYBRID cell is correct by construction only, because Chromium's touch
        emulation forces hover:none regardless of Emulation.setEmulatedMedia and
-       the combination cannot be built in the harness. */
+       the combination cannot be built in the harness. That unbuildability is a
+       CHROMIUM fact and playwright.config.ts runs only Chromium, so a WebKit or
+       Firefox project could pin it. And not(...) is MQ4 boolean syntax: a browser
+       that cannot parse it (Safari < 16.4, older Firefox) drops this whole block
+       and shows the star on every row — the benign direction. */
     @media (hover: hover) and (not (any-pointer: coarse)) {
       .wiki-pin { opacity: 0; pointer-events: none; }
       .wiki-pin.on, .wiki-list-item:hover .wiki-pin { opacity: 1; pointer-events: auto; }

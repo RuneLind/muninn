@@ -80,7 +80,7 @@ import {
 } from "./copy-path.ts";
 import { enhanceMermaid } from "./wiki-mermaid.ts";
 import { initRailResize } from "./wiki-rail-resize.ts";
-import { buildRail, type RailEntry } from "./wiki-recents.ts";
+import { buildRail, isPinnedRelPath, type RailEntry } from "./wiki-recents.ts";
 import {
   clearRecents,
   readPins,
@@ -556,7 +556,10 @@ function paintPinState(): void {
     const btn = rows[i]!.querySelector<HTMLElement>(".wiki-pin");
     const relPath = rows[i]!.getAttribute("data-relpath");
     if (!btn || !relPath) continue;
-    const pinned = pins.indexOf(relPath) !== -1;
+    // `isPinnedRelPath`, not an `indexOf`: this and `buildRail` must answer the
+    // same question, and a raw comparison here disagreed with the renderer's
+    // normalized one — see that function's own doc for what that cost.
+    const pinned = isPinnedRelPath(pins, relPath);
     const label = pinned ? "Unpin this page" : "Pin this page";
     btn.classList.toggle("on", pinned);
     btn.setAttribute("aria-pressed", String(pinned));
@@ -631,6 +634,14 @@ function renderList(): void {
   const listEl = document.getElementById("wikiList")!;
   const scroll = listEl.scrollTop;
   listEl.innerHTML = html || '<div class="wiki-conn-empty">No pages match.</div>';
+  // ⚠️ Measured DEAD in Chromium and kept anyway: an `innerHTML` swap PRESERVES
+  // `scrollTop` when the new content is at least as tall (300 → 300), and when it
+  // is shorter the browser clamps to the new maximum and re-assigning the saved
+  // value re-clamps to the same number (saved 2398 → 0 → 0). So this line changes
+  // nothing here. It is not deleted because scroll preservation across an
+  // `innerHTML` replacement is not specified — Firefox and WebKit may reset to 0
+  // — and `playwright.config.ts` runs only Chromium, so the half of that state
+  // space where the line matters is not buildable in this harness.
   if (scroll) listEl.scrollTop = scroll;
   // `rail.shown` counts DISTINCT pages among the rendered rows, so a page that
   // appears both in a recall section and in the listing below is one, and a jump
