@@ -634,7 +634,7 @@ describe("fix round 1 — the three root causes", () => {
     });
   });
 
-  describe("a BARE number is only ever matched as part of a <prefix>-<number> key", () => {
+  describe("a bare number that is a YEAR is not a key at all", () => {
     // The mimir case: `archive/2026-08-27-*.md` everywhere, and a `2026` query
     // must not grow a Jira header over the whole wiki.
     const dated = [
@@ -772,5 +772,20 @@ describe("fix round 2 — what the verify pass found", () => {
     ]);
     // …and the reason it never fires is that `2026` is not a candidate at all.
     expect(parseJiraKeyCandidates("2026")).toEqual([]);
+  });
+});
+
+describe("fix round 3 — the class check", () => {
+  test("a page NAMED as the bare number is the issue's own page, not a reference", () => {
+    // `isKeyToken` (tags, page name) and `mentions` (prose) described different
+    // key shapes after round 2 reverted the prose half: a page at
+    // `sources/jira/7588.md` counted as a REFERENCE to itself.
+    const bare = page({ relPath: "sources/jira/7588.md", title: "Utvid" });
+    expect(jiraKeyJump([bare], parseJiraKey("7588")!).own).toEqual([bare]);
+  });
+
+  test("…and a prefixed query still needs the prefix on the address", () => {
+    const bare = page({ relPath: "sources/jira/7588.md", title: "Utvid" });
+    expect(jiraKeyJump([bare], parseJiraKey("MELOSYS-7588")!).own).toEqual([]);
   });
 });

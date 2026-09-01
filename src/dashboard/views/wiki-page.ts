@@ -313,7 +313,17 @@ export async function renderWikiPage(opts?: {
       font-size: 10.5px; line-height: 1.55; color: var(--status-warning);
       flex-shrink: 0; opacity: 1; transition: opacity .12s;
     }
-    @media (hover: hover) {
+    /* Hidden-until-hover ONLY where hover is the whole story: a fine pointer and
+       no coarse one anywhere. hover: hover alone left the hybrid cell open — a
+       touchscreen laptop with a mouse reports it, and a finger tap in an
+       invisible star's slot pins again. any-pointer: coarse is the question
+       that actually matters ("can a finger reach this?"), so the reveal is
+       scoped to devices where the answer is no.
+       Of this media state space's four cells two are pinned by tests; the
+       HYBRID cell is correct by construction only, because Chromium's touch
+       emulation forces hover:none regardless of Emulation.setEmulatedMedia and
+       the combination cannot be built in the harness. */
+    @media (hover: hover) and (not (any-pointer: coarse)) {
       .wiki-pin { opacity: 0; pointer-events: none; }
       .wiki-pin.on, .wiki-list-item:hover .wiki-pin { opacity: 1; pointer-events: auto; }
     }

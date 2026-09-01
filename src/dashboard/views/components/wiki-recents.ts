@@ -245,7 +245,10 @@ export interface JiraKeyJump {
 export function jiraKeyJump(pages: WikiListing[], parsed: ParsedJiraKey): JiraKeyJump {
   // A bare number matches a key token from any project; a prefixed key matches
   // itself. `isKeyToken` is the WHOLE-token test (a tag, a page name).
-  const tokenRe = parsed.key ? null : new RegExp(`^[a-z][a-z0-9]{1,9}-${parsed.num}$`);
+  // The bare form accepts the number ALONE as a whole token too, so a page at
+  // `sources/jira/7588.md` is the issue's own page rather than a reference to
+  // itself — `isKeyToken` and `mentions` describe the same key shape.
+  const tokenRe = parsed.key ? null : new RegExp(`^([a-z][a-z0-9]{1,9}-)?${parsed.num}$`);
   const isKeyToken = (token: string): boolean => {
     const t = (token || "").toLowerCase();
     return parsed.key ? t === parsed.key : tokenRe!.test(t);

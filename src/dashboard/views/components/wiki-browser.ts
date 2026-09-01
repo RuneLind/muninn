@@ -537,66 +537,28 @@ function pinBtnHtml(pinned: boolean): string {
   );
 }
 
-/**
- * Keep the rows under the reader's eye where they were across a re-render that
- * changes the list's height ABOVE them.
- *
- * A plain `scrollTop` restore is right only while a render replaces like with
- * like. Pinning inserts headers at the very top and lifts the row out of the
- * listing, and the numeric restore then moved the row under the cursor 96px
- * (measured at scrollTop 800: 119.8 → 216.3) — so a second click at the same
- * point, which is exactly how a reader undoes a mis-pin, pinned a DIFFERENT
- * page. `skipRelPath` is the row being toggled: it is about to move to the top,
- * so anchoring on it would scroll the list there.
- */
-interface ScrollAnchor {
-  relPath: string;
-  /** The anchor row's distance below the list's own top edge, preserved verbatim. */
-  delta: number;
-}
-
-/**
- * ⚠️ Measured against the LIST's client rect, never `offsetTop`. `.wiki-list` is
- * not a positioned element, so its rows' `offsetTop` resolves against the pane —
- * head height included — and comparing that against `scrollTop` picked a row
- * near the top of the whole list instead of the top of the viewport. The e2e
- * case caught it: the correction over-scrolled by ~318px, ten rows, in the
- * opposite direction from the bug it was written for.
- */
-function captureScrollAnchor(listEl: HTMLElement, skipRelPath?: string): ScrollAnchor | null {
-  const listTop = listEl.getBoundingClientRect().top;
-  const rows = listEl.querySelectorAll<HTMLElement>(".wiki-list-item");
+/** Repaint every row for one page after its pin flipped — the ★'s own state, and
+ *  nothing else. There is at most one such row (sections MOVE rows), but this
+ *  does not depend on that: it updates whatever it finds. */
+function paintPinState(relPath: string): void {
+  const pinned = pins.indexOf(relPath) !== -1;
+  const label = pinned ? "Unpin this page" : "Pin this page";
+  // Compared as an ATTRIBUTE rather than spliced into a selector: a relPath is a
+  // file path and needs `CSS.escape` to be safe there, which this file has no
+  // helper for and does not need one.
+  const rows = document.getElementById("wikiList")!.querySelectorAll<HTMLElement>(".wiki-list-item");
   for (let i = 0; i < rows.length; i++) {
-    const el = rows[i]!;
-    const rect = el.getBoundingClientRect();
-    if (rect.bottom <= listTop) continue; // scrolled off the top
-    const relPath = el.getAttribute("data-relpath");
-    if (!relPath || relPath === skipRelPath) continue;
-    return { relPath, delta: rect.top - listTop };
-  }
-  return null;
-}
-
-function restoreScrollAnchor(listEl: HTMLElement, prev: number, anchor: ScrollAnchor | null): void {
-  if (!prev && !anchor) return;
-  listEl.scrollTop = prev; // the innerHTML swap reset it to 0
-  if (!anchor) return;
-  // The browser clamps when the new list is shorter, and the correction below is
-  // relative to where we ACTUALLY are — computing it from `prev` overshot by the
-  // difference on any render that shortens the list.
-  const base = listEl.scrollTop;
-  const listTop = listEl.getBoundingClientRect().top;
-  const rows = listEl.querySelectorAll<HTMLElement>(".wiki-list-item");
-  for (let i = 0; i < rows.length; i++) {
-    const el = rows[i]!;
-    if (el.getAttribute("data-relpath") !== anchor.relPath) continue;
-    const now = el.getBoundingClientRect().top - listTop;
-    listEl.scrollTop = Math.max(0, base + (now - anchor.delta));
-    return;
+    if (rows[i]!.getAttribute("data-relpath") !== relPath) continue;
+    const btn = rows[i]!.querySelector<HTMLElement>(".wiki-pin");
+    if (!btn) continue;
+    btn.classList.toggle("on", pinned);
+    btn.setAttribute("aria-pressed", String(pinned));
+    btn.setAttribute("title", label);
+    btn.setAttribute("aria-label", label);
   }
 }
 
-function renderList(scrollSkipRelPath?: string): void {
+function renderList(): void {
   const mode = sortMode();
   // ONE anchored instant for the sort AND its row labels, so the date a row shows is
   // the date it sorted on even for a page sitting at the 48h future-guard boundary.
@@ -661,18 +623,8 @@ function renderList(scrollSkipRelPath?: string): void {
   // every path — a background refresh can never yank a reader to the top.
   const listEl = document.getElementById("wikiList")!;
   const scroll = listEl.scrollTop;
-  // ⚠️ Anchoring is for the ONE render that inserts content ABOVE the reader —
-  // the ★ toggle, which is where a numeric restore moved the row under the
-  // cursor. Every other path keeps the numeric restore it always had, and two
-  // regressions found in review say why: the anchor CHASES the previously-top
-  // row to its new position, so a SORT change at the top of the list threw the
-  // reader 1256px down (measured), and pinning at the top scrolled the new
-  // Pinned header out of view — the only confirmation the click did anything.
-  // `scroll === 0` is never anchored either: at the top, where the reader was IS
-  // the top.
-  const anchor = scrollSkipRelPath && scroll ? captureScrollAnchor(listEl, scrollSkipRelPath) : null;
   listEl.innerHTML = html || '<div class="wiki-conn-empty">No pages match.</div>';
-  restoreScrollAnchor(listEl, scroll, anchor);
+  if (scroll) listEl.scrollTop = scroll;
   // `rail.shown` counts DISTINCT pages among the rendered rows, so a page that
   // appears both in a recall section and in the listing below is one, and a jump
   // hit the query itself would not have matched is counted.
@@ -1000,9 +952,6 @@ function setAtlasFull(on: boolean): void {
 }
 
 function renderStart(): void {
-  // Leaving for the start view abandons any navigation still in flight: its
-  // response must not write itself to the head of the PERSISTENT recents list.
-  navToken++;
   // Returning to the browse view is the moment a page set stashed during reading
   // becomes safe to apply — before anything below reads `allPages`.
   applyPendingPages();
@@ -1576,9 +1525,17 @@ document.getElementById("wikiList")!.addEventListener("click", (e) => {
   const relPath = row?.getAttribute("data-relpath");
   if (!relPath) return;
   pins = togglePinned(WIKI, relPath);
-  // The toggled row is about to move into (or out of) the Pinned section, so it
-  // is the one row that cannot anchor the scroll restore.
-  renderList(relPath);
+  // ⚠️ IN PLACE — deliberately NOT `renderList()`. Re-rendering here moved
+  // content under the reader, and the state space of "how much, and which way"
+  // (render cause × scroll position × whether the list reorders) produced a
+  // different defect in each of two review rounds: a numeric restore shifted the
+  // row at the cursor ~96px so a second click pinned a DIFFERENT page; the
+  // anchored restore that replaced it threw the reader down the list on a sort
+  // change and hid the new Pinned header when pinning at the top. Painting one
+  // button removes the space rather than picking a third point in it. The
+  // sections rebuild on the next render the reader causes, and the ★ filling in
+  // is the confirmation in the meantime.
+  paintPinState(relPath);
 });
 
 (document.getElementById("wikiSearch") as HTMLInputElement).addEventListener("input", (e) => {
@@ -1660,7 +1617,7 @@ document.getElementById("tagChips")!.addEventListener("click", (e) => {
   syncFilters();
 });
 
-document.getElementById("wikiSort")!.addEventListener("change", () => renderList());
+document.getElementById("wikiSort")!.addEventListener("change", renderList);
 
 // Switching wiki is a full navigation — resets browse context and keeps the URL shareable.
 const wikiSel = document.getElementById("wikiSelect") as HTMLSelectElement | null;
@@ -1682,7 +1639,17 @@ window.addEventListener("popstate", () => {
   }
   const page = params.get("page");
   if (page) loadPage(page, false);
-  else renderStart();
+  else {
+    // Back/forward to the start view ABANDONS any navigation still in flight:
+    // its response must not write itself to the head of the PERSISTENT recents
+    // list. The bump belongs HERE and not inside `renderStart`, which the Hubs /
+    // Timeline / Atlas tabs and the coverage link also call — while the reader
+    // is still ON the start view with a click of theirs in flight. Putting it
+    // there dropped the recent for a page the reader then sat and read
+    // (measured: articleRendered=1, recents=[]).
+    navToken++;
+    renderStart();
+  }
 });
 
 // ── Ask tab: research-style Q&A scoped to this wiki ───────────────────

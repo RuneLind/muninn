@@ -147,6 +147,14 @@ const reloadKeepingStore = openRail;
 
 /** The section headers' LABELS — `.wiki-sec-label`, not the header element, so
  *  the `clear` button's own text does not ride along. */
+/** Cause a render without changing what is on screen. The ★ toggle deliberately
+ *  paints only its own button, so a section appears at the reader's NEXT render;
+ *  in a test that moment has to be explicit rather than implied. */
+async function rerender(page: Page): Promise<void> {
+  await page.fill("#wikiSearch", "zzz-no-such-page");
+  await page.fill("#wikiSearch", "");
+}
+
 const sectionLabels = (page: Page) => page.locator(".wiki-sec-label").allTextContents();
 
 /** The rows under one section header, by relPath, in render order. */
@@ -224,6 +232,9 @@ test.describe("Wiki rail: recents, pins, key jump", () => {
     await row.locator(".wiki-pin").click();
 
     await expect(page.locator(".wiki-start")).toBeVisible();
+    // The ★ itself is the immediate confirmation; the section is the next render's.
+    await expect(row.locator(".wiki-pin")).toHaveAttribute("aria-pressed", "true");
+    await rerender(page);
     expect(await sectionLabels(page)).toEqual(["Pinned", "Other pages"]);
     expect(await relPathsIn(page, "pinned")).toEqual([KILDESKATT]);
     await expect(page.locator(`.wiki-list-item[data-relpath="${KILDESKATT}"]`)).toHaveCount(1);
@@ -241,9 +252,11 @@ test.describe("Wiki rail: recents, pins, key jump", () => {
     const row = page.locator(`.wiki-list-item[data-relpath="${KILDESKATT}"]`);
     await row.hover();
     await row.locator(".wiki-pin").click();
+    await rerender(page);
     await expect(rowsIn(page, "pinned")).toHaveCount(1);
 
     await page.locator(`.wiki-list-item[data-section="pinned"] .wiki-pin`).click();
+    await rerender(page);
     expect(await sectionLabels(page)).toEqual([]);
   });
 
@@ -255,6 +268,7 @@ test.describe("Wiki rail: recents, pins, key jump", () => {
     const row = page.locator(`.wiki-list-item[data-relpath="${ARSAVREGNING}"][data-section="recent"]`);
     await row.hover();
     await row.locator(".wiki-pin").click();
+    await rerender(page);
 
     expect(await sectionLabels(page)).toEqual(["Pinned", "Other pages"]);
     expect(await relPathsIn(page, "pinned")).toEqual([ARSAVREGNING]);
@@ -262,6 +276,7 @@ test.describe("Wiki rail: recents, pins, key jump", () => {
 
     // …and un-pinning gives it back to the recents section.
     await page.locator(`.wiki-list-item[data-section="pinned"] .wiki-pin`).click();
+    await rerender(page);
     expect(await relPathsIn(page, "recent")).toEqual([ARSAVREGNING]);
   });
 
@@ -354,30 +369,22 @@ test.describe("Wiki rail: recents, pins, key jump", () => {
   });
 
   /**
-   * The mis-click a verify pass measured: `renderList` restored `scrollTop`
-   * verbatim, so pinning — which inserts headers at the very top — moved the row
-   * under the cursor ~96px (measured 119.8 → 216.3 at scrollTop 800), and a
-   * second click at the same point pinned a page three rows away.
+   * The class fix for a surface that produced a defect in each of two rounds.
    *
-   * The rule, and what is asserted here: **the only thing that moves is the row
-   * that left.** The neighbours shift up by exactly one row height, never by the
-   * inserted headers. The row height is measured at runtime from two adjacent
-   * rows rather than hardcoded, so this pins the rule and not a layout.
+   * The ★ used to re-render the whole list, which moved content under the
+   * reader: a numeric scroll restore shifted the row at the cursor ~96px (so a
+   * second click pinned a different page), and the anchored restore that
+   * replaced it threw the reader down the list on a sort change and hid the new
+   * `Pinned` header when pinning at the top. Three cells of one state space —
+   * (render cause × scroll position × whether the list reorders) — wrong in
+   * three different ways.
    *
-   * ⚠️ Residual, and it is inherent rather than a defect: the pinned row does
-   * leave the cursor, so a second click at the same point lands on its
-   * neighbour. Under the section semantics this replaced that was invisible —
-   * the row stayed put and a duplicate appeared off-screen. Now the row visibly
-   * flies to `Pinned`, which is where the undo is.
+   * So the toggle does not re-render at all: it flips that one row's ★ in place
+   * and the sections rebuild on the next render the reader causes. Nothing moves,
+   * which is why there is no scroll rule left to get wrong.
    */
-  test("pinning shifts the rows around the cursor by exactly the row that left", async ({
-    page,
-  }) => {
+  test("pinning moves nothing under the reader", async ({ page }) => {
     await openRail(page);
-    // Title order, so filler-15 is deterministically ABOVE filler-20. The default
-    // sort is by mtime and the fixture's files are written in a loop, so whether
-    // 15 precedes 20 depends on filesystem timestamp granularity — which passed
-    // in isolation and failed once under the full parallel suite.
     await page.selectOption("#wikiSort", "title");
     await page.locator("#wikiList").evaluate((el) => {
       el.scrollTop = 300;
@@ -386,30 +393,58 @@ test.describe("Wiki rail: recents, pins, key jump", () => {
     const yOf = async (rel: string): Promise<number> =>
       (await page.locator(`.wiki-list-item[data-relpath="${rel}"]`).boundingBox())!.y;
 
-    // `hover()` scrolls the row into view, so every baseline is taken AFTER it —
-    // measuring before cost a debugging round on a 411px "shift" that was the
-    // hover's own scroll.
     const target = page.locator(`.wiki-list-item[data-relpath="concepts/filler-15.md"]`);
     await target.hover();
-
-    // The height of the row that is about to LEAVE — order-independent, unlike
-    // the gap between two rows named in the fixture.
-    const rowHeight = (await target.boundingBox())!.height;
-    expect(rowHeight).toBeGreaterThan(10);
     const before = await yOf("concepts/filler-20.md");
+    const selfBefore = await yOf("concepts/filler-15.md");
+    const scrollBefore = await page.locator("#wikiList").evaluate((el) => el.scrollTop);
 
     await target.locator(".wiki-pin").click();
-    await expect(rowsIn(page, "pinned")).toHaveCount(1);
+    await expect(target.locator(".wiki-pin")).toHaveAttribute("aria-pressed", "true");
 
-    // The rule: the content under the cursor never moves DOWN, and the most it
-    // moves up is the one row that left. An exact figure would be a layout pin —
-    // rows are not all the same height, since a long title wraps to two lines.
-    // Without the anchored restore the two inserted headers pushed it down.
-    const after = await yOf("concepts/filler-20.md");
-    expect(after, "pinning must not push content down").toBeLessThanOrEqual(before + 1);
-    expect(before - after, "…nor up by more than the row that left").toBeLessThanOrEqual(
-      rowHeight + 2,
-    );
+    // Nothing moved — not the neighbours, not the row itself, not the scroll.
+    expect(await yOf("concepts/filler-20.md")).toBe(before);
+    expect(await yOf("concepts/filler-15.md")).toBe(selfBefore);
+    expect(await page.locator("#wikiList").evaluate((el) => el.scrollTop)).toBe(scrollBefore);
+
+    // …so a second click at the same place acts on the same page: it un-pins.
+    await target.locator(".wiki-pin").click();
+    await expect(target.locator(".wiki-pin")).toHaveAttribute("aria-pressed", "false");
+  });
+
+  test("the pin is honoured by the next render the reader causes", async ({ page }) => {
+    await openRail(page);
+    const row = page.locator(`.wiki-list-item[data-relpath="${KILDESKATT}"]`);
+    await row.hover();
+    await row.locator(".wiki-pin").click();
+    // Not yet — the toggle deliberately paints no sections.
+    expect(await sectionLabels(page)).toEqual([]);
+
+    // Any render does it. A search and back is the cheapest.
+    await page.fill("#wikiSearch", "kilde");
+    await page.fill("#wikiSearch", "");
+    expect(await sectionLabels(page)).toEqual(["Pinned", "Other pages"]);
+    expect(await relPathsIn(page, "pinned")).toEqual([KILDESKATT]);
+
+    // …and it survived a reload, so the click really wrote through.
+    await reloadKeepingStore(page);
+    expect(await relPathsIn(page, "pinned")).toEqual([KILDESKATT]);
+  });
+
+  test("changing the sort leaves the reader where they were", async ({ page }) => {
+    await openRail(page);
+    // At the top AND scrolled: the anchored restore this replaced was wrong at
+    // the top, and its replacement was unpinned when scrolled.
+    expect(await page.locator("#wikiList").evaluate((el) => el.scrollTop)).toBe(0);
+    await page.selectOption("#wikiSort", "title");
+    expect(await page.locator("#wikiList").evaluate((el) => el.scrollTop)).toBe(0);
+    await expect(page.locator(".wiki-list-item").first()).toBeInViewport();
+
+    await page.locator("#wikiList").evaluate((el) => {
+      el.scrollTop = 300;
+    });
+    await page.selectOption("#wikiSort", "created");
+    expect(await page.locator("#wikiList").evaluate((el) => el.scrollTop)).toBe(300);
   });
 
   /**
@@ -439,6 +474,33 @@ test.describe("Wiki rail: recents, pins, key jump", () => {
     // Nothing here carries it, so no header — the point is that it PARSED and
     // simply found nothing, which the date cases above can no longer distinguish.
     expect(await sectionLabels(page)).toEqual([]);
+  });
+
+  /**
+   * The mirror of the case above, and a defect one fix round injected: bumping
+   * the navigation token inside `renderStart` also fired for the start view's
+   * OWN controls — the Hubs / Timeline / Atlas tabs and the coverage link — which
+   * the reader clicks while still ON the start view with a navigation in flight.
+   * The page then rendered and was silently absent from Recently opened
+   * (measured: articleRendered=1, recents=[]).
+   */
+  test("a start-view tab click does not discard the navigation in flight", async ({ page }) => {
+    await openRail(page);
+    let release: (() => void) | undefined;
+    const held = new Promise<void>((r) => (release = r));
+    await page.route(`**/api/wiki/page?relPath=${encodeURIComponent(KILDESKATT)}*`, async (route) => {
+      await held;
+      await route.continue();
+    });
+
+    await page.locator(`.wiki-list-item[data-relpath="${KILDESKATT}"]`).click();
+    // Still on the start view, response still in flight: switch tabs.
+    await page.locator('.wiki-tab[data-tab="timeline"]').click();
+    release!();
+
+    // The reader ends up on the page and reads it, so it IS recently opened.
+    await expect(page.locator(".wiki-bc-cur")).toContainText("Kildeskatt");
+    expect(await relPathsIn(page, "recent")).toEqual([KILDESKATT]);
   });
 
   /**
@@ -487,42 +549,6 @@ test.describe("Wiki rail: recents, pins, key jump", () => {
 
     // The page the reader actually settled on is the newest recent.
     expect((await relPathsIn(page, "recent"))[0]).toBe(KILDESKATT);
-  });
-
-  /**
-   * Two regressions the anchored scroll restore injected, both invisible to the
-   * case it was written for because that one scrolls the list first.
-   *
-   * The anchor chases a row to its new position, which is right when a render
-   * INSERTS above the reader and wrong when it REORDERS — and wrong at the top
-   * of the list in both cases, where "keep the reader where they were" means
-   * "stay at the top", not "follow row 1 wherever it went".
-   */
-  test("changing the sort at the top of the list leaves the reader at the top", async ({
-    page,
-  }) => {
-    await openRail(page);
-    expect(await page.locator("#wikiList").evaluate((el) => el.scrollTop)).toBe(0);
-    await page.selectOption("#wikiSort", "title");
-    expect(await page.locator("#wikiList").evaluate((el) => el.scrollTop)).toBe(0);
-    // …and the first row of the new order is the one ON SCREEN. (Which page
-    // that is depends on the collation of "Å", which is not what this pins.)
-    await expect(page.locator(".wiki-list-item").first()).toBeInViewport();
-  });
-
-  test("pinning the top row leaves the Pinned header on screen", async ({ page }) => {
-    await openRail(page);
-    const row = page.locator(".wiki-list-item").first();
-    await row.hover();
-    await row.locator(".wiki-pin").click();
-
-    // The whole confirmation that anything happened. Scrolled out of view, the
-    // row just vanishes from where it was.
-    const header = page.locator('.wiki-list-sec[data-section="pinned"]');
-    await expect(header).toBeVisible();
-    const headerBox = (await header.boundingBox())!;
-    const listBox = (await page.locator("#wikiList").boundingBox())!;
-    expect(headerBox.y).toBeGreaterThanOrEqual(listBox.y - 1);
   });
 
   /**
@@ -588,9 +614,11 @@ test.describe("Wiki rail: the ★ on a touch device", () => {
 
     const pinBox = (await row.locator(".wiki-pin").boundingBox())!;
     await page.touchscreen.tap(pinBox.x + pinBox.width / 2, pinBox.y + pinBox.height / 2);
-    await expect(rowsIn(page, "pinned")).toHaveCount(1);
+    await expect(row.locator(".wiki-pin")).toHaveAttribute("aria-pressed", "true");
     // …and it pinned, rather than also opening the page.
     expect(await page.locator(".wiki-article").count()).toBe(0);
+    await rerender(page);
+    await expect(rowsIn(page, "pinned")).toHaveCount(1);
   });
 
   test("a tap on the row still opens the page", async ({ page }) => {

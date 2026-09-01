@@ -175,23 +175,29 @@ Four things are deliberate and easy to undo by accident:
   star became clickable before the click dispatched and a tap in that slot still
   pinned instead of opening the page (measured with a real tap: pinned 1, article
   0). Nothing invisible may be hit-testable, and on a device that cannot hover
-  the only way to satisfy that is to SHOW the star, so touch gets a visible one.
-  It also shares
+  the only way to satisfy that is to SHOW the star, so the reveal is scoped to
+  `@media (hover: hover) and (not (any-pointer: coarse))` — `hover: hover` alone
+  left the HYBRID cell open, since a touchscreen laptop with a mouse reports it
+  and a finger tap in an invisible star's slot pins again. Of that media state
+  space's four cells, two are pinned by tests, the hybrid one is **not
+  constructible in Chromium's emulation** (touch emulation forces `hover: none`
+  regardless of `Emulation.setEmulatedMedia`) and is correct by construction
+  only, and the fourth is benign. It also shares
   one flex slot with the date (`.wiki-list-end`) so it costs the row its own
   width and not the row's 8px gap as well — as a sibling of the title the pair
   measured 21px off `.wiki-list-title` on every row, 42px of title left at
   `RAIL_WIDTH_MIN` with a status pill and a ⚑.
 
-`renderList` restores scroll by ANCHOR on **one** path — the ★ toggle, and only
-when the list is actually scrolled. A numeric restore there moved the row under
-the cursor ~96px, so a second click at the same point pinned a different page.
-Every other render keeps the plain numeric restore, because the anchor CHASES the
-previously-top row to its new position: applied to all renders it threw the
-reader 1256px down on a sort change, and applied at `scrollTop 0` it scrolled the
-new `Pinned` header out of view — the only confirmation the click did anything.
-The anchor is measured against the list's client rect: `.wiki-list` is not
-positioned, so its rows' `offsetTop` resolves against the pane, and comparing
-that with `scrollTop` over-scrolled by ten rows.
+⚠️ **The ★ toggle does NOT re-render the list.** It repaints that one button
+(`paintPinState`) and the sections rebuild at the reader's next render. This is a
+class fix, arrived at after three rounds on one state space — (render cause ×
+scroll position × whether the list reorders) — each of which produced a different
+defect: a numeric scroll restore moved the row at the cursor ~96px, so a second
+click pinned a DIFFERENT page; the anchored restore that replaced it threw the
+reader down the list on a sort change and hid the new `Pinned` header when
+pinning at the top; and two more cells of it shipped unpinned. Painting one
+button deletes the space instead of choosing a fourth point in it. `renderList`
+is back to the plain `scrollTop` restore it always had.
 
 Acceptance: `views/components/wiki-recents.test.ts` (the state space, enumerated)
 and `e2e/wiki-rail-recents.spec.ts` (two temp wikis in ONE process, so a
