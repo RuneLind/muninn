@@ -207,9 +207,18 @@ test.describe("Wiki rail: recents, pins, key jump", () => {
 
   test("the most recently opened page comes first, without duplicating", async ({ page }) => {
     await openRail(page);
+    // Wait for the page JUST clicked, by name. `.wiki-article` is already
+    // visible from the previous click, so waiting on it returns immediately and
+    // the next click can land while the last response is still in flight —
+    // which the nav-token guard then correctly drops from recents. One failure
+    // in seven local runs, green in isolation every time.
+    const titles: Record<string, string> = {
+      [ARSAVREGNING]: "Årsavregning",
+      [KILDESKATT]: "Kildeskatt",
+    };
     for (const rel of [ARSAVREGNING, KILDESKATT, ARSAVREGNING]) {
       await page.locator(`.wiki-list-item[data-relpath="${rel}"]`).click();
-      await expect(page.locator(".wiki-article")).toBeVisible();
+      await expect(page.locator(".wiki-bc-cur")).toHaveText(titles[rel]!);
     }
     expect(await relPathsIn(page, "recent")).toEqual([ARSAVREGNING, KILDESKATT]);
   });
@@ -571,17 +580,20 @@ test.describe("Wiki rail: recents, pins, key jump", () => {
   });
 
   /**
-   * The painter and the renderer must answer the SAME question about a pin.
+   * A page stored under a different spelling must be ONE page to every half of
+   * the rail — the renderer, the painter, AND the writer.
    *
-   * `buildRail` resolves pins case- and separator-insensitively; the DOM painter
-   * used a raw `indexOf`. Measured live, a pins key holding a differently-cased
-   * relPath rendered the page under `Pinned` while its ★ read "Pin this page" —
-   * and clicking that star appended a SECOND entry for one page, which then
-   * rendered twice under a `#wikiCount` that said otherwise. That is the
-   * "every page appears exactly ONCE" invariant, broken by the two halves
-   * disagreeing.
+   * Unifying the two READ halves was not enough: `togglePin` still compared raw,
+   * so clicking a star labelled "Unpin this page" appended a SECOND entry for
+   * one page instead of removing it, and at the next render that page rendered
+   * twice under a `#wikiCount` that said otherwise. The earlier version of this
+   * test clicked a DIFFERENT row's star to force the repaint, which is exactly
+   * the one action that cannot see it.
+   *
+   * `#wikiCount` cannot detect this either — it counts distinct pages, so it
+   * read 12/12 with 13 rows on screen. Only the row count can.
    */
-  test("a differently-cased stored pin is pinned to BOTH halves", async ({ page }) => {
+  test("a differently-cased stored pin is ONE page to every half of the rail", async ({ page }) => {
     await openRail(page);
     await page.evaluate(
       ([key, rel]: [string, string]) => localStorage.setItem(key, JSON.stringify([rel])),
@@ -589,25 +601,42 @@ test.describe("Wiki rail: recents, pins, key jump", () => {
     );
     await reloadKeepingStore(page);
 
-    // The renderer resolved it…
+    // The renderer resolved it, and the painter agrees.
     expect(await relPathsIn(page, "pinned")).toEqual([KILDESKATT]);
-    // …and the painter agrees, which is what stops the next click from adding a
-    // second entry for the same page.
-    await expect(
-      page.locator(`.wiki-list-item[data-relpath="${KILDESKATT}"] .wiki-pin`),
-    ).toHaveAttribute("aria-pressed", "true");
+    const star = page.locator(`.wiki-list-item[data-relpath="${KILDESKATT}"] .wiki-pin`);
+    await expect(star).toHaveAttribute("aria-pressed", "true");
 
-    // Pinning something ELSE repaints every row; the mismatch used to surface here.
-    const other = page.locator(`.wiki-list-item[data-relpath="${ARSAVREGNING}"]`);
-    await other.hover();
-    await other.locator(".wiki-pin").click();
-    await expect(
-      page.locator(`.wiki-list-item[data-relpath="${KILDESKATT}"] .wiki-pin`),
-    ).toHaveAttribute("aria-pressed", "true");
+    // The click the previous version of this test avoided: the mis-cased row's OWN
+    // star, which is the only action that reproduces the duplicate.
+    await star.click();
+    await expect(star).toHaveAttribute("aria-pressed", "false");
+    const stored = await page.evaluate(
+      (key: string) => JSON.parse(localStorage.getItem(key) || "[]") as string[],
+      `${PINS_KEY_PREFIX}${WIKI}`,
+    );
+    expect(stored).toEqual([]);
 
     await rerender(page);
+    expect(await sectionLabels(page)).toEqual([]);
     expect(await page.locator(`.wiki-list-item[data-relpath="${KILDESKATT}"]`).count()).toBe(1);
-    await expect(page.locator("#wikiCount")).toHaveText(`${ALL_PAGES} / ${ALL_PAGES}`);
+    expect(await page.locator(".wiki-list-item").count()).toBe(ALL_PAGES);
+  });
+
+  /** The same hole on the recents side, where no click is needed at all — just
+   *  opening the page a differently-cased entry already names. */
+  test("a differently-cased stored recent is not a second recent", async ({ page }) => {
+    await openRail(page);
+    await page.evaluate(
+      ([key, rel]: [string, string]) => localStorage.setItem(key, JSON.stringify([rel])),
+      [`${RECENTS_KEY_PREFIX}${WIKI}`, KILDESKATT.toUpperCase()] as [string, string],
+    );
+    await reloadKeepingStore(page);
+    await page.locator(`.wiki-list-item[data-relpath="${KILDESKATT}"]`).click();
+    await expect(page.locator(".wiki-bc-cur")).toContainText("Kildeskatt");
+
+    expect(await relPathsIn(page, "recent")).toEqual([KILDESKATT]);
+    expect(await page.locator(`.wiki-list-item[data-relpath="${KILDESKATT}"]`).count()).toBe(1);
+    expect(await page.locator(".wiki-list-item").count()).toBe(ALL_PAGES);
   });
 
   /** An `aria-label` overrides a button's text, so it is the string a screen

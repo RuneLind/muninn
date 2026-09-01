@@ -816,3 +816,64 @@ describe("fix round 5 — one pin comparison, not two", () => {
     expect(rows.map((r) => [r.section, r.pinned])).toEqual([["pinned", true]]);
   });
 });
+
+describe("fix round 6 — relPath identity has ONE boundary", () => {
+  test("the stored form is normalized, so a raw comparison inside the list is exact", () => {
+    expect(parseRelPathList(JSON.stringify(["Archive/Notes.MD"]), 6)).toEqual(["archive/notes.md"]);
+    expect(parseRelPathList(JSON.stringify(["archive\\notes.md"]), 6)).toEqual(["archive/notes.md"]);
+  });
+
+  test("…so a read collapses spellings of one page instead of keeping both", () => {
+    expect(parseRelPathList(JSON.stringify(["a/B.md", "A/b.md"]), 6)).toEqual(["a/b.md"]);
+  });
+
+  test("togglePin removes a differently-cased pin instead of adding a second", () => {
+    expect(togglePin(["concepts/kildeskatt.md"], "CONCEPTS/KILDESKATT.MD")).toEqual([]);
+  });
+
+  test("pushRecent moves a differently-cased entry rather than duplicating it", () => {
+    expect(pushRecent(["concepts/a.md", "concepts/b.md"], "CONCEPTS/A.MD")).toEqual([
+      "concepts/a.md",
+      "concepts/b.md",
+    ]);
+  });
+
+  // The two above pass an already-normalized LIST, which is all the reader ever
+  // produces — so they leave the writers' own comparisons equivalent under the
+  // current call graph and unpinned as contracts. These pass an UNNORMALIZED
+  // list, which is what a key written by an older build is, and pin the
+  // functions rather than their one caller.
+  test("togglePin is correct against a list that was never normalized", () => {
+    expect(togglePin(["CONCEPTS/A.MD"], "concepts/a.md")).toEqual([]);
+  });
+
+  test("pushRecent is correct against a list that was never normalized", () => {
+    expect(pushRecent(["CONCEPTS/A.MD", "concepts/b.md"], "concepts/a.md")).toEqual([
+      "concepts/a.md",
+      "concepts/b.md",
+    ]);
+  });
+
+  test("buildRail renders a page ONCE even if storage holds two spellings of it", () => {
+    // The invariant is buildRail's own, so it must not depend on the storage
+    // layer having been perfect — a key written by an older build still renders
+    // one row.
+    const p = page({ relPath: "concepts/a.md", title: "A" });
+    const rail = buildRail({
+      filtered: [p], facetOnly: [p], filters: INERT,
+      recents: [], pins: ["concepts/a.md", "CONCEPTS/A.MD"],
+    });
+    const rows = rail.entries.filter((e) => e.kind === "row");
+    expect(rows).toHaveLength(1);
+    expect(rail.shown).toBe(1);
+  });
+
+  test("…and one page cannot appear in both recall sections", () => {
+    const p = page({ relPath: "concepts/a.md", title: "A" });
+    const rail = buildRail({
+      filtered: [p], facetOnly: [p], filters: INERT,
+      recents: ["CONCEPTS/A.MD"], pins: ["concepts/a.md"],
+    });
+    expect(rail.entries.filter((e) => e.kind === "row")).toHaveLength(1);
+  });
+});

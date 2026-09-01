@@ -55,6 +55,17 @@ export function pinsKey(wiki: string): string {
  * A relPath is stored, never a `name`: a wiki with same-stem pages resolves a
  * name to whichever page registered first, so a name-keyed recent would open the
  * wrong page — the exact failure `data-relpath` exists to prevent.
+ *
+ * ⚠️ **Entries are NORMALIZED here, which is the one boundary relPath identity
+ * has.** Case and separators reach these lists from directions the index does
+ * not control (a `?relPath=` deep link, an Atlas node key, an older build's
+ * key), and the comparisons downstream — this dedupe, `pushRecent`,
+ * `togglePin` — are plain `===`. Leaving normalization to each of them was the
+ * bug, five times over: it was fixed in the two READ halves and left raw in the
+ * writers, so clicking a star labelled "Unpin this page" appended a SECOND
+ * entry for one page, which then rendered twice under a count that said
+ * otherwise. Normalizing on the way in makes every one of those comparisons
+ * exact by construction instead of correct by inspection.
  */
 export function parseRelPathList(raw: string | null | undefined, max: number): string[] {
   if (raw == null || raw.trim() === "") return [];
@@ -69,8 +80,9 @@ export function parseRelPathList(raw: string | null | undefined, max: number): s
   for (const entry of parsed) {
     if (typeof entry !== "string") continue;
     const v = entry.trim();
-    if (!v || out.indexOf(v) !== -1) continue;
-    out.push(v);
+    const rel = normalizeRel(v);
+    if (!rel || out.indexOf(rel) !== -1) continue;
+    out.push(rel);
     if (out.length >= max) break;
   }
   return out;
@@ -86,18 +98,18 @@ export function serializeRelPathList(list: string[]): string {
  *  failed, or a response carrying no relPath, must not push an entry that can
  *  never resolve. Never mutates the input. */
 export function pushRecent(list: string[], relPath: string): string[] {
-  const v = (relPath || "").trim();
+  const v = normalizeRel((relPath || "").trim());
   if (!v) return list.slice();
-  return [v, ...list.filter((p) => p !== v)].slice(0, RECENTS_MAX);
+  return [v, ...list.filter((p) => normalizeRel(p) !== v)].slice(0, RECENTS_MAX);
 }
 
 /** Add `relPath` to the front of the pin list, or remove it if already there.
  *  A blank relPath is a no-op. At the cap, a new pin displaces the OLDEST —
  *  losing the pin the reader just made would read as a broken control. */
 export function togglePin(list: string[], relPath: string): string[] {
-  const v = (relPath || "").trim();
+  const v = normalizeRel((relPath || "").trim());
   if (!v) return list.slice();
-  if (list.indexOf(v) !== -1) return list.filter((p) => p !== v);
+  if (isPinnedRelPath(list, v)) return list.filter((p) => normalizeRel(p) !== v);
   return [v, ...list].slice(0, PINS_MAX);
 }
 
@@ -326,17 +338,6 @@ export interface RailModel {
 }
 
 /**
- * Are the recall sections allowed on screen? Only with the search box empty AND
- * every facet inert — **including domain**, which `activeFilterCount` in
- * `wiki-browser.ts` deliberately excludes from its badge.
- *
- * The two differ on purpose: that badge answers "is a filter hidden inside the
- * collapsed disclosure", and domain lives in the always-visible head. This
- * answers "is the rail showing the whole wiki", and under `domain=life` a
- * Recently-opened row from the ai domain is a row the active filter says should
- * not be there.
- */
-/**
  * Is this page pinned? THE pin comparison — exported because there were two, and
  * they disagreed: `buildRail` resolved pins through `findPageByRelPath`
  * (case- and separator-insensitive, for the reason that function's own doc
@@ -347,14 +348,32 @@ export interface RailModel {
  * — the "every page appears exactly ONCE" invariant, broken by the two halves
  * answering differently.
  *
- * One function, so a second spelling of the comparison is a change to this line
- * rather than a new one somewhere else.
+ * ⚠️ **This closes the READ halves only, and saying otherwise was wrong.** Round
+ * 5 claimed "exactly one pin comparison" while `togglePin`, `pushRecent` and
+ * `parseRelPathList` each still carried their own raw one — so the duplicate
+ * survived, with a worse label: the star now READ "Unpin this page" and still
+ * appended a second entry. What actually closes it is normalizing at the
+ * STORAGE BOUNDARY (`parseRelPathList` on the way in, both writers on the way
+ * out), which makes every comparison downstream exact by construction. This
+ * function is the comparison for the two sides that hold a page rather than a
+ * stored string: `buildRail` and the DOM painter.
  */
 export function isPinnedRelPath(pins: readonly string[], relPath: string): boolean {
   const want = normalizeRel(relPath);
   return pins.some((p) => normalizeRel(p) === want);
 }
 
+/**
+ * Are the recall sections allowed on screen? Only with the search box empty AND
+ * every facet inert — **including domain**, which `activeFilterCount` in
+ * `wiki-browser.ts` deliberately excludes from its badge.
+ *
+ * The two differ on purpose: that badge answers "is a filter hidden inside the
+ * collapsed disclosure", and domain lives in the always-visible head. This
+ * answers "is the rail showing the whole wiki", and under `domain=life` a
+ * Recently-opened row from the ai domain is a row the active filter says should
+ * not be there.
+ */
 export function railSectionsVisible(filters: WikiFilters): boolean {
   return (
     !filters.q.trim() &&
@@ -379,11 +398,17 @@ export function railSectionsVisible(filters: WikiFilters): boolean {
  *  Deliberately does not report the misses: an entry is unresolvable both when
  *  its page was deleted and when the listing has not arrived yet, and pruning
  *  storage on the second would erase the reader's pins on every slow load. */
-function resolve(relPaths: string[], pages: WikiListing[]): WikiListing[] {
+function resolve(relPaths: string[], pages: WikiListing[], seen: Set<string>): WikiListing[] {
   const out: WikiListing[] = [];
   for (const rel of relPaths) {
     const p = findPageByRelPath(pages, rel);
-    if (p) out.push(p);
+    // Deduped by the PAGE, not by the stored string. Storage is normalized at
+    // its own boundary, but this is `buildRail`'s invariant — "every page
+    // appears exactly ONCE" — and it must not depend on an upstream that a key
+    // written by an older build can violate.
+    if (!p || seen.has(normalizeRel(p.relPath))) continue;
+    seen.add(normalizeRel(p.relPath));
+    out.push(p);
   }
   return out;
 }
@@ -451,9 +476,11 @@ export function buildRail(input: RailInput): RailModel {
   }
 
   if (railSectionsVisible(filters)) {
-    const pinned = resolve(pins, filtered);
-    // Pinned wins the overlap, so a pinned page is not two adjacent rows.
-    const recent = resolve(recents, filtered).filter((p) => !isPinned(p));
+    const pinned = resolve(pins, filtered, claimed);
+    // Pinned wins the overlap, so a pinned page is not two adjacent rows. The
+    // shared `claimed` set is what makes that true for a page stored under two
+    // spellings as well.
+    const recent = resolve(recents, filtered, claimed).filter((p) => !isPinned(p));
     if (pinned.length) {
       entries.push({ kind: "header", section: "pinned", label: "Pinned" });
       for (const p of pinned) {

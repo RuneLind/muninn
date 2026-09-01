@@ -139,7 +139,21 @@ Keys, both suffixed with the wiki's canonical name (`""` for the default wiki),
 so a browser reading two wikis keeps two lists: `muninn.wiki.recents.v1:<wiki>`
 (last 6 opened) and `muninn.wiki.pins.v1:<wiki>`. The rail's third key is
 `muninn.wiki.railWidth.v1` (PR #501), which is NOT per wiki — a width is a
-property of the reader's screen, not of the wiki. relPaths are stored, never
+property of the reader's screen, not of the wiki.
+
+⚠️ **relPath identity has ONE boundary: entries are normalized on the way into
+storage** (`parseRelPathList` on read, `pushRecent` and `togglePin` on write), so
+every comparison downstream is exact by construction. Leaving it to each
+comparison was the bug five times over — and fixing only the two READ halves
+(`buildRail` and the DOM painter) left it alive with a worse label: the star read
+"Unpin this page", the click appended a SECOND entry for one page, and that page
+then rendered twice under a `#wikiCount` that said otherwise. The count cannot
+see it — it counts distinct pages, so it read 12/12 with 13 rows on screen; only
+the row count can. `buildRail` also dedupes by PAGE rather than by stored string,
+so its "every page appears exactly once" invariant does not depend on an upstream
+that a key written by an older build can violate.
+
+relPaths are stored, never
 names: a wiki with same-stem pages resolves a name to whichever page registered
 first, and they are resolved back through `findPageByRelPath`, the reader's one
 normalized lookup, so a case-differing spelling does not silently drop a pin.
