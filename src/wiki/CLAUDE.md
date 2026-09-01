@@ -153,10 +153,9 @@ the row count can. `buildRail` also dedupes by PAGE rather than by stored string
 so its "every page appears exactly once" invariant does not depend on an upstream
 that a key written by an older build can violate.
 
-relPaths are stored, never
-names: a wiki with same-stem pages resolves a name to whichever page registered
-first, and they are resolved back through `findPageByRelPath`, the reader's one
-normalized lookup, so a case-differing spelling does not silently drop a pin.
+relPaths are stored, never names: a wiki with same-stem pages resolves a name to
+whichever page registered first, and they are resolved back through
+`findPageByRelPath`.
 
 Four things are deliberate and easy to undo by accident:
 - **Sections MOVE a row, they never copy it — every page is on screen exactly

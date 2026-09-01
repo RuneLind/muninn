@@ -32,7 +32,8 @@ export const RECENTS_MAX = 6;
 /** Pins are the reader's own choice, so the cap is only a bound on the stored
  *  string — but it is enforced on READ as well as on write, so a hand-edited or
  *  corrupted key cannot make the rail unusable. Read and write share the number
- *  precisely so a stored list round-trips unchanged. */
+ *  so a list AT the cap survives a round trip; the entries themselves do not
+ *  round-trip unchanged, since a read normalizes them. */
 export const PINS_MAX = 50;
 /** How many jump rows render. The header still reports the true total, so a key
  *  with 30 references says so rather than silently showing 8. */
@@ -387,7 +388,12 @@ export function railSectionsVisible(filters: WikiFilters): boolean {
 }
 
 /** Resolve stored relPaths against a listing, in the STORED order, dropping what
- *  no longer resolves.
+ *  no longer resolves and what `seen` already accounts for.
+ *
+ *  `seen` is the caller's running set of pages already rendered, keyed on the
+ *  normalized relPath and SHARED across the pin and recent passes — which is
+ *  what makes a page held by BOTH lists (under either spelling) render once,
+ *  under `Pinned`.
  *
  *  Through `findPageByRelPath`, which normalizes case and separators on BOTH
  *  sides — the reader's one relPath lookup, and not an optimisation: a stored
@@ -477,10 +483,13 @@ export function buildRail(input: RailInput): RailModel {
 
   if (railSectionsVisible(filters)) {
     const pinned = resolve(pins, filtered, claimed);
-    // Pinned wins the overlap, so a pinned page is not two adjacent rows. The
-    // shared `claimed` set is what makes that true for a page stored under two
-    // spellings as well.
-    const recent = resolve(recents, filtered, claimed).filter((p) => !isPinned(p));
+    // Pinned wins the overlap because `claimed` is SHARED: a page the pin pass
+    // already rendered is skipped here, whatever spelling either list holds it
+    // under. There used to be a `!isPinned` filter on this line as well, and
+    // having two mechanisms for one outcome meant NEITHER was pinned — a review
+    // survey found that unsharing the set and dropping the filter each survived
+    // the whole suite, while doing both together failed.
+    const recent = resolve(recents, filtered, claimed);
     if (pinned.length) {
       entries.push({ kind: "header", section: "pinned", label: "Pinned" });
       for (const p of pinned) {
