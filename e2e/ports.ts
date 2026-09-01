@@ -56,6 +56,7 @@ export const E2E_PORTS = {
   // server proves the copy-path button stays live where its egress neighbours
   // are dimmed.
   "wiki-copy-path": 3038,
+  "wiki-rail-width": 3039,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

@@ -79,6 +79,7 @@ import {
   wikiPagePath,
 } from "./copy-path.ts";
 import { enhanceMermaid } from "./wiki-mermaid.ts";
+import { initRailResize } from "./wiki-rail-resize.ts";
 import { atlasBodyHtml, initAtlas } from "./wiki-atlas.ts";
 import { enhanceCodeTabs } from "./code-tabs.ts";
 import { enhanceCodeBlocks } from "./code-block-chrome.ts";
@@ -332,6 +333,7 @@ function relPathToName(relPath: string): string | null {
 }
 
 initStartCards({ withWiki, resolvePageName: relPathToName });
+initRailResize();
 
 function sortMode(): WikiSortMode {
   return (document.getElementById("wikiSort") as HTMLSelectElement).value as WikiSortMode;

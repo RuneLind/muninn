@@ -116,9 +116,12 @@ export async function renderWikiPage(opts?: {
   <style>
     ${SHARED_STYLES}
 
+    /* The rail column reads --wiki-rail-w, which the drag handle sets inline
+       (wiki-rail-resize.ts) from a stored width; absent, the fallback is the
+       shipped default (RAIL_WIDTH_DEFAULT in wiki-rail-width.ts). */
     .wiki-layout {
       display: grid;
-      grid-template-columns: 300px minmax(0, 1fr) 300px;
+      grid-template-columns: var(--wiki-rail-w, 300px) minmax(0, 1fr) 300px;
       gap: 16px;
       padding: 16px 24px;
       height: calc(100vh - 63px);
@@ -245,12 +248,34 @@ export async function renderWikiPage(opts?: {
       border-radius: 7px;
       cursor: pointer;
       display: flex;
-      align-items: baseline;
+      align-items: flex-start;
       gap: 8px;
     }
     .wiki-list-item:hover { background: var(--bg-surface); }
     .wiki-list-item.active { background: color-mix(in srgb, var(--accent) 14%, transparent); }
-    .wiki-list-title { font-size: 12.5px; color: var(--text-secondary); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* Two lines, then clip: this wiki's titles carry their meaning in the second
+       half, so a one-line ellipsis made sibling pages indistinguishable. The dot
+       and the date sit on the first line. */
+    .wiki-list-title {
+      font-size: 12.5px; line-height: 1.3; color: var(--text-secondary); flex: 1; min-width: 0;
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+      overflow: hidden; overflow-wrap: anywhere;
+    }
+    .wiki-list-item .wiki-type-dot { align-self: flex-start; margin-top: 5px; }
+    .wiki-list-item .wiki-list-meta { margin-top: 2px; }
+    /* Drag handle on the rail's right edge — a hit zone straddling the pane border,
+       a 2px accent line while hovered or dragging. */
+    .wiki-pane:first-child { position: relative; }
+    .wiki-rail-resizer {
+      position: absolute; top: 0; bottom: 0; right: -8px; width: 14px;
+      cursor: col-resize; z-index: 2; touch-action: none;
+    }
+    .wiki-rail-resizer::after {
+      content: ""; position: absolute; top: 0; bottom: 0; left: 6px; width: 2px;
+      background: var(--accent); opacity: 0; transition: opacity .12s;
+    }
+    .wiki-rail-resizer:hover::after, .wiki-rail-resizer.dragging::after { opacity: .8; }
+    body.wiki-rail-dragging { cursor: col-resize; user-select: none; }
     .wiki-list-item.active .wiki-list-title { color: var(--text-primary); }
     .wiki-list-meta { font-size: 10.5px; color: var(--text-faint); flex-shrink: 0; }
 
@@ -1272,7 +1297,7 @@ export async function renderWikiPage(opts?: {
     .wiki-empty-state code { background: var(--bg-inset); padding: 2px 6px; border-radius: 4px; }
 
     @media (max-width: 1100px) {
-      .wiki-layout { grid-template-columns: 260px minmax(0, 1fr); }
+      .wiki-layout { grid-template-columns: var(--wiki-rail-w, 260px) minmax(0, 1fr); }
       .wiki-conn-pane { display: none; }
     }
     ${agentPresenceStyles()}
@@ -1322,6 +1347,7 @@ export async function renderWikiPage(opts?: {
       </div>
       <div class="wiki-list" id="wikiList"></div>
       <div class="wiki-coverage-foot" id="wikiCoverageFoot" style="display:none"></div>
+      <div class="wiki-rail-resizer" id="wikiRailResizer" title="Drag to resize · double-click to reset" aria-hidden="true"></div>
     </div>
 
     <div class="wiki-pane">
