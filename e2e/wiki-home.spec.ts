@@ -250,3 +250,27 @@ test("fix round 4: returning to the overview the address bar already denotes pus
   await page.goBack();
   await expect(page).toHaveURL(/\/traces$/);
 });
+
+test("fix round 5: the tab is resolved at boot even when the boot page fetch fails", async ({ page }) => {
+  // The sync lives at module boot, not inside `bootRender`: a boot whose page
+  // fetch failed never ran it there, and a popstate into an article (which
+  // needs no page list) then rendered a crumb aimed at Hubs with Timeline stored.
+  let n = 0;
+  await page.route("**/api/wiki/pages**", (route) =>
+    ++n === 1
+      ? route.fulfill({ status: 500, contentType: "application/json", body: '{"error":"boom"}' })
+      : route.fallback(),
+  );
+  await page.addInitScript((w) => localStorage.setItem(`muninn.wiki.startTab.v1:${w}`, "timeline"), WIKI);
+  await page.goto(`${BASE}/wiki?wiki=${WIKI}`);
+  await expect(page.locator(".wiki-empty-state")).toBeVisible();
+  await page.evaluate(
+    ({ rel, wiki }) => {
+      history.pushState({}, "", location.pathname + location.search + "&relPath=" + encodeURIComponent(rel));
+      history.pushState({}, "", "/wiki?wiki=" + wiki);
+      history.back(); // popstate → loadPageByRelPath, no page list needed
+    },
+    { rel: ARTICLE, wiki: WIKI },
+  );
+  await expect(page.locator("a.wiki-bc-wiki")).toHaveAttribute("href", `/wiki?wiki=${WIKI}&view=timeline`);
+});
