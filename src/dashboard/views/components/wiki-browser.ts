@@ -580,7 +580,14 @@ function renderList(): void {
   const facetOnly = /[0-9]/.test(filters.q)
     ? sortPages(filterPages(allPages, { ...filters, q: "" }), mode, now)
     : filtered;
-  const rail = buildRail({ filtered, facetOnly, filters, recents, pins });
+  const rail = buildRail({
+    filtered,
+    facetOnly,
+    filters,
+    recents,
+    pins,
+    metaTail: mode === "updated" || mode === "created",
+  });
   let html = "";
   rail.entries.forEach((entry: RailEntry) => {
     if (entry.kind === "header") {

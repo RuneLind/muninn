@@ -618,6 +618,19 @@ test("sortPages: created sinks meta pages (index/log/CLAUDE) to the bottom", () 
   expect(sortPages([log, idx, ...PAGES], "created").map((p) => p.name).slice(-2)).toEqual(["index", "log"]);
 });
 
+test("sortPages: updated sinks meta pages (index/log/CLAUDE) to the bottom", () => {
+  // Nearly every wiki write touches log.md and index.md, so on any recency signal
+  // they sat on top of "Recently updated", above the page that actually changed.
+  const t = (h: number) => Date.parse("2026-07-23T09:00:00Z") + h * 3_600_000;
+  const log = page({ name: "log", title: "Log", relPath: "log.md", mtimeMs: t(2) });
+  const idx = page({ name: "index", title: "Index", relPath: "plans/index.md", mtimeMs: t(1) });
+  const claude = page({ name: "CLAUDE", title: "Claude", relPath: "CLAUDE.md", mtimeMs: t(1) });
+  const ranked = sortPages([claude, idx, log, ...PAGES], "updated", t(3)).map((p) => p.name);
+  expect(ranked.slice(0, 3)).toEqual(["rag", "gym", "anthropic"]);
+  // Among themselves: recency first (log is newest), then title for the tie.
+  expect(ranked.slice(-3)).toEqual(["log", "CLAUDE", "index"]);
+});
+
 test("sortPages: created lifts a brand-new frontmatter-less page to the top", () => {
   const fresh = page({
     name: "fresh",

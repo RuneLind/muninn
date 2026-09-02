@@ -26,6 +26,7 @@ import {
   serializeRelPathList,
   togglePin,
   type RailEntry,
+  type RailSection,
 } from "./wiki-recents.ts";
 import type { WikiFilters, WikiListing } from "./wiki-filter.ts";
 
@@ -361,12 +362,15 @@ describe("jumpHeaderLabel", () => {
 });
 
 describe("railSectionsVisible", () => {
-  test("only with the box empty and every facet inert", () => {
+  test("with the box empty and every facet inert", () => {
     expect(railSectionsVisible(INERT)).toBe(true);
   });
-  // Each axis, one at a time — the enumeration is the point.
-  const axes: Array<[keyof WikiFilters, string]> = [
-    ["q", "nullable"],
+  test("a query hides them — a search is a find, and the Jira jump owns that head", () => {
+    expect(railSectionsVisible({ ...INERT, q: "nullable" })).toBe(false);
+  });
+  // Each facet, one at a time — the enumeration is the point. A facet NARROWS
+  // the sections (they resolve from the filtered list); it does not hide them.
+  const facets: Array<[keyof WikiFilters, string]> = [
     ["domain", "life"],
     ["folder", "archive"],
     ["type", "note"],
@@ -374,9 +378,9 @@ describe("railSectionsVisible", () => {
     ["status", "shipped"],
     ["followups", "open"],
   ];
-  for (const [axis, value] of axes) {
-    test(`an active ${axis} hides them`, () => {
-      expect(railSectionsVisible({ ...INERT, [axis]: value })).toBe(false);
+  for (const [axis, value] of facets) {
+    test(`an active ${axis} keeps them`, () => {
+      expect(railSectionsVisible({ ...INERT, [axis]: value })).toBe(true);
     });
   }
   test("a whitespace-only query is still empty", () => {
@@ -398,6 +402,98 @@ describe("buildRail", () => {
     entries.filter((e) => e.kind === "row") as Array<
       Extract<RailEntry, { kind: "row" }>
     >;
+
+  test("a facet NARROWS Pinned/Recent to the filtered list instead of hiding them", () => {
+    // Under `type=plan` the reader still wants the plans they pinned on top —
+    // the ones outside the filter simply do not resolve.
+    const filters = { ...INERT, type: "plan" };
+    const m = buildRail({ filtered: [a, c], facetOnly: [a, c], filters, recents: ["b.md", "c.md"], pins: ["a.md", "b.md"] });
+    expect(headers(m.entries)).toEqual(["Pinned", "Recently opened"]);
+    const rs = rows(m.entries);
+    expect(rs.filter((r) => r.section === "pinned").map((r) => r.page)).toEqual([a]);
+    expect(rs.filter((r) => r.section === "recent").map((r) => r.page)).toEqual([c]);
+    expect(rs.filter((r) => r.section === "all")).toEqual([]);
+    expect(m.shown).toBe(2);
+  });
+  test("under a facet the remainder still renders, minus the lifted rows", () => {
+    const m = buildRail({ filtered: [a, b, c], facetOnly: [a, b, c], filters: { ...INERT, type: "plan" }, recents: ["c.md"], pins: ["a.md"] });
+    expect(headers(m.entries)).toEqual(["Pinned", "Recently opened", "Other pages"]);
+    expect(rows(m.entries).filter((r) => r.section === "all").map((r) => r.page)).toEqual([b]);
+    expect(m.shown).toBe(3);
+  });
+  test("the recents clear affordance exists only while the rail shows the whole wiki", () => {
+    // Under a facet the section is a SUBSET of the store, and `clearRecents`
+    // empties the store — a clear there would destroy rows the reader never saw.
+    // Every facet, one at a time: the enumeration is the point.
+    const clearOf = (m: ReturnType<typeof buildRail>) =>
+      m.entries.find((e) => e.kind === "header" && e.section === "recent") as { clear?: true } | undefined;
+    expect(clearOf(build({ recents: ["b.md"] }))?.clear).toBe(true);
+    const facets: Array<[keyof WikiFilters, string]> = [
+      ["domain", "life"],
+      ["folder", "archive"],
+      ["type", "plan"],
+      ["tag", "jira"],
+      ["status", "shipped"],
+      ["followups", "open"],
+    ];
+    for (const [axis, value] of facets) {
+      const m = buildRail({ filtered: all, facetOnly: all, filters: { ...INERT, [axis]: value }, recents: ["b.md"], pins: [] });
+      expect(clearOf(m)?.clear, axis).toBeUndefined();
+      expect(headers(m.entries), axis).toEqual(["Recently opened", "Other pages"]);
+    }
+  });
+  test("metaTail: the sunk bookkeeping pages get their own header", () => {
+    // sortPages already puts index/log/CLAUDE last in a recency mode; without a
+    // header the date column jumps back to today at the tail and reads as a
+    // broken sort.
+    const log = page({ relPath: "log.md", title: "Log" });
+    const idx = page({ relPath: "plans/index.md", title: "Index" });
+    const m = buildRail({ filtered: [a, b, log, idx], facetOnly: [a, b, log, idx], filters: INERT, recents: [], pins: [], metaTail: true });
+    expect(headers(m.entries)).toEqual(["Bookkeeping"]);
+    expect(rows(m.entries).map((r) => [r.section, r.page.relPath])).toEqual([
+      ["all", "a.md"],
+      ["all", "b.md"],
+      ["meta", "log.md"],
+      ["meta", "plans/index.md"],
+    ]);
+    expect(m.shown).toBe(4);
+    // Off (title / backlinks modes), they are ordinary rows wherever the sort put them.
+    const off = buildRail({ filtered: [log, a], facetOnly: [log, a], filters: INERT, recents: [], pins: [] });
+    expect(headers(off.entries)).toEqual([]);
+    expect(rows(off.entries).map((r) => r.section)).toEqual(["all", "all"]);
+    // The split's reachable cells, one row each: query × what lifts (pins,
+    // recents, a pin that resolves to nothing) × non-meta in the remainder ×
+    // meta in the remainder. The header explains a TAIL, so it needs something
+    // rendered above it — lifted rows count, whichever list lifted them — and
+    // never appears in a search result list.
+    type Case = { name: string; q: string; pins?: string[]; recents?: string[]; filtered: WikiListing[]; headers: string[]; sections: RailSection[] };
+    const cases: Case[] = [
+      { name: "query", q: "lo", filtered: [a, log], headers: [], sections: ["all", "all"] },
+      { name: "query, lifted", q: "lo", pins: ["a.md"], filtered: [a, log], headers: [], sections: ["all", "all"] },
+      { name: "nothing above, meta only", q: "", filtered: [log, idx], headers: [], sections: ["all", "all"] },
+      { name: "unresolved pin is not 'above'", q: "", pins: ["ghost.md"], filtered: [log, idx], headers: [], sections: ["all", "all"] },
+      { name: "non-meta above", q: "", filtered: [a, log], headers: ["Bookkeeping"], sections: ["all", "meta"] },
+      { name: "pin-lifted above, meta-only remainder", q: "", pins: ["a.md"], filtered: [a, log, idx], headers: ["Pinned", "Bookkeeping"], sections: ["pinned", "meta", "meta"] },
+      { name: "recent-lifted above, meta-only remainder", q: "", recents: ["a.md"], filtered: [a, log, idx], headers: ["Recently opened", "Bookkeeping"], sections: ["recent", "meta", "meta"] },
+      { name: "lifted above, mixed remainder", q: "", pins: ["a.md"], filtered: [a, b, log], headers: ["Pinned", "Other pages", "Bookkeeping"], sections: ["pinned", "all", "meta"] },
+      { name: "lifted above, empty remainder", q: "", pins: ["a.md"], filtered: [a], headers: ["Pinned"], sections: ["pinned"] },
+      { name: "no meta at all", q: "", pins: ["a.md"], filtered: [a, b], headers: ["Pinned", "Other pages"], sections: ["pinned", "all"] },
+    ];
+    for (const c of cases) {
+      // The query case has no key, so the jump never fires; `q` only gates the split.
+      const m = buildRail({ filtered: c.filtered, facetOnly: c.filtered, filters: { ...INERT, q: c.q }, recents: c.recents ?? [], pins: c.pins ?? [], metaTail: true });
+      expect(headers(m.entries), c.name).toEqual(c.headers);
+      expect(rows(m.entries).map((r) => r.section), c.name).toEqual(c.sections);
+      expect(m.shown, c.name).toBe(c.filtered.length);
+    }
+    // A pinned meta page is lifted like any other; only the remainder is split.
+    const pinnedMeta = buildRail({ filtered: [a, log], facetOnly: [a, log], filters: INERT, recents: [], pins: ["log.md"], metaTail: true });
+    expect(headers(pinnedMeta.entries)).toEqual(["Pinned", "Other pages"]);
+  });
+  test("a query still hides Pinned/Recent", () => {
+    const m = buildRail({ filtered: [a, b], facetOnly: [a, b], filters: { ...INERT, q: "a" }, recents: ["b.md"], pins: ["a.md"] });
+    expect(headers(m.entries)).toEqual([]);
+  });
 
   test("a fresh browser gets exactly today's rail: rows, no headers", () => {
     const rail = build();
