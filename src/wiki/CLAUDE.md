@@ -127,6 +127,110 @@ Five things about it are deliberate and easy to undo by accident:
 
 Acceptance: `e2e/wiki-copy-path.spec.ts` (two temp wikis in ONE process, the second registered read-only).
 
+## The page rail's recall aids (Recently opened · Pinned · Jira-key jump)
+
+Client-only, per browser, per wiki. The rule is one pure function —
+`buildRail` in `views/components/wiki-recents.ts` returns the whole ordered list
+of headers and rows and `renderList` only paints it — with the localStorage half
+in `wiki-recents-store.ts`, the same pure/DOM split as the rail's drag handle
+(`wiki-rail-width.ts` + `wiki-rail-resize.ts`).
+
+Keys, both suffixed with the wiki's canonical name (`""` for the default wiki),
+so a browser reading two wikis keeps two lists: `muninn.wiki.recents.v1:<wiki>`
+(last 6 opened) and `muninn.wiki.pins.v1:<wiki>`. The rail's third key is
+`muninn.wiki.railWidth.v1` (PR #501), which is NOT per wiki — a width is a
+property of the reader's screen, not of the wiki.
+
+⚠️ **relPath identity has ONE boundary: entries are normalized on the way into
+storage** (`parseRelPathList` on read, `pushRecent` and `togglePin` on write), so
+every comparison downstream is exact by construction. Leaving it to each
+comparison was the bug five times over — and fixing only the two READ halves
+(`buildRail` and the DOM painter) left it alive with a worse label: the star read
+"Unpin this page", the click appended a SECOND entry for one page, and that page
+then rendered twice under a `#wikiCount` that said otherwise. The count cannot
+see it — it counts distinct pages, so it read 12/12 with 13 rows on screen; only
+the row count can. `buildRail` also dedupes by PAGE rather than by stored string,
+so its "every page appears exactly once" invariant does not depend on an upstream
+that a key written by an older build can violate.
+
+relPaths are stored, never names: a wiki with same-stem pages resolves a name to
+whichever page registered first, and they are resolved back through
+`findPageByRelPath`.
+
+Four things are deliberate and easy to undo by accident:
+- **Sections MOVE a row, they never copy it — every page is on screen exactly
+  once.** Leaving the listing complete and letting a pinned page render twice
+  was wrong in five measured ways at once: `.wiki-list-item[data-relpath=…]`
+  stopped naming one element (a strict-mode violation for four existing e2e
+  specs), the open page got two `.active` highlights, `#wikiCount` disagreed
+  with the rows on screen, `e2e/wiki-refresh` went red counting rows, and the
+  rail grew a row on every article view.
+- **`#wikiCount` counts DISTINCT rendered rows**, not query matches. Under a key
+  jump that can exceed what the query itself matched, because the jump reads the
+  facets without the query.
+- ⚠️ **A bare four-digit run in 1900–2099 is a YEAR, never an issue number.**
+  mimir files pages as `archive/<yyyy-mm-dd>-<topic>.mdx`, so a date is how a
+  reader finds one there — and as a bare key `2026` resolved to **121 of 485
+  pages**, pushing the query's single real match below eight unrelated ones.
+  Requiring a `<prefix>-<number>` token instead was tried for one round and
+  reverted: it narrowed recall (`Sak 7588 løst` stopped being a reference), no
+  test pinned it, and it does not close the case anyway — `retro-2026` and
+  `q1-2026` are ordinary tag shapes that satisfy it exactly. A PREFIXED
+  `MELOSYS-2026` still
+  resolves — naming the project is the only way anyone could tell the two apart.
+  Every candidate the query yields is tried in order and the first that RESOLVES
+  wins, which is what makes a permissive parse free.
+- ⚠️ **The ★ is `tabindex="-1"`, and hidden-until-hover only inside
+  `@media (hover: hover)`.** As an ordinary tab stop it put one per page ahead of
+  the rail resizer (485 on mimir, 953 on jarvis) in a list whose rows a keyboard
+  cannot open anyway. `pointer-events: none` on an invisible button was INERT for
+  the case it was written for — Chromium applies `:hover` on touchstart, so the
+  star became clickable before the click dispatched and a tap in that slot still
+  pinned instead of opening the page (measured with a real tap: pinned 1, article
+  0). Nothing invisible may be hit-testable, and on a device that cannot hover
+  the only way to satisfy that is to SHOW the star, so the reveal is scoped to
+  `@media (hover: hover) and (not (any-pointer: coarse))` — `hover: hover` alone
+  left the HYBRID cell open, since a touchscreen laptop with a mouse reports it
+  and a finger tap in an invisible star's slot pins again. Of that media state
+  space's four cells, two are pinned by tests, the hybrid one is **not
+  constructible in Chromium's emulation** (touch emulation forces `hover: none`
+  regardless of `Emulation.setEmulatedMedia`, and `setTouchEmulationEnabled`
+  forces `hover:false` and `any-pointer:coarse` together) and is correct by
+  construction only, and the fourth is benign. Two caveats: that unbuildability
+  is a CHROMIUM fact and `playwright.config.ts` runs only Chromium, so a WebKit
+  or Firefox project could pin it; and `not (…)` is MQ4 boolean syntax, so a
+  browser that cannot parse it (Safari < 16.4, older Firefox) drops the whole
+  block and shows the star on every row — which is the benign direction. It also shares
+  one flex slot with the date (`.wiki-list-end`) so it costs the row its own
+  width and not the row's 8px gap as well — as a sibling of the title the pair
+  measured 21px off `.wiki-list-title` on every row, 42px of title left at
+  `RAIL_WIDTH_MIN` with a status pill and a ⚑.
+
+⚠️ **The ★ toggle does NOT re-render the list.** It repaints that one button
+(`paintPinState`) and the sections rebuild at the reader's next render. This is a
+class fix, arrived at after three rounds on one state space — (render cause ×
+scroll position × whether the list reorders) — each of which produced a different
+defect: a numeric scroll restore moved the row at the cursor ~96px, so a second
+click pinned a DIFFERENT page; the anchored restore that replaced it threw the
+reader down the list on a sort change and hid the new `Pinned` header when
+pinning at the top; and two more cells of it shipped unpinned. Painting one
+button deletes the space instead of choosing a fourth point in it, and the
+painter reads the WHOLE pin list back rather than the clicked row — `togglePin`
+displaces the oldest pin at `PINS_MAX`, so a toggle at the cap flips two pages
+and "repaint what was clicked" left the other one lit and doing the opposite of
+its own label. `renderList` is back to the plain `scrollTop` restore it always
+had.
+
+⚠️ **Residual**: "nothing moves" is true of the CLICK, not of every later render.
+The render that first paints the new section can be the background listing
+refresh rather than one the reader caused, and the section then appears on a
+repaint nothing on screen explains — measured at ~50px on top of the ~46px that
+refresh already shifts content by, which is pre-existing and unrelated to pins.
+
+Acceptance: `views/components/wiki-recents.test.ts` (the state space, enumerated)
+and `e2e/wiki-rail-recents.spec.ts` (two temp wikis in ONE process, so a
+globally-keyed store cannot pass).
+
 ## Share (`POST /api/wiki/share`, `GET /api/wiki/share/presets`)
 
 Turns one wiki page into a pasteable post — the reader's **📤 Share** breadcrumb action, beside 💬 Discuss. One fenced one-shot on the wiki's synthesis bot (`resolveWikiSynthesisBot`, same routing as Ask), streamed as markdown, and on completion three server-rendered strings. Prompt/preset/body-prep layers live in `src/share/` (see the Share row in the repo `CLAUDE.md`); the SSE runner is `dashboard/routes/share-sse.ts`, the dialog `dashboard/views/components/share-dialog.ts` (+ its pure half `wiki-share-dialog.ts`).

@@ -80,6 +80,14 @@ import {
 } from "./copy-path.ts";
 import { enhanceMermaid } from "./wiki-mermaid.ts";
 import { initRailResize } from "./wiki-rail-resize.ts";
+import { buildRail, isPinnedRelPath, type RailEntry } from "./wiki-recents.ts";
+import {
+  clearRecents,
+  readPins,
+  readRecents,
+  recordRecent,
+  togglePinned,
+} from "./wiki-recents-store.ts";
 import { atlasBodyHtml, initAtlas } from "./wiki-atlas.ts";
 import { enhanceCodeTabs } from "./code-tabs.ts";
 import { enhanceCodeBlocks } from "./code-block-chrome.ts";
@@ -502,14 +510,88 @@ function syncFilters(autoOpen = true): void {
   if (autoOpen && details && count && !details.open) details.open = true;
 }
 
+/** The reader's own recall lists for THIS wiki, read once at boot and kept in
+ *  step by the two writers below — re-reading localStorage inside `renderList`
+ *  would put a synchronous storage hit on every keystroke in the search box. */
+let recents: string[] = readRecents(WIKI);
+let pins: string[] = readPins(WIKI);
+/** Bumped by every navigation, so a response that lands after a newer one has
+ *  started cannot write itself to the head of Recently opened. */
+let navToken = 0;
+
+/**
+ * ★ — hidden until the row is hovered, always shown once pinned.
+ *
+ * `tabindex="-1"` is deliberate and measured: as an ordinary tab stop it put ONE
+ * per page into the tab order — 485 on mimir, 953 on jarvis — all of them ahead
+ * of the rail resizer PR #501 shipped for keyboard users, and the rail's rows are
+ * plain `div`s that a keyboard cannot open anyway. Pinning is a pointer
+ * affordance until the rail gets row-level keyboard navigation; adding 500 stops
+ * to a list nothing can navigate makes the page worse, not more accessible.
+ */
+function pinBtnHtml(pinned: boolean): string {
+  const label = pinned ? "Unpin this page" : "Pin this page";
+  return (
+    `<button type="button" class="wiki-pin${pinned ? " on" : ""}" data-pin="1" tabindex="-1"` +
+    ` aria-pressed="${pinned}" title="${label}" aria-label="${label}">\u2605</button>`
+  );
+}
+
+/**
+ * Paint EVERY row's ★ from the stored pin list. No notion of which page changed,
+ * because "the page that was clicked" is the wrong unit: `togglePin` displaces
+ * the oldest pin at `PINS_MAX`, so a toggle at the cap flips TWO pages. Painting
+ * only the clicked row left the displaced one lit — its ★ still read "Unpin this
+ * page", and clicking it RE-pinned (evicting another page) while the star never
+ * moved, a control that reads as dead and does the opposite of its own label.
+ *
+ * Reading the whole list back is what makes that class unreachable rather than
+ * handled: there is no case to get wrong. It touches only class and attributes
+ * on one button per row, so it triggers no layout — which is the whole point of
+ * doing this instead of `renderList`.
+ */
+function paintPinState(): void {
+  const rows = document.getElementById("wikiList")!.querySelectorAll<HTMLElement>(".wiki-list-item");
+  for (let i = 0; i < rows.length; i++) {
+    const btn = rows[i]!.querySelector<HTMLElement>(".wiki-pin");
+    const relPath = rows[i]!.getAttribute("data-relpath");
+    if (!btn || !relPath) continue;
+    // `isPinnedRelPath`, not an `indexOf`: this and `buildRail` must answer the
+    // same question, and a raw comparison here disagreed with the renderer's
+    // normalized one — see that function's own doc for what that cost.
+    const pinned = isPinnedRelPath(pins, relPath);
+    const label = pinned ? "Unpin this page" : "Pin this page";
+    btn.classList.toggle("on", pinned);
+    btn.setAttribute("aria-pressed", String(pinned));
+    btn.setAttribute("title", label);
+    btn.setAttribute("aria-label", label);
+  }
+}
+
 function renderList(): void {
   const mode = sortMode();
   // ONE anchored instant for the sort AND its row labels, so the date a row shows is
   // the date it sorted on even for a page sitting at the 48h future-guard boundary.
   const now = recencyNow();
-  const pages = sortPages(filterPages(allPages, filters), mode, now);
+  const filtered = sortPages(filterPages(allPages, filters), mode, now);
+  // The key jump reads the facets WITHOUT the query (the query is the key). Only
+  // computed when the query could name one — on every other keystroke this is the
+  // same single `filterPages` pass the rail has always done.
+  const facetOnly = /[0-9]/.test(filters.q)
+    ? sortPages(filterPages(allPages, { ...filters, q: "" }), mode, now)
+    : filtered;
+  const rail = buildRail({ filtered, facetOnly, filters, recents, pins });
   let html = "";
-  pages.forEach((p) => {
+  rail.entries.forEach((entry: RailEntry) => {
+    if (entry.kind === "header") {
+      html +=
+        `<div class="wiki-list-sec" data-section="${esc(entry.section)}">` +
+        `<span class="wiki-sec-label">${esc(entry.label)}</span>` +
+        (entry.clear ? `<button type="button" class="wiki-sec-clear" data-clear-recents="1">clear</button>` : "") +
+        `</div>`;
+      return;
+    }
+    const p = entry.page;
     // In recency modes show the date we actually sorted on (mtime/birthtime or
     // frontmatter) — otherwise a frontmatter-less page would show nothing while
     // sitting at the top, which is exactly what looked broken before.
@@ -525,7 +607,7 @@ function renderList(): void {
     // while no relPath is known — see `wiki-nav.ts`.
     const active = isActivePage(p, { name: currentName, relPath: currentRelPath });
     html +=
-      `<div class="wiki-list-item${active ? " active" : ""}" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}">` +
+      `<div class="wiki-list-item${active ? " active" : ""}" data-section="${esc(entry.section)}" data-page="${esc(p.name)}" data-relpath="${esc(p.relPath)}">` +
       `<div class="wiki-type-dot type-${esc(p.type)}"></div>` +
       // `title=` carries the full name: the row ellipsizes, and a status pill +
       // ⚑ flag eat enough width that plan titles routinely clip.
@@ -534,7 +616,14 @@ function renderList(): void {
       // two surfaces show the same two facts and must not read differently.
       statusPillHtml(p) +
       followupFlagHtml(p) +
+      // ★ and date in ONE flex slot: as a sibling of the title the ★ also cost
+      // the row's 8px `gap`, and the pair measured 21px off `.wiki-list-title`
+      // on every row — a third of the title box at RAIL_WIDTH_MIN, paid by a
+      // reader who never pins anything.
+      `<div class="wiki-list-end">` +
+      pinBtnHtml(entry.pinned) +
       `<div class="wiki-list-meta">${esc(meta)}</div>` +
+      `</div>` +
       `</div>`;
   });
   // Scroll restore lives HERE, not at the refresh call site (the `renderBacklog`
@@ -545,8 +634,19 @@ function renderList(): void {
   const listEl = document.getElementById("wikiList")!;
   const scroll = listEl.scrollTop;
   listEl.innerHTML = html || '<div class="wiki-conn-empty">No pages match.</div>';
+  // ⚠️ Measured DEAD in Chromium and kept anyway: an `innerHTML` swap PRESERVES
+  // `scrollTop` when the new content is at least as tall (300 → 300), and when it
+  // is shorter the browser clamps to the new maximum and re-assigning the saved
+  // value re-clamps to the same number (saved 2398 → 0 → 0). So this line changes
+  // nothing here. It is not deleted because scroll preservation across an
+  // `innerHTML` replacement is not specified — Firefox and WebKit may reset to 0
+  // — and `playwright.config.ts` runs only Chromium, so the half of that state
+  // space where the line matters is not buildable in this harness.
   if (scroll) listEl.scrollTop = scroll;
-  document.getElementById("wikiCount")!.textContent = pages.length + " / " + allPages.length;
+  // `rail.shown` counts DISTINCT pages among the rendered rows, so a page that
+  // appears both in a recall section and in the listing below is one, and a jump
+  // hit the query itself would not have matched is counted.
+  document.getElementById("wikiCount")!.textContent = rail.shown + " / " + allPages.length;
 }
 
 /** The five payload-derived facet renders, in one place so the boot load and a
@@ -1149,6 +1249,11 @@ function loadExplainer(m: WikiListing, push: boolean): void {
   // The listing IS the identity here (no page response to wait for), so the
   // active-row test gets its relPath immediately.
   currentRelPath = m.relPath;
+  // Same rule as `fetchAndRenderPage`: an explainer opened is an explainer
+  // recently opened. Its own `renderList()` at the end of this function repaints.
+  // No token check needed — nothing is awaited between here and the render.
+  navToken++;
+  recents = recordRecent(WIKI, m.relPath);
   navInFlight = false; // `currentName` now carries the "article" signal on its own
   if (push) {
     history.pushState({ relPath: m.relPath }, "", pageUrlByRelPath(m.relPath));
@@ -1267,6 +1372,7 @@ function loadPageByRelPath(relPath: string, push = true): void {
  *  the round-trip survives Back/reload/share even where stems collide; a response
  *  carrying no relPath at all falls back to the name-based `?page=<name>` URL. */
 function fetchAndRenderPage(url: string, push: boolean): void {
+  const token = ++navToken;
   fetch(url)
     .then((r) => r.json())
     .then((data: WikiPageDetail) => {
@@ -1326,6 +1432,13 @@ function fetchAndRenderPage(url: string, push: boolean): void {
       // Lazy: fetch semantic cousins after the page + connections are on screen,
       // so it never blocks the article render.
       loadSimilar(data.meta);
+      // Recorded HERE, past everything that can throw: an article whose render
+      // blows up lands in the `.catch` below showing "Failed to load page", and
+      // pushing it to the front of a PERSISTENT list would outlive the failure.
+      // The token check is the same reason `loadExplainer` compares
+      // `currentRelPath`: on a fast A→B flip whose responses land out of order,
+      // A must not win the top of Recently opened for good.
+      if (currentRelPath && token === navToken) recents = recordRecent(WIKI, currentRelPath);
       renderList();
     })
     .catch((err: Error) => {
@@ -1374,6 +1487,12 @@ document.body.addEventListener("click", (e) => {
     switchConnTab(connTab.getAttribute("data-conntab") || "conn", true);
     return;
   }
+  // The rail's ★ and `clear` live inside a `[data-relpath]` row; they are the
+  // list's own listener's business, and opening the page as well is not what a
+  // click on either means. Skipped HERE rather than by stopping propagation in
+  // that listener, so one widget's handler cannot silence document-level
+  // listeners that have nothing to do with it.
+  if (target.closest && target.closest("[data-pin], [data-clear-recents]")) return;
   const link = target.closest ? target.closest(NAV_LINK_SELECTOR) : null;
   if (!link) return;
   // `navTargetFrom` prefers `data-relpath` — the only key that names ONE page on a
@@ -1383,6 +1502,65 @@ document.body.addEventListener("click", (e) => {
   if (!targetPage) return;
   e.preventDefault();
   openNavTarget(targetPage, true);
+});
+
+/**
+ * The rail's two own controls: the ★ pin on every row, and `clear` on the
+ * Recently-opened header.
+ *
+ * On `#wikiList`, not on the body delegate above — both controls sit INSIDE a
+ * `.wiki-list-item` (or a header inside the list), and that delegate opens
+ * whatever `[data-relpath]` a click landed in. A listener on the list runs
+ * first because it is deeper in the tree.
+ *
+ * ⚠️ It deliberately does NOT call `stopPropagation`; the body delegate skips
+ * these two controls by selector instead, so a handler on ONE widget cannot
+ * silence unrelated document-level listeners.
+ *
+ * **Correcting the claim this comment first carried**, which a verify pass
+ * disproved by measurement: the failure named was "with the Discuss popover
+ * open, a click on a ★ leaves the popover standing". It cannot happen. The
+ * popover renders a full-viewport scrim (`.wiki-chatopt-scrim`), so a real click
+ * never reaches the rail at all — and forced past the scrim, the popover stays
+ * open regardless, because `shouldCloseChatOptions` returns false while
+ * unattached and `renderList` below swaps the clicked element out of the
+ * document synchronously, before any document listener runs. The rule stands as
+ * a rule; the story about it was invented.
+ */
+document.getElementById("wikiList")!.addEventListener("click", (e) => {
+  const target = e.target as HTMLElement;
+  if (!target.closest) return;
+  if (target.closest("[data-clear-recents]")) {
+    e.preventDefault();
+    recents = clearRecents(WIKI);
+    renderList();
+    return;
+  }
+  const pin = target.closest("[data-pin]");
+  if (!pin) return;
+  e.preventDefault();
+  const row = pin.closest(".wiki-list-item");
+  const relPath = row?.getAttribute("data-relpath");
+  if (!relPath) return;
+  pins = togglePinned(WIKI, relPath);
+  // ⚠️ IN PLACE — deliberately NOT `renderList()`. Re-rendering here moved
+  // content under the reader, and the state space of "how much, and which way"
+  // (render cause × scroll position × whether the list reorders) produced a
+  // different defect in each of two review rounds: a numeric restore shifted the
+  // row at the cursor ~96px so a second click pinned a DIFFERENT page; the
+  // anchored restore that replaced it threw the reader down the list on a sort
+  // change and hid the new Pinned header when pinning at the top. Painting one
+  // button removes the space rather than picking a third point in it. The ★
+  // filling in is the confirmation in the meantime.
+  //
+  // ⚠️ The residual, stated because "nothing moves" is only true of THIS click:
+  // the render that first paints the new section can be the BACKGROUND listing
+  // refresh rather than one the reader caused, and the section then appears on a
+  // repaint nothing on screen explains — measured at ~50px of extra downward
+  // shift on top of the ~46px that refresh already moves content by, which is
+  // pre-existing and unrelated to pins. Bounded, and only on a render that
+  // already repaints the list.
+  paintPinState();
 });
 
 (document.getElementById("wikiSearch") as HTMLInputElement).addEventListener("input", (e) => {
@@ -1486,7 +1664,19 @@ window.addEventListener("popstate", () => {
   }
   const page = params.get("page");
   if (page) loadPage(page, false);
-  else renderStart();
+  else {
+    // Back/forward to the start view ABANDONS any navigation still in flight:
+    // its response must not write itself to the head of the PERSISTENT recents
+    // list. The bump belongs HERE and not inside `renderStart`, which the Hubs /
+    // Timeline / Atlas tabs also call while the reader is still ON the start
+    // view with a click of theirs in flight — and which the coverage-footer link
+    // calls from the ARTICLE view too, since `#wikiCoverageFoot` is a sibling of
+    // `#wikiList` in the rail rather than part of the start view. Putting the
+    // bump there dropped the recent for a page the reader then sat and read
+    // (measured: articleRendered=1, recents=[]).
+    navToken++;
+    renderStart();
+  }
 });
 
 // ── Ask tab: research-style Q&A scoped to this wiki ───────────────────

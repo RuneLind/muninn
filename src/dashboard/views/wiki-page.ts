@@ -268,6 +268,69 @@ export async function renderWikiPage(opts?: {
     .wiki-list-item .wiki-list-meta { margin-top: 2px; }
     .wiki-list-item .wiki-status { margin-top: 1px; }
     .wiki-list-item .wiki-followup-flag { margin-top: 2px; }
+
+    /* Recall sections (Pinned · Recently opened · Other pages) and the Jira-key
+       jump header. One rule for all four — they are the same furniture, and the
+       jump differs only by its tinted background. */
+    .wiki-list-sec {
+      display: flex; align-items: center; gap: 6px;
+      padding: 10px 10px 3px; font-size: 10px; letter-spacing: .07em;
+      text-transform: uppercase; color: var(--text-faint);
+    }
+    .wiki-list-sec[data-section="jump"] {
+      text-transform: none; letter-spacing: 0; font-size: 11.5px;
+      color: var(--text-dim); background: var(--bg-surface);
+      border-radius: 6px; margin: 2px 0 3px; padding: 6px 10px;
+    }
+    /* The same two tokens as .wiki-ask-hist-clear, the rail's other "clear":
+       one word, one tab away, so they must not read as different controls. */
+    .wiki-sec-clear {
+      margin-left: auto; background: none; border: 0; padding: 0; cursor: pointer;
+      font: inherit; letter-spacing: inherit; text-transform: inherit;
+      color: var(--text-dim);
+    }
+    .wiki-sec-clear:hover { color: var(--status-error); }
+    /* ★ and the date share one flex slot, so the ★ costs the row its own width
+       and NOT the row's 8px gap as well: as a sibling of the title the pair
+       measured 21px off .wiki-list-title on every row — 42px of title left at
+       RAIL_WIDTH_MIN with a status pill and a ⚑ — paid permanently by a reader
+       who never pins anything. */
+    .wiki-list-end { display: flex; align-items: flex-start; gap: 2px; flex-shrink: 0; }
+    /* The star is VISIBLE by default, and hidden-until-hover only where hover
+       really exists. pointer-events:none alone was INERT for the case it was
+       written for: Chromium applies :hover on touchstart, so an invisible star
+       became clickable before the click dispatched and a tap in that slot still
+       pinned instead of opening the page (measured with a real touchscreen tap:
+       pinned 1, article 0). A control nobody can see must not be hit-testable,
+       and on a device that cannot hover the only way to satisfy that is to SHOW
+       it — so touch gets a visible star it can choose to tap, and a pointer gets
+       the quiet hover reveal.
+       opacity, never display, in both branches: the slot stays reserved either
+       way, so hovering a row cannot re-wrap its two-line title and change the
+       row's height under a moving cursor. */
+    .wiki-pin {
+      background: none; border: 0; padding: 0; cursor: pointer;
+      font-size: 10.5px; line-height: 1.55; color: var(--status-warning);
+      flex-shrink: 0; opacity: 1; transition: opacity .12s;
+    }
+    /* Hidden-until-hover ONLY where hover is the whole story: a fine pointer and
+       no coarse one anywhere. hover: hover alone left the hybrid cell open — a
+       touchscreen laptop with a mouse reports it, and a finger tap in an
+       invisible star's slot pins again. any-pointer: coarse is the question
+       that actually matters ("can a finger reach this?"), so the reveal is
+       scoped to devices where the answer is no.
+       Of this media state space's four cells two are pinned by tests; the
+       HYBRID cell is correct by construction only, because Chromium's touch
+       emulation forces hover:none regardless of Emulation.setEmulatedMedia and
+       the combination cannot be built in the harness. That unbuildability is a
+       CHROMIUM fact and playwright.config.ts runs only Chromium, so a WebKit or
+       Firefox project could pin it. And not(...) is MQ4 boolean syntax: a browser
+       that cannot parse it (Safari < 16.4, older Firefox) drops this whole block
+       and shows the star on every row — the benign direction. */
+    @media (hover: hover) and (not (any-pointer: coarse)) {
+      .wiki-pin { opacity: 0; pointer-events: none; }
+      .wiki-pin.on, .wiki-list-item:hover .wiki-pin { opacity: 1; pointer-events: auto; }
+    }
     /* Drag handle on the rail's right edge. right:-14px resolves against the
        PADDING box, so the 14px box starts ON the pane's 1px border and runs 13px
        into the gap (measured at 1400px: pane border-box right edge 324, handle
