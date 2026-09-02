@@ -461,22 +461,27 @@ describe("buildRail", () => {
     const off = buildRail({ filtered: [log, a], facetOnly: [log, a], filters: INERT, recents: [], pins: [] });
     expect(headers(off.entries)).toEqual([]);
     expect(rows(off.entries).map((r) => r.section)).toEqual(["all", "all"]);
-    // The split's state space, enumerated: query × rows lifted above × non-meta
-    // in the remainder × meta in the remainder. The header explains a TAIL, so
-    // it needs something rendered above it — lifted rows count — and never
-    // appears in a search result list.
-    const cases: Array<{ name: string; q: string; pins: string[]; filtered: WikiListing[]; headers: string[]; sections: RailSection[] }> = [
-      { name: "query", q: "lo", pins: [], filtered: [a, log], headers: [], sections: ["all", "all"] },
+    // The split's reachable cells, one row each: query × what lifts (pins,
+    // recents, a pin that resolves to nothing) × non-meta in the remainder ×
+    // meta in the remainder. The header explains a TAIL, so it needs something
+    // rendered above it — lifted rows count, whichever list lifted them — and
+    // never appears in a search result list.
+    type Case = { name: string; q: string; pins?: string[]; recents?: string[]; filtered: WikiListing[]; headers: string[]; sections: RailSection[] };
+    const cases: Case[] = [
+      { name: "query", q: "lo", filtered: [a, log], headers: [], sections: ["all", "all"] },
       { name: "query, lifted", q: "lo", pins: ["a.md"], filtered: [a, log], headers: [], sections: ["all", "all"] },
-      { name: "nothing above, meta only", q: "", pins: [], filtered: [log, idx], headers: [], sections: ["all", "all"] },
-      { name: "non-meta above", q: "", pins: [], filtered: [a, log], headers: ["Bookkeeping"], sections: ["all", "meta"] },
-      { name: "lifted above, meta-only remainder", q: "", pins: ["a.md"], filtered: [a, log, idx], headers: ["Pinned", "Bookkeeping"], sections: ["pinned", "meta", "meta"] },
+      { name: "nothing above, meta only", q: "", filtered: [log, idx], headers: [], sections: ["all", "all"] },
+      { name: "unresolved pin is not 'above'", q: "", pins: ["ghost.md"], filtered: [log, idx], headers: [], sections: ["all", "all"] },
+      { name: "non-meta above", q: "", filtered: [a, log], headers: ["Bookkeeping"], sections: ["all", "meta"] },
+      { name: "pin-lifted above, meta-only remainder", q: "", pins: ["a.md"], filtered: [a, log, idx], headers: ["Pinned", "Bookkeeping"], sections: ["pinned", "meta", "meta"] },
+      { name: "recent-lifted above, meta-only remainder", q: "", recents: ["a.md"], filtered: [a, log, idx], headers: ["Recently opened", "Bookkeeping"], sections: ["recent", "meta", "meta"] },
       { name: "lifted above, mixed remainder", q: "", pins: ["a.md"], filtered: [a, b, log], headers: ["Pinned", "Other pages", "Bookkeeping"], sections: ["pinned", "all", "meta"] },
+      { name: "lifted above, empty remainder", q: "", pins: ["a.md"], filtered: [a], headers: ["Pinned"], sections: ["pinned"] },
       { name: "no meta at all", q: "", pins: ["a.md"], filtered: [a, b], headers: ["Pinned", "Other pages"], sections: ["pinned", "all"] },
     ];
     for (const c of cases) {
       // The query case has no key, so the jump never fires; `q` only gates the split.
-      const m = buildRail({ filtered: c.filtered, facetOnly: c.filtered, filters: { ...INERT, q: c.q }, recents: [], pins: c.pins, metaTail: true });
+      const m = buildRail({ filtered: c.filtered, facetOnly: c.filtered, filters: { ...INERT, q: c.q }, recents: c.recents ?? [], pins: c.pins ?? [], metaTail: true });
       expect(headers(m.entries), c.name).toEqual(c.headers);
       expect(rows(m.entries).map((r) => r.section), c.name).toEqual(c.sections);
       expect(m.shown, c.name).toBe(c.filtered.length);

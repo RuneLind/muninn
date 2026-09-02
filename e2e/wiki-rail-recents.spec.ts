@@ -297,8 +297,11 @@ test.describe("Wiki rail: recents, pins, key jump", () => {
   test("a search hides the sections; a facet NARROWS them to the filtered pages", async ({ page }) => {
     await openRail(page);
     await page.locator(`.wiki-list-item[data-relpath="${KILDESKATT}"]`).click();
+    // Settle between clicks: the first re-renders the rail (the row moves into
+    // Recently opened), and a click on a row mid-replacement is lost.
+    await expect(rowsIn(page, "recent")).toHaveCount(1);
     await page.locator(`.wiki-list-item[data-relpath="${ARSAVREGNING}"]`).click();
-    expect(await relPathsIn(page, "recent")).toEqual([ARSAVREGNING, KILDESKATT]);
+    await expect.poll(() => relPathsIn(page, "recent")).toEqual([ARSAVREGNING, KILDESKATT]);
 
     await page.fill("#wikiSearch", "kilde");
     expect(await sectionLabels(page)).toEqual([]);
