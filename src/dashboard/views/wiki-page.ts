@@ -655,6 +655,10 @@ export async function renderWikiPage(opts?: {
     .wiki-bc-trail { flex: 1 1 160px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .wiki-bc-sep { color: var(--text-dim); margin: 0 5px; }
     .wiki-bc-cur { color: var(--text-secondary); }
+    /* The wiki crumb is the link back to the overview — a link that reads as
+       part of the trail until hovered. */
+    .wiki-bc-wiki { color: inherit; text-decoration: none; }
+    .wiki-bc-wiki:hover, .wiki-bc-wiki:focus-visible { color: var(--accent); text-decoration: underline; }
     .wiki-bc-date { color: var(--text-dim); flex-shrink: 0; }
     .wiki-bc-explain {
       flex-shrink: 0; padding: 4px 11px; border-radius: 999px;

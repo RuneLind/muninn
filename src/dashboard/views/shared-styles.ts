@@ -1,6 +1,7 @@
 import { themeInitScript, themeToggleHtml, themeToggleScript } from "./components/theme.ts";
 import { resolveServingProfile, type MuninnProfile } from "../../config.ts";
 import { droppedRouteGroups, type RouteGroup } from "../route-groups.ts";
+import { LAST_WIKI_KEY } from "./components/wiki-home.ts";
 
 /** Dark palette — the default, and the forced value under html[data-theme="dark"]. */
 const DARK_TOKENS = `
@@ -550,6 +551,33 @@ export function renderNav(
     dropItem("models", "/models", "Models"),
     dropItem("indexing", "/indexing", "Indexing"),
   ].filter((item) => item !== "");
+  // The "Wiki" link goes to the wiki ON SCREEN when this is the reader AND it
+  // serves one — `__WIKI_ROOT__` is a string, never "" (both injected by the
+  // page above the nav; under the WIKI_DIR override the root IS served and the
+  // NAME is "", which is what keeps the bare link there) — else the wiki last
+  // opened by URL. Not `__WIKI_NAME__` alone: that is the REQUESTED name on the
+  // "No wiki named X" page, whose root is null, and preferring it pointed the
+  // nav at the error page (measured in review). The store is written by the
+  // reader under `LAST_WIKI_KEY` (components/wiki-home.ts owns the rule
+  // and refuses to store a name the picker does not offer). Bare /wiki resolves
+  // to the DEFAULT wiki server-side, so without this every trip through the nav
+  // dropped the reader back to jarvis. Runs on DOMContentLoaded: this script
+  // sits ABOVE the nav markup, so at parse time the link is not in the document
+  // yet (measured: 0 rewrites). Emitted only when the link is — a profile that
+  // dropped the wiki group must render no `href="/wiki"` at all, script included.
+  const wikiNavRewrite = !shown("wiki") ? "" : `
+      document.addEventListener('DOMContentLoaded', function() {
+        try {
+          var served = typeof window.__WIKI_ROOT__ === 'string' && typeof window.__WIKI_NAME__ === 'string';
+          var wiki = served ? window.__WIKI_NAME__ : localStorage.getItem(${JSON.stringify(LAST_WIKI_KEY)});
+          if (wiki) {
+            document.querySelectorAll('a.nav-link[href="/wiki"]').forEach(function(a) {
+              a.setAttribute('href', '/wiki?wiki=' + encodeURIComponent(wiki));
+            });
+          }
+        } catch (e) { /* storage unavailable: keep the bare link */ }
+      });
+`;
   const toolsDropdown = toolsItems.length === 0 ? "" : `<details class="nav-dropdown">
           <summary class="nav-link${toolsActive ? " active" : ""}">Tools <span class="nav-caret" aria-hidden="true">▾</span></summary>
           <div class="nav-dropdown-panel">
@@ -587,7 +615,7 @@ ${toolsItems.map((item) => `            ${item}`).join("\n")}
         document.documentElement.requestFullscreen().catch(function() {});
       }
 
-      // Close the Tools ▾ dropdown on outside-click / Escape (native <details>
+${wikiNavRewrite}      // Close the Tools ▾ dropdown on outside-click / Escape (native <details>
       // stays open otherwise). One global listener, no per-page wiring.
       document.addEventListener('click', function(e) {
         document.querySelectorAll('details.nav-dropdown[open]').forEach(function(d) {

@@ -60,6 +60,9 @@ export const E2E_PORTS = {
   // Two wikis, ONE process: the recents/pins keys are per wiki, and a spec with
   // one root cannot tell a per-wiki key from a global one.
   "wiki-rail-recents": 3040,
+  // Two wikis, ONE process: "remember the last wiki" is only provable when a
+  // bare /wiki can land on a wiki OTHER than the one the server defaults to.
+  "wiki-home": 3044,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,
