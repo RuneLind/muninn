@@ -587,6 +587,23 @@ ${toolsItems.map((item) => `            ${item}`).join("\n")}
         document.documentElement.requestFullscreen().catch(function() {});
       }
 
+      // The "Wiki" link goes to the wiki last opened by URL (the /wiki reader
+      // stores it under this key — see components/wiki-home.ts, which owns the
+      // rule). Bare /wiki resolves to the DEFAULT wiki server-side, so without
+      // this every trip through the nav dropped the reader back to jarvis.
+      // Runs on DOMContentLoaded: this script sits ABOVE the nav markup, so
+      // at parse time the link is not in the document yet (measured: 0 rewrites).
+      document.addEventListener('DOMContentLoaded', function() {
+        try {
+          var lastWiki = localStorage.getItem('muninn.wiki.last.v1');
+          if (lastWiki) {
+            document.querySelectorAll('a.nav-link[href="/wiki"]').forEach(function(a) {
+              a.setAttribute('href', '/wiki?wiki=' + encodeURIComponent(lastWiki));
+            });
+          }
+        } catch (e) { /* storage unavailable: keep the bare link */ }
+      });
+
       // Close the Tools ▾ dropdown on outside-click / Escape (native <details>
       // stays open otherwise). One global listener, no per-page wiring.
       document.addEventListener('click', function(e) {

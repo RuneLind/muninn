@@ -69,6 +69,17 @@ import {
 } from "./wiki-start-cards.ts";
 import { readActiveWikiName, readActiveWikiRoot, withWikiParam } from "./wiki-param.ts";
 import {
+  DEFAULT_START_TAB,
+  LAST_WIKI_KEY,
+  START_VIEW_PARAM,
+  lastWikiRedirect,
+  resolveStartTab,
+  startTabKey,
+  startUrl,
+  urlNamesWiki,
+  type StartTab,
+} from "./wiki-home.ts";
+import {
   COPY_PATH_BTN_ID,
   COPY_PATH_FAIL,
   COPY_PATH_IDLE,
@@ -321,7 +332,40 @@ const filters: WikiFilters = {
   status: "",
   followups: "",
 };
-let startTab: "hubs" | "timeline" | "atlas" = "hubs";
+/** Which overview tab is showing. Set from the URL's `view=` (else the per-wiki
+ *  stored value) at boot and on popstate — see `syncStartTabFromUrl` — and
+ *  stored on every tab click, so Back from an article and a reload both land on
+ *  the tab the reader left, and an Atlas link is a link. */
+let startTab: StartTab = DEFAULT_START_TAB;
+
+function readStoredStartTab(): string | null {
+  try {
+    return localStorage.getItem(startTabKey(WIKI));
+  } catch {
+    return null;
+  }
+}
+function syncStartTabFromUrl(): void {
+  startTab = resolveStartTab(new URLSearchParams(location.search).get(START_VIEW_PARAM), readStoredStartTab());
+}
+/** The overview URL for the CURRENT wiki + tab — what the breadcrumb crumb links
+ *  to and what a return-to-overview pushes. */
+function currentStartUrl(): string {
+  return startUrl(WIKI, startTab);
+}
+/**
+ * Return to the overview from wherever the reader is — the breadcrumb's wiki
+ * crumb and the rail's coverage footer. Abandons any navigation still in flight
+ * (the same `navToken` reason the popstate branch spells out) and pushes the
+ * overview URL, so the address bar stops showing the article just left — unless
+ * the reader is already ON the start view, where a push would only stack a
+ * duplicate history entry.
+ */
+function goToStart(): void {
+  navToken++;
+  if (currentViewState() !== "start") history.pushState({}, "", currentStartUrl());
+  renderStart();
+}
 let tagsExpanded = false;
 
 // ── Start-view cards (What's new · Index coverage · reindex) ──────────
@@ -769,7 +813,15 @@ function renderBreadcrumb(m: WikiListing): void {
   currentOutgoingTitles = [];
   if (!el) return;
   const crumbs: string[] = [];
-  if (WIKI) crumbs.push('<span class="wiki-bc-wiki">' + esc(WIKI) + "</span>");
+  // The wiki crumb is the way BACK to the overview (Hubs / Timeline / Atlas):
+  // before it was an anchor the only routes there were browser Back and the
+  // coverage footer. The href is the real overview URL so middle-click/copy
+  // work; the click delegate intercepts a plain click into `goToStart`.
+  crumbs.push(
+    '<a class="wiki-bc-wiki" href="' + esc(currentStartUrl()) + '" title="Back to the overview">' +
+      esc(WIKI || "Wiki") +
+      "</a>",
+  );
   const folder = pageFolder(m);
   const folderCrumb = folder && folder !== ROOT_FOLDER ? folderLabelOf(folder, folderLabels) : "";
   if (folder && folder !== ROOT_FOLDER) {
@@ -1468,6 +1520,14 @@ document.body.addEventListener("click", (e) => {
     startReindex();
     return;
   }
+  const crumb = target.closest ? target.closest(".wiki-bc-wiki") : null;
+  if (crumb) {
+    // Plain click only: a modifier/middle click keeps the anchor's own href.
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+    e.preventDefault();
+    goToStart();
+    return;
+  }
   if (target.closest && target.closest("#wikiIndexRefresh")) {
     loadIndexCoverage(true);
     return;
@@ -1475,7 +1535,7 @@ document.body.addEventListener("click", (e) => {
   // Coverage footer under the page list → open the full Index card on the start
   // view (it lazy-loads there); scroll it into view once the render settles.
   if (target.closest && target.closest("#wikiCoverageLink")) {
-    renderStart();
+    goToStart();
     setTimeout(() => {
       const card = document.getElementById("wikiIndexCard");
       if (card) card.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -1484,7 +1544,15 @@ document.body.addEventListener("click", (e) => {
   }
   const tab = target.closest ? target.closest(".wiki-tab") : null;
   if (tab) {
-    startTab = (tab.getAttribute("data-tab") as "hubs" | "timeline" | "atlas") || "hubs";
+    startTab = resolveStartTab(tab.getAttribute("data-tab"), null);
+    try {
+      localStorage.setItem(startTabKey(WIKI), startTab);
+    } catch {
+      /* storage unavailable — the tab still switches for this view */
+    }
+    // REPLACE, never push: Back from the overview should leave it, not walk
+    // through every tab the reader tried.
+    history.replaceState(history.state, "", currentStartUrl());
     renderStart();
     return;
   }
@@ -1682,6 +1750,7 @@ window.addEventListener("popstate", () => {
     // bump there dropped the recent for a page the reader then sat and read
     // (measured: articleRendered=1, recents=[]).
     navToken++;
+    syncStartTabFromUrl();
     renderStart();
   }
 });
@@ -4478,7 +4547,10 @@ function bootRender(applied: PendingPages): void {
   } else {
     const page = params.get("page");
     if (page) loadPage(page, false);
-    else renderStart(); // renders the list itself
+    else {
+      syncStartTabFromUrl();
+      renderStart(); // renders the list itself
+    }
   }
 }
 
@@ -4608,4 +4680,27 @@ installWikiReadonlyGuard();
 // Rehydrate any persisted Ask session into the "This session" list (does not
 // auto-show an answer). Safe at module load — the history element is static.
 rehydrateAskSession();
-requestPages({ refresh: false, boot: true });
+// Remember / return to the wiki last opened BY URL. Stored only when the URL
+// named the wiki (remembering the resolved default would make the redirect inert
+// exactly when it matters); read when it did not — a bare `/wiki` from the nav
+// or the address bar — and applied as a full `location.replace` if the stored
+// wiki is still one the picker offers. The pure rule is `lastWikiRedirect`.
+function rememberOrRedirectWiki(): boolean {
+  let stored: string | null = null;
+  try {
+    if (WIKI && urlNamesWiki(location.search)) {
+      localStorage.setItem(LAST_WIKI_KEY, WIKI);
+      return false;
+    }
+    stored = localStorage.getItem(LAST_WIKI_KEY);
+  } catch {
+    return false;
+  }
+  const sel = document.getElementById("wikiSelect") as HTMLSelectElement | null;
+  const known = sel ? Array.from(sel.options, (o) => o.value).filter(Boolean) : [];
+  const url = lastWikiRedirect({ search: location.search, stored, rendered: WIKI, known });
+  if (!url) return false;
+  location.replace(url);
+  return true;
+}
+if (!rememberOrRedirectWiki()) requestPages({ refresh: false, boot: true });

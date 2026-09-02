@@ -141,6 +141,16 @@ so a browser reading two wikis keeps two lists: `muninn.wiki.recents.v1:<wiki>`
 `muninn.wiki.railWidth.v1` (PR #501), which is NOT per wiki — a width is a
 property of the reader's screen, not of the wiki.
 
+Two more keys, owned by `views/components/wiki-home.ts` (pure rules; the shell
+and the site nav apply them): `muninn.wiki.last.v1` — the wiki last opened BY
+URL, global — which the nav's "Wiki" link rewrites its href from and a bare
+`/wiki` `location.replace`s to when the stored wiki is still in the picker (the
+`WIKI_DIR` override, rendered as `""`, is never redirected away from); and
+`muninn.wiki.startTab.v1:<wiki>` — the Hubs / Timeline / Atlas tab, also carried
+as `?view=timeline|atlas` on the overview URL (Hubs = absent), so Back from an
+article and a reload land on the tab the reader left. The breadcrumb's wiki crumb
+is the link back to the overview; a tab click `replaceState`s, never pushes.
+
 ⚠️ **relPath identity has ONE boundary: entries are normalized on the way into
 storage** (`parseRelPathList` on read, `pushRecent` and `togglePin` on write), so
 every comparison downstream is exact by construction. Leaving it to each
