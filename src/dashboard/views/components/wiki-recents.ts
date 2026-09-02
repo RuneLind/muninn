@@ -17,7 +17,7 @@
  * are not on screen.
  */
 
-import { displayTitleOf, type WikiFilters, type WikiListing } from "./wiki-filter.ts";
+import { displayTitleOf, isMetaPage, type WikiFilters, type WikiListing } from "./wiki-filter.ts";
 import { findPageByRelPath, normalizeRel } from "./wiki-nav.ts";
 
 /** localStorage key prefixes; the wiki's canonical name (`""` for the default
@@ -310,7 +310,7 @@ export function jumpHeaderLabel(jump: JiraKeyJump): string {
 
 // ── The rail ──────────────────────────────────────────────────────────
 
-export type RailSection = "jump" | "pinned" | "recent" | "all";
+export type RailSection = "jump" | "pinned" | "recent" | "all" | "meta";
 
 export type RailEntry =
   | { kind: "header"; section: RailSection; label: string; clear?: true }
@@ -329,6 +329,11 @@ export interface RailInput {
   /** Stored relPaths, most recent / most recently pinned first. */
   recents: string[];
   pins: string[];
+  /** Recency sort modes only: `sortPages` has sunk the bookkeeping pages
+   *  (index/log/CLAUDE) to the tail, so the remainder's trailing meta rows get
+   *  a `Bookkeeping` header. Without it the date column jumps back to today at
+   *  the bottom of a descending list and reads as a broken sort. */
+  metaTail?: boolean;
 }
 
 export interface RailModel {
@@ -380,6 +385,22 @@ export function railSectionsVisible(filters: WikiFilters): boolean {
   return !filters.q.trim();
 }
 
+/** Is the rail showing the WHOLE wiki (no query, no facet)? Gates the recents
+ *  clear affordance: `clearRecents` empties the store, and under a facet the
+ *  section on screen is only a subset of it. This is the old
+ *  `railSectionsVisible` rule, kept for the one place it is still right. */
+export function railFacetsInert(filters: WikiFilters): boolean {
+  return (
+    !filters.q.trim() &&
+    !filters.domain &&
+    !filters.folder &&
+    !filters.type &&
+    !filters.tag &&
+    !filters.status &&
+    !filters.followups
+  );
+}
+
 /** Resolve stored relPaths against a listing, in the STORED order, dropping what
  *  no longer resolves and what `seen` already accounts for.
  *
@@ -427,16 +448,22 @@ function resolve(relPaths: string[], pages: WikiListing[], seen: Set<string>): W
  *
  * The states, enumerated:
  *
- *  - **No key, sections hidden** (a query, or any active facet) — the rows
- *    exactly as today, with no headers at all.
- *  - **No key, sections visible, nothing stored** — also exactly as today. A
- *    fresh browser must not grow furniture it has nothing to put in.
- *  - **No key, sections visible, something stored** — `Pinned`, then
- *    `Recently opened` (with its clear affordance), then `Other pages`: the
- *    listing MINUS what the two sections lifted out of it. A page that is both
- *    pinned and recent renders under Pinned only; it stays in the recents
- *    storage, so unpinning returns it to its place in that list. When the
- *    sections lift every page, there is no remainder and no third header.
+ *  - **A query, no key** — the rows exactly as today, with no headers at all.
+ *  - **No query, nothing stored** — also exactly as today. A fresh browser must
+ *    not grow furniture it has nothing to put in.
+ *  - **No query, something stored** — `Pinned`, then `Recently opened`, then
+ *    `Other pages`: the listing MINUS what the two sections lifted out of it. A
+ *    page that is both pinned and recent renders under Pinned only; it stays in
+ *    the recents storage, so unpinning returns it to its place in that list.
+ *    When the sections lift every page, there is no remainder and no third
+ *    header. A facet NARROWS both sections (they resolve from the filtered
+ *    list); the clear affordance on `Recently opened` exists only with every
+ *    facet inert, because `clearRecents` empties the STORE and under a facet
+ *    the section is a subset of it — a clear there would destroy rows the
+ *    reader never saw.
+ *  - **`metaTail`** (recency sorts) — the remainder's sunk bookkeeping pages
+ *    render last under a `Bookkeeping` header, so their fresh dates at the
+ *    bottom of a descending list are explained rather than read as a bug.
  *  - **A key that resolves** — the jump block first, then `Other matches` with
  *    the ordinary results minus the jump's rows.
  *  - **A key that resolves to nothing** — the next candidate gets its turn
@@ -447,7 +474,7 @@ function resolve(relPaths: string[], pages: WikiListing[], seen: Set<string>): W
  * query and the sections need an empty one.
  */
 export function buildRail(input: RailInput): RailModel {
-  const { filtered, facetOnly, filters, recents, pins } = input;
+  const { filtered, facetOnly, filters, recents, pins, metaTail } = input;
   const entries: RailEntry[] = [];
   const isPinned = (p: WikiListing): boolean => isPinnedRelPath(pins, p.relPath);
 
@@ -490,19 +517,32 @@ export function buildRail(input: RailInput): RailModel {
       }
     }
     if (recent.length) {
-      entries.push({ kind: "header", section: "recent", label: "Recently opened", clear: true });
+      entries.push({
+        kind: "header",
+        section: "recent",
+        label: "Recently opened",
+        ...(railFacetsInert(filters) ? { clear: true as const } : {}),
+      });
       for (const p of recent) {
         entries.push({ kind: "row", section: "recent", page: p, pinned: false });
       }
     }
   }
 
-  const rest = claimed.size ? filtered.filter((p) => !claimed.has(normalizeRel(p.relPath))) : filtered;
+  const remainder = claimed.size ? filtered.filter((p) => !claimed.has(normalizeRel(p.relPath))) : filtered;
+  const rest = metaTail ? remainder.filter((p) => !isMetaPage(p)) : remainder;
+  const meta = metaTail ? remainder.filter((p) => isMetaPage(p)) : [];
   if (claimed.size && rest.length) {
     entries.push({ kind: "header", section: "all", label: jump ? "Other matches" : "Other pages" });
   }
   for (const p of rest) {
     entries.push({ kind: "row", section: "all", page: p, pinned: isPinned(p) });
+  }
+  if (meta.length) {
+    entries.push({ kind: "header", section: "meta", label: "Bookkeeping" });
+    for (const p of meta) {
+      entries.push({ kind: "row", section: "meta", page: p, pinned: isPinned(p) });
+    }
   }
 
   const distinct = new Set<string>();

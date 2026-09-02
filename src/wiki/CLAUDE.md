@@ -157,7 +157,7 @@ relPaths are stored, never names: a wiki with same-stem pages resolves a name to
 whichever page registered first, and they are resolved back through
 `findPageByRelPath`.
 
-Four things are deliberate and easy to undo by accident:
+Six things are deliberate and easy to undo by accident:
 - **Sections MOVE a row, they never copy it — every page is on screen exactly
   once.** Leaving the listing complete and letting a pinned page render twice
   was wrong in five measured ways at once: `.wiki-list-item[data-relpath=…]`
@@ -166,14 +166,24 @@ Four things are deliberate and easy to undo by accident:
   with the rows on screen, `e2e/wiki-refresh` went red counting rows, and the
   rail grew a row on every article view.
 - **A facet NARROWS Pinned/Recent, only a query hides them** (`railSectionsVisible`,
-  PR #504). Both lists resolve from the FILTERED pages, so under `type=plan` the
+  PR #504). Both lists resolve from the filtered pages, so under `type=plan` the
   section is exactly the plans the reader pinned. The first cut hid both on any
   facet — the reader lost their pins the moment they picked a type, for a
   contradiction (a recent row from outside the filter) that could never render.
-- **Meta pages (`index`/`log`/`CLAUDE`, any folder) sink to the bottom of BOTH
-  recency sorts** (`isMetaPage` in `wiki-filter.ts`). "Recently added" had it
-  from the start; "Recently updated" did not, so every sweep put log.md and
-  index.md above the page that actually changed, on every wiki.
+  ⚠️ The **clear** affordance on `Recently opened` is gated separately, on
+  `railFacetsInert` (no query AND no facet): `clearRecents` empties the STORE,
+  and under a facet the section is a subset of it — measured, `type=plan` over
+  six stored recents rendered two rows whose clear would have destroyed four the
+  reader never saw.
+- **Meta pages (`index`/`log`/`CLAUDE`, any folder, by stem) sink to the bottom
+  of BOTH recency sorts** (`isMetaPage` in `wiki-filter.ts`), and `buildRail`
+  renders the sunk run under a `Bookkeeping` header (`metaTail`, set by
+  `renderList` for the two recency modes only). "Recently added" sank them from
+  the start; "Recently updated" — the default sort — did not, so on mimir and
+  jarvis they held ranks 1–3 above the page that actually changed. The header
+  is not decoration: without it the date column of a descending list jumps
+  back to today at the tail and reads as a broken sort. The sink is by stem, so
+  a hand-edited CLAUDE.md goes with them — accepted, the header says where.
 - **`#wikiCount` counts DISTINCT rendered rows**, not query matches. Under a key
   jump that can exceed what the query itself matched, because the jump reads the
   facets without the query.

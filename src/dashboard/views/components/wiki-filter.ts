@@ -609,8 +609,10 @@ export function pageTimeMs(p: WikiListing, now?: number): number {
 
 /**
  * `YYYY-MM-DD` for `pageTimeMs` — what the list shows next to a page when it is
- * sorted by recency, so the visible date always explains the ordering. Derived from
- * the same `updatedSignal` as the sort key, so the two cannot drift apart.
+ * sorted by recency, so the visible date explains the ordering. Derived from the
+ * same `updatedSignal` as the sort key, so the two cannot drift apart — the one
+ * exception is the sunk meta pages, whose header (`Bookkeeping`) is what
+ * explains their position instead.
  */
 export function pageDateLabel(p: WikiListing, now?: number): string {
   return updatedSignal(p, now).label;
@@ -684,10 +686,13 @@ export function pageAddedMs(p: WikiListing, now?: number): number {
   return addedSignal(p, now).ms;
 }
 
-/** Meta/bookkeeping pages (index.md, log.md, CLAUDE.md — any folder). Rewritten
- *  by every sweep, so their birthtime AND mtime are churn, not content: they sink
- *  to the bottom of both "Recently added" and "Recently updated". */
-function isMetaPage(p: WikiListing): boolean {
+/** Meta/bookkeeping pages (index.md, log.md, CLAUDE.md — any folder, matched on
+ *  the stem). Nearly every wiki write touches log.md and index.md, so whichever
+ *  recency signal wins for them is churn, not content: they sink to the bottom
+ *  of both "Recently added" and "Recently updated", where `buildRail` puts them
+ *  under a `Bookkeeping` header. A hand-edited CLAUDE.md sinks with them —
+ *  accepted, since the header says where it went. */
+export function isMetaPage(p: WikiListing): boolean {
   const stem = (p.relPath || "").replace(/\\/g, "/").split("/").pop()!.replace(/\.[^.]+$/, "");
   return stem === "index" || stem === "log" || stem === "CLAUDE";
 }
@@ -806,9 +811,8 @@ export function sortPages(
         byTitle(a, b),
     );
   } else {
-    // Meta pages sink here too: every sweep touches log.md and index.md, so
-    // on mtime they sat on top of every wiki's "Recently updated", above the
-    // page that actually changed.
+    // Meta pages sink here too (see `isMetaPage`): measured on mimir and jarvis,
+    // log.md and index.md held ranks 1–3 of "Recently updated" on both.
     copy.sort(
       (a, b) =>
         Number(isMetaPage(a)) - Number(isMetaPage(b)) ||

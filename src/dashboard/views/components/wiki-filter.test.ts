@@ -619,16 +619,16 @@ test("sortPages: created sinks meta pages (index/log/CLAUDE) to the bottom", () 
 });
 
 test("sortPages: updated sinks meta pages (index/log/CLAUDE) to the bottom", () => {
-  // The same churn: every sweep touches log.md and index.md, so they sat on top of
-  // "Recently updated" on every wiki, above the page that actually changed.
-  const fresh = Date.parse("2026-07-23T09:00:00Z");
-  const log = page({ name: "log", title: "Log", relPath: "log.md", mtimeMs: fresh });
-  const idx = page({ name: "index", title: "Index", relPath: "plans/index.md", mtimeMs: fresh });
-  const claude = page({ name: "CLAUDE", title: "Claude", relPath: "CLAUDE.md", mtimeMs: fresh });
-  const ranked = sortPages([log, idx, claude, ...PAGES], "updated", fresh).map((p) => p.name);
+  // Nearly every wiki write touches log.md and index.md, so on any recency signal
+  // they sat on top of "Recently updated", above the page that actually changed.
+  const t = (h: number) => Date.parse("2026-07-23T09:00:00Z") + h * 3_600_000;
+  const log = page({ name: "log", title: "Log", relPath: "log.md", mtimeMs: t(2) });
+  const idx = page({ name: "index", title: "Index", relPath: "plans/index.md", mtimeMs: t(1) });
+  const claude = page({ name: "CLAUDE", title: "Claude", relPath: "CLAUDE.md", mtimeMs: t(1) });
+  const ranked = sortPages([claude, idx, log, ...PAGES], "updated", t(3)).map((p) => p.name);
   expect(ranked.slice(0, 3)).toEqual(["rag", "gym", "anthropic"]);
-  // Among themselves they still order by recency then title.
-  expect(ranked.slice(-3)).toEqual(["Claude", "index", "log"].map((t) => (t === "Claude" ? "CLAUDE" : t)));
+  // Among themselves: recency first (log is newest), then title for the tie.
+  expect(ranked.slice(-3)).toEqual(["log", "CLAUDE", "index"]);
 });
 
 test("sortPages: created lifts a brand-new frontmatter-less page to the top", () => {

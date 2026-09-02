@@ -414,6 +414,44 @@ describe("buildRail", () => {
     expect(rs.filter((r) => r.section === "all")).toEqual([]);
     expect(m.shown).toBe(2);
   });
+  test("under a facet the remainder still renders, minus the lifted rows", () => {
+    const m = buildRail({ filtered: [a, b, c], facetOnly: [a, b, c], filters: { ...INERT, type: "plan" }, recents: ["c.md"], pins: ["a.md"] });
+    expect(headers(m.entries)).toEqual(["Pinned", "Recently opened", "Other pages"]);
+    expect(rows(m.entries).filter((r) => r.section === "all").map((r) => r.page)).toEqual([b]);
+    expect(m.shown).toBe(3);
+  });
+  test("the recents clear affordance exists only while the rail shows the whole wiki", () => {
+    // Under a facet the section is a SUBSET of the store, and `clearRecents`
+    // empties the store — a clear there would destroy rows the reader never saw.
+    const clearOf = (m: ReturnType<typeof buildRail>) =>
+      m.entries.find((e) => e.kind === "header" && e.section === "recent") as { clear?: true } | undefined;
+    expect(clearOf(build({ recents: ["b.md"] }))?.clear).toBe(true);
+    expect(clearOf(buildRail({ filtered: [b], facetOnly: [b], filters: { ...INERT, type: "plan" }, recents: ["b.md"], pins: [] }))?.clear).toBeUndefined();
+    expect(clearOf(buildRail({ filtered: all, facetOnly: all, filters: { ...INERT, domain: "ai" }, recents: ["b.md"], pins: [] }))?.clear).toBeUndefined();
+  });
+  test("metaTail: the sunk bookkeeping pages get their own header", () => {
+    // sortPages already puts index/log/CLAUDE last in a recency mode; without a
+    // header the date column jumps back to today at the tail and reads as a
+    // broken sort.
+    const log = page({ relPath: "log.md", title: "Log" });
+    const idx = page({ relPath: "plans/index.md", title: "Index" });
+    const m = buildRail({ filtered: [a, b, log, idx], facetOnly: [a, b, log, idx], filters: INERT, recents: [], pins: [], metaTail: true });
+    expect(headers(m.entries)).toEqual(["Bookkeeping"]);
+    expect(rows(m.entries).map((r) => [r.section, r.page.relPath])).toEqual([
+      ["all", "a.md"],
+      ["all", "b.md"],
+      ["meta", "log.md"],
+      ["meta", "plans/index.md"],
+    ]);
+    expect(m.shown).toBe(4);
+    // Off (title / backlinks modes), they are ordinary rows wherever the sort put them.
+    const off = buildRail({ filtered: [log, a], facetOnly: [log, a], filters: INERT, recents: [], pins: [] });
+    expect(headers(off.entries)).toEqual([]);
+    expect(rows(off.entries).map((r) => r.section)).toEqual(["all", "all"]);
+    // A pinned meta page is lifted like any other; only the remainder is split.
+    const pinnedMeta = buildRail({ filtered: [a, log], facetOnly: [a, log], filters: INERT, recents: [], pins: ["log.md"], metaTail: true });
+    expect(headers(pinnedMeta.entries)).toEqual(["Pinned", "Other pages"]);
+  });
   test("a query still hides Pinned/Recent", () => {
     const m = buildRail({ filtered: [a, b], facetOnly: [a, b], filters: { ...INERT, q: "a" }, recents: ["b.md"], pins: ["a.md"] });
     expect(headers(m.entries)).toEqual([]);
