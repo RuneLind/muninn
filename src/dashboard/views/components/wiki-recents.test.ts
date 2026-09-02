@@ -26,6 +26,7 @@ import {
   serializeRelPathList,
   togglePin,
   type RailEntry,
+  type RailSection,
 } from "./wiki-recents.ts";
 import type { WikiFilters, WikiListing } from "./wiki-filter.ts";
 
@@ -460,15 +461,26 @@ describe("buildRail", () => {
     const off = buildRail({ filtered: [log, a], facetOnly: [log, a], filters: INERT, recents: [], pins: [] });
     expect(headers(off.entries)).toEqual([]);
     expect(rows(off.entries).map((r) => r.section)).toEqual(["all", "all"]);
-    // Under a query the rows are exactly as today — a search result list grows
-    // no furniture, and the sunk page is where the sort put it.
-    const searched = buildRail({ filtered: [a, log], facetOnly: [a, log], filters: { ...INERT, q: "lo" }, recents: [], pins: [], metaTail: true });
-    expect(headers(searched.entries)).toEqual([]);
-    expect(rows(searched.entries).map((r) => r.section)).toEqual(["all", "all"]);
-    // A header explains a tail; with nothing above it there is no tail to explain.
-    const onlyMeta = buildRail({ filtered: [log, idx], facetOnly: [log, idx], filters: INERT, recents: [], pins: [], metaTail: true });
-    expect(headers(onlyMeta.entries)).toEqual([]);
-    expect(rows(onlyMeta.entries).map((r) => r.section)).toEqual(["all", "all"]);
+    // The split's state space, enumerated: query × rows lifted above × non-meta
+    // in the remainder × meta in the remainder. The header explains a TAIL, so
+    // it needs something rendered above it — lifted rows count — and never
+    // appears in a search result list.
+    const cases: Array<{ name: string; q: string; pins: string[]; filtered: WikiListing[]; headers: string[]; sections: RailSection[] }> = [
+      { name: "query", q: "lo", pins: [], filtered: [a, log], headers: [], sections: ["all", "all"] },
+      { name: "query, lifted", q: "lo", pins: ["a.md"], filtered: [a, log], headers: [], sections: ["all", "all"] },
+      { name: "nothing above, meta only", q: "", pins: [], filtered: [log, idx], headers: [], sections: ["all", "all"] },
+      { name: "non-meta above", q: "", pins: [], filtered: [a, log], headers: ["Bookkeeping"], sections: ["all", "meta"] },
+      { name: "lifted above, meta-only remainder", q: "", pins: ["a.md"], filtered: [a, log, idx], headers: ["Pinned", "Bookkeeping"], sections: ["pinned", "meta", "meta"] },
+      { name: "lifted above, mixed remainder", q: "", pins: ["a.md"], filtered: [a, b, log], headers: ["Pinned", "Other pages", "Bookkeeping"], sections: ["pinned", "all", "meta"] },
+      { name: "no meta at all", q: "", pins: ["a.md"], filtered: [a, b], headers: ["Pinned", "Other pages"], sections: ["pinned", "all"] },
+    ];
+    for (const c of cases) {
+      // The query case has no key, so the jump never fires; `q` only gates the split.
+      const m = buildRail({ filtered: c.filtered, facetOnly: c.filtered, filters: { ...INERT, q: c.q }, recents: [], pins: c.pins, metaTail: true });
+      expect(headers(m.entries), c.name).toEqual(c.headers);
+      expect(rows(m.entries).map((r) => r.section), c.name).toEqual(c.sections);
+      expect(m.shown, c.name).toBe(c.filtered.length);
+    }
     // A pinned meta page is lifted like any other; only the remainder is split.
     const pinnedMeta = buildRail({ filtered: [a, log], facetOnly: [a, log], filters: INERT, recents: [], pins: ["log.md"], metaTail: true });
     expect(headers(pinnedMeta.entries)).toEqual(["Pinned", "Other pages"]);

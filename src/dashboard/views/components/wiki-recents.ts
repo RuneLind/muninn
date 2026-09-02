@@ -464,8 +464,9 @@ function resolve(relPaths: string[], pages: WikiListing[], seen: Set<string>): W
  *  - **`metaTail`** (recency sorts, no query) — the remainder's sunk
  *    bookkeeping pages render last under a `Bookkeeping` header, so their
  *    fresh dates at the bottom of a descending list are explained rather than
- *    read as a bug. Only when there IS a list above them: a remainder of meta
- *    pages alone, or any query, renders plain rows.
+ *    read as a bug. Only when there IS a list above them — lifted rows count,
+ *    so a meta-only remainder under Pinned still gets the header; a rail that
+ *    is meta pages ALONE, or any query, renders plain rows.
  *  - **A key that resolves** — the jump block first, then `Other matches` with
  *    the ordinary results minus the jump's rows.
  *  - **A key that resolves to nothing** — the next candidate gets its turn
@@ -534,9 +535,15 @@ export function buildRail(input: RailInput): RailModel {
   const remainder = claimed.size ? filtered.filter((p) => !claimed.has(normalizeRel(p.relPath))) : filtered;
   // The Bookkeeping split is a recency-list affordance and nothing else: under
   // a query the rows are exactly as today (a result list grows no furniture),
-  // and a header explains a TAIL — a remainder that is meta pages only has no
-  // head above it, so it renders as plain rows.
-  const split = !!metaTail && railSectionsVisible(filters) && remainder.some((p) => !isMetaPage(p));
+  // and a header explains a TAIL — it needs rows ABOVE it, lifted (pinned /
+  // recent) or in the remainder. With nothing above, the meta pages are the
+  // whole list and render plain. `remainder.some(non-meta)` alone was wrong
+  // here: with every non-meta row lifted, the meta-only remainder fell through
+  // to the `Other pages` header instead — labelled, and wrongly.
+  const split =
+    !!metaTail &&
+    railSectionsVisible(filters) &&
+    (claimed.size > 0 || remainder.some((p) => !isMetaPage(p)));
   const rest = split ? remainder.filter((p) => !isMetaPage(p)) : remainder;
   const meta = split ? remainder.filter((p) => isMetaPage(p)) : [];
   if (claimed.size && rest.length) {

@@ -184,8 +184,11 @@ Six things are deliberate and easy to undo by accident:
   2026-09-02). The header
   is not decoration: without it the date column of a descending list jumps
   back to today at the tail and reads as a broken sort. It is a recency-LIST
-  affordance only: under a query the rows are exactly as today, and a remainder
-  of meta pages alone has no tail to explain and renders plain. The sink is by
+  affordance only: under a query the rows are exactly as today, and a rail that
+  is meta pages ALONE has no tail to explain and renders plain — lifted rows
+  count as "above", so a meta-only remainder under Pinned keeps the header
+  (fix round 2 shipped it under "Other pages"; the split's state space is now
+  enumerated in the test). The sink is by
   stem, so a hand-edited CLAUDE.md goes with them — accepted, the header says
   where.
 - **`#wikiCount` counts DISTINCT rendered rows**, not query matches. Under a key
