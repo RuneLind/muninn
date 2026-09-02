@@ -494,14 +494,12 @@ export function buildRail(input: RailInput): RailModel {
       entries.push({ kind: "header", section: "pinned", label: "Pinned" });
       for (const p of pinned) {
         entries.push({ kind: "row", section: "pinned", page: p, pinned: true });
-        claim(p);
       }
     }
     if (recent.length) {
       entries.push({ kind: "header", section: "recent", label: "Recently opened", clear: true });
       for (const p of recent) {
         entries.push({ kind: "row", section: "recent", page: p, pinned: false });
-        claim(p);
       }
     }
   }
