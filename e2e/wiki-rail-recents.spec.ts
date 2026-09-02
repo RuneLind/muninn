@@ -294,20 +294,24 @@ test.describe("Wiki rail: recents, pins, key jump", () => {
     expect(await relPathsIn(page, "recent")).toEqual([ARSAVREGNING]);
   });
 
-  test("the sections vanish while a search or a filter is active", async ({ page }) => {
+  test("a search hides the sections; a facet NARROWS them to the filtered pages", async ({ page }) => {
     await openRail(page);
+    await page.locator(`.wiki-list-item[data-relpath="${KILDESKATT}"]`).click();
     await page.locator(`.wiki-list-item[data-relpath="${ARSAVREGNING}"]`).click();
-    await expect(rowsIn(page, "recent")).toHaveCount(1);
+    expect(await relPathsIn(page, "recent")).toEqual([ARSAVREGNING, KILDESKATT]);
 
     await page.fill("#wikiSearch", "kilde");
     expect(await sectionLabels(page)).toEqual([]);
 
     await page.fill("#wikiSearch", "");
-    await expect(rowsIn(page, "recent")).toHaveCount(1);
+    await expect(rowsIn(page, "recent")).toHaveCount(2);
 
-    // A facet hides them too — the rail is no longer showing the whole wiki.
-    await page.locator('#domainChips .wiki-chip[data-domain="ai"]').click();
-    expect(await sectionLabels(page)).toEqual([]);
+    // A facet keeps the section and drops the recent that is outside it: the
+    // reader who picked a type still has the pages they pinned/opened IN it.
+    await page.locator("#wikiFilters summary").click();
+    await page.locator('#tagChips .wiki-chip[data-tag="avregning"]').click();
+    expect(await relPathsIn(page, "recent")).toEqual([ARSAVREGNING]);
+    expect(await sectionLabels(page)).toEqual(["Recently opened"]);
   });
 
   test("the store is per wiki — one wiki's recents never show on another", async ({ page }) => {

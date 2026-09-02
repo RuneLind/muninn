@@ -685,8 +685,8 @@ export function pageAddedMs(p: WikiListing, now?: number): number {
 }
 
 /** Meta/bookkeeping pages (index.md, log.md, CLAUDE.md — any folder). Rewritten
- *  by every sweep, so their birthtime is churn, not content creation: they sink
- *  to the bottom of "Recently added" instead of squatting on top. */
+ *  by every sweep, so their birthtime AND mtime are churn, not content: they sink
+ *  to the bottom of both "Recently added" and "Recently updated". */
 function isMetaPage(p: WikiListing): boolean {
   const stem = (p.relPath || "").replace(/\\/g, "/").split("/").pop()!.replace(/\.[^.]+$/, "");
   return stem === "index" || stem === "log" || stem === "CLAUDE";
@@ -806,7 +806,15 @@ export function sortPages(
         byTitle(a, b),
     );
   } else {
-    copy.sort((a, b) => pageTimeMs(b, now) - pageTimeMs(a, now) || byTitle(a, b));
+    // Meta pages sink here too: every sweep touches log.md and index.md, so
+    // on mtime they sat on top of every wiki's "Recently updated", above the
+    // page that actually changed.
+    copy.sort(
+      (a, b) =>
+        Number(isMetaPage(a)) - Number(isMetaPage(b)) ||
+        pageTimeMs(b, now) - pageTimeMs(a, now) ||
+        byTitle(a, b),
+    );
   }
   return copy;
 }

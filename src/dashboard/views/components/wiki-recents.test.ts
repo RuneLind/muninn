@@ -361,12 +361,15 @@ describe("jumpHeaderLabel", () => {
 });
 
 describe("railSectionsVisible", () => {
-  test("only with the box empty and every facet inert", () => {
+  test("with the box empty and every facet inert", () => {
     expect(railSectionsVisible(INERT)).toBe(true);
   });
-  // Each axis, one at a time — the enumeration is the point.
-  const axes: Array<[keyof WikiFilters, string]> = [
-    ["q", "nullable"],
+  test("a query hides them — a search is a find, and the Jira jump owns that head", () => {
+    expect(railSectionsVisible({ ...INERT, q: "nullable" })).toBe(false);
+  });
+  // Each facet, one at a time — the enumeration is the point. A facet NARROWS
+  // the sections (they resolve from the filtered list); it does not hide them.
+  const facets: Array<[keyof WikiFilters, string]> = [
     ["domain", "life"],
     ["folder", "archive"],
     ["type", "note"],
@@ -374,9 +377,9 @@ describe("railSectionsVisible", () => {
     ["status", "shipped"],
     ["followups", "open"],
   ];
-  for (const [axis, value] of axes) {
-    test(`an active ${axis} hides them`, () => {
-      expect(railSectionsVisible({ ...INERT, [axis]: value })).toBe(false);
+  for (const [axis, value] of facets) {
+    test(`an active ${axis} keeps them`, () => {
+      expect(railSectionsVisible({ ...INERT, [axis]: value })).toBe(true);
     });
   }
   test("a whitespace-only query is still empty", () => {
@@ -398,6 +401,23 @@ describe("buildRail", () => {
     entries.filter((e) => e.kind === "row") as Array<
       Extract<RailEntry, { kind: "row" }>
     >;
+
+  test("a facet NARROWS Pinned/Recent to the filtered list instead of hiding them", () => {
+    // Under `type=plan` the reader still wants the plans they pinned on top —
+    // the ones outside the filter simply do not resolve.
+    const filters = { ...INERT, type: "plan" };
+    const m = buildRail({ filtered: [a, c], facetOnly: [a, c], filters, recents: ["b.md", "c.md"], pins: ["a.md", "b.md"] });
+    expect(headers(m.entries)).toEqual(["Pinned", "Recently opened"]);
+    const rs = rows(m.entries);
+    expect(rs.filter((r) => r.section === "pinned").map((r) => r.page)).toEqual([a]);
+    expect(rs.filter((r) => r.section === "recent").map((r) => r.page)).toEqual([c]);
+    expect(rs.filter((r) => r.section === "all")).toEqual([]);
+    expect(m.shown).toBe(2);
+  });
+  test("a query still hides Pinned/Recent", () => {
+    const m = buildRail({ filtered: [a, b], facetOnly: [a, b], filters: { ...INERT, q: "a" }, recents: ["b.md"], pins: ["a.md"] });
+    expect(headers(m.entries)).toEqual([]);
+  });
 
   test("a fresh browser gets exactly today's rail: rows, no headers", () => {
     const rail = build();

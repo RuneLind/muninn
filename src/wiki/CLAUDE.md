@@ -165,6 +165,15 @@ Four things are deliberate and easy to undo by accident:
   specs), the open page got two `.active` highlights, `#wikiCount` disagreed
   with the rows on screen, `e2e/wiki-refresh` went red counting rows, and the
   rail grew a row on every article view.
+- **A facet NARROWS Pinned/Recent, only a query hides them** (`railSectionsVisible`,
+  PR #504). Both lists resolve from the FILTERED pages, so under `type=plan` the
+  section is exactly the plans the reader pinned. The first cut hid both on any
+  facet — the reader lost their pins the moment they picked a type, for a
+  contradiction (a recent row from outside the filter) that could never render.
+- **Meta pages (`index`/`log`/`CLAUDE`, any folder) sink to the bottom of BOTH
+  recency sorts** (`isMetaPage` in `wiki-filter.ts`). "Recently added" had it
+  from the start; "Recently updated" did not, so every sweep put log.md and
+  index.md above the page that actually changed, on every wiki.
 - **`#wikiCount` counts DISTINCT rendered rows**, not query matches. Under a key
   jump that can exceed what the query itself matched, because the jump reads the
   facets without the query.

@@ -365,26 +365,19 @@ export function isPinnedRelPath(pins: readonly string[], relPath: string): boole
 }
 
 /**
- * Are the recall sections allowed on screen? Only with the search box empty AND
- * every facet inert — **including domain**, which `activeFilterCount` in
- * `wiki-browser.ts` deliberately excludes from its badge.
+ * Are the recall sections allowed on screen? Only with the search box empty.
  *
- * The two differ on purpose: that badge answers "is a filter hidden inside the
- * collapsed disclosure", and domain lives in the always-visible head. This
- * answers "is the rail showing the whole wiki", and under `domain=life` a
- * Recently-opened row from the ai domain is a row the active filter says should
- * not be there.
+ * A facet (domain/folder/type/tag/status/follow-ups) NARROWS them rather than
+ * hiding them: `buildRail` resolves both lists from the FILTERED pages, so under
+ * `type=plan` the Pinned section is exactly the plans the reader pinned, and a
+ * pin from another type does not resolve. The first cut hid the sections on any
+ * facet, on the theory that a recent row from another domain contradicts the
+ * filter — but that row was never on screen, and what the reader actually lost
+ * was their pins the moment they picked a type. A query is different: a search
+ * is "find this", and the Jira-key jump owns that head of the rail.
  */
 export function railSectionsVisible(filters: WikiFilters): boolean {
-  return (
-    !filters.q.trim() &&
-    !filters.domain &&
-    !filters.folder &&
-    !filters.type &&
-    !filters.tag &&
-    !filters.status &&
-    !filters.followups
-  );
+  return !filters.q.trim();
 }
 
 /** Resolve stored relPaths against a listing, in the STORED order, dropping what
