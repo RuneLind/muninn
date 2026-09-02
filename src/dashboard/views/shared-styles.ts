@@ -1,6 +1,7 @@
 import { themeInitScript, themeToggleHtml, themeToggleScript } from "./components/theme.ts";
 import { resolveServingProfile, type MuninnProfile } from "../../config.ts";
 import { droppedRouteGroups, type RouteGroup } from "../route-groups.ts";
+import { LAST_WIKI_KEY } from "./components/wiki-home.ts";
 
 /** Dark palette — the default, and the forced value under html[data-theme="dark"]. */
 const DARK_TOKENS = `
@@ -550,6 +551,29 @@ export function renderNav(
     dropItem("models", "/models", "Models"),
     dropItem("indexing", "/indexing", "Indexing"),
   ].filter((item) => item !== "");
+  // The "Wiki" link goes to the wiki ON SCREEN when this is the reader
+  // (`__WIKI_NAME__`, injected by the page above the nav; "" under the WIKI_DIR
+  // override keeps the bare link), else the wiki last opened by URL, which the
+  // reader stores under `LAST_WIKI_KEY` (components/wiki-home.ts owns the rule
+  // and refuses to store a name the picker does not offer). Bare /wiki resolves
+  // to the DEFAULT wiki server-side, so without this every trip through the nav
+  // dropped the reader back to jarvis. Runs on DOMContentLoaded: this script
+  // sits ABOVE the nav markup, so at parse time the link is not in the document
+  // yet (measured: 0 rewrites). Emitted only when the link is — a profile that
+  // dropped the wiki group must render no `href="/wiki"` at all, script included.
+  const wikiNavRewrite = !shown("wiki") ? "" : `
+      document.addEventListener('DOMContentLoaded', function() {
+        try {
+          var wiki = typeof window.__WIKI_NAME__ === 'string'
+            ? window.__WIKI_NAME__ : localStorage.getItem(${JSON.stringify(LAST_WIKI_KEY)});
+          if (wiki) {
+            document.querySelectorAll('a.nav-link[href="/wiki"]').forEach(function(a) {
+              a.setAttribute('href', '/wiki?wiki=' + encodeURIComponent(wiki));
+            });
+          }
+        } catch (e) { /* storage unavailable: keep the bare link */ }
+      });
+`;
   const toolsDropdown = toolsItems.length === 0 ? "" : `<details class="nav-dropdown">
           <summary class="nav-link${toolsActive ? " active" : ""}">Tools <span class="nav-caret" aria-hidden="true">▾</span></summary>
           <div class="nav-dropdown-panel">
@@ -587,24 +611,7 @@ ${toolsItems.map((item) => `            ${item}`).join("\n")}
         document.documentElement.requestFullscreen().catch(function() {});
       }
 
-      // The "Wiki" link goes to the wiki last opened by URL (the /wiki reader
-      // stores it under this key — see components/wiki-home.ts, which owns the
-      // rule). Bare /wiki resolves to the DEFAULT wiki server-side, so without
-      // this every trip through the nav dropped the reader back to jarvis.
-      // Runs on DOMContentLoaded: this script sits ABOVE the nav markup, so
-      // at parse time the link is not in the document yet (measured: 0 rewrites).
-      document.addEventListener('DOMContentLoaded', function() {
-        try {
-          var lastWiki = localStorage.getItem('muninn.wiki.last.v1');
-          if (lastWiki) {
-            document.querySelectorAll('a.nav-link[href="/wiki"]').forEach(function(a) {
-              a.setAttribute('href', '/wiki?wiki=' + encodeURIComponent(lastWiki));
-            });
-          }
-        } catch (e) { /* storage unavailable: keep the bare link */ }
-      });
-
-      // Close the Tools ▾ dropdown on outside-click / Escape (native <details>
+${wikiNavRewrite}      // Close the Tools ▾ dropdown on outside-click / Escape (native <details>
       // stays open otherwise). One global listener, no per-page wiring.
       document.addEventListener('click', function(e) {
         document.querySelectorAll('details.nav-dropdown[open]').forEach(function(d) {

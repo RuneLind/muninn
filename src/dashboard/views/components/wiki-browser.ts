@@ -70,15 +70,14 @@ import {
 import { readActiveWikiName, readActiveWikiRoot, withWikiParam } from "./wiki-param.ts";
 import {
   DEFAULT_START_TAB,
-  LAST_WIKI_KEY,
   START_VIEW_PARAM,
   lastWikiRedirect,
+  rememberWikiName,
   resolveStartTab,
-  startTabKey,
   startUrl,
-  urlNamesWiki,
   type StartTab,
 } from "./wiki-home.ts";
+import { readLastWiki, readStartTab, writeLastWiki, writeStartTab } from "./wiki-home-store.ts";
 import {
   COPY_PATH_BTN_ID,
   COPY_PATH_FAIL,
@@ -333,20 +332,14 @@ const filters: WikiFilters = {
   followups: "",
 };
 /** Which overview tab is showing. Set from the URL's `view=` (else the per-wiki
- *  stored value) at boot and on popstate — see `syncStartTabFromUrl` — and
- *  stored on every tab click, so Back from an article and a reload both land on
- *  the tab the reader left, and an Atlas link is a link. */
+ *  stored value) at boot — on EVERY boot, an article deep link included, since
+ *  the crumb's href is computed from it — and on popstate (`syncStartTabFromUrl`),
+ *  and stored on every tab click, so Back from an article and a reload both land
+ *  on the tab the reader left, and an Atlas link is a link. */
 let startTab: StartTab = DEFAULT_START_TAB;
 
-function readStoredStartTab(): string | null {
-  try {
-    return localStorage.getItem(startTabKey(WIKI));
-  } catch {
-    return null;
-  }
-}
 function syncStartTabFromUrl(): void {
-  startTab = resolveStartTab(new URLSearchParams(location.search).get(START_VIEW_PARAM), readStoredStartTab());
+  startTab = resolveStartTab(new URLSearchParams(location.search).get(START_VIEW_PARAM), readStartTab(WIKI));
 }
 /** The overview URL for the CURRENT wiki + tab — what the breadcrumb crumb links
  *  to and what a return-to-overview pushes. */
@@ -355,15 +348,19 @@ function currentStartUrl(): string {
 }
 /**
  * Return to the overview from wherever the reader is — the breadcrumb's wiki
- * crumb and the rail's coverage footer. Abandons any navigation still in flight
- * (the same `navToken` reason the popstate branch spells out) and pushes the
- * overview URL, so the address bar stops showing the article just left — unless
- * the reader is already ON the start view, where a push would only stack a
- * duplicate history entry.
+ * crumb and the rail's coverage footer. Bumps `navToken` so a page load still
+ * in flight does not record itself as a recent (the popstate branch spells out
+ * why; the load's own paint is not cancelled, same as there), and pushes the
+ * overview URL so the address bar stops showing the article just left. The
+ * guard is on the URL, not the view state: an Ask answer shows with the
+ * overview URL already in place, and a push there stacked a duplicate entry
+ * that made the reader's next Back a no-op (measured in review) — while an
+ * article that failed to load reads as "start" with the article's URL still up.
  */
 function goToStart(): void {
   navToken++;
-  if (currentViewState() !== "start") history.pushState({}, "", currentStartUrl());
+  const target = currentStartUrl();
+  if (location.pathname + location.search !== target) history.pushState({}, "", target);
   renderStart();
 }
 let tagsExpanded = false;
@@ -1545,11 +1542,7 @@ document.body.addEventListener("click", (e) => {
   const tab = target.closest ? target.closest(".wiki-tab") : null;
   if (tab) {
     startTab = resolveStartTab(tab.getAttribute("data-tab"), null);
-    try {
-      localStorage.setItem(startTabKey(WIKI), startTab);
-    } catch {
-      /* storage unavailable — the tab still switches for this view */
-    }
+    writeStartTab(WIKI, startTab);
     // REPLACE, never push: Back from the overview should leave it, not walk
     // through every tab the reader tried.
     history.replaceState(history.state, "", currentStartUrl());
@@ -4526,6 +4519,8 @@ function adoptPagesDataAndFacets(applied: PendingPages): void {
  *  facets, no list) the next successful refetch must run this path too, or the
  *  list heals beside a permanent error message. */
 function bootRender(applied: PendingPages): void {
+  // Before any branch: an article deep link needs the tab too, for its crumb.
+  syncStartTabFromUrl();
   setPagesData(applied.data);
   markApplied(pagesRefresh, applied);
   renderPageFacets(true);
@@ -4547,10 +4542,7 @@ function bootRender(applied: PendingPages): void {
   } else {
     const page = params.get("page");
     if (page) loadPage(page, false);
-    else {
-      syncStartTabFromUrl();
-      renderStart(); // renders the list itself
-    }
+    else renderStart(); // renders the list itself
   }
 }
 
@@ -4686,19 +4678,14 @@ rehydrateAskSession();
 // or the address bar — and applied as a full `location.replace` if the stored
 // wiki is still one the picker offers. The pure rule is `lastWikiRedirect`.
 function rememberOrRedirectWiki(): boolean {
-  let stored: string | null = null;
-  try {
-    if (WIKI && urlNamesWiki(location.search)) {
-      localStorage.setItem(LAST_WIKI_KEY, WIKI);
-      return false;
-    }
-    stored = localStorage.getItem(LAST_WIKI_KEY);
-  } catch {
-    return false;
-  }
   const sel = document.getElementById("wikiSelect") as HTMLSelectElement | null;
   const known = sel ? Array.from(sel.options, (o) => o.value).filter(Boolean) : [];
-  const url = lastWikiRedirect({ search: location.search, stored, rendered: WIKI, known });
+  const remember = rememberWikiName(location.search, WIKI, known);
+  if (remember) {
+    writeLastWiki(remember);
+    return false;
+  }
+  const url = lastWikiRedirect({ search: location.search, stored: readLastWiki(), rendered: WIKI, known });
   if (!url) return false;
   location.replace(url);
   return true;

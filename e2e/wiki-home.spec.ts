@@ -59,6 +59,9 @@ test.beforeAll(async () => {
       DASHBOARD_PORT: String(PORT),
       DASHBOARD_HOST: "127.0.0.1",
       SCHEDULER_ENABLED: "false",
+      // Blanked (assigned, never deleted — the child re-reads .env): a developer's
+      // WIKI_DIR would make bare /wiki the env override, rendered as "", which the
+      // redirect rule leaves alone by design — red here, green on another host.
       WIKI_DIR: "",
       WIKI_EXTRA: `${WIKI}=${root},${OTHER}=${otherRoot}`,
     },
@@ -161,4 +164,26 @@ test("the start tab lives in the URL, survives reload and Back, and is per wiki"
   expect(await activeTab(page)).toBe("hubs");
   await openStart(page, OTHER);
   expect(await activeTab(page)).toBe("hubs");
+});
+
+test("fix round 1: a deep-linked article still knows the remembered tab; an unknown wiki is not remembered", async ({ page }) => {
+  await openStart(page, WIKI);
+  await page.locator('.wiki-tab[data-tab="timeline"]').click();
+  // Arrive DIRECTLY on an article (reload, shared link): the crumb must return
+  // to the remembered tab, and its href must say so for middle-click/copy.
+  await page.goto(`${BASE}/wiki?wiki=${WIKI}&relPath=${encodeURIComponent(ARTICLE)}`);
+  const crumb = page.locator("a.wiki-bc-wiki");
+  await expect(crumb).toHaveAttribute("href", `/wiki?wiki=${WIKI}&view=timeline`);
+  await crumb.click();
+  await expect(page.locator(".wiki-start")).toBeVisible();
+  expect(await activeTab(page)).toBe("timeline");
+
+  // A stale link to a wiki that does not exist renders the unknown-wiki page;
+  // remembering THAT would poison the nav's Wiki link on every page.
+  await page.goto(`${BASE}/wiki?wiki=no-such-wiki`);
+  await page.goto(`${BASE}/traces`);
+  await expect(page.locator('a.nav-link[href="/wiki?wiki=' + WIKI + '"]')).toHaveCount(1);
+  // And on the reader itself the nav link points at the wiki ON SCREEN.
+  await openStart(page, OTHER);
+  await expect(page.locator('a.nav-link[href="/wiki?wiki=' + OTHER + '"]')).toHaveCount(1);
 });

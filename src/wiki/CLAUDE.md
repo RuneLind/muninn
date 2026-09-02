@@ -141,8 +141,8 @@ so a browser reading two wikis keeps two lists: `muninn.wiki.recents.v1:<wiki>`
 `muninn.wiki.railWidth.v1` (PR #501), which is NOT per wiki — a width is a
 property of the reader's screen, not of the wiki.
 
-Two more keys, owned by `views/components/wiki-home.ts` (pure rules; the shell
-and the site nav apply them): `muninn.wiki.last.v1` — the wiki last opened BY
+Two more keys, owned by `views/components/wiki-home.ts` (pure rules) + `wiki-home-store.ts`
+(the storage half; the shell and the site nav apply them): `muninn.wiki.last.v1` — the wiki last opened BY
 URL, global — which the nav's "Wiki" link rewrites its href from and a bare
 `/wiki` `location.replace`s to when the stored wiki is still in the picker (the
 `WIKI_DIR` override, rendered as `""`, is never redirected away from); and

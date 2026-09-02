@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
   lastWikiRedirect,
-  navWikiHref,
   parseStartTab,
+  rememberWikiName,
   resolveStartTab,
   startTabKey,
   startUrl,
@@ -53,15 +53,6 @@ describe("urlNamesWiki", () => {
   });
 });
 
-describe("navWikiHref", () => {
-  test("remembered wiki → its URL; nothing → bare /wiki; encoded", () => {
-    expect(navWikiHref("mimir")).toBe("/wiki?wiki=mimir");
-    expect(navWikiHref(null)).toBe("/wiki");
-    expect(navWikiHref("  ")).toBe("/wiki");
-    expect(navWikiHref("a&b")).toBe("/wiki?wiki=a%26b");
-  });
-});
-
 describe("start tab", () => {
   test("parseStartTab accepts the three names only", () => {
     expect(parseStartTab("hubs")).toBe("hubs");
@@ -88,5 +79,19 @@ describe("start tab", () => {
   test("the tab key is per wiki", () => {
     expect(startTabKey("mimir")).not.toBe(startTabKey("jarvis"));
     expect(startTabKey("")).toBe("muninn.wiki.startTab.v1:");
+  });
+});
+
+describe("fix round 1", () => {
+  test("an EMPTY wiki= / relPath= value is not a named wiki / page (server trims)", () => {
+    expect(urlNamesWiki("?wiki=")).toBe(false);
+    expect(urlNamesWiki("?bot=%20")).toBe(false);
+    expect(lastWikiRedirect({ ...base, search: "?relPath=" })).toBe("/wiki?relPath=&wiki=mimir");
+  });
+  test("only a wiki the picker offers is remembered — an unknown ?wiki=typo is not", () => {
+    expect(rememberWikiName("?wiki=typo", "typo", KNOWN)).toBeNull();
+    expect(rememberWikiName("?wiki=mimir", "mimir", KNOWN)).toBe("mimir");
+    expect(rememberWikiName("?relPath=a.md", "jarvis", KNOWN)).toBeNull();
+    expect(rememberWikiName("?wiki=", "jarvis", KNOWN)).toBeNull();
   });
 });

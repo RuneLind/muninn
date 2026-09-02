@@ -49,22 +49,15 @@ export function resolveStartTab(urlValue: string | null, stored: string | null):
   return parseStartTab(urlValue) ?? parseStartTab(stored) ?? DEFAULT_START_TAB;
 }
 
-/** The shareable overview URL for a wiki + tab. Hubs is the bare form so a
- *  stored/bookmarked `/wiki?wiki=X` keeps meaning what it meant. */
+/** The shareable overview URL for a wiki + tab. Hubs is the bare form: a bare
+ *  `/wiki?wiki=X` means "the overview as I left it" (the stored tab, else Hubs),
+ *  so every existing link keeps working; `?view=hubs` is the explicit form. */
 export function startUrl(wiki: string, tab: StartTab): string {
   const params = new URLSearchParams();
   if (wiki) params.set("wiki", wiki);
   if (tab !== DEFAULT_START_TAB) params.set(START_VIEW_PARAM, tab);
   const q = params.toString();
   return q ? "/wiki?" + q : "/wiki";
-}
-
-/** The href the site nav's "Wiki" link should carry: the remembered wiki, or
- *  bare `/wiki` when nothing is remembered. The name is URL-encoded here so a
- *  stored value with a `&` cannot smuggle a second param in. */
-export function navWikiHref(stored: string | null | undefined): string {
-  const wiki = (stored ?? "").trim();
-  return wiki ? "/wiki?wiki=" + encodeURIComponent(wiki) : "/wiki";
 }
 
 export interface RedirectInput {
@@ -94,8 +87,8 @@ export interface RedirectInput {
  */
 export function lastWikiRedirect(input: RedirectInput): string | null {
   const params = new URLSearchParams(input.search);
-  if (params.has("wiki") || params.has("bot")) return null;
-  if (params.has("relPath") || params.has("page")) return null;
+  if (urlNamesWiki(input.search)) return null;
+  if (nonBlank(params, "relPath") || nonBlank(params, "page")) return null;
   const stored = (input.stored ?? "").trim();
   if (!stored) return null;
   if (!input.rendered) return null;
@@ -105,10 +98,29 @@ export function lastWikiRedirect(input: RedirectInput): string | null {
   return "/wiki?" + params.toString();
 }
 
+/** A param with a non-blank value — the server's own test (`trim() ||`), so
+ *  `?wiki=` reads as "no wiki named", exactly as the route resolves it. */
+function nonBlank(params: URLSearchParams, name: string): boolean {
+  return (params.get(name) ?? "").trim() !== "";
+}
+
 /** Whether a boot URL named its wiki explicitly — the only case worth
  *  remembering. Remembering the resolved DEFAULT would make the redirect
  *  inert exactly when it matters (bare `/wiki` → jarvis → "remember jarvis"). */
 export function urlNamesWiki(search: string): boolean {
   const params = new URLSearchParams(search);
-  return params.has("wiki") || params.has("bot");
+  return nonBlank(params, "wiki") || nonBlank(params, "bot");
+}
+
+/**
+ * The wiki name to remember after a boot, or `null` for "leave the store
+ * alone". Three things must hold: the URL named the wiki (`urlNamesWiki`), the
+ * server rendered it, and the picker OFFERS it — `__WIKI_NAME__` is the
+ * REQUESTED name even on the "No wiki named X" page, and remembering that
+ * pointed the nav's Wiki link at the error page on every dashboard page, where
+ * landing on it re-stored it (measured in review).
+ */
+export function rememberWikiName(search: string, rendered: string, known: readonly string[]): string | null {
+  if (!rendered || !urlNamesWiki(search)) return null;
+  return known.includes(rendered) ? rendered : null;
 }
