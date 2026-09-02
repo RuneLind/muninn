@@ -269,9 +269,9 @@ export async function renderWikiPage(opts?: {
     .wiki-list-item .wiki-status { margin-top: 1px; }
     .wiki-list-item .wiki-followup-flag { margin-top: 2px; }
 
-    /* Recall sections (Pinned · Recently opened · Other pages) and the Jira-key
-       jump header. One rule for all four — they are the same furniture, and the
-       jump differs only by its tinted background. */
+    /* Recall sections (Pinned · Recently opened · Other pages · Bookkeeping)
+       and the Jira-key jump header. One rule for all five — they are the same
+       furniture, and the jump differs only by its tinted background. */
     .wiki-list-sec {
       display: flex; align-items: center; gap: 6px;
       padding: 10px 10px 3px; font-size: 10px; letter-spacing: .07em;

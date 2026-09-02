@@ -423,11 +423,23 @@ describe("buildRail", () => {
   test("the recents clear affordance exists only while the rail shows the whole wiki", () => {
     // Under a facet the section is a SUBSET of the store, and `clearRecents`
     // empties the store — a clear there would destroy rows the reader never saw.
+    // Every facet, one at a time: the enumeration is the point.
     const clearOf = (m: ReturnType<typeof buildRail>) =>
       m.entries.find((e) => e.kind === "header" && e.section === "recent") as { clear?: true } | undefined;
     expect(clearOf(build({ recents: ["b.md"] }))?.clear).toBe(true);
-    expect(clearOf(buildRail({ filtered: [b], facetOnly: [b], filters: { ...INERT, type: "plan" }, recents: ["b.md"], pins: [] }))?.clear).toBeUndefined();
-    expect(clearOf(buildRail({ filtered: all, facetOnly: all, filters: { ...INERT, domain: "ai" }, recents: ["b.md"], pins: [] }))?.clear).toBeUndefined();
+    const facets: Array<[keyof WikiFilters, string]> = [
+      ["domain", "life"],
+      ["folder", "archive"],
+      ["type", "plan"],
+      ["tag", "jira"],
+      ["status", "shipped"],
+      ["followups", "open"],
+    ];
+    for (const [axis, value] of facets) {
+      const m = buildRail({ filtered: all, facetOnly: all, filters: { ...INERT, [axis]: value }, recents: ["b.md"], pins: [] });
+      expect(clearOf(m)?.clear, axis).toBeUndefined();
+      expect(headers(m.entries), axis).toEqual(["Recently opened", "Other pages"]);
+    }
   });
   test("metaTail: the sunk bookkeeping pages get their own header", () => {
     // sortPages already puts index/log/CLAUDE last in a recency mode; without a
@@ -448,6 +460,15 @@ describe("buildRail", () => {
     const off = buildRail({ filtered: [log, a], facetOnly: [log, a], filters: INERT, recents: [], pins: [] });
     expect(headers(off.entries)).toEqual([]);
     expect(rows(off.entries).map((r) => r.section)).toEqual(["all", "all"]);
+    // Under a query the rows are exactly as today — a search result list grows
+    // no furniture, and the sunk page is where the sort put it.
+    const searched = buildRail({ filtered: [a, log], facetOnly: [a, log], filters: { ...INERT, q: "lo" }, recents: [], pins: [], metaTail: true });
+    expect(headers(searched.entries)).toEqual([]);
+    expect(rows(searched.entries).map((r) => r.section)).toEqual(["all", "all"]);
+    // A header explains a tail; with nothing above it there is no tail to explain.
+    const onlyMeta = buildRail({ filtered: [log, idx], facetOnly: [log, idx], filters: INERT, recents: [], pins: [], metaTail: true });
+    expect(headers(onlyMeta.entries)).toEqual([]);
+    expect(rows(onlyMeta.entries).map((r) => r.section)).toEqual(["all", "all"]);
     // A pinned meta page is lifted like any other; only the remainder is split.
     const pinnedMeta = buildRail({ filtered: [a, log], facetOnly: [a, log], filters: INERT, recents: [], pins: ["log.md"], metaTail: true });
     expect(headers(pinnedMeta.entries)).toEqual(["Pinned", "Other pages"]);

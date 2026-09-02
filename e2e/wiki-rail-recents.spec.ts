@@ -312,6 +312,8 @@ test.describe("Wiki rail: recents, pins, key jump", () => {
     await page.locator('#tagChips .wiki-chip[data-tag="avregning"]').click();
     expect(await relPathsIn(page, "recent")).toEqual([ARSAVREGNING]);
     expect(await sectionLabels(page)).toEqual(["Recently opened"]);
+    // …and no clear: the section is a subset of the store, and clear empties the store.
+    await expect(page.locator(".wiki-sec-clear")).toHaveCount(0);
   });
 
   test("the store is per wiki — one wiki's recents never show on another", async ({ page }) => {

@@ -180,10 +180,14 @@ Six things are deliberate and easy to undo by accident:
   renders the sunk run under a `Bookkeeping` header (`metaTail`, set by
   `renderList` for the two recency modes only). "Recently added" sank them from
   the start; "Recently updated" — the default sort — did not, so on mimir and
-  jarvis they held ranks 1–3 above the page that actually changed. The header
+  jarvis alike two of the top three rows were bookkeeping (measured
+  2026-09-02). The header
   is not decoration: without it the date column of a descending list jumps
-  back to today at the tail and reads as a broken sort. The sink is by stem, so
-  a hand-edited CLAUDE.md goes with them — accepted, the header says where.
+  back to today at the tail and reads as a broken sort. It is a recency-LIST
+  affordance only: under a query the rows are exactly as today, and a remainder
+  of meta pages alone has no tail to explain and renders plain. The sink is by
+  stem, so a hand-edited CLAUDE.md goes with them — accepted, the header says
+  where.
 - **`#wikiCount` counts DISTINCT rendered rows**, not query matches. Under a key
   jump that can exceed what the query itself matched, because the jump reads the
   facets without the query.

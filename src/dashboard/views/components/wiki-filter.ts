@@ -811,8 +811,9 @@ export function sortPages(
         byTitle(a, b),
     );
   } else {
-    // Meta pages sink here too (see `isMetaPage`): measured on mimir and jarvis,
-    // log.md and index.md held ranks 1–3 of "Recently updated" on both.
+    // Meta pages sink here too (see `isMetaPage`): measured 2026-09-02, two of
+    // the top three of "Recently updated" were bookkeeping pages on mimir and
+    // on jarvis alike.
     copy.sort(
       (a, b) =>
         Number(isMetaPage(a)) - Number(isMetaPage(b)) ||

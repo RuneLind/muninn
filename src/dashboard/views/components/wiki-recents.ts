@@ -461,9 +461,11 @@ function resolve(relPaths: string[], pages: WikiListing[], seen: Set<string>): W
  *    facet inert, because `clearRecents` empties the STORE and under a facet
  *    the section is a subset of it — a clear there would destroy rows the
  *    reader never saw.
- *  - **`metaTail`** (recency sorts) — the remainder's sunk bookkeeping pages
- *    render last under a `Bookkeeping` header, so their fresh dates at the
- *    bottom of a descending list are explained rather than read as a bug.
+ *  - **`metaTail`** (recency sorts, no query) — the remainder's sunk
+ *    bookkeeping pages render last under a `Bookkeeping` header, so their
+ *    fresh dates at the bottom of a descending list are explained rather than
+ *    read as a bug. Only when there IS a list above them: a remainder of meta
+ *    pages alone, or any query, renders plain rows.
  *  - **A key that resolves** — the jump block first, then `Other matches` with
  *    the ordinary results minus the jump's rows.
  *  - **A key that resolves to nothing** — the next candidate gets its turn
@@ -530,8 +532,13 @@ export function buildRail(input: RailInput): RailModel {
   }
 
   const remainder = claimed.size ? filtered.filter((p) => !claimed.has(normalizeRel(p.relPath))) : filtered;
-  const rest = metaTail ? remainder.filter((p) => !isMetaPage(p)) : remainder;
-  const meta = metaTail ? remainder.filter((p) => isMetaPage(p)) : [];
+  // The Bookkeeping split is a recency-list affordance and nothing else: under
+  // a query the rows are exactly as today (a result list grows no furniture),
+  // and a header explains a TAIL — a remainder that is meta pages only has no
+  // head above it, so it renders as plain rows.
+  const split = !!metaTail && railSectionsVisible(filters) && remainder.some((p) => !isMetaPage(p));
+  const rest = split ? remainder.filter((p) => !isMetaPage(p)) : remainder;
+  const meta = split ? remainder.filter((p) => isMetaPage(p)) : [];
   if (claimed.size && rest.length) {
     entries.push({ kind: "header", section: "all", label: jump ? "Other matches" : "Other pages" });
   }
