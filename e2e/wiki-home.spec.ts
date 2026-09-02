@@ -98,7 +98,12 @@ test("a bare /wiki opens the wiki last opened by URL; a fresh context does not",
   const fresh = await browser.newContext();
   const p0 = await fresh.newPage();
   await p0.goto(`${BASE}/wiki`);
-  await expect(p0.locator(".wiki-start")).toBeVisible();
+  // The picker, not the start view: on CI the default wiki is the tracked
+  // jarvis bot's `wikiDir`, which points OUTSIDE the checkout and does not
+  // exist there, so its page list never renders (measured: red on CI, green on
+  // a developer machine with `../huginn`). The redirect below must not depend
+  // on the default being readable either — it runs BEFORE the page fetch.
+  await expect(p0.locator("#wikiSelect")).toBeVisible();
   // Nothing remembered: the server's default, whatever it is, is not OTHER —
   // OTHER is the second registered wiki and no bot claims it.
   expect(await renderedWiki(p0)).not.toBe(OTHER);
