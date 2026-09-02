@@ -98,6 +98,26 @@ export function lastWikiRedirect(input: RedirectInput): string | null {
   return "/wiki?" + params.toString();
 }
 
+/**
+ * Whether a URL's query already DENOTES the overview of `wiki` on `tab` — the
+ * guard for pushing a return-to-overview entry. Compared on what the URL means,
+ * never on its string: the address bar can spell the same overview many ways
+ * (bare `/wiki` for the rendered default, `bot=`, `+` vs `%20`, a `view=` the
+ * store would resolve to anyway), and a string compare pushed a DEAD entry on
+ * every one of them (measured: bare boot + stored Timeline → coverage-footer
+ * click → Back was a no-op). Enumerated: same wiki (a URL naming none means the
+ * rendered one; names compare case-insensitively, as `findWiki` does), no page,
+ * and the tab the URL resolves to — through the SAME rule the boot uses, so
+ * `stored` is the per-wiki value `resolveStartTab` would read.
+ */
+export function sameStartUrl(search: string, wiki: string, tab: StartTab, stored: string | null): boolean {
+  const params = new URLSearchParams(search);
+  const named = (params.get("wiki") ?? params.get("bot") ?? "").trim();
+  if (named && named.toLowerCase() !== wiki.toLowerCase()) return false;
+  if (nonBlank(params, "relPath") || nonBlank(params, "page")) return false;
+  return resolveStartTab(params.get(START_VIEW_PARAM), stored) === tab;
+}
+
 /** A param with a non-blank value — the server's own test (`trim() ||`), so
  *  `?wiki=` reads as "no wiki named", exactly as the route resolves it. */
 function nonBlank(params: URLSearchParams, name: string): boolean {

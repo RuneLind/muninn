@@ -4,6 +4,7 @@ import {
   parseStartTab,
   rememberWikiName,
   resolveStartTab,
+  sameStartUrl,
   startTabKey,
   startUrl,
   urlNamesWiki,
@@ -93,5 +94,28 @@ describe("fix round 1", () => {
     expect(rememberWikiName("?wiki=mimir", "mimir", KNOWN)).toBe("mimir");
     expect(rememberWikiName("?relPath=a.md", "jarvis", KNOWN)).toBeNull();
     expect(rememberWikiName("?wiki=", "jarvis", KNOWN)).toBeNull();
+  });
+});
+
+describe("fix round 3: sameStartUrl — does the address bar already DENOTE this overview?", () => {
+  test("a bare boot URL with a stored tab denotes the stored tab (the dead-push regression)", () => {
+    expect(sameStartUrl("?wiki=X", "X", "timeline", "timeline")).toBe(true);
+    expect(sameStartUrl("?wiki=X", "X", "hubs", null)).toBe(true);
+    expect(sameStartUrl("", "X", "hubs", null)).toBe(true); // bare /wiki, X is the rendered default
+    expect(sameStartUrl("?wiki=X&view=timeline", "X", "timeline", null)).toBe(true);
+  });
+  test("spelling never matters: encoding, bot=, case", () => {
+    expect(sameStartUrl("?wiki=a+b", "a b", "hubs", null)).toBe(true);
+    expect(sameStartUrl("?wiki=a%20b", "a b", "hubs", null)).toBe(true);
+    expect(sameStartUrl("?bot=x", "X", "hubs", null)).toBe(true);
+    expect(sameStartUrl("?wiki=X&view=hubs", "X", "hubs", "timeline")).toBe(true);
+  });
+  test("a different wiki, a page, or a different resolved tab is NOT the same overview", () => {
+    expect(sameStartUrl("?wiki=Y", "X", "hubs", null)).toBe(false);
+    expect(sameStartUrl("?wiki=X&relPath=a.md", "X", "hubs", null)).toBe(false);
+    expect(sameStartUrl("?wiki=X&page=a", "X", "hubs", null)).toBe(false);
+    expect(sameStartUrl("?wiki=X&view=atlas", "X", "timeline", null)).toBe(false);
+    expect(sameStartUrl("?wiki=X", "X", "timeline", "hubs")).toBe(false); // bar denotes hubs
+    expect(sameStartUrl("?wiki=X", "X", "timeline", null)).toBe(false);
   });
 });

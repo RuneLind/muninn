@@ -192,3 +192,19 @@ test("fix round 1: a deep-linked article still knows the remembered tab; an unkn
   await openStart(page, OTHER);
   await expect(page.locator('a.nav-link[href="/wiki?wiki=' + OTHER + '"]')).toHaveCount(1);
 });
+
+test("fix round 3: the nav's Wiki link — the wiki on screen when the reader serves one, storage otherwise", async ({ page }) => {
+  await openStart(page, WIKI); // stores WIKI
+  // The unknown-wiki page serves no root: the link must fall back to storage,
+  // never to the requested name (that pointed the nav at the error page).
+  await page.goto(`${BASE}/wiki?wiki=no-such-wiki`);
+  await expect(page.locator('a.nav-link[href="/wiki?wiki=' + WIKI + '"]')).toHaveCount(1);
+  // Screen ≠ storage: a legacy link with no wiki param opens the DEFAULT wiki
+  // and stores nothing, so the link must name what is on screen, not the store.
+  await openStart(page, OTHER); // stores OTHER
+  await page.goto(`${BASE}/wiki?relPath=nothing.md`);
+  await expect(page.locator("#wikiSelect")).toBeVisible();
+  const onScreen = await renderedWiki(page);
+  expect(onScreen).not.toBe(OTHER);
+  await expect(page.locator('a.nav-link[href="/wiki?wiki=' + encodeURIComponent(onScreen) + '"]')).toHaveCount(1);
+});

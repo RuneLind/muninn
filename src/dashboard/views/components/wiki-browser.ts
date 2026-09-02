@@ -74,6 +74,7 @@ import {
   lastWikiRedirect,
   rememberWikiName,
   resolveStartTab,
+  sameStartUrl,
   startUrl,
   type StartTab,
 } from "./wiki-home.ts";
@@ -352,15 +353,17 @@ function currentStartUrl(): string {
  * in flight does not record itself as a recent (the popstate branch spells out
  * why; the load's own paint is not cancelled, same as there), and pushes the
  * overview URL so the address bar stops showing the article just left. The
- * guard is on the URL, not the view state: an Ask answer shows with the
- * overview URL already in place, and a push there stacked a duplicate entry
- * that made the reader's next Back a no-op (measured in review) — while an
- * article that failed to load reads as "start" with the article's URL still up.
+ * guard is on what the URL DENOTES (`sameStartUrl`), not on the view state and
+ * not on the string: an Ask answer shows with the overview URL already in place
+ * (a push there made the next Back a no-op), an article that failed to load
+ * reads as "start" with the article's URL still up, and a bare boot URL with a
+ * stored tab spells the same overview differently from `currentStartUrl()`.
  */
 function goToStart(): void {
   navToken++;
-  const target = currentStartUrl();
-  if (location.pathname + location.search !== target) history.pushState({}, "", target);
+  if (!sameStartUrl(location.search, WIKI, startTab, readStartTab(WIKI))) {
+    history.pushState({}, "", currentStartUrl());
+  }
   renderStart();
 }
 let tagsExpanded = false;
@@ -4519,8 +4522,6 @@ function adoptPagesDataAndFacets(applied: PendingPages): void {
  *  facets, no list) the next successful refetch must run this path too, or the
  *  list heals beside a permanent error message. */
 function bootRender(applied: PendingPages): void {
-  // Before any branch: an article deep link needs the tab too, for its crumb.
-  syncStartTabFromUrl();
   setPagesData(applied.data);
   markApplied(pagesRefresh, applied);
   renderPageFacets(true);
@@ -4533,6 +4534,9 @@ function bootRender(applied: PendingPages): void {
     renderList();
     return;
   }
+  // Boot-only too, and before EITHER branch: an article deep link needs the tab
+  // for its crumb, not just the start-view branch.
+  syncStartTabFromUrl();
   const params = new URLSearchParams(location.search);
   // A shared/reloaded relPath URL re-resolves collision-proof; check it first
   // (`?page=` remains for links written before relPath URLs were pushed).
