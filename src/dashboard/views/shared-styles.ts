@@ -552,11 +552,12 @@ export function renderNav(
     dropItem("indexing", "/indexing", "Indexing"),
   ].filter((item) => item !== "");
   // The "Wiki" link goes to the wiki ON SCREEN when this is the reader AND it
-  // serves one — `__WIKI_ROOT__` is a string (both injected by the page above
-  // the nav; "" under the WIKI_DIR override keeps the bare link) — else the wiki
-  // last opened by URL. Not `__WIKI_NAME__` alone: that is the REQUESTED name
-  // on the "No wiki named X" page, whose root is null, and preferring it pointed
-  // the nav at the error page (measured in review). The store is written by the
+  // serves one — `__WIKI_ROOT__` is a string, never "" (both injected by the
+  // page above the nav; under the WIKI_DIR override the root IS served and the
+  // NAME is "", which is what keeps the bare link there) — else the wiki last
+  // opened by URL. Not `__WIKI_NAME__` alone: that is the REQUESTED name on the
+  // "No wiki named X" page, whose root is null, and preferring it pointed the
+  // nav at the error page (measured in review). The store is written by the
   // reader under `LAST_WIKI_KEY` (components/wiki-home.ts owns the rule
   // and refuses to store a name the picker does not offer). Bare /wiki resolves
   // to the DEFAULT wiki server-side, so without this every trip through the nav
@@ -567,8 +568,7 @@ export function renderNav(
   const wikiNavRewrite = !shown("wiki") ? "" : `
       document.addEventListener('DOMContentLoaded', function() {
         try {
-          var served = typeof window.__WIKI_ROOT__ === 'string' && window.__WIKI_ROOT__ !== ''
-            && typeof window.__WIKI_NAME__ === 'string';
+          var served = typeof window.__WIKI_ROOT__ === 'string' && typeof window.__WIKI_NAME__ === 'string';
           var wiki = served ? window.__WIKI_NAME__ : localStorage.getItem(${JSON.stringify(LAST_WIKI_KEY)});
           if (wiki) {
             document.querySelectorAll('a.nav-link[href="/wiki"]').forEach(function(a) {

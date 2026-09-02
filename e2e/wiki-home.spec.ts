@@ -208,3 +208,45 @@ test("fix round 3: the nav's Wiki link — the wiki on screen when the reader se
   expect(onScreen).not.toBe(OTHER);
   await expect(page.locator('a.nav-link[href="/wiki?wiki=' + encodeURIComponent(onScreen) + '"]')).toHaveCount(1);
 });
+
+/**
+ * The coverage footer is the one return-to-overview trigger reachable FROM the
+ * start view, so it is how the push guard is driven. It renders on a non-degraded
+ * `/api/wiki/index-coverage` answer — stubbed at muninn's own boundary the way
+ * `wiki-start-cards.spec.ts` does; nothing else is intercepted.
+ */
+async function stubCoverage(page: Page): Promise<void> {
+  await page.route("**/api/wiki/index-coverage**", (route) =>
+    route.fulfill({
+      json: { collections: ["e2e"], totalMd: 2, indexed: 2, missing: [], excludedByRule: [], ghosts: [], htmlPages: 0, generatedAt: Date.now() },
+    }),
+  );
+}
+
+test("fix round 4: returning to the overview the address bar already denotes pushes NOTHING", async ({ page }) => {
+  await stubCoverage(page);
+  await openStart(page, WIKI);
+  await page.locator('.wiki-tab[data-tab="timeline"]').click(); // stores timeline
+  // A bare boot URL with a stored tab spells the same overview differently
+  // from what the reader would push: Back must still leave the wiki.
+  await page.goto(`${BASE}/traces`);
+  await page.goto(`${BASE}/wiki?wiki=${WIKI}`);
+  await expect(page.locator("#wikiCoverageLink")).toBeVisible();
+  await page.locator("#wikiCoverageLink").click();
+  await expect(page.locator(".wiki-start")).toBeVisible();
+  await page.goBack();
+  await expect(page).toHaveURL(/\/traces$/);
+  // Another tab changed the stored tab AFTER this one booted on Hubs: the bar
+  // and what the reader would push are byte-identical, so still no push.
+  await page.goto(`${BASE}/wiki?wiki=${WIKI}&view=hubs`);
+  await page.locator('.wiki-tab[data-tab="hubs"]').click(); // stores hubs, URL bare
+  await expect(page).toHaveURL(new RegExp(`/wiki\\?wiki=${WIKI}$`));
+  await page.goto(`${BASE}/traces`);
+  await page.goto(`${BASE}/wiki?wiki=${WIKI}`); // boots on Hubs (stored hubs)
+  await expect(page.locator("#wikiCoverageLink")).toBeVisible();
+  await page.evaluate(({ k, v }) => localStorage.setItem(k, v), { k: `muninn.wiki.startTab.v1:${WIKI}`, v: "timeline" });
+  await page.locator("#wikiCoverageLink").click();
+  await expect(page.locator(".wiki-start")).toBeVisible();
+  await page.goBack();
+  await expect(page).toHaveURL(/\/traces$/);
+});

@@ -358,11 +358,19 @@ function currentStartUrl(): string {
  * (a push there made the next Back a no-op), an article that failed to load
  * reads as "start" with the article's URL still up, and a bare boot URL with a
  * stored tab spells the same overview differently from `currentStartUrl()`.
+ * The second clause is the byte-identical case the first cannot see: storage
+ * is read at CLICK time, and another tab may have changed it since this one
+ * booted, so the bar can read as "another tab" while the URL about to be pushed
+ * is the one already there.
  */
 function goToStart(): void {
   navToken++;
-  if (!sameStartUrl(location.search, WIKI, startTab, readStartTab(WIKI))) {
-    history.pushState({}, "", currentStartUrl());
+  const target = currentStartUrl();
+  if (
+    !sameStartUrl(location.search, WIKI, startTab, readStartTab(WIKI)) &&
+    location.pathname + location.search !== target
+  ) {
+    history.pushState({}, "", target);
   }
   renderStart();
 }
@@ -4534,9 +4542,6 @@ function bootRender(applied: PendingPages): void {
     renderList();
     return;
   }
-  // Boot-only too, and before EITHER branch: an article deep link needs the tab
-  // for its crumb, not just the start-view branch.
-  syncStartTabFromUrl();
   const params = new URLSearchParams(location.search);
   // A shared/reloaded relPath URL re-resolves collision-proof; check it first
   // (`?page=` remains for links written before relPath URLs were pushed).
@@ -4694,4 +4699,9 @@ function rememberOrRedirectWiki(): boolean {
   location.replace(url);
   return true;
 }
+// The start tab is resolved HERE, once, whatever the page fetch does: an article
+// deep link needs it for its crumb, and a boot whose fetch failed heals through
+// `bootRender`'s early return with the reader possibly elsewhere — a sync
+// inside that function was skipped on exactly that path.
+syncStartTabFromUrl();
 if (!rememberOrRedirectWiki()) requestPages({ refresh: false, boot: true });
