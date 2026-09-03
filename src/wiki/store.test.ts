@@ -2465,10 +2465,22 @@ describe("resolveProject", () => {
     expect(resolveProject("notes/x.md", {}, ["mango"], identity, known)).toBe("mango");
   });
 
-  test("rule 5: the known-set test is case-folded, and the TAG is returned as written", () => {
-    // `quill` is known; the page is tagged `Quill`. A raw `known.has(tag)` reads
-    // those as two different projects.
-    expect(resolveProject("notes/x.md", {}, ["Quill"], rule, known)).toBe("Quill");
+  test("rule 5: a known result answers in the KNOWN spelling, not as the tag wrote it", () => {
+    // `quill` is known; the page is tagged `Quill`. Folding only the MEMBERSHIP
+    // test admits the page and then files it under `Quill`, so the same project
+    // gets two facet buckets — one per rule that reached it.
+    expect(resolveProject("notes/x.md", {}, ["Quill"], rule, known)).toBe("quill");
+    // The alias's VALUE is what the known set is asked about, so a known project
+    // spelled differently in the alias map answers in the on-disk spelling too.
+    const shouty = { ...rule, aliases: { ...rule.aliases, q: "QUILL" } };
+    expect(resolveProject("notes/x.md", {}, ["q"], shouty, known)).toBe("quill");
+  });
+
+  test("rule 5: an alias-only admission keeps the ALIAS's spelling", () => {
+    // The known set has no say here — the alias map is the wiki naming a project
+    // its layout does not, so the value it wrote is the only spelling there is.
+    const named = { ...rule, aliases: { ...rule.aliases, mg: "Mango-Works" } };
+    expect(resolveProject("notes/x.md", {}, ["mg"], named, known)).toBe("Mango-Works");
   });
 
   test("rule 3: the prefix test is case-folded and yields the KNOWN spelling", () => {
@@ -2480,6 +2492,33 @@ describe("resolveProject", () => {
     // leaves a file spelled in another case unmatched.
     expect(resolveProject("drafts/QUILL-press-Rollout.mdx", {}, [], rule, new Set(["quill-press"])))
       .toBe("quill-press");
+  });
+
+  test("rules 1 and 2 answer with the KNOWN spelling of the name they read", () => {
+    // The known set dedupes on the folded key and keeps the first spelling seen,
+    // so a directory and a page-per-project stem that differ only in case are ONE
+    // project there. The two rules that mint from those segments have to agree,
+    // or the facet gets a bucket per rule.
+    const mixed = new Set(["alpha"]);
+    expect(resolveProject("areas/Alpha/x.md", {}, [], rule, mixed)).toBe("alpha");
+    expect(resolveProject("units/ALPHA.md", {}, [], rule, mixed)).toBe("alpha");
+  });
+
+  test("rules 1 and 2 fall back to the raw segment when the known set has no say", () => {
+    // Rule 2's stem is always in the set and rule 1's directory is collected from
+    // the same paths — but `known` is an argument, so the guard is what keeps a
+    // caller that passes an unrelated set from turning a real page project-less.
+    expect(resolveProject("areas/never-heard-of-it/x.md", {}, [], rule, new Set())).toBe(
+      "never-heard-of-it",
+    );
+    expect(resolveProject("units/gamma.md", {}, [], rule, new Set())).toBe("gamma");
+  });
+
+  test("rule 4: an array is filed under its first NON-BLANK element", () => {
+    // `raw[0]` reads the blank as the answer, falls through to rule 5 and files
+    // the page under a tag — or nowhere. Nothing in the repo emits a blank array
+    // element today (`splitInlineArray` drops them), so only this pins it.
+    expect(resolveProject("notes/x.md", { units: ["", "beta"] }, [], rule, known)).toBe("beta");
   });
 });
 
@@ -2548,14 +2587,16 @@ describe("collectKnownProjects", () => {
     ).toEqual(new Set());
   });
 
-  test("two spellings differing only in case are ONE project — the first wins", () => {
-    // The facet groups on this value; admitting both spellings splits the bucket.
-    expect(
-      collectKnownProjects(["areas/alpha/x.md", "units/Alpha.md"], {
-        ...rule,
-        pathFolders: ["areas"],
-      }),
-    ).toEqual(new Set(["alpha"]));
+  test("two spellings differing only in case are ONE project — for the SET and for both rules", () => {
+    const paths = ["areas/alpha/x.md", "units/Alpha.md"];
+    const caseRule = { ...rule, pathFolders: ["areas"] };
+    const set = collectKnownProjects(paths, caseRule);
+    expect(set).toEqual(new Set(["alpha"]));
+    // The facet groups on what `resolveProject` ANSWERS, not on the set, so the
+    // set agreeing is not the property: both paths have to resolve to the one
+    // spelling. Collected first-wins and resolved from the raw segment, these two
+    // paths yield `alpha` and `Alpha` — two buckets out of one project.
+    expect(paths.map((p) => resolveProject(p, {}, [], caseRule, set))).toEqual(["alpha", "alpha"]);
   });
 });
 
@@ -2779,6 +2820,45 @@ describe("buildWikiIndex — project", () => {
         (r) => r.level === "warning" && r.rawMessage.includes("project.aliases entry"),
       );
       expect(aliasWarns.length).toBe(3);
+    } finally {
+      await reset();
+    }
+  });
+
+  test("an alias keyed on a prototype name is REFUSED with a warn, not swallowed", async () => {
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
+      reset: true,
+    });
+    try {
+      // `aliases[key] = value` on a plain object hits the `__proto__` SETTER, so
+      // that entry never becomes an own key and `hasProjectAlias` never sees it:
+      // the wiki declared an alias and the reader silently dropped it. Written as
+      // raw JSON on purpose — an object LITERAL spelling `__proto__` sets the
+      // prototype instead of an own property, so it could not reach the parser.
+      await Bun.write(
+        path.join(root, ".wiki-reader.json"),
+        String.raw`{"project":{"pageFolder":"units","tagFallback":true,"aliases":{"__proto__":"x","constructor":"y","prototype":"z","pom":"pomme-core"}}}`,
+      );
+      await page("misc/tagged.md", ["title: Tagged", "tags: [pom]"]);
+      const index = await buildWikiIndex(root);
+      const aliases = index.readerConfig?.project?.aliases ?? {};
+      expect(aliases).toEqual({ pom: "pomme-core" });
+      for (const key of ["__proto__", "constructor", "prototype"]) {
+        expect(Object.hasOwn(aliases, key)).toBe(false);
+      }
+      expect(index.resolve("Tagged")!.project).toBe("pomme-core");
+      const aliasWarns = records.filter(
+        (r) => r.level === "warning" && r.rawMessage.includes("project.aliases entry"),
+      );
+      expect(aliasWarns.length).toBe(3);
+      expect(aliasWarns.map((r) => r.properties.key).sort()).toEqual([
+        "__proto__",
+        "constructor",
+        "prototype",
+      ]);
     } finally {
       await reset();
     }

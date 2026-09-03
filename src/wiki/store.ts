@@ -1181,6 +1181,9 @@ function normalizeIncludeGlobs(entries: string[]): string[] {
   return out;
 }
 
+/** Alias keys the map cannot hold — see the refusal inside `parseProjectRule`. */
+const RESERVED_ALIAS_KEYS = ["__proto__", "constructor", "prototype"];
+
 /**
  * Parse the optional `project` declaration. Absent, or anything that isn't a
  * plain object, ⇒ `null` (no rule at all). A sub-field of the wrong TYPE is
@@ -1250,12 +1253,20 @@ function parseProjectRule(raw: unknown, root: string): WikiProjectRule | null {
       // Same trim-and-drop-blanks normalization the string lists get, per ENTRY:
       // a blank VALUE would ship `project: ""` — a facet bucket with no name —
       // and an untrimmed one splits the facet from the same name written plainly.
+      //
+      // A RESERVED key is refused through the same door, because the assignment
+      // below cannot honour it: `aliases["__proto__"] = v` on a plain object hits
+      // the prototype SETTER and creates no own key at all, so the entry would be
+      // dropped in silence — the wiki declared an alias and the reader ignored it
+      // with no way to tell. `constructor`/`prototype` DO assign, but every read
+      // is `Object.hasOwn`-guarded (see `hasProjectAlias`), so refusing all three
+      // at the parse keeps one rule instead of three behaviours.
       for (const [rawKey, rawValue] of Object.entries(obj.aliases)) {
         const key = rawKey.trim();
         const value = rawValue.trim();
-        if (!key || !value) {
+        if (!key || !value || RESERVED_ALIAS_KEYS.includes(key)) {
           log.warn(
-            "{file} at {root}: project.aliases entry {key} has a blank key or value — ignoring it",
+            "{file} at {root}: project.aliases entry {key} has a blank key or value, or a reserved key — ignoring it",
             { file: WIKI_READER_CONFIG_FILE, root, key: rawKey },
           );
           continue;
@@ -1568,10 +1579,11 @@ function applyProjectAlias(name: string, rule: WikiProjectRule): string {
 }
 
 /** The known project whose name matches `name` under {@link stemKey}'s NFC +
- *  lowercase fold, in the spelling the wiki keeps on disk — or undefined. Every
- *  membership test in {@link resolveProject} runs through this, because a raw
- *  `Set.has` reads a folder and a tag that differ only in case as two projects
- *  and splits the facet in half. */
+ *  lowercase fold, in the spelling the wiki keeps on disk — or undefined.
+ *  {@link resolveProject} runs every membership test through this AND ANSWERS
+ *  WITH WHAT IT RETURNS, because the facet groups on the answer: folding only
+ *  the test admits a page spelled in another case and then files it under that
+ *  spelling, which is the split it was meant to prevent, one layer down. */
 function knownSpelling(known: ReadonlySet<string>, name: string): string | undefined {
   const key = stemKey(name);
   for (const candidate of known) {
@@ -1591,13 +1603,13 @@ function knownSpelling(known: ReadonlySet<string>, name: string): string | undef
  *    after one), and
  *  - every project DIRECTORY under a declared `pathFolder`
  *    (`<pathFolder>/<project>/…`, ≥3 segments — the same count rule 1 resolves
- *    by, so the set holds exactly the names rule 1 can mint).
+ *    by, so the set holds a folded-key entry for every name rule 1 can mint;
+ *    the SPELLING can differ, which is why rules 1 and 2 answer with the set's
+ *    entry rather than with the raw path segment).
  *
  * Leaving the second source out is what made rules 3 and 5 blind to every
- * project with a directory and no page. Measured on the mimir wiki 2026-09-03
- * (three such projects, known set 5 → 8): 51 pages gained a project through
- * rule 3 and 21 through rule 5, and one page that had been filed under an
- * unrelated first tag moved to the project its filename names.
+ * project with a directory and no page-per-project entry — on one real wiki,
+ * three of its eight projects.
  *
  * Collected in a FIRST pass over the scanned paths — before any page is
  * resolved — because a page must resolve the same way regardless of where its
@@ -1645,10 +1657,15 @@ export function collectKnownProjects(
  *     the first is declared AND there are ≥3 segments. The segment count is the
  *     whole rule: a dated file sitting directly in the folder
  *     (`<folder>/2026-07-07-x.md`) has a second segment too, and reading it as a
- *     project would mint one facet value per file.
+ *     project would mint one facet value per file. Answered in the KNOWN
+ *     spelling where the set holds the name (it collects from these same paths,
+ *     first-wins on the folded key, so a second directory spelled in another
+ *     case must not become a second bucket), else the segment as written.
  *  2. **`pageFolder`** — `<folder>/<project>`: the file stem, direct children
  *     only. These stems are one of the two known-set sources (see
- *     {@link collectKnownProjects}).
+ *     {@link collectKnownProjects}), so the set decides the spelling here for
+ *     the same reason — a stem that lost the first-wins dedupe to a directory
+ *     answers as that directory, not as its own filename.
  *  3. **`filePrefixFolders`** — `<folder>/<project>-<rest>`: the LONGEST known
  *     project that prefixes the stem followed by `-`. Longest wins so a wiki
  *     that knows both `quill` and `quill-press` reads
@@ -1662,7 +1679,9 @@ export function collectKnownProjects(
  *     block-style YAML list under the key is not seen by this rule at all.
  *  5. **`tagFallback`** — the page's FIRST tag, through `aliases`. Guarded: the
  *     alias map must NAME the tag, or the known set must hold the RESULT (folded
- *     as in rule 3, but returned as the tag/alias wrote it). Without that guard
+ *     as in rule 3, and answered in the KNOWN spelling; only an alias-admitted
+ *     value the set does not hold keeps the spelling the alias wrote, since
+ *     there is no other). Without that guard
  *     every page's leading tag becomes a facet value and the facet fills with
  *     one-page buckets that are not projects at all. The alias half is a
  *     `hasOwn` test rather than "the value changed", so a wiki declaring
@@ -1691,13 +1710,13 @@ export function resolveProject(
   // 1. <pathFolder>/<project>/<page>
   if (segs.length >= 3 && rule.pathFolders.includes(first)) {
     const project = segs[1]!;
-    if (project) return project;
+    if (project) return knownSpelling(known, project) ?? project;
   }
 
   // 2. <pageFolder>/<project>.<ext>
   if (rule.pageFolder && segs.length === 2 && first === rule.pageFolder) {
     const stem = projectStem(relPath);
-    if (stem) return stem;
+    if (stem) return knownSpelling(known, stem) ?? stem;
   }
 
   // 3. <filePrefixFolder>/<project>-<rest> — longest known project wins, matched
@@ -1730,7 +1749,14 @@ export function resolveProject(
     const tag = tags.find((t) => t.trim().length > 0)?.trim();
     if (tag) {
       const result = applyProjectAlias(tag, rule);
-      if (hasProjectAlias(tag, rule) || knownSpelling(known, result)) return result;
+      // The known spelling first, for the reason rules 1–3 answer with it: this
+      // rule reaches the same projects they do, and a tag written in another case
+      // must join their bucket rather than mint a second one. An alias-only
+      // admission has no known spelling to answer with — the alias map IS the
+      // wiki naming a project its layout does not — so it keeps what it wrote.
+      const canonical = knownSpelling(known, result);
+      if (canonical) return canonical;
+      if (hasProjectAlias(tag, rule)) return result;
     }
   }
 
