@@ -153,6 +153,20 @@ as `?view=timeline|atlas` on the overview URL (Hubs = absent), so Back from an
 article and a reload land on the tab the reader left. The breadcrumb's wiki crumb
 is the link back to the overview; a tab click `replaceState`s, never pushes.
 
+**`?project=` is the reader's one FACET in the URL** (#509). It is read into
+`filters.project` at boot and on popstate, and on every LATER listing adopt only
+re-validated against the payload's `projects` map — never re-read from the address
+bar, because an article URL is pushed by `articleUrl` and a stashed refresh applied
+at the top of the next click would otherwise wipe the filter (measured, the first
+cut). Unknown/blank value ⇒ whole wiki and the param deleted; a known value is
+carried by every pushed article URL, `currentStartUrl()` and the crumb `href`
+(rewritten in place by `refreshCrumbHref`, not by re-rendering the breadcrumb, which
+closes the chat/share dialogs). ⚠️ The reader has THREE URL writers —
+`writeProjectParam`, the tab click's `replaceState(currentStartUrl())` and
+`goToStart` — and only the first keeps `location.hash`; a property fixed on one is
+not a property of the reader. Back/Forward that moves the project repaints with
+`autoOpen=false`, so a deliberately collapsed Filters stack stays collapsed.
+
 ⚠️ **relPath identity has ONE boundary: entries are normalized on the way into
 storage** (`parseRelPathList` on read, `pushRecent` and `togglePin` on write), so
 every comparison downstream is exact by construction. Leaving it to each
