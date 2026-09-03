@@ -28,6 +28,7 @@ import {
   sortPages,
   statusCounts,
   statusFacetVisible,
+  domainFacetVisible,
   STATUS_ORDER,
   tagCounts,
   topPages,
@@ -787,6 +788,16 @@ test("hasPlanStatus: the facet gate — one status opens it, none keeps it hidde
   // An invalid value is dropped server-side, so such a page arrives status-less
   // and must NOT open the facet — presence is validity for this gate.
   expect(hasPlanStatus([page({ followups: "open" })])).toBe(false);
+});
+
+test("domainFacetVisible: only a wiki spanning both domains gets the row", () => {
+  // Every wiki but jarvis's derives `ai` for every page (no life/ subtree), so the
+  // three chips can only narrow the list to itself or to nothing.
+  expect(domainFacetVisible([page({ name: "a" }), page({ name: "b" })])).toBe(false);
+  expect(domainFacetVisible([])).toBe(false);
+  expect(domainFacetVisible([page({ name: "a" }), page({ name: "b", domain: "life" })])).toBe(true);
+  // A wiki entirely under life/ is one domain too — the row would be just as inert.
+  expect(domainFacetVisible([page({ name: "a", domain: "life" })])).toBe(false);
 });
 
 test("STATUS_ORDER has not drifted from the store's PLAN_STATUS_VALUES", () => {

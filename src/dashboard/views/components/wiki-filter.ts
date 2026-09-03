@@ -888,6 +888,19 @@ export function facetKeys(counts: Record<string, number>, active: string): strin
 }
 
 /**
+ * Whether to render the domain (All/AI/Life) chip row at all — the whole-wiki gate,
+ * the `statusFacetVisible` sibling.
+ *
+ * `domain` is derived from a `life/` path prefix (`src/wiki/store.ts`), so every
+ * wiki except jarvis's is 100% `ai` and the row there is three chips that can only
+ * narrow the list to itself or to nothing. Unscoped for the same reason its sibling
+ * is: this decides whether the row EXISTS for this wiki.
+ */
+export function domainFacetVisible(pages: WikiListing[]): boolean {
+  return new Set(pages.map((p) => p.domain)).size > 1;
+}
+
+/**
  * Whether this wiki uses the plan-status convention at all — the gate for the
  * whole Status facet (chip row + follow-ups toggle). True as soon as ONE page
  * carries a `plan_status`.

@@ -1401,7 +1401,9 @@ export async function renderWikiPage(opts?: {
         }
         <div class="wiki-sort-row">${agentPresenceHtml("wikiPresence")}</div>
         <input type="text" id="wikiSearch" class="wiki-search" placeholder="Search titles, aliases, tags, paths…">
-        <div class="wiki-chip-row wiki-segmented" id="domainChips">
+        <!-- Domain facet — un-hidden client-side only on a wiki whose pages span
+             more than one domain (i.e. one with a life/ subtree). -->
+        <div class="wiki-chip-row wiki-segmented" id="domainChips" style="display:none">
           <button class="wiki-chip active" data-domain="">All</button>
           <button class="wiki-chip" data-domain="ai">AI</button>
           <button class="wiki-chip" data-domain="life">Life</button>
