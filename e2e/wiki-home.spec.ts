@@ -137,13 +137,16 @@ test("the breadcrumb's wiki crumb returns to the overview and pushes its URL", a
   // Pinned to the ACCENT, resolved from the theme token — "differs from the
   // trail" let any plain text token through (measured: `--text-secondary`,
   // the leaf crumb's colour, passed it). The token is a hex; computed colour
-  // is rgb(), so resolve it the same way the browser does.
+  // is rgb(), so resolve it the same way the browser does — on a probe under
+  // `document.body`, NOT inside the crumb: there, a token that stopped
+  // resolving would make crumb and probe fall back to the same inherited
+  // colour and the assertion pass on exactly the bug it pins (measured).
   const [crumbColor, accent] = await Promise.all([
     crumb.evaluate((el) => getComputedStyle(el).color),
-    crumb.evaluate((el) => {
+    page.evaluate(() => {
       const probe = document.createElement("span");
       probe.style.color = "var(--accent-light)";
-      el.append(probe);
+      document.body.append(probe);
       const c = getComputedStyle(probe).color;
       probe.remove();
       return c;
