@@ -827,6 +827,7 @@ function renderBreadcrumb(m: WikiListing): void {
   // work; the click delegate intercepts a plain click into `goToStart`.
   crumbs.push(
     '<a class="wiki-bc-wiki" href="' + esc(currentStartUrl()) + '" title="Back to the overview">' +
+      '<span aria-hidden="true">⌂</span> ' +
       esc(WIKI || "Wiki") +
       "</a>",
   );
