@@ -28,11 +28,11 @@
  * full process. Bun auto-loads it in the spawned child (cwd = repo root).
  *
  * SERIAL, NOT PARALLEL: the domain facet's shrink case DELETES a fixture page from
- * `WIKI_SHRINK` mid-test and puts it back. That is only safe because
- * `playwright.config.ts` sets no `fullyParallel` — tests within one file run
- * serially in a single worker, so no other case is reading that root while it is
- * a page short. Turning `fullyParallel` on would need that case moved to a root
- * nothing else touches (or its own file).
+ * `WIKI_SHRINK` mid-test and puts it back. That root is read by that one case
+ * alone (see `WIKI_SHRINK` below), so the deletion cannot poison a neighbour. What
+ * this file DOES rely on is `playwright.config.ts` setting no `fullyParallel`: with
+ * it on, a second worker would re-run `beforeAll` and try to spawn a second muninn
+ * on the same fixed port from `e2e/ports.ts`.
  *
  * SPAWN ENV: `e2eEnv()` keeps this muninn off Telegram/Slack, and blanks the
  * instance-profile flags (`MUNINN_WIKI_READONLY`, `SYNC_REPOS`, `MUNINN_AUTH`…)
