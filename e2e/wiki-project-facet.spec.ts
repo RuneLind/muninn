@@ -390,6 +390,60 @@ test.describe("Wiki reader: project facet", () => {
     expect(new URL(page.url()).searchParams.has("project")).toBe(false);
   });
 
+  test("Back does not spring the Filters disclosure open", async ({ page }) => {
+    await openReader(page, `wiki=${WIKI_WITH}`);
+    await page.locator("#wikiFilters summary").click();
+    await page.locator(`#projectChips [data-project="${PROJECT}"]`).click();
+    // An ARTICLE entry, so the chip below REPLACES it and Back is a project move
+    // and nothing else — the one popstate branch that repaints the facet.
+    await page.locator(`.wiki-list-item[data-relpath="${HUB_REL}"]`).click();
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("Pomme Core");
+    await page.locator(`#projectChips [data-project="${OTHER}"]`).click();
+    await expect(page.locator("#wikiCount")).toHaveText(`2 / ${TOTAL_PAGES}`);
+
+    // The reader collapses the stack deliberately.
+    await page.locator("#wikiFilters summary").click();
+    await expect(page.locator("#wikiFilters")).not.toHaveAttribute("open", "");
+
+    await page.goBack();
+    // The list follows the URL's project...
+    expect(new URL(page.url()).searchParams.get("project")).toBe(PROJECT);
+    await expect(page.locator("#wikiCount")).toHaveText(`5 / ${TOTAL_PAGES}`);
+    // ...and Back is not a filter CLICK: it must not re-open what the reader
+    // closed. `syncFilters()` auto-opens by default, which is right for the chip
+    // and hub-chip callers and wrong here.
+    await expect(page.locator("#wikiFilters")).not.toHaveAttribute("open", "");
+  });
+
+  test("the by-name fallback URL carries the project too", async ({ page }) => {
+    await openReader(page, `wiki=${WIKI_WITH}&project=${PROJECT}`);
+    await expect(page.locator("#wikiCount")).toHaveText(`5 / ${TOTAL_PAGES}`);
+    /**
+     * `fetchAndRenderPage` pushes `?relPath=` off the RESOLVED page and falls back
+     * to `?page=<name>` only for a response carrying no relPath — which the real
+     * route never sends (`relPath` is a required field on every index entry, and
+     * `/api/wiki/page` answers straight off it). So the fallback's URL is
+     * reachable only by stubbing the response at the network boundary (the
+     * `wiki-integrate.spec.ts` precedent); without this case the `project`
+     * argument of `pageUrl` is pinned by nothing.
+     */
+    await page.route(
+      (url) => url.pathname === "/api/wiki/page",
+      async (route) => {
+        const res = await route.fetch();
+        const body = (await res.json()) as { meta?: Record<string, unknown> };
+        if (body.meta) delete body.meta.relPath;
+        await route.fulfill({ response: res, json: body });
+      },
+    );
+    await page.locator(`.wiki-list-item[data-relpath="areas/${PROJECT}/a.md"]`).click();
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("Alpha");
+    const url = new URL(page.url());
+    expect(url.searchParams.get("relPath")).toBeNull();
+    expect(url.searchParams.get("page")).toBe("a");
+    expect(url.searchParams.get("project")).toBe(PROJECT);
+  });
+
   test("writing the param preserves the URL's hash", async ({ page }) => {
     await openReader(page, `wiki=${WIKI_WITH}#wiki-anchor`);
     await page.locator("#wikiFilters summary").click();

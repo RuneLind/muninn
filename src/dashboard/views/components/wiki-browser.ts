@@ -390,7 +390,11 @@ function currentStartUrl(): string {
  * no-op change cannot rewrite (and thereby re-encode) the reader's other params
  * — `projectParamNeedsRewrite`, which also answers "yes" for a present-but-blank
  * param that a raw string compare read as equal to "no filter". `location.hash`
- * rides along: this is the reader's own URL, anchor included.
+ * rides along HERE: this writer edits the URL in place, so the reader's anchor
+ * survives a chip click. It is not a property of the page's other writers — the
+ * tab click and `goToStart` both build from `currentStartUrl()`, which carries
+ * no hash, so a Timeline click after a chip click drops the anchor (pre-existing,
+ * out of scope for this PR).
  */
 function writeProjectParam(): void {
   if (!projectParamNeedsRewrite(location.search, filters.project)) return;
@@ -675,14 +679,24 @@ function renderProjectChips(): void {
 
 /** Everything a project change repaints — shared by the chip row, the article
  *  header's hub chip and popstate, so the three cannot drift on which renders
- *  they owe. `syncFilters()` auto-opens the Filters disclosure, which is what
- *  makes the chip row visible after a click that came from the article. */
-function repaintForProject(): void {
-  refreshCrumbHref();
+ *  they owe.
+ *
+ *  Order: `renderProjectChips` may CLEAR `filters.project` (the whole-wiki gate
+ *  going false takes the filter with it), so the crumb is rewritten after it or
+ *  it carries a project that is dropped a line later.
+ *
+ *  `autoOpen` is `syncFilters`' own flag: true for the two CLICK callers (the
+ *  chip row and the article header's hub chip, where auto-opening the Filters
+ *  disclosure is what makes the chip row visible after a click that came from
+ *  the article), false for popstate — Back/Forward is not a filter click, and
+ *  springing a deliberately collapsed stack open is the same "not caused by a
+ *  user action" rule the background listing refresh already passes false for. */
+function repaintForProject(autoOpen = true): void {
   renderProjectChips();
+  refreshCrumbHref();
   renderList();
   refreshStartBody();
-  syncFilters();
+  syncFilters(autoOpen);
 }
 
 /** Set the project filter, write it to the URL and repaint. */
@@ -1975,7 +1989,7 @@ window.addEventListener("popstate", () => {
   // repainted only when it actually moved.
   const projectBefore = filters.project;
   adoptProjectFilter(true);
-  if (filters.project !== projectBefore) repaintForProject();
+  if (filters.project !== projectBefore) repaintForProject(false);
   // A relPath URL round-trips collision-proof (and is what every in-reader
   // navigation now pushes); check it first, `?page=` stays for older links.
   const relPath = params.get("relPath");
