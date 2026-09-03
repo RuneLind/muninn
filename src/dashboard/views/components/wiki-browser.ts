@@ -175,6 +175,7 @@ import {
   connectionTypeOrder,
   breadcrumbLeaf,
   displayTitleOf,
+  domainFacetVisible,
   shortGraphLabel,
   facetKeys,
   filterPages,
@@ -471,6 +472,25 @@ function followupFlagHtml(p: WikiListing): string {
     : "";
 }
 
+/** The domain (All/AI/Life) chip row. The three chips are static markup, so this
+ *  only owns the row's `display` and which chip is active — the `renderStatusChips`
+ *  shape, one level simpler because there is nothing to build.
+ *
+ *  Hiding also forces `filters.domain` back to "": every other facet is scoped by
+ *  it, so a value left standing under a hidden row would narrow the list with no
+ *  control on screen to explain it. Runs FIRST in `renderPageFacets` for that
+ *  reason — the other renders read `filters.domain`. */
+function renderDomainChips(): void {
+  const row = document.getElementById("domainChips");
+  if (!row) return;
+  const visible = domainFacetVisible(allPages);
+  if (!visible) filters.domain = "";
+  row.style.display = visible ? "" : "none";
+  row.querySelectorAll(".wiki-chip").forEach((c) => {
+    c.classList.toggle("active", (c.getAttribute("data-domain") || "") === filters.domain);
+  });
+}
+
 /** The Status chip row + ⚑ follow-ups toggle. Rendered only on wikis that use
  *  either plan-status axis (`statusFacetVisible`); everywhere else the row stays
  *  hidden and empty, so a wiki without the convention looks exactly as it did
@@ -708,9 +728,10 @@ function renderList(): void {
   document.getElementById("wikiCount")!.textContent = rail.shown + " / " + allPages.length;
 }
 
-/** The five payload-derived facet renders, in one place so the boot load and a
+/** The payload-derived facet renders, in one place so the boot load and a
  *  refresh adopt can't drift. Paints no rows — `renderList` owns those. */
 function renderPageFacets(autoOpen: boolean): void {
+  renderDomainChips();
   renderFolderSelect();
   renderTypeChips();
   renderStatusChips();

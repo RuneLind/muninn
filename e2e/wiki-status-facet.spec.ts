@@ -1,5 +1,8 @@
 /**
- * /wiki reader — the plan-status facet, end-to-end.
+ * /wiki reader — the plan-status facet and the domain facet, end-to-end.
+ *
+ * Both are per-wiki presence gates over the same `/api/wiki/pages` payload, so they
+ * share this file's multi-root recipe. The domain block is at the foot.
  *
  * The one thing no unit test can prove: the Status chip row and the ⚑ follow-ups
  * toggle appear on a wiki that USES the `plan_status` convention, filter the page
@@ -8,9 +11,9 @@
  * melosys-kode-wiki) and mimir mid-backfill must look exactly as it did before.
  *
  * Two constraints shape the setup:
- *   1. **Two wikis, one server.** The gate is a per-wiki decision, so proving it
+ *   1. **Several wikis, one server.** A gate is a per-wiki decision, so proving it
  *      needs a with-status wiki AND a without-status wiki reachable from the same
- *      reader — hence two temp dirs in one comma-separated `WIKI_EXTRA`.
+ *      reader — hence temp dirs in one comma-separated `WIKI_EXTRA`.
  *   2. **No real wiki.** It CANNOT assert against mimir: no real page carries
  *      `plan_status` until the backfill lands, and this harness mounts only its own
  *      throwaway temp wikis. So it boots its OWN muninn on a dedicated port rather
@@ -38,11 +41,15 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { e2eEnv } from "./e2e-env.ts";
 import { e2ePort } from "./ports.ts";
+import { WIKI_REFETCH_MIN_INTERVAL_MS } from "../src/dashboard/views/components/wiki-refresh.ts";
 
 const PORT = e2ePort("wiki-status-facet");
 const BASE = `http://127.0.0.1:${PORT}`;
 const WIKI_WITH = "e2e-plans";
 const WIKI_WITHOUT = "e2e-plain";
+/** A third root, for the domain facet's shrink case ALONE: it loses its `life/`
+ *  page mid-test, which would poison the two wikis above for every other case. */
+const WIKI_SHRINK = "e2e-shrink";
 const REPO_ROOT = path.resolve(new URL(".", import.meta.url).pathname, "..");
 
 /** A note carrying markup + a quote — it reaches the client UNESCAPED (free prose,
@@ -78,26 +85,39 @@ const WITH_PAGES: Record<string, string> = {
   "plain.md": planPage("Plain", {}),
 };
 
-/** The control wiki: same shape, zero plan fields — the facet must not appear. */
+/** The control wiki: same shape, zero plan fields — the facet must not appear.
+ *  It is also the domain facet's one-domain side (no `life/` page). */
 const WITHOUT_PAGES: Record<string, string> = {
   "one.md": planPage("One", {}),
   "two.md": planPage("Two", {}),
 };
 
+/** The shrink wiki: two domains at boot, one after the test deletes `life/`. */
+const SHRINK_PAGES: Record<string, string> = {
+  "one.md": planPage("One", {}),
+  "two.md": planPage("Two", {}),
+  "life/three.md": planPage("Three", {}),
+};
+
 let server: ChildProcess | undefined;
 let rootWith = "";
 let rootWithout = "";
+let rootShrink = "";
 
 test.beforeAll(async () => {
   rootWith = await mkdtemp(path.join(tmpdir(), "muninn-e2e-plans-"));
   rootWithout = await mkdtemp(path.join(tmpdir(), "muninn-e2e-plain-"));
-  for (const [name, body] of Object.entries(WITH_PAGES)) {
-    const dest = path.join(rootWith, name);
-    await mkdir(path.dirname(dest), { recursive: true });
-    await writeFile(dest, body, "utf8");
-  }
-  for (const [name, body] of Object.entries(WITHOUT_PAGES)) {
-    await writeFile(path.join(rootWithout, name), body, "utf8");
+  rootShrink = await mkdtemp(path.join(tmpdir(), "muninn-e2e-shrink-"));
+  for (const [root, pages] of [
+    [rootWith, WITH_PAGES],
+    [rootWithout, WITHOUT_PAGES],
+    [rootShrink, SHRINK_PAGES],
+  ] as const) {
+    for (const [name, body] of Object.entries(pages)) {
+      const dest = path.join(root, name);
+      await mkdir(path.dirname(dest), { recursive: true });
+      await writeFile(dest, body, "utf8");
+    }
   }
 
   server = spawn("bun", ["run", "src/index.ts"], {
@@ -110,7 +130,7 @@ test.beforeAll(async () => {
       SCHEDULER_ENABLED: "false",
       // Both wikis on one server — the gate is per-wiki, so both sides of it have
       // to be reachable from the same reader build.
-      WIKI_EXTRA: `${WIKI_WITH}=${rootWith},${WIKI_WITHOUT}=${rootWithout}`,
+      WIKI_EXTRA: `${WIKI_WITH}=${rootWith},${WIKI_WITHOUT}=${rootWithout},${WIKI_SHRINK}=${rootShrink}`,
     },
     stdio: "ignore",
   });
@@ -132,6 +152,7 @@ test.afterAll(async () => {
   server?.kill("SIGTERM");
   if (rootWith) await rm(rootWith, { recursive: true, force: true });
   if (rootWithout) await rm(rootWithout, { recursive: true, force: true });
+  if (rootShrink) await rm(rootShrink, { recursive: true, force: true });
 });
 
 test.describe("Wiki reader: plan-status facet", () => {
@@ -232,5 +253,71 @@ test.describe("Wiki reader: plan-status facet", () => {
     await expect(page.locator("#statusChips")).toBeEmpty();
     await expect(page.locator(".wiki-status")).toHaveCount(0);
     await expect(page.locator(".wiki-followup-flag")).toHaveCount(0);
+  });
+});
+
+/**
+ * The domain (All/AI/Life) chip row, gated the same way and over the same two
+ * roots: `domain` is derived from a `life/` path prefix, so only jarvis's wiki
+ * spans both values and everywhere else the row is three inert chips.
+ */
+test.describe("Wiki reader: domain facet", () => {
+  test("the row is absent on a wiki with no life/ pages", async ({ page }) => {
+    await page.goto(`${BASE}/wiki?wiki=${WIKI_WITHOUT}`);
+    await expect(page.locator(".wiki-list-item")).toHaveCount(2);
+    // Not an unrendered page: the search box above the row is up.
+    await expect(page.locator("#wikiSearch")).toBeVisible();
+    await expect(page.locator("#domainChips")).toBeHidden();
+  });
+
+  test("the row shows and filters on a wiki that spans both domains", async ({ page }) => {
+    await page.goto(`${BASE}/wiki?wiki=${WIKI_WITH}`);
+    const row = page.locator("#domainChips");
+    await expect(row).toBeVisible();
+    await expect(row.locator('[data-domain=""]')).toHaveClass(/active/);
+
+    await row.locator('[data-domain="life"]').click();
+    await expect(page.locator(".wiki-list-item")).toHaveCount(1);
+    await expect(page.locator(".wiki-list-item")).toContainText("Delta");
+
+    await row.locator('[data-domain="ai"]').click();
+    await expect(page.locator(".wiki-list-item")).toHaveCount(4);
+
+    await row.locator('[data-domain=""]').click();
+    await expect(page.locator("#wikiCount")).toHaveText("5 / 5");
+  });
+
+  test("a listing that loses its life/ pages hides the row AND clears the stale filter", async ({
+    page,
+  }) => {
+    // The failure this pins: hiding the row while `filters.domain` still says
+    // `life` leaves the reader an empty list and no visible control to undo it.
+    await page.clock.install();
+    await page.goto(`${BASE}/wiki?wiki=${WIKI_SHRINK}`);
+    await expect(page.locator(".wiki-list-item")).toHaveCount(3);
+    const row = page.locator("#domainChips");
+    await expect(row).toBeVisible();
+    await row.locator('[data-domain="life"]').click();
+    await expect(page.locator(".wiki-list-item")).toHaveCount(1);
+
+    await rm(path.join(rootShrink, "life"), { recursive: true, force: true });
+    await page.clock.fastForward(WIKI_REFETCH_MIN_INTERVAL_MS + 1_000);
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+
+    await expect(row).toBeHidden();
+    await expect(page.locator(".wiki-list-item")).toHaveCount(2);
+    await expect(page.locator("#wikiCount")).toHaveText("2 / 2");
+
+    // …and when the domain comes back the row does too, showing the filter the
+    // clear above actually left behind rather than the chip the reader last hit.
+    await mkdir(path.join(rootShrink, "life"), { recursive: true });
+    await writeFile(path.join(rootShrink, "life", "three.md"), SHRINK_PAGES["life/three.md"]!, "utf8");
+    await page.clock.fastForward(WIKI_REFETCH_MIN_INTERVAL_MS + 1_000);
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+
+    await expect(row).toBeVisible();
+    await expect(page.locator(".wiki-list-item")).toHaveCount(3);
+    await expect(row.locator('[data-domain=""]')).toHaveClass(/active/);
+    await expect(row.locator('[data-domain="life"]')).not.toHaveClass(/active/);
   });
 });
