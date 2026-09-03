@@ -131,6 +131,7 @@ test("the breadcrumb's wiki crumb returns to the overview and pushes its URL", a
   const crumb = page.locator("a.wiki-bc-wiki");
   await expect(crumb).toBeVisible();
   await expect(crumb).toHaveAttribute("href", `/wiki?wiki=${WIKI}`);
+  await expect(crumb).toHaveText(`⌂ ${WIKI}`); // reads as "home", not as trail text
   await expect(page.locator(".wiki-start")).toHaveCount(0);
   await crumb.click();
   await expect(page.locator(".wiki-start")).toBeVisible();
