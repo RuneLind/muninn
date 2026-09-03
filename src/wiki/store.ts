@@ -114,7 +114,7 @@ export interface WikiReaderConfig {
    * How this wiki names the PROJECT a page belongs to — the declaration behind
    * {@link resolveProject} and the reader's Project facet. `null` ⇒ no rule ⇒
    * every page's `project` is undefined and the listing's `projects` map is `{}`,
-   * which is every wiki that ships no `project` key (all of them but one today).
+   * which is what any wiki shipping no `project` key gets.
    *
    * A wiki's project structure lives in its LAYOUT, and no two wikis spell it the
    * same way, so muninn learns it from this declaration and never from a
@@ -141,24 +141,28 @@ export interface WikiProjectRule {
    *  the folder — is not a match and falls through. */
   pathFolders: string[];
   /** The folder holding one page PER project, named after it: `<folder>/<project>`.
-   *  Those stems are also the wiki's KNOWN project set, which rules 3 and 5 check
-   *  against. `""` ⇒ no such folder, and then the known set is empty. */
+   *  Those stems are ONE of the two sources of the wiki's KNOWN project set,
+   *  which rules 3 and 5 check against (the other is `pathFolders`' project
+   *  directories — see {@link collectKnownProjects}). `""` ⇒ no such folder. */
   pageFolder: string;
   /** First path segments where the project is a `-`-separated PREFIX of the file
    *  stem (`<folder>/<project>-<rest>`). Only a KNOWN project matches, longest
-   *  first, so `claude-usage-live-x` resolves to `claude-usage` and not `claude`. */
+   *  first, so a wiki knowing both `quill` and `quill-press` reads
+   *  `quill-press-rollout` as the latter. */
   filePrefixFolders: string[];
   /** Frontmatter keys tried in order; the first with a value wins. A string, or
-   *  the first element of an array. Values pass through {@link WikiProjectRule.aliases}. */
+   *  an array's first NON-BLANK element. Values pass through
+   *  {@link WikiProjectRule.aliases}. */
   frontmatter: string[];
   /** Whether a page's FIRST tag may name its project. Guarded — see rule 5 in
    *  {@link resolveProject}: an unknown tag resolves to nothing rather than
    *  minting a one-page facet value out of whatever a page was tagged. */
   tagFallback: boolean;
-  /** Short name → project name (`{"netgate": "netgate-monitoring"}` in the
-   *  shape of the declaration, though the names are the wiki's own). Applied to
-   *  frontmatter values and tags, i.e. the two rules whose input is authored
-   *  free text rather than a directory the filesystem already agrees on. */
+  /** Short name → project name (`{"pomme": "pomme-core"}` in the shape of the
+   *  declaration, though the names are the wiki's own). Applied to frontmatter
+   *  values and tags, i.e. the two rules whose input is authored free text
+   *  rather than a directory the filesystem already agrees on. Keys and values
+   *  are trimmed; an entry with a blank key or value is dropped. */
   aliases: Record<string, string>;
 }
 
@@ -1185,9 +1189,11 @@ function normalizeIncludeGlobs(entries: string[]): string[] {
  * `aliases` must not silently retire the folder rules that were working.
  *
  * Entries are trimmed and blanks dropped, the same normalization `titleFrom`
- * gets: a stray `""` from a trailing comma in a hand-edited file would otherwise
- * sit in `pathFolders` matching the empty first segment of nothing, or in
- * `filePrefixFolders` looking like a configured folder.
+ * gets — in the string LISTS and in `aliases`, whose keys and values get it per
+ * entry: a stray `""` from a trailing comma in a hand-edited file would
+ * otherwise sit in `pathFolders` matching the empty first segment of nothing, or
+ * in `filePrefixFolders` looking like a configured folder, and a blank alias
+ * value would ship a page a `project: ""` the facet cannot name.
  */
 function parseProjectRule(raw: unknown, root: string): WikiProjectRule | null {
   if (raw === undefined) return null;
@@ -1233,7 +1239,7 @@ function parseProjectRule(raw: unknown, root: string): WikiProjectRule | null {
       tagFallback = obj.tagFallback;
     }
   }
-  let aliases: Record<string, string> = {};
+  const aliases: Record<string, string> = {};
   if (obj.aliases !== undefined) {
     if (!isStringRecord(obj.aliases)) {
       log.warn("{file} at {root}: project.aliases is not a string→string map — ignoring it", {
@@ -1241,10 +1247,24 @@ function parseProjectRule(raw: unknown, root: string): WikiProjectRule | null {
         root,
       });
     } else {
-      aliases = obj.aliases;
+      // Same trim-and-drop-blanks normalization the string lists get, per ENTRY:
+      // a blank VALUE would ship `project: ""` — a facet bucket with no name —
+      // and an untrimmed one splits the facet from the same name written plainly.
+      for (const [rawKey, rawValue] of Object.entries(obj.aliases)) {
+        const key = rawKey.trim();
+        const value = rawValue.trim();
+        if (!key || !value) {
+          log.warn(
+            "{file} at {root}: project.aliases entry {key} has a blank key or value — ignoring it",
+            { file: WIKI_READER_CONFIG_FILE, root, key: rawKey },
+          );
+          continue;
+        }
+        aliases[key] = value;
+      }
     }
   }
-  return {
+  const rule: WikiProjectRule = {
     pathFolders: strings("pathFolders"),
     pageFolder,
     filePrefixFolders: strings("filePrefixFolders"),
@@ -1252,6 +1272,23 @@ function parseProjectRule(raw: unknown, root: string): WikiProjectRule | null {
     tagFallback,
     aliases,
   };
+  // A rule can be well-formed and still be dead: `pageFolder` and `pathFolders`
+  // are the ONLY two sources of the known set (see `collectKnownProjects`), so
+  // without either of them rule 3 can never match anything, and rule 5 can only
+  // answer through an alias. Say so once — a silently inert declaration is
+  // indistinguishable from one that simply found no pages.
+  if (!rule.pageFolder && rule.pathFolders.length === 0) {
+    const inert: string[] = [];
+    if (rule.filePrefixFolders.length > 0) inert.push("filePrefixFolders");
+    if (rule.tagFallback && Object.keys(rule.aliases).length === 0) inert.push("tagFallback");
+    if (inert.length > 0) {
+      log.warn(
+        "{file} at {root}: project.{fields} can never match — the rule declares neither pageFolder nor pathFolders, so the known project set is always empty",
+        { file: WIKI_READER_CONFIG_FILE, root, fields: inert.join(", ") },
+      );
+    }
+  }
+  return rule;
 }
 
 /**
@@ -1516,34 +1553,82 @@ function projectStem(relPath: string): string {
   return path.posix.basename(relPath).replace(/\.(md|mdx|html)$/i, "");
 }
 
-/** Look one name up in the rule's alias map, own-key only (a page tagged
- *  `constructor` must not read the prototype). No entry ⇒ the name unchanged. */
+/** Whether the rule's alias map NAMES this tag, own-key only (a page tagged
+ *  `constructor` must not read the prototype). Rule 5's guard reads this rather
+ *  than comparing before/after, so an alias mapping a name to ITSELF still
+ *  counts as the wiki naming it. */
+function hasProjectAlias(name: string, rule: WikiProjectRule): boolean {
+  return Object.hasOwn(rule.aliases, name);
+}
+
+/** Look one name up in the rule's alias map, own-key only. No entry ⇒ the name
+ *  unchanged. */
 function applyProjectAlias(name: string, rule: WikiProjectRule): string {
-  return Object.prototype.hasOwnProperty.call(rule.aliases, name) ? rule.aliases[name]! : name;
+  return hasProjectAlias(name, rule) ? rule.aliases[name]! : name;
+}
+
+/** The known project whose name matches `name` under {@link stemKey}'s NFC +
+ *  lowercase fold, in the spelling the wiki keeps on disk — or undefined. Every
+ *  membership test in {@link resolveProject} runs through this, because a raw
+ *  `Set.has` reads a folder and a tag that differ only in case as two projects
+ *  and splits the facet in half. */
+function knownSpelling(known: ReadonlySet<string>, name: string): string | undefined {
+  const key = stemKey(name);
+  for (const candidate of known) {
+    if (stemKey(candidate) === key) return candidate;
+  }
+  return undefined;
 }
 
 /**
- * The wiki's KNOWN project set: the stems of the pages sitting directly in the
- * declared `pageFolder`. Collected in a FIRST pass over the scanned paths —
- * before any page is resolved — because rules 3 and 5 check membership, and a
- * `plans/` page must resolve the same way regardless of where its file happened
- * to land in the walk order.
+ * The wiki's KNOWN project set — the names rules 3 and 5 test membership
+ * against. TWO sources, because a project exists in the layout whether or not
+ * the wiki also keeps a page per project:
  *
- * Direct children only (`<pageFolder>/<name>.<ext>`, exactly two segments): a
- * page nested deeper is a page ABOUT something inside that folder, not a
- * per-project page named after one.
+ *  - the stems of the pages sitting directly in the declared `pageFolder`
+ *    (`<pageFolder>/<name>.<ext>`, exactly two segments — a page nested deeper
+ *    is a page ABOUT something inside that folder, not a per-project page named
+ *    after one), and
+ *  - every project DIRECTORY under a declared `pathFolder`
+ *    (`<pathFolder>/<project>/…`, ≥3 segments — the same count rule 1 resolves
+ *    by, so the set holds exactly the names rule 1 can mint).
+ *
+ * Leaving the second source out is what made rules 3 and 5 blind to every
+ * project with a directory and no page. Measured on the mimir wiki 2026-09-03
+ * (three such projects, known set 5 → 8): 51 pages gained a project through
+ * rule 3 and 21 through rule 5, and one page that had been filed under an
+ * unrelated first tag moved to the project its filename names.
+ *
+ * Collected in a FIRST pass over the scanned paths — before any page is
+ * resolved — because a page must resolve the same way regardless of where its
+ * file happened to land in the walk order.
+ *
+ * Two spellings that differ only in case (or in Unicode normal form) are ONE
+ * project and the first path wins: the value is what the facet groups on, so
+ * admitting both splits the bucket.
  */
 export function collectKnownProjects(
   relPaths: readonly string[],
   rule: WikiProjectRule | null,
 ): Set<string> {
   const known = new Set<string>();
-  if (!rule || !rule.pageFolder) return known;
+  if (!rule) return known;
+  const seen = new Set<string>();
+  const add = (name: string) => {
+    if (!name) return;
+    const key = stemKey(name);
+    if (seen.has(key)) return;
+    seen.add(key);
+    known.add(name);
+  };
   for (const relPath of relPaths) {
     const segs = relPath.split("/");
-    if (segs.length !== 2 || segs[0] !== rule.pageFolder) continue;
-    const stem = projectStem(relPath);
-    if (stem) known.add(stem);
+    const first = segs[0] ?? "";
+    if (rule.pageFolder && segs.length === 2 && first === rule.pageFolder) {
+      add(projectStem(relPath));
+      continue;
+    }
+    if (segs.length >= 3 && rule.pathFolders.includes(first)) add(segs[1]!);
   }
   return known;
 }
@@ -1562,25 +1647,33 @@ export function collectKnownProjects(
  *     (`<folder>/2026-07-07-x.md`) has a second segment too, and reading it as a
  *     project would mint one facet value per file.
  *  2. **`pageFolder`** — `<folder>/<project>`: the file stem, direct children
- *     only. These stems are the known set (see {@link collectKnownProjects}).
+ *     only. These stems are one of the two known-set sources (see
+ *     {@link collectKnownProjects}).
  *  3. **`filePrefixFolders`** — `<folder>/<project>-<rest>`: the LONGEST known
  *     project that prefixes the stem followed by `-`. Longest wins so a wiki
- *     that knows both `claude` and `claude-usage` reads
- *     `claude-usage-live-x` as the latter. A stem with no known prefix falls
- *     through — an unknown prefix is not a project, it is a filename.
+ *     that knows both `quill` and `quill-press` reads
+ *     `quill-press-rollout` as the latter. A stem with no known prefix falls
+ *     through — an unknown prefix is not a project, it is a filename. The match
+ *     is case/NFC-folded and yields the KNOWN spelling, not the filename's.
  *  4. **`frontmatter`** — the first declared key carrying a value: a string, or
- *     the first element of an array (a page naming several repos is filed under
- *     the first). Values pass through `aliases`.
+ *     an array's first NON-BLANK element (a page naming several repos is filed
+ *     under the first one that says something). Values pass through `aliases`.
+ *     NB `parseFrontmatter` emits only INLINE arrays (`key: [a, b]`), so a
+ *     block-style YAML list under the key is not seen by this rule at all.
  *  5. **`tagFallback`** — the page's FIRST tag, through `aliases`. Guarded: the
- *     result must be in the known set, or the alias map must name the tag.
- *     Without that guard every page's leading tag becomes a facet value and the
- *     facet fills with one-page buckets that are not projects at all.
+ *     alias map must NAME the tag, or the known set must hold the RESULT (folded
+ *     as in rule 3, but returned as the tag/alias wrote it). Without that guard
+ *     every page's leading tag becomes a facet value and the facet fills with
+ *     one-page buckets that are not projects at all. The alias half is a
+ *     `hasOwn` test rather than "the value changed", so a wiki declaring
+ *     `{"mango": "mango"}` — the one place it can name a project the layout
+ *     does not — is honoured.
  *  6. Otherwise undefined — the page belongs to no project, which is the honest
  *     answer for most of a wiki.
  *
  * `aliases` is applied in rules 4 and 5 ONLY, deliberately: those two read
- * authored free text, where a short form (`netgate`) and the project name
- * (`netgate-monitoring`) genuinely differ. Rules 1–3 read directory names the
+ * authored free text, where a short form (`pomme`) and the project name
+ * (`pomme-core`) genuinely differ. Rules 1–3 read directory names the
  * filesystem already agrees on, and aliasing those would let a declaration
  * rewrite what the layout plainly says.
  */
@@ -1607,13 +1700,19 @@ export function resolveProject(
     if (stem) return stem;
   }
 
-  // 3. <filePrefixFolder>/<project>-<rest> — longest known project wins.
+  // 3. <filePrefixFolder>/<project>-<rest> — longest known project wins, matched
+  //    on the folded key and answered with the known project's OWN spelling.
   if (rule.filePrefixFolders.includes(first)) {
-    const stem = projectStem(relPath);
+    const stem = stemKey(projectStem(relPath));
     let best: string | undefined;
+    let bestLen = -1;
     for (const candidate of known) {
-      if (!stem.startsWith(candidate + "-")) continue;
-      if (best === undefined || candidate.length > best.length) best = candidate;
+      const key = stemKey(candidate);
+      if (!stem.startsWith(key + "-")) continue;
+      if (key.length > bestLen) {
+        best = candidate;
+        bestLen = key.length;
+      }
     }
     if (best !== undefined) return best;
   }
@@ -1625,12 +1724,13 @@ export function resolveProject(
     if (value) return applyProjectAlias(value, rule);
   }
 
-  // 5. The first tag, through the aliases, and only when it lands somewhere real.
+  // 5. The first tag, through the aliases, and only when it lands somewhere
+  //    real: the alias map NAMES the tag, or the known set holds the RESULT.
   if (rule.tagFallback) {
     const tag = tags.find((t) => t.trim().length > 0)?.trim();
     if (tag) {
-      const aliased = applyProjectAlias(tag, rule);
-      if (aliased !== tag || known.has(tag)) return aliased;
+      const result = applyProjectAlias(tag, rule);
+      if (hasProjectAlias(tag, rule) || knownSpelling(known, result)) return result;
     }
   }
 
@@ -1956,11 +2056,12 @@ async function fileStatTimes(
  * created/updated dates are the file's mtime (yyyy-mm-dd). Returns null when the
  * file is unreadable so the rest of the wiki stays browsable.
  *
- * The project facet reaches an explainer through the PATH rules only: it is
- * handed no frontmatter (it has none) and no tags. The `<meta name="keywords">`
- * list this function does sniff is a free-text SEO field, not the wiki's tag
- * vocabulary, so feeding it to the tag fallback would resolve explainers by a
- * different vocabulary than every markdown page on the same wiki.
+ * The project facet reaches an explainer through the path rules and the TAG
+ * rule: it is handed no frontmatter (it has none), but the `<meta
+ * name="keywords">` list sniffed above IS this page's `tags` — it is what the
+ * facet, the tag filter and the wiki's own tag rule all read — so withholding it
+ * from the resolver made explainers the one page kind whose tags the wiki's tag
+ * rule could not see.
  */
 async function buildExplainerMeta(
   root: string,
@@ -2000,7 +2101,7 @@ async function buildExplainerMeta(
     relPath,
     mtimeMs,
     birthtimeMs,
-    project: resolveProject(relPath, {}, [], projectRule, knownProjects),
+    project: resolveProject(relPath, {}, tags, projectRule, knownProjects),
   };
 }
 

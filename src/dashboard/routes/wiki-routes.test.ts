@@ -3774,4 +3774,27 @@ describe("project + projects map on /api/wiki/pages", () => {
     const data = (await res.json()) as { meta: ProjectListing };
     expect(data.meta.project).toBe("pomme-core");
   });
+
+  test("project survives toListing on the outgoing/backlink ARRAYS too", async () => {
+    // `toListing`'s third caller is `listings()` — the link arrays on the same
+    // response — and it is the one a strip added for payload size would hit
+    // first. The Project facet has to be readable from a link row.
+    await Bun.write(
+      path.join(root, ".wiki-reader.json"),
+      JSON.stringify({ project: { pathFolders: ["areas"] } }),
+    );
+    await write("areas/pomme-core/setup.md", ["title: Setup"]);
+    await Bun.write(
+      path.join(root, "misc/hub.md"),
+      ["---", "title: Hub", "---", "", "See [[Setup]].", ""].join("\n"),
+    );
+    await mount();
+
+    const res = await app.request("/api/wiki/page?name=hub");
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { outgoing: ProjectListing[] };
+    const row = data.outgoing.find((p) => p.name === "setup");
+    expect(row).toBeDefined();
+    expect(row!.project).toBe("pomme-core");
+  });
 });
