@@ -1664,8 +1664,9 @@ export function collectKnownProjects(
  *  2. **`pageFolder`** — `<folder>/<project>`: the file stem, direct children
  *     only. These stems are one of the two known-set sources (see
  *     {@link collectKnownProjects}), so the set decides the spelling here for
- *     the same reason — a stem that lost the first-wins dedupe to a directory
- *     answers as that directory, not as its own filename.
+ *     the same reason — the set keeps the FIRST spelling the sorted walk saw,
+ *     whether that came from a directory or a stem, and a stem spelled
+ *     otherwise answers as that first spelling, not as its own filename.
  *  3. **`filePrefixFolders`** — `<folder>/<project>-<rest>`: the LONGEST known
  *     project that prefixes the stem followed by `-`. Longest wins so a wiki
  *     that knows both `quill` and `quill-press` reads
@@ -1674,7 +1675,10 @@ export function collectKnownProjects(
  *     is case/NFC-folded and yields the KNOWN spelling, not the filename's.
  *  4. **`frontmatter`** — the first declared key carrying a value: a string, or
  *     an array's first NON-BLANK element (a page naming several repos is filed
- *     under the first one that says something). Values pass through `aliases`.
+ *     under the first one that says something). Values pass through `aliases`
+ *     and are answered in the KNOWN spelling where the set holds the result,
+ *     exactly as rule 5 answers the same text — the two rules share one alias
+ *     map and must file one value under one bucket.
  *     NB `parseFrontmatter` emits only INLINE arrays (`key: [a, b]`), so a
  *     block-style YAML list under the key is not seen by this rule at all.
  *  5. **`tagFallback`** — the page's FIRST tag, through `aliases`. Guarded: the
@@ -1740,7 +1744,12 @@ export function resolveProject(
   for (const key of rule.frontmatter) {
     const raw = Object.prototype.hasOwnProperty.call(fm, key) ? fm[key] : undefined;
     const value = Array.isArray(raw) ? raw.find((v) => v.trim().length > 0)?.trim() : raw?.trim();
-    if (value) return applyProjectAlias(value, rule);
+    if (value) {
+      // Same answer rule 5 gives the same text: the known spelling where the set
+      // holds the result, else the alias's value as written.
+      const result = applyProjectAlias(value, rule);
+      return knownSpelling(known, result) ?? result;
+    }
   }
 
   // 5. The first tag, through the aliases, and only when it lands somewhere

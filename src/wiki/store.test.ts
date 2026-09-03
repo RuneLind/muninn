@@ -2483,6 +2483,22 @@ describe("resolveProject", () => {
     expect(resolveProject("notes/x.md", {}, ["mg"], named, known)).toBe("Mango-Works");
   });
 
+  test("rule 4: a known result answers in the KNOWN spelling, and an alias answers the same under rules 4 and 5", () => {
+    // Rules 4 and 5 read the same authored free text through the same alias map,
+    // so one value must file under one bucket whichever rule reached it. Rule 4
+    // was the one return point that skipped the known-spelling lookup: a
+    // `source-repo: QUILL` filed under `QUILL` while a tag `QUILL` filed under
+    // `quill`.
+    expect(resolveProject("notes/x.md", { "owner-unit": "QUILL" }, [], rule, known)).toBe("quill");
+    const shouty = { ...rule, aliases: { ...rule.aliases, q: "QUILL" } };
+    expect(resolveProject("notes/x.md", { "owner-unit": "q" }, [], shouty, known)).toBe("quill");
+    expect(resolveProject("notes/x.md", { "owner-unit": "q" }, [], shouty, known))
+      .toBe(resolveProject("notes/x.md", {}, ["q"], shouty, known));
+    // An alias-only admission still keeps the alias's spelling under rule 4 too.
+    const named = { ...rule, aliases: { ...rule.aliases, mg: "Mango-Works" } };
+    expect(resolveProject("notes/x.md", { "owner-unit": "mg" }, [], named, known)).toBe("Mango-Works");
+  });
+
   test("rule 3: the prefix test is case-folded and yields the KNOWN spelling", () => {
     // The known stem is what the facet groups on, so a draft whose filename
     // spells it in another case must join that bucket, not mint a second one.
@@ -2594,8 +2610,9 @@ describe("collectKnownProjects", () => {
     expect(set).toEqual(new Set(["alpha"]));
     // The facet groups on what `resolveProject` ANSWERS, not on the set, so the
     // set agreeing is not the property: both paths have to resolve to the one
-    // spelling. Collected first-wins and resolved from the raw segment, these two
-    // paths yield `alpha` and `Alpha` — two buckets out of one project.
+    // spelling. Before the answer went through the set, these two paths yielded
+    // `alpha` and `Alpha` — two buckets out of one project; now both file under
+    // the first spelling the sorted walk saw.
     expect(paths.map((p) => resolveProject(p, {}, [], caseRule, set))).toEqual(["alpha", "alpha"]);
   });
 });
