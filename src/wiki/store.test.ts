@@ -19,8 +19,11 @@ import {
   flattenLinks,
   deriveFolderLabels,
   stemDisplayTitle,
+  resolveProject,
+  collectKnownProjects,
   PLAN_STATUS_VALUES,
   __resetWikiCacheForTest,
+  type WikiProjectRule,
 } from "./store.ts";
 import { SWEEP_THRESHOLD } from "./git-dates.ts";
 
@@ -2281,6 +2284,715 @@ describe("buildWikiIndex — plan status fields", () => {
       await reset();
     }
     expect(records.some((r) => r.rawMessage.includes("plan-status"))).toBe(false);
+  });
+});
+
+/**
+ * The project resolver, driven directly. Pure, so every rule and every
+ * precedence pair is provable without a filesystem — the index tests below
+ * cover the WIRING (both meta constructors, the known-set first pass, the
+ * config parse) rather than re-testing the rules through ~700 file reads.
+ *
+ * Every name here is invented. muninn must not know any wiki's layout: the
+ * whole point of the declaration is that the reader learns it at runtime, so a
+ * fixture spelled like a real wiki would be a spec muninn quietly grew.
+ */
+describe("resolveProject", () => {
+  const rule: WikiProjectRule = {
+    pathFolders: ["areas", "vault"],
+    pageFolder: "units",
+    filePrefixFolders: ["drafts"],
+    frontmatter: ["owner-unit", "units"],
+    tagFallback: true,
+    aliases: { pomme: "pomme-core", zx: "zebra-exchange" },
+  };
+  const known = new Set(["pomme-core", "zebra-exchange", "quill", "quill-press"]);
+
+  test("rule 1: the second segment under a declared pathFolder", () => {
+    expect(resolveProject("areas/pomme-core/setup.md", {}, [], rule, known)).toBe("pomme-core");
+    expect(resolveProject("vault/quill/notes.mdx", {}, [], rule, known)).toBe("quill");
+  });
+
+  test("rule 1: a file sitting DIRECTLY in the pathFolder is not a project", () => {
+    // The segment count is the whole rule. `2026-07-07-x.md` has a second
+    // segment too, and reading it as a project mints one facet value per file.
+    expect(resolveProject("areas/2026-07-07-x.md", {}, [], rule, known)).toBeUndefined();
+  });
+
+  test("rule 1: a pathFolder value need not be in the known set", () => {
+    // A project directory exists whether or not the wiki also keeps a page per
+    // project — the layout is the evidence.
+    expect(resolveProject("areas/never-heard-of-it/x.md", {}, [], rule, known)).toBe(
+      "never-heard-of-it",
+    );
+  });
+
+  test("rule 2: the file stem inside the pageFolder", () => {
+    expect(resolveProject("units/zebra-exchange.md", {}, [], rule, known)).toBe("zebra-exchange");
+  });
+
+  test("rule 2: only direct children of the pageFolder", () => {
+    // `units` is not a pathFolder, so a nested page falls through every rule.
+    expect(resolveProject("units/zebra-exchange/deep.md", {}, [], rule, known)).toBeUndefined();
+  });
+
+  test("rule 3: the longest known project prefixing the stem", () => {
+    // Both `quill` and `quill-press` are known; the shorter one must not win.
+    expect(resolveProject("drafts/quill-press-rollout.mdx", {}, [], rule, known)).toBe(
+      "quill-press",
+    );
+    expect(resolveProject("drafts/quill-index-rebuild.mdx", {}, [], rule, known)).toBe("quill");
+  });
+
+  test("rule 3: the prefix must be followed by a dash, not merely start the stem", () => {
+    expect(resolveProject("drafts/quillpress-notes.mdx", {}, [], rule, known)).toBeUndefined();
+  });
+
+  test("rule 3: an UNKNOWN prefix falls through rather than minting a project", () => {
+    expect(resolveProject("drafts/mango-alert-delivery.mdx", {}, [], rule, known)).toBeUndefined();
+  });
+
+  test("rule 4: the first declared frontmatter key with a value, aliased", () => {
+    expect(resolveProject("notes/x.md", { "owner-unit": "pomme" }, [], rule, known)).toBe(
+      "pomme-core",
+    );
+    // The FIRST key wins even when a later one also carries a value.
+    expect(
+      resolveProject("notes/x.md", { "owner-unit": "quill", units: ["zx"] }, [], rule, known),
+    ).toBe("quill");
+  });
+
+  test("rule 4: an array value is filed under its first element", () => {
+    expect(resolveProject("notes/x.md", { units: ["zebra-exchange", "quill"] }, [], rule, known))
+      .toBe("zebra-exchange");
+  });
+
+  test("rule 4: an empty value is not a value — the next key gets its turn", () => {
+    expect(resolveProject("notes/x.md", { "owner-unit": "  ", units: ["quill"] }, [], rule, known))
+      .toBe("quill");
+  });
+
+  test("rule 4: a frontmatter value need not be known", () => {
+    // Unlike a tag, an explicitly declared key IS the author saying so.
+    expect(resolveProject("notes/x.md", { "owner-unit": "brand-new" }, [], rule, known)).toBe(
+      "brand-new",
+    );
+  });
+
+  test("rule 5: the first tag, through the aliases", () => {
+    expect(resolveProject("notes/x.md", {}, ["pomme", "monitoring"], rule, known)).toBe(
+      "pomme-core",
+    );
+  });
+
+  test("rule 5: a first tag already in the known set resolves as itself", () => {
+    expect(resolveProject("notes/x.md", {}, ["quill"], rule, known)).toBe("quill");
+  });
+
+  test("rule 5: an unknown, un-aliased first tag resolves to nothing", () => {
+    // The guard the facet lives by: without it every page's leading tag becomes
+    // a one-page bucket that is not a project at all.
+    expect(resolveProject("notes/x.md", {}, ["monitoring", "quill"], rule, known)).toBeUndefined();
+  });
+
+  test("rule 5: off when tagFallback is not declared", () => {
+    const noTags = { ...rule, tagFallback: false };
+    expect(resolveProject("notes/x.md", {}, ["pomme"], noTags, known)).toBeUndefined();
+  });
+
+  test("precedence: the path beats a contradicting tag AND frontmatter", () => {
+    expect(
+      resolveProject(
+        "areas/pomme-core/setup.md",
+        { "owner-unit": "quill" },
+        ["zx"],
+        rule,
+        known,
+      ),
+    ).toBe("pomme-core");
+  });
+
+  test("precedence: the pageFolder stem beats a contradicting frontmatter key", () => {
+    expect(resolveProject("units/quill.md", { "owner-unit": "zx" }, [], rule, known)).toBe("quill");
+  });
+
+  test("precedence: a file-prefix match beats a contradicting tag", () => {
+    expect(resolveProject("drafts/quill-x.md", {}, ["pomme"], rule, known)).toBe("quill");
+  });
+
+  test("precedence: frontmatter beats the tag fallback", () => {
+    expect(resolveProject("notes/x.md", { units: ["quill"] }, ["pomme"], rule, known)).toBe("quill");
+  });
+
+  test("aliases apply to frontmatter and tags BOTH, and to neither path rule", () => {
+    expect(resolveProject("notes/x.md", { "owner-unit": "zx" }, [], rule, known)).toBe(
+      "zebra-exchange",
+    );
+    expect(resolveProject("notes/x.md", {}, ["zx"], rule, known)).toBe("zebra-exchange");
+    // A directory literally named `zx` is what the layout says; a declaration
+    // does not get to overrule the filesystem.
+    expect(resolveProject("areas/zx/page.md", {}, [], rule, known)).toBe("zx");
+  });
+
+  test("no rule ⇒ undefined, whatever the page carries", () => {
+    expect(
+      resolveProject("areas/pomme-core/x.md", { "owner-unit": "quill" }, ["zx"], null, known),
+    ).toBeUndefined();
+  });
+
+  test("a page matching nothing resolves to undefined", () => {
+    expect(resolveProject("misc/loose.md", { title: "Loose" }, ["misc"], rule, known)).toBeUndefined();
+  });
+
+  test("aliases and frontmatter are read own-key only", () => {
+    // A page tagged `constructor` must not read Object.prototype.
+    expect(resolveProject("notes/x.md", {}, ["constructor"], rule, known)).toBeUndefined();
+    const ctorKeys = { ...rule, frontmatter: ["constructor"] };
+    expect(resolveProject("notes/x.md", {}, [], ctorKeys, known)).toBeUndefined();
+  });
+
+  test("rule 2: an explainer stem inside the pageFolder names a project too", () => {
+    // `projectStem` strips `.html` as well as `.md`/`.mdx`, so a page-per-project
+    // folder holding an explainer answers exactly as a markdown sibling does.
+    expect(resolveProject("units/gamma.html", {}, [], rule, known)).toBe("gamma");
+  });
+
+  test("rule 5: an alias naming the tag resolves it, even to ITSELF", () => {
+    // The guard is "the known set has the result OR the alias map names the tag".
+    // An identity alias is the wiki declaring `mango` a project in the one place
+    // it can — a `aliased !== tag` test reads it as "no alias" and drops it.
+    const identity = { ...rule, aliases: { ...rule.aliases, mango: "mango" } };
+    expect(resolveProject("notes/x.md", {}, ["mango"], identity, known)).toBe("mango");
+  });
+
+  test("rule 5: a known result answers in the KNOWN spelling, not as the tag wrote it", () => {
+    // `quill` is known; the page is tagged `Quill`. Folding only the MEMBERSHIP
+    // test admits the page and then files it under `Quill`, so the same project
+    // gets two facet buckets — one per rule that reached it.
+    expect(resolveProject("notes/x.md", {}, ["Quill"], rule, known)).toBe("quill");
+    // The alias's VALUE is what the known set is asked about, so a known project
+    // spelled differently in the alias map answers in the on-disk spelling too.
+    const shouty = { ...rule, aliases: { ...rule.aliases, q: "QUILL" } };
+    expect(resolveProject("notes/x.md", {}, ["q"], shouty, known)).toBe("quill");
+  });
+
+  test("rule 5: an alias-only admission keeps the ALIAS's spelling", () => {
+    // The known set has no say here — the alias map is the wiki naming a project
+    // its layout does not, so the value it wrote is the only spelling there is.
+    const named = { ...rule, aliases: { ...rule.aliases, mg: "Mango-Works" } };
+    expect(resolveProject("notes/x.md", {}, ["mg"], named, known)).toBe("Mango-Works");
+  });
+
+  test("rule 4: a known result answers in the KNOWN spelling, and an alias answers the same under rules 4 and 5", () => {
+    // Rules 4 and 5 read the same authored free text through the same alias map,
+    // so one value must file under one bucket whichever rule reached it. Rule 4
+    // was the one return point that skipped the known-spelling lookup: a
+    // `source-repo: QUILL` filed under `QUILL` while a tag `QUILL` filed under
+    // `quill`.
+    expect(resolveProject("notes/x.md", { "owner-unit": "QUILL" }, [], rule, known)).toBe("quill");
+    const shouty = { ...rule, aliases: { ...rule.aliases, q: "QUILL" } };
+    expect(resolveProject("notes/x.md", { "owner-unit": "q" }, [], shouty, known)).toBe("quill");
+    expect(resolveProject("notes/x.md", { "owner-unit": "q" }, [], shouty, known))
+      .toBe(resolveProject("notes/x.md", {}, ["q"], shouty, known));
+    // An alias-only admission still keeps the alias's spelling under rule 4 too.
+    const named = { ...rule, aliases: { ...rule.aliases, mg: "Mango-Works" } };
+    expect(resolveProject("notes/x.md", { "owner-unit": "mg" }, [], named, known)).toBe("Mango-Works");
+  });
+
+  test("rule 3: the prefix test is case-folded and yields the KNOWN spelling", () => {
+    // The known stem is what the facet groups on, so a draft whose filename
+    // spells it in another case must join that bucket, not mint a second one.
+    const mixed = new Set(["Quill-Press"]);
+    expect(resolveProject("drafts/quill-press-rollout.mdx", {}, [], rule, mixed)).toBe("Quill-Press");
+    // BOTH sides of the comparison have to fold — folding only the known name
+    // leaves a file spelled in another case unmatched.
+    expect(resolveProject("drafts/QUILL-press-Rollout.mdx", {}, [], rule, new Set(["quill-press"])))
+      .toBe("quill-press");
+  });
+
+  test("rules 1 and 2 answer with the KNOWN spelling of the name they read", () => {
+    // The known set dedupes on the folded key and keeps the first spelling seen,
+    // so a directory and a page-per-project stem that differ only in case are ONE
+    // project there. The two rules that mint from those segments have to agree,
+    // or the facet gets a bucket per rule.
+    const mixed = new Set(["alpha"]);
+    expect(resolveProject("areas/Alpha/x.md", {}, [], rule, mixed)).toBe("alpha");
+    expect(resolveProject("units/ALPHA.md", {}, [], rule, mixed)).toBe("alpha");
+  });
+
+  test("rules 1 and 2 fall back to the raw segment when the known set has no say", () => {
+    // Rule 2's stem is always in the set and rule 1's directory is collected from
+    // the same paths — but `known` is an argument, so the guard is what keeps a
+    // caller that passes an unrelated set from turning a real page project-less.
+    expect(resolveProject("areas/never-heard-of-it/x.md", {}, [], rule, new Set())).toBe(
+      "never-heard-of-it",
+    );
+    expect(resolveProject("units/gamma.md", {}, [], rule, new Set())).toBe("gamma");
+  });
+
+  test("rule 4: an array is filed under its first NON-BLANK element", () => {
+    // `raw[0]` reads the blank as the answer, falls through to rule 5 and files
+    // the page under a tag — or nowhere. Nothing in the repo emits a blank array
+    // element today (`splitInlineArray` drops them), so only this pins it.
+    expect(resolveProject("notes/x.md", { units: ["", "beta"] }, [], rule, known)).toBe("beta");
+  });
+});
+
+describe("collectKnownProjects", () => {
+  const rule: WikiProjectRule = {
+    pathFolders: [],
+    pageFolder: "units",
+    filePrefixFolders: [],
+    frontmatter: [],
+    tagFallback: false,
+    aliases: {},
+  };
+
+  test("collects the stems of direct children, any admitted extension", () => {
+    expect(
+      collectKnownProjects(
+        ["units/quill.md", "units/pomme-core.mdx", "units/zebra-exchange.html", "notes/x.md"],
+        rule,
+      ),
+    ).toEqual(new Set(["quill", "pomme-core", "zebra-exchange"]));
+  });
+
+  test("a nested page under the pageFolder is not a project", () => {
+    expect(collectKnownProjects(["units/quill/deep.md"], rule)).toEqual(new Set());
+  });
+
+  test("no rule ⇒ an empty set", () => {
+    expect(collectKnownProjects(["units/quill.md"], null)).toEqual(new Set());
+  });
+
+  test("a pathFolders project DIRECTORY joins the set", () => {
+    // Rule 1 mints project names out of second segments; leaving them out of the
+    // known set is what left rules 3 and 5 blind to every project that has a
+    // directory but no page-per-project entry.
+    const withPaths = { ...rule, pathFolders: ["areas", "vault"] };
+    expect(
+      collectKnownProjects(
+        [
+          "units/quill.md",
+          "areas/pomme-core/setup.md",
+          "vault/zebra-exchange/deep/x.md",
+          "areas/2026-01-01-loose.md", // 2 segments — not a project directory
+          "notes/y.md",
+        ],
+        withPaths,
+      ),
+    ).toEqual(new Set(["quill", "pomme-core", "zebra-exchange"]));
+  });
+
+  test("a rule with no pageFolder still collects from pathFolders", () => {
+    expect(
+      collectKnownProjects(["areas/pomme-core/x.md"], {
+        ...rule,
+        pageFolder: "",
+        pathFolders: ["areas"],
+      }),
+    ).toEqual(new Set(["pomme-core"]));
+  });
+
+  test("no pageFolder and no pathFolders ⇒ an empty set", () => {
+    expect(
+      collectKnownProjects(["units/quill.md", "areas/pomme-core/x.md"], {
+        ...rule,
+        pageFolder: "",
+      }),
+    ).toEqual(new Set());
+  });
+
+  test("two spellings differing only in case are ONE project — for the SET and for both rules", () => {
+    const paths = ["areas/alpha/x.md", "units/Alpha.md"];
+    const caseRule = { ...rule, pathFolders: ["areas"] };
+    const set = collectKnownProjects(paths, caseRule);
+    expect(set).toEqual(new Set(["alpha"]));
+    // The facet groups on what `resolveProject` ANSWERS, not on the set, so the
+    // set agreeing is not the property: both paths have to resolve to the one
+    // spelling. Before the answer went through the set, these two paths yielded
+    // `alpha` and `Alpha` — two buckets out of one project; now both file under
+    // the first spelling the sorted walk saw.
+    expect(paths.map((p) => resolveProject(p, {}, [], caseRule, set))).toEqual(["alpha", "alpha"]);
+  });
+});
+
+/**
+ * Warnings about ONE `project` sub-field, matched on the message SHAPE rather
+ * than on the key appearing anywhere in the record: the temp root path travels
+ * in `properties`, so a `JSON.stringify(properties).includes(key)` test passes on
+ * a warn about something else entirely (and on a root directory whose name
+ * happens to contain the key).
+ */
+const projectFieldWarns = (records: LogRecord[], key: string) =>
+  records.filter(
+    (r) =>
+      r.level === "warning" &&
+      (r.rawMessage.includes(`project.${key} is not`) ||
+        (r.rawMessage.includes("project.{key} is not") && r.properties.key === key)),
+  );
+
+/**
+ * The WIRING: the declaration is read once per build, the known set is collected
+ * before any page resolves, and `project` lands on BOTH meta constructors.
+ */
+describe("buildWikiIndex — project", () => {
+  let root: string;
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-project-"));
+    for (const d of ["areas/pomme-core", "units", "drafts", "misc"]) {
+      await mkdir(path.join(root, d), { recursive: true });
+    }
+  });
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const declare = (project: unknown) =>
+    Bun.write(path.join(root, ".wiki-reader.json"), JSON.stringify({ project }));
+
+  const fullRule = {
+    pathFolders: ["areas"],
+    pageFolder: "units",
+    filePrefixFolders: ["drafts"],
+    frontmatter: ["owner-unit"],
+    tagFallback: true,
+    aliases: { pomme: "pomme-core" },
+  };
+
+  const page = (relPath: string, fmLines: string[], body = "Body.") =>
+    Bun.write(
+      path.join(root, relPath),
+      fmLines.length > 0 ? ["---", ...fmLines, "---", "", body].join("\n") : body,
+    );
+
+  test("every rule reaches the page metadata through one declaration", async () => {
+    await declare(fullRule);
+    await page("units/pomme-core.md", ["title: Pomme Core"]);
+    await page("units/quill.md", ["title: Quill"]);
+    await page("areas/pomme-core/setup.md", ["title: Setup"]);
+    await page("drafts/quill-rollout.md", ["title: Rollout"]);
+    await page("misc/tagged.md", ["title: Tagged", "tags: [pomme, misc]"]);
+    await page("misc/declared.md", ["title: Declared", "owner-unit: quill"]);
+    await page("misc/orphan.md", ["title: Orphan", "tags: [misc]"]);
+
+    const index = await buildWikiIndex(root);
+    const project = (name: string) => index.resolve(name)!.project;
+    expect(project("Pomme Core")).toBe("pomme-core");
+    expect(project("Setup")).toBe("pomme-core");
+    expect(project("Rollout")).toBe("quill");
+    expect(project("Tagged")).toBe("pomme-core");
+    expect(project("Declared")).toBe("quill");
+    expect(project("Orphan")).toBeUndefined();
+  });
+
+  test("a drafts/ page resolves off a units/ stem regardless of walk order", async () => {
+    // The known set is a FIRST pass over the path list. Resolved inside the
+    // concurrent read instead, this page would answer differently depending on
+    // which read finished first.
+    await declare(fullRule);
+    await page("units/zebra-exchange.md", ["title: Zebra Exchange"]);
+    await page("drafts/zebra-exchange-cutover.md", ["title: Cutover"]);
+    const index = await buildWikiIndex(root);
+    expect(index.resolve("Cutover")!.project).toBe("zebra-exchange");
+  });
+
+  test("an explainer .html under a pathFolder gets the project too", async () => {
+    await declare(fullRule);
+    await Bun.write(
+      path.join(root, "areas/pomme-core/report.html"),
+      "<html><head><title>Pomme report</title></head><body>x</body></html>",
+    );
+    const index = await buildWikiIndex(root);
+    const meta = index.pages.find((p) => p.relPath === "areas/pomme-core/report.html")!;
+    expect(meta.type).toBe("explainer");
+    expect(meta.project).toBe("pomme-core");
+  });
+
+  test("a CRLF page keeps the path rule after losing its frontmatter", async () => {
+    // `parseFrontmatter`'s line regex ends in `(.*)$`, which does not match a
+    // trailing `\r`, so a CRLF page parses to `{}` — no title, no tags. The
+    // project must still resolve, because the path rule never reads the body.
+    await declare(fullRule);
+    await Bun.write(
+      path.join(root, "areas/pomme-core/crlf.md"),
+      "---\r\ntitle: CRLF Page\r\ntags: [quill]\r\n---\r\n\r\nBody.\r\n",
+    );
+    const index = await buildWikiIndex(root);
+    const meta = index.pages.find((p) => p.relPath === "areas/pomme-core/crlf.md")!;
+    expect(meta.title).toBe("crlf"); // frontmatter genuinely lost
+    expect(meta.project).toBe("pomme-core");
+  });
+
+  test("no project declaration ⇒ undefined on every page", async () => {
+    await Bun.write(
+      path.join(root, ".wiki-reader.json"),
+      JSON.stringify({ typeLabels: { plan: "Plans" } }),
+    );
+    await page("units/quill.md", ["title: Quill"]);
+    await page("areas/pomme-core/setup.md", ["title: Setup", "tags: [pomme]"]);
+    const index = await buildWikiIndex(root);
+    expect(index.readerConfig?.project).toBeNull();
+    // The count is the point: `every` over an EMPTY index is vacuously true, so
+    // a scan that found nothing would pass this test while proving nothing.
+    expect(index.pages.length).toBe(2);
+    expect(index.pages.every((p) => p.project === undefined)).toBe(true);
+  });
+
+  test("no .wiki-reader.json at all ⇒ undefined on every page", async () => {
+    await page("units/quill.md", ["title: Quill"]);
+    const index = await buildWikiIndex(root);
+    expect(index.resolve("Quill")!.project).toBeUndefined();
+  });
+
+  test("a project that is not an object warns and drops the whole rule", async () => {
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
+      reset: true,
+    });
+    try {
+      await Bun.write(
+        path.join(root, ".wiki-reader.json"),
+        JSON.stringify({ project: "areas", typeLabels: { plan: "Plans" } }),
+      );
+      await page("areas/pomme-core/setup.md", ["title: Setup"]);
+      const index = await buildWikiIndex(root);
+      expect(index.readerConfig?.project).toBeNull();
+      // The valid half of the config survives, as with typeMap/titleFrom.
+      expect(index.readerConfig?.typeLabels.plan).toBe("Plans");
+      expect(index.resolve("Setup")!.project).toBeUndefined();
+      expect(
+        records.some((r) => r.level === "warning" && r.rawMessage.includes("project is not")),
+      ).toBe(true);
+    } finally {
+      await reset();
+    }
+  });
+
+  test("a malformed SUB-FIELD warns and drops only that field", async () => {
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
+      reset: true,
+    });
+    try {
+      // `pathFolders` is a string, `aliases` a list, `tagFallback` a string —
+      // all three dropped; `pageFolder` still works.
+      await declare({
+        pathFolders: "areas",
+        pageFolder: "units",
+        aliases: ["pomme"],
+        tagFallback: "yes",
+      });
+      await page("units/quill.md", ["title: Quill"]);
+      await page("areas/pomme-core/setup.md", ["title: Setup", "tags: [quill]"]);
+      const index = await buildWikiIndex(root);
+      const rule = index.readerConfig?.project;
+      expect(rule?.pathFolders).toEqual([]);
+      expect(rule?.aliases).toEqual({});
+      expect(rule?.tagFallback).toBe(false);
+      expect(rule?.pageFolder).toBe("units");
+      expect(index.resolve("Quill")!.project).toBe("quill");
+      // The dropped path rule means this page has no project — and the dropped
+      // tagFallback means its `quill` tag does not rescue it.
+      expect(index.resolve("Setup")!.project).toBeUndefined();
+      // The WARN is the only evidence that separates "declared and dropped" from
+      // "never declared" — both leave the field at its default — so it is asserted
+      // by SHAPE and by COUNT. A substring test over the whole record matched the
+      // temp root path in `properties` and would pass on any warn at all.
+      for (const key of ["pathFolders", "aliases", "tagFallback"]) {
+        expect(projectFieldWarns(records, key).length).toBe(1);
+      }
+      // …and a field that was never declared warns not at all.
+      expect(projectFieldWarns(records, "frontmatter").length).toBe(0);
+      expect(projectFieldWarns(records, "filePrefixFolders").length).toBe(0);
+    } finally {
+      await reset();
+    }
+  });
+
+  test("alias keys and values are trimmed, and blank entries drop with a warn", async () => {
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
+      reset: true,
+    });
+    try {
+      await declare({
+        ...fullRule,
+        aliases: { "  pom  ": "  pomme-core  ", ng: "", blank: "   ", "": "quill" },
+      });
+      await page("misc/tagged.md", ["title: Tagged", "tags: [pom]"]);
+      const index = await buildWikiIndex(root);
+      // A blank VALUE would ship `project: ""` — a facet bucket with no name —
+      // and an untrimmed one would split the facet from the same name written
+      // straight.
+      expect(index.readerConfig?.project?.aliases).toEqual({ pom: "pomme-core" });
+      expect(index.resolve("Tagged")!.project).toBe("pomme-core");
+      const aliasWarns = records.filter(
+        (r) => r.level === "warning" && r.rawMessage.includes("project.aliases entry"),
+      );
+      expect(aliasWarns.length).toBe(3);
+    } finally {
+      await reset();
+    }
+  });
+
+  test("an alias keyed on a prototype name is REFUSED with a warn, not swallowed", async () => {
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
+      reset: true,
+    });
+    try {
+      // `aliases[key] = value` on a plain object hits the `__proto__` SETTER, so
+      // that entry never becomes an own key and `hasProjectAlias` never sees it:
+      // the wiki declared an alias and the reader silently dropped it. Written as
+      // raw JSON on purpose — an object LITERAL spelling `__proto__` sets the
+      // prototype instead of an own property, so it could not reach the parser.
+      await Bun.write(
+        path.join(root, ".wiki-reader.json"),
+        String.raw`{"project":{"pageFolder":"units","tagFallback":true,"aliases":{"__proto__":"x","constructor":"y","prototype":"z","pom":"pomme-core"}}}`,
+      );
+      await page("misc/tagged.md", ["title: Tagged", "tags: [pom]"]);
+      const index = await buildWikiIndex(root);
+      const aliases = index.readerConfig?.project?.aliases ?? {};
+      expect(aliases).toEqual({ pom: "pomme-core" });
+      for (const key of ["__proto__", "constructor", "prototype"]) {
+        expect(Object.hasOwn(aliases, key)).toBe(false);
+      }
+      expect(index.resolve("Tagged")!.project).toBe("pomme-core");
+      const aliasWarns = records.filter(
+        (r) => r.level === "warning" && r.rawMessage.includes("project.aliases entry"),
+      );
+      expect(aliasWarns.length).toBe(3);
+      expect(aliasWarns.map((r) => r.properties.key).sort()).toEqual([
+        "__proto__",
+        "constructor",
+        "prototype",
+      ]);
+    } finally {
+      await reset();
+    }
+  });
+
+  test("a rule whose known set can never fill warns that its rules are inert", async () => {
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
+      reset: true,
+    });
+    try {
+      // Neither `pageFolder` nor `pathFolders`, so the known set is empty by
+      // construction and both of the rules that test membership are dead. With
+      // no aliases either, the tag fallback can never answer.
+      await declare({ filePrefixFolders: ["drafts"], tagFallback: true });
+      await page("drafts/quill-rollout.md", ["title: Rollout", "tags: [quill]"]);
+      const index = await buildWikiIndex(root);
+      expect(index.resolve("Rollout")!.project).toBeUndefined();
+      const inert = records.filter(
+        (r) => r.level === "warning" && r.rawMessage.includes("can never match"),
+      );
+      expect(inert.length).toBe(1);
+      expect(String(inert[0]!.properties.fields)).toBe("filePrefixFolders, tagFallback");
+    } finally {
+      await reset();
+    }
+  });
+
+  test("a tag fallback with aliases is NOT inert, and a filled known set warns not at all", async () => {
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
+      reset: true,
+    });
+    try {
+      // An alias map is the second way rule 5 can answer, so `tagFallback` is
+      // live here; only `filePrefixFolders` is dead.
+      await declare({ filePrefixFolders: ["drafts"], tagFallback: true, aliases: { pomme: "pomme-core" } });
+      await page("misc/tagged.md", ["title: Tagged", "tags: [pomme]"]);
+      const index = await buildWikiIndex(root);
+      expect(index.resolve("Tagged")!.project).toBe("pomme-core");
+      const inert = records.filter(
+        (r) => r.level === "warning" && r.rawMessage.includes("can never match"),
+      );
+      expect(inert.length).toBe(1);
+      expect(String(inert[0]!.properties.fields)).toBe("filePrefixFolders");
+    } finally {
+      await reset();
+    }
+  });
+
+  test("a rule with a pathFolders known source warns about nothing", async () => {
+    const records: LogRecord[] = [];
+    await configure({
+      sinks: { capture: (r: LogRecord) => records.push(r) },
+      loggers: [{ category: ["muninn"], sinks: ["capture"], lowestLevel: "debug" }],
+      reset: true,
+    });
+    try {
+      await declare({ pathFolders: ["areas"], filePrefixFolders: ["drafts"], tagFallback: true });
+      await page("areas/pomme-core/setup.md", ["title: Setup"]);
+      const index = await buildWikiIndex(root);
+      expect(index.resolve("Setup")!.project).toBe("pomme-core");
+      expect(
+        records.filter((r) => r.level === "warning" && r.rawMessage.includes("can never match"))
+          .length,
+      ).toBe(0);
+    } finally {
+      await reset();
+    }
+  });
+
+  test("rule 3 resolves off a project only the PATH rule minted", async () => {
+    // The wiki keeps a directory per project but no page-per-project entry for
+    // this one — the layout is the evidence, so the prefixed draft must find it.
+    await declare(fullRule);
+    await page("areas/pomme-core/setup.md", ["title: Setup"]);
+    await page("drafts/pomme-core-rollout.md", ["title: Rollout"]);
+    const index = await buildWikiIndex(root);
+    expect(index.resolve("Rollout")!.project).toBe("pomme-core");
+  });
+
+  test("a known stem differing only in CASE still prefixes a draft stem", async () => {
+    await declare(fullRule);
+    await page("units/Alpha.md", ["title: Alpha Unit"]);
+    await page("drafts/alpha-x.md", ["title: Alpha Draft"]);
+    const index = await buildWikiIndex(root);
+    // Both under the ON-DISK spelling, so the facet holds one bucket, not two.
+    expect(index.resolve("Alpha Unit")!.project).toBe("Alpha");
+    expect(index.resolve("Alpha Draft")!.project).toBe("Alpha");
+  });
+
+  test("an explainer resolves through its own <meta keywords> tags", async () => {
+    // `buildExplainerMeta` computes these tags and SHIPS them as the page's tags;
+    // handing the resolver an empty list made explainers the one page kind whose
+    // tags the wiki's own tag rule could not see.
+    await declare(fullRule);
+    await page("units/quill.md", ["title: Quill"]);
+    await Bun.write(
+      path.join(root, "misc/report.html"),
+      '<html><head><title>Misc report</title><meta name="keywords" content="quill, notes"></head><body>x</body></html>',
+    );
+    const index = await buildWikiIndex(root);
+    const meta = index.pages.find((p) => p.relPath === "misc/report.html")!;
+    expect(meta.tags).toContain("quill");
+    expect(meta.project).toBe("quill");
+  });
+
+  test("blank entries are normalized away rather than invalidating the list", async () => {
+    await declare({ ...fullRule, pathFolders: ["areas", "  ", ""] });
+    await page("areas/pomme-core/setup.md", ["title: Setup"]);
+    const index = await buildWikiIndex(root);
+    expect(index.readerConfig?.project?.pathFolders).toEqual(["areas"]);
+    expect(index.resolve("Setup")!.project).toBe("pomme-core");
   });
 });
 

@@ -969,6 +969,21 @@ export function supersededMarksNote(count: number, tail: string): string | undef
   return `${count} mark${count === 1 ? "" : "s"} from a previous check superseded — ${tail}`;
 }
 
+/**
+ * Project → number of pages carrying it, for the listing's Project facet. Pages
+ * with no project contribute nothing (they are the facet's "everything else",
+ * which the client derives from the page rows it already has). A wiki declaring
+ * no project rule yields `{}`.
+ */
+export function projectCounts(pages: readonly WikiPageMeta[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const p of pages) {
+    if (!p.project) continue;
+    counts[p.project] = (counts[p.project] ?? 0) + 1;
+  }
+  return counts;
+}
+
 /** Listing shape sent to the client — meta plus connection counts for sorting. */
 interface WikiPageListing extends WikiPageMeta {
   linkCount: number;
@@ -1244,6 +1259,12 @@ export function registerWikiRoutes(app: Hono, config: Config): void {
       // pages themselves, so the labels have to travel with them; `{}` for every
       // wiki that needs neither, which is all five besides `memory`.
       folderLabels: index.folderLabels ?? {},
+      // Project → page count, over the SAME page array the listing ships, so the
+      // facet's counts can never disagree with the rows it filters. `{}` for
+      // every wiki whose `.wiki-reader.json` declares no `project` rule — which
+      // is how the client knows to render no Project facet at all, rather than
+      // one empty option.
+      projects: projectCounts(index.pages),
       // The wiki's `defaultType`, "" when it declares none. The client needs it
       // for exactly one decision — `hubTypeList` excludes the leftovers bucket
       // from the start view's "Top … by connections" sections — and cannot derive
