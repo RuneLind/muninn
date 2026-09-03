@@ -3673,3 +3673,105 @@ describe("POST /api/wiki/factcheck/append — supersedes stale marks", () => {
     expect(await read("log.md")).toContain("; 2 prior marks superseded");
   });
 });
+
+/**
+ * The Project facet's two wire halves on `/api/wiki/pages`: `project` per page
+ * (which must survive `toListing` — it is a LISTING facet, so a strip there
+ * would leave the facet with nothing to filter on) and the `projects` count map
+ * beside `types`/`folderLabels`.
+ *
+ * Invented names throughout — muninn learns a wiki's project structure from the
+ * wiki's own `.wiki-reader.json` declaration and must never know one by name.
+ */
+describe("project + projects map on /api/wiki/pages", () => {
+  let root: string;
+  let app: Hono;
+  let prevWikiDir: string | undefined;
+
+  const mount = async () => {
+    prevWikiDir = process.env.WIKI_DIR;
+    process.env.WIKI_DIR = root;
+    __resetWikiCacheForTest();
+    __resetWikiRegistryForTest();
+    app = new Hono();
+    registerWikiRoutes(app, {} as Parameters<typeof registerWikiRoutes>[1]);
+  };
+
+  beforeEach(async () => {
+    root = await mkdtemp(path.join(tmpdir(), "wiki-project-route-"));
+    for (const d of ["areas/pomme-core", "units", "misc"]) {
+      await mkdir(path.join(root, d), { recursive: true });
+    }
+  });
+
+  afterEach(async () => {
+    if (prevWikiDir === undefined) delete process.env.WIKI_DIR;
+    else process.env.WIKI_DIR = prevWikiDir;
+    __resetWikiCacheForTest();
+    __resetWikiRegistryForTest();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  type ProjectListing = { name: string; project?: string };
+  type PagesBody = { pages: ProjectListing[]; projects: Record<string, number> };
+
+  const write = (relPath: string, fmLines: string[]) =>
+    Bun.write(path.join(root, relPath), ["---", ...fmLines, "---", "", "Body."].join("\n"));
+
+  test("each page carries its project and the map counts them", async () => {
+    await Bun.write(
+      path.join(root, ".wiki-reader.json"),
+      JSON.stringify({
+        project: { pathFolders: ["areas"], pageFolder: "units", tagFallback: true },
+      }),
+    );
+    await write("units/pomme-core.md", ["title: Pomme Core"]);
+    await write("areas/pomme-core/setup.md", ["title: Setup"]);
+    await write("areas/pomme-core/notes.md", ["title: Notes"]);
+    await write("misc/orphan.md", ["title: Orphan", "tags: [misc]"]);
+    await mount();
+
+    const res = await app.request("/api/wiki/pages");
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as PagesBody;
+    const project = (name: string) => data.pages.find((p) => p.name === name)!.project;
+    expect(project("pomme-core")).toBe("pomme-core");
+    expect(project("setup")).toBe("pomme-core");
+    // A page no rule matched carries no project at all — not "", not a bucket.
+    expect(project("orphan")).toBeUndefined();
+    // The map counts the same rows the listing ships, so the facet's numbers can
+    // never disagree with what filtering on them returns.
+    expect(data.projects).toEqual({ "pomme-core": 3 });
+  });
+
+  test("a wiki declaring no project rule ships an empty map and no project field", async () => {
+    await Bun.write(
+      path.join(root, ".wiki-reader.json"),
+      JSON.stringify({ typeLabels: { plan: "Plans" } }),
+    );
+    await write("units/pomme-core.md", ["title: Pomme Core"]);
+    await write("areas/pomme-core/setup.md", ["title: Setup", "tags: [pomme]"]);
+    await mount();
+
+    const res = await app.request("/api/wiki/pages");
+    const data = (await res.json()) as PagesBody;
+    expect(data.pages.length).toBe(2);
+    expect(data.pages.every((p) => p.project === undefined)).toBe(true);
+    // `{}` is how the client knows to render no Project facet at all.
+    expect(data.projects).toEqual({});
+  });
+
+  test("project survives toListing on the single-page meta too", async () => {
+    await Bun.write(
+      path.join(root, ".wiki-reader.json"),
+      JSON.stringify({ project: { pathFolders: ["areas"] } }),
+    );
+    await write("areas/pomme-core/setup.md", ["title: Setup"]);
+    await mount();
+
+    const res = await app.request("/api/wiki/page?name=setup");
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { meta: ProjectListing };
+    expect(data.meta.project).toBe("pomme-core");
+  });
+});

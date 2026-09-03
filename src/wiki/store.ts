@@ -110,6 +110,56 @@ export interface WikiReaderConfig {
    * with no entry fall back to {@link deriveFolderLabels}' common-prefix strip.
    */
   folderLabels: Record<string, string>;
+  /**
+   * How this wiki names the PROJECT a page belongs to — the declaration behind
+   * {@link resolveProject} and the reader's Project facet. `null` ⇒ no rule ⇒
+   * every page's `project` is undefined and the listing's `projects` map is `{}`,
+   * which is every wiki that ships no `project` key (all of them but one today).
+   *
+   * A wiki's project structure lives in its LAYOUT, and no two wikis spell it the
+   * same way, so muninn learns it from this declaration and never from a
+   * hardcoded folder name. Every sub-field is optional and independently
+   * validated: a wrong-typed sub-field is warned about and DROPPED (the rest of
+   * the rule stands), while a `project` that isn't an object at all drops the
+   * whole rule — the same validate-warn-degrade shape as `typeMap`/`include`
+   * above. Per-field rather than whole-rule because the fields are independent
+   * rules, not one setting: a typo'd `aliases` should not silently retire the
+   * folder rules that were working.
+   */
+  project: WikiProjectRule | null;
+}
+
+/**
+ * A wiki's own answer to "which project does this page belong to", read from
+ * `.wiki-reader.json`'s `project` key. Six independent rules, applied in the
+ * fixed precedence {@link resolveProject} documents — most structural first
+ * (where the file SITS), least structural last (what it happens to be tagged).
+ */
+export interface WikiProjectRule {
+  /** First path segments under which the SECOND segment is a project directory:
+   *  `<folder>/<project>/<page>` (≥3 segments). Two segments — a file directly in
+   *  the folder — is not a match and falls through. */
+  pathFolders: string[];
+  /** The folder holding one page PER project, named after it: `<folder>/<project>`.
+   *  Those stems are also the wiki's KNOWN project set, which rules 3 and 5 check
+   *  against. `""` ⇒ no such folder, and then the known set is empty. */
+  pageFolder: string;
+  /** First path segments where the project is a `-`-separated PREFIX of the file
+   *  stem (`<folder>/<project>-<rest>`). Only a KNOWN project matches, longest
+   *  first, so `claude-usage-live-x` resolves to `claude-usage` and not `claude`. */
+  filePrefixFolders: string[];
+  /** Frontmatter keys tried in order; the first with a value wins. A string, or
+   *  the first element of an array. Values pass through {@link WikiProjectRule.aliases}. */
+  frontmatter: string[];
+  /** Whether a page's FIRST tag may name its project. Guarded — see rule 5 in
+   *  {@link resolveProject}: an unknown tag resolves to nothing rather than
+   *  minting a one-page facet value out of whatever a page was tagged. */
+  tagFallback: boolean;
+  /** Short name → project name (`{"netgate": "netgate-monitoring"}` in the
+   *  shape of the declaration, though the names are the wiki's own). Applied to
+   *  frontmatter values and tags, i.e. the two rules whose input is authored
+   *  free text rather than a directory the filesystem already agrees on. */
+  aliases: Record<string, string>;
 }
 
 /**
@@ -423,6 +473,18 @@ export interface WikiPageMeta {
    * undefined), never passed through.
    */
   plan_status?: PlanStatus;
+  /**
+   * The project this page belongs to — the reader's Project facet value. Resolved
+   * by {@link resolveProject} from the wiki's OWN `project` declaration in
+   * `.wiki-reader.json`; undefined on every wiki that ships no such declaration,
+   * and on any page inside one that no rule matched. Explainer `.html` pages get
+   * it too, from the path rules only (they have no frontmatter and no wiki tags).
+   *
+   * Deliberately NOT stripped by `toListing`: the Project facet is a LISTING
+   * facet, so the hot `/api/wiki/pages` payload is exactly where it has to be.
+   * One short string per page.
+   */
+  project?: string;
   /** When `plan_status` was last affirmed (`YYYY-MM-DD`). A value that isn't that
    *  exact shape — or is that shape but not a real calendar day, e.g. `2026-02-31`
    *  — is dropped at parse time. See `isCalendarDay`. */
@@ -1116,6 +1178,83 @@ function normalizeIncludeGlobs(entries: string[]): string[] {
 }
 
 /**
+ * Parse the optional `project` declaration. Absent, or anything that isn't a
+ * plain object, ⇒ `null` (no rule at all). A sub-field of the wrong TYPE is
+ * warned about and dropped on its own, leaving the rest of the rule standing —
+ * the fields are six independent rules rather than one setting, so a typo'd
+ * `aliases` must not silently retire the folder rules that were working.
+ *
+ * Entries are trimmed and blanks dropped, the same normalization `titleFrom`
+ * gets: a stray `""` from a trailing comma in a hand-edited file would otherwise
+ * sit in `pathFolders` matching the empty first segment of nothing, or in
+ * `filePrefixFolders` looking like a configured folder.
+ */
+function parseProjectRule(raw: unknown, root: string): WikiProjectRule | null {
+  if (raw === undefined) return null;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    log.warn("{file} at {root}: project is not an object — ignoring the whole rule", {
+      file: WIKI_READER_CONFIG_FILE,
+      root,
+    });
+    return null;
+  }
+  const obj = raw as Record<string, unknown>;
+  const strings = (key: string): string[] => {
+    if (obj[key] === undefined) return [];
+    if (!isStringArray(obj[key])) {
+      log.warn("{file} at {root}: project.{key} is not an array of strings — ignoring it", {
+        file: WIKI_READER_CONFIG_FILE,
+        root,
+        key,
+      });
+      return [];
+    }
+    return (obj[key] as string[]).map((s) => s.trim()).filter((s) => s.length > 0);
+  };
+  let pageFolder = "";
+  if (obj.pageFolder !== undefined) {
+    if (typeof obj.pageFolder !== "string") {
+      log.warn("{file} at {root}: project.pageFolder is not a string — ignoring it", {
+        file: WIKI_READER_CONFIG_FILE,
+        root,
+      });
+    } else {
+      pageFolder = obj.pageFolder.trim();
+    }
+  }
+  let tagFallback = false;
+  if (obj.tagFallback !== undefined) {
+    if (typeof obj.tagFallback !== "boolean") {
+      log.warn("{file} at {root}: project.tagFallback is not a boolean — ignoring it", {
+        file: WIKI_READER_CONFIG_FILE,
+        root,
+      });
+    } else {
+      tagFallback = obj.tagFallback;
+    }
+  }
+  let aliases: Record<string, string> = {};
+  if (obj.aliases !== undefined) {
+    if (!isStringRecord(obj.aliases)) {
+      log.warn("{file} at {root}: project.aliases is not a string→string map — ignoring it", {
+        file: WIKI_READER_CONFIG_FILE,
+        root,
+      });
+    } else {
+      aliases = obj.aliases;
+    }
+  }
+  return {
+    pathFolders: strings("pathFolders"),
+    pageFolder,
+    filePrefixFolders: strings("filePrefixFolders"),
+    frontmatter: strings("frontmatter"),
+    tagFallback,
+    aliases,
+  };
+}
+
+/**
  * Read the optional `<root>/.wiki-reader.json` per-wiki type ontology. Absent ⇒
  * null (the common case — the wiki uses the built-in five types). Malformed JSON,
  * or a `typeMap`/`typeLabels` that isn't a string map, degrades to a config with
@@ -1222,6 +1361,7 @@ async function readWikiReaderConfig(root: string): Promise<WikiReaderConfig | nu
       : [],
     defaultType: defaultTypeOk ? defaultTypeRaw : "",
     folderLabels: isStringRecord(obj.folderLabels) ? obj.folderLabels : {},
+    project: parseProjectRule(obj.project, root),
   };
 }
 
@@ -1365,6 +1505,136 @@ function typeFromFrontmatter(
   // type a page (authored key, typeMap, standard folder) still wins — and absent,
   // it is `note` exactly as before.
   return config?.defaultType || "note";
+}
+
+/** The page name without its extension, for the three extensions the scan
+ *  admits. Unlike {@link wikiPageStem} this also strips `.html`, because an
+ *  explainer sitting in the wiki's `pageFolder` names a project exactly like a
+ *  markdown page does — leaving `x.html` in the known set would put a value in
+ *  the facet that matches nothing else. */
+function projectStem(relPath: string): string {
+  return path.posix.basename(relPath).replace(/\.(md|mdx|html)$/i, "");
+}
+
+/** Look one name up in the rule's alias map, own-key only (a page tagged
+ *  `constructor` must not read the prototype). No entry ⇒ the name unchanged. */
+function applyProjectAlias(name: string, rule: WikiProjectRule): string {
+  return Object.prototype.hasOwnProperty.call(rule.aliases, name) ? rule.aliases[name]! : name;
+}
+
+/**
+ * The wiki's KNOWN project set: the stems of the pages sitting directly in the
+ * declared `pageFolder`. Collected in a FIRST pass over the scanned paths —
+ * before any page is resolved — because rules 3 and 5 check membership, and a
+ * `plans/` page must resolve the same way regardless of where its file happened
+ * to land in the walk order.
+ *
+ * Direct children only (`<pageFolder>/<name>.<ext>`, exactly two segments): a
+ * page nested deeper is a page ABOUT something inside that folder, not a
+ * per-project page named after one.
+ */
+export function collectKnownProjects(
+  relPaths: readonly string[],
+  rule: WikiProjectRule | null,
+): Set<string> {
+  const known = new Set<string>();
+  if (!rule || !rule.pageFolder) return known;
+  for (const relPath of relPaths) {
+    const segs = relPath.split("/");
+    if (segs.length !== 2 || segs[0] !== rule.pageFolder) continue;
+    const stem = projectStem(relPath);
+    if (stem) known.add(stem);
+  }
+  return known;
+}
+
+/**
+ * Resolve the project a page belongs to, from the wiki's own declaration. Pure —
+ * every input is passed in, so the whole facet is testable without a filesystem.
+ *
+ * Precedence is fixed, and ordered most-structural first: where the file SITS is
+ * a fact about the wiki's layout, while what it is TAGGED is authored free text
+ * a page can carry for any reason. The first rule that answers wins.
+ *
+ *  1. **`pathFolders`** — `<folder>/<project>/<page>`: the second segment, when
+ *     the first is declared AND there are ≥3 segments. The segment count is the
+ *     whole rule: a dated file sitting directly in the folder
+ *     (`<folder>/2026-07-07-x.md`) has a second segment too, and reading it as a
+ *     project would mint one facet value per file.
+ *  2. **`pageFolder`** — `<folder>/<project>`: the file stem, direct children
+ *     only. These stems are the known set (see {@link collectKnownProjects}).
+ *  3. **`filePrefixFolders`** — `<folder>/<project>-<rest>`: the LONGEST known
+ *     project that prefixes the stem followed by `-`. Longest wins so a wiki
+ *     that knows both `claude` and `claude-usage` reads
+ *     `claude-usage-live-x` as the latter. A stem with no known prefix falls
+ *     through — an unknown prefix is not a project, it is a filename.
+ *  4. **`frontmatter`** — the first declared key carrying a value: a string, or
+ *     the first element of an array (a page naming several repos is filed under
+ *     the first). Values pass through `aliases`.
+ *  5. **`tagFallback`** — the page's FIRST tag, through `aliases`. Guarded: the
+ *     result must be in the known set, or the alias map must name the tag.
+ *     Without that guard every page's leading tag becomes a facet value and the
+ *     facet fills with one-page buckets that are not projects at all.
+ *  6. Otherwise undefined — the page belongs to no project, which is the honest
+ *     answer for most of a wiki.
+ *
+ * `aliases` is applied in rules 4 and 5 ONLY, deliberately: those two read
+ * authored free text, where a short form (`netgate`) and the project name
+ * (`netgate-monitoring`) genuinely differ. Rules 1–3 read directory names the
+ * filesystem already agrees on, and aliasing those would let a declaration
+ * rewrite what the layout plainly says.
+ */
+export function resolveProject(
+  relPath: string,
+  fm: Record<string, string | string[]>,
+  tags: readonly string[],
+  rule: WikiProjectRule | null,
+  known: ReadonlySet<string>,
+): string | undefined {
+  if (!rule) return undefined;
+  const segs = relPath.split("/");
+  const first = segs[0] ?? "";
+
+  // 1. <pathFolder>/<project>/<page>
+  if (segs.length >= 3 && rule.pathFolders.includes(first)) {
+    const project = segs[1]!;
+    if (project) return project;
+  }
+
+  // 2. <pageFolder>/<project>.<ext>
+  if (rule.pageFolder && segs.length === 2 && first === rule.pageFolder) {
+    const stem = projectStem(relPath);
+    if (stem) return stem;
+  }
+
+  // 3. <filePrefixFolder>/<project>-<rest> — longest known project wins.
+  if (rule.filePrefixFolders.includes(first)) {
+    const stem = projectStem(relPath);
+    let best: string | undefined;
+    for (const candidate of known) {
+      if (!stem.startsWith(candidate + "-")) continue;
+      if (best === undefined || candidate.length > best.length) best = candidate;
+    }
+    if (best !== undefined) return best;
+  }
+
+  // 4. The first declared frontmatter key carrying a value.
+  for (const key of rule.frontmatter) {
+    const raw = Object.prototype.hasOwnProperty.call(fm, key) ? fm[key] : undefined;
+    const value = Array.isArray(raw) ? raw.find((v) => v.trim().length > 0)?.trim() : raw?.trim();
+    if (value) return applyProjectAlias(value, rule);
+  }
+
+  // 5. The first tag, through the aliases, and only when it lands somewhere real.
+  if (rule.tagFallback) {
+    const tag = tags.find((t) => t.trim().length > 0)?.trim();
+    if (tag) {
+      const aliased = applyProjectAlias(tag, rule);
+      if (aliased !== tag || known.has(tag)) return aliased;
+    }
+  }
+
+  return undefined;
 }
 
 /**
@@ -1685,8 +1955,19 @@ async function fileStatTimes(
  * file's <title> (sniffed from a bounded prefix) or the filename stem, and the
  * created/updated dates are the file's mtime (yyyy-mm-dd). Returns null when the
  * file is unreadable so the rest of the wiki stays browsable.
+ *
+ * The project facet reaches an explainer through the PATH rules only: it is
+ * handed no frontmatter (it has none) and no tags. The `<meta name="keywords">`
+ * list this function does sniff is a free-text SEO field, not the wiki's tag
+ * vocabulary, so feeding it to the tag fallback would resolve explainers by a
+ * different vocabulary than every markdown page on the same wiki.
  */
-async function buildExplainerMeta(root: string, relPath: string): Promise<WikiPageMeta | null> {
+async function buildExplainerMeta(
+  root: string,
+  relPath: string,
+  projectRule: WikiProjectRule | null,
+  knownProjects: ReadonlySet<string>,
+): Promise<WikiPageMeta | null> {
   const abs = path.join(root, relPath);
   const stem = path.basename(relPath, ".html");
   let title = stem;
@@ -1719,6 +2000,7 @@ async function buildExplainerMeta(root: string, relPath: string): Promise<WikiPa
     relPath,
     mtimeMs,
     birthtimeMs,
+    project: resolveProject(relPath, {}, [], projectRule, knownProjects),
   };
 }
 
@@ -1816,7 +2098,16 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
   relPaths = relPaths.filter((_, i) => !isPipelineSource[i]);
 
   // (`readerConfig` — the per-wiki type ontology + `include` scope — was read at
-  // the top of this function, before the scan it now scopes.)
+  // the top of this function, before the scan it now scopes. The project rule
+  // comes off that ONE read too, so it costs no extra file access per page.)
+  //
+  // The known project set is a pure FIRST pass over the final path list — no file
+  // reads, so it is cheap — and it has to happen here rather than inside the
+  // concurrent read below: rules 3 and 5 of `resolveProject` test membership, and
+  // a page resolved before the pages that define the set would answer differently
+  // depending on which of ~700 concurrent reads finished first.
+  const projectRule = readerConfig?.project ?? null;
+  const knownProjects = collectKnownProjects(relPaths, projectRule);
   // Curated Atlas trails — a sibling read next to `.wiki-reader.json`, same TTL.
   const trails = await readWikiTrails(root);
 
@@ -1849,7 +2140,7 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
   await Promise.all(
     relPaths.map(async (relPath) => {
       if (relPath.endsWith(".html")) {
-        const meta = await buildExplainerMeta(root, relPath);
+        const meta = await buildExplainerMeta(root, relPath, projectRule, knownProjects);
         if (meta) {
           pages.push(meta);
           rawOutgoing.set(relPath, []); // explainers don't join the link graph
@@ -1875,12 +2166,16 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
       // same wikilink extraction, same graph membership. The only difference is
       // the extension stripped off the stem.
       const name = wikiPageStem(relPath);
+      // Hoisted out of the literal below because the project rule's tag fallback
+      // reads the same list — one parse, and the facet can never disagree with
+      // the tags the page ships.
+      const tags = asStringArray(fm.tags);
       const meta: WikiPageMeta = {
         name,
         title: titleFromFrontmatter(fm, name, readerConfig),
         type: typeFromFrontmatter(fm, relPath, readerConfig),
         domain: relPath.startsWith("life/") ? "life" : "ai",
-        tags: asStringArray(fm.tags),
+        tags,
         aliases: asStringArray(fm.aliases),
         created: typeof fm.created === "string" ? fm.created : undefined,
         updated: typeof fm.updated === "string" ? fm.updated : undefined,
@@ -1900,6 +2195,9 @@ export async function buildWikiIndex(root: string): Promise<WikiIndex> {
         // files per uncached Atlas request. Both undefined for pages that lack them.
         pubDate: extractPubDate(content),
         desc: extractDesc(content),
+        // The Project facet. Undefined on every wiki that declares no rule, and
+        // on any page inside one that no rule matched.
+        project: resolveProject(relPath, fm, tags, projectRule, knownProjects),
         // Plan lifecycle fields. Wiki-agnostic (any page may declare them) and
         // strictly validated — an invalid value is dropped here and only ever
         // surfaces as a count in the aggregated warn below.
