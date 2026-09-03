@@ -172,6 +172,7 @@ import {
 } from "./wiki-nav.ts";
 import {
   anchorNow,
+  articleUrl,
   connectionTypeOrder,
   breadcrumbLeaf,
   displayTitleOf,
@@ -191,9 +192,10 @@ import {
   pageFollowups,
   projectCounts,
   projectFacetVisible,
+  projectFilterAfterListing,
   projectHubPage,
   PROJECT_PARAM,
-  resolveProjectParam,
+  projectParamNeedsRewrite,
   ROOT_FOLDER,
   sanitizeColorToken,
   searchWithProject,
@@ -273,18 +275,18 @@ const WIKI_ROOT = readActiveWikiRoot();
 function withWiki(url: string): string {
   return withWikiParam(url, WIKI);
 }
-/** Build a shareable in-page URL that preserves the active wiki. */
+/** Build a shareable in-page URL that preserves the active wiki AND the active
+ *  project filter (`articleUrl`) — the rail stays narrowed when an article
+ *  opens, so a URL without the project would describe a different screen. */
 function pageUrl(name: string): string {
-  const wiki = WIKI ? "wiki=" + encodeURIComponent(WIKI) + "&" : "";
-  return "/wiki?" + wiki + "page=" + encodeURIComponent(name);
+  return articleUrl(WIKI, "page", name, filters.project);
 }
 /** Collision-proof shareable URL keyed by the page's exact relPath — used for
  *  pages opened via the Atlas tab so Back/reload/share re-resolve the SAME page
  *  even on a wiki with same-stem pages in different folders (the `?page=` name
- *  route resolves first-stem-match). */
+ *  route resolves first-stem-match). Carries the project for the same reason. */
 function pageUrlByRelPath(relPath: string): string {
-  const wiki = WIKI ? "wiki=" + encodeURIComponent(WIKI) + "&" : "";
-  return "/wiki?" + wiki + "relPath=" + encodeURIComponent(relPath);
+  return articleUrl(WIKI, "relPath", relPath, filters.project);
 }
 
 let allPages: WikiListing[] = [];
@@ -385,32 +387,46 @@ function currentStartUrl(): string {
  * overview's would navigate the address bar off the `?relPath=` being read.
  *
  * Guarded on the param's CURRENT value rather than on the rebuilt string, so a
- * no-op change cannot rewrite (and thereby re-encode) the reader's other params.
+ * no-op change cannot rewrite (and thereby re-encode) the reader's other params
+ * — `projectParamNeedsRewrite`, which also answers "yes" for a present-but-blank
+ * param that a raw string compare read as equal to "no filter". `location.hash`
+ * rides along: this is the reader's own URL, anchor included.
  */
 function writeProjectParam(): void {
-  const current = new URLSearchParams(location.search).get(PROJECT_PARAM) ?? "";
-  if (current === filters.project) return;
-  history.replaceState(history.state, "", location.pathname + searchWithProject(location.search, filters.project));
+  if (!projectParamNeedsRewrite(location.search, filters.project)) return;
+  history.replaceState(
+    history.state,
+    "",
+    location.pathname + searchWithProject(location.search, filters.project) + location.hash,
+  );
 }
 
 /**
- * Adopt the project filter the URL asks for, against the listing that just
- * landed — the ONE place `filters.project` is set from the address bar.
+ * Adopt the project filter a freshly landed listing implies — the ONE place
+ * `filters.project` is set from anywhere but a click.
  *
- * Runs inside `setPagesData`, i.e. before the first `renderPageFacets` on boot
- * and again on every adopt. Re-running is a no-op in the steady state (every
- * setter writes the param back), and on the one path where it is not — a
- * background refresh over a wiki that no longer has the project at all — it
- * correctly drops a filter whose chip can no longer exist.
+ * `boot` (the first render, a boot heal, and popstate) reads the ADDRESS BAR:
+ * the deep link is what the reader asked for. Every later adopt re-validates the
+ * filter the reader has since set instead — see `projectFilterAfterListing`; it
+ * ran as a URL re-read on every refresh and on the `applyPendingPages()` at the
+ * top of each navigation, which is a wipe.
  *
- * A value this wiki does not know is cleared AND taken out of the URL, so a
- * stale link renders the whole wiki with nothing highlighted rather than an
- * empty list under an unrepresentable filter.
+ * A value this wiki does not know is cleared AND taken out of the URL either
+ * way, so a stale link renders the whole wiki with nothing highlighted rather
+ * than an empty list under an unrepresentable filter.
  */
-function syncProjectFilterFromUrl(): void {
+function adoptProjectFilter(boot: boolean): void {
   const raw = new URLSearchParams(location.search).get(PROJECT_PARAM);
-  filters.project = resolveProjectParam(raw, projects);
-  if (raw !== null) writeProjectParam();
+  filters.project = projectFilterAfterListing(boot, raw, filters.project, projects);
+  writeProjectParam();
+}
+
+/** Keep the breadcrumb's wiki-crumb href in step with the project filter. It is
+ *  built once per ARTICLE render, so after a chip click a middle-click or
+ *  copy-link would hand over the filter the reader had before it. */
+function refreshCrumbHref(): void {
+  const crumb = document.querySelector(".wiki-bc-wiki");
+  if (crumb) crumb.setAttribute("href", currentStartUrl());
 }
 /**
  * Return to the overview from wherever the reader is — the breadcrumb's wiki
@@ -657,17 +673,23 @@ function renderProjectChips(): void {
   row.style.display = "";
 }
 
-/** Set the project filter and repaint everything it changes — shared by the chip
- *  row and the article header's hub chip, so the two cannot drift on which
- *  renders they owe. `syncFilters()` auto-opens the Filters disclosure, which is
- *  what makes the chip row visible after a click that came from the article. */
-function applyProjectFilter(project: string): void {
-  filters.project = project;
-  writeProjectParam();
+/** Everything a project change repaints — shared by the chip row, the article
+ *  header's hub chip and popstate, so the three cannot drift on which renders
+ *  they owe. `syncFilters()` auto-opens the Filters disclosure, which is what
+ *  makes the chip row visible after a click that came from the article. */
+function repaintForProject(): void {
+  refreshCrumbHref();
   renderProjectChips();
   renderList();
   refreshStartBody();
   syncFilters();
+}
+
+/** Set the project filter, write it to the URL and repaint. */
+function applyProjectFilter(project: string): void {
+  filters.project = project;
+  writeProjectParam();
+  repaintForProject();
 }
 
 function renderTagChips(): void {
@@ -1947,6 +1969,13 @@ if (wikiSel) {
 
 window.addEventListener("popstate", () => {
   const params = new URLSearchParams(location.search);
+  // The project rides in the URL, so Back/Forward is a facet change too — and it
+  // is the one path where the address bar leads. Adopted on EVERY branch (the
+  // article ones included: the rail keeps its chips while a page is open), and
+  // repainted only when it actually moved.
+  const projectBefore = filters.project;
+  adoptProjectFilter(true);
+  if (filters.project !== projectBefore) repaintForProject();
   // A relPath URL round-trips collision-proof (and is what every in-reader
   // navigation now pushes); check it first, `?page=` stays for older links.
   const relPath = params.get("relPath");
@@ -4687,8 +4716,11 @@ function currentViewState() {
 }
 
 /** Swap in a page set + everything else the payload carries. Data only — paints
- *  nothing; `adoptPagesAndRender`/`bootRender` own the painting. */
-function setPagesData(data: WikiPagesResponse): void {
+ *  nothing; `adoptPagesAndRender`/`bootRender` own the painting.
+ *
+ *  `boot` is passed through to `adoptProjectFilter`: only the boot render (and a
+ *  boot heal) may read `?project=` off the address bar. */
+function setPagesData(data: WikiPagesResponse, boot = false): void {
   allPages = data.pages;
   // Anchor every recency read to the server's scan instant BEFORE the first render
   // (`recencyNow`) — a viewer clock running >48h slow would otherwise trip the
@@ -4720,7 +4752,7 @@ function setPagesData(data: WikiPagesResponse): void {
   projects = data.projects && typeof data.projects === "object" ? data.projects : {};
   // Before the first `renderPageFacets` on every path that reaches one, so the
   // boot render already paints the chip the URL asked for as active.
-  syncProjectFilterFromUrl();
+  adoptProjectFilter(boot);
 }
 
 /** Adopt a fresh page set and repaint everything derived from it. Filters, the
@@ -4752,7 +4784,7 @@ function adoptPagesDataAndFacets(applied: PendingPages): void {
  *  facets, no list) the next successful refetch must run this path too, or the
  *  list heals beside a permanent error message. */
 function bootRender(applied: PendingPages): void {
-  setPagesData(applied.data);
+  setPagesData(applied.data, true);
   markApplied(pagesRefresh, applied);
   renderPageFacets(true);
   loadCoverageFooter();

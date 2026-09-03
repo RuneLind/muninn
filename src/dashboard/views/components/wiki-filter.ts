@@ -985,7 +985,7 @@ export function statusCounts(
  * True as soon as ONE page carries a `project`. That is equivalent to "this wiki
  * declares a project rule AND something matched it": `resolveProject` returns
  * `undefined` for every page when the rule is absent or unusable, so a wiki
- * shipping no declaration (jarvis, melosys-kode-wiki) renders exactly as it did
+ * shipping no declaration (jarvis) renders exactly as it did
  * before — no row, no filter, no URL state.
  *
  * Deliberately unscoped (whole wiki, not the active domain/type/folder): this
@@ -1063,6 +1063,57 @@ export function resolveProjectParam(
 export function urlWithProject(url: string, project: string): string {
   if (!project) return url;
   return url + (url.indexOf("?") === -1 ? "?" : "&") + PROJECT_PARAM + "=" + encodeURIComponent(project);
+}
+
+/**
+ * The shareable in-reader URL for ONE page, carrying the active project filter.
+ *
+ * Both key spellings are built here — `page` for the by-name route, `relPath`
+ * for the collision-proof one — because the bug was in the URL BUILDERS, not in
+ * a call site: an article URL assembled from wiki + page alone drops the filter
+ * the rail is still narrowed by, so the pushed entry (and any reload or share of
+ * it) describes a screen nobody is looking at.
+ */
+export function articleUrl(wiki: string, key: "page" | "relPath", value: string, project: string): string {
+  const w = wiki ? "wiki=" + encodeURIComponent(wiki) + "&" : "";
+  return urlWithProject("/wiki?" + w + key + "=" + encodeURIComponent(value), project);
+}
+
+/**
+ * Must the address bar's project param be rewritten to match `project`?
+ *
+ * The non-obvious clause is the middle one: a param that is PRESENT always has
+ * to go when there is no filter, including when it is blank. Comparing the raw
+ * value against `filters.project` reads `?project=` as `"" === ""` and leaves it
+ * standing, while `?project=%20` was cleaned only because a blank string is not
+ * a trimmed one.
+ */
+export function projectParamNeedsRewrite(search: string, project: string): boolean {
+  const raw = new URLSearchParams(search).get(PROJECT_PARAM);
+  if (raw === null) return project !== "";
+  if (project === "") return true;
+  return raw !== project;
+}
+
+/**
+ * The project filter a freshly landed listing should leave in place.
+ *
+ * At BOOT the address bar is the reader's request, so the deep link is adopted.
+ * On every LATER listing the URL is ignored and the CURRENT filter is merely
+ * re-validated against the new map: the address bar is written by the reader's
+ * own clicks, so re-reading it on an adopt turned every background refresh — and
+ * the adopt at the top of every navigation — into a wipe.
+ *
+ * Both directions still answer "" for a project this listing does not know, so
+ * an unknown value continues to open the whole wiki with the param dropped.
+ */
+export function projectFilterAfterListing(
+  boot: boolean,
+  rawParam: string | null | undefined,
+  current: string,
+  projects: Record<string, number> | null | undefined,
+): string {
+  return resolveProjectParam(boot ? rawParam : current, projects);
 }
 
 /**

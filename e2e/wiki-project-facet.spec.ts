@@ -83,7 +83,9 @@ function mdPage(title: string, tags?: string[]): string {
 }
 
 /**
- * Five pomme-core pages, one per resolution rule the declaration turns on:
+ * Five pomme-core pages across FOUR of the declaration's resolution rules (the
+ * `frontmatter: []` rule is on but matches nothing, by design — an empty field
+ * list is what a wiki declaring no frontmatter key looks like):
  *   - `units/pomme-core.md`        rule 2, the page-per-project folder (the HUB)
  *   - `areas/pomme-core/{a,b}.md`  rule 1, a path folder's second segment
  *   - `drafts/pomme-core-rollout`  rule 3, a known project prefixing the stem
@@ -185,7 +187,7 @@ test.describe("Wiki reader: project facet", () => {
     await page.locator("#wikiFilters summary").click();
     const row = page.locator("#projectChips");
     await expect(row).toBeVisible();
-    // All five resolution rules landed on ONE project — that is the count.
+    // Five pages, resolved by four different rules, landing on ONE project.
     await expect(row.locator(`[data-project="${PROJECT}"]`)).toHaveText(`${PROJECT} 5`);
     await expect(row.locator(`[data-project="${OTHER}"]`)).toHaveText(`${OTHER} 2`);
     // Count DESC: the bigger project leads, whatever the alphabet says.
@@ -315,5 +317,85 @@ test.describe("Wiki reader: project facet", () => {
     await page.locator('#projectChips [data-project=""]').click();
     await expect(recentRows).toHaveCount(2);
     await expect(page.locator("[data-clear-recents]")).toHaveCount(1);
+  });
+
+  test("an article opened under the filter keeps it — in the URL and across a reload", async ({
+    page,
+  }) => {
+    await openReader(page, `wiki=${WIKI_WITH}`);
+    await page.locator("#wikiFilters summary").click();
+    await page.locator(`#projectChips [data-project="${PROJECT}"]`).click();
+    await expect(page.locator("#wikiCount")).toHaveText(`5 / ${TOTAL_PAGES}`);
+
+    // Opening a row PUSHES a new URL. The rail — chip row included — is still on
+    // screen and still narrowed, so a URL built from wiki + relPath alone lies
+    // about the screen, and the next listing adopt then believes it.
+    await page.locator(`.wiki-list-item[data-relpath="areas/${PROJECT}/a.md"]`).click();
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("Alpha");
+    const url = new URL(page.url());
+    expect(url.searchParams.get("relPath")).toBe(`areas/${PROJECT}/a.md`);
+    expect(url.searchParams.get("project")).toBe(PROJECT);
+    await expect(page.locator("#wikiCount")).toHaveText(`5 / ${TOTAL_PAGES}`);
+
+    // …and the reload the reader (or a shared link) does next lands on the same
+    // page under the same filter.
+    await page.reload();
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("Alpha");
+    await expect(page.locator("#wikiCount")).toHaveText(`5 / ${TOTAL_PAGES}`);
+    await expect(page.locator(`#projectChips [data-project="${PROJECT}"]`)).toHaveClass(/active/);
+  });
+
+  test("Back restores the project the entry's URL names", async ({ page }) => {
+    await openReader(page, `wiki=${WIKI_WITH}&project=${PROJECT}`);
+    await expect(page.locator("#wikiCount")).toHaveText(`5 / ${TOTAL_PAGES}`);
+    // A push: this overview entry keeps its own project.
+    await page.locator(`.wiki-list-item[data-relpath="${HUB_REL}"]`).click();
+    await expect(page.locator(".wiki-article-head h1")).toHaveText("Pomme Core");
+    // A chip REPLACES the article entry, so Back is a project change and nothing
+    // else — the one state the reader can reach where the URL and the list can
+    // disagree.
+    await page.locator(`#projectChips [data-project="${OTHER}"]`).click();
+    await expect(page.locator("#wikiCount")).toHaveText(`2 / ${TOTAL_PAGES}`);
+
+    await page.goBack();
+    expect(new URL(page.url()).searchParams.get("project")).toBe(PROJECT);
+    await expect(page.locator("#wikiCount")).toHaveText(`5 / ${TOTAL_PAGES}`);
+    await expect(page.locator(`#projectChips [data-project="${PROJECT}"]`)).toHaveClass(/active/);
+    await expect(page.locator(`#projectChips [data-project="${OTHER}"]`)).not.toHaveClass(/active/);
+  });
+
+  test("the breadcrumb crumb's href follows the project filter", async ({ page }) => {
+    await openReader(page, `wiki=${WIKI_WITH}`);
+    await page.locator(`.wiki-list-item[data-relpath="${HUB_REL}"]`).click();
+    const crumb = page.locator("a.wiki-bc-wiki");
+    await expect(crumb).toBeVisible();
+    const crumbProject = async () =>
+      new URL((await crumb.getAttribute("href")) || "", BASE).searchParams.get("project");
+    expect(await crumbProject()).toBeNull();
+
+    // The crumb is rendered once per ARTICLE; a facet change after that render
+    // leaves a middle-click / copy-link handing over the previous filter.
+    await page.locator("#wikiFilters summary").click();
+    await page.locator(`#projectChips [data-project="${PROJECT}"]`).click();
+    expect(await crumbProject()).toBe(PROJECT);
+    await page.locator(`#projectChips [data-project=""]`).click();
+    expect(await crumbProject()).toBeNull();
+  });
+
+  test("a blank ?project= is dropped from the URL", async ({ page }) => {
+    await openReader(page, `wiki=${WIKI_WITH}&project=`);
+    await expect(page.locator(".wiki-list-item")).toHaveCount(TOTAL_PAGES);
+    // Not a filter, so not a param — `?project=%20` was already cleaned and
+    // `?project=` compared equal to "no filter" and stayed.
+    expect(new URL(page.url()).searchParams.has("project")).toBe(false);
+  });
+
+  test("writing the param preserves the URL's hash", async ({ page }) => {
+    await openReader(page, `wiki=${WIKI_WITH}#wiki-anchor`);
+    await page.locator("#wikiFilters summary").click();
+    await page.locator(`#projectChips [data-project="${PROJECT}"]`).click();
+    const url = new URL(page.url());
+    expect(url.searchParams.get("project")).toBe(PROJECT);
+    expect(url.hash).toBe("#wiki-anchor");
   });
 });

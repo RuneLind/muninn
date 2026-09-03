@@ -1,6 +1,7 @@
 import { test, expect } from "bun:test";
 import {
   anchorNow,
+  articleUrl,
   breadcrumbLeaf,
   connectionTypeOrder,
   facetKeys,
@@ -25,7 +26,9 @@ import {
   pageTimeMs,
   projectCounts,
   projectFacetVisible,
+  projectFilterAfterListing,
   projectHubPage,
+  projectParamNeedsRewrite,
   PROJECT_PARAM,
   resolveProjectParam,
   ROOT_FOLDER,
@@ -1275,4 +1278,64 @@ test("projectHubPage names only the page whose own stem IS its project", () => {
   expect(projectHubPage(page({ relPath: "units/pomme-core-legacy.md", project: "pomme-core" }))).toBeNull();
   // No project at all ⇒ no hub, whatever the stem says.
   expect(projectHubPage(page({ relPath: "units/pomme-core.md" }))).toBeNull();
+});
+
+test("articleUrl carries the active project into every pushed article URL", () => {
+  // The bug this pins: an article URL built from wiki + relPath alone drops the
+  // filter the rail is still under, so the pushed entry — and any reload or
+  // share of it — describes a screen nobody is looking at.
+  expect(articleUrl("mimir", "relPath", "units/x.md", "pomme-core")).toBe(
+    "/wiki?wiki=mimir&relPath=units%2Fx.md&project=pomme-core",
+  );
+  expect(articleUrl("mimir", "page", "Alpha", "pomme-core")).toBe(
+    "/wiki?wiki=mimir&page=Alpha&project=pomme-core",
+  );
+  // No filter ⇒ exactly the URL the reader shared before this facet existed.
+  expect(articleUrl("mimir", "relPath", "units/x.md", "")).toBe("/wiki?wiki=mimir&relPath=units%2Fx.md");
+  // The default wiki carries no `wiki=` key, and the project still rides.
+  expect(articleUrl("", "relPath", "units/x.md", "")).toBe("/wiki?relPath=units%2Fx.md");
+  expect(articleUrl("", "page", "Alpha", "pomme-core")).toBe("/wiki?page=Alpha&project=pomme-core");
+  // Every one of the three values is encoded at its own sink.
+  expect(articleUrl("w&x", "relPath", "a b/c&d.md", "p&q")).toBe(
+    "/wiki?wiki=w%26x&relPath=a%20b%2Fc%26d.md&project=p%26q",
+  );
+});
+
+test("projectParamNeedsRewrite deletes a present-but-blank project param", () => {
+  // Absent param, no filter: today's link, left alone.
+  expect(projectParamNeedsRewrite("?wiki=mimir", "")).toBe(false);
+  expect(projectParamNeedsRewrite("", "")).toBe(false);
+  // Absent param, a filter set: it has to be written.
+  expect(projectParamNeedsRewrite("?wiki=mimir", "pomme-core")).toBe(true);
+  // Present and already right: no rewrite, so a no-op change cannot re-encode
+  // the reader's other params.
+  expect(projectParamNeedsRewrite("?wiki=mimir&project=pomme-core", "pomme-core")).toBe(false);
+  // Present and wrong.
+  expect(projectParamNeedsRewrite("?project=old", "new")).toBe(true);
+  // A non-canonical spelling of the SAME project is still a rewrite — the
+  // resolver trimmed it, and the address bar should say what the chip says.
+  expect(projectParamNeedsRewrite("?project=%20pomme-core", "pomme-core")).toBe(true);
+  // The bug: a present param with no filter must be DELETED, and a blank value
+  // is not a filter. `?project=` compared equal to "" and stayed in the URL.
+  expect(projectParamNeedsRewrite("?wiki=mimir&project=", "")).toBe(true);
+  expect(projectParamNeedsRewrite("?wiki=mimir&project=%20", "")).toBe(true);
+  expect(projectParamNeedsRewrite("?project=old", "")).toBe(true);
+});
+
+test("projectFilterAfterListing adopts the URL at boot and only re-validates later", () => {
+  const projects = { "pomme-core": 3, quill: 2 };
+  // Boot: the deep link is the reader's request.
+  expect(projectFilterAfterListing(true, "pomme-core", "", projects)).toBe("pomme-core");
+  expect(projectFilterAfterListing(true, "nonexistent", "", projects)).toBe("");
+  expect(projectFilterAfterListing(true, null, "quill", projects)).toBe("");
+  // The bug: on a LATER listing the URL is ignored, so a background adopt (or
+  // the one at the top of every navigation) cannot reset a filter the reader
+  // set by clicking — not even to "" from a URL that never carried the param.
+  expect(projectFilterAfterListing(false, null, "quill", projects)).toBe("quill");
+  expect(projectFilterAfterListing(false, "", "quill", projects)).toBe("quill");
+  expect(projectFilterAfterListing(false, "pomme-core", "quill", projects)).toBe("quill");
+  // …but a value the fresh listing no longer knows is still dropped.
+  expect(projectFilterAfterListing(false, null, "quill", { "pomme-core": 3 })).toBe("");
+  expect(projectFilterAfterListing(false, null, "quill", {})).toBe("");
+  expect(projectFilterAfterListing(false, null, "", projects)).toBe("");
 });
