@@ -1,6 +1,7 @@
 import { test, expect } from "bun:test";
 import {
   anchorNow,
+  articleUrl,
   breadcrumbLeaf,
   connectionTypeOrder,
   facetKeys,
@@ -23,8 +24,16 @@ import {
   pageFolder,
   pageFollowups,
   pageTimeMs,
+  projectCounts,
+  projectFacetVisible,
+  projectFilterAfterListing,
+  projectHubPage,
+  projectParamNeedsRewrite,
+  PROJECT_PARAM,
+  resolveProjectParam,
   ROOT_FOLDER,
   sanitizeColorToken,
+  searchWithProject,
   sortPages,
   statusCounts,
   statusFacetVisible,
@@ -35,6 +44,7 @@ import {
   typeCounts,
   TYPE_LABEL,
   TYPE_ORDER,
+  urlWithProject,
   type WikiFilters,
   type WikiListing,
 } from "./wiki-filter.ts";
@@ -66,6 +76,7 @@ const NO_FILTER: WikiFilters = {
   tag: "",
   status: "",
   followups: "",
+  project: "",
 };
 
 const PAGES: WikiListing[] = [
@@ -1134,4 +1145,197 @@ test("sanitizeColorToken drops a CSS-injection attempt (style-sink breakout)", (
   ]) {
     expect(sanitizeColorToken(attack)).toBeUndefined();
   }
+});
+
+// ── Project facet ─────────────────────────────────────────────────────
+// The pages behind these: two projects, a project-less page, and a page whose
+// project name PREFIXES another's so the exact-match rule has something to fail
+// on.
+const PROJECT_PAGES: WikiListing[] = [
+  page({ name: "hub", relPath: "units/pomme-core.md", type: "repo", project: "pomme-core" }),
+  page({ name: "a", relPath: "areas/pomme-core/a.md", type: "note", project: "pomme-core" }),
+  page({ name: "b", relPath: "areas/pomme-core/b.md", type: "note", domain: "life", project: "pomme-core" }),
+  page({ name: "c", relPath: "units/pomme-core-legacy.md", type: "repo", project: "pomme-core-legacy" }),
+  page({ name: "loose", relPath: "notes/loose.md", type: "note" }),
+];
+
+test("filterPages narrows to one project, exactly — a prefix is a different project", () => {
+  const got = filterPages(PROJECT_PAGES, { ...NO_FILTER, project: "pomme-core" }).map((p) => p.name);
+  expect(got).toEqual(["hub", "a", "b"]);
+  // `pomme-core-legacy` starts with `pomme-core-`, and must NOT be selected by it.
+  expect(filterPages(PROJECT_PAGES, { ...NO_FILTER, project: "pomme-core-legacy" }).map((p) => p.name)).toEqual([
+    "c",
+  ]);
+  // A project-less page is never selected by any project value, and an empty
+  // filter selects everything including it.
+  expect(filterPages(PROJECT_PAGES, NO_FILTER)).toHaveLength(5);
+  expect(filterPages(PROJECT_PAGES, { ...NO_FILTER, project: "nope" })).toEqual([]);
+});
+
+test("filterPages ANDs project with the other axes", () => {
+  // Only `a` is in pomme-core AND the ai domain AND type note.
+  const got = filterPages(PROJECT_PAGES, {
+    ...NO_FILTER,
+    project: "pomme-core",
+    domain: "ai",
+    type: "note",
+  }).map((p) => p.name);
+  expect(got).toEqual(["a"]);
+});
+
+test("projectCounts scopes by domain, type and folder, and ignores project-less pages", () => {
+  expect(projectCounts(PROJECT_PAGES, "", "", "")).toEqual({
+    "pomme-core": 3,
+    "pomme-core-legacy": 1,
+  });
+  // `b` is the only life page, so the ai scope drops it.
+  expect(projectCounts(PROJECT_PAGES, "ai", "", "")).toEqual({
+    "pomme-core": 2,
+    "pomme-core-legacy": 1,
+  });
+  // type=repo keeps the two hub pages, one per project.
+  expect(projectCounts(PROJECT_PAGES, "", "repo", "")).toEqual({
+    "pomme-core": 1,
+    "pomme-core-legacy": 1,
+  });
+  // folder=areas keeps the two pages under `areas/`, both pomme-core.
+  expect(projectCounts(PROJECT_PAGES, "", "", "areas")).toEqual({ "pomme-core": 2 });
+  // All three at once, and a scope that selects nothing is `{}` — not a zero row.
+  expect(projectCounts(PROJECT_PAGES, "life", "note", "areas")).toEqual({ "pomme-core": 1 });
+  expect(projectCounts(PROJECT_PAGES, "life", "repo", "")).toEqual({});
+});
+
+test("projectFacetVisible is the whole-wiki gate: one page carrying a project opens it", () => {
+  expect(projectFacetVisible(PROJECT_PAGES)).toBe(true);
+  // A wiki that declares no project rule: every page's `project` is absent.
+  expect(projectFacetVisible([page({ name: "x" }), page({ name: "y" })])).toBe(false);
+  expect(projectFacetVisible([])).toBe(false);
+  // One page is enough — the gate is not a threshold.
+  expect(projectFacetVisible([page({ name: "x" }), page({ name: "y", project: "solo" })])).toBe(true);
+});
+
+test("resolveProjectParam admits only a project the listing actually counts", () => {
+  const projects = { "pomme-core": 3, "pomme-core-legacy": 1 };
+  expect(resolveProjectParam("pomme-core", projects)).toBe("pomme-core");
+  expect(resolveProjectParam("  pomme-core  ", projects)).toBe("pomme-core");
+  // The stale-link rule: an unknown value CLEARS rather than emptying the list.
+  expect(resolveProjectParam("nonexistent", projects)).toBe("");
+  // Exact — a case variant has no chip that could be highlighted for it.
+  expect(resolveProjectParam("Pomme-Core", projects)).toBe("");
+  // Nothing asked for, nothing to answer.
+  expect(resolveProjectParam(null, projects)).toBe("");
+  expect(resolveProjectParam("", projects)).toBe("");
+  expect(resolveProjectParam("   ", projects)).toBe("");
+  // A wiki with no project rule (`{}`) and an older server (absent) both refuse.
+  expect(resolveProjectParam("pomme-core", {})).toBe("");
+  expect(resolveProjectParam("pomme-core", undefined)).toBe("");
+  // A zero count is not membership either.
+  expect(resolveProjectParam("gone", { gone: 0 })).toBe("");
+  // …and an inherited key is not a project. Without the own-property test these
+  // resolve truthy off Object.prototype and filter the list to nothing.
+  expect(resolveProjectParam("toString", projects)).toBe("");
+  expect(resolveProjectParam("constructor", projects)).toBe("");
+});
+
+test("urlWithProject appends the param and leaves a project-less URL untouched", () => {
+  expect(urlWithProject("/wiki", "")).toBe("/wiki");
+  expect(urlWithProject("/wiki?wiki=mimir", "")).toBe("/wiki?wiki=mimir");
+  expect(urlWithProject("/wiki", "pomme-core")).toBe("/wiki?project=pomme-core");
+  expect(urlWithProject("/wiki?wiki=mimir", "pomme-core")).toBe("/wiki?wiki=mimir&project=pomme-core");
+  expect(urlWithProject("/wiki?wiki=mimir&view=atlas", "a b/c")).toBe(
+    "/wiki?wiki=mimir&view=atlas&project=a%20b%2Fc",
+  );
+  expect(PROJECT_PARAM).toBe("project");
+});
+
+test("searchWithProject rewrites the param in place, preserving every other one", () => {
+  expect(searchWithProject("?wiki=mimir", "pomme-core")).toBe("?wiki=mimir&project=pomme-core");
+  // In place on an ARTICLE url — the relPath must survive, or a chip click
+  // navigates the address bar off the page being read.
+  expect(searchWithProject("?wiki=mimir&relPath=units%2Fx.md", "p")).toBe(
+    "?wiki=mimir&relPath=units%2Fx.md&project=p",
+  );
+  // An existing value is replaced, not appended twice.
+  expect(searchWithProject("?wiki=mimir&project=old", "new")).toBe("?wiki=mimir&project=new");
+  // Clearing removes it…
+  expect(searchWithProject("?wiki=mimir&project=old", "")).toBe("?wiki=mimir");
+  // …and clearing the only param leaves no `?` at all.
+  expect(searchWithProject("?project=old", "")).toBe("");
+  expect(searchWithProject("", "")).toBe("");
+});
+
+test("projectHubPage names only the page whose own stem IS its project", () => {
+  const hub = page({ relPath: "units/pomme-core.md", project: "pomme-core" });
+  expect(projectHubPage(hub)).toBe("pomme-core");
+  // `.mdx` and a nested folder are the same rule — the STEM is what is compared,
+  // never the folder, so no client code names a layout.
+  expect(projectHubPage(page({ relPath: "a/b/pomme-core.mdx", project: "pomme-core" }))).toBe("pomme-core");
+  // Case-folded: a filename and a known-set spelling come from different places.
+  expect(projectHubPage(page({ relPath: "units/Pomme-Core.md", project: "pomme-core" }))).toBe("pomme-core");
+  // An ordinary member page of the project is NOT its hub.
+  expect(projectHubPage(page({ relPath: "areas/pomme-core/a.md", project: "pomme-core" }))).toBeNull();
+  // A stem that merely starts with the project name is not it either.
+  expect(projectHubPage(page({ relPath: "units/pomme-core-legacy.md", project: "pomme-core" }))).toBeNull();
+  // No project at all ⇒ no hub, whatever the stem says.
+  expect(projectHubPage(page({ relPath: "units/pomme-core.md" }))).toBeNull();
+});
+
+test("articleUrl carries the active project into every pushed article URL", () => {
+  // The bug this pins: an article URL built from wiki + relPath alone drops the
+  // filter the rail is still under, so the pushed entry — and any reload or
+  // share of it — describes a screen nobody is looking at.
+  expect(articleUrl("mimir", "relPath", "units/x.md", "pomme-core")).toBe(
+    "/wiki?wiki=mimir&relPath=units%2Fx.md&project=pomme-core",
+  );
+  expect(articleUrl("mimir", "page", "Alpha", "pomme-core")).toBe(
+    "/wiki?wiki=mimir&page=Alpha&project=pomme-core",
+  );
+  // No filter ⇒ exactly the URL the reader shared before this facet existed.
+  expect(articleUrl("mimir", "relPath", "units/x.md", "")).toBe("/wiki?wiki=mimir&relPath=units%2Fx.md");
+  // The default wiki carries no `wiki=` key, and the project still rides.
+  expect(articleUrl("", "relPath", "units/x.md", "")).toBe("/wiki?relPath=units%2Fx.md");
+  expect(articleUrl("", "page", "Alpha", "pomme-core")).toBe("/wiki?page=Alpha&project=pomme-core");
+  // Every one of the three values is encoded at its own sink.
+  expect(articleUrl("w&x", "relPath", "a b/c&d.md", "p&q")).toBe(
+    "/wiki?wiki=w%26x&relPath=a%20b%2Fc%26d.md&project=p%26q",
+  );
+});
+
+test("projectParamNeedsRewrite deletes a present-but-blank project param", () => {
+  // Absent param, no filter: today's link, left alone.
+  expect(projectParamNeedsRewrite("?wiki=mimir", "")).toBe(false);
+  expect(projectParamNeedsRewrite("", "")).toBe(false);
+  // Absent param, a filter set: it has to be written.
+  expect(projectParamNeedsRewrite("?wiki=mimir", "pomme-core")).toBe(true);
+  // Present and already right: no rewrite, so a no-op change cannot re-encode
+  // the reader's other params.
+  expect(projectParamNeedsRewrite("?wiki=mimir&project=pomme-core", "pomme-core")).toBe(false);
+  // Present and wrong.
+  expect(projectParamNeedsRewrite("?project=old", "new")).toBe(true);
+  // A non-canonical spelling of the SAME project is still a rewrite — the
+  // resolver trimmed it, and the address bar should say what the chip says.
+  expect(projectParamNeedsRewrite("?project=%20pomme-core", "pomme-core")).toBe(true);
+  // The bug: a present param with no filter must be DELETED, and a blank value
+  // is not a filter. `?project=` compared equal to "" and stayed in the URL.
+  expect(projectParamNeedsRewrite("?wiki=mimir&project=", "")).toBe(true);
+  expect(projectParamNeedsRewrite("?wiki=mimir&project=%20", "")).toBe(true);
+  expect(projectParamNeedsRewrite("?project=old", "")).toBe(true);
+});
+
+test("projectFilterAfterListing adopts the URL at boot and only re-validates later", () => {
+  const projects = { "pomme-core": 3, quill: 2 };
+  // Boot: the deep link is the reader's request.
+  expect(projectFilterAfterListing(true, "pomme-core", "", projects)).toBe("pomme-core");
+  expect(projectFilterAfterListing(true, "nonexistent", "", projects)).toBe("");
+  expect(projectFilterAfterListing(true, null, "quill", projects)).toBe("");
+  // The bug: on a LATER listing the URL is ignored, so a background adopt (or
+  // the one at the top of every navigation) cannot reset a filter the reader
+  // set by clicking — not even to "" from a URL that never carried the param.
+  expect(projectFilterAfterListing(false, null, "quill", projects)).toBe("quill");
+  expect(projectFilterAfterListing(false, "", "quill", projects)).toBe("quill");
+  expect(projectFilterAfterListing(false, "pomme-core", "quill", projects)).toBe("quill");
+  // …but a value the fresh listing no longer knows is still dropped.
+  expect(projectFilterAfterListing(false, null, "quill", { "pomme-core": 3 })).toBe("");
+  expect(projectFilterAfterListing(false, null, "quill", {})).toBe("");
+  expect(projectFilterAfterListing(false, null, "", projects)).toBe("");
 });

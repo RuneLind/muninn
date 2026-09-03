@@ -21,6 +21,7 @@ import {
   parseRelPathList,
   pinsKey,
   pushRecent,
+  railFacetsInert,
   railSectionsVisible,
   recentsKey,
   serializeRelPathList,
@@ -52,6 +53,7 @@ const INERT: WikiFilters = {
   tag: "",
   status: "",
   followups: "",
+  project: "",
 };
 
 describe("storage keys", () => {
@@ -377,6 +379,7 @@ describe("railSectionsVisible", () => {
     ["tag", "jira"],
     ["status", "shipped"],
     ["followups", "open"],
+    ["project", "pomme-core"],
   ];
   for (const [axis, value] of facets) {
     test(`an active ${axis} keeps them`, () => {
@@ -385,6 +388,32 @@ describe("railSectionsVisible", () => {
   }
   test("a whitespace-only query is still empty", () => {
     expect(railSectionsVisible({ ...INERT, q: "   " })).toBe(true);
+  });
+});
+
+describe("railFacetsInert", () => {
+  /**
+   * The load-bearing one, and the reason it enumerates the TYPE instead of a
+   * hand-kept list: this predicate gates the recents `clear` affordance, and
+   * `clearRecents` empties the STORE. A facet field left off it therefore offers
+   * a button that destroys recents for pages the reader could not even see —
+   * and every OTHER symptom of the omission is invisible, so nothing else would
+   * catch it. `INERT` is typed `WikiFilters`, so tsc forces it to carry every
+   * field and `Object.keys` reaches every one of them; a facet added next month
+   * is covered on the day it compiles.
+   */
+  test("every WikiFilters axis switches it off — enumerated from the type", () => {
+    expect(railFacetsInert(INERT)).toBe(true);
+    const axes = Object.keys(INERT) as Array<keyof WikiFilters>;
+    // Proof the enumeration actually reaches the newest field rather than
+    // vacuously passing over a shorter object.
+    expect(axes).toContain("project");
+    for (const axis of axes) {
+      expect(railFacetsInert({ ...INERT, [axis]: "x" }), axis).toBe(false);
+    }
+  });
+  test("a whitespace-only query does not count as a facet", () => {
+    expect(railFacetsInert({ ...INERT, q: "   " })).toBe(true);
   });
 });
 
@@ -435,6 +464,7 @@ describe("buildRail", () => {
       ["tag", "jira"],
       ["status", "shipped"],
       ["followups", "open"],
+      ["project", "pomme-core"],
     ];
     for (const [axis, value] of facets) {
       const m = buildRail({ filtered: all, facetOnly: all, filters: { ...INERT, [axis]: value }, recents: ["b.md"], pins: [] });
