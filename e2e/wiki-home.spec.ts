@@ -134,13 +134,22 @@ test("the breadcrumb's wiki crumb returns to the overview and pushes its URL", a
   await expect(crumb).toHaveText(`⌂ ${WIKI}`); // reads as "home", not as trail text
   // …and in a colour of its own: styled `color: inherit` it was invisible as a
   // link (the day-one complaint), and the glyph alone does not pin the fix.
-  // Compared against its PARENT — what `color: inherit` resolves to — not
-  // against a sibling crumb that carries a colour token of its own.
-  const [crumbColor, trailColor] = await Promise.all([
+  // Pinned to the ACCENT, resolved from the theme token — "differs from the
+  // trail" let any plain text token through (measured: `--text-secondary`,
+  // the leaf crumb's colour, passed it). The token is a hex; computed colour
+  // is rgb(), so resolve it the same way the browser does.
+  const [crumbColor, accent] = await Promise.all([
     crumb.evaluate((el) => getComputedStyle(el).color),
-    crumb.evaluate((el) => getComputedStyle(el.parentElement!).color),
+    crumb.evaluate((el) => {
+      const probe = document.createElement("span");
+      probe.style.color = "var(--accent-light)";
+      el.append(probe);
+      const c = getComputedStyle(probe).color;
+      probe.remove();
+      return c;
+    }),
   ]);
-  expect(crumbColor).not.toBe(trailColor);
+  expect(crumbColor).toBe(accent);
   await expect(page.locator(".wiki-start")).toHaveCount(0);
   await crumb.click();
   await expect(page.locator(".wiki-start")).toBeVisible();

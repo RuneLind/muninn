@@ -658,8 +658,8 @@ export async function renderWikiPage(opts?: {
     /* The wiki crumb is the link back to the overview. Because it was styled to
        match the trail, it was invisible as a link (day-one feedback on #505:
        "where is this crumb?"), so it now carries a ⌂ and the accent, underlined
-       on hover. The glyph keeps the trail's 12px: at 13px it grew the row by
-       1px (measured), eating half the copy-path spec's wrap tolerance. */
+       on hover. The glyph is left at the trail's size — a bigger one earns
+       nothing the accent does not already give. */
     .wiki-bc-wiki { color: var(--accent-light); text-decoration: none; }
     .wiki-bc-wiki:hover, .wiki-bc-wiki:focus-visible { text-decoration: underline; }
     .wiki-bc-date { color: var(--text-dim); flex-shrink: 0; }
