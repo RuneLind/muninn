@@ -63,6 +63,10 @@ export const E2E_PORTS = {
   // Two wikis, ONE process: "remember the last wiki" is only provable when a
   // bare /wiki can land on a wiki OTHER than the one the server defaults to.
   "wiki-home": 3044,
+  // Two wikis, ONE process: the Project facet is a per-wiki PRESENCE gate over a
+  // `.wiki-reader.json` declaration, so proving it needs a declaring wiki and a
+  // non-declaring one reachable from the same reader build.
+  "wiki-project-facet": 3045,
   "plans-write": 3041,
   "plans-write/readonly": 3042,
   "plans-write/no-queue": 3043,

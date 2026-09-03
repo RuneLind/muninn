@@ -37,6 +37,12 @@ export interface WikiPagesResponse {
    *  none. Read only by `hubTypeList`, which excludes that bucket from the start
    *  view's hub sections (see its doc comment). */
   defaultType?: string;
+  /** Project → page count over the SAME page array this payload ships, so the
+   *  facet's counts can never disagree with the rows it filters. `{}` on a wiki
+   *  declaring no `project` rule, and absent on an older server — both of which
+   *  the client reads as "no Project facet". Also the membership set
+   *  `resolveProjectParam` judges a `?project=` deep link against. */
+  projects?: Record<string, number>;
   error?: string;
 }
 

@@ -101,6 +101,19 @@ export interface WikiListing {
    *  when empty or undeclared. Arrives **unescaped** — the first renderer of this
    *  field owns escaping it at its own sink. */
   status_note?: string;
+  /**
+   * The project this page belongs to, resolved SERVER-side from the wiki's own
+   * `.wiki-reader.json` declaration (`resolveProject`, `src/wiki/store.ts`).
+   *
+   * Absent on every page of a wiki that declares no `project` rule — which is
+   * also how the client knows to render no Project facet at all (see
+   * `projectFacetVisible`), rather than one empty control.
+   *
+   * Values arrive CANONICAL: the store answers in the known set's own spelling,
+   * so two pages of one project can never carry two spellings of its name and
+   * the facet's chip list needs no folding of its own.
+   */
+  project?: string;
   linkCount: number;
   backlinkCount: number;
 }
@@ -119,6 +132,11 @@ export interface WikiFilters {
   /** `"open"` (the ⚑ toggle) or "" for all. Compared against the page's
    *  `followups` with an ABSENT value read as `"none"`, per the field contract. */
   followups: string;
+  /** Exact `project` value, "" for all. The only facet that is also URL state
+   *  (`?project=`), so a narrowed reader can share what they are looking at —
+   *  see `resolveProjectParam` for what happens to a value this wiki doesn't
+   *  know. */
+  project: string;
 }
 
 /**
@@ -758,6 +776,10 @@ export function filterPages(pages: WikiListing[], filters: WikiFilters): WikiLis
     if (filters.tag && p.tags.indexOf(filters.tag) === -1) return false;
     if (filters.status && p.plan_status !== filters.status) return false;
     if (filters.followups && pageFollowups(p) !== filters.followups) return false;
+    // Exact, not prefix: the store already answered in the canonical spelling, so
+    // `netgate-monitoring` must never also select a hypothetical
+    // `netgate-monitoring-v2`.
+    if (filters.project && p.project !== filters.project) return false;
     if (!q) return true;
     if (p.title.toLowerCase().indexOf(q) !== -1) return true;
     if (displayTitleOf(p).toLowerCase().indexOf(q) !== -1) return true;
@@ -954,6 +976,136 @@ export function statusCounts(
     counts[p.plan_status] = (counts[p.plan_status] || 0) + 1;
   });
   return counts;
+}
+
+/**
+ * Whether to render the Project chip row at all — the WHOLE-WIKI gate, the
+ * `statusFacetVisible` / `domainFacetVisible` sibling.
+ *
+ * True as soon as ONE page carries a `project`. That is equivalent to "this wiki
+ * declares a project rule AND something matched it": `resolveProject` returns
+ * `undefined` for every page when the rule is absent or unusable, so a wiki
+ * shipping no declaration (jarvis, melosys-kode-wiki) renders exactly as it did
+ * before — no row, no filter, no URL state.
+ *
+ * Deliberately unscoped (whole wiki, not the active domain/type/folder): this
+ * decides whether the row EXISTS here, while `renderProjectChips` separately
+ * hides an empty row for the current scope.
+ */
+export function projectFacetVisible(pages: WikiListing[]): boolean {
+  return pages.some((p) => !!p.project);
+}
+
+/**
+ * Count pages per `project`, honoring the active domain + type + folder filters.
+ *
+ * One more axis than `statusCounts`/`tagCounts` take, and deliberately: the
+ * Project row sits BELOW the folder picker in the Filters disclosure, and the
+ * rule those rows follow is "each row counts within the selection the rows above
+ * it have already made". Status and tags predate the folder picker's move into
+ * the same stack; this row is the first written after it.
+ *
+ * Pages with no project contribute nothing — they are the facet's "everything
+ * else", reachable by clearing the filter rather than by a chip of their own.
+ */
+export function projectCounts(
+  pages: WikiListing[],
+  domain: string,
+  type: string,
+  folder: string,
+): Record<string, number> {
+  const counts: Record<string, number> = {};
+  pages.forEach((p) => {
+    if (domain && p.domain !== domain) return;
+    if (type && p.type !== type) return;
+    if (folder && pageFolder(p) !== folder) return;
+    if (!p.project) return;
+    counts[p.project] = (counts[p.project] || 0) + 1;
+  });
+  return counts;
+}
+
+/** Query param naming the active project filter. Deliberately `project` and not
+ *  `repo`: `/plans` already owns `?repo=` with an unrelated meaning (a repo
+ *  family on the board), and one word meaning two things across two pages of the
+ *  same dashboard is how a link gets pasted into the wrong reader. */
+export const PROJECT_PARAM = "project";
+
+/**
+ * The project filter a `?project=` value should actually produce, given the
+ * listing's own `projects` map.
+ *
+ * A value the wiki does not know is CLEARED rather than applied. Applying it
+ * would render an empty list under a chip row that cannot contain the chip which
+ * is emptying it — the exact dead end `facetKeys` exists to prevent for the
+ * scoped facets, except here it is unrecoverable: the value came from the URL,
+ * so there is no earlier state to go back to. A stale or hand-typed link
+ * therefore opens the whole wiki, and the caller drops the param it could not
+ * honour.
+ *
+ * The membership test is on OWN keys with a non-zero count, so `?project=toString`
+ * cannot inherit a truthy answer off `Object.prototype`, and the match is exact:
+ * the server answers in one canonical spelling per project, so a case-folded
+ * match would only ever admit a spelling no chip can be highlighted for.
+ */
+export function resolveProjectParam(
+  value: string | null | undefined,
+  projects: Record<string, number> | null | undefined,
+): string {
+  const v = (value ?? "").trim();
+  if (!v || !projects) return "";
+  return Object.prototype.hasOwnProperty.call(projects, v) && projects[v] ? v : "";
+}
+
+/** Append `?project=`/`&project=` to a URL that is known to carry none — the
+ *  overview URL from `startUrl`, which never emits one. `""` leaves the URL
+ *  untouched, so a reader with no project filter shares exactly today's link. */
+export function urlWithProject(url: string, project: string): string {
+  if (!project) return url;
+  return url + (url.indexOf("?") === -1 ? "?" : "&") + PROJECT_PARAM + "=" + encodeURIComponent(project);
+}
+
+/**
+ * `location.search` with the project param set to `project` (or removed when it
+ * is `""`), every OTHER param preserved.
+ *
+ * The project filter is written in PLACE rather than by replacing the URL with
+ * the overview's: the left rail — chip row included — is on screen while an
+ * article is open, so pushing an overview URL from a chip click would silently
+ * navigate the address bar off the `?relPath=` the reader is reading and break
+ * both reload and share. Returns a leading `?`, or `""` when nothing is left.
+ */
+export function searchWithProject(search: string, project: string): string {
+  const params = new URLSearchParams(search);
+  if (project) params.set(PROJECT_PARAM, project);
+  else params.delete(PROJECT_PARAM);
+  const q = params.toString();
+  return q ? "?" + q : "";
+}
+
+/**
+ * The project a page is the HUB page OF — its own project's landing page — or
+ * `null`.
+ *
+ * The client cannot see WHICH of the store's six rules resolved a page's
+ * project, so this is the reader-side proxy for "resolved as the page-per-project
+ * page" (rule 2): the file's stem IS its project name. On mimir that is
+ * `repos/<project>.md`; the test is written against the stem rather than the
+ * folder so no muninn code names a folder — the wiki declares its layout, the
+ * reader only ever reads the resolved answer back.
+ *
+ * Case-folded, because the two sides come from different places: the stem is a
+ * filename and the project is the known set's spelling, and a wiki whose file is
+ * `Netgate-Monitoring.md` under a project known as `netgate-monitoring` is the
+ * same page either way. The consequence of the proxy being a heuristic is
+ * bounded: a false negative renders no chip (today's behaviour), and a false
+ * positive renders a chip that filters correctly to the project the page already
+ * declares.
+ */
+export function projectHubPage(p: WikiListing): string | null {
+  if (!p.project) return null;
+  const stem = (p.relPath || "").replace(/\\/g, "/").split("/").pop()!.replace(/\.[^.]+$/, "");
+  return stem && stem.toLowerCase() === p.project.toLowerCase() ? p.project : null;
 }
 
 /** How many pages have OPEN follow-ups — the ⚑ toggle's count. Same domain + type

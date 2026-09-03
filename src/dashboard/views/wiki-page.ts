@@ -757,6 +757,21 @@ export async function renderWikiPage(opts?: {
        so "shipped with loose ends" reads as two facts and not one muddled pill. */
     .wiki-followup-flag { font-size: 10.5px; color: var(--status-warning); flex-shrink: 0; }
     .wiki-tag { font-size: 11px; color: var(--text-muted); background: var(--bg-surface); padding: 2px 8px; border-radius: 999px; }
+    /* "N pages about <project>" — the hub page's one way into the rest of its
+       project. Shaped like the rail's active facet chip (it SETS that filter),
+       not like the neutral .wiki-tag beside it, so it reads as a control. */
+    .wiki-project-hub {
+      font-size: 11px;
+      padding: 2px 9px;
+      border-radius: 999px;
+      border: 1px solid var(--accent);
+      background: color-mix(in srgb, var(--accent) 14%, transparent);
+      color: var(--accent-light);
+      font-family: inherit;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .wiki-project-hub:hover { background: color-mix(in srgb, var(--accent) 26%, transparent); }
     .wiki-dates { font-size: 11.5px; color: var(--text-dim); }
     .wiki-source-url { font-size: 11.5px; color: var(--status-info); text-decoration: none; }
     .wiki-source-url:hover { text-decoration: underline; }
@@ -1427,6 +1442,10 @@ export async function renderWikiPage(opts?: {
             <!-- Plan-status facet — populated (and un-hidden) only on wikis where
                  at least one page carries a valid plan_status. -->
             <div class="wiki-chip-row" id="statusChips" style="display:none"></div>
+            <!-- Project facet — populated (and un-hidden) only on wikis whose
+                 .wiki-reader.json declares a project rule that resolved at least
+                 one page. -->
+            <div class="wiki-chip-row" id="projectChips" style="display:none"></div>
             <div class="wiki-chip-row" id="tagChips"></div>
           </div>
         </details>

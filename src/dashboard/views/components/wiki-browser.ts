@@ -189,8 +189,14 @@ import {
   pageHeaderDates,
   pageFolder,
   pageFollowups,
+  projectCounts,
+  projectFacetVisible,
+  projectHubPage,
+  PROJECT_PARAM,
+  resolveProjectParam,
   ROOT_FOLDER,
   sanitizeColorToken,
+  searchWithProject,
   sortPages,
   statusCounts,
   statusFacetVisible,
@@ -200,6 +206,7 @@ import {
   typeCounts,
   TYPE_LABEL,
   TYPE_ORDER,
+  urlWithProject,
   type WikiFilters,
   type WikiListing,
   type WikiSortMode,
@@ -228,6 +235,17 @@ let folderLabels: Record<string, string> = {};
  *  exactly one call — `hubTypeList`, which keeps that bucket out of the start
  *  view's "Top … by connections" sections. */
 let defaultType = "";
+/**
+ * The wiki's project → page-count map from `/api/wiki/pages`. `{}` for a wiki
+ * declaring no project rule (and until the first payload lands), which is what
+ * keeps the Project facet off every wiki that predates the declaration.
+ *
+ * Kept beside `allPages` rather than derived from it because it is also the
+ * MEMBERSHIP set a `?project=` deep link is judged against: derived from the
+ * rows, an unknown value and a value whose pages the current scope happens to
+ * exclude would be indistinguishable.
+ */
+let projects: Record<string, number> = {};
 
 // ── Data shapes (mirror src/dashboard/routes/wiki-routes.ts) ──────────
 interface WikiPageDetail {
@@ -332,6 +350,7 @@ const filters: WikiFilters = {
   tag: "",
   status: "",
   followups: "",
+  project: "",
 };
 /** Which overview tab is showing. Set from the URL's `view=` (else the per-wiki
  *  stored value) at boot — on EVERY boot, an article deep link included, since
@@ -344,9 +363,54 @@ function syncStartTabFromUrl(): void {
   startTab = resolveStartTab(new URLSearchParams(location.search).get(START_VIEW_PARAM), readStartTab(WIKI));
 }
 /** The overview URL for the CURRENT wiki + tab — what the breadcrumb crumb links
- *  to and what a return-to-overview pushes. */
+ *  to and what a return-to-overview pushes.
+ *
+ *  The active project rides along, exactly as `view=` does: the filter is still
+ *  set when the reader lands back on the overview and the rail is still narrowed
+ *  by it, so an overview URL that dropped it would describe a screen nobody is
+ *  looking at. It does NOT leak into the remembered wiki home — `writeLastWiki`
+ *  stores the wiki's NAME, never a URL, so the nav's Wiki link keeps opening the
+ *  whole wiki. */
 function currentStartUrl(): string {
-  return startUrl(WIKI, startTab);
+  return urlWithProject(startUrl(WIKI, startTab), filters.project);
+}
+
+/**
+ * Write `filters.project` into the address bar, in place.
+ *
+ * `replaceState`, never `pushState`: a facet is not a navigation, and the tab
+ * switch above already established that shape for the reader's other piece of
+ * overview state. In PLACE rather than through `currentStartUrl()` because the
+ * chip row is on screen while an ARTICLE is open — replacing the URL with the
+ * overview's would navigate the address bar off the `?relPath=` being read.
+ *
+ * Guarded on the param's CURRENT value rather than on the rebuilt string, so a
+ * no-op change cannot rewrite (and thereby re-encode) the reader's other params.
+ */
+function writeProjectParam(): void {
+  const current = new URLSearchParams(location.search).get(PROJECT_PARAM) ?? "";
+  if (current === filters.project) return;
+  history.replaceState(history.state, "", location.pathname + searchWithProject(location.search, filters.project));
+}
+
+/**
+ * Adopt the project filter the URL asks for, against the listing that just
+ * landed — the ONE place `filters.project` is set from the address bar.
+ *
+ * Runs inside `setPagesData`, i.e. before the first `renderPageFacets` on boot
+ * and again on every adopt. Re-running is a no-op in the steady state (every
+ * setter writes the param back), and on the one path where it is not — a
+ * background refresh over a wiki that no longer has the project at all — it
+ * correctly drops a filter whose chip can no longer exist.
+ *
+ * A value this wiki does not know is cleared AND taken out of the URL, so a
+ * stale link renders the whole wiki with nothing highlighted rather than an
+ * empty list under an unrepresentable filter.
+ */
+function syncProjectFilterFromUrl(): void {
+  const raw = new URLSearchParams(location.search).get(PROJECT_PARAM);
+  filters.project = resolveProjectParam(raw, projects);
+  if (raw !== null) writeProjectParam();
 }
 /**
  * Return to the overview from wherever the reader is — the breadcrumb's wiki
@@ -539,6 +603,73 @@ function renderStatusChips(): void {
   row.style.display = "";
 }
 
+/**
+ * The Project chip row. Rendered only on wikis whose `.wiki-reader.json`
+ * declares a project rule that resolved something (`projectFacetVisible`);
+ * everywhere else the row stays hidden and empty, so a wiki without the
+ * declaration looks exactly as it did before.
+ *
+ * Ordered by count DESC then name, not by a fixed vocabulary: unlike types and
+ * plan statuses, projects are the wiki's own open-ended set, so there is no
+ * canonical order to union against — the biggest project is the one most worth
+ * reaching first, and the name tiebreak keeps the row stable across refreshes.
+ */
+function renderProjectChips(): void {
+  const row = document.getElementById("projectChips");
+  if (!row) return;
+  const hide = () => {
+    row.innerHTML = "";
+    row.style.display = "none";
+  };
+  if (!projectFacetVisible(allPages)) {
+    // The whole-wiki gate going false takes the filter with it — the
+    // `renderDomainChips` rule: a value left standing under a hidden row narrows
+    // the list with no control on screen to explain it. Unreachable from a deep
+    // link (`resolveProjectParam` already answers "" against an empty map) and
+    // reachable only from a listing that lost its last project mid-session.
+    if (filters.project) {
+      filters.project = "";
+      writeProjectParam();
+    }
+    hide();
+    return;
+  }
+  const counts = projectCounts(allPages, filters.domain, filters.type, filters.folder);
+  // The gate above says the facet EXISTS here; this says whether it has anything
+  // to offer in the CURRENT scope. An active filter keeps the row up regardless —
+  // it is the only way back out of it.
+  if (!Object.keys(counts).length && !filters.project) {
+    hide();
+    return;
+  }
+  let html = `<button class="wiki-chip${filters.project === "" ? " active" : ""}" data-project="">All projects</button>`;
+  // The ACTIVE project joins the list even at count 0 (`facetKeys`, the status
+  // row's rule), so a domain/type/folder switch that empties it cannot delete the
+  // very chip that is emptying the list.
+  facetKeys(counts, filters.project)
+    .sort((a, b) => (counts[b] || 0) - (counts[a] || 0) || a.localeCompare(b))
+    .forEach((p) => {
+      html +=
+        `<button class="wiki-chip${filters.project === p ? " active" : ""}" data-project="${esc(p)}">` +
+        `${esc(p)} ${counts[p] || 0}</button>`;
+    });
+  row.innerHTML = html;
+  row.style.display = "";
+}
+
+/** Set the project filter and repaint everything it changes — shared by the chip
+ *  row and the article header's hub chip, so the two cannot drift on which
+ *  renders they owe. `syncFilters()` auto-opens the Filters disclosure, which is
+ *  what makes the chip row visible after a click that came from the article. */
+function applyProjectFilter(project: string): void {
+  filters.project = project;
+  writeProjectParam();
+  renderProjectChips();
+  renderList();
+  refreshStartBody();
+  syncFilters();
+}
+
 function renderTagChips(): void {
   const counts = tagCounts(allPages, filters.domain, filters.type);
   const tags = Object.keys(counts).sort((a, b) => counts[b]! - counts[a]! || a.localeCompare(b));
@@ -555,10 +686,11 @@ function renderTagChips(): void {
   document.getElementById("tagChips")!.innerHTML = html;
 }
 
-/** Count of active secondary filters (folder + type + tag + status + follow-ups) —
- *  drives the Filters disclosure's badge and its auto-open. Status and follow-ups
- *  count separately because they ARE separate axes. Domain lives in the compact
- *  head, so it is deliberately excluded here. */
+/** Count of active secondary filters (folder + type + tag + status + follow-ups +
+ *  project) — drives the Filters disclosure's badge and its auto-open. Status and
+ *  follow-ups count separately because they ARE separate axes, and so does
+ *  project. Domain lives in the compact head, so it is deliberately excluded
+ *  here. */
 function activeFilterCount(): number {
   let n = 0;
   if (filters.folder) n++;
@@ -566,6 +698,7 @@ function activeFilterCount(): number {
   if (filters.tag) n++;
   if (filters.status) n++;
   if (filters.followups) n++;
+  if (filters.project) n++;
   return n;
 }
 
@@ -740,6 +873,7 @@ function renderPageFacets(autoOpen: boolean): void {
   renderFolderSelect();
   renderTypeChips();
   renderStatusChips();
+  renderProjectChips();
   renderTagChips();
   syncFilters(autoOpen);
 }
@@ -1301,6 +1435,29 @@ function loadSimilar(page: { relPath: string }): void {
     });
 }
 
+/**
+ * The article header's one project affordance: on a project's own hub page,
+ * "N pages about <project>" — a way into the rest of it from the page a reader
+ * most often lands on first.
+ *
+ * Rendered ONLY there (`projectHubPage`), and deliberately not on every page
+ * carrying a project: a chip on all 497 pages of a wiki is furniture, while the
+ * hub page is the one place "there is more of this" is news. `N` comes from the
+ * wiki-wide `projects` map — the same number the chip row shows unscoped — so a
+ * 0 (a project the listing no longer counts) renders nothing rather than an
+ * affordance that would filter to an empty list.
+ */
+function projectHubChipHtml(m: WikiListing): string {
+  const project = projectHubPage(m);
+  if (!project) return "";
+  const n = projects[project] || 0;
+  if (!n) return "";
+  return (
+    `<button type="button" class="wiki-project-hub" data-project-hub="${esc(project)}"` +
+    ` title="Show only this project's pages">${n} page${n === 1 ? "" : "s"} about ${esc(project)}</button>`
+  );
+}
+
 /** Article-head block (title, badges, tags, dates, source link) — shared by
  *  markdown pages and HTML explainers. */
 function articleHeadHtml(m: WikiListing): string {
@@ -1326,6 +1483,7 @@ function articleHeadHtml(m: WikiListing): string {
   if (m.url) {
     head += `<a class="wiki-source-url" href="${esc(m.url)}" target="_blank" rel="noopener">Open source ↗</a>`;
   }
+  head += projectHubChipHtml(m);
   head += "</div></div>";
   return head;
 }
@@ -1599,6 +1757,17 @@ document.body.addEventListener("click", (e) => {
   // that listener, so one widget's handler cannot silence document-level
   // listeners that have nothing to do with it.
   if (target.closest && target.closest("[data-pin], [data-clear-recents]")) return;
+  // The article header's project hub chip. Delegated here rather than bound at
+  // render time because `#articleWrap`'s innerHTML is replaced on every page
+  // load — and checked BEFORE the nav-link branch, since the chip sits inside the
+  // article head, which that branch would otherwise not claim but future markup
+  // might.
+  const hubChip = target.closest ? target.closest("[data-project-hub]") : null;
+  if (hubChip) {
+    e.preventDefault();
+    applyProjectFilter(hubChip.getAttribute("data-project-hub") || "");
+    return;
+  }
   const link = target.closest ? target.closest(NAV_LINK_SELECTOR) : null;
   if (!link) return;
   // `navTargetFrom` prefers `data-relpath` — the only key that names ONE page on a
@@ -1685,6 +1854,7 @@ document.getElementById("domainChips")!.addEventListener("click", function (this
   renderFolderSelect();
   renderTypeChips();
   renderStatusChips();
+  renderProjectChips();
   renderTagChips();
   renderList();
   refreshStartBody();
@@ -1693,6 +1863,9 @@ document.getElementById("domainChips")!.addEventListener("click", function (this
 
 document.getElementById("wikiFolder")!.addEventListener("change", function (this: HTMLSelectElement) {
   filters.folder = this.value;
+  // The one facet whose counts are scoped by folder (see `projectCounts`), so
+  // this handler is the only one that has to repaint a chip row at all.
+  renderProjectChips();
   renderList();
   refreshStartBody();
   syncFilters();
@@ -1705,6 +1878,7 @@ document.getElementById("typeChips")!.addEventListener("click", (e) => {
   filters.type = chip.getAttribute("data-type") || "";
   renderTypeChips();
   renderStatusChips();
+  renderProjectChips();
   renderTagChips();
   renderList();
   refreshStartBody();
@@ -1729,6 +1903,18 @@ document.getElementById("statusChips")!.addEventListener("click", (e) => {
   renderList();
   refreshStartBody();
   syncFilters();
+});
+
+// Project facet. The only facet that is also URL state, so every path through it
+// goes via `applyProjectFilter`, which owns the `replaceState`.
+document.getElementById("projectChips")!.addEventListener("click", (e) => {
+  const target = e.target as HTMLElement;
+  const chip = target.closest ? target.closest(".wiki-chip") : null;
+  if (!chip) return;
+  const project = chip.getAttribute("data-project") || "";
+  // Re-clicking the active chip clears it (the tag/status-row convention); "All
+  // projects" carries an empty value and so clears by assignment.
+  applyProjectFilter(filters.project === project ? "" : project);
 });
 
 document.getElementById("tagChips")!.addEventListener("click", (e) => {
@@ -4526,6 +4712,15 @@ function setPagesData(data: WikiPagesResponse): void {
   if (typeof data.defaultType === "string") {
     defaultType = data.defaultType;
   }
+  // NOT the "keep the last known value" degrade the three above use: this map is
+  // the membership set a `?project=` link is judged against, and a stale one
+  // would admit a project the listing on screen no longer has. An older server /
+  // an absent field means "this server tells me nothing about projects", which is
+  // exactly `{}` — no facet, no filter.
+  projects = data.projects && typeof data.projects === "object" ? data.projects : {};
+  // Before the first `renderPageFacets` on every path that reaches one, so the
+  // boot render already paints the chip the URL asked for as active.
+  syncProjectFilterFromUrl();
 }
 
 /** Adopt a fresh page set and repaint everything derived from it. Filters, the

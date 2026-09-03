@@ -388,7 +388,13 @@ export function railSectionsVisible(filters: WikiFilters): boolean {
 /** Is the rail showing the WHOLE wiki (no query, no facet)? Gates the recents
  *  clear affordance: `clearRecents` empties the store, and under a facet the
  *  section on screen is only a subset of it. This is the old
- *  `railSectionsVisible` rule, kept for the one place it is still right. */
+ *  `railSectionsVisible` rule, kept for the one place it is still right.
+ *
+ *  ⚠️ **Every field of `WikiFilters` belongs here.** A new facet left off this
+ *  list leaves `clear` offered under it — and `clearRecents` empties the STORE,
+ *  so the click destroys recents for pages the reader could not even see. The
+ *  omission is silent in every other way, which is why `wiki-recents.test.ts`
+ *  enumerates the fields against this predicate rather than spot-checking a few. */
 export function railFacetsInert(filters: WikiFilters): boolean {
   return (
     !filters.q.trim() &&
@@ -397,7 +403,8 @@ export function railFacetsInert(filters: WikiFilters): boolean {
     !filters.type &&
     !filters.tag &&
     !filters.status &&
-    !filters.followups
+    !filters.followups &&
+    !filters.project
   );
 }
 
