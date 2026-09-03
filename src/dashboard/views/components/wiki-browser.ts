@@ -476,10 +476,15 @@ function followupFlagHtml(p: WikiListing): string {
  *  only owns the row's `display` and which chip is active — the `renderStatusChips`
  *  shape, one level simpler because there is nothing to build.
  *
- *  Hiding also forces `filters.domain` back to "": every other facet is scoped by
- *  it, so a value left standing under a hidden row would narrow the list with no
- *  control on screen to explain it. Runs FIRST in `renderPageFacets` for that
- *  reason — the other renders read `filters.domain`. */
+ *  Hiding also forces `filters.domain` back to "": the four SCOPED facet renders
+ *  — `renderFolderSelect`, `renderTypeChips`, `renderStatusChips`,
+ *  `renderTagChips` — count within `filters.domain`, so a value left standing
+ *  under a hidden row would narrow the list with no control on screen to explain
+ *  it. Runs FIRST in `renderPageFacets` for that reason: last, those four would
+ *  count under the stale domain and then be reset, leaving facet rows that claim
+ *  the wiki has no types or tags beside a list showing every page. (The fifth
+ *  render, `syncFilters`, does NOT read it — `activeFilterCount` excludes domain
+ *  by design, since the domain control lives outside the Filters disclosure.) */
 function renderDomainChips(): void {
   const row = document.getElementById("domainChips");
   if (!row) return;

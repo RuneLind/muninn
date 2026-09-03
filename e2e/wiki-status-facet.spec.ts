@@ -27,6 +27,13 @@
  * (`DATABASE_URL` at minimum) at the repo root, since `src/index.ts` boots the
  * full process. Bun auto-loads it in the spawned child (cwd = repo root).
  *
+ * SERIAL, NOT PARALLEL: the domain facet's shrink case DELETES a fixture page from
+ * `WIKI_SHRINK` mid-test and puts it back. That is only safe because
+ * `playwright.config.ts` sets no `fullyParallel` — tests within one file run
+ * serially in a single worker, so no other case is reading that root while it is
+ * a page short. Turning `fullyParallel` on would need that case moved to a root
+ * nothing else touches (or its own file).
+ *
  * SPAWN ENV: `e2eEnv()` keeps this muninn off Telegram/Slack, and blanks the
  * instance-profile flags (`MUNINN_WIKI_READONLY`, `SYNC_REPOS`, `MUNINN_AUTH`…)
  * so a spawned server behaves the same on every host — a
@@ -92,10 +99,22 @@ const WITHOUT_PAGES: Record<string, string> = {
   "two.md": planPage("Two", {}),
 };
 
-/** The shrink wiki: two domains at boot, one after the test deletes `life/`. */
+/**
+ * The shrink wiki: two domains at boot, one after the test deletes `life/`.
+ *
+ * The two `ai` pages carry a TAG the `life/` page does not, so the secondary
+ * facet rows have something to say about the post-shrink listing and nothing to
+ * say about the pre-shrink `life` scope. That asymmetry is what makes the
+ * ordering assertion sharp: `renderDomainChips` running LAST counts type/tag
+ * under the stale `life` domain over an all-`ai` listing, so the type chip and
+ * the tag chip below are both ABSENT — while running first resets the domain and
+ * both render with a count of 2. (`planPage` writes `type: plan`, which is not in
+ * the reader's default ontology — the store normalizes it to `note`, so `note` is
+ * the type chip the assertions name.) */
+const SHRINK_TAG = "shrink-probe";
 const SHRINK_PAGES: Record<string, string> = {
-  "one.md": planPage("One", {}),
-  "two.md": planPage("Two", {}),
+  "one.md": planPage("One", { tags: `[${SHRINK_TAG}]` }),
+  "two.md": planPage("Two", { tags: `[${SHRINK_TAG}]` }),
   "life/three.md": planPage("Three", {}),
 };
 
@@ -295,25 +314,62 @@ test.describe("Wiki reader: domain facet", () => {
     await page.clock.install();
     await page.goto(`${BASE}/wiki?wiki=${WIKI_SHRINK}`);
     await expect(page.locator(".wiki-list-item")).toHaveCount(3);
+    // The secondary rows live inside the Filters disclosure, closed until a
+    // filter is set — and `activeFilterCount` deliberately ignores domain, so
+    // clicking a domain chip below will never auto-open it.
+    await page.locator("#wikiFilters summary").click();
     const row = page.locator("#domainChips");
+    const typeRow = page.locator("#typeChips");
+    const tagRow = page.locator("#tagChips");
     await expect(row).toBeVisible();
+    await expect(typeRow).toBeVisible();
     await row.locator('[data-domain="life"]').click();
     await expect(page.locator(".wiki-list-item")).toHaveCount(1);
 
+    /**
+     * Drive one background refetch and WAIT FOR THE RESPONSE.
+     *
+     * The listener is fired synchronously and the refetch is throttled on the
+     * frozen `page.clock`, so nothing here ever retries: if the request does not
+     * go out (a mis-set clock, a listener that never attached) the assertions
+     * below just time out on stale DOM and read as a product bug. Arming
+     * `waitForResponse` BEFORE the dispatch turns that into a fast, truthful
+     * failure that names the missing request instead.
+     */
+    const refetch = async () => {
+      const landed = page.waitForResponse((r) => r.url().includes("/api/wiki/pages"), {
+        // Well under the 30s test budget: a local refetch is ~150ms, so a wait
+        // that reaches this bound means no request went out at all.
+        timeout: 10_000,
+      });
+      await page.clock.fastForward(WIKI_REFETCH_MIN_INTERVAL_MS + 1_000);
+      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+      await landed;
+    };
+
     await rm(path.join(rootShrink, "life"), { recursive: true, force: true });
-    await page.clock.fastForward(WIKI_REFETCH_MIN_INTERVAL_MS + 1_000);
-    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await refetch();
 
     await expect(row).toBeHidden();
     await expect(page.locator(".wiki-list-item")).toHaveCount(2);
     await expect(page.locator("#wikiCount")).toHaveText("2 / 2");
 
+    // …and the SECONDARY facets were counted under the CLEARED domain, which is
+    // what pins `renderDomainChips` running FIRST in `renderPageFacets`. Ordered
+    // last it resets `filters.domain` only AFTER type/status/tag have counted
+    // under the stale `life` scope, so this type chip and this tag chip would
+    // not exist at all — a full page list beside facet rows claiming the wiki
+    // has neither types nor tags.
+    // `\b2$` and not `"2"`: the chip label is `<label> <count>`, and a bare
+    // substring check would pass on any count ending in 2.
+    await expect(typeRow.locator('[data-type="note"]')).toHaveText(/\b2$/);
+    await expect(tagRow.locator(`[data-tag="${SHRINK_TAG}"]`)).toHaveText(/\b2$/);
+
     // …and when the domain comes back the row does too, showing the filter the
     // clear above actually left behind rather than the chip the reader last hit.
     await mkdir(path.join(rootShrink, "life"), { recursive: true });
     await writeFile(path.join(rootShrink, "life", "three.md"), SHRINK_PAGES["life/three.md"]!, "utf8");
-    await page.clock.fastForward(WIKI_REFETCH_MIN_INTERVAL_MS + 1_000);
-    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await refetch();
 
     await expect(row).toBeVisible();
     await expect(page.locator(".wiki-list-item")).toHaveCount(3);
