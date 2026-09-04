@@ -39,7 +39,7 @@ time out and no frame budget behind it, so a 0 would have started an unbounded
 capture. It answers 422 `duration_unknown`, below the not-public branch (which
 carries no duration at all).
 
-**The dedup key is the VIDEO ID, resolved out of each listed row's url**
+**State 4 — the dedup key is the VIDEO ID, resolved out of each listed row's url**
 (`resolveVimeoRef(d.url)?.id`, the same rule as the youtube sibling). "Every
 writer posts `canonicalVimeoUrl(id)`" is true of this route and false of the
 collection: the live one already holds rows this route never wrote, including a
@@ -47,17 +47,57 @@ bare `https://vimeo.com/`, and a row spelled `vimeo.com/<id>/<hash>` or
 `player.vimeo.com/video/<id>` is the same video. A row whose url resolves to no
 id matches nothing.
 
-**The stored-document check is only half of dedup; the other half is
-in-process.** Nothing is stored until a capture finishes, and the huginn listing
-is an await, so two POSTs of one url either side of it both found nothing and
-both captured — and huginn suffixes `(2)` rather than overwriting, so the corpus
-kept a shadow copy of the same talk. `inFlight` is a module-level claim keyed on
-the video id, taken SYNCHRONOUSLY before that lookup and given back when the job
-settles (`summarizeVimeo` resolves exactly when `completeJob`/`failJob` has run)
-or, on any early return under it, in the handler's `finally` — one 500 must not
-lock a video out for the life of the process. A POST arriving before the claim
-carries a job id waits for that decision rather than being answered with an id
-that does not exist yet.
+**A video id is in one of FOUR states, and dedup needs a guard for each.** This
+is the enumeration, not a list of patches — each row names the guard that owns
+it, and a state with no owner is a video captured twice:
+
+| # | State | Guard | Answer |
+|---|---|---|---|
+| 1 | absent everywhere | — | capture it |
+| 2 | claimed in-flight in this process | `inFlight` | `in_flight` + the running job's id |
+| 3 | **ingested here, not yet listed by huginn** | `recentIngests` | `duplicate` |
+| 4 | listed by huginn | `findExistingByVideoId` | `duplicate` |
+
+**State 2 — the stored-document check is only half of dedup.** Nothing is stored
+until a capture finishes, and the huginn listing is an await, so two POSTs of one
+url either side of it both found nothing and both captured — and huginn suffixes
+`(2)` rather than overwriting, so the corpus kept a shadow copy of the same talk.
+`inFlight` is a per-registration claim keyed on the video id, taken
+SYNCHRONOUSLY before that lookup and given back when the job settles
+(`summarizeVimeo` resolves exactly when `completeJob`/`failJob` has run) or, on
+any early return under it, in the handler's `finally` — one 500 must not lock a
+video out for the life of the process. A POST arriving before the claim carries a
+job id waits for that decision rather than being answered with an id that does
+not exist yet.
+
+**State 3 — the REINDEX WINDOW, which was owned by nothing.** The two guards
+either side of it end and begin at different instants:
+`GET /api/collection/vimeo-summaries/documents` is derived from huginn's
+`index_document_mapping.json`, which moves only when the background reindex
+enqueued AFTER an ingest has run — seconds to minutes later — while the in-flight
+claim is released the moment the capture settles. Measured on a live instance: a
+completed capture re-POSTed immediately answered with a FRESH job id and ran a
+second full capture, and the corpus HID it, because huginn's writer overwrote the
+same category/title/url and only one document remained. So the route keeps a
+`recentIngests` map (`videoId → {documentId, existingUrl, at}`), written from the
+`onIngested` hook `summarizeVimeo` calls on a successful ingest — the only moment
+in the process that knows a document exists — and read BEFORE the huginn listing,
+answering a `duplicate` body byte-identical to the listing's (one
+`duplicateBody` builder, so the two cannot drift). It is bounded on BOTH axes,
+because it is a cache with no invalidation: `VIMEO_RECENT_INGEST_TTL_MS` (30 min,
+generous slack over a reindex measured in seconds) and `VIMEO_RECENT_INGEST_MAX`
+(200 entries, oldest-inserted evicted first). Past either bound the listing is
+authoritative again and the worst case is the pre-existing one, a re-capture.
+Three details are load-bearing: the hook fires only when huginn returned a
+`file_path` (a refused ingest must not make the route claim a document that
+exists nowhere), it fires BEFORE `completeJob` (a re-POST racing the terminal job
+event must find the entry already written), and it is wrapped in its own
+try/catch for the same reason the source-draft trigger is (the job store has no
+guard against a second terminal transition, so a throwing hook would turn a
+finished capture's card into an error). The hook is a separate parameter and
+deliberately NOT a field on `VimeoSummarizerDeps`: passing any `deps` means "this
+caller brings its own harvest", which skips the `VIMEO_HARVEST_STUB` resolution
+entirely.
 
 **ONE Chromium at a time, process-wide.** `harvestVimeoCaptions` launches a
 browser per harvest, so every harvest goes through a module-level

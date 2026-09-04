@@ -119,12 +119,32 @@ let vimeoSummarizeGate: Promise<void> | null = null;
  * covered: every other case here resolves.
  */
 let vimeoSummarizeRejectsWith: unknown = null;
+/**
+ * The huginn doc id this capture "ingests", or null for a capture that never
+ * reaches the ingest at all.
+ *
+ * The real `summarizeVimeo` calls the route's `onIngested` hook from inside its
+ * `ingestSummary` success path, which is the ONLY moment the route can learn
+ * that a document now exists — huginn's `/documents` listing is derived from
+ * `index_document_mapping.json` and does not move until the background reindex
+ * has run. Null keeps every pre-existing case byte-identical: no hook call, no
+ * recently-ingested entry, so the claim-release cases still see a fresh capture.
+ */
+let vimeoIngestDocId: string | null = null;
 const realVimeoSummarizer = await import("../../vimeo/summarizer.ts");
 mock.module("../../vimeo/summarizer.ts", () => ({
   ...realVimeoSummarizer,
-  summarizeVimeo: async () => {
+  summarizeVimeo: async (
+    _jobId: string,
+    meta: { videoId: string },
+    _config: unknown,
+    _botConfig: unknown,
+    _deps: unknown,
+    onIngested?: (videoId: string, documentId: string) => void,
+  ) => {
     vimeoSummarizeCalls++;
     if (vimeoSummarizeGate) await vimeoSummarizeGate;
+    if (vimeoIngestDocId !== null) onIngested?.(meta.videoId, vimeoIngestDocId);
     if (vimeoSummarizeRejectsWith !== null) throw vimeoSummarizeRejectsWith;
   },
 }));
@@ -164,6 +184,38 @@ function vmApp(): Hono {
   return app;
 }
 
+/**
+ * The same app with an injected clock, for the recently-ingested map's TTL.
+ *
+ * A real 30-minute wait is not a test, and mutating the system clock is not one
+ * either — the route reads `now()` once per decision, so a counter the case
+ * advances is the whole seam.
+ */
+function vmAppAt(now: () => number): Hono {
+  const app = new Hono();
+  registerVimeoRoutes(app, config, { now });
+  return app;
+}
+
+/**
+ * NO microtask-drain helper between a POST and the next one, deliberately.
+ *
+ * The route's capture is fire-and-forget, so both the `onIngested` write and the
+ * `.finally` claim release land in microtasks after the first POST resolves —
+ * which reads like it needs a drain. It does not: the SECOND POST awaits its own
+ * oEmbed fetch and (on the miss path) the huginn listing before it reads either
+ * map, and those awaits drain the queue for free.
+ *
+ * Measured rather than reasoned: a `for (i < 10) await Promise.resolve()` drain
+ * was written here first, then run at ZERO turns — all 34 cases still passed and
+ * every mutant below still died. A wait that changes no outcome is not rigor,
+ * it is a claim the file cannot back, so it is gone (the same finding retired
+ * the two round-2 drains in the claim-release cases below).
+ *
+ * If a future change makes the second POST synchronous before its map reads,
+ * these cases FAIL (an `in_flight` body, `vimeoSummarizeCalls` off by one) —
+ * they do not silently pass.
+ */
 const post = (app: Hono, path: string, body: unknown) =>
   app.request(path, {
     method: "POST",
@@ -208,6 +260,7 @@ beforeEach(() => {
   vimeoSummarizeCalls = 0;
   vimeoSummarizeGate = null;
   vimeoSummarizeRejectsWith = null;
+  vimeoIngestDocId = null;
   oembedCalls = 0;
   oembedThrows = null;
   oembedAnswer = {
@@ -535,7 +588,6 @@ describe("Vimeo capture POST — nothing is created until a capture will run", (
     const first = (await (await post(app, "/api/vimeo/summarize", { url: VIMEO_URL })).json()) as {
       job_id: string;
     };
-    for (let i = 0; i < 10; i++) await Promise.resolve();
 
     const second = (await (await post(app, "/api/vimeo/summarize", { url: VIMEO_URL })).json()) as
       Record<string, unknown>;
@@ -576,7 +628,6 @@ describe("Vimeo capture POST — nothing is created until a capture will run", (
     // the route's own error path logs and returns, it never throws into the
     // handler (which already responded) and never rejects the response.
     expect(first.job_id).toBeTruthy();
-    for (let i = 0; i < 10; i++) await Promise.resolve();
 
     const second = (await (await post(app, "/api/vimeo/summarize", { url: VIMEO_URL })).json()) as
       Record<string, unknown>;
@@ -694,5 +745,162 @@ describe("Vimeo capture POST — nothing is created until a capture will run", (
     // summarize entry is a way for any page to spend the operator's budget.
     const res = await vmApp().request("/api/vimeo/summarize", { method: "OPTIONS" });
     expect(res.status).toBe(404);
+  });
+
+  // ---------------------------------------------------------------------------
+  // State 3 of the video id's four: INGESTED, NOT YET LISTED.
+  //
+  // The state space is exactly four, and each has an owner:
+  //   1. absent everywhere            → capture
+  //   2. claimed in-flight            → `inFlight`, an `in_flight` body
+  //   3. ingested, not yet listed     → THIS map (the reindex window)
+  //   4. listed by huginn             → `findExistingByVideoId`, a `duplicate`
+  //
+  // State 3 was owned by nothing. `GET /api/collection/vimeo-summaries/documents`
+  // is derived from huginn's `index_document_mapping.json`, which only moves when
+  // the background reindex enqueued AFTER an ingest has actually run — seconds to
+  // minutes later — while the in-flight claim is released the instant the capture
+  // settles. Measured on a live instance (port 3016, `VIMEO_HARVEST_STUB` + a fake
+  // oEmbed): job A completed and ingested, an immediate re-POST answered with a
+  // FRESH job id, and both captures ran in full. Only one document survived,
+  // because huginn's writer overwrote the same category/title/url — so the corpus
+  // looked correct and the second model call was invisible in it.
+  //
+  // These three cases are ordered deliberately and the eviction one is LAST: it
+  // creates 201 jobs in the process-wide store, and every case above that uses a
+  // `getRecentJobs()` delta reads the default limit of 20.
+  // ---------------------------------------------------------------------------
+
+  test("a video ingested moments ago answers duplicate before huginn has listed it", async () => {
+    // The listing is EMPTY throughout — that is the reindex window, and it is
+    // what makes this case unsatisfiable by the state-4 guard.
+    let listings = 0;
+    knowledgeApiImpl = async () => {
+      listings++;
+      return { documents: [] };
+    };
+    vimeoIngestDocId = "ai/rag/Trust but verify.md";
+    const app = vmApp();
+
+    const first = (await (await post(app, "/api/vimeo/summarize", { url: VIMEO_URL })).json()) as {
+      job_id?: string;
+    };
+    expect(first.job_id).toBeTruthy();
+    expect(listings).toBe(1);
+
+    const before = vmState.getRecentJobs(1000).length;
+    const res = await post(app, "/api/vimeo/summarize", { url: VIMEO_URL });
+    const body = (await res.json()) as Record<string, unknown>;
+
+    // State 3 is checked BEFORE state 4, which the route's own comment claims:
+    // the duplicate is answered without asking huginn again. Without this the
+    // ORDER is unpinned — measured, swapping the two blocks passed all 34 cases.
+    expect(listings).toBe(1);
+
+    expect(res.status).toBe(200);
+    expect(body.duplicate).toBe(true);
+    expect(body.document_id).toBe("ai/rag/Trust but verify.md");
+    expect(body.existing_url).toBe(CANONICAL);
+    // Byte-identical to the listing path's body — the reader cannot tell which
+    // half of dedup answered, and neither can /summaries.
+    expect(body.dashboard_url).toBe(
+      `/summaries?source=vimeo&doc=${encodeURIComponent("ai/rag/Trust but verify.md")}&duplicate=1`,
+    );
+    expect(body.job_id).toBeUndefined();
+    expect(vmState.getRecentJobs(1000).length).toBe(before);
+    // The whole point: no SECOND capture, i.e. no second model call.
+    expect(vimeoSummarizeCalls).toBe(1);
+  });
+
+  test("a capture that ingested NOTHING leaves no recently-ingested entry", async () => {
+    // `ingestSummary` calls `onIngested` only when huginn answered ok, so a
+    // capture whose ingest failed must fall straight through to the listing —
+    // remembering an id-less capture would answer `duplicate` for a document
+    // that does not exist anywhere.
+    knowledgeApiImpl = async () => ({ documents: [] });
+    vimeoIngestDocId = null;
+    const app = vmApp();
+
+    await post(app, "/api/vimeo/summarize", { url: VIMEO_URL });
+
+    const second = (await (await post(app, "/api/vimeo/summarize", { url: VIMEO_URL })).json()) as
+      Record<string, unknown>;
+
+    expect(second.duplicate).toBeUndefined();
+    expect(second.job_id).toBeTruthy();
+    expect(vimeoSummarizeCalls).toBe(2);
+  });
+
+  test("a recently-ingested entry is forgotten once the TTL has passed", async () => {
+    // A local mirror of `VIMEO_RECENT_INGEST_TTL_MS`, deliberately not an import:
+    // importing a name the unfixed module does not export is a LINK error, which
+    // reds every case in this file for a reason that has nothing to do with the
+    // property under test. If the route's constant moves, this case fails loudly,
+    // which is the correct outcome for a contract.
+    const TTL_MS = 30 * 60 * 1000;
+    knowledgeApiImpl = async () => ({ documents: [] });
+    vimeoIngestDocId = "ai/rag/Trust but verify.md";
+
+    let clock = 1_700_000_000_000;
+    const app = vmAppAt(() => clock);
+
+    await post(app, "/api/vimeo/summarize", { url: VIMEO_URL });
+
+    // One millisecond inside the window: still the map's answer.
+    clock += TTL_MS - 1;
+    const inside = (await (await post(app, "/api/vimeo/summarize", { url: VIMEO_URL })).json()) as
+      Record<string, unknown>;
+    expect(inside.duplicate).toBe(true);
+    expect(vimeoSummarizeCalls).toBe(1);
+
+    // Exactly AT the window: huginn's listing is authoritative again, and it is
+    // empty — so the video is capturable. This is the half a mutant that never
+    // reads `at` fails.
+    clock += 1;
+    const outside = (await (await post(app, "/api/vimeo/summarize", { url: VIMEO_URL })).json()) as
+      Record<string, unknown>;
+    expect(outside.duplicate).toBeUndefined();
+    expect(outside.job_id).toBeTruthy();
+    expect(vimeoSummarizeCalls).toBe(2);
+  });
+
+  test("the map is bounded — the 201st ingest evicts the oldest entry", async () => {
+    // Mirrors `VIMEO_RECENT_INGEST_MAX`, same reason as the TTL mirror above.
+    const CAP = 200;
+    knowledgeApiImpl = async () => ({ documents: [] });
+    const app = vmApp();
+    // Vimeo ids never carry a leading zero (`/0123` and `/123` would be two
+    // dedup keys for one video), so the range starts well above it.
+    const urlFor = (i: number) => `https://vimeo.com/${String(1_000_000_000 + i)}`;
+
+    for (let i = 0; i <= CAP; i++) {
+      vimeoIngestDocId = `ai/rag/talk-${i}.md`;
+      await post(app, "/api/vimeo/summarize", { url: urlFor(i) });
+    }
+    const capturesSoFar = vimeoSummarizeCalls;
+    expect(capturesSoFar).toBe(CAP + 1);
+
+    // The newest ingest is remembered...
+    const newest = (await (await post(app, "/api/vimeo/summarize", { url: urlFor(CAP) })).json()) as
+      Record<string, unknown>;
+    expect(newest.duplicate).toBe(true);
+    expect(newest.document_id).toBe(`ai/rag/talk-${CAP}.md`);
+
+    // ...and so is the SECOND-oldest, so the eviction took exactly one entry
+    // rather than clearing the map. Asserted before the next POST, because a
+    // duplicate answer creates nothing and therefore evicts nothing.
+    const second = (await (await post(app, "/api/vimeo/summarize", { url: urlFor(1) })).json()) as
+      Record<string, unknown>;
+    expect(second.duplicate).toBe(true);
+    expect(second.document_id).toBe("ai/rag/talk-1.md");
+
+    // ...while the OLDEST is gone: it falls through to the (empty) listing and
+    // is captured again, which is the honest degrade — the map only ever covers
+    // the reindex window.
+    const oldest = (await (await post(app, "/api/vimeo/summarize", { url: urlFor(0) })).json()) as
+      Record<string, unknown>;
+    expect(oldest.duplicate).toBeUndefined();
+    expect(oldest.job_id).toBeTruthy();
+    expect(vimeoSummarizeCalls).toBe(capturesSoFar + 1);
   });
 });

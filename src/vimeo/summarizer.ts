@@ -130,6 +130,23 @@ export interface VimeoSummarizerDeps {
 }
 
 /**
+ * Told once, on a SUCCESSFUL ingest, with huginn's stored doc id.
+ *
+ * Deliberately NOT a field on {@link VimeoSummarizerDeps}: passing any `deps` at
+ * all means "this caller brings its own harvest", which skips the
+ * `VIMEO_HARVEST_STUB` resolution entirely — so a route handing over a callback
+ * through that channel would silently disable the stub.
+ *
+ * The route uses it to close the window between "ingested" and "listed by
+ * huginn": nothing else in the process knows that instant, because huginn's
+ * `/documents` listing is derived from an index the background reindex rebuilds
+ * later. It is called only when huginn returned a `file_path`, so a failed or
+ * older-huginn ingest records nothing rather than recording a document id that
+ * does not resolve.
+ */
+export type VimeoIngestedHook = (videoId: string, documentId: string) => void;
+
+/**
  * `VIMEO_HARVEST_STUB` — an absolute path to a `.vtt` file that stands in for
  * the whole browser half, so an acceptance run can drive the vertical end to
  * end with no Chromium and no live Vimeo.
@@ -262,6 +279,7 @@ export async function summarizeVimeo(
   config: Config,
   botConfig: BotConfig,
   deps?: Partial<VimeoSummarizerDeps>,
+  onIngested?: VimeoIngestedHook,
 ): Promise<void> {
   try {
     // 0. Resolve the deps INSIDE the try. `resolveServingProfile` throws on an
@@ -404,6 +422,22 @@ Video URL: ${meta.url}${captionKind === "auto" ? AUTO_CAPTION_RIDER : ""}`;
         ingestedDocId = info.filePath;
       },
     });
+
+    // Tell the caller a document now exists, BEFORE `completeJob` — the job
+    // event is what a client reacts to, and a re-POST racing that event must
+    // find the claim already recorded. Its own try/catch for the same reason
+    // the source-draft trigger below has one: a throw in a caller's hook must
+    // not turn a finished capture into an error.
+    if (ingestedDocId && onIngested) {
+      try {
+        onIngested(meta.videoId, ingestedDocId);
+      } catch (err) {
+        log.error("Vimeo onIngested hook threw for job {jobId} (the capture stands): {error}", {
+          jobId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
 
     completeJob(jobId, summary, category);
 

@@ -12,6 +12,9 @@
  */
 import { test, expect, beforeEach, beforeAll, afterEach, mock } from "bun:test";
 import { configure, type LogRecord } from "@logtape/logtape";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Config } from "../config.ts";
 import type { BotConfig } from "../bots/config.ts";
 import type { VimeoCaptions } from "./captions.ts";
@@ -46,6 +49,33 @@ mock.module("../gardener/source-drafter-run.ts", () => ({
     // The real function's first statements are synchronous (`isWikiReadonly`,
     // `isReadonlyWikiRoot`), so it CAN throw on the caller's stack.
     if (sourceDraftThrows) throw sourceDraftThrows;
+  },
+}));
+
+/**
+ * The BROWSER, refused at the door, so "the stub was refused" is observable.
+ *
+ * A refused `VIMEO_HARVEST_STUB` falls back to `REAL_DEPS`, whose harvest
+ * launches a headless Chromium — the wrong thing to do in a unit test, and also
+ * exactly the signal the memo-binding cases below need.
+ *
+ * The seam is `playwright-core`, deliberately NOT `./captions.ts`. Mocking the
+ * module would be the obvious move and it is wrong twice over: `bun test
+ * src/vimeo/` runs this file in the same process as `captions.test.ts`, whose
+ * whole subject is `harvestVimeoCaptions` — measured, mocking it there reds 14
+ * of that file's cases. `harvestVimeoCaptions` takes `opts.launcher` and falls
+ * back to `await import("playwright-core")` only when none is given, and
+ * `captions.test.ts` passes one in EVERY case, so this mock is invisible to it
+ * while still being the only door `REAL_DEPS` can reach the browser through.
+ */
+let realHarvestCalls = 0;
+const REAL_HARVEST_MARKER = "no browser in this test";
+mock.module("playwright-core", () => ({
+  chromium: {
+    launch: async () => {
+      realHarvestCalls++;
+      throw new Error(REAL_HARVEST_MARKER);
+    },
   },
 }));
 
@@ -206,6 +236,66 @@ test("the source-draft trigger keys off huginn's stored doc id and the vimeo col
   expect(sourceDraftCalls[0]!.url).toBe(CANONICAL);
 });
 
+// --- The onIngested hook -----------------------------------------------------
+//
+// The route's dedup has FOUR states to cover and this hook owns the third:
+// ingested here, not yet in huginn's `/documents` listing (which is derived from
+// an index the background reindex rebuilds seconds to minutes later). This is
+// the only moment in the process that knows a document now exists, so the route
+// cannot learn it any other way — measured, a re-POST inside that window ran a
+// whole second capture.
+
+test("a successful ingest hands the caller huginn's own doc id, before the job completes", async () => {
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  const seen: Array<[string, string, string]> = [];
+
+  await summarizeVimeo(jobId, META, config, bot, deps(), (videoId, documentId) => {
+    // The job's status AT CALL TIME rides along: the hook has to fire before
+    // the terminal transition, or a re-POST racing the completion event finds
+    // nothing recorded.
+    seen.push([videoId, documentId, getJob(jobId)!.status]);
+  });
+
+  expect(seen).toEqual([[VIDEO_ID, "ai/rag/Trust but verify.md", "ingesting"]]);
+  expect(getJob(jobId)!.status).toBe("complete");
+});
+
+test("an ingest huginn refused tells the hook NOTHING", async () => {
+  // `ingestSummary` reports a `file_path` only on an ok response, so there is no
+  // document to name — and naming one anyway would make the route answer
+  // `duplicate` for a document that exists nowhere, for the whole TTL.
+  // @ts-expect-error — a minimal Response stand-in is all the summarizer reads.
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 503,
+    json: async () => ({}),
+    text: async () => "",
+  });
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+  let calls = 0;
+
+  await summarizeVimeo(jobId, META, config, bot, deps(), () => { calls++; });
+
+  expect(calls).toBe(0);
+  expect(getJob(jobId)!.status).toBe("complete");
+});
+
+test("an onIngested hook that THROWS leaves the job COMPLETE", async () => {
+  // The same rule as the source-draft trigger: the hook runs on the capture's
+  // stack after a successful ingest, and the job store has no guard against a
+  // second terminal transition — so an unguarded throw would reach the job's
+  // catch and turn a finished capture's card from complete into error.
+  const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
+
+  await summarizeVimeo(jobId, META, config, bot, deps(), () => {
+    throw new Error("the route's map blew up");
+  });
+
+  expect(getJob(jobId)!.status).toBe("complete");
+  // And the tail after it still ran.
+  expect(sourceDraftCalls.length).toBe(1);
+});
+
 test("an AUTO caption track appends the proper-noun rider", async () => {
   const jobId = createJob(VIDEO_ID, META.title, CANONICAL);
   await summarizeVimeo(jobId, META, config, bot, deps({ tracks: [AUTO_TRACK] }));
@@ -274,14 +364,50 @@ test("two concurrent jobs harvest STRICTLY one at a time", async () => {
   // The overlap recorder: each stub harvest marks itself in-flight and asserts
   // nothing else already is. Without the module-level queue both jobs launch a
   // Chromium in the same tick.
+  //
+  // The scaffolding is the sibling case's, for the reason stated there: the
+  // harvests park on the MODULE-level `harvestQueue`, so a parked harvest that
+  // is never released does not fail this case — it wedges the queue for the rest
+  // of the FILE. Two probes, both measured on this file rather than reasoned:
+  //
+  //  - a 40-turn delay injected ahead of `harvestQueue.run` used to produce
+  //    EIGHT failures in 35.0 s, seven of them under unrelated names (the file
+  //    wedged and the rest timed out at 5 s each). With the START SIGNAL below
+  //    replacing the first guessed wait, the same probe produces ZERO failures
+  //    in 0.04 s — the case simply waits for the harvest it is about.
+  //  - the `finally` covers the other half, a case that genuinely FAILS with
+  //    harvests still parked. Forcing the negative assertion below to fail
+  //    (`toBe(999)`) strands harvest A parked and B queued behind it: with the
+  //    drain that is ONE failure in 0.07 s, without it EIGHT in 35.0 s.
+  //    NB deleting the queue does NOT demonstrate this — measured 2 failures in
+  //    0.07 s either way, because with no queue there is nothing left for a
+  //    stranded harvest to block.
+  //
+  // So the signal keeps this case from failing spuriously and the drain keeps
+  // its failure from becoming the file's.
   let inFlight = 0;
   let maxInFlight = 0;
+  let parkingOpen = true;
   const releases: Array<() => void> = [];
+  let startCount = 0;
+  let startWaiters: Array<{ n: number; resolve: () => void }> = [];
+
+  /** Resolves once `n` harvests have ENTERED (already resolved if they have). */
+  function harvestStarted(n: number): Promise<void> {
+    if (startCount >= n) return Promise.resolve();
+    return new Promise<void>((resolve) => { startWaiters.push({ n, resolve }); });
+  }
 
   const slowHarvest = async () => {
     inFlight++;
     maxInFlight = Math.max(maxInFlight, inFlight);
-    await new Promise<void>((resolve) => releases.push(resolve));
+    startCount++;
+    const due = startWaiters.filter((w) => startCount >= w.n);
+    startWaiters = startWaiters.filter((w) => startCount < w.n);
+    for (const w of due) w.resolve();
+    // No await between the read and the push: a harvest either parks or is waved
+    // through, never both and never neither.
+    if (parkingOpen) await new Promise<void>((resolve) => { releases.push(resolve); });
     inFlight--;
     return captionsWith([AUTO_TRACK]);
   };
@@ -292,22 +418,33 @@ test("two concurrent jobs harvest STRICTLY one at a time", async () => {
   const runA = summarizeVimeo(jobA, META, config, bot, slowDeps);
   const runB = summarizeVimeo(jobB, { ...META, videoId: "1223642971" }, config, bot, slowDeps);
 
-  // Let both jobs get as far as they can before anything is released.
-  for (let i = 0; i < 20; i++) await Promise.resolve();
-  expect(inFlight).toBe(1);
-  expect(releases.length).toBe(1);
+  try {
+    await harvestStarted(1);
 
-  releases[0]!();
-  for (let i = 0; i < 20; i++) await Promise.resolve();
-  expect(releases.length).toBe(2);
-  releases[1]!();
+    // The one guessed wait that STAYS, because the assertion under it is a
+    // NEGATIVE one and no signal can announce a harvest that never starts: give
+    // job B every chance to reach the harvester, then require that it did not.
+    // 20 turns is far past the ~4 the job needs to get from its own entry to
+    // `harvestQueue.run` — a mutex-free build reaches it inside 1.
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    expect(inFlight).toBe(1);
+    expect(startCount).toBe(1);
 
-  await Promise.all([runA, runB]);
+    releases[0]!();
+    await harvestStarted(2);
+    releases[1]!();
 
-  expect(maxInFlight).toBe(1);
-  // Both jobs really ran — a mutex that dropped one would also pass maxInFlight.
-  expect(getJob(jobA)!.status).toBe("complete");
-  expect(getJob(jobB)!.status).toBe("complete");
+    await Promise.all([runA, runB]);
+
+    expect(maxInFlight).toBe(1);
+    // Both jobs really ran — a mutex that dropped one would also pass maxInFlight.
+    expect(getJob(jobA)!.status).toBe("complete");
+    expect(getJob(jobB)!.status).toBe("complete");
+  } finally {
+    parkingOpen = false;
+    for (const release of releases.splice(0)) release();
+    await Promise.allSettled([runA, runB]);
+  }
 });
 
 test("a QUEUED job stays pending — it reports harvesting only when its harvest starts", async () => {
@@ -505,6 +642,100 @@ test("EVERY stubbed capture warns, naming the fixture and the job", async () => 
     expect(w.properties.path).toBe(path);
     expect(w.message.join("")).toContain("VIMEO_HARVEST_STUB");
   }
+});
+
+// --- The MEMO is bound to `stubCacheKey`, not merely adjacent to it ---------
+//
+// `stubCacheKey` has its own unit test above, and it passes against a memo that
+// never calls it: `harvestStub` could inline any key at all and the whole suite
+// stayed green. These three cases drive the MEMO — two `summarizeVimeo` calls in
+// one process at two configurations — and each kills a different way of getting
+// the key wrong. The observable is deliberately coarse and unfakeable: either
+// the capture ran off the local fixture (`caption_kind: "stub"`, and WHICH
+// fixture, from the transcript) or the stub was refused and `REAL_DEPS` reached
+// the mocked harvester.
+//
+// The stub's own gates are what make the second configuration observable: a
+// non-default profile REFUSES, so a memo that hands back the first
+// configuration's answer runs the backdoor on a nais process — which is the
+// whole reason this is worth a test rather than a comment.
+
+/** A temp dir, so a path can carry a SPACE without editing the repo. */
+let memoDir = "";
+beforeAll(async () => {
+  memoDir = await mkdtemp(join(tmpdir(), "muninn-vimeo-memo-"));
+});
+
+/** The same VTT shape as the fixture, with a caller-chosen marker line. */
+function markerVtt(marker: string): string {
+  return `WEBVTT\n\n00:00:01.000 --> 00:00:04.000\n${marker}\n`;
+}
+
+test("the memo does not serve a space-colliding (path, profile) pair one answer", async () => {
+  // Witness (1) from the key's own test, driven through the memo this time:
+  // `<dir>/x nais` with NO profile and `<dir>/x` with MUNINN_PROFILE="nais " are
+  // one key under a SPACE separator (`resolveServingProfile` trims, so "nais "
+  // really is a nais process). The paths differ, so this is the one case a
+  // path-only key would survive and the separator is what it is about.
+  const spaced = join(memoDir, "x nais");
+  await Bun.write(spaced, markerVtt("spaced fixture"));
+
+  process.env.VIMEO_HARVEST_STUB = spaced;
+  const first = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(first, META, config, bot);
+  expect(getJob(first)!.status).toBe("complete");
+  expect(ingestPayload!.caption_kind).toBe("stub");
+
+  process.env.VIMEO_HARVEST_STUB = join(memoDir, "x");
+  process.env.MUNINN_PROFILE = "nais ";
+  const before = realHarvestCalls;
+  const second = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(second, META, config, bot);
+
+  // Refused on the profile ⇒ REAL deps ⇒ the mocked harvester ran and threw.
+  expect(realHarvestCalls).toBe(before + 1);
+  expect(getJob(second)!.status).toBe("error");
+  expect(getJob(second)!.error).toContain(REAL_HARVEST_MARKER);
+});
+
+test("the memo re-resolves when only MUNINN_PROFILE changes", async () => {
+  // Kills a key that carries the path alone — the likeliest inlining, since the
+  // path is the variable the function is named after. Same path both times, so
+  // nothing but the profile can distinguish the two configurations.
+  const path = join(memoDir, "profile-only.vtt");
+  await Bun.write(path, markerVtt("profile-only fixture"));
+  process.env.VIMEO_HARVEST_STUB = path;
+
+  const first = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(first, META, config, bot);
+  expect(ingestPayload!.caption_kind).toBe("stub");
+
+  process.env.MUNINN_PROFILE = "nais";
+  const before = realHarvestCalls;
+  const second = createJob(VIDEO_ID, META.title, CANONICAL);
+  await summarizeVimeo(second, META, config, bot);
+
+  expect(realHarvestCalls).toBe(before + 1);
+  expect(getJob(second)!.status).toBe("error");
+});
+
+test("the memo re-resolves when only VIMEO_HARVEST_STUB changes", async () => {
+  // Kills a key that carries the profile alone. Both configurations resolve to
+  // a stub, so the observable is WHICH file was read — the marker line rides
+  // through `downloadVtt` into the windowed transcript in the prompt.
+  const a = join(memoDir, "path-a.vtt");
+  const b = join(memoDir, "path-b.vtt");
+  await Bun.write(a, markerVtt("fixture ALPHA speaking"));
+  await Bun.write(b, markerVtt("fixture BRAVO speaking"));
+
+  process.env.VIMEO_HARVEST_STUB = a;
+  await summarizeVimeo(createJob(VIDEO_ID, META.title, CANONICAL), META, config, bot);
+  expect(lastPrompt).toContain("fixture ALPHA speaking");
+
+  process.env.VIMEO_HARVEST_STUB = b;
+  await summarizeVimeo(createJob(VIDEO_ID, META.title, CANONICAL), META, config, bot);
+  expect(lastPrompt).toContain("fixture BRAVO speaking");
+  expect(lastPrompt).not.toContain("fixture ALPHA speaking");
 });
 
 // --- The stub resolution is a failure path of its own -----------------------

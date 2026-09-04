@@ -21,6 +21,51 @@ const VIMEO_COLLECTION = VIMEO_SOURCE.collection;
 interface VimeoDocumentMeta { id: string; url?: string }
 
 /**
+ * How long a just-ingested video is answered from memory rather than from
+ * huginn's listing.
+ *
+ * The window this covers is huginn's REINDEX lag (seconds to a minute or two on
+ * this corpus), so 30 minutes is generous slack rather than a fitted number —
+ * the listing is authoritative the moment it catches up, and an entry that
+ * outlives its usefulness costs nothing but a map slot. It is not longer,
+ * because the map is the one dedup half with no evidence behind it: a document
+ * deleted from huginn in the meantime would keep answering `duplicate` for as
+ * long as this lasts.
+ */
+export const VIMEO_RECENT_INGEST_TTL_MS = 30 * 60 * 1000;
+
+/**
+ * How many videos the recently-ingested map remembers.
+ *
+ * Sized to be unreachable in practice (a capture is minutes of model time, so
+ * 200 of them inside one TTL is not a real load) and bounded anyway, because
+ * this map is the only unbounded-by-nature structure in the route: `inFlight`
+ * empties itself when jobs settle, this one only ages out. Eviction is
+ * oldest-INSERTED first, which is also oldest-ingested.
+ */
+export const VIMEO_RECENT_INGEST_MAX = 200;
+
+/**
+ * A video this process ingested but has not yet seen in huginn's listing.
+ *
+ * `documentId` is huginn's own `file_path` — the same string its `/documents`
+ * listing reports as `id` — so the `duplicate` body this produces is
+ * indistinguishable from the listing's.
+ */
+interface VimeoRecentIngest {
+  documentId: string;
+  existingUrl: string;
+  /** When the ingest landed, read from the injected clock. */
+  at: number;
+}
+
+/** Options a caller may inject; production passes none. */
+export interface VimeoRouteOptions {
+  /** The clock the recently-ingested TTL is measured on. */
+  now?: () => number;
+}
+
+/**
  * Look for an already-captured document of this VIDEO.
  *
  * Each listed row's url is resolved to its video id and compared with the
@@ -75,8 +120,13 @@ interface VimeoFlight {
   settle: () => void;
 }
 
-export function registerVimeoRoutes(app: Hono, config: Config): void {
+export function registerVimeoRoutes(
+  app: Hono,
+  config: Config,
+  opts: VimeoRouteOptions = {},
+): void {
   const KNOWLEDGE_API_URL = config.knowledgeApiUrl;
+  const now = opts.now ?? Date.now;
 
   /**
    * ONE map per REGISTRATION, not one per module — the truthful scope, since a
@@ -105,6 +155,81 @@ export function registerVimeoRoutes(app: Hono, config: Config): void {
   function releaseVideo(videoId: string, flight: VimeoFlight): void {
     if (inFlight.get(videoId) === flight) inFlight.delete(videoId);
     flight.settle();
+  }
+
+  /**
+   * The videos this process has INGESTED but huginn has not listed yet — the
+   * third state of a video id, and the one that was owned by nothing.
+   *
+   * A video id is in exactly one of four states, and dedup needs a guard for
+   * each:
+   *
+   *  1. absent everywhere                → capture it;
+   *  2. claimed in-flight                → `inFlight`, answered `in_flight`;
+   *  3. **ingested, not yet listed**     → THIS map, answered `duplicate`;
+   *  4. listed by huginn                 → `findExistingByVideoId`, `duplicate`.
+   *
+   * State 3 exists because the two guards either side of it end and begin at
+   * different instants. `GET /api/collection/<c>/documents` is derived from
+   * huginn's `index_document_mapping.json`, which moves only when the background
+   * reindex enqueued AFTER an ingest has run — seconds to minutes later — while
+   * the in-flight claim is given back the moment the capture settles. Measured:
+   * a completed capture re-POSTed immediately started a SECOND job and spent a
+   * second model call, and the corpus hid it, because huginn's writer overwrote
+   * the same category/title/url and only one document remained.
+   *
+   * Bounded on BOTH axes ({@link VIMEO_RECENT_INGEST_TTL_MS},
+   * {@link VIMEO_RECENT_INGEST_MAX}) because it is a cache with no invalidation:
+   * the listing is the authority, this only covers the gap in front of it, and
+   * an entry that outlives the reindex is answering from memory about a document
+   * it can no longer see.
+   *
+   * Same scope as `inFlight` — one map per REGISTRATION — for the same reason:
+   * "a capture this app has started" is the truthful scope, and a module-level
+   * map would leak one case's ingest into every later one.
+   */
+  const recentIngests = new Map<string, VimeoRecentIngest>();
+
+  function rememberIngest(videoId: string, documentId: string, existingUrl: string): void {
+    // A plain `set`, and that is only correct because this key is NEVER already
+    // present — `Map.set` on an existing key keeps its ORIGINAL insertion
+    // position, so a re-insert would age wrongly under the eviction below.
+    //
+    // Enumerated rather than assumed: this runs only from the ingest hook of a
+    // capture, a capture starts only past `recentIngest(videoId)` returning null
+    // (which DELETES an entry it found expired), and `inFlight` admits one
+    // capture per video at a time — so no live entry can exist here. A change
+    // that breaks any of those three needs a `delete` before this line.
+    recentIngests.set(videoId, { documentId, existingUrl, at: now() });
+    while (recentIngests.size > VIMEO_RECENT_INGEST_MAX) {
+      const oldest = recentIngests.keys().next();
+      if (oldest.done) break;
+      recentIngests.delete(oldest.value);
+    }
+  }
+
+  /** The map's answer for this video, or null — an expired entry is dropped. */
+  function recentIngest(videoId: string): VimeoRecentIngest | null {
+    const hit = recentIngests.get(videoId);
+    if (!hit) return null;
+    if (now() - hit.at >= VIMEO_RECENT_INGEST_TTL_MS) {
+      recentIngests.delete(videoId);
+      return null;
+    }
+    return hit;
+  }
+
+  /**
+   * The one `duplicate` body, shared by both halves of the stored-document
+   * check, so a reader (and `/summaries`) cannot tell which one answered.
+   */
+  function duplicateBody(documentId: string, existingUrl: string | undefined) {
+    return {
+      duplicate: true as const,
+      document_id: documentId,
+      existing_url: existingUrl,
+      dashboard_url: `/summaries?source=vimeo&doc=${encodeURIComponent(documentId)}&duplicate=1`,
+    };
   }
 
   // Shared plumbing: bare-path redirect, SSE stream, jobs, document/similar
@@ -206,18 +331,26 @@ export function registerVimeoRoutes(app: Hono, config: Config): void {
     const flight = claimVideo(ref.id);
     let started = false;
     try {
+      // State 3 BEFORE state 4: the listing is authoritative, but it does not
+      // know about a document ingested inside the reindex window, and asking it
+      // first would spend a round-trip to be told "no" about a video this
+      // process just captured.
+      const recent = recentIngest(ref.id);
+      if (recent) {
+        log.info("Vimeo duplicate detected for {videoId} (ingested here, not yet listed): {docId}", {
+          videoId: ref.id,
+          docId: recent.documentId,
+        });
+        return c.json(duplicateBody(recent.documentId, recent.existingUrl));
+      }
+
       const existing = await findExistingByVideoId(KNOWLEDGE_API_URL, ref.id);
       if (existing) {
         log.info("Vimeo duplicate detected for {videoId}: {docId}", {
           videoId: ref.id,
           docId: existing.id,
         });
-        return c.json({
-          duplicate: true,
-          document_id: existing.id,
-          existing_url: existing.url,
-          dashboard_url: `/summaries?source=vimeo&doc=${encodeURIComponent(existing.id)}&duplicate=1`,
-        });
+        return c.json(duplicateBody(existing.id, existing.url));
       }
 
       const summarizerBot = resolveSummarizerBot(discoverAllBots());
@@ -253,6 +386,12 @@ export function registerVimeoRoutes(app: Hono, config: Config): void {
         },
         config,
         summarizerBot,
+        undefined,
+        // The ONE moment the route can learn that a document now exists: huginn
+        // answered the ingest, and its listing will not say so for another
+        // reindex cycle. `canonicalUrl` is closed over rather than re-derived —
+        // it is the exact string the capture posted as the document's `url`.
+        (videoId, documentId) => rememberIngest(videoId, documentId, canonicalUrl),
       )
         .catch((err) => {
           log.error("Vimeo summarization failed: {error}", {
