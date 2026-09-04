@@ -161,7 +161,7 @@ describe("canonical + watch URLs", () => {
     expect(good.hash).toBe("a1b2c3d4e5");
     expect(new URL(vimeoWatchUrl(good)).pathname).toBe("/123/a1b2c3d4e5");
 
-    for (const raw of ["..", ".", "%2e%2e", "a/b", "a?b", "..%2f..%2fsettings"]) {
+    for (const raw of ["..", ".", "%2e%2e", "a/b", "a?b", "..%2f..%2fsettings", "a".repeat(65)]) {
       const ref = extractVimeoVideoId(`https://vimeo.com/123?h=${raw}`)!;
       expect(ref).toEqual({ id: "123" });
       expect(ref.hash).toBeUndefined();

@@ -40,7 +40,7 @@ const HASH_RE = /^[0-9a-f]{6,32}$/i;
  * credential silently gone. Anything outside this charset degrades to NO hash,
  * exactly as an unrecognised path segment (`/likes`) already did.
  */
-const SAFE_HASH_RE = /^[A-Za-z0-9_-]+$/;
+const SAFE_HASH_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 /**
  * A video id has no leading zero. `/0123` and `/123` are the same video to

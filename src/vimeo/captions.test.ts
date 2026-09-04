@@ -114,10 +114,12 @@ describe("downloadVtt — the host pin", () => {
 
 /**
  * Settle-or-report, because the property under test is "this call comes back at
- * all". `bun test`'s per-test timeout does NOT reap a promise that never settles
- * (measured on bun 1.3.10 against a bare `await new Promise(() => {})`: the whole
- * FILE hangs and has to be killed), so a plain `await` on a regression would take
- * CI out rather than fail the test. This returns the rejection value, or the
+ * all". A bare `await` on a never-settling promise IS failed by `bun test`'s
+ * per-test timeout (measured on bun 1.3.10: "this test timed out after 300ms",
+ * file completes) — but `await expect(<never-settling>).rejects.toThrow()` is
+ * NOT: that construct hangs the whole file until it is killed (measured, same
+ * version). The natural way to write "the call rejects with the budget error"
+ * is exactly that construct, so this helper returns the rejection value, or the
  * string below when the call is still running — either way it comes back.
  */
 async function settledWithin(call: Promise<unknown>, ms = 1_000): Promise<unknown> {
@@ -488,6 +490,9 @@ describe("harvestVimeoCaptions — what a failure is ALLOWED to be called", () =
     const promise = harvestVimeoCaptions("123", { launcher: harness.launcher, timeoutMs: 40 });
     await expect(promise).rejects.toThrow(VimeoHarvestError);
     await expect(promise).rejects.not.toThrow(VimeoNotPublicError);
+    // Spent before any wait STARTED: the page was never observed, so there is no
+    // "may also be private" to say — that clause belongs to a wait cut short.
+    await expect(promise).rejects.not.toThrow(/may also be private/);
   }, 5_000);
 
   test("a budget that expires DURING the <video> wait is still a harvest error", async () => {
@@ -501,6 +506,10 @@ describe("harvestVimeoCaptions — what a failure is ALLOWED to be called", () =
     const promise = harvestVimeoCaptions("123", { launcher: harness.launcher, timeoutMs: 60 });
     await expect(promise).rejects.toThrow(VimeoHarvestError);
     await expect(promise).rejects.not.toThrow(VimeoNotPublicError);
+    // A wait cut short by the budget observed the page for less than its window,
+    // so the budget error must SAY the video may also be private — otherwise the
+    // operator reads "raise the timeout" about a video that never had a <video>.
+    await expect(promise).rejects.toThrow(/may also be private/);
   }, 5_000);
 
   test("a budget that expires DURING the text-track wait is not 'no tracks'", async () => {
@@ -509,9 +518,9 @@ describe("harvestVimeoCaptions — what a failure is ALLOWED to be called", () =
     // downstream calls `remaining()` again, so the harvest RESOLVED, reporting an
     // empty track list for a video whose tracks were never waited out.
     const harness = fakeHarness({ hasVideo: true, tracks: [], stallWaits: true });
-    await expect(
-      harvestVimeoCaptions("123", { launcher: harness.launcher, timeoutMs: 60 }),
-    ).rejects.toThrow(VimeoHarvestError);
+    const promise = harvestVimeoCaptions("123", { launcher: harness.launcher, timeoutMs: 60 });
+    await expect(promise).rejects.toThrow(VimeoHarvestError);
+    await expect(promise).rejects.toThrow(/may also have no captions/);
   }, 5_000);
 
   test("a non-finite budget is refused at the door", async () => {

@@ -507,13 +507,22 @@ async function harvestInContext(
   try {
     await page.waitForSelector("video", { timeout: selectorTimeout });
   } catch (err) {
-    // Hoisting the budget check out of the try only covers a budget already
-    // spent when the wait STARTS. The likelier case is the one this wait itself
-    // causes: it is handed what is left, burns it, and rejects — a rejection
-    // shaped exactly like "this page has no <video>". So the deadline is asked
-    // again HERE, before anything is classified; `remaining()` throws the budget
-    // error when it has passed.
-    remaining(deadline);
+    // The wait rejects in one of three states, and only the first two are
+    // distinguishable from each other:
+    //   1. it got its FULL slice (the cap) and the deadline is still ahead — the
+    //      page was observed for the whole window: classify (bot / unknown /
+    //      not public) below;
+    //   2. its slice was CUT SHORT by the budget (`selectorTimeout < cap`) and
+    //      the deadline has now passed — the observation window was truncated,
+    //      so "private" and "slow" are the same evidence: report the budget,
+    //      and say in the message that the video may also be private;
+    //   3. the wait failed for another reason (page closed) — falls through to
+    //      `probeChallenge`, which answers `unknown` and names it.
+    // State 2 is a deliberate choice, not a defect: with the default 60 s budget
+    // and a 30 s `goto` cap, the selector wait gets its full 20 s unless the page
+    // itself was slow, and a budget error naming the ambiguity is honest where a
+    // "not public" verdict about a video nobody observed for 20 s would not be.
+    remaining(deadline, undefined, "before a <video> appeared — the page may also be private; raise the budget to tell the two apart");
     const probe = await probeChallenge(page);
     if (probe.kind === "bot") throw new VimeoBotBlockedError(videoId);
     if (probe.kind === "unknown") {
@@ -548,12 +557,14 @@ async function harvestInContext(
       { timeout: tracksTimeout },
     );
   } catch {
-    // Same question as the selector wait above, one step down: this catch means
-    // "this video has no captions", and an exhausted budget is not that. It has
-    // to be asked here — with no tracks to pair, nothing further down calls
-    // `remaining()`, so the harvest RESOLVED with an empty track list for a video
-    // whose tracks were never waited out.
-    remaining(deadline);
+    // Same three states as the selector wait above, one step down: a full 25 s
+    // slice with no tracks IS the answer "no captions" (state 1, spec §5: fall
+    // back to audio); a slice cut short by the budget is state 2 — the message
+    // says the video may also be caption-less, since the wait never got its
+    // window. It has to be asked here — with no tracks to pair, nothing further
+    // down calls `remaining()`, so the harvest RESOLVED with an empty track list
+    // for a video whose tracks were never waited out.
+    remaining(deadline, undefined, "before any text track appeared — the video may also have no captions; raise the budget to tell the two apart");
     // No tracks is a legitimate answer (spec §5: fall back to audio), not a
     // failure — return the metadata we do have with an empty track list.
     log.info("Vimeo video {videoId} exposed no text tracks", { videoId });
@@ -735,9 +746,13 @@ function isBrowserMissing(err: unknown): boolean {
  * Throws rather than returning 0 — Playwright reads `timeout: 0` as "no timeout",
  * so an exhausted budget would turn into an unbounded wait.
  */
-function remaining(deadline: number, cap?: number): number {
+function remaining(deadline: number, cap?: number, ambiguity?: string): number {
   const left = deadline - Date.now();
-  if (left <= 0) throw new VimeoHarvestError("Vimeo caption harvest exceeded its whole-operation budget");
+  if (left <= 0) {
+    throw new VimeoHarvestError(
+      "Vimeo caption harvest exceeded its whole-operation budget" + (ambiguity ? ` ${ambiguity}` : ""),
+    );
+  }
   return cap ? Math.min(cap, left) : left;
 }
 

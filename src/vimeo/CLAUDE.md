@@ -80,8 +80,19 @@ while a response with a null body has only its declared `content-length` to go o
 — nothing else is knowable before buffering. The 20 s budget is RACED at all three
 reads (request, streamed body, bodiless body), not left to the abort signal alone:
 the signal bounds a transport that honours it, and a `fetchImpl` stub or a stream
-that ignores its abort is bounded by nothing else. Measured on bun 1.3.10: a test
-awaiting such a call does not fail, it hangs the whole file.
+that ignores its abort is bounded by nothing else. Measured on bun 1.3.10: a bare
+`await` on such a call is failed by the per-test timeout, but the natural
+assertion — `await expect(call).rejects.toThrow()` — is not: it hangs the whole
+file, which is why the tests race the call against a 1 s settle instead.
+
+**When the budget is the binding clock, "private" and "slow" are the same
+evidence.** Each Playwright wait is handed `min(cap, what is left)`. A wait that
+got its FULL cap and still failed is classified (bot page / not public / no
+captions). A wait whose slice was CUT SHORT by the budget rejects at the deadline,
+and the harvest reports the BUDGET — with a message saying the video may also be
+private (or caption-less) — rather than a verdict about a page it observed for
+less than its window. With the default 60 s budget that only happens after a slow
+`goto`; `--timeout` below ~55 s makes it the common case, by design.
 
 **A URL's hash rules differ by WHERE it sits.** A trailing path segment is a hash
 only if it looks hex — that rule exists to tell `/<hash>` from `/likes`, and it
