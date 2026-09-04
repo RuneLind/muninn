@@ -347,9 +347,11 @@ test("the system prompt carries the shared structure rules, incl. the verbatim-a
   const jobId = createJob("7523456789", "My TikTok", SHORT_URL);
   await summarizeTikTok(jobId, SHORT_URL, "My TikTok", config, bot);
 
-  for (const bullet of SUMMARY_STRUCTURE_BULLETS) {
-    expect(lastSystemPrompt).toContain(bullet);
-  }
+  // The whole interpolated block — separator and indent included, not bullet by
+  // bullet. A per-bullet toContain() survives a changed join: verified, swapping
+  // `.join("\n   ")` for `.join("\n")` kept both files green while breaking the
+  // bullets out of the prompt's numbered step 5.
+  expect(lastSystemPrompt).toContain(`   ${SUMMARY_STRUCTURE_BULLETS.join("\n   ")}`);
   // Named explicitly: a TikTok that reads a prompt out loud is the case the
   // verbatim rule exists for, and this vertical also sees on-screen text.
   expect(lastSystemPrompt).toContain("reproduce it VERBATIM inside a fenced code block");
